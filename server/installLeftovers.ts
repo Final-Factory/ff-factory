@@ -20,7 +20,9 @@ import { gitIgnores } from './cleanupFolders.ts';
  * - per-commit player builds in every session's folder, live and resumed ones too, beyond the newest few (w1575: 24 builds,
  *   about 46 GB, in the folders of LothDesktop's open requests on 2026-10-19);
  * - the rebuildable caches in a session's folder that had no activity for a day, resumed sessions' too (w1719): player
- *   builds, a Unity project's Library/Temp/obj, node_modules, digested Profiler captures, frames beside their clip;
+ *   builds and the tars a release packs them into, a Unity project's Library/Temp/obj/Logs, node_modules, digested Profiler
+ *   captures, frames beside their clip; while disk is below the soft threshold all but a whole Library go after 15 minutes
+ *   with no write (w1813);
  * - a Claude task `.output` file past a cap (a runaway writer reached 99.6 GB; the space came back only when its
  *   process ended): the file goes and, when its session has stopped, so does the process still writing it.
  *
@@ -51,6 +53,11 @@ export interface InstallLeftoverSettings {
   outputCapGB: number;
   /** A session's folder with nothing written for this many hours, and no worker or process on it, loses its rebuildable caches (w1719); 0: never. */
   idleCacheHours: number;
+  /**
+   * While free space is below the soft threshold, a stopped session's folder with nothing written for this many minutes loses
+   * its rebuildable caches at once, a whole Library apart (only its build caches go: w1813); 0: never.
+   */
+  lowCacheSettleMinutes: number;
 }
 
 export const INSTALL_LEFTOVER_DEFAULTS: InstallLeftoverSettings = {
@@ -64,6 +71,7 @@ export const INSTALL_LEFTOVER_DEFAULTS: InstallLeftoverSettings = {
   scratchDays: 3,
   outputCapGB: 2,
   idleCacheHours: 24,
+  lowCacheSettleMinutes: 15,
 };
 
 /** The settings in force: the defaults under whatever config gave (unknown or ill-typed values ignored). */
@@ -82,6 +90,7 @@ export function installLeftoverSettings(raw: unknown): InstallLeftoverSettings {
     scratchDays: n('scratchDays', 1, 365),
     outputCapGB: n('outputCapGB', 0.1, 1000),
     idleCacheHours: n('idleCacheHours', 0, 24 * 30),
+    lowCacheSettleMinutes: n('lowCacheSettleMinutes', 0, 24 * 60),
   };
 }
 
@@ -137,8 +146,16 @@ const REPO_DEPTH = 4;
 const NO_REPO_LOOK = /^(\.git|node_modules|library)$/i;
 /** How deep an idle session's folder is searched for rebuildable caches (w1719): as deep as for player builds. */
 const CACHE_DEPTH = 5;
-/** A Unity project's folders the editor rebuilds on open (beside its ProjectSettings/ProjectVersion.txt). */
-const UNITY_CACHE = /^(library|temp|obj)$/i;
+/** A Unity project's folders the editor rebuilds on open (beside its ProjectSettings/ProjectVersion.txt); Logs since w1813. */
+const UNITY_CACHE = /^(library|temp|obj|logs)$/i;
+/**
+ * The folders of a Unity project's Library that a build or a compile rebuilds by itself (w1813): what goes from a stopped
+ * session's project while disk is low, before its folder is idle long enough for the whole Library (Artifacts, the costly
+ * import, stays until then).
+ */
+const LIBRARY_BUILD_CACHES = /^(bee|buildcache|burstcache|shadercache|playerdatacache|il2cpp_cache)$/i;
+/** How many entries a session's folder is walked for its last write (w1813): 12 game clones (~630,000 entries) fit. */
+const ACTIVITY_BUDGET = 1_000_000;
 /** The first bytes of a Unity Profiler capture (`.raw`, -profiler-log-file); all 155 on biscuit on 2026-10-22 had them. */
 const PROFILER_MAGIC = 'PD3U';
 const IMAGE = /\.(png|jpe?g|bmp|webp|tga)$/i;
@@ -167,6 +184,45 @@ async function digestedCapture(file: string, siblings: fs.Dirent[]): Promise<boo
   return false;
 }
 
+/**
+ * A tar holding a player build (w1813): urgent_release.py packs each player into <run>/stage/<target>/release.<edition>.tar
+ * (about 2 GB each, six of them a release) and uploads it; the player it packs is rebuildable from its commit. Read by its
+ * headers (ustar, GNU long names and pax paths), up to `maxEntries`, looking for UnityPlayer.dll, .so or .dylib.
+ */
+export async function tarOfPlayer(file: string, maxEntries = 20_000): Promise<boolean> {
+  const fd = await fs.promises.open(file, 'r').catch(() => undefined);
+  if (!fd) return false;
+  const block = Buffer.alloc(512);
+  const field = (b: Buffer, at: number, len: number) => {
+    const s = b.toString('utf8', at, at + len);
+    const z = s.indexOf('\0');
+    return z < 0 ? s : s.slice(0, z);
+  };
+  try {
+    const size = (await fd.stat()).size;
+    let longName: string | undefined;
+    for (let pos = 0, n = 0; pos + 512 <= size && n < maxEntries; n++) {
+      if ((await fd.read(block, 0, 512, pos)).bytesRead < 512 || block.every((x) => x === 0)) return false;
+      const len = parseInt(field(block, 124, 12).trim() || '0', 8);
+      if (!Number.isFinite(len) || len < 0) return false;
+      const type = String.fromCharCode(block[156]!);
+      const name = longName ?? [field(block, 345, 155), field(block, 0, 100)].filter(Boolean).join('/');
+      longName = undefined;
+      if ((type === 'L' || type === 'x') && len <= 65_536) {
+        const data = Buffer.alloc(len);
+        await fd.read(data, 0, len, pos + 512);
+        const text = field(data, 0, len);
+        longName = type === 'L' ? text : text.split('\n').map((l) => / path=(.*)$/.exec(l)?.[1]).find((x) => x !== undefined);
+      } else if (PLAYER_IN_TAR.test(name)) return true;
+      pos += 512 + Math.ceil(len / 512) * 512;
+    }
+    return false;
+  } finally {
+    await fd.close();
+  }
+}
+const PLAYER_IN_TAR = /(^|\/)UnityPlayer\.(dll|so|dylib)$/;
+
 /** A folder of nothing but images: frames taken from a clip, or the clip encoded from them. */
 async function onlyImages(dir: string): Promise<boolean> {
   const es = await children(dir);
@@ -178,6 +234,16 @@ export interface IdleCache {
   what: string;
 }
 
+export interface IdleCacheOptions {
+  /**
+   * Whether a Unity project whose Temp/UnityLockfile exists is open in an editor or a batchmode build. Default: yes. The
+   * planner answers by the processes (w1813): a lockfile a crashed editor left behind holds nothing.
+   */
+  projectOpen?: (project: string) => boolean;
+  /** Only what a build or a compile rebuilds by itself: a project's Library build caches, not its whole Library (w1813, low disk). */
+  quick?: boolean;
+}
+
 /**
  * The rebuildable caches in `dir` (w1719), found by what they hold, so the same on every OS: player builds (a worker builds
  * one per commit), a Unity project's Library, Temp and obj, npm's node_modules beside a package.json, Unity Profiler captures
@@ -185,27 +251,66 @@ export interface IdleCache {
  * images beside the clip they came from or went into. Never a `.git`, the session's Claude task folders, nor anything else:
  * clips, stills, logs, reports, saves and clones stay.
  */
-export async function idleCachesIn(dir: string, depth = 1, out: IdleCache[] = []): Promise<IdleCache[]> {
+export async function idleCachesIn(dir: string, depth = 1, out: IdleCache[] = [], o: IdleCacheOptions = {}): Promise<IdleCache[]> {
   const es = await children(dir);
   const unity = fs.existsSync(path.join(dir, 'ProjectSettings', 'ProjectVersion.txt'));
   // An editor or a batchmode build has the project open while Temp/UnityLockfile exists: its caches are not ours.
-  const unityOpen = unity && fs.existsSync(path.join(dir, 'Temp', 'UnityLockfile'));
+  const unityOpen = unity && fs.existsSync(path.join(dir, 'Temp', 'UnityLockfile')) && (o.projectOpen?.(dir) ?? true);
   for (const e of es) {
     const p = path.join(dir, e.name);
     if (e.isFile()) {
       if (/\.raw$/i.test(e.name) && (await digestedCapture(p, es))) out.push({ path: p, what: 'a Unity Profiler capture with its digest beside it' });
+      else if (/\.tar$/i.test(e.name) && (await sizeIs(p)) >= 1024 ** 2 && (await tarOfPlayer(p))) out.push({ path: p, what: 'a player build packed into a tar (a release stage)' });
       continue;
     }
     if (!e.isDirectory() || /^\.git$/i.test(e.name) || (depth === 1 && /^claude/i.test(e.name))) continue;
     if (isPlayerBuild(p, e.name)) out.push({ path: p, what: 'a player build' });
     else if (unity && UNITY_CACHE.test(e.name)) {
-      if (!unityOpen) out.push({ path: p, what: `a Unity project's ${e.name}` });
+      if (unityOpen) continue;
+      if (o.quick && /^library$/i.test(e.name)) {
+        for (const c of await children(p)) if (c.isDirectory() && LIBRARY_BUILD_CACHES.test(c.name)) out.push({ path: path.join(p, c.name), what: `a Unity project's Library/${c.name} (a build cache)` });
+      } else out.push({ path: p, what: `a Unity project's ${e.name}` });
     } else if (e.name === 'node_modules') {
       if (fs.existsSync(path.join(dir, 'package.json'))) out.push({ path: p, what: 'npm packages (node_modules)' });
     } else if (/^frames$/i.test(e.name) && es.some((x) => x.isFile() && VIDEO.test(x.name)) && (await onlyImages(p))) out.push({ path: p, what: 'frames beside the clip they belong to' });
-    else if (depth < CACHE_DEPTH && !NEVER_SEGMENT.test(e.name)) await idleCachesIn(p, depth + 1, out);
+    else if (depth < CACHE_DEPTH && !NEVER_SEGMENT.test(e.name)) await idleCachesIn(p, depth + 1, out, o);
   }
   return out;
+}
+
+const sizeIs = async (p: string) => (await fs.promises.lstat(p).catch(() => undefined))?.size ?? 0;
+
+/**
+ * The newest write in a session's folder (w1813), or 'too-big' past `budget` entries; it stops at the first write after
+ * `stopAfter`. What lies inside a cache, a Library or node_modules is seen only at its top (the folder and its direct entries,
+ * which a build or an editor touches), and a repo's object store not at all: w1719 walked every entry up to 200,000, so a
+ * folder holding a few game clones always looked active and kept its caches for good.
+ */
+export async function newestWrite(dir: string, stopAfter: number, caches: Set<string>, budget = ACTIVITY_BUDGET): Promise<number | 'too-big'> {
+  const stack: { p: string; shallow: boolean }[] = [{ p: dir, shallow: false }];
+  let newest = 0;
+  let seen = 0;
+  while (stack.length) {
+    const { p, shallow } = stack.pop()!;
+    const st = await fs.promises.lstat(p).catch(() => undefined);
+    if (!st) continue;
+    newest = Math.max(newest, st.mtimeMs);
+    if (newest > stopAfter) return newest;
+    if (++seen > budget) return 'too-big';
+    if (!st.isDirectory() || shallow) continue;
+    const name = path.basename(p);
+    // A repo's object store says nothing a commit does not also write to its index and refs.
+    if (/^objects$/i.test(name) && /^\.git$/i.test(path.basename(path.dirname(p)))) continue;
+    const top = caches.has(norm(p)) || /^(library|node_modules)$/i.test(name);
+    let names: string[];
+    try {
+      names = await fs.promises.readdir(p);
+    } catch {
+      return Number.POSITIVE_INFINITY; // unreadable inside: not ours to judge
+    }
+    for (const n of names) stack.push({ p: path.join(p, n), shallow: top });
+  }
+  return newest;
 }
 
 async function children(dir: string): Promise<fs.Dirent[]> {
@@ -270,6 +375,8 @@ export async function planInstallLeftovers(o: {
   localWork?: (dir: string) => Promise<boolean>;
   /** 'sandboxes': only each sandbox's own build and capture output (the sandbox release sweep, w913). */
   scope?: 'all' | 'sandboxes';
+  /** Free space is below the soft threshold (or a person asked for a pass): stopped sessions' caches go after lowCacheSettleMinutes (w1813). */
+  low?: boolean;
 }): Promise<InstallPlan> {
   const plan: InstallPlan = { items: [], listed: [], strays: [] };
   if (!o.root) return plan; // not a worker-root install: nothing here is the install folder
@@ -382,18 +489,36 @@ export async function planInstallLeftovers(o: {
    * The rebuildable caches of a session's folder with no activity for idleCacheHours (w1719, lothsahn: "delete caches after 24
    * hours of inactivity for that test folder"). Its request may still resume the worker, so the folder stays (judgeSession,
    * resumable), but what a resumed worker rebuilds by itself goes. Activity: the session runs (the guard's inUse), a process
-   * names its folder, or anything in the folder was written within the window (a folder too big to judge counts as active).
+   * names its folder, or something in the folder was written within the window (newestWrite: a cache, a Library or a repo's
+   * objects only by its top, so a folder of game clones can be judged; one past ACTIVITY_BUDGET entries counts as active).
+   * While disk is low (w1813, ben: "This applies on low disk at once"), all but a whole Library goes once the folder had no
+   * write for lowCacheSettleMinutes (a detached writer's grace); a Library loses only its build caches then, and the rest
+   * once the folder is idle for idleCacheHours. A Unity lockfile no process names was left by a crashed editor: it holds nothing.
    * Nothing git holds goes: an item inside a repo's work tree only when git ignores it, never one holding a repo.
    */
   const idleCaches = async (session: string, t: string) => {
-    if (!s.idleCacheHours || live(session) || !within(session, root)) return;
+    if (live(session) || !within(session, root)) return;
+    const quickOn = !!o.low && s.lowCacheSettleMinutes > 0;
+    if (!s.idleCacheHours && !quickOn) return;
     if ((o.procs ?? []).some((p) => mentions(p.cmd, session))) return;
-    if ((await touchedWhy(session, now - s.idleCacheHours * HOUR)) !== undefined) return;
+    const projectOpen = (d: string) => !o.procs || o.procs.some((p) => mentions(p.cmd, d));
+    const full = s.idleCacheHours ? await idleCachesIn(session, 1, [], { projectOpen }) : [];
+    const quick = quickOn ? await idleCachesIn(session, 1, [], { projectOpen, quick: true }) : [];
+    if (!full.length && !quick.length) return;
+    const ageCut = now - s.idleCacheHours * HOUR;
+    const settleCut = now - s.lowCacheSettleMinutes * 60_000;
+    const last = await newestWrite(session, quickOn ? Math.max(settleCut, ageCut) : ageCut, new Set([...full, ...quick].map((c) => norm(c.path))));
+    if (last === 'too-big') return;
+    let caches: IdleCache[];
+    let after: string;
+    if (s.idleCacheHours && last <= ageCut) [caches, after] = [full, `with no activity for ${s.idleCacheHours} h`];
+    else if (quickOn && last <= settleCut) [caches, after] = [quick, `with no activity for ${s.lowCacheSettleMinutes} min while disk is low`];
+    else return;
     const g = sessionRelaxed(session, relaxed(t));
-    for (const c of await idleCachesIn(session)) {
+    for (const c of caches) {
       if (items.has(c.path) || !within(c.path, root) || neverDelete(c.path, g)) continue;
       if (await gitHolds(c.path, session)) continue;
-      items.set(c.path, { path: c.path, rule: 'session-idle-cache', why: `${c.what}, in a worker's temp folder with no activity for ${s.idleCacheHours} h (rebuildable)`, base: t, inSession: session });
+      items.set(c.path, { path: c.path, rule: 'session-idle-cache', why: `${c.what}, in a worker's temp folder ${after} (rebuildable)`, base: t, inSession: session });
     }
   };
   /** The entries of `dir`, newest first (by last activity). */
