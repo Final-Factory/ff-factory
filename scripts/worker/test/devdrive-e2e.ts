@@ -75,20 +75,20 @@ const firstFree = (taken: string[]) => letterOrder.find((l) => !taken.includes(l
 const detach = () => ps(`Write-VolumeCache -DriveLetter ${currentLetter} -ErrorAction SilentlyContinue; Dismount-DiskImage -ImagePath '${vhdx}' | Out-Null`);
 let currentLetter = '';
 const attached = () => ps(`(Get-DiskImage -ImagePath '${vhdx}').Attached`).stdout.trim() === 'True';
-const helperResult = () => {
+const helperResult = (action = 'mount') => {
   try {
-    return JSON.parse(fs.readFileSync(path.join(process.env.ProgramData ?? 'C:\\ProgramData', 'ffsb-helpers', 'results', 'mount.json'), 'utf8').replace(/^\uFEFF/, ''));
+    return JSON.parse(fs.readFileSync(path.join(process.env.ProgramData ?? 'C:\\ProgramData', 'ffsb-helpers', 'results', `${action}.json`), 'utf8').replace(/^\uFEFF/, ''));
   } catch {
     return undefined;
   }
 };
-/** Start the boot-mount task the way the machine does, and wait for the result it writes. */
-const bootTask = () => {
+/** Start a helper task (the boot-mount one by default) the way the machine does, and wait for the result it writes. */
+const bootTask = (action = 'mount') => {
   const start = Date.now();
-  const r = spawnSync('schtasks', ['/run', '/tn', 'ffsb-helper-mount'], { encoding: 'utf8' });
+  const r = spawnSync('schtasks', ['/run', '/tn', `ffsb-helper-${action}`], { encoding: 'utf8' });
   if (r.status !== 0) return { ok: false, detail: `schtasks: ${r.stdout}${r.stderr}` };
   for (let i = 0; i < 180; i++) {
-    const res = helperResult();
+    const res = helperResult(action);
     if (res && Date.parse(res.at) >= start) return res as { ok: boolean; detail: string };
     spawnSync('powershell.exe', ['-NoProfile', '-Command', 'Start-Sleep 2']);
   }
@@ -134,7 +134,7 @@ try {
   fs.writeFileSync(`${letter}:\\sandboxes\\slot1\\marker.txt`, 'kept');
   const created0 = fs.statSync(vhdx).birthtimeMs;
   const tasks = ps(`@(Get-ScheduledTask -TaskName 'ffsb-helper-*' | ForEach-Object { $_.TaskName }) -join ','`).stdout.trim();
-  check(/ffsb-helper-mount/.test(tasks) && /ffsb-helper-trim/.test(tasks) && /ffsb-helper-compact/.test(tasks), 'the helper tasks are registered', tasks);
+  check(/ffsb-helper-mount/.test(tasks) && /ffsb-helper-trim/.test(tasks) && /ffsb-helper-compact/.test(tasks) && /ffsb-helper-grow/.test(tasks), 'the helper tasks are registered', tasks);
   const boot = ps(`(Get-ScheduledTask -TaskName ffsb-helper-mount).Triggers | ForEach-Object { $_.CimClass.CimClassName }`).stdout.trim();
   check(/BootTrigger/.test(boot), 'the mount task also runs at boot', boot);
 
@@ -181,6 +181,23 @@ try {
   check(listed.includes(`${moved.toLowerCase()}:/sandboxes/slot1`) && !listed.includes(`${letter.toLowerCase()}:/sandboxes/slot1`), "the root's clone records the new path", listed.split('\n').filter((l) => l.startsWith('worktree')).join(' | '));
   releaseLetter(letter);
   letterTaken = undefined;
+
+  // 4b. Grow (w1918): the daemon writes wantGB into devdrive.json and starts ffsb-helper-grow; the VHDX is expanded while
+  // detached, reattached at its letter, its ReFS volume extended, the data kept.
+  const sf = path.join(root, 'devdrive.json');
+  const vol = (l: string) => Number(ps(`(Get-Partition -DriveLetter ${l}).Size`).stdout.trim());
+  const vol0 = vol(moved);
+  fs.writeFileSync(sf, JSON.stringify({ ...JSON.parse(fs.readFileSync(sf, 'utf8').replace(/^\uFEFF/, '')), wantGB: 72 }));
+  const gr = bootTask('grow');
+  check(gr.ok && /grew .* from 64 to 72 GB/.test(gr.detail), 'the grow task grows the drive', gr.detail);
+  const size = Number(ps(`(Get-DiskImage -ImagePath '${vhdx}').Size`).stdout.trim());
+  check(size === 72 * 1024 ** 3, "the VHDX's maximum is 72 GB", String(size));
+  check(attached() && vol(moved) > vol0 + 7 * 1024 ** 3, `${moved}: is back and its volume grew`, `${vol0} -> ${vol(moved)}`);
+  check(fs.existsSync(`${moved}:\\sandboxes\\slot1\\marker.txt`), `${moved}: still holds the data`);
+  const st2 = JSON.parse(fs.readFileSync(sf, 'utf8').replace(/^\uFEFF/, ''));
+  check(st2.maxGB === 72 && st2.wantGB === undefined, 'devdrive.json says 72 GB, with nothing left wanted', JSON.stringify(st2));
+  const again2 = bootTask('grow');
+  check(again2.ok && /wants no other size/.test(again2.detail) && size === Number(ps(`(Get-DiskImage -ImagePath '${vhdx}').Size`).stdout.trim()), 'run again with nothing wanted, it changes nothing', again2.detail);
 
   // 5. Remove.
   const rem = run(['-Action', 'remove', '-Root', root]);

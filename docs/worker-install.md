@@ -877,11 +877,39 @@ else origin's, else its base; `machine/sandboxes.ts` `remakeGone`, once per sand
 counts as gone: an agent placed there meanwhile makes its folder at its start, empty but for its own files (LothLaptop's slot1
 had the w1915 worker in it). The worktree is then added beside it and its `.git` moved in (`git worktree repair`), so the
 agent's files stay and it runs on in the checkout; a folder that holds a checkout's own files but no `.git` is left, as an
-error. Work never pushed went with the drive. While the drive is not attached there is no sandbox root, so nothing is remade
+error. A remake a daemon restart cuts off (an update landing mid-checkout) is made again by the next daemon from the worktree it
+had added (`Rec.remaking`); a plain create cut off still reads as an error. Work never pushed went with the drive. While the drive is not attached there is no sandbox root, so nothing is remade
 then.
 
 The maximum of an existing drive cannot be lowered in place (ReFS cannot shrink a volume, and `Optimize-VHD` needs the Hyper-V
 tools; both measured on LothDesktop on 2026-10-12): an update keeps it and says so; a reinstall makes the drive again.
+
+#### Growing the drive (w1918)
+
+A larger maximum is the ops worker's `machine_update` with `dev_drive_max_gb` (the only control; lothsahn: "just build scoped
+commands for the functionality needed ... But no way into machines"). The update writes it as `wantGB` in the host folder's
+`devdrive.json` (`scripts/worker/worker.ts` `wantDevDriveGrow`), and the daemon's host guard grows the drive once no agent
+(running, between turns or waiting) and no editor is in a sandbox (`machine/hostGuard.ts` `growIfIdle`). Until then the portal
+hears "Dev Drive: grow pending" once, with who is there. While it grows, new agents and editors wait (`blockReason`), and the
+guard does not look at the drive, which is detached on purpose.
+
+The grow is the SYSTEM task `ffsb-helper-grow` (`scripts/privileged/ffsb-helper.ps1` `grow`), with fixed arguments like the
+other helpers. It reads only `wantGB` from the state file and refuses a size that is smaller (ReFS cannot shrink), larger than
+the volume that holds the VHDX, or wanted while a Unity editor uses the drive. It detaches the VHDX (`diskpart expand vdisk`
+needs a detached disk: [expand vdisk](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/expand-vdisk)),
+expands it, attaches it again at its letter (in a `finally`, so a failed expand still reattaches it), extends the ReFS volume
+online (`Resize-Partition` to `Get-PartitionSupportedSize`'s maximum), and writes the new `maxGB` with the want cleared. The
+next update records that maximum for the host guard's estimate.
+
+A drive made before the task existed gets it the first time a larger size is asked: the update runs `devdrive.ps1 -Action
+ensure` again, elevated, which registers the helpers with `grow` among them. That is one administrator prompt on the PC's
+desktop, waited for 5 minutes (the daemon runs in the user's session, so its update can show one; an ssh session, in session 0,
+cannot, and says so). Declined or unanswered, the want is still written, and the grow waits for the task.
+
+Tested: `scripts/devdrive.test.ts` (the helper against faked disks: grown, never smaller, never past the host volume, never under
+an editor, reattached after a failed expand), `server/machineGuard.test.ts` (waits while anything is in a sandbox, holds new work
+while it grows, retries a failure after 30 minutes), and the real VHDX in `scripts/worker/test/devdrive-e2e.ts` (64 to 72 GB,
+data kept, CI's `dev-drive.yml`).
 
 ### The portal's ssh (w568)
 

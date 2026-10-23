@@ -6,6 +6,7 @@
 // gives it the daemon's pool, agents and link instead of the portal's. docs/self-recovery.md, "On BEAST's daemon".
 import fs from 'node:fs';
 import os from 'node:os';
+import path from 'node:path';
 import type { Config, HostGuardConfig } from '../server/config.ts';
 import { DEFAULT_CLEANUP } from '../server/config.ts';
 import { HostHealthMonitor } from '../server/hostHealth.ts';
@@ -24,7 +25,15 @@ export interface MachineGuardEffects {
   runHelper(action: HelperAction): Promise<HelperResult>;
   reap?(maxAgeHours: number): Promise<string[]>;
   now?(): number;
+  /** A JSON file (the Dev Drive's devdrive.json beside its VHDX, w1918), undefined when it cannot be read. */
+  readJson?(p: string): unknown;
 }
+
+/** Sessions that hold a sandbox (hostHealth.ts's BUSY plus an agent between turns, whose process still runs there). */
+const HOLDS_SANDBOX = new Set(['starting', 'running', 'waiting_permission', 'idle']);
+const EDITOR_HELD = new Set(['running', 'starting', 'blocked']);
+/** A grow that failed is tried again after this long, not on every look. */
+export const GROW_RETRY_MS = 30 * 60_000;
 
 /** What the guard sees of the daemon and asks of it. */
 export interface MachineGuardPorts {
@@ -77,9 +86,18 @@ export class MachineGuard {
   readonly monitor: HostHealthMonitor;
   readonly settings: MachineGuardSettings;
   private timer?: NodeJS.Timeout;
+  private readonly fx: MachineGuardEffects;
+  private readonly ports: MachineGuardPorts;
+  /** The Dev Drive's maximum being grown to (w1918): new agents and editors wait meanwhile. */
+  private growing?: number;
+  /** The last grow that waited or failed, said once each (the portal hears it), and when a failed one is tried again. */
+  private growNote?: string;
+  private growRetryAt = 0;
 
   constructor(settings: MachineGuardSettings, sandboxRoot: string, fx: MachineGuardEffects, ports: MachineGuardPorts) {
     this.settings = settings;
+    this.fx = fx;
+    this.ports = ports;
     this.monitor = new HostHealthMonitor({
       cfg: machineGuardConfig(settings, sandboxRoot),
       statfs: (p) => fx.statfs(p),
@@ -111,8 +129,9 @@ export class MachineGuard {
     });
   }
 
-  /** Why a new agent or editor in a sandbox must wait (the drive is gone, disk space is low), or undefined. */
+  /** Why a new agent or editor in a sandbox must wait (the drive is gone or growing, disk space is low), or undefined. */
   blockReason(kind: 'editor' | 'agent'): string | undefined {
+    if (this.growing) return `the Dev Drive is being grown to ${this.growing} GB (detached for a minute or two, w1918); try again in a few minutes`;
     return this.monitor.blockReason(kind);
   }
 
@@ -120,8 +139,65 @@ export class MachineGuard {
     return this.monitor.status;
   }
 
-  tick(): Promise<void> {
-    return this.monitor.tick();
+  async tick(): Promise<void> {
+    // While it grows the drive is detached on purpose: the helper attaches it again, so no look (and no remount) meanwhile.
+    if (this.growing) return;
+    await this.monitor.tick();
+    await this.growIfIdle();
+  }
+
+  /** The Dev Drive's wanted maximum (devdrive.json wantGB, which an update writes from dev_drive_max_gb) above its own, or undefined. */
+  pendingGrow(): { wantGB: number; maxGB: number } | undefined {
+    const vhdx = this.settings.devDriveVhdx;
+    if (!vhdx || !this.fx.readJson) return undefined;
+    const st = this.fx.readJson(path.join(path.dirname(vhdx), 'devdrive.json')) as { wantGB?: unknown; maxGB?: unknown } | undefined;
+    const wantGB = Number(st?.wantGB);
+    const maxGB = Number(st?.maxGB) || 0;
+    return Number.isInteger(wantGB) && wantGB > maxGB ? { wantGB, maxGB } : undefined;
+  }
+
+  /**
+   * Grow the Dev Drive to its wanted maximum through ffsb-helper-grow (w1918, lothsahn: "having the daemon drop and recreate
+   * the drive when the setting changes and there's no active workers also seems fine"): only when no agent and no editor is
+   * in a sandbox and the drive is there; new ones wait (blockReason) until it is back. Until then it is pending, and says why
+   * once. ReFS cannot shrink, so a smaller maximum is not done here: making the drive again is a reinstall.
+   */
+  private async growIfIdle() {
+    const p = this.pendingGrow();
+    if (!p) return void (this.growNote = undefined);
+    const now = this.fx.now?.() ?? Date.now();
+    // Once per wanted size and outcome, not at every change of who is in the sandboxes.
+    const say = (title: string, text: string) => {
+      const key = `${title} ${p.wantGB}`;
+      if (this.growNote === key) return;
+      this.growNote = key;
+      this.ports.log(`host guard: ${text}`);
+      this.ports.report(title, text);
+    };
+    const agents = this.ports.sessions().filter((s) => s.sandboxId && HOLDS_SANDBOX.has(s.status));
+    const editors = this.ports.sandboxes().filter((s) => EDITOR_HELD.has(s.unity.state));
+    if (agents.length || editors.length) {
+      const what = [agents.length ? `${agents.length} agent(s) (${agents.map((s) => s.sandboxId).join(', ')})` : '', editors.length ? `${editors.length} editor(s) (${editors.map((s) => s.id).join(', ')})` : ''].filter(Boolean).join(' and ');
+      return say('Dev Drive: grow pending', `the Dev Drive grows from ${p.maxGB} to ${p.wantGB} GB once no agent or editor is in a sandbox; ${what} there now`);
+    }
+    if (this.monitor.status.sandboxRoot !== 'ok' || now < this.growRetryAt) return;
+    this.growing = p.wantGB;
+    this.ports.log(`host guard: growing the Dev Drive from ${p.maxGB} to ${p.wantGB} GB (ffsb-helper-grow); new agents and editors wait`);
+    try {
+      const r = await this.fx.runHelper('grow');
+      if (r.ok) {
+        this.growNote = undefined;
+        this.growRetryAt = 0;
+        this.ports.log(`host guard: ${r.detail}`);
+        this.ports.report('Dev Drive: grown', r.detail);
+      } else {
+        this.growRetryAt = now + GROW_RETRY_MS;
+        say('Dev Drive: grow failed', `growing the Dev Drive from ${p.maxGB} to ${p.wantGB} GB failed (${r.detail}); tried again in ${GROW_RETRY_MS / 60_000} min`);
+      }
+    } finally {
+      this.growing = undefined;
+    }
+    await this.monitor.tick();
   }
 
   start() {
@@ -159,7 +235,15 @@ export async function realGuardEffects(): Promise<MachineGuardEffects> {
       }
     },
     mem: () => ({ free: os.freemem(), total: os.totalmem() }),
-    runHelper: (a) => runHelper(a),
+    // A grow detaches, expands and reattaches the drive: a few minutes on a busy disk.
+    runHelper: (a) => runHelper(a, a === 'grow' ? 20 * 60_000 : undefined),
     reap: (h) => reapBrowsers(h),
+    readJson: (p) => {
+      try {
+        return JSON.parse(fs.readFileSync(p, 'utf8').replace(/^\uFEFF/, ''));
+      } catch {
+        return undefined;
+      }
+    },
   };
 }

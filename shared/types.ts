@@ -2634,6 +2634,10 @@ export interface AppState {
   heldRoom?: { id: string; why: string; for: ('game' | 'agent')[] }[];
   /** Computers with room that placement.minPriority reserves for higher work (w1643), with their lowest priority: a request at that level may use them. */
   reservedRoom?: { id: string; min: 'normal' | 'high' | 'urgent'; for: readonly ('game' | 'agent')[] }[];
+  /** Each computer with room, id to its platform and no-timed-runs reason (w1944): work it cannot run is not Queued wrongly beside it. */
+  roomFit?: Record<string, { platform?: string; noTimedRuns?: string }>;
+  /** Since when each computer has had room, `${kind}:${id}` to epoch ms (w1944): room younger than ROOM_STAND_MS is not yet WRONG. */
+  roomSince?: Record<string, number>;
   /** The workers an urgent release's build paused (w1841, server/buildPlans.ts pausedFor), by session id: their requests show Blocked on it. */
   buildHolds?: Record<string, BuildHold>;
   /** Discord and FFBox intake into the ledger (docs/intake.md); absent from a server older than this field. */
