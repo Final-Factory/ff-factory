@@ -193,7 +193,10 @@ the server (`server/work.ts`) does three things:
 Requests also come from the intake ([intake.md](intake.md)): Discord bug reports, trusted people's requests to Max
 and FFBox's work, each with its source, its triage (an obvious bug, or it needs a human) and, until a reviewer approves
 it, `approval: pending`, which keeps it from the dispatcher and makes `start_agent` refuse it. Work started from the
-dashboard or over `/mcp` is recorded as an active request too, so the ledger shows all work.
+dashboard or over `/mcp` is recorded as an active request too, so the ledger shows all work. Every #bug-reports and
+dev_bug_reports thread gets its request by itself (w1783, [intake.md](intake.md#every-bug-thread-has-an-owner)): an
+owner's acknowledgement there files their own approved request, and an hourly check files each thread nothing owns for a
+reviewer, so no orchestrator sweeps the channels on a timer of its own.
 
 **Standing agents' delegations** (w527; [standing-agents.md](standing-agents.md#delegation)) are requests like the
 rest. Once approved (by the agent's auto-approve rules, with no click, or by a person: the Approve button, Start now,

@@ -105,6 +105,23 @@ export interface IntakeConfig {
      */
     desync?: { enabled?: boolean; maxPerDay?: number };
   };
+  /**
+   * The bug threads' owners (w1783, docs/intake.md "Every bug thread has an owner"), on by default and read-only on Discord:
+   * an owner's reply that a model judges acknowledges the bug files their own approved request, and a coverage check files
+   * every thread of the last `windowDays` that nothing owns, for a reviewer. `channels`: aliases from the ffbox config
+   * (default bug_reports and dev_bug_reports). `owners`: { "<discord id>": "<login>" }, added to intake.discord.trusted's
+   * ben and lothsahn and the ffbox config's operators. `judgeModel` default "haiku".
+   */
+  bugThreads?: {
+    enabled?: boolean;
+    channels?: string[];
+    owners?: Record<string, string>;
+    pollMinutes?: number;
+    windowDays?: number;
+    ackLookbackHours?: number;
+    judgeModel?: string;
+    coverage?: { enabled?: boolean; everyMinutes?: number; file?: boolean; perDay?: number };
+  };
   /** The "live in 0.50.0.X" follow-up: watch the base branch for the release that carries each landed fix. */
   release?: { enabled?: boolean; delayMinutes?: number };
   /**

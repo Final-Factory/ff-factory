@@ -18,6 +18,8 @@ export interface DiscordConfig {
   guildId?: string;
   /** alias -> channel id (blank ids are left out). */
   channels: Record<string, string>;
+  /** Discord user id -> the operator's name, from the config's top-level "operators" block when it has one (w1783). */
+  operators: Record<string, string>;
 }
 
 export function ffboxConfigDir(override?: string, env: NodeJS.ProcessEnv = process.env) {
@@ -54,8 +56,16 @@ export function readDiscordConfig(dirOverride?: string, env: NodeJS.ProcessEnv =
   const secrets = env.FFBOX_SECRETS || path.join(dir, 'secrets.env');
   let section: Record<string, unknown> = {};
   let problem: string | undefined;
+  const operators: Record<string, string> = {};
   try {
     const whole = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
+    // FFBox's "operators": { "<name>": { "discord": "<snowflake>", ... } }; numeric ids only, as FFBox reads them.
+    if (whole.operators && typeof whole.operators === 'object') {
+      for (const [name, o] of Object.entries(whole.operators as Record<string, unknown>)) {
+        const id = o && typeof o === 'object' ? (o as { discord?: unknown }).discord : undefined;
+        if (typeof id === 'string' && /^\d{15,25}$/.test(id) && /^[a-zA-Z0-9._-]{2,32}$/.test(name)) operators[id] = name;
+      }
+    }
     if (whole.discord && typeof whole.discord === 'object') section = whole.discord as Record<string, unknown>;
     else problem = `${file} has no "discord" section`;
   } catch (e) {
@@ -84,5 +94,5 @@ export function readDiscordConfig(dirOverride?: string, env: NodeJS.ProcessEnv =
     source = file;
     problem ??= `no app_token in the "discord" section of ${file}`;
   }
-  return { token, source, problem: token ? undefined : problem, guildId, channels };
+  return { token, source, problem: token ? undefined : problem, guildId, channels, operators };
 }

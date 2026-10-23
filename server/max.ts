@@ -19,6 +19,7 @@ import { FileTail, cleanLine, eventsFileOf, parseEventLine, type CliEvent } from
 import type { MaxEvent, MaxInboundChannel, MaxInboundItem, MaxSummary, SessionInfo } from '../shared/types.ts';
 import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
 import { dryRun } from './dryRun.ts';
+import type { RawThread } from './bugThreads.ts';
 
 const KEEP_EVENTS = 500;
 const HEALTH_EVERY_MS = 15 * 60_000;
@@ -427,6 +428,11 @@ export class MaxManager {
     return !!this.config().token;
   }
 
+  /** FFBox's operators by Discord id, from the ffbox config here (w1783: who an owner is in a bug thread). */
+  get operatorIds(): Record<string, string> {
+    return this.config().operators ?? {};
+  }
+
   /** The bot's id: known after a token check, else looked up now. */
   async ensureBotId(): Promise<string | undefined> {
     if (!this.botId) await this.checkHealth();
@@ -444,6 +450,21 @@ export class MaxManager {
     if (!g) throw new Error('no server_id in the ffbox config (needed to list forum threads)');
     const r = (await this.get(`/guilds/${g}/threads/active`)) as { threads?: { id: string; parent_id?: string; name?: string; owner_id?: string; message_count?: number }[] };
     return (r.threads ?? []).filter((t) => t.parent_id === channelId && /^\d+$/.test(t.id)).sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1));
+  }
+
+  /** Every active thread of the server, raw (with last_message_id and thread_metadata): the bug-thread watch (w1783). */
+  async activeThreads(): Promise<RawThread[]> {
+    const g = this.config().guildId;
+    if (!g) throw new Error('no server_id in the ffbox config (needed to list forum threads)');
+    const r = (await this.get(`/guilds/${g}/threads/active`)) as { threads?: RawThread[] };
+    return (r.threads ?? []).filter((t) => /^\d+$/.test(t.id));
+  }
+
+  /** A forum's archived public threads, newest archived first, 100 a page; `before` an archive time (ISO) to page back. */
+  async archivedThreads(channelId: string, before?: string): Promise<{ threads: RawThread[]; hasMore: boolean }> {
+    const q = `limit=100${before ? `&before=${encodeURIComponent(before)}` : ''}`;
+    const r = (await this.get(`/channels/${channelId}/threads/archived/public?${q}`)) as { threads?: RawThread[]; has_more?: boolean };
+    return { threads: (r.threads ?? []).filter((t) => /^\d+$/.test(t.id)), hasMore: r.has_more === true };
   }
 
   /** One message (a forum thread's first message has the thread's id). */
