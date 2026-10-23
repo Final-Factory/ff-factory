@@ -30,6 +30,11 @@ worker then runs on that person's Claude account when FF Factory holds one for t
   minted before this change, or without `--user`, acts for the owner. A key for a member login, written straight into a
   0600 file on a machine and never printed, is the orchestration worker's `fffctl apikey issue` (w1415,
   [ops-worker.md](ops-worker.md#api-keys-for-a-member-login-w1415)); owner logins and Ben's and Lothsahn's stay `apikey.ts`.
+- Deleting a login (w1864): `sudo fffctl user delete <id> --by <your login>` in the VM (`server/userCli.ts`; the
+  orchestration worker's form is member logins only, [ops-worker.md](ops-worker.md#deleting-a-member-login-w1864)). The
+  running portal removes the login with its API keys, sessions, pool entry and settings, push subscriptions and its own
+  orchestrator in one step, and prints what went, never a key or a password. It refuses the last owner and the login it
+  is run as.
 - `GET /api/me` returns the signed-in user's `userId`, `displayName` and `role`.
 
 ## Attribution

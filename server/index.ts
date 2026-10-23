@@ -51,7 +51,8 @@ import { UNIT_WATCHDOG_FILE, UnitWatchdogMonitor, fileUnitWatchdog } from './uni
 import { dataRecoveries, describeRecovery } from './durable.ts';
 import { DispatcherChatRefused, PermissionAnswerRefused } from './orchestrators.ts';
 import { OPS_PEOPLE, OPS_REFUSED } from './opsWorker.ts';
-import { backupMemory, healMemory, MEMORY_TRASH_DAYS, memoryRootOf, pruneMemoryTrash } from './orchestratorMemory.ts';
+import { backupMemory, healMemory, MEMORY_TRASH_DAYS, memoryDirFor, memoryRootOf, pruneMemoryTrash } from './orchestratorMemory.ts';
+import { deleteLogin, serveLoginDeletes } from './loginDelete.ts';
 import { describeMemoryGit, versionMemory } from './memoryGit.ts';
 import { DispatcherStop, stopMeters } from './dispatcherStop.ts';
 import { TokenSwitch, orchestratorOut, type RateLimitInfo } from './tokenSwitch.ts';
@@ -2810,6 +2811,35 @@ setInterval(() => {
   const req = parseRestartRequest(text);
   if (req === 'now') drainer.stopNow(plainStop('restart'));
   else agents.requestRestart!(req);
+}, 1000);
+
+// `fffctl user delete` (w1864, server/userCli.ts) hands a login's delete to the running portal, which holds its sessions, its
+// settings and its orchestrator in memory: data/login-delete/<id>.json in, <id>.result.json out (server/loginDelete.ts).
+setInterval(() => {
+  if (isDryRun) return;
+  try {
+    serveLoginDeletes(cfg.dataDir, (r) =>
+      deleteLogin(
+        {
+          auth,
+          settings: () => store.settings,
+          putSettings: (p) => store.putSettings(p),
+          personalOf: (u) => {
+            const h = agents.orchestrators.personalOf(u);
+            return h ? { id: h.info.id, status: h.info.status } : undefined;
+          },
+          removeSession: (id) => sessions.remove(id),
+          pushEndpoints: (u) => notifier.list(u).map((x) => x.endpoint),
+          unsubscribe: (e) => notifier.unsubscribe(e),
+          memoryRoot,
+          memoryDir: (u) => memoryDirFor(cfg, { orchestratorRole: 'personal', requestedBy: { userId: u, displayName: u } }, false),
+        },
+        r,
+      ),
+    );
+  } catch (e) {
+    console.warn('login delete:', (e as Error).message);
+  }
 }, 1000);
 
 // Local scripts that outlive a restart (scripts/republish-public.ps1) report to the orchestrator by dropping a
