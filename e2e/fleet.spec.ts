@@ -605,7 +605,7 @@ test('fleet: each machine says its bench lock mode, Exclusive, Shared or Free, w
   await expect(sidebar.getByTestId('fl-group-host').getByTestId('fl-bench')).toHaveAttribute('data-mode', 'exclusive');
   await expect(sidebar.getByTestId('fl-group-lothdesktop').getByTestId('fl-bench')).toHaveAttribute('data-mode', 'shared');
   await expect(sidebar.getByTestId('fl-group-m5').getByTestId('fl-bench')).toHaveText('Bench lock Free');
-  // Both lines fit the sidebar's width whole (measured at 280 px).
+  // No line is cut in the sidebar: a long one wraps (CI's Linux fonts cut one Windows fit whole at 280 px).
   if (!isMobile(page)) {
     const sideCut = await sidebar.locator('.fl-bench-line').evaluateAll((els) => els.filter((e) => e.scrollWidth > e.clientWidth + 1).map((e) => e.textContent));
     expect(sideCut, 'bench lines cut short in the sidebar').toEqual([]);

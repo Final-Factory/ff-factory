@@ -6176,19 +6176,14 @@ body {
   color: var(--text-3);
 }
 
+/* A long line wraps instead of cutting the time left or what waits: fonts differ in width by platform (w1835; the
+   sidebar's 280 px fits it whole on Windows and cut it on Linux). */
 .fl-bench-line {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .fl-bench b {
   font-weight: 600;
-}
-
-/* The board's cards have room to wrap a long line instead of cutting it (w1835). */
-.board-card .fl-bench-line {
-  white-space: normal;
 }
 
 .fl-places {
