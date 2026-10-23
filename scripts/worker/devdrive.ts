@@ -54,14 +54,65 @@ export function devDriveDirs(letter: string): { sandboxes: string; seed: string 
 }
 
 /**
- * The VHDX's maximum size in GB when no flag says. Windows' own minimum for a Dev Drive is 50 GB (sourced: Microsoft Learn,
- * "Set up a Dev Drive on Windows 11"); BEAST's is 900 GB on a volume of about 1 TB (devdrive.ps1). A dynamic VHDX takes only what
- * is written, so the maximum is a ceiling, not a reservation: 90 % of the host volume's size, at most 1 TB, at least 100 GB.
- * A guess, with those two for support; --dev-drive-max-gb overrides it.
+ * What the Dev Drive's maximum is made of (w1910, lothsahn: "The maximum should be based on the number of slots and agents
+ * and workers selected and anything else that goes into that"). GB (GiB), measured on LothDesktop's V: on 2026-10-23 (6
+ * sandboxes, 2 agents each) as logical sizes (`du -s`), so block clones and ReFS dedup count in full: a new machine runs no
+ * dedup, and an editor rewrites what it cloned from the seed. The table: docs/worker-install.md, "The maximum size".
  */
-export function defaultMaxGB(hostTotalGB: number | undefined): number {
-  if (!hostTotalGB || !Number.isFinite(hostTotalGB)) return 600;
-  return Math.max(100, Math.min(1024, Math.floor(hostTotalGB * 0.9)));
+export const DEV_DRIVE_SIZES = {
+  /**
+   * What every install holds once: the clone 20 (pack 1.4 measured by `git count-objects`, LFS objects 8.5 measured in
+   * docs/sandbox-disk.md, its checkout about 10: an estimate), the Library seed 11 (10.2 measured), nightly-history 5 (4.5
+   * measured), tools and steam 2 (under 1 each, measured).
+   */
+  fixedGB: 38,
+  /**
+   * One sandbox: the largest of the six, slot1, 40 (worktree 12 + Library 28; the others 21 to 37, measured), and its two
+   * player folders, 4 (players/ held 19 for 6 sandboxes: 3.2 each, measured, rounded up).
+   */
+  perSandboxGB: 44,
+  /** One agent's temp folder (ffa-<session>: its clones, builds and captures): tmp/ held 109.8 for 12 agent seats (9.2 each, measured; unswept leftovers of finished sessions included). */
+  perAgentGB: 10,
+  /** Free space the drive keeps at its fullest: the pool's clean-up line (DISK_WARN_GB_DEFAULT; lothsahn, w1910: "cleanup space should be 20G"). */
+  cleanupHeadroomGB: DISK_WARN_GB_DEFAULT,
+  /** Windows' own minimum for a Dev Drive (sourced: Microsoft Learn, "Set up a Dev Drive on Windows 11"). */
+  minGB: 50,
+} as const;
+
+/**
+ * What the host volume keeps free with the VHDX at its maximum: the guard's clean-up line plus its hysteresis (20 + 10,
+ * devDriveGuard), or a tenth of the free space when that is more, for whatever else the volume holds. A guess.
+ */
+export const hostReserveGB = (hostFreeGB: number) => Math.max(DISK_WARN_GB_DEFAULT + 10, Math.ceil(hostFreeGB * 0.1));
+
+/** The GB the pool's sandboxes and agents need on the drive: the sum of DEV_DRIVE_SIZES (1 sandbox, 1 agent: 112). */
+export function devDriveNeedGB(pool: { maxSandboxes: number; maxAgentsPerSandbox: number }): number {
+  const s = DEV_DRIVE_SIZES;
+  const sandboxes = Math.max(1, Math.floor(pool.maxSandboxes || 1));
+  const agents = sandboxes * Math.max(1, Math.floor(pool.maxAgentsPerSandbox || 1));
+  return s.fixedGB + sandboxes * s.perSandboxGB + agents * s.perAgentGB + s.cleanupHeadroomGB;
+}
+
+/**
+ * The VHDX's maximum size in GB when no flag says (w1910): what the pool needs (devDriveNeedGB), and never more than the host
+ * volume can hold with hostReserveGB to spare. A dynamic VHDX grows to its maximum and never shrinks, and the host guard holds
+ * new agents back while the host's free space is less than the growth left (server/hostHealth.ts roomLevel). The old default,
+ * 90 % of the volume's size up to 1 TB, gave LothLaptop a 1 TB drive on a volume with about 870 GB free: no agent could start.
+ * `gb` 0: the host cannot hold even Windows' minimum, so no drive. `short`: the pool needs more than the host can hold, and
+ * the drive gets what it can. --dev-drive-max-gb overrides it.
+ */
+export function defaultMaxGB(pool: { maxSandboxes: number; maxAgentsPerSandbox: number }, hostFreeGB: number | undefined): { gb: number; why: string; short?: boolean } {
+  const s = DEV_DRIVE_SIZES;
+  const need = devDriveNeedGB(pool);
+  const sandboxes = Math.max(1, Math.floor(pool.maxSandboxes || 1));
+  const agents = sandboxes * Math.max(1, Math.floor(pool.maxAgentsPerSandbox || 1));
+  const sum = `${sandboxes} sandbox${sandboxes === 1 ? '' : 'es'} x ${s.perSandboxGB} + ${agents} agent${agents === 1 ? '' : 's'} x ${s.perAgentGB} + ${s.fixedGB} shared + ${s.cleanupHeadroomGB} clean-up room`;
+  if (hostFreeGB === undefined || !Number.isFinite(hostFreeGB)) return { gb: need, why: `${need} GB: ${sum} (the host volume's free space is unknown)` };
+  const keep = hostReserveGB(hostFreeGB);
+  const cap = Math.floor(hostFreeGB - keep);
+  if (cap < s.minGB) return { gb: 0, why: `the host volume has ${Math.floor(hostFreeGB)} GB free; keeping ${keep} GB of it free leaves less than the ${s.minGB} GB a Dev Drive needs`, short: true };
+  if (need <= cap) return { gb: need, why: `${need} GB: ${sum}` };
+  return { gb: cap, why: `${cap} GB, the most the host volume holds (${Math.floor(hostFreeGB)} GB free, ${keep} kept free), where ${sum} come to ${need}: fewer sandboxes, or free space on the host and make the drive again`, short: true };
 }
 
 /**

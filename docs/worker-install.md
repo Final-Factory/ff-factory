@@ -709,10 +709,29 @@ installer reads whether the volume reports it (`fsutil fsinfo volumeinfo`: measu
 runner, and the install says so for each PC). Without it, `daemon.json` keeps `robocopy` so the pool counts a full copy
 honestly, and the install says why.
 
-**The maximum size** defaults to **90 % of the root's volume, between 100 GB and 1 TB** (*a guess*, supported by two
-sourced numbers: Windows' own minimum is 50 GB, and BEAST's drive is 900 GB on about a terabyte); `-DevDriveMaxGB N`
-sets it. It is a ceiling: the file takes what is written. The guard watches the root's volume because that, not the
-ceiling, is what runs out.
+**The maximum size** defaults to **what the pool needs, capped by the root's volume's free space** (w1910, lothsahn: "The
+maximum should be based on the number of slots and agents and workers selected and anything else that goes into that";
+`scripts/worker/devdrive.ts` `DEV_DRIVE_SIZES`, `defaultMaxGB`); `-DevDriveMaxGB N` sets it. It is a ceiling, the file
+takes what is written, but a dynamic VHDX never shrinks and the guard holds new agents back while the root's volume has less
+free space than the file can still grow (below), so a ceiling the volume cannot hold stops the machine. The old default,
+90 % of the volume's *size* up to 1 TB, gave LothLaptop (1 sandbox, 1 agent) a 1 TB drive on a D: with about 870 GB free:
+the guard refused every agent ("D:/ 841 GB free (the Dev Drive's file can still grow 996 GB there)").
+
+The need, in GB, measured on LothDesktop's V: on 2026-10-23 (6 sandboxes, 2 agents each) as logical sizes (`du -s`), so
+block clones and dedup count in full:
+
+| Part | GB | Rests on |
+|---|---|---|
+| Each sandbox | 44 | the largest of six, slot1: 40 (worktree 12, Library 28; the others 21 to 37), measured; its two player folders: 4 (19 for 6 sandboxes), measured, rounded up |
+| Each agent (sandboxes x agents per sandbox) | 10 | `tmp\` held 109.8 for 12 agent seats, unswept leftovers included: measured |
+| Once per install | 38 | the clone 20 (pack 1.4 and LFS 8.5 measured, checkout about 10 estimated), the seed 11, nightly-history 5, tools and steam 2: measured |
+| Clean-up room | 20 | the pool's clean-up line, `disk_warn_gb` (lothsahn, w1910: "cleanup space should be 20G") |
+
+One sandbox with one agent needs **112 GB**, the smallest safe drive; 6 sandboxes with 2 agents each, 442. The cap: the
+root's volume keeps 30 GB free (the guard's 20 GB clean-up line plus its 10 GB hysteresis) or a tenth of its free space,
+whichever is more (*a guess*). Under the need, the drive gets the cap and the install says so; under Windows' 50 GB
+minimum (sourced: Microsoft Learn, "Set up a Dev Drive on Windows 11"), no drive is made and the install carries on
+without one. A pool raised later needs a bigger drive: `-MoveToDevDrive` with `-DevDriveMaxGB` makes it again.
 
 **Moving an existing install's sandboxes onto the drive** (`-Update -MoveToDevDrive`; LothDesktop's `D:\work\ffw`). It is
 the only thing that touches sandboxes, so it runs only on request, and only when nothing works in them:
