@@ -262,7 +262,10 @@ past its bound, or the next exclusive ticket granted before a look saw the lock 
 again with `unity start`: it takes a shared ticket, so it comes back in the next shared turn, never beside the next
 timed leg, and the panel shows its place. The holder's own sandbox is never kept closed for its own run. The mark stays
 until the editor runs again, so a start that fails or is not made at its turn (no Unity slot, low disk) is asked for
-again every 30 s. The marks survive a daemon restart, which reopens them at its first look.
+again every 30 s; after 3 starts that never ran (an editor that crashes at boot) it is left stopped and its worker told.
+A `unity stop` asked for is the last word: the turn does not start that editor again. An editor still quitting under
+the turn keeps its mark and is not closed a second time. The marks survive a daemon restart, which reopens them at its
+first look.
 
 **Keep the turn short.** Every other sandbox's editor closes and reopens around each exclusive ticket, so a timed leg
 takes it only around the timing itself: build, stage and warm up under a shared ticket (or none), take the exclusive

@@ -419,9 +419,13 @@ export class SandboxPool {
     if (r.status !== 'ready') return { closed: false, saved: [], text: `skipped: the sandbox is ${r.status}` };
     if (this.unityState.get(id)?.state !== 'running' || this.queuedBoots.has(id)) return { closed: false, saved: [], text: 'skipped: its editor is not up and running' };
     const pids = await this.editorPids(id);
-    this.editorFor(r).watch?.expectExit(10 * 60_000);
+    const watch = this.editorFor(r).watch;
+    watch?.expectExit(10 * 60_000);
     const res = await close();
-    if (!res.closed) return res;
+    if (!res.closed) {
+      if (!res.quitting) watch?.expectExit(0); // still in use: watched for hangs again (w1829)
+      return res;
+    }
     this.idleClosedPids.set(id, pids);
     this.stoppedAt.set(id, this.d.now());
     this.unityState.set(id, { state: 'stopped', detail: `closed: Live view idle ${minutes} min; reopens on resume`, logPath: this.unityState.get(id)?.logPath });
@@ -492,6 +496,15 @@ export class SandboxPool {
       ...(first ? { benchNote: `[bench turn] Your sandbox's Unity editor was closed at ${c.at.slice(11, 16)}Z for ${c.by} (w1829: while another worker's exclusive bench ticket times a run, nothing else runs on this machine).${saved} Its assets were saved too: check git status. Anything in play mode then is gone. It is starting again now (${text.slice(0, 200)}); mcp__machine__unity status says when it is up.` } : {}),
     });
     return text;
+  }
+
+  /** Its editor was asked to start again after a turn and still does not run (w1829): the mark goes, its worker is told. */
+  benchGiveUp(id: string, tries: number) {
+    const r = this.recs.get(id);
+    const c = r?.benchClosed;
+    if (!r || !c) return;
+    this.changed(r, { benchClosed: undefined, benchNote: `[bench turn] Your sandbox's Unity editor was closed at ${c.at.slice(11, 16)}Z for ${c.by} (w1829) and did not come back after ${tries} starts; FF Factory stopped trying. Start it with mcp__machine__unity start when you need it (its status and log say why it did not run).` });
+    this.o.onEvent({ text: `sandbox ${id}: its editor, closed for ${c.by}, did not run again after ${tries} starts; left stopped (w1829)`, sandbox: id, unity: true });
   }
 
   /** The note about a timed run's close for the next message to a worker in this sandbox, once (w1829). */
@@ -943,6 +956,8 @@ export class SandboxPool {
     const hadEditor = action === 'restart' && this.editorUp(id);
     const out: string[] = [];
     if (action === 'stop') this.stoppedAt.set(id, this.d.now());
+    // w1829: a stop asked for is the last word: a timed run's turn does not start this editor again after it.
+    if (action === 'stop' && r.benchClosed) this.changed(r, { benchClosed: undefined });
     if (action === 'stop' || action === 'restart') {
       if (this.endBoot(id)) out.push('Its queued start is cancelled (w1615).');
       const ed = this.editorFor(r);

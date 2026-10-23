@@ -300,6 +300,9 @@ test('w1829: an editor closed for a timed run is marked before its quit, says wh
   await again.p.benchClose('a', by, 't00000043', 'x', async () => ({ closed: false, quitting: true, saved: [], text: 'skipped: asked to quit (...), it still runs after 180 s; left running, never killed' }));
   await again.p.tick();
   assert.deepEqual(again.p.benchClosedList().map((c) => c.id), ['a'], 'it may yet go: the turn reopens it then');
+  // A stop asked for is the last word: the turn does not start it again after it.
+  await again.p.unity('a', 'stop');
+  assert.deepEqual(again.p.benchClosedList(), []);
 });
 
 test('w1615: a queued editor start whose slot is gone at its turn is not made, its ticket let go, and the worker told', async (t) => {

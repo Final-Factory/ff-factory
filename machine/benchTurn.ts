@@ -67,6 +67,8 @@ export interface BenchTurnDeps {
   closeEditor(id: string, by: string, ticket: string): Promise<{ closed: boolean; text: string }>;
   /** Start a closed sandbox's editor again (it queues for its shared turn); the mark stays until it runs. Throws when it cannot. */
   reopenEditor(id: string): Promise<string>;
+  /** Its editor did not run after REOPEN_TRIES starts: drop the mark and tell its worker (an editor that crashes at boot). */
+  giveUp?(id: string, tries: number): void;
   /** Ask a player to quit (its window's close, SIGTERM); never forced. Answers what happened. */
   closePlayer(pid: number): Promise<string>;
   /** The note for a player's worker, given at its next message. */
@@ -79,6 +81,8 @@ export interface BenchTurnDeps {
 
 /** A close that was skipped (compiling, an untitled scene) or a start that failed is tried again after this long. */
 export const TURN_RETRY_MS = 30_000;
+/** Starts asked for a closed editor after its turn before it is left stopped (each takes a shared ticket of the queue). */
+export const REOPEN_TRIES = 3;
 /** A player asked to quit is asked again after this long if it still runs (never forced: then it is left and logged). */
 export const PLAYER_ASK_AGAIN_MS = 2 * 60_000;
 
@@ -126,6 +130,8 @@ export class BenchTurn {
   /** When a close was skipped or a reopen failed, per sandbox: tried again after TURN_RETRY_MS. */
   private readonly retryAt = new Map<string, number>();
   private readonly asked = new Map<number, number>();
+  /** Starts asked for each closed editor since its turn ended (REOPEN_TRIES). */
+  private readonly starts = new Map<string, number>();
   /** What the guard's file says now, as JSON, so it is written only when it changes. */
   private written?: string;
   /** The turn's holder has no session, and that was logged. */
@@ -161,11 +167,20 @@ export class BenchTurn {
     // before a look saw the lock free (its start then queues behind that run and comes back in the next shared turn), and
     // the holder's own sandbox (closed by an earlier turn) is never kept closed for its own run.
     const closed = this.d.closed();
+    for (const id of this.starts.keys()) if (!closed.some((c) => c.id === id)) this.starts.delete(id);
     for (const c of closed) {
       if (h && c.id !== h.sandbox && c.ticket === h.ticket) continue;
       if (c.starting || (c.reopenAt !== undefined && now - c.reopenAt < TURN_RETRY_MS) || (this.retryAt.get(c.id) ?? 0) > now) continue;
+      const tries = this.starts.get(c.id) ?? 0;
+      if (tries >= REOPEN_TRIES && this.d.giveUp) {
+        this.d.giveUp(c.id, tries);
+        this.starts.delete(c.id);
+        this.d.log(`bench turn: sandbox ${c.id}: its editor did not run after ${tries} starts; left stopped, its worker told`);
+        continue;
+      }
       try {
         const text = await this.d.reopenEditor(c.id);
+        this.starts.set(c.id, tries + 1);
         this.retryAt.delete(c.id);
         this.d.log(`bench turn: sandbox ${c.id}: its editor ${c.reopenAt === undefined ? 'starts again' : 'did not run yet: its start is asked for again'}: ${text}`);
       } catch (e) {
@@ -178,7 +193,10 @@ export class BenchTurn {
       return;
     }
     const by = holderText(h);
-    const editors = this.d.editors().filter((e) => e.id !== h.sandbox && e.running && !this.closing.has(e.id) && (this.retryAt.get(e.id) ?? 0) <= now);
+    // An editor already marked for this turn is closed or still quitting (its bridge's port file can outlive the quit):
+    // it is not closed again, which would take a dead bridge for a skip and drop its mark.
+    const marked = new Set(closed.filter((c) => c.ticket === h.ticket).map((c) => c.id));
+    const editors = this.d.editors().filter((e) => e.id !== h.sandbox && e.running && !marked.has(e.id) && !this.closing.has(e.id) && (this.retryAt.get(e.id) ?? 0) <= now);
     // A holder with no worker session (a person's own timed run, from the main clone) cannot be told apart from the players
     // its script started with --detach (their parent is gone): no player is asked to quit then.
     const players = h.session

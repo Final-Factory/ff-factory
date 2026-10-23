@@ -512,6 +512,7 @@ export class Daemon {
       isPlayer: (pid, procs) => gamePlayers(procs.filter((p) => p.pid === pid), platform).length > 0,
       closeEditor: (id, by, ticket) => this.benchCloseEditor(id, by, ticket),
       reopenEditor: (id) => this.pool.benchReopen(id),
+      giveUp: (id, tries) => this.pool.benchGiveUp(id, tries),
       closePlayer: (pid) => askPlayerToQuit(pid, platform),
       notePlayer: (session, text) => this.benchPlayerNotes.set(session, text),
       writeClosed: (marks) => cfg.root && writeClosedFile(cfg.root, marks, log),

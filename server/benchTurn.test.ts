@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { timedHolder } from '../machine/benchLock.ts';
-import { askPlayerToQuit, BenchTurn, closedRefusalFor, descendsFrom, holderText, PLAYER_ASK_AGAIN_MS, TURN_RETRY_MS, writeClosedFile, type BenchTurnDeps, type Holder, type TurnEditor, type TurnPlayer } from '../machine/benchTurn.ts';
+import { askPlayerToQuit, BenchTurn, closedRefusalFor, descendsFrom, holderText, PLAYER_ASK_AGAIN_MS, REOPEN_TRIES, TURN_RETRY_MS, writeClosedFile, type BenchTurnDeps, type Holder, type TurnEditor, type TurnPlayer } from '../machine/benchTurn.ts';
 import { sandboxGuard } from './guard.ts';
 
 /**
@@ -66,6 +66,10 @@ function harness(o: { editors: TurnEditor[]; players?: TurnPlayer[]; procs?: { p
       if (s.reopenStays.has(id)) s.closed.set(id, { ...s.closed.get(id)!, reopenAt: s.now });
       else s.closed.delete(id); // the next look sees it run
       return 'Queued (w1615): ...';
+    },
+    giveUp: (id, tries) => {
+      s.calls.push(`give up ${id} after ${tries}`);
+      s.closed.delete(id);
     },
     closePlayer: async (pid) => {
       s.calls.push(`quit player ${pid}`);
@@ -213,6 +217,26 @@ test('w1829: the next timed run granted before a look saw the lock free ends the
   s.now += TURN_RETRY_MS + 1;
   await turn.tick();
   assert.deepEqual(s.calls.sort(), ['reopen slot1', 'reopen slot2']);
+});
+
+test('w1829: an editor that never runs again is asked to start REOPEN_TRIES times, then left stopped and its worker told; one still quitting under this turn is not closed again', async () => {
+  const { s, turn } = harness({ editors: [{ id: 'slot1', running: false }] });
+  s.closed.set('slot1', { at: T0, ticket: 't00000041' });
+  s.reopenStays.add('slot1'); // it crashes at boot: the mark stays
+  for (let i = 0; i < REOPEN_TRIES + 1; i++) {
+    await turn.tick();
+    s.now += TURN_RETRY_MS + 1;
+  }
+  assert.deepEqual(s.calls, [...Array(REOPEN_TRIES).fill('reopen slot1'), `give up slot1 after ${REOPEN_TRIES}`]);
+  assert.equal(s.closed.size, 0);
+  // Marked for this turn and still shown running (its quit under way): left to go, not closed a second time.
+  s.calls.length = 0;
+  s.holder = holder();
+  s.editors = [{ id: 'slot2', running: true, pid: 102 }];
+  s.closed.set('slot2', { at: s.now, ticket: s.holder.ticket });
+  await turn.tick();
+  await settle();
+  assert.deepEqual(s.calls, []);
 });
 
 test('w1829: a holder with no worker session asks no player to quit (its own were started detached); a player gone from a fresh listing is not asked; nothing to handle lists no processes', async () => {
