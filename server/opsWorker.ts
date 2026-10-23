@@ -629,6 +629,8 @@ export interface OpsDeps {
    * not take one (then the worker runs the installer over ssh, as before).
    */
   linkUpdate?: (machineId: string, flags: LinkUpdateFlags) => Promise<LinkUpdateReport> | undefined;
+  /** Why its connected daemon does not take one (server/machines.ts linkProblem, w1918): then no ssh either; undefined otherwise. */
+  linkProblem?: (machineId: string) => string | undefined;
   /** Its turn of a job sent for requests ended: the ledger reads its DONE and still-open lines; answers what it did (w631). */
   workTurnEnded?: (info: SessionInfo, text: string, job: { workIds: readonly string[]; by: Requester }) => string[];
   now?: () => number;
@@ -936,6 +938,9 @@ export class OpsWorker {
       );
       return `Updating ${m.id}'s worker install over its daemon's own link (w1596; no ssh, no worker job)${named ? ` with ${named}` : ' with no setting changed'}. The portal sends its update job's report to you as a [machine update] message when it ends (a few minutes; the new daemon takes the agents back, and a daemon that does not come back is put back by the job itself). It does not close ${id}: tell ${person.displayName} what it says, and close the request with update_work once it is done.`;
     }
+    // A connected daemon is never sent to ssh (w1918: LothLaptop joined without it; port 22 timed out and nothing said why).
+    const why = this.d.linkProblem?.(m.id);
+    if (why) throw new Error(`machine: ${why}. Nothing was run`);
     if (!SAFE_TARGET.test(m.target) || !SAFE_ROOT.test(m.root) || /\s/.test(m.root)) throw new Error(`machine: ${m.id}'s ssh target or root folder has characters this job will not pass to a shell`);
     const extra = workerUpdateFlags(m.platform, nums, dev).join(' ');
     const command = `ssh ${m.target} '${workerUpdateRemote({ root: m.root, platform: m.platform }, extra)}'`;

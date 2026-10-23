@@ -85,6 +85,8 @@ export interface RolloutHost {
   ssh(target: string, remote: string, timeoutMs: number): Promise<{ code: number; stdout: string; stderr: string }>;
   /** Whether its connected daemon updates over its own link (w1596): then ssh is not used for it. */
   link?(id: string): boolean;
+  /** Why its connected daemon does not update over its link (server/machines.ts linkProblem, w1918): then no ssh either. */
+  linkProblem?(id: string): string | undefined;
   /** The installer's form over the daemon's link, to the deployed commit: its update job's report (server/machines.ts linkUpdate). */
   linkUpdate?(id: string, form: 'update' | 'tools', commit: string): Promise<LinkUpdateReport>;
   /** Send the report to a person's orchestrator, or (no person) the dispatcher. */
@@ -309,6 +311,10 @@ export class MachineRollout {
           // Connected, but its hello (which carries its commit) has not come yet: w970, beast was read as "unknown" and skipped.
           o.note = 'connected, but its daemon has not said hello yet';
           continue;
+        } else if (!this.viaLink(m.id) && this.d.host.linkProblem?.(m.id)) {
+          // A connected daemon is not sent to ssh (w1918): said why, and tried again at the next deploy.
+          Object.assign(o, { status: 'failed', note: this.d.host.linkProblem(m.id), at: new Date(this.now()).toISOString() });
+          console.log(`machine rollout: ${m.id}: failed (${o.note})`);
         } else if (!this.needsUpdate(m.id, sha)) {
           Object.assign(o, { status: 'current', before: this.d.host.daemon(m.id), after: this.d.host.daemon(m.id), at: new Date(this.now()).toISOString() });
         } else {
@@ -514,6 +520,8 @@ export class MachineRollout {
             t.warnings = [...warned, `WARNING: the tools run over ssh, for the firewall rules, failed: ${(e as Error).message}`];
           }
         }
+      } else if (this.d.host.linkProblem?.(m.id)) {
+        Object.assign(t, { status: 'failed', note: this.d.host.linkProblem(m.id) });
       } else {
         const r = await this.d.host.ssh(m.target, workerToolsRemote({ root: m.root!, platform: m.platform }), this.lim.toolsMs);
         Object.assign(t, toolsResult(r.code, `${r.stdout}\n${r.stderr}`));

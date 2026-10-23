@@ -16,7 +16,7 @@ import { MachineManager } from './machines.ts';
 import { PendingCalls, UpdateBundles, bundleServedLine, unwaitedAnswer, updateBundleFor } from './machineLink.ts';
 import type { LinkUpdateReport } from './machineProtocol.ts';
 import { Daemon, RECONNECT_MS, type DaemonConfig, type Probes } from '../machine/daemon.ts';
-import { ANSWERS, SelfUpdater, checkoutFromBundle, downloadBundle, fetchError, readJson, selfUpdateProblem, updateFiles, writeJson, type UpdateJob } from '../machine/selfUpdate.ts';
+import { ANSWERS, SelfUpdater, checkoutFromBundle, downloadBundle, fetchError, keepRootJson, readJson, rootBackupOf, selfUpdateProblem, updateFiles, writeJson, type UpdateJob } from '../machine/selfUpdate.ts';
 import type { JobSpec } from '../machine/osJob.ts';
 import type { Config } from './config.ts';
 
@@ -45,7 +45,7 @@ function portalRepo(dir: string, text = 'one'): { root: string; commit: string }
   return { root: dir, commit: git(dir, 'rev-parse', 'HEAD') };
 }
 
-async function setup(t: { after: (fn: () => unknown) => void }, o: { root?: boolean } = {}) {
+async function setup(t: { after: (fn: () => unknown) => void }, o: { root?: boolean; record?: 'file' | 'spare' | 'none' } = {}) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-link-'));
   const cfg = { dataDir: path.join(tmp, 'data'), limits: { maxSessions: 6 }, repo: { url: 'x' }, worker: { effort: 'high' } } as unknown as Config;
   fs.mkdirSync(cfg.dataDir);
@@ -68,8 +68,14 @@ async function setup(t: { after: (fn: () => unknown) => void }, o: { root?: bool
   const { token } = mm.register({ id: 'mx', host: 'mx', purpose: 'unused', status: 'ready', repoPath: tmp, home: tmp, portalUrl: url });
   const root = path.join(tmp, 'root');
   fs.mkdirSync(root);
-  if (o.root !== false) fs.writeFileSync(path.join(root, 'root.json'), JSON.stringify({ machineId: 'mx', service: 'com.fffactory.linktest', platform: process.platform }));
   const appDir = path.join(root, 'daemon');
+  // w1918: 'spare' is a root on its Dev Drive whose drive came back empty: only the daemon folder's spare copy is left.
+  const record = JSON.stringify({ machineId: 'mx', service: 'com.fffactory.linktest', platform: process.platform, devDrive: { vhdx: 'x.vhdx', letter: 'V', maxGB: 80, inUse: true, rootOnDrive: true, host: tmp } });
+  if (o.root !== false && (o.record ?? 'file') === 'file') fs.writeFileSync(path.join(root, 'root.json'), record);
+  if (o.record === 'spare') {
+    fs.mkdirSync(appDir, { recursive: true });
+    fs.writeFileSync(rootBackupOf(appDir), record);
+  }
   const config: DaemonConfig = { portalUrl: url, id: 'mx', token, repoPath: tmp, ...(o.root !== false ? { root } : {}), appDir, claude: 'no-such-claude', maxEventsFile: null, cleanup: { everyMinutes: 0 } } as DaemonConfig;
   RECONNECT_MS.value = 200;
   const d = new Daemon(config, undefined, PROBES);
@@ -209,6 +215,63 @@ test('w1596: a restart over the link answers, then the daemon exits for its supe
   await until('online, its hello read', () => plain.mm.hasHello('mx'));
   assert.equal(plain.mm.canLink('mx'), false, 'no worker root: ssh, as before');
   await assert.rejects(plain.mm.linkUpdate('mx'), /does not update over its link/);
+});
+
+test('w1918: root.json gone with a reset drive: the daemon puts it back from its spare copy and offers updates; with neither, the portal says why and sends nothing to ssh', async (t) => {
+  // The drive came back empty: the daemon puts root.json back before its hello, so it offers updates at once.
+  const s = await setup(t, { record: 'spare' });
+  await until('online, updates offered', () => s.mm.canLink('mx'));
+  assert.equal(readJson<{ service: string }>(path.join(s.root, 'root.json'))?.service, 'com.fffactory.linktest');
+  assert.equal(s.mm.linkProblem('mx'), undefined);
+  // Gone again while it runs: an unload over the link puts it back at the call and goes ahead.
+  fs.rmSync(path.join(s.root, 'root.json'));
+  s.d.selfUpdate.deps.launch = async () => 'a stand-in job';
+  fs.mkdirSync(path.join(updateFiles(s.appDir).src, 'scripts', 'worker'), { recursive: true });
+  fs.writeFileSync(path.join(updateFiles(s.appDir).src, 'scripts', 'worker', 'linkJob.ts'), '');
+  await s.mm.linkControl('mx', 'uninstall');
+  assert.ok(fs.existsSync(path.join(s.root, 'root.json')), 'put back at the call');
+
+  // Neither the file nor a copy (a daemon from before w1918 kept none): connected, no offer, and a reason instead of ssh.
+  const n = await setup(t, { record: 'none' });
+  await until('online, its hello read', () => n.mm.hasHello('mx'));
+  assert.equal(n.mm.canLink('mx'), false);
+  assert.match(n.mm.linkProblem('mx') ?? '', /mx's daemon .*is connected but did not offer updates over its link .*root\.json was missing or unreadable .*Not sent over ssh/);
+});
+
+test('w1918: keepRootJson keeps the spare copy fresh and puts root.json back only for a root on its Dev Drive, never throwing', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-rootjson-'));
+  try {
+    const root = path.join(tmp, 'V', 'ffw');
+    const appDir = path.join(tmp, 'D', 'daemon');
+    fs.mkdirSync(root, { recursive: true });
+    const onDrive = { machineId: 'mx', service: 'FFFactoryDaemon', devDrive: { rootOnDrive: true, host: path.join(tmp, 'D') } };
+    // A hand-written file with a byte order mark: read, and copied without it.
+    fs.writeFileSync(path.join(root, 'root.json'), String.fromCharCode(0xfeff) + JSON.stringify(onDrive));
+    assert.equal(keepRootJson(root, appDir), undefined);
+    assert.equal(fs.readFileSync(rootBackupOf(appDir), 'utf8'), JSON.stringify(onDrive));
+    // Unreadable, then missing with its folder: put back each time, the folder made again.
+    fs.writeFileSync(path.join(root, 'root.json'), '{ half');
+    assert.match(keepRootJson(root, appDir) ?? '', /root\.json was unreadable: put back from .*root-backup\.json/);
+    assert.equal(readJson<{ service: string }>(path.join(root, 'root.json'))?.service, 'FFFactoryDaemon');
+    fs.rmSync(root, { recursive: true });
+    assert.match(keepRootJson(root, appDir) ?? '', /was missing: put back/);
+    assert.ok(fs.existsSync(path.join(root, 'root.json')));
+    // The drive not attached (its root cannot be made): nothing, and no throw.
+    const blocked = path.join(tmp, 'file-not-drive');
+    fs.writeFileSync(blocked, '');
+    assert.equal(keepRootJson(path.join(blocked, 'ffw'), appDir), undefined);
+    // A root that is not on its Dev Drive keeps a copy but is never put back (its daemon folder goes with it).
+    const plain = path.join(tmp, 'plain');
+    fs.mkdirSync(plain);
+    fs.writeFileSync(path.join(plain, 'root.json'), JSON.stringify({ machineId: 'mx', service: 'svc' }));
+    const plainApp = path.join(plain, 'daemon');
+    keepRootJson(plain, plainApp);
+    fs.rmSync(path.join(plain, 'root.json'));
+    assert.equal(keepRootJson(plain, plainApp), undefined);
+    assert.equal(fs.existsSync(path.join(plain, 'root.json')), false);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test('w1596: a call nobody answers times out with what it waited for', async () => {

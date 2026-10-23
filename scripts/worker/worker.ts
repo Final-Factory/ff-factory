@@ -29,6 +29,7 @@ import { linuxControlScript, linuxReloadLines, parseUnitShow, systemdUnit, unitF
 import * as win from '../../server/machineDeployWin.ts';
 import { DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT, type SandboxPoolSettings } from '../../shared/types.ts';
 import { slotsPointer } from '../../machine/unitySlots.ts';
+import { rootBackupOf } from '../../machine/selfUpdate.ts';
 import { carryDevDrive, claudeSlug, decideDevDrive, defaultMaxGB, devDriveDirs, devDriveGuard, gbOf, hostDirOf, linkRootFolders, moveSandboxes, parseDevDriveOutput, realMoveDeps, unlinkRootFolder, type DevDriveRecord, type DevDriveState } from './devdrive.ts';
 import { REINSTALL_KEEPS, driveRootOf, isHostFile, moveMap, readMoved, rebaseJson, rebasePath, rebaseText, writeMoved } from './driveRoot.ts';
 import { readJsonDurable as readJsonFile } from '../../server/durable.ts';
@@ -126,16 +127,24 @@ export interface Manifest {
 
 export function readManifest(root: string): Manifest | undefined {
   try {
-    return JSON.parse(fs.readFileSync(layoutOf(root).manifest, 'utf8')) as Manifest;
+    // A UTF-8 byte order mark (a hand-written file, PowerShell 5.1's Set-Content) is not JSON (w1918).
+    return JSON.parse(fs.readFileSync(layoutOf(root).manifest, 'utf8').replace(/^\uFEFF/, '')) as Manifest;
   } catch {
     return undefined;
   }
 }
 
 function writeManifest(root: string, m: Manifest) {
-  const file = layoutOf(root).manifest;
-  fs.writeFileSync(file + '.tmp', JSON.stringify(m, null, 2) + '\n');
-  fs.renameSync(file + '.tmp', file);
+  const l = layoutOf(root, anchorOf(m));
+  const text = JSON.stringify(m, null, 2) + '\n';
+  fs.writeFileSync(l.manifest + '.tmp', text);
+  fs.renameSync(l.manifest + '.tmp', l.manifest);
+  // Its spare copy in the daemon's folder (w1918), off the Dev Drive for a root on it: the daemon puts root.json back from it
+  // when a reset drive took it (machine/selfUpdate.ts keepRootJson). Once the daemon's folder is made.
+  if (!fs.existsSync(l.daemon)) return;
+  const spare = rootBackupOf(l.daemon);
+  fs.writeFileSync(spare + '.tmp', text);
+  fs.renameSync(spare + '.tmp', spare);
 }
 
 /**
@@ -948,10 +957,10 @@ const devDrivePsArgs = (a: string[]) => ['-NoProfile', '-NonInteractive', '-Exec
 export const devDriveFile = (root: string) => path.join(root, 'devdrive.json');
 
 /** What devdrive.ps1 says about the drive without changing it (no administrator needed): attached? which letter? `host`: the folder that holds the VHDX. */
-async function devDriveStatus(host: string): Promise<{ exists: boolean; attached: boolean; letter: string }> {
+async function devDriveStatus(host: string): Promise<{ exists: boolean; attached: boolean; letter: string; maxGB: number }> {
   const r = await exec('powershell.exe', devDrivePsArgs(['-Action', 'status', '-Root', host]), { timeoutMs: 2 * 60_000 });
   const out = parseDevDriveOutput(r.stdout);
-  return { exists: !!out?.exists, attached: !!out?.attached, letter: String(out?.letter ?? '') };
+  return { exists: !!out?.exists, attached: !!out?.attached, letter: String(out?.letter ?? ''), maxGB: Number(out?.maxGB) || 0 };
 }
 
 /** Run devdrive.ps1 (-Action ensure by default): in this process when it is elevated, else in an elevated copy (one UAC prompt). `host`: the folder that holds the VHDX. */
@@ -1017,6 +1026,11 @@ async function setupDevDrive(o: InstallOptions, l: Layout, f: Facts & { probe: {
     if (!now.attached || !now.letter) throw new Error('the Dev Drive is not attached and this session cannot attach it (not elevated): run the update from an administrator\'s ssh session, or start the task by hand: schtasks /run /tn ffsb-helper-mount');
     state = JSON.parse(fs.readFileSync(devDriveFile(host), 'utf8')) as DevDriveState;
     state.letter = now.letter;
+    // The VHDX's own maximum where Windows reads it (w1918): LothLaptop's guard judged an 80 GB drive by a 1024 GB record.
+    if (now.maxGB >= 50 && now.maxGB !== state.maxGB) {
+      say(`Dev Drive: the VHDX's maximum is ${now.maxGB} GB (devdrive.json said ${state.maxGB} GB); recorded as ${now.maxGB} GB.`);
+      state.maxGB = now.maxGB;
+    }
   } else {
     // An existing drive keeps its maximum: a VHDX's cannot shrink in place (w1070), only a root move makes it again at a new one.
     const maxGB = had?.maxGB || newDriveMaxGB(o, f);
