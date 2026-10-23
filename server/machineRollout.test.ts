@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { MachineRollout, ROLLOUT_FILE, VERIFIED_FILE, changedSettings, installerSummary, toolsLine, toolsResult, type RolloutHost, type RolloutMachine } from './machineRollout.ts';
+import { MachineRollout, ROLLOUT_FILE, VERIFIED_FILE, changedSettings, installerSummary, timedRunText, toolsLine, toolsResult, type RolloutHost, type RolloutMachine } from './machineRollout.ts';
 import { workerToolsRemote, workerUpdateRemote } from './opsWorker.ts';
-import type { Requester } from '../shared/types.ts';
+import type { BenchState, Requester } from '../shared/types.ts';
 import type { LinkUpdateReport } from './machineProtocol.ts';
 
 /** The rollout after a verified portal deploy (w887, docs/ops-worker.md "After a verified deploy"). */
@@ -20,6 +20,8 @@ interface FakeMachine extends RolloutMachine {
   /** Whether its daemon has said hello on this connection (default: yes once online). */
   hello?: boolean;
   agents: { id: string; title: string }[];
+  /** w1861: the timed run its daemon says holds its bench queue now, if any. */
+  timed?: string;
   /** What a run of the installer does: its exit code and output, and what the machine looks like afterwards. */
   run: (remote: string) => { code: number; out?: string; after?: { online: boolean; daemon?: string }; adopt?: string[] };
   /** What a run of the installer's tools form does (w1476); default: published, ff-agents 1.29.19 -> 1.29.20. */
@@ -93,6 +95,7 @@ function world(machines: FakeMachine[], o: { requester?: Requester; enabled?: bo
     },
     tell: (to, text) => told.push({ to, text }),
     requesterOf: () => o.requester,
+    timedRun: (id) => find(id).timed,
   };
   const make = () =>
     new MachineRollout({ host, dataDir: dir, enabled: () => o.enabled !== false, tools: () => o.tools !== false, now: () => clock, sleep: async (ms) => void (clock += ms), limits: { settleMs: 10_000, graceMs: 10 * 60_000 } });
@@ -531,4 +534,91 @@ test("w1596: over the link, a new daemon that did not come back is put back by i
   assert.equal(w3.calls.length, 1, 'offline after the job went quiet: the installer put it back over ssh, where the portal can reach it');
   assert.match(w3.calls[0].remote, /--daemon-ref 1111111$/);
   assert.match(w3.told[0].text, /Rollback: ok\./);
+});
+
+test("w1861: a timed run on a machine holds its update and tools back until its bench has been free a while; the report says what it waits for", async () => {
+  const w = world([mac('m5', { timed: 'a timed run on m5/slot2 (w1780)' }), mac('biscuit')], { requester: LOTH });
+  const r = w.make();
+  w.verify();
+  await r.tick();
+  assert.deepEqual(w.calls.map((c) => c.target), ['ben@biscuit'], 'only the machine with no timed run is updated');
+  assert.deepEqual(w.toolCalls.map((c) => c.target), ['ben@biscuit']);
+  assert.equal(r.state.machines.m5.status, 'pending');
+  assert.match(r.state.machines.m5.note!, /held back for a timed run on m5\/slot2 \(w1780\)/);
+  // The leg ends: probe_ab.sh takes its next leg's ticket seconds later, so a look in that gap does not update it.
+  w.find('m5').timed = undefined;
+  w.advance(30_000);
+  await r.tick();
+  assert.equal(w.calls.length, 1, 'not in the gap between two legs');
+  assert.match(r.state.machines.m5.note!, /which let go moments ago/);
+  w.find('m5').timed = 'a timed run on m5/slot2 (w1780)';
+  w.advance(30_000);
+  await r.tick();
+  assert.equal(w.calls.length, 1);
+  // Past the grace period the report goes out, naming the run m5 waits for; m5 comes in a follow-up.
+  w.advance(10 * 60_000);
+  await r.tick();
+  assert.equal(w.told.length, 1);
+  assert.match(w.told[0].text, /- m5: waiting: held back for a timed run on m5\/slot2 \(w1780\): an update beside a timed run spoils its numbers \(w1861\)/);
+  assert.doesNotMatch(w.told[0].text, /- m5: .*next comes online/);
+  // The run is over: after 90 s of a free bench the update and the tools go ahead.
+  w.find('m5').timed = undefined;
+  w.advance(30_000);
+  await r.tick();
+  assert.equal(w.calls.length, 1);
+  w.advance(61_000);
+  await r.tick();
+  assert.deepEqual(w.calls.map((c) => c.target), ['ben@biscuit', 'ben@m5']);
+  assert.deepEqual(w.toolCalls.map((c) => c.target), ['ben@biscuit', 'ben@m5']);
+  assert.equal(r.state.machines.m5.held, undefined);
+  assert.equal(w.told.length, 2);
+  assert.match(w.told[1].text, /Follow-up for portal c5a93e060: a machine that was offline or held back now settled\.\n- m5: updated\./);
+});
+
+test('w1861: a timed run that never lets go holds the update back 45 minutes at the most', async () => {
+  const w = world([mac('m5', { timed: 'a timed run on m5/slot2 (w1780)' })]);
+  const r = w.make();
+  w.verify();
+  await r.tick();
+  assert.equal(w.calls.length, 0);
+  assert.match(r.state.machines.m5.note!, /by 18:45Z at the latest/);
+  w.advance(44 * 60_000);
+  await r.tick();
+  assert.equal(w.calls.length, 0);
+  w.advance(60_000);
+  await r.tick();
+  assert.equal(w.calls.length, 1, 'past 45 minutes it goes ahead');
+  assert.equal(w.toolCalls.length, 1, 'its tools too, in the same pass');
+});
+
+test('w1861: a machine already on the commit gets its tools only once a timed run there is over', async () => {
+  const w = world([mac('m5', { daemon: NEW.slice(0, 9), timed: 'a timed run on m5/slot2 (w1780)' })]);
+  const r = w.make();
+  w.verify();
+  await r.tick();
+  assert.equal(r.state.machines.m5.status, 'current');
+  assert.equal(w.toolCalls.length, 0, 'no tools run beside the timed run');
+  assert.equal(r.state.machines.m5.held, true);
+  w.advance(11 * 60_000);
+  await r.tick();
+  assert.match(w.told[0].text, /- m5: already on the deployed commit \(c5a93e060\); its daemon was left alone\. Its agent tools wait: held back for a timed run on m5\/slot2/);
+  w.find('m5').timed = undefined;
+  w.advance(91_000);
+  await r.tick();
+  assert.equal(w.toolCalls.length, 1);
+  assert.equal(r.state.machines.m5.held, undefined);
+  assert.equal(r.state.machines.m5.note, undefined);
+  assert.match(w.told[1].text, /- m5: already on the deployed commit .*Agent tools: ff-agents 1\.29\.19 → 1\.29\.20/);
+});
+
+test("w1861: the timed run is read from the daemon's bench state: exclusive only, fresh stats only", () => {
+  const now = Date.parse('2026-10-23T13:20:00Z');
+  const glance = { ticket: 't00000042', mode: 'exclusive' as const, what: 'probe on round 6', host: 'm5', sandbox: 'slot2', requests: ['w1780'], session: '0669c6ea' };
+  const exclusive: BenchState = { mode: 'exclusive', running: [glance], runningCount: 1, waiting: 0 };
+  assert.equal(timedRunText(exclusive, now - 10_000, now), 'a timed run on m5/slot2 (w1780)');
+  assert.equal(timedRunText(exclusive, now - 4 * 60_000, now), undefined, 'stale stats say nothing');
+  assert.equal(timedRunText({ mode: 'shared', running: [{ ...glance, mode: 'shared' }], runningCount: 1, waiting: 0 }, now, now), undefined, 'shared work never holds an update');
+  assert.equal(timedRunText({ mode: 'free', running: [], runningCount: 0, waiting: 0 }, now, now), undefined);
+  assert.equal(timedRunText(undefined, now, now), undefined);
+  assert.match(timedRunText({ mode: 'exclusive', running: [], runningCount: 0, waiting: 0, legacy: { owner: 'm5 pid 4242 ben probe', since: '' } }, now, now)!, /an old-style timed run \(m5 pid 4242/);
 });
