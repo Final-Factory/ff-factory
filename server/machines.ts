@@ -1860,6 +1860,8 @@ export class MachineManager {
   onLiveStaged?: (machineId: string, msg: Extract<FromDaemon, { type: 'live_staged' }>) => void;
   /** A daemon that streams live views said hello (w1509): the views it runs now, or undefined from an older one. */
   onLiveHello?: (machineId: string, running: DaemonLiveView[] | undefined) => void;
+  /** A daemon's hello has been handled (its resumes started, w1944): the capacity ping hears its room. */
+  onOnline?: (machineId: string) => void;
   private readonly liveWss = new WebSocketServer({ noServer: true, maxPayload: 8 * 1024 * 1024, perMessageDeflate: false });
 
   /** The token check of an upgrade from a daemon (lockout, dry run); the socket is answered when it fails. */
@@ -2119,6 +2121,8 @@ export class MachineManager {
           this.resumeCutOff(id, live);
           // w1135: messages queued while it was offline are placed and delivered now, not at the next half-minute pass.
           this.sessions.drain();
+          // w1944: its sandboxes are room again (after a portal restart every daemon says hello): queued work hears of it.
+          this.onOnline?.(id);
         }, RESUME_DELAY_MS.value).unref();
         return;
       }

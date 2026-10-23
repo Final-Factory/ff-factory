@@ -28,7 +28,7 @@ import { LIVE_HOLD_MS } from './placeAgain.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { startTestMachine, type TestMachineOptions } from './testMachine.ts';
 import { afterMergeReason } from './ledgerRules.ts';
-import { timedLine, type Computer } from './placement.ts';
+import { timedLine, type Computer, type RoomNow } from './placement.ts';
 import { TOOL_MANIFEST, deferredToolsLine, toolsOf } from './toolManifest.ts';
 import { buildOptions } from './launch.ts';
 
@@ -1873,7 +1873,9 @@ test("w527: a standing agent's delegation flows into the ledger and onto a worke
   await until("Ben's orchestrator hears it", () => heard(chat(BEN).info.id, '[auto-delegation]').some((e) => e.text.includes('filed w1')));
   assert.match((await call(chat(BEN).info, 'list_work', {})).text, /w1/);
 
-  // Queued is capacity only (w643): while pc has room, queueing it is refused.
+  // Queued is capacity only (w643): while pc has room, queueing it is refused. pc is a Windows computer here (server/testMachine.ts
+  // makes it a Mac off Windows), since a Mac refuses the multiplayer client an MP scenario starts (w1944).
+  store.putMachine({ ...store.machines.get('pc')!, platform: 'win32' });
   const refused = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'queue', note: 'every place is busy' });
   assert.equal(refused.isError, true);
   assert.match(refused.text, /queue is for capacity only, and pc has room for w1 now: start it there/);
@@ -2263,6 +2265,8 @@ test('w643: Queued only on a real capacity shortage: queue needs no room on a co
   assert.equal((await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'queue', note: 'later' })).isError, true);
   // The M5 frees and nobody starts w1: after the grace it is flagged, once, to the dispatcher and in its log.
   agentsRoom(agents, ['m5']);
+  // w1944: the room is read as it frees (the blocker watch reads it each minute), so it has stood when the clock moves on.
+  assert.match((await call(dispatcher().info, 'list_work', { id: 'w1' })).text, /Queued \(queued for capacity on m5; m5 has room since 0 min ago: the capacity ping brings it to the dispatcher\)/);
   const later = Date.now() + 11 * 60_000;
   (o as unknown as { now: () => Date }).now = () => new Date(later);
   assert.match((await call(dispatcher().info, 'list_work', { id: 'w1' })).text, /Queued \[WRONG: m5 has room\]/);
@@ -4783,4 +4787,95 @@ test('w1872: w1789 as it happened: a timed leg and a Queued timed request alread
   await until('the dispatcher hears it', () => heard(dispatcher().info.id, '[ledger] Re-placed timed work').length > 0);
   assert.match(heard(dispatcher().info.id, '[ledger] Re-placed timed work')[0].text, /"Have the dispatcher replace anything waiting on timing on m5"\): w1 "Cut UI main-thread cost on the Just Play save"; w2 "Perf A\/B of the belt renderer"\. Start each on the first computer "Next timed work" names with room/);
   assert.deepEqual(o.replaceNoTimedWaits(), [], 'nothing left on m5: no second notice');
+});
+
+// ---------------------------------------------------------------- w1944: queued work and the room it can really use
+
+/** A queued request, as decide_work queue leaves it. */
+function queuedItem(id: string, title: string, priority: WorkItem['priority'], at = T0): WorkItem {
+  return { id, title, brief: 'Do it.', priority, keys: [], requestedBy: LOTH, requesters: [LOTH], humanAsked: true, status: 'queued', queuedFor: { at }, createdAt: at, updatedAt: at, sessionIds: [], overlaps: [], asks: 0, log: [] };
+}
+
+test('w1944 as it happened: an MP scenario fix is not WRONG beside a free Mac, says why, and may be queued; ordinary work there is flagged, and only once its room has stood', async (t) => {
+  const { store, agents, o, dispatcher, call, heard } = setup(t);
+  store.putWork(queuedItem('w1', 'Nightly: fix the MP-W1020-camps-settle-join desync', 'urgent'));
+  store.putWork(queuedItem('w2', 'Blueprint paste keeps the filter', 'normal'));
+  const f: RoomNow = { game: ['m5'], agent: ['m5'], held: [], fit: { m5: { platform: 'darwin', noTimedRuns: "Ben's own Mac" } }, since: { 'game:m5': Date.parse(T0) + 10 * 60_000 } };
+  agents.roomNow = () => f.game;
+  agents.roomFacts = () => f;
+  // 22:13:31: the m5 freed a minute ago. Nothing is WRONG yet: the capacity ping brings it.
+  const clock = { at: Date.parse(T0) + 11 * 60_000 };
+  (o as unknown as { now: () => Date }).now = () => new Date(clock.at);
+  assert.deepEqual(o.flagQueuedWithRoom(agents.roomFacts()), [], 'room younger than ROOM_STAND_MS');
+  assert.match((await call(dispatcher().info, 'list_work', { id: 'w2' })).text, /Queued \(queued for capacity; m5 has room since 1 min ago: the capacity ping brings it to the dispatcher\)/);
+  // Five minutes on: w2 is WRONG and flagged; w1 never is, and says why it waits.
+  clock.at += 5 * 60_000;
+  assert.deepEqual(o.flagQueuedWithRoom(agents.roomFacts()), ['w2']);
+  await until('the dispatcher hears it', () => heard(dispatcher().info.id, '[ledger] WRONG STATE').length > 0);
+  assert.doesNotMatch(heard(dispatcher().info.id, '[ledger] WRONG STATE')[0].text, /w1 "/);
+  const w1 = (await call(dispatcher().info, 'list_work', { id: 'w1' })).text;
+  assert.doesNotMatch(w1, /WRONG/);
+  assert.match(w1, /Queued \(queued for capacity: no computer that could take it has room; m5 has room but cannot take it: m5 is a Mac, which refuses the multiplayer client its MP scenario starts \(w665\)\)/);
+  // decide_work queue takes it while only the Mac has room, and says so; it refuses ordinary work.
+  store.putWork({ ...store.work.get('w1')!, status: 'new', queuedFor: undefined });
+  store.putWork({ ...store.work.get('w2')!, status: 'new', queuedFor: undefined });
+  const ok = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'queue', note: 'only the m5 is free' });
+  assert.equal(ok.isError, false, ok.text);
+  assert.match(store.work.get('w1')!.log.at(-1)!, /m5 has room but cannot take it: m5 is a Mac/);
+  assert.equal((await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'queue', note: 'later' })).isError, true);
+});
+
+test('w1944: the capacity ping names the room a queued request cannot use, lets urgent work that fits past the hourly cap, and is never held past two minutes by a stream of events', async (t) => {
+  const { store, agents, o, dispatcher, heard } = setup(t);
+  store.putWork(queuedItem('w1', 'Nightly: fix MP-tutorial-e2e-loth', 'urgent'));
+  store.putWork(queuedItem('w2', 'Blueprint paste keeps the filter', 'normal'));
+  const f: RoomNow = { game: ['m5'], agent: ['m5'], held: [], fit: { m5: { platform: 'darwin' }, biscuit: { platform: 'win32' } } };
+  agents.roomNow = () => f.game;
+  agents.roomFacts = () => f;
+  const clock = { at: Date.parse(T0) };
+  (o as unknown as { now: () => Date }).now = () => new Date(clock.at);
+  const tick = (ms: number) => {
+    clock.at += ms;
+    t.mock.timers.tick(ms);
+  };
+  const pings = () => heard(dispatcher().info.id, '[ledger] Capacity may have freed').map((e) => e.text);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  o.capacityMayHaveFreed('sandbox m5/slot3 released');
+  tick(30_000);
+  assert.equal(pings().length, 1);
+  assert.match(pings()[0], /fitting it, by priority, then oldest: w2 "Blueprint paste keeps the filter".*Queued with no room for them now: w1 \(m5 is a Mac, which refuses the multiplayer client its MP scenario starts \(w665\)\)\./);
+
+  // The hourly cap is spent. biscuit (Windows) frees: the urgent MP fix fits it, so the ping goes at the gap, not in an hour.
+  const wakes = (o as unknown as { capacityWakes: number[] }).capacityWakes;
+  wakes.splice(0, wakes.length, ...Array.from({ length: 20 }, (_, i) => clock.at - 50 * 60_000 + i * 60_000));
+  f.game = ['m5', 'biscuit'];
+  f.agent = ['m5', 'biscuit'];
+  tick(3 * 60_000);
+  o.capacityMayHaveFreed('sandbox biscuit/slot1 released');
+  tick(30_000);
+  assert.equal(pings().length, 2, 'urgent work that fits is not held by the hourly cap');
+  assert.match(pings()[1], /fitting it, by priority, then oldest: w1 "Nightly: fix MP-tutorial-e2e-loth" \(Lothsahn, urgent\); w2/);
+
+  // Normal work alone waits for the cap, as before.
+  store.putWork({ ...store.work.get('w1')!, status: 'active', queuedFor: undefined });
+  wakes.splice(0, wakes.length, ...Array.from({ length: 20 }, (_, i) => clock.at - 50 * 60_000 + i * 60_000));
+  tick(3 * 60_000);
+  o.capacityMayHaveFreed('worker x stopped');
+  tick(30_000);
+  assert.equal(pings().length, 2, 'the hourly cap holds normal work');
+  // Drop the ping the cap holds, and start the next one afresh.
+  clearTimeout((o as unknown as { capacityTimer?: NodeJS.Timeout }).capacityTimer);
+  wakes.splice(0, wakes.length);
+  (o as unknown as { capacityFirstAt?: number }).capacityFirstAt = undefined;
+
+  // A worker finishes a turn every 20 s for 3 minutes: the quiet spell never comes, yet the ping goes two minutes after the first.
+  tick(3 * 60_000);
+  for (let i = 0; i < 6; i++) {
+    o.capacityMayHaveFreed(`worker w${i} finished a turn`);
+    tick(20_000);
+  }
+  // The quiet spell armed by the event 20 s ago would fire in 10 s more; the first event is two minutes old, so it went now.
+  assert.equal(pings().length, 3, 'the first event was two minutes old: it went while events still came');
+  assert.match(pings()[2], /Capacity may have freed \(worker w1 finished a turn, 2 min ago; .*worker w5 finished a turn, 0 min ago\)/);
+  t.mock.timers.reset();
 });
