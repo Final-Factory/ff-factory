@@ -693,6 +693,14 @@ job, no worker.
   the new daemon adopts them (w605). Before each machine the rollout counts its live agents; after it, the daemon's hello
   says which it took back (`MachineManager.liveAtHello`). The report gives "N of M adopted" and names any that ended (the
   portal resumes a mid-turn one; an idle one comes back on its next message).
+- **Not beside a timed run** (w1861). On 2026-10-23 m5's update and tools job (13:19:51 to 13:22:54 UTC) ran inside a timed A/B
+  leg of w1780 (round 6 of 8, the one whose `on` run read +4.9%), adding the bundle's transfer, the daemon restart and a
+  registerAgents.sh run to the machine it was timing. So while a machine's daemon says (its stats' `bench`, mode `exclusive`,
+  stats under 3 minutes old) that a timed run holds its bench queue, its update and its tools publish wait
+  (`MachineRollout.heldBack`), until its bench has been free for 90 s (`benchQuietMs`: `probe_ab.sh` lets go for seconds
+  between its legs) and for 45 minutes at the most (`benchWaitMs`), then go ahead. The machine counts as not settled
+  meanwhile; the report names the run it waits for and a follow-up says when it was updated. Shared work (builds, compiles)
+  holds nothing back.
 - **Which machines.** Worker-root machines (a record with a root folder), one at a time. The portal's own host is skipped (the
   portal runs its daemon itself) and so is a machine deployed over ssh (the portal redeploys it once idle, as before). A daemon
   already on the deployed commit is left alone.
