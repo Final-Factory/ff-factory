@@ -91,16 +91,36 @@ function tailFileText(gzSize: number, buf: Buffer): string {
 }
 
 function readTailFile(gzPath: string, lines: number): { text: string; whole: boolean } | undefined {
+  // Its header, then only as much of its end as `lines` needs, read backwards in growing chunks (w2026: the first start of 43c933439
+  // read every 8 MB tail file whole, twice per session, on each daemon's connect: an 18 s stall in readFileSync).
+  let fd: number | undefined;
   try {
-    const text = fs.readFileSync(`${gzPath}.tail`, 'utf8');
-    const nl = text.indexOf('\n');
-    const head = JSON.parse(text.slice(0, nl)) as { of?: number; whole?: boolean };
+    fd = fs.openSync(`${gzPath}.tail`, 'r');
+    const size = fs.fstatSync(fd).size;
+    const first = Buffer.alloc(Math.min(size, 4096));
+    fs.readSync(fd, first, 0, first.length, 0);
+    const nl = first.indexOf(0x0a);
+    if (nl < 0) return undefined;
+    const head = JSON.parse(first.toString('utf8', 0, nl)) as { of?: number; whole?: boolean };
     if (head.of !== fs.statSync(gzPath).size) return undefined;
-    const body = text.slice(nl + 1);
-    if (head.whole) return { text: body, whole: true };
-    return completeLines(Buffer.from(`\n${body}`)) >= lines ? { text: body, whole: false } : undefined;
+    const bodyStart = nl + 1;
+    for (let chunk = TAIL_CHUNK; ; chunk *= 2) {
+      const from = Math.max(bodyStart, size - chunk);
+      const buf = Buffer.alloc(size - from);
+      fs.readSync(fd, buf, 0, buf.length, from);
+      if (from === bodyStart) {
+        // all of the body
+        const body = buf.toString('utf8');
+        if (head.whole) return { text: body, whole: true };
+        return completeLines(Buffer.concat([Buffer.from('\n'), buf])) >= lines ? { text: body, whole: false } : undefined;
+      }
+      // a piece of the end: the lines after its first newline are whole
+      if (completeLines(buf) >= lines) return { text: buf.toString('utf8', buf.indexOf(0x0a) + 1), whole: false };
+    }
   } catch {
     return undefined;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
   }
 }
 

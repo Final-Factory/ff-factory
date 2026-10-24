@@ -179,4 +179,19 @@ test('w2026: connects after a start unzip one compressed transcript at a time, b
   const head = JSON.parse(fs.readFileSync(path.join(tr, 'a.jsonl.gz.tail'), 'utf8').split('\n')[0]);
   assert.equal(head.whole, false);
   assert.equal(new Store(dir).lastSeqNow('a'), 3000, 'the next start reads the tail file');
+  // and reads only its header and its end, never the whole 8 MB (43c933439's first start: 18 s of readFileSync)
+  const origRead = fs.readFileSync;
+  let tailReads = 0;
+  (fs as { readFileSync: unknown }).readFileSync = (f: fs.PathOrFileDescriptor, ...rest: unknown[]) => {
+    if (String(f).endsWith('.tail')) tailReads++;
+    return (origRead as (...x: unknown[]) => unknown)(f, ...rest);
+  };
+  try {
+    const next = new Store(dir);
+    assert.equal(next.lastSeqNow('b'), 3000);
+    assert.deepEqual(next.readTranscript('c', 3).map((e) => e.seq), [2998, 2999, 3000]);
+  } finally {
+    (fs as { readFileSync: unknown }).readFileSync = origRead;
+  }
+  assert.equal(tailReads, 0);
 });
