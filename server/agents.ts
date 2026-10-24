@@ -2649,6 +2649,8 @@ export class Agents {
 
   /** w2046: resumes being moved to a computer with room: session id to the messages that go with it and where it goes. */
   private readonly roomMoving = new Map<string, { to: string; texts: string[] }>();
+  /** w2046: the last stay or wait reason journalled for a worker whose resume did not move, so each is logged once. */
+  private readonly roomKept = new Map<string, string>();
 
   /**
    * SessionManager.roomMove (w2046, server/resumeMove.ts): a message that waits only for room on its worker's own computer.
@@ -2666,8 +2668,14 @@ export class Agents {
     if (now - (Date.parse(q.at) || now) < MOVE_AFTER_MS || info.pendingPermissions.length || isMidTurn(info)) return undefined;
     const reqs = this.openWorkOf(info);
     const d = moveDecision(this.moveFacts(info, reqs));
-    if ('stay' in d) return stayLine(hold, d.stay);
-    if ('none' in d) return `${hold}; ${NONE_MARK}: ${d.none}`;
+    if (!('move' in d)) {
+      const [kept, why] = 'stay' in d ? [stayLine(hold, d.stay), `stays: ${d.stay}`] : [`${hold}; ${NONE_MARK}: ${d.none}`, `waits: ${d.none}`];
+      // Journalled once per worker and reason, so a wait that did not move can be checked afterwards (this runs every drain).
+      if (this.roomKept.get(info.id) !== why) console.log(`room move: worker ${info.id} on ${info.machineId}/${info.machineSandbox} (${reqs.map((w) => w.id).join(', ')}) ${why}`);
+      this.roomKept.set(info.id, why);
+      return kept;
+    }
+    this.roomKept.delete(info.id);
     const entry = { to: d.move.to, texts: [q.text] };
     this.roomMoving.set(info.id, entry);
     const waited = Math.round((now - (Date.parse(q.at) || now)) / 1000);
