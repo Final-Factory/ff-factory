@@ -557,12 +557,28 @@ export class TimedRunner {
           const s = await ticket.wait(Infinity, (line) => this.status(o.id, 'waiting', `turn ${turn}: ${line}`.slice(0, 280)));
           if (s.kind !== 'granted') throw new Error(`the bench queue did not grant the ticket: ${s.line}`);
           // The turn's quiet machine (BenchTurn) asks the other players to quit; their leases end with them.
-          for (let waited = 0; !(pair = borrowPair(slotsRoot, w.sandboxIds(), x.buildDirs.length, { ownerPid: owner.pid, run: o.id, session: o.session })); waited++) {
+          // A pair whose player folder cannot be replaced (a player still runs from it, which Windows refuses) is given
+          // back and skipped for this turn; the others are tried, then the busy ones again, for 5 minutes.
+          const busy = new Set<string>();
+          for (let waited = 0; ; waited++) {
+            pair = borrowPair(slotsRoot, w.sandboxIds().filter((id) => !busy.has(id)), x.buildDirs.length, { ownerPid: owner.pid, run: o.id, session: o.session });
+            if (pair) {
+              try {
+                for (let i = 0; i < x.buildDirs.length; i++) linkInto(x.buildDirs[i], pair.slots[i], x.buildFiles.get(i)!, fs.readFileSync(path.join(x.buildDirs[i], '.timed-build'), 'utf8').trim(), o.id);
+                break;
+              } catch (e) {
+                for (const f of pair.leases) fs.rmSync(f, { force: true });
+                busy.add(pair.sandbox);
+                this.status(o.id, 'waiting', `turn ${turn}: ${pair.sandbox}'s player slots are in use (${(e as Error).message.slice(0, 120)}); trying another`);
+                pair = undefined;
+                continue;
+              }
+            }
             if (waited * x.poll > 5 * 60_000) throw new Error(`no sandbox's player-slot pair here came free within 5 minutes of the turn (${w.sandboxIds().join(', ')})`);
             if (waited % 4 === 0) this.status(o.id, 'waiting', `turn ${turn}: holds ${s.ticket}; waiting for a free player-slot pair`);
+            busy.clear();
             await sleep(x.poll);
           }
-          for (let i = 0; i < x.buildDirs.length; i++) linkInto(x.buildDirs[i], pair.slots[i], x.buildFiles.get(i)!, fs.readFileSync(path.join(x.buildDirs[i], '.timed-build'), 'utf8').trim(), o.id);
           const start = Date.now();
           let ran = 0;
           this.status(o.id, 'running', `turn ${turn}: holds the exclusive bench ticket ${s.ticket}, legs in ${pair.sandbox}'s player slots: ${order.length - next} legs left`);
