@@ -19,7 +19,7 @@ import { agentState, agentStateText, holdsItsPlace, holdsSandbox, sortAgents, so
 import { idleClosedPart } from './liveIdle.ts';
 import { HOLD_PLACE_MS, LIVE_HOLD_MS, PlaceAgain, RELEASE_AFTER_MS, RELEASE_WAKE_NOTE, handOverBranch, occupies, releasedOn } from './placeAgain.ts';
 import { agentQueueAll, agentQueueFacts, editorSlotRefusal, queueWaitsAll } from '../shared/queueWaits.ts';
-import { WORK_LIVE_LABEL, WORK_LIVE_STATES, asksAPerson, benchWaitOf, lastOpenLine, liveCounts, otherWorkWait, outsideDeclared, outsideWaitOf, ownWorkWait, personWaitIn, reportWaitKey, servedBy, workLiveAll, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
+import { WORK_LIVE_LABEL, WORK_LIVE_STATES, asksAPerson, benchWaitOf, lastOpenLine, liveCounts, otherWorkWait, outsideDeclared, outsideWaitOf, ownWorkWait, noTimedWaitOf, personWaitIn, reportWaitKey, servedBy, workLiveAll, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
 import { reportTail, type NeedsYouWait } from './needsYou.ts';
 import { stillOpenIn } from './ledgerRules.ts';
 import { inlineReviewMedia, outsideReview, publishedCopy, reviewRootOf } from './reviewMedia.ts';
@@ -225,6 +225,14 @@ const BLOCKER_SHAPE = z.object({
  */
 export const ownWorkNotice = (id: string, line: string) =>
   `[FF Factory] Your report says ${id} waits on the orchestrator: "${line.slice(0, 200)}". Two-machine and pair checks, builds, test runs and your own CI are your own work (w1841): nobody else runs them, so run it now. One that needs two or more computers at once: request_pair, then end your turn. If only a person can move it on, waiting_on_person; another request or pull request, blocked_on.`;
+
+/**
+ * What a worker that ended its turn waiting on a computer that takes no timed runs for timed work is told (w1996; w1789:
+ * "waiting for a sandbox on m5 for the timed runs"): that wait never ends, so it places the timing by "Next timed work"
+ * (w1872), smallest computer first, now.
+ */
+export const noTimedWaitNotice = (id: string, line: string, machine: string, why: string, takes: readonly string[]) =>
+  `[FF Factory] Your report says ${id} waits on ${machine} for timed work: "${line.slice(0, 200)}". ${machine} takes no timed or exclusive-lock work (${why}; w1861), so that wait never ends. Place the timing by "Next timed work" (w1872), smallest computer first: ${takes.length ? takes.join(' > ') : 'none takes it now'}. Call timed_place now: a Windows player A/B goes to timed_run on a small computer while you carry on here; anything else, via "leg". If none of them can do it, waiting_on_person for an operator.`;
 
 const REQUEST_PAIR_TOOL = `Ask for a check that needs several computers at once (w1945): a two-machine multiplayer or determinism check, a host and its clients. It files ONE pair request whose legs the dispatcher starts together, a new worker on each computer, as soon as that many computers have room at once (never one leg at a time), and Blocks your request on its report, as blocked_on with reports does: commit and push, then end your turn with a "wNNN: still open: blocked on <the pair request>" line. Your sandbox is released at once for other work while you wait, and the host leg's result (a line "For wNNN:") resumes you. what: one line; brief: what the legs run (the branch or commit, the scenario, what passes, where the result goes), since each leg is a new worker; legs: 2 by default; cross_os only for the reasons it names (w1692; without it no leg goes on a Mac, and with it a Mac only hosts); timed when a leg takes timing measurements (never on the m5). One open pair run per request: asked again, you wait on the one there is.`;
 
@@ -2085,6 +2093,8 @@ export class Agents {
     this.orchestrators.needsYouAll(this.personWaits({ worker: s.info.id, report: text }));
     // w1841 (d): a turn that ends waiting on the orchestrator for the worker's own work is told at once that it is its own.
     this.ownWorkNudge(s.info, text);
+    // w1996: a turn that ends waiting on a computer that takes no timed runs (m5) for timed work is re-placed at once.
+    this.noTimedWaitNudge(s.info, text);
     // The nightly merge review's jobs (w905): the portal files what its worker's message ends with, whoever started the turn.
     this.nightlyWorkerTurn?.(this.workIdsOf(s.info), text);
     if (from !== 'orchestrator') return;
@@ -2121,6 +2131,34 @@ export class Agents {
         this.orchestrators.ledgerEdit(id, `worker ${info.id} was told its wait on the orchestrator ("${line.slice(0, 120)}") is its own work (w1841)`, () => undefined);
       } catch (e) {
         console.warn(`own-work nudge: could not tell ${info.id}: ${(e as Error).message}`);
+      }
+    }
+  }
+
+  /** w1996: the waits on a computer that takes no timed runs a worker was told about ("<session>:<request>:<computer>"). */
+  private readonly noTimedTold = new Set<string>();
+
+  /**
+   * w1996 (w1789: d80ca173 stopped with "waiting for a sandbox on m5 for the timed runs"): a still-open line waiting on a
+   * computer that takes no timed runs for timed work is a wait nothing ends. The worker is told at once, once per request and
+   * computer, where "Next timed work" places it; the request's log says so.
+   */
+  private noTimedWaitNudge(info: SessionInfo, text: string) {
+    const open = stillOpenIn(text);
+    if (!open.size) return;
+    let facts: ReturnType<typeof timedFacts> | undefined;
+    for (const [id, line] of open) {
+      facts ??= timedFacts(this.places(), this.placement(), 'timed');
+      const machine = noTimedWaitOf(line, facts.noTimed);
+      if (!machine) continue;
+      const key = `${info.id}:${id}:${machine}`;
+      if (this.noTimedTold.has(key)) continue;
+      this.noTimedTold.add(key);
+      try {
+        this.sessions.send(info.id, noTimedWaitNotice(id, line, machine, facts.noTimed[machine], facts.takes), 'system');
+        this.orchestrators.ledgerEdit(id, `worker ${info.id} waited on ${machine} for timed work ("${line.slice(0, 120)}"), which takes none; told to place it by "Next timed work": ${facts.takes.join(' > ') || 'none'} (w1996)`, () => undefined);
+      } catch (e) {
+        console.warn(`no-timed wait nudge: could not tell ${info.id}: ${(e as Error).message}`);
       }
     }
   }
