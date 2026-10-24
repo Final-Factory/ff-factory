@@ -103,7 +103,7 @@ test('w1996: a borrowed player-slot pair is one no live lease holds; it is lease
   assert.equal(slotFree(path.join(root, 'slot2-0'), alive), true);
   assert.equal(slotFree(path.join(root, 'slot3-0'), alive), false);
   assert.equal(slotFree(path.join(root, 'slot9-0'), alive), true, 'a slot never used is free');
-  const p = borrowPair(root, ['slot1', 'slot3', 'slot2'], 2, { ownerPid: 4242, run: 'tr_0123456789', session: 'sess-1' }, alive)!;
+  const p = borrowPair(root, ['slot1', 'slot3', 'slot2'], 2, { ownerPid: 4242, run: 'run one', session: 'sess-1' }, alive)!;
   assert.equal(p.sandbox, 'slot2');
   assert.equal(p.leases.length, 2);
   const l = JSON.parse(fs.readFileSync(p.leases[0], 'utf8'));
@@ -123,13 +123,13 @@ test('w1996: a borrowed player-slot pair is one no live lease holds; it is lease
   fs.writeFileSync(path.join(slot, 'player', 'old.txt'), 'the sandbox build');
   fs.writeFileSync(path.join(slot, 'slot.json'), JSON.stringify({ sha: 'abc', fingerprint: 'real', state: 'ready' }));
   const files = [{ path: 'finalfactory.exe' }, { path: 'finalfactory_Data/a.dll' }];
-  assert.equal(linkInto(src, slot, files, 'key1', 'tr_0123456789'), 'linked');
+  assert.equal(linkInto(src, slot, files, 'key1', 'run one'), 'linked');
   assert.equal(fs.existsSync(path.join(slot, 'player', 'old.txt')), false);
   assert.equal(fs.readFileSync(path.join(slot, 'player', 'finalfactory_Data', 'a.dll'), 'utf8'), 'dll');
   const m = JSON.parse(fs.readFileSync(path.join(slot, 'slot.json'), 'utf8'));
   assert.equal(m.fingerprint, 'timed-run:key1');
   assert.equal(m.state, 'ready');
-  assert.equal(linkInto(src, slot, files, 'key1', 'tr_0123456789'), 'kept', 'the next turn of the run reuses it');
+  assert.equal(linkInto(src, slot, files, 'key1', 'run one'), 'kept', 'the next turn of the run reuses it');
 });
 
 /** A queue ticket that is granted at once and can be revoked by the test. */

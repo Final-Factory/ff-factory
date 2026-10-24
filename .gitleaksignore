@@ -17,3 +17,6 @@ deploy/vm/guest/units/fff-portal.service:generic-api-key:40
 fc18f2d37ad0b8bf5d4d5f8b6b9e1e127d9b294f:server/githubApps.test.ts:generic-api-key:282
 fc18f2d37ad0b8bf5d4d5f8b6b9e1e127d9b294f:server/githubApps.test.ts:generic-api-key:285
 fc18f2d37ad0b8bf5d4d5f8b6b9e1e127d9b294f:server/githubApps.test.ts:generic-api-key:286
+# A fake timed-run id ('tr_' and digits) passed to linkInto in the w1996 test; a plain word in the next commit.
+6f515dba68dc556e1cb3ffd01b1f7b64b459370c:server/w1996SmallTiming.test.ts:generic-api-key:126
+6f515dba68dc556e1cb3ffd01b1f7b64b459370c:server/w1996SmallTiming.test.ts:generic-api-key:132
