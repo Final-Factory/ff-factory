@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { DEFAULT_CLEANUP, HOST_GUARD_DEFAULTS, DEFAULT_USAGE_POLL_MINUTES, LOOP_GUARD_RANGE, ROOT, VAULT_ENTRY_NAME, VAULT_PINNED_PREFIX, VOICE_DEFAULTS, pinnedVaultEntry, type ClaudeAccount, type Config, type IntakeConfig } from './config.ts';
+import { DEFAULT_CLEANUP, DEFAULT_WORKER_EFFORT, HOST_GUARD_DEFAULTS, DEFAULT_USAGE_POLL_MINUTES, LOOP_GUARD_RANGE, ROOT, VAULT_ENTRY_NAME, VAULT_PINNED_PREFIX, VOICE_DEFAULTS, pinnedVaultEntry, type ClaudeAccount, type Config, type IntakeConfig } from './config.ts';
 import { SECRET_KEYS, maskSecret } from './secrets.ts';
 import { FFBOX_HASH_FILE, ffboxTokenHash, secretsDirOf, writeFfboxTokenHash } from './configMigration.ts';
 import { vaultContext } from './vault.ts';
@@ -14,6 +14,9 @@ import { DEV_DEFAULTS, type DevRequestsConfig } from './devRequests.ts';
 import { STALE_OUTPUT_DEFAULTS, staleOutputSettings, type StaleOutputSettings } from './staleOutput.ts';
 import { poolLimits, poolSettingProblem, type PoolConfigKey } from './tokenPool.ts';
 import { AUTO_COMPACT_LIMITS } from './autoCompact.ts';
+
+/** The efforts worker.effort takes (w2000, lothsahn's brief: "validated to low, medium, high or max"). */
+export const WORKER_EFFORTS = ['low', 'medium', 'high', 'max'] as const;
 
 /**
  * The config.json keys an agent may change (the set_app_config tool). Only cosmetic ones, plus the public
@@ -137,6 +140,9 @@ export const SETTABLE_KEYS = [
   'worker.compactPilotPercent',
   // The share of workers that write terse prose between tool calls (w1480, server/terseProse.ts).
   'worker.terseProsePilotPercent',
+  // Workers' reasoning effort when start_agent names none (w2000, docs/orchestrators.md "A worker's effort"): low, medium, high or
+  // max; null goes back to high. It is the session's --effort flag, which beats the repo's settings.json modelSettings.
+  'worker.effort',
   // The orchestrators' loop guards (w571, server/orchestrators.ts loopGuards): budgets a person's own message starts again.
   'orchestrator.filingsPerMessage',
   'orchestrator.followUpsPerMessage',
@@ -567,6 +573,11 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       if (!Number.isInteger(n) || n < 0 || n > 100) throw new Error(`${key} is a whole number from 0 to 100`);
       return n;
     }
+    case 'worker.effort': {
+      const e = String(value).trim();
+      if (!WORKER_EFFORTS.includes(e as (typeof WORKER_EFFORTS)[number])) throw new Error(`worker.effort is one of ${WORKER_EFFORTS.join(', ')}`);
+      return e;
+    }
     case 'orchestrator.compactAtTurnUsd': {
       const n = Number(value);
       if (!Number.isFinite(n) || (n !== 0 && (n < AUTO_COMPACT_LIMITS.minTurnUsd || n > AUTO_COMPACT_LIMITS.maxTurnUsd))) throw new Error(`orchestrator.compactAtTurnUsd is 0 (off) or a cost in USD from ${AUTO_COMPACT_LIMITS.minTurnUsd} to ${AUTO_COMPACT_LIMITS.maxTurnUsd}`);
@@ -986,6 +997,8 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   else if (key === 'hostGuard.cleanup.ageRules') cfg.hostGuard.cleanup.ageRules = (v as { path: string; olderThanDays: number }[] | undefined) ?? [];
   else if (key === 'orchestrator.compactAtTokens') cfg.orchestrator = { ...cfg.orchestrator, compactAtTokens: v as number | undefined };
   else if (key === 'worker.compactAtTokens' || key === 'worker.compactBeforeWaitTokens' || key === 'worker.compactPilotPercent' || key === 'worker.terseProsePilotPercent') cfg.worker = { ...cfg.worker, [key.slice('worker.'.length)]: v as number | undefined };
+  // Live: each worker's launch spec reads it when its session starts (agents.ts machineSandboxSpec, standing.ts).
+  else if (key === 'worker.effort') cfg.worker = { ...cfg.worker, effort: (v as Config['worker']['effort'] | undefined) ?? DEFAULT_WORKER_EFFORT };
   else if (key === 'orchestrator.compactAtTurnUsd') cfg.orchestrator = { ...cfg.orchestrator, compactAtTurnUsd: v as number | undefined };
   // Live: the automatic compaction reads them at each check (autoCompactSettings).
   else if (key === 'orchestrator.compactIdleSeconds' || key === 'orchestrator.compactHardAtTokens') cfg.orchestrator = { ...cfg.orchestrator, [key.slice('orchestrator.'.length)]: v as number | undefined };
