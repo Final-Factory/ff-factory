@@ -230,6 +230,19 @@ So w1482 takes −3,884 tokens a call against main and −3,728 against the PRs 
 D4–D7 was −3.6k. A brief also carries 385 characters less (about −150 tokens, estimated at 2.58 characters a token), and the
 filed text (848 characters for w1481's) when the brief quotes it. The worker's own `read_rules` adds one deferred tool name.
 
+## The skill listing trimmed (w2002)
+
+lothsahn, 2026-10-24: "File the compaction pilot plus the base-context trim and noise fixes". A worker's `--settings`
+(`workerSettings` in server/agents.ts) hide the skills workers never invoke: `skillOverrides` "user-invocable-only" for each
+name in `WORKER_HIDDEN_SKILLS`, which keeps a person's `/name` working. Claude Code reads skillOverrides for bundled, user and
+synced skills and never for a plugin's (its `QDe`: `if(e.type!=="prompt"||e.source==="plugin")return"on"`, CLI 2.1.284), so a
+plugin goes by `enabledPlugins`: the marketing plugin is off unless the worker's title or one of its requests names marketing
+work (`MARKETING_WORK`). Invocations over beast's 361 worker sessions of 2026-10-10..24 (measured, Skill tool calls): publish-skills
+104, drive-game 35, unity-ui 23, determinism-audit 16, ci-release 13, evidence-gate 12, watch-video 9, deep-think 2, playtest 2,
+add-network-operation 1, speckit-specify 2, speckit-plan 1, claude-api 1; no other skill. A probe session's listing went from 18,098
+to 11,593 characters (46 to 32 skills; measured: the first message's `skill_listing` is written before the API call, so a probe
+needs no login).
+
 ## The decisions (ranked by tokens saved per risk; as audited)
 
 1. **D2, PowerShell off for workers** (−4.4k). `disallowedTools: [..., 'PowerShell']` in `machineSandboxSpec`, or

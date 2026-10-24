@@ -429,12 +429,36 @@ export const WORKER_HIDDEN_AGENTS = ['Explore', 'Plan', 'claude', 'statusline-se
 export const WORKER_DISABLED_PLUGINS = ['csharp-lsp@claude-plugins-official'] as const;
 
 /**
- * A worker process's own settings (--settings): the plugins it starts without, and, in the earlier-compaction pilot's arm
- * (w2002), the autoCompactWindow that makes Claude Code compact within a turn from the arm's threshold.
+ * Skills left out of a worker's skill listing, which every model call reads again (w2002, lothsahn: "File the compaction pilot
+ * plus the base-context trim and noise fixes"). Measured over beast's 361 worker sessions of 2026-10-10..24: none of these was
+ * invoked (claude-api once); the listing fell from 18,098 to 11,593 characters on a probe session. "user-invocable-only"
+ * hides a skill from the model and keeps a person's /name working. Claude Code applies skillOverrides to bundled, user and
+ * synced skills, never to a plugin's (its `QDe`: a plugin skill is always "on"); a plugin goes by enabledPlugins instead.
  */
-export function workerSettings(sessionId: string, cfg: Partial<Pick<Config, 'worker'>>): Record<string, unknown> {
+export const WORKER_HIDDEN_SKILLS = [
+  'dataviz', 'claude-api', 'update-config', 'keybindings-help', 'simplify', 'fewer-permission-prompts', 'loop', 'schedule', 'workflow-authoring',
+  'run', 'init', 'security-review', 'plugin-authoring', 'code-review', 'code-review-sonnet', 'unity-mcp-skill', 'therapy',
+] as const;
+
+/** The marketing plugin, which only marketing work uses (its 17 skills: footage, trailers, ads, the Steam page, outreach). */
+export const MARKETING_PLUGIN = 'ff-marketing@ff-marketing';
+
+/** Words of a request that may need the marketing plugin: its title or brief naming them keeps it in the worker's listing. */
+export const MARKETING_WORK = /\b(marketing|ff-marketing|trailers?|thumbnails?|ads?|ad[- ](cuts?|copy|campaigns?)|steam page|creator outreach|outreach|social clips?|announcements?|captions?)\b/i;
+
+/**
+ * A worker process's own settings (--settings): the plugins it starts without (the marketing plugin too unless its work
+ * is marketing), the skills hidden from its listing, and, in the earlier-compaction pilot's arm (w2002), the
+ * autoCompactWindow that makes Claude Code compact within a turn from the arm's threshold.
+ */
+export function workerSettings(sessionId: string, cfg: Partial<Pick<Config, 'worker'>>, marketing = false): Record<string, unknown> {
   const window = workerAutoCompactWindow(sessionId, cfg);
-  return { enabledPlugins: Object.fromEntries(WORKER_DISABLED_PLUGINS.map((p) => [p, false])), ...(window ? { autoCompactWindow: window } : {}) };
+  const off = [...WORKER_DISABLED_PLUGINS, ...(marketing ? [] : [MARKETING_PLUGIN])];
+  return {
+    enabledPlugins: Object.fromEntries(off.map((p) => [p, false])),
+    skillOverrides: Object.fromEntries(WORKER_HIDDEN_SKILLS.map((k) => [k, 'user-invocable-only'])),
+    ...(window ? { autoCompactWindow: window } : {}),
+  };
 }
 
 /** The gates a worker may give up its sandbox for (w890): not a time, a machine, a usage limit or a lock; CI has its own rule (w846). */
@@ -2199,6 +2223,12 @@ export class Agents {
   nightlyWorkerTurn?: (workIds: readonly string[], text: string) => void;
 
   /** The requests a worker serves: by link, and the one its title names ("w901: ..."), which its first process starts before. */
+  /** Whether this worker's title or one of its requests (title and brief) names marketing work (MARKETING_WORK). */
+  private marketingWork(info: SessionInfo): boolean {
+    const texts = [info.title ?? '', ...this.workIdsOf(info).map((id) => this.store.work.get(id)).flatMap((w) => (w ? [w.title, w.brief] : []))];
+    return texts.some((t) => MARKETING_WORK.test(t ?? ''));
+  }
+
   private workIdsOf(info: SessionInfo): string[] {
     const ids = new Set(servedBy(info.id, [...this.store.work.values()]));
     const named = /^(w\d+):/.exec(info.title ?? '')?.[1];
@@ -2894,7 +2924,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
       // The Unity bridge of this sandbox's editor only (machine/unityMcp.ts): Claude Code has none registered for a new worktree.
       unityMcp: true,
       disallowedTools: ['mcp__ffsb', ...WORKER_UNUSED_TOOLS, ...WORKER_HIDDEN_AGENTS.map((a) => `Agent(${a})`)],
-      settings: workerSettings(info.id, this.cfg),
+      settings: workerSettings(info.id, this.cfg, this.marketingWork(info)),
       mcp: {
         server: 'machine',
         tools: this.workerTools({
