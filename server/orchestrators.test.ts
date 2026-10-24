@@ -5170,3 +5170,29 @@ test('w1945: the WRONG flag and decide_work queue count a pair as room only with
   const refused = await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'queue', note: 'two have room' });
   assert.match(refused.text, /start its 2 legs together \(start_agent with work_id "w2", sandbox for leg 1, the host, and pair_sandboxes for the others/);
 });
+
+test('w1945: a two-machine run filed by hand is marked a pair as the dispatcher queues it (decide_work pair_legs), so one free computer no longer flags it WRONG', async (t) => {
+  const env = await twoComputers(t);
+  const { store, agents, o, dispatcher, call } = env;
+  // w1936 as filed (2026-10-23, Ben): a two-machine sync run with no pair mark, flagged WRONG for one free computer five times.
+  putRequests(store, [{ id: 'w3', by: BEN, status: 'new' }]);
+  const fit = { pc: { platform: 'win32' }, beast: { platform: 'win32' } };
+  const one: RoomNow = { game: ['pc'], agent: ['pc'], held: [], fit };
+  const both: RoomNow = { ...one, game: ['pc', 'beast'] };
+  const facts = (r: RoomNow) => {
+    agents.roomNow = () => r.game;
+    agents.roomFacts = () => r;
+  };
+  facts(both);
+  const refused = await call(dispatcher().info, 'decide_work', { id: 'w3', action: 'queue', note: 'two have room', pair_legs: 2 });
+  assert.match(refused.text, /start its 2 legs together/);
+  assert.equal(store.work.get('w3')!.pair, undefined, 'a refused queue marks nothing');
+  facts(one);
+  const q = await call(dispatcher().info, 'decide_work', { id: 'w3', action: 'queue', note: 'one computer has room', pair_legs: 2 });
+  assert.equal(q.isError, false, q.text);
+  assert.deepEqual(store.work.get('w3')!.pair, { legs: 2 });
+  assert.match(store.work.get('w3')!.log.join('\n'), /queued for capacity \(marked a pair run of 2 legs, on computers that are not Macs\); a pair run of 2 legs needs 2 computers with room at once, and only pc has room it fits/);
+  store.work.get('w3')!.queuedFor = { at: '2026-01-01T00:00:00.000Z' };
+  assert.deepEqual(o.flagQueuedWithRoom(one), [], 'one free computer is no room for two legs');
+  assert.deepEqual(o.flagQueuedWithRoom(both), ['w3']);
+});

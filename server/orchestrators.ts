@@ -2596,7 +2596,7 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
   }
 
   /** The dispatcher decides about a request (decide_work); the requesters' orchestrators get the reply. */
-  decide(input: { id: string; action: Decision; note: string; into?: string; session_ids?: string[]; needs?: string[]; blocker?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>; blockers?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>[]; add_blocker?: boolean; drop_leg?: boolean; override_gate?: string; asks?: Ask[] }): string {
+  decide(input: { id: string; action: Decision; note: string; into?: string; session_ids?: string[]; needs?: string[]; blocker?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>; blockers?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>[]; add_blocker?: boolean; drop_leg?: boolean; override_gate?: string; asks?: Ask[]; pair_legs?: number }): string {
     let keptBefore: WorkBlocker[] = [];
     const w = this.requireWork(input.id);
     if (w.approval?.state === 'pending') throw new Error(`${w.id} waits for a person to approve it (intake); it is not yours to decide yet`);
@@ -2675,15 +2675,19 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       if (noTimed) throw new Error(noTimed);
       const kind = needsOf(w);
       const facts = this.roomNow();
+      // w1945: a two-machine run filed by hand (w1936, Ben's sync run for PR #2340) is marked a pair as it is queued, so its room,
+      // its WRONG flag and the hold read all its legs; a worker's request_pair marks its own.
+      if (input.pair_legs !== undefined && !(Number.isInteger(input.pair_legs) && input.pair_legs >= 2 && input.pair_legs <= PAIR_MAX_LEGS)) throw new Error(`pair_legs is the number of legs of a pair run, 2 to ${PAIR_MAX_LEGS}, not ${input.pair_legs}`);
+      const pair = input.pair_legs && !w.pair?.started ? { ...(w.pair ?? {}), legs: input.pair_legs } : w.pair;
       // w1944: room on a computer it cannot run on (a Mac for an MP scenario) does not refuse the queue.
-      const fitting = roomForWork(facts, w, needs);
+      const fitting = roomForWork(facts, { ...w, pair }, needs);
       // w1944: room that queued work ahead of it takes (one free sandbox, older requests that fit it) is not its: it queues.
-      const share = roomShares([...this.store.work.values()], this.liveRoom(facts), { w, wanted: needs })?.get(w.id);
+      const share = roomShares([...this.store.work.values()], this.liveRoom(facts), { w: { ...w, pair }, wanted: needs })?.get(w.id);
       const ahead = fitting.ids.length && share && !share.gets ? fitting.ids : [];
       const room = ahead.length ? [] : fitting.ids;
       if (room.length) {
         throw new Error(
-          `queue is for capacity only, and ${room.join(', ')} ${room.length > 1 ? 'have' : 'has'} ${kind === 'agent' ? 'an agent slot (it needs no editor and no game sandbox, w1098)' : 'room'} for ${w.id} now: ${w.pair ? `start its ${w.pair.legs} legs together (start_agent with work_id "${w.id}", sandbox for leg 1, the host, and pair_sandboxes for the others, each a FREE sandbox on another computer)` : `start it there (start_agent with work_id "${w.id}")`}, or, if it waits for something else, decide_work block with what it waits for${needs.length ? '' : ' (or queue with needs: the computers that can take it, when only busy ones can)'}`,
+          `queue is for capacity only, and ${room.join(', ')} ${room.length > 1 ? 'have' : 'has'} ${kind === 'agent' ? 'an agent slot (it needs no editor and no game sandbox, w1098)' : 'room'} for ${w.id} now: ${pair ? `start its ${pair.legs} legs together (start_agent with work_id "${w.id}", sandbox for leg 1, the host, and pair_sandboxes for the others, each a FREE sandbox on another computer)` : `start it there (start_agent with work_id "${w.id}")`}, or, if it waits for something else, decide_work block with what it waits for${needs.length ? '' : ' (or queue with needs: the computers that can take it, when only busy ones can)'}`,
         );
       }
       // Held computers, and those placement.minPriority reserves above its priority (w1643), with room it may not use.
@@ -2699,7 +2703,8 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
         what = `a leg queued for capacity on ${needs.join(' or ')} (its worker carries on; the leg stays Queued, and is flagged WRONG when ${needs.length > 1 ? 'one of them has' : 'it has'} room, until a worker starts for it there: start_agent with work_id "${w.id}" in a FREE sandbox on ${needs.join(' or ')})${held ? `; ${held}` : ''}`;
       } else {
         w.queuedFor = { at: this.now().toISOString(), ...(needs.length ? { needs } : {}) };
-        what = `queued for capacity${needs.length ? ` on ${needs.join(' or ')}` : ''}${held ? `; ${held}` : ''}`;
+        if (pair) w.pair = pair;
+        what = `queued for capacity${input.pair_legs && pair ? ` (marked ${pairText(pair)})` : ''}${needs.length ? ` on ${needs.join(' or ')}` : ''}${held ? `; ${held}` : ''}`;
       }
     } else if (input.action === 'block') {
       const now = this.now();

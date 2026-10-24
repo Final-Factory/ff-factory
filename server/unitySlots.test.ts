@@ -131,7 +131,8 @@ test('unity slots: each place, holder and outside process counts once, as its re
   assert.equal(a.used, 7);
   assert.deepEqual([...a.holders.entries()].sort(), [['main', 1], ['pid:r20', 2], ['sandbox:a', 2], ['sandbox:b', 1]]);
   assert.deepEqual(a.outside.map((x) => x.pid), [30]);
-  assert.equal(countsLine(a), 'editors 7 of 8: 3 interactive, 3 batch, 1 granted not started yet');
+  assert.equal(countsLine(a), 'editors 7 of 8: 3 interactive, 3 batch, 1 editor start queued or booting');
+  assert.equal(countsLine({ ...a, used: 8 }), 'editors 8 of 8: 3 interactive, 3 batch, 1 editor start queued or booting, 1 granted not started yet', 'a grant whose launch has no Unity yet is said apart (w1962)');
 });
 
 test('unity slots: two batch builds on a machine with one free slot run one after the other (LothDesktop, 2026-10-05)', () => {

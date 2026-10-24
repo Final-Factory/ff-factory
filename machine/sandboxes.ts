@@ -1033,7 +1033,6 @@ export class SandboxPool {
   }
 
   private runningEditors() {
-    // A start queued in the bench queue (w1615) holds no slot: its turn checks the slots again, as the daemon's count does.
     return [...this.recs.keys()].filter((id) => this.editorUp(id) && !this.queuedBoots.has(id));
   }
 
@@ -1075,7 +1074,7 @@ export class SandboxPool {
     if (boot?.ticket) {
       const st = await boot.ticket.wait(BOOT_TICKET_ANSWER_MS);
       if (st.kind === 'waiting') {
-        this.queueBoot(r, boot.ticket, hadEditor, st.line);
+        this.queueBoot(r, boot.ticket, st.line);
         return [...out, `Queued (w1615): this machine's bench queue has a timed run holding the lock or ahead of this start (${st.line}). The editor starts by itself at its turn, never beside a timed run; \`unity status\` shows its place. Do what needs no editor meanwhile, then wake_me in 10 minutes and look.`].join(' ');
       }
       if (st.kind === 'granted') this.bootTickets.set(id, { ticket: boot.ticket, at: this.d.now() });
@@ -1100,8 +1099,9 @@ export class SandboxPool {
       const why = await this.o.editorSlot(id);
       if (why) throw new Error(why);
     } else {
-      const up = this.runningEditors().filter((x) => x !== id);
-      if (up.length >= s.maxUnity) throw new Error(`already ${up.length} sandbox editors running on this machine (${up.join(', ')}; max_unity ${s.maxUnity}); stop one first`);
+      // A start queued in the bench queue holds its slot while it waits (w1962), as the daemon's count does.
+      const up = [...this.recs.keys()].filter((x) => x !== id && this.editorUp(x));
+      if (up.length >= s.maxUnity) throw new Error(`already ${up.length} sandbox editors running or starting on this machine (${up.join(', ')}; max_unity ${s.maxUnity}); stop one first`);
     }
   }
 
@@ -1116,7 +1116,7 @@ export class SandboxPool {
   }
 
   /** A start queued in the bench queue (w1615): made at its turn, after the gates are checked again (none is waited for). */
-  private queueBoot(r: Rec, t: BenchTicket, hadEditor: boolean, line: string) {
+  private queueBoot(r: Rec, t: BenchTicket, line: string) {
     const id = r.id;
     this.queuedBoots.set(id, t);
     this.unityState.set(id, { state: 'starting', detail: `queued in the bench queue: ${line}`, startedAt: this.d.now() });
@@ -1141,7 +1141,10 @@ export class SandboxPool {
         if (gate) throw new Error(gate);
         if (this.disk.level !== 'ok') throw new Error(`disk space is ${this.disk.level}`);
         if (this.editorFor(rec).unity.editors(await this.d.procs()).length) throw new Error('an editor already runs there');
-        if (!hadEditor) await this.checkSlot(id);
+        // w1962: no slot check here. The start took its slot before its ticket (w1615's order) and has held it since: a
+        // queued start is 'starting', which the machine's count (the places' editorUp) counts as an editor. Checking again
+        // counted it twice ("needs 1, 0 free (3 of 3 in use) ... 3 granted not started yet"), so every turn it reached on a
+        // full LothDesktop was refused, its ticket let go, and the start asked again at the back of the queue: hours.
         const said = await this.launch(rec);
         this.o.onEvent({ text: `sandbox ${id}: its queued editor start ran at its turn in the bench queue. ${said.join(' ')}`, sandbox: id, unity: true });
       } catch (e) {

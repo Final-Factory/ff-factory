@@ -62,6 +62,41 @@ export function sandboxBenchQueueScript(root: string | undefined): string | unde
   return best?.s;
 }
 
+/** A copy's queue rules version (bench_queue.py RULES_VERSION, w1962); 0 for a copy from before it, or unreadable. */
+export function rulesVersion(script: string): number {
+  try {
+    const m = /^RULES_VERSION = (\d+)/m.exec(fs.readFileSync(script, 'utf8'));
+    return m ? Number(m[1]) : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * The queue script a ticket runs under (w1962): the copy with the newest rules among the checkout's own and every
+ * sandbox's, the checkout's own on a tie. Each ticket's helper applies its own copy's rules at every look, and a branch
+ * that has not merged master for a while carries old ones: on LothDesktop, 2026-10-24, slot5's copy (from before w1860)
+ * set a deadline on t00000936 that the newer copies dropped again, every second for an hour, so the turn never ended.
+ */
+export function newestBenchQueueScript(checkouts: (string | undefined)[], root: string | undefined): string | undefined {
+  const own = findBenchQueueScript(checkouts);
+  let best = own ? { s: own, v: rulesVersion(own) } : undefined;
+  const dir = root ? path.join(root, 'sandboxes') : undefined;
+  let names: string[] = [];
+  try {
+    names = dir ? fs.readdirSync(dir).sort() : [];
+  } catch {
+    // no sandboxes here
+  }
+  for (const n of names) {
+    const s = benchQueueScript(path.join(dir!, n));
+    if (!s) continue;
+    const v = rulesVersion(s);
+    if (!best || v > best.v) best = { s, v };
+  }
+  return best?.s ?? sandboxBenchQueueScript(root);
+}
+
 /** The lock dir the queue sits beside: $BENCH_LOCK, else <root>/tmp/bench.lock (quiet_gate.sh's place). */
 export function benchLockPath(root: string | undefined, env: NodeJS.ProcessEnv = process.env): string | undefined {
   if (env.BENCH_LOCK) return env.BENCH_LOCK;
@@ -174,7 +209,8 @@ export function benchTicketFor(o: Omit<BenchTicketOptions, 'script' | 'lock'> & 
   const env = o.env ?? process.env;
   // w1628: a checkout from before w1615 has no queue script; any sandbox's copy on this machine keeps the same queue
   // (the queue is its files, not its code), so the run still waits its turn instead of going ahead without a ticket.
-  const script = findBenchQueueScript(o.checkouts) ?? sandboxBenchQueueScript(o.root);
+  // w1962: and of the copies here, the one with the newest rules.
+  const script = newestBenchQueueScript(o.checkouts, o.root);
   if (!script) return { why: 'no scripts/bench/bench_queue.py in this checkout (a branch from before w1615) or in any sandbox here' };
   const lock = benchLockPath(o.root, env);
   if (!lock) return { why: 'no worker root to keep the bench queue under' };
