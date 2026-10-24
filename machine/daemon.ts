@@ -69,6 +69,8 @@ import { readBenchWarnings } from './benchWarnings.ts';
 import { askPlayerToQuit, BenchTurn, closedDetail, writeClosedFile, type Holder } from './benchTurn.ts';
 import { GRACE_MIN, PersonPlay, personEnds, personHolderText, personHoldText, personTicket, priorityOf, setPriorityOf, treeOf, type PersonPlaySettings } from './personPlay.ts';
 import { benchTicketFor } from './benchQueue.ts';
+import { TimedRunner } from './timedRunner.ts';
+import { timedRunFromMachine } from './timedRunPack.ts';
 import { readBenchState } from './benchState.ts';
 import { attachmentLine } from '../shared/attachments.ts';
 import { PauseKeeper, pauseFile } from './pause.ts';
@@ -367,6 +369,8 @@ export class Daemon {
   private readonly benchPlayerNotes = new Map<string, string>();
   /** w1894: a person playing Final Factory here (machine/personPlay.ts): fed by the leftovers' look, it holds a turn. */
   readonly personPlay: PersonPlay;
+  /** w1946: the timed runs a play-only machine plays for workers elsewhere (machine/timedRunner.ts); a worker install only. */
+  readonly timed?: TimedRunner;
   /** w1894: this machine's machines.personPlay, as the portal last sent it (kept in person-play.json across restarts). */
   private personSettings: PersonPlaySettings = { enabled: false, graceMinutes: GRACE_MIN };
   /** w1894: the leftovers' look the person's watch was fed last (its `at`). */
@@ -526,6 +530,17 @@ export class Daemon {
       // never sent yet: off until the portal says
     }
     this.personPlay = new PersonPlay({ root: cfg.root, settings: () => this.personSettings, now: () => Date.now(), log: (line) => log(line) });
+    if (cfg.root) {
+      this.timed = new TimedRunner({
+        root: cfg.root,
+        portalUrl: cfg.portalUrl,
+        token: cfg.token,
+        send: (m) => this.send(m),
+        log: (line) => log(line),
+        personBusy: () => this.personStartGate(),
+        lastInputAt: () => this.personInputAt,
+      });
+    }
     this.leftovers = new LeftoverReaper({
       platform,
       machineId: cfg.id,
@@ -1077,7 +1092,8 @@ export class Daemon {
     // A stopped worker's temp folder (w913): swept a few minutes after its process ended, its clones after six hours.
     this.timers.push(setInterval(() => void this.sweeper.tick().catch((e) => log(`session sweep failed: ${(e as Error).message}`)), 30_000));
     // Clean-up: every minute it looks whether a pass is due (every everyMinutes, sooner below softFreeGB).
-    this.timers.push(setInterval(() => void this.cleaner.tick().catch((e) => log(`clean-up failed: ${(e as Error).message}`)), 60_000));
+    // w1946: not while a timed run plays here (its disk work would be in the legs' numbers); the pass comes after it.
+    this.timers.push(setInterval(() => void (this.timed?.busy() ? Promise.resolve() : this.cleaner.tick()).catch((e) => log(`clean-up failed: ${(e as Error).message}`)), 60_000));
     // Git Bash's /tmp (Windows, w603): kept out of clean-up and made again if anything else removes it.
     if (process.platform === 'win32') {
       void this.ensureBashTmp();
@@ -1397,6 +1413,8 @@ export class Daemon {
       liveViews: this.liveViews(),
       // It compacts an idle agent on request and says a compaction's turn end (w1469, the workers' automatic compaction).
       compact: true,
+      // w1946: it plays timed runs for workers elsewhere (a worker install), and the ones it holds now.
+      ...(this.timed ? { timedRuns: true, timedActive: this.timed.active() } : {}),
       // Its owner's pause (w1532): a paused machine is held and its workers hand their requests back.
       pause: this.pause.current(),
       // It updates, restarts and unloads itself on the portal's word over this link (w1596): a worker root install.
@@ -2074,6 +2092,15 @@ export class Daemon {
       if (!folder) throw new Error('this session has no working folder on this machine yet');
       return publishFromMachine(this.cfg.portalUrl, this.cfg.token, folder, args, call('publish_review'));
     };
+    // timed_run (w1946, machine/timedRunPack.ts): the builds are read and hashed here, the portal plans, the pieces it lacks
+    // go from here over HTTP with this machine's token, then the run is handed over. Builds come from the sandbox, the
+    // session's temp folder or this computer's worker install only.
+    all.timed_run = async (args) => {
+      const folder = this.entries.get(sessionId)?.spec?.cwd;
+      if (!folder) throw new Error('this session has no working folder on this machine yet');
+      const temp = sessionTempDir(agentTempRoot(this.cfg.tempDir), sessionId);
+      return timedRunFromMachine({ portalUrl: this.cfg.portalUrl, token: this.cfg.token, roots: [folder, temp, ...(this.cfg.root ? [this.cfg.root] : [])], saveRoots: [folder, temp], cwd: folder, tempDir: temp, args, rpc: (a) => call('timed_run', 900_000)(a), log: (line) => log(line) });
+    };
     // publish_attachment (docs/attachments.md, "Agents' files"): the portal opens an upload for this machine; the file
     // goes from here over HTTP with this machine's token and comes back as an attachment id.
     all.publish_attachment = async (args) => {
@@ -2358,6 +2385,14 @@ export class Daemon {
         return;
       case 'cleanup_context':
         this.staleCtx = msg.context;
+        return;
+      case 'timed_run':
+        // w1946: a run for this play-only machine, as data; the runner checks every path against the player folder.
+        if (!this.timed) log(`timed run ${msg.order?.id}: this daemon is no worker install, so it plays none`);
+        else this.timed.enqueue(msg.order);
+        return;
+      case 'timed_run_upload':
+        this.timed?.uploadReady(msg.id, msg.uploadId, msg.chunkBytes);
         return;
       case 'bench_priorities':
         // Each worker's request priority (w1628): the game repo's bench_queue.py orders tickets by it first.

@@ -387,6 +387,13 @@ export class AttachmentStore {
     return { records, blobs, partials };
   }
 
+  /** Drop these records now (w1946: a timed run's pieces after a few days unused); their files go at the next prune. */
+  forget(ids: string[]) {
+    let gone = 0;
+    for (const id of ids) if (this.records.delete(id)) gone++;
+    if (gone) this.save();
+  }
+
   /** Everything stored: the count and the bytes on disk (system_status). */
   usage(): { files: number; bytes: number } {
     const shas = new Map([...this.records.values()].map((r) => [r.sha256, r.size]));

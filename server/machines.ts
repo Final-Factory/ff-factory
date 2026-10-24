@@ -104,7 +104,7 @@ export interface SandboxLimits {
 }
 
 /** A machine's pool extras (docs/beast-machine.md): the Library seed, editor priority and the folders never to touch. */
-export type PoolExtras = Pick<Machine, 'librarySeed' | 'librarySeedCopy' | 'librarySeedGB' | 'unityBelowNormal' | 'protectedPaths' | 'noTimedRuns'>;
+export type PoolExtras = Pick<Machine, 'librarySeed' | 'librarySeedCopy' | 'librarySeedGB' | 'unityBelowNormal' | 'protectedPaths' | 'noTimedRuns' | 'playOnly'>;
 
 /**
  * The machines that take no timed runs unless their record says otherwise (w1861). lothsahn, 2026-10-23, after Ben's
@@ -122,7 +122,8 @@ export function noTimedRunsOf(m: Pick<Machine, 'id' | 'noTimedRuns'>): string | 
 
 /** The pool settings of a machine (its sandbox_root and limits, with defaults), or null when it has no sandbox_root. Exported for tests. */
 export function poolSettingsOf(m: Pick<Machine, 'sandboxRoot'> & SandboxLimits & PoolExtras): SandboxPoolSettings | null {
-  if (!m.sandboxRoot) return null;
+  // w1946: a play-only computer has no pool, whatever its installer's daemon.json says: no sandbox, no worker.
+  if (!m.sandboxRoot || m.playOnly?.trim()) return null;
   const warn = m.diskWarnGB ?? DISK_WARN_GB_DEFAULT;
   return {
     root: m.sandboxRoot,
@@ -151,6 +152,7 @@ export const STANDING_CAP_NO_POOL = 2;
  * pool it is max_sandbox_agents, else every sandbox full (max_sandboxes x max_agents_per_sandbox).
  */
 export function agentCap(m: Pick<Machine, 'sandboxRoot'> & SandboxLimits & PoolExtras): number {
+  if (m.playOnly?.trim()) return 0; // w1946: it runs no agent at all, standing ones included
   const pool = poolSettingsOf(m);
   return pool ? (pool.maxAgents ?? pool.maxSandboxes * pool.maxAgentsPerSandbox) : STANDING_CAP_NO_POOL;
 }
@@ -469,13 +471,15 @@ export class MachineManager {
    * add_machine's join_code and the dashboard's Add a machine both come here. Throws the refusal (an installed id, a
    * limit out of range); the code is in the answer only, never stored.
    */
-  createJoin(o: { id: string; tailnetName?: string; host?: string; portalUrl?: string; limits: JoinLimits; by: string }) {
+  createJoin(o: { id: string; tailnetName?: string; host?: string; portalUrl?: string; limits: JoinLimits; by: string; playOnly?: string }) {
     const id = o.id.trim().toLowerCase();
     const refusal = joinRefusal({ get: (x) => this.store.machines.get(x) }, id);
     if (refusal) throw new Error(refusal);
-    const limits = checkJoinLimits(o.limits);
+    // w1946: a play-only computer joins with the installer's smallest limits (one player-slot pair for its timed runs, the
+    // repo clone, no sandbox is ever made there: poolSettingsOf is null for it).
+    const limits = checkJoinLimits(o.playOnly?.trim() ? { maxSandboxes: 1, maxAgentsPerSandbox: 1, maxUnity: 1 } : o.limits);
     const tailnetName = (o.tailnetName?.trim() || id).toLowerCase();
-    const m = this.deployMachine({ id, workerInstall: true, host: o.host || tailnetName, portalUrl: o.portalUrl, ...limits });
+    const m = this.deployMachine({ id, workerInstall: true, host: o.host || tailnetName, portalUrl: o.portalUrl, ...limits, ...(o.playOnly?.trim() ? { playOnly: o.playOnly.trim() } : {}) });
     const join = this.joins.create({ machineId: m.id, tailnetName, limits, by: o.by });
     this.update(m.id, { statusDetail: `waiting for its join bootstrap on tailnet device ${tailnetName} (code ...${join.last4}, until ${join.expiresAt}): no daemon yet` });
     return { machine: this.require(m.id), join, limits, tailnetName };
@@ -733,7 +737,7 @@ export class MachineManager {
     const play = this.personPlayOf(id);
     const why = (m && noTimedRunsOf(m)) || (play ? `${play.who} is playing Final Factory on it (w1894); timed runs go elsewhere until ${play.graceMinutes} min after the game closes` : undefined);
     if (!why) return undefined;
-    const others = this.list().filter((o) => o.id !== id && o.sandboxRoot && !noTimedRunsOf(o));
+    const others = this.list().filter((o) => o.id !== id && o.sandboxRoot && !o.playOnly?.trim() && !noTimedRunsOf(o));
     const elsewhere = [...others.filter((o) => this.isOnline(o.id)), ...others.filter((o) => !this.isOnline(o.id))].map((o) => o.id);
     return { why, elsewhere };
   }
@@ -872,7 +876,7 @@ export class MachineManager {
   // ---------------------------------------------------------------- daemon versions
 
   /** What each connected daemon said in its hello. */
-  private readonly hellos = new Map<string, { protocol: number; oldestPortal?: number; daemon?: string; catalog?: string[]; guard?: boolean; agentHosts?: boolean; saveWork?: boolean; liveView?: boolean; liveIdleClose?: boolean; liveRestage?: boolean; liveKeep?: boolean; compact?: boolean; ghApp?: boolean; selfUpdate?: number }>();
+  private readonly hellos = new Map<string, { protocol: number; oldestPortal?: number; daemon?: string; catalog?: string[]; guard?: boolean; agentHosts?: boolean; saveWork?: boolean; liveView?: boolean; liveIdleClose?: boolean; liveRestage?: boolean; liveKeep?: boolean; compact?: boolean; ghApp?: boolean; selfUpdate?: number; timedRuns?: boolean }>();
 
   /** Each connected daemon's GPU Whisper (w615), from its hello and its `voice` messages. */
   private readonly voices = new Map<string, RemoteVoiceStatus>();
@@ -1397,6 +1401,7 @@ export class MachineManager {
       librarySeedGB: opts.librarySeedGB ?? prev?.librarySeedGB,
       unityBelowNormal: opts.unityBelowNormal ?? prev?.unityBelowNormal,
       noTimedRuns: opts.noTimedRuns ?? prev?.noTimedRuns,
+      playOnly: opts.playOnly ?? prev?.playOnly,
     };
     const { machine, token } = this.register({
       id,
@@ -1449,6 +1454,7 @@ export class MachineManager {
       ...(opts.librarySeedGB !== undefined ? { librarySeedGB: opts.librarySeedGB } : {}),
       ...(opts.unityBelowNormal !== undefined ? { unityBelowNormal: opts.unityBelowNormal } : {}),
       ...(opts.noTimedRuns !== undefined ? { noTimedRuns: opts.noTimedRuns } : {}),
+      ...(opts.playOnly !== undefined ? { playOnly: opts.playOnly } : {}),
     });
     this.store.putMachine(m);
     this.links.get(m.id)?.ws.send(JSON.stringify(this.welcomeOf(m) satisfies ToDaemon));
@@ -1491,6 +1497,7 @@ export class MachineManager {
       ...(opts.librarySeedCopy !== undefined ? { librarySeedCopy: opts.librarySeedCopy } : {}),
       ...(opts.unityBelowNormal !== undefined ? { unityBelowNormal: opts.unityBelowNormal } : {}),
       ...(opts.noTimedRuns !== undefined ? { noTimedRuns: opts.noTimedRuns } : {}),
+      ...(opts.playOnly !== undefined ? { playOnly: opts.playOnly } : {}),
     };
     m.online = this.isOnline(id);
     this.store.putMachine(m);
@@ -2070,9 +2077,11 @@ export class MachineManager {
     if (!m) return;
     switch (msg.type) {
       case 'hello': {
-        this.hellos.set(id, { protocol: msg.protocol, ...(msg.oldestPortal !== undefined ? { oldestPortal: msg.oldestPortal } : {}), daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}), ...(msg.agentHosts ? { agentHosts: true } : {}), ...(msg.saveWork ? { saveWork: true } : {}), ...(msg.liveView ? { liveView: true } : {}), ...(msg.liveIdleClose ? { liveIdleClose: true } : {}), ...(msg.liveRestage ? { liveRestage: true } : {}), ...(msg.liveKeep ? { liveKeep: true } : {}), ...(msg.compact ? { compact: true } : {}), ...(msg.ghApp ? { ghApp: true } : {}), ...(typeof msg.selfUpdate === 'number' ? { selfUpdate: msg.selfUpdate } : {}) });
+        this.hellos.set(id, { protocol: msg.protocol, ...(msg.oldestPortal !== undefined ? { oldestPortal: msg.oldestPortal } : {}), daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}), ...(msg.agentHosts ? { agentHosts: true } : {}), ...(msg.saveWork ? { saveWork: true } : {}), ...(msg.liveView ? { liveView: true } : {}), ...(msg.liveIdleClose ? { liveIdleClose: true } : {}), ...(msg.liveRestage ? { liveRestage: true } : {}), ...(msg.liveKeep ? { liveKeep: true } : {}), ...(msg.compact ? { compact: true } : {}), ...(msg.timedRuns ? { timedRuns: true } : {}), ...(msg.ghApp ? { ghApp: true } : {}), ...(typeof msg.selfUpdate === 'number' ? { selfUpdate: msg.selfUpdate } : {}) });
         // GitHub App tokens (w1519): a daemon that keeps them gets the current set at once.
         if (msg.ghApp) this.pushGhAppTokens(id);
+        // w1946: a play-only machine's timed runs: what it holds now, so the portal sends again what a restart lost.
+        if (msg.timedRuns) setImmediate(() => this.timedHello?.(id, Array.isArray(msg.timedActive) ? msg.timedActive.map(String) : []));
         if (!msg.guard) delete m.guard;
         if (msg.voice && typeof msg.voice === 'object') this.voices.set(id, msg.voice);
         else this.voices.delete(id);
@@ -2366,6 +2375,11 @@ export class MachineManager {
         else call.reject(new Error(msg.error ?? `${id}: the clean-up pass failed`));
         return;
       }
+      case 'timed_run_status':
+      case 'timed_run_done':
+      case 'timed_run_result':
+        this.timedReport?.(id, msg);
+        return;
       case 'max_event':
         if (typeof msg.line === 'string' && msg.line.length <= 8192) this.maxEvent?.(id, msg.line);
         return;
@@ -2496,6 +2510,22 @@ export class MachineManager {
   }
   /** A line from the Mac's Max events file (server/max.ts validates it). */
   maxEvent?: (machineId: string, line: string) => void;
+  /** w1946: a play-only machine's daemon said hello with its timed runs, and what it reports of one (server/timedRuns.ts). */
+  timedHello?: (machineId: string, active: string[]) => void;
+  timedReport?: (machineId: string, msg: Extract<FromDaemon, { type: 'timed_run_status' | 'timed_run_done' | 'timed_run_result' }>) => void;
+
+  /** Whether a machine's daemon is online and runs timed runs (w1946: its hello offered `timedRuns`). */
+  offersTimedRuns(machineId: string): boolean {
+    return this.isOnline(machineId) && !!this.hellos.get(machineId)?.timedRuns;
+  }
+
+  /** Post a message to a machine's daemon (w1946's timed runs); false when it is not connected. */
+  postTo(machineId: string, msg: ToDaemon): boolean {
+    const link = this.links.get(machineId);
+    if (!link || link.ws.readyState !== 1) return false;
+    link.ws.send(JSON.stringify(msg));
+    return true;
+  }
 
   /** Status, start, stop or restart the Unity editor of a machine's sandbox, on the machine (machine/unity.ts). */
   unity(machineId: string, action: 'status' | 'start' | 'stop' | 'restart' | 'clear_batch', force?: boolean, sandbox?: string, session?: string) {
