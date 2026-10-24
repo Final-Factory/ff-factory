@@ -4402,7 +4402,7 @@ ${w.repo ?? ''}
               `It works once, until ${j.expiresAt}, and only from the tailnet device "${tailnet}". Limits: ${given.length ? given.join(', ') : "the PC's own, from its RAM and CPUs"} (overridable at the PC).`,
               `On that PC, connected to Tailscale: open ${m.portalUrl}/join in its browser and download the Windows installer (double-click it), or, in a PowerShell window: irm ${m.portalUrl}/join/windows.ps1 | iex`,
               `A Mac or Linux PC, in a terminal: bash -c "$(curl -fsSL ${m.portalUrl}/join/unix.sh)"`,
-              'It asks for the code, then installs and enrols the machine by itself; list_machines shows it online when it is done. Relay the code and the command to the person who asked, as they are.',
+              'It asks for the code, then installs and enrolls the machine by itself; list_machines shows it online when it is done. Relay the code and the command to the person who asked, as they are.',
             ].join('\n');
           }
           const m = mm.deployMachine({
