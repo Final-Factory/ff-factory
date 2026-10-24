@@ -71,6 +71,8 @@ export interface Computer {
    * even when no other computer has room, and its bench queue refuses every exclusive ticket.
    */
   noTimedRuns?: string;
+  /** When its daemon dropped, while it is offline (Machine.lastSeen, w2048): a short drop is a blip, a long one an outage. */
+  offlineSince?: string;
 }
 
 

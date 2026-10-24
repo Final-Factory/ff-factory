@@ -116,6 +116,10 @@ export const SETTABLE_KEYS = [
   // Minutes a Live view sits idle (no turn, job, check-in or viewer) before its sandbox's editor is closed (w1746,
   // docs/live-view.md "Idle editors close"): default 15, 0 never. The owner's only: it closes editors on every machine.
   'live.idleCloseMinutes',
+  // How long a timed leg or run waits for an offline computer before it goes elsewhere (w2048, server/timedAsk.ts
+  // unavailableWait): whole minutes when the fleet is idle (default 5) and when it is busy (default 60).
+  'timing.unavailableIdleMinutes',
+  'timing.unavailableBusyMinutes',
   // Where new game-repo work goes first, and which computers it stays off (w428, docs/machines.md "Placing work").
   'placement.prefer',
   'placement.avoid',
@@ -696,6 +700,12 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       if (typeof n === 'number' && Number.isInteger(n) && n >= 0 && n <= 1440) return n;
       throw new Error('live.idleCloseMinutes is a whole number of minutes from 0 (never) to 1440');
     }
+    case 'timing.unavailableIdleMinutes':
+    case 'timing.unavailableBusyMinutes': {
+      const n = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
+      if (typeof n === 'number' && Number.isInteger(n) && n >= 1 && n <= 720) return n;
+      throw new Error(`${key} is a whole number of minutes from 1 to 720`);
+    }
     case 'providers.ffbox.devRequests':
       return checkDevRequests(value);
     case 'intake.reviewers':
@@ -994,6 +1004,14 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
     if (v === undefined) delete l[field];
     else (l as Record<string, unknown>)[field] = v;
     cfg.live = Object.keys(l).length ? l : undefined;
+  }
+  else if (key === 'timing.unavailableIdleMinutes' || key === 'timing.unavailableBusyMinutes') {
+    // Timing: read at every timed_place, leg bound and timed-run pass (server/timedAsk.ts unavailableWait); null is the default.
+    const t: NonNullable<Config['timing']> = { ...cfg.timing };
+    const field = key === 'timing.unavailableIdleMinutes' ? 'unavailableIdleMinutes' : 'unavailableBusyMinutes';
+    if (v === undefined) delete t[field];
+    else t[field] = v as number;
+    cfg.timing = Object.keys(t).length ? t : undefined;
   }
   else if (key === 'placement.prefer' || key === 'placement.avoid' || key === 'placement.hold' || key === 'placement.live' || key === 'placement.build' || key === 'placement.minPriority') {
     const p = { ...cfg.placement };

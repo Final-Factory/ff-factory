@@ -4986,18 +4986,32 @@ test('w1969: a worker on a big computer asks timed_place; its leg is filed Queue
   const w1 = store.work.get('w1')!;
   assert.equal(w1.status, 'blocked');
   assert.match(w1.log.join('\n'), /timed leg ask \(w1969\) from worker \w{8} on pc: handed to w2, queued for m3 > lothlaptop: pc has 6 agent slots/);
-  assert.match(leg.log.join('\n'), /filed by FF Factory for worker \w+ on w1 \(w1969 timed_place\) from pc: queued for m3 > lothlaptop, the small computers that take timed runs \(a big one only after it waited 60 min\): pc has 6 agent slots/);
+  assert.match(leg.log.join('\n'), /filed by FF Factory for worker \w+ on w1 \(w1969 timed_place\) from pc: queued for m3 > lothlaptop, the small computers that take timed runs \(a big one only once none of them can take it: offline past the load-scaled wait, held or without a game sandbox, w2048\): pc has 6 agent slots/);
   // Its machine hears the verdict with the bench priorities: the guard then names the leg.
   assert.deepEqual({ verdict: agents.benchPriorities('pc')[id]?.timed?.verdict, leg: agents.benchPriorities('pc')[id]?.timed?.leg }, { verdict: 'elsewhere', leg: 'w2' });
   // Asked again: no second leg.
   assert.match(String(await h.timed_place!({ what: 'the same A/B', brief: 'again' })), /w1 already has an open timed leg, w2/);
   assert.equal([...store.work.values()].filter((x) => x.timedLeg).length, 1);
 
-  // An hour and a minute Queued with no small computer free: any computer that takes timed runs may take it, logged once.
+  // w2048: an hour and a minute Queued while its small computers are online but busy: it keeps waiting there.
   leg.queuedFor = { ...leg.queuedFor!, at: new Date(Date.now() - 61 * 60_000).toISOString() };
+  assert.deepEqual(o.timedLegBound(), [], 'a busy small computer is waited for');
+  // One of them offline for two hours, the other online: still waits.
+  const gone = new Date(Date.now() - 120 * 60_000).toISOString();
+  agents.places = () => askFleet().map((c) => (c.id === 'm3' ? { ...c, online: false, offlineSince: gone } : c));
+  assert.deepEqual(o.timedLegBound(), [], 'one small computer online: it waits there');
+  // Both offline, one of them only a blip (30 s): still waits.
+  const blip = new Date(Date.now() - 30_000).toISOString();
+  agents.places = () => askFleet().map((c) => (c.id === 'm3' ? { ...c, online: false, offlineSince: gone } : c.id === 'lothlaptop' ? { ...c, online: false, offlineSince: blip } : c));
+  assert.deepEqual(o.timedLegBound(), [], 'a 30 s drop is a blip');
+  // Both offline past the wait: it widens to the big computers (never m5), logged on the leg and on w1 with why.
+  agents.places = () => askFleet().map((c) => (c.id === 'm3' || c.id === 'lothlaptop' ? { ...c, online: false, offlineSince: gone } : c));
   assert.deepEqual(o.timedLegBound(), ['w2']);
-  assert.deepEqual(store.work.get('w2')!.queuedFor?.needs, ['m3', 'lothlaptop', 'lothdesktop', 'beast']);
-  assert.match(store.work.get('w2')!.log.join('\n'), /ledger: its timed leg waited 61 min on m3, lothlaptop with no room \(w1969 bound: 60 min, two full bench turns\); now any computer that takes timed runs may take it: m3 > lothlaptop > lothdesktop > beast/);
+  const needs = store.work.get('w2')!.queuedFor?.needs ?? [];
+  assert.ok(!needs.includes('m5'), `never m5: ${needs.join(' > ')}`);
+  assert.ok(needs.includes('beast'), `a big computer may take it: ${needs.join(' > ')}`);
+  assert.match(store.work.get('w2')!.log.join('\n'), /ledger: BIG-COMPUTER FALLBACK \(w2048\): no small computer it was queued for can take it: lothlaptop offline since \d\d:\d\dZ \(120 min\); m3 offline since \d\d:\d\dZ \(120 min\) \(an offline one is waited for \d+ min, as the fleet is at \d+% load/);
+  assert.match(store.work.get('w1')!.log.join('\n'), /its timed leg w2 may now run on a big computer \(w2048 fallback\): no small computer it was queued for can take it: lothlaptop offline/);
   assert.deepEqual(o.timedLegBound(), [], 'once');
 });
 

@@ -50,7 +50,7 @@ import { aheadText, answerAfter, asksAPerson, holdsOf, personWaitIn, questionSha
 import { capacityBlockProblem, capacityWaitIn, needsOf, needsTimed, pairRoom, pairText, PAIR_MAX_LEGS, resolveNeeds } from '../shared/capacity.ts';
 import type { HandBack } from './machinePause.ts';
 import { heldText, roomEnough, roomForWork, roomIds, roomStood, timedKindOf, unusableText, type RoomNow, type TimedFacts, type TimedKind } from './placement.ts';
-import { TIMED_LEG_WAIT_MS } from './timedAsk.ts';
+import { TIMED_LEG_WAIT_MS, unavailableText, bigFallbackRules, type SmallState } from './timedAsk.ts';
 import { minPriorityText } from '../shared/capacity.ts';
 import { repoSlug } from './ciReadHealth.ts';
 import { actionName, CONDITIONAL_DAYS, CONDITIONAL_MAX_DAYS, CONDITIONAL_PER_REQUEST, conditionalLine, conditionName, HELD_MARK, inPersonWords, parseCondition, type ConditionInput } from '../shared/conditional.ts';
@@ -217,6 +217,11 @@ export interface OrchestratorsDeps {
   roomFacts?: () => RoomNow;
   /** The computers that take no timed runs, and those that take timed work of kind `t`, best first (w1872, placement.ts timedFacts). */
   timedFacts?: (t: TimedKind) => TimedFacts;
+  /**
+   * The small computers that take timed runs and whether each can take a timed leg now, with the wait for an offline one in
+   * words (w2048, timedAsk.ts smallTimedStates and unavailableWait): what timedLegBound widens a leg by.
+   */
+  timedSmall?: () => { states: SmallState[]; waitWhy: string };
   /** Whether a machine is online; undefined for a machine this portal does not have (w643: blockers). */
   machineOnline?: (id: string) => boolean | undefined;
   /** The commit the portal runs (no id), or a machine's daemon (w643: a deploy blocker clears when it changes). */
@@ -3296,6 +3301,16 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
     return { id: leg.id, text: `${head} ${blocked} Do not take an exclusive ticket here for it. Commit and push your work before the turn ends: your sandbox is then released for other work, and the leg's report (a line "For ${w.id}:") resumes you.` };
   }
 
+  /** The asking worker's request when it is a timed leg already widened to the big computers (w2048), else undefined. */
+  widenedLegOf(sessionId: string, request: string | undefined): string | undefined {
+    try {
+      const w = this.workerRequest(sessionId, request, 'timed_place');
+      return w.timedLeg?.widened ? w.id : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   /** A timed_place answer that keeps the leg where it is (w1969): a line in the asking request's log and the portal's journal. */
   noteTimedAsk(sessionId: string, request: string | undefined, line: string): void {
     console.log(`timed ask: ${line}`);
@@ -3344,38 +3359,56 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       log: [],
     };
     leg.overlaps = findOverlaps({ keys: leg.keys, title: leg.title }, this.pool(leg.id)).filter((o) => o.ref !== w.id);
-    this.stamp(leg, `filed by FF Factory for worker ${sessionId} on ${w.id} (w1969 timed_place) from ${x.from}: queued for ${x.needs.join(' > ')}, the small computers that take timed runs (a big one only after it waited ${TIMED_LEG_WAIT_MS / 60_000} min): ${x.why}`);
+    this.stamp(leg, `filed by FF Factory for worker ${sessionId} on ${w.id} (w1969 timed_place) from ${x.from}: queued for ${x.needs.join(' > ')}, the small computers that take timed runs (a big one only once none of them can take it: offline past the load-scaled wait, held or without a game sandbox, w2048): ${x.why}`);
     this.store.putWork(leg);
     this.gatherForDispatcher(w.requestedBy, requestNotice(leg));
     return leg;
   }
 
   /**
-   * The wait bound of a timed leg (w1969, TIMED_LEG_WAIT_MS): one Queued on its small computers for longer widens to every
-   * computer that takes timed runs ("Next timed work"'s order, big ones included), logged once, and the dispatcher is told.
-   * Returns the ids widened.
+   * The wait bound of a timed leg (w1969; w2048). A leg Queued on its small computers waits there while any of them can take
+   * it, busy or not (lothsahn, w2048: keep it waiting while a small machine is merely busy). Once none can (each offline past
+   * the load-scaled wait, timedAsk.ts unavailableWait, or held, or without a game sandbox) it widens to every computer that
+   * takes timed runs ("Next timed work"'s order, big ones included, never m5), logged once on the leg and on the request it
+   * serves with which small computers were unavailable and why, and the dispatcher is told. Without the w2048 facts (an old
+   * caller) a leg widens after TIMED_LEG_WAIT_MS, as before. Returns the ids widened.
    */
   timedLegBound(): string[] {
     const done: string[] = [];
     const now = this.now().getTime();
+    const small = this.d.timedSmall?.();
     for (const w of this.store.work.values()) {
       const leg = w.timedLeg;
       if (!leg || leg.widened || w.status !== 'queued' || !isOpen(w)) continue;
       const since = Date.parse(w.queuedFor?.at ?? w.createdAt);
-      if (!(now - since > TIMED_LEG_WAIT_MS)) continue;
+      let why: string;
+      if (small) {
+        const mine = small.states.filter((x) => leg.small.includes(x.id));
+        if (mine.some((x) => x.state === 'able')) continue;
+        const gone = unavailableText(mine) || `${leg.small.join(', ')} no longer take timed runs`;
+        why = `no small computer it was queued for can take it: ${gone} (an offline one is waited for ${small.waitWhy})`;
+      } else {
+        if (!(now - since > TIMED_LEG_WAIT_MS)) continue;
+        why = `it waited ${Math.round((now - since) / 60_000)} min on ${leg.small.join(', ')} with no room (w1969 bound: ${TIMED_LEG_WAIT_MS / 60_000} min, two full bench turns)`;
+      }
       const takes = this.d.timedFacts?.('timed')?.takes ?? [];
       const needs = [...new Set([...(w.queuedFor?.needs ?? leg.small), ...takes])];
       w.queuedFor = { at: w.queuedFor?.at ?? w.createdAt, needs };
       w.timedLeg = { ...leg, widened: this.now().toISOString() };
       this.roomFlags.delete(w.id);
-      this.stamp(w, `ledger: its timed leg waited ${Math.round((now - since) / 60_000)} min on ${leg.small.join(', ')} with no room (w1969 bound: ${TIMED_LEG_WAIT_MS / 60_000} min, two full bench turns); now any computer that takes timed runs may take it: ${needs.join(' > ')}`);
+      this.stamp(w, `ledger: BIG-COMPUTER FALLBACK (w2048): ${why}; now any computer that takes timed runs may take it: ${needs.join(' > ')}. Its numbers then come from that one computer only and compare with no other computer's: its worker runs every side there, the baseline included`);
       this.store.putWork(w);
+      const asker = this.store.work.get(leg.for);
+      if (asker && isOpen(asker)) {
+        this.stamp(asker, `ledger: its timed leg ${w.id} may now run on a big computer (w2048 fallback): ${why}. Its numbers will come from that one computer, every side re-measured there, and compare with no small computer's baseline`);
+        this.store.putWork(asker);
+      }
+      console.log(`timed ask (w2048): ${w.id} (timed leg of ${leg.for}) widened to ${needs.join(' > ')}: ${why}`);
       done.push(w.id);
     }
     if (!done.length) return [];
-    console.log(`timed ask (w1969): widened timed legs past their wait bound: ${done.join(', ')}`);
     this.toDispatcher(
-      `[ledger] Timed legs that waited over ${TIMED_LEG_WAIT_MS / 60_000} min for a small computer (w1969) may now go to any computer that takes timed runs: ${done.map((id) => `${id} "${clip(this.store.work.get(id)?.title ?? '', 80)}"`).join('; ')}. Start each on the first of its needs with room (start_agent with its work_id).`,
+      `[ledger] Timed legs no small computer can take now (w2048: each offline past the wait, held, or without a game sandbox) may now go to any computer that takes timed runs, big ones included, never m5: ${done.map((id) => `${id} "${clip(this.store.work.get(id)?.title ?? '', 80)}"`).join('; ')}. Start each on the first of its needs with room (start_agent with its work_id). Its worker calls timed_place there and is told: ${bigFallbackRules('that computer')}.`,
     );
     return done;
   }
