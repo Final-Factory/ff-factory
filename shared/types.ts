@@ -264,6 +264,12 @@ export interface SessionInfo {
    */
   queuedOn?: 'capacity' | 'machine' | 'pool';
   /**
+   * w1949: its last start of its sandbox's editor, refused for want of a Unity slot on its machine (machine/unitySlots.ts
+   * startRefusal), when and why. Cleared by a start, restart or stop that goes through, and when its next turn opens. While
+   * it is stopped with a check-in and the machine has no slot free, its request shows Blocked on a Unity editor slot.
+   */
+  editorRefused?: { machine: string; sandbox: string; at: string; why: string };
+  /**
    * The worker declared that only a person can move it on (w691: the waiting_on_person tool): who, and what they must do.
    * The ledger shows its requests Waiting on input (on <who>), also while a check-in of its own is pending, and the agent
    * as Needs you. Kept by the portal, never by the daemon; gone with its next message (a new turn: it declares again if
