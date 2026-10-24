@@ -6,6 +6,7 @@ import { checkMainCloneShell, flatten, normPath, pathSpellings, spellingsRegex, 
 import { checkTiming } from './timingGuard.ts';
 import { checkTimedAsk, type TimedAskState } from './timedAsk.ts';
 import { checkChecksRead, checkTimedSleep } from './waitGuard.ts';
+import { checkSearchTool, checkWholeDiskSearch, type WholeDiskContext } from './wholeDiskSearch.ts';
 import os from 'node:os';
 import path from 'node:path';
 import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
@@ -64,6 +65,9 @@ import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
  *     urgent release lane's pointer at the commit it builds (checkReleaseBranchCommit, server/releaseHandBack.ts).
  *   - waits that never work (w2015): `gh pr checks` and `--json statusCheckRollup` (a vault token cannot read checks), and a
  *     command that only sleeps on the clock for over 180 s (checkChecksRead, checkTimedSleep: server/waitGuard.ts).
+ *   - whole-disk searches (w2012), on every machine: find / fd / rg / grep -r / du / Get-ChildItem -Recurse / dir /s and the
+ *     Grep and Glob tools over `/`, a drive, every user's folder or a home folder (checkWholeDiskSearch, checkSearchTool); the
+ *     refusal names FF_SKILLS, where the ff-agents scripts a worker was hunting for are.
  *   - branch switches: while the sandbox's editor runs, no `git switch` / `git checkout <branch>` in the
  *     sandbox (Unity would stop on "The open scene(s) have been modified externally"); the worker's
  *     switch_branch tool does it safely. `git checkout -- <paths>` and `git restore` stay allowed.
@@ -87,6 +91,12 @@ export function sandboxGuard(opts: {
   publicIdentity?: PublicIdentity;
   /** The machine's worker install folder (root.json's root): deleting outside it is refused (checkOutsideRootDelete). Absent: not checked. */
   workerRoot?: string;
+  /**
+   * w2012: the machine's OS and the user's home for the whole-disk search fence (server/wholeDiskSearch.ts), checked on every
+   * machine. Default: this process's (process.platform, os.homedir()); the skills folder named in its refusal is env's FF_SKILLS.
+   */
+  platform?: NodeJS.Platform;
+  home?: string;
   /**
    * w936: a machine's main clone this worker's request explicitly asked for work in (server/mainCloneGuard.ts). Shell
    * commands naming it are then judged one by one against a short allowed list (quit its editor, back up, git fetch and
@@ -158,6 +168,10 @@ export function sandboxGuard(opts: {
     const banned = opts.denyToolPrefixes?.find((p) => tool.toLowerCase().startsWith(p.toLowerCase()));
     if (banned) return deny(`${tool} is not available to this agent (${banned}* is the portal's own control channel).`);
 
+    const disk = (cwd: string): WholeDiskContext => ({ win: (opts.platform ?? process.platform) === 'win32', home: opts.home ?? os.homedir(), cwd, ...(opts.env?.FF_SKILLS ? { skills: opts.env.FF_SKILLS } : {}) });
+    const wholeDisk = checkSearchTool(tool, args, disk(input.cwd || opts.sandboxPath));
+    if (wholeDisk) return deny(wholeDisk);
+
     if (tool === 'Bash' || tool === 'PowerShell') {
       const cmd = String(args.command ?? '');
       const reason =
@@ -173,6 +187,7 @@ export function sandboxGuard(opts: {
         checkRawUnityBatch(cmd, cloneSpellings) ??
         timing(tool, args, input.cwd || opts.sandboxPath) ??
         (opts.timedAsk ? checkTimedAsk(cmd, opts.timedAsk()) : undefined) ??
+        checkWholeDiskSearch(cmd, disk(input.cwd || opts.sandboxPath)) ??
         (opts.workerRoot ? checkOutsideRootDelete(cmd, { root: opts.workerRoot, cwd: input.cwd || opts.sandboxPath, allow: [opts.sandboxPath], saveTag }) : undefined) ??
         (opts.workerRoot ? checkOffDriveScan(cmd, { root: opts.workerRoot, cwd: input.cwd || opts.sandboxPath, allow: [opts.sandboxPath] }) : undefined);
       if (reason) return deny(reason);
