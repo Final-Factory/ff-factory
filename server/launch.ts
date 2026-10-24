@@ -168,6 +168,8 @@ export const CATALOG = {
     cross_os: z.string().max(300).optional().describe('Only when the change can behave differently across OSes (w1692: float or math-library use in the simulation, Burst or IL2CPP codegen, platform APIs or paths, the desync hash, a desync seen only across OSes): why. Without it the legs go on computers that are not Macs; with it a Mac may host, never a client.'),
     timed: z.boolean().optional().describe('A leg takes timing measurements (exclusive bench tickets): no leg goes on a computer that takes no timed runs (m5).'),
     request: z.string().max(16).optional().describe('The request ("w665") it is for, when you serve several; default: the one you are on.'),
+    retry: z.boolean().optional().describe('w2041: your open pair run is running but cannot deliver (a leg is stuck): cancel it and file a fresh one. A run one of whose legs already reported, or whose computer is offline, is retried without it.'),
+    avoid: z.array(z.string().max(40)).max(6).optional().describe('w2041: computers (ids such as lothlaptop) no leg may go on, where you saw a leg fail for a machine reason (Tailscale stuck, offline, a broken player).'),
   },
   /** w1969 (docs/machines.md, "Where a timed leg runs"): asked before an exclusive bench ticket; the portal says here or hands the leg to a small computer. */
   timed_place: {

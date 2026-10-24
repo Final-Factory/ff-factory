@@ -3187,7 +3187,7 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
    * have room at once, and its own request is Blocked on that request's report: the w890 release frees its sandbox when its
    * turn ends, and the report resumes it. One open pair run per request: asked again, it waits on the one there is.
    */
-  filePair(sessionId: string, a: { what?: string; brief?: string; legs?: number; cross_os?: string; timed?: boolean; request?: string }): string {
+  filePair(sessionId: string, a: { what?: string; brief?: string; legs?: number; cross_os?: string; timed?: boolean; request?: string; retry?: boolean; avoid?: string[] }): string {
     const w = this.workerRequest(sessionId, a.request, 'request_pair');
     const what = clip(String(a.what ?? '').replace(/\s+/g, ' ').trim(), 100);
     const brief = String(a.brief ?? '').trim();
@@ -3195,13 +3195,82 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
     const legs = a.legs ?? 2;
     if (!Number.isInteger(legs) || legs < 2 || legs > PAIR_MAX_LEGS) throw new Error(`legs is 2 to ${PAIR_MAX_LEGS}: the computers it needs at once`);
     const crossOs = String(a.cross_os ?? '').replace(/\s+/g, ' ').trim().slice(0, 300) || undefined;
+    const named = [...new Set((a.avoid ?? []).map((m) => String(m).trim().toLowerCase()).filter(Boolean))];
     const open = [...this.store.work.values()].find((x) => x.pair?.for === w.id && isOpen(x));
-    const p = open ?? this.newPair(w, sessionId, { what, brief, legs, crossOs, timed: a.timed === true });
+    const spent = open && this.pairSpent(open, a.retry === true);
+    let p: WorkItem;
+    let head: string;
+    if (open && !spent) {
+      p = open;
+      if (named.length && !open.pair?.started) {
+        p.pair = { ...p.pair!, avoid: [...new Set([...(p.pair!.avoid ?? []), ...named])] };
+        p.constraints = pairText(p.pair);
+        this.stamp(p, `worker ${sessionId} on ${w.id} asked again: not on ${named.join(', ')} (w2041)`);
+        this.store.putWork(p);
+      }
+      head = `${w.id} already has an open pair run, ${p.id} (${p.status}: ${clip(p.title, 80)}); you wait on it, and nothing new was filed.${p.pair?.started ? ' Its legs are running and none has reported yet: if they cannot deliver (a leg is stuck on its computer), ask again with retry: true and avoid naming that computer.' : ''}`;
+    } else {
+      const avoid = [...new Set([...(open ? this.pairFailedOn(open) : []), ...named])];
+      p = this.newPair(w, sessionId, { what, brief, legs, crossOs, timed: a.timed === true, ...(open ? { retryOf: open.id } : {}), avoid });
+      if (open) this.supersedePair(open, p, spent!);
+      head = open
+        ? `${open.id} (${spent}) is cancelled, and its legs no longer count for ${w.id}: filed ${p.id}, a retry, ${pairText(p.pair!)}, with fresh legs. Only ${p.id}'s report resumes you, never one from ${open.id}'s legs. The dispatcher starts its legs together, one new worker on each computer, as soon as that many computers have room at once.`
+        : `Filed ${p.id}, ${pairText(p.pair!)}, for ${w.id}. The dispatcher starts its legs together, one new worker on each computer, as soon as that many computers have room at once; each leg's first message says which leg it is and where the others are.`;
+    }
     const blocked = this.workerBlocked(sessionId, { request: w.id, reports: [p.id], what: `pair run ${p.id}: ${what}` });
-    const head = open
-      ? `${w.id} already has an open pair run, ${p.id} (${p.status}: ${clip(p.title, 80)}); you wait on it, and nothing new was filed.`
-      : `Filed ${p.id}, ${pairText(p.pair!)}, for ${w.id}. The dispatcher starts its legs together, one new worker on each computer, as soon as that many computers have room at once; each leg's first message says which leg it is and where the others are.`;
     return `${head} ${blocked} Commit and push your work before the turn ends: your sandbox is then released at once for other work, and you are resumed (in a free sandbox on your machine, on your branch) when the pair's host leg reports its result.`;
+  }
+
+  /**
+   * Why an open pair run is spent, so asking again files a fresh one (w2041), or undefined: it is waited on. w1976 (the pair
+   * run for w1904's PR #2364): its client leg sat on lothlaptop, whose Tailscale was stuck, then offline; its host leg said
+   * DONE with the check not run. w1904's worker asked "retry" and "retry 2", and each joined w1976 again, and was resumed at
+   * once by the old host leg's DONE. Spent: a leg already said DONE (the run reported, and the asker asks again), a leg's
+   * computer is offline or its worker errored, or the asker says retry. A run Queued or running with every leg healthy is
+   * waited on (a worker that asks twice by mistake does not start a second run).
+   */
+  private pairSpent(p: WorkItem, retry: boolean): string | undefined {
+    if (!p.pair?.started) return undefined;
+    if (Object.keys(doneOf(p)).length) return `its legs ${Object.keys(doneOf(p)).join(', ')} already reported`;
+    const failed = this.pairFailedOn(p);
+    if (failed.length) return `a leg failed on ${failed.join(', ')}`;
+    if (retry) return 'retried by its asker';
+    return undefined;
+  }
+
+  /** The computers of a started pair run's legs that failed (w2041): offline now, its worker errored, or no DONE while another leg said DONE. */
+  private pairFailedOn(p: WorkItem): string[] {
+    const legs = p.pair?.started?.legs ?? [];
+    const done = doneOf(p);
+    const anyDone = Object.keys(done).length > 0;
+    const out: string[] = [];
+    for (const l of legs) {
+      const machine = l.sandbox.split('/')[0].toLowerCase();
+      const s = this.store.sessions.get(l.session);
+      const offline = this.d.machineOnline?.(machine) === false;
+      const errored = s?.status === 'error';
+      const stuck = anyDone && !done[l.session];
+      if ((offline || errored || stuck) && !out.includes(machine)) out.push(machine);
+    }
+    return out;
+  }
+
+  /** A spent pair run replaced by its retry (w2041): cancelled, so its legs' reports no longer reach the asker and placeAgain frees them. */
+  private supersedePair(old: WorkItem, retry: WorkItem, why: string): void {
+    settleByHand(old);
+    old.status = 'cancelled';
+    old.outcome = `superseded by ${retry.id}, a retry (${why})`;
+    this.stamp(old, `cancelled: ${why}; ${old.pair?.for ?? 'its asker'} asked again, so ${retry.id} runs it with fresh legs${retry.pair?.avoid?.length ? `, not on ${retry.pair.avoid.join(' or ')}` : ''} (w2041)`);
+    this.store.putWork(old);
+    for (const sid of old.sessionIds) {
+      const s = this.store.sessions.get(sid);
+      if (!s || s.kind !== 'worker' || s.status === 'stopped' || s.status === 'error' || doneOf(old)[sid]) continue;
+      try {
+        this.sessions.send(sid, `[ledger] ${old.id} "${clip(old.title, 80)}" is cancelled: ${retry.id} runs it again with fresh legs (w2041). Stop your leg of ${old.id}; nothing more is needed from you on it.`, 'system');
+      } catch {
+        // gone or at a limit: placeAgain stops it once its request is closed
+      }
+    }
   }
 
   /**
@@ -3312,15 +3381,23 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
   }
 
   /** The pair request request_pair files (w1945): the asking request's people and priority, a game sandbox per leg. */
-  private newPair(w: WorkItem, sessionId: string, x: { what: string; brief: string; legs: number; crossOs?: string; timed: boolean }): WorkItem {
+  private newPair(w: WorkItem, sessionId: string, x: { what: string; brief: string; legs: number; crossOs?: string; timed: boolean; retryOf?: string; avoid?: string[] }): WorkItem {
     const now = this.now().toISOString();
-    const pair: WorkPair = { legs: x.legs, for: w.id, forSession: sessionId, ...(x.crossOs ? { crossOs: x.crossOs } : {}), ...(x.timed ? { timed: true } : {}) };
+    const pair: WorkPair = {
+      legs: x.legs,
+      for: w.id,
+      forSession: sessionId,
+      ...(x.crossOs ? { crossOs: x.crossOs } : {}),
+      ...(x.timed ? { timed: true } : {}),
+      ...(x.retryOf ? { retryOf: x.retryOf } : {}),
+      ...(x.avoid?.length ? { avoid: x.avoid } : {}),
+    };
     const title = clip(`Pair run for ${w.id}: ${x.what}`, 120);
     const brief = clip(
       [
         x.brief,
         '',
-        `FF Factory filed this for worker ${sessionId} on ${w.id} (w1945, request_pair): ${pairText(pair)}. Its legs start together, one worker on each computer (start_agent with pair_sandboxes); each leg's first message says which leg it is and where the others are, and message_pair reaches them. ${w.id}'s worker is Blocked on this request's report: the host leg (leg 1) reports the result with a line "For ${w.id}:" (what ran, the commit every leg ran, what the check compared and found, any desync report files), and every leg ends with DONE once the run is over. Do not merge ${w.id}'s pull request: its own worker does.`,
+        `FF Factory filed this for worker ${sessionId} on ${w.id} (w1945, request_pair): ${pairText(pair)}. Its legs start together, one worker on each computer (start_agent with pair_sandboxes); each leg's first message says which leg it is and where the others are, and message_pair reaches them. ${w.id}'s worker is Blocked on this request's report: the host leg (leg 1) reports the result with a line "For ${w.id}:" (what ran, the commit every leg ran, what the check compared and found, any desync report files), and every leg ends with DONE once the run is over. Do not merge ${w.id}'s pull request: its own worker does.${x.retryOf ? ` This is a retry of ${x.retryOf}, whose legs did not deliver the result (w2041)${x.avoid?.length ? `: no leg goes on ${x.avoid.join(' or ')}, where one failed` : ''}; start it fresh, nothing of ${x.retryOf}'s legs carries over.` : ''}`,
       ].join('\n'),
       8000,
     );
@@ -3833,13 +3910,23 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       }
       // Its part is done, whatever else is left (w434: one worker's DONE closed w428 while another was still on it). The
       // reports' text is kept for a later re-check (recheckDone): each DONE of this worker's on it, newest last (w515).
-      const was = doneOf(w)[s.id]?.text;
+      const prior = doneOf(w)[s.id];
+      const was = prior?.text;
       w.done = { ...doneOf(w), [s.id]: { at: this.now().toISOString(), report, text: (was ? `${was}\n\n${text}` : text).slice(-DONE_TEXT_CHARS) } };
       const others = this.stillOn(w, s.id);
       if (others.length) {
+        const still = others.join(', ');
+        w.done[s.id].told = still;
+        // w2041: told once per change. Each notice resumed w1976's host leg f09cb847, whose answer said DONE again and drew
+        // the same notice: about 8 rounds at 12:50Z, each "nothing has changed". A DONE again while the same workers are on
+        // it is recorded (its text kept) and answered with nothing.
+        if (prior?.told === still) {
+          this.store.putWork(w);
+          continue;
+        }
         const who = others.map((id) => this.workerLine(id)).join(', ');
-        parts.push(`${id}: your part is recorded as done; ${id} stays open while ${who} ${others.length > 1 ? 'are' : 'is'} still on it, and closes once each has said DONE or ended with nothing pending`);
-        this.stamp(w, `${speaker} said DONE for its part; still on it: ${others.join(', ')}`);
+        parts.push(`${id}: your part is recorded as done; ${id} stays open while ${who} ${others.length > 1 ? 'are' : 'is'} still on it, and closes once each has said DONE or ended with nothing pending. Nothing more is needed from you, and you are not told this again unless that changes`);
+        this.stamp(w, `${speaker} said DONE for its part; still on it: ${still}`);
         this.store.putWork(w);
         continue;
       }

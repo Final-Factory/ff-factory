@@ -1910,6 +1910,13 @@ export interface WorkPair {
   timed?: boolean;
   /** When its legs started together, and where: leg 1 (the host) first. */
   started?: { at: string; legs: { session: string; sandbox: string }[] };
+  /**
+   * A retry (w2041): the earlier pair run of the same request it replaces (cancelled when this one was filed), and the
+   * computers none of its legs may go on: an earlier leg's computer that was offline, whose worker errored or never said
+   * DONE while another leg did (w1976: lothlaptop's Tailscale was stuck), or one the asking worker named.
+   */
+  retryOf?: string;
+  avoid?: string[];
 }
 
 /** A request for work that a person's orchestrator filed with the dispatcher, and what became of it. */
@@ -1975,7 +1982,7 @@ export interface WorkItem {
    * the full text of that worker's DONE reports on it, newest last (the last 4000 characters), which a refused DONE is
    * checked against again when its PRs change (w515; absent on DONEs recorded before).
    */
-  done?: Record<string, { at: string; report: string; text?: string }>;
+  done?: Record<string, { at: string; report: string; text?: string; told?: string }>;
   /**
    * When a person (or an owner for them) last reopened it from closed (w731; absent when never). A reopen invalidates
    * what came before it: the workers' DONEs are dropped, the earlier PRs are no longer its own (a PR created before this

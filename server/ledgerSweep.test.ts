@@ -788,6 +788,35 @@ test('w419: merged and open for a step after the merge, quiet 6 hours: its worke
 
 // ---------------------------------------------------------------- w434: a request with several workers
 
+test('w2041: a worker whose part is done is told once that the request waits on another worker, not again on each DONE while that is unchanged (w1976: 8 identical notices to f09cb847 at 12:50Z)', async (t) => {
+  const { request, worker, o, get, sessions } = setup(t);
+  const sent: { id: string; text: string }[] = [];
+  (sessions as unknown as { send: (id: string, text: string) => void }).send = (id, text) => void sent.push({ id, text });
+  request('w1976', { sessionIds: ['f09cb847', '92fef195'] });
+  const host = worker('f09cb847');
+  worker('92fef195', { status: 'running' });
+  const done = 'My host leg of w1976 is finished.\nDONE: w1976\nLearned: nothing new';
+  o.workerTurnEnded(host, done);
+  const told = () => sent.filter((m) => m.id === 'f09cb847' && m.text.startsWith('[ledger]'));
+  assert.equal(told().length, 1);
+  assert.match(told()[0].text, /w1976: your part is recorded as done; w1976 stays open while .*92fef195.* is still on it.*you are not told this again unless that changes/);
+  // Its answers to that notice say DONE again: recorded, never answered with the same notice (the loop's other half).
+  for (let i = 0; i < 7; i++) o.workerTurnEnded(host, `Nothing has changed.\n${done}`);
+  assert.equal(told().length, 1, 'one notice, not eight');
+  assert.equal(get('w1976').log.filter((l) => /said DONE for its part/.test(l)).length, 1);
+  assert.match(get('w1976').done!['f09cb847'].text ?? '', /Nothing has changed/);
+  // What it waits on changes (a third worker joins): told again, once.
+  request('w1976', { ...get('w1976'), sessionIds: ['f09cb847', '92fef195', 's3'] });
+  worker('s3', { status: 'running' });
+  o.workerTurnEnded(host, done);
+  o.workerTurnEnded(host, done);
+  assert.equal(told().length, 2);
+  // The last worker's DONE still closes it.
+  o.workerTurnEnded(worker('92fef195'), 'Client leg done.\nDONE: w1976\nLearned: nothing new');
+  o.workerTurnEnded(worker('s3'), 'Done.\nDONE: w1976\nLearned: nothing new');
+  assert.equal(get('w1976').status, 'done');
+});
+
 test('w434: with two workers on a request, the first one\'s DONE records its part and keeps it open; the last one\'s closes it', async (t) => {
   const { request, worker, o, get, store } = setup(t);
   // w428 on 2026-10-05: worker 2092b20c's DONE after its hardware read closed the request while the placement work was unpushed.

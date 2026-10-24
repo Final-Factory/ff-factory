@@ -13,7 +13,7 @@ import { OPS_ID } from './opsWorker.ts';
 import { crossOwnerLine, delegationConstraints, DispatcherChatRefused, DISPATCHER_CHAT_REFUSED, FILINGS_PER_MESSAGE, loopGuards, FOLLOW_UPS_PER_MESSAGE, MESSAGES_PER_PERSON, OWNER_LOOP_MESSAGES_PER_HOUR, PERSON_MESSAGE_CHARS, type Orchestrators } from './orchestrators.ts';
 import { configPath, type Config } from './config.ts';
 import { memoryDirFor } from './orchestratorMemory.ts';
-import { handoverNote, requestAsFiled } from './work.ts';
+import { handoverNote, isOpen, requestAsFiled } from './work.ts';
 import { BlockerWatch } from './blockerWatch.ts';
 import { poolForRef, type GatePoolToken } from './usageGate.ts';
 import { personForWork, sessionPerson, setVaultContext } from './vault.ts';
@@ -23,13 +23,13 @@ import { HELD_MARK, inPersonWords } from '../shared/conditional.ts';
 import { splitReply, splitSent } from '../shared/replies.ts';
 import type { PrHealth } from '../shared/blockers.ts';
 import { answersText } from '../shared/questionCard.ts';
-import { PAIR_HOLD_MS, TIMED_HOLD_MS } from '../shared/capacity.ts';
+import { PAIR_HOLD_MS, TIMED_HOLD_MS, unfitWhy } from '../shared/capacity.ts';
 import { benchLockIn, type Requester, type SessionInfo, type TranscriptEvent, type UserInfo, type WorkItem } from '../shared/types.ts';
 import { LIVE_HOLD_MS, releaseWhy } from './placeAgain.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { startTestMachine, type TestMachineOptions } from './testMachine.ts';
 import { afterMergeReason } from './ledgerRules.ts';
-import { timedLine, type Computer, type RoomNow } from './placement.ts';
+import { roomForWork, timedLine, type Computer, type RoomNow } from './placement.ts';
 import { TOOL_MANIFEST, deferredToolsLine, toolsOf } from './toolManifest.ts';
 import { buildOptions } from './launch.ts';
 
@@ -5207,6 +5207,91 @@ test('w1945: request_pair files one pair request and blocks the asking worker on
   const again = String(await a.h.request_pair!({ what: 'MP-lowore-pin-pair again', brief: 'Same.' }));
   assert.ok(again.startsWith(`w665 already has an open pair run, ${id} (new: `), again);
   assert.equal([...store.work.values()].filter((x) => x.pair).length, 1);
+});
+
+test('w2041: w1976 as it happened: a retry of a spent pair run cancels it and files a fresh one off the failed computer; only the fresh run resumes the asker, never an old leg', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o } = env;
+  agentsRoom(agents, []);
+  putRequests(store, [{ id: 'w1904', by: BEN, status: 'active' }]);
+  const a = await startedFor(env, 'w1904');
+  const ask = async (extra: Record<string, unknown> = {}) => String(await a.h.request_pair!({ what: 'MP-W1904-connector-filter-list on PR #2364', brief: 'Run MP-W1904-connector-filter-list at c7891d5; pass: 0 diverged.', ...extra }));
+  const first = /^Filed (w\d+)/.exec(await ask())![1];
+  // Its legs started: the host on pc, the client on lothlaptop (a computer this portal knows, not connected: offline).
+  const worker = (id: string) => store.putSession({ id, kind: 'worker', title: `leg ${id}`, status: 'idle', permissionMode: 'bypassPermissions', createdAt: T0, lastActivityAt: T0, turns: 1, costUsd: 0, pendingPermissions: [], requestedBy: BEN } as unknown as SessionInfo);
+  worker('f09cb847');
+  worker('92fef195');
+  const p = store.work.get(first)!;
+  p.status = 'active';
+  p.sessionIds = ['f09cb847', '92fef195'];
+  p.pair = { ...p.pair!, started: { at: T0, legs: [{ session: 'f09cb847', sandbox: 'pc/slot5' }, { session: '92fef195', sandbox: 'lothlaptop/slot1' }] } };
+  store.putWork(p);
+
+  // Running with every leg healthy (lothlaptop not known yet: not offline) and nothing reported: asked again, it waits on it.
+  const again = await ask();
+  assert.ok(again.startsWith(`w1904 already has an open pair run, ${first} (active: `), again);
+  assert.match(again, /ask again with retry: true and avoid naming that computer/);
+
+  // lothlaptop goes offline; the host leg says DONE with the check not run (w1976, 12:46Z).
+  store.putMachine({ ...store.machines.get('pc')!, id: 'lothlaptop' });
+  o.workerTurnEnded(store.sessions.get('f09cb847')!, 'For w1904: NOT RUN: the client on lothlaptop never joined (Tailscale stuck).\nDONE: ' + first + '\nLearned: nothing new');
+  assert.equal(store.work.get(first)!.status, 'active', 'the client leg 92fef195 is still on it');
+
+  // "retry": the spent run is cancelled, a fresh one filed with new legs, not on lothlaptop.
+  const retry = await ask({ what: 'MP-W1904-connector-filter-list on PR #2364 (retry)' });
+  const fresh = /filed (w\d+), a retry/.exec(retry)?.[1];
+  assert.ok(fresh && fresh !== first, retry);
+  assert.match(retry, new RegExp(`^${first} \\(its legs f09cb847 already reported\\) is cancelled`));
+  assert.match(retry, new RegExp(`Only ${fresh}'s report resumes you, never one from ${first}'s legs`));
+  const old = store.work.get(first)!;
+  assert.equal(old.status, 'cancelled');
+  assert.match(old.outcome ?? '', new RegExp(`^superseded by ${fresh}, a retry`));
+  const n = store.work.get(fresh!)!;
+  assert.equal(n.status, 'new');
+  assert.deepEqual(n.sessionIds, [], 'fresh legs: none of the old run carries over');
+  assert.equal(n.pair!.retryOf, first);
+  assert.deepEqual(n.pair!.avoid, ['lothlaptop'], 'the offline client computer; the host computer pc is fine');
+  assert.match(n.constraints ?? '', /not on lothlaptop$/);
+  assert.match(n.brief, new RegExp(`This is a retry of ${first}.*no leg goes on lothlaptop`));
+  assert.match(unfitWhy(n, 'lothlaptop', undefined) ?? '', /^lothlaptop is where an earlier leg of this pair run failed/);
+  assert.equal(unfitWhy(n, 'pc', undefined), undefined);
+  const w = store.work.get('w1904')!;
+  assert.deepEqual([w.status, w.blocked?.ref, w.blocked?.on], ['blocked', fresh, 'report']);
+
+  // The old host leg reports again (DONE: <old>, "For w1904:"): the asker stays blocked on the fresh run.
+  o.workerTurnEnded({ ...store.sessions.get('f09cb847')!, lastActivityAt: new Date(Date.now() + 60_000).toISOString() }, `For w1904: nothing has changed.\nDONE: ${first}\nLearned: nothing new`);
+  const watch = new BlockerWatch({ store, orchestrators: o });
+  assert.equal((await watch.tick()).has('w1904'), false, 'no report of the old run clears it');
+  assert.deepEqual([store.work.get('w1904')!.status, store.work.get('w1904')!.blocked?.ref], ['blocked', fresh]);
+  // A worker that asks once more while the fresh run is Queued waits on it: no third run.
+  const third = await ask();
+  assert.ok(third.startsWith(`w1904 already has an open pair run, ${fresh} (new: `), third);
+  assert.equal([...store.work.values()].filter((x) => x.pair && isOpen(x)).length, 1);
+});
+
+test('w2041: retry: true replaces a running pair run that cannot deliver; avoid keeps the named computer off its legs, and start_agent refuses a leg there', async (t) => {
+  const env = await twoComputers(t);
+  const { store, dispatcher, call } = env;
+  putRequests(store, [{ id: 'w665', by: BEN, status: 'active' }]);
+  const a = await startedFor(env, 'w665');
+  const ask = async (extra: Record<string, unknown> = {}) => String(await a.h.request_pair!({ what: 'MP-lowore-pin-pair on PR #2340', brief: 'Run it.', ...extra }));
+  const first = /^Filed (w\d+)/.exec(await ask())![1];
+  const p = store.work.get(first)!;
+  p.status = 'active';
+  p.pair = { ...p.pair!, started: { at: T0, legs: [{ session: 'h1', sandbox: 'pc/slot9' }, { session: 'c1', sandbox: 'beast/slot2' }] } };
+  store.putWork(p);
+  // Both computers online, no leg reported: only the asker's retry: true replaces it; avoid names the computer it saw fail.
+  const retry = await ask({ retry: true, avoid: ['Beast'] });
+  const fresh = /filed (w\d+), a retry/.exec(retry)![1];
+  assert.ok(retry.startsWith(`${first} (retried by its asker) is cancelled`), retry);
+  assert.equal(store.work.get(first)!.status, 'cancelled');
+  const n = store.work.get(fresh)!;
+  assert.deepEqual(n.pair!.avoid, ['beast']);
+  assert.deepEqual(roomForWork({ game: ['pc', 'beast'], agent: [], held: [] }, n).ids, [], 'one computer left is no room for two legs');
+  const leg = await call(dispatcher().info, 'start_agent', { work_id: fresh, prompt: 'Run it.', title: 'pair', sandbox: 'beast/slot1', pair_sandboxes: ['pc/alpha'] });
+  assert.equal(leg.isError, true);
+  assert.ok(leg.text.includes(`leg 1 (the host) on beast/slot1: ${fresh} is a retry of ${first}, whose leg failed on beast: its legs go on other computers (w2041). Nothing was started.`), leg.text);
+  assert.deepEqual(store.work.get(fresh)!.sessionIds, []);
 });
 
 /** Two Windows computers, pc (alpha) and beast (slot1), both with room (w1945). */
