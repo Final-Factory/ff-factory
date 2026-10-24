@@ -69,6 +69,7 @@ import { permissionAccess, permissionWhat, type PermissionAccess } from '../shar
 import { OPS_ID, OPS_PEOPLE } from './opsWorker.ts';
 import { isSamePerson, personForWork, sessionPerson, tokenPersonForWork } from './vault.ts';
 import { MERGE_ON_GREEN_MARK } from './mergeOnGreen.ts';
+import { commitsIn, normPr, pairCommitsOf, pairPrOf, pairRanCommit, prIn, resultFor, sameCommit, samePr } from './pairRuns.ts';
 import type { AttachmentRef, ConditionalDecision, OpenAsk, WorkNeedsYou, GateResume, Machine, WorkAutoClosed, WorkBlocker, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPair, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
 import { WORK_PRIORITIES } from '../shared/types.ts';
 
@@ -2707,10 +2708,25 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
     const w = this.requireWork(input.id);
     if (w.approval?.state === 'pending') throw new Error(`${w.id} waits for a person to approve it (intake); it is not yours to decide yet`);
     const into = input.into ? this.requireWork(input.into) : undefined;
+    // w2057: a pair run that repeats one that already finished (w665's second run of PR #2340, queued at 15:58 after w1936
+    // passed) could not be dropped: start_agent refuses one leg, and a queued request cannot be queued again. pair_legs 0
+    // clears the mark of a pair run whose legs never started; done closes one that never had a worker as a repeat of the run
+    // that finished (finishedTwinOf), with that run's result as its outcome, so whoever waited on it is resumed with it.
+    const twin = input.action === 'done' && w.pair && !w.pair.started && !w.sessionIds.length ? this.finishedTwinOf(w) : undefined;
+    if (input.pair_legs === 0) {
+      if (!w.pair) throw new Error(`${w.id} is not a pair run: pair_legs 0 clears the mark of one`);
+      if (w.pair.started) throw new Error(`${w.id}'s legs started together at ${w.pair.started.at.slice(11, 16)} UTC: it stays a pair run until they end`);
+      const was = pairText(w.pair);
+      w.pair = undefined;
+      this.roomFlags.delete(w.id);
+      this.stamp(w, `dispatcher: no longer a pair run (it was ${was}): ${input.note.trim()} (w2057, pair_legs 0)`);
+      this.store.putWork(w);
+      if (input.action === 'queue' && w.status === 'queued') return `${w.id} is no longer a pair run (it was ${was}) and stays Queued as single work. To drop it as a repeat of a finished run, decide_work reject (or done) saying which run.`;
+    }
     const problem = decisionProblem(w, input.action, into);
     if (problem) throw new Error(problem);
     // w1870 (lothsahn: "doesn't close out jobs with errors"): not on a worker's errored or interrupted turn, nor without its DONE.
-    const hold = input.action === 'done' ? this.closeHold(w) : undefined;
+    const hold = input.action === 'done' && !twin ? this.closeHold(w) : undefined;
     if (hold) throw new Error(`${w.id} is not closed as done: ${hold} (w1870: no automatic close on an errored turn, or without its worker's DONE). Resume its worker (message_agent) with the error and what is left, so it finishes and says DONE: ${w.id}; place it again if it was stopped on purpose. A person who says it is done closes it through their own orchestrator (update_work close: done).`);
     const note = input.note.trim();
     let what = '';
@@ -2785,6 +2801,9 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       // its WRONG flag and the hold read all its legs; a worker's request_pair marks its own.
       if (input.pair_legs !== undefined && !(Number.isInteger(input.pair_legs) && input.pair_legs >= 2 && input.pair_legs <= PAIR_MAX_LEGS)) throw new Error(`pair_legs is the number of legs of a pair run, 2 to ${PAIR_MAX_LEGS}, not ${input.pair_legs}`);
       const pair = input.pair_legs && !w.pair?.started ? { ...(w.pair ?? {}), legs: input.pair_legs } : w.pair;
+      // w2057: the mark is not set on a repeat of a pair run that finished on the same commit (w665's second run of PR #2340).
+      const repeat = input.pair_legs && pair && !w.pair?.started ? this.finishedTwinOf({ ...w, pair }) : undefined;
+      if (repeat?.sure) throw new Error(`${w.id} repeats pair run ${repeat.twin.id} "${clip(repeat.twin.title, 80)}", which already finished on the same pull request and commit (w2057). Its result: "${clip(this.pairResult(repeat.twin, ''), 400)}". Do not queue it: decide_work reject (or done) saying it repeats ${repeat.twin.id}, and tell whoever asked for it the result.`);
       // w1944: room on a computer it cannot run on (a Mac for an MP scenario) does not refuse the queue.
       const fitting = roomForWork(facts, { ...w, pair }, needs);
       // w1944: room that queued work ahead of it takes (one free sandbox, older requests that fit it) is not its: it queues.
@@ -2810,7 +2829,7 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       } else {
         w.queuedFor = { at: this.now().toISOString(), ...(needs.length ? { needs } : {}) };
         if (pair) w.pair = pair;
-        what = `queued for capacity${input.pair_legs && pair ? ` (marked ${pairText(pair)})` : ''}${needs.length ? ` on ${needs.join(' or ')}` : ''}${held ? `; ${held}` : ''}`;
+        what = `queued for capacity${input.pair_legs && pair ? ` (marked ${pairText(pair)})` : ''}${needs.length ? ` on ${needs.join(' or ')}` : ''}${held ? `; ${held}` : ''}${repeat ? `; note: pair run ${repeat.twin.id} of the same pull request already finished (on ${pairCommitsOf(repeat.twin).map((c) => c.slice(0, 10)).join(', ') || 'a commit it does not record'}): if this runs the same commit it is a repeat, so reject it (w2057)` : ''}`;
       }
     } else if (input.action === 'block') {
       const now = this.now();
@@ -2843,7 +2862,12 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
     // Out of stalled by a decision (w643: block, a stalled request found to wait on something): no stale stall reason.
     if (isOpen(w)) w.stalled = undefined;
     if (input.action === 'reject' || input.action === 'done') w.outcome = clip(note, 300);
+    if (twin) {
+      w.outcome = clip(`${note} (a repeat of pair run ${twin.twin.id}, which finished${twin.sure ? ' on the same commit' : ''}; its result: ${this.pairResult(twin.twin, w.pair?.for ?? '')})`, 1500);
+      what = `${what || 'closed as done'}: a repeat of ${twin.twin.id} (w2057)`;
+    }
     this.stamp(w, `dispatcher: ${what}: ${note}`);
+    if (twin) this.pairFinished(w);
     this.store.putWork(w);
     if (input.action === 'block') this.tellReportWaited(w, gatesOf(w).filter((g) => !keptBefore.some((k) => sameGate(k, g))));
     // A question is for the person who asked, as [needs you] (w1378); the rest is news for everyone the request is for.
@@ -3032,11 +3056,19 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
     // A deploy (w890): its worker was released while it waited, and does its check after the deploy now.
     const deploy = gates.some((g) => g.kind === 'deploy');
     const prs = ciGates.map((g) => g.ref).filter(Boolean).join(', ');
+    // w2057: a pair run's result travels with the resume (d558ba14 was told nothing of w1936's pass), and the run is marked
+    // told, so its close (pairFinished) does not send it again.
+    const pairs = gates.filter((g) => g.kind === 'request' && g.on === 'report' && g.ref).map((g) => this.store.work.get(g.ref!.toLowerCase())).filter((p): p is WorkItem => !!p?.pair);
+    const results = pairs.map((p) => ({ p, r: this.pairResult(p, w.id) })).filter(({ r }) => !cleared.includes(r.split('\n')[0].slice(0, 80))).map(({ p, r }) => ` Pair run ${p.id}'s result: "${r}"`).join('');
+    for (const p of pairs) {
+      p.pair = { ...p.pair!, told: [...new Set([...(p.pair!.told ?? []), w.id])] };
+      this.store.putWork(p);
+    }
     const yours = owner.gone
       ? ` Worker ${owner.gone} set this gate and is gone, so ${ciGates.length ? `the merge of ${prs} is yours now: you own it (merge on green, fix on red)` : 'what it waited for is yours to carry on now'}.`
       : '';
     const held = w.heldCheckIns?.find((h) => h.session === sid);
-    const note = `${w.id} is unblocked: ${cleared}.${yours}${ci ? ` Run ff-pr merge now${prs ? ` (${prs})` : ''}: it merges on green, or names the red run to read (gh run view <run> --log-failed) and fix.` : ''}${deploy ? ' The deploy you waited for has happened: do the check that comes after it now (the live read, the health check), then report.' : ''} Carry on from where you left it.${held ? ` Your own check-in, which the block cancelled, is folded into this message; its note was: ${held.note}` : ''}`;
+    const note = `${w.id} is unblocked: ${cleared}.${results}${yours}${ci ? ` Run ff-pr merge now${prs ? ` (${prs})` : ''}: it merges on green, or names the red run to read (gh run view <run> --log-failed) and fix.` : ''}${deploy ? ' The deploy you waited for has happened: do the check that comes after it now (the live read, the health check), then report.' : ''} Carry on from where you left it.${held ? ` Your own check-in, which the block cancelled, is folded into this message; its note was: ${held.note}` : ''}`;
     if (!this.wakeNow(sid, note, w.id)) return [];
     this.noteResume(w, sid, note);
     return [sid];
@@ -3215,7 +3247,7 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
    * have room at once, and its own request is Blocked on that request's report: the w890 release frees its sandbox when its
    * turn ends, and the report resumes it. One open pair run per request: asked again, it waits on the one there is.
    */
-  filePair(sessionId: string, a: { what?: string; brief?: string; legs?: number; cross_os?: string; timed?: boolean; request?: string; retry?: boolean; avoid?: string[] }): string {
+  filePair(sessionId: string, a: { what?: string; brief?: string; legs?: number; cross_os?: string; timed?: boolean; request?: string; retry?: boolean; avoid?: string[]; pr?: string; commit?: string }): string {
     const w = this.workerRequest(sessionId, a.request, 'request_pair');
     const what = clip(String(a.what ?? '').replace(/\s+/g, ' ').trim(), 100);
     const brief = String(a.brief ?? '').trim();
@@ -3224,8 +3256,37 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
     if (!Number.isInteger(legs) || legs < 2 || legs > PAIR_MAX_LEGS) throw new Error(`legs is 2 to ${PAIR_MAX_LEGS}: the computers it needs at once`);
     const crossOs = String(a.cross_os ?? '').replace(/\s+/g, ' ').trim().slice(0, 300) || undefined;
     const named = [...new Set((a.avoid ?? []).map((m) => String(m).trim().toLowerCase()).filter(Boolean))];
+    const commit = String(a.commit ?? '').trim().toLowerCase() || undefined;
+    if (commit && !/^[0-9a-f]{7,40}$/.test(commit)) throw new Error(`commit is the head commit the legs run (git rev-parse HEAD, 7 to 40 hex), not "${clip(commit, 60)}"`);
+    if (a.pr?.trim() && !normPr(a.pr)) throw new Error(`pr is the pull request the legs check ("#2340", "Final-Factory/FinalFactory#2340" or its link), not "${clip(a.pr, 80)}"`);
+    const openPrs = (w.prs ?? []).filter((x) => x.state === 'open');
+    const pr = normPr(a.pr) ?? prIn(what) ?? prIn(brief) ?? (openPrs.length === 1 ? `${openPrs[0].repo}#${openPrs[0].number}` : undefined);
     const open = [...this.store.work.values()].find((x) => x.pair?.for === w.id && isOpen(x));
     const spent = open && this.pairSpent(open, a.retry === true);
+    // w2057: w665's PR #2340 had a pair run (w1936, filed by hand) that passed while its worker waited, and a second one was
+    // queued after it. Without an open run of its own, a filing joins the open run of the same pull request, and is answered
+    // with the finished run of the same pull request and commit; retry: true asks for a fresh run anyway.
+    if (!open && pr && a.retry !== true) {
+      const twin = this.openPairOf(pr, commit, w.id);
+      if (twin) {
+        this.stamp(twin, `worker ${sessionId} on ${w.id} asked for a pair run of ${pr} (request_pair) and waits on this one: same pull request (w2057)`);
+        this.store.putWork(twin);
+        const blocked = this.workerBlocked(sessionId, { request: w.id, reports: [twin.id], what: `pair run ${twin.id} of ${pr}: ${what}` });
+        return `${pr} already has an open pair run, ${twin.id} (${twin.status}: ${clip(twin.title, 80)}), filed ${twin.pair?.for ? `for ${twin.pair.for}` : 'by hand'}; you wait on it, and nothing new was filed (w2057).${twin.pair?.commit && commit && !sameCommit(twin.pair.commit, commit) ? ` It runs ${twin.pair.commit.slice(0, 10)}, not your ${commit.slice(0, 10)}: if your change since matters to the check, ask again with retry: true once it reports.` : ''} ${blocked} Commit and push your work before the turn ends: your sandbox is then released at once for other work, and you are resumed with its result when its host leg reports.`;
+      }
+      const done = this.finishedPairsOf(pr);
+      const same = commit ? done.find((x) => pairRanCommit(x, commit)) : undefined;
+      if (same) {
+        this.stamp(w, `worker ${sessionId} asked for a pair run of ${pr} at ${commit!.slice(0, 10)} (request_pair): answered with ${same.id}, which finished on that commit; nothing filed (w2057)`);
+        this.store.putWork(w);
+        return `Nothing filed: ${same.id} "${clip(same.title, 80)}", a pair run of ${pr} on ${commit!.slice(0, 10)}, already finished (w2057). Its result: "${this.pairResult(same, w.id)}". Carry on from it now (merge on its pass, fix on its fail); your request is not blocked. Only if that run could not have checked your change (a leg failed, the check did not run), ask again with retry: true.`;
+      }
+      if (!commit && done.length) {
+        const d = done[0];
+        const ran = pairCommitsOf(d).map((c) => c.slice(0, 10));
+        throw new Error(`${d.id} "${clip(d.title, 80)}", a pair run of ${pr}, already finished${ran.length ? ` (it ran ${ran.join(', ')})` : ' (its commit is not recorded)'}: pass commit, the head commit your legs would run (git rev-parse HEAD). On the same commit you get that run's result and nothing is filed; on another one a fresh run is filed (w2057). Its result: "${this.pairResult(d, w.id).slice(0, 400)}"`);
+      }
+    }
     let p: WorkItem;
     let head: string;
     if (open && !spent) {
@@ -3239,7 +3300,7 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       head = `${w.id} already has an open pair run, ${p.id} (${p.status}: ${clip(p.title, 80)}); you wait on it, and nothing new was filed.${p.pair?.started ? ' Its legs are running and none has reported yet: if they cannot deliver (a leg is stuck on its computer), ask again with retry: true and avoid naming that computer.' : ''}`;
     } else {
       const avoid = [...new Set([...(open ? this.pairFailedOn(open) : []), ...named])];
-      p = this.newPair(w, sessionId, { what, brief, legs, crossOs, timed: a.timed === true, ...(open ? { retryOf: open.id } : {}), avoid });
+      p = this.newPair(w, sessionId, { what, brief, legs, crossOs, timed: a.timed === true, ...(open ? { retryOf: open.id } : {}), avoid, ...(pr ? { pr } : {}), ...(commit ? { commit } : {}) });
       if (open) this.supersedePair(open, p, spent!);
       head = open
         ? `${open.id} (${spent}) is cancelled, and its legs no longer count for ${w.id}: filed ${p.id}, a retry, ${pairText(p.pair!)}, with fresh legs. Only ${p.id}'s report resumes you, never one from ${open.id}'s legs. The dispatcher starts its legs together, one new worker on each computer, as soon as that many computers have room at once.`
@@ -3437,7 +3498,7 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
   }
 
   /** The pair request request_pair files (w1945): the asking request's people and priority, a game sandbox per leg. */
-  private newPair(w: WorkItem, sessionId: string, x: { what: string; brief: string; legs: number; crossOs?: string; timed: boolean; retryOf?: string; avoid?: string[] }): WorkItem {
+  private newPair(w: WorkItem, sessionId: string, x: { what: string; brief: string; legs: number; crossOs?: string; timed: boolean; retryOf?: string; avoid?: string[]; pr?: string; commit?: string }): WorkItem {
     const now = this.now().toISOString();
     const pair: WorkPair = {
       legs: x.legs,
@@ -3447,6 +3508,8 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       ...(x.timed ? { timed: true } : {}),
       ...(x.retryOf ? { retryOf: x.retryOf } : {}),
       ...(x.avoid?.length ? { avoid: x.avoid } : {}),
+      ...(x.pr ? { pr: x.pr } : {}),
+      ...(x.commit ? { commit: x.commit } : {}),
     };
     const title = clip(`Pair run for ${w.id}: ${x.what}`, 120);
     const brief = clip(
@@ -3493,6 +3556,105 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
     w.pair = { ...(w.pair ?? {}), ...(made.crossOs ? { crossOs: made.crossOs } : {}), legs: legs.length, started: { at, legs } };
     this.stamp(w, `its ${legs.length} legs started together (w1945): ${legs.map((l, i) => `leg ${i + 1}${i ? '' : ' (host)'} ${l.session} in ${l.sandbox}`).join(', ')}`);
     this.store.putWork(w);
+  }
+
+  /** An open pair run of pull request `pr` (w2057), for another request than `asker` or filed by hand; one on another known commit only when none runs `commit`. */
+  private openPairOf(pr: string, commit: string | undefined, asker: string): WorkItem | undefined {
+    const open = [...this.store.work.values()].filter((x) => x.pair && x.id !== asker && isOpen(x) && samePr(pairPrOf(x), pr));
+    return open.find((x) => !commit || !x.pair?.commit || sameCommit(x.pair.commit, commit)) ?? open[0];
+  }
+
+  /** The finished (done) pair runs of pull request `pr`, newest first (w2057). */
+  private finishedPairsOf(pr: string): WorkItem[] {
+    return [...this.store.work.values()].filter((x) => x.pair && x.status === 'done' && samePr(pairPrOf(x), pr)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  /**
+   * A pair run that repeats one that already finished (w2057): the done pair run of the same pull request on one of the
+   * commits `w`'s title or brief names (pairRuns.ts), or undefined. `anyCommit`: of the same pull request, when `w` names no commit.
+   */
+  finishedTwinOf(w: WorkItem): { twin: WorkItem; sure: boolean } | undefined {
+    const pr = pairPrOf(w);
+    if (!pr) return undefined;
+    const done = this.finishedPairsOf(pr).filter((x) => x.id !== w.id);
+    if (!done.length) return undefined;
+    const mine = w.pair?.commit ? [w.pair.commit] : commitsIn(`${w.title}\n${w.brief}`);
+    const same = done.find((x) => mine.some((c) => pairRanCommit(x, c)));
+    return same ? { twin: same, sure: true } : { twin: done[0], sure: false };
+  }
+
+  /** What a pair run reported for `waiter` (w2057): its host leg's report from its "For wNNN:" line, else a leg's DONE, else its outcome. */
+  private pairResult(p: WorkItem, waiter: string): string {
+    const host = p.pair?.started?.legs[0]?.session;
+    const done = doneOf(p);
+    const sids = [...new Set([...(host ? [host] : []), ...newestFirst(p)])];
+    for (const sid of sids) {
+      const text = done[sid]?.text ?? this.store.sessions.get(sid)?.lastResult;
+      const r = resultFor(text, waiter);
+      if (r) return r;
+    }
+    return resultFor(p.outcome, waiter) || 'its legs left no report';
+  }
+
+  /**
+   * The requests a pair run serves (w2057): the one it was filed for, those it names (relatedIds), and the open requests
+   * one of whose open pull requests it checks. Pair runs themselves aside.
+   */
+  private pairServes(p: WorkItem): { w: WorkItem; why: string }[] {
+    const pr = pairPrOf(p);
+    const out: { w: WorkItem; why: string }[] = [];
+    for (const r of this.store.work.values()) {
+      if (r.id === p.id || r.pair || !isOpen(r)) continue;
+      const why =
+        p.pair?.for === r.id
+          ? 'it was filed for it'
+          : (p.relatedIds ?? []).includes(r.id)
+            ? 'it names it'
+            : pr && (r.prs ?? []).some((x) => x.state === 'open' && samePr(`${x.repo}#${x.number}`, pr))
+              ? `it checks its pull request ${pr}`
+              : '';
+      if (why) out.push({ w: r, why });
+    }
+    return out;
+  }
+
+  /** Whether request `id` has a pair run filed that serves it (w2057, the turn-end pair-wait check): open, or finished. */
+  pairFiledFor(id: string): boolean {
+    const w = this.store.work.get(id.toLowerCase());
+    if (!w) return false;
+    if (w.pair) return true; // a leg of a pair run, or one itself
+    if (gatesOf(w).some((g) => g.kind === 'request' && !!g.ref && !!this.store.work.get(g.ref.toLowerCase())?.pair)) return true;
+    return [...this.store.work.values()].some((p) => p.pair && (isOpen(p) || p.status === 'done') && this.pairServes(p).some((s) => s.w.id === w.id));
+  }
+
+  /**
+   * A pair run closed as done (w2057): its result goes to the worker of every request it serves (pairServes) that was not
+   * told yet, and resumes it. w1936, the pair run of w665's PR #2340, was filed by hand and passed at 12:55 on 10-24;
+   * w665's worker d558ba14 was never told, kept waiting, and at 15:58 a second run of the same PR was queued. A request
+   * gated on the run's report is resumed by that gate (resumeGatedWorker) and is told nothing twice. Returns the ids told.
+   */
+  private pairFinished(p: WorkItem): string[] {
+    if (!p.pair) return [];
+    const pr = pairPrOf(p);
+    const told = new Set(p.pair.told ?? []);
+    const out: string[] = [];
+    for (const { w: r, why } of this.pairServes(p)) {
+      if (told.has(r.id)) continue;
+      told.add(r.id);
+      if (gatesOf(r).some((g) => g.kind === 'request' && g.ref === p.id)) continue;
+      const sid = newestFirst(r).find((s) => this.store.sessions.get(s)?.kind === 'worker');
+      const note = `[ledger] Pair run ${p.id} "${clip(p.title, 100)}"${pr ? ` of ${pr}` : ''} has finished (w2057; ${why}). Its result: "${this.pairResult(p, r.id)}". Carry on with ${r.id} from it now (merge on its pass, fix on its fail): nothing else runs it, and a request_pair for the same pull request and commit answers with this result.`;
+      const woke = !!sid && this.wakeNow(sid, note, r.id);
+      if (woke) this.noteResume(r, sid!, note);
+      else this.toDispatcher(`[ledger] Pair run ${p.id}${pr ? ` of ${pr}` : ''} finished, and ${r.id} "${clip(r.title, 80)}" (${why}) has no worker to tell: start it (start_agent with work_id "${r.id}") with the result: "${clip(this.pairResult(p, r.id), 600)}" (w2057).`);
+      this.stamp(r, `ledger: pair run ${p.id}${pr ? ` of ${pr}` : ''} finished (${why}); ${woke ? `its worker ${sid} was resumed with the result` : 'no worker of it could be resumed: the dispatcher was told'} (w2057)`);
+      this.store.putWork(r);
+      out.push(r.id);
+    }
+    p.pair = { ...p.pair, told: [...told] };
+    this.store.putWork(p);
+    if (out.length) console.log(`pair run (w2057): ${p.id} finished; told ${out.join(', ')}`);
+    return out;
   }
 
   workerBlocked(sessionId: string, a: { request?: string; requests?: string[]; reports?: string[]; prs?: string[]; deploys?: string[]; what: string; head?: string; mergeOnGreen?: string }): string {
@@ -3922,6 +4084,7 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
     this.store.putWork(w);
     const audience = [...w.requesters, ...also.filter((r) => !isFor(w, r.userId))];
     this.toPeople(audience, `[ledger] ${w.id} "${clip(w.title, 100)}" (${names(w.requesters)}'s) closed as done: ${how}. Its report: "${clip(report, 200)}"`);
+    if (w.pair) this.pairFinished(w);
   }
 
   /**

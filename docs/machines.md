@@ -1380,6 +1380,34 @@ LothDesktop and Beast, not just when BEAST is full").
     fresh run's report, so no report of the old run's legs resumes it. A run Queued, or running with every leg healthy and
     nothing reported, is still waited on (a worker that asks twice by mistake starts no second run); the answer names
     `retry: true` for a run that cannot deliver.
+  - **One pair run per pull request and commit, and its result reaches whoever waits on it** (w2057, lothsahn, 2026-10-24).
+    w1936, the hand-filed pair run of w665's PR #2340, passed at 12:55 on 10-24, but w665's worker d558ba14 was never told:
+    it had filed nothing (its report said "waiting on a Windows or Linux pair worker to run `MP-lowore-pin-pair` for PR
+    #2340"), so nothing tied the two, and at 15:58 a second run of the same PR was queued. Code: `server/pairRuns.ts` (which
+    PR and commits a run checks), `Orchestrators.filePair`, `pairFinished`, `finishedTwinOf`, `resumeGatedWorker`.
+    - `request_pair` takes `pr` ("#2340" or "owner/repo#N"; else the PR its `what` or `brief` names, else the request's one
+      open PR) and `commit` (the head commit the legs run, 7 to 40 hex), recorded as `pair.pr` and `pair.commit`. A run filed
+      by hand is matched by the PR its title, constraints or brief names and the commits its title, brief, outcome or legs'
+      DONE reports name.
+    - **Open run of the same PR** (another request's, or filed by hand): the worker joins it, blocked on its report; nothing
+      is filed. **Finished run of the same PR and commit**: nothing is filed, the answer carries its result and the request
+      is not blocked (`retry: true` files one anyway, for a run that could not have checked the change). Finished runs of
+      the PR but no `commit` given: refused, asking for it. Another commit: a fresh run.
+    - **The result is delivered.** A worker gated on the run is resumed by its gate, and the resume carries the host leg's
+      result from its `For wNNN:` line (`pairResult`) unless the cleared reason already shows it. When the run closes as
+      done, every open request it serves and was not gated on it (filed for, named in `relatedIds`, or with an open PR the
+      run checks: `pairServes`) has its newest worker resumed with "[ledger] Pair run wNNN ... has finished ... Its result:
+      ...", or the dispatcher is told to start one. `pair.told` keeps each request told once.
+    - **The dispatcher drops a repeat.** `decide_work queue` with `pair_legs` is refused on a request that repeats a finished
+      run of the same PR and commit (and notes a finished run of the PR on another commit). `pair_legs 0` clears the mark of
+      a pair run whose legs never started (with `queue` on a Queued one it stays Queued as single work). `done` on a pair run
+      that never had a worker and repeats a finished one closes it with that run's result as its outcome and tells whoever it
+      serves (no worker DONE is needed for it).
+    - **A report that waits on a pair run with none filed** (`Agents.pairWaitNudge`, `pairRuns.ts` `pairWaitLine`): a
+      still-open line such as d558ba14's, on a request no open or finished pair run serves, gets the worker told at once,
+      once per request, to call `request_pair` (a wait "on the orchestrator to run" it is the w1841 own-work nudge's). A nudge,
+      not an automatic filing: the run needs what only the worker knows (branch, commit, scenario, what passes), and a run
+      filed from a report line would put two computers' workers on a guess.
   - **Starting one: `start_agent` with `pair_sandboxes`** (`Agents.startPairLegs`). `sandbox` is leg 1, the host, and
     `pair_sandboxes` the other legs, each a FREE sandbox on another computer. Every leg is checked before any starts (online,
     FREE, `placement.hold`, `placement.minPriority`, no timed legs where no timed runs go, the Mac rule below) and a refusal
@@ -1419,7 +1447,9 @@ LothDesktop and Beast, not just when BEAST is full").
   - Tests: `server/w1945PairRuns.test.ts` (the room rules, the Queued line), the w1983 hold case and the w1945 cases in
     `server/orchestrators.test.ts` (request_pair blocks the asking worker and its sandbox is released, both legs start
     together and never one alone, a Mac is no client, message_pair, the hold, the WRONG flag and the queue; w2041: a retry of
-    a spent run, `retry: true` and `avoid`), `server/ledgerSweep.test.ts` (w2041: a DONE leg is told once), and in
+    a spent run, `retry: true` and `avoid`; w2057: joining an open run of the PR, the finished-run answer, the result reaching a
+    worker that filed nothing and one gated on its run, `pair_legs 0` and a repeat closed as done, the pair-wait nudge),
+    `server/pairRuns.test.ts` (w2057: the PR, commit and wait-line matchers), `server/ledgerSweep.test.ts` (w2041: a DONE leg is told once), and in
     `server/machineSandboxes.test.ts` the asking worker stopped and its sandbox released FREE by the release pass.
 - **The rule** (the dispatcher's prompt): new game-repo work (code, tests, Unity, built players) goes where the
   Capacity block's last line says, even when a sandbox on the other computer is free. Discord posting as Max pins no

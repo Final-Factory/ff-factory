@@ -5345,7 +5345,7 @@ test('w1945: request_pair files one pair request and blocks the asking worker on
   assert.match(out, /your sandbox is then released at once for other work/);
   const id = /^Filed (w\d+)/.exec(out)![1];
   const p = store.work.get(id)!;
-  assert.deepEqual(p.pair, { legs: 2, for: 'w665', forSession: a.id });
+  assert.deepEqual(p.pair, { legs: 2, for: 'w665', forSession: a.id, pr: 'Final-Factory/FinalFactory#2340' });
   assert.equal(p.needs, 'game');
   assert.equal(p.priority, 'normal');
   assert.deepEqual(p.requesters, [BEN]);
@@ -5947,4 +5947,170 @@ test('w2043: with the pilot off (or the request in the control arm) a worker who
   sessions.send(old, 'Deploy check.', 'system');
   await until('it took the message', () => store.readTranscript(old).some((e) => e.kind === 'user' && (e as { text: string }).text === 'Deploy check.'));
   assert.deepEqual(store.work.get('w1')!.sessionIds, [old]);
+});
+
+// ---------------------------------------------------------------- w2057: workers file their own pair runs
+
+/** w2057: a leg worker of a pair run, idle. */
+function legWorker(store: Store, id: string) {
+  store.putSession({ id, kind: 'worker', title: `leg ${id}`, status: 'idle', permissionMode: 'bypassPermissions', createdAt: T0, lastActivityAt: T0, turns: 1, costUsd: 0, pendingPermissions: [], requestedBy: BEN } as unknown as SessionInfo);
+}
+
+/** w2057: w1936 as Ben's orchestrator filed it on 10-23: a sync run of PR #2340, marked a pair, with no tie to w665. */
+const W1936 = { id: 'w1936', by: BEN, title: 'Sync run: MP-lowore-pin-pair for PR #2340 on two non-Mac machines', brief: 'Run MP-lowore-pin-pair on branch w665-lowore-pin-no-collider.' };
+const PR2340 = { repo: 'Final-Factory/FinalFactory', number: 2340, state: 'open' as const };
+
+/** w2057: legs started on the pair run `id`, on two leg workers. */
+function legsStarted(store: Store, id: string, host: string, client: string) {
+  legWorker(store, host);
+  legWorker(store, client);
+  const p = store.work.get(id)!;
+  p.status = 'active';
+  p.sessionIds = [host, client];
+  p.pair = { ...p.pair!, started: { at: T0, legs: [{ session: host, sandbox: 'lothdesktop/slot1' }, { session: client, sandbox: 'beast/slot2' }] } } as WorkItem['pair'];
+  store.putWork(p);
+}
+
+test('w2057: request_pair records the pull request and commit; for a pull request whose pair run is open (one filed by hand included) it joins that run and files nothing', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents } = env;
+  agentsRoom(agents, []);
+  putRequests(store, [{ id: 'w665', by: BEN, prs: [PR2340] }, { id: 'w700', by: BEN }, { ...W1936, status: 'queued', pair: { legs: 2 } }]);
+  const a = await startedFor(env, 'w665');
+  await assert.rejects(async () => a.h.request_pair!({ what: 'x', brief: 'y', commit: 'HEAD' }), /commit is the head commit the legs run/);
+  // No PR in what or brief: w665's one open pull request is the one, and the open hand-filed w1936 of it is joined.
+  const out = String(await a.h.request_pair!({ what: 'MP-lowore-pin-pair', brief: 'Run it on two non-Mac machines; pass: 0 diverged.', commit: '1a2b3c4d5e' }));
+  assert.ok(out.startsWith('Final-Factory/FinalFactory#2340 already has an open pair run, w1936 (queued: '), out);
+  assert.match(out, /filed by hand; you wait on it, and nothing new was filed \(w2057\)/);
+  assert.deepEqual([...store.work.values()].filter((x) => x.pair).map((x) => x.id), ['w1936']);
+  const w = store.work.get('w665')!;
+  assert.deepEqual([w.status, w.blocked?.kind, w.blocked?.ref, w.blocked?.on], ['blocked', 'request', 'w1936', 'report']);
+  assert.match(store.work.get('w1936')!.log.join('\n'), /asked for a pair run of Final-Factory\/FinalFactory#2340 \(request_pair\) and waits on this one/);
+  // Its own filing, for another pull request: recorded with it.
+  const b = await startedFor(env, 'w700');
+  const own = String(await b.h.request_pair!({ what: 'MP-W700-2p', brief: 'Run MP-W700-2p.', pr: '#2400', commit: 'ABC1234DEF' }));
+  const id = /^Filed (w\d+)/.exec(own)?.[1];
+  assert.ok(id, own);
+  assert.deepEqual(store.work.get(id!)!.pair, { legs: 2, for: 'w700', forSession: b.id, pr: 'Final-Factory/FinalFactory#2400', commit: 'abc1234def' });
+});
+
+test('w2057: a filing for a pull request whose pair run already finished on that commit is answered with its result and files nothing; without a commit it asks for one; another commit files a fresh run', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents } = env;
+  agentsRoom(agents, []);
+  const passed = 'For w665: PASS: MP-lowore-pin-pair on 1a2b3c4d, 400 heartbeats compared, 0 diverged (lothdesktop host, beast client).';
+  putRequests(store, [{ id: 'w665', by: BEN, prs: [PR2340] }, { ...W1936, status: 'done', pair: { legs: 2 }, outcome: passed }]);
+  const a = await startedFor(env, 'w665');
+  const ask = async (extra: Record<string, unknown>) => String(await a.h.request_pair!({ what: 'MP-lowore-pin-pair on PR #2340', brief: 'Run it; pass: 0 diverged.', ...extra }));
+  const same = await ask({ commit: '1a2b3c4d9f' });
+  assert.ok(same.startsWith('Nothing filed: w1936 "Sync run: MP-lowore-pin-pair for PR #2340'), same);
+  assert.ok(same.includes(`Its result: "${passed}"`), same);
+  assert.notEqual(store.work.get('w665')!.status, 'blocked', 'not blocked: nothing runs');
+  assert.equal([...store.work.values()].filter((x) => x.pair).length, 1);
+  await assert.rejects(async () => ask({}), /w1936 "Sync run.*already finished \(it ran 1a2b3c4d\): pass commit/);
+  const fresh = await ask({ commit: 'f0e1d2c3b4' });
+  const id = /^Filed (w\d+)/.exec(fresh)?.[1];
+  assert.ok(id && id !== 'w1936', fresh);
+  assert.equal(store.work.get(id!)!.pair!.commit, 'f0e1d2c3b4');
+  assert.equal(store.work.get('w665')!.blocked?.ref, id);
+});
+
+test('w2057: w665 as it happened: a hand-filed pair run of its PR passes, and its waiting worker, which filed nothing, is resumed with the result, once', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o } = env;
+  agentsRoom(agents, []);
+  putRequests(store, [{ id: 'w665', by: BEN, status: 'active', prs: [PR2340] }, { ...W1936, status: 'active', pair: { legs: 2 } }]);
+  const a = await startedFor(env, 'w665');
+  legsStarted(store, 'w1936', 'host1936', 'client1936');
+  assert.equal(o.pairFiledFor('w665'), true, 'its PR has a pair run: the turn-end check does not nudge it');
+  o.workerTurnEnded(store.sessions.get('client1936')!, 'Client leg joined and stayed in sync.\nDONE: w1936\nLearned: nothing new');
+  o.workerTurnEnded(store.sessions.get('host1936')!, 'Ran MP-lowore-pin-pair.\n\nFor w665: PASS on 1a2b3c4d: 400 heartbeats compared, 0 diverged.\nDONE: w1936\nLearned: nothing new');
+  assert.equal(store.work.get('w1936')!.status, 'done');
+  const note = agents.waker.pending(a.id)?.note ?? '';
+  assert.match(note, /^\[ledger\] Pair run w1936 "Sync run: MP-lowore-pin-pair for PR #2340 on two non-Mac machines" of Final-Factory\/FinalFactory#2340 has finished \(w2057; it checks its pull request Final-Factory\/FinalFactory#2340\)\. Its result: "For w665: PASS on 1a2b3c4d: 400 heartbeats compared, 0 diverged\./);
+  assert.deepEqual(store.work.get('w1936')!.pair!.told, ['w665']);
+  assert.match(store.work.get('w665')!.log.join('\n'), new RegExp(`pair run w1936 of Final-Factory/FinalFactory#2340 finished \\(it checks its pull request .*\\); its worker ${a.id} was resumed with the result`));
+  // Told once: the second request_pair for the same commit is answered, nothing filed.
+  agents.waker.cancel(a.id);
+  const again = String(await a.h.request_pair!({ what: 'MP-lowore-pin-pair on PR #2340', brief: 'Run it.', commit: '1a2b3c4d' }));
+  assert.ok(again.startsWith('Nothing filed: w1936'), again);
+  assert.equal(agents.waker.pending(a.id), undefined);
+});
+
+test('w2057: a worker that filed its own pair run is resumed by its gate with the host leg’s result, and not told twice when the run closes', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o } = env;
+  agentsRoom(agents, []);
+  putRequests(store, [{ id: 'w665', by: BEN }]);
+  const a = await startedFor(env, 'w665');
+  const filed = String(await a.h.request_pair!({ what: 'MP-lowore-pin-pair on PR #2340', brief: 'Run it.', commit: '1a2b3c4d' }));
+  const id = /^Filed (w\d+)/.exec(filed)![1];
+  legsStarted(store, id, 'h1', 'c1');
+  o.workerTurnEnded(store.sessions.get('c1')!, `Client leg done.\nDONE: ${id}\nLearned: nothing new`);
+  o.workerTurnEnded(store.sessions.get('h1')!, `For w665: PASS on 1a2b3c4d, 0 diverged.\nDONE: ${id}\nLearned: nothing new`);
+  assert.equal(store.work.get(id)!.status, 'done');
+  assert.doesNotMatch(agents.waker.pending(a.id)?.note ?? '', /\[ledger\] Pair run/, 'the close tells it nothing: its gate does');
+  const watch = new BlockerWatch({ store, orchestrators: o });
+  await watch.tick();
+  assert.notEqual(store.work.get('w665')!.status, 'blocked');
+  const note = agents.waker.pending(a.id)?.note ?? '';
+  // The result is in the cleared reason already (a short one), so it is not appended again; a long one is (pairResult).
+  assert.ok(note.includes('For w665: PASS on 1a2b3c4d, 0 diverged.'), note);
+  assert.equal(note.match(/PASS on 1a2b3c4d/g)?.length, 1, note);
+  assert.deepEqual(store.work.get(id)!.pair!.told, ['w665']);
+  agents.waker.cancel(a.id);
+});
+
+test('w2057: the dispatcher cannot mark a repeat of a finished pair run, clears a mark with pair_legs 0, and closes a never-started repeat as done with the finished run’s result', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, dispatcher, call } = env;
+  agentsRoom(agents, []);
+  putRequests(store, [
+    { ...W1936, status: 'done', pair: { legs: 2 }, outcome: 'For w665: PASS on 1a2b3c4d, 0 diverged.' },
+    { id: 'w2049', by: BEN, title: 'Sync run again: MP-lowore-pin-pair for PR #2340 at 1a2b3c4d' },
+    { id: 'w2050', by: BEN, status: 'queued', title: 'Second sync run of PR #2340', pair: { legs: 2 } },
+    { id: 'w2051', by: BEN, status: 'queued', title: 'Third sync run of PR #2340', pair: { legs: 2 } },
+  ]);
+  const mark = await call(dispatcher().info, 'decide_work', { id: 'w2049', action: 'queue', pair_legs: 2, note: 'needs two machines' });
+  assert.equal(mark.isError, true, mark.text);
+  assert.match(mark.text, /w2049 repeats pair run w1936 "Sync run: MP-lowore-pin-pair.*already finished on the same pull request and commit \(w2057\)\. Its result: "For w665: PASS on 1a2b3c4d/);
+  assert.equal(store.work.get('w2049')!.pair, undefined, 'the mark is not set');
+  const clear = await call(dispatcher().info, 'decide_work', { id: 'w2050', action: 'queue', pair_legs: 0, note: 'repeats w1936' });
+  assert.equal(clear.isError, false, clear.text);
+  assert.match(clear.text, /w2050 is no longer a pair run \(it was .*\) and stays Queued as single work/);
+  assert.equal(store.work.get('w2050')!.pair, undefined);
+  assert.equal(store.work.get('w2050')!.status, 'queued');
+  const notPair = await call(dispatcher().info, 'decide_work', { id: 'w2050', action: 'queue', pair_legs: 0, note: 'again' });
+  assert.match(notPair.text, /w2050 is not a pair run/);
+  const done = await call(dispatcher().info, 'decide_work', { id: 'w2051', action: 'done', note: 'repeats w1936, which passed' });
+  assert.equal(done.isError, false, done.text);
+  const w = store.work.get('w2051')!;
+  assert.equal(w.status, 'done');
+  assert.match(w.outcome ?? '', /^repeats w1936, which passed \(a repeat of pair run w1936, which finished; its result: For w665: PASS on 1a2b3c4d, 0 diverged\.\)$/);
+});
+
+test('w2057: a worker that ends its turn waiting on a pair run with none filed is told to file it with request_pair, once; one whose PR has a pair run is not', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, sessions } = env;
+  agentsRoom(agents, []);
+  putRequests(store, [{ id: 'w665', by: BEN, prs: [PR2340] }, { id: 'w700', by: BEN, prs: [{ ...PR2340, number: 2400 }] }]);
+  const a = await startedFor(env, 'w665');
+  const line = 'w665: still open: waiting on a Windows or Linux pair worker to run `MP-lowore-pin-pair` for PR #2340 (CI is green, the merge is held for that run)';
+  const told = (sid: string) => store.readTranscript(sid).filter((e) => e.kind === 'user' && /No pair run is filed for w\d+/.test((e as { text: string }).text)).length;
+  a.info.lastResult = line;
+  sessions.events.emit('turnEnd', sessions.get(a.id), line);
+  await until('the pair-wait notice reaches it', () => told(a.id) === 1);
+  assert.match(store.work.get('w665')!.log.join('\n'), /ended its turn waiting on a pair run with none filed .*told to file it with request_pair \(w2057\)/);
+  await until('that turn ends', () => a.info.status === 'idle');
+  sessions.events.emit('turnEnd', sessions.get(a.id), line);
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(told(a.id), 1, 'once per request');
+  // w700's PR has a pair run open (filed by hand): no nudge.
+  putRequests(store, [{ id: 'w1999', by: BEN, status: 'queued', title: 'Sync run of PR #2400', pair: { legs: 2 } }]);
+  const b = await startedFor(env, 'w700');
+  const waits = 'w700: still open: waiting on the pair run of PR #2400';
+  b.info.lastResult = waits;
+  sessions.events.emit('turnEnd', sessions.get(b.id), waits);
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(told(b.id), 0);
 });

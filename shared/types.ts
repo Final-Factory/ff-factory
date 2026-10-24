@@ -1919,6 +1919,15 @@ export interface WorkPair {
    */
   retryOf?: string;
   avoid?: string[];
+  /**
+   * The pull request ("owner/repo#N") and the commit its legs run (w2057, request_pair pr and commit): a filing for the same
+   * pull request joins this run while it is open, and is answered with its result once it finished on the same commit.
+   * Absent on a run filed by hand: server/pairRuns.ts reads them from its title and brief.
+   */
+  pr?: string;
+  commit?: string;
+  /** The requests its finished result was sent to (w2057, Orchestrators.pairFinished): each told once. */
+  told?: string[];
 }
 
 /** A request for work that a person's orchestrator filed with the dispatcher, and what became of it. */
