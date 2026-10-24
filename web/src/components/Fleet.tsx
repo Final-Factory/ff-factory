@@ -38,7 +38,12 @@ function agentState(s: SessionInfo, wait?: PersonWait, me?: Pick<UserInfo, 'disp
   if (s.pendingPermissions.length || s.status === 'waiting_permission') return { word: 'needs you', tone: 'amber' };
   // No agent host started for it (w691): blocked on its machine, whatever its status says.
   if (s.hostFailure) return { word: 'blocked', tone: 'violet', detail: agentView(s).waitsOn };
-  if (s.status === 'running') return { word: 'busy', tone: 'blue' };
+  // w1968: a ticket of its own waits in its machine's bench queue (or for a Unity slot): blocked on it, not busy; a ticket it
+  // holds is said beside busy.
+  const q = agentView(s);
+  if (q.label === 'Blocked' && q.waitsOn?.startsWith('waiting for ')) return { word: 'blocked', tone: 'violet', detail: q.waitsOn };
+  const holds = q.waitsOn?.startsWith('holds ') ? q.waitsOn.split(' · ')[0] : undefined;
+  if (s.status === 'running') return { word: holds ? 'holds lock' : 'busy', tone: 'blue', ...(holds ? { detail: holds } : {}) };
   if (s.status === 'starting') return { word: 'starting', tone: 'blue' };
   if (wait) {
     const mine = !!me && wait.on.some((n) => n.toLowerCase() === me.displayName.toLowerCase());

@@ -2,6 +2,7 @@
 // held up, resting), with filters by group, person and machine. The cards and their order are shared/workerCards.ts; this
 // draws them from the fleet the machine view already built (fleetFor), so the mode adds no polling.
 import { useMemo, useState } from 'react';
+import { agentQueueAll } from '../../../shared/queueWaits';
 import type { AppState } from '../../../shared/types';
 import type { FleetComputer } from '../../../shared/fleet';
 import {
@@ -156,7 +157,9 @@ function Filters({ cards, f, set }: { cards: WorkerCard[]; f: CardFilter; set: (
 export function useWorkerCards(app: AppState, fleet: FleetComputer[], now: number, on: boolean): WorkerCard[] {
   const views = app.config.live?.enabled ? app.live : undefined;
   const me = app.me?.displayName;
-  return useMemo(() => (on ? workerCards(fleet, { work: app.work, views, me, now, time: localTime }) : []), [on, fleet, app.work, views, me, now]);
+  // w1968: the machines' queues, so a worker waiting in a bench queue reads Blocked on it, as list_work does.
+  const queue = useMemo(() => agentQueueAll(app.machineStats), [app.machineStats]);
+  return useMemo(() => (on ? workerCards(fleet, { work: app.work, views, me, now, time: localTime, queue }) : []), [on, fleet, app.work, views, me, now, queue]);
 }
 
 export function WorkerBoard({ cards, now, scrollRef }: { cards: WorkerCard[]; now: number; scrollRef: (el: HTMLDivElement | null) => void }) {

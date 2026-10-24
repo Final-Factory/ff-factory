@@ -55,7 +55,16 @@ export interface AgentStateView {
   released?: string;
 }
 
-type AgentFacts = Pick<SessionInfo, 'status'> & Partial<Pick<SessionInfo, 'machineId' | 'hostFailure' | 'wakeAt' | 'wakeNote' | 'queuedSend' | 'queuedOn' | 'backgroundTasks' | 'backgroundJobs' | 'heldSince' | 'placeReleased' | 'releaseDue'>>;
+type AgentFacts = Pick<SessionInfo, 'status'> &
+  Partial<Pick<SessionInfo, 'machineId' | 'hostFailure' | 'wakeAt' | 'wakeNote' | 'queuedSend' | 'queuedOn' | 'backgroundTasks' | 'backgroundJobs' | 'heldSince' | 'placeReleased' | 'releaseDue'>> & {
+    /**
+     * w1968: what it waits for in its machine's queues now, and the bench ticket it holds (shared/queueWaits.ts
+     * agentQueueFacts, from the daemons' reports: the reading the ledger's Blocked uses). Absent where the caller has no
+     * machine stats.
+     */
+    queueWait?: string;
+    benchHold?: string;
+  };
 
 /**
  * How long an agent whose daemon went away under it keeps its sandbox (w613) before the release pass may release it
@@ -110,8 +119,13 @@ export function agentState(s: AgentFacts, time: (iso: string, now: number) => st
   const v = (state: AgentState, more: Partial<AgentStateView> = {}): AgentStateView => ({ state, label: AGENT_STATE_LABEL[state], ...more });
   // Before the status: an older daemon went on reporting it mid-turn after its host failed to start (w665).
   if (s.hostFailure) return { ...v('error', { waitsOn: hostFailureText(s) }), label: 'Blocked' };
-  if (s.status === 'running' || s.status === 'starting') return v('working');
   if (s.status === 'waiting_permission') return v('needs_you');
+  // w1968: a ticket of its own waits in its machine's bench queue (or for a Unity slot): Blocked on it, mid-turn or between
+  // turns, whatever it does meanwhile; Working again by itself once the next report has it granted.
+  const live = s.status === 'running' || s.status === 'starting' || s.status === 'idle';
+  if (s.queueWait && live) return { ...v(s.status === 'idle' ? 'between_turns' : 'working', { waitsOn: `waiting for ${s.queueWait}`, ...(s.status === 'idle' ? { kind: 'job' as const } : {}) }), label: 'Blocked' };
+  const hold = s.benchHold && live ? `holds ${s.benchHold}` : undefined;
+  if (s.status === 'running' || s.status === 'starting') return v('working', hold ? { waitsOn: hold } : {});
   if (s.status === 'error') return v('error');
   const wakeAhead = !!s.wakeAt && Date.parse(s.wakeAt) > now - OVERDUE_MS;
   const checkIn = wakeAhead ? `check-in ${time(s.wakeAt!, now)}` : undefined;
@@ -124,7 +138,8 @@ export function agentState(s: AgentFacts, time: (iso: string, now: number) => st
     return v('stopped', { ...(resumes ? { resumes } : {}), ...(held ? { held, heldUntil } : {}), ...(released ? { released } : {}) });
   }
   const jobs = jobsText(s);
-  if (jobs) return v('between_turns', { kind: 'job', waitsOn: [jobs, checkIn].filter(Boolean).join(' · '), ...(wakeAhead ? { until: s.wakeAt } : {}) });
+  // A ticket it holds is work going on, with or without a job the SDK still lists (w1968).
+  if (jobs || hold) return v('between_turns', { kind: 'job', waitsOn: [hold, jobs, checkIn].filter(Boolean).join(' · '), ...(wakeAhead ? { until: s.wakeAt } : {}) });
   if (s.queuedSend) return { ...v('between_turns', { kind: 'queued', waitsOn: `a queued message (${s.queuedSend})` }), label: s.queuedOn === 'machine' || s.queuedOn === 'pool' ? 'Blocked' : 'Queued' };
   if (checkIn) {
     const note = firstWords(s.wakeNote);
