@@ -316,6 +316,12 @@ export interface SessionInfo {
    */
   stoppedOnPurpose?: boolean;
   /**
+   * Workers (w1984): stop_agent move_to moved its requests off `machine` to `to` at `at`. Its waiting bench tickets left
+   * in that machine's queue are marked away there (Agents.benchPriorities) for BENCH_MOVED_AWAY_MS, so they hold nobody
+   * back while its old processes wind down.
+   */
+  movedAway?: { machine: string; to: string; at: string };
+  /**
    * Machine sessions (w613): its process ended because its daemon went away (a worker update, a restart, a crash) and
    * not on purpose, at this time. Its sandbox stays its (holdsSandbox, shared/agentState.ts) until it is messaged, stopped
    * on purpose, or released: HOLD_PLACE_MS (30 min, w656) after this, the release pass (server/placeAgain.ts) releases
