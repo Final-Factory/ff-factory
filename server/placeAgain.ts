@@ -340,6 +340,8 @@ export interface PlaceAgainDeps {
   seats?: (machineId: string) => number;
   /** Run the release pass again soon (a worker was just stopped to release its sandbox: w890 frees it within a minute of its turn's end). */
   soon?: () => void;
+  /** Runs a release pass (w2026): AgentManager indexes the requests by worker for its length, so workOver, ciWait and waitOn read a worker's own requests, not all of them. */
+  pass?: <T>(run: () => T) => T;
   /** Why a live idle worker must keep its process, its check-in aside (Agents.keepIdle without the wake), or undefined. */
   keepLive: (id: string) => string | undefined;
   /** Why it keeps its process and sandbox for its Live view while it waits on a person (Agents.liveHold, w1582), or undefined. */
@@ -382,6 +384,12 @@ export class PlaceAgain {
   private readonly saveFailed = new Map<string, { at: number; why: string }>();
   /** Saves under way, for tests to wait on. */
   readonly pending = new Set<Promise<void>>();
+  /**
+   * During a release pass, each machine's claims, computed once (w2026): the pass asked claimedBy for every released worker,
+   * and each ask sorted all the machine's waiting workers again (37 s stalls of the portal on 2026-10-24, its stall profile:
+   * tick > claimedBy > claims > facts). A machine's entry goes when the pass does something there.
+   */
+  private claimsMemo?: Map<string, Map<string, string>>;
 
   constructor(d: PlaceAgainDeps) {
     this.d = d;
@@ -416,6 +424,8 @@ export class PlaceAgain {
    * Not free for new work (Agents.free).
    */
   claims(machineId: string): Map<string, string> {
+    const memo = this.claimsMemo?.get(machineId);
+    if (memo) return memo;
     const m = this.d.machine(machineId);
     const out = new Map<string, string>();
     if (!m) return out;
@@ -428,6 +438,7 @@ export class PlaceAgain {
       const p = placeFor(s, m, f, out, this.failedIn(s.id));
       if ('sandbox' in p) out.set(p.sandbox.id, s.id);
     }
+    this.claimsMemo?.set(machineId, out);
     return out;
   }
 
@@ -468,6 +479,15 @@ export class PlaceAgain {
    * when its check-in nears and that is still free. Returns what it did, for the log and tests.
    */
   tick(): string[] {
+    this.claimsMemo = new Map();
+    try {
+      return this.d.pass ? this.d.pass(() => this.releasePass()) : this.releasePass();
+    } finally {
+      this.claimsMemo = undefined;
+    }
+  }
+
+  private releasePass(): string[] {
     const did: string[] = [];
     const freed = new Set<string>();
     let stoppedDue = false;
@@ -487,6 +507,7 @@ export class PlaceAgain {
       else if (!live && s.status === 'stopped' && !(this.now() - Date.parse(s.lastActivityAt) < LIVE_HOLD_MS)) this.d.liveLost?.(s, `nobody came back to it within ${LIVE_HOLD_MS / 3_600_000} h`);
       const step = releaseStep(s, sb, { ...f, workOver: this.d.workOver(s), ciWait: this.d.ciWait?.(s), waitOn: this.d.waitOn?.(s), keepLive: live ? this.d.keepLive(s.id) : undefined, liveHold: this.d.liveHold?.(s), claimedBy: s.placeReleased ? this.claimedBy(m.id, sb.id) : undefined });
       if (!step) continue;
+      this.claimsMemo?.delete(m.id);
       if (step.do === 'stop') {
         // Stopped while Idle: its sandbox stays its until the next pass releases it, its worktree clean (w656).
         if (step.due) {

@@ -25,7 +25,10 @@ const REOPENABLE: readonly WorkItem['status'][] = ['done', 'rejected', 'cancelle
 export function resumableSessions(sessionIds: Iterable<string>, work: Iterable<WorkItem>, now = Date.now()): string[] {
   const reopenable = (w: WorkItem) => REOPENABLE.includes(w.status) && now - (Date.parse(w.updatedAt) || 0) < KEEP_CLOSED_MS;
   const items = [...work].filter((w) => w.status !== 'merged' && (WORK_OPEN.includes(w.status) || w.status === 'stalled' || reopenable(w)));
-  return [...sessionIds].filter((sid) => items.some((w) => w.sessionIds.includes(sid) && isWith(w, sid))).sort();
+  // w2026: one pass over the requests (the stall profiles of 2026-10-24 had a scan of every request per session here)
+  const withThem = new Set<string>();
+  for (const w of items) for (const sid of w.sessionIds) if (!withThem.has(sid) && isWith(w, sid)) withThem.add(sid);
+  return [...sessionIds].filter((sid) => withThem.has(sid)).sort();
 }
 
 /** A request a session is on, as a machine's clean-up needs it (w1379). */
@@ -52,10 +55,18 @@ export interface SessionOwner {
  * on w1332, stalled that day, whose builds and preview clips it deleted).
  */
 export function ownersOf(sessions: Iterable<{ id: string; machineSandbox?: string }>, work: Iterable<WorkItem>): Record<string, SessionOwner> {
-  const items = [...work];
+  // w2026: the requests by session in one pass, in ledger order, not a scan of every request per session
+  const bySession = new Map<string, WorkItem[]>();
+  for (const w of work) {
+    for (const sid of new Set(w.sessionIds)) {
+      const list = bySession.get(sid);
+      if (list) list.push(w);
+      else bySession.set(sid, [w]);
+    }
+  }
   const out: Record<string, SessionOwner> = {};
   for (const s of sessions) {
-    const mine = items.filter((w) => w.sessionIds.includes(s.id));
+    const mine = bySession.get(s.id) ?? [];
     if (!mine.some((w) => w.status !== 'merged' && (WORK_OPEN.includes(w.status) || w.status === 'stalled'))) continue;
     out[s.id] = {
       ...(s.machineSandbox ? { sandbox: s.machineSandbox } : {}),

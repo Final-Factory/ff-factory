@@ -1988,7 +1988,20 @@ export class MachineManager {
     const m = this.require(id);
     Object.assign(m, { online: true, lastSeen: new Date().toISOString() });
     this.store.putMachine(m);
-    const sessions = m.sessionIds.filter((sid) => this.store.sessions.has(sid)).map((sid) => ({ id: sid, lastSeq: this.store.lastSeq(sid) }));
+    const ids = m.sessionIds.filter((sid) => this.store.sessions.has(sid));
+    const seqs = ids.map((sid) => this.store.lastSeqNow(sid));
+    if (seqs.every((n) => n !== undefined)) return this.welcome(id, ws, m, ids.map((sid, i) => ({ id: sid, lastSeq: seqs[i]! })));
+    // w2026: a compressed transcript without its tail file is unzipped off the main thread first (Store.lastSeqAsync), one at a
+    // time, and the welcome waits for it; the loop answers /api/health and the other daemons meanwhile.
+    void (async () => {
+      const sessions: { id: string; lastSeq: number }[] = [];
+      for (const [i, sid] of ids.entries()) sessions.push({ id: sid, lastSeq: seqs[i] ?? (await this.store.lastSeqAsync(sid)) });
+      if (this.links.get(id) === link) this.welcome(id, ws, m, sessions);
+    })().catch((e) => console.warn(`machine ${id}: the welcome failed:`, (e as Error).message));
+  }
+
+  /** The rest of attach: the welcome with each session's last seq, then the daemon's configs. */
+  private welcome(id: string, ws: WebSocket, m: Machine, sessions: { id: string; lastSeq: number }[]) {
     ws.send(JSON.stringify(this.welcomeOf(m, sessions) satisfies ToDaemon));
     const watch = this.outsideWatchFor?.(id);
     if (watch !== undefined) ws.send(JSON.stringify({ type: 'outside_watch', config: watch } satisfies ToDaemon));
