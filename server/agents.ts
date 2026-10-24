@@ -182,6 +182,8 @@ const BUSY_STATUS = new Set(['running', 'starting', 'waiting_permission']);
 const NEEDS_YOU_DIGEST_MS = 3 * 60_000;
 /** How old a machine's last bench state may be for w1984's "a ticket on another machine" (stats come every 15 s). */
 const BENCH_STATE_FRESH_MS = 2 * 60_000;
+/** w1984: how long a moved worker's tickets in its old machine's bench queue stay marked away (its waiters end long before). */
+const BENCH_MOVED_AWAY_MS = 6 * 3_600_000;
 
 /** A machine's clone folder name (its Unity instance name), read as a path of the machine's own platform, not this host's. */
 const cloneName = (m: Pick<Machine, 'platform' | 'repoPath'>) => (m.platform === 'win32' ? path.win32 : path.posix).basename(m.repoPath);
@@ -2395,6 +2397,9 @@ export class Agents {
       const note = `${stage}${w.outcome ? `Its last report: ${w.outcome}` : 'No report yet.'}`;
       this.orchestrators?.handBack(w, info, { machine: info.machineId, sandbox: info.machineSandbox, ...(branch ? { branch } : {}), why: reason, note, how: 'moved by stop_agent move_to (w1600)', ...(saved ? { saved } : {}), to: target });
     }
+    // w1984: its waiting bench tickets on the old machine hold nobody back from now on (benchPriorities marks them away)
+    info.movedAway = { machine: info.machineId, to: target, at: new Date().toISOString() };
+    this.store.putSession(info);
     console.log(`move: ${reqs.map((w) => w.id).join(', ')} from worker ${info.id} on ${from} to ${target} (${reason}); branch ${branch ?? 'unknown'}${saved ? `; ${saved}` : ''}`);
     return `Moved ${reqs.map((w) => w.id).join(', ')} off ${sessionId} on ${from}, for ${target}: its process stopped${view ? ', its Live view ended' : ''}${saved ? `, ${saved}` : ''}. Each is Queued for ${target} with its branch ${branch ?? '(unknown)'} and a note${view ? ' (the Live view settings to stage again)' : ''}. Now ${branch ? `switch_branch a FREE ${target} sandbox to "${branch}", then ` : ''}start_agent with its work_id in that sandbox; the new worker's handover carries the note.`;
   }
@@ -2554,6 +2559,12 @@ export class Agents {
     for (const info of this.store.sessions.values()) {
       if (info.kind !== 'worker' || info.machineId !== machineId) continue;
       const open = this.openWorkOf(info);
+      // w1984: a worker moved off this machine serves no request here any more, but its old waiters may still hold tickets
+      const moved = this.movedAwayFrom(info, machineId);
+      if (moved && !open.length) {
+        out[info.id] = { priority: 'low', requests: [], away: moved };
+        continue;
+      }
       // w1656: the builder of the release planned here takes the bench first, whatever its request's priority; a builder
       // with no open request (build_plan takes `requests: []`) still gets its mark (w1832: else the queue caps its build)
       const release = !!this.builds?.releaseBuilder(machineId, info.id);
@@ -2582,6 +2593,8 @@ export class Agents {
    */
   private benchAway(info: SessionInfo, machineId: string, timed?: { verdict: string; leg?: string; timedRun?: string }): BenchAway | undefined {
     const who = `its worker ${info.id.slice(0, 8)}`;
+    const moved = this.movedAwayFrom(info, machineId);
+    if (moved) return moved;
     if (info.stoppedOnPurpose) return { why: `${who} was stopped on purpose` };
     const now = Date.now();
     for (const [m, st] of Object.entries(this.machines?.allStats?.() ?? {})) {
@@ -2594,6 +2607,13 @@ export class Agents {
       return { why: `${who}'s timed leg was placed elsewhere${where}`, exclusive_only: true };
     }
     return undefined;
+  }
+
+  /** w1984: the away mark of a worker that stop_agent move_to moved off `machineId` (moveWorker), while it holds. */
+  private movedAwayFrom(info: SessionInfo, machineId: string): BenchAway | undefined {
+    const m = info.movedAway;
+    if (!m || m.machine !== machineId || !(Date.now() - Date.parse(m.at) < BENCH_MOVED_AWAY_MS)) return undefined;
+    return { why: `its worker ${info.id.slice(0, 8)} was moved to ${m.to}` };
   }
 
   private openWorkOf(info: SessionInfo): WorkItem[] {
