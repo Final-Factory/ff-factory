@@ -329,7 +329,8 @@ test('runner: hourly, every 15 minutes below the soft threshold, one notice a da
 test('thresholds: host soft default, per-machine settings, and what set_app_config accepts', (t) => {
   assert.equal(hostSoftFreeGB({ warnFreeGB: 80, cleanup: { ...DEFAULT_CLEANUP } }), 80, 'unset: the warn level (w1101), no longer warn + 40');
   assert.equal(hostSoftFreeGB({ warnFreeGB: 80, cleanup: { ...DEFAULT_CLEANUP, softFreeGB: 150 } }), 150);
-  assert.deepEqual(machineCleanupSettings({}, 'm3'), { everyMinutes: 60, softFreeGB: 80, staleOutput: STALE_OUTPUT_DEFAULTS });
+  // A new machine with nothing in config: a 20 GB soft threshold (w1951; it was 80).
+  assert.deepEqual(machineCleanupSettings({}, 'm3'), { everyMinutes: 60, softFreeGB: 20, staleOutput: STALE_OUTPUT_DEFAULTS });
   const machines = { cleanup: { softFreeGB: { '*': 70, m3: 40 }, everyMinutes: 30 } };
   assert.deepEqual(machineCleanupSettings({ machines }, 'm3'), { everyMinutes: 30, softFreeGB: 40, staleOutput: STALE_OUTPUT_DEFAULTS });
   assert.deepEqual(machineCleanupSettings({ machines }, 'lothdesktop'), { everyMinutes: 30, softFreeGB: 70, staleOutput: STALE_OUTPUT_DEFAULTS });

@@ -127,7 +127,7 @@ before redeploying by hand.
 - **Awake.** While any agent process is live the daemon holds `caffeinate -i`.
 - **Clean-up.** The daemon cleans its machine's disk by itself (the continuous clean-up,
   [self-recovery.md](self-recovery.md#5-continuous-clean-up)): a pass every hour, every 15 minutes while
-  free space is below its soft threshold (80 GB by default), with the rules for its platform; below it, it also removes
+  free space is below its soft threshold (20 GB by default, w1951; config `machines.cleanup.softFreeGB`, BEAST 40), with the rules for its platform; below it, it also removes
   FF Factory's own leftovers by itself (player slots nobody holds, pushed agent worktrees, unused Unity editors:
   [self-recovery.md](self-recovery.md#ff-factorys-own-leftovers-w626), w626). Each agent
   gets its own temp folder (`ffa-<session>` under `temp_dir` or the system's temp), removed when the
@@ -657,10 +657,16 @@ change applies on the next reconnect; omitted on a redeploy: kept):
 | `max_agents_per_sandbox` | Agents that may be mid-turn at once in one sandbox; idle ones take no slot, and a message past it is queued | 2 |
 | `max_sandbox_agents` | The machine's agent cap: agents mid-turn at once on it, its sandboxes' and its standing agents together (w536) | `max_sandboxes` × `max_agents_per_sandbox` |
 | `max_unity` | Unity editors that may run at once on the machine: every top-level Unity process there counts, sandbox editors, the main clone's or its owner's own, `-batchmode` builds and test runs, peer-run editors, editors scripts start (w469, [unity-lifecycle.md](unity-lifecycle.md#unity-slots-every-editor-counts)); launches other than `unity start` wait in a queue for their slot (`unity-slot run`) | 2 |
-| `disk_warn_gb` | Below this many GB free on the sandbox volume: no new sandboxes, no new sandbox editors, and on a machine whose daemon runs the host guard (a Dev Drive install: lothdesktop's V:, BEAST) no new agent processes either (w1581) | 20 |
+| `disk_warn_gb` | Below this many GB free on the sandbox volume: no new sandboxes, no new sandbox editors, and on a machine whose daemon runs the host guard (a Dev Drive install: lothdesktop's V:, BEAST) no new agent processes either (w1581) | 15 |
 | `disk_critical_gb` | Below this: idle sandbox editors stop, and agents mid-turn in sandboxes are asked to commit, push and end their turn | 10 |
 
-**Why 20 / 10 GB** (w628, measured on BEAST 2026-10-07 in a sandbox with a warm Library): opening the editor and
+**10 / 15 / 20 GB since w1951** (lothsahn, 2026-10-23: "Let's set 10,15,20 as defaults in code for all new installs.
+For existing machines let them adopt the default but set BEAST to 40GB cleanup"): critical 10, warn 15 and the clean-up
+soft threshold 20 (`DISK_CRITICAL_GB_DEFAULT`, `DISK_WARN_GB_DEFAULT`, `CLEANUP_SOFT_GB_DEFAULT` in `shared/types.ts`), so a
+machine cleans up 5 GB before its guard refuses work. Every machine's guard was moved to 15/10 with `add_machine` the same
+day. The portal's own host guard keeps 20 / 10 (`HOST_GUARD_DEFAULTS`, w1101).
+
+**Why 20 / 10 GB, the w628 defaults** (measured on BEAST 2026-10-07 in a sandbox with a warm Library): opening the editor and
 force-reimporting all 4,169 scripts grew the Library by under 10 MB; a development player build wrote 2.1 GB of output
 and 0.25 GB of Library, a release build 2.0 GB of output and 2.5 GB of Temp (deleted when the editor closes); the
 sandbox's earlier day-long session (a develop merge, Burst recompiles, one build) wrote at most 7.6 GB. An editor
@@ -675,7 +681,7 @@ sandboxes, editors and agents there at once, with no installer run. Until w1581 
 `hostGuard.warnFreeGB` instead: the installer copies the pool's values into it at install (`devDriveGuard`,
 `scripts/worker/devdrive.ts`) and every update carries them, so lothdesktop's V: stayed at an old 50 GB that no tool
 could lower. `hostGuard.warnFreeGB` / `criticalFreeGB` in daemon.json now apply only to the guard's other volumes
-(`hostDiskPaths`, the VHDX's host when its maximum is not known). lothsahn wants Dev Drive (V:) volumes at 25 GB: `add_machine` with `disk_warn_gb: 25` on each.
+(`hostDiskPaths`, the VHDX's host when its maximum is not known). w1581 set Dev Drive (V:) volumes to 25 GB with `add_machine` `disk_warn_gb: 25`; w1951 moved every machine to 15.
 
 LothDesktop, for example: `sandbox_root: "D:\work\ffsb"`, `max_sandboxes: 3`, `max_agents_per_sandbox: 2` (six
 sandbox agents in all), `max_unity: 2`.
