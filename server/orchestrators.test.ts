@@ -4504,6 +4504,7 @@ test('w1600: a Live view marks its request; a bench lock holds its editor; stop_
   const ended: string[] = [];
   agents.liveHub = {
     tool: async () => 'Live view started (15 fps, 960 px, knobs on Ballista): streaming',
+    running: () => false,
     endFor: async (id: string) => (ended.push(id), { materials: ['Ballista'], fps: 15, width: 960 }),
   } as unknown as NonNullable<typeof agents.liveHub>;
   const a = await startedFor(env, 'w1');
@@ -4665,7 +4666,7 @@ test('w1984: a worker stopped on purpose, or whose timed work is on another mach
 // tickets on the old machine are dropped. Its requests leave it, so only the move's mark keeps it in that machine's list.
 test("w1984: after a move, no ticket of that worker holds anyone back in the old machine's bench queue", async (t) => {
   const env = await setupOnMachine(t);
-  const { store, agents, machines, dispatcher, call } = env;
+  const { store, agents, machines, dispatcher, call, heard } = env;
   const beast = await startTestMachine(machines, { id: 'beast', sandboxes: ['slot1'] });
   env.closers.push(() => beast.stop());
   agentsRoom(agents, ['pc', 'beast']);
@@ -4674,6 +4675,8 @@ test("w1984: after a move, no ticket of that worker holds anyone back in the old
   assert.equal(agents.benchPriorities('pc')[a.id].away, undefined);
   const moved = await call(dispatcher().info, 'stop_agent', { session_id: a.id, move_to: 'beast', why: 'its timed run goes to beast' });
   assert.equal(moved.isError, false, moved.text);
+  // settle the move's own messages (the dispatcher's MOVED note) before the test's folders go
+  await until('the dispatcher is told', () => heard(dispatcher().info.id, '[ledger] MOVED (w1600)').length > 0);
   const why = `its worker ${a.id.slice(0, 8)} was moved to beast`;
   assert.deepEqual(agents.benchPriorities('pc')[a.id]?.away, { why }, 'every waiting ticket of it on pc is parked');
   assert.equal(agents.benchPriorities('beast')[a.id], undefined, 'nothing on the new machine');
