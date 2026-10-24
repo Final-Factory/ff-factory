@@ -941,9 +941,13 @@ and w1891 waited behind it there, and w1789 waited on LothDesktop behind shared 
 - **Live** (measured, the portal journal): the first ask after the deploy came at 03:02:40Z on 2026-10-24 from w1829's
   worker on BEAST, answered "here" with `same_machine` (it validates BEAST's own bench lock). Workers whose host started
   before the rollout are not asked (above: "A host keeps the code it started on").
-- **Not yet**: the game repo's bench_queue.py does not read the verdict itself (the guard sees only commands it can parse);
-  a leg's new worker rebuilds both sides on the small computer (a laptop build is slow) where w1946's `timed_run` would ship
-  them, which needs a play-only computer joined.
+- **Build here, time there** (w1996, [scheduling.md](scheduling.md)): a Windows player A/B no longer costs a worker on the
+  small computer. With no `via`, and a computer up that takes a `timed_run` (a play-only one, or since w1996 a small worker
+  computer such as LothLaptop), the answer is "elsewhere" by `timed_run`: the worker builds both players where it is, under
+  shared tickets, and that computer's daemon times them. The answer says to ask again with `via: "leg"` for anything else
+  timed (a snippet timed in the editor, a Performance test, a profiler capture, a Mac player), which keeps the hand-off
+  above.
+- **Not yet**: the game repo's bench_queue.py does not read the verdict itself (the guard sees only commands it can parse).
 
 **A play-only timing machine** (w1946, lothsahn, 2026-10-23: "I have a desktop with 16GB ram. Windows takes 12G so there's
 not enough room for an editor. However, it could play the game and potentially be useful for benchmarks... Can the portal do
@@ -989,8 +993,30 @@ functionality needed"), it takes one named operation and nothing else:
    run's bound as the fallback. A run far past its bound is failed and its worker told (`TimedRuns.tick`). A daemon that
    restarted mid-run gets the run again from its hello (`timedActive`).
 
-Only play-only computers take a `timed_run`, picked by name or as the online one with the fewest runs ahead. Every worker
-install's daemon offers `timedRuns`, but the portal sends none elsewhere. What the timing machine runs is the build's own
+**Small worker computers take a `timed_run` too** (w1996, [scheduling.md](scheduling.md); lothsahn, 2026-10-24: "figure
+out how to efficiently use the machines with a small number of slots for jobs that do exclusive locks and the machines with a
+large number of slots to do builds and functional runs"). The targets (`TimedRuns.targets`, `windowsTargets`) are the
+play-only computers and every Windows worker computer with at most `SMALL_TIMED_MAX_AGENTS` agent slots that takes timed
+runs (`smallWorker` in `server/index.ts`; never m5, nor one where a person plays). Unnamed, a run goes to the first by
+`rankTargets`: online first, play-only before small ones (a play-only turn idles nobody), then the fewest runs ahead and the
+fewest agent slots. On a worker computer the daemon (`machine/timedRunner.ts` `workerTurns`) does three things otherwise:
+
+- **The ticket goes through the bench queue**: `bench_queue.py hold --mode exclusive --reason timing` with the asking
+  worker's `FF_SESSION_ID` (`benchTicketFor`), so the queue's order, its priorities (the portal lists the run's session in
+  that computer's bench priorities at its request's priority, `Agents.benchPriorities`), its 30-minute turn and BenchTurn's
+  quiet machine apply as to any timed leg there. The ticket's owner is a small node child of the daemon (`spawnOwner`), not
+  the daemon itself: BenchTurn spares what a ticket's owner started, and the daemon started every editor. Its players carry
+  the worker's session, so BenchTurn spares them and nothing else.
+- **Turns**: a turn plays the legs that fit in `TURN_PLAN_MS` (24 minutes, before the queue's 25-minute warning) by the
+  longest leg so far, gives the ticket back and queues again for the rest. A revoked turn ends after its leg.
+- **Borrowed player slots**: the builds are laid out under `<root>/timing/builds/b0|b1`, and during the turn hard-linked into
+  the player-slot pair of a sandbox that no live lease holds (`borrowPair`, `slotFree`: the game repo's
+  `scripts/nightly/player_slots.py` lease rules), the only folders whose firewall rules exist. The run leases them for its
+  turn and marks `slot.json` with a fingerprint no build has (`linkInto`), so `player_slots.py` refills the slot at that
+  sandbox's next launch.
+
+While a run is queued or sent to a computer whose agent cap is 1, it is no `single_worker` for its bench queue
+(`MachineManager.singleWorker`): its own worker's turn ends at 30 minutes again while the run waits. What the timing machine runs is the build's own
 `finalfactory.exe` from its player slot, as the daemon's user, one leg at a time. That is the game a worker built, so treat
 a play-only machine like any computer that runs workers' builds. Its numbers compare only with its own. Tests:
 `server/timedRuns.test.ts` (an in-process run end to end over the real upload and fetch routes, with a fake player).

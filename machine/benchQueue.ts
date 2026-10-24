@@ -119,6 +119,10 @@ export interface BenchTicketOptions {
   env?: NodeJS.ProcessEnv;
   /** Where its status file goes (default the OS temp folder). */
   tempDir?: string;
+  /** An exclusive ticket's reason (bench_queue.py --reason, w1832/w1948): 'timing' for a timed run. */
+  reason?: 'timing' | 'machine';
+  /** The process the ticket follows (default this one); w1996: a timed run's own owner child, so BenchTurn spares only it. */
+  ownerPid?: number;
 }
 
 export type TicketState =
@@ -141,8 +145,9 @@ export class BenchTicket {
 
   /** Start the helper: it numbers the ticket and starts waiting. */
   take(): this {
-    const args = [this.o.script, '--lock', this.o.lock, 'hold', '--mode', this.o.mode, '--what', this.o.what, '--owner-pid', String(process.pid), '--status', this.status];
+    const args = [this.o.script, '--lock', this.o.lock, 'hold', '--mode', this.o.mode, '--what', this.o.what, '--owner-pid', String(this.o.ownerPid ?? process.pid), '--status', this.status];
     if (this.o.maxMin) args.push('--max-min', String(this.o.maxMin));
+    if (this.o.reason) args.push('--reason', this.o.reason);
     try {
       this.child = spawn(this.o.python ?? pythonExe(this.o.env), args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true, env: { ...(this.o.env ?? process.env) } });
     } catch (e) {
