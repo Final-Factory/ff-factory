@@ -5655,3 +5655,57 @@ test('w2046: a released worker whose resume waits for room on its full computer 
   assert.match(w.log.join('\n'), /moved from pc\/alpha to beast \(w2046\), from branch w1-move/);
   full.placeFull = placeFull;
 });
+
+test('w2043: a pilot worker whose PR merged goes on in a fresh session at its next message; its check-in moves there, the old session ends', async (t) => {
+  const { store, sessions, agents, cfg, dispatcher, chat, call } = await setupOnMachine(t);
+  const ben = chat(BEN).info;
+  cfg.worker = { ...cfg.worker, freshAfterMergePilotPercent: 100 } as typeof cfg.worker;
+  await call(ben, 'request_work', { title: 'Fix the belt splitter', brief: 'Splitters drop items.' });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Fix the splitter', title: 'Splitter fix', work_id: 'w1' });
+  const old = /Started agent (\w+)/.exec(started.text)![1];
+  await until('the first worker idle', () => sessions.get(old).info.status === 'idle');
+  // Before its PR merges, a message resumes it as always.
+  sessions.send(old, 'CI on PR #12 finished: green.', 'system');
+  await until('it took the message', () => store.readTranscript(old).some((e) => e.kind === 'user' && (e as { text: string }).text.includes('CI on PR #12')));
+  await until('idle again', () => sessions.get(old).info.status === 'idle');
+  const w1 = store.work.get('w1')!;
+  w1.prs = [{ repo: 'Final-Factory/FinalFactory', number: 12, title: 'w1: splitter', state: 'merged', at: new Date().toISOString(), sha: '0123456789abcdef', via: 'line' }];
+  store.putWork(w1);
+  (agents as unknown as { waker: { schedule(id: string, m: number, n: string): string } }).waker.schedule(old, 90, 'check the deploy');
+
+  assert.equal(sessions.send(old, 'Deploy check: the portal runs the merge.', 'system'), '', 'taken for a fresh session');
+  await until('a fresh session on w1', () => store.work.get('w1')!.sessionIds.length === 1 && store.work.get('w1')!.sessionIds[0] !== old);
+  const fresh = store.work.get('w1')!.sessionIds[0];
+  await until('its first message', () => !!firstSaid(store, fresh));
+  const first = firstSaid(store, fresh);
+  assert.match(first, /^\[FF Factory\] Fresh session after a merge \(pilot w2043\): w1 /);
+  assert.match(first, /Merged: Final-Factory\/FinalFactory#12 "w1: splitter"/);
+  assert.match(first, /~~~text\nDeploy check: the portal runs the merge\.\n~~~/);
+  assert.match(first, /The request as filed \(w1/);
+  assert.equal(sessions.get(fresh).info.machineSandbox, 'alpha', 'the same sandbox');
+  assert.ok(!store.readTranscript(old).some((e) => e.kind === 'user' && (e as { text: string }).text.includes('Deploy check')), 'nothing went into the old conversation');
+  assert.equal(wakeOf(agents, old), undefined, 'the old check-in is gone');
+  assert.equal(wakeOf(agents, fresh)?.note, 'check the deploy', 'and moved to the fresh session');
+  await until('the old session ends', () => sessions.get(old).info.status === 'stopped');
+  // The fresh session's own next message is not turned again: nothing merged during it.
+  await until('fresh idle', () => sessions.get(fresh).info.status === 'idle');
+  sessions.send(fresh, 'Go on.', 'system');
+  await until('it took it', () => store.readTranscript(fresh).some((e) => e.kind === 'user' && (e as { text: string }).text === 'Go on.'));
+  assert.deepEqual(store.work.get('w1')!.sessionIds, [fresh]);
+});
+
+test('w2043: with the pilot off (or the request in the control arm) a worker whose PR merged is resumed in its own session', async (t) => {
+  const { store, sessions, cfg, dispatcher, chat, call } = await setupOnMachine(t);
+  const ben = chat(BEN).info;
+  cfg.worker = { ...cfg.worker, freshAfterMergePilotPercent: 0 } as typeof cfg.worker;
+  await call(ben, 'request_work', { title: 'Fix the belt splitter', brief: 'Splitters drop items.' });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Fix the splitter', title: 'Splitter fix', work_id: 'w1' });
+  const old = /Started agent (\w+)/.exec(started.text)![1];
+  await until('the first worker idle', () => sessions.get(old).info.status === 'idle');
+  const w1 = store.work.get('w1')!;
+  w1.prs = [{ repo: 'Final-Factory/FinalFactory', number: 12, state: 'merged', at: new Date().toISOString(), via: 'line' }];
+  store.putWork(w1);
+  sessions.send(old, 'Deploy check.', 'system');
+  await until('it took the message', () => store.readTranscript(old).some((e) => e.kind === 'user' && (e as { text: string }).text === 'Deploy check.'));
+  assert.deepEqual(store.work.get('w1')!.sessionIds, [old]);
+});
