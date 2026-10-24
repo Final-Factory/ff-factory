@@ -8,7 +8,7 @@ import path from 'node:path';
 import { checkArray, readJsonDurable, writeJsonDurable } from '../../server/durable.ts';
 import { saveWork, untrackedProblem, type SaveResult } from '../../server/saveWork.ts';
 import { armScriptReimport } from '../../machine/scriptReimport.ts';
-import { DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT } from '../../shared/types.ts';
+import { CLEANUP_SOFT_GB_DEFAULT, DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT } from '../../shared/types.ts';
 
 /** <root>/devdrive.json: what devdrive.ps1 and the helper keep about the drive (the letter is the one source of truth). */
 export interface DevDriveState {
@@ -55,37 +55,45 @@ export function devDriveDirs(letter: string): { sandboxes: string; seed: string 
 
 /**
  * What the Dev Drive's maximum is made of (w1910, lothsahn: "The maximum should be based on the number of slots and agents
- * and workers selected and anything else that goes into that"). GB (GiB), measured on LothDesktop's V: on 2026-10-23 (6
- * sandboxes, 2 agents each) as logical sizes (`du -s`), so block clones and ReFS dedup count in full: a new machine runs no
- * dedup, and an editor rewrites what it cloned from the seed. The table: docs/worker-install.md, "The maximum size".
+ * and workers selected and anything else that goes into that"). GB (GiB) of disk each part takes on its own, counted once
+ * (w1947, lothsahn: "Let's account for it in the sizing rule"): a sandbox's LFS files are block clones of the clone's LFS
+ * objects (machine/sandboxes.ts, w1576) and its Library starts as a block clone of the seed, so those blocks count with the
+ * clone and the seed and not again per sandbox. Measured on LothDesktop's V: on 2026-10-23 (6 sandboxes, 2 agents each) by
+ * cluster maps (FSCTL_GET_RETRIEVAL_POINTERS, docs/sandbox-disk.md's Phys.cs), where a sandbox's own part is its logical
+ * size less what it shares with the clone and the seed; ReFS dedup's sharing between sandboxes is not taken off, since a new
+ * machine runs no dedup. The table: docs/worker-install.md, "The maximum size".
  */
 export const DEV_DRIVE_SIZES = {
   /**
-   * What every install holds once: the clone 20 (pack 1.4 measured by `git count-objects`, LFS objects 8.5 measured in
-   * docs/sandbox-disk.md, its checkout about 10: an estimate), the Library seed 11 (10.2 measured), nightly-history 5 (4.5
-   * measured), tools and steam 2 (under 1 each, measured).
+   * What every install holds once: the clone 20 (bare, no checkout: `git worktree list`; pack 1.4 by `git count-objects`,
+   * also 1.3 on LothLaptop's new clone, and the LFS objects of master's tree 8.9 by `git lfs ls-files -s`: 10.3 new, and 10
+   * for the LFS objects other branches bring, a guess under LothDesktop's ~25 after 11 days, measured by difference), the
+   * Library seed 9 (8.5 on disk), nightly-history 5 (4.6), tools and steam 2 (under 1 each) and ReFS's own 2 (an empty
+   * 80 GB V: on LothLaptop: 1.8 used), all measured but the guess.
    */
   fixedGB: 38,
   /**
-   * One sandbox: the largest of the six, slot1, 40 (worktree 12 + Library 28; the others 21 to 37, measured), and its two
-   * player folders, 4 (players/ held 19 for 6 sandboxes: 3.2 each, measured, rounded up).
+   * One sandbox, the largest of the six (slot3; the median one takes 18): its worktree less the LFS blocks it shares with
+   * the clone 9 (8.4: Builds, Temp; 1 to 3 in the others), its Library less what it shares with the seed 17 (17.0: build
+   * caches, BurstCache, reimports; 9 to 16 in the others) and its two player folders 4 (3.7 logical). The 11 GB over the
+   * median sandbox is the room for its growth, measured: what days of player builds and imports added.
    */
-  perSandboxGB: 44,
-  /** One agent's temp folder (ffa-<session>: its clones, builds and captures): tmp/ held 109.8 for 12 agent seats (9.2 each, measured; unswept leftovers of finished sessions included). */
+  perSandboxGB: 30,
+  /** One agent's temp folder (ffa-<session>: its clones, builds and captures): tmp/ held 109.2 (101.3 on disk) for 12 agent seats, 9.1 each, measured, unswept leftovers of finished sessions included. */
   perAgentGB: 10,
-  /** Free space the drive keeps at its fullest: the pool's clean-up line (DISK_WARN_GB_DEFAULT; lothsahn, w1910: "cleanup space should be 20G"). */
-  cleanupHeadroomGB: DISK_WARN_GB_DEFAULT,
+  /** Free space the drive keeps at its fullest: the clean-up soft threshold (CLEANUP_SOFT_GB_DEFAULT, 5 GB above the guard's 15; lothsahn, w1910: "cleanup space should be 20G"). */
+  cleanupHeadroomGB: CLEANUP_SOFT_GB_DEFAULT,
   /** Windows' own minimum for a Dev Drive (sourced: Microsoft Learn, "Set up a Dev Drive on Windows 11"). */
   minGB: 50,
 } as const;
 
 /**
- * What the host volume keeps free with the VHDX at its maximum: the guard's clean-up line plus its hysteresis (20 + 10,
+ * What the host volume keeps free with the VHDX at its maximum: the clean-up line plus the guard's hysteresis (20 + 10,
  * devDriveGuard), or a tenth of the free space when that is more, for whatever else the volume holds. A guess.
  */
-export const hostReserveGB = (hostFreeGB: number) => Math.max(DISK_WARN_GB_DEFAULT + 10, Math.ceil(hostFreeGB * 0.1));
+export const hostReserveGB = (hostFreeGB: number) => Math.max(CLEANUP_SOFT_GB_DEFAULT + 10, Math.ceil(hostFreeGB * 0.1));
 
-/** The GB the pool's sandboxes and agents need on the drive: the sum of DEV_DRIVE_SIZES (1 sandbox, 1 agent: 112). */
+/** The GB the pool's sandboxes and agents need on the drive: the sum of DEV_DRIVE_SIZES (1 sandbox, 1 agent: 98). */
 export function devDriveNeedGB(pool: { maxSandboxes: number; maxAgentsPerSandbox: number }): number {
   const s = DEV_DRIVE_SIZES;
   const sandboxes = Math.max(1, Math.floor(pool.maxSandboxes || 1));

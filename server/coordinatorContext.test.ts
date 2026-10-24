@@ -140,14 +140,21 @@ test('w1158: what a coordinator carries in every call stays within its budget', 
   // w1812 (Ben: "i already answered this why are you asking me in the waiting on input for this still") added one sentence
   // to the [needs you] rule: read the notes of the request and its worker's other requests before asking (cut from 560
   // characters to 240; ask_person's refusal carries the rest); the owner's brief measured 28,140, so the cap moved to 28,150.
-  const PROMPT_MAX = 28_150;
+  // w1955 (lothsahn: "Why was I being shown old cards that were decided?") added one sentence to the ask_person rule: a card answered
+  // in typed words is closed with close_question that turn (69 characters). Main had grown to 28,243 before it (over the cap, which
+  // the pull request gate does not run); the owner's brief measured 28,312, so the cap moved to 28,350.
+  const PROMPT_MAX = 28_350;
   // w1163: the always-loaded sets now follow measured use (docs/tool-manifest.md); the dispatcher's is 23,436 characters
   // since w1159 gave list_work, list_sandboxes, list_machines and agent_transcript their output options. w1597 gave decide_work
   // its questions (one plain question per decision with its answers, as the person's card asks them; Ben, 2026-10-19: "just ask
   // the question clearly, give me the option selections and thats it"): the dispatcher's measured 24,348, so the cap moved to 24,500.
   // w1863 (lothsahn: "Why did they hang if the m5 was free?") gave decide_work queue its leg for a named computer beside the
   // request's own worker, and drop_leg (trimmed from 450 characters to 170): the dispatcher's measured 24,672, so the cap moved to 24,700.
-  const ALWAYS_LOADED_MAX = 24_700;
+  // w1945 (lothsahn: "Can we make the dispatcher smart enough so it queues work properly that requires running together across
+  // multiple machines and doesn't waste slots?") gave start_agent pair_sandboxes, a pair run's legs started together (trimmed from
+  // three parameters and 950 characters to one and 216; the rule itself is in read_rules machines): the dispatcher's measured
+  // 24,888, so the cap moved to 24,900.
+  const ALWAYS_LOADED_MAX = 24_900;
   await withCoordinators((agents, kinds) => {
     for (const [kind, info] of kinds) {
       const prompt = asOnLinuxCi(promptOf(agents, info)).length;

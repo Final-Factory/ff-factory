@@ -101,6 +101,35 @@ test('w890: the whole loop: a worker that ends its turn waiting on a deploy free
   await until('both stopped', () => !n.live && !w.live);
 });
 
+test('w1945: a worker that asks for a pair run with request_pair frees its sandbox as its turn ends: stopped, released FREE on its branch, and placed again when the pair reports', async (t) => {
+  const { r, store, sessions, mm, agents, path1, gitNow } = await twoSandboxes(t);
+  // w665's case (2026-10-23): its worker held m3's only sandbox while the two-machine run of its PR waited for a pair.
+  const w = mm.createSession('pc', { kind: 'worker', title: 'w665 work', permissionMode: 'default', sandbox: 'sb1' });
+  sessions.send(w.info.id, 'go');
+  await until('w live and idle', () => w.live && w.info.status === 'idle');
+  fs.writeFileSync(path.join(path1, 'pin.txt'), 'no collider');
+  r.git(path1, 'add', 'pin.txt');
+  r.git(path1, 'commit', '-q', '-m', 'w665 pin');
+  r.git(path1, 'push', '-q', '-u', 'origin', 'HEAD');
+  const by = { userId: 'lothsahn', displayName: 'Lothsahn' };
+  const item: WorkItem = { id: 'w665', title: 'Low-ore pin collider', brief: 'Do it.', priority: 'urgent', keys: [], requestedBy: by, requesters: [], humanAsked: true, status: 'active', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), sessionIds: [w.info.id], overlaps: [], asks: 0, log: [] };
+  store.putWork(item);
+  store.workSeq = Math.max(store.workSeq, 665);
+  const o = agents.orchestrators;
+  const out = o.filePair(w.info.id, { what: 'MP-lowore-pin-pair on PR #2340', brief: 'Run MP-lowore-pin-pair on the branch; 400 heartbeats compared, none diverged.' });
+  const id = /^Filed (w\d+)/.exec(out)![1];
+  assert.equal(item.status, 'blocked');
+  assert.equal(store.work.get(id)!.pair?.for, 'w665');
+  await gitNow('sb1');
+  (agents.placeAgain as unknown as { d: { soon?: () => void } }).d.soon = () => undefined;
+  assert.match(agents.placeAgain.tick().join('\n'), new RegExp(`stopped .*\\(it waits on w665: ${id}`));
+  await until('w stopped', () => !w.live && w.info.status === 'stopped');
+  await gitNow('sb1');
+  assert.match(agents.placeAgain.tick().join('\n'), new RegExp(`released pc/sb1 of .* \\(it waits on w665: ${id}`));
+  assert.equal(w.info.placeReleased?.branch, 'feature/w1');
+  assert.match(agents.describeAllSandboxes(), /pc\/sb1 FREE/);
+});
+
 const until = async (what: string, cond: () => boolean, ms = 60_000) => {
   const end = Date.now() + ms;
   while (!cond()) {
@@ -502,16 +531,16 @@ test('machine sandboxes: the default disk guard (w628) starts an editor at 25 GB
   await p.tick();
   assert.equal(p.diskState().level, 'ok');
   assert.match(await p.unity('a', 'start'), /Started/);
-  free = 19 * GB;
+  free = 14 * GB;
   await p.tick();
-  assert.equal(p.diskState().level, 'warn', 'below 20 GB no new editors');
+  assert.equal(p.diskState().level, 'warn', 'below 15 GB no new editors (w1951)');
   free = 9 * GB;
   await p.tick();
   assert.equal(p.diskState().level, 'critical', 'below 10 GB idle editors stop');
-  free = 24 * GB;
+  free = 19 * GB;
   await p.tick();
-  assert.equal(p.diskState().level, 'warn', 'hysteresis: not ok again until 25 GB');
-  free = 25 * GB;
+  assert.equal(p.diskState().level, 'warn', 'hysteresis: not ok again until 20 GB');
+  free = 20 * GB;
   await p.tick();
   assert.equal(p.diskState().level, 'ok');
 
@@ -519,7 +548,7 @@ test('machine sandboxes: the default disk guard (w628) starts an editor at 25 GB
   const full = pool(r, { free: () => 110 * GB, copyBytes: 100 * GB, settings: defaults }).p;
   await full.create({ id: 'b', branch: 'sandbox/b', base: 'origin/master', seedLibrary: true, startUnity: false });
   await until('b refused', () => full.list().find((x) => x.id === 'b')?.status === 'error');
-  assert.match(full.list().find((x) => x.id === 'b')!.statusDetail ?? '', /not enough disk for the Library copy \(~100 GB\): 110 GB free .* need 120 GB/);
+  assert.match(full.list().find((x) => x.id === 'b')!.statusDetail ?? '', /not enough disk for the Library copy \(~100 GB\): 110 GB free .* need 115 GB/);
   await full.remove('b').catch(() => undefined);
   // A block clone reports no size: the allowance stands.
   const cloned = pool(r, { free: () => 110 * GB, settings: defaults }).p;
@@ -729,7 +758,7 @@ test('machine sandboxes: where a Library comes from, and which editors are idle'
 
 test('machine sandboxes: settings, limits, references and snapshots on the portal', () => {
   assert.equal(poolSettingsOf({}), null, 'no sandbox_root, no sandboxes');
-  assert.deepEqual(poolSettingsOf({ sandboxRoot: 'D:\\work\\ffsb' }), { root: 'D:\\work\\ffsb', maxSandboxes: 3, maxAgentsPerSandbox: 2, maxUnity: 2, diskWarnGB: 20, diskCriticalGB: 10 }, 'the disk guard defaults to 20/10 GB (w628)');
+  assert.deepEqual(poolSettingsOf({ sandboxRoot: 'D:\\work\\ffsb' }), { root: 'D:\\work\\ffsb', maxSandboxes: 3, maxAgentsPerSandbox: 2, maxUnity: 2, diskWarnGB: 15, diskCriticalGB: 10 }, 'a new machine with nothing passed: the disk guard defaults to 15/10 GB (w1951)');
   assert.equal(poolSettingsOf({ sandboxRoot: '/x', diskWarnGB: 10 })!.diskCriticalGB, 10, 'critical never above warn');
 
   assert.deepEqual(limitOptions({ maxSandboxes: 3 }, { maxUnity: 2, maxSandboxes: 1 }), { maxSandboxes: 3, maxAgentsPerSandbox: undefined, maxUnity: 2, diskWarnGB: undefined, diskCriticalGB: undefined, maxSandboxAgents: undefined }, 'unset ones are kept');
@@ -757,7 +786,7 @@ test('machine sandboxes: settings, limits, references and snapshots on the porta
   assert.equal(machineForPath('D:/work/ffsb/sb1/Assets/Screenshots/a.png', [m]), m, "a sandbox's screenshot belongs to its machine");
 
   const cfg = JSON.parse(daemonConfig({ portalUrl: 'https://p', id: 'x', token: 't', repoPath: '/r', sandboxes: poolSettingsOf({ sandboxRoot: '/s', maxSandboxes: 3 }) }));
-  assert.deepEqual(cfg.sandboxes, { root: '/s', maxSandboxes: 3, maxAgentsPerSandbox: 2, maxUnity: 2, diskWarnGB: 20, diskCriticalGB: 10 }, 'daemon.json keeps them');
+  assert.deepEqual(cfg.sandboxes, { root: '/s', maxSandboxes: 3, maxAgentsPerSandbox: 2, maxUnity: 2, diskWarnGB: 15, diskCriticalGB: 10 }, 'daemon.json keeps them');
   assert.equal(JSON.parse(daemonConfig({ portalUrl: 'https://p', id: 'x', token: 't', repoPath: '/r' })).sandboxes, undefined);
 });
 

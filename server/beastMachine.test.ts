@@ -370,7 +370,7 @@ test('beast machine: add_machine local takes its settings from the config, deplo
 
   const json = JSON.parse(daemonConfig({ portalUrl: 'http://127.0.0.1:8790', id: 'beast', token: 't', repoPath: 'C:\\ffsb\\_base', extra: o.extra }));
   assert.deepEqual([json.maxEventsFile, json.unityMcpServer.command, json.sandboxIdleStopMinutes], [null, 'uvx.exe', 120]);
-  assert.deepEqual(poolSettingsOf({ sandboxRoot: '/s' }), { root: '/s', maxSandboxes: 3, maxAgentsPerSandbox: 2, maxUnity: 2, diskWarnGB: 20, diskCriticalGB: 10 }, 'a machine without the extras: as before');
+  assert.deepEqual(poolSettingsOf({ sandboxRoot: '/s' }), { root: '/s', maxSandboxes: 3, maxAgentsPerSandbox: 2, maxUnity: 2, diskWarnGB: 15, diskCriticalGB: 10 }, 'a machine without the extras: the w1951 defaults');
 });
 
 test('beast machine: the local transport runs the same bootstrap without ssh; an existing task survives a non-elevated deploy', () => {
@@ -423,7 +423,7 @@ test('beast machine: a standing agent on it keeps the workers\' account; its dae
     const d = new Daemon({ portalUrl: 'http://127.0.0.1:1', id: 'beast', token: 't', repoPath: dir, appDir: dir, maxEventsFile: null, cleanup: { everyMinutes: 0, softFreeGB: 0 } }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES);
     assert.deepEqual((d as unknown as { cleanupSettings: unknown }).cleanupSettings, { everyMinutes: 0, softFreeGB: 0 });
     const other = new Daemon({ portalUrl: 'http://127.0.0.1:1', id: 'm5', token: 't', repoPath: dir, appDir: path.join(dir, 'x'), maxEventsFile: null }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES);
-    assert.deepEqual((other as unknown as { cleanupSettings: unknown }).cleanupSettings, { everyMinutes: 60, softFreeGB: 80 }, 'other machines: the defaults, as before');
+    assert.deepEqual((other as unknown as { cleanupSettings: unknown }).cleanupSettings, { everyMinutes: 60, softFreeGB: 20 }, 'other machines: the defaults (w1951: a 20 GB soft threshold)');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

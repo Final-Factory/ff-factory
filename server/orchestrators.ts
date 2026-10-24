@@ -47,9 +47,9 @@ import { autoApproveProblem, cleanBlock, cleanLine, crashFacts, crashKinship, cr
 import { readDiscordConfig } from './discordConfig.ts';
 import { LIMIT_END, doneIdsIn, doneProblem, learnedProblem, mergedMentionsIn, notDoneReason, pausedIn, reportVerdict, stillOpenIn, toolErrors, turnEvidence, turnTroubleOf, type TurnTrouble } from './ledgerRules.ts';
 import { answerAfter, asksAPerson, holdsOf, personWaitIn, questionShareKey, reportWaitKey, servedBy } from '../shared/workState.ts';
-import { capacityBlockProblem, capacityWaitIn, needsOf, needsTimed, resolveNeeds } from '../shared/capacity.ts';
+import { capacityBlockProblem, capacityWaitIn, needsOf, needsTimed, pairRoom, pairText, PAIR_MAX_LEGS, resolveNeeds } from '../shared/capacity.ts';
 import type { HandBack } from './machinePause.ts';
-import { heldText, roomForWork, roomIds, roomStood, timedKindOf, unusableText, type RoomNow, type TimedFacts, type TimedKind } from './placement.ts';
+import { heldText, roomEnough, roomForWork, roomIds, roomStood, timedKindOf, unusableText, type RoomNow, type TimedFacts, type TimedKind } from './placement.ts';
 import { minPriorityText } from '../shared/capacity.ts';
 import { repoSlug } from './ciReadHealth.ts';
 import { actionName, CONDITIONAL_DAYS, CONDITIONAL_MAX_DAYS, CONDITIONAL_PER_REQUEST, conditionalLine, conditionName, HELD_MARK, inPersonWords, parseCondition, type ConditionInput } from '../shared/conditional.ts';
@@ -65,7 +65,7 @@ import { displayName } from '../shared/labels.ts';
 import { permissionAccess, permissionWhat, type PermissionAccess } from '../shared/permissionAccess.ts';
 import { OPS_PEOPLE } from './opsWorker.ts';
 import { isSamePerson, personForWork, sessionPerson, tokenPersonForWork } from './vault.ts';
-import type { AttachmentRef, ConditionalDecision, OpenAsk, WorkNeedsYou, GateResume, Machine, WorkAutoClosed, WorkBlocker, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
+import type { AttachmentRef, ConditionalDecision, OpenAsk, WorkNeedsYou, GateResume, Machine, WorkAutoClosed, WorkBlocker, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPair, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);
@@ -1490,7 +1490,7 @@ export class Orchestrators {
    */
   file(chat: SessionHandle, input: WorkInput): string {
     try {
-      return this.withBugNote(chat, this.fileNow(chat, input));
+      return this.withBugNote(chat, this.withOpenCards(chat, this.fileNow(chat, input)));
     } catch (e) {
       throw this.refusedCall(chat, 'request_work', { title: input.title, brief: input.brief }, e);
     }
@@ -1743,7 +1743,7 @@ export class Orchestrators {
   /** A requester's update (update_work): a note (an answer to a question reopens it), a priority, closing or reopening. */
   update(chat: SessionHandle, input: UpdateInput): string {
     try {
-      return this.withBugNote(chat, this.updateNow(chat, input));
+      return this.withBugNote(chat, this.withOpenCards(chat, this.updateNow(chat, input)));
     } catch (e) {
       throw this.refusedCall(chat, 'update_work', { ...input }, e);
     }
@@ -1998,6 +1998,34 @@ export class Orchestrators {
     if (go.length) this.closeAsks(chat.info.id, (a) => go.includes(a));
   }
 
+  /** Per chat, the turn (its opening message's uuid) and the open questions already listed to the orchestrator in it. */
+  private readonly cardsListed = new Map<string, { turn: string | undefined; seqs: Set<number> }>();
+
+  /**
+   * w1955 (lothsahn: "Why was I being shown old cards that were decided?"): a person answers a card's question in typed
+   * words, and the orchestrator files or updates work on it without calling close_question, so the card stays clickable.
+   * Typed words carry no mark of what they answer, so FF Factory never closes on a guess: in a turn the person started,
+   * request_work and update_work list the chat's open questions asked before that message, each once per turn, and the
+   * orchestrator closes the ones the work settles. The card stays open until it does.
+   */
+  private withOpenCards(chat: SessionHandle, said: string): string {
+    if ((chat.turnFrom ?? chat.lastFrom) !== 'human' || !this.isPersonal(chat.info)) return said;
+    const open = chat.info.openAsks ?? [];
+    if (!open.length) return said;
+    const sid = chat.info.id;
+    // The person's message that opened this turn (the newest of theirs): a card asked after it was asked in this turn.
+    const since = this.store.readTranscript(sid, 400).findLast((e) => e.kind === 'user' && e.from === 'human')?.seq ?? Infinity;
+    let seen = this.cardsListed.get(sid);
+    if (!seen || seen.turn !== chat.turnId) this.cardsListed.set(sid, (seen = { turn: chat.turnId, seqs: new Set() }));
+    const listed = seen.seqs;
+    const stale = open.filter((a) => a.seq < since && !listed.has(a.seq));
+    if (!stale.length) return said;
+    for (const a of stale) listed.add(a.seq);
+    const one = stale.length === 1;
+    const lines = stale.map((a) => `- open question ${a.seq} (${clip(splitMedia(a.ask.question).text.replace(/\s+/g, ' '), 140)}), asked ${a.at}`);
+    return `${said}\n\n[FF Factory] ${one ? 'An open question' : 'Open questions'} of yours on ${this.ownerOf(chat.info)?.displayName ?? 'your person'}'s Waiting on input tab, asked before their message this turn, may be answered by this:\n${lines.join('\n')}\nIf their typed words decided ${one ? 'it' : 'one'}, call close_question with its seq and why in this same turn, or the card stays clickable. If it is still open, leave it.`;
+  }
+
   /** The orchestrator's close_question (w1868): a question it asked that no longer needs an answer leaves the tab. */
   closeQuestion(chat: SessionHandle, input: { seq?: unknown; why?: unknown }): string {
     if (!this.isPersonal(chat.info)) throw new Error('only a person’s own orchestrator asks and closes questions');
@@ -2164,14 +2192,40 @@ export class Orchestrators {
    * starts with HELD_MARK: it is FF Factory's, and conditional decisions never take their words from it. Offered once; a
    * call refused again is held again.
    */
-  heldOffer(sessionId: string): string {
+  heldOffer(sessionId: string, typed?: string): string {
     const list = (this.held.get(sessionId) ?? []).filter((h) => this.now().getTime() - Date.parse(h.at) < HELD_MS);
     this.held.delete(sessionId);
-    if (!list.length) return '';
-    const owner = this.ownerOf(this.sessions.sessions.get(sessionId)?.info ?? { kind: 'worker' });
-    const n = owner?.displayName ?? 'your person';
+    const info = this.sessions.sessions.get(sessionId)?.info;
+    const n = (info ? this.ownerOf(info) : undefined)?.displayName ?? 'your person';
+    const cards = typed === undefined ? '' : this.cardsOffer(sessionId, typed, n);
+    if (!list.length && !cards) return '';
     const lines = list.map((h) => `- ${utcShort(h.at)}: ${h.tool} ${clip(JSON.stringify(h.args), 600)}, refused: ${clip(h.why, 300)}`);
-    return `\n\n${HELD_MARK}\nCalls a gate refused in your earlier turns, offered again with this message of ${n}'s (w830). Make each one ${n} already decided in their own words, now, as it stands; don't ask ${n} again. Leave out any their words do not decide.\n${lines.join('\n')}`;
+    const held = list.length ? `\nCalls a gate refused in your earlier turns, offered again with this message of ${n}'s (w830). Make each one ${n} already decided in their own words, now, as it stands; don't ask ${n} again. Leave out any their words do not decide.\n${lines.join('\n')}` : '';
+    return `\n\n${HELD_MARK}${held}${cards}`;
+  }
+
+  /** The open questions each chat was already shown at the start of a turn, by seq: a card is offered once. In memory only. */
+  private readonly cardsOffered = new Map<string, Set<number>>();
+
+  /**
+   * w1955 (lothsahn: "Why was I being shown old cards that were decided?"): at the start of a turn the person started with
+   * typed words, the chat's open questions that were asked before this message and were not offered before, so the
+   * orchestrator closes (close_question) the ones their words settled, with or without filing anything. A click or a
+   * reply quoting a card has answered that one (the reply's quote is left out). Offered once per card; request_work and
+   * update_work list the ones still open again (withOpenCards). Never closes anything: typed words name no card.
+   */
+  private cardsOffer(sessionId: string, typed: string, n: string): string {
+    const info = this.sessions.sessions.get(sessionId)?.info;
+    if (!info || !this.isPersonal(info)) return '';
+    const quoted = splitReply(typed, HELD_MARK).quote?.seq;
+    let offered = this.cardsOffered.get(sessionId);
+    if (!offered) this.cardsOffered.set(sessionId, (offered = new Set()));
+    const seen = offered;
+    const fresh = (info.openAsks ?? []).filter((a) => a.seq !== quoted && !seen.has(a.seq));
+    if (!fresh.length) return '';
+    for (const a of fresh) seen.add(a.seq);
+    const lines = fresh.map((a) => `- open question ${a.seq} (${clip(splitMedia(a.ask.question).text.replace(/\s+/g, ' '), 140)}), asked ${a.at}`);
+    return `\nOpen questions of yours on ${n}'s Waiting on input tab, asked before this message (w1955). If ${n}'s words in this message decided one, call close_question with its seq and why in this same turn, or the card stays clickable; leave the ones still open.\n${lines.join('\n')}`;
   }
 
   /** The person's own recent messages in this chat, newest last: where a conditional decision's words must be found. */
@@ -2626,11 +2680,11 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       const room = fitting.ids;
       if (room.length) {
         throw new Error(
-          `queue is for capacity only, and ${room.join(', ')} ${room.length > 1 ? 'have' : 'has'} ${kind === 'agent' ? 'an agent slot (it needs no editor and no game sandbox, w1098)' : 'room'} for ${w.id} now: start it there (start_agent with work_id "${w.id}"), or, if it waits for something else, decide_work block with what it waits for${needs.length ? '' : ' (or queue with needs: the computers that can take it, when only busy ones can)'}`,
+          `queue is for capacity only, and ${room.join(', ')} ${room.length > 1 ? 'have' : 'has'} ${kind === 'agent' ? 'an agent slot (it needs no editor and no game sandbox, w1098)' : 'room'} for ${w.id} now: ${w.pair ? `start its ${w.pair.legs} legs together (start_agent with work_id "${w.id}", sandbox for leg 1, the host, and pair_sandboxes for the others, each a FREE sandbox on another computer)` : `start it there (start_agent with work_id "${w.id}")`}, or, if it waits for something else, decide_work block with what it waits for${needs.length ? '' : ' (or queue with needs: the computers that can take it, when only busy ones can)'}`,
         );
       }
       // Held computers, and those placement.minPriority reserves above its priority (w1643), with room it may not use.
-      const held = [unusableText({ ...facts, held: facts.held.filter((h) => !needs.length || needs.includes(h.id)), reserved: (facts.reserved ?? []).filter((r) => !needs.length || needs.includes(r.id)) }, kind, w.priority), ...fitting.unfit.map((u) => `${u.id} has room but cannot take it: ${u.why}`)].filter(Boolean).join('; ');
+      const held = [unusableText({ ...facts, held: facts.held.filter((h) => !needs.length || needs.includes(h.id)), reserved: (facts.reserved ?? []).filter((r) => !needs.length || needs.includes(r.id)) }, kind, w.priority), ...(fitting.short ? [fitting.short] : []), ...fitting.unfit.map((u) => `${u.id} has room but cannot take it: ${u.why}`)].filter(Boolean).join('; ');
       // w1863: a leg for named computers of a request whose own worker carries on elsewhere ("queued for capacity on m5 … I
       // start a timing worker there when a slot frees"). It was the request's status, so the next message to that worker
       // (linkWorker: active) dropped it, and w1789's and w1785's m5 legs waited 8 hours unseen. Now it is its own entry.
@@ -3020,18 +3074,103 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
    * Blocked on them, its pending check-ins are cancelled, and the worker ends its turn: it is resumed by the dispatcher
    * when they clear (unblock). No polling.
    */
-  workerBlocked(sessionId: string, a: { request?: string; requests?: string[]; reports?: string[]; prs?: string[]; deploys?: string[]; what: string }): string {
+  /**
+   * The request a worker's tool is about (w754): the one it names, if it holds it or set it aside (w1094: sent w1095,
+   * 7d8eebb0 could no longer register its wait for w1078's PR), else the one it serves now when it serves one; open and
+   * being worked.
+   */
+  private workerRequest(sessionId: string, request: string | undefined, tool: string): WorkItem {
     const items = [...this.store.work.values()];
     const byId = (id: string) => this.store.work.get(id);
     const serves = [...servedBy(sessionId, items)].map(byId).filter((x): x is WorkItem => !!x);
-    // Any open request it holds or set aside, not only the one it was sent last (w1094: sent w1095, 7d8eebb0 could no
-    // longer register its wait for w1078's PR). Without request, the one it serves now, as before.
     const h = holdsOf(sessionId, items);
     const holds = [...new Set([...h.held, ...h.paused.keys()])].sort().map(byId).filter((x): x is WorkItem => !!x);
-    const named = a.request?.trim().toLowerCase();
+    const named = request?.trim().toLowerCase();
     const w = named ? holds.find((x) => x.id === named) : serves.length === 1 ? serves[0] : undefined;
     if (!w) throw new Error(named ? `you are not on ${named}${holds.length ? ` (you hold ${holds.map((x) => x.id).join(', ')})` : ''}` : serves.length ? `you serve ${serves.map((x) => x.id).join(', ')}: pass request, the one that waits` : 'you are on no request in the ledger, so there is nothing to block');
-    if (w.status !== 'active' && w.status !== 'blocked') throw new Error(`${w.id} is ${w.status}; blocked_on is for a request you are working on`);
+    if (w.status !== 'active' && w.status !== 'blocked') throw new Error(`${w.id} is ${w.status}; ${tool} is for a request you are working on`);
+    return w;
+  }
+
+  /**
+   * request_pair (w1945, lothsahn: "Can we make the dispatcher smart enough so it queues work properly that requires running
+   * together across multiple machines and doesn't waste slots?"). On 2026-10-23 w665's worker d558ba14 held m3's only sandbox
+   * for an hour while the two-machine run of its PR #2340 (w1936, filed by hand) sat Queued, so m3 took no work; w1940's
+   * client leg on biscuit waited on w1898's host leg, w1826's host on biscuit's client. Now the worker files the run itself
+   * as one pair request, whose legs the dispatcher starts together (start_agent with pair_sandboxes) when that many computers
+   * have room at once, and its own request is Blocked on that request's report: the w890 release frees its sandbox when its
+   * turn ends, and the report resumes it. One open pair run per request: asked again, it waits on the one there is.
+   */
+  filePair(sessionId: string, a: { what?: string; brief?: string; legs?: number; cross_os?: string; timed?: boolean; request?: string }): string {
+    const w = this.workerRequest(sessionId, a.request, 'request_pair');
+    const what = clip(String(a.what ?? '').replace(/\s+/g, ' ').trim(), 100);
+    const brief = String(a.brief ?? '').trim();
+    if (!what || !brief) throw new Error('give what (one line: "MP-lowore-pin-pair on PR #2340") and brief (what the legs run: the branch or commit, the scenario or steps, what passes, where the result goes)');
+    const legs = a.legs ?? 2;
+    if (!Number.isInteger(legs) || legs < 2 || legs > PAIR_MAX_LEGS) throw new Error(`legs is 2 to ${PAIR_MAX_LEGS}: the computers it needs at once`);
+    const crossOs = String(a.cross_os ?? '').replace(/\s+/g, ' ').trim().slice(0, 300) || undefined;
+    const open = [...this.store.work.values()].find((x) => x.pair?.for === w.id && isOpen(x));
+    const p = open ?? this.newPair(w, sessionId, { what, brief, legs, crossOs, timed: a.timed === true });
+    const blocked = this.workerBlocked(sessionId, { request: w.id, reports: [p.id], what: `pair run ${p.id}: ${what}` });
+    const head = open
+      ? `${w.id} already has an open pair run, ${p.id} (${p.status}: ${clip(p.title, 80)}); you wait on it, and nothing new was filed.`
+      : `Filed ${p.id}, ${pairText(p.pair!)}, for ${w.id}. The dispatcher starts its legs together, one new worker on each computer, as soon as that many computers have room at once; each leg's first message says which leg it is and where the others are.`;
+    return `${head} ${blocked} Commit and push your work before the turn ends: your sandbox is then released at once for other work, and you are resumed (in a free sandbox on your machine, on your branch) when the pair's host leg reports its result.`;
+  }
+
+  /** The pair request request_pair files (w1945): the asking request's people and priority, a game sandbox per leg. */
+  private newPair(w: WorkItem, sessionId: string, x: { what: string; brief: string; legs: number; crossOs?: string; timed: boolean }): WorkItem {
+    const now = this.now().toISOString();
+    const pair: WorkPair = { legs: x.legs, for: w.id, forSession: sessionId, ...(x.crossOs ? { crossOs: x.crossOs } : {}), ...(x.timed ? { timed: true } : {}) };
+    const title = clip(`Pair run for ${w.id}: ${x.what}`, 120);
+    const brief = clip(
+      [
+        x.brief,
+        '',
+        `FF Factory filed this for worker ${sessionId} on ${w.id} (w1945, request_pair): ${pairText(pair)}. Its legs start together, one worker on each computer (start_agent with pair_sandboxes); each leg's first message says which leg it is and where the others are, and message_pair reaches them. ${w.id}'s worker is Blocked on this request's report: the host leg (leg 1) reports the result with a line "For ${w.id}:" (what ran, the commit every leg ran, what the check compared and found, any desync report files), and every leg ends with DONE once the run is over. Do not merge ${w.id}'s pull request: its own worker does.`,
+      ].join('\n'),
+      8000,
+    );
+    const p: WorkItem = {
+      id: `w${++this.store.workSeq}`,
+      title,
+      brief,
+      constraints: pairText(pair),
+      priority: w.priority,
+      relatedIds: [w.id],
+      keys: textKeys(title, this.knownBranches()),
+      requestedBy: w.requestedBy,
+      requesters: [...w.requesters],
+      humanAsked: false,
+      status: 'new',
+      createdAt: now,
+      updatedAt: now,
+      sessionIds: [],
+      needs: 'game',
+      pair,
+      overlaps: [],
+      asks: 0,
+      log: [],
+    };
+    // The request it is for is no repeat of it (its worker waits on it).
+    p.overlaps = findOverlaps({ keys: p.keys, title: p.title }, this.pool(p.id)).filter((o) => o.ref !== w.id);
+    this.stamp(p, `filed by FF Factory for worker ${sessionId} on ${w.id} (w1945 request_pair): ${pairText(pair)}; counts against no limit`);
+    this.store.putWork(p);
+    this.gatherForDispatcher(w.requestedBy, requestNotice(p));
+    return p;
+  }
+
+  /** A pair run's legs started together (w1945, start_agent with pair_sandboxes), leg 1 (the host) first: recorded on it. */
+  pairStarted(id: string, legs: { session: string; sandbox: string }[], made: Pick<WorkPair, 'crossOs'> = {}): void {
+    const w = this.requireWork(id);
+    const at = this.now().toISOString();
+    w.pair = { ...(w.pair ?? {}), ...(made.crossOs ? { crossOs: made.crossOs } : {}), legs: legs.length, started: { at, legs } };
+    this.stamp(w, `its ${legs.length} legs started together (w1945): ${legs.map((l, i) => `leg ${i + 1}${i ? '' : ' (host)'} ${l.session} in ${l.sandbox}`).join(', ')}`);
+    this.store.putWork(w);
+  }
+
+  workerBlocked(sessionId: string, a: { request?: string; requests?: string[]; reports?: string[]; prs?: string[]; deploys?: string[]; what: string }): string {
+    const w = this.workerRequest(sessionId, a.request, 'blocked_on');
     const what = (a.what ?? '').split(/ +/).join(' ').trim();
     if (!what) throw new Error('say what it waits for (what), for example: w727 PR 1291 and w752 fix merged into master');
     // w1089: a wait for a sandbox, slot, editor or RAM is capacity, which is Queued and done by the send queue, not a block.
@@ -5255,7 +5394,8 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       if (now - since < ROOM_GRACE_MS || now - (this.roomFlags.get(w.id) ?? 0) < 3_600_000) continue;
       // w1944: only computers it can run on (no Mac for an MP scenario, no m5 for timed work), whose room has stood a while.
       const on = roomStood(facts, needsOf(w), roomForWork(facts, w, w.queuedFor?.needs).ids, now);
-      if (!on.length) continue;
+      // w1945: a pair run is wrongly Queued only beside room that has stood for all its legs at once.
+      if (!roomEnough(facts, w, on)) continue;
       this.roomFlags.set(w.id, now);
       this.stamp(w, `flagged: queued for capacity while ${on.join(', ')} ${on.length > 1 ? 'have' : 'has'} ${needsOf(w) === 'agent' ? 'an agent slot' : 'room'} (${nums(on)} at this time)`);
       this.store.putWork(w);
@@ -5335,13 +5475,14 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       this.capacityWakes.push(now);
       console.log(`ledger: capacity ping: ${events.map((e) => e.what).join('; ')}; fitting ${usable.map((w) => w.id).join(', ')}`);
       const old = (e: { what: string; at: number }) => `${e.what}, ${Math.max(0, Math.round((now - e.at) / 60_000))} min ago`;
-      const line = (w: WorkItem) => `${w.id} "${clip(w.title, 80)}" (${names(w.requesters)}, ${w.priority}${roomNeeds(w)?.length ? `; needs ${roomNeeds(w)!.join(' or ')}` : ''}${needsOf(w) === 'agent' ? '; needs only an agent slot' : ''}${w.status !== 'queued' ? `; a leg, its own worker elsewhere: ${clip(w.legs!.map((l) => l.what).join('; '), 120)}` : ''})`;
+      const line = (w: WorkItem) => `${w.id} "${clip(w.title, 80)}" (${names(w.requesters)}, ${w.priority}${roomNeeds(w)?.length ? `; needs ${roomNeeds(w)!.join(' or ')}` : ''}${needsOf(w) === 'agent' ? '; needs only an agent slot' : ''}${w.status !== 'queued' ? `; a leg, its own worker elsewhere: ${clip(w.legs!.map((l) => l.what).join('; '), 120)}` : ''}${w.pair ? `; ${pairText(w.pair)}: start its legs together, e.g. on ${pairRoom(w, fit(w).ids, facts.fit).pick?.join(' + ')} (start_agent with pair_sandboxes)` : ''})`;
       const room = [facts.game.length ? `game work: ${facts.game.join(', ')}` : '', facts.agent.length ? `agent-slot work: ${facts.agent.join(', ')}` : '', facts.held.length ? heldText(facts.held) : '', ...(facts.reserved ?? []).map((r) => `${r.id} has room for ${minPriorityText(r.min)} (placement.minPriority)`)].filter(Boolean).join('; ');
       const rest = queued.filter((w) => !usable.includes(w));
       // w1944: why the room now is no room for one, when that is it ("w1941: m5 is a Mac, which refuses ...").
       const restLine = (w: WorkItem) => {
-        const u = fit(w).unfit;
-        return u.length ? `${w.id} (${u.map((x) => x.why).join('; ')})` : w.id;
+        const { unfit: u, short } = fit(w);
+        const why = [...(short ? [short] : []), ...u.map((x) => x.why)];
+        return why.length ? `${w.id} (${why.join('; ')})` : w.id;
       };
       this.toDispatcher(`[ledger] Capacity may have freed (${events.map(old).join('; ')}). Room now: ${room}. Queued for capacity and fitting it, by priority, then oldest: ${usable.map(line).join('; ')}.${rest.length ? ` Queued with no room for them now: ${rest.map(restLine).join(', ')}.` : ''} Start what fits now (start_agent into a FREE sandbox: list_sandboxes marks them, and check the sandbox is still free); leave queued only what no computer with room can take, and block what waits on something else.`);
     };

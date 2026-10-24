@@ -182,6 +182,8 @@ export interface SlotRequest {
   label: string;
   /** Project folders its Unity processes open, for ones started where they are not its children (a detached launch). */
   projects?: string[];
+  /** The agent session that ran it (RequestFile.session): the ledger shows its request Blocked while it waits (w1949). */
+  session?: string;
   createdAt: number;
   /** When it was granted; undefined while it waits. */
   grantedAt?: number;
@@ -405,6 +407,8 @@ export const reqFile = (dir: string, id: string) => path.join(dir, `req-${id}.js
 export const grantFile = (dir: string, id: string) => path.join(dir, `grant-${id}.json`);
 export const denyFile = (dir: string, id: string) => path.join(dir, `deny-${id}.json`);
 export const arbiterFile = (dir: string) => path.join(dir, 'arbiter.json');
+/** When this process started, in ms: of two daemons of one machine on one mailbox, the newer stays (w1918). */
+const PROCESS_STARTED = Math.round(Date.now() - process.uptime() * 1000);
 
 /** What a client writes. */
 export interface RequestFile {
@@ -445,6 +449,8 @@ export interface ArbiterFile {
   /** Which arbiter wrote it (one per UnitySlots): two writing one mailbox are told apart. */
   instance?: string;
   machine?: string;
+  /** When the process that writes it started: of two daemons of one machine on one mailbox, the newer stays (w1918). */
+  startedAt?: string;
   at: string;
   limit?: number;
   used: number;
@@ -502,6 +508,13 @@ export interface ArbiterDeps {
   holderWaitMs?: number;
   staleMs?: number;
   machine?: string;
+  /** When this process started (default: from process.uptime()); tests give it. */
+  startedAt?: number;
+  /**
+   * A newer live daemon of the same machine answers this mailbox (w1918: three daemons answered LothLaptop's after its
+   * updates): this one should end, so one stays. Without it the other is only reported.
+   */
+  onNewerTwin?(pid: number): void;
   /** Something the orchestrator should hear of: over the limit and back, a refusal, a crashed holder's slots freed. */
   onEvent?(text: string): void;
   log?(line: string): void;
@@ -511,6 +524,7 @@ export class UnitySlots {
   private readonly d: ArbiterDeps;
   /** This arbiter's own mark in arbiter.json: another one writing the same mailbox is told apart by it. */
   private readonly instance = randomBytes(6).toString('hex');
+  private yielded = false;
   /** Other arbiters already reported, by instance. */
   private readonly foreign = new Set<string>();
   private last?: { a: Assessment; reqs: SlotRequest[]; ramPct?: number; at: number };
@@ -577,6 +591,7 @@ export class UnitySlots {
         pid: f.pid,
         label,
         projects: Array.isArray(f.projects) ? f.projects.filter((p): p is string => typeof p === 'string').slice(0, 8) : undefined,
+        ...(typeof f.session === 'string' && f.session ? { session: f.session.slice(0, 80) } : {}),
         createdAt: Date.parse(f.createdAt) || mtime,
         grantedAt: grant ? Date.parse(grant.grantedAt) || mtime : undefined,
         denied: deny?.why,
@@ -634,9 +649,18 @@ export class UnitySlots {
     // Another live arbiter on this mailbox (a second daemon on the same home folder, a test's daemon) grants past the
     // limit: the orchestrator hears of it once per arbiter, so it can be stopped.
     const cur = readJson<ArbiterFile>(arbiterFile(this.d.dir));
-    if (cur?.instance && cur.instance !== this.instance && now - Date.parse(cur.at) <= ARBITER_FRESH_MS && this.d.alive(cur.pid) && !this.foreign.has(cur.instance)) {
-      this.foreign.add(cur.instance);
-      this.d.onEvent?.(`another process (pid ${cur.pid}${cur.machine ? `, machine "${cur.machine}"` : ''}) is answering this machine's Unity slots mailbox ${this.d.dir} too, so launches may be granted past the limit. Stop it: a second daemon on the same home folder, or a test's daemon left running.`);
+    const other = !!cur?.instance && cur.instance !== this.instance && now - Date.parse(cur.at) <= ARBITER_FRESH_MS && this.d.alive(cur.pid);
+    if (other && this.d.onNewerTwin && this.d.machine && cur!.machine === this.d.machine && cur!.startedAt && Date.parse(cur!.startedAt) > this.started) {
+      // The same machine's newer daemon (an update started it beside this one): it keeps the mailbox, this one ends.
+      if (!this.yielded) {
+        this.yielded = true;
+        this.d.onNewerTwin(cur!.pid);
+      }
+      return a;
+    }
+    if (other && !this.foreign.has(cur!.instance!)) {
+      this.foreign.add(cur!.instance!);
+      this.d.onEvent?.(`another process (pid ${cur!.pid}${cur!.machine ? `, machine "${cur!.machine}"` : ''}${cur!.startedAt ? `, started ${cur!.startedAt}` : ''}) is answering this machine's Unity slots mailbox ${this.d.dir} too, so launches may be granted past the limit. Stop it: a second daemon on the same home folder, or a test's daemon left running.`);
     }
     try {
       writeAtomic(arbiterFile(this.d.dir), JSON.stringify(this.arbiterFile(), null, 1));
@@ -669,6 +693,10 @@ export class UnitySlots {
     } else this.ramSince = 0;
   }
 
+  private get started(): number {
+    return this.d.startedAt ?? PROCESS_STARTED;
+  }
+
   private arbiterFile(): ArbiterFile {
     const l = this.last!;
     const byId = new Map(l.reqs.map((r) => [r.id, r]));
@@ -677,6 +705,7 @@ export class UnitySlots {
       pid: process.pid,
       instance: this.instance,
       machine: this.d.machine,
+      startedAt: new Date(this.started).toISOString(),
       at: new Date(l.at).toISOString(),
       limit: l.a.limit,
       used: l.a.used,
@@ -734,7 +763,7 @@ export class UnitySlots {
       ramLimitPct: this.d.ramLimitPct ?? UNITY_RAM_PCT,
       waiting: l.a.waiting.map((w) => {
         const r = byId.get(w.id)!;
-        return { label: r.label, count: r.count, holder: r.holder, since: iso(r.createdAt), why: w.why };
+        return { label: r.label, count: r.count, holder: r.holder, since: iso(r.createdAt), why: w.why, position: w.position, ...(r.session ? { session: r.session } : {}) };
       }),
       granted: l.reqs.filter((r) => r.grantedAt !== undefined && !r.denied).map((r) => ({ label: r.label, count: r.count, holder: r.holder, since: iso(r.grantedAt!) })),
       at: iso(l.at),

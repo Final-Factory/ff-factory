@@ -127,7 +127,7 @@ before redeploying by hand.
 - **Awake.** While any agent process is live the daemon holds `caffeinate -i`.
 - **Clean-up.** The daemon cleans its machine's disk by itself (the continuous clean-up,
   [self-recovery.md](self-recovery.md#5-continuous-clean-up)): a pass every hour, every 15 minutes while
-  free space is below its soft threshold (80 GB by default), with the rules for its platform; below it, it also removes
+  free space is below its soft threshold (20 GB by default, w1951; config `machines.cleanup.softFreeGB`, BEAST 40), with the rules for its platform; below it, it also removes
   FF Factory's own leftovers by itself (player slots nobody holds, pushed agent worktrees, unused Unity editors:
   [self-recovery.md](self-recovery.md#ff-factorys-own-leftovers-w626), w626). Each agent
   gets its own temp folder (`ffa-<session>` under `temp_dir` or the system's temp), removed when the
@@ -657,10 +657,16 @@ change applies on the next reconnect; omitted on a redeploy: kept):
 | `max_agents_per_sandbox` | Agents that may be mid-turn at once in one sandbox; idle ones take no slot, and a message past it is queued | 2 |
 | `max_sandbox_agents` | The machine's agent cap: agents mid-turn at once on it, its sandboxes' and its standing agents together (w536) | `max_sandboxes` × `max_agents_per_sandbox` |
 | `max_unity` | Unity editors that may run at once on the machine: every top-level Unity process there counts, sandbox editors, the main clone's or its owner's own, `-batchmode` builds and test runs, peer-run editors, editors scripts start (w469, [unity-lifecycle.md](unity-lifecycle.md#unity-slots-every-editor-counts)); launches other than `unity start` wait in a queue for their slot (`unity-slot run`) | 2 |
-| `disk_warn_gb` | Below this many GB free on the sandbox volume: no new sandboxes, no new sandbox editors, and on a machine whose daemon runs the host guard (a Dev Drive install: lothdesktop's V:, BEAST) no new agent processes either (w1581) | 20 |
+| `disk_warn_gb` | Below this many GB free on the sandbox volume: no new sandboxes, no new sandbox editors, and on a machine whose daemon runs the host guard (a Dev Drive install: lothdesktop's V:, BEAST) no new agent processes either (w1581) | 15 |
 | `disk_critical_gb` | Below this: idle sandbox editors stop, and agents mid-turn in sandboxes are asked to commit, push and end their turn | 10 |
 
-**Why 20 / 10 GB** (w628, measured on BEAST 2026-10-07 in a sandbox with a warm Library): opening the editor and
+**10 / 15 / 20 GB since w1951** (lothsahn, 2026-10-23: "Let's set 10,15,20 as defaults in code for all new installs.
+For existing machines let them adopt the default but set BEAST to 40GB cleanup"): critical 10, warn 15 and the clean-up
+soft threshold 20 (`DISK_CRITICAL_GB_DEFAULT`, `DISK_WARN_GB_DEFAULT`, `CLEANUP_SOFT_GB_DEFAULT` in `shared/types.ts`), so a
+machine cleans up 5 GB before its guard refuses work. Every machine's guard was moved to 15/10 with `add_machine` the same
+day. The portal's own host guard keeps 20 / 10 (`HOST_GUARD_DEFAULTS`, w1101).
+
+**Why 20 / 10 GB, the w628 defaults** (measured on BEAST 2026-10-07 in a sandbox with a warm Library): opening the editor and
 force-reimporting all 4,169 scripts grew the Library by under 10 MB; a development player build wrote 2.1 GB of output
 and 0.25 GB of Library, a release build 2.0 GB of output and 2.5 GB of Temp (deleted when the editor closes); the
 sandbox's earlier day-long session (a develop merge, Burst recompiles, one build) wrote at most 7.6 GB. An editor
@@ -675,7 +681,7 @@ sandboxes, editors and agents there at once, with no installer run. Until w1581 
 `hostGuard.warnFreeGB` instead: the installer copies the pool's values into it at install (`devDriveGuard`,
 `scripts/worker/devdrive.ts`) and every update carries them, so lothdesktop's V: stayed at an old 50 GB that no tool
 could lower. `hostGuard.warnFreeGB` / `criticalFreeGB` in daemon.json now apply only to the guard's other volumes
-(`hostDiskPaths`, the VHDX's host when its maximum is not known). lothsahn wants Dev Drive (V:) volumes at 25 GB: `add_machine` with `disk_warn_gb: 25` on each.
+(`hostDiskPaths`, the VHDX's host when its maximum is not known). w1581 set Dev Drive (V:) volumes to 25 GB with `add_machine` `disk_warn_gb: 25`; w1951 moved every machine to 15.
 
 LothDesktop, for example: `sandbox_root: "D:\work\ffsb"`, `max_sandboxes: 3`, `max_agents_per_sandbox: 2` (six
 sandbox agents in all), `max_unity: 2`.
@@ -1176,6 +1182,55 @@ LothDesktop and Beast, not just when BEAST is full").
     timed work" counts it as that computer's queued timed work (`pickTimed`) and lists every held leg, with "has ROOM:
     start it now" where its computer has room.
   - Tests: the two w1863 cases in `server/orchestrators.test.ts`.
+- **Pair runs are placed as one unit** (w1945, lothsahn, 2026-10-23: "Can we make the dispatcher smart enough so it queues
+  work properly that requires running together across multiple machines and doesn't waste slots?"). That evening w665's
+  worker d558ba14 held m3's only sandbox (so m3 took no work, and 15 requests read "WRONG: m3 has room") while the
+  two-machine run of its PR #2340, w1936, sat Queued for a Windows or Linux pair; w1940's client leg on biscuit waited on
+  w1898's host leg on lothdesktop, w1826's host on biscuit's client, each leg placed on its own and holding a sandbox while
+  the other waited. A check that needs several computers at once (a host and its clients) is now one request, and its legs
+  start together.
+  - **Asking for one: `request_pair`** (a worker tool, `CATALOG.request_pair` in `server/launch.ts`; `Orchestrators.filePair`).
+    `what` (a line), `brief` (what the legs run: branch or commit, scenario, what passes, where the result goes; each leg is
+    a new worker), `legs` (2 to `PAIR_MAX_LEGS`, 4; default 2), `cross_os` (why, only for the reasons the game repo's
+    Determinism-Test-Strategy.md "Which machines" lists, w1692) and `timed` (a leg takes timing measurements). It files a
+    request (`WorkItem.pair`: legs, `for` the asking request and `forSession` its worker, `crossOs`, `timed`) for the
+    asking request's people at its priority, needing a game sandbox per leg, and Blocks the asking request on its report
+    (`blocked_on` `reports`). The w890 release ("it waits on another request", below) then frees the worker's sandbox as
+    its turn ends, and the host leg's result (a line `For wNNN:`) resumes it. One open pair run per request: asked again,
+    the worker waits on the one there is. The worker's brief says to use it, and never to hold a sandbox for a second
+    machine's worker; a daemon older than the tool does not offer it (the portal sends a worker only the tools its daemon's
+    catalog names).
+  - **Starting one: `start_agent` with `pair_sandboxes`** (`Agents.startPairLegs`). `sandbox` is leg 1, the host, and
+    `pair_sandboxes` the other legs, each a FREE sandbox on another computer. Every leg is checked before any starts (online,
+    FREE, `placement.hold`, `placement.minPriority`, no timed legs where no timed runs go, the Mac rule below) and a refusal
+    ends "Nothing was started"; then each starts with the same prompt plus a section saying its leg and where the others
+    are. A leg that fails to start stops the legs started before it, so no sandbox waits for a pair that is not running.
+    The request records `pair.started` (when, each leg's session and sandbox, leg 1 first). A pair request is refused
+    without `pair_sandboxes` (one leg alone), and two legs on one computer are refused. A request not filed as a pair can be
+    started as one by giving `pair_sandboxes` (a cross-OS pair is asked for with `request_pair`).
+  - **Talking: `message_pair`** (a worker tool, `Agents.messagePair`): a leg's message reaches every other leg's worker of
+    its started pair run, as a message that resumes a leg that ended its turn (where the host listens and on which commit,
+    that a client joined, that a leg failed).
+  - **Which computers.** Legs go on computers that are not Macs (a Mac refuses a multiplayer client, w665). A cross-OS pair
+    may put one Mac as the host, never a client, and needs its legs on two operating systems. Timed legs never go where no
+    timed runs go (the m5). `placement.prefer`, holds, reservations and exclusive bench tickets are as for any work: each leg
+    is a game worker in its own sandbox, and a timed leg takes its ticket as every timing run does. Code: `shared/capacity.ts`
+    `pairRoom` and `unfitWhy`.
+  - **Room for a pair is room for all its legs at once.** `roomForWork` (`server/placement.ts`), the Queued line
+    (`shared/workState.ts` `queuedLive`), the WRONG flag (`roomEnough` on the room that has stood), the capacity ping and
+    `decide_work queue` count a pair as room only where as many computers that fit have room at the same moment; fewer read
+    "queued for capacity (a pair run of 2 legs, on computers that are not Macs): a pair run of 2 legs needs 2 computers with
+    room at once, and only biscuit has room it fits". With room for all legs the ping and the queue refusal say to start its
+    legs together, naming a pick.
+  - **Not starved by single work** (`Agents.pairHoldProblem`). While a pair run is Queued, a computer's LAST free sandbox
+    that the pair fits is held for it from newer game work of no higher priority: `start_agent` refuses it there, naming the
+    pair. A computer with two free sandboxes still takes single work, and work of higher priority goes first (a person's
+    "Start now" makes a request urgent). Without this each sandbox that frees goes to the next single request, and a pair,
+    which needs two at the same moment, waits for a coincidence.
+  - Tests: `server/w1945PairRuns.test.ts` (the room rules, the Queued line) and the w1945 cases in
+    `server/orchestrators.test.ts` (request_pair blocks the asking worker and its sandbox is released, both legs start
+    together and never one alone, a Mac is no client, message_pair, the hold, the WRONG flag and the queue), and in
+    `server/machineSandboxes.test.ts` the asking worker stopped and its sandbox released FREE by the release pass.
 - **The rule** (the dispatcher's prompt): new game-repo work (code, tests, Unity, built players) goes where the
   Capacity block's last line says, even when a sandbox on the other computer is free. Discord posting as Max pins no
   computer: any worker posts with `post_as_max` and FFBox posts (w901, [ffbox.md](ffbox.md#posting-as-max-w901)). A computer that is avoided or not next keeps only what needs it: `F:\ffsb\_review`, ssh to the M5 from BEAST, a brief that pins it
@@ -1241,7 +1296,12 @@ LothDesktop and Beast, not just when BEAST is full").
       are all a `deploy` (the portal or a machine's daemon), a `request` or a `pr` merging (set by the worker's `blocked_on`,
       `deploys: ["portal"]` for a deploy, by the dispatcher's `decide_work block`, or by the ledger cleanup on a merged
       request whose only step left is a deploy); or **Waiting on input**, a person (its `waiting_on_person`, "still open:
-      waiting on Ben to …" in its report, or a question). The worker's own `waiting_on_person` counts for **every** request it
+      waiting on Ben to …" in its report, or a question); or, since w1944, its own still-open line waits on another request
+      ("waiting for w1761 to report"), the orchestrator, or a worker only the dispatcher starts ("waiting on a Windows or
+      Linux pair worker"), with no block declared (`otherWorkWait`, shared/workState.ts). lothsahn, 2026-10-23: "Why is m3
+      not taking work when there's stuff to do?": d558ba14 (w665) held m3's only sandbox idle from 22:15 to 22:45 UTC with
+      "still open: waiting on a Windows or Linux pair worker to run `MP-lowore-pin-pair` for PR #2340" and no `blocked_on`,
+      while 18 requests waited Queued, until the 30-minute idle release; a worker started there 95 s after it. The worker's own `waiting_on_person` counts for **every** request it
       is the latest worker on, at once (found live on w890, 2026-10-10 19:50Z: started for w1 and then sent w2, the ledger
       read it as working on w2 only, w1 never read Waiting, "every request waits" failed, and biscuit/slot3 stayed held
       with the worker Idle after it had declared it waited on lothsahn). Not a time, a machine, a usage limit or a lock (they clear by

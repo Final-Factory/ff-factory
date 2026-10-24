@@ -11,6 +11,8 @@ import { closedFile } from './benchTurn.ts';
 
 /** The holders the report lists by name; a big shared group is a count past these. */
 export const BENCH_STATE_MAX_RUNNING = 6;
+/** The waiters the report lists (w1949), in the queue's order; the rest are counted in `waiting`. */
+export const BENCH_STATE_MAX_WAITERS = 12;
 
 /** bench_queue.py turn_min: an exclusive ticket's turn, at most MAX_HOLD_MIN (30); one from before w1832 keeps its max_min
  * (OLD_MAX_MIN, 60). */
@@ -207,12 +209,16 @@ export function readBenchState(root: string | undefined, now: number = Date.now(
   const players = mode === 'exclusive' ? playersClosed : 0;
   const g = (t: QueueTicket) => glance(t, infos.get(t.ticket), m, waiters);
   const untimed = readUntimed(qdir, now);
+  // w1949: every waiter with its place, so the ledger can show a request Blocked on the lock while its worker's ticket waits.
+  const inLine = urgent >= 0 ? [waiting[urgent], ...waiting.filter((_, i) => i !== urgent)] : waiting;
+  const inQueue = inLine.slice(0, BENCH_STATE_MAX_WAITERS).map((t, ahead) => ({ ...g(t), ahead }));
   return {
     mode,
     running: running.slice(0, BENCH_STATE_MAX_RUNNING).map(g),
     runningCount: running.length,
     waiting: waiting.length,
     ...(next >= 0 ? { nextExclusive: { ...g(waiting[next]), ahead: urgent >= 0 ? 0 : next } } : {}),
+    ...(inQueue.length ? { waiters: inQueue } : {}),
     ...(legacy ? { legacy } : {}),
     ...(m.singleWorker ? { singleWorker: true } : {}),
     ...(editors.length || players ? { closed: { editors, players } } : {}),

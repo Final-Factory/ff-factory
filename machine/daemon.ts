@@ -19,6 +19,8 @@ import { writeFileDurable } from '../server/durable.ts';
 import { HOST_PROTOCOL, HostedSession, hostFolders, hostLook, hostNodeArgs, hostPlace, hostsDir, pidAlive, readHostState } from './agentHost.ts';
 import { SelfUpdater } from './selfUpdate.ts';
 import { HOST_WATCH, HostWatch, folderLastWrite, lingeringRefusal, realHostProcs, removeHostDir, type LingeringHost } from './hostWatch.ts';
+/** The exit code of a daemon that ends for a newer one of its machine: its supervisor stops instead of starting it again. */
+export const DAEMON_YIELD_EXIT = 75;
 import { MachineGuard, realGuardEffects, type MachineGuardEffects, type MachineGuardSettings } from './hostGuard.ts';
 import type { TrimPolicy } from '../server/cacheTrim.ts';
 import { DEFAULT_BUILD } from '../server/placement.ts';
@@ -423,6 +425,19 @@ export class Daemon {
     this.shutdown();
     setTimeout(() => process.exit(0), 500);
   };
+
+  /**
+   * A newer daemon of this machine answers its Unity slots mailbox (w1918: three answered LothLaptop's): this older one ends
+   * with DAEMON_YIELD_EXIT, which its supervisor (server/machineDeployWin.ts) takes as "do not start it again". Its agents run on
+   * (w605) and the newer daemon takes them back.
+   */
+  private yieldToNewer(pid: number) {
+    const text = `this daemon (pid ${process.pid}) ends: a newer daemon of ${this.cfg.id}, pid ${pid}, answers the same Unity slots mailbox, and one daemon per machine stays (w1918)`;
+    log(text);
+    this.send({ type: 'sandbox_event', text });
+    this.shutdown();
+    setTimeout(() => process.exit(DAEMON_YIELD_EXIT), 500);
+  }
   /** The activity pause as the tray last set it, until the portal's machines.activityPause says the same (w1574). */
   private trayActivity?: { enabled: boolean; idleMinutes: number };
   private tray?: TrayHost;
@@ -483,6 +498,10 @@ export class Daemon {
         log(`unity slots: ${text}`);
         this.send({ type: 'sandbox_event', text: `Unity slots: ${text}` });
       },
+      // A test's daemon (poolDeps given) shares no mailbox with a real one and never ends its process. Windows only: its
+      // supervisor stops on DAEMON_YIELD_EXIT, where launchd or systemd would start the older one again, newest then, and
+      // the two would take turns ending.
+      ...(poolDeps || process.platform !== 'win32' ? {} : { onNewerTwin: (pid: number) => this.yieldToNewer(pid) }),
     });
     // A test's daemon (poolDeps given) never kills real processes: its reaper sees none unless the test hands it deps.
     const reaperHands = {

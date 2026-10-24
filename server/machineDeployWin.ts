@@ -222,9 +222,13 @@ function Stop-FFDaemon([switch]$Agents) {
   foreach ($id in $kill) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }
   for ($i = 0; $i -lt 30; $i++) {
     if (-not @($kill | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue }).Count) { break }
+    if ($i -eq 10) { foreach ($id in $kill) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue } }
     Start-Sleep -Milliseconds 500
   }
   if ($task) { $null = $task | Enable-ScheduledTask -ErrorAction SilentlyContinue }
+  # A survivor would answer beside the daemon started next (w1918: three daemons on LothLaptop): fail, naming it, instead.
+  $left = @($kill | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+  if ($left.Count) { throw "the old daemon did not stop: pid(s) $($left -join ', ') still run 15 s after Stop-Process; nothing new was started beside them" }
   $kill.Count
 }
 
@@ -411,6 +415,8 @@ while ($true) {
     $null = $proc.Handle
     "$(Get-Date -Format s) started the daemon, pid $($proc.Id)" | Out-File $log -Append -Encoding utf8
     $proc.WaitForExit()
+    # 75 (machine/daemon.ts DAEMON_YIELD_EXIT): a newer daemon of this machine took over, so this supervisor ends too (w1918).
+    if ($proc.ExitCode -eq 75) { "$(Get-Date -Format s) the daemon ended for a newer one of this machine; this supervisor ends" | Out-File $log -Append -Encoding utf8; break }
     $why = "exited with code $($proc.ExitCode)"
   } catch {
     $why = "could not start: $($_.Exception.Message)"

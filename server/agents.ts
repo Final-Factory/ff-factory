@@ -18,7 +18,8 @@ import { describeAutoIntake } from './ffboxAutoIntake.ts';
 import { agentState, agentStateText, holdsItsPlace, holdsSandbox, sortAgents, sortPlaces } from '../shared/agentState.ts';
 import { idleClosedPart } from './liveIdle.ts';
 import { HOLD_PLACE_MS, LIVE_HOLD_MS, PlaceAgain, RELEASE_AFTER_MS, RELEASE_WAKE_NOTE, handOverBranch, occupies, releasedOn } from './placeAgain.ts';
-import { WORK_LIVE_LABEL, WORK_LIVE_STATES, asksAPerson, benchWaitOf, lastOpenLine, liveCounts, outsideDeclared, outsideWaitOf, ownWorkWait, personWaitIn, reportWaitKey, servedBy, workLiveAll, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
+import { editorSlotRefusal, queueWaitsAll } from '../shared/queueWaits.ts';
+import { WORK_LIVE_LABEL, WORK_LIVE_STATES, asksAPerson, benchWaitOf, lastOpenLine, liveCounts, otherWorkWait, outsideDeclared, outsideWaitOf, ownWorkWait, personWaitIn, reportWaitKey, servedBy, workLiveAll, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
 import { reportTail, type NeedsYouWait } from './needsYou.ts';
 import { stillOpenIn } from './ledgerRules.ts';
 import { inlineReviewMedia, outsideReview, publishedCopy, reviewRootOf } from './reviewMedia.ts';
@@ -47,7 +48,7 @@ import { withTerseProse } from './terseProse.ts';
 import { WORKER_READ_RULES_TOOL, workerRuleText } from './workerRules.ts';
 import { activityLine, Waker } from './wake.ts';
 import { TIMER_LIMITS, Timers, scheduleText, type TimerView } from './timers.ts';
-import { EVEN_MARGIN, RAM_BUSY_PCT, benchText, buildOf, busyReasons, capacityLines, forPriority, hasRoom, holdReason, liveOf, lowestPriority, minOf, pickComputer, placeId, pinnedWork, placementHint, reservedReason, roomNow, timedFacts, timedKindOf, timedPinRefusal, voiceVram, type Computer, type FirstKind, type NeedKind, type PlacementPrefs, type RoomNow, type TimedKind } from './placement.ts';
+import { EVEN_MARGIN, RAM_BUSY_PCT, benchText, buildOf, busyReasons, capacityLines, forPriority, hasRoom, holdReason, liveOf, lowestPriority, minOf, pickComputer, placeId, pinnedWork, placementHint, reservedReason, roomForWork, roomNow, timedFacts, timedKindOf, timedPinRefusal, voiceVram, type Computer, type FirstKind, type NeedKind, type PlacementPrefs, type RoomNow, type TimedKind } from './placement.ts';
 import { MachinePauses, pauseHolds } from './machinePause.ts';
 import { playHolds, playLine } from '../shared/personPlay.ts';
 import { unitySlotsLine } from '../shared/fleet.ts';
@@ -78,7 +79,7 @@ import { WAIT_LINE_CHARS, summaryText, waitSummary } from '../shared/waitSummary
 import { waitingItemOf } from '../shared/waiting.ts';
 import { checkAsks } from '../shared/questionCard.ts';
 import { DECISIONS, attachmentsNote, describeItem, handoverNote, isFor, isOpen, ledgerOrder, names, overlapLine, priorityThenAge, requestAsFiled, requestLineRule, startProblem } from './work.ts';
-import { minPriorityText, needsBuild, needsLive, needsOf, needsTimed } from '../shared/capacity.ts';
+import { minPriorityText, needsBuild, needsLive, needsOf, needsTimed, pairText, PAIR_MAX_LEGS } from '../shared/capacity.ts';
 import { BUILD_PLAN_DOC, BuildPlans, NOT_RELEASE, type BuildPlan, type SeatResult } from './buildPlans.ts';
 import { SEAT_GRACE_MS, seatAction, seatNotice } from './releaseSeat.ts';
 import { RELEASE_RULES } from './releaseLanes.ts';
@@ -218,7 +219,11 @@ const BLOCKER_SHAPE = z.object({
  * orchestrator to run the two-machine check `MP-W1685-black-hole-swallow-2p`").
  */
 export const ownWorkNotice = (id: string, line: string) =>
-  `[FF Factory] Your report says ${id} waits on the orchestrator: "${line.slice(0, 200)}". Two-machine and pair checks, builds, test runs and your own CI are your own work (w1841): nobody else runs them, so run it now. Ask the dispatcher only for a second machine's worker, and say so plainly. If only a person can move it on, waiting_on_person; another request or pull request, blocked_on.`;
+  `[FF Factory] Your report says ${id} waits on the orchestrator: "${line.slice(0, 200)}". Two-machine and pair checks, builds, test runs and your own CI are your own work (w1841): nobody else runs them, so run it now. One that needs two or more computers at once: request_pair, then end your turn. If only a person can move it on, waiting_on_person; another request or pull request, blocked_on.`;
+
+const REQUEST_PAIR_TOOL = `Ask for a check that needs several computers at once (w1945): a two-machine multiplayer or determinism check, a host and its clients. It files ONE pair request whose legs the dispatcher starts together, a new worker on each computer, as soon as that many computers have room at once (never one leg at a time), and Blocks your request on its report, as blocked_on with reports does: commit and push, then end your turn with a "wNNN: still open: blocked on <the pair request>" line. Your sandbox is released at once for other work while you wait, and the host leg's result (a line "For wNNN:") resumes you. what: one line; brief: what the legs run (the branch or commit, the scenario, what passes, where the result goes), since each leg is a new worker; legs: 2 by default; cross_os only for the reasons it names (w1692; without it no leg goes on a Mac, and with it a Mac only hosts); timed when a leg takes timing measurements (never on the m5). One open pair run per request: asked again, you wait on the one there is.`;
+
+const MESSAGE_PAIR_TOOL = `For a leg of a pair run (w1945): send a message to the workers of the other legs of your pair run (where the host listens and on which commit, that a client joined, that your leg failed). It reaches them as a message, which resumes a leg that ended its turn; their messages come back to you the same way.`;
 
 const BLOCKED_ON_TOOL = `Say that your request now waits ONLY for other requests to close, pull requests to merge or a deploy to happen (prs: "owner/repo#123" or the github.com link; requests: ids; reports: ids of requests whose worker must report first, its files or results for you, said in what: their worker is told and marks the report that carries them with a line "For <your request>:"; that line or their DONE unblocks you, a \"still open\" progress report does not; deploys: "portal" or a machine id; what: in a line). The ledger then shows it Blocked on them, your pending check-in is cancelled, and you are resumed with a message when they all clear. Then end your turn with your report and a "wNNN: still open: blocked on <them>" line. Never poll for them with wake_me and gh pr view: a pending check-in is work in progress for the ledger, and a wait on something you cannot move is not. Not for a person (waiting_on_person) or a time (wake_me). For CI on your own pull request (you merge it on green, or fix it on red), pass head (git rev-parse HEAD of what you pushed) and name it in prs with a "ci:" prefix ("ci:Final-Factory/FinalFactory#1354"): that waits for its checks to finish, green or red, not for its merge; FF Factory refuses it when the pull request conflicts with its base or its head is not your head (CI cannot start: fix and push first), and resumes you at once when a conflict or a missing run shows up later; you are resumed within minutes of them finishing, and with your editor stopped and your work pushed your sandbox takes other work meanwhile. For a deploy that only a person can start, say so with waiting_on_person as well; once your PR has merged and the deploy is all that is left, name it in deploys ("portal"): your sandbox is freed at once and you are resumed in any free sandbox when a different commit runs there, to do the check that comes after it.`;
 
@@ -283,6 +288,9 @@ CLAUDE.md's "Discord: FFBox owns #bug-reports" binds you: read and download ther
  * What FFBox is and how FF Factory works with it, in Lothsahn's words (w49, 2026-09-30). Both orchestrators' briefs
  * carry it verbatim (worldBrief). The longer version is docs/ffbox.md.
  */
+/** The dispatcher's rule for pair runs (w1945), in read_rules machines: placing, queueing and holding for them. */
+const PAIR_RULES = `**Pair runs** (w1945, lothsahn: "Can we make the dispatcher smart enough so it queues work properly that requires running together across multiple machines and doesn't waste slots?"): a request marked "a pair run of N legs" (a worker's request_pair, or one you file or see that needs two computers at once, such as a two-machine determinism check) starts ALL its legs together: start_agent with its work_id, sandbox for leg 1 (the host) and pair_sandboxes for the others, each a FREE sandbox on another computer. Never start one leg alone, and never leave a worker holding its sandbox while it waits for a partner leg: a worker that asks you for a second machine's worker is told to use request_pair. With fewer computers that fit having room than it has legs, queue it: a pair is room, and WRONG, only where that many computers have room at once. While an older pair run of at least the same priority is Queued, each computer's last free sandbox it fits is held for it: start other work elsewhere (start_agent refuses it, naming the pair; work of higher priority goes first). Legs go on computers that are not Macs; a cross-OS pair (only for w1692's reasons) may put a Mac as the host, never a client; timed legs never on the m5.`;
+
 /** read_rules's topics (w1158): rules a coordinator reads only when a turn needs them (Agents.rulesText). */
 export const RULE_TOPICS = ['ffbox', 'intake', 'release', 'machines', 'reactions', 'ui', 'builds'] as const;
 export type RuleTopic = (typeof RULE_TOPICS)[number];
@@ -834,10 +842,13 @@ export class Agents {
             waiting_on_person: async (a) => this.declareWaiting(info.id, a),
             cancel_wake: async () => this.cancelWakeTool(info.id),
             blocked_on: async (a) => this.declareBlocked(info.id, a),
+            request_pair: async (a) => this.requestPair(info.id, a),
+            message_pair: async (a) => this.messagePair(info, a),
             unity: async (a) => {
               const benched = a.action === 'start' || a.action === 'restart' ? this.liveBenchWait(info, m.id, 'start its editor') : undefined;
               // clear_batch carries the worker's session: its own stalled builds go by the owner rules (w1874).
-              return benched ?? machines.unity(m.id, a.action as 'status' | 'start' | 'stop' | 'restart' | 'clear_batch', a.force === true, sb, info.id);
+              const out = benched ?? machines.unity(m.id, a.action as 'status' | 'start' | 'stop' | 'restart' | 'clear_batch', a.force === true, sb, info.id);
+              return a.action === 'start' || a.action === 'restart' || a.action === 'stop' ? this.noteEditorStart(info.id, m.id, sb, out) : out;
             },
             live_view: async (a) => {
               if (!this.liveHub) return 'The live view is off on this portal.';
@@ -1012,7 +1023,14 @@ export class Agents {
       const l = this.waitLive.live.get(w.id);
       if (l?.state === 'waiting') parts.push(`${w.id}: ${l.waitsOn?.length ? l.waitsOn.join(' and ') : 'a person'} to act`);
       else if (l?.state === 'blocked' && w.status === 'blocked' && w.blocked && gatesOf(w).every((g) => WAIT_RELEASE_KINDS.includes(g.kind))) parts.push(`${w.id}: ${gatesName(gatesOf(w), now)}`);
-      else return undefined;
+      // w1944: its own still-open line waits on another request, the orchestrator or a worker they start, with no block
+      // declared (Blocked from its report, or Stalled): nothing for it to do in its sandbox until a message comes.
+      else if ((l?.state === 'blocked' || l?.state === 'stalled') && w.status !== 'blocked') {
+        const line = lastOpenLine(w, i, now)?.line;
+        const on = line ? otherWorkWait(line, w.id) : undefined;
+        if (!on) return undefined;
+        parts.push(`${w.id}: ${on} (its report: "${line!.slice(0, 120)}")`);
+      } else return undefined;
     }
     return `it waits on ${parts.join('; ')}`;
   }
@@ -1260,6 +1278,21 @@ export class Agents {
     });
     this.blockerWatch?.kick();
     return warnings.length ? `${out} WARNING: ${warnings.join(' ')}` : out;
+  }
+
+  /** The request_pair tool (w1945, Orchestrators.filePair): a check on several computers at once, filed as one request it waits on. */
+  private requestPair(sessionId: string, a: Record<string, unknown>): string {
+    refuseInDryRun('request_pair');
+    const out = this.orchestrators.filePair(sessionId, {
+      what: typeof a.what === 'string' ? a.what : '',
+      brief: typeof a.brief === 'string' ? a.brief : '',
+      ...(typeof a.legs === 'number' ? { legs: a.legs } : {}),
+      ...(typeof a.cross_os === 'string' ? { cross_os: a.cross_os } : {}),
+      ...(a.timed === true ? { timed: true } : {}),
+      ...(typeof a.request === 'string' && a.request.trim() ? { request: a.request } : {}),
+    });
+    this.blockerWatch?.kick();
+    return out;
   }
 
   /** Reads a pull request for a ci: wait (w907); set by the server (ghPrHealth), absent in tests that do not read GitHub. */
@@ -2494,6 +2527,31 @@ export class Agents {
     return `Not now (w1600): on ${machineId}, ${benchText(lock)}, and a Live view editor beside it would spoil that run's numbers. Do what needs no editor meanwhile, then wake_me in 10 minutes and ${what} again (a leg holds the lock under 15 minutes and gives it back between legs; a holder that dies frees it at once, w1615).`;
   }
 
+  /**
+   * w1949: keep on the worker's session a start of its sandbox's editor that its machine's Unity slots refused
+   * (machine/unitySlots.ts startRefusal: "not started: …; Try again once one ends (wake_me) …"), cleared by one that goes
+   * through and by its next turn (server/sessions.ts). While it is stopped with that check-in and the machine still has no
+   * slot free, its request shows Blocked on a Unity editor slot (shared/workState.ts queueWaitOf), not Working.
+   */
+  private async noteEditorStart(id: string, machine: string, sandbox: string, out: string | Promise<string>): Promise<string> {
+    const set = (r: SessionInfo['editorRefused']) => {
+      if (!this.sessions.sessions.has(id)) return;
+      const s = this.sessions.get(id).info;
+      if (!r && !s.editorRefused) return;
+      s.editorRefused = r;
+      this.store.putSession(s);
+    };
+    try {
+      const text = await out;
+      set(undefined);
+      return text;
+    } catch (e) {
+      const why = editorSlotRefusal((e as Error).message ?? '');
+      if (why) set({ machine, sandbox, at: new Date().toISOString(), why });
+      throw e;
+    }
+  }
+
   /** w1841: the reports a bench lock's freeing already told their worker about ("<session>@<report time>"). */
   private readonly benchTold = new Set<string>();
 
@@ -2614,7 +2672,7 @@ Your sandbox has its own Unity editor, managed by the FF Factory daemon on this 
 When only a person can move you on (they must reboot or log in to a computer, decide, approve, hand over a secret), call \`mcp__machine__waiting_on_person\` with who, what and questions (what their card asks: one question per decision in a plain sentence, 2 to 4 full-sentence answers with your pick marked recommended, stills and clips as previews, and no file paths, pull request lists or ids in the question; the detail stays in your report), then end your turn with a report that names them and the action, and a \`wNNN: still open: waiting on <Name> to <do what>\` line. The ledger then shows your request Waiting on input (on that person). Never poll for a person with \`wake_me\`: a pending check-in shows the request as Working, and nobody is. A check-in is for machines and jobs: CI, a build, an import. You may also set one as a fallback; the state stays Waiting on input. Your next message ends the declaration, so declare again if a person is still needed.
 
 ## Waiting on other requests or pull requests
-When what remains is only waiting for another request to close or a pull request to merge (a gate such as "after w727's PR #1291 merges"), call \`mcp__machine__blocked_on\` with the pull requests (prs) and/or requests, and what you wait for, then end your turn with your report and a \`wNNN: still open: blocked on <them>\` line. The ledger shows your request Blocked on them (a check-in shows it Working: that is wrong for a wait on something you cannot move), your pending check-in is cancelled, and FF Factory resumes you with a message when they clear. Do NOT poll for it with \`wake_me\` and \`gh pr view\`, and do not stay in a loop; what people add meanwhile is kept and sent when you resume. A wait for a merge names the PR (prs), not the request: a request closes after its PR merges. A wait for a deploy names it in deploys ("portal", or a machine id for its daemon update); you are resumed when a different commit runs there, in any free sandbox on your machine. \`mcp__machine__cancel_wake\` cancels a check-in you set earlier and no longer need. If a person lifts a hold ("go") while a gate is open, the gate stays: you are resumed when it clears, not before. Files or results another request's worker makes for you: \`blocked_on\` with reports (its id); you are resumed when that worker reports. Two-machine and pair checks, builds, test runs and your own CI are your own work: run them, or ask the dispatcher only for a second machine's worker; never end a turn waiting on the orchestrator for them.
+When what remains is only waiting for another request to close or a pull request to merge (a gate such as "after w727's PR #1291 merges"), call \`mcp__machine__blocked_on\` with the pull requests (prs) and/or requests, and what you wait for, then end your turn with your report and a \`wNNN: still open: blocked on <them>\` line. The ledger shows your request Blocked on them (a check-in shows it Working: that is wrong for a wait on something you cannot move), your pending check-in is cancelled, and FF Factory resumes you with a message when they clear. Do NOT poll for it with \`wake_me\` and \`gh pr view\`, and do not stay in a loop; what people add meanwhile is kept and sent when you resume. A wait for a merge names the PR (prs), not the request: a request closes after its PR merges. A wait for a deploy names it in deploys ("portal", or a machine id for its daemon update); you are resumed when a different commit runs there, in any free sandbox on your machine. \`mcp__machine__cancel_wake\` cancels a check-in you set earlier and no longer need. If a person lifts a hold ("go") while a gate is open, the gate stays: you are resumed when it clears, not before. Files or results another request's worker makes for you: \`blocked_on\` with reports (its id); you are resumed when that worker reports. Two-machine and pair checks, builds, test runs and your own CI are your own work: run them; never end a turn waiting on the orchestrator for them. A check that needs two or more computers at once (a host and a client on two machines) is \`mcp__machine__request_pair\`: it files one pair request whose legs start together on free computers, and blocks you on its result; commit, push and end your turn, and your sandbox takes other work until the result resumes you. Never hold your sandbox waiting for a second machine's worker.
 
 ## Waiting on CI
 When what remains is CI on your pull request (you merge it on green, or fix it on red: Your pull requests below), do not poll it with \`wake_me\` or \`gh pr checks\`/\`gh run view\` calls: a poll sits up to a whole interval after the checks finish, holding a sandbox, and each call re-reads your whole context. Commit, then run \`ff-pr push\` (the first time with \`--base <branch> --title "<title>" --body-file <file>\`): in one call it merges origin/<base> in (it stops and names the files on a conflict), pushes, opens the PR, and checks the push landed (a push that silently failed leaves no CI to wait for), then prints the \`head\` and \`prs\` to wait with; on exit 1 fix what it names instead of waiting. Stop your Unity editor if nothing of yours needs it (\`mcp__machine__unity\` stop), then call \`mcp__machine__blocked_on\` with that \`head\` and \`prs: ["ci:<owner/repo>#<n>"]\` (the \`ci:\` prefix waits for its checks to finish, green or red, not for its merge) and what, and end your turn with a \`wNNN: still open: blocked on CI on <PR>\` line. FF Factory reads the checks every 2 minutes and resumes you within about 4 minutes of them finishing, green or red; then \`ff-pr merge\` merges on green (\`--match-head-commit\`) or names the red run to read (\`gh run view <run> --log-failed\`) and fix; \`ff-pr status\` reads without merging. Where \`ff-pr\` is missing, do those steps with git and gh, comparing \`git rev-parse HEAD\` with \`gh pr view <n> --json headRefOid,mergeable\`. Meanwhile, with your editor stopped, no batch run in flight and your work pushed, your sandbox takes other work: you are placed again on your branch when you resume, back in it if it is still free, else in another on this ${mac} (the message says where).
@@ -2687,6 +2745,8 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
           wake_me: 'Be messaged again after N minutes with your note, e.g. to check a long build or test run. Then end your turn: the message resumes you. One pending wake per session (a new one replaces it). Not for waiting on a person: use waiting_on_person. Not for polling for other requests or pull requests to merge: use blocked_on. cancel_wake takes it back.',
           waiting_on_person: WAITING_ON_PERSON_TOOL,
           blocked_on: BLOCKED_ON_TOOL,
+          request_pair: REQUEST_PAIR_TOOL,
+          message_pair: MESSAGE_PAIR_TOOL,
           cancel_wake: "Cancel your own pending wake_me check-in (you have at most one). Use it when you no longer need it: when you go Blocked on other requests (blocked_on cancels it for you), or when what it was for is done. A check-in you leave behind wakes you later for nothing.",
           unity: `This sandbox's own Unity editor (${sb.path}) on this ${platformNoun(m.platform)}. action: status | start | stop | restart | clear_batch. clear_batch: when a start is refused because a \`-batchmode\` build (yours, another worker's, a nightly's) has held a slot for a long time, ask for this check: it ends the sandboxes' batch builds whose owner is gone, or that have made no log or CPU progress for 30 minutes after running an hour, and your own (started by your unity-slot run, or of your sandbox when its run recorded no session) once its log has been silent for 20 minutes, or log and CPU for 10, whatever its age; it removes the stale Temp/UnityLockfile, leaves every other build alone and says why, so do not wait hours for a stuck one. A unity-slot run ends with the shell or task that started it. Restart it whenever it is hung, crashed or misbehaving: stop asks it to quit and kills it (and what it started) after 30 s; force: true kills at once. Starting returns once the process is up; the MCP bridge follows once the project has loaded (poll status until "running"). A start takes one of the machine's Unity slots: it is refused while every Unity process there fills max_unity or other launches wait ahead (the reason says which); a restart keeps its slot. status lists every Unity editor on the machine, who holds a slot and who waits.`,
           build_plan: BUILD_PLAN_DOC,
@@ -2785,6 +2845,130 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
   private claimLine(machineId: string, sandbox: string): string {
     const by = this.placeAgain.claimedBy(machineId, sandbox);
     return by ? ` (spoken for: worker ${by} resumes here, ahead of new work)` : '';
+  }
+
+  /**
+   * start_agent for a pair run (w1945, WorkItem.pair): its legs start together, one worker in a FREE sandbox on each of as
+   * many computers, leg 1 (`sandbox`) the host, or none starts. Each leg is checked as a single start is (FREE, held,
+   * reserved, timed) and against the pair's own rules (pairRoom: no Mac unless cross-OS, and then a Mac only hosts) before
+   * any starts; a leg that fails to start stops the ones started before it, so no sandbox is held for a pair that is not
+   * running. Each worker gets the same prompt and a section saying its leg and where the others are; message_pair reaches them.
+   */
+  private async startPairLegs(
+    w: WorkItem,
+    a: { sandbox?: string; machine?: string; pair_sandboxes?: string[]; prompt: string; title?: string; model?: string; effort?: EffortLevel; permission_mode?: PermissionMode; attachments?: string[]; extra_agent?: boolean; override_gate?: string },
+    from: 'human' | 'orchestrator',
+    requestedBy: Requester,
+    override: string | undefined,
+  ): Promise<string> {
+    const crossOs = w.pair?.crossOs;
+    const want = w.pair?.legs;
+    const refs = [a.sandbox, ...(a.pair_sandboxes ?? [])].filter((x): x is string => !!x?.trim());
+    const fitNow = () => {
+      const r = this.roomFacts();
+      const f = roomForWork(r, { ...w, pair: { legs: want ?? 2, ...(crossOs ? { crossOs } : {}), ...(w.pair?.timed ? { timed: true } : {}) } });
+      return f.short ? f.short : `computers with room it fits now: ${f.ids.join(', ')}`;
+    };
+    if (!a.pair_sandboxes?.length) throw new Error(`${w.id} is ${pairText(w.pair!)}: start every leg together, sandbox for leg 1 (the host) and pair_sandboxes for the others, each a FREE sandbox on another computer (${fitNow()}). When fewer computers than that have room, queue it (decide_work queue): it is never started one leg at a time.`);
+    if (want && refs.length !== want) throw new Error(`${w.id} is ${pairText(w.pair!)}: give ${want} sandboxes (sandbox and ${want - 1} in pair_sandboxes), not ${refs.length}`);
+    if (refs.length < 2 || refs.length > PAIR_MAX_LEGS) throw new Error(`a pair run has 2 to ${PAIR_MAX_LEGS} legs, one per computer`);
+    if (a.extra_agent) throw new Error('a pair run\'s legs are game work: each goes into a FREE sandbox, never beside another agent (extra_agent)');
+    // Every leg checked before any starts.
+    const legs = refs.map((ref, i) => {
+      const t = this.target(ref, i ? undefined : a.machine);
+      if (!t.machineSandbox) throw new Error(`leg ${i + 1} (${ref}) names no sandbox: give "<computer>/<sandbox>"`);
+      return { ref, machine: placeId(t.machine), sandbox: t.machineSandbox, label: `${placeId(t.machine)}/${t.machineSandbox}` };
+    });
+    const twice = legs.find((l, i) => legs.findIndex((x) => x.machine === l.machine) !== i);
+    if (twice) throw new Error(`two legs on ${twice.machine}: each leg of a pair run goes on its own computer`);
+    for (const [i, l] of legs.entries()) {
+      const leg = `leg ${i + 1}${i ? '' : ' (the host)'} on ${l.label}`;
+      const m = this.store.machines.get(l.machine);
+      if (!this.machines.isOnline(l.machine)) throw new Error(`${leg}: ${l.machine} is offline. Nothing was started.`);
+      try {
+        this.sharedSandboxProblem(l.ref, undefined, w.id, false, 'game');
+      } catch (e) {
+        throw new Error(`${leg}: ${(e as Error).message} Nothing was started.`);
+      }
+      if (!this.newWorkOn(l.ref, undefined)) throw new Error(`${leg}: ${l.label} is not FREE${this.claimLine(l.machine, l.sandbox)}. Nothing was started.`);
+      const reserved = this.reservedProblem(l.machine, w);
+      if (reserved) throw new Error(`${leg}: ${reserved} Nothing was started.`);
+      const timedPin = this.timedPinProblem(l.machine, w.pair?.timed ? 'timed' : timedKind(needsTimed(w, a.prompt)));
+      if (timedPin) throw new Error(`${leg}: ${timedPin} Nothing was started.`);
+      if (m?.platform === 'darwin' && (i > 0 || !crossOs)) {
+        throw new Error(`${leg}: ${l.machine} is a Mac, and a Mac refuses a multiplayer client (w665): ${crossOs ? 'in a cross-OS pair a Mac only hosts (leg 1, sandbox)' : 'a pair run that needs no cross-OS pair (w1692) runs on computers that are not Macs'}. Nothing was started.`);
+      }
+    }
+    if (crossOs && new Set(legs.map((l) => this.store.machines.get(l.machine)?.platform ?? l.machine)).size < 2) throw new Error(`a cross-OS pair run (${crossOs}) needs its legs on two operating systems; ${legs.map((l) => `${l.machine} is ${this.store.machines.get(l.machine)?.platform ?? 'unknown'}`).join(', ')}. Nothing was started.`);
+    if (!a.title?.trim()) throw new Error(TITLE_HELP);
+    jobTitle(w.id, a.title);
+    const files = this.attachmentsFor(a.attachments, w);
+    const started: { session: string; sandbox: string }[] = [];
+    const lines: string[] = [];
+    for (const [i, l] of legs.entries()) {
+      const handed = await this.prepareForNewWork(l.ref, undefined, legs.length > 1 ? `${w.id}-leg${i + 1}` : w.id, w.source, false);
+      const others = legs.map((x, k) => `leg ${k + 1}${k ? '' : ' (host)'} ${x.label}`).join(', ');
+      const role = `\n\n## Your leg of this pair run (w1945)\nYou are leg ${i + 1} of ${legs.length}${i ? ', a client: join the host once it says it listens' : ', the host: start the run and say where it listens'}, in ${l.label}. The legs, all started together just now: ${others}. Talk to the other legs with \`mcp__machine__message_pair\` (each message reaches every other leg's worker; theirs come back to you as messages, and a message resumes a leg that ended its turn): the host says its address and port once it listens, a client says when it has joined. Wait for each other in one call (an until loop) or end your turn; never poll with short check-ins. Build and run the same commit on every leg${w.pair?.for ? `. The host leg ends with the result in a line "For ${w.pair.for}:" (what ran, the commit every leg ran, what the check compared and found, any desync report files), which resumes ${w.pair.for}'s worker` : ''}. A leg that fails says so to the others with message_pair before it ends. Every leg ends with DONE: ${w.id} once the run is over (Learned: as the request rules say).`;
+      const prompt = `${a.prompt}${role}${requestAsFiled(w, a.prompt)}${this.handoverFor(w, this.target(l.ref), handed.branch)}${w.source ? workerRules(w, handed.branch ?? this.sandboxBranchOf(this.target(l.ref))) : ''}${requestLineRule(w)}`;
+      const s = this.startWorker({ sandbox: l.ref, prompt, title: jobTitle(w.id, `${a.title} (leg ${i + 1}/${legs.length})`, { clip: true }), model: a.model, effort: a.effort, permissionMode: a.permission_mode, from, requestedBy, attachments: files, workId: w.id });
+      if (s.info.status === 'error') {
+        for (const x of started) this.sessions.get(x.session)?.stop();
+        throw new Error(`leg ${i + 1} on ${l.label} did not start: ${s.info.statusDetail}.${started.length ? ` The leg${started.length > 1 ? 's' : ''} started before it (${started.map((x) => x.session).join(', ')}) ${started.length > 1 ? 'were' : 'was'} stopped, so no sandbox waits for a pair that is not running.` : ''} Start the pair again on free sandboxes, or queue it.`);
+      }
+      this.lastPlaced = l.machine;
+      started.push({ session: s.info.id, sandbox: l.label });
+      this.orchestrators.linkWorker(w.id, s.info, `started ${this.orchestrators.workerLine(s.info.id)} as leg ${i + 1} of its pair run${override ? ` (not a repeat: ${override})` : ''}`, { overrideGate: a.override_gate });
+      lines.push(`leg ${i + 1}${i ? '' : ' (host)'}: agent ${s.info.id} in ${l.label}${handed.note}${this.queuedLine(s.info.id)}`);
+    }
+    this.orchestrators.pairStarted(w.id, started, crossOs ? { crossOs } : {});
+    const withFiles = files.length ? ` Each gets ${files.length === 1 ? 'the attachment' : `${files.length} attachments`} (${files.map((f) => f.id).join(', ')}) in ${INBOX_DIR}/.` : '';
+    return `Started ${w.id}'s ${legs.length} legs together, requested by ${requestedBy.displayName}: ${lines.join('; ')}. ${names(w.requesters)}'s orchestrator is told.${withFiles}${Agents.goneLine(files)}`;
+  }
+
+  /**
+   * Why new game work may not take `machine`'s last free sandbox (w1945), or undefined: an older pair run that is Queued, of
+   * at least this work's priority, fits that computer, and waits for computers to have room at once. Left to chance, single
+   * work takes each sandbox as it frees and a pair, which needs two at the same moment, waits forever (lothsahn: "queues
+   * work properly that requires running together across multiple machines"). Only the last free sandbox there, so a
+   * computer with two takes both, and urgent work (a person's "Start now") goes first.
+   */
+  pairHoldProblem(machine: string | undefined, w: WorkItem | undefined): string | undefined {
+    if (!machine) return undefined;
+    const place = this.places().find((p) => p.id === placeId(machine));
+    if (!place || place.freeSandboxes > 1) return undefined;
+    const rank = (p: WorkPriority | undefined) => WORK_PRIORITIES.indexOf(p ?? 'normal');
+    const since = (x: WorkItem) => Date.parse(x.queuedFor?.at ?? x.createdAt) || 0;
+    const facts = this.roomFacts();
+    const pair = [...this.store.work.values()]
+      .filter((p) => p.pair && !p.pair.started && p.status === 'queued' && p.id !== w?.id)
+      .filter((p) => rank(p.priority) >= rank(w?.priority) && (!w || since(p) <= since(w) || rank(p.priority) > rank(w.priority)))
+      .filter((p) => roomForWork(facts, { ...p, pair: { ...p.pair!, legs: 1 } }, p.queuedFor?.needs).ids.includes(place.id))
+      .sort((x, y) => rank(y.priority) - rank(x.priority) || since(x) - since(y))[0];
+    if (!pair) return undefined;
+    const room = roomForWork(facts, pair, pair.queuedFor?.needs);
+    return `${place.id}'s last free sandbox is held for ${pair.id} "${pair.title.slice(0, 80)}" (${pair.priority}, Queued since ${(pair.queuedFor?.at ?? pair.createdAt).slice(11, 16)} UTC), ${pairText(pair.pair!)}, which starts only when that many computers have room at once (w1945)${room.short ? `: ${room.short}` : `: it can start now, start its legs first`}. Start ${w ? w.id : 'this'} on another computer; work of higher priority than the pair (a person's "Start now" makes it urgent) goes first.`;
+  }
+
+  /**
+   * message_pair (w1945): a leg of a pair run tells the other legs' workers something (where the host listens, that a client
+   * joined, that a leg failed). Delivered as a message, which resumes a leg that ended its turn.
+   */
+  private messagePair(info: SessionInfo, a: Record<string, unknown>): string {
+    const text = String(a.text ?? '').trim();
+    if (!text) throw new Error('give text: what the other legs need to know ("host listens at 100.74.97.12:7890 on commit 1a2b3c4")');
+    const pairs = [...this.store.work.values()].filter((w) => isOpen(w) && w.pair?.started?.legs.some((l) => l.session === info.id));
+    if (!pairs.length) throw new Error('you are no leg of an open pair run: message_pair reaches the other legs of a pair run the dispatcher started together (w1945). To ask for one, request_pair.');
+    const sent: string[] = [];
+    for (const w of pairs) {
+      const legs = w.pair!.started!.legs;
+      const me = legs.findIndex((l) => l.session === info.id);
+      for (const [k, l] of legs.entries()) {
+        if (k === me || !this.store.sessions.get(l.session)) continue;
+        this.sessions.send(l.session, `[pair ${w.id}, from leg ${me + 1}${me ? '' : ' (host)'} ${info.id} in ${legs[me].sandbox}] ${text.slice(0, 4000)}`, 'system');
+        sent.push(`leg ${k + 1} ${l.session}`);
+      }
+    }
+    return sent.length ? `Sent to ${sent.join(', ')}.` : 'The other legs are gone: nobody got it.';
   }
 
   /**
@@ -3241,6 +3425,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
               .describe("Only when the request's server check found a strong overlap still in flight (list_work shows it): what makes this different work. Refused without it then."),
             override_gate: OVERRIDE_GATE,
             extra_agent: z.boolean().optional().describe("Dispatcher: true puts this request's worker beside another request's live agent in the sandbox on purpose (w1089): only for work that needs no editor and no game tree (FF Factory, FFBox, the plugin: it works in its own clone in its temp folder, w1098), and not past max_agents_per_sandbox. It never switches the sandbox's branch; game work beside a busy worker is refused even with it (w1607). Without it start_agent refuses a sandbox that is not FREE."),
+            pair_sandboxes: z.array(z.string()).max(PAIR_MAX_LEGS - 1).optional().describe('A pair run (w1945): its other legs\' FREE sandboxes, each on another computer; sandbox is leg 1, the host. All start or none.'),
           },
           wrap(async (a) => {
             if (a.work_id && ctx.role !== 'dispatcher') throw new Error(WORK_ID_ONLY);
@@ -3270,8 +3455,16 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
                 throw new Error(`${w.id} already has ${live.map((id) => this.orchestrators.workerLine(id)).join(', ')}: send it there (message_agent with work_id), or pass override_duplicate saying why it needs another worker.`);
               }
             }
+            // w1945: a pair run's legs start together, each in a FREE sandbox on its own computer, or none does.
+            if (w && (w.pair || a.pair_sandboxes?.length)) return this.startPairLegs(w, a, from, actor(a.for_user, a.work_id), override);
+            if (a.pair_sandboxes?.length) throw new Error('pair_sandboxes is for a request (work_id): its legs are recorded on it, and the host leg reports for it');
             // Where it goes after what the request itself is (a repeat, a gate): w1607.
             if (ctx.role === 'dispatcher') this.sharedSandboxProblem(a.sandbox, a.machine, a.work_id, a.extra_agent, needs);
+            // w1945: a computer's last free sandbox is not taken from an older pair run that waits for it.
+            if (ctx.role === 'dispatcher' && needs === 'game' && !a.extra_agent) {
+              const hold = this.pairHoldProblem(this.newWorkOn(a.sandbox, a.machine), w);
+              if (hold) throw new Error(hold);
+            }
             // A computer reserved for higher work (w1643, placement.minPriority) takes no new work below its level.
             const reserved = this.reservedProblem(this.machineOf(a.sandbox, a.machine), w);
             if (reserved) throw new Error(reserved);
@@ -4009,7 +4202,7 @@ ${w.repo ?? ''}
           max_sandboxes: z.number().int().min(1).max(8).optional().describe('Sandboxes that may exist there (default 3). Omitted: kept. On a worker-root install this is refused: its installer sets the count, and the ops worker reruns it (the requester\'s orchestrator sends ops_worker machine_update with max_sandboxes), never a person.'),
           max_agents_per_sandbox: z.number().int().min(1).max(8).optional().describe('Agents that may run at once in one sandbox (default 2). Omitted: kept.'),
           max_unity: z.number().int().min(0).max(8).optional().describe('Sandbox Unity editors that may run at once there (default 2). Omitted: kept.'),
-          disk_warn_gb: z.number().int().min(1).optional().describe("Its disk guard: below this many GB free on the sandbox volume, no new sandboxes or sandbox editors (default 20, w628). Omitted: kept."),
+          disk_warn_gb: z.number().int().min(1).optional().describe("Its disk guard: below this many GB free on the sandbox volume, no new sandboxes or sandbox editors (default 15, w1951). Omitted: kept."),
           disk_critical_gb: z.number().int().min(1).optional().describe('Below this, idle sandbox editors stop and busy sandbox agents are asked to commit, push and end their turn (default 10, w628). Omitted: kept.'),
           max_sandbox_agents: z.number().int().min(1).max(16).optional().describe('Its agent cap: agents that may be mid-turn at once on it, in its sandboxes and its standing agents together (default max_sandboxes x max_agents_per_sandbox). Omitted: kept.'),
           protected_paths: z.array(z.string()).optional().describe('Absolute folders its agents must never touch and its clean-up never deletes, besides its main clone and daemon folder (e.g. a live game checkout). Omitted: kept.'),
@@ -4369,7 +4562,7 @@ ${w.repo ?? ''}
     const id = this.orchestrators.personalFor(person).info.id;
     this.waker.cancel(id);
     this.orchestrators.personWrote(id);
-    return this.sessions.send(id, text + this.orchestrators.heldOffer(id), 'human', undefined, { requestedBy: person });
+    return this.sessions.send(id, text + this.orchestrators.heldOffer(id, text), 'human', undefined, { requestedBy: person });
   }
 
   /**
@@ -4381,7 +4574,7 @@ ${w.repo ?? ''}
     const id = this.orchestrators.personalFor(who).info.id;
     this.waker.cancel(id);
     this.orchestrators.personWrote(id);
-    const uuid = this.sessions.send(id, `[via ${via}]\n${text}${this.orchestrators.heldOffer(id)}`, 'human', undefined, { requestedBy: who });
+    const uuid = this.sessions.send(id, `[via ${via}]\n${text}${this.orchestrators.heldOffer(id, text)}`, 'human', undefined, { requestedBy: who });
     const deadline = Date.now() + waitSeconds * 1000;
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 1500));
@@ -4858,6 +5051,8 @@ ${w.repo ?? ''}
       // w1841: a worker an urgent release's build paused shows Blocked on it; a report waiting on a held bench lock, on that.
       buildHold: (id) => this.builds.pausedFor(id),
       benchLock: (id) => this.machines.statsOf(id)?.benchLock,
+      // w1949: a worker whose bench ticket or Unity slot waits in its machine's queue shows Blocked on it.
+      queueWaits: queueWaitsAll(this.machines.allStats()),
       // The clock the room's since (w1944) and the WRONG flag read.
       now: this.orchestrators.now().getTime(),
     });
@@ -5019,6 +5214,7 @@ ${fp}`;
     return `
 You are the dispatcher of FF Factory, the control room for parallel work on **Final Factory** (a Unity 6 DOTS space automation game with deterministic lockstep multiplayer). People do not chat with you: each person has their own orchestrator, which talks with them and files work requests with you (${this.peopleLine() || 'one login so far'}). You turn requests into sandboxes and workers without the same work being done twice, keep track of them, and answer through the ledger. Nobody writes in this chat, the owner included: you hear only the harness and the ledger.
 ${ownerLine(this.cfg)}
+- Pair runs (w1945: legs started together): \`read_rules machines\` before you start, queue or hold one.
 ## What you control
 ${this.worldBrief(true)}
 
@@ -5084,7 +5280,7 @@ ${this.worldBrief(false)}
 - Answer ${n}'s questions from the tools (list_work, list_sandboxes, list_machines, agent_transcript, search_transcripts, system_status, …), not from memory. Ask back only when what they want is genuinely unclear.
 - When ${n} asks for work, check list_work first. If it is already in flight or just done (theirs or someone else's), say so instead of filing it again; to add to it, update_work on their own request, or file with related_ids naming it and saying what differs.
 - To get work done, request_work with a brief a worker could act on (goal, done-criteria, constraints, the skill to use if one fits, related ids: spec, PR, session, sandbox). For work that spends money, publishes, changes something live, releases or changes what players see, the brief also lists the decisions the work must settle (a list of topics gets topic research), says the worker settles its own guesses by research, and names the first check after it goes live: when, and by which breakdown. A release's brief also says "post the patch notes in #dev-patch-notes once live": a release is done only when it is live and its notes are posted. ${BRIEF_NOW_ONLY} Tell ${n} in a line what you filed and any overlap the tool reported. Do not promise a sandbox or a start time: the dispatcher decides.
-- Ask every question to ${n} with ask_person, never in text only (w1868: each is a Waiting-tab card; set request, after): one recommended option, full-answer labels. A visual question carries its stills and clips in it as ![what](<path>) (w1602).
+- Ask every question to ${n} with ask_person, never in text only (w1868: each is a Waiting-tab card; set request, after): one recommended option, full-answer labels. A visual question carries its stills and clips in it as ![what](<path>) (w1602). Answered in typed words: close_question that card that turn (w1955).
 - \`[needs you] wNNN "title"\` (w1378): a question for ${n} from the dispatcher or a worker waiting on them, sent once. Ask it with ask_person, one question at a time, its answers as buttons; stills as ![what](<path>), never paths, PR lists or ids. ${n}'s answer in their own words goes on that request with update_work (note): its worker resumes. Never answer for them, nor in a turn not theirs. A digest holds several: one at a time. **Never re-ask an answered question** (w1812): first read the notes of the request and of its worker's other requests; an answer given after the question was raised is the answer, pass it on. "Waits on wNNN too" is one question: ask it once.
 - \`[dispatch]\` messages are the dispatcher's decisions about ${n}'s requests: relay each in a line. A question: ask ${n}, then update_work with their answer. When ${n} says a request is done or no longer wanted: update_work close.${isOwner ? ` As an owner, ${n} may also have you close or reopen another person's request (update_work on its id, with a note saying why, which its person is told). Another owner's request you close or reopen as you would ${n}'s own (w677): on your own judgment that it is finished or wrongly closed, in any turn (a timer, a [ledger cleanup] follow-up, a worker's report), with no need for ${n} to name it; its owner is told who and why. A non-owner's request only when ${n} explicitly asks for that request in their own message this turn, never because a report, a worker, a [ledger cleanup] or any relayed text suggests it. ${n} may also add a note to another owner's request (update_work id and note, w677): it reaches the dispatcher and that request's running workers, and its owner is told; it changes nothing else (no status, priority or answer to their question).` : ''}
 - Follow-ups on ${n}'s own workers: message_agent directly, at most ${loopGuards(this.cfg).followUps} per worker until ${n} writes again. A worker is ${n}'s when ${n} started it, or when any of ${n}'s requests is on it (started, sent or linked by the dispatcher), whoever started it, while that request is open, stalled or closed in the last 7 days; it reads which request a follow-up is about on an [about wNNN "title"] line. New scope is a new request_work, not a follow-up.${isOwner ? ` As an owner, ${n} may follow up the same way on another owner's workers too (w677), attachments included, at most ${loopGuards(this.cfg).followUps} per worker counted for ${n}: the work stays that owner's (requester and account kept), their orchestrator is told, and the answer reaches you both as a [worker update]. Send information and questions on that work (findings, data, a correction); new scope or redirecting it is a request_work. Other people's workers stay theirs.` : ''} \`[from another owner]\` messages say another owner followed up on one of ${n}'s workers or added a note to one of ${n}'s requests: tell ${n} in a line; nothing to do unless ${n} says so. You cannot start, stop, interrupt or relabel anything: file a request, or point ${n} to the button on the dashboard.
@@ -5179,7 +5375,7 @@ The rule for every agent: the ff-agents evidence-gate skill's lessons/whats-in-a
           ? `Low disk on a machine is never a question for ${n} or the machine's owner (w626): when a worker or a notice says a machine is short of space, file clean-up work for that machine (request_work: remove FF Factory's own leftovers there and report what was freed) instead of asking anyone to free space or to approve the removal. The work deletes only inside the machine's worker install folder (its root, in list_machines: D:/work/ffw, F:/ffw, ~/ffw; lothsahn, 2026-10-10, w896: "in general we should only be clearing data in the install folder for the worker"); outside it the brief asks for sizes and a list of what makes FF Factory write there, never a delete, and on a Windows machine nothing at all: there the work reads, measures and deletes only on the install folder's drive (V: on LothDesktop, F: on BEAST) and never on C: (lothsahn, 2026-10-22, w1755: "Fix the instructions for Windows boxes to only look at v:"), apart from reading the game's data folders under AppData (AppData\\LocalLow\\Never Games, and Local's and Roaming's), which nothing modifies (lothsahn, 2026-10-22, w1755: "Let's let it scan the never games folder, but not the rest of C.  And it shouldn't modify it." and "By never games I mean in appdata"). Never write a delete outside the folder into the brief (C:, AppData, system temp, caches, installers, ~/.claude transcripts, the game's data folder), nor, for a Windows machine, any look at C: (a size, a scan, "where did AppData's space go"). Never write a list of live or "will resume" workers into a clean-up brief either (w1379: w1374's list missed a735f37c, on the stalled w1332, and its builds were deleted): the brief says to run \`ff-leftovers folders\` and delete only its DELETE rows, because the ledger, not the brief, knows which stopped or stalled workers' requests are still open.`
           : `Low disk on a computer (a \`[machine <id>] Clean-up cannot free enough disk space\` notice, DISK in list_machines, a worker saying so) is fixed by the machine, never by its owner (Ben, 2026-10-07, w626): run machine_cleanup on it (below the soft threshold its daemon also removes FF Factory's own leftovers: player slots nobody holds, pushed agent worktrees, finished agents' temp, unused Unity editors), and when that is not enough, start a clean-up worker there (a free sandbox on that machine) with the biggest consumers the notice names; its brief says to remove FF Factory's own leftovers itself and report what it removed and freed. Never ask the machine's owner or anyone else to free space or to approve removing FF Factory's leftovers; only a person's own files (documents, their own projects, saves) are theirs, and the worker lists those in its report. A clean-up worker deletes only inside the machine's worker install folder (lothsahn, 2026-10-10, w896: "in general we should only be clearing data in the install folder for the worker"; the root is in list_machines and the machine's root.json: D:/work/ffw, F:/ffw, ~/ffw): put that in its brief, and never write a delete outside the folder into one (C:, AppData, system temp, Temp entries, the Unity Hub installer, dotnet or package caches, the game's data folder under LocalLow, ~/.claude transcripts, a person's files). On a Windows machine the brief keeps the work on the install folder's drive (the drive of its root: V: on LothDesktop, F: on BEAST): never a read, measurement or scan of C: (lothsahn, 2026-10-22, w1755: "Fix the instructions for Windows boxes to only look at v:"; the guard refuses one), and never a question about what fills C:. On macOS and Linux, for what is outside the folder the brief asks for measuring only: sizes, plus a list of every setting, script or reference that makes FF Factory write there so it can be moved inside the folder (a request of its own). The notice names the biggest consumers (on Windows only those on the install drive) and tags the ones outside the folder "measure only": a big one outside is a finding to report, not a thing to delete. The daemon's own pass follows the same rule (it lists what is outside and removes nothing there; on Windows it neither measures nor lists anything off the install drive). Never write a list of live or "will resume" workers into a clean-up brief (w1379: w1374's list missed a735f37c, on the stalled w1332, and its builds were deleted): tell the worker to run \`ff-leftovers folders\` and delete only its DELETE rows, because the ledger, not the brief, knows which stopped or stalled workers' requests are still open.`;
         const reserved = `A computer may be reserved for higher work (w1643, lothsahn, 2026-10-20: "If normal (all work), if high, high and urgent, if urgent, urgent only"): config placement.minPriority, { "<machine>": "high" | "urgent" } (normal, the default, takes all work, low included). Its Capacity line reads "ROOM n% but RESERVED for ...", and the block's "Reserved by priority" line says where high and urgent work goes; the Next lines are for low and normal work. A request below a computer's level never goes there, not even when nothing else has room: it waits Queued, since a reservation that overflowed would reserve nothing. The priority is the request's now: one a person raises to the level may go there at once. start_agent, message_agent with a request the worker is not on yet, and stop_agent move_to are refused for work below the level; the workers already there go on and resume there, and a release build declared with build_plan counts as urgent.`;
-        return [clone, installers, update, disk, reserved].join('\n\n');
+        return [clone, installers, update, disk, reserved, PAIR_RULES].join('\n\n');
       }
     }
   }

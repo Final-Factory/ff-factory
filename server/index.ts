@@ -1337,7 +1337,7 @@ route('POST', '/api/sessions/([\\w-]+)/message', async (req, [id]) => {
     agents.orchestrators.personWrote(id);
   }
   // The calls a gate refused in earlier turns ride along with the person's message (w830), marked as FF Factory's.
-  const said = words + (s.info.kind === 'orchestrator' ? agents.orchestrators.heldOffer(id) : '');
+  const said = words + (s.info.kind === 'orchestrator' ? agents.orchestrators.heldOffer(id, words) : '');
   await agents.sendWithAttachments(id, said, 'human', { images: imgs, attachments: files, requestedBy: requesterOf(req) });
   return taken({});
 });

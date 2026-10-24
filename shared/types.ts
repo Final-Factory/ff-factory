@@ -264,6 +264,12 @@ export interface SessionInfo {
    */
   queuedOn?: 'capacity' | 'machine' | 'pool';
   /**
+   * w1949: its last start of its sandbox's editor, refused for want of a Unity slot on its machine (machine/unitySlots.ts
+   * startRefusal), when and why. Cleared by a start, restart or stop that goes through, and when its next turn opens. While
+   * it is stopped with a check-in and the machine has no slot free, its request shows Blocked on a Unity editor slot.
+   */
+  editorRefused?: { machine: string; sandbox: string; at: string; why: string };
+  /**
    * The worker declared that only a person can move it on (w691: the waiting_on_person tool): who, and what they must do.
    * The ledger shows its requests Waiting on input (on <who>), also while a check-in of its own is pending, and the agent
    * as Needs you. Kept by the portal, never by the daemon; gone with its next message (a new turn: it declares again if
@@ -512,7 +518,8 @@ export interface UnitySlotsReport {
   ramPct?: number;
   /** New launches wait at or above this RAM use. */
   ramLimitPct: number;
-  waiting: { label: string; count: number; holder: string; since: string; why: string }[];
+  /** w1949: `session`, the worker that ran it (FF_SESSION_ID), and `position` in the queue (1 first), from a daemon since w1949. */
+  waiting: { label: string; count: number; holder: string; since: string; why: string; session?: string; position?: number }[];
   granted: { label: string; count: number; holder: string; since: string }[];
   at: string;
 }
@@ -664,6 +671,12 @@ export interface BenchState {
   runningCount: number;
   waiting: number;
   nextExclusive?: BenchTicketGlance & { ahead: number };
+  /**
+   * w1949: the tickets not granted yet, in the queue's own order (a waiting urgent release first), each with `ahead` waiters
+   * before it; at most BENCH_STATE_MAX_WAITERS. The ledger shows a request Blocked on the lock while its worker's ticket is
+   * here (shared/queueWaits.ts). Absent while nothing waits, and from a daemon before w1949.
+   */
+  waiters?: (BenchTicketGlance & { ahead: number })[];
   /** An old-style lock's owner line (quiet_gate.sh before w1615): no ticket, so no request or worker. */
   legacy?: { owner: string; since: string };
   /** A machine FF Factory runs one worker on (priorities.json single_worker): no turn limits, warnings or pre-emptions. */
@@ -841,7 +854,7 @@ export interface Machine {
   maxAgentsPerSandbox?: number;
   /** Unity editors of its sandboxes that may run at once (default 2; the main clone's editor is not counted). */
   maxUnity?: number;
-  /** Its disk guard: below this many GB free on the sandbox volume, no new sandboxes or sandbox editors (default 20, DISK_WARN_GB_DEFAULT). */
+  /** Its disk guard: below this many GB free on the sandbox volume, no new sandboxes or sandbox editors (default 15, DISK_WARN_GB_DEFAULT). */
   diskWarnGB?: number;
   /** Below this, idle sandbox editors are stopped and busy sandbox agents asked to checkpoint (default 10, DISK_CRITICAL_GB_DEFAULT). */
   diskCriticalGB?: number;
@@ -938,10 +951,14 @@ export interface MachineSandboxUnity {
  * opening the editor and force-reimporting every script grew its Library by under 10 MB, a development player build
  * wrote 2.1 GB of output and 0.25 GB of Library, a release build 2.0 GB of output and 2.5 GB of Temp (gone when the
  * editor closes), and a whole day's sandbox session (a develop merge, Burst recompiles, one build) at most 7.6 GB. So
- * an editor needs about 10 GB on top of the 10 GB floor, where idle editors stop and busy agents checkpoint.
+ * an editor needs about 10 GB on top of the 10 GB floor, where idle editors stop and busy agents checkpoint. Since w1951
+ * (lothsahn, 2026-10-23: "Let's set 10,15,20 as defaults in code for all new installs"): critical 10, warn 15, and the
+ * clean-up soft threshold 20 above them (CLEANUP_SOFT_GB_DEFAULT), so a machine cleans up before its guard refuses work.
  */
-export const DISK_WARN_GB_DEFAULT = 20;
+export const DISK_WARN_GB_DEFAULT = 15;
 export const DISK_CRITICAL_GB_DEFAULT = 10;
+/** A machine's clean-up soft threshold (config machines.cleanup.softFreeGB) when config names none: 20 GB (w1951; it was 80). */
+export const CLEANUP_SOFT_GB_DEFAULT = 20;
 
 /** The pool settings the portal sends a daemon (welcome) and a deploy writes into daemon.json. */
 export interface SandboxPoolSettings {
@@ -1822,6 +1839,31 @@ export interface QueuedLeg {
   what: string;
 }
 
+/**
+ * A pair run (w1945, lothsahn: "Can we make the dispatcher smart enough so it queues work properly that requires running
+ * together across multiple machines and doesn't waste slots?"): work that needs `legs` computers at once, one worker on each,
+ * started together (start_agent with pair_sandboxes), such as a two-machine multiplayer determinism check: leg 1 hosts, the
+ * others join. It counts as room only where that many computers that fit have room at once (shared/capacity.ts pairRoom).
+ */
+export interface WorkPair {
+  /** Computers at once, one worker on each (2 to PAIR_MAX_LEGS). */
+  legs: number;
+  /** The request whose worker asked for it with request_pair, and that worker: Blocked on this one's report meanwhile. */
+  for?: string;
+  forSession?: string;
+  /**
+   * Why the legs must run on different operating systems (the game repo's Determinism-Test-Strategy.md "Which machines",
+   * w1692: float or math-library use in the simulation, Burst or IL2CPP codegen, platform APIs or paths, the desync hash, a
+   * desync seen only across OSes). Absent: computers that are not Macs (a Mac refuses a multiplayer client, w665). With it,
+   * one Mac may take leg 1, the host.
+   */
+  crossOs?: string;
+  /** A leg takes timing measurements (exclusive bench tickets): never on a computer that takes no timed runs (m5, w1861). */
+  timed?: boolean;
+  /** When its legs started together, and where: leg 1 (the host) first. */
+  started?: { at: string; legs: { session: string; sandbox: string }[] };
+}
+
 /** A request for work that a person's orchestrator filed with the dispatcher, and what became of it. */
 export interface WorkItem {
   id: string;
@@ -1989,6 +2031,8 @@ export interface WorkItem {
    * merging, and goes only when a worker starts or is sent for it on a computer it names, or the request closes.
    */
   legs?: QueuedLeg[];
+  /** A pair run (w1945): it needs this many computers at once, its legs started together. */
+  pair?: WorkPair;
   /**
    * Its last hand-back (w1532, server/machinePause.ts): its worker's machine was paused, so it was taken off that worker and
    * Queued for another computer, whose worker picks it up from `branch` with `note` (the worker's own line, or where it

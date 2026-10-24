@@ -19,7 +19,7 @@ import { poolForRef, type GatePoolToken } from './usageGate.ts';
 import { personForWork, sessionPerson, setVaultContext } from './vault.ts';
 import { fakeToken, useFakeVault } from './testVault.ts';
 import { parseNotice } from '../shared/notices.ts';
-import { HELD_MARK } from '../shared/conditional.ts';
+import { HELD_MARK, inPersonWords } from '../shared/conditional.ts';
 import { splitReply, splitSent } from '../shared/replies.ts';
 import type { PrHealth } from '../shared/blockers.ts';
 import { answersText } from '../shared/questionCard.ts';
@@ -2600,6 +2600,95 @@ test('w1868: every ask_person question is an open card until it is answered, ask
   assert.match(listed.text, new RegExp(`${seqs[3]}: Question 4 about w14`));
 });
 
+test('w1955: a card answered in typed words stays open, and request_work and update_work list it so the orchestrator closes it', async (t) => {
+  const env = setup(t);
+  const { store, o, chat, call } = env;
+  store.onEvent = (sid, e) => o.observeAsk(sid, e);
+  const loth = chat(LOTH);
+  const asked = (question: string, toolUseId: string) => {
+    const tag = toolUseId.toUpperCase();
+    const ev = store.append(loth.info.id, { kind: 'tool_use', toolUseId, name: 'mcp__sandboxes__ask_person', input: { question, options: [{ label: `Yes, do it that way (${tag})`, description: '', recommended: true }, { label: `No, leave it as it is (${tag})`, description: '' }] } });
+    store.append(loth.info.id, { kind: 'tool_result', toolUseId, isError: false, text: 'Shown' });
+    return ev.seq;
+  };
+  const open = () => (o.personalOf('lothsahn')!.info.openAsks ?? []).map((a) => a.seq);
+  const timing = asked('Should the 16 GB desktop be a play-only timing machine?', 'a1');
+  const cleanup = asked('Should LothLaptop keep its clean-up line?', 'a2');
+  // Lothsahn types the answer instead of clicking: no quote, so nothing closes by itself.
+  store.append(loth.info.id, { kind: 'user', from: 'human', text: 'Yes, make the 16 GB desktop a play-only timing machine.', requestedBy: LOTH });
+  assert.deepEqual(open(), [timing, cleanup], 'typed words close nothing on a guess');
+  // A card asked in this turn, after their message, is not an old one.
+  const fresh = asked('Which look for the new card?', 'a3');
+  const filed = await call(loth.info, 'request_work', { title: 'Play-only timing machine', brief: 'Make the 16 GB desktop a play-only timing machine.' });
+  assert.equal(filed.isError, false, filed.text);
+  assert.match(filed.text, new RegExp(`open question ${timing} \\(Should the 16 GB desktop be a play-only timing machine\\?\\)`));
+  assert.match(filed.text, new RegExp(`open question ${cleanup} `));
+  assert.doesNotMatch(filed.text, new RegExp(`open question ${fresh} `));
+  assert.match(filed.text, /call close_question with its seq and why in this same turn/);
+  assert.deepEqual(open(), [timing, cleanup, fresh], 'listed, not closed');
+  // Each card is listed once per turn.
+  const wid = /w\d+/.exec(filed.text)![0];
+  const second = await call(loth.info, 'update_work', { id: wid, note: 'Also keep it off the render farm.' });
+  assert.equal(second.isError, false, second.text);
+  assert.doesNotMatch(second.text, /open question/);
+  // The orchestrator closes the one the words decided; the other stays, and is listed again in a later turn of theirs.
+  const closed = await call(loth.info, 'close_question', { seq: timing, why: 'answered in chat; filed as ' + wid });
+  assert.equal(closed.isError, false, closed.text);
+  assert.deepEqual(open(), [cleanup, fresh]);
+  Object.defineProperty(loth, 'turnId', { value: 'next-turn', configurable: true });
+  store.append(loth.info.id, { kind: 'user', from: 'human', text: 'Keep the clean-up line.', requestedBy: LOTH });
+  const later = await call(loth.info, 'update_work', { id: wid, note: 'Keep the LothLaptop clean-up line.' });
+  assert.match(later.text, new RegExp(`open question ${cleanup} `));
+  assert.match(later.text, new RegExp(`open question ${fresh} `), 'asked before this newer message');
+  // A turn the harness started (a timer, a relayed report) lists nothing: the person said nothing in it.
+  loth.lastFrom = 'system';
+  Object.defineProperty(loth, 'turnId', { value: 'timer-turn', configurable: true });
+  const quiet = await call(loth.info, 'update_work', { id: wid, note: 'Timer note.' });
+  assert.doesNotMatch(quiet.text, /open question/);
+  const brief = (env.agents as unknown as { personalBrief(r: Requester): string }).personalBrief(LOTH);
+  assert.match(brief, /Answered in typed words: close_question that card that turn \(w1955\)/);
+});
+
+test('w1955: a typed message starts its turn with the open cards asked before it, once; a click or a reply quoting a card leaves that card out', async (t) => {
+  const { store, o, chat } = setup(t);
+  store.onEvent = (sid, e) => o.observeAsk(sid, e);
+  const loth = chat(LOTH);
+  const asked = (question: string, toolUseId: string) => {
+    const tag = toolUseId.toUpperCase();
+    const ev = store.append(loth.info.id, { kind: 'tool_use', toolUseId, name: 'mcp__sandboxes__ask_person', input: { question, options: [{ label: `Do it (${tag})`, description: '', recommended: true }, { label: `Leave it (${tag})`, description: '' }] } });
+    store.append(loth.info.id, { kind: 'tool_result', toolUseId, isError: false, text: 'Shown' });
+    return ev.seq;
+  };
+  const cleanup = asked('Should LothLaptop keep its clean-up line?', 'c1');
+  const timing = asked('Should the 16 GB desktop be a play-only timing machine?', 'c2');
+  // No typed message (a click, a harness note): nothing is offered, and nothing is used up.
+  assert.equal(o.heldOffer(loth.info.id), '');
+  // Typed words that quote no card: both cards are offered, under FF Factory's own mark.
+  const typed = 'We already decided on this in a discussion. Reference those decisions.';
+  const offer = o.heldOffer(loth.info.id, typed);
+  assert.match(offer, /^\n\n\[FF Factory, not your person: held from earlier turns\]\nOpen questions of yours on Lothsahn's Waiting on input tab, asked before this message \(w1955\)/);
+  assert.match(offer, new RegExp(`- open question ${cleanup} \\(Should LothLaptop keep its clean-up line\\?\\)`));
+  assert.match(offer, new RegExp(`- open question ${timing} `));
+  assert.match(offer, /close_question with its seq and why in this same turn/);
+  // Offered once: the next typed message lists a card only if it is new.
+  assert.equal(o.heldOffer(loth.info.id, 'Ok.'), '');
+  const later = asked('Which look for the new panel?', 'c3');
+  assert.match(o.heldOffer(loth.info.id, 'Ok.'), new RegExp(`open question ${later} `));
+  // A reply quoting a card has answered it: it is left out of the offer.
+  const q1 = asked('Should the dispatcher retry?', 'c4');
+  const q2 = asked('Should the idle stop be 10 minutes?', 'c5');
+  const quoting = o.replyWords(loth.info.id, 'Yes, retry.', q1);
+  const reply = o.heldOffer(loth.info.id, quoting);
+  assert.doesNotMatch(reply, new RegExp(`open question ${q1} `));
+  assert.match(reply, new RegExp(`open question ${q2} `));
+  // The reply is sent, so the quoted card closes (observeAsk); nothing is left to offer.
+  store.append(loth.info.id, { kind: 'user', from: 'human', text: quoting, requestedBy: LOTH });
+  assert.equal(o.heldOffer(loth.info.id, 'Ok.'), '');
+  // The typed message the orchestrator receives keeps the person's words ahead of the mark.
+  assert.equal(inPersonWords('We already decided on this in a discussion', [typed + offer]), true);
+  assert.equal(inPersonWords('call close_question with its seq', [typed + offer]), false, 'the card note is the harness note, not their words');
+});
+
 test('w1868: waiting_on_person refuses a still on the worker’s own machine; the brief asks every question with ask_person', async (t) => {
   const env = await setupOnMachine(t);
   const { store, dispatcher, chat, call, agents } = env;
@@ -4613,7 +4702,9 @@ test('w1841: a worker on a real portal: a reporter wait is Waiting with no [need
   const live = async () => (await call(dispatcher().info, 'list_work', { id: 'w2' })).text;
   const spec = machines.hooks!.specFor(info, store.machines.get('pc')!);
   // (d) Every worker's prompt says pair checks and builds are its own work, and how to wait on another request's worker.
-  assert.match(spec.append, /Two-machine and pair checks, builds, test runs and your own CI are your own work: run them, or ask the dispatcher only for a second machine's worker/);
+  assert.match(spec.append, /Two-machine and pair checks, builds, test runs and your own CI are your own work: run them; never end a turn waiting on the orchestrator for them\. A check that needs two or more computers at once \(a host and a client on two machines\) is `mcp__machine__request_pair`/);
+  // w1945: and never holds its sandbox for a second machine's worker.
+  assert.match(spec.append, /Never hold your sandbox waiting for a second machine's worker\./);
   assert.match(spec.append, /Files or results another request's worker makes for you: `blocked_on` with reports/);
 
   // (b) w1778: a wait on the reporter is Waiting on input on them, and nobody's orchestrator is asked.
@@ -4790,6 +4881,34 @@ test('w1872: w1789 as it happened: a timed leg and a Queued timed request alread
   assert.deepEqual(o.replaceNoTimedWaits(), [], 'nothing left on m5: no second notice');
 });
 
+test('w1944: a worker whose still-open line waits on another request, the orchestrator or a worker they start gives up its sandbox at once, as for a declared block; one with its own work left keeps it', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }, { id: 'w2' }, { id: 'w3' }, { id: 'w4' }]);
+  const waitOn = (i: SessionInfo) => {
+    (agents as unknown as { waitLive?: unknown }).waitLive = undefined;
+    return agents.waitOn(i);
+  };
+  const said = (s: { info: SessionInfo }, line: string) => Object.assign(s.info, { status: 'idle', lastResult: `Done the low-ore pin.\n\n${line}`, lastResultAt: new Date().toISOString() });
+  // d558ba14 on w665, 2026-10-23 21:57 UTC: idle on the m3's only sandbox for 29 minutes with this line and no blocked_on.
+  const a = await startedFor(env, 'w1');
+  said(a, 'w1: still open: waiting on a Windows or Linux pair worker to run `MP-lowore-pin-pair` for PR #2340 (CI is green, the merge is held for that run), and on Ben\'s Intel Mac tester report');
+  assert.match(waitOn(a.info) ?? '', /^it waits on w1: a worker the dispatcher starts \(its report: "w1: still open: waiting on a Windows or Linux pair worker/);
+  const b = await startedFor(env, 'w2', { override_duplicate: 'another request' });
+  said(b, 'w2: still open: waiting for w3 to report its stills');
+  assert.match(waitOn(b.info) ?? '', /^it waits on w2: w3 \(its report/);
+  const c = await startedFor(env, 'w3', { override_duplicate: 'another request' });
+  said(c, 'w3: still open: waiting on the orchestrator to start the Windows client leg');
+  assert.match(waitOn(c.info) ?? '', /^it waits on w3: the orchestrator/);
+  // Work of its own left, or no line at all: it keeps the sandbox.
+  const d = await startedFor(env, 'w4', { override_duplicate: 'another request' });
+  said(d, 'w4: still open: I re-run the scenario after the fix');
+  assert.equal(waitOn(d.info), undefined);
+  Object.assign(d.info, { lastResult: 'Done for now.' });
+  assert.equal(waitOn(d.info), undefined);
+});
+
 // ---------------------------------------------------------------- w1944: queued work and the room it can really use
 
 /** A queued request, as decide_work queue leaves it. */
@@ -4879,4 +4998,143 @@ test('w1944: the capacity ping names the room a queued request cannot use, lets 
   assert.equal(pings().length, 3, 'the first event was two minutes old: it went while events still came');
   assert.match(pings()[2], /Capacity may have freed \(worker w1 finished a turn, 2 min ago; .*worker w5 finished a turn, 0 min ago\)/);
   t.mock.timers.reset();
+});
+
+// ---------------------------------------------------------------- w1945: pair runs placed as one unit
+
+// lothsahn, 2026-10-23: "Can we make the dispatcher smart enough so it queues work properly that requires running together
+// across multiple machines and doesn't waste slots?" w665's worker d558ba14 held m3's only sandbox while the two-machine run
+// of its PR #2340 (w1936) sat Queued; w1940's client leg on biscuit waited on w1898's host leg placed separately.
+
+test('w1945: request_pair files one pair request and blocks the asking worker on its report, so its sandbox is released at once (w890 waitOn); asked again, it waits on the same one', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents } = env;
+  agentsRoom(agents, []);
+  putRequests(store, [{ id: 'w665', by: BEN }]);
+  const a = await startedFor(env, 'w665');
+  await assert.rejects(async () => a.h.request_pair!({ what: 'x', brief: 'y', legs: 1 }), /legs is 2 to 4/);
+  const out = String(await a.h.request_pair!({ what: 'MP-lowore-pin-pair on PR #2340', brief: 'Run MP-lowore-pin-pair on branch w665-lowore-pin-no-collider; pass: 400 heartbeats compared, none diverged.' }));
+  assert.match(out, /^Filed (w\d+), a pair run of 2 legs, on computers that are not Macs, for w665\. The dispatcher starts its legs together/);
+  assert.match(out, /Recorded: w665 is Blocked on /);
+  assert.match(out, /your sandbox is then released at once for other work/);
+  const id = /^Filed (w\d+)/.exec(out)![1];
+  const p = store.work.get(id)!;
+  assert.deepEqual(p.pair, { legs: 2, for: 'w665', forSession: a.id });
+  assert.equal(p.needs, 'game');
+  assert.equal(p.priority, 'normal');
+  assert.deepEqual(p.requesters, [BEN]);
+  assert.deepEqual(p.relatedIds, ['w665']);
+  assert.equal(p.title, 'Pair run for w665: MP-lowore-pin-pair on PR #2340');
+  assert.match(p.brief, /the host leg \(leg 1\) reports the result with a line "For w665:"/);
+  assert.equal(p.overlaps.some((o) => o.ref === 'w665'), false, 'the request it is for is no repeat of it');
+  const w = store.work.get('w665')!;
+  assert.equal(w.status, 'blocked');
+  assert.equal(w.blocked?.kind, 'request');
+  assert.equal(w.blocked?.ref, id);
+  assert.equal(w.blocked?.on, 'report');
+  // The w890 release reads this: its sandbox frees at once (server/placeAgain.test.ts, "w890: a worker that ends its turn
+  // waiting on request frees its sandbox at once").
+  (agents as unknown as { waitLive?: unknown }).waitLive = undefined;
+  assert.match(agents.waitOn(a.info) ?? '', new RegExp(`^it waits on w665: ${id}`));
+  const again = String(await a.h.request_pair!({ what: 'MP-lowore-pin-pair again', brief: 'Same.' }));
+  assert.ok(again.startsWith(`w665 already has an open pair run, ${id} (new: `), again);
+  assert.equal([...store.work.values()].filter((x) => x.pair).length, 1);
+});
+
+/** Two Windows computers, pc (alpha) and beast (slot1), both with room (w1945). */
+async function twoComputers(t: Parameters<typeof setupOnMachine>[0]) {
+  const env = await setupOnMachine(t);
+  const beast = await startTestMachine(env.machines, { id: 'beast', sandboxes: ['slot1'] });
+  env.closers.push(() => beast.stop());
+  for (const id of ['pc', 'beast']) env.store.putMachine({ ...env.store.machines.get(id)!, platform: 'win32' });
+  agentsRoom(env.agents, ['pc', 'beast']);
+  return env;
+}
+
+test('w1945: a pair request starts both legs together, each on its own computer, never one leg alone; a Mac is no client; message_pair reaches the other leg', async (t) => {
+  const env = await twoComputers(t);
+  const { store, machines, dispatcher, call } = env;
+  putRequests(store, [{ id: 'w2', by: BEN, status: 'queued', queuedFor: { at: T0 }, pair: { legs: 2 } }]);
+  const start = (extra: Record<string, unknown>) => call(dispatcher().info, 'start_agent', { work_id: 'w2', prompt: 'Run MP-lowore-pin-pair on branch w665-lowore-pin-no-collider.', title: 'MP-lowore-pin-pair', sandbox: 'pc/alpha', ...extra });
+  const nothing = () => assert.deepEqual(store.work.get('w2')!.sessionIds, [], 'nothing was started');
+  const one = await start({});
+  assert.equal(one.isError, true);
+  assert.match(one.text, /w2 is a pair run of 2 legs, on computers that are not Macs: start every leg together, sandbox for leg 1 \(the host\) and pair_sandboxes for the others/);
+  nothing();
+  assert.match((await start({ pair_sandboxes: ['pc/alpha'] })).text, /two legs on pc: each leg of a pair run goes on its own computer/);
+  store.putMachine({ ...store.machines.get('beast')!, platform: 'darwin' });
+  assert.match((await start({ pair_sandboxes: ['beast/slot1'] })).text, /leg 2 on beast\/slot1: beast is a Mac, and a Mac refuses a multiplayer client \(w665\).*Nothing was started\./);
+  nothing();
+  store.putMachine({ ...store.machines.get('beast')!, platform: 'win32' });
+
+  const ok = await start({ pair_sandboxes: ['beast/slot1'] });
+  assert.equal(ok.isError, false, ok.text);
+  assert.match(ok.text, /^Started w2's 2 legs together, requested by Ben: leg 1 \(host\): agent \w+ in pc\/alpha.*; leg 2: agent \w+ in beast\/slot1/);
+  const w = store.work.get('w2')!;
+  assert.equal(w.status, 'active');
+  assert.equal(w.sessionIds.length, 2);
+  assert.deepEqual(w.pair!.started!.legs.map((l) => l.sandbox), ['pc/alpha', 'beast/slot1']);
+  assert.match(w.log.join('\n'), /its 2 legs started together \(w1945\): leg 1 \(host\) \w+ in pc\/alpha, leg 2 \w+ in beast\/slot1/);
+  const [l1, l2] = w.pair!.started!.legs.map((l) => store.sessions.get(l.session)!);
+  assert.equal(l1.machineId, 'pc');
+  assert.equal(l2.machineId, 'beast');
+  await until('both legs end their first turn', () => l1.status === 'idle' && l2.status === 'idle');
+  const said = (id: string) => JSON.stringify(store.readTranscript(id));
+  assert.match(said(l1.id), /You are leg 1 of 2, the host/);
+  assert.match(said(l2.id), /You are leg 2 of 2, a client/);
+  const h1 = machines.hooks!.handlersFor(l1, store.machines.get('pc')!);
+  assert.equal(String(await h1.message_pair!({ text: 'host listens at 100.74.97.12:7890 on 1a2b3c4' })), `Sent to leg 2 ${l2.id}.`);
+  await until('leg 2 hears it', () => said(l2.id).includes('[pair w2, from leg 1 (host)'));
+  // A worker that is no leg of a pair has no one to tell.
+  putRequests(store, [{ id: 'w3', by: BEN }]);
+  const other = await call(dispatcher().info, 'start_agent', { work_id: 'w3', prompt: 'Fix it', title: 'fix', sandbox: 'pc/alpha', extra_agent: true });
+  const o = store.sessions.get(/Started agent (\w+)/.exec(other.text)![1])!;
+  await assert.rejects(async () => machines.hooks!.handlersFor(o, store.machines.get('pc')!).message_pair!({ text: 'hi' }), /you are no leg of an open pair run/);
+});
+
+
+test('w1945: an older Queued pair run holds a computer’s last free sandbox from newer single work of no higher priority; urgent work goes first', async (t) => {
+  const env = await twoComputers(t);
+  const { store, agents, dispatcher, call } = env;
+  putRequests(store, [{ id: 'w2', by: BEN, status: 'queued', queuedFor: { at: T0 }, pair: { legs: 2 } }, { id: 'w3', by: BEN }]);
+  const start = (extra: Record<string, unknown> = {}) => call(dispatcher().info, 'start_agent', { work_id: 'w3', prompt: 'Fix it', title: 'fix', sandbox: 'pc/alpha', ...extra });
+  const held = await start();
+  assert.equal(held.isError, true);
+  assert.match(held.text, /pc's last free sandbox is held for w2 "Request w2" \(normal, Queued since 09:00 UTC\), a pair run of 2 legs, on computers that are not Macs, which starts only when that many computers have room at once \(w1945\): it can start now, start its legs first\. Start w3 on another computer; work of higher priority than the pair/);
+  assert.deepEqual(store.work.get('w3')!.sessionIds, []);
+  // Urgent single work goes first; so does work on a computer the pair does not fit.
+  store.work.get('w3')!.priority = 'urgent';
+  assert.equal(agents.pairHoldProblem('pc', store.work.get('w3')), undefined);
+  store.work.get('w3')!.priority = 'normal';
+  store.putMachine({ ...store.machines.get('pc')!, platform: 'darwin' });
+  assert.equal(agents.pairHoldProblem('pc', store.work.get('w3')), undefined, 'a Mac is no leg of this pair, so nothing is held there for it');
+  store.putMachine({ ...store.machines.get('pc')!, platform: 'win32' });
+  // A person's "Start now" makes it urgent: it starts.
+  store.work.get('w3')!.priority = 'urgent';
+  const ok = await start();
+  assert.equal(ok.isError, false, ok.text);
+});
+
+test('w1945: the WRONG flag and decide_work queue count a pair as room only with a computer per leg', async (t) => {
+  const env = await twoComputers(t);
+  const { store, agents, o, dispatcher, call } = env;
+  putRequests(store, [{ id: 'w2', by: BEN, status: 'new', pair: { legs: 2 } }]);
+  const fit = { pc: { platform: 'win32' }, beast: { platform: 'win32' } };
+  const one: RoomNow = { game: ['pc'], agent: ['pc'], held: [], fit };
+  const both: RoomNow = { ...one, game: ['pc', 'beast'] };
+  const facts = (r: RoomNow) => {
+    agents.roomNow = () => r.game;
+    agents.roomFacts = () => r;
+  };
+  facts(one);
+  const q = await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'queue', note: 'one computer has room' });
+  assert.equal(q.isError, false, q.text);
+  assert.match(store.work.get('w2')!.log.join('\n'), /queued for capacity; a pair run of 2 legs needs 2 computers with room at once, and only pc has room it fits/);
+  store.work.get('w2')!.queuedFor = { at: '2026-01-01T00:00:00.000Z' };
+  assert.deepEqual(o.flagQueuedWithRoom(one), [], 'one free computer is no room for two legs');
+  assert.deepEqual(o.flagQueuedWithRoom(both), ['w2']);
+  store.work.get('w2')!.status = 'new';
+  facts(both);
+  const refused = await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'queue', note: 'two have room' });
+  assert.match(refused.text, /start its 2 legs together \(start_agent with work_id "w2", sandbox for leg 1, the host, and pair_sandboxes for the others/);
 });
