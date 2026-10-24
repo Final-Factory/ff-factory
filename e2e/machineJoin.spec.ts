@@ -64,3 +64,47 @@ test('add a machine: opened on the new PC, the form names it after its tailnet d
   await modal.getByRole('button', { name: 'Add it with an installer run on the PC instead' }).click();
   await expect(modal.getByLabel('Its tailnet device name')).toBeVisible();
 });
+
+test('add a machine play-only (w1946): the tick hides the limits and the join asks for a play-only computer', async ({ authed: page }) => {
+  const asked: unknown[] = [];
+  await page.route('**/api/machines/join/device', (r) => r.fulfill({ json: { name: 'desktop-timing' } }));
+  await page.route('**/api/machines/join', async (r) => {
+    asked.push(r.request().postDataJSON());
+    await r.fulfill({
+      json: {
+        machine: {
+          id: 'desktop-timing',
+          name: 'desktop-timing',
+          host: 'desktop-timing',
+          status: 'deploying',
+          purpose: '',
+          portalUrl: 'https://fff.example.ts.net',
+          sandboxes: [],
+          playOnly: 'added play-only in the dashboard by Owner',
+        },
+        code: CODE,
+        last4: 'TVWX',
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+        tailnetName: 'desktop-timing',
+        limits: { maxSandboxes: 1, maxAgentsPerSandbox: 1, maxUnity: 1 },
+        portalUrl: 'https://fff.example.ts.net',
+        page: 'https://fff.example.ts.net/join',
+        windowsCommand: 'irm https://fff.example.ts.net/join/windows.ps1 | iex',
+        unixCommand: 'bash -c "$(curl -fsSL https://fff.example.ts.net/join/unix.sh)"',
+        installer: { name: 'ff-factory-join.cmd', text: INSTALLER },
+      },
+    });
+  });
+  const sidebar = await openSidebar(page);
+  await sidebar.locator('.fl-add-machine').click();
+  const modal = page.locator('.modal');
+  await expect(modal.getByLabel('Id')).toHaveValue('desktop-timing');
+  await modal.getByLabel('Unity editors at once').fill('9');
+  await modal.getByLabel(/Play-only/).check();
+  await expect(modal.getByLabel('Unity editors at once')).toBeHidden();
+  await modal.getByRole('button', { name: 'Make the installer' }).click();
+  const made = page.getByTestId('join-made');
+  await expect(made.getByText(CODE)).toBeVisible();
+  await expect(made.getByText('It joins play-only')).toBeVisible();
+  expect(asked).toEqual([{ id: 'desktop-timing', tailnetName: 'desktop-timing', playOnly: true }]);
+});

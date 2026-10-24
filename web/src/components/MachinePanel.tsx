@@ -325,6 +325,7 @@ function JoinMachineModal({ app, onClose, onSsh }: { app: AppState; onClose: () 
   const [sandboxes, setSandboxes] = useState('');
   const [agents, setAgents] = useState('');
   const [unity, setUnity] = useState('');
+  const [playOnly, setPlayOnly] = useState(false);
   const [device, setDevice] = useState<{ name?: string; machine?: string }>({});
   const [busy, setBusy] = useState(false);
   const [made, setMade] = useState<JoinAnswer>();
@@ -349,7 +350,7 @@ function JoinMachineModal({ app, onClose, onSsh }: { app: AppState; onClose: () 
     };
   }, [owner]);
   const slug = id.trim().toLowerCase();
-  const valid = owner && /^[a-z0-9][a-z0-9-]{0,23}$/.test(slug) && (!tailnet.trim() || /^[a-z0-9][a-z0-9-]*$/i.test(tailnet.trim())) && [sandboxes, agents, unity].every((t) => LIMIT.test(t.trim()));
+  const valid = owner && /^[a-z0-9][a-z0-9-]{0,23}$/.test(slug) && (!tailnet.trim() || /^[a-z0-9][a-z0-9-]*$/i.test(tailnet.trim())) && (playOnly || [sandboxes, agents, unity].every((t) => LIMIT.test(t.trim())));
   const submit = async () => {
     if (!valid || busy) return;
     setBusy(true);
@@ -357,9 +358,7 @@ function JoinMachineModal({ app, onClose, onSsh }: { app: AppState; onClose: () 
       api.createJoin({
         id: slug,
         tailnetName: tailnet.trim() || undefined,
-        maxSandboxes: limitOf(sandboxes),
-        maxAgentsPerSandbox: limitOf(agents),
-        maxUnity: limitOf(unity),
+        ...(playOnly ? { playOnly: true } : { maxSandboxes: limitOf(sandboxes), maxAgentsPerSandbox: limitOf(agents), maxUnity: limitOf(unity) }),
       }),
     );
     setBusy(false);
@@ -400,8 +399,10 @@ function JoinMachineModal({ app, onClose, onSsh }: { app: AppState; onClose: () 
               </button>
               <br />
               <small className="dim">
-                The code is in it. On {made.tailnetName}, connected to Tailscale, double-click it (Windows warns about a downloaded file first: More info, then Run anyway). It
-                installs what is missing, sets the PC up and ends with a summary; the machine shows up here when its daemon connects.
+                The code is in it. On {made.tailnetName}, connected to Tailscale, double-click it (Windows warns about a downloaded file first: More info, then Run anyway), or
+                right-click it and Run as administrator to answer one Windows prompt instead of two. It installs what is missing, sets the PC up and ends with a summary; the
+                machine shows up here when its daemon connects.
+                {made.machine.playOnly && ' It joins play-only: no editors and no workers there, only the timed runs other computers build.'}
               </small>
             </p>
           )}
@@ -460,7 +461,14 @@ function JoinMachineModal({ app, onClose, onSsh }: { app: AppState; onClose: () 
           </label>
         </div>
         {device.name && !device.machine && <small className="dim">This browser is on the tailnet device {device.name}.</small>}
-        <div className="field-row">
+        <label className="check">
+          <input type="checkbox" checked={playOnly} onChange={(e) => setPlayOnly(e.target.checked)} />
+          <span>
+            Play-only <small className="dim">it only plays the timed runs other computers build, under its own exclusive bench lock: no editors, no workers</small>
+          </span>
+        </label>
+        {!playOnly && (
+          <div className="field-row">
           <label className="field">
             <span>Sandboxes</span>
             <input className="input mono" inputMode="numeric" value={sandboxes} onChange={(e) => setSandboxes(e.target.value)} placeholder="from its RAM and disk" />
@@ -473,7 +481,8 @@ function JoinMachineModal({ app, onClose, onSsh }: { app: AppState; onClose: () 
             <span>Unity editors at once</span>
             <input className="input mono" inputMode="numeric" value={unity} onChange={(e) => setUnity(e.target.value)} placeholder="from its RAM and CPUs" />
           </label>
-        </div>
+          </div>
+        )}
         <button type="submit" hidden />
       </form>
     </Modal>
