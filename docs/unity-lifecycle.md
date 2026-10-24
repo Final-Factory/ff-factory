@@ -237,14 +237,27 @@ by the worker's request priority first (the daemon writes `bench.queue/prioritie
 `bench_priorities`, each minute), then one exclusive ticket, then the waiting shared group, and so on; a new shared ticket
 joins the waiting group or goes right after the next exclusive one. The daemon reports the timed legs in the queue, running
 or waiting (`readBenchQueue`, `MachineStats.benchQueue`): a release build goes to another computer meanwhile. Editor-gate
-tickets carry the worker's `FF_SESSION_ID`, so they queue at its priority. FF Factory takes tickets in three places (`machine/benchQueue.ts` runs the game repo's helper as a child, since
+tickets carry the worker's `FF_SESSION_ID`, so they queue at its priority.
+
+**A shared ticket waits for one exclusive turn at most** (w1962, lothsahn: "a shared bench-queue ticket (an editor start,
+a build) must not wait for hours behind one exclusive timed ticket after another"). The game repo's `bench_queue.py`
+does it since its `RULES_VERSION` 1, but each ticket's helper decides under its own branch's copy, and a branch from before
+it keeps the old order: a higher priority goes first, and an urgent holder keeps the lock while only lower-priority work
+waits (w1860). So the daemon also does it through what every copy reads at every decision, `priorities.json`
+(`machine/benchRaise.ts`, every 5 s): a waiting shared ticket that an exclusive turn has passed (one held the lock while it
+waited) has its session raised to `urgent` while it waits (`raisedFrom`, `raisedFor`; the marks are kept in the file's
+`passed`). It then sorts before the exclusive tickets taken after it, and counts against the holder, whose 30-minute
+turn (w1832) ends instead of the hold. A session with a live exclusive ticket of its own is not raised (its timed leg
+would move up too). An editor start's ticket has a session of its own, `editor:<sandbox>` (`FF_BENCH_SESSION`), at the
+highest priority of the workers in that sandbox. The exclusive guarantee does not change: a raised ticket still waits
+for the holder to go. FF Factory takes tickets in three places (`machine/benchQueue.ts` runs the game repo's helper as a child, since
 node cannot take the OS file locks the queue lives on):
 
 - **`unity-slot run`** takes a shared ticket after its Unity slots (`--bench exclusive`, or `FF_UNITY_SLOT_BENCH`, for a
   timed run). A run made inside a bench hold (`FF_BENCH_TICKET`) reuses it, and waits for a slot at most 2 minutes.
 - **`unity start`** of a sandbox editor checks the slot first, then takes a shared ticket. Not granted within 5 s, it
-  answers `Queued (w1615)` and the pool starts the editor itself at its turn, checking the gates and the slot again
-  (none is waited for while it holds the ticket); `unity status` shows its place. A stop cancels a queued start.
+  answers `Queued (w1615)` and the pool starts the editor itself at its turn, checking the gates again but not the slot
+  it already holds (w1962: a queued start counts in the slot count, so a second check counted it twice); `unity status` shows its place. A stop cancels a queued start.
   Since w1860 (lothsahn, 2026-10-23: "builds or any compute intensive job needs a lock"; yes to "running editors and game
   players hold a shared ticket while they run") the ticket, `running editor <sandbox>`, is held for as long as the editor
   runs, not only while it boots, and goes once the editor is gone. A running editor that lost its ticket (revoked at

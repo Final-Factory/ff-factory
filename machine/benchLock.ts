@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { BenchLock, BenchPriority, BenchQueueReport, NoTimedRuns } from '../shared/types.ts';
 import { benchQueueDir, queueTickets, type QueueTicket } from './benchQueue.ts';
+import type { PassedMark } from './benchRaise.ts';
 
 /** Where quiet_gate.sh keeps the lock: `$FF_WORKER_ROOT/tmp/bench.lock` (Git Bash's /f/ffw is F:\ffw). */
 export const benchLockDir = (root: string) => path.join(root, 'tmp', 'bench.lock');
@@ -73,7 +74,7 @@ export function readBenchQueue(root: string | undefined, alive: (pid: number) =>
  * `no_timed_runs` {why, elsewhere} (w1861): this machine takes no timed runs, so bench_queue.py refuses every exclusive
  * ticket here and names the machines in `elsewhere`. Errors are logged, never thrown: the queue then goes on in its old order.
  */
-export function writeBenchPriorities(root: string | undefined, sessions: Record<string, BenchPriority>, at = new Date(), singleWorker?: boolean, noTimedRuns?: NoTimedRuns): string | undefined {
+export function writeBenchPriorities(root: string | undefined, sessions: Record<string, BenchPriority>, at = new Date(), singleWorker?: boolean, noTimedRuns?: NoTimedRuns, passed?: Record<string, PassedMark>): string | undefined {
   if (!root) return undefined;
   const dir = benchQueueDir(benchLockDir(root));
   const file = path.join(dir, 'priorities.json');
@@ -83,7 +84,9 @@ export function writeBenchPriorities(root: string | undefined, sessions: Record<
     // w1832: `v: 2` (the release and nightly marks) only from a portal that sends them, which also sends `singleWorker`:
     // under v 2 the queue honours a pre-empt ticket only from a session marked release, so an older portal's file stays v 1
     const marks = typeof singleWorker === 'boolean' ? { v: 2, single_worker: singleWorker } : {};
-    fs.writeFileSync(tmp, JSON.stringify({ at: at.toISOString(), ...marks, ...(noTimedRuns ? { no_timed_runs: noTimedRuns } : {}), sessions }));
+    // w1962: `passed`, the daemon's own marks (machine/benchRaise.ts), kept here so a restarted daemon goes on with them
+    const kept = passed && Object.keys(passed).length ? { passed } : {};
+    fs.writeFileSync(tmp, JSON.stringify({ at: at.toISOString(), ...marks, ...(noTimedRuns ? { no_timed_runs: noTimedRuns } : {}), ...kept, sessions }));
     fs.renameSync(tmp, file);
     return file;
   } catch (e) {
@@ -155,4 +158,17 @@ export function ownTimedHold(root: string | undefined, session: string | undefin
   if (!root || !session) return undefined;
   const t = timedHolder(root, now, alive);
   return t && t.session === session ? t.ticket : undefined;
+}
+
+/** The daemon's passed marks as it last wrote them (w1962, writeBenchPriorities `passed`), or {} (none, or unreadable). */
+export function readPassedMarks(root: string | undefined): Record<string, PassedMark> {
+  if (!root) return {};
+  try {
+    const f = JSON.parse(fs.readFileSync(path.join(benchQueueDir(benchLockDir(root)), 'priorities.json'), 'utf8'));
+    const p = f?.passed;
+    if (!p || typeof p !== 'object') return {};
+    return Object.fromEntries(Object.entries(p as Record<string, PassedMark>).filter(([k, v]) => /^t\d{8}$/.test(k) && typeof v?.by === 'string'));
+  } catch {
+    return {};
+  }
 }
