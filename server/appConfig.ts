@@ -144,6 +144,8 @@ export const SETTABLE_KEYS = [
   'worker.earlyCompactMidTurnTokens',
   // The share of workers that write terse prose between tool calls (w1480, server/terseProse.ts).
   'worker.terseProsePilotPercent',
+  // The share of workers nudged to hand a long read/search chain to a subagent (w2014, server/readChain.ts).
+  'worker.readChainPilotPercent',
   // Workers' reasoning effort when start_agent names none (w2000, docs/orchestrators.md "A worker's effort"): low, medium, high or
   // max; null goes back to medium (w2010). It is the session's --effort flag, which beats the repo's settings.json modelSettings.
   'worker.effort',
@@ -579,7 +581,8 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
     }
     case 'worker.compactPilotPercent':
     case 'worker.earlyCompactPilotPercent':
-    case 'worker.terseProsePilotPercent': {
+    case 'worker.terseProsePilotPercent':
+    case 'worker.readChainPilotPercent': {
       const n = Number(value);
       if (!Number.isInteger(n) || n < 0 || n > 100) throw new Error(`${key} is a whole number from 0 to 100`);
       return n;
@@ -1007,7 +1010,7 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   else if (key === 'machines.cleanup.staleOutput') cfg.machines = { ...cfg.machines, cleanup: { ...cfg.machines?.cleanup, staleOutput: v as Partial<StaleOutputSettings> | undefined } };
   else if (key === 'hostGuard.cleanup.ageRules') cfg.hostGuard.cleanup.ageRules = (v as { path: string; olderThanDays: number }[] | undefined) ?? [];
   else if (key === 'orchestrator.compactAtTokens') cfg.orchestrator = { ...cfg.orchestrator, compactAtTokens: v as number | undefined };
-  else if (key === 'worker.compactAtTokens' || key === 'worker.compactBeforeWaitTokens' || key === 'worker.compactPilotPercent' || key === 'worker.earlyCompactPilotPercent' || key === 'worker.earlyCompactAtTokens' || key === 'worker.earlyCompactMidTurnTokens' || key === 'worker.terseProsePilotPercent') cfg.worker = { ...cfg.worker, [key.slice('worker.'.length)]: v as number | undefined };
+  else if (key === 'worker.compactAtTokens' || key === 'worker.compactBeforeWaitTokens' || key === 'worker.compactPilotPercent' || key === 'worker.earlyCompactPilotPercent' || key === 'worker.earlyCompactAtTokens' || key === 'worker.earlyCompactMidTurnTokens' || key === 'worker.terseProsePilotPercent' || key === 'worker.readChainPilotPercent') cfg.worker = { ...cfg.worker, [key.slice('worker.'.length)]: v as number | undefined };
   // Live: each worker's launch spec reads it when its session starts (agents.ts machineSandboxSpec, standing.ts).
   else if (key === 'worker.effort') cfg.worker = { ...cfg.worker, effort: (v as Config['worker']['effort'] | undefined) ?? DEFAULT_WORKER_EFFORT };
   else if (key === 'orchestrator.compactAtTurnUsd') cfg.orchestrator = { ...cfg.orchestrator, compactAtTurnUsd: v as number | undefined };
