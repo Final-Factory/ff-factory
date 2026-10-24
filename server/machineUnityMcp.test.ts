@@ -10,7 +10,7 @@ import { buildOptions, type LaunchSpec } from './launch.ts';
 import { Store } from './store.ts';
 import { SessionManager } from './sessions.ts';
 import { MachineManager } from './machines.ts';
-import { Agents } from './agents.ts';
+import { Agents, WORKER_HIDDEN_SKILLS } from './agents.ts';
 import { Identity } from './identity.ts';
 import type { Config } from './config.ts';
 import type { MachineSandbox, SessionInfo } from '../shared/types.ts';
@@ -182,8 +182,15 @@ test('machine unity mcp: the portal asks for it for sandbox agents on a machine;
   // w1482: the built-in roles go by deny rules; general-purpose (spawned) and every plugin role stay.
   assert.ok(!inSb.disallowedTools!.some((t) => /general-purpose|ff-agents:/.test(t)));
   // w1480: the C# language server's diagnostics are noise in a sandbox; a worker starts with it off, and the SDK gets it as --settings
-  assert.deepEqual(inSb.settings, { enabledPlugins: { 'csharp-lsp@claude-plugins-official': false } });
-  assert.deepEqual(buildOptions(inSb, {}).settings, { enabledPlugins: { 'csharp-lsp@claude-plugins-official': false } });
+  // w2002: and the marketing plugin, unless its work is marketing, and the skills workers never invoke stay out of the listing
+  const hidden = Object.fromEntries(WORKER_HIDDEN_SKILLS.map((k) => [k, 'user-invocable-only']));
+  const plain = { enabledPlugins: { 'csharp-lsp@claude-plugins-official': false, 'ff-marketing@ff-marketing': false }, skillOverrides: hidden, bashOutputMaxChars: 10_000 };
+  assert.deepEqual(inSb.settings, plain);
+  assert.deepEqual(buildOptions(inSb, {}).settings, plain);
+  assert.ok(['dataviz', 'claude-api', 'therapy'].every((k) => hidden[k] === 'user-invocable-only'), 'hidden from the model, a person\'s /name still works');
+  assert.ok(!WORKER_HIDDEN_SKILLS.some((k) => k.includes(':')), 'skillOverrides never reach a plugin skill: ff-agents, ff-speckit and ff-discord stay listed');
+  const ads = machines.hooks!.specFor(info({ machineSandbox: 'sb1', title: 'w9: cut a 30 s trailer for the Steam page' }), machine);
+  assert.deepEqual((ads.settings as { enabledPlugins: object }).enabledPlugins, { 'csharp-lsp@claude-plugins-official': false }, 'marketing work keeps the marketing plugin');
   // w2002: no <total_tokens> countdown after every tool result; the process gets the switch
   assert.equal(inSb.env?.CLAUDE_CODE_TOTAL_TOKENS_REMINDER, 'off');
   assert.equal(buildOptions(inSb, {}).env?.CLAUDE_CODE_TOTAL_TOKENS_REMINDER, 'off');

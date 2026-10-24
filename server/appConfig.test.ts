@@ -122,6 +122,19 @@ test('app config: orchestrator.compactAtTokens and compactAtTurnUsd (w535), live
   assert.equal(full.orchestrator.compactAtTurnUsd, undefined, 'null: back to the default ($1)');
 });
 
+test('app config: the earlier-compaction pilot (w2002), live, its thresholds 80,000 at least, null back to the default', (t) => {
+  const { file, cfg } = setup(t);
+  const full = { ...cfg, worker: { permissionMode: 'bypassPermissions', effort: 'high' } } as unknown as Config;
+  setAppConfig(file, full, 'worker.earlyCompactPilotPercent', '25');
+  setAppConfig(file, full, 'worker.earlyCompactAtTokens', 100_000);
+  setAppConfig(file, full, 'worker.earlyCompactMidTurnTokens', '140000');
+  assert.deepEqual(full.worker, { permissionMode: 'bypassPermissions', effort: 'high', earlyCompactPilotPercent: 25, earlyCompactAtTokens: 100_000, earlyCompactMidTurnTokens: 140_000 }, 'applies at once, the rest kept');
+  for (const bad of ['0', '79999', '900001', 'soon']) assert.throws(() => setAppConfig(file, full, 'worker.earlyCompactAtTokens', bad), /from 80,000 to 900,000/, bad);
+  for (const bad of ['-1', '101']) assert.throws(() => setAppConfig(file, full, 'worker.earlyCompactPilotPercent', bad), /0 to 100/, bad);
+  setAppConfig(file, full, 'worker.earlyCompactPilotPercent', null);
+  assert.equal(full.worker.earlyCompactPilotPercent, undefined, 'null: back to the default (50%)');
+});
+
 test('app config: orchestrator.compactIdleSeconds and compactHardAtTokens (w1538), live, bounded, null back to the default', (t) => {
   const { file, cfg } = setup(t);
   const full = { ...cfg, orchestrator: { model: 'opus', effort: 'medium', notifyOnWorkerEvents: true, compactAtTokens: 80_000 } } as unknown as Config;
