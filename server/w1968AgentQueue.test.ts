@@ -74,3 +74,14 @@ test('w1968: once its ticket is granted the waiter reads Working and holds it; a
   // No machine stats: as before.
   assert.equal(agentStateText({ ...session('0cd35068'), ...agentQueueFacts('0cd35068', undefined) }, time, NOW), 'Working');
 });
+
+test('w1968: a holder that waits for a second ticket reads Blocked and says what it holds (LothDesktop, 02:39Z)', () => {
+  // e6b2309a (w1782) held shared t00000942 (a running player) and waited for shared t00000951 (a second player) behind w1853's exclusive t00000944.
+  const held = ticket({ ticket: 't00000942', mode: 'shared', session: 'e6b2309a', requests: ['w1782'], what: 'running player', since: '2026-10-24T02:24:00Z' });
+  const ex = { ...ticket({ ticket: 't00000944', mode: 'exclusive', session: '33bc6316', requests: ['w1853'] }), ahead: 0 };
+  const second = { ...ticket({ ticket: 't00000951', mode: 'shared', session: 'e6b2309a', requests: ['w1782'], what: 'running player' }), ahead: 1 };
+  const q = agentQueueAll({ lothdesktop: { bench: bench({ mode: 'shared', running: [held], runningCount: 1, waiting: 2, waiters: [ex, second] }) } });
+  const text = agentStateText({ ...session('e6b2309a'), ...agentQueueFacts('e6b2309a', q) }, time, NOW);
+  assert.match(text, /^Blocked: waiting for the shared bench lock on lothdesktop \(.*behind the exclusive ticket w1853 \/ t00000944.*\) · holds a shared bench ticket on lothdesktop \(t00000942 for w1782, since 02:24 UTC\)$/);
+  assert.match(cardStatus(session('e6b2309a'), { now: NOW, time, queue: q }).doing ?? '', / · holds a shared bench ticket on lothdesktop \(t00000942/);
+});
