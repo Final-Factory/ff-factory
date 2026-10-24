@@ -593,6 +593,10 @@ export interface BenchPriority {
    * taken under another session's id would carry that session's mark.
    */
   exempt?: 'release' | 'nightly';
+  /** w1962 (machine/benchRaise.ts, the daemon only): a session raised to the top while its shared ticket `raisedFor`,
+   * which an exclusive turn has passed, waits; `raisedFrom` is its own priority. bench_queue.py reads only `priority`. */
+  raisedFrom?: WorkPriority;
+  raisedFor?: string;
   /** w1969: the worker's last timed_place verdict while it holds; the guard lets its exclusive timing tickets through only on "here". */
   timed?: TimedVerdict;
 }
