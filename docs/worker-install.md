@@ -616,6 +616,8 @@ kept a person's marker, a record set back to 1.29.19 was updated to 1.29.20, a s
 
 ### The Dev Drive (w900)
 
+Each storage step of `devdrive.ps1` (attach, initialise, partition, format, letter) says what it starts, runs in a job of its own with a time limit (2 minutes, 10 for the format) and says it is still on it every 30 s; the installer prints those lines as they come, and a line a minute while none does (w1993: on desktop-coosego the install sat silent after the size line, one core busy and the disk idle, its output held until the script ended). The partition gets its letter only after it is formatted, so Explorer never asks "You need to format the disk". A run cut off while formatting leaves a partition with no file system and no `devdrive.json`: the next run formats it, on the letter it has. A play-only machine makes no Dev Drive.
+
 **TL;DR:** A new Windows install makes a **Dev Drive** in its root: a dynamically expanding VHDX, `<root>\devdrive.vhdx`,
 formatted ReFS as a Dev Drive and mounted at **the first free drive letter from V: down to A:**. The sandboxes and the
 Library seed live on it, so every new sandbox's Library is a block clone of the seed (a few seconds and almost no disk)

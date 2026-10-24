@@ -15,7 +15,7 @@ const CMD = fs.readFileSync(new URL('../scripts/worker/join.cmd', import.meta.ur
 
 async function serve(over: Partial<MachineJoinDeps> = {}, device: TailnetDevice | null = { name: 'desktop-coosego', tags: [] }) {
   const codes = new JoinCodes(path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ffjoinhttp-')), 'machine-joins.json'));
-  const records = new Map<string, { root?: string; awaitingInstall?: string }>();
+  const records = new Map<string, { root?: string; awaitingInstall?: string; playOnly?: string }>();
   const enrolled: { machineId: string; tailnetName: string; limits: Required<JoinLimits>; portalUrl: string; by: string; platform?: string }[] = [];
   const reports: string[] = [];
   const d: MachineJoinDeps = {
@@ -81,6 +81,7 @@ test('join http: a check changes nothing; the redeem makes the record and answer
   assert.equal(c.body.limitsFrom, 'code');
   assert.equal(c.body.tagged, false);
   assert.equal(c.body.existing, 'new');
+  assert.equal(c.body.playOnly, false);
   assert.equal(c.body.credential, undefined);
   assert.deepEqual(s.enrolled, []);
   assert.ok(s.codes.find(code), 'a check uses nothing up');
@@ -180,4 +181,17 @@ test('join http: the dashboard\'s installer carries its code; a URL or code that
   assert.throws(() => windowsInstaller(CMD, "https://x' ; calc ; '"), /not a portal URL/);
   assert.throws(() => windowsInstaller(CMD, 'https://fff.tail1234.ts.net', 'A" & calc & "'), /digits, capital letters and dashes/);
   assert.ok(!joinPage('https://x"><script>alert(1)</script>').includes('<script>'), 'the page escapes what it writes in');
+});
+
+test('join http: a play-only record tells the bootstrap so, and its installer makes no Dev Drive (w1993)', async (t) => {
+  const s = await serve();
+  t.after(s.close);
+  const { code } = s.codes.create({ machineId: 'desktop-coosego', tailnetName: 'desktop-coosego', limits: { maxSandboxes: 1, maxAgentsPerSandbox: 1, maxUnity: 1 }, by: 'lothsahn' });
+  s.records.set('desktop-coosego', { awaitingInstall: 'now', playOnly: 'added play-only in the dashboard by lothsahn' });
+  const c = await s.join({ code, check: true });
+  assert.equal(c.status, 200);
+  assert.equal(c.body.existing, 'waiting');
+  assert.equal(c.body.playOnly, true);
+  const join = fs.readFileSync(path.join(import.meta.dirname, '..', 'scripts', 'worker', 'join.ps1'), 'utf8');
+  assert.match(join, /if \(\$playOnly\) \{ \$a \+= '-NoDevDrive' \}/, 'join.ps1 passes -NoDevDrive for a play-only machine');
 });

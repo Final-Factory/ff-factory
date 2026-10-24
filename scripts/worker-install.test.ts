@@ -15,7 +15,7 @@ import { carryExclude, claudeSlug, plan, rehome, sameVolume, stopOldScript, type
 import { cloneRepo, credentialId, daemonJson, mergePath, planUpdate, plistPathOf, settingsDiff, update, updateVerdict, withPlistPath, withStandardPaths, gitVersion, holdRedeploys, layoutOf, writeMacSlotConfig, nightlyTaskProblem, playerFolders, supervisorProblems, syncPlayerFolders, noteOutside, parseArgs, preflightProblems, removeSlotsPointer, writeSlotsPointer, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
 import { slotsPointer } from '../machine/unitySlots.ts';
 import { adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, inAdministrators, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, withAuthorizedKey, withoutAuthorizedKey } from './worker/portalSsh.ts';
-import { runElevatedSteps } from './worker/worker.ts';
+import { exec, runElevatedSteps } from './worker/worker.ts';
 
 const TOKEN = `ffm_lothdesktop_${'A'.repeat(43)}`;
 const OPTS = { root: 'D:\\work\\ffw', portalUrl: 'https://portal.example', maxSandboxes: 3, maxAgentsPerSandbox: 2, maxUnity: 2 };
@@ -719,4 +719,23 @@ test("w1596: the installer's Mac probe searches the home folder for clones only 
   const m = { machineId: 't', service: 'com.fffactory.t', slots: 1, outside: [] } as unknown as Manifest;
   assert.equal(planUpdate(l.root, m, cfg, 'ffm_t_x', {}).noCleanup, true);
   assert.equal(planUpdate(l.root, m, { ...cfg, leftovers: undefined }, 'ffm_t_x', {}).noCleanup, undefined, 'a real install is never made one');
+});
+
+test('exec: lines come as they are printed, and a run past its limit is answered even when its child holds the output (w1993)', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffexec-'));
+  const js = (name: string, body: string) => {
+    fs.writeFileSync(path.join(dir, name), body);
+    return path.join(dir, name);
+  };
+  const lines: string[] = [];
+  const r = await exec(process.execPath, [js('lines.js', "process.stdout.write('one\\ntw'); setTimeout(() => process.stdout.write('o\\nthree'), 50);")], { onLine: (l) => lines.push(l) });
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(lines, ['one', 'two', 'three'], 'split on newlines across chunks, the last unterminated line at the end');
+  // The child starts a grandchild that inherits its stdout and outlives it (a PowerShell job does this): 'close' never comes.
+  const sleeper = js('sleeper.js', 'setTimeout(() => {}, 20000);');
+  const parent = js('parent.js', `require('child_process').spawn(process.execPath, [${JSON.stringify(sleeper)}], { stdio: 'inherit' }); setInterval(() => {}, 1000);`);
+  const t0 = Date.now();
+  const held = await exec(process.execPath, [parent], { timeoutMs: 500 });
+  assert.notEqual(held.code, 0, 'killed at its limit');
+  assert.ok(Date.now() - t0 < 10_000, `answered in ${Date.now() - t0} ms, not when the grandchild ends (20 s)`);
 });
