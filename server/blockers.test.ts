@@ -110,7 +110,7 @@ test('w643: machine, usage, lock, time and CI blockers: clear, open, and stuck p
 test("w643: CI is done when no check is still running, or the PR merged or closed; failures are named", () => {
   const ref = 'Final-Factory/ff-factory#205';
   assert.deepEqual(checksState({ state: 'OPEN', statusCheckRollup: [{ name: 'unit', status: 'COMPLETED', conclusion: 'SUCCESS' }, { name: 'e2e', status: 'IN_PROGRESS' }] }, ref), { done: false, text: `1 of 2 checks on ${ref} still running` });
-  assert.deepEqual(checksState({ state: 'OPEN', statusCheckRollup: [{ name: 'unit', status: 'COMPLETED', conclusion: 'SUCCESS' }, { name: 'vm', status: 'COMPLETED', conclusion: 'SKIPPED' }] }, ref), { done: true, text: `CI on ${ref} finished: all 2 checks passed or skipped` });
+  assert.deepEqual(checksState({ state: 'OPEN', statusCheckRollup: [{ name: 'unit', status: 'COMPLETED', conclusion: 'SUCCESS' }, { name: 'vm', status: 'COMPLETED', conclusion: 'SKIPPED' }] }, ref), { done: true, green: true, text: `CI on ${ref} finished: all 2 checks passed or skipped` });
   assert.match(checksState({ state: 'OPEN', statusCheckRollup: [{ name: 'unit', status: 'COMPLETED', conclusion: 'FAILURE' }] }, ref).text, /1 of 1 checks failed \(unit\)/);
   assert.equal(checksState({ state: 'MERGED' }, ref).done, true);
   assert.equal(checksState({ state: 'OPEN', statusCheckRollup: [] }, ref).done, false, 'no checks yet: they have not started');
@@ -183,7 +183,7 @@ const ROLLUP_1338 = ['docs/Lessons-Index.md freshness:SUCCESS', 'Mode-2 nightly 
 test('w829: the checks of #1338 (w814) and #1335 (w818) as they finished read as done, so their blocks held only because the read failed', () => {
   // Both PRs' rollups had every check COMPLETED (Test in editmode at 00:26Z and 00:06Z): checksState clears them at once.
   for (const ref of ['Final-Factory/FinalFactory#1338', 'Final-Factory/FinalFactory#1335']) {
-    assert.deepEqual(checksState({ state: 'OPEN', statusCheckRollup: ROLLUP_1338 }, ref), { done: true, text: `CI on ${ref} finished: all 9 checks passed or skipped` });
+    assert.deepEqual(checksState({ state: 'OPEN', statusCheckRollup: ROLLUP_1338 }, ref), { done: true, green: true, text: `CI on ${ref} finished: all 9 checks passed or skipped` });
   }
   // #1328 (w808): its editmode job hung and was cancelled after 90 minutes: done, and named as failed.
   const cancelled = checksState({ state: 'OPEN', statusCheckRollup: [{ name: 'Test in editmode', status: 'COMPLETED', conclusion: 'CANCELLED' }, { name: 'Release', status: 'COMPLETED', conclusion: 'SKIPPED' }] }, 'Final-Factory/FinalFactory#1328');
@@ -197,7 +197,7 @@ test('w829: Actions runs, the reading without Checks permission: running, green,
   assert.equal(runsState({ workflow_runs: [{ name: 'Test Runner', status: 'queued' }] }, ref).done, false);
   assert.equal(runsState({ workflow_runs: [{ name: 'Test Runner', status: 'waiting' }] }, ref).done, false, 'waiting for an approval is not finished');
   // Green: every run completed with success or skipped.
-  assert.deepEqual(runsState({ workflow_runs: [{ name: 'Lessons index freshness', status: 'completed', conclusion: 'success' }, { name: 'Test Runner', status: 'completed', conclusion: 'success' }, { name: 'Release', status: 'completed', conclusion: 'skipped' }] }, ref), { done: true, text: `CI on ${ref} finished: all 3 workflow runs passed or skipped` });
+  assert.deepEqual(runsState({ workflow_runs: [{ name: 'Lessons index freshness', status: 'completed', conclusion: 'success' }, { name: 'Test Runner', status: 'completed', conclusion: 'success' }, { name: 'Release', status: 'completed', conclusion: 'skipped' }] }, ref), { done: true, green: true, text: `CI on ${ref} finished: all 3 workflow runs passed or skipped` });
   // Red: a failure, and #1328's first attempt, cancelled at its 90-minute limit (run 37997522857, 23:38Z): both done, both named.
   assert.deepEqual(runsState({ workflow_runs: [{ name: 'Test Runner', status: 'completed', conclusion: 'failure' }] }, ref), { done: true, text: `CI on ${ref} finished: 1 of 1 workflow runs failed (Test Runner: failure)` });
   assert.deepEqual(runsState({ workflow_runs: [{ name: 'Lessons index freshness', status: 'completed', conclusion: 'success' }, { name: 'Test Runner', status: 'completed', conclusion: 'cancelled' }] }, ref), { done: true, text: `CI on ${ref} finished: 1 of 2 workflow runs failed (Test Runner: cancelled)` });

@@ -1080,6 +1080,9 @@ from the other pilots, server/mergeOnGreen.ts) is in the arm:
   resumed. A DONE refused is told back to it as any refused DONE is, which resumes it.
 - Red checks, a reading that is not green (unreadable checks, a PR merged or closed by hand), or a merge GitHub refuses (a newer
   push, a rule) unblock the request as without the pilot: the worker is resumed with why and told the report was not filed.
+- `merge_on_green` is in the tool's schema from this version on, which a machine's daemon builds (machine/agentHost.ts reads
+  server/launch.ts): a worker gets it once its daemon has updated and its process has started again. On an older one the
+  field is dropped, and the worker is only told again that it may.
 
 The resume note on a cleared CI gate says `Run ff-pr merge now (<pr>): it merges on green, or names the red run to read`; it
 said `gh pr checks`, which the wait guard refuses (w2015).
