@@ -2633,7 +2633,7 @@ test('w2051: a person’s list_work list shows their own waiting card brief and 
   // w2051's measure: the brief list is well under the whole one (the w1868 card text is most of a waiting list).
   const whole = (await call(dispatcher().info, 'list_work', { state: 'waiting' })).text;
   assert.ok(list.length < whole.length * 0.6, `${list.length} characters against ${whole.length}`);
-  for (const s of store.sessions.values()) if (s.kind === 'agent') env.agents.cancelWake(s.id);
+  for (const s of store.sessions.values()) if (s.kind === 'worker') env.agents.cancelWake(s.id);
 });
 
 test('w1868: every ask_person question is an open card until it is answered, asked again, closed or refused', async (t) => {
