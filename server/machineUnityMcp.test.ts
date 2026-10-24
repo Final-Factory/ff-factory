@@ -184,4 +184,7 @@ test('machine unity mcp: the portal asks for it for sandbox agents on a machine;
   // w1480: the C# language server's diagnostics are noise in a sandbox; a worker starts with it off, and the SDK gets it as --settings
   assert.deepEqual(inSb.settings, { enabledPlugins: { 'csharp-lsp@claude-plugins-official': false } });
   assert.deepEqual(buildOptions(inSb, {}).settings, { enabledPlugins: { 'csharp-lsp@claude-plugins-official': false } });
+  // w2002: no <total_tokens> countdown after every tool result; the process gets the switch
+  assert.equal(inSb.env?.CLAUDE_CODE_TOTAL_TOKENS_REMINDER, 'off');
+  assert.equal(buildOptions(inSb, {}).env?.CLAUDE_CODE_TOTAL_TOKENS_REMINDER, 'off');
 });
