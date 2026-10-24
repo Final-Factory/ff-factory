@@ -17,6 +17,8 @@ interface FakeEditor {
   laterCompiling?: boolean;
   /** The bridge does not answer. */
   noBridge?: boolean;
+  /** w1829: the save-and-quit's answer is lost; 'quits': it quit before the answer went out, 'runs': it is still on. */
+  answerLost?: 'quits' | 'runs';
   /** Saving leaves this scene dirty. */
   staysDirty?: string;
   inputAgoMs?: number;
@@ -48,6 +50,11 @@ function fakeEditor(e: FakeEditor) {
         if (e.staysDirty) return `skip: ${e.staysDirty} still has unsaved changes after saving`;
         quitAsked = true;
         if (!e.stuck && !e.noUpdates) up = false;
+        if (e.answerLost === 'quits') return 'the bridge closed the connection';
+        if (e.answerLost === 'runs') {
+          up = true;
+          return 'the editor did not answer in time (compiling, or its main thread is busy)';
+        }
         return `quitting saved=${was.join(';')}`;
       }
       if (code === EXIT_NOW_SNIPPET) {
@@ -154,6 +161,24 @@ test('w1829: asked again while it began compiling: left running, its quit still 
   assert.equal(r.closed, false);
   assert.equal(r.quitting, true);
   assert.match(r.text, /would not quit then: compiling or importing; left running, never killed$/);
+  assert.equal(ed.up(), true);
+});
+
+test('w1829: an editor that quit before its answer went out is closed (its mark stays, so the turn reopens it)', async () => {
+  const ed = fakeEditor({ playing: false, dirty: ['Assets/Scenes/Look.unity'], answerLost: 'quits' });
+  const r = await idleCloseEditor(ed.d, 0);
+  assert.equal(r.closed, true, r.text);
+  assert.match(r.text, /^closed \(its answer was lost as it quit: the bridge closed the connection; /);
+  assert.deepEqual(ed.saved, ['Assets/Scenes/Look.unity'], 'it saved before it quit');
+  assert.ok(!ed.calls.some((c) => c.code === EXIT_NOW_SNIPPET), 'not asked again: it is gone');
+});
+
+test('w1829: no answer and still running after the wait: skipped as before, never killed', async () => {
+  const ed = fakeEditor({ playing: false, dirty: [], answerLost: 'runs' });
+  const r = await idleCloseEditor(ed.d, 0);
+  assert.equal(r.closed, false);
+  assert.equal(r.quitting, undefined);
+  assert.match(r.text, /^skipped: the editor did not take the save and quit \(the editor did not answer in time/);
   assert.equal(ed.up(), true);
 });
 

@@ -324,7 +324,9 @@ w1832), the daemon:
   One that compiles or imports, or has an untitled scene with unsaved changes, is left and tried again every 30 s; one
   that took the quit and still runs 15 s later (an unfocused, idle editor does not update, so its delayed quit waits:
   w1829, BEAST 2026-10-24, marked closed at 03:06Z, quit at 03:15Z) is asked again to quit inside the bridge's own call
-  (`EXIT_NOW_SNIPPET`, docs/live-view.md "Idle editors close"); one that does not quit is left running. Nothing is killed, and the editor watch never takes an editor it told to quit for
+  (`EXIT_NOW_SNIPPET`, docs/live-view.md "Idle editors close"); one whose answer was lost because it quit first (w1829,
+  BEAST 2026-10-24 05:54Z) counts as closed once its process is gone, so its mark stays and the turn's end starts it
+  again; one that does not quit is left running. Nothing is killed, and the editor watch never takes an editor it told to quit for
   hung while it goes quiet (`machine/unity.ts` `expectExit`, kept per editor pid). One that comes up during the turn (a
   start that did not queue) is closed too. The sandbox is marked (`benchClosed` in `sandboxes.json`, with the ticket and
   the editor's pids) before the quit is sent, and its line in `list_sandboxes`, `unity status` and the sandbox panel says
