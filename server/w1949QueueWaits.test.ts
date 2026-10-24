@@ -6,7 +6,8 @@ import path from 'node:path';
 import { benchLockDir } from '../machine/benchLock.ts';
 import { benchQueueDir } from '../machine/benchQueue.ts';
 import { readBenchState } from '../machine/benchState.ts';
-import { queueWaitsAll } from '../shared/queueWaits.ts';
+import { UnitySlots } from '../machine/unitySlots.ts';
+import { editorSlotRefusal, queueWaitsAll } from '../shared/queueWaits.ts';
 import { workLive, type WorkLiveFacts } from '../shared/workState.ts';
 import { liveLine } from './work.ts';
 import type { BenchState, MachineStats, SessionInfo, UnitySlotsReport, WorkItem } from '../shared/types.ts';
@@ -164,6 +165,9 @@ test('w1949: a Unity slot wait and a queued sandbox editor start show Blocked wi
   assert.equal(slot.state, 'blocked');
   assert.deepEqual(slot.waitsOn, ['a Unity editor slot on lothdesktop (3 of 3 in use, next in queue)']);
   assert.match(slot.why, /^hhhh8888 waits on lothdesktop for 1 Unity slot for "build host player", waiting since 22:56 UTC: needs 1, 0 free/);
+  // Stopped with only a check-in while that run waits for its slot: Blocked too.
+  const stoppedSlot = session('hhhh8888', { status: 'idle', wakeAt: new Date(NOW + 15 * 60_000).toISOString(), wakeNote: 'build done?' });
+  assert.deepEqual(live(item('w1898', { sessionIds: ['hhhh8888'] }), [stoppedSlot], { lothdesktop: { unity } }).waitsOn, ['a Unity editor slot on lothdesktop (3 of 3 in use, next in queue)']);
 
   // Its sandbox editor's start waits in the bench queue behind a timed run; the worker stopped with a check-in.
   const bench: BenchState = {
@@ -183,4 +187,38 @@ test('w1949: a Unity slot wait and a queued sandbox editor start show Blocked wi
   assert.equal(live(item('w1949', { sessionIds: ['iiii9999'], needs: 'agent' }), [session('iiii9999', checkIn)], { lothdesktop: { bench } }).state, 'working');
   // Another sandbox's editor start is no wait of this worker's.
   assert.equal(live(item('w1891', { sessionIds: ['iiii9999'] }), [session('iiii9999', { ...checkIn, machineSandbox: 'slot1' })], { lothdesktop: { bench } }).state, 'working');
+});
+
+test('w1949: a worker stopped with a check-in after its editor start was refused for want of a Unity slot shows Blocked on the slot, Working once one is free', async (t) => {
+  // The refusal as the machine's slot gate words it (RAM at its cap: no launch is granted), then its report.
+  let ram = 97;
+  const slots = new UnitySlots({ dir: tmp(t), platform: 'win32', procs: async () => [], alive: () => true, now: () => NOW, limit: () => 3, places: () => [], ramPct: () => ram, ramLimitPct: 90 });
+  const refusal = (await slots.startRefusal('sandbox:slot4')) ?? '';
+  assert.match(refusal, /^not started: RAM 97% used/);
+  const why = editorSlotRefusal(refusal)!;
+  assert.match(why, /^RAM 97% used; new Unity launches wait below 90%/);
+  assert.equal(editorSlotRefusal('not started: disk space is low on V:/ffw; new editors wait until space is freed'), undefined, 'not a slot wait');
+
+  const refused = { machine: 'lothdesktop', sandbox: 'slot4', at: ago(4), why };
+  const checkIn = { status: 'idle' as const, machineSandbox: 'slot4', wakeAt: new Date(NOW + 10 * 60_000).toISOString(), wakeNote: 'start the editor again', editorRefused: refused };
+  const w = item('w1891', { sessionIds: ['jjjj0000'] });
+  const full = live(w, [session('jjjj0000', checkIn)], { lothdesktop: { unity: slots.report() } });
+  assert.equal(full.state, 'blocked');
+  assert.deepEqual(full.waitsOn, ['a Unity editor slot on lothdesktop (0 of 3 in use, RAM 97%, new launches wait below 90%)']);
+  assert.match(full.why, /^jjjj0000 waits for a Unity slot on lothdesktop: its start of sandbox slot4's editor, refused at 22:56 UTC \(RAM 97% used\); its check-in tries again/);
+  assert.match(liveLine(full), /^Blocked on a Unity editor slot on lothdesktop/);
+
+  // Every slot in use, by the report's counts: the same.
+  const busy: UnitySlotsReport = { ...slots.report()!, ramPct: 40, used: 3 };
+  assert.deepEqual(live(w, [session('jjjj0000', checkIn)], { lothdesktop: { unity: busy } }).waitsOn, ['a Unity editor slot on lothdesktop (3 of 3 in use)']);
+  // A slot frees: Working (its check-in comes to start it).
+  ram = 40;
+  await slots.tick();
+  assert.equal(live(w, [session('jjjj0000', checkIn)], { lothdesktop: { unity: slots.report() } }).state, 'working');
+  // Mid-turn (it does what needs no editor meanwhile), no refusal on it, or work that needs no editor: Working.
+  assert.equal(live(w, [session('jjjj0000', { machineSandbox: 'slot4', editorRefused: refused })], { lothdesktop: { unity: busy } }).state, 'working');
+  assert.equal(live(w, [session('jjjj0000', { ...checkIn, editorRefused: undefined })], { lothdesktop: { unity: busy } }).state, 'working');
+  assert.equal(live(item('w1949', { sessionIds: ['jjjj0000'], needs: 'agent' }), [session('jjjj0000', checkIn)], { lothdesktop: { unity: busy } }).state, 'working');
+  // Another machine full is no wait of its.
+  assert.equal(live(w, [session('jjjj0000', checkIn)], { beast: { unity: busy } }).state, 'working');
 });

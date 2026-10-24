@@ -719,8 +719,12 @@ without one means it is off or failing, worth a person's look.
   daemon's ticket, which names the sandbox only) is Blocked on it while its worker is between turns with a check-in; mid-turn
   it does what needs no editor and is Working. The wait comes from the queue's files only, never from what the worker says;
   the next stats report after the grant shows it Working again. A request whose busy workers do not all wait is Working.
-  The stored status is untouched, so the cleanup's stalled rules and the Queued WRONG flag never see these. Tests:
-  `w1949QueueWaits.test.ts`.
+  The stored status is untouched, so the cleanup's stalled rules and the Queued WRONG flag never see these. A `unity
+  start` the machine's Unity slots refused leaves no queue entry (the worker is told to wake_me and try again), so the portal
+  keeps the refusal on the worker's session (`SessionInfo.editorRefused`, cleared by a start that goes through and by its
+  next turn): while it is stopped with that check-in and its daemon still reports no slot free (every slot in use, launches
+  waiting, or RAM at its cap), work that needs an editor reads "Blocked on a Unity editor slot on lothdesktop (3 of 3 in
+  use)", and Working once a slot frees. Tests: `w1949QueueWaits.test.ts`.
 - **Stalled is only what nothing will move** (w1841; Ben, 2026-10-23, on six requests his Stalled filter showed: "why are
   these stalled?"). `shared/workState.ts` `workLive` reads these before it says Stalled:
   - a worker an urgent release's build paused (`server/buildPlans.ts` `pausedFor`: asked mid-turn, or paused between turns

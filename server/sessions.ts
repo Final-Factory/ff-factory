@@ -468,7 +468,8 @@ export class AgentSession implements SessionHandle {
     // A message after a compaction: the turn that ends next is this message's, not the compaction's (w535).
     this.compactTurn = undefined;
     if (opens) this.costAtTurnOpen = this.info.costUsd;
-    this.update({ status: 'running', statusDetail: undefined, ...(opens ? { turnOpenSince: new Date().toISOString() } : {}) });
+    // w1949: a refused editor start (SessionInfo.editorRefused) is the wait of the stop it ended; a new turn tries again.
+    this.update({ status: 'running', statusDetail: undefined, ...(opens ? { turnOpenSince: new Date().toISOString(), editorRefused: undefined } : {}) });
     if (opens) this.store.flush?.();
     return uuid;
   }

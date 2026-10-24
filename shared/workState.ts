@@ -511,7 +511,12 @@ function queueWaitOf(s: SessionInfo, f: Pick<WorkLiveFacts, 'queueWaits'>, edito
   if (own || !editor) return own;
   const [m, slot] = (s.machineId ?? '').split('/').map((x) => x.trim().toLowerCase());
   const sandbox = (s.machineSandbox ?? slot)?.trim().toLowerCase();
-  return m && sandbox ? waits.find((q) => q.kind === 'editor' && q.machine.toLowerCase() === m && q.sandbox?.toLowerCase() === sandbox) : undefined;
+  const queued = m && sandbox ? waits.find((q) => q.kind === 'editor' && q.machine.toLowerCase() === m && q.sandbox?.toLowerCase() === sandbox) : undefined;
+  if (queued) return queued;
+  // Its editor start was refused for want of a slot (SessionInfo.editorRefused), and its machine still has none free.
+  const r = s.editorRefused;
+  const full = r && waits.find((q) => q.kind === 'full' && q.machine.toLowerCase() === r.machine.toLowerCase());
+  return full && r ? { ...full, kind: 'refused', session: s.id, sandbox: r.sandbox, what: `its start of sandbox ${r.sandbox}'s editor, refused at ${r.at.slice(11, 16)} UTC (${r.why.split(';')[0].slice(0, 120)})` } : undefined;
 }
 
 /** Blocked on a queue (w1949): "Blocked on the exclusive bench lock on lothdesktop (held by w1908 / t00000911, 2 ahead in queue)". */
@@ -522,6 +527,8 @@ function queueLive(s: SessionInfo, q: QueueWait): WorkLive {
       ? `${s.id} waits on ${q.machine} for ${q.what}; ${back} the slot is granted`
       : q.kind === 'editor'
         ? `its sandbox ${q.sandbox}'s editor start waits in ${q.machine}'s bench queue for ${q.what}; the editor starts by itself at its turn, and ${s.id}'s check-in brings it back`
+        : q.kind === 'refused'
+          ? `${s.id} waits for a Unity slot on ${q.machine}: ${q.what}; its check-in tries again, and it shows Working again by itself once ${q.machine} has a slot free`
         : `${s.id} waits in ${q.machine}'s bench queue for ${q.what}; ${back} the ticket is granted`;
   return { state: 'blocked', why, waitsOn: [q.on] };
 }
