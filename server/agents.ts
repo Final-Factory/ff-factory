@@ -75,13 +75,13 @@ import { deleteMemoryFile, MEMORY_TRASH_DAYS, memoryDirFor, memoryGuard, memoryK
 import { ownerDataReads, portalSecretRules, secretFilesOf, secretReadGuard, type SecretRules } from './secretGuard.ts';
 import { readableConfigFiles } from './configMigration.ts';
 import { conditionalLine, HELD_MARK } from '../shared/conditional.ts';
-import { FFBOX_CONVERSATION_DEFAULT_TURNS, FFBOX_REPORTS_DEFAULT, LIST_WORK_LOG_TAIL, SANDBOX_DETAIL_CHARS, SESSION_REQUESTS_TOP, clip, keyList, logLines } from './toolOutput.ts';
+import { FFBOX_CONVERSATION_DEFAULT_TURNS, FFBOX_REPORTS_DEFAULT, LIST_CARD_NOTE, LIST_WORK_LOG_TAIL, SANDBOX_DETAIL_CHARS, SESSION_REQUESTS_TOP, clip, keyList, logLines } from './toolOutput.ts';
 import { SpendStore, buildReport, costLine, renderReport, renderRequest, renderSession } from './spend.ts';
 import { dataGuardSettings, footprint, gzipRatioCached, renderFootprint } from './dataGuard.ts';
 import { REACTION_MEANINGS, REPLY_MARK } from '../shared/replies.ts';
 import { ASK_TOOL, CHAT_MORE_LABEL, DESCRIPTION_CHARS, LABEL_CHARS, LABEL_INPUT_CHARS, MAX_OPTIONS, MEDIA_CHARS, MIN_OPTIONS, QUESTION_CHARS, splitMedia } from '../shared/ask.ts';
-import { WAIT_LINE_CHARS, summaryText, waitSummary } from '../shared/waitSummary.ts';
-import { waitingItemOf } from '../shared/waiting.ts';
+import { WAIT_LINE_CHARS, summaryBrief, summaryText, waitSummary } from '../shared/waitSummary.ts';
+import { isMyMove, waitingItemOf } from '../shared/waiting.ts';
 import { checkAsks } from '../shared/questionCard.ts';
 import { DECISIONS, attachmentsNote, describeItem, handoverNote, isFor, isOpen, ledgerOrder, names, overlapLine, priorityThenAge, requestAsFiled, requestLineRule, startProblem } from './work.ts';
 import { minPriorityText, needsBuild, needsLive, needsOf, needsTimed, pairText, PAIR_HOLD_MS, PAIR_MAX_LEGS, TIMED_HOLD_MS } from '../shared/capacity.ts';
@@ -5889,18 +5889,27 @@ ${fp}`;
     const tail = counts.length ? [`Now: ${counts.join(', ')}${matching.length > items.length ? ` (${items.length} of ${matching.length} shown)` : ''}.`] : [];
     // A person's orchestrator reads the shorter line (w1866, LIST_LINE_TEXT); its cost and the rest are in list_work id.
     const short = ctx.role !== 'dispatcher';
-    return [...items.map((w) => describeItem(w, (id) => o.workerState(id), live.get(w.id), short ? '' : costLine(this.spend, w.id), this.waitSummaryOf(w, live.get(w.id)), short)), ...tail].join('\n');
+    // w2051: and the brief card, whole only in list_work id.
+    const brief = short ? { userId: owner?.userId ?? '', displayName: owner?.displayName ?? '' } : undefined;
+    const waits = items.some((w) => live.get(w.id)?.state === 'waiting');
+    return [...items.map((w) => describeItem(w, (id) => o.workerState(id), live.get(w.id), short ? '' : costLine(this.spend, w.id), this.waitSummaryOf(w, live.get(w.id), brief), short)), ...tail, ...(brief && waits ? [LIST_CARD_NOTE] : [])].join('\n');
   }
 
   /**
    * A waiting request's card as text (w1868, shared/waitSummary.ts): what it is, who acts and since when, the question whole,
    * its answers with the recommended one, its media counted and what follows the answer, indented under its list_work line.
-   * Empty for a request that waits on nobody.
+   * Empty for a request that waits on nobody. `brief` (a person's list_work list, w2051): the reader's own move as a brief
+   * card, another person's move in one line (summaryBrief).
    */
-  waitSummaryOf(w: WorkItem, l: WorkLive | undefined): string {
+  waitSummaryOf(w: WorkItem, l: WorkLive | undefined, brief?: { userId: string; displayName: string }): string {
     if (!l || l.state !== 'waiting') return '';
-    const reviewers = this.orchestrators.reviewers().map((r) => r.displayName).join(' or ');
-    return summaryText(waitSummary(waitingItemOf(w, l), { session: (id) => this.store.sessions.get(id), reviewers }), Date.now(), '    ');
+    const ops = this.orchestrators.reviewers();
+    const reviewers = ops.map((r) => r.displayName).join(' or ');
+    const item = waitingItemOf(w, l);
+    const s = waitSummary(item, { session: (id) => this.store.sessions.get(id), reviewers });
+    if (!brief) return summaryText(s, Date.now(), '    ');
+    const reviewer = ops.some((r) => r.userId.toLowerCase() === brief.userId.toLowerCase());
+    return summaryBrief(s, Date.now(), '    ', !brief.userId || isMyMove(w, l, item.ask, { ...brief, reviewer }));
   }
 
   /** The logins, for the briefs: "Ben (user id ben, owner), Lothsahn (user id lothsahn, member)". */

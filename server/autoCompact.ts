@@ -78,9 +78,17 @@ export const COMPACT_HOLD = 'its conversation is being compacted';
 /** How long after a turn's end the check waits, so a message sent with the turn's end goes first. */
 export const SETTLE_MS = 2_000;
 
+/**
+ * What a coordinator's summary leaves out (w2051): its brief, CLAUDE.md and the MEMORY.md index are loaded again after every
+ * compaction, and list_work id shows a waiting card whole, so a summary that repeats them pays for them twice. Lothsahn's
+ * orchestrator's summaries were 6-7k tokens and the dispatcher's 10-12k (portal coordinator_context, 2026-10-24, estimated).
+ */
+export const LEAN_SUMMARY =
+  'Leave out what your brief, CLAUDE.md and memory already say (standing rules, how the tools work) and the full text of waiting cards and questions (list_work id has them): one line per open request, its question in a few words.';
+
 /** What a person's orchestrator keeps across an automatic compaction: Claude Code's /compact focus. */
 export const PERSONAL_FOCUS =
-  'Automatic compaction by FF Factory. Keep, exactly: every request still open (its wNNN id, title, state, the worker session id, its sandbox or machine, PR numbers, and what it waits on); every question you asked your person that they have not answered, and every question of theirs you have not answered yet; decisions, approvals and holds, each with the person who gave it; timers, heartbeat and wake_me check-ins you set, and why; anything you promised to report or check. Keep every id with what it is. Finished work: one line each at most. Your memory folder is unchanged, and list_work has the ledger.';
+  `Automatic compaction by FF Factory. Keep, exactly: every request still open (its wNNN id, title, state, the worker session id, its sandbox or machine, PR numbers, and what it waits on); every question you asked your person that they have not answered, and every question of theirs you have not answered yet; decisions, approvals and holds, each with the person who gave it; timers, heartbeat and wake_me check-ins you set, and why; anything you promised to report or check. Keep every id with what it is. Finished work: one line each at most. Your memory folder is unchanged, and list_work has the ledger. ${LEAN_SUMMARY}`;
 
 /** What a worker keeps across an automatic compaction (w1469). */
 export const WORKER_FOCUS =
@@ -189,7 +197,7 @@ export function workerCompactionDue(info: Pick<SessionInfo, 'contextTokens' | 'l
 
 /** What the dispatcher keeps across an automatic compaction. */
 export const DISPATCHER_FOCUS =
-  'Automatic compaction by FF Factory. Keep, exactly: every open or queued request (its wNNN id, title, who asked, its state, the worker session id and sandbox or machine, PR numbers, and what it waits on: a slot, a check, a person); decisions, approvals, holds and priorities, each with the person who gave it; deploy and release checks in flight; timers you set and why; capacity facts you still rely on (which machine or slot is out, and since when). Keep every id with what it is. Finished work: one line each at most. Your memory folder is unchanged, and list_work has the ledger.';
+  `Automatic compaction by FF Factory. Keep, exactly: every open or queued request (its wNNN id, title, who asked, its state, the worker session id and sandbox or machine, PR numbers, and what it waits on: a slot, a check, a person); decisions, approvals, holds and priorities, each with the person who gave it; deploy and release checks in flight; timers you set and why; capacity facts you still rely on (which machine or slot is out, and since when). Keep every id with what it is. Finished work: one line each at most. Your memory folder is unchanged, and list_work has the ledger. ${LEAN_SUMMARY}`;
 
 export interface AutoCompactSettings {
   atTokens: number;
