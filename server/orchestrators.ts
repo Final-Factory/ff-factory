@@ -7,7 +7,7 @@ import path from 'node:path';
 import { band, concepts, DEFAULT_THRESHOLDS, entryMatch, indexOf, type MatchThresholds } from './boardMatch.ts';
 import { LOOP_GUARD_RANGE, type Config } from './config.ts';
 import type { Store } from './store.ts';
-import { blockerName, blockerProblem, blockerVerdict, gateSetter, newestFirst, RESUME_SWEEP_MS, gatesName, gatesOf, MAX_GATES, prRefOf, sameGate, type BlockerFacts } from '../shared/blockers.ts';
+import { blockerName, blockerProblem, blockerVerdict, gateSetter, latestWorker, newestFirst, RESUME_SWEEP_MS, gatesName, gatesOf, MAX_GATES, prRefOf, sameGate, type BlockerFacts } from '../shared/blockers.ts';
 import { COORD_TURN_MAX_CALLS, COORD_TURN_MAX_TOKENS_READ, type OptionsFactory, type SessionHandle, type SessionManager, type TurnBudgetHit } from './sessions.ts';
 import { actingFor, asRequester, type Identity } from './identity.ts';
 import {
@@ -1306,6 +1306,11 @@ export class Orchestrators {
     w.sessionIds = w.sessionIds.filter((x) => x !== sessionId);
     // w1983: remembered, so the worker's sandbox is not pinned by the check-in it set for this request (Agents.workOver).
     w.movedOff = { ...(w.movedOff ?? {}), [sessionId]: this.now().toISOString() };
+    // w2079: its gate resumes go with it, or the sweep resumes the worker it left (and a resume's move moved it again).
+    if (w.gateResumes?.some((r) => r.session === sessionId)) {
+      const left = w.gateResumes.filter((r) => r.session !== sessionId);
+      w.gateResumes = left.length ? left : undefined;
+    }
     if (w.links?.[sessionId]) {
       const { [sessionId]: _gone, ...rest } = w.links;
       w.links = rest;
@@ -3104,6 +3109,16 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       return `${w.id} is blocked again on ${name}; the resume is kept and handed back when that clears`;
     }
     if (!isOpen(w) && w.status !== 'stalled') return `${w.id} is ${w.status}`;
+    // w2079: a worker its request was moved off does not take it up again beside the new one. eca53c32 was moved off w1903 at
+    // 19:34Z on 2026-10-24 (to c62e5ad1 on m5/slot3); the sweep's resume reached it at 19:40Z, and both pushed to PR #2369.
+    if (w.movedOff?.[sessionId] && !w.sessionIds.includes(sessionId)) {
+      const left = (w.gateResumes ?? []).filter((r) => r.session !== sessionId);
+      if (left.length !== (w.gateResumes ?? []).length) {
+        w.gateResumes = left.length ? left : undefined;
+        this.store.putWork(w);
+      }
+      return `${w.id} was moved off worker ${sessionId} at ${w.movedOff[sessionId]}; it is with ${latestWorker(w) ?? 'no worker yet'} now`;
+    }
     return undefined;
   }
 
@@ -3522,6 +3537,11 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
   /** A line on a timed leg FF Factory could not start itself (w2055). */
   /** A line in a request's log, stamped (w2085: a worker's decided_override on waiting_on_person). */
   noteOnRequest(id: string, line: string): void {
+    this.noteTimedLegStart(id, line);
+  }
+
+  /** A line in request `id`'s log about a resume's move that did not happen (w2079, Agents.leaveToOwners). */
+  noteMove(id: string, line: string): void {
     this.noteTimedLegStart(id, line);
   }
 

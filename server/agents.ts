@@ -2763,7 +2763,9 @@ export class Agents {
       return true;
     }
     if (now - (Date.parse(q.at) || now) < MOVE_AFTER_MS || info.pendingPermissions.length || isMidTurn(info)) return undefined;
-    const reqs = this.openWorkOf(info);
+    const { reqs, owned, gone } = this.movableWorkOf(info);
+    if (owned.length || gone.length) this.leaveToOwners(info, owned, gone, hold, !reqs.length);
+    if (!reqs.length && (owned.length || gone.length)) return true;
     const d = moveDecision(this.moveFacts(info, reqs));
     if (!('move' in d)) {
       const [kept, why] = 'stay' in d ? [stayLine(hold, d.stay), `stays: ${d.stay}`] : [`${hold}; ${NONE_MARK}: ${d.none}`, `waits: ${d.none}`];
@@ -2779,6 +2781,43 @@ export class Agents {
     console.log(`room move: worker ${info.id} on ${info.machineId}/${info.machineSandbox} (${reqs.map((w) => w.id).join(', ')}) moves to ${d.move.to} ${waited} s after its message was queued: ${hold}; ${d.move.why}`);
     void this.moveForRoom(info, reqs, d.move.to, d.move.why, hold, entry, q).finally(() => this.roomMoving.delete(info.id));
     return true;
+  }
+
+  /** Whether worker `id`'s work is being moved to another computer now (w2046): the resume sweep does not resume it then (w2079). */
+  isMoving(id: string): boolean {
+    return this.roomMoving.has(id);
+  }
+
+  /**
+   * The open requests a resume's move takes along (w2079), and the ones it must not: `gone`, those it was moved off already
+   * (its title still names one: workIdsOf), and `owned`, those another live worker carries (otherWorkerOn; never a pair run's
+   * other leg). At 19:23Z on 2026-10-24 w1903's worker d5ab39da was moved twice (to m5/slot3, then biscuit/slot2 a minute
+   * later) while eca53c32 owned the request: two copies started where none should have.
+   */
+  private movableWorkOf(info: SessionInfo): { reqs: WorkItem[]; owned: WorkItem[]; gone: WorkItem[] } {
+    const out = { reqs: [] as WorkItem[], owned: [] as WorkItem[], gone: [] as WorkItem[] };
+    for (const w of this.openWorkOf(info)) {
+      if (!w.sessionIds.includes(info.id) && w.movedOff?.[info.id]) out.gone.push(w);
+      else if (!w.pair?.started?.legs.some((l) => l.session === info.id) && this.otherWorkerOn(w, info)) out.owned.push(w);
+      else out.reqs.push(w);
+    }
+    return out;
+  }
+
+  /**
+   * A waiting resume's requests that do not move with it (w2079, movableWorkOf): each one another worker carries is taken off
+   * this worker, and when nothing is left to move (`all`) its message is not delivered, its check-in goes and it is retired.
+   */
+  private leaveToOwners(info: SessionInfo, owned: WorkItem[], gone: WorkItem[], hold: string, all: boolean) {
+    const at = `${info.machineId}/${info.machineSandbox}`;
+    for (const w of owned) this.orchestrators.moveOff(w, info.id, `not moved (w2079): ${this.otherWorkerOn(w, info)}, so no moved copy starts (${hold})`);
+    for (const w of gone) this.orchestrators.noteMove(w.id, `a message for its old worker ${info.id} on ${at} did not move it again (w2079): it was moved off ${w.movedOff![info.id]}`);
+    const ids = [...owned, ...gone].map((w) => w.id).join(', ');
+    console.log(`room move: worker ${info.id} on ${at} (${ids}) not moved (w2079): ${[...owned.map((w) => `${w.id}: ${this.otherWorkerOn(w, info)}`), ...gone.map((w) => `${w.id}: moved off it already`)].join('; ')}`);
+    if (!all) return;
+    this.store.append(info.id, { kind: 'system', text: `Not moved (w2079): its requests (${ids}) are with other workers now, so the message that waited for it was not delivered and nothing starts for it elsewhere.` });
+    this.waker.cancel(info.id);
+    this.orchestrators.retireWhenFree(info.id);
   }
 
   /** What moveDecision reads of a worker whose resume waits for room (w2046). */

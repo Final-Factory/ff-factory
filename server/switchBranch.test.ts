@@ -42,6 +42,26 @@ test('switch: pushes stranded commits, then creates the new branch from origin/m
   assert.equal(r.git(r.work, 'log', '-1', '--format=%s'), 'base');
 });
 
+test('w2079: commits whose push another worker\'s push refuses go to a backup branch, and the switch goes on', async (t) => {
+  // m5/slot3 on 2026-10-24: a duplicate of w1903's worker left 41 commits on w1903-station-stop-circuits, the owner pushed
+  // the branch meanwhile, and every switch there failed on "pushing w1903-station-stop-circuits failed ... fetch first".
+  const r = repos();
+  t.after(r.cleanup);
+  r.git(r.work, 'push', '-q', '-u', 'origin', 'sandbox/a');
+  const other = path.join(r.root, 'other');
+  execFileSync('git', ['clone', '-q', '-b', 'sandbox/a', r.origin, other], { stdio: 'pipe' });
+  r.git(other, 'commit', '-q', '--allow-empty', '-m', 'the owner\'s work');
+  r.git(other, 'push', '-q');
+  r.git(r.work, 'commit', '-q', '--allow-empty', '-m', 'the duplicate\'s work');
+  const sha = r.git(r.work, 'rev-parse', '--short=10', 'HEAD');
+  const res = await switchBranch({ dir: r.work, branch: 'w2073-belts' });
+  assert.equal(res.to, 'w2073-belts');
+  assert.match(res.notes.join('; '), new RegExp(`its 1 unpushed commit\\(s\\) were pushed to the backup branch ff-backup/sandbox/a-${sha}, not to sandbox/a; created w2073-belts`));
+  assert.equal(r.git(r.origin, 'log', '-1', '--format=%s', `ff-backup/sandbox/a-${sha}`), 'the duplicate\'s work', 'kept on origin');
+  assert.equal(r.git(r.origin, 'log', '-1', '--format=%s', 'sandbox/a'), 'the owner\'s work', 'the owner\'s branch is untouched');
+  assert.equal(r.git(r.work, 'branch', '--show-current'), 'w2073-belts');
+});
+
 test('switch: tracks a branch that only exists on origin; fast-forwards a local one that lags', async (t) => {
   const r = repos();
   t.after(r.cleanup);

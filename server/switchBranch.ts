@@ -4,6 +4,11 @@ import { restoreCommittedBytes } from './committedBytes.ts';
 
 const ENV = { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' };
 const SHARED = /^(master|main|develop)$/;
+/** git's refusal of a push that is not a fast-forward of the remote branch ("fetch first", "non-fast-forward"). */
+const REJECTED = /\[rejected\][^\n]*\((fetch first|non-fast-forward)\)|Updates were rejected because/;
+
+/** The backup branch a switch pushes a branch's commits to when its own push is refused (w2079). Exported for tests. */
+export const backupBranch = (from: string, sha: string) => `ff-backup/${from}-${sha}`;
 
 export interface SwitchResult {
   from: string;
@@ -69,8 +74,17 @@ export async function switchBranch(opts: {
     const unpushed = Number((await must(dir, ['rev-list', '--count', 'HEAD', '--not', '--remotes'], 'counting unpushed commits')).trim()) || 0;
     if (unpushed > 0) {
       if (SHARED.test(from)) throw new Error(`${from} has ${unpushed} commit(s) that are on no remote. Pushing ${from} is a decision for a person; push or move them yourself, then switch.`);
-      await must(dir, ['push', '-u', 'origin', `${from}:${from}`], `pushing ${from}`, 5 * 60_000, opts.env);
-      notes.push(`pushed ${unpushed} unpushed commit(s) of ${from} first`);
+      const pushed = await git(dir, ['push', '-u', 'origin', `${from}:${from}`], 5 * 60_000, opts.env);
+      if (pushed.code === 0) notes.push(`pushed ${unpushed} unpushed commit(s) of ${from} first`);
+      else if (REJECTED.test(pushed.stderr)) {
+        // w2079: another worker pushed the branch meanwhile (m5/slot3 kept 41 commits of a duplicate of w1903's worker on
+        // w1903-station-stop-circuits, and every switch there was refused). The commits go to a backup branch of their own:
+        // kept on origin, never merged into the owner's branch, and the switch goes on.
+        const sha = (await must(dir, ['rev-parse', '--short=10', 'HEAD'], 'reading HEAD')).trim();
+        const backup = backupBranch(from, sha);
+        await must(dir, ['push', 'origin', `HEAD:refs/heads/${backup}`], `pushing ${from}'s commits to ${backup}`, 5 * 60_000, opts.env);
+        notes.push(`${from} on origin has commits this one lacks (another worker pushed it), so its ${unpushed} unpushed commit(s) were pushed to the backup branch ${backup}, not to ${from}`);
+      } else throw new Error(`pushing ${from} failed: ${(pushed.stderr || pushed.stdout).trim().split('\n').slice(-3).join(' ')}`);
     }
   }
 
