@@ -412,6 +412,16 @@ Before the pilot (beast, 2026-10-17..24, 135 Opus 5.5 worker sessions, measured 
 cache-read tokens and $18.79 at list price a session (median $10.45), 1.93 compactions a session at 242k on average; in the 40
 calls after a compaction 1.80 re-reads and 13.1 repeated commands (2.37 and 18.3 in the 40 before it).
 
+### Shell output over 10,000 characters goes to a file (w2002)
+
+A worker's shell results are 24% of what its later calls re-read (beast, 2026-10-17..24, each result's characters times the
+calls after it before the next compaction, measured). Claude Code's `bashOutputMaxChars` (default 30,000) is how much of a
+command's output the model gets inline; past it the whole output is saved to a file and the model gets a preview of about 2,200
+characters with the path. Workers run with 10,000 (`WORKER_BASH_OUTPUT_MAX_CHARS`, their `--settings`). If nothing saved were read
+back, that cuts 3.7% of all context tokens (8,000 would cut 5.1%, 15,000 1.5%; measured on the same week, with the preview's
+measured median). 1% of results pass 12,900 characters, and of the 109 outputs saved past 30,000 in 14 days, 10 were read back
+within the next few steps (measured).
+
 ## Model calls per session (w1478)
 
 lothsahn, 2026-10-18: "why are there 200 calls at all? Typically you ask a worker to do something and it responds back. Why is
