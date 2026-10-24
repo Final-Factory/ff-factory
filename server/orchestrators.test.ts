@@ -1196,6 +1196,38 @@ test('w343: "Please diagnose this" is not every diagnosis (the text match that h
   assert.equal(a.verdict, 'clear', JSON.stringify(a));
 });
 
+test('w2044: board_check works out each request\'s concepts once, and again only when its text changes', (t) => {
+  const { store, o } = setup(t);
+  const now = new Date().toISOString();
+  const item = (i: number, brief: string) => ({
+    id: `w${100 + i}`,
+    title: i === 7 ? 'Conveyor belts jam at the splitter' : `Request number ${i} about turret ammo ${i}`,
+    brief,
+    priority: 'normal' as const,
+    keys: [],
+    requestedBy: LOTH,
+    requesters: [LOTH],
+    humanAsked: true,
+    status: 'active' as const,
+    createdAt: now,
+    updatedAt: now,
+    sessionIds: [],
+    overlaps: [],
+    asks: 0,
+    log: [],
+  });
+  for (let i = 0; i < 40; i++) store.putWork(item(i, `Brief ${i}: the turret runs out of ammo near the base.`));
+  const q = { keys: [], title: 'belts jam at a splitter', summary: 'The conveyor belt jams where it splits.' };
+  const first = o.boardCheck(q, 30);
+  assert.equal(first.matches[0]?.id, 'w107', JSON.stringify(first));
+  assert.equal(o.boardTextsMade, 40, 'every request once');
+  assert.deepEqual(o.boardCheck(q, 30), first, 'the same answer from the kept concepts');
+  assert.equal(o.boardTextsMade, 40, 'none again while their text is unchanged');
+  store.putWork({ ...store.work.get('w107')!, brief: 'Splitter jams: the belt stops.' });
+  o.boardCheck(q, 30);
+  assert.equal(o.boardTextsMade, 41, 'a changed brief is worked out again');
+});
+
 test('w343: the start-up detach drops referenced report keys (backed up, logged, stamped), keeps own ones, and is idempotent', (t) => {
   const { dir, store, o } = setup(t);
   const now = new Date().toISOString();
