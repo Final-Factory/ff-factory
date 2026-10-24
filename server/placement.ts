@@ -342,6 +342,12 @@ export interface RoomNow {
    * freed a minute ago is not yet a wrong Queued, since the capacity ping takes its quiet spell and a dispatcher turn to act.
    */
   since?: Record<string, number>;
+  /**
+   * How many more workers each computer with room takes now, `${kind}:${id}` to a count (w1944, lothsahn: "Why does the
+   * dispatcher say biscuit has room when it's full?"): one free sandbox is room for the first queued request that fits there,
+   * not for every one, so the rest are not WRONG and decide_work queue does not refuse them (shared/workState.ts roomShares).
+   */
+  slots?: Record<string, number>;
 }
 
 /** The holds a person or FF Factory set (placement.hold, paused machines, coming builds): they also stop resumes there. */
@@ -368,13 +374,24 @@ const holdOf = (prefs: PlacementPrefs) => {
   return out;
 };
 
+/**
+ * How many more workers of `kind` a computer with room takes now (w1944, RoomNow.slots): game work, its free sandboxes and
+ * those it may still make, up to its agent limit; agent-slot work, its free seats up to its agent cap. At least 1, since
+ * hasRoomFor said it has room.
+ */
+export function slotsOf(p: Computer, kind: NeedKind): number {
+  const n = kind === 'game' ? Math.min(p.freeSandboxes + Math.max(0, p.maxSandboxes - p.sandboxes), p.maxAgents - p.live) : Math.min(p.agentSeats ?? p.maxAgents - p.midTurn, p.maxAgents - p.midTurn);
+  return Math.max(1, n);
+}
+
 export function roomNow(places: readonly Computer[], prefs: PlacementPrefs = {}): RoomNow {
   const hold = holdOnly(prefs);
   const min = minOf(prefs);
-  const out: RoomNow = { game: [], agent: [], held: [], reserved: [], detail: {}, fit: {} };
+  const out: RoomNow = { game: [], agent: [], held: [], reserved: [], detail: {}, fit: {}, slots: {} };
   for (const p of places) {
     const kinds = (['game', 'agent'] as const).filter((k) => hasRoomFor(p, k));
     if (!kinds.length) continue;
+    for (const k of kinds) out.slots![`${k}:${p.id}`] = slotsOf(p, k);
     out.detail![p.id] = `${p.freeSandboxes} of ${p.maxSandboxes} sandboxes free, ${p.live} live agents of ${p.maxAgents}, ${memPct(p) !== undefined ? `RAM ${memPct(p)}%` : 'RAM unknown'}`;
     out.fit![p.id] = { ...(p.platform ? { platform: p.platform } : {}), ...(p.noTimedRuns ? { noTimedRuns: p.noTimedRuns } : {}) };
     const why = hold.get(p.id);

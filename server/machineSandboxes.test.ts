@@ -1546,3 +1546,33 @@ test('w1856: a release build hands its sandbox back: switch_branch onto urgent/<
   assert.equal(r.git(path1, 'branch', '--show-current'), 'sandbox/sb1-w1767');
   assert.equal(sbOf('sb1')!.branch, 'sandbox/sb1-w1767');
 });
+
+test('w1944: a sandbox being handed to new work (its editor stopped, its branch switched, before the worker exists) is not free: no room for it, and a second start into it is refused', async (t) => {
+  const { mm, sessions, agents, gitNow } = await twoSandboxes(t);
+  const w = mm.createSession('pc', { kind: 'worker', title: 'w1935 work', permissionMode: 'default', sandbox: 'sb1' });
+  sessions.send(w.info.id, 'go');
+  await until('w live and idle', () => w.live && w.info.status === 'idle');
+  w.stop();
+  await until('w stopped', () => !w.live);
+  // It released sb1 on its own branch while it waits on CI, as 604a6cdc released biscuit/slot1 at 01:12:48Z.
+  w.info.placeReleased = { at: new Date().toISOString(), sandbox: 'sb1', branch: 'feature/w1', why: 'it waits on CI (w1935)' };
+  await gitNow('sb1');
+  const free = () => agents.places().find((p) => p.id === 'pc')!.freeSandboxes;
+  assert.equal(free(), 2);
+  let open!: () => void;
+  const gate = new Promise<void>((res) => (open = res));
+  const hands = mm as unknown as { switchBranch: (...a: unknown[]) => Promise<unknown> };
+  const real = hands.switchBranch.bind(mm);
+  hands.switchBranch = async (...a: unknown[]) => {
+    await gate;
+    return real(...a);
+  };
+  const prep = agents.prepareForNewWork('pc/sb1', undefined, 'W1911');
+  await until('sb1 handed', () => free() === 1);
+  await assert.rejects(agents.prepareForNewWork('pc/sb1', undefined, 'W1917'), /sandbox pc\/sb1 is being handed to new work W1911 now/);
+  open();
+  const done = await prep;
+  assert.equal(done.branch, 'sandbox/sb1-w1911', done.note);
+  // Handed over and no worker started in it (a failed start): free again.
+  assert.equal(free(), 2);
+});
