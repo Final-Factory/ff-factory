@@ -2552,6 +2552,49 @@ or not, takes no slot. Orchestrators never count. The Unity editor limits are un
   - memory writes (`memoryGuard`, [Memory](#memory));
   - recording and cancelling a conditional decision ([below](#conditional-decisions-w830)).
 
+### A per-turn budget (w2007)
+
+lothsahn, 2026-10-24, w2007: "Yes, add a per-turn budget cap for orchestrators and the dispatcher to w2007". The
+coordinators (`kind: 'orchestrator'`: the dispatcher and each person's orchestrator; not workers, the ops worker or
+standing agents) have a budget per turn, in `server/sessions.ts`:
+
+| Constant | Value | Counts |
+|---|---|---|
+| `COORD_TURN_MAX_CALLS` | 150 | model calls of the turn, each message id once (a call's content blocks arrive as separate messages), subagents' calls included |
+| `COORD_TURN_MAX_TOKENS_READ` | 25,000,000 | what those calls read: input + cache read + cache creation tokens |
+
+**Sizing** (measured, `portal_logs` `coordinator_context`, the last 8 compaction cycles of the dispatcher, Ben's and
+lothsahn's orchestrators, 2026-10-24 00:03Z-08:11Z): 637 turns, 1,079 model calls, 1.7 calls a turn. The largest turn in
+any cycle made at most 30 calls (the cycle's calls minus its other turns'), and the context peaked at 112k tokens, so the
+largest turn read at most about 3.4M tokens. The caps are 5x and 7x those bounds, so a normal turn never meets them. There
+is no cap on a reply's output tokens (lothsahn did not choose one).
+
+**The counters** start when a message opens a turn and again at each `result` that is not a compaction's, so a message
+queued behind the first, answered in the same CLI turn, has a budget of its own.
+
+**A hit**, once per turn (`Session.stopOverBudget`):
+
+- the transcript gets an error line before the stop: "FF Factory stopped this turn: it made N model calls and read M
+  tokens, over the per-turn budget (150 calls / 25M tokens, w2007)." and then the usual "Interrupted.";
+- the turn is stopped with the same `interrupt()` as the stop button, so the session is stopped on purpose: no restart
+  resumes it and nothing re-sends its message. Only a new message (a person's, a timer, a worker's report) starts a turn;
+- `sessions.events` emits `turnBudget` with `{ calls, tokensRead, cap: 'calls' | 'tokens', since, starter }`
+  (`TurnBudgetHit`), and `Orchestrators.turnBudget` answers it:
+  - one request on `Final-Factory/ff-factory` (`INVESTIGATE_REPO`, needs an agent slot, counts against no limit) for the
+    orchestrator's person, or the system payer for the dispatcher: "Investigate: <person>'s orchestrator (the
+    dispatcher) passed the per-turn budget (N calls, M tokens)". Its brief has the session link, when the turn opened, the
+    first line of the message that started it, the numbers and the caps, and asks to find out why from the transcript and
+    whether the cap should move. The dispatcher hears of it as of any request;
+  - a push notice (`Notifier.turnBudget`, kind `error`, so the person's error setting applies) to the orchestrator's person,
+    or to the owners for the dispatcher (the people the dispatcher's own errors already reach). It is a push, never a
+    message into the stopped orchestrator, which would open a new turn of the session just stopped;
+  - at most one request and one notice per session in `TURN_BUDGET_REFILE_MS` (6 h). A later hit in that window adds a
+    line to the open request. The request itself is the record (found by its session link), so a restart does not forget it.
+
+**To change the caps** edit the two constants in `server/sessions.ts` (they are code, not config: a coordinator can not
+raise its own); the "w2007" tests in `server/sessions.test.ts` name the numbers and change with them. The request FF Factory
+files is where a worker says whether they should move.
+
 ### Conditional decisions (w830)
 
 A person often decides something for later: "Close w811 as a duplicate once 1314 is merged" (Lothsahn, 2026-10-10).
