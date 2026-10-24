@@ -362,7 +362,7 @@ test('w1829: an editor closed for a timed run is marked before its quit, says wh
   assert.deepEqual(again.p.benchClosedList(), []);
 });
 
-test('w1615: a queued editor start whose slot is gone at its turn is not made, its ticket let go, and the worker told', async (t) => {
+test('w1962: a queued editor start holds its slot while it waits, so another start is refused meanwhile, and it starts at its turn', async (t) => {
   const r = repos();
   t.after(r.cleanup);
   const tickets: ReturnType<typeof fakeTicket>[] = [];
@@ -379,12 +379,12 @@ test('w1615: a queued editor start whose slot is gone at its turn is not made, i
   await ready(p, 'b');
   assert.match(await p.unity('a', 'start'), /^Queued/);
   queue = false;
-  assert.match(await p.unity('b', 'start'), /Started \(fake\)/, 'granted at once: started at once');
+  await assert.rejects(p.unity('b', 'start'), /already 1 sandbox editors running or starting on this machine \(a; max_unity 1\)/, "a's queued start holds the slot");
   tickets[0].kind = 'granted';
-  await until('a told', () => events.some((e) => /sandbox a: its queued editor start was not made at its turn .*already 1 sandbox editors running/.test(e.text)));
+  await until('a started at its turn', () => events.some((e) => /sandbox a: its queued editor start ran at its turn in the bench queue/.test(e.text)));
   assert.equal(running.size, 1);
-  assert.equal(tickets[0].released, 1, 'no wait for a slot while holding the ticket: it is let go');
-  assert.match(p.list().find((s) => s.id === 'a')!.unity.detail ?? '', /^queued start not made: /);
+  assert.equal(tickets[0].released, 0, 'the granted ticket is kept while the editor runs');
+  assert.ok(!events.some((e) => /was not made at its turn/.test(e.text)));
 });
 
 test('machine sandboxes: a worktree of the main clone on its own branch, a warm Library, removed cleanly', async (t) => {
@@ -457,7 +457,7 @@ test('machine sandboxes: editors are limited by max_unity; a switch waits for th
   await p.unity('a', 'start');
   assert.equal(p.list().find((s) => s.id === 'a')!.unity.state, 'starting');
   assert.match(p.list().find((s) => s.id === 'a')!.unity.logPath ?? '', /sandbox-editor\.log$/, 'its own log, not the shared Editor.log');
-  await assert.rejects(p.unity('b', 'start'), /already 1 sandbox editors running on this machine \(a; max_unity 1\)/);
+  await assert.rejects(p.unity('b', 'start'), /already 1 sandbox editors running or starting on this machine \(a; max_unity 1\)/);
   await p.tick();
   assert.equal(p.list().find((s) => s.id === 'a')!.unity.state, 'running', 'up once its bridge is');
   await assert.rejects(p.switch('a', 'feature/y'), /editor of sandbox a is running: stop it first/);
@@ -1104,7 +1104,36 @@ test('machine sandboxes: an editor start takes a Unity slot: batch builds starte
   // The second build comes back meanwhile: a restart of a's editor is not queued behind it.
   procs = [build(501, 'D:\\work\\ffsb\\pr-fix'), build(502, 'D:\\work\\ffsb\\ui-fix')];
   assert.match(await p.unity('a', 'restart'), /Stopped \(fake\)\. Started \(fake\)/);
-  assert.match(await p.unity('a', 'status'), /\nUnity on this machine: editors 3 of 2: 0 interactive, 2 batch, 1 granted not started yet; OVER LIMIT: nothing more starts until it drops/);
+  assert.match(await p.unity('a', 'status'), /\nUnity on this machine: editors 3 of 2: 0 interactive, 2 batch, 1 editor start queued or booting; OVER LIMIT: nothing more starts until it drops/);
+});
+
+test('w1962: queued editor starts that fill the Unity slots each start at their turn, never refused for the slot they hold (LothDesktop, 2026-10-23: "needs 1, 0 free (3 of 3 in use) ... 3 granted not started yet")', async (t) => {
+  const r = repos();
+  t.after(r.cleanup);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-msb-slots-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const tickets: ReturnType<typeof fakeTicket>[] = [];
+  let slots: UnitySlots | undefined;
+  const { p, events, running } = pool(r, { settings: { maxUnity: 2, maxSandboxes: 3 }, slots: () => slots!, bootTicket: () => {
+    const k = fakeTicket();
+    tickets.push(k);
+    return { ticket: k as unknown as BenchTicket };
+  } });
+  t.after(() => tickets.forEach((k) => k.release()));
+  slots = new UnitySlots({ dir, platform: 'win32', procs: async () => [], alive: () => true, now: () => Date.now(), limit: () => 2, places: () => p.list().map((s) => ({ holder: `sandbox:${s.id}`, path: s.path, editorUp: p.editorUp(s.id) })), ramPct: () => undefined });
+  for (const id of ['a', 'b', 'c']) await p.create({ id, branch: `sandbox/${id}`, base: 'origin/master', seedLibrary: false, startUnity: false });
+  for (const id of ['a', 'b', 'c']) await ready(p, id);
+  // A timed run holds the bench lock: both starts queue, each holding the slot it took first (w1615's order).
+  assert.match(await p.unity('a', 'start'), /^Queued/);
+  assert.match(await p.unity('b', 'start'), /^Queued/);
+  await assert.rejects(p.unity('c', 'start'), /not started: needs 1, 0 free \(2 of 2 in use\); editors 2 of 2: 0 interactive, 0 batch, 2 editor starts queued or booting\./, 'the slots read as queued starts, not grants');
+  // The timed run ends: the shared turn grants both tickets, and both editors start.
+  tickets[0].kind = 'granted';
+  tickets[1].kind = 'granted';
+  await until('both started at their turn', () => ['a', 'b'].every((id) => events.some((e) => new RegExp(`sandbox ${id}: its queued editor start ran at its turn`).test(e.text))));
+  assert.equal(running.size, 2);
+  assert.ok(!events.some((e) => /was not made at its turn/.test(e.text)), events.map((e) => e.text).join('\n'));
+  assert.deepEqual(tickets.slice(0, 2).map((k) => k.released), [0, 0]);
 });
 
 /** A portal with a machine `pc` (a real daemon and git) holding two ready sandboxes, sb1 on feature/w1 and sb2 (w640, w890). */
