@@ -306,6 +306,24 @@ export const orchestratorWaitIn = (line: string) => ORCHESTRATOR_WAIT.test(line)
 const OWN_WORK = /\bto (?:run|do|start|kick off|trigger|launch|finish|make) (?:the |a |my |its |our )?[^;.]{0,60}?\b(?:check|build|ci|tests?|audit|run|clips?|playtest|capture)\b/i;
 export const ownWorkWait = (line: string) => ORCHESTRATOR_WAIT.test(line) && OWN_WORK.test(line) && !/\b(?:worker|sandbox|place|move)\b/i.test(line);
 
+/** A wait word, then within the clause a timing word: "waiting for a sandbox on m5 for the timed runs" (w1996). */
+const WAIT_WORD = /\b(?:waiting|waits|wait|queued|held) (?:for|on)\b/i;
+const TIMING_WORD = /\b(?:tim(?:ed|ing)|bench(?:mark)?s?|a\/b|exclusive|perf(?:ormance)?)\b/i;
+
+/**
+ * The computer a worker's still-open line waits on for timed work when that computer takes none (`noTimed`: id to why,
+ * w1861), else undefined. w1789: d80ca173 on BEAST stopped with "still open: waiting for a sandbox on m5 for the timed
+ * runs" while m5 took no timed runs (lothsahn, 2026-10-23: "The m5 should not be used for timing runs because Ben runs
+ * stuff on it personally"), so nothing would ever bring it back (lothsahn's w1996 review, 2026-10-24).
+ */
+export function noTimedWaitOf(line: string, noTimed: Readonly<Record<string, string>>): string | undefined {
+  const wait = WAIT_WORD.exec(line);
+  if (!wait) return undefined;
+  const rest = line.slice(wait.index);
+  if (!TIMING_WORD.test(rest)) return undefined;
+  return Object.keys(noTimed).find((id) => new RegExp(`\\b${id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(rest));
+}
+
 /** "waiting on a Windows or Linux pair worker", "waits for another worker": a worker only the dispatcher can start (w1944). */
 const WORKER_WAIT = /\b(?:waiting|waits|wait) (?:for|on) (?:a|an|the|another|its|my)\b[^;.]{0,60}?\bworker\b/i;
 
