@@ -5234,14 +5234,21 @@ test('w1983: a worker whose request another of its workers runs in another sandb
   const a = await startedFor(env, 'w1853');
   const b = await startedFor(env, 'w2', { sandbox: 'beast/slot1' });
   // 03:58Z on 2026-10-24: w1853's timing A/B went to a worker on m3 (aa20f433); 33bc6316 sat idle in lothdesktop/slot3.
-  o.linkWorker('w1853', b.info, `sent to worker ${b.id}`);
-  o.linkWorker('w1853', a.info, `sent to worker ${a.id}, already on it`);
+  // The stored sessions, which the checks read, with their status set: not left to when the fake agents' turns end.
+  const sa = () => store.sessions.get(a.id)!;
+  const sb = () => store.sessions.get(b.id)!;
+  o.linkWorker('w1853', sb(), `sent to worker ${b.id}`);
+  // A later link, by the clock: two in one millisecond tie on which is the latest worker (isWith).
+  await new Promise((r) => setTimeout(r, 5));
+  o.linkWorker('w1853', sa(), `sent to worker ${a.id}, already on it`);
+  sa().status = 'idle';
+  sb().status = 'idle';
   const fresh = () => ((agents as unknown as { waitLive?: unknown }).waitLive = undefined);
   fresh();
-  assert.equal(agents.waitOn(a.info), undefined, 'nobody works on it elsewhere: its work is its own');
-  b.info.status = 'running';
+  assert.equal(agents.waitOn(sa()), undefined, 'nobody works on it elsewhere: its work is its own');
+  sb().status = 'running';
   fresh();
-  assert.equal(agents.waitOn(a.info), `it waits on w1853: its worker ${b.id} works on it in beast/slot1`);
+  assert.equal(agents.waitOn(sa()), `it waits on w1853: its worker ${b.id} works on it in beast/slot1`);
 });
 
 test('w1983: message_agent never starts a request\'s new session in a sandbox that is not the old worker\'s any more', async (t) => {
