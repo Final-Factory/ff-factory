@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { readBenchLock } from '../machine/benchLock.ts';
-import { BenchTicket, benchQueueDir, benchTicketFor, findBenchQueueScript, heldTicket, queueTickets } from '../machine/benchQueue.ts';
+import { BenchTicket, benchQueueDir, benchTicketFor, findBenchQueueScript, heldTicket, newestBenchQueueScript, queueTickets, rulesVersion } from '../machine/benchQueue.ts';
 
 /**
  * w1615: the bench queue is the game repo's scripts/bench/bench_queue.py (its own tests kill holders and waiters with
@@ -156,4 +156,22 @@ test('w1615: against the real bench_queue.py, a shared ticket waits for an exclu
   const next = new BenchTicket({ script, lock, mode: 'exclusive', what: 'next', tempDir: dir, env }).take();
   assert.equal((await next.wait(15_000)).kind, 'granted', 'the killed owner\'s ticket is let go');
   next.release();
+});
+
+test('w1962: a ticket runs under the copy of bench_queue.py with the newest rules on the machine, its own checkout first on a tie', (t) => {
+  const root = tmp(t);
+  const put = (dir: string, text: string) => {
+    fs.mkdirSync(path.join(dir, 'scripts', 'bench'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'scripts', 'bench', 'bench_queue.py'), text);
+    return path.join(dir, 'scripts', 'bench', 'bench_queue.py');
+  };
+  const stale = put(path.join(root, 'sandboxes', 'slot5'), '# from before w1962\n');
+  const fresh = put(path.join(root, 'sandboxes', 'slot3'), 'X = 1\nRULES_VERSION = 2\n');
+  const other = put(path.join(root, 'sandboxes', 'slot1'), 'RULES_VERSION = 2\n');
+  assert.equal(rulesVersion(stale), 0);
+  assert.equal(rulesVersion(fresh), 2);
+  assert.equal(newestBenchQueueScript([path.join(root, 'sandboxes', 'slot5')], root), other, "slot5's stale copy loses to the newest rules (the first sandbox of them)");
+  assert.equal(newestBenchQueueScript([path.join(root, 'sandboxes', 'slot3')], root), fresh, 'a tie keeps the checkout\'s own copy');
+  assert.equal(newestBenchQueueScript([undefined], root), other);
+  assert.equal(newestBenchQueueScript([undefined], undefined), undefined);
 });

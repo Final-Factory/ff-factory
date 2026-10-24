@@ -320,12 +320,23 @@ export function capacityLine(c: FleetComputer): string {
 }
 
 /**
+ * The slots in use with no Unity process yet, said apart (w1962): sandbox editors whose start waits in the bench queue
+ * or boots ("2 editor starts queued or booting"; LothDesktop read "3 granted not started yet" for those, which looked
+ * like lost grants), and slots granted to a launch that has not started Unity yet.
+ */
+export function heldNotStarted(r: Pick<UnitySlotsReport, 'used' | 'interactive' | 'batch' | 'starting'>): string {
+  const reserved = r.used - r.interactive - r.batch;
+  const starting = Math.min(Math.max(0, r.starting ?? 0), Math.max(0, reserved));
+  const granted = reserved - starting;
+  return `${starting > 0 ? `, ${starting} editor start${starting === 1 ? '' : 's'} queued or booting` : ''}${granted > 0 ? `, ${granted} granted not started yet` : ''}`;
+}
+
+/**
  * A machine's Unity editors as its daemon counts them (w469): "editors 4 of 3: 1 interactive, 3 batch", then what is
  * over, waiting or held up by RAM, and the game players beside them (not counted).
  */
 export function unitySlotsLine(r: UnitySlotsReport): string {
-  const reserved = r.used - r.interactive - r.batch;
-  const parts = [`editors ${r.used} of ${r.limit ?? 'no limit'}: ${r.interactive} interactive, ${r.batch} batch${reserved > 0 ? `, ${reserved} granted not started yet` : ''}`];
+  const parts = [`editors ${r.used} of ${r.limit ?? 'no limit'}: ${r.interactive} interactive, ${r.batch} batch${heldNotStarted(r)}`];
   if (r.overLimit) parts.push('OVER LIMIT: nothing more starts until it drops');
   if (r.waiting.length) parts.push(`${r.waiting.length} waiting (${r.waiting.slice(0, 3).map((w) => `"${w.label}" for ${w.count}`).join(', ')}${r.waiting.length > 3 ? ', ...' : ''})`);
   if (r.ramPct !== undefined && r.ramPct >= r.ramLimitPct) parts.push(`RAM ${r.ramPct}%: new launches wait below ${r.ramLimitPct}%`);

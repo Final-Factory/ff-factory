@@ -210,7 +210,7 @@ export const api = {
     request<Machine>('POST', '/api/machines', req),
   /** The tailnet device this browser is on (w1592), to name a PC added from its own browser. */
   joinDevice: () => request<{ name?: string; machine?: string }>('GET', '/api/machines/join/device'),
-  createJoin: (req: { id: string; tailnetName?: string; maxSandboxes?: number; maxAgentsPerSandbox?: number; maxUnity?: number }) => request<JoinAnswer>('POST', '/api/machines/join', req),
+  createJoin: (req: { id: string; tailnetName?: string; maxSandboxes?: number; maxAgentsPerSandbox?: number; maxUnity?: number; playOnly?: boolean }) => request<JoinAnswer>('POST', '/api/machines/join', req),
   redeployMachine: (id: string, force = false) => request<Machine>('POST', `/api/machines/${enc(id)}/redeploy`, { force }),
   machineDaemon: (id: string, action: 'start' | 'stop' | 'restart', force = false) => request<{ note: string }>('POST', `/api/machines/${enc(id)}/daemon`, { action, force }),
   /** The machine's activity pause (w1574, config machines.activityPause): on or off, and its idle minutes. */

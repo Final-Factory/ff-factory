@@ -6,6 +6,7 @@
 // polling: fleetFor and the page's own ledger).
 import type { LiveViewInfo, SessionInfo, WorkItem, WorkPr } from './types.ts';
 import { agentState } from './agentState.ts';
+import { agentQueueFacts, type AgentQueue } from './queueWaits.ts';
 import { gatesOf } from './blockers.ts';
 import { chatLedger, type FleetComputer } from './fleet.ts';
 import { workLiveAll, type WorkLive } from './workState.ts';
@@ -123,6 +124,8 @@ export interface CardFacts {
   now: number;
   /** How a check-in time reads ("16:29 UTC"); the page passes local time. */
   time?: (iso: string, now: number) => string;
+  /** The machines' queues (w1968, shared/queueWaits.ts agentQueueAll): a ticket it waits for or holds. */
+  queue?: AgentQueue;
 }
 
 const lastSaid = (s: SessionInfo) => s.lastResultAt ?? s.lastActivityAt;
@@ -142,14 +145,17 @@ const noteOf = (s: SessionInfo) => {
 function statusOf(s: SessionInfo, f: CardFacts): Pick<WorkerCard, 'status' | 'word' | 'doing' | 'since' | 'tool'> {
   const perm = s.pendingPermissions[0];
   if (perm || s.status === 'waiting_permission') return { status: 'needs_you', word: 'Needs you', doing: perm ? `Asks to use ${toolName(perm.toolName)}` : 'Asks for a permission', since: perm?.createdAt ?? s.lastActivityAt };
-  const a = agentState(s, f.time, f.now);
+  const a = agentState({ ...s, ...agentQueueFacts(s.id, f.queue) }, f.time, f.now);
   if (s.hostFailure) return { status: 'blocked', word: 'Blocked', doing: a.waitsOn, since: s.hostFailure.at };
+  // w1968: a ticket of its own waits in its machine's bench queue (or for a Unity slot), as list_work reads it.
+  if (a.label === 'Blocked' && a.waitsOn?.startsWith('waiting for ')) return { status: 'blocked', word: 'Blocked', doing: `Waiting for ${a.waitsOn.slice('waiting for '.length)}`, since: s.turnOpenSince ?? lastSaid(s) };
   if (s.status === 'running' || s.status === 'starting') {
     const tool = s.activeTool;
+    const holds = a.waitsOn?.startsWith('holds ') ? `Holds ${a.waitsOn.slice('holds '.length)}` : undefined;
     return {
       status: 'working',
       word: s.status === 'starting' ? 'Starting' : 'Working',
-      ...(tool ? { doing: toolName(tool.name), tool: true } : { doing: s.status === 'starting' ? 'Starting up' : 'Thinking' }),
+      ...(holds ? { doing: holds } : tool ? { doing: toolName(tool.name), tool: true } : { doing: s.status === 'starting' ? 'Starting up' : 'Thinking' }),
       since: s.turnOpenSince ?? s.lastActivityAt,
     };
   }
@@ -201,6 +207,7 @@ export interface CardInputs {
   me?: string;
   now: number;
   time?: (iso: string, now: number) => string;
+  queue?: AgentQueue;
 }
 
 /**
@@ -224,7 +231,7 @@ export function workerCards(fleet: readonly FleetComputer[], x: CardInputs): Wor
         const reqId = wait?.request ?? ledger.current.get(s.id)?.[0];
         const w = reqId ? workOf.get(reqId) : undefined;
         const requester = (s.lastRequestedBy ?? s.requestedBy)?.displayName;
-        const st = cardStatus(s, { work: w, live: w ? live.get(w.id) : undefined, waitsOn: wait?.on, me: x.me, liveUp: streams(s), requester, now: x.now, time: x.time });
+        const st = cardStatus(s, { work: w, live: w ? live.get(w.id) : undefined, waitsOn: wait?.on, me: x.me, liveUp: streams(s), requester, now: x.now, time: x.time, queue: x.queue });
         const title = plainTitle(s.title) || (w ? plainTitle(w.title) : '') || s.title;
         cards.push({
           id: s.id,

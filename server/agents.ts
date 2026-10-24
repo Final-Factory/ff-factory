@@ -18,7 +18,7 @@ import { describeAutoIntake } from './ffboxAutoIntake.ts';
 import { agentState, agentStateText, holdsItsPlace, holdsSandbox, sortAgents, sortPlaces } from '../shared/agentState.ts';
 import { idleClosedPart } from './liveIdle.ts';
 import { HOLD_PLACE_MS, LIVE_HOLD_MS, PlaceAgain, RELEASE_AFTER_MS, RELEASE_WAKE_NOTE, handOverBranch, occupies, releasedOn } from './placeAgain.ts';
-import { editorSlotRefusal, queueWaitsAll } from '../shared/queueWaits.ts';
+import { agentQueueAll, agentQueueFacts, editorSlotRefusal, queueWaitsAll } from '../shared/queueWaits.ts';
 import { WORK_LIVE_LABEL, WORK_LIVE_STATES, asksAPerson, benchWaitOf, lastOpenLine, liveCounts, otherWorkWait, outsideDeclared, outsideWaitOf, ownWorkWait, personWaitIn, reportWaitKey, servedBy, workLiveAll, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
 import { reportTail, type NeedsYouWait } from './needsYou.ts';
 import { stillOpenIn } from './ledgerRules.ts';
@@ -292,7 +292,7 @@ CLAUDE.md's "Discord: FFBox owns #bug-reports" binds you: read and download ther
  * carry it verbatim (worldBrief). The longer version is docs/ffbox.md.
  */
 /** The dispatcher's rule for pair runs (w1945), in read_rules machines: placing, queueing and holding for them. */
-const PAIR_RULES = `**Pair runs** (w1945, lothsahn: "Can we make the dispatcher smart enough so it queues work properly that requires running together across multiple machines and doesn't waste slots?"): a request marked "a pair run of N legs" (a worker's request_pair, or one you file or see that needs two computers at once, such as a two-machine determinism check) starts ALL its legs together: start_agent with its work_id, sandbox for leg 1 (the host) and pair_sandboxes for the others, each a FREE sandbox on another computer. Never start one leg alone, and never leave a worker holding its sandbox while it waits for a partner leg: a worker that asks you for a second machine's worker is told to use request_pair. With fewer computers that fit having room than it has legs, queue it: a pair is room, and WRONG, only where that many computers have room at once. While an older pair run of at least the same priority is Queued, each computer's last free sandbox it fits is held for it: start other work elsewhere (start_agent refuses it, naming the pair; work of higher priority goes first). Legs go on computers that are not Macs; a cross-OS pair (only for w1692's reasons) may put a Mac as the host, never a client; timed legs never on the m5.`;
+const PAIR_RULES = `**Pair runs** (w1945, lothsahn: "Can we make the dispatcher smart enough so it queues work properly that requires running together across multiple machines and doesn't waste slots?"): a request marked "a pair run of N legs" (a worker's request_pair, or one you file or see that needs two computers at once, such as a two-machine determinism check: queue that one with decide_work pair_legs, so it is marked) starts ALL its legs together: start_agent with its work_id, sandbox for leg 1 (the host) and pair_sandboxes for the others, each a FREE sandbox on another computer. Never start one leg alone, and never leave a worker holding its sandbox while it waits for a partner leg: a worker that asks you for a second machine's worker is told to use request_pair. With fewer computers that fit having room than it has legs, queue it: a pair is room, and WRONG, only where that many computers have room at once. While an older pair run of at least the same priority is Queued, each computer's last free sandbox it fits is held for it: start other work elsewhere (start_agent refuses it, naming the pair; work of higher priority goes first). Legs go on computers that are not Macs; a cross-OS pair (only for w1692's reasons) may put a Mac as the host, never a client; timed legs never on the m5.`;
 
 /** read_rules's topics (w1158): rules a coordinator reads only when a turn needs them (Agents.rulesText). */
 export const RULE_TOPICS = ['ffbox', 'intake', 'release', 'machines', 'reactions', 'ui', 'builds'] as const;
@@ -2866,10 +2866,19 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
 
   /** An agent line for the listings: live agents only (the full history is in the dashboard and search_transcripts). */
   private agentLine(s: SessionInfo) {
-    // Its state first (w475, w643): Working (mid-turn, or between turns and on what), Queued or Blocked (a held message),
-    // Needs you, Idle (free for new work), Stopped.
+    // Its state first (w475, w643): Working (mid-turn, or between turns and on what), Queued or Blocked (a held message, or
+    // a ticket waiting in its machine's queue, w1968), Needs you, Idle (free for new work), Stopped.
     const kept = this.placeAgain.keptLine(s);
-    return `    - ${s.id} "${s.title}" [${agentStateText(s)}${agentState(s).state === 'between_turns' ? `, ${s.status === 'idle' ? 'between turns' : s.status}` : ''}${kept ? `; ${kept}` : ''}${s.pendingPermissions.length ? `, ${s.pendingPermissions.length} permission request(s) waiting` : ''}] ${activityLine(s)}, turns=${s.turns} cost=$${s.costUsd.toFixed(2)}`;
+    const q = this.withQueue(s);
+    return `    - ${s.id} "${s.title}" [${agentStateText(q)}${agentState(q).state === 'between_turns' ? `, ${s.status === 'idle' ? 'between turns' : s.status}` : ''}${kept ? `; ${kept}` : ''}${s.pendingPermissions.length ? `, ${s.pendingPermissions.length} permission request(s) waiting` : ''}] ${activityLine(s)}, turns=${s.turns} cost=$${s.costUsd.toFixed(2)}`;
+  }
+
+  /**
+   * An agent with what its machine's queues say of it (w1968): the bench ticket or Unity slot it waits for, and the bench
+   * ticket it holds, from the daemons' reports list_work's Blocked reads (shared/queueWaits.ts agentQueueFacts).
+   */
+  private withQueue<T extends SessionInfo>(s: T): T & ReturnType<typeof agentQueueFacts> {
+    return { ...s, ...agentQueueFacts(s.id, agentQueueAll(this.machines.allStats())) };
   }
 
   /** Live agents of a place (a process up or mid-turn), and how many earlier ones there were. */
@@ -3058,7 +3067,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
     const there = this.sessionsOf(sb.sessionIds).filter((x) => x.kind === 'worker' && !mine.includes(x.id) && occupies(x, !!this.sessions.sessions.get(x.id)?.live));
     const busy = this.busyIn(m, sb, mine);
     if (!there.length && !busy.length) return;
-    const who = there.length ? there.map((x) => `${x.id} "${x.title}" (${agentStateText(x)})`).join('; ') : busy.join('; ');
+    const who = there.length ? there.map((x) => `${x.id} "${x.title}" (${agentStateText(this.withQueue(x))})`).join('; ') : busy.join('; ');
     const label = `${m.id}/${sb.id}`;
     const max = poolSettingsOf(m)?.maxAgentsPerSandbox ?? 2;
     const midTurn = this.machines.runningIn(m.id, sb.id);
@@ -3150,7 +3159,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
       const busy = this.busyIn(m, sb);
       const left = ` this worker's handover tells it to switch_branch to its own branch before it commits anything.`;
       if (here.length || busy.length) {
-        const why = busy.length ? busy.join('; ') : here.map((x) => `${x.id} "${x.title}" (${agentStateText(x)}) is there on it`).join('; ');
+        const why = busy.length ? busy.join('; ') : here.map((x) => `${x.id} "${x.title}" (${agentStateText(this.withQueue(x))}) is there on it`).join('; ');
         return { note: ` Not handed over: ${label} is on the release branch ${onBranch} (w1856), but ${why}, so it was not switched under them;${left}` };
       }
       const tag = (name ?? new Date().toISOString().slice(0, 16).replace(/[-:]/g, '').replace('T', '-')).toLowerCase();
@@ -3173,7 +3182,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
     const here = this.sessionsOf(sb.sessionIds).filter((x) => x.id !== r.id && !x.placeReleased && occupies(x, !!this.sessions.sessions.get(x.id)?.live));
     const busy = this.busyIn(m, sb);
     if (here.length || busy.length) {
-      const why = busy.length ? busy.join('; ') : here.map((x) => `${x.id} "${x.title}" (${agentStateText(x)}) is there on it`).join('; ');
+      const why = busy.length ? busy.join('; ') : here.map((x) => `${x.id} "${x.title}" (${agentStateText(this.withQueue(x))}) is there on it`).join('; ');
       console.log(`place again: did not hand ${label} over from ${r.id}'s branch ${r.placeReleased.branch}: ${why}`);
       return { note: ` Not handed over: ${kept}, but ${why}, so it was not switched under them.` };
     }
@@ -3515,7 +3524,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
               .describe("Only when the request's server check found a strong overlap still in flight (list_work shows it): what makes this different work. Refused without it then."),
             override_gate: OVERRIDE_GATE,
             extra_agent: z.boolean().optional().describe("Dispatcher: true puts this request's worker beside another request's live agent in the sandbox on purpose (w1089): only for work that needs no editor and no game tree (FF Factory, FFBox, the plugin: it works in its own clone in its temp folder, w1098), and not past max_agents_per_sandbox. It never switches the sandbox's branch; game work beside a busy worker is refused even with it (w1607). Without it start_agent refuses a sandbox that is not FREE."),
-            pair_sandboxes: z.array(z.string()).max(PAIR_MAX_LEGS - 1).optional().describe('A pair run (w1945): its other legs\' FREE sandboxes, each on another computer; sandbox is leg 1, the host. All start or none.'),
+            pair_sandboxes: z.array(z.string()).max(PAIR_MAX_LEGS - 1).optional().describe('Pair run: its other legs\' FREE sandboxes, one per computer; sandbox is leg 1 (host).'),
           },
           wrap(async (a) => {
             if (a.work_id && ctx.role !== 'dispatcher') throw new Error(WORK_ID_ONLY);
@@ -4988,6 +4997,7 @@ ${w.repo ?? ''}
           session_ids: z.array(z.string()).optional().describe('link: the workers already doing it.'),
           needs: z.array(z.string()).max(12).optional().describe('queue: the computers (machine ids) that can take it, when only some can (a Mac, BEAST); queue is refused while any of them (any computer, without needs) has room. On an active request with a worker: a leg there, kept until a worker starts for it there (w1863).'),
           drop_leg: z.boolean().optional().describe('queue: drop its leg for needs.'),
+          pair_legs: z.number().optional(),
           blockers: z.array(BLOCKER_SHAPE).max(6).optional().describe(`block: SEVERAL things it waits on (a request waiting for w727's PR and w752's fix has two). It starts only when ALL have cleared. Replaces what it waited on. Same shape as blocker.`),
           add_blocker: z.boolean().optional().describe('block with a single blocker on a request that is already blocked: add it to the gates it has, instead of replacing them.'),
           override_gate: z

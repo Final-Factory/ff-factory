@@ -1882,7 +1882,7 @@ route('GET', '/api/machines/join/device', async (req) => {
 });
 route('POST', '/api/machines/join', async (req) => {
   requireJoinOwner(req);
-  const b = await readJson<{ id?: string; tailnetName?: string; maxSandboxes?: number; maxAgentsPerSandbox?: number; maxUnity?: number }>(req);
+  const b = await readJson<{ id?: string; tailnetName?: string; maxSandboxes?: number; maxAgentsPerSandbox?: number; maxUnity?: number; playOnly?: boolean }>(req);
   const portalUrl = originOf(req) || (cfg.publicUrl ?? '').replace(/\/+$/, '');
   let made: ReturnType<typeof machines.createJoin>;
   try {
@@ -1892,6 +1892,8 @@ route('POST', '/api/machines/join', async (req) => {
       portalUrl: portalUrl || undefined,
       limits: { maxSandboxes: b.maxSandboxes, maxAgentsPerSandbox: b.maxAgentsPerSandbox, maxUnity: b.maxUnity },
       by: requesterOf(req).displayName,
+      // w1946: ticked in the form; the record says who made it play-only.
+      ...(b.playOnly === true ? { playOnly: `added play-only in the dashboard by ${requesterOf(req).displayName}` } : {}),
     });
   } catch (e) {
     throw new HttpError(409, (e as Error).message);

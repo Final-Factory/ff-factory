@@ -500,6 +500,8 @@ export interface UnitySlotsReport {
   limit?: number;
   /** Slots in use: running editors and batch runs, and slots granted whose Unity has not started yet. */
   used: number;
+  /** w1962: of `used`, sandbox editors whose start is queued in the bench queue or booting (no Unity yet); absent: none, or a daemon before w1962. */
+  starting?: number;
   interactive: number;
   batch: number;
   /** Of those, started outside the slot gate and not a sandbox's or the main clone's editor. */

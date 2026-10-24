@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import { agentState, type AgentState, type WaitKind } from '../../shared/agentState.ts';
 import { ledgerGlance, workLiveAll, type WorkLive } from '../../shared/workState.ts';
-import { queueWaitsAll, type QueueWait } from '../../shared/queueWaits.ts';
+import { agentQueueAll, agentQueueFacts, queueWaitsAll, type AgentQueue, type QueueWait } from '../../shared/queueWaits.ts';
 import type { AppState, BenchLock, AppVersion, CompactionTrigger, ImageInput, Machine, MachineSandbox, MaxSummary, PermissionMode, PersonPlayReport, Provider, Sandbox, SessionInfo, WorkItem, WorkStatus, SessionStatus, UnityState, SandboxStatus, StandingAgent, StandingRunOutcome, StandingTrigger } from '../../shared/types';
 import { displayName, isUnused } from '../../shared/labels';
 import { playGlance } from '../../shared/personPlay';
@@ -263,8 +263,21 @@ export const localTime = (iso: string, now: number) => {
   const days = Math.round((day(at) - day(new Date(now))) / 86_400_000);
   return days === 0 ? hm : days === 1 ? `tomorrow ${hm}` : `${at.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${hm}`;
 };
+/**
+ * The machines' queues as the store last had them (w1968): every agent state on the page reads them, so a worker waiting in
+ * a bench queue shows Blocked on it and a holder says what it holds, as list_work does. The store notes each new set of
+ * machine stats (store.ts set).
+ */
+let queueNow: { stats?: AppState['machineStats']; q?: AgentQueue } = {};
+export function noteMachineStats(stats: AppState['machineStats']) {
+  if (stats !== queueNow.stats) queueNow = { stats };
+}
+const agentQueue = () => (queueNow.q ??= agentQueueAll(queueNow.stats));
+/** A session with what the machines' queues say of it (w1968, shared/queueWaits.ts agentQueueFacts). */
+export const withQueue = (s: SessionInfo) => ({ ...s, ...agentQueueFacts(s.id, agentQueue()) });
+
 export function agentView(s: SessionInfo): { tone: Tone; label: string; text: string; waitsOn?: string; kind?: WaitKind } {
-  const a = agentState(s, localTime);
+  const a = agentState(withQueue(s), localTime);
   const text = a.waitsOn ? `${a.label}: ${a.waitsOn}` : a.resumes ? `${a.label} (resumes at ${a.resumes})` : a.label;
   return { tone: LABEL_TONE[a.label] ?? STATE_TONE[a.state], label: a.state === 'idle' && s.kind === 'worker' ? 'Idle (available)' : a.label, text, ...(a.waitsOn ? { waitsOn: a.waitsOn } : {}), ...(a.kind ? { kind: a.kind } : {}) };
 }

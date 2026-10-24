@@ -3,6 +3,7 @@ import type { AppState, ServerEvent, SessionInfo, TranscriptEvent } from '../../
 import { api, connectSocket, setUnauthorizedHandler, UnauthorizedError, type WsStatus } from './api';
 import { noteServedBuild } from './freshness';
 import { initNotifications, onNotice } from './notify';
+import { noteMachineStats } from './util';
 
 export type AuthState = 'unknown' | 'needed' | 'ok';
 
@@ -90,6 +91,7 @@ function set(patch: Partial<StoreState> | ((s: StoreState) => Partial<StoreState
   const p = typeof patch === 'function' ? patch(state) : patch;
   if (!Object.keys(p).length) return;
   state = { ...state, ...p };
+  if (p.app) noteMachineStats(state.app?.machineStats);
   if (batching) dirty = true;
   else listeners.forEach((l) => l());
 }
