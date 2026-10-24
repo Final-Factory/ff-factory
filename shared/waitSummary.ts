@@ -340,3 +340,32 @@ export function summaryText(s: WaitSummary, now: number, indent = ''): string {
   if (s.stale) lines.push(`May be out of date: ${s.stale}`);
   return lines.map((l) => `${indent}${l}`).join('\n');
 }
+
+/** w2051: the longest question and "what it is" a person's list_work list shows of a waiting card; the card is whole in list_work id. */
+export const LIST_QUESTION_CHARS = 300;
+const oneLine = (s: string) => s.replace(/\s+/g, ' ').trim();
+
+/**
+ * A waiting card as a person's list_work list shows it (w2051, lothsahn: "How did that recent turn use 20k tokens and force a
+ * compaction? Can we optimize that?"): one list call of their orchestrator carried up to ~16.7k tokens, mostly whole cards
+ * (every option's description, Step, After the answer) and cards of other people's moves. The person's own move keeps who,
+ * since when, each question (clipped) and its options by label with the recommended one marked; another person's move is
+ * one line. `list_work id`, the [needs you] message and the page keep the whole card (summaryText).
+ */
+export function summaryBrief(s: WaitSummary, now: number, indent = '', mine = true): string {
+  const questions = s.asks.length ? s.asks.map((a) => splitMedia(a.question).text) : [s.question];
+  const first = clip(oneLine(questions[0] ?? ''), 120);
+  if (!mine) return `${indent}Waits on ${s.who}, ${waitedFor(s.since, now)}: ${first}${questions.length > 1 ? ` (+${questions.length - 1} more)` : ''}`;
+  const lines = [`What it is: ${clip(oneLine(s.what), LIST_QUESTION_CHARS)}`, `Who acts: ${s.who}, waiting ${waitedFor(s.since, now)}`];
+  if (s.asks.length) {
+    s.asks.forEach((a, i) => {
+      lines.push(`${s.asks.length > 1 ? `Question ${i + 1} of ${s.asks.length}` : 'Question'}: ${clip(oneLine(splitMedia(a.question).text), LIST_QUESTION_CHARS)}`);
+      if (a.options.length) lines.push(`Options: ${a.options.map((o, j) => `${j + 1}. ${clip(oneLine(o.label), 120)}${o.recommended ? ' (recommended)' : ''}`).join('; ')}`);
+    });
+  } else lines.push(`Question: ${clip(oneLine(s.question), LIST_QUESTION_CHARS)}`);
+  if (s.step) lines.push(`Step: ${clip(oneLine(s.step), 200)}`);
+  const media = mediaWords(s);
+  if (media) lines.push(`Media: ${media}`);
+  if (s.stale) lines.push(`May be out of date: ${clip(oneLine(s.stale), 160)}`);
+  return lines.map((l) => `${indent}${l}`).join('\n');
+}

@@ -2592,6 +2592,50 @@ test('w1868: two questions on one request, the first answered: the second can st
   agents.cancelWake(id);
 });
 
+test('w2051: a person’s list_work list shows their own waiting card brief and another person’s in one line; list_work id and the dispatcher keep the whole card', async (t) => {
+  const env = await setupOnMachine(t, {}, { sandboxes: ['alpha', 'beta'] });
+  const { store, dispatcher, chat, call, heard } = env;
+  const loth = chat(LOTH).info;
+  const ben = chat(BEN).info;
+  const LONG = 'Keeps the old look for the frames over space and costs one more draw call per window, measured on the Deck at 0.1 ms.';
+  const declare = async (who: Requester, title: string, sandbox: string) => {
+    await call(chat(who).info, 'request_work', { title, brief: `${title}.` });
+    const w = [...store.work.values()].at(-1)!;
+    const started = await call(dispatcher().info, 'start_agent', { sandbox, prompt: 'Do it', title: `${w.id}: ${title}`, work_id: w.id });
+    const id = /Started agent (\w+)/.exec(started.text)![1];
+    const info = store.sessions.get(id)!;
+    await until('its first turn', () => info.status === 'idle');
+    const h = env.machines.hooks!.handlersFor(info, store.machines.get('pc')!);
+    const q = { question: FRAME_Q.question, options: FRAME_Q.options.map((o) => ({ ...o, description: LONG })) };
+    await h.waiting_on_person!({ who: who.displayName, what: 'Pick the frame look', questions: [q, STRIP_Q], about: 'Stacked game windows let the back window’s text show through.', after: 'I build the picked look and bring you its clips.', request: w.id });
+    env.sessions.events.emit('turnEnd', env.sessions.get(id), `${w.id}: still open: waiting on ${who.displayName} to pick the frame look`);
+    await until('the person hears it', () => heard(chat(who).info.id, '[needs you]').length >= 1);
+    return w.id;
+  };
+  const mine = await declare(LOTH, 'Stacked windows show the back text', 'pc/alpha');
+  const bens = await declare(BEN, 'Circuit icon button', 'pc/beta');
+
+  const list = (await call(loth, 'list_work', { state: 'waiting' })).text;
+  // His own move: who, each question and its options by label, the recommended one marked; no reasons, no After.
+  assert.match(list, /Who acts: Lothsahn, waiting \d+ min/);
+  assert.match(list, /Question 1 of 2: How solid should a window frame be where windows stack\?/);
+  assert.match(list, /Options: 1\. Keep frames see-through over space, solid only over a window \(recommended\); 2\. Make every frame fully solid/);
+  assert.doesNotMatch(list, /After the answer|draw call/);
+  // Ben's move: one line under its request.
+  assert.match(list, new RegExp(`- ${bens} [^\\n]*\\n    Waits on Ben, \\d+ min: How solid should a window frame be where windows stack\\? \\(\\+1 more\\)\\n`));
+  assert.match(list, /list_work id shows one whole/);
+  // The whole card: by id, in the dispatcher's list, and in Ben's own [needs you].
+  for (const text of [(await call(loth, 'list_work', { id: mine })).text, (await call(dispatcher().info, 'list_work', { state: 'waiting' })).text]) {
+    assert.match(text, /After the answer: I build the picked look and bring you its clips\./);
+    assert.ok(text.includes(LONG), 'the option reasons');
+  }
+  assert.ok((await call(ben, 'list_work', { state: 'waiting' })).text.includes('Waits on Lothsahn'), 'and the same for Ben');
+  // w2051's measure: the brief list is well under the whole one (the w1868 card text is most of a waiting list).
+  const whole = (await call(dispatcher().info, 'list_work', { state: 'waiting' })).text;
+  assert.ok(list.length < whole.length * 0.6, `${list.length} characters against ${whole.length}`);
+  for (const s of store.sessions.values()) if (s.kind === 'worker') env.agents.cancelWake(s.id);
+});
+
 test('w1868: every ask_person question is an open card until it is answered, asked again, closed or refused', async (t) => {
   const env = setup(t);
   const { store, o, chat, call } = env;
