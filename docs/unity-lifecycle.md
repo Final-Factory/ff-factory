@@ -245,7 +245,9 @@ does it since its `RULES_VERSION` 1, but each ticket's helper decides under its 
 it keeps the old order: a higher priority goes first, and an urgent holder keeps the lock while only lower-priority work
 waits (w1860). So the daemon also does it through what every copy reads at every decision, `priorities.json`
 (`machine/benchRaise.ts`, every 5 s): a waiting shared ticket that an exclusive turn has passed (one held the lock while it
-waited) has its session raised to `urgent` while it waits (`raisedFrom`, `raisedFor`; the marks are kept in the file's
+waited), or that an exclusive ticket taken after it outranks (on LothDesktop on 2026-10-24 a normal build waited behind
+w1789's later high leg, which itself waited behind a shared group kept urgent by game players, with no exclusive holder),
+has its session raised to `urgent` while it waits (`raisedFrom`, `raisedFor`; the marks are kept in the file's
 `passed`). It then sorts before the exclusive tickets taken after it, and counts against the holder, whose 30-minute
 turn (w1832) ends instead of the hold. A session with a live exclusive ticket of its own is not raised (its timed leg
 would move up too). An editor start's ticket has a session of its own, `editor:<sandbox>` (`FF_BENCH_SESSION`), at the
