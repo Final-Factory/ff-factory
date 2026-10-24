@@ -2369,7 +2369,7 @@ export class Agents {
    * Search every transcript (server/search.ts). `agent` is a session id, a standing agent id, or part
    * of a session title; `sandbox` / `machine` narrow to their sessions.
    */
-  search(req: { query: string; sandbox?: string; machine?: string; agent?: string; since?: string; until?: string; limit?: number }) {
+  async search(req: { query: string; sandbox?: string; machine?: string; agent?: string; since?: string; until?: string; limit?: number }) {
     let ids: Set<string> | undefined;
     const narrow = (keep: (s: SessionInfo) => boolean) => {
       const next = new Set([...this.store.sessions.values()].filter(keep).map((s) => s.id));
@@ -4579,7 +4579,7 @@ ${w.repo ?? ''}
             limit: rangedNumber(1, 100, 'Default 30.').optional(),
           },
           wrap(clamped({ limit: [1, 100] }, async (a: { query: string; sandbox?: string; machine?: string; agent?: string; since?: string; until?: string; limit?: number }) => {
-            const r = this.search({ ...a, limit: a.limit ?? 30 });
+            const r = await this.search({ ...a, limit: a.limit ?? 30 });
             if (!r.hits.length) return `No matches in ${r.scanned} transcript(s).`;
             const where = (h: (typeof r.hits)[number]) => (h.sandboxId ? `sandbox ${h.sandboxId}` : h.machineId ? `machine ${h.machineId}` : h.standingId ? `standing agent ${h.standingId}` : h.sessionKind === 'orchestrator' ? 'orchestrator' : '');
             return r.hits.map((h) => `- ${h.t.slice(0, 16).replace('T', ' ')} ${h.sessionId} "${h.title}" (${where(h)}) seq ${h.seq} ${h.kind}: ${h.snippet}`).join('\n');
