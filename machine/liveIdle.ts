@@ -106,6 +106,8 @@ export const LEAVE_PLAY_WAIT_MS = 90_000;
 export const QUIT_WAIT_MS = 180_000;
 /** How long the delayed quit gets before EXIT_NOW_SNIPPET quits the editor inside a bridge call (w1829). */
 export const QUIT_NUDGE_MS = 15_000;
+/** How long an editor whose save-and-quit answer never came gets to go before it counts as not closed (w1829). */
+export const ANSWER_LOST_WAIT_MS = 15_000;
 
 /**
  * Close an idle editor without losing work: read its state (unreadable: skip), skip while it compiles or imports, or while
@@ -138,7 +140,18 @@ export async function idleCloseEditor(d: IdleCloseDeps, minutes: number): Promis
   if (look.untitled) return skip(`${look.untitled} untitled scene${look.untitled > 1 ? 's have' : ' has'} unsaved changes (saving would ask where)`);
   const answer = await d.bridge(SAVE_AND_QUIT_SNIPPET, { safetyChecks: false });
   const q = /^quitting saved=(.*)$/.exec(answer.trim());
-  if (!q) return skip(answer.startsWith('skip: ') ? answer.slice(6) : `the editor did not take the save and quit (${answer.slice(0, 160)})`);
+  if (!q && answer.startsWith('skip: ')) return skip(answer.slice(6));
+  if (!q) {
+    // w1829: the bridge answers from another thread after the call, and an editor that updates at once quits first: no
+    // answer, yet it saved and quit (BEAST, 2026-10-24 05:54Z: slot5's editor quit cleanly 2 s after the call, its mark was
+    // dropped as a skip and nothing started it again). It is closed if its process goes.
+    const until = d.now() + ANSWER_LOST_WAIT_MS;
+    while ((await d.editorPids()).length) {
+      if (d.now() >= until) return skip(`the editor did not take the save and quit (${answer.slice(0, 160)})`);
+      await d.sleep(2000);
+    }
+    return { closed: true, saved: [], text: `closed (its answer was lost as it quit: ${answer.slice(0, 160)}; the quit comes only after its scenes and assets are saved)` };
+  }
   const saved = q[1].split(';').filter(Boolean);
   const savedText = saved.length ? `saved ${saved.join(', ')} and the assets first` : 'nothing unsaved in its scenes; assets saved';
   const start = d.now();

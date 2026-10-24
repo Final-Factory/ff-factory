@@ -331,6 +331,10 @@ sandbox, its branch, the worker's conversation and its hold stay.
      checks and save, then `Exit(0)` inside the bridge's own call, which runs while the editor does not update (the
      bridge posts its calls to the main thread's SynchronizationContext). One that answers "skip: …" then (it began
      compiling) keeps its quit asked for. One that does not go is left running, never killed.
+     The answer to the save and quit can be lost: the bridge writes it from another thread after the call, and an editor
+     that updates at once quits first (w1829: BEAST's slot5 editor on 2026-10-24 quit cleanly at 05:54Z, 2 s after the
+     call; the close counted as a skip, its mark was dropped and nothing started it again). With no answer, an editor
+     whose process goes within 15 s (`ANSWER_LOST_WAIT_MS`) is closed, since the quit comes only after the save.
   A skipped close is asked again after another idle period. The crash watch is told first, so the quit is not restarted.
 - **Shown and logged.** A closed sandbox carries `idleClosed` (`MachineSandbox`, kept in the daemon's `sandboxes.json`):
   list_sandboxes shows "editor closed: idle 15 min; reopens on resume (closed HH:MMZ, saved ... first)" in place of
