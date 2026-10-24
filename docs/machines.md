@@ -1643,6 +1643,36 @@ LothDesktop and Beast, not just when BEAST is full").
     queued message is retried (the send queue is on disk); one whose switch had finished finds its branch already
     there. w631 (finished requests close themselves) only makes more check-ins stale, which releases their sandboxes
     sooner; it changes nothing else here.
+- **A resume on a full computer moves to one with room** (w2046, lothsahn, 2026-10-24: "We should not have idle slots if
+  there is queued work"; `server/resumeMove.ts`, `Agents.roomMove`). Until then a released worker was placed again only on
+  its own computer: at 14:05Z w1891's worker 0cd35068 (merge PR #2347) and w2013's leg 2 worker 99862afa waited for a BEAST
+  sandbox while LothLaptop, LothDesktop (3 free), the m5 (2 free) and biscuit (1 free) sat idle.
+  - **When.** A message that waits in the send queue only for room on its worker's computer (`ROOM_WAIT`: no sandbox free
+    there, its agent cap, its sandbox's seats; not an offline or outdated machine, not a placement under way) for
+    `MOVE_AFTER_MS` (20 s, so a turn ending there that moment frees it; the drain runs every 30 s, so a move comes 20 to
+    50 s after the message).
+  - **Where.** `moveDecision` picks as new work is placed (`pickComputer`: placement.prefer, avoid, hold and minPriority,
+    the Live view and build lists, timed work on computers that take it, never the m5), among computers other than its
+    own with a free sandbox already made (game work) or an agent seat (other work). A pair leg never goes to another leg's
+    computer, nor to a retry's avoided ones, and a Mac takes only a cross-OS pair's host leg. A request pinned to computers
+    (`queuedFor.needs`) goes only there.
+  - **How.** Its process stops, its sandbox's uncommitted work is saved and pushed (w656), its sandbox is released at once
+    (`placeReleased`, `movedAway`: lothsahn, "When it moves workers to another box, it should request they clean up and
+    force those slots to be released"; FF Factory ends what it left running and its temp folder goes as for any stopped
+    worker). A conversation does not cross computers, so FF Factory itself starts a fresh session for its request in a free
+    sandbox there, switched to its branch (game work) or on an agent seat, whose first message carries its last report,
+    the brief its worker started from, the request as filed and the handover (`handedBack`: "Moved (w2046)", its branch,
+    the message that was waiting). A pair leg's record points at the new session. Its other open requests, and the request
+    itself when the start fails, go to the dispatcher Queued for that computer ([ledger] MOVED). The journal says
+    `room move: ...` for each.
+  - **When it stays** (its Queued line says why, marked "it stays on its computer (w2046)"): commits only that computer
+    has (its sandbox on its branch with commits not pushed, or a branch that does not track its own remote branch),
+    uncommitted work its daemon cannot save, a timed run from its sandbox holding the bench lock, a timed leg (w1969:
+    both sides are timed on one computer), a request pinned there, or an unknown branch. With no other computer that
+    could take it it waits as before ("no other computer can take it now (w2046)").
+  - **WRONG.** Any other resume waiting for room on its computer while another computer it fits has had room for
+    `ROOM_STAND_MS` reads Queued "… it should move there (w2046)" with `roomOn`, the ledger's WRONG flag
+    (`shared/workState.ts`).
 - **The numbers are judgments**: 85% RAM (BEAST at 86% was overloaded, LothDesktop at 47% had room; one more editor
   takes 8-12 GB, about 15% of 64 GB) and the 10-point margin (one agent of ten slots, or about 6 GB of 64). Live agents
   count, not only mid-turn ones, because an idle agent's process holds its memory too (docs/orchestrators.md, "Agent

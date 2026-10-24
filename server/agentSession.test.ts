@@ -443,6 +443,33 @@ test('w1135: a queued message says what holds it now: "offline" goes once the ma
   await until(() => store.readTranscript(c.info.id).some((e) => e.kind === 'user' && (e as { text: string }).text === 'carry on'), 'delivered');
 });
 
+test('w2046: a message that waits only for room on its own computer goes to roomMove: dropped once its work moved, or held with the line it gives', (t) => {
+  const { sessions, worker } = setup(t);
+  const c = worker();
+  c.info.machineId = 'm1';
+  let hold = 'm1 is offline: it is placed again once its daemon is back';
+  sessions.placeFull = () => hold;
+  const asked: string[] = [];
+  let answer: true | string | undefined;
+  sessions.roomMove = (_s, q, h) => {
+    asked.push(`${q.text}|${h}`);
+    return answer;
+  };
+  sessions.send(c.info.id, 'carry on');
+  assert.deepEqual(asked, [], 'an offline machine is its machine, not room: never moved');
+  hold = 'no sandbox on m1 is free (its own, slot2, took other work after it was released: it waits on CI); the next one to free there is its, ahead of new work';
+  sessions.drain();
+  assert.equal(asked.length, 1);
+  assert.equal(sessions.queued()[0].why, hold, 'undefined: it waits as it is');
+  answer = `${hold}; it stays on its computer (w2046): 2 commit(s) on b are not pushed: only m1 has them`;
+  sessions.drain();
+  assert.equal(sessions.queued()[0].why, answer, 'it stays: its Queued line says why');
+  assert.equal(sessions.queued()[0].on, 'capacity');
+  answer = true;
+  sessions.drain();
+  assert.equal(sessions.queued().length, 0, 'moved: the message went with its work to the new session');
+});
+
 test('the model a session shows is the one its last reply came from, not the configured one (w1358)', async (t) => {
   const { dir, store, sessions, worker } = setup(t);
   const s = worker();
