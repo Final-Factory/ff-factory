@@ -270,7 +270,7 @@ test('orchestrator options: each its own memory folder, Write and Edit behind th
 
 // ---------------------------------------------------------------- delete_memory (w1748)
 
-test('delete_memory: one .md file of its own, in its person’s turn; a copy in the trash, a log line, the index named', (t) => {
+test('delete_memory: one .md file of its own, in its person’s turn; a copy in the trash, a log line, the index named', async (t) => {
   const { ben } = world(t);
   const root = path.dirname(ben);
   const file = path.join(ben, 'm5-for-ben.md');
@@ -294,12 +294,12 @@ test('delete_memory: one .md file of its own, in its person’s turn; a copy in 
   assert.equal(fs.readFileSync(path.join(memoryTrashDir(root, 'person-ben'), '20261022T153000Z-2-m5-for-ben.md'), 'utf8'), 'second');
   // Kept 30 days, then the backup pass removes it; a name without a time is never removed.
   fs.writeFileSync(path.join(memoryTrashDir(root, 'person-ben'), 'no-stamp.md'), 'x');
-  assert.equal(pruneMemoryTrash(root, new Date('2026-11-21T15:29:59Z')), 0, 'not yet 30 days');
+  assert.equal(await pruneMemoryTrash(root, new Date('2026-11-21T15:29:59Z')), 0, 'not yet 30 days');
   assert.ok(fs.existsSync(kept));
-  assert.equal(pruneMemoryTrash(root, new Date('2026-11-21T15:30:01Z')), 2);
+  assert.equal(await pruneMemoryTrash(root, new Date('2026-11-21T15:30:01Z')), 2);
   assert.ok(!fs.existsSync(kept));
   assert.ok(fs.existsSync(path.join(memoryTrashDir(root, 'person-ben'), 'no-stamp.md')));
-  assert.equal(pruneMemoryTrash(path.join(root, 'missing')), 0, 'no trash yet');
+  assert.equal(await pruneMemoryTrash(path.join(root, 'missing')), 0, 'no trash yet');
 });
 
 test('delete_memory: refused outside its own folder, for MEMORY.md, folders, wildcards and subfolders; nothing touched', (t) => {
