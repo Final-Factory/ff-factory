@@ -140,7 +140,10 @@ test('w1158: what a coordinator carries in every call stays within its budget', 
   // w1812 (Ben: "i already answered this why are you asking me in the waiting on input for this still") added one sentence
   // to the [needs you] rule: read the notes of the request and its worker's other requests before asking (cut from 560
   // characters to 240; ask_person's refusal carries the rest); the owner's brief measured 28,140, so the cap moved to 28,150.
-  const PROMPT_MAX = 28_150;
+  // w1955 (lothsahn: "Why was I being shown old cards that were decided?") added one sentence to the ask_person rule: a card answered
+  // in typed words is closed with close_question that turn (69 characters). Main had grown to 28,243 before it (over the cap, which
+  // the pull request gate does not run); the owner's brief measured 28,312, so the cap moved to 28,350.
+  const PROMPT_MAX = 28_350;
   // w1163: the always-loaded sets now follow measured use (docs/tool-manifest.md); the dispatcher's is 23,436 characters
   // since w1159 gave list_work, list_sandboxes, list_machines and agent_transcript their output options. w1597 gave decide_work
   // its questions (one plain question per decision with its answers, as the person's card asks them; Ben, 2026-10-19: "just ask

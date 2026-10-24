@@ -289,7 +289,7 @@ export class RemoteChat {
     this.d.waker.cancel(id);
     this.d.orchestrators.personWrote(id);
     const via = `Claude Code or Desktop (${c.keyName.replace(/[\]\n\r]/g, '')})`;
-    const said = `[via ${via}]\n${text}${this.d.orchestrators.heldOffer(id)}`;
+    const said = `[via ${via}]\n${text}${this.d.orchestrators.heldOffer(id, text)}`;
     const watch = new Watch(id);
     try {
       const uuid = await this.d.deliver(id, said, { attachments: files, requestedBy: c.who });
