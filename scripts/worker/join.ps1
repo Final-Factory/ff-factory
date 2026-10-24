@@ -402,7 +402,7 @@ function Invoke-NewJoin([string]$tsExe, $self, [string]$work) {
         Say "Dry run: nothing was changed, and the code is still unused. Run it again without -DryRun to join."
         return 0
     }
-    if (-not $Yes -and -not (Confirm-Step 'Go on: install what is missing, enrol and install this PC?' $true)) { Say 'Stopped; nothing was changed and the code is still unused.'; return 1 }
+    if (-not $Yes -and -not (Confirm-Step 'Go on: install what is missing, enroll and install this PC?' $true)) { Say 'Stopped; nothing was changed and the code is still unused.'; return 1 }
     if (-not $SkipMachineSetup) {
         if (-not (Install-Tools)) { return 2 }
         Show-Unity

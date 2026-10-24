@@ -171,7 +171,7 @@ say "Limits: $LS sandboxes, $LA agents per sandbox, $LU Unity editors at once ($
 ROOT=${ROOT:-$(tty_read 'Root folder (an empty or new folder with 200+ GB free)' "$ROOT_GUESS")}
 say "Root: $ROOT."
 if [ "$DRY_RUN" = 1 ]; then say 'Dry run: nothing was changed, and the code is still unused. Run it again without --dry-run to join.'; exit 0; fi
-yes_no 'Go on: enrol and install this computer?' y || { say 'Stopped; nothing was changed and the code is still unused.'; exit 1; }
+yes_no 'Go on: enroll and install this computer?' y || { say 'Stopped; nothing was changed and the code is still unused.'; exit 1; }
 
 step 'Enrolling'
 status=$(post_join false "$WORK/join.json" 2>/dev/null || true)
