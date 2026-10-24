@@ -23,7 +23,7 @@ import { openPr } from './gitStatus.ts';
 import { ownersOf, resumableSessions, type SessionOwner } from './resumable.ts';
 import { liveLostNote, movedNote, savedNote } from './placeAgain.ts';
 import { safeImage } from './images.ts';
-import { hostStartFailed } from '../shared/agentState.ts';
+import { hostStartFailed, offlineDetail } from '../shared/agentState.ts';
 import { ghLoginLabel, sanitizeGhLogin } from '../shared/ghLogin.ts';
 import { HOST_LOGIN, machineLogin, type AccountIdentity } from './usage.ts';
 import type { AttachmentStore } from './attachments.ts';
@@ -2033,7 +2033,7 @@ export class MachineManager {
       // stays its, so new work does not take it, until it is messaged, stopped on purpose, or HOLD_PLACE_MS passes.
       if (was && why !== false && !s.info.stoppedOnPurpose && s.info.machineSandbox) s.info.heldSince = new Date().toISOString();
       if (s.info.status !== 'stopped' && s.info.status !== 'error') {
-        Object.assign(s.info, { status: 'stopped', statusDetail: `machine ${id} went offline`, pendingPermissions: [] });
+        Object.assign(s.info, { status: 'stopped', statusDetail: offlineDetail(id), pendingPermissions: [] });
         this.store.putSession(s.info);
       }
       // Noted above if it was mid-turn; the mark must not outlive this drop, or every later drop resumes it again.

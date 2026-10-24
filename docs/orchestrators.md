@@ -1388,6 +1388,21 @@ request's first ("main") worker may close it, was not taken: at w428 the worker 
 first one started, and a request handed from worker to worker has no single main one, while who is still on it is
 already in the ledger (links, `servedBy`, session state).
 
+**An ended worker with work pending is still on it** (w1972, lothsahn: "Please fix the closing job so it doesn't close out
+jobs with errors. Those should be resumed to fix the error or escalated to an operator if the error can't be fixed"). On
+2026-10-24 at 02:38Z beast's daemon update dropped the idle processes of w1945's worker 7fadacb8 (a 30-minute check-in
+pending) and w1946's 9d3696a1 (waiting on lothsahn); the drop marks every live session on the machine `stopped`,
+"machine beast went offline" (`server/machines.ts`, the drop, `offlineDetail`), and emits `ended`, and the ops worker's
+DONE for its deploy job then closed both requests; w1962's f77f6ee0 the same at 02:50Z when lothdesktop went offline.
+The check-ins were not lost (the restart log says "wake_me: re-armed 15 pending wake(s)", and 7fadacb8's 03:00 check-in
+was still pending at 02:40): only the ledger read the drop as the worker ending. Now `stillOn` keeps a stopped or errored
+worker on the request while `pendingOn` finds work pending on it: a wake_me check-in, a declared wait on a person
+(`waitingOn`), a gate on the request (`blocked`), a question, a last report with a `wNNN: still open:` line, or a stop its
+machine going offline made (`stoppedOffline`, `shared/agentState.ts`; not one on purpose). Such a worker is resumed by its
+check-in, its gate or the ledger cleanup (which resumes, re-places or escalates, w1870), or waits on its person; another
+worker's DONE records only its own part. And `workerEnded` never closes a request on the orchestration worker's DONE
+alone: that DONE is for its job (a deploy, a restart), so the request waits for its own worker's DONE.
+
 **The wrap-up** (w419). When the dispatcher sends a worker a related request that is not yet one of its own (`message_agent` with `work_id`, [One session per request](#one-session-per-request)) and the
 worker's current turn is on other requests (`servedBy`, [What a request is doing now](#what-a-request-is-doing-now)),
 the message starts with `[wrap-up]`: for each request it holds (not only the one its turn was on, w915), end the reply

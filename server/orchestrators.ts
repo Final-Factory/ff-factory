@@ -60,10 +60,10 @@ import { NOTICE_TAG } from '../shared/notices.ts';
 import { mediaLine, previewsOf, reviewRootOf } from './reviewMedia.ts';
 import { alreadySent, asksSame, matchedAsk, needsYouDigestText, needsYouRecord, needsYouText, whoOf, type NeedsYouWait } from './needsYou.ts';
 import { asksAnsweredBy, sameAsk, WAIT_LINE_CHARS } from '../shared/waitSummary.ts';
-import { holdsItsPlace } from '../shared/agentState.ts';
+import { holdsItsPlace, stoppedOffline } from '../shared/agentState.ts';
 import { displayName } from '../shared/labels.ts';
 import { permissionAccess, permissionWhat, type PermissionAccess } from '../shared/permissionAccess.ts';
-import { OPS_PEOPLE } from './opsWorker.ts';
+import { OPS_ID, OPS_PEOPLE } from './opsWorker.ts';
 import { isSamePerson, personForWork, sessionPerson, tokenPersonForWork } from './vault.ts';
 import type { AttachmentRef, ConditionalDecision, OpenAsk, WorkNeedsYou, GateResume, Machine, WorkAutoClosed, WorkBlocker, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPair, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
 
@@ -3495,16 +3495,39 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
 
   /**
    * The workers still on a request, apart from `except` (w434): linked to it, still serving it (servedBy: not moved on to
-   * newer work), alive (not stopped, errored or gone), and not done with their part (WorkItem.done).
+   * newer work), alive (not stopped, errored or gone) or stopped with work still pending on it (pendingOn, w1972), and
+   * not done with their part (WorkItem.done).
    */
   private stillOn(w: WorkItem, except?: string): string[] {
     const all = [...this.store.work.values()];
     return w.sessionIds.filter((id) => {
       if (id === except || doneOf(w)[id]) return false;
       const s = this.store.sessions.get(id);
-      if (!s || s.status === 'stopped' || s.status === 'error') return false;
+      if (!s || ((s.status === 'stopped' || s.status === 'error') && !this.pendingOn(w, id))) return false;
       return servedBy(id, all).has(w.id);
     });
+  }
+
+  /**
+   * What worker `sid` still has pending on request `w` once its process has ended (w1972, lothsahn: "Please fix the closing
+   * job so it doesn't close out jobs with errors"): a check-in, a gate on the request, a wait on a person, a question, a
+   * last report that says the request is still open, or a stop its machine going offline made (a daemon update or restart
+   * ends a process, not its work: w1945's 7fadacb8, w1946's 9d3696a1 and w1962's f77f6ee0 were closed so on 2026-10-24).
+   * Such a worker is resumed by its check-in, its gate or the ledger cleanup, or waits on its person; its request is not
+   * closed on another worker's DONE. undefined: nothing pending.
+   */
+  private pendingOn(w: WorkItem, sid: string): string | undefined {
+    const s = this.store.sessions.get(sid);
+    if (!s) return undefined;
+    const wake = this.d.pendingWake?.(sid);
+    if (wake) return `its check-in is pending (${wake.at.slice(11, 16)} UTC: "${clip(wake.note, 80)}")`;
+    if (s.waitingOn && (!s.waitingOn.request || s.waitingOn.request === w.id)) return `it waits on ${s.waitingOn.who}`;
+    if (w.blocked) return `the request is blocked on ${w.blocked.kind}${w.blocked.ref ? ` ${w.blocked.ref}` : ''}`;
+    if (w.question) return 'a question on it waits on a person';
+    const open = s.lastResult ? stillOpenIn(s.lastResult.slice(-2000)).get(w.id.toLowerCase()) : undefined;
+    if (open) return `its last report says "${clip(open, 120)}"`;
+    if (stoppedOffline(s)) return `it was stopped because ${s.machineId} went offline, not on purpose`;
+    return undefined;
   }
 
   /**
@@ -3541,12 +3564,28 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
   /**
    * A worker of open requests ended (its process stopped, w434): a request whose other workers all said DONE closes now,
    * on the last DONE's report, unless doneProblem finds something missing (then it waits for the cleanup or a person).
+   * w1972: not while the ended worker still has work pending on it (pendingOn), and never on the orchestration worker's
+   * DONE alone: that one is for its job (a deploy, a restart), not the request's own work.
    */
   workerEnded(s: Pick<SessionInfo, 'id'>) {
     for (const w of [...this.store.work.values()]) {
       const done = doneOf(w);
-      if (!isOpen(w) || !w.sessionIds.includes(s.id) || !Object.keys(done).length || done[s.id] || this.stillOn(w).length) continue;
-      const [sid, last] = Object.entries(done).sort((a, b) => b[1].at.localeCompare(a[1].at))[0];
+      if (!isOpen(w) || !w.sessionIds.includes(s.id) || !Object.keys(done).length || done[s.id] || this.stillOn(w, s.id).length) continue;
+      const status = this.store.sessions.get(s.id)?.status;
+      if (status && status !== 'stopped' && status !== 'error' && this.stillOn(w).length) continue;
+      const pending = this.pendingOn(w, s.id);
+      if (pending) {
+        this.stamp(w, `worker ${s.id} ended; its other workers said DONE, but it stays open: ${s.id} still has work on it: ${pending} (w1972)`);
+        this.store.putWork(w);
+        continue;
+      }
+      const own = Object.entries(done).filter(([id]) => id !== OPS_ID);
+      if (!own.length) {
+        this.stamp(w, `worker ${s.id} ended; only the orchestration worker said DONE, for its job, so it stays open for its own worker's DONE (w1972)`);
+        this.store.putWork(w);
+        continue;
+      }
+      const [sid, last] = own.sort((a, b) => b[1].at.localeCompare(a[1].at))[0];
       // w1870: a worker whose last turn ended in an error or an interrupt did not finish its part: the cleanup resumes,
       // escalates or places it, and the request stays open.
       const ended = this.store.sessions.get(s.id);
@@ -3614,7 +3653,7 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       const others = this.stillOn(w, s.id);
       if (others.length) {
         const who = others.map((id) => this.workerLine(id)).join(', ');
-        parts.push(`${id}: your part is recorded as done; ${id} stays open while ${who} ${others.length > 1 ? 'are' : 'is'} still on it, and closes once each has said DONE or ended`);
+        parts.push(`${id}: your part is recorded as done; ${id} stays open while ${who} ${others.length > 1 ? 'are' : 'is'} still on it, and closes once each has said DONE or ended with nothing pending`);
         this.stamp(w, `${speaker} said DONE for its part; still on it: ${others.join(', ')}`);
         this.store.putWork(w);
         continue;
