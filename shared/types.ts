@@ -599,6 +599,17 @@ export interface BenchPriority {
   raisedFor?: string;
   /** w1969: the worker's last timed_place verdict while it holds; the guard lets its exclusive timing tickets through only on "here". */
   timed?: TimedVerdict;
+  /**
+   * w1984 (server/agents.ts benchAway): its worker is away from this machine's queue, so its waiting tickets hold
+   * nobody back (bench_queue.py parks them, and queues them again at the back once the mark goes).
+   */
+  away?: BenchAway;
+}
+
+/** Why a worker's waiting bench tickets are parked (w1984); `exclusive_only`: only its timed (exclusive) tickets. */
+export interface BenchAway {
+  why: string;
+  exclusive_only?: true;
 }
 
 /** What timed_place decided for a worker's timed leg (w1969, server/timedAsk.ts). */

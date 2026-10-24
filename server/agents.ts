@@ -53,7 +53,7 @@ import { MachinePauses, pauseHolds } from './machinePause.ts';
 import { playHolds, playLine } from '../shared/personPlay.ts';
 import { unitySlotsLine } from '../shared/fleet.ts';
 import { isMidTurn, midTurnRefusal, othersMidTurn, snapshotOf, type OptionsFactory, type SessionHandle, type SessionManager, type TurnEndMeta } from './sessions.ts';
-import { FLAG_LABEL, WORK_BLOCKER_KINDS, WORK_OPEN, WORK_PRIORITIES, type WorkBlockerKind, type WorkSource, type BenchPriority, type AttachmentRef, type DeliveredAttachment, type ImageInput, type PermissionMode, type Requester, type Sandbox, type SessionInfo, type TranscriptEvent, type WorkItem, type WorkPriority, type WorkStatus } from '../shared/types.ts';
+import { FLAG_LABEL, WORK_BLOCKER_KINDS, WORK_OPEN, WORK_PRIORITIES, type WorkBlockerKind, type WorkSource, type BenchPriority, type BenchAway, type AttachmentRef, type DeliveredAttachment, type ImageInput, type PermissionMode, type Requester, type Sandbox, type SessionInfo, type TranscriptEvent, type WorkItem, type WorkPriority, type WorkStatus } from '../shared/types.ts';
 import { attachmentForMachine, publicRef, publishableFile, uploadForMachine, type AttachmentStore } from './attachments.ts';
 import type { TimedRuns } from './timedRuns.ts';
 import { REVIEW_DEFAULTS, type ReviewStore } from './review.ts';
@@ -180,6 +180,8 @@ type Where = { machineId?: string; machineSandbox?: string };
 const BUSY_STATUS = new Set(['running', 'starting', 'waiting_permission']);
 /** w1378: how long after a boot the [needs you] digest goes, once the machines' workers have reported in. */
 const NEEDS_YOU_DIGEST_MS = 3 * 60_000;
+/** How old a machine's last bench state may be for w1984's "a ticket on another machine" (stats come every 15 s). */
+const BENCH_STATE_FRESH_MS = 2 * 60_000;
 
 /** A machine's clone folder name (its Unity instance name), read as a path of the machine's own platform, not this host's. */
 const cloneName = (m: Pick<Machine, 'platform' | 'repoPath'>) => (m.platform === 'win32' ? path.win32 : path.posix).basename(m.repoPath);
@@ -2562,9 +2564,36 @@ export class Agents {
       // w1969: its timed_place verdict while it holds, for this machine's guard
       const v = this.timedVerdicts.get(info.id);
       const timed = v && Date.parse(v.until) > Date.now() ? v : undefined;
-      out[info.id] = { priority: release ? 'urgent' : top, requests: open.map((w) => w.id), ...(exempt ? { exempt } : {}), ...(timed ? { timed } : {}) };
+      const away = release ? undefined : this.benchAway(info, machineId, timed);
+      out[info.id] = { priority: release ? 'urgent' : top, requests: open.map((w) => w.id), ...(exempt ? { exempt } : {}), ...(timed ? { timed } : {}), ...(away ? { away } : {}) };
     }
     return out;
+  }
+
+  /**
+   * Why worker `info`'s waiting tickets in `machineId`'s bench queue should hold nobody back now (w1984), or undefined.
+   * lothsahn, 2026-10-24: "a waiting ticket in a machine's bench queue must not outlive the worker that asked for it":
+   * on LothDesktop the exclusive ticket t00000982 waited on for w1789 after its worker 2e29f29e was stopped and the
+   * timed run had moved to LothLaptop, and the newer shared tickets queued behind it. bench_queue.py parks the tickets
+   * of a session marked so (they keep waiting, blocking nobody) and queues them again at the back once the mark goes.
+   * - stopped on purpose (stop_agent, interrupt_agent, the UI): every waiting ticket, until it is sent a message again;
+   * - a ticket of its own in another machine's queue (its daemon's last bench state), or a timed_place verdict
+   *   "elsewhere": its timed (exclusive) tickets only, so its builds here still count.
+   */
+  private benchAway(info: SessionInfo, machineId: string, timed?: { verdict: string; leg?: string; timedRun?: string }): BenchAway | undefined {
+    const who = `its worker ${info.id.slice(0, 8)}`;
+    if (info.stoppedOnPurpose) return { why: `${who} was stopped on purpose` };
+    const now = Date.now();
+    for (const [m, st] of Object.entries(this.machines?.allStats?.() ?? {})) {
+      if (m === machineId || !st.bench || !(now - Date.parse(st.at ?? '') < BENCH_STATE_FRESH_MS)) continue;
+      const t = [...(st.bench.running ?? []), ...(st.bench.waiters ?? [])].find((x) => x.session === info.id);
+      if (t) return { why: `${who} has ticket ${t.ticket} on ${m} now`, exclusive_only: true };
+    }
+    if (timed?.verdict === 'elsewhere') {
+      const where = timed.leg ? ` (${timed.leg})` : timed.timedRun ? ` (timed_run on ${timed.timedRun})` : '';
+      return { why: `${who}'s timed leg was placed elsewhere${where}`, exclusive_only: true };
+    }
+    return undefined;
   }
 
   private openWorkOf(info: SessionInfo): WorkItem[] {
