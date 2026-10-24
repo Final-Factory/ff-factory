@@ -2,7 +2,7 @@
 // (machine/liveIdle.ts). The editor here is a fake that answers the snippets the way the real one does.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { INSPECT_SNIPPET, LEAVE_PLAY_SNIPPET, SAVE_AND_QUIT_SNIPPET, idleCloseEditor, idleReopenNote, parseLook, type IdleCloseDeps } from '../machine/liveIdle.ts';
+import { EXIT_NOW_SNIPPET, INSPECT_SNIPPET, LEAVE_PLAY_SNIPPET, SAVE_AND_QUIT_SNIPPET, idleCloseEditor, idleReopenNote, parseLook, type IdleCloseDeps } from '../machine/liveIdle.ts';
 
 interface FakeEditor {
   playing: boolean;
@@ -11,6 +11,10 @@ interface FakeEditor {
   untitled?: number;
   /** It does not quit when asked (a dialog, a hang). */
   stuck?: boolean;
+  /** w1829: unfocused and idle, it takes the delayed quit but never updates, so only a quit inside a bridge call goes. */
+  noUpdates?: boolean;
+  /** w1829: what it is doing when asked to quit again inside a bridge call (it began compiling meanwhile). */
+  laterCompiling?: boolean;
   /** The bridge does not answer. */
   noBridge?: boolean;
   /** Saving leaves this scene dirty. */
@@ -43,8 +47,15 @@ function fakeEditor(e: FakeEditor) {
         e.dirty = e.staysDirty ? [e.staysDirty] : [];
         if (e.staysDirty) return `skip: ${e.staysDirty} still has unsaved changes after saving`;
         quitAsked = true;
-        if (!e.stuck) up = false;
+        if (!e.stuck && !e.noUpdates) up = false;
         return `quitting saved=${was.join(';')}`;
+      }
+      if (code === EXIT_NOW_SNIPPET) {
+        if (o?.safetyChecks !== false) return 'error: Blocked pattern detected: EditorApplication.Exit';
+        if (e.laterCompiling) return 'skip: compiling or importing';
+        if (e.stuck) return 'the editor did not answer in time (compiling, or its main thread is busy)';
+        up = false;
+        return 'the bridge closed the connection';
       }
       return 'error: unknown snippet';
     },
@@ -115,6 +126,34 @@ test('w1746: an editor that does not quit when asked is left running, never kill
   const r = await idleCloseEditor(ed.d, 15);
   assert.equal(r.closed, false);
   assert.match(r.text, /it still runs after 180 s; left running, never killed$/);
+  assert.equal(ed.up(), true);
+});
+
+test('w1829: an unfocused idle editor that takes the quit but never updates is quit again inside a bridge call', async () => {
+  const ed = fakeEditor({ playing: false, dirty: ['Assets/Scenes/Look.unity'], noUpdates: true });
+  const r = await idleCloseEditor(ed.d, 0);
+  assert.equal(r.closed, true, r.text);
+  assert.deepEqual(r.saved, ['Assets/Scenes/Look.unity']);
+  assert.match(r.text, /^closed \(saved Assets\/Scenes\/Look\.unity and the assets first; it quit when asked again inside a bridge call\)$/);
+  assert.equal(ed.up(), false);
+  const kinds = ed.calls.map((c) => [c.code === INSPECT_SNIPPET ? 'look' : c.code === SAVE_AND_QUIT_SNIPPET ? 'save+quit' : c.code === EXIT_NOW_SNIPPET ? 'exit now' : 'other', c.safetyChecks]);
+  assert.deepEqual(kinds, [['look', true], ['save+quit', false], ['exit now', false]], 'asked again once, with the safety checks off');
+  assert.match(EXIT_NOW_SNIPPET, /SaveOpenScenes\(\)[\s\S]*still has unsaved changes after saving[\s\S]*EditorApplication\.Exit\(0\);/, 'it saves and checks again before it quits');
+  assert.doesNotMatch(EXIT_NOW_SNIPPET, /delayCall/, 'it quits inside the call, not at an update that may not come');
+});
+
+test('w1829: one that quits by itself within the nudge time is never asked again', async () => {
+  const ed = fakeEditor({ playing: false, dirty: [] });
+  assert.equal((await idleCloseEditor(ed.d, 0)).closed, true);
+  assert.ok(!ed.calls.some((c) => c.code === EXIT_NOW_SNIPPET));
+});
+
+test('w1829: asked again while it began compiling: left running, its quit still asked for (the mark stays)', async () => {
+  const ed = fakeEditor({ playing: false, dirty: [], noUpdates: true, laterCompiling: true });
+  const r = await idleCloseEditor(ed.d, 0);
+  assert.equal(r.closed, false);
+  assert.equal(r.quitting, true);
+  assert.match(r.text, /would not quit then: compiling or importing; left running, never killed$/);
   assert.equal(ed.up(), true);
 });
 
