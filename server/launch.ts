@@ -156,6 +156,19 @@ export const CATALOG = {
     what: z.string().min(1).max(200).describe('What you wait for, in a line ("w727 PR #1291 and w752 fix merged into master").'),
     request: z.string().max(16).optional().describe('The request ("w750") that waits, when you serve several; default: the one you are on.'),
   },
+  /** w1945 (docs/machines.md, "Pair runs"): a check that needs several computers at once, filed as one request; the worker waits on its report. */
+  request_pair: {
+    what: z.string().min(1).max(100).describe('The run in one line: "MP-lowore-pin-pair on PR #2340".'),
+    brief: z.string().min(1).max(6000).describe('What the legs run, as a worker needs it: the branch or commit, the scenario or steps for the host and the clients, what passes (counts, ranges), and where the result goes (a PR comment). Each leg is a new worker that knows nothing else.'),
+    legs: z.number().int().min(2).max(4).optional().describe('Computers it needs at once, one worker on each (default 2: a host and a client).'),
+    cross_os: z.string().max(300).optional().describe('Only when the change can behave differently across OSes (w1692: float or math-library use in the simulation, Burst or IL2CPP codegen, platform APIs or paths, the desync hash, a desync seen only across OSes): why. Without it the legs go on computers that are not Macs; with it a Mac may host, never a client.'),
+    timed: z.boolean().optional().describe('A leg takes timing measurements (exclusive bench tickets): no leg goes on a computer that takes no timed runs (m5).'),
+    request: z.string().max(16).optional().describe('The request ("w665") it is for, when you serve several; default: the one you are on.'),
+  },
+  /** w1945: a leg of a pair run tells the other legs' workers something. */
+  message_pair: {
+    text: z.string().min(1).max(4000).describe('What the other legs need to know: "host listens at 100.74.97.12:7890 on commit 1a2b3c4", "client joined at heartbeat 812", "my leg failed: <why>".'),
+  },
   /** docs/orchestrators.md, "Waiting, Queued, Blocked" (w691): the worker says only a person can move it on. */
   waiting_on_person: {
     who: z.string().min(1).max(120).describe('Whose action it waits on: a name ("Ben"), several separated by commas, or "a reviewer".'),

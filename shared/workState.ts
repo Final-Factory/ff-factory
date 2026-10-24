@@ -34,7 +34,7 @@
 import type { BenchLock, BuildHold, SessionInfo, WorkItem } from './types.ts';
 import { agentState, hostFailureText } from './agentState.ts';
 import { gatesName, gatesOf } from './blockers.ts';
-import { admitsPriority, needsOf, reservedText, ROOM_STAND_MS, unfitWhy, type ReservedRoom, type RoomFit } from './capacity.ts';
+import { admitsPriority, needsOf, pairRoom, pairText, reservedText, ROOM_STAND_MS, unfitWhy, type ReservedRoom, type RoomFit } from './capacity.ts';
 import type { QueueWait } from './queueWaits.ts';
 
 export type WorkLiveState = 'working' | 'waiting' | 'queued' | 'blocked' | 'paused' | 'followup' | 'stalled';
@@ -585,11 +585,15 @@ export function roomShares(items: readonly WorkItem[], f: RoomFacts, extra?: { w
     // A computer without a count (a room list a test or an older reader gave) takes every one.
     const n = (id: string) => left.get(`${kind}:${id}`) ?? Infinity;
     const open = fits.filter((id) => n(id) > 0).sort((a, b) => n(b) - n(a));
-    if (open.length) {
-      const k = `${kind}:${open[0]}`;
-      if (left.has(k)) left.set(k, left.get(k)! - 1);
-      takers.set(k, [...(takers.get(k) ?? []), e.w.id]);
-      out.set(e.key, { gets: open[0], ahead: [] });
+    // A pair run (w1945) takes one on each computer its legs need at once, or none.
+    const pick = e.w.pair ? pairRoom(e.w, open, f.roomFit).pick : open.slice(0, 1);
+    if (pick?.length) {
+      for (const id of pick) {
+        const k = `${kind}:${id}`;
+        if (left.has(k)) left.set(k, left.get(k)! - 1);
+        takers.set(k, [...(takers.get(k) ?? []), e.w.id]);
+      }
+      out.set(e.key, { gets: pick[0], ahead: [] });
     } else out.set(e.key, { ahead: [...new Set(fits.flatMap((id) => takers.get(`${kind}:${id}`) ?? []))] });
   }
   return out;
@@ -613,12 +617,18 @@ function queuedLive(w: WorkItem, f: WorkLiveFacts, wanted: readonly string[] | u
   const age = (id: string) => (f.roomSince ? f.now - (f.roomSince[`${kind}:${id}`] ?? f.now) : Infinity);
   const stood = fits.filter((id) => age(id) >= ROOM_STAND_MS);
   const have = (ids: readonly string[]) => `${ids.join(', ')} ${ids.length > 1 ? 'have' : 'has'} ${slot}`;
+  // w1945: a pair run is room only where enough computers it fits have room at once, one per leg.
+  const short = w.pair ? pairRoom(w, fits, f.roomFit).short : undefined;
+  if (w.pair && short) return { state: 'queued', why: `${head} ${what} (${pairText(w.pair)}): ${short}${unfit.length ? `; ${unfit.map((u) => `${u.id} has ${slot} but cannot take it: ${u.why}`).join('; ')}` : ''}` };
   // w1944: room that work ahead of it in the queue takes is not its: it waits rightly, and says for whom.
   const share = f.shares?.get(key);
   if (fits.length && share && !share.gets) return { state: 'queued', why: `${head} ${what}; ${have(fits)}, but ${aheadText(share)}: it starts when more frees` };
-  if (stood.length) return { state: 'queued', why: `${head} ${what}, but ${have(stood)}: the dispatcher should ${start}`, roomOn: stood };
+  if (stood.length && !(w.pair && pairRoom(w, stood, f.roomFit).short)) {
+    return { state: 'queued', why: `${head} ${what}, but ${have(stood)}: the dispatcher should ${w.pair ? `start its ${w.pair.legs} legs together (start_agent with pair_sandboxes)` : start}`, roomOn: stood };
+  }
   if (fits.length) {
-    const mins = Math.max(...fits.map((id) => Math.floor(age(id) / 60_000)));
+    // w1945: a pair has room for all its legs only since the last of them freed.
+    const mins = (w.pair ? Math.min : Math.max)(...fits.map((id) => Math.floor(age(id) / 60_000)));
     return { state: 'queued', why: `${head} ${what}; ${have(fits)} since ${mins} min ago: the capacity ping brings it to the dispatcher` };
   }
   const held = (f.heldRoom ?? []).filter((h) => h.for.includes(kind) && (!needs?.length || needs.includes(h.id.toLowerCase())));

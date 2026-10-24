@@ -1,5 +1,5 @@
 import type { BenchLock, BenchQueueReport, WorkItem, WorkPriority } from '../shared/types.ts';
-import { admitsPriority, minPriorityText, MIN_PRIORITIES, reservedText, ROOM_STAND_MS, unfitWhy, type MinPriority, type ReservedRoom, type RoomFit } from '../shared/capacity.ts';
+import { admitsPriority, minPriorityText, MIN_PRIORITIES, reservedText, pairRoom, ROOM_STAND_MS, unfitWhy, type MinPriority, type ReservedRoom, type RoomFit } from '../shared/capacity.ts';
 
 /**
  * Where new work has room (w416, Lothsahn: "make sure jobs are getting scheduled on LothDesktop", then "Game work should
@@ -724,7 +724,7 @@ export const roomIds = (r: RoomNow, kind: NeedKind, priority?: WorkPriority): st
 ];
 
 /** The computers with room that `w` can take (w1944): roomIds for its kind and priority, within `needs`, less those it cannot run on, each with why. */
-export function roomForWork(r: RoomNow, w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes' | 'priority'>, needs?: readonly string[]): { ids: string[]; unfit: { id: string; why: string }[] } {
+export function roomForWork(r: RoomNow, w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes' | 'priority' | 'pair'>, needs?: readonly string[]): { ids: string[]; unfit: { id: string; why: string }[]; short?: string } {
   const want = needs?.map((n) => n.toLowerCase());
   const ids: string[] = [];
   const unfit: { id: string; why: string }[] = [];
@@ -734,8 +734,13 @@ export function roomForWork(r: RoomNow, w: Pick<WorkItem, 'needs' | 'title' | 'b
     if (why) unfit.push({ id, why });
     else ids.push(id);
   }
-  return { ids, unfit };
+  // w1945: a pair run has room only where enough computers it fits have room at once, one per leg; fewer are no room for it.
+  const short = w.pair ? pairRoom(w, ids, r.fit).short : undefined;
+  return short ? { ids: [], unfit, short } : { ids, unfit };
 }
+
+/** Of `ids` (room that has stood, roomStood), whether they still hold a pair run's legs at once (w1945); any one does for other work. */
+export const roomEnough = (r: Pick<RoomNow, 'fit'>, w: Pick<WorkItem, 'pair'>, ids: readonly string[]): boolean => (w.pair ? !pairRoom(w, ids, r.fit).short : ids.length > 0);
 
 export { ROOM_STAND_MS };
 

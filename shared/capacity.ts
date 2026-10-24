@@ -8,7 +8,7 @@
 //
 // w1098 (lothsahn, 2026-10-12: "FFBox and FF Factory updates don't need unity editors"): work on a repository that is not
 // the game's needs only an agent slot, not a free game sandbox, an editor or RAM for Unity. needsOf says which a request is.
-import type { WorkItem } from './types.ts';
+import type { WorkItem, WorkPair } from './types.ts';
 
 /**
  * Words that say a request waits for room: "a free sandbox", "all in use", "no free slot", "waiting for an editor",
@@ -213,12 +213,50 @@ export interface RoomFit {
  * [WRONG: biscuit, m5 have room]" while the m5, a Mac that takes no timed runs, could never run them, and the capacity ping
  * listed them as fitting its room. Unknown facts fit: a computer whose platform nobody reported is not ruled out.
  */
-export function unfitWhy(w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes'>, id: string, fit: Readonly<Record<string, RoomFit>> | undefined): string | undefined {
+export function unfitWhy(w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes'> & { pair?: WorkPair }, id: string, fit: Readonly<Record<string, RoomFit>> | undefined): string | undefined {
   const f = fit?.[id];
   if (!f) return undefined;
-  const timed = needsTimed(w);
+  const timed = needsTimed(w) || (w.pair?.timed ? 'any' : false);
   if (timed && f.noTimedRuns) return `${id} takes no timed runs (${f.noTimedRuns})`;
   if ((timed === 'win32' || timed === 'darwin') && f.platform && f.platform !== timed) return `${id} is not on ${timed === 'win32' ? 'Windows' : 'macOS'}, which its timed work names`;
-  if (f.platform === 'darwin' && needsMpPeers(w)) return `${id} is a Mac, which refuses the multiplayer client its MP scenario starts (w665)`;
+  // w1945: a pair run's legs are any computers but Macs, unless it needs a cross-OS pair; then a Mac may host (pairRoom).
+  if (f.platform === 'darwin' && w.pair && !w.pair.crossOs) return `${id} is a Mac: a pair run's legs go on computers that are not Macs (a Mac refuses a multiplayer client, w665), and this one needs no cross-OS pair (w1692)`;
+  if (f.platform === 'darwin' && needsMpPeers(w) && !w.pair?.crossOs) return `${id} is a Mac, which refuses the multiplayer client its MP scenario starts (w665)`;
   return undefined;
 }
+
+/** The most computers one pair run takes at once (w1945; a judgment: the game's own pair scenarios use 2, the honest co-op 3). */
+export const PAIR_MAX_LEGS = 4;
+
+/**
+ * Whether a pair run (w1945, WorkItem.pair) can start on the computers in `ids` (those with room that fit it, unfitWhy, in the
+ * order placement prefers): `pick` names one computer per leg, leg 1 (the host) first; `short` says why not. Each leg needs its
+ * own computer, at the same moment. A cross-OS pair takes at most one Mac, as the host (a Mac refuses a multiplayer client,
+ * w665), and its legs on at least two operating systems; a computer whose platform nobody reported counts toward the legs but
+ * not toward a second operating system. Work that is no pair run fits on any one of them.
+ */
+export function pairRoom(w: { pair?: WorkPair }, ids: readonly string[], fit: Readonly<Record<string, RoomFit>> | undefined): { pick: string[]; short?: undefined } | { pick?: undefined; short: string } {
+  const p = w.pair;
+  if (!p) return ids.length ? { pick: [ids[0]] } : { short: 'no computer it fits has room' };
+  const os = (id: string) => fit?.[id]?.platform;
+  const macs = ids.filter((id) => os(id) === 'darwin');
+  const rest = ids.filter((id) => os(id) !== 'darwin');
+  const have = ids.length ? `only ${ids.join(', ')} ${ids.length > 1 ? 'have' : 'has'} room it fits` : 'no computer it fits has room';
+  if (!p.crossOs) {
+    if (rest.length < p.legs) return { short: `a pair run of ${p.legs} legs needs ${p.legs} computers with room at once, and ${have}` };
+    return { pick: rest.slice(0, p.legs) };
+  }
+  // Cross-OS: a Mac host when one has room, else one computer of each operating system first.
+  const byOs = new Map<string, string[]>();
+  for (const id of rest) byOs.set(os(id) ?? '?', [...(byOs.get(os(id) ?? '?') ?? []), id]);
+  const spread: string[] = [];
+  for (let i = 0; spread.length < rest.length; i++) for (const list of byOs.values()) if (list[i]) spread.push(list[i]);
+  const pick = [...macs.slice(0, 1), ...spread].slice(0, p.legs);
+  const systems = new Set(pick.map(os).filter((x): x is string => !!x));
+  if (pick.length < p.legs) return { short: `a cross-OS pair run of ${p.legs} legs needs ${p.legs} computers with room at once, at most one of them a Mac (the host), and ${have}` };
+  if (systems.size < 2) return { short: `a cross-OS pair run (${p.crossOs}) needs its legs on two operating systems, and the computers with room it fits (${ids.join(', ')}) are all ${[...systems][0] ?? 'of unknown platform'}` };
+  return { pick };
+}
+
+/** "a pair run of 2 legs, cross-OS: <why>, timed" (w1945): what a pair needs, as lines about it say it. */
+export const pairText = (p: WorkPair): string => `a pair run of ${p.legs} legs${p.crossOs ? `, cross-OS (${p.crossOs})` : ', on computers that are not Macs'}${p.timed ? ', timed (exclusive tickets: not on a computer that takes no timed runs)' : ''}`;
