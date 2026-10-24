@@ -61,8 +61,10 @@ export interface TimedPlaceDecision {
   verdict: TimedVerdictKind;
   /** elsewhere: the small computers the leg waits on, best first. */
   needs?: string[];
-  /** elsewhere: the play-only computer a player A/B goes to by timed_run (w1946) instead of a leg. */
+  /** elsewhere: the computer a Windows player A/B goes to by timed_run (w1946, w1996) instead of a leg. */
   timedRun?: string;
+  /** elsewhere by timed_run because the worker named no `via` (w1996): the answer names the leg as the other choice. */
+  choose?: boolean;
   why: string;
 }
 
@@ -77,10 +79,17 @@ export interface TimedPlaceInput {
   sameMachine?: string;
   /** The urgent release lane's builder or the nightly's worker (BenchPriority.exempt): its machine is chosen for it. */
   exempt?: string;
-  /** 'timed_run': a player A/B that a play-only computer can take (w1946). */
+  /**
+   * 'timed_run': a Windows player A/B (w1946), timed by a computer that takes timed runs; 'leg': anything else timed (a snippet
+   * timed in the editor, a Performance test, a Mac player), handed to a new worker on a small computer. Unset (w1996): a
+   * timed_run computer when one is up, with the leg named as the other choice.
+   */
   via?: 'leg' | 'timed_run';
-  /** The play-only computers online on a daemon that runs timed runs (server/timedRuns.ts targets). */
-  playOnly?: readonly string[];
+  /**
+   * The computers a timed_run can go to now, best first (server/timedRuns.ts windowsTargets: play-only, then small worker
+   * computers; online, on a daemon that runs timed runs). Named playOnly before w1996, when only play-only ones took runs.
+   */
+  timedRun?: readonly string[];
 }
 
 /**
@@ -105,9 +114,11 @@ export function decideTimedPlace(a: TimedPlaceInput): TimedPlaceDecision {
   if (sm) return { verdict: 'here', why: `its numbers must come from ${here.id}: "${sm.slice(0, 200)}" (both sides of an A/B stay on one machine)` };
   if (isSmallTimed(here)) return { verdict: 'here', why: `${here.id} is a small computer (${here.maxAgents} agent slot${here.maxAgents === 1 ? '' : 's'}, at most ${SMALL_TIMED_MAX_AGENTS}): its exclusive turn idles little` };
   const idles = `${here.id} has ${here.maxAgents} agent slots (${here.live} live now): an exclusive turn there idles all the others`;
+  // w1996: a Windows player A/B is built here (shared tickets) and timed on a timed_run computer, so no worker or seat is
+  // taken there and nothing is rebuilt; anything else timed goes as a leg to a new worker on a small computer.
+  const play = a.via !== 'leg' && a.platform !== 'darwin' ? a.timedRun?.find((id) => id !== here.id) : undefined;
+  if (play) return { verdict: 'elsewhere', timedRun: play, ...(a.via ? {} : { choose: true }), why: `${idles}; a Windows player A/B goes to ${play} by timed_run, built here (w1946, w1996)` };
   if (!small.length) return { verdict: 'here', why: `${idles}, but no small computer${os} that takes timed runs is online (never m5): time here` };
-  const play = a.via === 'timed_run' && a.platform !== 'darwin' ? a.playOnly?.[0] : undefined;
-  if (play) return { verdict: 'elsewhere', timedRun: play, why: `${idles}; a player A/B goes to the play-only computer ${play} by timed_run (w1946)` };
   return { verdict: 'elsewhere', needs: small.map((c) => c.id), why: `${idles}; small computers${os} take it: ${smallText}${small.some(hasRoom) ? '' : `; none has room now, so it queues there (a big one only after ${TIMED_LEG_WAIT_MS / 60_000} min)`}` };
 }
 
@@ -234,7 +245,7 @@ export function checkTimedAsk(cmd: string, state: TimedAskState | undefined, now
   const v = state.verdict && Date.parse(state.verdict.until) > now ? state.verdict : undefined;
   if (v?.verdict === 'here') return undefined;
   if (v?.verdict === 'elsewhere') {
-    const where = v.timedRun ? `the play-only computer ${v.timedRun}: build the players here (shared tickets) and call timed_run` : v.leg ? `${v.leg}, the timed leg FF Factory filed for it, which runs on a small computer and reports to you` : 'a small computer';
+    const where = v.timedRun ? `${v.timedRun} by timed_run: build the players here (shared tickets) and call timed_run (for a leg that is no Windows player A/B, call timed_place again with via "leg")` : v.leg ? `${v.leg}, the timed leg FF Factory filed for it, which runs on a small computer and reports to you` : 'a small computer';
     return `w1969: the dispatcher sent this timed leg to ${where} (${v.why}), so ${takes} takes no exclusive ticket here. If its numbers must come from this computer (a side of the A/B already ran here), call timed_place again with same_machine saying why.`;
   }
   return `w1969: ${takes} takes an exclusive bench ticket, and ${state.mark.why}. Call timed_place (what, brief, platform) first: it answers "here" (then run this again) or hands the leg to a small computer and blocks you on its report.`;

@@ -21,7 +21,7 @@ import type { AttachmentRef } from '../shared/types.ts';
 import { legArgs, legOrder, legTimeoutS, perfSummaryOf, summaryTable, timedArgsProblem, timedSettingsOf, variantNameProblem, TIMED_SLOTS, type LegSummary, type Piece, type TimedRunOrder, type TimedRunReport, type TimedVariant } from '../shared/timedRun.ts';
 import { fetchAttachment } from './attachments.ts';
 import { benchLockDir, pidAlive } from './benchLock.ts';
-import { benchQueueDir, queueTickets } from './benchQueue.ts';
+import { benchQueueDir, queueTickets, type TicketState } from './benchQueue.ts';
 import { sendChunks } from './review.ts';
 import { PLAYER_EXE } from './timedRunPack.ts';
 
@@ -46,6 +46,137 @@ export interface TimedRunnerDeps {
   pollMs?: number;
   /** Most bytes of pieces kept between runs (default 8 GB). */
   cacheMaxBytes?: number;
+  /**
+   * w1996: this is a worker computer (it has sandboxes and the game repo's bench queue), not a play-only one. Its exclusive
+   * ticket is taken through the bench queue (bench_queue.py hold --reason timing, with the asking worker's session, so the
+   * queue's order, turn limits and BenchTurn's quiet machine apply), and its legs borrow a sandbox's player-slot pair that no
+   * live lease holds, only during its turn. Undefined on a play-only computer (the ticket written by hand, its own slots).
+   */
+  worker?: TimedWorkerDeps;
+}
+
+/** A queue ticket as the runner uses one (machine/benchQueue.ts BenchTicket). */
+export interface RunTicket {
+  wait(ms?: number, onLine?: (line: string) => void): Promise<TicketState>;
+  state(): TicketState;
+  release(): void;
+}
+
+export interface TimedWorkerDeps {
+  /** The sandbox ids whose player-slot pairs (slotK-0, slotK-1) are this computer's (the pool's sandboxes). */
+  sandboxIds: () => string[];
+  /** Take the exclusive timing ticket for the run, owned by `ownerPid`; undefined with why when the queue cannot be used. */
+  ticket: (o: { what: string; session: string; maxMin: number; ownerPid: number }) => { ticket?: RunTicket; why?: string };
+  /** The process the ticket and the slot leases follow; ended after the run (default: a small node child of this daemon). */
+  owner?: () => { pid: number; end: () => void };
+  /** The slot pool's root (default <root>/players: the folders the firewall step allows). */
+  slotsRoot?: string;
+  /** The longest a turn is planned for before the ticket is given back and taken again (default TURN_PLAN_MS). */
+  turnPlanMs?: number;
+}
+
+/**
+ * The part of the bench queue's 30-minute exclusive turn (the game repo's bench_queue.py MAX_HOLD_MIN, w1832) a timed run on
+ * a worker computer plans its legs into: no leg starts that would end past it, by the longest leg so far. The queue warns
+ * at 25 minutes, so the run gives the ticket back before any warning and queues again for the rest (w1996).
+ */
+export const TURN_PLAN_MS = 24 * 60_000;
+
+/** The node child that owns a run's ticket and leases: it ends when this daemon does (w1996, so BenchTurn spares only it). */
+export function spawnOwner(): { pid: number; end: () => void } {
+  const parent = process.pid;
+  const c = spawn(process.execPath, ['-e', `setInterval(()=>{try{process.kill(${parent},0)}catch{process.exit(0)}},2000)`], { stdio: 'ignore', windowsHide: true });
+  return { pid: c.pid ?? process.pid, end: () => c.kill() };
+}
+
+const HOST = () => os.hostname().toLowerCase();
+
+/** A lease file that holds a slot now (player_slots.py live_leases/_live: a live pid on this host, or a fresh remote one). */
+function liveLease(file: string, alive: (pid: number) => boolean, now: number): boolean {
+  try {
+    const l = JSON.parse(fs.readFileSync(file, 'utf8')) as { pid?: number; host?: string; time?: number };
+    if (now / 1000 - Number(l.time ?? 0) > 12 * 3600) return false;
+    if (String(l.host ?? '').toLowerCase() !== HOST()) return true;
+    return Number.isInteger(l.pid) && alive(l.pid!);
+  } catch {
+    return false;
+  }
+}
+
+/** Whether no live lease holds slot `dir` (game repo scripts/nightly/player_slots.py's layout: <slot>/leases/*.json). */
+export function slotFree(dir: string, alive: (pid: number) => boolean = pidAlive, now = Date.now()): boolean {
+  const leases = path.join(dir, 'leases');
+  if (!fs.existsSync(leases)) return true;
+  return !fs.readdirSync(leases).some((n) => n.endsWith('.json') && liveLease(path.join(leases, n), alive, now));
+}
+
+/** A sandbox pair a run borrows: its slot folders, and the lease files to remove after the turn. */
+export interface BorrowedPair {
+  sandbox: string;
+  slots: string[];
+  leases: string[];
+}
+
+/**
+ * Borrow the player-slot pair of a sandbox here that no live lease holds (w1996), for `n` builds: lease each slot to
+ * `ownerPid` as player_slots.py does (so no launch takes it meanwhile) and mark it with a fingerprint no build has, so
+ * the sandbox's next launch refills it. Undefined when every pair is in use.
+ */
+export function borrowPair(slotsRoot: string, sandboxIds: string[], n: number, o: { ownerPid: number; run: string; session: string }, alive: (pid: number) => boolean = pidAlive, now = Date.now()): BorrowedPair | undefined {
+  for (const sb of sandboxIds) {
+    if (!/^slot\d+$/.test(sb)) continue;
+    const slots = [0, 1].slice(0, Math.max(1, n)).map((p) => path.join(slotsRoot, `${sb}-${p}`));
+    if (!slots.every((d) => slotFree(d, alive, now))) continue;
+    const leases: string[] = [];
+    for (const d of slots) {
+      fs.mkdirSync(path.join(d, 'leases'), { recursive: true });
+      const f = path.join(d, 'leases', `${HOST()}-${o.ownerPid}-${randomHex()}.json`);
+      fs.writeFileSync(f, JSON.stringify({ pid: o.ownerPid, host: HOST(), sandbox: `timed run ${o.run}`, sha: '', build: `timed-run:${o.run}`, time: now / 1000, when: new Date(now).toISOString().slice(0, 19), session: o.session }));
+      leases.push(f);
+    }
+    return { sandbox: sb, slots, leases };
+  }
+  return undefined;
+}
+
+const randomHex = () => createHash('sha256').update(`${process.pid}-${Date.now()}-${Math.random()}`).digest('hex').slice(0, 8);
+
+/**
+ * Put build folder `src` (laid out by layOut) into slot `slot`'s player folder by hard links (a copy across volumes), unless
+ * it holds that build from an earlier turn. A player folder of another build goes first (renamed aside, then removed: a
+ * rename fails while a player runs from it, and then this throws). The slot's marker names the run's build, so
+ * player_slots.py, matching sha and fingerprint, never takes it for one of its own.
+ */
+export function linkInto(src: string, slot: string, files: { path: string }[], key: string, run: string): 'kept' | 'linked' {
+  const dst = path.join(slot, 'player');
+  const marker = path.join(slot, 'slot.json');
+  const fp = `timed-run:${key}`;
+  let m: { fingerprint?: string } | undefined;
+  try {
+    m = JSON.parse(fs.readFileSync(marker, 'utf8'));
+  } catch {
+    m = undefined;
+  }
+  if (m?.fingerprint === fp && files.every((f) => fs.existsSync(path.join(dst, f.path)))) return 'kept';
+  if (fs.existsSync(dst)) {
+    const trash = path.join(slot, `trash-${Date.now()}-timed`);
+    fs.renameSync(dst, trash);
+    fs.rmSync(trash, { recursive: true, force: true });
+  }
+  const now = Date.now() / 1000;
+  fs.writeFileSync(marker, JSON.stringify({ sha: '', fingerprint: fp, state: 'filling', source: `timed run ${run}`, filled: now, used: now }));
+  for (const f of files) {
+    const from = path.join(src, f.path);
+    const to = path.join(dst, f.path);
+    fs.mkdirSync(path.dirname(to), { recursive: true });
+    try {
+      fs.linkSync(from, to);
+    } catch {
+      fs.copyFileSync(from, to);
+    }
+  }
+  fs.writeFileSync(marker, JSON.stringify({ sha: '', fingerprint: fp, state: 'ready', source: `timed run ${run}`, filled: now, used: now }));
+  return 'linked';
 }
 
 /** The Windows player's saves folder (GameDataPaths.Saves: persistentDataPath/UserData/saves). */
@@ -288,22 +419,29 @@ export class TimedRunner {
     }
     const now = new Date();
     for (const sha of want.keys()) fs.utimesSync(path.join(cache, sha), now, now);
-    // 2. Each distinct build into its slot; names that share a build share its slot.
-    const slotOf = new Map<string, string>();
-    const builds = new Map<string, string>();
+    // 2. Each distinct build laid out; names that share a build share it. A play-only computer lays them into its own slot
+    // pair (TIMED_SLOTS) now; a worker computer (w1996) lays them beside the slots and links them into a borrowed sandbox
+    // pair only during its turn, since those slots are its sandboxes' own.
+    const worker = this.d.worker?.sandboxIds().length ? this.d.worker : undefined;
+    const buildOf = new Map<string, number>();
+    const builds = new Map<string, number>();
+    const buildDirs: string[] = [];
     for (const v of o.variants) {
       const key = buildKey(v);
-      let slot = builds.get(key);
-      if (!slot) {
-        slot = TIMED_SLOTS[builds.size];
-        if (!slot) throw new Error(`more than ${TIMED_SLOTS.length} different builds; a timed run times at most ${TIMED_SLOTS.length} (one build may carry several names with their own args)`);
-        builds.set(key, slot);
-        const dir = path.join(root, 'players', slot, 'player');
+      let i = builds.get(key);
+      if (i === undefined) {
+        i = builds.size;
+        if (i >= TIMED_SLOTS.length) throw new Error(`more than ${TIMED_SLOTS.length} different builds; a timed run times at most ${TIMED_SLOTS.length} (one build may carry several names with their own args)`);
+        builds.set(key, i);
+        const dir = worker ? path.join(root, 'timing', 'builds', `b${i}`) : path.join(root, 'players', TIMED_SLOTS[i], 'player');
+        buildDirs.push(dir);
         const how = await layOut(v, dir, cache);
-        this.status(o.id, 'fetching', `${v.name}: ${how === 'kept' ? 'already' : 'laid out'} in ${slot}`);
+        this.status(o.id, 'fetching', `${v.name}: ${how === 'kept' ? 'already' : 'laid out'} in ${worker ? `timing/builds/b${i}` : TIMED_SLOTS[i]}`);
       }
-      slotOf.set(v.name, slot);
+      buildOf.set(v.name, i);
     }
+    const buildFiles = new Map<number, TimedVariant['files']>();
+    for (const v of o.variants) buildFiles.set(buildOf.get(v.name)!, v.files);
     // 3. The save, under this run's name, beside the person's own saves (never one of theirs).
     const savesDir = this.d.savesDir ?? windowsSavesDir();
     fs.mkdirSync(savesDir, { recursive: true });
@@ -312,37 +450,41 @@ export class TimedRunner {
     fs.copyFileSync(path.join(cache, o.save.sha256), saveFile);
     const legs: LegSummary[] = [];
     const contention: string[] = [];
-    let ticket: string | undefined;
     const poll = this.d.pollMs ?? 15_000;
+    const order = legOrder(o.variants.map((v) => v.name), o.settings.rounds);
     try {
-      // 4. The exclusive ticket, once nobody else holds one and nobody plays here.
-      for (let waited = 0; ; waited++) {
-        const why = this.d.personBusy() ?? (foreignTicket(root) ? `another ticket is in this machine's bench queue (${foreignTicket(root)})` : undefined);
-        if (!why) break;
-        if (waited % 20 === 0) this.status(o.id, 'waiting', `waiting: ${why}`);
-        await sleep(poll);
-      }
-      const order = legOrder(o.variants.map((v) => v.name), o.settings.rounds);
-      ticket = takeTicket(root, { what: `timed run ${o.id}: ${o.what}`, session: o.session, requests: o.requests, maxMin: Math.ceil((order.length * legTimeoutS(o.settings)) / 60) + 5 });
-      this.status(o.id, 'running', `holds the exclusive bench ticket ${ticket}: ${order.length} legs`);
-      // 5. The legs.
-      for (const leg of order) {
-        const v = o.variants.find((x) => x.name === leg.variant)!;
-        for (let waited = 0; this.d.personBusy(); waited++) {
-          if (waited % 20 === 0) this.status(o.id, 'waiting', `paused before ${leg.variant} round ${leg.round}: ${this.d.personBusy()}`);
-          await sleep(poll);
+      if (!worker) {
+        // 4. The exclusive ticket, once nobody else holds one and nobody plays here.
+        let ticket: string | undefined;
+        try {
+          for (let waited = 0; ; waited++) {
+            const why = this.d.personBusy() ?? (foreignTicket(root) ? `another ticket is in this machine's bench queue (${foreignTicket(root)})` : undefined);
+            if (!why) break;
+            if (waited % 20 === 0) this.status(o.id, 'waiting', `waiting: ${why}`);
+            await sleep(poll);
+          }
+          ticket = takeTicket(root, { what: `timed run ${o.id}: ${o.what}`, session: o.session, requests: o.requests, maxMin: Math.ceil((order.length * legTimeoutS(o.settings)) / 60) + 5 });
+          this.status(o.id, 'running', `holds the exclusive bench ticket ${ticket}: ${order.length} legs`);
+          // 5. The legs.
+          for (const leg of order) {
+            const v = o.variants.find((x) => x.name === leg.variant)!;
+            await this.personWait(o, `before ${leg.variant} round ${leg.round}`, poll);
+            legs.push(await this.leg(o, v, leg.round, path.join(buildDirs[buildOf.get(v.name)!], PLAYER_EXE), saveName, runDir, contention));
+          }
+        } finally {
+          if (ticket) releaseTicket(root, ticket);
         }
-        legs.push(await this.leg(o, v, leg.round, slotOf.get(v.name)!, saveName, runDir, contention));
+      } else {
+        await this.workerTurns(o, worker, order, { buildOf, buildDirs, buildFiles, saveName, runDir, contention, legs, poll });
       }
     } finally {
-      if (ticket) releaseTicket(root, ticket);
       fs.rmSync(saveFile, { force: true });
     }
     // 6. The logs back, in probe_ab_win.sh's layout.
     const summary = summaryTable(legs);
     fs.writeFileSync(path.join(runDir, 'summary.tsv'), summary + '\n');
     fs.writeFileSync(path.join(runDir, 'contention.txt'), contention.join('\n') + '\n');
-    fs.writeFileSync(path.join(runDir, 'run.json'), JSON.stringify({ id: o.id, what: o.what, requests: o.requests, settings: o.settings, variants: o.variants.map((v) => ({ name: v.name, args: v.args, slot: slotOf.get(v.name), files: v.files.length, bytes: v.files.reduce((s, f) => s + f.size, 0) })), machine: os.hostname(), cpus: os.cpus().length, cpu: os.cpus()[0]?.model, memGB: Math.round(os.totalmem() / 1024 ** 3), legs }, null, 2));
+    fs.writeFileSync(path.join(runDir, 'run.json'), JSON.stringify({ id: o.id, what: o.what, requests: o.requests, settings: o.settings, variants: o.variants.map((v) => ({ name: v.name, args: v.args, build: buildOf.get(v.name), files: v.files.length, bytes: v.files.reduce((s, f) => s + f.size, 0) })), machine: os.hostname(), cpus: os.cpus().length, cpu: os.cpus()[0]?.model, memGB: Math.round(os.totalmem() / 1024 ** 3), legs }, null, 2));
     const files: { name: string; file: string }[] = [];
     const walk = (rel: string) => {
       for (const e of fs.readdirSync(path.join(runDir, rel), { withFileTypes: true })) {
@@ -377,8 +519,84 @@ export class TimedRunner {
     }
   }
 
+  /** Wait while a person plays here (w1894), saying so every 20 looks. */
+  private async personWait(o: TimedRunOrder, when: string, poll: number) {
+    for (let waited = 0; this.d.personBusy(); waited++) {
+      if (waited % 20 === 0) this.status(o.id, 'waiting', `paused ${when}: ${this.d.personBusy()}`);
+      await sleep(poll);
+    }
+  }
+
+  /**
+   * A worker computer's turns (w1996): take the exclusive timing ticket through the bench queue, borrow a free sandbox
+   * pair, play the legs that fit in the turn (TURN_PLAN_MS, by the longest leg so far), give the pair and the ticket back,
+   * and queue again for the rest. A revoked turn (the queue's limit, an urgent release) ends the turn after its leg; the
+   * rest are played in the next one.
+   */
+  private async workerTurns(
+    o: TimedRunOrder,
+    w: TimedWorkerDeps,
+    order: { variant: string; round: number }[],
+    x: { buildOf: Map<string, number>; buildDirs: string[]; buildFiles: Map<number, TimedVariant['files']>; saveName: string; runDir: string; contention: string[]; legs: LegSummary[]; poll: number },
+  ) {
+    const owner = (w.owner ?? spawnOwner)();
+    const plan = w.turnPlanMs ?? TURN_PLAN_MS;
+    const slotsRoot = w.slotsRoot ?? path.join(this.d.root, 'players');
+    let longest = legTimeoutS(o.settings) * 1000;
+    let seen = false;
+    let next = 0;
+    try {
+      for (let turn = 1; next < order.length; turn++) {
+        await this.personWait(o, 'before its turn', x.poll);
+        const t = w.ticket({ what: `timed run ${o.id}: ${o.what}`, session: o.session, maxMin: 30, ownerPid: owner.pid });
+        if (!t.ticket) throw new Error(`no bench queue ticket here: ${t.why ?? 'unknown'}`);
+        const ticket = t.ticket;
+        let pair: BorrowedPair | undefined;
+        try {
+          this.status(o.id, 'waiting', `turn ${turn}: queued for this computer's exclusive bench ticket (${order.length - next} legs left)`);
+          const s = await ticket.wait(Infinity, (line) => this.status(o.id, 'waiting', `turn ${turn}: ${line}`.slice(0, 280)));
+          if (s.kind !== 'granted') throw new Error(`the bench queue did not grant the ticket: ${s.line}`);
+          // The turn's quiet machine (BenchTurn) asks the other players to quit; their leases end with them.
+          for (let waited = 0; !(pair = borrowPair(slotsRoot, w.sandboxIds(), x.buildDirs.length, { ownerPid: owner.pid, run: o.id, session: o.session })); waited++) {
+            if (waited * x.poll > 5 * 60_000) throw new Error(`no sandbox's player-slot pair here came free within 5 minutes of the turn (${w.sandboxIds().join(', ')})`);
+            if (waited % 4 === 0) this.status(o.id, 'waiting', `turn ${turn}: holds ${s.ticket}; waiting for a free player-slot pair`);
+            await sleep(x.poll);
+          }
+          for (let i = 0; i < x.buildDirs.length; i++) linkInto(x.buildDirs[i], pair.slots[i], x.buildFiles.get(i)!, fs.readFileSync(path.join(x.buildDirs[i], '.timed-build'), 'utf8').trim(), o.id);
+          const start = Date.now();
+          let ran = 0;
+          this.status(o.id, 'running', `turn ${turn}: holds the exclusive bench ticket ${s.ticket}, legs in ${pair.sandbox}'s player slots: ${order.length - next} legs left`);
+          while (next < order.length) {
+            // a turn plays at least one leg; another only when, by the longest leg so far, it ends within the plan
+            if (ran > 0 && Date.now() - start + longest > plan) break;
+            if (ticket.state().kind !== 'granted') break;
+            const leg = order[next];
+            const v = o.variants.find((y) => y.name === leg.variant)!;
+            await this.personWait(o, `before ${leg.variant} round ${leg.round}`, x.poll);
+            const t0 = Date.now();
+            x.legs.push(await this.leg(o, v, leg.round, path.join(pair.slots[x.buildOf.get(v.name)!], 'player', PLAYER_EXE), x.saveName, x.runDir, x.contention));
+            longest = seen ? Math.max(longest, Date.now() - t0) : Date.now() - t0;
+            seen = true;
+            next++;
+            ran++;
+            if (ticket.state().kind !== 'granted') {
+              x.contention.push(`${new Date().toISOString()} turn ${turn} ended by the bench queue after ${leg.variant} round ${leg.round}: ${ticket.state().line}`);
+              break;
+            }
+          }
+        } finally {
+          for (const f of pair?.leases ?? []) fs.rmSync(f, { force: true });
+          ticket.release();
+        }
+        if (next < order.length) this.status(o.id, 'waiting', `turn ${turn} gave its ticket back after ${next} of ${order.length} legs (a turn is at most 30 minutes, w1832); queued again for the rest`);
+      }
+    } finally {
+      owner.end();
+    }
+  }
+
   /** One leg: the quiet wait, the player with its fixed arguments and time bound, its CPU every 2 s, its numbers. */
-  private async leg(o: TimedRunOrder, v: TimedVariant, round: number, slot: string, saveName: string, runDir: string, contention: string[]): Promise<LegSummary> {
+  private async leg(o: TimedRunOrder, v: TimedVariant, round: number, exe: string, saveName: string, runDir: string, contention: string[]): Promise<LegSummary> {
     const out = path.join(runDir, v.name, `round${round}`);
     fs.mkdirSync(out, { recursive: true });
     // Quiet: other load on this machine under 25% for 5 s, waiting 2 minutes at most (quiet_gate.sh waits 5 and goes on).
@@ -386,7 +604,6 @@ export class TimedRunner {
     for (let i = 0; i < 24 && (load = await cpuLoad(this.d.pollMs ? 10 : 5000)) >= 25; i++);
     const mem = () => Math.round(100 * (1 - os.freemem() / os.totalmem()));
     contention.push(`${new Date().toISOString()} ${v.name} round ${round} start: cpu=${load.toFixed(0)}% ram=${mem()}%${load >= 25 ? ' (still busy after 2 minutes: ran anyway)' : ''}`);
-    const exe = path.join(this.d.root, 'players', slot, 'player', PLAYER_EXE);
     const logFile = path.join(out, 'player.log');
     const args = legArgs(o.settings, v, round, saveName, logFile);
     const inputBefore = this.d.lastInputAt?.();
@@ -399,7 +616,9 @@ export class TimedRunner {
         csv.push(`"${new Date().toISOString()}",${c.toFixed(1)},${mem()}`);
       }
     })();
-    const child = (this.d.spawnPlayer ?? ((e, a, cwd) => spawn(e, a, { cwd, stdio: 'ignore', windowsHide: false })))(exe, args, path.dirname(exe));
+    // w1996: the asking worker's session, so a worker computer's bench turn (machine/benchTurn.ts) spares the run's own player
+    const env = { ...process.env, FF_SESSION_ID: o.session };
+    const child = (this.d.spawnPlayer ?? ((e, a, cwd) => spawn(e, a, { cwd, env, stdio: 'ignore', windowsHide: false })))(exe, args, path.dirname(exe));
     const bound = legTimeoutS(o.settings) * 1000;
     const code = await new Promise<number | string>((resolve) => {
       const timer = setTimeout(() => {

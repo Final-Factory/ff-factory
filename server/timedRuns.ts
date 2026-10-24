@@ -56,6 +56,38 @@ export interface TimedRunDeps {
   deliver: (session: string, text: string, files: AttachmentRef[]) => Promise<void>;
   log?: (line: string) => void;
   now?: () => number;
+  /**
+   * w1996: which other computers take a timed run beside the play-only ones: a small worker computer that takes timed runs
+   * (at most SMALL_TIMED_MAX_AGENTS agent slots, never m5), with its agent slots for the order. Default: none.
+   */
+  smallWorker?: (m: Machine) => { agents: number } | undefined;
+}
+
+/** What kind of timing computer a target is (w1996): one that only plays the game, or a small worker computer. */
+export type TimedTargetKind = 'play-only' | 'small';
+
+export interface TimedTarget {
+  id: string;
+  kind: TimedTargetKind;
+  online: boolean;
+  offers: boolean;
+  runs: TimedRunRecord[];
+  why: string;
+  platform?: string;
+  agents: number;
+}
+
+/**
+ * The order targets are picked in when none is named (w1996): online ones that run timed runs first, play-only before
+ * small worker computers (a play-only turn idles nobody), then the fewest runs ahead, the fewest agent slots, the id.
+ */
+export function rankTargets(all: readonly TimedTarget[]): TimedTarget[] {
+  const key = (t: TimedTarget) => [t.online && t.offers ? 0 : 1, t.kind === 'play-only' ? 0 : 1, t.runs.length, t.agents];
+  return [...all].sort((a, b) => {
+    const [x, y] = [key(a), key(b)];
+    for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return x[i] - y[i];
+    return a.id.localeCompare(b.id);
+  });
 }
 
 /** A piece nobody used for this long leaves the portal's store (the timing machine keeps its own copies). */
@@ -134,27 +166,41 @@ export class TimedRuns {
     return [...this.runs.values()];
   }
 
-  /** The play-only computers, for the Capacity block and the tool: each with its state and the runs it holds. */
-  targets(): { id: string; online: boolean; offers: boolean; runs: TimedRunRecord[]; why: string }[] {
-    return this.d
-      .machines()
-      .filter(isPlayOnly)
-      .map((m) => ({ id: m.id, online: this.d.isOnline(m.id), offers: this.d.offers(m.id), why: m.playOnly!.trim(), runs: this.list().filter((r) => r.machine === m.id && r.state !== 'done' && r.state !== 'failed') }));
+  /** The runs a computer holds now (sent, queued or running there). */
+  runsOn(id: string): TimedRunRecord[] {
+    return this.list().filter((r) => r.machine === id && r.state !== 'done' && r.state !== 'failed');
   }
 
-  /** Where a run goes: the computer named, else the online play-only Windows one with the fewest runs ahead. */
+  /**
+   * The computers a timed run can go to, for the Capacity block, timed_place and the tool: the play-only ones (w1946) and,
+   * since w1996, the small worker computers that take timed runs (deps.smallWorker), each with its state and its runs.
+   */
+  targets(): TimedTarget[] {
+    const out: TimedTarget[] = [];
+    for (const m of this.d.machines()) {
+      const small = isPlayOnly(m) ? undefined : this.d.smallWorker?.(m);
+      if (!isPlayOnly(m) && !small) continue;
+      out.push({ id: m.id, kind: isPlayOnly(m) ? 'play-only' : 'small', online: this.d.isOnline(m.id), offers: this.d.offers(m.id), why: isPlayOnly(m) ? m.playOnly!.trim() : `a small worker computer (${small!.agents} agent slot${small!.agents === 1 ? '' : 's'})`, runs: this.runsOn(m.id), ...(m.platform ? { platform: m.platform } : {}), agents: small?.agents ?? 0 });
+    }
+    return out;
+  }
+
+  /** The Windows targets in pick order (rankTargets): a timed run plays Windows players (probe_ab_win.sh's legs). */
+  windowsTargets(): TimedTarget[] {
+    return rankTargets(this.targets().filter((t) => t.platform !== 'darwin' && t.platform !== 'linux'));
+  }
+
+  /** Where a run goes: the computer named, else the first Windows target (rankTargets). */
   private target(named: unknown): string {
-    const all = this.targets();
+    const all = this.windowsTargets();
     if (named !== undefined && named !== '') {
       const t = all.find((x) => x.id.toLowerCase() === String(named).toLowerCase());
-      if (!t) throw new Error(`${String(named)} is not a play-only timing machine (w1946); the play-only ones: ${all.map((x) => x.id).join(', ') || 'none yet'}`);
+      if (!t) throw new Error(`${String(named)} takes no timed run (w1946, w1996: a play-only computer, or a small worker computer that takes timed runs, on Windows: a run plays Windows players); the ones that do: ${all.map((x) => x.id).join(', ') || 'none yet'}`);
       return t.id;
     }
-    const windows = all.filter((x) => this.d.machines().find((m) => m.id === x.id)?.platform !== 'darwin');
-    const up = windows.filter((x) => x.online && x.offers).sort((a, b) => a.runs.length - b.runs.length || a.id.localeCompare(b.id));
-    if (up[0]) return up[0].id;
-    if (windows[0]) return windows[0].id; // offline: the run waits for it, and the answer says so
-    throw new Error('there is no play-only timing machine yet (w1946: add_machine play_only on a computer that only plays the game); time on your own computer with the bench queue instead (scripts/bench/probe_ab_win.sh)');
+    const first = this.windowsTargets()[0];
+    if (first) return first.id; // offline: the run waits for it, and the answer says so
+    throw new Error('no computer takes a timed run now (w1946, w1996: a play-only computer, or a small Windows worker computer that takes timed runs); time on your own computer with the bench queue instead (scripts/bench/probe_ab_win.sh)');
   }
 
   /** The plan step: check the builds, open an upload for each piece the portal lacks. Answers JSON for the daemon. */
@@ -328,10 +374,10 @@ export class TimedRuns {
     }
   }
 
-  /** The Capacity block's line: each play-only computer and the runs it holds. */
+  /** The Capacity block's line: each computer that takes timed runs (play-only first, w1946; small workers, w1996) and its runs. */
   capacityLine(): string | undefined {
-    const t = this.targets();
+    const t = this.windowsTargets();
     if (!t.length) return undefined;
-    return `Play-only timing machines (w1946: no workers; timed A/B legs go there with timed_run, built anywhere): ${t.map((x) => `${x.id} (${x.online ? (x.offers ? 'online' : 'online, daemon too old for timed runs') : 'offline'}${x.runs.length ? `; ${x.runs.length} run(s): ${x.runs.map((r) => `${r.id} ${r.state}`).join(', ')}` : '; free'})`).join(', ')}.`;
+    return `Timed-run computers (w1946, w1996: a Windows player A/B built where its worker is goes there with timed_run, under that computer's exclusive ticket): ${t.map((x) => `${x.id} (${x.kind === 'play-only' ? 'play-only' : `small, ${x.agents} agent slot${x.agents === 1 ? '' : 's'}`}, ${x.online ? (x.offers ? 'online' : 'online, daemon too old for timed runs') : 'offline'}${x.runs.length ? `; ${x.runs.length} run(s): ${x.runs.map((r) => `${r.id} ${r.state}`).join(', ')}` : '; free'})`).join(', ')}.`;
   }
 }

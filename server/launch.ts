@@ -171,7 +171,7 @@ export const CATALOG = {
     brief: z.string().max(6000).optional().describe('What the leg runs, as a new worker on another computer needs it: the branch and the commit of each side, the save, the script and its settings (probe_ab_win.sh rounds), what to report. Needed when it is handed off.'),
     platform: z.enum(['windows', 'mac', 'any']).optional().describe('The OS the leg needs (default any: both sides run on one computer, whichever OS).'),
     same_machine: z.string().max(300).optional().describe('Only when its numbers must come from this computer (a side of the A/B already ran here, the brief names it): why. It then runs here.'),
-    via: z.enum(['leg', 'timed_run']).optional().describe('timed_run: a Windows player A/B that a play-only computer can time (w1946), when one is up; default leg.'),
+    via: z.enum(['leg', 'timed_run']).optional().describe('timed_run: a Windows player A/B (a save played by two builds), built here and timed by a computer that takes timed runs (w1946, w1996); leg: anything else timed, handed to a new worker on a small computer. Unset: timed_run when such a computer is up, and the answer says when to ask again with leg.'),
     request: z.string().max(16).optional().describe('The request ("w1891") it is for, when you serve several; default: the one you are on.'),
   },
   /** w1945: a leg of a pair run tells the other legs' workers something. */
@@ -219,7 +219,7 @@ export const CATALOG = {
   },
   /**
    * w1946 (docs/machines.md, "A play-only timing machine"). On a machine the daemon reads and sends the builds itself: the
-   * portal plans (which pieces it lacks) and hands the run to a play-only computer; the worker hears the result in a message.
+   * portal plans (which pieces it lacks) and hands the run to a computer that takes timed runs (w1996); the worker hears the result in a message.
    */
   timed_run: {
     builds: z
@@ -238,7 +238,7 @@ export const CATALOG = {
     sample_s: z.number().int().min(5).max(300).optional().describe('Seconds the perf probe samples each leg (default 20).'),
     settle_s: z.number().int().min(5).max(300).optional().describe('Seconds after the save is ready before the sample (default 25).'),
     res: z.enum(['1920x1080', '1280x720', '1280x800', '2560x1440']).optional().describe('Window size (default 1920x1080).'),
-    machine: z.string().max(40).optional().describe('A play-only machine by id; default the online one with the fewest runs ahead.'),
+    machine: z.string().max(40).optional().describe('A computer that takes timed runs, by id (a play-only one, or a small worker computer such as lothlaptop; w1996); default: play-only first, then the small ones, the fewest runs ahead.'),
   },
   switch_branch: {
     branch: z.string().describe('The branch to switch to, e.g. "spec-098-belts".'),

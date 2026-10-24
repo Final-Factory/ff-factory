@@ -10,7 +10,8 @@ import { Store, bus } from './store.ts';
 import { SessionManager, compactCommand, seedSdkCost, snapshotOf } from './sessions.ts';
 import { TIMER_LIMITS } from './timers.ts';
 import { Agents } from './agents.ts';
-import { MachineManager, enrolledMachines, machineForPath, revokeMachineToken } from './machines.ts';
+import { MachineManager, agentCap, enrolledMachines, machineForPath, revokeMachineToken } from './machines.ts';
+import { SMALL_TIMED_MAX_AGENTS } from './timedAsk.ts';
 import { LiveError, LiveHub } from './live.ts';
 import { LIVE_IDLE_DEFAULT_MINUTES, LiveIdleCloser, liveIdleStatusLine } from './liveIdle.ts';
 import { BenchWarner } from './benchWarnings.ts';
@@ -508,8 +509,15 @@ const timedRuns = new TimedRuns({
   post: (id, msg) => machines.postTo(id, msg as ToDaemon),
   deliver: (session, text, files) => agents.timedRunDelivered(session, text, files),
   log: (line) => console.log(line),
+  // w1996: a small worker computer that takes timed runs times builds made on the big ones, like a play-only one
+  smallWorker: (m) => {
+    const agents = m.sandboxRoot ? agentCap(m) : 0;
+    return agents >= 1 && agents <= SMALL_TIMED_MAX_AGENTS && !machines.noTimedRuns(m.id) ? { agents } : undefined;
+  },
 });
 agents.timedRuns = timedRuns;
+// w1996: a computer timing another worker's run hosts more than its own worker, so its bench queue keeps the turn limits
+machines.timedRunsOn = (id) => timedRuns.runsOn(id).length;
 machines.timedHello = (id, active) => timedRuns.onHello(id, active);
 machines.timedReport = (id, msg) => timedRuns.onReport(id, msg);
 setInterval(() => {
