@@ -25,3 +25,24 @@ test('w2026: a stall profile names the function that held the loop, by own time 
   const mine = sum.under.find((x) => x.fn.startsWith('busyLoopForStallTest (server/stallProfile.test.ts:'));
   assert.ok(mine && mine.ms >= 200, JSON.stringify(sum));
 });
+
+test('w2044: a block\'s own line counts only the samples taken in it, not the rest of the minute', () => {
+  const frame = (functionName: string, lineNumber: number) => ({ functionName, url: 'file:///srv/fff/server/agents.ts', lineNumber, columnNumber: 0 });
+  // A state save at 1-3 ms, then placement at 4-9 ms: one sample a millisecond (timeDeltas are microseconds).
+  const profile: CpuProfile = {
+    nodes: [
+      { id: 1, callFrame: { functionName: '(root)', url: '', lineNumber: 0, columnNumber: 0 }, children: [2, 3] },
+      { id: 2, callFrame: frame('save', 10) },
+      { id: 3, callFrame: frame('places', 20) },
+    ],
+    startTime: 0,
+    endTime: 10_000,
+    samples: [2, 2, 2, 3, 3, 3, 3, 3, 3],
+    timeDeltas: [1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000],
+  };
+  const block = summarizeProfile(profile, 6, [[3.5, 10]]);
+  assert.deepEqual(block.under.map((x) => x.fn), ['places (server/agents.ts:21)']);
+  const minute = summarizeProfile(profile);
+  assert.equal(block.totalMs, minute.totalMs - 3, 'the save\'s three samples are left out');
+  assert.deepEqual(minute.under.map((x) => x.fn).sort(), ['places (server/agents.ts:21)', 'save (server/agents.ts:11)']);
+});

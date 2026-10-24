@@ -143,10 +143,10 @@ test('no origin: committed here only. The repository keeps its own identity when
   assert.equal(git(root, 'log', '-1', '--format=%an|%ae'), 'Memory Owner|owner@users.noreply.github.com');
 });
 
-test('the crash backup of a memory root that is a repository leaves .git out', (t) => {
+test('the crash backup of a memory root that is a repository leaves .git out', async (t) => {
   const { root, write } = world(t);
   write('person-ben/MEMORY.md', '- a');
-  assert.equal(backupMemory(root), true);
+  assert.equal(await backupMemory(root), true);
   const copy = path.join(memoryBackupRoot(root), '1');
   assert.ok(fs.existsSync(path.join(copy, 'person-ben', 'MEMORY.md')));
   assert.equal(fs.existsSync(path.join(copy, '.git')), false);
