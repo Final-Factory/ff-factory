@@ -256,7 +256,7 @@ test("w913: workers are told to leave their temp files, not to clean up; the one
 });
 
 test("w1097: every worker's brief says which shell step still waits for a person, and the routes that never do", async (t) => {
-  const { DISK_HYGIENE, SHELL_STEPS } = await import('./agents.ts');
+  const { DISK_HYGIENE, SHELL_STEPS, diskHygiene } = await import('./agents.ts');
   const { workerRuleText } = await import('./workerRules.ts');
   // Why w1079 deleted its own temp: to reuse a test's output folder. The brief says to make a new one.
   assert.match(DISK_HYGIENE, /never delete in your temp folder to reuse a folder for the next test leg; give every leg a new one, `\$TMPDIR\/<leg>-<timestamp>`/);
@@ -275,7 +275,11 @@ test("w1097: every worker's brief says which shell step still waits for a person
     { id: 'm5', repoPath: '/Users/dev/FinalFactory', platform: 'darwin', sandboxRoot: '/Users/dev/ffsb' },
     { id: 'alpha', path: '/sb/alpha', branch: 'fix-x', purpose: 'a fix', unity: { state: 'stopped' } },
   );
-  assert.ok(brief.includes(SHELL_STEPS) && brief.indexOf(DISK_HYGIENE) < brief.indexOf(SHELL_STEPS) && brief.indexOf(SHELL_STEPS) < brief.indexOf('## Reporting'));
+  assert.ok(brief.includes(SHELL_STEPS) && brief.indexOf(diskHygiene('darwin')) > 0 && brief.indexOf(diskHygiene('darwin')) < brief.indexOf(SHELL_STEPS) && brief.indexOf(SHELL_STEPS) < brief.indexOf('## Reporting'));
+  // w2002: a worker reads only its own platform's disk sentences
+  assert.ok(!brief.includes('On a Windows computer, disk work') && brief.includes('On macOS and Linux, outside the folder you only measure and report'));
+  assert.ok(diskHygiene('win32').includes('On a Windows computer, disk work') && !diskHygiene('win32').includes('On macOS and Linux'));
+  assert.equal(diskHygiene(undefined), DISK_HYGIENE, 'an unknown platform reads both');
   assert.match(brief, /A save to load in the game \(an attached one or your own\): `read_rules saves` first/);
 });
 
