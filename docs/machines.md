@@ -1211,6 +1211,10 @@ LothDesktop and Beast, not just when BEAST is full").
     The request records `pair.started` (when, each leg's session and sandbox, leg 1 first). A pair request is refused
     without `pair_sandboxes` (one leg alone), and two legs on one computer are refused. A request not filed as a pair can be
     started as one by giving `pair_sandboxes` (a cross-OS pair is asked for with `request_pair`).
+  - **Marking one filed by hand: `decide_work queue` with `pair_legs`** (2 to `PAIR_MAX_LEGS`). w1936, Ben's two-machine
+    sync run for PR #2340, was filed with `file_work` and so carried no `pair`: after the w1945 deploy it was still
+    flagged WRONG for each single free computer. Queued with `pair_legs`, a request gets `WorkItem.pair` and from then on
+    its room, WRONG flag, capacity ping and hold read all its legs; a refused queue marks nothing.
   - **Talking: `message_pair`** (a worker tool, `Agents.messagePair`): a leg's message reaches every other leg's worker of
     its started pair run, as a message that resumes a leg that ended its turn (where the host listens and on which commit,
     that a client joined, that a leg failed).
