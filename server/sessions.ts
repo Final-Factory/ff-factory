@@ -13,7 +13,7 @@ import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
 import { dryRun, dryRunStartRefusal } from './dryRun.ts';
 import { DANGEROUS_REMOVAL, tempDeletesWithin, tempOnlyDelete } from './tempDelete.ts';
 import { isRealModelId } from '../shared/models.ts';
-import { ContextMeter, IMAGE_CHARS, MIN_BASE, type Cumulative, type MeterState, type TurnUsage } from '../shared/spend.ts';
+import { ContextMeter, IMAGE_CHARS, MIN_BASE, carriedTotals, type Cumulative, type MeterState, type TurnUsage } from '../shared/spend.ts';
 import type { MeterStates } from './meterStates.ts';
 import { CliTranscriptTail, cliTranscriptPath, rebuildMeter } from './cliTranscript.ts';
 
@@ -316,8 +316,13 @@ export function compactedLine(before: number, after: { total: number; max?: numb
  * restart counted the CLI's whole running total again (about $200 a time on each orchestrator and the dispatcher).
  * A session older than sdkCostUsd keeps the rule before it.
  */
-export function firstResultBase(costUsd: number, sdkCostUsd: number | undefined, total: number): { base: number; restarted: boolean } {
-  if (sdkCostUsd !== undefined) return total + 1e-9 >= sdkCostUsd ? { base: costUsd - sdkCostUsd, restarted: false } : { base: costUsd, restarted: sdkCostUsd > 0 };
+export function firstResultBase(costUsd: number, sdkCostUsd: number | undefined, total: number, carried = false): { base: number; restarted: boolean } {
+  if (sdkCostUsd !== undefined) {
+    if (total + 1e-9 >= sdkCostUsd) return { base: costUsd - sdkCostUsd, restarted: false };
+    // Below it but the CLI's older saved total, not this turn alone (w2007, carriedTotals): the session's figure stays where it was.
+    if (carried) return { base: costUsd - total, restarted: false };
+    return { base: costUsd, restarted: sdkCostUsd > 0 };
+  }
   return total >= costUsd ? { base: 0, restarted: false } : { base: costUsd, restarted: costUsd > 0 };
 }
 
@@ -735,7 +740,7 @@ export class AgentSession implements SessionHandle {
         // A process's first result: did the CLI continue from its saved total, or begin again from zero (w859, w1161)?
         let restarted = false;
         if (this.firstResult) {
-          const first = firstResultBase(this.info.costUsd, this.info.sdkCostUsd, total);
+          const first = firstResultBase(this.info.costUsd, this.info.sdkCostUsd, total, this.carriedFirst(m, total));
           this.costBase = first.base;
           restarted = first.restarted;
         }
@@ -790,11 +795,19 @@ export class AgentSession implements SessionHandle {
     }
   }
 
+  /** A first result whose totals are the CLI's older saved ones, the whole running total (w2007): its read tokens dwarf the turn's own. */
+  private carriedFirst(m: Extract<SDKMessage, { type: 'result' }>, total: number): boolean {
+    const u = this.turnUsage(m, false);
+    if (!u.cum || !u.main) return false;
+    const read = Object.values(u.cum).reduce((x, c) => x + c.in + c.cr + c.cw, 0);
+    return carriedTotals(read, u.main.in + u.main.cr + u.main.cw, total, this.info.sdkCostUsd ?? 0);
+  }
+
   /**
    * What this turn cost, from Claude Code's own numbers (w859): the SDK's cumulative per-model totals at its end (the portal
    * takes the difference against the last it saw), the main loop's own usage for this turn, and the context meter's reading.
    */
-  private turnUsage(m: Extract<SDKMessage, { type: 'result' }>): TurnUsage {
+  private turnUsage(m: Extract<SDKMessage, { type: 'result' }>, drain = true): TurnUsage {
     const cum: Cumulative = {};
     for (const [model, u] of Object.entries(m.modelUsage ?? {})) {
       if (!u) continue;
@@ -804,7 +817,7 @@ export class AgentSession implements SessionHandle {
     return {
       ...(Object.keys(cum).length ? { cum } : {}),
       ...(u ? { main: { in: u.input_tokens ?? 0, out: u.output_tokens ?? 0, cr: u.cache_read_input_tokens ?? 0, cw: u.cache_creation_input_tokens ?? 0 } } : {}),
-      meter: this.drainMeter(),
+      ...(drain ? { meter: this.drainMeter() } : {}),
     };
   }
 
