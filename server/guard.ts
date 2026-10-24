@@ -5,6 +5,7 @@ import { headBranch, isUrgentBranch } from './releaseHandBack.ts';
 import { checkMainCloneShell, flatten, normPath, pathSpellings, spellingsRegex, type MainCloneGrant } from './mainCloneGuard.ts';
 import { checkTiming } from './timingGuard.ts';
 import { checkTimedAsk, type TimedAskState } from './timedAsk.ts';
+import { checkChecksRead, checkTimedSleep } from './waitGuard.ts';
 import { checkSearchTool, checkWholeDiskSearch, type WholeDiskContext } from './wholeDiskSearch.ts';
 import os from 'node:os';
 import path from 'node:path';
@@ -62,6 +63,8 @@ import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
  *     email, so nobody's private address ends up in public history.
  *   - release branches (w1856): no commit, merge, cherry-pick, revert, am, pull or rebase in a sandbox on urgent/<v>, the
  *     urgent release lane's pointer at the commit it builds (checkReleaseBranchCommit, server/releaseHandBack.ts).
+ *   - waits that never work (w2015): `gh pr checks` and `--json statusCheckRollup` (a vault token cannot read checks), and a
+ *     command that only sleeps on the clock for over 180 s (checkChecksRead, checkTimedSleep: server/waitGuard.ts).
  *   - whole-disk searches (w2012), on every machine: find / fd / rg / grep -r / du / Get-ChildItem -Recurse / dir /s and the
  *     Grep and Glob tools over `/`, a drive, every user's folder or a home folder (checkWholeDiskSearch, checkSearchTool); the
  *     refusal names FF_SKILLS, where the ff-agents scripts a worker was hunting for are.
@@ -176,6 +179,9 @@ export function sandboxGuard(opts: {
         (opts.editorRunning?.() ? checkEditorSwitch(cmd, input.cwd || opts.sandboxPath, opts.sandboxPath) : undefined) ??
         checkReleaseBranchCommit(cmd, input.cwd || opts.sandboxPath, opts.sandboxPath) ??
         checkPlayerLaunch(cmd, opts.sandboxId) ??
+        // w2015: no CI check read the vault token cannot make, no wait that only sleeps (server/waitGuard.ts).
+        checkChecksRead(cmd) ??
+        checkTimedSleep(cmd, { timeoutMs: typeof args.timeout === 'number' ? args.timeout : undefined, background: args.run_in_background === true }) ??
         (opts.benchBusy ? checkBenchBusyLaunch(cmd, opts.benchBusy) : undefined) ??
         (opts.personBusy ? checkPersonPlayLaunch(cmd, opts.personBusy) : undefined) ??
         checkRawUnityBatch(cmd, cloneSpellings) ??
