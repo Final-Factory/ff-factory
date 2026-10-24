@@ -39,7 +39,7 @@ test('w1969: a timed leg from BEAST or LothDesktop goes to the small computers; 
   const busy = fleet().map((c) => (['lothlaptop', 'm3', 'biscuit'].includes(c.id) ? full(c) : c));
   const q = decideTimedPlace({ here: at('lothdesktop'), places: busy, platform: 'win32' });
   assert.deepEqual(q.needs, ['lothlaptop']);
-  assert.match(q.why, /on Windows take it: lothlaptop \(1 agent slot, 1 live, no room now\); none has room now, so it queues there \(a big one only after 60 min\)$/);
+  assert.match(q.why, /on Windows take it: lothlaptop \(1 agent slot, 1 live, no room now\); none has room now, so it queues there and waits while one is online \(a big one only if none can take it, w2048\)$/);
   assert.equal(TIMED_LEG_WAIT_MS, 60 * 60_000);
 });
 
@@ -52,7 +52,7 @@ test('w1969: the leg stays here on a small computer, with a same-machine reason,
   assert.equal(decideTimedPlace({ here: at('beast'), places: fleet(), exempt: 'release' }).verdict, 'here');
   const none = decideTimedPlace({ here: at('beast'), places: fleet().filter((c) => c.maxAgents > 4 || c.noTimedRuns), platform: 'win32' });
   assert.equal(none.verdict, 'here');
-  assert.match(none.why, /no small computer on Windows that takes timed runs is online \(never m5\): time here/);
+  assert.match(none.why, /but no small computer on Windows that takes timed runs can take it; never m5: time here on beast, a big computer \(w2048\)\. Every number of this comparison comes from beast/);
   assert.equal(decideTimedPlace({ here: undefined, places: fleet() }).verdict, 'here');
 });
 

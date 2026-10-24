@@ -208,6 +208,12 @@ export interface Config {
    * idleCloseMinutes (w1746): a view idle this long (no turn, job, check-in or viewer) has its sandbox's editor closed; default 15, 0 never.
    */
   live?: { enabled?: boolean; idleCloseMinutes?: number };
+  /**
+   * Timed work (w2048, server/timedAsk.ts unavailableWait): how long a computer that should take a timed leg or holds a timed
+   * run's baseline may be offline before the leg or run stops waiting for it, in whole minutes, when the fleet is idle
+   * (default 5) and when it is busy (default 60); between, it grows with the load.
+   */
+  timing?: { unavailableIdleMinutes?: number; unavailableBusyMinutes?: number };
   masterBatch?: { enabled?: boolean; autoApprove?: { enabled?: boolean; maxPerDay?: number }; repo?: string; workflow?: string };
   /**
    * The automatic portal deploy (w1634, server/autoDeploy.ts, docs/ops-worker.md "Automatic deploys"): a new commit on this
