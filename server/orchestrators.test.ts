@@ -4798,6 +4798,20 @@ test('w1628: each worker\'s bench priority is the highest of its open requests, 
   assert.equal(agents.benchPriorities('pc')[b.id].exempt, 'nightly');
 });
 
+test('w2044: bench priorities read the ledger once per machine, not once per worker it ever had', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents } = env;
+  putRequests(store, [{ id: 'w1', by: BEN, status: 'active', priority: 'high' }, { id: 'w2', by: BEN, status: 'active', priority: 'low' }]);
+  const a = await startedFor(env, 'w1');
+  const b = await startedFor(env, 'w2');
+  // The portal keeps every worker a machine ever had, and every request: each one's open work used to scan the whole ledger.
+  for (let i = 0; i < 300; i++) store.sessions.set(`old${i}`, { ...a.info, id: `old${i}`, title: `w${1000 + i}: done long ago` });
+  putRequests(store, Array.from({ length: 300 }, (_, i) => ({ id: `w${1000 + i}`, by: BEN, status: 'done' as const, sessionIds: [`old${i}`] })));
+  const reads = t.mock.method(store.work, 'values');
+  assert.deepEqual(agents.benchPriorities('pc'), { [a.id]: { priority: 'high', requests: ['w1'] }, [b.id]: { priority: 'low', requests: ['w2'] } });
+  assert.equal(reads.mock.callCount(), 1, 'one read of the ledger for 302 workers');
+});
+
 // w1984, lothsahn: "a waiting ticket in a machine's bench queue must not outlive the worker that asked for it" (LothDesktop's
 // t00000982 waited on after its worker was stopped and w1789's timed run moved to LothLaptop). bench_queue.py parks the
 // waiting tickets of a session marked away and queues them again at the back once the mark goes.
