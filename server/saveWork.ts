@@ -30,7 +30,25 @@ export const SAVE_LIMITS = { files: 500, fileBytes: 10 * 1024 * 1024, totalBytes
  * only some machines' clones exclude it (BEAST's info/exclude does, LothDesktop's did not), so a player build pinned it.
  */
 export const SAVE_SKIPS = ['.nightly-builds/', 'builds/'];
-const SKIP_SPECS = SAVE_SKIPS.map((d) => `:(exclude,icase)${d}`);
+
+/**
+ * The exclude pathspecs for the build folders this sandbox has, by their names on disk, leaving out one git already
+ * ignores. An exclude pathspec that names an ignored folder makes `git add` answer "The following paths are ignored by one
+ * of your .gitignore files: Builds ... Use -f" with exit 1, though it staged the rest (git 2.47, measured): the game repo
+ * ignores Builds/, so every save of lothdesktop/slot6 from 06:56Z on 2026-10-24 failed "git add failed: Builds hint: Use
+ * -f if you really want to add them" and the sandbox stayed held (w1983).
+ */
+async function skipSpecs(dir: string): Promise<string[]> {
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(dir, { withFileTypes: true }).filter((e) => e.isDirectory() && SAVE_SKIPS.includes(`${e.name.toLowerCase()}/`)).map((e) => e.name);
+  } catch {
+    return [];
+  }
+  const specs: string[] = [];
+  for (const n of names) if ((await git(dir, ['check-ignore', '-q', '--', `${n}/`])).code !== 0) specs.push(`:(exclude,literal)${n}/`);
+  return specs;
+}
 
 const ENV = { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' };
 const SHARED = /^(master|main|develop)$/;
@@ -60,7 +78,7 @@ const mb = (n: number) => `${(n / 1024 / 1024).toFixed(n < 10 * 1024 * 1024 ? 1 
 
 /** Why the untracked files of `dir` are too many or too big to commit, or undefined. Stops reading at the first excess. */
 export async function untrackedProblem(dir: string, limits = SAVE_LIMITS): Promise<string | undefined> {
-  const list = (await must(dir, ['ls-files', '--others', '--exclude-standard', '-z', '--', '.', ...SKIP_SPECS], 'listing untracked files')).split('\0').filter(Boolean);
+  const list = (await must(dir, ['ls-files', '--others', '--exclude-standard', '-z', '--', '.', ...(await skipSpecs(dir))], 'listing untracked files')).split('\0').filter(Boolean);
   if (list.length > limits.files) return `${list.length} untracked files there, more than the ${limits.files} a save commits (build output, captures or recordings belong in the temp folder): commit what matters, delete or ignore the rest`;
   let total = 0;
   for (const f of list) {
@@ -85,7 +103,7 @@ export async function saveWork(opts: { dir: string; branch: string; message: str
   if (!st.dirty && !st.untracked) return { files: 0, pushed: false, notes: ['nothing to save'] };
   const problem = st.untracked ? await untrackedProblem(dir, opts.limits) : undefined;
   if (problem) throw new Error(problem);
-  await must(dir, ['add', '-A', '--', '.', ...SKIP_SPECS], 'git add');
+  await must(dir, ['add', '-A', '--', '.', ...(await skipSpecs(dir))], 'git add');
   const files = (await must(dir, ['diff', '--cached', '--name-only', '-z'], 'listing what is saved')).split('\0').filter(Boolean).length;
   if (!files) return { files: 0, pushed: false, notes: [`nothing to save (build output in ${SAVE_SKIPS.join(' or ')} stays, uncommitted)`] };
   await must(dir, ['commit', '-q', '--no-verify', '-m', opts.message], 'git commit');
