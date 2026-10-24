@@ -549,6 +549,15 @@ export interface Config {
     /** The share of worker sessions (by their id) that compact by themselves, 0-100 (w1469's pilot): default 34. */
     compactPilotPercent?: number;
     /**
+     * The earlier-compaction pilot (w2002, server/autoCompact.ts, docs/spend.md "Compacting earlier, a pilot"): the share of
+     * worker sessions (by a hash of their id, apart from the other pilots) that compact between turns from
+     * earlyCompactAtTokens and within a turn from earlyCompactMidTurnTokens. Defaults 50%, 120,000 and 150,000; each threshold
+     * at least 80,000. The share reaches a session's mid-turn threshold when its process next starts.
+     */
+    earlyCompactPilotPercent?: number;
+    earlyCompactAtTokens?: number;
+    earlyCompactMidTurnTokens?: number;
+    /**
      * The share of worker sessions (by a hash of their id, apart from the compaction pilot's) that write terse prose between
      * tool calls, 0-100 (w1480's pilot, server/terseProse.ts, docs/spend.md "Terse prose between tool calls"): default 50.
      * It reaches a session when its process next starts.

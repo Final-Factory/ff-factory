@@ -13,7 +13,7 @@ import { MIN_PRIORITIES, type MinPriority } from '../shared/capacity.ts';
 import { DEV_DEFAULTS, type DevRequestsConfig } from './devRequests.ts';
 import { STALE_OUTPUT_DEFAULTS, staleOutputSettings, type StaleOutputSettings } from './staleOutput.ts';
 import { poolLimits, poolSettingProblem, type PoolConfigKey } from './tokenPool.ts';
-import { AUTO_COMPACT_LIMITS } from './autoCompact.ts';
+import { AUTO_COMPACT_LIMITS, EARLY_COMPACT_MIN_TOKENS } from './autoCompact.ts';
 
 /** The efforts worker.effort takes (w2000, lothsahn's brief: "validated to low, medium, high or max"). */
 export const WORKER_EFFORTS = ['low', 'medium', 'high', 'max'] as const;
@@ -138,6 +138,10 @@ export const SETTABLE_KEYS = [
   'worker.compactAtTokens',
   'worker.compactBeforeWaitTokens',
   'worker.compactPilotPercent',
+  // The earlier-compaction pilot (w2002, server/autoCompact.ts): its share of workers, and its two thresholds (80,000 at least).
+  'worker.earlyCompactPilotPercent',
+  'worker.earlyCompactAtTokens',
+  'worker.earlyCompactMidTurnTokens',
   // The share of workers that write terse prose between tool calls (w1480, server/terseProse.ts).
   'worker.terseProsePilotPercent',
   // Workers' reasoning effort when start_agent names none (w2000, docs/orchestrators.md "A worker's effort"): low, medium, high or
@@ -567,7 +571,14 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       if (!Number.isInteger(n) || (n !== 0 && (n < AUTO_COMPACT_LIMITS.minTokens || n > AUTO_COMPACT_LIMITS.maxTokens))) throw new Error(`${key} is 0 (off) or a whole number of tokens from ${AUTO_COMPACT_LIMITS.minTokens.toLocaleString('en-US')} to ${AUTO_COMPACT_LIMITS.maxTokens.toLocaleString('en-US')}`);
       return n;
     }
+    case 'worker.earlyCompactAtTokens':
+    case 'worker.earlyCompactMidTurnTokens': {
+      const n = Number(value);
+      if (!Number.isInteger(n) || n < EARLY_COMPACT_MIN_TOKENS || n > AUTO_COMPACT_LIMITS.maxTokens) throw new Error(`${key} is a whole number of tokens from ${EARLY_COMPACT_MIN_TOKENS.toLocaleString('en-US')} to ${AUTO_COMPACT_LIMITS.maxTokens.toLocaleString('en-US')}`);
+      return n;
+    }
     case 'worker.compactPilotPercent':
+    case 'worker.earlyCompactPilotPercent':
     case 'worker.terseProsePilotPercent': {
       const n = Number(value);
       if (!Number.isInteger(n) || n < 0 || n > 100) throw new Error(`${key} is a whole number from 0 to 100`);
@@ -996,7 +1007,7 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   else if (key === 'machines.cleanup.staleOutput') cfg.machines = { ...cfg.machines, cleanup: { ...cfg.machines?.cleanup, staleOutput: v as Partial<StaleOutputSettings> | undefined } };
   else if (key === 'hostGuard.cleanup.ageRules') cfg.hostGuard.cleanup.ageRules = (v as { path: string; olderThanDays: number }[] | undefined) ?? [];
   else if (key === 'orchestrator.compactAtTokens') cfg.orchestrator = { ...cfg.orchestrator, compactAtTokens: v as number | undefined };
-  else if (key === 'worker.compactAtTokens' || key === 'worker.compactBeforeWaitTokens' || key === 'worker.compactPilotPercent' || key === 'worker.terseProsePilotPercent') cfg.worker = { ...cfg.worker, [key.slice('worker.'.length)]: v as number | undefined };
+  else if (key === 'worker.compactAtTokens' || key === 'worker.compactBeforeWaitTokens' || key === 'worker.compactPilotPercent' || key === 'worker.earlyCompactPilotPercent' || key === 'worker.earlyCompactAtTokens' || key === 'worker.earlyCompactMidTurnTokens' || key === 'worker.terseProsePilotPercent') cfg.worker = { ...cfg.worker, [key.slice('worker.'.length)]: v as number | undefined };
   // Live: each worker's launch spec reads it when its session starts (agents.ts machineSandboxSpec, standing.ts).
   else if (key === 'worker.effort') cfg.worker = { ...cfg.worker, effort: (v as Config['worker']['effort'] | undefined) ?? DEFAULT_WORKER_EFFORT };
   else if (key === 'orchestrator.compactAtTurnUsd') cfg.orchestrator = { ...cfg.orchestrator, compactAtTurnUsd: v as number | undefined };

@@ -4,7 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { SessionManager, setQueryForTesting, type AutoCompaction, type SessionHandle, type TurnEndMeta } from './sessions.ts';
-import { AutoCompactor, WORKER_COMPACT_DEFAULTS, WORKER_FOCUS, compactBlocker, inPilot, workerCompactSettings, workerCompactionDue } from './autoCompact.ts';
+import { AutoCompactor, EARLY_COMPACT_MARK, WORKER_COMPACT_DEFAULTS, WORKER_FOCUS, compactBlocker, earlyCompactSettings, inEarlyCompactPilot, inPilot, withEarlyCompactMark, workerAutoCompactWindow, workerCompactSettings, workerCompactionDue } from './autoCompact.ts';
+import { workerSettings } from './agents.ts';
 import { Store } from './store.ts';
 import type { Config } from './config.ts';
 import type { SessionInfo } from '../shared/types.ts';
@@ -43,6 +44,39 @@ test('inPilot: a stable share of session ids', () => {
   for (const id of ids.slice(0, 50)) assert.equal(inPilot(id, 34), inPilot(id, 34));
   assert.ok(ids.every((id) => inPilot(id, 100)));
   assert.ok(!ids.some((id) => inPilot(id, 0)));
+});
+
+test('w2002: the earlier-compaction pilot: half the workers by default, 120,000 between turns and 150,000 within a turn, never under 80,000', () => {
+  assert.deepEqual(earlyCompactSettings({}), { pilotPercent: 50, atTokens: 120_000, midTurnTokens: 150_000 });
+  assert.deepEqual(earlyCompactSettings({ worker: { earlyCompactPilotPercent: 300, earlyCompactAtTokens: 40_000, earlyCompactMidTurnTokens: 60_000 } as Config['worker'] }), { pilotPercent: 100, atTokens: 80_000, midTurnTokens: 80_000 });
+  const ids = Array.from({ length: 2000 }, (_, i) => `s-${i.toString(36)}-${(i * 7919).toString(16)}`);
+  const early = ids.filter((id) => inEarlyCompactPilot(id, {}));
+  assert.ok(early.length / ids.length > 0.45 && early.length / ids.length < 0.55, `share ${early.length / ids.length}`);
+  // drawn apart from w1469's pilot: the arm is not the same sessions as inPilot's
+  const both = early.filter((id) => inPilot(id, 50)).length / early.length;
+  assert.ok(both > 0.4 && both < 0.6, `overlap ${both}`);
+  const [inArm, outArm] = [early[0], ids.find((id) => !inEarlyCompactPilot(id, {}))!];
+  assert.equal(workerCompactSettings({}, inArm).atTokens, 120_000, 'the arm compacts between turns from 120,000');
+  assert.equal(workerCompactSettings({}, outArm).atTokens, 200_000, 'the control arm as before');
+  assert.equal(workerCompactSettings({ worker: { compactAtTokens: 0 } as Config['worker'] }, inArm).atTokens, 0, 'compaction off stays off');
+  assert.equal(workerAutoCompactWindow(inArm, {}), 183_000, "Claude Code's window: 150,000 + its 20,000 reserve and 13,000 buffer");
+  assert.equal(workerAutoCompactWindow(outArm, {}), undefined);
+  assert.deepEqual(workerSettings(inArm, {}), { enabledPlugins: { 'csharp-lsp@claude-plugins-official': false }, autoCompactWindow: 183_000 });
+  assert.deepEqual(workerSettings(outArm, {}), { enabledPlugins: { 'csharp-lsp@claude-plugins-official': false } });
+  assert.ok(withEarlyCompactMark('brief', inArm, {}).startsWith(`brief\n\n${EARLY_COMPACT_MARK}\n`), 'the arm is marked in the prompt');
+  assert.equal(withEarlyCompactMark('brief', outArm, {}), 'brief');
+  assert.equal(workerAutoCompactWindow(inArm, { worker: { earlyCompactPilotPercent: 0 } as Config['worker'] }), undefined, '0 ends the pilot');
+});
+
+test('w2002: a worker in the early arm compacts between turns past 120,000; one in the control arm waits for 200,000', async (t) => {
+  const early = Array.from({ length: 200 }, (_, i) => `e-${i}`).find((id) => inEarlyCompactPilot(id, {}))!;
+  const control = Array.from({ length: 200 }, (_, i) => `e-${i}`).find((id) => !inEarlyCompactPilot(id, {}))!;
+  for (const id of [early, control]) {
+    const due = workerCompactionDue(info({ contextTokens: 130_000 }), workerCompactSettings({}, id));
+    if (id === early) assert.deepEqual(due, { trigger: 'tokens', reason: 'the context passed 120,000 tokens' });
+    else assert.equal(due, undefined);
+  }
+  t.diagnostic(`early ${early}, control ${control}`);
 });
 
 test('compactBlocker: a worker whose daemon cannot compact is left alone', () => {

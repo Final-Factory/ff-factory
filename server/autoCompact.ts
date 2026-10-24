@@ -89,6 +89,63 @@ export const WORKER_FOCUS =
 /** The defaults of a worker's compaction (w1469): its context, its context before a long wait, and the pilot's share in percent. */
 export const WORKER_COMPACT_DEFAULTS = { atTokens: 200_000, beforeWaitTokens: 100_000, pilotPercent: 34 } as const;
 
+/**
+ * The earlier-compaction pilot (w2002, lothsahn: "File the compaction pilot plus the base-context trim and noise fixes"). Over
+ * 14 days 96% of workers' cache-read tokens came from calls above 100k of context and 78% above 200k (measured), so a share
+ * of worker sessions compacts earlier: between turns from atTokens instead of worker.compactAtTokens, and within a turn from
+ * midTurnTokens (Claude Code's own autocompact, through the session's autoCompactWindow setting) instead of near the model's
+ * 1M window. Never below EARLY_COMPACT_MIN_TOKENS: the base plus a compaction's summary is already about 67k. The rest of the
+ * workers are the control arm. docs/spend.md, "Compacting earlier, a pilot".
+ */
+export const EARLY_COMPACT_DEFAULTS = { pilotPercent: 50, atTokens: 120_000, midTurnTokens: 150_000 } as const;
+
+/** The least either early threshold may be set to (set_app_config). */
+export const EARLY_COMPACT_MIN_TOKENS = 80_000;
+
+/**
+ * Claude Code compacts within a turn once the context reaches its autoCompactWindow less 20,000 (the output reserve) less
+ * 13,000 (its buffer): read from Claude Code 2.1.284 (`Sve`, `yQ`), and measured there with autoCompactWindow 170,000 (its
+ * debug log: "effectiveWindow=150000"). So a mid-turn threshold T takes the window T + 33,000.
+ */
+export const AUTO_COMPACT_WINDOW_OVERHEAD = 33_000;
+
+/** Appended to a pilot worker's system prompt: it marks the arm in the transcript (scripts/compact-compare.py reads it). */
+export const EARLY_COMPACT_MARK = '## Compaction (pilot)';
+
+export interface EarlyCompactSettings {
+  pilotPercent: number;
+  atTokens: number;
+  midTurnTokens: number;
+}
+
+/** The early pilot in force (config worker.earlyCompactPilotPercent / earlyCompactAtTokens / earlyCompactMidTurnTokens). */
+export function earlyCompactSettings(cfg: Partial<Pick<Config, 'worker'>>): EarlyCompactSettings {
+  const n = (v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : d);
+  const w = cfg.worker;
+  return {
+    pilotPercent: Math.min(100, n(w?.earlyCompactPilotPercent, EARLY_COMPACT_DEFAULTS.pilotPercent)),
+    atTokens: Math.max(EARLY_COMPACT_MIN_TOKENS, n(w?.earlyCompactAtTokens, EARLY_COMPACT_DEFAULTS.atTokens)),
+    midTurnTokens: Math.max(EARLY_COMPACT_MIN_TOKENS, n(w?.earlyCompactMidTurnTokens, EARLY_COMPACT_DEFAULTS.midTurnTokens)),
+  };
+}
+
+/** Whether this worker session is in the earlier-compaction arm: a stable share of ids, drawn apart from the other pilots. */
+export function inEarlyCompactPilot(sessionId: string, cfg: Partial<Pick<Config, 'worker'>>): boolean {
+  return inPilot(`early:${sessionId}`, earlyCompactSettings(cfg).pilotPercent);
+}
+
+/** The Claude Code autoCompactWindow setting of a pilot worker's process, or undefined (the control arm: Claude Code's own). */
+export function workerAutoCompactWindow(sessionId: string, cfg: Partial<Pick<Config, 'worker'>>): number | undefined {
+  return inEarlyCompactPilot(sessionId, cfg) ? earlyCompactSettings(cfg).midTurnTokens + AUTO_COMPACT_WINDOW_OVERHEAD : undefined;
+}
+
+/** A worker's system prompt append with the pilot's mark when its session is in the early arm. */
+export function withEarlyCompactMark(brief: string, sessionId: string, cfg: Partial<Pick<Config, 'worker'>>): string {
+  if (!inEarlyCompactPilot(sessionId, cfg)) return brief;
+  const e = earlyCompactSettings(cfg);
+  return `${brief}\n\n${EARLY_COMPACT_MARK}\nThis session compacts earlier than most: between turns from about ${num(e.atTokens)} tokens of context, within a turn from about ${num(e.midTurnTokens)}.`;
+}
+
 /** A wait shorter than this keeps the cache warm (its entries live an hour): a check-in sooner is no long wait. */
 export const LONG_WAIT_MS = 55 * 60_000;
 
@@ -98,11 +155,16 @@ export interface WorkerCompactSettings {
   pilotPercent: number;
 }
 
-/** The worker thresholds in force (config worker.compactAtTokens / compactBeforeWaitTokens / compactPilotPercent; 0 is off). */
-export function workerCompactSettings(cfg: Partial<Pick<Config, 'worker'>>): WorkerCompactSettings {
+/**
+ * The worker thresholds in force (config worker.compactAtTokens / compactBeforeWaitTokens / compactPilotPercent; 0 is off).
+ * With a session id in the earlier-compaction arm (w2002), its between-turns threshold is the arm's, unless compaction is off.
+ */
+export function workerCompactSettings(cfg: Partial<Pick<Config, 'worker'>>, sessionId?: string): WorkerCompactSettings {
   const n = (v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : d);
   const w = cfg.worker;
-  return { atTokens: n(w?.compactAtTokens, WORKER_COMPACT_DEFAULTS.atTokens), beforeWaitTokens: n(w?.compactBeforeWaitTokens, WORKER_COMPACT_DEFAULTS.beforeWaitTokens), pilotPercent: Math.min(100, n(w?.compactPilotPercent, WORKER_COMPACT_DEFAULTS.pilotPercent)) };
+  const s = { atTokens: n(w?.compactAtTokens, WORKER_COMPACT_DEFAULTS.atTokens), beforeWaitTokens: n(w?.compactBeforeWaitTokens, WORKER_COMPACT_DEFAULTS.beforeWaitTokens), pilotPercent: Math.min(100, n(w?.compactPilotPercent, WORKER_COMPACT_DEFAULTS.pilotPercent)) };
+  if (sessionId !== undefined && s.atTokens > 0 && inEarlyCompactPilot(sessionId, cfg)) s.atTokens = earlyCompactSettings(cfg).atTokens;
+  return s;
 }
 
 /** Whether this worker session is in the pilot: a stable share of session ids (the same session always answers the same). */
@@ -343,7 +405,7 @@ export class AutoCompactor {
     const worker = s.info.kind === 'worker';
     let ws: WorkerCompactSettings | undefined;
     if (worker) {
-      ws = workerCompactSettings(this.cfg);
+      ws = workerCompactSettings(this.cfg, id);
       if (!inPilot(id, ws.pilotPercent)) return 'not in the pilot';
     }
     const owed = orch ? s.info.compactOwed : undefined;

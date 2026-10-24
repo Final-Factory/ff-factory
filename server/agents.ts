@@ -43,7 +43,7 @@ import { JOIN_TTL_MINUTES } from './machineJoin.ts';
 import { searchTranscripts } from './search.ts';
 import { CATALOG, questionsShape } from './launch.ts';
 import { clampArgs, clamped, rangedNumber, withWarnings } from './forgiving.ts';
-import { AutoCompactor, LONG_WAIT_MS } from './autoCompact.ts';
+import { AutoCompactor, LONG_WAIT_MS, withEarlyCompactMark, workerAutoCompactWindow } from './autoCompact.ts';
 import { withTerseProse } from './terseProse.ts';
 import { WORKER_READ_RULES_TOOL, workerRuleText } from './workerRules.ts';
 import { activityLine, Waker } from './wake.ts';
@@ -427,6 +427,15 @@ export const WORKER_HIDDEN_AGENTS = ['Explore', 'Plan', 'claude', 'statusline-se
  * on Claude Code 2026-10-18, the plugin and its LSP tool are gone from the session's init.
  */
 export const WORKER_DISABLED_PLUGINS = ['csharp-lsp@claude-plugins-official'] as const;
+
+/**
+ * A worker process's own settings (--settings): the plugins it starts without, and, in the earlier-compaction pilot's arm
+ * (w2002), the autoCompactWindow that makes Claude Code compact within a turn from the arm's threshold.
+ */
+export function workerSettings(sessionId: string, cfg: Partial<Pick<Config, 'worker'>>): Record<string, unknown> {
+  const window = workerAutoCompactWindow(sessionId, cfg);
+  return { enabledPlugins: Object.fromEntries(WORKER_DISABLED_PLUGINS.map((p) => [p, false])), ...(window ? { autoCompactWindow: window } : {}) };
+}
 
 /** The gates a worker may give up its sandbox for (w890): not a time, a machine, a usage limit or a lock; CI has its own rule (w846). */
 const WAIT_RELEASE_KINDS: readonly string[] = ['deploy', 'request', 'pr'];
@@ -2871,12 +2880,13 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
       effort: info.effort ?? this.cfg.worker.effort,
       settingSources: ['user', 'project', 'local'],
       // w1480: a share of workers also get the terse-prose rule (server/terseProse.ts).
-      append: withTerseProse(this.machineSandboxBrief(m, sb, run.account, run.github, clone, this.workflowMachines()), info.id, this.cfg),
+      // w2002: and a share compacts earlier, marked in the prompt (server/autoCompact.ts withEarlyCompactMark).
+      append: withEarlyCompactMark(withTerseProse(this.machineSandboxBrief(m, sb, run.account, run.github, clone, this.workflowMachines()), info.id, this.cfg), info.id, this.cfg),
       strictMcp: false,
       // The Unity bridge of this sandbox's editor only (machine/unityMcp.ts): Claude Code has none registered for a new worktree.
       unityMcp: true,
       disallowedTools: ['mcp__ffsb', ...WORKER_UNUSED_TOOLS, ...WORKER_HIDDEN_AGENTS.map((a) => `Agent(${a})`)],
-      settings: { enabledPlugins: Object.fromEntries(WORKER_DISABLED_PLUGINS.map((p) => [p, false])) },
+      settings: workerSettings(info.id, this.cfg),
       mcp: {
         server: 'machine',
         tools: this.workerTools({
