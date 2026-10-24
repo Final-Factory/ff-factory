@@ -847,7 +847,8 @@ const blockerWatch = new BlockerWatch({
   nightlyAt: () => nightlyAt,
   room: () => agents.roomNow(),
   roomFacts: () => agents.roomFacts(),
-  queued: (id) => sessions.queued().some((q) => q.id === id),
+  // w2079: a worker whose work a resume's move is carrying away is not lost: the sweep leaves it be.
+  queued: (id) => sessions.queued().some((q) => q.id === id) || agents.isMoving(id),
   benchResume: () => agents.resumeBenchWaits(),
   githubPerson: (w) => githubPersonOf(tokenPersonForWork(cfg, w), w, identity.systemPayer().userId),
 });
