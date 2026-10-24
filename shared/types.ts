@@ -2233,6 +2233,13 @@ export interface WorkNeedsYou {
   sharedWith?: string;
   /** The other requests the one message named as carrying the same question (w1812). */
   also?: string[];
+  /**
+   * The asked person's notes on this request and its related requests, newest last, cut (w2085, server/priorDecisions.ts):
+   * the card shows them, so the orchestrator checks none decides the question before it asks.
+   */
+  prior?: { on: string; at: string; by: string; text: string }[];
+  /** Those notes that may already decide it, and what each names that the question names too (w2085). */
+  possiblyDecided?: { on: string; at: string; by: string; why: string[] }[];
 }
 
 /** An ask_person question its person has not answered yet (w1868, SessionInfo.openAsks). */

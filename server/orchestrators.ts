@@ -62,6 +62,7 @@ import { excerptOf, isEmoji, PERSON_MESSAGE_CHARS, reactionRemovedText, reaction
 import { grantCovers, grantKey, grantWords, GRANT_MS, isNo, isYes, PROPOSAL_MAX_AGE_MS, proposalText, type GateNeed, type ReactionGrant } from '../shared/reactionGrant.ts';
 import { NOTICE_TAG } from '../shared/notices.ts';
 import { mediaLine, previewsOf, reviewRootOf } from './reviewMedia.ts';
+import { personNotes, relatedRequests } from './priorDecisions.ts';
 import { alreadySent, asksSame, matchedAsk, needsYouDigestText, needsYouRecord, needsYouText, whoOf, type NeedsYouWait } from './needsYou.ts';
 import { asksAnsweredBy, sameAsk, WAIT_LINE_CHARS } from '../shared/waitSummary.ts';
 import { holdsItsPlace, stoppedOffline } from '../shared/agentState.ts';
@@ -914,8 +915,10 @@ export class Orchestrators {
     if (!isOpen(w) || alreadySent(w, wait.key)) return undefined;
     const to = whoOf(wait.names, this.d.identity.list(), wait.kind === 'question' ? [w.requestedBy] : w.requesters);
     const at = opts.at ?? this.now().toISOString();
-    const r = needsYouRecord(w, wait, to, at, { reviewRoot: reviewRootOf(this.d.cfg), digest: opts.digest, also: (opts.also ?? []).filter((a) => a !== w).map((a) => a.id) });
     const carriers = this.carriers(w, wait);
+    // w2085: the asked person's notes on this request, its related requests and the others its worker holds go on the card.
+    const prior = personNotes(relatedRequests(w, this.store.work.values(), [...carriers, ...(opts.also ?? [])]), to.flatMap((p) => [p.displayName, p.userId]));
+    const r = needsYouRecord(w, wait, to, at, { reviewRoot: reviewRootOf(this.d.cfg), digest: opts.digest, also: (opts.also ?? []).filter((a) => a !== w).map((a) => a.id), prior });
     const raised = Date.parse(wait.raisedAt ?? '');
     if (wait.kind !== 'question' && raised) {
       const who = to.map((p) => p.displayName);
@@ -3517,6 +3520,11 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
   }
 
   /** A line on a timed leg FF Factory could not start itself (w2055). */
+  /** A line in a request's log, stamped (w2085: a worker's decided_override on waiting_on_person). */
+  noteOnRequest(id: string, line: string): void {
+    this.noteTimedLegStart(id, line);
+  }
+
   noteTimedLegStart(id: string, line: string): void {
     const w = this.store.work.get(id);
     if (!w) return;

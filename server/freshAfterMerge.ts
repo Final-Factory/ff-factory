@@ -14,6 +14,7 @@ import type { SessionInfo, WorkItem, WorkPr } from '../shared/types.ts';
 import { inPilot } from './autoCompact.ts';
 import { isOpen } from './work.ts';
 import { isMidTurn } from './sessions.ts';
+import { noteLine, type PriorNote } from './priorDecisions.ts';
 
 const oneLine = (s: string) => s.replace(/\s+/g, ' ').trim();
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);
@@ -73,13 +74,16 @@ export function mergedInSession(s: Pick<SessionInfo, 'id' | 'kind' | 'createdAt'
  * session's last word on it) and the message that brought it. The branch and git state follow in the harness's handover
  * (work.ts handoverNote).
  */
-export function freshAfterMergeText(w: Pick<WorkItem, 'id' | 'title' | 'outcome' | 'status'>, old: Pick<SessionInfo, 'id' | 'lastResult'>, merged: readonly WorkPr[], message: string): string {
+export function freshAfterMergeText(w: Pick<WorkItem, 'id' | 'title' | 'outcome' | 'status'>, old: Pick<SessionInfo, 'id' | 'lastResult'>, merged: readonly WorkPr[], message: string, relatedNotes: readonly PriorNote[] = []): string {
   const prs = merged.map((p) => `${p.repo}#${p.number}${p.title ? ` "${clip(p.title, 80)}"` : ''} (merged ${(p.at ?? '').slice(0, 16).replace('T', ' ')} UTC${p.sha ? `, ${p.sha.slice(0, 10)}` : ''})`);
   const left = w.outcome ? clip(oneLine(w.outcome), 400) : old.lastResult ? clip(oneLine(old.lastResult), 400) : 'not said: read the request with read_work';
   return [
     `[FF Factory] ${FRESH_AFTER_MERGE_MARK}: ${w.id} "${clip(w.title, 100)}" goes on in this NEW session in the same sandbox and branch. Worker ${old.id} was on it until its pull request merged; that session has ended, and its conversation is not carried over (a compaction without the old context, to cut what a long context costs on every call).`,
     `Merged: ${prs.join('; ')}.`,
     `What is left, in that worker's last word: ${left}`,
+    // w2085: d57b4ea5, w1958's fresh session, asked Ben for a look OK on a tooltip line he had decided in a note of 04:59.
+    `Decisions already made: its people's notes, verbatim, follow the brief below ("Notes since it was filed")${relatedNotes.length ? ', and theirs on its related requests are here' : ''}. Read them before you ask anyone anything: a question they settle is not asked (w2085; Ben, 2026-10-24: "you keep asking me questions i already answered"), and a UI change whose content they decided (their wording or behaviour as plain text in an existing component, nothing else moved) merges on green with no look OK.`,
+    ...relatedNotes.map((n) => noteLine(n, w.id)),
     `Read the request (read_work ${w.id}) and the branch's git log for anything more before you act; do not redo research the merged work already settled. The message that brought this session:`,
     '~~~text',
     message.trim(),
