@@ -927,10 +927,36 @@ and w1891 waited behind it there, and w1789 waited on LothDesktop behind shared 
   comparison on that one computer (any OS) and reports "For wNNN:", and the asking request is Blocked on that report, so its
   sandbox goes to other work meanwhile. One open leg per request. With `via: "timed_run"` and a play-only computer up
   (w1946), a Windows player A/B goes there by `timed_run` instead, built where the worker is.
-- **The wait bound**: a leg Queued on busy small computers waits for them rather than taking a big one, for
-  `TIMED_LEG_WAIT_MS`, 60 minutes: two full bench turns (the game repo's bench_queue.py caps a turn at 30 minutes). Past it
-  `Orchestrators.timedLegBound` (each blocker-watch pass) widens its needs to every computer that takes timed runs, logged
-  once in the leg's log and told to the dispatcher.
+- **The wait bound, and the fall-back to a big computer** (w2048; lothsahn, 2026-10-24: "sometimes machines go offline. We
+  should still allow timed runs on larger machines if there are no other machines available to take them"). A leg Queued
+  on small computers waits there while any of them can take it, busy or not. A small computer cannot when it is held or
+  avoided, has no game sandbox, or is offline for longer than the wait (`timedAsk.ts` `smallTimedStates`); a shorter drop is
+  a blip and still counts. Once none of the leg's small computers can, `Orchestrators.timedLegBound` (each blocker-watch
+  pass) widens its needs to every computer that takes timed runs (big ones included, never m5), stamps "BIG-COMPUTER
+  FALLBACK (w2048)" with which small computers were unavailable and why in the leg's log and in the asking request's, and
+  tells the dispatcher. The same test runs at the ask: with no small computer able, a worker on BEAST or LothDesktop hears
+  **here**, with the same reason, and the log line says "here on a big computer (w2048 fallback: ...)". A widened leg's
+  worker hears **here** wherever it is started. Before w2048 a leg widened after `TIMED_LEG_WAIT_MS` (60 minutes) even
+  when its small computer was only busy.
+- **How long "offline" is waited for** (w2048, `unavailableWait`; lothsahn: "If the fleet is idle it should wait far less
+  than if the fleet is busy"). The load is the agents mid-turn plus the requests Queued, over the online computers' agent
+  slots (`fleetLoad`). At 50% load or less the wait is 5 minutes, at 100% or more 60 minutes, and between the two it grows
+  in a straight line. Config `timing.unavailableIdleMinutes` and `timing.unavailableBusyMinutes` set the two ends. The
+  numbers come from the journal for 2026-10-17..24. A daemon's drops were blips of 1 to 30 s (deploys and link flaps:
+  dozens on lothlaptop and biscuit at 12:02..13:49Z on 2026-10-24). A daemon reconnects by itself within about a minute
+  (`redeployDue` waits 2 minutes before it redeploys). The real outages lasted hours: m3 was offline from 06:50Z to past
+  13:43Z. So 5 minutes clears every blip seen, and an idle fleet loses nothing to a fresh baseline. 60 minutes is two
+  full bench turns: a re-run on a busy fleet takes an exclusive turn that idles a big computer's other slots (5 on BEAST,
+  9 on LothDesktop) while queued work waits. The load measure counts both what runs and what waits: at 12:17Z there were
+  10 requests Queued on about 25 slots (busy), and at 13:25Z 1 Queued with free slots (idle).
+- **Numbers never cross computers** (w2048; lothsahn: "Timings can't be compared across machines at all. Every machine has
+  wildly different performance"). A fall-back worker is told to run every side on its computer, to re-measure there any
+  baseline from another, and to name the computer in its report (`bigFallbackRules`). A `timed_run` with no `machine`
+  goes to the computer the same request's last run used, when that one can take it. A run Queued for a computer that stays
+  unavailable past the same wait moves to another (`TimedRuns.retarget`; lothsahn: "rerun the baseline if a machine is
+  offline or unavailable too long"). Its order holds every build, so the baseline is played again there, and its worker is
+  told that the numbers left behind do not compare. When no other computer can take it, the worker is told once to time it
+  itself through `timed_place`. Every result names the one computer all its numbers come from.
 - **The guard**: the verdict rides the bench priorities to the machine (`BenchPriority.timed`, and the machine's
   `timed_ask` mark in priorities.json, `machine/benchLock.ts` `readTimedAsk`). On a big computer, `checkTimedAsk`
   refuses `bench_queue.py timed`, `bench_queue.py run --mode exclusive`, `unity-bridge.py --timed`, `bench_lock --timing`,
