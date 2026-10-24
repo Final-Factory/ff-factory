@@ -107,7 +107,9 @@ export const gateSetter = (g: Pick<WorkBlocker, 'by'>): string | undefined => /^
  * 39772f0c, which did not know the PR was its to merge.
  */
 export function isWith(w: Pick<WorkItem, 'sessionIds' | 'links' | 'status' | 'blocked' | 'alsoBlocked'>, sessionId: string): boolean {
-  return latestWorker(w) === sessionId || (w.status === 'blocked' && gatesOf(w).some((g) => gateSetter(g) === sessionId));
+  // w2026: a worker not in sessionIds is never its newest worker, so newestFirst's sort runs only for the request's own workers (the
+  // release pass asks this of every request for every worker each minute: 9 s of the portal's 37 s stalls on 2026-10-24).
+  return (w.sessionIds.includes(sessionId) && latestWorker(w) === sessionId) || (w.status === 'blocked' && gatesOf(w).some((g) => gateSetter(g) === sessionId));
 }
 
 /**

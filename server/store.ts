@@ -76,14 +76,17 @@ const TAIL_FILE_BYTES = 8 * 1024 * 1024;
  */
 export function writeTailFile(gzPath: string, text: string | Buffer) {
   try {
-    const size = fs.statSync(gzPath).size;
-    const buf = typeof text === 'string' ? Buffer.from(text) : text;
-    let from = Math.max(0, buf.length - TAIL_FILE_BYTES);
-    if (from > 0) from = buf.indexOf(0x0a, from) + 1 || buf.length;
-    fs.writeFileSync(`${gzPath}.tail`, `${JSON.stringify({ of: size, whole: from === 0 })}\n${buf.toString('utf8', from)}`);
+    fs.writeFileSync(`${gzPath}.tail`, tailFileText(fs.statSync(gzPath).size, typeof text === 'string' ? Buffer.from(text) : text));
   } catch {
     // a tail file is only a shortcut
   }
+}
+
+/** A tail file's text: the header, then the last whole lines of `buf` (the unzipped transcript) up to TAIL_FILE_BYTES. */
+function tailFileText(gzSize: number, buf: Buffer): string {
+  let from = Math.max(0, buf.length - TAIL_FILE_BYTES);
+  if (from > 0) from = buf.indexOf(0x0a, from) + 1 || buf.length;
+  return `${JSON.stringify({ of: gzSize, whole: from === 0 })}\n${buf.toString('utf8', from)}`;
 }
 
 function readTailFile(gzPath: string, lines: number): { text: string; whole: boolean } | undefined {
@@ -433,6 +436,40 @@ export class Store {
     const last = this.readTranscript(sessionId, LAST_LINES).at(-1)?.seq ?? 0;
     this.seqs.set(sessionId, last);
     return last;
+  }
+
+  /**
+   * lastSeq when it is cheap: remembered, a plain transcript (its end is read), or a compressed one with its tail file. Undefined
+   * when it would unzip a whole compressed transcript on the main thread (lastSeqAsync does that off it). w2026: the first start
+   * after the tail files came (735683ea0, 2026-10-24) answered every daemon's connect by unzipping each compressed transcript of
+   * its sessions and writing its tail file synchronously, a 39 s stall (stall profile: attach > lastSeq > writeFileSync), and the
+   * deploy missed /api/health for 300 s and was rolled back.
+   */
+  lastSeqNow(sessionId: string): number | undefined {
+    const n = this.seqs.get(sessionId);
+    if (n !== undefined) return n;
+    const f = this.transcriptPath(sessionId);
+    if (!fs.existsSync(f) && fs.existsSync(`${f}.gz`) && !readTailFile(`${f}.gz`, LAST_LINES)) return undefined;
+    return this.lastSeq(sessionId);
+  }
+
+  /** lastSeq, a compressed transcript without its tail file unzipped off the main thread, and its tail file written for next time (w2026). */
+  async lastSeqAsync(sessionId: string): Promise<number> {
+    const now = this.lastSeqNow(sessionId);
+    if (now !== undefined) return now;
+    const gz = `${this.transcriptPath(sessionId)}.gz`;
+    let last = 0;
+    try {
+      const zipped = await fs.promises.readFile(gz);
+      const text = tailFileText(zipped.length, await gunzipAsync(zipped, {}));
+      await fs.promises.writeFile(`${gz}.tail`, text);
+      last = parseLines(text.slice(text.indexOf('\n') + 1), LAST_LINES).at(-1)?.seq ?? 0;
+    } catch (e) {
+      console.warn(`store: the last seq of ${sessionId} could not be read from its compressed transcript: ${(e as Error).message}`);
+    }
+    // appended to meanwhile (unzipped, a new seq given): that one stands
+    if (!this.seqs.has(sessionId)) this.seqs.set(sessionId, last);
+    return this.seqs.get(sessionId)!;
   }
 
   append(sessionId: string, e: DistributiveOmit<TranscriptEvent, 'seq' | 't'>): TranscriptEvent {

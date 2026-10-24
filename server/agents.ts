@@ -758,6 +758,14 @@ export class Agents {
         return (m && poolSettingsOf(m)?.maxAgentsPerSandbox) || 2;
       },
       soon: () => void setTimeout(() => this.placeAgain.tick(), 5000).unref?.(),
+      pass: (run) => {
+        this.workByWorker = workByWorker(this.store.work.values());
+        try {
+          return run();
+        } finally {
+          this.workByWorker = undefined;
+        }
+      },
       // Uncommitted changes keep no process when its daemon saves them before the release (w656).
       keepLive: (id) => {
         const h = sessions.sessions.get(id);
@@ -1049,9 +1057,20 @@ export class Agents {
    * priority. That will help it get queued"): the one whose open request comes first by priority, then age; one with none last.
    */
   resumeOrder(a: SessionInfo, b: SessionInfo): number {
-    const first = (i: SessionInfo) => [...this.store.work.values()].filter((w) => latestWorker(w) === i.id && WORK_OPEN.includes(w.status)).sort(priorityThenAge)[0];
-    const x = first(a);
-    const y = first(b);
+    // w2026: a sort compares each worker many times, and each comparison read every request twice; now one pass per turn of the loop.
+    if (!this.firstOpen) {
+      const first = new Map<string, WorkItem>();
+      for (const w of this.store.work.values()) {
+        if (!WORK_OPEN.includes(w.status)) continue;
+        const id = latestWorker(w);
+        const had = id && first.get(id);
+        if (id && (!had || priorityThenAge(w, had) < 0)) first.set(id, w);
+      }
+      this.firstOpen = first;
+      setImmediate(() => (this.firstOpen = undefined));
+    }
+    const x = this.firstOpen.get(a.id);
+    const y = this.firstOpen.get(b.id);
     return x && y ? priorityThenAge(x, y) : x ? -1 : y ? 1 : 0;
   }
 
@@ -1061,7 +1080,7 @@ export class Agents {
    * and slot5 stayed pinned by 2e29f29e's 04:14 check-in, since a worker on no request had no work to be over).
    */
   workOver(i: SessionInfo): string | undefined {
-    const items = [...this.store.work.values()].filter((w) => (w.sessionIds.includes(i.id) || w.movedOff?.[i.id]) && w.status !== 'merged');
+    const items = [...this.workOf(i.id)].filter((w) => (w.sessionIds.includes(i.id) || w.movedOff?.[i.id]) && w.status !== 'merged');
     if (items.length && items.every((w) => !WORK_OPEN.includes(w.status))) return `its request${items.length > 1 ? 's are' : ' is'} closed (${items.map((w) => `${w.id} ${w.status}`).join(', ')})`;
     // A worker that set a gate its request still waits on is with it (w1094, shared/blockers.ts isWith).
     if (items.length && items.every((w) => !isWith(w, i.id))) return `its request${items.length > 1 ? 's are' : ' is'} with another worker now (${items.map((w) => `${w.id}: ${latestWorker(w) ?? 'moved off it, not placed yet'}`).join(', ')})`;
@@ -1075,7 +1094,7 @@ export class Agents {
    * ciReleaseWhy), and it is resumed when the checks finish (Orchestrators.unblock).
    */
   ciWait(i: SessionInfo): string | undefined {
-    const items = [...this.store.work.values()].filter((w) => isWith(w, i.id) && WORK_OPEN.includes(w.status));
+    const items = [...this.workOf(i.id)].filter((w) => isWith(w, i.id) && WORK_OPEN.includes(w.status));
     if (!items.length || !items.every((w) => w.status === 'blocked' && w.blocked)) return undefined;
     // Its own CI wait or the dispatcher's, never another worker's on the same request (w1094).
     const ci = items.flatMap((w) => gatesOf(w).filter((g) => g.kind === 'ci' && (!gateSetter(g) || gateSetter(g) === i.id)).map((g) => `${w.id}: CI on ${g.ref}`));
@@ -1094,7 +1113,7 @@ export class Agents {
    */
   waitOn(i: SessionInfo): string | undefined {
     if (this.ciWait(i)) return undefined;
-    const items = [...this.store.work.values()].filter((w) => isWith(w, i.id) && WORK_OPEN.includes(w.status));
+    const items = [...this.workOf(i.id)].filter((w) => isWith(w, i.id) && WORK_OPEN.includes(w.status));
     if (!items.length) return undefined;
     // The worker's own declaration (waiting_on_person, which its next message ends) covers every request it is the latest
     // worker on (w890, found live: a worker started for w1 and then sent w2 is read as working on w2 only, so its
@@ -1149,7 +1168,7 @@ export class Agents {
   private personWait(i: SessionInfo): string | undefined {
     const now = Date.now();
     if (!this.waitLive || now - this.waitLive.at > 5000) this.waitLive = { at: now, live: this.workLive() };
-    for (const w of this.store.work.values()) {
+    for (const w of this.workOf(i.id)) {
       if (!isWith(w, i.id) || !WORK_OPEN.includes(w.status)) continue;
       const l = this.waitLive.live.get(w.id);
       if (l?.state === 'waiting') return l.waitsOn?.length ? l.waitsOn.join(' and ') : 'a person';
@@ -1170,6 +1189,15 @@ export class Agents {
   }
   /** Agents.workLive() for the release pass, kept a few seconds: it reads every request, and the pass asks once per worker. */
   private waitLive?: { at: number; live: Map<string, WorkLive> };
+  /** Each released worker's first open request by priority, for resumeOrder, for the rest of this turn of the loop (w2026). */
+  private firstOpen?: Map<string, WorkItem>;
+  /** During a release pass, the requests by worker (workByWorker, w2026); undefined outside one. */
+  private workByWorker?: Map<string, WorkItem[]>;
+
+  /** The requests that can concern worker `id`: its own during a release pass (workByWorker), else all of them. */
+  private workOf(id: string): Iterable<WorkItem> {
+    return this.workByWorker ? (this.workByWorker.get(id) ?? []) : this.store.work.values();
+  }
 
   /** Why an idle worker's process should go (w384), or undefined: its requests are closed, handed to another worker, or it has been idle an hour. */
   reapWhy(s: SessionHandle, now = Date.now()): string | undefined {
@@ -5975,4 +6003,22 @@ function reviewBy(i: SessionInfo): string {
 /** The computer the review folder is on, as people know it (BEAST). */
 function reviewHost(): string {
   return os.hostname();
+}
+
+/**
+ * The requests each worker may be on, in ledger order (w2026): every worker in a request's sessionIds, every worker moved off it
+ * (WorkItem.movedOff) and every worker that set one of its gates (isWith). The release pass asked workOver, ciWait and waitOn of
+ * every worker each minute, each a scan of every request (agents.ts in the 2026-10-24 stall profiles, with isWith's sort).
+ */
+export function workByWorker(work: Iterable<WorkItem>): Map<string, WorkItem[]> {
+  const out = new Map<string, WorkItem[]>();
+  for (const w of work) {
+    const ids = new Set([...w.sessionIds, ...Object.keys(w.movedOff ?? {}), ...gatesOf(w).map((g) => gateSetter(g)).filter((x): x is string => !!x)]);
+    for (const id of ids) {
+      const list = out.get(id);
+      if (list) list.push(w);
+      else out.set(id, [w]);
+    }
+  }
+  return out;
 }
