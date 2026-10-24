@@ -365,7 +365,7 @@ const exceptText = (ids: readonly string[]) => (ids.length ? `; except ${ids.joi
  * higher work (w1643). A reservation is a hold for the work below it, not an avoid: it never overflows when nothing else has
  * room, since a reservation that overflows reserves nothing.
  */
-const holdOf = (prefs: PlacementPrefs) => {
+export const holdOf = (prefs: PlacementPrefs) => {
   const out = holdOnly(prefs);
   for (const id of minOf(prefs).keys()) {
     const why = out.has(id) ? undefined : reservedReason(id, prefs);
@@ -540,7 +540,7 @@ const noTimedNote = (places: readonly Computer[]) => {
   return no.length ? `; never ${no.map((p) => `${p.id} (it takes no timed runs: ${p.noTimedRuns})`).join(', ')}` : '';
 };
 
-const avoidOf = (prefs: PlacementPrefs) => new Map(Object.entries(prefs.avoid ?? {}).map(([k, v]) => [placeId(k), v]));
+export const avoidOf = (prefs: PlacementPrefs) => new Map(Object.entries(prefs.avoid ?? {}).map(([k, v]) => [placeId(k), v]));
 
 const loadPart = (p: Computer) => {
   const pct = memPct(p);

@@ -362,6 +362,10 @@ fewest timed legs queued, then `placement.prefer`. A one-worker computer ranks f
 - **When every computer is full**, the line still says where timed work goes when one frees, smallest first, never m5.
 - **The line shows the whole ranking**: after the computers with room come those online without it, smallest first
   ("lothdesktop (10 agent slots, 3 editors, 5 live); no room now: m3 (4 agent slots), beast (12 agent slots); never m5").
+- **A timed leg asked for at its ticket** (w1969, docs/machines.md "Where a timed leg runs"): a worker on a big computer
+  calls `timed_place` before an exclusive ticket; a leg handed off arrives as "Timed leg for wNNN: ...", Queued for the small
+  computers it names. Start it on the first of them with room; a big one takes it only after the ledger widens its needs
+  (60 minutes Queued). Its asking worker is Blocked on its report: do not start that worker for it.
 
 A timed A/B compares its legs on one computer, so a slower one gives as good an answer.
 

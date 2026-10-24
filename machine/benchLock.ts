@@ -4,7 +4,8 @@
 // (docs/live-view.md, "On BEAST first"): a streaming editor in play mode takes the CPU and GPU the run measures.
 import fs from 'node:fs';
 import path from 'node:path';
-import type { BenchLock, BenchPriority, BenchQueueReport, NoTimedRuns } from '../shared/types.ts';
+import type { BenchLock, BenchPriority, BenchQueueReport, NoTimedRuns, TimedAskMark } from '../shared/types.ts';
+import type { TimedAskState } from '../server/timedAsk.ts';
 import { benchQueueDir, queueTickets, type QueueTicket } from './benchQueue.ts';
 
 /** Where quiet_gate.sh keeps the lock: `$FF_WORKER_ROOT/tmp/bench.lock` (Git Bash's /f/ffw is F:\ffw). */
@@ -73,7 +74,7 @@ export function readBenchQueue(root: string | undefined, alive: (pid: number) =>
  * `no_timed_runs` {why, elsewhere} (w1861): this machine takes no timed runs, so bench_queue.py refuses every exclusive
  * ticket here and names the machines in `elsewhere`. Errors are logged, never thrown: the queue then goes on in its old order.
  */
-export function writeBenchPriorities(root: string | undefined, sessions: Record<string, BenchPriority>, at = new Date(), singleWorker?: boolean, noTimedRuns?: NoTimedRuns): string | undefined {
+export function writeBenchPriorities(root: string | undefined, sessions: Record<string, BenchPriority>, at = new Date(), singleWorker?: boolean, noTimedRuns?: NoTimedRuns, timedAsk?: TimedAskMark): string | undefined {
   if (!root) return undefined;
   const dir = benchQueueDir(benchLockDir(root));
   const file = path.join(dir, 'priorities.json');
@@ -83,11 +84,27 @@ export function writeBenchPriorities(root: string | undefined, sessions: Record<
     // w1832: `v: 2` (the release and nightly marks) only from a portal that sends them, which also sends `singleWorker`:
     // under v 2 the queue honours a pre-empt ticket only from a session marked release, so an older portal's file stays v 1
     const marks = typeof singleWorker === 'boolean' ? { v: 2, single_worker: singleWorker } : {};
-    fs.writeFileSync(tmp, JSON.stringify({ at: at.toISOString(), ...marks, ...(noTimedRuns ? { no_timed_runs: noTimedRuns } : {}), sessions }));
+    // w1969: `timed_ask` {required, why}: whether workers here ask timed_place before an exclusive timing ticket
+    fs.writeFileSync(tmp, JSON.stringify({ at: at.toISOString(), ...marks, ...(noTimedRuns ? { no_timed_runs: noTimedRuns } : {}), ...(timedAsk ? { timed_ask: timedAsk } : {}), sessions }));
     fs.renameSync(tmp, file);
     return file;
   } catch (e) {
     console.warn(`bench priorities: ${(e as Error).message}`);
+    return undefined;
+  }
+}
+
+/**
+ * What the guard needs of the ask for one worker session (w1969, server/timedAsk.ts checkTimedAsk): this machine's
+ * `timed_ask` mark and the session's verdict and exempt mark in priorities.json, or undefined with no file (it fails open).
+ */
+export function readTimedAsk(root: string | undefined, session: string | undefined): TimedAskState | undefined {
+  if (!root) return undefined;
+  try {
+    const d = JSON.parse(fs.readFileSync(path.join(benchQueueDir(benchLockDir(root)), 'priorities.json'), 'utf8')) as { timed_ask?: TimedAskMark; sessions?: Record<string, BenchPriority> };
+    const s = session ? d.sessions?.[session] : undefined;
+    return { ...(d.timed_ask ? { mark: d.timed_ask } : {}), ...(s?.timed ? { verdict: s.timed } : {}), ...(s?.exempt ? { exempt: s.exempt } : {}) };
+  } catch {
     return undefined;
   }
 }

@@ -97,7 +97,11 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // w1946 (no bump): `timedRuns` and `timedActive` in the hello (an older portal ignores them), `timed_run` and `timed_run_upload`,
 // sent only to a daemon whose hello offered `timedRuns` (an older daemon never gets one), and the daemon's `timed_run_status`,
 // `timed_run_done` and `timed_run_result`, which an older portal never asked for and drops (no default case).
-const DECIDED = { protocol: 9, fingerprint: 'e62608da93cd1ecd' };
+// w1969 (no bump): `timedAsk` on `bench_priorities` (an older daemon drops it: it writes no timed_ask mark, and its own guard,
+// which is as old, asks nothing), `timed` on each BenchPriority (an older daemon writes it into priorities.json, where nothing
+// reads it), and the `timed_place` worker tool (an older daemon's catalog has no schema for it, so its workers are not offered
+// it; nothing there asks for it either). A newer daemon with an older portal gets no mark and asks nothing.
+const DECIDED = { protocol: 9, fingerprint: 'eefebeb14db25fd3' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {
