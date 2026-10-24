@@ -21,10 +21,10 @@ const at = (id: string) => fleet().find((c) => c.id === id)!;
 
 test('w1969: the small computers rank by agent slots, those with room first; never m5, never a big one', () => {
   assert.equal(SMALL_TIMED_MAX_AGENTS, 4);
-  assert.deepEqual(ids(smallTimedRank(fleet(), {}, undefined, 'beast')), ['lothlaptop', 'm3', 'biscuit']);
+  assert.deepEqual(ids(smallTimedRank(fleet(), {}, undefined, 'beast')), ['lothlaptop', 'm3']); // biscuit (4 slots) is large since w2055
   // A busy LothLaptop still ranks, after the small ones with room: the leg queues there rather than going to a big one.
   const busy = fleet().map((c) => (c.id === 'lothlaptop' ? full(c) : c));
-  assert.deepEqual(ids(smallTimedRank(busy, {}, undefined, 'beast')), ['m3', 'biscuit', 'lothlaptop']);
+  assert.deepEqual(ids(smallTimedRank(busy, {}, undefined, 'beast')), ['m3', 'lothlaptop']);
   assert.deepEqual(ids(smallTimedRank(fleet(), {}, 'win32', 'beast')), ['lothlaptop']);
   assert.deepEqual(ids(smallTimedRank(fleet(), {}, 'darwin', 'beast')), ['m3'], 'the Mac that takes timed runs, not m5');
   assert.deepEqual(ids(smallTimedRank(fleet(), { hold: { m3: 'Ben testing' }, avoid: { biscuit: 'reserved' } }, undefined, 'beast')), ['lothlaptop']);
@@ -34,18 +34,18 @@ test('w1969: the small computers rank by agent slots, those with room first; nev
 test('w1969: a timed leg from BEAST or LothDesktop goes to the small computers; it queues on busy ones and says when a big one may take it', () => {
   const d = decideTimedPlace({ here: at('beast'), places: fleet() });
   assert.equal(d.verdict, 'elsewhere');
-  assert.deepEqual(d.needs, ['lothlaptop', 'm3', 'biscuit']);
-  assert.match(d.why, /^beast has 6 agent slots \(6 live now\): an exclusive turn there idles all the others; small computers take it: lothlaptop \(1 agent slot, 0 live, room now\) > m3 \(2 agent slots, 1 live, room now\) > biscuit \(4 agent slots, 1 live, room now\)$/);
+  assert.deepEqual(d.needs, ['lothlaptop', 'm3']);
+  assert.match(d.why, /^beast has 6 agent slots \(6 live now\): an exclusive turn there idles all the others; small computers take it: lothlaptop \(small, 1 agent slot, 0 live, room now\) > m3 \(medium, 2 agent slots, 1 live, room now\)$/);
   const busy = fleet().map((c) => (['lothlaptop', 'm3', 'biscuit'].includes(c.id) ? full(c) : c));
   const q = decideTimedPlace({ here: at('lothdesktop'), places: busy, platform: 'win32' });
   assert.deepEqual(q.needs, ['lothlaptop']);
-  assert.match(q.why, /on Windows take it: lothlaptop \(1 agent slot, 1 live, no room now\); none has room now, so it queues there and waits while one is online \(a big one only if none can take it, w2048\)$/);
+  assert.match(q.why, /on Windows take it: lothlaptop \(small, 1 agent slot, 1 live, no room now\); none has room now, so it queues there and waits while one is online \(a big one only if none can take it, w2048\)$/);
   assert.equal(TIMED_LEG_WAIT_MS, 60 * 60_000);
 });
 
 test('w1969: the leg stays here on a small computer, with a same-machine reason, for the release lane and the nightly, and with no small computer online', () => {
   assert.equal(decideTimedPlace({ here: at('lothlaptop'), places: fleet() }).verdict, 'here');
-  assert.match(decideTimedPlace({ here: at('m3'), places: fleet() }).why, /^m3 is a small computer \(2 agent slots, at most 4\)/);
+  assert.match(decideTimedPlace({ here: at('m3'), places: fleet() }).why, /^m3 is a medium computer \(2 agent slots; small and medium, at most 3, time where they are, w2055\)/);
   const same = decideTimedPlace({ here: at('beast'), places: fleet(), sameMachine: 'the base side ran here at 01:10Z' });
   assert.equal(same.verdict, 'here');
   assert.match(same.why, /its numbers must come from beast: "the base side ran here at 01:10Z" \(both sides of an A\/B stay on one machine\)/);
@@ -108,7 +108,7 @@ test('w1969: the guard refuses an exclusive timing ticket on a big computer unti
   const later = new Date(now + 3_600_000).toISOString();
   assert.equal(checkTimedAsk(cmd, undefined, now), undefined, 'no priorities file: fails open');
   assert.equal(checkTimedAsk(cmd, { mark: timedAskMark(at('lothlaptop')) }, now), undefined, 'a small computer asks nothing');
-  assert.match(checkTimedAsk(cmd, { mark }, now)!, /^w1969: bench_queue\.py timed takes an exclusive bench ticket, and beast has 6 agent slots: .*Call timed_place \(what, brief, platform\) first/);
+  assert.match(checkTimedAsk(cmd, { mark }, now)!, /^w1969: bench_queue\.py timed takes an exclusive bench ticket, and beast is a large computer \(6 agent slots\): .*Call timed_place \(what, brief, platform\) first/);
   assert.equal(checkTimedAsk(cmd, { mark, verdict: { verdict: 'here', why: 'x', until: later } }, now), undefined);
   assert.match(checkTimedAsk(cmd, { mark, verdict: { verdict: 'here', why: 'x', until: new Date(now - 1).toISOString() } }, now)!, /Call timed_place/, 'an old verdict asks again');
   const gone = checkTimedAsk(cmd, { mark, verdict: { verdict: 'elsewhere', why: 'beast has 6 agent slots', until: later, leg: 'w2001' } }, now)!;

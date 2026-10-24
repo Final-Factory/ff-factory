@@ -73,10 +73,33 @@ export interface Computer {
   noTimedRuns?: string;
   /** When its daemon dropped, while it is offline (Machine.lastSeen, w2048): a short drop is a blip, a long one an outage. */
   offlineSince?: string;
+  /**
+   * Of `editors`, those open in a sandbox no worker holds (w2055): left by a worker that stopped, they run nothing, so they do
+   * not make a computer busy for the timing order (lothlaptop at 08:38 MDT on 2026-10-24: 1 editor, 0 live).
+   */
+  idleEditors?: number;
   /** Its CPU use over the last minute, % (w2054, Machines.cpuOf): the mean of its daemon's 15 s reports; undefined when none came. */
   cpuPct?: number;
 }
 
+
+/**
+ * A computer's size class by its agent slots (w2055, lothsahn, 2026-10-24: "let's stop calling them by machine name. Small:1
+ * slot, medium:2-3 slots. Large:4-6 slots. Xlarge:7+"). The timing rules name classes, never machines (m5's no timed runs
+ * and LothDesktop's play yield stay machine rules). The portal journal of 2026-10-24 reads lothlaptop 1 (small), biscuit 4
+ * and beast 6 (large), lothdesktop 10 (xlarge).
+ */
+export type SizeClass = 'small' | 'medium' | 'large' | 'xlarge';
+export const SIZE_CLASSES: readonly SizeClass[] = ['small', 'medium', 'large', 'xlarge'];
+export const SMALL_MAX_SLOTS = 1;
+export const MEDIUM_MAX_SLOTS = 3;
+export const LARGE_MAX_SLOTS = 6;
+export const sizeClass = (slots: number): SizeClass => (slots <= SMALL_MAX_SLOTS ? 'small' : slots <= MEDIUM_MAX_SLOTS ? 'medium' : slots <= LARGE_MAX_SLOTS ? 'large' : 'xlarge');
+export const classOf = (c: Pick<Computer, 'maxAgents'>) => sizeClass(c.maxAgents);
+/** Its place in SIZE_CLASSES: small 0 .. xlarge 3. */
+export const classRank = (c: Pick<Computer, 'maxAgents'>) => SIZE_CLASSES.indexOf(classOf(c));
+/** "biscuit (large, 4 agent slots)". */
+export const classText = (c: Pick<Computer, 'id' | 'maxAgents'>) => `${c.id} (${classOf(c)}, ${c.maxAgents} agent slot${c.maxAgents === 1 ? '' : 's'})`;
 
 /** config placement (w428): computers to try first, in order, and computers to keep work off, with why. */
 export interface PlacementPrefs {
@@ -201,7 +224,7 @@ export function pickTimed(places: readonly Computer[], prefs: PlacementPrefs, t:
   const full = places
     .filter((x) => x.online && !x.noTimedRuns && (!platform || x.platform === platform) && !sorted.includes(x) && !holdOf(prefs).has(x.id) && !avoidOf(prefs).has(x.id))
     .sort((a, b) => a.maxAgents - b.maxAgents || (a.maxEditors ?? 0) - (b.maxEditors ?? 0) || a.id.localeCompare(b.id));
-  const later = full.length ? `; no room now: ${full.map((x) => `${x.id} (${x.maxAgents} agent slot${x.maxAgents === 1 ? '' : 's'})`).join(', ')}` : '';
+  const later = full.length ? `; no room now: ${full.map((x) => classText(x)).join(', ')}` : '';
   return { pick: p, why: `timed or exclusive-lock work goes to the smallest computer with room${platform ? ` on ${platform}` : ''} (w1872, lothsahn: "machines that have a smaller number of editors or slots"): ${ranked}${later}${legs}${noTimedNote(places)}` };
 }
 
@@ -249,7 +272,7 @@ export function timedFacts(places: readonly Computer[], prefs: PlacementPrefs, t
 }
 
 /** "m3 (2 agent slots, 1 editor, 0 live)" (w1872): what timedRank compares. */
-const timedSize = (p: Computer) => `${p.id} (${p.maxAgents} agent slot${p.maxAgents === 1 ? '' : 's'}, ${p.maxEditors ?? '?'} editor${p.maxEditors === 1 ? '' : 's'}, ${p.live} live${queuedTimed(p) ? `, ${queuedTimed(p)} timed queued` : ''})`;
+const timedSize = (p: Computer) => `${p.id} (${classOf(p)}, ${p.maxAgents} agent slot${p.maxAgents === 1 ? '' : 's'}, ${p.maxEditors ?? '?'} editor${p.maxEditors === 1 ? '' : 's'}, ${p.live} live${queuedTimed(p) ? `, ${queuedTimed(p)} timed queued` : ''})`;
 
 /**
  * The computers timed or exclusive-lock work may go to, best first (w1872, pickTimed's rule): with room, not held or
@@ -679,7 +702,7 @@ export function timedLine(places: readonly Computer[], last?: string, prefs: Pla
     const next = places
       .filter((x) => x.online && !x.noTimedRuns && !hold.has(x.id) && !avoidOf(prefs).has(x.id))
       .sort((a, b) => a.maxAgents - b.maxAgents || (a.maxEditors ?? 0) - (b.maxEditors ?? 0) || a.id.localeCompare(b.id));
-    const order = next.length ? ` When one frees, timed work goes to the first of: ${next.map((x) => `${x.id} (${x.maxAgents} agent slot${x.maxAgents === 1 ? '' : 's'})`).join(' > ')} (w1872)${noTimedNote(places)}.` : '';
+    const order = next.length ? ` When one frees, timed work goes to the first of: ${next.map((x) => classText(x)).join(' > ')} (w1872)${noTimedNote(places)}.` : '';
     return `No computer has room for timed work now${heldNote(places, prefs, 'game')}.${order}${held}`;
   }
   return `Next timed work (benchmarks, perf A/Bs and probes; on the platform it names, w1628): ${p.pick.id} (${p.why}).${held}`;

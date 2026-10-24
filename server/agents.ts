@@ -99,7 +99,8 @@ import { commandLine, launchIndependent, run } from './proc.ts';
 import { type HostHealthMonitor } from './hostHealth.ts';
 import { describeCleanup, describeCleanupItems, describeCleanupLog } from './cleanup.ts';
 import type { BuildHold, HostHealth, TimedVerdict } from '../shared/types.ts';
-import { decideTimedPlace, fleetLoad, isSmallTimed, smallTimedStates, timedAskMark, unavailableWait, TIMED_VERDICT_MS } from './timedAsk.ts';
+import { decideTimedPlace, fleetLoad, isSmallTimed, smallTimedStates, timedAskMark, unavailableWait, TIMED_VERDICT_MS, TIMED_WAIT_IDLE_MIN } from './timedAsk.ts';
+import { reachesBig, timedLegStep, type LegStep, type Occupant } from './timedLegPlace.ts';
 import { StandingAgents } from './standing.ts';
 import type { MachineManager } from './machines.ts';
 import type { CatalogTool, LaunchSpec } from './launch.ts';
@@ -826,9 +827,12 @@ export class Agents {
       timedFacts: (t) => timedFacts(this.places(), this.placement(), t),
       timedSmall: () => {
         const places = this.places();
-        const wait = this.timedWait(places);
+        const wait = this.timedBlip();
         return { states: smallTimedStates(places, this.placement(), undefined, undefined, Date.now(), wait.ms), waitWhy: wait.why };
       },
+      // w2055: a Queued timed leg's next step, and FF Factory starting it itself (pre-empting a small computer's movable work).
+      timedLegStep: (w) => this.timedLegStepFor(w),
+      startTimedLeg: (w, m, why, moves) => this.startTimedLeg(w, m, why, moves),
       machineOnline: (id) => (store.machines.has(id.toLowerCase()) ? machines.isOnline(id.toLowerCase()) : undefined),
       // w2045: the merge-on-green pilot's arm, by request (server/mergeOnGreen.ts); the setting is read live.
       mergeOnGreenPilot: (id) => inMergeOnGreenPilot(id, this.cfg),
@@ -1394,6 +1398,17 @@ export class Agents {
    * How long timed work waits for an unavailable computer now (w2048, timedAsk.ts unavailableWait): from the fleet's load
    * (agents mid-turn and requests Queued over the online slots) and config timing.
    */
+  /**
+   * How long an offline computer still counts as up for a timed leg (w2055): the blip window, timing.unavailableIdleMinutes
+   * (5 min). Since w2055 a leg no longer waits out the load-scaled wait for an offline computer: lothsahn, "If all small
+   * machines are offline, don't wait for them to come online", so past a blip its class is skipped and re-checked each pass.
+   * The load-scaled wait (timedWait) stays for a timed run's baseline retarget (timedRuns.ts).
+   */
+  timedBlip(): { ms: number; why: string } {
+    const min = this.cfg.timing?.unavailableIdleMinutes ?? TIMED_WAIT_IDLE_MIN;
+    return { ms: min * 60_000, why: `${min} min, a daemon's blip (timing.unavailableIdleMinutes; w2055: past it the next size class is used)` };
+  }
+
   timedWait(places: readonly Computer[] = this.places()): { ms: number; why: string; load: number } {
     const queued = [...this.store.work.values()].filter((w) => w.status === 'queued' && isOpen(w)).length;
     const load = fleetLoad(places, queued);
@@ -1414,7 +1429,7 @@ export class Agents {
     const places = this.places();
     const here = places.find((p) => p.id === placeId(machineId));
     const timedRun = (this.timedRuns?.windowsTargets() ?? []).filter((t) => t.online && t.offers && !t.held).map((t) => t.id);
-    const wait = this.timedWait(places);
+    const wait = this.timedBlip();
     const d = decideTimedPlace({
       here,
       places,
@@ -1442,7 +1457,7 @@ export class Agents {
       this.orchestrators.noteTimedAsk(info.id, request, `timed leg ask (w1969) from worker ${info.id.slice(0, 8)} on ${machineId}: to ${d.timedRun} by timed_run (w1996): ${d.why} ("${clip(what, 80)}")`);
       text = `Elsewhere (w1969, w1996): ${d.why}. Build both players here (a build takes a shared ticket), then call timed_run with machine "${d.timedRun}": its daemon times both there, interleaved, under that computer's own exclusive ticket, and the table and logs come back to you; no worker starts there and nothing is rebuilt. Take no exclusive ticket here.${d.choose ? ` That is for a Windows player A/B (a save played by two builds, probe_ab_win.sh's legs). For anything else timed (a snippet timed in the editor, a Performance test, a profiler capture, a Mac player), call timed_place again with via "leg": a new worker on a small computer then builds and times it.` : ''}`;
     } else {
-      const leg = this.orchestrators.fileTimedLeg(info.id, { what, brief: String(a.brief ?? ''), from: machineId, needs: d.needs ?? [], why: d.why, ...(request ? { request } : {}) });
+      const leg = this.orchestrators.fileTimedLeg(info.id, { what, brief: String(a.brief ?? ''), from: machineId, needs: d.needs ?? [], why: d.why, ...(request ? { request } : {}), ...(platform ? { platform } : {}) });
       this.setTimedVerdict(info, { verdict: 'elsewhere', why: d.why, until, leg: leg.id });
       this.blockerWatch?.kick();
       text = `Elsewhere (w1969): ${d.why}. ${leg.text}`;
@@ -2756,10 +2771,10 @@ export class Agents {
    * work) or on an agent seat (work in its own clone), with a hand-off carrying its last report, its brief and the waiting
    * message. Its other open requests, and the request itself when the start fails, go back to the dispatcher Queued for `to`.
    */
-  private async moveForRoom(info: SessionInfo, reqs: WorkItem[], to: string, why: string, hold: string, entry: { texts: string[] }, q: QueuedSend) {
+  private async moveForRoom(info: SessionInfo, reqs: WorkItem[], to: string, why: string, hold: string, entry: { texts: string[]; how?: string; lead?: string }, q?: QueuedSend) {
     const from = `${info.machineId}/${info.machineSandbox}`;
     const reason = `${hold}, and ${to} has room (w2046)`;
-    const how = 'moved by FF Factory: its computer was full (w2046)';
+    const how = entry.how ?? 'moved by FF Factory: its computer was full (w2046)';
     const h = this.sessions.sessions.get(info.id);
     if (h?.live) {
       this.store.append(info.id, { kind: 'system', text: `Stopped by FF Factory: its work moves to ${to}, since ${hold} (w2046).` });
@@ -2787,14 +2802,14 @@ export class Agents {
     this.waker.cancel(info.id);
     this.store.append(info.id, { kind: 'system', text: `Its work moved to ${to} (w2046): ${hold}, and ${to} had room. Its sandbox ${from} is released${saved ? ` (${saved})` : ''}; FF Factory ends what it left running there, and its temp folder goes by itself. Its requests go on in a fresh session on ${to}.` });
     const message = entry.texts.join('\n\n---\n\n');
-    const primary = reqs.find((w) => w.id === q.resumeOf?.work) ?? reqs.find((w) => w.status !== 'queued') ?? reqs[0];
+    const primary = reqs.find((w) => w.id === q?.resumeOf?.work) ?? reqs.find((w) => w.status !== 'queued') ?? reqs[0];
     const stage = view ? `Its Live view ran on ${from} (materials ${JSON.stringify(view.materials)}, fps ${view.fps}, width ${view.width}): stage it again in your sandbox's editor and tell the person it streams again from ${to}. ` : '';
     const back = (w: WorkItem, note: string, msg?: string) => this.orchestrators?.handBack(w, info, { machine: info.machineId!, sandbox: info.machineSandbox!, ...(branch ? { branch } : {}), why: reason, note, how, ...(saved ? { saved } : {}), ...(msg ? { message: msg } : {}), to });
     for (const w of reqs) if (w !== primary) back(w, `${stage}${w.outcome ? `Its last report: ${w.outcome}` : 'No report yet.'}`);
     if (primary) {
       const note = `${stage}${primary.outcome ? `Its last report: ${primary.outcome}` : 'No report yet.'}`;
       try {
-        const started = await this.startMoved(info, primary, to, why, hold, branch, { machine: info.machineId!, sandbox: info.machineSandbox!, ...(branch ? { branch } : {}), why: reason, note, how, ...(saved ? { saved } : {}), ...(message ? { message } : {}), to });
+        const started = await this.startMoved(info, primary, to, why, hold, branch, entry.lead, { machine: info.machineId!, sandbox: info.machineSandbox!, ...(branch ? { branch } : {}), why: reason, note, how, ...(saved ? { saved } : {}), ...(message ? { message } : {}), to });
         console.log(`room move: ${primary.id} moved from worker ${info.id} on ${from} to ${started} (${why})`);
         this.machines.report?.(`[machines] ${primary.id} moved from ${from} to ${started}: ${hold} (w2046).`);
       } catch (e) {
@@ -2807,7 +2822,7 @@ export class Agents {
   }
 
   /** The fresh session of a moved request (w2046), in a free sandbox on `to`; answers where it started. Throws when it cannot. */
-  private async startMoved(info: SessionInfo, w: WorkItem, to: string, why: string, hold: string, branch: string | undefined, hb: HandBack): Promise<string> {
+  private async startMoved(info: SessionInfo, w: WorkItem, to: string, why: string, hold: string, branch: string | undefined, lead: string | undefined, hb: HandBack): Promise<string> {
     const m = this.store.machines.get(to);
     if (!m) throw new Error(`${to} is not known`);
     const agent = needsOf(w) === 'agent';
@@ -2828,7 +2843,7 @@ export class Agents {
       const transcript = this.store.readTranscript(info.id, 4000);
       const brief = briefOf(transcript.find((e) => e.kind === 'user')?.text);
       const last = [...transcript].reverse().flatMap((e) => (e.kind === 'result' && e.text.trim() ? [e.text] : []))[0];
-      const head = movedPrompt({ id: w.id, from: `${info.machineId}/${info.machineSandbox}`, to: key, old: info.id, hold, why, ...(brief ? { brief } : {}), ...(last ? { report: last.length > 3000 ? `${last.slice(0, 3000)}…` : last } : {}) });
+      const head = movedPrompt({ id: w.id, from: `${info.machineId}/${info.machineSandbox}`, to: key, old: info.id, hold, why, ...(lead ? { lead } : {}), ...(brief ? { brief } : {}), ...(last ? { report: last.length > 3000 ? `${last.slice(0, 3000)}…` : last } : {}) });
       this.orchestrators.movedForRoom(w, info, hb);
       const t = { machine: to, machineSandbox: sb.id };
       const prompt = `${head}${requestAsFiled(w, head)}${this.handoverFor(w, t, agent ? undefined : branch)}${w.source ? workerRules(w, agent ? this.sandboxBranchOf(t) : branch) : ''}${requestLineRule(w)}`;
@@ -2847,6 +2862,146 @@ export class Agents {
     } finally {
       this.handing.delete(key);
     }
+  }
+
+  /** w2055: timed legs being started by FF Factory itself (leg id to where), so a pass does not start one twice. */
+  private readonly legStarting = new Map<string, string>();
+
+  /**
+   * Whether worker `info`, which holds sandbox `sb`, can leave it for a timed leg (w2055, lothsahn: "if it's possible for the
+   * existing worker to push their work and swap to a new machine"). It moves only when nothing is lost or interrupted:
+   * between turns (never mid-turn), not serving a timed leg, a pair run or the release lane's or nightly's turn, no bench
+   * lock or bench wait of its own, no Live view, a clean worktree with every commit pushed to its own remote branch (the
+   * daemon's WIP save is for a computer that is going away, not for this), and nothing running for it there (a check-in with
+   * its editor up, a batch slot, a player). Then moveDecision must find it a computer with room, as a resume's move does.
+   * A worker that serves no open request goes nowhere: its sandbox is released.
+   */
+  private preemptVerdict(info: SessionInfo, sb: MachineSandbox, now = Date.now()): Pick<Occupant, 'move' | 'release' | 'stays'> {
+    if (info.kind !== 'worker') return { stays: `it is ${info.kind === 'ops' ? 'the orchestration worker' : `a ${info.kind}`}` };
+    if (isMidTurn(info) || info.pendingPermissions.length) return { stays: 'it is mid-turn (a worker is never interrupted; it can move after its turn)' };
+    if (info.turns === 0 && !info.sdkSessionId) return { stays: 'it is starting' };
+    if (this.roomMoving.has(info.id) || this.handing.has(`${info.machineId}/${sb.id}`)) return { stays: 'it is being moved already' };
+    const reqs = this.openWorkOf(info);
+    const special = reqs.find((w) => w.timedLeg || w.pair);
+    if (special) return { stays: `${special.id} is ${special.timedLeg ? 'a timed leg' : 'a pair run'}` };
+    if (this.benchPriorities(info.machineId!)[info.id]?.exempt) return { stays: 'it is the urgent release lane or the nightly' };
+    if (this.liveHub?.running(info.id)) return { stays: 'its Live view is up' };
+    const st = this.machines.statsOf(info.machineId!);
+    if (sb.path && benchLockIn(st?.benchLock, sb.path)) return { stays: 'a timed run from its sandbox holds the bench lock' };
+    const g = sb.git;
+    if (!g) return { stays: 'its sandbox\'s git state is not known' };
+    if (g.dirty + g.untracked > 0) return { stays: `its sandbox has uncommitted work (${g.dirty + g.untracked} file(s)): its worker commits and pushes first` };
+    const u = st?.unity;
+    if (u?.playerList?.some((p) => p.session === info.id)) return { stays: 'a game player of its runs' };
+    if (u?.waiting.some((x) => x.session === info.id) || u?.granted.some((x) => x.holder.includes(info.id) || x.holder.includes(info.id.slice(0, 8)))) return { stays: 'a Unity batch run of its holds or waits for a slot' };
+    if (info.wakeAt && Date.parse(info.wakeAt) > now && sb.unity.state !== 'stopped') return { stays: 'its check-in is set and its editor runs: a build, import or test run may be in flight' };
+    if (!reqs.length) return { release: true };
+    const d = moveDecision(this.moveFacts(info, reqs));
+    if ('move' in d) return { move: d.move.to };
+    return { stays: 'stay' in d ? d.stay : d.none };
+  }
+
+  /** The workers holding a sandbox on `machineId`, each with whether it can move for a timed leg (w2055). */
+  private preemptOccupants(machineId: string): Occupant[] {
+    const now = Date.now();
+    const out: Occupant[] = [];
+    for (const sb of this.store.machines.get(machineId)?.sandboxes ?? []) {
+      for (const s of this.sessionsOf(sb.sessionIds)) {
+        if (s.machineId !== machineId || !occupies(s, !!this.sessions.sessions.get(s.id)?.live, now)) continue;
+        out.push({ session: s.id, requests: this.openWorkOf(s).map((w) => w.id), ...this.preemptVerdict(s, sb, now) });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * timedLegStep's facts for a Queued timed leg, and its step (w2055, server/timedLegPlace.ts). The leg's platform is the
+   * one timed_place was asked for; a leg from before w2055 has none, and goes by its small computers' platform when they
+   * share one.
+   */
+  timedLegStepFor(w: WorkItem): { step: LegStep; big: boolean } | undefined {
+    const leg = w.timedLeg;
+    if (!leg) return undefined;
+    const places = this.places();
+    const os = [...new Set(leg.small.map((id) => places.find((p) => p.id === id)?.platform))];
+    const platform = leg.platform ?? (os.length === 1 && os[0] ? os[0] : undefined);
+    const occupants: Record<string, Occupant[]> = {};
+    for (const p of places) if (p.online && !p.noTimedRuns) occupants[p.id] = this.preemptOccupants(p.id);
+    const step = timedLegStep({ id: w.id, priority: w.priority, ...(platform ? { platform } : {}), places, prefs: this.placement(), occupants, now: Date.now(), blipMs: this.timedBlip().ms });
+    const ids = 'widen' in step ? step.widen : 'wait' in step ? step.wait : [];
+    return { step, big: reachesBig(ids, places) };
+  }
+
+  /**
+   * Start a Queued timed leg on `machine` (w2055): an idle computer's free sandbox, or one pre-empted (`moves`: its workers
+   * leave first through w2046's moveForRoom, which stops each between turns, saves nothing it has not pushed, releases its
+   * sandbox at once and starts a fresh session for its request on the computer moveDecision picked; one serving no open
+   * request is only released). lothsahn: "When it moves workers to another box, it should request they clean up and force
+   * those slots to be released". The leg's worker then takes its exclusive bench ticket there as any timed worker does.
+   * False when a start for it is under way already.
+   */
+  startTimedLeg(w: WorkItem, machine: string, why: string, moves: readonly Occupant[] = []): boolean {
+    if (this.legStarting.has(w.id) || [...this.legStarting.values()].includes(machine)) return false;
+    this.legStarting.set(w.id, machine);
+    void this.runTimedLegStart(w, machine, why, moves)
+      .catch((e) => {
+        console.warn(`timed leg (w2055): starting ${w.id} on ${machine} failed: ${(e as Error).message}; it stays Queued`);
+        this.orchestrators.noteTimedLegStart(w.id, `FF Factory could not start it on ${machine} itself (${(e as Error).message}); it stays Queued (w2055)`);
+      })
+      .finally(() => this.legStarting.delete(w.id));
+    return true;
+  }
+
+  private async runTimedLegStart(w: WorkItem, machine: string, why: string, moves: readonly Occupant[]) {
+    const hold = `timed leg ${w.id} (${w.priority} priority) needs ${machine}, and FF Factory freed it for the leg (w2055)`;
+    for (const o of moves) {
+      const info = this.store.sessions.get(o.session);
+      if (!info || info.machineId !== machine) continue;
+      const sb = this.store.machines.get(machine)?.sandboxes?.find((x) => x.id === info.machineSandbox);
+      // Checked again now: a turn may have started since the pass looked.
+      const v = sb ? this.preemptVerdict(info, sb) : { stays: 'its sandbox is gone' };
+      if (!v.move && !v.release) throw new Error(`worker ${info.id.slice(0, 8)} can no longer move (${v.stays})`);
+      const from = `${machine}/${info.machineSandbox}`;
+      if (v.release) {
+        this.sessions.sessions.get(info.id)?.stop(true);
+        for (let n = 0; n < 40 && this.sessions.sessions.get(info.id)?.live; n++) await new Promise((r) => setTimeout(r, 250));
+        info.placeReleased = { at: new Date().toISOString(), sandbox: info.machineSandbox!, branch: this.branchNow(info) ?? info.machineSandbox!, why: `its sandbox went to timed leg ${w.id} (w2055)` };
+        this.store.putSession(info);
+        this.waker.cancel(info.id);
+        this.store.append(info.id, { kind: 'system', text: `Stopped by FF Factory: its sandbox ${from} went to timed leg ${w.id} (w2055). It serves no open request, so it moves nowhere; a message to it places it again.` });
+        console.log(`timed preempt (w2055): worker ${info.id} on ${from} (no open request) released for timed leg ${w.id} on ${machine}`);
+        continue;
+      }
+      const reqs = this.openWorkOf(info);
+      const lead = `[moved, w2055] FF Factory moved ${reqs.map((x) => x.id).join(', ')} to this computer between turns: its worker ${info.id} on ${from} held the slot timed leg ${w.id} needed (${why}). lothsahn: "If timing runs arrive and small machines (single slot) are working on non timing work, the dispatcher should pre-empt their existing work and move it to make space for the timing work". That worker is stopped (its work was all committed and pushed) and its sandbox released; you carry its work on from where it left off. The handover below says where its work is (its branch, pushed).`;
+      this.roomMoving.set(info.id, { to: v.move!, texts: [] });
+      try {
+        await this.moveForRoom(info, reqs, v.move!, `pre-empted for timed leg ${w.id} (w2055)`, hold, { texts: [], how: `moved by FF Factory: its slot went to timed leg ${w.id} (w2055)`, lead });
+      } finally {
+        this.roomMoving.delete(info.id);
+      }
+      console.log(`timed preempt (w2055): worker ${info.id} on ${from} (${reqs.map((x) => x.id).join(', ')}) moved to ${v.move} so timed leg ${w.id} can start on ${machine}`);
+    }
+    // The sandbox the leg starts in: free now (a moved worker's release frees it as its process stops).
+    let sb: MachineSandbox | undefined;
+    for (let n = 0; n < 40 && !sb; n++) {
+      sb = (this.store.machines.get(machine)?.sandboxes ?? []).filter((x) => this.free(x, machine)).sort((a, b) => Number(a.unity.state !== 'stopped') - Number(b.unity.state !== 'stopped') || a.id.localeCompare(b.id))[0];
+      if (!sb) await new Promise((r) => setTimeout(r, 500));
+    }
+    if (!sb) throw new Error(`no free sandbox on ${machine}`);
+    const cur = this.store.work.get(w.id);
+    if (!cur || cur.status !== 'queued' || !isOpen(cur)) throw new Error(`${w.id} is no longer Queued`);
+    const key = `${machine}/${sb.id}`;
+    const handed = await this.prepareForNewWork(sb.id, machine, cur.id, cur.source, false);
+    const head = `[timed leg, w2055] FF Factory started this timed leg in ${key} by itself: ${why}. Build and time it here under this computer's exclusive bench ticket, as the brief says.\n\n${cur.brief}`;
+    const t = this.target(sb.id, machine);
+    const prompt = `${head}${requestAsFiled(cur, head)}${this.handoverFor(cur, t, handed.branch)}${cur.source ? workerRules(cur, handed.branch ?? this.sandboxBranchOf(t)) : ''}${requestLineRule(cur)}`;
+    const s = this.startWorker({ sandbox: sb.id, machine, prompt, title: jobTitle(cur.id, cur.title.replace(/^Timed leg for /, 'timed leg for '), { clip: true }), model: this.cfg.defaultModel, from: 'orchestrator', ...(cur.requestedBy ? { requestedBy: cur.requestedBy } : {}), workId: cur.id });
+    if (s.info.status === 'error') throw new Error(`its session ${s.info.id} did not start: ${s.info.statusDetail}`);
+    this.lastPlaced = machine;
+    this.orchestrators.linkWorker(cur.id, s.info, `started ${this.orchestrators.workerLine(s.info.id)} in ${key} by FF Factory (w2055): ${why}`);
+    console.log(`timed leg (w2055): ${cur.id} started on ${key} as worker ${s.info.id} (${machine}: ${why})`);
+    this.machines.report?.(`[machines] timed leg ${cur.id} started on ${key}${moves.length ? ` after ${moves.length} worker(s) moved off it` : ''} (w2055).`);
   }
 
   /**
@@ -3901,6 +4056,8 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
         // Every Unity process there, as its daemon counts them (w469); a daemon before that reports its sandbox editors only.
         editors: st?.unity?.used ?? sbs.filter((s) => s.unity.state === 'running' || s.unity.state === 'starting').length,
         maxEditors: pool.maxUnity,
+        // w2055: editors open in sandboxes no worker holds run nothing: the timing order's "idle" does not count them.
+        idleEditors: sbs.filter((s) => (s.unity.state === 'running' || s.unity.state === 'starting') && this.free(s, m.id)).length,
         ...(st?.unity ? { editorsDetail: unitySlotsLine(st.unity).replace(/^editors \d+ of \S+: /, '') } : {}),
         // Its GPU Whisper for the portal's mic, while loaded (w615): VRAM the editors share.
         ...voiceVram(this.machines.voiceMachines().find((v) => v.machine === m.id)?.status),

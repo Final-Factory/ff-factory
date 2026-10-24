@@ -53,6 +53,7 @@ import { capacityBlockProblem, capacityWaitIn, needsOf, needsTimed, pairRoom, pa
 import type { HandBack } from './machinePause.ts';
 import { heldText, roomEnough, roomForWork, roomIds, roomStood, timedKindOf, unusableText, type RoomNow, type TimedFacts, type TimedKind } from './placement.ts';
 import { TIMED_LEG_WAIT_MS, unavailableText, bigFallbackRules, type SmallState } from './timedAsk.ts';
+import type { LegStep, Occupant } from './timedLegPlace.ts';
 import { minPriorityText } from '../shared/capacity.ts';
 import { repoSlug } from './ciReadHealth.ts';
 import { actionName, CONDITIONAL_DAYS, CONDITIONAL_MAX_DAYS, CONDITIONAL_PER_REQUEST, conditionalLine, conditionName, HELD_MARK, inPersonWords, parseCondition, type ConditionInput } from '../shared/conditional.ts';
@@ -230,6 +231,10 @@ export interface OrchestratorsDeps {
    * words (w2048, timedAsk.ts smallTimedStates and unavailableWait): what timedLegBound widens a leg by.
    */
   timedSmall?: () => { states: SmallState[]; waitWhy: string };
+  /** A Queued timed leg's next step, and whether its needs reach the big computers (w2055, Agents.timedLegStepFor). */
+  timedLegStep?: (w: WorkItem) => { step: LegStep; big: boolean } | undefined;
+  /** Start a timed leg on `machine` itself, its movable workers moved first (w2055, Agents.startTimedLeg); false when under way. */
+  startTimedLeg?: (w: WorkItem, machine: string, why: string, moves: readonly Occupant[]) => boolean;
   /** Whether a machine is online; undefined for a machine this portal does not have (w643: blockers). */
   machineOnline?: (id: string) => boolean | undefined;
   /** w2045: whether a request is in the merge-on-green pilot's arm (server/mergeOnGreen.ts); absent: no request is. */
@@ -3367,14 +3372,14 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
    * Queued for the small computers `needs` names (best first), with the asking request Blocked on its report. One open leg
    * per request: asked again, it waits on the one there is. Returns the leg's id and what the worker is told.
    */
-  fileTimedLeg(sessionId: string, a: { what: string; brief: string; from: string; needs: string[]; why: string; request?: string }): { id: string; text: string } {
+  fileTimedLeg(sessionId: string, a: { what: string; brief: string; from: string; needs: string[]; why: string; request?: string; platform?: string }): { id: string; text: string } {
     const w = this.workerRequest(sessionId, a.request, 'timed_place');
     const what = clip(a.what.replace(/\s+/g, ' ').trim(), 100);
     const brief = a.brief.trim();
     if (!what || !brief) throw new Error('give what (one line: "RoundRobin belt output A/B on PR #2347") and brief (what the leg runs, as a new worker needs it: the branch and the commits of both sides, the save, the script and its settings, what to report)');
     if (!a.needs.length) throw new Error(`no small computer takes ${w.id}'s timed leg: ask an operator`);
     const open = [...this.store.work.values()].find((x) => x.timedLeg?.for === w.id && isOpen(x));
-    const leg = open ?? this.newTimedLeg(w, sessionId, { what, brief, from: a.from, needs: a.needs, why: a.why });
+    const leg = open ?? this.newTimedLeg(w, sessionId, { what, brief, from: a.from, needs: a.needs, why: a.why, ...(a.platform ? { platform: a.platform } : {}) });
     const blocked = this.workerBlocked(sessionId, { request: w.id, reports: [leg.id], what: `timed leg ${leg.id}: ${what}` });
     const head = open
       ? `${w.id} already has an open timed leg, ${leg.id} (${leg.status}: ${clip(leg.title, 80)}); you wait on it, and nothing new was filed.`
@@ -3409,7 +3414,7 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
   }
 
   /** The request fileTimedLeg files (w1969): the asking request's people and priority, a game sandbox, Queued for the small computers. */
-  private newTimedLeg(w: WorkItem, sessionId: string, x: { what: string; brief: string; from: string; needs: string[]; why: string }): WorkItem {
+  private newTimedLeg(w: WorkItem, sessionId: string, x: { what: string; brief: string; from: string; needs: string[]; why: string; platform?: string }): WorkItem {
     const now = this.now().toISOString();
     const title = clip(`Timed leg for ${w.id}: ${x.what}`, 120);
     const brief = clip(
@@ -3437,13 +3442,13 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       updatedAt: now,
       sessionIds: [],
       needs: 'game',
-      timedLeg: { for: w.id, forSession: sessionId, from: x.from, small: [...x.needs] },
+      timedLeg: { for: w.id, forSession: sessionId, from: x.from, small: [...x.needs], ...(x.platform ? { platform: x.platform } : {}) },
       overlaps: [],
       asks: 0,
       log: [],
     };
     leg.overlaps = findOverlaps({ keys: leg.keys, title: leg.title }, this.pool(leg.id)).filter((o) => o.ref !== w.id);
-    this.stamp(leg, `filed by FF Factory for worker ${sessionId} on ${w.id} (w1969 timed_place) from ${x.from}: queued for ${x.needs.join(' > ')}, the small computers that take timed runs (a big one only once none of them can take it: offline past the load-scaled wait, held or without a game sandbox, w2048): ${x.why}`);
+    this.stamp(leg, `filed by FF Factory for worker ${sessionId} on ${w.id} (w1969 timed_place) from ${x.from}: queued for ${x.needs.join(' > ')}, the computers of the timing order (w2055: idle first, then pre-emption, then by priority): ${x.why}`);
     this.store.putWork(leg);
     this.gatherForDispatcher(w.requestedBy, requestNotice(leg));
     return leg;
@@ -3457,7 +3462,70 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
    * serves with which small computers were unavailable and why, and the dispatcher is told. Without the w2048 facts (an old
    * caller) a leg widens after TIMED_LEG_WAIT_MS, as before. Returns the ids widened.
    */
+  /**
+   * Each Queued timed leg's next step (w2055, server/timedLegPlace.ts timedLegStep): start it on an idle computer, or on a
+   * small one whose workers can move (they move first), or widen a high or urgent one to the big computers at once (w2048's
+   * fallback), or keep a normal or low one Queued on the smallest class with a computer up. Its needs follow each pass, so a
+   * small computer coming back narrows them again. Without the w2055 facts (an old caller) w2048's rule runs as before.
+   * Returns the ids whose needs changed or that started.
+   */
   timedLegBound(): string[] {
+    if (!this.d.timedLegStep) return this.timedLegBoundW2048();
+    const done: string[] = [];
+    const widened: string[] = [];
+    for (const w of this.store.work.values()) {
+      const leg = w.timedLeg;
+      if (!leg || w.status !== 'queued' || !isOpen(w)) continue;
+      const r = this.d.timedLegStep(w);
+      if (!r) continue;
+      const { step, big } = r;
+      if ('start' in step || 'preempt' in step) {
+        const to = 'start' in step ? step.start : step.preempt;
+        if (this.d.startTimedLeg?.(w, to, step.why, 'preempt' in step ? step.moves : [])) {
+          this.stamp(w, `${'preempt' in step ? 'ledger: PRE-EMPTED' : 'starting'} on ${to} by FF Factory (w2055): ${step.why}`);
+          this.store.putWork(w);
+          console.log(`timed leg (w2055): ${w.id} (timed leg of ${leg.for}, ${w.priority}) ${'preempt' in step ? 'pre-empts' : 'starts on'} ${to}: ${step.why}`);
+          done.push(w.id);
+        }
+        continue;
+      }
+      const needs = 'widen' in step ? step.widen : step.wait;
+      if (!needs.length) continue;
+      const was = w.queuedFor?.needs ?? leg.small;
+      if (was.length === needs.length && was.every((x, i) => x === needs[i])) continue;
+      w.queuedFor = { at: w.queuedFor?.at ?? w.createdAt, needs: [...needs] };
+      const first = big && !leg.widened;
+      const { widened: _w, ...rest } = leg;
+      w.timedLeg = big ? { ...rest, widened: leg.widened ?? this.now().toISOString() } : rest;
+      this.roomFlags.delete(w.id);
+      this.stamp(w, `${big ? 'ledger: BIG-COMPUTER FALLBACK (w2048, w2055)' : 'ledger: timed leg queue (w2055)'}: ${step.why}; Queued for ${needs.join(' > ')}${big ? '. Its numbers then come from that one computer only and compare with no other computer\'s: its worker runs every side there, the baseline included' : ''}`);
+      this.store.putWork(w);
+      const asker = this.store.work.get(leg.for);
+      if (first && asker && isOpen(asker)) {
+        this.stamp(asker, `ledger: its timed leg ${w.id} may now run on a big computer (w2048 fallback, w2055): ${step.why}. Its numbers will come from that one computer, every side re-measured there, and compare with no small computer's baseline`);
+        this.store.putWork(asker);
+      }
+      console.log(`timed ask (w2055): ${w.id} (timed leg of ${leg.for}, ${w.priority}) queued for ${needs.join(' > ')}${big ? ' (big-computer fallback)' : ''}: ${step.why}`);
+      if (first) widened.push(w.id);
+      done.push(w.id);
+    }
+    if (widened.length)
+      this.toDispatcher(
+        `[ledger] Timed legs that may now go to a big computer (w2048 fallback; w2055: high or urgent with no idle or freeable small computer, or every smaller class offline): ${widened.map((id) => `${id} "${clip(this.store.work.get(id)?.title ?? '', 80)}"`).join('; ')}. Start each on the first of its needs with room (start_agent with its work_id). Its worker calls timed_place there and is told: ${bigFallbackRules('that computer')}.`,
+      );
+    return done;
+  }
+
+  /** A line on a timed leg FF Factory could not start itself (w2055). */
+  noteTimedLegStart(id: string, line: string): void {
+    const w = this.store.work.get(id);
+    if (!w) return;
+    this.stamp(w, line);
+    this.store.putWork(w);
+  }
+
+  /** w2048's rule, for a caller without the w2055 facts. */
+  private timedLegBoundW2048(): string[] {
     const done: string[] = [];
     const now = this.now().getTime();
     const small = this.d.timedSmall?.();
