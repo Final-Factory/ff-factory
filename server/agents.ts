@@ -51,10 +51,11 @@ import { WORKER_READ_RULES_TOOL, workerRuleText } from './workerRules.ts';
 import { activityLine, Waker } from './wake.ts';
 import { TIMER_LIMITS, Timers, scheduleText, type TimerView } from './timers.ts';
 import { EVEN_MARGIN, RAM_BUSY_PCT, benchText, buildOf, busyReasons, capacityLines, forPriority, hasRoom, holdReason, liveOf, lowestPriority, minOf, pickComputer, placeId, pinnedWork, placementHint, reservedReason, roomEnough, roomForWork, roomNow, timedFacts, timedKindOf, timedPinRefusal, voiceVram, type Computer, type FirstKind, type NeedKind, type PlacementPrefs, type RoomNow, type TimedKind } from './placement.ts';
-import { MachinePauses, pauseHolds } from './machinePause.ts';
+import { MachinePauses, pauseHolds, type HandBack } from './machinePause.ts';
+import { MOVE_AFTER_MS, NONE_MARK, ROOM_WAIT, briefOf, moveDecision, movedPrompt, stayLine, type MoveFacts } from './resumeMove.ts';
 import { playHolds, playLine } from '../shared/personPlay.ts';
 import { unitySlotsLine } from '../shared/fleet.ts';
-import { isMidTurn, midTurnRefusal, othersMidTurn, snapshotOf, type OptionsFactory, type SessionHandle, type SessionManager, type TurnEndMeta } from './sessions.ts';
+import { isMidTurn, midTurnRefusal, othersMidTurn, snapshotOf, type OptionsFactory, type QueuedSend, type SessionHandle, type SessionManager, type TurnEndMeta } from './sessions.ts';
 import { FLAG_LABEL, WORK_BLOCKER_KINDS, WORK_OPEN, WORK_PRIORITIES, type WorkBlockerKind, type WorkSource, type BenchPriority, type BenchAway, type AttachmentRef, type DeliveredAttachment, type ImageInput, type PermissionMode, type Requester, type Sandbox, type SessionInfo, type TranscriptEvent, type WorkItem, type WorkPriority, type WorkStatus } from '../shared/types.ts';
 import { attachmentForMachine, publicRef, publishableFile, uploadForMachine, type AttachmentStore } from './attachments.ts';
 import type { TimedRuns } from './timedRuns.ts';
@@ -646,6 +647,7 @@ export class Agents {
       log: (line) => console.log(line),
     });
     sessions.pauseHeld = (s, text) => this.pauses.heldResume(s.info, text);
+    sessions.roomMove = (s, q, hold, now) => this.roomMove(s, q, hold, now);
     machines.onPause = (id, p) => {
       if (p.paused) this.pauses.onPause(id);
       else {
@@ -2508,6 +2510,168 @@ export class Agents {
     return i.machineId && i.machineSandbox && this.machines.canSaveWork(i.machineId)
       ? this.machines.saveWork(i.machineId, i.machineSandbox, branch, message, this.githubTokenFor(i.machineId, i.id, `saving ${i.id}'s work ${when}`))
       : Promise.reject(new Error(`${i.machineId ?? 'its machine'}'s daemon cannot save work now (offline, or before w656)`));
+  }
+
+  /** w2046: resumes being moved to a computer with room: session id to the messages that go with it and where it goes. */
+  private readonly roomMoving = new Map<string, { to: string; texts: string[] }>();
+
+  /**
+   * SessionManager.roomMove (w2046, server/resumeMove.ts): a message that waits only for room on its worker's own computer.
+   * After MOVE_AFTER_MS its work moves to a computer with room (true: the message goes with it), or its Queued line says why
+   * it stays (a string); undefined while it waits as it is.
+   */
+  private roomMove(h: SessionHandle, q: QueuedSend, hold: string, now: number): true | string | undefined {
+    const info = h.info;
+    if (info.kind !== 'worker' || !info.machineId || !info.machineSandbox || !ROOM_WAIT.test(hold)) return undefined;
+    const moving = this.roomMoving.get(info.id);
+    if (moving) {
+      moving.texts.push(q.text);
+      return true;
+    }
+    if (now - (Date.parse(q.at) || now) < MOVE_AFTER_MS || info.pendingPermissions.length || isMidTurn(info)) return undefined;
+    const reqs = this.openWorkOf(info);
+    const d = moveDecision(this.moveFacts(info, reqs));
+    if ('stay' in d) return stayLine(hold, d.stay);
+    if ('none' in d) return `${hold}; ${NONE_MARK}: ${d.none}`;
+    const entry = { to: d.move.to, texts: [q.text] };
+    this.roomMoving.set(info.id, entry);
+    const waited = Math.round((now - (Date.parse(q.at) || now)) / 1000);
+    console.log(`room move: worker ${info.id} on ${info.machineId}/${info.machineSandbox} (${reqs.map((w) => w.id).join(', ')}) moves to ${d.move.to} ${waited} s after its message was queued: ${hold}; ${d.move.why}`);
+    void this.moveForRoom(info, reqs, d.move.to, d.move.why, hold, entry, q).finally(() => this.roomMoving.delete(info.id));
+    return true;
+  }
+
+  /** What moveDecision reads of a worker whose resume waits for room (w2046). */
+  private moveFacts(info: SessionInfo, reqs: WorkItem[]): MoveFacts {
+    const m = this.store.machines.get(info.machineId!);
+    const r = info.placeReleased;
+    const sb = m?.sandboxes?.find((x) => x.id === info.machineSandbox);
+    const branch = r?.branch ?? this.branchNow(info);
+    const git = sb?.git && sb.git.branch === branch ? sb.git : undefined;
+    return {
+      machine: info.machineId!,
+      released: !!r,
+      ...(branch ? { branch } : {}),
+      ...(git ? { git } : {}),
+      canSave: this.machines.canSaveWork(info.machineId!),
+      benchHeld: !r && !!sb?.path && benchLockIn(this.machines.statsOf(info.machineId!)?.benchLock, sb.path),
+      requests: reqs.map((w) => {
+        const legs = w.pair?.started?.legs ?? [];
+        const mine = legs.findIndex((l) => l.session === info.id);
+        const others = legs.filter((_, i) => i !== mine).map((l) => this.store.sessions.get(l.session)?.machineId ?? l.sandbox.split('/')[0]);
+        const t = timedKind(needsTimed(w));
+        const first: FirstKind | undefined = needsLive(w) ? 'live' : needsBuild(w) ? 'build' : t || undefined;
+        return {
+          id: w.id,
+          priority: w.priority,
+          kind: needsOf(w),
+          ...(first ? { first } : {}),
+          ...(w.queuedFor?.needs?.length ? { pinned: w.queuedFor.needs } : {}),
+          ...(w.timedLeg ? { timedLeg: true } : {}),
+          ...(mine >= 0 ? { pair: { leg: mine + 1, others, crossOs: !!w.pair!.crossOs, ...(w.pair!.avoid ? { avoid: w.pair!.avoid } : {}) } } : {}),
+        };
+      }),
+      places: this.places(),
+      prefs: this.placement(),
+      ...(this.lastPlaced ? { last: this.lastPlaced } : {}),
+    };
+  }
+
+  /**
+   * Move a resuming worker's work to `to` (w2046): stop its process, save and push what its sandbox has uncommitted, release
+   * that sandbox at once, then start a fresh session for its request in a free sandbox there, switched to its branch (game
+   * work) or on an agent seat (work in its own clone), with a hand-off carrying its last report, its brief and the waiting
+   * message. Its other open requests, and the request itself when the start fails, go back to the dispatcher Queued for `to`.
+   */
+  private async moveForRoom(info: SessionInfo, reqs: WorkItem[], to: string, why: string, hold: string, entry: { texts: string[] }, q: QueuedSend) {
+    const from = `${info.machineId}/${info.machineSandbox}`;
+    const reason = `${hold}, and ${to} has room (w2046)`;
+    const how = 'moved by FF Factory: its computer was full (w2046)';
+    const h = this.sessions.sessions.get(info.id);
+    if (h?.live) {
+      this.store.append(info.id, { kind: 'system', text: `Stopped by FF Factory: its work moves to ${to}, since ${hold} (w2046).` });
+      h.stop(true);
+      for (let n = 0; n < 40 && this.sessions.sessions.get(info.id)?.live; n++) await new Promise((r) => setTimeout(r, 250));
+    }
+    const view = await this.liveHub?.endFor(info.id);
+    const released = info.placeReleased;
+    const branch = released?.branch ?? this.branchNow(info);
+    let saved: string | undefined;
+    if (!released && branch) {
+      try {
+        const r = await this.saveSandboxWork(info, branch, `FF Factory: WIP saved from ${info.id} before its work moved to ${to} (w2046)\n\n${reqs.map((w) => w.id).join(', ')} moved: ${reason}. \`git reset HEAD~1\` gives the work back uncommitted.`, `before its move to ${to}`);
+        saved = r.sha ? `its sandbox's uncommitted work (${r.files} file(s)) was saved as WIP commit ${r.sha.slice(0, 10)} on ${branch}${r.pushed ? ' and pushed' : `, not pushed (${r.notes.join('; ')})`}` : `its sandbox had no uncommitted work on ${branch}`;
+      } catch (e) {
+        saved = `its sandbox's uncommitted work could not be saved (${(e as Error).message}); what its worker pushed is what the next one gets`;
+      }
+    }
+    // lothsahn: "When it moves workers to another box, it should request they clean up and force those slots to be released".
+    const at = new Date().toISOString();
+    if (!released) info.placeReleased = { at, sandbox: info.machineSandbox!, branch: branch ?? info.machineSandbox!, why: `its work moved to ${to} (w2046)` };
+    info.movedAway = { machine: info.machineId!, to, at };
+    this.store.putSession(info);
+    this.store.append(info.id, { kind: 'system', text: `Its work moved to ${to} (w2046): ${hold}, and ${to} had room. Its sandbox ${from} is released${saved ? ` (${saved})` : ''}; FF Factory ends what it left running there, and its temp folder goes by itself. Its requests go on in a fresh session on ${to}.` });
+    const message = entry.texts.join('\n\n---\n\n');
+    const primary = reqs.find((w) => w.id === q.resumeOf?.work) ?? reqs.find((w) => w.status !== 'queued') ?? reqs[0];
+    const stage = view ? `Its Live view ran on ${from} (materials ${JSON.stringify(view.materials)}, fps ${view.fps}, width ${view.width}): stage it again in your sandbox's editor and tell the person it streams again from ${to}. ` : '';
+    const back = (w: WorkItem, note: string, msg?: string) => this.orchestrators?.handBack(w, info, { machine: info.machineId!, sandbox: info.machineSandbox!, ...(branch ? { branch } : {}), why: reason, note, how, ...(saved ? { saved } : {}), ...(msg ? { message: msg } : {}), to });
+    for (const w of reqs) if (w !== primary) back(w, `${stage}${w.outcome ? `Its last report: ${w.outcome}` : 'No report yet.'}`);
+    if (primary) {
+      const note = `${stage}${primary.outcome ? `Its last report: ${primary.outcome}` : 'No report yet.'}`;
+      try {
+        const started = await this.startMoved(info, primary, to, why, hold, branch, { machine: info.machineId!, sandbox: info.machineSandbox!, ...(branch ? { branch } : {}), why: reason, note, how, ...(saved ? { saved } : {}), ...(message ? { message } : {}), to });
+        console.log(`room move: ${primary.id} moved from worker ${info.id} on ${from} to ${started} (${why})`);
+        this.machines.report?.(`[machines] ${primary.id} moved from ${from} to ${started}: ${hold} (w2046).`);
+      } catch (e) {
+        const err = (e as Error).message;
+        console.warn(`room move: starting ${primary.id} on ${to} failed (${err}); handed back to the dispatcher, Queued for ${to}`);
+        back(primary, `FF Factory could not start its new session on ${to} itself (${err}). ${note}`, message);
+      }
+    }
+    this.orchestrators?.retireWhenFree(info.id);
+  }
+
+  /** The fresh session of a moved request (w2046), in a free sandbox on `to`; answers where it started. Throws when it cannot. */
+  private async startMoved(info: SessionInfo, w: WorkItem, to: string, why: string, hold: string, branch: string | undefined, hb: HandBack): Promise<string> {
+    const m = this.store.machines.get(to);
+    if (!m) throw new Error(`${to} is not known`);
+    const agent = needsOf(w) === 'agent';
+    const seats = poolSettingsOf(m)?.maxAgentsPerSandbox ?? 2;
+    const live = (id: string) => !!this.sessions.sessions.get(id)?.live;
+    const agentsIn = (sb: MachineSandbox) => this.sessionsOf(sb.sessionIds).filter((s) => occupies(s, live(s.id))).length;
+    const fits = (sb: MachineSandbox) => (agent ? sb.status === 'ready' && !sb.lingering?.length && agentsIn(sb) < seats && !this.handing.has(`${to}/${sb.id}`) : this.free(sb, to));
+    const rank = (sb: MachineSandbox) => (agent ? agentsIn(sb) : sb.git?.branch === branch ? 0 : sb.unity.state === 'stopped' ? 1 : 2);
+    const sb = (m.sandboxes ?? []).filter(fits).sort((a, b) => rank(a) - rank(b) || a.id.localeCompare(b.id))[0];
+    if (!sb) throw new Error(`no ${agent ? 'agent seat' : 'free sandbox'} on ${to} now`);
+    const key = `${to}/${sb.id}`;
+    this.handing.set(key, `${w.id} moved from ${info.machineId} (w2046)`);
+    try {
+      if (!agent && branch) {
+        if (sb.unity.state !== 'stopped') await this.machines.unity(to, 'stop', false, sb.id);
+        if (sb.git?.branch !== branch) await this.machines.switchBranch(to, branch, undefined, sb.id, undefined, this.githubTokenFor(to, info.id, `switching ${key} to ${branch} for ${w.id}`));
+      }
+      const transcript = this.store.readTranscript(info.id, 4000);
+      const brief = briefOf(transcript.find((e) => e.kind === 'user')?.text);
+      const last = [...transcript].reverse().flatMap((e) => (e.kind === 'result' && e.text.trim() ? [e.text] : []))[0];
+      const head = movedPrompt({ id: w.id, from: `${info.machineId}/${info.machineSandbox}`, to: key, old: info.id, hold, why, ...(brief ? { brief } : {}), ...(last ? { report: last.length > 3000 ? `${last.slice(0, 3000)}…` : last } : {}) });
+      this.orchestrators.movedForRoom(w, info, hb);
+      const t = { machine: to, machineSandbox: sb.id };
+      const prompt = `${head}${requestAsFiled(w, head)}${this.handoverFor(w, t, agent ? undefined : branch)}${w.source ? workerRules(w, agent ? this.sandboxBranchOf(t) : branch) : ''}${requestLineRule(w)}`;
+      const s = this.startWorker({ sandbox: key, prompt, title: info.title, model: info.model, ...(info.effort ? { effort: info.effort } : {}), permissionMode: info.permissionMode, from: 'orchestrator', ...(info.requestedBy ? { requestedBy: info.requestedBy } : {}), workId: w.id });
+      if (s.info.status === 'error') throw new Error(`its session ${s.info.id} did not start: ${s.info.statusDetail}`);
+      this.orchestrators.linkWorker(w.id, s.info, `started ${this.orchestrators.workerLine(s.info.id)} in ${key}: moved from worker ${info.id} on ${info.machineId}/${info.machineSandbox}, since ${hold} (w2046)`);
+      // A pair leg (w1945): message_pair and the other legs find it at its new place.
+      const leg = w.pair?.started?.legs.find((l) => l.session === info.id);
+      if (leg) {
+        leg.session = s.info.id;
+        leg.sandbox = key;
+        this.store.putWork(w);
+      }
+      this.lastPlaced = to;
+      return `${key} as worker ${s.info.id}`;
+    } finally {
+      this.handing.delete(key);
+    }
   }
 
   /**

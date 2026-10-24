@@ -26,6 +26,7 @@ import { answersText } from '../shared/questionCard.ts';
 import { PAIR_HOLD_MS, TIMED_HOLD_MS, unfitWhy } from '../shared/capacity.ts';
 import { benchLockIn, type Requester, type SessionInfo, type TranscriptEvent, type UserInfo, type WorkItem } from '../shared/types.ts';
 import { LIVE_HOLD_MS, releaseWhy } from './placeAgain.ts';
+import { MOVE_AFTER_MS } from './resumeMove.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { startTestMachine, type TestMachineOptions } from './testMachine.ts';
 import { afterMergeReason } from './ledgerRules.ts';
@@ -5609,4 +5610,48 @@ test('w2007: the dispatcher passing the budget files its request for the system 
   assert.match(w.brief, /started by a message that is not known any more\./);
   assert.match(w.brief, /over the tokens cap/);
   assert.deepEqual(pushed.map((p) => p.users), [['ben']]);
+});
+
+test('w2046: a released worker whose resume waits for room on its full computer moves to a computer with room: a fresh session there on its branch, with the hand-off and the waiting message; its old slot is released', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, machines, sessions } = env;
+  const beast = await startTestMachine(machines, { id: 'beast', sandboxes: ['slot1'] });
+  env.closers.push(() => beast.stop());
+  putRequests(store, [{ id: 'w1', by: BEN, status: 'active' }]);
+  const a = await startedFor(env, 'w1');
+  // Its branch is pushed (each test machine has an origin of its own: put it in beast's).
+  beast.repos.git(beast.repos.main, 'push', '-q', 'origin', 'master:refs/heads/w1-move');
+  // w1891 at 14:05Z on 2026-10-24: its worker released its sandbox while it waited, and its computer is full now.
+  sessions.sessions.get(a.id)!.stop(true);
+  await until('its process stopped', () => !sessions.sessions.get(a.id)?.live);
+  a.info.placeReleased = { at: new Date().toISOString(), sandbox: 'alpha', branch: 'w1-move', why: 'it waits on w2006 reporting' };
+  store.putSession(a.info);
+  const full = sessions as unknown as { placeFull?: (s: { info: SessionInfo }) => string | undefined };
+  const placeFull = full.placeFull!.bind(sessions);
+  const hold = 'no sandbox on pc is free (its own, alpha, took other work after it was released: it waits on w2006 reporting); the next one to free there is its, ahead of new work';
+  full.placeFull = (s) => (s.info.machineId === 'pc' ? hold : placeFull(s));
+  sessions.send(a.id, 'w2006 reported: carry on and merge PR #2347.');
+  sessions.drain();
+  assert.ok(sessions.queued().some((q) => q.id === a.id), 'it waits a moment first: a turn ending there now frees it');
+  sessions.drain(Date.now() + MOVE_AFTER_MS + 1000);
+  assert.ok(!sessions.queued().some((q) => q.id === a.id), 'the message went with its work');
+  await until('its fresh session on beast', () => store.work.get('w1')!.sessionIds.some((id) => store.sessions.get(id)?.machineId === 'beast'));
+  const w = store.work.get('w1')!;
+  const b = store.sessions.get(w.sessionIds.find((id) => store.sessions.get(id)?.machineId === 'beast')!)!;
+  assert.equal(b.machineSandbox, 'slot1');
+  assert.ok(!w.sessionIds.includes(a.id), 'taken off the old worker');
+  assert.equal(w.status, 'active', 'not Queued: FF Factory started it itself');
+  assert.equal(beast.repos.git(beast.path('slot1'), 'rev-parse', '--abbrev-ref', 'HEAD'), 'w1-move', 'its sandbox there is on its branch');
+  await until('its brief', () => store.readTranscript(b.id).some((e) => e.kind === 'user'));
+  const first = store.readTranscript(b.id).find((e) => e.kind === 'user');
+  const text = first && 'text' in first ? first.text : '';
+  assert.match(text, /^\[moved, w2046\] FF Factory moved w1 to this computer: its worker \w+ on pc\/alpha was about to resume, but no sandbox on pc is free/);
+  assert.match(text, /The brief its worker started from[^]*Fix it/);
+  assert.match(text, /Moved \(w2046\): w1 was taken off worker \w+ on pc\/alpha/);
+  assert.match(text, /The message that was waiting for it when it was handed back, now yours:\n~~~text\nw2006 reported: carry on and merge PR #2347\./);
+  // Its old slot is released at once, and it is marked moved away.
+  assert.equal(a.info.movedAway?.to, 'beast');
+  assert.ok(a.info.placeReleased);
+  assert.match(w.log.join('\n'), /moved from pc\/alpha to beast \(w2046\), from branch w1-move/);
+  full.placeFull = placeFull;
 });

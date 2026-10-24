@@ -1324,6 +1324,20 @@ export class Orchestrators {
   }
 
   /**
+   * A request whose resume waited for room on its worker's full computer moves on to a fresh session on `h.to`, which FF
+   * Factory starts itself (w2046, Agents.moveForRoom): taken off the old worker, with the hand-off its new session's
+   * handover carries (WorkItem.handedBack). Unlike handBack it is not Queued and the dispatcher has nothing to place.
+   */
+  movedForRoom(w: WorkItem, s: Pick<SessionInfo, 'id' | 'title'>, h: HandBack) {
+    if (!isOpen(w)) return;
+    const from = `${h.machine}${h.sandbox ? `/${h.sandbox}` : ''}`;
+    w.handedBack = { at: this.now().toISOString(), from, session: s.id, ...(h.branch ? { branch: h.branch } : {}), why: h.why, note: clip(h.note, 600), how: h.how, ...(h.saved ? { saved: h.saved } : {}), ...(h.message ? { message: clip(h.message, 2000) } : {}), ...(h.to ? { to: h.to } : {}) };
+    this.moveOff(w, s.id, `moved to ${h.to}: ${h.why}`);
+    this.stamp(w, `moved from ${from} to ${h.to} (w2046), from branch ${h.branch ?? 'unknown'}${h.saved ? `; ${h.saved}` : ''}`);
+    this.store.putWork(w);
+  }
+
+  /**
    * The worker on `w` stopped on a usage limit, and it is on another person's request too, so that limit is another
    * person's account's (w1076: "a session that hit one person's usage limit must not hold another person's request
    * hostage"). `w` does not wait for it: the dispatcher is told to give it a session of its own now (message_agent with its

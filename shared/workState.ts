@@ -824,7 +824,16 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: s
   const held = serving.map((s) => ({ s, why: f.queuedSend?.(s.id) ?? s.queuedSend, on: s.queuedOn })).find((x) => x.why);
   if (held?.on === 'machine') return { state: 'blocked', why: `a message to ${held.s.id} waits for its machine (${held.why})`, waitsOn: [held.s.machineId ?? 'its machine'] };
   // w1094: a worker resumed after its sandbox went to other work waits for a sandbox on its machine: Queued, named so.
-  if (held) return { state: 'queued', why: `a message to ${held.s.id} waits for a ${/^(no sandbox on|being placed again|its branch )/.test(held.why ?? '') ? 'sandbox on its machine' : 'free agent slot'} (${held.why})` };
+  if (held) {
+    const why = `a message to ${held.s.id} waits for a ${/^(no sandbox on|being placed again|its branch )/.test(held.why ?? '') ? 'sandbox on its machine' : 'free agent slot'} (${held.why})`;
+    // w2046: a resume waiting for room on its full computer moves to one with room (Agents.roomMove); one that says it stays on
+    // purpose, or that no other computer can take it, is right to wait. Any other such wait beside room elsewhere is WRONG.
+    if (/\(w2046\)/.test(held.why ?? '') || /^being placed again/.test(held.why ?? '')) return { state: 'queued', why };
+    const { kind, fits } = roomFor(w, f, undefined);
+    const age = (id: string) => (f.roomSince ? f.now - (f.roomSince[`${kind}:${id}`] ?? f.now) : Infinity);
+    const elsewhere = fits.filter((id) => id.toLowerCase() !== held.s.machineId?.toLowerCase() && age(id) >= ROOM_STAND_MS);
+    return elsewhere.length ? { state: 'queued', why: `${why}, but ${elsewhere.join(', ')} ${elsewhere.length > 1 ? 'have' : 'has'} ${kind === 'agent' ? 'an agent slot' : 'room'}: it should move there (w2046)`, roomOn: elsewhere } : { state: 'queued', why };
+  }
 
   // Blocked on a thing (w643): the blocker it records.
   if (w.status === 'blocked' && gates.length) return blockedLive(gates, f.now);
