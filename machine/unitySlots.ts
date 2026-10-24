@@ -17,7 +17,7 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import type { Proc, UnityPlatform } from './unity.ts';
-import { unitySlotsLine } from '../shared/fleet.ts';
+import { heldNotStarted, unitySlotsLine } from '../shared/fleet.ts';
 import { benchLockPath, benchTicketFor, heldTicket, HELD_WAIT_CAP_MS, type BenchMode, type BenchTicket } from './benchQueue.ts';
 import type { UnitySlotsReport } from '../shared/types.ts';
 import { foreignTimedHold } from './benchLock.ts';
@@ -221,6 +221,8 @@ export interface Assessment {
   limit?: number;
   /** Slots in use: each place, holder and outside process counted once (a reservation or its processes, the larger). */
   used: number;
+  /** w1962: of `used`, the sandbox editors whose start is queued in the bench queue or booting (no Unity process yet). */
+  starting: number;
   free: number;
   unity: UnityProcess[];
   interactive: number;
@@ -299,10 +301,12 @@ export function assess(input: AssessInput): Assessment {
   const holders = new Map<string, number>();
   const usedOf = new Map<string, number>();
   let used = outside.length;
+  let starting = 0;
   for (const [key, b] of buckets) {
     const n = Math.max(b.reserved, b.procs);
     used += n;
     usedOf.set(key, n);
+    if (key.startsWith('e:')) starting += n - b.procs;
     if (n) holders.set(b.holder, (holders.get(b.holder) ?? 0) + n);
   }
   // What a waiter keeps while it waits: what its own process holds, and its place's editor (its worker waits in a tool
@@ -377,6 +381,7 @@ export function assess(input: AssessInput): Assessment {
   return {
     limit,
     used: used + granted,
+    starting,
     free: limit === undefined ? Infinity : limit - used - granted,
     unity,
     interactive: unity.filter((u) => u.kind === 'interactive').length,
@@ -392,11 +397,9 @@ export function assess(input: AssessInput): Assessment {
   };
 }
 
-/** "editors 4 of 3: 1 interactive, 3 batch" (the processes; slots granted but not started yet are said apart). */
-export function countsLine(a: Pick<Assessment, 'limit' | 'used' | 'interactive' | 'batch'>): string {
-  const procs = a.interactive + a.batch;
-  const reserved = a.used - procs;
-  return `editors ${a.used} of ${a.limit ?? 'no limit'}: ${a.interactive} interactive, ${a.batch} batch${reserved > 0 ? `, ${reserved} granted not started yet` : ''}`;
+/** "editors 4 of 3: 1 interactive, 3 batch" (the processes; slots held with no Unity yet are said apart, shared/fleet.ts). */
+export function countsLine(a: Pick<Assessment, 'limit' | 'used' | 'interactive' | 'batch' | 'starting'>): string {
+  return `editors ${a.used} of ${a.limit ?? 'no limit'}: ${a.interactive} interactive, ${a.batch} batch${heldNotStarted(a)}`;
 }
 
 // ---------------------------------------------------------------- the mailbox
@@ -754,6 +757,7 @@ export class UnitySlots {
     return {
       limit: l.a.limit,
       used: l.a.used,
+      ...(l.a.starting ? { starting: l.a.starting } : {}),
       interactive: l.a.interactive,
       batch: l.a.batch,
       outside: l.a.outside.length,
