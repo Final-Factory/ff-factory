@@ -5447,3 +5447,58 @@ test('w1945: a two-machine run filed by hand is marked a pair as the dispatcher 
   assert.deepEqual(o.flagQueuedWithRoom(one), [], 'one free computer is no room for two legs');
   assert.deepEqual(o.flagQueuedWithRoom(both), ['w3']);
 });
+
+// ---------------------------------------------------------------- w2007: a coordinator's turn passed the per-turn budget
+
+test("w2007: two budget hits of one orchestrator within 6 h file one request on FF Factory's repo for its person and push one notice; the second adds a log line; 6 h later it files again", async (t) => {
+  const { o, store, sessions, chat, heard, dispatcher } = setup(t);
+  const pushed: { session: string; users: string[]; what: string }[] = [];
+  o.onTurnBudget = (s, users, what) => pushed.push({ session: s.id, users, what });
+  const loth = chat(LOTH);
+  const hit = { calls: 151, tokensRead: 3_400_000, cap: 'calls' as const, since: '2026-10-24T09:00:00.000Z', starter: { from: 'system' as const, text: '[timer t-1] close finished requests\nand unjam the rest' } };
+  sessions.events.emit('turnBudget', loth, hit);
+  const budget = () => [...store.work.values()].filter((w) => w.title.includes('per-turn budget'));
+  assert.equal(budget().length, 1);
+  const w = budget()[0];
+  assert.equal(w.title, "Investigate: Lothsahn's orchestrator passed the per-turn budget (151 calls, 3.4M tokens)");
+  assert.deepEqual([w.requestedBy.userId, w.repo, w.needs, w.humanAsked, w.status], ['lothsahn', 'Final-Factory/ff-factory', 'agent', false, 'new']);
+  assert.match(w.brief, new RegExp(`session ${loth.info.id}: /#/session/${loth.info.id}\\) passed the per-turn budget of a coordinator, 150 calls / 25M tokens`));
+  assert.match(w.brief, /made 151 model calls \(subagents' included\) and read 3,400,000 tokens .* over the calls cap\. The turn was open since 2026-10-24T09:00:00\.000Z/);
+  assert.match(w.brief, /started by a harness message .*: "\[timer t-1\] close finished requests"\./);
+  assert.match(w.brief, /Find out why \(a loop, polling, a retry\) from the transcript .* Say whether the cap should move/);
+  assert.match(w.log.at(-1)!, /filed by FF Factory for Lothsahn \(w2007\).*counts against no limit/);
+  assert.equal(pushed.length, 1);
+  assert.deepEqual([pushed[0].session, pushed[0].users], [loth.info.id, ['lothsahn']]);
+  assert.match(pushed[0].what, new RegExp(`^FF Factory stopped a turn of Lothsahn's orchestrator: it made 151 model calls and read 3\\.4M tokens, over the per-turn budget \\(150 calls / 25M tokens\\)\\. ${w.id} looks into why\\.$`));
+  // The dispatcher hears of the request as of any; nothing is sent into the stopped orchestrator itself.
+  await until('the dispatcher hears of the request', () => heard(dispatcher().info.id, '[work request]').some((e) => e.text.includes(`${w.id} `)));
+  assert.equal(heard(loth.info.id, '[').length, 0);
+  // Another hit of the same session within 6 h: a line on the open request, no second request, no second notice.
+  sessions.events.emit('turnBudget', loth, { ...hit, calls: 160, tokensRead: 5_000_000 });
+  assert.equal(budget().length, 1);
+  assert.equal(pushed.length, 1);
+  assert.match(w.log.at(-1)!, /another turn of the same session passed the budget \(w2007\): 160 calls, 5\.0M tokens, over the calls cap/);
+  // Another orchestrator is its own session.
+  sessions.events.emit('turnBudget', chat(BEN), { ...hit, cap: 'tokens' as const });
+  assert.equal(budget().length, 2);
+  assert.deepEqual(pushed.at(-1)!.users, ['ben']);
+  // 6 h later the same session files again.
+  (o as unknown as { now: () => Date }).now = () => new Date(Date.now() + 6 * 3_600_000 + 60_000);
+  sessions.events.emit('turnBudget', loth, hit);
+  assert.equal(budget().length, 3);
+  assert.equal(pushed.length, 3);
+});
+
+test('w2007: the dispatcher passing the budget files its request for the system payer and the notice goes to the owners', async (t) => {
+  const { o, store, sessions, dispatcher } = setup(t);
+  const pushed: { users: string[]; what: string }[] = [];
+  o.onTurnBudget = (_s, users, what) => pushed.push({ users, what });
+  const d = dispatcher();
+  sessions.events.emit('turnBudget', d, { calls: 12, tokensRead: 26_000_000, cap: 'tokens' as const });
+  const [w] = [...store.work.values()].filter((x) => x.title.includes('per-turn budget'));
+  assert.equal(w.title, 'Investigate: the dispatcher passed the per-turn budget (12 calls, 26.0M tokens)');
+  assert.equal(w.requestedBy.userId, 'ben', 'the system payer: the owner here');
+  assert.match(w.brief, /started by a message that is not known any more\./);
+  assert.match(w.brief, /over the tokens cap/);
+  assert.deepEqual(pushed.map((p) => p.users), [['ben']]);
+});

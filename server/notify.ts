@@ -123,6 +123,11 @@ export class Notifier {
     this.fire({ kind: 'person', title: `Message from ${from.displayName}`, body: clip(firstLine(text), 180), url: '#/', tag: `person-${from.userId}` }, [to.userId]);
   }
 
+  /** A coordinator's turn was stopped for passing its per-turn budget (w2007): an error to its people, on its own page. */
+  turnBudget(s: SessionInfo, users: string[], body: string) {
+    this.fire({ kind: 'error', title: `${this.name(s)} was stopped: over the per-turn budget`, body: clip(body, 240), url: this.route(s), tag: `budget-${s.id}` }, users);
+  }
+
   /** A host-health step (disk guard, sandbox drive recovery): server/hostHealth.ts. */
   host(title: string, body: string) {
     this.fire({ kind: 'host', title, body: clip(body, 240), url: '#/', tag: `host-${title.slice(0, 40)}` });

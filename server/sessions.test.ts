@@ -3,11 +3,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { SessionManager, firstResultBase, seedSdkCost, setQueryForTesting } from './sessions.ts';
+import { SessionManager, firstResultBase, seedSdkCost, setQueryForTesting, type TurnBudgetHit } from './sessions.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { Store } from './store.ts';
 import type { Config } from './config.ts';
-import type { SessionInfo } from '../shared/types.ts';
+import type { SessionInfo, TranscriptEvent } from '../shared/types.ts';
 
 test('after a portal restart a machine agent that was mid-turn shows stopped, saying it may still run there (w424)', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-sessions-'));
@@ -181,4 +181,143 @@ test("a resumed process's first turn after a portal restart costs only itself, n
   await settle();
   assert.ok(Math.abs(s.info.costUsd - 601.25) < 1e-9);
   assert.ok(Math.abs((s.info.lastTurnCostUsd ?? 0) - 0.75) < 1e-9);
+});
+
+// ---------------------------------------------------------------- w2007: the coordinators' per-turn budget
+
+/** A scripted CLI for the budget tests: the test emits the stream; `interrupts` counts the process's interrupt() calls. */
+function scriptedCli(t: { after: (fn: () => void) => void }) {
+  const out: unknown[] = [];
+  let wake: (() => void) | undefined;
+  const state = { interrupts: 0 };
+  const emit = (m: unknown) => {
+    out.push(m);
+    wake?.();
+  };
+  setQueryForTesting((({ prompt }: { prompt: AsyncIterable<unknown> }) => {
+    void (async () => {
+      for await (const _ of prompt) void _;
+    })();
+    const stream = (async function* () {
+      yield { type: 'system', subtype: 'init', session_id: 'scripted', model: 'm', uuid: 'init' };
+      for (;;) {
+        while (!out.length) await new Promise<void>((r) => (wake = r));
+        yield out.shift();
+      }
+    })();
+    return Object.assign(stream, { interrupt: async () => void state.interrupts++ });
+  }) as never);
+  t.after(() => setQueryForTesting(fakeQuery() as never));
+  let n = 0;
+  /** One content block of model call `id`; a call with several blocks arrives as several messages with the one id. */
+  const block = (id: string, read = 1000, sub?: string) =>
+    emit({ type: 'assistant', parent_tool_use_id: sub ?? null, uuid: `a${++n}`, session_id: 'scripted', message: { id, role: 'assistant', model: 'claude-opus-5-5', content: [{ type: 'text', text: `block ${n}` }], usage: { input_tokens: 5, cache_read_input_tokens: read, cache_creation_input_tokens: 0, output_tokens: 7 } } });
+  const result = (uuids: string[]) => emit({ type: 'result', subtype: 'success', is_error: false, result: 'ok', total_cost_usd: 0, num_turns: 1, duration_ms: 1, user_message_uuids: uuids, session_id: 'scripted', uuid: `r${++n}` });
+  const idle = () => emit({ type: 'system', subtype: 'session_state_changed', state: 'idle', session_id: 'scripted', uuid: `st${++n}` });
+  const settle = () => new Promise((r) => setTimeout(r, 80));
+  return { state, emit, block, result, idle, settle };
+}
+
+function budgetSession(t: { after: (fn: () => void) => void }, kind: SessionInfo['kind']) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-budget-'));
+  const store = new Store(dir);
+  const sessions = new SessionManager({} as Config, store);
+  t.after(() => {
+    sessions.stopAll();
+    store.flush();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const s = sessions.create({ kind, title: kind, permissionMode: 'bypassPermissions', options: () => ({}) });
+  const hits: TurnBudgetHit[] = [];
+  sessions.events.on('turnBudget', (_s: unknown, hit: TurnBudgetHit) => hits.push(hit));
+  const errors = () => store.readTranscript(s.info.id).filter((e): e is Extract<TranscriptEvent, { kind: 'error' }> => e.kind === 'error');
+  return { sessions, s, store, hits, errors };
+}
+
+test("w2007: a coordinator turn of 151 distinct model calls is interrupted once with one event; 150 are not, and a call's repeated content blocks count once", async (t) => {
+  const cli = scriptedCli(t);
+  const { sessions, s, hits, errors } = budgetSession(t, 'orchestrator');
+  sessions.send(s.info.id, 'sweep the whole ledger\nand report', 'human');
+  // 150 calls, each arriving as two messages with one id, the first 40 of them a subagent's: the cap is 150, not passed.
+  for (let i = 1; i <= 150; i++) for (let b = 0; b < 2; b++) cli.block(`m${i}`, 1000, i <= 40 ? 'toolu_sub' : undefined);
+  await cli.settle();
+  assert.equal(cli.state.interrupts, 0);
+  assert.equal(hits.length, 0);
+  // The 151st passes it.
+  cli.block('m151');
+  await cli.settle();
+  assert.equal(cli.state.interrupts, 1);
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].calls, 151);
+  assert.equal(hits[0].cap, 'calls');
+  assert.equal(hits[0].tokensRead, 151 * 1005);
+  assert.ok(hits[0].since, 'when the turn opened');
+  assert.deepEqual(hits[0].starter, { from: 'human', text: 'sweep the whole ledger\nand report' });
+  // What the stream still delivers before the CLI's result stops nothing again.
+  cli.block('m152');
+  cli.block('m153');
+  await cli.settle();
+  assert.equal(cli.state.interrupts, 1);
+  assert.equal(hits.length, 1);
+  // The transcript says it was FF Factory, in words; the stop is on purpose, so a restart resumes nothing.
+  assert.deepEqual(errors().map((e) => e.text), ['FF Factory stopped this turn: it made 151 model calls and read 151,755 tokens, over the per-turn budget (150 calls / 25M tokens, w2007).']);
+  assert.ok(sessions.get(s.info.id).snapshot!().stoppedOnPurpose);
+  assert.equal(s.info.status, 'idle');
+});
+
+test('w2007: the token cap fires on a few calls with huge reads', async (t) => {
+  const cli = scriptedCli(t);
+  const { sessions, s, hits, errors } = budgetSession(t, 'orchestrator');
+  sessions.send(s.info.id, 'read everything', 'human');
+  cli.block('m1', 9_000_000);
+  cli.block('m2', 9_000_000);
+  await cli.settle();
+  assert.equal(hits.length, 0, '18M read: under 25M');
+  cli.block('m3', 8_000_000);
+  await cli.settle();
+  assert.equal(hits.length, 1);
+  assert.deepEqual([hits[0].calls, hits[0].cap, hits[0].tokensRead], [3, 'tokens', 26_000_015]);
+  assert.equal(cli.state.interrupts, 1);
+  assert.match(errors()[0].text, /^FF Factory stopped this turn: it made 3 model calls and read 26,000,015 tokens, over the per-turn budget \(150 calls \/ 25M tokens, w2007\)\.$/);
+});
+
+test('w2007: a worker is never stopped by the budget, however many calls its turn makes; nor is a standing agent', async (t) => {
+  for (const kind of ['worker', 'standing'] as const) {
+    const cli = scriptedCli(t);
+    const { sessions, s, hits, errors } = budgetSession(t, kind);
+    sessions.send(s.info.id, 'long job', 'human');
+    for (let i = 1; i <= 500; i++) cli.block(`m${i}`, 100_000);
+    await cli.settle();
+    assert.equal(cli.state.interrupts, 0, kind);
+    assert.equal(hits.length, 0, kind);
+    assert.equal(errors().length, 0, kind);
+  }
+});
+
+test('w2007: the counters start again with each turn: turns of 100 calls each, a queued message in the same CLI turn too, stop nothing', async (t) => {
+  const cli = scriptedCli(t);
+  const { sessions, s, hits } = budgetSession(t, 'orchestrator');
+  const one = sessions.send(s.info.id, 'first', 'human');
+  for (let i = 1; i <= 100; i++) cli.block(`a${i}`);
+  cli.result([one]);
+  cli.idle();
+  await cli.settle();
+  const two = sessions.send(s.info.id, 'second', 'human');
+  for (let i = 1; i <= 100; i++) cli.block(`b${i}`);
+  await cli.settle();
+  assert.equal(hits.length, 0);
+  // Not idle in between: the CLI answers `two`, and goes on with a message queued behind it; its calls are a turn of their own.
+  cli.result([two]);
+  for (let i = 1; i <= 100; i++) cli.block(`c${i}`);
+  await cli.settle();
+  assert.equal(hits.length, 0);
+  assert.equal(cli.state.interrupts, 0);
+  // The same ids in a later turn are new calls, not the earlier turn's.
+  cli.result([]);
+  cli.idle();
+  sessions.send(s.info.id, 'third', 'human');
+  for (let i = 1; i <= 150; i++) cli.block(`a${i}`);
+  await cli.settle();
+  assert.equal(hits.length, 0);
+  assert.equal(cli.state.interrupts, 0);
 });

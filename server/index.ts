@@ -695,6 +695,7 @@ notifier.audience = (s, kind) => {
   return undefined;
 };
 agents.orchestrators.onPersonMessage = (from, to, text) => notifier.personMessage(from, to, text);
+agents.orchestrators.onTurnBudget = (s, users, what) => notifier.turnBudget(s, users, what);
 agents.standing.events.on('run', (a, run) => notifier.standingRun(a, run));
 agents.standing.events.on('delegation', (d) => notifier.delegation(d));
 agents.standing.events.on('delegationUpdate', (d, what) => notifier.delegationUpdate(d, what));
