@@ -5,6 +5,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { PermissionMode } from '../shared/types.ts';
+import { CLEANUP_SOFT_GB_DEFAULT } from '../shared/types.ts';
 import type { MinPriority } from '../shared/capacity.ts';
 import { checkObject, dataRecoveries, readJsonDurable, writeFileDurable } from './durable.ts';
 import { staleOutputSettings, type StaleOutputSettings } from './staleOutput.ts';
@@ -244,7 +245,7 @@ export interface Config {
     githubFromVault?: boolean | Record<string, boolean>;
     /**
      * Each machine daemon's own clean-up (docs/self-recovery.md): a pass every `everyMinutes` (default 60) and
-     * sooner below `softFreeGB` (default 80). A number for every machine, or per machine with "*" for the rest.
+     * sooner below `softFreeGB` (default 20, w1951). A number for every machine, or per machine with "*" for the rest.
      */
     cleanup?: {
       everyMinutes?: number | Record<string, number>;
@@ -838,7 +839,7 @@ export const DEFAULT_CLEANUP: CleanupPolicy = {
 export const hostSoftFreeGB = (g: Pick<HostGuardConfig, 'warnFreeGB' | 'cleanup'>) => g.cleanup.softFreeGB || g.warnFreeGB;
 
 /** A machine's clean-up when config machines.cleanup says nothing about it. */
-export const MACHINE_CLEANUP_DEFAULTS = { everyMinutes: 60, softFreeGB: 80 };
+export const MACHINE_CLEANUP_DEFAULTS = { everyMinutes: 60, softFreeGB: CLEANUP_SOFT_GB_DEFAULT };
 
 /** A per-machine setting: a number for every machine, or { "<id>": n, "*": n } (the id wins, then "*"). */
 const perMachine = (v: number | Record<string, number> | undefined, id: string): number | undefined => (typeof v === 'number' ? v : v ? (v[id] ?? v['*']) : undefined);

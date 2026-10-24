@@ -1007,7 +1007,9 @@ async function wantDevDriveGrow(host: string, wantGB: number, haveGB: number, en
   }
   const file = devDriveFile(host);
   const st = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')) as Record<string, unknown>;
-  fs.writeFileSync(file, JSON.stringify({ ...st, wantGB }, null, 2));
+  // maxGB too: the update's own reading of the VHDX (haveGB), where the file could say more (LothLaptop's said 1024 for an 80 GB
+  // drive, w1918) and the daemon's guard, which grows only to a want above the file's maxGB, would then never grow it (w1947).
+  fs.writeFileSync(file, JSON.stringify({ ...st, maxGB: haveGB, wantGB }, null, 2));
   say(`Dev Drive: ${haveGB} GB now, ${wantGB} GB asked: the daemon grows it in place (ffsb-helper-grow) once no agent or editor is in a sandbox, holding new ones for the minute or two it takes.`);
 }
 

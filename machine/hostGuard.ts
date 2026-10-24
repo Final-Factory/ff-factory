@@ -93,13 +93,16 @@ export class MachineGuard {
   /** The last grow that waited or failed, said once each (the portal hears it), and when a failed one is tried again. */
   private growNote?: string;
   private growRetryAt = 0;
+  /** The config the monitor judges by: a grow raises its devDriveMaxGB, so the VHDX's room is the new maximum's (w1947). */
+  private readonly cfg: Config;
 
   constructor(settings: MachineGuardSettings, sandboxRoot: string, fx: MachineGuardEffects, ports: MachineGuardPorts) {
     this.settings = settings;
     this.fx = fx;
     this.ports = ports;
+    this.cfg = machineGuardConfig(settings, sandboxRoot);
     this.monitor = new HostHealthMonitor({
-      cfg: machineGuardConfig(settings, sandboxRoot),
+      cfg: this.cfg,
       statfs: (p) => fx.statfs(p),
       ...(fx.fileBytes ? { fileBytes: (p: string) => fx.fileBytes!(p) } : {}),
       exists: (p) => fx.exists(p),
@@ -188,6 +191,8 @@ export class MachineGuard {
       if (r.ok) {
         this.growNote = undefined;
         this.growRetryAt = 0;
+        // daemon.json still says the old maximum until the next update writes it: judge the host's room by the new one now.
+        this.cfg.hostGuard.devDriveMaxGB = p.wantGB;
         this.ports.log(`host guard: ${r.detail}`);
         this.ports.report('Dev Drive: grown', r.detail);
       } else {

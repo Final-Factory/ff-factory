@@ -706,6 +706,25 @@ without one means it is off or failing, worth a person's look.
   Where Actions runs are refused too (w889), the PR's merge state is read: `clean` after `unstable` on the same head commit
   is a green finish and clears the wait at once; a red one still waits `CI_UNREADABLE_MS`. Whether the portal can read CI
   at all is measured at start and every 30 minutes and said loudly when it cannot ([vault.md](vault.md) section 13.2).
+- **Waiting in a machine's queue is Blocked, not Working** (w1949; lothsahn, 2026-10-23: "Show those requests as blocked,
+  with the existing blocked state in the request list, and clearly indicate that they're blocked on the exclusive lock").
+  w1898, w1893 and w1891 read Working while their workers sat in `bench_queue.py` behind exclusive ticket t00000911 on
+  LothDesktop. Each daemon's stats now list its bench queue's waiters in the queue's order, with the session, sandbox and
+  requests each ticket carries and how many wait ahead (`machine/benchState.ts`, `BenchState.waiters`), and each `unity-slot
+  run` waiting for a Unity slot with its session and place (`UnitySlotsReport.waiting`). `shared/queueWaits.ts` turns them
+  into waits, and `workLive` shows a request **Blocked** on its worker's wait, mid-turn or between turns: "Blocked on the
+  exclusive bench lock on lothdesktop (held by w1908 / t00000911 since 22:35 UTC, 1 ahead in queue)", "Blocked on the
+  shared bench lock on beast (a shared lock, held by 2 shared tickets: …)", "Blocked on a Unity editor slot on lothdesktop
+  (3 of 3 in use, next in queue)". Work that needs an editor whose sandbox editor's start waits in the bench queue (the
+  daemon's ticket, which names the sandbox only) is Blocked on it while its worker is between turns with a check-in; mid-turn
+  it does what needs no editor and is Working. The wait comes from the queue's files only, never from what the worker says;
+  the next stats report after the grant shows it Working again. A request whose busy workers do not all wait is Working.
+  The stored status is untouched, so the cleanup's stalled rules and the Queued WRONG flag never see these. A `unity
+  start` the machine's Unity slots refused leaves no queue entry (the worker is told to wake_me and try again), so the portal
+  keeps the refusal on the worker's session (`SessionInfo.editorRefused`, cleared by a start that goes through and by its
+  next turn): while it is stopped with that check-in and its daemon still reports no slot free (every slot in use, launches
+  waiting, or RAM at its cap), work that needs an editor reads "Blocked on a Unity editor slot on lothdesktop (3 of 3 in
+  use)", and Working once a slot frees. Tests: `w1949QueueWaits.test.ts`.
 - **Stalled is only what nothing will move** (w1841; Ben, 2026-10-23, on six requests his Stalled filter showed: "why are
   these stalled?"). `shared/workState.ts` `workLive` reads these before it says Stalled:
   - a worker an urgent release's build paused (`server/buildPlans.ts` `pausedFor`: asked mid-turn, or paused between turns
@@ -2224,6 +2243,16 @@ on it is `POST /api/sessions/<id>/answer`, exactly the chat's click; typed words
 answered (a reply quoting it), asked again (one card, the newer), closed by the orchestrator (`close_question` with why), answered
 by the person's note on its request, or its request closes; one the request's own card already asks is that card. `ask_person`
 takes `request` and `after`, and the orchestrator's brief says to ask every question with it, never in text only.
+
+**Typed answers (w1955).** Words typed in the chat carry no mark of the card they answer, so nothing closes the card by itself and
+FF Factory never guesses. Two nudges tell the orchestrator to `close_question` the ones the words decided, in the same turn:
+(1) at the start of a turn the person typed, `Orchestrators.heldOffer(id, typed)` appends the chat's open questions asked before
+that message ("open question N (...)"), each card offered once, under HELD_MARK like the w830 held calls, so conditional decisions
+never take their words from it; a click, a reply quoting a card (that card is left out) and the harness's own turns offer none.
+The typed routes pass their text: the page, FFBox operator words, the remote Claude Code key, `askOrchestrator`. This covers the
+answer that leads to no filing. (2) `request_work` and `update_work` in a turn the person started end their result with the
+open questions asked before that message that are still open (`Orchestrators.withOpenCards`), once per turn. The brief says the
+same. Tests: `orchestrators.test.ts` "w1955" (two).
 
 `list_work` shows each waiting request's six parts under its line (`Agents.waitSummaryOf`, `summaryText`). Tests:
 `server/waitSummary.test.ts` (today's cases in `server/fixtures/waitingCards.ts`), `server/orchestrators.test.ts` ("w1868"),

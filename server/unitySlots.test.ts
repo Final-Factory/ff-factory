@@ -424,7 +424,7 @@ test('unity slots: the CLI: run waits, runs and releases; a second run waits for
   const job = (name: string) =>
     new Promise<number>((resolve) => {
       const body = `const fs=require('fs');fs.appendFileSync(${JSON.stringify(log)},'${name} start '+Date.now()+'\\n');const cap=Date.now()+60000;const i=setInterval(()=>{if(fs.existsSync(${JSON.stringify(go)})||Date.now()>cap){clearInterval(i);fs.appendFileSync(${JSON.stringify(log)},'${name} end '+Date.now()+'\\n')}},10)`;
-      const c = spawn(process.execPath, [script, 'run', '--label', name, '--', process.execPath, '-e', body], { env: { ...process.env, FF_UNITY_SLOTS: dir, FF_BENCH_TICKETS: 'off', FF_WORKER_ROOT: '' }, stdio: 'ignore' });
+      const c = spawn(process.execPath, [script, 'run', '--label', name, '--', process.execPath, '-e', body], { env: { ...process.env, FF_UNITY_SLOTS: dir, FF_BENCH_TICKETS: 'off', FF_WORKER_ROOT: '', FF_SESSION_ID: `sess-${name}` }, stdio: 'ignore' });
       c.on('exit', (code) => resolve(code ?? -1));
     });
   const a = job('first');
@@ -432,6 +432,9 @@ test('unity slots: the CLI: run waits, runs and releases; a second run waits for
   const b = job('second');
   await waitFor('the second run to wait', () => slots.report()?.waiting.some((w) => w.label === 'second') ?? false);
   assert.deepEqual(slots.report()!.granted.map((g) => g.label), ['first']);
+  // w1949: the waiting run names its worker's session and its place, so the ledger shows that worker's request Blocked.
+  const waiting = slots.report()!.waiting.find((w) => w.label === 'second')!;
+  assert.deepEqual([waiting.session, waiting.position], ['sess-second', 1]);
   fs.writeFileSync(go, '');
   assert.deepEqual(await Promise.all([a, b]), [0, 0]);
   const done = lines();
@@ -499,7 +502,33 @@ test('unity slots: a second arbiter answering the same mailbox is reported once 
   await slots.tick();
   const told = events.filter((e) => e.startsWith('another process'));
   assert.equal(told.length, 1, 'once per arbiter');
-  assert.match(told[0], /another process \(pid \d+, machine "mx"\) is answering this machine's Unity slots mailbox .* too, so launches may be granted past the limit/);
+  assert.match(told[0], /another process \(pid \d+, machine "mx", started [^)]+\) is answering this machine's Unity slots mailbox .* too, so launches may be granted past the limit/);
+});
+
+test("w1918: of two daemons of one machine on one mailbox, the older ends for the newer (LothLaptop had three); another machine's or one that does not say when it started is only reported", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-slots-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 }));
+  const yielded: string[] = [];
+  const events: string[] = [];
+  const mk = (name: string, machine: string, startedAt?: number) =>
+    new UnitySlots({ dir, platform: 'win32', procs: async () => [], alive: () => true, now: () => Date.now(), limit: () => 1, places: () => [], ramPct: () => undefined, machine, ...(startedAt !== undefined ? { startedAt } : {}), onNewerTwin: (pid) => void yielded.push(`${name}:${pid}`), onEvent: (e) => void events.push(`${name}: ${e}`) });
+  const old = mk('old', 'lothlaptop', 1_000);
+  const fresh = mk('new', 'lothlaptop', 2_000);
+  for (let i = 0; i < 3; i++) {
+    await old.tick();
+    await fresh.tick();
+  }
+  assert.deepEqual(yielded, [`old:${process.pid}`], 'the older one ends, once; the newer one never');
+  assert.ok(events.some((e) => e.startsWith('new: another process') && /started 1970-01-01T00:00:01/.test(e)), events.join('\n'));
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'arbiter.json'), 'utf8')).startedAt, new Date(2_000).toISOString(), 'the newer one keeps writing the mailbox');
+
+  // Another machine's daemon on this home folder: reported, nobody ends.
+  yielded.length = 0;
+  const other = mk('other', 'm3', 3_000);
+  await other.tick();
+  await fresh.tick();
+  assert.deepEqual(yielded, []);
+  assert.ok(events.some((e) => e.startsWith('new: another process') && /machine "m3"/.test(e)));
 });
 
 test('w1874: callerGone: Linux reads the parent live (reparented: gone); a Mac or Windows asks whether the caller is alive', () => {
