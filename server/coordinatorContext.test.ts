@@ -177,6 +177,7 @@ test('w2067: asOnLinuxCi swaps whole paths only, so a clone that is a prefix of 
   const ci = '/home/runner/work/ff-factory/ff-factory';
   const out = asOnLinuxCi(`${ROOT}${sep}a ${ROOT}sb-context-x${sep}base \`${ROOT}\``);
   assert.ok(out.startsWith(`${ci}${sep}a `) && out.endsWith(` \`${ci}\``), out);
-  assert.ok(!out.includes(`${ci}sb-context`), out);
+  // The prefixed folder keeps its own name: only a temp-folder swap may touch it (a worker's clone sits in its temp folder; CI's does not).
+  assert.ok(out.includes(` ${`${ROOT}sb-context-x`.split(os.tmpdir()).join('/tmp')}${sep}base `), out);
   assert.equal(asOnLinuxCi(`${os.tmpdir()}${sep}ffsb-context-x`), `/tmp${sep}ffsb-context-x`);
 });
