@@ -109,8 +109,10 @@ test('dictation with local Whisper chosen: records the mic, then says transcript
   await expect(bar.locator('.engine-short')).toHaveText('Whisper');
   await expect(bar.locator('.rec-dot.live')).toBeVisible();
   await expect(bar.locator('.level-meter')).toBeVisible();
-  // Long enough to be a clip (under 0.3 s is refused as too short).
-  await expect(bar.locator('.dictation-time')).toHaveText('0:01', { timeout: 5_000 });
+  // Long enough to be a clip (under 0.3 s is refused as too short). Any second past 0:00: a loaded CI runner can stall the
+  // page past 0:01 between polls (w2014: run 40081034328 read 0:06 and 0:07).
+  await expect(bar.locator('.dictation-time')).not.toHaveText('0:00', { timeout: 5_000 });
+  await expect(bar.locator('.dictation-time')).toHaveText(/^\d+:\d\d$/);
 
   await bar.getByRole('button', { name: 'Done' }).click();
   const err = panel.getByRole('alert');
