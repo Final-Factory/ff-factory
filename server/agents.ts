@@ -1370,8 +1370,16 @@ export class Agents {
     throw new Error(`timed_run needs ${machineId}'s daemon to read and send the builds, and this one is older than w1946: it is updated by itself once idle; try again after that`);
   }
 
-  /** Each worker's last timed_place verdict (w1969), sent with its machine's bench priorities while it holds. */
-  private readonly timedVerdicts = new Map<string, TimedVerdict>();
+  /**
+   * Keep a worker's timed_place verdict (w1969) on its session record, which is sent with its machine's bench priorities
+   * while it holds. It was a map in memory: on 2026-10-24 the 13:43Z auto-deploy restarted the portal 31 min after w1829's
+   * worker got "here" on BEAST ("this answer holds 12 h"), and its exclusive ticket 80 s later was refused for want of an
+   * answer (measured, bench_queue.py timed_ask_refusal).
+   */
+  private setTimedVerdict(info: SessionInfo, v: TimedVerdict) {
+    info.timedVerdict = v;
+    this.store.putSession(info);
+  }
 
   /** Whether `machineId`'s workers ask timed_place before an exclusive timing ticket (w1969): a big computer's do. */
   timedAskFor(machineId: string) {
@@ -1421,17 +1429,17 @@ export class Agents {
     const request = typeof a.request === 'string' && a.request.trim() ? a.request : undefined;
     let text: string;
     if (d.verdict === 'here') {
-      this.timedVerdicts.set(info.id, { verdict: 'here', why: d.why, until });
+      this.setTimedVerdict(info, { verdict: 'here', why: d.why, until });
       const where = d.bigFallback ? `here on a big computer (w2048 fallback: ${d.bigFallback}; every number of it from ${machineId}, comparable with no other computer's)` : `here: ${d.why}`;
       this.orchestrators.noteTimedAsk(info.id, request, `timed leg ask (w1969) from worker ${info.id.slice(0, 8)} on ${machineId}: ${where} ("${clip(what, 80)}")`);
       text = `Here (w1969): ${d.why}. Take your exclusive ticket on ${machineId} as before (bench_queue.py timed, unity-bridge.py --timed, the bench scripts); this answer holds 12 h for your session. Both sides of an A/B run on this one computer.`;
     } else if (d.timedRun) {
-      this.timedVerdicts.set(info.id, { verdict: 'elsewhere', why: d.why, until, timedRun: d.timedRun });
+      this.setTimedVerdict(info, { verdict: 'elsewhere', why: d.why, until, timedRun: d.timedRun });
       this.orchestrators.noteTimedAsk(info.id, request, `timed leg ask (w1969) from worker ${info.id.slice(0, 8)} on ${machineId}: to ${d.timedRun} by timed_run (w1996): ${d.why} ("${clip(what, 80)}")`);
       text = `Elsewhere (w1969, w1996): ${d.why}. Build both players here (a build takes a shared ticket), then call timed_run with machine "${d.timedRun}": its daemon times both there, interleaved, under that computer's own exclusive ticket, and the table and logs come back to you; no worker starts there and nothing is rebuilt. Take no exclusive ticket here.${d.choose ? ` That is for a Windows player A/B (a save played by two builds, probe_ab_win.sh's legs). For anything else timed (a snippet timed in the editor, a Performance test, a profiler capture, a Mac player), call timed_place again with via "leg": a new worker on a small computer then builds and times it.` : ''}`;
     } else {
       const leg = this.orchestrators.fileTimedLeg(info.id, { what, brief: String(a.brief ?? ''), from: machineId, needs: d.needs ?? [], why: d.why, ...(request ? { request } : {}) });
-      this.timedVerdicts.set(info.id, { verdict: 'elsewhere', why: d.why, until, leg: leg.id });
+      this.setTimedVerdict(info, { verdict: 'elsewhere', why: d.why, until, leg: leg.id });
       this.blockerWatch?.kick();
       text = `Elsewhere (w1969): ${d.why}. ${leg.text}`;
     }
@@ -3028,7 +3036,7 @@ export class Agents {
       // w1832: the urgent release lane's builder and the scheduled nightly's worker are never pre-empted by the turn limits.
       const exempt = release ? 'release' : open.some((w) => w.source?.kind === 'nightly-run') ? 'nightly' : undefined;
       // w1969: its timed_place verdict while it holds, for this machine's guard
-      const v = this.timedVerdicts.get(info.id);
+      const v = info.timedVerdict;
       const timed = v && Date.parse(v.until) > Date.now() ? v : undefined;
       const away = release ? undefined : this.benchAway(info, machineId, timed);
       out[info.id] = { priority: release ? 'urgent' : top, requests: open.map((w) => w.id), ...(exempt ? { exempt } : {}), ...(timed ? { timed } : {}), ...(away ? { away } : {}) };

@@ -4682,7 +4682,7 @@ test('w1984: a worker stopped on purpose, or whose timed work is on another mach
   assert.equal(agents.benchPriorities('pc')[b.id].away, undefined, 'a stale bench state counts for nothing');
   machines.allStats = real;
   // Its timed leg placed elsewhere (timed_place).
-  (agents as unknown as { timedVerdicts: Map<string, unknown> }).timedVerdicts.set(b.id, { verdict: 'elsewhere', why: 'big computer', until: new Date(Date.now() + 3_600_000).toISOString(), leg: 'w9' });
+  store.sessions.get(b.id)!.timedVerdict = { verdict: 'elsewhere', why: 'big computer', until: new Date(Date.now() + 3_600_000).toISOString(), leg: 'w9' };
   assert.deepEqual(agents.benchPriorities('pc')[b.id].away, { why: `its worker ${b.id.slice(0, 8)}'s timed leg was placed elsewhere (w9)`, exclusive_only: true });
 });
 
@@ -4990,6 +4990,9 @@ test('w1969: a worker on a big computer asks timed_place; its leg is filed Queue
   assert.match(leg.log.join('\n'), /filed by FF Factory for worker \w+ on w1 \(w1969 timed_place\) from pc: queued for m3 > lothlaptop, the small computers that take timed runs \(a big one only once none of them can take it: offline past the load-scaled wait, held or without a game sandbox, w2048\): pc has 6 agent slots/);
   // Its machine hears the verdict with the bench priorities: the guard then names the leg.
   assert.deepEqual({ verdict: agents.benchPriorities('pc')[id]?.timed?.verdict, leg: agents.benchPriorities('pc')[id]?.timed?.leg }, { verdict: 'elsewhere', leg: 'w2' });
+  // w1829: the verdict is kept with the session, so a portal restart does not drop it (BEAST, 2026-10-24 13:43Z).
+  store.flush();
+  assert.equal(new Store(env.cfg.dataDir).sessions.get(id)?.timedVerdict?.leg, 'w2', 'kept across a portal restart');
   // Asked again: no second leg.
   assert.match(String(await h.timed_place!({ what: 'the same A/B', brief: 'again' })), /w1 already has an open timed leg, w2/);
   assert.equal([...store.work.values()].filter((x) => x.timedLeg).length, 1);
