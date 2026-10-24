@@ -44,6 +44,7 @@ import { JOIN_TTL_MINUTES } from './machineJoin.ts';
 import { searchTranscripts } from './search.ts';
 import { CATALOG, questionsShape } from './launch.ts';
 import { clampArgs, clamped, rangedNumber, withWarnings } from './forgiving.ts';
+import { FRESH_AFTER_MERGE_MARK, freshAfterMergeArm, freshAfterMergeDue, freshAfterMergePercent, freshAfterMergeText, mergedInSession } from './freshAfterMerge.ts';
 import { AutoCompactor, LONG_WAIT_MS, withEarlyCompactMark, workerAutoCompactWindow } from './autoCompact.ts';
 import { inReadChainPilot, withReadChainMark } from './readChain.ts';
 import { withTerseProse } from './terseProse.ts';
@@ -646,6 +647,8 @@ export class Agents {
       log: (line) => console.log(line),
     });
     sessions.pauseHeld = (s, text) => this.pauses.heldResume(s.info, text);
+    // w2043: a pilot worker whose pull request merged goes on in a fresh session at its next message (server/freshAfterMerge.ts).
+    sessions.freshStart = (s, m) => this.freshStart(s, m);
     machines.onPause = (id, p) => {
       if (p.paused) this.pauses.onPause(id);
       else {
@@ -1907,6 +1910,98 @@ export class Agents {
     return handoverNote(w, { sandbox, previous: was, related, ...(w.handedBack ? { handedBack: w.handedBack } : {}) });
   }
 
+  /** w2043: a worker whose message is being turned into a fresh session, to the new session's id once it started (or undefined). */
+  private readonly freshStarts = new Map<string, Promise<string | undefined>>();
+  /** w2043: workers a fresh start failed for: their messages go to them as before. */
+  private readonly freshRefused = new Set<string>();
+
+  /**
+   * The fresh-session pilot (w2043, server/freshAfterMerge.ts): a message to a worker between turns whose request is in the
+   * pilot arm and had a pull request merge during its session starts a NEW session in the same sandbox and branch
+   * (startFreshSession, the request moved to it) with a short hand-off and the message, instead of resuming this context.
+   * The old session is stopped once free (retireWhenFree), its pending check-in and gate resumes move to the new one.
+   * True when the message went there (or waits for the new session to start); false delivers it here as always.
+   */
+  private freshStart(s: SessionHandle, m: { text: string; from: 'human' | 'orchestrator' | 'system'; images?: ImageInput[]; requestedBy?: Requester; attachments?: DeliveredAttachment[] }): boolean {
+    const id = s.info.id;
+    const deliver = (to: string) => {
+      try {
+        this.sessions.send(to, m.text, m.from, m.images, { ...(m.requestedBy ? { requestedBy: m.requestedBy } : {}), ...(m.attachments?.length ? { attachments: m.attachments } : {}) });
+      } catch (e) {
+        console.warn(`fresh-after-merge pilot (w2043): a message for ${id} could not go to ${to}: ${(e as Error).message}`);
+      }
+    };
+    const pending = this.freshStarts.get(id);
+    if (pending) {
+      // Another message while the fresh session starts: it follows the first one there, in order.
+      void pending.then((to) => deliver(to ?? id));
+      return true;
+    }
+    if (this.freshRefused.has(id) || m.images?.length) return false;
+    const due = freshAfterMergeDue(s.info, this.store.work.values(), this.cfg);
+    if (!due) return false;
+    const { w, merged } = due;
+    // A gated request is not started (linkWorker would refuse it after the session exists): the message goes here as before.
+    if (this.orchestrators.gateProblem(w)) return false;
+    const requestedBy = w.requesters.find((r) => r.userId === s.info.requestedBy?.userId) ?? w.requesters[0] ?? s.info.requestedBy;
+    if (!requestedBy) return false;
+    const prs = merged.map((p) => `#${p.number}`).join(', ');
+    const why = `${FRESH_AFTER_MERGE_MARK}: PR ${prs} merged during worker ${id}'s session, so ${w.id} goes on without its context`;
+    const p = this.startFreshSession(s, w, {
+      text: freshAfterMergeText(w, s.info, merged, m.text),
+      title: s.info.title,
+      requestedBy,
+      from: m.from === 'human' ? 'human' : 'orchestrator',
+      why,
+      moveFrom: true,
+      ...(m.attachments?.length ? { attachments: m.attachments.map((a) => a.id) } : {}),
+    }).then(
+      (said) => {
+        const to = this.store.work.get(w.id)?.sessionIds.at(-1);
+        if (!to || to === id || !this.store.sessions.get(to)) throw new Error(`no new session: ${String(said).slice(0, 200)}`);
+        this.carryOver(id, to, w.id);
+        console.log(`fresh-after-merge pilot (w2043): ${w.id}: worker ${id} ended after PR ${prs} merged; fresh session ${to} goes on (pilot arm)`);
+        return to;
+      },
+    ).catch((e: Error) => {
+      this.freshRefused.add(id);
+      console.warn(`fresh-after-merge pilot (w2043): ${w.id}: no fresh session for worker ${id} (${e.message}); the message goes to it as before`);
+      deliver(id);
+      return undefined;
+    });
+    this.freshStarts.set(id, p);
+    void p.finally(() => this.freshStarts.delete(id));
+    return true;
+  }
+
+  /** w2043: what the old session had pending moves to the fresh one: its check-in, and the ledger's gate resumes and held check-ins. */
+  private carryOver(from: string, to: string, workId: string) {
+    const wake = this.waker.pending(from);
+    if (wake) {
+      this.waker.cancel(from);
+      const minutes = Math.min(24 * 60, Math.max(1, Math.ceil((Date.parse(wake.at) - Date.now()) / 60_000)));
+      try {
+        this.waker.schedule(to, minutes, wake.note);
+      } catch (e) {
+        console.warn(`fresh-after-merge pilot (w2043): ${from}'s check-in could not move to ${to}: ${(e as Error).message}`);
+      }
+    }
+    this.orchestrators.sessionReplaced(workId, from, to);
+  }
+
+  /**
+   * w2043: a pilot worker's turn ended with nothing open in hand after a pull request of its merged during its session (its
+   * DONE closed the request): it is ended now, so no later request reuses that context.
+   */
+  private endAfterMerge(i: SessionInfo) {
+    if (freshAfterMergePercent(this.cfg) <= 0 || i.kind !== 'worker') return;
+    const all = [...this.store.work.values()];
+    if (all.some((w) => isOpen(w) && w.sessionIds.includes(i.id))) return;
+    const w = mergedInSession(i, all, this.cfg);
+    if (!w) return;
+    console.log(`fresh-after-merge pilot (w2043): worker ${i.id} ends after ${w.id}'s PR merged and it holds nothing open: ${this.orchestrators.retireWhenFree(i.id)}`);
+  }
+
   /**
    * message_agent with a work_id for a worker that is not on that request (w740): the request starts a NEW session in the
    * same sandbox, never another conversation's turn, so a worker's context holds one request. The branch and files stay;
@@ -2008,6 +2103,9 @@ export class Agents {
     });
     // Its first process starts before the ledger links it to the request (w1076): it starts on that request's person's tokens.
     if (req.workId) this.startingFor.set(s.info.id, req.workId.toLowerCase());
+    // w2043: which arm of the fresh-session pilot its request is in, for the comparison (the hash says the same later).
+    const arm = req.workId ? freshAfterMergeArm(req.workId, this.cfg) : undefined;
+    if (arm) console.log(`fresh-after-merge pilot (w2043): worker ${s.info.id} for ${req.workId!.toLowerCase()}, ${arm} arm`);
     const sb = t.machineSandbox ? this.machines.requireSandbox(m.id, t.machineSandbox) : undefined;
     if (sb && sb.status === 'creating') {
       // The prompt goes once the sandbox is ready.
@@ -2122,6 +2220,9 @@ export class Agents {
     // status ask, w631), and that message is the next turn's.
     const from = s.lastFrom;
     this.orchestrators.workerTurnEnded(s.info, text);
+    // w2043: a pilot worker whose pull request merged and that holds no open request is ended now; a request that goes on
+    // continues in a fresh session at its next message (freshStart).
+    this.endAfterMerge(s.info);
     // w1532: a turn that ends on a paused machine hands its requests back (after the ledger read its DONE and status lines).
     this.pauses.turnEnded(s.info, text);
     // w1378: a turn that ends waiting on a person sends its question to that person's orchestrator, once.
@@ -3984,8 +4085,12 @@ ${w.repo ?? ''}
               const rel = this.orchestrators.relationTo(item, w.info.id);
               const read = `the server read it as ${rel.related ? 'related' : 'unrelated'}: ${rel.why}`;
               if (session && !clash && !session_reason?.trim()) throw new Error(`session "${session}" overrules the server's reading (${read}): say why in session_reason`);
-              const same = !clash && (session ? session === 'same' : rel.related);
-              why = clash
+              // w2043: a pilot worker whose pull request merged takes no next request into that context: a new session does.
+              const fresh = !clash ? mergedInSession(w.info, this.store.work.values(), this.cfg) : undefined;
+              const same = !clash && !fresh && (session ? session === 'same' : rel.related);
+              why = fresh
+                ? `${FRESH_AFTER_MERGE_MARK}: ${fresh.id}'s pull request merged during worker ${w.info.id}'s session, so the next request starts a new one (${read})`
+                : clash
                 ? `${clash}; a request runs on its own person's tokens (w1076)${session === 'same' ? ', so the dispatcher\'s "same" is overruled' : ''} (${read})`
                 : session
                   ? `the dispatcher chose ${same ? 'the same session' : 'a new session'}: ${session_reason!.trim().slice(0, 300)} (${read})`

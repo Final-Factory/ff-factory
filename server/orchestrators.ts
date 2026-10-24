@@ -4118,6 +4118,26 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
     return this.stopRetired(sessionId);
   }
 
+  /**
+   * A fresh session took request `workId` over from `from` (the fresh-session pilot, w2043): the gate resumes and held
+   * check-ins recorded for the old session now name the new one, so the sweep and the gate's clearing reach it. The resume's
+   * seq is reset (-1): nothing in the new session's transcript is the old one's.
+   */
+  sessionReplaced(workId: string, from: string, to: string) {
+    const w = this.store.work.get(workId.toLowerCase());
+    if (!w) return;
+    let changed = false;
+    if (w.gateResumes?.some((r) => r.session === from)) {
+      w.gateResumes = w.gateResumes.map((r) => (r.session === from ? { ...r, session: to, seq: -1 } : r));
+      changed = true;
+    }
+    if (w.heldCheckIns?.some((h) => h.session === from)) {
+      w.heldCheckIns = w.heldCheckIns.map((h) => (h.session === from ? { ...h, session: to } : h));
+      changed = true;
+    }
+    if (changed) this.store.putWork(w);
+  }
+
   /** The dispatcher's (or the server's) choice of session for a request handed to a worker it is not on, in the request's log. */
   noteSessionChoice(w: WorkItem, worker: Pick<SessionInfo, 'id' | 'title'>, same: boolean, why: string) {
     this.stamp(w, `session choice: ${same ? `sent to worker ${worker.id}'s session` : `a NEW session instead of worker ${worker.id}'s`}; ${why}`);

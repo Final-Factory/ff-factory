@@ -8,8 +8,13 @@
 
 /** How often the watch beats. */
 export const LOOP_BEAT_MS = 1000;
-/** A beat this much later than due is a stall worth a line in the log. */
-export const LOOP_STALL_LOG_MS = 2000;
+/**
+ * A beat this much later than due is a stall worth a line in the log: the portal's target is that nothing holds the loop
+ * for more than about a second (w2044, CONTRIBUTING.md "Performance"), so a block at the target is seen, not only one twice it.
+ */
+export const LOOP_STALL_LOG_MS = 1000;
+/** How often the watch says how the loop did, stall or not: "event loop: worst block 0.2 s in the last 10 min" (w2044). */
+export const LOOP_SUMMARY_MS = 10 * 60_000;
 /** At most one stall line in this long; the longest one in between is in it. */
 const LOG_EVERY_MS = 10_000;
 /** The window /api/health's loopLagMs covers. */
@@ -32,6 +37,10 @@ export class LoopWatch {
   private lags: [number, number][] = [];
   private loggedAt = 0;
   private unlogged = 0;
+  /** Since the last summary line: when it began, its worst lag and its beats at least LOOP_STALL_LOG_MS late. */
+  private summaryFrom: number;
+  private summaryWorst = 0;
+  private summaryStalls = 0;
   private readonly now: () => number;
   private readonly log: (line: string) => void;
 
@@ -39,6 +48,7 @@ export class LoopWatch {
     this.now = o.now ?? Date.now;
     this.log = o.log ?? ((l) => console.warn(l));
     this.last = this.now();
+    this.summaryFrom = this.last;
   }
 
   start() {
@@ -61,6 +71,15 @@ export class LoopWatch {
     if (lag > 0) this.lags.push([now, lag]);
     while (this.lags.length && now - this.lags[0][0] > LAG_WINDOW_MS) this.lags.shift();
     if (lag >= LOOP_STALL_LOG_MS) this.unlogged = Math.max(this.unlogged, lag);
+    this.summaryWorst = Math.max(this.summaryWorst, lag);
+    if (lag >= LOOP_STALL_LOG_MS) this.summaryStalls++;
+    if (now - this.summaryFrom >= LOOP_SUMMARY_MS) {
+      const min = Math.round((now - this.summaryFrom) / 60_000);
+      this.log(`event loop: worst block ${(this.summaryWorst / 1000).toFixed(1)} s in the last ${min} min; ${this.summaryStalls} of ${(LOOP_STALL_LOG_MS / 1000).toFixed(0)} s or more`);
+      this.summaryFrom = now;
+      this.summaryWorst = 0;
+      this.summaryStalls = 0;
+    }
     if (!this.unlogged || now - this.loggedAt < LOG_EVERY_MS) return;
     this.loggedAt = now;
     this.log(`event loop: blocked for ${(this.unlogged / 1000).toFixed(1)} s (the longest since the last such line): the portal answered nothing meanwhile`);
@@ -70,6 +89,11 @@ export class LoopWatch {
   /** The worst lag of the last minute, in ms (0: every beat on time). */
   lagMs(): number {
     return this.worstLagSince(this.now() - LAG_WINDOW_MS);
+  }
+
+  /** The beats since `since` (within the last minute) that came late: [when, lag ms], oldest first; the stall profiler's blocks. */
+  blocksSince(since: number): [number, number][] {
+    return this.lags.filter(([at]) => at >= since).map(([at, lag]) => [at, Math.round(lag)]);
   }
 
   /** The worst lag of the beats since `since` (within the last minute), in ms: the stall profiler's window (stallProfile.ts). */

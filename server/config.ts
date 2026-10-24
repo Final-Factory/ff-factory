@@ -569,6 +569,13 @@ export interface Config {
      * to a subagent, a pilot"): default 50. It reaches a session when its process next starts.
      */
     readChainPilotPercent?: number;
+    /**
+     * The share of requests (by a hash of the request id, apart from the other pilots') whose worker starts a NEW session in
+     * the same sandbox and branch at its next message once a pull request of the request merged during its session, 0-100
+     * (w2043's one-day pilot, server/freshAfterMerge.ts, docs/spend.md "A fresh session after each merge, a pilot"): default
+     * 0, off. Read at each message, so it applies at once.
+     */
+    freshAfterMergePilotPercent?: number;
   };
   /**
    * The user id automatic work is attributed and billed to: scheduled standing-agent runs and, once FFBox takes
