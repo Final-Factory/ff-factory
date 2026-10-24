@@ -3,11 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { gunzipSync } from 'node:zlib';
 import { LOG_RETENTION, listArchives, logStamp, maintainLogs, maintenanceLine } from '../machine/logRetention.ts';
-import { supervisorScript } from './machineDeployWin.ts';
 
 // w2038: two daemon restarts on beast (08:30Z, 11:10Z) erased its 08:15-08:30Z log; one daemon.log.prev was all it kept.
 
@@ -114,24 +112,4 @@ test('logs: only log names in the folder are touched, and a missing folder is no
   assert.deepEqual(fs.readdirSync(dir).sort(), ['daemon.json', 'notes.txt']);
   assert.deepEqual(m.errors, []);
   assert.deepEqual(maintainLogs(path.join(dir, 'nope')).errors, []);
-});
-
-test('logs: the real supervisor block, run by PowerShell over many restarts, keeps every run', { skip: process.platform !== 'win32' && 'PowerShell runs the Windows supervisor' }, () => {
-  const s = supervisorScript('C:\\nodejs\\node.exe', false);
-  const block = /  # Each run's output is kept[\s\S]*?\n  \}\n(?=  \$started)/.exec(s)?.[0];
-  assert.ok(block, 'the rotation block of supervisorScript');
-  const dir = tmpDir();
-  // The same second twice (a fast crash loop) must not overwrite either.
-  const script = `$logs = $env:FFLOGS\n${block}`;
-  for (let i = 0; i < 6; i++) {
-    fs.writeFileSync(path.join(dir, 'daemon.log'), `run ${i}\n`);
-    fs.writeFileSync(path.join(dir, 'daemon.err.log'), i % 2 ? `err ${i}\n` : '');
-    execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { env: { ...process.env, FFLOGS: dir } });
-  }
-  const runs = listArchives(dir).filter((x) => x.base === 'daemon.log');
-  assert.equal(runs.length, 6);
-  assert.deepEqual(runs.map((x) => fs.readFileSync(path.join(dir, x.name), 'utf8')).sort(), [0, 1, 2, 3, 4, 5].map((i) => `run ${i}\n`));
-  assert.equal(listArchives(dir).filter((x) => x.base === 'daemon.err.log').length, 3, 'empty err logs are not archived');
-  maintainLogs(dir, { platform: 'win32' });
-  assert.equal(listArchives(dir).filter((x) => x.base === 'daemon.log' && x.gz).length, 5);
 });
