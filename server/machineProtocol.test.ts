@@ -101,7 +101,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // which is as old, asks nothing), `timed` on each BenchPriority (an older daemon writes it into priorities.json, where nothing
 // reads it), and the `timed_place` worker tool (an older daemon's catalog has no schema for it, so its workers are not offered
 // it; nothing there asks for it either). A newer daemon with an older portal gets no mark and asks nothing.
-const DECIDED = { protocol: 9, fingerprint: 'eefebeb14db25fd3' };
+// w1996 (no bump): `bench_hours`, a daemon's exclusive-bench cost per UTC hour (at connect and hourly), which an older portal's
+// onMessage drops (no default case); an older daemon never sends it, and portal_logs bench_hours then has no hours for it.
+const DECIDED = { protocol: 9, fingerprint: '132a537ce9acd204' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {
