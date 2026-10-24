@@ -2465,8 +2465,8 @@ export class Agents {
     return texts.some((t) => MARKETING_WORK.test(t ?? ''));
   }
 
-  private workIdsOf(info: SessionInfo): string[] {
-    const ids = new Set(servedBy(info.id, [...this.store.work.values()]));
+  private workIdsOf(info: SessionInfo, bySession?: Map<string, WorkItem[]>): string[] {
+    const ids = new Set(servedBy(info.id, bySession ? (bySession.get(info.id) ?? []) : [...this.store.work.values()]));
     const named = /^(w\d+):/.exec(info.title ?? '')?.[1];
     if (named) ids.add(named);
     return [...ids];
@@ -3024,9 +3024,10 @@ export class Agents {
    */
   benchPriorities(machineId: string): Record<string, BenchPriority> {
     const out: Record<string, BenchPriority> = {};
+    const bySession = this.workBySession();
     for (const info of this.store.sessions.values()) {
       if (info.kind !== 'worker' || info.machineId !== machineId) continue;
-      const open = this.openWorkOf(info);
+      const open = this.openWorkOf(info, bySession);
       // w1984: a worker moved off this machine serves no request here any more, but its old waiters may still hold tickets
       const moved = this.movedAwayFrom(info, machineId);
       if (moved && !open.length) {
@@ -3050,7 +3051,7 @@ export class Agents {
     for (const r of this.timedRuns?.runsOn(machineId) ?? []) {
       if (out[r.session]) continue;
       const info = this.store.sessions.get(r.session);
-      const open = info ? this.openWorkOf(info) : [];
+      const open = info ? this.openWorkOf(info, bySession) : [];
       const top = open.length ? open.reduce((a, w) => (WORK_PRIORITIES.indexOf(w.priority) > WORK_PRIORITIES.indexOf(a) ? w.priority : a), 'low' as WorkPriority) : 'normal';
       out[r.session] = { priority: top, requests: open.length ? open.map((w) => w.id) : r.requests };
     }
@@ -3092,8 +3093,19 @@ export class Agents {
     return { why: `its worker ${info.id.slice(0, 8)} was moved to ${m.to}` };
   }
 
-  private openWorkOf(info: SessionInfo): WorkItem[] {
-    return this.workIdsOf(info)
+  /**
+   * Every request under each session it names (w2044), for a pass over many workers: servedBy reads only the requests
+   * that name the session, so one index replaces a scan of the whole ledger per worker. benchPriorities ran that scan for
+   * every worker a machine ever had, for each machine each minute: 1.3 to 1.7 s blocks on 2026-10-24 (15:38 and 15:47Z).
+   */
+  private workBySession(): Map<string, WorkItem[]> {
+    const out = new Map<string, WorkItem[]>();
+    for (const w of this.store.work.values()) for (const id of w.sessionIds) (out.get(id) ?? out.set(id, []).get(id)!).push(w);
+    return out;
+  }
+
+  private openWorkOf(info: SessionInfo, bySession?: Map<string, WorkItem[]>): WorkItem[] {
+    return this.workIdsOf(info, bySession)
       .map((id) => this.store.work.get(id))
       .filter((w): w is WorkItem => !!w && isOpen(w));
   }
