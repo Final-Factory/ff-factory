@@ -45,6 +45,7 @@ import { searchTranscripts } from './search.ts';
 import { CATALOG, questionsShape } from './launch.ts';
 import { clampArgs, clamped, rangedNumber, withWarnings } from './forgiving.ts';
 import { AutoCompactor, LONG_WAIT_MS, withEarlyCompactMark, workerAutoCompactWindow } from './autoCompact.ts';
+import { inMergeOnGreenPilot } from './mergeOnGreen.ts';
 import { inReadChainPilot, withReadChainMark } from './readChain.ts';
 import { withTerseProse } from './terseProse.ts';
 import { WORKER_READ_RULES_TOOL, workerRuleText } from './workerRules.ts';
@@ -818,6 +819,8 @@ export class Agents {
       roomFacts: () => this.roomFacts(),
       timedFacts: (t) => timedFacts(this.places(), this.placement(), t),
       machineOnline: (id) => (store.machines.has(id.toLowerCase()) ? machines.isOnline(id.toLowerCase()) : undefined),
+      // w2045: the merge-on-green pilot's arm, by request (server/mergeOnGreen.ts); the setting is read live.
+      mergeOnGreenPilot: (id) => inMergeOnGreenPilot(id, this.cfg),
       deploySha: (id) => (id ? this.daemonSha?.(id) : appVersion().sha),
       cancelWake: (id) => this.cancelWake(id),
       pendingWake: (id) => this.waker.pending(id),
@@ -1454,6 +1457,8 @@ export class Agents {
       prs,
       deploys: list(a.deploys),
       what: String(a.what ?? ''),
+      ...(head ? { head } : {}),
+      ...(typeof a.merge_on_green === 'string' && a.merge_on_green.trim() ? { mergeOnGreen: a.merge_on_green } : {}),
     });
     this.blockerWatch?.kick();
     return warnings.length ? `${out} WARNING: ${warnings.join(' ')}` : out;

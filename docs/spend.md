@@ -590,6 +590,24 @@ To read it, on each worker machine: `python scripts/compact-compare.py --since <
 (cost a call, a session and a request per arm), and cost per merged PR and reopens per arm from `spend_report` and the ledger for
 those ids. Compare within one model and effort, and mind the other two pilots: each arm holds about half of each of them. The phase split above (w2018) is the before: the research share is where a nudge that works shows first.
 
+### Merging green PRs with no model turn, a pilot (w2045)
+
+lothsahn asked for "a Sonnet helper for CI waits and merges only", then chose, after the measurements below, "Have FF Factory
+merge green PRs itself with no model; the worker reports before the wait". Measured on beast's worker transcripts, 2026-10-10
+to 10-24 (the turn after an "is unblocked: ... CI on ... finished" resume, priced at Opus 5.5's rates with 1-hour cache
+writes): 275 turns woken by green CI, about 20 a day; median 4 calls, a first call of median 177k tokens, 71 of them cold;
+cost median $0.39, mean $0.84, $232 in all. 69 woken by red CI: median 12 calls, median $0.76. A Sonnet helper saves little:
+Sonnet 5 reads cache at $0.20 per million, as Opus does (shared/spend.ts), so the same session switched to Sonnet saves nothing
+and writes its context afresh, and a fresh Sonnet session starts at about 56k tokens (the median first call of 465 fresh
+workers), about $0.25 a PR, saving about $0.14 (estimated). Merging with no model saves the whole green turn: about $8 to $16
+a day on beast (estimated from the figures above), less the report the worker writes before the wait.
+
+The mechanism: docs/orchestrators.md, "Merge on green, a pilot". To read it: the requests whose log carries
+`merge-on-green pilot (w2045)` are the arm (and those whose log says `FF Factory merged ... with no model turn` merged that way);
+compare cost after the first push and per request against the control requests in the same window, and count red PRs merged
+(must be none) and the arm's hand-backs (red, or a merge refused). The fresh-session pilot (w2043) splits requests by
+`fresh:`, so the two read as a 2x2.
+
 ## Transcripts: how long they are kept
 
 **Seven days after the request closes**, a request that is open keeps them as long as it is open, a reopened request keeps them again.

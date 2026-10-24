@@ -66,7 +66,11 @@ import { displayName } from '../shared/labels.ts';
 import { permissionAccess, permissionWhat, type PermissionAccess } from '../shared/permissionAccess.ts';
 import { OPS_ID, OPS_PEOPLE } from './opsWorker.ts';
 import { isSamePerson, personForWork, sessionPerson, tokenPersonForWork } from './vault.ts';
+import { MERGE_ON_GREEN_MARK } from './mergeOnGreen.ts';
 import type { AttachmentRef, ConditionalDecision, OpenAsk, WorkNeedsYou, GateResume, Machine, WorkAutoClosed, WorkBlocker, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPair, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
+
+/** w2045: the most of a worker's after-merge report a merge-on-green gate keeps (a DONE report is rarely longer). */
+const MERGE_ON_GREEN_REPORT_CHARS = 12_000;
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);
@@ -219,6 +223,8 @@ export interface OrchestratorsDeps {
   timedFacts?: (t: TimedKind) => TimedFacts;
   /** Whether a machine is online; undefined for a machine this portal does not have (w643: blockers). */
   machineOnline?: (id: string) => boolean | undefined;
+  /** w2045: whether a request is in the merge-on-green pilot's arm (server/mergeOnGreen.ts); absent: no request is. */
+  mergeOnGreenPilot?: (requestId: string) => boolean;
   /** The commit the portal runs (no id), or a machine's daemon (w643: a deploy blocker clears when it changes). */
   deploySha?: (machineId?: string) => string | undefined;
   /**
@@ -3008,7 +3014,7 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       ? ` Worker ${owner.gone} set this gate and is gone, so ${ciGates.length ? `the merge of ${prs} is yours now: you own it (merge on green, fix on red)` : 'what it waited for is yours to carry on now'}.`
       : '';
     const held = w.heldCheckIns?.find((h) => h.session === sid);
-    const note = `${w.id} is unblocked: ${cleared}.${yours}${ci ? ` Read its checks now (gh pr checks${prs ? ` ${prs}` : ''}): merge on green, fix on red.` : ''}${deploy ? ' The deploy you waited for has happened: do the check that comes after it now (the live read, the health check), then report.' : ''} Carry on from where you left it.${held ? ` Your own check-in, which the block cancelled, is folded into this message; its note was: ${held.note}` : ''}`;
+    const note = `${w.id} is unblocked: ${cleared}.${yours}${ci ? ` Run ff-pr merge now${prs ? ` (${prs})` : ''}: it merges on green, or names the red run to read (gh run view <run> --log-failed) and fix.` : ''}${deploy ? ' The deploy you waited for has happened: do the check that comes after it now (the live read, the health check), then report.' : ''} Carry on from where you left it.${held ? ` Your own check-in, which the block cancelled, is folded into this message; its note was: ${held.note}` : ''}`;
     if (!this.wakeNow(sid, note, w.id)) return [];
     this.noteResume(w, sid, note);
     return [sid];
@@ -3439,7 +3445,7 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
     this.store.putWork(w);
   }
 
-  workerBlocked(sessionId: string, a: { request?: string; requests?: string[]; reports?: string[]; prs?: string[]; deploys?: string[]; what: string }): string {
+  workerBlocked(sessionId: string, a: { request?: string; requests?: string[]; reports?: string[]; prs?: string[]; deploys?: string[]; what: string; head?: string; mergeOnGreen?: string }): string {
     const w = this.workerRequest(sessionId, a.request, 'blocked_on');
     const what = (a.what ?? '').split(/ +/).join(' ').trim();
     if (!what) throw new Error('say what it waits for (what), for example: w727 PR 1291 and w752 fix merged into master');
@@ -3474,6 +3480,7 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
     const gates = asked.map((b) => this.makeGate(b, now.toISOString(), `worker ${sessionId}`)).filter((g, i, all) => all.findIndex((x) => sameGate(x, g)) === i);
     const before = gatesOf(w);
     if (gates.length > MAX_GATES) throw new Error(`at most ${MAX_GATES} things at once`);
+    const pilot = this.mergeOnGreenAsk(w, sessionId, gates, a.head, a.mergeOnGreen);
     w.blocked = gates[0];
     w.alsoBlocked = gates.length > 1 ? gates.slice(1) : undefined;
     w.stalled = undefined;
@@ -3485,7 +3492,65 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
     this.store.putWork(w);
     this.toPeople(w.requesters, dispatchNotice(w, `blocked on ${name} (${gates[0].what}); its worker ${sessionId} stopped polling and is resumed when that clears`));
     const told = this.tellReportWaited(w, gates.filter((g) => !before.some((k) => sameGate(k, g))));
-    return `Recorded: ${w.id} is Blocked on ${name}. ${cancelled ? 'Your pending check-in is cancelled. ' : ''}End your turn now with your report (a line "${w.id}: still open: blocked on ${name}"). Do NOT set a wake_me to poll for it: when it clears, FF Factory resumes you with a message. Anything people add meanwhile is kept for you.${told.length ? ` The worker${told.length > 1 ? 's' : ''} you wait on (${told.join(', ')}) ${told.length > 1 ? 'are' : 'is'} told to mark your result with a line "For ${w.id}:"; a progress report does not unblock you, that line or their DONE does.` : ''}`;
+    if (pilot.merge) return `Recorded: ${w.id} is Blocked on ${name}, merge on green (w2045). ${cancelled ? 'Your pending check-in is cancelled. ' : ''}On green CI FF Factory merges it at ${a.head!.trim().slice(0, 12)} and files the report you left; you are not resumed. On red, or if the merge fails, you are resumed as usual and that report is not filed. End your turn now with only the line "${w.id}: still open: blocked on ${name}" (no DONE line now: it is in the report you left).`;
+    return `${pilot.note ? `${pilot.note} ` : ''}Recorded: ${w.id} is Blocked on ${name}. ${cancelled ? 'Your pending check-in is cancelled. ' : ''}End your turn now with your report (a line "${w.id}: still open: blocked on ${name}"). Do NOT set a wake_me to poll for it: when it clears, FF Factory resumes you with a message. Anything people add meanwhile is kept for you.${told.length ? ` The worker${told.length > 1 ? 's' : ''} you wait on (${told.join(', ')}) ${told.length > 1 ? 'are' : 'is'} told to mark your result with a line "For ${w.id}:"; a progress report does not unblock you, that line or their DONE does.` : ''}`;
+  }
+
+  /**
+   * The merge-on-green pilot at blocked_on (w2045, server/mergeOnGreen.ts): a request in the arm waiting on CI alone may
+   * leave its worker's after-merge report on the gate (merge on green). Without one, the worker is told it may; with one
+   * that does not fit (out of the arm, other gates, no head, no DONE line for this request), the wait is set without it and
+   * the worker hears why. The report's DONE is checked when it is filed (doneMarkers), as any report's is.
+   */
+  private mergeOnGreenAsk(w: WorkItem, sessionId: string, gates: WorkBlocker[], head: string | undefined, report: string | undefined): { merge?: true; note?: string } {
+    const inArm = this.d.mergeOnGreenPilot?.(w.id) === true;
+    const ciOnly = gates.length === 1 && gates[0].kind === 'ci';
+    const text = (report ?? '').trim();
+    if (!text) {
+      if (!inArm || !ciOnly) return {};
+      this.stamp(w, `${MERGE_ON_GREEN_MARK}: its worker ${sessionId} is told it may leave its after-merge report`);
+      return {
+        note: `${w.id} is in the merge-on-green pilot (w2045): if nothing follows the merge but your report (no deploy check, no second PR, no release step), call blocked_on again now with the same prs and head, and merge_on_green: the report you would write after the merge, whole (its "DONE: ${w.id}" line, Learned:, and the rest). FF Factory then merges on green and files it, with no turn of yours. If something follows the merge, end your turn as below.`,
+      };
+    }
+    const why = !inArm
+      ? `${w.id} is not in the merge-on-green pilot`
+      : !ciOnly
+        ? "it waits on more than one pull request's CI alone"
+        : !head || head.trim().length < 7
+          ? 'it needs head (git rev-parse HEAD), the commit FF Factory merges at'
+          : !doneIdsIn(text).includes(w.id)
+            ? `the report has no "DONE: ${w.id}" line (work left after the merge: leave out merge_on_green)`
+            : undefined;
+    if (why) return { note: `merge_on_green ignored: ${why}; you are resumed when CI finishes, as usual.` };
+    gates[0].mergeOnGreen = { head: head!.trim().toLowerCase(), report: text.slice(0, MERGE_ON_GREEN_REPORT_CHARS), session: sessionId };
+    this.stamp(w, `${MERGE_ON_GREEN_MARK}: worker ${sessionId} left its after-merge report (${clip(firstLine(text), 160)}); FF Factory merges ${gates[0].ref} on green at ${head!.trim().slice(0, 12)}`);
+    return { merge: true };
+  }
+
+  /**
+   * The merge-on-green pilot's merge landed (w2045, BlockerWatch.clearAll): the request is unblocked and the report its worker
+   * left is filed as that worker's report (workerTurnEnded: its DONE closes the request, with every check a DONE has), with
+   * no model turn. A DONE refused is told back to the worker, which resumes it (doneMarkers, tellRefused). A worker that is
+   * gone: unblocked for the dispatcher, as unblock does.
+   */
+  mergedOnGreen(id: string, why: string) {
+    const w = this.store.work.get(id);
+    if (!w || w.status !== 'blocked' || !w.blocked) return;
+    const g = gatesOf(w).find((x) => x.kind === 'ci' && x.mergeOnGreen);
+    const s = g ? this.store.sessions.get(g.mergeOnGreen!.session) : undefined;
+    if (!g || !s) return this.unblock(id, `${why}; FF Factory merged it on green, and the worker that left its report is gone`);
+    const m = g.mergeOnGreen!;
+    const handed = this.handBackCheckIns(w, `${w.id} is unblocked: FF Factory merged ${g.ref} on green CI (${why})`, m.session);
+    w.status = 'active';
+    w.blocked = undefined;
+    w.alsoBlocked = undefined;
+    w.heldCheckIns = undefined;
+    w.gateResumes = undefined;
+    this.stamp(w, `${MERGE_ON_GREEN_MARK}: FF Factory merged ${g.ref} at ${m.head.slice(0, 12)} on green CI with no model turn (${why}); filing worker ${m.session}'s report${handed.length ? `; handed back ${handed.join(', ')}'s check-in` : ''}`);
+    this.store.putWork(w);
+    console.log(`ledger: ${w.id}: merged ${g.ref} on green (${MERGE_ON_GREEN_MARK}); filing worker ${m.session}'s report`);
+    this.workerTurnEnded(s, m.report);
   }
 
   /**
@@ -3889,6 +3954,8 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
         continue;
       }
       if (!(isOpen(w) || w.status === 'stalled')) continue;
+      // w2045: a DONE while its after-merge report waits on green CI is that report's, filed when FF Factory merges.
+      if (!ops && w.status === 'blocked' && gatesOf(w).some((g) => g.mergeOnGreen?.session === s.id)) continue;
       if (!w.sessionIds.includes(s.id)) {
         const by = ops ? undefined : this.namedBy(s.id, id);
         if (ops?.workIds.has(id)) {

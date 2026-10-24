@@ -3350,7 +3350,7 @@ test("w829: w814 as it happened: the dispatcher blocks a worker on CI and cancel
   const back = agents.waker.pending(id)!;
   assert.ok(Date.parse(back.at) - Date.now() <= 61_000, 'fires within a minute');
   // w1094: the gate's owner is resumed with what to do, its own check-in folded in.
-  assert.match(back.note, /^w1 is unblocked: CI on Final-Factory\/FinalFactory#1338 cleared \(FF Factory could not read CI on .* so its worker checks CI itself\)\. Read its checks now \(gh pr checks Final-Factory\/FinalFactory#1338\): merge on green, fix on red\. Carry on from where you left it\. Your own check-in, which the block cancelled, is folded into this message; its note was: w1: merge #1338 when Test in editmode is green$/);
+  assert.match(back.note, /^w1 is unblocked: CI on Final-Factory\/FinalFactory#1338 cleared \(FF Factory could not read CI on .* so its worker checks CI itself\)\. Run ff-pr merge now \(Final-Factory\/FinalFactory#1338\): it merges on green, or names the red run to read \(gh run view <run> --log-failed\) and fix\. Carry on from where you left it\. Your own check-in, which the block cancelled, is folded into this message; its note was: w1: merge #1338 when Test in editmode is green$/);
   assert.ok(w1().log.at(-1)!.includes(` unblocked (its worker ${id} resumes within a minute): CI on Final-Factory/FinalFactory#1338 cleared (FF Factory could not read CI`), w1().log.at(-1)!);
   await new Promise((r) => setTimeout(r, 200));
   assert.equal(heard(dispatcher().info.id, '[ledger] w1').length, 0);
@@ -3414,10 +3414,10 @@ test('w846: a worker blocks on its own PR\'s CI (blocked_on prs "ci:…"); while
     assert.ok(Date.parse(wake.at) - Date.now() <= 61_000, 'within a minute');
     // w1 had polled: its own check-in is folded into the resume (w829, w1094). w2 had none: it is resumed all the same (w846).
     if (wid === 'w1') {
-      assert.equal(wake.note, `${wid} is unblocked: CI on ${pr} cleared (${result.text}). Read its checks now (gh pr checks ${pr}): merge on green, fix on red. Carry on from where you left it. Your own check-in, which the block cancelled, is folded into this message; its note was: ${wid}: check CI on ${pr}`);
+      assert.equal(wake.note, `${wid} is unblocked: CI on ${pr} cleared (${result.text}). Run ff-pr merge now (${pr}): it merges on green, or names the red run to read (gh run view <run> --log-failed) and fix. Carry on from where you left it. Your own check-in, which the block cancelled, is folded into this message; its note was: ${wid}: check CI on ${pr}`);
       assert.ok(w.log.at(-1)!.includes(`unblocked (its worker ${id} resumes within a minute): CI on ${pr} cleared`), w.log.at(-1)!);
     } else {
-      assert.equal(wake.note, `${wid} is unblocked: CI on ${pr} cleared (${result.text}). Read its checks now (gh pr checks ${pr}): merge on green, fix on red. Carry on from where you left it.`);
+      assert.equal(wake.note, `${wid} is unblocked: CI on ${pr} cleared (${result.text}). Run ff-pr merge now (${pr}): it merges on green, or names the red run to read (gh run view <run> --log-failed) and fix. Carry on from where you left it.`);
       assert.ok(w.log.at(-1)!.includes(`unblocked (its worker ${id} resumes within a minute): CI on ${pr} cleared`), w.log.at(-1)!);
     }
     assert.equal(agents.ciWait(info), undefined);
@@ -4109,7 +4109,7 @@ test('w1094: w1049 as it happened: the worker that set a ci: gate keeps its requ
   assert.equal((await watch.tick()).get('w1'), `clear: ${checks.text}`);
   const w = store.work.get('w1')!;
   assert.equal(w.status, 'active');
-  assert.equal(agents.waker.pending(a.id)?.note, `w1 is unblocked: CI on ${pr} cleared (${checks.text}). Read its checks now (gh pr checks ${pr}): merge on green, fix on red. Carry on from where you left it.`);
+  assert.equal(agents.waker.pending(a.id)?.note, `w1 is unblocked: CI on ${pr} cleared (${checks.text}). Run ff-pr merge now (${pr}): it merges on green, or names the red run to read (gh run view <run> --log-failed) and fix. Carry on from where you left it.`);
   assert.equal(agents.waker.pending(b.id)?.note, 'w1: ask Ben again about bug 6');
   assert.ok(w.log.at(-1)!.includes(`unblocked (its worker ${a.id} resumes within a minute)`), w.log.at(-1)!);
   assert.deepEqual(w.gateResumes?.map((r) => r.session), [a.id], 'recorded for the sweep');
@@ -4134,7 +4134,7 @@ test('w1094: the worker that set a ci: gate is gone: the newest worker is resume
   (watch as unknown as { ciSeen: Map<string, unknown> }).ciSeen.clear();
   await watch.tick();
   assert.equal(store.work.get('w1')!.status, 'active');
-  assert.equal(agents.waker.pending(b.id)?.note, `w1 is unblocked: CI on ${pr} cleared (${checks.text}). Worker ${a.id} set this gate and is gone, so the merge of ${pr} is yours now: you own it (merge on green, fix on red). Read its checks now (gh pr checks ${pr}): merge on green, fix on red. Carry on from where you left it.`);
+  assert.equal(agents.waker.pending(b.id)?.note, `w1 is unblocked: CI on ${pr} cleared (${checks.text}). Worker ${a.id} set this gate and is gone, so the merge of ${pr} is yours now: you own it (merge on green, fix on red). Run ff-pr merge now (${pr}): it merges on green, or names the red run to read (gh run view <run> --log-failed) and fix. Carry on from where you left it.`);
   agents.waker.cancel(b.id);
 });
 
@@ -5609,4 +5609,100 @@ test('w2007: the dispatcher passing the budget files its request for the system 
   assert.match(w.brief, /started by a message that is not known any more\./);
   assert.match(w.brief, /over the tokens cap/);
   assert.deepEqual(pushed.map((p) => p.users), [['ben']]);
+});
+
+/** w2045: the merge-on-green pilot's arm, set on a test's orchestrators (the server reads worker.mergeOnGreenPilotPercent). */
+function mergeOnGreenArm(o: unknown, arm: (id: string) => boolean) {
+  (o as { d: { mergeOnGreenPilot?: (id: string) => boolean } }).d.mergeOnGreenPilot = arm;
+}
+
+test('w2045: merge on green: a worker in the arm is told it may leave its report; on green CI FF Factory merges at its head and files the report, which closes the request with no turn of the worker', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }]);
+  mergeOnGreenArm(o, (id) => id === 'w1');
+  const pr = 'Final-Factory/FinalFactory#2045';
+  const head = 'abc1234def5678';
+  let checks: { done: boolean; text: string; green?: true } = { done: false, text: `1 of 1 checks on ${pr} still running` };
+  const merges: string[][] = [];
+  const watch = new BlockerWatch({ store, orchestrators: o, ci: async () => checks, merge: async (ref, h) => void merges.push([ref, h]) });
+  const a = await startedFor(env, 'w1');
+  const told = String(await a.h.blocked_on!({ request: 'w1', prs: [`ci:${pr}`], head, what: 'CI on PR #2045' }));
+  assert.match(told, /^w1 is in the merge-on-green pilot \(w2045\): .*merge_on_green: the report you would write after the merge/);
+  assert.match(told, /Recorded: w1 is Blocked on CI on/);
+  assert.equal(store.work.get('w1')!.blocked!.mergeOnGreen, undefined, 'not until it leaves its report');
+  const report = 'TL;DR: the fix is in.\n\nDONE: w1\nLearned: nothing new';
+  const set = String(await a.h.blocked_on!({ request: 'w1', prs: [`ci:${pr}`], head, what: 'CI on PR #2045', merge_on_green: report }));
+  assert.match(set, /^Recorded: w1 is Blocked on CI on .*, merge on green \(w2045\)\. .*no DONE line now/);
+  assert.deepEqual(store.work.get('w1')!.blocked!.mergeOnGreen, { head, report, session: a.id });
+  // A DONE in the turn that ends now is the report's, filed after the merge: it does not close the request yet.
+  o.workerTurnEnded(a.info, 'DONE: w1\nLearned: nothing new');
+  assert.equal(store.work.get('w1')!.status, 'blocked');
+  await watch.tick();
+  assert.deepEqual(merges, [], 'nothing merged while CI runs');
+  checks = { done: true, green: true, text: `CI on ${pr} finished: all 1 checks passed or skipped` };
+  (watch as unknown as { ciSeen: Map<string, unknown> }).ciSeen.clear();
+  await watch.tick();
+  assert.deepEqual(merges, [[pr, head]]);
+  const w = store.work.get('w1')!;
+  assert.equal(w.status, 'done', w.log.slice(-3).join(' | '));
+  assert.ok(w.log.some((l) => l.includes(`merge-on-green pilot (w2045): FF Factory merged ${pr} at abc1234def56 on green CI with no model turn`)));
+  assert.equal(agents.waker.pending(a.id), undefined, 'the worker is not resumed');
+});
+
+test('w2045: merge on green: red CI, or a merge GitHub refuses, resumes the worker as without it, saying the report was not filed', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }, { id: 'w2' }]);
+  mergeOnGreenArm(o, () => true);
+  const head = 'abc1234def5678';
+  const checks = new Map<string, { done: boolean; text: string; green?: true }>();
+  const merges: string[] = [];
+  const watch = new BlockerWatch({
+    store,
+    orchestrators: o,
+    ci: async (ref) => checks.get(ref),
+    merge: async (ref) => {
+      merges.push(ref);
+      throw new Error(`gh pr merge ${ref}: Head branch was modified. Review and try the merge again.`);
+    },
+  });
+  const report = 'DONE: w1\nLearned: nothing new';
+  const red = 'Final-Factory/FinalFactory#1';
+  const refused = 'Final-Factory/FinalFactory#2';
+  const a = await startedFor(env, 'w1');
+  const b = await startedFor(env, 'w2');
+  await a.h.blocked_on!({ request: 'w1', prs: [`ci:${red}`], head, what: 'CI', merge_on_green: report });
+  await b.h.blocked_on!({ request: 'w2', prs: [`ci:${refused}`], head, what: 'CI', merge_on_green: report.replace('w1', 'w2') });
+  checks.set(red, { done: true, text: `CI on ${red} finished: 1 of 1 checks failed (Test in editmode)` });
+  checks.set(refused, { done: true, green: true, text: `CI on ${refused} finished: all 1 checks passed or skipped` });
+  await watch.tick();
+  assert.deepEqual(merges, [refused], 'red is never merged');
+  assert.equal(store.work.get('w1')!.status, 'active');
+  assert.match(agents.waker.pending(a.id)!.note, /1 of 1 checks failed \(Test in editmode\); FF Factory did not merge it \(the checks are not all green\), and the report you left with merge_on_green was not filed\)\. Run ff-pr merge now/);
+  assert.equal(store.work.get('w2')!.status, 'active');
+  assert.match(agents.waker.pending(b.id)!.note, /FF Factory tried to merge it and GitHub said: gh pr merge Final-Factory\/FinalFactory#2: Head branch was modified\. .*Merge it yourself \(ff-pr merge\)/);
+  agents.waker.cancel(a.id);
+  agents.waker.cancel(b.id);
+});
+
+test('w2045: merge_on_green is ignored, the wait set as usual, out of the arm, without head, or with a report that has no DONE line for the request', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }, { id: 'w2' }]);
+  mergeOnGreenArm(o, (id) => id === 'w1');
+  const pr = 'Final-Factory/FinalFactory#3';
+  const a = await startedFor(env, 'w1');
+  const b = await startedFor(env, 'w2');
+  const out = String(await b.h.blocked_on!({ request: 'w2', prs: [`ci:${pr}`], head: 'abc1234', what: 'CI', merge_on_green: 'DONE: w2\nLearned: nothing new' }));
+  assert.match(out, /^merge_on_green ignored: w2 is not in the merge-on-green pilot; you are resumed when CI finishes, as usual\. Recorded: w2 is Blocked/);
+  assert.equal(store.work.get('w2')!.blocked!.mergeOnGreen, undefined);
+  const plain = String(await b.h.blocked_on!({ request: 'w2', prs: [`ci:${pr}`], head: 'abc1234', what: 'CI' }));
+  assert.match(plain, /^Recorded: w2 is Blocked/, 'the control arm hears nothing of the pilot');
+  assert.match(String(await a.h.blocked_on!({ request: 'w1', prs: [`ci:${pr}`], what: 'CI', merge_on_green: 'DONE: w1' })), /^merge_on_green ignored: it needs head/);
+  assert.match(String(await a.h.blocked_on!({ request: 'w1', prs: [`ci:${pr}`], head: 'abc1234', what: 'CI', merge_on_green: 'w1: still open: the deploy check' })), /^merge_on_green ignored: the report has no "DONE: w1" line/);
+  assert.equal(store.work.get('w1')!.blocked!.mergeOnGreen, undefined);
 });

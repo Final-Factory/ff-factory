@@ -569,6 +569,11 @@ export interface Config {
      * to a subagent, a pilot"): default 50. It reaches a session when its process next starts.
      */
     readChainPilotPercent?: number;
+    /**
+     * The share of REQUESTS (by a hash of their id, apart from the other pilots') in the merge-on-green pilot, 0-100 (w2045,
+     * server/mergeOnGreen.ts, docs/orchestrators.md "Merge on green, a pilot"): default 0, off. Read live at each blocked_on.
+     */
+    mergeOnGreenPilotPercent?: number;
   };
   /**
    * The user id automatic work is attributed and billed to: scheduled standing-agent runs and, once FFBox takes
