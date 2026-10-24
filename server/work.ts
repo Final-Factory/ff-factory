@@ -462,6 +462,29 @@ export function priorityThenAge(a: Pick<WorkItem, 'priority' | 'createdAt'>, b: 
 }
 
 /**
+ * Work already started that can run only on named computers (lothsahn, 2026-10-24, w2049: "Work that has started and
+ * requires a specific machine should be prioritized by the dispatcher over general work when that machine frees up
+ * slots"): a leg held for named computers while the request's own worker carries on elsewhere (w1863), a timed leg a
+ * running worker handed off (w1969), or a Queued request that already had a worker and waits for the computers it names.
+ * Released workers resuming on their own machine are not requests here: their claims come before any new work
+ * (placeAgain.ts claims, Agents.free).
+ */
+export function startedPinned(w: Pick<WorkItem, 'status' | 'legs' | 'queuedFor' | 'timedLeg' | 'sessionIds'>): boolean {
+  if (w.status !== 'queued') return isOpen(w) && !!w.legs?.length;
+  return !!w.queuedFor?.needs?.length && (!!w.timedLeg || w.sessionIds.length > 0);
+}
+
+/**
+ * The order queued work takes free room in (the capacity ping, w1099, w2049): urgent, high, normal, low; within one
+ * priority, started work that can run only on named computers first; then the oldest. Never across priorities: a
+ * person's priority is their word, and higher work that fits another computer with room goes there (the ping's room).
+ */
+export function capacityOrder(a: WorkItem, b: WorkItem): number {
+  const prio: Record<WorkPriority, number> = { urgent: 0, high: 1, normal: 2, low: 3 };
+  return prio[a.priority] - prio[b.priority] || Number(startedPinned(b)) - Number(startedPinned(a)) || a.createdAt.localeCompare(b.createdAt);
+}
+
+/**
  * Someone other than the ledger cleanup closes or reopens a request (a person, the dispatcher, a worker's marker, the
  * intake): any automatic-close mark goes, and with it the PR links made before the strict rules (no `via`), so the
  * cleanup's re-check of its own closes never acts on it (w370).

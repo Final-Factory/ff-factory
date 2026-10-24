@@ -118,6 +118,7 @@ function rowsState(s: AppState): AppState {
     item('w1100', 'Web UI scroll on beast', { sessionIds: ['s2', 's1', 's4'], requestedBy: BEN, requesters: [BEN, LOTH] }),
     item('w1099', 'A request whose worker is idle', { sessionIds: ['s5'], requestedBy: BEN, requesters: [BEN], source: ffboxDev('ben', true) }),
     item('w1098', 'Queued for a slot', { status: 'queued', queuedFor: { at: at(10), needs: ['nowhere'] } }),
+    item('w1097', 'Someday: tidy the dashboard', { status: 'queued', priority: 'low', queuedFor: { at: at(11) } }),
   ];
   return { ...s, sessions, work };
 }
@@ -162,4 +163,23 @@ test('a Working request shows its machine after its id, and an FFBox dev request
   const file = test.info().outputPath('dispatcher-rows.png');
   await panel.screenshot({ path: file });
   await test.info().attach('dispatcher-rows', { path: file, contentType: 'image/png' });
+});
+
+test('a low request says low beside its id, and its detail sets the priority (w2049)', async ({ page }) => {
+  await rowsPage(page);
+  const panel = page.locator('.dispatcher-panel');
+  await expect(panel.getByTestId('work-low-w1097')).toHaveText(' · low');
+  await expect(panel.getByTestId('work-low-w1098')).toHaveCount(0);
+  await panel.getByTestId('work-w1097').getByRole('button', { name: /Someday: tidy the dashboard/ }).click();
+  const select = panel.getByTestId('work-priority-w1097').getByRole('combobox', { name: 'Priority of w1097' });
+  await expect(select).toHaveValue('low');
+  await expect(select.locator('option')).toHaveText(['urgent', 'high', 'normal', 'low']);
+  // The row here is the page's own (rowsState), not the server's: the server's answer proves the change reached its route.
+  await select.selectOption('normal');
+  await expect(page.getByText('no work request "w1097"; list_work shows them')).toBeVisible();
+
+  await settle(page);
+  const file = test.info().outputPath('dispatcher-priority.png');
+  await panel.getByTestId('work-w1097').screenshot({ path: file });
+  await test.info().attach('dispatcher-priority', { path: file, contentType: 'image/png' });
 });

@@ -29,6 +29,7 @@ import type {
   TranscriptEvent,
   VaultEntryMeta,
   VaultView,
+  WorkPriority,
 } from '../../shared/types';
 import type { TranscribeResult, VoiceStatus } from '../../shared/voice';
 import type { SpendReportReply, SpendRequestReply, SpendSummaryReply } from '../../shared/spend';
@@ -203,6 +204,8 @@ export const api = {
   intakePoll: () => request<{ ok: boolean; note?: string }>('POST', '/api/intake/poll', {}),
   /** The Intake tab's nightly chips (w903): flip intake.nightly.enabled ("enabled") or the nightly run's enabled flag ("run"). */
   toggleNightly: (which: 'enabled' | 'run' | 'review', on: boolean) => request<{ key: string; before: boolean; after: boolean }>('POST', '/api/intake/nightly/toggle', { which, on }),
+  /** A request's priority (w2049): urgent, high, normal or low. */
+  setWorkPriority: (id: string, priority: WorkPriority) => request<{ id: string; priority: WorkPriority }>('POST', `/api/work/${encodeURIComponent(id)}/priority`, { priority }),
   declineWork: (id: string, note?: string) => request<{ id: string; status: string }>('POST', `/api/work/${encodeURIComponent(id)}/decline`, { note }),
   /** A sandbox on this host's own daemon (docs/beast-machine.md), which is making it; the portal holds none itself (w510). */
   createSandbox: (req: CreateSandboxRequest) => request<{ machine: string; id: string; note: string }>('POST', '/api/sandboxes', req),

@@ -576,6 +576,20 @@ had room, which read as "LothDesktop can take more work but the queue isn't movi
    - **A block already recorded becomes Queued.** The blocker watch's tick calls `Orchestrators.requeueCapacityBlocks`:
      a Blocked request whose every gate is a capacity wait (none the cleanup's, none naming a thing as well) is Queued,
      keeping its priority, order, notes and log (the request's log says what was done). A thing it also waits on keeps it Blocked.
+   - **The order queued work takes room in** (w1099, w2049; `capacityOrder`, `server/work.ts`): the capacity ping lists
+     what fits by priority, urgent, high, normal, low (lothsahn, w2049: "a new priority "low" that is below normal/medium
+     priority"), then, within one priority, **started work that can run only on the computers it names** (`startedPinned`:
+     a leg held while its request's worker carries on elsewhere, a timed leg a running worker handed off, a Queued request
+     that already had a worker and names its computers; lothsahn, w2049: "Work that has started and requires a specific
+     machine should be prioritized by the dispatcher over general work when that machine frees up slots"), then the oldest.
+     Pinned work goes first only within its priority: the priority is its person's word, and higher general work that fits
+     another computer with room starts there instead (the dispatcher's prompt says so). Released workers resuming on their
+     own machine come before all of it (`PlaceAgain.claims`: their sandboxes are not free for new work). **Low never ages
+     up**: it waits behind normal work while normal work fits, and starts whenever a slot is free and nothing above it fits,
+     so it never leaves a slot idle ("We should not have idle slots if there is queued work"); a person who wants it sooner
+     raises it (`update_work priority`, or the Priority control in a request's detail on the Requests page, which its
+     people, an intake reviewer or an owner may use: `POST /api/work/<id>/priority`). The bench queue sorts the same four
+     levels (`bench_queue.py` `PRIORITIES`, `machine/benchState.ts`).
    - **A held computer is named.** A computer can be held for a person (config `placement.hold`, set with
      `set_app_config`: `{ "m5": "Ben testing, 2026-10-12" }`). It takes no new work, game or not, even when everything
      else is busy; the Capacity block shows `ROOM n% but HELD (…)`, and a Queued request's reason reads "queued for

@@ -38,7 +38,7 @@ import { machineLoadLine, systemStats } from './system.ts';
 import { Auth } from './auth.ts';
 import { Identity, asRequester } from './identity.ts';
 import { routeMcp } from './mcp.ts';
-import { IMAGE_TYPES, SOCKET_PING_MS, type ImageInput, type NotifyPrefs, type AnswerRequest, type ReactRequest, type SendMessageRequest } from '../shared/types.ts';
+import { IMAGE_TYPES, SOCKET_PING_MS, WORK_PRIORITIES, type WorkPriority, type ImageInput, type NotifyPrefs, type AnswerRequest, type ReactRequest, type SendMessageRequest } from '../shared/types.ts';
 import { listImages, MEDIA_TYPE, openVideo, parseRange, readImage, VIDEO_FILE } from './images.ts';
 import { VideoPreviews } from './videoPreview.ts';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -1102,6 +1102,18 @@ route('POST', '/api/ledger/cleanup', async (req) => {
 route('POST', '/api/work/(w[0-9]+)/approve', async (req, [id]) => {
   const w = agents.orchestrators.approveIntake(id, requesterOf(req));
   return { id: w.id, status: w.status, approval: w.approval };
+});
+// A request's priority from the dashboard (w2049): one of its people, an intake reviewer or an owner.
+route('POST', '/api/work/(w[0-9]+)/priority', async (req, [id]) => {
+  const b = await readJson<{ priority?: string }>(req);
+  if (!WORK_PRIORITIES.includes(b.priority as WorkPriority)) throw new HttpError(400, `priority is one of ${WORK_PRIORITIES.join(', ')}`);
+  try {
+    const me = requesterOf(req);
+    const w = agents.orchestrators.setPriority(id, me, b.priority as WorkPriority, identity.get(me.userId)?.role === 'owner');
+    return { id: w.id, priority: w.priority };
+  } catch (e) {
+    throw new HttpError(400, (e as Error).message);
+  }
 });
 route('POST', '/api/work/(w[0-9]+)/decline', async (req, [id]) => {
   const b = await readJson<{ note?: string }>(req);
