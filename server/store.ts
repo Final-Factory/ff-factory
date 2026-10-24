@@ -5,6 +5,7 @@ import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import zlib from 'node:zlib';
+import { pipeline } from 'node:stream/promises';
 import type { AppSettings, DelegationRequest, Machine, Sandbox, ServerEvent, SessionInfo, StandingAgent, TranscriptEvent, WorkItem } from '../shared/types.ts';
 import { meterStates, type MeterStates } from './meterStates.ts';
 
@@ -169,6 +170,8 @@ export class Store {
   /** The context meter's tally per conversation, for the next process of the portal's own sessions (w1484). */
   readonly meters: MeterStates;
   private readonly seqs = new Map<string, number>();
+  /** lastSeqAsync's unzips, one after another (w2026). */
+  private unzipQueue: Promise<unknown> = Promise.resolve();
   /** Transcripts whose last line this process has checked is complete (see appendLine). */
   private readonly tailChecked = new Set<string>();
 
@@ -457,11 +460,35 @@ export class Store {
   async lastSeqAsync(sessionId: string): Promise<number> {
     const now = this.lastSeqNow(sessionId);
     if (now !== undefined) return now;
+    // One at a time across every daemon's connect: after a start each machine's connect asks at once (w2026).
+    const run = this.unzipQueue.then(() => this.unzipLastSeq(sessionId));
+    this.unzipQueue = run.catch(() => undefined);
+    return run;
+  }
+
+  /** Unzips with a stream, keeping only the end in memory (a transcript can unzip to gigabytes), and writes its tail file. */
+  private async unzipLastSeq(sessionId: string): Promise<number> {
+    const now = this.lastSeqNow(sessionId);
+    if (now !== undefined) return now;
     const gz = `${this.transcriptPath(sessionId)}.gz`;
     let last = 0;
     try {
-      const zipped = await fs.promises.readFile(gz);
-      const text = tailFileText(zipped.length, await gunzipAsync(zipped, {}));
+      const size = (await fs.promises.stat(gz)).size;
+      let parts: Buffer[] = [];
+      let held = 0;
+      await pipeline(fs.createReadStream(gz), zlib.createGunzip(), async (src: AsyncIterable<Buffer>) => {
+        for await (const c of src) {
+          parts.push(c);
+          held += c.length;
+          // past twice a tail file, keep 1.5 of one: always more than a tail file, so tailFileText marks it "not whole"
+          if (held > 2 * TAIL_FILE_BYTES) {
+            const all = Buffer.concat(parts);
+            parts = [all.subarray(all.length - Math.floor(1.5 * TAIL_FILE_BYTES))];
+            held = parts[0].length;
+          }
+        }
+      });
+      const text = tailFileText(size, Buffer.concat(parts));
       await fs.promises.writeFile(`${gz}.tail`, text);
       last = parseLines(text.slice(text.indexOf('\n') + 1), LAST_LINES).at(-1)?.seq ?? 0;
     } catch (e) {
