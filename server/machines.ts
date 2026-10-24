@@ -2383,6 +2383,9 @@ export class MachineManager {
       case 'timed_run_result':
         this.timedReport?.(id, msg);
         return;
+      case 'bench_hours':
+        this.benchHours?.(id, msg.rows);
+        return;
       case 'max_event':
         if (typeof msg.line === 'string' && msg.line.length <= 8192) this.maxEvent?.(id, msg.line);
         return;
@@ -2515,6 +2518,8 @@ export class MachineManager {
   maxEvent?: (machineId: string, line: string) => void;
   /** w1946: a play-only machine's daemon said hello with its timed runs, and what it reports of one (server/timedRuns.ts). */
   timedHello?: (machineId: string, active: string[]) => void;
+  /** w1996: a daemon's exclusive-bench hours (server/benchHoursStore.ts validates them). */
+  benchHours?: (machineId: string, rows: unknown) => void;
   timedReport?: (machineId: string, msg: Extract<FromDaemon, { type: 'timed_run_status' | 'timed_run_done' | 'timed_run_result' }>) => void;
 
   /** Whether a machine's daemon is online and runs timed runs (w1946: its hello offered `timedRuns`). */

@@ -340,10 +340,10 @@ export const CATALOG = {
   },
   /** docs/portal-logs.md (w920). Read-only: the portal answers from a fixed list of sources (server/portalLogs.ts). */
   portal_logs: {
-    source: z.string().max(40).optional().describe('What to read (journal, portal, updater, health, cleanup, update_result, update_verified, update_prepared, update_verifying, machine_rollout, auto_deploy, unit_watchdog, coordinator_context). Absent: the list of sources and what is there now.'),
-    machine: z.string().max(41).optional().describe('cleanup only: a machine id ("lothdesktop", "m5"); absent: the portal host\'s own passes.'),
-    since: z.string().max(40).optional().describe('journal and cleanup: an ISO time with a zone, e.g. 2026-10-10T18:50:00Z. The journal defaults to the last hour.'),
-    until: z.string().max(40).optional().describe('journal and cleanup: an ISO time with a zone. Default: now.'),
+    source: z.string().max(40).optional().describe('What to read (journal, portal, updater, health, cleanup, update_result, update_verified, update_prepared, update_verifying, machine_rollout, auto_deploy, unit_watchdog, coordinator_context, bench_hours). Absent: the list of sources and what is there now.'),
+    machine: z.string().max(41).optional().describe('cleanup and bench_hours: a machine id ("lothdesktop", "m5"); absent: the portal host\'s own passes (cleanup) or every machine (bench_hours).'),
+    since: z.string().max(40).optional().describe('journal, cleanup and bench_hours: an ISO time with a zone, e.g. 2026-10-10T18:50:00Z. The journal defaults to the last hour.'),
+    until: z.string().max(40).optional().describe('journal, cleanup and bench_hours: an ISO time with a zone. Default: now.'),
     grep: z.string().max(200).optional().describe('Only lines containing this text, any case.'),
     regex: z.string().max(100).optional().describe('Only lines matching this pattern, any case (no quantified group, backreference or lookaround).'),
     limit: rangedNumber(1, 2000, 'Lines per page, default 200; a page also stops at 48,000 characters.').optional(),
