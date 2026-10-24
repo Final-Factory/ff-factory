@@ -59,6 +59,54 @@ const TAIL_CHUNK = 64 * 1024;
 const LAST_LINES = 4;
 
 /** A transcript's events from its text: the last `limit` lines when given; a line that does not parse (torn by a crash) is skipped. */
+/** What a `gh pr create` call printed, and when (Store.prCreateResults). */
+export interface PrCreateResult {
+  at: string;
+  text: string;
+  isError: boolean;
+}
+/** A compressed transcript's tail file keeps its last lines up to this size (w2026). */
+const TAIL_FILE_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Beside a compressed transcript, its last lines (`<id>.jsonl.gz.tail`, w2026): a tail read of a compressed transcript (every daemon
+ * connect asks each of its sessions' last seq; the blocker watch and the ledger sweep read the last lines of idle workers) unzipped
+ * the whole file synchronously, seconds each for a big one on the portal VM. The first line names the size of the .gz it was made
+ * from (a tail file of another one is ignored) and whether it holds the whole transcript.
+ */
+export function writeTailFile(gzPath: string, text: string | Buffer) {
+  try {
+    const size = fs.statSync(gzPath).size;
+    const buf = typeof text === 'string' ? Buffer.from(text) : text;
+    let from = Math.max(0, buf.length - TAIL_FILE_BYTES);
+    if (from > 0) from = buf.indexOf(0x0a, from) + 1 || buf.length;
+    fs.writeFileSync(`${gzPath}.tail`, `${JSON.stringify({ of: size, whole: from === 0 })}\n${buf.toString('utf8', from)}`);
+  } catch {
+    // a tail file is only a shortcut
+  }
+}
+
+function readTailFile(gzPath: string, lines: number): { text: string; whole: boolean } | undefined {
+  try {
+    const text = fs.readFileSync(`${gzPath}.tail`, 'utf8');
+    const nl = text.indexOf('\n');
+    const head = JSON.parse(text.slice(0, nl)) as { of?: number; whole?: boolean };
+    if (head.of !== fs.statSync(gzPath).size) return undefined;
+    const body = text.slice(nl + 1);
+    if (head.whole) return { text: body, whole: true };
+    return completeLines(Buffer.from(`\n${body}`)) >= lines ? { text: body, whole: false } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+const RESULT_MARK = '"kind":"result"';
+/** A background parse gives the loop a turn after this many bytes (about 20 ms of JSON.parse on the portal VM, a guess). */
+const PARSE_SLICE_BYTES = 2 * 1024 * 1024;
+const gunzipAsync = (b: Buffer, o: zlib.ZlibOptions) => new Promise<Buffer>((ok, no) => zlib.gunzip(b, o, (e, r) => (e ? no(e) : ok(r))));
+/** A turn of the event loop: timers, sockets and /api/health run before the caller goes on. */
+export const yieldLoop = () => new Promise<void>((r) => setImmediate(r));
+
 function parseLines(text: string, limit?: number): TranscriptEvent[] {
   const lines = text.split('\n').filter(Boolean);
   const out: TranscriptEvent[] = [];
@@ -270,9 +318,81 @@ export class Store {
   }
 
   /** How many result lines a session's transcript holds (a turn each): 1 right after a session's first turn ended. */
-  countResults(sessionId: string): number {
-    const text = this.transcriptText(sessionId);
-    return text === undefined ? 0 : text.split('"kind":"result"').length - 1;
+  countResults(sessionId: string, atMost = Infinity): number {
+    // w2026: read in pieces and stop at `atMost` (the spend store only asks "more than one?"): a coordinator's gigabyte transcript
+    // read whole and split held the event loop for seconds at a time.
+    const f = this.transcriptPath(sessionId);
+    let fd: number;
+    try {
+      fd = fs.openSync(f, 'r');
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+      const text = this.transcriptText(sessionId);
+      return text === undefined ? 0 : Math.min(atMost, text.split(RESULT_MARK).length - 1);
+    }
+    const mark = Buffer.from(RESULT_MARK);
+    const buf = Buffer.alloc(1024 * 1024 + mark.length);
+    let n = 0;
+    let keep = 0;
+    try {
+      for (;;) {
+        const got = fs.readSync(fd, buf, keep, buf.length - keep, null);
+        if (got <= 0) break;
+        const end = keep + got;
+        for (let i = buf.indexOf(mark); i >= 0 && i + mark.length <= end; i = buf.indexOf(mark, i + mark.length)) if (++n >= atMost) return n;
+        // carry the last bytes over, so a mark across two reads is found once
+        keep = Math.min(mark.length - 1, end);
+        buf.copy(buf, 0, end - keep, end);
+        buf.fill(0, keep);
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+    return n;
+  }
+
+  /**
+   * The whole transcript for a background job (w2026), without holding the event loop: read and unzipped off the main thread and
+   * parsed a few thousand lines at a time with a turn of the loop between. Undefined when it has none, or when it is larger than
+   * `maxBytes` (on disk, or unzipped), which a background job then leaves alone: a 1.3 GB coordinator transcript read whole held
+   * the loop for tens of seconds on every boot.
+   */
+  async readTranscriptAsync(sessionId: string, maxBytes: number): Promise<TranscriptEvent[] | undefined> {
+    const f = this.transcriptPath(sessionId);
+    let buf: Buffer;
+    try {
+      if ((await fs.promises.stat(f)).size > maxBytes) return undefined;
+      buf = await fs.promises.readFile(f);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+      try {
+        if ((await fs.promises.stat(`${f}.gz`)).size > maxBytes / 4) return undefined;
+        buf = await gunzipAsync(await fs.promises.readFile(`${f}.gz`), { maxOutputLength: maxBytes });
+      } catch {
+        return undefined;
+      }
+    }
+    const out: TranscriptEvent[] = [];
+    let at = 0;
+    let since = 0;
+    while (at < buf.length) {
+      let nl = buf.indexOf(10, at);
+      if (nl < 0) nl = buf.length;
+      if (nl > at) {
+        try {
+          out.push(JSON.parse(buf.toString('utf8', at, nl).replace(/^\0+/, '')));
+        } catch {
+          // a torn line after a crash; skip it
+        }
+        since += nl - at;
+      }
+      at = nl + 1;
+      if (since >= PARSE_SLICE_BYTES) {
+        since = 0;
+        await yieldLoop();
+      }
+    }
+    return out;
   }
 
   private readonly pendingTools = new Map<string, { id: string; name: string; since: string }[]>();
@@ -391,6 +511,73 @@ export class Store {
     }
   }
 
+  /**
+   * The results of the `gh pr create` calls a session made (w340's "opened by its own worker"), read from its transcript in pieces and
+   * remembered with where the read stopped, so the next ask reads only what was appended since (w2026). The ledger sweep asked this
+   * of every open request's workers and of every auto-closed request's, every five minutes and two minutes after each start, by
+   * reading the last 2,000 or 100,000 lines of each transcript whole and synchronously: tens of seconds of a held event loop on
+   * 2026-10-24, while the daemons' heartbeats and /api/health waited. The whole transcript is read, not its last lines.
+   */
+  async prCreateResults(sessionId: string): Promise<PrCreateResult[]> {
+    const f = this.transcriptPath(sessionId);
+    let file = f;
+    let st: fs.Stats;
+    try {
+      st = await fs.promises.stat(f);
+    } catch {
+      file = `${f}.gz`;
+      try {
+        st = await fs.promises.stat(file);
+      } catch {
+        this.prScans.delete(sessionId);
+        return [];
+      }
+    }
+    const gz = file !== f;
+    let c = this.prScans.get(sessionId);
+    if (c && c.file === file && c.size === st.size && c.mtimeMs === st.mtimeMs) return c.results;
+    // a new file, a compressed one (it never grows), one that shrank or was rewritten (amend): read from the start
+    if (!c || c.file !== file || gz || st.size < c.offset) c = { file, size: 0, mtimeMs: 0, offset: 0, created: new Set(), results: [] };
+    const raw = fs.createReadStream(file, { start: gz ? 0 : c.offset, highWaterMark: 1024 * 1024 });
+    const stream = gz ? raw.pipe(zlib.createGunzip()) : raw;
+    let offset = c.offset;
+    let rest = Buffer.alloc(0);
+    const line = (text: string) => {
+      const create = text.includes('"kind":"tool_use"') && text.includes('create') && text.includes('gh');
+      const result = !create && text.includes('"kind":"tool_result"') && text.includes('/pull/');
+      if (!create && !result) return;
+      let e: TranscriptEvent;
+      try {
+        e = JSON.parse(text.replace(/^\0+/, ''));
+      } catch {
+        return; // a torn line after a crash
+      }
+      if (e.kind === 'tool_use' && /bash/i.test(e.name) && /\bgh\s+pr\s+create\b/.test(String((e.input as { command?: unknown } | null)?.command ?? ''))) c.created.add(e.toolUseId);
+      else if (e.kind === 'tool_result' && c.created.has(e.toolUseId)) c.results.push({ at: e.t, text: e.text, isError: !!e.isError });
+    };
+    try {
+      for await (const chunk of stream as AsyncIterable<Buffer>) {
+        const buf = rest.length ? Buffer.concat([rest, chunk]) : chunk;
+        let at = 0;
+        for (let nl = buf.indexOf(10, at); nl >= 0; nl = buf.indexOf(10, at)) {
+          if (nl > at) line(buf.toString('utf8', at, nl));
+          at = nl + 1;
+        }
+        offset += at;
+        rest = Buffer.from(buf.subarray(at));
+      }
+    } finally {
+      raw.destroy();
+    }
+    // a line still being written stays for the next read (a plain file); a compressed one is whole
+    if (gz && rest.length) line(rest.toString('utf8'));
+    c.offset = gz ? 0 : offset;
+    c.size = st.size;
+    c.mtimeMs = st.mtimeMs;
+    this.prScans.set(sessionId, c);
+    return c.results;
+  }
+
   /** The transcript's text, from its file or, once the data guard compressed it (server/dataGuard.ts), its .gz; undefined: none. */
   transcriptText(sessionId: string): string | undefined {
     const f = this.transcriptPath(sessionId);
@@ -425,7 +612,11 @@ export class Store {
       fd = fs.openSync(f, 'r');
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+      // compressed (idle a day, dataGuard.ts): its last lines from the tail file beside it, else the whole file once, and the tail file written for next time (w2026)
+      const side = readTailFile(`${f}.gz`, lines);
+      if (side) return side;
       const text = this.transcriptText(sessionId);
+      if (text !== undefined) writeTailFile(`${f}.gz`, text);
       return text === undefined ? undefined : { text, whole: true };
     }
     try {
@@ -460,6 +651,9 @@ export class Store {
     return fs.existsSync(f) || fs.existsSync(`${f}.gz`);
   }
 
+  /** Where each session's `gh pr create` scan stopped (prCreateResults). */
+  private readonly prScans = new Map<string, { file: string; size: number; mtimeMs: number; offset: number; created: Set<string>; results: PrCreateResult[] }>();
+
   /** Transcripts the data guard compressed in this process: the next append to one restores its plain file. */
   private readonly compressed = new Set<string>();
   noteCompressed(sessionId: string) {
@@ -472,6 +666,7 @@ export class Store {
     if (fs.existsSync(f) || !fs.existsSync(`${f}.gz`)) return;
     fs.writeFileSync(f, zlib.gunzipSync(fs.readFileSync(`${f}.gz`)));
     fs.rmSync(`${f}.gz`, { force: true });
+    fs.rmSync(`${f}.gz.tail`, { force: true });
   }
 
   /**
@@ -495,6 +690,7 @@ export class Store {
   deleteTranscript(sessionId: string) {
     this.seqs.delete(sessionId);
     fs.rmSync(this.transcriptPath(sessionId), { force: true });
+    fs.rmSync(`${this.transcriptPath(sessionId)}.gz.tail`, { force: true });
     fs.rmSync(`${this.transcriptPath(sessionId)}.gz`, { force: true });
     this.deleteUploads(sessionId);
   }

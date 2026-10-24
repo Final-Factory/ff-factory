@@ -31,6 +31,8 @@ interface SpendFile {
   sessions: Record<string, SessionSpend>;
   /** When the backfill from the transcripts that existed ran, and what it covered. */
   backfill?: { at: string; sessions: number; turns: number; usd: number };
+  /** Sessions the backfill read and found no turn in (w2026): read once, not again on every start. */
+  backfillNone?: string[];
 }
 
 /** What the store needs from the portal. */
@@ -281,6 +283,8 @@ export class SpendStore {
   readonly requests = new Map<string, RequestSpend>();
   readonly sessions = new Map<string, SessionSpend>();
   backfill?: SpendFile['backfill'];
+  /** Sessions the backfill read that had no turn before the live record (w2026): before it they were read again on every start. */
+  readonly backfillNone = new Set<string>();
   private readonly file: SnapshotFile;
   private readonly path: string;
   private readonly ctx: SpendContext;
@@ -298,6 +302,7 @@ export class SpendStore {
     for (const r of Object.values(f?.requests ?? {})) this.requests.set(r.id, r);
     for (const s of Object.values(f?.sessions ?? {})) this.sessions.set(s.id, s);
     this.backfill = f?.backfill;
+    for (const id of f?.backfillNone ?? []) this.backfillNone.add(id);
     // w1160: coordination days are keyed by the coordinator's session; the first version keyed them by "dispatcher" and the like,
     // on days that were wrong. Those go, and every coordinator without coordV 2 is rebuilt from its transcript (rebuildCoordination).
     for (const r of this.requests.values()) {
@@ -324,7 +329,7 @@ export class SpendStore {
     }
     const sessions: Record<string, SessionSpend> = {};
     for (const [id, s] of this.sessions) sessions[id] = { ...s, total: roundTok(s.total), estimated: roundTok(s.estimated), models: roundModels(s.models), ...(s.accounts ? { accounts: roundModels(s.accounts) } : {}), cats: roundCats(s.cats), ...(s.phaseDays ? { phaseDays: roundPhaseDays(s.phaseDays) } : {}), requests: Object.fromEntries(Object.entries(s.requests).map(([k, v]) => [k, round(v)])) };
-    return { version: 1, requests, sessions, ...(this.backfill ? { backfill: this.backfill } : {}) };
+    return { version: 1, requests, sessions, ...(this.backfill ? { backfill: this.backfill } : {}), ...(this.backfillNone.size ? { backfillNone: [...this.backfillNone] } : {}) };
   }
 
   changed() {
@@ -565,7 +570,7 @@ export class SpendStore {
    */
   backfillSession(sessionId: string, events: readonly TranscriptEvent[], info: SessionInfo | undefined): { turns: number; usd: number } {
     const existing = this.sessions.get(sessionId);
-    if (existing?.backfilled) return { turns: 0, usd: 0 };
+    if (existing?.backfilled || this.backfillNone.has(sessionId)) return { turns: 0, usd: 0 };
     const limit = existing?.liveFrom ?? Infinity;
     const items = [...this.ctx.work()];
     const model = info?.model ?? 'unknown';
@@ -610,8 +615,8 @@ export class SpendStore {
     if (s) {
       s.backfilled = true;
       s.lastCost ??= prevCost;
-      this.changed();
-    }
+    } else this.backfillNone.add(sessionId); // no turn: nothing to record, and nothing to read again (w2026)
+    this.changed();
     return { turns, usd };
   }
 

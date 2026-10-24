@@ -69,9 +69,13 @@ export class LoopWatch {
 
   /** The worst lag of the last minute, in ms (0: every beat on time). */
   lagMs(): number {
-    const now = this.now();
+    return this.worstLagSince(this.now() - LAG_WINDOW_MS);
+  }
+
+  /** The worst lag of the beats since `since` (within the last minute), in ms: the stall profiler's window (stallProfile.ts). */
+  worstLagSince(since: number): number {
     let worst = 0;
-    for (const [at, lag] of this.lags) if (now - at <= LAG_WINDOW_MS && lag > worst) worst = lag;
+    for (const [at, lag] of this.lags) if (at >= since && lag > worst) worst = lag;
     return Math.round(worst);
   }
 }

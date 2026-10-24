@@ -94,9 +94,11 @@ import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, typ
 import type { AccountUsage, AppState, CreateSandboxRequest, HostStatus, Machine, TokenWarning, PermissionDecisionRequest, Requester, ServerEvent, SessionInfo, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats, LiveKnobRequest, PoolPerson, TranscriptEvent } from '../shared/types.ts';
 import { slugify } from './sandboxes.ts';
 import { SpendStore, buildReport } from './spend.ts';
-import { isCoordinatorRole, type SpendSummaryReply } from '../shared/spend.ts';
+import { backfillSpend, repairSpend } from './spendJobs.ts';
+import type { SpendSummaryReply } from '../shared/spend.ts';
 import { dataGuardSettings, footprint, gzipRatioCached, runDataGuard } from './dataGuard.ts';
 import { LoopWatch } from './loopWatch.ts';
+import { StallProfiler } from './stallProfile.ts';
 
 const WEB = path.join(ROOT, 'web', 'dist');
 
@@ -165,10 +167,12 @@ writeAlive(cfg.dataDir);
 setInterval(() => writeAlive(cfg.dataDir), 30_000);
 // A blocked event loop says so in the log, and /api/health carries the last minute's worst lag (w1377).
 const loopWatch = new LoopWatch().start();
+// A stall names the functions that held the loop, from V8's sampling profiler in this process (w2026, server/stallProfile.ts).
+if (!isDryRun) new StallProfiler({ dataDir: cfg.dataDir, worstLagSince: (t) => loopWatch.worstLagSince(t) }).start();
 
 const store = new Store(cfg.dataDir);
 // What each request costs (w859, docs/spend.md): fed by every transcript event, whether the session runs here or on a machine.
-const spend = new SpendStore(cfg.dataDir, { work: () => store.work.values(), session: (id) => store.sessions.get(id), priorResults: (id) => store.countResults(id), accountLabel: (i) => (i.account ? `account ${i.account}` : undefined) });
+const spend = new SpendStore(cfg.dataDir, { work: () => store.work.values(), session: (id) => store.sessions.get(id), priorResults: (id) => store.countResults(id, 2), accountLabel: (i) => (i.account ? `account ${i.account}` : undefined) });
 // And each person's open ask_person questions, the cards of their Waiting on input tab (w1868), once the orchestrators exist.
 let observeAsk: ((sid: string, e: TranscriptEvent) => void) | undefined;
 store.onEvent = (sid, e) => {
@@ -600,87 +604,15 @@ const guardData = async () => {
 };
 setTimeout(() => void guardData(), 3 * 60_000).unref();
 setInterval(() => void guardData(), dataGuardSettings(cfg).everyMinutes * 60_000).unref();
-// Sessions that ran before the spend record existed are read from their transcripts once, a few at a time so the portal stays
-// responsive (w859, docs/spend.md "Backfill"): dollars as recorded, tokens estimated and labelled so.
-const backfillSpend = async () => {
-  if (isDryRun) return;
-  const started = Date.now();
-  let sessionsDone = 0;
-  let turns = 0;
-  let usd = 0;
-  const todo = [...store.sessions.values()].filter((s) => !spend.session(s.id)?.backfilled && store.hasTranscript(s.id)).sort((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt));
-  for (const s of todo) {
-    try {
-      const r = spend.backfillSession(s.id, store.readTranscript(s.id), s);
-      sessionsDone++;
-      turns += r.turns;
-      usd += r.usd;
-    } catch (e) {
-      console.warn(`spend backfill: ${s.id}: ${(e as Error).message}`);
-    }
-    // One session per turn of the event loop (a big transcript is one blocking parse), a pause after every five.
-    await new Promise((r) => (sessionsDone % 5 === 0 ? setTimeout(r, 25) : setImmediate(r)));
-  }
-  if (sessionsDone) {
-    spend.backfill = { at: new Date().toISOString(), sessions: (spend.backfill?.sessions ?? 0) + sessionsDone, turns: (spend.backfill?.turns ?? 0) + turns, usd: (spend.backfill?.usd ?? 0) + usd };
-    spend.syncWork();
-    spend.changed();
-    console.log(`spend backfill: ${sessionsDone} session(s), ${turns} turn(s), $${usd.toFixed(2)} in ${((Date.now() - started) / 1000).toFixed(0)} s`);
-  }
-};
-setTimeout(() => void backfillSpend(), 90_000).unref();
-// Two repairs of the record, once per session, in the background (docs/spend.md "Coordination", "Corrections to history"): the turns the old
-// rules got wrong are recorded again by the current ones (w1209: a restart's running total counted as one turn, an id cited in a notice
-// billing its request), then a coordinator's coordination gets its days from its own transcript (w1160). A copy of the record is kept first.
-const repairSpend = async () => {
-  if (isDryRun) return;
-  spend.backupOnce('pre-w1209');
-  const acct = spend.repairAccounts();
-  if (acct.sessions) console.log(`spend repair: the accounts of ${acct.sessions} corrected session(s) and ${acct.requests} request(s) put right`);
-  let looked = 0;
-  let fixed = 0;
-  let removed = 0;
-  let moved = 0;
-  let given = 0;
-  const skipped: string[] = [];
-  for (const s of [...spend.sessions.values()].filter((x) => x.fixV !== 2 || (isCoordinatorRole(x.role) && x.coordV !== 2))) {
-    try {
-      const events = store.hasTranscript(s.id) ? store.readTranscript(s.id) : undefined;
-      const info = store.sessions.get(s.id);
-      const r = spend.correctHistory(s.id, events, info);
-      looked++;
-      if (r.turns) fixed++;
-      removed += r.removedUsd;
-      moved += r.movedUsd;
-      if (r.skipped && r.skipped !== 'no transcript') skipped.push(`${s.id.slice(0, 8)}: ${r.skipped}`);
-      if (isCoordinatorRole(s.role) && s.coordV !== 2) given += spend.rebuildCoordination(s.id, events, info);
-    } catch (e) {
-      console.warn(`spend repair: ${s.id}: ${(e as Error).message}`);
-    }
-    await new Promise((r) => setImmediate(r));
-  }
-  // w2007: the turns billed a carried running total (a resumed CLI's older saved totals), from the transcript read in pieces
-  let carriedLooked = 0;
-  let carriedTurns = 0;
-  let carriedUsd = 0;
-  for (const s of [...spend.sessions.values()].filter((x) => x.carriedV !== 1)) {
-    try {
-      const keep = (line: string) => line.includes('"kind":"result"') || line.includes('"kind":"user"');
-      const r = await spend.correctCarried(s.id, store.hasTranscript(s.id) ? store.scanTranscript(s.id, keep) : undefined, store.sessions.get(s.id));
-      carriedLooked++;
-      carriedTurns += r.turns;
-      carriedUsd += r.removedUsd;
-      if (r.skipped && r.skipped !== 'no transcript') skipped.push(`${s.id.slice(0, 8)}: ${r.skipped}`);
-    } catch (e) {
-      console.warn(`spend repair (carried totals): ${s.id}: ${(e as Error).message}`);
-    }
-    await new Promise((r) => setImmediate(r));
-  }
-  if (carriedLooked) console.log(`spend repair (w2007): ${carriedLooked} session(s) looked at, $${carriedUsd.toFixed(2)} of carried running totals taken out of ${carriedTurns} turn(s)`);
-  if (looked) console.log(`spend repair: ${looked} session(s) looked at, ${fixed} corrected ($${removed.toFixed(2)} taken out of restart turns, $${moved.toFixed(2)} moved off requests a notice only cited), $${given.toFixed(2)} of coordination given its days${skipped.length ? `; left as recorded: ${skipped.slice(0, 8).join('; ')}${skipped.length > 8 ? `; and ${skipped.length - 8} more` : ''}` : ''}`);
-  spend.syncWork();
-};
-setTimeout(() => void repairSpend(), 150_000).unref();
+// Sessions that ran before the spend record existed are read from their transcripts once, then the record's repairs run once per
+// session (w859, w1209, w1160, w2007; docs/spend.md "Backfill", "Corrections to history"). server/spendJobs.ts: read off the main
+// thread and parsed in slices with a pause after each session, so a start never holds the loop (w2026).
+setTimeout(() => {
+  if (!isDryRun) void backfillSpend(store, spend);
+}, 90_000).unref();
+setTimeout(() => {
+  if (!isDryRun) void repairSpend(store, spend);
+}, 150_000).unref();
 
 // The ledger moves on (requests close, titles change, closed ones drop out after a week): the spend record follows (w859).
 setInterval(() => spend.syncWork(), 5 * 60_000).unref();
