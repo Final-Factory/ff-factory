@@ -229,6 +229,8 @@ export interface RoomFit {
  * listed them as fitting its room. Unknown facts fit: a computer whose platform nobody reported is not ruled out.
  */
 export function unfitWhy(w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes'> & { pair?: WorkPair }, id: string, fit: Readonly<Record<string, RoomFit>> | undefined): string | undefined {
+  // w2041: a retry of a pair run never goes back to a computer an earlier leg failed on.
+  if (w.pair?.avoid?.includes(id)) return `${id} is where an earlier leg of this pair run failed (${w.pair.retryOf ?? 'its first run'}): a retry goes on other computers (w2041)`;
   const f = fit?.[id];
   if (!f) return undefined;
   const timed = needsTimed(w) || (w.pair?.timed ? 'any' : false);
@@ -274,4 +276,4 @@ export function pairRoom(w: { pair?: WorkPair }, ids: readonly string[], fit: Re
 }
 
 /** "a pair run of 2 legs, cross-OS: <why>, timed" (w1945): what a pair needs, as lines about it say it. */
-export const pairText = (p: WorkPair): string => `a pair run of ${p.legs} legs${p.crossOs ? `, cross-OS (${p.crossOs})` : ', on computers that are not Macs'}${p.timed ? ', timed (exclusive tickets: not on a computer that takes no timed runs)' : ''}`;
+export const pairText = (p: WorkPair): string => `a pair run of ${p.legs} legs${p.crossOs ? `, cross-OS (${p.crossOs})` : ', on computers that are not Macs'}${p.timed ? ', timed (exclusive tickets: not on a computer that takes no timed runs)' : ''}${p.avoid?.length ? `, not on ${p.avoid.join(' or ')}` : ''}`;

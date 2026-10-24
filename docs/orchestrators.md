@@ -807,7 +807,9 @@ without one means it is off or failing, worth a person's look.
     `reports` (its id) records it as a `request` gate with `on: report`, so the worker is resumed when that worker reports;
   - a check on several computers at once (a two-machine determinism check) is the worker's `request_pair` (w1945): one pair
     request whose legs the dispatcher starts together, and the asking request **Blocked on its report**, so the worker's
-    sandbox is released while it waits ([machines.md](machines.md), "Pair runs are placed as one unit");
+    sandbox is released while it waits ([machines.md](machines.md), "Pair runs are placed as one unit"); asked again
+    for a spent run (a leg reported, a leg's computer offline, or `retry: true`), it cancels that run and files a fresh one
+    off the failed computers (w2041, "A retry starts fresh legs");
   - a worker that waits on the orchestrator stays Stalled and the line says so, adding "that is its own work" for a pair or
     two-machine check, a build, a test run or its CI (w1685). Such a worker is told at its turn's end, once per request
     (`Agents.ownWorkNudge`), and every worker's prompt says these are its own work.
@@ -1423,7 +1425,10 @@ after only its hardware read, closed the request while the placement work it was
 records that worker's part (`WorkItem.done`: session id, when, the report's first line), and the request closes only
 once no other worker is still on it (`stillOn`, `server/orchestrators.ts`): every worker linked to it has said DONE,
 ended (stopped, errored or gone), or moved on to newer work (it no longer serves the request, `servedBy`). Until then
-the worker is told its part is recorded and who is still on it, and the log says so. When the last worker still on it
+the worker is told its part is recorded and who is still on it, and the log says so, once per change of who that is
+(`done[<session>].told`, w2041): each notice resumed w1976's host leg f09cb847, whose answer said DONE again and drew the
+same notice, about 8 rounds at 12:50Z on 2026-10-24. A DONE again while the same workers are on it is recorded and not
+answered. When the last worker still on it
 ends without a DONE (`workerEnded`, called as its process stops), the request closes on the latest DONE's report, unless
 `doneProblem` finds something missing in it; then it stays open and the log says why. The other choice, only the
 request's first ("main") worker may close it, was not taken: at w428 the worker that closed it may well have been the

@@ -1338,9 +1338,22 @@ LothDesktop and Beast, not just when BEAST is full").
     asking request's people at its priority, needing a game sandbox per leg, and Blocks the asking request on its report
     (`blocked_on` `reports`). The w890 release ("it waits on another request", below) then frees the worker's sandbox as
     its turn ends, and the host leg's result (a line `For wNNN:`) resumes it. One open pair run per request: asked again,
-    the worker waits on the one there is. The worker's brief says to use it, and never to hold a sandbox for a second
+    the worker waits on the one there is, unless that run is spent (below). The worker's brief says to use it, and never to hold a sandbox for a second
     machine's worker; a daemon older than the tool does not offer it (the portal sends a worker only the tools its daemon's
     catalog names).
+  - **A retry starts fresh legs** (w2041, Ben: "A retry of a pair run starts fresh legs on online machines"). w1976, the
+    pair run for w1904's PR #2364, put its client leg on lothlaptop, whose Tailscale was stuck, then offline; the host leg
+    said DONE with the check not run. w1904's worker asked again ("retry", "retry 2"), each ask joined w1976, and each was
+    resumed at once by the old host leg's next DONE. Now `request_pair` on an open run that is **spent**
+    (`Orchestrators.pairSpent`: a leg already said DONE, a leg's computer is offline or its worker errored, or the worker
+    passes `retry: true`) cancels it (`supersedePair`: outcome "superseded by wNNN", a line to its live legs; placeAgain then
+    frees them) and files a fresh pair run with no legs, `pair.retryOf` the old one and `pair.avoid` the computers it must
+    not use: each old leg's computer that is offline, whose worker errored, or that never said DONE while another leg did
+    (`pairFailedOn`), plus the worker's own `avoid` (computers it saw fail). `unfitWhy` keeps every leg off them, so room,
+    the WRONG flag, the hold and the ping skip them, and `startPairLegs` refuses a leg there. The asker is blocked on the
+    fresh run's report, so no report of the old run's legs resumes it. A run Queued, or running with every leg healthy and
+    nothing reported, is still waited on (a worker that asks twice by mistake starts no second run); the answer names
+    `retry: true` for a run that cannot deliver.
   - **Starting one: `start_agent` with `pair_sandboxes`** (`Agents.startPairLegs`). `sandbox` is leg 1, the host, and
     `pair_sandboxes` the other legs, each a FREE sandbox on another computer. Every leg is checked before any starts (online,
     FREE, `placement.hold`, `placement.minPriority`, no timed legs where no timed runs go, the Mac rule below) and a refusal
@@ -1379,7 +1392,8 @@ LothDesktop and Beast, not just when BEAST is full").
     now is held whatever the time: start its legs first.
   - Tests: `server/w1945PairRuns.test.ts` (the room rules, the Queued line), the w1983 hold case and the w1945 cases in
     `server/orchestrators.test.ts` (request_pair blocks the asking worker and its sandbox is released, both legs start
-    together and never one alone, a Mac is no client, message_pair, the hold, the WRONG flag and the queue), and in
+    together and never one alone, a Mac is no client, message_pair, the hold, the WRONG flag and the queue; w2041: a retry of
+    a spent run, `retry: true` and `avoid`), `server/ledgerSweep.test.ts` (w2041: a DONE leg is told once), and in
     `server/machineSandboxes.test.ts` the asking worker stopped and its sandbox released FREE by the release pass.
 - **The rule** (the dispatcher's prompt): new game-repo work (code, tests, Unity, built players) goes where the
   Capacity block's last line says, even when a sandbox on the other computer is free. Discord posting as Max pins no
