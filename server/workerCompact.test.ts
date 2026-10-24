@@ -63,6 +63,9 @@ test('w2002: the earlier-compaction pilot: half the workers by default, 120,000 
   assert.equal(workerAutoCompactWindow(outArm, {}), undefined);
   assert.equal(workerSettings(inArm, {}).autoCompactWindow, 183_000);
   assert.ok(!('autoCompactWindow' in workerSettings(outArm, {})));
+  // w2008: no worker gets Claude Code's auto memory (CLAUDE.md forbids its files; its prompt section is read on every call).
+  assert.equal(workerSettings(inArm, {}).autoMemoryEnabled, false);
+  assert.equal(workerSettings(outArm, {}).autoMemoryEnabled, false);
   assert.ok(withEarlyCompactMark('brief', inArm, {}).startsWith(`brief\n\n${EARLY_COMPACT_MARK}\n`), 'the arm is marked in the prompt');
   assert.equal(withEarlyCompactMark('brief', outArm, {}), 'brief');
   assert.equal(workerAutoCompactWindow(inArm, { worker: { earlyCompactPilotPercent: 0 } as Config['worker'] }), undefined, '0 ends the pilot');
