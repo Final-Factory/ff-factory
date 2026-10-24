@@ -12,7 +12,7 @@
 // refuses a ticket-taking command until the worker has asked (checkTimedAsk). Placement from words stays as w1872 left it:
 // it moves a whole request, most of whose turns are code work, while the ask moves only the leg (docs/machines.md, "Where a
 // timed leg runs").
-import { avoidOf, holdOf, hasRoom, type Computer, type PlacementPrefs } from './placement.ts';
+import { avoidOf, classOf, classRank, holdOf, hasRoom, type Computer, type PlacementPrefs } from './placement.ts';
 import type { TimedAskMark, TimedVerdict, TimedVerdictKind } from '../shared/types.ts';
 
 /**
@@ -22,6 +22,9 @@ import type { TimedAskMark, TimedVerdict, TimedVerdictKind } from '../shared/typ
  * computer, about one slot's work, so it pays where the turn would idle 5 or more.
  */
 export const SMALL_TIMED_MAX_AGENTS = 4;
+// Since w2055 the leg rules go by size class (placement.ts sizeClass): a small or medium computer (1 to 3 agent slots) times
+// where it is and takes legs; a large or xlarge one asks. SMALL_TIMED_MAX_AGENTS stays only for timed_run's worker
+// computers (index.ts timedRunSmall), a player A/B that takes no slot.
 
 /**
  * How long a computer that should take a timed leg may be unavailable (offline, asleep, its daemon gone) before the leg
@@ -83,10 +86,11 @@ export const TIMED_LEG_WAIT_MS = 60 * 60_000;
 /** How long a verdict holds for its worker (an A/B investigation's legs span hours); asked again, the new one replaces it. */
 export const TIMED_VERDICT_MS = 12 * 3_600_000;
 
-export const isSmallTimed = (c: Pick<Computer, 'maxAgents'>) => c.maxAgents <= SMALL_TIMED_MAX_AGENTS;
+/** A computer of the timing classes, small or medium (w2055: 1 to 3 agent slots): its exclusive turn idles at most 2 others. */
+export const isSmallTimed = (c: Pick<Computer, 'maxAgents'>) => classRank(c) <= 1;
 
 /** "lothlaptop (1 agent slot, 0 live)". */
-export const sizeText = (c: Computer) => `${c.id} (${c.maxAgents} agent slot${c.maxAgents === 1 ? '' : 's'}, ${c.live} live${hasRoom(c) ? ', room now' : ', no room now'})`;
+export const sizeText = (c: Computer) => `${c.id} (${classOf(c)}, ${c.maxAgents} agent slot${c.maxAgents === 1 ? '' : 's'}, ${c.live} live${hasRoom(c) ? ', room now' : ', no room now'})`;
 
 /** Why a small computer can or cannot take a timed leg now (w2048). */
 export interface SmallState {
@@ -214,7 +218,10 @@ export function decideTimedPlace(a: TimedPlaceInput): TimedPlaceDecision {
   }
   const sm = a.sameMachine?.replace(/\s+/g, ' ').trim();
   if (sm) return { verdict: 'here', why: `its numbers must come from ${here.id}: "${sm.slice(0, 200)}" (both sides of an A/B stay on one machine)` };
-  if (isSmallTimed(here)) return { verdict: 'here', why: `${here.id} is a small computer (${here.maxAgents} agent slot${here.maxAgents === 1 ? '' : 's'}, at most ${SMALL_TIMED_MAX_AGENTS}): its exclusive turn idles little` };
+  if (isSmallTimed(here)) return { verdict: 'here', why: `${here.id} is a ${classOf(here)} computer (${here.maxAgents} agent slot${here.maxAgents === 1 ? '' : 's'}; small and medium, at most 3, time where they are, w2055): its exclusive turn idles little` };
+  // w2055: an idle computer of any class takes timed work; the asker's own is idle when it is the only work there.
+  if (here.online && here.live <= 1 && here.midTurn <= 1 && (here.editors ?? 0) - (here.idleEditors ?? 0) <= 1 && !here.benchLock && !here.benchQueue?.timed && !here.resumesWaiting && !here.legs?.length)
+    return { verdict: 'here', why: `${here.id} (${classOf(here)}, ${here.maxAgents} agent slots) is idle but for this worker: its exclusive turn idles no other work (w2055: an idle computer of any class takes timed work)` };
   if (a.widenedLeg) {
     const why = `${a.widenedLeg} is a timed leg FF Factory widened to the big computers, as no small computer could take it (w2048)`;
     return { verdict: 'here', bigFallback: why, why: `${why}: time here. ${bigFallbackRules(here.id)}` };
@@ -236,8 +243,8 @@ export function decideTimedPlace(a: TimedPlaceInput): TimedPlaceDecision {
 /** The mark for computer `c` (w1969): a big computer that takes timed runs asks; a small one, or one that takes none, does not. */
 export function timedAskMark(c: Computer | undefined): TimedAskMark | undefined {
   if (!c || c.noTimedRuns) return undefined;
-  if (isSmallTimed(c)) return { required: false, why: `${c.id} is a small computer (${c.maxAgents} agent slots): timed legs run here without asking` };
-  return { required: true, why: `${c.id} has ${c.maxAgents} agent slots: an exclusive turn here idles the others, so a worker asks where its timed leg runs first (timed_place, w1969)` };
+  if (isSmallTimed(c)) return { required: false, why: `${c.id} is a ${classOf(c)} computer (${c.maxAgents} agent slots): timed legs run here without asking` };
+  return { required: true, why: `${c.id} is a ${classOf(c)} computer (${c.maxAgents} agent slots): an exclusive turn here idles the others, so a worker asks where its timed leg runs first (timed_place, w1969)` };
 }
 
 // ------------------------------------------------------------------ the guard

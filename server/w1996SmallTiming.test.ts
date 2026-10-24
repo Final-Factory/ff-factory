@@ -102,7 +102,7 @@ test('w1996: on a big computer a timed leg with no via goes to a timed_run compu
   assert.equal(decideTimedPlace({ here: at('lothdesktop'), places: fleet(), via: 'timed_run', timedRun: ['lothlaptop'] }).choose, undefined);
   const leg = decideTimedPlace({ here: at('beast'), places: fleet(), via: 'leg', timedRun: ['lothlaptop'] });
   assert.equal(leg.timedRun, undefined);
-  assert.deepEqual(leg.needs, ['lothlaptop', 'm3', 'biscuit']);
+  assert.deepEqual(leg.needs, ['lothlaptop', 'm3']); // biscuit (4 slots) is large since w2055
   // a Mac player goes as a leg (timed_run plays Windows players); a small computer times its own; the asker is never its own target
   assert.equal(decideTimedPlace({ here: at('beast'), places: fleet(), platform: 'darwin', timedRun: ['lothlaptop'] }).timedRun, undefined);
   assert.equal(decideTimedPlace({ here: at('lothlaptop'), places: fleet(), timedRun: ['lothlaptop'] }).verdict, 'here');

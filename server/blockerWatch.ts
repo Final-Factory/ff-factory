@@ -218,8 +218,8 @@ export class BlockerWatch {
       }
       // Timed work waiting on a computer that takes no timed runs (w1872): re-placed first, so the room flag below can start it.
       for (const id of this.d.orchestrators.replaceNoTimedWaits?.() ?? []) did.set(id, 're-placed: timed work off a computer that takes no timed runs');
-      // A timed leg past its wait for a small computer (w1969): any computer that takes timed runs may take it now.
-      for (const id of this.d.orchestrators.timedLegBound?.() ?? []) did.set(id, 'widened: no small computer can take its timed leg (w2048)');
+      // A Queued timed leg (w1969, w2048, w2055): started on an idle computer, pre-empted onto a small one, or re-queued by priority.
+      for (const id of this.d.orchestrators.timedLegBound?.() ?? []) did.set(id, 'timed leg: started, pre-empted or re-queued (w2055)');
       // Queued with room (w643): the same room test the page and decide_work queue read, for game work and for agent-slot work (w1098).
       const room: RoomNow | undefined = this.d.roomFacts?.() ?? (this.d.room ? { game: this.d.room(), agent: [], held: [] } : undefined);
       if (room && (room.game.length || room.agent.length || room.reserved?.length)) for (const id of this.d.orchestrators.flagQueuedWithRoom(room)) did.set(id, 'flagged: queued while a computer has room');

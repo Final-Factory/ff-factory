@@ -132,9 +132,9 @@ export function briefOf(first: string | undefined, max = 6000): string | undefin
 }
 
 /** The first lines of a moved request's new session, before the request as filed and the handover. */
-export function movedPrompt(m: { id: string; from: string; to: string; old: string; hold: string; why: string; brief?: string; report?: string }): string {
+export function movedPrompt(m: { id: string; from: string; to: string; old: string; hold: string; why: string; brief?: string; report?: string; lead?: string }): string {
   const lines = [
-    `[moved, w2046] FF Factory moved ${m.id} to this computer: its worker ${m.old} on ${m.from} was about to resume, but ${m.hold}, and ${m.to} had room (${m.why}). lothsahn's rule: "We should not have idle slots if there is queued work". That worker is stopped and its sandbox released; you carry ${m.id} on from where it left off. The handover below says where its work is (its branch, pushed) and carries the message that was waiting for it.`,
+    m.lead ?? `[moved, w2046] FF Factory moved ${m.id} to this computer: its worker ${m.old} on ${m.from} was about to resume, but ${m.hold}, and ${m.to} had room (${m.why}). lothsahn's rule: "We should not have idle slots if there is queued work". That worker is stopped and its sandbox released; you carry ${m.id} on from where it left off. The handover below says where its work is (its branch, pushed) and carries the message that was waiting for it.`,
   ];
   if (m.report) lines.push(`\nIts worker's last report:\n~~~text\n${m.report}\n~~~`);
   if (m.brief) lines.push(`\nThe brief its worker started from (the dispatcher's words then; where it names ${m.from} or that worker's sandbox, you are on ${m.to} now):\n~~~text\n${m.brief}\n~~~`);

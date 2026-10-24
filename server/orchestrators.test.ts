@@ -31,6 +31,7 @@ import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { startTestMachine, type TestMachineOptions } from './testMachine.ts';
 import { afterMergeReason } from './ledgerRules.ts';
 import { roomForWork, timedLine, type Computer, type RoomNow } from './placement.ts';
+import type { Occupant } from './timedLegPlace.ts';
 import { TOOL_MANIFEST, deferredToolsLine, toolsOf } from './toolManifest.ts';
 import { buildOptions } from './launch.ts';
 
@@ -5116,7 +5117,7 @@ test('w1969: a worker on a big computer asks timed_place; its leg is filed Queue
   assert.equal(agents.timedAskFor('pc')?.required, true);
   assert.equal(agents.timedAskFor('m3')?.required, false);
   const out = String(await h.timed_place!({ what: 'RoundRobin belt output A/B on PR #2347', brief: 'Branch w1891-roundrobin: base 1a2b3c4, fix 5d6e7f8; probe_ab_win.sh 4 rounds on the Just Play save; report the table.' }));
-  assert.match(out, /^Elsewhere \(w1969\): pc has 6 agent slots \(6 live now\): an exclusive turn there idles all the others; small computers take it: m3 \(2 agent slots, 1 live, room now\) > lothlaptop \(1 agent slot, 1 live, no room now\)\. Filed w2, the timed leg of w1, Queued for m3 > lothlaptop/);
+  assert.match(out, /^Elsewhere \(w1969\): pc has 6 agent slots \(6 live now\): an exclusive turn there idles all the others; small computers take it: m3 \(medium, 2 agent slots, 1 live, room now\) > lothlaptop \(small, 1 agent slot, 1 live, no room now\)\. Filed w2, the timed leg of w1, Queued for m3 > lothlaptop/);
   const leg = store.work.get('w2')!;
   assert.equal(leg.status, 'queued');
   assert.deepEqual(leg.queuedFor?.needs, ['m3', 'lothlaptop'], 'small ones only: never pc (big) or m5');
@@ -5127,7 +5128,7 @@ test('w1969: a worker on a big computer asks timed_place; its leg is filed Queue
   const w1 = store.work.get('w1')!;
   assert.equal(w1.status, 'blocked');
   assert.match(w1.log.join('\n'), /timed leg ask \(w1969\) from worker \w{8} on pc: handed to w2, queued for m3 > lothlaptop: pc has 6 agent slots/);
-  assert.match(leg.log.join('\n'), /filed by FF Factory for worker \w+ on w1 \(w1969 timed_place\) from pc: queued for m3 > lothlaptop, the small computers that take timed runs \(a big one only once none of them can take it: offline past the load-scaled wait, held or without a game sandbox, w2048\): pc has 6 agent slots/);
+  assert.match(leg.log.join('\n'), /filed by FF Factory for worker \w+ on w1 \(w1969 timed_place\) from pc: queued for m3 > lothlaptop, the computers of the timing order \(w2055: idle first, then pre-emption, then by priority\): pc has 6 agent slots/);
   // Its machine hears the verdict with the bench priorities: the guard then names the leg.
   assert.deepEqual({ verdict: agents.benchPriorities('pc')[id]?.timed?.verdict, leg: agents.benchPriorities('pc')[id]?.timed?.leg }, { verdict: 'elsewhere', leg: 'w2' });
   // w1829: the verdict is kept with the session, so a portal restart does not drop it (BEAST, 2026-10-24 13:43Z).
@@ -5137,26 +5138,38 @@ test('w1969: a worker on a big computer asks timed_place; its leg is filed Queue
   assert.match(String(await h.timed_place!({ what: 'the same A/B', brief: 'again' })), /w1 already has an open timed leg, w2/);
   assert.equal([...store.work.values()].filter((x) => x.timedLeg).length, 1);
 
-  // w2048: an hour and a minute Queued while its small computers are online but busy: it keeps waiting there.
-  leg.queuedFor = { ...leg.queuedFor!, at: new Date(Date.now() - 61 * 60_000).toISOString() };
-  assert.deepEqual(o.timedLegBound(), [], 'a busy small computer is waited for');
-  // One of them offline for two hours, the other online: still waits.
+  // w2055: nothing idle (pc runs 6 agents, m3 and lothlaptop one each) and no worker of theirs to move: a normal leg waits
+  // Queued on the small computers only (lothlaptop), never on a busy shared one.
+  assert.deepEqual(o.timedLegBound(), ['w2'], 're-queued on the smallest class');
+  assert.deepEqual(store.work.get('w2')!.queuedFor?.needs, ['lothlaptop']);
+  assert.equal(store.work.get('w2')!.timedLeg?.widened, undefined);
+  assert.match(store.work.get('w2')!.log.join('\n'), /ledger: timed leg queue \(w2055\): no computer that takes timed runs is idle or can be freed; none can be freed: .*at normal priority it waits Queued on the small computers \(lothlaptop\)/);
+  assert.deepEqual(o.timedLegBound(), [], 'unchanged: nothing to do');
+  // lothlaptop offline for two hours: the small class is skipped, not waited for; m3 (medium) is next.
   const gone = new Date(Date.now() - 120 * 60_000).toISOString();
-  agents.places = () => askFleet().map((c) => (c.id === 'm3' ? { ...c, online: false, offlineSince: gone } : c));
-  assert.deepEqual(o.timedLegBound(), [], 'one small computer online: it waits there');
-  // Both offline, one of them only a blip (30 s): still waits.
+  agents.places = () => askFleet().map((c) => (c.id === 'lothlaptop' ? { ...c, online: false, offlineSince: gone } : c));
+  assert.deepEqual(o.timedLegBound(), ['w2']);
+  assert.deepEqual(store.work.get('w2')!.queuedFor?.needs, ['m3']);
+  assert.match(store.work.get('w2')!.log.join('\n'), /every small computer is offline \(lothlaptop\), so the next class is used/);
+  // A 30 s drop is a blip: lothlaptop still counts, so the leg goes back to waiting on it.
   const blip = new Date(Date.now() - 30_000).toISOString();
-  agents.places = () => askFleet().map((c) => (c.id === 'm3' ? { ...c, online: false, offlineSince: gone } : c.id === 'lothlaptop' ? { ...c, online: false, offlineSince: blip } : c));
-  assert.deepEqual(o.timedLegBound(), [], 'a 30 s drop is a blip');
-  // Both offline past the wait: it widens to the big computers (never m5), logged on the leg and on w1 with why.
+  agents.places = () => askFleet().map((c) => (c.id === 'lothlaptop' ? { ...c, online: false, offlineSince: blip } : c));
+  assert.deepEqual(o.timedLegBound(), ['w2']);
+  assert.deepEqual(store.work.get('w2')!.queuedFor?.needs, ['lothlaptop']);
+  // Every small and medium computer offline: the large class (pc) takes it at once, a big-computer fallback logged on both requests.
   agents.places = () => askFleet().map((c) => (c.id === 'm3' || c.id === 'lothlaptop' ? { ...c, online: false, offlineSince: gone } : c));
   assert.deepEqual(o.timedLegBound(), ['w2']);
   const needs = store.work.get('w2')!.queuedFor?.needs ?? [];
-  assert.ok(!needs.includes('m5'), `never m5: ${needs.join(' > ')}`);
-  assert.ok(needs.includes('beast'), `a big computer may take it: ${needs.join(' > ')}`);
-  assert.match(store.work.get('w2')!.log.join('\n'), /ledger: BIG-COMPUTER FALLBACK \(w2048\): no small computer it was queued for can take it: lothlaptop offline since \d\d:\d\dZ \(120 min\); m3 offline since \d\d:\d\dZ \(120 min\) \(an offline one is waited for \d+ min, as the fleet is at \d+% load/);
-  assert.match(store.work.get('w1')!.log.join('\n'), /its timed leg w2 may now run on a big computer \(w2048 fallback\): no small computer it was queued for can take it: lothlaptop offline/);
+  assert.deepEqual(needs, ['pc'], 'never m5');
+  assert.ok(store.work.get('w2')!.timedLeg?.widened);
+  assert.match(store.work.get('w2')!.log.join('\n'), /ledger: BIG-COMPUTER FALLBACK \(w2048, w2055\): .*every small computer is offline \(lothlaptop\); every medium computer is offline \(m3\)/);
+  assert.match(store.work.get('w1')!.log.join('\n'), /its timed leg w2 may now run on a big computer \(w2048 fallback, w2055\)/);
   assert.deepEqual(o.timedLegBound(), [], 'once');
+  // lothlaptop back: re-checked every pass, the leg goes back to waiting on it and is no longer widened.
+  agents.places = () => askFleet().map((c) => (c.id === 'm3' ? { ...c, online: false, offlineSince: gone } : c));
+  assert.deepEqual(o.timedLegBound(), ['w2']);
+  assert.deepEqual(store.work.get('w2')!.queuedFor?.needs, ['lothlaptop']);
+  assert.equal(store.work.get('w2')!.timedLeg?.widened, undefined);
 });
 
 test('w1969: with a reason its numbers must come from here, the leg stays, the verdict lets its ticket through, and the log says why', async (t) => {
@@ -5947,4 +5960,74 @@ test('w2043: with the pilot off (or the request in the control arm) a worker who
   sessions.send(old, 'Deploy check.', 'system');
   await until('it took the message', () => store.readTranscript(old).some((e) => e.kind === 'user' && (e as { text: string }).text === 'Deploy check.'));
   assert.deepEqual(store.work.get('w1')!.sessionIds, [old]);
+});
+
+// w2055: a Queued timed leg pre-empts a small computer whose worker can move, and waits when it cannot. lothsahn, 2026-10-24:
+// "If timing runs arrive and small machines (single slot) are working on non timing work, the dispatcher should pre-empt
+// their existing work and move it to make space for the timing work if it's possible for the existing worker to push their
+// work and swap to a new machine"; "This is much better than just adding the work to an open slot on a busy large machine".
+test('w2055: a timed leg pre-empts a small computer whose worker is between turns with everything pushed, not a busy big one with a free slot; dirty work, a build in flight, mid-turn or no room elsewhere keeps it waiting', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o } = env;
+  fixTimedFacts(o);
+  agentsRoomFacts(agents, { game: ['pc'] });
+  putRequests(store, [{ id: 'w1', title: 'Belt tooltip', brief: 'Fix it.' }]);
+  const { id, info } = await startedFor(env, 'w1');
+  const fleet = (o2: { big?: Partial<Computer> } = {}): Computer[] => {
+    const box = (bid: string, maxAgents: number, x: Partial<Computer> = {}): Computer => ({ id: bid, online: true, live: 0, midTurn: 0, maxAgents, sandboxes: 1, maxSandboxes: 3, freeSandboxes: 1, memUsedBytes: 16 * 1024 ** 3, memTotalBytes: 64 * 1024 ** 3, editors: 0, maxEditors: 2, platform: 'win32', ...x });
+    // pc: a small computer (1 agent slot) running w1's worker; big: xlarge, an empty slot but three agents at work.
+    return [box('pc', 1, { live: 1, freeSandboxes: 0, sandboxes: 1, maxSandboxes: 1 }), box('big', 10, { live: 3, editors: 2, ...o2.big })];
+  };
+  agents.places = () => fleet();
+  const sb = store.machines.get('pc')!.sandboxes!.find((x) => x.id === info.machineSandbox)!;
+  const clean = { branch: 'w1-belt', upstream: 'origin/w1-belt', ahead: 0, behind: 0, dirty: 0, untracked: 0 };
+  sb.git = { ...clean } as typeof sb.git;
+  putRequests(store, [{ id: 'w2', title: 'Timed leg for w9: belt A/B', status: 'queued', needs: 'game', queuedFor: { at: new Date().toISOString(), needs: ['pc'] }, timedLeg: { for: 'w9', forSession: 'nobody', from: 'beast', small: ['pc'] } }]);
+  const starts: { w: string; m: string; moves: readonly Occupant[] }[] = [];
+  agents.startTimedLeg = (w, m, _why, moves = []) => (starts.push({ w: w.id, m, moves }), true);
+
+  // Movable: between turns, clean, pushed, w1 has room on big. Pre-empt pc, never the free slot on big.
+  const s1 = agents.timedLegStepFor(store.work.get('w2')!)!;
+  assert.ok('preempt' in s1.step, JSON.stringify(s1.step));
+  assert.deepEqual(o.timedLegBound(), ['w2']);
+  assert.deepEqual(starts.map((x) => [x.w, x.m, x.moves.map((m) => [m.session, m.move])]), [['w2', 'pc', [[id, 'big']]]]);
+  assert.match(store.work.get('w2')!.log.join('\n'), /ledger: PRE-EMPTED on pc by FF Factory \(w2055\): no computer on Windows that takes timed runs is idle; pc \(small, 1 agent slot\) is the first small one whose work can move: worker \w{8} \(w1\) moves to big/);
+  starts.length = 0;
+
+  const stays = () => {
+    const r = agents.timedLegStepFor(store.work.get('w2')!)!.step;
+    assert.ok('wait' in r, JSON.stringify(r));
+    assert.deepEqual(r.wait, ['pc'], 'a normal leg waits on the small computer, not on big');
+    return r.why;
+  };
+  // Not movable: uncommitted work.
+  sb.git = { ...clean, dirty: 2 } as typeof sb.git;
+  assert.match(stays(), /worker \w{8} on pc \(w1\) stays: its sandbox has uncommitted work \(2 file\(s\)\)/);
+  // Not movable: commits not pushed.
+  sb.git = { ...clean, ahead: 1 } as typeof sb.git;
+  assert.match(stays(), /stays: 1 commit\(s\) on w1-belt are not pushed/);
+  sb.git = { ...clean } as typeof sb.git;
+  // Not movable: a check-in set with its editor up (a build, an import or a test run in flight).
+  info.wakeAt = new Date(Date.now() + 10 * 60_000).toISOString();
+  const was = sb.unity.state;
+  sb.unity.state = 'running';
+  assert.match(stays(), /stays: its check-in is set and its editor runs: a build, import or test run may be in flight/);
+  sb.unity.state = was;
+  delete info.wakeAt;
+  // Not movable: mid-turn (never interrupted).
+  const st = info.status;
+  info.status = 'running';
+  assert.match(stays(), /stays: it is mid-turn/);
+  info.status = st;
+  // No room: big has no free sandbox, so w1 has nowhere to go.
+  agents.places = () => fleet({ big: { freeSandboxes: 0, sandboxes: 3 } });
+  assert.match(stays(), /stays: no other computer that could take it has room now/);
+  assert.deepEqual(o.timedLegBound(), [], 'nothing started, its queue unchanged');
+  assert.equal(starts.length, 0);
+  // High priority with nothing freeable: the big computers' fallback at once.
+  agents.places = () => fleet({ big: { freeSandboxes: 0, sandboxes: 3 } });
+  store.work.get('w2')!.priority = 'high';
+  const hi = agents.timedLegStepFor(store.work.get('w2')!)!;
+  assert.ok('widen' in hi.step && hi.big, JSON.stringify(hi.step));
+  assert.deepEqual(hi.step.widen, ['pc', 'big']);
 });

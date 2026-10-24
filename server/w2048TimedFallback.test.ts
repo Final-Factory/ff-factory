@@ -54,7 +54,7 @@ test('w2048: all small computers offline past the wait: the leg times here on th
   for (const big of ['beast', 'lothdesktop']) {
     const d = ask(big, places);
     assert.equal(d.verdict, 'here', big);
-    assert.match(d.bigFallback ?? '', /lothlaptop offline since 12:30Z \(90 min\); biscuit offline since 13:15Z \(45 min\); m3 offline since 06:50Z \(430 min\)/);
+    assert.match(d.bigFallback ?? '', /lothlaptop offline since 12:30Z \(90 min\); m3 offline since 06:50Z \(430 min\)/);
     assert.match(d.why, new RegExp(`time here on ${big}, a big computer \\(w2048\\)\\. Every number of this comparison comes from ${big}: run every side on ${big} \\(A and B, the baseline and the change\\), re-measure here any baseline that ran on another computer, and never compare with another computer's numbers`));
     assert.match(d.why, /never m5/);
   }
@@ -70,7 +70,7 @@ test('w2048: one small computer online, even busy, the leg waits for it there; a
   assert.equal(blip.verdict, 'elsewhere', 'a 30 s drop (a deploy, a link flap) is waited out');
   assert.deepEqual(blip.needs, ['lothlaptop']);
   const states = smallTimedStates(fleet({ lothlaptop: off(0.5) }), {}, undefined, 'beast', NOW, WAIT);
-  assert.deepEqual(states.map((s) => [s.id, s.state]), [['lothlaptop', 'able'], ['biscuit', 'able'], ['m3', 'offline']]);
+  assert.deepEqual(states.map((s) => [s.id, s.state]), [['lothlaptop', 'able'], ['m3', 'offline']]);
 });
 
 test('w2048: m5 never takes timed work, not even when it is the only computer online', () => {
@@ -84,7 +84,7 @@ test('w2048: m5 never takes timed work, not even when it is the only computer on
 
 test('w2048: a small computer that is held or has no game sandbox cannot take it, at once', () => {
   const st = smallTimedStates(fleet({ biscuit: { maxSandboxes: 0 } }), { hold: { lothlaptop: 'lothsahn using it' } }, undefined, 'beast', NOW, WAIT);
-  assert.deepEqual(st.map((s) => `${s.id}:${s.state}:${s.why}`), ['lothlaptop:unable:lothlaptop is held (lothsahn using it)', 'biscuit:unable:biscuit has no game sandbox', 'm3:offline:m3 offline since 06:50Z (430 min)']);
+  assert.deepEqual(st.map((s) => `${s.id}:${s.state}:${s.why}`), ['lothlaptop:unable:lothlaptop is held (lothsahn using it)', 'm3:offline:m3 offline since 06:50Z (430 min)']);
   assert.equal(decideTimedPlace({ here: fleet().find((c) => c.id === 'beast'), places: fleet({ biscuit: { maxSandboxes: 0 } }), prefs: { hold: { lothlaptop: 'x' } }, now: NOW, waitMs: WAIT }).verdict, 'here');
 });
 

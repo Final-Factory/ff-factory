@@ -938,6 +938,37 @@ and w1891 waited behind it there, and w1789 waited on LothDesktop behind shared 
   **here**, with the same reason, and the log line says "here on a big computer (w2048 fallback: ...)". A widened leg's
   worker hears **here** wherever it is started. Before w2048 a leg widened after `TIMED_LEG_WAIT_MS` (60 minutes) even
   when its small computer was only busy.
+- **Size classes, and the timing order with pre-emption** (w2055; lothsahn, 2026-10-24: "Small:1 slot, medium:2-3 slots.
+  Large:4-6 slots. Xlarge:7+"; "If timing runs arrive and small machines (single slot) are working on non timing work, the
+  dispatcher should pre-empt their existing work and move it to make space for the timing work if it's possible for the
+  existing worker to push their work and swap to a new machine"; "Timing should prefer small, then medium, etc. if machines
+  are all busy, queue timing runs up on small machines and make them wait vs scheduling them on shared boxes, unless high or
+  urgent priority"; "If all small machines are offline, don't wait for them to come online"; "By free machine you mean
+  idle... Doing no other work"). A computer's class comes from its agent slots (`placement.ts` `sizeClass`), never its
+  name, and the logs and the Capacity timed line show it ("biscuit (large, 4 agent slots)"). Small and medium computers
+  time where they are (`timedAsk.ts` `isSmallTimed`); biscuit (4 slots) is large now and asks `timed_place` like BEAST.
+  Each blocker-watch pass, `Orchestrators.timedLegBound` asks `timedLegPlace.ts` `timedLegStep` for every Queued timed leg:
+  1. **an idle computer** (`notIdle`: online, no agent live, no Unity process in use but editors left open in sandboxes no
+     worker holds, no bench lock or timed wait, no released worker coming back, no leg held for it; an empty slot on a busy
+     computer is not idle), small first, then medium, large, xlarge: FF Factory starts the leg there itself
+     (`Agents.startTimedLeg`, "timed leg (w2055): wNNN started on M/S");
+  2. else **pre-emption** on a computer of the base class (the smallest class with a computer up; a computer offline for
+     less than the 5-minute blip window, `timing.unavailableIdleMinutes`, still counts): when every worker holding a sandbox
+     there can move (`Agents.preemptVerdict`), each is moved by w2046's `moveForRoom` (stopped between turns, its sandbox
+     released at once, a fresh session for its request on the computer `moveDecision` picks, told "[moved, w2055]"), or only
+     released when it serves no open request; then the leg starts in the freed sandbox ("timed preempt (w2055): worker X on
+     M/S (wNNN) moved to T so timed leg wNNN can start on M");
+  3. else a **high or urgent** leg widens at once to every computer that takes timed runs (w2048's fallback, never m5); a
+     **normal or low** one waits Queued on the base class's computers, never on a busy shared one. With every small computer
+     offline the base class is medium (then large...), at once, and each pass re-checks, so a small one coming back is the
+     base again and a widening is undone.
+  **Movable** ("possible", `preemptVerdict`): a worker between turns (never mid-turn, no permission waiting, not starting),
+  not being moved already, serving no timed leg or pair run and not the release lane or nightly, no Live view, no bench lock
+  from its sandbox, a known git state with no uncommitted or untracked file, nothing running for it (a game player, a
+  Unity batch slot held or waited for, a check-in with its editor up: a build, import or test may be in flight), and
+  `moveDecision` must answer move: not pinned to that computer, its branch tracking its own remote branch with nothing
+  unpushed, and another computer with a free sandbox. Out of scope: `timed_run` (daemon player A/Bs) and a whole timed
+  request's placement (`timedRank`, w1872) are unchanged; `SMALL_TIMED_MAX_AGENTS` (4) still picks timed_run's computers.
 - **How long "offline" is waited for** (w2048, `unavailableWait`; lothsahn: "If the fleet is idle it should wait far less
   than if the fleet is busy"). The load is the agents mid-turn plus the requests Queued, over the online computers' agent
   slots (`fleetLoad`). At 50% load or less the wait is 5 minutes, at 100% or more 60 minutes, and between the two it grows

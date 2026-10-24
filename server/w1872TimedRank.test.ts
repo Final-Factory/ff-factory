@@ -23,7 +23,7 @@ test('w1872: a small computer beats a big one, BEAST last, whatever their live a
   assert.deepEqual(ids(timedRank(fleet())), ['m3', 'lothdesktop', 'beast']);
   const p = pickTimed(fleet(), {}, 'timed')!;
   assert.equal(p.pick.id, 'm3');
-  assert.match(p.why, /: m3 \(4 agent slots, 2 editors, 1 live\) > lothdesktop \(8 agent slots, 3 editors, 2 live\) > beast \(12 agent slots, 3 editors, 0 live\); never m5 /);
+  assert.match(p.why, /: m3 \(large, 4 agent slots, 2 editors, 1 live\) > lothdesktop \(xlarge, 8 agent slots, 3 editors, 2 live\) > beast \(xlarge, 12 agent slots, 3 editors, 0 live\); never m5 /);
   // Agent slots first, the editor limit breaks a tie; a one-worker computer is the ideal (its queue never cuts a turn, w1832).
   const one = box('solo', 4, 4, 'win32', { maxAgents: 1, live: 0 });
   assert.deepEqual(ids(timedRank([box('a', 2, 3, 'win32'), box('b', 2, 1, 'win32'), one])), ['solo', 'b', 'a']);
@@ -66,7 +66,7 @@ test('w1872: a named computer wins over the ranking; one that takes no timed run
   assert.match(placementHint('beast', fleet(), undefined, {}, undefined, 'game', false, 'timed')!, /the next new timed work goes to m3 .*Unless this work needs beast/);
   // Pinned to m5: refused, nothing started or moved, with the computers that take it and the way out.
   const no = timedPinRefusal('m5', fleet(), {}, 'timed:darwin')!;
-  assert.match(no, /^m5 takes no timed or exclusive-lock work \(lothsahn, 2026-10-23: "The m5 should not be used for timing runs because Ben runs stuff on it personally"; w1861\): this timed work was not started or moved\. Pick another computer on darwin and start it there: m3 \(4 agent slots, 2 editors, 1 live\) \("Next timed work" ranks them, w1872\)\. If none of them can do it, ask an operator \(waiting_on_person\) instead of placing it\.$/);
+  assert.match(no, /^m5 takes no timed or exclusive-lock work \(lothsahn, 2026-10-23: "The m5 should not be used for timing runs because Ben runs stuff on it personally"; w1861\): this timed work was not started or moved\. Pick another computer on darwin and start it there: m3 \(large, 4 agent slots, 2 editors, 1 live\) \("Next timed work" ranks them, w1872\)\. If none of them can do it, ask an operator \(waiting_on_person\) instead of placing it\.$/);
   const [beast, loth, m3, m5] = fleet();
   assert.match(timedPinRefusal('M5', [beast, loth, { ...m3, freeSandboxes: 0, sandboxes: 2 }, m5], {}, 'timed')!, /start it there: lothdesktop \(.*\) > beast \(.*\) > m3 \(no room now\) /);
   assert.match(timedPinRefusal('m5', [{ ...m3, online: false }, m5], {}, 'timed:darwin')!, /start it there: none is online/);
@@ -85,7 +85,7 @@ test('w1872: "Next timed work" also names the computers without room, smallest f
   const [beast, loth, m3, m5] = fleet();
   const p = pickTimed([full(beast), loth, full(m3), m5], {}, 'timed')!;
   assert.equal(p.pick.id, 'lothdesktop');
-  assert.match(p.why, /: lothdesktop \(8 agent slots, 3 editors, 2 live\); no room now: m3 \(4 agent slots\), beast \(12 agent slots\); never m5 /);
+  assert.match(p.why, /: lothdesktop \(xlarge, 8 agent slots, 3 editors, 2 live\); no room now: m3 \(large, 4 agent slots\), beast \(xlarge, 12 agent slots\); never m5 /);
   // A held or offline computer is not "no room now".
   const q = pickTimed([full(beast), loth, { ...m3, online: false }, m5], { hold: { beast: 'paused' } }, 'timed')!;
   assert.doesNotMatch(q.why, /no room now/);

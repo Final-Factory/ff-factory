@@ -66,7 +66,7 @@ test('w1628: timed work goes to the smallest computer with room and no timed leg
   assert.equal(pickTimed([beast, loth], { hold: { lothdesktop: 'a build' } }, 'timed:win32')!.pick.id, 'beast');
   assert.equal(pickTimed([beast, loth], {}, 'timed:darwin'), undefined);
   assert.match(pickComputer([beast, loth], undefined, {}, 'game', false, 'timed:darwin')!.why, /^timed work, but no computer on darwin has room; so the general placement/);
-  assert.match(pickComputer([beast, loth, m3], undefined, {}, 'game', false, 'timed')!.why, /machines that have a smaller number of editors or slots"\): m3 \(4 agent slots, 2 editors, 1 live\) > lothdesktop .* > beast /);
+  assert.match(pickComputer([beast, loth, m3], undefined, {}, 'game', false, 'timed')!.why, /machines that have a smaller number of editors or slots"\): m3 \(large, 4 agent slots, 2 editors, 1 live\) > lothdesktop .* > beast /);
   assert.ok(capacityLines([beast, loth, m3]).some((l) => /^Next timed work \(benchmarks, perf A\/Bs and probes; on the platform it names, w1628\): m3 /.test(l)));
 });
 

@@ -2095,7 +2095,7 @@ export interface WorkItem {
    * on this one's report meanwhile), where it came from and the small computers it waits on. Queued for those; after
    * TIMED_LEG_WAIT_MS (server/timedAsk.ts) its needs widen to every computer that takes timed runs, and `widened` says when.
    */
-  timedLeg?: { for: string; forSession: string; from: string; small: string[]; widened?: string };
+  timedLeg?: { for: string; forSession: string; from: string; small: string[]; widened?: string; platform?: string };
   /**
    * Its last hand-back (w1532, server/machinePause.ts): its worker's machine was paused, so it was taken off that worker and
    * Queued for another computer, whose worker picks it up from `branch` with `note` (the worker's own line, or where it
