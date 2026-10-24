@@ -423,7 +423,7 @@ function Invoke-NewJoin([string]$tsExe, $self, [string]$work) {
     # w2004: the person's vault GitHub token for the game repo's clone, when the portal sent one (machines.githubFromVault):
     # given to the installer's process only, never written or printed. A play-only join clones nothing and gets none.
     $ghToken = [string]$r.Body.githubToken
-    $r.Body.githubToken = $null
+    if ($ghToken) { $r.Body.githubToken = $null }
     if ($ghToken) { Say 'The portal also sent a GitHub token for the game repo''s clone (used by the installer only, not kept).' }
 
     Step 'Installing (install.ps1)'
