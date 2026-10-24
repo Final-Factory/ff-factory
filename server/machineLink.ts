@@ -39,6 +39,8 @@ export class UpdateBundles {
   private made = new Map<string, Promise<UpdateBundle>>();
   /** machine id -> the bundle's SHA-256 it was offered, until when (ms). */
   private offers = new Map<string, { sha256: string; until: number }>();
+  /** machine id -> the SHA-256 of the offered bundle it asked for since (w2005): a machine that never did changed nothing. */
+  private asked = new Map<string, string>();
 
   constructor(o: { dataDir: string; root: string }) {
     this.dir = path.join(o.dataDir, 'update-bundles');
@@ -83,12 +85,19 @@ export class UpdateBundles {
   /** This machine may fetch this bundle for the next hour. */
   offer(machineId: string, b: UpdateBundle, now = Date.now()) {
     this.offers.set(machineId, { sha256: b.sha256, until: now + 3_600_000 });
+    this.asked.delete(machineId);
+  }
+
+  /** Whether the machine asked for this offered bundle since it was offered (w2005). */
+  fetched(machineId: string, sha256: string): boolean {
+    return this.asked.get(machineId) === sha256;
   }
 
   /** The bundle file a machine asks for, when it was offered that one and the offer stands; else undefined. */
   async fileFor(machineId: string, sha256: string, now = Date.now()): Promise<string | undefined> {
     const o = this.offers.get(machineId);
     if (!o || o.sha256 !== sha256 || o.until < now) return undefined;
+    this.asked.set(machineId, sha256);
     for (const p of this.made.values()) {
       const b = await p.catch(() => undefined);
       if (b?.sha256 === sha256) return b.file;
@@ -110,6 +119,14 @@ export async function updateBundleFor(pathname: string, machineOf: () => string 
   if (!file || !fs.existsSync(file)) return { status: 404, error: 'no update bundle with that SHA-256 was offered to this machine' };
   return { status: 200, file, size: fs.statSync(file).size, machineId };
 }
+
+/**
+ * An update over the link that never reached the machine (w2005): no answer came, the machine is offline, and its daemon
+ * never asked for the bundle, which it does before it changes anything (machine/selfUpdate.ts onSelfUpdate). On 2026-10-24
+ * m3 went dark 17 s before its update was sent; the rollout called it FAILED, tried an ssh rollback of a machine nothing had
+ * touched, and never updated it when it came back. Such an update stays due instead.
+ */
+export class UpdateNotReached extends Error {}
 
 /** How long the portal waits for a daemon to take an update or tools publish over its link (self_update_ack, w1641). */
 export const LINK_ACK_MS = 12 * 60_000;

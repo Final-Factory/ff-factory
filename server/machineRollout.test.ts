@@ -7,6 +7,7 @@ import { MachineRollout, ROLLOUT_FILE, VERIFIED_FILE, changedSettings, installer
 import { workerToolsRemote, workerUpdateRemote } from './opsWorker.ts';
 import type { BenchState, Requester } from '../shared/types.ts';
 import type { LinkUpdateReport } from './machineProtocol.ts';
+import { UpdateNotReached } from './machineLink.ts';
 
 /** The rollout after a verified portal deploy (w887, docs/ops-worker.md "After a verified deploy"). */
 
@@ -29,7 +30,7 @@ interface FakeMachine extends RolloutMachine {
   /** w1596: its daemon updates over its own link: what its update job reports (or throws), and the machine afterwards. */
   /** w1918: why its connected daemon does not update over its link (server/machines.ts linkProblem). */
   linkProblem?: string;
-  linkRun?: (form: 'update' | 'tools', commit: string) => { report?: Partial<LinkUpdateReport>; throws?: string; after?: { online: boolean; daemon?: string } };
+  linkRun?: (form: 'update' | 'tools', commit: string) => { report?: Partial<LinkUpdateReport>; throws?: string; notReached?: boolean; after?: { online: boolean; daemon?: string } };
 }
 
 /** What `worker.ts tools` prints (server/agentTools.ts), shortened to the lines the rollout reads. */
@@ -93,7 +94,7 @@ function world(machines: FakeMachine[], o: { requester?: Requester; enabled?: bo
       linkCalls.push({ id, form, commit });
       const r = find(id).linkRun!(form, commit);
       if (r.after) Object.assign(find(id), r.after);
-      if (r.throws) throw new Error(r.throws);
+      if (r.throws) throw r.notReached ? new UpdateNotReached(r.throws) : new Error(r.throws);
       return { id: 'j', form, commit, ok: true, exit: 0, log: '', at: '', ...r.report };
     },
     tell: (to, text) => told.push({ to, text }),
@@ -550,6 +551,29 @@ test("w1596: over the link, a new daemon that did not come back is put back by i
   assert.equal(w3.calls.length, 1, 'offline after the job went quiet: the installer put it back over ssh, where the portal can reach it');
   assert.match(w3.calls[0].remote, /--daemon-ref 1111111$/);
   assert.match(w3.told[0].text, /Rollback: ok\./);
+});
+
+test('w2005: a machine that went offline before its update reached it is not called failed, nothing is put back over ssh, and it is updated when it comes back', async () => {
+  let tries = 0;
+  const asleep = mac('m3', {
+    agents: [{ id: 'a1', title: 'w1987: repro' }],
+    linkRun: () => (++tries === 1 ? { throws: 'm3 did not answer the update over its link in 12 minute(s); it went offline without fetching the update bundle, so nothing on it changed', notReached: true, after: { online: false } } : { after: { online: true, daemon: NEW.slice(0, 7) } }),
+    run: () => assert.fail('no ssh: nothing on it changed'),
+  });
+  const w = world([asleep], { tools: false });
+  const r = w.make();
+  w.verify();
+  await r.tick();
+  assert.equal(w.calls.length, 0, 'no rollback over ssh');
+  w.advance(11 * 60_000);
+  await r.tick();
+  assert.equal(w.told.length, 1);
+  assert.match(w.told[0].text, /- m3: waiting: offline before the update reached it \(over its daemon's link: .*nothing on it changed\)\. It is updated when it next comes online\./);
+  assert.doesNotMatch(w.told[0].text, /- m3: FAILED|needs a person/);
+  w.find('m3').online = true;
+  await r.tick();
+  assert.equal(w.linkCalls.length, 2, 'updated over its link once it is back');
+  assert.match(w.told[1].text, /- m3: updated\./);
 });
 
 test("w1861: a timed run on a machine holds its update and tools back until its bench has been free a while; the report says what it waits for", async () => {

@@ -191,4 +191,7 @@ test('machine unity mcp: the portal asks for it for sandbox agents on a machine;
   assert.ok(!WORKER_HIDDEN_SKILLS.some((k) => k.includes(':')), 'skillOverrides never reach a plugin skill: ff-agents, ff-speckit and ff-discord stay listed');
   const ads = machines.hooks!.specFor(info({ machineSandbox: 'sb1', title: 'w9: cut a 30 s trailer for the Steam page' }), machine);
   assert.deepEqual((ads.settings as { enabledPlugins: object }).enabledPlugins, { 'csharp-lsp@claude-plugins-official': false }, 'marketing work keeps the marketing plugin');
+  // w2002: no <total_tokens> countdown after every tool result; the process gets the switch
+  assert.equal(inSb.env?.CLAUDE_CODE_TOTAL_TOKENS_REMINDER, 'off');
+  assert.equal(buildOptions(inSb, {}).env?.CLAUDE_CODE_TOTAL_TOKENS_REMINDER, 'off');
 });

@@ -76,7 +76,7 @@ needs the text in front of it on every call, or only in the case named.
 | 8 | UnityMCP server instructions | 803 | the bridge's own usage notes | when the task uses Unity | keep (they come from the mcp-for-unity package) | |
 | 9 | Deferred tool names (81: 37 UnityMCP, 15 machine, 29 Claude Code) | 770 | names to ToolSearch | yes | keep; Cron*, Enter/ExitWorktree, Enter/ExitPlanMode, DesignSync, PushNotification, RemoteTrigger, NotebookEdit, LSP had 0 calls (about 120 tokens) | measured |
 | 10 | gitStatus, email, attribution, environment, model, bypass note, date, headers | ~1,540 | Claude Code's context | yes | keep | remainder of the measured 29,872 |
-| 11 | **Per-turn reminders** (in the history, not the base) | ~20 a call each, piling up | `total_tokens` countdown on every call (16,709 of 16,995 calls), "hasn't heard from you" (1,449), file-change notes | no | no switch found for `total_tokens_reminder`; leave | w1469's 62 sessions, measured |
+| 11 | **Per-turn reminders** (in the history, not the base) | ~20 a call each, piling up | `total_tokens` countdown on every call (16,709 of 16,995 calls), "hasn't heard from you" (1,449), file-change notes | no | **off for workers** (w2002): `CLAUDE_CODE_TOTAL_TOKENS_REMINDER=off`, the switch Claude Code 2.1.284 reads first (its modes: off, infinite, fixed, countdown, padded-countdown; the default counts down from 15,000,000) | w1469's 62 sessions, measured; the switch read from the CLI and probed |
 | 12 | **CLAUDE.md re-injected** into the history | ~13k each time | Claude Code re-sends CLAUDE.md when it changes on disk (a merge, a branch switch) or after a compaction | | a shorter CLAUDE.md shrinks each one | 55 re-injections in 62 sessions, 12 of 29 recent ones identical to the last (w1469's `instr.py`, measured) |
 
 ## Duplicated text
@@ -271,5 +271,5 @@ needs no login).
 10. **D9, brief harness text** (~−1k on a typical brief): "The request as filed" only when the brief does not already quote it; one
     copy of the DONE/Learned rule.
 
-Not levers: the `total_tokens` reminder (Claude Code's, no switch found), UnityMCP's instructions (the package's), Claude Code's
+Not levers: UnityMCP's instructions (the package's), Claude Code's
 own system text.

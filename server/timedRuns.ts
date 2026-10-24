@@ -61,6 +61,11 @@ export interface TimedRunDeps {
    * (at most SMALL_TIMED_MAX_AGENTS agent slots, never m5), with its agent slots for the order. Default: none.
    */
   smallWorker?: (m: Machine) => { agents: number } | undefined;
+  /**
+   * w1996: why a person holds a computer (placement.hold, a tray pause: holdReason), or undefined. A held computer is shown
+   * but never picked for a new run (lothsahn holds LothLaptop while he uses it; an exclusive turn would close his editor).
+   */
+  held?: (id: string) => string | undefined;
 }
 
 /** What kind of timing computer a target is (w1996): one that only plays the game, or a small worker computer. */
@@ -75,14 +80,16 @@ export interface TimedTarget {
   why: string;
   platform?: string;
   agents: number;
+  /** A person's hold on it (deps.held): no new run goes there until it is lifted. */
+  held?: string;
 }
 
 /**
- * The order targets are picked in when none is named (w1996): online ones that run timed runs first, play-only before
+ * The order targets are picked in when none is named (w1996): computers nobody holds first, then online ones that run timed runs, play-only before
  * small worker computers (a play-only turn idles nobody), then the fewest runs ahead, the fewest agent slots, the id.
  */
 export function rankTargets(all: readonly TimedTarget[]): TimedTarget[] {
-  const key = (t: TimedTarget) => [t.online && t.offers ? 0 : 1, t.kind === 'play-only' ? 0 : 1, t.runs.length, t.agents];
+  const key = (t: TimedTarget) => [t.held ? 1 : 0, t.online && t.offers ? 0 : 1, t.kind === 'play-only' ? 0 : 1, t.runs.length, t.agents];
   return [...all].sort((a, b) => {
     const [x, y] = [key(a), key(b)];
     for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return x[i] - y[i];
@@ -180,7 +187,8 @@ export class TimedRuns {
     for (const m of this.d.machines()) {
       const small = isPlayOnly(m) ? undefined : this.d.smallWorker?.(m);
       if (!isPlayOnly(m) && !small) continue;
-      out.push({ id: m.id, kind: isPlayOnly(m) ? 'play-only' : 'small', online: this.d.isOnline(m.id), offers: this.d.offers(m.id), why: isPlayOnly(m) ? m.playOnly!.trim() : `a small worker computer (${small!.agents} agent slot${small!.agents === 1 ? '' : 's'})`, runs: this.runsOn(m.id), ...(m.platform ? { platform: m.platform } : {}), agents: small?.agents ?? 0 });
+      const held = this.d.held?.(m.id);
+      out.push({ ...(held ? { held } : {}), id: m.id, kind: isPlayOnly(m) ? 'play-only' : 'small', online: this.d.isOnline(m.id), offers: this.d.offers(m.id), why: isPlayOnly(m) ? m.playOnly!.trim() : `a small worker computer (${small!.agents} agent slot${small!.agents === 1 ? '' : 's'})`, runs: this.runsOn(m.id), ...(m.platform ? { platform: m.platform } : {}), agents: small?.agents ?? 0 });
     }
     return out;
   }
@@ -196,9 +204,11 @@ export class TimedRuns {
     if (named !== undefined && named !== '') {
       const t = all.find((x) => x.id.toLowerCase() === String(named).toLowerCase());
       if (!t) throw new Error(`${String(named)} takes no timed run (w1946, w1996: a play-only computer, or a small worker computer that takes timed runs, on Windows: a run plays Windows players); the ones that do: ${all.map((x) => x.id).join(', ') || 'none yet'}`);
+      if (t.held) throw new Error(`${t.id} is held (${t.held}): no timed run goes there until the hold is lifted; leave machine unset for the next one, or call timed_place again with via "leg"`);
       return t.id;
     }
-    const first = this.windowsTargets()[0];
+    const first = all.find((x) => !x.held);
+    if (!first && all.length) throw new Error(`every computer that takes a timed run is held now (${all.map((x) => `${x.id}: ${x.held}`).join('; ')}); call timed_place again with via "leg"`);
     if (first) return first.id; // offline: the run waits for it, and the answer says so
     throw new Error('no computer takes a timed run now (w1946, w1996: a play-only computer, or a small Windows worker computer that takes timed runs); time on your own computer with the bench queue instead (scripts/bench/probe_ab_win.sh)');
   }
@@ -378,6 +388,6 @@ export class TimedRuns {
   capacityLine(): string | undefined {
     const t = this.windowsTargets();
     if (!t.length) return undefined;
-    return `Timed-run computers (w1946, w1996: a Windows player A/B built where its worker is goes there with timed_run, under that computer's exclusive ticket): ${t.map((x) => `${x.id} (${x.kind === 'play-only' ? 'play-only' : `small, ${x.agents} agent slot${x.agents === 1 ? '' : 's'}`}, ${x.online ? (x.offers ? 'online' : 'online, daemon too old for timed runs') : 'offline'}${x.runs.length ? `; ${x.runs.length} run(s): ${x.runs.map((r) => `${r.id} ${r.state}`).join(', ')}` : '; free'})`).join(', ')}.`;
+    return `Timed-run computers (w1946, w1996: a Windows player A/B built where its worker is goes there with timed_run, under that computer's exclusive ticket): ${t.map((x) => `${x.id} (${x.kind === 'play-only' ? 'play-only' : `small, ${x.agents} agent slot${x.agents === 1 ? '' : 's'}`}, ${x.held ? `held (${x.held}), ` : ''}${x.online ? (x.offers ? 'online' : 'online, daemon too old for timed runs') : 'offline'}${x.runs.length ? `; ${x.runs.length} run(s): ${x.runs.map((r) => `${r.id} ${r.state}`).join(', ')}` : '; free'})`).join(', ')}.`;
   }
 }

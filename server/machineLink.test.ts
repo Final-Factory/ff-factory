@@ -153,9 +153,13 @@ test('w1596: the bundle goes only to the machine it was offered to, with its own
   s.mm.bundles.offer('mx', b);
   assert.equal((await get('ffm_mx_' + 'x'.repeat(40))).status, 401, 'another credential');
   assert.equal((await get(s.token, 'f'.repeat(64))).status, 404, 'another bundle');
+  assert.equal(s.mm.bundles.fetched('mx', b.sha256), false, 'w2005: not asked for yet');
   const ok = await get(s.token);
   assert.equal(ok.status, 200);
   await ok.arrayBuffer();
+  assert.equal(s.mm.bundles.fetched('mx', b.sha256), true, 'w2005: asked for');
+  s.mm.bundles.offer('mx', b);
+  assert.equal(s.mm.bundles.fetched('mx', b.sha256), false, 'w2005: a new offer starts over');
 
   const dir = path.join(s.tmp, 'dl');
   await assert.rejects(downloadBundle(s.url, s.token, { sha256: b.sha256, size: b.size - 1 }, dir), /larger than the .* bytes the portal said/);
