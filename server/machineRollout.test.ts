@@ -358,6 +358,9 @@ test('the installer summary keeps the lines that matter, and the settings it cha
   const out = 'FF Factory worker update of /x\nBefore: daemon a; the portal sees it online.\nChecking prerequisites...\nAfter: daemon b (was a).\nSettings: none changed (every setting carried).\nCredential: the machine\'s own, reused.\nThe portal sees m5 online running b, the commit installed, not outdated.\n';
   assert.deepEqual(installerSummary(out), ['Before: daemon a; the portal sees it online.', 'After: daemon b (was a).', 'Settings: none changed (every setting carried).', "Credential: the machine's own, reused.", 'The portal sees m5 online running b, the commit installed, not outdated.']);
   assert.deepEqual(installerSummary('a\nb\nc'), ['a', 'b', 'c']);
+  // A grow asked of the Dev Drive goes to devdrive.json, which "Settings" never diffs: the summary says it (w1947).
+  const grow = 'Before: daemon a.\nDev Drive: 80 GB now, 98 GB asked: the daemon grows it in place once no agent or editor is in a sandbox.\nDev Drive: reused V: (ReFS, Dev Drive, up to 80 GB).\nAfter: daemon b (was a).\nSettings: none changed (every setting carried).\n';
+  assert.deepEqual(installerSummary(grow), ['Before: daemon a.', 'Dev Drive: 80 GB now, 98 GB asked: the daemon grows it in place once no agent or editor is in a sandbox.', 'Dev Drive: reused V: (ReFS, Dev Drive, up to 80 GB).', 'After: daemon b (was a).', 'Settings: none changed (every setting carried).']);
   assert.deepEqual(changedSettings('Settings changed:\n  ~ maxUnity: 2 -> 3\n'), ['~ maxUnity: 2 -> 3']);
   assert.deepEqual(changedSettings(out), []);
 });
