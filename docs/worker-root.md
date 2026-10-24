@@ -52,7 +52,7 @@ BEAST `C:\Users\rydin\.ff-factory`, LothDesktop `D:\work\.ff-factory` (its `app_
 | `app/`, `app.new/`, `app.old/` | the daemon's code (a `git archive` of the portal) and the swap on redeploy | deploy | M | no | `server/machineDeploy.ts:334`, `machineDeployWin.ts` (deploy step 3, docs/machines.md) |
 | `daemon.json` | portal URL, machine id, **machine token**, repo path, folder options, pool settings | deploy; the daemon patches it on relocate | M | **yes** (token) | `machine/daemon.ts:113` (written 0600), `:1229`; `server/machineDeploy.ts:416` |
 | `run-daemon.ps1`, `daemon-task.xml` | Windows supervisor; task XML when registration needs an admin | deploy | M | no | `server/machineDeployWin.ts:436,470,476` |
-| `logs/` (`daemon.log`, `daemon.err.log`, `supervisor.log`, `*.prev`) | daemon output | daemon, supervisor | M | redacted | `server/machineDeployWin.ts:357`, `server/machines.ts:1678` |
+| `logs/` (`daemon.log`, `daemon.err.log`, `supervisor.log`, their `.<UTC stamp>[.gz]` archives) | daemon output: 14 days, at least 20 archives, at most 200 MB (docs/machines.md "The daemon's logs") | daemon, supervisor | M | redacted | `machine/logRetention.ts`, `server/machineDeployWin.ts` `supervisorScript` |
 | `sandboxes.json` | the sandbox pool across restarts | daemon | M | no | `machine/daemon.ts:241` |
 | `cleanup.json`, `cleanup-log.jsonl`, `cleanup-state.json` | clean-up settings and log | daemon | M | no | `machine/daemon.ts:136,270`; `server/cleanup.ts:537-569` |
 | `outside-watch.json` | the outside watchdog's ntfy topic | daemon | M | **yes** (the topic is the credential) | `machine/daemon.ts:960-969` |

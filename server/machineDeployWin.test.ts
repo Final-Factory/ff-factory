@@ -14,6 +14,7 @@ import { DAEMON_YIELD_EXIT, keepAwakeCommand } from '../machine/daemon.ts';
 import { editorBinary, editorLogPath, editorTree, editorsFor, parseWinProcs, reportersFor, winLaunchScript } from '../machine/unity.ts';
 import { ROOT } from './config.ts';
 import { powershell } from './testPowershell.ts';
+import { listArchives, maintainLogs } from '../machine/logRetention.ts';
 
 // Windows machines (docs/machines.md, "Windows machines"): the scripts the portal sends over ssh, the platform
 // branching, and (on a Windows CI runner only) the scripts run for real by Windows PowerShell.
@@ -155,7 +156,10 @@ test('windows: the supervisor finds its own folder, passes the config, restarts 
   assert.doesNotMatch(s, /strip-types/);
   assert.match(s, /-WindowStyle Hidden -PassThru -RedirectStandardOutput/);
   assert.match(s, /\$delay = \[Math\]::Min\(\$delay \* 2, 300\)/);
-  assert.match(s, /\.prev/);
+  // w2038: each run's log is kept under its own stamp (never one .prev that the next restart overwrites).
+  assert.doesNotMatch(s, /\.prev/);
+  assert.match(s, /ToString\("yyyyMMdd'T'HHmmssfff'Z'"\)/);
+  assert.match(s, /Move-Item -LiteralPath \$p -Destination \$to/);
   // w1918: a daemon that ended for a newer one of its machine (DAEMON_YIELD_EXIT) is not started again.
   assert.match(s, new RegExp(`if \\(\\$proc\\.ExitCode -eq ${DAEMON_YIELD_EXIT}\\) \\{[^}]*; break \\}`));
 });
@@ -729,4 +733,25 @@ public static class Inj {
   tray.stdin.write(`${JSON.stringify({ type: 'quit' })}\n`);
   const code = await new Promise<number | null>((r) => tray.on('exit', (c) => r(c)));
   assert.equal(code, 0);
+});
+
+// w2038: the supervisor's rotation, run for real (the rest of retention: logRetention.test.ts).
+test('logs: the real supervisor block, run by PowerShell over many restarts, keeps every run', { skip: process.platform !== 'win32' && 'PowerShell runs the Windows supervisor' }, () => {
+  const s = win.supervisorScript('C:\\nodejs\\node.exe', false);
+  const block = /  # Each run's output is kept[\s\S]*?\n  \}\n(?=  \$started)/.exec(s)?.[0];
+  assert.ok(block, 'the rotation block of supervisorScript');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fflogs-'));
+  // The same second twice (a fast crash loop) must not overwrite either.
+  const script = `$logs = $env:FFLOGS\n${block}`;
+  for (let i = 0; i < 6; i++) {
+    fs.writeFileSync(path.join(dir, 'daemon.log'), `run ${i}\n`);
+    fs.writeFileSync(path.join(dir, 'daemon.err.log'), i % 2 ? `err ${i}\n` : '');
+    execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { env: { ...process.env, FFLOGS: dir } });
+  }
+  const runs = listArchives(dir).filter((x) => x.base === 'daemon.log');
+  assert.equal(runs.length, 6);
+  assert.deepEqual(runs.map((x) => fs.readFileSync(path.join(dir, x.name), 'utf8')).sort(), [0, 1, 2, 3, 4, 5].map((i) => `run ${i}\n`));
+  assert.equal(listArchives(dir).filter((x) => x.base === 'daemon.err.log').length, 3, 'empty err logs are not archived');
+  maintainLogs(dir, { platform: 'win32' });
+  assert.equal(listArchives(dir).filter((x) => x.base === 'daemon.log' && x.gz).length, 5);
 });

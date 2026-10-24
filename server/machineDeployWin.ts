@@ -386,7 +386,8 @@ if ($r.Code -ne 0) { throw "npm ci failed ($($r.Code)): $($r.Out)" }
 /**
  * The supervisor the task runs (hidden): starts the daemon, and again whenever it exits, backing off when it
  * keeps dying quickly, like the portal's own scripts/supervise.ps1. The daemon's output goes to
- * logs\daemon.log and daemon.err.log (the previous run's kept as *.prev).
+ * logs\daemon.log and daemon.err.log; before each start the last run's are moved to daemon.log.<UTC stamp> (w2038), which
+ * the daemon gzips and prunes (machine/logRetention.ts).
  */
 export function supervisorScript(node: string, flag: boolean, service?: WinService): string {
   const flags = [...(flag ? ['--experimental-strip-types'] : []), '--disable-warning=ExperimentalWarning'].join(' ');
@@ -405,9 +406,16 @@ $argv = ${psq(flags)} + ' "' + $daemon + '" "' + (Join-Path $F 'daemon.json') + 
 $log = Join-Path $logs 'supervisor.log'
 $delay = 10
 while ($true) {
+  # Each run's output is kept under the time it closed (w2038); the daemon gzips and prunes them (machine/logRetention.ts).
+  $stamp = (Get-Date).ToUniversalTime().ToString("yyyyMMdd'T'HHmmssfff'Z'")
   foreach ($f in 'daemon.log', 'daemon.err.log') {
     $p = Join-Path $logs $f
-    if (Test-Path -LiteralPath $p) { Move-Item -Force -LiteralPath $p -Destination ($p + '.prev') }
+    if ((Test-Path -LiteralPath $p) -and (Get-Item -LiteralPath $p).Length -gt 0) {
+      $to = $p + '.' + $stamp
+      $i = 0
+      while ((Test-Path -LiteralPath $to) -or (Test-Path -LiteralPath ($to + '.gz'))) { $i++; $to = $p + '.' + $stamp + '-' + $i }
+      Move-Item -LiteralPath $p -Destination $to
+    }
   }
   $started = Get-Date
   try {
