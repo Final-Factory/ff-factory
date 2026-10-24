@@ -1490,7 +1490,7 @@ export class Orchestrators {
    */
   file(chat: SessionHandle, input: WorkInput): string {
     try {
-      return this.withBugNote(chat, this.fileNow(chat, input));
+      return this.withBugNote(chat, this.withOpenCards(chat, this.fileNow(chat, input)));
     } catch (e) {
       throw this.refusedCall(chat, 'request_work', { title: input.title, brief: input.brief }, e);
     }
@@ -1743,7 +1743,7 @@ export class Orchestrators {
   /** A requester's update (update_work): a note (an answer to a question reopens it), a priority, closing or reopening. */
   update(chat: SessionHandle, input: UpdateInput): string {
     try {
-      return this.withBugNote(chat, this.updateNow(chat, input));
+      return this.withBugNote(chat, this.withOpenCards(chat, this.updateNow(chat, input)));
     } catch (e) {
       throw this.refusedCall(chat, 'update_work', { ...input }, e);
     }
@@ -1996,6 +1996,34 @@ export class Orchestrators {
     const hit = about.filter((a) => asksAnsweredBy([a.ask], note).length);
     const go = hit.length ? hit : about.length === 1 ? about : [];
     if (go.length) this.closeAsks(chat.info.id, (a) => go.includes(a));
+  }
+
+  /** Per chat, the turn (its opening message's uuid) and the open questions already listed to the orchestrator in it. */
+  private readonly cardsListed = new Map<string, { turn: string | undefined; seqs: Set<number> }>();
+
+  /**
+   * w1955 (lothsahn: "Why was I being shown old cards that were decided?"): a person answers a card's question in typed
+   * words, and the orchestrator files or updates work on it without calling close_question, so the card stays clickable.
+   * Typed words carry no mark of what they answer, so FF Factory never closes on a guess: in a turn the person started,
+   * request_work and update_work list the chat's open questions asked before that message, each once per turn, and the
+   * orchestrator closes the ones the work settles. The card stays open until it does.
+   */
+  private withOpenCards(chat: SessionHandle, said: string): string {
+    if ((chat.turnFrom ?? chat.lastFrom) !== 'human' || !this.isPersonal(chat.info)) return said;
+    const open = chat.info.openAsks ?? [];
+    if (!open.length) return said;
+    const sid = chat.info.id;
+    // The person's message that opened this turn (the newest of theirs): a card asked after it was asked in this turn.
+    const since = this.store.readTranscript(sid, 400).findLast((e) => e.kind === 'user' && e.from === 'human')?.seq ?? Infinity;
+    let seen = this.cardsListed.get(sid);
+    if (!seen || seen.turn !== chat.turnId) this.cardsListed.set(sid, (seen = { turn: chat.turnId, seqs: new Set() }));
+    const listed = seen.seqs;
+    const stale = open.filter((a) => a.seq < since && !listed.has(a.seq));
+    if (!stale.length) return said;
+    for (const a of stale) listed.add(a.seq);
+    const one = stale.length === 1;
+    const lines = stale.map((a) => `- open question ${a.seq} (${clip(splitMedia(a.ask.question).text.replace(/\s+/g, ' '), 140)}), asked ${a.at}`);
+    return `${said}\n\n[FF Factory] ${one ? 'An open question' : 'Open questions'} of yours on ${this.ownerOf(chat.info)?.displayName ?? 'your person'}'s Waiting on input tab, asked before their message this turn, may be answered by this:\n${lines.join('\n')}\nIf their typed words decided ${one ? 'it' : 'one'}, call close_question with its seq and why in this same turn, or the card stays clickable. If it is still open, leave it.`;
   }
 
   /** The orchestrator's close_question (w1868): a question it asked that no longer needs an answer leaves the tab. */

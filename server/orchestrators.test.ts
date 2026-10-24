@@ -2600,6 +2600,55 @@ test('w1868: every ask_person question is an open card until it is answered, ask
   assert.match(listed.text, new RegExp(`${seqs[3]}: Question 4 about w14`));
 });
 
+test('w1955: a card answered in typed words stays open, and request_work and update_work list it so the orchestrator closes it', async (t) => {
+  const env = setup(t);
+  const { store, o, chat, call } = env;
+  store.onEvent = (sid, e) => o.observeAsk(sid, e);
+  const loth = chat(LOTH);
+  const asked = (question: string, toolUseId: string) => {
+    const tag = toolUseId.toUpperCase();
+    const ev = store.append(loth.info.id, { kind: 'tool_use', toolUseId, name: 'mcp__sandboxes__ask_person', input: { question, options: [{ label: `Yes, do it that way (${tag})`, description: '', recommended: true }, { label: `No, leave it as it is (${tag})`, description: '' }] } });
+    store.append(loth.info.id, { kind: 'tool_result', toolUseId, isError: false, text: 'Shown' });
+    return ev.seq;
+  };
+  const open = () => (o.personalOf('lothsahn')!.info.openAsks ?? []).map((a) => a.seq);
+  const timing = asked('Should the 16 GB desktop be a play-only timing machine?', 'a1');
+  const cleanup = asked('Should LothLaptop keep its clean-up line?', 'a2');
+  // Lothsahn types the answer instead of clicking: no quote, so nothing closes by itself.
+  store.append(loth.info.id, { kind: 'user', from: 'human', text: 'Yes, make the 16 GB desktop a play-only timing machine.', requestedBy: LOTH });
+  assert.deepEqual(open(), [timing, cleanup], 'typed words close nothing on a guess');
+  // A card asked in this turn, after their message, is not an old one.
+  const fresh = asked('Which look for the new card?', 'a3');
+  const filed = await call(loth.info, 'request_work', { title: 'Play-only timing machine', brief: 'Make the 16 GB desktop a play-only timing machine.' });
+  assert.equal(filed.isError, false, filed.text);
+  assert.match(filed.text, new RegExp(`open question ${timing} \\(Should the 16 GB desktop be a play-only timing machine\\?\\)`));
+  assert.match(filed.text, new RegExp(`open question ${cleanup} `));
+  assert.doesNotMatch(filed.text, new RegExp(`open question ${fresh} `));
+  assert.match(filed.text, /call close_question with its seq and why in this same turn/);
+  assert.deepEqual(open(), [timing, cleanup, fresh], 'listed, not closed');
+  // Each card is listed once per turn.
+  const wid = /w\d+/.exec(filed.text)![0];
+  const second = await call(loth.info, 'update_work', { id: wid, note: 'Also keep it off the render farm.' });
+  assert.equal(second.isError, false, second.text);
+  assert.doesNotMatch(second.text, /open question/);
+  // The orchestrator closes the one the words decided; the other stays, and is listed again in a later turn of theirs.
+  const closed = await call(loth.info, 'close_question', { seq: timing, why: 'answered in chat; filed as ' + wid });
+  assert.equal(closed.isError, false, closed.text);
+  assert.deepEqual(open(), [cleanup, fresh]);
+  Object.defineProperty(loth, 'turnId', { value: 'next-turn', configurable: true });
+  store.append(loth.info.id, { kind: 'user', from: 'human', text: 'Keep the clean-up line.', requestedBy: LOTH });
+  const later = await call(loth.info, 'update_work', { id: wid, note: 'Keep the LothLaptop clean-up line.' });
+  assert.match(later.text, new RegExp(`open question ${cleanup} `));
+  assert.match(later.text, new RegExp(`open question ${fresh} `), 'asked before this newer message');
+  // A turn the harness started (a timer, a relayed report) lists nothing: the person said nothing in it.
+  loth.lastFrom = 'system';
+  Object.defineProperty(loth, 'turnId', { value: 'timer-turn', configurable: true });
+  const quiet = await call(loth.info, 'update_work', { id: wid, note: 'Timer note.' });
+  assert.doesNotMatch(quiet.text, /open question/);
+  const brief = (env.agents as unknown as { personalBrief(r: Requester): string }).personalBrief(LOTH);
+  assert.match(brief, /answers a question of yours in typed words instead of clicking its card, call close_question for that card in the same turn/);
+});
+
 test('w1868: waiting_on_person refuses a still on the worker’s own machine; the brief asks every question with ask_person', async (t) => {
   const env = await setupOnMachine(t);
   const { store, dispatcher, chat, call, agents } = env;
