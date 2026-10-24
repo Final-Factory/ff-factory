@@ -37,6 +37,7 @@ import { run } from '../server/proc.ts';
 import { ensureGitBashTmp, keepGitBashTmp } from '../server/gitBashTmp.ts';
 import { readImage } from '../server/images.ts';
 import { publishFromMachine } from './review.ts';
+import { LOG_MAINTAIN_EVERY_MS, maintainLogs, maintenanceLine } from './logRetention.ts';
 import { DEV_TIER_SNIPPET, LiveSession, gameCommand, readGameChannel, type LiveDeps } from './live.ts';
 import { idleCloseEditor, idleClosedDetail, idleReopenNote } from './liveIdle.ts';
 import { LIVE_MATERIAL_NAME, LIVE_PROPERTY_NAME, keepInMat, type MatKnobType } from './matText.ts';
@@ -1114,6 +1115,14 @@ export class Daemon {
     // Clean-up: every minute it looks whether a pass is due (every everyMinutes, sooner below softFreeGB).
     // w1946: not while a timed run plays here (its disk work would be in the legs' numbers); the pass comes after it.
     this.timers.push(setInterval(() => void (this.timed?.busy() ? Promise.resolve() : this.cleaner.tick()).catch((e) => log(`clean-up failed: ${(e as Error).message}`)), 60_000));
+    // Its own logs (w2038): every run's kept, the old ones gzipped, the folder capped (machine/logRetention.ts).
+    const logsDir = path.join(appDirOfConfig(this.cfg), 'logs');
+    const keepLogs = () => {
+      const line = maintenanceLine(maintainLogs(logsDir));
+      if (line) log(line);
+    };
+    keepLogs();
+    this.timers.push(setInterval(keepLogs, LOG_MAINTAIN_EVERY_MS));
     // Git Bash's /tmp (Windows, w603): kept out of clean-up and made again if anything else removes it.
     if (process.platform === 'win32') {
       void this.ensureBashTmp();

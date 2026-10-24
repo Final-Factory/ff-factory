@@ -115,7 +115,8 @@ source's per-item size, not by growth per turn; the large levers are the orchest
 
 A machine daemon's own log is **not** kept by the portal (it holds a daemon's clean-up passes, which `cleanup` shows, and
 nothing else of its log). It is `<app_dir>/logs/daemon.log` on that machine (`daemonLogPath` in `server/machines.ts`: the
-machine's `app_dir`, by default `~/.ff-factory`, `%USERPROFILE%\.ff-factory` on Windows). Where the `app_dir` is set
+machine's `app_dir`, by default `~/.ff-factory`, `%USERPROFILE%\.ff-factory` on Windows), with every earlier run beside
+it as `daemon.log.<UTC stamp>[.gz]` for 14 days, within 200 MB (docs/machines.md, "The daemon's logs"). Where the `app_dir` is set
 elsewhere, a worker usually cannot read it: lothdesktop's is `D:\work\ffw\daemon`, the daemon's folder, which the
 worker harness refuses as a protected path (measured, w1536, 2026-10-19). Say so in the report and leave it to the
 orchestrator (the ops worker or ssh).

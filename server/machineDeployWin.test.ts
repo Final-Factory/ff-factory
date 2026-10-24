@@ -155,7 +155,10 @@ test('windows: the supervisor finds its own folder, passes the config, restarts 
   assert.doesNotMatch(s, /strip-types/);
   assert.match(s, /-WindowStyle Hidden -PassThru -RedirectStandardOutput/);
   assert.match(s, /\$delay = \[Math\]::Min\(\$delay \* 2, 300\)/);
-  assert.match(s, /\.prev/);
+  // w2038: each run's log is kept under its own stamp (never one .prev that the next restart overwrites).
+  assert.doesNotMatch(s, /\.prev/);
+  assert.match(s, /ToString\("yyyyMMdd'T'HHmmssfff'Z'"\)/);
+  assert.match(s, /Move-Item -LiteralPath \$p -Destination \$to/);
   // w1918: a daemon that ended for a newer one of its machine (DAEMON_YIELD_EXIT) is not started again.
   assert.match(s, new RegExp(`if \\(\\$proc\\.ExitCode -eq ${DAEMON_YIELD_EXIT}\\) \\{[^}]*; break \\}`));
 });

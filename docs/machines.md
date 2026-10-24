@@ -179,7 +179,8 @@ worker machine uses today, and the plan to put them all under one root folder: [
 
 On a redeploy an option left out keeps its value and `""` clears it. A path for the other OS is refused
 (`checkDirs`). On a Mac with an `app_dir` the deploy writes there and the LaunchAgent runs
-`<app_dir>/app/machine/daemon.ts <app_dir>/daemon.json`, logging to `<app_dir>/logs/daemon.log`. The guard
+`<app_dir>/app/machine/daemon.ts <app_dir>/daemon.json`, logging to `<app_dir>/logs/daemon.log` (kept as "The
+daemon's logs" below says). The guard
 protects the `app_dir` as it protects `~/.ff-factory`. Moving it leaves the old folder's files in place (delete
 them by hand); the old LaunchAgent is replaced as on any redeploy.
 
@@ -363,8 +364,8 @@ Hidden -File run-daemon.ps1` (headless since w603: with Windows Terminal as the 
 Hidden` alone left a Terminal window open on the desktop for as long as the daemon ran), a supervisor like the portal's own `scripts/supervise.ps1`: it starts
 `node machine/daemon.ts <daemon.json>` hidden, and again whenever it exits (10 s, doubling up to 5 minutes
 while it keeps dying within 5 minutes). Its output is in `logs\daemon.log` and `daemon.err.log` in its folder
-(the previous run's in `*.prev`), the supervisor's own lines in `supervisor.log`. Task Scheduler restarts the
-supervisor itself if it fails.
+(every earlier run's kept, see "The daemon's logs" below), the supervisor's own lines in `supervisor.log`. Task
+Scheduler restarts the supervisor itself if it fails.
 
 **Start, stop, restart.** `machine_daemon` (orchestrator tool, and Restart/Start on the machine page) runs
 over ssh: stop disables the task, ends it, kills the supervisor and the daemon with everything they started
@@ -479,6 +480,29 @@ Host lothdesktop
 `ssh lothdesktop exit 0` must return at once. Then `add_machine` with `id: LothDesktop` and
 `ssh_host: lothdesktop` (or the Add button in the sidebar) does the rest; `list_machines` shows the progress.
 
+
+## The daemon's logs
+
+A machine daemon logs to `<app_dir>/logs/` on its machine: `<root>/daemon/logs` on a worker install (`F:\ffw\daemon\logs`
+on beast), `~/.ff-factory/logs` (`%USERPROFILE%\.ff-factory\logs`) on a portal-deployed one. Nothing is written outside
+that folder. A restart never erases a log (w2038: two restarts on beast, at about 08:30Z and 11:10Z,
+overwrote the one `daemon.log.prev` it then kept and erased 08:15-08:30Z):
+
+- `daemon.log` (and on Windows `daemon.err.log`, `supervisor.log`) is the live file.
+- Each closed run or roll is `<file>.<UTC stamp>`, the stamp being when it closed (`daemon.log.20261024T083049123Z`).
+  Windows: the supervisor (`run-daemon.ps1`, `server/machineDeployWin.ts` `supervisorScript`) moves daemon.log and
+  daemon.err.log there before every start. macOS (launchd) and Linux (systemd `append:`) append across restarts; the
+  daemon copies a live file out and truncates it once it passes 20 MB. A `daemon.log.prev` an older supervisor left is
+  renamed to its stamp at the daemon's start.
+- Every archive but each file's newest is gzipped (`.gz`; read with `zcat`, `gzip -dc`, or PowerShell's
+  `System.IO.Compression.GZipStream`).
+- Kept: every archive of the last 14 days, and at least the newest 20 whatever their age, while the folder (live files
+  included) stays under 200 MB; over 200 MB the oldest go first. At beast's pace that is days to weeks of lines.
+- The daemon does this at start and every 10 minutes (`machine/logRetention.ts`, `LOG_RETENTION`), and logs one `logs:`
+  line when it rolled, gzipped or removed anything. Tests: `server/logRetention.test.ts`.
+
+A worker usually cannot read this folder (the daemon's folder is a protected path, docs/portal-logs.md): the ops worker
+or ssh reads it.
 ## Pausing a machine
 
 A Windows PC's owner pauses and unpauses all FF Factory work on it from a tray app the daemon installs (w1532, lothsahn,
