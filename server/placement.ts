@@ -281,11 +281,16 @@ export const placeId = (id: string) => id.trim().toLowerCase();
 export const memPct = (p: Pick<Computer, 'memUsedBytes' | 'memTotalBytes'>): number | undefined =>
   p.memTotalBytes && p.memUsedBytes !== undefined ? Math.round((100 * p.memUsedBytes) / p.memTotalBytes) : undefined;
 
-/** Why a computer is busy (at or over its agent limit, RAM high, no sandbox to use or make), or [] when it is not. */
+/**
+ * Why a computer is busy (its agent cap reached, RAM high, no sandbox to use or make), or [] when it is not. The agent cap
+ * counts the agents mid-turn, as start_agent's gate does (machines.ts capFull, w384), not the idle ones between turns
+ * (w1983, lothsahn: "we have 20 queued runs, why are we not scheduling them on stuff?": at 03:50Z BEAST read BUSY at "9 live
+ * agents of 6" with beast/slot4 free and 3 of them mid-turn, so no queued work, pair runs included, saw room there).
+ */
 export function busyReasons(p: Computer): string[] {
   const out: string[] = [];
   if (!p.online) out.push('offline');
-  if (p.live >= p.maxAgents) out.push(`${p.live} live agents of ${p.maxAgents}`);
+  if (p.midTurn >= p.maxAgents) out.push(`${p.midTurn} agents mid-turn of ${p.maxAgents}`);
   const pct = memPct(p);
   if (pct !== undefined && pct >= RAM_BUSY_PCT) out.push(`RAM ${pct}% used`);
   if (!p.freeSandboxes && p.sandboxes >= p.maxSandboxes) out.push(`no free sandbox (${p.sandboxes} of ${p.maxSandboxes} made, all in use)`);
@@ -380,7 +385,7 @@ export const holdOf = (prefs: PlacementPrefs) => {
  * hasRoomFor said it has room.
  */
 export function slotsOf(p: Computer, kind: NeedKind): number {
-  const n = kind === 'game' ? Math.min(p.freeSandboxes + Math.max(0, p.maxSandboxes - p.sandboxes), p.maxAgents - p.live) : Math.min(p.agentSeats ?? p.maxAgents - p.midTurn, p.maxAgents - p.midTurn);
+  const n = kind === 'game' ? Math.min(p.freeSandboxes + Math.max(0, p.maxSandboxes - p.sandboxes), p.maxAgents - p.midTurn) : Math.min(p.agentSeats ?? p.maxAgents - p.midTurn, p.maxAgents - p.midTurn);
   return Math.max(1, n);
 }
 
@@ -392,7 +397,7 @@ export function roomNow(places: readonly Computer[], prefs: PlacementPrefs = {})
     const kinds = (['game', 'agent'] as const).filter((k) => hasRoomFor(p, k));
     if (!kinds.length) continue;
     for (const k of kinds) out.slots![`${k}:${p.id}`] = slotsOf(p, k);
-    out.detail![p.id] = `${p.freeSandboxes} of ${p.maxSandboxes} sandboxes free, ${p.live} live agents of ${p.maxAgents}, ${memPct(p) !== undefined ? `RAM ${memPct(p)}%` : 'RAM unknown'}`;
+    out.detail![p.id] = `${p.freeSandboxes} of ${p.maxSandboxes} sandboxes free, ${p.midTurn} agents mid-turn of ${p.maxAgents} (${p.live} live), ${memPct(p) !== undefined ? `RAM ${memPct(p)}%` : 'RAM unknown'}`;
     out.fit![p.id] = { ...(p.platform ? { platform: p.platform } : {}), ...(p.noTimedRuns ? { noTimedRuns: p.noTimedRuns } : {}) };
     const why = hold.get(p.id);
     if (why !== undefined) {

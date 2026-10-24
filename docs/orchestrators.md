@@ -1434,7 +1434,10 @@ fresh session*, and an update to a request always goes to the session already on
   `[session]` line saying why it came there. **Unrelated** (nothing ties them, the default): the portal starts a NEW worker
   session in the same sandbox (`Agents.startFreshSession`): a new conversation and process on the same branch and files,
   titled `<id>: <title>`. `start_agent` always starts a new session; into a sandbox the dispatcher picks it is a second
-  session there.
+  session there. Only while that sandbox is still the old worker's (w1983): one it released while it waited
+  (`placeReleased`, w640), or one where another agent is, refuses with "start_agent with work_id … in a FREE sandbox", so
+  every placement rule applies (at 04:15Z on 2026-10-24 w1440 sent to its stopped worker 9c38a500 started feed4032 in
+  beast/slot1, beside c7bfc9f0 on w1475's branch, on a BEAST at 7 of 6).
 - **The dispatcher decides when it is ambiguous**: `message_agent` takes `session` (`same` or `new`) and a required
   `session_reason`, which overrule the server's reading either way. Without `session` the server's reading stands. The
   reply says which way it went and why ("Same session (related: it names w1 …)", "Started a NEW session … because

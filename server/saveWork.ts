@@ -11,7 +11,8 @@ import { parseStatus } from './gitStatus.ts';
  *
  * Refused, so the sandbox stays held and list_sandboxes says why: the worktree is not on that branch, the branch is a
  * shared one (develop, master, main), or the untracked files are more than a commit should carry (SAVE_LIMITS: build
- * output, captures and recordings belong in the temp folder, not on a branch).
+ * output, captures and recordings belong in the temp folder, not on a branch). Build output in the sandbox's own build
+ * folders (SAVE_SKIPS) is neither saved nor counted: it stays where it is, uncommitted, and the release sweep clears it.
  */
 
 /**
@@ -21,6 +22,15 @@ import { parseStatus } from './gitStatus.ts';
  * `git ls-files --others --exclude-standard`, `du -sh`): no limit of these lets that onto a branch.
  */
 export const SAVE_LIMITS = { files: 500, fileBytes: 10 * 1024 * 1024, totalBytes: 50 * 1024 * 1024 };
+
+/**
+ * The sandbox's build folders, top level, any case (the ones the clean-up reads as sandbox output, cleanupFolders.ts): a
+ * save leaves their untracked files out (w1983). lothdesktop/slot6 stayed held from 03:27Z on 2026-10-24 by "the untracked
+ * file .nightly-builds/5f7b5ad5…-win/player/UnityPlayer.dll is 80 MB": the game repo does not ignore .nightly-builds/, and
+ * only some machines' clones exclude it (BEAST's info/exclude does, LothDesktop's did not), so a player build pinned it.
+ */
+export const SAVE_SKIPS = ['.nightly-builds/', 'builds/'];
+const SKIP_SPECS = SAVE_SKIPS.map((d) => `:(exclude,icase)${d}`);
 
 const ENV = { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' };
 const SHARED = /^(master|main|develop)$/;
@@ -50,7 +60,7 @@ const mb = (n: number) => `${(n / 1024 / 1024).toFixed(n < 10 * 1024 * 1024 ? 1 
 
 /** Why the untracked files of `dir` are too many or too big to commit, or undefined. Stops reading at the first excess. */
 export async function untrackedProblem(dir: string, limits = SAVE_LIMITS): Promise<string | undefined> {
-  const list = (await must(dir, ['ls-files', '--others', '--exclude-standard', '-z'], 'listing untracked files')).split('\0').filter(Boolean);
+  const list = (await must(dir, ['ls-files', '--others', '--exclude-standard', '-z', '--', '.', ...SKIP_SPECS], 'listing untracked files')).split('\0').filter(Boolean);
   if (list.length > limits.files) return `${list.length} untracked files there, more than the ${limits.files} a save commits (build output, captures or recordings belong in the temp folder): commit what matters, delete or ignore the rest`;
   let total = 0;
   for (const f of list) {
@@ -75,8 +85,9 @@ export async function saveWork(opts: { dir: string; branch: string; message: str
   if (!st.dirty && !st.untracked) return { files: 0, pushed: false, notes: ['nothing to save'] };
   const problem = st.untracked ? await untrackedProblem(dir, opts.limits) : undefined;
   if (problem) throw new Error(problem);
-  await must(dir, ['add', '-A'], 'git add');
+  await must(dir, ['add', '-A', '--', '.', ...SKIP_SPECS], 'git add');
   const files = (await must(dir, ['diff', '--cached', '--name-only', '-z'], 'listing what is saved')).split('\0').filter(Boolean).length;
+  if (!files) return { files: 0, pushed: false, notes: [`nothing to save (build output in ${SAVE_SKIPS.join(' or ')} stays, uncommitted)`] };
   await must(dir, ['commit', '-q', '--no-verify', '-m', opts.message], 'git commit');
   const sha = (await must(dir, ['rev-parse', '--short', 'HEAD'], 'reading the commit')).trim();
   const notes = [`committed ${files} file(s) on ${branch} as ${sha}`];

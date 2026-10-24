@@ -200,6 +200,14 @@ export function needsMpPeers(w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'no
  */
 export const ROOM_STAND_MS = 5 * 60_000;
 
+/**
+ * How long a computer's last free sandbox stays held for an older Queued pair run that still cannot start (w1983): from
+ * when that computer's room began. Held longer, it starved everything (lothlaptop/slot1 sat free 02:50Z to 03:52Z on
+ * 2026-10-24, held for w1970 and then w1981, while lothsahn's w1789 waited for it). A judgment: four capacity pings' worth
+ * of standing room, and sandboxes freed every few minutes in that hour's journal.
+ */
+export const PAIR_HOLD_MS = 20 * 60_000;
+
 /** What a computer with room is, for whether a request can run there (w1944, RoomNow.fit): its platform, and w1861's no-timed-runs reason. */
 export interface RoomFit {
   platform?: string;

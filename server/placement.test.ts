@@ -72,20 +72,24 @@ test('w416: with one busier, the other is picked, and placing on the busier one 
 });
 
 test('w416: BEAST full (the 05:22 numbers): busy, LothDesktop is next, and the capacity block shows both with their room', () => {
-  assert.deepEqual(busyReasons(BEAST), ['7 live agents of 6', 'RAM 86% used', 'no free sandbox (5 of 5 made, all in use)']);
+  // w1983: 7 live agents of 6 alone is not busy (5 mid-turn); its RAM and sandboxes are.
+  assert.deepEqual(busyReasons(BEAST), ['RAM 86% used', 'no free sandbox (5 of 5 made, all in use)']);
   assert.equal(roomOf(BEAST), 0);
   const lines = capacityLines([BEAST, LOTH]);
   assert.match(lines[0], /^## Capacity/);
-  assert.equal(lines[1], '- beast: BUSY (7 live agents of 6; RAM 86% used; no free sandbox (5 of 5 made, all in use)): 7 live agents of 6 (5 mid-turn); 0 of 5 sandboxes free; RAM 86% used; editors 2 of 3; agent slot: free (5 of 6 mid-turn)');
+  assert.equal(lines[1], '- beast: BUSY (RAM 86% used; no free sandbox (5 of 5 made, all in use)): 7 live agents of 6 (5 mid-turn); 0 of 5 sandboxes free; RAM 86% used; editors 2 of 3; agent slot: free (5 of 6 mid-turn)');
   assert.match(lines[2], /^- lothdesktop: ROOM \d+%: 2 live agents of 5 \(1 mid-turn\); 2 of 5 sandboxes free \(2 more can be made\); RAM 47% used; editors 1 of 2; agent slot: free \(1 of 5 mid-turn\)$/);
   assert.equal(lines[3], 'Next new game-repo work: lothdesktop (the only one with room; beast is busy).');
-  assert.match(placementHint('beast', [BEAST, LOTH]) ?? '', /^ Note: beast is busy \(7 live agents of 6; RAM 86% used; no free sandbox .*\); the next new game-repo work goes to lothdesktop/);
+  assert.match(placementHint('beast', [BEAST, LOTH]) ?? '', /^ Note: beast is busy \(RAM 86% used; no free sandbox .*\); the next new game-repo work goes to lothdesktop/);
 });
 
 test('w416: each reason alone makes a computer busy: its agent limit, RAM at the line, no sandbox to use or make', () => {
   const ok: Computer = { ...BEAST, live: 3, memUsedBytes: 40 * GB, freeSandboxes: 1 };
   assert.equal(hasRoom(ok), true);
-  assert.deepEqual(busyReasons({ ...ok, live: 6 }), ['6 live agents of 6'], 'at the limit is busy');
+  assert.deepEqual(busyReasons({ ...ok, live: 6, midTurn: 6 }), ['6 agents mid-turn of 6'], 'at the limit is busy');
+  // w1983 (BEAST at 03:50Z on 2026-10-24: "9 live agents of 6", 3 mid-turn, beast/slot4 free): idle agents between turns
+  // do not fill the cap, as start_agent's gate (machines.ts capFull) does not count them either.
+  assert.deepEqual(busyReasons({ ...ok, live: 9, midTurn: 3 }), [], 'idle workers between turns leave room');
   assert.deepEqual(busyReasons({ ...ok, memUsedBytes: (RAM_BUSY_PCT / 100) * 64 * GB }), [`RAM ${RAM_BUSY_PCT}% used`]);
   assert.deepEqual(busyReasons({ ...ok, memUsedBytes: 0.84 * 64 * GB }), [], 'under the line');
   assert.deepEqual(busyReasons({ ...ok, freeSandboxes: 0, sandboxes: 4 }), [], 'none free, but one more can be made');
@@ -119,7 +123,7 @@ test('w428: with the preference set, LothDesktop first, and BEAST only when it i
   assert.match(first.why, /^first with room in placement\.prefer \(lothdesktop > m5 > m3\)$/);
   assert.match(preferLine(cs, undefined, PREFS)!, /^Next new game-repo work: lothdesktop \(first with room in placement\.prefer/);
   // LothDesktop full: BEAST, and the line says why.
-  cs = [beast, { ...idle('lothdesktop', 5), live: 5 }];
+  cs = [beast, { ...idle('lothdesktop', 5), live: 5, midTurn: 5 }];
   const last = pickComputer(cs, undefined, PREFS)!;
   assert.equal(last.pick.id, 'beast');
   assert.match(last.why, /^only avoided computers have room \(beast: BEAST unstable, 2026-10-05\)/);
@@ -146,7 +150,7 @@ test('w428: avoid alone keeps BEAST last; "host" names this host\'s own pool', (
   const roomy = [idle('beast', 6), { ...idle('lothdesktop', 5), live: 3 }];
   assert.ok(roomOf(roomy[0]) > roomOf(roomy[1]), 'BEAST has more room');
   assert.equal(pickComputer(roomy, undefined, avoidOnly)!.pick.id, 'lothdesktop');
-  assert.equal(pickComputer([roomy[0], { ...roomy[1], live: 5 }], undefined, avoidOnly)!.pick.id, 'beast');
+  assert.equal(pickComputer([roomy[0], { ...roomy[1], live: 5, midTurn: 5 }], undefined, avoidOnly)!.pick.id, 'beast');
   assert.equal(pickComputer([idle('this host', 6), idle('lothdesktop', 5)], undefined, { prefer: ['host'] })!.pick.id, 'this host');
 });
 
@@ -188,11 +192,11 @@ test('w1600: Live view work goes to BEAST first when it has room; other game wor
 });
 
 test('w1600: BEAST full, held or avoided: Live view work falls back to the general placement, and says why', () => {
-  const full: Computer = { ...idle('beast', 6), live: 6 };
+  const full: Computer = { ...idle('beast', 6), live: 6, midTurn: 6 };
   const cs = [full, idle('lothdesktop', 5), idle('m5', 3)];
   const p = pickComputer(cs, undefined, M5_FIRST, 'game', false, true)!;
   assert.equal(p.pick.id, 'm5');
-  assert.match(p.why, /^Live view work, but beast is busy \(6 live agents of 6\); so the general placement: first with room in placement\.prefer \(m5 > lothdesktop\)/);
+  assert.match(p.why, /^Live view work, but beast is busy \(6 agents mid-turn of 6\); so the general placement: first with room in placement\.prefer \(m5 > lothdesktop\)/);
   const held = pickComputer([idle('beast', 6), idle('m5', 3)], undefined, { ...M5_FIRST, hold: { beast: 'Ben testing' } }, 'game', false, true)!;
   assert.equal(held.pick.id, 'm5');
   assert.match(held.why, /beast is held \(Ben testing\)/);
@@ -201,7 +205,7 @@ test('w1600: BEAST full, held or avoided: Live view work falls back to the gener
   assert.match(avoided.why, /beast is avoided \(unstable\)/);
   // Nothing has room at all: no pick, and the line says so.
   assert.equal(pickComputer([full], undefined, {}, 'game', false, true), undefined);
-  assert.equal(liveLine([full, { ...idle('m5', 3), live: 3 }], undefined, {}), 'No computer has room for Live view work now.');
+  assert.equal(liveLine([full, { ...idle('m5', 3), live: 3, midTurn: 3 }], undefined, {}), 'No computer has room for Live view work now.');
   assert.equal(liveLine([idle('beast', 6)], undefined, {}), undefined, 'one computer: no line, like preferLine');
 });
 
