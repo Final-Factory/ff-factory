@@ -109,7 +109,7 @@ export interface FleetSandbox {
   statusDetail?: string;
   unity: UnityState;
   agents: PlaceAgents;
-  /** Ready with no live agent: free to take. */
+  /** list_sandboxes' FREE, as the portal sends it (MachineSandbox.free, w2067): free to take. */
   free: boolean;
   /** Permission requests waiting in it, plus a blocked editor. */
   attention: number;
@@ -280,7 +280,8 @@ export function fleetOf(
         statusDetail: sb.statusDetail,
         unity: sb.unity.state,
         agents,
-        free: agents.live.length === 0 && sb.status === 'ready',
+        // The portal's own answer (server/agents.ts free()), never worked out here a second way (w2067).
+        free: sb.free === true,
         attention: waiting(agents),
         machineSandbox: sb,
       };
@@ -308,7 +309,19 @@ export function fleetOf(
   return [host(local), ...machines];
 }
 
-/** "2/3 sandboxes · 1/2 editors", or what a computer without a pool has. */
+/**
+ * A machine's sandboxes in list_sandboxes' and list_machines' headers (w2067): in use of the limit, then how many are made
+ * when fewer than the limit, "1/3 sandboxes in use, 2 made". In use is any sandbox that is not FREE.
+ */
+export const sandboxUseText = (inUse: number, limit: number, made: number) => `${inUse}/${limit} sandboxes in use${made < limit ? `, ${made} made` : ''}`;
+
+/** A computer's sandboxes not free to take (w2067): what its "1/3 sandboxes" counts. */
+export const sandboxesInUse = (c: Pick<FleetComputer, 'sandboxes'>) => c.sandboxes.filter((s) => !s.free).length;
+
+/**
+ * "1/3 sandboxes · 1/2 editors", or what a computer without a pool has. The sandboxes are those in use of the limit (w2067;
+ * lothsahn: "just say 1/3. Don't be so verbose"): "3/3" read as full on biscuit while two of its made sandboxes were empty.
+ */
 export function capacityLine(c: FleetComputer): string {
   // The portal's own host without a daemon of its own: it runs the orchestrators and the dispatcher only (w510).
   if (c.host && !c.daemon) return 'orchestrators only';
@@ -316,7 +329,18 @@ export function capacityLine(c: FleetComputer): string {
   if (!c.host && c.sandboxLimit === undefined) return 'no sandboxes';
   // "1/3 sandboxes" counts against the limit, so it stays plural; "1 sandbox" without one does not.
   const n = (count: number, limit: number | undefined, one: string, many: string) => (limit !== undefined ? `${count}/${limit} ${many}` : `${count} ${count === 1 ? one : many}`);
-  return `${n(c.sandboxes.length, c.sandboxLimit, 'sandbox', 'sandboxes')} · ${n(c.editors, c.editorLimit, 'editor', 'editors')}`;
+  return `${n(sandboxesInUse(c), c.sandboxLimit, 'sandbox', 'sandboxes')} · ${n(c.editors, c.editorLimit, 'editor', 'editors')}`;
+}
+
+/**
+ * The capacity line's hover (w2067): in use and free of the sandboxes made, and how many are made when fewer than the
+ * limit, the secondary detail the line leaves out ("1 in use, 1 free; 2 of 3 made"). Undefined without a pool.
+ */
+export function capacityHint(c: FleetComputer): string | undefined {
+  if (c.sandboxLimit === undefined) return undefined;
+  const inUse = sandboxesInUse(c);
+  const made = c.sandboxes.length;
+  return `Sandboxes: ${inUse} in use, ${made - inUse} free${made < c.sandboxLimit ? `; ${made} of ${c.sandboxLimit} made` : ''}`;
 }
 
 /**

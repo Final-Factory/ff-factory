@@ -981,6 +981,12 @@ export interface MachineSandbox {
    * editor starts by any path. Sent by daemons from w1746 on; an older portal ignores it.
    */
   idleClosed?: MachineSandboxIdleClosed;
+  /**
+   * Free to take, as list_sandboxes marks it FREE (server/agents.ts free(): no live agent, none spoken for or held, no
+   * bench lock or lingering host). Set by the portal on what it sends a page (w2067, server/index.ts machineView), never
+   * by a daemon and never saved: the dashboard counts in-use sandboxes from it.
+   */
+  free?: boolean;
 }
 
 export interface MachineSandboxIdleClosed {

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { capacityLine, chatLedger, chatMatters, fleetOf, slotCall, type PersonWait } from '../shared/fleet.ts';
+import { capacityHint, capacityLine, chatLedger, sandboxUseText, chatMatters, fleetOf, slotCall, type PersonWait } from '../shared/fleet.ts';
 import type { LiveViewInfo, Machine, MachineSandbox, SessionInfo, SessionStatus, SystemStats, WorkItem } from '../shared/types.ts';
 
 const T = '2026-09-29T10:00:00.000Z';
@@ -30,6 +30,8 @@ const machineSandbox = (id: string, purpose: string, sessionIds: string[] = [], 
   unity: { state: unity },
   sessionIds,
   git: { branch: `feature/${id}`, dirty: 0, untracked: 0, at: T },
+  // As the portal sends it (server/index.ts machineView, w2067): list_sandboxes' FREE.
+  free: sessionIds.length === 0,
 });
 
 const machine = (id: string, extra: Partial<Machine> = {}): Machine => ({
@@ -87,7 +89,8 @@ test('fleet: the host first, then each machine, with sandboxes and their live ag
   // A machine sandbox is keyed "<machine>/<id>" and shows the branch git reports; in-use sandboxes first.
   assert.deepEqual(loth.sandboxes.map((s) => [s.key, s.branch, s.free]), [['lothdesktop/sb1', 'feature/sb1', false], ['lothdesktop/sb2', 'feature/sb2', true]]);
   assert.equal(loth.sandboxes[0].attention, 1);
-  assert.equal(capacityLine(loth), '2/3 sandboxes · 1/2 editors');
+  assert.equal(capacityLine(loth), '1/3 sandboxes · 1/2 editors');
+  assert.equal(capacityHint(loth), 'Sandboxes: 1 in use, 1 free; 2 of 3 made');
   // Its sandboxes' agents; the standing agent has its own list.
   assert.deepEqual([loth.live, loth.busy, loth.attention], [1, 1, 1]);
 
@@ -272,7 +275,7 @@ test('w1430: fleetOf lists the chats that matter now per slot, the person-waitin
       system,
       sessions,
       work: [item('w1325', 'active', ['knob']), item('w2', 'done', ['old2'])],
-      machines: [machine('lothdesktop', { sandboxRoot: 'D:/work/ffsb', sessionIds: sessions.map((s) => s.id), sandboxes: [machineSandbox('slot1', 'slot1', ['old1', 'busy', 'knob', 'old2']), machineSandbox('slot2', 'slot2', ['old3'])] })],
+      machines: [machine('lothdesktop', { sandboxRoot: 'D:/work/ffsb', sessionIds: sessions.map((s) => s.id), sandboxes: [machineSandbox('slot1', 'slot1', ['old1', 'busy', 'knob', 'old2']), { ...machineSandbox('slot2', 'slot2', ['old3']), free: true }] })],
     },
     undefined,
     NOW,
@@ -312,4 +315,21 @@ test('w1504: the slot badge clears with the ledger: w1243 blocked on w1438 after
   // PR #1699 merged after the report, no note: no call either.
   const prs = [{ repo: 'Final-Factory/FinalFactory', number: 1699, state: 'merged' as const, at: ago(2900) }];
   assert.equal(callOf(item('w1243', 'active', ['26d27a69', '0db9f8a2'], { links, prs })), undefined);
+});
+
+test('w2067: a machine counts its sandboxes in use of its limit, as the portal marks them FREE, not how many are made', () => {
+  // biscuit, 2026-10-24: three made of three, two of them empty, read "3/3 sandboxes" (lothsahn: "Why does biscuits show 3
+  // out of three sandboxes but two of the slots are empty?").
+  const biscuit = (sandboxes: MachineSandbox[]) => fleetOf({ system, sessions: [session('w', 'running', { machineId: 'biscuit', machineSandbox: 'slot1' })], machines: [machine('biscuit', { sandboxRoot: 'D:/ffw', maxSandboxes: 3, sandboxes })] })[1];
+  const all = biscuit([machineSandbox('slot1', 'unused', ['w']), machineSandbox('slot2', 'unused'), machineSandbox('slot3', 'unused')]);
+  assert.match(capacityLine(all), /^1\/3 sandboxes · /);
+  assert.equal(capacityHint(all), 'Sandboxes: 1 in use, 2 free');
+  // One with no live agent that the portal says is not FREE (spoken for, held, a bench lock) is in use: the page never
+  // works free out a second way.
+  const held = biscuit([machineSandbox('slot1', 'unused', ['w']), { ...machineSandbox('slot2', 'unused'), free: false }, machineSandbox('slot3', 'unused')]);
+  assert.match(capacityLine(held), /^2\/3 sandboxes · /);
+  assert.deepEqual(held.sandboxes.map((s) => [s.id, s.free]), [['slot1', false], ['slot2', false], ['slot3', true]]);
+  // The agents' headers: in use first, the made count only when fewer than the limit.
+  assert.equal(sandboxUseText(1, 3, 3), '1/3 sandboxes in use');
+  assert.equal(sandboxUseText(0, 3, 1), '0/3 sandboxes in use, 1 made');
 });

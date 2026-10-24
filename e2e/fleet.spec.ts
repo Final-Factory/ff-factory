@@ -72,6 +72,8 @@ const machineSb = (id: string, purpose: string, sessionIds: string[], unity: Mac
   unity: { state: unity, logPath: `D:/work/ffsb/${id}/Logs/sandbox-editor.log` },
   sessionIds,
   git: git(branch),
+  // list_sandboxes' FREE, as the portal sends it (server/index.ts machineView, w2067).
+  free: sessionIds.length === 0,
 });
 
 const machine = (id: string, extra: Partial<Machine>): Machine => ({
@@ -235,7 +237,7 @@ test('fleet: the sidebar groups every computer, with its sandboxes and their age
 
   const beast = sidebar.getByTestId('fl-group-host');
   await expect(beast.locator('.fl-name')).toHaveText('BEAST');
-  await expect(beast.getByTestId('fl-capacity')).toHaveText('2/5 sandboxes · 1/4 editors');
+  await expect(beast.getByTestId('fl-capacity')).toHaveText('1/5 sandboxes · 1/4 editors');
   await expect(beast.getByTestId('fl-agents-sum')).toHaveText('1 agent, 1 busy');
   await expect(beast.getByTestId('meter-CPU')).toHaveText('CPU 38%');
   await expect(beast.getByTestId('meter-GPU')).toHaveText('GPU 45%');
@@ -256,7 +258,7 @@ test('fleet: the sidebar groups every computer, with its sandboxes and their age
   const loth = sidebar.getByTestId('fl-group-lothdesktop');
   await expect(loth.locator('.fl-title')).toContainText('LothDesktop');
   await expect(loth.locator('.fl-title')).toContainText('Windows');
-  await expect(loth.getByTestId('fl-capacity')).toHaveText('2/3 sandboxes · 1/2 editors');
+  await expect(loth.getByTestId('fl-capacity')).toHaveText('1/3 sandboxes · 1/2 editors');
   await expect(loth.getByTestId('fl-agents-sum')).toHaveText('2 agents, 1 busy');
   const sb1 = loth.getByTestId('fl-sandbox-lothdesktop/sb1');
   // Its label is its name (w575); what it is doing is its live agents' titles, the Working one first.
@@ -285,7 +287,7 @@ test('fleet: a group folds away, and stays folded after a reload', async ({ page
   await expect(head).toHaveAttribute('aria-expanded', 'false');
   await expect(sidebar.getByTestId('fl-group-lothdesktop').locator('.fl-places')).toHaveCount(0);
   // Folded, the header still says what is there: the counts and what waits on the user.
-  await expect(head.getByTestId('fl-capacity')).toContainText('2/3 sandboxes');
+  await expect(head.getByTestId('fl-capacity')).toContainText('1/3 sandboxes');
 
   expect(await page.evaluate(() => localStorage.getItem('ffsb.fleet.collapsed'))).toBe('["lothdesktop"]');
 
@@ -306,7 +308,7 @@ test('fleet: the Overview board shows every computer as a card with its live age
   await expect(board.locator('.overview-sum')).toHaveText('3 agents live · 2 busy');
   await expect(board.locator('.board-card')).toHaveCount(4);
   const loth = board.getByTestId('board-lothdesktop');
-  await expect(loth.getByTestId('fl-capacity')).toHaveText('2/3 sandboxes · 1/2 editors');
+  await expect(loth.getByTestId('fl-capacity')).toHaveText('1/3 sandboxes · 1/2 editors');
   await expect(loth.getByTestId('fl-agents-sum')).toHaveText('2 agents, 1 busy');
   // Free sandboxes are one line of chips on the board; the requester shows on each agent.
   await expect(loth.getByTestId('fl-free-line')).toHaveText(/FREE\s*sb2/);
@@ -409,7 +411,7 @@ test("fleet: BEAST's own daemon holds its sandboxes: they stay under BEAST, and 
   await expect(beast.locator('.fl-name')).toHaveText('BEAST');
   await expect(beast.getByTestId('fl-os')).toHaveText('Windows · host');
   // Its limits are the daemon's pool now (max_sandboxes 5, max_unity 4).
-  await expect(beast.getByTestId('fl-capacity')).toHaveText('2/5 sandboxes · 1/4 editors');
+  await expect(beast.getByTestId('fl-capacity')).toHaveText('1/5 sandboxes · 1/4 editors');
   await expect(beast.getByTestId('fl-agents-sum')).toHaveText('1 agent, 1 busy');
   const play = beast.getByTestId('fl-sandbox-beast/agent-a');
   await expect(play.getByTestId('fl-agent')).toContainText(/Honest co-op: BEAST client\s*busy\s*1m/);

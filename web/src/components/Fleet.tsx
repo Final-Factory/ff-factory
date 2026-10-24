@@ -5,7 +5,7 @@ import { useState, type ReactNode } from 'react';
 import type { AppState, HostHealth, Provider, SessionInfo, UserInfo } from '../../../shared/types';
 import { benchGlance } from '../../../shared/benchGlance';
 import { cpuPct, disksHint, memPct, metricsLine, metricsStale, rootDisk } from '../../../shared/providerMetrics';
-import { capacityLine, fleetOf, slotCall, type FleetComputer, type FleetSandbox, type PersonWait, type PlaceAgents, type SlotCall } from '../../../shared/fleet';
+import { capacityHint, capacityLine, fleetOf, slotCall, type FleetComputer, type FleetSandbox, type PersonWait, type PlaceAgents, type SlotCall } from '../../../shared/fleet';
 import { liveReady } from '../../../shared/liveReady';
 import { useAttention } from '../attention';
 import { sessionIndex } from '../store';
@@ -173,7 +173,7 @@ function Head({ c, health, now, fold, bench = true }: { c: FleetComputer; health
         {fold && <Icon name="chevron" size={12} />}
       </span>
       <Meters c={c} health={health} now={now} />
-      <span className="fl-cap" data-testid="fl-capacity">
+      <span className="fl-cap" data-testid="fl-capacity" title={capacityHint(c)}>
         {capacityLine(c)}
       </span>
       {bench && <BenchLine c={c} now={now} compact={fold} />}
