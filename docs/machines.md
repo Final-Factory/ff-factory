@@ -1695,7 +1695,8 @@ LothDesktop and Beast, not just when BEAST is full").
     the brief its worker started from, the request as filed and the handover (`handedBack`: "Moved (w2046)", its branch,
     the message that was waiting). A pair leg's record points at the new session. Its other open requests, and the request
     itself when the start fails, go to the dispatcher Queued for that computer ([ledger] MOVED). The journal says
-    `room move: ...` for each.
+    `room move: ...` for each, and `room move: worker <id> ... stays: <why>` or `... waits: <why>` once per reason for one
+    that did not move, so a wait can be checked from the journal afterwards.
   - **When it stays** (its Queued line says why, marked "it stays on its computer (w2046)"): commits only that computer
     has (its sandbox on its branch with commits not pushed, or a branch that does not track its own remote branch),
     uncommitted work its daemon cannot save, a timed run from its sandbox holding the bench lock, a timed leg (w1969:

@@ -4928,6 +4928,25 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
   }
 
   /** The ledger requests a board_check's keys and words match, strongest first (at most five), each with its band. */
+  /**
+   * Each request's concepts for the board check (w2044), kept while its title and the start of its brief stay as they
+   * were: every board_check worked out the concepts of every request in its lookback, twice, and blocked the event loop
+   * 1.2 to 1.8 s (stall profiles 2026-10-24 15:23 and 15:47Z: concepts, stem, onBoardCheck).
+   */
+  private readonly boardTexts = new Map<string, { src: string; doc: string[]; title: string[] }>();
+  /** How many requests' concepts were worked out (w2044), for the tests. */
+  boardTextsMade = 0;
+
+  private boardTextOf(w: WorkItem): { doc: string[]; title: string[] } {
+    const src = `${w.title}\n${w.brief.slice(0, 1500)}`;
+    const kept = this.boardTexts.get(w.id);
+    if (kept?.src === src) return kept;
+    this.boardTextsMade++;
+    const made = { src, doc: concepts(`${w.title}\n${src}`), title: concepts(w.title) };
+    this.boardTexts.set(w.id, made);
+    return made;
+  }
+
   private rankBoard(q: { keys: readonly string[]; title?: string; summary?: string; conversation?: string }, lookbackDays: number, t: MatchThresholds): { w: WorkItem; score: number; why: string; band: 'high' | 'medium' }[] {
     // FFBox's own conversation (the review request filed from it) is not someone else's work on its thread.
     const own = (w: WorkItem) => !!q.conversation && (w.source?.conversation === q.conversation || w.keys.includes(`ffbox:${q.conversation}`));
@@ -4938,13 +4957,17 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
     // weighted by how rare each concept is in this ledger. The text is only compared, never shown to a model.
     const report = concepts([q.title, q.summary].filter(Boolean).join('\n'));
     const items = pool.map((e) => this.store.work.get(e.ref)!);
-    const docs = items.map((w) => concepts(`${w.title}\n${w.title}\n${w.brief.slice(0, 1500)}`));
+    const texts = items.map((w) => this.boardTextOf(w));
+    // Only the lookback's requests stay kept.
+    const inPool = new Set(items.map((w) => w.id));
+    for (const id of [...this.boardTexts.keys()]) if (!inPool.has(id)) this.boardTexts.delete(id);
+    const docs = texts.map((x) => x.doc);
     const ix = indexOf(docs);
     type Band = 'high' | 'medium' | 'low';
     const best = new Map<string, { w: WorkItem; score: number; why: string; band: Band }>();
     items.forEach((item, i) => {
       const k = byKey.get(item.id);
-      const m = report.length ? entryMatch(report, concepts(item.title), docs[i], ix) : undefined;
+      const m = report.length ? entryMatch(report, texts[i].title, docs[i], ix) : undefined;
       const keyBand: Band = k ? (k.score >= STRONG ? 'high' : 'medium') : 'low';
       const textBand: Band = m ? band(m, t) : 'low';
       const rank = { high: 2, medium: 1, low: 0 } as const;

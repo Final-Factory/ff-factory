@@ -2384,7 +2384,7 @@ export class Agents {
    * Search every transcript (server/search.ts). `agent` is a session id, a standing agent id, or part
    * of a session title; `sandbox` / `machine` narrow to their sessions.
    */
-  search(req: { query: string; sandbox?: string; machine?: string; agent?: string; since?: string; until?: string; limit?: number }) {
+  async search(req: { query: string; sandbox?: string; machine?: string; agent?: string; since?: string; until?: string; limit?: number }) {
     let ids: Set<string> | undefined;
     const narrow = (keep: (s: SessionInfo) => boolean) => {
       const next = new Set([...this.store.sessions.values()].filter(keep).map((s) => s.id));
@@ -2480,8 +2480,8 @@ export class Agents {
     return texts.some((t) => MARKETING_WORK.test(t ?? ''));
   }
 
-  private workIdsOf(info: SessionInfo): string[] {
-    const ids = new Set(servedBy(info.id, [...this.store.work.values()]));
+  private workIdsOf(info: SessionInfo, bySession?: Map<string, WorkItem[]>): string[] {
+    const ids = new Set(servedBy(info.id, bySession ? (bySession.get(info.id) ?? []) : [...this.store.work.values()]));
     const named = /^(w\d+):/.exec(info.title ?? '')?.[1];
     if (named) ids.add(named);
     return [...ids];
@@ -2664,6 +2664,8 @@ export class Agents {
 
   /** w2046: resumes being moved to a computer with room: session id to the messages that go with it and where it goes. */
   private readonly roomMoving = new Map<string, { to: string; texts: string[] }>();
+  /** w2046: the last stay or wait reason journalled for a worker whose resume did not move, so each is logged once. */
+  private readonly roomKept = new Map<string, string>();
 
   /**
    * SessionManager.roomMove (w2046, server/resumeMove.ts): a message that waits only for room on its worker's own computer.
@@ -2681,8 +2683,14 @@ export class Agents {
     if (now - (Date.parse(q.at) || now) < MOVE_AFTER_MS || info.pendingPermissions.length || isMidTurn(info)) return undefined;
     const reqs = this.openWorkOf(info);
     const d = moveDecision(this.moveFacts(info, reqs));
-    if ('stay' in d) return stayLine(hold, d.stay);
-    if ('none' in d) return `${hold}; ${NONE_MARK}: ${d.none}`;
+    if (!('move' in d)) {
+      const [kept, why] = 'stay' in d ? [stayLine(hold, d.stay), `stays: ${d.stay}`] : [`${hold}; ${NONE_MARK}: ${d.none}`, `waits: ${d.none}`];
+      // Journalled once per worker and reason, so a wait that did not move can be checked afterwards (this runs every drain).
+      if (this.roomKept.get(info.id) !== why) console.log(`room move: worker ${info.id} on ${info.machineId}/${info.machineSandbox} (${reqs.map((w) => w.id).join(', ')}) ${why}`);
+      this.roomKept.set(info.id, why);
+      return kept;
+    }
+    this.roomKept.delete(info.id);
     const entry = { to: d.move.to, texts: [q.text] };
     this.roomMoving.set(info.id, entry);
     const waited = Math.round((now - (Date.parse(q.at) || now)) / 1000);
@@ -3179,9 +3187,10 @@ export class Agents {
    */
   benchPriorities(machineId: string): Record<string, BenchPriority> {
     const out: Record<string, BenchPriority> = {};
+    const bySession = this.workBySession();
     for (const info of this.store.sessions.values()) {
       if (info.kind !== 'worker' || info.machineId !== machineId) continue;
-      const open = this.openWorkOf(info);
+      const open = this.openWorkOf(info, bySession);
       // w1984: a worker moved off this machine serves no request here any more, but its old waiters may still hold tickets
       const moved = this.movedAwayFrom(info, machineId);
       if (moved && !open.length) {
@@ -3205,7 +3214,7 @@ export class Agents {
     for (const r of this.timedRuns?.runsOn(machineId) ?? []) {
       if (out[r.session]) continue;
       const info = this.store.sessions.get(r.session);
-      const open = info ? this.openWorkOf(info) : [];
+      const open = info ? this.openWorkOf(info, bySession) : [];
       const top = open.length ? open.reduce((a, w) => (WORK_PRIORITIES.indexOf(w.priority) > WORK_PRIORITIES.indexOf(a) ? w.priority : a), 'low' as WorkPriority) : 'normal';
       out[r.session] = { priority: top, requests: open.length ? open.map((w) => w.id) : r.requests };
     }
@@ -3247,8 +3256,19 @@ export class Agents {
     return { why: `its worker ${info.id.slice(0, 8)} was moved to ${m.to}` };
   }
 
-  private openWorkOf(info: SessionInfo): WorkItem[] {
-    return this.workIdsOf(info)
+  /**
+   * Every request under each session it names (w2044), for a pass over many workers: servedBy reads only the requests
+   * that name the session, so one index replaces a scan of the whole ledger per worker. benchPriorities ran that scan for
+   * every worker a machine ever had, for each machine each minute: 1.3 to 1.7 s blocks on 2026-10-24 (15:38 and 15:47Z).
+   */
+  private workBySession(): Map<string, WorkItem[]> {
+    const out = new Map<string, WorkItem[]>();
+    for (const w of this.store.work.values()) for (const id of w.sessionIds) (out.get(id) ?? out.set(id, []).get(id)!).push(w);
+    return out;
+  }
+
+  private openWorkOf(info: SessionInfo, bySession?: Map<string, WorkItem[]>): WorkItem[] {
+    return this.workIdsOf(info, bySession)
       .map((id) => this.store.work.get(id))
       .filter((w): w is WorkItem => !!w && isOpen(w));
   }
@@ -4728,7 +4748,7 @@ ${w.repo ?? ''}
             limit: rangedNumber(1, 100, 'Default 30.').optional(),
           },
           wrap(clamped({ limit: [1, 100] }, async (a: { query: string; sandbox?: string; machine?: string; agent?: string; since?: string; until?: string; limit?: number }) => {
-            const r = this.search({ ...a, limit: a.limit ?? 30 });
+            const r = await this.search({ ...a, limit: a.limit ?? 30 });
             if (!r.hits.length) return `No matches in ${r.scanned} transcript(s).`;
             const where = (h: (typeof r.hits)[number]) => (h.sandboxId ? `sandbox ${h.sandboxId}` : h.machineId ? `machine ${h.machineId}` : h.standingId ? `standing agent ${h.standingId}` : h.sessionKind === 'orchestrator' ? 'orchestrator' : '');
             return r.hits.map((h) => `- ${h.t.slice(0, 16).replace('T', ' ')} ${h.sessionId} "${h.title}" (${where(h)}) seq ${h.seq} ${h.kind}: ${h.snippet}`).join('\n');
