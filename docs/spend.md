@@ -492,6 +492,25 @@ report's): one call is one assistant message id, its context is input + cache re
 - **Model**: re-pricing every Opus call as Sonnet saves 24% at most; the cache-read price is the same, so the context, not the
   model, is most of the bill.
 
+### Read chains handed to a subagent, a pilot (w2014)
+
+lothsahn, 2026-10-24: "nudge workers to hand long read/search chains to Explore". The exploration runs above are the game repo's
+delegation rule ("a lookup you expect to need five or more reads") done inline. In a share of worker sessions
+(`worker.readChainPilotPercent`, default 50, set_app_config; 0 off; by a hash of the session id drawn apart from the compaction
+and terse-prose pilots, server/readChain.ts) the agent host adds a PostToolUse hook (server/readChainHook.ts): after the fifth
+Read, Grep, Glob or read-only Bash call in a row on the main thread, one line, `five reads in a row: hand the rest of this search
+to ff-agents:Explore or scout and keep the conclusion (CLAUDE.md, Delegation policy)`, once per chain. Any other tool call and a
+new prompt start the count again; a subagent's own calls neither count nor reset it. A Bash call counts when every part of it
+(split at unquoted `;`, `&&`, `||`, `|`) is a reader (cat, head, tail, sed without -i, grep, rg, find without -delete or -exec,
+ls, wc, awk, read-only git subcommands, ...) or neutral (cd, echo), and nothing writes a file (`>` other than /dev/null); gh,
+python, npm and the rest do not. A pilot session's system prompt ends with `## Read chains (pilot)` and one line, which marks the
+arm in its transcript, and the line itself shows there as hook context where it fired. It reaches a session when its process
+next starts, on a daemon of this version (an older daemon ignores the field).
+
+To read it, on each worker machine: `python scripts/compact-compare.py --since <deploy time> --marker '## Read chains (pilot)' --ids`
+(cost a call, a session and a request per arm), and cost per merged PR and reopens per arm from `spend_report` and the ledger for
+those ids. Compare within one model and effort, and mind the other two pilots: each arm holds about half of each of them.
+
 ## Transcripts: how long they are kept
 
 **Seven days after the request closes**, a request that is open keeps them as long as it is open, a reopened request keeps them again.
