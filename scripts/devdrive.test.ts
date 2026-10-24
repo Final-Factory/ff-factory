@@ -290,9 +290,11 @@ test('the maximum size: what the pool needs from the measured sizes, capped by t
       assert.equal(roomLevel(free - fileGB, gb - fileGB, 'ok', g), 'ok', `${free} GB free, ${s}x${a}: ${gb}`);
     }
   }
-  // The disk guard's own lines are not this rule's: 20 GB clean-up, 10 GB critical (lothsahn, w1910).
+  // The disk guard's own lines are not this rule's: a new machine with nothing passed gets 15 warn and 10 critical, and the
+  // drive keeps the 20 GB clean-up line free at its fullest (lothsahn, w1951: "Let's set 10,15,20 as defaults in code for all new installs").
   const guard = devDriveGuard('D:\\', {}, { path: 'D:\\ffw\\devdrive.vhdx', maxGB: 112 });
-  assert.deepEqual([guard.warnFreeGB, guard.criticalFreeGB, guard.devDriveMaxGB], [20, 10, 112]);
+  assert.deepEqual([guard.warnFreeGB, guard.criticalFreeGB, guard.devDriveMaxGB], [15, 10, 112]);
+  assert.equal(DEV_DRIVE_SIZES.cleanupHeadroomGB, 20);
   const f = (...argv: string[]) => {
     const { opts, flags } = parseArgs(['update', ...argv]);
     return devDriveFlags(opts, flags);
@@ -347,7 +349,7 @@ test('daemon.json on the Dev Drive: the drive’s own paths, block-clone copies,
   assert.equal(cfg.sandboxes.librarySeedCopy, 'clone');
   assert.equal(cfg.root, 'D:\\work\\ffw');
   assert.deepEqual(cfg.extraRoots, ['V:\\sandboxes', 'V:\\seed'], "the clean-up's fence to the install folder counts the drive's folders as inside it");
-  assert.deepEqual(cfg.hostGuard, { pollSeconds: 30, warnFreeGB: 20, criticalFreeGB: 10, hysteresisGB: 10, remountMinFreeGB: 30, hostDiskPaths: ['D:/'], reapBrowsersAfterHours: 0, reapEveryMinutes: 15 });
+  assert.deepEqual(cfg.hostGuard, { pollSeconds: 30, warnFreeGB: 15, criticalFreeGB: 10, hysteresisGB: 10, remountMinFreeGB: 30, hostDiskPaths: ['D:/'], reapBrowsersAfterHours: 0, reapEveryMinutes: 15 });
   // No seed yet: no librarySeed (the pool then copies a sandbox's Library once).
   assert.equal((daemonJson({ ...o, devDriveDirs: { ...devDriveDirs('V'), seedReady: false, blockClone: true } }, l, 'lothdesktop', undefined) as any).sandboxes.librarySeed, undefined);
   // A host guard the machine already has (BEAST's, tuned) is kept as it is; a carried old root and seed never beat the drive's.

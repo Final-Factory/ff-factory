@@ -8,8 +8,12 @@
 import type { BenchState, BenchTicketGlance, MachineStats, UnitySlotsReport } from './types.ts';
 
 export interface QueueWait {
-  /** `bench`: a worker's own ticket; `editor`: its sandbox editor's start, queued in the bench queue; `slot`: a Unity slot. */
-  kind: 'bench' | 'editor' | 'slot';
+  /**
+   * `bench`: a worker's own ticket; `editor`: its sandbox editor's start, queued in the bench queue; `slot`: a Unity slot;
+   * `full`: the machine has no Unity slot to give now (no worker named: a refused editor start waits on it,
+   * SessionInfo.editorRefused); `refused`: that wait, as one worker's.
+   */
+  kind: 'bench' | 'editor' | 'slot' | 'full' | 'refused';
   machine: string;
   /** The worker session that waits (FF_SESSION_ID); absent for an editor's start, which the daemon queues for the sandbox. */
   session?: string;
@@ -72,7 +76,25 @@ export function queueWaitsOf(machine: string, st: Pick<MachineStats, 'bench' | '
     const since = hhmm(w.since);
     out.push({ kind: 'slot', machine, session: w.session, on: slotWaitOn(machine, u!, w), what: `${w.count} Unity slot${w.count === 1 ? '' : 's'} for "${clip(w.label, 80)}"${since ? `, waiting since ${since}` : ''}: ${clip(w.why, 120)}` });
   }
+  // No slot to give now, by the slot gate's own rule (machine/unitySlots.ts assess): every slot in use, launches already
+  // waiting (a start goes behind them), or RAM at its cap. An editor start refused here still waits.
+  if (u && u.limit !== undefined) {
+    const ram = u.ramPct !== undefined && u.ramPct >= u.ramLimitPct;
+    const n = u.waiting.length;
+    if (u.used >= u.limit || n || ram) {
+      const why = [`${u.used} of ${u.limit} in use`, ...(n ? [`${n} launch${n === 1 ? '' : 'es'} waiting`] : []), ...(ram ? [`RAM ${u.ramPct}%, new launches wait below ${u.ramLimitPct}%`] : [])];
+      out.push({ kind: 'full', machine, on: `a Unity editor slot on ${machine} (${why.join(', ')})`, what: 'no Unity slot free' });
+    }
+  }
   return out;
+}
+
+/**
+ * Why its machine's Unity slots refused an editor start (machine/unitySlots.ts startRefusal: "not started: <why>; …; Try
+ * again once one ends (wake_me) …"), or undefined for any other error (a person playing, low disk, an offline machine).
+ */
+export function editorSlotRefusal(message: string): string | undefined {
+  return /^not started: /.test(message) && /Try again once one ends/.test(message) ? message.slice('not started: '.length, 213) : undefined;
 }
 
 /** Every machine's queue waits (the portal's machine stats, by machine id). */

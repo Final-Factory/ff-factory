@@ -18,7 +18,7 @@ import { describeAutoIntake } from './ffboxAutoIntake.ts';
 import { agentState, agentStateText, holdsItsPlace, holdsSandbox, sortAgents, sortPlaces } from '../shared/agentState.ts';
 import { idleClosedPart } from './liveIdle.ts';
 import { HOLD_PLACE_MS, LIVE_HOLD_MS, PlaceAgain, RELEASE_AFTER_MS, RELEASE_WAKE_NOTE, handOverBranch, occupies, releasedOn } from './placeAgain.ts';
-import { queueWaitsAll } from '../shared/queueWaits.ts';
+import { editorSlotRefusal, queueWaitsAll } from '../shared/queueWaits.ts';
 import { WORK_LIVE_LABEL, WORK_LIVE_STATES, asksAPerson, benchWaitOf, lastOpenLine, liveCounts, otherWorkWait, outsideDeclared, outsideWaitOf, ownWorkWait, personWaitIn, reportWaitKey, servedBy, workLiveAll, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
 import { reportTail, type NeedsYouWait } from './needsYou.ts';
 import { stillOpenIn } from './ledgerRules.ts';
@@ -834,7 +834,8 @@ export class Agents {
             unity: async (a) => {
               const benched = a.action === 'start' || a.action === 'restart' ? this.liveBenchWait(info, m.id, 'start its editor') : undefined;
               // clear_batch carries the worker's session: its own stalled builds go by the owner rules (w1874).
-              return benched ?? machines.unity(m.id, a.action as 'status' | 'start' | 'stop' | 'restart' | 'clear_batch', a.force === true, sb, info.id);
+              const out = benched ?? machines.unity(m.id, a.action as 'status' | 'start' | 'stop' | 'restart' | 'clear_batch', a.force === true, sb, info.id);
+              return a.action === 'start' || a.action === 'restart' || a.action === 'stop' ? this.noteEditorStart(info.id, m.id, sb, out) : out;
             },
             live_view: async (a) => {
               if (!this.liveHub) return 'The live view is off on this portal.';
@@ -2475,6 +2476,31 @@ export class Agents {
     return `Not now (w1600): on ${machineId}, ${benchText(lock)}, and a Live view editor beside it would spoil that run's numbers. Do what needs no editor meanwhile, then wake_me in 10 minutes and ${what} again (a leg holds the lock under 15 minutes and gives it back between legs; a holder that dies frees it at once, w1615).`;
   }
 
+  /**
+   * w1949: keep on the worker's session a start of its sandbox's editor that its machine's Unity slots refused
+   * (machine/unitySlots.ts startRefusal: "not started: …; Try again once one ends (wake_me) …"), cleared by one that goes
+   * through and by its next turn (server/sessions.ts). While it is stopped with that check-in and the machine still has no
+   * slot free, its request shows Blocked on a Unity editor slot (shared/workState.ts queueWaitOf), not Working.
+   */
+  private async noteEditorStart(id: string, machine: string, sandbox: string, out: string | Promise<string>): Promise<string> {
+    const set = (r: SessionInfo['editorRefused']) => {
+      if (!this.sessions.sessions.has(id)) return;
+      const s = this.sessions.get(id).info;
+      if (!r && !s.editorRefused) return;
+      s.editorRefused = r;
+      this.store.putSession(s);
+    };
+    try {
+      const text = await out;
+      set(undefined);
+      return text;
+    } catch (e) {
+      const why = editorSlotRefusal((e as Error).message ?? '');
+      if (why) set({ machine, sandbox, at: new Date().toISOString(), why });
+      throw e;
+    }
+  }
+
   /** w1841: the reports a bench lock's freeing already told their worker about ("<session>@<report time>"). */
   private readonly benchTold = new Set<string>();
 
@@ -3988,7 +4014,7 @@ ${w.repo ?? ''}
           max_sandboxes: z.number().int().min(1).max(8).optional().describe('Sandboxes that may exist there (default 3). Omitted: kept. On a worker-root install this is refused: its installer sets the count, and the ops worker reruns it (the requester\'s orchestrator sends ops_worker machine_update with max_sandboxes), never a person.'),
           max_agents_per_sandbox: z.number().int().min(1).max(8).optional().describe('Agents that may run at once in one sandbox (default 2). Omitted: kept.'),
           max_unity: z.number().int().min(0).max(8).optional().describe('Sandbox Unity editors that may run at once there (default 2). Omitted: kept.'),
-          disk_warn_gb: z.number().int().min(1).optional().describe("Its disk guard: below this many GB free on the sandbox volume, no new sandboxes or sandbox editors (default 20, w628). Omitted: kept."),
+          disk_warn_gb: z.number().int().min(1).optional().describe("Its disk guard: below this many GB free on the sandbox volume, no new sandboxes or sandbox editors (default 15, w1951). Omitted: kept."),
           disk_critical_gb: z.number().int().min(1).optional().describe('Below this, idle sandbox editors stop and busy sandbox agents are asked to commit, push and end their turn (default 10, w628). Omitted: kept.'),
           max_sandbox_agents: z.number().int().min(1).max(16).optional().describe('Its agent cap: agents that may be mid-turn at once on it, in its sandboxes and its standing agents together (default max_sandboxes x max_agents_per_sandbox). Omitted: kept.'),
           protected_paths: z.array(z.string()).optional().describe('Absolute folders its agents must never touch and its clean-up never deletes, besides its main clone and daemon folder (e.g. a live game checkout). Omitted: kept.'),

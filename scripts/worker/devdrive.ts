@@ -8,7 +8,7 @@ import path from 'node:path';
 import { checkArray, readJsonDurable, writeJsonDurable } from '../../server/durable.ts';
 import { saveWork, untrackedProblem, type SaveResult } from '../../server/saveWork.ts';
 import { armScriptReimport } from '../../machine/scriptReimport.ts';
-import { DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT } from '../../shared/types.ts';
+import { CLEANUP_SOFT_GB_DEFAULT, DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT } from '../../shared/types.ts';
 
 /** <root>/devdrive.json: what devdrive.ps1 and the helper keep about the drive (the letter is the one source of truth). */
 export interface DevDriveState {
@@ -81,17 +81,17 @@ export const DEV_DRIVE_SIZES = {
   perSandboxGB: 30,
   /** One agent's temp folder (ffa-<session>: its clones, builds and captures): tmp/ held 109.2 (101.3 on disk) for 12 agent seats, 9.1 each, measured, unswept leftovers of finished sessions included. */
   perAgentGB: 10,
-  /** Free space the drive keeps at its fullest: the pool's clean-up line (DISK_WARN_GB_DEFAULT; lothsahn, w1910: "cleanup space should be 20G"). */
-  cleanupHeadroomGB: DISK_WARN_GB_DEFAULT,
+  /** Free space the drive keeps at its fullest: the clean-up soft threshold (CLEANUP_SOFT_GB_DEFAULT, 5 GB above the guard's 15; lothsahn, w1910: "cleanup space should be 20G"). */
+  cleanupHeadroomGB: CLEANUP_SOFT_GB_DEFAULT,
   /** Windows' own minimum for a Dev Drive (sourced: Microsoft Learn, "Set up a Dev Drive on Windows 11"). */
   minGB: 50,
 } as const;
 
 /**
- * What the host volume keeps free with the VHDX at its maximum: the guard's clean-up line plus its hysteresis (20 + 10,
+ * What the host volume keeps free with the VHDX at its maximum: the clean-up line plus the guard's hysteresis (20 + 10,
  * devDriveGuard), or a tenth of the free space when that is more, for whatever else the volume holds. A guess.
  */
-export const hostReserveGB = (hostFreeGB: number) => Math.max(DISK_WARN_GB_DEFAULT + 10, Math.ceil(hostFreeGB * 0.1));
+export const hostReserveGB = (hostFreeGB: number) => Math.max(CLEANUP_SOFT_GB_DEFAULT + 10, Math.ceil(hostFreeGB * 0.1));
 
 /** The GB the pool's sandboxes and agents need on the drive: the sum of DEV_DRIVE_SIZES (1 sandbox, 1 agent: 98). */
 export function devDriveNeedGB(pool: { maxSandboxes: number; maxAgentsPerSandbox: number }): number {
