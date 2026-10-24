@@ -2610,6 +2610,8 @@ export class Agents {
     if (!released) info.placeReleased = { at, sandbox: info.machineSandbox!, branch: branch ?? info.machineSandbox!, why: `its work moved to ${to} (w2046)` };
     info.movedAway = { machine: info.machineId!, to, at };
     this.store.putSession(info);
+    // Its own check-in would wake a session its requests have left: the new one sets its own.
+    this.waker.cancel(info.id);
     this.store.append(info.id, { kind: 'system', text: `Its work moved to ${to} (w2046): ${hold}, and ${to} had room. Its sandbox ${from} is released${saved ? ` (${saved})` : ''}; FF Factory ends what it left running there, and its temp folder goes by itself. Its requests go on in a fresh session on ${to}.` });
     const message = entry.texts.join('\n\n---\n\n');
     const primary = reqs.find((w) => w.id === q.resumeOf?.work) ?? reqs.find((w) => w.status !== 'queued') ?? reqs[0];
