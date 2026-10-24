@@ -110,6 +110,25 @@ test('w1094: w1073 as it happened: CI cleared, its worker resumed, its sandbox g
   assert.deepEqual([l?.state, l?.why], ['queued', `a message to ec839c3a waits for a sandbox on its machine (${why})`]);
 });
 
+test('w2046: a resume waiting for room on its full computer is WRONG beside room elsewhere, unless it stays on purpose or no other can take it', () => {
+  // w1891 at 14:05Z on 2026-10-24: 0cd35068 waited for a BEAST sandbox while LothDesktop and biscuit had room.
+  const hold = 'no sandbox on beast is free (its own, slot2, took other work after it was released: it waits on w1891: w2006 reporting); the next one to free there is its, ahead of new work';
+  const w = item('w1891', { sessionIds: ['0cd35068'] });
+  const s = (queuedSend: string) => session('0cd35068', { status: 'stopped', machineId: 'beast', queuedSend, placeReleased: { sandbox: 'slot2', branch: 'w1891-roundrobin-belt-output', at: ago(0.3), why: 'it waits on w1891' } });
+  const live = (queuedSend: string, room: string[]) => workLive(w, { items: [w], session: () => s(queuedSend), room, now: NOW });
+  const wrong = live(hold, ['beast', 'lothdesktop', 'biscuit']);
+  assert.equal(wrong?.state, 'queued');
+  assert.deepEqual(wrong?.roomOn, ['lothdesktop', 'biscuit']);
+  assert.match(wrong!.why, /lothdesktop, biscuit have room: it should move there \(w2046\)/);
+  // Room only on its own computer is no other computer's: not WRONG.
+  assert.equal(live(hold, ['beast'])?.roomOn, undefined);
+  // It stays on purpose (unpushed commits), or no other computer can take it (the other pair leg's): right to wait.
+  assert.equal(live(`${hold}; it stays on its computer (w2046): 2 commit(s) on w1891-roundrobin-belt-output are not pushed: only beast has them`, ['lothdesktop'])?.roomOn, undefined);
+  assert.equal(live(`${hold}; no other computer can take it now (w2046): no other computer that could take it has room now; lothdesktop: w2013's other leg runs there`, ['lothdesktop'])?.roomOn, undefined);
+  // A placement under way is no wait on room.
+  assert.equal(live('being placed again in beast/slot3', ['lothdesktop'])?.roomOn, undefined);
+});
+
 test('w643: a machine with room: nothing is wrongly Queued; a request queued anyway is flagged with the computers that have room', () => {
   const w = item('w634', { status: 'queued', queuedFor: { at: ago(1) } });
   const full = workLive(w, { items: [w], session: () => undefined, room: [], now: NOW });

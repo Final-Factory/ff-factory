@@ -1148,6 +1148,13 @@ export class SessionManager {
    */
   pauseHeld?: (s: SessionHandle, text: string) => boolean;
   /**
+   * A message that waits only for room on its worker's own computer (w2046, server/resumeMove.ts): `true` when its work
+   * moved to a computer with room instead (a fresh session there gets the message in its hand-off), so it is dropped here;
+   * a string, the Queued line to show instead (it stays on its computer on purpose, and says why); undefined: it waits as
+   * it is. Set by Agents.
+   */
+  roomMove?: (s: SessionHandle, q: QueuedSend, hold: string, now: number) => true | string | undefined;
+  /**
    * A message to a worker between turns that starts a NEW session instead (w2043's pilot, server/freshAfterMerge.ts): true
    * when a pull request of its request merged during its session and the message went to a fresh session in the same
    * sandbox, so it is not delivered here. Checked last, once nothing holds the message. Set by Agents.
@@ -1382,11 +1389,21 @@ export class SessionManager {
       }
       // w1376: a held computer resumes nobody; checked before a restart (moveFor) or a slot, so nothing stops or starts there.
       const onHold = this.machineHold?.(s);
-      const hold = onHold ?? (this.moveFor(s) || this.fullFor(s));
+      const restart = onHold ? undefined : this.moveFor(s);
+      let hold = onHold ?? (restart || this.fullFor(s));
       // w1532: a paused machine's worker hands its requests back instead of waiting for the unpause; the message goes with them.
       if (onHold && this.pauseHeld?.(s, q.text)) {
         drop();
         continue;
+      }
+      // w2046: a resume that waits only for room on its own computer moves to one with room, or says why it stays.
+      if (hold && !onHold && !restart && !OFFLINE.test(hold) && this.roomMove) {
+        const r = this.roomMove(s, q, hold, now);
+        if (r === true) {
+          drop();
+          continue;
+        }
+        if (r) hold = r;
       }
       if (hold) {
         // w1135: what holds it NOW, not what held it when it was queued ("lothdesktop is offline" stayed on dd8193f8's line
