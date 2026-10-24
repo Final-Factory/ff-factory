@@ -830,6 +830,13 @@ portal (`unity` and `switch_branch` with a machine alone are refused, and the da
   in `system_status` and `list_machines` ends with the same words (`BenchState.untimed`, `readUntimed`), so an
   orchestrator's bench audit sees them.
 
+  **What the exclusive tickets cost, per hour** (w1996, lothsahn: "We're wasting system resources like crazy locking beast
+  down to a single timing job"): the queue's history lives only on its machine (`<root>/tmp/bench.queue/history.jsonl`, rotated to
+  `history.1.jsonl` at 5 MB). Each daemon reads both (`machine/benchHours.ts`), works out the last 72 UTC hours and sends them
+  as `bench_hours` after each welcome and every hour; the portal merges them into `data/bench-hours.json` (14 days, the newest
+  report of an hour wins; `server/benchHoursStore.ts`). A worker reads them with `portal_logs {source: "bench_hours"}` to compare
+  a machine before and after a change (docs/portal-logs.md, "bench_hours").
+
 ![The sidebar grouped by computer](images/fleet-sidebar-desktop-chromium.png)
 ![The Overview board](images/fleet-overview-desktop-chromium.png)
 

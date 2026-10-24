@@ -134,7 +134,7 @@ test('w920: only the listed sources are read: another name, a path or a link is 
     if (machine === '') continue;
     await assert.rejects(readPortalLogs(d, { source: 'cleanup', machine }), /machine: /, machine);
   }
-  await assert.rejects(readPortalLogs(d, { source: 'portal', machine: 'm5' }), /only the cleanup source takes one/);
+  await assert.rejects(readPortalLogs(d, { source: 'portal', machine: 'm5' }), /only the cleanup and bench_hours sources take one/);
   // A link in the data folder is not followed, to a file in or outside it.
   await assert.rejects(readPortalLogs(d, { source: 'cleanup', machine: 'm5' }), /a link: refused/);
   await assert.rejects(readPortalLogs(d, { source: 'update_result' }), /a link: refused/);

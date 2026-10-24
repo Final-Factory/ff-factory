@@ -70,6 +70,7 @@ import { readBenchWarnings } from './benchWarnings.ts';
 import { askPlayerToQuit, BenchTurn, closedDetail, writeClosedFile, type Holder } from './benchTurn.ts';
 import { GRACE_MIN, PersonPlay, personEnds, personHolderText, personHoldText, personTicket, priorityOf, setPriorityOf, treeOf, type PersonPlaySettings } from './personPlay.ts';
 import { benchTicketFor, queueTickets } from './benchQueue.ts';
+import { readBenchHours } from './benchHours.ts';
 import { TimedRunner } from './timedRunner.ts';
 import { timedRunFromMachine } from './timedRunPack.ts';
 import { readBenchState } from './benchState.ts';
@@ -311,6 +312,8 @@ const HOME = os.homedir();
 /** A knob's later moves within this long amend its line in the conversation instead of adding one (a drag is one line). */
 const LIVE_LINE_MERGE_MS = 5000;
 const STATS_MS = 15_000;
+/** w1996: how often the bench queue's cost per hour goes to the portal (it also goes after each welcome). */
+const BENCH_HOURS_MS = 60 * 60_000;
 /** How often this Mac's own login's usage is polled until the portal says (usage_config: config usagePollMinutes). */
 const USAGE_DEFAULT_MINUTES = 15;
 // Never a Claude OAuth token in the daemon log (the launch spec carries the host's, server/secrets.ts).
@@ -1105,6 +1108,7 @@ export class Daemon {
     // An update job's result (w1596): sent once the link is up, then the job's task or LaunchAgent removed.
     this.timers.push(setInterval(() => void this.selfUpdate.tick().catch((e) => log(`update job report: ${(e as Error).message}`)), 10_000));
     this.timers.push(setInterval(() => void this.reportStats(), STATS_MS));
+    this.timers.push(setInterval(() => void this.reportBenchHours(), BENCH_HOURS_MS));
     // A stopped worker's temp folder (w913): swept a few minutes after its process ended, its clones after six hours.
     this.timers.push(setInterval(() => void this.sweeper.tick().catch((e) => log(`session sweep failed: ${(e as Error).message}`)), 30_000));
     // Clean-up: every minute it looks whether a pass is due (every everyMinutes, sooner below softFreeGB).
@@ -1463,6 +1467,24 @@ export class Daemon {
     // The portal keeps the last report across a reconnect: a flapping link must not start a CLI each time.
     if (Date.now() - this.lastUsage > this.usageMs / 2) void this.reportUsage();
     else this.scheduleUsage();
+  }
+
+  /**
+   * The last 72 hours of this machine's bench queue history, per UTC hour (w1996, machine/benchHours.ts): what the exclusive
+   * tickets held and cost. Nothing is sent when there is no history here. One read at a time; a failure is logged, never thrown.
+   */
+  private benchHoursBusy = false;
+  private async reportBenchHours() {
+    if (this.benchHoursBusy || this.ws?.readyState !== WebSocket.OPEN) return;
+    this.benchHoursBusy = true;
+    try {
+      const rows = await readBenchHours(this.cfg.root);
+      if (rows) this.send({ type: 'bench_hours', rows });
+    } catch (e) {
+      log(`bench hours: ${(e as Error).message}`);
+    } finally {
+      this.benchHoursBusy = false;
+    }
   }
 
   /** This Mac's CPU, RAM, GPU and disk (the disk holding the clone), for the portal's meters (protocol 4), with its Unity editors (w469). */
@@ -2479,6 +2501,7 @@ export class Daemon {
         if (msg.owners) this.owners = msg.owners;
         this.portalSessions = new Set(msg.sessions.map((s) => s.id));
         this.welcomed = true;
+        void this.reportBenchHours();
         // A portal from before protocol 5 sends no pool settings: keep daemon.json's. So does a worker root install
         // (w513) whose record has no pool yet (an enrollment, never deployed from the portal): its hello tells it.
         if (msg.sandboxes !== undefined && !(msg.sandboxes === null && this.cfg.root)) {

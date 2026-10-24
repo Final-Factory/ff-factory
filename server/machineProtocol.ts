@@ -9,6 +9,7 @@ import type { RemoteVoiceStatus } from '../shared/voice.ts';
 import type { GhLogin } from '../shared/ghLogin.ts';
 import type { GhAppToken } from '../shared/githubAppRoute.ts';
 import type { TimedRunOrder, TimedRunReport } from '../shared/timedRun.ts';
+import type { BenchHourRow } from '../shared/benchHours.ts';
 import type { AttachmentRef, BenchLock, BenchPriority, BenchQueueReport, NoTimedRuns, TimedAskMark, BenchState, BenchWarning, CompactionTrigger, CleanupSummary, HostHealth, HostStats, ImageFile, ImageInput, Machine, MachinePause, LiveStageStep, MachineSandbox, PermissionMode, PersonPlayReport, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, TranscriptEvent, UnitySlotsReport } from '../shared/types.ts';
 
 /**
@@ -41,6 +42,7 @@ import type { AttachmentRef, BenchLock, BenchPriority, BenchQueueReport, NoTimed
  * offered it.
  * Also (w1596, no bump): `selfUpdate` in the hello, and `self_update` and `daemon_control`, sent only to a daemon that offered
  * it, answered by `self_update_ack`, `self_update_report` and `daemon_control_result`, which an older portal never asks for.
+ * Also (w1996, no bump): `bench_hours`, the machine's exclusive-bench cost per UTC hour, which an older portal drops.
  */
 export const PROTOCOL_VERSION = 9;
 
@@ -395,6 +397,11 @@ export type FromDaemon =
   | { type: 'cleanup_result'; id: string; ok: boolean; summary?: CleanupSummary; error?: string }
   /** A timed run's progress, its end (the table, the legs, the logs' size and hash) and the logs' attachment (w1946). */
   | TimedRunReport
+  /**
+   * What the machine's exclusive bench tickets cost it, per UTC hour for the last 72 h (w1996, machine/benchHours.ts): at
+   * connect and every hour. The portal merges the hours (server/benchHoursStore.ts). An older portal drops it.
+   */
+  | { type: 'bench_hours'; rows: BenchHourRow[] }
   /** A line the ffdiscord CLI appended to the Mac's Max events file (docs/max.md), forwarded as is; the portal validates it. */
   | { type: 'max_event'; line: string }
   /** Its GPU Whisper's state, when it changes (w615): loaded, unloaded for the editors' VRAM, installing. An older portal drops it. */

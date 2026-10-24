@@ -45,6 +45,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { keepMessageImages } from './inlineImages.ts';
 import { AttachmentError, AttachmentStore, downloadDisposition, machineAttachment, machineUploadHttp, publicRef } from './attachments.ts';
 import { TimedRuns } from './timedRuns.ts';
+import { BenchHoursStore } from './benchHoursStore.ts';
 import type { ToDaemon } from './machineProtocol.ts';
 import { REVIEW_DEFAULTS, ReviewStore, reviewHttp } from './review.ts';
 import { HostHealthMonitor } from './hostHealth.ts';
@@ -520,6 +521,15 @@ agents.timedRuns = timedRuns;
 machines.timedRunsOn = (id) => timedRuns.runsOn(id).length;
 machines.timedHello = (id, active) => timedRuns.onHello(id, active);
 machines.timedReport = (id, msg) => timedRuns.onReport(id, msg);
+// What each machine's exclusive bench tickets cost it, per UTC hour (w1996): portal_logs source bench_hours.
+const benchHours = new BenchHoursStore({ dataDir: cfg.dataDir });
+machines.benchHours = (id, rows) => {
+  try {
+    benchHours.merge(id, rows);
+  } catch (e) {
+    console.warn(`bench hours of ${id}: ${(e as Error).message}`);
+  }
+};
 setInterval(() => {
   try {
     timedRuns.tick();

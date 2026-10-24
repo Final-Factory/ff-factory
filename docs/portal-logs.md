@@ -19,6 +19,7 @@ portal_logs {source: "update_result"}                             # how the last
 portal_logs {source: "machine_rollout"}                           # how each machine's daemon followed it
 portal_logs {source: "auto_deploy"}                               # the automatic deploy (w1634): what it waits for, each deploy and its outcome
 portal_logs {source: "coordinator_context", grep: "lothsahn"}   # what fills Lothsahn's orchestrator between compactions (w1866)
+portal_logs {source: "bench_hours", machine: "beast", since: "2026-10-23T00:00:00Z"}   # what exclusive bench tickets cost BEAST, per hour (w1996)
 portal_logs {source: "journal", grep: "fff-ops", offset: 200}     # the next page
 ```
 
@@ -29,6 +30,7 @@ portal_logs {source: "journal", grep: "fff-ops", offset: 200}     # the next pag
 | `tailscaled` | the VM's Tailscale daemon (`tailscaled.service`, w1420): its control connection (`PollNetMap`, `dial plan`), link changes, DERP, Funnel hand-offs and the packet filter's `Drop:` lines; a Tailscale login link in it is masked | the same |
 | `cleanup` | one computer's clean-up passes as the portal keeps them (`data/cleanup/<machine>/cleanup-log.jsonl` and its rotated `.1`; no `machine`: this host's own `data/cleanup-log.jsonl`): one line per pass, then one per item removed, would-remove or kept for a person, with size and why, each starting with the pass's time | `since` / `until` on the pass's time |
 | `update_result`, `update_verified`, `update_prepared`, `update_verifying`, `machine_rollout`, `auto_deploy`, `unit_watchdog` | the JSON files of the same names (`update.result.json` …, `machine-rollout.json`, `auto-deploy.json`, `unit-watchdog.json`), pretty-printed, in order | the file as it is; `since` and `until` do not apply |
+| `bench_hours` | what each machine's exclusive bench tickets cost it, per UTC hour (w1996): below. `machine` picks one; none: every machine | `since` / `until` pick the hours that overlap them; 14 days are kept |
 | `coordinator_context` | how the coordinators' conversations (the dispatcher's and each person's orchestrator's) grow between compactions (w1866), computed from Claude Code's own transcripts of them as counts only, never their text: below | the last 8 cycles of each; `since` / `until` pick the cycles that overlap them (at most 30) |
 
 `grep` is a substring, any case. `regex` is any case too and refuses a quantified group, a backreference, a lookaround and
@@ -36,6 +38,36 @@ more than 100 characters (the pattern runs on the portal). `limit` is 200 by def
 characters; the answer says `more: offset N for the next page`, how many lines the window held, whether it held more than
 one call reads (the journal read stops at 20,000 lines: narrow it with `since`, `until` or `grep`), and how many lines were
 left out. Lines are cut at 1,000 characters. The journal and the clean-up passes come newest first.
+
+### bench_hours: what the exclusive bench tickets cost (w1996)
+
+lothsahn, w1996: "We're wasting system resources like crazy locking beast down to a single timing job." A machine's bench
+queue history stays on that machine (`<root>/tmp/bench.queue/history.jsonl`, rotated to `history.1.jsonl` at 5 MB), so nothing
+could compare BEAST or LothDesktop before and after a change. Each daemon now reads both files (`machine/benchHours.ts`), computes
+the last 72 UTC hours and sends them as `bench_hours` after each welcome and every 60 minutes; the portal keeps them in
+`data/bench-hours.json` (14 days; an hour reported again replaces the one kept; `server/benchHoursStore.ts`). A machine whose
+queue has no history sends nothing. One line per machine-hour that had any activity, newest first, and a totals line per
+machine for the window at the top of every page (outside `grep`, `regex`, `limit` and `offset`):
+
+```text
+beast totals, 2026-10-23T05:00Z to 2026-10-24T05:00Z (25 hours with activity): exclusive 3.3 h, idle slots 8.1 slot-h, shared waited 6.8 h, shared granted 19.1 h
+2026-10-24T05:00Z beast: exclusive 41 min in 3 holds, idle slots 160 slot-min, shared waited 52 min, shared granted 38 min; w1908 30m, w1891 11m
+```
+
+- **exclusive**: minutes in the hour that an exclusive ticket was granted (held); **holds**: exclusive tickets that overlap the
+  hour. A hold still open counts up to now; a hold is split across the hours it spans.
+- **idle slots**: for each hold, its minutes in the hour times the number of *other* sandboxes (the ticket's `sandbox`, else its
+  `what`) that had a shared ticket alive, from take to end, at some point during the hold, not counting the holder's own session
+  or sandbox. Since w1860 every running editor holds a shared ticket, so this is a lower bound of the editor slots the turn idled.
+- **shared waited**: minutes other sessions' shared tickets spent waiting (take to grant, or to the end of one never granted)
+  while an exclusive ticket was granted.
+- **shared granted**: minutes in the hour that any shared ticket was granted (the union, not the sum), so an hour that was busy
+  with shared work is visible.
+- **the requests**: the exclusive minutes by the request ids the ticket carried (`w1908,w1891` joined; `-` none), the 10 biggest.
+
+The hour that is not over yet is partial and grows with each hourly report. Measured on LothDesktop's history, 2026-10-23T05:30Z
+to 2026-10-24T05:36Z: 42 exclusive tickets, 3.3 h exclusive, 6.75 h of shared waits behind them, 8.08 slot-hours idle.
+Tests: `server/benchHours.test.ts`, `server/portalLogsBenchHours.test.ts`.
 
 ### coordinator_context: what fills a coordinator's context (w1866)
 
