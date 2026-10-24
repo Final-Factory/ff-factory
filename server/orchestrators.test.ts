@@ -4632,6 +4632,34 @@ test('w1628: each worker\'s bench priority is the highest of its open requests, 
   assert.equal(agents.benchPriorities('pc')[b.id].exempt, 'nightly');
 });
 
+// w1984, lothsahn: "a waiting ticket in a machine's bench queue must not outlive the worker that asked for it" (LothDesktop's
+// t00000982 waited on after its worker was stopped and w1789's timed run moved to LothLaptop). bench_queue.py parks the
+// waiting tickets of a session marked away and queues them again at the back once the mark goes.
+test('w1984: a worker stopped on purpose, or whose timed work is on another machine, is marked away in its machine\'s bench priorities', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, machines } = env;
+  putRequests(store, [{ id: 'w1', by: BEN, status: 'active' }, { id: 'w2', by: BEN, status: 'active' }]);
+  const a = await startedFor(env, 'w1');
+  const b = await startedFor(env, 'w2');
+  assert.equal(agents.benchPriorities('pc')[a.id].away, undefined, 'a worker at work is not away');
+  store.sessions.get(a.id)!.stoppedOnPurpose = true;
+  assert.deepEqual(agents.benchPriorities('pc')[a.id].away, { why: `its worker ${a.id.slice(0, 8)} was stopped on purpose` });
+  delete store.sessions.get(a.id)!.stoppedOnPurpose;
+  assert.equal(agents.benchPriorities('pc')[a.id].away, undefined, 'messaged again, it is back: its tickets queue again at the back');
+  // A ticket of its own in another machine's queue: its timed tickets here are parked, its builds here still count.
+  const bench = (at: string) => ({ laptop: { hostname: 'l', platform: 'win32', cpuCount: 8, loadPct: 5, memTotalBytes: 1, memFreeBytes: 1, at, bench: { mode: 'exclusive' as const, running: [{ ticket: 't00000047', mode: 'exclusive' as const, what: 'cpu budget A/B', session: b.id }], runningCount: 1, waiting: 0 } } });
+  const real = machines.allStats.bind(machines);
+  machines.allStats = (() => bench(new Date().toISOString())) as unknown as typeof machines.allStats;
+  assert.deepEqual(agents.benchPriorities('pc')[b.id].away, { why: `its worker ${b.id.slice(0, 8)} has ticket t00000047 on laptop now`, exclusive_only: true });
+  assert.equal(agents.benchPriorities('laptop')[b.id], undefined, 'not its own machine');
+  machines.allStats = (() => bench(new Date(Date.now() - 10 * 60_000).toISOString())) as unknown as typeof machines.allStats;
+  assert.equal(agents.benchPriorities('pc')[b.id].away, undefined, 'a stale bench state counts for nothing');
+  machines.allStats = real;
+  // Its timed leg placed elsewhere (timed_place).
+  (agents as unknown as { timedVerdicts: Map<string, unknown> }).timedVerdicts.set(b.id, { verdict: 'elsewhere', why: 'big computer', until: new Date(Date.now() + 3_600_000).toISOString(), leg: 'w9' });
+  assert.deepEqual(agents.benchPriorities('pc')[b.id].away, { why: `its worker ${b.id.slice(0, 8)}'s timed leg was placed elsewhere (w9)`, exclusive_only: true });
+});
+
 // w1643, lothsahn: "let's make the setting the minimum priority work that can go to a machine. If normal (all work), if high,
 // high and urgent, if urgent, urgent only".
 test('w1643: placement.minPriority: start_agent refuses a request below the computer\'s level and takes it once its person raises it; a new request sent to a worker there follows the rule while the worker\'s own goes on', async (t) => {
