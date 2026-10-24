@@ -6,7 +6,7 @@ import { execFileSync } from 'node:child_process';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { HOST_ROLES, configPath, loadConfig, machineActivityPause, machinePersonPlay, machineCleanupSettings, pruneRetiredConfig, publicIdentityOf, retiredKeysLine, ROOT } from './config.ts';
 import { migrateConfig, retireOldTokenFile, secretsDirOf } from './configMigration.ts';
-import { Store, bus } from './store.ts';
+import { Store, bus, emit } from './store.ts';
 import { SessionManager, compactCommand, seedSdkCost, snapshotOf } from './sessions.ts';
 import { TIMER_LIMITS } from './timers.ts';
 import { Agents } from './agents.ts';
@@ -948,7 +948,7 @@ function appState(user: string | undefined): AppState {
     sessions: [...store.sessions.values()],
     standingAgents: agents.standing.list(),
     delegations: [...store.delegations.values()],
-    machines: machines.list(),
+    machines: machines.list().map(machineView),
     providers: providers.enabled || providers.summary().tokenSet ? [providers.summary()] : [],
     ffbox: providers.summary(),
     max: max.summary(),
@@ -2308,7 +2308,28 @@ function hostForUser(h: HostStatus, user: string): HostStatus {
   if (!h.tokenWarnings) return h;
   return { ...h, tokenWarnings: warningsForUser(h.tokenWarnings, user, auth.userInfo(user)?.role === 'owner') };
 }
+/**
+ * A machine as a page gets it (w2067): each sandbox carries list_sandboxes' FREE (Agents.sandboxFree), so the dashboard's
+ * "1/3 sandboxes" counts in use as the agents' tools do and never works it out a second way.
+ */
+function machineView(m: Machine): Machine {
+  return m.sandboxes?.length ? { ...m, sandboxes: m.sandboxes.map((sb) => ({ ...sb, free: agents.sandboxFree(m.id, sb) })) } : m;
+}
+/**
+ * What makes a sandbox free changes without a machine event (a worker's turn ends, a claim lapses, a bench lock goes):
+ * every few seconds a machine whose FREE set moved is sent again (w2067).
+ */
+const freeSent = new Map<string, string>();
+const freeKey = (v: Machine) => (v.sandboxes ?? []).map((sb) => `${sb.id}:${sb.free ? 1 : 0}`).join(',');
+setInterval(() => {
+  for (const m of machines.list()) if (freeSent.get(m.id) !== freeKey(machineView(m))) emit({ type: 'machine', machine: m });
+}, 5_000).unref();
 function broadcast(e: ServerEvent) {
+  if (e.type === 'machine') {
+    const machine = machineView(e.machine);
+    freeSent.set(machine.id, freeKey(machine));
+    e = { ...e, machine };
+  }
   if (e.type === 'host') {
     for (const [c, user] of clients) if (c.readyState === c.OPEN) c.send(JSON.stringify({ ...e, host: hostForUser(e.host, user) } satisfies ServerEvent));
     return;

@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { z } from 'zod';
+import os from 'node:os';
+import path from 'node:path';
+import { ROOT } from './config.ts';
 import { asOnLinuxCi, withCoordinators } from '../scripts/coordinatorContext.ts';
 import { ALWAYS_LOADED } from './belts.ts';
 import { deferredToolsLine } from './toolManifest.ts';
@@ -166,4 +169,15 @@ test('w1158: what a coordinator carries in every call stays within its budget', 
       assert.ok(tools <= ALWAYS_LOADED_MAX, `${kind}: its always-loaded tools are ${tools} characters, over ${ALWAYS_LOADED_MAX}: defer one (server/toolManifest.ts) or shorten it`);
     }
   });
+});
+
+test('w2067: asOnLinuxCi swaps whole paths only, so a clone that is a prefix of a temp folder beside it leaves that folder alone', () => {
+  const sep = path.sep;
+  // A worker's clone at <tmp>/ff (w2067) is the start of the test's own <tmp>/ffsb-context-*; that folder becomes /tmp/..., not the clone's CI path.
+  const ci = '/home/runner/work/ff-factory/ff-factory';
+  const out = asOnLinuxCi(`${ROOT}${sep}a ${ROOT}sb-context-x${sep}base \`${ROOT}\``);
+  assert.ok(out.startsWith(`${ci}${sep}a `) && out.endsWith(` \`${ci}\``), out);
+  // The prefixed folder keeps its own name: only a temp-folder swap may touch it (a worker's clone sits in its temp folder; CI's does not).
+  assert.ok(out.includes(` ${`${ROOT}sb-context-x`.split(os.tmpdir()).join('/tmp')}${sep}base `), out);
+  assert.equal(asOnLinuxCi(`${os.tmpdir()}${sep}ffsb-context-x`), `/tmp${sep}ffsb-context-x`);
 });

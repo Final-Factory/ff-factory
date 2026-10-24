@@ -130,6 +130,25 @@ test('w1945: a worker that asks for a pair run with request_pair frees its sandb
   assert.match(agents.describeAllSandboxes(), /pc\/sb1 FREE/);
 });
 
+test('w2067: a machine reads sandboxes in use of its limit, from the FREE that marks each sandbox, and the page gets that same FREE', async (t) => {
+  const { sessions, mm, agents } = await twoSandboxes(t);
+  const pc = () => mm.list().find((m) => m.id === 'pc')!;
+  // Both made, neither used: "0/2", not "2/2" (biscuit read full with two of its three empty, 2026-10-24).
+  assert.match(agents.describeAllSandboxes(), /0\/2 sandboxes in use, up to 2 agents each/);
+  assert.deepEqual(pc().sandboxes!.map((sb) => agents.sandboxFree('pc', sb)), [true, true]);
+  const w = mm.createSession('pc', { kind: 'worker', title: 'w2067 work', permissionMode: 'default', sandbox: 'sb1' });
+  sessions.send(w.info.id, 'go');
+  await until('w live and idle', () => w.live && w.info.status === 'idle');
+  const text = agents.describeAllSandboxes();
+  assert.match(text, /1\/2 sandboxes in use, up to 2 agents each/);
+  // The header, the per-sandbox FREE marks and what the page is sent agree.
+  const free = pc().sandboxes!.filter((sb) => agents.sandboxFree('pc', sb)).map((sb) => sb.id);
+  assert.deepEqual(free, ['sb2']);
+  assert.deepEqual([...text.matchAll(/- pc\/(\w+) FREE/g)].map((m) => m[1]), free);
+  w.stop();
+  await until('w stopped', () => !w.live);
+});
+
 const until = async (what: string, cond: () => boolean, ms = 60_000) => {
   const end = Date.now() + ms;
   while (!cond()) {

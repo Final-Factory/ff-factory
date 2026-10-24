@@ -45,7 +45,9 @@ function toolTexts(belt: { name: string; description: string; schema: unknown }[
 export function asOnLinuxCi(text: string): string {
   const swaps: [string, string][] = [[ROOT, '/home/runner/work/ff-factory/ff-factory'], [os.tmpdir(), '/tmp']];
   // The longer one first: a clone may sit inside the temp folder (a worker's), or the temp folder inside the clone.
-  for (const [from, to] of swaps.sort((a, b) => b[0].length - a[0].length)) text = text.split(from).join(to);
+  // A whole path only: a clone at <tmp>/ff is no prefix of the test's own <tmp>/ffsb-context-* (w2067, which read a brief 63 over).
+  const whole = (from: string) => new RegExp(from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?![\\w.-])', 'g');
+  for (const [from, to] of swaps.sort((a, b) => b[0].length - a[0].length)) text = text.replace(whole(from), to);
   return text;
 }
 

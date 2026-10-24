@@ -57,7 +57,7 @@ import { EVEN_MARGIN, RAM_BUSY_PCT, benchText, buildOf, busyReasons, capacityLin
 import { MachinePauses, pauseHolds, type HandBack } from './machinePause.ts';
 import { MOVE_AFTER_MS, NONE_MARK, ROOM_WAIT, briefOf, moveDecision, movedPrompt, stayLine, type MoveFacts } from './resumeMove.ts';
 import { playHolds, playLine } from '../shared/personPlay.ts';
-import { unitySlotsLine } from '../shared/fleet.ts';
+import { sandboxUseText, unitySlotsLine } from '../shared/fleet.ts';
 import { isMidTurn, midTurnRefusal, othersMidTurn, snapshotOf, type OptionsFactory, type QueuedSend, type SessionHandle, type SessionManager, type TurnEndMeta } from './sessions.ts';
 import { FLAG_LABEL, WORK_BLOCKER_KINDS, WORK_OPEN, WORK_PRIORITIES, type WorkBlockerKind, type WorkSource, type BenchPriority, type BenchAway, type AttachmentRef, type DeliveredAttachment, type ImageInput, type PermissionMode, type Requester, type Sandbox, type SessionInfo, type TranscriptEvent, type WorkItem, type WorkPriority, type WorkStatus } from '../shared/types.ts';
 import { attachmentForMachine, publicRef, publishableFile, uploadForMachine, type AttachmentStore } from './attachments.ts';
@@ -3651,6 +3651,14 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
     return !(machineId && this.placeAgain.claimedBy(machineId, x.id));
   }
 
+  /**
+   * list_sandboxes' FREE for one of a machine's sandboxes (free()), as the page gets it (w2067, server/index.ts machineView):
+   * the dashboard's in-use count reads this, so it and list_sandboxes always agree.
+   */
+  sandboxFree(machineId: string, sb: MachineSandbox): boolean {
+    return this.free(sb, machineId);
+  }
+
   /** " (spoken for: …)" when a released worker is being placed again there or its resume waits for it (w640), else "". */
   private claimLine(machineId: string, sandbox: string): string {
     const by = this.placeAgain.claimedBy(machineId, sandbox);
@@ -4189,7 +4197,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
       const state = this.machines.isOnline(m.id) ? 'online' : 'OFFLINE (last known state)';
       const u = this.machines.statsOf(m.id)?.unity;
       const editors = u ? `Unity ${unitySlotsLine(u)}` : `${pool?.maxUnity} editors at once`;
-      const limits = pool ? `${sbs.length}/${pool.maxSandboxes} sandboxes, ${sbs.filter((s) => this.free(s)).length} free, up to ${pool.maxAgentsPerSandbox} agents each, ${editors}, root ${pool.root}` : 'no sandbox_root any more';
+      const limits = pool ? `${sandboxUseText(sbs.filter((s) => !this.free(s, m.id)).length, pool.maxSandboxes, sbs.length)}, up to ${pool.maxAgentsPerSandbox} agents each, ${editors}, root ${pool.root}` : 'no sandbox_root any more';
       const diskPart = disk && disk.level !== 'ok' ? `; DISK ${disk.level.toUpperCase()} (${((disk.freeBytes ?? 0) / 2 ** 30).toFixed(0)} GB free)` : '';
       const noun = m.local ? `this host's own daemon; bare names like "${sbs[0]?.id ?? 'sb1'}" work too` : platformNoun(m.platform);
       const total = pool ? `, up to ${agentCap(m)} agents in all, standing agents included` : '';
@@ -4984,7 +4992,7 @@ ${w.repo ?? ''}
     const pool = poolSettingsOf(m);
     const sbs = m.sandboxes ?? [];
     const sandboxes = pool
-      ? `  sandboxes: ${sbs.length}/${pool.maxSandboxes} in ${pool.root} (${sbs.filter((s) => this.free(s)).length} free; up to ${pool.maxAgentsPerSandbox} agents each${pool.maxAgents !== undefined ? `, ${pool.maxAgents} in all` : ''}, ${pool.maxUnity} editors at once; disk guard ${pool.diskWarnGB}/${pool.diskCriticalGB} GB${pool.librarySeed ? `; Library seed ${pool.librarySeed}${pool.librarySeedCopy === 'clone' ? ' (block clone)' : ''}` : ''}${pool.belowNormal ? '; editors below normal priority' : ''}): ${sbs.map((s) => s.id).join(', ') || 'none yet'} (list_sandboxes for details)`
+      ? `  sandboxes: ${sandboxUseText(sbs.filter((s) => !this.free(s, m.id)).length, pool.maxSandboxes, sbs.length)} in ${pool.root} (up to ${pool.maxAgentsPerSandbox} agents each${pool.maxAgents !== undefined ? `, ${pool.maxAgents} in all` : ''}, ${pool.maxUnity} editors at once; disk guard ${pool.diskWarnGB}/${pool.diskCriticalGB} GB${pool.librarySeed ? `; Library seed ${pool.librarySeed}${pool.librarySeedCopy === 'clone' ? ' (block clone)' : ''}` : ''}${pool.belowNormal ? '; editors below normal priority' : ''}): ${sbs.map((s) => s.id).join(', ') || 'none yet'} (list_sandboxes for details)`
       : '  sandboxes: none (no sandbox_root)';
     // Its standing agents here; a sandbox's are under list_sandboxes.
     const standing = m.sessionIds.filter((id) => this.store.sessions.get(id)?.kind === 'standing');

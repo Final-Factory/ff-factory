@@ -783,8 +783,9 @@ main clone's own branch switch) take one lock in the daemon.
 
 **In the web UI.** The sidebar groups everything by computer: this host (its own daemon's sandboxes, or "orchestrators only" when it has no
 daemon), then each machine, each a collapsible group
-whose header shows its load and `sandboxes/max_sandboxes · editors/max_unity`, then one row per sandbox (label, branch,
-editor, a **FREE** badge) with its agents under it (no main-clone row: no agent works there, w536). The Overview
+whose header shows its load and `in use/max_sandboxes sandboxes · editors/max_unity` (in use: every sandbox not FREE, the
+portal's own answer that list_sandboxes marks, so the two always agree; how many are made is in the hover, w2067), then one
+row per sandbox (label, branch, editor, a **FREE** badge) with its agents under it (no main-clone row: no agent works there, w536). The Overview
 page (`#/overview`) shows the same as one card per computer. A machine sandbox has its own page,
 `#/machine/<machine>/sandbox/<id>`: its agents as tabs, its editor (start, stop, the log read through the daemon), its
 git state and a branch switch (`POST /api/machines/<machine>/sandboxes/<id>/unity`, `GET …/unity-log`,

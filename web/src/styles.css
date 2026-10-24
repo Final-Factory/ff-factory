@@ -6545,6 +6545,14 @@ button.board-head-link:hover {
   padding: 6px var(--s-3);
 }
 
+/* w2067 critic: the free line's FREE label takes its chips' pill shape and height, so the row reads as one set. */
+.fl-free-line .fl-free,
+.fl-free-line .fl-chip {
+  padding: 2px 8px;
+  border-radius: 999px;
+  line-height: 15px;
+}
+
 .fl-chip {
   padding: 2px 8px;
   border: 1px solid var(--border-2);
