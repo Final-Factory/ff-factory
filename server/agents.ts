@@ -440,6 +440,16 @@ export const WORKER_HIDDEN_SKILLS = [
   'run', 'init', 'security-review', 'plugin-authoring', 'code-review', 'code-review-sonnet', 'unity-mcp-skill', 'therapy',
 ] as const;
 
+/**
+ * How many characters of a shell command's output a worker gets inline (Claude Code's bashOutputMaxChars, default 30,000, at
+ * least 4,000); past it Claude Code saves the whole output to a file and gives a preview of about 2,200 characters and the
+ * path, which the worker reads when it needs more (w2002). Measured on beast's workers (2026-10-17..24): shell output is 24% of
+ * what later calls re-read; a 10,000 cap would cut 3.7% of all context tokens if no saved output were read back (8,000: 5.1%,
+ * 15,000: 1.5%); 1% of results pass 12,900 characters; of the 109 outputs already saved past 30,000 in 14 days, 10 were read
+ * back within the next few steps.
+ */
+export const WORKER_BASH_OUTPUT_MAX_CHARS = 10_000;
+
 /** The marketing plugin, which only marketing work uses (its 17 skills: footage, trailers, ads, the Steam page, outreach). */
 export const MARKETING_PLUGIN = 'ff-marketing@ff-marketing';
 
@@ -457,6 +467,7 @@ export function workerSettings(sessionId: string, cfg: Partial<Pick<Config, 'wor
   return {
     enabledPlugins: Object.fromEntries(off.map((p) => [p, false])),
     skillOverrides: Object.fromEntries(WORKER_HIDDEN_SKILLS.map((k) => [k, 'user-invocable-only'])),
+    bashOutputMaxChars: WORKER_BASH_OUTPUT_MAX_CHARS,
     ...(window ? { autoCompactWindow: window } : {}),
   };
 }
