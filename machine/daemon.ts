@@ -1515,16 +1515,17 @@ export class Daemon {
     if (!root || !this.benchSent) return;
     try {
       const tickets = queueTickets(benchLockDir(root), pidAlive);
-      this.benchPassed = passedShared(tickets, this.benchPassed ?? readPassedMarks(root), new Date());
       const placed = [...this.entries].map(([session, e]) => ({ session, sandbox: e.spec?.sandbox }));
-      const { sessions, raised } = raisedSessions({ ...editorSessions(placed, this.benchMarks), ...this.benchMarks }, tickets, this.benchPassed);
+      const base = { ...editorSessions(placed, this.benchMarks), ...this.benchMarks };
+      this.benchPassed = passedShared(tickets, this.benchPassed ?? readPassedMarks(root), new Date(), base);
+      const { sessions, raised } = raisedSessions(base, tickets, this.benchPassed);
       const key = JSON.stringify([sessions, this.benchPassed, this.benchSent]);
       if (key === this.benchWritten) return;
       if (writeBenchPriorities(root, sessions, new Date(), this.benchSent.singleWorker, this.benchSent.noTimedRuns, this.benchSent.timedAsk, this.benchPassed)) this.benchWritten = key;
       const now = raised.join(',');
       if (now !== this.benchRaised) {
         this.benchRaised = now;
-        if (raised.length) log(`bench queue: raised to the top while they wait, an exclusive turn having passed them (w1962): ${raised.map((t) => `${t} (passed by ${this.benchPassed![t]?.by})`).join(', ')}`);
+        if (raised.length) log(`bench queue: raised to the top while they wait, an exclusive turn having passed them or a later exclusive ticket outranking them (w1962): ${raised.map((t) => `${t} (passed by ${this.benchPassed![t]?.by})`).join(', ')}`);
       }
     } catch (e) {
       log(`bench queue: priorities: ${(e as Error).message}`);

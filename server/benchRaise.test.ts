@@ -84,6 +84,28 @@ test('w1962: a session with a live timed leg of its own is not raised, nor a tic
   assert.deepEqual(raisedSessions({ sB: { priority: 'normal', requests: [] } }, q, passed).raised, []);
 });
 
+/** LothDesktop at 04:04Z on 2026-10-24 (measured): no timed leg holds the lock; a shared group runs (w1977's repro,
+ * slot6's urgent game player, slot1's editor); w1789's high timed leg, taken after w1905's build, waits behind it. */
+const lothdesktop0404 = (): QueueTicket[] => [
+  tk('t00000937', 'shared', 'unity: build_player win 8e88b213', { session: 's1905', sandbox: 'slot2', requests: ['w1905'] }),
+  tk('t00000974', 'shared', 'w1977 MP-trailer-raid-fleets witness repro', { session: 's1977', sandbox: 'slot4', granted }),
+  tk('t00000982', 'exclusive', 'w1789 A/B UI fixes', { session: 's1789', sandbox: 'slot5' }),
+  tk('t00000987', 'shared', 'running player pid 34504 slot 6-0', { session: 's1782', sandbox: 'slot6', granted }),
+  tk('t00000988', 'shared', 'running editor slot1', { session: editorBenchSession('slot1'), sandbox: 'slot1', granted }),
+];
+
+test('w1962: a shared ticket that an exclusive ticket taken after it outranks is raised, with no timed leg holding the lock', () => {
+  const q = lothdesktop0404();
+  const prios = { ...portal, s1977: { priority: 'high', requests: ['w1977'] }, s1782: { priority: 'urgent', requests: ['w1782'] } } as Record<string, BenchPriority>;
+  assert.deepEqual(passedShared(q, {}, NOW), {}, 'all normal: nothing outranks the build');
+  const passed = passedShared(q, {}, NOW, prios);
+  assert.deepEqual(passed, { t00000937: { by: 't00000982', since: NOW.toISOString() } });
+  assert.equal(raisedSessions(prios, q, passed).sessions.s1905.priority, 'urgent');
+  // an exclusive taken before it, or one it outranks, passes nothing
+  assert.deepEqual(passedShared(q.map((t) => (t.ticket === 't00000982' ? { ...t, ticket: 't00000930' } : t)), {}, NOW, prios), {});
+  assert.deepEqual(passedShared(q, {}, NOW, { ...prios, s1789: { priority: 'normal', requests: [] } }), {});
+});
+
 test('w1962: an editor start waits at the highest priority of the workers in its sandbox', () => {
   const e = editorSessions([{ session: 'a', sandbox: 'slot1' }, { session: 'b', sandbox: 'slot1' }, { session: 'c' }, { session: 'gone', sandbox: 'slot2' }], {
     a: { priority: 'normal', requests: ['w1'] },
@@ -171,4 +193,47 @@ test('w1962: against the real bench_queue.py, a raised build ends an urgent hold
   assert.equal((await sh.wait(1000)).kind, 'waiting', 'the exclusive leg keeps the machine to itself until its turn ends');
   ex.release();
   assert.equal((await sh.wait(15_000)).kind, 'granted');
+});
+
+test('w1962: against the real bench_queue.py, a raised build joins a running urgent shared group instead of waiting behind a later high timed leg', { skip: !GAME || !findBenchQueueScript([GAME]) ? 'FF_GAME_REPO not set to a checkout with scripts/bench/bench_queue.py' : false }, async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'w1962-'));
+  const helpers: BenchTicket[] = [];
+  t.after(async () => {
+    for (const h of helpers) h.release();
+    await waitFor(() => helpers.every((h) => h.state().kind === 'failed'), 15_000);
+    fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  });
+  const lock = benchLockDir(root);
+  fs.mkdirSync(path.dirname(lock), { recursive: true });
+  const script = findBenchQueueScript([GAME])!;
+  const env: NodeJS.ProcessEnv = { ...process.env, BENCH_POLL_S: '0.1', BENCH_LEGACY_GRACE_S: '0' };
+  for (const k of ['FF_BENCH_TICKET', 'FF_SANDBOX_ID', 'FF_SESSION_ID', 'FF_BENCH_SESSION']) delete env[k];
+  const sessions: Record<string, BenchPriority> = { sP: { priority: 'urgent', requests: ['w1782'] }, sX: { priority: 'urgent', requests: ['w1853'] }, sH: { priority: 'high', requests: ['w1789'] }, sN: { priority: 'normal', requests: ['w1905'] } };
+  writeBenchPriorities(root, sessions, new Date(), false);
+  const take = (mode: 'shared' | 'exclusive', what: string, s: string) => {
+    const b = new BenchTicket({ script, lock, mode, what, tempDir: root, env: { ...env, FF_SESSION_ID: s } }).take();
+    helpers.push(b);
+    return b;
+  };
+  const player = take('shared', 'running player pid 1 slot 6-0', 'sP');
+  assert.equal((await player.wait(15_000)).kind, 'granted');
+  // an urgent timed leg waits first, so the build, taken next, waits too and is ahead of w1789's leg in taking order
+  const first = take('exclusive', 'w1853 urgent leg', 'sX');
+  assert.equal((await first.wait(1500)).kind, 'waiting');
+  const build = take('shared', 'unity: build_player', 'sN');
+  assert.equal((await build.wait(1000)).kind, 'waiting');
+  const leg = take('exclusive', 'w1789 A/B UI fixes', 'sH');
+  assert.equal((await leg.wait(1000)).kind, 'waiting');
+  first.release();
+  // Before: the leg, taken later, outranks the build and waits behind the urgent group; the build waits behind the leg
+  assert.equal((await build.wait(2000)).kind, 'waiting', 'the build waits behind the later, higher leg');
+  assert.equal((await leg.wait(500)).kind, 'waiting');
+  const q = queueTickets(lock, pidAlive);
+  const passed = passedShared(q, {}, new Date(), sessions);
+  const bt = q.find((x) => x.what === 'unity: build_player')!.ticket;
+  assert.deepEqual(Object.keys(passed), [bt]);
+  const r = raisedSessions(sessions, q, passed);
+  writeBenchPriorities(root, r.sessions, new Date(), false, undefined, undefined, passed);
+  assert.equal((await build.wait(10_000)).kind, 'granted', 'raised, the build joins the running shared group');
+  assert.equal((await leg.wait(500)).kind, 'waiting', 'the timed leg still never runs beside shared work');
 });
