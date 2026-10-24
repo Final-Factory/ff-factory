@@ -309,6 +309,12 @@ it running, mid-turn or idle. The next daemon takes it back.
   a reinstall and a restart (`installScript`, `machine_daemon restart`) keep them, and a stop and the uninstall end them.
   On a Mac `launchctl bootout` stops only the daemon; a stop and the uninstall then `pkill` this daemon's hosts. The
   portal lets a daemon that says `agentHosts` in its hello restart while agents run (`controlDaemon`).
+- **A host keeps the code it started on.** It imports `CATALOG` and `buildOptions` from `server/launch.ts`
+  (`machine/agentHost.ts:29`), so the worker tools, the guard and the launch options of a running agent are those of the
+  commit its host started on. A daemon update does not change them, and neither does the agent's own process starting again
+  in its old host; only a new host does (measured, w1969: a host started at 02:53:30Z on 4408319 let `bench_queue.py timed`
+  through and offered no `timed_place` after the 1dd9113 rollout at 02:59Z, while the merged guard refuses it). Check a
+  new guard or tool live with a worker started after the rollout, and expect workers already running to miss it.
 - `agentHosts: false` in daemon.json runs agents inside the daemon as before (they end with it).
 - Tests: `server/agentHost.test.ts` runs a real daemon process and real hosts with the scripted fake agent, kills the
   daemon mid-turn and starts another (Linux and Windows in the checks job; CI has no macOS runner yet), and kills a host to
@@ -905,6 +911,9 @@ and w1891 waited behind it there, and w1789 waited on LothDesktop behind shared 
 - **The log**: every answer is a line in the asking request's log ("timed leg ask (w1969) from worker ... on beast: handed to
   w2001, queued for lothlaptop > m3 > biscuit: beast has 6 agent slots ...", or "here: ...") and in the portal's journal
   ("timed ask (w1969): ..."; `portal_logs` grep "timed ask").
+- **Live** (measured, the portal journal): the first ask after the deploy came at 03:02:40Z on 2026-10-24 from w1829's
+  worker on BEAST, answered "here" with `same_machine` (it validates BEAST's own bench lock). Workers whose host started
+  before the rollout are not asked (above: "A host keeps the code it started on").
 - **Not yet**: the game repo's bench_queue.py does not read the verdict itself (the guard sees only commands it can parse);
   a leg's new worker rebuilds both sides on the small computer (a laptop build is slow) where w1946's `timed_run` would ship
   them, which needs a play-only computer joined.
