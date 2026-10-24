@@ -23,7 +23,7 @@ import { promisify } from 'node:util';
 import type { SpendStore } from './spend.ts';
 import type { DataGuardConfig, Footprint } from '../shared/spend.ts';
 export type { DataGuardConfig, Footprint };
-import type { Store } from './store.ts';
+import { writeTailFile, type Store } from './store.ts';
 
 const gzipAsync = promisify(zlib.gzip);
 const gunzipAsync = promisify(zlib.gunzip);
@@ -168,6 +168,7 @@ export async function gzipFile(file: string): Promise<{ from: number; to: number
     return undefined;
   }
   fs.renameSync(tmp, out);
+  writeTailFile(out, raw); // its last lines, so a tail read never unzips it whole (w2026)
   fs.rmSync(file, { force: true });
   return { from: raw.length, to: gz.length };
 }
@@ -195,6 +196,7 @@ export async function runDataGuard(o: { dir: string; spend: SpendStore; store: P
     try {
       fs.rmSync(path.join(o.dir, f.id + '.jsonl'), { force: true });
       fs.rmSync(path.join(o.dir, f.id + '.jsonl.gz'), { force: true });
+      fs.rmSync(path.join(o.dir, f.id + '.jsonl.gz.tail'), { force: true });
       o.store.deleteUploads?.(f.id);
       run.pruned++;
       run.prunedBytes += f.bytes;
@@ -224,6 +226,7 @@ export async function runDataGuard(o: { dir: string; spend: SpendStore; store: P
     try {
       fs.rmSync(path.join(o.dir, `${id}.jsonl`), { force: true });
       fs.rmSync(path.join(o.dir, `${id}.jsonl.gz`), { force: true });
+      fs.rmSync(path.join(o.dir, `${id}.jsonl.gz.tail`), { force: true });
       o.store.deleteUploads?.(id);
       run.pruned++;
       run.prunedBytes += f?.bytes ?? 0;

@@ -373,19 +373,18 @@ export class LedgerSweep {
   /**
    * The PRs this request's workers opened while working on it (w340): the URL a `gh pr create` printed, at the time it ran,
    * kept only when this request is the one the worker was on then (the latest filed by then of the requests that share the
-   * worker). A URL a worker merely mentions, or a PR of an earlier request the same worker did, is not one.
+   * worker). A URL a worker merely mentions, or a PR of an earlier request the same worker did, is not one. Read from the whole
+   * transcript in pieces, only what was appended since the last pass (Store.prCreateResults, w2026: the last 2,000 or 100,000
+   * lines read whole and synchronously held the portal's event loop for tens of seconds every pass).
    */
-  private openedBy(w: WorkItem, workers: readonly SessionInfo[], limit = 2000): OpenedPr[] {
+  private async openedBy(w: WorkItem, workers: readonly SessionInfo[]): Promise<OpenedPr[]> {
     const out: OpenedPr[] = [];
     const all = [...this.d.store.work.values()];
     for (const s of workers) {
       const sharing = all.filter((x) => x.sessionIds.includes(s.id));
-      const created = new Set<string>();
-      for (const e of this.d.store.readTranscript(s.id, limit)) {
-        if (e.kind === 'tool_use' && /bash/i.test(e.name) && /\bgh\s+pr\s+create\b/.test(String((e.input as { command?: unknown } | null)?.command ?? ''))) created.add(e.toolUseId);
-        if (e.kind !== 'tool_result' || !created.has(e.toolUseId) || e.isError) continue;
-        if (ownerAt(sharing, e.t)?.id !== w.id) continue;
-        for (const u of prUrlsIn(e.text)) out.push({ ...u, at: e.t });
+      for (const e of await this.d.store.prCreateResults(s.id)) {
+        if (e.isError || ownerAt(sharing, e.at)?.id !== w.id) continue;
+        for (const u of prUrlsIn(e.text)) out.push({ ...u, at: e.at });
       }
     }
     return out;
@@ -418,7 +417,7 @@ export class LedgerSweep {
           const v = await this.view(p.repo, p.number);
           if (v) records.push(v);
         }
-        const strong = prsOf(w, records, { opened: this.openedBy(w, workers, 100_000) });
+        const strong = prsOf(w, records, { opened: await this.openedBy(w, workers) });
         const closing = w.prs?.find((p) => p.number === w.autoClosed!.pr);
         if (!closing) continue;
         if (closing.via) continue;
@@ -540,7 +539,7 @@ export class LedgerSweep {
 
   /** Link PRs, note what changed, close or leave open. True when the request was closed (it needs nothing more). */
   private async prStep(w: WorkItem, workers: readonly SessionInfo[], all: readonly PrRecord[], acts: Action[]): Promise<boolean> {
-    const found = prsOf(w, all, { opened: this.openedBy(w, workers) });
+    const found = prsOf(w, all, { opened: await this.openedBy(w, workers) });
     // A linked PR the list no longer reaches was read by number already this pass (refreshStates).
     let prs = mergePrs(w.prs ?? [], found);
     if (!prs.length) return false;
