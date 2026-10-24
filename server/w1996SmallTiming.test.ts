@@ -10,7 +10,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { rankTargets, TimedRuns, type TimedTarget } from './timedRuns.ts';
 import { checkTimedAsk, decideTimedPlace } from './timedAsk.ts';
-import type { Computer } from './placement.ts';
+import { timedFacts, type Computer } from './placement.ts';
+import { noTimedWaitNotice } from './agents.ts';
+import { noTimedWaitOf } from '../shared/workState.ts';
 import { borrowPair, linkInto, slotFree, TimedRunner, type RunTicket } from '../machine/timedRunner.ts';
 import { hashVariant, scanBuild } from '../machine/timedRunPack.ts';
 import type { TicketState } from '../machine/benchQueue.ts';
@@ -269,4 +271,22 @@ test('w1996: on a worker computer a timed run queues through the bench queue, pl
   assert.deepEqual(fs.readdirSync(path.join(slots, 'slot2-0', 'leases')), []);
   assert.match(JSON.parse(fs.readFileSync(path.join(slots, 'slot2-0', 'slot.json'), 'utf8')).fingerprint, /^timed-run:/);
   assert.deepEqual(fs.readdirSync(path.join(d, 'saves')), [], 'the save copy is gone');
+});
+
+test('w1996: a stopped worker waiting on a computer that takes no timed runs is re-placed by "Next timed work", smallest first, never there', () => {
+  // lothsahn's w1996 review, 2026-10-24: w1789's worker d80ca173 stopped with "waiting for a sandbox on m5 for the timed runs".
+  const f = timedFacts(fleet(), {}, 'timed');
+  const line = 'waiting for a sandbox on m5 for the timed runs; then PRs for the Steam Input and hover card fixes';
+  assert.equal(noTimedWaitOf(line, f.noTimed), 'm5');
+  assert.equal(noTimedWaitOf('waiting on M5 for the bench A/B', f.noTimed), 'm5', 'any case, any timing word');
+  assert.equal(noTimedWaitOf('waiting for a sandbox on lothlaptop for the timed runs', f.noTimed), undefined, 'a computer that takes timed runs');
+  assert.equal(noTimedWaitOf('waiting for a sandbox on m5 for the clip', f.noTimed), undefined, 'untimed work may wait on m5');
+  assert.equal(noTimedWaitOf('the timed runs are done on lothlaptop; m5 builds the Mac player', f.noTimed), undefined, 'no wait');
+  assert.equal(noTimedWaitOf('waiting for a sandbox on m50 for the timed runs', f.noTimed), undefined, 'a whole id only');
+  const told = noTimedWaitNotice('w1789', line, 'm5', f.noTimed.m5, f.takes);
+  assert.ok(!f.takes.includes('m5'));
+  assert.equal(f.takes[0], 'lothlaptop', 'the smallest computer with room first');
+  assert.match(told, /m5 takes no timed or exclusive-lock work \(Ben; w1861\)/);
+  assert.match(told, new RegExp(`smallest computer first: ${f.takes.join(' > ')}\\.`));
+  assert.match(told, /Call timed_place now/);
 });

@@ -15,7 +15,7 @@ import { carryExclude, claudeSlug, plan, rehome, sameVolume, stopOldScript, type
 import { cloneRepo, credentialId, daemonJson, mergePath, planUpdate, plistPathOf, settingsDiff, update, updateVerdict, withPlistPath, withStandardPaths, gitVersion, holdRedeploys, layoutOf, writeMacSlotConfig, nightlyTaskProblem, playerFolders, supervisorProblems, syncPlayerFolders, noteOutside, parseArgs, preflightProblems, removeSlotsPointer, writeSlotsPointer, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
 import { slotsPointer } from '../machine/unitySlots.ts';
 import { adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, inAdministrators, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, withAuthorizedKey, withoutAuthorizedKey } from './worker/portalSsh.ts';
-import { exec, runElevatedSteps } from './worker/worker.ts';
+import { cloneEnv, devDriveFailure, exec, manifestFor, runElevatedSteps } from './worker/worker.ts';
 
 const TOKEN = `ffm_lothdesktop_${'A'.repeat(43)}`;
 const OPTS = { root: 'D:\\work\\ffw', portalUrl: 'https://portal.example', maxSandboxes: 3, maxAgentsPerSandbox: 2, maxUnity: 2 };
@@ -738,4 +738,33 @@ test('exec: lines come as they are printed, and a run past its limit is answered
   const held = await exec(process.execPath, [parent], { timeoutMs: 500 });
   assert.notEqual(held.code, 0, 'killed at its limit');
   assert.ok(Date.now() - t0 < 10_000, `answered in ${Date.now() - t0} ms, not when the grandchild ends (20 s)`);
+});
+
+test('worker install: a Dev Drive failure always says why (w2004: desktop-coosego\'s ended "could not be set up:")', () => {
+  assert.match(devDriveFailure({ code: 1, stdout: 'making it...\nFAILED: Access is denied\n', stderr: '' }), /^FAILED: Access is denied \(exit 1; its log: .*mount\.log\)$/);
+  const blank = devDriveFailure({ code: 1, stdout: 'attaching it...\nformatting it as a ReFS Dev Drive...\nFAILED:\n', stderr: '' });
+  assert.match(blank, /^attaching it\.\.\. \| formatting it as a ReFS Dev Drive\.\.\. \| FAILED: \(exit 1;/, 'an empty FAILED line gives the last lines');
+  assert.match(devDriveFailure({ code: 3, stdout: '', stderr: 'Missing closing brace\n' }), /^Missing closing brace \(exit 3;/);
+  assert.match(devDriveFailure({ code: -1, stdout: '', stderr: '' }), /^devdrive\.ps1 printed no reason \(exit -1;/);
+});
+
+test('worker install: the clone uses the token the join brought, through a helper, and nothing without one (w2004)', () => {
+  assert.equal(cloneEnv({ PATH: 'x' }), undefined);
+  const e = cloneEnv({ PATH: 'x', FF_INSTALL_GH_TOKEN: ' ghp_FAKE ', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'a.b', GIT_CONFIG_VALUE_0: 'c' })!;
+  assert.equal(e.GH_TOKEN, 'ghp_FAKE');
+  assert.equal(e.GIT_TERMINAL_PROMPT, '0');
+  assert.equal(e.GIT_CONFIG_COUNT, '3');
+  assert.equal(e.GIT_CONFIG_KEY_0, 'a.b', 'a config already given is kept');
+  assert.equal(e.GIT_CONFIG_KEY_1, 'credential.https://github.com.helper');
+  assert.equal(e.GIT_CONFIG_VALUE_1, '', 'other helpers are reset first');
+  assert.match(e.GIT_CONFIG_VALUE_2!, /password=\$GH_TOKEN/);
+  assert.ok(!Object.entries(e).some(([k, v]) => k !== 'GH_TOKEN' && k !== 'FF_INSTALL_GH_TOKEN' && String(v).includes('ghp_FAKE')), 'the token is in GH_TOKEN only, not in a config value');
+});
+
+test('worker install: play-only stays on the record, so an update clones nothing either (w2004)', () => {
+  const o = { portalUrl: 'https://p', service: 's', maxSandboxes: 1, repoUrl: 'https://github.com/x/y.git' };
+  const m = manifestFor(undefined, { ...o, playOnly: true }, 'desktop-coosego', 'D:\\ffw', '2026-10-24T00:00:00Z', 'win32');
+  assert.equal(m.playOnly, true);
+  assert.equal(manifestFor(m, o, 'desktop-coosego', 'D:\\ffw', '2026-10-25T00:00:00Z', 'win32').playOnly, true, 'kept by an update that does not say it');
+  assert.equal(manifestFor(undefined, o, 'beast', 'F:\\ffw', '2026-10-24T00:00:00Z', 'win32').playOnly, undefined);
 });

@@ -504,6 +504,27 @@ Compare calls a turn rather than calls a session, since a session's length follo
 subagent calls. w1469's compaction changes context a call, not calls, so it does not move these counts. Run it on a Mac with
 `--root` and `--match` for its sandboxes as well.
 
+## Where a worker session's money goes, by phase (w2008, beast 2026-10-19..24, measured)
+
+Read from beast's own transcripts (main worker threads, 148 sessions since the w1469 compaction; the scripts are the w2008
+report's): one call is one assistant message id, its context is input + cache read + cache write.
+
+- **After the first push is 56% of a session's cost** (research before the first edit 14%, implementing 30%). Mean context
+  there is 173k; pushes per session: median 3, p90 9, max 33, so most sessions carry one PR's history into the next PR or fix
+  loop. Inside that phase reads and searches are still 40%, git 12%, PR/CI 10%, edits 9%.
+- **Keep the 1-hour cache.** Re-pricing the same calls with a 5-minute TTL costs $2,217 against $1,567 (+41%); misses after
+  a 5-60 minute pause total $86 in 5 days, most of them the first call after a compaction.
+- **Thinking stays in context.** A call with 2.8k thinking and 3.2k output grows the next call's context by a median 4.5k;
+  7.3M thinking tokens in 5 days, about 13% of cost with their carry (estimate). Effort is the lever (w2000).
+- **Exploration runs**: calls triggered by a read or search are 30-53% of most large requests' cost, and runs of five or more
+  reads/searches in a row hold 20-30% of calls: the delegation rule's "five or more reads" case, done inline.
+- **Waits**: about 110 pure timed waits (`until [ $SECONDS -ge $t ]; do sleep`) and 56 `gh pr checks` calls (which a
+  fine-grained token cannot read) in 5 days; CI polling is 7% of calls.
+- **Small**: images ($141 in 30 days carried), visible assistant text ($104 in 5 days), ToolSearch (967 `select:` against 81
+  keyword queries; a keyword query adds 2.6k median, 10k p90).
+- **Model**: re-pricing every Opus call as Sonnet saves 24% at most; the cache-read price is the same, so the context, not the
+  model, is most of the bill.
+
 ## Transcripts: how long they are kept
 
 **Seven days after the request closes**, a request that is open keeps them as long as it is open, a reopened request keeps them again.

@@ -471,7 +471,7 @@ export class MachineManager {
    * add_machine's join_code and the dashboard's Add a machine both come here. Throws the refusal (an installed id, a
    * limit out of range); the code is in the answer only, never stored.
    */
-  createJoin(o: { id: string; tailnetName?: string; host?: string; portalUrl?: string; limits: JoinLimits; by: string; playOnly?: string }) {
+  createJoin(o: { id: string; tailnetName?: string; host?: string; portalUrl?: string; limits: JoinLimits; by: string; byUser?: string; playOnly?: string }) {
     const id = o.id.trim().toLowerCase();
     const refusal = joinRefusal({ get: (x) => this.store.machines.get(x) }, id);
     if (refusal) throw new Error(refusal);
@@ -480,7 +480,7 @@ export class MachineManager {
     const limits = checkJoinLimits(o.playOnly?.trim() ? { maxSandboxes: 1, maxAgentsPerSandbox: 1, maxUnity: 1 } : o.limits);
     const tailnetName = (o.tailnetName?.trim() || id).toLowerCase();
     const m = this.deployMachine({ id, workerInstall: true, host: o.host || tailnetName, portalUrl: o.portalUrl, ...limits, ...(o.playOnly?.trim() ? { playOnly: o.playOnly.trim() } : {}) });
-    const join = this.joins.create({ machineId: m.id, tailnetName, limits, by: o.by });
+    const join = this.joins.create({ machineId: m.id, tailnetName, limits, by: o.by, ...(o.byUser ? { byUser: o.byUser } : {}) });
     this.update(m.id, { statusDetail: `waiting for its join bootstrap on tailnet device ${tailnetName} (code ...${join.last4}, until ${join.expiresAt}): no daemon yet` });
     return { machine: this.require(m.id), join, limits, tailnetName };
   }
