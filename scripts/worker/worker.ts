@@ -123,6 +123,8 @@ export interface Manifest {
   outside: OutsideItem[];
   /** Windows: the Dev Drive this install made in its root (w900, docs/worker-install.md "The Dev Drive"). */
   devDrive?: DevDriveRecord;
+  /** A play-only computer (w1946, w2004): no game repo clone and no Dev Drive, now and at every update; the tray app stays. */
+  playOnly?: boolean;
 }
 
 export function readManifest(root: string): Manifest | undefined {
@@ -178,6 +180,12 @@ export interface InstallOptions {
   root: string;
   portalUrl: string;
   token: string;
+  /**
+   * A play-only computer (w1946, w2004; lothsahn: "The play only version should still get a tray icon so I can check for
+   * mouse activity and pause on a schedule"): it plays timed runs other computers build, so no game repo clone, no
+   * sandboxes and no Dev Drive; the daemon, its tray app, the player-slot pair and their firewall rules as on any computer.
+   */
+  playOnly?: boolean;
   maxSandboxes: number;
   maxAgentsPerSandbox: number;
   maxUnity: number;
@@ -702,6 +710,27 @@ async function lockDown(dir: string, sid?: string) {
  * user's GitHub credential (LothDesktop, measured 2026-10-06), while the daemon in the user's session can; the
  * clone's remote is still `url`, and the fetch from it below is then only tried. Exported for tests.
  */
+/**
+ * The clone's environment when the join brought the person's vault GitHub token (w2004, FF_INSTALL_GH_TOKEN, set by
+ * join.ps1 for the installer only): git asks a helper that answers it for github.com, nothing is written to a config, and
+ * a prompt never waits. Undefined without one: the computer's own login. Exported for tests.
+ */
+export function cloneEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv | undefined {
+  const token = env.FF_INSTALL_GH_TOKEN?.trim();
+  if (!token) return undefined;
+  const n = Number(env.GIT_CONFIG_COUNT ?? 0) || 0;
+  return {
+    ...env,
+    GH_TOKEN: token,
+    GIT_TERMINAL_PROMPT: '0',
+    [`GIT_CONFIG_KEY_${n}`]: 'credential.https://github.com.helper',
+    [`GIT_CONFIG_VALUE_${n}`]: '',
+    [`GIT_CONFIG_KEY_${n + 1}`]: 'credential.https://github.com.helper',
+    [`GIT_CONFIG_VALUE_${n + 1}`]: '!f() { test "$1" = get && echo username=x-access-token && echo "password=$GH_TOKEN"; }; f',
+    GIT_CONFIG_COUNT: String(n + 2),
+  };
+}
+
 export async function cloneRepo(l: Pick<Layout, 'repo'>, url: string, relative = true, seedFrom?: string, fetchOrigin = true) {
   if (!fs.existsSync(path.join(l.repo, 'HEAD'))) {
     if (seedFrom) {
@@ -710,8 +739,17 @@ export async function cloneRepo(l: Pick<Layout, 'repo'>, url: string, relative =
       await must('git remote add', 'git', ['-C', l.repo, 'remote', 'add', 'origin', url]);
       await must('git fetch (seed)', 'git', ['-C', l.repo, 'fetch', '--no-tags', '--progress', seedFrom, '+refs/remotes/origin/*:refs/remotes/origin/*'], { live: true });
     } else {
-      say(`Cloning ${url} into ${l.repo} (bare; about 1.3 GB of history, git's progress below)...`);
-      await must('git clone', 'git', ['clone', '--bare', '--progress', url, l.repo], { live: true });
+      const env = cloneEnv(process.env);
+      say(`Cloning ${url} into ${l.repo} (bare; about 1.3 GB of history, git's progress below${env ? ", with the GitHub token the portal sent for this install" : ''})...`);
+      const r = await exec('git', ['clone', '--bare', '--progress', url, l.repo], { live: true, env: env ?? { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
+      if (r.code !== 0) {
+        const tail = (r.stderr || r.stdout).trim().split('\n').slice(-2).join(' ');
+        throw new Error(
+          /could not read Username|Authentication failed|terminal prompts disabled|Repository not found/i.test(tail) && !env
+            ? `git clone failed (${r.code}): this computer has no GitHub login that can read ${url}, and the portal sent no GitHub token with the join (machines.githubFromVault is off for this machine, or its person has no usable vault GitHub token): ${tail}`
+            : `git clone failed (${r.code}): ${tail}`,
+        );
+      }
     }
   }
   // A bare clone has no fetch refspec: sandboxes' branches stay local, origin's go to refs/remotes/origin (docs/worker-root.md 2.3).
@@ -1001,7 +1039,7 @@ async function devDriveEnsure(host: string, args: string[], action = 'ensure', s
       },
     }).finally(() => clearInterval(beat));
     text = r.stdout;
-    if (r.code !== 0) throw new Error(`the Dev Drive could not be set up: ${(text.split('\n').find((x) => x.startsWith('FAILED:')) ?? r.stderr ?? text).trim().slice(-500)}`);
+    if (r.code !== 0) throw new Error(`the Dev Drive could not be set up: ${devDriveFailure(r)}`);
   } else {
     text = await elevatedSteps([{ kind: 'dev-drive', args: psArgs }], promptTimeoutMs);
     for (const line of text.split('\n')) if (line.trim() && !line.startsWith('FFW-DEVDRIVE')) say(`  ${line.trim()}`);
@@ -1011,6 +1049,18 @@ async function devDriveEnsure(host: string, args: string[], action = 'ensure', s
   if (action !== 'ensure') return (out ?? {}) as DevDriveState;
   // The elevated copy's log may be cut short: the state file is what the script wrote last.
   return JSON.parse(fs.readFileSync(path.join(host, `${stateName}.json`), 'utf8')) as DevDriveState;
+}
+
+/**
+ * Why devdrive.ps1 failed, never blank (w2004: desktop-coosego's install said "the Dev Drive could not be set up:" and
+ * nothing more, since an empty stderr is not undefined to `??`): its FAILED line when it has a reason, else its error
+ * output, else its last lines, else its exit code alone. Exported for tests.
+ */
+export function devDriveFailure(r: Pick<Ran, 'code' | 'stdout' | 'stderr'>): string {
+  const lines = (s: string) => s.split(/\r?\n/).map((x) => x.trim()).filter((x) => x && !x.startsWith('FFW-DEVDRIVE'));
+  const failed = lines(r.stdout).find((x) => /^FAILED:\s*\S/.test(x));
+  const why = failed ?? (lines(r.stderr).slice(-4).join(' | ') || lines(r.stdout).slice(-4).join(' | '));
+  return `${why ? why.slice(-600) : 'devdrive.ps1 printed no reason'} (exit ${r.code}; its log: ${path.join(process.env.ProgramData ?? 'C:\\ProgramData', 'ffsb-helpers', 'results', 'mount.log')})`;
 }
 
 /** This process has a desktop to show an administrator prompt on (an ssh session runs in session 0, which has none). */
@@ -1528,7 +1578,7 @@ async function registerPortalSsh(o: InstallOptions) {
  * The root.json an install or update writes: what is new from the options, and what the root already had (its id, creation time,
  * the list of things outside it, its Dev Drive: w1038). Exported for tests.
  */
-export function manifestFor(prev: Manifest | undefined, o: Pick<InstallOptions, 'portalUrl' | 'service' | 'maxSandboxes' | 'repoUrl' | 'firewallSuffix'>, machineId: string, root: string, now: string, platform: NodeJS.Platform = process.platform): Manifest {
+export function manifestFor(prev: Manifest | undefined, o: Pick<InstallOptions, 'portalUrl' | 'service' | 'maxSandboxes' | 'repoUrl' | 'firewallSuffix' | 'playOnly'>, machineId: string, root: string, now: string, platform: NodeJS.Platform = process.platform): Manifest {
   const drive = carryDevDrive(prev, root);
   return {
     installId: prev?.installId ?? crypto.randomUUID(),
@@ -1545,6 +1595,7 @@ export function manifestFor(prev: Manifest | undefined, o: Pick<InstallOptions, 
     outside: prev?.outside ?? [],
     // The Dev Drive stays on the record: without it the next update takes no drive and resets daemon.json's root and seed.
     ...(drive ? { devDrive: drive } : {}),
+    ...(o.playOnly || prev?.playOnly ? { playOnly: true } : {}),
   };
 }
 
@@ -1572,6 +1623,12 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
   let l = layoutOf(path.resolve(o.root), o.anchor);
   o.root = l.root;
   say(`FF Factory worker install into ${l.root}`);
+  // Play-only (w2004): asked for now, or recorded by the install an update updates. No clone and no Dev Drive; the tray stays.
+  if (readManifest(l.root)?.playOnly) o.playOnly = true;
+  if (o.playOnly) {
+    o.devDrive = 'off';
+    say('Play-only: this computer plays the timed runs other computers build. No game repo clone, no sandboxes, no Dev Drive; the daemon, its tray app (it pauses on your mouse and keyboard and on its schedule) and one player-slot pair, as on any computer.');
+  }
   say('Checking prerequisites (nothing changes until they all pass)...');
   // An update gathered them already, before it changed anything (w629).
   const f = facts ?? (await gatherFacts(o));
@@ -1651,9 +1708,10 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
   fs.writeFileSync(l.token, o.token.trim() + '\n', { mode: 0o600 });
   await lockDown(l.secrets, f.probe.sid);
 
-  // 3. The game repo, bare, and the installer's own checkout.
-  await cloneRepo(l, o.repoUrl, !o.absoluteWorktrees, o.seedFrom, !o.update);
-  if (carry && o.seedFrom) {
+  // 3. The game repo, bare, and the installer's own checkout. A play-only computer needs no game repo (w2004).
+  if (o.playOnly) say('Game repo: none (play-only).');
+  else await cloneRepo(l, o.repoUrl, !o.absoluteWorktrees, o.seedFrom, !o.update);
+  if (carry && o.seedFrom && !o.playOnly) {
     // Every local branch of the old clone as well (the seed brings origin's only): a branch whose newest commits never reached
     // origin is kept.
     const heads = await exec('git', ['-C', l.repo, 'fetch', '--no-tags', '--update-head-ok', o.seedFrom, '+refs/heads/*:refs/heads/*'], { timeoutMs: 30 * 60_000 });
@@ -2600,6 +2658,7 @@ const USAGE = `node scripts/worker/worker.ts <install|update|reinstall|uninstall
             [--unity-editor-root <dir>] [--unity-path <exe>]
             [--no-ssh] [--ssh-host <name the portal reaches it by>] [--ssh-user <user>] (the portal's ssh, w568)
             [--no-dev-drive] [--dev-drive-max-gb N] [--dev-drive-skip U,T] (Windows: a new install makes a Dev Drive in the root, w900)
+            [--play-only] (w2004: no game repo clone, no sandboxes, no Dev Drive; the tray stays)
   update    [--max-sandboxes N] [--max-agents-per-sandbox N] [--max-unity N] (only to change them)
             [--ref portal|main|<commit> (the daemon code; default: the commit the portal runs)] [--source <checkout>]
             [--owner <user> (Windows, elevated: default the user the daemon's task runs as)] [--no-firewall] [--no-ssh]
@@ -2672,6 +2731,7 @@ export async function main(argv = process.argv.slice(2)) {
       ...(opts['seed-from'] ? { seedFrom: opts['seed-from'] } : {}),
       ...(opts['voice-whisper'] !== undefined ? { voiceWhisper: opts['voice-whisper'] } : {}),
       ...devDriveFlags(opts, flags),
+      ...(flags.has('play-only') ? { playOnly: true } : {}),
     });
   } else if (cmd === 'update') {
     if (!opts.root) throw new Error(USAGE);

@@ -4539,7 +4539,8 @@ ${w.repo ?? ''}
             if (problem) throw new Error(problem);
             const workId = (a as { work_id?: unknown }).work_id;
             const w = typeof workId === 'string' ? this.store.work.get(workId.trim().toLowerCase()) : undefined;
-            const by = (w?.requestedBy ?? this.identity.owner()).displayName;
+            const who = w?.requestedBy ?? this.identity.owner();
+            const by = who.displayName;
             const { machine: m, join: j, limits, tailnetName: tailnet } = mm.createJoin({
               id: a.id,
               tailnetName: a.tailnet_name,
@@ -4547,6 +4548,7 @@ ${w.repo ?? ''}
               portalUrl: a.portal_url,
               limits: { maxSandboxes: a.max_sandboxes, maxAgentsPerSandbox: a.max_agents_per_sandbox, maxUnity: a.max_unity },
               by,
+              byUser: who.userId,
               ...(a.play_only ? { playOnly: a.play_only } : {}),
             });
             const given = Object.entries(limits).map(([k, v]) => `${k} ${v}`);

@@ -193,5 +193,30 @@ test('join http: a play-only record tells the bootstrap so, and its installer ma
   assert.equal(c.body.existing, 'waiting');
   assert.equal(c.body.playOnly, true);
   const join = fs.readFileSync(path.join(import.meta.dirname, '..', 'scripts', 'worker', 'join.ps1'), 'utf8');
-  assert.match(join, /if \(\$playOnly\) \{ \$a \+= '-NoDevDrive' \}/, 'join.ps1 passes -NoDevDrive for a play-only machine');
+  assert.match(join, /if \(\$playOnly\) \{ \$a \+= @\('-NoDevDrive', '-PlayOnly'\) \}/, 'w2004: join.ps1 passes -NoDevDrive and -PlayOnly for a play-only machine');
+  const install = fs.readFileSync(path.join(import.meta.dirname, '..', 'scripts', 'worker', 'install.ps1'), 'utf8');
+  assert.match(install, /if \(\$PlayOnly\) \{ \$argv \+= '--play-only' \}/, 'install.ps1 hands -PlayOnly to worker.ts');
+});
+
+test('join http: the redeem brings the person\'s vault GitHub token for the clone, never to a check or a play-only computer (w2004)', async (t) => {
+  const asked: [string, string | undefined][] = [];
+  const s = await serve({ githubToken: (id, person) => (asked.push([id, person]), 'ghp_FAKE_vault_token') });
+  t.after(s.close);
+  const { code } = s.codes.create({ machineId: 'desktop-coosego', tailnetName: 'desktop-coosego', limits: {}, by: 'Lothsahn', byUser: 'lothsahn' });
+  const c = await s.join({ code, check: true });
+  assert.equal(c.body.githubToken, undefined, 'a check gets no token');
+  const r = await s.join({ code });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.githubToken, 'ghp_FAKE_vault_token');
+  assert.deepEqual(asked, [['desktop-coosego', 'lothsahn']], "the code's person by user id");
+  assert.ok(!s.reports.join(' ').includes('ghp_FAKE'), 'never in the report');
+
+  const p = await serve({ githubToken: () => 'ghp_FAKE_vault_token' });
+  t.after(p.close);
+  const po = p.codes.create({ machineId: 'desktop-coosego', tailnetName: 'desktop-coosego', limits: {}, by: 'Lothsahn', byUser: 'lothsahn' });
+  p.records.set('desktop-coosego', { awaitingInstall: 'now', playOnly: 'added play-only in the dashboard by lothsahn' });
+  const pr = await p.join({ code: po.code });
+  assert.equal(pr.status, 200);
+  assert.equal(pr.body.playOnly, true);
+  assert.equal(pr.body.githubToken, undefined, 'a play-only computer clones nothing');
 });

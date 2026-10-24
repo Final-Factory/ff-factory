@@ -255,7 +255,12 @@ try {
     }
   }
 } catch {
-  Write-Output "FAILED: $($_.Exception.Message)"
-  Log "FAILED: $($_.Exception.Message)"
+  # Never a bare "FAILED:" (w2004): the exception's type and the line it came from when its message is empty.
+  $why = "$($_.Exception.Message)".Trim()
+  if (-not $why) { $why = "$($_.Exception.GetType().FullName) with no message ($($_.FullyQualifiedErrorId))" }
+  $at = "$($_.InvocationInfo.ScriptLineNumber)"
+  if ($at -and $at -ne '0') { $why += " (devdrive.ps1 line $($at):$("$($_.InvocationInfo.Line)".Trim()))" }
+  Write-Output "FAILED: $why"
+  Log "FAILED: $why"
   exit 1
 }

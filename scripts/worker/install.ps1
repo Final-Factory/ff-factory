@@ -35,6 +35,9 @@
 .PARAMETER VoiceWhisper
   Whisper on this PC's GPU for the portal's mic (w615, docs/voice.md): a model name (large-v3-turbo) turns it on, off
   turns it off. Left out: a re-run keeps what the daemon has (a new install: off).
+.PARAMETER PlayOnly
+  A play-only computer (w1946, w2004): no game repo clone, no sandboxes and no Dev Drive; the daemon, its tray app and one
+  player-slot pair as on any computer. join.ps1 passes it when the join code is a play-only one.
 .PARAMETER NoDevDrive
   A new install makes a Dev Drive (w900, docs/worker-install.md "The Dev Drive"): a dynamically expanding VHDX in the root,
   formatted as a ReFS Dev Drive and mounted at the first free letter from V: down to A:, holding the sandboxes and the
@@ -83,6 +86,7 @@ param(
     [string]$Owner = '',
     [string]$VoiceWhisper = '',
     [switch]$NoDevDrive,
+    [switch]$PlayOnly,
     [switch]$DevDrive,
     [switch]$MoveToDevDrive,
     [int]$DevDriveMaxGB = 0,
@@ -251,6 +255,7 @@ if ($NoSsh) { $argv += '--no-ssh' }
 if ($Owner) { $argv += @('--owner', $Owner) }
 if ($VoiceWhisper) { $argv += @('--voice-whisper', $VoiceWhisper) }
 if ($NoDevDrive) { $argv += '--no-dev-drive' }
+if ($PlayOnly) { $argv += '--play-only' }
 if ($DevDrive) { $argv += '--dev-drive' }
 if ($MoveToDevDrive) { $argv += '--move-to-dev-drive' }
 if ($DevDriveMaxGB) { $argv += @('--dev-drive-max-gb', $DevDriveMaxGB) }

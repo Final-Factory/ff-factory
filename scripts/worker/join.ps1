@@ -385,13 +385,14 @@ function Invoke-NewJoin([string]$tsExe, $self, [string]$work) {
     if ($MaxSandboxes) { $limits.maxSandboxes = $MaxSandboxes }
     if ($MaxAgentsPerSandbox) { $limits.maxAgentsPerSandbox = $MaxAgentsPerSandbox }
     if ($MaxUnity) { $limits.maxUnity = $MaxUnity }
-    # w1993: a play-only timing machine only plays builds made elsewhere: no Dev Drive (its sandbox clones nothing big).
+    # w1993, w2004: a play-only timing machine only plays builds made elsewhere: no Dev Drive, no sandboxes, no game repo.
     $playOnly = [bool]$c.playOnly
     Say "The code is good: this PC joins as '$($c.machineId)' (code valid until $($c.expiresAt))."
     $from = $(if ($MaxSandboxes -or $MaxAgentsPerSandbox -or $MaxUnity) { 'as given here' } elseif ($c.limitsFrom -eq 'code') { "the owner's, with the code" } else { "from this PC: $($c.defaultsWhy)" })
-    Say "Limits: $($limits.maxSandboxes) sandboxes, $($limits.maxAgentsPerSandbox) agents per sandbox, $($limits.maxUnity) Unity editors at once ($from)."
+    if ($playOnly) { Say 'Play-only: no sandboxes, no agents and no Unity editor here; one player-slot pair for the timed runs.' }
+    else { Say "Limits: $($limits.maxSandboxes) sandboxes, $($limits.maxAgentsPerSandbox) agents per sandbox, $($limits.maxUnity) Unity editors at once ($from)." }
     $root = $(if ($Root) { $Root } else { Ask 'Root folder (an empty or new folder on a fast drive with 200+ GB free)' $rootGuess })
-    Say "Root: $root ($(Get-FreeGB $root) GB free on its drive). $(if ($playOnly) { 'Play-only: it plays the timed runs other computers build, so install.ps1 makes no Dev Drive.' } else { 'install.ps1 also makes a Dev Drive there for the sandboxes (one administrator prompt).' })"
+    Say "Root: $root ($(Get-FreeGB $root) GB free on its drive). $(if ($playOnly) { 'Play-only: it plays the timed runs other computers build, so install.ps1 makes no Dev Drive, no sandboxes and no game repo clone; the tray app comes as on any computer.' } else { 'install.ps1 also makes a Dev Drive there for the sandboxes (one administrator prompt).' })"
 
     Step 'Tools'
     if ($DryRun) {
@@ -419,15 +420,23 @@ function Invoke-NewJoin([string]$tsExe, $self, [string]$work) {
     $credential = [string]$r.Body.credential
     $r.Body.credential = $null
     Say "The portal made the record for '$($r.Body.machineId)' and issued its credential (...$($r.Body.last4)), written to a private file for the installer."
+    # w2004: the person's vault GitHub token for the game repo's clone, when the portal sent one (machines.githubFromVault):
+    # given to the installer's process only, never written or printed. A play-only join clones nothing and gets none.
+    $ghToken = [string]$r.Body.githubToken
+    $r.Body.githubToken = $null
+    if ($ghToken) { Say 'The portal also sent a GitHub token for the game repo''s clone (used by the installer only, not kept).' }
 
     Step 'Installing (install.ps1)'
     $a = @('-Root', $root, '-PortalUrl', $script:Portal, '-MaxSandboxes', $limits.maxSandboxes, '-MaxAgentsPerSandbox', $limits.maxAgentsPerSandbox, '-MaxUnity', $limits.maxUnity, '-CredentialFile', $credFile, '-NoSsh')
     if ($script:Owner) { $a += @('-Owner', $script:Owner) }
-    if ($playOnly) { $a += '-NoDevDrive' }
+    if ($playOnly) { $a += @('-NoDevDrive', '-PlayOnly') }
     try {
+        if ($ghToken) { $env:FF_INSTALL_GH_TOKEN = $ghToken }
         $exit = Invoke-Installer $a $work
     } finally {
         Remove-Item -LiteralPath $credFile -Force -ErrorAction SilentlyContinue
+        Remove-Item Env:FF_INSTALL_GH_TOKEN -ErrorAction SilentlyContinue
+        $ghToken = $null
     }
     Say "The credential file is deleted$(if (Test-Path -LiteralPath $credFile) { ' (NOT: remove it by hand: ' + $credFile + ')' })."
 
