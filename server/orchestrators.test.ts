@@ -23,7 +23,7 @@ import { HELD_MARK, inPersonWords } from '../shared/conditional.ts';
 import { splitReply, splitSent } from '../shared/replies.ts';
 import type { PrHealth } from '../shared/blockers.ts';
 import { answersText } from '../shared/questionCard.ts';
-import { PAIR_HOLD_MS } from '../shared/capacity.ts';
+import { PAIR_HOLD_MS, TIMED_HOLD_MS } from '../shared/capacity.ts';
 import { benchLockIn, type Requester, type SessionInfo, type TranscriptEvent, type UserInfo, type WorkItem } from '../shared/types.ts';
 import { LIVE_HOLD_MS, releaseWhy } from './placeAgain.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
@@ -5347,6 +5347,55 @@ test('w1983: a pair hold is bounded: work pinned to that computer goes, and the 
   // A pair that can start now is held for whatever the time: start its legs first.
   agentsRoom(agents, ['pc', 'beast']);
   assert.match(agents.pairHoldProblem('pc', w3) ?? '', /it can start now, start its legs first/);
+});
+
+test('w1995: a small computer\'s last free sandbox is held for the timed work Queued for it: other work starts elsewhere, a pair leg only when no other computers hold the pair', async (t) => {
+  const env = await twoComputers(t);
+  const { store, agents, o, dispatcher, call } = env;
+  // pc stands for LothLaptop (1 agent slot), beast for BEAST.
+  const places = agents.places.bind(agents);
+  agents.places = () => places().map((p) => (p.id === 'pc' ? { ...p, maxAgents: 1 } : p));
+  // 2026-10-24: w1985, w1440's timed leg, Queued for lothlaptop from 04:27Z; at 04:59Z w1981's pair leg 2 took lothlaptop/slot1.
+  putRequests(store, [
+    { id: 'w5', title: 'Timed leg for w1440: belt A/B', status: 'queued', queuedFor: { at: T0, needs: ['pc'] }, timedLeg: { for: 'w1440', forSession: 'abc', from: 'beast', small: ['pc'] } },
+    { id: 'w3' },
+    { id: 'w2', pair: { legs: 2 } },
+  ]);
+  const w3 = store.work.get('w3')!;
+  const held = await call(dispatcher().info, 'start_agent', { work_id: 'w3', prompt: 'Fix it', title: 'fix', sandbox: 'pc/alpha' });
+  assert.equal(held.isError, true);
+  assert.match(held.text, /pc's last free sandbox is held for timed work: w5 "Timed leg for w1440: belt A\/B" \(the timed leg of w1440, normal, Queued since 09:00 UTC\) starts there first, as pc is a small computer \(1 agent slot\) ranked for timed and exclusive-lock work \(w1872, w1995\).*Start w5 there, and w3 on another computer with room \(beast\)/);
+  assert.deepEqual(w3.sessionIds, []);
+  // Timed work itself takes it; so does work that can run only there, or urgent work.
+  assert.equal(agents.timedHoldProblem('pc', w3, true), undefined);
+  w3.queuedFor = { at: T0, needs: ['pc'] };
+  assert.equal(agents.timedHoldProblem('pc', w3, false), undefined);
+  delete w3.queuedFor;
+  w3.priority = 'urgent';
+  assert.equal(agents.timedHoldProblem('pc', w3, false), undefined);
+  w3.priority = 'normal';
+  // A big computer is never held; nor a small one with two free sandboxes.
+  assert.equal(agents.timedHoldProblem('beast', w3, false), undefined);
+  // A pair run's leg: held off pc only while other computers hold all its legs.
+  Object.assign(store.work.get('w2')!, { status: 'queued', queuedFor: { at: T0 } });
+  assert.equal(agents.timedHoldProblem('pc', store.work.get('w2'), false), undefined, 'pc and beast are the only pair: the leg may go there');
+  agentsRoom(agents, ['pc', 'beast', 'm3']);
+  assert.match(agents.timedHoldProblem('pc', store.work.get('w2'), false) ?? '', /^pc's last free sandbox is held for timed work: w5/);
+  // With no other computer with room, single work takes it.
+  agentsRoom(agents, ['pc']);
+  assert.equal(agents.timedHoldProblem('pc', w3, false), undefined);
+  agentsRoom(agents, ['pc', 'beast']);
+  assert.ok(agents.timedHoldProblem('pc', w3, false));
+  // A timed request (not a leg) on its platform holds it too; on another platform it does not.
+  store.work.get('w5')!.status = 'done';
+  putRequests(store, [{ id: 'w6', title: 'Timed A/B of PR #2156 on macOS', status: 'queued', queuedFor: { at: T0 } }]);
+  assert.equal(agents.timedHoldProblem('pc', w3, false), undefined, 'a Mac timed run does not fit pc (Windows)');
+  store.work.get('w6')!.title = 'Timed A/B of PR #2156';
+  assert.match(agents.timedHoldProblem('pc', w3, false) ?? '', /held for timed work: w6 .*\(timed work, normal/);
+  // TIMED_HOLD_MS after pc's room began, nobody started it: the hold lapses.
+  const later = Date.now() + TIMED_HOLD_MS + 60_000;
+  (o as unknown as { now: () => Date }).now = () => new Date(later);
+  assert.equal(agents.timedHoldProblem('pc', w3, false), undefined);
 });
 
 test('w1945: the WRONG flag and decide_work queue count a pair as room only with a computer per leg', async (t) => {
