@@ -2299,6 +2299,12 @@ export interface WorkBlocker {
    * its nested-VM workflow still ran, and the people saw only the worker's own words, so it looked stale).
    */
   read?: { at: string; text: string };
+  /**
+   * ci, the merge-on-green pilot (w2045, docs/orchestrators.md "Merge on green, a pilot"): FF Factory merges the pull request
+   * itself when every check passed, at this head (--match-head-commit), and files `report` as the worker's report, with no model
+   * turn. On red, or a merge that fails, the worker is resumed as without it. `session`: the worker that set it.
+   */
+  mergeOnGreen?: { head: string; report: string; session: string };
 }
 
 /**

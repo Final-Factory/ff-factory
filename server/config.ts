@@ -576,6 +576,11 @@ export interface Config {
      */
     readChainPilotPercent?: number;
     /**
+     * The share of REQUESTS (by a hash of their id, apart from the other pilots') in the merge-on-green pilot, 0-100 (w2045,
+     * server/mergeOnGreen.ts, docs/orchestrators.md "Merge on green, a pilot"): default 0, off. Read live at each blocked_on.
+     */
+    mergeOnGreenPilotPercent?: number;
+    /**
      * The share of requests (by a hash of the request id, apart from the other pilots') whose worker starts a NEW session in
      * the same sandbox and branch at its next message once a pull request of the request merged during its session, 0-100
      * (w2043's one-day pilot, server/freshAfterMerge.ts, docs/spend.md "A fresh session after each merge, a pilot"): default

@@ -38,14 +38,15 @@ const READ_FAIL_LOG_MS = 30 * 60_000;
 const BUSY: ReadonlySet<SessionInfo['status']> = new Set(['running', 'starting', 'waiting_permission']);
 
 /** `none`: no check or workflow run exists for the pull request's head yet (w907: it may never get one). */
-export type CiState = { done: boolean; text: string; none?: boolean };
+/** `green` (w2045): done with every check passed or skipped, the only reading the merge-on-green pilot merges on. */
+export type CiState = { done: boolean; text: string; none?: boolean; green?: true };
 /** A pull request's state (w754): open, merged, or closed without merging, and a line saying how. */
 export type PrState = { state: 'open' | 'merged' | 'closed'; text: string; sha?: string };
 
 export interface BlockerWatchDeps {
   store: Store;
   orchestrators: Pick<Orchestrators, 'unblock' | 'blockerStuck' | 'blockerDecide' | 'gatesCleared' | 'flagQueuedWithRoom' | 'carryOutConditional' | 'dropConditional'> &
-    Partial<Pick<Orchestrators, 'noteCiRead' | 'sweepResumes' | 'requeueCapacityBlocks' | 'replaceNoTimedWaits' | 'timedLegBound'>>;
+    Partial<Pick<Orchestrators, 'noteCiRead' | 'sweepResumes' | 'requeueCapacityBlocks' | 'replaceNoTimedWaits' | 'timedLegBound' | 'mergedOnGreen'>>;
   /** w1841: tell the workers waiting on a bench lock that is free now (Agents.resumeBenchWaits): request id to what it did. */
   benchResume?: () => [string, string][];
   /** Whether a message to a session waits in the send queue (for a sandbox, a slot or its machine): its resume is on its way (w1094). */
@@ -69,6 +70,8 @@ export interface BlockerWatchDeps {
   prHealth?: (ref: string, person?: string) => Promise<PrHealth | undefined>;
   /** A pull request's state ("owner/repo#123"); default gh, as for ci. */
   pr?: (ref: string, person?: string) => Promise<PrState | undefined>;
+  /** w2045: merge a pull request at exactly this head (merge-on-green pilot); default gh, as for ci. Throws with what GitHub said. */
+  merge?: (ref: string, head: string, person?: string) => Promise<void>;
   /** Whose GitHub token a request's reads use (w868); undefined: the portal's own gh login. */
   githubPerson?: (w: WorkItem) => string | undefined;
   /** The computers with room for one more game worker now. */
@@ -163,7 +166,7 @@ export class BlockerWatch {
           const cleared = gates.filter((x) => x.v.state === 'clear');
           if (bad?.v.state === 'stuck') this.d.orchestrators.blockerStuck(live.id, bad.v.why, bad.g);
           else if (bad) this.d.orchestrators.blockerDecide(live.id, bad.v.why, bad.g);
-          else if (cleared.length === gates.length) this.d.orchestrators.unblock(live.id, cleared.map((x) => x.v.why).join('; '));
+          else if (cleared.length === gates.length) await this.clearAll(live, gates.map((x) => x.g), cleared.map((x) => x.v.why).join('; '), ci);
           else if (cleared.length) this.d.orchestrators.gatesCleared(live.id, cleared.map((x) => x.g), cleared.map((x) => x.v.why).join('; '));
           else continue;
           const was = bad ?? cleared[0];
@@ -230,6 +233,28 @@ export class BlockerWatch {
       this.kick();
     }
     return did;
+  }
+
+  /**
+   * Every gate cleared: unblock, unless it is the merge-on-green pilot's (w2045) and its CI is green. Then FF Factory merges the
+   * pull request itself at the head the worker pushed, and files the worker's report (Orchestrators.mergedOnGreen), with no
+   * model turn. Red CI, a reading that is not green (unreadable, closed), or a merge GitHub refuses: unblocked as without it,
+   * and the worker hears why.
+   */
+  private async clearAll(w: WorkItem, gates: readonly { kind: string; ref?: string; mergeOnGreen?: { head: string } }[], why: string, ci: ReadonlyMap<string, CiState | undefined>) {
+    const g = gates.length === 1 && gates[0].kind === 'ci' && gates[0].ref && gates[0].mergeOnGreen ? gates[0] : undefined;
+    if (!g || !this.d.orchestrators.mergedOnGreen) return this.d.orchestrators.unblock(w.id, why);
+    if (!ci.get(g.ref!)?.green) return this.d.orchestrators.unblock(w.id, `${why}; FF Factory did not merge it (the checks are not all green), and the report you left with merge_on_green was not filed`);
+    try {
+      await (this.d.merge ? this.d.merge(g.ref!, g.mergeOnGreen!.head, this.d.githubPerson?.(w)) : ghMerge(g.ref!, g.mergeOnGreen!.head, ghRunner(this.d.githubPerson?.(w), `the merge of ${g.ref}`)));
+    } catch (e) {
+      const said = clipLine((e as Error).message, 300);
+      console.warn(`blocker watch: ${w.id}: merge on green of ${g.ref} failed: ${said}`);
+      return this.d.orchestrators.unblock(w.id, `${why}; FF Factory tried to merge it and GitHub said: ${said}. Merge it yourself (ff-pr merge), then report; the report you left with merge_on_green was not filed`);
+    }
+    // Merged: the PR's state is read fresh next time.
+    this.prSeen.delete(g.ref!);
+    this.d.orchestrators.mergedOnGreen(w.id, why);
   }
 
   private facts(ci: ReadonlyMap<string, CiState | undefined>, pr: ReadonlyMap<string, PrState | undefined>, health: ReadonlyMap<string, PrHealth | undefined>): BlockerFacts {
@@ -358,7 +383,7 @@ export function checksState(pr: { state?: string; statusCheckRollup?: GhCheck[] 
   if (!checks.length) return { done: false, text: `${ref} has no checks yet`, none: true };
   if (running.length) return { done: false, text: `${running.length} of ${checks.length} checks on ${ref} still running` };
   const failed = checks.filter((c) => ['FAILURE', 'ERROR', 'TIMED_OUT', 'CANCELLED', 'ACTION_REQUIRED'].includes((c.conclusion ?? c.state ?? '').toUpperCase()));
-  return { done: true, text: failed.length ? `CI on ${ref} finished: ${failed.length} of ${checks.length} checks failed (${failed.slice(0, 3).map((c) => c.name ?? c.context).join(', ')})` : `CI on ${ref} finished: all ${checks.length} checks passed or skipped` };
+  return failed.length ? { done: true, text: `CI on ${ref} finished: ${failed.length} of ${checks.length} checks failed (${failed.slice(0, 3).map((c) => c.name ?? c.context).join(', ')})` } : { done: true, green: true, text: `CI on ${ref} finished: all ${checks.length} checks passed or skipped` };
 }
 
 /** A pull request's merge state as REST gives it (GET /repos/{owner}/{repo}/pulls/{n}), with its head commit. */
@@ -388,7 +413,7 @@ export function mergeStateCi(pr: MergeState, ref: string, seen: Map<string, numb
   }
   if ((state === 'clean' || state === 'has_hooks') && seen.has(key)) {
     seen.delete(key);
-    return { done: true, text: `CI on ${ref} finished: every check passed (read from the pull request's merge state, "${state}" after "unstable": FF Factory's GitHub token cannot read the checks themselves, docs/vault.md section 13.2)` };
+    return { done: true, green: true, text: `CI on ${ref} finished: every check passed (read from the pull request's merge state, "${state}" after "unstable": FF Factory's GitHub token cannot read the checks themselves, docs/vault.md section 13.2)` };
   }
   return undefined;
 }
@@ -410,7 +435,7 @@ export function runsState(body: { workflow_runs?: GhRun[] }, ref: string): CiSta
   const running = runs.filter((r) => (r.status ?? '').toLowerCase() !== 'completed');
   if (running.length) return { done: false, text: `${running.length} of ${runs.length} workflow runs on ${ref} still running (${running.slice(0, 3).map((r) => r.name).join(', ')})` };
   const failed = runs.filter((r) => ['failure', 'timed_out', 'cancelled', 'action_required', 'startup_failure'].includes((r.conclusion ?? '').toLowerCase()));
-  return { done: true, text: failed.length ? `CI on ${ref} finished: ${failed.length} of ${runs.length} workflow runs failed (${failed.slice(0, 3).map((r) => `${r.name}: ${r.conclusion}`).join(', ')})` : `CI on ${ref} finished: all ${runs.length} workflow runs passed or skipped` };
+  return failed.length ? { done: true, text: `CI on ${ref} finished: ${failed.length} of ${runs.length} workflow runs failed (${failed.slice(0, 3).map((r) => `${r.name}: ${r.conclusion}`).join(', ')})` } : { done: true, green: true, text: `CI on ${ref} finished: all ${runs.length} workflow runs passed or skipped` };
 }
 
 const clipLine = (s: string, n: number) => {
@@ -471,6 +496,14 @@ let rollupRefusedLogged = false;
  * Checks permission, so every read failed and the CI blocks of w814, w818 and w808 never cleared), the PR's state and its
  * head commit's GitHub Actions runs, which "Actions: read" covers. Throws, saying what gh said, when neither can be read.
  */
+/** w2045: `gh pr merge` at exactly `head` (a newer push, or one GitHub's rules refuse, is not merged). Throws with what gh said. */
+export async function ghMerge(ref: string, head: string, run: Runner = runProc): Promise<void> {
+  const m = CI_REF.exec(ref);
+  if (!m) throw new Error(`"${ref}" is not a pull request (owner/repo#123)`);
+  const r = await run('gh', ['pr', 'merge', m[2], '-R', m[1], '--merge', '--match-head-commit', head], { timeoutMs: 60_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
+  if (r.code !== 0) throw new Error(`gh pr merge ${ref}: ${ghSaid(r)}`);
+}
+
 export async function ghChecks(ref: string, run: Runner = runProc): Promise<CiState> {
   const m = CI_REF.exec(ref);
   if (!m) throw new Error(`"${ref}" is not a pull request (owner/repo#123)`);

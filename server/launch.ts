@@ -159,6 +159,7 @@ export const CATALOG = {
     deploys: z.array(z.string().max(40)).max(2).optional().describe('Deploys that must happen first (w890): "portal" for a portal deploy, or a machine id for that machine\'s daemon update. It clears when a different commit runs there; you are resumed then, in any free sandbox, for the check that comes after it.'),
     what: z.string().min(1).max(200).describe('What you wait for, in a line ("w727 PR #1291 and w752 fix merged into master").'),
     request: z.string().max(16).optional().describe('The request ("w750") that waits, when you serve several; default: the one you are on.'),
+    merge_on_green: z.string().max(12000).optional().describe('Only when FF Factory told you your request is in the merge-on-green pilot (w2045), with one ci: pull request and head: the report you would write after the merge, whole (its DONE line, Learned: and the rest). On green CI FF Factory merges at head and files it, and you are not resumed; on red you are resumed as usual.'),
   },
   /** w1945 (docs/machines.md, "Pair runs"): a check that needs several computers at once, filed as one request; the worker waits on its report. */
   request_pair: {

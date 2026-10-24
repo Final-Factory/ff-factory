@@ -1071,6 +1071,36 @@ state with its count above the list: any number can be on at once, and the list 
 like to be able to select multiple types"). Each row's state and reason follow its workers live.
 A Working row names the machine its working workers run on, after its id and before its people (w1104, lothsahn: "show which machine working runs are running on after the work item number and before the user"): `WorkLive.machines`, each machine once, the machine part of "<machine>/<slot>"; no other state shows one. An FFBox dev request reads "<operator> (FFBox)" in the row (w1105), and its detail names the operator once (no "reported by", no "for" when it is the same person) with a short "untrusted" marking (`shared/workLabels.ts`).
 
+### Merge on green, a pilot (w2045)
+
+lothsahn, 2026-10-24: "Have FF Factory merge green PRs itself with no model; the worker reports before the wait" (chosen over
+a Sonnet helper that waits on CI: the turn that green CI wakes costs a median $0.39 at a median 177k tokens of warm context,
+and Sonnet reads cache at Opus's price, docs/spend.md "Merging green PRs with no model turn"). A share of requests
+(`worker.mergeOnGreenPilotPercent`, default 0, off; set_app_config; by a hash of the request id, `mergeongreen:`, drawn apart
+from the other pilots, server/mergeOnGreen.ts) is in the arm:
+
+- A worker in the arm that calls `blocked_on` with one `ci:` pull request is told, ahead of the usual answer, that it may call
+  it again with the same prs and head and `merge_on_green`: the whole report it would write after the merge (its
+  `DONE: wNNN` line, `Learned:` and the rest), when nothing follows the merge but that report. The ledger stamps
+  `merge-on-green pilot (w2045)` on the request, which marks the arm. A worker out of the arm hears nothing of it; one that
+  passes `merge_on_green` anyway, or without head, or with a report that has no DONE line for the request, gets the wait set
+  as usual and a line saying why it was ignored (Orchestrators.mergeOnGreenAsk).
+- With the report left, the gate keeps it (`WorkBlocker.mergeOnGreen`: head, report, session) and the worker ends its turn with
+  only its still-open line. A DONE in that turn is held: it is the report's (doneMarkers).
+- When the checks finish all green (`CiState.green`: every check or workflow run passed or skipped, or GitHub's merge state
+  "clean" after "unstable"), the blocker watch runs `gh pr merge <n> -R <repo> --merge --match-head-commit <head>` on the
+  person's GitHub token (blockerWatch.ts clearAll, ghMerge), then files the report as that worker's turn
+  (Orchestrators.mergedOnGreen, workerTurnEnded): its DONE closes the request with every check a DONE has. The worker is not
+  resumed. A DONE refused is told back to it as any refused DONE is, which resumes it.
+- Red checks, a reading that is not green (unreadable checks, a PR merged or closed by hand), or a merge GitHub refuses (a newer
+  push, a rule) unblock the request as without the pilot: the worker is resumed with why and told the report was not filed.
+- `merge_on_green` is in the tool's schema from this version on, which a machine's daemon builds (machine/agentHost.ts reads
+  server/launch.ts): a worker gets it once its daemon has updated and its process has started again. On an older one the
+  field is dropped, and the worker is only told again that it may.
+
+The resume note on a cleared CI gate says `Run ff-pr merge now (<pr>): it merges on green, or names the red run to read`; it
+said `gh pr checks`, which the wait guard refuses (w2015).
+
 ### Workers read the ledger
 
 Workers have no ledger tools of their own: they cannot file, update, decide or close anything but their own request
