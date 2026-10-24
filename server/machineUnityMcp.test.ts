@@ -184,7 +184,8 @@ test('machine unity mcp: the portal asks for it for sandbox agents on a machine;
   // w1480: the C# language server's diagnostics are noise in a sandbox; a worker starts with it off, and the SDK gets it as --settings
   // w2002: and the marketing plugin, unless its work is marketing, and the skills workers never invoke stay out of the listing
   const hidden = Object.fromEntries(WORKER_HIDDEN_SKILLS.map((k) => [k, 'user-invocable-only']));
-  const plain = { enabledPlugins: { 'csharp-lsp@claude-plugins-official': false, 'ff-marketing@ff-marketing': false }, skillOverrides: hidden, bashOutputMaxChars: 10_000 };
+  // w2008: and Claude Code's auto memory off (CLAUDE.md forbids its files)
+  const plain = { autoMemoryEnabled: false, enabledPlugins: { 'csharp-lsp@claude-plugins-official': false, 'ff-marketing@ff-marketing': false }, skillOverrides: hidden, bashOutputMaxChars: 10_000 };
   assert.deepEqual(inSb.settings, plain);
   assert.deepEqual(buildOptions(inSb, {}).settings, plain);
   assert.ok(['dataviz', 'claude-api', 'therapy'].every((k) => hidden[k] === 'user-invocable-only'), 'hidden from the model, a person\'s /name still works');
