@@ -62,6 +62,34 @@ test('w1996: timed_run goes to small worker computers too, play-only first, then
   assert.deepEqual(rankTargets([T('b', 'small', 1, 1), T('a', 'small', 0, 3), T('p', 'play-only', 2, 0)]).map((x) => x.id), ['p', 'a', 'b']);
 });
 
+test('w1996: a computer a person holds is shown but never picked for a timed run', () => {
+  const machines = [
+    { id: 'lothlaptop', platform: 'win32', sandboxRoot: 'C:/ffw/sandboxes' },
+    { id: 'desktop-coosego', platform: 'win32', playOnly: 'play only' },
+  ] as unknown as Machine[];
+  const holds: Record<string, string> = { lothlaptop: 'lothsahn using it, 2026-10-24: hold until he says it\'s free' };
+  const tr = new TimedRuns({
+    dataDir: fs.mkdtempSync(path.join(os.tmpdir(), 'w1996held-')),
+    store: {} as AttachmentStore,
+    machines: () => machines,
+    isOnline: () => true,
+    offers: () => true,
+    post: () => true,
+    deliver: async () => {},
+    smallWorker: () => ({ agents: 1 }),
+    held: (id) => holds[id],
+  });
+  const target = (named?: string) => (tr as unknown as { target(n: unknown): string }).target(named);
+  assert.deepEqual(tr.windowsTargets().map((x) => x.id), ['desktop-coosego', 'lothlaptop']);
+  assert.equal(target(), 'desktop-coosego');
+  assert.throws(() => target('lothlaptop'), /lothlaptop is held \(lothsahn using it.*no timed run goes there until the hold is lifted/);
+  assert.match(tr.capacityLine() ?? '', /lothlaptop \(small, 1 agent slot, held \(lothsahn using it/);
+  holds['desktop-coosego'] = 'paused from its tray app';
+  assert.throws(() => target(), /every computer that takes a timed run is held now .*via "leg"/);
+  delete holds.lothlaptop;
+  assert.equal(target(), 'lothlaptop', 'the hold lifted, it takes runs again');
+});
+
 test('w1996: on a big computer a timed leg with no via goes to a timed_run computer, built here; via leg keeps the hand-off', () => {
   const d = decideTimedPlace({ here: at('beast'), places: fleet(), timedRun: ['lothlaptop'] });
   assert.equal(d.verdict, 'elsewhere');

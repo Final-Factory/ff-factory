@@ -1281,7 +1281,7 @@ export class Agents {
     const platform = a.platform === 'windows' ? 'win32' : a.platform === 'mac' ? 'darwin' : undefined;
     const places = this.places();
     const here = places.find((p) => p.id === placeId(machineId));
-    const timedRun = (this.timedRuns?.windowsTargets() ?? []).filter((t) => t.online && t.offers).map((t) => t.id);
+    const timedRun = (this.timedRuns?.windowsTargets() ?? []).filter((t) => t.online && t.offers && !t.held).map((t) => t.id);
     const d = decideTimedPlace({
       here,
       places,

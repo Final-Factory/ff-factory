@@ -30,7 +30,7 @@ import { MasterBatchWatch } from './masterBatch.ts';
 import { runWaitsMigration } from './waitsMigration.ts';
 import { parseNightlyReport } from './nightlyRules.ts';
 import { parseEscalation } from './escalationRules.ts';
-import { benchText } from './placement.ts';
+import { benchText, holdReason } from './placement.ts';
 import { groupIntake } from '../shared/intake.ts';
 import { Notifier } from './notify.ts';
 import { describeBusy } from './wake.ts';
@@ -515,6 +515,7 @@ const timedRuns = new TimedRuns({
     const agents = m.sandboxRoot ? agentCap(m) : 0;
     return agents >= 1 && agents <= SMALL_TIMED_MAX_AGENTS && !machines.noTimedRuns(m.id) ? { agents } : undefined;
   },
+  held: (id) => holdReason(id, agents.placement(false)),
 });
 agents.timedRuns = timedRuns;
 // w1996: a computer timing another worker's run hosts more than its own worker, so its bench queue keeps the turn limits
