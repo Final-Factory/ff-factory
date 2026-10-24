@@ -67,8 +67,9 @@ function machine(procs: (Proc & { env?: ProcEnv; born?: number; cpu?: number })[
     host: 'biscuit',
     kill: (pid, sig) => {
       st.signals.push(`${sig} ${pid}`);
-      // A player and an Xvfb end on SIGTERM; a process named "stubborn" only on SIGKILL.
+      // A player and an Xvfb end on SIGTERM; a process named "stubborn" only on SIGKILL; one named "unkillable" on neither.
       const p = st.procs.find((x) => x.pid === pid);
+      if (p && /unkillable/.test(p.cmd)) return sig === 'SIGKILL' ? 'taskkill: ERROR: The process with PID ' + pid + ' could not be terminated. Reason: Access is denied.' : undefined;
       if (p && (sig === 'SIGKILL' || !/stubborn/.test(p.cmd))) st.procs = st.procs.filter((x) => x.pid !== pid);
     },
     exists: (p) => st.files.has(p),
@@ -143,6 +144,28 @@ test('a worker that a request still waits for (CI, a person) keeps what it left 
   assert.ok(!m.alive(50) && !m.alive(51));
   assert.deepEqual(m.st.signals, ['SIGTERM 50', 'SIGTERM 51', 'SIGKILL 51']);
   assert.match(e.line, /a request still waits for it, with no check-in pending.*1 needed SIGKILL/);
+});
+
+test('w1983: a process SIGKILL does not end is said so once, with why, and tried again an hour later, not at every look', async () => {
+  // LothDesktop, 2026-10-24: "ended 1 process(es) left by worker 5322f111 (sandbox slot6): gh pid 24280 ... 1 needed SIGKILL"
+  // every minute from 04:44Z, the same pid each time: taskkill /F failed and the watch never looked again.
+  const m = machine([SYSTEMD, { pid: 24280, ppid: 9212, cmd: '/usr/bin/gh unkillable pr view', env: env('5322f111', 'slot6') }], { sessions: { '5322f111': {} } });
+  await m.look(0);
+  await m.look(1);
+  const [e] = await m.look(1);
+  assert.deepEqual(m.st.signals, ['SIGTERM 24280', 'SIGKILL 24280']);
+  assert.deepEqual(e.pids, []);
+  assert.deepEqual(e.stuck, [24280]);
+  assert.match(e.line, /^could not end 1 process\(es\) left by worker 5322f111 \(sandbox slot6\), still running after SIGKILL: gh pid 24280 \(taskkill: ERROR: .*Access is denied\.\); tried again in 60 min\. Why: its worker stopped/);
+  assert.doesNotMatch(e.line, /^ended|needed SIGKILL/);
+  for (let i = 0; i < 59; i++) assert.deepEqual(await m.look(1), [], `minute ${i + 1} after: not tried again`);
+  assert.equal(m.st.signals.length, 2);
+  const [again] = await m.look(1);
+  assert.deepEqual(again.stuck, [24280], 'an hour later it is tried again');
+  assert.equal(m.st.signals.length, 4);
+  // Gone at last: forgotten, and a new process under its pid is a new one.
+  m.st.procs = m.st.procs.filter((p) => p.pid !== 24280);
+  assert.deepEqual(await m.look(1), []);
 });
 
 test('every other process a stopped worker left goes with it (w1197): a gnome session, ffmpeg, a batch build and its lock', async () => {

@@ -5,3 +5,4 @@
   - A worker whose request moved to another worker (`stop_agent move_to`, a hand-back, a new session), or whose request another of its workers runs in another sandbox, frees its sandbox for the queue; it takes a seat again when it resumes.
   - `message_agent` with a work_id never starts the new session in a sandbox that is not the old worker's any more (released, or another agent there): it says to `start_agent` in a FREE sandbox.
   - A release no longer waits for the daemon's own git read: with the git state unread, the save reads it on the computer itself (lothdesktop/slot5 stayed "git state not known yet"), and a move waits for the old worker's process to end before saving its work.
+  - The leftover watch no longer says "ended" every minute for a process SIGKILL could not end: it says once that it could not, with taskkill's reason, and tries again an hour later.

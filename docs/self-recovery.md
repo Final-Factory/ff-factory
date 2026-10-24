@@ -611,7 +611,11 @@ stopped workers' folders on LothDesktop.
 SIGTERM first, SIGKILL for what still runs 5 s later, children before parents; a stopped batch Unity's stale
 `Temp/UnityLockfile` goes when no Unity has the project open. Each end is logged (`leftovers: ended N process(es) left by
 worker <id> (sandbox <id>): game player slot1-1 pid ..., Xvfb pid ... Why: ...`, with the command lines) and told to the
-orchestrators as a `sandbox_event` ("Leftover processes: ..."). `list_sandboxes` and the dashboard's meters (hover; a
+orchestrators as a `sandbox_event` ("Leftover processes: ..."). A process still running after SIGKILL (w1983: LothDesktop's
+watch said "ended ... gh pid 24280 ... 1 needed SIGKILL" every minute for a stopped worker while `taskkill /F` failed
+without a word) is looked at once more after another 5 s, said once as "could not end ... still running after SIGKILL:
+gh pid 24280 (taskkill: <its own words>); tried again in 60 min", and left alone for `LEFTOVER.STUCK_RETRY_MS` (60 min).
+`list_sandboxes` and the dashboard's meters (hover; a
 "leftover players" flag) show each game player with its owner, its age and when it ends.
 
 **Never ended:** anything while its worker's process runs; an interactive Unity editor and what it started (the sandbox
