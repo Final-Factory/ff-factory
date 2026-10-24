@@ -2192,14 +2192,40 @@ export class Orchestrators {
    * starts with HELD_MARK: it is FF Factory's, and conditional decisions never take their words from it. Offered once; a
    * call refused again is held again.
    */
-  heldOffer(sessionId: string): string {
+  heldOffer(sessionId: string, typed?: string): string {
     const list = (this.held.get(sessionId) ?? []).filter((h) => this.now().getTime() - Date.parse(h.at) < HELD_MS);
     this.held.delete(sessionId);
-    if (!list.length) return '';
-    const owner = this.ownerOf(this.sessions.sessions.get(sessionId)?.info ?? { kind: 'worker' });
-    const n = owner?.displayName ?? 'your person';
+    const info = this.sessions.sessions.get(sessionId)?.info;
+    const n = (info ? this.ownerOf(info) : undefined)?.displayName ?? 'your person';
+    const cards = typed === undefined ? '' : this.cardsOffer(sessionId, typed, n);
+    if (!list.length && !cards) return '';
     const lines = list.map((h) => `- ${utcShort(h.at)}: ${h.tool} ${clip(JSON.stringify(h.args), 600)}, refused: ${clip(h.why, 300)}`);
-    return `\n\n${HELD_MARK}\nCalls a gate refused in your earlier turns, offered again with this message of ${n}'s (w830). Make each one ${n} already decided in their own words, now, as it stands; don't ask ${n} again. Leave out any their words do not decide.\n${lines.join('\n')}`;
+    const held = list.length ? `\nCalls a gate refused in your earlier turns, offered again with this message of ${n}'s (w830). Make each one ${n} already decided in their own words, now, as it stands; don't ask ${n} again. Leave out any their words do not decide.\n${lines.join('\n')}` : '';
+    return `\n\n${HELD_MARK}${held}${cards}`;
+  }
+
+  /** The open questions each chat was already shown at the start of a turn, by seq: a card is offered once. In memory only. */
+  private readonly cardsOffered = new Map<string, Set<number>>();
+
+  /**
+   * w1955 (lothsahn: "Why was I being shown old cards that were decided?"): at the start of a turn the person started with
+   * typed words, the chat's open questions that were asked before this message and were not offered before, so the
+   * orchestrator closes (close_question) the ones their words settled, with or without filing anything. A click or a
+   * reply quoting a card has answered that one (the reply's quote is left out). Offered once per card; request_work and
+   * update_work list the ones still open again (withOpenCards). Never closes anything: typed words name no card.
+   */
+  private cardsOffer(sessionId: string, typed: string, n: string): string {
+    const info = this.sessions.sessions.get(sessionId)?.info;
+    if (!info || !this.isPersonal(info)) return '';
+    const quoted = splitReply(typed, HELD_MARK).quote?.seq;
+    let offered = this.cardsOffered.get(sessionId);
+    if (!offered) this.cardsOffered.set(sessionId, (offered = new Set()));
+    const seen = offered;
+    const fresh = (info.openAsks ?? []).filter((a) => a.seq !== quoted && !seen.has(a.seq));
+    if (!fresh.length) return '';
+    for (const a of fresh) seen.add(a.seq);
+    const lines = fresh.map((a) => `- open question ${a.seq} (${clip(splitMedia(a.ask.question).text.replace(/\s+/g, ' '), 140)}), asked ${a.at}`);
+    return `\nOpen questions of yours on ${n}'s Waiting on input tab, asked before this message (w1955). If ${n}'s words in this message decided one, call close_question with its seq and why in this same turn, or the card stays clickable; leave the ones still open.\n${lines.join('\n')}`;
   }
 
   /** The person's own recent messages in this chat, newest last: where a conditional decision's words must be found. */

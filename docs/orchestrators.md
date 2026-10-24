@@ -2238,10 +2238,14 @@ by the person's note on its request, or its request closes; one the request's ow
 takes `request` and `after`, and the orchestrator's brief says to ask every question with it, never in text only.
 
 **Typed answers (w1955).** Words typed in the chat carry no mark of the card they answer, so nothing closes the card by itself and
-FF Factory never guesses (`Orchestrators.withOpenCards`). In a turn the person started, `request_work` and `update_work` end
-their result with the chat's open questions asked before that message ("open question N (...) may be answered by this"), each
-once per turn; the brief tells the orchestrator to `close_question` the ones the words decided, in the same turn. A turn the
-harness started (timer, relayed report) lists none. Test: `orchestrators.test.ts` "w1955".
+FF Factory never guesses. Two nudges tell the orchestrator to `close_question` the ones the words decided, in the same turn:
+(1) at the start of a turn the person typed, `Orchestrators.heldOffer(id, typed)` appends the chat's open questions asked before
+that message ("open question N (...)"), each card offered once, under HELD_MARK like the w830 held calls, so conditional decisions
+never take their words from it; a click, a reply quoting a card (that card is left out) and the harness's own turns offer none.
+The typed routes pass their text: the page, FFBox operator words, the remote Claude Code key, `askOrchestrator`. This covers the
+answer that leads to no filing. (2) `request_work` and `update_work` in a turn the person started end their result with the
+open questions asked before that message that are still open (`Orchestrators.withOpenCards`), once per turn. The brief says the
+same. Tests: `orchestrators.test.ts` "w1955" (two).
 
 `list_work` shows each waiting request's six parts under its line (`Agents.waitSummaryOf`, `summaryText`). Tests:
 `server/waitSummary.test.ts` (today's cases in `server/fixtures/waitingCards.ts`), `server/orchestrators.test.ts` ("w1868"),

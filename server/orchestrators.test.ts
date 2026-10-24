@@ -19,7 +19,7 @@ import { poolForRef, type GatePoolToken } from './usageGate.ts';
 import { personForWork, sessionPerson, setVaultContext } from './vault.ts';
 import { fakeToken, useFakeVault } from './testVault.ts';
 import { parseNotice } from '../shared/notices.ts';
-import { HELD_MARK } from '../shared/conditional.ts';
+import { HELD_MARK, inPersonWords } from '../shared/conditional.ts';
 import { splitReply, splitSent } from '../shared/replies.ts';
 import type { PrHealth } from '../shared/blockers.ts';
 import { answersText } from '../shared/questionCard.ts';
@@ -2646,7 +2646,47 @@ test('w1955: a card answered in typed words stays open, and request_work and upd
   const quiet = await call(loth.info, 'update_work', { id: wid, note: 'Timer note.' });
   assert.doesNotMatch(quiet.text, /open question/);
   const brief = (env.agents as unknown as { personalBrief(r: Requester): string }).personalBrief(LOTH);
-  assert.match(brief, /answers a question of yours in typed words instead of clicking its card, call close_question for that card in the same turn/);
+  assert.match(brief, /Answered in typed words: close_question that card that turn \(w1955\)/);
+});
+
+test('w1955: a typed message starts its turn with the open cards asked before it, once; a click or a reply quoting a card leaves that card out', async (t) => {
+  const { store, o, chat } = setup(t);
+  store.onEvent = (sid, e) => o.observeAsk(sid, e);
+  const loth = chat(LOTH);
+  const asked = (question: string, toolUseId: string) => {
+    const tag = toolUseId.toUpperCase();
+    const ev = store.append(loth.info.id, { kind: 'tool_use', toolUseId, name: 'mcp__sandboxes__ask_person', input: { question, options: [{ label: `Do it (${tag})`, description: '', recommended: true }, { label: `Leave it (${tag})`, description: '' }] } });
+    store.append(loth.info.id, { kind: 'tool_result', toolUseId, isError: false, text: 'Shown' });
+    return ev.seq;
+  };
+  const cleanup = asked('Should LothLaptop keep its clean-up line?', 'c1');
+  const timing = asked('Should the 16 GB desktop be a play-only timing machine?', 'c2');
+  // No typed message (a click, a harness note): nothing is offered, and nothing is used up.
+  assert.equal(o.heldOffer(loth.info.id), '');
+  // Typed words that quote no card: both cards are offered, under FF Factory's own mark.
+  const typed = 'We already decided on this in a discussion. Reference those decisions.';
+  const offer = o.heldOffer(loth.info.id, typed);
+  assert.match(offer, /^\n\n\[FF Factory, not your person: held from earlier turns\]\nOpen questions of yours on Lothsahn's Waiting on input tab, asked before this message \(w1955\)/);
+  assert.match(offer, new RegExp(`- open question ${cleanup} \\(Should LothLaptop keep its clean-up line\\?\\)`));
+  assert.match(offer, new RegExp(`- open question ${timing} `));
+  assert.match(offer, /close_question with its seq and why in this same turn/);
+  // Offered once: the next typed message lists a card only if it is new.
+  assert.equal(o.heldOffer(loth.info.id, 'Ok.'), '');
+  const later = asked('Which look for the new panel?', 'c3');
+  assert.match(o.heldOffer(loth.info.id, 'Ok.'), new RegExp(`open question ${later} `));
+  // A reply quoting a card has answered it: it is left out of the offer.
+  const q1 = asked('Should the dispatcher retry?', 'c4');
+  const q2 = asked('Should the idle stop be 10 minutes?', 'c5');
+  const quoting = o.replyWords(loth.info.id, 'Yes, retry.', q1);
+  const reply = o.heldOffer(loth.info.id, quoting);
+  assert.doesNotMatch(reply, new RegExp(`open question ${q1} `));
+  assert.match(reply, new RegExp(`open question ${q2} `));
+  // The reply is sent, so the quoted card closes (observeAsk); nothing is left to offer.
+  store.append(loth.info.id, { kind: 'user', from: 'human', text: quoting, requestedBy: LOTH });
+  assert.equal(o.heldOffer(loth.info.id, 'Ok.'), '');
+  // The typed message the orchestrator receives keeps the person's words ahead of the mark.
+  assert.equal(inPersonWords('We already decided on this in a discussion', [typed + offer]), true);
+  assert.equal(inPersonWords('call close_question with its seq', [typed + offer]), false, 'the card note is the harness note, not their words');
 });
 
 test('w1868: waiting_on_person refuses a still on the worker’s own machine; the brief asks every question with ask_person', async (t) => {
