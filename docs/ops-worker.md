@@ -774,7 +774,10 @@ job, no worker.
   (w1596) the machine's own update job does that put-back itself, and the report says "Rollback: ok" or that it needs a
   person; a job that never reports and leaves the machine offline is handled as a failed ssh run (put back over ssh where
   the portal reaches the machine). A link update the daemon refuses (a bundle that does not match, a job still running)
-  changed nothing and is reported FAILED with the daemon's reason.
+  changed nothing and is reported FAILED with the daemon's reason. A link update that gets no answer from a machine that
+  went offline **without fetching its bundle** (w2005: m3 went dark 17 s before its update was sent, on 2026-10-24) never
+  reached it, since the daemon fetches the bundle before it changes anything: it stays pending ("offline before the update
+  reached it"), nothing is put back over ssh, and it is updated after its next hello like any machine offline at the deploy.
 - **The report** is one `[machine updates]` message to the orchestrator of the person whose `ops_worker deploy` it was
   (`OpsWorker.deployRequester`: the last deploy asked for within 3 hours before the verification), else to the dispatcher (a
   deploy by hand at the VM, or an automatic one, w1634, whose people hear of their pull requests in their own line). Per machine: updated, already current, skipped (with why), failed (with the installer's own lines and the

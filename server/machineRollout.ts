@@ -6,6 +6,7 @@ import { daemonBehind } from './machines.ts';
 import { SAFE_ROOT, SAFE_TARGET, workerToolsRemote, workerUpdateRemote } from './opsWorker.ts';
 import { AGENT_PLUGINS, EXIT, LINE, parseVersions, type Versions } from './agentTools.ts';
 import type { LinkUpdateReport } from './machineProtocol.ts';
+import { UpdateNotReached } from './machineLink.ts';
 
 /**
  * The machine rollout (w887, lothsahn 2026-10-10: "Update FFFactory so that after updating the portal and validating, it
@@ -306,7 +307,7 @@ export class MachineRollout {
         } else if (!this.viaLink(m.id) && (!SAFE_TARGET.test(m.target) || !SAFE_ROOT.test(m.root) || /\s/.test(m.root))) {
           Object.assign(o, { status: 'skipped', note: 'its ssh target or root folder has characters this will not pass to a shell' });
         } else if (!this.d.host.online(m.id)) {
-          o.note = 'offline';
+          if (!o.note?.startsWith('offline')) o.note = 'offline';
           continue;
         } else if (!this.d.host.hello(m.id)) {
           // Connected, but its hello (which carries its commit) has not come yet: w970, beast was read as "unknown" and skipped.
@@ -382,6 +383,12 @@ export class MachineRollout {
       r = await host.linkUpdate!(m.id, 'update', sha);
     } catch (e) {
       const why = `over its daemon's link: ${(e as Error).message}`;
+      // w2005: it went quiet before the update reached it (an asleep or hung Mac): nothing to put back, and it is updated when
+      // it next comes online, as a machine offline at the deploy is.
+      if (e instanceof UpdateNotReached && !host.online(m.id)) {
+        Object.assign(o, { status: 'pending', note: `offline before the update reached it (${why})` });
+        return;
+      }
       if (/refused it:/.test(why)) Object.assign(o, { status: 'failed', note: `${why}; nothing was changed, and the daemon keeps working` });
       else await this.afterFailure(m, o, before, why);
       return;
@@ -416,7 +423,7 @@ export class MachineRollout {
     else await this.updateOverSsh(m, o, sha, before);
     o.at = new Date(this.now()).toISOString();
     // Were the agents taken back by the new daemon? Its hello after the update says what it runs.
-    if (agentsBefore.length) await this.checkAdoption(m.id, o, agentsBefore, startedAt);
+    if (agentsBefore.length && o.status !== 'pending') await this.checkAdoption(m.id, o, agentsBefore, startedAt);
     console.log(`machine rollout: ${m.id}: ${o.status}${o.note ? ` (${o.note})` : ''}`);
   }
 

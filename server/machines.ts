@@ -14,7 +14,7 @@ import { COMPACTING, isMidTurn, type AutoCompaction, type SessionHandle, type Se
 import type { CatalogTool, LaunchSpec, ToolHandler } from './launch.ts';
 import type { RemoteVoiceStatus } from '../shared/voice.ts';
 import { ATTACHMENT_PROTOCOL, BATCH_CLEAR_PROTOCOL, MAIN_CLONE_NO_AGENTS, RELOCATE_FALLBACK_MINUTES, RELOCATE_PROTOCOL, SANDBOX_PROTOCOL, protocolProblem, relocateProblem, type DaemonLiveView, type DaemonSandbox, type FromDaemon, type LinkUpdateFlags, type LinkUpdateReport, type ToDaemon } from './machineProtocol.ts';
-import { LINK_ACK_MS, PendingCalls, UpdateBundles, unwaitedAnswer } from './machineLink.ts';
+import { LINK_ACK_MS, PendingCalls, UpdateBundles, UpdateNotReached, unwaitedAnswer } from './machineLink.ts';
 import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
 import { branchProblem, normalizePurpose, slugify } from './sandboxes.ts';
 import { winDir } from './machineDeployWin.ts';
@@ -1041,8 +1041,10 @@ export class MachineManager {
     try {
       await ack;
     } catch (e) {
-      this.linkReports.settle(callId, e as Error);
-      throw e;
+      // w2005: gone quiet before it even asked for the bundle, so nothing on it changed: the update is still due, not failed.
+      const err = !this.isOnline(id) && !this.bundles.fetched(id, b.sha256) ? new UpdateNotReached(`${(e as Error).message}; it went offline without fetching the update bundle, so nothing on it changed`) : (e as Error);
+      this.linkReports.settle(callId, err);
+      throw err;
     }
     return report;
   }
