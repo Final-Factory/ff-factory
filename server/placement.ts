@@ -78,6 +78,8 @@ export interface Computer {
    * not make a computer busy for the timing order (lothlaptop at 08:38 MDT on 2026-10-24: 1 editor, 0 live).
    */
   idleEditors?: number;
+  /** Its CPU use over the last minute, % (w2054, Machines.cpuOf): the mean of its daemon's 15 s reports; undefined when none came. */
+  cpuPct?: number;
 }
 
 
@@ -138,6 +140,12 @@ export interface PlacementPrefs {
    * normal, which is also what the Capacity block's "Next" lines are for.
    */
   priority?: WorkPriority;
+  /**
+   * The load, %, at which a computer counts as full for the first pass of placement (w2054, config placement.spillAtPercent,
+   * default SPILL_AT_PCT): new work goes to the first one in placement.prefer under it, then to the overflow computers under
+   * it, and only when every one is at it or over to placement.prefer's order up to real capacity. 100 turns the tiers off.
+   */
+  spillAtPercent?: number;
 }
 
 const ORDER: readonly WorkPriority[] = ['low', 'normal', 'high', 'urgent'];
@@ -480,6 +488,34 @@ const roomFor = (p: Computer, kind: NeedKind) => (kind === 'game' ? roomOf(p) : 
 
 const pctOf = (r: number) => `${Math.round(r * 100)}%`;
 
+/**
+ * The load at which a computer counts as full when config placement.spillAtPercent is not set (w2054). lothsahn, 2026-10-24:
+ * "If a priority machine is over 50% full it should send work later down the list for any machine less than 50% full ...
+ * Modern machines have slower efficiency cores and hyper threading and boost clocks so they lose a lot of speed above 50%
+ * usage."
+ */
+export const SPILL_AT_PCT = 50;
+
+export const spillOf = (prefs: PlacementPrefs): number => {
+  const n = prefs.spillAtPercent;
+  return typeof n === 'number' && Number.isFinite(n) && n >= 1 && n <= 100 ? n : SPILL_AT_PCT;
+};
+
+/**
+ * How full a computer is for the spill tiers (w2054), %: the larger of its CPU use over the last minute and its agents
+ * mid-turn over its agent cap. CPU is the speed loss lothsahn named (on 8 cores with SMT the second thread of each core and
+ * the boost clock go above 50%), but it lags: a worker just placed holds its share of the cap before its editor compiles.
+ * The agents' share is what placement already promised there (w2048 reads the fleet's load the same way), but misses load
+ * that is not an agent: a person's game, a batch build, a player. The larger catches both; CPU unknown is the agents' share.
+ */
+export function loadOf(p: Pick<Computer, 'cpuPct' | 'midTurn' | 'maxAgents'>): number {
+  const agents = p.maxAgents > 0 ? Math.round((100 * p.midTurn) / p.maxAgents) : 100;
+  return Math.max(agents, p.cpuPct ?? 0);
+}
+
+/** "beast 62% (CPU 62%, 2 of 6 agents mid-turn)": a computer's load as the spill tiers read it (w2054), for the notes and the log. */
+export const loadText = (p: Computer) => `${p.id} ${loadOf(p)}% (CPU ${p.cpuPct !== undefined ? `${p.cpuPct}%` : 'unknown'}, ${p.midTurn} of ${p.maxAgents} agents mid-turn)`;
+
 /** The w416 spread among `open` (all with room): most room; within EVEN_MARGIN, fewer live agents, then taking turns. */
 function spread(open: Computer[], last: string | undefined, kind: NeedKind): { pick: Computer; why: string } {
   const score = (p: Computer) => roomFor(p, kind);
@@ -550,15 +586,37 @@ export function pickComputer(places: readonly Computer[], last?: string, prefs: 
   busy.push(...places.filter((p) => hasRoomFor(p, kind) && hold.has(p.id)).map((p) => `${p.id} is held (${hold.get(p.id)})`));
   const tail = busy.length ? `; ${busy.join(', ')}` : '';
   const prefer = (prefs.prefer ?? []).map(placeId);
-  for (const id of prefer) {
-    const p = open.find((x) => x.id === id && !avoid.has(x.id));
-    if (p) return { pick: p, why: `first with room in placement.prefer (${prefer.join(' > ')})${tail}` };
-  }
   const usable = open.filter((p) => !avoid.has(p.id));
+  // The spill tiers (w2054): the first preferred computer under spillAtPercent load, then the overflow ones under it, then
+  // (all at it or over) placement.prefer's order up to real capacity, then the overflow spread by room, as before w2054.
+  // Without a placement.prefer list there are no tiers: the w416 spread by room already evens the load.
+  const spill = spillOf(prefs);
+  const tiers = spill < 100 && prefer.length > 0;
+  const preferred = prefer.map((id) => usable.find((x) => x.id === id)).filter((p): p is Computer => !!p);
+  const overflow = usable.filter((p) => !prefer.includes(p.id));
+  const under = (p: Computer) => tiers && loadOf(p) < spill;
+  const loads = tiers ? `; loads: ${usable.map(loadText).join(', ')}` : '';
+  const order = prefer.length ? ` (${prefer.join(' > ')})` : '';
+  const first = preferred.find(under);
+  if (first) {
+    const past = preferred.slice(0, preferred.indexOf(first));
+    const why = past.length
+      ? `spilled past ${past.map((p) => p.id).join(', ')} (at ${spill}% load or more) to the first in placement.prefer under ${spill}%${order} (w2054, placement.spillAtPercent)`
+      : `first with room in placement.prefer${order}${tiers ? `, under ${spill}% load (w2054)` : ''}`;
+    return { pick: first, why: `${why}${loads}${tail}` };
+  }
+  const light = overflow.filter(under);
+  if (light.length) {
+    const s = spread(light, last, kind);
+    const head = preferred.length ? `every computer in placement.prefer with room is at ${spill}% load or more (${preferred.map((p) => p.id).join(', ')}), so the overflow under ${spill}% (w2054, placement.spillAtPercent)` : `none in placement.prefer has room; the overflow under ${spill}% load first (w2054)`;
+    return { pick: s.pick, why: `${head}: ${light.length === 1 ? `${s.pick.id} the only one under it` : s.why}${loads}${tail}` };
+  }
+  const full = tiers ? `every computer with room is at ${spill}% load or more, so ${preferred.length ? "placement.prefer's order up to capacity" : 'the overflow spread by room'} (w2054): ` : '';
+  if (preferred.length) return { pick: preferred[0], why: `${full}first with room in placement.prefer${order}${loads}${tail}` };
   if (usable.length) {
     const s = spread(usable, last, kind);
     const why = prefer.length ? `none in placement.prefer has room; ${s.why}` : s.why;
-    return { pick: s.pick, why: `${why}${tail}` };
+    return { pick: s.pick, why: `${full}${why}${loads}${tail}` };
   }
   const s = spread(open, last, kind);
   return { pick: s.pick, why: `only avoided computers have room (${s.pick.id}: ${avoid.get(s.pick.id)}); ${s.why}${tail}` };
@@ -575,7 +633,7 @@ export const avoidOf = (prefs: PlacementPrefs) => new Map(Object.entries(prefs.a
 const loadPart = (p: Computer) => {
   const pct = memPct(p);
   const ram = pct !== undefined ? `; RAM ${pct}% used` : '';
-  return `${p.live} live agents of ${p.maxAgents} (${p.midTurn} mid-turn); ${p.freeSandboxes} of ${p.maxSandboxes} sandboxes free${p.sandboxes < p.maxSandboxes ? ` (${p.maxSandboxes - p.sandboxes} more can be made)` : ''}${ram}${p.maxEditors ? `; editors ${p.editors ?? 0} of ${p.maxEditors}${p.editorsDetail ? `: ${p.editorsDetail}` : ''}` : ''}${p.voiceVramMiB ? `; Whisper holds ~${(p.voiceVramMiB / 1024).toFixed(1)} GB VRAM (unloaded for the editors when VRAM runs short)` : ''}${p.resumesWaiting ? `; ${p.resumesWaiting} released worker(s) wait to resume there and take the next sandbox that frees` : ''}${p.benchLock ? `; ${benchText(p.benchLock)}` : ''}${p.noTimedRuns ? '; no timed runs (w1861)' : ''}${p.untimed ? `; ${p.untimed} (w1923)` : ''}${p.legs?.length ? `; ${legsText(p.legs)}` : ''}`;
+  return `load ${loadOf(p)}% (CPU ${p.cpuPct !== undefined ? `${p.cpuPct}%` : 'unknown'} over the last minute; w2054); ${p.live} live agents of ${p.maxAgents} (${p.midTurn} mid-turn); ${p.freeSandboxes} of ${p.maxSandboxes} sandboxes free${p.sandboxes < p.maxSandboxes ? ` (${p.maxSandboxes - p.sandboxes} more can be made)` : ''}${ram}${p.maxEditors ? `; editors ${p.editors ?? 0} of ${p.maxEditors}${p.editorsDetail ? `: ${p.editorsDetail}` : ''}` : ''}${p.voiceVramMiB ? `; Whisper holds ~${(p.voiceVramMiB / 1024).toFixed(1)} GB VRAM (unloaded for the editors when VRAM runs short)` : ''}${p.resumesWaiting ? `; ${p.resumesWaiting} released worker(s) wait to resume there and take the next sandbox that frees` : ''}${p.benchLock ? `; ${benchText(p.benchLock)}` : ''}${p.noTimedRuns ? '; no timed runs (w1861)' : ''}${p.untimed ? `; ${p.untimed} (w1923)` : ''}${p.legs?.length ? `; ${legsText(p.legs)}` : ''}`;
 };
 
 /** "the ledger holds legs for it: w1789 (since 06:45Z), w1785 (since 06:46Z)" (w1863). */
@@ -690,7 +748,7 @@ export function capacityLines(places: readonly Computer[], last?: string, prefs:
   // The "Next" lines are for low and normal work (prefs.priority unset); reservedLine says where higher work goes.
   const base = { ...prefs, priority: undefined };
   const next = preferLine(places, last, base);
-  const how = prefer.length || avoid.size || hold.size || min.size ? `placement.prefer first, avoided last${hold.size ? ', held never' : ''}${min.size ? ', reserved only for the work they take' : ''}, the rest spread by room` : 'game-repo work is spread by room';
+  const how = prefer.length || avoid.size || hold.size || min.size ? `placement.prefer first${prefer.length && spillOf(prefs) < 100 ? `, spilling to the next under ${spillOf(prefs)}% load (placement.spillAtPercent, w2054)` : ''}, avoided last${hold.size ? ', held never' : ''}${min.size ? ', reserved only for the work they take' : ''}, the rest spread by room` : 'game-repo work is spread by room';
   const wf = workflowLine(places, last, base);
   const live = liveLine(places, last, base);
   const build = buildLine(places, last, base);

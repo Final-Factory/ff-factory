@@ -38,6 +38,8 @@ import type { GhAppToken } from '../shared/githubAppRoute.ts';
 
 const PING_MS = 20_000;
 const DEAD_MS = 45_000;
+/** How far back a machine's CPU use is averaged for placement (w2054): four of its daemon's 15 s reports. */
+export const CPU_WINDOW_MS = 60_000;
 /** Sessions whose last seq a daemon's connect looks up in one loop turn (w2026). */
 const ATTACH_SLICE = 200;
 /** w1894: a daemon's person-play report older than this holds nothing (its stats come every 15 s). */
@@ -517,6 +519,27 @@ export class MachineManager {
 
   statsOf(id: string): MachineStats | undefined {
     return this.stats.get(id);
+  }
+
+  /** Each machine's recent CPU reports (w2054): its daemon's loadPct, each the share busy since its last report (STATS_MS, 15 s). */
+  private readonly cpuSamples = new Map<string, { at: number; pct: number }[]>();
+
+  /**
+   * Its CPU use over the last CPU_WINDOW_MS, %, the mean of its daemon's reports in that window (w2054: placement spills past a
+   * computer at placement.spillAtPercent). One report is 15 s, and a compile or a domain reload fills it alone; a minute's mean
+   * is what the machine is running. Undefined when it reported none in the window (offline, or a daemon that sends no stats).
+   */
+  cpuOf(id: string, now = Date.now()): number | undefined {
+    const xs = (this.cpuSamples.get(id) ?? []).filter((x) => now - x.at <= CPU_WINDOW_MS);
+    return xs.length ? Math.round(xs.reduce((a, x) => a + x.pct, 0) / xs.length) : undefined;
+  }
+
+  /** Record a CPU report from a machine's stats message (w2054). */
+  noteCpu(id: string, pct: number, now = Date.now()): void {
+    if (!Number.isFinite(pct)) return;
+    const xs = (this.cpuSamples.get(id) ?? []).filter((x) => now - x.at <= CPU_WINDOW_MS);
+    xs.push({ at: now, pct: Math.max(0, Math.min(100, pct)) });
+    this.cpuSamples.set(id, xs);
   }
 
   /**
@@ -2382,6 +2405,7 @@ export class MachineManager {
         const was = this.stats.get(id)?.personPlay;
         if (!!was !== !!msg.personPlay) console.log(`machine ${id}: ${msg.personPlay ? `${msg.personPlay.who} is playing Final Factory there (pid ${(msg.personPlay.pids ?? []).join(', ')}): held, its agents yield (w1894)` : `the person's game there ended and its grace passed: it takes work again (w1894)`}`);
         this.stats.set(id, stats);
+        this.noteCpu(id, msg.stats.loadPct);
         emit({ type: 'machine_stats', id, stats });
         if (Array.isArray(msg.benchWarnings) && msg.benchWarnings.length) this.onBenchWarnings?.(id, msg.benchWarnings);
         return;
