@@ -465,6 +465,10 @@ export function workerSettings(sessionId: string, cfg: Partial<Pick<Config, 'wor
   const window = workerAutoCompactWindow(sessionId, cfg);
   const off = [...WORKER_DISABLED_PLUGINS, ...(marketing ? [] : [MARKETING_PLUGIN])];
   return {
+    // w2008 (docs/worker-base.md D3): Claude Code's auto memory off. Its "# Memory" section (~730 tokens) told every worker to
+    // write machine-local memory files, which the game repo's CLAUDE.md forbids ("This overrides any default memory-saving
+    // behavior"), and every model call read it again.
+    autoMemoryEnabled: false,
     enabledPlugins: Object.fromEntries(off.map((p) => [p, false])),
     skillOverrides: Object.fromEntries(WORKER_HIDDEN_SKILLS.map((k) => [k, 'user-invocable-only'])),
     bashOutputMaxChars: WORKER_BASH_OUTPUT_MAX_CHARS,

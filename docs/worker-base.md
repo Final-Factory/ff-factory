@@ -264,6 +264,8 @@ needs no login).
    mp-beta-deploy, steam-upload (0 uses in a week). They stay on disk, and a brief that needs one names it.
 6. **D3, auto memory off for workers** (−0.7k): `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` in a worker's environment (the daemon's launch),
    or `"autoMemoryEnabled": false` in the game repo's `.claude/settings.json` (that one reaches people's own sessions too).
+   **Built by w2008**: `workerSettings` (server/agents.ts) sets `"autoMemoryEnabled": false` in every worker's own settings, so
+   people's own sessions keep theirs; `server/workerCompact.test.ts` pins it.
 7. **D4, ReportFindings off for workers** (−0.7k): 0 calls. Risk: a code-review run asks to report through it.
 8. **D7, the worker prompt says each CLAUDE.md rule once** (−0.5k): drop the Discord, evidence and merge sentences CLAUDE.md
    already says; the tests that pin them move to a check that CLAUDE.md holds them.
