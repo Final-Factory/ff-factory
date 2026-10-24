@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { BenchState, Requester } from '../shared/types.ts';
-import { readJsonDurable, writeJsonDurable } from './durable.ts';
+import { SnapshotFile, readJsonDurable } from './durable.ts';
 import { daemonBehind } from './machines.ts';
 import { SAFE_ROOT, SAFE_TARGET, workerToolsRemote, workerUpdateRemote } from './opsWorker.ts';
 import { AGENT_PLUGINS, EXIT, LINE, parseVersions, type Versions } from './agentTools.ts';
@@ -218,6 +218,12 @@ export class MachineRollout {
   state: RolloutState = { machines: {} };
   private busy = false;
   private timer?: NodeJS.Timeout;
+  /**
+   * Saved in the background (w2044): tick saved once per machine, each a synchronous write with fsync, and one fsync took
+   * 1.0-1.4 s on the portal's disk (stall profiles 2026-10-24 17:33-17:41Z: tick > save > writeJsonDurable > fsync). A
+   * crash loses at most about a second of it; the portal looks at an unfinished machine again on start.
+   */
+  private readonly snap: SnapshotFile;
   /** w1861: per machine, since when a timed run holds its update back, when one was last seen, and what. */
   private readonly benchSeen = new Map<string, { since: number; last: number; what: string; over?: boolean }>();
 
@@ -228,6 +234,7 @@ export class MachineRollout {
     this.lim = { ...ROLLOUT_LIMITS, ...d.limits };
     this.file = path.join(d.dataDir, ROLLOUT_FILE);
     this.marker = path.join(d.dataDir, VERIFIED_FILE);
+    this.snap = new SnapshotFile(this.file, () => JSON.stringify(this.state, null, 2) + '\n', { delayMs: 200, intervalMs: 1_000, generations: 0, label: 'machine rollout' });
     const saved = readJsonDurable<RolloutState>(this.file, { generations: 0 });
     if (saved && typeof saved === 'object' && saved.machines) this.state = saved;
     // A run the last portal was in the middle of is lost with it: the machine is looked at again (its daemon says where it is).
@@ -245,14 +252,21 @@ export class MachineRollout {
 
   close() {
     clearInterval(this.timer);
+    if (this.snap.pending) this.saveNow();
+  }
+
+  /** Resolves once no background save is running or due (tests). */
+  idle() {
+    return this.snap.idle();
   }
 
   private save() {
-    try {
-      writeJsonDurable(this.file, this.state, { indent: 2, generations: 0 });
-    } catch (e) {
-      console.warn('machine rollout: could not save its state:', (e as Error).message);
-    }
+    this.snap.changed();
+  }
+
+  /** On disk now, on the main thread: before a taken marker is retired, and at close. */
+  private saveNow() {
+    this.snap.flushSync();
   }
 
   /** A verified deploy's marker, taken once: a new rollout for its commit. */
@@ -271,7 +285,7 @@ export class MachineRollout {
       const tools = this.d.tools?.() !== false;
       this.benchSeen.clear();
       this.state = { sha, previous: v?.previous || undefined, verifiedAt: new Date(at).toISOString(), ...(by ? { by } : {}), ...(tools ? { tools } : {}), machines: {} };
-      this.save();
+      this.saveNow();
       console.log(`machine rollout: portal ${sha.slice(0, 9)} verified${by ? ` (deploy asked for by ${by.userId})` : ''}; updating the machines' daemons${tools ? ' and agent tools' : ''}`);
     }
     // Retired only after the state is saved: a crash in between takes the marker again.

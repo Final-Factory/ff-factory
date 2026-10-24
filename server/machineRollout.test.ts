@@ -194,7 +194,8 @@ test('an offline machine is deferred, named in the report, and updated when it c
   assert.match(w.told[1].text, /Follow-up for portal c5a93e060/);
   assert.match(w.told[1].text, /- biscuit: updated\./);
   assert.doesNotMatch(w.told[1].text, /- m5/);
-  // A portal restart keeps what was done.
+  // A portal restart keeps what was done (its stop writes what the background save had not yet).
+  r.close();
   const again = w.make();
   await again.tick();
   assert.equal(w.calls.length, 2);
@@ -661,4 +662,19 @@ test("w1861: the timed run is read from the daemon's bench state: exclusive only
   assert.equal(timedRunText({ mode: 'free', running: [], runningCount: 0, waiting: 0 }, now, now), undefined);
   assert.equal(timedRunText(undefined, now, now), undefined);
   assert.match(timedRunText({ mode: 'exclusive', running: [], runningCount: 0, waiting: 0, legacy: { owner: 'm5 pid 4242 ben probe', since: '' } }, now, now)!, /an old-style timed run \(m5 pid 4242/);
+});
+
+test('w2044: a tick saves in the background: no synchronous write per machine, and the file holds the state once idle', async () => {
+  const w = world([mac('m5'), mac('beast'), mac('biscuit', { online: false })], { requester: LOTH });
+  const r = w.make();
+  w.verify();
+  await r.tick();
+  const file = path.join(w.dir, ROLLOUT_FILE);
+  const taken = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.deepEqual(taken.machines, {}, 'the taken deploy is on disk before its marker is retired, written at once');
+  await r.idle();
+  const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(saved.machines.m5.status, r.state.machines.m5.status);
+  assert.equal(saved.machines.biscuit.status, 'pending');
+  r.close();
 });

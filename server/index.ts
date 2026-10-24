@@ -2429,6 +2429,7 @@ function stopServer(req: RestartRequest, drained: ReadonlySet<string> = new Set(
   ledgerSweep.close();
   blockerWatch.close();
   masterBatch.close();
+  agents.rollout.close();
   store.flush();
   spend.flush();
   process.exit(0);

@@ -153,6 +153,8 @@ export type OptionsFactory = (info: SessionInfo) => Options;
 export type SessionSink = Pick<Store, 'putSession' | 'append' | 'amend' | 'saveImage'> & {
   noteActivity?: (sessionId: string) => void;
   flush?: () => void;
+  /** Saved at once in the background (w2044, Store.flushSoon): a turn opening or ending. */
+  flushSoon?: () => void;
   /** Where the context meter's tally of each conversation is kept for its next process (w1484, server/meterStates.ts). */
   meters?: MeterStates;
 };
@@ -513,7 +515,7 @@ export class AgentSession implements SessionHandle {
     }
     // w1949: a refused editor start (SessionInfo.editorRefused) is the wait of the stop it ended; a new turn tries again.
     this.update({ status: 'running', statusDetail: undefined, ...(opens ? { turnOpenSince: new Date().toISOString(), editorRefused: undefined } : {}) });
-    if (opens) this.store.flush?.();
+    if (opens) this.store.flushSoon?.();
     return uuid;
   }
 
@@ -674,7 +676,7 @@ export class AgentSession implements SessionHandle {
             // Idle means the input queue is drained: everything sent has been answered.
             this.clearOutstanding();
             this.update({ status: this.pending.size ? 'waiting_permission' : 'idle', turnOpenSince: undefined });
-            this.store.flush?.();
+            this.store.flushSoon?.();
             this.emitTurnEnd(this.lastTurnText);
           }
         } else if (m.subtype === 'status') {
@@ -1036,7 +1038,7 @@ export class AgentSession implements SessionHandle {
     this.stoppedOnPurpose = true;
     this.store.append(this.info.id, { kind: 'system', text: 'Interrupted.' });
     this.update({ status: 'idle', turnOpenSince: undefined });
-    this.store.flush?.();
+    this.store.flushSoon?.();
   }
 
   async setMode(mode: PermissionMode) {
@@ -1090,7 +1092,7 @@ export class AgentSession implements SessionHandle {
     this.info.backgroundTasks = undefined;
     this.info.backgroundJobs = undefined;
     this.store.putSession(this.info);
-    this.store.flush?.();
+    this.store.flushSoon?.();
   }
 
   /** The process ended by itself: keep the restart marks for restartMarks.graceMs in case the server is going down too. */
