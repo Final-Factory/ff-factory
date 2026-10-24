@@ -77,6 +77,15 @@ export const HOLD_PLACE_MS = 30 * 60_000;
 /** Whether a status or error line says no agent host could be started (the daemon's words: "could not start its agent host: …", "its agent host did not start"). */
 export const hostStartFailed = (text: string | undefined) => !!text && /could not start its agent host|its agent host did not start/i.test(text);
 
+/** The status detail a remote session gets when its machine's daemon goes away (server/machines.ts, the drop). */
+export const offlineDetail = (machineId: string) => `machine ${machineId} went offline`;
+/**
+ * A worker stopped because its machine went offline (a daemon update or restart, a lost link), not on purpose (w1972): its
+ * process ended, its work did not, and it resumes on its check-in or the next message.
+ */
+export const stoppedOffline = (s: Pick<SessionInfo, 'status' | 'statusDetail' | 'machineId' | 'stoppedOnPurpose'>) =>
+  s.status === 'stopped' && !s.stoppedOnPurpose && !!s.machineId && s.statusDetail === offlineDetail(s.machineId);
+
 /** Why a dead agent host blocks an agent: "its agent host did not start on m3". */
 export const hostFailureText = (s: Pick<SessionInfo, 'machineId'>) => `its agent host did not start on ${s.machineId ?? 'its machine'}`;
 
@@ -123,8 +132,9 @@ export function agentState(s: AgentFacts, time: (iso: string, now: number) => st
   // w1968: a ticket of its own waits in its machine's bench queue (or for a Unity slot): Blocked on it, mid-turn or between
   // turns, whatever it does meanwhile; Working again by itself once the next report has it granted.
   const live = s.status === 'running' || s.status === 'starting' || s.status === 'idle';
-  if (s.queueWait && live) return { ...v(s.status === 'idle' ? 'between_turns' : 'working', { waitsOn: `waiting for ${s.queueWait}`, ...(s.status === 'idle' ? { kind: 'job' as const } : {}) }), label: 'Blocked' };
   const hold = s.benchHold && live ? `holds ${s.benchHold}` : undefined;
+  // A holder that waits for a second ticket (a second player beside its first) says both (live on LothDesktop 02:39Z).
+  if (s.queueWait && live) return { ...v(s.status === 'idle' ? 'between_turns' : 'working', { waitsOn: [`waiting for ${s.queueWait}`, hold].filter(Boolean).join(' · '), ...(s.status === 'idle' ? { kind: 'job' as const } : {}) }), label: 'Blocked' };
   if (s.status === 'running' || s.status === 'starting') return v('working', hold ? { waitsOn: hold } : {});
   if (s.status === 'error') return v('error');
   const wakeAhead = !!s.wakeAt && Date.parse(s.wakeAt) > now - OVERDUE_MS;

@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { sandboxGuard } from './guard.ts';
 import { editorBenchGateFor, GATE_HOOK_TIMEOUT_S } from '../machine/editorBenchGate.ts';
-import { foreignTimedHold, ownTimedHold } from '../machine/benchLock.ts';
+import { foreignTimedHold, ownTimedHold, readTimedAsk } from '../machine/benchLock.ts';
 import { personHoldReason } from '../machine/personPlay.ts';
 import { closedRefusalFor } from '../machine/benchTurn.ts';
 import { standingGuard } from './standingGuard.ts';
@@ -164,6 +164,15 @@ export const CATALOG = {
     cross_os: z.string().max(300).optional().describe('Only when the change can behave differently across OSes (w1692: float or math-library use in the simulation, Burst or IL2CPP codegen, platform APIs or paths, the desync hash, a desync seen only across OSes): why. Without it the legs go on computers that are not Macs; with it a Mac may host, never a client.'),
     timed: z.boolean().optional().describe('A leg takes timing measurements (exclusive bench tickets): no leg goes on a computer that takes no timed runs (m5).'),
     request: z.string().max(16).optional().describe('The request ("w665") it is for, when you serve several; default: the one you are on.'),
+  },
+  /** w1969 (docs/machines.md, "Where a timed leg runs"): asked before an exclusive bench ticket; the portal says here or hands the leg to a small computer. */
+  timed_place: {
+    what: z.string().min(1).max(100).describe('The timed leg in one line: "RoundRobin belt output A/B on PR #2347".'),
+    brief: z.string().max(6000).optional().describe('What the leg runs, as a new worker on another computer needs it: the branch and the commit of each side, the save, the script and its settings (probe_ab_win.sh rounds), what to report. Needed when it is handed off.'),
+    platform: z.enum(['windows', 'mac', 'any']).optional().describe('The OS the leg needs (default any: both sides run on one computer, whichever OS).'),
+    same_machine: z.string().max(300).optional().describe('Only when its numbers must come from this computer (a side of the A/B already ran here, the brief names it): why. It then runs here.'),
+    via: z.enum(['leg', 'timed_run']).optional().describe('timed_run: a Windows player A/B that a play-only computer can time (w1946), when one is up; default leg.'),
+    request: z.string().max(16).optional().describe('The request ("w1891") it is for, when you serve several; default: the one you are on.'),
   },
   /** w1945: a leg of a pair run tells the other legs' workers something. */
   message_pair: {
@@ -415,6 +424,8 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
       // w1923: no timing measurement (an editor snippet reading a clock, a Performance test, a profiler capture) without an
       // exclusive bench ticket of the worker's own session.
       ...(g.workerRoot ? { timingHold: () => ownTimedHold(g.workerRoot, agentEnv.FF_SESSION_ID), session: agentEnv.FF_SESSION_ID, host: os.hostname().split('.')[0].toLowerCase() } : {}),
+      // w1969: on a big computer, no exclusive timing ticket before the worker asked timed_place where its leg runs.
+      ...(g.workerRoot ? { timedAsk: () => readTimedAsk(g.workerRoot, agentEnv.FF_SESSION_ID) } : {}),
     }),
     ...(g.standing ? [standingGuard(g.standing)] : []),
   ];

@@ -97,7 +97,7 @@ test('w1962: the passed marks are written into priorities.json and read back aft
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'w1962-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const passed = { t00000934: { by: 't00000936', since: NOW.toISOString() } };
-  const file = writeBenchPriorities(root, portal, NOW, false, undefined, passed)!;
+  const file = writeBenchPriorities(root, portal, NOW, false, undefined, undefined, passed)!;
   const f = JSON.parse(fs.readFileSync(file, 'utf8'));
   assert.deepEqual(f.passed, passed);
   assert.equal(f.sessions.s1853.priority, 'urgent');
@@ -152,7 +152,7 @@ test('w1962: against the real bench_queue.py, a raised build ends an urgent hold
   assert.deepEqual(Object.keys(passed), [build]);
   const r = raisedSessions(sessions, q, passed);
   assert.deepEqual(r.raised, [build]);
-  writeBenchPriorities(root, r.sessions, new Date(), false, undefined, passed);
+  writeBenchPriorities(root, r.sessions, new Date(), false, undefined, undefined, passed);
   assert.ok(await waitFor(() => has('limit.json') && !has('keep.json'), 10_000), 'the raised build ends the turn at its limit: a deadline, no hold');
   const lim = JSON.parse(fs.readFileSync(path.join(holder, 'limit.json'), 'utf8'));
   assert.ok((lim.waiters ?? [lim.by]).includes(build), `the deadline is the build's: ${JSON.stringify(lim)}`);

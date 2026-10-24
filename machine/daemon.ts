@@ -79,7 +79,7 @@ import { trayView } from './pauseRules.ts';
 import { TrayHost, trayInstance } from './tray.ts';
 import { FirefoxCloser, closeFirefox, firefoxFile, winFirefoxDeps } from './firefox.ts';
 import { GhLoginWatch, LOOK_EVERY_MS as GH_LOOK_EVERY_MS, lookHostsFile, type GhLoginDeps } from './ghLogin.ts';
-import { machinePlatformOf, type AttachmentRef, type BenchPriority, type CompactionTrigger, type HostHealth, type HostStats, type NoTimedRuns, type PersonPlayReport, type SandboxPoolSettings, type SessionInfo, type TranscriptEvent } from '../shared/types.ts';
+import { machinePlatformOf, type AttachmentRef, type BenchPriority, type CompactionTrigger, type HostHealth, type HostStats, type NoTimedRuns, type TimedAskMark, type PersonPlayReport, type SandboxPoolSettings, type SessionInfo, type TranscriptEvent } from '../shared/types.ts';
 
 export interface DaemonConfig {
   /**
@@ -379,7 +379,7 @@ export class Daemon {
   /** w1860: the portal's bench marks per session (its last bench_priorities): an exempt worker's builds are never stopped. */
   private benchMarks: Record<string, BenchPriority> = {};
   /** w1962: the portal's last bench_priorities (its marks as sent), the passed shared tickets, and what was written last. */
-  private benchSent?: { singleWorker?: boolean; noTimedRuns?: NoTimedRuns };
+  private benchSent?: { singleWorker?: boolean; noTimedRuns?: NoTimedRuns; timedAsk?: TimedAskMark };
   private benchPassed?: Record<string, PassedMark>;
   private benchWritten = '';
   private benchRaised = '';
@@ -1520,7 +1520,7 @@ export class Daemon {
       const { sessions, raised } = raisedSessions({ ...editorSessions(placed, this.benchMarks), ...this.benchMarks }, tickets, this.benchPassed);
       const key = JSON.stringify([sessions, this.benchPassed, this.benchSent]);
       if (key === this.benchWritten) return;
-      if (writeBenchPriorities(root, sessions, new Date(), this.benchSent.singleWorker, this.benchSent.noTimedRuns, this.benchPassed)) this.benchWritten = key;
+      if (writeBenchPriorities(root, sessions, new Date(), this.benchSent.singleWorker, this.benchSent.noTimedRuns, this.benchSent.timedAsk, this.benchPassed)) this.benchWritten = key;
       const now = raised.join(',');
       if (now !== this.benchRaised) {
         this.benchRaised = now;
@@ -2434,7 +2434,7 @@ export class Daemon {
       case 'bench_priorities':
         // Each worker's request priority (w1628): the game repo's bench_queue.py orders tickets by it first.
         this.benchMarks = msg.sessions;
-        this.benchSent = { singleWorker: msg.singleWorker, noTimedRuns: msg.noTimedRuns };
+        this.benchSent = { singleWorker: msg.singleWorker, noTimedRuns: msg.noTimedRuns, timedAsk: msg.timedAsk };
         this.benchPriorities();
         // w1894: this machine's machines.personPlay, kept for a restart before the portal answers
         if (msg.personPlay && JSON.stringify(msg.personPlay) !== JSON.stringify(this.personSettings)) {

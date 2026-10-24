@@ -1574,3 +1574,70 @@ test('w1870: the last worker ending after another said DONE (w434) does not clos
   o.workerEnded({ id: 's2' });
   assert.equal(get('w1').status, 'done');
 });
+
+// w1972 (2026-10-24 02:38Z): w1945's worker 7fadacb8 had a 30-minute check-in pending and w1946's 9d3696a1 waited on
+// lothsahn; beast's daemon update dropped their idle processes ("machine beast went offline"), and the ops worker's DONE
+// for its deploy job closed both requests. w1962's f77f6ee0 (02:50Z, lothdesktop offline, a 25-minute check-in) the same.
+const OPS = { id: 'ops-worker', kind: 'ops', title: 'Orchestration worker', status: 'idle', requestedBy: LOTH } as SessionInfo;
+const DEPLOYED = 'The deploy lothsahn asked for went out and was verified, with no rollback. The portal is now on commit 32f5914798be.\nDONE: w1\nLearned: nothing new';
+
+test("w1972: a worker that ended with work pending (a check-in, a wait on a person, a gate, a still-open report, its machine offline) keeps its request open on the ops worker's DONE", async (t) => {
+  const { request, worker, get, o } = setup(t);
+  const wakes = new Map<string, { at: string; note: string }>();
+  (o as unknown as { d: { pendingWake: (id: string) => { at: string; note: string } | undefined } }).d.pendingWake = (id) => wakes.get(id);
+  const offline = { status: 'stopped', statusDetail: 'machine beast went offline', machineId: 'beast' } as const;
+  const cases: { id: string; over: Partial<SessionInfo>; req?: Partial<WorkItem>; wake?: boolean; why: RegExp }[] = [
+    // w1945 as it happened: the check-in for the live check, then beast's daemon update.
+    { id: 'w1', over: { ...offline, lastResult: 'w1: still open: live check of the next pair run, check-in set for 30 minutes' }, wake: true, why: /its check-in is pending \(03:00 UTC: "w1 live check"\)/ },
+    // w1946 as it happened: waiting on lothsahn to join a machine.
+    { id: 'w2', over: { ...offline, waitingOn: { who: 'lothsahn', what: 'join coosego-desktop as a play-only machine', at: ago(1) } }, why: /it waits on lothsahn/ },
+    { id: 'w3', over: { status: 'stopped', lastResult: 'Pushed.' }, req: { status: 'blocked', blocked: { kind: 'ci', ref: `${APP}#609`, what: 'CI on #609', at: ago(1), by: 's3' } as WorkItem['blocked'] }, why: /the request is blocked on ci Final-Factory\/ff-factory#609/ },
+    { id: 'w4', over: { status: 'stopped', lastResult: 'Merged #610.\nw4: still open: waiting on lothsahn to join the desktop' }, why: /its last report says "w4: still open: waiting on lothsahn to join the desktop"/ },
+    // w1962 as it happened: stopped by lothdesktop going offline, with nothing else on record.
+    { id: 'w5', over: { status: 'stopped', statusDetail: 'machine lothdesktop went offline', machineId: 'lothdesktop', lastResult: 'Checking the bench lock.' }, why: /it was stopped because lothdesktop went offline, not on purpose/ },
+  ];
+  for (const c of cases) {
+    const sid = `s${c.id.slice(1)}`;
+    request(c.id, { sessionIds: [sid], ...c.req });
+    // Alive between turns when the ops worker says DONE: that records its part only (w434), as on 02:34.
+    worker(sid, { status: 'idle' });
+    o.opsTurnEnded(OPS, DEPLOYED.replace('w1', c.id), { workIds: [c.id], by: LOTH });
+    assert.equal(get(c.id).status, c.req?.status ?? 'active', `${c.id}: the ops worker's DONE alone does not close it`);
+    if (c.wake) wakes.set(sid, { at: '2026-10-24T03:00:00.000Z', note: `${c.id} live check` });
+    // Then its process ends (the daemon update): not closed, and the log says what is pending.
+    worker(sid, c.over);
+    o.workerEnded({ id: sid });
+    assert.equal(get(c.id).status, c.req?.status ?? 'active', `${c.id}: a worker with work pending did not finish it`);
+    assert.match(get(c.id).log.at(-1)!, new RegExp(`worker ${sid} ended; its other workers said DONE, but it stays open: ${sid} still has work on it: ${c.why.source} \\(w1972\\)`));
+  }
+  // Its own DONE later closes it as usual.
+  wakes.delete('s1');
+  o.workerTurnEnded(worker('s1', { status: 'idle' }), 'The pair run started both legs in one placement.\nDONE: w1\nLearned: nothing new');
+  assert.equal(get('w1').status, 'done');
+});
+
+test("w1972: the ops worker's DONE for its job never closes a request on its own worker ending, whatever that worker left", async (t) => {
+  const { request, worker, get, o } = setup(t);
+  // w1962's order: the worker was already stopped by lothdesktop going offline, with a check-in pending, when the ops DONE came.
+  (o as unknown as { d: { pendingWake: (id: string) => { at: string; note: string } | undefined } }).d.pendingWake = (id) => (id === 's1' ? { at: '2026-10-24T03:15:00.000Z', note: 'w1 lock check' } : undefined);
+  request('w1', { sessionIds: ['s1'] });
+  worker('s1', { status: 'stopped', statusDetail: 'machine lothdesktop went offline', machineId: 'lothdesktop', lastResult: 'w1: still open: cannot close yet, the release-lock check is next' });
+  o.opsTurnEnded(OPS, DEPLOYED, { workIds: ['w1'], by: LOTH });
+  assert.equal(get('w1').status, 'active', 'a stopped worker with a check-in pending is still on it');
+  assert.match(get('w1').log.join('\n'), /the orchestration worker said DONE for its part; still on it: s1$/m);
+  // A worker that ended with nothing pending and no DONE of its own: the ops worker's DONE is still not the request's.
+  request('w2', { sessionIds: ['s2'] });
+  worker('s2', { status: 'idle' });
+  o.opsTurnEnded(OPS, DEPLOYED.replace('w1', 'w2'), { workIds: ['w2'], by: LOTH });
+  worker('s2', { status: 'stopped', lastResult: 'Read the logs.' });
+  o.workerEnded({ id: 's2' });
+  assert.equal(get('w2').status, 'active');
+  assert.match(get('w2').log.at(-1)!, /worker s2 ended; only the orchestration worker said DONE, for its job, so it stays open for its own worker's DONE \(w1972\)/);
+  // A worker stopped on purpose with nothing pending, beside another worker's DONE, still closes it (w434).
+  request('w3', { sessionIds: ['s3', 's4'] });
+  worker('s4', { status: 'idle' });
+  o.workerTurnEnded(worker('s3'), 'My part is in.\nDONE: w3\nLearned: nothing new');
+  worker('s4', { status: 'stopped', stoppedOnPurpose: true, statusDetail: 'machine beast went offline', machineId: 'beast', lastResult: 'Looked; nothing to add.' });
+  o.workerEnded({ id: 's4' });
+  assert.equal(get('w3').status, 'done');
+});

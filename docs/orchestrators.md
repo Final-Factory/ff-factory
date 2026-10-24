@@ -362,6 +362,10 @@ fewest timed legs queued, then `placement.prefer`. A one-worker computer ranks f
 - **When every computer is full**, the line still says where timed work goes when one frees, smallest first, never m5.
 - **The line shows the whole ranking**: after the computers with room come those online without it, smallest first
   ("lothdesktop (10 agent slots, 3 editors, 5 live); no room now: m3 (4 agent slots), beast (12 agent slots); never m5").
+- **A timed leg asked for at its ticket** (w1969, docs/machines.md "Where a timed leg runs"): a worker on a big computer
+  calls `timed_place` before an exclusive ticket; a leg handed off arrives as "Timed leg for wNNN: ...", Queued for the small
+  computers it names. Start it on the first of them with room; a big one takes it only after the ledger widens its needs
+  (60 minutes Queued). Its asking worker is Blocked on its report: do not start that worker for it.
 
 A timed A/B compares its legs on one computer, so a slower one gives as good an answer.
 
@@ -740,7 +744,8 @@ without one means it is off or failing, worth a person's look.
   agent's own waiting ticket (bench or Unity slot) and the bench ticket it holds, so list_sandboxes, the
   machine view, the worker cards and the sidebar show "Blocked: waiting for the exclusive bench lock on beast (held by
   w1891 / t00001009 since 02:10 UTC, next in queue)" for the waiter and "Working: holds the exclusive bench lock on beast
-  (t00001009 for w1891, since 02:10 UTC)" for the holder ("holds lock" in the machine view). Only the label and its reason
+  (t00001009 for w1891, since 02:10 UTC)" for the holder ("holds lock" in the machine view); a holder waiting for a
+  second ticket reads Blocked with both ("… · holds a shared bench ticket on lothdesktop (t00000942 …)"). Only the label and its reason
   change; the state stays mid-turn or between turns, so capacity and placement read it as before. Tests:
   `w1968AgentQueue.test.ts`.
 - **Stalled is only what nothing will move** (w1841; Ben, 2026-10-23, on six requests his Stalled filter showed: "why are
@@ -1387,6 +1392,21 @@ ends without a DONE (`workerEnded`, called as its process stops), the request cl
 request's first ("main") worker may close it, was not taken: at w428 the worker that closed it may well have been the
 first one started, and a request handed from worker to worker has no single main one, while who is still on it is
 already in the ledger (links, `servedBy`, session state).
+
+**An ended worker with work pending is still on it** (w1972, lothsahn: "Please fix the closing job so it doesn't close out
+jobs with errors. Those should be resumed to fix the error or escalated to an operator if the error can't be fixed"). On
+2026-10-24 at 02:38Z beast's daemon update dropped the idle processes of w1945's worker 7fadacb8 (a 30-minute check-in
+pending) and w1946's 9d3696a1 (waiting on lothsahn); the drop marks every live session on the machine `stopped`,
+"machine beast went offline" (`server/machines.ts`, the drop, `offlineDetail`), and emits `ended`, and the ops worker's
+DONE for its deploy job then closed both requests; w1962's f77f6ee0 the same at 02:50Z when lothdesktop went offline.
+The check-ins were not lost (the restart log says "wake_me: re-armed 15 pending wake(s)", and 7fadacb8's 03:00 check-in
+was still pending at 02:40): only the ledger read the drop as the worker ending. Now `stillOn` keeps a stopped or errored
+worker on the request while `pendingOn` finds work pending on it: a wake_me check-in, a declared wait on a person
+(`waitingOn`), a gate on the request (`blocked`), a question, a last report with a `wNNN: still open:` line, or a stop its
+machine going offline made (`stoppedOffline`, `shared/agentState.ts`; not one on purpose). Such a worker is resumed by its
+check-in, its gate or the ledger cleanup (which resumes, re-places or escalates, w1870), or waits on its person; another
+worker's DONE records only its own part. And `workerEnded` never closes a request on the orchestration worker's DONE
+alone: that DONE is for its job (a deploy, a restart), so the request waits for its own worker's DONE.
 
 **The wrap-up** (w419). When the dispatcher sends a worker a related request that is not yet one of its own (`message_agent` with `work_id`, [One session per request](#one-session-per-request)) and the
 worker's current turn is on other requests (`servedBy`, [What a request is doing now](#what-a-request-is-doing-now)),

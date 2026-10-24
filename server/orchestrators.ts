@@ -50,6 +50,7 @@ import { aheadText, answerAfter, asksAPerson, holdsOf, personWaitIn, questionSha
 import { capacityBlockProblem, capacityWaitIn, needsOf, needsTimed, pairRoom, pairText, PAIR_MAX_LEGS, resolveNeeds } from '../shared/capacity.ts';
 import type { HandBack } from './machinePause.ts';
 import { heldText, roomEnough, roomForWork, roomIds, roomStood, timedKindOf, unusableText, type RoomNow, type TimedFacts, type TimedKind } from './placement.ts';
+import { TIMED_LEG_WAIT_MS } from './timedAsk.ts';
 import { minPriorityText } from '../shared/capacity.ts';
 import { repoSlug } from './ciReadHealth.ts';
 import { actionName, CONDITIONAL_DAYS, CONDITIONAL_MAX_DAYS, CONDITIONAL_PER_REQUEST, conditionalLine, conditionName, HELD_MARK, inPersonWords, parseCondition, type ConditionInput } from '../shared/conditional.ts';
@@ -60,10 +61,10 @@ import { NOTICE_TAG } from '../shared/notices.ts';
 import { mediaLine, previewsOf, reviewRootOf } from './reviewMedia.ts';
 import { alreadySent, asksSame, matchedAsk, needsYouDigestText, needsYouRecord, needsYouText, whoOf, type NeedsYouWait } from './needsYou.ts';
 import { asksAnsweredBy, sameAsk, WAIT_LINE_CHARS } from '../shared/waitSummary.ts';
-import { holdsItsPlace } from '../shared/agentState.ts';
+import { holdsItsPlace, stoppedOffline } from '../shared/agentState.ts';
 import { displayName } from '../shared/labels.ts';
 import { permissionAccess, permissionWhat, type PermissionAccess } from '../shared/permissionAccess.ts';
-import { OPS_PEOPLE } from './opsWorker.ts';
+import { OPS_ID, OPS_PEOPLE } from './opsWorker.ts';
 import { isSamePerson, personForWork, sessionPerson, tokenPersonForWork } from './vault.ts';
 import type { AttachmentRef, ConditionalDecision, OpenAsk, WorkNeedsYou, GateResume, Machine, WorkAutoClosed, WorkBlocker, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPair, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
 
@@ -3126,6 +3127,113 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
     return `${head} ${blocked} Commit and push your work before the turn ends: your sandbox is then released at once for other work, and you are resumed (in a free sandbox on your machine, on your branch) when the pair's host leg reports its result.`;
   }
 
+  /**
+   * timed_place's hand-off (w1969, server/timedAsk.ts): the timed leg of `sessionId`'s request filed as its own request,
+   * Queued for the small computers `needs` names (best first), with the asking request Blocked on its report. One open leg
+   * per request: asked again, it waits on the one there is. Returns the leg's id and what the worker is told.
+   */
+  fileTimedLeg(sessionId: string, a: { what: string; brief: string; from: string; needs: string[]; why: string; request?: string }): { id: string; text: string } {
+    const w = this.workerRequest(sessionId, a.request, 'timed_place');
+    const what = clip(a.what.replace(/\s+/g, ' ').trim(), 100);
+    const brief = a.brief.trim();
+    if (!what || !brief) throw new Error('give what (one line: "RoundRobin belt output A/B on PR #2347") and brief (what the leg runs, as a new worker needs it: the branch and the commits of both sides, the save, the script and its settings, what to report)');
+    if (!a.needs.length) throw new Error(`no small computer takes ${w.id}'s timed leg: ask an operator`);
+    const open = [...this.store.work.values()].find((x) => x.timedLeg?.for === w.id && isOpen(x));
+    const leg = open ?? this.newTimedLeg(w, sessionId, { what, brief, from: a.from, needs: a.needs, why: a.why });
+    const blocked = this.workerBlocked(sessionId, { request: w.id, reports: [leg.id], what: `timed leg ${leg.id}: ${what}` });
+    const head = open
+      ? `${w.id} already has an open timed leg, ${leg.id} (${leg.status}: ${clip(leg.title, 80)}); you wait on it, and nothing new was filed.`
+      : `Filed ${leg.id}, the timed leg of ${w.id}, Queued for ${a.needs.join(' > ')}: a new worker there builds and times both sides of it on that one computer, and reports to you.`;
+    this.stamp(w, `timed leg ask (w1969) from worker ${sessionId.slice(0, 8)} on ${a.from}: handed to ${leg.id}, queued for ${a.needs.join(' > ')}: ${a.why}`);
+    this.store.putWork(w);
+    console.log(`timed ask (w1969): ${w.id} worker ${sessionId.slice(0, 8)} on ${a.from}: elsewhere -> ${leg.id} queued for ${a.needs.join(' > ')}: ${a.why}`);
+    return { id: leg.id, text: `${head} ${blocked} Do not take an exclusive ticket here for it. Commit and push your work before the turn ends: your sandbox is then released for other work, and the leg's report (a line "For ${w.id}:") resumes you.` };
+  }
+
+  /** A timed_place answer that keeps the leg where it is (w1969): a line in the asking request's log and the portal's journal. */
+  noteTimedAsk(sessionId: string, request: string | undefined, line: string): void {
+    console.log(`timed ask: ${line}`);
+    let w: WorkItem | undefined;
+    try {
+      w = this.workerRequest(sessionId, request, 'timed_place');
+    } catch {
+      return; // no request of its own: the journal line is the record
+    }
+    this.stamp(w, line);
+    this.store.putWork(w);
+  }
+
+  /** The request fileTimedLeg files (w1969): the asking request's people and priority, a game sandbox, Queued for the small computers. */
+  private newTimedLeg(w: WorkItem, sessionId: string, x: { what: string; brief: string; from: string; needs: string[]; why: string }): WorkItem {
+    const now = this.now().toISOString();
+    const title = clip(`Timed leg for ${w.id}: ${x.what}`, 120);
+    const brief = clip(
+      [
+        x.brief,
+        '',
+        `FF Factory filed this for worker ${sessionId} on ${w.id} (w1969, timed_place): its timed leg, moved off a big computer so its exclusive bench turn idles few slots (${x.why}). Build and time BOTH sides of the comparison on the computer you run on, under its exclusive bench ticket (the bench queue, as the game repo's scripts take it): numbers compare only with the same computer's own. ${w.id}'s worker is Blocked on this request's report: report the result with a line "For ${w.id}:" (each side's commit, the computer, the table, where the logs are), then end with DONE: <this request> once the run is over. Do not merge ${w.id}'s pull request: its own worker does.`,
+      ].join('\n'),
+      8000,
+    );
+    const leg: WorkItem = {
+      id: `w${++this.store.workSeq}`,
+      title,
+      brief,
+      constraints: `a timed leg (w1969): runs on ${x.needs.join(' or ')}`,
+      priority: w.priority,
+      relatedIds: [w.id],
+      keys: textKeys(title, this.knownBranches()),
+      requestedBy: w.requestedBy,
+      requesters: [...w.requesters],
+      humanAsked: false,
+      status: 'queued',
+      queuedFor: { at: now, needs: [...x.needs] },
+      createdAt: now,
+      updatedAt: now,
+      sessionIds: [],
+      needs: 'game',
+      timedLeg: { for: w.id, forSession: sessionId, from: x.from, small: [...x.needs] },
+      overlaps: [],
+      asks: 0,
+      log: [],
+    };
+    leg.overlaps = findOverlaps({ keys: leg.keys, title: leg.title }, this.pool(leg.id)).filter((o) => o.ref !== w.id);
+    this.stamp(leg, `filed by FF Factory for worker ${sessionId} on ${w.id} (w1969 timed_place) from ${x.from}: queued for ${x.needs.join(' > ')}, the small computers that take timed runs (a big one only after it waited ${TIMED_LEG_WAIT_MS / 60_000} min): ${x.why}`);
+    this.store.putWork(leg);
+    this.gatherForDispatcher(w.requestedBy, requestNotice(leg));
+    return leg;
+  }
+
+  /**
+   * The wait bound of a timed leg (w1969, TIMED_LEG_WAIT_MS): one Queued on its small computers for longer widens to every
+   * computer that takes timed runs ("Next timed work"'s order, big ones included), logged once, and the dispatcher is told.
+   * Returns the ids widened.
+   */
+  timedLegBound(): string[] {
+    const done: string[] = [];
+    const now = this.now().getTime();
+    for (const w of this.store.work.values()) {
+      const leg = w.timedLeg;
+      if (!leg || leg.widened || w.status !== 'queued' || !isOpen(w)) continue;
+      const since = Date.parse(w.queuedFor?.at ?? w.createdAt);
+      if (!(now - since > TIMED_LEG_WAIT_MS)) continue;
+      const takes = this.d.timedFacts?.('timed')?.takes ?? [];
+      const needs = [...new Set([...(w.queuedFor?.needs ?? leg.small), ...takes])];
+      w.queuedFor = { at: w.queuedFor?.at ?? w.createdAt, needs };
+      w.timedLeg = { ...leg, widened: this.now().toISOString() };
+      this.roomFlags.delete(w.id);
+      this.stamp(w, `ledger: its timed leg waited ${Math.round((now - since) / 60_000)} min on ${leg.small.join(', ')} with no room (w1969 bound: ${TIMED_LEG_WAIT_MS / 60_000} min, two full bench turns); now any computer that takes timed runs may take it: ${needs.join(' > ')}`);
+      this.store.putWork(w);
+      done.push(w.id);
+    }
+    if (!done.length) return [];
+    console.log(`timed ask (w1969): widened timed legs past their wait bound: ${done.join(', ')}`);
+    this.toDispatcher(
+      `[ledger] Timed legs that waited over ${TIMED_LEG_WAIT_MS / 60_000} min for a small computer (w1969) may now go to any computer that takes timed runs: ${done.map((id) => `${id} "${clip(this.store.work.get(id)?.title ?? '', 80)}"`).join('; ')}. Start each on the first of its needs with room (start_agent with its work_id).`,
+    );
+    return done;
+  }
+
   /** The pair request request_pair files (w1945): the asking request's people and priority, a game sandbox per leg. */
   private newPair(w: WorkItem, sessionId: string, x: { what: string; brief: string; legs: number; crossOs?: string; timed: boolean }): WorkItem {
     const now = this.now().toISOString();
@@ -3495,16 +3603,39 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
 
   /**
    * The workers still on a request, apart from `except` (w434): linked to it, still serving it (servedBy: not moved on to
-   * newer work), alive (not stopped, errored or gone), and not done with their part (WorkItem.done).
+   * newer work), alive (not stopped, errored or gone) or stopped with work still pending on it (pendingOn, w1972), and
+   * not done with their part (WorkItem.done).
    */
   private stillOn(w: WorkItem, except?: string): string[] {
     const all = [...this.store.work.values()];
     return w.sessionIds.filter((id) => {
       if (id === except || doneOf(w)[id]) return false;
       const s = this.store.sessions.get(id);
-      if (!s || s.status === 'stopped' || s.status === 'error') return false;
+      if (!s || ((s.status === 'stopped' || s.status === 'error') && !this.pendingOn(w, id))) return false;
       return servedBy(id, all).has(w.id);
     });
+  }
+
+  /**
+   * What worker `sid` still has pending on request `w` once its process has ended (w1972, lothsahn: "Please fix the closing
+   * job so it doesn't close out jobs with errors"): a check-in, a gate on the request, a wait on a person, a question, a
+   * last report that says the request is still open, or a stop its machine going offline made (a daemon update or restart
+   * ends a process, not its work: w1945's 7fadacb8, w1946's 9d3696a1 and w1962's f77f6ee0 were closed so on 2026-10-24).
+   * Such a worker is resumed by its check-in, its gate or the ledger cleanup, or waits on its person; its request is not
+   * closed on another worker's DONE. undefined: nothing pending.
+   */
+  private pendingOn(w: WorkItem, sid: string): string | undefined {
+    const s = this.store.sessions.get(sid);
+    if (!s) return undefined;
+    const wake = this.d.pendingWake?.(sid);
+    if (wake) return `its check-in is pending (${wake.at.slice(11, 16)} UTC: "${clip(wake.note, 80)}")`;
+    if (s.waitingOn && (!s.waitingOn.request || s.waitingOn.request === w.id)) return `it waits on ${s.waitingOn.who}`;
+    if (w.blocked) return `the request is blocked on ${w.blocked.kind}${w.blocked.ref ? ` ${w.blocked.ref}` : ''}`;
+    if (w.question) return 'a question on it waits on a person';
+    const open = s.lastResult ? stillOpenIn(s.lastResult.slice(-2000)).get(w.id.toLowerCase()) : undefined;
+    if (open) return `its last report says "${clip(open, 120)}"`;
+    if (stoppedOffline(s)) return `it was stopped because ${s.machineId} went offline, not on purpose`;
+    return undefined;
   }
 
   /**
@@ -3541,12 +3672,28 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
   /**
    * A worker of open requests ended (its process stopped, w434): a request whose other workers all said DONE closes now,
    * on the last DONE's report, unless doneProblem finds something missing (then it waits for the cleanup or a person).
+   * w1972: not while the ended worker still has work pending on it (pendingOn), and never on the orchestration worker's
+   * DONE alone: that one is for its job (a deploy, a restart), not the request's own work.
    */
   workerEnded(s: Pick<SessionInfo, 'id'>) {
     for (const w of [...this.store.work.values()]) {
       const done = doneOf(w);
-      if (!isOpen(w) || !w.sessionIds.includes(s.id) || !Object.keys(done).length || done[s.id] || this.stillOn(w).length) continue;
-      const [sid, last] = Object.entries(done).sort((a, b) => b[1].at.localeCompare(a[1].at))[0];
+      if (!isOpen(w) || !w.sessionIds.includes(s.id) || !Object.keys(done).length || done[s.id] || this.stillOn(w, s.id).length) continue;
+      const status = this.store.sessions.get(s.id)?.status;
+      if (status && status !== 'stopped' && status !== 'error' && this.stillOn(w).length) continue;
+      const pending = this.pendingOn(w, s.id);
+      if (pending) {
+        this.stamp(w, `worker ${s.id} ended; its other workers said DONE, but it stays open: ${s.id} still has work on it: ${pending} (w1972)`);
+        this.store.putWork(w);
+        continue;
+      }
+      const own = Object.entries(done).filter(([id]) => id !== OPS_ID);
+      if (!own.length) {
+        this.stamp(w, `worker ${s.id} ended; only the orchestration worker said DONE, for its job, so it stays open for its own worker's DONE (w1972)`);
+        this.store.putWork(w);
+        continue;
+      }
+      const [sid, last] = own.sort((a, b) => b[1].at.localeCompare(a[1].at))[0];
       // w1870: a worker whose last turn ended in an error or an interrupt did not finish its part: the cleanup resumes,
       // escalates or places it, and the request stays open.
       const ended = this.store.sessions.get(s.id);
@@ -3614,7 +3761,7 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       const others = this.stillOn(w, s.id);
       if (others.length) {
         const who = others.map((id) => this.workerLine(id)).join(', ');
-        parts.push(`${id}: your part is recorded as done; ${id} stays open while ${who} ${others.length > 1 ? 'are' : 'is'} still on it, and closes once each has said DONE or ended`);
+        parts.push(`${id}: your part is recorded as done; ${id} stays open while ${who} ${others.length > 1 ? 'are' : 'is'} still on it, and closes once each has said DONE or ended with nothing pending`);
         this.stamp(w, `${speaker} said DONE for its part; still on it: ${others.join(', ')}`);
         this.store.putWork(w);
         continue;

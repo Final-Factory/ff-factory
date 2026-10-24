@@ -4,6 +4,7 @@ import { checkOffDriveScan, checkOutsideRootDelete } from './rootFence.ts';
 import { headBranch, isUrgentBranch } from './releaseHandBack.ts';
 import { checkMainCloneShell, flatten, normPath, pathSpellings, spellingsRegex, type MainCloneGrant } from './mainCloneGuard.ts';
 import { checkTiming } from './timingGuard.ts';
+import { checkTimedAsk, type TimedAskState } from './timedAsk.ts';
 import os from 'node:os';
 import path from 'node:path';
 import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
@@ -111,6 +112,12 @@ export function sandboxGuard(opts: {
    * undefined. A timing measurement without one is refused (server/timingGuard.ts checkTiming). Absent: not checked.
    */
   timingHold?: () => string | undefined;
+  /**
+   * w1969: this machine's timed_place mark and the session's verdict (machine/benchLock.ts readTimedAsk). On a big computer
+   * a command that takes an exclusive timing ticket is refused until the worker asked where the leg runs and heard "here"
+   * (server/timedAsk.ts checkTimedAsk). Absent: not checked.
+   */
+  timedAsk?: () => TimedAskState | undefined;
   /** w1923: who the timing log names (the worker's session, this machine). */
   session?: string;
   host?: string;
@@ -159,6 +166,7 @@ export function sandboxGuard(opts: {
         (opts.personBusy ? checkPersonPlayLaunch(cmd, opts.personBusy) : undefined) ??
         checkRawUnityBatch(cmd, cloneSpellings) ??
         timing(tool, args, input.cwd || opts.sandboxPath) ??
+        (opts.timedAsk ? checkTimedAsk(cmd, opts.timedAsk()) : undefined) ??
         (opts.workerRoot ? checkOutsideRootDelete(cmd, { root: opts.workerRoot, cwd: input.cwd || opts.sandboxPath, allow: [opts.sandboxPath], saveTag }) : undefined) ??
         (opts.workerRoot ? checkOffDriveScan(cmd, { root: opts.workerRoot, cwd: input.cwd || opts.sandboxPath, allow: [opts.sandboxPath] }) : undefined);
       if (reason) return deny(reason);
