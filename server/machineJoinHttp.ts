@@ -185,6 +185,8 @@ export function machineJoinHttp(d: MachineJoinDeps) {
       tagged: device.tags.includes(WORKER_TAG),
       tags: device.tags,
       existing: d.records.get(j.machineId) ? 'waiting' : 'new',
+      // w1993: a play-only timing machine plays builds made elsewhere, so its installer makes no Dev Drive (join.ps1 -NoDevDrive).
+      playOnly: !!d.records.get(j.machineId)?.playOnly?.trim(),
     };
     if (check) return send(res, 200, { ok: true, check: true, ...answer });
 

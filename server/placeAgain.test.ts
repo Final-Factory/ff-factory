@@ -44,6 +44,8 @@ const facts = (sessions: SessionInfo[], o: Partial<PlaceFacts> & { liveIds?: str
   live: (id) => (o.liveIds ?? []).includes(id),
   unityHolders: o.unityHolders ?? [],
   now: NOW,
+  ...(o.canSave !== undefined ? { canSave: o.canSave } : {}),
+  ...(o.saveRefused ? { saveRefused: o.saveRefused } : {}),
 });
 
 test('place again (w640): how far a check-in has to be, and stale check-ins of finished work', () => {
@@ -68,6 +70,11 @@ test('place again (w640): a stopped worker with a far check-in releases a clean 
   assert.match(keptWhy(w, sandbox('slot1', {}, { untracked: 3 }), facts([w])) ?? '', /3 untracked file/);
   assert.match(keptWhy(w, sandbox('slot1', {}, { at: iso(NOW - 30 * MIN) }), facts([w])) ?? '', /not been read since the worker last worked/);
   assert.match(keptWhy(w, sandbox('slot1', { git: undefined }), facts([w])) ?? '', /not known yet/);
+  // w1983: a daemon that saves reads it itself in the save (lothdesktop/slot5, 2026-10-24: unread 10 min after its worker stopped).
+  const unread = sandbox('slot1', { git: undefined });
+  assert.equal(keptWhy(w, unread, facts([w], { canSave: true })), undefined);
+  assert.deepEqual(releaseStep(w, unread, facts([w], { canSave: true })), { do: 'release', why: 'its check-in is 9.0 h away, at tomorrow 01:00 UTC', branch: unread.branch, save: true });
+  assert.match(keptWhy(w, unread, facts([w], { canSave: true, saveRefused: () => 'git status failed' })) ?? '', /could not be saved: git status failed/);
   assert.match(keptWhy(w, sandbox('slot1', {}, { branch: 'detached HEAD' }), facts([w])) ?? '', /not on a branch/);
   assert.match(keptWhy(w, sandbox('slot1', { status: 'creating' }), facts([w])) ?? '', /is creating/);
   // A Unity batch run of that sandbox, or another agent working there on the same branch.

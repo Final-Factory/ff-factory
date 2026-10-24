@@ -72,6 +72,27 @@ test('w656 save: nothing to save; refused on another branch, a shared branch, or
   assert.match(r.git(r.work, 'status', '--porcelain'), /M a\.cs/, 'nothing was committed');
 });
 
+test('w1983 save: build output in .nightly-builds/ or Builds/ is neither saved nor counted, so a player build never pins a sandbox', async (t) => {
+  const r = repos();
+  t.after(r.cleanup);
+  const limits = { files: 3, fileBytes: 1000, totalBytes: 1500 };
+  // lothdesktop/slot6 at 03:27Z on 2026-10-24: ".nightly-builds/5f7b5ad5…-win/player/UnityPlayer.dll is 80 MB".
+  const player = path.join(r.work, '.nightly-builds', 'abc-win', 'player');
+  fs.mkdirSync(player, { recursive: true });
+  fs.writeFileSync(path.join(player, 'UnityPlayer.dll'), Buffer.alloc(5000));
+  fs.mkdirSync(path.join(r.work, 'Builds'));
+  for (const n of [1, 2, 3, 4]) fs.writeFileSync(path.join(r.work, 'Builds', `f${n}.bin`), 'x');
+  const none = await saveWork({ dir: r.work, branch: 'w1-feature', message: MSG, limits });
+  assert.equal(none.files, 0);
+  assert.equal(none.sha, undefined);
+  assert.match(none.notes.join(' '), /nothing to save \(build output in \.nightly-builds\/ or builds\/ stays, uncommitted\)/);
+  fs.writeFileSync(path.join(r.work, 'New.cs'), 'new');
+  const res = await saveWork({ dir: r.work, branch: 'w1-feature', message: MSG, limits });
+  assert.equal(res.files, 1);
+  assert.equal(r.git(r.work, 'show', '--name-only', '--format=', 'HEAD'), 'New.cs');
+  assert.ok(fs.existsSync(path.join(player, 'UnityPlayer.dll')), 'the build stays where it is');
+});
+
 test('w656 save: a push that fails still leaves the commit in the repository, and says so', async (t) => {
   const r = repos();
   t.after(r.cleanup);

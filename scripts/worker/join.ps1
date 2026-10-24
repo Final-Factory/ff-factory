@@ -385,11 +385,13 @@ function Invoke-NewJoin([string]$tsExe, $self, [string]$work) {
     if ($MaxSandboxes) { $limits.maxSandboxes = $MaxSandboxes }
     if ($MaxAgentsPerSandbox) { $limits.maxAgentsPerSandbox = $MaxAgentsPerSandbox }
     if ($MaxUnity) { $limits.maxUnity = $MaxUnity }
+    # w1993: a play-only timing machine only plays builds made elsewhere: no Dev Drive (its sandbox clones nothing big).
+    $playOnly = [bool]$c.playOnly
     Say "The code is good: this PC joins as '$($c.machineId)' (code valid until $($c.expiresAt))."
     $from = $(if ($MaxSandboxes -or $MaxAgentsPerSandbox -or $MaxUnity) { 'as given here' } elseif ($c.limitsFrom -eq 'code') { "the owner's, with the code" } else { "from this PC: $($c.defaultsWhy)" })
     Say "Limits: $($limits.maxSandboxes) sandboxes, $($limits.maxAgentsPerSandbox) agents per sandbox, $($limits.maxUnity) Unity editors at once ($from)."
     $root = $(if ($Root) { $Root } else { Ask 'Root folder (an empty or new folder on a fast drive with 200+ GB free)' $rootGuess })
-    Say "Root: $root ($(Get-FreeGB $root) GB free on its drive). install.ps1 also makes a Dev Drive there for the sandboxes (one administrator prompt)."
+    Say "Root: $root ($(Get-FreeGB $root) GB free on its drive). $(if ($playOnly) { 'Play-only: it plays the timed runs other computers build, so install.ps1 makes no Dev Drive.' } else { 'install.ps1 also makes a Dev Drive there for the sandboxes (one administrator prompt).' })"
 
     Step 'Tools'
     if ($DryRun) {
@@ -402,7 +404,7 @@ function Invoke-NewJoin([string]$tsExe, $self, [string]$work) {
         Say "Dry run: nothing was changed, and the code is still unused. Run it again without -DryRun to join."
         return 0
     }
-    if (-not $Yes -and -not (Confirm-Step 'Go on: install what is missing, enrol and install this PC?' $true)) { Say 'Stopped; nothing was changed and the code is still unused.'; return 1 }
+    if (-not $Yes -and -not (Confirm-Step 'Go on: install what is missing, enroll and install this PC?' $true)) { Say 'Stopped; nothing was changed and the code is still unused.'; return 1 }
     if (-not $SkipMachineSetup) {
         if (-not (Install-Tools)) { return 2 }
         Show-Unity
@@ -421,6 +423,7 @@ function Invoke-NewJoin([string]$tsExe, $self, [string]$work) {
     Step 'Installing (install.ps1)'
     $a = @('-Root', $root, '-PortalUrl', $script:Portal, '-MaxSandboxes', $limits.maxSandboxes, '-MaxAgentsPerSandbox', $limits.maxAgentsPerSandbox, '-MaxUnity', $limits.maxUnity, '-CredentialFile', $credFile, '-NoSsh')
     if ($script:Owner) { $a += @('-Owner', $script:Owner) }
+    if ($playOnly) { $a += '-NoDevDrive' }
     try {
         $exit = Invoke-Installer $a $work
     } finally {

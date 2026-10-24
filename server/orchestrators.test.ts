@@ -23,8 +23,9 @@ import { HELD_MARK, inPersonWords } from '../shared/conditional.ts';
 import { splitReply, splitSent } from '../shared/replies.ts';
 import type { PrHealth } from '../shared/blockers.ts';
 import { answersText } from '../shared/questionCard.ts';
+import { PAIR_HOLD_MS } from '../shared/capacity.ts';
 import { benchLockIn, type Requester, type SessionInfo, type TranscriptEvent, type UserInfo, type WorkItem } from '../shared/types.ts';
-import { LIVE_HOLD_MS } from './placeAgain.ts';
+import { LIVE_HOLD_MS, releaseWhy } from './placeAgain.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { startTestMachine, type TestMachineOptions } from './testMachine.ts';
 import { afterMergeReason } from './ledgerRules.ts';
@@ -4503,6 +4504,7 @@ test('w1600: a Live view marks its request; a bench lock holds its editor; stop_
   const ended: string[] = [];
   agents.liveHub = {
     tool: async () => 'Live view started (15 fps, 960 px, knobs on Ballista): streaming',
+    running: () => false,
     endFor: async (id: string) => (ended.push(id), { materials: ['Ballista'], fps: 15, width: 960 }),
   } as unknown as NonNullable<typeof agents.liveHub>;
   const a = await startedFor(env, 'w1');
@@ -4532,8 +4534,8 @@ test('w1600: a Live view marks its request; a bench lock holds its editor; stop_
   assert.match((await move()).text, /beast is on hold \(Ben testing\).*stays on pc\/alpha/);
   cfg.placement = {};
   const places = agents.places.bind(agents);
-  agents.places = () => places().map((p) => (p.id === 'beast' ? { ...p, live: p.maxAgents } : p));
-  assert.match((await move()).text, /beast has no room for game work now \(\d+ live agents of \d+\): \w+ stays on pc\/alpha/);
+  agents.places = () => places().map((p) => (p.id === 'beast' ? { ...p, live: p.maxAgents, midTurn: p.maxAgents } : p));
+  assert.match((await move()).text, /beast has no room for game work now \(\d+ agents mid-turn of \d+\): \w+ stays on pc\/alpha/);
   agents.places = places;
   assert.equal(store.work.get('w1')!.status, 'active');
   assert.deepEqual(ended, []);
@@ -4568,7 +4570,7 @@ test('w1606: a worker declares its build: the build computer is held, a worker t
   // pc is the build computer here (placement.build), and beast is full: the other worker there cannot move, so it is paused.
   cfg.placement = { build: ['pc'] };
   const places = agents.places.bind(agents);
-  agents.places = () => places().map((p) => (p.id === 'beast' ? { ...p, live: p.maxAgents } : p));
+  agents.places = () => places().map((p) => (p.id === 'beast' ? { ...p, live: p.maxAgents, midTurn: p.maxAgents } : p));
   putRequests(store, [{ id: 'w1', by: BEN, status: 'active' }, { id: 'w2', by: BEN, status: 'active' }]);
   const a = await startedFor(env, 'w1');
   const b = await startedFor(env, 'w2');
@@ -4664,7 +4666,7 @@ test('w1984: a worker stopped on purpose, or whose timed work is on another mach
 // tickets on the old machine are dropped. Its requests leave it, so only the move's mark keeps it in that machine's list.
 test("w1984: after a move, no ticket of that worker holds anyone back in the old machine's bench queue", async (t) => {
   const env = await setupOnMachine(t);
-  const { store, agents, machines, dispatcher, call } = env;
+  const { store, agents, machines, dispatcher, call, heard } = env;
   const beast = await startTestMachine(machines, { id: 'beast', sandboxes: ['slot1'] });
   env.closers.push(() => beast.stop());
   agentsRoom(agents, ['pc', 'beast']);
@@ -4673,6 +4675,8 @@ test("w1984: after a move, no ticket of that worker holds anyone back in the old
   assert.equal(agents.benchPriorities('pc')[a.id].away, undefined);
   const moved = await call(dispatcher().info, 'stop_agent', { session_id: a.id, move_to: 'beast', why: 'its timed run goes to beast' });
   assert.equal(moved.isError, false, moved.text);
+  // settle the move's own messages (the dispatcher's MOVED note) before the test's folders go
+  await until('the dispatcher is told', () => heard(dispatcher().info.id, '[ledger] MOVED (w1600)').length > 0);
   const why = `its worker ${a.id.slice(0, 8)} was moved to beast`;
   assert.deepEqual(agents.benchPriorities('pc')[a.id]?.away, { why }, 'every waiting ticket of it on pc is parked');
   assert.equal(agents.benchPriorities('beast')[a.id], undefined, 'nothing on the new machine');
@@ -4933,7 +4937,7 @@ test('w1872: w1789 as it happened: a timed leg and a Queued timed request alread
 // w1969: the fleet the ask decides on, with the test machine "pc" as BEAST (6 agent slots); m5 takes no timed runs.
 const askFleet = (): Computer[] => {
   const box = (id: string, maxAgents: number, platform: string, o: Partial<Computer> = {}): Computer => ({ id, online: true, live: 1, midTurn: 0, maxAgents, sandboxes: 1, maxSandboxes: 3, freeSandboxes: 1, memUsedBytes: 16 * 1024 ** 3, memTotalBytes: 64 * 1024 ** 3, editors: 0, maxEditors: 2, platform, ...o });
-  return [box('pc', 6, 'win32', { live: 6 }), box('lothlaptop', 1, 'win32', { live: 1, freeSandboxes: 0 }), box('m3', 2, 'darwin'), box('m5', 4, 'darwin', { noTimedRuns: M5_NO })];
+  return [box('pc', 6, 'win32', { live: 6 }), box('lothlaptop', 1, 'win32', { live: 1, midTurn: 1, freeSandboxes: 0 }), box('m3', 2, 'darwin'), box('m5', 4, 'darwin', { noTimedRuns: M5_NO })];
 };
 
 test('w1969: a worker on a big computer asks timed_place; its leg is filed Queued for the small computers, its request waits on the leg\'s report, the guard keeps its ticket off here, and the decision is in the log', async (t) => {
@@ -5254,6 +5258,95 @@ test('w1945: an older Queued pair run holds a computer’s last free sandbox fro
   store.work.get('w3')!.priority = 'urgent';
   const ok = await start();
   assert.equal(ok.isError, false, ok.text);
+});
+
+test('w1983: a worker its request was moved off has its work over, so the check-in it set before the move no longer pins its sandbox', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1789', title: 'Steam Input A/B' }]);
+  const a = await startedFor(env, 'w1789');
+  assert.equal(agents.workOver(a.info), undefined);
+  // 03:49Z on 2026-10-24: stop_agent move_to took w1789 off 2e29f29e (lothdesktop/slot5) for LothLaptop; its 04:14 check-in held slot5.
+  o.moveOff(store.work.get('w1789')!, a.id, 'moved: it moves to lothlaptop');
+  assert.ok(store.work.get('w1789')!.movedOff?.[a.id]);
+  assert.equal(agents.workOver(a.info), 'its request is with another worker now (w1789: moved off it, not placed yet)');
+  const wake = { wakeAt: new Date(Date.now() + 10 * 60_000).toISOString() };
+  assert.equal(releaseWhy(wake, Date.now()), undefined, 'a near check-in alone keeps a sandbox');
+  assert.match(releaseWhy(wake, Date.now(), agents.workOver(a.info)) ?? '', /is for work that is over: its request is with another worker now \(w1789: moved off it/);
+  // Its next worker takes it: still over for a.
+  const b = await startedFor(env, 'w1789');
+  assert.equal(agents.workOver(a.info), `its request is with another worker now (w1789: ${b.id})`);
+});
+
+test('w1983: a worker whose request another of its workers runs in another sandbox waits (Agents.waitOn), so its idle sandbox goes to the queue', async (t) => {
+  const env = await twoComputers(t);
+  const { store, agents, o } = env;
+  putRequests(store, [{ id: 'w1853', title: 'Nightly regressions' }, { id: 'w2' }]);
+  const a = await startedFor(env, 'w1853');
+  const b = await startedFor(env, 'w2', { sandbox: 'beast/slot1' });
+  // 03:58Z on 2026-10-24: w1853's timing A/B went to a worker on m3 (aa20f433); 33bc6316 sat idle in lothdesktop/slot3.
+  // The stored sessions, which the checks read, with their status set: not left to when the fake agents' turns end.
+  const sa = () => store.sessions.get(a.id)!;
+  const sb = () => store.sessions.get(b.id)!;
+  o.linkWorker('w1853', sb(), `sent to worker ${b.id}`);
+  // A later link, by the clock: two in one millisecond tie on which is the latest worker (isWith).
+  await new Promise((r) => setTimeout(r, 5));
+  o.linkWorker('w1853', sa(), `sent to worker ${a.id}, already on it`);
+  sa().status = 'idle';
+  sb().status = 'idle';
+  const fresh = () => ((agents as unknown as { waitLive?: unknown }).waitLive = undefined);
+  fresh();
+  assert.equal(agents.waitOn(sa()), undefined, 'nobody works on it elsewhere: its work is its own');
+  sb().status = 'running';
+  fresh();
+  assert.equal(agents.waitOn(sa()), `it waits on w1853: its worker ${b.id} works on it in beast/slot1`);
+});
+
+test('w1983: message_agent never starts a request\'s new session in a sandbox that is not the old worker\'s any more', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, dispatcher, call } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1', title: 'Fix the belt splitter' }, { id: 'w2', title: 'Rewrite the tutorial text' }, { id: 'w3', title: 'Another thing' }]);
+  const old = await startedFor(env, 'w1');
+  const send = () => call(dispatcher().info, 'message_agent', { session_id: old.id, text: 'Now do w2.', work_id: 'w2', title: 'Tutorial text', session: 'new', session_reason: 'unrelated' });
+  // A worker that released its sandbox while it waited (w640) has none to start a session in.
+  old.info.placeReleased = { at: '2026-10-24T04:00:00.000Z', sandbox: 'alpha', branch: 'w1-splitter', why: 'it waits on CI' };
+  const released = await send();
+  assert.equal(released.isError, true);
+  assert.match(released.text, new RegExp(`pc/alpha is not ${old.id}'s any more \\(it released it at 04:00 UTC while it waited\\): a new session for w2 never goes beside other work\\. start_agent with work_id "w2" in a FREE sandbox on a computer with room \\(list_sandboxes\\), switched to its branch w1-splitter\\.`));
+  assert.deepEqual(store.work.get('w2')!.sessionIds, []);
+  delete old.info.placeReleased;
+  // 04:15Z on 2026-10-24: w1440 sent to its stopped worker 9c38a500 started feed4032 in beast/slot1, beside c7bfc9f0 (w1829).
+  const other = await startedFor(env, 'w3');
+  old.info.status = 'stopped';
+  const beside = await send();
+  assert.equal(beside.isError, true);
+  assert.match(beside.text, new RegExp(`pc/alpha is not ${old.id}'s any more \\(agent ${other.id} is there\\)`));
+  assert.deepEqual(store.work.get('w2')!.sessionIds, []);
+});
+
+test('w1983: a pair hold is bounded: work pinned to that computer goes, and the hold lapses PAIR_HOLD_MS after its room began while the pair still cannot start', async (t) => {
+  const env = await twoComputers(t);
+  const { store, agents, o } = env;
+  // Only pc has room: the pair is a computer short (lothlaptop/slot1 on 2026-10-24, held for w1970 and then w1981 for an hour).
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w2', by: BEN, status: 'queued', queuedFor: { at: T0 }, pair: { legs: 2 } }, { id: 'w3', by: BEN }]);
+  const w3 = store.work.get('w3')!;
+  assert.match(agents.pairHoldProblem('pc', w3) ?? '', /^pc's last free sandbox is held for w2 .*\(w1945\): .*; the hold lapses at \d\d:\d\d UTC \(w1983\)\. Start w3 on another computer/);
+  // Work whose needs name pc alone (lothsahn's "Move one timed run to LothLaptop", w1789) is not sent elsewhere.
+  w3.queuedFor = { at: T0, needs: ['PC'] };
+  assert.equal(agents.pairHoldProblem('pc', w3), undefined);
+  w3.queuedFor = { at: T0, needs: ['pc', 'beast'] };
+  assert.ok(agents.pairHoldProblem('pc', w3), 'work that may also go elsewhere is still held off');
+  delete w3.queuedFor;
+  // PAIR_HOLD_MS after pc's room began, with the pair still short: the hold lapses and single work takes the sandbox.
+  const later = Date.now() + PAIR_HOLD_MS + 60_000;
+  (o as unknown as { now: () => Date }).now = () => new Date(later);
+  assert.equal(agents.pairHoldProblem('pc', w3), undefined);
+  // A pair that can start now is held for whatever the time: start its legs first.
+  agentsRoom(agents, ['pc', 'beast']);
+  assert.match(agents.pairHoldProblem('pc', w3) ?? '', /it can start now, start its legs first/);
 });
 
 test('w1945: the WRONG flag and decide_work queue count a pair as room only with a computer per leg', async (t) => {

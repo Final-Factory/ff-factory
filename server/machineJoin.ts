@@ -239,8 +239,8 @@ export class JoinCodes {
 
 /** What a join needs of the machine records (MachineManager, a fake in tests). */
 export interface JoinRecords {
-  /** A machine's record: whether it is a worker root install already, or a record waiting for its installer. */
-  get(id: string): { root?: string; awaitingInstall?: string } | undefined;
+  /** A machine's record: whether it is a worker root install already, or a record waiting for its installer (play-only: w1993). */
+  get(id: string): { root?: string; awaitingInstall?: string; playOnly?: string } | undefined;
 }
 
 /**

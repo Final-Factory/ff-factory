@@ -335,21 +335,39 @@ interface Ran {
 }
 
 /** Run a program, its output captured; `live` streams its stderr (git's own progress) instead. */
-export function exec(cmd: string, args: string[], o: { cwd?: string; env?: NodeJS.ProcessEnv; input?: string; live?: boolean; timeoutMs?: number } = {}): Promise<Ran> {
+export function exec(cmd: string, args: string[], o: { cwd?: string; env?: NodeJS.ProcessEnv; input?: string; live?: boolean; timeoutMs?: number; onLine?: (line: string) => void } = {}): Promise<Ran> {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, { cwd: o.cwd, env: o.env ?? process.env, windowsHide: true, stdio: ['pipe', 'pipe', o.live ? 'inherit' : 'pipe'] });
     let stdout = '';
     let stderr = '';
-    const timer = o.timeoutMs ? setTimeout(() => child.kill(), o.timeoutMs) : undefined;
-    child.stdout?.on('data', (d) => (stdout += d));
-    child.stderr?.on('data', (d) => (stderr += d));
-    child.on('error', (e) => {
+    let settled = false;
+    const settle = (r: Ran) => {
+      if (settled) return;
+      settled = true;
       if (timer) clearTimeout(timer);
-      resolve({ code: -1, stdout, stderr: stderr || e.message });
+      resolve(r);
+    };
+    // Killed at its time limit, it is answered within 5 s even when a process it started still holds its output open, which
+    // keeps 'close' from ever coming (w1993: a PowerShell job inherits the pipe).
+    const timer = o.timeoutMs
+      ? setTimeout(() => {
+          child.kill();
+          setTimeout(() => settle({ code: -1, stdout, stderr: `${stderr}\n(stopped after ${Math.round(o.timeoutMs! / 1000)} s)` }), 5000).unref();
+        }, o.timeoutMs)
+      : undefined;
+    let partial = '';
+    child.stdout?.on('data', (d) => {
+      stdout += d;
+      if (!o.onLine) return;
+      const lines = (partial + String(d)).split(/\r?\n/);
+      partial = lines.pop() ?? '';
+      for (const line of lines) o.onLine(line);
     });
+    child.stderr?.on('data', (d) => (stderr += d));
+    child.on('error', (e) => settle({ code: -1, stdout, stderr: stderr || e.message }));
     child.on('close', (code) => {
-      if (timer) clearTimeout(timer);
-      resolve({ code: code ?? -1, stdout, stderr });
+      if (partial && o.onLine) o.onLine(partial);
+      settle({ code: code ?? -1, stdout, stderr });
     });
     // A program that exits without reading its input closes the pipe first (EPIPE): its exit code says how it went.
     child.stdin?.on('error', () => undefined);
@@ -968,11 +986,26 @@ async function devDriveEnsure(host: string, args: string[], action = 'ensure', s
   const psArgs = devDrivePsArgs(['-Action', action, ...args]);
   let text: string;
   if (elevated()) {
-    const r = await exec('powershell.exe', psArgs, { timeoutMs: 30 * 60_000 });
+    // Each line as it comes, and a line a minute while none does (w1993: desktop-coosego's install sat silent here, its
+    // output held until the script ended); devdrive.ps1 stops a storage step that overruns its own limit.
+    const t0 = Date.now();
+    let lastLine = t0;
+    const beat = setInterval(() => {
+      if (Date.now() - lastLine >= 60_000) say(`  (Dev Drive: still working, ${Math.round((Date.now() - t0) / 60_000)} min in; it is stopped at 30)`);
+    }, 60_000);
+    const r = await exec('powershell.exe', psArgs, {
+      timeoutMs: 30 * 60_000,
+      onLine: (line) => {
+        lastLine = Date.now();
+        if (line.trim() && !line.startsWith('FFW-DEVDRIVE')) say(`  ${line.trim()}`);
+      },
+    }).finally(() => clearInterval(beat));
     text = r.stdout;
     if (r.code !== 0) throw new Error(`the Dev Drive could not be set up: ${(text.split('\n').find((x) => x.startsWith('FAILED:')) ?? r.stderr ?? text).trim().slice(-500)}`);
-  } else text = await elevatedSteps([{ kind: 'dev-drive', args: psArgs }], promptTimeoutMs);
-  for (const line of text.split('\n')) if (line && !line.startsWith('FFW-DEVDRIVE')) say(`  ${line.trim()}`);
+  } else {
+    text = await elevatedSteps([{ kind: 'dev-drive', args: psArgs }], promptTimeoutMs);
+    for (const line of text.split('\n')) if (line.trim() && !line.startsWith('FFW-DEVDRIVE')) say(`  ${line.trim()}`);
+  }
   const out = parseDevDriveOutput(text);
   if (out?.letter) return out as DevDriveState;
   if (action !== 'ensure') return (out ?? {}) as DevDriveState;
