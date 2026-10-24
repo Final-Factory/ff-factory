@@ -13,7 +13,7 @@ import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
 import { dryRun, dryRunStartRefusal } from './dryRun.ts';
 import { DANGEROUS_REMOVAL, tempDeletesWithin, tempOnlyDelete } from './tempDelete.ts';
 import { isRealModelId } from '../shared/models.ts';
-import { ContextMeter, IMAGE_CHARS, MIN_BASE, type Cumulative, type MeterState, type TurnUsage } from '../shared/spend.ts';
+import { ContextMeter, IMAGE_CHARS, MIN_BASE, carriedTotals, type Cumulative, type MeterState, type TurnUsage } from '../shared/spend.ts';
 import type { MeterStates } from './meterStates.ts';
 import { CliTranscriptTail, cliTranscriptPath, rebuildMeter } from './cliTranscript.ts';
 
@@ -243,6 +243,29 @@ export interface CompactEnd {
   auto: boolean;
 }
 
+/**
+ * The per-turn budget of the coordinators (w2007, lothsahn, 2026-10-24: "Yes, add a per-turn budget cap for orchestrators and
+ * the dispatcher to w2007"): the dispatcher and each person's orchestrator, not workers, the ops worker or standing agents.
+ * A turn that passes either cap is interrupted once (Session.stopOverBudget) and 'turnBudget' tells Orchestrators.
+ *
+ * Sizing (measured, portal_logs coordinator_context, the last 8 compaction cycles of the dispatcher, Ben's and lothsahn's
+ * orchestrators, 2026-10-24 00:03Z-08:11Z): 637 turns, 1,079 model calls, 1.7 calls a turn; the largest turn in any cycle made
+ * at most 30 calls (the cycle's calls minus its other turns'); the context peaked at 112k tokens, so the largest turn read at
+ * most ~3.4M tokens. The caps are 5x and 7x those bounds. There is no cap on a reply's output tokens (lothsahn did not choose one).
+ * A call counts once however many content blocks arrive for it, subagents' calls too; "read" is input + cache read + cache creation.
+ */
+export const COORD_TURN_MAX_CALLS = 150;
+export const COORD_TURN_MAX_TOKENS_READ = 25_000_000;
+
+/** What 'turnBudget' carries (w2007): the turn's counts when it passed `cap`, when it opened, and the message that started it. */
+export interface TurnBudgetHit {
+  calls: number;
+  tokensRead: number;
+  cap: 'calls' | 'tokens';
+  since?: string;
+  starter?: { from: 'human' | 'orchestrator' | 'system'; text: string };
+}
+
 function textOf(content: unknown): string {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) {
@@ -288,6 +311,13 @@ export function compactCommand(text: string): string | undefined {
   return m ? (m[1] ?? '').replace(/\s+/g, ' ').trim() : undefined;
 }
 
+/** The usage of one model call, as the SDK's assistant messages carry it. */
+interface CallUsage {
+  input_tokens?: number;
+  cache_read_input_tokens?: number | null;
+  cache_creation_input_tokens?: number | null;
+}
+
 const tokens = (n: number) => `${n.toLocaleString('en-US')} tokens`;
 
 /**
@@ -316,8 +346,13 @@ export function compactedLine(before: number, after: { total: number; max?: numb
  * restart counted the CLI's whole running total again (about $200 a time on each orchestrator and the dispatcher).
  * A session older than sdkCostUsd keeps the rule before it.
  */
-export function firstResultBase(costUsd: number, sdkCostUsd: number | undefined, total: number): { base: number; restarted: boolean } {
-  if (sdkCostUsd !== undefined) return total + 1e-9 >= sdkCostUsd ? { base: costUsd - sdkCostUsd, restarted: false } : { base: costUsd, restarted: sdkCostUsd > 0 };
+export function firstResultBase(costUsd: number, sdkCostUsd: number | undefined, total: number, carried = false): { base: number; restarted: boolean } {
+  if (sdkCostUsd !== undefined) {
+    if (total + 1e-9 >= sdkCostUsd) return { base: costUsd - sdkCostUsd, restarted: false };
+    // Below it but the CLI's older saved total, not this turn alone (w2007, carriedTotals): the session's figure stays where it was.
+    if (carried) return { base: costUsd - total, restarted: false };
+    return { base: costUsd, restarted: sdkCostUsd > 0 };
+  }
   return total >= costUsd ? { base: 0, restarted: false } : { base: costUsd, restarted: costUsd > 0 };
 }
 
@@ -380,6 +415,11 @@ export class AgentSession implements SessionHandle {
   private compactTurn?: CompactionTrigger;
   /** The session's spend when its current turn opened (w535): what the turn's cost is measured from. */
   private costAtTurnOpen = 0;
+  /** A coordinator's model calls in the current turn, by message id (a call's content blocks arrive as separate messages), and what they read (w2007). */
+  private readonly turnCalls = new Set<string>();
+  private turnTokensRead = 0;
+  /** The budget stopped this turn already: once per turn, whatever the stream still delivers before the CLI's result. */
+  private turnOverBudget = false;
   /** The uuids of /compact messages not answered yet: their results are no turn a person reads. */
   private readonly compactUuids = new Set<string>();
   /** Where this session's context tokens go (w859, shared/spend.ts): read per turn into the result event's usage. */
@@ -467,7 +507,10 @@ export class AgentSession implements SessionHandle {
     const opens = !this.info.turnOpenSince;
     // A message after a compaction: the turn that ends next is this message's, not the compaction's (w535).
     this.compactTurn = undefined;
-    if (opens) this.costAtTurnOpen = this.info.costUsd;
+    if (opens) {
+      this.costAtTurnOpen = this.info.costUsd;
+      this.resetTurnBudget();
+    }
     // w1949: a refused editor start (SessionInfo.editorRefused) is the wait of the stop it ended; a new turn tries again.
     this.update({ status: 'running', statusDetail: undefined, ...(opens ? { turnOpenSince: new Date().toISOString(), editorRefused: undefined } : {}) });
     if (opens) this.store.flush?.();
@@ -700,6 +743,8 @@ export class AgentSession implements SessionHandle {
             if (mid !== this.meterSavedAt) this.saveMeter(mid);
           }
         }
+        // A coordinator's turn is counted by call, subagents' too (w2007); the stop comes once this message is recorded.
+        const over = this.info.kind === 'orchestrator' ? this.countCall((m.message as { id?: string }).id, (m.message as { usage?: CallUsage }).usage) : undefined;
         for (const b of m.message.content) {
           if (!sub) {
             if (b.type === 'text') this.meter.addAssistant(b.text.length);
@@ -711,6 +756,7 @@ export class AgentSession implements SessionHandle {
           else if (b.type === 'tool_use') this.store.append(id, { kind: 'tool_use', toolUseId: b.id, name: b.name, input: b.input, parentToolUseId: sub });
         }
         if (m.error) this.store.append(id, { kind: 'error', text: `assistant error: ${m.error}` });
+        if (over) this.stopOverBudget(over);
         return;
       }
       case 'user': {
@@ -735,7 +781,7 @@ export class AgentSession implements SessionHandle {
         // A process's first result: did the CLI continue from its saved total, or begin again from zero (w859, w1161)?
         let restarted = false;
         if (this.firstResult) {
-          const first = firstResultBase(this.info.costUsd, this.info.sdkCostUsd, total);
+          const first = firstResultBase(this.info.costUsd, this.info.sdkCostUsd, total, this.carriedFirst(m, total));
           this.costBase = first.base;
           restarted = first.restarted;
         }
@@ -754,6 +800,8 @@ export class AgentSession implements SessionHandle {
           return;
         }
         for (const u of answered) this.compactUuids.delete(u);
+        // A message queued behind this one is a turn of its own in the same CLI turn (w2007): its budget starts here.
+        this.resetTurnBudget();
         const text = m.subtype === 'success' ? m.result : `stopped: ${m.subtype}`;
         for (const u of answered) this.outstanding.delete(u);
         // The CLI goes on with a message that waited behind the one that started this turn: the next turn is that
@@ -790,11 +838,53 @@ export class AgentSession implements SessionHandle {
     }
   }
 
+  /** A first result whose totals are the CLI's older saved ones, the whole running total (w2007): its read tokens dwarf the turn's own. */
+  private carriedFirst(m: Extract<SDKMessage, { type: 'result' }>, total: number): boolean {
+    const u = this.turnUsage(m, false);
+    if (!u.cum || !u.main) return false;
+    const read = Object.values(u.cum).reduce((x, c) => x + c.in + c.cr + c.cw, 0);
+    return carriedTotals(read, u.main.in + u.main.cr + u.main.cw, total, this.info.sdkCostUsd ?? 0);
+  }
+
+  /** A new turn's budget starts from nothing (w2007): when a message opens it, and at each result that ends one. */
+  private resetTurnBudget() {
+    this.turnCalls.clear();
+    this.turnTokensRead = 0;
+    this.turnOverBudget = false;
+  }
+
+  /**
+   * Count one model call of a coordinator's turn (w2007); the cap it passed, when this call is the one that passes it, once
+   * per turn. A message with an id counted already (another content block of the same call) adds nothing.
+   */
+  private countCall(mid: string | undefined, u: CallUsage | undefined): 'calls' | 'tokens' | undefined {
+    if (!mid || this.turnOverBudget || this.turnCalls.has(mid)) return undefined;
+    this.turnCalls.add(mid);
+    this.turnTokensRead += (u?.input_tokens ?? 0) + (u?.cache_read_input_tokens ?? 0) + (u?.cache_creation_input_tokens ?? 0);
+    return this.turnCalls.size > COORD_TURN_MAX_CALLS ? 'calls' : this.turnTokensRead > COORD_TURN_MAX_TOKENS_READ ? 'tokens' : undefined;
+  }
+
+  /**
+   * The turn passed its budget (w2007): say so in the transcript, tell Orchestrators ('turnBudget', which files the request
+   * and notifies the person), and stop the turn with the interrupt a person's stop button uses. That interrupt marks the
+   * session stopped on purpose, so no restart resumes it and nothing re-sends the message; only a new message starts a turn.
+   */
+  private stopOverBudget(cap: 'calls' | 'tokens') {
+    this.turnOverBudget = true;
+    const calls = this.turnCalls.size;
+    const tokensRead = this.turnTokensRead;
+    this.store.append(this.info.id, { kind: 'error', text: `FF Factory stopped this turn: it made ${calls} model calls and read ${tokens(tokensRead)}, over the per-turn budget (${COORD_TURN_MAX_CALLS} calls / ${COORD_TURN_MAX_TOKENS_READ / 1_000_000}M tokens, w2007).` });
+    // The message that started the turn is still outstanding: interrupt() below clears it after this handler has run.
+    const first = this.turnStarter ? this.outstanding.get(this.turnStarter.uuid) : undefined;
+    this.events.emit('turnBudget', this, { calls, tokensRead, cap, since: this.info.turnOpenSince, ...(first ? { starter: { from: first.from, text: first.text } } : {}) } satisfies TurnBudgetHit);
+    this.interrupt().catch((e) => console.warn(`sessions: the budget stop of ${this.info.id} failed: ${(e as Error).message}`));
+  }
+
   /**
    * What this turn cost, from Claude Code's own numbers (w859): the SDK's cumulative per-model totals at its end (the portal
    * takes the difference against the last it saw), the main loop's own usage for this turn, and the context meter's reading.
    */
-  private turnUsage(m: Extract<SDKMessage, { type: 'result' }>): TurnUsage {
+  private turnUsage(m: Extract<SDKMessage, { type: 'result' }>, drain = true): TurnUsage {
     const cum: Cumulative = {};
     for (const [model, u] of Object.entries(m.modelUsage ?? {})) {
       if (!u) continue;
@@ -804,7 +894,7 @@ export class AgentSession implements SessionHandle {
     return {
       ...(Object.keys(cum).length ? { cum } : {}),
       ...(u ? { main: { in: u.input_tokens ?? 0, out: u.output_tokens ?? 0, cr: u.cache_read_input_tokens ?? 0, cw: u.cache_creation_input_tokens ?? 0 } } : {}),
-      meter: this.drainMeter(),
+      ...(drain ? { meter: this.drainMeter() } : {}),
     };
   }
 
