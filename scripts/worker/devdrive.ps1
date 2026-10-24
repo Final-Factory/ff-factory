@@ -33,6 +33,8 @@ param(
   [string]$DaemonConfig = ''
 )
 $ErrorActionPreference = 'Stop'
+# No progress bars: nobody sees them in the installer's hidden window (w1993).
+$ProgressPreference = 'SilentlyContinue'
 . (Join-Path $PSScriptRoot '..\privileged\devdrive-lib.ps1')
 
 $Root = [IO.Path]::GetFullPath($Root).TrimEnd('\')
@@ -84,19 +86,58 @@ function Write-State([string]$l, [int]$gb, [bool]$created) {
 
 function Test-Admin { ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) }
 
-# GPT, one data partition on the letter, formatted as a Dev Drive (ReFS). A Windows that has no Dev Drive (before 11 22H2)
-# gets plain ReFS, which still block-clones, and the caller is told (devDrive false).
-function Initialize-DevDriveDisk($disk, [string]$l) {
-  if ($disk.PartitionStyle -eq 'RAW') { Initialize-Disk -Number $disk.Number -PartitionStyle GPT }
-  New-Partition -DiskNumber $disk.Number -UseMaximumSize -DriveLetter $l | Out-Null
+# One storage step in a job of its own, with a time limit (w1993): on desktop-coosego the install sat silent for minutes after
+# the drive got its letter, one core busy and the disk idle, and nothing said which call it was in. Each step says what it
+# starts, says it is still on it every 30 s, and one that does not end in time is stopped with its name, never left to hold
+# the installer for its whole 30 minutes.
+# Straight to stdout, not the function's output: a step's caller keeps or drops what the step returns, never these lines.
+function Tell([string]$line) { [Console]::Out.WriteLine($line); Log $line }
+function Invoke-Step([string]$what, [int]$seconds, [scriptblock]$block, [object[]]$argList = @()) {
+  Tell "$what..."
+  $t0 = Get-Date
+  $job = Start-Job -ScriptBlock $block -ArgumentList $argList
   try {
-    Format-Volume -DriveLetter $l -DevDrive -FileSystem ReFS -NewFileSystemLabel 'ffw' -Confirm:$false | Out-Null
-    Say "formatted ${l}: as a ReFS Dev Drive"
-  } catch {
-    Say "Format-Volume -DevDrive failed ($($_.Exception.Message)); trying plain ReFS"
-    Format-Volume -DriveLetter $l -FileSystem ReFS -NewFileSystemLabel 'ffw' -Confirm:$false | Out-Null
-    Say "formatted ${l}: as plain ReFS (this Windows has no Dev Drive)"
+    while (-not (Wait-Job -Job $job -Timeout 30)) {
+      $s = [int]((Get-Date) - $t0).TotalSeconds
+      if ($s -ge $seconds) { throw "$what did not finish in $seconds s, so it was stopped" }
+      Tell "  still $what ($s s)"
+    }
+    $out = Receive-Job -Job $job -ErrorAction Stop
+    Log ("{0}: done in {1:N0} s" -f $what, ((Get-Date) - $t0).TotalSeconds)
+    return $out
+  } finally { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue }
+}
+
+# GPT, one data partition, formatted as a Dev Drive (ReFS), then given the letter. A Windows that has no Dev Drive (before
+# 11 22H2) gets plain ReFS, which still block-clones, and the caller is told (devDrive false).
+function Initialize-DevDriveDisk($disk, [string]$l) {
+  $n = [int]$disk.Number
+  if ($disk.PartitionStyle -eq 'RAW') { Invoke-Step "initialising disk $n (GPT)" 120 { param($n) Initialize-Disk -Number $n -PartitionStyle GPT -ErrorAction Stop } @($n) | Out-Null }
+  # No letter until it is formatted: a blank volume with a letter makes Explorer ask "You need to format the disk" (w1993).
+  $part = Invoke-Step "making its partition" 120 { param($n) (New-Partition -DiskNumber $n -UseMaximumSize -AssignDriveLetter:$false -ErrorAction Stop).PartitionNumber } @($n)
+  Format-DataPartition $n ([int]($part | Select-Object -Last 1)) $l
+}
+
+function Format-DataPartition([int]$n, [int]$part, [string]$l) {
+  $fmt = {
+    param($n, $p, $dev)
+    $a = @{ FileSystem = 'ReFS'; NewFileSystemLabel = 'ffw'; Confirm = $false; ErrorAction = 'Stop' }
+    if ($dev) { $a.DevDrive = $true }
+    Get-Partition -DiskNumber $n -PartitionNumber $p -ErrorAction Stop | Format-Volume @a | Out-Null
   }
+  try {
+    Invoke-Step "formatting it as a ReFS Dev Drive" 600 $fmt @($n, $part, $true) | Out-Null
+    $how = 'a ReFS Dev Drive'
+  } catch {
+    if ($_.Exception.Message -match 'did not finish') { throw }
+    Say "Format-Volume -DevDrive failed ($($_.Exception.Message)); trying plain ReFS"
+    Invoke-Step "formatting it as plain ReFS" 600 $fmt @($n, $part, $false) | Out-Null
+    $how = 'plain ReFS (this Windows has no Dev Drive)'
+  }
+  if ("$((Get-Partition -DiskNumber $n -PartitionNumber $part).DriveLetter)".ToUpper() -ne $l.ToUpper()) {
+    Invoke-Step "giving it the letter ${l}:" 120 { param($n, $p, $l) Set-Partition -DiskNumber $n -PartitionNumber $p -NewDriveLetter $l -ErrorAction Stop } @($n, $part, $l) | Out-Null
+  }
+  Say "formatted ${l}: as $how"
 }
 
 function Register-Tasks([string]$l) {
@@ -136,7 +177,7 @@ try {
         $created = $true
         Say "created $Vhdx ($MaxGB GB maximum, dynamically expanding)"
         try {
-          Mount-DiskImage -ImagePath $Vhdx | Out-Null
+          Invoke-Step "attaching it" 120 { param($v) Mount-DiskImage -ImagePath $v -ErrorAction Stop | Out-Null } @($Vhdx) | Out-Null
           $disk = Get-DiskImage -ImagePath $Vhdx | Get-Disk
           Initialize-DevDriveDisk $disk $Letter
         } catch {
@@ -164,6 +205,17 @@ try {
           Say "$Vhdx has no partition (an earlier run was cut off); finishing it as ${Letter}:"
           if ($MaxGB -lt 50 -and $st) { $MaxGB = [int]$st.maxGB }
           Initialize-DevDriveDisk $disk $Letter
+        } elseif (-not $st -and @($data[0] | Get-Volume -ErrorAction SilentlyContinue | Where-Object { -not $_.FileSystem -or $_.FileSystem -eq 'RAW' }).Count) {
+          # A partition with no file system and no devdrive.json (written only once a run finished): an earlier run cut off while
+          # formatting (w1993, desktop-coosego), nothing on it to lose. Format it, on the letter it has or the next free one.
+          $own = "$($data[0].DriveLetter)".Trim([char]0).ToUpper()
+          if ($own -match '^[A-Z]$') { $script:Letter = $own } else {
+            $pick = Resolve-DriveLetter -Prefer $Letter -Skip $Skip
+            if (-not $pick.Letter) { throw "no free drive letter from V: down to A: ($(Format-LetterRejections $pick.Rejected))" }
+            $script:Letter = $pick.Letter
+          }
+          Say "$Vhdx has a partition with no file system (an earlier run was cut off while formatting); formatting it as ${Letter}:"
+          Format-DataPartition ([int]$disk.Number) ([int]$data[0].PartitionNumber) $Letter
         } elseif ((Get-OwnLetter) -ne $Letter.ToUpper()) {
           Mount-DevDrive
           if ($LetterChangedFrom) { Say "the letter changed from ${LetterChangedFrom}: to ${Letter}: (taken): $(Update-LetterDependents $LetterChangedFrom $Letter)" }
@@ -172,6 +224,7 @@ try {
         Say "reusing $Vhdx at ${Letter}:"
       }
       if ($UserSid -match '^S-1-') {
+        Say "giving $UserSid full control of ${Letter}:\..."
         icacls "${Letter}:\" /grant "*${UserSid}:(OI)(CI)F" /Q | Out-Null
         if ($LASTEXITCODE -ne 0) { throw "icacls ${Letter}:\ failed ($LASTEXITCODE)" }
         Say "gave $UserSid full control of ${Letter}:\"

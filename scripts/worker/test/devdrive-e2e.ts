@@ -107,6 +107,7 @@ try {
   console.log(first.text.split('\n').filter((l) => !l.startsWith('FFW-DEVDRIVE')).join('\n'));
   const j1 = first.json ?? {};
   check(first.code === 0 && !!first.json, 'the first run succeeds', `exit ${first.code}`);
+  check(/^attaching it\.\.\.$/m.test(first.text) && /^formatting it as a ReFS Dev Drive\.\.\.$/m.test(first.text), 'it says each storage step before it starts (w1993)');
   check(fs.existsSync(vhdx), 'the VHDX is in the root');
   check(j1.created === true, 'it says it created the drive');
   check(j1.letter === firstFree(taken1), 'it took the first free letter from V: down', `letter ${j1.letter}, expected ${firstFree(taken1)}, in use ${taken1.join('')}`);
@@ -203,6 +204,22 @@ try {
   const rem = run(['-Action', 'remove', '-Root', root]);
   check(rem.code === 0 && !fs.existsSync(vhdx) && !attached(), 'remove detaches and deletes the VHDX');
   check(ps(`@(Get-ScheduledTask -TaskName 'ffsb-helper-*' -ErrorAction SilentlyContinue).Count`).stdout.trim() === '0', 'and takes the tasks away');
+
+  // 6. A run cut off while formatting (w1993, desktop-coosego): the VHDX is there, attached, with a lettered partition that has
+  //    no file system, and no devdrive.json. The next run formats that partition instead of reusing a drive it cannot use.
+  const dp = path.join(scratch, 'half.txt');
+  fs.writeFileSync(dp, `create vdisk file="${vhdx}" maximum=${64 * 1024} type=expandable\r\n`);
+  spawnSync('diskpart', ['/s', dp], { encoding: 'utf8' });
+  const half = ps(`Mount-DiskImage -ImagePath '${vhdx}' | Out-Null; $d = Get-DiskImage -ImagePath '${vhdx}' | Get-Disk; Initialize-Disk -Number $d.Number -PartitionStyle GPT; (New-Partition -DiskNumber $d.Number -UseMaximumSize -AssignDriveLetter).DriveLetter`);
+  const halfLetter = half.stdout.trim();
+  check(/^[A-Z]$/.test(halfLetter) && !fs.existsSync(path.join(root, 'devdrive.json')), 'a half-made drive: a lettered partition with no file system', `${halfLetter} ${half.stderr.trim()}`);
+  currentLetter = halfLetter;
+  const finish = run(['-Action', 'ensure', '-Root', root, '-MaxGB', '64', '-NoTasks']);
+  console.log(finish.text.split('\n').filter((l) => !l.startsWith('FFW-DEVDRIVE')).join('\n'));
+  check(finish.code === 0 && /refs/i.test(String(finish.json?.fileSystem)) && finish.json?.letter === halfLetter, 'the next run formats it on its letter', `exit ${finish.code}, ${finish.json?.fileSystem} at ${finish.json?.letter}`);
+  check(/no file system/.test(finish.text), 'and says why');
+  const rem2 = run(['-Action', 'remove', '-Root', root]);
+  check(rem2.code === 0 && !fs.existsSync(vhdx), 'remove takes it away too');
 } catch (e) {
   console.log(`FAIL: ${(e as Error).message}`);
   failed++;
