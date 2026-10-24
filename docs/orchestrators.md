@@ -2233,6 +2233,24 @@ page clears. Never answer it for them. …
   person already answered (`asksSame`: the same words, or two of the same answers) are refused once with the person's words
   (`Orchestrators.repeatRefusal`); the same call again goes through, for a new question that only looks the same. Tests:
   `server/orchestrators.test.ts` ("w1812"), `server/workState.test.ts` ("w1812").
+- **A new question an earlier decision settles is held** (w2085; Ben, 2026-10-24: "i already answered this. you keep asking
+  me questions i already answered"). The w1812 check holds the SAME question; on w1958 Ben decided the low-ore wording at
+  04:59 and a fresh session asked at 16:32 whether game PR #2395, which only added it, could merge as it looked. Pure parts
+  in `server/priorDecisions.ts`:
+  - **The card carries their notes.** Every `[needs you]` keeps the asked person's notes on the request, the requests it
+    names, the ones that name it and its worker's other requests (`prior`, the newest 8, each cut to 900 characters), and
+    flags `POSSIBLY DECIDED` the ones that name one of its pull requests or threads, a hyphenated term of it ("low-ore"), or
+    two of its longer words (`possiblyDecided`). The orchestrator reads the flagged note first; one that decides it is
+    recorded with `update_work`, quoting the person's words with their time, instead of asking.
+  - **waiting_on_person refuses a look or merge OK the person decided.** A question with merge, OK, approve, ship or "as it
+    looks" in it, on a request with a pull request (named with its repo, or linked and open; at most three), reads each one's
+    diff (`gh pr diff`, `Agents.prDiff`, under the request's person's token). When 80% of the content words of a quote of
+    4 or more in their note are in the added lines, it is refused with that note: quote it in the PR and merge on green. Its
+    `decided_override` (what the note leaves open) lets it through, logged. A diff that cannot be read refuses nothing.
+  - **The fresh session after a merge** (w2043) is told its people's notes (they come whole with the request as filed) are
+    decisions, and gets theirs on its related requests.
+  Tests: `server/priorDecisions.test.ts`, `server/orchestrators.test.ts` and `server/freshAfterMerge.test.ts` ("w2085"),
+  with w1958's replay against PR #2395's diff (`server/fixtures/w2085-pr2395.diff`).
 - **The digest.** 3 minutes after the portal starts (`NEEDS_YOU_DIGEST_MS`, once the machines' workers have reported in),
   every wait on a person the ledger shows whose key was never sent goes as one `[needs you] digest` per person, and is
   recorded as sent. The first start after w1378 ships sends the waits already open; later starts find none unless something

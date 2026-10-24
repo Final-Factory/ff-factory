@@ -788,6 +788,14 @@ setInterval(() => unitWatchdog.tick(), 15_000);
 setTimeout(() => unitWatchdog.tick(), 5500);
 agents.providers = providers;
 agents.max = max;
+// waiting_on_person's decided check reads the pull request's diff (w2085), under the request's person's GitHub token.
+agents.prDiff = async (ref, w) => {
+  const m = /^([\w.-]+\/[\w.-]+)#(\d+)$/.exec(ref);
+  if (!m) throw new Error(`"${ref}" is not owner/repo#123`);
+  const r = await ghRunner(githubPersonOf(tokenPersonForWork(cfg, w), w, identity.systemPayer().userId), `the diff of ${ref}`)('gh', ['pr', 'diff', m[2], '-R', m[1]], { timeoutMs: 30_000 });
+  if (r.code !== 0) throw new Error(`gh pr diff ${ref}: exit ${r.code}`);
+  return r.stdout;
+};
 // The intake (docs/intake.md): Discord and FFBox into the work ledger. Everything in it is off unless config intake
 // switches it on; the hooks below only record what already arrives while it is off.
 const intake = new IntakeManager({

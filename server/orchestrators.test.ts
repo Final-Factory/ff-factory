@@ -28,6 +28,7 @@ import { benchLockIn, type Requester, type SessionInfo, type TranscriptEvent, ty
 import { LIVE_HOLD_MS, releaseWhy } from './placeAgain.ts';
 import { MOVE_AFTER_MS } from './resumeMove.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
+import { PR2395_DIFF, W1958_0459, W1958_1632 } from './priorDecisions.fixtures.ts';
 import { startTestMachine, type TestMachineOptions } from './testMachine.ts';
 import { afterMergeReason } from './ledgerRules.ts';
 import { roomForWork, timedLine, type Computer, type RoomNow } from './placement.ts';
@@ -6241,4 +6242,76 @@ test('w2057: a worker that ends its turn waiting on a pair run with none filed i
   sessions.events.emit('turnEnd', sessions.get(b.id), waits);
   await new Promise((r) => setTimeout(r, 300));
   assert.equal(told(b.id), 0);
+});
+
+test('w2085: the replay of w1958 at 16:32: a look OK for PR #2395 is refused with Ben\'s 04:59 note; past it, the card shows the note as possibly deciding', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, machines, dispatcher, chat, call, heard, agents, sessions } = env;
+  const ben = chat(BEN).info;
+  await call(ben, 'request_work', { title: 'Fix every clear bug in the Discord bug reports', brief: 'Sweep the new threads.' });
+  // 04:59: Ben decides the low-ore alert's wording (thread 1251), the note as the ledger holds it.
+  chat(BEN).lastFrom = 'human';
+  await call(ben, 'update_work', { id: 'w1', note: W1958_0459 });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Do it', title: 'w1: bug sweep', work_id: 'w1' });
+  assert.equal(started.isError, false, started.text);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const info = store.sessions.get(id)!;
+  await until('its first turn', () => info.status === 'idle');
+  const w1 = store.work.get('w1')!;
+  w1.prs = [{ repo: 'Final-Factory/FinalFactory', number: 2395, title: 'w1958: low-ore alert: right click dismisses it for ten minutes, Shift + right click silences it for good', state: 'open', via: 'line' }];
+  store.putWork(w1);
+  const read: string[] = [];
+  agents.prDiff = async (ref) => {
+    read.push(ref);
+    return PR2395_DIFF;
+  };
+  const h = machines.hooks!.handlersFor(info, store.machines.get('pc')!);
+  // 16:32: the fresh session's question, as d57b4ea5 raised it.
+  const ask = { who: 'Ben', what: W1958_1632, about: 'The low-ore alert tooltip gets a line for Shift + right click', after: 'I merge #2395 on green', questions: [{ question: 'Can the low-ore alert tooltip merge as it looks?', options: [{ label: 'Yes, merge it as it looks', recommended: true }, { label: 'No, change the wording first' }] }] };
+  await assert.rejects(h.waiting_on_person!(ask), (e: Error) => {
+    assert.match(e.message, /^Not recorded: ben already decided what Final-Factory\/FinalFactory#2395 adds/i);
+    assert.match(e.message, /Right-click dismisses for a while; shift\+right-click silences for good/);
+    assert.match(e.message, /Low-ore right-click \(thread 1251\)/);
+    return true;
+  });
+  assert.deepEqual(read, ['Final-Factory/FinalFactory#2395']);
+  assert.equal(info.waitingOn, undefined, 'nothing recorded: the request does not show Waiting on input');
+
+  // A question the note leaves open goes through with decided_override, logged; its card carries the note, flagged.
+  await h.waiting_on_person!({ ...ask, decided_override: 'the note does not settle the hover arrow touching the tooltip' });
+  assert.match(store.work.get('w1')!.log.join('\n'), /let through past Ben's note of [\d:]+ UTC, which decided what Final-Factory\/FinalFactory#2395 adds: "the note does not settle the hover arrow/);
+  sessions.events.emit('turnEnd', sessions.get(id), 'w1: still open: waiting on Ben to OK the low-ore tooltip look (#2395)');
+  await until('the [needs you]', () => heard(ben.id, '[needs you]').length === 1);
+  const card = heard(ben.id, '[needs you]')[0].text;
+  assert.match(card, /POSSIBLY DECIDED \(w2085\): Ben's note at [\d-]+ [\d:]+ UTC names "low-ore"/);
+  assert.match(card, /Ben's earlier notes on w1 and its related requests \(1\)/);
+  assert.match(card, /4\. Low-ore right-click \(thread 1251\): "Right-click dismisses for a while/);
+  assert.equal(store.work.get('w1')!.needsYou?.possiblyDecided?.[0].why.includes('"low-ore"'), true);
+});
+
+test('w2085: no diff reader, or a design choice, refuses nothing', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, machines, dispatcher, chat, call, agents } = env;
+  const ben = chat(BEN).info;
+  await call(ben, 'request_work', { title: 'Bug sweep', brief: 'Sweep.' });
+  chat(BEN).lastFrom = 'human';
+  await call(ben, 'update_work', { id: 'w1', note: W1958_0459 });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Do it', title: 'w1: bug sweep', work_id: 'w1' });
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const info = store.sessions.get(id)!;
+  await until('its first turn', () => info.status === 'idle');
+  const w1 = store.work.get('w1')!;
+  w1.prs = [{ repo: 'Final-Factory/FinalFactory', number: 2395, state: 'open', via: 'line' }];
+  store.putWork(w1);
+  const h = machines.hooks!.handlersFor(info, store.machines.get('pc')!);
+  const q = (what: string) => ({ who: 'Ben', what, about: 'The low-ore alert', after: 'I build it', questions: [{ question: what, options: [{ label: 'Go with A, the arrow', recommended: true }, { label: 'Go with B, the badge' }] }] });
+  agents.prDiff = undefined;
+  await h.waiting_on_person!(q('OK the low-ore tooltip look so #2395 can merge'));
+  agents.prDiff = async () => PR2395_DIFF;
+  await h.waiting_on_person!(q('Pick the arrow style for the low-ore alert pointer'));
+  agents.prDiff = async () => {
+    throw new Error('gh: not found');
+  };
+  await h.waiting_on_person!(q('OK the low-ore tooltip look so #2395 can merge'));
+  assert.ok(info.waitingOn, 'recorded');
 });

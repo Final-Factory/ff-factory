@@ -86,3 +86,11 @@ test('freshAfterMergeText: the mark, the request, what merged, what is left, and
   const none = freshAfterMergeText(item(), session({ lastResult: undefined }), [pr()], 'x');
   assert.match(none, /last word: not said: read the request with read_work/);
 });
+
+test('w2085: the hand-off says its people\'s notes are decisions, with theirs on its related requests', () => {
+  const t = freshAfterMergeText(item(), session(), [pr()], 'x', [{ on: 'w1768', at: '2026-10-23T03:04:00Z', by: 'ben', text: 'Use L, and a long press of D-pad up on a pad.' }]);
+  assert.match(t, /Decisions already made: its people's notes, verbatim, follow the brief below \("Notes since it was filed"\), and theirs on its related requests are here\./);
+  assert.match(t, /a UI change whose content they decided .* merges on green with no look OK/);
+  assert.match(t, /^- 2026-10-23 03:04 UTC on w1768, ben: Use L, and a long press/m);
+  assert.doesNotMatch(freshAfterMergeText(item(), session(), [pr()], 'x'), /and theirs on its related requests/);
+});

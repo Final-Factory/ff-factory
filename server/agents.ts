@@ -22,7 +22,8 @@ import { HOLD_PLACE_MS, LIVE_HOLD_MS, PlaceAgain, RELEASE_AFTER_MS, RELEASE_WAKE
 import { agentQueueAll, agentQueueFacts, editorSlotRefusal, queueWaitsAll } from '../shared/queueWaits.ts';
 import { pairWaitLine, pairWaitNotice } from './pairRuns.ts';
 import { WORK_LIVE_LABEL, WORK_LIVE_STATES, asksAPerson, benchWaitOf, lastOpenLine, liveCounts, otherWorkWait, outsideDeclared, outsideWaitOf, ownWorkWait, noTimedWaitOf, personWaitIn, reportWaitKey, servedBy, workLiveAll, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
-import { reportTail, type NeedsYouWait } from './needsYou.ts';
+import { prsIn, reportTail, whoOf, type NeedsYouWait } from './needsYou.ts';
+import { addedLines, asksLookOk, decidedRefusal, personNotes, quoteCovered, quotedPhrases, relatedRequests } from './priorDecisions.ts';
 import { stillOpenIn } from './ledgerRules.ts';
 import { inlineReviewMedia, outsideReview, publishedCopy, reviewRootOf } from './reviewMedia.ts';
 import { BLOCKER_KIND_HELP, conflictText, gateSetter, gatesName, gatesOf, isWith, latestWorker, newestFirst, prLabel, prRefOf, type PrHealth } from '../shared/blockers.ts';
@@ -576,6 +577,11 @@ export class Agents {
   review?: ReviewStore;
   /** Max, the Discord bot (server/max.ts); wired by index.ts. */
   max?: MaxManager;
+  /**
+   * A pull request's diff ("owner/repo#123"), for waiting_on_person's decided check (w2085); wired by index.ts through gh.
+   * Unset (tests, a portal without gh): the check reads no diff and refuses nothing.
+   */
+  prDiff?: (ref: string, w: WorkItem) => Promise<string>;
 
   readonly machines: MachineManager;
   /** Updates every machine's daemon after a verified portal deploy (w887). */
@@ -944,7 +950,10 @@ export class Agents {
             set_label: async () => Agents.SET_LABEL_RETIRED,
             // w640: a far check-in may release the sandbox; the worker hears what that needs before it stops.
             wake_me: async (a) => this.waker.schedule(info.id, Number(a.minutes), String(a.note ?? '')) + (Number(a.minutes) * 60_000 > RELEASE_AFTER_MS ? RELEASE_WAKE_NOTE : ''),
-            waiting_on_person: async (a) => this.declareWaiting(info.id, a),
+            waiting_on_person: async (a) => {
+              await this.refuseDecided(info, a);
+              return this.declareWaiting(info.id, a);
+            },
             cancel_wake: async () => this.cancelWakeTool(info.id),
             blocked_on: async (a) => this.declareBlocked(info.id, a),
             request_pair: async (a) => this.requestPair(info.id, a),
@@ -1325,6 +1334,48 @@ export class Agents {
     // w1542: a file of the report's diagnosis instead of the zip.
     if (typeof a.diagnosis === 'string' && a.diagnosis) return fetchFfboxDiagnosis(this.providers, this.attachments, { id: String(a.id ?? ''), file: a.diagnosis, ...(typeof a.run === 'number' ? { run: a.run } : {}) }, by);
     return fetchFfboxReport(this.providers, this.attachments, { id: String(a.id ?? ''), ...(typeof a.file === 'string' && a.file ? { file: a.file } : {}) }, by);
+  }
+
+  /**
+   * waiting_on_person's decided check (w2085, server/priorDecisions.ts): a look or merge OK for a pull request whose added
+   * text a note of the asked person on the request (or a related one) quotes is refused, with that note: they decided it
+   * (w1958: Ben's 04:59 wording, asked again at 16:32 as "can #2395 merge as it looks?"). decided_override, with what the
+   * note leaves open, lets it through and is logged. A diff that cannot be read refuses nothing.
+   */
+  private async refuseDecided(info: SessionInfo, a: Record<string, unknown>): Promise<void> {
+    const request = typeof a.request === 'string' && /^w\d+$/i.test(a.request.trim()) ? a.request.trim().toLowerCase() : undefined;
+    const open = this.openWorkOf(info).filter((w) => !request || w.id === request);
+    const questions = Array.isArray(a.questions) ? (a.questions as { question?: unknown; options?: { label?: unknown; description?: unknown }[] }[]) : [];
+    const texts = [a.what, a.about, ...questions.flatMap((q) => [q?.question, ...(Array.isArray(q?.options) ? q.options.map((o) => o?.label) : [])])].map((t) => (typeof t === 'string' ? t : ''));
+    const override = typeof a.decided_override === 'string' ? a.decided_override.replace(/\s+/g, ' ').trim().slice(0, 300) : '';
+    if (!open.length || !this.prDiff || !asksLookOk(texts)) return;
+    const names = String(a.who ?? '').split(/,|\band\b/).map((s) => s.trim()).filter(Boolean);
+    for (const w of open) {
+      const who = whoOf(names, this.identity.list(), w.requesters).flatMap((p) => [p.displayName, p.userId]);
+      const notes = personNotes(relatedRequests(w, this.store.work.values()), who).filter((n) => quotedPhrases(n.text).length);
+      if (!notes.length) continue;
+      // The pull requests it names with their repo, else the request's open ones (prsIn adds those), at most three.
+      const refs = prsIn(texts, w).filter((p) => /^[\w.-]+\/[\w.-]+#\d+$/.test(p)).slice(0, 3);
+      for (const ref of refs) {
+        let added: string;
+        try {
+          added = addedLines(await this.prDiff(ref, w));
+        } catch (e) {
+          console.log(`waiting_on_person decided check: ${ref}'s diff not read (${(e as Error).message.slice(0, 120)}): nothing refused`);
+          continue;
+        }
+        for (const n of [...notes].reverse()) {
+          const quote = quoteCovered(n.text, added);
+          if (!quote) continue;
+          if (override) {
+            this.orchestrators.noteOnRequest(w.id, `waiting_on_person from worker ${info.id.slice(0, 8)} let through past ${n.by}'s note of ${n.at.slice(11, 16)} UTC, which decided what ${ref} adds: "${override}" (decided_override, w2085)`);
+            return;
+          }
+          console.log(`waiting_on_person refused for ${w.id} (worker ${info.id.slice(0, 8)}): ${n.by}'s note of ${n.at} decided what ${ref} adds (w2085)`);
+          throw new Error(decidedRefusal(n, quote, ref, w.id));
+        }
+      }
+    }
   }
 
   /** The waiting_on_person tool (w691): the worker declares that a person must act; it ends with its next message (RemoteSession.send). */
@@ -2002,7 +2053,8 @@ export class Agents {
     const prs = merged.map((p) => `#${p.number}`).join(', ');
     const why = `${FRESH_AFTER_MERGE_MARK}: PR ${prs} merged during worker ${id}'s session, so ${w.id} goes on without its context`;
     const p = this.startFreshSession(s, w, {
-      text: freshAfterMergeText(w, s.info, merged, m.text),
+      // w2085: its people's notes on its related requests (its own come whole with the request as filed).
+      text: freshAfterMergeText(w, s.info, merged, m.text, personNotes(relatedRequests(w, this.store.work.values()).filter((x) => x.id !== w.id), w.requesters.flatMap((r) => [r.displayName, r.userId]))),
       title: s.info.title,
       requestedBy,
       from: m.from === 'human' ? 'human' : 'orchestrator',

@@ -1,0 +1,74 @@
+diff --git a/Assets/Localization/LocalizationMasterTable_en.asset b/Assets/Localization/LocalizationMasterTable_en.asset
+index 3a322313cd..f36febf51b 100644
+--- a/Assets/Localization/LocalizationMasterTable_en.asset
++++ b/Assets/Localization/LocalizationMasterTable_en.asset
+@@ -9719,6 +9719,15 @@ MonoBehaviour:
+     m_Localized: Asteroids low on resources. [Right click] to dismiss.
+     m_Metadata:
+       m_Items: []
++  - m_Id: 1958000000000000001
++    m_Localized: Hold Shift and right click to stop warning about these
++      asteroids.
++    m_Metadata:
++      m_Items: []
++  - m_Id: 1958000000000000002
++    m_Localized: Hold [Shift] and [Right click] to stop warning about these asteroids.
++    m_Metadata:
++      m_Items: []
+   - m_Id: 548000000000000021
+     m_Localized: '[Left click] to craft 1. [Right click] to craft 5.'
+     m_Metadata:
+diff --git a/Assets/Scripts/Localization/Messages.cs b/Assets/Scripts/Localization/Messages.cs
+index 4c95b3c3e4..8a4130808e 100644
+--- a/Assets/Scripts/Localization/Messages.cs
++++ b/Assets/Scripts/Localization/Messages.cs
+@@ -1235,6 +1235,11 @@ public static class Messages
+       "Structures damaged by overheating. [Left click] to go to overheating structures. [Right click] " +
+       "to dismiss.";
+     public const string ControllerAsteroidsLow = "Asteroids low on resources. [Right click] to dismiss.";
++    // w1958 (Ben, Discord thread 1251: "Right-click dismisses for a while; shift+right-click silences for good"): the
++    // low-ore alert's tooltip note, under its "Right click to dismiss" hint.
++    public const string LowOreSilenceForGoodHint = "Hold Shift and right click to stop warning about these asteroids.";
++    public const string ControllerLowOreSilenceForGoodHint =
++      "Hold [Shift] and [Right click] to stop warning about these asteroids.";
+     public const string LandingZoneBlockedAlertTooltip =
+       "Mobile station cannot land because its landing zone is blocked. Click to go to it. Right click to dismiss.";
+     public const string ControllerLandingZoneBlockedAlertTooltip =
+diff --git a/Assets/Scripts/Steam/ControllerPrompts.cs b/Assets/Scripts/Steam/ControllerPrompts.cs
+index 85c5dcc147..4f820c9b53 100644
+--- a/Assets/Scripts/Steam/ControllerPrompts.cs
++++ b/Assets/Scripts/Steam/ControllerPrompts.cs
+@@ -654,6 +654,7 @@ private static (string action, string key)? TokenPart(string name)
+       ["Structures damaged by overheating. Click to go to overheating structures. Right click to dismiss."] =
+         Messages.ControllerOverheating,
+       ["Asteroids low on resources. Right click to dismiss."] = Messages.ControllerAsteroidsLow,
++      [Messages.LowOreSilenceForGoodHint] = Messages.ControllerLowOreSilenceForGoodHint,
+       [Messages.LandingZoneBlockedAlertTooltip] = Messages.ControllerLandingZoneBlockedAlertTooltip,
+       ["Left click to craft 1. Right click to craft 5."] = Messages.ControllerCraftCounts,
+       [Messages.MapMarkerControlsHint] = Messages.ControllerRemoveMarkers,
+diff --git a/docs/HowToPlay.md b/docs/HowToPlay.md
+index 38cc12409c..2cb863b9b6 100644
+--- a/docs/HowToPlay.md
++++ b/docs/HowToPlay.md
+@@ -693,15 +693,18 @@ hand-crafting hundreds of research bots is playing it wrong, even if it moves th
+   Mobile Stations list says `Landing zone blocked` for the same station (`ui.open|mobilestations`). Clicking the icon
+   flies the camera to the hovering station; right click dismisses it until the block clears.
+ - **The asteroid-low-on-ore warning needs an asteroid that is low AND being mined right now, and a right click on its
+-  icon silences an asteroid for good (w1514).** `AsteroidLowOreWarningSystem` raises the orange marker and the HUD icon
++  icon dismisses it for ten minutes, and Shift + right click silences that asteroid for good (w1514, w1958).** `AsteroidLowOreWarningSystem` raises the orange marker and the HUD icon
+   for an asteroid at or under 12,000 ore that some built, landed `MiningStation` targets and that is not held up: a
+   station with no room for one more ore in its primary slots (`InventoryHelper.NumCanAdd` < 1) takes none, because its
+   miner bots wait at the station with their cargo, so a ring of full stations raises nothing, and the warning comes
+   back the heartbeat one has room again. It reads the slots, not the cycle progress (which stands still on an unpowered
+   station too) and not `ProductsPerCycle` (0 on a Mining Station); a station that is unpowered or has no miner out but
+   has room still counts, which is not yet told apart. `ffauto:asteroid.lowore` dumps each asteroid's warning and the
+-  room of each station targeting it. Right click on the icon (its hint reads "Right click to
+-  dismiss") also acknowledges every asteroid the icon is showing: `StructureSettingKind.AsteroidLowOreAcknowledge` (21)
++  room of each station targeting it. A plain right click on the icon (its hint reads "Right click to
++  dismiss") dismisses it for `WarningIconButton.LowOreSnoozeSeconds` (600 s on the game clock, kept per asteroid in the
++  HUD, not saved; w1958, Ben: "Right-click dismisses for a while; shift+right-click silences for good"), past the
++  entry's own 120 s lifetime. Shift + right click (the tooltip's note says so) also acknowledges every asteroid the icon
++  is showing: `StructureSettingKind.AsteroidLowOreAcknowledge` (21)
+   adds the saved `AsteroidLowOreAcknowledged` component to each one on every peer, so the asteroid never warns again,
+   after a load or for a joining player. To turn it back on (w1568), select a Mining Station that mines that asteroid:
+   its window shows a "Low-ore warning" On/Off switch beside the ore-rate chip once the asteroid is acknowledged

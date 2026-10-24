@@ -195,6 +195,7 @@ export const CATALOG = {
     about: z.string().min(1).max(WAIT_LINE_CHARS).describe('What the request is, in ONE plain line for someone who has read nothing about it ("The station brakes to a stop after Disable Transit, where today it stops dead"); not the title, no ids or paths.'),
     after: z.string().min(1).max(WAIT_LINE_CHARS).describe('What happens once they answer ("I merge the fix and it ships in the next dev build"; "I build the picked look and bring you its clip").'),
     request: z.string().max(16).optional().describe('The request ("w665") it is about, when you serve several; default: all of them.'),
+    decided_override: z.string().max(300).optional().describe('Only after a refusal that their note already decided it (w2085): what that note leaves open.'),
   },
   unity: {
     action: z.enum(['status', 'start', 'stop', 'restart', 'clear_batch']),
