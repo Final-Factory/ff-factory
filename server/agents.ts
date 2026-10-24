@@ -45,7 +45,6 @@ import { searchTranscripts } from './search.ts';
 import { CATALOG, questionsShape } from './launch.ts';
 import { clampArgs, clamped, rangedNumber, withWarnings } from './forgiving.ts';
 import { AutoCompactor, LONG_WAIT_MS, withEarlyCompactMark, workerAutoCompactWindow } from './autoCompact.ts';
-import { inReadChainPilot, withReadChainMark } from './readChain.ts';
 import { withTerseProse } from './terseProse.ts';
 import { WORKER_READ_RULES_TOOL, workerRuleText } from './workerRules.ts';
 import { activityLine, Waker } from './wake.ts';
@@ -2988,9 +2987,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
       settingSources: ['user', 'project', 'local'],
       // w1480: a share of workers also get the terse-prose rule (server/terseProse.ts).
       // w2002: and a share compacts earlier, marked in the prompt (server/autoCompact.ts withEarlyCompactMark).
-      // w2014: and a share gets the read-chain nudge, marked in the prompt (server/readChain.ts).
-      append: withReadChainMark(withEarlyCompactMark(withTerseProse(this.machineSandboxBrief(m, sb, run.account, run.github, clone, this.workflowMachines()), info.id, this.cfg), info.id, this.cfg), info.id, this.cfg),
-      ...(inReadChainPilot(info.id, this.cfg) ? { readChainNudge: true } : {}),
+      append: withEarlyCompactMark(withTerseProse(this.machineSandboxBrief(m, sb, run.account, run.github, clone, this.workflowMachines()), info.id, this.cfg), info.id, this.cfg),
       strictMcp: false,
       // The Unity bridge of this sandbox's editor only (machine/unityMcp.ts): Claude Code has none registered for a new worktree.
       unityMcp: true,

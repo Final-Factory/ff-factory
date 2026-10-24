@@ -11,7 +11,6 @@ import { foreignTimedHold, ownTimedHold, readTimedAsk } from '../machine/benchLo
 import { personHoldReason } from '../machine/personPlay.ts';
 import { closedRefusalFor } from '../machine/benchTurn.ts';
 import { standingGuard } from './standingGuard.ts';
-import { readChainHook } from './readChainHook.ts';
 import { publicIdentityEnv } from './publicGit.ts';
 import { usageEnv } from './usage.ts';
 import type { StandingToolGroup } from '../shared/types.ts';
@@ -76,8 +75,6 @@ export interface LaunchSpec {
   disallowedTools?: string[];
   /** Claude Code settings on top of the machine's own (the SDK's `settings`, the CLI's --settings): w1480's plugins a worker starts without. An older daemon ignores it. */
   settings?: Record<string, unknown>;
-  /** w2014: add the read-chain nudge (server/readChainHook.ts), a PostToolUse hook; a pilot worker's. An older daemon ignores it. */
-  readChainNudge?: boolean;
   /** Only the MCP servers named here (plus `mcp`); false loads the user's own too. */
   strictMcp: boolean;
   /**
@@ -472,11 +469,7 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
     strictMcpConfig: spec.strictMcp,
     mcpServers,
     ...(spec.maxBudgetUsd !== undefined ? { maxBudgetUsd: spec.maxBudgetUsd } : {}),
-    hooks: {
-      PreToolUse: [{ hooks }, ...(editorGate ? [{ matcher: 'mcp__UnityMCP__.*', hooks: [editorGate.hook], timeout: GATE_HOOK_TIMEOUT_S }] : [])],
-      // w2014: the read-chain pilot's one line after five reads or searches in a row.
-      ...(spec.readChainNudge ? { PostToolUse: [{ hooks: [readChainHook()] }] } : {}),
-    },
+    hooks: { PreToolUse: [{ hooks }, ...(editorGate ? [{ matcher: 'mcp__UnityMCP__.*', hooks: [editorGate.hook], timeout: GATE_HOOK_TIMEOUT_S }] : [])] },
     env: agentEnv,
     ...(spec.claudeExecutable ? { pathToClaudeCodeExecutable: spec.claudeExecutable } : {}),
   };

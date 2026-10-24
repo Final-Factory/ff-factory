@@ -103,9 +103,7 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // it; nothing there asks for it either). A newer daemon with an older portal gets no mark and asks nothing.
 // w1996 (no bump): `bench_hours`, a daemon's exclusive-bench cost per UTC hour (at connect and hourly), which an older portal's
 // onMessage drops (no default case); an older daemon never sends it, and portal_logs bench_hours then has no hours for it.
-// w2014 (no bump): `readChainNudge` on LaunchSpec, a pilot worker's PostToolUse hook; an older daemon ignores the field (its
-// workers then run as the control arm with the pilot's prompt mark), and a newer daemon with an older portal never gets it.
-const DECIDED = { protocol: 9, fingerprint: '989547bad4bbd001' };
+const DECIDED = { protocol: 9, fingerprint: '132a537ce9acd204' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

@@ -563,12 +563,6 @@ export interface Config {
      * It reaches a session when its process next starts.
      */
     terseProsePilotPercent?: number;
-    /**
-     * The share of worker sessions (by a hash of their id, apart from the other pilots') whose agent host adds the read-chain
-     * nudge after five reads or searches in a row, 0-100 (w2014's pilot, server/readChain.ts, docs/spend.md "Read chains handed
-     * to a subagent, a pilot"): default 50. It reaches a session when its process next starts.
-     */
-    readChainPilotPercent?: number;
   };
   /**
    * The user id automatic work is attributed and billed to: scheduled standing-agent runs and, once FFBox takes
