@@ -1,5 +1,8 @@
 import { useEffect, useState } from 'react';
-import { FLAG_LABEL, type AppState, type IntakeSummary, type WorkItem } from '../../../shared/types';
+import { FLAG_LABEL, type AppState, type IntakeSummary, type WorkItem, type WorkPriority } from '../../../shared/types';
+
+/** The priorities the dashboard sets (w2049), highest first. */
+const PRIORITY_CHOICES: readonly WorkPriority[] = ['urgent', 'high', 'normal', 'low'];
 import { decisionOf } from '../../../shared/decision';
 import { api } from '../api';
 import { isMine, ledgerOrder } from '../../../shared/workOrder';
@@ -592,7 +595,7 @@ function WorkRow({ app, w, live, open, onToggle, now }: { app: AppState; w: Work
             ) : null}
             {isMine(w, app.me?.userId) ? <span className="tone-blue" data-testid="work-yours"> · yours</span> : null}
             {w.triage && w.triage.class !== 'needs-human' ? <span> · {triageLabel[w.triage.class]}</span> : null}
-            {w.priority === 'urgent' || w.priority === 'high' ? <span className="tone-amber"> · {w.priority}</span> : null}
+            {w.priority === 'urgent' || w.priority === 'high' ? <span className="tone-amber"> · {w.priority}</span> : w.priority === 'low' ? <span className="dim" data-testid={`work-low-${w.id}`}> · low</span> : null}
             {w.flag ? <span className="tone-amber"> · {FLAG_LABEL[w.flag.kind].toLowerCase()}</span> : null}
             <CostChip id={w.id} summary={spend} />
           </span>
@@ -639,6 +642,25 @@ function WorkRow({ app, w, live, open, onToggle, now }: { app: AppState; w: Work
             <p className={`small tone-${tone}`} data-testid={`live-why-${w.id}`}>
               {WORK_LIVE_LABEL[live.state]}
               {live.waitsOn?.length ? ` on ${live.waitsOn.join(', ')}` : ''}: {live.why}
+            </p>
+          )}
+          {isOpenWork(w) && (isMine(w, app.me?.userId) || app.me?.role === 'owner') && (
+            <p className="small" data-testid={`work-priority-${w.id}`}>
+              Priority{' '}
+              <select
+                className="input"
+                aria-label={`Priority of ${w.id}`}
+                value={w.priority}
+                onChange={(e) => void attempt(api.setWorkPriority(w.id, e.target.value as WorkPriority))}
+              >
+                {PRIORITY_CHOICES.map((p) => (
+                  <option key={p} value={p}>
+                    {p}
+                  </option>
+                ))}
+              </select>
+              <br />
+              <span className="dim">A free slot takes urgent, then high, normal and low, oldest first; low still starts whenever nothing above it fits.</span>
             </p>
           )}
           {w.triage && (

@@ -369,3 +369,16 @@ test('w1860: a kept holder is no "at the latest" in the turn messages: timedHold
   limit(root, 't00000001', { deadline: sec(-5), warned: sec(0), by: 't00000002' });
   assert.equal(timedHolder(root, NOW, alive)!.kept, undefined, 'a deadline set by a same-or-higher waiter: no keep');
 });
+
+test('w2049: in the bench queue a low worker\'s timed leg waits behind a normal one queued after it, and goes next alone', (t) => {
+  const root = tmp(t);
+  ticket(root, 't00000001', { mode: 'exclusive', what: 'held', max_min: 60 }, sec(1));
+  ticket(root, 't00000002', { mode: 'exclusive', what: 'low leg', session: 'low-s' });
+  ticket(root, 't00000003', { mode: 'exclusive', what: 'normal leg', session: 'normal-s' });
+  const prios = (sessions: Record<string, { priority: string; requests: string[] }>) => fs.writeFileSync(path.join(benchQueueDir(benchLockDir(root)), 'priorities.json'), JSON.stringify({ at: 'x', sessions }));
+  prios({ 'low-s': { priority: 'low', requests: ['w1'] }, 'normal-s': { priority: 'normal', requests: ['w2'] } });
+  assert.equal(readBenchState(root, NOW, alive)!.nextExclusive?.what, 'normal leg', 'normal before low, although low queued first');
+  // The normal one gone: low is next (it never waits behind nothing).
+  fs.rmSync(path.join(benchQueueDir(benchLockDir(root)), 't00000003'), { recursive: true, force: true });
+  assert.equal(readBenchState(root, NOW, alive)!.nextExclusive?.what, 'low leg');
+});

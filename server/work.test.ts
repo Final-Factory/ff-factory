@@ -8,6 +8,8 @@ import {
   dispatchNotice,
   findOverlaps,
   ledgerOrder,
+  capacityOrder,
+  startedPinned,
   limitProblem,
   limitsFor,
   normalizeTitle,
@@ -211,4 +213,23 @@ test('lines: the dispatcher reads the request and the overlap check; people see 
   assert.equal(asked.attention, true);
   assert.equal(asked.summary, 'The dispatcher asks about “Fix belt desync”');
   assert.equal(asked.body, 'Which save shows it?');
+});
+
+test('w2049: capacityOrder: urgent, high, normal, low; within one priority started work pinned to named computers first; then oldest', () => {
+  const at = (h: number) => `2026-10-24T0${h}:00:00.000Z`;
+  const base = { title: 't', brief: 'b', keys: [], requestedBy: BEN, requesters: [BEN], updatedAt: at(0), overlaps: [], asks: 0, log: [] };
+  const w = (id: string, h: number, x: Partial<WorkItem>): WorkItem => ({ ...base, id, priority: 'normal', status: 'queued', createdAt: at(h), sessionIds: [], queuedFor: { at: at(h) }, ...x }) as WorkItem;
+  const items = [
+    w('lowOld', 0, { priority: 'low' }),
+    w('normal', 1, {}),
+    w('pinnedNotStarted', 2, { queuedFor: { at: at(2), needs: ['m5'] } }),
+    w('requeuedPinned', 3, { queuedFor: { at: at(3), needs: ['m5'] }, sessionIds: ['s1'] }),
+    w('timedLeg', 4, { queuedFor: { at: at(4), needs: ['lothlaptop'] }, timedLeg: { for: 'w9', forSession: 's9', from: 'm5', small: ['lothlaptop'] } }),
+    w('leg', 5, { status: 'active', queuedFor: undefined, legs: [{ at: at(5), needs: ['m5'], what: 'timing' }], sessionIds: ['s2'] }),
+    w('high', 6, { priority: 'high' }),
+    w('urgent', 7, { priority: 'urgent' }),
+  ];
+  assert.deepEqual([...items].sort(capacityOrder).map((x) => x.id), ['urgent', 'high', 'requeuedPinned', 'timedLeg', 'leg', 'normal', 'pinnedNotStarted', 'lowOld']);
+  assert.equal(startedPinned(w('x', 1, { sessionIds: ['s'] })), false, 'a requeued request that names no computer is general work');
+  assert.equal(startedPinned(w('x', 1, { status: 'done', legs: [{ at: at(1), needs: ['m5'], what: 'x' }] })), false, 'a closed request holds no leg');
 });

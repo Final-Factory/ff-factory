@@ -20,6 +20,8 @@ import {
   isFor,
   isOpen,
   ledgerOrder,
+  capacityOrder,
+  startedPinned,
   limitProblem,
   limitsFor,
   logLine,
@@ -67,6 +69,7 @@ import { permissionAccess, permissionWhat, type PermissionAccess } from '../shar
 import { OPS_ID, OPS_PEOPLE } from './opsWorker.ts';
 import { isSamePerson, personForWork, sessionPerson, tokenPersonForWork } from './vault.ts';
 import type { AttachmentRef, ConditionalDecision, OpenAsk, WorkNeedsYou, GateResume, Machine, WorkAutoClosed, WorkBlocker, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPair, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
+import { WORK_PRIORITIES } from '../shared/types.ts';
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);
@@ -4648,6 +4651,24 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
     return w;
   }
 
+  /**
+   * A person sets an open request's priority from the dashboard (w2049, lothsahn: "Please introduce a new priority "low"
+   * that is below normal/medium priority"): one of its people, an intake reviewer or an owner.
+   */
+  setPriority(id: string, by: Requester, priority: WorkPriority, owner = false): WorkItem {
+    const w = this.requireWork(id);
+    if (!WORK_PRIORITIES.includes(priority)) throw new Error(`priority is one of ${WORK_PRIORITIES.join(', ')}`);
+    if (!owner && !isFor(w, by.userId) && !this.reviewers().some((r) => same(r.userId, by.userId))) throw new Error(`${w.id} is not ${by.displayName}'s request`);
+    if (!isOpen(w)) throw new Error(`${w.id} is ${w.status}: only an open request's priority changes`);
+    if (w.priority === priority) return w;
+    this.stamp(w, `priority ${w.priority} → ${priority}, by ${by.displayName} on the dashboard`);
+    w.priority = priority;
+    this.store.putWork(w);
+    // As update_work: a computer placement.minPriority reserves (w1643) may take it now, and the queue's order changed.
+    if (w.status === 'queued') this.capacityMayHaveFreed(`${w.id}'s priority changed to ${priority}`);
+    return w;
+  }
+
   /** Only the reviewers decide what comes in through the intake (players do not steer the game's design). */
   private requireReviewer(by: Requester) {
     const who = this.reviewers();
@@ -5840,8 +5861,9 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
     const fire = () => {
       const now = this.now().getTime();
       while (this.capacityWakes.length && now - this.capacityWakes[0] > 3_600_000) this.capacityWakes.shift();
-      // By priority, then oldest (ledgerOrder): the order the dispatcher should start them in (w1099: a high nightly run first).
-      const queued = [...this.store.work.values()].filter(waitsForRoom).sort(ledgerOrder);
+      // By priority, then started work that runs only on named computers (w2049), then oldest (capacityOrder): the order the
+      // dispatcher should start them in (w1099: a high nightly run first). Low comes after normal, and still starts when it fits.
+      const queued = [...this.store.work.values()].filter(waitsForRoom).sort(capacityOrder);
       // The room now, not the room when the event happened: only a queued request that a computer with room could take is worth
       // a ping; w1944: one it can run on (no Mac for an MP scenario, no m5 for timed work).
       const facts = this.roomNow();
@@ -5869,7 +5891,7 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       this.capacityWakes.push(now);
       console.log(`ledger: capacity ping: ${events.map((e) => e.what).join('; ')}; fitting ${usable.map((w) => w.id).join(', ')}`);
       const old = (e: { what: string; at: number }) => `${e.what}, ${Math.max(0, Math.round((now - e.at) / 60_000))} min ago`;
-      const line = (w: WorkItem) => `${w.id} "${clip(w.title, 80)}" (${names(w.requesters)}, ${w.priority}${roomNeeds(w)?.length ? `; needs ${roomNeeds(w)!.join(' or ')}` : ''}${needsOf(w) === 'agent' ? '; needs only an agent slot' : ''}${w.status !== 'queued' ? `; a leg, its own worker elsewhere: ${clip(w.legs!.map((l) => l.what).join('; '), 120)}` : ''}${w.pair ? `; ${pairText(w.pair)}: start its legs together, e.g. on ${pairRoom(w, fit(w).ids, facts.fit).pick?.join(' + ')} (start_agent with pair_sandboxes)` : ''})`;
+      const line = (w: WorkItem) => `${w.id} "${clip(w.title, 80)}" (${names(w.requesters)}, ${w.priority}${roomNeeds(w)?.length ? `; needs ${roomNeeds(w)!.join(' or ')}` : ''}${needsOf(w) === 'agent' ? '; needs only an agent slot' : ''}${startedPinned(w) ? '; started, runs only there' : ''}${w.status !== 'queued' ? `; a leg, its own worker elsewhere: ${clip(w.legs!.map((l) => l.what).join('; '), 120)}` : ''}${w.pair ? `; ${pairText(w.pair)}: start its legs together, e.g. on ${pairRoom(w, fit(w).ids, facts.fit).pick?.join(' + ')} (start_agent with pair_sandboxes)` : ''})`;
       const room = [facts.game.length ? `game work: ${facts.game.join(', ')}` : '', facts.agent.length ? `agent-slot work: ${facts.agent.join(', ')}` : '', facts.held.length ? heldText(facts.held) : '', ...(facts.reserved ?? []).map((r) => `${r.id} has room for ${minPriorityText(r.min)} (placement.minPriority)`)].filter(Boolean).join('; ');
       const rest = queued.filter((w) => !usable.includes(w));
       // w1944: why the room now is no room for one, when that is it ("w1941: m5 is a Mac, which refuses ...").
@@ -5878,7 +5900,7 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
         const why = [...(short ? [short] : []), ...u.map((x) => x.why)];
         return why.length ? `${w.id} (${why.join('; ')})` : w.id;
       };
-      this.toDispatcher(`[ledger] Capacity may have freed (${events.map(old).join('; ')}). Room now: ${room}. Queued for capacity and fitting it, by priority, then oldest: ${usable.map(line).join('; ')}.${rest.length ? ` Queued with no room for them now: ${rest.map(restLine).join(', ')}.` : ''} Start what fits now (start_agent into a FREE sandbox: list_sandboxes marks them, and check the sandbox is still free); leave queued only what no computer with room can take, and block what waits on something else.`);
+      this.toDispatcher(`[ledger] Capacity may have freed (${events.map(old).join('; ')}). Room now: ${room}. Queued for capacity and fitting it, by priority, then started work that runs only on the computers it names, then oldest: ${usable.map(line).join('; ')}.${rest.length ? ` Queued with no room for them now: ${rest.map(restLine).join(', ')}.` : ''} Start what fits now (start_agent into a FREE sandbox: list_sandboxes marks them, and check the sandbox is still free); leave queued only what no computer with room can take, and block what waits on something else. A computer's room goes to started work that runs only there before general work of its priority or lower (w2049); higher work that fits another computer with room starts there.`);
     };
     // w1944: the quiet spell, but never past CAPACITY.maxQuietMs after the first event, so a busy fleet still gets its ping.
     this.capacityTimer = setTimeout(fire, Math.max(0, Math.min(CAPACITY.quietMs, this.capacityFirstAt + CAPACITY.maxQuietMs - at)));

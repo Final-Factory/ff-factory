@@ -5423,7 +5423,7 @@ ${w.repo ?? ''}
         {
           title: z.string().min(1).max(120).describe('What it is, in one line: "Fix the belt splitter desync (spec 098)".'),
           brief: z.string().min(1).max(8000).describe('The full brief: goal, done-criteria, constraints, the skill to use, what your person said.'),
-          priority: priority.optional().describe('Default normal. urgent: broken for players, or blocking someone.'),
+          priority: priority.optional().describe('Default normal. urgent: broken for players, or blocking someone. low: whenever nothing above it fits a free slot (it waits behind normal work, and starts when only it fits).'),
           constraints: z.string().max(2000).optional().describe('Where it must or must not run, deadlines, what not to touch.'),
           ledger_read: z.literal(true).optional().describe('A ledger task (e.g. "list the finished requests"): its workers may list and read every open and stalled request with read_work, not only theirs and the ones they name. Only when the task is about the ledger itself.'),
           repo: z.string().max(120).optional().describe('The repository the work is in, "owner/name" ("Final-Factory/ff-factory", "Final-Factory/ffbox", "Final-Factory/final-factory-agents", "Final-Factory/FinalFactory" for the game). Set it whenever the brief names one: work on any repository that is not the game repo itself needs only an agent slot, no Unity editor and no free game sandbox (w1098), so it is placed on any computer with a free agent slot. Left out, FF Factory guesses once from the title and brief and logs the guess.'),

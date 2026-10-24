@@ -1924,7 +1924,7 @@ test("w527: a standing agent's delegation flows into the ledger and onto a worke
   t.mock.timers.tick(30_000);
   t.mock.timers.reset();
   const ping = heard(dispatcher().info.id, '[ledger] Capacity may have freed').map((e) => e.text).join('\n');
-  assert.match(ping, /\[ledger\] Capacity may have freed \(worker x "Other work" stopped, 0 min ago\)\. Room now: game work: pc; agent-slot work: pc\. Queued for capacity and fitting it, by priority, then oldest: w1 "Verify suspected/);
+  assert.match(ping, /\[ledger\] Capacity may have freed \(worker x "Other work" stopped, 0 min ago\)\. Room now: game work: pc; agent-slot work: pc\. Queued for capacity and fitting it, by priority, then started work that runs only on the computers it names, then oldest: w1 "Verify suspected/);
 
   // It starts it in a machine's sandbox: the request is active, and the agent sees how it is doing.
   const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: task, title: 'Regression check', work_id: 'w1' });
@@ -4024,7 +4024,7 @@ test('w1099: the capacity ping and the queued-with-room flag list queued request
   const ping = heard(dispatcher().info.id, '[ledger] Capacity may have freed').at(-1)!.text;
   const order = ['w3', 'w1', 'w2', 'w4'].map((id) => ping.indexOf(`${id} "`));
   assert.ok(order.every((x, i) => x >= 0 && (i === 0 || x > order[i - 1])), `high first, then the normal ones oldest first, then low: ${ping}`);
-  assert.match(ping, /Queued for capacity and fitting it, by priority, then oldest: w3 "Nightly e2e run"/);
+  assert.match(ping, /Queued for capacity and fitting it, by priority, then started work that runs only on the computers it names, then oldest: w3 "Nightly e2e run"/);
   // The flag for requests left queued while a computer has room, in the same order.
   agentsRoom(agents, ['lothdesktop']);
   const later = Date.now() + 11 * 60_000;
@@ -5114,7 +5114,7 @@ test('w1944: the capacity ping names the room a queued request cannot use, lets 
   o.capacityMayHaveFreed('sandbox m5/slot3 released');
   tick(30_000);
   assert.equal(pings().length, 1);
-  assert.match(pings()[0], /fitting it, by priority, then oldest: w2 "Blueprint paste keeps the filter".*Queued with no room for them now: w1 \(m5 is a Mac, which refuses the multiplayer client its MP scenario starts \(w665\)\)\./);
+  assert.match(pings()[0], /fitting it, by priority, then started work that runs only on the computers it names, then oldest: w2 "Blueprint paste keeps the filter".*Queued with no room for them now: w1 \(m5 is a Mac, which refuses the multiplayer client its MP scenario starts \(w665\)\)\./);
 
   // The hourly cap is spent. biscuit (Windows) frees: the urgent MP fix fits it, so the ping goes at the gap, not in an hour.
   const wakes = (o as unknown as { capacityWakes: number[] }).capacityWakes;
@@ -5125,7 +5125,7 @@ test('w1944: the capacity ping names the room a queued request cannot use, lets 
   o.capacityMayHaveFreed('sandbox biscuit/slot1 released');
   tick(30_000);
   assert.equal(pings().length, 2, 'urgent work that fits is not held by the hourly cap');
-  assert.match(pings()[1], /fitting it, by priority, then oldest: w1 "Nightly: fix MP-tutorial-e2e-loth" \(Lothsahn, urgent\); w2/);
+  assert.match(pings()[1], /fitting it, by priority, then started work that runs only on the computers it names, then oldest: w1 "Nightly: fix MP-tutorial-e2e-loth" \(Lothsahn, urgent\); w2/);
 
   // Normal work alone waits for the cap, as before.
   store.putWork({ ...store.work.get('w1')!, status: 'active', queuedFor: undefined });
@@ -5624,6 +5624,88 @@ test('w2007: the dispatcher passing the budget files its request for the system 
   assert.match(w.brief, /started by a message that is not known any more\./);
   assert.match(w.brief, /over the tokens cap/);
   assert.deepEqual(pushed.map((p) => p.users), [['ben']]);
+});
+
+// ---------------------------------------------------------------- w2049: priority low, and started work pinned to a computer
+
+/** The capacity ping's request ids in the order it lists the ones that fit (w2049). */
+function pingOrder(ping: string): string[] {
+  const fitting = ping.split('Queued for capacity and fitting it')[1]?.split('Queued with no room')[0] ?? '';
+  return [...fitting.matchAll(/(w\d+) "/g)].map((m) => m[1]);
+}
+
+test('w2049: a free slot with a normal and a low request queued takes the normal one', async (t) => {
+  const { store, agents, o, dispatcher, heard } = setup(t);
+  const q = (at: string) => ({ at });
+  // The low one is older: priority still comes first.
+  putRequests(store, [
+    { id: 'w1', status: 'queued', priority: 'low', createdAt: '2026-10-24T01:00:00.000Z', queuedFor: q('2026-10-24T01:00:00.000Z') },
+    { id: 'w2', status: 'queued', priority: 'normal', createdAt: '2026-10-24T02:00:00.000Z', queuedFor: q('2026-10-24T02:00:00.000Z') },
+  ]);
+  agentsRoom(agents, ['lothdesktop']);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  o.capacityMayHaveFreed('worker x stopped');
+  t.mock.timers.tick(30_000);
+  t.mock.timers.reset();
+  const ping = heard(dispatcher().info.id, '[ledger] Capacity may have freed').at(-1)!.text;
+  assert.deepEqual(pingOrder(ping), ['w2', 'w1'], ping);
+  assert.match(ping, /w1 "Request w1" \(Lothsahn, low\)/);
+});
+
+test('w2049: low alone with a free slot is room for it: the ping names it (low never leaves a slot idle)', async (t) => {
+  const { store, agents, o, dispatcher, heard } = setup(t);
+  putRequests(store, [{ id: 'w1', status: 'queued', priority: 'low', queuedFor: { at: T0 } }]);
+  agentsRoom(agents, ['lothdesktop']);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  o.capacityMayHaveFreed('worker y stopped');
+  t.mock.timers.tick(30_000);
+  t.mock.timers.reset();
+  const ping = heard(dispatcher().info.id, '[ledger] Capacity may have freed').at(-1)!.text;
+  assert.deepEqual(pingOrder(ping), ['w1'], ping);
+});
+
+test('w2049: within one priority, started work that runs only on the computers it names goes before general work; never ahead of a higher priority', async (t) => {
+  const { store, agents, o, dispatcher, heard } = setup(t);
+  const at = (h: number) => `2026-10-24T0${h}:00:00.000Z`;
+  putRequests(store, [
+    // General normal work, the oldest.
+    { id: 'w1', status: 'queued', createdAt: at(1), queuedFor: { at: at(1) } },
+    // Normal, newer, already had a worker, and waits for lothdesktop alone (a requeued request pinned there).
+    { id: 'w2', status: 'queued', createdAt: at(2), queuedFor: { at: at(2), needs: ['lothdesktop'] }, sessionIds: ['s2'] },
+    // Normal, newest: a leg held for lothdesktop while its own worker carries on elsewhere (w1863).
+    { id: 'w3', status: 'active', createdAt: at(3), legs: [{ at: at(3), needs: ['lothdesktop'], what: 'timing on lothdesktop' }], sessionIds: ['s3'] },
+    // High general work: still first.
+    { id: 'w4', status: 'queued', priority: 'high', createdAt: at(4), queuedFor: { at: at(4) } },
+    // Low pinned work: after every normal one.
+    { id: 'w5', status: 'queued', priority: 'low', createdAt: at(0), queuedFor: { at: at(0), needs: ['lothdesktop'] }, sessionIds: ['s5'] },
+    // Pinned but never started (no worker yet): general, by age.
+    { id: 'w6', status: 'queued', createdAt: at(5), queuedFor: { at: at(5), needs: ['lothdesktop'] } },
+  ]);
+  agentsRoom(agents, ['lothdesktop']);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  o.capacityMayHaveFreed('sandbox lothdesktop/slot2 released');
+  t.mock.timers.tick(30_000);
+  t.mock.timers.reset();
+  const ping = heard(dispatcher().info.id, '[ledger] Capacity may have freed').at(-1)!.text;
+  assert.deepEqual(pingOrder(ping), ['w4', 'w2', 'w3', 'w1', 'w6', 'w5'], ping);
+  assert.match(ping, /by priority, then started work that runs only on the computers it names, then oldest/);
+  assert.match(ping, /w2 "Request w2" \([^)]*started, runs only there/);
+  assert.doesNotMatch(ping, /w6 "Request w6" \([^)]*started/);
+  assert.match(ping, /higher work that fits another computer with room starts there/);
+});
+
+test('w2049: the dashboard sets a request\'s priority: its people, a reviewer or an owner; open requests only; a queued one wakes the capacity ping', (t) => {
+  const { store, o } = setup(t);
+  putRequests(store, [{ id: 'w1', status: 'queued', queuedFor: { at: T0 } }, { id: 'w2', status: 'done', by: BEN }, { id: 'w3', by: BEN }]);
+  let woke = '';
+  (o as unknown as { capacityMayHaveFreed: (what: string) => void }).capacityMayHaveFreed = (what) => (woke = what);
+  assert.equal(o.setPriority('w1', LOTH, 'low').priority, 'low');
+  assert.equal(woke, "w1's priority changed to low");
+  assert.match(store.work.get('w1')!.log.at(-1)!, /priority normal → low, by Lothsahn on the dashboard/);
+  assert.throws(() => o.setPriority('w2', BEN, 'low'), /w2 is done/);
+  assert.equal(o.setPriority('w3', LOTH, 'high', true).priority, 'high', 'an owner sets anyone\'s');
+  assert.throws(() => o.setPriority('w1', { userId: 'someone', displayName: 'Someone' }, 'urgent'), /not Someone's request/);
+  assert.throws(() => o.setPriority('w1', LOTH, 'medium' as never), /priority is one of/);
 });
 
 test('w2046: a released worker whose resume waits for room on its full computer moves to a computer with room: a fresh session there on its branch, with the hand-off and the waiting message; its old slot is released', async (t) => {
