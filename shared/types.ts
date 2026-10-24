@@ -173,6 +173,8 @@ export interface SessionInfo {
   title: string;
   status: SessionStatus;
   statusDetail?: string;
+  /** w1969: the worker's last timed_place verdict, kept with the session so a portal restart does not drop it (w1829). */
+  timedVerdict?: TimedVerdict;
   model?: string;
   permissionMode: PermissionMode;
   /** Reasoning effort for this session's model; unset = the server default (config worker.effort). */

@@ -176,8 +176,10 @@ export function parseNotice(text: string): Notice {
     const waiting = /Requests waiting for you: ([\s\S]*?)\. list_work shows/.exec(rest)?.[1];
     if (waiting) return { kind: 'ledger', summary: `${waiting.split('; ').length} request(s) still waiting`, attention: false, body: rest.trim() };
     // "Queued for capacity, by priority, then oldest:" since w1099 ("Queued for capacity:" before, "Queued:" earlier still).
-    const queued = /Queued(?: for capacity)?(?:, by priority, then oldest)?: ([\s\S]*?)\. Start what fits/.exec(rest)?.[1];
-    const n = queued ? queued.split('; ').length : 0;
+    // w1944 added "and fitting it"; w2049 "then started work that runs only on the computers it names".
+    const queued = /Queued(?: for capacity)?(?: and fitting it)?(?:, by priority(?:, then started work that runs only on the computers it names)?, then oldest)?: ([\s\S]*?)\. (?:Queued with no room|Start what fits)/.exec(rest)?.[1];
+    // One per request id: an item's own parentheses hold "; needs m5" too (w2049).
+    const n = queued ? (queued.match(/(?:^|; )w\d+ "/g)?.length ?? queued.split('; ').length) : 0;
     return { kind: 'ledger', summary: `Capacity may have freed${n ? `; ${n} queued` : ''}`, attention: false, body: rest.trim() };
   }
 

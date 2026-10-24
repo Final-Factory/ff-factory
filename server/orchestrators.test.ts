@@ -1924,7 +1924,7 @@ test("w527: a standing agent's delegation flows into the ledger and onto a worke
   t.mock.timers.tick(30_000);
   t.mock.timers.reset();
   const ping = heard(dispatcher().info.id, '[ledger] Capacity may have freed').map((e) => e.text).join('\n');
-  assert.match(ping, /\[ledger\] Capacity may have freed \(worker x "Other work" stopped, 0 min ago\)\. Room now: game work: pc; agent-slot work: pc\. Queued for capacity and fitting it, by priority, then oldest: w1 "Verify suspected/);
+  assert.match(ping, /\[ledger\] Capacity may have freed \(worker x "Other work" stopped, 0 min ago\)\. Room now: game work: pc; agent-slot work: pc\. Queued for capacity and fitting it, by priority, then started work that runs only on the computers it names, then oldest: w1 "Verify suspected/);
 
   // It starts it in a machine's sandbox: the request is active, and the agent sees how it is doing.
   const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: task, title: 'Regression check', work_id: 'w1' });
@@ -4024,7 +4024,7 @@ test('w1099: the capacity ping and the queued-with-room flag list queued request
   const ping = heard(dispatcher().info.id, '[ledger] Capacity may have freed').at(-1)!.text;
   const order = ['w3', 'w1', 'w2', 'w4'].map((id) => ping.indexOf(`${id} "`));
   assert.ok(order.every((x, i) => x >= 0 && (i === 0 || x > order[i - 1])), `high first, then the normal ones oldest first, then low: ${ping}`);
-  assert.match(ping, /Queued for capacity and fitting it, by priority, then oldest: w3 "Nightly e2e run"/);
+  assert.match(ping, /Queued for capacity and fitting it, by priority, then started work that runs only on the computers it names, then oldest: w3 "Nightly e2e run"/);
   // The flag for requests left queued while a computer has room, in the same order.
   agentsRoom(agents, ['lothdesktop']);
   const later = Date.now() + 11 * 60_000;
@@ -4137,6 +4137,102 @@ test('w1094: the worker that set a ci: gate is gone: the newest worker is resume
   assert.equal(store.work.get('w1')!.status, 'active');
   assert.equal(agents.waker.pending(b.id)?.note, `w1 is unblocked: CI on ${pr} cleared (${checks.text}). Worker ${a.id} set this gate and is gone, so the merge of ${pr} is yours now: you own it (merge on green, fix on red). Run ff-pr merge now (${pr}): it merges on green, or names the red run to read (gh run view <run> --log-failed) and fix. Carry on from where you left it.`);
   agents.waker.cancel(b.id);
+});
+
+/** w2045: the merge-on-green pilot's arm, set on a test's orchestrators (the server reads worker.mergeOnGreenPilotPercent). */
+function mergeOnGreenArm(o: unknown, arm: (id: string) => boolean) {
+  (o as { d: { mergeOnGreenPilot?: (id: string) => boolean } }).d.mergeOnGreenPilot = arm;
+}
+
+test('w2045: merge on green: a worker in the arm is told it may leave its report; on green CI FF Factory merges at its head and files the report, which closes the request with no turn of the worker', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }]);
+  mergeOnGreenArm(o, (id) => id === 'w1');
+  const pr = 'Final-Factory/FinalFactory#2045';
+  const head = 'abc1234def5678';
+  let checks: { done: boolean; text: string; green?: true } = { done: false, text: `1 of 1 checks on ${pr} still running` };
+  const merges: string[][] = [];
+  const watch = new BlockerWatch({ store, orchestrators: o, ci: async () => checks, merge: async (ref, h) => void merges.push([ref, h]) });
+  const a = await startedFor(env, 'w1');
+  const told = String(await a.h.blocked_on!({ request: 'w1', prs: [`ci:${pr}`], head, what: 'CI on PR #2045' }));
+  assert.match(told, /^w1 is in the merge-on-green pilot \(w2045\): .*merge_on_green: the report you would write after the merge/);
+  assert.match(told, /Recorded: w1 is Blocked on CI on/);
+  assert.equal(store.work.get('w1')!.blocked!.mergeOnGreen, undefined, 'not until it leaves its report');
+  const report = 'TL;DR: the fix is in.\n\nDONE: w1\nLearned: nothing new';
+  const set = String(await a.h.blocked_on!({ request: 'w1', prs: [`ci:${pr}`], head, what: 'CI on PR #2045', merge_on_green: report }));
+  assert.match(set, /^Recorded: w1 is Blocked on CI on .*, merge on green \(w2045\)\. .*no DONE line now/);
+  assert.deepEqual(store.work.get('w1')!.blocked!.mergeOnGreen, { head, report, session: a.id });
+  // A DONE in the turn that ends now is the report's, filed after the merge: it does not close the request yet.
+  o.workerTurnEnded(a.info, 'DONE: w1\nLearned: nothing new');
+  assert.equal(store.work.get('w1')!.status, 'blocked');
+  await watch.tick();
+  assert.deepEqual(merges, [], 'nothing merged while CI runs');
+  checks = { done: true, green: true, text: `CI on ${pr} finished: all 1 checks passed or skipped` };
+  (watch as unknown as { ciSeen: Map<string, unknown> }).ciSeen.clear();
+  await watch.tick();
+  assert.deepEqual(merges, [[pr, head]]);
+  const w = store.work.get('w1')!;
+  assert.equal(w.status, 'done', w.log.slice(-3).join(' | '));
+  assert.ok(w.log.some((l) => l.includes(`merge-on-green pilot (w2045): FF Factory merged ${pr} at abc1234def56 on green CI with no model turn`)));
+  assert.equal(agents.waker.pending(a.id), undefined, 'the worker is not resumed');
+});
+
+test('w2045: merge on green: red CI, or a merge GitHub refuses, resumes the worker as without it, saying the report was not filed', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }, { id: 'w2' }]);
+  mergeOnGreenArm(o, () => true);
+  const head = 'abc1234def5678';
+  const checks = new Map<string, { done: boolean; text: string; green?: true }>();
+  const merges: string[] = [];
+  const watch = new BlockerWatch({
+    store,
+    orchestrators: o,
+    ci: async (ref) => checks.get(ref),
+    merge: async (ref) => {
+      merges.push(ref);
+      throw new Error(`gh pr merge ${ref}: Head branch was modified. Review and try the merge again.`);
+    },
+  });
+  const report = 'DONE: w1\nLearned: nothing new';
+  const red = 'Final-Factory/FinalFactory#1';
+  const refused = 'Final-Factory/FinalFactory#2';
+  const a = await startedFor(env, 'w1');
+  const b = await startedFor(env, 'w2');
+  await a.h.blocked_on!({ request: 'w1', prs: [`ci:${red}`], head, what: 'CI', merge_on_green: report });
+  await b.h.blocked_on!({ request: 'w2', prs: [`ci:${refused}`], head, what: 'CI', merge_on_green: report.replace('w1', 'w2') });
+  checks.set(red, { done: true, text: `CI on ${red} finished: 1 of 1 checks failed (Test in editmode)` });
+  checks.set(refused, { done: true, green: true, text: `CI on ${refused} finished: all 1 checks passed or skipped` });
+  await watch.tick();
+  assert.deepEqual(merges, [refused], 'red is never merged');
+  assert.equal(store.work.get('w1')!.status, 'active');
+  assert.match(agents.waker.pending(a.id)!.note, /1 of 1 checks failed \(Test in editmode\); FF Factory did not merge it \(the checks are not all green\), and the report you left with merge_on_green was not filed\)\. Run ff-pr merge now/);
+  assert.equal(store.work.get('w2')!.status, 'active');
+  assert.match(agents.waker.pending(b.id)!.note, /FF Factory tried to merge it and GitHub said: gh pr merge Final-Factory\/FinalFactory#2: Head branch was modified\. .*Merge it yourself \(ff-pr merge\)/);
+  agents.waker.cancel(a.id);
+  agents.waker.cancel(b.id);
+});
+
+test('w2045: merge_on_green is ignored, the wait set as usual, out of the arm, without head, or with a report that has no DONE line for the request', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }, { id: 'w2' }]);
+  mergeOnGreenArm(o, (id) => id === 'w1');
+  const pr = 'Final-Factory/FinalFactory#3';
+  const a = await startedFor(env, 'w1');
+  const b = await startedFor(env, 'w2');
+  const out = String(await b.h.blocked_on!({ request: 'w2', prs: [`ci:${pr}`], head: 'abc1234', what: 'CI', merge_on_green: 'DONE: w2\nLearned: nothing new' }));
+  assert.match(out, /^merge_on_green ignored: w2 is not in the merge-on-green pilot; you are resumed when CI finishes, as usual\. Recorded: w2 is Blocked/);
+  assert.equal(store.work.get('w2')!.blocked!.mergeOnGreen, undefined);
+  const plain = String(await b.h.blocked_on!({ request: 'w2', prs: [`ci:${pr}`], head: 'abc1234', what: 'CI' }));
+  assert.match(plain, /^Recorded: w2 is Blocked/, 'the control arm hears nothing of the pilot');
+  assert.match(String(await a.h.blocked_on!({ request: 'w1', prs: [`ci:${pr}`], what: 'CI', merge_on_green: 'DONE: w1' })), /^merge_on_green ignored: it needs head/);
+  assert.match(String(await a.h.blocked_on!({ request: 'w1', prs: [`ci:${pr}`], head: 'abc1234', what: 'CI', merge_on_green: 'w1: still open: the deploy check' })), /^merge_on_green ignored: the report has no "DONE: w1" line/);
+  assert.equal(store.work.get('w1')!.blocked!.mergeOnGreen, undefined);
 });
 
 test('w1094: a worker sent a second request still registers a wait for the first (7d8eebb0: w1078 after w1095); without request it blocks the one it serves now', async (t) => {
@@ -4682,7 +4778,7 @@ test('w1984: a worker stopped on purpose, or whose timed work is on another mach
   assert.equal(agents.benchPriorities('pc')[b.id].away, undefined, 'a stale bench state counts for nothing');
   machines.allStats = real;
   // Its timed leg placed elsewhere (timed_place).
-  (agents as unknown as { timedVerdicts: Map<string, unknown> }).timedVerdicts.set(b.id, { verdict: 'elsewhere', why: 'big computer', until: new Date(Date.now() + 3_600_000).toISOString(), leg: 'w9' });
+  store.sessions.get(b.id)!.timedVerdict = { verdict: 'elsewhere', why: 'big computer', until: new Date(Date.now() + 3_600_000).toISOString(), leg: 'w9' };
   assert.deepEqual(agents.benchPriorities('pc')[b.id].away, { why: `its worker ${b.id.slice(0, 8)}'s timed leg was placed elsewhere (w9)`, exclusive_only: true });
 });
 
@@ -4990,6 +5086,9 @@ test('w1969: a worker on a big computer asks timed_place; its leg is filed Queue
   assert.match(leg.log.join('\n'), /filed by FF Factory for worker \w+ on w1 \(w1969 timed_place\) from pc: queued for m3 > lothlaptop, the small computers that take timed runs \(a big one only once none of them can take it: offline past the load-scaled wait, held or without a game sandbox, w2048\): pc has 6 agent slots/);
   // Its machine hears the verdict with the bench priorities: the guard then names the leg.
   assert.deepEqual({ verdict: agents.benchPriorities('pc')[id]?.timed?.verdict, leg: agents.benchPriorities('pc')[id]?.timed?.leg }, { verdict: 'elsewhere', leg: 'w2' });
+  // w1829: the verdict is kept with the session, so a portal restart does not drop it (BEAST, 2026-10-24 13:43Z).
+  store.flush();
+  assert.equal(new Store(env.cfg.dataDir).sessions.get(id)?.timedVerdict?.leg, 'w2', 'kept across a portal restart');
   // Asked again: no second leg.
   assert.match(String(await h.timed_place!({ what: 'the same A/B', brief: 'again' })), /w1 already has an open timed leg, w2/);
   assert.equal([...store.work.values()].filter((x) => x.timedLeg).length, 1);
@@ -5114,7 +5213,7 @@ test('w1944: the capacity ping names the room a queued request cannot use, lets 
   o.capacityMayHaveFreed('sandbox m5/slot3 released');
   tick(30_000);
   assert.equal(pings().length, 1);
-  assert.match(pings()[0], /fitting it, by priority, then oldest: w2 "Blueprint paste keeps the filter".*Queued with no room for them now: w1 \(m5 is a Mac, which refuses the multiplayer client its MP scenario starts \(w665\)\)\./);
+  assert.match(pings()[0], /fitting it, by priority, then started work that runs only on the computers it names, then oldest: w2 "Blueprint paste keeps the filter".*Queued with no room for them now: w1 \(m5 is a Mac, which refuses the multiplayer client its MP scenario starts \(w665\)\)\./);
 
   // The hourly cap is spent. biscuit (Windows) frees: the urgent MP fix fits it, so the ping goes at the gap, not in an hour.
   const wakes = (o as unknown as { capacityWakes: number[] }).capacityWakes;
@@ -5125,7 +5224,7 @@ test('w1944: the capacity ping names the room a queued request cannot use, lets 
   o.capacityMayHaveFreed('sandbox biscuit/slot1 released');
   tick(30_000);
   assert.equal(pings().length, 2, 'urgent work that fits is not held by the hourly cap');
-  assert.match(pings()[1], /fitting it, by priority, then oldest: w1 "Nightly: fix MP-tutorial-e2e-loth" \(Lothsahn, urgent\); w2/);
+  assert.match(pings()[1], /fitting it, by priority, then started work that runs only on the computers it names, then oldest: w1 "Nightly: fix MP-tutorial-e2e-loth" \(Lothsahn, urgent\); w2/);
 
   // Normal work alone waits for the cap, as before.
   store.putWork({ ...store.work.get('w1')!, status: 'active', queuedFor: undefined });
@@ -5626,100 +5725,86 @@ test('w2007: the dispatcher passing the budget files its request for the system 
   assert.deepEqual(pushed.map((p) => p.users), [['ben']]);
 });
 
-/** w2045: the merge-on-green pilot's arm, set on a test's orchestrators (the server reads worker.mergeOnGreenPilotPercent). */
-function mergeOnGreenArm(o: unknown, arm: (id: string) => boolean) {
-  (o as { d: { mergeOnGreenPilot?: (id: string) => boolean } }).d.mergeOnGreenPilot = arm;
+// ---------------------------------------------------------------- w2049: priority low, and started work pinned to a computer
+
+/** The capacity ping's request ids in the order it lists the ones that fit (w2049). */
+function pingOrder(ping: string): string[] {
+  const fitting = ping.split('Queued for capacity and fitting it')[1]?.split('Queued with no room')[0] ?? '';
+  return [...fitting.matchAll(/(w\d+) "/g)].map((m) => m[1]);
 }
 
-test('w2045: merge on green: a worker in the arm is told it may leave its report; on green CI FF Factory merges at its head and files the report, which closes the request with no turn of the worker', async (t) => {
-  const env = await setupOnMachine(t);
-  const { store, agents, o } = env;
-  agentsRoom(agents, ['pc']);
-  putRequests(store, [{ id: 'w1' }]);
-  mergeOnGreenArm(o, (id) => id === 'w1');
-  const pr = 'Final-Factory/FinalFactory#2045';
-  const head = 'abc1234def5678';
-  let checks: { done: boolean; text: string; green?: true } = { done: false, text: `1 of 1 checks on ${pr} still running` };
-  const merges: string[][] = [];
-  const watch = new BlockerWatch({ store, orchestrators: o, ci: async () => checks, merge: async (ref, h) => void merges.push([ref, h]) });
-  const a = await startedFor(env, 'w1');
-  const told = String(await a.h.blocked_on!({ request: 'w1', prs: [`ci:${pr}`], head, what: 'CI on PR #2045' }));
-  assert.match(told, /^w1 is in the merge-on-green pilot \(w2045\): .*merge_on_green: the report you would write after the merge/);
-  assert.match(told, /Recorded: w1 is Blocked on CI on/);
-  assert.equal(store.work.get('w1')!.blocked!.mergeOnGreen, undefined, 'not until it leaves its report');
-  const report = 'TL;DR: the fix is in.\n\nDONE: w1\nLearned: nothing new';
-  const set = String(await a.h.blocked_on!({ request: 'w1', prs: [`ci:${pr}`], head, what: 'CI on PR #2045', merge_on_green: report }));
-  assert.match(set, /^Recorded: w1 is Blocked on CI on .*, merge on green \(w2045\)\. .*no DONE line now/);
-  assert.deepEqual(store.work.get('w1')!.blocked!.mergeOnGreen, { head, report, session: a.id });
-  // A DONE in the turn that ends now is the report's, filed after the merge: it does not close the request yet.
-  o.workerTurnEnded(a.info, 'DONE: w1\nLearned: nothing new');
-  assert.equal(store.work.get('w1')!.status, 'blocked');
-  await watch.tick();
-  assert.deepEqual(merges, [], 'nothing merged while CI runs');
-  checks = { done: true, green: true, text: `CI on ${pr} finished: all 1 checks passed or skipped` };
-  (watch as unknown as { ciSeen: Map<string, unknown> }).ciSeen.clear();
-  await watch.tick();
-  assert.deepEqual(merges, [[pr, head]]);
-  const w = store.work.get('w1')!;
-  assert.equal(w.status, 'done', w.log.slice(-3).join(' | '));
-  assert.ok(w.log.some((l) => l.includes(`merge-on-green pilot (w2045): FF Factory merged ${pr} at abc1234def56 on green CI with no model turn`)));
-  assert.equal(agents.waker.pending(a.id), undefined, 'the worker is not resumed');
+test('w2049: a free slot with a normal and a low request queued takes the normal one', async (t) => {
+  const { store, agents, o, dispatcher, heard } = setup(t);
+  const q = (at: string) => ({ at });
+  // The low one is older: priority still comes first.
+  putRequests(store, [
+    { id: 'w1', status: 'queued', priority: 'low', createdAt: '2026-10-24T01:00:00.000Z', queuedFor: q('2026-10-24T01:00:00.000Z') },
+    { id: 'w2', status: 'queued', priority: 'normal', createdAt: '2026-10-24T02:00:00.000Z', queuedFor: q('2026-10-24T02:00:00.000Z') },
+  ]);
+  agentsRoom(agents, ['lothdesktop']);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  o.capacityMayHaveFreed('worker x stopped');
+  t.mock.timers.tick(30_000);
+  t.mock.timers.reset();
+  const ping = heard(dispatcher().info.id, '[ledger] Capacity may have freed').at(-1)!.text;
+  assert.deepEqual(pingOrder(ping), ['w2', 'w1'], ping);
+  assert.match(ping, /w1 "Request w1" \(Lothsahn, low\)/);
 });
 
-test('w2045: merge on green: red CI, or a merge GitHub refuses, resumes the worker as without it, saying the report was not filed', async (t) => {
-  const env = await setupOnMachine(t);
-  const { store, agents, o } = env;
-  agentsRoom(agents, ['pc']);
-  putRequests(store, [{ id: 'w1' }, { id: 'w2' }]);
-  mergeOnGreenArm(o, () => true);
-  const head = 'abc1234def5678';
-  const checks = new Map<string, { done: boolean; text: string; green?: true }>();
-  const merges: string[] = [];
-  const watch = new BlockerWatch({
-    store,
-    orchestrators: o,
-    ci: async (ref) => checks.get(ref),
-    merge: async (ref) => {
-      merges.push(ref);
-      throw new Error(`gh pr merge ${ref}: Head branch was modified. Review and try the merge again.`);
-    },
-  });
-  const report = 'DONE: w1\nLearned: nothing new';
-  const red = 'Final-Factory/FinalFactory#1';
-  const refused = 'Final-Factory/FinalFactory#2';
-  const a = await startedFor(env, 'w1');
-  const b = await startedFor(env, 'w2');
-  await a.h.blocked_on!({ request: 'w1', prs: [`ci:${red}`], head, what: 'CI', merge_on_green: report });
-  await b.h.blocked_on!({ request: 'w2', prs: [`ci:${refused}`], head, what: 'CI', merge_on_green: report.replace('w1', 'w2') });
-  checks.set(red, { done: true, text: `CI on ${red} finished: 1 of 1 checks failed (Test in editmode)` });
-  checks.set(refused, { done: true, green: true, text: `CI on ${refused} finished: all 1 checks passed or skipped` });
-  await watch.tick();
-  assert.deepEqual(merges, [refused], 'red is never merged');
-  assert.equal(store.work.get('w1')!.status, 'active');
-  assert.match(agents.waker.pending(a.id)!.note, /1 of 1 checks failed \(Test in editmode\); FF Factory did not merge it \(the checks are not all green\), and the report you left with merge_on_green was not filed\)\. Run ff-pr merge now/);
-  assert.equal(store.work.get('w2')!.status, 'active');
-  assert.match(agents.waker.pending(b.id)!.note, /FF Factory tried to merge it and GitHub said: gh pr merge Final-Factory\/FinalFactory#2: Head branch was modified\. .*Merge it yourself \(ff-pr merge\)/);
-  agents.waker.cancel(a.id);
-  agents.waker.cancel(b.id);
+test('w2049: low alone with a free slot is room for it: the ping names it (low never leaves a slot idle)', async (t) => {
+  const { store, agents, o, dispatcher, heard } = setup(t);
+  putRequests(store, [{ id: 'w1', status: 'queued', priority: 'low', queuedFor: { at: T0 } }]);
+  agentsRoom(agents, ['lothdesktop']);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  o.capacityMayHaveFreed('worker y stopped');
+  t.mock.timers.tick(30_000);
+  t.mock.timers.reset();
+  const ping = heard(dispatcher().info.id, '[ledger] Capacity may have freed').at(-1)!.text;
+  assert.deepEqual(pingOrder(ping), ['w1'], ping);
 });
 
-test('w2045: merge_on_green is ignored, the wait set as usual, out of the arm, without head, or with a report that has no DONE line for the request', async (t) => {
-  const env = await setupOnMachine(t);
-  const { store, agents, o } = env;
-  agentsRoom(agents, ['pc']);
-  putRequests(store, [{ id: 'w1' }, { id: 'w2' }]);
-  mergeOnGreenArm(o, (id) => id === 'w1');
-  const pr = 'Final-Factory/FinalFactory#3';
-  const a = await startedFor(env, 'w1');
-  const b = await startedFor(env, 'w2');
-  const out = String(await b.h.blocked_on!({ request: 'w2', prs: [`ci:${pr}`], head: 'abc1234', what: 'CI', merge_on_green: 'DONE: w2\nLearned: nothing new' }));
-  assert.match(out, /^merge_on_green ignored: w2 is not in the merge-on-green pilot; you are resumed when CI finishes, as usual\. Recorded: w2 is Blocked/);
-  assert.equal(store.work.get('w2')!.blocked!.mergeOnGreen, undefined);
-  const plain = String(await b.h.blocked_on!({ request: 'w2', prs: [`ci:${pr}`], head: 'abc1234', what: 'CI' }));
-  assert.match(plain, /^Recorded: w2 is Blocked/, 'the control arm hears nothing of the pilot');
-  assert.match(String(await a.h.blocked_on!({ request: 'w1', prs: [`ci:${pr}`], what: 'CI', merge_on_green: 'DONE: w1' })), /^merge_on_green ignored: it needs head/);
-  assert.match(String(await a.h.blocked_on!({ request: 'w1', prs: [`ci:${pr}`], head: 'abc1234', what: 'CI', merge_on_green: 'w1: still open: the deploy check' })), /^merge_on_green ignored: the report has no "DONE: w1" line/);
-  assert.equal(store.work.get('w1')!.blocked!.mergeOnGreen, undefined);
+test('w2049: within one priority, started work that runs only on the computers it names goes before general work; never ahead of a higher priority', async (t) => {
+  const { store, agents, o, dispatcher, heard } = setup(t);
+  const at = (h: number) => `2026-10-24T0${h}:00:00.000Z`;
+  putRequests(store, [
+    // General normal work, the oldest.
+    { id: 'w1', status: 'queued', createdAt: at(1), queuedFor: { at: at(1) } },
+    // Normal, newer, already had a worker, and waits for lothdesktop alone (a requeued request pinned there).
+    { id: 'w2', status: 'queued', createdAt: at(2), queuedFor: { at: at(2), needs: ['lothdesktop'] }, sessionIds: ['s2'] },
+    // Normal, newest: a leg held for lothdesktop while its own worker carries on elsewhere (w1863).
+    { id: 'w3', status: 'active', createdAt: at(3), legs: [{ at: at(3), needs: ['lothdesktop'], what: 'timing on lothdesktop' }], sessionIds: ['s3'] },
+    // High general work: still first.
+    { id: 'w4', status: 'queued', priority: 'high', createdAt: at(4), queuedFor: { at: at(4) } },
+    // Low pinned work: after every normal one.
+    { id: 'w5', status: 'queued', priority: 'low', createdAt: at(0), queuedFor: { at: at(0), needs: ['lothdesktop'] }, sessionIds: ['s5'] },
+    // Pinned but never started (no worker yet): general, by age.
+    { id: 'w6', status: 'queued', createdAt: at(5), queuedFor: { at: at(5), needs: ['lothdesktop'] } },
+  ]);
+  agentsRoom(agents, ['lothdesktop']);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  o.capacityMayHaveFreed('sandbox lothdesktop/slot2 released');
+  t.mock.timers.tick(30_000);
+  t.mock.timers.reset();
+  const ping = heard(dispatcher().info.id, '[ledger] Capacity may have freed').at(-1)!.text;
+  assert.deepEqual(pingOrder(ping), ['w4', 'w2', 'w3', 'w1', 'w6', 'w5'], ping);
+  assert.match(ping, /by priority, then started work that runs only on the computers it names, then oldest/);
+  assert.match(ping, /w2 "Request w2" \([^)]*started, runs only there/);
+  assert.doesNotMatch(ping, /w6 "Request w6" \([^)]*started/);
+  assert.match(ping, /higher work that fits another computer with room starts there/);
+});
+
+test('w2049: the dashboard sets a request\'s priority: its people, a reviewer or an owner; open requests only; a queued one wakes the capacity ping', (t) => {
+  const { store, o } = setup(t);
+  putRequests(store, [{ id: 'w1', status: 'queued', queuedFor: { at: T0 } }, { id: 'w2', status: 'done', by: BEN }, { id: 'w3', by: BEN }]);
+  let woke = '';
+  (o as unknown as { capacityMayHaveFreed: (what: string) => void }).capacityMayHaveFreed = (what) => (woke = what);
+  assert.equal(o.setPriority('w1', LOTH, 'low').priority, 'low');
+  assert.equal(woke, "w1's priority changed to low");
+  assert.match(store.work.get('w1')!.log.at(-1)!, /priority normal → low, by Lothsahn on the dashboard/);
+  assert.throws(() => o.setPriority('w2', BEN, 'low'), /w2 is done/);
+  assert.equal(o.setPriority('w3', LOTH, 'high', true).priority, 'high', 'an owner sets anyone\'s');
+  assert.throws(() => o.setPriority('w1', { userId: 'someone', displayName: 'Someone' }, 'urgent'), /not Someone's request/);
+  assert.throws(() => o.setPriority('w1', LOTH, 'medium' as never), /priority is one of/);
 });
 
 test('w2046: a released worker whose resume waits for room on its full computer moves to a computer with room: a fresh session there on its branch, with the hand-off and the waiting message; its old slot is released', async (t) => {
