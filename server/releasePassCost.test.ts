@@ -195,3 +195,47 @@ test('w2026: connects after a start unzip one compressed transcript at a time, b
   }
   assert.equal(tailReads, 0);
 });
+
+test('w2026: a daemon with thousands of sessions is welcomed after its last seqs are looked up a slice per loop turn', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'attach-slices-'));
+  const cfg = { dataDir: dir, port: 0, limits: { maxSessions: 30, maxUnity: 2, maxSandboxes: 4, minFreeGB: 0, minFreeRamGB: 0 }, orchestrator: { model: 'opus', effort: 'low', notifyOnWorkerEvents: false }, worker: { permissionMode: 'bypassPermissions', effort: 'low' }, unity: {} } as unknown as Config;
+  const store = new Store(dir);
+  const ids = Array.from({ length: 1000 }, (_, i) => `s${i}`);
+  for (const id of ids) {
+    store.putSession({ id, kind: 'worker', machineId: 'pc', title: 'w1: x', status: 'stopped', permissionMode: 'default', createdAt: iso(NOW), lastActivityAt: iso(NOW), turns: 1, costUsd: 0, pendingPermissions: [] } as SessionInfo);
+    store.append(id, { kind: 'system', text: 'a' });
+  }
+  // the portal starting again: nothing remembered
+  const fresh = new Store(dir);
+  for (const id of ids) fresh.putSession(store.sessions.get(id)!);
+  fresh.putMachine({ id: 'pc', name: 'pc', platform: 'linux', sessionIds: ids, sandboxes: [], online: false, createdAt: iso(NOW) } as unknown as Machine);
+  const machines = new MachineManager(cfg, fresh, new SessionManager(cfg, fresh));
+  const sent: { type: string; sessions?: { id: string; lastSeq: number }[] }[] = [];
+  const ws = { on: () => undefined, send: (s: string) => void sent.push(JSON.parse(s)), close: () => undefined, readyState: 1 };
+  const orig = fresh.lastSeqNow.bind(fresh);
+  let calls = 0;
+  let most = 0;
+  let turn = 0;
+  const tick = setInterval(() => undefined, 1);
+  fresh.lastSeqNow = (sid: string) => {
+    calls++;
+    turn++;
+    most = Math.max(most, turn);
+    return orig(sid);
+  };
+  try {
+    machines.attach('pc', ws as never);
+    assert.equal(calls, 200, 'one slice in the connect itself');
+    assert.equal(sent.length, 0);
+    for (let i = 0; i < 50 && !sent.some((m) => m.type === 'welcome'); i++) {
+      turn = 0;
+      await new Promise((r) => setImmediate(r));
+    }
+    const welcome = sent.find((m) => m.type === 'welcome');
+    assert.equal(welcome?.sessions?.length, 1000);
+    assert.ok(welcome!.sessions!.every((s) => s.lastSeq === 1));
+    assert.ok(most <= 200, `at most a slice a loop turn (saw ${most})`);
+  } finally {
+    clearInterval(tick);
+  }
+});

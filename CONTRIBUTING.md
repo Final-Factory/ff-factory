@@ -240,6 +240,18 @@ the sidebar and its lists, the Overview board, the Requests list), the state sto
 adds DOM to a page of thousands of agents. It builds the page and runs `--check` on the orchestrator and beside the
 busiest sandbox; run it on a machine that is otherwise quiet, and put its result in your pull request.
 
+**The server's event loop: nothing blocks it for more than about a second** (w2026, 2026-10-24: three auto-deploys rolled back
+and every machine dropped for two hours). A blocked loop misses `/api/health` (the deploy check gives a new start 300 s for one
+answer), the daemons' pings (they reconnect after 45 s silent) and their 8 s WebSocket handshakes (a busy first minute after a
+start had each machine reconnect up to 8 times). Most at risk: anything per connect, per minute or at start that walks every
+session, every request or every transcript, since all three only grow. Bound it per loop turn (a slice, then `setImmediate`),
+move file work to `fs.promises` or a stream, and index once per pass instead of per item. Two ways to see it:
+- the journal's `stall profile:` lines (`server/stallProfile.ts`) name the functions behind each minute's stall, on the live
+  portal (`portal_logs` source `journal`, grep `stall profile`), and in the first minutes after a deploy;
+- `node scripts/release-pass-bench.ts` times one release pass over a production-sized ledger at any checkout; compare it
+  with main's on the same machine. Pin the fix with a test that counts the work (`server/releasePassCost.test.ts`), since CI
+  runs no timing tests.
+
 ## Versions and releases
 
 The version lives in `package.json` (web/package.json follows it) and uses semantic versioning. Add

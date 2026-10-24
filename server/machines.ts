@@ -38,6 +38,8 @@ import type { GhAppToken } from '../shared/githubAppRoute.ts';
 
 const PING_MS = 20_000;
 const DEAD_MS = 45_000;
+/** Sessions whose last seq a daemon's connect looks up in one loop turn (w2026). */
+const ATTACH_SLICE = 200;
 /** w1894: a daemon's person-play report older than this holds nothing (its stats come every 15 s). */
 export const PERSON_PLAY_STALE_MS = 3 * 60_000;
 /**
@@ -1989,11 +1991,19 @@ export class MachineManager {
     Object.assign(m, { online: true, lastSeen: new Date().toISOString() });
     this.store.putMachine(m);
     const ids = m.sessionIds.filter((sid) => this.store.sessions.has(sid));
-    const seqs = ids.map((sid) => this.store.lastSeqNow(sid));
-    if (seqs.every((n) => n !== undefined)) return this.welcome(id, ws, m, ids.map((sid, i) => ({ id: sid, lastSeq: seqs[i]! })));
+    // At most ATTACH_SLICE sessions' last seqs a loop turn: a machine lists every session it ever ran, and after a start none is
+    // remembered (w2026: 738ed3ad2's first minute spent 12.8 s in this lookup, so the daemons' 8 s handshakes timed out and each
+    // machine reconnected up to 8 times before it stayed).
+    const seqs = ids.slice(0, ATTACH_SLICE).map((sid) => this.store.lastSeqNow(sid));
+    if (ids.length <= ATTACH_SLICE && seqs.every((n) => n !== undefined)) return this.welcome(id, ws, m, ids.map((sid, i) => ({ id: sid, lastSeq: seqs[i]! })));
     // w2026: a compressed transcript without its tail file is unzipped off the main thread first (Store.lastSeqAsync), one at a
     // time, and the welcome waits for it; the loop answers /api/health and the other daemons meanwhile.
     void (async () => {
+      while (seqs.length < ids.length) {
+        await new Promise((r) => setImmediate(r));
+        if (this.links.get(id) !== link) return;
+        for (const sid of ids.slice(seqs.length, seqs.length + ATTACH_SLICE)) seqs.push(this.store.lastSeqNow(sid));
+      }
       const sessions: { id: string; lastSeq: number }[] = [];
       for (const [i, sid] of ids.entries()) sessions.push({ id: sid, lastSeq: seqs[i] ?? (await this.store.lastSeqAsync(sid)) });
       if (this.links.get(id) === link) this.welcome(id, ws, m, sessions);
