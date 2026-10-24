@@ -53,7 +53,7 @@ import { MachinePauses, pauseHolds } from './machinePause.ts';
 import { playHolds, playLine } from '../shared/personPlay.ts';
 import { unitySlotsLine } from '../shared/fleet.ts';
 import { isMidTurn, midTurnRefusal, othersMidTurn, snapshotOf, type OptionsFactory, type SessionHandle, type SessionManager, type TurnEndMeta } from './sessions.ts';
-import { FLAG_LABEL, WORK_BLOCKER_KINDS, WORK_OPEN, WORK_PRIORITIES, type WorkBlockerKind, type WorkSource, type BenchPriority, type AttachmentRef, type DeliveredAttachment, type ImageInput, type PermissionMode, type Requester, type Sandbox, type SessionInfo, type TranscriptEvent, type WorkItem, type WorkPriority, type WorkStatus } from '../shared/types.ts';
+import { FLAG_LABEL, WORK_BLOCKER_KINDS, WORK_OPEN, WORK_PRIORITIES, type WorkBlockerKind, type WorkSource, type BenchPriority, type BenchAway, type AttachmentRef, type DeliveredAttachment, type ImageInput, type PermissionMode, type Requester, type Sandbox, type SessionInfo, type TranscriptEvent, type WorkItem, type WorkPriority, type WorkStatus } from '../shared/types.ts';
 import { attachmentForMachine, publicRef, publishableFile, uploadForMachine, type AttachmentStore } from './attachments.ts';
 import type { TimedRuns } from './timedRuns.ts';
 import { REVIEW_DEFAULTS, type ReviewStore } from './review.ts';
@@ -180,6 +180,10 @@ type Where = { machineId?: string; machineSandbox?: string };
 const BUSY_STATUS = new Set(['running', 'starting', 'waiting_permission']);
 /** w1378: how long after a boot the [needs you] digest goes, once the machines' workers have reported in. */
 const NEEDS_YOU_DIGEST_MS = 3 * 60_000;
+/** How old a machine's last bench state may be for w1984's "a ticket on another machine" (stats come every 15 s). */
+const BENCH_STATE_FRESH_MS = 2 * 60_000;
+/** w1984: how long a moved worker's tickets in its old machine's bench queue stay marked away (its waiters end long before). */
+const BENCH_MOVED_AWAY_MS = 6 * 3_600_000;
 
 /** A machine's clone folder name (its Unity instance name), read as a path of the machine's own platform, not this host's. */
 const cloneName = (m: Pick<Machine, 'platform' | 'repoPath'>) => (m.platform === 'win32' ? path.win32 : path.posix).basename(m.repoPath);
@@ -2422,6 +2426,9 @@ export class Agents {
       const note = `${stage}${w.outcome ? `Its last report: ${w.outcome}` : 'No report yet.'}`;
       this.orchestrators?.handBack(w, info, { machine: info.machineId, sandbox: info.machineSandbox, ...(branch ? { branch } : {}), why: reason, note, how: 'moved by stop_agent move_to (w1600)', ...(saved ? { saved } : {}), to: target });
     }
+    // w1984: its waiting bench tickets on the old machine hold nobody back from now on (benchPriorities marks them away)
+    info.movedAway = { machine: info.machineId, to: target, at: new Date().toISOString() };
+    this.store.putSession(info);
     console.log(`move: ${reqs.map((w) => w.id).join(', ')} from worker ${info.id} on ${from} to ${target} (${reason}); branch ${branch ?? 'unknown'}${saved ? `; ${saved}` : ''}`);
     return `Moved ${reqs.map((w) => w.id).join(', ')} off ${sessionId} on ${from}, for ${target}: its process stopped${view ? ', its Live view ended' : ''}${saved ? `, ${saved}` : ''}. Each is Queued for ${target} with its branch ${branch ?? '(unknown)'} and a note${view ? ' (the Live view settings to stage again)' : ''}. Now ${branch ? `switch_branch a FREE ${target} sandbox to "${branch}", then ` : ''}start_agent with its work_id in that sandbox; the new worker's handover carries the note.`;
   }
@@ -2581,6 +2588,12 @@ export class Agents {
     for (const info of this.store.sessions.values()) {
       if (info.kind !== 'worker' || info.machineId !== machineId) continue;
       const open = this.openWorkOf(info);
+      // w1984: a worker moved off this machine serves no request here any more, but its old waiters may still hold tickets
+      const moved = this.movedAwayFrom(info, machineId);
+      if (moved && !open.length) {
+        out[info.id] = { priority: 'low', requests: [], away: moved };
+        continue;
+      }
       // w1656: the builder of the release planned here takes the bench first, whatever its request's priority; a builder
       // with no open request (build_plan takes `requests: []`) still gets its mark (w1832: else the queue caps its build)
       const release = !!this.builds?.releaseBuilder(machineId, info.id);
@@ -2591,9 +2604,45 @@ export class Agents {
       // w1969: its timed_place verdict while it holds, for this machine's guard
       const v = this.timedVerdicts.get(info.id);
       const timed = v && Date.parse(v.until) > Date.now() ? v : undefined;
-      out[info.id] = { priority: release ? 'urgent' : top, requests: open.map((w) => w.id), ...(exempt ? { exempt } : {}), ...(timed ? { timed } : {}) };
+      const away = release ? undefined : this.benchAway(info, machineId, timed);
+      out[info.id] = { priority: release ? 'urgent' : top, requests: open.map((w) => w.id), ...(exempt ? { exempt } : {}), ...(timed ? { timed } : {}), ...(away ? { away } : {}) };
     }
     return out;
+  }
+
+  /**
+   * Why worker `info`'s waiting tickets in `machineId`'s bench queue should hold nobody back now (w1984), or undefined.
+   * lothsahn, 2026-10-24: "a waiting ticket in a machine's bench queue must not outlive the worker that asked for it":
+   * on LothDesktop the exclusive ticket t00000982 waited on for w1789 after its worker 2e29f29e was stopped and the
+   * timed run had moved to LothLaptop, and the newer shared tickets queued behind it. bench_queue.py parks the tickets
+   * of a session marked so (they keep waiting, blocking nobody) and queues them again at the back once the mark goes.
+   * - stopped on purpose (stop_agent, interrupt_agent, the UI): every waiting ticket, until it is sent a message again;
+   * - a ticket of its own in another machine's queue (its daemon's last bench state), or a timed_place verdict
+   *   "elsewhere": its timed (exclusive) tickets only, so its builds here still count.
+   */
+  private benchAway(info: SessionInfo, machineId: string, timed?: { verdict: string; leg?: string; timedRun?: string }): BenchAway | undefined {
+    const who = `its worker ${info.id.slice(0, 8)}`;
+    const moved = this.movedAwayFrom(info, machineId);
+    if (moved) return moved;
+    if (info.stoppedOnPurpose) return { why: `${who} was stopped on purpose` };
+    const now = Date.now();
+    for (const [m, st] of Object.entries(this.machines?.allStats?.() ?? {})) {
+      if (m === machineId || !st.bench || !(now - Date.parse(st.at ?? '') < BENCH_STATE_FRESH_MS)) continue;
+      const t = [...(st.bench.running ?? []), ...(st.bench.waiters ?? [])].find((x) => x.session === info.id);
+      if (t) return { why: `${who} has ticket ${t.ticket} on ${m} now`, exclusive_only: true };
+    }
+    if (timed?.verdict === 'elsewhere') {
+      const where = timed.leg ? ` (${timed.leg})` : timed.timedRun ? ` (timed_run on ${timed.timedRun})` : '';
+      return { why: `${who}'s timed leg was placed elsewhere${where}`, exclusive_only: true };
+    }
+    return undefined;
+  }
+
+  /** w1984: the away mark of a worker that stop_agent move_to moved off `machineId` (moveWorker), while it holds. */
+  private movedAwayFrom(info: SessionInfo, machineId: string): BenchAway | undefined {
+    const m = info.movedAway;
+    if (!m || m.machine !== machineId || !(Date.now() - Date.parse(m.at) < BENCH_MOVED_AWAY_MS)) return undefined;
+    return { why: `its worker ${info.id.slice(0, 8)} was moved to ${m.to}` };
   }
 
   private openWorkOf(info: SessionInfo): WorkItem[] {

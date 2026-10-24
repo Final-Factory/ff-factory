@@ -129,6 +129,18 @@ test('w1962: the passed marks are written into priorities.json and read back aft
   assert.deepEqual(readPassedMarks(undefined), {});
 });
 
+test('w1984: the portal\'s away mark reaches priorities.json through the daemon\'s own marks', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'w1984-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const away = { why: 'its worker 2e29f29e was stopped on purpose' };
+  const sessions: Record<string, BenchPriority> = { s1789: { priority: 'normal', requests: ['w1789'], away } };
+  const { sessions: out } = raisedSessions({ ...editorSessions([{ session: 's1789', sandbox: 'slot5' }], sessions), ...sessions }, [], {});
+  const file = writeBenchPriorities(root, out, NOW, false)!;
+  const f = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.deepEqual(f.sessions.s1789.away, away, 'bench_queue.py reads it from here');
+  assert.equal(f.sessions['editor:slot5'].away, undefined, 'its sandbox editor\'s life ticket is not parked');
+});
+
 const waitFor = async (ok: () => boolean, ms: number) => {
   const until = Date.now() + ms;
   while (!ok() && Date.now() < until) await new Promise((r) => setTimeout(r, 50));

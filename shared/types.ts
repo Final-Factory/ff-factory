@@ -316,6 +316,12 @@ export interface SessionInfo {
    */
   stoppedOnPurpose?: boolean;
   /**
+   * Workers (w1984): stop_agent move_to moved its requests off `machine` to `to` at `at`. Its waiting bench tickets left
+   * in that machine's queue are marked away there (Agents.benchPriorities) for BENCH_MOVED_AWAY_MS, so they hold nobody
+   * back while its old processes wind down.
+   */
+  movedAway?: { machine: string; to: string; at: string };
+  /**
    * Machine sessions (w613): its process ended because its daemon went away (a worker update, a restart, a crash) and
    * not on purpose, at this time. Its sandbox stays its (holdsSandbox, shared/agentState.ts) until it is messaged, stopped
    * on purpose, or released: HOLD_PLACE_MS (30 min, w656) after this, the release pass (server/placeAgain.ts) releases
@@ -599,6 +605,17 @@ export interface BenchPriority {
   raisedFor?: string;
   /** w1969: the worker's last timed_place verdict while it holds; the guard lets its exclusive timing tickets through only on "here". */
   timed?: TimedVerdict;
+  /**
+   * w1984 (server/agents.ts benchAway): its worker is away from this machine's queue, so its waiting tickets hold
+   * nobody back (bench_queue.py parks them, and queues them again at the back once the mark goes).
+   */
+  away?: BenchAway;
+}
+
+/** Why a worker's waiting bench tickets are parked (w1984); `exclusive_only`: only its timed (exclusive) tickets. */
+export interface BenchAway {
+  why: string;
+  exclusive_only?: true;
 }
 
 /** What timed_place decided for a worker's timed leg (w1969, server/timedAsk.ts). */

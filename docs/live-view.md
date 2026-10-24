@@ -325,7 +325,12 @@ sandbox, its branch, the worker's conversation and its hold stay.
      the clean quit of a person's main clone does), checks no scene is still dirty, and only then calls
      `EditorApplication.Exit(0)` on the editor's next update. That call needs the bridge's safety checks off
      (`bridgeExecute`'s `safetyChecks`), which the bridge otherwise refuses.
-  5. It waits up to 3 minutes for the process to go. One that does not is left running, never killed.
+  5. It waits up to 3 minutes for the process to go. An unfocused, idle editor may not update for minutes, so the delayed
+     quit can wait that long (w1829: BEAST's slot1 editor took it at 03:06Z on 2026-10-24 and quit at 03:15Z, 10 s after a
+     build woke it). After 15 s (`QUIT_NUDGE_MS`) one still running is asked again with `EXIT_NOW_SNIPPET`: the same
+     checks and save, then `Exit(0)` inside the bridge's own call, which runs while the editor does not update (the
+     bridge posts its calls to the main thread's SynchronizationContext). One that answers "skip: …" then (it began
+     compiling) keeps its quit asked for. One that does not go is left running, never killed.
   A skipped close is asked again after another idle period. The crash watch is told first, so the quit is not restarted.
 - **Shown and logged.** A closed sandbox carries `idleClosed` (`MachineSandbox`, kept in the daemon's `sandboxes.json`):
   list_sandboxes shows "editor closed: idle 15 min; reopens on resume (closed HH:MMZ, saved ... first)" in place of
