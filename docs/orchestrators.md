@@ -172,11 +172,29 @@ Off switch: `set_app_config orchestrator.routineModel "off"` puts every coordina
 next message on, with no restart; `orchestrator.routineAfterMinutes` (0-1440) changes the window. Tests:
 `server/turnModel.test.ts` (every tag above, the window, workers untouched, the live switch).
 
+### Which model a worker starts on (w2010)
+
+lothsahn, 2026-10-24: "workers should be opus medium thinking", then "if the dispatcher is confident the task is
+small, it can start a sonnet worker directly". A worker starts on config `defaultModel` (`opus`, `DEFAULT_WORKER_MODEL`
+in `server/config.ts`) at `worker.effort` (`medium`). `start_agent` keeps its `model` argument, and an orchestrator that
+names any other model must give `model_reason` (`server/workerModel.ts` `workerModelChoice`): `small: <why it is sure>`
+for a task it is sure is small (one or two named files, a mechanical or contained change with done-criteria in the brief,
+no simulation, determinism, netcode or save state, no design question, no investigation: the dispatcher's brief,
+"Model"), or `asked: <the person's words>` when a person named the model. Without one the start is refused before any
+sandbox is touched. The reason goes into the request's log (`started worker ... on sonnet (small: ...)`), a pair run's
+every leg included, and the reply says the model either way (`... on opus, requested by ...`). A person's own start
+(`from: human`, a portal button or `/mcp`) names a model with no reason. A standing agent's suggested model and a review
+job's `Model:` line stay suggestions under the same test. Tests: `server/workerModel.test.ts`, and the two w2010 tests in
+`server/orchestrators.test.ts`.
+
+Opus workers in turn hand small, well-specified pieces to a Sonnet implementer subagent: that guidance is the game repo's
+(its `CLAUDE.md` "Delegation agents"), not this portal's.
+
 ### A worker's effort (w2000)
 
 lothsahn, w2000: "Please file a change to downgrade the workers to medium effort opus". A worker's reasoning effort is,
 first that applies: the `effort` its `start_agent` call names (a pair's legs and a standing agent's approved delegation
-pass theirs), else config `worker.effort` (default `high`, `DEFAULT_WORKER_EFFORT` in `server/config.ts`). The portal puts
+pass theirs), else config `worker.effort` (default `medium` since w2010, `DEFAULT_WORKER_EFFORT` in `server/config.ts`). The portal puts
 it in the launch spec (`agents.ts` `machineSandboxSpec`: `info.effort ?? cfg.worker.effort`); the machine daemon passes
 the spec on unchanged (`machine/agentHost.ts` `buildOptions(spec)`) and adds no effort of its own; the Agent SDK turns it
 into the CLI's `--effort` flag. That flag beats the game repo's `.claude/settings.json` `modelSettings`: Claude Code takes
@@ -187,7 +205,7 @@ overrides the session level for that subagent. Orchestrators use `orchestrator.e
 (`OPS_LIMITS`).
 
 `set_app_config worker.effort "medium"` takes `low`, `medium`, `high` or `max` (`WORKER_EFFORTS`); null goes back to
-`high`. It applies to every worker started after it, with no restart; running workers keep theirs until their process
+`medium`. It applies to every worker started after it, with no restart; running workers keep theirs until their process
 restarts. Check it on a new worker: its claude process's command line carries `--effort <level>`, and `CLAUDE_EFFORT` in
 its shell says the level the session applies.
 

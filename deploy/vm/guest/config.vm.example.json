@@ -18,7 +18,7 @@
     "minFreeRamGB": 0
   },
   "models": ["opus", "sonnet", "haiku", "fable"],
-  "defaultModel": "sonnet",
+  "defaultModel": "opus",
   "orchestrator": {
     "model": "opus",
     "effort": "medium",
