@@ -525,6 +525,52 @@ report's): one call is one assistant message id, its context is input + cache re
 - **Model**: re-pricing every Opus call as Sonnet saves 24% at most; the cache-read price is the same, so the context, not the
   model, is most of the bill.
 
+### The phase split, measured as it runs (w2018)
+
+The split above is now recorded live, so a pilot can be judged against it. Each agent's `ContextMeter` (shared/spend.ts)
+charges each model call's list-price dollars to the phase the session is in when the call runs. A tool use then moves the phase
+for the next call, in one direction only (`nextPhase`):
+
+- **research** until the first Edit, MultiEdit, Write, NotebookEdit or Unity script edit;
+- **implementing** until the first `git push`, `ff-pr push` or `gh pr create` (Bash or PowerShell);
+- **after the first push** from then on.
+
+The call that makes the edit or the push is charged to the phase before it. Each push is counted. A worker's turns land in its
+session and in the requests it served (`phaseDays`, by UTC day, split like its dollars). Only workers are counted; orchestrators,
+ops and standing agents are not.
+
+- **spend_report** has a "By phase (w2018 ...)" section: all workers, each machine, and the top requests, for the report's window
+  (`days`). Each line gives the dollars and shares by phase and the worker sessions with a reading. It also gives their pushes:
+  the total, the median per session and the p90.
+- **The request and session views** (the request's and the session's spend pages, `renderRequest` and `renderSession`) end with
+  the same line over their whole record.
+- **History before the deploy has no phase readings**, and a machine counts only from its daemon's update to this code. A window
+  that starts before it reads low: compare windows that start after it.
+- **`scripts/worker-calls.ts`** prints the same split from one computer's own transcripts, with the request that cost most (the
+  first request id a session's brief names: a guess, where spend_report's attribution is exact). Use it for a before that
+  predates the deploy.
+
+**Baseline, the "before" for the Explore nudge pilot (w2014), the compaction pilot (w2002) and later changes** (measured on beast,
+`node scripts/worker-calls.ts --days 8 --since 2026-10-17T09:02:16Z --until 2026-10-24T09:02:16Z`; worker sessions whose first
+call is in that week; list price):
+
+| | |
+|---|---|
+| Sessions, cost | 169 sessions, $2,704 |
+| By phase | research before the first edit $310 (11%), implementing $779 (29%), after the first push $1,615 (60%) |
+| Pushes per session | 682 in all; median 2, p90 9 |
+| Calls | 39,322: 233 a session (median 136), 195k context a call |
+| Reads | 10.6% of calls in runs of 5+ read-only calls; subagents: 6,293 calls at 102k context |
+| Top requests (all after the first push 69-97%) | w1431 $183 (30 pushes), w1440 $115 (29), w1475 $110 (22), w1432 $81 (4), w1590 $77 (8) |
+
+This week's 60% after the push is higher than w2008's 56% (148 sessions). The rules are the same; the windows differ. w2008
+counted every call made from 2026-10-19 on. This counts the whole of each session that started in the week, including its
+pre-compaction days from 10-17 to 10-19.
+
+How to read a pilot against it: run the same command over a week that starts after the change, on the same machine, and read
+spend_report's "By phase" for the fleet. A cut in after-push dollars that does not raise the dollars per merged PR is a win.
+A smaller after-push share that only comes from more research or implementing is not.
+
 ## Transcripts: how long they are kept
 
 **Seven days after the request closes**, a request that is open keeps them as long as it is open, a reopened request keeps them again.

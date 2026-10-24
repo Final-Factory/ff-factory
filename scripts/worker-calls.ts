@@ -9,9 +9,15 @@
 //
 // --match picks the project folders (default: worker sandboxes, `sandboxes-slot`); --since/--until keep sessions whose
 // first call is in that window; --days skips files not written for that many days.
+//
+// w2018: it also splits each session's list-price dollars by phase (research before the first edit, implementing, after the
+// first push; the same rules as the portal's meter, shared/spend.ts nextPhase) and counts its pushes, overall and for the
+// requests that cost most (the request a session's first message names). The method: docs/spend.md, "Where a worker
+// session's money goes, by phase".
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { PHASES, PHASE_LABEL, listUsd, nextPhase, type Phase } from '../shared/spend.ts';
 
 interface Args {
   root: string;
@@ -42,6 +48,8 @@ interface Call {
   ctx: number;
   tools: Tool[];
   t: number;
+  /** List-price dollars of the call (w2018). */
+  usd: number;
 }
 
 const READ_SHELL = /^\s*(cd [^&;]+&&\s*)?(cat|head|tail|sed -n|grep|rg|ls|find|wc|git (log|show|diff|status|grep|blame|rev-parse|branch|ls-files)|jq|du|stat)\b/;
@@ -68,8 +76,17 @@ export function kindOf(t: Tool): string {
   return 'other';
 }
 
-function readCalls(file: string): { calls: Call[]; turns: number; waitsUnder30: number; blockedSleeps: number } {
+/**
+ * The request a session's first message is about: the brief's "Request: w123", an [about w123] line or a work-request header,
+ * else the first request id the brief names (a guess: a brief can cite another request first; spend_report's split is exact).
+ */
+const REQUEST_ID = /(?:\bRequest(?: id)?:?|\[about|\[work request\])\s+(w\d+)/;
+/** The request id of a session's first message (see REQUEST_ID). */
+export const requestOf = (text: string): string | undefined => (REQUEST_ID.exec(text) ?? /\b(w\d{2,5})\b/.exec(text))?.[1];
+
+function readCalls(file: string): { calls: Call[]; turns: number; waitsUnder30: number; blockedSleeps: number; request?: string } {
   const calls = new Map<string, Call>();
+  let request: string | undefined;
   const started = new Map<string, number>();
   let turns = 0;
   let waitsUnder30 = 0;
@@ -87,8 +104,9 @@ function readCalls(file: string): { calls: Call[]; turns: number; waitsUnder30: 
     const t = Date.parse(e.timestamp ?? '');
     if (e.type === 'assistant' && m.id && m.model && !String(m.model).includes('synthetic')) {
       const u = m.usage ?? {};
-      const c = calls.get(m.id) ?? { ctx: 0, tools: [], t };
+      const c = calls.get(m.id) ?? { ctx: 0, tools: [], t, usd: 0 };
       c.ctx = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
+      c.usd = listUsd(m.model, { in: u.input_tokens ?? 0, out: u.output_tokens ?? 0, cr: u.cache_read_input_tokens ?? 0, cw: u.cache_creation_input_tokens ?? 0, cw5: u.cache_creation?.ephemeral_5m_input_tokens ?? 0 });
       for (const b of m.content ?? []) {
         if (b.type !== 'tool_use') continue;
         c.tools.push({ name: b.name, input: b.input ?? {}, id: b.id });
@@ -98,6 +116,10 @@ function readCalls(file: string): { calls: Call[]; turns: number; waitsUnder30: 
       calls.set(m.id, c);
     } else if (e.type === 'user') {
       if (typeof m.content === 'string' && !e.isMeta && !m.content.startsWith('<')) turns++;
+      if (request === undefined && !e.isMeta) {
+        const text = typeof m.content === 'string' ? m.content : (Array.isArray(m.content) ? m.content : []).map((b: { text?: string }) => b.text ?? '').join('\n');
+        request = requestOf(text) ?? (text ? '' : undefined);
+      }
       for (const b of Array.isArray(m.content) ? m.content : []) {
         if (b.type !== 'tool_result') continue;
         const t0 = started.get(b.tool_use_id);
@@ -107,7 +129,7 @@ function readCalls(file: string): { calls: Call[]; turns: number; waitsUnder30: 
       }
     }
   }
-  return { calls: [...calls.values()], turns, waitsUnder30, blockedSleeps };
+  return { calls: [...calls.values()], turns, waitsUnder30, blockedSleeps, ...(request ? { request } : {}) };
 }
 
 function subagentCalls(dir: string): { calls: number; ctx: number } {
@@ -147,6 +169,47 @@ export interface Summary {
   subagentCalls: number;
   subagentContextPerCall: number;
   byKind: Record<string, number>;
+  /** w2018: list-price dollars by phase, and pushes per session. */
+  phases: PhaseSplit;
+  /** w2018: the same for the requests that cost most (a session counts for the request its first message names). */
+  byRequest: ({ id: string } & PhaseSplit)[];
+}
+
+export interface PhaseSplit {
+  usd: Record<Phase, number>;
+  sessions: number;
+  pushes: number;
+  pushesMedian: number;
+  pushesP90: number;
+}
+
+/** A session's dollars by phase and its pushes (w2018): each call is charged to the phase it ran in, then its tools move the phase. */
+export function sessionPhases(calls: readonly Pick<Call, 'usd' | 'tools'>[]): { usd: Record<Phase, number>; pushes: number } {
+  const usd = Object.fromEntries(PHASES.map((p) => [p, 0])) as Record<Phase, number>;
+  let phase: Phase = 'research';
+  let pushes = 0;
+  for (const c of calls) {
+    usd[phase] += c.usd;
+    for (const t of c.tools) {
+      const n = nextPhase(phase, t.name, t.input);
+      phase = n.phase;
+      if (n.push) pushes++;
+    }
+  }
+  return { usd, pushes };
+}
+
+function split(rows: readonly { usd: Record<Phase, number>; pushes: number }[]): PhaseSplit {
+  const usd = Object.fromEntries(PHASES.map((p) => [p, Math.round(100 * rows.reduce((a, r) => a + r.usd[p], 0)) / 100])) as Record<Phase, number>;
+  const ps = rows.map((r) => r.pushes).sort((a, b) => a - b);
+  return { usd, sessions: rows.length, pushes: ps.reduce((a, b) => a + b, 0), pushesMedian: ps[Math.floor(ps.length / 2)] ?? 0, pushesP90: ps[Math.min(ps.length - 1, Math.floor(ps.length * 0.9))] ?? 0 };
+}
+
+/** "research before the first edit $120 (14%), ...; 148 sessions, 400 pushes (a session: median 3, p90 9)". */
+export function phaseText(p: PhaseSplit): string {
+  const sum = PHASES.reduce((a, x) => a + p.usd[x], 0);
+  const parts = PHASES.map((x) => `${PHASE_LABEL[x]} $${p.usd[x].toFixed(0)} (${sum > 0 ? Math.round((100 * p.usd[x]) / sum) : 0}%)`);
+  return `${parts.join(', ')}; ${p.sessions} sessions, ${p.pushes} pushes (a session: median ${p.pushesMedian}, p90 ${p.pushesP90})`;
 }
 
 export function summarize(a: Args): Summary {
@@ -154,6 +217,7 @@ export function summarize(a: Args): Summary {
   let n = 0, ctx = 0, multi = 0, inRuns = 0, under30 = 0, blocked = 0, prs = 0, prCalls = 0, turns = 0, subCalls = 0, subCtx = 0;
   const per: number[] = [];
   const kinds = new Map<string, number>();
+  const phased: { usd: Record<Phase, number>; pushes: number; request?: string }[] = [];
   for (const proj of fs.readdirSync(a.root).filter((d) => a.match.test(d))) {
     const dir = path.join(a.root, proj);
     for (const f of fs.readdirSync(dir).filter((x) => x.endsWith('.jsonl'))) {
@@ -164,6 +228,7 @@ export function summarize(a: Args): Summary {
       const first = s.calls[0].t;
       if ((a.since !== undefined && first < a.since) || (a.until !== undefined && first >= a.until)) continue;
       per.push(s.calls.length);
+      phased.push({ ...sessionPhases(s.calls), ...(s.request ? { request: s.request } : {}) });
       n += s.calls.length;
       turns += s.turns;
       under30 += s.waitsUnder30;
@@ -172,7 +237,7 @@ export function summarize(a: Args): Summary {
       subCalls += sub.calls;
       subCtx += sub.ctx;
       let run = 0;
-      for (const c of [...s.calls, { ctx: 0, tools: [], t: 0 }]) {
+      for (const c of [...s.calls, { ctx: 0, tools: [], t: 0, usd: 0 }]) {
         ctx += c.ctx;
         if (c.tools.length > 1) multi++;
         const ks = c.tools.map(kindOf);
@@ -208,6 +273,11 @@ export function summarize(a: Args): Summary {
     subagentCalls: subCalls,
     subagentContextPerCall: Math.round(subCtx / Math.max(subCalls, 1)),
     byKind: Object.fromEntries([...kinds].sort((x, y) => y[1] - x[1]).map(([k, v]) => [k, pct(v)])),
+    phases: split(phased),
+    byRequest: [...phased.reduce((m, x) => (x.request ? m.set(x.request, [...(m.get(x.request) ?? []), x]) : m), new Map<string, typeof phased>())]
+      .map(([id, rows]) => ({ id, ...split(rows) }))
+      .sort((x, y) => PHASES.reduce((a, p) => a + y.usd[p] - x.usd[p], 0))
+      .slice(0, 10),
   };
 }
 
@@ -221,6 +291,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
       `calls with more than one tool ${s.multiToolShare}%; in runs of 5+ read-only calls ${s.readRunsOf5PlusShare}%; waits/polls back in under 30 s ${s.waitsUnder30sShare}%; refused sleeps ${s.blockedSleeps}`,
       `PRs opened ${s.prsOpened}, PR-routine calls a PR ${s.prCallsPerPr}; subagent calls ${s.subagentCalls} at ${Math.round(s.subagentContextPerCall / 1000)}k context`,
       `by kind (share of calls): ${kinds}`,
+      `by phase (list price): ${phaseText(s.phases)}`,
+      ...s.byRequest.map((r) => `- ${r.id}: ${phaseText(r)}`),
     ].join('\n') + '\n',
   );
   if (a.json) fs.writeFileSync(a.json, JSON.stringify(s, null, 1));

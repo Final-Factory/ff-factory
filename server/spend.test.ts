@@ -4,8 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
-import { ContextMeter, toolKind, stripCd, listUsd, priceOf, zeroTok, type ModelTok, type TurnUsage } from '../shared/spend.ts';
-import { SpendStore, aboutIds, attribute, buildReport, costLine, estimateTurn, kindOfWork, namedIdsIn, renderReport, renderRequest, renderSession, servedAt, type SpendContext } from './spend.ts';
+import { ContextMeter, nextPhase, toolKind, stripCd, listUsd, priceOf, zeroTok, type ModelTok, type PhaseDay, type TurnUsage } from '../shared/spend.ts';
+import { SpendStore, aboutIds, addPhaseDay, attribute, buildReport, costLine, estimateTurn, kindOfWork, namedIdsIn, phaseLine, phaseRow, renderReport, renderRequest, renderSession, servedAt, type SpendContext } from './spend.ts';
 import { DATA_GUARD_DEFAULTS, dataGuardSettings, footprint, gzipFile, planGuard, runDataGuard, type TranscriptFile } from './dataGuard.ts';
 import { Store } from './store.ts';
 import type { Requester, SessionInfo, TranscriptEvent, WorkItem } from '../shared/types.ts';
@@ -1246,4 +1246,81 @@ test('correctHistory: a session the first release already corrected (live turns 
   assert.ok(Math.abs(r.removedUsd - 30) < 1e-9);
   assert.ok(Math.abs(w.spend.session('s1')!.total.usd - 40) < 1e-9);
   assert.ok(Math.abs(w.spend.request('w1')!.total.usd - 40) < 1e-9);
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// w2018: the phases of a worker session and its pushes
+// ---------------------------------------------------------------------------------------------------------------------
+
+test('nextPhase: research until the first edit, implementing until the first push, never back', () => {
+  assert.deepEqual(nextPhase('research', 'Read', { file_path: 'a.ts' }), { phase: 'research', push: false });
+  assert.deepEqual(nextPhase('research', 'Bash', { command: 'git status' }), { phase: 'research', push: false });
+  assert.deepEqual(nextPhase('research', 'Edit', { file_path: 'a.ts' }), { phase: 'implement', push: false });
+  assert.deepEqual(nextPhase('research', 'mcp__UnityMCP__script_apply_edits', {}), { phase: 'implement', push: false });
+  assert.deepEqual(nextPhase('implement', 'Bash', { command: 'cd x && git push -u origin b' }), { phase: 'after-push', push: true });
+  assert.deepEqual(nextPhase('research', 'Bash', { command: 'ff-pr push --base main --title t' }), { phase: 'after-push', push: true });
+  assert.deepEqual(nextPhase('implement', 'PowerShell', { command: 'gh pr create --base master' }), { phase: 'after-push', push: true });
+  assert.deepEqual(nextPhase('after-push', 'Edit', { file_path: 'a.ts' }), { phase: 'after-push', push: false });
+  assert.deepEqual(nextPhase('after-push', 'Bash', { command: 'git push' }), { phase: 'after-push', push: true });
+  assert.deepEqual(nextPhase('implement', 'Bash', { command: 'git pushd' }), { phase: 'implement', push: false });
+});
+
+test('ContextMeter: a turn\'s dollars split by the phase each call ran in, the pushes counted, the phase kept across processes', () => {
+  const m = new ContextMeter();
+  m.addUser(1000);
+  m.call({ id: 'a1', in: 0, out: 100, cr: 0, cw: 50_000 });
+  m.addToolUse('t1', 'Edit', { file_path: 'a.ts' }, 10);
+  m.addToolResult('t1', 100);
+  m.call({ id: 'a2', in: 0, out: 100, cr: 50_000, cw: 1000 });
+  m.addToolUse('t2', 'Bash', { command: 'git push' }, 10);
+  m.addToolResult('t2', 100);
+  m.call({ id: 'a3', in: 0, out: 100, cr: 51_000, cw: 1000 });
+  const turn = m.drain()!;
+  const total = Object.values(turn.cats).reduce((a, c) => a + c.usd, 0);
+  const ph = turn.phases!;
+  assert.ok(ph.research! > 0 && ph.implement! > 0 && ph['after-push']! > 0, JSON.stringify(ph));
+  assert.ok(Math.abs(ph.research! + ph.implement! + ph['after-push']! - total) < 1e-9);
+  assert.equal(turn.pushes, 1);
+  const again = new ContextMeter();
+  assert.equal(again.resume(JSON.parse(JSON.stringify(m.snapshot()))), true);
+  assert.equal(again.currentPhase, 'after-push');
+  assert.equal(new ContextMeter().currentPhase, 'research');
+});
+
+test('phaseRow: the window\'s days only, pushes per session with median and p90', () => {
+  let a: Record<string, PhaseDay> = {};
+  a = addPhaseDay(a, '2026-10-07', { phases: { research: 1 }, pushes: 0 });
+  a = addPhaseDay(a, '2026-10-08', { phases: { research: 1, implement: 2 }, pushes: 1 });
+  a = addPhaseDay(a, '2026-10-08', { phases: { 'after-push': 4 }, pushes: 2 });
+  const b = addPhaseDay({}, '2026-10-08', { phases: { implement: 2 }, pushes: 0 });
+  const r = phaseRow([a, b, undefined], '2026-10-08', '2026-10-08')!;
+  assert.deepEqual(r.usd, { research: 1, implement: 4, 'after-push': 4 });
+  assert.equal(r.sessions, 2);
+  assert.equal(r.pushes, 3);
+  assert.equal(r.pushesMedian, 3);
+  assert.equal(r.pushesP90, 3);
+  assert.equal(phaseRow([a], '2026-10-09', '2026-10-10'), undefined);
+  assert.deepEqual(addPhaseDay(a, '2026-10-08', { phases: { 'after-push': 4 }, pushes: 2 }, -1)['2026-10-08'], { research: 1, implement: 2, 'after-push': 0, pushes: 1 });
+  assert.match(phaseLine(r), /research before the first edit \$1\.00 \(11%\), implementing \$4\.00 \(44%\), after the first push \$4\.00 \(44%\); 2 session\(s\), 3 push\(es\) \(a session: median 3, p90 3\)/);
+});
+
+test('w2018: a worker\'s phases add up per session and request and show in the report; an orchestrator\'s do not count', () => {
+  const w = world([item('w1', { sessionIds: ['s1'], links: { s1: { at: iso(T0), how: 'sent' } } })], [session('s1', { machineId: 'beast' } as Partial<SessionInfo>), session('o1', { kind: 'orchestrator' } as Partial<SessionInfo>)]);
+  const meter = { calls: 3, ctxMax: 90_000, ctxEnd: 90_000, cats: { base: { usd: 2, tok: 500 } }, phases: { research: 0.5, implement: 0.5, 'after-push': 1 }, pushes: 2 };
+  w.spend.observe('s1', resultEvent(T0 + 60_000, { cum: { 'claude-sonnet-5-5': tok({ usd: 2, cr: 5_000_000, out: 3000 }) }, meter }, 2));
+  w.spend.observe('o1', resultEvent(T0 + 60_000, { cum: { 'claude-sonnet-5-5': tok({ usd: 1, cr: 1_000_000 }) }, meter }, 1));
+  assert.deepEqual(w.spend.session('s1')!.phaseDays, { '2026-10-08': { research: 0.5, implement: 0.5, 'after-push': 1, pushes: 2 } });
+  assert.equal(w.spend.session('o1')!.phaseDays, undefined);
+  assert.equal(w.spend.request('w1')!.phaseDays!['2026-10-08'].pushes, 2);
+  const rep = buildReport(w.spend, T0 + 3_600_000);
+  assert.equal(rep.phases!.fleet.sessions, 1);
+  assert.equal(rep.phases!.fleet.usd['after-push'], 1);
+  assert.equal(rep.phases!.machines[0].machine, 'beast');
+  assert.equal(rep.phases!.requests[0].id, 'w1');
+  const text = renderReport(rep);
+  assert.match(text, /By phase \(w2018/);
+  assert.match(text, /- all workers: research before the first edit \$0\.50 \(25%\), implementing \$0\.50 \(25%\), after the first push \$1\.00 \(50%\); 1 session\(s\), 2 push\(es\)/);
+  assert.match(renderRequest(w.spend, 'w1', (sid) => sid, 7), /By phase \(w2018\): .*2 push\(es\)/);
+  assert.match(renderSession(w.spend, 's1', (sid) => sid), /By phase \(w2018\)/);
+  assert.match(renderReport(buildReport(world([], []).spend, T0)), /No phase readings yet in this window/);
 });
