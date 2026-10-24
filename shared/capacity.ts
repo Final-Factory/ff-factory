@@ -208,6 +208,13 @@ export const ROOM_STAND_MS = 5 * 60_000;
  */
 export const PAIR_HOLD_MS = 20 * 60_000;
 
+/**
+ * How long a small computer's last free sandbox stays held for Queued timed work that has not started there (w1995), from
+ * when that computer's room began: as PAIR_HOLD_MS, so a hold the dispatcher does not act on never keeps a sandbox idle long.
+ * Timed work fits one sandbox, so it can start the moment the hold begins; the bound only covers a dispatcher that does not.
+ */
+export const TIMED_HOLD_MS = PAIR_HOLD_MS;
+
 /** What a computer with room is, for whether a request can run there (w1944, RoomNow.fit): its platform, and w1861's no-timed-runs reason. */
 export interface RoomFit {
   platform?: string;
