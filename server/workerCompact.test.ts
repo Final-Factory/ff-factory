@@ -87,7 +87,7 @@ test('compactBlocker: a worker whose daemon cannot compact is left alone', () =>
 function setup(t: { after: (fn: () => void | Promise<void>) => void }, worker: Partial<Config['worker']>, waits: { why?: string; move?: string }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-workercompact-'));
   const store = new Store(dir);
-  const cfg = { limits: { maxSessions: 6 }, orchestrator: { model: 'opus', effort: 'low' }, worker: { permissionMode: 'bypassPermissions', effort: 'high', ...worker } } as unknown as Config;
+  const cfg = { limits: { maxSessions: 6 }, orchestrator: { model: 'opus', effort: 'low' }, worker: { permissionMode: 'bypassPermissions', effort: 'high', earlyCompactPilotPercent: 0, ...worker } } as unknown as Config;
   const sessions = new SessionManager(cfg, store);
   const auto = new AutoCompactor(sessions, cfg, { settleMs: 20, waitsLong: () => waits.why, moving: () => waits.move });
   t.after(async () => {
