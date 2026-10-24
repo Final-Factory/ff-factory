@@ -1123,6 +1123,24 @@ LothDesktop and Beast, not just when BEAST is full").
   once BEAST is fixed). The Capacity block tags each computer `[preferred #n]` or `[avoided: <why>]`, and its last line says why the next
   one was picked ("first with room in placement.prefer (lothdesktop > m5 > m3)", "only avoided computers have room").
   The dispatcher's prompt shows the setting in force.
+- **The spill below 50% load** (w2054, lothsahn, 2026-10-24: "If a priority machine is over 50% full it should send work
+  later down the list for any machine less than 50% full. Once the priority list is all at 50%+ do the same for the
+  overflow list. Modern machines have slower efficiency cores and hyper threading and boost clocks so they lose a lot of
+  speed above 50% usage."). With `placement.prefer` set, general placement (`pickComputer`, `server/placement.ts`) goes in
+  three tiers: (1) the first computer in `placement.prefer` with room and under `placement.spillAtPercent` load (default
+  50); (2) when every preferred one with room is at or over it, the overflow (every other computer that is not avoided)
+  under it, spread by room; (3) when everything is at or over it, the order of before: `placement.prefer` up to real
+  capacity, then the overflow. **Load** (`loadOf`) is the larger of the computer's CPU use, the mean of its daemon's 15 s
+  `loadPct` reports over the last minute (`Machines.cpuOf`, `CPU_WINDOW_MS`), and its agents mid-turn over its agent cap.
+  CPU is the speed loss lothsahn named and it sees what no agent count does (batch builds, players, a person's game: on
+  2026-10-24 LothDesktop measured a mean of 95% CPU over 10 minutes, min 56%, with 7 Unity processes); the agent share is
+  load a just-placed worker commits before its compile shows on the CPU, and the measure w2048's fleet load uses. A
+  computer with no CPU report counts its agent share. Holds, avoids, reservations, the personPlay yield and real capacity
+  are unchanged: the tiers only reorder computers that already have room. `placement.spillAtPercent 100` turns the spill
+  off; it is a whole number 1-100. The special lanes keep their own order (Live view, build, timed, workflow-scope); their
+  fallback to general placement, and w2046's resume moves (`resumeMove.ts`), get the tiers through `pickComputer`. Every
+  start through `start_agent` logs `placement: <id> ... started on <computer>; placement named <computer> (<why>); every
+  online computer's load now: ...`, and the why lists each computer's load.
 - **A hold** (w1089, lothsahn, 2026-10-12, after five of his requests were blocked on "a free sandbox: all in use except
   the m5's (Ben testing)"): `placement.hold`, set with `set_app_config` and kept across restarts, names computers that take
   **no** new work at all, game or not, even when every other computer is busy, each with who holds it and why:
@@ -1694,7 +1712,8 @@ LothDesktop and Beast, not just when BEAST is full").
     the brief its worker started from, the request as filed and the handover (`handedBack`: "Moved (w2046)", its branch,
     the message that was waiting). A pair leg's record points at the new session. Its other open requests, and the request
     itself when the start fails, go to the dispatcher Queued for that computer ([ledger] MOVED). The journal says
-    `room move: ...` for each.
+    `room move: ...` for each, and `room move: worker <id> ... stays: <why>` or `... waits: <why>` once per reason for one
+    that did not move, so a wait can be checked from the journal afterwards.
   - **When it stays** (its Queued line says why, marked "it stays on its computer (w2046)"): commits only that computer
     has (its sandbox on its branch with commits not pushed, or a branch that does not track its own remote branch),
     uncommitted work its daemon cannot save, a timed run from its sandbox holding the bench lock, a timed leg (w1969:

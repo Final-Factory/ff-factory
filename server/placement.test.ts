@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_BUILD, DEFAULT_LIVE, EVEN_MARGIN, buildLine, RAM_BUSY_PCT, busyReasons, capacityLines, hasRoom, liveLine, pickComputer, placementHint, preferLine, roomOf, type Computer, type PlacementPrefs } from './placement.ts';
+import { DEFAULT_BUILD, DEFAULT_LIVE, EVEN_MARGIN, SPILL_AT_PCT, loadOf, loadText, spillOf, buildLine, RAM_BUSY_PCT, busyReasons, capacityLines, hasRoom, liveLine, pickComputer, placementHint, preferLine, roomOf, type Computer, type PlacementPrefs } from './placement.ts';
 
 /**
  * Where new work goes (w416): spread by room between the computers with sandboxes ("Game work should be spread between
@@ -77,8 +77,8 @@ test('w416: BEAST full (the 05:22 numbers): busy, LothDesktop is next, and the c
   assert.equal(roomOf(BEAST), 0);
   const lines = capacityLines([BEAST, LOTH]);
   assert.match(lines[0], /^## Capacity/);
-  assert.equal(lines[1], '- beast: BUSY (RAM 86% used; no free sandbox (5 of 5 made, all in use)): 7 live agents of 6 (5 mid-turn); 0 of 5 sandboxes free; RAM 86% used; editors 2 of 3; agent slot: free (5 of 6 mid-turn)');
-  assert.match(lines[2], /^- lothdesktop: ROOM \d+%: 2 live agents of 5 \(1 mid-turn\); 2 of 5 sandboxes free \(2 more can be made\); RAM 47% used; editors 1 of 2; agent slot: free \(1 of 5 mid-turn\)$/);
+  assert.equal(lines[1], '- beast: BUSY (RAM 86% used; no free sandbox (5 of 5 made, all in use)): load 83% (CPU unknown over the last minute; w2054); 7 live agents of 6 (5 mid-turn); 0 of 5 sandboxes free; RAM 86% used; editors 2 of 3; agent slot: free (5 of 6 mid-turn)');
+  assert.match(lines[2], /^- lothdesktop: ROOM \d+%: load 20% \(CPU unknown over the last minute; w2054\); 2 live agents of 5 \(1 mid-turn\); 2 of 5 sandboxes free \(2 more can be made\); RAM 47% used; editors 1 of 2; agent slot: free \(1 of 5 mid-turn\)$/);
   assert.equal(lines[3], 'Next new game-repo work: lothdesktop (the only one with room; beast is busy).');
   assert.match(placementHint('beast', [BEAST, LOTH]) ?? '', /^ Note: beast is busy \(RAM 86% used; no free sandbox .*\); the next new game-repo work goes to lothdesktop/);
 });
@@ -120,7 +120,7 @@ test('w428: with the preference set, LothDesktop first, and BEAST only when it i
   assert.ok(roomOf(beast) >= roomOf(cs[1]));
   const first = pickComputer(cs, undefined, PREFS)!;
   assert.equal(first.pick.id, 'lothdesktop');
-  assert.match(first.why, /^first with room in placement\.prefer \(lothdesktop > m5 > m3\)$/);
+  assert.match(first.why, /^first with room in placement\.prefer \(lothdesktop > m5 > m3\), under 50% load \(w2054\); loads: lothdesktop 0% \(CPU unknown, 0 of 5 agents mid-turn\)$/);
   assert.match(preferLine(cs, undefined, PREFS)!, /^Next new game-repo work: lothdesktop \(first with room in placement\.prefer/);
   // LothDesktop full: BEAST, and the line says why.
   cs = [beast, { ...idle('lothdesktop', 5), live: 5, midTurn: 5 }];
@@ -132,8 +132,8 @@ test('w428: with the preference set, LothDesktop first, and BEAST only when it i
 test('w428: the capacity block tags each computer, and placing on an avoided BEAST says so', () => {
   const cs = [idle('beast', 6), idle('lothdesktop', 5)];
   const lines = capacityLines(cs, undefined, PREFS);
-  assert.match(lines[0], /^## Capacity \(placement\.prefer first, avoided last, the rest spread by room;/);
-  assert.match(lines[1], /^- beast \[avoided: BEAST unstable, 2026-10-05\]: ROOM \d+%: 0 live agents of 6/);
+  assert.match(lines[0], /^## Capacity \(placement\.prefer first, spilling to the next under 50% load \(placement\.spillAtPercent, w2054\), avoided last, the rest spread by room;/);
+  assert.match(lines[1], /^- beast \[avoided: BEAST unstable, 2026-10-05\]: ROOM \d+%: load 0% \(CPU unknown over the last minute; w2054\); 0 live agents of 6/);
   assert.match(lines[2], /^- lothdesktop \[preferred #1\]: ROOM \d+%/);
   assert.match(lines[3], /^Next new game-repo work: lothdesktop \(first with room in placement\.prefer/);
   // BEAST avoided: Live view work does not override the avoid (w1600).
@@ -243,4 +243,78 @@ test('w1606: build work goes to placement.build first (beast), falls back when i
   assert.match(held.why, /^Urgent release work goes to the first with room in placement\.build/);
   assert.match(buildLine(cs, undefined, M5_FIRST) ?? '', /^Next urgent release work \(a quick or urgent release, w1639; .*\): beast/);
   assert.match(placementHint('m5', cs, undefined, M5_FIRST, undefined, 'game', false, 'build') ?? '', /the next new urgent release work goes to beast/);
+});
+
+/**
+ * The spill tiers (w2054). lothsahn, 2026-10-24: "If a priority machine is over 50% full it should send work later down the
+ * list for any machine less than 50% full. Once the priority list is all at 50%+ do the same for the overflow list." A
+ * computer's load is the larger of its CPU use over the last minute and its agents mid-turn over its cap (loadOf).
+ */
+const SPILL_PREFS: PlacementPrefs = { prefer: ['beast', 'lothdesktop', 'm5', 'biscuit', 'm3'] };
+const at = (id: string, maxAgents: number, midTurn: number, cpuPct?: number): Computer => ({ ...idle(id, maxAgents), live: midTurn, midTurn, ...(cpuPct !== undefined ? { cpuPct } : {}) });
+
+test("w2054: load is the larger of CPU use and agents mid-turn over the cap; CPU unknown is the agents' share", () => {
+  assert.equal(SPILL_AT_PCT, 50);
+  assert.equal(loadOf(at('beast', 6, 2, 70)), 70, "CPU above the agents' share");
+  assert.equal(loadOf(at('beast', 6, 4, 20)), 67, 'agents above CPU: 4 of 6');
+  assert.equal(loadOf(at('beast', 6, 1)), 17, 'no CPU report');
+  assert.equal(loadText(at('m5', 3, 1, 40)), 'm5 40% (CPU 40%, 1 of 3 agents mid-turn)');
+});
+
+test('w2054 tier 1: the first preferred computer under 50% load, spilling past the busier ones before it', () => {
+  // Nobody loaded: the head of the list, as before.
+  const calm = [at('beast', 6, 1, 20), at('lothdesktop', 5, 0, 10), at('m5', 3, 0, 5), at('lothlaptop', 2, 0, 3)];
+  const a = pickComputer(calm, undefined, SPILL_PREFS)!;
+  assert.equal(a.pick.id, 'beast');
+  assert.match(a.why, /^first with room in placement\.prefer \(beast > lothdesktop > m5 > biscuit > m3\), under 50% load \(w2054\); loads: beast 20% /);
+  // BEAST over 50% by CPU, LothDesktop at exactly 50% by agents (3 of 6: "at or over" is full): the m5, third in the list.
+  const busy = [at('beast', 6, 1, 72), at('lothdesktop', 6, 3, 30), at('m5', 3, 1, 20), at('lothlaptop', 2, 0, 3)];
+  const b = pickComputer(busy, undefined, SPILL_PREFS)!;
+  assert.equal(b.pick.id, 'm5');
+  assert.match(b.why, /^spilled past beast, lothdesktop \(at 50% load or more\) to the first in placement\.prefer under 50% \(beast > lothdesktop > m5 > biscuit > m3\) \(w2054, placement\.spillAtPercent\); loads: beast 72% \(CPU 72%, 1 of 6 agents mid-turn\), lothdesktop 50% \(CPU 30%, 3 of 6 agents mid-turn\), m5 33% /);
+  // A preferred computer without room is skipped as before, whatever its load: m5 at its cap, so tier 2.
+  const noRoom = busy.map((c) => (c.id === 'm5' ? { ...c, midTurn: 3, live: 3 } : c));
+  assert.equal(pickComputer(noRoom, undefined, SPILL_PREFS)!.pick.id, 'lothlaptop');
+});
+
+test('w2054 tier 2: every preferred computer at 50% or more: the overflow computers under 50%', () => {
+  const cs = [at('beast', 6, 3, 60), at('lothdesktop', 5, 3, 40), at('m5', 3, 2, 30), at('biscuit', 2, 1, 55), at('m3', 2, 1, 20), at('lothlaptop', 2, 0, 10)];
+  const p = pickComputer(cs, undefined, SPILL_PREFS)!;
+  assert.equal(p.pick.id, 'lothlaptop');
+  assert.match(p.why, /^every computer in placement\.prefer with room is at 50% load or more \(beast, lothdesktop, m5, biscuit, m3\), so the overflow under 50% \(w2054, placement\.spillAtPercent\): lothlaptop the only one under it; loads: /);
+  // An avoided overflow computer is never a spill target: with none other under 50%, tier 3.
+  assert.equal(pickComputer(cs, undefined, { ...SPILL_PREFS, avoid: { lothlaptop: 'test' } })!.pick.id, 'beast');
+  // A held computer is never picked, whatever its load.
+  assert.equal(pickComputer(cs, undefined, { ...SPILL_PREFS, hold: { lothlaptop: 'lothsahn playing' } })!.pick.id, 'beast');
+});
+
+test("w2054 tier 3: everything at 50% or more: placement.prefer's order up to real capacity, then the overflow", () => {
+  const cs = [at('beast', 6, 3, 80), at('lothdesktop', 5, 3, 60), at('m5', 3, 2, 50), at('lothlaptop', 2, 1, 60)];
+  const p = pickComputer(cs, undefined, SPILL_PREFS)!;
+  assert.equal(p.pick.id, 'beast');
+  assert.match(p.why, /^every computer with room is at 50% load or more, so placement\.prefer's order up to capacity \(w2054\): first with room in placement\.prefer \(beast > lothdesktop > m5 > biscuit > m3\); loads: /);
+  // BEAST at its real cap (6 of 6 mid-turn): the next preferred one, not the overflow.
+  const full = cs.map((c) => (c.id === 'beast' ? { ...c, midTurn: 6, live: 6 } : c));
+  assert.equal(pickComputer(full, undefined, SPILL_PREFS)!.pick.id, 'lothdesktop');
+  // Every preferred one at its cap: the overflow, as before.
+  const allFull = cs.map((c) => (c.id === 'lothlaptop' ? c : { ...c, midTurn: c.maxAgents, live: c.maxAgents }));
+  const o = pickComputer(allFull, undefined, SPILL_PREFS)!;
+  assert.equal(o.pick.id, 'lothlaptop');
+  assert.match(o.why, /none in placement\.prefer has room; the only one with room/);
+});
+
+test('w2054: placement.spillAtPercent moves the threshold; 100 turns the tiers off; bad values fall back to 50', () => {
+  const cs = [at('beast', 6, 2, 60), at('lothdesktop', 5, 1, 20), at('lothlaptop', 2, 0, 5)];
+  assert.equal(pickComputer(cs, undefined, SPILL_PREFS)!.pick.id, 'lothdesktop', 'default 50: BEAST at 60% spills');
+  assert.equal(pickComputer(cs, undefined, { ...SPILL_PREFS, spillAtPercent: 70 })!.pick.id, 'beast', '70: BEAST at 60% is under it');
+  assert.equal(pickComputer(cs, undefined, { ...SPILL_PREFS, spillAtPercent: 15 })!.pick.id, 'lothlaptop', '15: both preferred over it, the overflow at 5% is not');
+  const off = pickComputer(cs, undefined, { ...SPILL_PREFS, spillAtPercent: 100 })!;
+  assert.equal(off.pick.id, 'beast', '100: the strict order of before w2054');
+  assert.equal(off.why, 'first with room in placement.prefer (beast > lothdesktop > m5 > biscuit > m3)');
+  for (const bad of [0, 101, Number.NaN]) assert.equal(spillOf({ spillAtPercent: bad }), SPILL_AT_PCT, String(bad));
+  // The Capacity block says the rule and each computer's load.
+  const lines = capacityLines(cs, undefined, SPILL_PREFS);
+  assert.match(lines[0], /^## Capacity \(placement\.prefer first, spilling to the next under 50% load \(placement\.spillAtPercent, w2054\), avoided last/);
+  assert.match(lines[1], /^- beast \[preferred #1\]: ROOM \d+%: load 60% \(CPU 60% over the last minute; w2054\); 2 live agents of 6/);
+  assert.match(preferLine(cs, undefined, SPILL_PREFS) ?? '', /^Next new game-repo work: lothdesktop \(spilled past beast/);
 });

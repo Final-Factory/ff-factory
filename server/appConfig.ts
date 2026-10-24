@@ -131,6 +131,8 @@ export const SETTABLE_KEYS = [
   'placement.build',
   // The lowest priority of work each computer takes (w1643, docs/machines.md "Placing work"): { "beast": "urgent" }.
   'placement.minPriority',
+  // The load, %, past which new work spills down the placement list (w2054, docs/machines.md "Placing work"); unset: 50.
+  'placement.spillAtPercent',
   // When the orchestrators compact their conversations by themselves (w535, server/autoCompact.ts): the context in
   // tokens, and a turn's cost in USD. 0 turns either trigger off.
   'orchestrator.compactAtTokens',
@@ -716,6 +718,11 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       return checkDevRequests(value);
     case 'intake.reviewers':
       return checkReviewers(value, users ?? []);
+    case 'placement.spillAtPercent': {
+      const n = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
+      if (typeof n === 'number' && Number.isInteger(n) && n >= 1 && n <= 100) return n;
+      throw new Error(`${key} is a whole percent from 1 to 100: the load (the larger of CPU use and agents mid-turn over the cap) past which new work spills down the placement list; 100 turns the spill off`);
+    }
     case 'placement.prefer':
     case 'placement.live':
     case 'placement.build': {
@@ -1019,9 +1026,9 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
     else t[field] = v as number;
     cfg.timing = Object.keys(t).length ? t : undefined;
   }
-  else if (key === 'placement.prefer' || key === 'placement.avoid' || key === 'placement.hold' || key === 'placement.live' || key === 'placement.build' || key === 'placement.minPriority') {
+  else if (key === 'placement.prefer' || key === 'placement.avoid' || key === 'placement.hold' || key === 'placement.live' || key === 'placement.build' || key === 'placement.minPriority' || key === 'placement.spillAtPercent') {
     const p = { ...cfg.placement };
-    const field = key === 'placement.prefer' ? 'prefer' : key === 'placement.avoid' ? 'avoid' : key === 'placement.live' ? 'live' : key === 'placement.build' ? 'build' : key === 'placement.minPriority' ? 'minPriority' : 'hold';
+    const field = key === 'placement.spillAtPercent' ? 'spillAtPercent' : key === 'placement.prefer' ? 'prefer' : key === 'placement.avoid' ? 'avoid' : key === 'placement.live' ? 'live' : key === 'placement.build' ? 'build' : key === 'placement.minPriority' ? 'minPriority' : 'hold';
     const split = field === 'hold' ? splitHold(v) : undefined;
     if (v === undefined) delete p[field];
     else (p as Record<string, unknown>)[field] = split ? split.hold : v;
