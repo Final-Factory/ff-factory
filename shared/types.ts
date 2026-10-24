@@ -1833,6 +1833,31 @@ export interface QueuedLeg {
   what: string;
 }
 
+/**
+ * A pair run (w1945, lothsahn: "Can we make the dispatcher smart enough so it queues work properly that requires running
+ * together across multiple machines and doesn't waste slots?"): work that needs `legs` computers at once, one worker on each,
+ * started together (start_agent with pair_sandboxes), such as a two-machine multiplayer determinism check: leg 1 hosts, the
+ * others join. It counts as room only where that many computers that fit have room at once (shared/capacity.ts pairRoom).
+ */
+export interface WorkPair {
+  /** Computers at once, one worker on each (2 to PAIR_MAX_LEGS). */
+  legs: number;
+  /** The request whose worker asked for it with request_pair, and that worker: Blocked on this one's report meanwhile. */
+  for?: string;
+  forSession?: string;
+  /**
+   * Why the legs must run on different operating systems (the game repo's Determinism-Test-Strategy.md "Which machines",
+   * w1692: float or math-library use in the simulation, Burst or IL2CPP codegen, platform APIs or paths, the desync hash, a
+   * desync seen only across OSes). Absent: computers that are not Macs (a Mac refuses a multiplayer client, w665). With it,
+   * one Mac may take leg 1, the host.
+   */
+  crossOs?: string;
+  /** A leg takes timing measurements (exclusive bench tickets): never on a computer that takes no timed runs (m5, w1861). */
+  timed?: boolean;
+  /** When its legs started together, and where: leg 1 (the host) first. */
+  started?: { at: string; legs: { session: string; sandbox: string }[] };
+}
+
 /** A request for work that a person's orchestrator filed with the dispatcher, and what became of it. */
 export interface WorkItem {
   id: string;
@@ -2000,6 +2025,8 @@ export interface WorkItem {
    * merging, and goes only when a worker starts or is sent for it on a computer it names, or the request closes.
    */
   legs?: QueuedLeg[];
+  /** A pair run (w1945): it needs this many computers at once, its legs started together. */
+  pair?: WorkPair;
   /**
    * Its last hand-back (w1532, server/machinePause.ts): its worker's machine was paused, so it was taken off that worker and
    * Queued for another computer, whose worker picks it up from `branch` with `note` (the worker's own line, or where it

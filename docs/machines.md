@@ -1135,6 +1135,55 @@ LothDesktop and Beast, not just when BEAST is full").
     timed work" counts it as that computer's queued timed work (`pickTimed`) and lists every held leg, with "has ROOM:
     start it now" where its computer has room.
   - Tests: the two w1863 cases in `server/orchestrators.test.ts`.
+- **Pair runs are placed as one unit** (w1945, lothsahn, 2026-10-23: "Can we make the dispatcher smart enough so it queues
+  work properly that requires running together across multiple machines and doesn't waste slots?"). That evening w665's
+  worker d558ba14 held m3's only sandbox (so m3 took no work, and 15 requests read "WRONG: m3 has room") while the
+  two-machine run of its PR #2340, w1936, sat Queued for a Windows or Linux pair; w1940's client leg on biscuit waited on
+  w1898's host leg on lothdesktop, w1826's host on biscuit's client, each leg placed on its own and holding a sandbox while
+  the other waited. A check that needs several computers at once (a host and its clients) is now one request, and its legs
+  start together.
+  - **Asking for one: `request_pair`** (a worker tool, `CATALOG.request_pair` in `server/launch.ts`; `Orchestrators.filePair`).
+    `what` (a line), `brief` (what the legs run: branch or commit, scenario, what passes, where the result goes; each leg is
+    a new worker), `legs` (2 to `PAIR_MAX_LEGS`, 4; default 2), `cross_os` (why, only for the reasons the game repo's
+    Determinism-Test-Strategy.md "Which machines" lists, w1692) and `timed` (a leg takes timing measurements). It files a
+    request (`WorkItem.pair`: legs, `for` the asking request and `forSession` its worker, `crossOs`, `timed`) for the
+    asking request's people at its priority, needing a game sandbox per leg, and Blocks the asking request on its report
+    (`blocked_on` `reports`). The w890 release ("it waits on another request", below) then frees the worker's sandbox as
+    its turn ends, and the host leg's result (a line `For wNNN:`) resumes it. One open pair run per request: asked again,
+    the worker waits on the one there is. The worker's brief says to use it, and never to hold a sandbox for a second
+    machine's worker; a daemon older than the tool does not offer it (the portal sends a worker only the tools its daemon's
+    catalog names).
+  - **Starting one: `start_agent` with `pair_sandboxes`** (`Agents.startPairLegs`). `sandbox` is leg 1, the host, and
+    `pair_sandboxes` the other legs, each a FREE sandbox on another computer. Every leg is checked before any starts (online,
+    FREE, `placement.hold`, `placement.minPriority`, no timed legs where no timed runs go, the Mac rule below) and a refusal
+    ends "Nothing was started"; then each starts with the same prompt plus a section saying its leg and where the others
+    are. A leg that fails to start stops the legs started before it, so no sandbox waits for a pair that is not running.
+    The request records `pair.started` (when, each leg's session and sandbox, leg 1 first). A pair request is refused
+    without `pair_sandboxes` (one leg alone), and two legs on one computer are refused. A request not filed as a pair can be
+    started as one by giving `pair_sandboxes` (a cross-OS pair is asked for with `request_pair`).
+  - **Talking: `message_pair`** (a worker tool, `Agents.messagePair`): a leg's message reaches every other leg's worker of
+    its started pair run, as a message that resumes a leg that ended its turn (where the host listens and on which commit,
+    that a client joined, that a leg failed).
+  - **Which computers.** Legs go on computers that are not Macs (a Mac refuses a multiplayer client, w665). A cross-OS pair
+    may put one Mac as the host, never a client, and needs its legs on two operating systems. Timed legs never go where no
+    timed runs go (the m5). `placement.prefer`, holds, reservations and exclusive bench tickets are as for any work: each leg
+    is a game worker in its own sandbox, and a timed leg takes its ticket as every timing run does. Code: `shared/capacity.ts`
+    `pairRoom` and `unfitWhy`.
+  - **Room for a pair is room for all its legs at once.** `roomForWork` (`server/placement.ts`), the Queued line
+    (`shared/workState.ts` `queuedLive`), the WRONG flag (`roomEnough` on the room that has stood), the capacity ping and
+    `decide_work queue` count a pair as room only where as many computers that fit have room at the same moment; fewer read
+    "queued for capacity (a pair run of 2 legs, on computers that are not Macs): a pair run of 2 legs needs 2 computers with
+    room at once, and only biscuit has room it fits". With room for all legs the ping and the queue refusal say to start its
+    legs together, naming a pick.
+  - **Not starved by single work** (`Agents.pairHoldProblem`). While a pair run is Queued, a computer's LAST free sandbox
+    that the pair fits is held for it from newer game work of no higher priority: `start_agent` refuses it there, naming the
+    pair. A computer with two free sandboxes still takes single work, and work of higher priority goes first (a person's
+    "Start now" makes a request urgent). Without this each sandbox that frees goes to the next single request, and a pair,
+    which needs two at the same moment, waits for a coincidence.
+  - Tests: `server/w1945PairRuns.test.ts` (the room rules, the Queued line) and the w1945 cases in
+    `server/orchestrators.test.ts` (request_pair blocks the asking worker and its sandbox is released, both legs start
+    together and never one alone, a Mac is no client, message_pair, the hold, the WRONG flag and the queue), and in
+    `server/machineSandboxes.test.ts` the asking worker stopped and its sandbox released FREE by the release pass.
 - **The rule** (the dispatcher's prompt): new game-repo work (code, tests, Unity, built players) goes where the
   Capacity block's last line says, even when a sandbox on the other computer is free. Discord posting as Max pins no
   computer: any worker posts with `post_as_max` and FFBox posts (w901, [ffbox.md](ffbox.md#posting-as-max-w901)). A computer that is avoided or not next keeps only what needs it: `F:\ffsb\_review`, ssh to the M5 from BEAST, a brief that pins it

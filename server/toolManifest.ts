@@ -102,6 +102,9 @@ export const TOOL_MANIFEST = {
   set_pool: { group: 'admin', kinds: [P, R] },
   cancel_wake: { group: 'timers', kinds: [W] },
   blocked_on: { group: 'timers', kinds: [W] },
+  // w1945: a check on several computers at once, and its legs talking to each other.
+  request_pair: { group: 'timers', kinds: [W] },
+  message_pair: { group: 'timers', kinds: [W] },
   waiting_on_person: { group: 'timers', kinds: [W] },
   // ffbox
   ffbox_activity: { group: 'ffbox', kinds: [D, P, R] },
