@@ -22,13 +22,8 @@ export const INSPECT_SNIPPET = [
 /** Leave play mode: the game's own session ends, and LiveLook puts every knob back (its materials are never saved). */
 export const LEAVE_PLAY_SNIPPET = 'UnityEditor.EditorApplication.isPlaying = false; return "leaving play mode";';
 
-/**
- * Save the open scenes and the assets, check nothing is left unsaved, then quit on the editor's next update. One snippet, on
- * the editor's main thread: nothing can change between the check and the quit. The same calls as the clean quit of a
- * person's main clone (docs/orchestrators.md, "quit its editor"). Needs the bridge's safety checks off (they refuse
- * EditorApplication.Exit).
- */
-export const SAVE_AND_QUIT_SNIPPET = [
+/** The checks and the save both quits run first, on the editor's main thread: a "skip: ..." answer, or `saved` filled. */
+const SAVE_LINES = [
   'if (UnityEditor.EditorApplication.isPlayingOrWillChangePlaymode) return "skip: in play mode";',
   'if (UnityEditor.EditorApplication.isCompiling || UnityEditor.EditorApplication.isUpdating) return "skip: compiling or importing";',
   'var saved = new System.Collections.Generic.List<string>();',
@@ -44,9 +39,30 @@ export const SAVE_AND_QUIT_SNIPPET = [
   '  var s = UnityEngine.SceneManagement.SceneManager.GetSceneAt(i);',
   '  if (s.isDirty) return "skip: " + (string.IsNullOrEmpty(s.path) ? s.name : s.path) + " still has unsaved changes after saving";',
   '}',
+];
+
+/**
+ * Save the open scenes and the assets, check nothing is left unsaved, then quit on the editor's next update. One snippet, on
+ * the editor's main thread: nothing can change between the check and the quit. The same calls as the clean quit of a
+ * person's main clone (docs/orchestrators.md, "quit its editor"). Needs the bridge's safety checks off (they refuse
+ * EditorApplication.Exit). The quit waits for the editor's next update so this answer goes out first, and an unfocused,
+ * idle editor may not update for minutes (w1829: BEAST's slot1 editor took it at 03:06Z on 2026-10-24 and quit at 03:15Z,
+ * 10 s after a build woke it), so idleCloseEditor follows it with EXIT_NOW_SNIPPET.
+ */
+export const SAVE_AND_QUIT_SNIPPET = [
+  ...SAVE_LINES,
   'UnityEditor.EditorApplication.delayCall += () => UnityEditor.EditorApplication.Exit(0);',
+  'UnityEditor.EditorApplication.QueuePlayerLoopUpdate();',
   'return "quitting saved=" + string.Join(";", saved);',
 ].join('\n');
+
+/**
+ * The same checks and save, then quit at once, inside the bridge's own call (w1829). The bridge runs its calls on the main
+ * thread even when the editor is unfocused and does not update (MCP for Unity's TransportCommandDispatcher posts them to the
+ * main thread's SynchronizationContext), so this quits where the delayed quit waits. Its answer goes with the process; a
+ * "skip: ..." answer comes back when it does not quit.
+ */
+export const EXIT_NOW_SNIPPET = [...SAVE_LINES, 'UnityEditor.EditorApplication.Exit(0);', 'return "exiting saved=" + string.Join(";", saved);'].join('\n');
 
 export interface EditorLook {
   playing: boolean;
@@ -88,6 +104,8 @@ export interface IdleCloseResult {
 /** How long it waits for play mode to end, and for the process to go after the quit (never a kill after either). */
 export const LEAVE_PLAY_WAIT_MS = 90_000;
 export const QUIT_WAIT_MS = 180_000;
+/** How long the delayed quit gets before EXIT_NOW_SNIPPET quits the editor inside a bridge call (w1829). */
+export const QUIT_NUDGE_MS = 15_000;
 
 /**
  * Close an idle editor without losing work: read its state (unreadable: skip), skip while it compiles or imports, or while
@@ -123,12 +141,20 @@ export async function idleCloseEditor(d: IdleCloseDeps, minutes: number): Promis
   if (!q) return skip(answer.startsWith('skip: ') ? answer.slice(6) : `the editor did not take the save and quit (${answer.slice(0, 160)})`);
   const saved = q[1].split(';').filter(Boolean);
   const savedText = saved.length ? `saved ${saved.join(', ')} and the assets first` : 'nothing unsaved in its scenes; assets saved';
-  const until = d.now() + QUIT_WAIT_MS;
+  const start = d.now();
+  let nudged = false;
   while ((await d.editorPids()).length) {
-    if (d.now() >= until) return { closed: false, quitting: true, saved, text: `skipped: asked to quit (${savedText}), it still runs after ${QUIT_WAIT_MS / 1000} s; left running, never killed` };
+    if (d.now() >= start + QUIT_WAIT_MS) return { closed: false, quitting: true, saved, text: `skipped: asked to quit (${savedText}), it still runs after ${QUIT_WAIT_MS / 1000} s; left running, never killed` };
+    if (!nudged && d.now() - start >= QUIT_NUDGE_MS) {
+      // w1829: it took the quit and has not updated since (unfocused and idle): quit inside a bridge call, which runs.
+      nudged = true;
+      const again = (await d.bridge(EXIT_NOW_SNIPPET, { safetyChecks: false })).trim();
+      // The delayed quit is still asked for and may go at its next update, so its mark stays (quitting).
+      if (again.startsWith('skip: ')) return { closed: false, quitting: true, saved, text: `skipped: asked to quit (${savedText}), it still ran ${Math.round((d.now() - start) / 1000)} s later and would not quit then: ${again.slice(6)}; left running, never killed` };
+    }
     await d.sleep(2000);
   }
-  return { closed: true, saved, text: `closed (${savedText})` };
+  return { closed: true, saved, text: `closed (${savedText}${nudged ? '; it quit when asked again inside a bridge call' : ''})` };
 }
 
 /** What the Live view and the sandbox line say while the editor is closed idle. */

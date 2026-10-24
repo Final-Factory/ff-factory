@@ -322,7 +322,9 @@ w1832), the daemon:
 - **closes every other sandbox's editor** that is up, the way an idle Live view's closes (`machine/liveIdle.ts`
   `idleCloseEditor`, w1746): it leaves play mode, saves the open scenes and the assets through the editor, then quits it.
   One that compiles or imports, or has an untitled scene with unsaved changes, is left and tried again every 30 s; one
-  that does not quit is left running. Nothing is killed, and the editor watch never takes an editor it told to quit for
+  that took the quit and still runs 15 s later (an unfocused, idle editor does not update, so its delayed quit waits:
+  w1829, BEAST 2026-10-24, marked closed at 03:06Z, quit at 03:15Z) is asked again to quit inside the bridge's own call
+  (`EXIT_NOW_SNIPPET`, docs/live-view.md "Idle editors close"); one that does not quit is left running. Nothing is killed, and the editor watch never takes an editor it told to quit for
   hung while it goes quiet (`machine/unity.ts` `expectExit`, kept per editor pid). One that comes up during the turn (a
   start that did not queue) is closed too. The sandbox is marked (`benchClosed` in `sandboxes.json`, with the ticket and
   the editor's pids) before the quit is sent, and its line in `list_sandboxes`, `unity status` and the sandbox panel says
