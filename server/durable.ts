@@ -326,6 +326,8 @@ export class SnapshotFile {
   private committed = 0;
   private lastStart = 0;
   private failures = 0;
+  /** changedNow: the next write starts without waiting (w2044). */
+  private urgent = false;
   /** The last background write, for tests and shutdown. */
   private inFlight: Promise<void> = Promise.resolve();
   readonly file: string;
@@ -344,6 +346,21 @@ export class SnapshotFile {
     this.schedule();
   }
 
+  /**
+   * Something worth keeping across a crash changed (w2044: a turn opening or ending): a background write starts now, past
+   * the delay and the interval, instead of flushSync's write and fsync on the main thread (0.8-1.2 s portal blocks on
+   * 2026-10-24). A write in flight is followed by another at once.
+   */
+  changedNow() {
+    this.dirty = true;
+    this.urgent = true;
+    if (this.timer && !this.writing) {
+      clearTimeout(this.timer);
+      this.timer = undefined;
+    }
+    this.schedule();
+  }
+
   get pending() {
     return this.dirty || this.writing;
   }
@@ -351,7 +368,7 @@ export class SnapshotFile {
   private schedule() {
     if (this.timer || this.writing || !this.dirty) return;
     const backoff = this.failures ? Math.min(30_000, 500 * 2 ** this.failures) : 0;
-    const wait = Math.max(this.o.delayMs, this.lastStart + this.o.intervalMs - Date.now(), backoff);
+    const wait = this.urgent && !this.failures ? 0 : Math.max(this.o.delayMs, this.lastStart + this.o.intervalMs - Date.now(), backoff);
     this.timer = setTimeout(() => {
       this.timer = undefined;
       this.inFlight = this.writeInBackground();
@@ -362,6 +379,7 @@ export class SnapshotFile {
   private async writeInBackground() {
     if (!this.dirty) return;
     this.dirty = false;
+    this.urgent = false;
     this.writing = true;
     this.lastStart = Date.now();
     const v = ++this.version;

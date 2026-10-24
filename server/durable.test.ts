@@ -243,3 +243,20 @@ test('writeFileDurable leaves the old file whole when the new data cannot be wri
   assert.throws(() => writeFileDurable(f, '{"ok": 2}'));
   assert.deepEqual(read(f), { ok: 1 });
 });
+
+test('w2044: changedNow writes at once in the background, past a long delay and interval, and nothing on the main thread', async (t) => {
+  const dir = tmp(t);
+  const f = path.join(dir, 'state.json');
+  let n = 1;
+  const s = new SnapshotFile(f, () => JSON.stringify({ n }), { delayMs: 60_000, intervalMs: 60_000, label: 'test' });
+  s.changed();
+  s.changedNow();
+  assert.equal(fs.existsSync(f), false, 'not written on the main thread');
+  await s.idle();
+  assert.equal(read(f).n, 1, 'written without waiting the minute');
+  n = 2;
+  s.changed();
+  s.changedNow();
+  await s.idle();
+  assert.equal(read(f).n, 2, 'a second one goes at once too, inside the interval');
+});
