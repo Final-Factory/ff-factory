@@ -44,6 +44,7 @@ import { JOIN_TTL_MINUTES } from './machineJoin.ts';
 import { searchTranscripts } from './search.ts';
 import { CATALOG, questionsShape } from './launch.ts';
 import { clampArgs, clamped, rangedNumber, withWarnings } from './forgiving.ts';
+import { FRESH_AFTER_MERGE_MARK, freshAfterMergeArm, freshAfterMergeDue, freshAfterMergePercent, freshAfterMergeText, mergedInSession } from './freshAfterMerge.ts';
 import { AutoCompactor, LONG_WAIT_MS, withEarlyCompactMark, workerAutoCompactWindow } from './autoCompact.ts';
 import { inMergeOnGreenPilot } from './mergeOnGreen.ts';
 import { inReadChainPilot, withReadChainMark } from './readChain.ts';
@@ -96,7 +97,7 @@ import { commandLine, launchIndependent, run } from './proc.ts';
 import { type HostHealthMonitor } from './hostHealth.ts';
 import { describeCleanup, describeCleanupItems, describeCleanupLog } from './cleanup.ts';
 import type { BuildHold, HostHealth, TimedVerdict } from '../shared/types.ts';
-import { decideTimedPlace, isSmallTimed, timedAskMark, TIMED_VERDICT_MS } from './timedAsk.ts';
+import { decideTimedPlace, fleetLoad, isSmallTimed, smallTimedStates, timedAskMark, unavailableWait, TIMED_VERDICT_MS } from './timedAsk.ts';
 import { StandingAgents } from './standing.ts';
 import type { MachineManager } from './machines.ts';
 import type { CatalogTool, LaunchSpec } from './launch.ts';
@@ -239,7 +240,7 @@ export const noTimedWaitNotice = (id: string, line: string, machine: string, why
 
 const REQUEST_PAIR_TOOL = `Ask for a check that needs several computers at once (w1945): a two-machine multiplayer or determinism check, a host and its clients. It files ONE pair request whose legs the dispatcher starts together, a new worker on each computer, as soon as that many computers have room at once (never one leg at a time), and Blocks your request on its report, as blocked_on with reports does: commit and push, then end your turn with a "wNNN: still open: blocked on <the pair request>" line. Your sandbox is released at once for other work while you wait, and the host leg's result (a line "For wNNN:") resumes you. what: one line; brief: what the legs run (the branch or commit, the scenario, what passes, where the result goes), since each leg is a new worker; legs: 2 by default; cross_os only for the reasons it names (w1692; without it no leg goes on a Mac, and with it a Mac only hosts); timed when a leg takes timing measurements (never on the m5). One open pair run per request: asked again, you wait on the one there is, unless it is spent (w2041): a leg already reported, a leg's computer is offline or its worker errored, or you pass retry: true. Then that run is cancelled and a fresh one is filed, with new legs on other computers than the failed ones (avoid adds computers you saw fail, such as one whose Tailscale is stuck), and only the fresh run's report resumes you.`;
 
-const TIMED_PLACE_TOOL = `Ask where a timed leg runs BEFORE you take an exclusive bench ticket for it (w1969, lothsahn: "every time a worker needs an exclusive lock it should ask the dispatcher"): an exclusive turn idles every other slot of its computer, so a leg from a big computer (BEAST, LothDesktop) goes to a small one (LothLaptop, m3, biscuit; never m5). On a big computer the harness refuses bench_queue.py timed, --timed, bench_lock --timing, unity-slot --bench exclusive and the bench scripts (probe_ab_win.sh, cpu_budget_run.sh, ...) until you asked; a small computer needs no ask. It answers "here" (take your ticket as before; it holds 12 h) or "elsewhere". Elsewhere for a Windows player A/B (w1996: a save played by two builds, probe_ab_win.sh's legs) names a computer for timed_run: build both players here under shared tickets, call timed_run, and that computer's daemon times them under its own exclusive ticket, with no new worker and no rebuild there. Elsewhere for anything else timed (via "leg": a snippet timed in the editor, a Performance test, a profiler capture, a Mac player): FF Factory files the leg as its own request, Queued for the small computers (a big one only after 60 minutes), whose new worker builds and times BOTH sides there and reports to you, and Blocks your request on that report (as request_pair does): commit and push, then end your turn. what: the leg in one line; brief: what it runs, as a new worker needs it (the branch and the commit of each side, the save, the script and its settings, what to report); platform: windows or mac when the leg needs one (default any); same_machine: only when its numbers must come from this computer (a side of the A/B already ran here), and why; via: timed_run for a Windows player A/B, leg for anything else (unset: timed_run when a computer takes one, and the answer says when to ask again with leg).`;
+const TIMED_PLACE_TOOL = `Ask where a timed leg runs BEFORE you take an exclusive bench ticket for it (w1969, lothsahn: "every time a worker needs an exclusive lock it should ask the dispatcher"): an exclusive turn idles every other slot of its computer, so a leg from a big computer (BEAST, LothDesktop) goes to a small one (LothLaptop, m3, biscuit; never m5). On a big computer the harness refuses bench_queue.py timed, --timed, bench_lock --timing, unity-slot --bench exclusive and the bench scripts (probe_ab_win.sh, cpu_budget_run.sh, ...) until you asked; a small computer needs no ask. It answers "here" (take your ticket as before; it holds 12 h) or "elsewhere". Elsewhere for a Windows player A/B (w1996: a save played by two builds, probe_ab_win.sh's legs) names a computer for timed_run: build both players here under shared tickets, call timed_run, and that computer's daemon times them under its own exclusive ticket, with no new worker and no rebuild there. Elsewhere for anything else timed (via "leg": a snippet timed in the editor, a Performance test, a profiler capture, a Mac player): FF Factory files the leg as its own request, Queued for the small computers (a big one only when none of them can take it: offline past a wait that grows with the fleet's load, held, or without a game sandbox; w2048), whose new worker builds and times BOTH sides there and reports to you, and Blocks your request on that report (as request_pair does): commit and push, then end your turn. what: the leg in one line; brief: what it runs, as a new worker needs it (the branch and the commit of each side, the save, the script and its settings, what to report); platform: windows or mac when the leg needs one (default any); same_machine: only when its numbers must come from this computer (a side of the A/B already ran here), and why; via: timed_run for a Windows player A/B, leg for anything else (unset: timed_run when a computer takes one, and the answer says when to ask again with leg).`;
 
 const MESSAGE_PAIR_TOOL = `For a leg of a pair run (w1945): send a message to the workers of the other legs of your pair run (where the host listens and on which commit, that a client joined, that your leg failed). It reaches them as a message, which resumes a leg that ended its turn; their messages come back to you the same way.`;
 
@@ -647,6 +648,8 @@ export class Agents {
       log: (line) => console.log(line),
     });
     sessions.pauseHeld = (s, text) => this.pauses.heldResume(s.info, text);
+    // w2043: a pilot worker whose pull request merged goes on in a fresh session at its next message (server/freshAfterMerge.ts).
+    sessions.freshStart = (s, m) => this.freshStart(s, m);
     machines.onPause = (id, p) => {
       if (p.paused) this.pauses.onPause(id);
       else {
@@ -818,6 +821,11 @@ export class Agents {
       room: () => this.roomNow(),
       roomFacts: () => this.roomFacts(),
       timedFacts: (t) => timedFacts(this.places(), this.placement(), t),
+      timedSmall: () => {
+        const places = this.places();
+        const wait = this.timedWait(places);
+        return { states: smallTimedStates(places, this.placement(), undefined, undefined, Date.now(), wait.ms), waitWhy: wait.why };
+      },
       machineOnline: (id) => (store.machines.has(id.toLowerCase()) ? machines.isOnline(id.toLowerCase()) : undefined),
       // w2045: the merge-on-green pilot's arm, by request (server/mergeOnGreen.ts); the setting is read live.
       mergeOnGreenPilot: (id) => inMergeOnGreenPilot(id, this.cfg),
@@ -1372,6 +1380,16 @@ export class Agents {
   }
 
   /**
+   * How long timed work waits for an unavailable computer now (w2048, timedAsk.ts unavailableWait): from the fleet's load
+   * (agents mid-turn and requests Queued over the online slots) and config timing.
+   */
+  timedWait(places: readonly Computer[] = this.places()): { ms: number; why: string; load: number } {
+    const queued = [...this.store.work.values()].filter((w) => w.status === 'queued' && isOpen(w)).length;
+    const load = fleetLoad(places, queued);
+    return { ...unavailableWait(load, this.cfg.timing), load };
+  }
+
+  /**
    * timed_place (w1969, server/timedAsk.ts): where the asking worker's timed leg runs. "here" is kept for its session and
    * sent to its machine, whose guard then lets its exclusive tickets through; "elsewhere" files the leg as its own request
    * Queued for the small computers (Orchestrators.fileTimedLeg), or names the play-only computer for timed_run. Each
@@ -1385,6 +1403,7 @@ export class Agents {
     const places = this.places();
     const here = places.find((p) => p.id === placeId(machineId));
     const timedRun = (this.timedRuns?.windowsTargets() ?? []).filter((t) => t.online && t.offers && !t.held).map((t) => t.id);
+    const wait = this.timedWait(places);
     const d = decideTimedPlace({
       here,
       places,
@@ -1394,13 +1413,18 @@ export class Agents {
       exempt: this.benchPriorities(machineId)[info.id]?.exempt,
       ...(a.via === 'timed_run' || a.via === 'leg' ? { via: a.via } : {}),
       timedRun,
+      now: Date.now(),
+      waitMs: wait.ms,
+      waitWhy: wait.why,
+      widenedLeg: this.orchestrators.widenedLegOf(info.id, typeof a.request === 'string' && a.request.trim() ? a.request : undefined),
     });
     const until = new Date(Date.now() + TIMED_VERDICT_MS).toISOString();
     const request = typeof a.request === 'string' && a.request.trim() ? a.request : undefined;
     let text: string;
     if (d.verdict === 'here') {
       this.timedVerdicts.set(info.id, { verdict: 'here', why: d.why, until });
-      this.orchestrators.noteTimedAsk(info.id, request, `timed leg ask (w1969) from worker ${info.id.slice(0, 8)} on ${machineId}: here: ${d.why} ("${clip(what, 80)}")`);
+      const where = d.bigFallback ? `here on a big computer (w2048 fallback: ${d.bigFallback}; every number of it from ${machineId}, comparable with no other computer's)` : `here: ${d.why}`;
+      this.orchestrators.noteTimedAsk(info.id, request, `timed leg ask (w1969) from worker ${info.id.slice(0, 8)} on ${machineId}: ${where} ("${clip(what, 80)}")`);
       text = `Here (w1969): ${d.why}. Take your exclusive ticket on ${machineId} as before (bench_queue.py timed, unity-bridge.py --timed, the bench scripts); this answer holds 12 h for your session. Both sides of an A/B run on this one computer.`;
     } else if (d.timedRun) {
       this.timedVerdicts.set(info.id, { verdict: 'elsewhere', why: d.why, until, timedRun: d.timedRun });
@@ -1912,6 +1936,98 @@ export class Agents {
     return handoverNote(w, { sandbox, previous: was, related, ...(w.handedBack ? { handedBack: w.handedBack } : {}) });
   }
 
+  /** w2043: a worker whose message is being turned into a fresh session, to the new session's id once it started (or undefined). */
+  private readonly freshStarts = new Map<string, Promise<string | undefined>>();
+  /** w2043: workers a fresh start failed for: their messages go to them as before. */
+  private readonly freshRefused = new Set<string>();
+
+  /**
+   * The fresh-session pilot (w2043, server/freshAfterMerge.ts): a message to a worker between turns whose request is in the
+   * pilot arm and had a pull request merge during its session starts a NEW session in the same sandbox and branch
+   * (startFreshSession, the request moved to it) with a short hand-off and the message, instead of resuming this context.
+   * The old session is stopped once free (retireWhenFree), its pending check-in and gate resumes move to the new one.
+   * True when the message went there (or waits for the new session to start); false delivers it here as always.
+   */
+  private freshStart(s: SessionHandle, m: { text: string; from: 'human' | 'orchestrator' | 'system'; images?: ImageInput[]; requestedBy?: Requester; attachments?: DeliveredAttachment[] }): boolean {
+    const id = s.info.id;
+    const deliver = (to: string) => {
+      try {
+        this.sessions.send(to, m.text, m.from, m.images, { ...(m.requestedBy ? { requestedBy: m.requestedBy } : {}), ...(m.attachments?.length ? { attachments: m.attachments } : {}) });
+      } catch (e) {
+        console.warn(`fresh-after-merge pilot (w2043): a message for ${id} could not go to ${to}: ${(e as Error).message}`);
+      }
+    };
+    const pending = this.freshStarts.get(id);
+    if (pending) {
+      // Another message while the fresh session starts: it follows the first one there, in order.
+      void pending.then((to) => deliver(to ?? id));
+      return true;
+    }
+    if (this.freshRefused.has(id) || m.images?.length) return false;
+    const due = freshAfterMergeDue(s.info, this.store.work.values(), this.cfg);
+    if (!due) return false;
+    const { w, merged } = due;
+    // A gated request is not started (linkWorker would refuse it after the session exists): the message goes here as before.
+    if (this.orchestrators.gateProblem(w)) return false;
+    const requestedBy = w.requesters.find((r) => r.userId === s.info.requestedBy?.userId) ?? w.requesters[0] ?? s.info.requestedBy;
+    if (!requestedBy) return false;
+    const prs = merged.map((p) => `#${p.number}`).join(', ');
+    const why = `${FRESH_AFTER_MERGE_MARK}: PR ${prs} merged during worker ${id}'s session, so ${w.id} goes on without its context`;
+    const p = this.startFreshSession(s, w, {
+      text: freshAfterMergeText(w, s.info, merged, m.text),
+      title: s.info.title,
+      requestedBy,
+      from: m.from === 'human' ? 'human' : 'orchestrator',
+      why,
+      moveFrom: true,
+      ...(m.attachments?.length ? { attachments: m.attachments.map((a) => a.id) } : {}),
+    }).then(
+      (said) => {
+        const to = this.store.work.get(w.id)?.sessionIds.at(-1);
+        if (!to || to === id || !this.store.sessions.get(to)) throw new Error(`no new session: ${String(said).slice(0, 200)}`);
+        this.carryOver(id, to, w.id);
+        console.log(`fresh-after-merge pilot (w2043): ${w.id}: worker ${id} ended after PR ${prs} merged; fresh session ${to} goes on (pilot arm)`);
+        return to;
+      },
+    ).catch((e: Error) => {
+      this.freshRefused.add(id);
+      console.warn(`fresh-after-merge pilot (w2043): ${w.id}: no fresh session for worker ${id} (${e.message}); the message goes to it as before`);
+      deliver(id);
+      return undefined;
+    });
+    this.freshStarts.set(id, p);
+    void p.finally(() => this.freshStarts.delete(id));
+    return true;
+  }
+
+  /** w2043: what the old session had pending moves to the fresh one: its check-in, and the ledger's gate resumes and held check-ins. */
+  private carryOver(from: string, to: string, workId: string) {
+    const wake = this.waker.pending(from);
+    if (wake) {
+      this.waker.cancel(from);
+      const minutes = Math.min(24 * 60, Math.max(1, Math.ceil((Date.parse(wake.at) - Date.now()) / 60_000)));
+      try {
+        this.waker.schedule(to, minutes, wake.note);
+      } catch (e) {
+        console.warn(`fresh-after-merge pilot (w2043): ${from}'s check-in could not move to ${to}: ${(e as Error).message}`);
+      }
+    }
+    this.orchestrators.sessionReplaced(workId, from, to);
+  }
+
+  /**
+   * w2043: a pilot worker's turn ended with nothing open in hand after a pull request of its merged during its session (its
+   * DONE closed the request): it is ended now, so no later request reuses that context.
+   */
+  private endAfterMerge(i: SessionInfo) {
+    if (freshAfterMergePercent(this.cfg) <= 0 || i.kind !== 'worker') return;
+    const all = [...this.store.work.values()];
+    if (all.some((w) => isOpen(w) && w.sessionIds.includes(i.id))) return;
+    const w = mergedInSession(i, all, this.cfg);
+    if (!w) return;
+    console.log(`fresh-after-merge pilot (w2043): worker ${i.id} ends after ${w.id}'s PR merged and it holds nothing open: ${this.orchestrators.retireWhenFree(i.id)}`);
+  }
+
   /**
    * message_agent with a work_id for a worker that is not on that request (w740): the request starts a NEW session in the
    * same sandbox, never another conversation's turn, so a worker's context holds one request. The branch and files stay;
@@ -2013,6 +2129,9 @@ export class Agents {
     });
     // Its first process starts before the ledger links it to the request (w1076): it starts on that request's person's tokens.
     if (req.workId) this.startingFor.set(s.info.id, req.workId.toLowerCase());
+    // w2043: which arm of the fresh-session pilot its request is in, for the comparison (the hash says the same later).
+    const arm = req.workId ? freshAfterMergeArm(req.workId, this.cfg) : undefined;
+    if (arm) console.log(`fresh-after-merge pilot (w2043): worker ${s.info.id} for ${req.workId!.toLowerCase()}, ${arm} arm`);
     const sb = t.machineSandbox ? this.machines.requireSandbox(m.id, t.machineSandbox) : undefined;
     if (sb && sb.status === 'creating') {
       // The prompt goes once the sandbox is ready.
@@ -2127,6 +2246,9 @@ export class Agents {
     // status ask, w631), and that message is the next turn's.
     const from = s.lastFrom;
     this.orchestrators.workerTurnEnded(s.info, text);
+    // w2043: a pilot worker whose pull request merged and that holds no open request is ended now; a request that goes on
+    // continues in a fresh session at its next message (freshStart).
+    this.endAfterMerge(s.info);
     // w1532: a turn that ends on a paused machine hands its requests back (after the ledger read its DONE and status lines).
     this.pauses.turnEnded(s.info, text);
     // w1378: a turn that ends waiting on a person sends its question to that person's orchestrator, once.
@@ -3570,6 +3692,8 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
         ...(legsHere.length ? { legs: legsHere } : {}),
         // It takes no timed runs (w1861): timed work goes elsewhere.
         ...(noTimedRunsOf(m) ? { noTimedRuns: noTimedRunsOf(m) } : {}),
+        // When it dropped, while offline (w2048): a timed leg waits out a blip, not an outage.
+        ...(!this.machines.isOnline(m.id) && m.lastSeen ? { offlineSince: m.lastSeen } : {}),
       });
     }
     return out;
@@ -3989,8 +4113,12 @@ ${w.repo ?? ''}
               const rel = this.orchestrators.relationTo(item, w.info.id);
               const read = `the server read it as ${rel.related ? 'related' : 'unrelated'}: ${rel.why}`;
               if (session && !clash && !session_reason?.trim()) throw new Error(`session "${session}" overrules the server's reading (${read}): say why in session_reason`);
-              const same = !clash && (session ? session === 'same' : rel.related);
-              why = clash
+              // w2043: a pilot worker whose pull request merged takes no next request into that context: a new session does.
+              const fresh = !clash ? mergedInSession(w.info, this.store.work.values(), this.cfg) : undefined;
+              const same = !clash && !fresh && (session ? session === 'same' : rel.related);
+              why = fresh
+                ? `${FRESH_AFTER_MERGE_MARK}: ${fresh.id}'s pull request merged during worker ${w.info.id}'s session, so the next request starts a new one (${read})`
+                : clash
                 ? `${clash}; a request runs on its own person's tokens (w1076)${session === 'same' ? ', so the dispatcher\'s "same" is overruled' : ''} (${read})`
                 : session
                   ? `the dispatcher chose ${same ? 'the same session' : 'a new session'}: ${session_reason!.trim().slice(0, 300)} (${read})`

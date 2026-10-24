@@ -608,6 +608,31 @@ compare cost after the first push and per request against the control requests i
 (must be none) and the arm's hand-backs (red, or a merge refused). The fresh-session pilot (w2043) splits requests by
 `fresh:`, so the two read as a 2x2.
 
+### A fresh session after each merge, a pilot (w2043)
+
+lothsahn, 2026-10-24: "Do a pilot for one day". After the first push is 56-60% of a session's cost (above), and most sessions
+carry one PR's history into the next step. In the pilot arm (`worker.freshAfterMergePilotPercent`, default 0: off;
+set_app_config, 0-100; drawn by a hash of the REQUEST id, `fresh:<id>`, apart from the other pilots, so every session of a
+request is in one arm and spend compares per request; server/freshAfterMerge.ts):
+
+- **A request goes on in a fresh session.** A worker between turns whose one open request had a pull request merge during its
+  session (`prs[].at`, GitHub's mergedAt, at or after the session started) does not get its next message (a CI or deploy resume,
+  its own check-in, a person's or the dispatcher's word) in that context. SessionManager's `freshStart` hook, in `send` and in
+  the queue drain, hands it to `Agents.freshStart`, which calls the w740 machinery, `startFreshSession` with `moveFrom`: a new
+  session in the same sandbox and branch, on the request's person, its first message a short hand-off (the mark `Fresh session
+  after a merge (pilot w2043)`, what merged, what is left in the old session's last word, the message quoted) plus the usual
+  request as filed and handover (branch and git state). The old session's check-in and the ledger's gate resumes and held
+  check-ins move to the new one (`Orchestrators.sessionReplaced`); the old one is stopped once free (`retireWhenFree`). Never
+  mid-turn; a message with images, a gated request or a failed start goes to the old session as always.
+- **A worker whose PR merged and that holds nothing open** is ended at its turn end, and the dispatcher's next request for it
+  starts a new session even when related (message_agent's session choice says why).
+- **The arm is logged**: `fresh-after-merge pilot (w2043): worker <id> for <request>, <pilot|control> arm` on each worker start,
+  and each switch, in the portal log; the hash says the same at any time (`freshAfterMergeArm`).
+
+To read it: spend_report over the day for the requests of each arm (cost per request, the "By phase" block, after-push dollars),
+re-reads from `scripts/worker-calls.ts`, and lost-context rework from the ledger (reopens) and the fresh sessions' transcripts
+(research the merged work had settled, done again).
+
 ## Transcripts: how long they are kept
 
 **Seven days after the request closes**, a request that is open keeps them as long as it is open, a reopened request keeps them again.

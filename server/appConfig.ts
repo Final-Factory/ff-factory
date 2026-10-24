@@ -116,6 +116,10 @@ export const SETTABLE_KEYS = [
   // Minutes a Live view sits idle (no turn, job, check-in or viewer) before its sandbox's editor is closed (w1746,
   // docs/live-view.md "Idle editors close"): default 15, 0 never. The owner's only: it closes editors on every machine.
   'live.idleCloseMinutes',
+  // How long a timed leg or run waits for an offline computer before it goes elsewhere (w2048, server/timedAsk.ts
+  // unavailableWait): whole minutes when the fleet is idle (default 5) and when it is busy (default 60).
+  'timing.unavailableIdleMinutes',
+  'timing.unavailableBusyMinutes',
   // Where new game-repo work goes first, and which computers it stays off (w428, docs/machines.md "Placing work").
   'placement.prefer',
   'placement.avoid',
@@ -148,6 +152,8 @@ export const SETTABLE_KEYS = [
   'worker.readChainPilotPercent',
   // The share of requests whose green PRs FF Factory merges itself, filing the report the worker left (w2045, server/mergeOnGreen.ts).
   'worker.mergeOnGreenPilotPercent',
+  // The share of requests whose worker starts a fresh session after a merged PR (w2043, server/freshAfterMerge.ts); default 0, off.
+  'worker.freshAfterMergePilotPercent',
   // Workers' reasoning effort when start_agent names none (w2000, docs/orchestrators.md "A worker's effort"): low, medium, high or
   // max; null goes back to medium (w2010). It is the session's --effort flag, which beats the repo's settings.json modelSettings.
   'worker.effort',
@@ -585,7 +591,8 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
     case 'worker.earlyCompactPilotPercent':
     case 'worker.terseProsePilotPercent':
     case 'worker.readChainPilotPercent':
-    case 'worker.mergeOnGreenPilotPercent': {
+    case 'worker.mergeOnGreenPilotPercent':
+    case 'worker.freshAfterMergePilotPercent': {
       const n = Number(value);
       if (!Number.isInteger(n) || n < 0 || n > 100) throw new Error(`${key} is a whole number from 0 to 100`);
       return n;
@@ -698,6 +705,12 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       const n = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
       if (typeof n === 'number' && Number.isInteger(n) && n >= 0 && n <= 1440) return n;
       throw new Error('live.idleCloseMinutes is a whole number of minutes from 0 (never) to 1440');
+    }
+    case 'timing.unavailableIdleMinutes':
+    case 'timing.unavailableBusyMinutes': {
+      const n = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
+      if (typeof n === 'number' && Number.isInteger(n) && n >= 1 && n <= 720) return n;
+      throw new Error(`${key} is a whole number of minutes from 1 to 720`);
     }
     case 'providers.ffbox.devRequests':
       return checkDevRequests(value);
@@ -998,6 +1011,14 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
     else (l as Record<string, unknown>)[field] = v;
     cfg.live = Object.keys(l).length ? l : undefined;
   }
+  else if (key === 'timing.unavailableIdleMinutes' || key === 'timing.unavailableBusyMinutes') {
+    // Timing: read at every timed_place, leg bound and timed-run pass (server/timedAsk.ts unavailableWait); null is the default.
+    const t: NonNullable<Config['timing']> = { ...cfg.timing };
+    const field = key === 'timing.unavailableIdleMinutes' ? 'unavailableIdleMinutes' : 'unavailableBusyMinutes';
+    if (v === undefined) delete t[field];
+    else t[field] = v as number;
+    cfg.timing = Object.keys(t).length ? t : undefined;
+  }
   else if (key === 'placement.prefer' || key === 'placement.avoid' || key === 'placement.hold' || key === 'placement.live' || key === 'placement.build' || key === 'placement.minPriority') {
     const p = { ...cfg.placement };
     const field = key === 'placement.prefer' ? 'prefer' : key === 'placement.avoid' ? 'avoid' : key === 'placement.live' ? 'live' : key === 'placement.build' ? 'build' : key === 'placement.minPriority' ? 'minPriority' : 'hold';
@@ -1013,7 +1034,7 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   else if (key === 'machines.cleanup.staleOutput') cfg.machines = { ...cfg.machines, cleanup: { ...cfg.machines?.cleanup, staleOutput: v as Partial<StaleOutputSettings> | undefined } };
   else if (key === 'hostGuard.cleanup.ageRules') cfg.hostGuard.cleanup.ageRules = (v as { path: string; olderThanDays: number }[] | undefined) ?? [];
   else if (key === 'orchestrator.compactAtTokens') cfg.orchestrator = { ...cfg.orchestrator, compactAtTokens: v as number | undefined };
-  else if (key === 'worker.compactAtTokens' || key === 'worker.compactBeforeWaitTokens' || key === 'worker.compactPilotPercent' || key === 'worker.earlyCompactPilotPercent' || key === 'worker.earlyCompactAtTokens' || key === 'worker.earlyCompactMidTurnTokens' || key === 'worker.terseProsePilotPercent' || key === 'worker.readChainPilotPercent' || key === 'worker.mergeOnGreenPilotPercent') cfg.worker = { ...cfg.worker, [key.slice('worker.'.length)]: v as number | undefined };
+  else if (key === 'worker.compactAtTokens' || key === 'worker.compactBeforeWaitTokens' || key === 'worker.compactPilotPercent' || key === 'worker.earlyCompactPilotPercent' || key === 'worker.earlyCompactAtTokens' || key === 'worker.earlyCompactMidTurnTokens' || key === 'worker.terseProsePilotPercent' || key === 'worker.readChainPilotPercent' || key === 'worker.freshAfterMergePilotPercent' || key === 'worker.mergeOnGreenPilotPercent') cfg.worker = { ...cfg.worker, [key.slice('worker.'.length)]: v as number | undefined };
   // Live: each worker's launch spec reads it when its session starts (agents.ts machineSandboxSpec, standing.ts).
   else if (key === 'worker.effort') cfg.worker = { ...cfg.worker, effort: (v as Config['worker']['effort'] | undefined) ?? DEFAULT_WORKER_EFFORT };
   else if (key === 'orchestrator.compactAtTurnUsd') cfg.orchestrator = { ...cfg.orchestrator, compactAtTurnUsd: v as number | undefined };

@@ -42,6 +42,10 @@ export interface TimedRunRecord {
   summary?: string;
   result?: string;
   error?: string;
+  /** w2048: the computers it left because each stayed unavailable past the wait, with why ("lothlaptop offline 64 min"). */
+  movedFrom?: string[];
+  /** w2048: when its worker was told that its computer is gone past the wait and no other takes the run. */
+  toldStuck?: string;
 }
 
 export interface TimedRunDeps {
@@ -66,6 +70,12 @@ export interface TimedRunDeps {
    * but never picked for a new run (lothsahn holds LothLaptop while he uses it; an exclusive turn would close his editor).
    */
   held?: (id: string) => string | undefined;
+  /**
+   * w2048: how long a run waits for its computer while that one is unavailable (offline, or not on a daemon that runs timed
+   * runs) before it moves to another and plays every build there again, the baseline included (timedAsk.ts unavailableWait:
+   * scaled by the fleet's load). Default: never moves.
+   */
+  unavailableWait?: () => { ms: number; why: string };
 }
 
 /** What kind of timing computer a target is (w1996): one that only plays the game, or a small worker computer. */
@@ -198,9 +208,20 @@ export class TimedRuns {
     return rankTargets(this.targets().filter((t) => t.platform !== 'darwin' && t.platform !== 'linux'));
   }
 
-  /** Where a run goes: the computer named, else the first Windows target (rankTargets). */
-  private target(named: unknown): string {
+  /**
+   * Where a run goes: the computer named, else the computer the same request's (or session's) last run used when it can take
+   * one now (w2048, lothsahn: "Timings can't be compared across machines at all": a second run elsewhere would not compare
+   * with the first), else the first Windows target (rankTargets).
+   */
+  private target(named: unknown, who?: { session: string; requests: string[] }): string {
     const all = this.windowsTargets();
+    if ((named === undefined || named === '') && who) {
+      const prev = this.list()
+        .filter((r) => r.session === who.session || r.requests.some((q) => who.requests.includes(q)))
+        .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))[0];
+      const t = prev && all.find((x) => x.id === prev.machine);
+      if (t && t.online && t.offers && !t.held) return t.id;
+    }
     if (named !== undefined && named !== '') {
       const t = all.find((x) => x.id.toLowerCase() === String(named).toLowerCase());
       if (!t) throw new Error(`${String(named)} takes no timed run (w1946, w1996: a play-only computer, or a small worker computer that takes timed runs, on Windows: a run plays Windows players); the ones that do: ${all.map((x) => x.id).join(', ') || 'none yet'}`);
@@ -226,7 +247,7 @@ export class TimedRuns {
     if (typeof settings === 'string') throw new Error(settings);
     const s = a.save as { name?: unknown; size?: unknown; sha256?: unknown } | undefined;
     if (!s || !SHA.test(String(s.sha256)) || !Number.isSafeInteger(s.size) || Number(s.size) <= 0 || Number(s.size) > PIECE_MAX_BYTES) throw new Error('save: a .zip save of at most 64 MB');
-    const machine = this.target(a.machine);
+    const machine = this.target(a.machine, who);
     const id = `tr_${randomBytes(5).toString('hex')}`;
     const need = new Map<string, number>();
     for (const v of variants) for (const p of v.pieces) need.set(p.sha256, p.size);
@@ -356,6 +377,7 @@ export class TimedRuns {
         ? `The logs are in your Inbox as timed-${r.id}.tar.gz: tar -xzf it into $TMPDIR, then python scripts/bench/probe_table.py "$TMPDIR/${r.id}"/*/round* (probe_ab_win.sh's layout; ab_stop.py reads it too). contention.txt has each leg's start load; run.json the machine and settings. Numbers are from ${r.machine} alone: compare them only with ${r.machine}'s own.`
         : 'No logs came back.',
       `It ran under ${r.machine}'s exclusive bench ticket${o ? ` (${o.settings.rounds} rounds, order flipped on even rounds)` : ''}. If you set a wake_me check-in for it, cancel_wake it now.`,
+      `Every number in it comes from ${r.machine}: compare them only with each other or with other runs on ${r.machine}, never with another computer's (w2048, lothsahn: "Timings can't be compared across machines at all"); your report names ${r.machine}.${r.movedFrom?.length ? ` It moved here from ${r.movedFrom.join('; ')}, so every build, the baseline included, was played again here.` : ''}`,
     ].join('\n');
     try {
       await this.d.deliver(r.session, text, rec ? [publicRef(rec)] : []);
@@ -364,8 +386,67 @@ export class TimedRuns {
     }
   }
 
-  /** Every few minutes: give up on a run far past its bound, and let old pieces go from the portal's store. */
+  /** When each target was first seen unavailable by tick (w2048); its offline time comes from Machine.lastSeen when known. */
+  private unavailableSince = new Map<string, number>();
+
+  /**
+   * w2048 (lothsahn: "The dispatcher should have a rule to rerun the baseline if a machine is offline or unavailable too
+   * long"): a run Queued for a computer unavailable past the wait (deps.unavailableWait, scaled by the fleet's load) moves to
+   * the first other Windows target that is online, runs timed runs and is not held. The run's order holds every build, so
+   * the baseline is played again there with the change and every number comes from the one computer; the worker is told
+   * that its earlier numbers from the computer left behind do not compare. Returns the runs moved, for the log.
+   */
+  retarget(): string[] {
+    const wait = this.d.unavailableWait?.();
+    const now = this.now();
+    const all = this.windowsTargets();
+    for (const t of all) {
+      if (t.online && t.offers) this.unavailableSince.delete(t.id);
+      else if (!this.unavailableSince.has(t.id)) {
+        const seen = Date.parse(this.d.machines().find((m) => m.id === t.id)?.lastSeen ?? '');
+        this.unavailableSince.set(t.id, !t.online && Number.isFinite(seen) ? seen : now);
+      }
+    }
+    if (!wait) return [];
+    const moved: string[] = [];
+    for (const r of this.runs.values()) {
+      if (r.state !== 'queued' || !r.order) continue;
+      const since = this.unavailableSince.get(r.machine);
+      if (since === undefined || now - since < wait.ms) continue;
+      const to = all.find((t) => t.id !== r.machine && t.online && t.offers && !t.held);
+      const from = r.machine;
+      const why = `${from} ${this.d.isOnline(from) ? 'connected but not running timed runs' : 'offline'} for ${Math.round((now - since) / 60_000)} min, past the wait of ${wait.why}`;
+      if (!to) {
+        // No other computer takes it: the worker may time it itself, on its big computer if need be (timed_place, w2048).
+        if (r.toldStuck) continue;
+        r.toldStuck = this.iso();
+        this.set(r, 'queued', `waiting for ${from}: ${why}; no other computer takes a timed run now`);
+        this.d.log?.(`timed run ${r.id}: stuck on ${from} (w2048): ${why}; no other target; worker told to ask timed_place`);
+        void this.d
+          .deliver(r.session, `[timed run ${r.id}] still queued for ${from}: ${why}, and no other computer that takes a timed run can take it now. It stays queued and goes out if ${from} comes back. To time it now instead, call timed_place again with via "leg": with no small computer available it answers "here", and you time every side on your own computer (all of its numbers from that one computer, the baseline re-measured there).`, [])
+          .catch((e) => this.d.log?.(`timed run ${r.id}: could not tell worker ${r.session}: ${(e as Error).message}`));
+        continue;
+      }
+      r.movedFrom = [...(r.movedFrom ?? []), `${from}: ${why}`];
+      r.machine = to.id;
+      this.set(r, 'queued', `moved from ${from} (w2048): ${why}`);
+      this.d.log?.(`timed run ${r.id}: moved from ${from} to ${to.id} (w2048 baseline re-run): ${why}`);
+      void this.d
+        .deliver(
+          r.session,
+          `[timed run ${r.id}] moved from ${from} to ${to.id} (w2048): ${why}. It plays every build again on ${to.id}, your baseline included, so all of its numbers come from ${to.id}. Compare them with no number measured on ${from} or any other computer (lothsahn: "Timings can't be compared across machines at all"); your report names ${to.id} as the computer they come from.`,
+          [],
+        )
+        .catch((e) => this.d.log?.(`timed run ${r.id}: could not tell worker ${r.session}: ${(e as Error).message}`));
+      this.dispatch(r);
+      moved.push(r.id);
+    }
+    return moved;
+  }
+
+  /** Every few minutes: move a run off a computer gone too long (w2048), give up on a run far past its bound, and let old pieces go from the portal's store. */
   tick() {
+    this.retarget();
     const now = this.now();
     for (const r of this.runs.values()) {
       if (r.state === 'done' || r.state === 'failed') continue;
