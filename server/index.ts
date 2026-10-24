@@ -202,18 +202,22 @@ const versionMemoryNow = () => {
     .catch((e) => console.warn(`orchestrator memory versioning failed: ${(e as Error).message}`));
 };
 const guardMemory = (what: 'heal' | 'backup') => {
-  try {
-    if (what === 'heal') healMemory(memoryRoot);
-    else {
-      backupMemory(memoryRoot);
-      // Deleted memory files (delete_memory, w1748) are kept 30 days in <root>.backup/trash.
-      const pruned = pruneMemoryTrash(memoryRoot);
-      if (pruned) console.log(`orchestrator memory: removed ${pruned} deleted file(s) older than ${MEMORY_TRASH_DAYS} days from the trash`);
-      versionMemoryNow();
+  if (what === 'heal') {
+    try {
+      healMemory(memoryRoot);
+    } catch (e) {
+      console.warn(`orchestrator memory heal failed: ${(e as Error).message}`);
     }
-  } catch (e) {
-    console.warn(`orchestrator memory ${what} failed: ${(e as Error).message}`);
+    return;
   }
+  // Off the event loop (w2044): the copy, its fsyncs and the trash pass are asynchronous; versioning follows the copy.
+  void (async () => {
+    await backupMemory(memoryRoot);
+    // Deleted memory files (delete_memory, w1748) are kept 30 days in <root>.backup/trash.
+    const pruned = await pruneMemoryTrash(memoryRoot);
+    if (pruned) console.log(`orchestrator memory: removed ${pruned} deleted file(s) older than ${MEMORY_TRASH_DAYS} days from the trash`);
+    versionMemoryNow();
+  })().catch((e) => console.warn(`orchestrator memory backup failed: ${(e as Error).message}`));
 };
 guardMemory('heal');
 guardMemory('backup');
