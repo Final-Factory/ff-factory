@@ -512,7 +512,8 @@ export interface UnitySlotsReport {
   ramPct?: number;
   /** New launches wait at or above this RAM use. */
   ramLimitPct: number;
-  waiting: { label: string; count: number; holder: string; since: string; why: string }[];
+  /** w1949: `session`, the worker that ran it (FF_SESSION_ID), and `position` in the queue (1 first), from a daemon since w1949. */
+  waiting: { label: string; count: number; holder: string; since: string; why: string; session?: string; position?: number }[];
   granted: { label: string; count: number; holder: string; since: string }[];
   at: string;
 }
@@ -664,6 +665,12 @@ export interface BenchState {
   runningCount: number;
   waiting: number;
   nextExclusive?: BenchTicketGlance & { ahead: number };
+  /**
+   * w1949: the tickets not granted yet, in the queue's own order (a waiting urgent release first), each with `ahead` waiters
+   * before it; at most BENCH_STATE_MAX_WAITERS. The ledger shows a request Blocked on the lock while its worker's ticket is
+   * here (shared/queueWaits.ts). Absent while nothing waits, and from a daemon before w1949.
+   */
+  waiters?: (BenchTicketGlance & { ahead: number })[];
   /** An old-style lock's owner line (quiet_gate.sh before w1615): no ticket, so no request or worker. */
   legacy?: { owner: string; since: string };
   /** A machine FF Factory runs one worker on (priorities.json single_worker): no turn limits, warnings or pre-emptions. */

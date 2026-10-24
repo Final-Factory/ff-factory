@@ -794,6 +794,18 @@ can leave the supervisor and the daemon running, and the next `/run` then starts
 and the Unity slots mailbox, seen on LothDesktop after the w900 move). `Stop-FFDaemon` ends the whole tree by command line.
 The installer starts the daemon only with `Start-ScheduledTask` after it has stopped the old one that way.
 
+**One daemon per machine (w1918).** Three daemons answered LothLaptop's Unity slots mailbox after its updates. Two guards now
+keep it to one:
+- `Stop-FFDaemon` (`server/machineDeployWin.ts`) kills again after 5 s and fails, naming the pids, when any is still running
+  after 15 s, so an update never starts a new daemon beside a survivor.
+- A daemon that sees a newer live daemon of the same machine id on its mailbox (`arbiter.json`'s `startedAt`,
+  `machine/unitySlots.ts`) ends with exit code 75 (`DAEMON_YIELD_EXIT`, `machine/daemon.ts` `yieldToNewer`), and its
+  supervisor takes 75 as "do not start it again" (Windows only: launchd or systemd would start it again). Its agents run on (w605); the newer daemon takes them back.
+
+A daemon of another machine id on the same home folder, or one too old to write `startedAt`, is only reported ("another
+process (pid N, machine ..., started ...) is answering this machine's Unity slots mailbox"). Only a daemon running this code
+yields, so strays from before it are stopped by the next update's `Stop-FFDaemon` when they run from this install's folder.
+
 **Uninstall.** It attaches the drive first if it is not (the sandboxes' unpushed work is checked through the junction),
 stops what runs from the root or the drive, takes the junctions away, removes the three SYSTEM tasks (only those whose
 arguments name this root's VHDX), detaches the drive and deletes the file, then deletes the root. `check` lists the

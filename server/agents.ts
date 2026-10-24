@@ -18,7 +18,8 @@ import { describeAutoIntake } from './ffboxAutoIntake.ts';
 import { agentState, agentStateText, holdsItsPlace, holdsSandbox, sortAgents, sortPlaces } from '../shared/agentState.ts';
 import { idleClosedPart } from './liveIdle.ts';
 import { HOLD_PLACE_MS, LIVE_HOLD_MS, PlaceAgain, RELEASE_AFTER_MS, RELEASE_WAKE_NOTE, handOverBranch, occupies, releasedOn } from './placeAgain.ts';
-import { WORK_LIVE_LABEL, WORK_LIVE_STATES, asksAPerson, benchWaitOf, lastOpenLine, liveCounts, outsideDeclared, outsideWaitOf, ownWorkWait, personWaitIn, reportWaitKey, servedBy, workLiveAll, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
+import { queueWaitsAll } from '../shared/queueWaits.ts';
+import { WORK_LIVE_LABEL, WORK_LIVE_STATES, asksAPerson, benchWaitOf, lastOpenLine, liveCounts, otherWorkWait, outsideDeclared, outsideWaitOf, ownWorkWait, personWaitIn, reportWaitKey, servedBy, workLiveAll, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
 import { reportTail, type NeedsYouWait } from './needsYou.ts';
 import { stillOpenIn } from './ledgerRules.ts';
 import { inlineReviewMedia, outsideReview, publishedCopy, reviewRootOf } from './reviewMedia.ts';
@@ -1007,7 +1008,14 @@ export class Agents {
       const l = this.waitLive.live.get(w.id);
       if (l?.state === 'waiting') parts.push(`${w.id}: ${l.waitsOn?.length ? l.waitsOn.join(' and ') : 'a person'} to act`);
       else if (l?.state === 'blocked' && w.status === 'blocked' && w.blocked && gatesOf(w).every((g) => WAIT_RELEASE_KINDS.includes(g.kind))) parts.push(`${w.id}: ${gatesName(gatesOf(w), now)}`);
-      else return undefined;
+      // w1944: its own still-open line waits on another request, the orchestrator or a worker they start, with no block
+      // declared (Blocked from its report, or Stalled): nothing for it to do in its sandbox until a message comes.
+      else if ((l?.state === 'blocked' || l?.state === 'stalled') && w.status !== 'blocked') {
+        const line = lastOpenLine(w, i, now)?.line;
+        const on = line ? otherWorkWait(line, w.id) : undefined;
+        if (!on) return undefined;
+        parts.push(`${w.id}: ${on} (its report: "${line!.slice(0, 120)}")`);
+      } else return undefined;
     }
     return `it waits on ${parts.join('; ')}`;
   }
@@ -4826,6 +4834,8 @@ ${w.repo ?? ''}
       // w1841: a worker an urgent release's build paused shows Blocked on it; a report waiting on a held bench lock, on that.
       buildHold: (id) => this.builds.pausedFor(id),
       benchLock: (id) => this.machines.statsOf(id)?.benchLock,
+      // w1949: a worker whose bench ticket or Unity slot waits in its machine's queue shows Blocked on it.
+      queueWaits: queueWaitsAll(this.machines.allStats()),
       // The clock the room's since (w1944) and the WRONG flag read.
       now: this.orchestrators.now().getTime(),
     });

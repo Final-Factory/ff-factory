@@ -1200,7 +1200,12 @@ LothDesktop and Beast, not just when BEAST is full").
       are all a `deploy` (the portal or a machine's daemon), a `request` or a `pr` merging (set by the worker's `blocked_on`,
       `deploys: ["portal"]` for a deploy, by the dispatcher's `decide_work block`, or by the ledger cleanup on a merged
       request whose only step left is a deploy); or **Waiting on input**, a person (its `waiting_on_person`, "still open:
-      waiting on Ben to …" in its report, or a question). The worker's own `waiting_on_person` counts for **every** request it
+      waiting on Ben to …" in its report, or a question); or, since w1944, its own still-open line waits on another request
+      ("waiting for w1761 to report"), the orchestrator, or a worker only the dispatcher starts ("waiting on a Windows or
+      Linux pair worker"), with no block declared (`otherWorkWait`, shared/workState.ts). lothsahn, 2026-10-23: "Why is m3
+      not taking work when there's stuff to do?": d558ba14 (w665) held m3's only sandbox idle from 22:15 to 22:45 UTC with
+      "still open: waiting on a Windows or Linux pair worker to run `MP-lowore-pin-pair` for PR #2340" and no `blocked_on`,
+      while 18 requests waited Queued, until the 30-minute idle release; a worker started there 95 s after it. The worker's own `waiting_on_person` counts for **every** request it
       is the latest worker on, at once (found live on w890, 2026-10-10 19:50Z: started for w1 and then sent w2, the ledger
       read it as working on w2 only, w1 never read Waiting, "every request waits" failed, and biscuit/slot3 stayed held
       with the worker Idle after it had declared it waited on lothsahn). Not a time, a machine, a usage limit or a lock (they clear by
