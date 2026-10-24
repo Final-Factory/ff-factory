@@ -927,10 +927,36 @@ and w1891 waited behind it there, and w1789 waited on LothDesktop behind shared 
   comparison on that one computer (any OS) and reports "For wNNN:", and the asking request is Blocked on that report, so its
   sandbox goes to other work meanwhile. One open leg per request. With `via: "timed_run"` and a play-only computer up
   (w1946), a Windows player A/B goes there by `timed_run` instead, built where the worker is.
-- **The wait bound**: a leg Queued on busy small computers waits for them rather than taking a big one, for
-  `TIMED_LEG_WAIT_MS`, 60 minutes: two full bench turns (the game repo's bench_queue.py caps a turn at 30 minutes). Past it
-  `Orchestrators.timedLegBound` (each blocker-watch pass) widens its needs to every computer that takes timed runs, logged
-  once in the leg's log and told to the dispatcher.
+- **The wait bound, and the fall-back to a big computer** (w2048; lothsahn, 2026-10-24: "sometimes machines go offline. We
+  should still allow timed runs on larger machines if there are no other machines available to take them"). A leg Queued
+  on small computers waits there while any of them can take it, busy or not. A small computer cannot when it is held or
+  avoided, has no game sandbox, or is offline for longer than the wait (`timedAsk.ts` `smallTimedStates`); a shorter drop is
+  a blip and still counts. Once none of the leg's small computers can, `Orchestrators.timedLegBound` (each blocker-watch
+  pass) widens its needs to every computer that takes timed runs (big ones included, never m5), stamps "BIG-COMPUTER
+  FALLBACK (w2048)" with which small computers were unavailable and why in the leg's log and in the asking request's, and
+  tells the dispatcher. The same test runs at the ask: with no small computer able, a worker on BEAST or LothDesktop hears
+  **here**, with the same reason, and the log line says "here on a big computer (w2048 fallback: ...)". A widened leg's
+  worker hears **here** wherever it is started. Before w2048 a leg widened after `TIMED_LEG_WAIT_MS` (60 minutes) even
+  when its small computer was only busy.
+- **How long "offline" is waited for** (w2048, `unavailableWait`; lothsahn: "If the fleet is idle it should wait far less
+  than if the fleet is busy"). The load is the agents mid-turn plus the requests Queued, over the online computers' agent
+  slots (`fleetLoad`). At 50% load or less the wait is 5 minutes, at 100% or more 60 minutes, and between the two it grows
+  in a straight line. Config `timing.unavailableIdleMinutes` and `timing.unavailableBusyMinutes` set the two ends. The
+  numbers come from the journal for 2026-10-17..24. A daemon's drops were blips of 1 to 30 s (deploys and link flaps:
+  dozens on lothlaptop and biscuit at 12:02..13:49Z on 2026-10-24). A daemon reconnects by itself within about a minute
+  (`redeployDue` waits 2 minutes before it redeploys). The real outages lasted hours: m3 was offline from 06:50Z to past
+  13:43Z. So 5 minutes clears every blip seen, and an idle fleet loses nothing to a fresh baseline. 60 minutes is two
+  full bench turns: a re-run on a busy fleet takes an exclusive turn that idles a big computer's other slots (5 on BEAST,
+  9 on LothDesktop) while queued work waits. The load measure counts both what runs and what waits: at 12:17Z there were
+  10 requests Queued on about 25 slots (busy), and at 13:25Z 1 Queued with free slots (idle).
+- **Numbers never cross computers** (w2048; lothsahn: "Timings can't be compared across machines at all. Every machine has
+  wildly different performance"). A fall-back worker is told to run every side on its computer, to re-measure there any
+  baseline from another, and to name the computer in its report (`bigFallbackRules`). A `timed_run` with no `machine`
+  goes to the computer the same request's last run used, when that one can take it. A run Queued for a computer that stays
+  unavailable past the same wait moves to another (`TimedRuns.retarget`; lothsahn: "rerun the baseline if a machine is
+  offline or unavailable too long"). Its order holds every build, so the baseline is played again there, and its worker is
+  told that the numbers left behind do not compare. When no other computer can take it, the worker is told once to time it
+  itself through `timed_place`. Every result names the one computer all its numbers come from.
 - **The guard**: the verdict rides the bench priorities to the machine (`BenchPriority.timed`, and the machine's
   `timed_ask` mark in priorities.json, `machine/benchLock.ts` `readTimedAsk`). On a big computer, `checkTimedAsk`
   refuses `bench_queue.py timed`, `bench_queue.py run --mode exclusive`, `unity-bridge.py --timed`, `bench_lock --timing`,
@@ -1617,6 +1643,36 @@ LothDesktop and Beast, not just when BEAST is full").
     queued message is retried (the send queue is on disk); one whose switch had finished finds its branch already
     there. w631 (finished requests close themselves) only makes more check-ins stale, which releases their sandboxes
     sooner; it changes nothing else here.
+- **A resume on a full computer moves to one with room** (w2046, lothsahn, 2026-10-24: "We should not have idle slots if
+  there is queued work"; `server/resumeMove.ts`, `Agents.roomMove`). Until then a released worker was placed again only on
+  its own computer: at 14:05Z w1891's worker 0cd35068 (merge PR #2347) and w2013's leg 2 worker 99862afa waited for a BEAST
+  sandbox while LothLaptop, LothDesktop (3 free), the m5 (2 free) and biscuit (1 free) sat idle.
+  - **When.** A message that waits in the send queue only for room on its worker's computer (`ROOM_WAIT`: no sandbox free
+    there, its agent cap, its sandbox's seats; not an offline or outdated machine, not a placement under way) for
+    `MOVE_AFTER_MS` (20 s, so a turn ending there that moment frees it; the drain runs every 30 s, so a move comes 20 to
+    50 s after the message).
+  - **Where.** `moveDecision` picks as new work is placed (`pickComputer`: placement.prefer, avoid, hold and minPriority,
+    the Live view and build lists, timed work on computers that take it, never the m5), among computers other than its
+    own with a free sandbox already made (game work) or an agent seat (other work). A pair leg never goes to another leg's
+    computer, nor to a retry's avoided ones, and a Mac takes only a cross-OS pair's host leg. A request pinned to computers
+    (`queuedFor.needs`) goes only there.
+  - **How.** Its process stops, its sandbox's uncommitted work is saved and pushed (w656), its sandbox is released at once
+    (`placeReleased`, `movedAway`: lothsahn, "When it moves workers to another box, it should request they clean up and
+    force those slots to be released"; FF Factory ends what it left running and its temp folder goes as for any stopped
+    worker). A conversation does not cross computers, so FF Factory itself starts a fresh session for its request in a free
+    sandbox there, switched to its branch (game work) or on an agent seat, whose first message carries its last report,
+    the brief its worker started from, the request as filed and the handover (`handedBack`: "Moved (w2046)", its branch,
+    the message that was waiting). A pair leg's record points at the new session. Its other open requests, and the request
+    itself when the start fails, go to the dispatcher Queued for that computer ([ledger] MOVED). The journal says
+    `room move: ...` for each.
+  - **When it stays** (its Queued line says why, marked "it stays on its computer (w2046)"): commits only that computer
+    has (its sandbox on its branch with commits not pushed, or a branch that does not track its own remote branch),
+    uncommitted work its daemon cannot save, a timed run from its sandbox holding the bench lock, a timed leg (w1969:
+    both sides are timed on one computer), a request pinned there, or an unknown branch. With no other computer that
+    could take it it waits as before ("no other computer can take it now (w2046)").
+  - **WRONG.** Any other resume waiting for room on its computer while another computer it fits has had room for
+    `ROOM_STAND_MS` reads Queued "… it should move there (w2046)" with `roomOn`, the ledger's WRONG flag
+    (`shared/workState.ts`).
 - **The numbers are judgments**: 85% RAM (BEAST at 86% was overloaded, LothDesktop at 47% had room; one more editor
   takes 8-12 GB, about 15% of 64 GB) and the 10-point margin (one agent of ten slots, or about 6 GB of 64). Live agents
   count, not only mid-turn ones, because an idle agent's process holds its memory too (docs/orchestrators.md, "Agent

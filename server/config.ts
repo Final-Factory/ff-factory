@@ -208,6 +208,12 @@ export interface Config {
    * idleCloseMinutes (w1746): a view idle this long (no turn, job, check-in or viewer) has its sandbox's editor closed; default 15, 0 never.
    */
   live?: { enabled?: boolean; idleCloseMinutes?: number };
+  /**
+   * Timed work (w2048, server/timedAsk.ts unavailableWait): how long a computer that should take a timed leg or holds a timed
+   * run's baseline may be offline before the leg or run stops waiting for it, in whole minutes, when the fleet is idle
+   * (default 5) and when it is busy (default 60); between, it grows with the load.
+   */
+  timing?: { unavailableIdleMinutes?: number; unavailableBusyMinutes?: number };
   masterBatch?: { enabled?: boolean; autoApprove?: { enabled?: boolean; maxPerDay?: number }; repo?: string; workflow?: string };
   /**
    * The automatic portal deploy (w1634, server/autoDeploy.ts, docs/ops-worker.md "Automatic deploys"): a new commit on this
@@ -569,6 +575,13 @@ export interface Config {
      * to a subagent, a pilot"): default 50. It reaches a session when its process next starts.
      */
     readChainPilotPercent?: number;
+    /**
+     * The share of requests (by a hash of the request id, apart from the other pilots') whose worker starts a NEW session in
+     * the same sandbox and branch at its next message once a pull request of the request merged during its session, 0-100
+     * (w2043's one-day pilot, server/freshAfterMerge.ts, docs/spend.md "A fresh session after each merge, a pilot"): default
+     * 0, off. Read at each message, so it applies at once.
+     */
+    freshAfterMergePilotPercent?: number;
   };
   /**
    * The user id automatic work is attributed and billed to: scheduled standing-agent runs and, once FFBox takes

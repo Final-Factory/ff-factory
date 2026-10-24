@@ -1,6 +1,6 @@
 // A hard crash (power cut, BSOD, WHEA error) while the app writes its data: the store, the transcripts, the
 // orchestrators' memory and a whole server come back by themselves with the last good state (server/durable.ts).
-import { test } from 'node:test';
+import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
@@ -107,19 +107,19 @@ test('transcripts: a line torn by a crash does not swallow the next event, and z
   s.flush();
 });
 
-test('orchestrator memory: backed up when changed, and a zeroed file gets its last good copy back', (t) => {
+test('orchestrator memory: backed up when changed, and a zeroed file gets its last good copy back', async (t) => {
   const root = path.join(tmp(t, 'ffsb-crash-mem-'), 'orchestrator-memory');
   const ben = path.join(root, 'person-ben');
   fs.mkdirSync(ben, { recursive: true });
   fs.writeFileSync(path.join(ben, 'MEMORY.md'), '- [Deploys](deploys.md) wait for Ben\n');
   fs.writeFileSync(path.join(ben, 'deploys.md'), 'Never deploy without Ben.\n');
-  assert.equal(backupMemory(root), true);
-  assert.equal(backupMemory(root), false, 'nothing changed: no new copy');
+  assert.equal(await backupMemory(root), true);
+  assert.equal(await backupMemory(root), false, 'nothing changed: no new copy');
   assert.equal(fs.statSync(path.join(memoryBackupRoot(root), '1', 'person-ben', 'MEMORY.md')).nlink, 1, 'a copy, not a hard link (the guard refuses those)');
   // The crash: MEMORY.md zeroed while the CLI wrote it, deploys.md emptied.
   zero(path.join(ben, 'MEMORY.md'));
   fs.writeFileSync(path.join(ben, 'deploys.md'), '');
-  assert.equal(backupMemory(root), false, 'damaged files are not backed up over good copies');
+  assert.equal(await backupMemory(root), false, 'damaged files are not backed up over good copies');
   const healed = healMemory(root);
   assert.equal(healed.length, 2);
   assert.equal(fs.readFileSync(path.join(ben, 'MEMORY.md'), 'utf8'), '- [Deploys](deploys.md) wait for Ben\n');
@@ -200,4 +200,28 @@ test('the real server comes back by itself from a zeroed state.json and users.js
   );
   t.diagnostic(log.split('\n').filter((l) => /DATA|restored|unclean|FF Factory/.test(l)).join('\n'));
   assert.ok(fs.readdirSync(data).some((n) => n.startsWith('state.json.damaged-')), 'the zeroed file is kept');
+});
+
+test('w2044: the memory backup does no synchronous file work, so it never holds the event loop', async (t) => {
+  const root = path.join(tmp(t, 'ffsb-crash-mem-async-'), 'orchestrator-memory');
+  for (let p = 0; p < 5; p++) {
+    fs.mkdirSync(path.join(root, `person-${p}`), { recursive: true });
+    for (let f = 0; f < 40; f++) fs.writeFileSync(path.join(root, `person-${p}`, `note-${f}.md`), `note ${p}/${f}\n`.repeat(50));
+  }
+  // The 2026-10-24 stall profiles: backupMemory > copyDurable > fsync, 4.8-5.5 s on the loop every ten minutes.
+  const sync = ['readFileSync', 'writeFileSync', 'fsyncSync', 'openSync', 'readdirSync', 'statSync', 'existsSync', 'renameSync', 'rmSync', 'mkdirSync', 'utimesSync', 'copyFileSync'] as const;
+  const calls = sync.map((m) => mock.method(fs, m));
+  t.after(() => calls.forEach((c) => c.mock.restore()));
+  let turns = 0;
+  const tick = setInterval(() => turns++, 0);
+  t.after(() => clearInterval(tick));
+  const pass = backupMemory(root);
+  assert.equal(backupMemory(root), pass, 'a second call joins the pass in flight');
+  assert.equal(await pass, true);
+  clearInterval(tick);
+  for (const [i, m] of sync.entries()) assert.equal(calls[i].mock.callCount(), 0, `fs.${m} during the backup`);
+  assert.ok(turns > 0, 'the loop ran other work while the backup copied');
+  calls.forEach((c) => c.mock.restore());
+  assert.equal(fs.readdirSync(path.join(memoryBackupRoot(root), '1', 'person-4')).length, 40, 'every file copied');
+  assert.equal(await backupMemory(root), false, 'nothing changed: no new copy');
 });

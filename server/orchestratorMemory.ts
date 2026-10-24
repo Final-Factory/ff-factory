@@ -216,51 +216,120 @@ function goodCopy(backups: string, rel: string): string | undefined {
   return Array.from({ length: MEMORY_BACKUPS }, (_, i) => path.join(backups, String(i + 1), rel)).find((b) => fs.existsSync(b) && !looksDamaged(b));
 }
 
+/** filesUnder, off the event loop (w2044). */
+async function filesUnderAsync(dir: string, rel = ''): Promise<string[]> {
+  let entries: fs.Dirent[];
+  try {
+    entries = await fs.promises.readdir(path.join(dir, rel), { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const out: string[] = [];
+  for (const e of entries) {
+    if (e.name === '.git') continue;
+    const r = rel ? path.join(rel, e.name) : e.name;
+    if (e.isDirectory()) out.push(...(await filesUnderAsync(dir, r)));
+    else if (e.isFile()) out.push(r);
+  }
+  return out.sort();
+}
+
+/** looksDamaged, off the event loop. */
+async function looksDamagedAsync(file: string): Promise<string | undefined> {
+  let buf: Buffer;
+  try {
+    buf = await fs.promises.readFile(file);
+  } catch {
+    return undefined;
+  }
+  if (!buf.length) return 'empty (0 bytes)';
+  const zero = buf.indexOf(0);
+  if (zero < 0) return undefined;
+  return buf.some((b) => b !== 0) ? `partly written (zero bytes from byte ${zero} of ${buf.length})` : `all zero bytes (${buf.length} bytes)`;
+}
+
+const existsAsync = (p: string) => fs.promises.access(p).then(() => true, () => false);
+
+/** copyDurable, off the event loop: the read, the write and the fsync run on libuv's threads. */
+async function copyDurableAsync(from: string, to: string) {
+  await fs.promises.mkdir(path.dirname(to), { recursive: true });
+  const data = await fs.promises.readFile(from);
+  const h = await fs.promises.open(to, 'w');
+  try {
+    await h.writeFile(data);
+    await h.sync();
+  } finally {
+    await h.close();
+  }
+  const st = await fs.promises.stat(from);
+  await fs.promises.utimes(to, st.atime, st.mtime);
+}
+
+/** The newest good copy of `rel` in the backups, if any. */
+async function goodCopyAsync(backups: string, rel: string): Promise<string | undefined> {
+  for (let i = 1; i <= MEMORY_BACKUPS; i++) {
+    const b = path.join(backups, String(i), rel);
+    if ((await existsAsync(b)) && !(await looksDamagedAsync(b))) return b;
+  }
+  return undefined;
+}
+
 /**
  * What a backup of `root` would hold: each file from the folder, or, for a file that looks damaged, its newest good
  * copy from the older backups, so a good copy never rotates out while the file stays damaged.
  */
-function planBackup(root: string, backups: string): Map<string, string> {
+async function planBackup(root: string, backups: string): Promise<Map<string, string>> {
   const plan = new Map<string, string>();
-  for (const r of filesUnder(root)) {
+  for (const r of await filesUnderAsync(root)) {
     const src = path.join(root, r);
-    const from = looksDamaged(src) ? goodCopy(backups, r) : src;
+    const from = (await looksDamagedAsync(src)) ? await goodCopyAsync(backups, r) : src;
     if (from) plan.set(r, from);
   }
   return plan;
 }
 
 /** Names, sizes and modification times (to the second): a backup is taken only when this changes. */
-function fingerprint(plan: Map<string, string>): string {
-  return JSON.stringify(
-    [...plan].map(([r, src]) => {
-      const st = fs.statSync(src);
-      return [r, st.size, Math.floor(st.mtimeMs / 1000)];
-    }),
-  );
+async function fingerprint(plan: Map<string, string>): Promise<string> {
+  const out: [string, number, number][] = [];
+  for (const [r, src] of plan) {
+    const st = await fs.promises.stat(src);
+    out.push([r, st.size, Math.floor(st.mtimeMs / 1000)]);
+  }
+  return JSON.stringify(out);
 }
+
+let backingUp: Promise<boolean> | undefined;
 
 /**
  * Copy the memory folders to <root>.backup/1 when they changed since the last copy (the older copies move to 2 and
- * 3). A file that looks damaged is not copied; its last good copy is carried over instead. Returns whether a copy was
- * made.
+ * 3). A file that looks damaged is not copied; its last good copy is carried over instead. Resolves whether a copy was
+ * made. Every read, write and fsync is asynchronous (w2044: the synchronous copy with an fsync per file held the portal's
+ * event loop 4.8-5.5 s every ten minutes, stall profiles 2026-10-24 12:20Z and 12:30Z); a pass still running is joined, not
+ * started twice.
  */
-export function backupMemory(root: string): boolean {
-  if (!fs.existsSync(root)) return false;
+export function backupMemory(root: string): Promise<boolean> {
+  backingUp ??= backupPass(root).finally(() => {
+    backingUp = undefined;
+  });
+  return backingUp;
+}
+
+async function backupPass(root: string): Promise<boolean> {
+  if (!(await existsAsync(root))) return false;
   const backups = memoryBackupRoot(root);
   const newest = path.join(backups, '1');
-  const plan = planBackup(root, backups);
-  if (fs.existsSync(newest) && fingerprint(plan) === fingerprint(new Map(filesUnder(newest).map((r) => [r, path.join(newest, r)])))) return false;
+  const plan = await planBackup(root, backups);
+  if ((await existsAsync(newest)) && (await fingerprint(plan)) === (await fingerprint(new Map((await filesUnderAsync(newest)).map((r) => [r, path.join(newest, r)]))))) return false;
   const fresh = path.join(backups, 'new');
-  fs.rmSync(fresh, { recursive: true, force: true });
-  for (const [r, src] of plan) copyDurable(src, path.join(fresh, r));
-  fs.mkdirSync(fresh, { recursive: true });
-  fs.rmSync(path.join(backups, String(MEMORY_BACKUPS)), { recursive: true, force: true });
+  await fs.promises.rm(fresh, { recursive: true, force: true });
+  for (const [r, src] of plan) await copyDurableAsync(src, path.join(fresh, r));
+  await fs.promises.mkdir(fresh, { recursive: true });
+  await fs.promises.rm(path.join(backups, String(MEMORY_BACKUPS)), { recursive: true, force: true });
   for (let k = MEMORY_BACKUPS - 1; k >= 1; k--) {
     const from = path.join(backups, String(k));
-    if (fs.existsSync(from)) fs.renameSync(from, path.join(backups, String(k + 1)));
+    if (await existsAsync(from)) await fs.promises.rename(from, path.join(backups, String(k + 1)));
   }
-  fs.renameSync(fresh, newest);
+  await fs.promises.rename(fresh, newest);
   return true;
 }
 
@@ -379,14 +448,14 @@ export function deleteMemoryFile(o: MemoryDeleteOptions): string {
  * Remove trash copies older than MEMORY_TRASH_DAYS, by the time in their name (a name without one is kept). Runs with
  * the backup pass; returns how many it removed.
  */
-export function pruneMemoryTrash(root: string, now = new Date(), days = MEMORY_TRASH_DAYS): number {
+export async function pruneMemoryTrash(root: string, now = new Date(), days = MEMORY_TRASH_DAYS): Promise<number> {
   const trash = path.join(memoryBackupRoot(root), 'trash');
   let removed = 0;
-  for (const rel of filesUnder(trash)) {
+  for (const rel of await filesUnderAsync(trash)) {
     const m = TRASH_STAMP.exec(path.basename(rel));
     if (!m) continue;
     if (now.getTime() - Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]) < days * 86_400_000) continue;
-    fs.rmSync(path.join(trash, rel), { force: true });
+    await fs.promises.rm(path.join(trash, rel), { force: true });
     removed++;
   }
   return removed;

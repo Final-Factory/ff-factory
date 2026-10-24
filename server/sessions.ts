@@ -1148,6 +1148,19 @@ export class SessionManager {
    */
   pauseHeld?: (s: SessionHandle, text: string) => boolean;
   /**
+   * A message that waits only for room on its worker's own computer (w2046, server/resumeMove.ts): `true` when its work
+   * moved to a computer with room instead (a fresh session there gets the message in its hand-off), so it is dropped here;
+   * a string, the Queued line to show instead (it stays on its computer on purpose, and says why); undefined: it waits as
+   * it is. Set by Agents.
+   */
+  roomMove?: (s: SessionHandle, q: QueuedSend, hold: string, now: number) => true | string | undefined;
+  /**
+   * A message to a worker between turns that starts a NEW session instead (w2043's pilot, server/freshAfterMerge.ts): true
+   * when a pull request of its request merged during its session and the message went to a fresh session in the same
+   * sandbox, so it is not delivered here. Checked last, once nothing holds the message. Set by Agents.
+   */
+  freshStart?: (s: SessionHandle, m: { text: string; from: 'human' | 'orchestrator' | 'system'; images?: ImageInput[]; requestedBy?: Requester; attachments?: DeliveredAttachment[] }) => boolean;
+  /**
    * Why a worker's live process must restart on the FF Factory code its machine runs now before its next turn (w1166: an
    * agent host keeps the guard and system prompt it started with across daemon updates), or undefined. Set by Agents.
    * Its messages wait meanwhile, as for an account move (moveFor).
@@ -1376,11 +1389,21 @@ export class SessionManager {
       }
       // w1376: a held computer resumes nobody; checked before a restart (moveFor) or a slot, so nothing stops or starts there.
       const onHold = this.machineHold?.(s);
-      const hold = onHold ?? (this.moveFor(s) || this.fullFor(s));
+      const restart = onHold ? undefined : this.moveFor(s);
+      let hold = onHold ?? (restart || this.fullFor(s));
       // w1532: a paused machine's worker hands its requests back instead of waiting for the unpause; the message goes with them.
       if (onHold && this.pauseHeld?.(s, q.text)) {
         drop();
         continue;
+      }
+      // w2046: a resume that waits only for room on its own computer moves to one with room, or says why it stays.
+      if (hold && !onHold && !restart && !OFFLINE.test(hold) && this.roomMove) {
+        const r = this.roomMove(s, q, hold, now);
+        if (r === true) {
+          drop();
+          continue;
+        }
+        if (r) hold = r;
       }
       if (hold) {
         // w1135: what holds it NOW, not what held it when it was queued ("lothdesktop is offline" stayed on dd8193f8's line
@@ -1391,6 +1414,11 @@ export class SessionManager {
           this.saveQueue();
         }
         held.add(q.id);
+        continue;
+      }
+      // w2043: a pilot worker whose pull request merged goes on in a fresh session; the message goes there.
+      if (this.freshStart?.(s, q)) {
+        drop();
         continue;
       }
       try {
@@ -1474,6 +1502,8 @@ export class SessionManager {
         return queue((e as Error).message, 'machine');
       }
     } else this.checkStart(id, opts.bypassGate, from);
+    // w2043: a pilot worker whose pull request merged goes on in a fresh session; the message goes there.
+    if (this.freshStart?.(s, { text, from, ...(images?.length ? { images } : {}), ...(opts.requestedBy ? { requestedBy: opts.requestedBy } : {}), ...(opts.attachments?.length ? { attachments: opts.attachments } : {}) })) return '';
     try {
       return s.send(text, from, undefined, images, opts.requestedBy, opts.attachments);
     } catch (e) {
