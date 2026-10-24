@@ -44,6 +44,9 @@ test('[dispatch], [work request], [work update], [ledger]: the ledger’s notice
   // The ping as the server writes it since w1099 (by priority, then oldest).
   const sorted = parseNotice('[ledger] Capacity may have freed (x). Queued for capacity, by priority, then oldest: w3 "Nightly" (Lothsahn, high); w1 "A" (Ben, normal); w2 "B" (Ben, normal). Start what fits now; leave queued only what no computer with room can take, and block what waits on something else.');
   assert.equal(sorted.summary, 'Capacity may have freed; 3 queued');
+  // w2049: started work pinned to named computers is named in the order.
+  const pinned = parseNotice('[ledger] Capacity may have freed (x). Room now: game work: pc. Queued for capacity and fitting it, by priority, then started work that runs only on the computers it names, then oldest: w2 "P" (Ben, normal; needs pc; started, runs only there); w1 "A" (Ben, low). Start what fits now.');
+  assert.equal(pinned.summary, 'Capacity may have freed; 2 queued');
 });
 
 test('[worker update] on a machine', () => {

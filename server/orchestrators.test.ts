@@ -1923,7 +1923,7 @@ test("w527: a standing agent's delegation flows into the ledger and onto a worke
   t.mock.timers.tick(30_000);
   t.mock.timers.reset();
   const ping = heard(dispatcher().info.id, '[ledger] Capacity may have freed').map((e) => e.text).join('\n');
-  assert.match(ping, /\[ledger\] Capacity may have freed \(worker x "Other work" stopped, 0 min ago\)\. Room now: game work: pc; agent-slot work: pc\. Queued for capacity and fitting it, by priority, then oldest: w1 "Verify suspected/);
+  assert.match(ping, /\[ledger\] Capacity may have freed \(worker x "Other work" stopped, 0 min ago\)\. Room now: game work: pc; agent-slot work: pc\. Queued for capacity and fitting it, by priority, then started work that runs only on the computers it names, then oldest: w1 "Verify suspected/);
 
   // It starts it in a machine's sandbox: the request is active, and the agent sees how it is doing.
   const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: task, title: 'Regression check', work_id: 'w1' });
@@ -5099,7 +5099,7 @@ test('w1944: the capacity ping names the room a queued request cannot use, lets 
   o.capacityMayHaveFreed('sandbox m5/slot3 released');
   tick(30_000);
   assert.equal(pings().length, 1);
-  assert.match(pings()[0], /fitting it, by priority, then oldest: w2 "Blueprint paste keeps the filter".*Queued with no room for them now: w1 \(m5 is a Mac, which refuses the multiplayer client its MP scenario starts \(w665\)\)\./);
+  assert.match(pings()[0], /fitting it, by priority, then started work that runs only on the computers it names, then oldest: w2 "Blueprint paste keeps the filter".*Queued with no room for them now: w1 \(m5 is a Mac, which refuses the multiplayer client its MP scenario starts \(w665\)\)\./);
 
   // The hourly cap is spent. biscuit (Windows) frees: the urgent MP fix fits it, so the ping goes at the gap, not in an hour.
   const wakes = (o as unknown as { capacityWakes: number[] }).capacityWakes;
@@ -5110,7 +5110,7 @@ test('w1944: the capacity ping names the room a queued request cannot use, lets 
   o.capacityMayHaveFreed('sandbox biscuit/slot1 released');
   tick(30_000);
   assert.equal(pings().length, 2, 'urgent work that fits is not held by the hourly cap');
-  assert.match(pings()[1], /fitting it, by priority, then oldest: w1 "Nightly: fix MP-tutorial-e2e-loth" \(Lothsahn, urgent\); w2/);
+  assert.match(pings()[1], /fitting it, by priority, then started work that runs only on the computers it names, then oldest: w1 "Nightly: fix MP-tutorial-e2e-loth" \(Lothsahn, urgent\); w2/);
 
   // Normal work alone waits for the cap, as before.
   store.putWork({ ...store.work.get('w1')!, status: 'active', queuedFor: undefined });
