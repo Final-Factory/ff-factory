@@ -464,9 +464,10 @@ export interface Config {
    * view goes first, machine ids in order; unset: beast (placement.ts DEFAULT_LIVE). Set with placement.live. `build` (w1606): where builds run first and which computers a build declared coming
    * clears, machine ids in order; unset: beast (placement.ts DEFAULT_BUILD). Set with placement.build. `minPriority` (w1643):
    * machine id to the lowest priority of work it takes (high: high and urgent only; urgent: urgent only; a computer left out takes
-   * all work). Set with placement.minPriority.
+   * all work). Set with placement.minPriority. `spillAtPercent` (w2054): the load past which new work spills down the list
+   * (placement.ts SPILL_AT_PCT, 50 when unset). Set with placement.spillAtPercent.
    */
-  placement?: { prefer?: string[]; avoid?: Record<string, string>; hold?: Record<string, string>; holdExcept?: Record<string, string[]>; live?: string[]; build?: string[]; minPriority?: Record<string, MinPriority> };
+  placement?: { prefer?: string[]; avoid?: Record<string, string>; hold?: Record<string, string>; holdExcept?: Record<string, string[]>; live?: string[]; build?: string[]; minPriority?: Record<string, MinPriority>; spillAtPercent?: number };
   /** Paths no sandbox agent may write to or mention in a shell command (e.g. the live co-op checkout). */
   protectedPaths: string[];
   limits: {
