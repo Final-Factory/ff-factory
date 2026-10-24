@@ -101,3 +101,43 @@ export function editorSlotRefusal(message: string): string | undefined {
 export function queueWaitsAll(stats: Readonly<Record<string, Pick<MachineStats, 'bench' | 'unity'>>> | undefined): QueueWait[] {
   return Object.entries(stats ?? {}).flatMap(([id, st]) => queueWaitsOf(id, st));
 }
+
+/** A bench ticket a worker holds now (w1968): "the exclusive bench lock on beast (t00001009 for w1891, since 02:10 UTC)". */
+export interface BenchHold {
+  machine: string;
+  session: string;
+  on: string;
+}
+
+/** Every bench ticket a worker holds now, from the same daemon reports (BenchState.running). */
+export function benchHoldsAll(stats: Readonly<Record<string, Pick<MachineStats, 'bench'>>> | undefined): BenchHold[] {
+  return Object.entries(stats ?? {}).flatMap(([machine, st]) =>
+    (st.bench?.running ?? []).flatMap((t) => {
+      if (!t.session) return [];
+      const since = hhmm(t.since);
+      const about = [t.ticket, ...(t.requests?.length ? [`for ${t.requests.join('/')}`] : [])].join(' ') + (since ? `, since ${since}` : '');
+      const on = t.mode === 'exclusive' ? `the exclusive bench lock on ${machine} (${about})` : `a shared bench ticket on ${machine} (${about})`;
+      return [{ machine, session: t.session, on }];
+    }),
+  );
+}
+
+/** The machines' queues as the agent lists read them (w1968): who waits in one, and who holds a bench ticket. */
+export interface AgentQueue {
+  waits: readonly QueueWait[];
+  holds: readonly BenchHold[];
+}
+
+export const agentQueueAll = (stats: Readonly<Record<string, Pick<MachineStats, 'bench' | 'unity'>>> | undefined): AgentQueue => ({ waits: queueWaitsAll(stats), holds: benchHoldsAll(stats) });
+
+/**
+ * w1968 (lothsahn, 2026-10-24: "Why does Beast show an exclusive lock but a bunch of working runners? Shouldn't some of
+ * them be blocked?"): what an agent's own tickets add to its state in the runner and sandbox views (shared/agentState.ts),
+ * read from the same queue waits the ledger's Blocked uses: the bench ticket or Unity slot it waits for, and the bench
+ * ticket it holds.
+ */
+export function agentQueueFacts(sessionId: string, q: AgentQueue | undefined): { queueWait?: string; benchHold?: string } {
+  const wait = q?.waits.find((w) => w.session === sessionId && (w.kind === 'bench' || w.kind === 'slot'));
+  const hold = q?.holds.find((h) => h.session === sessionId);
+  return { ...(wait ? { queueWait: wait.on } : {}), ...(hold ? { benchHold: hold.on } : {}) };
+}

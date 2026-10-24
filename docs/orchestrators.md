@@ -735,6 +735,14 @@ without one means it is off or failing, worth a person's look.
   next turn): while it is stopped with that check-in and its daemon still reports no slot free (every slot in use, launches
   waiting, or RAM at its cap), work that needs an editor reads "Blocked on a Unity editor slot on lothdesktop (3 of 3 in
   use)", and Working once a slot frees. Tests: `w1949QueueWaits.test.ts`.
+  The runner and sandbox views read the same waits (w1968; lothsahn: "Why does Beast show an exclusive lock but a bunch of
+  working runners? Shouldn't some of them be blocked?"): `shared/queueWaits.ts` `agentQueueFacts` gives `agentState` an
+  agent's own waiting ticket (bench or Unity slot) and the bench ticket it holds, so list_sandboxes, the
+  machine view, the worker cards and the sidebar show "Blocked: waiting for the exclusive bench lock on beast (held by
+  w1891 / t00001009 since 02:10 UTC, next in queue)" for the waiter and "Working: holds the exclusive bench lock on beast
+  (t00001009 for w1891, since 02:10 UTC)" for the holder ("holds lock" in the machine view). Only the label and its reason
+  change; the state stays mid-turn or between turns, so capacity and placement read it as before. Tests:
+  `w1968AgentQueue.test.ts`.
 - **Stalled is only what nothing will move** (w1841; Ben, 2026-10-23, on six requests his Stalled filter showed: "why are
   these stalled?"). `shared/workState.ts` `workLive` reads these before it says Stalled:
   - a worker an urgent release's build paused (`server/buildPlans.ts` `pausedFor`: asked mid-turn, or paused between turns

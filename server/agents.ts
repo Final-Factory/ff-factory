@@ -18,7 +18,7 @@ import { describeAutoIntake } from './ffboxAutoIntake.ts';
 import { agentState, agentStateText, holdsItsPlace, holdsSandbox, sortAgents, sortPlaces } from '../shared/agentState.ts';
 import { idleClosedPart } from './liveIdle.ts';
 import { HOLD_PLACE_MS, LIVE_HOLD_MS, PlaceAgain, RELEASE_AFTER_MS, RELEASE_WAKE_NOTE, handOverBranch, occupies, releasedOn } from './placeAgain.ts';
-import { editorSlotRefusal, queueWaitsAll } from '../shared/queueWaits.ts';
+import { agentQueueAll, agentQueueFacts, editorSlotRefusal, queueWaitsAll } from '../shared/queueWaits.ts';
 import { WORK_LIVE_LABEL, WORK_LIVE_STATES, asksAPerson, benchWaitOf, lastOpenLine, liveCounts, otherWorkWait, outsideDeclared, outsideWaitOf, ownWorkWait, personWaitIn, reportWaitKey, servedBy, workLiveAll, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
 import { reportTail, type NeedsYouWait } from './needsYou.ts';
 import { stillOpenIn } from './ledgerRules.ts';
@@ -2805,10 +2805,19 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
 
   /** An agent line for the listings: live agents only (the full history is in the dashboard and search_transcripts). */
   private agentLine(s: SessionInfo) {
-    // Its state first (w475, w643): Working (mid-turn, or between turns and on what), Queued or Blocked (a held message),
-    // Needs you, Idle (free for new work), Stopped.
+    // Its state first (w475, w643): Working (mid-turn, or between turns and on what), Queued or Blocked (a held message, or
+    // a ticket waiting in its machine's queue, w1968), Needs you, Idle (free for new work), Stopped.
     const kept = this.placeAgain.keptLine(s);
-    return `    - ${s.id} "${s.title}" [${agentStateText(s)}${agentState(s).state === 'between_turns' ? `, ${s.status === 'idle' ? 'between turns' : s.status}` : ''}${kept ? `; ${kept}` : ''}${s.pendingPermissions.length ? `, ${s.pendingPermissions.length} permission request(s) waiting` : ''}] ${activityLine(s)}, turns=${s.turns} cost=$${s.costUsd.toFixed(2)}`;
+    const q = this.withQueue(s);
+    return `    - ${s.id} "${s.title}" [${agentStateText(q)}${agentState(q).state === 'between_turns' ? `, ${s.status === 'idle' ? 'between turns' : s.status}` : ''}${kept ? `; ${kept}` : ''}${s.pendingPermissions.length ? `, ${s.pendingPermissions.length} permission request(s) waiting` : ''}] ${activityLine(s)}, turns=${s.turns} cost=$${s.costUsd.toFixed(2)}`;
+  }
+
+  /**
+   * An agent with what its machine's queues say of it (w1968): the bench ticket or Unity slot it waits for, and the bench
+   * ticket it holds, from the daemons' reports list_work's Blocked reads (shared/queueWaits.ts agentQueueFacts).
+   */
+  private withQueue<T extends SessionInfo>(s: T): T & ReturnType<typeof agentQueueFacts> {
+    return { ...s, ...agentQueueFacts(s.id, agentQueueAll(this.machines.allStats())) };
   }
 
   /** Live agents of a place (a process up or mid-turn), and how many earlier ones there were. */
@@ -2997,7 +3006,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
     const there = this.sessionsOf(sb.sessionIds).filter((x) => x.kind === 'worker' && !mine.includes(x.id) && occupies(x, !!this.sessions.sessions.get(x.id)?.live));
     const busy = this.busyIn(m, sb, mine);
     if (!there.length && !busy.length) return;
-    const who = there.length ? there.map((x) => `${x.id} "${x.title}" (${agentStateText(x)})`).join('; ') : busy.join('; ');
+    const who = there.length ? there.map((x) => `${x.id} "${x.title}" (${agentStateText(this.withQueue(x))})`).join('; ') : busy.join('; ');
     const label = `${m.id}/${sb.id}`;
     const max = poolSettingsOf(m)?.maxAgentsPerSandbox ?? 2;
     const midTurn = this.machines.runningIn(m.id, sb.id);
@@ -3089,7 +3098,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
       const busy = this.busyIn(m, sb);
       const left = ` this worker's handover tells it to switch_branch to its own branch before it commits anything.`;
       if (here.length || busy.length) {
-        const why = busy.length ? busy.join('; ') : here.map((x) => `${x.id} "${x.title}" (${agentStateText(x)}) is there on it`).join('; ');
+        const why = busy.length ? busy.join('; ') : here.map((x) => `${x.id} "${x.title}" (${agentStateText(this.withQueue(x))}) is there on it`).join('; ');
         return { note: ` Not handed over: ${label} is on the release branch ${onBranch} (w1856), but ${why}, so it was not switched under them;${left}` };
       }
       const tag = (name ?? new Date().toISOString().slice(0, 16).replace(/[-:]/g, '').replace('T', '-')).toLowerCase();
@@ -3112,7 +3121,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
     const here = this.sessionsOf(sb.sessionIds).filter((x) => x.id !== r.id && !x.placeReleased && occupies(x, !!this.sessions.sessions.get(x.id)?.live));
     const busy = this.busyIn(m, sb);
     if (here.length || busy.length) {
-      const why = busy.length ? busy.join('; ') : here.map((x) => `${x.id} "${x.title}" (${agentStateText(x)}) is there on it`).join('; ');
+      const why = busy.length ? busy.join('; ') : here.map((x) => `${x.id} "${x.title}" (${agentStateText(this.withQueue(x))}) is there on it`).join('; ');
       console.log(`place again: did not hand ${label} over from ${r.id}'s branch ${r.placeReleased.branch}: ${why}`);
       return { note: ` Not handed over: ${kept}, but ${why}, so it was not switched under them.` };
     }
