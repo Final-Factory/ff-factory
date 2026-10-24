@@ -4024,6 +4024,10 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
    * system_status and the placement hint read.
    */
   places(): Computer[] {
+    return this.placeAgain.withClaimsMemo(() => this.placesNow());
+  }
+
+  private placesNow(): Computer[] {
     const out: Computer[] = [];
     const all = [...this.sessions.sessions.values()].filter((s) => s.info.kind !== 'orchestrator');
     const mem = this.hostMem();

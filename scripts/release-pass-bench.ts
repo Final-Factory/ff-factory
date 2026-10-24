@@ -69,3 +69,17 @@ p.tick();
 const ms = performance.now() - t0;
 console.log = log;
 console.log(`${path.basename(repo)}: ${S} sessions, ${W} requests, ${R} released: one release pass held the loop ${ms.toFixed(0)} ms`);
+// w2044: the shape of Agents.places outside a release pass: free() asks claimedBy twice for every sandbox, then waiting() once.
+const placesShape = () => {
+  for (const m of machines) {
+    for (const s of mach.get(m)!.sandboxes) p.claimedBy(m, s.id), p.claimedBy(m, s.id);
+    p.waiting(m);
+  }
+};
+console.log = () => {};
+const t1 = performance.now();
+if (p.withClaimsMemo) p.withClaimsMemo(placesShape);
+else placesShape();
+const ms2 = performance.now() - t1;
+console.log = log;
+console.log(`${path.basename(repo)}: the claims one places() call asks for held the loop ${ms2.toFixed(0)} ms${p.withClaimsMemo ? ' (memoized per call, w2044)' : ''}`);

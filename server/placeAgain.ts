@@ -479,9 +479,20 @@ export class PlaceAgain {
    * when its check-in nears and that is still free. Returns what it did, for the log and tests.
    */
   tick(): string[] {
+    return this.withClaimsMemo(() => (this.d.pass ? this.d.pass(() => this.releasePass()) : this.releasePass()));
+  }
+
+  /**
+   * Runs `fn` with each machine's claims computed once (w2044): Agents.places asks free() twice for every sandbox, and each
+   * ask computed the machine's claims again, every session in the store filtered and sorted each time (1.0-1.1 s portal
+   * blocks on 2026-10-24, stall profile: places > free > claimedBy > claims > facts). Inside a memo already (the release
+   * pass), it adds none, so the pass's own invalidation stays.
+   */
+  withClaimsMemo<T>(fn: () => T): T {
+    if (this.claimsMemo) return fn();
     this.claimsMemo = new Map();
     try {
-      return this.d.pass ? this.d.pass(() => this.releasePass()) : this.releasePass();
+      return fn();
     } finally {
       this.claimsMemo = undefined;
     }
