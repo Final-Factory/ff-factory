@@ -347,3 +347,17 @@ test('w898: a sandbox in cleanup (its caches are being trimmed) is not free, pla
   assert.match(agents.describeAllSandboxes(), /- pc\/beta FREE/, 'free again when the trim ends');
   assert.equal(free(), before);
 });
+
+test('places computes each machine\'s claims once per call (w2044: 1.0-1.1 s portal blocks in places > free > claims > facts)', async (t) => {
+  const { agents } = await setup(t);
+  const pa = agents.placeAgain as unknown as { facts: (m: string) => unknown };
+  const facts = pa.facts.bind(pa);
+  let calls = 0;
+  pa.facts = (m: string) => (calls++, facts(m));
+  const p = agents.places().find((x) => x.id === 'pc');
+  assert.equal(p?.freeSandboxes, 2);
+  assert.ok(calls <= 2, `facts read ${calls} times for one places() call: claims once and waiting once`);
+  calls = 0;
+  agents.places();
+  assert.ok(calls <= 2, 'a second call computes them again (no memo outlives the call)');
+});
