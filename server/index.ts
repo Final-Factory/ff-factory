@@ -436,6 +436,7 @@ const agents = new Agents(cfg, store, sessions, machines, identity);
 observeAsk = (sid, e) => agents.orchestrators.observeAsk(sid, e);
 // Each machine's bench queue orders tickets by their worker's request priority first (w1628): at connect and each minute.
 machines.benchPrioritiesFor = (id) => agents.benchPriorities(id);
+machines.timedAskFor = (id) => agents.timedAskFor(id);
 setInterval(() => machines.pushBenchPriorities(), 60_000).unref();
 // A holder warned that its bench turn ends (w1832, server/benchWarnings.ts): its worker is messaged once per deadline.
 const benchWarner = new BenchWarner({ session: (id) => store.sessions.get(id), send: (id, text) => void sessions.send(id, text, 'system'), log: (line) => console.log(`[bench] ${line}`) });

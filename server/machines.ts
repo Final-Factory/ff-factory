@@ -27,7 +27,7 @@ import { hostStartFailed, offlineDetail } from '../shared/agentState.ts';
 import { ghLoginLabel, sanitizeGhLogin } from '../shared/ghLogin.ts';
 import { HOST_LOGIN, machineLogin, type AccountIdentity } from './usage.ts';
 import type { AttachmentStore } from './attachments.ts';
-import type { BenchPriority, BenchWarning, NoTimedRuns, DeliveredAttachment, EffortLevel, ImageInput, Machine, MachineGuardSettings, MachinePause, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PersonPlayReport, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, CleanupSummary } from '../shared/types.ts';
+import type { BenchPriority, BenchWarning, NoTimedRuns, TimedAskMark, DeliveredAttachment, EffortLevel, ImageInput, Machine, MachineGuardSettings, MachinePause, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PersonPlayReport, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, CleanupSummary } from '../shared/types.ts';
 import { DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT } from '../shared/types.ts';
 import type { StaleContext } from './staleOutput.ts';
 import { checkStringMap, readJsonDurable, writeJsonDurable } from './durable.ts';
@@ -711,6 +711,8 @@ export class MachineManager {
 
   /** Each worker's request priority on a machine, for its bench queue (w1628; set by server/index.ts). */
   benchPrioritiesFor?: (machineId: string) => Record<string, BenchPriority>;
+  /** Whether a machine's workers ask timed_place before an exclusive timing ticket (w1969; set by server/index.ts). */
+  timedAskFor?: (machineId: string) => TimedAskMark | undefined;
 
   /** Send every connected daemon its workers' request priorities for its bench queue (w1628): at connect and each minute. */
   pushBenchPriorities() {
@@ -724,7 +726,8 @@ export class MachineManager {
   benchPrioritiesMsg(id: string, sessions: Record<string, BenchPriority>): Extract<ToDaemon, { type: 'bench_priorities' }> {
     const no = this.noTimedRuns(id);
     const play = this.personPlayFor?.(id);
-    return { type: 'bench_priorities', sessions, singleWorker: this.singleWorker(id), ...(no ? { noTimedRuns: no } : {}), ...(play ? { personPlay: play } : {}) };
+    const ask = this.timedAskFor?.(id);
+    return { type: 'bench_priorities', sessions, singleWorker: this.singleWorker(id), ...(no ? { noTimedRuns: no } : {}), ...(ask ? { timedAsk: ask } : {}), ...(play ? { personPlay: play } : {}) };
   }
 
   /**

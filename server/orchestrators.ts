@@ -50,6 +50,7 @@ import { aheadText, answerAfter, asksAPerson, holdsOf, personWaitIn, questionSha
 import { capacityBlockProblem, capacityWaitIn, needsOf, needsTimed, pairRoom, pairText, PAIR_MAX_LEGS, resolveNeeds } from '../shared/capacity.ts';
 import type { HandBack } from './machinePause.ts';
 import { heldText, roomEnough, roomForWork, roomIds, roomStood, timedKindOf, unusableText, type RoomNow, type TimedFacts, type TimedKind } from './placement.ts';
+import { TIMED_LEG_WAIT_MS } from './timedAsk.ts';
 import { minPriorityText } from '../shared/capacity.ts';
 import { repoSlug } from './ciReadHealth.ts';
 import { actionName, CONDITIONAL_DAYS, CONDITIONAL_MAX_DAYS, CONDITIONAL_PER_REQUEST, conditionalLine, conditionName, HELD_MARK, inPersonWords, parseCondition, type ConditionInput } from '../shared/conditional.ts';
@@ -3124,6 +3125,113 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       ? `${w.id} already has an open pair run, ${p.id} (${p.status}: ${clip(p.title, 80)}); you wait on it, and nothing new was filed.`
       : `Filed ${p.id}, ${pairText(p.pair!)}, for ${w.id}. The dispatcher starts its legs together, one new worker on each computer, as soon as that many computers have room at once; each leg's first message says which leg it is and where the others are.`;
     return `${head} ${blocked} Commit and push your work before the turn ends: your sandbox is then released at once for other work, and you are resumed (in a free sandbox on your machine, on your branch) when the pair's host leg reports its result.`;
+  }
+
+  /**
+   * timed_place's hand-off (w1969, server/timedAsk.ts): the timed leg of `sessionId`'s request filed as its own request,
+   * Queued for the small computers `needs` names (best first), with the asking request Blocked on its report. One open leg
+   * per request: asked again, it waits on the one there is. Returns the leg's id and what the worker is told.
+   */
+  fileTimedLeg(sessionId: string, a: { what: string; brief: string; from: string; needs: string[]; why: string; request?: string }): { id: string; text: string } {
+    const w = this.workerRequest(sessionId, a.request, 'timed_place');
+    const what = clip(a.what.replace(/\s+/g, ' ').trim(), 100);
+    const brief = a.brief.trim();
+    if (!what || !brief) throw new Error('give what (one line: "RoundRobin belt output A/B on PR #2347") and brief (what the leg runs, as a new worker needs it: the branch and the commits of both sides, the save, the script and its settings, what to report)');
+    if (!a.needs.length) throw new Error(`no small computer takes ${w.id}'s timed leg: ask an operator`);
+    const open = [...this.store.work.values()].find((x) => x.timedLeg?.for === w.id && isOpen(x));
+    const leg = open ?? this.newTimedLeg(w, sessionId, { what, brief, from: a.from, needs: a.needs, why: a.why });
+    const blocked = this.workerBlocked(sessionId, { request: w.id, reports: [leg.id], what: `timed leg ${leg.id}: ${what}` });
+    const head = open
+      ? `${w.id} already has an open timed leg, ${leg.id} (${leg.status}: ${clip(leg.title, 80)}); you wait on it, and nothing new was filed.`
+      : `Filed ${leg.id}, the timed leg of ${w.id}, Queued for ${a.needs.join(' > ')}: a new worker there builds and times both sides of it on that one computer, and reports to you.`;
+    this.stamp(w, `timed leg ask (w1969) from worker ${sessionId.slice(0, 8)} on ${a.from}: handed to ${leg.id}, queued for ${a.needs.join(' > ')}: ${a.why}`);
+    this.store.putWork(w);
+    console.log(`timed ask (w1969): ${w.id} worker ${sessionId.slice(0, 8)} on ${a.from}: elsewhere -> ${leg.id} queued for ${a.needs.join(' > ')}: ${a.why}`);
+    return { id: leg.id, text: `${head} ${blocked} Do not take an exclusive ticket here for it. Commit and push your work before the turn ends: your sandbox is then released for other work, and the leg's report (a line "For ${w.id}:") resumes you.` };
+  }
+
+  /** A timed_place answer that keeps the leg where it is (w1969): a line in the asking request's log and the portal's journal. */
+  noteTimedAsk(sessionId: string, request: string | undefined, line: string): void {
+    console.log(`timed ask: ${line}`);
+    let w: WorkItem | undefined;
+    try {
+      w = this.workerRequest(sessionId, request, 'timed_place');
+    } catch {
+      return; // no request of its own: the journal line is the record
+    }
+    this.stamp(w, line);
+    this.store.putWork(w);
+  }
+
+  /** The request fileTimedLeg files (w1969): the asking request's people and priority, a game sandbox, Queued for the small computers. */
+  private newTimedLeg(w: WorkItem, sessionId: string, x: { what: string; brief: string; from: string; needs: string[]; why: string }): WorkItem {
+    const now = this.now().toISOString();
+    const title = clip(`Timed leg for ${w.id}: ${x.what}`, 120);
+    const brief = clip(
+      [
+        x.brief,
+        '',
+        `FF Factory filed this for worker ${sessionId} on ${w.id} (w1969, timed_place): its timed leg, moved off a big computer so its exclusive bench turn idles few slots (${x.why}). Build and time BOTH sides of the comparison on the computer you run on, under its exclusive bench ticket (the bench queue, as the game repo's scripts take it): numbers compare only with the same computer's own. ${w.id}'s worker is Blocked on this request's report: report the result with a line "For ${w.id}:" (each side's commit, the computer, the table, where the logs are), then end with DONE: <this request> once the run is over. Do not merge ${w.id}'s pull request: its own worker does.`,
+      ].join('\n'),
+      8000,
+    );
+    const leg: WorkItem = {
+      id: `w${++this.store.workSeq}`,
+      title,
+      brief,
+      constraints: `a timed leg (w1969): runs on ${x.needs.join(' or ')}`,
+      priority: w.priority,
+      relatedIds: [w.id],
+      keys: textKeys(title, this.knownBranches()),
+      requestedBy: w.requestedBy,
+      requesters: [...w.requesters],
+      humanAsked: false,
+      status: 'queued',
+      queuedFor: { at: now, needs: [...x.needs] },
+      createdAt: now,
+      updatedAt: now,
+      sessionIds: [],
+      needs: 'game',
+      timedLeg: { for: w.id, forSession: sessionId, from: x.from, small: [...x.needs] },
+      overlaps: [],
+      asks: 0,
+      log: [],
+    };
+    leg.overlaps = findOverlaps({ keys: leg.keys, title: leg.title }, this.pool(leg.id)).filter((o) => o.ref !== w.id);
+    this.stamp(leg, `filed by FF Factory for worker ${sessionId} on ${w.id} (w1969 timed_place) from ${x.from}: queued for ${x.needs.join(' > ')}, the small computers that take timed runs (a big one only after it waited ${TIMED_LEG_WAIT_MS / 60_000} min): ${x.why}`);
+    this.store.putWork(leg);
+    this.gatherForDispatcher(w.requestedBy, requestNotice(leg));
+    return leg;
+  }
+
+  /**
+   * The wait bound of a timed leg (w1969, TIMED_LEG_WAIT_MS): one Queued on its small computers for longer widens to every
+   * computer that takes timed runs ("Next timed work"'s order, big ones included), logged once, and the dispatcher is told.
+   * Returns the ids widened.
+   */
+  timedLegBound(): string[] {
+    const done: string[] = [];
+    const now = this.now().getTime();
+    for (const w of this.store.work.values()) {
+      const leg = w.timedLeg;
+      if (!leg || leg.widened || w.status !== 'queued' || !isOpen(w)) continue;
+      const since = Date.parse(w.queuedFor?.at ?? w.createdAt);
+      if (!(now - since > TIMED_LEG_WAIT_MS)) continue;
+      const takes = this.d.timedFacts?.('timed')?.takes ?? [];
+      const needs = [...new Set([...(w.queuedFor?.needs ?? leg.small), ...takes])];
+      w.queuedFor = { at: w.queuedFor?.at ?? w.createdAt, needs };
+      w.timedLeg = { ...leg, widened: this.now().toISOString() };
+      this.roomFlags.delete(w.id);
+      this.stamp(w, `ledger: its timed leg waited ${Math.round((now - since) / 60_000)} min on ${leg.small.join(', ')} with no room (w1969 bound: ${TIMED_LEG_WAIT_MS / 60_000} min, two full bench turns); now any computer that takes timed runs may take it: ${needs.join(' > ')}`);
+      this.store.putWork(w);
+      done.push(w.id);
+    }
+    if (!done.length) return [];
+    console.log(`timed ask (w1969): widened timed legs past their wait bound: ${done.join(', ')}`);
+    this.toDispatcher(
+      `[ledger] Timed legs that waited over ${TIMED_LEG_WAIT_MS / 60_000} min for a small computer (w1969) may now go to any computer that takes timed runs: ${done.map((id) => `${id} "${clip(this.store.work.get(id)?.title ?? '', 80)}"`).join('; ')}. Start each on the first of its needs with room (start_agent with its work_id).`,
+    );
+    return done;
   }
 
   /** The pair request request_pair files (w1945): the asking request's people and priority, a game sandbox per leg. */

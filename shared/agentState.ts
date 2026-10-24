@@ -132,8 +132,9 @@ export function agentState(s: AgentFacts, time: (iso: string, now: number) => st
   // w1968: a ticket of its own waits in its machine's bench queue (or for a Unity slot): Blocked on it, mid-turn or between
   // turns, whatever it does meanwhile; Working again by itself once the next report has it granted.
   const live = s.status === 'running' || s.status === 'starting' || s.status === 'idle';
-  if (s.queueWait && live) return { ...v(s.status === 'idle' ? 'between_turns' : 'working', { waitsOn: `waiting for ${s.queueWait}`, ...(s.status === 'idle' ? { kind: 'job' as const } : {}) }), label: 'Blocked' };
   const hold = s.benchHold && live ? `holds ${s.benchHold}` : undefined;
+  // A holder that waits for a second ticket (a second player beside its first) says both (live on LothDesktop 02:39Z).
+  if (s.queueWait && live) return { ...v(s.status === 'idle' ? 'between_turns' : 'working', { waitsOn: [`waiting for ${s.queueWait}`, hold].filter(Boolean).join(' · '), ...(s.status === 'idle' ? { kind: 'job' as const } : {}) }), label: 'Blocked' };
   if (s.status === 'running' || s.status === 'starting') return v('working', hold ? { waitsOn: hold } : {});
   if (s.status === 'error') return v('error');
   const wakeAhead = !!s.wakeAt && Date.parse(s.wakeAt) > now - OVERDUE_MS;

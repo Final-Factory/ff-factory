@@ -593,6 +593,31 @@ export interface BenchPriority {
    * taken under another session's id would carry that session's mark.
    */
   exempt?: 'release' | 'nightly';
+  /** w1969: the worker's last timed_place verdict while it holds; the guard lets its exclusive timing tickets through only on "here". */
+  timed?: TimedVerdict;
+}
+
+/** What timed_place decided for a worker's timed leg (w1969, server/timedAsk.ts). */
+export type TimedVerdictKind = 'here' | 'elsewhere';
+
+/** A worker's timed_place verdict as its machine keeps it (w1969, BenchPriority.timed). */
+export interface TimedVerdict {
+  verdict: TimedVerdictKind;
+  why: string;
+  /** ISO time it holds until. */
+  until: string;
+  /** elsewhere: the request its leg was filed as, or the play-only computer of its timed_run. */
+  leg?: string;
+  timedRun?: string;
+}
+
+/**
+ * Whether a machine's workers ask before an exclusive timing ticket (w1969, server/timedAsk.ts timedAskMark), as the
+ * portal sends it with the bench priorities: a big computer asks, a small one does not.
+ */
+export interface TimedAskMark {
+  required: boolean;
+  why: string;
 }
 
 /**
@@ -2035,6 +2060,12 @@ export interface WorkItem {
   legs?: QueuedLeg[];
   /** A pair run (w1945): it needs this many computers at once, its legs started together. */
   pair?: WorkPair;
+  /**
+   * A timed leg handed off to a small computer (w1969, timed_place): the request whose worker asked and that worker (Blocked
+   * on this one's report meanwhile), where it came from and the small computers it waits on. Queued for those; after
+   * TIMED_LEG_WAIT_MS (server/timedAsk.ts) its needs widen to every computer that takes timed runs, and `widened` says when.
+   */
+  timedLeg?: { for: string; forSession: string; from: string; small: string[]; widened?: string };
   /**
    * Its last hand-back (w1532, server/machinePause.ts): its worker's machine was paused, so it was taken off that worker and
    * Queued for another computer, whose worker picks it up from `branch` with `note` (the worker's own line, or where it
