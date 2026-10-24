@@ -4881,6 +4881,66 @@ test('w1872: w1789 as it happened: a timed leg and a Queued timed request alread
   assert.deepEqual(o.replaceNoTimedWaits(), [], 'nothing left on m5: no second notice');
 });
 
+// w1969: the fleet the ask decides on, with the test machine "pc" as BEAST (6 agent slots); m5 takes no timed runs.
+const askFleet = (): Computer[] => {
+  const box = (id: string, maxAgents: number, platform: string, o: Partial<Computer> = {}): Computer => ({ id, online: true, live: 1, midTurn: 0, maxAgents, sandboxes: 1, maxSandboxes: 3, freeSandboxes: 1, memUsedBytes: 16 * 1024 ** 3, memTotalBytes: 64 * 1024 ** 3, editors: 0, maxEditors: 2, platform, ...o });
+  return [box('pc', 6, 'win32', { live: 6 }), box('lothlaptop', 1, 'win32', { live: 1, freeSandboxes: 0 }), box('m3', 2, 'darwin'), box('m5', 4, 'darwin', { noTimedRuns: M5_NO })];
+};
+
+test('w1969: a worker on a big computer asks timed_place; its leg is filed Queued for the small computers, its request waits on the leg\'s report, the guard keeps its ticket off here, and the decision is in the log', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o } = env;
+  fixTimedFacts(o);
+  agentsRoomFacts(agents, { game: ['pc'] });
+  putRequests(store, [{ id: 'w1', title: 'Just Play perf: RoundRobin belt output without Instantiate', brief: 'Fix it, then a timed A/B.' }]);
+  const { id, h } = await startedFor(env, 'w1');
+  agents.places = () => askFleet();
+  // The machine view: pc is big, so its workers ask.
+  assert.equal(agents.timedAskFor('pc')?.required, true);
+  assert.equal(agents.timedAskFor('m3')?.required, false);
+  const out = String(await h.timed_place!({ what: 'RoundRobin belt output A/B on PR #2347', brief: 'Branch w1891-roundrobin: base 1a2b3c4, fix 5d6e7f8; probe_ab_win.sh 4 rounds on the Just Play save; report the table.' }));
+  assert.match(out, /^Elsewhere \(w1969\): pc has 6 agent slots \(6 live now\): an exclusive turn there idles all the others; small computers take it: m3 \(2 agent slots, 1 live, room now\) > lothlaptop \(1 agent slot, 1 live, no room now\)\. Filed w2, the timed leg of w1, Queued for m3 > lothlaptop/);
+  const leg = store.work.get('w2')!;
+  assert.equal(leg.status, 'queued');
+  assert.deepEqual(leg.queuedFor?.needs, ['m3', 'lothlaptop'], 'small ones only: never pc (big) or m5');
+  assert.deepEqual(leg.timedLeg, { for: 'w1', forSession: id, from: 'pc', small: ['m3', 'lothlaptop'] });
+  assert.match(leg.title, /^Timed leg for w1: RoundRobin belt output A\/B on PR #2347$/);
+  assert.match(leg.brief, /Build and time BOTH sides of the comparison on the computer you run on, under its exclusive bench ticket/);
+  assert.match(leg.brief, /a line "For w1:"/);
+  const w1 = store.work.get('w1')!;
+  assert.equal(w1.status, 'blocked');
+  assert.match(w1.log.join('\n'), /timed leg ask \(w1969\) from worker \w{8} on pc: handed to w2, queued for m3 > lothlaptop: pc has 6 agent slots/);
+  assert.match(leg.log.join('\n'), /filed by FF Factory for worker \w+ on w1 \(w1969 timed_place\) from pc: queued for m3 > lothlaptop, the small computers that take timed runs \(a big one only after it waited 60 min\): pc has 6 agent slots/);
+  // Its machine hears the verdict with the bench priorities: the guard then names the leg.
+  assert.deepEqual({ verdict: agents.benchPriorities('pc')[id]?.timed?.verdict, leg: agents.benchPriorities('pc')[id]?.timed?.leg }, { verdict: 'elsewhere', leg: 'w2' });
+  // Asked again: no second leg.
+  assert.match(String(await h.timed_place!({ what: 'the same A/B', brief: 'again' })), /w1 already has an open timed leg, w2/);
+  assert.equal([...store.work.values()].filter((x) => x.timedLeg).length, 1);
+
+  // An hour and a minute Queued with no small computer free: any computer that takes timed runs may take it, logged once.
+  leg.queuedFor = { ...leg.queuedFor!, at: new Date(Date.now() - 61 * 60_000).toISOString() };
+  assert.deepEqual(o.timedLegBound(), ['w2']);
+  assert.deepEqual(store.work.get('w2')!.queuedFor?.needs, ['m3', 'lothlaptop', 'lothdesktop', 'beast']);
+  assert.match(store.work.get('w2')!.log.join('\n'), /ledger: its timed leg waited 61 min on m3, lothlaptop with no room \(w1969 bound: 60 min, two full bench turns\); now any computer that takes timed runs may take it: m3 > lothlaptop > lothdesktop > beast/);
+  assert.deepEqual(o.timedLegBound(), [], 'once');
+});
+
+test('w1969: with a reason its numbers must come from here, the leg stays, the verdict lets its ticket through, and the log says why', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o } = env;
+  fixTimedFacts(o);
+  agentsRoomFacts(agents, { game: ['pc'] });
+  putRequests(store, [{ id: 'w1', title: 'Factory info > Mobile Stations: fix the slow open' }]);
+  const { id, h } = await startedFor(env, 'w1');
+  agents.places = () => askFleet();
+  const out = String(await h.timed_place!({ what: 'Mobile Stations open, after', same_machine: 'the before side ran on pc at 01:10Z' }));
+  assert.match(out, /^Here \(w1969\): its numbers must come from pc: "the before side ran on pc at 01:10Z" \(both sides of an A\/B stay on one machine\)\. Take your exclusive ticket on pc as before/);
+  assert.equal(agents.benchPriorities('pc')[id]?.timed?.verdict, 'here');
+  assert.equal(store.work.get('w1')!.status, 'active');
+  assert.match(store.work.get('w1')!.log.join('\n'), /timed leg ask \(w1969\) from worker \w{8} on pc: here: its numbers must come from pc/);
+  assert.equal([...store.work.values()].filter((x) => x.timedLeg).length, 0);
+});
+
 test('w1944: a worker whose still-open line waits on another request, the orchestrator or a worker they start gives up its sandbox at once, as for a declared block; one with its own work left keeps it', async (t) => {
   const env = await setupOnMachine(t);
   const { store, agents } = env;

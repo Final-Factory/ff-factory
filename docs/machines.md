@@ -865,6 +865,50 @@ Capacity line says "no timed runs"), and a start pinned to it for such work is r
 `writeBenchPriorities`), and the game repo's `scripts/bench/bench_queue.py` then refuses every exclusive ticket there,
 naming the computers that take them. Builds, editors, coding and tests go there as before (shared tickets).
 
+**Where a timed leg runs: the worker asks first** (w1969; lothsahn, 2026-10-24: "Why are these on the big machines and not
+scheduled for m3 or even biscuit? The scheduler should favor running exclusive locks on machines with a small number of
+slots", then "Maybe every time a worker needs an exclusive lock it should ask the dispatcher?"). An exclusive bench turn idles
+every other slot of its computer. w1872 ranks timed work smallest first, but only where a request starts, from its words, and
+the timed leg then runs in whatever sandbox the code work got: at 02:2xZ on 2026-10-24 w1908 held BEAST's exclusive ticket
+and w1891 waited behind it there, and w1789 waited on LothDesktop behind shared builds (the ledger, measured).
+
+- **The signal** (research, w1969): the request's words (`needsTimed`, w1628) catch timing work only when its brief says so
+  (measured with `needsTimed` on 2026-10-24: false for w1908, "fix the slow open and per-frame cost", brief and note
+  included, and for w1891's title, "Just Play perf: ...", both of which hold timed legs), and they move the whole request, whose turns are
+  mostly code work, to a small computer for a leg of minutes. The moment a worker takes an exclusive ticket is the one signal
+  that is always true, so it is where the decision is made. Placement from words stays as w1872 left it; the ask is the
+  check that always applies.
+- **The ask**: before an exclusive timing ticket on a big computer, a worker calls `timed_place` (what, brief, platform,
+  same_machine, via; `server/timedAsk.ts` `decideTimedPlace`). It answers **here** for a small computer (at most
+  `SMALL_TIMED_MAX_AGENTS`, 4, agent slots: a judgment, since a turn there idles at most 3 others while BEAST's idles 5 and
+  LothDesktop's 9), for a reason the numbers must come from here (`same_machine`: a side of the A/B already ran here), for
+  the urgent release lane and the nightly, or when no small computer on the leg's OS is online. Otherwise **elsewhere**: the
+  small computers that take timed runs (never m5, w1861), those with room first, then by agent slots, editor limit and live
+  agents. A small computer never asks: it would always hear "here", and every call costs a model turn.
+- **The hand-off**: elsewhere files the leg as its own request, "Timed leg for wNNN: ...", Queued for those small computers
+  (`Orchestrators.fileTimedLeg`, modelled on w1945's `request_pair`): a new worker there builds and times both sides of the
+  comparison on that one computer (any OS) and reports "For wNNN:", and the asking request is Blocked on that report, so its
+  sandbox goes to other work meanwhile. One open leg per request. With `via: "timed_run"` and a play-only computer up
+  (w1946), a Windows player A/B goes there by `timed_run` instead, built where the worker is.
+- **The wait bound**: a leg Queued on busy small computers waits for them rather than taking a big one, for
+  `TIMED_LEG_WAIT_MS`, 60 minutes: two full bench turns (the game repo's bench_queue.py caps a turn at 30 minutes). Past it
+  `Orchestrators.timedLegBound` (each blocker-watch pass) widens its needs to every computer that takes timed runs, logged
+  once in the leg's log and told to the dispatcher.
+- **The guard**: the verdict rides the bench priorities to the machine (`BenchPriority.timed`, and the machine's
+  `timed_ask` mark in priorities.json, `machine/benchLock.ts` `readTimedAsk`). On a big computer, `checkTimedAsk`
+  refuses `bench_queue.py timed`, `bench_queue.py run --mode exclusive`, `unity-bridge.py --timed`, `bench_lock --timing`,
+  `unity-slot --bench exclusive` and the bench scripts that take one (probe_ab_win.sh, cpu_budget_run.sh, machine_bench.sh,
+  run_mp_frame_bench.sh, zoom_run.sh, probe_ab.sh) until the worker heard "here" (12 hours); after "elsewhere" it names
+  where the leg went. A ticket for the whole machine (`--reason machine`), a shared one and letting go pass. It is a
+  seatbelt: a script of the worker's own that takes a ticket is not seen. The exclusive guarantee is unchanged: the ask
+  decides where a ticket is taken, never whether a timed run takes one.
+- **The log**: every answer is a line in the asking request's log ("timed leg ask (w1969) from worker ... on beast: handed to
+  w2001, queued for lothlaptop > m3 > biscuit: beast has 6 agent slots ...", or "here: ...") and in the portal's journal
+  ("timed ask (w1969): ..."; `portal_logs` grep "timed ask").
+- **Not yet**: the game repo's bench_queue.py does not read the verdict itself (the guard sees only commands it can parse);
+  a leg's new worker rebuilds both sides on the small computer (a laptop build is slow) where w1946's `timed_run` would ship
+  them, which needs a play-only computer joined.
+
 **A play-only timing machine** (w1946, lothsahn, 2026-10-23: "I have a desktop with 16GB ram. Windows takes 12G so there's
 not enough room for an editor. However, it could play the game and potentially be useful for benchmarks... Can the portal do
 builds on one machine and then use this other with an exclusive lock for benchmarks?", then "File it: play-only timing machine,

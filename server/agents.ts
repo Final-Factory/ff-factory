@@ -92,7 +92,8 @@ import { statsLine, systemStats } from './system.ts';
 import { commandLine, launchIndependent, run } from './proc.ts';
 import { type HostHealthMonitor } from './hostHealth.ts';
 import { describeCleanup, describeCleanupItems, describeCleanupLog } from './cleanup.ts';
-import type { BuildHold, HostHealth } from '../shared/types.ts';
+import type { BuildHold, HostHealth, TimedVerdict } from '../shared/types.ts';
+import { decideTimedPlace, timedAskMark, TIMED_VERDICT_MS } from './timedAsk.ts';
 import { StandingAgents } from './standing.ts';
 import type { MachineManager } from './machines.ts';
 import type { CatalogTool, LaunchSpec } from './launch.ts';
@@ -223,6 +224,8 @@ export const ownWorkNotice = (id: string, line: string) =>
 
 const REQUEST_PAIR_TOOL = `Ask for a check that needs several computers at once (w1945): a two-machine multiplayer or determinism check, a host and its clients. It files ONE pair request whose legs the dispatcher starts together, a new worker on each computer, as soon as that many computers have room at once (never one leg at a time), and Blocks your request on its report, as blocked_on with reports does: commit and push, then end your turn with a "wNNN: still open: blocked on <the pair request>" line. Your sandbox is released at once for other work while you wait, and the host leg's result (a line "For wNNN:") resumes you. what: one line; brief: what the legs run (the branch or commit, the scenario, what passes, where the result goes), since each leg is a new worker; legs: 2 by default; cross_os only for the reasons it names (w1692; without it no leg goes on a Mac, and with it a Mac only hosts); timed when a leg takes timing measurements (never on the m5). One open pair run per request: asked again, you wait on the one there is.`;
 
+const TIMED_PLACE_TOOL = `Ask where a timed leg runs BEFORE you take an exclusive bench ticket for it (w1969, lothsahn: "every time a worker needs an exclusive lock it should ask the dispatcher"): an exclusive turn idles every other slot of its computer, so a leg from a big computer (BEAST, LothDesktop) goes to a small one (LothLaptop, m3, biscuit; never m5). On a big computer the harness refuses bench_queue.py timed, --timed, bench_lock --timing, unity-slot --bench exclusive and the bench scripts (probe_ab_win.sh, cpu_budget_run.sh, ...) until you asked; a small computer needs no ask. It answers "here" (take your ticket as before; it holds 12 h) or "elsewhere": FF Factory files the leg as its own request, Queued for the small computers (a big one only after 60 minutes), whose new worker builds and times BOTH sides there and reports to you, and Blocks your request on that report (as request_pair does): commit and push, then end your turn. what: the leg in one line; brief: what it runs, as a new worker needs it (the branch and the commit of each side, the save, the script and its settings, what to report); platform: windows or mac when the leg needs one (default any); same_machine: only when its numbers must come from this computer (a side of the A/B already ran here), and why; via timed_run: a Windows player A/B a play-only computer can take (w1946), if one is up.`;
+
 const MESSAGE_PAIR_TOOL = `For a leg of a pair run (w1945): send a message to the workers of the other legs of your pair run (where the host listens and on which commit, that a client joined, that your leg failed). It reaches them as a message, which resumes a leg that ended its turn; their messages come back to you the same way.`;
 
 const BLOCKED_ON_TOOL = `Say that your request now waits ONLY for other requests to close, pull requests to merge or a deploy to happen (prs: "owner/repo#123" or the github.com link; requests: ids; reports: ids of requests whose worker must report first, its files or results for you, said in what: their worker is told and marks the report that carries them with a line "For <your request>:"; that line or their DONE unblocks you, a \"still open\" progress report does not; deploys: "portal" or a machine id; what: in a line). The ledger then shows it Blocked on them, your pending check-in is cancelled, and you are resumed with a message when they all clear. Then end your turn with your report and a "wNNN: still open: blocked on <them>" line. Never poll for them with wake_me and gh pr view: a pending check-in is work in progress for the ledger, and a wait on something you cannot move is not. Not for a person (waiting_on_person) or a time (wake_me). For CI on your own pull request (you merge it on green, or fix it on red), pass head (git rev-parse HEAD of what you pushed) and name it in prs with a "ci:" prefix ("ci:Final-Factory/FinalFactory#1354"): that waits for its checks to finish, green or red, not for its merge; FF Factory refuses it when the pull request conflicts with its base or its head is not your head (CI cannot start: fix and push first), and resumes you at once when a conflict or a missing run shows up later; you are resumed within minutes of them finishing, and with your editor stopped and your work pushed your sandbox takes other work meanwhile. For a deploy that only a person can start, say so with waiting_on_person as well; once your PR has merged and the deploy is all that is left, name it in deploys ("portal"): your sandbox is freed at once and you are resumed in any free sandbox when a different commit runs there, to do the check that comes after it.`;
@@ -319,7 +322,7 @@ Disk space on this computer is shared and runs out: then new agents and editors 
  */
 export const PROCESS_HYGIENE = `## Processes you start
 Nothing you start may outlive your work: a game player left running holds a machine's cores and fans for days. Give every game player you start a way to end by itself (\`-ffSoloQuitAfterSeconds <n>\` or \`timeout -s TERM <n>\` around its launch). Before you report DONE, and before you end a turn that leaves no check-in (wake_me) for a run still going, run \`ff-leftovers list\`, then \`ff-leftovers end\`: it ends what your session started that still runs (players, Xvfb and its window manager, ffmpeg, background jobs and scripts, batch builds, servers), never your own editor, claude's tools or another worker's processes; say in your report what it ended, or that nothing was left. FF Factory ends the rest by itself: everything your session started, 2 minutes after your process stops once no request waits for you, 10 minutes after it stops while one still does, and never before a pending check-in is due plus 10 minutes; a game player nobody owns 10 minutes after it is first seen so. A run you need to keep while you are stopped needs a check-in (wake_me) set for when you will look at it.
-Every timing measurement holds an exclusive bench ticket on its machine, not only bench scripts' legs: a snippet that reads a clock in your editor (\`execute_code\` or \`unity-bridge.py eval\`: Stopwatch, ProfilerRecorder, realtimeSinceStartup, in-job counters), a Performance test run by name, a profiler capture you take numbers from. Across tool calls, run the game repo's \`python scripts/bench/bench_queue.py timed --what "<what>" --minutes 20\` in the background, time once it prints \`granted\`, then \`bench_queue.py timed --release\`; one call: \`unity-bridge.py ... --timed "<what>"\`. Without one the harness refuses the call.`;
+Every timing measurement holds an exclusive bench ticket on its machine, not only bench scripts' legs: a snippet that reads a clock in your editor (\`execute_code\` or \`unity-bridge.py eval\`: Stopwatch, ProfilerRecorder, realtimeSinceStartup, in-job counters), a Performance test run by name, a profiler capture you take numbers from. Across tool calls, run the game repo's \`python scripts/bench/bench_queue.py timed --what "<what>" --minutes 20\` in the background, time once it prints \`granted\`, then \`bench_queue.py timed --release\`; one call: \`unity-bridge.py ... --timed "<what>"\`. Without one the harness refuses the call. On a big computer, first ask where the leg runs: \`timed_place\`.`;
 
 /**
  * Shell steps that never wait for a person (w1097, lothsahn, 2026-10-12: "Why did it do that, and how do we allow it to do
@@ -870,6 +873,7 @@ export class Agents {
             publish_review: async (a) => this.reviewPlan(m.id, info, a),
             publish_attachment: async (a) => this.attachmentUploadPlan(m.id, info, a),
             timed_run: async (a) => this.timedRunTool(m.id, info, a),
+            timed_place: async (a) => this.timedPlaceTool(m.id, info, a),
             read_rules: async (a) => workerRuleText(String(a.topic ?? '')),
             read_work: async (a) => this.readWorkFor(info.id, a),
             portal_logs: async (a) => this.portalLogsFor(a),
@@ -1232,6 +1236,59 @@ export class Agents {
     }
     if (a.phase === 'go') return tr.go(info.id, a);
     throw new Error(`timed_run needs ${machineId}'s daemon to read and send the builds, and this one is older than w1946: it is updated by itself once idle; try again after that`);
+  }
+
+  /** Each worker's last timed_place verdict (w1969), sent with its machine's bench priorities while it holds. */
+  private readonly timedVerdicts = new Map<string, TimedVerdict>();
+
+  /** Whether `machineId`'s workers ask timed_place before an exclusive timing ticket (w1969): a big computer's do. */
+  timedAskFor(machineId: string) {
+    return timedAskMark(this.places().find((p) => p.id === placeId(machineId)));
+  }
+
+  /**
+   * timed_place (w1969, server/timedAsk.ts): where the asking worker's timed leg runs. "here" is kept for its session and
+   * sent to its machine, whose guard then lets its exclusive tickets through; "elsewhere" files the leg as its own request
+   * Queued for the small computers (Orchestrators.fileTimedLeg), or names the play-only computer for timed_run. Each
+   * answer is a line in the asking request's log and the portal's journal ("timed ask (w1969): ...").
+   */
+  private timedPlaceTool(machineId: string, info: SessionInfo, a: Record<string, unknown>): string {
+    refuseInDryRun('timed_place');
+    const what = String(a.what ?? '').replace(/\s+/g, ' ').trim();
+    if (!what) throw new Error('give what: the timed leg in one line ("RoundRobin belt output A/B on PR #2347")');
+    const platform = a.platform === 'windows' ? 'win32' : a.platform === 'mac' ? 'darwin' : undefined;
+    const places = this.places();
+    const here = places.find((p) => p.id === placeId(machineId));
+    const playOnly = (this.timedRuns?.targets() ?? []).filter((t) => t.online && t.offers).map((t) => t.id);
+    const d = decideTimedPlace({
+      here,
+      places,
+      prefs: this.placement(),
+      platform,
+      ...(typeof a.same_machine === 'string' ? { sameMachine: a.same_machine } : {}),
+      exempt: this.benchPriorities(machineId)[info.id]?.exempt,
+      via: a.via === 'timed_run' ? 'timed_run' : 'leg',
+      playOnly,
+    });
+    const until = new Date(Date.now() + TIMED_VERDICT_MS).toISOString();
+    const request = typeof a.request === 'string' && a.request.trim() ? a.request : undefined;
+    let text: string;
+    if (d.verdict === 'here') {
+      this.timedVerdicts.set(info.id, { verdict: 'here', why: d.why, until });
+      this.orchestrators.noteTimedAsk(info.id, request, `timed leg ask (w1969) from worker ${info.id.slice(0, 8)} on ${machineId}: here: ${d.why} ("${clip(what, 80)}")`);
+      text = `Here (w1969): ${d.why}. Take your exclusive ticket on ${machineId} as before (bench_queue.py timed, unity-bridge.py --timed, the bench scripts); this answer holds 12 h for your session. Both sides of an A/B run on this one computer.`;
+    } else if (d.timedRun) {
+      this.timedVerdicts.set(info.id, { verdict: 'elsewhere', why: d.why, until, timedRun: d.timedRun });
+      this.orchestrators.noteTimedAsk(info.id, request, `timed leg ask (w1969) from worker ${info.id.slice(0, 8)} on ${machineId}: to the play-only ${d.timedRun} by timed_run: ${d.why} ("${clip(what, 80)}")`);
+      text = `Elsewhere (w1969): ${d.why}. Build both players here (a build takes a shared ticket), then call timed_run with machine "${d.timedRun}": it times them there under that computer's own exclusive ticket. Take no exclusive ticket here.`;
+    } else {
+      const leg = this.orchestrators.fileTimedLeg(info.id, { what, brief: String(a.brief ?? ''), from: machineId, needs: d.needs ?? [], why: d.why, ...(request ? { request } : {}) });
+      this.timedVerdicts.set(info.id, { verdict: 'elsewhere', why: d.why, until, leg: leg.id });
+      this.blockerWatch?.kick();
+      text = `Elsewhere (w1969): ${d.why}. ${leg.text}`;
+    }
+    this.machines.pushBenchPriorities();
+    return text;
   }
 
   /** A timed run's end, for its worker (w1946): its check-in for the run is taken back, then the table and the logs. */
@@ -2502,7 +2559,10 @@ export class Agents {
       const top = open.reduce((a, w) => (WORK_PRIORITIES.indexOf(w.priority) > WORK_PRIORITIES.indexOf(a) ? w.priority : a), 'low' as WorkPriority);
       // w1832: the urgent release lane's builder and the scheduled nightly's worker are never pre-empted by the turn limits.
       const exempt = release ? 'release' : open.some((w) => w.source?.kind === 'nightly-run') ? 'nightly' : undefined;
-      out[info.id] = { priority: release ? 'urgent' : top, requests: open.map((w) => w.id), ...(exempt ? { exempt } : {}) };
+      // w1969: its timed_place verdict while it holds, for this machine's guard
+      const v = this.timedVerdicts.get(info.id);
+      const timed = v && Date.parse(v.until) > Date.now() ? v : undefined;
+      out[info.id] = { priority: release ? 'urgent' : top, requests: open.map((w) => w.id), ...(exempt ? { exempt } : {}), ...(timed ? { timed } : {}) };
     }
     return out;
   }
@@ -2762,6 +2822,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
           publish_review: this.reviewToolText(),
           publish_attachment: this.publishAttachmentText(),
           timed_run: TIMED_RUN_TOOL,
+          timed_place: TIMED_PLACE_TOOL,
           read_rules: WORKER_READ_RULES_TOOL,
           read_work: READ_WORK_TOOL,
           portal_logs: PORTAL_LOGS_TOOL,

@@ -2396,7 +2396,7 @@ export class Daemon {
         return;
       case 'bench_priorities':
         // Each worker's request priority (w1628): the game repo's bench_queue.py orders tickets by it first.
-        writeBenchPriorities(this.cfg.root, msg.sessions, new Date(), msg.singleWorker, msg.noTimedRuns);
+        writeBenchPriorities(this.cfg.root, msg.sessions, new Date(), msg.singleWorker, msg.noTimedRuns, msg.timedAsk);
         this.benchMarks = msg.sessions;
         // w1894: this machine's machines.personPlay, kept for a restart before the portal answers
         if (msg.personPlay && JSON.stringify(msg.personPlay) !== JSON.stringify(this.personSettings)) {
