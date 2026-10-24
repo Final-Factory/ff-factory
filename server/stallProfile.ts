@@ -12,8 +12,8 @@ import { Session } from 'node:inspector';
 
 /** A profile window. */
 export const PROFILE_WINDOW_MS = 60_000;
-/** A window whose worst lag is at least this keeps its profile. */
-export const PROFILE_STALL_MS = 3000;
+/** A window whose worst lag is at least this keeps its profile: the loop watch's line, the 1 s target (w2044). */
+export const PROFILE_STALL_MS = 1000;
 /** One sample every this many microseconds (10 ms): a minute is 6,000 samples, a cost too small to see. */
 const SAMPLE_US = 10_000;
 /** Profiles kept. */
