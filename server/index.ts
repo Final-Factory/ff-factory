@@ -168,7 +168,7 @@ setInterval(() => writeAlive(cfg.dataDir), 30_000);
 // A blocked event loop says so in the log, and /api/health carries the last minute's worst lag (w1377).
 const loopWatch = new LoopWatch().start();
 // A stall names the functions that held the loop, from V8's sampling profiler in this process (w2026, server/stallProfile.ts).
-if (!isDryRun) new StallProfiler({ dataDir: cfg.dataDir, worstLagSince: (t) => loopWatch.worstLagSince(t) }).start();
+if (!isDryRun) new StallProfiler({ dataDir: cfg.dataDir, worstLagSince: (t) => loopWatch.worstLagSince(t), blocksSince: (t) => loopWatch.blocksSince(t) }).start();
 
 const store = new Store(cfg.dataDir);
 // What each request costs (w859, docs/spend.md): fed by every transcript event, whether the session runs here or on a machine.

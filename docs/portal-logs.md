@@ -140,7 +140,9 @@ is back, the same worker session's calls work again with nothing restarted. Read
    of 1 s or more` says how the loop did, so a quiet stretch reads as measured, not as missing lines.
    `grep: "stall profile"` next to it names what held the loop (w2026, `server/stallProfile.ts`): V8's sampling profiler
    runs in the portal's own process in one-minute windows, and a window with a stall of 1 s or more logs the functions by
-   their own time and the portal's functions on the stack under them, and keeps the profile in `<dataDir>/profiles` (the
+   their own time and the portal's functions on the stack under them (the minute's totals), then up to three `stall profile:
+   block of 1.4 s ending …` lines from the samples taken in each longest block alone (w2044: a once-a-second save sums to
+   seconds a minute without ever being the block), and keeps the profile in `<dataDir>/profiles` (the
    newest six; an ops worker opens one in Chrome DevTools' Performance panel). A window with no stall is dropped.
 3. `regex: "review:|attachments:"` after that: a worker's publish landing (`publishes N file(s) … from <machine>`) is
    the proof that machine's path works again.

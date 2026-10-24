@@ -91,6 +91,11 @@ export class LoopWatch {
     return this.worstLagSince(this.now() - LAG_WINDOW_MS);
   }
 
+  /** The beats since `since` (within the last minute) that came late: [when, lag ms], oldest first; the stall profiler's blocks. */
+  blocksSince(since: number): [number, number][] {
+    return this.lags.filter(([at]) => at >= since).map(([at, lag]) => [at, Math.round(lag)]);
+  }
+
   /** The worst lag of the beats since `since` (within the last minute), in ms: the stall profiler's window (stallProfile.ts). */
   worstLagSince(since: number): number {
     let worst = 0;

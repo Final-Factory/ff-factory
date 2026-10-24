@@ -16,6 +16,8 @@ export const PROFILE_WINDOW_MS = 60_000;
 export const PROFILE_STALL_MS = 1000;
 /** One sample every this many microseconds (10 ms): a minute is 6,000 samples, a cost too small to see. */
 const SAMPLE_US = 10_000;
+/** Blocks of a window that get a line of their own, the longest first. */
+const BLOCK_LINES = 3;
 /** Profiles kept. */
 const KEEP = 6;
 
@@ -33,16 +35,22 @@ const ours = (f: CallFrame) => /\/(server|shared)\/[^/]+\.ts$/.test(f.url) && !f
  * The functions that took the time in a profile: `self` by their own time (where the CPU was), `under` the portal's own functions
  * by the time spent in them and what they called (which of ours was on the stack). Milliseconds, the biggest first.
  */
-export function summarizeProfile(p: CpuProfile, top = 6): { totalMs: number; self: { fn: string; ms: number }[]; under: { fn: string; ms: number }[] } {
+export function summarizeProfile(p: CpuProfile, top = 6, within?: [number, number][]): { totalMs: number; self: { fn: string; ms: number }[]; under: { fn: string; ms: number }[] } {
   const byId = new Map(p.nodes.map((n) => [n.id, n]));
   const parent = new Map<number, number>();
   for (const n of p.nodes) for (const c of n.children ?? []) parent.set(c, n.id);
   const hits = new Map<number, number>();
   const samples = p.samples ?? [];
   const deltas = p.timeDeltas ?? [];
-  // a sample's time is the gap to the next one (V8's own reading); without deltas every hit counts the sampling interval
-  for (let i = 0; i < samples.length; i++) hits.set(samples[i], (hits.get(samples[i]) ?? 0) + (deltas[i + 1] ?? SAMPLE_US) / 1000);
-  if (!samples.length) for (const n of p.nodes) if (n.hitCount) hits.set(n.id, n.hitCount * (SAMPLE_US / 1000));
+  // a sample's time is the gap to the next one (V8's own reading); without deltas every hit counts the sampling interval.
+  // `within`: only the samples taken in these spans, in ms from the profile's start (a block of the loop, w2044).
+  let at = 0;
+  for (let i = 0; i < samples.length; i++) {
+    at += (deltas[i] ?? 0) / 1000;
+    if (within && !within.some(([a, b]) => at >= a && at <= b)) continue;
+    hits.set(samples[i], (hits.get(samples[i]) ?? 0) + (deltas[i + 1] ?? SAMPLE_US) / 1000);
+  }
+  if (!samples.length && !within) for (const n of p.nodes) if (n.hitCount) hits.set(n.id, n.hitCount * (SAMPLE_US / 1000));
   const self = new Map<string, number>();
   const under = new Map<string, number>();
   let totalMs = 0;
@@ -79,11 +87,13 @@ export class StallProfiler {
   private busy = false;
   private readonly dir: string;
   private readonly worstLagSince: (since: number) => number;
+  private readonly blocksSince: (since: number) => [number, number][];
   private readonly log: (line: string) => void;
 
-  constructor(o: { dataDir: string; worstLagSince: (since: number) => number; log?: (line: string) => void }) {
+  constructor(o: { dataDir: string; worstLagSince: (since: number) => number; blocksSince?: (since: number) => [number, number][]; log?: (line: string) => void }) {
     this.dir = path.join(o.dataDir, 'profiles');
     this.worstLagSince = o.worstLagSince;
+    this.blocksSince = o.blocksSince ?? (() => []);
     this.log = o.log ?? ((l) => console.warn(l));
   }
 
@@ -126,19 +136,27 @@ export class StallProfiler {
     this.busy = true;
     const from = this.windowStart;
     const lag = this.worstLagSince(from);
+    const blocks = this.blocksSince(from).filter(([, l]) => l >= PROFILE_STALL_MS);
     s.post('Profiler.stop', (err, res) => {
       this.begin();
       this.busy = false;
       if (err || !res?.profile || lag < PROFILE_STALL_MS) return;
-      void this.keep(res.profile as unknown as CpuProfile, lag, from);
+      void this.keep(res.profile as unknown as CpuProfile, lag, from, blocks);
     });
   }
 
-  private async keep(p: CpuProfile, lag: number, from: number) {
+  private async keep(p: CpuProfile, lag: number, from: number, blocks: [number, number][] = []) {
     try {
       const sum = summarizeProfile(p);
       const fmt = (l: { fn: string; ms: number }[]) => l.map((x) => `${x.fn} ${(x.ms / 1000).toFixed(1)} s`).join('; ') || 'none';
       this.log(`stall profile: the loop stalled ${(lag / 1000).toFixed(1)} s in the minute from ${new Date(from).toISOString()}; CPU ${(sum.totalMs / 1000).toFixed(1)} s. Own time: ${fmt(sum.self)}. In the portal's functions: ${fmt(sum.under)}`);
+      // The minute's totals mix the block with everything else that ran (w2044: a state save once a second summed to 5 s a
+      // minute, though no one save came near a second): each of the longest blocks gets its own line, from its samples only.
+      // A beat `lag` ms late ran at `at`, so the loop was held from at most `at - lag` to `at`.
+      for (const [at, l] of blocks.sort((a, b) => b[1] - a[1]).slice(0, BLOCK_LINES)) {
+        const b = summarizeProfile(p, 4, [[at - l - from, at - from]]);
+        this.log(`stall profile: block of ${(l / 1000).toFixed(1)} s ending ${new Date(at).toISOString()}. Own time: ${fmt(b.self)}. In the portal's functions: ${fmt(b.under)}`);
+      }
       await fs.promises.mkdir(this.dir, { recursive: true });
       await fs.promises.writeFile(path.join(this.dir, `stall-${new Date(from).toISOString().replace(/[:.]/g, '-')}.cpuprofile`), JSON.stringify(p));
       const old = (await fs.promises.readdir(this.dir)).filter((f) => f.startsWith('stall-') && f.endsWith('.cpuprofile')).sort();
