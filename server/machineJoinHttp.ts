@@ -27,6 +27,11 @@ export interface MachineJoinDeps {
   whois(addr: string): Promise<TailnetDevice | undefined>;
   /** Make the machine's worker_install record (or update the waiting one) and issue its credential, returned once. */
   enrol(o: { machineId: string; tailnetName: string; limits: Required<JoinLimits>; portalUrl: string; by: string; platform?: MachinePlatform }): string;
+  /**
+   * The vault GitHub token of the person whose code it is, for the installer's clone of the game repo (w2004:
+   * desktop-coosego had no GitHub login and its clone failed), or undefined (machines.githubFromVault off there).
+   */
+  githubToken?(machineId: string, person: string | undefined): string | undefined;
   /** The URL the PC reached this portal at (originOf), for the record and the bootstrap. */
   portalUrl(req: http.IncomingMessage): string;
   /** A bootstrap's text (join.ps1, join.sh, join.cmd), or undefined when this portal's checkout lacks it. */
@@ -202,8 +207,10 @@ export function machineJoinHttp(d: MachineJoinDeps) {
     }
     d.codes.take(j);
     const last4 = credential.slice(-4);
+    // Only with the credential, once; a play-only computer clones nothing (w2004).
+    const githubToken = answer.playOnly ? undefined : d.githubToken?.(j.machineId, j.byUser);
     console.log(`machine ${j.machineId}: joined from tailnet device ${device.name} with ${j.by}'s join code ...${j.last4}; credential ...${last4} issued`);
     d.report?.(`[machines] ${j.machineId} joined from its tailnet device ${device.name} with ${j.by}'s join code (...${j.last4}); its installer runs there now, and list_machines shows it online when its daemon connects.`);
-    return send(res, 200, { ok: true, ...answer, credential, last4, portalUrl: d.portalUrl(req) });
+    return send(res, 200, { ok: true, ...answer, credential, last4, portalUrl: d.portalUrl(req), ...(githubToken ? { githubToken } : {}) });
   };
 }

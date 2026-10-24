@@ -43,6 +43,8 @@ export interface PendingJoin {
   limits: JoinLimits;
   /** The owner whose approval it is (user id). */
   by: string;
+  /** That person's user id, whose vault GitHub token the installer's clone gets (w2004); `by` holds a display name. */
+  byUser?: string;
   createdAt: string;
   expiresAt: string;
   /** The code's last four characters, for telling two codes apart. */
@@ -179,7 +181,7 @@ export class JoinCodes {
   }
 
   /** A new code for `machineId`, returned once. */
-  create(o: { machineId: string; tailnetName: string; limits: JoinLimits; by: string; minutes?: number }): { code: string; expiresAt: string; last4: string } {
+  create(o: { machineId: string; tailnetName: string; limits: JoinLimits; by: string; byUser?: string; minutes?: number }): { code: string; expiresAt: string; last4: string } {
     if (!MACHINE_ID.test(o.machineId)) throw new Error(`machine id "${o.machineId}" must be lower-case letters, digits and dashes`);
     const tailnetName = tailnetShortName(o.tailnetName);
     if (!TAILNET_NAME.test(tailnetName)) throw new Error(`tailnet name "${o.tailnetName}" is not a device name (letters, digits and dashes, as the Tailscale admin console shows it)`);
@@ -192,6 +194,7 @@ export class JoinCodes {
       tailnetName,
       limits: checkJoinLimits(o.limits),
       by: o.by,
+      ...(o.byUser ? { byUser: o.byUser } : {}),
       createdAt: new Date(this.now()).toISOString(),
       expiresAt: new Date(this.now() + minutes * 60_000).toISOString(),
       last4: canonical.slice(-4),

@@ -67,7 +67,7 @@ import { cliProjectsDir } from './cliTranscript.ts';
 import { clock, firstFree, poolBanner, poolLabel, poolKind, poolLimits, warningsForUser } from './tokenPool.ts';
 import { poolForRef, type GatePoolToken } from './usageGate.ts';
 import { VAULT_FILE, VAULT_KINDS, VAULT_ROLES, Vault, keySource, setVaultContext, tokenPersonForWork, vaultStatusLine, type VaultKind, type VaultRole, type VaultShare } from './vault.ts';
-import { GithubTokens, PORTAL_MACHINE, ghRunner, githubFromVault, githubPersonOf, setGithubTokens } from './githubTokens.ts';
+import { GithubTokens, PORTAL_MACHINE, ghRunner, githubFromVault, githubPersonOf, githubTokens, setGithubTokens } from './githubTokens.ts';
 import { GithubApps } from './githubApps.ts';
 import { CiReadWatch, ciReadBanner, ciReadLine, repoSlug } from './ciReadHealth.ts';
 import { GITHUB_REQUIRED_REPOS } from '../shared/githubRequirements.ts';
@@ -345,6 +345,8 @@ const joinHttp = machineJoinHttp({
     return issueMachineToken(cfg.dataDir, machineId);
   },
   portalUrl: (req) => originOf(req) || (cfg.publicUrl ?? '').replace(/\/+$/, ''),
+  // w2004: the clone of a new computer with no GitHub login of its own, where machines.githubFromVault is on for it.
+  githubToken: (machineId, person) => githubTokens()?.forMachine(machineId, person, `${machineId}'s worker install (the game repo's clone)`),
   script: (kind) => joinHttpScript(kind),
   refused: () => (dryRun() ? DRY_RUN_WHY : undefined),
   report: (text) => machines.report?.(text),
@@ -1911,6 +1913,7 @@ route('POST', '/api/machines/join', async (req) => {
       portalUrl: portalUrl || undefined,
       limits: { maxSandboxes: b.maxSandboxes, maxAgentsPerSandbox: b.maxAgentsPerSandbox, maxUnity: b.maxUnity },
       by: requesterOf(req).displayName,
+      byUser: requesterOf(req).userId,
       // w1946: ticked in the form; the record says who made it play-only.
       ...(b.playOnly === true ? { playOnly: `added play-only in the dashboard by ${requesterOf(req).displayName}` } : {}),
     });
