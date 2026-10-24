@@ -50,10 +50,35 @@ export interface CatTok {
 }
 export type Cats = Record<string, CatTok>;
 
+/**
+ * The phases of a worker session (w2018, docs/spend.md "Where a worker session's money goes, by phase"): `research` until its first
+ * edit (Edit, Write, NotebookEdit, a Unity script edit), `implement` until its first push (git push, ff-pr push, gh pr create), then
+ * `after-push` for the rest of the conversation, follow-ups included. A phase never goes back: a second PR's edits stay `after-push`.
+ * MEASURED on beast (w2008, 148 sessions of 2026-10-19..24): 14% / 30% / 56%.
+ */
+export const PHASES = ['research', 'implement', 'after-push'] as const;
+export type Phase = (typeof PHASES)[number];
+export const PHASE_LABEL: Record<Phase, string> = { research: 'research before the first edit', implement: 'implementing', 'after-push': 'after the first push' };
+/** A push: the call that runs it is still in the phase before; the calls after it are `after-push`. */
+export const PUSH_COMMAND = /\b(git\s+push|ff-pr\s+push|gh\s+pr\s+create)\b/;
+const EDIT_TOOL = /^(Edit|MultiEdit|Write|NotebookEdit|mcp__UnityMCP__(apply_text_edits|script_apply_edits|create_script))$/;
+/** The phase after a tool call, and whether it was a push. */
+export function nextPhase(phase: Phase, name: string, input: unknown): { phase: Phase; push: boolean } {
+  const cmd = (name === 'Bash' || name === 'PowerShell') && input && typeof (input as { command?: unknown }).command === 'string' ? (input as { command: string }).command : '';
+  if (cmd && PUSH_COMMAND.test(cmd)) return { phase: 'after-push', push: true };
+  if (phase === 'research' && EDIT_TOOL.test(name)) return { phase: 'implement', push: false };
+  return { phase, push: false };
+}
+/** A day's phase reading (w2018): list-price dollars by phase, and the pushes made. */
+export type PhaseDay = Partial<Record<Phase, number>> & { pushes?: number };
+
 /** One turn's reading of its context (ContextMeter.drain). */
 export interface MeterTurn {
   /** Model calls of the main loop in the turn (a subagent's own calls are not counted). */
   calls: number;
+  /** w2018: the turn's metered dollars by the phase each call ran in, and the pushes it made. */
+  phases?: Partial<Record<Phase, number>>;
+  pushes?: number;
   cats: Cats;
   /** Reads of a range of a file this session already read (Read, sed -n, cat): how many, their characters, those after a compaction. */
   reread?: { n: number; chars: number; afterCompact: number };
@@ -90,6 +115,8 @@ export interface MeterState {
   compacted: boolean;
   readSeen: string[];
   readSeenBeforeCompact: string[];
+  /** w2018: the phase the conversation is in (absent: a tally saved before w2018, read as `research`). */
+  phase?: Phase;
 }
 /**
  * The smallest base a conversation has (w1556): a base below it is inside a carried history, not measured. MEASURED: the first call of a
@@ -368,6 +395,8 @@ export class ContextMeter {
   private lastCtx = 0;
   private turn = blankTurn();
   private compactedOnce = false;
+  /** w2018: the conversation's phase; it is saved with the tally, so it outlives a process. */
+  private phase: Phase = 'research';
   /** The next call's unexplained cache read is a conversation resumed from before this process, not the base context (w1209). */
   private carriedNext = false;
 
@@ -429,6 +458,7 @@ export class ContextMeter {
       compacted: this.compactedOnce,
       readSeen: last(this.readSeen),
       readSeenBeforeCompact: last(this.readSeenBeforeCompact),
+      ...(this.phase !== 'research' ? { phase: this.phase } : {}),
     };
   }
 
@@ -444,6 +474,7 @@ export class ContextMeter {
     this.readSeen.clear();
     for (const k of s.readSeen ?? []) this.readSeen.add(k);
     this.readSeenBeforeCompact = new Set(s.readSeenBeforeCompact ?? []);
+    this.phase = s.phase && (PHASES as readonly string[]).includes(s.phase) ? s.phase : 'research';
   }
 
   /**
@@ -491,6 +522,9 @@ export class ContextMeter {
   addAssistant(_chars: number) {}
   addToolUse(id: string, name: string, input: unknown, _inputChars: number) {
     this.tools.set(id, toolKind(name, input));
+    const n = nextPhase(this.phase, name, input);
+    this.phase = n.phase;
+    if (n.push) this.turn.pushes = (this.turn.pushes ?? 0) + 1;
     if (this.tools.size > 4000) this.tools.delete(this.tools.keys().next().value as string);
   }
   addToolResult(id: string, chars: number, images = 0) {
@@ -524,7 +558,22 @@ export class ContextMeter {
    * A model call of the main loop. Called on each assistant message; the first one of a message id counts the call, later
    * ones (the message's other content blocks) only raise its output tokens.
    */
+  /** One model call's usage: charged to the kinds of content (charge), and its dollars to the phase it ran in (w2018). */
   call(u: CallUsage) {
+    const before = this.turnUsd();
+    this.charge(u);
+    const d = this.turnUsd() - before;
+    if (d > 0) {
+      const ph = (this.turn.phases ??= {});
+      ph[this.phase] = (ph[this.phase] ?? 0) + d;
+    }
+  }
+  private turnUsd(): number {
+    let t = 0;
+    for (const c of Object.values(this.turn.cats)) t += c.usd;
+    return t;
+  }
+  private charge(u: CallUsage) {
     if (this.cur && this.cur.id === u.id) {
       this.chargeOutput(u.out - this.cur.out, u.model, true);
       this.cur.out = Math.max(this.cur.out, u.out);
@@ -672,6 +721,10 @@ export class ContextMeter {
   get compacted() {
     return this.compactedOnce;
   }
+  /** The conversation's phase (w2018). */
+  get currentPhase(): Phase {
+    return this.phase;
+  }
   /** The meter holds a conversation: it has seen a call, or picked up a tally (resume). */
   get started() {
     return this.lastCtx > 0;
@@ -743,6 +796,8 @@ export interface SessionSpend {
   ctxMax: number;
   compactions: number;
   reread?: { n: number; chars: number; afterCompact: number };
+  /** w2018: a worker's metered dollars by phase and its pushes, by UTC day (absent: none metered since w2018). */
+  phaseDays?: Record<string, PhaseDay>;
   /** The transcript: kept as is, compressed, or pruned (with when). The numbers above stay either way. */
   transcript?: { state: 'full' | 'gz' | 'pruned'; bytes?: number; prunedAt?: string };
   /** The seq of the first transcript event recorded live; the backfill takes only the events before it. */
@@ -788,6 +843,8 @@ export interface RequestSpend {
   calls: number;
   compactions: number;
   reread?: { n: number; chars: number; afterCompact: number };
+  /** w2018: a worker's metered dollars by phase and its pushes, by UTC day (absent: none metered since w2018). */
+  phaseDays?: Record<string, PhaseDay>;
   /** Tokens and dollars by UTC day, for a report over a window. Workers and coordinators together. */
   days: Record<string, Tok>;
   /**
@@ -846,6 +903,18 @@ export interface SpendReport {
   buckets: { id: string; title: string; usd: number }[];
   measuredCats: number;
   reread?: { n: number; chars: number; afterCompact: number };
+  /** w2018: the workers' metered dollars by phase and their pushes, fleet-wide, by machine and for the top requests (absent: none in the window). */
+  phases?: { fleet: PhaseRow; machines: (PhaseRow & { machine: string })[]; requests: (PhaseRow & { id: string; title: string })[] };
+}
+
+/** A phase reading over a window (w2018): list-price dollars by phase, worker sessions with a reading, and their pushes. */
+export interface PhaseRow {
+  usd: Record<Phase, number>;
+  sessions: number;
+  pushes: number;
+  /** Pushes per session: median and 90th percentile. */
+  pushesMedian: number;
+  pushesP90: number;
 }
 
 

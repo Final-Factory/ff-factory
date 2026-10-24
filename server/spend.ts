@@ -21,7 +21,7 @@ import { SnapshotFile, readJsonDurable, checkObject } from './durable.ts';
 import { SESSION_REQUESTS_TOP } from './toolOutput.ts';
 import type { SessionInfo, TranscriptEvent, WorkItem } from '../shared/types.ts';
 import { WORK_OPEN } from '../shared/types.ts';
-import { UNRECORDED_ACCOUNT, coordKey, coordLabel, isCoordinatorRole, COORDINATION_NOTE, type Coordination, type How, type ReportOptions, type RequestSpend, type SessionSpend, type SpendReport, type SpendRole } from '../shared/spend.ts';
+import { UNRECORDED_ACCOUNT, coordKey, coordLabel, isCoordinatorRole, COORDINATION_NOTE, type Coordination, type How, PHASES, PHASE_LABEL, type Phase, type PhaseDay, type PhaseRow, type ReportOptions, type RequestSpend, type SessionSpend, type SpendReport, type SpendRole } from '../shared/spend.ts';
 export type { How, ReportOptions, RequestSpend, SessionSpend, SpendReport, SpendRole };
 import { addCats, addModels, addTok, fmtTokens, fmtUsd, listUsd, priceOf, scaleTok, sumTok, zeroTok, CATEGORY_LABEL, CHARS_PER_TOKEN, OUTPUT_TOKENS_PER_CHAR, type Cats, type MeterTurn, type ModelTok, type Tok, type TurnUsage } from '../shared/spend.ts';
 
@@ -66,6 +66,37 @@ export function estimateTurn(model: string, usd: number, outChars: number, fresh
   return { in: 0, out, cr, cw, usd };
 }
 const day = (iso: string) => iso.slice(0, 10);
+
+const roundPhaseDays = (days: Record<string, PhaseDay>): Record<string, PhaseDay> =>
+  Object.fromEntries(Object.entries(days).map(([d, v]) => [d, Object.fromEntries(Object.entries(v).map(([k, x]) => [k, Math.round((x ?? 0) * 1e4) / 1e4]))]));
+
+/** Add a turn's phase reading to a day (w2018); `f` its share (a split turn) or -1 to take it back out. */
+export function addPhaseDay(days: Record<string, PhaseDay>, d: string, m: Pick<MeterTurn, 'phases' | 'pushes'>, f = 1): Record<string, PhaseDay> {
+  const o: PhaseDay = { ...(days[d] ?? {}) };
+  for (const [ph, usd] of Object.entries(m.phases ?? {}) as [Phase, number][]) o[ph] = (o[ph] ?? 0) + usd * f;
+  if (m.pushes) o.pushes = (o.pushes ?? 0) + m.pushes * f;
+  return { ...days, [d]: o };
+}
+
+/** The phase reading of a set of day maps in a window (w2018): one map per worker session, or per request. */
+export function phaseRow(maps: readonly (Record<string, PhaseDay> | undefined)[], sinceDay: string, untilDay: string): PhaseRow | undefined {
+  const usd = Object.fromEntries(PHASES.map((p) => [p, 0])) as Record<Phase, number>;
+  const pushes: number[] = [];
+  for (const m of maps) {
+    let seen = false;
+    let n = 0;
+    for (const [d, v] of Object.entries(m ?? {})) {
+      if (d < sinceDay || d > untilDay) continue;
+      seen = true;
+      for (const p of PHASES) usd[p] += v[p] ?? 0;
+      n += v.pushes ?? 0;
+    }
+    if (seen) pushes.push(Math.round(n));
+  }
+  if (!pushes.length) return undefined;
+  pushes.sort((a, b) => a - b);
+  return { usd, sessions: pushes.length, pushes: pushes.reduce((a, b) => a + b, 0), pushesMedian: pushes[Math.floor(pushes.length / 2)], pushesP90: pushes[Math.min(pushes.length - 1, Math.floor(pushes.length * 0.9))] };
+}
 /** When the portal began recording by the rules of w1160 and w1161 (the a9d5eae restart, 2026-10-13 01:52:30 -06:00, from the journal's first spend backfill line 90 s later). Turns before it were recorded by the old ones. */
 export const RULES_FROM_MS = Date.parse('2026-10-13T07:52:30Z');
 const round = (n: number, d = 4) => Math.round(n * 10 ** d) / 10 ** d;
@@ -274,12 +305,13 @@ export class SpendStore {
         ...(r.accounts ? { accounts: roundModels(r.accounts) } : {}),
         ...(r.coordDays ? { coordDays: Object.fromEntries(Object.entries(r.coordDays).map(([k, d]) => [k, Object.fromEntries(Object.entries(d).map(([day, t]) => [day, roundTok(t)]))])) } : {}),
         cats: roundCats(r.cats),
+        ...(r.phaseDays ? { phaseDays: roundPhaseDays(r.phaseDays) } : {}),
         days: Object.fromEntries(Object.entries(r.days).map(([d, t]) => [d, roundTok(t)])),
         sessions: Object.fromEntries(Object.entries(r.sessions).map(([k, v]) => [k, { ...v, total: roundTok(v.total), models: roundModels(v.models) }])),
       };
     }
     const sessions: Record<string, SessionSpend> = {};
-    for (const [id, s] of this.sessions) sessions[id] = { ...s, total: roundTok(s.total), estimated: roundTok(s.estimated), models: roundModels(s.models), ...(s.accounts ? { accounts: roundModels(s.accounts) } : {}), cats: roundCats(s.cats), requests: Object.fromEntries(Object.entries(s.requests).map(([k, v]) => [k, round(v)])) };
+    for (const [id, s] of this.sessions) sessions[id] = { ...s, total: roundTok(s.total), estimated: roundTok(s.estimated), models: roundModels(s.models), ...(s.accounts ? { accounts: roundModels(s.accounts) } : {}), cats: roundCats(s.cats), ...(s.phaseDays ? { phaseDays: roundPhaseDays(s.phaseDays) } : {}), requests: Object.fromEntries(Object.entries(s.requests).map(([k, v]) => [k, round(v)])) };
     return { version: 1, requests, sessions, ...(this.backfill ? { backfill: this.backfill } : {}) };
   }
 
@@ -414,6 +446,9 @@ export class SpendStore {
       if (a.meter.compacted) s.compactions += k;
       if (a.meter.reread) s.reread = { n: (s.reread?.n ?? 0) + a.meter.reread.n * k, chars: (s.reread?.chars ?? 0) + a.meter.reread.chars * k, afterCompact: (s.reread?.afterCompact ?? 0) + a.meter.reread.afterCompact * k };
     }
+    // w2018: a worker's dollars by phase and its pushes, by day (coordinators' turns have no phases worth reading)
+    const phased = s.role === 'worker' && a.meter && (a.meter.phases || a.meter.pushes) ? a.meter : undefined;
+    if (phased) s.phaseDays = addPhaseDay(s.phaseDays ?? {}, day(at), phased, k);
     for (const al of allocs) {
       const f = al.weight * k;
       const r = this.requestRec(al.id, a.items, at);
@@ -445,6 +480,7 @@ export class SpendStore {
         if (a.meter.compacted) r.compactions += f;
         if (a.meter.reread) r.reread = { n: (r.reread?.n ?? 0) + a.meter.reread.n * f, chars: (r.reread?.chars ?? 0) + a.meter.reread.chars * f, afterCompact: (r.reread?.afterCompact ?? 0) + a.meter.reread.afterCompact * f };
       }
+      if (phased) r.phaseDays = addPhaseDay(r.phaseDays ?? {}, day(at), phased, f);
     }
   }
 
@@ -994,12 +1030,41 @@ export function buildReport(spend: SpendStore, now: number, o: ReportOptions = {
   const where = [...catUsd].map(([cat, usd]) => ({ cat, label: CATEGORY_LABEL[cat] ?? cat, usd, pct: measured > 0 ? usd / measured : 0 })).sort((a, b) => b.usd - a.usd);
   const buckets = rows.filter((x) => isBucket(x.r.id)).map((x) => ({ id: x.r.id, title: x.r.title, usd: x.window.usd })).sort((a, b) => b.usd - a.usd);
   const accounts = Object.entries(byAccount).map(([account, tokens]) => ({ account, usd: tokens.usd, tokens })).sort((a, b) => b.usd - a.usd);
-  return { sinceDay, untilDay, total, estimated, models, accounts, top, workers, coordination, topCoordination, kinds, where, buckets, measuredCats: measured, ...(reread ? { reread } : {}) };
+  // w2018: the workers' dollars by phase and their pushes, fleet-wide, by machine, and for the top requests
+  const workerSessions = [...spend.sessions.values()].filter((x) => x.role === 'worker' && x.phaseDays);
+  const fleet = phaseRow(workerSessions.map((x) => x.phaseDays), sinceDay, untilDay);
+  let phases: SpendReport['phases'];
+  if (fleet) {
+    const byMachine = new Map<string, SessionSpend[]>();
+    for (const x of workerSessions) byMachine.set(x.machine ?? 'portal', [...(byMachine.get(x.machine ?? 'portal') ?? []), x]);
+    const machines = [...byMachine].flatMap(([machine, ss]) => {
+      const row = phaseRow(ss.map((x) => x.phaseDays), sinceDay, untilDay);
+      return row ? [{ machine, ...row }] : [];
+    });
+    const requests = top.flatMap((t) => {
+      const r = spend.request(t.id);
+      const row = r?.phaseDays ? phaseRow([r.phaseDays], sinceDay, untilDay) : undefined;
+      if (!r || !row) return [];
+      // its dollars from the request's own map (a shared session's turns split by weight); sessions and pushes from the sessions that served it
+      const own = phaseRow(Object.keys(r.sessions).map((id) => spend.session(id)).filter((x) => x?.role === 'worker').map((x) => x!.phaseDays), sinceDay, untilDay);
+      return [{ id: t.id, title: t.title, ...row, ...(own ? { sessions: own.sessions, pushes: own.pushes, pushesMedian: own.pushesMedian, pushesP90: own.pushesP90 } : {}) }];
+    });
+    phases = { fleet, machines: machines.sort((a, b) => phaseSum(b) - phaseSum(a)), requests };
+  }
+  return { sinceDay, untilDay, total, estimated, models, accounts, top, workers, coordination, topCoordination, kinds, where, buckets, measuredCats: measured, ...(reread ? { reread } : {}), ...(phases ? { phases } : {}) };
 }
 
 const pct = (x: number) => `${Math.round(x * 100)}%`;
 export function tokLine(t: Tok): string {
   return `${fmtUsd(t.usd)} (in ${fmtTokens(t.in)}, out ${fmtTokens(t.out)}, cache read ${fmtTokens(t.cr)}, cache write ${fmtTokens(t.cw)})`;
+}
+
+const phaseSum = (r: PhaseRow) => PHASES.reduce((a, p) => a + r.usd[p], 0);
+/** "research before the first edit $1.20 (14%), ...; 12 session(s), 31 push(es) (a session: median 2, p90 6)" (w2018). */
+export function phaseLine(r: PhaseRow): string {
+  const sum = phaseSum(r);
+  const parts = PHASES.map((p) => `${PHASE_LABEL[p]} ${fmtUsd(r.usd[p])} (${sum > 0 ? Math.round((r.usd[p] / sum) * 100) : 0}%)`);
+  return `${parts.join(', ')}; ${r.sessions} session(s), ${r.pushes} push(es) (a session: median ${r.pushesMedian}, p90 ${r.pushesP90})`;
 }
 
 /** The report as text for the orchestrators' spend_report tool. */
@@ -1027,6 +1092,12 @@ export function renderReport(r: SpendReport): string {
     for (const c of r.where.slice(0, 12)) lines.push(`- ${c.cat}: ${fmtUsd(c.usd)} (${pct(c.pct)}) — ${c.label}`);
     if (r.reread) lines.push(`Re-reads: ${Math.round(r.reread.n)} reads of a range already read in the same session, ${fmtTokens(r.reread.chars / 3.5)} tokens of results${r.reread.afterCompact ? `, ${Math.round(r.reread.afterCompact)} of them after a compaction` : ''}.`);
   } else lines.push('', 'No context readings yet in this window: they come from agents that run the w859 code (a machine daemon updated after it).');
+  if (r.phases) {
+    lines.push('', "By phase (w2018; the workers' metered list-price dollars: research until the first edit, implementing until the first push, then after it; pushes per worker session):");
+    lines.push(`- all workers: ${phaseLine(r.phases.fleet)}`);
+    for (const m of r.phases.machines) lines.push(`- ${m.machine}: ${phaseLine(m)}`);
+    for (const q of r.phases.requests) lines.push(`- ${q.id} "${q.title.slice(0, 60)}": ${phaseLine(q)}`);
+  } else lines.push('', 'No phase readings yet in this window: they come from agents that run the w2018 code.');
   return lines.join('\n');
 }
 
@@ -1088,6 +1159,11 @@ export function renderRequest(spend: SpendStore, id: string, link: (sessionId: s
     for (const [cat, c] of Object.entries(r.cats).sort((a, b) => b[1].usd - a[1].usd).slice(0, 8)) lines.push(`- ${cat}: ${pct(c.usd / sum)} (${fmtUsd((c.usd / sum) * r.total.usd)}) ${CATEGORY_LABEL[cat] ?? ''}`);
     if (r.reread) lines.push(`Re-reads: ${Math.round(r.reread.n)}${r.reread.afterCompact ? `, ${Math.round(r.reread.afterCompact)} after a compaction` : ''}.`);
   }
+  const ph = r.phaseDays ? phaseRow([r.phaseDays], '0000', '9999') : undefined;
+  if (ph) {
+    const own = phaseRow(Object.keys(r.sessions).map((id) => spend.session(id)).filter((x) => x?.role === 'worker').map((x) => x!.phaseDays), '0000', '9999');
+    lines.push(`By phase (w2018): ${phaseLine(own ? { ...ph, sessions: own.sessions, pushes: own.pushes, pushesMedian: own.pushesMedian, pushesP90: own.pushesP90 } : ph)}.`);
+  }
   return lines.join('\n');
 }
 
@@ -1134,5 +1210,7 @@ export function renderSession(spend: SpendStore, id: string, link: (sessionId: s
     for (const [cat, c] of Object.entries(s.cats).sort((a, b) => b[1].usd - a[1].usd).slice(0, 10)) lines.push(`- ${cat}: ${pct(c.usd / sum)} (${fmtUsd((c.usd / sum) * s.total.usd)})`);
     if (s.reread) lines.push(`Re-reads: ${s.reread.n} (${s.reread.afterCompact} after a compaction), ${fmtTokens(s.reread.chars / 3.5)} tokens of results.`);
   }
+  const ph = s.phaseDays ? phaseRow([s.phaseDays], '0000', '9999') : undefined;
+  if (ph) lines.push(`By phase (w2018): ${phaseLine(ph)}.`);
   return lines.join('\n');
 }
