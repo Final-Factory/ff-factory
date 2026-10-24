@@ -64,11 +64,12 @@ import { fetchAttachment, fetchAttachments, publishAttachmentFromMachine } from 
 import { prepareInbox } from '../server/attachments.ts';
 import { postTextFromFile } from '../server/ffboxPostFile.ts';
 import { DaemonVoice, type DaemonVoiceSettings } from './voice.ts';
-import { readBenchLock, readBenchQueue, timedHolder, writeBenchPriorities } from './benchLock.ts';
+import { benchLockDir, readBenchLock, readBenchQueue, readPassedMarks, timedHolder, writeBenchPriorities } from './benchLock.ts';
+import { editorBenchSession, editorSessions, passedShared, raisedSessions, type PassedMark } from './benchRaise.ts';
 import { readBenchWarnings } from './benchWarnings.ts';
 import { askPlayerToQuit, BenchTurn, closedDetail, writeClosedFile, type Holder } from './benchTurn.ts';
 import { GRACE_MIN, PersonPlay, personEnds, personHolderText, personHoldText, personTicket, priorityOf, setPriorityOf, treeOf, type PersonPlaySettings } from './personPlay.ts';
-import { benchTicketFor } from './benchQueue.ts';
+import { benchTicketFor, queueTickets } from './benchQueue.ts';
 import { TimedRunner } from './timedRunner.ts';
 import { timedRunFromMachine } from './timedRunPack.ts';
 import { readBenchState } from './benchState.ts';
@@ -78,7 +79,7 @@ import { trayView } from './pauseRules.ts';
 import { TrayHost, trayInstance } from './tray.ts';
 import { FirefoxCloser, closeFirefox, firefoxFile, winFirefoxDeps } from './firefox.ts';
 import { GhLoginWatch, LOOK_EVERY_MS as GH_LOOK_EVERY_MS, lookHostsFile, type GhLoginDeps } from './ghLogin.ts';
-import { machinePlatformOf, type AttachmentRef, type BenchPriority, type CompactionTrigger, type HostHealth, type HostStats, type PersonPlayReport, type SandboxPoolSettings, type SessionInfo, type TranscriptEvent } from '../shared/types.ts';
+import { machinePlatformOf, type AttachmentRef, type BenchPriority, type CompactionTrigger, type HostHealth, type HostStats, type NoTimedRuns, type TimedAskMark, type PersonPlayReport, type SandboxPoolSettings, type SessionInfo, type TranscriptEvent } from '../shared/types.ts';
 
 export interface DaemonConfig {
   /**
@@ -377,6 +378,11 @@ export class Daemon {
   private personLookAt?: string;
   /** w1860: the portal's bench marks per session (its last bench_priorities): an exempt worker's builds are never stopped. */
   private benchMarks: Record<string, BenchPriority> = {};
+  /** w1962: the portal's last bench_priorities (its marks as sent), the passed shared tickets, and what was written last. */
+  private benchSent?: { singleWorker?: boolean; noTimedRuns?: NoTimedRuns; timedAsk?: TimedAskMark };
+  private benchPassed?: Record<string, PassedMark>;
+  private benchWritten = '';
+  private benchRaised = '';
   /** The pending wake_me check-ins of this machine's sessions (ms), as the portal last said (welcome, `resumable`; w1196). */
   private wakes = new Map<string, number>();
   /** The machine's gh login and its token's scopes, names only (w1463, machine/ghLogin.ts); none when the probes have no gh. */
@@ -632,7 +638,9 @@ export class Daemon {
         // w1615: an editor boot takes a shared ticket in the machine's bench queue (the game repo's bench_queue.py).
         // w1860: held for as long as the editor runs, named so the game repo's bench_queue.py lets it ride along with its
         // own sandbox's timed leg (rides_along: "running editor <sandbox>", with the sandbox in the ticket)
-        bootTicket: (sb) => benchTicketFor({ mode: 'shared', what: `running editor ${sb.id}`, checkouts: [sb.path], root: cfg.root, env: { ...process.env, FF_SANDBOX_ID: sb.id } }),
+        // w1962: under a session of its own (editor:<sandbox>, at its sandbox's worker's priority in priorities.json), which
+        // FF_BENCH_SESSION gives it: FF_SESSION_ID would make it a worker's, whose leftovers FF Factory ends
+        bootTicket: (sb) => benchTicketFor({ mode: 'shared', what: `running editor ${sb.id}`, checkouts: [sb.path], root: cfg.root, env: { ...process.env, FF_SANDBOX_ID: sb.id, FF_SESSION_ID: '', FF_BENCH_SESSION: editorBenchSession(sb.id) } }),
       },
       pd,
     );
@@ -1045,6 +1053,8 @@ export class Daemon {
     this.timers.push(setInterval(() => void this.slotTick(), 5_000));
     // w1829: another worker's timed run holds the bench lock: the other editors and players close, and come back after.
     this.timers.push(setInterval(() => void this.benchTurn.tick(), 5_000));
+    // w1962: a shared ticket an exclusive turn has passed is raised in priorities.json while it waits (machine/benchRaise.ts)
+    this.timers.push(setInterval(() => this.benchPriorities(), 5_000));
     void this.slotTick();
     // Orphaned and hung batch builds (w791): looked at once a minute, and when a worker asks (unity clear_batch).
     this.timers.push(setInterval(() => void this.reaper.tick(), 15_000));
@@ -1493,6 +1503,34 @@ export class Daemon {
   }
 
   /** A look at the Unity slots when due: every 15 s, or at once while a launch waits or holds one. */
+
+  /**
+   * priorities.json (w1628) as the portal's priorities plus the daemon's own (w1962): each editor start's session at its
+   * sandbox's worker's priority, and the session of every shared ticket an exclusive turn has passed raised to the top
+   * while it waits (machine/benchRaise.ts), so every copy of bench_queue.py, an old branch's too, grants it before the
+   * next timed leg and ends the holder's turn at its limit. Written when it changes; nothing before the portal's first.
+   */
+  private benchPriorities(): void {
+    const root = this.cfg.root;
+    if (!root || !this.benchSent) return;
+    try {
+      const tickets = queueTickets(benchLockDir(root), pidAlive);
+      const placed = [...this.entries].map(([session, e]) => ({ session, sandbox: e.spec?.sandbox }));
+      const base = { ...editorSessions(placed, this.benchMarks), ...this.benchMarks };
+      this.benchPassed = passedShared(tickets, this.benchPassed ?? readPassedMarks(root), new Date(), base);
+      const { sessions, raised } = raisedSessions(base, tickets, this.benchPassed);
+      const key = JSON.stringify([sessions, this.benchPassed, this.benchSent]);
+      if (key === this.benchWritten) return;
+      if (writeBenchPriorities(root, sessions, new Date(), this.benchSent.singleWorker, this.benchSent.noTimedRuns, this.benchSent.timedAsk, this.benchPassed)) this.benchWritten = key;
+      const now = raised.join(',');
+      if (now !== this.benchRaised) {
+        this.benchRaised = now;
+        if (raised.length) log(`bench queue: raised to the top while they wait, an exclusive turn having passed them or a later exclusive ticket outranking them (w1962): ${raised.map((t) => `${t} (passed by ${this.benchPassed![t]?.by})`).join(', ')}`);
+      }
+    } catch (e) {
+      log(`bench queue: priorities: ${(e as Error).message}`);
+    }
+  }
   private async slotTick() {
     let pending = false;
     try {
@@ -2396,8 +2434,9 @@ export class Daemon {
         return;
       case 'bench_priorities':
         // Each worker's request priority (w1628): the game repo's bench_queue.py orders tickets by it first.
-        writeBenchPriorities(this.cfg.root, msg.sessions, new Date(), msg.singleWorker, msg.noTimedRuns, msg.timedAsk);
         this.benchMarks = msg.sessions;
+        this.benchSent = { singleWorker: msg.singleWorker, noTimedRuns: msg.noTimedRuns, timedAsk: msg.timedAsk };
+        this.benchPriorities();
         // w1894: this machine's machines.personPlay, kept for a restart before the portal answers
         if (msg.personPlay && JSON.stringify(msg.personPlay) !== JSON.stringify(this.personSettings)) {
           this.personSettings = { enabled: !!msg.personPlay.enabled, graceMinutes: Number(msg.personPlay.graceMinutes) || GRACE_MIN, ...(msg.personPlay.who ? { who: String(msg.personPlay.who).slice(0, 40) } : {}) };
