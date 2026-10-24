@@ -740,7 +740,8 @@ without one means it is off or failing, worth a person's look.
   agent's own waiting ticket (bench or Unity slot) and the bench ticket it holds, so list_sandboxes, the
   machine view, the worker cards and the sidebar show "Blocked: waiting for the exclusive bench lock on beast (held by
   w1891 / t00001009 since 02:10 UTC, next in queue)" for the waiter and "Working: holds the exclusive bench lock on beast
-  (t00001009 for w1891, since 02:10 UTC)" for the holder ("holds lock" in the machine view). Only the label and its reason
+  (t00001009 for w1891, since 02:10 UTC)" for the holder ("holds lock" in the machine view); a holder waiting for a
+  second ticket reads Blocked with both ("… · holds a shared bench ticket on lothdesktop (t00000942 …)"). Only the label and its reason
   change; the state stays mid-turn or between turns, so capacity and placement read it as before. Tests:
   `w1968AgentQueue.test.ts`.
 - **Stalled is only what nothing will move** (w1841; Ben, 2026-10-23, on six requests his Stalled filter showed: "why are
