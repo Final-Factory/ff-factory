@@ -43,7 +43,7 @@ import { JOIN_TTL_MINUTES } from './machineJoin.ts';
 import { searchTranscripts } from './search.ts';
 import { CATALOG, questionsShape } from './launch.ts';
 import { clampArgs, clamped, rangedNumber, withWarnings } from './forgiving.ts';
-import { AutoCompactor, LONG_WAIT_MS } from './autoCompact.ts';
+import { AutoCompactor, LONG_WAIT_MS, withEarlyCompactMark, workerAutoCompactWindow } from './autoCompact.ts';
 import { withTerseProse } from './terseProse.ts';
 import { WORKER_READ_RULES_TOOL, workerRuleText } from './workerRules.ts';
 import { activityLine, Waker } from './wake.ts';
@@ -441,6 +441,50 @@ export const WORKER_HIDDEN_AGENTS = ['Explore', 'Plan', 'claude', 'statusline-se
  * on Claude Code 2026-10-18, the plugin and its LSP tool are gone from the session's init.
  */
 export const WORKER_DISABLED_PLUGINS = ['csharp-lsp@claude-plugins-official'] as const;
+
+/**
+ * Skills left out of a worker's skill listing, which every model call reads again (w2002, lothsahn: "File the compaction pilot
+ * plus the base-context trim and noise fixes"). Measured over beast's 361 worker sessions of 2026-10-10..24: none of these was
+ * invoked (claude-api once); the listing fell from 18,098 to 11,593 characters on a probe session. "user-invocable-only"
+ * hides a skill from the model and keeps a person's /name working. Claude Code applies skillOverrides to bundled, user and
+ * synced skills, never to a plugin's (its `QDe`: a plugin skill is always "on"); a plugin goes by enabledPlugins instead.
+ */
+export const WORKER_HIDDEN_SKILLS = [
+  'dataviz', 'claude-api', 'update-config', 'keybindings-help', 'simplify', 'fewer-permission-prompts', 'loop', 'schedule', 'workflow-authoring',
+  'run', 'init', 'security-review', 'plugin-authoring', 'code-review', 'code-review-sonnet', 'unity-mcp-skill', 'therapy',
+] as const;
+
+/**
+ * How many characters of a shell command's output a worker gets inline (Claude Code's bashOutputMaxChars, default 30,000, at
+ * least 4,000); past it Claude Code saves the whole output to a file and gives a preview of about 2,200 characters and the
+ * path, which the worker reads when it needs more (w2002). Measured on beast's workers (2026-10-17..24): shell output is 24% of
+ * what later calls re-read; a 10,000 cap would cut 3.7% of all context tokens if no saved output were read back (8,000: 5.1%,
+ * 15,000: 1.5%); 1% of results pass 12,900 characters; of the 109 outputs already saved past 30,000 in 14 days, 10 were read
+ * back within the next few steps.
+ */
+export const WORKER_BASH_OUTPUT_MAX_CHARS = 10_000;
+
+/** The marketing plugin, which only marketing work uses (its 17 skills: footage, trailers, ads, the Steam page, outreach). */
+export const MARKETING_PLUGIN = 'ff-marketing@ff-marketing';
+
+/** Words of a request that may need the marketing plugin: its title or brief naming them keeps it in the worker's listing. */
+export const MARKETING_WORK = /\b(marketing|ff-marketing|trailers?|thumbnails?|ads?|ad[- ](cuts?|copy|campaigns?)|steam page|creator outreach|outreach|social clips?|announcements?|captions?)\b/i;
+
+/**
+ * A worker process's own settings (--settings): the plugins it starts without (the marketing plugin too unless its work
+ * is marketing), the skills hidden from its listing, and, in the earlier-compaction pilot's arm (w2002), the
+ * autoCompactWindow that makes Claude Code compact within a turn from the arm's threshold.
+ */
+export function workerSettings(sessionId: string, cfg: Partial<Pick<Config, 'worker'>>, marketing = false): Record<string, unknown> {
+  const window = workerAutoCompactWindow(sessionId, cfg);
+  const off = [...WORKER_DISABLED_PLUGINS, ...(marketing ? [] : [MARKETING_PLUGIN])];
+  return {
+    enabledPlugins: Object.fromEntries(off.map((p) => [p, false])),
+    skillOverrides: Object.fromEntries(WORKER_HIDDEN_SKILLS.map((k) => [k, 'user-invocable-only'])),
+    bashOutputMaxChars: WORKER_BASH_OUTPUT_MAX_CHARS,
+    ...(window ? { autoCompactWindow: window } : {}),
+  };
+}
 
 /** The gates a worker may give up its sandbox for (w890): not a time, a machine, a usage limit or a lock; CI has its own rule (w846). */
 const WAIT_RELEASE_KINDS: readonly string[] = ['deploy', 'request', 'pr'];
@@ -2204,6 +2248,12 @@ export class Agents {
   nightlyWorkerTurn?: (workIds: readonly string[], text: string) => void;
 
   /** The requests a worker serves: by link, and the one its title names ("w901: ..."), which its first process starts before. */
+  /** Whether this worker's title or one of its requests (title and brief) names marketing work (MARKETING_WORK). */
+  private marketingWork(info: SessionInfo): boolean {
+    const texts = [info.title ?? '', ...this.workIdsOf(info).map((id) => this.store.work.get(id)).flatMap((w) => (w ? [w.title, w.brief] : []))];
+    return texts.some((t) => MARKETING_WORK.test(t ?? ''));
+  }
+
   private workIdsOf(info: SessionInfo): string[] {
     const ids = new Set(servedBy(info.id, [...this.store.work.values()]));
     const named = /^(w\d+):/.exec(info.title ?? '')?.[1];
@@ -2893,12 +2943,13 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
       effort: info.effort ?? this.cfg.worker.effort,
       settingSources: ['user', 'project', 'local'],
       // w1480: a share of workers also get the terse-prose rule (server/terseProse.ts).
-      append: withTerseProse(this.machineSandboxBrief(m, sb, run.account, run.github, clone, this.workflowMachines()), info.id, this.cfg),
+      // w2002: and a share compacts earlier, marked in the prompt (server/autoCompact.ts withEarlyCompactMark).
+      append: withEarlyCompactMark(withTerseProse(this.machineSandboxBrief(m, sb, run.account, run.github, clone, this.workflowMachines()), info.id, this.cfg), info.id, this.cfg),
       strictMcp: false,
       // The Unity bridge of this sandbox's editor only (machine/unityMcp.ts): Claude Code has none registered for a new worktree.
       unityMcp: true,
       disallowedTools: ['mcp__ffsb', ...WORKER_UNUSED_TOOLS, ...WORKER_HIDDEN_AGENTS.map((a) => `Agent(${a})`)],
-      settings: { enabledPlugins: Object.fromEntries(WORKER_DISABLED_PLUGINS.map((p) => [p, false])) },
+      settings: workerSettings(info.id, this.cfg, this.marketingWork(info)),
       mcp: {
         server: 'machine',
         tools: this.workerTools({

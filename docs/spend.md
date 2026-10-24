@@ -386,6 +386,42 @@ compaction at 200k **-44%** of the workers' spend (-37% if what is read again af
 the one before waits alone -22%; both -46%. To check on the pilot: its sessions' cost per call against the rest's, and what they
 re-read after a compaction (`spend_report`, the `summary` and `reread` categories).
 
+### Compacting earlier, a pilot (w2002)
+
+lothsahn, 2026-10-24: "File the compaction pilot plus the base-context trim and noise fixes". Over 14 days 96% of workers'
+cache-read tokens came from calls above 100k of context and 78% from calls above 200k (measured by the ops worker), so a share of
+worker sessions compacts earlier (server/autoCompact.ts `EARLY_COMPACT_DEFAULTS`):
+
+| Arm | Between turns (the portal's /compact) | Within a turn (Claude Code's own autocompact) |
+|---|---|---|
+| pilot, `worker.earlyCompactPilotPercent` (default 50) of sessions, by a hash of the id apart from the other pilots | from `worker.earlyCompactAtTokens` (120,000) | from `worker.earlyCompactMidTurnTokens` (150,000) |
+| control, the rest | from `worker.compactAtTokens` (200,000) | near the model's window (Opus 5.5: 980,000 less 13,000) |
+
+Neither threshold goes under 80,000: a worker's base plus a compaction's summary is already about 67k. The mid-turn threshold is
+the process's `autoCompactWindow` setting (`--settings`), which Claude Code turns into a threshold of the window less 20,000 (the
+output reserve) less 13,000 (its buffer): read from Claude Code 2.1.284 and measured there (`autoCompactWindow` 170,000 gives
+`effectiveWindow=150000` in its debug log). So it reaches a session when its process next starts. A pilot session's system prompt
+ends with `## Compaction (pilot)` and one line saying when it compacts; that line marks the arm in its transcript.
+
+To read it, on each worker machine: `python scripts/compact-compare.py --since <deploy time> --ids`. Per arm and model: cache-read
+tokens and list-price cost a call, a session and a request, compactions and their triggers, and quality after a compaction (in the
+40 calls after it, file ranges read again and commands run again, against the 40 calls before it), DONE lines and follow-up
+messages. Compare only sessions on the same effort (`worker.effort` changed on 2026-10-24, w2000) and the same model.
+
+Before the pilot (beast, 2026-10-17..24, 135 Opus 5.5 worker sessions, measured with that script): 200k context a call, 52.4M
+cache-read tokens and $18.79 at list price a session (median $10.45), 1.93 compactions a session at 242k on average; in the 40
+calls after a compaction 1.80 re-reads and 13.1 repeated commands (2.37 and 18.3 in the 40 before it).
+
+### Shell output over 10,000 characters goes to a file (w2002)
+
+A worker's shell results are 24% of what its later calls re-read (beast, 2026-10-17..24, each result's characters times the
+calls after it before the next compaction, measured). Claude Code's `bashOutputMaxChars` (default 30,000) is how much of a
+command's output the model gets inline; past it the whole output is saved to a file and the model gets a preview of about 2,200
+characters with the path. Workers run with 10,000 (`WORKER_BASH_OUTPUT_MAX_CHARS`, their `--settings`). If nothing saved were read
+back, that cuts 3.7% of all context tokens (8,000 would cut 5.1%, 15,000 1.5%; measured on the same week, with the preview's
+measured median). 1% of results pass 12,900 characters, and of the 109 outputs saved past 30,000 in 14 days, 10 were read back
+within the next few steps (measured).
+
 ## Model calls per session (w1478)
 
 lothsahn, 2026-10-18: "why are there 200 calls at all? Typically you ask a worker to do something and it responds back. Why is
