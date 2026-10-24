@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import type { CleanupPolicy } from './config.ts';
-import { DISK_WARN_GB_DEFAULT, type CleanupSummary } from '../shared/types.ts';
+import { CLEANUP_SOFT_GB_DEFAULT, type CleanupSummary } from '../shared/types.ts';
 import type { StaleOutputSettings } from './staleOutput.ts';
 import { inNeverGames, installDrive, onInstallDrive } from './rootFence.ts';
 
@@ -720,7 +720,8 @@ export const LOW_PASS_MINUTES = 15;
 
 /**
  * The soft threshold a volume is judged by (w1918): the setting, but at most a quarter of the volume's size and never below the
- * pool's clean-up line (DISK_WARN_GB_DEFAULT, 20 GB). LothLaptop's empty 80 GB Dev Drive had 76.9 GB free, under the 80 GB
+ * clean-up line (CLEANUP_SOFT_GB_DEFAULT, 20 GB: w1951 kept the floor there, above the guard's 15 GB warn, so clean-up still
+ * starts before the guard refuses work). LothLaptop's empty 80 GB Dev Drive had 76.9 GB free, under the 80 GB
  * default, and its clean-up said every 15 minutes that it could not free enough, with nothing there to free. A Dev Drive sized
  * by the installer (scripts/worker/devdrive.ts defaultMaxGB, w1910) keeps 20 GB free at its fullest, so a quarter of it is a
  * line it crosses only once it is mostly full. Unknown size: the setting.
@@ -728,7 +729,7 @@ export const LOW_PASS_MINUTES = 15;
 export function softFreeBytes(softFreeGB: number, totalBytes: number | undefined): number {
   const set = softFreeGB * GB;
   if (!totalBytes || totalBytes <= 0) return set;
-  return Math.min(set, Math.max(DISK_WARN_GB_DEFAULT * GB, Math.floor(totalBytes / 4)));
+  return Math.min(set, Math.max(CLEANUP_SOFT_GB_DEFAULT * GB, Math.floor(totalBytes / 4)));
 }
 /** A notice that clean-up cannot get above the soft threshold repeats at most this often while it stays so. */
 export const NOTICE_REPEAT_HOURS = 24;

@@ -638,7 +638,7 @@ generalises it, and BEAST keeps its own.
 | **The letter** | `V:`, `U:`, `T:` … `C:`, then `B:`, then `A:`; `W:` to `Z:` are never tried (`Z:` is where a share is mapped first). Skipped: a letter **in use** (a volume, a `subst`, a CD drive), a **mapped network drive** (this session's, and every user's persistent mapping in the registry, read from their profiles' hives because the boot task runs as SYSTEM with nobody logged on), a letter **reserved** by Windows (`HKLM\SYSTEM\MountedDevices` remembers the letter of every volume it has seen, plugged in or not), and `-DevDriveSkip`. The install prints which letter it took and why each earlier one was passed over (`V: in use, U: mapped network drive, …`). The rule is one function, `Select-DriveLetter` in `scripts/privileged/devdrive-lib.ps1`, used by the installer and the boot task. |
 | **On it** | `<letter>:\sandboxes` and `<letter>:\seed`. `daemon.json` names these (`sandboxes.root`, `sandboxes.librarySeed`, `librarySeedCopy: "clone"`), never the root's junctions: git and Unity record the canonical path ([worker-root.md](worker-root.md) 2.2). `<root>\sandboxes` and `<root>\seed` become directory junctions to them, so tools that look under the root (the uninstall's risk check, `player_slots.py`'s `realpath` of `<root>/sandboxes`) still find the sandboxes. Built players stay in `<root>\players`: the firewall rules name those paths, and a build is hard-linked into a slot only on one volume, so on a Dev Drive root `player_slots.py` copies it (`_link_or_copy`, about 2 GB for a development player, measured in w628) instead. |
 | **The seed** | A new install has none: the first sandbox imports its Library cold, and the next ones copy it, as block clones because they share the drive (`librarySource` takes a ready sandbox's Library when there is no seed). A machine that has a seed puts it in `<letter>:\seed\Library`; the move below does that for an existing install. |
-| **The guard** | The installer adds a `hostGuard` to `daemon.json` (unless it has one): the daemon watches `<letter>:\sandboxes`, and when it is gone it starts `ffsb-helper-mount` and retries (at once, then 2, 5, 10 and 30 minutes; [self-recovery.md](self-recovery.md), "The sandbox drive"). Its thresholds are the pool's own (`disk_warn_gb` 20, `disk_critical_gb` 10, not BEAST's 80 and 40), it watches the **root's volume** too (`hostDiskPaths: ["D:/"]`: the drive's own "free space" is its maximum size, and a VHDX that cannot grow takes the drive away, BEAST 2026-09-24), and the browser reaper is off. |
+| **The guard** | The installer adds a `hostGuard` to `daemon.json` (unless it has one): the daemon watches `<letter>:\sandboxes`, and when it is gone it starts `ffsb-helper-mount` and retries (at once, then 2, 5, 10 and 30 minutes; [self-recovery.md](self-recovery.md), "The sandbox drive"). Its thresholds are the pool's own (`disk_warn_gb` 15, `disk_critical_gb` 10 since w1951, not BEAST's 80 and 40), it watches the **root's volume** too (`hostDiskPaths: ["D:/"]`: the drive's own "free space" is its maximum size, and a VHDX that cannot grow takes the drive away, BEAST 2026-09-24), and the browser reaper is off. |
 
 **Clean-up and the install folder (w896).** The daemon's clean-up deletes only inside the install folder. The drive's
 folders are not under the root, so the installer writes `extraRoots: ["<letter>:\\sandboxes", "<letter>:\\seed"]` into `daemon.json`
@@ -748,14 +748,14 @@ less what it shares with the clone and the seed. Dedup's sharing between sandbox
 | Each sandbox | 30 | the largest of six, slot3 (the median one takes 18): its worktree less the LFS blocks it shares with the clone, 8.4 (Builds, Temp; 1 to 3 in the others); its Library less what it shares with the seed, 17.0 (build caches, BurstCache, reimports; 9 to 16 in the others); its two player folders, 4 (3.7 logical). All measured. The 11 GB over the median sandbox is the room for a sandbox's growth: what days of player builds and imports added. |
 | Each agent (sandboxes x agents per sandbox) | 10 | `tmp\` held 109.2 (101.3 on disk) for 12 agent seats, unswept leftovers included: measured |
 | Once per install | 38 | the clone 20: bare, no checkout (`git worktree list`, measured); pack 1.4 (`git count-objects`; 1.3 on LothLaptop's new clone) and master's LFS objects 8.9 (`git lfs ls-files -s`), measured, plus 10 for the LFS objects other branches bring (*a guess*, under LothDesktop's ~25 after 11 days, measured by difference: V: used less every other folder). The seed 9 (8.5 on disk), nightly-history 5 (4.6), tools and steam 2, ReFS's own 2 (an empty 80 GB V: on LothLaptop used 1.8): measured |
-| Clean-up room | 20 | the pool's clean-up line, `disk_warn_gb` (lothsahn, w1910: "cleanup space should be 20G") |
+| Clean-up room | 20 | the clean-up soft threshold, `CLEANUP_SOFT_GB_DEFAULT`, 5 GB above the guard's 15 GB `disk_warn_gb` (lothsahn, w1910: "cleanup space should be 20G"; w1951 kept it at 20) |
 
 w1910's first version summed logical sizes (`du -s`). That counted the seed's blocks again in every Library, the clone's
 LFS blocks again in every worktree, and a 10 GB checkout the bare clone does not have: 44 GB a sandbox, 112 for one sandbox
 with one agent.
 
 One sandbox with one agent needs **98 GB**, the smallest safe drive; 6 sandboxes with 2 agents each, 358. The cap: the
-root's volume keeps 30 GB free (the guard's 20 GB clean-up line plus its 10 GB hysteresis) or a tenth of its free space,
+root's volume keeps 30 GB free (the 20 GB clean-up line plus the guard's 10 GB hysteresis) or a tenth of its free space,
 whichever is more (*a guess*). Under the need, the drive gets the cap and the install says so; under Windows' 50 GB
 minimum (sourced: Microsoft Learn, "Set up a Dev Drive on Windows 11"), no drive is made and the install carries on
 without one. A pool raised later needs a bigger drive: `-MoveToDevDrive` with `-DevDriveMaxGB` makes it again.
@@ -882,8 +882,10 @@ Three fixes from LothLaptop's reset V: (w1918, 2026-10-23):
   measures the root's drive (`V:\`), never the home folder's (`machine/daemon.ts` `diskPath`). Before this, LothLaptop's line
   read "190 GB of 928 GB" (C:) while `V:\ffw\repo` was missing.
 - **A machine's clean-up soft threshold fits its drive.** It is at most a quarter of the fullest volume's size, and never
-  below the pool's 20 GB clean-up line (`server/cleanup.ts` `softFreeBytes`; the daemon's runner sets `fitSoftToVolume`).
-  The portal's one `machines.cleanup.softFreeGB` (80) is meant for big disks: an empty 80 GB V: with 76.9 GB free read as
+  below the 20 GB clean-up line (`CLEANUP_SOFT_GB_DEFAULT`; `server/cleanup.ts` `softFreeBytes`; the daemon's runner sets
+  `fitSoftToVolume`). The floor stays 20 GB, not the guard's 15 GB warn (w1951), so clean-up starts before the guard refuses
+  work. The soft threshold itself defaults to 20 GB since w1951 (config sets BEAST's to 40). The old 80 GB default was meant
+  for big disks: an empty 80 GB V: with 76.9 GB free read as
   low, and every 15 minutes the clean-up said it could not free enough. A drive the installer sizes (w1910's `defaultMaxGB`)
   keeps 20 GB free at its fullest, so a quarter of it is crossed only once the drive is mostly full. The portal host keeps
   the number set for it.
