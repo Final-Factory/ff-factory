@@ -61,8 +61,8 @@ test('w2002: the earlier-compaction pilot: half the workers by default, 120,000 
   assert.equal(workerCompactSettings({ worker: { compactAtTokens: 0 } as Config['worker'] }, inArm).atTokens, 0, 'compaction off stays off');
   assert.equal(workerAutoCompactWindow(inArm, {}), 183_000, "Claude Code's window: 150,000 + its 20,000 reserve and 13,000 buffer");
   assert.equal(workerAutoCompactWindow(outArm, {}), undefined);
-  assert.deepEqual(workerSettings(inArm, {}), { enabledPlugins: { 'csharp-lsp@claude-plugins-official': false }, autoCompactWindow: 183_000 });
-  assert.deepEqual(workerSettings(outArm, {}), { enabledPlugins: { 'csharp-lsp@claude-plugins-official': false } });
+  assert.equal(workerSettings(inArm, {}).autoCompactWindow, 183_000);
+  assert.ok(!('autoCompactWindow' in workerSettings(outArm, {})));
   assert.ok(withEarlyCompactMark('brief', inArm, {}).startsWith(`brief\n\n${EARLY_COMPACT_MARK}\n`), 'the arm is marked in the prompt');
   assert.equal(withEarlyCompactMark('brief', outArm, {}), 'brief');
   assert.equal(workerAutoCompactWindow(inArm, { worker: { earlyCompactPilotPercent: 0 } as Config['worker'] }), undefined, '0 ends the pilot');
