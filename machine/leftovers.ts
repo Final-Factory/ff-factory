@@ -62,6 +62,8 @@ const MIN = 60_000;
  * - LOOKS: a process ends only once two looks (a minute apart) have seen it, so one odd listing never ends it.
  * - SERVER_IDLE_CPU_MS: as unityReaper.ts did with its 2 s CPU_ADVANCE_MS (now CPU_BUSY_SHARE): a compiler server serving a build uses seconds of CPU a minute.
  * - TERM_WAIT_MS: a guess: a player or an Xvfb ends within a second of SIGTERM; what still runs 5 s later is killed.
+ * - STUCK_RETRY_MS: a guess (w1983): a process SIGKILL did not end (taskkill /F failed: LothDesktop's gh pid 24280 of worker
+ *   5322f111 was "ended" again every minute from 04:44Z on 2026-10-24) is tried once an hour, not at every look.
  */
 export const LEFTOVER = {
   DONE_GRACE_MS: 2 * MIN,
@@ -71,6 +73,7 @@ export const LEFTOVER = {
   LOOKS: 2,
   SERVER_IDLE_CPU_MS: 2_000,
   TERM_WAIT_MS: 5_000,
+  STUCK_RETRY_MS: 60 * MIN,
   LOOK_EVERY_MS: MIN,
 } as const;
 
@@ -130,7 +133,8 @@ export interface LeftoverDeps {
   /** Never touched: the daemon and its parents. */
   self(): number[];
   host: string;
-  kill(pid: number, signal: 'SIGTERM' | 'SIGKILL'): void;
+  /** Why the signal could not be sent, when the platform says (taskkill's own words); nothing when sent or already gone. */
+  kill(pid: number, signal: 'SIGTERM' | 'SIGKILL'): string | void;
   exists(p: string): boolean;
   remove(p: string): void;
   sleep(ms: number): Promise<void>;
@@ -339,7 +343,10 @@ interface Candidate {
 
 export interface Ended {
   session?: string;
+  /** The ones that ended. */
   pids: number[];
+  /** w1983: the ones still running after SIGKILL, tried again after LEFTOVER.STUCK_RETRY_MS. */
+  stuck?: number[];
   line: string;
 }
 
@@ -349,6 +356,8 @@ export class LeftoverReaper {
   private readonly stopped = new Map<string, number>();
   /** Looks that saw a process (by pid and command line), and when it was first seen an orphan. */
   private readonly looks = new Map<string, { n: number; orphanSince?: number; cpuMs?: number }>();
+  /** w1983: processes (by pid and command line) SIGKILL did not end, and when: not tried again before LEFTOVER.STUCK_RETRY_MS. */
+  private readonly stuck = new Map<string, number>();
   private busy?: Promise<Ended[]>;
   private lastLook = 0;
   private players: PlayerLine[] = [];
@@ -492,11 +501,14 @@ export class LeftoverReaper {
       if (c.kind === 'player') players.push({ pid: c.p.pid, ...(c.slot ? { slot: c.slot } : {}), ...(c.session ? { session: c.session } : {}), ...(c.sandbox ? { sandbox: c.sandbox } : {}), ...(age !== undefined ? { ageMin: Math.round(age / MIN) } : {}), owner, ...(v.until !== undefined ? { endsInMin: Math.max(0, Math.ceil((v.until - now) / MIN)) } : {}) });
       else if (owner === 'stopped') others++;
       if (!v.end || look.n < LEFTOVER.LOOKS || born === undefined) continue;
+      const stuckAt = this.stuck.get(id);
+      if (stuckAt !== undefined && now - stuckAt < LEFTOVER.STUCK_RETRY_MS) continue;
       const group = c.session ?? `orphan:${c.p.pid}`;
       if (!toEnd.has(group)) toEnd.set(group, []);
       toEnd.get(group)!.push({ c, why: v.why });
     }
     for (const id of [...this.looks.keys()]) if (!seen.has(id)) this.looks.delete(id);
+    for (const id of [...this.stuck.keys()]) if (!seen.has(id)) this.stuck.delete(id);
     for (const s of [...this.stopped.keys()]) if (!sessions.has(s)) this.stopped.delete(s);
     this.players = players;
     this.others = others;
@@ -525,7 +537,20 @@ export class LeftoverReaper {
     await d.sleep(LEFTOVER.TERM_WAIT_MS);
     const after = await d.procs().catch(() => [] as Proc[]);
     const left = order.filter(({ c }) => after.some((p) => p.pid === c.p.pid && p.cmd === c.p.cmd));
-    for (const { c } of left) d.kill(c.p.pid, 'SIGKILL');
+    const refused = new Map<number, string>();
+    for (const { c } of left) {
+      const why = d.kill(c.p.pid, 'SIGKILL');
+      if (why) refused.set(c.p.pid, why);
+    }
+    // w1983: what SIGKILL did not end is said so, once, and left for an hour: LothDesktop's watch said "ended" gh pid 24280
+    // every minute while taskkill /F failed and said nothing.
+    let stuck: typeof left = [];
+    if (left.length) {
+      await d.sleep(LEFTOVER.TERM_WAIT_MS);
+      const last = await d.procs().catch(() => after);
+      stuck = left.filter(({ c }) => last.some((p) => p.pid === c.p.pid && p.cmd === c.p.cmd));
+      for (const { c } of stuck) this.stuck.set(`${c.p.pid}|${c.p.cmd}`, d.now());
+    }
     // A killed batch build's stale lock, once no Unity has its project open (as unityReaper.ts does).
     const projects = new Set<string>();
     for (const { c } of order) {
@@ -545,12 +570,16 @@ export class LeftoverReaper {
     const what = (c: Candidate) => `${c.kind === 'player' ? `game player${c.slot ? ` ${c.slot}` : ''}` : c.kind === 'display' ? programOf(c.p, d.platform) : c.kind === 'unity-batch' ? 'batch Unity' : c.kind === 'unity-worker' ? 'Unity import worker' : programOf(c.p, d.platform) || 'process'} pid ${c.p.pid}`;
     const first = order[0].c;
     const whose = first.session ? `worker ${first.session}${first.sandbox ? ` (sandbox ${first.sandbox})` : ''}` : 'no worker';
-    const list = order.map(({ c }) => what(c));
-    const text = `ended ${order.length} process(es) left by ${whose}: ${list.slice(0, 8).join(', ')}${list.length > 8 ? `, and ${list.length - 8} more` : ''}. Why: ${order[0].why}${left.length ? `; ${left.length} needed SIGKILL` : ''}.`;
+    const gone = order.filter((x) => !stuck.includes(x));
+    const list = gone.map(({ c }) => what(c));
+    const notEnded = stuck.map(({ c }) => `${what(c)}${refused.get(c.p.pid) ? ` (${refused.get(c.p.pid)!.slice(0, 160)})` : ''}`);
+    const endedText = gone.length ? `ended ${gone.length} process(es) left by ${whose}: ${list.slice(0, 8).join(', ')}${list.length > 8 ? `, and ${list.length - 8} more` : ''}` : '';
+    const stuckText = stuck.length ? `could not end ${stuck.length} process(es) left by ${whose}, still running after SIGKILL: ${notEnded.slice(0, 8).join(', ')}; tried again in ${LEFTOVER.STUCK_RETRY_MS / MIN} min` : '';
+    const text = `${[endedText, stuckText].filter(Boolean).join('; ')}. Why: ${order[0].why}${left.length - stuck.length ? `; ${left.length - stuck.length} needed SIGKILL` : ''}.`;
     d.log(`leftovers: ${text} Command lines: ${order.map(({ c }) => `[${c.p.pid}] ${c.p.cmd.slice(0, 160)}`).join(' | ')}`);
     d.onEvent(text);
     await d.afterKill?.().catch(() => undefined);
-    return { session: group.startsWith('orphan:') ? undefined : group, pids: order.map(({ c }) => c.p.pid), line: text };
+    return { session: group.startsWith('orphan:') ? undefined : group, pids: gone.map(({ c }) => c.p.pid), ...(stuck.length ? { stuck: stuck.map(({ c }) => c.p.pid) } : {}), line: text };
   }
 }
 

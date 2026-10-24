@@ -2094,6 +2094,11 @@ export interface WorkItem {
    */
   handedBack?: { at: string; from: string; session: string; branch?: string; why: string; note: string; how: string; saved?: string; message?: string; to?: string };
   /**
+   * The workers it was taken off (Orchestrators.moveOff: a move, a hand-back, a new session), session id to when (w1983): for
+   * such a worker its work here is over (Agents.workOver), so a check-in it set before the move no longer pins its sandbox.
+   */
+  movedOff?: Record<string, string>;
+  /**
    * The repository the work is in, "owner/name" (w1098; request_work `repo`). Placement reads `needs`, which is derived
    * from it when the request is filed, never guessed later from the brief.
    */
