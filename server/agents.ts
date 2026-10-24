@@ -2836,6 +2836,8 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
     if (machineId && x.path && benchLockIn(this.machines.statsOf(machineId)?.benchLock, x.path)) return false;
     // An old agent host's tree still runs there while its daemon stops it (w799: one ran on beside the next worker).
     if (x.lingering?.length) return false;
+    // Being handed to a new worker that does not exist yet (w1944, prepareForNewWork).
+    if (machineId && this.handing.has(`${machineId}/${x.id}`)) return false;
     // A worker that released its sandbox while it waits (w640) does not keep it; one placed again there does (claims).
     if (this.sessionsOf(x.sessionIds).some((s) => occupies(s, !!this.sessions.sessions.get(s.id)?.live))) return false;
     return !(machineId && this.placeAgain.claimedBy(machineId, x.id));
@@ -3041,6 +3043,33 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
    * starts on, when it was switched.
    */
   async prepareForNewWork(sandbox: string | undefined, machine: string | undefined, name?: string, source?: WorkSource, agentSeat = false): Promise<{ note: string; branch?: string }> {
+    let key: string | undefined;
+    try {
+      const t = this.target(sandbox, machine);
+      if (t.machineSandbox) key = `${t.machine}/${t.machineSandbox}`;
+    } catch {
+      // An unknown target: the inner call says nothing either.
+    }
+    if (!key) return this.prepareSandbox(sandbox, machine, name, source, agentSeat);
+    const by = this.handing.get(key);
+    if (by) throw new Error(`sandbox ${key} is being handed to ${by} now (its editor stopped and its branch switched for it, before its worker starts): use another free sandbox.`);
+    // w1944: until the new worker exists the sandbox has no agent in it, yet it is taken: not free for room, list_sandboxes or another start.
+    this.handing.set(key, name ? `new work ${name}` : 'new work');
+    try {
+      return await this.prepareSandbox(sandbox, machine, name, source, agentSeat);
+    } finally {
+      this.handing.delete(key);
+    }
+  }
+
+  /**
+   * Sandboxes being made ready for a new worker (w1944): "<machine>/<sandbox>" to the work. prepareForNewWork stops the editor
+   * and switches the branch before the worker exists (start_agent creates it right after), and meanwhile the sandbox looked
+   * FREE to the room count, the Queued WRONG flag, decide_work queue and a second start_agent.
+   */
+  private readonly handing = new Map<string, string>();
+
+  private async prepareSandbox(sandbox: string | undefined, machine: string | undefined, name?: string, source?: WorkSource, agentSeat = false): Promise<{ note: string; branch?: string }> {
     let t: ReturnType<Agents['target']>;
     try {
       t = this.target(sandbox, machine);
@@ -5048,6 +5077,7 @@ ${w.repo ?? ''}
       reservedRoom: extras.reservedRoom,
       roomFit: extras.roomFit,
       ...(extras.roomSince ? { roomSince: extras.roomSince } : {}),
+      ...(extras.roomSlots ? { roomSlots: extras.roomSlots } : {}),
       // w1841: a worker an urgent release's build paused shows Blocked on it; a report waiting on a held bench lock, on that.
       buildHold: (id) => this.builds.pausedFor(id),
       benchLock: (id) => this.machines.statsOf(id)?.benchLock,
@@ -5083,11 +5113,11 @@ ${w.repo ?? ''}
   }
 
   /** What the page and the live state read besides `room`: the agent-slot room and the held computers (w1089, w1098). */
-  roomExtras(): { agentRoom: string[]; heldRoom: RoomNow['held']; reservedRoom: NonNullable<RoomNow['reserved']>; roomFit: NonNullable<RoomNow['fit']>; roomSince?: RoomNow['since']; buildHolds: Record<string, BuildHold> } {
+  roomExtras(): { agentRoom: string[]; heldRoom: RoomNow['held']; reservedRoom: NonNullable<RoomNow['reserved']>; roomFit: NonNullable<RoomNow['fit']>; roomSince?: RoomNow['since']; roomSlots?: RoomNow['slots']; buildHolds: Record<string, BuildHold> } {
     const f = this.roomFacts();
     // w1841: the workers of open requests an urgent release's build paused, for the page's live states.
     const ids = new Set([...this.store.work.values()].filter((w) => isOpen(w)).flatMap((w) => w.sessionIds));
-    return { agentRoom: f.agent, heldRoom: f.held, reservedRoom: f.reserved ?? [], roomFit: f.fit ?? {}, ...(f.since ? { roomSince: f.since } : {}), buildHolds: this.builds.pausedAmong(ids) };
+    return { agentRoom: f.agent, heldRoom: f.held, reservedRoom: f.reserved ?? [], roomFit: f.fit ?? {}, ...(f.since ? { roomSince: f.since } : {}), ...(f.slots ? { roomSlots: f.slots } : {}), buildHolds: this.builds.pausedAmong(ids) };
   }
 
   /** The blocker watch (server/blockerWatch.ts), set by the server: a new blocker is looked at at once. */

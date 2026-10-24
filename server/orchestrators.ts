@@ -46,7 +46,7 @@ import {
 import { autoApproveProblem, cleanBlock, cleanLine, crashFacts, crashKinship, crashPeersBlock, identityKeys, ownApprovalCount, parseMarkers, quoteUntrusted, sourceTag, titleOnly } from './intakeRules.ts';
 import { readDiscordConfig } from './discordConfig.ts';
 import { LIMIT_END, doneIdsIn, doneProblem, learnedProblem, mergedMentionsIn, notDoneReason, pausedIn, reportVerdict, stillOpenIn, toolErrors, turnEvidence, turnTroubleOf, type TurnTrouble } from './ledgerRules.ts';
-import { answerAfter, asksAPerson, holdsOf, personWaitIn, questionShareKey, reportWaitKey, servedBy } from '../shared/workState.ts';
+import { aheadText, answerAfter, asksAPerson, holdsOf, personWaitIn, questionShareKey, reportWaitKey, roomShares, servedBy } from '../shared/workState.ts';
 import { capacityBlockProblem, capacityWaitIn, needsOf, needsTimed, pairRoom, pairText, PAIR_MAX_LEGS, resolveNeeds } from '../shared/capacity.ts';
 import type { HandBack } from './machinePause.ts';
 import { heldText, roomEnough, roomForWork, roomIds, roomStood, timedKindOf, unusableText, type RoomNow, type TimedFacts, type TimedKind } from './placement.ts';
@@ -2677,14 +2677,17 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       const facts = this.roomNow();
       // w1944: room on a computer it cannot run on (a Mac for an MP scenario) does not refuse the queue.
       const fitting = roomForWork(facts, w, needs);
-      const room = fitting.ids;
+      // w1944: room that queued work ahead of it takes (one free sandbox, older requests that fit it) is not its: it queues.
+      const share = roomShares([...this.store.work.values()], this.liveRoom(facts), { w, wanted: needs })?.get(w.id);
+      const ahead = fitting.ids.length && share && !share.gets ? fitting.ids : [];
+      const room = ahead.length ? [] : fitting.ids;
       if (room.length) {
         throw new Error(
           `queue is for capacity only, and ${room.join(', ')} ${room.length > 1 ? 'have' : 'has'} ${kind === 'agent' ? 'an agent slot (it needs no editor and no game sandbox, w1098)' : 'room'} for ${w.id} now: ${w.pair ? `start its ${w.pair.legs} legs together (start_agent with work_id "${w.id}", sandbox for leg 1, the host, and pair_sandboxes for the others, each a FREE sandbox on another computer)` : `start it there (start_agent with work_id "${w.id}")`}, or, if it waits for something else, decide_work block with what it waits for${needs.length ? '' : ' (or queue with needs: the computers that can take it, when only busy ones can)'}`,
         );
       }
       // Held computers, and those placement.minPriority reserves above its priority (w1643), with room it may not use.
-      const held = [unusableText({ ...facts, held: facts.held.filter((h) => !needs.length || needs.includes(h.id)), reserved: (facts.reserved ?? []).filter((r) => !needs.length || needs.includes(r.id)) }, kind, w.priority), ...(fitting.short ? [fitting.short] : []), ...fitting.unfit.map((u) => `${u.id} has room but cannot take it: ${u.why}`)].filter(Boolean).join('; ');
+      const held = [unusableText({ ...facts, held: facts.held.filter((h) => !needs.length || needs.includes(h.id)), reserved: (facts.reserved ?? []).filter((r) => !needs.length || needs.includes(r.id)) }, kind, w.priority), ...(fitting.short ? [fitting.short] : []), ...fitting.unfit.map((u) => `${u.id} has room but cannot take it: ${u.why}`), ahead.length ? `${ahead.join(', ')} ${ahead.length > 1 ? 'have' : 'has'} room, but ${aheadText(share!)}` : ''].filter(Boolean).join('; ');
       // w1863: a leg for named computers of a request whose own worker carries on elsewhere ("queued for capacity on m5 … I
       // start a timing worker there when a slot frees"). It was the request's status, so the next message to that worker
       // (linkWorker: active) dropped it, and w1789's and w1785's m5 legs waited 8 hours unseen. Now it is its own entry.
@@ -5374,6 +5377,11 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
     return done;
   }
 
+  /** RoomNow as the live states read it (shared/workState.ts WorkLiveFacts), for roomShares (w1944). */
+  private liveRoom(r: RoomNow) {
+    return { room: r.game, agentRoom: r.agent, heldRoom: r.held, ...(r.reserved ? { reservedRoom: r.reserved } : {}), ...(r.fit ? { roomFit: r.fit } : {}), ...(r.slots ? { roomSlots: r.slots } : {}), now: this.now().getTime() };
+  }
+
   /** When each request was last flagged Queued while a computer had room (at most once an hour each). */
   private readonly roomFlags = new Map<string, number>();
 
@@ -5388,8 +5396,11 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
     const now = this.now().getTime();
     const flagged: { w: WorkItem; on: string[]; leg?: string }[] = [];
     const nums = (ids: readonly string[]) => ids.map((id) => `${id}: ${facts.detail?.[id] ?? 'room'}`).join('; ');
+    // w1944: one free sandbox is room for the first request in the queue that fits it, not for every one (roomShares).
+    const shares = roomShares([...this.store.work.values()], this.liveRoom(facts));
+    const theirs = (key: string) => { const s = shares?.get(key); return !s || !!s.gets; };
     for (const w of this.store.work.values()) {
-      if (w.status !== 'queued') continue;
+      if (w.status !== 'queued' || !theirs(w.id)) continue;
       const since = Date.parse(w.queuedFor?.at ?? w.updatedAt) || now;
       if (now - since < ROOM_GRACE_MS || now - (this.roomFlags.get(w.id) ?? 0) < 3_600_000) continue;
       // w1944: only computers it can run on (no Mac for an MP scenario, no m5 for timed work), whose room has stood a while.
@@ -5403,7 +5414,7 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
     }
     // w1863: a leg held for named computers, whatever the request's own status (its worker works elsewhere).
     for (const w of this.store.work.values()) {
-      if (!w.legs?.length || !isOpen(w) || w.status === 'queued') continue;
+      if (!w.legs?.length || !isOpen(w) || w.status === 'queued' || !theirs(`${w.id}:leg`)) continue;
       if (now - (this.roomFlags.get(`${w.id}:leg`) ?? 0) < 3_600_000) continue;
       const late = w.legs.filter((l) => now - (Date.parse(l.at) || now) >= ROOM_GRACE_MS);
       const on = roomStood(facts, needsOf(w), [...new Set(late.flatMap((l) => roomForWork(facts, w, l.needs).ids))], now);

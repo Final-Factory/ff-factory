@@ -2682,6 +2682,8 @@ export interface AppState {
   roomFit?: Record<string, { platform?: string; noTimedRuns?: string }>;
   /** Since when each computer has had room, `${kind}:${id}` to epoch ms (w1944): room younger than ROOM_STAND_MS is not yet WRONG. */
   roomSince?: Record<string, number>;
+  /** How many more workers each computer with room takes, `${kind}:${id}` (w1944): its room goes to that many queued requests, in queue order. */
+  roomSlots?: Record<string, number>;
   /** The workers an urgent release's build paused (w1841, server/buildPlans.ts pausedFor), by session id: their requests show Blocked on it. */
   buildHolds?: Record<string, BuildHold>;
   /** Discord and FFBox intake into the ledger (docs/intake.md); absent from a server older than this field. */
