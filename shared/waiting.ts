@@ -69,7 +69,7 @@ export function describe(w: WorkItem, live: WorkLive): { ask: WaitingAsk; text: 
 }
 
 /** Whose move it is, for a request in the live state "waiting". */
-function isMyMove(w: WorkItem, live: WorkLive, ask: WaitingAsk, me: WaitingViewer): boolean {
+export function isMyMove(w: WorkItem, live: WorkLive, ask: WaitingAsk, me: WaitingViewer): boolean {
   if (ask === 'approve') return me.reviewer;
   if (w.question) return same(w.requestedBy.userId, me.userId);
   if (w.flag) return w.flag.for.some((r) => same(r.userId, me.userId));

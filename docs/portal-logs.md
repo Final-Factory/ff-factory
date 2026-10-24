@@ -113,6 +113,17 @@ readings: it rose to 11,845 a call (3 calls) while the dispatcher's unfiltered l
 largest, so the ledger itself grew, and the reader records no call's filter (`state`, `mine`). Judge a trim by its own
 source's per-item size, not by growth per turn; the large levers are the orchestrator's own habits and its settings.
 
+**w2051, Lothsahn's orchestrator, 2026-10-24 12:15Z to 15:34Z** (lothsahn: "How did that recent turn use 20k tokens and
+force a compaction?"): 4 cycles, each starting at 35,469-39,492 tokens (measured) = system prompt and tools ~23,900, the
+summary 5,960-6,933, MEMORY.md 3,411, a re-attached file up to 3,853 (estimated), so an 80,000 threshold leaves ~42,000
+for the turns; the compaction at 15:32Z ran at 102,351 (journal `auto-compact 204dd77f`). Growth 1,407 a turn over 132
+turns (measured): own output 26%, `list_work` list 17% (5 calls, 6,183 a call, the largest 16,662), `[worker update]` 9%;
+a person's turn 4,267 a turn, 53% of all growth. Most of a waiting list is its cards (w1868: every option's reason, Step,
+After the answer), other people's moves included. What it changed: a person's list shows its own moves' cards brief and
+another person's in one line (`summaryBrief`, `shared/waitSummary.ts`; the whole card in `list_work id`), and the
+coordinators' compaction focus leaves out what the brief and memory already hold (`LEAN_SUMMARY`, `server/autoCompact.ts`).
+Judge it by `list_work list` per call and the summary's size at the next compactions, not by growth per turn.
+
 A machine daemon's own log is **not** kept by the portal (it holds a daemon's clean-up passes, which `cleanup` shows, and
 nothing else of its log). It is `<app_dir>/logs/daemon.log` on that machine (`daemonLogPath` in `server/machines.ts`: the
 machine's `app_dir`, by default `~/.ff-factory`, `%USERPROFILE%\.ff-factory` on Windows), with every earlier run beside

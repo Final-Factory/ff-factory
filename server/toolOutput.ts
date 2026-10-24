@@ -5,6 +5,12 @@
 /** list_work with id: how many of a request's newest log entries it prints unless full_log is set. */
 export const LIST_WORK_LOG_TAIL = 15;
 
+/**
+ * A person's list_work list under its waiting cards (w2051): the cards there are brief (their own move) or one line (another
+ * person's), and this says where the whole card is.
+ */
+export const LIST_CARD_NOTE = 'Waiting cards are brief here: list_work id shows one whole (option reasons, the step, what follows the answer).';
+
 /** spend_report session: how many of the requests the session served it lists (by cost) unless `requests` asks for more. */
 export const SESSION_REQUESTS_TOP = 20;
 
