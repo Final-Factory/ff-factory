@@ -138,3 +138,60 @@ test('w2026: the per-pass index of requests by worker holds every request workOv
   const owners = ownersOf(sessions.map((id) => ({ id })), work);
   for (const sid of Object.keys(owners)) assert.deepEqual(owners[sid].requests.map((r) => r.id), work.filter((w) => w.sessionIds.includes(sid)).map((w) => w.id.toLowerCase()).sort((a, b) => a.localeCompare(b)), sid);
 });
+
+test('w2026: connects after a start unzip one compressed transcript at a time, by a stream, and a big one gets a tail file that is not whole', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'unzip-stream-'));
+  const tr = path.join(dir, 'transcripts');
+  fs.mkdirSync(tr, { recursive: true });
+  // 12 MB unzipped: more than a tail file (8 MB)
+  const pad = 'x'.repeat(4000);
+  const lines: string[] = [];
+  for (let i = 1; i <= 3000; i++) lines.push(JSON.stringify({ seq: i, t: iso(NOW), kind: 'system', text: pad }));
+  for (const id of ['a', 'b', 'c']) {
+    fs.writeFileSync(path.join(tr, `${id}.jsonl`), lines.join('\n') + '\n');
+    assert.ok(await gzipFile(path.join(tr, `${id}.jsonl`)));
+    fs.rmSync(path.join(tr, `${id}.jsonl.gz.tail`));
+  }
+  const store = new Store(dir);
+  assert.equal(store.lastSeqNow('a'), undefined);
+  const orig = zlib.gunzip;
+  let inFlight = 0;
+  let most = 0;
+  const origStat = fs.promises.stat;
+  (fs.promises as { stat: unknown }).stat = async (...a: unknown[]) => {
+    inFlight++;
+    most = Math.max(most, inFlight);
+    try {
+      return await (origStat as (...x: unknown[]) => Promise<fs.Stats>)(...a);
+    } finally {
+      await new Promise((r) => setTimeout(r, 5));
+      inFlight--;
+    }
+  };
+  (zlib as { gunzip: unknown }).gunzip = () => assert.fail('no whole-buffer unzip');
+  try {
+    assert.deepEqual(await Promise.all(['a', 'b', 'c'].map((id) => store.lastSeqAsync(id))), [3000, 3000, 3000]);
+  } finally {
+    (zlib as { gunzip: unknown }).gunzip = orig;
+    (fs.promises as { stat: unknown }).stat = origStat;
+  }
+  assert.equal(most, 1, 'one unzip at a time');
+  const head = JSON.parse(fs.readFileSync(path.join(tr, 'a.jsonl.gz.tail'), 'utf8').split('\n')[0]);
+  assert.equal(head.whole, false);
+  assert.equal(new Store(dir).lastSeqNow('a'), 3000, 'the next start reads the tail file');
+  // and reads only its header and its end, never the whole 8 MB (43c933439's first start: 18 s of readFileSync)
+  const origRead = fs.readFileSync;
+  let tailReads = 0;
+  (fs as { readFileSync: unknown }).readFileSync = (f: fs.PathOrFileDescriptor, ...rest: unknown[]) => {
+    if (String(f).endsWith('.tail')) tailReads++;
+    return (origRead as (...x: unknown[]) => unknown)(f, ...rest);
+  };
+  try {
+    const next = new Store(dir);
+    assert.equal(next.lastSeqNow('b'), 3000);
+    assert.deepEqual(next.readTranscript('c', 3).map((e) => e.seq), [2998, 2999, 3000]);
+  } finally {
+    (fs as { readFileSync: unknown }).readFileSync = origRead;
+  }
+  assert.equal(tailReads, 0);
+});
