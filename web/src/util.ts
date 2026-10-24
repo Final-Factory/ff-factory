@@ -336,12 +336,13 @@ export function useWorkLive(app: AppState, work: readonly WorkItem[], now: numbe
       ...(app.reservedRoom ? { reservedRoom: app.reservedRoom } : {}),
       ...(app.roomFit ? { roomFit: app.roomFit } : {}),
       ...(app.roomSince ? { roomSince: app.roomSince } : {}),
+      ...(app.roomSlots ? { roomSlots: app.roomSlots } : {}),
       ...(holds ? { buildHold: (id: string) => holds[id] } : {}),
       benchLock: (id: string) => locks.get(id),
       queueWaits: waits,
       now,
     });
-  }, [app.sessions, app.room, app.agentRoom, app.heldRoom, app.reservedRoom, app.roomFit, app.roomSince, app.buildHolds, locks, waits, work, now]);
+  }, [app.sessions, app.room, app.agentRoom, app.heldRoom, app.reservedRoom, app.roomFit, app.roomSince, app.roomSlots, app.buildHolds, locks, waits, work, now]);
 }
 
 /**

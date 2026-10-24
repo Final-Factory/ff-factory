@@ -188,11 +188,12 @@ const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…`
 
 /**
  * The lines of an installer run worth reporting (scripts/worker/worker.ts `update`): what ran before and after, the settings
- * changed, what the portal sees, the problems that stopped it. Falls back to the last lines. Exported for tests.
+ * changed, the Dev Drive's size and a grow asked of it (devdrive.json, which "Settings" never diffs: w1947), what the portal sees,
+ * the problems that stopped it. Falls back to the last lines. Exported for tests.
  */
 export function installerSummary(out: string): string[] {
   const lines = out.replace(/\r/g, '').split('\n').map((l) => l.trimEnd()).filter((l) => l.trim());
-  const keep = lines.filter((l) => /^(Before:|After:|Settings|The portal sees|FAILED|Not updating|The portal does not|Credential:|Its log:)/.test(l) || /^\s+~ /.test(l) || /^- /.test(l));
+  const keep = lines.filter((l) => /^(Before:|After:|Settings|Dev Drive:|The portal sees|FAILED|Not updating|The portal does not|Credential:|Its log:)/.test(l) || /^\s+~ /.test(l) || /^- /.test(l));
   return (keep.length ? keep : lines.slice(-6)).slice(-14).map((l) => clip(l.trim(), 240));
 }
 

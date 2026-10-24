@@ -5000,6 +5000,38 @@ test('w1944: the capacity ping names the room a queued request cannot use, lets 
   t.mock.timers.reset();
 });
 
+test('w1944: one free sandbox is room for the first queued request that fits it: decide_work queue takes a newer request, says who the room goes to, and only the first in line is flagged WRONG', async (t) => {
+  const { store, agents, o, dispatcher, call } = setup(t);
+  // biscuit at 01:16Z: slot3 free since 01:15:09, its one free sandbox; w1917 (20:21) queued ahead of w1961 (01:15).
+  const f = { game: ['biscuit'], agent: [] as string[], held: [], slots: { 'game:biscuit': 1 } as Record<string, number>, since: { 'game:biscuit': Date.parse(T0) - 60_000 } };
+  agents.roomNow = () => f.game;
+  agents.roomFacts = () => f;
+  putRequests(store, [
+    { id: 'w1917', status: 'queued', queuedFor: { at: '2026-09-28T07:00:00.000Z' }, createdAt: '2026-09-28T07:00:00.000Z' },
+    { id: 'w1918', status: 'queued', queuedFor: { at: '2026-09-28T07:30:00.000Z' }, createdAt: '2026-09-28T07:30:00.000Z' },
+    { id: 'w1961' },
+  ]);
+  (o as unknown as { now: () => Date }).now = () => new Date(T0);
+  const queued = await call(dispatcher().info, 'decide_work', { id: 'w1961', action: 'queue', note: "biscuit's last free one goes to an older request" });
+  assert.equal(queued.isError, false, queued.text);
+  assert.match(store.work.get('w1961')!.log.join('\n'), /queued for capacity; biscuit has room, but it goes first to w1917, ahead in the queue \(urgent first, then the oldest\)/);
+  // After the grace, only w1917 is WRONG; w1918 and w1961 wait rightly.
+  (o as unknown as { now: () => Date }).now = () => new Date(Date.parse(T0) + 11 * 60_000);
+  assert.deepEqual(o.flagQueuedWithRoom(agents.roomFacts()), ['w1917']);
+  const list = (await call(dispatcher().info, 'list_work', { id: 'w1918' })).text;
+  assert.doesNotMatch(list, /WRONG/);
+  assert.match(list, /biscuit has room, but it goes first to w1917/);
+  // Two free sandboxes: room for w1917 and w1918, still none for a third; five: room for w1963, behind four queued.
+  f.slots = { 'game:biscuit': 2 };
+  putRequests(store, [{ id: 'w1962' }]);
+  assert.equal((await call(dispatcher().info, 'decide_work', { id: 'w1962', action: 'queue', note: 'room is spoken for' })).isError, false);
+  f.slots = { 'game:biscuit': 5 };
+  putRequests(store, [{ id: 'w1963' }]);
+  const refused = await call(dispatcher().info, 'decide_work', { id: 'w1963', action: 'queue', note: 'no room' });
+  assert.equal(refused.isError, true);
+  assert.match(refused.text, /queue is for capacity only, and biscuit has room for w1963 now/);
+});
+
 // ---------------------------------------------------------------- w1945: pair runs placed as one unit
 
 // lothsahn, 2026-10-23: "Can we make the dispatcher smart enough so it queues work properly that requires running together

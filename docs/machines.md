@@ -1398,6 +1398,10 @@ LothDesktop and Beast, not just when BEAST is full").
     `Agents.busyIn`), or for work that needs only an agent seat (`extra_agent`, or a request on another repo: it works
     in its own clone). The answer then says "Not handed over" and why. Game work never starts beside a busy worker,
     `extra_agent` or not: `start_agent` refuses it ("sandbox … is busy"), so it goes to a FREE sandbox or is queued.
+    **While it is handed over it is taken** (w1944): the editor stop and the switch run before the new worker exists, and
+    meanwhile the sandbox had no agent in it, so it counted FREE (room, the Queued WRONG flag, `decide_work queue`, a second
+    `start_agent`). `Agents.handing` marks it for that time: not free, and another start there is refused ("sandbox … is
+    being handed to new work w1911 now").
   - **When it resumes** (its check-in, or anyone's message), it is placed again like new work: its own sandbox if that
     is still free (switched back to its branch if someone switched it), else a free sandbox on the same machine whose
     editor is not running first, stopped and switched to its branch (`switch_branch`, so a sandbox with uncommitted
