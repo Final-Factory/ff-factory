@@ -1,4 +1,4 @@
-import { execFileSync, spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -31,7 +31,8 @@ export interface Proc {
 export interface UnityDeps {
   /** Every process: pid, parent, full command line. */
   procs(): Promise<Proc[]>;
-  kill(pid: number, signal: 'SIGTERM' | 'SIGKILL'): void;
+  /** Why the signal could not be sent, when the platform says; nothing when sent or already gone (w1983). */
+  kill(pid: number, signal: 'SIGTERM' | 'SIGKILL'): string | void;
   /** Start the editor detached; its pid (the Windows launch goes through PowerShell, so it may be a promise). */
   launch(bin: string, args: string[], cwd: string): number | Promise<number>;
   exists(p: string): boolean;
@@ -432,11 +433,11 @@ export function realDeps(platform: UnityPlatform = 'darwin'): UnityDeps {
     },
     // taskkill without /F asks the program to close (the editor may save and quit); /F ends it at once.
     kill: (pid, signal) => {
-      try {
-        execFileSync('taskkill.exe', ['/PID', String(pid), ...(signal === 'SIGKILL' ? ['/F'] : [])], { stdio: 'ignore', windowsHide: true, timeout: 15_000 });
-      } catch {
-        // already gone
-      }
+      // w1983: taskkill's own words when it fails (not "not found": already gone), for the leftover watch to say.
+      const r = spawnSync('taskkill.exe', ['/PID', String(pid), ...(signal === 'SIGKILL' ? ['/F'] : [])], { encoding: 'utf8', windowsHide: true, timeout: 15_000 });
+      if (r.status === 0) return;
+      const why = `${r.stderr ?? ''} ${r.stdout ?? ''}`.replace(/\s+/g, ' ').trim() || (r.error ? String(r.error.message) : `taskkill exit ${r.status}`);
+      return /not found/i.test(why) ? undefined : `taskkill: ${why}`;
     },
     launch: async (bin, args, cwd) => {
       const r = await ps(winLaunchScript(bin, args, cwd), 60_000);
@@ -461,8 +462,10 @@ function realDepsMac(): UnityDeps {
     kill: (pid, signal) => {
       try {
         process.kill(pid, signal);
-      } catch {
-        // already gone
+      } catch (e) {
+        // Gone already (ESRCH) says nothing; EPERM is why it still runs (w1983).
+        const code = (e as NodeJS.ErrnoException).code;
+        if (code && code !== 'ESRCH') return `kill: ${code}`;
       }
     },
     launch: (bin, args, cwd) => {

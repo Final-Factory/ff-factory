@@ -980,13 +980,18 @@ LothDesktop and Beast, not just when BEAST is full").
   line per computer that holds sandboxes (each machine's, BEAST's own daemon included; the portal's host has no line of
   its own) with its live agents against its limit (and how many are mid-turn), free sandboxes and how many
   more can be made, RAM used and its Unity editors against `max_unity` (every Unity process there, "editors 4 of 3: 1
-  interactive, 3 batch", w469). Each is **BUSY** (offline; as many live agents
+  interactive, 3 batch", w469). Each is **BUSY** (offline; as many agents mid-turn
   as its limit, `max_sandbox_agents` / `max_sandboxes` × `max_agents_per_sandbox`; `RAM_BUSY_PCT` (85%) of its RAM or more; or no free sandbox and no room to make one) or **ROOM n%**: the
   mean of its free shares of agent slots, sandboxes (free plus those it may still make), RAM and editors, each
   against its own limits (`roomOf`). The last line names where the next piece of new game-repo work goes
   (`pickComputer`): the computer with the most room; when the best two are within `EVEN_MARGIN` (10 points), the one
   with fewer live agents, then the one that did not take the last (FF Factory remembers the computer it last placed new
   work on, in memory). Two idle computers so take turns, and one with more agents gets the next less often.
+  The agent limit counts the agents **mid-turn**, as `start_agent`'s gate does (`machines.ts` `capFull`, w384), never the
+  idle ones between turns (w1983, lothsahn: "we have 20 queued runs, why are we not scheduling them on stuff?": at 03:50Z
+  on 2026-10-24 BEAST read BUSY at "9 live agents of 6" with beast/slot4 free and 3 of them mid-turn, so no queued work,
+  pair runs included, saw room there, while `start_agent` would have taken it). RAM still guards the load idle workers
+  carry; the live count only ranks computers with room (`roomOf`).
   Every line also ends with its **agent slot** for work that needs no editor ("agent slot: free (5 of 10 mid-turn)" or
   "agent slot: none (…)", below), and the block's last line names where the next piece of **non-game** work goes. A computer
   held with `placement.hold` reads `ROOM n% but HELD (<who and why>): no new work goes there` and is never the next.
@@ -1287,7 +1292,12 @@ LothDesktop and Beast, not just when BEAST is full").
     pair. A computer with two free sandboxes still takes single work, and work of higher priority goes first (a person's
     "Start now" makes a request urgent). Without this each sandbox that frees goes to the next single request, and a pair,
     which needs two at the same moment, waits for a coincidence.
-  - Tests: `server/w1945PairRuns.test.ts` (the room rules, the Queued line) and the w1945 cases in
+  - **Bounded** (w1983). A hold lapses `PAIR_HOLD_MS` (20 min) after that computer's room began while the pair still cannot
+    start (its refusal says when: "the hold lapses at 04:12 UTC"), and work whose needs name that computer alone is never
+    held off it. Unbounded, it starved everything: lothlaptop/slot1 sat free from 02:50Z to 03:52Z on 2026-10-24, held for
+    w1970 and then w1981, while lothsahn's w1789 ("Move one timed run to LothLaptop") waited for it. A pair that can start
+    now is held whatever the time: start its legs first.
+  - Tests: `server/w1945PairRuns.test.ts` (the room rules, the Queued line), the w1983 hold case and the w1945 cases in
     `server/orchestrators.test.ts` (request_pair blocks the asking worker and its sandbox is released, both legs start
     together and never one alone, a Mac is no client, message_pair, the hold, the WRONG flag and the queue), and in
     `server/machineSandboxes.test.ts` the asking worker stopped and its sandbox released FREE by the release pass.
@@ -1361,7 +1371,13 @@ LothDesktop and Beast, not just when BEAST is full").
       Linux pair worker"), with no block declared (`otherWorkWait`, shared/workState.ts). lothsahn, 2026-10-23: "Why is m3
       not taking work when there's stuff to do?": d558ba14 (w665) held m3's only sandbox idle from 22:15 to 22:45 UTC with
       "still open: waiting on a Windows or Linux pair worker to run `MP-lowore-pin-pair` for PR #2340" and no `blocked_on`,
-      while 18 requests waited Queued, until the 30-minute idle release; a worker started there 95 s after it. The worker's own `waiting_on_person` counts for **every** request it
+      while 18 requests waited Queued, until the 30-minute idle release; a worker started there 95 s after it. Since w1983,
+      also **another worker of the same request at work on it in another sandbox** (`Agents.otherWorkerOn`: lothsahn moved
+      w1853's timing A/B to m3 at 03:58Z on 2026-10-24, and its LothDesktop worker 33bc6316 sat idle in lothdesktop/slot3
+      waiting for it). And a worker a request was **moved off** (`stop_agent move_to`, a hand-back, a new session:
+      `WorkItem.movedOff`) has its work over (`Agents.workOver`), so the check-in it set before the move no longer pins its
+      sandbox (w1789 moved from 2e29f29e to LothLaptop at 03:49Z, and lothdesktop/slot5 stayed held by its 04:14 check-in).
+      Each is placed again when it resumes, like any released worker. The worker's own `waiting_on_person` counts for **every** request it
       is the latest worker on, at once (found live on w890, 2026-10-10 19:50Z: started for w1 and then sent w2, the ledger
       read it as working on w2 only, w1 never read Waiting, "every request waits" failed, and biscuit/slot3 stayed held
       with the worker Idle after it had declared it waited on lothsahn). Not a time, a machine, a usage limit or a lock (they clear by
@@ -1432,6 +1448,10 @@ LothDesktop and Beast, not just when BEAST is full").
     held with the reason in `list_sandboxes` ("its uncommitted work could not be saved: …", tried again after 10
     minutes), when the worktree is not on the worker's branch, the branch is master, main or develop, an agent there
     has a process, or the untracked files pass `SAVE_LIMITS`: more than 500 files, one over 10 MB, or 50 MB in all.
+    Untracked files in the sandbox's build folders (`SAVE_SKIPS`: `.nightly-builds/` and `Builds/`, top level, any case)
+    are neither saved nor counted: they stay, uncommitted, for the release sweep (w1983: an 80 MB
+    `.nightly-builds/…/UnityPlayer.dll` held lothdesktop/slot6 from 03:27Z on 2026-10-24, since the game repo does not
+    ignore that folder and only some machines' clones exclude it).
     GitHub refuses a file over 100 MiB and warns from 50 MiB ("About large files on GitHub"), and a worker's new
     scripts and `.meta` files are a few kB each; on the M3 on 2026-10-07 slot1 held 41,491 untracked files, about
     10 GB of builds, clips and audit runs (measured), which belong in the temp folder, not on a branch. A daemon from

@@ -62,7 +62,7 @@ test('w1628: timed work goes to the smallest computer with room and no timed leg
   // locking BEAST (was w1628: a computer with a queued leg came after one with none).
   assert.equal(pickTimed([beast, { ...loth, benchQueue: timed(1) }, m3], {}, 'timed:win32')!.pick.id, 'lothdesktop');
   // Busy, held or avoided computers are passed over; none left: the general placement, said so.
-  assert.equal(pickTimed([beast, { ...loth, live: 8 }], {}, 'timed:win32')!.pick.id, 'beast');
+  assert.equal(pickTimed([beast, { ...loth, live: 8, midTurn: 8 }], {}, 'timed:win32')!.pick.id, 'beast');
   assert.equal(pickTimed([beast, loth], { hold: { lothdesktop: 'a build' } }, 'timed:win32')!.pick.id, 'beast');
   assert.equal(pickTimed([beast, loth], {}, 'timed:darwin'), undefined);
   assert.match(pickComputer([beast, loth], undefined, {}, 'game', false, 'timed:darwin')!.why, /^timed work, but no computer on darwin has room; so the general placement/);

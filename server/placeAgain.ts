@@ -129,18 +129,22 @@ export interface PlaceFacts {
 export function keptWhy(s: SessionInfo, sb: MachineSandbox, f: PlaceFacts): string | undefined {
   if (sb.status !== 'ready') return `the sandbox is ${sb.status}`;
   const g = sb.git;
-  if (!g) return 'its git state is not known yet';
+  // w1983: unread (its daemon's 2-minute read failed or has not come; lothdesktop/slot5 still said so 10 min after 2e29f29e
+  // was stopped at 04:26Z on 2026-10-24): a daemon that saves reads it itself in the save (releaseStep: save), which commits
+  // only what is there and refuses, with git's own reason, on another branch.
+  if (!g && !f.canSave) return 'its git state is not known yet';
   // The stop that made its release due writes a line of its own (it moves lastActivityAt): the work is what counts (w890,
   // measured live on 2026-10-10: stop 19:29:40Z, release 19:31:40Z, waiting for the daemon's next 2-minute git read).
-  if (Date.parse(g.at ?? '') < Date.parse(s.releaseDue?.workedAt ?? s.lastActivityAt)) return 'its git state has not been read since the worker last worked';
-  if (g.branch === 'detached HEAD' || g.branch === '?') return 'it is not on a branch';
+  if (g && Date.parse(g.at ?? '') < Date.parse(s.releaseDue?.workedAt ?? s.lastActivityAt)) return 'its git state has not been read since the worker last worked';
+  if (g && (g.branch === 'detached HEAD' || g.branch === '?')) return 'it is not on a branch';
   if (f.unityHolders.includes(`sandbox:${sb.id}`)) return 'a Unity batch run of that sandbox is in flight';
   const other = f.sessions.find((o) => o.id !== s.id && o.machineSandbox === sb.id && occupies(o, f.live(o.id), f.now) && !releasable(o, f));
   if (other) return `agent ${other.id} works there too, on the same branch`;
-  if (!dirtyOf(sb)) return undefined;
+  if (g && !dirtyOf(sb)) return undefined;
   // Its daemon commits and pushes them first (w656), unless its last try failed a moment ago.
   const refused = f.saveRefused?.(sb.id);
   if (refused) return `its uncommitted work could not be saved: ${refused}`;
+  if (!g) return undefined;
   if (f.canSave) return undefined;
   const later = f.canSave === false ? " (FF Factory saves them before a release once this machine's daemon is updated)" : '';
   return g.dirty > 0 ? `${g.dirty} uncommitted change(s) there${later}` : `${g.untracked} untracked file(s) there${later}`;
@@ -220,7 +224,8 @@ export function releaseStep(s: SessionInfo, sb: MachineSandbox | undefined, f: P
   // Waiting on CI, a deploy or a person (w846, w890): released whatever its check-in, which places it again when it comes.
   const why = (s.queuedSend ? undefined : ci) ?? releaseWhy(s, f.now, f.workOver);
   if (!why || keptWhy(s, sb, f)) return undefined;
-  return { do: 'release', why, branch: sb.git!.branch, ...(dirtyOf(sb) ? { save: true } : {}) };
+  // w1983: with its git state unread, the save reads it (keptWhy): on the sandbox's own branch.
+  return { do: 'release', why, branch: sb.git?.branch ?? sb.branch, ...(dirtyOf(sb) || !sb.git ? { save: true } : {}) };
 }
 
 /** Whether `sb` is on `branch`: an agent there works on that branch, as the released worker did with it (w656). */
