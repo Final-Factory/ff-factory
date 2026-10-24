@@ -137,6 +137,26 @@ most used save 16.3M and cost 105M. So workers carry none: every `machine` tool 
 A worker's first call is 56.6k input tokens (median; 54.7k-59.6k p10-p90, measured), mostly Claude Code's preset, the
 game repo's CLAUDE.md, the worker brief and the plugin skills' list; the `machine` tools were already deferred.
 
+**Re-measured by w2016 (2026-10-24, BEAST, 143 worker sessions since 2026-10-19, `scripts/workerToolCarry.py`).** Claude
+Code would let us carry them: a tool listed with `_meta["anthropic/alwaysLoad"]: true` is never deferred, and a server
+config's `alwaysLoad: true` does it for the whole server (Claude Code 2.1.295's own config schema: "always included in the
+prompt and never deferred behind tool search"; `server/launch.ts` already passes `alwaysLoad` per tool). It still does not
+pay. Workers make 6.9 `ToolSearch` calls a session (906 `select:`, 43 group, 40 keyword), but a lookup costs a model call
+only when it is the call's only tool and loads nothing outside the carried set; most load Unity's tools too (708 of the
+2,248 tools selected) or ride a call that makes other tool calls. Per session, in input-token equivalents (cache read 0.1,
+1 h cache write 2, output 5):
+
+| Carried set | Its size (tokens, from the definitions as listed) | Lookups saved | Saved | Cost |
+|---|---|---|---|---|
+| wake_me, blocked_on, waiting_on_person, read_work, unity, publish_attachment | 5,370 | 1.28 | 22k | 112k |
+| wake_me, unity, read_work | 2,170 | 0.52 | 8k | 39k |
+| wake_me | 250 | 0.39 | 6.5k | 4.5k |
+
+A session costs 5.46M on average, so the six would add 1.6% and `wake_me` alone would save 0.03%, inside the size
+estimate's error. The definitions' sizes are a guess from their characters (/2.9) and could be off by half without
+changing the six's answer. After w2002's trims the first call is 49.9k (3 sessions, measured), so a lookup's call costs a
+little less and carrying pays even less. Workers carry none.
+
 ## The tests
 
 `server/toolManifest.test.ts`:

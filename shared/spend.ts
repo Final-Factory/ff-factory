@@ -137,6 +137,19 @@ export interface TurnUsage {
   restarted?: boolean;
 }
 
+/**
+ * Totals a new agent process reports below the last ones seen (w2007): either a count that began again (this turn alone,
+ * counted in full) or the CLI's saved totals from a few turns back (it resumed from an older save), which hold the session's
+ * whole running total. Counting the second as one turn billed Ben's orchestrator $425 for four turns named w1737 (925M cache
+ * reads in a request that lived 1 h 43 min, where a coordinator's turn reads at most a few million) and the dispatcher about
+ * $290 for eight turns named w1349-w1351. The turn's own main-loop usage tells them apart: a count that began again holds about
+ * this turn (with its subagents), a carried one hundreds of turns. `read`: input, cache read and cache write tokens, summed over
+ * the models; `total`, `last`: the dollar totals now and at the last result.
+ */
+export function carriedTotals(read: number, mainRead: number | undefined, total: number, last: number): boolean {
+  return mainRead !== undefined && last > 0 && total >= last * 0.5 && read > 4 * mainRead + 2_000_000;
+}
+
 /** The kinds of content a context holds, in the order they are shown. The list comes from what the tool results of a week of workers held. */
 export const CATEGORIES = [
   'base',
@@ -813,6 +826,10 @@ export interface SessionSpend {
   /** `fixV` 1: correctHistory has looked at this session (w1209); `fixApplied`: it changed the record, so the record now reads every turn by the current rules. */
   fixV?: number;
   fixApplied?: boolean;
+  /** `carriedV` 1: correctCarried has looked at this session (w2007): no turn of it is billed a carried running total. */
+  carriedV?: number;
+  /** The seq of the first result the carried-totals rule recorded (w2007): the turns from it on are right already. */
+  carriedFrom?: number;
   /** `acctV` 1: its accounts are right after correctHistory (repairAccounts, w1209). */
   acctV?: number;
   coordFrom?: number;

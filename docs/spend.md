@@ -197,6 +197,39 @@ It refuses a session whose replay does not explain its recorded total within 5% 
 (`spend repair: … left as recorded`); a session whose transcript is gone, and every turn backfilled before the live recording started, stay as recorded. A coordinator's
 coordination days are rebuilt from the corrected record.
 
+### A resume that carried older totals (w2007)
+
+lothsahn, w2007: "find out why a few requests cost far more in coordination ... than in their workers' own work". The four outliers of the 30 days to
+2026-10-24 were one artefact, not spend:
+
+| Request | Billed (spend_report) | What the numbers show |
+|---|---|---|
+| w1737 | Ben's orchestrator $425, 4 turns on 2026-10-22: 925M cache read, 4.2M output | measured: a coordinator's turn makes 1.7 model calls on average and at most about 30, at a context that peaks near 112k (portal_logs coordinator_context, 24 compaction cycles of the three coordinators, 2026-10-24: 637 turns, about 1,080 calls); 925M cache read is about 10,000 calls at that size, in a request that lived 1 h 43 min |
+| w1349, w1350, w1351 | the dispatcher $96.3 to $96.6 each, the same 8 turns on 2026-10-15 split three ways (about $290) | the same shape: 215M cache read a request |
+| w863, w788 | the dispatcher $67 each, backfilled, 2026-10-10 | 335M cache read beside 3k to 10k output tokens: no real calls read that much and write that little |
+
+The cause (traced in the code): when the CLI resumes a conversation it continues from the totals its transcript saved, and those can be older than
+the last result the portal saw (why its save lags is not known; a guess: a process the portal's restart kills saves nothing after its last save). The first result of the new process is then a little below the
+last totals: `firstResultBase` (server/sessions.ts) read "below" as "began again from zero" and flagged it `restarted`, and `delta` (server/spend.ts)
+counted every count of it as the turn, the session's whole running total. The backfill had the same rule on its dollar totals (a drop counted as the
+new total in full), and `estimateTurn` then turned those dollars into cache reads, which is why w863 and w788 read hundreds of millions of cache
+tokens beside almost no output. The turn went to the request its starting message named, so whichever request was named at a restart took the whole
+running total.
+
+Now (`carriedTotals`, shared/spend.ts): totals below the last ones, no lower than half, whose read tokens are more than four times the turn's own
+main-loop usage plus 2M, are the older save: the turn is billed its main loop's usage at list price (an estimate, labelled), and the session's
+figure stays where it was. A count that really began again still holds about one turn and is counted in full. In the backfill a drop to no less than
+half reads nothing (`backfillTurnUsd`). `SpendStore.correctCarried` takes the carried totals back out of the turns already recorded, once per session
+(`carriedV`), on the same request and day so coordination moves with it, and only for turns before the first one the new rule recorded
+(`carriedFrom`), so the resumes at the deploy are not taken out twice. It reads only the messages and results of the transcript, in pieces
+(`Store.scanTranscript`): `readTranscript` reads a file into one string, and Ben's orchestrator's transcript (1,306.6 MB on 2026-10-24) is past the
+longest string Node makes, so correctHistory and rebuildCoordination cannot read it (they log a warning and leave it as recorded). The journal line is
+`spend repair (w2007): N session(s) looked at, $X of carried running totals taken out of M turn(s)`.
+
+**What a coordinator's turn costs is still the whole turn.** A turn's dollars go evenly to the requests (at most 4) named in the first lines of the
+messages that began it, however long it ran (`attribute`). That is exact for the usual turn of a few calls; a coordinator turn that ran away would
+bill all of it to whichever request started it. A per-turn budget stops such a turn (w2007; docs/orchestrators.md, "A per-turn budget").
+
 ### Audit findings (w1209, 2026-10-13; measured = from the portal's `spend_report` on 3c98743 or its journal, estimated = said so)
 
 | # | Finding | $ | Where | Fixed |

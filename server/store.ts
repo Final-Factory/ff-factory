@@ -350,6 +350,47 @@ export class Store {
     return parseLines(text, limit);
   }
 
+  /**
+   * The events whose line `keep` takes, read from the start in pieces (w2007): a coordinator's transcript is past a gigabyte (Ben's
+   * orchestrator's 1,306.6 MB, 2026-10-24), over the longest string Node makes (about 512 MB), so `readTranscript` throws on it. A line
+   * is parsed only when `keep` takes its raw text, so a replay of the results and messages skips the tool output that fills the file.
+   */
+  async *scanTranscript(sessionId: string, keep: (line: string) => boolean): AsyncGenerator<TranscriptEvent> {
+    const f = this.transcriptPath(sessionId);
+    const gz = !fs.existsSync(f);
+    if (gz && !fs.existsSync(`${f}.gz`)) return;
+    const raw = fs.createReadStream(gz ? `${f}.gz` : f, { highWaterMark: 4 * 1024 * 1024 });
+    const stream = gz ? raw.pipe(zlib.createGunzip()) : raw;
+    const lineOf = (buf: Buffer, from: number, to: number) => {
+      const line = buf.toString('utf8', from, to).replace(/^\0+/, '');
+      if (!line || !keep(line)) return undefined;
+      try {
+        return JSON.parse(line) as TranscriptEvent;
+      } catch {
+        return undefined; // a torn line after a crash
+      }
+    };
+    let rest = Buffer.alloc(0);
+    try {
+      for await (const chunk of stream as AsyncIterable<Buffer>) {
+        const buf = rest.length ? Buffer.concat([rest, chunk]) : chunk;
+        let at = 0;
+        for (let nl = buf.indexOf(10, at); nl >= 0; nl = buf.indexOf(10, at)) {
+          const e = lineOf(buf, at, nl);
+          if (e) yield e;
+          at = nl + 1;
+        }
+        rest = Buffer.from(buf.subarray(at));
+      }
+    } finally {
+      raw.destroy();
+    }
+    if (rest.length) {
+      const e = lineOf(rest, 0, rest.length);
+      if (e) yield e;
+    }
+  }
+
   /** The transcript's text, from its file or, once the data guard compressed it (server/dataGuard.ts), its .gz; undefined: none. */
   transcriptText(sessionId: string): string | undefined {
     const f = this.transcriptPath(sessionId);
