@@ -1148,6 +1148,12 @@ export class SessionManager {
    */
   pauseHeld?: (s: SessionHandle, text: string) => boolean;
   /**
+   * A message to a worker between turns that starts a NEW session instead (w2043's pilot, server/freshAfterMerge.ts): true
+   * when a pull request of its request merged during its session and the message went to a fresh session in the same
+   * sandbox, so it is not delivered here. Checked last, once nothing holds the message. Set by Agents.
+   */
+  freshStart?: (s: SessionHandle, m: { text: string; from: 'human' | 'orchestrator' | 'system'; images?: ImageInput[]; requestedBy?: Requester; attachments?: DeliveredAttachment[] }) => boolean;
+  /**
    * Why a worker's live process must restart on the FF Factory code its machine runs now before its next turn (w1166: an
    * agent host keeps the guard and system prompt it started with across daemon updates), or undefined. Set by Agents.
    * Its messages wait meanwhile, as for an account move (moveFor).
@@ -1393,6 +1399,11 @@ export class SessionManager {
         held.add(q.id);
         continue;
       }
+      // w2043: a pilot worker whose pull request merged goes on in a fresh session; the message goes there.
+      if (this.freshStart?.(s, q)) {
+        drop();
+        continue;
+      }
       try {
         s.send(q.text, q.from, q.uuid, q.images, q.requestedBy, q.attachments);
         drop();
@@ -1474,6 +1485,8 @@ export class SessionManager {
         return queue((e as Error).message, 'machine');
       }
     } else this.checkStart(id, opts.bypassGate, from);
+    // w2043: a pilot worker whose pull request merged goes on in a fresh session; the message goes there.
+    if (this.freshStart?.(s, { text, from, ...(images?.length ? { images } : {}), ...(opts.requestedBy ? { requestedBy: opts.requestedBy } : {}), ...(opts.attachments?.length ? { attachments: opts.attachments } : {}) })) return '';
     try {
       return s.send(text, from, undefined, images, opts.requestedBy, opts.attachments);
     } catch (e) {
