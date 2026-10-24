@@ -915,6 +915,26 @@ and w1891 waited behind it there, and w1789 waited on LothDesktop behind shared 
   where the leg went. A ticket for the whole machine (`--reason machine`), a shared one and letting go pass. It is a
   seatbelt: a script of the worker's own that takes a ticket is not seen. The exclusive guarantee is unchanged: the ask
   decides where a ticket is taken, never whether a timed run takes one.
+- **The queue asks too** (w1995; lothsahn, 2026-10-24: "Beast is running an exclusive lock and LothLaptop isn't locked at
+  all"). w1908's and w1891's legs ran from scripts in their temp folders (`legs3/1-B-dev-42-ps`, `abdev2-230633`) and held
+  BEAST's exclusive tickets t00001100 and t00001107 with no verdict and no "timed ask" line (BEAST's bench queue and the
+  journal, 05:3xZ): the guard above never saw them. The game repo's `bench_queue.py` `hold()`, where every ticket is made,
+  now reads the same `timed_ask` mark and the session's `timed` verdict (`timed_ask_refusal`, `TimedAskFirst`, exit 77) and
+  refuses an exclusive timing ticket the same way. It reaches a sandbox when its branch has that master; a run already going
+  uses its own copy, so nothing running is cut off.
+- **The small computer's last sandbox** (w1995, `Agents.timedHoldProblem`): while timed work (a timed request on its
+  platform, or a timed leg whose needs name it) waits Queued for a small computer and fits it, that computer's LAST free
+  sandbox is held from other work of no higher priority that another computer can take: `start_agent` refuses it, naming
+  the timed work. A pair run's leg goes there only when no other computers hold all its legs. Bounded like the pair hold:
+  `TIMED_HOLD_MS` (20 min) after that computer's room began. At 04:59Z on 2026-10-24 w1981's pair leg 2 took
+  lothlaptop/slot1 while w1985, w1440's timed leg, had been Queued for lothlaptop since 04:27Z; at 05:27Z w1985 widened to
+  the big computers (the journal).
+- **The wait bound, measured** (w1995): BEAST's exclusive timing tickets over the day to 05:40Z on 2026-10-24 (73 takes,
+  `bench.queue/history.jsonl`) held p50 2.1 min, p90 11.8 min, max 44 min, and waited p50 3.5 min, p90 25.5 min, max 102 min;
+  lothlaptop/slot1's one worker that day held it 64 min (w1789, 03:52Z to 04:56Z). `TIMED_LEG_WAIT_MS` stays 60 minutes: about
+  one small-computer occupant, and a p90 wait on BEAST is 25 min of five idle slots each.
+- **The ranking in the journal** (w1995): the "Next timed work" line the dispatcher reads is logged as "capacity (w1995): ..."
+  when it changes beyond its counts (`Agents.logTimedLine`); an audit of the day before found no record of it.
 - **The log**: every answer is a line in the asking request's log ("timed leg ask (w1969) from worker ... on beast: handed to
   w2001, queued for lothlaptop > m3 > biscuit: beast has 6 agent slots ...", or "here: ...") and in the portal's journal
   ("timed ask (w1969): ..."; `portal_logs` grep "timed ask").
