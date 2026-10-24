@@ -160,7 +160,7 @@ orchestrator or the dispatcher for a code ("add desktop-coosego with a join code
 in their own words); a person at the PC, connected to Tailscale, double-clicks the installer, or opens
 `https://<the portal>/join`, or runs `irm https://<the portal>/join/windows.ps1 | iex` (a Mac or Linux PC:
 `bash -c "$(curl -fsSL https://<the portal>/join/unix.sh)"`) and types the code. The bootstrap installs the missing tools,
-enrols the PC (the portal answers its credential once, into a private file on the PC), runs the installer below with the
+enrolls the PC (the portal answers its credential once, into a private file on the PC), runs the installer below with the
 right answers and `-NoSsh` / `--no-ssh`, and deletes the file. The code works once, for an hour, and only from the tailnet
 device it was made for. Nothing is left for the tailnet: no tag, no grant, no OpenSSH Server (w1596), since the portal
 updates, restarts and unloads the PC over its daemon's own link ([worker-install.md](worker-install.md#updates-over-the-daemons-link-w1596)).

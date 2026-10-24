@@ -947,7 +947,7 @@ that only plays the game. It has no pool, so it gets no sandbox, no worker and n
 lists it on a line of its own ("Play-only timing machines ...", `TimedRuns.capacityLine`). It joins by the usual join
 ([worker-install.md](worker-install.md)): `add_machine join_code` with `play_only` gives the installer's smallest limits (one
 sandbox's player-slot pair, `slot1-0` and `slot1-1`, whose firewall rules the install makes; the bare repo clone of about 1.3 GB;
-no Unity). From the dashboard, Add a machine has a **Play-only** tick that does the same (`POST /api/machines/join` with
+no Unity; no Dev Drive: the join check answers `playOnly` and `join.ps1` passes `-NoDevDrive`, w1993). From the dashboard, Add a machine has a **Play-only** tick that does the same (`POST /api/machines/join` with
 `playOnly: true`; the record names who ticked it): opened in the new PC's own browser it names the PC after its tailnet device,
 and the downloaded installer, run as administrator, asks one Windows prompt.
 Within lothsahn's rule ("I don't want a unilateral way into machines... just build scoped commands for the

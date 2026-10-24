@@ -1,4 +1,4 @@
-// The join bootstraps end to end against a test enrolment (w1592, docs/worker-install.md "Adding a machine with a join
+// The join bootstraps end to end against a test enrollment (w1592, docs/worker-install.md "Adding a machine with a join
 // code"): scripts/worker/join.ps1 under PowerShell and scripts/worker/join.sh under bash, each against a local portal
 // running the real join routes (server/machineJoinHttp.ts) with a fake `tailscale whois`, a fake tailscale CLI and a fake
 // installer that records what it was given. Proves: a dry run changes nothing and leaves the code unused; a join writes
