@@ -1,0 +1,7 @@
+- **Queued work sees the room there is** (w1983, lothsahn: "we have 20 queued runs, why are we not scheduling them on stuff?").
+  - A computer is BUSY for game work by its agents mid-turn, as `start_agent`'s gate counts them, not by idle workers between turns: BEAST at "9 live agents of 6" with 3 mid-turn and a free sandbox is room again, for single work and pair runs.
+  - A pair run's hold on a computer's last free sandbox lapses after 20 minutes while the pair still cannot start, and never keeps work pinned to that computer off it.
+  - A released worker's save leaves build output in `.nightly-builds/` and `Builds/` where it is, so an 80 MB player build no longer pins a sandbox.
+  - A worker whose request moved to another worker (`stop_agent move_to`, a hand-back, a new session), or whose request another of its workers runs in another sandbox, frees its sandbox for the queue; it takes a seat again when it resumes.
+  - `message_agent` with a work_id never starts the new session in a sandbox that is not the old worker's any more (released, or another agent there): it says to `start_agent` in a FREE sandbox.
+  - A release no longer waits for the daemon's own git read: with the git state unread, the save reads it on the computer itself (lothdesktop/slot5 stayed "git state not known yet"), and a move waits for the old worker's process to end before saving its work.

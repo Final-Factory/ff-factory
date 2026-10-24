@@ -66,7 +66,7 @@ test("w1089: a held computer (the m5 held for Ben's testing) takes no work, game
 
 test('w1089: a flag explains itself hours later: roomNow keeps each computer\'s numbers at that moment', () => {
   const r = roomNow([{ ...LOTH_0447, memUsedBytes: 40 * GB, freeSandboxes: 2 }]);
-  assert.equal(r.detail?.lothdesktop, '2 of 6 sandboxes free, 6 live agents of 10, RAM 63%');
+  assert.equal(r.detail?.lothdesktop, '2 of 6 sandboxes free, 5 agents mid-turn of 10 (6 live), RAM 63%');
 });
 
 test('w1098: work that needs no editor goes by agent slot alone: no free game sandbox, no editor and high RAM do not matter; the agent cap, seats, holds and avoids do', () => {

@@ -79,7 +79,7 @@ import { WAIT_LINE_CHARS, summaryText, waitSummary } from '../shared/waitSummary
 import { waitingItemOf } from '../shared/waiting.ts';
 import { checkAsks } from '../shared/questionCard.ts';
 import { DECISIONS, attachmentsNote, describeItem, handoverNote, isFor, isOpen, ledgerOrder, names, overlapLine, priorityThenAge, requestAsFiled, requestLineRule, startProblem } from './work.ts';
-import { minPriorityText, needsBuild, needsLive, needsOf, needsTimed, pairText, PAIR_MAX_LEGS } from '../shared/capacity.ts';
+import { minPriorityText, needsBuild, needsLive, needsOf, needsTimed, pairText, PAIR_HOLD_MS, PAIR_MAX_LEGS } from '../shared/capacity.ts';
 import { BUILD_PLAN_DOC, BuildPlans, NOT_RELEASE, type BuildPlan, type SeatResult } from './buildPlans.ts';
 import { SEAT_GRACE_MS, seatAction, seatNotice } from './releaseSeat.ts';
 import { RELEASE_RULES } from './releaseLanes.ts';
@@ -979,12 +979,16 @@ export class Agents {
     return x && y ? priorityThenAge(x, y) : x ? -1 : y ? 1 : 0;
   }
 
-  /** Why a worker's work is over, or undefined: its requests are closed, or handed to another worker (w384, w640). */
+  /**
+   * Why a worker's work is over, or undefined: its requests are closed, or handed to another worker (w384, w640), or moved
+   * off it (w1983, WorkItem.movedOff: w1789 moved from 2e29f29e on lothdesktop/slot5 to LothLaptop at 03:49Z on 2026-10-24,
+   * and slot5 stayed pinned by 2e29f29e's 04:14 check-in, since a worker on no request had no work to be over).
+   */
   workOver(i: SessionInfo): string | undefined {
-    const items = [...this.store.work.values()].filter((w) => w.sessionIds.includes(i.id) && w.status !== 'merged');
+    const items = [...this.store.work.values()].filter((w) => (w.sessionIds.includes(i.id) || w.movedOff?.[i.id]) && w.status !== 'merged');
     if (items.length && items.every((w) => !WORK_OPEN.includes(w.status))) return `its request${items.length > 1 ? 's are' : ' is'} closed (${items.map((w) => `${w.id} ${w.status}`).join(', ')})`;
     // A worker that set a gate its request still waits on is with it (w1094, shared/blockers.ts isWith).
-    if (items.length && items.every((w) => !isWith(w, i.id))) return `its request${items.length > 1 ? 's are' : ' is'} with another worker now (${items.map((w) => `${w.id}: ${latestWorker(w)}`).join(', ')})`;
+    if (items.length && items.every((w) => !isWith(w, i.id))) return `its request${items.length > 1 ? 's are' : ' is'} with another worker now (${items.map((w) => `${w.id}: ${latestWorker(w) ?? 'moved off it, not placed yet'}`).join(', ')})`;
     return undefined;
   }
 
@@ -1034,10 +1038,24 @@ export class Agents {
         const on = line ? otherWorkWait(line, w.id) : undefined;
         if (!on) return undefined;
         parts.push(`${w.id}: ${on} (its report: "${line!.slice(0, 120)}")`);
-      } else return undefined;
+      } else if (l?.state === 'working' && this.otherWorkerOn(w, i)) parts.push(`${w.id}: ${this.otherWorkerOn(w, i)}`);
+      else return undefined;
     }
     return `it waits on ${parts.join('; ')}`;
   }
+  /**
+   * Another worker of `w` at work on it in another sandbox (w1983), as "its worker aa20f433 works on it in m3/slot1", or
+   * undefined. lothsahn moved w1853's timing A/B to m3 at 03:58Z on 2026-10-24 ("Move another timed run by m3"): its
+   * LothDesktop worker 33bc6316 then sat idle in lothdesktop/slot3 waiting for that run, holding the sandbox from the queue.
+   */
+  private otherWorkerOn(w: WorkItem, i: SessionInfo): string | undefined {
+    const o = w.sessionIds
+      .filter((id) => id !== i.id)
+      .map((id) => this.store.sessions.get(id))
+      .find((x) => !!x && x.kind === 'worker' && (isMidTurn(x) || !!this.sessions.sessions.get(x.id)?.live) && !(x.machineId === i.machineId && x.machineSandbox === i.machineSandbox));
+    return o ? `its worker ${o.id} works on it in ${o.machineId}/${o.machineSandbox ?? '?'}` : undefined;
+  }
+
   /**
    * Why a worker keeps its process and its sandbox for its Live view (w1582), or undefined: a view of it runs, it waits on a
    * person (its waiting_on_person, or a request of it Waiting on input), its work is not over, and it worked within
@@ -1795,6 +1813,14 @@ export class Agents {
     const { machineId, machineSandbox } = old.info;
     if (!machineId || !machineSandbox) throw new Error(`${old.info.id} has no sandbox to start ${item.id}'s session in: use start_agent with work_id "${item.id}" and a sandbox`);
     const sandbox = `${machineId}/${machineSandbox}`;
+    // w1983: only a sandbox that is still the old worker's. At 04:15Z on 2026-10-24 w1440 sent to its stopped worker 9c38a500
+    // started feed4032 in beast/slot1, where c7bfc9f0 (w1829) was between turns on w1475's branch, on a BEAST at 7 of 6.
+    const sb = this.store.machines.get(machineId)?.sandboxes?.find((x) => x.id === machineSandbox);
+    const others = sb ? this.sessionsOf(sb.sessionIds).filter((s) => s.id !== old.info.id && occupies(s, !!this.sessions.sessions.get(s.id)?.live)) : [];
+    if (old.info.placeReleased || (old.info.status === 'stopped' && others.length)) {
+      const why = others.length ? `agent ${others.map((s) => s.id).join(', ')} is there` : `it released it at ${old.info.placeReleased!.at.slice(11, 16)} UTC while it waited`;
+      throw new Error(`${sandbox} is not ${old.info.id}'s any more (${why}): a new session for ${item.id} never goes beside other work. start_agent with work_id "${item.id}" in a FREE sandbox on a computer with room (list_sandboxes)${old.info.placeReleased?.branch ? `, switched to its branch ${old.info.placeReleased.branch}` : ''}.`);
+    }
     const title = jobTitle(item.id, a.title);
     const files = this.attachmentsFor(a.attachments, item);
     const handed = await this.prepareForNewWork(sandbox, undefined, item.id, item.source, item.needs === 'agent');
@@ -2376,6 +2402,9 @@ export class Agents {
     if (h.live) {
       this.store.append(info.id, { kind: 'system', text: `Stopped by FF Factory: its requests move to ${target} (${reason}; w1600).` });
       h.stop(true);
+      // w1983: the save below is refused while its process still runs ("agent 2e29f29e runs in sandbox slot5", w1789's move
+      // at 03:49Z on 2026-10-24): wait for it to end, a few seconds. A save that still fails is the release pass's to redo.
+      for (let n = 0; n < 40 && this.sessions.sessions.get(info.id)?.live; n++) await new Promise((r) => setTimeout(r, 250));
     }
     const view = await this.liveHub?.endFor(info.id);
     const branch = this.branchNow(info);
@@ -3002,12 +3031,17 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
    * at least this work's priority, fits that computer, and waits for computers to have room at once. Left to chance, single
    * work takes each sandbox as it frees and a pair, which needs two at the same moment, waits forever (lothsahn: "queues
    * work properly that requires running together across multiple machines"). Only the last free sandbox there, so a
-   * computer with two takes both, and urgent work (a person's "Start now") goes first.
+   * computer with two takes both, and urgent work (a person's "Start now") goes first. Bounded (w1983): work whose needs
+   * name this computer alone is never held off it, and a hold lapses PAIR_HOLD_MS after that computer's room began while
+   * the pair still cannot start, so a pair waiting for a partner never keeps a sandbox idle for long.
    */
   pairHoldProblem(machine: string | undefined, w: WorkItem | undefined): string | undefined {
     if (!machine) return undefined;
     const place = this.places().find((p) => p.id === placeId(machine));
     if (!place || place.freeSandboxes > 1) return undefined;
+    // w1983: work that can run only here (lothsahn's "Move one timed run to LothLaptop", w1789) is not sent elsewhere.
+    const needs = w?.queuedFor?.needs;
+    if (needs?.length && needs.every((n) => placeId(n) === place.id)) return undefined;
     const rank = (p: WorkPriority | undefined) => WORK_PRIORITIES.indexOf(p ?? 'normal');
     const since = (x: WorkItem) => Date.parse(x.queuedFor?.at ?? x.createdAt) || 0;
     const facts = this.roomFacts();
@@ -3018,7 +3052,11 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
       .sort((x, y) => rank(y.priority) - rank(x.priority) || since(x) - since(y))[0];
     if (!pair) return undefined;
     const room = roomForWork(facts, pair, pair.queuedFor?.needs);
-    return `${place.id}'s last free sandbox is held for ${pair.id} "${pair.title.slice(0, 80)}" (${pair.priority}, Queued since ${(pair.queuedFor?.at ?? pair.createdAt).slice(11, 16)} UTC), ${pairText(pair.pair!)}, which starts only when that many computers have room at once (w1945)${room.short ? `: ${room.short}` : `: it can start now, start its legs first`}. Start ${w ? w.id : 'this'} on another computer; work of higher priority than the pair (a person's "Start now" makes it urgent) goes first.`;
+    // w1983: held only PAIR_HOLD_MS from when this computer's room began, while the pair still cannot start.
+    const freeSince = facts.since?.[`game:${place.id}`];
+    const lapses = freeSince !== undefined ? freeSince + PAIR_HOLD_MS : undefined;
+    if (room.short && lapses !== undefined && (this.orchestrators?.now().getTime() ?? Date.now()) >= lapses) return undefined;
+    return `${place.id}'s last free sandbox is held for ${pair.id} "${pair.title.slice(0, 80)}" (${pair.priority}, Queued since ${(pair.queuedFor?.at ?? pair.createdAt).slice(11, 16)} UTC), ${pairText(pair.pair!)}, which starts only when that many computers have room at once (w1945)${room.short ? `: ${room.short}${lapses !== undefined ? `; the hold lapses at ${new Date(lapses).toISOString().slice(11, 16)} UTC (w1983)` : ''}` : `: it can start now, start its legs first`}. Start ${w ? w.id : 'this'} on another computer; work of higher priority than the pair (a person's "Start now" makes it urgent) goes first.`;
   }
 
   /**

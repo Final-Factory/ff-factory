@@ -1273,6 +1273,8 @@ export class Orchestrators {
   moveOff(w: WorkItem, sessionId: string, why: string) {
     if (!w.sessionIds.includes(sessionId)) return;
     w.sessionIds = w.sessionIds.filter((x) => x !== sessionId);
+    // w1983: remembered, so the worker's sandbox is not pinned by the check-in it set for this request (Agents.workOver).
+    w.movedOff = { ...(w.movedOff ?? {}), [sessionId]: this.now().toISOString() };
     if (w.links?.[sessionId]) {
       const { [sessionId]: _gone, ...rest } = w.links;
       w.links = rest;
