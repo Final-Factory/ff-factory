@@ -8,7 +8,7 @@ import { band, concepts, DEFAULT_THRESHOLDS, entryMatch, indexOf, type MatchThre
 import { LOOP_GUARD_RANGE, type Config } from './config.ts';
 import type { Store } from './store.ts';
 import { blockerName, blockerProblem, blockerVerdict, gateSetter, newestFirst, RESUME_SWEEP_MS, gatesName, gatesOf, MAX_GATES, prRefOf, sameGate, type BlockerFacts } from '../shared/blockers.ts';
-import type { OptionsFactory, SessionHandle, SessionManager } from './sessions.ts';
+import { COORD_TURN_MAX_CALLS, COORD_TURN_MAX_TOKENS_READ, type OptionsFactory, type SessionHandle, type SessionManager, type TurnBudgetHit } from './sessions.ts';
 import { actingFor, asRequester, type Identity } from './identity.ts';
 import {
   subjectKeys,
@@ -135,6 +135,11 @@ export const FILINGS_PER_MESSAGE = 20;
 export const INVESTIGATE_AT = 100;
 /** The repository the investigation bug is filed for: FF Factory's own. */
 export const INVESTIGATE_REPO = 'Final-Factory/ff-factory';
+/**
+ * One investigation request per coordinator session for passing the per-turn budget (w2007, sessions.ts COORD_TURN_MAX_CALLS),
+ * and one notice to its person, in this long; a later hit in the window only adds a line to that request.
+ */
+export const TURN_BUDGET_REFILE_MS = 6 * 3_600_000;
 /** Follow-ups a personal orchestrator may send one worker between two messages of its person. */
 export const FOLLOW_UPS_PER_MESSAGE = 3;
 /**
@@ -546,6 +551,8 @@ export class Orchestrators {
   onPersonMessage?: (from: Requester, to: Requester, text: string) => void;
   /** An intake request waits for a person's approval, or a worker raised a design question (index.ts notifies). */
   onIntakeAttention?: (w: WorkItem, what: 'pending' | 'design') => void;
+  /** A coordinator's turn was stopped for passing its budget (w2007): index.ts pushes `what` to these people (user ids). */
+  onTurnBudget?: (session: SessionInfo, users: string[], what: string) => void;
   /** Notices gathered for the dispatcher, per person they are about. */
   private readonly gathered = new Map<string, { by: Requester; texts: string[]; timer: NodeJS.Timeout }>();
   private capacityTimer?: NodeJS.Timeout;
@@ -556,6 +563,7 @@ export class Orchestrators {
   constructor(d: OrchestratorsDeps) {
     this.d = d;
     this.now = d.now ?? (() => new Date());
+    d.sessions.events.on('turnBudget', (s: SessionHandle, hit: TurnBudgetHit) => this.turnBudget(s, hit));
   }
 
   private get store() {
@@ -1721,6 +1729,73 @@ export class Orchestrators {
     this.store.dropWork(pruneIds(this.store.work.values(), undefined, now.getTime()));
     this.gatherForDispatcher(owner, requestNotice(w));
     return w;
+  }
+
+  /**
+   * A coordinator's turn passed its budget and sessions.ts stopped it (w2007). FF Factory files one investigation request
+   * for it on INVESTIGATE_REPO, for its person (the dispatcher's: the system payer), and pushes the person a notice, once per
+   * TURN_BUDGET_REFILE_MS per session; a later hit in that window only adds a line to that request. The record is the request
+   * itself (found by its session link), so a restart does not forget it. The notice is a push, never a message into the
+   * stopped orchestrator: that would open a new turn of the very session just stopped. The dispatcher hears of the request as
+   * of any (gatherForDispatcher), which the window bounds to one message in 6 h, however often it runs away.
+   */
+  private turnBudget(s: SessionHandle, hit: TurnBudgetHit) {
+    try {
+      const info = s.info;
+      const now = this.now();
+      const dispatcher = this.isDispatcher(info);
+      const owner = (dispatcher ? undefined : this.ownerOf(info)) ?? this.d.identity.systemPayer();
+      const who = dispatcher ? 'the dispatcher' : `${owner.displayName}'s orchestrator`;
+      const link = `${(this.d.cfg.publicUrl ?? '').replace(/\/+$/, '')}/#/session/${info.id}`;
+      const numbers = `${hit.calls} calls, ${(hit.tokensRead / 1_000_000).toFixed(1)}M tokens`;
+      const caps = `${COORD_TURN_MAX_CALLS} calls / ${COORD_TURN_MAX_TOKENS_READ / 1_000_000}M tokens`;
+      const earlier = [...this.store.work.values()].find((w) => w.repo === INVESTIGATE_REPO && w.title.includes('per-turn budget') && w.brief.includes(`session ${info.id}:`) && now.getTime() - Date.parse(w.createdAt) < TURN_BUDGET_REFILE_MS);
+      if (earlier) {
+        this.stamp(earlier, `another turn of the same session passed the budget (w2007): ${numbers}, over ${hit.cap === 'calls' ? 'the calls' : 'the tokens'} cap (${caps}); turn open since ${hit.since ?? 'unknown'}`);
+        this.store.putWork(earlier);
+        return;
+      }
+      const first = hit.starter?.text.split('\n').find((l) => l.trim());
+      const startedBy = hit.starter ? (hit.starter.from === 'human' ? "a person's own message" : hit.starter.from === 'orchestrator' ? "another orchestrator's message" : "a harness message (a worker's report, a dispatch, a timer, a check-in)") : 'a message that is not known any more';
+      const title = clip(`Investigate: ${who} passed the per-turn budget (${numbers})`, 120);
+      const brief = [
+        `FF Factory filed this by itself (w2007; lothsahn: "Yes, add a per-turn budget cap for orchestrators and the dispatcher to w2007").`,
+        `${who} (session ${info.id}: ${link}) passed the per-turn budget of a coordinator, ${caps}, and FF Factory stopped that turn: it made ${hit.calls} model calls (subagents' included) and read ${hit.tokensRead.toLocaleString('en-US')} tokens (input, cache read and cache creation), over the ${hit.cap === 'calls' ? 'calls' : 'tokens'} cap. The turn was open since ${hit.since ?? 'an unknown time'}; it was stopped at ${now.toISOString()}.`,
+        `It was started by ${startedBy}${first ? `: "${clip(first.trim(), 200)}"` : ''}.`,
+        '',
+        'Find out why (a loop, polling, a retry) from the transcript (agent_transcript on the session, or the link) and fix the harness. Say whether the cap should move: the caps are 5x and 7x the largest turn measured on 2026-10-24 (sessions.ts COORD_TURN_MAX_CALLS, COORD_TURN_MAX_TOKENS_READ; docs/orchestrators.md, "A per-turn budget").',
+      ].join('\n');
+      const placed = resolveNeeds({ needs: 'agent', repo: INVESTIGATE_REPO, title, brief }, repoSlug(this.d.cfg.repo.url));
+      const w: WorkItem = {
+        id: `w${++this.store.workSeq}`,
+        title,
+        brief: clip(brief, 8000),
+        priority: 'normal',
+        keys: textKeys(title, this.knownBranches()),
+        requestedBy: asRequester(owner),
+        requesters: [asRequester(owner)],
+        humanAsked: false,
+        status: 'new',
+        createdAt: now.toISOString(),
+        updatedAt: now.toISOString(),
+        sessionIds: [],
+        needs: placed.needs,
+        repo: INVESTIGATE_REPO,
+        overlaps: [],
+        asks: 0,
+        log: [],
+      };
+      w.overlaps = findOverlaps({ keys: w.keys, title: w.title }, this.pool(w.id));
+      this.stamp(w, `filed by FF Factory for ${owner.displayName} (w2007): ${who} passed the per-turn budget (${numbers}); counts against no limit; needs ${placed.needs === 'agent' ? 'an agent slot only' : 'a game sandbox'} (${placed.how})`);
+      this.store.putWork(w);
+      this.store.dropWork(pruneIds(this.store.work.values(), undefined, now.getTime()));
+      // The dispatcher's: the owners; a personal orchestrator's: its person. The people the dispatcher's own errors go to (index.ts audience).
+      const users = dispatcher ? this.d.identity.list().filter((u) => u.role === 'owner').map((u) => u.userId) : [owner.userId];
+      this.onTurnBudget?.(info, users, `FF Factory stopped a turn of ${who}: it made ${hit.calls} model calls and read ${(hit.tokensRead / 1_000_000).toFixed(1)}M tokens, over the per-turn budget (${caps}). ${w.id} looks into why.`);
+      this.gatherForDispatcher(owner, requestNotice(w));
+    } catch (e) {
+      console.warn(`orchestrators: the budget request for ${s.info.id} was not filed: ${(e as Error).message}`);
+    }
   }
 
   /** A requester hands a request to another person (w1511): it stays open and the same for everyone; they come off it, the other person is on it. */

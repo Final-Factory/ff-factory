@@ -5,6 +5,7 @@ import { WAIT_LINE_CHARS } from '../shared/waitSummary.ts';
 import os from 'node:os';
 import path from 'node:path';
 import { sandboxGuard } from './guard.ts';
+import { localPluginEnv } from './pluginPaths.ts';
 import { editorBenchGateFor, GATE_HOOK_TIMEOUT_S } from '../machine/editorBenchGate.ts';
 import { foreignTimedHold, ownTimedHold, readTimedAsk } from '../machine/benchLock.ts';
 import { personHoldReason } from '../machine/personPlay.ts';
@@ -401,7 +402,10 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
   const g = spec.guard;
   // Git fails fast instead of waiting on a credential prompt nobody will answer.
   const agentEnv = (() => {
-    const env: Record<string, string | undefined> = { MCP_TIMEOUT: '120000', ...baseEnv, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', ...publicGitEnvFor(spec, baseEnv), ...spec.env };
+    // w2012: a sandbox worker learns where the ff-agents scripts are (FF_SKILLS), read on this machine at launch, so it never
+    // searches the disk for ui_look.py or pr_evidence.py (server/pluginPaths.ts).
+    const plugins = localPluginEnv(baseEnv, g.workerRoot);
+    const env: Record<string, string | undefined> = { MCP_TIMEOUT: '120000', ...baseEnv, ...plugins, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', ...publicGitEnvFor(spec, baseEnv), ...spec.env };
     // A vault GitHub token (GH_TOKEN): gh reads it itself; git gets a helper that reads it (githubCredentialEnv).
     return spec.env?.GH_TOKEN ? { ...env, ...githubCredentialEnv(env) } : env;
   })();

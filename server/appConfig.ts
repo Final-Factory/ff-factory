@@ -147,7 +147,7 @@ export const SETTABLE_KEYS = [
   // The share of workers nudged to hand a long read/search chain to a subagent (w2014, server/readChain.ts).
   'worker.readChainPilotPercent',
   // Workers' reasoning effort when start_agent names none (w2000, docs/orchestrators.md "A worker's effort"): low, medium, high or
-  // max; null goes back to high. It is the session's --effort flag, which beats the repo's settings.json modelSettings.
+  // max; null goes back to medium (w2010). It is the session's --effort flag, which beats the repo's settings.json modelSettings.
   'worker.effort',
   // The orchestrators' loop guards (w571, server/orchestrators.ts loopGuards): budgets a person's own message starts again.
   'orchestrator.filingsPerMessage',

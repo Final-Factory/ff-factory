@@ -660,7 +660,9 @@ export const LOOP_GUARD_RANGE = { min: 1, max: 100 } as const;
 export const DEFAULT_USAGE_POLL_MINUTES = 15;
 
 /** Workers' reasoning effort when start_agent names none (config worker.effort, settable: set_app_config, w2000). */
-export const DEFAULT_WORKER_EFFORT: Config['worker']['effort'] = 'high';
+export const DEFAULT_WORKER_EFFORT: Config['worker']['effort'] = 'medium';
+/** The model workers start on when start_agent names none (config defaultModel; w2010). */
+export const DEFAULT_WORKER_MODEL = 'opus';
 
 const DEFAULTS: Omit<Config, 'sandboxRoot' | 'standingRoot' | 'repo' | 'unity' | 'voice' | 'hostGuard'> = {
   port: 8790,
@@ -673,8 +675,9 @@ const DEFAULTS: Omit<Config, 'sandboxRoot' | 'standingRoot' | 'repo' | 'unity' |
   limits: { minFreeRamGB: 10 },
   hostDiskPaths: [],
   models: ['opus', 'sonnet', 'haiku', 'fable'],
-  // Sonnet 5.5 implements (Ben, 2026-10-08); the orchestrators, the dispatcher and the ops worker stay on Opus.
-  defaultModel: 'sonnet',
+  // Workers start on Opus at medium effort (lothsahn, 2026-10-24, w2010: "workers should be opus medium thinking"); the
+  // dispatcher may name sonnet for a task it is sure is small, with a model_reason (server/workerModel.ts).
+  defaultModel: DEFAULT_WORKER_MODEL,
   orchestrator: { model: 'opus', effort: 'medium', notifyOnWorkerEvents: true },
   worker: { permissionMode: 'bypassPermissions', effort: DEFAULT_WORKER_EFFORT },
 };

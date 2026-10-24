@@ -659,6 +659,24 @@ const repairSpend = async () => {
     }
     await new Promise((r) => setImmediate(r));
   }
+  // w2007: the turns billed a carried running total (a resumed CLI's older saved totals), from the transcript read in pieces
+  let carriedLooked = 0;
+  let carriedTurns = 0;
+  let carriedUsd = 0;
+  for (const s of [...spend.sessions.values()].filter((x) => x.carriedV !== 1)) {
+    try {
+      const keep = (line: string) => line.includes('"kind":"result"') || line.includes('"kind":"user"');
+      const r = await spend.correctCarried(s.id, store.hasTranscript(s.id) ? store.scanTranscript(s.id, keep) : undefined, store.sessions.get(s.id));
+      carriedLooked++;
+      carriedTurns += r.turns;
+      carriedUsd += r.removedUsd;
+      if (r.skipped && r.skipped !== 'no transcript') skipped.push(`${s.id.slice(0, 8)}: ${r.skipped}`);
+    } catch (e) {
+      console.warn(`spend repair (carried totals): ${s.id}: ${(e as Error).message}`);
+    }
+    await new Promise((r) => setImmediate(r));
+  }
+  if (carriedLooked) console.log(`spend repair (w2007): ${carriedLooked} session(s) looked at, $${carriedUsd.toFixed(2)} of carried running totals taken out of ${carriedTurns} turn(s)`);
   if (looked) console.log(`spend repair: ${looked} session(s) looked at, ${fixed} corrected ($${removed.toFixed(2)} taken out of restart turns, $${moved.toFixed(2)} moved off requests a notice only cited), $${given.toFixed(2)} of coordination given its days${skipped.length ? `; left as recorded: ${skipped.slice(0, 8).join('; ')}${skipped.length > 8 ? `; and ${skipped.length - 8} more` : ''}` : ''}`);
   spend.syncWork();
 };
@@ -679,6 +697,7 @@ notifier.audience = (s, kind) => {
   return undefined;
 };
 agents.orchestrators.onPersonMessage = (from, to, text) => notifier.personMessage(from, to, text);
+agents.orchestrators.onTurnBudget = (s, users, what) => notifier.turnBudget(s, users, what);
 agents.standing.events.on('run', (a, run) => notifier.standingRun(a, run));
 agents.standing.events.on('delegation', (d) => notifier.delegation(d));
 agents.standing.events.on('delegationUpdate', (d, what) => notifier.delegationUpdate(d, what));

@@ -172,11 +172,29 @@ Off switch: `set_app_config orchestrator.routineModel "off"` puts every coordina
 next message on, with no restart; `orchestrator.routineAfterMinutes` (0-1440) changes the window. Tests:
 `server/turnModel.test.ts` (every tag above, the window, workers untouched, the live switch).
 
+### Which model a worker starts on (w2010)
+
+lothsahn, 2026-10-24: "workers should be opus medium thinking", then "if the dispatcher is confident the task is
+small, it can start a sonnet worker directly". A worker starts on config `defaultModel` (`opus`, `DEFAULT_WORKER_MODEL`
+in `server/config.ts`) at `worker.effort` (`medium`). `start_agent` keeps its `model` argument, and an orchestrator that
+names any other model must give `model_reason` (`server/workerModel.ts` `workerModelChoice`): `small: <why it is sure>`
+for a task it is sure is small (one or two named files, a mechanical or contained change with done-criteria in the brief,
+no simulation, determinism, netcode or save state, no design question, no investigation: the dispatcher's brief,
+"Model"), or `asked: <the person's words>` when a person named the model. Without one the start is refused before any
+sandbox is touched. The reason goes into the request's log (`started worker ... on sonnet (small: ...)`), a pair run's
+every leg included, and the reply says the model either way (`... on opus, requested by ...`). A person's own start
+(`from: human`, a portal button or `/mcp`) names a model with no reason. A standing agent's suggested model and a review
+job's `Model:` line stay suggestions under the same test. Tests: `server/workerModel.test.ts`, and the two w2010 tests in
+`server/orchestrators.test.ts`.
+
+Opus workers in turn hand small, well-specified pieces to a Sonnet implementer subagent: that guidance is the game repo's
+(its `CLAUDE.md` "Delegation agents"), not this portal's.
+
 ### A worker's effort (w2000)
 
 lothsahn, w2000: "Please file a change to downgrade the workers to medium effort opus". A worker's reasoning effort is,
 first that applies: the `effort` its `start_agent` call names (a pair's legs and a standing agent's approved delegation
-pass theirs), else config `worker.effort` (default `high`, `DEFAULT_WORKER_EFFORT` in `server/config.ts`). The portal puts
+pass theirs), else config `worker.effort` (default `medium` since w2010, `DEFAULT_WORKER_EFFORT` in `server/config.ts`). The portal puts
 it in the launch spec (`agents.ts` `machineSandboxSpec`: `info.effort ?? cfg.worker.effort`); the machine daemon passes
 the spec on unchanged (`machine/agentHost.ts` `buildOptions(spec)`) and adds no effort of its own; the Agent SDK turns it
 into the CLI's `--effort` flag. That flag beats the game repo's `.claude/settings.json` `modelSettings`: Claude Code takes
@@ -187,7 +205,7 @@ overrides the session level for that subagent. Orchestrators use `orchestrator.e
 (`OPS_LIMITS`).
 
 `set_app_config worker.effort "medium"` takes `low`, `medium`, `high` or `max` (`WORKER_EFFORTS`); null goes back to
-`high`. It applies to every worker started after it, with no restart; running workers keep theirs until their process
+`medium`. It applies to every worker started after it, with no restart; running workers keep theirs until their process
 restarts. Check it on a new worker: its claude process's command line carries `--effort <level>`, and `CLAUDE_EFFORT` in
 its shell says the level the session applies.
 
@@ -2551,6 +2569,49 @@ or not, takes no slot. Orchestrators never count. The Unity editor limits are un
     `set_app_config` keys, and `for_user` attribution;
   - memory writes (`memoryGuard`, [Memory](#memory));
   - recording and cancelling a conditional decision ([below](#conditional-decisions-w830)).
+
+### A per-turn budget (w2007)
+
+lothsahn, 2026-10-24, w2007: "Yes, add a per-turn budget cap for orchestrators and the dispatcher to w2007". The
+coordinators (`kind: 'orchestrator'`: the dispatcher and each person's orchestrator; not workers, the ops worker or
+standing agents) have a budget per turn, in `server/sessions.ts`:
+
+| Constant | Value | Counts |
+|---|---|---|
+| `COORD_TURN_MAX_CALLS` | 150 | model calls of the turn, each message id once (a call's content blocks arrive as separate messages), subagents' calls included |
+| `COORD_TURN_MAX_TOKENS_READ` | 25,000,000 | what those calls read: input + cache read + cache creation tokens |
+
+**Sizing** (measured, `portal_logs` `coordinator_context`, the last 8 compaction cycles of the dispatcher, Ben's and
+lothsahn's orchestrators, 2026-10-24 00:03Z-08:11Z): 637 turns, 1,079 model calls, 1.7 calls a turn. The largest turn in
+any cycle made at most 30 calls (the cycle's calls minus its other turns'), and the context peaked at 112k tokens, so the
+largest turn read at most about 3.4M tokens. The caps are 5x and 7x those bounds, so a normal turn never meets them. There
+is no cap on a reply's output tokens (lothsahn did not choose one).
+
+**The counters** start when a message opens a turn and again at each `result` that is not a compaction's, so a message
+queued behind the first, answered in the same CLI turn, has a budget of its own.
+
+**A hit**, once per turn (`Session.stopOverBudget`):
+
+- the transcript gets an error line before the stop: "FF Factory stopped this turn: it made N model calls and read M
+  tokens, over the per-turn budget (150 calls / 25M tokens, w2007)." and then the usual "Interrupted.";
+- the turn is stopped with the same `interrupt()` as the stop button, so the session is stopped on purpose: no restart
+  resumes it and nothing re-sends its message. Only a new message (a person's, a timer, a worker's report) starts a turn;
+- `sessions.events` emits `turnBudget` with `{ calls, tokensRead, cap: 'calls' | 'tokens', since, starter }`
+  (`TurnBudgetHit`), and `Orchestrators.turnBudget` answers it:
+  - one request on `Final-Factory/ff-factory` (`INVESTIGATE_REPO`, needs an agent slot, counts against no limit) for the
+    orchestrator's person, or the system payer for the dispatcher: "Investigate: <person>'s orchestrator (the
+    dispatcher) passed the per-turn budget (N calls, M tokens)". Its brief has the session link, when the turn opened, the
+    first line of the message that started it, the numbers and the caps, and asks to find out why from the transcript and
+    whether the cap should move. The dispatcher hears of it as of any request;
+  - a push notice (`Notifier.turnBudget`, kind `error`, so the person's error setting applies) to the orchestrator's person,
+    or to the owners for the dispatcher (the people the dispatcher's own errors already reach). It is a push, never a
+    message into the stopped orchestrator, which would open a new turn of the session just stopped;
+  - at most one request and one notice per session in `TURN_BUDGET_REFILE_MS` (6 h). A later hit in that window adds a
+    line to the open request. The request itself is the record (found by its session link), so a restart does not forget it.
+
+**To change the caps** edit the two constants in `server/sessions.ts` (they are code, not config: a coordinator can not
+raise its own); the "w2007" tests in `server/sessions.test.ts` name the numbers and change with them. The request FF Factory
+files is where a worker says whether they should move.
 
 ### Conditional decisions (w830)
 
