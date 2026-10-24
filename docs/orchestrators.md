@@ -172,6 +172,25 @@ Off switch: `set_app_config orchestrator.routineModel "off"` puts every coordina
 next message on, with no restart; `orchestrator.routineAfterMinutes` (0-1440) changes the window. Tests:
 `server/turnModel.test.ts` (every tag above, the window, workers untouched, the live switch).
 
+### A worker's effort (w2000)
+
+lothsahn, w2000: "Please file a change to downgrade the workers to medium effort opus". A worker's reasoning effort is,
+first that applies: the `effort` its `start_agent` call names (a pair's legs and a standing agent's approved delegation
+pass theirs), else config `worker.effort` (default `high`, `DEFAULT_WORKER_EFFORT` in `server/config.ts`). The portal puts
+it in the launch spec (`agents.ts` `machineSandboxSpec`: `info.effort ?? cfg.worker.effort`); the machine daemon passes
+the spec on unchanged (`machine/agentHost.ts` `buildOptions(spec)`) and adds no effort of its own; the Agent SDK turns it
+into the CLI's `--effort` flag. That flag beats the game repo's `.claude/settings.json` `modelSettings`: Claude Code takes
+an explicit choice (`CLAUDE_CODE_EFFORT_LEVEL`, `--effort`, `/effort`) before settings, and settings before the model's
+default (code.claude.com/docs/en/model-config, "the session's effort level", read 2026-10-24). The CLI reads
+`modelSettings.<model>.effortLevel`, not `effort`. A subagent's own `effort:` frontmatter (the implementors' `high`)
+overrides the session level for that subagent. Orchestrators use `orchestrator.effort`, the ops worker its own
+(`OPS_LIMITS`).
+
+`set_app_config worker.effort "medium"` takes `low`, `medium`, `high` or `max` (`WORKER_EFFORTS`); null goes back to
+`high`. It applies to every worker started after it, with no restart; running workers keep theirs until their process
+restarts. Check it on a new worker: its claude process's command line carries `--effort <level>`, and `CLAUDE_EFFORT` in
+its shell says the level the session applies.
+
 ## Requests and the ledger
 
 `request_work {title, brief, priority, constraints, related_ids, attachments}` files a request (`w12`). `attachments`

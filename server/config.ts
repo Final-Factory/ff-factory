@@ -644,6 +644,9 @@ export const LOOP_GUARD_RANGE = { min: 1, max: 100 } as const;
 /** The default of config usagePollMinutes. */
 export const DEFAULT_USAGE_POLL_MINUTES = 15;
 
+/** Workers' reasoning effort when start_agent names none (config worker.effort, settable: set_app_config, w2000). */
+export const DEFAULT_WORKER_EFFORT: Config['worker']['effort'] = 'high';
+
 const DEFAULTS: Omit<Config, 'sandboxRoot' | 'standingRoot' | 'repo' | 'unity' | 'voice' | 'hostGuard'> = {
   port: 8790,
   usagePollMinutes: DEFAULT_USAGE_POLL_MINUTES,
@@ -658,7 +661,7 @@ const DEFAULTS: Omit<Config, 'sandboxRoot' | 'standingRoot' | 'repo' | 'unity' |
   // Sonnet 5.5 implements (Ben, 2026-10-08); the orchestrators, the dispatcher and the ops worker stay on Opus.
   defaultModel: 'sonnet',
   orchestrator: { model: 'opus', effort: 'medium', notifyOnWorkerEvents: true },
-  worker: { permissionMode: 'bypassPermissions', effort: 'high' },
+  worker: { permissionMode: 'bypassPermissions', effort: DEFAULT_WORKER_EFFORT },
 };
 
 /**

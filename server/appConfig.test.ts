@@ -511,3 +511,17 @@ test('set_app_config: placement.hold { why, except } (w1863) keeps the reason wh
   setAppConfig(file, cfg, 'placement.hold', null);
   assert.deepEqual(cfg.placement, {});
 });
+
+test('set_app_config (w2000): worker.effort takes low, medium, high or max, live; null is high again', (t) => {
+  const { file, cfg } = setup(t);
+  cfg.worker = { permissionMode: 'bypassPermissions', effort: 'high' };
+  assert.deepEqual(setAppConfig(file, cfg, 'worker.effort', ' medium '), { before: undefined, after: 'medium' });
+  assert.equal(cfg.worker.effort, 'medium');
+  assert.equal(cfg.worker.permissionMode, 'bypassPermissions');
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).worker.effort, 'medium');
+  for (const e of ['low', 'high', 'max']) assert.equal(normalizeSetting('worker.effort', e), e);
+  for (const bad of ['xhigh', 'Medium', 'fast', 3]) assert.throws(() => normalizeSetting('worker.effort', bad), /worker.effort is one of low, medium, high, max/);
+  setAppConfig(file, cfg, 'worker.effort', null);
+  assert.equal(cfg.worker.effort, 'high');
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).worker?.effort, undefined);
+});
