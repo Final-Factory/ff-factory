@@ -5,6 +5,7 @@ import { headBranch, isUrgentBranch } from './releaseHandBack.ts';
 import { checkMainCloneShell, flatten, normPath, pathSpellings, spellingsRegex, type MainCloneGrant } from './mainCloneGuard.ts';
 import { checkTiming } from './timingGuard.ts';
 import { checkTimedAsk, type TimedAskState } from './timedAsk.ts';
+import { checkChecksRead, checkTimedSleep } from './waitGuard.ts';
 import os from 'node:os';
 import path from 'node:path';
 import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
@@ -61,6 +62,8 @@ import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
  *     email, so nobody's private address ends up in public history.
  *   - release branches (w1856): no commit, merge, cherry-pick, revert, am, pull or rebase in a sandbox on urgent/<v>, the
  *     urgent release lane's pointer at the commit it builds (checkReleaseBranchCommit, server/releaseHandBack.ts).
+ *   - waits that never work (w2015): `gh pr checks` and `--json statusCheckRollup` (a vault token cannot read checks), and a
+ *     command that only sleeps on the clock for over 180 s (checkChecksRead, checkTimedSleep: server/waitGuard.ts).
  *   - branch switches: while the sandbox's editor runs, no `git switch` / `git checkout <branch>` in the
  *     sandbox (Unity would stop on "The open scene(s) have been modified externally"); the worker's
  *     switch_branch tool does it safely. `git checkout -- <paths>` and `git restore` stay allowed.
@@ -162,6 +165,9 @@ export function sandboxGuard(opts: {
         (opts.editorRunning?.() ? checkEditorSwitch(cmd, input.cwd || opts.sandboxPath, opts.sandboxPath) : undefined) ??
         checkReleaseBranchCommit(cmd, input.cwd || opts.sandboxPath, opts.sandboxPath) ??
         checkPlayerLaunch(cmd, opts.sandboxId) ??
+        // w2015: no CI check read the vault token cannot make, no wait that only sleeps (server/waitGuard.ts).
+        checkChecksRead(cmd) ??
+        checkTimedSleep(cmd, { timeoutMs: typeof args.timeout === 'number' ? args.timeout : undefined, background: args.run_in_background === true }) ??
         (opts.benchBusy ? checkBenchBusyLaunch(cmd, opts.benchBusy) : undefined) ??
         (opts.personBusy ? checkPersonPlayLaunch(cmd, opts.personBusy) : undefined) ??
         checkRawUnityBatch(cmd, cloneSpellings) ??

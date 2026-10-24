@@ -41,12 +41,12 @@ const DELETE_VERBS = new Set(['rm', 'rmdir', 'unlink', 'rd', 'del', 'erase', 're
 /** cmd.exe's verbs: `/s` and `/q` are flags there, but `/c` is a path to rm. */
 const CMD_VERBS = new Set(['rd', 'del', 'erase']);
 /** `$(...)` and `` `...` ``: a value the text does not give. */
-const SUBSTITUTION = /\$\([^()]*\)|`[^`]*`/g;
+export const SUBSTITUTION = /\$\([^()]*\)|`[^`]*`/g;
 
 /** Pipeline stages that pass a listing on to the next (Get-ChildItem X | Where-Object {...} | Remove-Item). */
 const PASS_THROUGH = new Set(['where-object', 'where', 'select-object', 'select', 'sort-object', 'sort', 'head', 'tail', 'grep', 'xargs']);
 const LISTERS = new Set(['get-childitem', 'gci', 'ls', 'dir', 'get-item', 'gi', 'find']);
-const SHELL_PAYLOAD_FLAGS = new Set(['-c', '-lc', '-ic', '-command', '/c', '/k']);
+export const SHELL_PAYLOAD_FLAGS = new Set(['-c', '-lc', '-ic', '-command', '/c', '/k']);
 /** PowerShell parameters (and rm's) whose next word is a value, not a path. */
 const VALUE_FLAGS = new Set(['-erroraction', '-ea', '-include', '-exclude', '-filter', '-stream', '-credential']);
 const PATH_FLAGS = new Set(['-path', '-literalpath', '-lp']);
@@ -73,7 +73,7 @@ const escapes = (s: string, i: number, word: string) =>
   s[i] === '\\' && i + 1 < s.length && /[\s"']/.test(s[i + 1]) && !/\\(?![\s"'])/.test(word) && !/^["']?[a-zA-Z]:$/.test(word);
 
 /** A word with its shell quoting removed: quoted parts joined to the rest (`~/"Never Games"/x`), `\ ` as a space. */
-function unquote(w: string): string {
+export function unquote(w: string): string {
   let out = '';
   let q = '';
   for (let i = 0; i < w.length; i++) {
@@ -89,7 +89,7 @@ function unquote(w: string): string {
 }
 
 /** The words of a statement, as written: a quoted part or an escaped space belongs to its word (w1505). */
-function words(s: string): string[] {
+export function words(s: string): string[] {
   const out: string[] = [];
   let cur = '';
   let q = '';
@@ -113,7 +113,7 @@ function words(s: string): string[] {
 }
 
 /** The program a word names, lower case, without a directory or `.exe`. */
-const verbOf = (w: string) => unquote(w).replace(/\\/g, '/').split('/').pop()!.replace(/\.exe$/i, '').toLowerCase();
+export const verbOf = (w: string) => unquote(w).replace(/\\/g, '/').split('/').pop()!.replace(/\.exe$/i, '').toLowerCase();
 
 /**
  * A path as written in the command, made absolute and normalised (forward slashes, lower case, no trailing slash), or
@@ -193,7 +193,7 @@ function pathsOf(verb: string, args: string[]): string[] {
 }
 
 /** Statements of one command line: `cd` is tracked by the caller, so each one carries the stage list of its pipeline. */
-function statements(cmd: string): string[][] {
+export function statements(cmd: string): string[][] {
   // Respecting quotes: a separator inside "..." or '...' belongs to the word.
   const out: string[][] = [];
   let cur: string[] = [];
