@@ -43,6 +43,8 @@ import { VideoPreviews } from './videoPreview.ts';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { keepMessageImages } from './inlineImages.ts';
 import { AttachmentError, AttachmentStore, downloadDisposition, machineAttachment, machineUploadHttp, publicRef } from './attachments.ts';
+import { TimedRuns } from './timedRuns.ts';
+import type { ToDaemon } from './machineProtocol.ts';
 import { REVIEW_DEFAULTS, ReviewStore, reviewHttp } from './review.ts';
 import { HostHealthMonitor } from './hostHealth.ts';
 import { PATH_HEALTH_FILE, PathHealthMonitor, filePathHealth } from './pathHealth.ts';
@@ -494,6 +496,28 @@ machines.onLiveState = (machineId, msg) => liveHub.onState(machineId, msg);
 machines.onLiveStaged = (machineId, msg) => liveHub.staged(machineId, msg);
 machines.onLiveHello = (machineId, running) => void liveHub.daemonHello(machineId, running);
 agents.attachments = attachments;
+// Timed runs on play-only machines (w1946, docs/machines.md "A play-only timing machine"): builds made anywhere, timed
+// there under its exclusive bench ticket, the logs back to the worker.
+const timedRuns = new TimedRuns({
+  dataDir: cfg.dataDir,
+  store: attachments,
+  machines: () => machines.list(),
+  isOnline: (id) => machines.isOnline(id),
+  offers: (id) => machines.offersTimedRuns(id),
+  post: (id, msg) => machines.postTo(id, msg as ToDaemon),
+  deliver: (session, text, files) => agents.timedRunDelivered(session, text, files),
+  log: (line) => console.log(line),
+});
+agents.timedRuns = timedRuns;
+machines.timedHello = (id, active) => timedRuns.onHello(id, active);
+machines.timedReport = (id, msg) => timedRuns.onReport(id, msg);
+setInterval(() => {
+  try {
+    timedRuns.tick();
+  } catch (e) {
+    console.warn(`timed runs: ${(e as Error).message}`);
+  }
+}, 5 * 60_000).unref();
 agents.spend = spend;
 // Review media workers publish (docs/review.md): <sandboxRoot>/_review unless config review.root says otherwise.
 const review = new ReviewStore(() => ({ ...REVIEW_DEFAULTS, ...cfg.review, root: cfg.review?.root ?? path.join(cfg.sandboxRoot, '_review') }));

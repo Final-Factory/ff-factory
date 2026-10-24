@@ -865,6 +865,53 @@ Capacity line says "no timed runs"), and a start pinned to it for such work is r
 `writeBenchPriorities`), and the game repo's `scripts/bench/bench_queue.py` then refuses every exclusive ticket there,
 naming the computers that take them. Builds, editors, coding and tests go there as before (shared tickets).
 
+**A play-only timing machine** (w1946, lothsahn, 2026-10-23: "I have a desktop with 16GB ram. Windows takes 12G so there's
+not enough room for an editor. However, it could play the game and potentially be useful for benchmarks... Can the portal do
+builds on one machine and then use this other with an exclusive lock for benchmarks?", then "File it: play-only timing machine,
+builds elsewhere, exclusive lock there"). `Machine.playOnly` (add_machine `play_only "<why>"`, `""` clears it) makes a computer
+that only plays the game. It has no pool, so it gets no sandbox, no worker and no standing agent (`poolSettingsOf` is null and
+`agentCap` 0, `server/machines.ts`), whatever its installer's daemon.json says. Placement never sees it: the Capacity block
+lists it on a line of its own ("Play-only timing machines ...", `TimedRuns.capacityLine`). It joins by the usual join
+([worker-install.md](worker-install.md)): `add_machine join_code` with `play_only` gives the installer's smallest limits (one
+sandbox's player-slot pair, `slot1-0` and `slot1-1`, whose firewall rules the install makes; the bare repo clone of about 1.3 GB;
+no Unity). Within lothsahn's rule ("I don't want a unilateral way into machines... just build scoped commands for the
+functionality needed"), it takes one named operation and nothing else:
+
+1. **A worker's `timed_run`** (builds `[{name, path, args?}]`, save, rounds, sample_s, settle_s, res, machine). Its own daemon
+   (`machine/timedRunPack.ts`) reads each build folder (a Windows player in the sandbox, the session's temp folder or the
+   worker install; `.pdb` files and `*_DoNotShip` folders are left out) and cuts it into pieces named by their SHA-256 (a file
+   of 8 MB or more in pieces of at most 64 MB, smaller files grouped up to 16 MB; `shared/timedRun.ts planPieces`). The portal's
+   plan (`server/timedRuns.ts`) answers an attachment upload for each piece it lacks. The daemon sends those over its own link,
+   the same way `publish_attachment` does, and says `go`. The same bytes are one piece wherever they come from, so the second
+   build of an A/B and every later run send only what changed. On 2026-10-23 the two big `.resS` files (1.19 GB of a 1.86 GB
+   player) were the same in four of five BEAST builds from different branches (measured). The portal drops a piece unused for
+   3 days (`PIECE_KEEP_MS`, `AttachmentStore.forget`).
+2. **The timing machine's daemon** gets the run as data (`timed_run`: pieces by hash, the save, the variants' `-ff` switches,
+   bounded numbers; `machine/timedRunner.ts`). It refuses an order whose switches, numbers or names fail the shared checks, and
+   any file path that would leave the player folder. It fetches the pieces it lacks (checked against their SHA-256; it keeps up
+   to 8 GB of them between runs) and lays each distinct build out in a player slot. It copies the save into the game's saves
+   folder as `ffa-timed-<run>.zip` and removes it afterwards. Once no other live ticket is in its bench queue and nobody plays
+   there (w1894), it holds the machine's exclusive ticket for the whole run. It writes that ticket in the queue's own format
+   (`tNNNNNNNN/info.json`, `granted`, `bench.lock/owner`), held by the daemon's own process: a play-only machine has no checkout
+   or python for `bench_queue.py`, so the bench row and `readBenchLock` show it like any other ticket. Each leg is the game
+   repo's `scripts/bench/probe_ab_win.sh` leg with its fixed arguments (`legArgs`: solo, the save, the perf probe after the
+   settle, quit after the dwell). Before a leg it waits up to 2 minutes for the rest of the machine to drop below 25% CPU, and
+   it samples the CPU every 2 s during the leg. A leg that runs past its bound is ended. A leg during which a person used the
+   computer (the tray's last input) carries a note. The legs run in probe_ab_win.sh's order, flipped on even rounds. The daemon's
+   own clean-up waits while a run plays.
+3. **The logs come back** as one `timed-<run>.tar.gz` (ustar, gzipped) in probe_ab_win.sh's layout
+   (`<run>/<variant>/round<R>/player.log`, `cpu.csv`, `launch.txt`; `summary.tsv`, `contention.txt`, `run.json`). The portal
+   delivers it to the worker's Inbox with the table (frameAvgMs per leg, each variant's mean ± SD), cancelling the worker's
+   check-in (`Agents.timedRunDelivered`). The worker ends its turn after `timed_run` answers, with a wake_me check-in of the
+   run's bound as the fallback. A run far past its bound is failed and its worker told (`TimedRuns.tick`). A daemon that
+   restarted mid-run gets the run again from its hello (`timedActive`).
+
+Only play-only computers take a `timed_run`, picked by name or as the online one with the fewest runs ahead. Every worker
+install's daemon offers `timedRuns`, but the portal sends none elsewhere. What the timing machine runs is the build's own
+`finalfactory.exe` from its player slot, as the daemon's user, one leg at a time. That is the game a worker built, so treat
+a play-only machine like any computer that runs workers' builds. Its numbers compare only with its own. Tests:
+`server/timedRuns.test.ts` (an in-process run end to end over the real upload and fetch routes, with a fake player).
+
 The dispatcher picks the computer for each request itself (`start_agent` with a sandbox id; there is no automatic
 placement), so FF Factory shows it each computer's room where it decides, names the computer the next piece of work
 should go to, and says so when it places work elsewhere. New game-repo work is **spread** across the computers with
@@ -1135,6 +1182,55 @@ LothDesktop and Beast, not just when BEAST is full").
     timed work" counts it as that computer's queued timed work (`pickTimed`) and lists every held leg, with "has ROOM:
     start it now" where its computer has room.
   - Tests: the two w1863 cases in `server/orchestrators.test.ts`.
+- **Pair runs are placed as one unit** (w1945, lothsahn, 2026-10-23: "Can we make the dispatcher smart enough so it queues
+  work properly that requires running together across multiple machines and doesn't waste slots?"). That evening w665's
+  worker d558ba14 held m3's only sandbox (so m3 took no work, and 15 requests read "WRONG: m3 has room") while the
+  two-machine run of its PR #2340, w1936, sat Queued for a Windows or Linux pair; w1940's client leg on biscuit waited on
+  w1898's host leg on lothdesktop, w1826's host on biscuit's client, each leg placed on its own and holding a sandbox while
+  the other waited. A check that needs several computers at once (a host and its clients) is now one request, and its legs
+  start together.
+  - **Asking for one: `request_pair`** (a worker tool, `CATALOG.request_pair` in `server/launch.ts`; `Orchestrators.filePair`).
+    `what` (a line), `brief` (what the legs run: branch or commit, scenario, what passes, where the result goes; each leg is
+    a new worker), `legs` (2 to `PAIR_MAX_LEGS`, 4; default 2), `cross_os` (why, only for the reasons the game repo's
+    Determinism-Test-Strategy.md "Which machines" lists, w1692) and `timed` (a leg takes timing measurements). It files a
+    request (`WorkItem.pair`: legs, `for` the asking request and `forSession` its worker, `crossOs`, `timed`) for the
+    asking request's people at its priority, needing a game sandbox per leg, and Blocks the asking request on its report
+    (`blocked_on` `reports`). The w890 release ("it waits on another request", below) then frees the worker's sandbox as
+    its turn ends, and the host leg's result (a line `For wNNN:`) resumes it. One open pair run per request: asked again,
+    the worker waits on the one there is. The worker's brief says to use it, and never to hold a sandbox for a second
+    machine's worker; a daemon older than the tool does not offer it (the portal sends a worker only the tools its daemon's
+    catalog names).
+  - **Starting one: `start_agent` with `pair_sandboxes`** (`Agents.startPairLegs`). `sandbox` is leg 1, the host, and
+    `pair_sandboxes` the other legs, each a FREE sandbox on another computer. Every leg is checked before any starts (online,
+    FREE, `placement.hold`, `placement.minPriority`, no timed legs where no timed runs go, the Mac rule below) and a refusal
+    ends "Nothing was started"; then each starts with the same prompt plus a section saying its leg and where the others
+    are. A leg that fails to start stops the legs started before it, so no sandbox waits for a pair that is not running.
+    The request records `pair.started` (when, each leg's session and sandbox, leg 1 first). A pair request is refused
+    without `pair_sandboxes` (one leg alone), and two legs on one computer are refused. A request not filed as a pair can be
+    started as one by giving `pair_sandboxes` (a cross-OS pair is asked for with `request_pair`).
+  - **Talking: `message_pair`** (a worker tool, `Agents.messagePair`): a leg's message reaches every other leg's worker of
+    its started pair run, as a message that resumes a leg that ended its turn (where the host listens and on which commit,
+    that a client joined, that a leg failed).
+  - **Which computers.** Legs go on computers that are not Macs (a Mac refuses a multiplayer client, w665). A cross-OS pair
+    may put one Mac as the host, never a client, and needs its legs on two operating systems. Timed legs never go where no
+    timed runs go (the m5). `placement.prefer`, holds, reservations and exclusive bench tickets are as for any work: each leg
+    is a game worker in its own sandbox, and a timed leg takes its ticket as every timing run does. Code: `shared/capacity.ts`
+    `pairRoom` and `unfitWhy`.
+  - **Room for a pair is room for all its legs at once.** `roomForWork` (`server/placement.ts`), the Queued line
+    (`shared/workState.ts` `queuedLive`), the WRONG flag (`roomEnough` on the room that has stood), the capacity ping and
+    `decide_work queue` count a pair as room only where as many computers that fit have room at the same moment; fewer read
+    "queued for capacity (a pair run of 2 legs, on computers that are not Macs): a pair run of 2 legs needs 2 computers with
+    room at once, and only biscuit has room it fits". With room for all legs the ping and the queue refusal say to start its
+    legs together, naming a pick.
+  - **Not starved by single work** (`Agents.pairHoldProblem`). While a pair run is Queued, a computer's LAST free sandbox
+    that the pair fits is held for it from newer game work of no higher priority: `start_agent` refuses it there, naming the
+    pair. A computer with two free sandboxes still takes single work, and work of higher priority goes first (a person's
+    "Start now" makes a request urgent). Without this each sandbox that frees goes to the next single request, and a pair,
+    which needs two at the same moment, waits for a coincidence.
+  - Tests: `server/w1945PairRuns.test.ts` (the room rules, the Queued line) and the w1945 cases in
+    `server/orchestrators.test.ts` (request_pair blocks the asking worker and its sandbox is released, both legs start
+    together and never one alone, a Mac is no client, message_pair, the hold, the WRONG flag and the queue), and in
+    `server/machineSandboxes.test.ts` the asking worker stopped and its sandbox released FREE by the release pass.
 - **The rule** (the dispatcher's prompt): new game-repo work (code, tests, Unity, built players) goes where the
   Capacity block's last line says, even when a sandbox on the other computer is free. Discord posting as Max pins no
   computer: any worker posts with `post_as_max` and FFBox posts (w901, [ffbox.md](ffbox.md#posting-as-max-w901)). A computer that is avoided or not next keeps only what needs it: `F:\ffsb\_review`, ssh to the M5 from BEAST, a brief that pins it
@@ -1298,6 +1394,10 @@ LothDesktop and Beast, not just when BEAST is full").
     `Agents.busyIn`), or for work that needs only an agent seat (`extra_agent`, or a request on another repo: it works
     in its own clone). The answer then says "Not handed over" and why. Game work never starts beside a busy worker,
     `extra_agent` or not: `start_agent` refuses it ("sandbox … is busy"), so it goes to a FREE sandbox or is queued.
+    **While it is handed over it is taken** (w1944): the editor stop and the switch run before the new worker exists, and
+    meanwhile the sandbox had no agent in it, so it counted FREE (room, the Queued WRONG flag, `decide_work queue`, a second
+    `start_agent`). `Agents.handing` marks it for that time: not free, and another start there is refused ("sandbox … is
+    being handed to new work w1911 now").
   - **When it resumes** (its check-in, or anyone's message), it is placed again like new work: its own sandbox if that
     is still free (switched back to its branch if someone switched it), else a free sandbox on the same machine whose
     editor is not running first, stopped and switched to its branch (`switch_branch`, so a sandbox with uncommitted

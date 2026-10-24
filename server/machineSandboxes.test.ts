@@ -101,6 +101,35 @@ test('w890: the whole loop: a worker that ends its turn waiting on a deploy free
   await until('both stopped', () => !n.live && !w.live);
 });
 
+test('w1945: a worker that asks for a pair run with request_pair frees its sandbox as its turn ends: stopped, released FREE on its branch, and placed again when the pair reports', async (t) => {
+  const { r, store, sessions, mm, agents, path1, gitNow } = await twoSandboxes(t);
+  // w665's case (2026-10-23): its worker held m3's only sandbox while the two-machine run of its PR waited for a pair.
+  const w = mm.createSession('pc', { kind: 'worker', title: 'w665 work', permissionMode: 'default', sandbox: 'sb1' });
+  sessions.send(w.info.id, 'go');
+  await until('w live and idle', () => w.live && w.info.status === 'idle');
+  fs.writeFileSync(path.join(path1, 'pin.txt'), 'no collider');
+  r.git(path1, 'add', 'pin.txt');
+  r.git(path1, 'commit', '-q', '-m', 'w665 pin');
+  r.git(path1, 'push', '-q', '-u', 'origin', 'HEAD');
+  const by = { userId: 'lothsahn', displayName: 'Lothsahn' };
+  const item: WorkItem = { id: 'w665', title: 'Low-ore pin collider', brief: 'Do it.', priority: 'urgent', keys: [], requestedBy: by, requesters: [], humanAsked: true, status: 'active', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), sessionIds: [w.info.id], overlaps: [], asks: 0, log: [] };
+  store.putWork(item);
+  store.workSeq = Math.max(store.workSeq, 665);
+  const o = agents.orchestrators;
+  const out = o.filePair(w.info.id, { what: 'MP-lowore-pin-pair on PR #2340', brief: 'Run MP-lowore-pin-pair on the branch; 400 heartbeats compared, none diverged.' });
+  const id = /^Filed (w\d+)/.exec(out)![1];
+  assert.equal(item.status, 'blocked');
+  assert.equal(store.work.get(id)!.pair?.for, 'w665');
+  await gitNow('sb1');
+  (agents.placeAgain as unknown as { d: { soon?: () => void } }).d.soon = () => undefined;
+  assert.match(agents.placeAgain.tick().join('\n'), new RegExp(`stopped .*\\(it waits on w665: ${id}`));
+  await until('w stopped', () => !w.live && w.info.status === 'stopped');
+  await gitNow('sb1');
+  assert.match(agents.placeAgain.tick().join('\n'), new RegExp(`released pc/sb1 of .* \\(it waits on w665: ${id}`));
+  assert.equal(w.info.placeReleased?.branch, 'feature/w1');
+  assert.match(agents.describeAllSandboxes(), /pc\/sb1 FREE/);
+});
+
 const until = async (what: string, cond: () => boolean, ms = 60_000) => {
   const end = Date.now() + ms;
   while (!cond()) {
@@ -1574,4 +1603,34 @@ test('w1856: a release build hands its sandbox back: switch_branch onto urgent/<
   assert.match(prep.note, /^ Handed over first: pc\/sb1 was on the release branch urgent\/1\.0\.0\.12, which a release build left it on \(w1856\)/);
   assert.equal(r.git(path1, 'branch', '--show-current'), 'sandbox/sb1-w1767');
   assert.equal(sbOf('sb1')!.branch, 'sandbox/sb1-w1767');
+});
+
+test('w1944: a sandbox being handed to new work (its editor stopped, its branch switched, before the worker exists) is not free: no room for it, and a second start into it is refused', async (t) => {
+  const { mm, sessions, agents, gitNow } = await twoSandboxes(t);
+  const w = mm.createSession('pc', { kind: 'worker', title: 'w1935 work', permissionMode: 'default', sandbox: 'sb1' });
+  sessions.send(w.info.id, 'go');
+  await until('w live and idle', () => w.live && w.info.status === 'idle');
+  w.stop();
+  await until('w stopped', () => !w.live);
+  // It released sb1 on its own branch while it waits on CI, as 604a6cdc released biscuit/slot1 at 01:12:48Z.
+  w.info.placeReleased = { at: new Date().toISOString(), sandbox: 'sb1', branch: 'feature/w1', why: 'it waits on CI (w1935)' };
+  await gitNow('sb1');
+  const free = () => agents.places().find((p) => p.id === 'pc')!.freeSandboxes;
+  assert.equal(free(), 2);
+  let open!: () => void;
+  const gate = new Promise<void>((res) => (open = res));
+  const hands = mm as unknown as { switchBranch: (...a: unknown[]) => Promise<unknown> };
+  const real = hands.switchBranch.bind(mm);
+  hands.switchBranch = async (...a: unknown[]) => {
+    await gate;
+    return real(...a);
+  };
+  const prep = agents.prepareForNewWork('pc/sb1', undefined, 'W1911');
+  await until('sb1 handed', () => free() === 1);
+  await assert.rejects(agents.prepareForNewWork('pc/sb1', undefined, 'W1917'), /sandbox pc\/sb1 is being handed to new work W1911 now/);
+  open();
+  const done = await prep;
+  assert.equal(done.branch, 'sandbox/sb1-w1911', done.note);
+  // Handed over and no worker started in it (a failed start): free again.
+  assert.equal(free(), 2);
 });

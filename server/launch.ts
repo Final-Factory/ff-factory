@@ -156,6 +156,19 @@ export const CATALOG = {
     what: z.string().min(1).max(200).describe('What you wait for, in a line ("w727 PR #1291 and w752 fix merged into master").'),
     request: z.string().max(16).optional().describe('The request ("w750") that waits, when you serve several; default: the one you are on.'),
   },
+  /** w1945 (docs/machines.md, "Pair runs"): a check that needs several computers at once, filed as one request; the worker waits on its report. */
+  request_pair: {
+    what: z.string().min(1).max(100).describe('The run in one line: "MP-lowore-pin-pair on PR #2340".'),
+    brief: z.string().min(1).max(6000).describe('What the legs run, as a worker needs it: the branch or commit, the scenario or steps for the host and the clients, what passes (counts, ranges), and where the result goes (a PR comment). Each leg is a new worker that knows nothing else.'),
+    legs: z.number().int().min(2).max(4).optional().describe('Computers it needs at once, one worker on each (default 2: a host and a client).'),
+    cross_os: z.string().max(300).optional().describe('Only when the change can behave differently across OSes (w1692: float or math-library use in the simulation, Burst or IL2CPP codegen, platform APIs or paths, the desync hash, a desync seen only across OSes): why. Without it the legs go on computers that are not Macs; with it a Mac may host, never a client.'),
+    timed: z.boolean().optional().describe('A leg takes timing measurements (exclusive bench tickets): no leg goes on a computer that takes no timed runs (m5).'),
+    request: z.string().max(16).optional().describe('The request ("w665") it is for, when you serve several; default: the one you are on.'),
+  },
+  /** w1945: a leg of a pair run tells the other legs' workers something. */
+  message_pair: {
+    text: z.string().min(1).max(4000).describe('What the other legs need to know: "host listens at 100.74.97.12:7890 on commit 1a2b3c4", "client joined at heartbeat 812", "my leg failed: <why>".'),
+  },
   /** docs/orchestrators.md, "Waiting, Queued, Blocked" (w691): the worker says only a person can move it on. */
   waiting_on_person: {
     who: z.string().min(1).max(120).describe('Whose action it waits on: a name ("Ben"), several separated by commas, or "a reviewer".'),
@@ -194,6 +207,29 @@ export const CATALOG = {
     release: z.boolean().optional().describe('coming, start: true for an urgent release\'s build (a quick or urgent release, w1639), the only kind build_plan plans: a normal release is FFBox\'s and builds nothing here. Your own player build needs no plan: build where you are.'),
     minutes: z.number().int().min(0).max(240).optional().describe('coming: lead time in minutes until the build starts (0: now).'),
     what: z.string().max(160).optional().describe('coming: what it builds ("Windows player for the w1475 clip").'),
+  },
+  /**
+   * w1946 (docs/machines.md, "A play-only timing machine"). On a machine the daemon reads and sends the builds itself: the
+   * portal plans (which pieces it lacks) and hands the run to a play-only computer; the worker hears the result in a message.
+   */
+  timed_run: {
+    builds: z
+      .array(
+        z.object({
+          name: z.string().max(24).describe('The variant name in the table, e.g. "base" or "fix" (letters, digits, - and _).'),
+          path: z.string().max(400).describe('The built Windows player folder (finalfactory.exe beside finalfactory_Data), in your sandbox, your temp folder or the worker install of this computer.'),
+          args: z.array(z.string().max(64)).max(8).optional().describe('Its own -ff switches after the fixed arguments (e.g. ["-ffNoHangWatchdog"]); one build may be listed twice with different switches.'),
+        }),
+      )
+      .min(1)
+      .max(4)
+      .describe('The players to compare: usually two, the build before your change and the build with it, each built where you are.'),
+    save: z.string().max(400).describe('The save every leg loads (.zip, at most 64 MB), copied into your working folder or temp folder.'),
+    rounds: z.number().int().min(1).max(20).optional().describe('Rounds (default 4; even, so each variant runs first as often). Each round runs every variant once, the order reversed on even rounds.'),
+    sample_s: z.number().int().min(5).max(300).optional().describe('Seconds the perf probe samples each leg (default 20).'),
+    settle_s: z.number().int().min(5).max(300).optional().describe('Seconds after the save is ready before the sample (default 25).'),
+    res: z.enum(['1920x1080', '1280x720', '1280x800', '2560x1440']).optional().describe('Window size (default 1920x1080).'),
+    machine: z.string().max(40).optional().describe('A play-only machine by id; default the online one with the fewest runs ahead.'),
   },
   switch_branch: {
     branch: z.string().describe('The branch to switch to, e.g. "spec-098-belts".'),

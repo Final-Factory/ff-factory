@@ -91,6 +91,7 @@ export const TOOL_MANIFEST = {
   host_recovery: { group: 'machines', kinds: [D, R] },
   ops_worker: { group: 'machines', kinds: [P] },
   portal_logs: { group: 'machines', kinds: [W] },
+  timed_run: { group: 'machines', kinds: [W] },
   // timers
   wake_me: { group: 'timers', kinds: [D, P, R, O, W], always: [D, P, O] },
   set_timer: { group: 'timers', kinds: [D, P, R, O], always: [O] },
@@ -102,6 +103,9 @@ export const TOOL_MANIFEST = {
   set_pool: { group: 'admin', kinds: [P, R] },
   cancel_wake: { group: 'timers', kinds: [W] },
   blocked_on: { group: 'timers', kinds: [W] },
+  // w1945: a check on several computers at once, and its legs talking to each other.
+  request_pair: { group: 'timers', kinds: [W] },
+  message_pair: { group: 'timers', kinds: [W] },
   waiting_on_person: { group: 'timers', kinds: [W] },
   // ffbox
   ffbox_activity: { group: 'ffbox', kinds: [D, P, R] },

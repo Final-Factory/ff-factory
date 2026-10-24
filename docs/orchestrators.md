@@ -565,6 +565,16 @@ had room, which read as "LothDesktop can take more work but the queue isn't movi
      each computer has had room (`RoomNow.since`, read each minute by the blocker watch and at every page or list_work read); a
      request is WRONG only beside room that has stood `ROOM_STAND_MS` (5 minutes, a judgment: the quiet spell, the 2-minute
      gap and a dispatcher turn), and reads "m5 has room since 1 min ago: the capacity ping brings it to the dispatcher" before.
+   - **One free sandbox is room for one request: the first in the queue that fits it** (w1944, lothsahn, 2026-10-24: "Why does
+     the dispatcher say biscuit has room when it's full?"). At 01:15:09Z biscuit/slot3 freed, biscuit's one free sandbox;
+     19 queued requests could use it, all read WRONG, and `decide_work queue` refused w1961 ("biscuit has room for w1961
+     now") though the sandbox went to w1917, older, at 01:16Z. `RoomNow.slots` counts how many more workers each computer
+     takes (`slotsOf`: free sandboxes and those it may make, up to its agent limit; agent seats up to its cap), and
+     `roomShares` (`shared/workState.ts`) hands them out in the order work starts (urgent first, then the oldest; a leg held
+     for named computers, w1863, takes its place too), each to the computer that fits with the most left. A request whose
+     room all goes ahead of it reads "biscuit has room, but it goes first to w1917, ahead in the queue (urgent first, then
+     the oldest): it starts when more frees", is not flagged, and may be queued (its note says the same). list_work, the
+     page, the flag and the queue gate read the one function.
 
    **"Has room" is one test.** `roomNow` (`server/placement.ts`) returns the room for each kind of work and the held
    computers, built from the same `hasRoom` / `busyReasons` that print BUSY or ROOM in the Capacity block of
@@ -745,6 +755,9 @@ without one means it is off or failing, worth a person's look.
     pick" reads as a wait on Ben;
   - a wait on another request's worker ("needs the w1761 stills") is **Blocked on that request** (w1818); `blocked_on` with
     `reports` (its id) records it as a `request` gate with `on: report`, so the worker is resumed when that worker reports;
+  - a check on several computers at once (a two-machine determinism check) is the worker's `request_pair` (w1945): one pair
+    request whose legs the dispatcher starts together, and the asking request **Blocked on its report**, so the worker's
+    sandbox is released while it waits ([machines.md](machines.md), "Pair runs are placed as one unit");
   - a worker that waits on the orchestrator stays Stalled and the line says so, adding "that is its own work" for a pair or
     two-machine check, a build, a test run or its CI (w1685). Such a worker is told at its turn's end, once per request
     (`Agents.ownWorkNudge`), and every worker's prompt says these are its own work.

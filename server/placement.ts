@@ -1,5 +1,5 @@
 import type { BenchLock, BenchQueueReport, WorkItem, WorkPriority } from '../shared/types.ts';
-import { admitsPriority, minPriorityText, MIN_PRIORITIES, reservedText, ROOM_STAND_MS, unfitWhy, type MinPriority, type ReservedRoom, type RoomFit } from '../shared/capacity.ts';
+import { admitsPriority, minPriorityText, MIN_PRIORITIES, reservedText, pairRoom, ROOM_STAND_MS, unfitWhy, type MinPriority, type ReservedRoom, type RoomFit } from '../shared/capacity.ts';
 
 /**
  * Where new work has room (w416, Lothsahn: "make sure jobs are getting scheduled on LothDesktop", then "Game work should
@@ -342,6 +342,12 @@ export interface RoomNow {
    * freed a minute ago is not yet a wrong Queued, since the capacity ping takes its quiet spell and a dispatcher turn to act.
    */
   since?: Record<string, number>;
+  /**
+   * How many more workers each computer with room takes now, `${kind}:${id}` to a count (w1944, lothsahn: "Why does the
+   * dispatcher say biscuit has room when it's full?"): one free sandbox is room for the first queued request that fits there,
+   * not for every one, so the rest are not WRONG and decide_work queue does not refuse them (shared/workState.ts roomShares).
+   */
+  slots?: Record<string, number>;
 }
 
 /** The holds a person or FF Factory set (placement.hold, paused machines, coming builds): they also stop resumes there. */
@@ -368,13 +374,24 @@ const holdOf = (prefs: PlacementPrefs) => {
   return out;
 };
 
+/**
+ * How many more workers of `kind` a computer with room takes now (w1944, RoomNow.slots): game work, its free sandboxes and
+ * those it may still make, up to its agent limit; agent-slot work, its free seats up to its agent cap. At least 1, since
+ * hasRoomFor said it has room.
+ */
+export function slotsOf(p: Computer, kind: NeedKind): number {
+  const n = kind === 'game' ? Math.min(p.freeSandboxes + Math.max(0, p.maxSandboxes - p.sandboxes), p.maxAgents - p.live) : Math.min(p.agentSeats ?? p.maxAgents - p.midTurn, p.maxAgents - p.midTurn);
+  return Math.max(1, n);
+}
+
 export function roomNow(places: readonly Computer[], prefs: PlacementPrefs = {}): RoomNow {
   const hold = holdOnly(prefs);
   const min = minOf(prefs);
-  const out: RoomNow = { game: [], agent: [], held: [], reserved: [], detail: {}, fit: {} };
+  const out: RoomNow = { game: [], agent: [], held: [], reserved: [], detail: {}, fit: {}, slots: {} };
   for (const p of places) {
     const kinds = (['game', 'agent'] as const).filter((k) => hasRoomFor(p, k));
     if (!kinds.length) continue;
+    for (const k of kinds) out.slots![`${k}:${p.id}`] = slotsOf(p, k);
     out.detail![p.id] = `${p.freeSandboxes} of ${p.maxSandboxes} sandboxes free, ${p.live} live agents of ${p.maxAgents}, ${memPct(p) !== undefined ? `RAM ${memPct(p)}%` : 'RAM unknown'}`;
     out.fit![p.id] = { ...(p.platform ? { platform: p.platform } : {}), ...(p.noTimedRuns ? { noTimedRuns: p.noTimedRuns } : {}) };
     const why = hold.get(p.id);
@@ -707,7 +724,7 @@ export const roomIds = (r: RoomNow, kind: NeedKind, priority?: WorkPriority): st
 ];
 
 /** The computers with room that `w` can take (w1944): roomIds for its kind and priority, within `needs`, less those it cannot run on, each with why. */
-export function roomForWork(r: RoomNow, w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes' | 'priority'>, needs?: readonly string[]): { ids: string[]; unfit: { id: string; why: string }[] } {
+export function roomForWork(r: RoomNow, w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes' | 'priority' | 'pair'>, needs?: readonly string[]): { ids: string[]; unfit: { id: string; why: string }[]; short?: string } {
   const want = needs?.map((n) => n.toLowerCase());
   const ids: string[] = [];
   const unfit: { id: string; why: string }[] = [];
@@ -717,8 +734,13 @@ export function roomForWork(r: RoomNow, w: Pick<WorkItem, 'needs' | 'title' | 'b
     if (why) unfit.push({ id, why });
     else ids.push(id);
   }
-  return { ids, unfit };
+  // w1945: a pair run has room only where enough computers it fits have room at once, one per leg; fewer are no room for it.
+  const short = w.pair ? pairRoom(w, ids, r.fit).short : undefined;
+  return short ? { ids: [], unfit, short } : { ids, unfit };
 }
+
+/** Of `ids` (room that has stood, roomStood), whether they still hold a pair run's legs at once (w1945); any one does for other work. */
+export const roomEnough = (r: Pick<RoomNow, 'fit'>, w: Pick<WorkItem, 'pair'>, ids: readonly string[]): boolean => (w.pair ? !pairRoom(w, ids, r.fit).short : ids.length > 0);
 
 export { ROOM_STAND_MS };
 

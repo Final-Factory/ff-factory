@@ -34,7 +34,7 @@
 import type { BenchLock, BuildHold, SessionInfo, WorkItem } from './types.ts';
 import { agentState, hostFailureText } from './agentState.ts';
 import { gatesName, gatesOf } from './blockers.ts';
-import { admitsPriority, needsOf, reservedText, ROOM_STAND_MS, unfitWhy, type ReservedRoom, type RoomFit } from './capacity.ts';
+import { admitsPriority, needsOf, pairRoom, pairText, reservedText, ROOM_STAND_MS, unfitWhy, type ReservedRoom, type RoomFit } from './capacity.ts';
 import type { QueueWait } from './queueWaits.ts';
 
 export type WorkLiveState = 'working' | 'waiting' | 'queued' | 'blocked' | 'paused' | 'followup' | 'stalled';
@@ -106,6 +106,10 @@ export interface WorkLiveFacts {
   roomFit?: Readonly<Record<string, RoomFit>>;
   /** Since when each computer has had room, `${kind}:${id}` to epoch ms (w1944, RoomNow.since); absent: room counts at once. */
   roomSince?: Readonly<Record<string, number>>;
+  /** How many more workers each computer with room takes, `${kind}:${id}` (w1944, RoomNow.slots); absent: room for every one. */
+  roomSlots?: Readonly<Record<string, number>>;
+  /** Who each computer's room goes to first (w1944, roomShares), set by workLiveAll from `items` and roomSlots. */
+  shares?: ReadonlyMap<string, RoomShare>;
   /** The urgent release build that paused this worker (w1841, server/buildPlans.ts pausedFor); undefined when none did. */
   buildHold?: (sessionId: string) => BuildHold | undefined;
   /** A machine's bench lock while a timed run holds it (w1841, MachineStats.benchLock); undefined when free or unknown. */
@@ -533,31 +537,98 @@ function queueLive(s: SessionInfo, q: QueueWait): WorkLive {
   return { state: 'blocked', why, waitsOn: [q.on] };
 }
 
-/** The live state of one request, or undefined once it is closed. */
-/**
- * Queued for capacity (w643), by the same room test as Capacity's ROOM/BUSY and decide_work queue (w1089), on what the
- * request needs (w1098): with a computer that could take it free, that is wrong, and says so (`roomOn`). `head` is what is
- * queued: the request, or a leg of it held for named computers while its own worker works elsewhere (w1863).
- */
-function queuedLive(w: WorkItem, f: WorkLiveFacts, wanted: readonly string[] | undefined, head: string, start = 'start it, or block it on what it waits for'): WorkLive {
+/** The computers with room for `w` (of `wanted`, when named): those it can run on (`fits`), and those it cannot, with why. */
+type RoomFacts = Pick<WorkLiveFacts, 'room' | 'agentRoom' | 'reservedRoom' | 'roomFit' | 'roomSlots'>;
+
+function roomFor(w: WorkItem, f: RoomFacts, wanted: readonly string[] | undefined) {
   const needs = wanted?.map((n) => n.toLowerCase());
   const kind = needsOf(w);
   const known = kind === 'game' ? f.room : f.agentRoom;
   // A computer reserved for higher work (w1643) is room only for a request whose priority now reaches its level.
   const reserved = (f.reservedRoom ?? []).filter((r) => r.for.includes(kind) && (!needs?.length || needs.includes(r.id.toLowerCase())));
   const room = [...(known ?? []), ...reserved.filter((r) => admitsPriority(r.min, w.priority)).map((r) => r.id)].filter((id) => !needs?.length || needs.includes(id.toLowerCase()));
-  const what = `for capacity${needs?.length ? ` on ${needs.join(' or ')}` : ''}`;
-  const slot = kind === 'agent' ? 'an agent slot' : 'room';
   // w1944: a computer it cannot run on (a Mac for an MP scenario, the m5 for timed work) is no room for it, and says why.
   const unfit = room.map((id) => ({ id, why: unfitWhy(w, id, f.roomFit) })).filter((x): x is { id: string; why: string } => !!x.why);
   const fits = room.filter((id) => !unfit.some((u) => u.id === id));
+  return { needs, kind, known, reserved, unfit, fits };
+}
+
+/** Who a computer's room goes to (w1944): `gets`, the computer whose room it takes, or `ahead`, the work ahead that takes it. */
+export interface RoomShare {
+  gets?: string;
+  ahead: string[];
+}
+
+const PRIORITY_RANK: Record<WorkItem['priority'], number> = { urgent: 0, high: 1, normal: 2, low: 3 };
+
+/**
+ * Who each computer's room goes to first (w1944, lothsahn, 2026-10-24: "Why does the dispatcher say biscuit has room when
+ * it's full?"). At 01:16Z biscuit had one free sandbox and 19 queued requests that could use it; every one read WRONG and
+ * decide_work queue refused w1961 ("biscuit has room for w1961 now"), though the sandbox went to w1917, older. Here each
+ * queued request, and each leg of another request held for named computers (w1863), in the order work starts (urgent
+ * first, then the oldest: server/work.ts priorityThenAge, w1099), takes one of RoomNow.slots on a computer it fits, the
+ * one with the most left. Keyed by request id (`<id>:leg` for a leg). `extra`: a request about to be queued, in its place
+ * in that order. Undefined without slots (an older server): every computer's room is every request's, as before.
+ */
+export function roomShares(items: readonly WorkItem[], f: RoomFacts, extra?: { w: WorkItem; wanted?: readonly string[] }): Map<string, RoomShare> | undefined {
+  if (!f.roomSlots) return undefined;
+  const queue: { key: string; w: WorkItem; wanted?: readonly string[] }[] = items
+    .filter((w) => live(w) && w.id !== extra?.w.id && (w.status === 'queued' || w.legs?.length))
+    .map((w) => (w.status === 'queued' ? { key: w.id, w, wanted: w.queuedFor?.needs } : { key: `${w.id}:leg`, w, wanted: w.legs!.flatMap((l) => l.needs) }));
+  if (extra) queue.push({ key: extra.w.id, w: extra.w, wanted: extra.wanted });
+  queue.sort((a, b) => PRIORITY_RANK[a.w.priority] - PRIORITY_RANK[b.w.priority] || a.w.createdAt.localeCompare(b.w.createdAt) || a.key.localeCompare(b.key));
+  const left = new Map(Object.entries(f.roomSlots));
+  const takers = new Map<string, string[]>();
+  const out = new Map<string, RoomShare>();
+  for (const e of queue) {
+    const { kind, fits } = roomFor(e.w, f, e.wanted);
+    // A computer without a count (a room list a test or an older reader gave) takes every one.
+    const n = (id: string) => left.get(`${kind}:${id}`) ?? Infinity;
+    const open = fits.filter((id) => n(id) > 0).sort((a, b) => n(b) - n(a));
+    // A pair run (w1945) takes one on each computer its legs need at once, or none.
+    const pick = e.w.pair ? pairRoom(e.w, open, f.roomFit).pick : open.slice(0, 1);
+    if (pick?.length) {
+      for (const id of pick) {
+        const k = `${kind}:${id}`;
+        if (left.has(k)) left.set(k, left.get(k)! - 1);
+        takers.set(k, [...(takers.get(k) ?? []), e.w.id]);
+      }
+      out.set(e.key, { gets: pick[0], ahead: [] });
+    } else out.set(e.key, { ahead: [...new Set(fits.flatMap((id) => takers.get(`${kind}:${id}`) ?? []))] });
+  }
+  return out;
+}
+
+/** "it goes first to w1917, ahead in the queue": why room a request fits is not its (w1944, roomShares). */
+export const aheadText = (s: RoomShare) => `it goes first to ${s.ahead.length ? s.ahead.join(', ') : 'other work'}, ahead in the queue (urgent first, then the oldest)`;
+
+/** The live state of one request, or undefined once it is closed. */
+/**
+ * Queued for capacity (w643), by the same room test as Capacity's ROOM/BUSY and decide_work queue (w1089), on what the
+ * request needs (w1098): with a computer that could take it free, that is wrong, and says so (`roomOn`). `head` is what is
+ * queued: the request, or a leg of it held for named computers while its own worker works elsewhere (w1863). `key`: its
+ * entry in f.shares (roomShares).
+ */
+function queuedLive(w: WorkItem, f: WorkLiveFacts, wanted: readonly string[] | undefined, head: string, start = 'start it, or block it on what it waits for', key = w.id): WorkLive {
+  const { needs, kind, known, reserved, unfit, fits } = roomFor(w, f, wanted);
+  const what = `for capacity${needs?.length ? ` on ${needs.join(' or ')}` : ''}`;
+  const slot = kind === 'agent' ? 'an agent slot' : 'room';
   // w1944: and room that freed moments ago is the capacity ping's to bring, not yet a wrong Queued.
   const age = (id: string) => (f.roomSince ? f.now - (f.roomSince[`${kind}:${id}`] ?? f.now) : Infinity);
   const stood = fits.filter((id) => age(id) >= ROOM_STAND_MS);
   const have = (ids: readonly string[]) => `${ids.join(', ')} ${ids.length > 1 ? 'have' : 'has'} ${slot}`;
-  if (stood.length) return { state: 'queued', why: `${head} ${what}, but ${have(stood)}: the dispatcher should ${start}`, roomOn: stood };
+  // w1945: a pair run is room only where enough computers it fits have room at once, one per leg.
+  const short = w.pair ? pairRoom(w, fits, f.roomFit).short : undefined;
+  if (w.pair && short) return { state: 'queued', why: `${head} ${what} (${pairText(w.pair)}): ${short}${unfit.length ? `; ${unfit.map((u) => `${u.id} has ${slot} but cannot take it: ${u.why}`).join('; ')}` : ''}` };
+  // w1944: room that work ahead of it in the queue takes is not its: it waits rightly, and says for whom.
+  const share = f.shares?.get(key);
+  if (fits.length && share && !share.gets) return { state: 'queued', why: `${head} ${what}; ${have(fits)}, but ${aheadText(share)}: it starts when more frees` };
+  if (stood.length && !(w.pair && pairRoom(w, stood, f.roomFit).short)) {
+    return { state: 'queued', why: `${head} ${what}, but ${have(stood)}: the dispatcher should ${w.pair ? `start its ${w.pair.legs} legs together (start_agent with pair_sandboxes)` : start}`, roomOn: stood };
+  }
   if (fits.length) {
-    const mins = Math.max(...fits.map((id) => Math.floor(age(id) / 60_000)));
+    // w1945: a pair has room for all its legs only since the last of them freed.
+    const mins = (w.pair ? Math.min : Math.max)(...fits.map((id) => Math.floor(age(id) / 60_000)));
     return { state: 'queued', why: `${head} ${what}; ${have(fits)} since ${mins} min ago: the capacity ping brings it to the dispatcher` };
   }
   const held = (f.heldRoom ?? []).filter((h) => h.for.includes(kind) && (!needs?.length || needs.includes(h.id.toLowerCase())));
@@ -574,7 +645,7 @@ function legLive(w: WorkItem, f: WorkLiveFacts): WorkLive | undefined {
   if (!w.legs?.length || w.status === 'queued') return undefined;
   const since = w.legs.map((l) => minute(l.at).slice(11)).join(', ');
   const head = `its leg${w.legs.length > 1 ? 's' : ''} (since ${since} UTC; its own worker elsewhere) queued`;
-  return queuedLive(w, f, w.legs.flatMap((l) => l.needs), head, 'start a worker for it there');
+  return queuedLive(w, f, w.legs.flatMap((l) => l.needs), head, 'start a worker for it there', `${w.id}:leg`);
 }
 
 export function workLive(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: string) => Holds): WorkLive | undefined {
@@ -818,7 +889,8 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: s
 
 /** Every open (or stalled) request's live state, by id. */
 export function workLiveAll(items: readonly WorkItem[], f: Omit<WorkLiveFacts, 'items'>): Map<string, WorkLive> {
-  const facts = { ...f, items };
+  const facts: WorkLiveFacts = { ...f, items };
+  facts.shares = roomShares(items, facts);
   const cache = new Map<string, Holds>();
   const holds = (sid: string) => {
     let h = cache.get(sid);
