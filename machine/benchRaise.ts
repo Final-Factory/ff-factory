@@ -15,6 +15,9 @@ import type { QueueTicket } from './benchQueue.ts';
 /** The top of the queue's order (bench_queue.py PRIORITIES[0]). */
 export const RAISE_TO: WorkPriority = 'urgent';
 
+/** bench_queue.py PRIORITIES, highest first. */
+const RANKS: WorkPriority[] = ['urgent', 'high', 'normal', 'low'];
+
 /** A shared ticket an exclusive turn has passed (w1962): `by` is that exclusive ticket, `since` when the daemon saw it. */
 export interface PassedMark {
   by: string;
@@ -36,11 +39,18 @@ function ridesAlong(t: QueueTicket, ex: QueueTicket): boolean {
 
 /**
  * The waiting shared tickets an exclusive turn has passed (w1962): one waiting while an exclusive ticket holds the lock,
- * whether it was taken during that turn or before it was granted. A mark lasts while its ticket waits (`prev`, the last
- * look's) and goes when the ticket is granted, revoked or gone. `tickets`: the queue's live tickets (queueTickets).
+ * whether it was taken during that turn or before it was granted, and one that an exclusive ticket taken after it
+ * outranks (`sessions`: the priorities the queue reads, unraised), which would otherwise be granted before it. On
+ * LothDesktop at 04:04Z on 2026-10-24 (measured) w1905's normal build had waited since 01:03Z behind w1789's high timed
+ * leg, taken later, which itself waited behind a running shared group kept urgent by slot6's game players: no exclusive
+ * held the lock, so the first case never marked it. A mark lasts while its ticket waits (`prev`, the last look's) and
+ * goes when the ticket is granted, revoked or gone. `tickets`: the queue's live tickets (queueTickets).
  */
-export function passedShared(tickets: QueueTicket[], prev: Record<string, PassedMark>, now: Date): Record<string, PassedMark> {
+export function passedShared(tickets: QueueTicket[], prev: Record<string, PassedMark>, now: Date, sessions: Record<string, BenchPriority> = {}): Record<string, PassedMark> {
   const holders = tickets.filter((t) => t.mode === 'exclusive' && t.granted && !t.revoked);
+  const rank = (t: QueueTicket) => RANKS.indexOf((t.session && sessions[t.session]?.priority) || 'normal');
+  const num = (t: QueueTicket) => Number(t.ticket.replace(/\D/g, ''));
+  const later = tickets.filter((t) => t.mode === 'exclusive' && !t.granted && !t.revoked);
   const out: Record<string, PassedMark> = {};
   for (const t of tickets) {
     if (t.mode !== 'shared' || t.granted || t.revoked) continue;
@@ -49,7 +59,7 @@ export function passedShared(tickets: QueueTicket[], prev: Record<string, Passed
       out[t.ticket] = mark;
       continue;
     }
-    const h = holders.find((x) => !ridesAlong(t, x));
+    const h = holders.find((x) => !ridesAlong(t, x)) ?? later.find((x) => num(x) > num(t) && rank(x) < rank(t) && !ridesAlong(t, x));
     if (h) out[t.ticket] = { by: h.ticket, since: now.toISOString() };
   }
   return out;
@@ -79,7 +89,7 @@ export function raisedSessions(sessions: Record<string, BenchPriority>, tickets:
 /** The editor starts' sessions (w1962): `editor:<sandbox>` at the highest priority of the worker sessions placed in that
  * sandbox (`placed`: session id and sandbox), with their requests; a sandbox with no known worker gets none (normal). */
 export function editorSessions(placed: { session: string; sandbox?: string }[], sessions: Record<string, BenchPriority>): Record<string, BenchPriority> {
-  const rank = (p: WorkPriority) => ['urgent', 'high', 'normal', 'low'].indexOf(p);
+  const rank = (p: WorkPriority) => RANKS.indexOf(p);
   const out: Record<string, BenchPriority> = {};
   for (const { session, sandbox } of placed) {
     const p = sessions[session];
