@@ -52,7 +52,7 @@ import { withTerseProse } from './terseProse.ts';
 import { WORKER_READ_RULES_TOOL, workerRuleText } from './workerRules.ts';
 import { activityLine, Waker } from './wake.ts';
 import { TIMER_LIMITS, Timers, scheduleText, type TimerView } from './timers.ts';
-import { EVEN_MARGIN, RAM_BUSY_PCT, benchText, buildOf, busyReasons, capacityLines, forPriority, hasRoom, holdReason, liveOf, lowestPriority, minOf, pickComputer, placeId, pinnedWork, placementHint, reservedReason, roomEnough, roomForWork, roomNow, timedFacts, timedKindOf, timedPinRefusal, voiceVram, type Computer, type FirstKind, type NeedKind, type PlacementPrefs, type RoomNow, type TimedKind } from './placement.ts';
+import { EVEN_MARGIN, RAM_BUSY_PCT, benchText, buildOf, busyReasons, capacityLines, forPriority, hasRoom, holdReason, liveOf, loadText, lowestPriority, minOf, pickComputer, placeId, pinnedWork, placementHint, reservedReason, roomEnough, roomForWork, roomNow, timedFacts, timedKindOf, timedPinRefusal, voiceVram, type Computer, type FirstKind, type NeedKind, type PlacementPrefs, type RoomNow, type TimedKind } from './placement.ts';
 import { MachinePauses, pauseHolds, type HandBack } from './machinePause.ts';
 import { MOVE_AFTER_MS, NONE_MARK, ROOM_WAIT, briefOf, moveDecision, movedPrompt, stayLine, type MoveFacts } from './resumeMove.ts';
 import { playHolds, playLine } from '../shared/personPlay.ts';
@@ -3863,6 +3863,8 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
         // Its timing calls outside an exclusive ticket in the last hour (w1923): the orchestrators' bench audit sees them.
         ...(untimedText(st?.bench) ? { untimed: untimedText(st?.bench) } : {}),
         ...(m.platform ? { platform: m.platform } : {}),
+        // Its CPU use over the last minute (w2054): placement spills past it at placement.spillAtPercent.
+        ...(this.machines.cpuOf(m.id) !== undefined ? { cpuPct: this.machines.cpuOf(m.id) } : {}),
         ...(legsHere.length ? { legs: legsHere } : {}),
         // It takes no timed runs (w1861): timed work goes elsewhere.
         ...(noTimedRunsOf(m) ? { noTimedRuns: noTimedRunsOf(m) } : {}),
@@ -3929,6 +3931,17 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
   private placeNote(on: string | undefined, kind: NeedKind = 'game', workflows?: { person: string | undefined }, live: boolean | FirstKind = false, priority?: WorkPriority): string {
     // Read for the request's priority now (w1643): a computer placement.minPriority reserves above it counts as held for it.
     return on ? (placementHint(on, workflows ? this.placesFor(workflows.person) : this.places(), this.lastPlaced, forPriority(this.placement(), priority), this.review?.root, kind, !!workflows, live) ?? '') : '';
+  }
+
+  /**
+   * "placement: w12 game work started on m5; placement named m5 (spilled past beast, lothdesktop ...; loads: ...)" (w2054): one
+   * line per new placement, with every computer's load as the spill tiers read it, so a spill can be checked in the log.
+   */
+  private placedLog(id: string, on: string, kind: NeedKind, live: boolean | FirstKind, priority?: WorkPriority): string {
+    const places = this.places();
+    const p = pickComputer(places, this.lastPlaced, forPriority(this.placement(), priority), kind, false, live);
+    const all = places.filter((x) => x.online).map(loadText).join(', ');
+    return `placement: ${id} ${kind} work${live ? ` (${live === true ? 'live' : live})` : ''} started on ${on}; placement named ${p ? `${p.pick.id} (${p.why})` : 'no computer with room'}; every online computer's load now: ${all}`;
   }
 
   /** The refusal for timed or exclusive-lock work pinned to a computer that takes none (w1861, w1872; placement.ts timedPinRefusal). */
@@ -4185,6 +4198,8 @@ ${w.repo ?? ''}
 ` : ''}${a.prompt}`) ? { person: w ? personForWork(this.cfg, w) : requestedBy.userId } : undefined;
             // Work that needs a Live view goes to placement.live first (w1600): said in the note, by request or prompt.
             const hint = this.placeNote(newOn, needs, workflows, needsLive(w, a.prompt) ? 'live' : needsBuild(w, a.prompt) ? 'build' : timedKind(needsTimed(w, a.prompt)), w?.priority);
+            // w2054: what placement named for it and each computer's load at that moment, read before it is placed; portal_logs shows it.
+            const placedLog = newOn ? this.placedLog(w?.id ?? nextId, newOn, needs, needsLive(w, a.prompt) ? 'live' : needsBuild(w, a.prompt) ? 'build' : timedKind(needsTimed(w, a.prompt)), w?.priority) : undefined;
             // A sandbox a waiting worker released on its own branch is switched to a fresh one first (w640), never for work
             // that needs only an agent seat, nor under a worker there (w1607).
             const handed = await this.prepareForNewWork(a.sandbox, a.machine, w?.id ?? nextId, w?.source, !!a.extra_agent || needs === 'agent');
@@ -4195,6 +4210,7 @@ ${w.repo ?? ''}
             const where = `in sandbox ${s.info.machineId}/${s.info.machineSandbox}`;
             if (s.info.status === 'error') return `Created agent ${s.info.id} ${where}, but it did not start: ${s.info.statusDetail}`;
             if (newOn) this.lastPlaced = newOn;
+            if (placedLog) console.log(placedLog);
             let item = '';
             if (w) {
               const why = override ? ` (not a repeat: ${override})` : '';
