@@ -122,6 +122,29 @@ slot-seconds, shared waits behind exclusive turns, shared granted time and the r
 (`machine/benchHours.ts`). `portal_logs` source `bench_hours` (machine, since, until) shows them, so the before and after
 exclusive hours on BEAST and LothDesktop are read from the portal, not from each machine.
 
+### After the deploy (measured, `bench_hours`, 2026-10-24)
+
+The holds (#636) and the no-timed-wait nudge (#639) went live at 08:27Z (portal 8b31876). Exclusive time per hour of
+the clock:
+
+| Computer | Before: 72 h to 07:00Z | After: 08:00Z to 11:00Z (3 h) |
+|---|---|---|
+| BEAST | 18.1 h, 0.25 h per hour | 27 min, 0.15 h per hour: w1908 26 min, w1829 1 min; none at 10:00Z |
+| LothDesktop | 9.6 h, 0.13 h per hour | 0 |
+| LothLaptop | 1.4 h | 38 min: w1892 17 min, w2019 14 min, w1985 7 min |
+
+The three timed asks after the deploy (journal, `timed ask`):
+
+- w1789 (a Just Play UI A/B), 08:56Z: built on BEAST and sent by `timed_run` to LothLaptop as w2019, which timed it
+  there for 14 minutes. This is the worker whose earlier report said it waited on m5.
+- w1908 (factory info screens), 09:10Z: kept on BEAST, because its earlier A/B legs and its capture ran there and both
+  sides of an A/B stay on one machine. Its ticket ended a batch build in BEAST's slot3 (w1860). This is the remaining
+  BEAST exclusive time.
+- w1440 (balance harness), 09:24Z: moved off LothDesktop and queued for LothLaptop as w2021. A big computer takes it
+  only after 60 minutes.
+
+Biscuit and m5 held no exclusive time. Nothing was timed on m5, and biscuit got no timed work in this window.
+
 ## 6. Risks
 
 - **A borrowed player slot.** The daemon writes into a sandbox's `slotK-0`/`slotK-1` only while it holds the exclusive
