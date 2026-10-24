@@ -8,6 +8,7 @@ import type { SessionOwner } from './resumable.ts';
 import type { RemoteVoiceStatus } from '../shared/voice.ts';
 import type { GhLogin } from '../shared/ghLogin.ts';
 import type { GhAppToken } from '../shared/githubAppRoute.ts';
+import type { TimedRunOrder, TimedRunReport } from '../shared/timedRun.ts';
 import type { AttachmentRef, BenchLock, BenchPriority, BenchQueueReport, NoTimedRuns, BenchState, BenchWarning, CompactionTrigger, CleanupSummary, HostHealth, HostStats, ImageFile, ImageInput, Machine, MachinePause, LiveStageStep, MachineSandbox, PermissionMode, PersonPlayReport, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, TranscriptEvent, UnitySlotsReport } from '../shared/types.ts';
 
 /**
@@ -219,6 +220,13 @@ export type ToDaemon =
    * carrying the pass's summary; `dryRun`: plan only, nothing removed (older daemons ignore both and run a real pass).
    */
   | { type: 'cleanup_now'; id?: string; dryRun?: boolean }
+  /**
+   * A timed run for a play-only machine (w1946, server/timedRuns.ts, machine/timedRunner.ts): data only (pieces by hash, a
+   * save, -ff switches, bounded settings); the daemon plays the fixed legs under its exclusive ticket. Sent only to a daemon
+   * whose hello offered `timedRuns`. `timed_run_upload`: the upload its logs go back by.
+   */
+  | { type: 'timed_run'; order: TimedRunOrder }
+  | { type: 'timed_run_upload'; id: string; uploadId: string; chunkBytes?: number }
   /** Dial the portal at this base URL from now on (protocol 8, w466); answered by relocate_result, then the link closes. */
   | { type: 'relocate'; id: string; url: string }
   /** How often the daemon polls its Mac's own Claude login's plan usage (config usagePollMinutes), at connect and when it changes. */
@@ -325,6 +333,9 @@ export type FromDaemon =
       ghApp?: boolean;
       /** It compacts an idle agent's conversation on request (w1469, `compact`) and says a compaction's turn end in `signal` `meta`. An older portal ignores it. */
       compact?: boolean;
+      /** It runs timed runs on a play-only machine (w1946, `timed_run`), and the ones it holds now, running first. An older portal ignores both. */
+      timedRuns?: boolean;
+      timedActive?: string[];
       /** Its owner's pause (w1532, machine/pause.ts): from its tray, its schedule or a person's input. An older portal ignores it. */
       pause?: MachinePause;
       /** It updates, restarts and unloads itself on the portal's word over this link (w1596, `self_update`, `daemon_control`): the version. An older portal ignores it. */
@@ -382,6 +393,8 @@ export type FromDaemon =
   | { type: 'cleanup_log'; entry: Record<string, unknown> }
   /** The answer to a `cleanup_now` with an id (w459). */
   | { type: 'cleanup_result'; id: string; ok: boolean; summary?: CleanupSummary; error?: string }
+  /** A timed run's progress, its end (the table, the legs, the logs' size and hash) and the logs' attachment (w1946). */
+  | TimedRunReport
   /** A line the ffdiscord CLI appended to the Mac's Max events file (docs/max.md), forwarded as is; the portal validates it. */
   | { type: 'max_event'; line: string }
   /** Its GPU Whisper's state, when it changes (w615): loaded, unloaded for the editors' VRAM, installing. An older portal drops it. */
