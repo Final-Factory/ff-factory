@@ -860,6 +860,12 @@ export class Store {
     this.stateFile.flushSync();
   }
 
+  /** A session's turn opened or ended (w2044): saved at once, off the main thread; flush() stays for the process's stop. */
+  flushSoon() {
+    if (this.workFile.pending) this.workFile.changedNow();
+    this.stateFile.changedNow();
+  }
+
   /** Resolves once no background save is running or due (tests). */
   async saved() {
     await Promise.all([this.stateFile.idle(), this.workFile.idle()]);
