@@ -272,6 +272,29 @@ test("routing: a worker's update goes to its requesters' own chats, never the di
   assert.match(again.text, new RegExp(`^ERROR: w1 already has worker ${id} "w1: Tutorial skip" in pc/alpha: send it there`));
 });
 
+test('w2010: the dispatcher starts a worker on Sonnet only with a reason, which the request log and the reply keep', async (t) => {
+  const { store, sessions, dispatcher, chat, call } = await setupOnMachine(t);
+  await call(chat(BEN).info, 'request_work', { title: 'Fix a typo in the README', brief: 'One word in README.md.' });
+  const bare = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'fix the typo', title: 'README typo', work_id: 'w1', model: 'sonnet' });
+  assert.match(bare.text, /^ERROR: model_reason is required with a model other than the default/);
+  assert.equal(store.work.get('w1')!.sessionIds.length, 0, 'nothing started');
+  const r = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'fix the typo', title: 'README typo', work_id: 'w1', model: 'sonnet', model_reason: 'small: one word in one doc file' });
+  assert.equal(r.isError, false, r.text);
+  assert.match(r.text, / on sonnet \(small: one word in one doc file\), requested by Ben/);
+  const id = /Started agent (\w+)/.exec(r.text)![1];
+  assert.equal(sessions.get(id).info.model, 'sonnet');
+  assert.ok(store.work.get('w1')!.log.some((l) => / on sonnet \(small: one word in one doc file\)/.test(l)), store.work.get('w1')!.log.join('\n'));
+});
+
+test('w2010: a worker the dispatcher names no model for starts on the default, and the reply says which', async (t) => {
+  const { sessions, dispatcher, chat, call } = await setupOnMachine(t);
+  await call(chat(BEN).info, 'request_work', { title: 'Make the tutorial skippable', brief: 'Add a skip button.' });
+  const r = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'skip button', title: 'Tutorial skip', work_id: 'w1' });
+  assert.equal(r.isError, false, r.text);
+  assert.match(r.text, / in sandbox pc\/alpha on opus, requested by Ben/);
+  assert.equal(sessions.get(/Started agent (\w+)/.exec(r.text)![1]).info.model, 'opus');
+});
+
 test("a machine worker's permission signal carries no request (the daemon drops it): its people hear the pending one", async (t) => {
   const { sessions, dispatcher, chat, call, heard } = await setupOnMachine(t);
   const ben = chat(BEN).info;

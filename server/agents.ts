@@ -1,4 +1,5 @@
 import { untimedText } from '../shared/benchGlance.ts';
+import { workerModelChoice } from './workerModel.ts';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -3126,11 +3127,12 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
    */
   private async startPairLegs(
     w: WorkItem,
-    a: { sandbox?: string; machine?: string; pair_sandboxes?: string[]; prompt: string; title?: string; model?: string; effort?: EffortLevel; permission_mode?: PermissionMode; attachments?: string[]; extra_agent?: boolean; override_gate?: string },
+    a: { sandbox?: string; machine?: string; pair_sandboxes?: string[]; prompt: string; title?: string; model?: string; model_reason?: string; effort?: EffortLevel; permission_mode?: PermissionMode; attachments?: string[]; extra_agent?: boolean; override_gate?: string },
     from: 'human' | 'orchestrator',
     requestedBy: Requester,
     override: string | undefined,
   ): Promise<string> {
+    const picked = workerModelChoice(this.cfg, a, from);
     const crossOs = w.pair?.crossOs;
     const want = w.pair?.legs;
     const refs = [a.sandbox, ...(a.pair_sandboxes ?? [])].filter((x): x is string => !!x?.trim());
@@ -3183,14 +3185,14 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
       const others = legs.map((x, k) => `leg ${k + 1}${k ? '' : ' (host)'} ${x.label}`).join(', ');
       const role = `\n\n## Your leg of this pair run (w1945)\nYou are leg ${i + 1} of ${legs.length}${i ? ', a client: join the host once it says it listens' : ', the host: start the run and say where it listens'}, in ${l.label}. The legs, all started together just now: ${others}. Talk to the other legs with \`mcp__machine__message_pair\` (each message reaches every other leg's worker; theirs come back to you as messages, and a message resumes a leg that ended its turn): the host says its address and port once it listens, a client says when it has joined. Wait for each other in one call (an until loop) or end your turn; never poll with short check-ins. Build and run the same commit on every leg${w.pair?.for ? `. The host leg ends with the result in a line "For ${w.pair.for}:" (what ran, the commit every leg ran, what the check compared and found, any desync report files), which resumes ${w.pair.for}'s worker` : ''}. A leg that fails says so to the others with message_pair before it ends. Every leg ends with DONE: ${w.id} once the run is over (Learned: as the request rules say).`;
       const prompt = `${a.prompt}${role}${requestAsFiled(w, a.prompt)}${this.handoverFor(w, this.target(l.ref), handed.branch)}${w.source ? workerRules(w, handed.branch ?? this.sandboxBranchOf(this.target(l.ref))) : ''}${requestLineRule(w)}`;
-      const s = this.startWorker({ sandbox: l.ref, prompt, title: jobTitle(w.id, `${a.title} (leg ${i + 1}/${legs.length})`, { clip: true }), model: a.model, effort: a.effort, permissionMode: a.permission_mode, from, requestedBy, attachments: files, workId: w.id });
+      const s = this.startWorker({ sandbox: l.ref, prompt, title: jobTitle(w.id, `${a.title} (leg ${i + 1}/${legs.length})`, { clip: true }), model: picked.model, effort: a.effort, permissionMode: a.permission_mode, from, requestedBy, attachments: files, workId: w.id });
       if (s.info.status === 'error') {
         for (const x of started) this.sessions.get(x.session)?.stop();
         throw new Error(`leg ${i + 1} on ${l.label} did not start: ${s.info.statusDetail}.${started.length ? ` The leg${started.length > 1 ? 's' : ''} started before it (${started.map((x) => x.session).join(', ')}) ${started.length > 1 ? 'were' : 'was'} stopped, so no sandbox waits for a pair that is not running.` : ''} Start the pair again on free sandboxes, or queue it.`);
       }
       this.lastPlaced = l.machine;
       started.push({ session: s.info.id, sandbox: l.label });
-      this.orchestrators.linkWorker(w.id, s.info, `started ${this.orchestrators.workerLine(s.info.id)} as leg ${i + 1} of its pair run${override ? ` (not a repeat: ${override})` : ''}`, { overrideGate: a.override_gate });
+      this.orchestrators.linkWorker(w.id, s.info, `started ${this.orchestrators.workerLine(s.info.id)}${picked.note} as leg ${i + 1} of its pair run${override ? ` (not a repeat: ${override})` : ''}`, { overrideGate: a.override_gate });
       lines.push(`leg ${i + 1}${i ? '' : ' (host)'}: agent ${s.info.id} in ${l.label}${handed.note}${this.queuedLine(s.info.id)}`);
     }
     this.orchestrators.pairStarted(w.id, started, crossOs ? { crossOs } : {});
@@ -3768,8 +3770,9 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
                   : 'A short, specific name the user will recognise on the dashboard, e.g. "Belt splitter fix (spec 098)". Always give one; its request id goes in front.',
               ),
             model: z.string().optional().describe(`One of ${this.cfg.models.join(', ')}. Default ${this.cfg.defaultModel}.`),
+            model_reason: z.string().max(300).optional().describe('Why another model.'),
             permission_mode: z.enum(PERMISSION_MODES).optional().describe(`Default ${this.cfg.worker.permissionMode}.`),
-            effort: z.enum(EFFORT_LEVELS as [EffortLevel, ...EffortLevel[]]).optional().describe(`Reasoning effort for the model (the Agent SDK's effort option). Default ${this.cfg.worker.effort}.`),
+            effort: z.enum(EFFORT_LEVELS as [EffortLevel, ...EffortLevel[]]).optional().describe(`Default ${this.cfg.worker.effort}.`),
             for_user: FOR_USER,
             work_id: WORK_ID,
             attachments: ATTACHMENTS.describe("Files a person attached, by id (\"att_k2m9x0q7p3a1\", from an [attachments] list): the worker gets a copy of each in Inbox/ in its working folder. With work_id, the request's own attachments go too."),
@@ -3809,6 +3812,8 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
                 throw new Error(`${w.id} already has ${live.map((id) => this.orchestrators.workerLine(id)).join(', ')}: send it there (message_agent with work_id), or pass override_duplicate saying why it needs another worker.`);
               }
             }
+            // w2010: workers start on the default model; another needs a reason, logged on the request (before any sandbox is touched).
+            const picked = workerModelChoice(this.cfg, a, from);
             // w1945: a pair run's legs start together, each in a FREE sandbox on its own computer, or none does.
             if (w && (w.pair || a.pair_sandboxes?.length)) return this.startPairLegs(w, a, from, actor(a.for_user, a.work_id), override);
             if (a.pair_sandboxes?.length) throw new Error('pair_sandboxes is for a request (work_id): its legs are recorded on it, and the host leg reports for it');
@@ -3849,25 +3854,25 @@ ${w.repo ?? ''}
             // An intake request always carries its rules (untrusted text, posting limits, the markers), whatever the brief says.
             // The request as filed goes with every brief (w496), then the intake rules and the PR line.
             const prompt = `${a.prompt}${w ? requestAsFiled(w, a.prompt) : ''}${w ? this.handoverFor(w, this.target(a.sandbox, a.machine), handed.branch) : ''}${w?.source ? workerRules(w, handed.branch ?? this.sandboxBranchOf(this.target(a.sandbox, a.machine))) : ''}${w ? requestLineRule(w) : ''}`;
-            const s = this.startWorker({ sandbox: a.sandbox, machine: a.machine, prompt, title: w ? jobTitle(w.id, a.title!) : a.title, model: a.model, effort: a.effort, permissionMode: a.permission_mode, from, requestedBy, attachments: files, workId: w?.id });
+            const s = this.startWorker({ sandbox: a.sandbox, machine: a.machine, prompt, title: w ? jobTitle(w.id, a.title!) : a.title, model: picked.model, effort: a.effort, permissionMode: a.permission_mode, from, requestedBy, attachments: files, workId: w?.id });
             const where = `in sandbox ${s.info.machineId}/${s.info.machineSandbox}`;
             if (s.info.status === 'error') return `Created agent ${s.info.id} ${where}, but it did not start: ${s.info.statusDetail}`;
             if (newOn) this.lastPlaced = newOn;
             let item = '';
             if (w) {
               const why = override ? ` (not a repeat: ${override})` : '';
-              this.orchestrators.linkWorker(w.id, s.info, `started ${this.orchestrators.workerLine(s.info.id)}${why}`, { overrideGate: a.override_gate });
+              this.orchestrators.linkWorker(w.id, s.info, `started ${this.orchestrators.workerLine(s.info.id)}${picked.note}${why}`, { overrideGate: a.override_gate });
               item = ` for ${w.id}; ${names(w.requesters)}'s orchestrator is told`;
             } else {
               const id =
                 ctx.role === 'dispatcher'
-                  ? this.orchestrators.recordDirectStart(s.info, a.prompt, requestedBy, where)
+                  ? this.orchestrators.recordDirectStart(s.info, a.prompt, requestedBy, `${where}${picked.note}`)
                   : this.orchestrators.recordStart(s.info, a.prompt, requestedBy, `started over /mcp for ${requestedBy.displayName}: worker ${s.info.id} ${where}`, from === 'human');
               this.sessions.setTitle(s.info.id, jobTitle(id, a.title ?? s.info.title, { clip: true }));
               item = `; recorded in the ledger as ${id}`;
             }
             const withFiles = files.length ? ` It gets ${files.length === 1 ? 'the attachment' : `${files.length} attachments`} (${files.map((f) => f.id).join(', ')}) in ${INBOX_DIR}/.` : '';
-            return `Started agent ${s.info.id} "${s.info.title}" ${where}, requested by ${requestedBy.displayName}${item}.${withFiles}${Agents.goneLine(files)}${this.queuedLine(s.info.id)}${handed.note}${hint}`;
+            return `Started agent ${s.info.id} "${s.info.title}" ${where}${picked.note || ` on ${this.cfg.defaultModel}`}, requested by ${requestedBy.displayName}${item}.${withFiles}${Agents.goneLine(files)}${this.queuedLine(s.info.id)}${handed.note}${hint}`;
           }),
         ),
         ...this.machineToolSpecs(tool, from, ctx),
@@ -5619,6 +5624,7 @@ ${this.worldBrief(true)}
 - Worker updates, standing agents' delegation requests and \`[auto-delegation]\` news go to the orchestrators of the people concerned, not to you; list_work shows each request's latest outcome. People message each other orchestrator to orchestrator (message_person): you neither relay nor see that.
 - Placement: one sandbox per independent stream of work, named for the work ("spec-098", "tutorial-playtest"). For spec work, list_branches finds the spec's branch to check out; else create \`NNN-short-name\` from ${this.cfg.defaultBase}. Reuse an idle sandbox when the request refers to it or the work continues there. Work that never opens Unity (Discord reading, docs, planning) still needs a sandbox as its working directory: create it with seed_library=false, or reuse an idle one.
 - One session per request (w740, Lothsahn and Ben): related work stays in the session that did the earlier work, unrelated work gets a fresh one (workers have no auto-compaction; stale context costs on every turn). start_agent always starts a NEW session, into a FREE sandbox (w1089: refused for a sandbox another request's agent occupies, and past max_agents_per_sandbox; a \`[ledger] Capacity may have freed\` ping can be minutes old, so look again just before you start; work that needs no editor and no game tree may sit beside another agent on purpose with extra_agent: true, which never switches its branch, w1607). message_agent with a work_id for a worker not on that request: the server sends a RELATED request (it names one of the worker's requests in related_ids, is about its PR or branch, or the overlap check calls it a match: a fix for a regression it just shipped, its feature's next step, a correction to its PR) to that session, and starts a NEW session in the same sandbox for an unrelated one (the default when nothing ties them), whose first message carries the brief, the request as filed, the branch state and the related requests (read with read_work); the old session stops once it has nothing in hand, never mid-turn. When it is ambiguous, pass session "same" or "new" with session_reason (one plain line; recorded in the reply and the log). Updates to a request (notes, answers, follow-ups, resumes) go to the session already on it: message_agent with the same work_id, never a new session. decide_work merge is for a duplicate; link is for a direct follow-up of what a worker is on, refused for an unrelated request while it has another in hand. **One person per session** (w1076: lothsahn's w1072, sent into Ben's worker, ran on Ben's Claude pool and stopped on Ben's limit): a request never goes into a session holding another person's open request, because a session runs on its requests' person's tokens; message_agent then starts a new session there (even with session "same"), a request already in such a session moves out on its next message_agent, and link is refused. To restart a request somewhere fresh (its session stopped on a usage limit, say), message_agent with its work_id, session "new" and a session_reason.
+- Model (w2010): Opus, medium; a task you are sure is small (1-2 named files, mechanical or contained, done-criteria given; no sim, determinism, netcode, save state, design or hunt): "sonnet", model_reason "small: <why>".
 - Titles (w575): each time you hand a worker a request, give \`title\`: the job in a few plain words for a person scanning the dashboard ("LothDesktop fresh install, sandboxes slot1..6"), not the request's title cut short; the request id goes in front by itself. start_agent always takes one; message_agent with a work_id needs one when the worker is not on that request yet; decide_work link takes one for the workers it links. set_agent_title renames a worker otherwise.
 - Sandbox labels are their names (slot1..N on a worker root) and never change; nobody sets them. A sandbox is free when list_sandboxes marks it FREE; what it is doing is its agents' titles. A worker stopped with its check-in more than ${RELEASE_AFTER_MS / 60_000} min away, its request over, ${HOLD_PLACE_MS / 60_000} min after its daemon restarted under it, or by FF Factory after ${RELEASE_AFTER_MS / 60_000} min Idle with nothing pending releases a clean sandbox (w640, w656): it shows FREE and the worker's line says "its sandbox is released"; new work there is switched to a fresh branch first, and the worker is placed again when it resumes (its own sandbox if still free, else another free one on its machine, on its branch). A sandbox "spoken for" is a resuming worker's: never new work there.
 - Where new work runs (w416, w428): new game-repo work (code, tests, Unity, built players) goes where the Capacity block's last line (list_sandboxes, system_status) says, "Next new game-repo work: <computer> (why)", even when a sandbox elsewhere is free. That line follows config placement first${this.placementLine()}: the first computer in placement.prefer with room, then the others not avoided, spread by room (ROOM n%: the free share of agent slots, sandboxes, RAM and editors against each one's own limits; BUSY: at its agent limit, RAM at ${RAM_BUSY_PCT}% or more, no sandbox to use or make; within ${Math.round(EVEN_MARGIN * 100)} points, fewer live agents, then taking turns), and an avoided computer only when nothing else has room. Every worker runs in a sandbox (w536): start_agent with a machine alone is refused, and a machine without a sandbox_root takes no workers. Posting as Max does not pin a computer (post_as_max, w901). A computer that is avoided or not next keeps only what needs it: ${pinnedWork(this.review?.root)}. **Work that needs no Unity editor goes by agent slot alone** (w1098, lothsahn, 2026-10-12: "FFBox and FF Factory updates don't need unity editors"): a request on another repo than the game's (FF Factory, FFBox, the ff-agents plugin; its list_work line says "needs an agent slot only", set at filing from its repo) goes where the Capacity block's "Next non-game work: <computer> (why)" says, in any sandbox with an agent seat (a free one first, else beside another request's agent with start_agent extra_agent: true, never past max_agents_per_sandbox: it works in its own clone in its temp folder), whatever the editors or RAM. It still respects the computer's agent cap, the person's own Claude pool (a held pool queues the worker's first prompt) and holds and avoids, and one queued while an allowed computer has an agent slot is flagged WRONG like game work; check the guessed repo in the log of one whose repo was not set. A worker going on in its own sandbox stays there (message_agent), and a running worker is never moved. Live view, urgent release and timed work go by "Next Live view work" / "Next urgent release work" / "Next timed work" (w1600, w1606, w1628: a worker's own build gets no BEAST preference; timed or exclusive-lock work, w1872: that line's ranking is the default, unless a machine is named: smallest first, BEAST last, never a computer that takes no timed runs (m5), where a pin is refused back to you: pick another, or ask an operator; w1996: a request whose timing is a Windows player A/B goes where its code work goes, since its worker builds there and timed_run times it on a small computer); stop_agent move_to moves a waiting one there; build_plan clears one for an urgent release. start_agent and create_sandbox add a note when new work goes elsewhere than the next one: follow it unless one of those reasons holds, and say which. People change the preference with set_app_config placement.prefer / avoid / live / build / minPriority (null clears).
