@@ -752,8 +752,12 @@ export class MachineManager {
    */
   singleWorker(id: string): boolean {
     const m = this.store.machines.get(id);
-    return !!m && agentCap(m) === 1;
+    // w1996: while it times another worker's timed_run, it serves two workers: its own turn ends at 30 minutes again
+    return !!m && agentCap(m) === 1 && !(this.timedRunsOn?.(id) ?? 0);
   }
+
+  /** The timed runs sent or queued to a computer (w1996; set by server/index.ts from TimedRuns.runsOn). */
+  timedRunsOn?: (id: string) => number;
 
   /** A daemon's turn warnings (w1832), for server/benchWarnings.ts to message their workers (set by server/index.ts). */
   onBenchWarnings?: (machineId: string, warnings: BenchWarning[]) => void;

@@ -60,10 +60,10 @@ test('w1969: m5 sends its timed leg to a small computer; a player A/B goes to an
   const m5 = decideTimedPlace({ here: at('m5'), places: fleet(), platform: 'darwin' });
   assert.equal(m5.verdict, 'elsewhere');
   assert.deepEqual(m5.needs, ['m3']);
-  const tr = decideTimedPlace({ here: at('beast'), places: fleet(), via: 'timed_run', playOnly: ['lothdesk16'] });
+  const tr = decideTimedPlace({ here: at('beast'), places: fleet(), via: 'timed_run', timedRun: ['lothdesk16'] });
   assert.equal(tr.timedRun, 'lothdesk16');
-  assert.match(tr.why, /a player A\/B goes to the play-only computer lothdesk16 by timed_run \(w1946\)/);
-  assert.equal(decideTimedPlace({ here: at('beast'), places: fleet(), via: 'timed_run', playOnly: [] }).timedRun, undefined, 'none up: a leg');
+  assert.match(tr.why, /a Windows player A\/B goes to lothdesk16 by timed_run, built here \(w1946, w1996\)/);
+  assert.equal(decideTimedPlace({ here: at('beast'), places: fleet(), via: 'timed_run', timedRun: [] }).timedRun, undefined, 'none up: a leg');
 });
 
 test('w1969: a big computer asks before an exclusive timing ticket; a small one and one that takes no timed runs do not', () => {

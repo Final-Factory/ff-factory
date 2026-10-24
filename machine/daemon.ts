@@ -548,6 +548,12 @@ export class Daemon {
         log: (line) => log(line),
         personBusy: () => this.personStartGate(),
         lastInputAt: () => this.personInputAt,
+        // w1996: on a worker computer the run queues like any timed leg and borrows a free sandbox's player slots
+        worker: {
+          sandboxIds: () => (this.pool ? this.pool.list().map((sb) => sb.id) : []),
+          ticket: (o) =>
+            benchTicketFor({ mode: 'exclusive', reason: 'timing', what: o.what, maxMin: o.maxMin, ownerPid: o.ownerPid, checkouts: this.pool ? this.pool.list().map((sb) => sb.path) : [], root: cfg.root, env: { ...process.env, FF_SESSION_ID: o.session, FF_SANDBOX_ID: '' } }),
+        },
       });
     }
     this.leftovers = new LeftoverReaper({
