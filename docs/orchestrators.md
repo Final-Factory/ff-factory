@@ -823,7 +823,9 @@ without one means it is off or failing, worth a person's look.
     request whose legs the dispatcher starts together, and the asking request **Blocked on its report**, so the worker's
     sandbox is released while it waits ([machines.md](machines.md), "Pair runs are placed as one unit"); asked again
     for a spent run (a leg reported, a leg's computer offline, or `retry: true`), it cancels that run and files a fresh one
-    off the failed computers (w2041, "A retry starts fresh legs");
+    off the failed computers (w2041, "A retry starts fresh legs"); one for a PR whose run is open joins it, one for a PR and
+    commit whose run finished is answered with its result, and a finished run resumes every request it serves with its
+    result; a report waiting on a pair run with none filed is told to file it (w2057, "One pair run per pull request");
   - a worker that waits on the orchestrator stays Stalled and the line says so, adding "that is its own work" for a pair or
     two-machine check, a build, a test run or its CI (w1685). Such a worker is told at its turn's end, once per request
     (`Agents.ownWorkNudge`), and every worker's prompt says these are its own work.

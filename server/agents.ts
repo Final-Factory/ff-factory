@@ -20,6 +20,7 @@ import { agentState, agentStateText, holdsItsPlace, holdsSandbox, sortAgents, so
 import { idleClosedPart } from './liveIdle.ts';
 import { HOLD_PLACE_MS, LIVE_HOLD_MS, PlaceAgain, RELEASE_AFTER_MS, RELEASE_WAKE_NOTE, handOverBranch, occupies, releasedOn } from './placeAgain.ts';
 import { agentQueueAll, agentQueueFacts, editorSlotRefusal, queueWaitsAll } from '../shared/queueWaits.ts';
+import { pairWaitLine, pairWaitNotice } from './pairRuns.ts';
 import { WORK_LIVE_LABEL, WORK_LIVE_STATES, asksAPerson, benchWaitOf, lastOpenLine, liveCounts, otherWorkWait, outsideDeclared, outsideWaitOf, ownWorkWait, noTimedWaitOf, personWaitIn, reportWaitKey, servedBy, workLiveAll, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
 import { reportTail, type NeedsYouWait } from './needsYou.ts';
 import { stillOpenIn } from './ledgerRules.ts';
@@ -240,7 +241,7 @@ export const ownWorkNotice = (id: string, line: string) =>
 export const noTimedWaitNotice = (id: string, line: string, machine: string, why: string, takes: readonly string[]) =>
   `[FF Factory] Your report says ${id} waits on ${machine} for timed work: "${line.slice(0, 200)}". ${machine} takes no timed or exclusive-lock work (${why}; w1861), so that wait never ends. Place the timing by "Next timed work" (w1872), smallest computer first: ${takes.length ? takes.join(' > ') : 'none takes it now'}. Call timed_place now: a Windows player A/B goes to timed_run on a small computer while you carry on here; anything else, via "leg". If none of them can do it, waiting_on_person for an operator.`;
 
-const REQUEST_PAIR_TOOL = `Ask for a check that needs several computers at once (w1945): a two-machine multiplayer or determinism check, a host and its clients. It files ONE pair request whose legs the dispatcher starts together, a new worker on each computer, as soon as that many computers have room at once (never one leg at a time), and Blocks your request on its report, as blocked_on with reports does: commit and push, then end your turn with a "wNNN: still open: blocked on <the pair request>" line. Your sandbox is released at once for other work while you wait, and the host leg's result (a line "For wNNN:") resumes you. what: one line; brief: what the legs run (the branch or commit, the scenario, what passes, where the result goes), since each leg is a new worker; legs: 2 by default; cross_os only for the reasons it names (w1692; without it no leg goes on a Mac, and with it a Mac only hosts); timed when a leg takes timing measurements (never on the m5). One open pair run per request: asked again, you wait on the one there is, unless it is spent (w2041): a leg already reported, a leg's computer is offline or its worker errored, or you pass retry: true. Then that run is cancelled and a fresh one is filed, with new legs on other computers than the failed ones (avoid adds computers you saw fail, such as one whose Tailscale is stuck), and only the fresh run's report resumes you.`;
+const REQUEST_PAIR_TOOL = `Ask for a check that needs several computers at once (w1945): a two-machine multiplayer or determinism check, a host and its clients. It files ONE pair request whose legs the dispatcher starts together, a new worker on each computer, as soon as that many computers have room at once (never one leg at a time), and Blocks your request on its report, as blocked_on with reports does: commit and push, then end your turn with a "wNNN: still open: blocked on <the pair request>" line. Your sandbox is released at once for other work while you wait, and the host leg's result (a line "For wNNN:") resumes you. what: one line; brief: what the legs run (the branch or commit, the scenario, what passes, where the result goes), since each leg is a new worker; legs: 2 by default; cross_os only for the reasons it names (w1692; without it no leg goes on a Mac, and with it a Mac only hosts); timed when a leg takes timing measurements (never on the m5). One open pair run per request: asked again, you wait on the one there is, unless it is spent (w2041): a leg already reported, a leg's computer is offline or its worker errored, or you pass retry: true. Then that run is cancelled and a fresh one is filed, with new legs on other computers than the failed ones (avoid adds computers you saw fail, such as one whose Tailscale is stuck), and only the fresh run's report resumes you. pr and commit (w2057): the pull request and the head commit the legs run (default: the pull request named in what or brief, else your request's one open pull request). A pull request with an open pair run (yours or one an orchestrator filed) is never run twice: you wait on that one. One whose pair run finished on that commit is answered with its result and nothing is filed (retry: true runs it again). When the run finishes, its result comes with your resume. Never ask an orchestrator in your report for a pair run: nobody reads that as a filing.`;
 
 const TIMED_PLACE_TOOL = `Ask where a timed leg runs BEFORE you take an exclusive bench ticket for it (w1969, lothsahn: "every time a worker needs an exclusive lock it should ask the dispatcher"): an exclusive turn idles every other slot of its computer, so a leg from a big computer (BEAST, LothDesktop) goes to a small one (LothLaptop, m3, biscuit; never m5). On a big computer the harness refuses bench_queue.py timed, --timed, bench_lock --timing, unity-slot --bench exclusive and the bench scripts (probe_ab_win.sh, cpu_budget_run.sh, ...) until you asked; a small computer needs no ask. It answers "here" (take your ticket as before; it holds 12 h) or "elsewhere". Elsewhere for a Windows player A/B (w1996: a save played by two builds, probe_ab_win.sh's legs) names a computer for timed_run: build both players here under shared tickets, call timed_run, and that computer's daemon times them under its own exclusive ticket, with no new worker and no rebuild there. Elsewhere for anything else timed (via "leg": a snippet timed in the editor, a Performance test, a profiler capture, a Mac player): FF Factory files the leg as its own request, Queued for the small computers (a big one only when none of them can take it: offline past a wait that grows with the fleet's load, held, or without a game sandbox; w2048), whose new worker builds and times BOTH sides there and reports to you, and Blocks your request on that report (as request_pair does): commit and push, then end your turn. what: the leg in one line; brief: what it runs, as a new worker needs it (the branch and the commit of each side, the save, the script and its settings, what to report); platform: windows or mac when the leg needs one (default any); same_machine: only when its numbers must come from this computer (a side of the A/B already ran here), and why; via: timed_run for a Windows player A/B, leg for anything else (unset: timed_run when a computer takes one, and the answer says when to ask again with leg).`;
 
@@ -310,7 +311,7 @@ CLAUDE.md's "Discord: FFBox owns #bug-reports" binds you: read and download ther
  * carry it verbatim (worldBrief). The longer version is docs/ffbox.md.
  */
 /** The dispatcher's rule for pair runs (w1945), in read_rules machines: placing, queueing and holding for them. */
-const PAIR_RULES = `**Pair runs** (w1945, lothsahn: "Can we make the dispatcher smart enough so it queues work properly that requires running together across multiple machines and doesn't waste slots?"): a request marked "a pair run of N legs" (a worker's request_pair, or one you file or see that needs two computers at once, such as a two-machine determinism check: queue that one with decide_work pair_legs, so it is marked) starts ALL its legs together: start_agent with its work_id, sandbox for leg 1 (the host) and pair_sandboxes for the others, each a FREE sandbox on another computer. Never start one leg alone, and never leave a worker holding its sandbox while it waits for a partner leg: a worker that asks you for a second machine's worker is told to use request_pair. With fewer computers that fit having room than it has legs, queue it: a pair is room, and WRONG, only where that many computers have room at once. While an older pair run of at least the same priority is Queued, each computer's last free sandbox it fits is held for it: start other work elsewhere (start_agent refuses it, naming the pair; work of higher priority goes first). Legs go on computers that are not Macs; a cross-OS pair (only for w1692's reasons) may put a Mac as the host, never a client; timed legs never on the m5.`;
+const PAIR_RULES = `**Pair runs** (w1945, lothsahn: "Can we make the dispatcher smart enough so it queues work properly that requires running together across multiple machines and doesn't waste slots?"): a request marked "a pair run of N legs" (a worker's request_pair, or one you file or see that needs two computers at once, such as a two-machine determinism check: queue that one with decide_work pair_legs, so it is marked) starts ALL its legs together: start_agent with its work_id, sandbox for leg 1 (the host) and pair_sandboxes for the others, each a FREE sandbox on another computer. Never start one leg alone, and never leave a worker holding its sandbox while it waits for a partner leg: a worker that asks you for a second machine's worker is told to use request_pair. With fewer computers that fit having room than it has legs, queue it: a pair is room, and WRONG, only where that many computers have room at once. While an older pair run of at least the same priority is Queued, each computer's last free sandbox it fits is held for it: start other work elsewhere (start_agent refuses it, naming the pair; work of higher priority goes first). Legs go on computers that are not Macs; a cross-OS pair (only for w1692's reasons) may put a Mac as the host, never a client; timed legs never on the m5. A pair run that repeats one that finished on the same pull request and commit (w2057) is not marked: decide_work queue with pair_legs refuses it; pair_legs 0 clears the mark of one whose legs never started, and done closes a never-started repeat with the finished run's result, which reaches whoever waits on it.`;
 
 /** read_rules's topics (w1158): rules a coordinator reads only when a turn needs them (Agents.rulesText). */
 export const RULE_TOPICS = ['ffbox', 'intake', 'release', 'machines', 'reactions', 'ui', 'builds'] as const;
@@ -1525,6 +1526,8 @@ export class Agents {
       ...(typeof a.request === 'string' && a.request.trim() ? { request: a.request } : {}),
       ...(a.retry === true ? { retry: true } : {}),
       ...(Array.isArray(a.avoid) ? { avoid: a.avoid.filter((x): x is string => typeof x === 'string').slice(0, 6) } : {}),
+      ...(typeof a.pr === 'string' && a.pr.trim() ? { pr: a.pr } : {}),
+      ...(typeof a.commit === 'string' && a.commit.trim() ? { commit: a.commit } : {}),
     });
     this.blockerWatch?.kick();
     return out;
@@ -2280,6 +2283,7 @@ export class Agents {
     // w1812: the same question on several of its requests goes once.
     this.orchestrators.needsYouAll(this.personWaits({ worker: s.info.id, report: text }));
     // w1841 (d): a turn that ends waiting on the orchestrator for the worker's own work is told at once that it is its own.
+    this.pairWaitNudge(s.info, text);
     this.ownWorkNudge(s.info, text);
     // w1996: a turn that ends waiting on a computer that takes no timed runs (m5) for timed work is re-placed at once.
     this.noTimedWaitNudge(s.info, text);
@@ -2298,6 +2302,32 @@ export class Agents {
       // the paragraph that followed every report until then was 22% of what these messages added to lothsahn's orchestrator.
       `[worker update] ${this.label(s)} finished a turn. Its final message:\n\n${text.slice(0, 3000)}`,
     );
+  }
+
+  /**
+   * w2057 (w665: d558ba14 ended its turn "still open: waiting on a Windows or Linux pair worker to run MP-lowore-pin-pair
+   * for PR #2340" and waited 17 h): a still-open line that waits on a pair run while its request has none filed
+   * (Orchestrators.pairFiledFor: none open or finished for it, its pull request or its gates) is a wait nothing ends. The
+   * worker is nudged at once, once per request, to file it with request_pair, rather than FF Factory filing one itself: a
+   * pair run needs what only the worker knows (the branch and commit, the scenario, what passes), and a run filed from a
+   * report line would put two computers' workers on a guess. Its own-work nudge (w1841) is then not sent for the same line.
+   */
+  private pairWaitNudge(info: SessionInfo, text: string) {
+    for (const [id, line] of stillOpenIn(text)) {
+      // A wait on the orchestrator to run it is the own-work nudge's (w1841), which names request_pair too.
+      if (!pairWaitLine(line) || ownWorkWait(line)) continue;
+      const key = `${info.id}:${id}`;
+      if (this.ownWorkTold.has(key)) continue;
+      if (this.orchestrators.pairFiledFor(id)) continue;
+      if (!this.store.work.get(id)) continue;
+      this.ownWorkTold.add(key);
+      try {
+        this.sessions.send(info.id, pairWaitNotice(id, line), 'system');
+        this.orchestrators.ledgerEdit(id, `worker ${info.id} ended its turn waiting on a pair run with none filed ("${line.slice(0, 120)}"): told to file it with request_pair (w2057)`, () => undefined);
+      } catch (e) {
+        console.warn(`pair-wait nudge: could not tell ${info.id}: ${(e as Error).message}`);
+      }
+    }
   }
 
   /** w1841: the requests a worker was told its own-work wait is its own ("<session>:<request>"): once each. */
