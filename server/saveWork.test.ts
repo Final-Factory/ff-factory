@@ -83,6 +83,11 @@ test('w1983 save: build output in .nightly-builds/ or Builds/ is neither saved n
   fs.mkdirSync(path.join(r.work, 'Builds'));
   for (const n of [1, 2, 3, 4]) fs.writeFileSync(path.join(r.work, 'Builds', `f${n}.bin`), 'x');
   const none = await saveWork({ dir: r.work, branch: 'w1-feature', message: MSG, limits });
+  // The game repo ignores Builds/: an exclude pathspec naming an ignored folder made git add exit 1 ("The following paths
+  // are ignored ... Builds ... Use -f"), and lothdesktop/slot6 stayed held from 06:56Z on 2026-10-24.
+  fs.appendFileSync(path.join(r.work, '.git', 'info', 'exclude'), '\nBuilds/\n');
+  const ignored = await saveWork({ dir: r.work, branch: 'w1-feature', message: MSG, limits });
+  assert.equal(ignored.files, 0, 'an ignored Builds/ is no error');
   assert.equal(none.files, 0);
   assert.equal(none.sha, undefined);
   assert.match(none.notes.join(' '), /nothing to save \(build output in \.nightly-builds\/ or builds\/ stays, uncommitted\)/);
