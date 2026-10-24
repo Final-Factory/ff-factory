@@ -4,6 +4,7 @@ import path from 'node:path';
 import { BOX, appState, expect, expectNoHorizontalOverflow, expectTapTargets, isMobile, sendToChat, test, uniq, useTool } from './fixtures.ts';
 import type { TranscriptEvent } from '../shared/types.ts';
 import { REPLY_MARK } from '../shared/replies.ts';
+import { HELD_MARK } from '../shared/conditional.ts';
 
 /**
  * Questions the orchestrator asks with buttons (w1397, docs/orchestrators.md "Questions with buttons"). The fake agent
@@ -106,8 +107,9 @@ test('ask: a click is sent as your own reply to the question, the buttons lock o
 test('ask: "Chat more about this" sends nothing: it opens the reply box on the question, and the buttons stay for later', async ({ authed: page }) => {
   const tag = uniq('more');
   const { q, card, orchestratorId } = await ask(page, tag);
-  // Other tests share this chat: only messages that carry this question's own tag count.
-  const mentions = async () => (await transcript(page.request, orchestratorId)).filter((e) => e.kind === 'user' && e.from === 'human' && e.text.includes(tag)).length;
+  // Other tests share this chat: only messages that carry this question's own tag count, in the person's own words. Another
+  // test's message typed while this card is open carries FF Factory's note after HELD_MARK, which quotes this question (w1955).
+  const mentions = async () => (await transcript(page.request, orchestratorId)).filter((e) => e.kind === 'user' && e.from === 'human' && e.text.split(HELD_MARK)[0].includes(tag)).length;
   const before = await mentions();
   expect(before, 'only the message that asked it, through the fake agent').toBe(1);
   await card.getByTestId('ask-more').click();
