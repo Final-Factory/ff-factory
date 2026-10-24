@@ -2987,6 +2987,11 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
         FF_SESSION_ID: info.id,
         // The MCP-for-Unity server takes 20-40 s to answer on Windows; Claude Code's default connect timeout is 30 s.
         ...(m.platform === 'win32' ? { MCP_TIMEOUT: '120000' } : {}),
+        // w2002: no "<total_tokens>N tokens left</total_tokens>" line after every tool result, which every later call reads again
+        // (about 0.9% of what beast's workers read, measured over 2026-10-17..24). A worker's budget is FF Factory's, not that
+        // countdown's (it counts down from a fixed 15,000,000). Claude Code 2.1.284 reads this switch first (`off` is one of its
+        // modes); measured on a probe session there: the first message's total_tokens_reminder attachment is gone.
+        CLAUDE_CODE_TOTAL_TOKENS_REMINDER: 'off',
         // On the portal's own host its agents write this server's Max events file (the daemon keeps none of its own there).
         ...(m.local ? { FF_MAX_EVENTS: eventsFileOf(this.cfg) } : {}),
         ...connectorEnv(this.cfg, 'workers'),
