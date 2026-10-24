@@ -1,0 +1,4 @@
+- **Timed work gets the small computers first** (w1995, lothsahn: "Beast is running an exclusive lock and LothLaptop isn't locked at all. Yet LothLaptop has 1 job and should get exclusive locks first.").
+  - A small computer's last free sandbox is held for the timed work Queued for it: other work starts on another computer with room, and a pair run's leg goes there only when no other computers hold the pair. The hold lapses after 20 minutes if nobody starts the timed work.
+  - The "Next timed work" ranking is written to the journal when it changes, so where timed work went can be checked against it.
+  - The game repo's bench queue now refuses an exclusive timing ticket on a big computer until its worker asked `timed_place`, as FF Factory's command guard did, so a worker's own script no longer gets past the ask.

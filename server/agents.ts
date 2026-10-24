@@ -48,7 +48,7 @@ import { withTerseProse } from './terseProse.ts';
 import { WORKER_READ_RULES_TOOL, workerRuleText } from './workerRules.ts';
 import { activityLine, Waker } from './wake.ts';
 import { TIMER_LIMITS, Timers, scheduleText, type TimerView } from './timers.ts';
-import { EVEN_MARGIN, RAM_BUSY_PCT, benchText, buildOf, busyReasons, capacityLines, forPriority, hasRoom, holdReason, liveOf, lowestPriority, minOf, pickComputer, placeId, pinnedWork, placementHint, reservedReason, roomForWork, roomNow, timedFacts, timedKindOf, timedPinRefusal, voiceVram, type Computer, type FirstKind, type NeedKind, type PlacementPrefs, type RoomNow, type TimedKind } from './placement.ts';
+import { EVEN_MARGIN, RAM_BUSY_PCT, benchText, buildOf, busyReasons, capacityLines, forPriority, hasRoom, holdReason, liveOf, lowestPriority, minOf, pickComputer, placeId, pinnedWork, placementHint, reservedReason, roomEnough, roomForWork, roomNow, timedFacts, timedKindOf, timedPinRefusal, voiceVram, type Computer, type FirstKind, type NeedKind, type PlacementPrefs, type RoomNow, type TimedKind } from './placement.ts';
 import { MachinePauses, pauseHolds } from './machinePause.ts';
 import { playHolds, playLine } from '../shared/personPlay.ts';
 import { unitySlotsLine } from '../shared/fleet.ts';
@@ -79,7 +79,7 @@ import { WAIT_LINE_CHARS, summaryText, waitSummary } from '../shared/waitSummary
 import { waitingItemOf } from '../shared/waiting.ts';
 import { checkAsks } from '../shared/questionCard.ts';
 import { DECISIONS, attachmentsNote, describeItem, handoverNote, isFor, isOpen, ledgerOrder, names, overlapLine, priorityThenAge, requestAsFiled, requestLineRule, startProblem } from './work.ts';
-import { minPriorityText, needsBuild, needsLive, needsOf, needsTimed, pairText, PAIR_HOLD_MS, PAIR_MAX_LEGS } from '../shared/capacity.ts';
+import { minPriorityText, needsBuild, needsLive, needsOf, needsTimed, pairText, PAIR_HOLD_MS, PAIR_MAX_LEGS, TIMED_HOLD_MS } from '../shared/capacity.ts';
 import { BUILD_PLAN_DOC, BuildPlans, NOT_RELEASE, type BuildPlan, type SeatResult } from './buildPlans.ts';
 import { SEAT_GRACE_MS, seatAction, seatNotice } from './releaseSeat.ts';
 import { RELEASE_RULES } from './releaseLanes.ts';
@@ -93,7 +93,7 @@ import { commandLine, launchIndependent, run } from './proc.ts';
 import { type HostHealthMonitor } from './hostHealth.ts';
 import { describeCleanup, describeCleanupItems, describeCleanupLog } from './cleanup.ts';
 import type { BuildHold, HostHealth, TimedVerdict } from '../shared/types.ts';
-import { decideTimedPlace, timedAskMark, TIMED_VERDICT_MS } from './timedAsk.ts';
+import { decideTimedPlace, isSmallTimed, timedAskMark, TIMED_VERDICT_MS } from './timedAsk.ts';
 import { StandingAgents } from './standing.ts';
 import type { MachineManager } from './machines.ts';
 import type { CatalogTool, LaunchSpec } from './launch.ts';
@@ -3045,6 +3045,9 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
       if (reserved) throw new Error(`${leg}: ${reserved} Nothing was started.`);
       const timedPin = this.timedPinProblem(l.machine, w.pair?.timed ? 'timed' : timedKind(needsTimed(w, a.prompt)));
       if (timedPin) throw new Error(`${leg}: ${timedPin} Nothing was started.`);
+      // w1995: a small computer's last free sandbox goes to the timed work Queued for it, while other computers hold the pair.
+      const timedHold = this.timedHoldProblem(l.machine, w, !!w.pair?.timed || !!timedKind(needsTimed(w, a.prompt)));
+      if (timedHold) throw new Error(`${leg}: ${timedHold} Nothing was started.`);
       if (m?.platform === 'darwin' && (i > 0 || !crossOs)) {
         throw new Error(`${leg}: ${l.machine} is a Mac, and a Mac refuses a multiplayer client (w665): ${crossOs ? 'in a cross-OS pair a Mac only hosts (leg 1, sandbox)' : 'a pair run that needs no cross-OS pair (w1692) runs on computers that are not Macs'}. Nothing was started.`);
       }
@@ -3106,6 +3109,50 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
     const lapses = freeSince !== undefined ? freeSince + PAIR_HOLD_MS : undefined;
     if (room.short && lapses !== undefined && (this.orchestrators?.now().getTime() ?? Date.now()) >= lapses) return undefined;
     return `${place.id}'s last free sandbox is held for ${pair.id} "${pair.title.slice(0, 80)}" (${pair.priority}, Queued since ${(pair.queuedFor?.at ?? pair.createdAt).slice(11, 16)} UTC), ${pairText(pair.pair!)}, which starts only when that many computers have room at once (w1945)${room.short ? `: ${room.short}${lapses !== undefined ? `; the hold lapses at ${new Date(lapses).toISOString().slice(11, 16)} UTC (w1983)` : ''}` : `: it can start now, start its legs first`}. Start ${w ? w.id : 'this'} on another computer; work of higher priority than the pair (a person's "Start now" makes it urgent) goes first.`;
+  }
+
+  /**
+   * Why work that is not timed may not take `machine`'s last free sandbox (w1995), or undefined: `machine` is a small
+   * computer that takes timed runs (timedAsk.ts isSmallTimed: the top of w1872's ranking), timed work of at least this
+   * work's priority waits Queued for it and fits it now (a timed request on its platform, or a timed leg whose needs name
+   * it), and another computer can take this work (for a pair run, enough others for all its legs). lothsahn, 2026-10-24:
+   * "LothLaptop has 1 job and should get exclusive locks first. Why is this?": w1981's pair leg 2 took lothlaptop/slot1 at
+   * 04:59Z while w1985, w1440's timed leg Queued for lothlaptop since 04:27Z, waited until it widened to the big computers
+   * at 05:27Z. Not held: timed work itself, work whose needs name this computer alone, a pair with no other computers for
+   * its legs, and, TIMED_HOLD_MS after that computer's room began, anything (a hold nobody acts on never idles a sandbox).
+   */
+  timedHoldProblem(machine: string | undefined, w: WorkItem | undefined, timed: boolean): string | undefined {
+    if (!machine || timed) return undefined;
+    const place = this.places().find((p) => p.id === placeId(machine));
+    if (!place || place.freeSandboxes > 1 || place.noTimedRuns || !isSmallTimed(place)) return undefined;
+    const needs = w?.queuedFor?.needs;
+    if (needs?.length && needs.every((n) => placeId(n) === place.id)) return undefined;
+    const rank = (p: WorkPriority | undefined) => WORK_PRIORITIES.indexOf(p ?? 'normal');
+    const since = (x: WorkItem) => Date.parse(x.queuedFor?.at ?? x.createdAt) || 0;
+    const facts = this.roomFacts();
+    const kindOf = (t: WorkItem) => (t.timedLeg ? 'any' : needsTimed(t));
+    const waiting = [...this.store.work.values()]
+      .filter((t) => t.status === 'queued' && t.id !== w?.id && !t.pair && kindOf(t))
+      .filter((t) => rank(t.priority) >= rank(w?.priority))
+      .filter((t) => {
+        const k = kindOf(t);
+        if (k === 'win32' || k === 'darwin') {
+          if (place.platform !== k) return false;
+        }
+        return roomForWork(facts, t, t.queuedFor?.needs).ids.includes(place.id);
+      })
+      .sort((x, y) => rank(y.priority) - rank(x.priority) || since(x) - since(y))[0];
+    if (!waiting) return undefined;
+    const self: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes' | 'priority' | 'pair'> = w ?? { needs: 'game', title: '', brief: '', priority: 'normal' };
+    const all = roomForWork(facts, { ...self, pair: undefined }, needs).ids;
+    const others = all.filter((id) => id !== place.id);
+    // A pair leg may still go there when no other set of computers holds the pair (w1995 brief); single work, when no other computer has room.
+    if (w?.pair ? !roomEnough(facts, w, others) : !others.length) return undefined;
+    const freeSince = facts.since?.[`game:${place.id}`];
+    const lapses = freeSince !== undefined ? freeSince + TIMED_HOLD_MS : undefined;
+    if (lapses !== undefined && (this.orchestrators?.now().getTime() ?? Date.now()) >= lapses) return undefined;
+    const what = waiting.timedLeg ? `the timed leg of ${waiting.timedLeg.for}` : 'timed work';
+    return `${place.id}'s last free sandbox is held for timed work: ${waiting.id} "${waiting.title.slice(0, 80)}" (${what}, ${waiting.priority}, Queued since ${(waiting.queuedFor?.at ?? waiting.createdAt).slice(11, 16)} UTC) starts there first, as ${place.id} is a small computer (${place.maxAgents} agent slot${place.maxAgents === 1 ? '' : 's'}) ranked for timed and exclusive-lock work (w1872, w1995)${lapses !== undefined ? `; the hold lapses at ${new Date(lapses).toISOString().slice(11, 16)} UTC` : ''}. Start ${waiting.id} there, and ${w ? w.id : 'this'} on another computer with room (${others.slice(0, 4).join(', ')}); work of higher priority than the timed work goes first.`;
   }
 
   /**
@@ -3466,6 +3513,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
       parts.push('', `## ${m.id} (${noun}, ${state}; ${limits}${total}${diskPart})`, ...(sbs.length ? sbs.map((s) => this.describeMachineSandbox(m, s, detail)) : ['(none yet)']));
     }
     const cap = [...capacityLines(this.places(), this.lastPlaced, this.placement()), ...[this.timedRuns?.capacityLine()].filter((l): l is string => !!l)];
+    this.logTimedLine(cap);
     return [...cap, ...(cap.length ? [''] : []), ...parts, ...this.ops.groupLines()].join('\n').replace(/^\n+/, '');
   }
 
@@ -3650,6 +3698,9 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
             if (ctx.role === 'dispatcher' && needs === 'game' && !a.extra_agent) {
               const hold = this.pairHoldProblem(this.newWorkOn(a.sandbox, a.machine), w);
               if (hold) throw new Error(hold);
+              // w1995: nor from timed work Queued for a small computer, when other computers can take this.
+              const timedHold = this.timedHoldProblem(this.newWorkOn(a.sandbox, a.machine), w, !!w?.timedLeg || !!timedKind(needsTimed(w, a.prompt)));
+              if (timedHold) throw new Error(timedHold);
             }
             // A computer reserved for higher work (w1643, placement.minPriority) takes no new work below its level.
             const reserved = this.reservedProblem(this.machineOf(a.sandbox, a.machine), w);
@@ -5257,6 +5308,21 @@ ${w.repo ?? ''}
 
   /** Since when each computer has had room, `${kind}:${id}` to epoch ms (w1944, RoomNow.since): kept across reads, dropped when its room goes. */
   private roomSeen = new Map<string, number>();
+
+  /** The "Next timed work" line last written to the journal, its numbers masked (w1995). */
+  private timedLineSeen?: string;
+
+  /**
+   * The timed ranking the dispatcher reads (placement.ts timedLine), in the journal when it changes beyond its counts
+   * (w1995): an audit of where timed work went over a day found no record of what the line said at each placement.
+   */
+  private logTimedLine(cap: readonly string[]): void {
+    const line = cap.find((l) => l.startsWith('Next timed work') || l.startsWith('No computer has room for timed work'));
+    const key = line?.replace(/\d+/g, '#');
+    if (!line || key === this.timedLineSeen) return;
+    this.timedLineSeen = key;
+    console.log(`capacity (w1995): ${line.slice(0, 600)}`);
+  }
 
   /** Room for each kind of work and the held computers with room (w1089, w1098); `game` follows roomNow(), which tests replace. */
   roomFacts(): RoomNow {
