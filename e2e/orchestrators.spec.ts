@@ -160,7 +160,8 @@ test('the ledger dedupes: the overlap is found at once, a repeat is the same req
     await page.goto('/#/dispatcher');
     const panel = page.locator('.dispatcher-panel');
     // Not decided yet: the dispatcher has it, so Working, not Queued, which is capacity only (w643).
-    await expect(panel.getByTestId(`work-${a.id}`)).toContainText(`Working · New · ${a.id} · tester, Team Mate`);
+    await expect(panel.getByTestId(`work-${a.id}`)).toContainText(`Working · New · tester, Team Mate`);
+    await expect(panel.getByTestId(`work-id-${a.id}`)).toHaveText(a.id);
     await expect(panel.getByTestId(`work-${b.id}`)).toHaveCount(0);
     await panel.getByRole('button', { name: /closed$/ }).click();
     await expect(panel.getByTestId(`work-${b.id}`)).toContainText(`Merged into ${a.id}`);

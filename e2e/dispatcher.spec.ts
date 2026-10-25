@@ -138,17 +138,18 @@ async function rowsPage(page: Page) {
   await page.goto('/#/dispatcher');
 }
 
-test('a Working request shows its machine after its id, and an FFBox dev request reads "<operator> (FFBox)" (w1104, w1105)', async ({ page }) => {
+test('a Working request shows its machine after its status, its id in its own column, and an FFBox dev request reads "<operator> (FFBox)" (w1104, w1105)', async ({ page }) => {
   await rowsPage(page);
   const panel = page.locator('.dispatcher-panel');
   const sub = (id: string) => panel.getByTestId(`work-${id}`).locator('.work-sub');
-  await expect(sub('w1104')).toContainText(/Working .*w1104 · lothdesktop · Lothsahn/);
-  await expect(sub('w1105')).toContainText('w1105 · lothdesktop · lothsahn (FFBox)');
+  await expect(sub('w1104')).toContainText(/Working .* · lothdesktop · Lothsahn/);
+  await expect(panel.getByTestId('work-id-w1104')).toHaveText('w1104');
+  await expect(sub('w1105')).toContainText(' · lothdesktop · lothsahn (FFBox)');
   await expect(panel.getByTestId('work-machine-w1105')).toHaveText(/^ · lothdesktop$/);
-  await expect(sub('w1100')).toContainText(/w1100 · beast, lothdesktop, m3 · Ben, Lothsahn/);
+  await expect(sub('w1100')).toContainText(/ · beast, lothdesktop, m3 · Ben, Lothsahn/);
   // Not Working: no machine, FFBox dev request still short.
   await expect(panel.getByTestId('work-machine-w1099')).toHaveCount(0);
-  await expect(sub('w1099')).toContainText('w1099 · ben (FFBox)');
+  await expect(sub('w1099')).toContainText(' · ben (FFBox)');
   await expect(panel.getByTestId('work-machine-w1098')).toHaveCount(0);
   await expect(panel.getByText('FFBox dev request')).toHaveCount(0);
 

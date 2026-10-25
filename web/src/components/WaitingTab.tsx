@@ -8,7 +8,7 @@ import { namesReporter, sourceLabel, untrustedLabel } from '../../../shared/work
 import { api } from '../api';
 import { sessionRoute } from '../attention';
 import { attempt, focusWait, sessionsByIds, toast, useStore } from '../store';
-import { fmtClock, fmtRelative, navigate } from '../util';
+import { fmtClock, fmtRelative, href, navigate } from '../util';
 import { LocalImages, Markdown } from './Markdown';
 import { DetailLine, Previews, QuestionCard, type CardSummary } from './QuestionCard';
 import { PermissionCard } from './Transcript';
@@ -200,7 +200,8 @@ function CardDetails({ app, item, now }: { app: AppState; item: WaitingItem; now
 export { APPROVE_LABEL, DECLINE_LABEL };
 
 /** A summary's parts as the card shows them (w1868): what it is, who acts and for how long, the step, what follows, stale. */
-export function cardSummary(s: WaitSummary, now: number, title?: string): CardSummary {
+/** `id`: the request's number, linked to it in the Requests tab (w2143: the Intake tab's cards showed none on a phone). */
+export function cardSummary(s: WaitSummary, now: number, title?: string, id?: string): CardSummary {
   const age = waitAge(s.since, now);
   return {
     what: s.what,
@@ -209,6 +210,14 @@ export function cardSummary(s: WaitSummary, now: number, title?: string): CardSu
         <span className={age === 'fresh' ? '' : `tone-${AGE_TONE[age]}`}>
           {s.who} must act · waiting {waitedFor(s.since, now)}
         </span>
+        {id ? (
+          <>
+            {' · '}
+            <a className="mono qc-id" href={href({ view: 'dispatcher', tab: id })} data-testid={`work-id-${id}`}>
+              {id}
+            </a>
+          </>
+        ) : null}
         {title ? <span title={title}> · {title}</span> : null}
       </>
     ),
@@ -392,6 +401,6 @@ function AskWaitCard({ app, item, now }: { app: AppState; item: AskItem; now: nu
 /** The Intake tab's card for a request waiting for a reviewer (w1597): the same question card the Waiting on input tab shows. */
 export function IntakeApproveCard({ app, w, reviewer, now }: { app: AppState; w: WorkItem; reviewer: boolean; now: number }) {
   const item = { w, ask: 'approve', mine: reviewer, on: [], since: w.createdAt, text: `Nothing is worked on it until it is approved${w.approval?.why ? ` (not approved automatically: ${w.approval.why})` : ''}.`, recommendation: intakeRecommendation(w) } as unknown as WaitingItem;
-  const summary = cardSummary(waitSummary({ ...item, live: { state: 'waiting', why: '' } }, { reviewers: app.intake?.reviewers.join(' or ') }), now, w.title);
+  const summary = cardSummary(waitSummary({ ...item, live: { state: 'waiting', why: '' } }, { reviewers: app.intake?.reviewers.join(' or ') }), now, w.title, w.id);
   return <ApproveCard app={app} w={w} mine={reviewer} reviewers={app.intake?.reviewers.join(' or ') || 'A reviewer'} details={<CardDetails app={app} item={item} now={now} />} testId={`intake-${w.id}`} summary={summary} />;
 }
