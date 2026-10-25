@@ -408,6 +408,18 @@ test('w1829: an editor closed for a timed run is marked before its quit, says wh
   // A stop asked for is the last word: the turn does not start it again after it.
   await again.p.unity('a', 'stop');
   assert.deepEqual(again.p.benchClosedList(), []);
+  // w2116: a dialog held the quit up, so the close backed the scenes up and force-stopped the editor: unlike a stop asked
+  // for, its mark stays and the turn's end starts it again.
+  await again.p.unity('a', 'start');
+  await again.p.tick();
+  const forced = await again.p.benchClose('a', by, 't00000044', 'x', async () => {
+    await again.p.benchForceStop('a');
+    return { closed: true, forced: true, saved: [], text: 'closed by force: the dialog "Save Scene [&Save / Cancel]" held it 32 s; backed up ...' };
+  });
+  assert.equal(forced.closed, true);
+  assert.equal(again.running.size, 0, 'force-stopped');
+  await again.p.tick();
+  assert.deepEqual(again.p.benchClosedList().map((c) => [c.id, c.ticket]), [['a', 't00000044']], 'the turn reopens it');
 });
 
 test('w1962: a queued editor start holds its slot while it waits, so another start is refused meanwhile, and it starts at its turn', async (t) => {

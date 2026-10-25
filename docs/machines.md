@@ -606,7 +606,8 @@ keep their requests and their shells run on.
 
 - **The daemon** tells the person's game from the agents' players (no worker session in its environment, no slot lease, no
   sandbox or worker temp folder in its command line) at each leftovers look, and holds an exclusive bench turn for it:
-  every sandbox editor closes (saved first), the workers' players are asked to quit, batch Unity runs go to idle priority
+  every sandbox editor closes (saved first; one a modal dialog holds 30 s is backed up into its `Logs/` and
+  force-stopped, w2116), the workers' players are asked to quit, batch Unity runs go to idle priority
   and finish, and no editor start, Unity run, player, clip or timed leg begins (docs/unity-lifecycle.md, "A person's game").
 - **The portal** holds the machine for new work (`Agents.placement()` merges `playHolds` from `shared/personPlay.ts`, read
   from the daemon's stats, `MachineStats.personPlay`, fresh within 3 minutes): the Capacity block reads `ROOM n% but HELD

@@ -496,6 +496,17 @@ export class SandboxPool {
     return res;
   }
 
+  /**
+   * w2116: force-stop an editor a timed run's turn is closing, after a modal dialog held its quit up and its scenes were
+   * backed up (machine/liveIdle.ts idleCloseEditor's rescue). Unlike a stop asked for, its close mark stays, so the turn's
+   * end starts it again.
+   */
+  async benchForceStop(id: string): Promise<string> {
+    const ed = this.editorFor(this.require(id));
+    ed.watch?.expectExit(10 * 60_000);
+    return ed.unity.stop({ force: true });
+  }
+
   /** The sandboxes a timed run's turn closed that are not open again yet (w1829): when, by which ticket, and their start. */
   benchClosedList(): { id: string; at: number; ticket: string; reopenAt?: number; starting: boolean }[] {
     return [...this.recs.values()]
