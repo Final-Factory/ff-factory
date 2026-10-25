@@ -236,6 +236,8 @@ export interface OrchestratorsDeps {
   timedLegStep?: (w: WorkItem) => { step: LegStep; big: boolean } | undefined;
   /** Start a timed leg on `machine` itself, its movable workers moved first (w2055, Agents.startTimedLeg); false when under way. */
   startTimedLeg?: (w: WorkItem, machine: string, why: string, moves: readonly Occupant[]) => boolean;
+  /** w2168: a started leg waiting for an exclusive ticket on a big computer moves to an idle small one: its log line, if it did. */
+  relocateTimedLeg?: (w: WorkItem) => string | undefined;
   /** Whether a machine is online; undefined for a machine this portal does not have (w643: blockers). */
   machineOnline?: (id: string) => boolean | undefined;
   /** w2045: whether a request is in the merge-on-green pilot's arm (server/mergeOnGreen.ts); absent: no request is. */
@@ -3572,7 +3574,17 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
     const widened: string[] = [];
     for (const w of this.store.work.values()) {
       const leg = w.timedLeg;
-      if (!leg || w.status !== 'queued' || !isOpen(w)) continue;
+      if (!leg || !isOpen(w)) continue;
+      if (w.status !== 'queued') {
+        // w2168: a started leg that waits for an exclusive ticket on a big computer moves to a small one that became idle.
+        const moved = this.d.relocateTimedLeg?.(w);
+        if (moved) {
+          this.stamp(w, moved);
+          this.store.putWork(w);
+          done.push(w.id);
+        }
+        continue;
+      }
       const r = this.d.timedLegStep(w);
       if (!r) continue;
       const { step, big } = r;
@@ -3622,6 +3634,23 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
   /** A line in request `id`'s log about a resume's move that did not happen (w2079, Agents.leaveToOwners). */
   noteMove(id: string, line: string): void {
     this.noteTimedLegStart(id, line);
+  }
+
+  /**
+   * A started timed leg moves to an idle small computer (w2168, Agents.relocateTimedLeg): taken off its old worker and Queued
+   * for `to`, where FF Factory starts it next; the request it serves is told in its log.
+   */
+  relocatedTimedLeg(w: WorkItem, sessionId: string, to: string, why: string): void {
+    this.moveOff(w, sessionId, `its timed leg moves to ${to} (w2168): ${why}`);
+    w.status = 'queued';
+    w.queuedFor = { at: this.now().toISOString(), needs: [to] };
+    this.roomFlags.delete(w.id);
+    this.store.putWork(w);
+    const asker = w.timedLeg ? this.store.work.get(w.timedLeg.for) : undefined;
+    if (asker && isOpen(asker)) {
+      this.stamp(asker, `ledger: its timed leg ${w.id} moves to ${to}, which became idle, instead of waiting for an exclusive ticket on a big computer (w2168)`);
+      this.store.putWork(asker);
+    }
   }
 
   noteTimedLegStart(id: string, line: string): void {

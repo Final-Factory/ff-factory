@@ -169,3 +169,35 @@ export const reachesBig = (ids: readonly string[], places: readonly Computer[]) 
   const c = places.find((p) => p.id === id);
   return !!c && classRank(c) >= 2;
 });
+
+const osText = (platform?: string) => (platform === 'win32' ? ' on Windows' : platform === 'darwin' ? ' on macOS' : '');
+
+/**
+ * Why timed work may not start on `target` when it is first placed (w2168, lothsahn: "Please file a fix to understand and
+ * fix why this got placed as ordinary work, as BEAST was about to start doing exclusive runs which really lowers our ability
+ * to develop"): the timing order holds at start_agent too, not only for a Queued leg. While a computer that takes timed runs
+ * is idle (notIdle), the first idle one by size gets it; `target` passes only when it is that one, or idle itself and of
+ * the same class or smaller. With no idle computer the start goes on (a leg then waits Queued and pre-empts, w2055).
+ */
+export function timedStartProblem(id: string, target: string, places: readonly Computer[], prefs: PlacementPrefs = {}, platform?: string): string | undefined {
+  const ok = places.filter((c) => !timedEligible(c, prefs, platform)).sort(bySize);
+  const idle = ok.find((c) => !notIdle(c));
+  if (!idle || idle.id === target) return undefined;
+  const here = ok.find((c) => c.id === target);
+  if (here && !notIdle(here) && classRank(here) <= classRank(idle)) return undefined;
+  const why = here ? (notIdle(here) ?? `${classText(here)} is bigger`) : `${target} takes no timed runs here`;
+  return `${id} is timed work, and ${classText(idle)} is idle: the first idle computer${osText(platform)} that takes timed runs, by size, small first. Start it there (start_agent with machine "${idle.id}"), with its code work: not on ${target} (${why}). The timing order (w2055, w2168): an idle computer first, smallest class first; then pre-emption of movable work on a small one; then, for high or urgent work only, the big computers. lothsahn: "BEAST was about to start doing exclusive runs which really lowers our ability to develop".`;
+}
+
+/**
+ * Where a started timed leg that only waits for its exclusive bench ticket on a big computer (large or xlarge) goes instead
+ * (w2168): the first idle small or medium computer that takes timed runs, smallest first; undefined while none is idle. Its
+ * worker is moved between turns only (Agents.timedLegRelocateFor checks that), never mid-turn, and the leg starts again there.
+ */
+export function timedRelocateStep(from: string, places: readonly Computer[], prefs: PlacementPrefs = {}, platform?: string): { to: string; why: string } | undefined {
+  const here = places.find((c) => c.id === from);
+  if (!here || classRank(here) < 2) return undefined;
+  const idle = places.filter((c) => !timedEligible(c, prefs, platform) && classRank(c) <= 1 && !notIdle(c)).sort(bySize)[0];
+  if (!idle) return undefined;
+  return { to: idle.id, why: `${classText(idle)} became idle while it waited on ${classText(here)} for an exclusive bench ticket, which would idle every other slot there; a timed leg runs on the smallest idle computer${osText(platform)} (w2055, w2168)` };
+}
