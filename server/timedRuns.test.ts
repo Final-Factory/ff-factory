@@ -103,6 +103,15 @@ test('the ticket is written in the bench queue\'s own format, so the machine\'s 
   assert.equal(takeTicket(root, { what: 'b', session: 's1', requests: [], maxMin: 5 }), 't00000001');
 });
 
+test('w2116: a path that does not exist yet is inside a root reached through a link (a Windows short name, RUNNER~1)', (t) => {
+  const d = tmp(t);
+  fs.mkdirSync(path.join(d, 'real'));
+  fs.symlinkSync(path.join(d, 'real'), path.join(d, 'link'), 'junction');
+  assert.ok(insideRoots(path.join(d, 'link', 'a', 'b'), [path.join(d, 'link')]));
+  assert.ok(insideRoots(path.join(d, 'link', 'a', 'b'), [path.join(d, 'real')]));
+  assert.ok(!insideRoots(path.join(d, 'link', '..', 'elsewhere', 'b'), [path.join(d, 'real')]));
+});
+
 test('a build is read only from the sandbox, the session temp folder or the worker install', (t) => {
   const d = tmp(t);
   assert.ok(insideRoots(path.join(d, 'a', 'b'), [d]));
