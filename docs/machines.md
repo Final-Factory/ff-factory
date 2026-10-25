@@ -971,6 +971,25 @@ and w1891 waited behind it there, and w1789 waited on LothDesktop behind shared 
   `moveDecision` must answer move: not pinned to that computer, its branch tracking its own remote branch with nothing
   unpushed, and another computer with a free sandbox. Out of scope: `timed_run` (daemon player A/Bs) and a whole timed
   request's placement (`timedRank`, w1872) are unchanged; `SMALL_TIMED_MAX_AGENTS` (4) still picks timed_run's computers.
+- **The timing order binds at a start and while a leg waits** (w2168; lothsahn, 2026-10-25: "Please file a fix to understand
+  and fix why this got placed as ordinary work, as BEAST was about to start doing exclusive runs which really lowers our
+  ability to develop"). Two gaps, from the journal of 2026-10-25: w2163 started on a busy lothdesktop/slot3 at 18:43Z while
+  LothLaptop sat idle, because start_agent only noted "Next timed work"; w2157 started on BEAST at 17:55Z correctly
+  (LothLaptop was offline from 05:50:51Z to 18:33:40Z), but after LothLaptop came back its worker kept waiting on BEAST for
+  an exclusive ticket and nothing looked again. Now:
+  1. `start_agent` (not `extra_agent`) and `stop_agent` `move_to` refuse timed work (a request `needsTimed` marks, or a timed
+     leg) on a computer that is not idle or is bigger while an eligible computer is idle, naming the first idle one
+     (`Agents.timedOrderProblem`, `timedLegPlace.ts` `timedStartProblem`). A request a person pinned (`queuedFor.needs`
+     naming that computer) goes where it was pinned. Resumes were already placed by `moveDecision` with `first: timed`.
+  2. Each blocker-watch pass, `timedLegBound` also looks at every started timed leg (`Agents.timedLegRelocateFor`): one
+     worker, its exclusive ticket waiting in the bench queue (`bench.waiters` or `nextExclusive`), holding no ticket, between
+     turns, no bench lock from its sandbox, on a large or xlarge computer while a small or medium one is idle
+     (`timedRelocateStep`). It is stopped, its sandbox released, the leg Queued for that computer and started there
+     ("timed relocate (w2168): ..."; the leg's log "ledger: MOVED to M by FF Factory (w2168)"). The dropped ticket's
+     process ends when the leftovers sweep ends the stopped session's processes.
+  `placement.prefer` plays no part in timed placement (`timedEligible` reads hold and avoid only): LothLaptop is left out of
+  prefer on purpose and is still first for timed work. Tests: `server/w2168TimedPlacement.test.ts`, and the w2168 test in
+  `server/orchestrators.test.ts`.
 - **How long "offline" is waited for** (w2048, `unavailableWait`; lothsahn: "If the fleet is idle it should wait far less
   than if the fleet is busy"). The load is the agents mid-turn plus the requests Queued, over the online computers' agent
   slots (`fleetLoad`). At 50% load or less the wait is 5 minutes, at 100% or more 60 minutes, and between the two it grows

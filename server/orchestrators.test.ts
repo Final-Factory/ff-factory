@@ -6436,3 +6436,48 @@ test('w2085: no diff reader, or a design choice, refuses nothing', async (t) => 
   await h.waiting_on_person!(q('OK the low-ore tooltip look so #2395 can merge'));
   assert.ok(info.waitingOn, 'recorded');
 });
+// ---------------------------------------------------------------- w2168: timed work follows the timing order at start and while it waits
+
+test('w2168: start_agent refuses timed work on a busy big computer while a small one is idle; a leg waiting there for an exclusive ticket moves to the small one between turns, never mid-turn', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, machines, o, dispatcher, call } = env;
+  fixTimedFacts(o);
+  agentsRoomFacts(agents, { game: ['pc', 'lap'] });
+  const box = (bid: string, maxAgents: number, x: Partial<Computer> = {}): Computer => ({ id: bid, online: true, live: 0, midTurn: 0, maxAgents, sandboxes: 1, maxSandboxes: 3, freeSandboxes: 1, memUsedBytes: 16 * 1024 ** 3, memTotalBytes: 64 * 1024 ** 3, editors: 0, maxEditors: 2, platform: 'win32', ...x });
+  // pc: xlarge with three agents at work (LothDesktop at 18:43Z on 10-25); lap: small and idle (LothLaptop).
+  let lap: Partial<Computer> = {};
+  agents.places = () => [box('pc', 10, { live: 3, midTurn: 2 }), box('lap', 1, lap)];
+  putRequests(store, [{ id: 'w3', title: 'Timed A/B of the belt fix', brief: 'Run the benchmark A/B on Windows.' }]);
+  const refused = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Run it', title: 'w3: A/B', work_id: 'w3' });
+  assert.equal(refused.isError, true, refused.text);
+  assert.match(refused.text, /w3 is timed work, and lap \(small, 1 agent slot\) is idle.*start_agent with machine "lap"/s);
+
+  // A started leg on pc whose worker waits for an exclusive ticket there (w2157 on BEAST from 18:44).
+  putRequests(store, [{ id: 'w2', title: 'Timed leg for w9: belt A/B', status: 'active', needs: 'game', timedLeg: { for: 'w9', forSession: 'nobody', from: 'pc', small: ['lap'] } }]);
+  const { id, info } = await startedFor(env, 'w2');
+  const stats = machines.statsOf.bind(machines);
+  const bench = { mode: 'shared', running: [{ ticket: 't1', mode: 'shared', what: 'other', session: 'someone' }], runningCount: 1, waiting: 1, waiters: [{ ticket: 't1507', mode: 'exclusive', what: 'belt A/B', session: id.slice(0, 8), ahead: 0 }] };
+  machines.statsOf = ((mid: string) => ({ ...(stats(mid) ?? {}), ...(mid === 'pc' ? { bench } : {}) })) as typeof machines.statsOf;
+  const starts: { w: string; m: string }[] = [];
+  agents.startTimedLeg = (w, m) => (starts.push({ w: w.id, m }), true);
+
+  // lap busy: it stays.
+  lap = { live: 1, midTurn: 1 };
+  assert.deepEqual(o.timedLegBound(), []);
+  lap = {};
+  // Mid-turn: never interrupted.
+  const st = info.status;
+  info.status = 'running';
+  assert.deepEqual(agents.timedLegRelocateFor(store.work.get('w2')!), { stays: 'it is mid-turn (a worker is never interrupted; it can move after its turn)' });
+  assert.deepEqual(o.timedLegBound(), []);
+  info.status = st;
+  // Between turns, lap idle: it moves.
+  assert.deepEqual(o.timedLegBound(), ['w2']);
+  assert.deepEqual(starts, [{ w: 'w2', m: 'lap' }]);
+  const w2 = store.work.get('w2')!;
+  assert.equal(w2.status, 'queued');
+  assert.deepEqual(w2.queuedFor?.needs, ['lap']);
+  assert.ok(!w2.sessionIds.includes(id), 'the stopped worker is detached');
+  assert.match(w2.log.join('\n'), /ledger: MOVED to lap by FF Factory \(w2168\): worker \w{8} on pc\/alpha waited for an exclusive bench ticket and was between turns; lap \(small, 1 agent slot\) became idle/);
+  assert.ok(store.sessions.get(id)!.placeReleased, 'its sandbox is released');
+});

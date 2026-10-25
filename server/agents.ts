@@ -101,7 +101,7 @@ import { type HostHealthMonitor } from './hostHealth.ts';
 import { describeCleanup, describeCleanupItems, describeCleanupLog } from './cleanup.ts';
 import type { BuildHold, HostHealth, TimedVerdict } from '../shared/types.ts';
 import { decideTimedPlace, fleetLoad, isSmallTimed, smallTimedStates, timedAskMark, unavailableWait, TIMED_VERDICT_MS, TIMED_WAIT_IDLE_MIN } from './timedAsk.ts';
-import { reachesBig, timedLegStep, type LegStep, type Occupant } from './timedLegPlace.ts';
+import { reachesBig, timedLegStep, timedRelocateStep, timedStartProblem, type LegStep, type Occupant } from './timedLegPlace.ts';
 import { machineAskProblem } from '../shared/machineAsk.ts';
 import { StandingAgents } from './standing.ts';
 import type { MachineManager } from './machines.ts';
@@ -840,6 +840,8 @@ export class Agents {
       // w2055: a Queued timed leg's next step, and FF Factory starting it itself (pre-empting a small computer's movable work).
       timedLegStep: (w) => this.timedLegStepFor(w),
       startTimedLeg: (w, m, why, moves) => this.startTimedLeg(w, m, why, moves),
+      // w2168: a started leg waiting for an exclusive ticket on a big computer moves to a small one that became idle.
+      relocateTimedLeg: (w) => this.relocateTimedLeg(w),
       machineOnline: (id) => (store.machines.has(id.toLowerCase()) ? machines.isOnline(id.toLowerCase()) : undefined),
       // w2045: the merge-on-green pilot's arm, by request (server/mergeOnGreen.ts); the setting is read live.
       mergeOnGreenPilot: (id) => inMergeOnGreenPilot(id, this.cfg),
@@ -3032,6 +3034,54 @@ export class Agents {
   }
 
   /**
+   * A started timed leg whose worker only waits for its exclusive bench ticket on a big computer (w2168): when a small or
+   * medium computer that takes timed runs is idle, the worker is stopped between turns (never mid-turn), its sandbox released
+   * (its waiting ticket's process ends with it), the leg is Queued again for that computer, and FF Factory starts it there
+   * (startTimedLeg). lothsahn: "BEAST was about to start doing exclusive runs which really lowers our ability to develop".
+   * w2157 waited on BEAST from 18:44 behind two shared tickets while LothLaptop sat idle; nothing looked again. The facts and
+   * the target, or why it stays (undefined: not such a leg).
+   */
+  timedLegRelocateFor(w: WorkItem): { session: SessionInfo; from: string; to: string; why: string } | { stays: string } | undefined {
+    const leg = w.timedLeg;
+    if (!leg || w.status === 'queued' || !isOpen(w) || this.legStarting.has(w.id)) return undefined;
+    const live = w.sessionIds.map((id) => this.store.sessions.get(id)).filter((s): s is SessionInfo => !!s && s.kind === 'worker' && !!s.machineId && occupies(s, !!this.sessions.sessions.get(s.id)?.live, Date.now()));
+    if (live.length !== 1) return undefined;
+    const info = live[0];
+    const bench = this.machines.statsOf(info.machineId!)?.bench;
+    const mine = (t: { session?: string }) => !!t.session && (t.session === info.id || info.id.startsWith(t.session));
+    const waiting = bench?.waiters?.find((t) => mine(t) && t.mode === 'exclusive') ?? (bench?.nextExclusive && mine(bench.nextExclusive) ? bench.nextExclusive : undefined);
+    if (!waiting) return undefined;
+    if (bench?.running.some(mine)) return { stays: 'it holds a ticket already' };
+    if (isMidTurn(info) || info.pendingPermissions.length) return { stays: 'it is mid-turn (a worker is never interrupted; it can move after its turn)' };
+    if (this.roomMoving.has(info.id)) return { stays: 'it is being moved already' };
+    const sb = this.store.machines.get(info.machineId!)?.sandboxes?.find((x) => x.id === info.machineSandbox);
+    if (sb?.path && benchLockIn(this.machines.statsOf(info.machineId!)?.benchLock, sb.path)) return { stays: 'a timed run from its sandbox holds the bench lock' };
+    const places = this.places();
+    const platform = leg.platform ?? places.find((p) => p.id === info.machineId)?.platform;
+    const r = timedRelocateStep(info.machineId!, places, this.placement(), platform);
+    if (!r) return undefined;
+    return { session: info, from: `${info.machineId}/${info.machineSandbox}`, to: r.to, why: `${r.why}; its waiting ticket ${waiting.ticket} there is dropped` };
+  }
+
+  /** Move a waiting timed leg to an idle small computer (w2168, timedLegRelocateFor): the line for its log, or undefined. */
+  relocateTimedLeg(w: WorkItem): string | undefined {
+    const r = this.timedLegRelocateFor(w);
+    if (!r || 'stays' in r) return undefined;
+    const info = r.session;
+    const report = [...this.store.readTranscript(info.id, 400)].reverse().flatMap((e) => (e.kind === 'result' && e.text.trim() ? [e.text] : []))[0];
+    this.sessions.sessions.get(info.id)?.stop(true);
+    info.placeReleased = { at: new Date().toISOString(), sandbox: info.machineSandbox!, branch: this.branchNow(info) ?? info.machineSandbox!, why: `timed leg ${w.id} moved to ${r.to} (w2168)` };
+    this.store.putSession(info);
+    this.waker.cancel(info.id);
+    this.store.append(info.id, { kind: 'system', text: `Stopped by FF Factory between turns: timed leg ${w.id} moves to ${r.to}, which is idle (${r.why}). Its sandbox ${r.from} is released (w2168).` });
+    this.orchestrators.relocatedTimedLeg(w, info.id, r.to, `${r.why}${report ? `; its worker's last report there: "${report.replace(/\s+/g, ' ').slice(0, 300)}"` : ''}`);
+    console.log(`timed relocate (w2168): ${w.id} worker ${info.id} on ${r.from} stopped between turns, waiting for an exclusive ticket; the leg moves to ${r.to}: ${r.why}`);
+    const cur = this.store.work.get(w.id) ?? w;
+    if (!this.startTimedLeg(cur, r.to, `${r.why}; moved from ${r.from} (w2168)`)) return undefined;
+    return `ledger: MOVED to ${r.to} by FF Factory (w2168): worker ${info.id.slice(0, 8)} on ${r.from} waited for an exclusive bench ticket and was between turns; ${r.why}`;
+  }
+
+  /**
    * Start a Queued timed leg on `machine` (w2055): an idle computer's free sandbox, or one pre-empted (`moves`: its workers
    * leave first through w2046's moveForRoom, which stops each between turns, saves nothing it has not pushed, releases its
    * sandbox at once and starts a fresh session for its request on the computer moveDecision picked; one serving no open
@@ -3129,6 +3179,8 @@ export class Agents {
     // A timed request is never moved to a computer that takes no timed runs (w1861, w1872): handed back, like a pin.
     const timedPin = this.openWorkOf(info).map((w) => this.timedPinProblem(target, timedKind(needsTimed(w)))).find(Boolean);
     if (timedPin) throw new Error(`${timedPin} ${sessionId} stays on ${from}.`);
+    const timedOrder = this.openWorkOf(info).map((w) => this.timedOrderProblem(target, w)).find(Boolean);
+    if (timedOrder) throw new Error(`${timedOrder} ${sessionId} stays on ${from}.`);
     if (!hasRoom(place)) throw new Error(`${target} has no room for game work now (${busyReasons(place).join('; ')}): ${sessionId} stays on ${from}. Move it when list_sandboxes shows room there.`);
     if (isMidTurn(info) || info.pendingPermissions.length) throw new Error(`${sessionId} is mid-turn: move it once its turn ends (a move hands its requests to a new session, and a turn cut off loses its step)`);
     const reqs = this.openWorkOf(info);
@@ -4267,6 +4319,21 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
     return on && t ? timedPinRefusal(on, this.places(), this.placement(), t) : undefined;
   }
 
+  /**
+   * The timing order at a start or a move (w2168, timedLegPlace.ts timedStartProblem): timed work (a request marked timed, or
+   * a timed leg) goes to the first idle computer by size while one is idle. w2163 started on a busy LothDesktop while
+   * LothLaptop sat idle, as start_agent only added "Next timed work" as a note. A request a person pinned to computers
+   * (queuedFor.needs naming this one) goes where it was pinned.
+   */
+  private timedOrderProblem(on: string | undefined, w: WorkItem | undefined, prompt?: string): string | undefined {
+    const t = w?.timedLeg ? 'timed' : timedKind(needsTimed(w, prompt));
+    if (!on || !t) return undefined;
+    const target = placeId(on);
+    if (w?.queuedFor?.needs?.length && !w.timedLeg && w.queuedFor.needs.some((n) => placeId(n) === target)) return undefined;
+    const platform = t === 'timed:win32' ? 'win32' : t === 'timed:darwin' ? 'darwin' : w?.timedLeg?.platform;
+    return timedStartProblem(w?.id ?? 'this', target, this.places(), this.placement(), platform);
+  }
+
   /** places() for one person's work (w1463): a machine where their runs get a vault GitHub token counts as able to push workflow files. */
   private placesFor(person: string | undefined): Computer[] {
     return this.places().map((p) => {
@@ -4501,6 +4568,9 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
             // Timed or exclusive-lock work pinned to a computer that takes none goes back to the caller (w1861, w1872).
             const timedPin = this.timedPinProblem(this.machineOf(a.sandbox, a.machine), timedKind(needsTimed(w, a.prompt)));
             if (timedPin) throw new Error(timedPin);
+            // w2168: timed work is placed by the timing order when it starts too: an idle small computer first, never a busy big one.
+            const timedOrder = a.extra_agent ? undefined : this.timedOrderProblem(this.machineOf(a.sandbox, a.machine), w, a.prompt);
+            if (timedOrder) throw new Error(timedOrder);
             // The title is the job (w575): "wNNN: <description>", checked before anything starts. Without a work_id the
             // start is recorded as the next request, so its id is known now too.
             if (ctx.role === 'dispatcher' && !a.title?.trim()) throw new Error(TITLE_HELP);
