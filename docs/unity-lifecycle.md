@@ -326,7 +326,14 @@ w1832), the daemon:
   w1829, BEAST 2026-10-24, marked closed at 03:06Z, quit at 03:15Z) is asked again to quit inside the bridge's own call
   (`EXIT_NOW_SNIPPET`, docs/live-view.md "Idle editors close"); one whose answer was lost because it quit first (w1829,
   BEAST 2026-10-24 05:54Z) counts as closed once its process is gone, so its mark stays and the turn's end starts it
-  again; one that does not quit is left running. Nothing is killed, and the editor watch never takes an editor it told to quit for
+  again; one that does not quit is left running. A modal dialog that holds the close up for 30 s (`DIALOG_RESCUE_MS`,
+  looked for every 2 s while a bridge call or the quit is pending; w2116: BEAST's slot3 editor sat on Unity's "Save
+  Scene [Save / Cancel]" dialog from 08:30:31Z on 2026-10-25 until the orchestrator force-stopped it a minute later) ends
+  it: Cancel is never pressed; the daemon copies Unity's own scene backups (`Temp/__Backupscenes/*`) and each dirty
+  scene's file as last saved into `Logs/bench-close-backup-<stamp>/` with a README naming the scenes and the dialog
+  (`machine/liveIdle.ts` `backupScenes`; edits made after Unity's last backup lived only in the blocked editor and are
+  lost), then force-stops the editor (`SandboxPool.benchForceStop`, which keeps the mark, so the turn's end reopens it).
+  The idle Live view close has no rescue and still waits a dialog out. Nothing else is killed, and the editor watch never takes an editor it told to quit for
   hung while it goes quiet (`machine/unity.ts` `expectExit`, kept per editor pid). One that comes up during the turn (a
   start that did not queue) is closed too. The sandbox is marked (`benchClosed` in `sandboxes.json`, with the ticket and
   the editor's pids) before the quit is sent, and its line in `list_sandboxes`, `unity status` and the sandbox panel says
@@ -404,7 +411,8 @@ would count as the person's.
 **What the agents do meanwhile.** The game holds an exclusive turn (`machine/benchTurn.ts`, `Holder.person`, the
 daemon's `personHolder`) with no queue ticket, and the turn does what a timed run's does, with one difference:
 
-- every sandbox's editor closes (saved first, never killed; "The exclusive turn" above), every worker's game player is
+- every sandbox's editor closes (saved first; force-stopped only after its scenes are backed up when a dialog holds the
+  close 30 s, w2116; "The exclusive turn" above), every worker's game player is
   asked to quit (its window's close), and Unity MCP calls into a closed editor are refused with who plays and when it
   comes back;
 - a batch Unity (a build, a test run, a batch compile) is **dropped to idle priority and left to finish**, never ended:

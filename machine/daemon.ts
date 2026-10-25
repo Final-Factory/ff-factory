@@ -39,7 +39,7 @@ import { readImage } from '../server/images.ts';
 import { publishFromMachine } from './review.ts';
 import { LOG_MAINTAIN_EVERY_MS, maintainLogs, maintenanceLine } from './logRetention.ts';
 import { DEV_TIER_SNIPPET, LiveSession, gameCommand, readGameChannel, type LiveDeps } from './live.ts';
-import { idleCloseEditor, idleClosedDetail, idleReopenNote } from './liveIdle.ts';
+import { backupScenes, idleCloseEditor, idleClosedDetail, idleReopenNote } from './liveIdle.ts';
 import { LIVE_MATERIAL_NAME, LIVE_PROPERTY_NAME, keepInMat, type MatKnobType } from './matText.ts';
 import { legsText, parseStage, restage, stageSummary, type LiveStageStep } from './liveStage.ts';
 import { FramePump, parseAck } from '../shared/framePump.ts';
@@ -53,7 +53,8 @@ import { SessionSweeper, sweepSettings } from '../server/sessionSweep.ts';
 import { cleanupPass, defaultNightlyRoots, planStaleOutput, staleOutputSettings, type StaleContext, type StalePlace } from '../server/staleOutput.ts';
 import { MACHINE_CLEANUP_DEFAULTS } from '../server/config.ts';
 import { editorFolderOf, ownRecheck, planOwnLeftovers, playerSlotRoots, runOwnLeftovers, type OwnLeftoverInputs } from '../server/ownLeftovers.ts';
-import { hubEditorDirs, hubListedEditors, realDeps as realUnityDeps } from './unity.ts';
+import { hubEditorDirs, hubListedEditors, listWinDialogs, realDeps as realUnityDeps } from './unity.ts';
+import { listMacDialogs } from './macDialogs.ts';
 import { UnityReaper, realReaperDeps, type ReaperDeps } from './unityReaper.ts';
 import type { CleanupFacts } from '../server/cleanupFolders.ts';
 import type { SessionOwner } from '../server/resumable.ts';
@@ -1745,6 +1746,16 @@ export class Daemon {
     };
   }
 
+  /** w2116: the first modal dialog a sandbox's editor shows now, as "<title> [<buttons>]", or undefined. */
+  private async editorDialog(id: string): Promise<string | undefined> {
+    for (const pid of await this.pool.editorPids(id)) {
+      const { dialogs } = await (process.platform === 'darwin' ? listMacDialogs(pid) : listWinDialogs(pid)).catch(() => ({ dialogs: [] as { title: string; buttons: string[] }[] }));
+      const box = dialogs[0];
+      if (box) return `${box.title || 'untitled dialog'} [${box.buttons.join(' / ')}]`;
+    }
+    return undefined;
+  }
+
   private async benchCloseEditor(id: string, by: string, ticket: string) {
     const sbPath = this.pool.pathOf(id);
     if (!sbPath) return { closed: false, text: 'skipped: no such sandbox' };
@@ -1755,7 +1766,21 @@ export class Daemon {
       const detail = holder?.person ? `closed while ${by}; reopens when that ends, ${holder.person.ends}` : closedDetail(by, holder?.until, holder?.kept);
       const res = await this.pool.benchClose(id, by, ticket, detail, () =>
         idleCloseEditor(
-          { bridge: this.editorBridge(id, sbPath), editorPids: () => this.pool.editorPids(id), personInputAgoMs: () => undefined, sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: () => Date.now() },
+          {
+            bridge: this.editorBridge(id, sbPath),
+            editorPids: () => this.pool.editorPids(id),
+            personInputAgoMs: () => undefined,
+            sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+            now: () => Date.now(),
+            // w2116: a modal dialog ("Save Scene") that holds the close up is waited out DIALOG_RESCUE_MS, then the scenes
+            // are backed up and the editor force-stopped; its mark stays, so the turn's end reopens it.
+            dialog: () => this.editorDialog(id),
+            rescue: async (dialog, dirty) => {
+              const kept = backupScenes(sbPath, dirty, dialog, new Date());
+              log(`bench: sandbox ${id}: the dialog "${dialog}" held its close for ${by} up: ${kept}; force-stopping its editor (w2116)`);
+              return `${kept}; ${await this.pool.benchForceStop(id)}`;
+            },
+          },
           0,
         ),
       );

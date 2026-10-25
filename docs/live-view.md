@@ -321,8 +321,9 @@ sandbox, its branch, the worker's conversation and its hold stay.
      not the activity pause is on): skipped. Otherwise it leaves play mode, which ends the game's session and puts every
      knob back (`LiveLook`), so a knob value is never saved into a `.mat`.
   3. An untitled scene with unsaved changes (saving would ask where): skipped.
-  4. One snippet saves the open scenes and the assets (`EditorSceneManager.SaveOpenScenes`, `AssetDatabase.SaveAssets`, as
-     the clean quit of a person's main clone does), checks no scene is still dirty, and only then calls
+  4. One snippet saves each named dirty scene alone and the assets (`EditorSceneManager.SaveScene` per scene,
+     `AssetDatabase.SaveAssets`; not `SaveOpenScenes`, which opened Unity's "Save Scene" file picker on BEAST's slot3
+     editor in the middle of an EditMode test run, w2116, 2026-10-25 08:30Z), checks no scene is still dirty, and only then calls
      `EditorApplication.Exit(0)` on the editor's next update. That call needs the bridge's safety checks off
      (`bridgeExecute`'s `safetyChecks`), which the bridge otherwise refuses.
   5. It waits up to 3 minutes for the process to go. An unfocused, idle editor may not update for minutes, so the delayed

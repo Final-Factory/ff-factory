@@ -2,7 +2,10 @@
 // (machine/liveIdle.ts). The editor here is a fake that answers the snippets the way the real one does.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { EXIT_NOW_SNIPPET, INSPECT_SNIPPET, LEAVE_PLAY_SNIPPET, SAVE_AND_QUIT_SNIPPET, idleCloseEditor, idleReopenNote, parseLook, type IdleCloseDeps } from '../machine/liveIdle.ts';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { DIALOG_POLL_MS, DIALOG_RESCUE_MS, EXIT_NOW_SNIPPET, INSPECT_SNIPPET, LEAVE_PLAY_SNIPPET, SAVE_AND_QUIT_SNIPPET, backupScenes, idleCloseEditor, idleReopenNote, parseLook, type IdleCloseDeps } from '../machine/liveIdle.ts';
 
 interface FakeEditor {
   playing: boolean;
@@ -145,7 +148,7 @@ test('w1829: an unfocused idle editor that takes the quit but never updates is q
   assert.equal(ed.up(), false);
   const kinds = ed.calls.map((c) => [c.code === INSPECT_SNIPPET ? 'look' : c.code === SAVE_AND_QUIT_SNIPPET ? 'save+quit' : c.code === EXIT_NOW_SNIPPET ? 'exit now' : 'other', c.safetyChecks]);
   assert.deepEqual(kinds, [['look', true], ['save+quit', false], ['exit now', false]], 'asked again once, with the safety checks off');
-  assert.match(EXIT_NOW_SNIPPET, /SaveOpenScenes\(\)[\s\S]*still has unsaved changes after saving[\s\S]*EditorApplication\.Exit\(0\);/, 'it saves and checks again before it quits');
+  assert.match(EXIT_NOW_SNIPPET, /SaveScene\([\s\S]*still has unsaved changes after saving[\s\S]*EditorApplication\.Exit\(0\);/, 'it saves and checks again before it quits');
   assert.doesNotMatch(EXIT_NOW_SNIPPET, /delayCall/, 'it quits inside the call, not at an update that may not come');
 });
 
@@ -189,4 +192,106 @@ test('w1746: the state line parses, and the reopen note says what was saved and 
   assert.match(note, /^\[live view\] Your sandbox's Unity editor was closed at 14:05Z after 15 min/);
   assert.match(note, /It saved Assets\/A\.unity first/);
   assert.match(note, /stage it again/);
+});
+
+// w2116: BEAST's slot3 editor, closed for an exclusive ticket in the middle of an EditMode test run (2026-10-25 08:30Z),
+// opened Unity's "Save Scene" dialog inside the save and the close waited on it until the editor was killed by hand.
+function dialogEditor(o: { dialogFrom: 'save' | 'never' | 'briefly'; dirty: string[] }) {
+  const ed = fakeEditor({ playing: false, dirty: [...o.dirty] });
+  let box: string | undefined;
+  let up = true;
+  let seen = 0;
+  let saveAt = -1;
+  let gone: (() => void) | undefined;
+  const rescues: { dialog: string; dirty: string[]; at: number }[] = [];
+  const bridge = ed.d.bridge;
+  const d: IdleCloseDeps = {
+    ...ed.d,
+    bridge: (code, opt) => {
+      if (code === SAVE_AND_QUIT_SNIPPET) saveAt = ed.d.now();
+      if (code === SAVE_AND_QUIT_SNIPPET && o.dialogFrom === 'save') {
+        box = 'Save Scene [&Save / Cancel]';
+        return new Promise<string>(() => {}); // the main thread sits in the dialog: no answer, ever
+      }
+      if (code === SAVE_AND_QUIT_SNIPPET && o.dialogFrom === 'briefly') {
+        box = 'Hold on [busy]';
+        return new Promise<string>((r) => (gone = () => r(bridge(code, opt))));
+      }
+      return bridge(code, opt);
+    },
+    editorPids: async () => (up && (await ed.d.editorPids()).length ? [4242] : []),
+    // 'briefly': the dialog goes by itself after three looks (~6 s), and the save answers then.
+    dialog: async () => {
+      const now = box;
+      if (box && gone && ++seen >= 3) {
+        box = undefined;
+        gone();
+      }
+      return now;
+    },
+    rescue: async (dialog, dirty) => {
+      rescues.push({ dialog, dirty, at: ed.d.now() });
+      up = false;
+      box = undefined;
+      return 'backed up 0.backup into Logs/bench-close-backup-x; stopped';
+    },
+  };
+  return { d, ed, rescues, up: () => up && ed.up(), saveAt: () => saveAt };
+}
+
+test('w2116: a dirty scene closed for an exclusive ticket is saved scene by scene, then the editor quits', async () => {
+  const t = dialogEditor({ dialogFrom: 'never', dirty: ['Assets/Scenes/main.unity'] });
+  const r = await idleCloseEditor(t.d, 0);
+  assert.equal(r.closed, true, r.text);
+  assert.equal(r.forced, undefined);
+  assert.deepEqual(r.saved, ['Assets/Scenes/main.unity']);
+  assert.equal(t.rescues.length, 0, 'no dialog: nothing backed up or force-stopped');
+  assert.match(SAVE_AND_QUIT_SNIPPET, /EditorSceneManager\.SaveScene\(UnityEngine\.SceneManagement\.SceneManager\.GetSceneByPath\(p\)\)/);
+  assert.doesNotMatch(SAVE_AND_QUIT_SNIPPET, /SaveOpenScenes/, 'SaveOpenScenes opened the Save Scene picker on slot3');
+});
+
+test('w2116: a "Save Scene" dialog that holds the close up is waited out ~30 s, then the scenes are backed up and the editor force-stopped', async () => {
+  const t = dialogEditor({ dialogFrom: 'save', dirty: ['Assets/Scenes/main.unity'] });
+  const r = await idleCloseEditor(t.d, 0);
+  assert.equal(r.closed, true, r.text);
+  assert.equal(r.forced, true);
+  assert.equal(t.rescues.length, 1, 'backed up and force-stopped once');
+  assert.deepEqual(t.rescues[0].dirty, ['Assets/Scenes/main.unity'], 'the backup is told which scenes held unsaved changes');
+  assert.equal(t.rescues[0].dialog, 'Save Scene [&Save / Cancel]');
+  const waited = t.rescues[0].at - t.saveAt();
+  assert.ok(waited >= DIALOG_RESCUE_MS && waited <= DIALOG_RESCUE_MS + 2 * DIALOG_POLL_MS, `rescued ${waited} ms after the save was asked for, about ${DIALOG_RESCUE_MS} ms`);
+  assert.match(r.text, /^closed by force: the dialog "Save Scene \[&Save \/ Cancel\]" held it \d+ s; backed up /);
+  assert.equal(t.up(), false);
+  // Cancel is never pressed: the close has no way to press a button (IdleCloseDeps has none); the rescue backs up and stops.
+});
+
+test('w2116: a dialog that goes by itself within the wait is not a rescue: the close goes on and saves', async () => {
+  const t = dialogEditor({ dialogFrom: 'briefly', dirty: ['Assets/Scenes/main.unity'] });
+  const r = await idleCloseEditor(t.d, 0);
+  assert.equal(r.closed, true, r.text);
+  assert.equal(r.forced, undefined);
+  assert.equal(t.rescues.length, 0);
+  assert.deepEqual(r.saved, ['Assets/Scenes/main.unity']);
+});
+
+test('w2116: without dialog and rescue (the idle close) a dialog is waited out as before, never killed', async () => {
+  const ed = fakeEditor({ playing: false, dirty: [], stuck: true });
+  const r = await idleCloseEditor(ed.d, 0);
+  assert.equal(r.closed, false);
+  assert.equal(r.forced, undefined);
+  assert.equal(ed.up(), true);
+});
+
+test('w2116: backupScenes keeps Unity\'s scene backups and each dirty scene file, with a note, under Logs/', () => {
+  const sb = fs.mkdtempSync(path.join(os.tmpdir(), 'w2116-'));
+  fs.mkdirSync(path.join(sb, 'Temp', '__Backupscenes'), { recursive: true });
+  fs.writeFileSync(path.join(sb, 'Temp', '__Backupscenes', '0.backup'), 'unity backup');
+  fs.mkdirSync(path.join(sb, 'Assets', 'Scenes'), { recursive: true });
+  fs.writeFileSync(path.join(sb, 'Assets', 'Scenes', 'main.unity'), 'scene as saved');
+  const text = backupScenes(sb, ['Assets/Scenes/main.unity', 'Assets/Scenes/Gone.unity'], 'Save Scene [&Save / Cancel]', new Date('2026-10-25T08:30:45.123Z'));
+  const dir = path.join(sb, 'Logs', 'bench-close-backup-20261025T083045Z');
+  assert.equal(text, 'backed up Temp/__Backupscenes/0.backup, Assets/Scenes/main.unity (as last saved) into Logs/bench-close-backup-20261025T083045Z');
+  assert.equal(fs.readFileSync(path.join(dir, '__Backupscenes', '0.backup'), 'utf8'), 'unity backup');
+  assert.equal(fs.readFileSync(path.join(dir, 'scenes', 'Assets', 'Scenes', 'main.unity'), 'utf8'), 'scene as saved');
+  assert.match(fs.readFileSync(path.join(dir, 'README.txt'), 'utf8'), /Save Scene \[&Save \/ Cancel\].*\n.*Assets\/Scenes\/main\.unity, Assets\/Scenes\/Gone\.unity/);
 });
