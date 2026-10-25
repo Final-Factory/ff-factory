@@ -416,6 +416,33 @@ test('intake.nightly.review (w905): settable by anyone, checked like the run\'s,
   assert.ok(SETTABLE_KEYS.includes('intake.nightly.review'));
 });
 
+test('intake.nightly.autoApprove (w2142): settable by anyone, { enabled, maxPerDay } both given, written, applied live, null back to the default', (t) => {
+  const { file, cfg } = setup(t);
+  setAppConfig(file, cfg, 'intake.nightly.enabled', true);
+  assert.deepEqual(setAppConfig(file, cfg, 'intake.nightly.autoApprove', '{"enabled": true, "maxPerDay": 10}'), { before: undefined, after: { enabled: true, maxPerDay: 10 } });
+  assert.deepEqual(cfg.intake?.nightly, { enabled: true, autoApprove: { enabled: true, maxPerDay: 10 } }, 'the intake reads it at its next report: no restart');
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8').replace(/^﻿/, '')).intake.nightly, { enabled: true, autoApprove: { enabled: true, maxPerDay: 10 } });
+  setAppConfig(file, cfg, 'intake.nightly.autoApprove', null);
+  assert.deepEqual(cfg.intake?.nightly, { enabled: true, autoApprove: undefined }, 'null is the default (off, 10 a day)');
+  const before = fs.readFileSync(file, 'utf8');
+  for (const [bad, why] of [
+    [{ enabled: 'yes', maxPerDay: 10 }, /enabled is true or false/],
+    [{ maxPerDay: 10 }, /enabled is true or false, and must be given/],
+    [{ enabled: true }, /maxPerDay is a whole number from 1 to 100, and must be given/],
+    [{ enabled: true, maxPerDay: 0 }, /whole number from 1 to 100/],
+    [{ enabled: true, maxPerDay: -3 }, /whole number from 1 to 100/],
+    [{ enabled: true, maxPerDay: 2.5 }, /whole number from 1 to 100/],
+    [{ enabled: true, maxPerDay: '10' }, /whole number from 1 to 100/],
+    [{ enabled: true, maxPerDay: 101 }, /whole number from 1 to 100/],
+    [{ enabled: true, maxPerDay: 10, bugs: true }, /unknown key\(s\) "bugs"/],
+    [true, /intake\.nightly\.autoApprove/],
+    ['[1, 2]', /intake\.nightly\.autoApprove/],
+  ] as const) assert.throws(() => setAppConfig(file, cfg, 'intake.nightly.autoApprove', bad), why, JSON.stringify(bad));
+  assert.equal(fs.readFileSync(file, 'utf8'), before, 'a refused value writes nothing');
+  assert.equal(OWNER_ONLY_KEYS.has('intake.nightly.autoApprove'), false);
+  assert.ok(SETTABLE_KEYS.includes('intake.nightly.autoApprove'));
+});
+
 test('masterBatch.enabled and .autoApprove (w1180): settable by anyone, checked, written, applied live, null back to the default', (t) => {
   const { file, cfg } = setup(t);
   assert.deepEqual(setAppConfig(file, cfg, 'masterBatch.enabled', 'false'), { before: undefined, after: false });
