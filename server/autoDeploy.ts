@@ -56,6 +56,29 @@ export interface BatchPr {
 export interface CiVerdict {
   state: 'green' | 'running' | 'red';
   text: string;
+  /** red because the commit's own workflow runs failed (w2140): which ("Windows tests: failure"). */
+  failed?: string;
+  /** The pull requests the commit merged, when read. */
+  prs?: number[];
+}
+
+/**
+ * The deploy held because CI failed on the head of main (w2140): nothing deploys, so every request blocked on a portal
+ * deploy or a machine's update waits until a fix lands. Told on every pass while it holds (`held`); the one told keeps
+ * its own "said it once".
+ */
+export interface DeployHold {
+  sha: string;
+  /** The failed runs, "Windows tests: failure". */
+  workflows: string;
+  /** The pull requests the head merged (whose worker is resumed to fix it). */
+  prs: number[];
+  since: string;
+}
+
+/** What a request blocked on a deploy says while the deploy is held (w2140). */
+export function heldLine(h: Pick<DeployHold, 'sha' | 'workflows'>): string {
+  return `deploy held: master CI failed on ${short(h.sha)} (${h.workflows})`;
 }
 
 export interface AutoDeployGithub {
@@ -82,6 +105,8 @@ export interface AutoDeployDeps {
   peopleOf: (pr: number) => Requester[];
   /** One line to a person's own orchestrator. */
   tell: (person: Requester, text: string) => void;
+  /** w2140: the deploy is held on failed CI of the head (every pass while it holds; the receiver says it once). */
+  held?: (hold: DeployHold) => void;
   now?: () => number;
   log?: (line: string) => void;
   limits?: Partial<typeof AUTO_DEPLOY_LIMITS>;
@@ -116,6 +141,8 @@ export interface AutoDeployState {
   failed: string[];
   /** What it waits for now, in words (logged when it changes). */
   waiting?: string;
+  /** w2140: held because CI failed on the head of main. */
+  held?: DeployHold;
   /** Newest first. */
   history: DeployRecord[];
 }
@@ -223,6 +250,7 @@ export class AutoDeploy {
     if (!/^[0-9a-f]{40}$/.test(head)) throw new Error(`the head of main is not a commit (${clip(head, 60)})`);
     const now = this.now();
     if (sameCommit(running, head)) {
+      this.hold(undefined);
       if (this.state.waitingSince || this.state.head?.sha !== head) {
         this.state.waitingSince = undefined;
         this.state.head = { sha: head, seenAt: new Date(now).toISOString() };
@@ -245,6 +273,7 @@ export class AutoDeploy {
       return this.wait(`batching: main moved to ${short(head)} ${Math.floor(quietFor / 60_000)} min ago; it goes out after ${quiet} min with no new merge, or ${maxWait} min after the first commit the portal does not run`);
     }
     const ci = await this.d.github.ci(head);
+    this.hold(ci.state === 'red' && ci.failed ? { sha: head, workflows: ci.failed, prs: ci.prs ?? [], since: this.state.held?.sha === head ? this.state.held.since : new Date(now).toISOString() } : undefined);
     if (ci.state !== 'green') return this.wait(`CI of ${short(head)}: ${ci.text}`);
     const busy = await this.d.busy();
     if (busy.length) return this.wait(`not now, it would cut off: ${busy.join('; ')}`);
@@ -256,6 +285,23 @@ export class AutoDeploy {
     this.state.waiting = undefined;
     this.save();
     this.log(`deploying ${head.slice(0, 12)} (from ${running}; ${why}; CI green: ${ci.text}; pull requests ${prs.map((p) => `#${p.number}`).join(', ') || 'none found'})`);
+  }
+
+  /** w2140: record a hold on failed CI (or its end), and tell the requests it holds up on every pass while it holds. */
+  private hold(h: DeployHold | undefined) {
+    const was = this.state.held;
+    if (h?.sha !== was?.sha || h?.workflows !== was?.workflows) {
+      this.state.held = h;
+      this.save();
+      if (h) this.log(`held: ${heldLine(h)}; the requests blocked on a deploy are told, and the worker that merged it is resumed to fix it`);
+      else if (was) this.log(`no longer held on the failed CI of ${short(was.sha)}`);
+    }
+    if (!h) return;
+    try {
+      this.d.held?.(h);
+    } catch (e) {
+      this.log(`could not tell the requests the deploy holds up: ${(e as Error).message}`);
+    }
   }
 
   /** The verification marker fff-update writes (data/update.verified.json; the machine rollout renames it .done). */
@@ -362,10 +408,17 @@ export function ghAutoDeploy(repo: () => Promise<string | undefined>, branch: st
       const own = await runs(s, sha);
       if (own.none) return { state: 'running', text: 'no workflow run on it yet' };
       if (!own.done) return { state: 'running', text: own.text };
-      if (/failed/.test(own.text)) return { state: 'red', text: own.text };
-      const p = await run('gh', ['api', `repos/${s}/commits/${sha}/pulls`, '--jq', '[.[] | select(.merged_at != null) | {number: .number, head: .head.sha}]'], GH_OPTS);
-      if (p.code !== 0) throw new Error(`the pull request of ${short(sha)} cannot be read: ${said(p)}`);
-      const prs = JSON.parse(p.stdout || '[]') as { number: number; head: string }[];
+      const pulls = async () => {
+        const p = await run('gh', ['api', `repos/${s}/commits/${sha}/pulls`, '--jq', '[.[] | select(.merged_at != null) | {number: .number, head: .head.sha}]'], GH_OPTS);
+        if (p.code !== 0) throw new Error(`the pull request of ${short(sha)} cannot be read: ${said(p)}`);
+        return JSON.parse(p.stdout || '[]') as { number: number; head: string }[];
+      };
+      if (/failed/.test(own.text)) {
+        // w2140: which runs failed and which pull request the commit merged, for the requests the hold keeps waiting.
+        const merged = await pulls().catch(() => []);
+        return { state: 'red', text: own.text, ...(own.failed ? { failed: own.failed } : {}), prs: merged.map((x) => x.number) };
+      }
+      const prs = await pulls();
       if (!prs.length) return { state: 'red', text: `${short(sha)} is not the merge of a pull request, so it is not deployed by itself (a person deploys it by hand)` };
       for (const pr of prs) {
         const c = await runs(s, pr.head);

@@ -3194,6 +3194,76 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
   }
 
   /**
+   * The portal's automatic deploy is held because CI failed on the head of its main (w2140; server/autoDeploy.ts hold):
+   * nothing deploys, so no deploy gate (a portal deploy, a machine's update, the machines' rollout) can clear until a fix
+   * lands. w2116 on 2026-10-25 showed "Blocked on beast's update" for over 2.5 h while the deploy waited on
+   * "1 of 4 workflow runs failed (Windows tests: failure)", and nobody was told. Called on every pass while it holds:
+   * - each open deploy gate keeps the hold (`held`), so the request's live state says "deploy held: master CI failed …";
+   * - once per held commit, the worker of the request whose pull request the commit merged is resumed to fix it, or, with
+   *   none, the gate's own worker (gateOwner); the request stays Blocked on its deploy;
+   * - once per held commit, each blocked request's people hear it.
+   * Returns the requests newly told and the workers resumed.
+   */
+  deployHeld(h: { sha: string; text: string; prs: readonly number[]; repo?: string }): { told: string[]; resumed: string[] } {
+    const at = this.now().toISOString();
+    const short = h.sha.slice(0, 9);
+    const newly: WorkItem[] = [];
+    for (const w of this.store.work.values()) {
+      if (w.status !== 'blocked') continue;
+      const gates = gatesOf(w).filter((g) => g.kind === 'deploy');
+      if (!gates.length) continue;
+      const fresh = gates.some((g) => g.held?.sha !== h.sha);
+      let changed = false;
+      for (const g of gates) {
+        if (g.held?.sha === h.sha && g.held.text === h.text) continue;
+        g.held = { sha: h.sha, text: h.text, at: g.held?.sha === h.sha ? g.held.at : at };
+        changed = true;
+      }
+      if (fresh) {
+        newly.push(w);
+        this.stamp(w, `${h.text}: the automatic deploy waits for that CI to be fixed, so ${gatesName(gates, this.now().getTime())} cannot clear until then`);
+      }
+      if (changed || fresh) this.store.putWork(w);
+    }
+    if (!newly.length) return { told: [], resumed: [] };
+    const exists = (w: WorkItem, sid: string) => !!this.store.sessions.get(sid) && w.sessionIds.includes(sid);
+    const repoOk = (r: string) => (h.repo ? r.toLowerCase() === h.repo.toLowerCase() : /\/ff-factory$/i.test(r));
+    const merged = [...this.store.work.values()].filter((w) => (w.prs ?? []).some((p) => h.prs.includes(p.number) && repoOk(p.repo)));
+    const prsText = h.prs.length ? `pull request ${h.prs.map((n) => `#${n}`).join(', ')}` : 'a pull request';
+    const waiting = newly.map((w) => w.id).join(', ');
+    const fix = `Read the failed run (gh run list --commit ${short}, then gh run view <run> --log-failed), fix it through a pull request of its own and merge it on green; the deploy goes out by itself once main's CI is green.`;
+    const resumed: string[] = [];
+    for (const m of merged) {
+      if (m.deployHeldTold === h.sha) continue;
+      const sid = newestFirst(m).find((x) => exists(m, x));
+      if (!sid) continue;
+      const note = `[portal deploy held] ${h.text}. The portal's automatic deploy waits on it: ${short} is the head of ${h.repo ?? "ff-factory"}'s main and merged ${prsText}, of ${m.id}. Nothing deploys until it is fixed, so ${waiting} stay${newly.length > 1 ? '' : 's'} blocked on a deploy. ${fix} Then carry on with ${m.id}.`;
+      if (!this.wakeNow(sid, note)) continue;
+      m.deployHeldTold = h.sha;
+      this.stamp(m, `resumed worker ${sid} to fix the failed CI that holds the portal deploy (${h.text})`);
+      this.store.putWork(m);
+      resumed.push(sid);
+    }
+    if (!resumed.length) {
+      // No worker of the merge to fix it: the blocked request's own worker is the one waiting, so it hears.
+      for (const w of newly) {
+        if (w.deployHeldTold === h.sha) continue;
+        const owner = this.gateOwner(w, gatesOf(w));
+        if (!owner || resumed.includes(owner.sid)) continue;
+        const note = `[portal deploy held] ${w.id} is blocked on ${gatesName(gatesOf(w), this.now().getTime())}, which cannot clear: ${h.text}. The portal's automatic deploy waits on it (${short} merged ${prsText}, and FF Factory found no worker of it to fix it). ${fix} Then call blocked_on again for the deploy, or carry on.`;
+        if (!this.wakeNow(owner.sid, note)) continue;
+        w.deployHeldTold = h.sha;
+        this.store.putWork(w);
+        resumed.push(owner.sid);
+      }
+    }
+    const how = resumed.length ? `; worker ${resumed.join(', ')} was resumed to fix it` : '; no worker could be resumed to fix it';
+    for (const w of newly) this.toPeople(w.requesters, dispatchNotice(w, `${h.text}. It is blocked on ${gatesName(gatesOf(w), this.now().getTime())}, which cannot clear while the portal's automatic deploy waits on that CI${how}`));
+    console.log(`ledger: ${h.text}: told ${waiting}${how}`);
+    return { told: newly.map((w) => w.id), resumed };
+  }
+
+  /**
    * The deploy a worker waited for has happened, and its report puts a step of its own after it (w890: w889's "then I
    * verify a live PR read and the health check"): the request is not finished. Its latest worker, released while it
    * waited, is resumed within a minute with that step, the block (the ledger cleanup's own) is lifted, and the request is

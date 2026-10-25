@@ -525,6 +525,16 @@ deploy`, `sudo fffctl update`) still works as before, on Lothsahn's or Ben's own
    secret scan and the identity check, [ci.md](ci.md)), and the pull request it merged (`commits/<sha>/pulls`) finished
    green on its head, where the whole suite ran. Still running: it waits. Red: it holds that commit and says so; the next
    merge is looked at afresh. A commit that is no pull request's merge is never deployed by itself.
+
+   **A hold on failed CI reaches the requests it keeps waiting** (w2140: w2116 showed "Blocked on beast's update" for
+   over 2.5 hours on 2026-10-25 while the deploy waited on "1 of 4 workflow runs failed (Windows tests: failure)" of
+   `5a1909756`, and nobody was told). When the head's own runs failed, `AutoDeploy` records the hold (`held` in
+   `auto-deploy.json`: the commit, the failed runs, the pull requests it merged) and on every pass while it holds calls
+   `Orchestrators.deployHeld`. Every request Blocked on a deploy (a portal deploy, a machine's update, the machines') then
+   leads its live state with "deploy held: master CI failed on <sha> (<workflow>)" (the gate's `held`). Once per held
+   commit, the worker of the request whose pull request the commit merged is resumed to fix the failure (with none left,
+   the blocked request's own worker, `gateOwner`), and each blocked request's people hear it once. The request stays
+   Blocked: only the deploy clears it. A red that is no failed run (a direct push) is not such a hold.
 4. **Nothing it would cut off** (`busy` in `server/index.ts`). It waits while any of these hold, and says which:
    - **A coordinator turn is open**: a person's orchestrator, the dispatcher, the ops worker or a standing agent without a
      machine. These are the portal's own processes: a restart stops them and does **not** resume the cut turn. Only

@@ -491,7 +491,10 @@ function blockedLive(gates: readonly NonNullable<WorkItem['blocked']>[], now: nu
   // w1094: what the blocker watch last read of a CI gate's checks, so a gate that is still open says why.
   const read = gates.find((g) => g.kind === 'ci' && g.read)?.read;
   const ci = read ? `; last read: ${read.text} (${ago(read.at, now)})` : '';
-  return { state: 'blocked', why: `${first.what}${more} (since ${ago(first.at, now)}, set by ${first.by})${ci}`, waitsOn: gates.map((g) => gatesName([g], now)) };
+  // w2140: a deploy gate the automatic deploy holds on red CI cannot clear until that is fixed; it says so first.
+  const held = gates.find((g) => g.kind === 'deploy' && g.held)?.held;
+  const hold = held ? `${held.text} (since ${ago(held.at, now)}): ` : '';
+  return { state: 'blocked', why: `${hold}${first.what}${more} (since ${ago(first.at, now)}, set by ${first.by})${ci}`, waitsOn: gates.map((g) => gatesName([g], now)) };
 }
 
 /** Waiting on someone outside the team (w1841 (b)): the reporter or a player, through FFBox and Discord. */

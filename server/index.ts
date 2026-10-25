@@ -23,7 +23,7 @@ import { BugThreadWatch } from './bugThreads.ts';
 import { FfboxBugThreads } from './ffboxBugThreads.ts';
 import { setAppConfig, toggleNightly } from './appConfig.ts';
 import { LedgerSweep, slugOf } from './ledgerSweep.ts';
-import { AutoDeploy, ghAutoDeploy } from './autoDeploy.ts';
+import { AutoDeploy, ghAutoDeploy, heldLine } from './autoDeploy.ts';
 import { run as runProc } from './proc.ts';
 import { BlockerWatch, ghPrHealth } from './blockerWatch.ts';
 import { MasterBatchWatch } from './masterBatch.ts';
@@ -2861,6 +2861,8 @@ const autoDeploy = new AutoDeploy({
     return out;
   },
   tell: (person, text) => void sessions.send(agents.orchestrators.personalFor(person).info.id, text, 'system', undefined, { requestedBy: person }),
+  // w2140: a hold on failed CI reaches the requests blocked on a deploy, and the worker of the merge that broke it.
+  held: (h) => void agents.orchestrators.deployHeld({ sha: h.sha, text: heldLine(h), prs: h.prs, repo: appSlug }),
 }).start();
 
 const plainStop = (reason: string): RestartRequest => ({ drain: false, drainMinutes: 0, reason, update: false, hold: false });

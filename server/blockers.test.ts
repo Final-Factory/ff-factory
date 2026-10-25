@@ -199,8 +199,8 @@ test('w829: Actions runs, the reading without Checks permission: running, green,
   // Green: every run completed with success or skipped.
   assert.deepEqual(runsState({ workflow_runs: [{ name: 'Lessons index freshness', status: 'completed', conclusion: 'success' }, { name: 'Test Runner', status: 'completed', conclusion: 'success' }, { name: 'Release', status: 'completed', conclusion: 'skipped' }] }, ref), { done: true, green: true, text: `CI on ${ref} finished: all 3 workflow runs passed or skipped` });
   // Red: a failure, and #1328's first attempt, cancelled at its 90-minute limit (run 37997522857, 23:38Z): both done, both named.
-  assert.deepEqual(runsState({ workflow_runs: [{ name: 'Test Runner', status: 'completed', conclusion: 'failure' }] }, ref), { done: true, text: `CI on ${ref} finished: 1 of 1 workflow runs failed (Test Runner: failure)` });
-  assert.deepEqual(runsState({ workflow_runs: [{ name: 'Lessons index freshness', status: 'completed', conclusion: 'success' }, { name: 'Test Runner', status: 'completed', conclusion: 'cancelled' }] }, ref), { done: true, text: `CI on ${ref} finished: 1 of 2 workflow runs failed (Test Runner: cancelled)` });
+  assert.deepEqual(runsState({ workflow_runs: [{ name: 'Test Runner', status: 'completed', conclusion: 'failure' }] }, ref), { done: true, failed: 'Test Runner: failure', text: `CI on ${ref} finished: 1 of 1 workflow runs failed (Test Runner: failure)` });
+  assert.deepEqual(runsState({ workflow_runs: [{ name: 'Lessons index freshness', status: 'completed', conclusion: 'success' }, { name: 'Test Runner', status: 'completed', conclusion: 'cancelled' }] }, ref), { done: true, failed: 'Test Runner: cancelled', text: `CI on ${ref} finished: 1 of 2 workflow runs failed (Test Runner: cancelled)` });
   for (const conclusion of ['timed_out', 'startup_failure', 'action_required']) assert.match(runsState({ workflow_runs: [{ name: 'T', status: 'completed', conclusion }] }, ref).text, /1 of 1 workflow runs failed/, conclusion);
 });
 

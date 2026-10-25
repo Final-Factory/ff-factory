@@ -39,7 +39,8 @@ const BUSY: ReadonlySet<SessionInfo['status']> = new Set(['running', 'starting',
 
 /** `none`: no check or workflow run exists for the pull request's head yet (w907: it may never get one). */
 /** `green` (w2045): done with every check passed or skipped, the only reading the merge-on-green pilot merges on. */
-export type CiState = { done: boolean; text: string; none?: boolean; green?: true };
+/** `failed` (w2140): the failed runs, "Windows tests: failure", when it finished red. */
+export type CiState = { done: boolean; text: string; none?: boolean; green?: true; failed?: string };
 /** A pull request's state (w754): open, merged, or closed without merging, and a line saying how. */
 export type PrState = { state: 'open' | 'merged' | 'closed'; text: string; sha?: string };
 
@@ -435,7 +436,8 @@ export function runsState(body: { workflow_runs?: GhRun[] }, ref: string): CiSta
   const running = runs.filter((r) => (r.status ?? '').toLowerCase() !== 'completed');
   if (running.length) return { done: false, text: `${running.length} of ${runs.length} workflow runs on ${ref} still running (${running.slice(0, 3).map((r) => r.name).join(', ')})` };
   const failed = runs.filter((r) => ['failure', 'timed_out', 'cancelled', 'action_required', 'startup_failure'].includes((r.conclusion ?? '').toLowerCase()));
-  return failed.length ? { done: true, text: `CI on ${ref} finished: ${failed.length} of ${runs.length} workflow runs failed (${failed.slice(0, 3).map((r) => `${r.name}: ${r.conclusion}`).join(', ')})` } : { done: true, green: true, text: `CI on ${ref} finished: all ${runs.length} workflow runs passed or skipped` };
+  const which = failed.slice(0, 3).map((r) => `${r.name}: ${r.conclusion}`).join(', ');
+  return failed.length ? { done: true, failed: which, text: `CI on ${ref} finished: ${failed.length} of ${runs.length} workflow runs failed (${which})` } : { done: true, green: true, text: `CI on ${ref} finished: all ${runs.length} workflow runs passed or skipped` };
 }
 
 const clipLine = (s: string, n: number) => {

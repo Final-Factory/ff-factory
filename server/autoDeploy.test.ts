@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { AUTO_DEPLOY_FILE, AutoDeploy, deployedLine, ghAutoDeploy, prsInMessages, sameCommit, type BatchPr, type CiVerdict } from './autoDeploy.ts';
+import { AUTO_DEPLOY_FILE, AutoDeploy, deployedLine, ghAutoDeploy, heldLine, prsInMessages, sameCommit, type BatchPr, type CiVerdict, type DeployHold } from './autoDeploy.ts';
 import type { Requester } from '../shared/types.ts';
 import type { RunResult } from './proc.ts';
 
@@ -30,6 +30,7 @@ function world(t: TestContext, over: { enabled?: boolean; busy?: string[]; ci?: 
     prs: [{ number: 485, title: 'Dev Drive status' }] as BatchPr[],
     requests: [] as { ref: string; reason: string; drainMinutes: number }[],
     told: [] as [string, string][],
+    holds: [] as DeployHold[],
     lines: [] as string[],
     people: over.people ?? ({ 485: [LOTH], 486: [BEN, LOTH] } as Record<number, Requester[]>),
   };
@@ -43,6 +44,7 @@ function world(t: TestContext, over: { enabled?: boolean; busy?: string[]; ci?: 
       request: (o) => void w.requests.push(o),
       peopleOf: (n) => w.people[n] ?? [],
       tell: (p, text) => void w.told.push([p.userId, text]),
+      held: (h) => void w.holds.push(h),
       now: () => w.now,
       log: (l) => void w.lines.push(l),
     });
@@ -221,5 +223,37 @@ test('ghAutoDeploy: green needs the push runs and the merged pull request green 
   assert.equal((await gh.ci(A)).state, 'red');
   pulls = '[]';
   assert.match((await gh.ci(A)).text, /not the merge of a pull request/);
+  assert.equal((await gh.ci(A)).failed, undefined, 'no failed run: not a CI failure the deploy is held on (w2140)');
+  // w2140: the head's own runs failed: which, and the pull request it merged.
+  pulls = '[{"number":682,"head":"' + 'c'.repeat(40) + '"}]';
+  const failed = await gh.ci(B);
+  assert.deepEqual({ state: failed.state, failed: failed.failed, prs: failed.prs }, { state: 'red', failed: 'wf0: failure', prs: [682] });
   assert.ok(calls.every((c) => c.startsWith('repos/Final-Factory/ff-factory/')));
+});
+
+test('w2140: a head whose own CI failed holds the deploy, says so every pass while it holds, and ends the hold once CI is green', async (t) => {
+  // w2116 on 2026-10-25: 5a1909756 (PR #682's merge) waited on "1 of 4 workflow runs failed (Windows tests: failure)".
+  const { w, ad } = world(t, { ci: { state: 'red', text: 'CI on aaaaaaa1b finished: 1 of 4 workflow runs failed (Windows tests: failure)', failed: 'Windows tests: failure', prs: [682] } });
+  await ad.tick();
+  assert.equal(w.holds.length, 0, 'batching: CI is not read yet');
+  w.now += 15 * MIN;
+  await ad.tick();
+  assert.equal(w.requests.length, 0, 'not deployed');
+  assert.deepEqual(w.holds.map((h) => ({ ...h, since: undefined })), [{ sha: A, workflows: 'Windows tests: failure', prs: [682], since: undefined }]);
+  assert.equal(heldLine(w.holds[0]), 'deploy held: master CI failed on aaaaaaa1b (Windows tests: failure)');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(w.dir, AUTO_DEPLOY_FILE), 'utf8')).held.sha, A, 'saved: a restarted portal knows it');
+  w.now += 1 * MIN;
+  await ad.tick();
+  assert.equal(w.holds.length, 2, 'told on every pass (the receiver says it once), so a request blocked later hears too');
+  assert.equal(w.holds[1].since, w.holds[0].since, 'the same hold');
+  assert.equal(w.lines.filter((l) => /held: deploy held/.test(l)).length, 1, 'logged once');
+  // A red that is not a failed run (the head merged no pull request) is no CI failure: no hold.
+  w.ci = { state: 'red', text: 'aaaaaaa1b is not the merge of a pull request' };
+  await ad.tick();
+  assert.equal(ad.state.held, undefined);
+  assert.equal(w.holds.length, 2);
+  w.ci = { state: 'green', text: 'all green' };
+  await ad.tick();
+  assert.equal(w.requests.length, 1, 'green: deployed');
+  assert.match(w.lines.join('\n'), /no longer held on the failed CI of aaaaaaa1b/);
 });
