@@ -645,7 +645,9 @@ ledger request, or a line on the request already fixing it.
   the same for the commit it tested.
 - **Approval and caps.** `intake.nightly.autoApprove` (default off, 10 a day) as for the other sources: off, each
   request waits on the Intake tab for a reviewer; on, it goes to the dispatcher at once unless a strong overlap is in
-  flight. At most `intake.nightly.dailyCap` (default 10) a day, inside the intake's own `workLimits.intake`.
+  flight. Anyone's orchestrator sets it with `set_app_config intake.nightly.autoApprove`
+  `{ "enabled": true, "maxPerDay": 10 }` (both given; maxPerDay 1 to 100; null back to the default), no restart: the
+  intake reads it at every report (w2142). At most `intake.nightly.dailyCap` (default 10) a day, inside the intake's own `workLimits.intake`.
 - **Off by default** (`intake.nightly.enabled`). Off, the endpoint still checks the key and the report, records the
   night ([The nightly run](#the-nightly-run)), files nothing, and answers `{enabled: false}`; the lab prints that in
   its log.
@@ -964,7 +966,8 @@ snowflakes; an entry that is not one trusts nobody.
 9. **Nightly e2e** (independent of the rest): mint the lab's key on BEAST, `node server/apikey.ts nightly-lab --scope
    nightly`, and hand it to Lothsahn out of band with the public URL. Set `intake.nightly.enabled: true` (leave
    `autoApprove` off for the first nights) and restart. After the next night, the Intake tab's Nightly line shows the
-   last report and what it came to. Turn on `intake.nightly.autoApprove.enabled` once the requests look right. The
+   last report and what it came to. Turn on nightly auto-approve once the requests look right: `set_app_config intake.nightly.autoApprove`
+   `{ "enabled": true, "maxPerDay": 10 }`, live (w2142). The
    nightly-regression-sentry standing agent now duplicates this: narrow its charter to what the intake does not do, or
    pause it. **The nightly run** (w864): a person's orchestrator sets `set_app_config intake.nightly.run`
    `{ "enabled": true, "time": "03:00", "tz": "America/New_York", "machine": "lothdesktop", "person": "lothsahn" }` and

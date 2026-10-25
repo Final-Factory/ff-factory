@@ -20,6 +20,7 @@ import { DIAGNOSIS } from './diagnosisRules.test.ts';
 import type { Diagnosis } from './diagnosisRules.ts';
 import { run } from './proc.ts';
 import { trunkBase, type Config } from './config.ts';
+import { setAppConfig } from './appConfig.ts';
 import type { ProviderConversation, Requester, SessionInfo, TranscriptEvent, UserInfo, WorkItem } from '../shared/types.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { BlockerWatch } from './blockerWatch.ts';
@@ -677,6 +678,19 @@ test('nightly: many at once become one batched request; flaky N nights running i
   assert.match(work().at(-1)!.title, /S4-rejoin-dwell flaky 3 nights running/);
   const capped = intake.onNightly(night('2026-10-01', NSHA('b'), [fail('B1-frenzy-sp')]))!;
   assert.deepEqual([capped[0].action, /daily cap/.test(capped[0].why ?? '')], ['skipped', true]);
+});
+
+test('nightly: auto-approve set through set_app_config applies at the next report, no restart (w2142)', async (t) => {
+  const { intake, cfg, dir, work } = setup(t, { nightly: { enabled: true } });
+  const file = path.join(dir, 'config.json');
+  fs.writeFileSync(file, JSON.stringify({ intake: { nightly: { enabled: true } } }));
+  intake.onNightly(night('2026-09-30', NSHA('a'), [fail('MP-slow-client-catchup')]));
+  assert.deepEqual([work()[0].approval?.state, work()[0].approval?.why], ['pending', 'auto-approve is off']);
+  setAppConfig(file, cfg, 'intake.nightly.autoApprove', { enabled: true, maxPerDay: 1 });
+  intake.onNightly(night('2026-10-01', NSHA('b'), [fail('S2-passive-fleet-fires')]));
+  assert.deepEqual([work()[1].approval?.state, work()[1].approval?.by, work()[1].approval?.why], ['approved', 'auto', undefined], 'the same IntakeManager, the new setting');
+  intake.onNightly(night('2026-10-01', NSHA('b'), [fail('R4-join-during-autosave')]));
+  assert.deepEqual([work()[2].approval?.state, work()[2].approval?.why], ['pending', 'already 1 auto-approved in the last 24 hours'], 'past maxPerDay 1 it waits for a reviewer');
 });
 
 test('escalations from Max: off by default; checked against the ledger and filed in one step; a resend gets the same answer', async (t) => {

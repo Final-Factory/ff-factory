@@ -103,6 +103,9 @@ export const SETTABLE_KEYS = [
   'intake.nightly.enabled',
   'intake.nightly.run',
   'intake.nightly.review',
+  // Whether the nightly's requests go to the dispatcher without a reviewer, at most maxPerDay a day (w2142, lothsahn: "Turn
+  // on nightly auto-approve, 10 a day"). Anyone may set it, like the switch above. Read live (intakeSettings, every look).
+  'intake.nightly.autoApprove',
   // The game repo's red master batches handed back to the culprit PR's request (w1180, docs/intake.md "Master batch reds"): the
   // switch and the auto-approve rule. Anyone may set them: they file the team's own CI work, never players' words.
   'masterBatch.enabled',
@@ -267,6 +270,19 @@ function checkNightlySchedule(value: unknown, users: readonly string[], key: 'in
     out.reportWithinHours = o.reportWithinHours as number;
   }
   return out;
+}
+
+/**
+ * intake.nightly.autoApprove as set_app_config takes it (w2142): { enabled: true or false, maxPerDay: a whole number from 1
+ * to 100 }, both given, nothing else. null removes it (the default: off, 10 a day; intakeRules.ts intakeSettings).
+ */
+export function checkNightlyAutoApprove(value: unknown): { enabled: boolean; maxPerDay: number } {
+  const o = objectOf(value, 'intake.nightly.autoApprove', '{ "enabled": true, "maxPerDay": 10 }');
+  const unknown = Object.keys(o).filter((k) => k !== 'enabled' && k !== 'maxPerDay');
+  if (unknown.length) throw new Error(`intake.nightly.autoApprove: unknown key(s) ${unknown.map((k) => JSON.stringify(k.slice(0, 40))).join(', ')}; known: enabled, maxPerDay`);
+  if (typeof o.enabled !== 'boolean') throw new Error('intake.nightly.autoApprove.enabled is true or false, and must be given');
+  if (!Number.isInteger(o.maxPerDay) || (o.maxPerDay as number) < 1 || (o.maxPerDay as number) > 100) throw new Error('intake.nightly.autoApprove.maxPerDay is a whole number from 1 to 100, and must be given');
+  return { enabled: o.enabled, maxPerDay: o.maxPerDay as number };
 }
 
 /** masterBatch.autoApprove as set_app_config takes it (w1180): { enabled, maxPerDay 0-100 }, known keys only. */
@@ -686,6 +702,8 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       return checkNightlyRun(value, users ?? []);
     case 'intake.nightly.review':
       return checkNightlyReview(value, users ?? []);
+    case 'intake.nightly.autoApprove':
+      return checkNightlyAutoApprove(value);
     case 'masterBatch.enabled': {
       if (value === true || value === 'true') return true;
       if (value === false || value === 'false') return false;
@@ -987,11 +1005,12 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   }
   else if (key === 'intake.ffbox') cfg.intake = { ...cfg.intake, ffbox: v as IntakeConfig['ffbox'] };
   else if (key === 'intake.reviewers') cfg.intake = { ...cfg.intake, reviewers: v as string[] | undefined };
-  else if (key === 'intake.nightly.enabled' || key === 'intake.nightly.run' || key === 'intake.nightly.review') {
+  else if (key === 'intake.nightly.enabled' || key === 'intake.nightly.run' || key === 'intake.nightly.review' || key === 'intake.nightly.autoApprove') {
     // Live: the intake reads its settings at every look (intakeSettings), the schedule's every minute.
     const nightly = { ...cfg.intake?.nightly };
     if (key === 'intake.nightly.enabled') nightly.enabled = v as boolean | undefined;
     else if (key === 'intake.nightly.run') nightly.run = v as NonNullable<IntakeConfig['nightly']>['run'];
+    else if (key === 'intake.nightly.autoApprove') nightly.autoApprove = v as NonNullable<IntakeConfig['nightly']>['autoApprove'];
     else nightly.review = v as NonNullable<IntakeConfig['nightly']>['review'];
     cfg.intake = { ...cfg.intake, nightly };
   }
