@@ -19,11 +19,11 @@
 import type { Store } from './store.ts';
 import type { Orchestrators } from './orchestrators.ts';
 import { run as runProc, type RunOptions, type RunResult } from './proc.ts';
-import { blockerVerdict, CI_REF, gatesOf, RESUME_SWEEP_MS, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
+import { blockerVerdict, CI_REF, gateSetter, gatesOf, RESUME_SWEEP_MS, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
 import { conditionalVerdict } from '../shared/conditional.ts';
 import { ghRunner } from './githubTokens.ts';
 import { reportDelivers } from './ledgerRules.ts';
-import type { SessionInfo, WorkItem } from '../shared/types.ts';
+import type { SessionInfo, WorkBlocker, WorkItem } from '../shared/types.ts';
 import type { RoomNow } from './placement.ts';
 
 const EVERY_MS = 60_000;
@@ -168,7 +168,7 @@ export class BlockerWatch {
           if (bad?.v.state === 'stuck') this.d.orchestrators.blockerStuck(live.id, bad.v.why, bad.g);
           else if (bad) this.d.orchestrators.blockerDecide(live.id, bad.v.why, bad.g);
           else if (cleared.length === gates.length) await this.clearAll(live, gates.map((x) => x.g), cleared.map((x) => x.v.why).join('; '), ci);
-          else if (cleared.length) this.d.orchestrators.gatesCleared(live.id, cleared.map((x) => x.g), cleared.map((x) => x.v.why).join('; '));
+          else if (cleared.length) await this.clearSome(live, gates, cleared, ci);
           else continue;
           const was = bad ?? cleared[0];
           did.set(live.id, `${bad ? was.v.state : 'clear'}: ${(bad ? [bad] : cleared).map((x) => x.v.why).join('; ')}`);
@@ -256,6 +256,34 @@ export class BlockerWatch {
     // Merged: the PR's state is read fresh next time.
     this.prSeen.delete(g.ref!);
     this.d.orchestrators.mergedOnGreen(w.id, why);
+  }
+
+  /**
+   * Some gates cleared while others hold the request (w754). w2153: a gate a worker left with merge_on_green, the last of that
+   * worker's own, is merged on green now and its report filed (DONE for its part), though another worker's gates (a pair
+   * run's other leg) still hold the request: w2146's host leg left #2524's report at 14:20Z and lost it to the client leg's
+   * wait at 14:22Z. The rest clear as before (gatesCleared, which resumes a worker whose own gates have all cleared).
+   */
+  private async clearSome(w: WorkItem, gates: readonly { g: WorkBlocker; v: { why: string } }[], cleared: readonly { g: WorkBlocker; v: { why: string } }[], ci: ReadonlyMap<string, CiState | undefined>) {
+    const by = (g: WorkBlocker) => gateSetter(g);
+    const merge = this.d.orchestrators.mergedOnGreen
+      ? cleared.filter((x) => x.g.kind === 'ci' && x.g.ref && x.g.mergeOnGreen && ci.get(x.g.ref)?.green && by(x.g) && gates.every((y) => by(y.g) !== by(x.g) || cleared.includes(y)))
+      : [];
+    const rest = cleared.filter((x) => !merge.includes(x));
+    for (const x of merge) {
+      const g = x.g;
+      try {
+        await (this.d.merge ? this.d.merge(g.ref!, g.mergeOnGreen!.head, this.d.githubPerson?.(w)) : ghMerge(g.ref!, g.mergeOnGreen!.head, ghRunner(this.d.githubPerson?.(w), `the merge of ${g.ref}`)));
+      } catch (e) {
+        const said = clipLine((e as Error).message, 300);
+        console.warn(`blocker watch: ${w.id}: merge on green of ${g.ref} failed: ${said}`);
+        rest.push({ g, v: { why: `${x.v.why}; FF Factory tried to merge it and GitHub said: ${said}. Merge it yourself (ff-pr merge), then report; the report you left with merge_on_green was not filed` } });
+        continue;
+      }
+      this.prSeen.delete(g.ref!);
+      this.d.orchestrators.mergedOnGreen!(w.id, x.v.why, g);
+    }
+    if (rest.length) this.d.orchestrators.gatesCleared(w.id, rest.map((x) => x.g), rest.map((x) => x.v.why).join('; '));
   }
 
   private facts(ci: ReadonlyMap<string, CiState | undefined>, pr: ReadonlyMap<string, PrState | undefined>, health: ReadonlyMap<string, PrHealth | undefined>): BlockerFacts {

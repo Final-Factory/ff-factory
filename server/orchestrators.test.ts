@@ -4294,6 +4294,127 @@ test('w2045: merge on green: red CI, or a merge GitHub refuses, resumes the work
   agents.waker.cancel(b.id);
 });
 
+/** w2153: a request's gates, each with the worker that set it (shared/blockers.ts gateSetter), sorted. */
+function gateRefs(w: WorkItem): string[] {
+  return (w.blocked ? [w.blocked, ...(w.alsoBlocked ?? [])] : []).map((g) => `${g.by}: ${g.kind} ${g.ref ?? ''}`).sort();
+}
+
+test("w2153: w2146 as it happened: two legs each wait on their own PR's CI with merge on green; the second leg's blocked_on keeps the first's gate, the first leg is not stopped as idle when the second merges and says DONE, and it is merged when its own CI is green", async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }, { id: 'w1x' }]);
+  mergeOnGreenArm(o, (id) => id === 'w1');
+  const host = 'Final-Factory/FinalFactory#2524';
+  const client = 'Final-Factory/FinalFactory#2525';
+  const running = (ref: string) => ({ done: false, text: `1 of 1 checks on ${ref} still running` });
+  const green = (ref: string) => ({ done: true, green: true as const, text: `CI on ${ref} finished: all 1 workflow runs passed or skipped` });
+  const checks = new Map<string, { done: boolean; text: string; green?: true }>([
+    [host, running(host)],
+    [client, running(client)],
+  ]);
+  const merges: string[] = [];
+  const watch = new BlockerWatch({ store, orchestrators: o, ci: async (ref) => checks.get(ref), merge: async (ref) => void merges.push(ref) });
+  const tick = async () => {
+    (watch as unknown as { ciSeen: Map<string, unknown> }).ciSeen.clear();
+    return watch.tick();
+  };
+  const a = await startedFor(env, 'w1');
+  const b = await secondWorkerOn(env, 'w1');
+  // 14:20: the host leg (a4d94148) waits on #2524 and leaves its report; 14:22: the client leg (26258346) on #2525.
+  await a.h.blocked_on!({ request: 'w1', prs: [`ci:${host}`], head: 'aaaa1111bbbb', what: 'CI on PR #2524, then merge', merge_on_green: 'Host leg: all six steps passed.\n\nDONE: w1\nLearned: nothing new' });
+  await b.h.blocked_on!({ request: 'w1', prs: [`ci:${client}`], head: 'cccc2222dddd', what: 'CI on PR #2525, then merge', merge_on_green: 'Client leg finished.\n\nDONE: w1\nLearned: nothing new' });
+  assert.deepEqual(gateRefs(store.work.get('w1')!), [`worker ${a.id}: ci ${host}`, `worker ${b.id}: ci ${client}`].sort(), "the client leg's wait does not drop the host leg's");
+  assert.equal(agents.workOver(a.info), undefined, 'the host leg is still with its request');
+  // #2525 is green first: FF Factory merges it and files the client leg's DONE for its part.
+  checks.set(client, green(client));
+  await tick();
+  assert.deepEqual(merges, [client]);
+  let w = store.work.get('w1')!;
+  assert.ok(w.done?.[b.id], `the client leg's report is filed: ${w.log.slice(-3).join(' | ')}`);
+  assert.equal(w.status, 'blocked', w.log.slice(-3).join(' | '));
+  assert.deepEqual(gateRefs(w), [`worker ${a.id}: ci ${host}`]);
+  // 14:23:20Z: the release pass stopped a4d94148 as "its request is with another worker now". Not any more.
+  assert.equal(agents.workOver(a.info), undefined, 'not "with another worker now" while its gate waits');
+  assert.equal(agents.workLive().get('w1')!.state, 'blocked', 'Blocked on its CI, never Stalled');
+  // #2524 is green: merged on green, and the host leg's report closes the request.
+  checks.set(host, green(host));
+  await tick();
+  assert.deepEqual(merges, [client, host]);
+  w = store.work.get('w1')!;
+  assert.equal(w.status, 'done', w.log.slice(-3).join(' | '));
+});
+
+test("w2153: w2137 as it happened: one leg waits on another PR merging and on its own CI; the other leg's later blocked_on and DONE keep that wait, each leg is resumed when its own gates clear, and the request stays Blocked on the rest meanwhile", async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }, { id: 'w1x' }]);
+  const tests = 'Final-Factory/FinalFactory#2511';
+  const docs = 'Final-Factory/FinalFactory#2516';
+  const hostPr = 'Final-Factory/FinalFactory#2514';
+  const checks = new Map<string, { done: boolean; text: string; green?: true }>([
+    [docs, { done: false, text: 'running' }],
+    [hostPr, { done: false, text: 'running' }],
+  ]);
+  const prs = new Map<string, { state: 'open' | 'merged' | 'closed'; text: string }>([[tests, { state: 'open', text: `${tests} is open` }]]);
+  const watch = new BlockerWatch({ store, orchestrators: o, ci: async (ref) => checks.get(ref), pr: async (ref) => prs.get(ref) });
+  const tick = async () => {
+    (watch as unknown as { ciSeen: Map<string, unknown> }).ciSeen.clear();
+    (watch as unknown as { prSeen: Map<string, unknown> }).prSeen.clear();
+    return watch.tick();
+  };
+  const host = await startedFor(env, 'w1');
+  const client = await secondWorkerOn(env, 'w1');
+  // 12:27: the client leg (6ebd3483) waits on #2511 merging and CI on its docs PR #2516; then the host leg (6e664be4) on #2514.
+  await client.h.blocked_on!({ request: 'w1', prs: [tests, `ci:${docs}`], what: '#2511 to merge first, then CI on #2516' });
+  await host.h.blocked_on!({ request: 'w1', prs: [`ci:${hostPr}`], what: 'CI on PR #2514' });
+  assert.deepEqual(gateRefs(store.work.get('w1')!), [`worker ${client.id}: ci ${docs}`, `worker ${client.id}: pr ${tests}`, `worker ${host.id}: ci ${hostPr}`].sort());
+  // The host's CI finishes: the host leg is resumed; the client leg's wait stays.
+  checks.set(hostPr, { done: true, green: true, text: `CI on ${hostPr} finished: all 2 workflow runs passed or skipped` });
+  await tick();
+  let w = store.work.get('w1')!;
+  assert.equal(w.status, 'blocked', w.log.slice(-3).join(' | '));
+  assert.deepEqual(gateRefs(w), [`worker ${client.id}: ci ${docs}`, `worker ${client.id}: pr ${tests}`]);
+  assert.ok((agents.waker.pending(host.id)?.note ?? '').includes(`Run ff-pr merge now (${hostPr})`), String(agents.waker.pending(host.id)?.note));
+  assert.equal(agents.waker.pending(client.id), undefined, 'the client leg waits on');
+  agents.waker.cancel(host.id);
+  // 12:35: the host leg says DONE for its part. The client leg is still with the request, and it is not Stalled.
+  o.workerTurnEnded(host.info, 'Host leg finished.\n\nDONE: w1\nLearned: nothing new');
+  w = store.work.get('w1')!;
+  assert.equal(w.status, 'blocked', w.log.slice(-3).join(' | '));
+  assert.equal(agents.workOver(client.info), undefined);
+  assert.equal(agents.workLive().get('w1')!.state, 'blocked');
+  // 12:38: #2511 merges, and CI on #2516 finishes: the client leg is resumed to merge its PR.
+  prs.set(tests, { state: 'merged', text: `${tests} merged` });
+  checks.set(docs, { done: true, green: true, text: `CI on ${docs} finished: all 1 workflow runs passed or skipped` });
+  await tick();
+  w = store.work.get('w1')!;
+  assert.equal(w.status, 'active', w.log.slice(-3).join(' | '));
+  assert.ok((agents.waker.pending(client.id)?.note ?? '').includes(`Run ff-pr merge now (${docs})`), String(agents.waker.pending(client.id)?.note));
+  agents.waker.cancel(client.id);
+});
+
+test("w2153: a leg moved to another sandbox (w2046) while the other leg waits on its own CI keeps that wait: the request stays Blocked on it and the move is not refused", async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }, { id: 'w1x' }]);
+  const ref = 'Final-Factory/FinalFactory#2525';
+  const a = await startedFor(env, 'w1');
+  const b = await secondWorkerOn(env, 'w1');
+  await b.h.blocked_on!({ request: 'w1', prs: [`ci:${ref}`], what: 'CI on PR #2525' });
+  const w = store.work.get('w1')!;
+  o.movedForRoom(w, a.info, { machine: 'pc', sandbox: 'slot1', branch: 'w1-host', why: 'room', note: '', how: 'moved', to: 'pc/slot2' } as Parameters<Orchestrators['movedForRoom']>[2]);
+  const moved = { ...a.info, id: 'feed0001', machineSandbox: 'slot2' };
+  store.putSession(moved);
+  o.linkWorker('w1', moved, 'started worker feed0001 in pc/slot2: moved from worker a (w2046)', { moved: true });
+  const after = store.work.get('w1')!;
+  assert.deepEqual(gateRefs(after), [`worker ${b.id}: ci ${ref}`], after.log.slice(-2).join(' | '));
+  assert.equal(after.status, 'blocked');
+  assert.equal(agents.workOver(b.info), undefined);
+});
+
 test('w2045: merge_on_green is ignored, the wait set as usual, out of the arm, without head, or with a report that has no DONE line for the request', async (t) => {
   const env = await setupOnMachine(t);
   const { store, agents, o } = env;

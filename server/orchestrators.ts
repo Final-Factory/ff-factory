@@ -7,7 +7,7 @@ import path from 'node:path';
 import { band, concepts, DEFAULT_THRESHOLDS, entryMatch, indexOf, type MatchThresholds } from './boardMatch.ts';
 import { LOOP_GUARD_RANGE, type Config } from './config.ts';
 import type { Store } from './store.ts';
-import { blockerName, blockerProblem, blockerVerdict, gateSetter, latestWorker, newestFirst, RESUME_SWEEP_MS, gatesName, gatesOf, MAX_GATES, prRefOf, sameGate, type BlockerFacts } from '../shared/blockers.ts';
+import { blockerName, blockerProblem, blockerVerdict, gateSetter, latestWorker, newestFirst, RESUME_SWEEP_MS, gatesName, gatesOf, MAX_GATES, othersGates, prRefOf, sameGate, type BlockerFacts } from '../shared/blockers.ts';
 import { COORD_TURN_MAX_CALLS, COORD_TURN_MAX_TOKENS_READ, type OptionsFactory, type SessionHandle, type SessionManager, type TurnBudgetHit } from './sessions.ts';
 import { actingFor, asRequester, type Identity } from './identity.ts';
 import {
@@ -3010,10 +3010,11 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
    * (`except`) is resumed by resumeGatedWorker instead, its check-in folded in. Returns the workers whose check-in was
    * handed back.
    */
-  private handBackCheckIns(w: WorkItem, lead: string, except?: string): string[] {
+  private handBackCheckIns(w: WorkItem, lead: string, except?: string | readonly string[]): string[] {
     const back: string[] = [];
+    const skip = typeof except === 'string' ? [except] : (except ?? []);
     for (const h of w.heldCheckIns ?? []) {
-      if (h.session === except || !this.store.sessions.get(h.session) || !w.sessionIds.includes(h.session)) continue;
+      if (skip.includes(h.session) || !this.store.sessions.get(h.session) || !w.sessionIds.includes(h.session)) continue;
       const note = h.resume
         ? `${lead}. An earlier resume reached you only after ${w.id} was blocked again, so it was kept until now; carry on from it: ${h.note}`
         : `${lead}. This is your own check-in, which the block cancelled; carry on from it. Its note was: ${h.note}`;
@@ -3059,7 +3060,7 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
    * held for it is folded in. One standing in for a setter that is gone is told the work is its now. The resume is
    * recorded (gateResumes) for the sweep. Returns it, or [].
    */
-  private resumeGatedWorker(w: WorkItem, gates: readonly WorkBlocker[], cleared: string): string[] {
+  private resumeGatedWorker(w: WorkItem, gates: readonly WorkBlocker[], cleared: string, still?: readonly WorkBlocker[]): string[] {
     const owner = this.gateOwner(w, gates);
     if (!owner) return [];
     const sid = owner.sid;
@@ -3081,9 +3082,16 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       ? ` Worker ${owner.gone} set this gate and is gone, so ${ciGates.length ? `the merge of ${prs} is yours now: you own it (merge on green, fix on red)` : 'what it waited for is yours to carry on now'}.`
       : '';
     const held = w.heldCheckIns?.find((h) => h.session === sid);
-    const note = `${w.id} is unblocked: ${cleared}.${results}${yours}${ci ? ` Run ff-pr merge now${prs ? ` (${prs})` : ''}: it merges on green, or names the red run to read (gh run view <run> --log-failed) and fix.` : ''}${deploy ? ' The deploy you waited for has happened: do the check that comes after it now (the live read, the health check), then report.' : ''} Carry on from where you left it.${held ? ` Your own check-in, which the block cancelled, is folded into this message; its note was: ${held.note}` : ''}`;
+    // w2153: its own gates cleared while another worker's still hold the request (a pair run's other leg): its part goes on.
+    const lead = still?.length ? `Your wait on ${w.id} is over: ${cleared}. (${w.id} stays Blocked on ${gatesName(still, this.now().getTime())}, another worker's wait: not yours.)` : `${w.id} is unblocked: ${cleared}.`;
+    const note = `${lead}${results}${yours}${ci ? ` Run ff-pr merge now${prs ? ` (${prs})` : ''}: it merges on green, or names the red run to read (gh run view <run> --log-failed) and fix.` : ''}${deploy ? ' The deploy you waited for has happened: do the check that comes after it now (the live read, the health check), then report.' : ''} Carry on from where you left it.${held ? ` Your own check-in, which the block cancelled, is folded into this message; its note was: ${held.note}` : ''}`;
     if (!this.wakeNow(sid, note, w.id)) return [];
     this.noteResume(w, sid, note);
+    // Folded in above: not handed back again when the rest clears (unblock's handBackCheckIns).
+    if (held && still?.length) {
+      const rest = w.heldCheckIns!.filter((h) => h !== held);
+      w.heldCheckIns = rest.length ? rest : undefined;
+    }
     return [sid];
   }
 
@@ -3099,7 +3107,9 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
     if (!w) return undefined;
     // Blocked again, or held on a person with its gates kept (w754): handed back when the gates clear (unblock). A hold with
     // no gate left has nothing to hand it back, so the resume goes.
-    if (w.blocked && (w.status === 'blocked' || w.status === 'question')) {
+    // w2153: not when every gate left is another live worker's (a pair run's other leg): this worker's own wait is over.
+    const othersOnly = gatesOf(w).length > 0 && othersGates(w, sessionId).length === gatesOf(w).length;
+    if (w.blocked && (w.status === 'blocked' || w.status === 'question') && !othersOnly) {
       const name = gatesName(gatesOf(w), this.now().getTime());
       if (!(w.heldCheckIns ?? []).some((h) => h.session === sessionId && h.note === note)) w.heldCheckIns = [...(w.heldCheckIns ?? []), { session: sessionId, at: this.now().toISOString(), note, resume: true }];
       const left = (w.gateResumes ?? []).filter((r) => r.session !== sessionId);
@@ -3302,8 +3312,8 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
    * a lifted hold do not lift a gate (w750: the dispatcher started a worker on a released hold with w727 still open).
    * `override` is a person's own words saying to start it anyway.
    */
-  gateProblem(w: WorkItem, override?: string): string | undefined {
-    const open = gatesOf(w).filter((g) => this.gateOpen(g));
+  gateProblem(w: WorkItem, override?: string, others: readonly WorkBlocker[] = []): string | undefined {
+    const open = gatesOf(w).filter((g) => !others.includes(g) && this.gateOpen(g));
     if (!open.length || override?.trim()) return undefined;
     return `${w.id} is gated on ${gatesName(open, this.now().getTime())} (${open.map((g) => g.what).join('; ')}), which has not cleared. A hold lifted or a "go" does not lift a gate: it starts by itself when they clear, and what people add meanwhile is kept for its worker. Start it anyway only on a person's own word to do so, passing it as override_gate; otherwise leave it blocked (decide_work block with no new blocker blocks it again on these).`;
   }
@@ -3858,11 +3868,15 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
     const before = gatesOf(w);
     if (gates.length > MAX_GATES) throw new Error(`at most ${MAX_GATES} things at once`);
     const pilot = this.mergeOnGreenAsk(w, sessionId, gates, a.head, a.mergeOnGreen);
-    w.blocked = gates[0];
-    w.alsoBlocked = gates.length > 1 ? gates.slice(1) : undefined;
+    // w2153: this worker's wait replaces its own gates and the dispatcher's, never another worker's on the same request.
+    const kept = othersGates(w, sessionId).filter((k) => !gates.some((g) => sameGate(g, k)));
+    const all = [...kept, ...gates];
+    w.blocked = all[0];
+    w.alsoBlocked = all.length > 1 ? all.slice(1) : undefined;
     w.stalled = undefined;
     w.status = 'blocked';
-    w.gateResumes = undefined;
+    const resumes = (w.gateResumes ?? []).filter((r) => kept.some((k) => gateSetter(k) === r.session));
+    w.gateResumes = resumes.length ? resumes : undefined;
     const cancelled = this.cancelCheckIns(w, sessionId);
     const name = gatesName(gates, now.getTime());
     this.stamp(w, `worker ${sessionId}: blocked on ${name} (${gates[0].what}); it ends its turn and is resumed when that clears${cancelled}`);
@@ -3911,11 +3925,26 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
    * no model turn. A DONE refused is told back to the worker, which resumes it (doneMarkers, tellRefused). A worker that is
    * gone: unblocked for the dispatcher, as unblock does.
    */
-  mergedOnGreen(id: string, why: string) {
+  mergedOnGreen(id: string, why: string, only?: WorkBlocker) {
     const w = this.store.work.get(id);
     if (!w || w.status !== 'blocked' || !w.blocked) return;
-    const g = gatesOf(w).find((x) => x.kind === 'ci' && x.mergeOnGreen);
+    const g = only ? gatesOf(w).find((x) => sameGate(x, only) && x.mergeOnGreen) : gatesOf(w).find((x) => x.kind === 'ci' && x.mergeOnGreen);
     const s = g ? this.store.sessions.get(g.mergeOnGreen!.session) : undefined;
+    const rest = g ? gatesOf(w).filter((x) => x !== g) : [];
+    // w2153: one worker's merge on green while another worker's gates still hold the request (a pair run's other leg): only
+    // its own gate goes, the request stays Blocked on the rest, and its report is filed (DONE for its part).
+    if (only && g && rest.length) {
+      if (!s) return this.gatesCleared(id, [g], `${why}; FF Factory merged it on green, and the worker that left its report is gone`);
+      const m = g.mergeOnGreen!;
+      w.blocked = rest[0];
+      w.alsoBlocked = rest.length > 1 ? rest.slice(1) : undefined;
+      const now = this.now().getTime();
+      this.stamp(w, `${MERGE_ON_GREEN_MARK}: FF Factory merged ${g.ref} at ${m.head.slice(0, 12)} on green CI with no model turn (${why}); filing worker ${m.session}'s report; still blocked on ${gatesName(rest, now)}`);
+      this.store.putWork(w);
+      console.log(`ledger: ${w.id}: merged ${g.ref} on green (${MERGE_ON_GREEN_MARK}); filing worker ${m.session}'s report; still blocked on ${gatesName(rest, now)}`);
+      this.workerTurnEnded(s, m.report);
+      return;
+    }
     if (!g || !s) return this.unblock(id, `${why}; FF Factory merged it on green, and the worker that left its report is gone`);
     const m = g.mergeOnGreen!;
     const handed = this.handBackCheckIns(w, `${w.id} is unblocked: FF Factory merged ${g.ref} on green CI (${why})`, m.session);
@@ -3971,12 +4000,16 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
   }
 
   /** A worker was started, messaged or approved for a request: link it, mark the request active, tell its requesters. */
-  linkWorker(workId: string, s: Pick<SessionInfo, 'id' | 'title' | 'machineId'>, what: string, opts: { reply?: boolean; overrideGate?: string } = {}) {
+  linkWorker(workId: string, s: Pick<SessionInfo, 'id' | 'title' | 'machineId'>, what: string, opts: { reply?: boolean; overrideGate?: string; moved?: boolean } = {}) {
     const w = this.requireWork(workId);
     const problem = startProblem(w);
     if (problem) throw new Error(problem);
+    // w2153: another live worker's own wait (a pair run's other leg) neither stops this one nor is dropped by it; the request
+    // stays Blocked on it (a worker moved to another sandbox, w2046, or a pair run's leg started beside it). Elsewhere a
+    // start on a gated request still needs a person's override, which drops every gate as before.
+    const others = w.pair || opts.moved ? othersGates(w, s.id) : [];
     // Gates are checked before the worker starts (gateProblem); an override is recorded here (w754).
-    const gated = gatesOf(w).length ? this.gateProblem(w, opts.overrideGate) : undefined;
+    const gated = gatesOf(w).length > others.length ? this.gateProblem(w, opts.overrideGate, others) : undefined;
     if (gated) throw new Error(gated);
     if (opts.overrideGate?.trim() && gatesOf(w).length) what += ` (gate overridden: "${clip(opts.overrideGate.trim(), 200)}")`;
     w.sessionIds = [...new Set([...w.sessionIds, s.id])];
@@ -3991,8 +4024,12 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       w.legs = rest.length ? rest : undefined;
       what += `; its ${legsName(started)} started (queued ${started.map((l) => l.at.slice(11, 16)).join(', ')} UTC)`;
     }
-    w.status = 'active';
-    this.stamp(w, `dispatcher: ${what}${was}`);
+    if (others.length) {
+      w.blocked = others[0];
+      w.alsoBlocked = others.length > 1 ? others.slice(1) : undefined;
+      w.status = 'blocked';
+    } else w.status = 'active';
+    this.stamp(w, `dispatcher: ${what}${was}${others.length ? `; still blocked on ${gatesName(others)}, another worker's wait` : ''}`);
     this.store.putWork(w);
     if (opts.reply !== false) this.toPeople(w.requesters, dispatchNotice(w, what));
   }
@@ -6021,8 +6058,16 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
     const name = gatesName(gates, this.now().getTime());
     // w846, w1094: the gate's owner (the worker that set it, or the newest standing in for it) is resumed within a minute,
     // its own check-in folded in. w829: every other worker whose check-in the block cancelled gets it back.
-    const resumedIds = this.resumeGatedWorker(w, gates, `${name} cleared (${why})`);
-    const handed = this.handBackCheckIns(w, `${w.id} is unblocked: ${name} cleared (${why})`, resumedIds[0]);
+    // w2153: gates several workers set (a pair run's legs) clearing in one look resume each of them, not only the first.
+    const setters = [...new Set(gates.map(gateSetter).filter((x): x is string => !!x))];
+    const resumedIds =
+      setters.length > 1
+        ? setters.flatMap((sid) => {
+            const own = gates.filter((g) => gateSetter(g) === sid);
+            return this.resumeGatedWorker(w, own, `${gatesName(own, this.now().getTime())} cleared (${why})`);
+          })
+        : this.resumeGatedWorker(w, gates, `${name} cleared (${why})`);
+    const handed = this.handBackCheckIns(w, `${w.id} is unblocked: ${name} cleared (${why})`, resumedIds);
     const back = [...resumedIds, ...handed];
     const resumed = resumedIds.length > 0;
     w.status = back.length ? 'active' : 'new';
@@ -6056,9 +6101,17 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
     const left = gatesOf(w).filter((g) => !cleared.some((c) => sameGate(c, g)));
     if (!left.length || left.length === gatesOf(w).length) return;
     const now = this.now().getTime();
+    const gone = gatesOf(w).filter((g) => !left.includes(g));
     w.blocked = left[0];
     w.alsoBlocked = left.length > 1 ? left.slice(1) : undefined;
-    this.stamp(w, `${gatesName(cleared, now)} cleared (${why}); still blocked on ${gatesName(left, now)}`);
+    // w2153: a worker whose own gates have all cleared is resumed now, while the request stays Blocked on another worker's
+    // (a pair run's other leg): it does not wait for theirs.
+    const resumed: string[] = [];
+    for (const sid of new Set(gone.map(gateSetter).filter((x): x is string => !!x))) {
+      if (left.some((g) => gateSetter(g) === sid)) continue;
+      resumed.push(...this.resumeGatedWorker(w, gone.filter((g) => gateSetter(g) === sid), `${gatesName(gone.filter((g) => gateSetter(g) === sid), now)} cleared (${why})`, left));
+    }
+    this.stamp(w, `${gatesName(cleared, now)} cleared (${why}); still blocked on ${gatesName(left, now)}${resumed.length ? `; its worker ${resumed.join(', ')} resumes within a minute` : ''}`);
     this.store.putWork(w);
   }
 
