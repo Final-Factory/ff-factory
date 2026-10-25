@@ -630,6 +630,20 @@ compare cost after the first push and per request against the control requests i
 (must be none) and the arm's hand-backs (red, or a merge refused). The fresh-session pilot (w2043) splits requests by
 `fresh:`, so the two read as a 2x2.
 
+The result, 24 h at 50% (2026-10-24 15:55Z to 10-25 15:55Z). Merges, all machines, from the portal journal (measured): FF
+Factory merged 24 PRs on green for 23 requests (FinalFactory, final-factory-agents, ff-factory); every merged head's
+pull_request runs had passed (`gh run list --commit`), so 0 red PRs merged; 3 red CI runs went back to their workers, as
+designed (w2117's #2502 logged its hand-back twice, 2 minutes apart: a possible double resume, not traced); no merge refused
+and no filed report refused. Cost, beast's transcripts only (measured): pilot 19 requests (14 pushed), control 18 (11 pushed);
+per pushed request median $4.23 against $5.29, after the first push median $0.61 against $0.33 (mean $1.85 against $0.97, the
+pilot's held up by one request that spent $15 after its push and never used the feature); a green-CI resume turn now costs a
+median $0.13-0.14 in both arms (6 and 11 turns), well below the $0.39 of 10-10 to 10-24 (why: not checked); writing the report
+before the wait cost about $0.10 a time (median, 8 sessions). 8 of 14 pushed pilot requests left a report. So the arms differ
+by less than their noise; a merge with no model saves about $0.10-0.15 net (estimated), about $3-7 a day at 100%, and merges
+as soon as CI ends. lothsahn, 2026-10-25: "Widen the merge-on-green pilot to every request (set it to 100)"; it is 100 since.
+A worker cannot set a pilot's percent: only a person's own orchestrator can (set_app_config, docs/accounts.md), so a pilot's
+switch on, widen and off are each a card to that person.
+
 ### A fresh session after each merge, a pilot (w2043)
 
 lothsahn, 2026-10-24: "Do a pilot for one day". After the first push is 56-60% of a session's cost (above), and most sessions
