@@ -655,6 +655,26 @@ To read it: spend_report over the day for the requests of each arm (cost per req
 re-reads from `scripts/worker-calls.ts`, and lost-context rework from the ledger (reopens) and the fresh sessions' transcripts
 (research the merged work had settled, done again).
 
+**Result: dropped after one day** (2026-10-24 15:35Z to 10-25 15:35Z at 50%; set back to 0 on lothsahn's orchestrator's word,
+"There's no further trial"). Measured unless marked:
+
+- **Arms** (portal log, the arm lines): 56 requests in the pilot arm, 49 in the control. **11 switches** to a fresh session
+  fleet-wide. **12 fallbacks**: the worker's sandbox had gone to another worker while it waited on CI (`no fresh session for
+  worker ... (beast/slot3 is not ...'s any more`), so the message went to the old session. Plus 5 workers ended after a merge
+  with nothing open, and a sixth that was mid-turn was left to stop once free. A rerun should start the fresh session in a free
+  sandbox on the branch, the way a CI resume already moves a worker, or half its switches never happen.
+- **Spend on beast** (`node scripts/worker-calls.ts --since 2026-10-24T15:35:00Z --until 2026-10-25T15:40:00Z --days 2 --top 0
+  --json`, list price; 39 requests): pilot 18 requests, $60.96, mean $3.39, median $2.85, after the first push $4.29 (7%), 13
+  pushes. Control 21 requests, $117.32, mean $5.59, median $4.35, after the first push $35.10 (30%), 29 pushes. **The gap is not
+  the switch's**: it fired about three times on beast that day, and one control request (w2078) spent $15 after its push alone.
+  The request mix decides a sample this small.
+- **Per switch** (the three fresh sessions on beast against the sessions they replaced): a fresh session starts at 45-49k
+  tokens of context. The old one stood at 66-88k after the earlier compaction (w2002). After a CI wait the cache is usually cold
+  either way, so a switch saves about $0.30-0.50 (estimated), a few dollars a day at 11 switches.
+- **Rework**: small. The fresh sessions made 8 calls (about $0.60, mostly log reads), 34 calls of new work (about $2.37), and
+  17 calls that re-read only the merged PR's description. Reopens were not checked: a worker's read_work refuses other requests,
+  and spend_report is an orchestrator's tool. Ask for a ledger-read grant before such a pilot ends.
+
 ## Transcripts: how long they are kept
 
 **Seven days after the request closes**, a request that is open keeps them as long as it is open, a reopened request keeps them again.

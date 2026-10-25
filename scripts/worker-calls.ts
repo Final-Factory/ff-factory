@@ -5,10 +5,11 @@
 // a deploy and on sessions that started after it, on the same machine, and compare the lines it prints.
 //
 //   node scripts/worker-calls.ts [--root <projects dir>] [--match <dir regex>] [--since <ISO time>] [--until <ISO time>]
-//                                [--days 4] [--json <file>]
+//                                [--days 4] [--top 10] [--json <file>]
 //
 // --match picks the project folders (default: worker sandboxes, `sandboxes-slot`); --since/--until keep sessions whose
-// first call is in that window; --days skips files not written for that many days.
+// first call is in that window; --days skips files not written for that many days; --top is how many requests the
+// by-request list keeps, 0 for every one (w2043: a pilot's arms are compared request by request).
 //
 // w2018: it also splits each session's list-price dollars by phase (research before the first edit, implementing, after the
 // first push; the same rules as the portal's meter, shared/spend.ts nextPhase) and counts its pushes, overall and for the
@@ -26,6 +27,7 @@ interface Args {
   until?: number;
   days: number;
   json?: string;
+  top?: number;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -38,6 +40,7 @@ function parseArgs(argv: string[]): Args {
     else if (argv[i] === '--until') (a.until = Date.parse(v)), i++;
     else if (argv[i] === '--days') (a.days = Number(v)), i++;
     else if (argv[i] === '--json') (a.json = v), i++;
+    else if (argv[i] === '--top') (a.top = Number(v)), i++;
     else throw new Error(`unknown option ${argv[i]}`);
   }
   return a;
@@ -277,7 +280,7 @@ export function summarize(a: Args): Summary {
     byRequest: [...phased.reduce((m, x) => (x.request ? m.set(x.request, [...(m.get(x.request) ?? []), x]) : m), new Map<string, typeof phased>())]
       .map(([id, rows]) => ({ id, ...split(rows) }))
       .sort((x, y) => PHASES.reduce((a, p) => a + y.usd[p] - x.usd[p], 0))
-      .slice(0, 10),
+      .slice(0, a.top === 0 ? undefined : (a.top ?? 10)),
   };
 }
 
