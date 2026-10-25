@@ -101,6 +101,21 @@ export function blockerName(b: Pick<WorkBlocker, 'kind' | 'ref' | 'on' | 'until'
 export const gateSetter = (g: Pick<WorkBlocker, 'by'>): string | undefined => /^worker (\S+)$/.exec(g.by)?.[1];
 
 /**
+ * The gates on `w` that another of its workers set for its own part (w2153), apart from `actor`'s: the setter is still on
+ * the request (in sessionIds, not moved off it, not done with its part). A request with several workers (a pair run's
+ * legs, w1945) holds each one's wait: one worker's blocked_on, start or move keeps the others'. w2146 on 2026-10-25: the
+ * client leg 26258346's blocked_on at 14:22Z replaced the host leg a4d94148's ci gate on #2524, the release pass stopped
+ * a4d94148 at 14:23Z as "with another worker now", and #2524 waited 1.5 h for a person; w2137's host leg 6e664be4 did the
+ * same to the client leg 6ebd3483's wait on #2511 and #2516 at 12:27Z.
+ */
+export function othersGates(w: Pick<WorkItem, 'sessionIds' | 'blocked' | 'alsoBlocked' | 'done' | 'movedOff'>, actor?: string): WorkBlocker[] {
+  return gatesOf(w).filter((g) => {
+    const by = gateSetter(g);
+    return !!by && by !== actor && w.sessionIds.includes(by) && !w.done?.[by] && !w.movedOff?.[by];
+  });
+}
+
+/**
  * Whether a request is with worker `sessionId` (w1094): it is its newest worker, or it set one of the request's open gates.
  * w1049 (PR #1507): 0b5f813d blocked on its own PR's CI while 39772f0c, linked later to the same request, waited on Ben;
  * reading only the newest, the release pass stopped 0b5f813d as "with another worker now", and the CI's end resumed
