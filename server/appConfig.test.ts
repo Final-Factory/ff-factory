@@ -132,7 +132,7 @@ test('app config: the earlier-compaction pilot (w2002), live, its thresholds 80,
   for (const bad of ['0', '79999', '900001', 'soon']) assert.throws(() => setAppConfig(file, full, 'worker.earlyCompactAtTokens', bad), /from 80,000 to 900,000/, bad);
   for (const bad of ['-1', '101']) assert.throws(() => setAppConfig(file, full, 'worker.earlyCompactPilotPercent', bad), /0 to 100/, bad);
   setAppConfig(file, full, 'worker.earlyCompactPilotPercent', null);
-  assert.equal(full.worker.earlyCompactPilotPercent, undefined, 'null: back to the default (50%)');
+  assert.equal(full.worker.earlyCompactPilotPercent, undefined, 'null: back to the default (100%, every worker)');
 });
 
 test('app config: orchestrator.compactIdleSeconds and compactHardAtTokens (w1538), live, bounded, null back to the default', (t) => {

@@ -558,7 +558,7 @@ export interface Config {
     /**
      * The earlier-compaction pilot (w2002, server/autoCompact.ts, docs/spend.md "Compacting earlier, a pilot"): the share of
      * worker sessions (by a hash of their id, apart from the other pilots) that compact between turns from
-     * earlyCompactAtTokens and within a turn from earlyCompactMidTurnTokens. Defaults 50%, 120,000 and 150,000; each threshold
+     * earlyCompactAtTokens and within a turn from earlyCompactMidTurnTokens. Defaults 100% (every worker, since the pilot's result), 120,000 and 150,000; each threshold
      * at least 80,000. The share reaches a session's mid-turn threshold when its process next starts.
      */
     earlyCompactPilotPercent?: number;
