@@ -237,7 +237,8 @@ const queuedTimed = (p: Computer) => (p.benchQueue?.timed ?? 0) + (p.legs?.lengt
  * follow the workers request or the orchestrator's request for that placement. In absence of any preference, it should
  * use this list"), but not here: "that should go back to the orchestrator or worker ... The orchestrator worker then can
  * pick a new machine or escalate to an operator if it is unable to pick a new machine". So nothing starts and nothing is
- * moved: the caller gets why and the computers that do take it, ranked (with room first).
+ * moved: the caller gets why and the computers that do take it, ranked (with room first). Since w2147 the escalation is
+ * never a question for a person: when none of them is online or has room the work is queued with needs naming them.
  */
 export function timedPinRefusal(target: string, places: readonly Computer[], prefs: PlacementPrefs, t: TimedKind): string | undefined {
   const here = places.find((p) => p.id === placeId(target));
@@ -246,7 +247,7 @@ export function timedPinRefusal(target: string, places: readonly Computer[], pre
   const ranked = timedRank(places, prefs, platform);
   const rest = places.filter((p) => p.online && !p.noTimedRuns && (!platform || p.platform === platform) && !ranked.includes(p)).map((p) => `${p.id} (no room now)`);
   const list = [...ranked.map(timedSize), ...rest];
-  return `${here.id} takes no timed or exclusive-lock work (${here.noTimedRuns}; w1861): this timed work was not started or moved. Pick another computer${platform ? ` on ${platform}` : ''} and start it there: ${list.length ? list.join(' > ') : 'none is online'} ("Next timed work" ranks them, w1872). If none of them can do it, ask an operator (waiting_on_person) instead of placing it.`;
+  return `${here.id} takes no timed or exclusive-lock work (${here.noTimedRuns}; w1861): this timed work was not started or moved. Pick another computer${platform ? ` on ${platform}` : ''} and start it there: ${list.length ? list.join(' > ') : 'none is online'} ("Next timed work" ranks them, w1872). If none of them is online or has room, queue it with needs naming them: it starts by itself on the first that comes online or frees up (w2055 order); never ask a person for a computer (w2147).`;
 }
 
 /** needsTimed's answer (shared/capacity.ts) as a placement kind (w1628). */
