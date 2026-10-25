@@ -880,6 +880,14 @@ Ben's goal (2026-09-29) is that the ledger shows all dev work. Besides people's 
   reviewers, today's numbers, **Needs a human** (Approve / Decline for reviewers), the intake requests in the ledger
   with their triage, state and how the fix is reaching players, and a log of what the intake saw (filed, repeat,
   skipped, ignored). The Requests tab marks intake rows by source.
+  - **Only what waits on a person is open** (w2143, lothsahn: "the intake is showing things that auto approved. Why show
+    it if approved?"). Auto-approved requests used to sit in "In the ledger" beside the ones a person approved or
+    declined, since that list held every intake request not pending and not closed by itself. They are now in a folded
+    **Auto-approved** section (its line names how many stalled, so a fold hides no trouble), and **Closed automatically**
+    is folded too; "In the ledger" keeps what a person decided.
+  - **Every item shows its request number, on a phone too** (w2143). A row's number has a column of its own above its age
+    (it used to end the one-line state, which a phone cut off); a waiting card names it in its info line, linked to the
+    request (`#/dispatcher/<id>`).
 - **`list_work`**: `source: intake | discord | ffbox | people`, `status: needs_human`; one request shows its source,
   triage, approval, design question and delivery.
 - **The heartbeat**: an Intake line with what needs a human, design questions for that person, FFBox branches to

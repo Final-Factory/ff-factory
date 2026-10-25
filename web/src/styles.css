@@ -4344,6 +4344,19 @@ button.react-chip:hover {
   font-size: var(--fs-sm);
 }
 
+/* The request's number above its age (w2143): a column that never shrinks, so a phone shows it whatever the state line holds. */
+.work-side {
+  flex: none;
+  display: grid;
+  justify-items: end;
+  gap: 2px;
+}
+
+.work-id {
+  color: var(--text-2);
+  font-size: var(--fs-sm);
+}
+
 .work-detail {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -4426,6 +4439,15 @@ button.react-chip:hover {
   font-size: var(--fs-sm);
   color: var(--text-2);
   font-weight: 600;
+}
+
+/* Auto-approved and auto-closed requests wait on nobody (w2143): folded under their heading, opened by a click. */
+.intake-fold > summary {
+  cursor: pointer;
+}
+
+.intake-fold > .run-list {
+  margin-top: var(--s-2);
 }
 
 /* A long intake page scrolls: nothing in it shrinks to fit (a run-list hides its overflow, so it would vanish). */
@@ -7666,6 +7688,10 @@ a.wc-pr:hover {
   font-weight: 600;
   color: var(--text-2);
   overflow-wrap: anywhere;
+}
+
+.qc-meta .qc-id {
+  color: inherit;
 }
 
 .qc-meta,

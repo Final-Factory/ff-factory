@@ -161,6 +161,8 @@ test('a request whose linked request is done closes by itself and shows under Cl
 
   const section = tab.getByTestId('intake-auto-closed');
   await expect(section).toContainText('Closed automatically');
+  // Folded: nobody waits on it (w2143).
+  await section.locator('summary').click();
   const row = section.getByTestId(`work-${bug.id}`);
   await expect(row).toContainText('Auto-closed');
   await row.getByRole('button', { name: new RegExp(tag) }).click();
@@ -487,4 +489,109 @@ function needsYouState(s: AppState, tag: string): AppState {
   const agent = { id: `sa-${tag}`, name: `Agent ${tag}`, charter: 'x', model: 'sonnet', trigger: { kind: 'manual' }, folder: '/x', enabled: true, budget: { perRunUsd: 1, perDayUsd: 1, maxMinutes: 5 }, tools: [], sessionId: `sa-s-${tag}`, createdAt: ago(9), updatedAt: ago(9), state: 'asleep', spend: { day: '', usd: 0 }, runs: [] } as unknown as StandingAgent;
   const delegation = { id: `d-${tag}`, agentId: agent.id, agentName: agent.name, title: `Delegation ${tag}`, task: 'Do the thing.', createdAt: ago(1), status: 'pending', log: [] } as unknown as DelegationRequest;
   return { ...s, work, sessions: [...s.sessions, busy], standingAgents: [...s.standingAgents, agent], delegations: [...s.delegations, delegation], intake: { ...s.intake!, reviewerIds: ['tester'] } };
+}
+
+// ---- The Intake tab on a phone (w2143, lothsahn: "In the intake, you can't see any of the workorders numbers in the screen on a
+// phone ... Also, the intake is showing things that auto approved. Why show it if approved?") ----
+
+test('the Intake tab shows every request number on a phone and keeps auto-approved requests out of the waiting list (w2143, test data)', async ({ page }) => {
+  await page.routeWebSocket('**/ws', (ws) => {
+    const server = ws.connectToServer();
+    server.onMessage((raw) => {
+      const e = JSON.parse(String(raw)) as ServerEvent;
+      if (e.type === 'state') return ws.send(JSON.stringify({ type: 'state', state: intakeState(e.state) } satisfies ServerEvent));
+      if (e.type === 'session' || e.type === 'session_removed' || e.type === 'work') return;
+      ws.send(raw);
+    });
+    ws.onMessage((m) => server.send(m));
+  });
+  if (!isMobile(page)) await page.setViewportSize({ width: 1440, height: 1600 });
+  await signIn(page);
+  await page.goto('/#/dispatcher/intake');
+  const tab = page.getByTestId('intake-tab');
+  await expect(tab.getByTestId('work-w9305')).toBeVisible();
+  await settle(page);
+  // The tab scrolls inside its panel, so a full-page still would stop at the settings: scroll to the lists instead.
+  const shot = async (name: string, from = tab.getByText('Needs a human', { exact: true })) => {
+    await from.evaluate((h) => h.scrollIntoView({ block: 'start' }));
+    const file = test.info().outputPath(`${name}.png`);
+    await page.screenshot({ path: file });
+    await test.info().attach(name, { path: file, contentType: 'image/png' });
+  };
+  await shot('intake-tab');
+  await shot('intake-tab-lists', tab.getByText(/^(Auto-approved|Closed automatically) · /).first());
+
+  // Waiting for a person: the two pending reports, nothing else.
+  const waiting = tab.locator('.intake-cards');
+  await expect(waiting.locator('.qc')).toHaveCount(2);
+  for (const id of ['w9301', 'w9302']) await expect(tab.getByTestId(`intake-${id}`)).toBeVisible();
+  // Auto-approved requests are in a section of their own, folded, not among what waits or in the ledger list.
+  const auto = tab.getByTestId('intake-auto-approved');
+  await expect(auto).toContainText('Auto-approved · 2');
+  // Its stalled one is named on the folded line.
+  await expect(auto.getByTestId('intake-auto-stalled')).toHaveText(' · 1 stalled');
+  await expect(auto).not.toHaveAttribute('open', '');
+  await expect(tab.getByTestId('intake-ledger').getByTestId('work-w9303')).toHaveCount(0);
+  await expect(tab.getByTestId('intake-ledger').getByTestId('work-w9305')).toBeVisible();
+  // Closed automatically is folded too: none of it waits on a person.
+  await expect(tab.getByTestId('intake-auto-closed')).not.toHaveAttribute('open', '');
+  await auto.locator('summary').click();
+  await tab.getByTestId('intake-auto-closed').locator('summary').click();
+
+  // Every request shows its number, whole and on screen: a waiting card's links to the request (a ledger row is one button
+  // that opens in place, so its number is text).
+  for (const id of ['w9301', 'w9302', 'w9303', 'w9304', 'w9305', 'w9306', 'w9307']) {
+    const num = tab.getByTestId(`work-id-${id}`);
+    await expect(num).toHaveText(id);
+    if (id === 'w9301' || id === 'w9302') await expect(num).toHaveAttribute('href', `#/dispatcher/${id}`);
+    await num.scrollIntoViewIfNeeded();
+    const clipped = await num.evaluate((el) => {
+      const r = el.getBoundingClientRect();
+      // Clipped when an ancestor that hides overflow ends before the number does.
+      for (let p = el.parentElement; p; p = p.parentElement) {
+        const cs = getComputedStyle(p);
+        if (cs.overflow === 'visible' && cs.overflowX === 'visible') continue;
+        const b = p.getBoundingClientRect();
+        if (r.right > b.right + 0.5 || r.left < b.left - 0.5) return `${p.className}: ${Math.round(r.left)}..${Math.round(r.right)} outside ${Math.round(b.left)}..${Math.round(b.right)}`;
+      }
+      return r.right > window.innerWidth + 0.5 ? 'past the screen' : '';
+    });
+    expect(clipped, `${id} is cut off`).toBe('');
+  }
+  await settle(page);
+  await shot('intake-tab-open', tab.getByText(/^Auto-approved · /));
+  // A waiting card's number opens the request in the Requests tab.
+  await tab.getByTestId('work-id-w9301').click();
+  await expect(page).toHaveURL(/#\/dispatcher\/w9301$/);
+  await expect(page.getByTestId('work-w9301')).toBeVisible();
+});
+
+/** Intake requests of each kind: two that wait for a reviewer, two auto-approved, one a person approved, one closed by itself, one declined. */
+function intakeState(s: AppState): AppState {
+  const ago = (days: number) => new Date(Date.now() - days * 86_400_000).toISOString();
+  const TESTER = { userId: 'tester', displayName: 'tester' };
+  const LOTH = { userId: 'lothsahn', displayName: 'Lothsahn' };
+  const base = { priority: 'normal', keys: [], requestedBy: TESTER, requesters: [TESTER], humanAsked: false, status: 'new', updatedAt: ago(0.01), sessionIds: [], overlaps: [], asks: 0, log: [] } satisfies Partial<WorkItem> as Pick<WorkItem, 'priority' | 'keys' | 'requestedBy' | 'requesters' | 'humanAsked' | 'status' | 'updatedAt' | 'sessionIds' | 'overlaps' | 'asks' | 'log'>;
+  const bug = (id: string, days: number, title: string, extra: Partial<WorkItem> = {}): WorkItem => ({
+    ...base,
+    id,
+    title,
+    brief: `${title}.`,
+    createdAt: ago(days),
+    source: { kind: 'discord-bug', untrusted: true, channel: '#beta-bugs', url: `https://discord.com/channels/1/${id.slice(1)}`, reporter: 'PlayerOne', version: '0.50.0.46' },
+    triage: { class: 'needs-human', reason: 'needs a human: no clear defect in the report, no save or log attached' },
+    approval: { state: 'pending', why: 'auto-approve is off' },
+    ...extra,
+  });
+  const auto = { state: 'approved', by: 'auto', at: ago(0.5) } as const;
+  const work: WorkItem[] = [
+    bug('w9301', 2, 'Discord bug: Belts stop after loading a save made before the splitter rework'),
+    bug('w9302', 1, 'Discord bug: The research panel scrolls back to the top after every unlock', { triage: { class: 'obvious-bug', reason: 'a clear defect with a version' } }),
+    bug('w9303', 3, 'Discord bug: Drills stop mining when the sun sets on the far side of the planet', { status: 'active', approval: auto, triage: { class: 'obvious-bug', reason: 'a clear defect with a version' } }),
+    bug('w9304', 4, 'Nightly regression: Splitter round robin drifts after a save and load', { status: 'queued', approval: auto, triage: { class: 'regression', reason: 'new in the nightly run' } }),
+    bug('w9305', 5, 'Discord request: A hotkey for the minimap that also works in build mode', { status: 'active', approval: { state: 'approved', by: LOTH, at: ago(4) }, source: { kind: 'discord-request', untrusted: false, channel: '#dev-chat', reporter: 'tester' }, triage: { class: 'person', reason: 'asked by a trusted person' } }),
+    bug('w9306', 6, 'Discord bug: Mass driver loses items on a full receiver', { status: 'done', approval: auto, autoClosed: { at: ago(1), how: 'pr', pr: 1234, sha: 'abc123def456', mergedAt: ago(1), text: 'merged as #1234 (abc123def456)' } }),
+    bug('w9307', 7, 'Discord bug: The game is too hard on the second planet', { status: 'rejected', approval: { state: 'declined', by: LOTH, at: ago(6), why: 'balance, not a bug' } }),
+  ];
+  return { ...s, work, intake: { ...s.intake!, reviewerIds: ['tester'] } };
 }

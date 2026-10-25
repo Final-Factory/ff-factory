@@ -373,7 +373,9 @@ function IntakeTab({ app, intake: s, work, now }: { app: AppState; intake: Intak
   const pending = items.filter(pendingApproval);
   const reviewer = !!app.me && s.reviewerIds.some((id) => id.toLowerCase() === app.me!.userId.toLowerCase());
   const auto = items.filter((w) => w.autoClosed).sort((a, b) => b.autoClosed!.at.localeCompare(a.autoClosed!.at));
-  const rest = items.filter((w) => !pendingApproval(w) && !w.autoClosed);
+  // Auto-approved requests wait on nobody (w2143, lothsahn: "Why show it if approved?"): a folded list of their own, not the ledger's.
+  const autoApproved = items.filter((w) => !pendingApproval(w) && !w.autoClosed && decisionOf(w)?.state === 'auto-approved');
+  const rest = items.filter((w) => !pendingApproval(w) && !w.autoClosed && decisionOf(w)?.state !== 'auto-approved');
   const anyOn = s.discord.enabled || s.ffbox.enabled || s.release.enabled || !!s.nightly?.enabled;
   // The nightly chips are switches (w903): config.json's setting flips live; the server pushes the new summary to every page.
   const flip = (which: 'enabled' | 'run' | 'review', on: boolean) => void act(`nightly-${which}`, () => api.toggleNightly(which, on));
@@ -386,6 +388,8 @@ function IntakeTab({ app, intake: s, work, now }: { app: AppState; intake: Intak
   const [picked, setPicked] = usePickedStates('intake');
   // The ledger list's filter counts only its own (intake) requests.
   const restLive = new Map([...live].filter(([id]) => rest.some((w) => w.id === id)));
+  // A stalled one is named on the fold's line, so folding it hides no trouble.
+  const autoStalled = autoApproved.filter((w) => live.get(w.id)?.state === 'stalled').length;
   const restShown = picked.size ? rest.filter((w) => picked.has(live.get(w.id)?.state as WorkLiveState)) : rest;
   const row = (w: WorkItem) => <WorkRow key={w.id} app={app} w={w} live={live.get(w.id)} open={expanded === w.id} onToggle={() => setExpanded(expanded === w.id ? null : w.id)} now={now} />;
   const d = s.discord;
@@ -509,12 +513,28 @@ function IntakeTab({ app, intake: s, work, now }: { app: AppState; intake: Intak
         <p className="dim small ledger-none">Nothing needs a human.</p>
       )}
 
+      {autoApproved.length > 0 && (
+        <details className="intake-fold" data-testid="intake-auto-approved">
+          <summary className="intake-h">
+            Auto-approved · {autoApproved.length}
+            {autoStalled > 0 && (
+              <span className="tone-red" data-testid="intake-auto-stalled">
+                {' '}
+                · {autoStalled} stalled
+              </span>
+            )}
+          </summary>
+          <p className="dim small ledger-none">Obvious bugs and regressions the intake's auto-approve rules passed to the dispatcher. Nobody needs to approve them; the Requests tab follows their work.</p>
+          <div className="run-list">{autoApproved.map(row)}</div>
+        </details>
+      )}
+
       {auto.length > 0 && (
-        <section data-testid="intake-auto-closed">
-          <h3 className="intake-h">Closed automatically · {auto.length}</h3>
+        <details className="intake-fold" data-testid="intake-auto-closed">
+          <summary className="intake-h">Closed automatically · {auto.length}</summary>
           <p className="dim small ledger-none">Their work already merged (a branch, a PR, or a linked request that is done), so they closed as done without a review.</p>
           <div className="run-list">{auto.map(row)}</div>
-        </section>
+        </details>
       )}
 
       <h3 className="intake-h">In the ledger</h3>
@@ -578,7 +598,7 @@ function WorkRow({ app, w, live, open, onToggle, now }: { app: AppState; w: Work
             ) : (
               <span className={`tone-${tone}`}>{statusText(w)}</span>
             )}
-            {w.mergedInto ? ` into ${w.mergedInto}` : ''} · <span className="mono">{w.id}</span>
+            {w.mergedInto ? ` into ${w.mergedInto}` : ''}
             {live?.state === 'working' && live.machines?.length ? (
               <span title={`Working on ${live.machines.join(', ')}`} data-testid={`work-machine-${w.id}`}>
                 {' · '}
@@ -600,8 +620,14 @@ function WorkRow({ app, w, live, open, onToggle, now }: { app: AppState; w: Work
             <CostChip id={w.id} summary={spend} />
           </span>
         </span>
-        <span className="run-cost mono dim" title={new Date(w.updatedAt).toLocaleString()}>
-          {fmtRelative(w.updatedAt, now)}
+        {/* The number in a column of its own (w2143): at the end of the one-line state it was cut off on a phone. */}
+        <span className="work-side">
+          <span className="mono work-id" data-testid={`work-id-${w.id}`}>
+            {w.id}
+          </span>
+          <span className="run-cost mono dim" title={new Date(w.updatedAt).toLocaleString()}>
+            {fmtRelative(w.updatedAt, now)}
+          </span>
         </span>
       </button>
       {open && (
