@@ -1670,3 +1670,55 @@ test("w1972: the ops worker's DONE for its job never closes a request on its own
   o.workerEnded({ id: 's4' });
   assert.equal(get('w3').status, 'done');
 });
+
+// ---------------------------------------------------------------- w2140: a deploy held on red CI reaches its waiters
+
+test('w2140: w2116 as it happened: the auto-deploy held on red master CI turns "Blocked on beast\'s update" into "deploy held: master CI failed" and resumes the worker that merged it, once', async (t) => {
+  const { request, worker, store, get, o } = setup(t);
+  const woke: { id: string; note: string }[] = [];
+  (o as unknown as { d: { restoreWake: (id: string, note: string) => boolean } }).d.restoreWake = (id, note) => (woke.push({ id, note }), true);
+  // w2116 at 09:25Z: its PR #682 merged as 5a1909756, its worker c7bfc9f0 blocked on beast's update.
+  const SHA = '5a1909756' + 'e'.repeat(31);
+  request('w2116', {
+    requestedBy: LOTH,
+    requesters: [LOTH],
+    status: 'blocked',
+    sessionIds: ['c7bfc9f0'],
+    prs: [{ repo: APP, number: 682, state: 'merged', at: ago(1), sha: SHA }],
+    blocked: { kind: 'deploy', ref: 'beast', what: "beast's update", at: ago(1), by: 'worker c7bfc9f0', sha: '3acc3147' },
+  });
+  worker('c7bfc9f0', { requestedBy: LOTH });
+  // Another request blocked on a portal deploy, whose worker is not the merge's: it hears, its worker is not resumed.
+  request('w9', { status: 'blocked', sessionIds: ['s9'], blocked: { kind: 'deploy', what: 'the next portal deploy', at: ago(0.5), by: 'worker s9', sha: '3acc3147' } });
+  worker('s9');
+  const text = 'deploy held: master CI failed on 5a1909756 (Windows tests: failure)';
+  const heardDeploy = (who: Requester) => store.readTranscript(o.personalFor(who).info.id).filter((e) => e.kind === 'user' && e.from === 'system' && e.text.includes(text));
+  const r = o.deployHeld({ sha: SHA, text, prs: [682], repo: APP });
+  assert.deepEqual(r, { told: ['w2116', 'w9'], resumed: ['c7bfc9f0'] });
+  const live = workLiveAll([get('w2116'), get('w9')], { session: (id) => store.sessions.get(id), now: NOW });
+  assert.equal(live.get('w2116')?.state, 'blocked', 'still blocked: only a deploy clears it');
+  assert.match(live.get('w2116')?.why ?? '', /^deploy held: master CI failed on 5a1909756 \(Windows tests: failure\) \(since [^)]*\): beast's update/);
+  assert.match(live.get('w9')?.why ?? '', /^deploy held: master CI failed on 5a1909756/);
+  assert.deepEqual(woke.map((x) => x.id), ['c7bfc9f0'], 'the worker that merged it, to fix the master failure');
+  assert.match(woke[0].note, /^\[portal deploy held\] deploy held: master CI failed on 5a1909756 \(Windows tests: failure\)\..*merged pull request #682, of w2116\..*gh run list --commit 5a1909756/);
+  await until('its person hears', () => heardDeploy(LOTH).length === 1);
+  await until("w9's person hears", () => heardDeploy(BEN).length === 1);
+  // The auto-deploy says it on every pass while it holds: nobody is told or resumed again.
+  assert.deepEqual(o.deployHeld({ sha: SHA, text, prs: [682], repo: APP }), { told: [], resumed: [] });
+  await new Promise((res) => setTimeout(res, 100));
+  assert.equal(heardDeploy(LOTH).length, 1, 'once, not on every poll');
+  assert.equal(woke.length, 1);
+  assert.equal(get('w2116').blocked?.held?.text, text);
+});
+
+test('w2140: with no worker of the merge left, the blocked worker is resumed instead', async (t) => {
+  const { request, worker, get, o } = setup(t);
+  const woke: string[] = [];
+  (o as unknown as { d: { restoreWake: (id: string, note: string) => boolean } }).d.restoreWake = (id) => (woke.push(id), true);
+  request('w5', { status: 'blocked', sessionIds: ['s5'], blocked: { kind: 'deploy', what: 'the next portal deploy', at: ago(0.5), by: 'worker s5', sha: '3acc3147' } });
+  worker('s5');
+  const text = 'deploy held: master CI failed on 5a1909756 (Windows tests: failure)';
+  assert.deepEqual(o.deployHeld({ sha: '5a1909756' + 'e'.repeat(31), text, prs: [682], repo: APP }), { told: ['w5'], resumed: ['s5'] });
+  assert.deepEqual(woke, ['s5']);
+  assert.equal(get('w5').status, 'blocked');
+});

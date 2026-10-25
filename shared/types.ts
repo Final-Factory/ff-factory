@@ -2089,6 +2089,8 @@ export interface WorkItem {
    * waiting to fire, no message waiting for a sandbox), and tells the dispatcher after a few tries.
    */
   gateResumes?: GateResume[];
+  /** w2140: the held deploy's head (a red CI on the portal's main) whose fix this request's worker was resumed for, once. */
+  deployHeldTold?: string;
   /**
    * w830: decisions a person gave on this request that wait for a fact ("close w811 as a duplicate once #1314 merges"),
    * recorded in their own turn with their words; the blocker watch carries each out, or drops it, when its condition is met.
@@ -2327,6 +2329,12 @@ export interface WorkBlocker {
    * turn. On red, or a merge that fails, the worker is resumed as without it. `session`: the worker that set it.
    */
   mergeOnGreen?: { head: string; report: string; session: string };
+  /**
+   * deploy (w2140): the portal's automatic deploy is held because CI failed on the head of its main, so this gate cannot
+   * clear until that is fixed. `text` is what the request's live state says ("deploy held: master CI failed on 5a1909756
+   * (Windows tests: failure)"); `sha` the held head, whose hold its person was told of once.
+   */
+  held?: { sha: string; text: string; at: string };
 }
 
 /**
