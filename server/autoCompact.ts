@@ -102,10 +102,11 @@ export const WORKER_COMPACT_DEFAULTS = { atTokens: 200_000, beforeWaitTokens: 10
  * 14 days 96% of workers' cache-read tokens came from calls above 100k of context and 78% above 200k (measured), so a share
  * of worker sessions compacts earlier: between turns from atTokens instead of worker.compactAtTokens, and within a turn from
  * midTurnTokens (Claude Code's own autocompact, through the session's autoCompactWindow setting) instead of near the model's
- * 1M window. Never below EARLY_COMPACT_MIN_TOKENS: the base plus a compaction's summary is already about 67k. The rest of the
- * workers are the control arm. docs/spend.md, "Compacting earlier, a pilot".
+ * 1M window. Never below EARLY_COMPACT_MIN_TOKENS: the base plus a compaction's summary is already about 67k. Rolled out to
+ * every worker after a day of half (17% less list-price cost at the same session length, no more re-reads or repeated commands
+ * after a compaction, measured); pilotPercent under 100 brings a control arm back. docs/spend.md, "Compacting earlier, a pilot".
  */
-export const EARLY_COMPACT_DEFAULTS = { pilotPercent: 50, atTokens: 120_000, midTurnTokens: 150_000 } as const;
+export const EARLY_COMPACT_DEFAULTS = { pilotPercent: 100, atTokens: 120_000, midTurnTokens: 150_000 } as const;
 
 /** The least either early threshold may be set to (set_app_config). */
 export const EARLY_COMPACT_MIN_TOKENS = 80_000;
@@ -151,7 +152,7 @@ export function workerAutoCompactWindow(sessionId: string, cfg: Partial<Pick<Con
 export function withEarlyCompactMark(brief: string, sessionId: string, cfg: Partial<Pick<Config, 'worker'>>): string {
   if (!inEarlyCompactPilot(sessionId, cfg)) return brief;
   const e = earlyCompactSettings(cfg);
-  return `${brief}\n\n${EARLY_COMPACT_MARK}\nThis session compacts earlier than most: between turns from about ${num(e.atTokens)} tokens of context, within a turn from about ${num(e.midTurnTokens)}.`;
+  return `${brief}\n\n${EARLY_COMPACT_MARK}\nThis session compacts early: between turns from about ${num(e.atTokens)} tokens of context, within a turn from about ${num(e.midTurnTokens)}.`;
 }
 
 /** A wait shorter than this keeps the cache warm (its entries live an hour): a check-in sooner is no long wait. */

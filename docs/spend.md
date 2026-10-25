@@ -427,8 +427,8 @@ worker sessions compacts earlier (server/autoCompact.ts `EARLY_COMPACT_DEFAULTS`
 
 | Arm | Between turns (the portal's /compact) | Within a turn (Claude Code's own autocompact) |
 |---|---|---|
-| pilot, `worker.earlyCompactPilotPercent` (default 50) of sessions, by a hash of the id apart from the other pilots | from `worker.earlyCompactAtTokens` (120,000) | from `worker.earlyCompactMidTurnTokens` (150,000) |
-| control, the rest | from `worker.compactAtTokens` (200,000) | near the model's window (Opus 5.5: 980,000 less 13,000) |
+| pilot, `worker.earlyCompactPilotPercent` (default 100 since the result below; it was 50) of sessions, by a hash of the id apart from the other pilots | from `worker.earlyCompactAtTokens` (120,000) | from `worker.earlyCompactMidTurnTokens` (150,000) |
+| control, the rest (none at the default 100) | from `worker.compactAtTokens` (200,000) | near the model's window (Opus 5.5: 980,000 less 13,000) |
 
 Neither threshold goes under 80,000: a worker's base plus a compaction's summary is already about 67k. The mid-turn threshold is
 the process's `autoCompactWindow` setting (`--settings`), which Claude Code turns into a threshold of the window less 20,000 (the
@@ -444,6 +444,28 @@ messages. Compare only sessions on the same effort (`worker.effort` changed on 2
 Before the pilot (beast, 2026-10-17..24, 135 Opus 5.5 worker sessions, measured with that script): 200k context a call, 52.4M
 cache-read tokens and $18.79 at list price a session (median $10.45), 1.93 compactions a session at 242k on average; in the 40
 calls after a compaction 1.80 re-reads and 13.1 repeated commands (2.37 and 18.3 in the 40 before it).
+
+**Result, rolled out** (beast, 2026-10-24 08:03Z to 10-25 02:04Z, Opus 5.5 workers, both arms in the same hours and so on the
+same effort mix; compact-compare.py, list price; measured):
+
+| | Control (20 sessions, 1,971 calls) | Pilot (25 sessions, 2,798 calls) |
+|---|---|---|
+| Context a call | 142k | 94k |
+| Cost per 1,000 calls: cache read / cache write / output | $27.89 / $17.52 / $10.95 | $18.36 / $20.20 / $10.33 |
+| Cost a call | $0.052 | $0.048 |
+| Cost a session, mean (median) | $5.56 ($4.11) | $5.47 ($4.18) |
+| Pilot against control at the same session length | | -17% (sessions over 140 calls -24%, under 80 calls +2%) |
+| Compactions a session | 0.50, at 212k | 1.56, at 141k |
+| In the 40 calls after a compaction (before it): re-reads, commands run again | 0.00 (0.00), 0.10 (0.00) | 0.05 (0.05), 1.38 (1.36) |
+| DONE line | 15 of 20 | 17 of 25 |
+
+Cache reads fall a third a call; each compaction writes the base and its summary to the cache again (cache writes cost 40
+times a read), which takes back about a third of that. Pilot sessions ran longer (112 calls against 99, one of 367), so the
+mean per session hides the saving: "at the same session length" fits the control's cost to a*calls + b*calls^2 and prices each
+pilot session on it. The pilot's extra follow-up messages (5.4 a session against 3.1) were FF Factory's own resumes (ledger
+notices, check-ins, the "Compacted" line), not people's corrections: 27 of one session's 31 were ledger notices. A compaction's
+own summary call writes no transcript line, so it is left out of both arms (a guess: about $0.13 each, $0.14 a session more in
+the pilot). So `worker.earlyCompactPilotPercent` defaults to 100 (w2002); set it under 100 for a control arm again.
 
 ### Shell output over 10,000 characters goes to a file (w2002)
 

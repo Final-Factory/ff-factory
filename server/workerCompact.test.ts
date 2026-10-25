@@ -46,28 +46,30 @@ test('inPilot: a stable share of session ids', () => {
   assert.ok(!ids.some((id) => inPilot(id, 0)));
 });
 
-test('w2002: the earlier-compaction pilot: half the workers by default, 120,000 between turns and 150,000 within a turn, never under 80,000', () => {
-  assert.deepEqual(earlyCompactSettings({}), { pilotPercent: 50, atTokens: 120_000, midTurnTokens: 150_000 });
+test('w2002: earlier compaction: every worker by default, a share when set, 120,000 between turns and 150,000 within a turn, never under 80,000', () => {
+  assert.deepEqual(earlyCompactSettings({}), { pilotPercent: 100, atTokens: 120_000, midTurnTokens: 150_000 });
   assert.deepEqual(earlyCompactSettings({ worker: { earlyCompactPilotPercent: 300, earlyCompactAtTokens: 40_000, earlyCompactMidTurnTokens: 60_000 } as Config['worker'] }), { pilotPercent: 100, atTokens: 80_000, midTurnTokens: 80_000 });
   const ids = Array.from({ length: 2000 }, (_, i) => `s-${i.toString(36)}-${(i * 7919).toString(16)}`);
-  const early = ids.filter((id) => inEarlyCompactPilot(id, {}));
+  assert.ok(ids.every((id) => inEarlyCompactPilot(id, {})), 'rolled out: every worker by default');
+  const half = { worker: { earlyCompactPilotPercent: 50 } } as Config;
+  const early = ids.filter((id) => inEarlyCompactPilot(id, half));
   assert.ok(early.length / ids.length > 0.45 && early.length / ids.length < 0.55, `share ${early.length / ids.length}`);
   // drawn apart from w1469's pilot: the arm is not the same sessions as inPilot's
   const both = early.filter((id) => inPilot(id, 50)).length / early.length;
   assert.ok(both > 0.4 && both < 0.6, `overlap ${both}`);
-  const [inArm, outArm] = [early[0], ids.find((id) => !inEarlyCompactPilot(id, {}))!];
-  assert.equal(workerCompactSettings({}, inArm).atTokens, 120_000, 'the arm compacts between turns from 120,000');
-  assert.equal(workerCompactSettings({}, outArm).atTokens, 200_000, 'the control arm as before');
+  const [inArm, outArm] = [early[0], ids.find((id) => !inEarlyCompactPilot(id, half))!];
+  assert.equal(workerCompactSettings(half, inArm).atTokens, 120_000, 'the arm compacts between turns from 120,000');
+  assert.equal(workerCompactSettings(half, outArm).atTokens, 200_000, 'the control arm as before');
   assert.equal(workerCompactSettings({ worker: { compactAtTokens: 0 } as Config['worker'] }, inArm).atTokens, 0, 'compaction off stays off');
   assert.equal(workerAutoCompactWindow(inArm, {}), 183_000, "Claude Code's window: 150,000 + its 20,000 reserve and 13,000 buffer");
-  assert.equal(workerAutoCompactWindow(outArm, {}), undefined);
+  assert.equal(workerAutoCompactWindow(outArm, half), undefined);
   assert.equal(workerSettings(inArm, {}).autoCompactWindow, 183_000);
-  assert.ok(!('autoCompactWindow' in workerSettings(outArm, {})));
+  assert.ok(!('autoCompactWindow' in workerSettings(outArm, half)));
   // w2008: no worker gets Claude Code's auto memory (CLAUDE.md forbids its files; its prompt section is read on every call).
   assert.equal(workerSettings(inArm, {}).autoMemoryEnabled, false);
   assert.equal(workerSettings(outArm, {}).autoMemoryEnabled, false);
   assert.ok(withEarlyCompactMark('brief', inArm, {}).startsWith(`brief\n\n${EARLY_COMPACT_MARK}\n`), 'the arm is marked in the prompt');
-  assert.equal(withEarlyCompactMark('brief', outArm, {}), 'brief');
+  assert.equal(withEarlyCompactMark('brief', outArm, half), 'brief');
   assert.equal(workerAutoCompactWindow(inArm, { worker: { earlyCompactPilotPercent: 0 } as Config['worker'] }), undefined, '0 ends the pilot');
 });
 

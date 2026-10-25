@@ -122,7 +122,7 @@ test('the arm: a stable half of session ids, drawn apart from the compaction and
   assert.deepEqual(ids.filter((id) => inReadChainPilot(id, {})), half, 'the same session always answers the same');
   assert.equal(ids.filter((id) => inReadChainPilot(id, worker(0))).length, 0);
   // Overlap with each other pilot as chance says (a quarter of the sessions), so each one's effect reads apart.
-  for (const [name, other] of [['early', (id: string) => inEarlyCompactPilot(id, {})], ['terse', (id: string) => inTerseProsePilot(id, {})], ['compact', (id: string) => inPilot(id, 50)]] as const) {
+  for (const [name, other] of [['early', (id: string) => inEarlyCompactPilot(id, { worker: { earlyCompactPilotPercent: 50 } } as Config)], ['terse', (id: string) => inTerseProsePilot(id, {})], ['compact', (id: string) => inPilot(id, 50)]] as const) {
     const both = half.filter(other).length;
     assert.ok(both > 400 && both < 600, `${both} sessions in both the read-chain and the ${name} pilot`);
   }
