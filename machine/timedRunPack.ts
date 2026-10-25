@@ -17,11 +17,15 @@ const MAX_BUILD_FILES = 5000;
 
 /** Whether `p` is inside one of `roots` (both resolved, links followed where they exist). */
 export function insideRoots(p: string, roots: string[]): boolean {
-  const real = (x: string) => {
+  // A path that does not exist yet resolves through its deepest existing parent, so a Windows short
+  // name (RUNNER~1) is expanded the same way on both sides (w2116: the Windows CI flake on 5a19097).
+  const real = (x: string): string => {
     try {
       return fs.realpathSync.native(x);
     } catch {
-      return path.resolve(x);
+      const abs = path.resolve(x);
+      const parent = path.dirname(abs);
+      return parent === abs ? abs : path.join(real(parent), path.basename(abs));
     }
   };
   const rp = real(p).toLowerCase();
