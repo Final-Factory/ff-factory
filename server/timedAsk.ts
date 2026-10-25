@@ -13,6 +13,7 @@
 // it moves a whole request, most of whose turns are code work, while the ask moves only the leg (docs/machines.md, "Where a
 // timed leg runs").
 import { avoidOf, classOf, classRank, holdOf, hasRoom, type Computer, type PlacementPrefs } from './placement.ts';
+import { bySize, timedEligible } from './timedLegPlace.ts';
 import type { TimedAskMark, TimedVerdict, TimedVerdictKind } from '../shared/types.ts';
 
 /**
@@ -213,7 +214,14 @@ export function decideTimedPlace(a: TimedPlaceInput): TimedPlaceDecision {
   const small = smallTimedRank(a.places, a.prefs, a.platform, here.id, a.now, a.waitMs);
   const smallText = small.map(sizeText).join(' > ');
   if (here.noTimedRuns) {
-    if (!small.length) return { verdict: 'elsewhere', needs: [], why: `${here.id} takes no timed runs (${here.noTimedRuns}; w1861) and no small computer${os} that takes them is online: ask an operator` };
+    if (!small.length) {
+      // w2147 (lothsahn: "Stop asking to bring computers online ... Use and schedule resources based on what you have. Don't
+      // ask for permission"): no small computer can take it now, so the leg is still filed, Queued for every computer that
+      // takes timed runs (smallest first, offline ones included); timedLegStep re-places it each pass (w2055) and it starts
+      // by itself on the first that fits. Never "ask an operator".
+      const all = [...a.places].filter((c) => c.id !== here.id && !timedEligible(c, a.prefs ?? {}, a.platform)).sort(bySize).map((c) => c.id);
+      return { verdict: 'elsewhere', needs: all, why: `${here.id} takes no timed runs (${here.noTimedRuns}; w1861) and no small computer${os} that takes them can take it now: the leg waits Queued${all.length ? ` for ${all.join(' > ')}` : ''} and starts by itself on the first that comes online or frees up, in the timing order (w2055; w2147: a capacity wait, never a question for a person)` };
+    }
     return { verdict: 'elsewhere', needs: small.map((c) => c.id), why: `${here.id} takes no timed runs (${here.noTimedRuns}; w1861): the leg goes to ${smallText}` };
   }
   const sm = a.sameMachine?.replace(/\s+/g, ' ').trim();

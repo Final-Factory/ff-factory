@@ -3465,13 +3465,12 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
     const what = clip(a.what.replace(/\s+/g, ' ').trim(), 100);
     const brief = a.brief.trim();
     if (!what || !brief) throw new Error('give what (one line: "RoundRobin belt output A/B on PR #2347") and brief (what the leg runs, as a new worker needs it: the branch and the commits of both sides, the save, the script and its settings, what to report)');
-    if (!a.needs.length) throw new Error(`no small computer takes ${w.id}'s timed leg: ask an operator`);
     const open = [...this.store.work.values()].find((x) => x.timedLeg?.for === w.id && isOpen(x));
     const leg = open ?? this.newTimedLeg(w, sessionId, { what, brief, from: a.from, needs: a.needs, why: a.why, ...(a.platform ? { platform: a.platform } : {}) });
     const blocked = this.workerBlocked(sessionId, { request: w.id, reports: [leg.id], what: `timed leg ${leg.id}: ${what}` });
     const head = open
       ? `${w.id} already has an open timed leg, ${leg.id} (${leg.status}: ${clip(leg.title, 80)}); you wait on it, and nothing new was filed.`
-      : `Filed ${leg.id}, the timed leg of ${w.id}, Queued for ${a.needs.join(' > ')}: a new worker there builds and times both sides of it on that one computer, and reports to you.`;
+      : `Filed ${leg.id}, the timed leg of ${w.id}, Queued for ${a.needs.length ? a.needs.join(' > ') : 'the first computer that takes timed runs to come online'}: it starts by itself when one fits (w2055 order; w2147: a capacity wait, so ask no person for a computer), and a new worker there builds and times both sides of it on that one computer, and reports to you.`;
     this.stamp(w, `timed leg ask (w1969) from worker ${sessionId.slice(0, 8)} on ${a.from}: handed to ${leg.id}, queued for ${a.needs.join(' > ')}: ${a.why}`);
     this.store.putWork(w);
     console.log(`timed ask (w1969): ${w.id} worker ${sessionId.slice(0, 8)} on ${a.from}: elsewhere -> ${leg.id} queued for ${a.needs.join(' > ')}: ${a.why}`);
@@ -6155,7 +6154,7 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
     const bad = timed ? needs.filter((n) => timed.f.noTimed[n]) : [];
     if (!timed || !bad.length) return undefined;
     const takes = timed.f.takes.length ? timed.f.takes.join(', ') : 'none';
-    return `${bad.map((n) => `${n} takes no timed or exclusive-lock work (${timed.f.noTimed[n]}; w1861)`).join('; ')}: ${w.id} is timed work, so it does not wait there, even when its worker named it. Place it by "Next timed work" (w1872): start it on the first of ${takes} with room, or queue it with needs naming those. If none of them can do it, ask an operator.`;
+    return `${bad.map((n) => `${n} takes no timed or exclusive-lock work (${timed.f.noTimed[n]}; w1861)`).join('; ')}: ${w.id} is timed work, so it does not wait there, even when its worker named it. Place it by "Next timed work" (w1872): start it on the first of ${takes} with room, or queue it with needs naming those: it starts by itself on the first that comes online or frees up; never ask a person for a computer (w2147).`;
   }
 
   /**
@@ -6195,7 +6194,7 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
     if (!done.length) return [];
     console.log(`ledger: re-placed timed work off computers that take no timed runs: ${done.join(', ')}`);
     this.toDispatcher(
-      `[ledger] Re-placed timed work that waited on a computer that takes no timed runs (w1872, lothsahn: "Have the dispatcher replace anything waiting on timing on m5"): ${done.map((id) => `${id} "${clip(this.store.work.get(id)?.title ?? '', 80)}"`).join('; ')}. Start each on the first computer "Next timed work" names with room (start_agent with its work_id; for a leg, in a FREE sandbox there while its own worker carries on), and tell its worker where it runs now. If none can do it, ask an operator.`,
+      `[ledger] Re-placed timed work that waited on a computer that takes no timed runs (w1872, lothsahn: "Have the dispatcher replace anything waiting on timing on m5"): ${done.map((id) => `${id} "${clip(this.store.work.get(id)?.title ?? '', 80)}"`).join('; ')}. Start each on the first computer "Next timed work" names with room (start_agent with its work_id; for a leg, in a FREE sandbox there while its own worker carries on), and tell its worker where it runs now. If none has room or is online, queue it with needs naming them: it starts by itself on the first that fits; never ask a person for a computer (w2147).`,
     );
     return done;
   }

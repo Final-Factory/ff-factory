@@ -387,7 +387,10 @@ fewest timed legs queued, then `placement.prefer`. A one-worker computer ranks f
   queue refuses every exclusive ticket there. A pin to it is not moved either: start_agent and create_sandbox refuse it
   back to you, with the computers that take it (lothsahn: "that should go back to the orchestrator or worker ... The
   orchestrator worker then can pick a new machine or escalate to an operator if it is unable to pick a new machine").
-  Pick one of them, or ask an operator (waiting_on_person) when none fits.
+  Pick one of them, or, when none is online or has room, queue it with needs naming them: it starts by itself on the
+  first that comes online or frees up. Since w2147 nobody asks a person for a computer (lothsahn, 2026-10-25: "Stop asking
+  to bring computers online. It's a cluster where computers are sometimes online and sometimes paused. Use and schedule
+  resources based on what you have. Don't ask for permission"); see "Capacity is never a question" below.
 - **Nothing timed waits on it either** (w1872, lothsahn: "Have the dispatcher replace anything waiting on timing on m5").
   decide_work queue refuses timed work whose needs name it, even when its worker asked for it by name. A leg or a Queued
   request that already waits there is re-placed by the ledger's watch (`Orchestrators.replaceNoTimedWaits`): that computer
@@ -1072,6 +1075,29 @@ state with its count above the list: any number can be on at once, and the list 
 "All" or "Clear" turns them off. Each list's choice is kept in the browser (localStorage) across reloads (Lothsahn: "I'd
 like to be able to select multiple types"). Each row's state and reason follow its workers live.
 A Working row names the machine its working workers run on, after its id and before its people (w1104, lothsahn: "show which machine working runs are running on after the work item number and before the user"): `WorkLive.machines`, each machine once, the machine part of "<machine>/<slot>"; no other state shows one. An FFBox dev request reads "<operator> (FFBox)" in the row (w1105), and its detail names the operator once (no "reported by", no "for" when it is the same person) with a short "untrusted" marking (`shared/workLabels.ts`).
+
+### Capacity is never a question (w2147)
+
+lothsahn, 2026-10-25: "Stop asking to bring computers online. It's a cluster where computers are sometimes online and
+sometimes paused. Use and schedule resources based on what you have. Don't ask for permission." No worker, dispatcher or
+orchestrator asks a person to bring a computer online, wake or unpause one, say which computer may run work, or allow a
+computer that is allowed. Work that no online computer fits now waits Queued and starts by itself on the first that comes
+online or frees up.
+
+- **Timed work**: `timed_place` always files the leg (`server/timedAsk.ts` `decideTimedPlace`): even from a computer that
+  takes no timed runs (m5) with no small computer up, it is Queued for every computer that takes timed runs, smallest
+  first, and `Orchestrators.timedLegBound` (w2055 `timedLegStep`) re-places it each pass: an idle computer first, then
+  pre-emption on a small one, then the queue, a big one only for high or urgent work or when every smaller class is
+  offline. `timed_run` queues for its computer (`server/timedRuns.ts`). The exclusions stand: m5 takes no timed runs.
+  w1958 (2026-10-25) is the case: its worker on m5 queued a Windows A/B for desktop-coosego, which was offline, and
+  `fileTimedLeg` answered "no small computer takes w1958's timed leg: ask an operator".
+- **waiting_on_person and decide_work ask refuse a capacity ask** (`shared/machineAsk.ts` `machineAskProblem`): a wait
+  whose every question (or its `what`, with no questions) asks for a computer's availability or choice is not recorded,
+  and the caller is told how it waits Queued instead. A blocker only that person can clear (their own login, password or
+  FileVault, a reboot of their own machine, an admin prompt) still goes through. "machine" alone counts only beside a
+  word of the fleet's work, since a factory's machines are a game noun.
+- The first correction of this kind was w847 (the dispatcher asked Ben to re-run an installer; lothsahn: "When we say
+  update the machines, do the update"), so an ask to run an installer or update a computer is refused the same way.
 
 ### Merge on green, a pilot (w2045)
 

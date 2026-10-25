@@ -90,7 +90,7 @@ export function notIdle(c: Computer): string | undefined {
 }
 
 /** Smallest class first, then fewer slots, a lower editor limit, the id. */
-const bySize = (a: Computer, b: Computer) => classRank(a) - classRank(b) || a.maxAgents - b.maxAgents || (a.maxEditors ?? 0) - (b.maxEditors ?? 0) || a.id.localeCompare(b.id);
+export const bySize = (a: Computer, b: Computer) => classRank(a) - classRank(b) || a.maxAgents - b.maxAgents || (a.maxEditors ?? 0) - (b.maxEditors ?? 0) || a.id.localeCompare(b.id);
 
 /** Up for the timing order: online, or offline shorter than the blip window. */
 export function upNow(c: Computer, now: number, blipMs: number): boolean {

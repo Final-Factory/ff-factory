@@ -901,7 +901,7 @@ export class MachineManager {
       `${m.name ?? m.id} offline for ${minutesText(now - since)}`,
       `[machines] ${m.id} has been offline for ${minutesText(now - since)} (since ${new Date(since).toISOString().slice(0, 16)}Z) with work waiting on it: ${titles.join(', ')}. ` +
         `Nothing runs there until its daemon is back. It may be asleep, off the network, or restarted after a crash and waiting at its login screen (a Mac with FileVault waits for its person to log in). ` +
-        `Tell its owner, or place the work on another machine.`,
+        `Place the work on another machine that fits, or leave it Queued: it starts there by itself when it is back. Ask nobody to bring it online (w2147, lothsahn: "Use and schedule resources based on what you have. Don't ask for permission").`,
     );
   }
 

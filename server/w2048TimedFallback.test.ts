@@ -78,8 +78,11 @@ test('w2048: m5 never takes timed work, not even when it is the only computer on
   assert.ok(!smallTimedStates(places, {}, undefined, undefined, NOW, WAIT).some((s) => s.id === 'm5'));
   const m5 = ask('m5', places, 'darwin');
   assert.equal(m5.verdict, 'elsewhere');
-  assert.deepEqual(m5.needs, []);
+  // w2147: the leg is still filed, Queued for the Mac that takes timed runs though it is offline, never "ask an operator".
+  assert.deepEqual(m5.needs, ['m3']);
   assert.match(m5.why, /m5 takes no timed runs/);
+  assert.match(m5.why, /waits Queued for m3 and starts by itself/);
+  assert.doesNotMatch(m5.why, /operator/);
 });
 
 test('w2048: a small computer that is held or has no game sandbox cannot take it, at once', () => {
