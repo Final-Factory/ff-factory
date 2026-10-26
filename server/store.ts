@@ -8,6 +8,7 @@ import zlib from 'node:zlib';
 import { pipeline } from 'node:stream/promises';
 import type { AppSettings, DelegationRequest, Machine, Sandbox, ServerEvent, SessionInfo, StandingAgent, TranscriptEvent, WorkItem } from '../shared/types.ts';
 import { meterStates, type MeterStates } from './meterStates.ts';
+import { removedUpload } from './mediaRetention.ts';
 import { repairText } from '../shared/capacity.ts';
 
 /** Everything the UI hears about goes through here and out the WebSocket. */
@@ -812,6 +813,16 @@ export class Store {
       if (fs.existsSync(f)) return f;
     }
     return undefined;
+  }
+
+  /** Where the sessions' images are kept (data/uploads), for the media retention (mediaRetention.ts). */
+  get uploadsDir(): string {
+    return this.uploadDir;
+  }
+
+  /** An image the media retention removed (its tombstone entry), or undefined. */
+  removedImage(sessionId: string, id: string) {
+    return removedUpload(path.join(this.uploadDir, safeId(sessionId)), safeId(id));
   }
 
   /** Where the transcripts are (for search). */

@@ -829,6 +829,11 @@ export interface CleanupPolicy {
   buildsOlderThanDays: number;
   /** The game's PlaytestSessions (playtest screenshots and recordings) go once untouched this many days. */
   playtestDays: number;
+  /**
+   * The portal's own host only (w2268, server/mediaRetention.ts): the pictures and videos of conversations idle this many
+   * days go from data/uploads and the review folder; the transcript text stays. 0: never.
+   */
+  mediaDays: number;
   /** Claude Code's task output folders (<temp>/claude/<project>/<session>) go once untouched this many days. */
   claudeTempDays: number;
   /** A GitHub Actions runner's job folders (_work in the actions-runner folders) go once untouched this many days. */
@@ -860,6 +865,7 @@ export const DEFAULT_CLEANUP: CleanupPolicy = {
   tempAnyOlderThanDays: 7,
   buildsOlderThanDays: 7,
   playtestDays: 14,
+  mediaDays: 14,
   claudeTempDays: 3,
   runnerWorkDays: 14,
   libraryReportDays: 30,

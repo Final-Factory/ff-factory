@@ -185,7 +185,8 @@ is 401 (no or a wrong token) or 404.
 An attachment's retention clock restarts whenever it is uploaded, sent with a message or handed to an agent. One unused
 for config `attachments.retentionDays` (default 30) is deleted with its stored file, unless another record shares the
 file. An upload left unfinished for a day is deleted. Retention runs a minute after start and then hourly. Copies in
-sandboxes go with their sandbox; on a machine, with the clone's own clean-up or by hand.
+sandboxes go with their sandbox; on a machine, with the clone's own clean-up or by hand. The host's media retention
+(w2268, docs/self-recovery.md) leaves attachments alone: they keep this clock even when they are pictures or videos.
 
 ## Config
 

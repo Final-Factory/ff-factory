@@ -24,8 +24,42 @@ export const previewSrc = (src: string) => (src.startsWith('/api/image?') ? `${s
  */
 export function PreviewVideo({ src, onBroken }: { src: string; onBroken: () => void }) {
   const [original, setOriginal] = useState(false);
+  const [removed, setRemoved] = useState<string>();
   const url = original ? src : previewSrc(src);
-  return <video key={url} src={posterSrc(url)} controls playsInline muted preload="metadata" onError={() => (url === src ? onBroken() : setOriginal(true))} />;
+  if (removed) return <MediaRemoved text={removed} />;
+  return <video key={url} src={posterSrc(url)} controls playsInline muted preload="metadata" onError={() => (url === src ? void removedReason(src).then((r) => (r ? setRemoved(r) : onBroken())) : setOriginal(true))} />;
+}
+
+/**
+ * Why a clip is gone when the portal's media retention removed it (w2268): the server answers 410 with the words to show,
+ * "[video removed after 14 days]". undefined for anything else (a machine away, a file never there). A removed still
+ * needs none of this: its URL answers a placeholder image with the same words.
+ */
+export async function removedReason(src: string): Promise<string | undefined> {
+  try {
+    const r = await fetch(src, { credentials: 'same-origin', headers: { Range: 'bytes=0-0' } });
+    if (r.status !== 410) return undefined;
+    const body = (await r.json()) as { error?: unknown };
+    return typeof body.error === 'string' ? body.error : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The lightbox's player; a clip the retention removed shows its words instead. */
+function LightboxVideo({ src }: { src: string }) {
+  const [removed, setRemoved] = useState<string>();
+  if (removed) return <MediaRemoved text={removed} />;
+  return <video src={previewSrc(src)} controls playsInline autoPlay onError={() => void removedReason(src).then(setRemoved)} />;
+}
+
+/** The words a removed clip leaves where its player was. */
+export function MediaRemoved({ text }: { text: string }) {
+  return (
+    <span className="media-removed dim small" data-testid="media-removed">
+      {text}
+    </span>
+  );
 }
 
 /** "Full quality": the original file in a tab of its own, for a video that plays its preview here. */
@@ -151,7 +185,7 @@ export function Lightbox() {
           </button>
         )}
         {it.video ? (
-          <video key={it.src} src={previewSrc(it.src)} controls playsInline autoPlay />
+          <LightboxVideo key={it.src} src={it.src} />
         ) : (
           <img src={it.src} alt={it.name} title={zoomed ? 'Fit to the screen' : 'Actual size'} onClick={() => setZoomed(!zoomed)} />
         )}
