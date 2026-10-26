@@ -749,7 +749,24 @@ without one means it is off or failing, worth a person's look.
     and on each usage reading, kept up to 8 days (`POOL_HOLD_MS`), never refused; the sweep counts it as on its way;
   - a standing agent's run waits for its pool (tried each minute) instead of ending "Could not start".
   A queued message still keeps its worker's sandbox (`placeAgain.ts` `releaseWhy`): releasing it would place and release
-  the worker again every pass while the pool is held.
+  the worker again every pass while the pool is held. So a worker's held pool is a block instead, not a queued message:
+- **A worker whose Claude pool is held is Blocked on that pool and gives up its sandbox** (w2231, lothsahn: "if the claude
+  pool is full the worker is blocked until claude resets and it frees for other jobs"). On 2026-10-25 a message to w2222's
+  worker 39ba1854 waited Queued in its sandbox from 02:00Z (ben's pool: one token at its one-job cap, one inside the
+  dispatcher's reserve, one used up) until lothsahn released it by hand at 02:21Z. Now, when a worker's process cannot start
+  because `machineRunEnv` throws `PoolHeldError` (only ever between turns: a worker mid-turn has its process), the send queue
+  parks the message (`sessions.ts` `parkOnPool`, `QueuedSend.parked`) and `Agents.poolBlock` blocks each active request the
+  worker holds on a usage gate set by that worker (`Orchestrators.poolHoldBlocked`, through the w1109 `tokenStopBlocked`),
+  `until` the pool's first reset. A parked message is not in `queued()`, so it neither keeps the sandbox nor claims another:
+  `usage` is in `WAIT_RELEASE_KINDS`, and the w890 release pass (`Agents.waitOn`) stops and releases the sandbox for other
+  work, its branch kept and dirty work saved first, as for a deploy or a merge. The gate clears as every usage gate does (the
+  pool serves again, its one-job cap included, or `until`), `resumeGatedWorker` resumes the worker, the parked message goes
+  with it, and it is placed again like any released worker (resumes before new work; a timed leg on its own computer). While
+  it is parked a harness message joins it; a person's message tries again. A pair run's request is not blocked (its legs run
+  together; releasing one would leave the other waiting on a leg placed elsewhere), so it keeps the w1129 queue. A bench
+  ticket is held by the worker's own process, which a parked worker no longer has; `machine/leftovers.ts` ends what it left
+  running. The release also frees the sandboxes of workers stopped on a usage gate by w1109's stop line and w1745's token
+  switch, which used to keep them.
 - **A resume that comes after its request is blocked again does not go** (w1128). w1083's CI resume of a50a8ee1, queued for a
   sandbox at 06:48Z, went at 06:50Z, though the dispatcher had blocked the request on w1070 and w1110 at 06:49Z; w1082's
   (c37a6ec0) waited from 06:13Z and went at 07:33Z the same way. A gate's resume carries its request (`resumeOf`, through
