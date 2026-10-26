@@ -38,6 +38,7 @@ PL_IDS="ssh 1 2 3 4 5 6 7 8 9 disk clock loop units ntfy"
 # zone with nanoseconds ("2026-10-26T15:51:26.112734631-06:00", VM_TIMEZONE=America/Denver), and as ...Z in UTC; jq's
 # fromdateiso8601 takes only the second form without a fraction, so the offset is taken off by hand (w2311). The zero
 # time ("0001-...") and null are 0; anything else is an error, which fails the layer with jq's message.
+# shellcheck disable=SC2016 # $c and the string interpolation are jq's, not the shell's
 PL_JQ_EPOCH='def epoch: if (. == null) or startswith("0001") then 0
   else (capture("^(?<t>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})([.][0-9]+)?(?<z>Z|(?<s>[-+])(?<h>[0-9]{2}):(?<m>[0-9]{2}))$")
         // error("not an RFC 3339 time: \(.)")) as $c
