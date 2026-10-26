@@ -39,6 +39,7 @@ import {
   settleByHand,
   reopenWork,
   doneOf,
+  livePair,
   replacedLeg,
   filingKeys,
   updateNotice,
@@ -82,6 +83,10 @@ const MERGE_ON_GREEN_REPORT_CHARS = 12_000;
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);
 const BUSY: SessionInfo['status'][] = ['running', 'starting', 'waiting_permission'];
+/** How many times FF Factory re-queues one pair run by itself after a leg broke mid-run (w2304); past it a person looks. */
+export const PAIR_REQUEUE_MAX = 3;
+/** A pair leg's computer offline this long breaks the run (w2304): a daemon restart or a short reconnect is shorter. */
+export const PAIR_OFFLINE_MS = 10 * 60_000;
 /** The statuses a request keeps its gates in (w754): blocked itself, a hold (question) and the dispatcher's turn after a "go" (new). */
 const GATE_STATUSES: ReadonlySet<WorkItem['status']> = new Set(['blocked', 'question', 'new']);
 
@@ -243,6 +248,8 @@ export interface OrchestratorsDeps {
   withdrawStaleTimedHere?: () => string[];
   /** Whether a machine is online; undefined for a machine this portal does not have (w643: blockers). */
   machineOnline?: (id: string) => boolean | undefined;
+  /** w2304: who plays Final Factory on a machine now, or in the grace after (w1894, MachineManager.personPlayOf), as a phrase. */
+  personPlaying?: (id: string) => string | undefined;
   /** w2045: whether a request is in the merge-on-green pilot's arm (server/mergeOnGreen.ts); absent: no request is. */
   mergeOnGreenPilot?: (requestId: string) => boolean;
   /** The commit the portal runs (no id), or a machine's daemon (w643: a deploy blocker clears when it changes). */
@@ -1333,6 +1340,10 @@ export class Orchestrators {
    */
   handBack(w: WorkItem, s: Pick<SessionInfo, 'id' | 'title'>, h: HandBack) {
     if (!isOpen(w)) return;
+    // w2304: a leg of a pair run under way is never handed back alone: the whole run starts again, off a paused computer.
+    if (livePair(w) && w.pair!.started!.legs.some((l) => l.session === s.id)) {
+      if (this.requeuePair(w, h.to ? `its leg ${s.id} on ${h.machine} was to move to ${h.to}: ${h.why}` : `its leg ${s.id}'s computer ${h.machine} is ${h.why}`, h.to ? [] : [h.machine])) return;
+    }
     const from = `${h.machine}${h.sandbox ? `/${h.sandbox}` : ''}`;
     const now = this.now().toISOString();
     w.handedBack = { at: now, from, session: s.id, ...(h.branch ? { branch: h.branch } : {}), why: h.why, note: clip(h.note, 600), how: h.how, ...(h.saved ? { saved: h.saved } : {}), ...(h.message ? { message: clip(h.message, 2000) } : {}), ...(h.to ? { to: h.to } : {}) };
@@ -3452,6 +3463,102 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       if ((offline || errored || stuck) && !out.includes(machine)) out.push(machine);
     }
     return out;
+  }
+
+  /**
+   * Re-queue pair run `p` as one unit after a leg broke mid-run (w2304, lothsahn: "when one leg is stopped (player-yield or a
+   * move), re-queue the pair instead of stalling"): every leg is taken off it and stopped, `avoid` joins the computers no leg
+   * goes on, and the request is Queued for capacity, so the dispatcher starts all its legs again, fresh and together, on
+   * computers with room. w2276's client leg on lothdesktop was stopped by the w1894 player-yield at 09:24Z on 2026-10-26; both
+   * legs ended "needs a new client machine" and it sat Stalled for over 2 h. Its log line, or undefined when it did nothing
+   * (not under way, or re-queued PAIR_REQUEUE_MAX times already: then its log says so once, and it stays for a person).
+   */
+  requeuePair(p: WorkItem, why: string, avoid: readonly string[] = []): string | undefined {
+    if (!livePair(p)) return undefined;
+    const pair = p.pair!;
+    const count = (pair.requeued?.count ?? 0) + 1;
+    if (count > PAIR_REQUEUE_MAX) {
+      if (pair.requeued?.gaveUp) return undefined;
+      p.pair = { ...pair, requeued: { ...pair.requeued!, gaveUp: this.now().toISOString() } };
+      this.stamp(p, `not re-queued again (w2304): ${why}; FF Factory re-queued this pair run ${PAIR_REQUEUE_MAX} times already, so it is left for a person to look at`);
+      this.store.putWork(p);
+      return undefined;
+    }
+    const legs = pair.started!.legs;
+    const at = this.now().toISOString();
+    const from = legs.map((l, i) => `leg ${i + 1} ${l.session} in ${l.sandbox}`).join(', ');
+    for (const l of legs) this.moveOff(p, l.session, 'its pair run is re-queued as a unit (w2304)');
+    const off = [...new Set([...(pair.avoid ?? []), ...avoid.map((x) => x.toLowerCase())])];
+    const { started: _started, ...rest } = pair;
+    p.pair = { ...rest, ...(off.length ? { avoid: off } : {}), requeued: { at, why, count } };
+    p.constraints = pairText(p.pair);
+    p.status = 'queued';
+    p.blocked = undefined;
+    p.alsoBlocked = undefined;
+    p.queuedFor = { at };
+    const not = avoid.length ? `, not on ${avoid.join(' or ')}` : '';
+    const line = `re-queued as a pair run (w2304, ${count} of ${PAIR_REQUEUE_MAX}; its ${pair.legs} legs start fresh together${not}): ${why}. Old legs stopped: ${legs.map((l) => `${l.session} (${l.sandbox})`).join(", ")}`;
+    this.stamp(p, line);
+    this.store.putWork(p);
+    for (const l of legs) {
+      const s = this.store.sessions.get(l.session);
+      if (!s || s.kind !== 'worker' || s.status === 'stopped' || s.status === 'error') continue;
+      if (BUSY.includes(s.status)) {
+        try {
+          this.sessions.send(l.session, `[ledger] ${p.id} "${clip(p.title, 80)}" is re-queued as a whole pair run (w2304): ${why}. Its legs start again with new workers; stop your leg now (end what you started, ff-leftovers end) and end your turn: nothing more is needed from you on it.`, 'system');
+        } catch {
+          // gone or at a limit: retireWhenFree stops it at its turn's end
+        }
+      }
+      this.retireWhenFree(l.session);
+    }
+    this.toDispatcher(
+      `[ledger] PAIR RE-QUEUED (w2304): ${p.id} "${clip(p.title, 80)}" (${names(p.requesters)}, ${p.priority}): ${why}. Its old legs (${from}) are taken off it and stopped. It is Queued as ${pairText(p.pair)}: start all ${pair.legs} legs together again with new workers (start_agent with work_id "${p.id}", sandbox for leg 1 and pair_sandboxes for the others) once that many computers have room${not}. Say in each leg's text that this is a fresh attempt after: ${clip(why, 200)}.`,
+    );
+    console.log(`ledger: ${p.id} ${line}`);
+    return line;
+  }
+
+  /** w2304: when a pair leg's computer was first seen offline mid-run, by "<request>:<machine>". */
+  private readonly pairOffline = new Map<string, number>();
+
+  /**
+   * Pair runs under way that lost a leg mid-run (w2304), each re-queued as a unit (requeuePair): a person started playing on a
+   * leg's computer (the w1894 player-yield: no player of theirs runs there), a leg's computer offline PAIR_OFFLINE_MS, a leg's
+   * worker gone, its sandbox given to other work, or the leg moved off its request. Run by the blocker watch each minute.
+   * Returns the ids re-queued.
+   */
+  requeueBrokenPairs(): string[] {
+    const out: string[] = [];
+    const now = this.now().getTime();
+    for (const p of this.store.work.values()) {
+      if (!livePair(p)) continue;
+      const broke = this.pairLegBroken(p, now);
+      if (broke && this.requeuePair(p, broke.why, broke.avoid)) out.push(p.id);
+    }
+    return out;
+  }
+
+  /** Why a leg of live pair run `p` broke (w2304, requeueBrokenPairs), and the computer the fresh legs avoid, or undefined. */
+  private pairLegBroken(p: WorkItem, now: number): { why: string; avoid: string[] } | undefined {
+    const legs = p.pair!.started!.legs;
+    for (const [i, l] of legs.entries()) {
+      const s = this.store.sessions.get(l.session);
+      const machine = (s?.machineId ?? l.sandbox.split('/')[0]).toLowerCase();
+      const leg = `leg ${i + 1} (${i === 0 ? 'host' : 'client'} ${l.session})`;
+      const play = this.d.personPlaying?.(machine);
+      if (play) return { why: `${play} on ${machine} (the w1894 player-yield), where ${leg} runs`, avoid: [machine] };
+      const key = `${p.id}:${machine}`;
+      if (this.d.machineOnline?.(machine) === false) {
+        const since = this.pairOffline.get(key) ?? now;
+        this.pairOffline.set(key, since);
+        if (now - since >= PAIR_OFFLINE_MS) return { why: `${machine} has been offline ${Math.round((now - since) / 60_000)} min, so ${leg} is gone`, avoid: [machine] };
+      } else this.pairOffline.delete(key);
+      if (!s) return { why: `${leg} is gone`, avoid: [] };
+      if (p.movedOff?.[l.session]) return { why: `${leg} was taken off it, and a leg moved alone cuts the run`, avoid: [] };
+      if (s.placeReleased) return { why: `${leg}'s sandbox went to other work (${clip(s.placeReleased.why, 80)}), which ended what it ran there`, avoid: [] };
+    }
+    return undefined;
   }
 
   /** A spent pair run replaced by its retry (w2041): cancelled, so its legs' reports no longer reach the asker and placeAgain frees them. */

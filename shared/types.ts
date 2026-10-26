@@ -1940,6 +1940,11 @@ export interface WorkPair {
   commit?: string;
   /** The requests its finished result was sent to (w2057, Orchestrators.pairFinished): each told once. */
   told?: string[];
+  /**
+   * The last time FF Factory re-queued it as a unit after a leg broke mid-run (w2304, Orchestrators.requeuePair): when, why,
+   * how many times so far, and `gaveUp` once it stopped re-queuing it (PAIR_REQUEUE_MAX).
+   */
+  requeued?: { at: string; why: string; count: number; gaveUp?: string };
 }
 
 /** A request for work that a person's orchestrator filed with the dispatcher, and what became of it. */

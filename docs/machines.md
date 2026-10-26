@@ -1483,6 +1483,31 @@ LothDesktop and Beast, not just when BEAST is full").
     fresh run's report, so no report of the old run's legs resumes it. A run Queued, or running with every leg healthy and
     nothing reported, is still waited on (a worker that asks twice by mistake starts no second run); the answer names
     `retry: true` for a run that cannot deliver.
+  - **A run that loses a leg mid-run is re-queued whole** (w2304, lothsahn, 2026-10-26: "when one leg is stopped
+    (player-yield or a move), re-queue the pair instead of stalling"). w2276, the pair run for w2263's PR #2607, had its
+    client leg on lothdesktop stopped by the w1894 player-yield at 09:24Z (lothsahn started playing; the yield closes
+    editors and asks players to quit); the host's run broke after 26 heartbeats, both legs ended "needs a new client
+    machine", and it sat Stalled for over 2 h. w2271's live client leg was moved alone by the w2046 move three times
+    (09:14Z, 09:45Z, 11:04Z), each cutting the run. A run is **under way** (`livePair` in `server/work.ts`) while it is open,
+    its legs started and none has said DONE.
+    - **The sweep** (`Orchestrators.requeueBrokenPairs`, run by the blocker watch each minute) finds a leg broken: a person
+      plays Final Factory on its computer, or is in the grace after (`personPlaying`, `MachineManager.personPlayOf`); its
+      computer is offline `PAIR_OFFLINE_MS` (10 min); its worker is gone; it was taken off the request (`movedOff`); or its
+      sandbox went to other work (`placeReleased`), which ended what it ran there.
+    - **The re-queue** (`Orchestrators.requeuePair`): every leg is taken off the request and retired (a leg mid-turn is told
+      to stop first), `pair.started` is cleared, the yielding or offline computer joins `pair.avoid`, and the request is
+      Queued for capacity (never Stalled; the asker stays Blocked on the same run's report). The dispatcher gets "[ledger]
+      PAIR RE-QUEUED (w2304)" and starts every leg again with new workers, together. The log line reads "re-queued as a pair
+      run (w2304, 1 of 3; its 2 legs start fresh together, not on lothdesktop): <why>. Old legs stopped: <session (sandbox)>
+      ...". At most `PAIR_REQUEUE_MAX` (3) times per run; past it the log says "not re-queued again (w2304)" once and a person
+      looks.
+    - **No lone leg moves.** A leg of a run under way keeps its sandbox while the other legs work (`Agents.waitOn` no longer
+      reads "it waits on wNNN: its worker ... works on it" for it, so the w890 release leaves it). The w2046 move never moves
+      it (`moveDecision`: it stays, "a pair run under way (w2304)"; once its sandbox went to other work anyway, `requeuePair`
+      decision: the whole run is re-queued and its message is not delivered). A paused computer's hand-back (w1532) of a leg
+      re-queues the whole run too. Once a leg has reported, the run is over and these rules no longer apply.
+    - Tests: the four w2304 cases in `server/orchestrators.test.ts` (the yield, the cap, the kept sandbox, the move) and the
+      w2304 case in `server/resumeMove.test.ts`.
   - **One pair run per pull request and commit, and its result reaches whoever waits on it** (w2057, lothsahn, 2026-10-24).
     w1936, the hand-filed pair run of w665's PR #2340, passed at 12:55 on 10-24, but w665's worker d558ba14 was never told:
     it had filed nothing (its report said "waiting on a Windows or Linux pair worker to run `MP-lowore-pin-pair` for PR
@@ -1806,7 +1831,9 @@ LothDesktop and Beast, not just when BEAST is full").
   - **When it stays** (its Queued line says why, marked "it stays on its computer (w2046)"): commits only that computer
     has (its sandbox on its branch with commits not pushed, or a branch that does not track its own remote branch),
     uncommitted work its daemon cannot save, a timed run from its sandbox holding the bench lock, a timed leg (w1969:
-    both sides are timed on one computer), a request pinned there, or an unknown branch. With no other computer that
+    both sides are timed on one computer), a request pinned there, a leg of a pair run under way (w2304: a leg never moves
+    alone; once its sandbox went to other work the whole run is re-queued, "Pair runs are placed as one unit"), or an
+    unknown branch. With no other computer that
     could take it it waits as before ("no other computer can take it now (w2046)").
   - **WRONG.** Any other resume waiting for room on its computer while another computer it fits has had room for
     `ROOM_STAND_MS` reads Queued "… it should move there (w2046)" with `roomOn`, the ledger's WRONG flag
