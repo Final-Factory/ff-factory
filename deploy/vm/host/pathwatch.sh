@@ -3,6 +3,8 @@
 # reports, on top of its hang detection. Sourced by fff-vm (installed next to lib.sh, which fff-vm has sourced), never run.
 #
 # One pass per fff-vm-watch.timer run, a line in the journal for every layer: "path L<id> <name>: <verdict>: <evidence>".
+# A pass logs into the VM twice: once at its start for every read, under one sudo (pl_prefetch, w2311), once at its end
+# to hand the portal its status; a repair and the re-check after it log in again.
 # The layers, in order; the first failing one of 2 to 8 stops that part of the pass (the rest are "skip"):
 #   ssh   the host can reach the VM over ssh (this script's way in)
 #   1     the portal answers in the VM (fff-vm watch's own check, recorded here)
@@ -90,8 +92,99 @@ shq() { local s=${1//\'/\'\\\'\'}; printf "'%s'" "$s"; }
 pl_clean() {
   printf '%s' "$1" | tr '\n\r\t' '   ' | sed -E 's#tskey-[A-Za-z0-9_-]+#[auth key removed]#g; s#https?://login\.tailscale\.com/a/[A-Za-z0-9]+#[login link removed]#g; s#(nodekey|privkey|mkey|dmkey):[0-9a-f]+#\1:[removed]#g; s#((authkey|token|key|secret)=)[^ &"]+#\1[removed]#gI' | tr -s ' ' | cut -c1-"${2:-600}"
 }
-# gx CMD: CMD (sh syntax) in the guest as root over ssh; stderr is the caller's to merge (2>&1 in CMD).
-gx() { ssh_guest "sudo -n timeout ${GX_TIMEOUT:-40} sh -c $(shq "$1")"; }
+# gx CMD: CMD (sh syntax) in the guest as root over ssh; stderr is the caller's to merge (2>&1 in CMD). A CMD the pass's
+# one login already ran (pl_prefetch) answers from that run, once: a second gx of the same CMD (a re-check after a repair)
+# goes to the VM again.
+gx() {
+  local i rc
+  if i=$(gx_slot "$1"); then
+    rc=$(cat "$GX_DIR/$i.rc")
+    rm -f "$GX_DIR/$i.rc"
+    cat "$GX_DIR/$i.out"
+    return "$rc"
+  fi
+  ssh_guest "sudo -n timeout ${GX_TIMEOUT:-40} sh -c $(shq "$1")"
+}
+
+# ---------------------------------------------------------------- one login per pass (w2311)
+# A pass used to open one ssh session, and so one logind session and one sudo, per gx: about 14 a minute, 20,000 a day, each
+# a dozen auth.log and syslog lines in the VM. Now the pass logs in once at its start (pl_check_ssh) and runs, under one
+# sudo, every read a healthy pass makes, each in its own `timeout` as gx would (one that fails or hangs does not hide the
+# rest); the layers then read the results through gx. Repairs and the re-checks after them still log in each time, and
+# so does path_publish at the end (it sends this pass's result): two sessions a healthy pass.
+# The reads, the exact strings the layers pass to gx (a lookup is by the string and the timeout):
+PL_CMD_DATE='date +%s'
+PL_CMD_DF='df -Pm / /srv/fff 2>&1 | tail -n +2'
+PL_CMD_LOOP='systemctl show fff-portal.service -p NRestarts -p ActiveState -p Result 2>&1'
+PL_CMD_UNITS='fffctl units --check 2>&1'
+PL_CMD_TS='tailscale status --json 2>&1'
+PL_CMD_DRYRUN="[ -e $PL_DRYRUN_MARKER ] || systemctl show -p Environment fff-portal.service 2>/dev/null | grep -q FFSB_DRY_RUN=1"
+PL_CMD_SERVE='tailscale serve status --json 2>&1'
+PL_CMD_SS='ss -ltnpH 2>&1'
+PL_CMD_NFT='nft list chain inet fff_guest input 2>&1'
+PL_CMD_DROPS="journalctl -u tailscaled --since -15min --no-pager 2>&1 | grep 'Drop:.*no rules matched' | tail -n 300 || true"
+# pl_cmd_selftest DNS SELF4, pl_cmd_checkend DNS SELF4: layer 5's two reads, for the node's name and address.
+pl_cmd_selftest() { echo "curl -fsS -m 20 --resolve $(shq "$1:443:$2") $(shq "https://$1/api/health") 2>&1"; }
+pl_cmd_checkend() { echo "echo | openssl s_client -connect $(shq "$2:443") -servername $(shq "$1") 2>/dev/null | openssl x509 -noout -checkend 432000 2>&1"; }
+
+# GX_DIR: this pass's results (N.out, N.rc for GX_CMDS[N], the rc gone once read); GX_T0: when the login started.
+GX_DIR="" GX_T0="" GX_CMDS=()
+# gx_slot CMD: the index of CMD's unread result from this pass's login, or fail.
+gx_slot() {
+  local i key="${GX_TIMEOUT:-40}|$1"
+  [ -n "$GX_DIR" ] || return 1
+  for i in "${!GX_CMDS[@]}"; do
+    if [ "${GX_CMDS[$i]}" = "$key" ] && [ -e "$GX_DIR/$i.rc" ]; then echo "$i"; return 0; fi
+  done
+  return 1
+}
+# pl_prefetch PORTAL(yes|no): the pass's login: one ssh session, one sudo, every read the pass will make (layer 2 and the
+# layers after it only while the portal answers, as the pass checks them; layer 5's with the name and address the last
+# pass read, which gx only answers when they are still this pass's). PF_ERR: what ssh said. Fails when the login did not
+# reach the VM, with ssh's exit code; a sudo that fails leaves no results, and every gx then goes to the VM itself.
+PF_ERR=""
+pl_prefetch() {
+  local portal=$1 cmds=() c i=0 script rc tag n r b64 dns self4
+  [ -n "$GX_DIR" ] || GX_DIR=$(mktemp -d) || { GX_DIR=""; ssh_guest true; return; }
+  cmds=("$PL_CMD_DATE" "$PL_CMD_DF" "$PL_CMD_LOOP" "$PL_CMD_UNITS")
+  if [ "$portal" = yes ]; then
+    cmds+=("$PL_CMD_TS")
+    if [ "$PW_EXPECT_FUNNEL" = 1 ]; then
+      cmds+=("$PL_CMD_DRYRUN" "$PL_CMD_SERVE")
+      dns=$(sget path_dns) self4=$(sget path_self4)
+      [ -z "$dns" ] || [ -z "$self4" ] || cmds+=("$(pl_cmd_selftest "$dns" "$self4")" "$(pl_cmd_checkend "$dns" "$self4")")
+      cmds+=("$PL_CMD_SS" "$PL_CMD_NFT" "$PL_CMD_DROPS")
+    fi
+  fi
+  GX_CMDS=()
+  # In the VM: each read alone in `timeout ${GX_TIMEOUT:-40} sh -c` (as gx), its output into a private file, then one line
+  # "GX N RC BASE64".
+  # shellcheck disable=SC2016 # it expands in the VM
+  script='o=$(mktemp) || exit 3; trap '"'"'rm -f "$o"'"'"' EXIT'
+  for c in "${cmds[@]}"; do
+    GX_CMDS[i]="${GX_TIMEOUT:-40}|$c"
+    script+="; timeout ${GX_TIMEOUT:-40} sh -c $(shq "$c") >\"\$o\" </dev/null; r=\$?; printf 'GX $i %s ' \"\$r\"; base64 -w0 <\"\$o\"; echo"
+    i=$((i + 1))
+  done
+  GX_T0=$(now)
+  ssh_guest "echo GX-LOGIN; sudo -n sh -c $(shq "$script")" >"$GX_DIR/raw" 2>"$GX_DIR/err" && rc=0 || rc=$?
+  PF_ERR=$(cat "$GX_DIR/err")
+  if [ "$(head -n 1 "$GX_DIR/raw")" != GX-LOGIN ]; then
+    GX_CMDS=()
+    [ "$rc" != 0 ] || rc=1
+    return "$rc"
+  fi
+  # the reads' own stderr (what gx left to the caller) to the journal, as before
+  [ ! -s "$GX_DIR/err" ] || cat "$GX_DIR/err" >&2
+  while read -r tag n r b64; do
+    [ "$tag" = GX ] && [[ $n =~ ^[0-9]+$ ]] && [[ $r =~ ^[0-9]+$ ]] && [ "$n" -lt "${#GX_CMDS[@]}" ] || continue
+    printf '%s' "$b64" | base64 -d >"$GX_DIR/$n.out" 2>/dev/null || continue
+    echo "$r" >"$GX_DIR/$n.rc"
+  done <"$GX_DIR/raw"
+  return 0
+}
+# pl_prefetch_done: the pass is over; its results go.
+pl_prefetch_done() { [ -z "$GX_DIR" ] || rm -rf "$GX_DIR"; GX_DIR="" GX_CMDS=(); }
 
 # pl_set ID VERDICT EVIDENCE [MAX]: record a layer's result (state + one journal line). Verdicts: ok warn fail skip.
 pl_set() {
@@ -145,8 +238,12 @@ pl_ts_restart_mark() {
   state_set ts_restarts "${recent# } $(now)"
   state_set ts_restart_at "$(now)"
 }
-# pl_dry_run: the VM runs a migrate dry run, whose Funnel is off on purpose.
-pl_dry_run() { gx "[ -e $PL_DRYRUN_MARKER ] || systemctl show -p Environment fff-portal.service 2>/dev/null | grep -q FFSB_DRY_RUN=1" >/dev/null 2>&1; }
+# pl_dry_run: the VM runs a migrate dry run, whose Funnel is off on purpose. Read once a pass (layers 4 to 8 each ask).
+PL_DRYRUN_RC=""
+pl_dry_run() {
+  if [ -z "$PL_DRYRUN_RC" ]; then gx "$PL_CMD_DRYRUN" >/dev/null 2>&1 && PL_DRYRUN_RC=0 || PL_DRYRUN_RC=1; fi
+  return "$PL_DRYRUN_RC"
+}
 
 # ---------------------------------------------------------------- the firewall check
 # What tailscale0 may reach in this VM, by install.sh (w683): ssh and 443, nothing else. Funnel's servers and tailscale serve
@@ -177,9 +274,12 @@ fw_scan() {
 
 # ---------------------------------------------------------------- the layers
 # ssh: the way into the VM. Its repair goes through the guest agent (root, no ssh needed).
+# pl_check_ssh PORTAL(yes|no)
 pl_check_ssh() {
   local out rc fails
-  out=$(ssh_guest true 2>&1) && rc=0 || rc=$?
+  # the pass's one login (pl_prefetch) is the check
+  pl_prefetch "$1" && rc=0 || rc=$?
+  out=$PF_ERR
   if [ "$rc" = 0 ]; then pl_set ssh ok "ssh $VM_ADMIN_USER@$NET_VM_IP answers"; return 0; fi
   fails=$(($(sget Lssh_fails 0) + 1))
   if [ "$fails" -ge "$PW_FAILS_BEFORE_ALERT" ] && [ $(($(now) - $(sget ssh_repair_at 0))) -ge 1800 ] && agent_ok; then
@@ -207,7 +307,7 @@ SELF4="" SELF6="" DNS="" PEERAPI_PORTS=""
 pl_read_status() {
   local out rc active st on health ver
   HARD=1
-  out=$(gx 'tailscale status --json 2>&1') && rc=0 || rc=$?
+  out=$(gx "$PL_CMD_TS") && rc=0 || rc=$?
   if [ "$rc" -ne 0 ] || ! jq -e 'type == "object"' >/dev/null 2>&1 <<<"$out"; then
     active=$(gx 'systemctl is-active tailscaled 2>&1' || true)
     TS=""
@@ -223,6 +323,8 @@ pl_read_status() {
   PEERAPI_PORTS=$(jq -r '[.Self.PeerAPIURL[]? | capture(":(?<p>[0-9]+)/?$").p] | unique | join(" ")' <<<"$TS" 2>/dev/null || true)
   [[ $PEERAPI_PORTS =~ ^[0-9\ ]*$ ]] || PEERAPI_PORTS=""
   [ -z "$DNS" ] || state_set path_dns "$DNS"
+  # the next pass's login reads layer 5 at this address (pl_prefetch)
+  [ -z "$SELF4" ] || state_set path_self4 "$SELF4"
   st=$(jq -r '.BackendState // "?"' <<<"$TS")
   on=$(jq -r '.Self.Online // false' <<<"$TS")
   health=$(jq -r '(.Health // []) | join(" | ")' <<<"$TS")
@@ -276,7 +378,7 @@ path_l4() {
   local out proxy fn want="http://127.0.0.1:$PORTAL_PORT" key="$DNS:443" ev rc
   if [ -z "$DNS" ]; then pl_set 4 fail "the node has no DNS name (MagicDNS or HTTPS off for the tailnet?)"; return 1; fi
   read_route() {
-    out=$(gx 'tailscale serve status --json 2>&1') && rc=0 || rc=$?
+    out=$(gx "$PL_CMD_SERVE") && rc=0 || rc=$?
     proxy=$(jq -r --arg k "$key" '.Web[$k].Handlers["/"].Proxy // ""' 2>/dev/null <<<"$out" || true)
     fn=$(jq -r --arg k "$key" '.AllowFunnel[$k] // false' 2>/dev/null <<<"$out" || echo false)
     ev="$key / → ${proxy:-no route}, AllowFunnel=${fn:-false}"
@@ -314,12 +416,12 @@ path_l5() {
   cert_cmd() { echo "d=\$(mktemp -d) && cd \"\$d\" && umask 077 && tailscale cert --cert-file c.crt --key-file c.key $(shq "$DNS") 2>&1; r=\$?; cd /; rm -rf \"\$d\"; exit \$r"; }
   [ -n "$SELF4" ] || { pl_set 5 fail "no Tailscale IPv4 address to test the certificate against"; return 1; }
   selftest() {
-    out=$(gx "curl -fsS -m 20 --resolve $(shq "$DNS:443:$SELF4") $(shq "https://$DNS/api/health") 2>&1") && rc=0 || rc=$?
+    out=$(gx "$(pl_cmd_selftest "$DNS" "$SELF4")") && rc=0 || rc=$?
     [ "$rc" = 0 ] && grep -E '"ok" *: *true' >/dev/null <<<"$out"
   }
   if selftest; then
     # works: expiring within 5 days is renewed ahead of time (tailscale cert is a no-op while the cached one is good)
-    exp=$(gx "echo | openssl s_client -connect $(shq "$SELF4:443") -servername $(shq "$DNS") 2>/dev/null | openssl x509 -noout -checkend 432000 2>&1" || true)
+    exp=$(gx "$(pl_cmd_checkend "$DNS" "$SELF4")" || true)
     if [[ $exp == *"will expire"* ]]; then
       ev="https://$DNS answers from inside the VM, but its certificate expires within 5 days"
       if [ $(($(now) - $(sget cert_renew_at 0))) -ge 21600 ]; then
@@ -366,8 +468,8 @@ path_l5() {
 
 path_l6() {
   local ssout nftout rules sshd="" kernel="" mine
-  ssout=$(gx 'ss -ltnpH 2>&1') || true
-  nftout=$(gx 'nft list chain inet fff_guest input 2>&1') || true
+  ssout=$(gx "$PL_CMD_SS") || true
+  nftout=$(gx "$PL_CMD_NFT") || true
   if ! grep -F 'chain input' >/dev/null <<<"$nftout"; then
     pl_set 6 fail "cannot read the VM's firewall chain (nft list chain inet fff_guest input): ${nftout:0:240}"
     return 1
@@ -428,7 +530,7 @@ path_l7() {
   # Drop: TCP{[fd7a:...]:41822 > [fd7a:...]:59343} 80 no rules matched: the protocol, the source, the destination port.
   local re='Drop: ([A-Za-z0-9]+)\{\[?([0-9a-fA-F:.]+)\]?:[0-9]+ > \[?([0-9a-fA-F:.]+)\]?:([0-9]+)\}'
   ingress=$(jq -r '[.Peer[]? | select(((.Tags // []) | index("tag:ingress")) != null) | .TailscaleIPs[]?] | .[]' <<<"$TS")
-  out=$(gx "journalctl -u tailscaled --since -15min --no-pager 2>&1 | grep 'Drop:.*no rules matched' | tail -n 300 || true") || true
+  out=$(gx "$PL_CMD_DROPS") || true
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     total=$((total + 1))
@@ -687,7 +789,7 @@ pl_e2e_repair() {
 pl_disk() {
   local out mb pct min=999999999 max=0 line v ev
   read_disk() {
-    out=$(gx 'df -Pm / /srv/fff 2>&1 | tail -n +2') || true
+    out=$(gx "$PL_CMD_DF") || true
     min=999999999; max=0
     while read -r _ _ _ mb pct _; do
       [[ ${mb:-x} =~ ^[0-9]+$ ]] || continue
@@ -720,7 +822,10 @@ pl_disk() {
 pl_clock() {
   local t0 t1 g skew out
   measure() {
-    t0=$(now); g=$(gx 'date +%s'); t1=$(now)
+    # read by the pass's login: its clock against when that login started (as close as the old midpoint: within the
+    # ssh handshake, a second against PW_CLOCK_SKEW_SEC's 60)
+    if gx_slot "$PL_CMD_DATE" >/dev/null; then t0=$GX_T0; g=$(gx "$PL_CMD_DATE"); t1=$GX_T0
+    else t0=$(now); g=$(gx "$PL_CMD_DATE"); t1=$(now); fi
     [[ ${g:-x} =~ ^[0-9]+$ ]] || return 1
     skew=$((g - (t0 + t1) / 2))
   }
@@ -745,7 +850,7 @@ pl_clock() {
 # The portal service restarting in a loop: systemd restarts it for ever (Restart=always), so only the count tells.
 pl_loop() {
   local out nr kept="" base="" e n delta act
-  out=$(gx 'systemctl show fff-portal.service -p NRestarts -p ActiveState -p Result 2>&1') || true
+  out=$(gx "$PL_CMD_LOOP") || true
   nr=$(sed -n 's/^NRestarts=//p' <<<"$out")
   act=$(sed -n 's/^ActiveState=//p' <<<"$out")
   if ! [[ ${nr:-x} =~ ^[0-9]+$ ]]; then pl_set loop warn "could not read NRestarts of fff-portal.service: ${out:0:160}"; return 0; fi
@@ -767,7 +872,7 @@ pl_loop() {
 # something down for longer than a few passes.
 pl_units() {
   local out rc
-  out=$(gx 'fffctl units --check 2>&1') && rc=0 || rc=$?
+  out=$(gx "$PL_CMD_UNITS") && rc=0 || rc=$?
   if [ "$rc" = 0 ]; then pl_set units ok "$out"; return 0; fi
   if grep -F 'unknown command' <<<"$out" >/dev/null; then
     pl_set units skip "the VM's fffctl predates 'fffctl units' (w698): not checked until its next update"
@@ -875,13 +980,13 @@ path_watch() {
   [ "$PW_CHECKS" = on ] || return 0
   exec 9>"$FFF_VM_RUN/path.lock"
   flock -n 9 || { log "path: another pass is running"; return 0; }
-  TS="" DNS="" SELF4="" SELF6="" PEERAPI_PORTS="" PW_OFF=""
+  TS="" DNS="" SELF4="" SELF6="" PEERAPI_PORTS="" PW_OFF="" PL_DRYRUN_RC=""
   if [ "$portal" = yes ]; then
     pl_set 1 ok "http://$NET_VM_IP:$PORTAL_PORT/api/health answers"
   else
     pl_set 1 fail "http://$NET_VM_IP:$PORTAL_PORT/api/health does not answer (fff-vm watch alerts and resets on its own rules)"
   fi
-  if ! pl_check_ssh; then
+  if ! pl_check_ssh "$portal"; then
     pl_skip "not checked: ssh to the VM fails" 2 3 4 5 6 7 8 disk clock loop units
   else
     pl_disk; pl_clock; pl_loop; pl_units
@@ -902,6 +1007,7 @@ path_watch() {
     pl_e2e || true
   fi
   pl_ntfy
+  pl_prefetch_done
   path_summary
   path_publish
   return 0
