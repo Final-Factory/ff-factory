@@ -435,3 +435,35 @@ started by script before the title screen has finished loading stayed at 20 fps 
   costs frames, not seconds. A smaller frame (width, quality, or a video codec) is what would raise the rate there.
 - **The game's own rate bounds the stream.** A Live view of a late-game save runs at the game's rate: the w1466 worker
   measured 0.5 fps on lothdesktop with the stream stopped (LogisticsNetworkConsumerUnitFinderJob, w1604).
+
+## Measured, w1839 (beast)
+
+beast/slot4, 2026-10-26: `scripts/liveRestageBench.ts --leave` against the sandbox editor (Unity 6000.3, warm Library),
+the timing legs under the bench ticket. Recipe: `load` of a save, then `ui.hide|true`. Small save from `w77feel`, mid
+save (3 MB) from `w257-life`.
+
+| Replay | Total s | editor / play / title / load / steps s |
+|---|---|---|
+| Small save, first play of a freshly started editor | 24.4 | 0.9 / 0.7 / 18.4 / 4.3 / 0.1 |
+| Small save, runs 2 and 3 | 6.7, 6.0 | – / ~2 / 3.1 / 1.2 / 0.1 |
+| Mid save, 3 runs | 11.3, 10.5, 10.4 | – / 1.6 / 3.1 / 5.6–6.5 / 0.1 |
+| First replay after a cold editor start | 22.2 | 1.5 / 13.0 / 3.9 / 3.7 / 0.1 |
+| First replay after a script change | 12.0 | |
+
+- **A cold editor start** (process to MCP bridge, warm Library, not under a ticket): 22 s. With the 22 s replay after it, a
+  click on a stopped view reaches its first frame in about 45–50 s when nothing waits in the bench queue, against the
+  7.5 minutes of a worker's turn before w1839. A warm editor replays in 6–11 s, most of it the save's own load. The first
+  play of a fresh editor pays once for the title screen (18 s) or the domain reload (13 s). An editor start waits behind
+  any exclusive bench ticket on the computer, so a view opened during a bench leg waits for that leg.
+- **Calibrated against the game** (Ben, 2026-10-23: "Calibrate it against the game once first, then use it."): a frame from
+  the real `live.frames` socket against `ScreenCapture.CaptureScreenshot` of the same moment, both scaled to 960 px, on a lit
+  space scene: mean bias at most 0.26/255 per channel, PSNR 35.4 dB at JPEG 75, the tone curve the same in every brightness
+  bucket but the brightest 482 px (star highlights). The stream needs no colour correction.
+- **But only once the Game view fills its panel.** In the editor the capture copies the panel's bottom-left
+  `Screen.width` x `Screen.height` pixels while the game image is centred: with the Game view fixed at 1920x1080 in a
+  2532x1303 px panel (175% Windows scaling) the stream was shifted 153 px right and 57 px up, with editor grey in the gap,
+  and Free Aspect alone was worse (the game renders at point size, 1447x744: 360 px). Game PR #2654 (the stream shows the
+  whole game image in a scaled editor) sets Free Aspect at full pixels on `live.frames|on` and puts the old setting back on
+  `off`. The game ran at 85.8 fps at 1920x1080 and 86.2 fps at 2532x1303, so the bigger image costs nothing measurable.
+- **Recipes:** both saves opened a "Connection Lost" dialog on every load in the editor, and the dialogs stacked (six after
+  six replays); `ui.hide` leaves it. Check a recipe's save for it (game repo `Documentation/Live-View-Knobs.md`).
