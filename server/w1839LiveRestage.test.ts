@@ -49,7 +49,7 @@ const SAVE = 'ffa-9a5e3b28-live';
 const STEP_CS = 'return "camera set";';
 
 /** A stand-in editor and game: a fake clock that advances in sleep, and a log of what the replay asked, in order. */
-function stand(o: { dirty?: boolean; neverInGame?: boolean; ffautoFails?: boolean; noBridgeForStep?: boolean } = {}) {
+function stand(o: { dirty?: boolean; neverInGame?: boolean; ffautoFails?: boolean; noBridgeForStep?: boolean; channelClosed?: boolean; hostLate?: number; neverChannel?: boolean } = {}) {
   let clock = 0;
   const log: string[] = [];
   let up = false;
@@ -58,7 +58,11 @@ function stand(o: { dirty?: boolean; neverInGame?: boolean; ffautoFails?: boolea
   let titleAsks = 0;
   let loaded = false;
   let bridgeUp = false;
-  const ch = (): GameChannel | undefined => (playing ? { port: 1, token: 't', tier, pid: 77 } : undefined);
+  // w2255: like the real game, play mode opens no channel unless channelClosed is off (the fake's old default); then only
+  // DEV_TIER_SNIPPET's StartChannel opens it, once the game's channel host exists (hostLate asks after play mode began).
+  let opened = !o.channelClosed;
+  let hostAsks = 0;
+  const ch = (): GameChannel | undefined => (playing && opened ? { port: 1, token: 't', tier, pid: 77 } : undefined);
   const deps: StageDeps = {
     editorPid: () => (up ? 77 : undefined),
     startEditor: async () => {
@@ -83,6 +87,9 @@ function stand(o: { dirty?: boolean; neverInGame?: boolean; ffautoFails?: boolea
       }
       if (code === DEV_TIER_SNIPPET) {
         log.push('dev-tier');
+        if (!playing) return 'not playing';
+        if (o.neverChannel || hostAsks++ < (o.hostLate ?? 0)) return 'no channel host';
+        opened = true;
         tier = 'all';
         return 'tier=all port=1';
       }
@@ -177,6 +184,22 @@ test('w1839: restage says why it failed, in the leg that failed', async () => {
   const r = await restage(dead.deps, RECIPE, LIM);
   assert.equal(r.ok, false);
   assert.match(r.detail, /^the editor did not start: not started: needs 1, 0 free/);
+});
+
+test('w2255: a fresh editor whose play mode opens no channel: restage starts it and stages the view', async () => {
+  // w2196 on m5/slot2, 2026-10-26 05:04Z: after the idle close the restage from a fresh editor failed with "the game opened
+  // no agent channel in play mode": the game's AgentChannelHost.Bootstrap starts no channel without the launch flag or the
+  // Agent Control setting, and the replay asked for the dev tier only once a channel was open.
+  const s = stand({ channelClosed: true, hostLate: 2 });
+  const r = await restage(s.deps, RECIPE, LIM);
+  assert.equal(r.ok, true, r.detail);
+  assert.deepEqual(s.calls(), ['start-editor', 'look', 'play', 'dev-tier', 'title', 'cmd:game.loadsolo|' + SAVE, 'in-game', 'cmd:ui.hide|true', `csharp:${STEP_CS}`]);
+  assert.equal(s.log.filter((l) => l === 'dev-tier').length, 3, 'asked again while the channel host was not there yet');
+
+  // A game that never opens one says what the snippet last answered.
+  const never = await restage(stand({ channelClosed: true, neverChannel: true }).deps, RECIPE, LIM);
+  assert.equal(never.ok, false);
+  assert.equal(never.detail, 'the game opened no agent channel in play mode (no channel host)');
 });
 
 test('w1839: the limits are the ones the docs name', () => {

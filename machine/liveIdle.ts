@@ -4,6 +4,7 @@
 //
 // lothsahn, 2026-10-22: "If a live view is idle for more than 15 minutes can we close it down to free the box?"
 
+import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -294,4 +295,96 @@ export function backupScenes(sbPath: string, dirty: string[], dialog: string, at
     return `backing up the scenes into ${dir} failed partway (${(e as Error).message}); kept ${kept.length ? kept.join(', ') : 'nothing'}`;
   }
   return `backed up ${kept.length ? kept.join(', ') : 'nothing (no Unity scene backups, no dirty scene files)'} into ${path.relative(sbPath, dir).split(path.sep).join('/')}`;
+}
+
+/** w2255: the `.mat` files git lists as changed in a worktree now, each with its bytes then (an uncommitted Keep, the worker's own edits). */
+export type MatSnapshot = Map<string, Buffer | undefined>;
+
+/** Runs git in a worktree; its stdout, or throws. */
+export type GitRun = (cwd: string, args: string[]) => Promise<string>;
+
+export const runGit: GitRun = (cwd, args) =>
+  new Promise((resolve, reject) =>
+    execFile('git', ['-c', 'core.fsmonitor=false', '-C', cwd, ...args], { encoding: 'utf8', timeout: 30_000, windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, (e, out) => (e ? reject(e) : resolve(out))),
+  );
+
+/** The tracked `.mat` files `git status` lists as changed (modified or type-changed, staged or not), worktree-relative with `/`. */
+async function changedMats(sbPath: string, git: GitRun): Promise<string[]> {
+  const out = await git(sbPath, ['status', '--porcelain=v1', '-z', '--untracked-files=no', '--', '*.mat']);
+  const paths: string[] = [];
+  const parts = out.split('\0');
+  for (let i = 0; i < parts.length; i++) {
+    const e = parts[i];
+    if (e.length < 4) continue;
+    const xy = e.slice(0, 2);
+    if (xy[0] === 'R' || xy[0] === 'C') i++; // the rename's source follows
+    if (/[MT]/.test(xy)) paths.push(e.slice(3));
+  }
+  return paths;
+}
+
+/** w2255: what the `.mat` files hold before an idle close (snapshotMats), so putBackMats can undo what the close wrote. */
+export async function snapshotMats(sbPath: string, git: GitRun = runGit): Promise<MatSnapshot> {
+  const snap: MatSnapshot = new Map();
+  for (const p of await changedMats(sbPath, git)) {
+    try {
+      snap.set(p, fs.readFileSync(path.join(sbPath, p)));
+    } catch {
+      snap.set(p, undefined);
+    }
+  }
+  return snap;
+}
+
+/**
+ * w2255: put back every `.mat` file an idle close wrote, so no value from a Live view's knobs (or anything else held only in
+ * the editor's memory) lands in the worktree without the person's Keep. The close's `AssetDatabase.SaveAssets` writes every
+ * dirty material: on m5/slot2 (w2196, 2026-10-26 03:37Z) it rewrote 11, one with the view's ColorBR that nobody kept. A file
+ * clean before the close goes back to git's version; one already changed before (an uncommitted Keep, the worker's edit)
+ * goes back to its bytes then. What the close wrote is copied first into `Logs/live-close-backup-<stamp>/` (ignored by git),
+ * so nothing is lost. Answers what it did, or undefined when the close wrote no `.mat`. Never throws.
+ */
+export async function putBackMats(sbPath: string, before: MatSnapshot, at: Date, git: GitRun = runGit): Promise<string | undefined> {
+  let after: string[];
+  try {
+    after = await changedMats(sbPath, git);
+  } catch (e) {
+    return `could not read git status to put back the .mat files the close wrote (${(e as Error).message.slice(0, 160)})`;
+  }
+  const read = (p: string) => {
+    try {
+      return fs.readFileSync(path.join(sbPath, p));
+    } catch {
+      return undefined;
+    }
+  };
+  const written = after.filter((p) => {
+    if (!before.has(p)) return true;
+    const was = before.get(p);
+    const now = read(p);
+    return !!was && !!now && !was.equals(now);
+  });
+  if (!written.length) return undefined;
+  const stamp = at.toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
+  const dir = path.join(sbPath, 'Logs', `live-close-backup-${stamp}`);
+  const back: string[] = [];
+  const failed: string[] = [];
+  for (const p of written) {
+    try {
+      const now = read(p);
+      if (now) {
+        const to = path.join(dir, p);
+        fs.mkdirSync(path.dirname(to), { recursive: true });
+        fs.writeFileSync(to, now);
+      }
+      const was = before.get(p);
+      if (was) fs.writeFileSync(path.join(sbPath, p), was);
+      else await git(sbPath, ['checkout', '--', p]);
+      back.push(p);
+    } catch (e) {
+      failed.push(`${p} (${(e as Error).message.slice(0, 80)})`);
+    }
+  }
+  const rel = path.relative(sbPath, dir).split(path.sep).join('/');
+  return `put back ${back.length} .mat file${back.length === 1 ? '' : 's'} the close wrote (${back.join(', ')}); what it wrote is in ${rel}${failed.length ? `; could not put back ${failed.join(', ')}` : ''}`;
 }

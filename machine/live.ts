@@ -78,7 +78,8 @@ export function gameCommand(ch: GameChannel, command: string, timeoutMs = 10_000
 
 /**
  * The C# the editor runs (through its MCP bridge) to give the play session's agent channel the dev tier: the
- * SessionState switch `AgentChannelHost.ResolveCapabilities` reads, then a restart so the router takes it.
+ * SessionState switch `AgentChannelHost.ResolveCapabilities` reads, then a restart so the router takes it. It also opens a
+ * channel where none is: a plain play mode opens none (w2255, machine/liveStage.ts restage).
  */
 export const DEV_TIER_SNIPPET = [
   'if (!UnityEngine.Application.isPlaying) return "not playing";',
