@@ -54,7 +54,7 @@ import { withTerseProse } from './terseProse.ts';
 import { WORKER_READ_RULES_TOOL, workerRuleText } from './workerRules.ts';
 import { activityLine, Waker } from './wake.ts';
 import { TIMER_LIMITS, Timers, scheduleText, type TimerView } from './timers.ts';
-import { EVEN_MARGIN, RAM_BUSY_PCT, benchText, buildOf, busyReasons, capacityLines, forPriority, hasRoom, holdReason, liveOf, loadText, lowestPriority, minOf, pickComputer, placeId, pinnedWork, placementHint, reservedReason, roomEnough, roomForWork, roomNow, timedFacts, timedKindOf, timedPinRefusal, voiceVram, type Computer, type FirstKind, type NeedKind, type PlacementPrefs, type RoomNow, type TimedKind } from './placement.ts';
+import { EVEN_MARGIN, RAM_BUSY_PCT, benchText, buildOf, busyReasons, capacityLines, classRank, forPriority, hasRoom, holdReason, liveOf, loadText, lowestPriority, minOf, pickComputer, placeId, pinnedWork, placementHint, reservedReason, roomEnough, roomForWork, roomNow, timedFacts, timedKindOf, timedPinRefusal, voiceVram, type Computer, type FirstKind, type NeedKind, type PlacementPrefs, type RoomNow, type TimedKind } from './placement.ts';
 import { MachinePauses, pauseHolds, type HandBack } from './machinePause.ts';
 import { MOVE_AFTER_MS, NONE_MARK, ROOM_WAIT, briefOf, moveDecision, movedPrompt, stayLine, type MoveFacts } from './resumeMove.ts';
 import { playHolds, playLine } from '../shared/personPlay.ts';
@@ -101,7 +101,7 @@ import { type HostHealthMonitor } from './hostHealth.ts';
 import { describeCleanup, describeCleanupItems, describeCleanupLog } from './cleanup.ts';
 import type { BuildHold, HostHealth, TimedVerdict } from '../shared/types.ts';
 import { decideTimedPlace, fleetLoad, isSmallTimed, smallTimedStates, timedAskMark, unavailableWait, TIMED_VERDICT_MS, TIMED_WAIT_IDLE_MIN } from './timedAsk.ts';
-import { reachesBig, timedLegStep, timedRelocateStep, timedStartProblem, type LegStep, type Occupant } from './timedLegPlace.ts';
+import { notIdle, reachesBig, timedEligible, timedLegStep, timedRelocateStep, timedStartProblem, type LegStep, type Occupant } from './timedLegPlace.ts';
 import { machineAskProblem } from '../shared/machineAsk.ts';
 import { StandingAgents } from './standing.ts';
 import type { MachineManager } from './machines.ts';
@@ -670,6 +670,8 @@ export class Agents {
       else {
         this.pauses.onUnpause(id);
         void sessions.drain();
+        // w2277: the timed pass looks at once, so work waiting on a big computer moves to the unpaused small one.
+        this.blockerWatch?.kick();
         this.orchestrators?.capacityMayHaveFreed(`${id} unpaused from its tray app`);
       }
     };
@@ -848,6 +850,7 @@ export class Agents {
       startTimedLeg: (w, m, why, moves) => this.startTimedLeg(w, m, why, moves),
       // w2168: a started leg waiting for an exclusive ticket on a big computer moves to a small one that became idle.
       relocateTimedLeg: (w) => this.relocateTimedLeg(w),
+      withdrawStaleTimedHere: () => this.withdrawStaleTimedHere(),
       machineOnline: (id) => (store.machines.has(id.toLowerCase()) ? machines.isOnline(id.toLowerCase()) : undefined),
       // w2045: the merge-on-green pilot's arm, by request (server/mergeOnGreen.ts); the setting is read live.
       mergeOnGreenPilot: (id) => inMergeOnGreenPilot(id, this.cfg),
@@ -1546,7 +1549,7 @@ export class Agents {
     const request = typeof a.request === 'string' && a.request.trim() ? a.request : undefined;
     let text: string;
     if (d.verdict === 'here') {
-      this.setTimedVerdict(info, { verdict: 'here', why: d.why, until });
+      this.setTimedVerdict(info, { verdict: 'here', why: d.why, until, ...(d.bigFallback ? { fallback: true, ...(platform ? { platform } : {}) } : {}) });
       const where = d.bigFallback ? `here on a big computer (w2048 fallback: ${d.bigFallback}; every number of it from ${machineId}, comparable with no other computer's)` : `here: ${d.why}`;
       this.orchestrators.noteTimedAsk(info.id, request, `timed leg ask (w1969) from worker ${info.id.slice(0, 8)} on ${machineId}: ${where} ("${clip(what, 80)}")`);
       text = `Here (w1969): ${d.why}. Take your exclusive ticket on ${machineId} as before (bench_queue.py timed, unity-bridge.py --timed, the bench scripts); this answer holds 12 h for your session. Both sides of an A/B run on this one computer.`;
@@ -3004,6 +3007,8 @@ export class Agents {
 
   /** w2055: timed legs being started by FF Factory itself (leg id to where), so a pass does not start one twice. */
   private readonly legStarting = new Map<string, string>();
+  /** Workers a timed move (w2277, relocateTimedLeg) is taking off their computer now. */
+  private readonly timedMoving = new Set<string>();
 
   /**
    * Whether worker `info`, which holds sandbox `sb`, can leave it for a timed leg (w2055, lothsahn: "if it's possible for the
@@ -3080,13 +3085,19 @@ export class Agents {
    */
   timedLegRelocateFor(w: WorkItem): { session: SessionInfo; from: string; to: string; why: string } | { stays: string } | undefined {
     const leg = w.timedLeg;
-    if (!leg || w.status === 'queued' || !isOpen(w) || this.legStarting.has(w.id)) return undefined;
+    // w2277: a request marked timed moves too, not only a timed leg: w2257 and w2265 were timed requests on BEAST, w2265 waiting
+    // for a shared ticket behind w2257's exclusive one, when LothLaptop became idle at 07:23Z on 2026-10-26; nothing moved them.
+    const kind = leg ? 'timed' : timedKind(needsTimed(w));
+    if (!kind || w.status === 'queued' || !isOpen(w) || this.legStarting.has(w.id)) return undefined;
     const live = w.sessionIds.map((id) => this.store.sessions.get(id)).filter((s): s is SessionInfo => !!s && s.kind === 'worker' && !!s.machineId && occupies(s, !!this.sessions.sessions.get(s.id)?.live, Date.now()));
     if (live.length !== 1) return undefined;
     const info = live[0];
+    if (info.movedAway || this.timedMoving.has(info.id)) return undefined;
     const bench = this.machines.statsOf(info.machineId!)?.bench;
     const mine = (t: { session?: string }) => !!t.session && (t.session === info.id || info.id.startsWith(t.session));
-    const waiting = bench?.waiters?.find((t) => mine(t) && t.mode === 'exclusive') ?? (bench?.nextExclusive && mine(bench.nextExclusive) ? bench.nextExclusive : undefined);
+    // A leg moves while it waits for its exclusive ticket; a timed request while it waits for any ticket there (w2277: w2265
+    // waited for a shared one, for its player build, behind an exclusive one), as its timed passes follow on that computer.
+    const waiting = bench?.waiters?.find((t) => mine(t) && (!leg || t.mode === 'exclusive')) ?? (bench?.nextExclusive && mine(bench.nextExclusive) ? bench.nextExclusive : undefined);
     if (!waiting) return undefined;
     if (bench?.running.some(mine)) return { stays: 'it holds a ticket already' };
     if (isMidTurn(info) || info.pendingPermissions.length) return { stays: 'it is mid-turn (a worker is never interrupted; it can move after its turn)' };
@@ -3094,10 +3105,43 @@ export class Agents {
     const sb = this.store.machines.get(info.machineId!)?.sandboxes?.find((x) => x.id === info.machineSandbox);
     if (sb?.path && benchLockIn(this.machines.statsOf(info.machineId!)?.benchLock, sb.path)) return { stays: 'a timed run from its sandbox holds the bench lock' };
     const places = this.places();
-    const platform = leg.platform ?? places.find((p) => p.id === info.machineId)?.platform;
-    const r = timedRelocateStep(info.machineId!, places, this.placement(), platform);
+    const platform = leg ? (leg.platform ?? places.find((p) => p.id === info.machineId)?.platform) : kind === 'timed:win32' ? 'win32' : kind === 'timed:darwin' ? 'darwin' : places.find((p) => p.id === info.machineId)?.platform;
+    const r = timedRelocateStep(info.machineId!, places, this.placement(), platform, `for ${waiting.mode === 'shared' ? 'a shared' : 'an exclusive'} bench ticket`);
     if (!r) return undefined;
     return { session: info, from: `${info.machineId}/${info.machineSandbox}`, to: r.to, why: `${r.why}; its waiting ticket ${waiting.ticket} there is dropped` };
+  }
+
+  /**
+   * w2277: a timed_place "here" given as w2048's big-computer fallback (every small computer unavailable then) is withdrawn
+   * once a small or medium computer that takes timed runs is idle, unless its exclusive ticket is granted already (a running
+   * measurement is never cut). Its machine's guard then refuses its next exclusive ticket until the worker asks timed_place
+   * again, which sends the leg to that computer. w2257 heard "here" on BEAST at 06:27Z on 2026-10-26, when LothLaptop was
+   * paused from its tray; LothLaptop was idle from 07:23Z, and at 07:27Z w2257 took exclusive ticket t00001948 on BEAST on
+   * that answer. Returns the requests whose worker's answer was withdrawn.
+   */
+  withdrawStaleTimedHere(): string[] {
+    const out: string[] = [];
+    const places = this.places();
+    const now = Date.now();
+    for (const info of this.store.sessions.values()) {
+      const v = info.timedVerdict;
+      if (info.kind !== 'worker' || !info.machineId || v?.verdict !== 'here' || !v.fallback || Date.parse(v.until) <= now) continue;
+      const bench = this.machines.statsOf(info.machineId)?.bench;
+      const mine = (t: { session?: string }) => !!t.session && (t.session === info.id || info.id.startsWith(t.session));
+      if (bench?.running.some((t) => mine(t) && t.mode === 'exclusive')) continue;
+      const platform = v.platform ?? places.find((p) => p.id === placeId(info.machineId!))?.platform;
+      const r = timedRelocateStep(placeId(info.machineId), places, this.placement(), platform, 'with a big-computer fallback "here" from timed_place');
+      if (!r) continue;
+      delete info.timedVerdict;
+      this.store.putSession(info);
+      const reqs = this.openWorkOf(info).map((w) => w.id);
+      const line = `timed ask (w2277): withdrew worker ${info.id.slice(0, 8)}'s big-computer "here" on ${info.machineId}, as ${r.to} is idle: its next exclusive ticket there is refused until it asks timed_place again, which sends the leg to ${r.to} (${r.why})`;
+      console.log(`${line} (${reqs.join(', ') || 'no open request'})`);
+      for (const id of reqs) this.orchestrators?.noteOnRequest(id, line);
+      out.push(...reqs);
+    }
+    if (out.length) this.machines.pushBenchPriorities();
+    return out;
   }
 
   /** Move a waiting timed leg to an idle small computer (w2168, timedLegRelocateFor): the line for its log, or undefined. */
@@ -3105,6 +3149,20 @@ export class Agents {
     const r = this.timedLegRelocateFor(w);
     if (!r || 'stays' in r) return undefined;
     const info = r.session;
+    if (!w.timedLeg) {
+      // w2277: a timed request moves as stop_agent move_to moves a worker (w1600): stopped between turns, its work saved on its
+      // branch, its requests Queued for that computer, where the next placement starts it.
+      this.timedMoving.add(info.id);
+      console.log(`timed relocate (w2277): ${w.id} worker ${info.id} on ${r.from} stopped between turns, waiting for a bench ticket; it moves to ${r.to}: ${r.why}`);
+      void this.moveWorker(info.id, r.to, `timed work moves to ${r.to}, which is idle (w2277)`)
+        .then(() => this.orchestrators?.capacityMayHaveFreed(`${w.id} moved to ${r.to} for its timed work (w2277)`))
+        .catch((e) => {
+          console.warn(`timed relocate (w2277): moving ${w.id} to ${r.to} failed: ${(e as Error).message}; it stays on ${r.from}`);
+          this.orchestrators?.noteOnRequest(w.id, `FF Factory could not move it to ${r.to} for its timed work (${(e as Error).message}); it stays on ${r.from} (w2277)`);
+        })
+        .finally(() => this.timedMoving.delete(info.id));
+      return `ledger: MOVED to ${r.to} by FF Factory (w2277): worker ${info.id.slice(0, 8)} on ${r.from} waited for a bench ticket and was between turns; ${r.why}`;
+    }
     const report = [...this.store.readTranscript(info.id, 400)].reverse().flatMap((e) => (e.kind === 'result' && e.text.trim() ? [e.text] : []))[0];
     this.sessions.sessions.get(info.id)?.stop(true);
     info.placeReleased = { at: new Date().toISOString(), sandbox: info.machineSandbox!, branch: this.branchNow(info) ?? info.machineSandbox!, why: `timed leg ${w.id} moved to ${r.to} (w2168)` };
@@ -4364,11 +4422,44 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
    */
   private timedOrderProblem(on: string | undefined, w: WorkItem | undefined, prompt?: string): string | undefined {
     const t = w?.timedLeg ? 'timed' : timedKind(needsTimed(w, prompt));
-    if (!on || !t) return undefined;
+    if (!on) return undefined;
     const target = placeId(on);
+    if (!t) {
+      const claim = this.timedClaimOn(target, w?.id);
+      return claim ? `${target} is kept for timed work that waits for it: ${claim}. Start ${w?.id ?? 'this'}, which is not timed work, on another computer (w2277: a small computer that takes timed runs goes to waiting timed work first; it stays off placement.prefer for overflow otherwise).` : undefined;
+    }
     if (w?.queuedFor?.needs?.length && !w.timedLeg && w.queuedFor.needs.some((n) => placeId(n) === target)) return undefined;
     const platform = t === 'timed:win32' ? 'win32' : t === 'timed:darwin' ? 'darwin' : w?.timedLeg?.platform;
     return timedStartProblem(w?.id ?? 'this', target, this.places(), this.placement(), platform);
+  }
+
+  /**
+   * The timed work that waits for `target`, an idle small or medium computer that takes timed runs (w2277), in words, else
+   * undefined: a started timed request or leg on a big computer that would move there now (timedLegRelocateFor), a worker
+   * whose big-computer "here" is withdrawn for it, or a Queued timed request or leg whose first need it is. At 07:28Z on
+   * 2026-10-26 w2228's pair leg took LothLaptop while w2257 and w2265 waited on BEAST's bench queue.
+   */
+  private timedClaimOn(target: string, except?: string): string | undefined {
+    const places = this.places();
+    const p = places.find((c) => c.id === target);
+    if (!p || classRank(p) > 1 || timedEligible(p, this.placement()) || notIdle(p)) return undefined;
+    for (const w of this.store.work.values()) {
+      if (!isOpen(w) || w.id === except || !(w.timedLeg || needsTimed(w))) continue;
+      if (w.status === 'queued') {
+        if (w.queuedFor?.needs?.[0] && placeId(w.queuedFor.needs[0]) === target) return `${w.id} "${clip(w.title, 60)}", Queued for it`;
+        continue;
+      }
+      const r = this.timedLegRelocateFor(w);
+      if (r && !('stays' in r) && r.to === target) return `${w.id} "${clip(w.title, 60)}", which waits for a bench ticket on ${r.from}`;
+    }
+    for (const info of this.store.sessions.values()) {
+      const v = info.timedVerdict;
+      if (info.kind !== 'worker' || !info.machineId || v?.verdict !== 'here' || !v.fallback || Date.parse(v.until) <= Date.now()) continue;
+      const r = timedRelocateStep(placeId(info.machineId), places, this.placement(), v.platform ?? places.find((c) => c.id === placeId(info.machineId!))?.platform);
+      const w = this.openWorkOf(info).find((x) => x.id !== except);
+      if (r?.to === target && w) return `${w.id} "${clip(w.title, 60)}", which was told to time on ${info.machineId} when no small computer could`;
+    }
+    return undefined;
   }
 
   /** places() for one person's work (w1463): a machine where their runs get a vault GitHub token counts as able to push workflow files. */

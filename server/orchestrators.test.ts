@@ -23,7 +23,7 @@ import { HELD_MARK, inPersonWords } from '../shared/conditional.ts';
 import { splitReply, splitSent } from '../shared/replies.ts';
 import type { PrHealth } from '../shared/blockers.ts';
 import { answersText } from '../shared/questionCard.ts';
-import { PAIR_HOLD_MS, TIMED_HOLD_MS, unfitWhy } from '../shared/capacity.ts';
+import { needsTimed, PAIR_HOLD_MS, TIMED_HOLD_MS, unfitWhy } from '../shared/capacity.ts';
 import { benchLockIn, type Requester, type SessionInfo, type TranscriptEvent, type UserInfo, type WorkItem } from '../shared/types.ts';
 import { LIVE_HOLD_MS, releaseWhy } from './placeAgain.ts';
 import { MOVE_AFTER_MS } from './resumeMove.ts';
@@ -6535,6 +6535,81 @@ test('w2168: start_agent refuses timed work on a busy big computer while a small
   assert.ok(!w2.sessionIds.includes(id), 'the stopped worker is detached');
   assert.match(w2.log.join('\n'), /ledger: MOVED to lap by FF Factory \(w2168\): worker \w{8} on pc\/alpha waited for an exclusive bench ticket and was between turns; lap \(small, 1 agent slot\) became idle/);
   assert.ok(store.sessions.get(id)!.placeReleased, 'its sandbox is released');
+});
+
+test('w2277: a timed request (not a leg) waiting on a big computer for a shared ticket moves to an idle small one between turns; a big-computer fallback "here" is withdrawn once a small one is idle; a non-timed start may not take the small one from timed work', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, machines, o, dispatcher, call } = env;
+  fixTimedFacts(o);
+  agentsRoomFacts(agents, { game: ['pc', 'lap'] });
+  const box = (bid: string, maxAgents: number, x: Partial<Computer> = {}): Computer => ({ id: bid, online: true, live: 0, midTurn: 0, maxAgents, sandboxes: 1, maxSandboxes: 3, freeSandboxes: 1, memUsedBytes: 16 * 1024 ** 3, memTotalBytes: 64 * 1024 ** 3, editors: 0, maxEditors: 2, platform: 'win32', ...x });
+  // pc: BEAST at 07:23Z on 2026-10-26, three agents at work; lap: LothLaptop, idle once w2222's worker left it.
+  let lap: Partial<Computer> = { live: 1, midTurn: 1 };
+  agents.places = () => [box('pc', 10, { live: 3, midTurn: 2 }), box('lap', 1, lap)];
+
+  // w2265: a timed request (FPS-drop profiling) started on pc while lap was busy, now waiting for a shared ticket.
+  putRequests(store, [{ id: 'w2', title: 'Moving the camera drops FPS 120 to 90 on the big base: profile and fix', status: 'active', needs: 'game' }]);
+  assert.equal(needsTimed(store.work.get('w2')!), 'any', 'FPS-drop profiling is timed work (w2277)');
+  const { id, info } = await startedFor(env, 'w2');
+  const stats = machines.statsOf.bind(machines);
+  let bench: Record<string, unknown> = { mode: 'exclusive', running: [{ ticket: 't1948', mode: 'exclusive', what: 'w2257 p99', session: 'other123' }], runningCount: 1, waiting: 1, waiters: [{ ticket: 't1949', mode: 'shared', what: 'player build', session: id.slice(0, 8), ahead: 0 }] };
+  machines.statsOf = ((mid: string) => ({ ...(stats(mid) ?? {}), ...(mid === 'pc' ? { bench } : {}) })) as typeof machines.statsOf;
+
+  // lap busy: it stays.
+  assert.deepEqual(o.timedLegBound(), []);
+  lap = {};
+  // Mid-turn: never interrupted.
+  const st = info.status;
+  info.status = 'running';
+  assert.deepEqual(agents.timedLegRelocateFor(store.work.get('w2')!), { stays: 'it is mid-turn (a worker is never interrupted; it can move after its turn)' });
+  assert.deepEqual(o.timedLegBound(), []);
+  info.status = st;
+
+  // While it waits for lap, a non-timed start (w2228's pair leg at 07:28Z) may not take lap; on pc it may.
+  putRequests(store, [{ id: 'w5', title: 'Pair run for w4: MP-check on PR #2575', needs: 'game' }]);
+  const pair = await call(dispatcher().info, 'start_agent', { machine: 'lap', prompt: 'Run the leg', title: 'w5: pair leg', work_id: 'w5' });
+  assert.equal(pair.isError, true, pair.text);
+  assert.match(pair.text, /lap is kept for timed work that waits for it: w2 ".*", which waits for a bench ticket on pc\/alpha\. Start w5, which is not timed work, on another computer/);
+
+  // Between turns, lap idle: it moves as stop_agent move_to moves a worker (w1600), Queued for lap.
+  assert.deepEqual(o.timedLegBound(), ['w2']);
+  await until('it is moved', () => store.work.get('w2')!.status === 'queued');
+  const w2 = store.work.get('w2')!;
+  assert.deepEqual(w2.queuedFor?.needs, ['lap']);
+  assert.ok(!w2.sessionIds.includes(id), 'taken off the old worker');
+  assert.ok(store.sessions.get(id)!.movedAway, 'its waiting ticket on pc holds nobody back');
+  assert.match(w2.log.join('\n'), /ledger: MOVED to lap by FF Factory \(w2277\): worker \w{8} on pc\/alpha waited for a bench ticket and was between turns; lap \(small, 1 agent slot\) became idle while it waited on .* for a shared bench ticket/);
+  assert.deepEqual(o.timedLegBound(), [], 'once');
+
+  // w2257: a worker told "here" on pc as w2048's fallback (lap paused at 06:27Z) keeps it while its exclusive ticket runs,
+  // and loses it once lap is idle and it holds none, before it takes one (07:27Z).
+  putRequests(store, [{ id: 'w3', title: 'JustPlay save p99: the slowest systems', status: 'active', needs: 'game' }]);
+  const b = await startedFor(env, 'w3');
+  const until12h = new Date(Date.now() + 12 * 3600_000).toISOString();
+  b.info.timedVerdict = { verdict: 'here', why: 'w2048 fallback: lap is held (paused)', until: until12h, fallback: true };
+  store.putSession(b.info);
+  bench = { mode: 'exclusive', running: [{ ticket: 't1948', mode: 'exclusive', what: 'w3 p99', session: b.id.slice(0, 8) }], runningCount: 1, waiting: 0, waiters: [] };
+  assert.deepEqual(agents.withdrawStaleTimedHere(), [], 'a running measurement is never cut');
+  assert.equal(store.sessions.get(b.id)!.timedVerdict?.verdict, 'here');
+  lap = { live: 1, midTurn: 1 };
+  bench = { mode: 'idle', running: [], runningCount: 0, waiting: 0, waiters: [] };
+  assert.deepEqual(agents.withdrawStaleTimedHere(), [], 'lap busy: the fallback stands');
+  lap = {};
+  // An ordinary "here" (not a fallback) is never withdrawn.
+  b.info.timedVerdict = { verdict: 'here', why: 'pc is the right computer', until: until12h };
+  assert.deepEqual(agents.withdrawStaleTimedHere(), []);
+  b.info.timedVerdict = { verdict: 'here', why: 'w2048 fallback', until: until12h, fallback: true };
+  assert.deepEqual(agents.withdrawStaleTimedHere(), ['w3']);
+  assert.equal(store.sessions.get(b.id)!.timedVerdict, undefined);
+  assert.match(store.work.get('w3')!.log.join('\n'), /timed ask \(w2277\): withdrew worker \w{8}'s big-computer "here" on pc, as lap is idle: its next exclusive ticket there is refused until it asks timed_place again, which sends the leg to lap/);
+  assert.deepEqual(agents.withdrawStaleTimedHere(), [], 'once');
+
+  // Nothing timed waits for lap any more: the pair leg may start there.
+  b.info.timedVerdict = undefined;
+  putRequests(store, [{ id: 'w2', title: 'Moving the camera drops FPS 120 to 90 on the big base: profile and fix', status: 'done', needs: 'game' }]);
+  putRequests(store, [{ id: 'w3', title: 'JustPlay save p99: the slowest systems', status: 'done', needs: 'game' }]);
+  const ok = await call(dispatcher().info, 'start_agent', { machine: 'lap', prompt: 'Run the leg', title: 'w5: pair leg', work_id: 'w5' });
+  assert.doesNotMatch(ok.text, /kept for timed work/, ok.text);
 });
 
 test('w2217: a request left undecided past the bound is offered to the dispatcher again, once, then shows Stalled, not Working', async (t) => {

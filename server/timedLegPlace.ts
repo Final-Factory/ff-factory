@@ -194,10 +194,10 @@ export function timedStartProblem(id: string, target: string, places: readonly C
  * (w2168): the first idle small or medium computer that takes timed runs, smallest first; undefined while none is idle. Its
  * worker is moved between turns only (Agents.timedLegRelocateFor checks that), never mid-turn, and the leg starts again there.
  */
-export function timedRelocateStep(from: string, places: readonly Computer[], prefs: PlacementPrefs = {}, platform?: string): { to: string; why: string } | undefined {
+export function timedRelocateStep(from: string, places: readonly Computer[], prefs: PlacementPrefs = {}, platform?: string, waits = 'for an exclusive bench ticket'): { to: string; why: string } | undefined {
   const here = places.find((c) => c.id === from);
   if (!here || classRank(here) < 2) return undefined;
   const idle = places.filter((c) => !timedEligible(c, prefs, platform) && classRank(c) <= 1 && !notIdle(c)).sort(bySize)[0];
   if (!idle) return undefined;
-  return { to: idle.id, why: `${classText(idle)} became idle while it waited on ${classText(here)} for an exclusive bench ticket, which would idle every other slot there; a timed leg runs on the smallest idle computer${osText(platform)} (w2055, w2168)` };
+  return { to: idle.id, why: `${classText(idle)} became idle while it waited on ${classText(here)} ${waits}, which would idle every other slot there; a timed leg runs on the smallest idle computer${osText(platform)} (w2055, w2168)` };
 }

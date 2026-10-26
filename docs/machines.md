@@ -990,6 +990,28 @@ and w1891 waited behind it there, and w1789 waited on LothDesktop behind shared 
   `placement.prefer` plays no part in timed placement (`timedEligible` reads hold and avoid only): LothLaptop is left out of
   prefer on purpose and is still first for timed work. Tests: `server/w2168TimedPlacement.test.ts`, and the w2168 test in
   `server/orchestrators.test.ts`.
+- **Timed requests move too, a fallback "here" expires, and an idle small computer is kept for timed work** (w2277;
+  lothsahn, 2026-10-26: "Why are we doing timed runs on beast when LothLaptop is idle?"). From the journal of 2026-10-26:
+  w2257 heard timed_place "here" on BEAST at 06:27Z as w2048's fallback (LothLaptop was paused from its tray), and that
+  answer held 12 h. w2265 was placed on BEAST at 07:21Z, marked timed, while w2222 still held LothLaptop. LothLaptop was
+  free from 07:23Z. At 07:27Z w2257 took exclusive ticket t00001948 on BEAST on its old answer, while w2265 waited there
+  for shared ticket t00001949. At 07:28Z the dispatcher put w2228's pair leg on the idle LothLaptop. w2168's step 2 above
+  looked only at timed legs waiting for an exclusive ticket, so it moved neither. Now:
+  1. `timedLegRelocateFor` also takes a started request `needsTimed` marks (not only `timedLeg`), waiting for a ticket of
+     either mode. Such a request moves the way `stop_agent` `move_to` moves a worker (`moveWorker`, w1600): stopped
+     between turns, its work saved on its branch, Queued for the small computer ("timed relocate (w2277): ..."; its log
+     "ledger: MOVED to M by FF Factory (w2277)"). A leg still moves as in w2168.
+  2. timed_place stores a fallback "here" with `fallback: true` (`TimedVerdict`). On each blocker-watch pass,
+     `Agents.withdrawStaleTimedHere` withdraws that answer once a small or medium computer that takes timed runs is idle,
+     unless the worker's exclusive ticket is already running there. The machine guard (`checkTimedAsk`) then refuses its
+     next exclusive ticket until it asks timed_place again, and the new answer names the idle computer ("timed ask (w2277):
+     withdrew ...").
+  3. `timedOrderProblem` refuses a start or move of work that is not timed onto an idle small or medium computer while
+     timed work waits for that computer (`Agents.timedClaimOn`): a timed request Queued for it, a started one
+     `timedLegRelocateFor` would move there, or a fallback "here" it would withdraw.
+  4. An unpause from the tray kicks the blocker watch at once, so the steps above look straight away, not up to 60 s later.
+  5. `TIMED_WORDS` (`shared/capacity.ts`) also matches profiling, p95/p99 frames, and FPS drops or before/after.
+  Tests: the w2277 test in `server/orchestrators.test.ts`.
 - **How long "offline" is waited for** (w2048, `unavailableWait`; lothsahn: "If the fleet is idle it should wait far less
   than if the fleet is busy"). The load is the agents mid-turn plus the requests Queued, over the online computers' agent
   slots (`fleetLoad`). At 50% load or less the wait is 5 minutes, at 100% or more 60 minutes, and between the two it grows
