@@ -85,7 +85,7 @@ import { ASK_TOOL, CHAT_MORE_LABEL, DESCRIPTION_CHARS, LABEL_CHARS, LABEL_INPUT_
 import { WAIT_LINE_CHARS, summaryBrief, summaryText, waitSummary } from '../shared/waitSummary.ts';
 import { isMyMove, waitingItemOf } from '../shared/waiting.ts';
 import { checkAsks } from '../shared/questionCard.ts';
-import { DECISIONS, attachmentsNote, describeItem, handoverNote, isFor, isOpen, livePair, ledgerOrder, names, overlapLine, priorityThenAge, requestAsFiled, requestLineRule, startProblem } from './work.ts';
+import { DECISIONS, attachmentsNote, describeItem, handoverNote, isFor, isOpen, livePair, pairLegOf, ledgerOrder, names, overlapLine, priorityThenAge, requestAsFiled, requestLineRule, startProblem } from './work.ts';
 import { minPriorityText, needsBuild, needsLive, needsOf, needsTimed, pairText, PAIR_HOLD_MS, PAIR_MAX_LEGS, TIMED_HOLD_MS } from '../shared/capacity.ts';
 import { BUILD_PLAN_DOC, BuildPlans, NOT_RELEASE, type BuildPlan, type SeatResult } from './buildPlans.ts';
 import { SEAT_GRACE_MS, seatAction, seatNotice } from './releaseSeat.ts';
@@ -760,6 +760,7 @@ export class Agents {
       ciWait: (info) => this.ciWait(info),
       waitOn: (info) => this.waitOn(info),
       liveHold: (info) => this.liveHold(info),
+      pairHold: (info) => this.pairHold(info),
       liveLost: (info, why) => {
         void this.liveHub?.endFor(info.id).then((was) => {
           if (!was) return;
@@ -1128,8 +1129,10 @@ export class Agents {
   workOver(i: SessionInfo): string | undefined {
     const items = [...this.workOf(i.id)].filter((w) => (w.sessionIds.includes(i.id) || w.movedOff?.[i.id]) && w.status !== 'merged');
     if (items.length && items.every((w) => !WORK_OPEN.includes(w.status))) return `its request${items.length > 1 ? 's are' : ' is'} closed (${items.map((w) => `${w.id} ${w.status}`).join(', ')})`;
-    // A worker that set a gate its request still waits on is with it (w1094, shared/blockers.ts isWith).
-    if (items.length && items.every((w) => !isWith(w, i.id))) return `its request${items.length > 1 ? 's are' : ' is'} with another worker now (${items.map((w) => `${w.id}: ${latestWorker(w) ?? 'moved off it, not placed yet'}`).join(', ')})`;
+    // A worker that set a gate its request still waits on is with it (w1094, shared/blockers.ts isWith), and so is every leg of
+    // a pair run under way (w2305): w2298's host 7d3bf3b8 was released at 12:50Z on 2026-10-26 as "its check-in at 13:06 UTC is
+    // for work that is over: its request is with another worker now (w2298: e33e6f40)", e33e6f40 being its own client leg.
+    if (items.length && items.every((w) => !isWith(w, i.id) && !pairLegOf(w, i.id))) return `its request${items.length > 1 ? 's are' : ' is'} with another worker now (${items.map((w) => `${w.id}: ${latestWorker(w) ?? 'moved off it, not placed yet'}`).join(', ')})`;
     return undefined;
   }
 
@@ -1196,7 +1199,7 @@ export class Agents {
     // w2304: a leg of a pair run under way keeps its sandbox while the other legs work: its game player runs there, joined to
     // theirs. w2271's client leg was released at 09:14Z on 2026-10-26 as "it waits on w2271: its worker c4cd09fd works on it",
     // and the w2046 move that followed cut the run.
-    if (items.some((w) => livePair(w) && w.pair!.started!.legs.some((l) => l.session === i.id))) return undefined;
+    if (this.pairHold(i)) return undefined;
     const now = Date.now();
     if (!this.waitLive || now - this.waitLive.at > 5000) this.waitLive = { at: now, live: this.workLive() };
     const parts: string[] = [];
@@ -1215,6 +1218,24 @@ export class Agents {
       else return undefined;
     }
     return `it waits on ${parts.join('; ')}`;
+  }
+  /**
+   * Why worker `i` keeps its sandbox whatever else the release pass reads (w2305), or undefined: it is a leg of a pair run under
+   * way (work.ts pairLegOf), held until the run is over (a leg said DONE, the request closed) or re-queued. Waiting on its
+   * partner, on its own check-in, or idle between turns, it is the same work as the other legs: w2276's client e5dcf0d3 was
+   * released at 12:39Z on 2026-10-26 as "it waits on w2276: its worker 9a4452ce works on it in beast/slot1", its own host leg,
+   * and w2304's sweep then re-queued the run.
+   */
+  pairHold(i: SessionInfo): string | undefined {
+    if (i.kind !== 'worker') return undefined;
+    for (const w of this.workOf(i.id)) {
+      if (!pairLegOf(w, i.id)) continue;
+      const legs = w.pair!.started!.legs;
+      const n = legs.findIndex((l) => l.session === i.id);
+      const others = legs.filter((l) => l.session !== i.id).map((l) => `${l.session} in ${l.sandbox}`).join(', ');
+      return `it is leg ${n + 1} of pair run ${w.id} under way, with ${others || 'its other legs'} (w2305)`;
+    }
+    return undefined;
   }
   /**
    * Another worker of `w` at work on it in another sandbox (w1983), as "its worker aa20f433 works on it in m3/slot1", or

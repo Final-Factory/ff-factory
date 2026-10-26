@@ -3500,17 +3500,16 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
     const line = `re-queued as a pair run (w2304, ${count} of ${PAIR_REQUEUE_MAX}; its ${pair.legs} legs start fresh together${not}): ${why}. Old legs stopped: ${legs.map((l) => `${l.session} (${l.sandbox})`).join(", ")}`;
     this.stamp(p, line);
     this.store.putWork(p);
+    // w2305: stopped now, mid-turn or not. Left to retire at its turn's end (w2304), w2276's host 9a4452ce, resumed after the
+    // portal's restart, kept working in beast/slot1 on the old attempt after the re-queue said it was stopped.
     for (const l of legs) {
       const s = this.store.sessions.get(l.session);
       if (!s || s.kind !== 'worker' || s.status === 'stopped' || s.status === 'error') continue;
-      if (BUSY.includes(s.status)) {
-        try {
-          this.sessions.send(l.session, `[ledger] ${p.id} "${clip(p.title, 80)}" is re-queued as a whole pair run (w2304): ${why}. Its legs start again with new workers; stop your leg now (end what you started, ff-leftovers end) and end your turn: nothing more is needed from you on it.`, 'system');
-        } catch {
-          // gone or at a limit: retireWhenFree stops it at its turn's end
-        }
+      try {
+        this.sessions.get(l.session).stop();
+      } catch {
+        this.retireWhenFree(l.session);
       }
-      this.retireWhenFree(l.session);
     }
     this.toDispatcher(
       `[ledger] PAIR RE-QUEUED (w2304): ${p.id} "${clip(p.title, 80)}" (${names(p.requesters)}, ${p.priority}): ${why}. Its old legs (${from}) are taken off it and stopped. It is Queued as ${pairText(p.pair)}: start all ${pair.legs} legs together again with new workers (start_agent with work_id "${p.id}", sandbox for leg 1 and pair_sandboxes for the others) once that many computers have room${not}. Say in each leg's text that this is a fresh attempt after: ${clip(why, 200)}.`,

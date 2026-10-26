@@ -6798,3 +6798,96 @@ test('w2304: w2271 as it happened: the w2046 move never moves a live pair leg al
   assert.equal(a.info.movedAway, undefined);
   assert.match(w.log.join('\n'), new RegExp(`re-queued as a pair run \\(w2304, 1 of 3; its 2 legs start fresh together\\): leg 2's sandbox on pc went to other work mid-run, and a leg moved alone cuts the run \\(w2046 move refused\\)\\. Old legs stopped: c4cd09fd \\(lothdesktop/slot5\\), ${a.id} \\(pc/alpha\\)$`, 'm'));
 });
+
+/**
+ * w2305: pair run `id` for `asker` under way, its leg under test stopped in pc/alpha (a clean worktree the release pass could
+ * take) and its partner leg at work on lothdesktop. `mine` is leg 1 (the host) or 2 (the client); the client is the newest worker.
+ */
+async function heldLegFor(t: { after: (fn: () => void | Promise<void>) => void }, asker: string, mine: 1 | 2, me: string, partner: string, extra: Partial<SessionInfo> = {}) {
+  const env = await setupOnMachine(t);
+  const { store, agents, o } = env;
+  agentsRoom(agents, []);
+  putRequests(store, [{ id: asker, by: LOTH, status: 'active' }]);
+  const a = await startedFor(env, asker);
+  const id = /^Filed (w\d+)/.exec(String(await a.h.request_pair!({ what: `pair run for ${asker}`, brief: 'Host from the save, client joins, 2000 heartbeats.' })))![1];
+  // The asker's own worker is elsewhere: pc/alpha is the leg's.
+  store.putSession({ ...store.sessions.get(a.id)!, machineId: 'm5', machineSandbox: 'slot9' });
+  const base = { kind: "worker" as const, permissionMode: "bypassPermissions" as const, createdAt: T0, lastActivityAt: new Date(Date.now() - 5 * 60_000).toISOString(), turns: 3, costUsd: 0, pendingPermissions: [], requestedBy: LOTH };
+  store.putSession({ ...base, id: me, title: `${id}: leg ${mine}`, status: 'stopped', machineId: 'pc', machineSandbox: 'alpha', ...extra } as SessionInfo);
+  store.putSession({ ...base, id: partner, title: `${id}: leg ${3 - mine}`, status: 'running', machineId: 'lothdesktop', machineSandbox: 'slot3' } as SessionInfo);
+  const legs = mine === 1 ? [{ session: me, sandbox: 'pc/alpha' }, { session: partner, sandbox: 'lothdesktop/slot3' }] : [{ session: partner, sandbox: 'lothdesktop/slot3' }, { session: me, sandbox: 'pc/alpha' }];
+  const p = store.work.get(id)!;
+  p.status = 'active';
+  p.sessionIds = legs.map((l) => l.session);
+  p.pair = { ...p.pair!, started: { at: T0, legs } };
+  store.putWork(p);
+  const sb = () => store.machines.get('pc')!.sandboxes!.find((x) => x.id === 'alpha')!;
+  const pass = () => {
+    (agents as unknown as { waitLive?: unknown }).waitLive = undefined;
+    sb().git = { branch: 'sandbox/alpha', dirty: 0, untracked: 0, ...sb().git, at: new Date().toISOString() };
+    return (agents as unknown as { placeAgain: { tick(): string[] } }).placeAgain.tick();
+  };
+  const watch = new BlockerWatch({ store, orchestrators: o });
+  return { ...env, id, p, pass, watch };
+}
+
+test('w2305: w2298 as it happened: the host leg, stopped with its check-in at the run\'s end, keeps its sandbox; its client is the same work, not "another worker", so nothing is released or re-queued', async (t) => {
+  const wake = new Date(Date.now() + 14 * 60_000).toISOString();
+  const env = await heldLegFor(t, 'w2262', 1, '7d3bf3b8', 'e33e6f40', { wakeAt: wake });
+  const { store, agents, id, p, pass, watch } = env;
+  const host = store.sessions.get('7d3bf3b8')!;
+  // 12:50Z on 2026-10-26: "stopped 7d3bf3b8 (its check-in at 13:06 UTC is for work that is over: its request is with another
+  // worker now (w2298: e33e6f40))", then the release of biscuit/slot1 and w2304's re-queue.
+  assert.equal(agents.workOver(host), undefined, 'the bug: "its request is with another worker now (w2298: e33e6f40)"');
+  assert.match(agents.pairHold(host) ?? '', new RegExp(`^it is leg 1 of pair run ${id} under way, with e33e6f40 in lothdesktop/slot3`));
+  for (let i = 0; i < 3; i++) assert.deepEqual(pass().filter((x) => x.includes('7d3bf3b8')), [], 'no stop, no release');
+  assert.equal(host.placeReleased, undefined);
+  assert.equal((await watch.tick()).has(id), false, 'no re-queue');
+  assert.equal(p.status, 'active');
+  assert.ok(p.pair!.started);
+  assert.ok(!p.log.some((l) => /re-queued as a pair run/.test(l)));
+  // The run over (its client said DONE with the verdict): the host's check-in is for work that is over, as before.
+  p.done = { e33e6f40: { at: new Date().toISOString(), report: 'For w2262: PASS, 0 mismatches' } };
+  store.putWork(p);
+  assert.match(agents.workOver(host) ?? '', /with another worker now/);
+  await until('alpha released once the run is over', () => (pass(), !!store.sessions.get('7d3bf3b8')!.placeReleased));
+});
+
+test('w2305: w2276 as it happened: the client leg waiting for its own host\'s address keeps its sandbox (not "it waits on w2276: its worker 9a4452ce works on it"), so nothing is released or re-queued', async (t) => {
+  const env = await heldLegFor(t, 'w2263', 2, 'e5dcf0d3', '9a4452ce');
+  const { store, agents, id, p, pass, watch } = env;
+  const client = store.sessions.get('e5dcf0d3')!;
+  // 12:39Z on 2026-10-26: "stopped e5dcf0d3 (it waits on w2276: its worker 9a4452ce works on it in beast/slot1)", then the
+  // release of lothdesktop/slot6 and, at 12:44Z, w2304's re-queue.
+  assert.equal(agents.waitOn(client), undefined, 'the bug: "it waits on w2276: its worker 9a4452ce works on it"');
+  for (let i = 0; i < 3; i++) assert.deepEqual(pass().filter((x) => x.includes('e5dcf0d3')), [], 'no stop, no release');
+  assert.equal(client.placeReleased, undefined);
+  assert.equal((await watch.tick()).has(id), false, 'no re-queue');
+  assert.equal(p.status, 'active');
+  // A DONE from a leg of an earlier attempt does not end this one (w2276 was a retry): still held.
+  p.done = { '1a2b3c4d': { at: new Date().toISOString(), report: 'needs a new client machine' } };
+  store.putWork(p);
+  assert.ok(agents.pairHold(client), 'an earlier attempt\'s DONE is not this run\'s');
+  assert.deepEqual(pass().filter((x) => x.includes('e5dcf0d3')), []);
+  // This attempt's host reported: the client is released as before.
+  p.done = { ...p.done, '9a4452ce': { at: new Date().toISOString(), report: 'For w2263: PASS' } };
+  store.putWork(p);
+  assert.equal(agents.pairHold(client), undefined);
+  await until('alpha released once the run is over', () => (pass(), !!store.sessions.get('e5dcf0d3')!.placeReleased));
+});
+
+test('w2305: a re-queue stops its old legs at once, not at their turn\'s end (w2276\'s host 9a4452ce kept working after "Old legs stopped")', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, sessions, o } = env;
+  putRequests(store, [{ id: 'w2276', by: LOTH, status: 'active' }]);
+  const a = await startedFor(env, 'w2276');
+  store.putSession({ id: '9a4452ce', kind: 'worker', title: 'host leg', status: 'running', permissionMode: 'bypassPermissions', createdAt: T0, lastActivityAt: T0, turns: 1, costUsd: 0, pendingPermissions: [], requestedBy: LOTH, machineId: 'beast', machineSandbox: 'slot1' } as SessionInfo);
+  const w = store.work.get('w2276')!;
+  w.sessionIds = ['9a4452ce', a.id];
+  w.pair = { legs: 2, started: { at: T0, legs: [{ session: '9a4452ce', sandbox: 'beast/slot1' }, { session: a.id, sandbox: 'pc/alpha' }] } };
+  store.putWork(w);
+  assert.ok(sessions.sessions.get(a.id)?.live, 'its leg on pc/alpha has a process');
+  assert.match(o.requeuePair(w, 'leg 1 is gone') ?? '', /Old legs stopped/);
+  await until('the old leg stopped', () => !sessions.sessions.get(a.id)?.live);
+  assert.equal(w.status, 'queued');
+});

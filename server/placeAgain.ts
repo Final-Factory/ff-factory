@@ -187,11 +187,14 @@ export function waitReleaseWhy(sb: MachineSandbox, waitOn: string | undefined): 
   return waitOn;
 }
 
-export function releaseStep(s: SessionInfo, sb: MachineSandbox | undefined, f: PlaceFacts & { workOver?: string; keepLive?: string; claimedBy?: string; ciWait?: string; waitOn?: string; liveHold?: string }): ReleaseStep {
+export function releaseStep(s: SessionInfo, sb: MachineSandbox | undefined, f: PlaceFacts & { workOver?: string; keepLive?: string; claimedBy?: string; ciWait?: string; waitOn?: string; liveHold?: string; pairHold?: string }): ReleaseStep {
   if (s.kind !== 'worker' || !s.machineId || !s.machineSandbox || !sb) return undefined;
   // Its Live view is up while it waits on a person (w1582, LIVE_HOLD_MS): neither stopped nor released, so the person's
   // words reach it at once and the editor behind the view stays its. Its work being over ends the hold (Agents.liveHold).
   if (f.liveHold && !s.placeReleased) return undefined;
+  // A leg of a pair run under way (w2305): neither stopped nor released until the run is over or re-queued, whatever its
+  // check-in, its wait on its partner or its idle time say (Agents.pairHold).
+  if (f.pairHold && !s.placeReleased) return undefined;
   const live = f.live(s.id);
   const far = farWhy(s, f.now, f.workOver);
   // Waiting on CI (w846), else on a deploy, a person or another request (w890): its sandbox may go at once.
@@ -346,6 +349,8 @@ export interface PlaceAgainDeps {
   keepLive: (id: string) => string | undefined;
   /** Why it keeps its process and sandbox for its Live view while it waits on a person (Agents.liveHold, w1582), or undefined. */
   liveHold?: (s: SessionInfo) => string | undefined;
+  /** Why it keeps its sandbox as a leg of a pair run under way (Agents.pairHold, w2305), or undefined. */
+  pairHold?: (s: SessionInfo) => string | undefined;
   /**
    * Its sandbox was released (or it is released) while a Live view of it runs (w1582): stop the view, which would otherwise
    * show whatever that sandbox's editor shows next, another worker's game included, and record it so its next message asks
@@ -469,7 +474,7 @@ export class PlaceAgain {
     if (s.kind !== 'worker' || !s.machineId || !s.machineSandbox || s.placeReleased || s.status !== 'stopped' || this.d.isLive(s.id)) return undefined;
     const sb = this.d.machine(s.machineId)?.sandboxes?.find((x) => x.id === s.machineSandbox);
     const why = sb && (ciReleaseWhy(sb, this.d.ciWait?.(s)) ?? waitReleaseWhy(sb, this.d.waitOn?.(s)) ?? releaseWhy(s, this.now(), this.d.workOver(s)));
-    const kept = why && (this.d.liveHold?.(s) ?? keptWhy(s, sb, this.facts(s.machineId)));
+    const kept = why && (this.d.pairHold?.(s) ?? this.d.liveHold?.(s) ?? keptWhy(s, sb, this.facts(s.machineId)));
     return kept ? `its sandbox stays held although ${why}: ${kept}` : undefined;
   }
 
@@ -516,7 +521,7 @@ export class PlaceAgain {
       // came back to does not keep the sandbox's editor from its idle stop (the daemon counts a running view as activity).
       if (!live && s.placeReleased) this.d.liveLost?.(s, s.placeReleased.why);
       else if (!live && s.status === 'stopped' && !(this.now() - Date.parse(s.lastActivityAt) < LIVE_HOLD_MS)) this.d.liveLost?.(s, `nobody came back to it within ${LIVE_HOLD_MS / 3_600_000} h`);
-      const step = releaseStep(s, sb, { ...f, workOver: this.d.workOver(s), ciWait: this.d.ciWait?.(s), waitOn: this.d.waitOn?.(s), keepLive: live ? this.d.keepLive(s.id) : undefined, liveHold: this.d.liveHold?.(s), claimedBy: s.placeReleased ? this.claimedBy(m.id, sb.id) : undefined });
+      const step = releaseStep(s, sb, { ...f, workOver: this.d.workOver(s), ciWait: this.d.ciWait?.(s), waitOn: this.d.waitOn?.(s), keepLive: live ? this.d.keepLive(s.id) : undefined, liveHold: this.d.liveHold?.(s), pairHold: this.d.pairHold?.(s), claimedBy: s.placeReleased ? this.claimedBy(m.id, sb.id) : undefined });
       if (!step) continue;
       this.claimsMemo?.delete(m.id);
       if (step.do === 'stop') {
