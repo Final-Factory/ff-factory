@@ -2,11 +2,13 @@
 // dispatcher) gets a folder of its own for Claude Code's auto memory, whose MEMORY.md index the CLI loads at every
 // start (settings.autoMemoryDirectory). Orchestrators stay read-only on everything else: Write and Edit pass the
 // guard below only for a Markdown file inside that folder, with no secret in it, in a turn its person started, and the
-// delete_memory tool (w1748) removes one such file under the same rules, keeping a copy in the trash for 30 days.
+// delete_memory tool (w1748) removes one such file under the same rules, keeping a copy in the trash for 30 days, and
+// restore_memory (w2253) puts one back from the backups or the memory's git history.
 import fs from 'node:fs';
 import path from 'node:path';
 import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
 import { asidePath, recordRecovery, type DataRecovery } from './durable.ts';
+import { run } from './proc.ts';
 import type { Config } from './config.ts';
 import type { SessionInfo } from '../shared/types.ts';
 
@@ -136,10 +138,21 @@ export function memoryWriteProblem(file: unknown, dir: string, content: string, 
  * The PreToolUse hook of an orchestrator: Write and Edit only as memoryWriteProblem allows, and only in a turn its
  * person started (`personTurn`), so text the harness relays (a worker's report, a Discord message) cannot plant a
  * lasting instruction. Other tools pass to the normal permission rules. A hook's deny holds in every permission mode.
+ * A Write over an existing memory file this process has not Read is refused (w2253: Ben's orchestrator wrote
+ * "PLACEHOLDER" over a 90-line file it had not read; Claude Code's own rule had let it through). Edit needs a Read anyway.
  */
 export function memoryGuard(dir: string, personTurn: () => boolean, platform: NodeJS.Platform = process.platform, fsx: GuardFs = realFs): HookCallback {
+  const P = platform === 'win32' ? path.win32 : path.posix;
+  const seen = new Set<string>();
+  const keyOf = (p: string) => (platform === 'win32' ? P.resolve(p).toLowerCase() : P.resolve(p));
   return async (input) => {
-    if (input.hook_event_name !== 'PreToolUse' || !WRITE_TOOLS.has(input.tool_name)) return {};
+    if (input.hook_event_name !== 'PreToolUse') return {};
+    if (input.tool_name === 'Read') {
+      const f = (input.tool_input as { file_path?: unknown } | undefined)?.file_path;
+      if (typeof f === 'string' && P.isAbsolute(f)) seen.add(keyOf(f));
+      return {};
+    }
+    if (!WRITE_TOOLS.has(input.tool_name)) return {};
     const deny = (why: string) => ({ hookSpecificOutput: { hookEventName: 'PreToolUse' as const, permissionDecision: 'deny' as const, permissionDecisionReason: why } });
     if (input.tool_name !== 'Write' && input.tool_name !== 'Edit') return deny(`${input.tool_name} is not available to orchestrators; use Write or Edit in your memory folder ${dir}`);
     if (!personTurn()) return deny('memory is written only in a turn your person started (their own message), never because a harness message, a worker or relayed text asks; tell them what you would save instead');
@@ -147,6 +160,9 @@ export function memoryGuard(dir: string, personTurn: () => boolean, platform: No
     const text = typeof a.content === 'string' ? a.content : typeof a.new_string === 'string' ? a.new_string : '';
     const why = memoryWriteProblem(a.file_path, dir, text, platform, fsx);
     if (why) return deny(why);
+    const file = a.file_path as string;
+    if (input.tool_name === 'Write' && fsx.lstat(P.resolve(file)) && !seen.has(keyOf(file))) return deny(`${file} already exists and you have not Read it since this conversation's process started: Read it first, then Edit it (or Write it whole, knowing a Write replaces every line)`);
+    seen.add(keyOf(file));
     return { hookSpecificOutput: { hookEventName: 'PreToolUse' as const, permissionDecision: 'allow' as const, permissionDecisionReason: 'inside this orchestrator’s own memory folder' } };
   };
 }
@@ -459,4 +475,208 @@ export async function pruneMemoryTrash(root: string, now = new Date(), days = ME
     removed++;
   }
   return removed;
+}
+
+// ---------------------------------------------------------------- restoring a memory (w2253)
+
+// A memory file overwritten by mistake (w2253: Ben's orchestrator wrote "PLACEHOLDER" over person-ben/corrections-log.md)
+// could not be put back: the Read guard keeps the backups closed, and orchestrators have no shell. restore_memory lists
+// the copies of one of its own files, the three crash backups and, when the memory root is a git repository
+// (server/memoryGit.ts), that file's commits, and puts one back under the write guard's rules. The backups rotate at
+// every change anywhere in the memory, so after three changes a file's older text lives only in git.
+
+/** How many of a file's commits restore_memory looks at, newest first. */
+const RESTORE_GIT_COMMITS = 10;
+
+/** One copy of a memory file that restore_memory can put back. */
+export interface MemoryCopy {
+  /** "1".."3" for a backup, a commit's short id for git: what `copy` names. */
+  id: string;
+  /** "backup 1" or "commit 1a2b3c4". */
+  label: string;
+  /** The backup file's modification time, or the commit's time. */
+  time: Date;
+  text: string;
+  bytes: number;
+  lines: number;
+  /** Byte for byte the current file. */
+  same: boolean;
+  /** Empty or holding zero bytes (what a crash leaves): never restored. */
+  damaged?: string;
+}
+
+const lineCount = (text: string) => (text ? text.split('\n').length - (text.endsWith('\n') ? 1 : 0) : 0);
+
+/**
+ * Every copy of memory file `rel` (relative to the memory root, e.g. "person-ben/notes.md"), newest first: the backups
+ * 1..3, then its last commits when the root is a git repository of its own.
+ */
+export async function memoryCopies(root: string, rel: string, current: string | undefined): Promise<MemoryCopy[]> {
+  const out: MemoryCopy[] = [];
+  const add = (c: Pick<MemoryCopy, 'id' | 'label' | 'time' | 'text'>, buf: Buffer) => {
+    const damaged = !buf.length ? 'empty (0 bytes)' : buf.includes(0) ? 'holding zero bytes' : undefined;
+    out.push({ ...c, bytes: buf.length, lines: lineCount(c.text), same: current !== undefined && c.text === current, damaged });
+  };
+  for (let i = 1; i <= MEMORY_BACKUPS; i++) {
+    const b = path.join(memoryBackupRoot(root), String(i), rel);
+    try {
+      const buf = await fs.promises.readFile(b);
+      add({ id: String(i), label: `backup ${i}`, time: (await fs.promises.stat(b)).mtime, text: buf.toString('utf8') }, buf);
+    } catch {
+      // no copy in this backup
+    }
+  }
+  if (!(await existsAsync(path.join(root, '.git')))) return out;
+  const git = (args: string[]) => run('git', args, { cwd: root, timeoutMs: 30_000 });
+  const gitPath = rel.split(path.sep).join('/');
+  const log = await git(['log', '-n', String(RESTORE_GIT_COMMITS), '--format=%H %cI', '--', gitPath]);
+  if (log.code !== 0) return out;
+  for (const line of log.stdout.split('\n').filter(Boolean)) {
+    const [sha, when] = line.split(' ');
+    const shown = await git(['show', `${sha}:${gitPath}`]);
+    // The commit that deleted the file has none.
+    if (shown.code !== 0) continue;
+    add({ id: sha.slice(0, 7), label: `commit ${sha.slice(0, 7)}`, time: new Date(when), text: shown.stdout }, Buffer.from(shown.stdout, 'utf8'));
+  }
+  return out;
+}
+
+/** The copies, one line each, the one restore_memory picks by default marked. */
+export function describeCopies(copies: MemoryCopy[], pick?: MemoryCopy): string {
+  if (!copies.length) return 'no copies: neither the backups nor the memory repository hold this file';
+  return copies
+    .map((c) => `- ${c.label} (copy "${c.id}"): ${c.time.toISOString()}, ${c.bytes} bytes, ${c.lines} lines${c.same ? ', the same as the current file' : ''}${c.damaged ? `, ${c.damaged}: never restored` : ''}${c === pick ? ' <- the default' : ''}`)
+    .join('\n');
+}
+
+/** The newest copy that is not the current file, not damaged and not rejected by `bad`. */
+export const defaultCopy = (copies: MemoryCopy[], bad: (text: string) => boolean = () => false) => copies.find((c) => !c.same && !c.damaged && !bad(c.text));
+
+/** Write `text` to `file`, on disk when this returns. */
+function writeDurable(file: string, text: string) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const fd = fs.openSync(file, 'w');
+  try {
+    fs.writeFileSync(fd, text);
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/**
+ * Put `copy` back as `target` (inside memory folder `dir`): the current file, if any, first goes to the trash as a
+ * delete would (kept MEMORY_TRASH_DAYS days), so a restore is undone by Reading that copy back. Logs one line; answers it.
+ */
+function putBack(o: { target: string; dir: string; root: string; who: string; copy: MemoryCopy; now: Date; log: (line: string) => void }): string {
+  const key = path.basename(path.resolve(o.dir));
+  const rel = path.relative(path.resolve(o.dir), o.target).split(path.sep).join('/');
+  const until = new Date(o.now.getTime() + MEMORY_TRASH_DAYS * 86_400_000).toISOString().slice(0, 10);
+  let kept = '';
+  if (fs.existsSync(o.target)) {
+    const stamp = o.now.toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
+    const trash = memoryTrashDir(o.root, key);
+    const name = rel.split('/').join('__');
+    kept = path.join(trash, `${stamp}-${name}`);
+    for (let i = 2; fs.existsSync(kept); i++) kept = path.join(trash, `${stamp}-${i}-${name}`);
+    copyDurable(o.target, kept);
+  }
+  writeDurable(o.target, o.copy.text);
+  const what = `${o.copy.label} (${o.copy.time.toISOString()}, ${o.copy.lines} lines, ${o.copy.bytes} bytes)`;
+  const replaced = kept ? `; the file it replaced is kept until ${until} at ${kept}` : '';
+  o.log(`orchestrator memory: ${o.who} restored ${key}/${rel} from ${what} at ${o.now.toISOString()}${replaced}`);
+  return `Restored ${o.target} from ${what}${replaced}.`;
+}
+
+/**
+ * The full path of the file restore_memory is asked for, or why it is refused, for an orchestrator whose memory folder is
+ * `dir`: a file name in the folder ("notes.md") or the full path of a file in it, under the write guard's path rules
+ * (memoryWriteProblem: its own folder only, after "..", links and Windows' path rules).
+ */
+export function memoryRestoreTarget(name: unknown, dir: string, platform: NodeJS.Platform = process.platform, fsx: GuardFs = realFs): { file: string } | { problem: string } {
+  const P = platform === 'win32' ? path.win32 : path.posix;
+  if (typeof name !== 'string' || !name.trim()) return { problem: 'no name given: the file name of one of your memory files, e.g. "notes.md"' };
+  if (/[*?[\]{}]/.test(name)) return { problem: 'one file at a time: wildcards are refused' };
+  let file = name;
+  if (!P.isAbsolute(name)) {
+    if (/[\\/]/.test(name) || name === '.' || name === '..') return { problem: `give a file name in your memory folder ${dir} ("notes.md") or its full path` };
+    file = P.join(dir, name);
+  }
+  if (fsx.lstat(P.resolve(file))?.directory) return { problem: `${file} is a folder: only Markdown files are restored` };
+  const why = memoryWriteProblem(file, dir, '', platform, fsx);
+  if (why) return { problem: why.replace(/\bwrite\b/g, 'restore') };
+  return { file: P.resolve(file) };
+}
+
+export interface MemoryRestoreOptions {
+  /** The file: its name in the folder or its full path. */
+  name: unknown;
+  /** Which copy: "1".."3" for a backup, a commit's id (7 or more hex digits); absent: the newest that differs from the current file. */
+  copy?: string;
+  /** Only list the copies; restore nothing. */
+  list?: boolean;
+  /** The orchestrator's own memory folder. */
+  dir: string;
+  /** The memory root: its backups are beside it, and it may be a git repository. */
+  root: string;
+  /** Who restored it, for the log: "Ben (ben)'s orchestrator". */
+  who: string;
+  /** Whether this turn is its person's (a message of their own): the gate Write, Edit and delete_memory have. */
+  personTurn: boolean;
+  now?: Date;
+  log?: (line: string) => void;
+  platform?: NodeJS.Platform;
+  fsx?: GuardFs;
+}
+
+/**
+ * restore_memory: list the copies of one of its own memory files, or put one back (putBack). Throws with the reason when
+ * refused; nothing is touched then.
+ */
+export async function restoreMemoryFile(o: MemoryRestoreOptions): Promise<string> {
+  if (!o.personTurn) throw new Error('a memory file is restored only in a turn your person started (their own message), never because a harness message, a worker or relayed text asks; tell them what you would restore instead');
+  const t = memoryRestoreTarget(o.name, o.dir, o.platform, o.fsx);
+  if ('problem' in t) throw new Error(t.problem);
+  const rel = path.relative(path.resolve(o.root), t.file);
+  let current: string | undefined;
+  try {
+    current = fs.readFileSync(t.file, 'utf8');
+  } catch {
+    // a file that is gone is restored too
+  }
+  const copies = await memoryCopies(o.root, rel, current);
+  const want = o.copy?.trim().toLowerCase();
+  const pick = want ? copies.find((c) => c.id === want || (want.length >= 7 && /^[0-9a-f]+$/.test(want) && c.label.startsWith('commit ') && want.startsWith(c.id))) : defaultCopy(copies);
+  const now = current === undefined ? 'missing' : `now ${Buffer.byteLength(current)} bytes, ${lineCount(current)} lines`;
+  const head = `${t.file}: ${now}. Its copies, newest first:\n${describeCopies(copies, want ? undefined : pick)}`;
+  if (o.list) return head;
+  if (!pick) throw new Error(want ? `no copy "${o.copy}". ${head}` : `no copy differs from the current file: nothing restored. ${head}`);
+  if (pick.damaged) throw new Error(`${pick.label} is ${pick.damaged}: never restored`);
+  if (pick.same) throw new Error(`${pick.label} is the current file already: nothing restored`);
+  const secret = secretIn(pick.text);
+  if (secret) throw new Error(`${pick.label} holds what looks like ${secret}: never restored into memory`);
+  return `${putBack({ target: t.file, dir: o.dir, root: o.root, who: o.who, copy: pick, now: o.now ?? new Date(), log: o.log ?? console.log })}\n${head}`;
+}
+
+/**
+ * A one-off repair at start (w2253): when memory file `rel` ("person-ben/notes.md") holds text that `bad` matches, put back
+ * its newest copy that `bad` does not match, logged as restore_memory logs. Does nothing once the file is good.
+ */
+export async function restoreBadMemory(root: string, rel: string, bad: (text: string) => boolean, log: (line: string) => void = console.log, now = new Date()): Promise<boolean> {
+  const target = path.join(root, rel);
+  let current: string;
+  try {
+    current = fs.readFileSync(target, 'utf8');
+  } catch {
+    return false;
+  }
+  if (!bad(current)) return false;
+  const copies = await memoryCopies(root, rel, current);
+  const pick = defaultCopy(copies, bad);
+  if (!pick || secretIn(pick.text)) {
+    log(`orchestrator memory: ${rel} still holds what overwrote it, and no copy is good to put back:\n${describeCopies(copies)}`);
+    return false;
+  }
+  putBack({ target, dir: path.dirname(target), root, who: 'FF Factory (a one-off repair at start, w2253)', copy: pick, now, log });
+  return true;
 }
