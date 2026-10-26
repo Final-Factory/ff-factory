@@ -6481,3 +6481,34 @@ test('w2168: start_agent refuses timed work on a busy big computer while a small
   assert.match(w2.log.join('\n'), /ledger: MOVED to lap by FF Factory \(w2168\): worker \w{8} on pc\/alpha waited for an exclusive bench ticket and was between turns; lap \(small, 1 agent slot\) became idle/);
   assert.ok(store.sessions.get(id)!.placeReleased, 'its sandbox is released');
 });
+
+test('w2217: a request left undecided past the bound is offered to the dispatcher again, once, then shows Stalled, not Working', async (t) => {
+  const { store, o, dispatcher, chat, call, heard } = setup(t);
+  await call(chat(BEN).info, 'request_work', { title: 'Pair run for w2090', brief: 'Two legs on computers that are not Macs.' });
+  await until('the dispatcher hears it', () => heard(dispatcher().info.id, '[work request] w1').length === 1);
+  const at = (min: number) => {
+    const when = Date.now() + min * 60_000;
+    (o as unknown as { now: () => Date }).now = () => new Date(when);
+  };
+  // Inside the bound: nothing is offered again, and it is Working.
+  at(5);
+  assert.deepEqual(o.undecidedBound(), []);
+  assert.match((await call(dispatcher().info, 'list_work', { id: 'w1' })).text, /Working \(the dispatcher has it to decide/);
+  // Past it (w2192 sat 3 h so): offered again, once, with the request in full, and its log says so.
+  at(16);
+  assert.deepEqual(o.undecidedBound(), ['w1']);
+  assert.deepEqual(o.undecidedBound(), [], 'once');
+  await until('the dispatcher hears it again', () => heard(dispatcher().info.id, '[work request] w1').length === 2);
+  assert.match(heard(dispatcher().info.id, '[work request] w1')[1].text, /Offered again by FF Factory \(w2217\): it has sat undecided for 16 min/);
+  assert.match(store.work.get('w1')!.log.join('\n'), /undecided for 16 min: offered to the dispatcher again \(w2217\)/);
+  assert.match((await call(dispatcher().info, 'list_work', { id: 'w1' })).text, /Working \(the dispatcher has it to decide/, 'the dispatcher has a few minutes to decide it');
+  // Still undecided after that: Stalled, with how long.
+  at(22);
+  assert.match((await call(dispatcher().info, 'list_work', { id: 'w1' })).text, /Stalled \(undecided for 22 min: its \[work request\] went to the dispatcher when it was filed and again 6 min ago/);
+  assert.equal(store.work.get('w1')!.status, 'new', 'the live state only; nothing is changed');
+  // Decided: the mark goes, so a reopen counts afresh.
+  const ok = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'reject', note: 'not needed' });
+  assert.equal(ok.isError, false, ok.text);
+  o.undecidedBound();
+  assert.equal(store.work.get('w1')!.undecided, undefined);
+});

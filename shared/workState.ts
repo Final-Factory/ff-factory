@@ -387,6 +387,13 @@ function followUpReason(w: WorkItem): string | undefined {
   return undefined;
 }
 
+/**
+ * w2217: a request still `new` (undecided) this long is offered to the dispatcher again, once (Orchestrators.undecidedBound),
+ * and still undecided UNDECIDED_STALL_MS after that its live state is Stalled ("undecided for N min"), not Working.
+ */
+export const UNDECIDED_BOUND_MS = 15 * 60_000;
+export const UNDECIDED_STALL_MS = 5 * 60_000;
+
 const names = (rs: readonly { displayName: string }[]) => rs.map((r) => r.displayName);
 const ago = (iso: string | undefined, now: number) => {
   const ms = now - (Date.parse(iso ?? '') || now);
@@ -841,8 +848,17 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: s
   // Blocked on a thing (w643): the blocker it records.
   if (w.status === 'blocked' && gates.length) return blockedLive(gates, f.now);
 
-  // Not decided yet: the dispatcher has it (its [work request] went out when it was filed or reopened).
-  if (w.status === 'new') return { state: 'working', why: `the dispatcher has it to decide, since ${ago(w.updatedAt, f.now)}` };
+  // Not decided yet: the dispatcher has it (its [work request] went out when it was filed or reopened). w2217: past the bound
+  // it was offered again (Orchestrators.undecidedBound); still undecided UNDECIDED_STALL_MS after that, it is Stalled.
+  if (w.status === 'new') {
+    const u = w.undecided;
+    const again = Date.parse(u?.reofferedAt ?? '');
+    if (u && again && f.now - again >= UNDECIDED_STALL_MS) {
+      const mins = Math.round((f.now - (Date.parse(u.since) || again)) / 60_000);
+      return { state: 'stalled', why: `undecided for ${mins} min: its [work request] went to the dispatcher when it was filed and again ${ago(u.reofferedAt, f.now)}, and it has not decided it` };
+    }
+    return { state: 'working', why: `the dispatcher has it to decide, since ${ago(w.updatedAt, f.now)}` };
+  }
 
   // Queued: capacity only. With a computer that could take it free, that is wrong, and says so (w643).
   if (w.status === 'queued') return queuedLive(w, f, w.queuedFor?.needs, 'queued');
