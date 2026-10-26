@@ -140,3 +140,16 @@ test('the hand-off keeps the brief the old worker started from, without the harn
   assert.match(p, /Merge PR #2347/);
   assert.match(p, /blocked on w2006/);
 });
+
+test('w2304: a leg of a pair run under way never moves alone: it stays on its own sandbox, or once that went to other work the whole pair is re-queued', () => {
+  const live = req({ id: 'w2271', pair: { leg: 2, others: ['beast'], live: true } });
+  const kept = moveDecision(facts({ released: false, git: { ahead: 0, upstream: 'origin/w1891-roundrobin-belt-output', dirty: 0, untracked: 0 }, requests: [live] }));
+  assert.ok('stay' in kept, JSON.stringify(kept));
+  assert.equal(kept.stay, 'w2271 is a pair run under way (w2304): leg 2 plays with beast, and a leg moved alone cuts the run');
+  // w2271 at 09:14Z on 2026-10-26: its sandbox on lothdesktop had gone to other work; the move then cut the run.
+  const gone = moveDecision(facts({ machine: 'lothdesktop', requests: [live] }));
+  assert.ok('requeuePair' in gone, JSON.stringify(gone));
+  assert.deepEqual(gone.requeuePair, { id: 'w2271', why: "leg 2's sandbox on lothdesktop went to other work mid-run, and a leg moved alone cuts the run (w2046 move refused)" });
+  // Once a leg reported (the run is over, not live), a leg left waiting moves as before.
+  assert.ok('move' in moveDecision(facts({ machine: 'lothdesktop', requests: [req({ id: 'w2271', pair: { leg: 2, others: ['beast'] } })] })));
+});

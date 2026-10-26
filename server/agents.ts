@@ -85,7 +85,7 @@ import { ASK_TOOL, CHAT_MORE_LABEL, DESCRIPTION_CHARS, LABEL_CHARS, LABEL_INPUT_
 import { WAIT_LINE_CHARS, summaryBrief, summaryText, waitSummary } from '../shared/waitSummary.ts';
 import { isMyMove, waitingItemOf } from '../shared/waiting.ts';
 import { checkAsks } from '../shared/questionCard.ts';
-import { DECISIONS, attachmentsNote, describeItem, handoverNote, isFor, isOpen, ledgerOrder, names, overlapLine, priorityThenAge, requestAsFiled, requestLineRule, startProblem } from './work.ts';
+import { DECISIONS, attachmentsNote, describeItem, handoverNote, isFor, isOpen, livePair, ledgerOrder, names, overlapLine, priorityThenAge, requestAsFiled, requestLineRule, startProblem } from './work.ts';
 import { minPriorityText, needsBuild, needsLive, needsOf, needsTimed, pairText, PAIR_HOLD_MS, PAIR_MAX_LEGS, TIMED_HOLD_MS } from '../shared/capacity.ts';
 import { BUILD_PLAN_DOC, BuildPlans, NOT_RELEASE, type BuildPlan, type SeatResult } from './buildPlans.ts';
 import { SEAT_GRACE_MS, seatAction, seatNotice } from './releaseSeat.ts';
@@ -852,6 +852,10 @@ export class Agents {
       relocateTimedLeg: (w) => this.relocateTimedLeg(w),
       withdrawStaleTimedHere: () => this.withdrawStaleTimedHere(),
       machineOnline: (id) => (store.machines.has(id.toLowerCase()) ? machines.isOnline(id.toLowerCase()) : undefined),
+      personPlaying: (id) => {
+        const p = machines.personPlayOf(id.toLowerCase());
+        return p ? `${p.who} ${p.until ? `played Final Factory (its grace runs until ${p.until.slice(11, 16)}Z)` : `is playing Final Factory since ${p.since.slice(11, 16)}Z`}` : undefined;
+      },
       // w2045: the merge-on-green pilot's arm, by request (server/mergeOnGreen.ts); the setting is read live.
       mergeOnGreenPilot: (id) => inMergeOnGreenPilot(id, this.cfg),
       deploySha: (id) => (id ? this.daemonSha?.(id) : appVersion().sha),
@@ -1189,6 +1193,10 @@ export class Agents {
     // worker on (w890, found live: a worker started for w1 and then sent w2 is read as working on w2 only, so its
     // declaration for w1 never made w1 Waiting, "every request waits" failed, and its sandbox stayed held).
     if (i.waitingOn) return `it waits on ${i.waitingOn.who}: ${i.waitingOn.what}`;
+    // w2304: a leg of a pair run under way keeps its sandbox while the other legs work: its game player runs there, joined to
+    // theirs. w2271's client leg was released at 09:14Z on 2026-10-26 as "it waits on w2271: its worker c4cd09fd works on it",
+    // and the w2046 move that followed cut the run.
+    if (items.some((w) => livePair(w) && w.pair!.started!.legs.some((l) => l.session === i.id))) return undefined;
     const now = Date.now();
     if (!this.waitLive || now - this.waitLive.at > 5000) this.waitLive = { at: now, live: this.workLive() };
     const parts: string[] = [];
@@ -2817,6 +2825,13 @@ export class Agents {
     if (owned.length || gone.length) this.leaveToOwners(info, owned, gone, hold, !reqs.length);
     if (!reqs.length && (owned.length || gone.length)) return true;
     const d = moveDecision(this.moveFacts(info, reqs));
+    if ('requeuePair' in d) {
+      // w2304: its pair run starts again whole; this worker is retired with the other legs, so its message is not delivered.
+      const w = reqs.find((x) => x.id === d.requeuePair.id);
+      const did = w && this.orchestrators.requeuePair(w, d.requeuePair.why);
+      console.log(`room move: worker ${info.id} on ${info.machineId}/${info.machineSandbox} (${d.requeuePair.id}) not moved alone: ${did ?? `its pair run was not re-queued (${d.requeuePair.why})`}`);
+      return did ? true : stayLine(hold, d.requeuePair.why);
+    }
     if (!('move' in d)) {
       const [kept, why] = 'stay' in d ? [stayLine(hold, d.stay), `stays: ${d.stay}`] : [`${hold}; ${NONE_MARK}: ${d.none}`, `waits: ${d.none}`];
       // Journalled once per worker and reason, so a wait that did not move can be checked afterwards (this runs every drain).
@@ -2897,7 +2912,7 @@ export class Agents {
           ...(first ? { first } : {}),
           ...(w.queuedFor?.needs?.length ? { pinned: w.queuedFor.needs } : {}),
           ...(w.timedLeg ? { timedLeg: true } : {}),
-          ...(mine >= 0 ? { pair: { leg: mine + 1, others, crossOs: !!w.pair!.crossOs, ...(w.pair!.avoid ? { avoid: w.pair!.avoid } : {}) } } : {}),
+          ...(mine >= 0 ? { pair: { leg: mine + 1, others, crossOs: !!w.pair!.crossOs, ...(w.pair!.avoid ? { avoid: w.pair!.avoid } : {}), ...(livePair(w) ? { live: true } : {}) } } : {}),
         };
       }),
       places: this.places(),
@@ -3041,7 +3056,7 @@ export class Agents {
     if (!reqs.length) return { release: true };
     const d = moveDecision(this.moveFacts(info, reqs));
     if ('move' in d) return { move: d.move.to };
-    return { stays: 'stay' in d ? d.stay : d.none };
+    return { stays: 'stay' in d ? d.stay : 'none' in d ? d.none : d.requeuePair.why };
   }
 
   /** The workers holding a sandbox on `machineId`, each with whether it can move for a timed leg (w2055). */

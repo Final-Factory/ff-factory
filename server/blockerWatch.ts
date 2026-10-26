@@ -47,7 +47,7 @@ export type PrState = { state: 'open' | 'merged' | 'closed'; text: string; sha?:
 export interface BlockerWatchDeps {
   store: Store;
   orchestrators: Pick<Orchestrators, 'unblock' | 'blockerStuck' | 'blockerDecide' | 'gatesCleared' | 'flagQueuedWithRoom' | 'carryOutConditional' | 'dropConditional'> &
-    Partial<Pick<Orchestrators, 'noteCiRead' | 'sweepResumes' | 'requeueCapacityBlocks' | 'replaceNoTimedWaits' | 'timedLegBound' | 'mergedOnGreen' | 'undecidedBound'>>;
+    Partial<Pick<Orchestrators, 'noteCiRead' | 'sweepResumes' | 'requeueCapacityBlocks' | 'requeueBrokenPairs' | 'replaceNoTimedWaits' | 'timedLegBound' | 'mergedOnGreen' | 'undecidedBound'>>;
   /** w1841: tell the workers waiting on a bench lock that is free now (Agents.resumeBenchWaits): request id to what it did. */
   benchResume?: () => [string, string][];
   /** Whether a message to a session waits in the send queue (for a sandbox, a slot or its machine): its resume is on its way (w1094). */
@@ -138,6 +138,8 @@ export class BlockerWatch {
     try {
       // w1089: a block that is only a wait for capacity is Queued, not Blocked, whoever set it and whenever.
       for (const id of this.d.orchestrators.requeueCapacityBlocks?.() ?? []) did.set(id, 'requeued: a block that waited only for capacity');
+      // w2304: a pair run that lost a leg mid-run starts again whole, Queued, never Stalled.
+      for (const id of this.d.orchestrators.requeueBrokenPairs?.() ?? []) did.set(id, 'requeued: a pair run that lost a leg mid-run');
       const blocked = [...this.d.store.work.values()].filter((w) => w.status === 'blocked' && w.blocked && w.blocked.by !== 'ledger cleanup');
       const ci = new Map<string, CiState | undefined>();
       const pr = new Map<string, PrState | undefined>();

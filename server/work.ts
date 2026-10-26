@@ -528,6 +528,15 @@ export function doneOf(w: Pick<WorkItem, 'done' | 'reopenedAt'>): NonNullable<Wo
 }
 
 /**
+ * Whether pair run `w` is under way (w2304): open, its legs started together, and none of them has reported yet. A leg of it
+ * never moves alone (server/resumeMove.ts), keeps its sandbox while the others work (Agents.waitOn), and a leg broken mid-run
+ * re-queues the whole run (Orchestrators.requeueBrokenPairs).
+ */
+export function livePair(w: WorkItem): boolean {
+  return !!w.pair?.started && isOpen(w) && !Object.keys(doneOf(w)).length;
+}
+
+/**
  * Whether worker `s` is a leg of an earlier attempt of pair run `w` that a newer attempt replaced, once the newest
  * attempt's host leg said DONE with the verdict (w2239, lothsahn: "once the attempt that produced a pair run's verdict has
  * finished, the request closes, even if worker legs from earlier failed or replaced attempts never said DONE"). Each retry's

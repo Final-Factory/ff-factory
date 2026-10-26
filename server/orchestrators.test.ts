@@ -6690,3 +6690,111 @@ test('w2239: a pair run closes on its newest attempt\'s DONEs though a leg of an
   assert.equal(store.work.get('w4')!.status, 'active');
   assert.match(store.work.get('w4')!.log.join('\n'), /still on it: aa000001, bb000001/);
 });
+
+/** w2304: a pair run for w2263 filed by its worker, its legs started: the host on pc/alpha, the client on lothdesktop/slot6. */
+async function livePairFor(env: Awaited<ReturnType<typeof setupOnMachine>>) {
+  const { store, agents } = env;
+  agentsRoom(agents, []);
+  putRequests(store, [{ id: 'w2263', by: LOTH, status: 'active' }]);
+  const a = await startedFor(env, 'w2263');
+  const id = /^Filed (w\d+)/.exec(String(await a.h.request_pair!({ what: 'Singularity fuel reserve on PR #2607', brief: 'Host from the save, client joins, 2000 heartbeats.' })))![1];
+  const leg = (sid: string, machineId: string, machineSandbox: string) =>
+    store.putSession({ id: sid, kind: 'worker', title: `leg ${sid}`, status: 'idle', permissionMode: 'bypassPermissions', createdAt: T0, lastActivityAt: T0, turns: 1, costUsd: 0, pendingPermissions: [], requestedBy: LOTH, machineId, machineSandbox } as SessionInfo);
+  leg('39c87651', 'pc', 'alpha');
+  leg('0de45d46', 'lothdesktop', 'slot6');
+  const p = store.work.get(id)!;
+  p.status = 'active';
+  p.sessionIds = ['39c87651', '0de45d46'];
+  p.pair = { ...p.pair!, started: { at: T0, legs: [{ session: '39c87651', sandbox: 'pc/alpha' }, { session: '0de45d46', sandbox: 'lothdesktop/slot6' }] } };
+  store.putWork(p);
+  return { a, id, p };
+}
+
+test('w2304: w2276 as it happened: the w1894 player-yield stops the client leg on lothdesktop mid-run, so the pair is re-queued whole: both legs stopped, Queued (never Stalled), off lothdesktop', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, machines, o, agents } = env;
+  const { id, p } = await livePairFor(env);
+  const watch = new BlockerWatch({ store, orchestrators: o });
+  assert.equal((await watch.tick()).has(id), false, 'every leg healthy: it runs on');
+  // 09:24Z on 2026-10-26: lothsahn starts playing on lothdesktop, where the client leg runs.
+  const play = machines.personPlayOf.bind(machines);
+  machines.personPlayOf = (m, now) => (m === 'lothdesktop' ? { who: 'lothsahn', pids: [4242], since: '2026-10-26T09:24:00.000Z', graceMinutes: 10, editorsClosed: 0, playersAsked: 1, buildsLowered: 0 } : play(m, now));
+  t.after(() => (machines.personPlayOf = play));
+  assert.equal((await watch.tick()).get(id), 'requeued: a pair run that lost a leg mid-run');
+  assert.equal(p.status, 'queued');
+  assert.equal(p.pair!.started, undefined, 'its legs start again, fresh');
+  assert.deepEqual(p.sessionIds, [], 'neither old leg carries over');
+  assert.deepEqual(p.pair!.avoid, ['lothdesktop']);
+  assert.match(unfitWhy(p, 'lothdesktop', undefined) ?? '', /^lothdesktop is where an earlier leg of this pair run failed/);
+  assert.equal(p.pair!.requeued?.count, 1);
+  const log = p.log.join('\n');
+  assert.match(log, /re-queued as a pair run \(w2304, 1 of 3; its 2 legs start fresh together, not on lothdesktop\): lothsahn is playing Final Factory since 09:24Z on lothdesktop \(the w1894 player-yield\), where leg 2 \(client 0de45d46\) runs\. Old legs stopped: 39c87651 \(pc\/alpha\), 0de45d46 \(lothdesktop\/slot6\)$/m);
+  assert.equal(agents.workLive().get(id)?.state, 'queued', 'Queued for capacity, not Stalled');
+  const w = store.work.get('w2263')!;
+  assert.deepEqual([w.status, w.blocked?.ref, w.blocked?.on], ['blocked', id, 'report'], 'its asker still waits on the same run');
+  // The next look finds nothing more to do: the run is not under way any more.
+  assert.equal((await watch.tick()).has(id), false);
+});
+
+test('w2304: a pair run is re-queued by itself at most PAIR_REQUEUE_MAX times; then its log says so once and it is left for a person', async (t) => {
+  const env = await setupOnMachine(t);
+  const { o } = env;
+  const { p } = await livePairFor(env);
+  p.pair = { ...p.pair!, requeued: { at: T0, why: 'an earlier break', count: 3 } };
+  assert.equal(o.requeuePair(p, 'leg 2 is gone'), undefined);
+  assert.equal(p.status, 'active');
+  assert.ok(p.pair!.started, 'its legs are left as they are');
+  assert.ok(p.pair!.requeued!.gaveUp);
+  assert.equal(o.requeuePair(p, 'leg 2 is gone'), undefined);
+  assert.equal(p.log.filter((l) => /not re-queued again \(w2304\)/.test(l)).length, 1, 'said once');
+});
+
+test('w2304: a leg of a pair run under way keeps its sandbox while the other leg works (not "it waits on" it), and once a leg reported it is released as before', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents } = env;
+  const { p } = await livePairFor(env);
+  const waitOn = (i: SessionInfo) => {
+    (agents as unknown as { waitLive?: unknown }).waitLive = undefined;
+    return agents.waitOn(i);
+  };
+  const client = store.sessions.get('0de45d46')!;
+  store.putSession({ ...store.sessions.get('39c87651')!, status: 'running' });
+  assert.equal(waitOn(client), undefined, 'w2271 at 09:14Z: released as "it waits on w2271: its worker c4cd09fd works on it", then moved mid-run');
+  p.done = { '39c87651': { at: new Date().toISOString(), report: 'For w2263: PASS' } };
+  store.putWork(p);
+  assert.match(waitOn(client) ?? '', /its worker 39c87651 works on it/, 'the run reported: a leg left waiting is released');
+});
+
+test('w2304: w2271 as it happened: the w2046 move never moves a live pair leg alone; its sandbox went to other work, so the whole pair is re-queued instead of a fresh leg starting elsewhere', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, machines, sessions } = env;
+  const beast = await startTestMachine(machines, { id: 'beast', sandboxes: ['slot1'] });
+  env.closers.push(() => beast.stop());
+  putRequests(store, [{ id: 'w2271', by: LOTH, status: 'active' }]);
+  const a = await startedFor(env, 'w2271');
+  beast.repos.git(beast.repos.main, 'push', '-q', 'origin', 'master:refs/heads/w2271-pair-instrument');
+  // Leg 2 (the client) is `a` on pc/alpha; leg 1 (the host) works on lothdesktop.
+  store.putSession({ id: 'c4cd09fd', kind: 'worker', title: 'host leg', status: 'running', permissionMode: 'bypassPermissions', createdAt: T0, lastActivityAt: T0, turns: 1, costUsd: 0, pendingPermissions: [], requestedBy: LOTH, machineId: 'lothdesktop', machineSandbox: 'slot5' } as SessionInfo);
+  const w = store.work.get('w2271')!;
+  w.sessionIds = ['c4cd09fd', a.id];
+  w.pair = { legs: 2, started: { at: T0, legs: [{ session: 'c4cd09fd', sandbox: 'lothdesktop/slot5' }, { session: a.id, sandbox: 'pc/alpha' }] } };
+  store.putWork(w);
+  sessions.sessions.get(a.id)!.stop(true);
+  await until('its process stopped', () => !sessions.sessions.get(a.id)?.live);
+  a.info.placeReleased = { at: new Date().toISOString(), sandbox: 'alpha', branch: 'w2271-pair-instrument', why: 'it waits on w2271: its worker c4cd09fd works on it' };
+  store.putSession(a.info);
+  const full = sessions as unknown as { placeFull?: (s: { info: SessionInfo }) => string | undefined };
+  const placeFull = full.placeFull!.bind(sessions);
+  const hold = 'no sandbox on pc is free (its own, alpha, took other work after it was released: it waits on w2271: its worker c4cd09fd works on it); the next one to free there is its, ahead of new work';
+  full.placeFull = (s) => (s.info.machineId === 'pc' ? hold : placeFull(s));
+  t.after(() => (full.placeFull = placeFull));
+  sessions.send(a.id, '[pair] host: GO, join now.');
+  sessions.drain(Date.now() + MOVE_AFTER_MS + 1000);
+  assert.ok(!sessions.queued().some((q) => q.id === a.id), 'its message is not delivered: the leg is retired');
+  assert.equal(w.status, 'queued', 'the pair is Queued whole');
+  assert.equal(w.pair!.started, undefined);
+  assert.deepEqual(w.sessionIds, []);
+  assert.ok(![...store.sessions.values()].some((s) => s.machineId === 'beast'), 'no lone leg started on beast');
+  assert.equal(a.info.movedAway, undefined);
+  assert.match(w.log.join('\n'), new RegExp(`re-queued as a pair run \\(w2304, 1 of 3; its 2 legs start fresh together\\): leg 2's sandbox on pc went to other work mid-run, and a leg moved alone cuts the run \\(w2046 move refused\\)\\. Old legs stopped: c4cd09fd \\(lothdesktop/slot5\\), ${a.id} \\(pc/alpha\\)$`, 'm'));
+});
