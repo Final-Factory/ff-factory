@@ -9,7 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { INSPECT_SNIPPET } from '../machine/liveIdle.ts';
 import { DEV_TIER_SNIPPET, LiveSession, type CommandReply, type GameChannel, type LiveState } from '../machine/live.ts';
-import { IN_GAME_SNIPPET, LIVE_STAGE_MAX_STEPS, PLAY_SNIPPET, STAGE_LIMITS, TITLE_READY_SNIPPET, legsText, parseStage, restage, stageSummary, type LiveStageStep, type StageDeps, type StageLimits } from '../machine/liveStage.ts';
+import { IN_GAME_SNIPPET, LIVE_STAGE_MAX_STEPS, loadSnippet, PLAY_SNIPPET, STAGE_LIMITS, TITLE_READY_SNIPPET, legsText, parseStage, restage, stageSummary, type LiveStageStep, type StageDeps, type StageLimits } from '../machine/liveStage.ts';
 import { liveReady } from '../shared/liveReady.ts';
 import type { LiveViewInfo, MachineSandbox, SessionInfo } from '../shared/types.ts';
 import type { ToDaemon } from './machineProtocol.ts';
@@ -49,7 +49,7 @@ const SAVE = 'ffa-9a5e3b28-live';
 const STEP_CS = 'return "camera set";';
 
 /** A stand-in editor and game: a fake clock that advances in sleep, and a log of what the replay asked, in order. */
-function stand(o: { dirty?: boolean; neverInGame?: boolean; ffautoFails?: boolean; noBridgeForStep?: boolean; channelClosed?: boolean; hostLate?: number; neverChannel?: boolean } = {}) {
+function stand(o: { dirty?: boolean; neverInGame?: boolean; ffautoFails?: boolean; noBridgeForStep?: boolean; loadThrows?: boolean; channelClosed?: boolean; hostLate?: number; neverChannel?: boolean } = {}) {
   let clock = 0;
   const log: string[] = [];
   let up = false;
@@ -57,6 +57,9 @@ function stand(o: { dirty?: boolean; neverInGame?: boolean; ffautoFails?: boolea
   let tier = 'player-safe';
   let titleAsks = 0;
   let loaded = false;
+  // w2255: a play mode entered here starts at the title screen, where the game's channel refuses every command (its router's
+  // "commands need a running game; the game is 'menu'") until a save is loaded.
+  let atTitle = false;
   let bridgeUp = false;
   // w2255: like the real game, play mode opens no channel unless channelClosed is off (the fake's old default); then only
   // DEV_TIER_SNIPPET's StartChannel opens it, once the game's channel host exists (hostLate asks after play mode began).
@@ -83,6 +86,7 @@ function stand(o: { dirty?: boolean; neverInGame?: boolean; ffautoFails?: boolea
         log.push('play');
         if (o.dirty) return 'refused: an open scene has unsaved changes';
         playing = true;
+        atTitle = true;
         return 'entering play mode';
       }
       if (code === DEV_TIER_SNIPPET) {
@@ -97,6 +101,12 @@ function stand(o: { dirty?: boolean; neverInGame?: boolean; ffautoFails?: boolea
         log.push('title');
         return ++titleAsks < 2 ? 'wait: title screen loading' : 'ready';
       }
+      if (code === loadSnippet(SAVE)) {
+        log.push(`load:${SAVE}`);
+        if (o.loadThrows) return 'error: FileNotFoundException: no such save';
+        loaded = true;
+        return 'loading';
+      }
       if (code === IN_GAME_SNIPPET) {
         log.push('in-game');
         return loaded && !o.neverInGame ? 'ready' : 'wait: the save is loading';
@@ -108,7 +118,7 @@ function stand(o: { dirty?: boolean; neverInGame?: boolean; ffautoFails?: boolea
     channel: () => ch(),
     command: async (_c, text): Promise<CommandReply> => {
       log.push(`cmd:${text}`);
-      if (text.startsWith('game.loadsolo')) loaded = true;
+      if (atTitle && !loaded) return { ok: false, status: 409, result: "state_not_playable: commands need a running game; the game is 'menu'" };
       if (o.ffautoFails && text.startsWith('ui.hide')) return { ok: false, status: 200, result: 'bad_arguments: no such command' };
       return { ok: true, status: 200, result: 'ok' };
     },
@@ -128,7 +138,7 @@ test('w1839: restage starts the editor, enters play mode, loads the save and run
   const r = await restage(s.deps, RECIPE, LIM);
   assert.equal(r.ok, true, r.detail);
   assert.equal(r.detail, 'staged');
-  assert.deepEqual(s.calls(), ['start-editor', 'look', 'play', 'dev-tier', 'title', 'cmd:game.loadsolo|' + SAVE, 'in-game', 'cmd:ui.hide|true', `csharp:${STEP_CS}`]);
+  assert.deepEqual(s.calls(), ['start-editor', 'look', 'play', 'dev-tier', 'title', `load:${SAVE}`, 'in-game', 'cmd:ui.hide|true', `csharp:${STEP_CS}`]);
   assert.deepEqual(Object.keys(r.legs), ['editor', 'play', 'title', 'load', 'steps']);
   assert.ok(r.legs.editor >= 1000, 'the bridge that did not answer first cost a poll');
   assert.ok(r.ms >= r.legs.editor + r.legs.title);
@@ -163,6 +173,11 @@ test('w1839: restage says why it failed, in the leg that failed', async () => {
   assert.match(slow.detail, new RegExp(`^the save "${SAVE}" was not in game after 3 s \\(wait: the save is loading\\)`));
   assert.deepEqual(Object.keys(slow.legs), ['editor', 'play', 'title']);
 
+  // w2255: a save the game cannot load says the bridge's answer.
+  const noSave = await restage(stand({ loadThrows: true }).deps, RECIPE, LIM);
+  assert.equal(noSave.ok, false);
+  assert.equal(noSave.detail, `the save "${SAVE}" did not load: error: FileNotFoundException: no such save`);
+
   // A game command the game refuses.
   const refused = await restage(stand({ ffautoFails: true }).deps, RECIPE, LIM);
   assert.equal(refused.ok, false);
@@ -193,7 +208,7 @@ test('w2255: a fresh editor whose play mode opens no channel: restage starts it 
   const s = stand({ channelClosed: true, hostLate: 2 });
   const r = await restage(s.deps, RECIPE, LIM);
   assert.equal(r.ok, true, r.detail);
-  assert.deepEqual(s.calls(), ['start-editor', 'look', 'play', 'dev-tier', 'title', 'cmd:game.loadsolo|' + SAVE, 'in-game', 'cmd:ui.hide|true', `csharp:${STEP_CS}`]);
+  assert.deepEqual(s.calls(), ['start-editor', 'look', 'play', 'dev-tier', 'title', `load:${SAVE}`, 'in-game', 'cmd:ui.hide|true', `csharp:${STEP_CS}`]);
   assert.equal(s.log.filter((l) => l === 'dev-tier').length, 3, 'asked again while the channel host was not there yet');
 
   // A game that never opens one says what the snippet last answered.

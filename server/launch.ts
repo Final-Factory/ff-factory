@@ -209,7 +209,7 @@ export const CATALOG = {
     stage: z
       .array(
         z.object({
-          load: z.string().optional().describe('The save name to load (game.loadsolo); first step only.'),
+          load: z.string().optional().describe('The save name to load (as game.loadsolo does); first step only.'),
           ffauto: z.string().optional().describe('A game command ("ui.hide|true", "camera.focus|x|z|distance").'),
           csharp: z.string().optional().describe('C# for the editor bridge.'),
           until: z.string().optional().describe('csharp: text its answer must contain before the next step.'),
