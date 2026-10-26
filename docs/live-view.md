@@ -207,7 +207,10 @@ first frame was that turn. Now the worker records once how it staged the view, a
      bench queue apply) and waits for its MCP bridge to answer (up to 20 min).
   2. **play**: enters play mode in `Assets/Scenes/main.unity` (3 min), unless it is playing already. An open scene with unsaved
      changes is never thrown away: that fails the replay with "play mode was not entered: an open scene has unsaved changes".
-     Then it waits for the game's agent channel and gives it the dev tier.
+     Then it starts the game's agent channel in the dev tier (`DEV_TIER_SNIPPET`, which calls `AgentChannelHost.StartChannel`)
+     and waits for it: a plain play mode opens none (the game's `AgentChannelHost.Bootstrap` starts one only for the launch
+     flag or the Agent Control setting), so a replay that only waited failed with "the game opened no agent channel in play
+     mode" (w2255: w2196 on m5/slot2, 2026-10-26 05:04Z, after its editor was closed idle).
   3. **title**, **load** (a recipe with `load`): waits for the title screen (2 min), runs `game.loadsolo|<save>`, and waits until
      the game is in the world (4 min).
   4. **steps**: the remaining steps, in order. The first one that fails ends the replay with its number and the answer.
@@ -336,6 +339,12 @@ sandbox, its branch, the worker's conversation and its hold stay.
      that updates at once quits first (w1829: BEAST's slot5 editor on 2026-10-24 quit cleanly at 05:54Z, 2 s after the
      call; the close counted as a skip, its mark was dropped and nothing started it again). With no answer, an editor
      whose process goes within 15 s (`ANSWER_LOST_WAIT_MS`) is closed, since the quit comes only after the save.
+  6. **No knob value is left in the worktree** (w2255). `SaveAssets` writes every dirty material, whatever made it dirty: on
+     m5/slot2 (w2196, 2026-10-26 03:37Z) it rewrote 11 `.mat` files, one with the view's ColorBR that nobody kept. So the
+     daemon reads `git status` for `.mat` files before the close and puts back each one the close wrote (`putBackMats`): one
+     clean before goes back to git's version, one changed before (an uncommitted Keep, the worker's edit) to its bytes then.
+     What the close wrote is copied first into `Logs/live-close-backup-<stamp>/` (ignored by git), and the close's log line
+     names the files. Skipping editors that hold a view instead would undo the close itself (lothsahn's ask above).
   A skipped close is asked again after another idle period. The crash watch is told first, so the quit is not restarted.
 - **Shown and logged.** A closed sandbox carries `idleClosed` (`MachineSandbox`, kept in the daemon's `sandboxes.json`):
   list_sandboxes shows "editor closed: idle 15 min; reopens on resume (closed HH:MMZ, saved ... first)" in place of

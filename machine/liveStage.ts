@@ -180,13 +180,15 @@ export async function restage(d: StageDeps, steps: readonly LiveStageStep[], lim
   let tier = '';
   const channel = await until(lim.playMs, async () => {
     ch = d.channel(pid);
-    if (!ch) return undefined;
-    if (ch.tier === 'all') return ch;
+    if (ch?.tier === 'all') return ch;
+    // w2255: a plain play mode opens no channel (the game's AgentChannelHost.Bootstrap starts one only for the launch flag
+    // or the Agent Control setting), so the snippet starts it too, not only moves an open one to the dev tier. Until the
+    // game's channel host exists it answers "not playing" or "no channel host", and the next poll asks again.
     tier = await d.bridge(DEV_TIER_SNIPPET);
     ch = d.channel(pid);
     return ch?.tier === 'all' ? ch : undefined;
   });
-  if (!channel) return fail(ch ? `the game's agent channel is not in the dev tier (${tier.slice(0, 120)})` : 'the game opened no agent channel in play mode');
+  if (!channel) return fail(ch ? `the game's agent channel is not in the dev tier (${tier.slice(0, 120)})` : `the game opened no agent channel in play mode (${tier.slice(0, 120) || 'no answer'})`);
   leg('play');
   const cmd = async (text: string) => {
     const c = d.channel(pid) ?? channel;

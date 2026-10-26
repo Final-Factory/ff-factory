@@ -39,7 +39,7 @@ import { readImage } from '../server/images.ts';
 import { publishFromMachine } from './review.ts';
 import { LOG_MAINTAIN_EVERY_MS, maintainLogs, maintenanceLine } from './logRetention.ts';
 import { DEV_TIER_SNIPPET, LiveSession, gameCommand, readGameChannel, type LiveDeps } from './live.ts';
-import { backupScenes, idleCloseEditor, idleClosedDetail, idleReopenNote } from './liveIdle.ts';
+import { backupScenes, idleCloseEditor, idleClosedDetail, idleReopenNote, putBackMats, snapshotMats, type MatSnapshot } from './liveIdle.ts';
 import { LIVE_MATERIAL_NAME, LIVE_PROPERTY_NAME, keepInMat, type MatKnobType } from './matText.ts';
 import { legsText, parseStage, restage, stageSummary, type LiveStageStep } from './liveStage.ts';
 import { FramePump, parseAck } from '../shared/framePump.ts';
@@ -1819,6 +1819,8 @@ export class Daemon {
     this.idleClosing.add(id);
     try {
       const bridge = this.editorBridge(id, sbPath);
+      // w2255: the close saves every dirty asset; the .mat files it writes are put back after it (putBackMats).
+      const mats: MatSnapshot | string = await snapshotMats(sbPath).catch((e: Error) => `could not read git status before the close (${e.message.slice(0, 160)})`);
       const res = await this.pool.idleClose(id, minutes, () =>
         idleCloseEditor(
           {
@@ -1831,6 +1833,8 @@ export class Daemon {
           minutes,
         ),
       );
+      const putBack = typeof mats === 'string' ? mats : await putBackMats(sbPath, mats, new Date());
+      if (putBack) res.text += `; ${putBack}`;
       log(`live: sandbox ${id}: its Live view sat idle ${minutes} min: editor ${res.text}`);
       if (res.closed) {
         for (const [liveId, l] of this.lives) {
