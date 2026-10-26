@@ -79,11 +79,31 @@ export const TITLE_READY_SNIPPET = [
   'return s != null && s.Loaded ? "ready" : "wait: title screen loading";',
 ].join('\n');
 
-/** The game is in a world with its player and camera (the content shader bench's WaitForGame, SaveThumbnailCapture.IsInGame). */
+/**
+ * Load a save from the title screen through the editor bridge, as `game.loadsolo` does (the game repo's
+ * LocalMultiplayerAutomationCommandRunner.ExecuteGameLoadSolo). Not through the agent channel: its router refuses every
+ * command outside a running game ("commands need a running game; the game is 'menu'", AgentRequestRouter.HandleCommand
+ * since 068), so a recipe's load never ran (w2255: m5/slot3, 2026-10-26 12:07Z). parseStage keeps the name a plain one.
+ */
+export function loadSnippet(save: string): string {
+  return [
+    'var s = UnityEngine.Object.FindFirstObjectByType<Behaviours.StartController>(UnityEngine.FindObjectsInactive.Include);',
+    'if (s == null || !s.Loaded) return "wait: title screen loading";',
+    `Serialization.SaveGameManager.LoadGame(FFNetcode.Lobby.LobbyCreationParameters.SinglePlayerGame, ${JSON.stringify(save)}, true);`,
+    'return "loading";',
+  ].join('\n');
+}
+
+/**
+ * The game is in a world with its player and camera, and its agent channel takes commands (AgentRequestRouter.CurrentState
+ * is "playing"). Not GameRunning.GameInitializer.InitialWorldSetupComplete: that class is internal, so a snippet naming it
+ * never compiled in the bridge ("'GameInitializer' is inaccessible due to its protection level", w2255).
+ */
 export const IN_GAME_SNIPPET = [
   'if (!UnityEngine.Application.isPlaying) return "wait: not playing";',
-  'var ready = FFCore.Extensions.Ecs.Ready && GameRunning.GameInitializer.InitialWorldSetupComplete && PlayerController.PlayersManager.LocalPlayerReady && PlayerController.PlayerCamera.Instance != null && !Serialization.SaveGameManager.IsWorldBeingReplaced;',
-  'return ready ? "ready" : "wait: the save is loading";',
+  'var state = Behaviours.Multiplayer.AgentControl.AgentRequestRouter.CurrentState();',
+  'var ready = FFCore.Extensions.Ecs.Ready && state == "playing" && PlayerController.PlayersManager.LocalPlayerReady && PlayerController.PlayerCamera.Instance != null && !Serialization.SaveGameManager.IsWorldBeingReplaced;',
+  'return ready ? "ready" : "wait: the save is loading (" + state + ")";',
 ].join('\n');
 
 export interface StageDeps {
@@ -212,8 +232,8 @@ export async function restage(d: StageDeps, steps: readonly LiveStageStep[], lim
     if (title !== undefined) return fail(`the title screen did not load in ${Math.round(lim.titleMs / 1000)} s (${title.slice(0, 120)})`);
     leg('title');
     d.progress(`setting the view up again: loading the save "${first.load}"`);
-    const r = await cmd(`game.loadsolo|${first.load}`);
-    if (!r.ok) return fail(`the save "${first.load}" did not load: ${r.result || r.status}`);
+    const r = await d.bridge(loadSnippet(first.load));
+    if (r !== 'loading') return fail(`the save "${first.load}" did not load: ${r.slice(0, 160)}`);
     const loaded = await snippetUntil(IN_GAME_SNIPPET, 'ready', lim.loadMs);
     if (loaded !== undefined) return fail(`the save "${first.load}" was not in game after ${Math.round(lim.loadMs / 1000)} s (${loaded.slice(0, 120)})`);
     leg('load');
