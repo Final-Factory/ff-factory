@@ -2096,6 +2096,12 @@ export interface WorkItem {
    * recorded in their own turn with their words; the blocker watch carries each out, or drops it, when its condition is met.
    */
   conditional?: ConditionalDecision[];
+  /**
+   * w2217 (w2192 sat 3 h as "the dispatcher has it to decide"): how long it has sat undecided, status `new`. `since`: when
+   * the blocker watch first saw it so (its updatedAt then); `reofferedAt`: when FF Factory offered it to the dispatcher again,
+   * once, past UNDECIDED_BOUND_MS (shared/workState.ts). Cleared when it leaves `new`.
+   */
+  undecided?: { since: string; reofferedAt?: string };
   /** The computers the dispatcher said can take it when it queued it for capacity (decide_work queue `needs`, w643). */
   queuedFor?: { at: string; needs?: string[] };
   /**
