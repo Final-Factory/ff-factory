@@ -229,6 +229,12 @@ export type ToDaemon =
    */
   | { type: 'timed_run'; order: TimedRunOrder }
   | { type: 'timed_run_upload'; id: string; uploadId: string; chunkBytes?: number }
+  /**
+   * w2218: stop a timed run the portal no longer waits for (it gave up on it, moved it, finished it, or never knew it): a
+   * queued one is dropped, the current one ends its leg and gives its ticket back, answered by a timed_run_done not ok. An
+   * older daemon ignores it.
+   */
+  | { type: 'timed_run_cancel'; id: string; why: string }
   /** Dial the portal at this base URL from now on (protocol 8, w466); answered by relocate_result, then the link closes. */
   | { type: 'relocate'; id: string; url: string }
   /** How often the daemon polls its Mac's own Claude login's plan usage (config usagePollMinutes), at connect and when it changes. */

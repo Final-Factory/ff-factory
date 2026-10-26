@@ -105,7 +105,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // onMessage drops (no default case); an older daemon never sends it, and portal_logs bench_hours then has no hours for it.
 // w2014 (no bump): `readChainNudge` on LaunchSpec, a pilot worker's PostToolUse hook; an older daemon ignores the field (its
 // workers then run as the control arm with the pilot's prompt mark), and a newer daemon with an older portal never gets it.
-const DECIDED = { protocol: 9, fingerprint: '989547bad4bbd001' };
+// w2218 (no bump): `timed_run_cancel`, the portal stopping a timed run it no longer waits for; an older daemon drops it (its
+// onMessage switch has no default case, machine/daemon.ts), and its run then ends as before; an older portal never sends it.
+const DECIDED = { protocol: 9, fingerprint: '697b0399463ab2df' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

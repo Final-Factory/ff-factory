@@ -184,6 +184,13 @@ export const windowsSavesDir = () => path.join(os.homedir(), 'AppData', 'LocalLo
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** End a leg's player and what it started (taskkill /T on Windows). */
+function killTree(child: ChildProcess | undefined) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  if (child.pid && process.platform === 'win32') spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true });
+  else child.kill('SIGKILL');
+}
+
 /** The machine's mean CPU load over `ms`, all cores, percent. */
 export async function cpuLoad(ms: number): Promise<number> {
   const snap = () => os.cpus().reduce((a, c) => ({ idle: a.idle + c.times.idle, all: a.all + c.times.idle + c.times.user + c.times.sys + c.times.irq + c.times.nice }), { idle: 0, all: 0 });
@@ -341,9 +348,57 @@ export class TimedRunner {
   private current?: string;
   private readonly uploads = new Map<string, (u: { uploadId: string; chunkBytes?: number }) => void>();
   private readonly d: TimedRunnerDeps;
+  /** w2218: the current run's cancel (the portal gave up on it, moved it, or no longer knows it), the waits it cuts short, its leg's player. */
+  private stop?: { id: string; why: string };
+  private readonly wakers = new Set<() => void>();
+  private child?: ChildProcess;
 
   constructor(d: TimedRunnerDeps) {
     this.d = d;
+  }
+
+  /**
+   * w2218: the portal's timed_run_cancel. A queued run is dropped; the current one ends where it is (its leg's player is
+   * ended, every wait is cut short) and its finally blocks give the ticket, the slot leases and the save back, so no
+   * ticket outlives a run the portal no longer waits for. Answered by a timed_run_done that is not ok. False: no such run here.
+   */
+  cancel(id: string, why: string): boolean {
+    const i = this.queue.findIndex((o) => o.id === id);
+    if (i >= 0) {
+      this.queue.splice(i, 1);
+      this.d.log(`timed run ${id}: cancelled before it started: ${why}`);
+      this.d.send({ type: 'timed_run_done', id, ok: false, error: `cancelled: ${why}`, summary: '', legs: [] });
+      return true;
+    }
+    if (this.current !== id) return false;
+    if (this.stop?.id === id) return true;
+    this.stop = { id, why };
+    this.d.log(`timed run ${id}: cancelled: ${why}; ending its leg and giving its ticket back`);
+    killTree(this.child);
+    for (const w of [...this.wakers]) w();
+    return true;
+  }
+
+  private checkStop(id: string) {
+    if (this.stop?.id === id) throw new Error(`cancelled: ${this.stop.why}`);
+  }
+
+  /** A wait that the run's cancel cuts short. */
+  private nap(id: string, ms: number): Promise<unknown> {
+    return this.until(id, sleep(ms));
+  }
+
+  /** `p`, or the run's cancel, whichever comes first. */
+  private until<T>(id: string, p: Promise<T>): Promise<T> {
+    this.checkStop(id);
+    return new Promise<T>((resolve, reject) => {
+      const wake = () => (this.wakers.delete(wake), reject(new Error(`cancelled: ${this.stop?.why ?? 'cancelled'}`)));
+      this.wakers.add(wake);
+      p.then(
+        (v) => (this.wakers.delete(wake), resolve(v)),
+        (e) => (this.wakers.delete(wake), reject(e)),
+      );
+    });
   }
 
   /** The runs here, running first: the hello names them, so the portal sends none twice. */
@@ -380,6 +435,7 @@ export class TimedRunner {
       this.d.send({ type: 'timed_run_done', id: o.id, ok: false, error: (e as Error).message, summary: '', legs: [] });
     } finally {
       this.current = undefined;
+      if (this.stop?.id === o.id) this.stop = undefined;
       void this.next();
     }
   }
@@ -415,6 +471,7 @@ export class TimedRunner {
     for (const p of missing) {
       const id = p.sha256 === o.save.sha256 ? o.save.id : o.pieceIds[p.sha256];
       if (!id) throw new Error(`the order names no attachment for piece ${p.sha256.slice(0, 12)}…`);
+      this.checkStop(o.id);
       await fetchPiece({ id, name: p.sha256, size: p.size, sha256: p.sha256, kind: 'file', mediaType: 'application/octet-stream' }, path.join(cache, p.sha256));
     }
     const now = new Date();
@@ -461,7 +518,7 @@ export class TimedRunner {
             const why = this.d.personBusy() ?? (foreignTicket(root) ? `another ticket is in this machine's bench queue (${foreignTicket(root)})` : undefined);
             if (!why) break;
             if (waited % 20 === 0) this.status(o.id, 'waiting', `waiting: ${why}`);
-            await sleep(poll);
+            await this.nap(o.id, poll);
           }
           ticket = takeTicket(root, { what: `timed run ${o.id}: ${o.what}`, session: o.session, requests: o.requests, maxMin: Math.ceil((order.length * legTimeoutS(o.settings)) / 60) + 5 });
           this.status(o.id, 'running', `holds the exclusive bench ticket ${ticket}: ${order.length} legs`);
@@ -481,6 +538,7 @@ export class TimedRunner {
       fs.rmSync(saveFile, { force: true });
     }
     // 6. The logs back, in probe_ab_win.sh's layout.
+    this.checkStop(o.id);
     const summary = summaryTable(legs);
     fs.writeFileSync(path.join(runDir, 'summary.tsv'), summary + '\n');
     fs.writeFileSync(path.join(runDir, 'contention.txt'), contention.join('\n') + '\n');
@@ -519,11 +577,11 @@ export class TimedRunner {
     }
   }
 
-  /** Wait while a person plays here (w1894), saying so every 20 looks. */
+  /** Wait while a person plays here (w1894), saying so every 20 looks. A worker computer's run holds no ticket meanwhile (w2218). */
   private async personWait(o: TimedRunOrder, when: string, poll: number) {
     for (let waited = 0; this.d.personBusy(); waited++) {
       if (waited % 20 === 0) this.status(o.id, 'waiting', `paused ${when}: ${this.d.personBusy()}`);
-      await sleep(poll);
+      await this.nap(o.id, poll);
     }
   }
 
@@ -554,7 +612,7 @@ export class TimedRunner {
         let pair: BorrowedPair | undefined;
         try {
           this.status(o.id, 'waiting', `turn ${turn}: queued for this computer's exclusive bench ticket (${order.length - next} legs left)`);
-          const s = await ticket.wait(Infinity, (line) => this.status(o.id, 'waiting', `turn ${turn}: ${line}`.slice(0, 280)));
+          const s = await this.until(o.id, ticket.wait(Infinity, (line) => this.status(o.id, 'waiting', `turn ${turn}: ${line}`.slice(0, 280))));
           if (s.kind !== 'granted') throw new Error(`the bench queue did not grant the ticket: ${s.line}`);
           // The turn's quiet machine (BenchTurn) asks the other players to quit; their leases end with them.
           // A pair whose player folder cannot be replaced (a player still runs from it, which Windows refuses) is given
@@ -577,7 +635,7 @@ export class TimedRunner {
             if (waited * x.poll > 5 * 60_000) throw new Error(`no sandbox's player-slot pair here came free within 5 minutes of the turn (${w.sandboxIds().join(', ')})`);
             if (waited % 4 === 0) this.status(o.id, 'waiting', `turn ${turn}: holds ${s.ticket}; waiting for a free player-slot pair`);
             busy.clear();
-            await sleep(x.poll);
+            await this.nap(o.id, x.poll);
           }
           const start = Date.now();
           let ran = 0;
@@ -588,9 +646,18 @@ export class TimedRunner {
             if (ticket.state().kind !== 'granted') break;
             const leg = order[next];
             const v = o.variants.find((y) => y.name === leg.variant)!;
-            await this.personWait(o, `before ${leg.variant} round ${leg.round}`, x.poll);
+            // w2218: a person who starts playing mid-turn ends the turn: the ticket goes back now and the run waits for them
+            // without it, before its next turn. Waiting here held the exclusive ticket for as long as they played, and a
+            // one-agent computer's queue sets no turn limit (bench_queue.py _enforce_limits, single_worker), so nothing took it back.
+            const person = this.d.personBusy();
+            if (person) {
+              x.contention.push(`${new Date().toISOString()} turn ${turn} ended before ${leg.variant} round ${leg.round}: ${person}`);
+              this.status(o.id, 'waiting', `turn ${turn}: a person plays here, so its ticket goes back; it waits for them without one`);
+              break;
+            }
             const t0 = Date.now();
             x.legs.push(await this.leg(o, v, leg.round, path.join(pair.slots[x.buildOf.get(v.name)!], 'player', PLAYER_EXE), x.saveName, x.runDir, x.contention));
+            this.checkStop(o.id);
             longest = seen ? Math.max(longest, Date.now() - t0) : Date.now() - t0;
             seen = true;
             next++;
@@ -617,7 +684,7 @@ export class TimedRunner {
     fs.mkdirSync(out, { recursive: true });
     // Quiet: other load on this machine under 25% for 5 s, waiting 2 minutes at most (quiet_gate.sh waits 5 and goes on).
     let load = 100;
-    for (let i = 0; i < 24 && (load = await cpuLoad(this.d.pollMs ? 10 : 5000)) >= 25; i++);
+    for (let i = 0; i < 24 && (load = await this.until(o.id, cpuLoad(this.d.pollMs ? 10 : 5000))) >= 25; i++);
     const mem = () => Math.round(100 * (1 - os.freemem() / os.totalmem()));
     contention.push(`${new Date().toISOString()} ${v.name} round ${round} start: cpu=${load.toFixed(0)}% ram=${mem()}%${load >= 25 ? ' (still busy after 2 minutes: ran anyway)' : ''}`);
     const logFile = path.join(out, 'player.log');
@@ -634,17 +701,19 @@ export class TimedRunner {
     })();
     // w1996: the asking worker's session, so a worker computer's bench turn (machine/benchTurn.ts) spares the run's own player
     const env = { ...process.env, FF_SESSION_ID: o.session };
+    this.checkStop(o.id);
     const child = (this.d.spawnPlayer ?? ((e, a, cwd) => spawn(e, a, { cwd, env, stdio: 'ignore', windowsHide: false })))(exe, args, path.dirname(exe));
+    this.child = child;
     const bound = legTimeoutS(o.settings) * 1000;
     const code = await new Promise<number | string>((resolve) => {
       const timer = setTimeout(() => {
-        if (child.pid && process.platform === 'win32') spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true });
-        else child.kill('SIGKILL');
+        killTree(child);
         resolve('timeout');
       }, bound);
       child.on('error', (e) => (clearTimeout(timer), resolve(`error: ${e.message}`)));
       child.on('exit', (c) => (clearTimeout(timer), resolve(c ?? -1)));
     });
+    this.child = undefined;
     running = false;
     await sampler;
     const seconds = Math.round((Date.now() - start) / 1000);
