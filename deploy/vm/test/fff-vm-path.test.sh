@@ -128,10 +128,13 @@ echo "tailscale $*" >>"$D/calls"
 case "$*" in
   "status --json")
     if [ -f "$L/ts-status.fail" ]; then cat "$L/ts-status.fail" >&2; exit 1; fi
-    # @AGO:N@ is a time N seconds before now
+    # @AGO:N@ is a time N seconds before now: in UTC (...Z), or with ts-local-time (a zone name) as tailscaled on the
+    # VM writes it, in that zone with nanoseconds ("2026-10-26T15:51:26.112734631-06:00", w2311)
     out=$(cat "$L/ts-status.json")
     for n in $(grep -o '@AGO:[0-9]*@' "$L/ts-status.json" | sort -u | tr -d '@' | cut -d: -f2); do
-      out=$(printf '%s' "$out" | sed "s/@AGO:$n@/$(date -u -d "@$(($(date +%s) - n))" +%FT%TZ)/g")
+      if [ -f "$L/ts-local-time" ]; then t=$(TZ=$(cat "$L/ts-local-time") date -d "@$(($(date +%s) - n))" +%FT%T.%N%:z)
+      else t=$(date -u -d "@$(($(date +%s) - n))" +%FT%TZ); fi
+      out=$(printf '%s' "$out" | sed "s/@AGO:$n@/$t/g")
     done
     printf '%s\n' "$out" ;;
   "serve status --json") cat "$L/ts-serve.json" ;;
@@ -645,6 +648,25 @@ pass 2
 is 8 ok
 [ "$(calls 'systemctl restart tailscaled')" = 0 ] || fail "L8: restarted although the outside probe passes"
 ok "funnel servers: old handshakes alone are fine while the outside probe passes (nothing connects when nobody visits)"
+# tailscaled on the VM writes LastHandshake in the VM's zone with nanoseconds (America/Denver: ...-06:00); jq's
+# fromdateiso8601 refused it, so layer 8 failed with "could not read the Funnel servers" (w2311, 2026-10-26)
+for zone in America/Denver Asia/Kolkata; do
+  scen
+  echo "$zone" >"$FAKE_DIR/live/ts-local-time"
+  pass
+  is 8 ok
+  said "path L8 Funnel servers: ok: 4 Funnel server peer(s), newest handshake 0 min ago"
+  scen funnel-stale
+  echo "$zone" >"$FAKE_DIR/live/ts-local-time"
+  pass
+  is 8 ok
+  said "path L8 Funnel servers: ok: 4 Funnel server peer(s), newest handshake 120 min ago"
+  scen e2e-timeout
+  echo "$zone" >"$FAKE_DIR/live/ts-local-time"
+  pass
+  said "2 of 4 Funnel server peer(s) with a handshake in 5 min"
+done
+ok "funnel servers: handshake times in the VM's own zone with nanoseconds (-06:00, +05:30) read as their UTC instant: layer 8 and the end-to-end evidence count them right"
 scen funnel-nopeers
 pass
 is 8 fail
