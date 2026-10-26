@@ -1097,6 +1097,14 @@ functionality needed"), it takes one named operation and nothing else:
    check-in (`Agents.timedRunDelivered`). The worker ends its turn after `timed_run` answers, with a wake_me check-in of the
    run's bound as the fallback. A run far past its bound is failed and its worker told (`TimedRuns.tick`). A daemon that
    restarted mid-run gets the run again from its hello (`timedActive`).
+   **No ticket outlives its run** (w2218, lothsahn: "Please fix that, figure out how to happened, and fix so it can't happen
+   again"). The portal tells the daemon `timed_run_cancel` for a run it no longer waits for there: one it gave up on
+   (`tick`), and one a hello's `timedActive` or a status report names that it already ended, moved elsewhere or never knew
+   (`notHere`, `cancelOn`; an offline daemon is told at its next hello). The daemon (`TimedRunner.cancel`) drops a queued
+   run, or ends the current one where it is: its leg's player is ended and every wait (a person playing, the ticket, a slot
+   pair, the quiet machine) is cut short, so its `finally` blocks give the ticket, the slot leases and the save back. None of
+   it depends on the worker that sent the run: a stopped worker only misses the result message. An older daemon drops the
+   message (no protocol bump). Tests: `server/w2218TimedRunCancel.test.ts`.
 
 **Small worker computers take a `timed_run` too** (w1996, [scheduling.md](scheduling.md); lothsahn, 2026-10-24: "figure
 out how to efficiently use the machines with a small number of slots for jobs that do exclusive locks and the machines with a
@@ -1113,7 +1121,10 @@ fewest agent slots. On a worker computer the daemon (`machine/timedRunner.ts` `w
   the daemon itself: BenchTurn spares what a ticket's owner started, and the daemon started every editor. Its players carry
   the worker's session, so BenchTurn spares them and nothing else.
 - **Turns**: a turn plays the legs that fit in `TURN_PLAN_MS` (24 minutes, before the queue's 25-minute warning) by the
-  longest leg so far, gives the ticket back and queues again for the rest. A revoked turn ends after its leg.
+  longest leg so far, gives the ticket back and queues again for the rest. A revoked turn ends after its leg. A person who
+  starts playing mid-turn ends the turn too (w2218): the run waits for them with no ticket, before its next turn. It used to
+  wait holding the exclusive ticket, and once the portal no longer counted the run, a one-agent computer's queue set no turn
+  limit (`singleWorker`), so nothing took the ticket back.
 - **Borrowed player slots**: the builds are laid out under `<root>/timing/builds/b0|b1`, and during the turn hard-linked into
   the player-slot pair of a sandbox that no live lease holds (`borrowPair`, `slotFree`: the game repo's
   `scripts/nightly/player_slots.py` lease rules), the only folders whose firewall rules exist. The run leases them for its

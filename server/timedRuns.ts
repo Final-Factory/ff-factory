@@ -320,6 +320,12 @@ export class TimedRuns {
 
   /** A daemon said hello: what it runs now; runs sent to it before and not among them are sent again (it restarted). */
   onHello(machineId: string, active: string[] | undefined) {
+    // w2218: a run its daemon still holds that the portal no longer waits for there (finished, failed, moved or unknown)
+    // is stopped, so its ticket goes back whether or not the worker that sent it is still there to notice.
+    for (const id of active ?? []) {
+      const why = this.notHere(machineId, id);
+      if (why) this.cancelOn(machineId, id, why);
+    }
     for (const r of this.runs.values()) {
       if (r.machine !== machineId) continue;
       if ((r.state === 'sent' || r.state === 'running') && !(active ?? []).includes(r.id)) this.set(r, 'queued', `${machineId}'s daemon restarted: sent again`);
@@ -330,7 +336,12 @@ export class TimedRuns {
   /** What a timing machine's daemon reports of a run. */
   onReport(machineId: string, m: { type: string; id?: string; state?: string; line?: string; ok?: boolean; error?: string; summary?: string; legs?: LegSummary[]; result?: { name?: string; size?: number; sha256?: string }; attachmentId?: string }) {
     const r = this.runs.get(String(m.id ?? ''));
-    if (!r || r.machine !== machineId || r.state === 'done' || r.state === 'failed') return;
+    if (!r || r.machine !== machineId || r.state === 'done' || r.state === 'failed') {
+      // w2218: a run still reporting progress that the portal no longer waits for there is stopped (its ticket goes back)
+      const why = m.type === 'timed_run_status' && m.state !== 'uploading' ? this.notHere(machineId, String(m.id ?? '')) : undefined;
+      if (why) this.cancelOn(machineId, String(m.id), why);
+      return;
+    }
     if (m.type === 'timed_run_status') {
       this.set(r, m.state === 'running' ? 'running' : r.state === 'queued' ? 'sent' : r.state, String(m.line ?? '').slice(0, 300));
       return;
@@ -359,6 +370,22 @@ export class TimedRuns {
       else r.error = [r.error, `its logs did not come back${m.error ? `: ${String(m.error).slice(0, 200)}` : ''}`].filter(Boolean).join('; ');
       void this.finish(r, r.legs?.some((l) => l.ok) ? 'done' : 'failed');
     }
+  }
+
+  /** w2218: why the portal no longer waits for run `id` on `machineId` (it never knew it, finished it or moved it), or undefined. */
+  private notHere(machineId: string, id: string): string | undefined {
+    if (!/^tr_[0-9a-f]{10}$/.test(id)) return undefined;
+    const r = this.runs.get(id);
+    if (!r) return 'the portal has no such run';
+    if (r.machine !== machineId) return `the portal moved it to ${r.machine}`;
+    if (r.state === 'done' || r.state === 'failed') return `the portal already ended it (${r.state}${r.error ? `: ${r.error.slice(0, 120)}` : ''})`;
+    return undefined;
+  }
+
+  /** w2218: tell `machineId`'s daemon to stop run `id` and give its ticket back (machine/timedRunner.ts cancel); an offline one is told on its hello. */
+  private cancelOn(machineId: string, id: string, why: string) {
+    const sent = this.d.isOnline(machineId) && this.d.post(machineId, { type: 'timed_run_cancel', id, why });
+    this.d.log?.(`timed run ${id}: ${sent ? `told ${machineId} to stop it` : `${machineId} is told to stop it when it says hello`}: ${why}`);
   }
 
   /** Tell the worker how it went, with the logs. */
@@ -454,7 +481,10 @@ export class TimedRuns {
       const bound = (s ? runBoundMinutes(s, r.order!.variants.length) : 60) + (r.state === 'uploading' ? 60 : 120);
       if (now - Date.parse(r.updatedAt) > bound * 60_000) {
         r.error = r.state === 'uploading' ? 'its pieces never all arrived' : `nothing heard from ${r.machine} for ${bound} min (${r.line ?? r.state})`;
+        const held = r.state === 'sent' || r.state === 'running';
         void this.finish(r, 'failed');
+        // w2218: its daemon may still hold the run and its exclusive ticket; it stops now, or on its next hello
+        if (held) this.cancelOn(r.machine, r.id, `the portal gave up on it: ${r.error}`);
       }
     }
     const old = Object.entries(this.pieces).filter(([, p]) => now - Date.parse(p.usedAt) > PIECE_KEEP_MS);

@@ -2494,6 +2494,10 @@ export class Daemon {
       case 'timed_run_upload':
         this.timed?.uploadReady(msg.id, msg.uploadId, msg.chunkBytes);
         return;
+      case 'timed_run_cancel':
+        // w2218: the portal no longer waits for this run; its ticket goes back with it
+        if (!this.timed?.cancel(msg.id, msg.why)) log(`timed run ${msg.id}: cancel (${msg.why}): not here`);
+        return;
       case 'bench_priorities':
         // Each worker's request priority (w1628): the game repo's bench_queue.py orders tickets by it first.
         this.benchMarks = msg.sessions;
