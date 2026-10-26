@@ -112,7 +112,8 @@ export function needsBuild(w: Pick<WorkItem, 'needs' | 'build' | 'title' | 'brie
  * Timed work named in words (w1628): a benchmark, a perf A/B or probe, a timed run or leg, frame times. Not "fps" alone
  * (60 fps clips are visual work) and not a bare "performance".
  */
-export const TIMED_WORDS = /\b(?:bench(?:mark)?(?:s|ed|ing)?|perf (?:a\/b|probe|test|run|fix|regression)s?|performance (?:a\/b|probe|test|run|regression|fix)s?|timed (?:runs?|legs?|a\/b)|timing (?:runs?|legs?)|exclusive (?:bench )?(?:locks?|tickets?)|probe_ab\w*|frame ?times?|a\/b (?:runs?|test|legs?))\b/i;
+// w2277: profiling, p99 frames and FPS drops or before/after are timed work too (w2257 and w2265 were p99 and FPS-drop profiling).
+export const TIMED_WORDS = /\b(?:bench(?:mark)?(?:s|ed|ing)?|perf (?:a\/b|probe|test|run|fix|regression)s?|performance (?:a\/b|probe|test|run|regression|fix)s?|timed (?:runs?|legs?|a\/b)|timing (?:runs?|legs?)|exclusive (?:bench )?(?:locks?|tickets?)|probe_ab\w*|frame ?times?|a\/b (?:runs?|test|legs?)|profil(?:ing|er captures?)|profile (?:it|and fix|the (?:save|frames?|fps))|p(?:95|99)s?(?: frames?)?|fps (?:drops?|regressions?|before\/after|a\/b|probes?)|drops? (?:the )?fps|before\/after (?:fps|frames?|timings?))\b/i;
 
 // A clause's last words that rule the timed word after them out ("no bench lock", "without a benchmark", "not a timed run").
 const NEGATED_BEFORE = /(?:\b(?:no|without|never|nor|none)\b(?:\s+\S+){0,3}|\bnot(?:\s+(?:a|an|any|the))?)\s*$/i;

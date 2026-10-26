@@ -239,6 +239,8 @@ export interface OrchestratorsDeps {
   startTimedLeg?: (w: WorkItem, machine: string, why: string, moves: readonly Occupant[]) => boolean;
   /** w2168: a started leg waiting for an exclusive ticket on a big computer moves to an idle small one: its log line, if it did. */
   relocateTimedLeg?: (w: WorkItem) => string | undefined;
+  /** w2277: withdraw big-computer fallback "here" answers once a small timed computer is idle (Agents.withdrawStaleTimedHere). */
+  withdrawStaleTimedHere?: () => string[];
   /** Whether a machine is online; undefined for a machine this portal does not have (w643: blockers). */
   machineOnline?: (id: string) => boolean | undefined;
   /** w2045: whether a request is in the merge-on-green pilot's arm (server/mergeOnGreen.ts); absent: no request is. */
@@ -3612,9 +3614,21 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
     if (!this.d.timedLegStep) return this.timedLegBoundW2048();
     const done: string[] = [];
     const widened: string[] = [];
+    for (const id of this.d.withdrawStaleTimedHere?.() ?? []) if (!done.includes(id)) done.push(id);
     for (const w of this.store.work.values()) {
       const leg = w.timedLeg;
-      if (!leg || !isOpen(w)) continue;
+      if (!isOpen(w)) continue;
+      if (!leg) {
+        // w2277: a started request marked timed that waits for a bench ticket on a big computer moves the same way.
+        if (w.status === 'queued' || !needsTimed(w)) continue;
+        const moved = this.d.relocateTimedLeg?.(w);
+        if (moved) {
+          this.stamp(w, moved);
+          this.store.putWork(w);
+          done.push(w.id);
+        }
+        continue;
+      }
       if (w.status !== 'queued') {
         // w2168: a started leg that waits for an exclusive ticket on a big computer moves to a small one that became idle.
         const moved = this.d.relocateTimedLeg?.(w);

@@ -632,6 +632,12 @@ export interface TimedVerdict {
   /** elsewhere: the request its leg was filed as, or the play-only computer of its timed_run. */
   leg?: string;
   timedRun?: string;
+  /**
+   * here: given as w2048's big-computer fallback (every small computer unavailable then), on this platform. Such a "here" is
+   * withdrawn once a small computer that takes timed runs is idle (w2277, Agents.withdrawStaleTimedHere).
+   */
+  fallback?: boolean;
+  platform?: string;
 }
 
 /**
