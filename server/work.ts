@@ -527,6 +527,24 @@ export function doneOf(w: Pick<WorkItem, 'done' | 'reopenedAt'>): NonNullable<Wo
   return Object.fromEntries(Object.entries(w.done ?? {}).filter(([, d]) => afterReopen(w, d.at)));
 }
 
+/**
+ * Whether worker `s` is a leg of an earlier attempt of pair run `w` that a newer attempt replaced, once the newest
+ * attempt's host leg said DONE with the verdict (w2239, lothsahn: "once the attempt that produced a pair run's verdict has
+ * finished, the request closes, even if worker legs from earlier failed or replaced attempts never said DONE"). Each retry's
+ * legs overwrite WorkItem.pair.started (Orchestrators.pairStarted), so such a leg is one not among them, started before
+ * them, and not done. It counts as ended: w2175's 1168453d (stopped while waiting for a host LISTENING) and w2224's
+ * 1a047a74 (an earlier host leg) kept their requests open after the newest legs said DONE. A worker started after the
+ * newest legs (a moved leg's new session, a follow-up) is never one.
+ */
+export function replacedLeg(w: Pick<WorkItem, 'pair' | 'done' | 'reopenedAt'>, s: { id: string; createdAt?: string }): boolean {
+  const started = w.pair?.started;
+  const host = started?.legs[0]?.session;
+  const done = doneOf(w);
+  if (!started || !host || !done[host] || done[s.id] || started.legs.some((l) => l.session === s.id)) return false;
+  const born = Date.parse(s.createdAt ?? '');
+  return Number.isFinite(born) && born < Date.parse(started.at);
+}
+
 /** Notes in a request's log from before WorkItem.notes (w496): "10:02 Ben: …; note: <text>", clipped as logged. */
 const LOGGED_NOTE = /^(\d\d:\d\d) ([^:]+): (?:.*; )?note: (.+?)(?:; answers the design question .*)?$/;
 

@@ -25,7 +25,7 @@ import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
 import { dryRun } from './dryRun.ts';
 import { run as runProc } from './proc.ts';
 import { ghRunner } from './githubTokens.ts';
-import { afterReopen, doneOf, isOpen, settleByHand } from './work.ts';
+import { afterReopen, doneOf, isOpen, replacedLeg, settleByHand } from './work.ts';
 import {
   STALL_AFTER_MS,
   REPORT_QUIET_MS,
@@ -242,7 +242,7 @@ export class LedgerSweep {
         const live = this.d.store.work.get(w.id);
         if (!live || !(isOpen(live) || live.status === 'stalled')) continue;
         if (live.approval?.state === 'pending') continue;
-        const workers = live.sessionIds.map((id) => this.d.store.sessions.get(id)).filter((s): s is SessionInfo => !!s);
+        const workers = live.sessionIds.map((id) => this.d.store.sessions.get(id)).filter((s): s is SessionInfo => !!s && !replacedLeg(live, s));
         // A DONE refused while a PR was open, whose PRs are all merged or closed now (w515): it closes on that DONE, unless its
         // latest worker's turn since ended in an error or was interrupted (w1870): that is handled below instead.
         if (Object.keys(doneOf(live)).length && !(live.prs ?? []).some((p) => p.state === 'open') && !this.troubleOf(workers) && this.d.orchestrators.recheckDone(live.id, 'its PRs have merged or closed since')) {
@@ -409,7 +409,7 @@ export class LedgerSweep {
       }
       checked++;
       try {
-        const workers = w.sessionIds.map((id) => this.d.store.sessions.get(id)).filter((s): s is SessionInfo => !!s);
+        const workers = w.sessionIds.map((id) => this.d.store.sessions.get(id)).filter((s): s is SessionInfo => !!s && !replacedLeg(w, s)); // w2239: not an earlier pair attempt's replaced leg
         const listed = new Map(all.map((p) => [`${p.repo.toLowerCase()}#${p.number}`, p]));
         const records = [...all];
         for (const p of w.prs ?? []) {
@@ -529,7 +529,7 @@ export class LedgerSweep {
       if (!(isOpen(w) || w.status === 'stalled') || acts.some((a) => a.id === w.id && a.kind === 'closed')) continue;
       const prs = w.prs ?? [];
       if (!prs.some((p) => p.state === 'merged') || prs.some((p) => p.state === 'open')) continue;
-      const workers = w.sessionIds.map((id) => this.d.store.sessions.get(id)).filter((s): s is SessionInfo => !!s);
+      const workers = w.sessionIds.map((id) => this.d.store.sessions.get(id)).filter((s): s is SessionInfo => !!s && !replacedLeg(w, s)); // w2239: not an earlier pair attempt's replaced leg
       const busy = workers.filter((s) => BUSY.has(s.status) || holdsItsPlace(s, this.now()));
       const reason =
         w.question ? 'it waits on a question' : w.flag ? (w.flag.kind === 'error' ? 'it waits on an escalated error' : 'it waits on a design question') : busy.length ? `its worker ${busy.map((s) => s.id).join(', ')} is busy or waiting, so the cleanup leaves it alone` : (partOfReason(w.id, prs) ?? afterMergeReason(w, workers.map((s) => s.lastResult ?? '')) ?? 'nothing found left; the next pass closes it');
@@ -924,7 +924,7 @@ export class LedgerSweep {
     const list = [...this.d.store.work.values()].filter((w) => closedAt(w) >= since);
     console.log(`ledger cleanup: w1870 check: ${list.length} request(s) closed automatically in the last 24 h`);
     for (const w of list) {
-      const workers = w.sessionIds.map((id) => this.d.store.sessions.get(id)).filter((s): s is SessionInfo => !!s);
+      const workers = w.sessionIds.map((id) => this.d.store.sessions.get(id)).filter((s): s is SessionInfo => !!s && !replacedLeg(w, s)); // w2239: not an earlier pair attempt's replaced leg
       const tr = this.troubleOf(workers);
       const notDone = notDoneReason(w, workers);
       let now: string;

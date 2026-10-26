@@ -6567,3 +6567,46 @@ test('w2217: a request left undecided past the bound is offered to the dispatche
   o.undecidedBound();
   assert.equal(store.work.get('w1')!.undecided, undefined);
 });
+
+test('w2239: a pair run closes on its newest attempt\'s DONEs though a leg of an earlier attempt never said DONE (w2175: stopped waiting for LISTENING; w2224: an earlier host leg still alive)', async (t) => {
+  const { store, o } = await setupOnMachine(t);
+  const T1 = '2026-09-28T10:00:00.000Z';
+  const later = (min: number) => new Date(Date.parse(T1) + min * 60_000).toISOString();
+  const worker = (id: string, createdAt: string, status: SessionInfo['status'], lastResult?: string) =>
+    store.putSession({ id, kind: 'worker', title: `leg ${id}`, status, permissionMode: 'bypassPermissions', createdAt, lastActivityAt: createdAt, turns: 1, costUsd: 0, pendingPermissions: [], requestedBy: LOTH, ...(lastResult ? { lastResult } : {}) } as unknown as SessionInfo);
+  const pairOf = (id: string, sessions: string[], legs: [string, string]) =>
+    putRequests(store, [{ id, title: `Pair run for w1: MP-check on PR #2545`, status: 'active', sessionIds: sessions, pair: { legs: 2, for: 'w1', started: { at: T1, legs: [{ session: legs[0], sandbox: 'lothdesktop/slot4' }, { session: legs[1], sandbox: 'biscuit/slot1' }] } } }]);
+  const done = (sid: string, id: string, min: number, text: string) =>
+    o.workerTurnEnded({ ...store.sessions.get(sid)!, lastActivityAt: later(min) }, `${text}\nDONE: ${id}\nLearned: nothing new`);
+
+  // w2175: the first attempt's client leg 1168453d stopped while waiting for the host's LISTENING, its last report still
+  // open; the retry's legs 492fba05 (host) and 5bb89b8d (client) started at T1.
+  worker('1168453d', T0, 'stopped', 'w2: still open: waiting for the host leg to say it\'s listening, then the client run and its reports');
+  worker('492fba05', T1, 'idle');
+  worker('5bb89b8d', T1, 'idle');
+  pairOf('w2', ['1168453d', '492fba05', '5bb89b8d'], ['492fba05', '5bb89b8d']);
+  done('5bb89b8d', 'w2', 1, 'The client side passed: no desync.');
+  assert.equal(store.work.get('w2')!.status, 'active', 'the host leg 492fba05 of the newest attempt is still on it');
+  done('492fba05', 'w2', 2, 'For w1: PASS, 422 samples compared, 0 diverged.');
+  assert.equal(store.work.get('w2')!.status, 'done', 'the old leg 1168453d was replaced: it no longer holds the request open');
+
+  // w2224: the earlier host leg 1a047a74 is still alive (idle, its last report open); the newest host 8c99712e gives the
+  // verdict, then its client baa08a3b says DONE.
+  worker('1a047a74', T0, 'idle', 'w3: still open: waiting for the client to join');
+  worker('8c99712e', T1, 'idle');
+  worker('baa08a3b', T1, 'idle');
+  pairOf('w3', ['1a047a74', '8c99712e', 'baa08a3b'], ['8c99712e', 'baa08a3b']);
+  done('8c99712e', 'w3', 1, 'For w1: PASS, 539 compared, 0 diverged.');
+  assert.equal(store.work.get('w3')!.status, 'active', 'the newest attempt\'s client baa08a3b is still on it');
+  done('baa08a3b', 'w3', 2, 'The client reports its part done.');
+  assert.equal(store.work.get('w3')!.status, 'done');
+
+  // Until the newest attempt's host leg said DONE, an earlier leg still counts: the verdict is not in yet.
+  worker('aa000001', T0, 'stopped', 'w4: still open: waiting for the host leg to say it\'s listening');
+  worker('bb000001', T1, 'idle');
+  worker('cc000001', T1, 'idle');
+  pairOf('w4', ['aa000001', 'bb000001', 'cc000001'], ['bb000001', 'cc000001']);
+  done('cc000001', 'w4', 1, 'The client side passed.');
+  assert.equal(store.work.get('w4')!.status, 'active');
+  assert.match(store.work.get('w4')!.log.join('\n'), /still on it: aa000001, bb000001/);
+});
