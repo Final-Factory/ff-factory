@@ -134,6 +134,10 @@ const SWITCH = /^-ff[A-Za-z][A-Za-z0-9]{0,63}$/;
 const VALUE = /^[A-Za-z0-9_.:+-]{1,64}$/;
 /** Switches the run sets itself: a variant may not move the save, the commands, the log or the quit. */
 const OWN_SWITCH = /^-ff(Automation|SoloQuit|Solo|LoadSave|Bench)/i;
+/** Bench switches that only place the player and move none of those (w2230: -ffBenchStartTile -1,-228, the Mall spot). */
+const PLACEMENT_SWITCH = /^-ffBenchStartTile$/i;
+/** A number or a comma list of them, negatives included (a tile "-1,-228"), as the value after a switch. */
+const NUMBERS = /^-?\d+(\.\d+)?(,-?\d+(\.\d+)?){0,3}$/;
 
 /** Why a variant's own arguments are refused, or undefined: -ff switches only, each optionally followed by one plain value. */
 export function timedArgsProblem(args: unknown): string | undefined {
@@ -143,10 +147,10 @@ export function timedArgsProblem(args: unknown): string | undefined {
     const a = args[i];
     if (typeof a !== 'string') return 'args: strings only';
     if (SWITCH.test(a)) {
-      if (OWN_SWITCH.test(a)) return `args: ${a} is set by the run itself (the save, the commands, the quit); only other -ff switches`;
+      if (OWN_SWITCH.test(a) && !PLACEMENT_SWITCH.test(a)) return `args: ${a} is set by the run itself (the save, the commands, the quit); only other -ff switches`;
       continue;
     }
-    if (i > 0 && SWITCH.test(String(args[i - 1])) && VALUE.test(a) && !a.startsWith('-')) continue;
+    if (i > 0 && SWITCH.test(String(args[i - 1])) && ((VALUE.test(a) && !a.startsWith('-')) || NUMBERS.test(a))) continue;
     return `args: "${a.slice(0, 40)}" is not a -ff switch or a plain value after one (a timed run takes the game's own -ff switches only, w1946)`;
   }
   return undefined;

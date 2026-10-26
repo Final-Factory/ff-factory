@@ -51,6 +51,10 @@ test('a variant takes -ff switches only, never the run\'s own or a command', () 
   assert.equal(timedArgsProblem(['-ffShadowQuality', '2']), undefined);
   assert.match(timedArgsProblem(['-ffSoloLoad', 'x']) ?? '', /set by the run itself/);
   assert.match(timedArgsProblem(['-ffAutomationSave', 'other']) ?? '', /set by the run itself/);
+  assert.match(timedArgsProblem(['-ffBench', 'x']) ?? '', /set by the run itself/);
+  assert.equal(timedArgsProblem(['-ffBenchStartTile', '-1,-228']), undefined);
+  assert.equal(timedArgsProblem(['-ffX', '-2.5']), undefined);
+  assert.match(timedArgsProblem(['-ffX', '-1,-2,-3,-4,-5']) ?? '', /not a -ff switch/);
   assert.match(timedArgsProblem(['-logFile', 'C:/x']) ?? '', /not a -ff switch/);
   assert.match(timedArgsProblem(['cmd.exe']) ?? '', /not a -ff switch/);
   assert.match(timedArgsProblem(['-ffX', 'a b']) ?? '', /not a -ff switch/);
