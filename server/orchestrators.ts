@@ -39,6 +39,7 @@ import {
   settleByHand,
   reopenWork,
   doneOf,
+  replacedLeg,
   filingKeys,
   updateNotice,
   updateProblem,
@@ -4317,14 +4318,15 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
   /**
    * The workers still on a request, apart from `except` (w434): linked to it, still serving it (servedBy: not moved on to
    * newer work), alive (not stopped, errored or gone) or stopped with work still pending on it (pendingOn, w1972), and
-   * not done with their part (WorkItem.done).
+   * not done with their part (WorkItem.done), nor a pair run's leg that a newer attempt replaced once that attempt's host
+   * leg said DONE (replacedLeg, w2239).
    */
   private stillOn(w: WorkItem, except?: string): string[] {
     const all = [...this.store.work.values()];
     return w.sessionIds.filter((id) => {
       if (id === except || doneOf(w)[id]) return false;
       const s = this.store.sessions.get(id);
-      if (!s || ((s.status === 'stopped' || s.status === 'error') && !this.pendingOn(w, id))) return false;
+      if (!s || replacedLeg(w, s) || ((s.status === 'stopped' || s.status === 'error') && !this.pendingOn(w, id))) return false;
       return servedBy(id, all).has(w.id);
     });
   }
@@ -4395,7 +4397,9 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       if (!isOpen(w) || !w.sessionIds.includes(s.id) || !Object.keys(done).length || done[s.id] || this.stillOn(w, s.id).length) continue;
       const status = this.store.sessions.get(s.id)?.status;
       if (status && status !== 'stopped' && status !== 'error' && this.stillOn(w).length) continue;
-      const pending = this.pendingOn(w, s.id);
+      const ended = this.store.sessions.get(s.id);
+      // w2239: an earlier pair attempt's leg has nothing pending once the newest attempt's legs said DONE.
+      const pending = ended && replacedLeg(w, ended) ? undefined : this.pendingOn(w, s.id);
       if (pending) {
         this.stamp(w, `worker ${s.id} ended; its other workers said DONE, but it stays open: ${s.id} still has work on it: ${pending} (w1972)`);
         this.store.putWork(w);
@@ -4410,9 +4414,8 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       const [sid, last] = own.sort((a, b) => b[1].at.localeCompare(a[1].at))[0];
       // w1870: a worker whose last turn ended in an error or an interrupt did not finish its part: the cleanup resumes,
       // escalates or places it, and the request stays open.
-      const ended = this.store.sessions.get(s.id);
-      const events = ended ? this.store.readTranscript(s.id, 8) : [];
-      const trouble = ended ? turnTroubleOf(ended, turnEvidence(events), toolErrors(events)) : undefined;
+      const events = ended && !replacedLeg(w, ended) ? this.store.readTranscript(s.id, 8) : [];
+      const trouble = ended && !replacedLeg(w, ended) ? turnTroubleOf(ended, turnEvidence(events), toolErrors(events)) : undefined;
       const problem = trouble && (Date.parse(trouble.turnAt) || 0) > (Date.parse(last.at) || 0) ? `its own last turn ${trouble.kind === 'interrupt' ? 'was interrupted' : 'ended in an error'} (${trouble.reason}) (w1870)` : doneProblem(w, last.report);
       if (problem) {
         this.stamp(w, `worker ${s.id} ended; its other workers said DONE, but it stays open: ${problem}`);
@@ -4580,7 +4583,7 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
     if (!w || !Object.keys(doneOf(w)).length || !(isOpen(w) || w.status === 'stalled') || w.question || w.flag) return false;
     if (this.stillOn(w).length) return false;
     const all = [...this.store.work.values()];
-    if (w.sessionIds.some((sid) => BUSY.includes(this.store.sessions.get(sid)?.status ?? 'stopped') && servedBy(sid, all).has(w.id))) return false;
+    if (w.sessionIds.some((sid) => { const x = this.store.sessions.get(sid); return BUSY.includes(x?.status ?? 'stopped') && !(x && replacedLeg(w, x)) && servedBy(sid, all).has(w.id); })) return false;
     const [sid, last] = Object.entries(doneOf(w)).sort((a, b) => b[1].at.localeCompare(a[1].at))[0];
     if (doneProblem(w, last.text ?? last.report)) return false;
     // A worker turn that ended in an error or an interrupt after that DONE (w1870): the ledger cleanup resumes or escalates it.
