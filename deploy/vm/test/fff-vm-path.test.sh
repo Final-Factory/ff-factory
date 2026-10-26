@@ -205,7 +205,8 @@ cat >"$T/gbin/fffctl" <<'EOF'
 D=$FAKE_DIR
 echo "fffctl $*" >>"$D/calls"
 case "$*" in
-  "units --check") cat "$D/live/units.out"; exit "$(cat "$D/live/units.rc")" ;;
+  # units.hang: it hangs (the watch's own timeout must end it)
+  "units --check") [ ! -e "$D/live/units.hang" ] || exec /bin/sleep 30; cat "$D/live/units.out"; exit "$(cat "$D/live/units.rc")" ;;
   *) echo "fake fffctl: $* is not faked" >&2; exit 1 ;;
 esac
 EOF
@@ -301,6 +302,37 @@ said "path L9 end to end: ok: https://fff.example-tailnet.ts.net/api/health answ
 no_vm_reset
 check_recording status-file.healthy.json
 ok "healthy: every layer passes, one journal line each, the status file says ok, no alert, no repair"
+
+# ---------------------------------------------------------------- one login per pass (w2311)
+# A healthy pass logs in twice: once for every read (one sudo), once to hand the portal its status. Each read runs once.
+: >"$FAKE_DIR/calls"
+pass
+[ "$(calls 'ssh ')" = 2 ] || fail "one login: a healthy pass opened $(calls 'ssh ') ssh sessions, want 2 (the reads, the status): $(grep '^ssh ' "$FAKE_DIR/calls" | cut -c1-80 | tr '\n' '~')"
+[ "$(grep -c '^ssh .*sudo -n sh -c' "$FAKE_DIR/calls")" = 2 ] || fail "one login: want one sudo per session"
+for c in 'fffctl units --check' 'tailscale status --json' 'tailscale serve status --json' 'guest-curl ' 'nft list chain' 'journalctl -u tailscaled' 'systemctl show fff-portal.service -p NRestarts'; do
+  [ "$(calls "$c")" = 1 ] || fail "one login: '$c' ran $(calls "$c") times in a pass, want 1"
+done
+for l in ssh 1 2 3 4 5 6 7 8 9 disk clock loop units ntfy; do is "$l" ok; done
+ok "one login: a healthy pass makes 2 ssh sessions (each with one sudo) and runs every read once, every layer still ok"
+# A read that hangs is ended by its own timeout and fails alone: the reads after it in the same login still answer.
+scen
+pass
+touch "$FAKE_DIR/live/units.hang"
+export GX_TIMEOUT=2
+pass 2
+unset GX_TIMEOUT
+is units fail
+for l in ssh 1 2 3 4 5 6 7 8 9 disk clock loop ntfy; do is "$l" ok; done
+alert_has "fff-vm: portal path: VM units fails"
+ok "one login: a read that hangs times out alone (layer units fails and alerts), every other layer is still read and passes"
+# The login fails: the ssh layer fails as before, the VM's layers are skipped.
+scen
+touch "$FAKE_DIR/ssh_down"
+pass
+is ssh fail
+is units skip
+said "Connection refused"
+ok "one login: when it fails, layer ssh fails with ssh's own words and the VM's layers are skipped"
 
 # ---------------------------------------------------------------- 2. tailscaled
 scen ts-health-warning
