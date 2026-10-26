@@ -1850,6 +1850,33 @@ the orchestrator then edits `MEMORY.md` to remove its line (the tool's answer sa
   memory it can write but never delete would leave it the same stubs. It passes the gate only in a turn the owner started
   by writing on its page; its harness turns (workers, intake, timers) never do.
 
+### Restoring a memory (w2253)
+
+Ben's orchestrator wrote the single word "PLACEHOLDER" over its own `person-ben/corrections-log.md` (about 90 lines).
+Nothing could put it back: the Read guard keeps `<root>.backup` closed, orchestrators have no shell, and the ops worker
+refuses `data/` by design. The `restore_memory` tool (group `core`, deferred; `restoreMemoryFile` in
+`server/orchestratorMemory.ts`) puts one file back. A tool, not Read access to the backups: the backups rotate at every
+change anywhere in the memory, so the good copy is often only in git, which Read cannot reach; and a tool keeps the
+replaced file and logs the restore.
+
+- **Copies:** the three crash backups (`<root>.backup/1..3/<folder>/<file>`, newest first) and, when the memory root is a
+  git repository, the file's last 10 commits (`memoryCopies`). `list: true` lists each copy's time, size and line count,
+  and whether it is the current file, and restores nothing. Without `copy` it restores the newest copy that differs from
+  the current file and is not empty or zeroed (`defaultCopy`); `copy` names one (`"2"`, a commit id).
+- **Where:** a file name in its own folder (`"notes.md"`) or the full path of one; the write rules above
+  (`memoryRestoreTarget` → `memoryWriteProblem`), so no other orchestrator's folder, no `..`, links or wildcards. A copy
+  that holds a secret is never restored.
+- **When:** only in a turn its person started with a message of their own (`personTurn`), listing included.
+- **Undoable and logged:** the file it replaces goes to its trash (`<root>.backup/trash/<folder>/<UTC time>-<name>`,
+  30 days), and one journal line says who restored which file from which copy: `orchestrator memory: Ben (ben)'s
+  orchestrator restored person-ben/corrections-log.md from backup 2 (<time>, 90 lines, <n> bytes) at <time>; ...`.
+- **No blind overwrite:** the Write guard (`memoryGuard`) refuses a Write over an existing memory file that the process
+  has not Read (Claude Code's own rule had let the PLACEHOLDER Write through). Edit needs a Read anyway; a new file, or
+  one the process wrote itself, passes. A process started for a resumed conversation reads the file again first.
+- **The one-off:** the deploy that brought the tool put Ben's file back once at start (`restoreBadMemory` in
+  `server/index.ts`): the newest copy that is not "PLACEHOLDER", logged as above with "FF Factory (a one-off repair at
+  start, w2253)".
+
 ### Memory in a private repository
 
 The memory holds one person's preferences, in their words, so it does not belong in a public repository; and a folder
