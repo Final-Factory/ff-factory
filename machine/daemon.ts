@@ -49,6 +49,7 @@ import { fetchPlanUsage, parseUsage, usageEnv, type AccountIdentity, type UsageR
 import { onInstallDrive } from '../server/rootFence.ts';
 import { CleanupRunner, DEFAULT_CLEANUP, appendCleanupLog, staleAtFile, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, rulesOnInstallDrive, runCleanup, sessionTempDir, sessionTempEnv, staleUnityLibraries, volumeStat, type CleanupGuard } from '../server/cleanup.ts';
 import { RELEASE_SETTINGS, mergePlans, planInstallLeftovers } from '../server/installLeftovers.ts';
+import { publishedFile, readPublished, recordPublished } from '../server/published.ts';
 import { SessionSweeper, sweepSettings } from '../server/sessionSweep.ts';
 import { cleanupPass, defaultNightlyRoots, planStaleOutput, staleOutputSettings, type StaleContext, type StalePlace } from '../server/staleOutput.ts';
 import { MACHINE_CLEANUP_DEFAULTS } from '../server/config.ts';
@@ -730,6 +731,9 @@ export class Daemon {
                 self: [process.pid, process.ppid],
                 // Below the soft threshold (or asked), stopped sessions' caches go after minutes, not a day (w1813).
                 low,
+                // Finished workers' clones, Library copies and test output go too, published evidence with them (w2223).
+                finished: this.finishedSessionDirs(),
+                published: readPublished(publishedFile(appDirOfConfig(this.cfg))),
               }),
             ),
           endStrays: async (strays) => {
@@ -862,6 +866,16 @@ export class Daemon {
     };
   }
 
+  /**
+   * The temp folders of finished workers (w2223): stopped, held only by the reopen window (resumable but no open request owns
+   * them, server/resumable.ts ownersOf). Empty until the portal's welcome has said both, so nothing is judged finished blind.
+   */
+  private finishedSessionDirs(): string[] {
+    if (!this.welcomed || !this.owners) return [];
+    const owners = this.owners;
+    return [...this.resumable].filter((id) => !owners[id] && !this.sessionLive(id)).map((id) => sessionTempDir(agentTempRoot(this.cfg.tempDir), id));
+  }
+
   /** What a clean-up worker may delete is judged by the ledger's facts, not by a list in its brief (server/cleanupFolders.ts, w1379). */
   private cleanupFacts(): CleanupFacts {
     const c = this.cfg;
@@ -877,6 +891,8 @@ export class Daemon {
       open: this.staleCtx?.open ?? [],
       closed: this.staleCtx?.closed ?? [],
       ...(this.staleCtx ? { contextAt: this.staleCtx.at } : {}),
+      // The last pass's free space against the soft threshold: ff-leftovers folders gives a finished worker's bulk minutes, not a day (w2223).
+      ...(this.cleaner.last ? { low: !!this.cleaner.last.belowSoft } : {}),
     };
   }
 
@@ -2190,7 +2206,10 @@ export class Daemon {
     all.publish_review = async (args) => {
       const folder = this.entries.get(sessionId)?.spec?.cwd;
       if (!folder) throw new Error('this session has no working folder on this machine yet');
-      return publishFromMachine(this.cfg.portalUrl, this.cfg.token, folder, args, call('publish_review'));
+      const out = await publishFromMachine(this.cfg.portalUrl, this.cfg.token, folder, args, call('publish_review'));
+      // A published file may leave a finished worker's folder with its bulk; one published nowhere stays (w2223).
+      recordPublished(publishedFile(appDirOfConfig(this.cfg)), (Array.isArray(args.files) ? args.files.map(String) : []).map((f) => path.resolve(folder, f)));
+      return out;
     };
     // timed_run (w1946, machine/timedRunPack.ts): the builds are read and hashed here, the portal plans, the pieces it lacks
     // go from here over HTTP with this machine's token, then the run is handed over. Builds come from the sandbox, the
@@ -2207,7 +2226,9 @@ export class Daemon {
       const folder = this.entries.get(sessionId)?.spec?.cwd;
       if (!folder) throw new Error('this session has no working folder on this machine yet');
       const roots = [folder, sessionTempDir(agentTempRoot(this.cfg.tempDir), sessionId)];
-      return publishAttachmentFromMachine(this.cfg.portalUrl, this.cfg.token, folder, roots, args, call('publish_attachment'));
+      const out = await publishAttachmentFromMachine(this.cfg.portalUrl, this.cfg.token, folder, roots, args, call('publish_attachment'));
+      if (typeof args.file === 'string') recordPublished(publishedFile(appDirOfConfig(this.cfg)), [path.resolve(folder, args.file)]);
+      return out;
     };
     return all;
   }
