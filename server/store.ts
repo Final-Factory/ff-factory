@@ -9,6 +9,7 @@ import { pipeline } from 'node:stream/promises';
 import type { AppSettings, DelegationRequest, Machine, Sandbox, ServerEvent, SessionInfo, StandingAgent, TranscriptEvent, WorkItem } from '../shared/types.ts';
 import { meterStates, type MeterStates } from './meterStates.ts';
 import { removedUpload } from './mediaRetention.ts';
+import { repairText } from '../shared/capacity.ts';
 
 /** Everything the UI hears about goes through here and out the WebSocket. */
 export const bus = new EventEmitter<{ event: [ServerEvent] }>();
@@ -217,7 +218,16 @@ export class Store {
     }
     const w = readJsonDurable<{ seq?: number; items?: WorkItem[] }>(workFile, { check: checkWork });
     if (w) {
-      for (const item of w.items ?? []) this.work.set(item.id, item);
+      for (const item of w.items ?? []) {
+        // w2282: a pair run filed before it says "on computers that are not Macs"; say the rule placement now follows. The
+        // computers the dispatcher queued a request_pair one for (which names none) were its list of those not Macs: dropped.
+        if (item.pair && !item.pair.started && repairText(item)) {
+          const was = item.pair.for && item.queuedFor?.needs?.length ? item.queuedFor.needs : undefined;
+          if (was) item.queuedFor = { at: item.queuedFor!.at };
+          item.log = [...(item.log ?? []), `${new Date().toISOString().slice(11, 16)} FF Factory: its pair text now says a Mac may host (w2282)${was ? `; no longer queued only for ${was.join(' or ')}` : ''}`].slice(-40);
+        }
+        this.work.set(item.id, item);
+      }
       // An older version restored after a crash may not know the last few numbers handed out: skip past them.
       const restored = dataRecoveries.some((r) => r.file === workFile && r.from);
       this.workSeq = (w.seq ?? 0) + (restored ? 100 : 0);

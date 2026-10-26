@@ -990,6 +990,28 @@ and w1891 waited behind it there, and w1789 waited on LothDesktop behind shared 
   `placement.prefer` plays no part in timed placement (`timedEligible` reads hold and avoid only): LothLaptop is left out of
   prefer on purpose and is still first for timed work. Tests: `server/w2168TimedPlacement.test.ts`, and the w2168 test in
   `server/orchestrators.test.ts`.
+- **Timed requests move too, a fallback "here" expires, and an idle small computer is kept for timed work** (w2277;
+  lothsahn, 2026-10-26: "Why are we doing timed runs on beast when LothLaptop is idle?"). From the journal of 2026-10-26:
+  w2257 heard timed_place "here" on BEAST at 06:27Z as w2048's fallback (LothLaptop was paused from its tray), and that
+  answer held 12 h. w2265 was placed on BEAST at 07:21Z, marked timed, while w2222 still held LothLaptop. LothLaptop was
+  free from 07:23Z. At 07:27Z w2257 took exclusive ticket t00001948 on BEAST on its old answer, while w2265 waited there
+  for shared ticket t00001949. At 07:28Z the dispatcher put w2228's pair leg on the idle LothLaptop. w2168's step 2 above
+  looked only at timed legs waiting for an exclusive ticket, so it moved neither. Now:
+  1. `timedLegRelocateFor` also takes a started request `needsTimed` marks (not only `timedLeg`), waiting for a ticket of
+     either mode. Such a request moves the way `stop_agent` `move_to` moves a worker (`moveWorker`, w1600): stopped
+     between turns, its work saved on its branch, Queued for the small computer ("timed relocate (w2277): ..."; its log
+     "ledger: MOVED to M by FF Factory (w2277)"). A leg still moves as in w2168.
+  2. timed_place stores a fallback "here" with `fallback: true` (`TimedVerdict`). On each blocker-watch pass,
+     `Agents.withdrawStaleTimedHere` withdraws that answer once a small or medium computer that takes timed runs is idle,
+     unless the worker's exclusive ticket is already running there. The machine guard (`checkTimedAsk`) then refuses its
+     next exclusive ticket until it asks timed_place again, and the new answer names the idle computer ("timed ask (w2277):
+     withdrew ...").
+  3. `timedOrderProblem` refuses a start or move of work that is not timed onto an idle small or medium computer while
+     timed work waits for that computer (`Agents.timedClaimOn`): a timed request Queued for it, a started one
+     `timedLegRelocateFor` would move there, or a fallback "here" it would withdraw.
+  4. An unpause from the tray kicks the blocker watch at once, so the steps above look straight away, not up to 60 s later.
+  5. `TIMED_WORDS` (`shared/capacity.ts`) also matches profiling, p95/p99 frames, and FPS drops or before/after.
+  Tests: the w2277 test in `server/orchestrators.test.ts`.
 - **How long "offline" is waited for** (w2048, `unavailableWait`; lothsahn: "If the fleet is idle it should wait far less
   than if the fleet is busy"). The load is the agents mid-turn plus the requests Queued, over the online computers' agent
   slots (`fleetLoad`). At 50% load or less the wait is 5 minutes, at 100% or more 60 minutes, and between the two it grows
@@ -1461,6 +1483,39 @@ LothDesktop and Beast, not just when BEAST is full").
     fresh run's report, so no report of the old run's legs resumes it. A run Queued, or running with every leg healthy and
     nothing reported, is still waited on (a worker that asks twice by mistake starts no second run); the answer names
     `retry: true` for a run that cannot deliver.
+  - **A run that loses a leg mid-run is re-queued whole** (w2304, lothsahn, 2026-10-26: "when one leg is stopped
+    (player-yield or a move), re-queue the pair instead of stalling"). w2276, the pair run for w2263's PR #2607, had its
+    client leg on lothdesktop stopped by the w1894 player-yield at 09:24Z (lothsahn started playing; the yield closes
+    editors and asks players to quit); the host's run broke after 26 heartbeats, both legs ended "needs a new client
+    machine", and it sat Stalled for over 2 h. w2271's live client leg was moved alone by the w2046 move three times
+    (09:14Z, 09:45Z, 11:04Z), each cutting the run. A run is **under way** (`livePair` in `server/work.ts`) while it is open,
+    its legs started and none of this attempt's legs has said DONE (a DONE from an earlier attempt's leg does not count, w2305).
+    - **The sweep** (`Orchestrators.requeueBrokenPairs`, run by the blocker watch each minute) finds a leg broken: a person
+      plays Final Factory on its computer, or is in the grace after (`personPlaying`, `MachineManager.personPlayOf`); its
+      computer is offline `PAIR_OFFLINE_MS` (10 min); its worker is gone; it was taken off the request (`movedOff`); or its
+      sandbox went to other work (`placeReleased`), which ended what it ran there.
+    - **The re-queue** (`Orchestrators.requeuePair`): every leg is taken off the request and stopped at once, mid-turn or not
+      (w2305: retired at its turn's end, w2276's host 9a4452ce kept working in beast/slot1 after the re-queue), `pair.started` is cleared, the yielding or offline computer joins `pair.avoid`, and the request is
+      Queued for capacity (never Stalled; the asker stays Blocked on the same run's report). The dispatcher gets "[ledger]
+      PAIR RE-QUEUED (w2304)" and starts every leg again with new workers, together. The log line reads "re-queued as a pair
+      run (w2304, 1 of 3; its 2 legs start fresh together, not on lothdesktop): <why>. Old legs stopped: <session (sandbox)>
+      ...". At most `PAIR_REQUEUE_MAX` (3) times per run; past it the log says "not re-queued again (w2304)" once and a person
+      looks.
+    - **A leg's sandbox is held until the run is over** (w2305, lothsahn, 2026-10-26: "a sandbox that holds a live pair-run leg
+      is never released to other work while that pair run is in progress"). Right after w2304 deployed, the release took
+      sandboxes from healthy legs and the sweep re-queued both runs under way: w2276's client e5dcf0d3 (12:39Z, "it waits on
+      w2276: its worker 9a4452ce works on it", its own host) and w2298's host 7d3bf3b8 (12:50Z, "its check-in at 13:06 UTC is
+      for work that is over: its request is with another worker now (w2298: e33e6f40)", its own client). `Agents.pairHold`
+      (`pairLegOf` in `server/work.ts`) makes the release pass (`releaseStep`) neither stop nor release a leg of a run under
+      way, whatever its check-in, its wait on its partner or its idle time say; `workOver` and `waitOn` read the partner legs
+      as the same work, never "another worker". list_sandboxes's kept line names the hold.
+    - **No lone leg moves.** The w2046 move never moves
+      it (`moveDecision`: it stays, "a pair run under way (w2304)"; once its sandbox went to other work anyway, `requeuePair`
+      decision: the whole run is re-queued and its message is not delivered). A paused computer's hand-back (w1532) of a leg
+      re-queues the whole run too. Once a leg has reported, the run is over and these rules no longer apply.
+    - Tests: the four w2304 cases in `server/orchestrators.test.ts` (the yield, the cap, the kept sandbox, the move), the
+      w2304 case in `server/resumeMove.test.ts`, and the w2305 replays of w2298 and w2276 (no release, no re-queue) and the
+      old legs' stop.
   - **One pair run per pull request and commit, and its result reaches whoever waits on it** (w2057, lothsahn, 2026-10-24).
     w1936, the hand-filed pair run of w665's PR #2340, passed at 12:55 on 10-24, but w665's worker d558ba14 was never told:
     it had filed nothing (its report said "waiting on a Windows or Linux pair worker to run `MP-lowore-pin-pair` for PR
@@ -1504,16 +1559,20 @@ LothDesktop and Beast, not just when BEAST is full").
   - **Talking: `message_pair`** (a worker tool, `Agents.messagePair`): a leg's message reaches every other leg's worker of
     its started pair run, as a message that resumes a leg that ended its turn (where the host listens and on which commit,
     that a client joined, that a leg failed).
-  - **Which computers.** Legs go on computers that are not Macs (a Mac refuses a multiplayer client, w665). A cross-OS pair
-    may put one Mac as the host, never a client, and needs its legs on two operating systems. Timed legs never go where no
-    timed runs go (the m5). `placement.prefer`, holds, reservations and exclusive bench tickets are as for any work: each leg
+  - **Which computers.** Legs go on any free computers, any OS (w2282, lothsahn: "Not windows by default, any OS. Being
+    particular about a machine or OS limits the fleet we can use."). A Mac may be the host (leg 1), never a client (a Mac
+    refuses a multiplayer client, w665: the game's `player_slots.py` refuses it), and a Mac with room hosts first, which
+    leaves the other computers for work a Mac cannot take. A cross-OS pair also needs its legs on two operating systems.
+    A pair is not timed unless request_pair says `timed`; only then do its legs stay off where no timed runs go (the m5).
+    Pair runs filed before w2282 say "on computers that are not Macs": the store rewrites that text when it loads the
+    ledger, and drops the computers the dispatcher queued a request_pair one for (`server/store.ts`, `repairText`). `placement.prefer`, holds, reservations and exclusive bench tickets are as for any work: each leg
     is a game worker in its own sandbox, and a timed leg takes its ticket as every timing run does. Code: `shared/capacity.ts`
     `pairRoom` and `unfitWhy`.
   - **Room for a pair is room for all its legs at once.** `roomForWork` (`server/placement.ts`), the Queued line
     (`shared/workState.ts` `queuedLive`), the WRONG flag (`roomEnough` on the room that has stood), the capacity ping and
     `decide_work queue` count a pair as room only where as many computers that fit have room at the same moment; fewer read
-    "queued for capacity (a pair run of 2 legs, on computers that are not Macs): a pair run of 2 legs needs 2 computers with
-    room at once, and only biscuit has room it fits". With room for all legs the ping and the queue refusal say to start its
+    "queued for capacity (a pair run of 2 legs, on any computers, any OS (a Mac only as the host, leg 1)): a pair run of 2
+    legs needs 2 computers with room at once, at most one of them a Mac (the host), and only biscuit has room it fits". With room for all legs the ping and the queue refusal say to start its
     legs together, naming a pick.
   - **Not starved by single work** (`Agents.pairHoldProblem`). While a pair run is Queued, a computer's LAST free sandbox
     that the pair fits is held for it from newer game work of no higher priority: `start_agent` refuses it there, naming the
@@ -1618,7 +1677,9 @@ LothDesktop and Beast, not just when BEAST is full").
       whose Live view is up while it waits on a **person** keeps its process, its sandbox and its editor for
       `LIVE_HOLD_MS` (12 h) after its last activity (`Agents.liveHold`; the idle reaper's `keepIdle` too), so the person's
       words reach it at once; past that, or when its sandbox is released any other way, the view ends with the release and
-      its next message asks it to stage the view again ([live-view.md](live-view.md), "While it waits on you"). Never
+      its next message asks it to stage the view again ([live-view.md](live-view.md), "While it waits on you"). **Nor a leg of
+      a pair run under way** (w2305, `Agents.pairHold`): it keeps its sandbox until the run is over or re-queued ("Pair runs
+      are placed as one unit"). Never
       released (`waitReleaseWhy`, `keptWhy`): uncommitted or untracked work its daemon cannot
       save and push first, a branch with a commit its remote lacks, a Unity batch run of that sandbox in flight, another
       agent working there, a message queued for it, a worker mid-turn, with a permission open, or with a background job or
@@ -1780,7 +1841,9 @@ LothDesktop and Beast, not just when BEAST is full").
   - **When it stays** (its Queued line says why, marked "it stays on its computer (w2046)"): commits only that computer
     has (its sandbox on its branch with commits not pushed, or a branch that does not track its own remote branch),
     uncommitted work its daemon cannot save, a timed run from its sandbox holding the bench lock, a timed leg (w1969:
-    both sides are timed on one computer), a request pinned there, or an unknown branch. With no other computer that
+    both sides are timed on one computer), a request pinned there, a leg of a pair run under way (w2304: a leg never moves
+    alone; once its sandbox went to other work the whole run is re-queued, "Pair runs are placed as one unit"), or an
+    unknown branch. With no other computer that
     could take it it waits as before ("no other computer can take it now (w2046)").
   - **WRONG.** Any other resume waiting for room on its computer while another computer it fits has had room for
     `ROOM_STAND_MS` reads Queued "… it should move there (w2046)" with `roomOn`, the ledger's WRONG flag

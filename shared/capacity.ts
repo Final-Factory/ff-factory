@@ -112,7 +112,8 @@ export function needsBuild(w: Pick<WorkItem, 'needs' | 'build' | 'title' | 'brie
  * Timed work named in words (w1628): a benchmark, a perf A/B or probe, a timed run or leg, frame times. Not "fps" alone
  * (60 fps clips are visual work) and not a bare "performance".
  */
-export const TIMED_WORDS = /\b(?:bench(?:mark)?(?:s|ed|ing)?|perf (?:a\/b|probe|test|run|fix|regression)s?|performance (?:a\/b|probe|test|run|regression|fix)s?|timed (?:runs?|legs?|a\/b)|timing (?:runs?|legs?)|exclusive (?:bench )?(?:locks?|tickets?)|probe_ab\w*|frame ?times?|a\/b (?:runs?|test|legs?))\b/i;
+// w2277: profiling, p99 frames and FPS drops or before/after are timed work too (w2257 and w2265 were p99 and FPS-drop profiling).
+export const TIMED_WORDS = /\b(?:bench(?:mark)?(?:s|ed|ing)?|perf (?:a\/b|probe|test|run|fix|regression)s?|performance (?:a\/b|probe|test|run|regression|fix)s?|timed (?:runs?|legs?|a\/b)|timing (?:runs?|legs?)|exclusive (?:bench )?(?:locks?|tickets?)|probe_ab\w*|frame ?times?|a\/b (?:runs?|test|legs?)|profil(?:ing|er captures?)|profile (?:it|and fix|the (?:save|frames?|fps))|p(?:95|99)s?(?: frames?)?|fps (?:drops?|regressions?|before\/after|a\/b|probes?)|drops? (?:the )?fps|before\/after (?:fps|frames?|timings?))\b/i;
 
 // A clause's last words that rule the timed word after them out ("no bench lock", "without a benchmark", "not a timed run").
 const NEGATED_BEFORE = /(?:\b(?:no|without|never|nor|none)\b(?:\s+\S+){0,3}|\bnot(?:\s+(?:a|an|any|the))?)\s*$/i;
@@ -236,9 +237,9 @@ export function unfitWhy(w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes'
   const timed = needsTimed(w) || (w.pair?.timed ? 'any' : false);
   if (timed && f.noTimedRuns) return `${id} takes no timed runs (${f.noTimedRuns})`;
   if ((timed === 'win32' || timed === 'darwin') && f.platform && f.platform !== timed) return `${id} is not on ${timed === 'win32' ? 'Windows' : 'macOS'}, which its timed work names`;
-  // w1945: a pair run's legs are any computers but Macs, unless it needs a cross-OS pair; then a Mac may host (pairRoom).
-  if (f.platform === 'darwin' && w.pair && !w.pair.crossOs) return `${id} is a Mac: a pair run's legs go on computers that are not Macs (a Mac refuses a multiplayer client, w665), and this one needs no cross-OS pair (w1692)`;
-  if (f.platform === 'darwin' && needsMpPeers(w) && !w.pair?.crossOs) return `${id} is a Mac, which refuses the multiplayer client its MP scenario starts (w665)`;
+  // w2282: a Mac fits a pair run, as its host only; pairRoom keeps the clients off Macs. A pair's MP scenario runs one peer
+  // per computer, so needsMpPeers (every peer on one computer) does not rule a Mac out for it.
+  if (f.platform === 'darwin' && needsMpPeers(w) && !w.pair) return `${id} is a Mac, which refuses the multiplayer client its MP scenario starts (w665)`;
   return undefined;
 }
 
@@ -248,9 +249,11 @@ export const PAIR_MAX_LEGS = 4;
 /**
  * Whether a pair run (w1945, WorkItem.pair) can start on the computers in `ids` (those with room that fit it, unfitWhy, in the
  * order placement prefers): `pick` names one computer per leg, leg 1 (the host) first; `short` says why not. Each leg needs its
- * own computer, at the same moment. A cross-OS pair takes at most one Mac, as the host (a Mac refuses a multiplayer client,
- * w665), and its legs on at least two operating systems; a computer whose platform nobody reported counts toward the legs but
- * not toward a second operating system. Work that is no pair run fits on any one of them.
+ * own computer, at the same moment. Every pair takes at most one Mac, as the host (a Mac refuses a multiplayer client, w665;
+ * w2282, lothsahn: "Not windows by default, any OS. Being particular about a machine or OS limits the fleet we can use."),
+ * and a Mac with room hosts first, which leaves the other computers to work a Mac cannot take. A cross-OS pair also needs
+ * its legs on at least two operating systems; a computer whose platform nobody reported counts toward the legs but not
+ * toward a second operating system. Work that is no pair run fits on any one of them.
  */
 export function pairRoom(w: { pair?: WorkPair }, ids: readonly string[], fit: Readonly<Record<string, RoomFit>> | undefined): { pick: string[]; short?: undefined } | { pick?: undefined; short: string } {
   const p = w.pair;
@@ -260,8 +263,9 @@ export function pairRoom(w: { pair?: WorkPair }, ids: readonly string[], fit: Re
   const rest = ids.filter((id) => os(id) !== 'darwin');
   const have = ids.length ? `only ${ids.join(', ')} ${ids.length > 1 ? 'have' : 'has'} room it fits` : 'no computer it fits has room';
   if (!p.crossOs) {
-    if (rest.length < p.legs) return { short: `a pair run of ${p.legs} legs needs ${p.legs} computers with room at once, and ${have}` };
-    return { pick: rest.slice(0, p.legs) };
+    const pick = [...macs.slice(0, 1), ...rest].slice(0, p.legs);
+    if (pick.length < p.legs) return { short: `a pair run of ${p.legs} legs needs ${p.legs} computers with room at once, at most one of them a Mac (the host), and ${have}` };
+    return { pick };
   }
   // Cross-OS: a Mac host when one has room, else one computer of each operating system first.
   const byOs = new Map<string, string[]>();
@@ -275,5 +279,25 @@ export function pairRoom(w: { pair?: WorkPair }, ids: readonly string[], fit: Re
   return { pick };
 }
 
+/** Where a pair run that needs no cross-OS pair goes (w2282): any computers, a Mac only as the host. */
+export const PAIR_ANY_OS = 'on any computers, any OS (a Mac only as the host, leg 1)';
+/** What pairText said of one before w2282, still in the constraints and brief of pair runs filed then (repairText). */
+const PAIR_NOT_MACS = 'on computers that are not Macs';
+
+/**
+ * A pair run filed before w2282 says its legs go "on computers that are not Macs" in its constraints and brief, which the
+ * dispatcher reads: say the rule placement now follows instead (its pair mark never held the old rule, so placement needs no
+ * change). Whether it changed anything.
+ */
+export function repairText(w: Pick<WorkItem, 'constraints' | 'brief'> & { pair?: WorkPair }): boolean {
+  if (!w.pair || w.pair.crossOs) return false;
+  const fix = (s: string | undefined) => s?.split(PAIR_NOT_MACS).join(PAIR_ANY_OS);
+  const c = fix(w.constraints), b = fix(w.brief) ?? w.brief;
+  if (c === w.constraints && b === w.brief) return false;
+  if (c !== undefined) w.constraints = c;
+  w.brief = b;
+  return true;
+}
+
 /** "a pair run of 2 legs, cross-OS: <why>, timed" (w1945): what a pair needs, as lines about it say it. */
-export const pairText = (p: WorkPair): string => `a pair run of ${p.legs} legs${p.crossOs ? `, cross-OS (${p.crossOs})` : ', on computers that are not Macs'}${p.timed ? ', timed (exclusive tickets: not on a computer that takes no timed runs)' : ''}${p.avoid?.length ? `, not on ${p.avoid.join(' or ')}` : ''}`;
+export const pairText = (p: WorkPair): string => `a pair run of ${p.legs} legs${p.crossOs ? `, cross-OS (${p.crossOs})` : `, ${PAIR_ANY_OS}`}${p.timed ? ', timed (exclusive tickets: not on a computer that takes no timed runs)' : ''}${p.avoid?.length ? `, not on ${p.avoid.join(' or ')}` : ''}`;

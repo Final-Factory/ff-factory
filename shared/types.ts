@@ -632,6 +632,12 @@ export interface TimedVerdict {
   /** elsewhere: the request its leg was filed as, or the play-only computer of its timed_run. */
   leg?: string;
   timedRun?: string;
+  /**
+   * here: given as w2048's big-computer fallback (every small computer unavailable then), on this platform. Such a "here" is
+   * withdrawn once a small computer that takes timed runs is idle (w2277, Agents.withdrawStaleTimedHere).
+   */
+  fallback?: boolean;
+  platform?: string;
 }
 
 /**
@@ -1932,8 +1938,8 @@ export interface WorkPair {
   /**
    * Why the legs must run on different operating systems (the game repo's Determinism-Test-Strategy.md "Which machines",
    * w1692: float or math-library use in the simulation, Burst or IL2CPP codegen, platform APIs or paths, the desync hash, a
-   * desync seen only across OSes). Absent: computers that are not Macs (a Mac refuses a multiplayer client, w665). With it,
-   * one Mac may take leg 1, the host.
+   * desync seen only across OSes): its legs then go on two operating systems. With it or without, one Mac may take leg 1,
+   * the host, and no other leg (a Mac refuses a multiplayer client, w665; w2282).
    */
   crossOs?: string;
   /** A leg takes timing measurements (exclusive bench tickets): never on a computer that takes no timed runs (m5, w1861). */
@@ -1956,6 +1962,11 @@ export interface WorkPair {
   commit?: string;
   /** The requests its finished result was sent to (w2057, Orchestrators.pairFinished): each told once. */
   told?: string[];
+  /**
+   * The last time FF Factory re-queued it as a unit after a leg broke mid-run (w2304, Orchestrators.requeuePair): when, why,
+   * how many times so far, and `gaveUp` once it stopped re-queuing it (PAIR_REQUEUE_MAX).
+   */
+  requeued?: { at: string; why: string; count: number; gaveUp?: string };
 }
 
 /** A request for work that a person's orchestrator filed with the dispatcher, and what became of it. */

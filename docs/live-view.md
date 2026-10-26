@@ -194,7 +194,7 @@ first frame was that turn. Now the worker records once how it staged the view, a
 
 - **The recipe** (`live_view` `stage`, on `start` or as its own action; `parseStage`, `machine/liveStage.ts`): up to 20 steps,
   each with exactly one key.
-  - `{ "load": "<save name>" }`, the first step only: the save to load (`game.loadsolo`). Save the staged game first
+  - `{ "load": "<save name>" }`, the first step only: the save to load (as `game.loadsolo` does, through the editor bridge). Save the staged game first
     (`ffauto game.save|ffa-<session>-live`) and load that.
   - `{ "ffauto": "<command>" }`: a game command through the agent channel (`ui.hide|true`, `camera.focus|x|z|distance`).
   - `{ "csharp": "<C#>", "until"?: "<text>", "timeoutS"?: 1-300 }`: C# for the editor bridge. With `until` it repeats
@@ -214,8 +214,11 @@ first frame was that turn. Now the worker records once how it staged the view, a
      A `session-<pid>.json` written before the editor process started is another, older game's under a reused pid and is
      not its channel (`readGameChannel`'s `bornMs`, `ProcessBirths` in `machine/live.ts`): on lothdesktop/slot1 (w2255,
      2026-10-26 06:35Z) editor pid 2044 found the file of a 2026-10-14 game and the first step failed with ECONNREFUSED.
-  3. **title**, **load** (a recipe with `load`): waits for the title screen (2 min), runs `game.loadsolo|<save>`, and waits until
-     the game is in the world (4 min).
+  3. **title**, **load** (a recipe with `load`): waits for the title screen (2 min), loads the save through the editor bridge
+     (`loadSnippet`: `SaveGameManager.LoadGame`, what `game.loadsolo` calls), and waits until the game is in the world and its
+     channel takes commands (`IN_GAME_SNIPPET`, 4 min). Not through the agent channel: the game's router refuses every command
+     outside a running game ("commands need a running game; the game is 'menu'"), so no recipe with a `load` had ever staged
+     (w2255, m5/slot3, 2026-10-26 12:07Z), and the old in-game check named an internal class and never compiled.
   4. **steps**: the remaining steps, in order. The first one that fails ends the replay with its number and the answer.
   Meanwhile the view's `holding` detail is the progress ("setting the view up again: loading the save ..."), so the 1 s tick does not
   overwrite it with "not in play mode", and the view reads `setting-up` (below). The streaming itself starts by itself once the game

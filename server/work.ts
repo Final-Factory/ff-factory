@@ -528,6 +528,28 @@ export function doneOf(w: Pick<WorkItem, 'done' | 'reopenedAt'>): NonNullable<Wo
 }
 
 /**
+ * Whether pair run `w` is under way (w2304): open, its legs started together, and none of them has reported yet. A leg of it
+ * never moves alone (server/resumeMove.ts), keeps its sandbox until the run is over (pairLegOf), and a leg broken mid-run
+ * re-queues the whole run (Orchestrators.requeueBrokenPairs). Only the newest attempt's legs count (w2305): a DONE from a leg
+ * of an earlier attempt (a retry's, w2041) does not end the attempt now running.
+ */
+export function livePair(w: WorkItem): boolean {
+  const started = w.pair?.started;
+  if (!started || !isOpen(w)) return false;
+  const done = doneOf(w);
+  return !started.legs.some((l) => done[l.session]);
+}
+
+/**
+ * Whether worker `sessionId` is a leg of pair run `w` under way (w2305, lothsahn: "a sandbox that holds a live pair-run leg is
+ * never released to other work while that pair run is in progress"): its partner legs are the same work, never "another
+ * worker", and its sandbox is held while it waits on them, on its check-in, or idles between turns (Agents.pairHold).
+ */
+export function pairLegOf(w: WorkItem, sessionId: string): boolean {
+  return livePair(w) && w.pair!.started!.legs.some((l) => l.session === sessionId);
+}
+
+/**
  * Whether worker `s` is a leg of an earlier attempt of pair run `w` that a newer attempt replaced, once the newest
  * attempt's host leg said DONE with the verdict (w2239, lothsahn: "once the attempt that produced a pair run's verdict has
  * finished, the request closes, even if worker legs from earlier failed or replaced attempts never said DONE"). Each retry's

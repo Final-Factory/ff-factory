@@ -220,6 +220,16 @@ else
   rc=0; out=$(upriv units '') || rc=$?
   [ "$rc" -eq 2 ] || fail "priv: units with an empty word was not refused (exit $rc): $out"
   echo "ok: fff-ops-priv units and units --check reach fffctl (and its exit status comes back); every other word, the watchdog included, is refused"
+  # disk-usage (w2267): sizes and paths, read only, and no option at all.
+  [ "$(upriv disk-usage)" = "FFFCTL [disk-usage]" ] || fail "priv: disk-usage: $(upriv disk-usage)"
+  for bad in 'disk-usage /srv/fff/data' 'disk-usage --path /etc' 'disk-usage -- /' 'disk-usage extra' 'disk-usage;id' 'diskusage'; do
+    rc=0
+    # shellcheck disable=SC2086 # the words are the arguments
+    out=$(upriv $bad) || rc=$?
+    [ "$rc" -eq 2 ] || fail "priv: '$bad' was not refused (exit $rc): $out"
+    if printf '%s' "$out" | matches FFFCTL; then fail "priv: '$bad' reached fffctl: $out"; fi
+  done
+  echo "ok: fff-ops-priv disk-usage reaches fffctl with no option; any other word is refused"
   # approvals (w1097): the prompt counts, read only. Only --since and --split, each once, each with a date, reach fffctl.
   [ "$(upriv approvals)" = "FFFCTL [approvals]" ] || fail "priv: approvals: $(upriv approvals)"
   [ "$(upriv approvals --since 2026-10-05 --split 2026-10-13)" = "FFFCTL [approvals] [--since] [2026-10-05] [--split] [2026-10-13]" ] || fail "priv: approvals --since --split: $(upriv approvals --since 2026-10-05 --split 2026-10-13)"

@@ -49,7 +49,7 @@ export interface MoveRequest {
   /** A timed leg handed to a small computer (WorkItem.timedLeg, w1969): both its sides are timed on one computer. */
   timedLeg?: boolean;
   /** A pair run's leg (WorkItem.pair.started): this worker's leg number (1 = host), the other legs' computers, cross-OS or not. */
-  pair?: { leg: number; others: readonly string[]; crossOs?: boolean; avoid?: readonly string[] };
+  pair?: { leg: number; others: readonly string[]; crossOs?: boolean; avoid?: readonly string[]; live?: boolean };
 }
 
 export interface MoveFacts {
@@ -71,7 +71,7 @@ export interface MoveFacts {
   last?: string;
 }
 
-export type MoveDecision = { move: { to: string; why: string } } | { stay: string } | { none: string };
+export type MoveDecision = { move: { to: string; why: string } } | { stay: string } | { none: string } | { requeuePair: { id: string; why: string } };
 
 /**
  * Where a worker whose resume waits for room on its computer goes (`move`), why it must stay there (`stay`: the Queued line
@@ -81,6 +81,15 @@ export function moveDecision(f: MoveFacts): MoveDecision {
   const here = placeId(f.machine);
   if (!f.requests.length) return { none: 'it serves no open request' };
   if (f.benchHeld) return { stay: `a timed run from its sandbox holds ${here}'s bench lock: its numbers compare only with ${here}'s own` };
+  // w2304: a leg of a pair run under way (no leg has reported) never moves alone: its game is joined to the other legs', and
+  // w2271's client leg was moved three times mid-run (09:14Z, 09:45Z, 11:04Z on 2026-10-26), each move cutting the run. It
+  // keeps its own sandbox; once that went to other work (released) what it ran there is gone, so the pair starts again whole.
+  const live = f.requests.find((r) => r.pair?.live);
+  if (live) {
+    const others = live.pair!.others.length ? live.pair!.others.join(', ') : 'the other legs';
+    if (!f.released) return { stay: `${live.id} is a pair run under way (w2304): leg ${live.pair!.leg} plays with ${others}, and a leg moved alone cuts the run` };
+    return { requeuePair: { id: live.id, why: `leg ${live.pair!.leg}'s sandbox on ${here} went to other work mid-run, and a leg moved alone cuts the run (w2046 move refused)` } };
+  }
   const pin = f.requests.find((r) => r.pinned?.length && r.pinned.every((p) => placeId(p) === here));
   if (pin) return { stay: `${pin.id} is pinned to ${here}` };
   const leg = f.requests.find((r) => r.timedLeg);
@@ -107,7 +116,7 @@ export function moveDecision(f: MoveFacts): MoveDecision {
       if (!r.pair) continue;
       if (r.pair.others.some((o) => placeId(o) === p.id)) unfit.set(p.id, `${r.id}'s other leg runs there`);
       else if (r.pair.avoid?.some((o) => placeId(o) === p.id)) unfit.set(p.id, `${r.id}'s pair run avoids it`);
-      else if (p.platform === 'darwin' && (r.pair.leg > 1 || !r.pair.crossOs)) unfit.set(p.id, 'a Mac is never a pair run client, and hosts only a cross-OS pair');
+      else if (p.platform === 'darwin' && r.pair.leg > 1) unfit.set(p.id, 'a Mac is never a pair run client (w665); it may host (w2282)');
     }
   }
   const candidates = f.places.filter((p) => p.id !== here && !unfit.has(p.id));
