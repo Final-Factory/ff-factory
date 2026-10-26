@@ -107,7 +107,7 @@ export function moveDecision(f: MoveFacts): MoveDecision {
       if (!r.pair) continue;
       if (r.pair.others.some((o) => placeId(o) === p.id)) unfit.set(p.id, `${r.id}'s other leg runs there`);
       else if (r.pair.avoid?.some((o) => placeId(o) === p.id)) unfit.set(p.id, `${r.id}'s pair run avoids it`);
-      else if (p.platform === 'darwin' && (r.pair.leg > 1 || !r.pair.crossOs)) unfit.set(p.id, 'a Mac is never a pair run client, and hosts only a cross-OS pair');
+      else if (p.platform === 'darwin' && r.pair.leg > 1) unfit.set(p.id, 'a Mac is never a pair run client (w665); it may host (w2282)');
     }
   }
   const candidates = f.places.filter((p) => p.id !== here && !unfit.has(p.id));

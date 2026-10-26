@@ -5576,7 +5576,7 @@ test('w1945: request_pair files one pair request and blocks the asking worker on
   const a = await startedFor(env, 'w665');
   await assert.rejects(async () => a.h.request_pair!({ what: 'x', brief: 'y', legs: 1 }), /legs is 2 to 4/);
   const out = String(await a.h.request_pair!({ what: 'MP-lowore-pin-pair on PR #2340', brief: 'Run MP-lowore-pin-pair on branch w665-lowore-pin-no-collider; pass: 400 heartbeats compared, none diverged.' }));
-  assert.match(out, /^Filed (w\d+), a pair run of 2 legs, on computers that are not Macs, for w665\. The dispatcher starts its legs together/);
+  assert.match(out, /^Filed (w\d+), a pair run of 2 legs, on any computers, any OS \(a Mac only as the host, leg 1\), for w665\. The dispatcher starts its legs together/);
   assert.match(out, /Recorded: w665 is Blocked on /);
   assert.match(out, /your sandbox is then released at once for other work/);
   const id = /^Filed (w\d+)/.exec(out)![1];
@@ -5706,7 +5706,7 @@ test('w1945: a pair request starts both legs together, each on its own computer,
   const nothing = () => assert.deepEqual(store.work.get('w2')!.sessionIds, [], 'nothing was started');
   const one = await start({});
   assert.equal(one.isError, true);
-  assert.match(one.text, /w2 is a pair run of 2 legs, on computers that are not Macs: start every leg together, sandbox for leg 1 \(the host\) and pair_sandboxes for the others/);
+  assert.match(one.text, /w2 is a pair run of 2 legs, on any computers, any OS \(a Mac only as the host, leg 1\): start every leg together, sandbox for leg 1 \(the host\) and pair_sandboxes for the others/);
   nothing();
   assert.match((await start({ pair_sandboxes: ['pc/alpha'] })).text, /two legs on pc: each leg of a pair run goes on its own computer/);
   store.putMachine({ ...store.machines.get('beast')!, platform: 'darwin' });
@@ -5714,6 +5714,8 @@ test('w1945: a pair request starts both legs together, each on its own computer,
   nothing();
   store.putMachine({ ...store.machines.get('beast')!, platform: 'win32' });
 
+  // w2282: a Mac hosts (leg 1) a pair that needs no cross-OS pair.
+  store.putMachine({ ...store.machines.get('pc')!, platform: 'darwin' });
   const ok = await start({ pair_sandboxes: ['beast/slot1'] });
   assert.equal(ok.isError, false, ok.text);
   assert.match(ok.text, /^Started w2's 2 legs together, requested by Ben: leg 1 \(host\): agent \w+ in pc\/alpha.*; leg 2: agent \w+ in beast\/slot1/);
@@ -5747,15 +5749,18 @@ test('w1945: an older Queued pair run holds a computer’s last free sandbox fro
   const start = (extra: Record<string, unknown> = {}) => call(dispatcher().info, 'start_agent', { work_id: 'w3', prompt: 'Fix it', title: 'fix', sandbox: 'pc/alpha', ...extra });
   const held = await start();
   assert.equal(held.isError, true);
-  assert.match(held.text, /pc's last free sandbox is held for w2 "Request w2" \(normal, Queued since 09:00 UTC\), a pair run of 2 legs, on computers that are not Macs, which starts only when that many computers have room at once \(w1945\): it can start now, start its legs first\. Start w3 on another computer; work of higher priority than the pair/);
+  assert.match(held.text, /pc's last free sandbox is held for w2 "Request w2" \(normal, Queued since 09:00 UTC\), a pair run of 2 legs, on any computers, any OS \(a Mac only as the host, leg 1\), which starts only when that many computers have room at once \(w1945\): it can start now, start its legs first\. Start w3 on another computer; work of higher priority than the pair/);
   assert.deepEqual(store.work.get('w3')!.sessionIds, []);
   // Urgent single work goes first; so does work on a computer the pair does not fit.
   store.work.get('w3')!.priority = 'urgent';
   assert.equal(agents.pairHoldProblem('pc', store.work.get('w3')), undefined);
   store.work.get('w3')!.priority = 'normal';
   store.putMachine({ ...store.machines.get('pc')!, platform: 'darwin' });
-  assert.equal(agents.pairHoldProblem('pc', store.work.get('w3')), undefined, 'a Mac is no leg of this pair, so nothing is held there for it');
+  assert.match(agents.pairHoldProblem('pc', store.work.get('w3')) ?? '', /held for w2/, 'w2282: a Mac may host this pair, so its last free sandbox is held for it');
   store.putMachine({ ...store.machines.get('pc')!, platform: 'win32' });
+  store.work.get('w2')!.pair = { legs: 2, avoid: ['pc'] };
+  assert.equal(agents.pairHoldProblem('pc', store.work.get('w3')), undefined, 'a computer the pair avoids holds nothing for it');
+  store.work.get('w2')!.pair = { legs: 2 };
   // A person's "Start now" makes it urgent: it starts.
   store.work.get('w3')!.priority = 'urgent';
   const ok = await start();
@@ -5914,7 +5919,7 @@ test('w1945: the WRONG flag and decide_work queue count a pair as room only with
   facts(one);
   const q = await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'queue', note: 'one computer has room' });
   assert.equal(q.isError, false, q.text);
-  assert.match(store.work.get('w2')!.log.join('\n'), /queued for capacity; a pair run of 2 legs needs 2 computers with room at once, and only pc has room it fits/);
+  assert.match(store.work.get('w2')!.log.join('\n'), /queued for capacity; a pair run of 2 legs needs 2 computers with room at once, at most one of them a Mac \(the host\), and only pc has room it fits/);
   store.work.get('w2')!.queuedFor = { at: '2026-01-01T00:00:00.000Z' };
   assert.deepEqual(o.flagQueuedWithRoom(one), [], 'one free computer is no room for two legs');
   assert.deepEqual(o.flagQueuedWithRoom(both), ['w2']);
@@ -5944,7 +5949,7 @@ test('w1945: a two-machine run filed by hand is marked a pair as the dispatcher 
   const q = await call(dispatcher().info, 'decide_work', { id: 'w3', action: 'queue', note: 'one computer has room', pair_legs: 2 });
   assert.equal(q.isError, false, q.text);
   assert.deepEqual(store.work.get('w3')!.pair, { legs: 2 });
-  assert.match(store.work.get('w3')!.log.join('\n'), /queued for capacity \(marked a pair run of 2 legs, on computers that are not Macs\); a pair run of 2 legs needs 2 computers with room at once, and only pc has room it fits/);
+  assert.match(store.work.get('w3')!.log.join('\n'), /queued for capacity \(marked a pair run of 2 legs, on any computers, any OS \(a Mac only as the host, leg 1\)\); a pair run of 2 legs needs 2 computers with room at once, at most one of them a Mac \(the host\), and only pc has room it fits/);
   store.work.get('w3')!.queuedFor = { at: '2026-01-01T00:00:00.000Z' };
   assert.deepEqual(o.flagQueuedWithRoom(one), [], 'one free computer is no room for two legs');
   assert.deepEqual(o.flagQueuedWithRoom(both), ['w3']);
