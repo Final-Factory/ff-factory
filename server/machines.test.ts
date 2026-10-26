@@ -805,6 +805,56 @@ test('machine: add_machine worker_install makes only the record a new machine in
   assert.deepEqual([b.status, b.awaitingInstall, b.platform], ['ready', undefined, 'linux']);
 });
 
+test('w2313: a worker started while a slow welcome is on its way keeps running, its queued brief goes on the hello, and an update over the link that cuts it off resumes it', async (t) => {
+  const { store, sessions, mm, daemon, cleanup } = await setup();
+  t.after(cleanup);
+  fastReconnect(t);
+  RESUME_DELAY_MS.value = 50;
+  t.after(() => (RESUME_DELAY_MS.value = 3000));
+  const reports: string[] = [];
+  mm.report = (text) => reports.push(text);
+  // An older session of the machine whose last seq needs an unzip (beast, 2026-10-26: over ATTACH_SLICE sessions): the
+  // welcome waits for it, so it goes out after the link opened and after the hello.
+  const old = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'old', permissionMode: 'default' });
+  let unzip!: () => void;
+  const unzipped = new Promise<void>((r) => (unzip = r));
+  const lastSeqNow = store.lastSeqNow.bind(store);
+  store.lastSeqNow = (sid) => (sid === old.info.id ? undefined : lastSeqNow(sid));
+  store.lastSeqAsync = async () => (await unzipped, 0);
+  // Its hello waits too, so the brief is queued first, as a3d1d9f7's was ("has not said hello yet").
+  const priv = mm as unknown as { onMessage(id: string, msg: { type: string }): void };
+  const onMessage = priv.onMessage.bind(mm);
+  let hello!: () => void;
+  const helloHeld = new Promise<void>((r) => (hello = r));
+  priv.onMessage = (id, msg) => (msg.type === 'hello' ? void helloHeld.then(() => onMessage(id, msg)) : onMessage(id, msg));
+  const d1 = daemon();
+  await until('the link is open', () => mm.isOnline('mx'));
+  const s = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'w2302 leg', permissionMode: 'default' });
+  sessions.send(s.info.id, 'long timed leg', 'system', undefined, { hold: true });
+  assert.equal(sessions.queued().filter((q) => q.id === s.info.id).length, 1, 'queued until the daemon says hello');
+  const users = () => store.readTranscript(s.info.id).filter((e) => e.kind === 'user').map((e) => (e as { text: string }).text);
+  hello();
+  await until('the brief went once the daemon said hello', () => s.info.status === 'running' && users().length === 1);
+  assert.equal(sessions.queued().filter((q) => q.id === s.info.id).length, 0, 'delivered, not dropped');
+  // The welcome comes now, naming the machine's sessions as they are, the new worker included: the daemon keeps it.
+  unzip();
+  const daemonHas = () => (d1 as unknown as { entries: Map<string, unknown> }).entries.has(s.info.id);
+  await until('welcomed', () => (d1 as unknown as { welcomed: boolean }).welcomed);
+  await new Promise((r) => setTimeout(r, 200));
+  assert.ok(daemonHas(), 'the daemon did not drop the worker it had just started');
+  assert.equal(s.info.status, 'running', 'still mid-turn, not stopped by the welcome');
+
+  // Its daemon updated over its link (the job restarts it): the worker cut off mid-turn is resumed after the new hello.
+  (mm as unknown as { dropWhy: Map<string, string | false> }).dropWhy.set('mx', 'was updated over its link');
+  d1.shutdown();
+  await until('offline', () => !mm.isOnline('mx'));
+  assert.equal(s.info.status, 'stopped');
+  daemon();
+  await until('resumed', () => users().length === 2, 8000);
+  assert.match(users()[1], /^\[machine mx\] The FF Factory daemon on this machine was updated over its link at .* while you were mid-turn/);
+  await until('the resumed turn ran', () => s.info.status === 'running' || s.info.status === 'idle');
+});
+
 test('machine: agents cut off mid-turn by a forced redeploy or a daemon restart are resumed when the daemon is back; a stop is not', async (t) => {
   const { store, sessions, mm, daemon, cleanup } = await setup();
   t.after(cleanup);

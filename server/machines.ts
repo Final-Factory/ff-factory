@@ -1065,6 +1065,8 @@ export class MachineManager {
     console.log(`machine ${id}: ${form} over its link to ${b.commit.slice(0, 12)} (bundle ${b.size} bytes, sha256 ${b.sha256.slice(0, 12)}…), job ${callId.slice(0, 8)}`);
     try {
       await ack;
+      // w2313: its job restarts the daemon: the agents a dropped link cuts off mid-turn are resumed saying why.
+      if (form === 'update' && !this.dropWhy.has(id)) this.dropWhy.set(id, 'was updated over its link');
     } catch (e) {
       // w2005: gone quiet before it even asked for the bundle, so nothing on it changed: the update is still due, not failed.
       const err = !this.isOnline(id) && !this.bundles.fetched(id, b.sha256) ? new UpdateNotReached(`${(e as Error).message}; it went offline without fetching the update bundle, so nothing on it changed`) : (e as Error);
@@ -1936,6 +1938,12 @@ export class MachineManager {
 
   /** The welcome a daemon gets on connecting, and again when its hello moved its pool (w513). */
   private welcomeOf(m: Machine, sessions = m.sessionIds.filter((sid) => this.store.sessions.has(sid)).map((sid) => ({ id: sid, lastSeq: this.store.lastSeq(sid) }))) {
+    // w2313: every session the machine has NOW. The daemon stops each one the welcome does not name, and attach's list is
+    // taken when the link opens: on beast (over ATTACH_SLICE sessions) the welcome went out 40 s later, after a3d1d9f7 had
+    // been created, given its brief on the hello and started there, so the daemon stopped it mid-turn and nothing resumed it.
+    const listed = new Set(sessions.map((s) => s.id));
+    const late = (this.store.machines.get(m.id) ?? m).sessionIds.filter((sid) => !listed.has(sid) && this.store.sessions.has(sid));
+    if (late.length) sessions = [...sessions, ...late.map((sid) => ({ id: sid, lastSeq: this.store.lastSeqNow(sid) ?? 0 }))];
     // A worker root install (w513) whose record has no pool of its own yet keeps daemon.json's until its hello says it.
     const pool = m.sandboxRoot || !m.root ? poolSettingsOf(m) : undefined;
     const resumable = this.resumableOf(m);

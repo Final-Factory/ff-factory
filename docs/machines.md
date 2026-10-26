@@ -69,7 +69,13 @@ before redeploying by hand.
   without `turnOpenSince` clears the portal's copy (JSON drops cleared fields), a drop clears every mark it has
   noted, and a refused start (`failed`) does not move `lastActivityAt`. An agent stopped or interrupted on purpose
   (`stop_agent`, the UI) is marked `stoppedOnPurpose` (saved, and taken off any cut-off list already noted) and is
-  never resumed, by a dropped link or a portal restart, until it is sent a message again.
+  never resumed, by a dropped link or a portal restart, until it is sent a message again. An update over the link
+  (the machine rollout after a deploy) names itself in the resume ("was updated over its link"). **The welcome names
+  every session the machine has when it is sent (w2313)**, not the list taken when the link opened: the daemon stops
+  each agent the welcome leaves out, and on a machine with more than `ATTACH_SLICE` sessions the welcome goes out
+  seconds later, after the hello. On 2026-10-26 beast's went out about 40 s after its link opened; worker a3d1d9f7
+  (w2302) had been created in between, its brief (queued until the hello) was delivered on the hello, and the
+  welcome then stopped it as unknown, with no link drop, so no cut-off was noted and nothing resumed it.
 - **Offline with work waiting (w1249).** A machine offline 30 minutes (`OFFLINE_ALERT_MS`; its `lastSeen` counts from
   before a portal restart) with work stranded on it (agents cut off mid-turn, workers it holds a sandbox for, messages
   queued for it: `strandedOn`) is told once per outage to the orchestrator and pushed to the host's devices
