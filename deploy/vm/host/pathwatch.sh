@@ -34,6 +34,17 @@
 : "${PW_FUNNEL_REPUBLISH_AFTER:=3}" "${PW_FUNNEL_RESTART_AFTER:=10}"
 
 PL_IDS="ssh 1 2 3 4 5 6 7 8 9 disk clock loop units ntfy"
+# jq: a time in tailscale status --json (LastHandshake) in seconds since 1970. tailscaled writes it in the VM's own time
+# zone with nanoseconds ("2026-10-26T15:51:26.112734631-06:00", VM_TIMEZONE=America/Denver), and as ...Z in UTC; jq's
+# fromdateiso8601 takes only the second form without a fraction, so the offset is taken off by hand (w2311). The zero
+# time ("0001-...") and null are 0; anything else is an error, which fails the layer with jq's message.
+# shellcheck disable=SC2016 # $c and the string interpolation are jq's, not the shell's
+PL_JQ_EPOCH='def epoch: if (. == null) or startswith("0001") then 0
+  else (capture("^(?<t>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})([.][0-9]+)?(?<z>Z|(?<s>[-+])(?<h>[0-9]{2}):(?<m>[0-9]{2}))$")
+        // error("not an RFC 3339 time: \(.)")) as $c
+    | ($c.t + "Z" | fromdateiso8601)
+      - (if $c.z == "Z" then 0 else ($c.h | tonumber) * 3600 + ($c.m | tonumber) * 60 | if $c.s == "-" then -. else . end end)
+  end;'
 PL_POLICY_MSG="the tailnet policy drops Funnel traffic: a tailnet admin must grant tag:ingress (or *) → tag:fff-portal"
 # The VM's marker of a running migrate dry run (fffctl migrate --dry-run-copy): its Funnel is off on purpose.
 PL_DRYRUN_MARKER=${PL_DRYRUN_MARKER:-/srv/fff/migrate/dry-run.json}
@@ -569,7 +580,7 @@ path_l7() {
 path_l8() {
   local stats peers newest rx age restarted_at restarted_ago ev
   stats=$(jq -r '
-    def epoch: if (. == null) or startswith("0001") then 0 else (sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) end;
+    '"$PL_JQ_EPOCH"'
     [.Peer[]? | select(((.Tags // []) | index("tag:ingress")) != null)] as $p
     | "\($p | length) \([$p[] | (.LastHandshake | epoch)] | max // 0) \([$p[] | .RxBytes // 0] | add // 0)"' <<<"$TS" 2>&1) || true
   read -r peers newest rx <<<"$stats"
@@ -708,7 +719,7 @@ pl_e2e_inside() {
   s=""
   if [ -n "$TS" ]; then
     read -r peers fresh < <(jq -r --argjson now "$(now)" '
-      def epoch: if (. == null) or startswith("0001") then 0 else (sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) end;
+      '"$PL_JQ_EPOCH"'
       [.Peer[]? | select(((.Tags // []) | index("tag:ingress")) != null)] as $p
       | "\($p | length) \([$p[] | select(($now - (.LastHandshake | epoch)) < 300)] | length)"' <<<"$TS" 2>/dev/null || echo "? ?")
     s="$fresh of $peers Funnel server peer(s) with a handshake in 5 min; "
