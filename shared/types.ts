@@ -1692,6 +1692,26 @@ export interface MachineGuardSettings {
 }
 
 /** One clean-up pass on a computer (server/cleanup.ts): the host guard's or a machine daemon's. */
+export interface MediaTally {
+  files: number;
+  bytes: number;
+}
+
+/** The media retention's part of a clean-up pass (w2268, server/mediaRetention.ts). */
+export interface MediaSummary {
+  days: number;
+  /** Pictures and videos removed (dry run: that would go), and their bytes. */
+  removedFiles: number;
+  freedBytes: number;
+  /** What is there before the pass, by store. */
+  inventory: { uploads: MediaTally; review: MediaTally };
+  /** Old enough, kept because something live points at it (an open request, a pending question, a waiting card, a running session). */
+  keptReferenced: MediaTally;
+  /** Not old enough yet. */
+  keptYoung: MediaTally;
+  dryRun?: boolean;
+}
+
 export interface CleanupSummary {
   at: string;
   /** hourly: the regular pass; low-space: below the soft threshold; critical: the host guard's critical level; asked: by hand. */
@@ -1726,6 +1746,8 @@ export interface CleanupSummary {
   consumers?: { path: string; bytes: number }[];
   /** Unity Libraries of projects not opened for a long time: reported, removed only past a longer age. */
   staleLibraries?: { path: string; days: number }[];
+  /** The portal host's media retention (w2268): what it removed and kept, and what was there. */
+  media?: MediaSummary;
 }
 
 export interface DrainStatus {

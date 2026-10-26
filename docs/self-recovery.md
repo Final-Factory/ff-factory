@@ -379,6 +379,28 @@ machine (`{ "*": 80, "m3": 40 }` in config.json). The ages are in `hostGuard.cle
 `playtestDays`, `libraryReportDays`, `libraryDeleteDays`, `cloneOlderThanDays`). The machines use the
 defaults.
 
+**Media retention** (w2268; lothsahn: "delete pictures and videos from transcripts older than 14 days"; `server/mediaRetention.ts`).
+Each host pass (`server/index.ts`, the host cleanup `pass`) also removes the pictures and videos (png, jpg, gif, webp,
+svg, mp4, m4v, webm, mov) older than `hostGuard.cleanup.mediaDays` (default 14; 0 = never; `set_app_config`) from the
+two places they live: the chat pictures in `data/uploads/<session>/` and the review folder (`review.root`) with its
+`.preview/` copies. Nothing else is touched: transcript text, logs, the ledger, attachments (their own
+`attachments.retentionDays`, docs/attachments.md) and the `data:` pictures inside a message's text stay.
+
+- **Age**: a worker's picture counts from the later of its file time and the session's last activity, so a transcript
+  goes only when it has been idle that long; a coordinator, standing or ops chat never goes idle, so its picture counts
+  from its own time. A review file counts from when it was published (its file time).
+- **Kept whatever its age**: a session that is live, waiting on a person or has open asks; every session of an open or
+  stalled request; a review topic named for an open request (`w2268-...`); and any file whose name (an upload's id, a
+  review file's `topic/name`) appears as a whole word in an open request's fields or a pending question.
+- **Placeholder**: each folder keeps a `.media-removed.json` tombstone (name, when, days, bytes). `/api/uploads` serves
+  a removed picture as an SVG reading "[image removed after 14 days]"; `/api/image` does the same for a review still
+  and answers 410 "[video removed after 14 days]" for a video, which the dashboard's players show as that text
+  (`web/src/components/Images.tsx` `MediaRemoved`). A file that was never there stays a 404.
+- **Log**: one item per folder in `cleanup-log.jsonl` (rule `media`, bytes, why), and the pass's `media` summary: the
+  inventory before, what was kept as referenced or newer, files removed and bytes freed. `portal_logs` source
+  `cleanup` shows it as the pass's "media retention (14 days): removed N picture/video file(s), X MB freed; ..." line.
+  A dry run (`host_recovery` "cleanup" with `dryRun`) measures and removes nothing.
+
 ### Stale build and run output (w459)
 
 Until 2026-10-05 a person asked for every clean-up of build output: w451 freed 42 GB of stale player builds on

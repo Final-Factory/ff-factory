@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import type { CleanupPolicy } from './config.ts';
-import { CLEANUP_SOFT_GB_DEFAULT, type CleanupSummary } from '../shared/types.ts';
+import { CLEANUP_SOFT_GB_DEFAULT, type CleanupSummary, type MediaSummary } from '../shared/types.ts';
 import type { StaleOutputSettings } from './staleOutput.ts';
 import { inNeverGames, installDrive, onInstallDrive } from './rootFence.ts';
 
@@ -111,6 +111,8 @@ export interface CleanupRun {
   listed?: { path: string; bytes: number; why: string }[];
   /** Rebuildable caches a low pass saw in a worker's temp folder and kept, with the check that kept them (w1813). */
   held?: { path: string; bytes: number; why: string }[];
+  /** The portal host's media retention (w2268, mediaRetention.ts withMedia). */
+  media?: MediaSummary;
 }
 
 // Windows paths ("C:/x", "\\\\server\\x") are judged as Windows paths and "/x" as POSIX paths on any OS (CI runs
@@ -927,6 +929,7 @@ export class CleanupRunner {
         ...(r.planned?.length ? { planned: r.planned.slice(0, 200), plannedBytes: r.planned.reduce((n, x) => n + x.bytes, 0) } : {}),
         ...(r.listed?.length ? { listed: r.listed.slice(0, 50) } : {}),
         ...(r.held?.length ? { held: r.held.slice(0, 50) } : {}),
+        ...(r.media ? { media: r.media } : {}),
       };
       if (dryRun) {
         this.d.log({ ...summary, freeBeforeBytes: before, plannedAll: r.planned, listedAll: r.listed, heldAll: r.held });
