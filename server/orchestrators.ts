@@ -48,7 +48,7 @@ import {
 import { autoApproveProblem, cleanBlock, cleanLine, crashFacts, crashKinship, crashPeersBlock, identityKeys, ownApprovalCount, parseMarkers, quoteUntrusted, sourceTag, titleOnly } from './intakeRules.ts';
 import { readDiscordConfig } from './discordConfig.ts';
 import { LIMIT_END, doneIdsIn, doneProblem, learnedProblem, mergedMentionsIn, notDoneReason, pausedIn, reportVerdict, stillOpenIn, toolErrors, turnEvidence, turnTroubleOf, type TurnTrouble } from './ledgerRules.ts';
-import { aheadText, answerAfter, asksAPerson, holdsOf, personWaitIn, questionShareKey, reportWaitKey, roomShares, servedBy } from '../shared/workState.ts';
+import { aheadText, answerAfter, asksAPerson, holdsOf, personWaitIn, questionShareKey, reportWaitKey, roomShares, servedBy, UNDECIDED_BOUND_MS } from '../shared/workState.ts';
 import { capacityBlockProblem, capacityWaitIn, needsOf, needsTimed, pairRoom, pairText, PAIR_MAX_LEGS, resolveNeeds } from '../shared/capacity.ts';
 import type { HandBack } from './machinePause.ts';
 import { heldText, roomEnough, roomForWork, roomIds, roomStood, timedKindOf, unusableText, type RoomNow, type TimedFacts, type TimedKind } from './placement.ts';
@@ -828,11 +828,13 @@ export class Orchestrators {
   /** Send the dispatcher a harness message about `by`'s work (recorded with them, so for_user can name them). */
   toDispatcher(text: string, by?: Requester) {
     const id = this.dispatcherId;
-    if (!id) return;
+    // w2217: said in the journal, so a notice that never reached it can be found; undecidedBound offers a request again.
+    if (!id) return void console.warn(`dispatcher: no dispatcher to tell: ${clip(text.replace(/\s+/g, ' ').trim(), 160)}`);
     try {
       this.sessions.send(id, text, 'system', undefined, { requestedBy: by });
-    } catch {
+    } catch (e) {
       // the dispatcher is gone or at a limit; the ledger and the UI still have it
+      console.warn(`dispatcher: a notice did not reach ${id} (${(e as Error).message}): ${clip(text.replace(/\s+/g, ' ').trim(), 160)}`);
     }
   }
 
@@ -3568,6 +3570,43 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
    * small computer coming back narrows them again. Without the w2055 facts (an old caller) w2048's rule runs as before.
    * Returns the ids whose needs changed or that started.
    */
+  /**
+   * w2217 (lothsahn: "no request sits as "new: Working (the dispatcher has it to decide)" without a decision for more than a
+   * few minutes"): w2192, a pair run request_pair filed at 20:56Z on 2026-10-25, got its one [work request] at filing and sat
+   * undecided 3 h, while the capacity pings named only Queued requests. A request still `new` UNDECIDED_BOUND_MS after the
+   * blocker watch first saw it so is offered to the dispatcher again, once (its log says so); still undecided after that, its
+   * live state turns Stalled (shared/workState.ts). Its `undecided` mark goes when it leaves `new`, so a reopen counts afresh.
+   * Returns the ids offered again.
+   */
+  undecidedBound(): string[] {
+    const now = this.now().getTime();
+    const offered: string[] = [];
+    for (const w of this.store.work.values()) {
+      if (w.status !== 'new') {
+        if (w.undecided) {
+          delete w.undecided;
+          this.store.putWork(w);
+        }
+        continue;
+      }
+      if (w.approval?.state === 'pending') continue;
+      if (!w.undecided) {
+        w.undecided = { since: new Date(Math.min(now, Date.parse(w.updatedAt) || now)).toISOString() };
+        this.store.putWork(w);
+      }
+      const since = Date.parse(w.undecided.since) || now;
+      if (w.undecided.reofferedAt || now - since < UNDECIDED_BOUND_MS) continue;
+      const mins = Math.round((now - since) / 60_000);
+      w.undecided = { ...w.undecided, reofferedAt: new Date(now).toISOString() };
+      this.stamp(w, `ledger: undecided for ${mins} min: offered to the dispatcher again (w2217)`);
+      this.store.putWork(w);
+      console.log(`ledger: ${w.id} undecided for ${mins} min: offered to the dispatcher again (w2217)`);
+      this.gatherForDispatcher(w.requestedBy, `${requestNotice(w)}\n\nOffered again by FF Factory (w2217): it has sat undecided for ${mins} min since its first [work request]. Decide it now (start it, queue it for capacity, block it or ask); left undecided, it shows as Stalled.`);
+      offered.push(w.id);
+    }
+    return offered;
+  }
+
   timedLegBound(): string[] {
     if (!this.d.timedLegStep) return this.timedLegBoundW2048();
     const done: string[] = [];
