@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { describeCleanup } from './cleanup.ts';
+import { describeMedia } from './mediaRetention.ts';
 import { contextCycles, contextReport } from './contextGrowth.ts';
 import { run } from './proc.ts';
 import { redactSecrets } from './secrets.ts';
@@ -257,6 +258,7 @@ function passLines(e: CleanupSummary & { removedAll?: { path: string; bytes: num
   const gb = (b: number) => (b >= 1024 ** 3 ? `${(b / 1024 ** 3).toFixed(1)} GB` : `${(b / 1024 ** 2).toFixed(0)} MB`);
   const tag = `[${e.at}]`;
   const out = [`${tag} ${describeCleanup(e)}`];
+  if (e.media) out.push(`${tag} ${describeMedia(e.media)}`);
   const item = (kind: string, x: { path: string; bytes: number; why?: string; rule?: string }) => `${tag} ${kind}: ${x.path}  ${gb(x.bytes)}  (${x.why ?? x.rule ?? ''})`;
   if (!e.dryRun) for (const x of [...(e.removedAll ?? e.top ?? [])].sort((a, b) => b.bytes - a.bytes)) out.push(item('removed', x));
   for (const x of e.planned ?? []) out.push(item(e.dryRun ? 'would remove' : 'would remove (dry-run mode)', x));

@@ -39,6 +39,8 @@ export const SETTABLE_KEYS = [
   // The continuous clean-up's pace and soft threshold, on this host and on the machines (optional `machine`).
   'hostGuard.cleanup.everyMinutes',
   'hostGuard.cleanup.softFreeGB',
+  // The portal's pictures and videos of idle conversations (w2268, server/mediaRetention.ts): days, 0 never.
+  'hostGuard.cleanup.mediaDays',
   'machines.cleanup.everyMinutes',
   'machines.cleanup.softFreeGB',
   // The stale build and run output rules (w459, server/staleOutput.ts): this host's, and every machine's.
@@ -664,6 +666,11 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
     case 'hostGuard.cleanup.staleOutput':
     case 'machines.cleanup.staleOutput':
       return checkStaleOutput(key, value);
+    case 'hostGuard.cleanup.mediaDays': {
+      const n = Number(value);
+      if (!Number.isInteger(n) || n < 0 || n > 3650) throw new Error(`${key} is 0 (never) or a whole number of days from 1 to 3650`);
+      return n;
+    }
     case 'hostGuard.cleanup.softFreeGB':
     case 'machines.cleanup.softFreeGB': {
       // The portal's at or below its warn level is fine (w1101: its default is warnFreeGB); above its critical level.
@@ -1076,6 +1083,8 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   else if (key === 'usagePollMinutes') cfg.usagePollMinutes = (v as number | undefined) ?? DEFAULT_USAGE_POLL_MINUTES;
   else if (key === 'hostGuard.cleanup.everyMinutes') cfg.hostGuard.cleanup.everyMinutes = (v as number | undefined) ?? DEFAULT_CLEANUP.everyMinutes;
   else if (key === 'hostGuard.cleanup.softFreeGB') cfg.hostGuard.cleanup.softFreeGB = (v as number | undefined) ?? DEFAULT_CLEANUP.softFreeGB;
+  // Live: the next clean-up pass reads it (index.ts, the host's pass).
+  else if (key === 'hostGuard.cleanup.mediaDays') cfg.hostGuard.cleanup.mediaDays = (v as number | undefined) ?? DEFAULT_CLEANUP.mediaDays;
   // Live: the host guard reads its levels at every look (server/hostHealth.ts).
   else if (key === 'hostGuard.warnFreeGB') cfg.hostGuard.warnFreeGB = (v as number | undefined) ?? HOST_GUARD_DEFAULTS.warnFreeGB;
   else if (key === 'hostGuard.criticalFreeGB') cfg.hostGuard.criticalFreeGB = (v as number | undefined) ?? HOST_GUARD_DEFAULTS.criticalFreeGB;

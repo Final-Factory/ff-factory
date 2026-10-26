@@ -5785,6 +5785,13 @@ body {
   gap: 10px;
   margin-top: 8px;
 }
+.media-removed {
+  display: inline-block;
+  padding: 6px 10px;
+  border: 1px dashed var(--border, #5a5f68);
+  border-radius: 6px;
+}
+
 .video-item {
   margin: 0;
   width: min(100%, 480px);

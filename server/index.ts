@@ -74,6 +74,7 @@ import { GITHUB_REQUIRED_REPOS } from '../shared/githubRequirements.ts';
 import { collectNetwork, loadOutsideWatchState, outsideWatchConfig, saveOutsideWatchState, watchedPortalUrl, watcherOf } from './outsideWatch.ts';
 import { endMaybeGzip } from './compress.ts';
 import { serveStatic, webBuild } from './webStatic.ts';
+import { placeholderSvg, removedMedia, removedText, runMediaRetention, withMedia } from './mediaRetention.ts';
 import { appendCleanupLog, staleAtFile, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, sessionTempDir, staleUnityLibraries, volumeStat } from './cleanup.ts';
 import { cleanupPass, defaultNightlyRoots, planStaleOutput, staleContextOf, staleOutputSettings, type StalePlace } from './staleOutput.ts';
 import { TASK_NAME, checkElevation } from './elevation.ts';
@@ -705,7 +706,11 @@ const hostHealth = new HostHealthMonitor({
         regular: () => planCleanup({ rules: cleanupRules(env, cfg.hostGuard.cleanup), guard, low, libraries }),
         stale: () => planStaleOutput({ places: hostStalePlaces(), nightlyRoots: settings.nightlyRoots ?? defaultNightlyRoots(), ctx: staleContextOf(store.work.values()), settings, guard }),
       });
-      return r;
+      // The pictures and videos of idle conversations (w2268, server/mediaRetention.ts): only inside data/uploads and the
+      // review folder, which the guard above keeps whole, so they get a pass of their own, logged with this one. A dry-run
+      // portal can share the real review folder: it removes nothing there.
+      const media = await runMediaRetention({ uploadDir: store.uploadsDir, reviewRoot: review.root, days: isDryRun ? 0 : cfg.hostGuard.cleanup.mediaDays, sessions: store.sessions.values(), work: store.work.values(), dryRun: opts.dryRun });
+      return withMedia(r, media, opts.dryRun);
     },
     consumers: () => biggestConsumers(cleanupEnv, [cfg.hostGuard.devDriveVhdx].filter(Boolean)),
     stale: async () => (await staleUnityLibraries([cleanupEnv.home], cfg.hostGuard.cleanup.libraryReportDays)).filter((l) => !neverDelete(l.path, hostCleanupGuard())),
@@ -1532,7 +1537,12 @@ route('GET', '/api/attachments/(att_[a-z0-9]{12})/download', async (_r, [id]) =>
 
 route('GET', '/api/uploads/([\\w-]+)/([\\w-]+)', async (_r, [sessionId, imageId]) => {
   const f = store.imagePath(sessionId, imageId);
-  if (!f) throw new HttpError(404, 'no such image');
+  if (!f) {
+    // Removed by the media retention (w2268): its words where the picture was, never a broken image.
+    const gone = store.removedImage(sessionId, imageId);
+    if (gone) return new FileReply('image/svg+xml', placeholderSvg(gone.days));
+    throw new HttpError(404, 'no such image');
+  }
   return new FileReply(MEDIA_TYPE[f.split('.').pop()!] ?? 'application/octet-stream', fs.readFileSync(f));
 });
 
@@ -1594,6 +1604,10 @@ route('GET', '/api/image', async (_r, _p, url) => {
     const img = await readImageIn(where, file);
     return new FileReply(img.mediaType, img.data);
   } catch (e) {
+    // A review file the media retention removed (w2268): a still gets its placeholder, a clip 410 with the words to show.
+    const gone = review.contains(file) ? removedMedia(path.resolve(file)) : undefined;
+    if (gone && VIDEO_FILE.test(file)) throw new HttpError(410, removedText(file, gone.days));
+    if (gone) return new FileReply('image/svg+xml', placeholderSvg(gone.days));
     throw new HttpError(404, (e as Error).message);
   }
 });
