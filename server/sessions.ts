@@ -76,6 +76,11 @@ export interface QueuedSend {
   account?: boolean;
   /** It waits for its orchestrator's automatic compaction to finish (w1749, SessionManager.compactHold). */
   compaction?: boolean;
+  /**
+   * Parked on its worker's Claude pool (w2231): the pool held its start and its requests were blocked on that pool's usage
+   * limit (SessionManager.poolBlock), so it neither claims a sandbox nor counts as queued (queued()) until the block clears.
+   */
+  parked?: boolean;
 }
 
 /** How long a worker stopped to restart on another account may take to go before it is told to stop again (w1076). */
@@ -1174,6 +1179,19 @@ export class SessionManager {
    */
   staleResume?: (work: string, sessionId: string, note: string) => string | undefined;
   /**
+   * A worker's process could not start because its person's Claude pool is held (w2231): block the requests it holds on that
+   * pool's usage limit (a usage gate, Orchestrators.poolHoldBlocked), so they show Blocked, not Queued, its sandbox is
+   * released (Agents.waitOn) and the gate's clearing resumes it. Returns the ids blocked; none: the message waits as before
+   * (w1129). Set by Agents.
+   */
+  poolBlock?: (s: SessionHandle, why: string, next?: string) => string[];
+  /**
+   * Why a worker's messages stay parked (w2231), or undefined: one of the requests it holds is Blocked on a usage gate. A
+   * parked message is not placed (it claims no sandbox) and does not count as queued; it goes once the gate clears (the
+   * gate's resume, or any later message, unparks it). Set by Agents.
+   */
+  poolWait?: (s: SessionHandle) => string | undefined;
+  /**
    * Why a message to this orchestrator must wait for its automatic compaction (w1749: one runs, or a retry is owed), or
    * undefined. Set by AutoCompactor. Checked before anything else may start its process. `incoming`: a message sent now
    * (a waiting retry then runs at once), not one the queue tries again.
@@ -1321,7 +1339,47 @@ export class SessionManager {
 
   /** The messages waiting for a slot (oldest first): for the status views and tests. */
   queued(): readonly QueuedSend[] {
-    return this.queue;
+    // Parked messages (w2231) wait on a usage gate, not for a slot: they claim no sandbox and show no Queued line.
+    return this.queue.filter((q) => !q.parked);
+  }
+
+  /** The messages parked on a worker's Claude pool (w2231), oldest first. */
+  parked(id?: string): readonly QueuedSend[] {
+    return this.queue.filter((q) => q.parked && (id === undefined || q.id === id));
+  }
+
+  /**
+   * Its pool held a worker's start (w2231): its requests are blocked on the pool's usage limit (poolBlock) and, when that
+   * blocked any, its waiting messages are parked. Returns whether they were.
+   */
+  private parkOnPool(s: SessionHandle, e: unknown): boolean {
+    const blocked = this.poolBlock?.(s, (e as Error).message, (e as { next?: string }).next) ?? [];
+    if (!blocked.length && !this.poolWait?.(s)) return false;
+    let did = false;
+    for (const q of this.queue) {
+      if (q.id !== s.info.id || q.parked) continue;
+      q.parked = true;
+      q.on = 'pool';
+      did = true;
+    }
+    if (did) {
+      this.saveQueue();
+      this.store.append(s.info.id, { kind: 'system', text: `Its person's Claude pool is held, so its process does not start: ${blocked.length ? `${blocked.join(', ')} ${blocked.length > 1 ? 'are' : 'is'} Blocked on that pool's usage limit` : 'its request is Blocked on that pool\'s usage limit'}, its sandbox is released for other work, and its waiting message goes when the pool has room again (w2231).` });
+      console.log(`sessions: parked the messages of ${s.info.id} on its Claude pool (w2231): ${blocked.join(', ') || 'already blocked'}`);
+    }
+    return did;
+  }
+
+  /** Unpark a session's parked messages (w2231): its usage gate cleared, or a message came for it. Returns whether any were. */
+  private unpark(id: string): boolean {
+    let did = false;
+    for (const q of this.queue) {
+      if (q.id !== id || !q.parked) continue;
+      q.parked = undefined;
+      did = true;
+    }
+    if (did) this.saveQueue();
+    return did;
   }
 
   /** Whether the message with this uuid is waiting for a slot. */
@@ -1375,6 +1433,20 @@ export class SessionManager {
       if (!s) {
         drop();
         continue;
+      }
+      // w2231: parked on its Claude pool while its request is Blocked on that pool's usage limit: no placement, no start.
+      if (q.parked) {
+        if (now - (Date.parse(q.at) || now) >= POOL_HOLD_MS) {
+          drop();
+          this.store.append(q.id, { kind: 'error', text: `A message parked on its Claude pool could not be delivered within ${POOL_HOLD_MS / 3_600_000} hours and was given up. It began: ${q.text.replace(/\s+/g, ' ').slice(0, 200)}` });
+          continue;
+        }
+        if (this.poolWait?.(s)) {
+          held.add(q.id);
+          continue;
+        }
+        q.parked = undefined;
+        this.saveQueue();
       }
       // w1128: a resume whose request was blocked again (or closed) while it waited does not go; its request keeps it.
       const stale = q.resumeOf ? this.staleResume?.(q.resumeOf.work, q.id, q.resumeOf.note) : undefined;
@@ -1443,6 +1515,8 @@ export class SessionManager {
           continue;
         }
         held.add(q.id);
+        // w2231: its pool held the start: its requests go Blocked on the pool's usage limit and its sandbox is released.
+        if (pool && this.parkOnPool(s, e)) continue;
         if (q.lastError !== why) {
           q.lastError = why;
           this.saveQueue();
@@ -1477,6 +1551,13 @@ export class SessionManager {
     // A worker whose person's Claude pool is held (w1129): its message waits for the pool, never refused or dropped. On
     // 2026-10-12 every wake-up, gate resume and dispatcher follow-up to lothsahn's workers was refused this way for hours.
     const pooled = (e: unknown) => s.info.kind === 'worker' && poolHeld(e);
+    // w2231: a worker whose request is Blocked on its pool's usage limit: a harness message waits parked with the rest (no
+    // placement, no start); a person's or an orchestrator's tries again now, its parked ones first.
+    const poolWait = s.info.kind === 'worker' && !isMidTurn(s.info) && !s.live ? this.poolWait?.(s) : undefined;
+    if (poolWait && from === 'system' && this.parked(id).length) {
+      return this.enqueue({ uuid: randomUUID(), id, text, from, ...(images?.length ? { images } : {}), ...(opts.requestedBy ? { requestedBy: opts.requestedBy } : {}), ...(opts.attachments?.length ? { attachments: opts.attachments } : {}), ...(opts.bypassGate ? { bypassGate: true } : {}), ...(opts.resumeOf ? { resumeOf: opts.resumeOf } : {}), at: new Date().toISOString(), why: poolWait, on: 'pool', parked: true });
+    }
+    if (this.unpark(id)) this.drainSoon();
     // ANOTHER PERSON'S ACCOUNT (w1076): its process restarts on its requests' person's tokens first; the message waits.
     // A computer on hold (w1376, config placement.hold) resumes nobody: the message waits for the hold to lift, Blocked on its machine.
     const onHold = this.machineHold?.(s);
@@ -1509,7 +1590,11 @@ export class SessionManager {
     try {
       return s.send(text, from, undefined, images, opts.requestedBy, opts.attachments);
     } catch (e) {
-      if (pooled(e)) return queue((e as Error).message, 'pool');
+      if (pooled(e)) {
+        const uuid = queue((e as Error).message, 'pool');
+        this.parkOnPool(s, e);
+        return uuid;
+      }
       if (!opts.hold) throw e;
       return queue((e as Error).message, 'machine');
     }

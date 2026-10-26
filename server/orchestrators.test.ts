@@ -4753,6 +4753,61 @@ test('w1129: a message to a worker while its Claude pool is held is queued, not 
   });
 });
 
+
+test("w2231: a worker whose Claude pool is held is Blocked on that pool, gives up its sandbox to another request's worker, and is resumed and placed again when the pool frees", async (t) => {
+  const env = await setupOnMachine(t, {}, { sandboxes: ['alpha', 'beta'] });
+  const held = heldVault(t);
+  const { store, agents, o, dispatcher, call, sessions } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }, { id: 'w2' }]);
+  const { pool, pools, usageClear } = lothPool();
+  (agents as unknown as { usageRef: (ref: string) => unknown }).usageRef = (ref) => poolForRef(ref, pools());
+  const watch = new BlockerWatch({ store, orchestrators: o, usageClear, now: () => Date.parse('2026-10-12T12:35:00Z') });
+  const a = await startedFor(env, 'w1', { extra_agent: false });
+  // Its turn ended; the pool is held when its next message must start its process (w2222 on 2026-10-25: 39ba1854 sat Queued
+  // in its sandbox for 21 minutes until lothsahn released it by hand).
+  held.on = true;
+  const sent = await call(dispatcher().info, 'message_agent', { session_id: a.id, work_id: 'w1', text: 'Fix the Test Runner failure on #1552.' });
+  assert.equal(sent.isError, false, sent.text);
+  const w1 = store.work.get('w1')!;
+  assert.equal(w1.status, 'blocked', 'Blocked on the pool, not Queued');
+  assert.equal(w1.blocked?.kind, 'usage');
+  assert.equal(w1.blocked?.ref, LOTH_TOKEN);
+  assert.equal(w1.blocked?.until, POOL_HELD_UNTIL, "the pool's reset");
+  assert.ok(!sessions.queued().some((q) => q.id === a.id), 'not a queued message that keeps its sandbox or claims another');
+  assert.equal(sessions.parked(a.id).length, 1, 'kept for when the pool frees');
+  assert.ok(store.readTranscript(a.id).some((e) => e.kind === 'system' && /Claude pool is held/.test(e.text) && /w2231/.test(e.text)));
+  // The release pass gives its sandbox up (Agents.waitOn: a usage gate since w2231).
+  (agents as unknown as { waitLive?: unknown }).waitLive = undefined;
+  assert.match(agents.waitOn(store.sessions.get(a.id)!) ?? '', /w1: .*usage limit/);
+  const sb = () => store.machines.get('pc')!.sandboxes!.find((x) => x.id === 'alpha')!;
+  await until('alpha released', () => {
+    (agents as unknown as { waitLive?: unknown }).waitLive = undefined;
+    // Its daemon's next 2-minute git read (keptWhy: the line the park wrote is newer than the last read).
+    sb().git = { branch: 'sandbox/alpha', dirty: 0, untracked: 0, ...sb().git, at: new Date().toISOString() };
+    (agents as unknown as { placeAgain: { tick(): string[] } }).placeAgain.tick();
+    return !!store.sessions.get(a.id)!.placeReleased;
+  });
+  // The sandbox is free for another request's worker.
+  held.on = false;
+  const b = await startedFor(env, 'w2', { extra_agent: false });
+  assert.equal(store.sessions.get(b.id)!.machineSandbox, 'alpha', "another job's worker is placed in the sandbox it gave up");
+  sessions.drain();
+  assert.equal(sessions.parked(a.id).length, 1, 'still parked while w1 is Blocked on the pool');
+  // The pool frees: the gate clears, its worker is resumed, and its message goes, placed again (beta, alpha being taken).
+  pool.serving = true;
+  assert.match((await watch.tick()).get('w1') ?? '', /^clear: /);
+  assert.equal(store.work.get('w1')!.status, 'active');
+  assert.match(agents.waker.pending(a.id)?.note ?? '', /^w1 is unblocked: /);
+  (agents.waker as unknown as { fire(id: string, tries: number): void }).fire(a.id, 0);
+  await until('the parked message and the resume reach it', () => {
+    const tx = store.readTranscript(a.id);
+    return tx.some((e) => e.kind === 'user' && e.text.includes('Fix the Test Runner failure on #1552.')) && tx.some((e) => e.kind === 'user' && e.text.includes('w1 is unblocked: '));
+  });
+  assert.equal(sessions.parked(a.id).length, 0);
+  assert.equal(store.sessions.get(a.id)!.machineSandbox, 'beta', 'placed again on a free sandbox');
+});
+
 test("w1463: a machine's gh login reaches list_machines, the Capacity block, start_agent's note and the worker's brief, as names only", async (t) => {
   const token = 'gho_' + 'Z9y8X7w6V5u4T3s2R1q0P9o8N7m6L5k4J3i2';
   const logs: string[] = [];

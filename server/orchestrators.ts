@@ -4034,14 +4034,14 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
    * own, so it is resumed when the gate clears (resumeGatedWorker); its process then starts again on a token with room
    * (Agents.accountMove). Returns the requests blocked.
    */
-  tokenStopBlocked(sessionId: string, a: { ref: string; what: string }, how = { stamp: "stopped at the dispatcher's token's stop line", told: 'saved its work and stopped' }): string[] {
+  tokenStopBlocked(sessionId: string, a: { ref: string; what: string; until?: string }, how = { stamp: "stopped at the dispatcher's token's stop line", told: 'saved its work and stopped' }, only: (w: WorkItem) => boolean = () => true): string[] {
     const items = [...this.store.work.values()];
     const now = this.now();
     const done: string[] = [];
     for (const id of holdsOf(sessionId, items).held) {
       const w = this.store.work.get(id);
-      if (!w || w.status !== 'active') continue;
-      const until = this.d.usageRef?.(a.ref)?.until;
+      if (!w || w.status !== 'active' || !only(w)) continue;
+      const until = this.d.usageRef?.(a.ref)?.until ?? a.until;
       const gate = this.makeGate({ kind: 'usage', ref: a.ref, what: a.what, ...(until ? { until } : {}) }, now.toISOString(), `worker ${sessionId}`);
       w.blocked = gate;
       w.alsoBlocked = undefined;
@@ -4056,6 +4056,18 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       done.push(w.id);
     }
     return done;
+  }
+
+  /**
+   * A worker's process could not start because its person's Claude pool is held (w2231, lothsahn: "if the claude pool is full
+   * the worker is blocked until claude resets and it frees for other jobs"): each active request it holds is Blocked on that
+   * pool's usage limit, as at a token's stop (tokenStopBlocked), so the ledger shows a usage blocker with the reset instead of
+   * Queued, its sandbox is released (Agents.waitOn) and the gate's clearing resumes it (resumeGatedWorker), placed again like
+   * any released worker. A pair run is left as it was: its legs are placed together on their machines, and one leg released
+   * and placed again elsewhere would not meet the other. Returns the requests blocked.
+   */
+  poolHoldBlocked(sessionId: string, a: { ref: string; what: string; until?: string }): string[] {
+    return this.tokenStopBlocked(sessionId, a, { stamp: "could not start: its person's Claude pool is held (w2231)", told: 'could not start on its Claude pool; its sandbox goes to other work meanwhile, and it' }, (w) => !w.pair);
   }
 
   /**

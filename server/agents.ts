@@ -507,8 +507,12 @@ export function workerSettings(sessionId: string, cfg: Partial<Pick<Config, 'wor
   };
 }
 
-/** The gates a worker may give up its sandbox for (w890): not a time, a machine, a usage limit or a lock; CI has its own rule (w846). */
-const WAIT_RELEASE_KINDS: readonly string[] = ['deploy', 'request', 'pr'];
+/**
+ * The gates a worker may give up its sandbox for (w890): not a time, a machine or a lock; CI has its own rule (w846). A usage
+ * limit since w2231 (lothsahn: "if the claude pool is full the worker is blocked until claude resets and it frees for other
+ * jobs"): a Claude pool that cannot serve its worker lasts until a window resets, often hours, and the gate's clearing resumes it.
+ */
+const WAIT_RELEASE_KINDS: readonly string[] = ['deploy', 'request', 'pr', 'usage'];
 
 /**
  * The brief's paragraph when a request of the worker's was granted work in the machine's main clone (w936, Ben: "I fucking
@@ -729,6 +733,8 @@ export class Agents {
     pauseTick.unref?.();
     // w1128: a gate's resume that waited while its request was blocked again is kept for the new gates, not delivered.
     sessions.staleResume = (work, sid, note) => this.orchestrators?.staleResume(work, sid, note);
+    sessions.poolBlock = (s, why, next) => this.poolBlock(s, why, next);
+    sessions.poolWait = (s) => this.poolWait(s.info);
     // The coordinators' routine turns on the routine model, a person's on their own (w1158, server/turnModel.ts).
     const turnModels = new TurnModels(() => this.cfg);
     sessions.turnModel = (info, from, text, opens) => turnModels.pick(info, from, text, opens);
@@ -1079,7 +1085,10 @@ export class Agents {
   /** " Queued: …" when a message to this session waits for a free running slot (w384), else "". */
   private queuedLine(id: string): string {
     const q = this.sessions.queued().filter((x) => x.id === id);
-    return q.length ? ` Queued, not refused: ${q[0].why}; it is delivered as soon as it can go, before any later message to it (nothing to resend).` : '';
+    if (q.length) return ` Queued, not refused: ${q[0].why}; it is delivered as soon as it can go, before any later message to it (nothing to resend).`;
+    // w2231: its process could not start on its Claude pool, so its requests are Blocked on that pool and its sandbox goes to other work.
+    const p = this.sessions.parked(id);
+    return p.length ? ` Kept, not refused: its process could not start (${p[0].why}), so ${this.poolWait(this.sessions.get(id).info) ?? 'its request is Blocked on that pool'}; its sandbox is released for other work, and the message goes, placed again, when the pool has room (w2231; nothing to resend).` : '';
   }
 
   /**
@@ -1136,11 +1145,39 @@ export class Agents {
    * waits on a thing or a person that nobody in the sandbox can move: a deploy, another request, a pull request merging
    * (Blocked on such gates), or a person (Waiting on input: its waiting_on_person, its report's "still open: waiting on
    * Ben", a question). Read from the ledger's own live state (shared/workState.ts), so the sandbox page, the ledger and
-   * the release agree. Not a time, a machine, a usage limit or a lock (they clear by themselves, soon, or are about this
-   * machine), and not CI, which has its own stricter rule (ciWait, w846: undefined here). Its sandbox may then take other
+   * the release agree. Not a time, a machine or a lock (they clear by themselves, soon, or are about this machine; a usage
+   * limit is released since w2231, as it lasts until a Claude window resets), and not CI, which has its own stricter rule (ciWait, w846: undefined here). Its sandbox may then take other
    * work (placeAgain.ts waitReleaseWhy); the block clearing (Orchestrators.unblock), a person's message or its check-in
    * resumes it, placed again like any released worker.
    */
+  /**
+   * A worker whose process could not start because its person's Claude pool is held (w2231; sessions.ts parkOnPool, from the
+   * PoolHeldError machineRunEnv throws): each request it holds is Blocked on that pool's usage limit (Orchestrators
+   * poolHoldBlocked), so its sandbox is released (waitOn) and the gate's clearing resumes it. Never a worker mid-turn (one has a
+   * process). Returns the requests blocked, or [] (not a worker, no pool named in `why`, or nothing to block: it stays Queued).
+   */
+  private poolBlock(s: SessionHandle, why: string, next?: string): string[] {
+    if (s.info.kind !== 'worker' || isMidTurn(s.info) || !this.orchestrators) return [];
+    const person = /^(\S+)'s Claude token pool is (?:held|used up)/.exec(why)?.[1];
+    const r = person ? this.usageRef?.(person) : undefined;
+    if (!person || !r) return [];
+    return this.orchestrators.poolHoldBlocked(s.info.id, { ref: r.ref, what: `${person}'s Claude pool: ${why.replace(/^\S+'s Claude token pool is /, '')}`, ...(next && !r.until ? { until: next } : {}) });
+  }
+
+  /**
+   * Why a worker parked on its Claude pool (w2231) still waits, or undefined: an open request it holds is still Blocked on a
+   * usage limit. When that gate clears (the pool serves, or the hold's end) its message goes again, placed like any released worker.
+   */
+  private poolWait(i: SessionInfo): string | undefined {
+    const now = Date.now();
+    for (const w of this.workOf(i.id)) {
+      if (!isWith(w, i.id) || w.status !== 'blocked' || !w.blocked) continue;
+      const usage = gatesOf(w).filter((g) => g.kind === 'usage');
+      if (usage.length) return `${w.id} is Blocked on ${gatesName(usage, now)}`;
+    }
+    return undefined;
+  }
+
   waitOn(i: SessionInfo): string | undefined {
     if (this.ciWait(i)) return undefined;
     const items = [...this.workOf(i.id)].filter((w) => isWith(w, i.id) && WORK_OPEN.includes(w.status));
@@ -4716,7 +4753,8 @@ ${w.repo ?? ''}
             await this.sendWithAttachments(session_id, `${wrap}${text}${why ? `
 
 [session] ${item!.id} came to this session, not a new one: ${why}` : ''}${fresh ? requestAsFiled(item, text) : ''}${fresh && item.source ? workerRules(item, this.sandboxBranchOf({ machine: w.info.machineId, machineSandbox: w.info.machineSandbox })) : ''}${fresh ? requestLineRule(item) : ''}`, from, { requestedBy, attachments: files });
-            if (work_id) this.orchestrators.linkWorker(work_id, w.info, `sent to ${this.orchestrators.workerLine(w.info.id)}, already on it`, { overrideGate: override_gate });
+            // w2231: a message parked on its Claude pool has just Blocked the request on that pool; the link waits for its resume.
+            if (work_id && !this.sessions.parked(session_id).length) this.orchestrators.linkWorker(work_id, w.info, `sent to ${this.orchestrators.workerLine(w.info.id)}, already on it`, { overrideGate: override_gate });
             if (newTitle) this.sessions.setTitle(session_id, newTitle);
             return `Sent, for ${requestedBy.displayName}${work_id ? ` (${work_id})` : ''}${sent(files.length)}.${why ? ` Same session (${why}).` : ''}${newTitle ? ` It is now "${newTitle}".` : ''}${Agents.goneLine(files)}${this.queuedLine(session_id)}`;
           }),
