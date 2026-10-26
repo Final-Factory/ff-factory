@@ -10,6 +10,9 @@
 #   fffctl approvals [--since DATE] [--split DATE]
 #                                      the permission prompts a person answered, as counts only (w1097): per day and by kind,
 #                                      before and after DATE (YYYY-MM-DD). Read only, run as the portal's account; no other word
+#   fffctl disk-usage                where the VM's disk went (w2267): sizes, counts, dates and paths only (du of the portal's
+#                                      folder, data/, the releases and their node_modules, the portal account's .claude, /var/log,
+#                                      auth.log's and syslog's lines counted by the program that wrote them). Read only; no other word
 #   fffctl units [--check]             the critical units: active, enabled, the watchdog's verdict and its last restarts (fffctl
 #                                      units). --check prints "down: ..." and exits 1 if one is not (w743); read only, and no
 #                                      other word: `fffctl watchdog` (run, pause, resume, reset) and the restarts stay a person's
@@ -240,6 +243,11 @@ case "${1:-help}" in
       *) refuse "config | config --check (changing a setting is set_app_config's, through the dispatcher or an owner's orchestrator)" ;;
     esac
     ;;
+  disk-usage)
+    # Read only (w2267): du, find, df and line counts by program; nothing written, no file's text printed. No option.
+    [ $# -eq 1 ] || refuse "disk-usage takes nothing more (sizes, counts, dates and paths only)"
+    exec "$FFFCTL" disk-usage
+    ;;
   approvals)
     # Read only (w1097): counts of the prompts people answered. Only --since and --split, each once, each with a date.
     shift
@@ -385,5 +393,5 @@ case "${1:-help}" in
     echo "asked for: the portal asks its busy agents to commit, push and end their turn, restarts on the same release and resumes them. Your process ends with the old portal; FF Factory messages you when the new one is up."
     ;;
   help | -h | --help) awk 'NR > 5 && /^#$/ {exit} NR > 5' "$0" | sed 's/^# \{0,1\}//' ;;
-  *) refuse "fffctl $1 is a person's (rollbacks, settings, the vault, migrations). You have: status, state, config [--check], units [--check], vault list [--names] / vault help, machine-credential list, migrate --help, logs [N], machine-ssh --check / --key / --pin USER@HOST FINGERPRINT, credential list, credential issue ID --to TARGET, apikey list / issue / revoke for a member login, conf / conf get [KEY] / conf set KEY VALUE (fff.conf, not its credentials, keys or secrets), update with a deploy grant, and restart with a restart grant" ;;
+  *) refuse "fffctl $1 is a person's (rollbacks, settings, the vault, migrations). You have: status, state, config [--check], units [--check], vault list [--names] / vault help, machine-credential list, migrate --help, logs [N], disk-usage, approvals, machine-ssh --check / --key / --pin USER@HOST FINGERPRINT, credential list, credential issue ID --to TARGET, apikey list / issue / revoke for a member login, conf / conf get [KEY] / conf set KEY VALUE (fff.conf, not its credentials, keys or secrets), update with a deploy grant, and restart with a restart grant" ;;
 esac

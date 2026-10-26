@@ -60,6 +60,11 @@
 #                                       ones by kind, and every one by kind, before and after DATE (YYYY-MM-DD, UTC), read from
 #                                       the portal's transcripts by the current release's scripts/cleanup-approvals.ts as the
 #                                       portal's account. No transcript text, command or path is printed
+#   fffctl disk-usage                   where the VM's disk went (w2267): df, du of the portal's folder (its 30 biggest at depth 3,
+#                                       each child of it and of data/ with its files' count and oldest and newest dates), each kept
+#                                       release with its node_modules, the portal account's .claude, files of 200 MB or more,
+#                                       /var/log and the journal, and auth.log's and syslog's lines counted per day by the program
+#                                       that wrote them. Sizes, counts, dates and paths only; read only
 #   fffctl state                        what is set up, as JSON (the host's install.sh reads it to do only what is missing)
 #   fffctl vault list | add | rotate | grant | remove ...
 #                                       the token vault (docs/vault.md): secrets the portal hands worker runs. A value comes
@@ -867,6 +872,135 @@ cmd_approvals() {
   as_fff_in "$CURRENT" node scripts/cleanup-approvals.ts "$DATA" "${args[@]}"
 }
 
+# disk-usage (w2267; lothsahn: "What's taking up so much disk space on fff-portal?"): where the VM's disk went, as sizes,
+# counts, dates and paths only. Read only: it runs du, find, df, journalctl --disk-usage and reads /var/log's auth.log and
+# syslog, counting lines by the program that wrote them (never a line's text), and writes nothing (no temp file: every
+# sort here sorts a few hundred lines in memory). Low CPU and I/O priority, so the portal does not feel it.
+DU_LOG_DIR=${FFF_LOG_DIR:-/var/log}
+du_low() { if command -v ionice >/dev/null; then nice -n 19 ionice -c3 "$@"; else nice -n 19 "$@"; fi; }
+du_day() { [ -n "$1" ] && date -u -d "@${1%.*}" +%F 2>/dev/null || echo -; }
+# du_ages DIR: "files N, oldest DATE, newest DATE" by the files' modification times under DIR.
+du_ages() {
+  du_low find "$1" -xdev -type f -printf '%T@\n' 2>/dev/null | awk '
+    { n++; if (min == "" || $1 < min) min = $1; if (max == "" || $1 > max) max = $1 }
+    END { printf "%d %s %s\n", n, (n ? min : ""), (n ? max : "") }' | {
+    read -r n min max
+    echo "files $n, oldest $(du_day "${min:-}"), newest $(du_day "${max:-}")"
+  } || true
+}
+# du_children DIR [LIMIT]: each child of DIR, biggest first: size, path, its files' count and dates.
+du_children() {
+  local dir=$1 limit=${2:-1000} size path
+  [ -d "$dir" ] || { echo "  (no $dir)"; return 0; }
+  du_low du -xs --block-size=1 "$dir"/* "$dir"/.[!.]* 2>/dev/null | sort -rn | head -n "$limit" | while IFS=$'\t' read -r size path; do
+    printf '  %8s  %s  (%s)\n' "$(numfmt --to=iec "$size")" "$path" "$(if [ -d "$path" ]; then du_ages "$path"; else echo "file, $(du_day "$(stat -c %Y "$path")")"; fi)"
+  done || true
+}
+# du_log_programs FILE...: the lines of syslog-format files counted by the program that wrote them, per day (the day's
+# total and its three biggest writers), then the whole range's top writers. auth.log adds the PAM services (sudo, runuser,
+# sshd, cron sessions) and who ran sudo, with the command's path only (never its arguments).
+du_log_programs() {
+  local auth=$1; shift
+  local f
+  for f in "$@"; do case $f in *.gz) zcat -- "$f" 2>/dev/null ;; *) cat -- "$f" 2>/dev/null ;; esac; done | awk -v auth="$auth" '
+    function prog(p) { sub(/\[[0-9]+\]/, "", p); sub(/:$/, "", p); return p }
+    {
+      if ($1 ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T/) { day = substr($1, 1, 10); p = prog($3); rest = 4 }
+      else if ($1 ~ /^[A-Z][a-z][a-z]$/) { day = $1 " " sprintf("%02d", $2); p = prog($5); rest = 6 }
+      else next
+      if (p !~ /^[A-Za-z0-9_.@()\/-]{1,40}$/) p = "(other)"
+      total[day]++; byday[day SUBSEP p]++; all[p]++; days[day] = 1; lines++
+      if (auth != "1") next
+      if ($rest ~ /^pam_[a-z_]+\([a-z0-9_-]+:[a-z]+\):$/) { k = $rest; sub(/:$/, "", k); ev = ($(rest + 1) == "session" ? $(rest + 1) " " $(rest + 2) : "other"); pam[k " " ev]++ }
+      if (p == "sudo" && $0 ~ /COMMAND=/) {
+        who = $rest; cmd = $0; sub(/.*COMMAND=/, "", cmd); sub(/ .*/, "", cmd)
+        if (cmd !~ /^[A-Za-z0-9_.\/-]{1,120}$/) cmd = "(other)"
+        if (who !~ /^[A-Za-z0-9_.-]{1,40}$/) who = "(other)"
+        sudo[who " -> " cmd]++
+      }
+    }
+    END {
+      printf "    lines %d\n", lines
+      nd = 0; for (d in days) dl[++nd] = d
+      for (i = 2; i <= nd; i++) { v = dl[i]; for (j = i - 1; j >= 1 && dl[j] > v; j--) dl[j + 1] = dl[j]; dl[j + 1] = v }
+      for (i = 1; i <= nd; i++) {
+        d = dl[i]; delete top; nt = 0
+        for (k in byday) { split(k, kp, SUBSEP); if (kp[1] == d) top[kp[2]] = byday[k] }
+        out = ""
+        for (r = 1; r <= 3; r++) { best = ""; for (q in top) if (best == "" || top[q] > top[best]) best = q; if (best == "") break; out = out sprintf("  %s %d", best, top[best]); delete top[best] }
+        printf "    %s  %8d lines %s\n", d, total[d], out
+      }
+      printf "    top writers, whole range:\n"
+      for (r = 1; r <= 12; r++) { best = ""; for (q in all) if (best == "" || all[q] > all[best]) best = q; if (best == "") break; printf "      %9d  %s\n", all[best], best; delete all[best] }
+      if (auth == "1") {
+        printf "    PAM sessions:\n"
+        for (r = 1; r <= 10; r++) { best = ""; for (q in pam) if (best == "" || pam[q] > pam[best]) best = q; if (best == "") break; printf "      %9d  %s\n", pam[best], best; delete pam[best] }
+        printf "    sudo, by who ran it and the command (path only):\n"
+        for (r = 1; r <= 10; r++) { best = ""; for (q in sudo) if (best == "" || sudo[q] > sudo[best]) best = q; if (best == "") break; printf "      %9d  %s\n", sudo[best], best; delete sudo[best] }
+      }
+    }' || true
+}
+cmd_disk_usage() {
+  [ $# -eq 0 ] || die "fffctl disk-usage takes nothing more"
+  local home size path cur prev prepared d mark nm
+  echo "== disks (df -h)"
+  df -h -x tmpfs -x devtmpfs -x squashfs -x overlay 2>/dev/null || df -h
+  echo
+  echo "== $FFF_ROOT: du -xh --max-depth=3, the 30 biggest"
+  du_low du -xh --max-depth=3 "$FFF_ROOT" 2>/dev/null | sort -rh | head -n 30 || true
+  echo
+  echo "== $FFF_ROOT, each child (size, path, files, oldest and newest by modification time)"
+  du_children "$FFF_ROOT"
+  echo
+  echo "== $DATA, each child"
+  du_children "$DATA"
+  echo
+  echo "== app releases ($RELEASES), newest first: size, node_modules, built; RELEASES_KEEP_EXTRA=${RELEASES_KEEP_EXTRA:-?}"
+  cur=$(readlink -e "$CURRENT" 2>/dev/null || true); prev=$(readlink -e "$PREVIOUS" 2>/dev/null || true)
+  prepared=$(jq -r '.dir // empty' "$DATA/update.prepared.json" 2>/dev/null || true)
+  if [ -d "$RELEASES" ]; then
+    find "$RELEASES" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' | sort -rn | while read -r _ d; do
+      mark=""
+      [ "$d" != "$cur" ] || mark=" CURRENT"
+      [ "$d" != "$prev" ] || mark="$mark PREVIOUS"
+      [ "$d" != "$prepared" ] || mark="$mark PREPARED"
+      size=$(du_low du -xs --block-size=1 "$d" 2>/dev/null | cut -f1)
+      nm=$(find "$d" -maxdepth 3 -type d -name node_modules -prune -print0 2>/dev/null | du_low du -xsc --block-size=1 --files0-from=- 2>/dev/null | tail -n 1 | cut -f1)
+      printf '  %8s  %s%s  (node_modules %s, built %s)\n' "$(numfmt --to=iec "${size:-0}")" "$d" "$mark" "$(numfmt --to=iec "${nm:-0}")" "$(date -u -r "$d" +'%F %H:%MZ')"
+    done || true
+  else
+    echo "  (no $RELEASES)"
+  fi
+  [ ! -d "$REPO" ] || echo "  repo.git: $(du_low du -xsh "$REPO" 2>/dev/null | cut -f1)  $REPO"
+  echo
+  home=$(getent passwd "$FFF_USER" 2>/dev/null | cut -d: -f6 || true)
+  [ -n "$home" ] && [ -d "$home" ] || home=$FFF_ROOT/home
+  echo "== the $FFF_USER account's Claude Code folder ($home/.claude), each child"
+  du_children "$home/.claude"
+  if [ -d "$home/.claude/projects" ]; then
+    echo "  its projects/, the 15 biggest:"
+    du_children "$home/.claude/projects" 15 | sed 's/^/  /'
+  fi
+  echo
+  echo "== files of 200 MB or more under $FFF_ROOT (the 25 biggest)"
+  du_low find "$FFF_ROOT" -xdev -type f -size +200M -printf '%s\t%TF\t%p\n' 2>/dev/null | sort -rn | head -n 25 | while IFS=$'\t' read -r size d path; do
+    printf '  %8s  %s  %s\n' "$(numfmt --to=iec "$size")" "${d%%.*}" "$path"
+  done || true
+  echo
+  echo "== $DU_LOG_DIR, the 15 biggest; the journal"
+  du_low du -xh --max-depth=2 "$DU_LOG_DIR" 2>/dev/null | sort -rh | head -n 15 || true
+  journalctl --disk-usage 2>/dev/null || true
+  for base in auth.log syslog; do
+    echo
+    echo "== $DU_LOG_DIR/$base and its rotations: size, modified, then lines by the program that wrote them (counts only)"
+    local files=()
+    for f in "$DU_LOG_DIR/$base" "$DU_LOG_DIR/$base".[0-9]*; do [ -f "$f" ] && files+=("$f"); done
+    [ ${#files[@]} -gt 0 ] || { echo "  (none)"; continue; }
+    for f in "${files[@]}"; do printf '  %8s  %s  %s\n' "$(numfmt --to=iec "$(stat -c %s "$f")")" "$(date -u -r "$f" +'%F %H:%MZ')" "$f"; done
+    du_log_programs "$([ "$base" = auth.log ] && echo 1 || echo 0)" "${files[@]}"
+  done
+}
+
 # Where the backups go and who can open them.
 cmd_backup_config() {
   local target="" rf="" set_target=0 tmp
@@ -909,6 +1043,7 @@ case "${1:-status}" in
   config) shift; cmd_config "$@" ;;
   conf) shift; cmd_conf "$@" ;;
   approvals) shift; cmd_approvals "$@" ;;
+  disk-usage) shift; cmd_disk_usage "$@" ;;
   state) cmd_state ;;
   migrate) shift; exec "$FFF_LIB/fff-migrate" "$@" ;;
   vault) shift; cmd_vault "$@" ;;

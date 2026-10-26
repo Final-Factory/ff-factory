@@ -110,6 +110,13 @@ test('the ops worker reads config.json through fffctl config and its check, and 
   assert.match(opsBrief('Ben'), /fffctl config/);
 });
 
+test('w2267: the ops worker reads where the disk went through fffctl disk-usage, and still runs no du of its own as root', () => {
+  const ctx: ReadCtx = { platform: 'linux', home: OPS_PATHS.home, cwd: OPS_PATHS.scratch, fsx: { realpath: () => undefined } };
+  assert.equal(checkOpsShell('fffctl disk-usage', ctx), undefined);
+  assert.notEqual(checkOpsShell('sudo du -xh --max-depth=3 /srv/fff', ctx), undefined);
+  assert.match(opsBrief('Lothsahn'), /fffctl disk-usage\` \(w2267\): where the VM's disk went/);
+});
+
 test('w1097: the ops worker counts the prompts people answered through fffctl approvals, and still reads no transcript', () => {
   const ctx: ReadCtx = { platform: 'linux', home: OPS_PATHS.home, cwd: OPS_PATHS.scratch, fsx: { realpath: () => undefined } };
   assert.equal(checkOpsShell('fffctl approvals', ctx), undefined);
