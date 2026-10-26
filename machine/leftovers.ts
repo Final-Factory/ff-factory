@@ -41,7 +41,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { run } from '../server/proc.ts';
-import { factsProblem, judgePath, planFolders, renderFolders, withGitCheck, type CleanupFacts } from '../server/cleanupFolders.ts';
+import { factsProblem, finishedRows, finishedSession, judgePath, planFolders, renderFolders, withGitCheck, type CleanupFacts, type FolderRow } from '../server/cleanupFolders.ts';
+import { norm, within } from '../server/cleanup.ts';
+import { publishedFile, readPublished } from '../server/published.ts';
 import { parsePsJson } from '../server/watchdog.ts';
 import { driveLabel, inNeverGames, installDrive, onInstallDrive } from '../server/rootFence.ts';
 import type { Proc, UnityPlatform } from './unity.ts';
@@ -807,6 +809,18 @@ export function readCleanupFacts(file: string | undefined): CleanupFacts | undef
   }
 }
 
+/** One path for `check`: by the ledger, and inside a finished worker's kept folder by its rebuildable bulk (w2223). */
+async function checkPath(p: string, facts: CleanupFacts, now: number, published: ReturnType<typeof readPublished>): Promise<Pick<FolderRow, 'verdict' | 'why'>> {
+  const r = await withGitCheck(judgePath(p, facts, now), facts.root);
+  if (r.verdict === 'delete' || r.kind !== 'session-temp' || !facts.tempRoot) return r;
+  const name = norm(p).slice(norm(facts.tempRoot).length + 1).split('/')[0]!;
+  const dir = path.join(facts.tempRoot, name);
+  const sid = /^ffa-([\w-]+)$/i.exec(name)?.[1];
+  if (!sid || norm(dir) === norm(p) || !finishedSession(sid, facts)) return r;
+  const bulk = (await finishedRows(dir, facts, { now, published })).filter((b) => b.verdict === 'delete' && within(p, b.path));
+  return bulk[0] ?? r;
+}
+
 /**
  * `ff-leftovers folders` and `ff-leftovers check <path>...` (w1379): a clean-up worker's deletes judged by the ledger. `folders`
  * lists every folder a clean-up could take under the install folder with its owner, KEEP or DELETE and why; `check` judges
@@ -815,6 +829,8 @@ export function readCleanupFacts(file: string | undefined): CleanupFacts | undef
  */
 export async function foldersMain(cmd: 'folders' | 'check', args: string[], e: NodeJS.ProcessEnv = process.env, now = Date.now(), out: (s: string) => void = (s) => void process.stdout.write(s)): Promise<number> {
   const facts = readCleanupFacts(e.FF_CLEANUP_FACTS);
+  // What this machine's workers published, beside the facts in the daemon's folder (w2223): a finished worker's evidence published there may go.
+  const published = readPublished(e.FF_CLEANUP_FACTS ? publishedFile(path.dirname(e.FF_CLEANUP_FACTS)) : undefined);
   if (cmd === 'check') {
     if (!args.length) {
       out('usage: ff-leftovers check <path>...\n');
@@ -834,13 +850,13 @@ export async function foldersMain(cmd: 'folders' | 'check', args: string[], e: N
           ? { verdict: 'keep' as const, why: "the game's data folder under AppData (Never Games): read-only, never deleted, moved or written by a clean-up (w1755)" }
         : offDrive
           ? { verdict: 'keep' as const, why: `not looked at: off this Windows computer's install drive ${driveLabel(facts!.root!)}; disk work never reads, measures or touches C: (w1755)` }
-          : await withGitCheck(judgePath(path.resolve(a), facts!, now), facts!.root);
+          : await checkPath(path.resolve(a), facts!, now, published);
       if (r.verdict === 'keep') kept++;
       out(`${r.verdict === 'keep' ? 'KEEP  ' : 'DELETE'}  ${a}\n        ${r.why}\n`);
     }
     return kept ? 1 : 0;
   }
-  const rows = factsProblem(facts, now) ? [] : await planFolders(facts!, { now });
+  const rows = factsProblem(facts, now) ? [] : await planFolders(facts!, { now, published });
   out(renderFolders(rows, facts, now));
   return factsProblem(facts, now) ? 1 : 0;
 }

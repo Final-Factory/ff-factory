@@ -1,9 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { hasLocalWork, neverDelete, norm, sessionRelaxed, sizeOf, touchedSince, touchedWhy, within, type CleanupGuard, type CleanupItem } from './cleanup.ts';
+import { hasLocalWork, localWorkWhy, neverDelete, norm, sessionRelaxed, sizeOf, touchedSince, touchedWhy, within, type CleanupGuard, type CleanupItem } from './cleanup.ts';
 import { CONTEXT_MAX_AGE_HOURS, requestIdsIn, type StaleContext, type StalePlan } from './staleOutput.ts';
 import { mentions } from './ownLeftovers.ts';
 import { gitIgnores } from './cleanupFolders.ts';
+import { isPublished, type PublishedRecord } from './published.ts';
+import { execFile } from 'node:child_process';
 
 /**
  * Leftovers inside the install folder (w899, docs/self-recovery.md "Install-folder leftovers"): what w876 had to remove
@@ -285,6 +287,141 @@ export async function idleCachesIn(dir: string, depth = 1, out: IdleCache[] = []
 /** "12 min", "5.2 h" or "3.1 days". */
 const agoText = (ms: number) => (ms < 2 * HOUR ? `${Math.max(0, Math.round(ms / 60_000))} min` : ms < 2 * DAY ? `${(ms / HOUR).toFixed(1)} h` : `${(ms / DAY).toFixed(1)} days`);
 
+/**
+ * Review evidence (w2223): what a person looks at or a worker handed over, kept in a finished worker's folder unless it was
+ * published (server/published.ts). Logs, JSON and XML reports are test output: a rerun makes them again.
+ */
+const EVIDENCE = /\.(png|jpe?g|gif|bmp|webp|tga|svg|mp4|mkv|webm|mov|avi|md|pdf|html?|zip)$/i;
+/** What only a Unity Library holds: a folder with two of these is a copy of one, whatever its name (w2223). */
+const LIBRARY_MARK = /^(artifactdb|sourceassetdb|artifacts|bee|scriptassemblies|packagecache|burstcache|buildcache|shadercache|playerdatacache|il2cpp_cache)$/i;
+/** How deep a finished worker's folder is taken apart around what it keeps. */
+const BULK_DEPTH = 4;
+/** A loose file of test output smaller than this stays: a worker's scripts and notes are not where the space is. */
+const LOOSE_MIN_BYTES = 1024 ** 2;
+/** Entries a folder is searched for what keeps it before it counts as too big to take whole (then it is taken apart). */
+const BULK_SCAN_BUDGET = 200_000;
+
+export interface FinishedBulkOptions {
+  /** The machine's published files (server/published.ts): evidence published elsewhere may go. */
+  published?: Map<string, PublishedRecord[]>;
+  /** Why a repo holds work (uncommitted changes, commits on no remote, a stash), or undefined (cleanup.ts localWorkWhy). */
+  localWork?: (repo: string) => Promise<string | undefined>;
+  /** The evidence files git ignores in a repo's work tree (they go with the clone); undefined when git could not say. */
+  ignoredEvidence?: (repo: string) => Promise<string[] | undefined>;
+  projectOpen?: (project: string) => boolean;
+}
+
+export interface FinishedBulk {
+  take: IdleCache[];
+  /** What stays and why: a repo with work on no remote, evidence published nowhere else. */
+  keep: { path: string; why: string }[];
+}
+
+/** The evidence files git ignores in `repo`, Unity's and npm's caches apart; undefined when git fails or times out. */
+export function gitIgnoredEvidence(repo: string, timeoutMs = 60_000): Promise<string[] | undefined> {
+  const skip = ['Library', 'Temp', 'obj', 'Logs', 'node_modules'].map((d) => `:(exclude,glob)**/${d}/**`);
+  return new Promise((resolve) =>
+    execFile('git', ['--no-optional-locks', '-C', repo, 'ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--', '.', ...skip], { timeout: timeoutMs, maxBuffer: 256 * 1024 ** 2, windowsHide: true }, (e, out) =>
+      resolve(e ? undefined : String(out).split('\0').filter((f) => f && EVIDENCE.test(f)).map((f) => path.join(repo, f))),
+    ),
+  );
+}
+
+/**
+ * The rebuildable bulk of a finished worker's temp folder (w2223): every request it was on is closed, and only the reopen
+ * hold (server/resumable.ts, w1575) keeps the folder. Beyond the caches idleCachesIn finds (its whole Library included):
+ * a git clone, checkout or worktree with nothing on no remote (cloned again on demand) unless git ignores evidence in it
+ * that was published nowhere else; a copy of a Unity Library outside its project; and test output, a folder holding no
+ * repo, no Unity project and no unpublished evidence, or a loose file of 1 MiB or more that is not evidence. What stays:
+ * evidence published nowhere else, a repo with work on no remote, a Unity project's own files, the Claude task folders and
+ * the Inbox. A cache inside a repo that stays goes only when git ignores it, as idle caches do.
+ */
+export async function finishedBulkIn(session: string, o: FinishedBulkOptions = {}): Promise<FinishedBulk> {
+  const take: IdleCache[] = [];
+  const keep: FinishedBulk['keep'] = [];
+  const published = o.published ?? new Map<string, PublishedRecord[]>();
+  const localWork = o.localWork ?? ((d: string) => localWorkWhy(d, 60_000));
+  const ignoredEvidence = o.ignoredEvidence ?? ((d: string) => gitIgnoredEvidence(d));
+  const caches = await idleCachesIn(session, 1, [], { projectOpen: o.projectOpen });
+  const cacheAt = new Set(caches.map((c) => norm(c.path)));
+  const unpublished = (f: string) => EVIDENCE.test(f) && !isPublished(published, f);
+  let evidence = 0;
+  const isRepo = (d: string) => fs.existsSync(path.join(d, '.git'));
+  /** Why `dir` cannot go whole, or undefined: a repo, a Unity project or unpublished evidence in it, or too many entries. */
+  const holds = async (dir: string): Promise<string | undefined> => {
+    const stack = [dir];
+    let seen = 0;
+    while (stack.length) {
+      const d = stack.pop()!;
+      if (isRepo(d)) return 'repo';
+      if (fs.existsSync(path.join(d, 'ProjectSettings', 'ProjectVersion.txt'))) return 'unity';
+      for (const e of await children(d)) {
+        if (++seen > BULK_SCAN_BUDGET) return 'too-big';
+        const p = path.join(d, e.name);
+        if (cacheAt.has(norm(p)) || e.isSymbolicLink()) continue;
+        if (e.isFile() && unpublished(p)) return 'evidence';
+        if (e.isDirectory()) stack.push(p);
+      }
+    }
+    return undefined;
+  };
+  const repos: { repo: string; taken: boolean }[] = [];
+  const walk = async (dir: string, depth: number): Promise<void> => {
+    for (const e of await children(dir)) {
+      const p = path.join(dir, e.name);
+      if (e.isSymbolicLink() || cacheAt.has(norm(p))) continue;
+      if (depth === 1 && (/^claude/i.test(e.name) || /^inbox$/i.test(e.name))) continue;
+      if (e.isFile()) {
+        if (unpublished(p)) evidence++;
+        else if ((await sizeIs(p)) >= LOOSE_MIN_BYTES) take.push({ path: p, what: EVIDENCE.test(p) ? 'a file published to the portal' : 'test output (a file)' });
+        continue;
+      }
+      if (!e.isDirectory() || NEVER_SEGMENT.test(e.name)) continue;
+      if (isRepo(p)) {
+        const fixture = norm(p).slice(norm(session).length).split('/').some((seg) => FIXTURE_REPO.test(seg));
+        const work = fixture ? undefined : await localWork(p);
+        if (work) {
+          keep.push({ path: p, why: `a git repo with work on no remote: ${work}` });
+          repos.push({ repo: p, taken: false });
+          continue;
+        }
+        const ignored = await ignoredEvidence(p);
+        const un = ignored?.filter(unpublished) ?? [];
+        if (!ignored || un.length) {
+          keep.push({ path: p, why: ignored ? `git ignores ${un.length} review file(s) in it that were published nowhere else (${path.relative(p, un[0]!)})` : 'git could not list the files it ignores, so its evidence cannot be judged' });
+          repos.push({ repo: p, taken: false });
+          continue;
+        }
+        take.push({ path: p, what: 'a git clone or checkout with nothing on no remote (cloned again on demand)' });
+        repos.push({ repo: p, taken: true });
+        continue;
+      }
+      if ((await children(p)).filter((c) => LIBRARY_MARK.test(c.name)).length >= 2) {
+        take.push({ path: p, what: "a copy of a Unity project's Library caches" });
+        continue;
+      }
+      if (isPlayerBuild(p, e.name)) continue; // idleCachesIn has it, or it lies past its depth: a build is never test output here
+      const why = await holds(p);
+      if (!why) take.push({ path: p, what: 'test output (no repo, Unity project or unpublished evidence in it)' });
+      else if (depth < BULK_DEPTH) await walk(p, depth + 1);
+      else if (why === 'evidence') evidence++;
+    }
+  };
+  await walk(session, 1);
+  // The caches: one in a repo that goes whole goes with it; one in a repo that stays only when git ignores it; never one holding a repo.
+  for (const c of caches) {
+    const around = repos.find((r) => within(c.path, r.repo) && norm(c.path) !== norm(r.repo));
+    if (around?.taken) continue;
+    if (around && !(await gitIgnores(around.repo, c.path))) continue;
+    if (repos.some((r) => within(r.repo, c.path))) continue;
+    take.push(c);
+  }
+  if (evidence) keep.push({ path: session, why: `${evidence} review file(s) or folder(s) of them published nowhere else (images, clips, notes, saves): kept until the folder's hold ends` });
+  // What lies inside an item taken whole is not listed again.
+  const out = take.filter((t) => !take.some((u) => u !== t && within(t.path, u.path) && norm(t.path) !== norm(u.path)));
+  return { take: out, keep };
+}
+
 const sizeIs = async (p: string) => (await fs.promises.lstat(p).catch(() => undefined))?.size ?? 0;
 
 /**
@@ -387,6 +524,14 @@ export async function planInstallLeftovers(o: {
   low?: boolean;
   /** A low pass says which check kept a temp folder's rebuildable caches once they reach this size (plan.held; default 256 MiB). */
   heldMinBytes?: number;
+  /** Session folders of finished workers: stopped, every request they were on closed, held only by the reopen window (w2223). */
+  finished?: string[];
+  /** The machine's published files (server/published.ts): a finished worker's evidence published there may go. */
+  published?: Map<string, PublishedRecord[]>;
+  /** Why a repo holds work, or undefined (tests; default cleanup.ts localWorkWhy). */
+  localWhy?: (repo: string) => Promise<string | undefined>;
+  /** The evidence files git ignores in a repo (tests; default gitIgnoredEvidence). */
+  ignoredEvidence?: (repo: string) => Promise<string[] | undefined>;
 }): Promise<InstallPlan> {
   const plan: InstallPlan = { items: [], listed: [], strays: [] };
   if (!o.root) return plan; // not a worker-root install: nothing here is the install folder
@@ -399,6 +544,7 @@ export async function planInstallLeftovers(o: {
   const held: NonNullable<InstallPlan['held']> = [];
   const ctx = o.ctx && now - Date.parse(o.ctx.at) < CONTEXT_MAX_AGE_HOURS * HOUR ? o.ctx : undefined;
   const open = new Set(ctx?.open ?? []);
+  const finished = new Set((o.finished ?? []).map(norm));
   const relaxed = (base: string): CleanupGuard => ({ ...o.guard, keep: o.guard.keep.filter((k) => !(norm(base) === norm(k) || norm(base).startsWith(norm(k) + '/'))) });
   const live = (p: string) => o.guard.inUse.some((k) => k && (within(p, k) || within(k, p)));
 
@@ -543,6 +689,39 @@ export async function planInstallLeftovers(o: {
     }
   };
   /**
+   * The rebuildable bulk of a finished worker's folder (w2223: LothDesktop's clean-up freed 0 GB of 60 while 55 GB sat in four
+   * finished workers' folders): every request it was on closed, so only the reopen hold keeps the folder (o.finished). Its clones
+   * with nothing on no remote, Library copies and test output go too (finishedBulkIn), on the idle caches' clock: no write
+   * for idleCacheHours, or for lowCacheSettleMinutes while disk is low (then a whole Library goes too: a finished worker
+   * rebuilds nothing until a reopen). Unpushed work and evidence published nowhere else stay, and a repo with work is listed.
+   */
+  const finishedBulk = async (session: string, t: string) => {
+    if (!within(session, root) || !finished.has(norm(session)) || live(session)) return;
+    const quickOn = !!o.low && s.lowCacheSettleMinutes > 0;
+    if (!s.idleCacheHours && !quickOn) return;
+    if ((o.procs ?? []).some((p) => mentions(p.cmd, session))) return;
+    const projectOpen = (d: string) => !o.procs || o.procs.some((p) => mentions(p.cmd, d));
+    const bulk = await finishedBulkIn(session, { published: o.published, localWork: o.localWhy, ignoredEvidence: o.ignoredEvidence, projectOpen });
+    for (const k of bulk.keep) if (k.path !== session) listed.set(k.path, `in a finished worker's folder: ${k.why}`);
+    if (!bulk.take.length) return;
+    const ageCut = now - s.idleCacheHours * HOUR;
+    const settleCut = now - s.lowCacheSettleMinutes * 60_000;
+    const found: { path?: string; unreadable?: boolean } = {};
+    const last = await newestWrite(session, quickOn ? Math.max(settleCut, ageCut) : ageCut, new Set(bulk.take.map((c) => norm(c.path))), ACTIVITY_BUDGET, found);
+    let after: string;
+    if (last === 'too-big') return hold(session, bulk.take, `its last write cannot be judged: more than ${ACTIVITY_BUDGET.toLocaleString('en-US')} entries outside its bulk`);
+    if (s.idleCacheHours && last <= ageCut) after = `with no write for ${s.idleCacheHours} h`;
+    else if (quickOn && last <= settleCut) after = `with no write for ${s.lowCacheSettleMinutes} min while disk is low`;
+    else return hold(session, bulk.take, found.unreadable ? `a folder in it cannot be read (${found.path})` : `written ${agoText(now - last)} ago (${found.path})`);
+    const g = sessionRelaxed(session, relaxed(t));
+    for (const c of bulk.take) {
+      if (items.has(c.path) || !within(c.path, root)) continue;
+      const no = neverDelete(c.path, g);
+      if (no) await hold(c.path, [c], no);
+      else items.set(c.path, { path: c.path, rule: 'finished-session-bulk', why: `${c.what}, in a finished worker's temp folder (its requests closed) ${after} (rebuildable)`, base: t, inSession: session });
+    }
+  };
+  /**
    * What a low pass kept and why (w1813: LothDesktop's ffa-409f9363 kept 15.6 GB with nothing in the log to say which check
    * held it): the caches of `at` (a session's folder, or one cache the guard or git holds), measured, once past heldMinBytes.
    */
@@ -620,6 +799,7 @@ export async function planInstallLeftovers(o: {
         await idleCaches(dir, t);
         continue;
       }
+      await finishedBulk(dir, t);
       await idleCaches(dir, t);
       for (const b of big) {
         const no = (await blocked(b.file, t, undefined))?.why;

@@ -4,6 +4,8 @@ import { execFile } from 'node:child_process';
 import { localWorkWhy, norm, OUTSIDE_ROOT_WHY, sizeOf, within } from './cleanup.ts';
 import { requestIdsIn, CONTEXT_MAX_AGE_HOURS } from './staleOutput.ts';
 import type { SessionOwner } from './resumable.ts';
+import { finishedBulkIn, INSTALL_LEFTOVER_DEFAULTS, newestWrite } from './installLeftovers.ts';
+import type { PublishedRecord } from './published.ts';
 
 /**
  * The folders a clean-up worker may delete, judged against the ledger (w1379). On 2026-10-15 w1374, LothDesktop's low-disk
@@ -47,11 +49,13 @@ export interface CleanupFacts {
   closed: string[];
   /** When the portal said it (ISO). */
   contextAt?: string;
+  /** Free space was below the soft threshold at the daemon's last clean-up pass: a finished worker's bulk goes after minutes, not a day (w2223). */
+  low?: boolean;
 }
 
 export interface FolderRow {
   path: string;
-  kind: 'session-temp' | 'scratch' | 'sandbox-output' | 'named' | 'other';
+  kind: 'session-temp' | 'session-bulk' | 'scratch' | 'sandbox-output' | 'named' | 'other';
   verdict: 'keep' | 'delete';
   why: string;
   bytes?: number;
@@ -84,7 +88,7 @@ export function judgeSession(sid: string, f: CleanupFacts): Pick<FolderRow, 'ver
     if (withIt.length) return { verdict: 'keep', why: `stopped worker ${sid} is still on ${list(withIt)}, which has not closed: it resumes there and needs its files` };
     return { verdict: 'keep', why: `worker ${sid} was on ${list(open)}, which has not closed (it moved on to another worker; the daemon sweeps these itself, w1097)` };
   }
-  if (f.resumable.includes(sid)) return { verdict: 'keep', why: `a request still waits for worker ${sid}, or closed within the last 7 days and may be reopened to it (w1575)` };
+  if (f.resumable.includes(sid)) return { verdict: 'keep', why: `a request still waits for worker ${sid}, or closed within the last 7 days and may be reopened to it (w1575): the folder stays, its rebuildable bulk is listed below it once idle (w2223)` };
   return { verdict: 'delete', why: `no open, stalled or paused request names worker ${sid}: its requests are closed, or it belongs to no request (an orphan)` };
 }
 
@@ -209,8 +213,36 @@ export async function withGitCheck(r: FolderRow, root: string | undefined, local
   return why ? { ...r, verdict: 'keep', why: `${why}. The ledger alone said: ${r.why}` } : r;
 }
 
+/** Worker `sid` finished (w2223): stopped, no request that has not closed is on it, and only the 7-day reopen hold keeps its folder. */
+export const finishedSession = (sid: string, f: CleanupFacts) => !f.live.includes(sid) && !f.owners?.[sid] && f.resumable.includes(sid);
+
+/**
+ * The DELETE and KEEP rows inside a finished worker's folder (w2223, installLeftovers.ts finishedBulkIn): its clones with
+ * nothing on no remote, Library copies, caches and test output, once nothing in the folder was written for a day (15 min
+ * while disk is low); evidence published nowhere else and repos with work stay, the latter listed.
+ */
+export async function finishedRows(dir: string, f: CleanupFacts, o: { now?: number; published?: Map<string, PublishedRecord[]>; localWork?: (dir: string) => Promise<string | undefined>; ignoredEvidence?: (repo: string) => Promise<string[] | undefined> } = {}): Promise<FolderRow[]> {
+  const now = o.now ?? Date.now();
+  // The daemon sweep's own clock (installLeftovers.ts idleCacheHours, lowCacheSettleMinutes); read here, not at load: the modules import each other.
+  const FINISHED_IDLE_HOURS = INSTALL_LEFTOVER_DEFAULTS.idleCacheHours;
+  const FINISHED_LOW_MIN = INSTALL_LEFTOVER_DEFAULTS.lowCacheSettleMinutes;
+  const bulk = await finishedBulkIn(dir, { published: o.published, localWork: o.localWork, ignoredEvidence: o.ignoredEvidence });
+  const rows: FolderRow[] = bulk.keep.filter((k) => k.path !== dir).map((k) => ({ path: k.path, kind: 'session-bulk', verdict: 'keep', why: k.why }));
+  if (!bulk.take.length) return rows;
+  const cut = now - (f.low ? FINISHED_LOW_MIN * 60_000 : FINISHED_IDLE_HOURS * 3_600_000);
+  const found: { path?: string; unreadable?: boolean } = {};
+  const last = await newestWrite(dir, cut, new Set(bulk.take.map((t) => norm(t.path))), undefined, found);
+  const wait = f.low ? `${FINISHED_LOW_MIN} min (disk is low)` : `${FINISHED_IDLE_HOURS} h`;
+  if (last === 'too-big' || last > cut || found.unreadable) {
+    const why = last === 'too-big' ? 'too many entries to judge its last write' : found.unreadable ? `a folder in it cannot be read (${found.path})` : `written ${Math.round((now - last) / 60_000)} min ago (${found.path})`;
+    return [...rows, { path: dir, kind: 'session-bulk', verdict: 'keep', why: `its rebuildable bulk (${bulk.take.length} item(s)) waits for ${wait} with no write: ${why}` }];
+  }
+  for (const t of bulk.take) rows.push({ path: t.path, kind: 'session-bulk', verdict: 'delete', why: `${t.what}, in finished worker ${path.basename(dir).replace(/^ffa-/i, '')}'s folder (its requests closed; the reopen hold keeps the folder, not what a reopen rebuilds) with no write for ${wait}` });
+  return rows;
+}
+
 /** Every folder a clean-up could take, judged. Sizes are measured for the deletable ones only unless `sizes` asks for all. */
-export async function planFolders(f: CleanupFacts, o: { now?: number; sizes?: 'all' | 'delete' | 'none'; localWork?: (dir: string) => Promise<string | undefined> } = {}): Promise<FolderRow[]> {
+export async function planFolders(f: CleanupFacts, o: { now?: number; sizes?: 'all' | 'delete' | 'none'; localWork?: (dir: string) => Promise<string | undefined>; published?: Map<string, PublishedRecord[]>; ignoredEvidence?: (repo: string) => Promise<string[] | undefined> } = {}): Promise<FolderRow[]> {
   const now = o.now ?? Date.now();
   const bad = factsProblem(f, now);
   if (bad) return [{ path: f.root ?? '(no install folder)', kind: 'other', verdict: 'keep', why: bad }];
@@ -221,7 +253,12 @@ export async function planFolders(f: CleanupFacts, o: { now?: number; sizes?: 'a
     for (const top of ['Builds', '.nightly-builds']) for (const e of entries(path.join(sb.path, top))) paths.push(path.join(sb.path, top, e.name));
   }
   const rows: FolderRow[] = [];
-  for (const p of paths) rows.push(await withGitCheck(judgePath(p, f, now), f.root, o.localWork));
+  for (const p of paths) {
+    const r = await withGitCheck(judgePath(p, f, now), f.root, o.localWork);
+    rows.push(r);
+    const sid = r.kind === 'session-temp' ? sessionOfDir(path.basename(p)) : undefined;
+    if (r.verdict === 'keep' && sid && finishedSession(sid, f)) rows.push(...(await finishedRows(p, f, { now, published: o.published, localWork: o.localWork, ignoredEvidence: o.ignoredEvidence })));
+  }
   const mode = o.sizes ?? 'delete';
   if (mode !== 'none') for (const r of rows) if (mode === 'all' || r.verdict === 'delete') r.bytes = await sizeOf(r.path).catch(() => undefined);
   return rows.sort((a, b) => (a.verdict === b.verdict ? 0 : a.verdict === 'keep' ? -1 : 1) || a.path.localeCompare(b.path));
@@ -241,7 +278,7 @@ export function renderFolders(rows: FolderRow[], f: CleanupFacts | undefined, no
     `Folders under ${f!.root} judged against the ledger (facts ${Math.max(0, Math.round((now - Date.parse(f!.at)) / 1000))} s old): ${keep.length} to KEEP, ${del.length} deletable${total ? ` (${gb(total)})` : ''}.`,
     ...keep.map(line),
     ...del.map(line),
-    'Delete only the DELETE rows, and only inside the install folder. A KEEP row belongs to a request that has not closed (open, stalled or paused), holds a git repo with work on no remote, or could not be attributed: report it, never remove it.',
+    'Delete only the DELETE rows, and only inside the install folder. A KEEP row belongs to a request that has not closed (open, stalled or paused), holds a git repo with work on no remote or evidence published nowhere else, or could not be attributed: report it, never remove it. A DELETE row inside a kept folder (a finished worker\'s bulk, w2223) goes alone; its folder stays.',
     '`ff-leftovers check <path>...` judges any other path before you delete it.',
     '',
   ].join('\n');
