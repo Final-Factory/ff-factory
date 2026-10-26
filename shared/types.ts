@@ -1916,8 +1916,8 @@ export interface WorkPair {
   /**
    * Why the legs must run on different operating systems (the game repo's Determinism-Test-Strategy.md "Which machines",
    * w1692: float or math-library use in the simulation, Burst or IL2CPP codegen, platform APIs or paths, the desync hash, a
-   * desync seen only across OSes). Absent: computers that are not Macs (a Mac refuses a multiplayer client, w665). With it,
-   * one Mac may take leg 1, the host.
+   * desync seen only across OSes): its legs then go on two operating systems. With it or without, one Mac may take leg 1,
+   * the host, and no other leg (a Mac refuses a multiplayer client, w665; w2282).
    */
   crossOs?: string;
   /** A leg takes timing measurements (exclusive bench tickets): never on a computer that takes no timed runs (m5, w1861). */

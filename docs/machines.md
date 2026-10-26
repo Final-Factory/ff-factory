@@ -1526,16 +1526,20 @@ LothDesktop and Beast, not just when BEAST is full").
   - **Talking: `message_pair`** (a worker tool, `Agents.messagePair`): a leg's message reaches every other leg's worker of
     its started pair run, as a message that resumes a leg that ended its turn (where the host listens and on which commit,
     that a client joined, that a leg failed).
-  - **Which computers.** Legs go on computers that are not Macs (a Mac refuses a multiplayer client, w665). A cross-OS pair
-    may put one Mac as the host, never a client, and needs its legs on two operating systems. Timed legs never go where no
-    timed runs go (the m5). `placement.prefer`, holds, reservations and exclusive bench tickets are as for any work: each leg
+  - **Which computers.** Legs go on any free computers, any OS (w2282, lothsahn: "Not windows by default, any OS. Being
+    particular about a machine or OS limits the fleet we can use."). A Mac may be the host (leg 1), never a client (a Mac
+    refuses a multiplayer client, w665: the game's `player_slots.py` refuses it), and a Mac with room hosts first, which
+    leaves the other computers for work a Mac cannot take. A cross-OS pair also needs its legs on two operating systems.
+    A pair is not timed unless request_pair says `timed`; only then do its legs stay off where no timed runs go (the m5).
+    Pair runs filed before w2282 say "on computers that are not Macs": the store rewrites that text when it loads the
+    ledger, and drops the computers the dispatcher queued a request_pair one for (`server/store.ts`, `repairText`). `placement.prefer`, holds, reservations and exclusive bench tickets are as for any work: each leg
     is a game worker in its own sandbox, and a timed leg takes its ticket as every timing run does. Code: `shared/capacity.ts`
     `pairRoom` and `unfitWhy`.
   - **Room for a pair is room for all its legs at once.** `roomForWork` (`server/placement.ts`), the Queued line
     (`shared/workState.ts` `queuedLive`), the WRONG flag (`roomEnough` on the room that has stood), the capacity ping and
     `decide_work queue` count a pair as room only where as many computers that fit have room at the same moment; fewer read
-    "queued for capacity (a pair run of 2 legs, on computers that are not Macs): a pair run of 2 legs needs 2 computers with
-    room at once, and only biscuit has room it fits". With room for all legs the ping and the queue refusal say to start its
+    "queued for capacity (a pair run of 2 legs, on any computers, any OS (a Mac only as the host, leg 1)): a pair run of 2
+    legs needs 2 computers with room at once, at most one of them a Mac (the host), and only biscuit has room it fits". With room for all legs the ping and the queue refusal say to start its
     legs together, naming a pick.
   - **Not starved by single work** (`Agents.pairHoldProblem`). While a pair run is Queued, a computer's LAST free sandbox
     that the pair fits is held for it from newer game work of no higher priority: `start_agent` refuses it there, naming the
