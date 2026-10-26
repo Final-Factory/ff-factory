@@ -38,7 +38,7 @@ import { ensureGitBashTmp, keepGitBashTmp } from '../server/gitBashTmp.ts';
 import { readImage } from '../server/images.ts';
 import { publishFromMachine } from './review.ts';
 import { LOG_MAINTAIN_EVERY_MS, maintainLogs, maintenanceLine } from './logRetention.ts';
-import { DEV_TIER_SNIPPET, LiveSession, gameCommand, readGameChannel, type LiveDeps } from './live.ts';
+import { DEV_TIER_SNIPPET, LiveSession, ProcessBirths, gameCommand, type LiveDeps } from './live.ts';
 import { backupScenes, idleCloseEditor, idleClosedDetail, idleReopenNote, putBackMats, snapshotMats, type MatSnapshot } from './liveIdle.ts';
 import { LIVE_MATERIAL_NAME, LIVE_PROPERTY_NAME, keepInMat, type MatKnobType } from './matText.ts';
 import { legsText, parseStage, restage, stageSummary, type LiveStageStep } from './liveStage.ts';
@@ -56,7 +56,7 @@ import { MACHINE_CLEANUP_DEFAULTS } from '../server/config.ts';
 import { editorFolderOf, ownRecheck, planOwnLeftovers, playerSlotRoots, runOwnLeftovers, type OwnLeftoverInputs } from '../server/ownLeftovers.ts';
 import { hubEditorDirs, hubListedEditors, listWinDialogs, realDeps as realUnityDeps } from './unity.ts';
 import { listMacDialogs } from './macDialogs.ts';
-import { UnityReaper, realReaperDeps, type ReaperDeps } from './unityReaper.ts';
+import { UnityReaper, inspectProcs, realReaperDeps, type ReaperDeps } from './unityReaper.ts';
 import type { CleanupFacts } from '../server/cleanupFolders.ts';
 import type { SessionOwner } from '../server/resumable.ts';
 import { LeftoverReaper, installLeftoversShim, readEnvs, readLeases, realInspect, type LeftoverDeps } from './leftovers.ts';
@@ -1870,6 +1870,8 @@ export class Daemon {
   /** Tests' fake game for a live view (server/testLiveGame.ts); the real one is the sandbox editor's (machine/live.ts). */
   private readonly liveDeps?: (sandbox: string) => LiveDeps;
   private readonly lives = new Map<string, LiveEntry>();
+  /** Each editor's start, so a channel file an older process left under a reused pid is not taken for its (w2255). */
+  private readonly births = new ProcessBirths(async (pid) => (await inspectProcs(machinePlatformOf(process.platform), [pid]))[0]?.startedAt);
 
   /** The live views it runs, for the hello (w1509): a portal that restarted takes them back. */
   private liveViews(): DaemonLiveView[] {
@@ -2006,7 +2008,7 @@ export class Daemon {
     });
     entry.s = new LiveSession(msg.fps ?? 15, msg.width ?? 960, {
       editorPid: pidOf,
-      channel: (pid) => readGameChannel(pid),
+      channel: (pid) => this.births.channel(pid),
       devTier: async () => {
         const port = bridgeInfo(sb.path).port;
         return port ? bridgeExecute(port, DEV_TIER_SNIPPET) : 'no MCP bridge for this editor';
@@ -2055,7 +2057,7 @@ export class Daemon {
             const port = bridgeInfo(sb.path).port;
             return port ? bridgeExecute(port, code) : 'no bridge: none for this editor';
           }),
-        channel: over.channel ?? ((pid) => readGameChannel(pid)),
+        channel: over.channel ?? ((pid) => this.births.channel(pid)),
         command: over.command ?? ((ch, text) => gameCommand(ch, text)),
         progress: (detail) => entry.s.setStaging(detail),
         now: () => Date.now(),
