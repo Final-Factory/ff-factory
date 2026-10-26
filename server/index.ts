@@ -55,7 +55,7 @@ import { UNIT_WATCHDOG_FILE, UnitWatchdogMonitor, fileUnitWatchdog } from './uni
 import { dataRecoveries, describeRecovery } from './durable.ts';
 import { DispatcherChatRefused, PermissionAnswerRefused } from './orchestrators.ts';
 import { OPS_PEOPLE, OPS_REFUSED } from './opsWorker.ts';
-import { backupMemory, healMemory, MEMORY_TRASH_DAYS, memoryDirFor, memoryRootOf, pruneMemoryTrash, restoreBadMemory } from './orchestratorMemory.ts';
+import { backupMemory, healMemory, MEMORY_TRASH_DAYS, memoryDirFor, memoryRootOf, pruneMemoryTrash } from './orchestratorMemory.ts';
 import { deleteLogin, serveLoginDeletes } from './loginDelete.ts';
 import { describeMemoryGit, versionMemory } from './memoryGit.ts';
 import { DispatcherStop, stopMeters } from './dispatcherStop.ts';
@@ -212,7 +212,6 @@ const guardMemory = (what: 'heal' | 'backup') => {
   }
   // Off the event loop (w2044): the copy, its fsyncs and the trash pass are asynchronous; versioning follows the copy.
   void (async () => {
-    await oneOffMemoryRepair;
     await backupMemory(memoryRoot);
     // Deleted memory files (delete_memory, w1748) are kept 30 days in <root>.backup/trash.
     const pruned = await pruneMemoryTrash(memoryRoot);
@@ -221,10 +220,6 @@ const guardMemory = (what: 'heal' | 'backup') => {
   })().catch((e) => console.warn(`orchestrator memory backup failed: ${(e as Error).message}`));
 };
 guardMemory('heal');
-// w2253, once: Ben's orchestrator wrote "PLACEHOLDER" over person-ben/corrections-log.md (2026-10-26 ~04:45Z), before
-// restore_memory existed. The newest copy that is not that word goes back, before a backup pass can rotate one out; once
-// the file holds anything else this does nothing. Remove after the deploy that ran it.
-const oneOffMemoryRepair = restoreBadMemory(memoryRoot, path.join('person-ben', 'corrections-log.md'), (t) => t.trim() === 'PLACEHOLDER').catch((e) => console.warn(`orchestrator memory one-off repair failed: ${(e as Error).message}`));
 guardMemory('backup');
 setInterval(() => guardMemory('backup'), 10 * 60_000).unref();
 // The token vault (docs/vault.md, w512): data/vault.json, sealed with a key outside data/. Loaded first, so redaction knows

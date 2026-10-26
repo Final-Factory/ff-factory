@@ -1873,9 +1873,9 @@ replaced file and logs the restore.
 - **No blind overwrite:** the Write guard (`memoryGuard`) refuses a Write over an existing memory file that the process
   has not Read (Claude Code's own rule had let the PLACEHOLDER Write through). Edit needs a Read anyway; a new file, or
   one the process wrote itself, passes. A process started for a resumed conversation reads the file again first.
-- **The one-off:** the deploy that brought the tool put Ben's file back once at start (`restoreBadMemory` in
-  `server/index.ts`): the newest copy that is not "PLACEHOLDER", logged as above with "FF Factory (a one-off repair at
-  start, w2253)".
+- **The one-off:** the deploy that brought the tool (82b0f67, 2026-10-26 05:42Z) put Ben's file back once at start with
+  `restoreBadMemory`, from commit dcec5f0 (94 lines), logged as above with "FF Factory (a one-off repair at start,
+  w2253)". The call left `server/index.ts` after that; `restoreBadMemory` stays for the next such repair.
 
 ### Memory in a private repository
 
