@@ -211,6 +211,9 @@ first frame was that turn. Now the worker records once how it staged the view, a
      and waits for it: a plain play mode opens none (the game's `AgentChannelHost.Bootstrap` starts one only for the launch
      flag or the Agent Control setting), so a replay that only waited failed with "the game opened no agent channel in play
      mode" (w2255: w2196 on m5/slot2, 2026-10-26 05:04Z, after its editor was closed idle).
+     A `session-<pid>.json` written before the editor process started is another, older game's under a reused pid and is
+     not its channel (`readGameChannel`'s `bornMs`, `ProcessBirths` in `machine/live.ts`): on lothdesktop/slot1 (w2255,
+     2026-10-26 06:35Z) editor pid 2044 found the file of a 2026-10-14 game and the first step failed with ECONNREFUSED.
   3. **title**, **load** (a recipe with `load`): waits for the title screen (2 min), runs `game.loadsolo|<save>`, and waits until
      the game is in the world (4 min).
   4. **steps**: the remaining steps, in order. The first one that fails ends the replay with its number and the answer.

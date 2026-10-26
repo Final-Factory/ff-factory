@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { FrameParser, LiveSession, agentControlDir, readGameChannel, type CommandReply, type GameChannel, type LiveState } from '../machine/live.ts';
+import { FrameParser, LiveSession, ProcessBirths, agentControlDir, readGameChannel, type CommandReply, type GameChannel, type LiveState } from '../machine/live.ts';
 
 const msg = (kind: string, payload: Buffer) => {
   const h = Buffer.alloc(5);
@@ -112,4 +112,31 @@ test('live: no editor or no play mode holds, with the reason', async () => {
   assert.ok(states.some(([st, d]) => st === 'holding' && /editor is not running/.test(d)));
   assert.ok(states.some(([st, d]) => st === 'holding' && /not in play mode/.test(d)));
   assert.equal((await s.command('look.material.list|X')).ok, false);
+});
+
+test('w2255: a session file older than its process is another process\'s under a reused pid, and is not its channel', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'live-'));
+  const file = path.join(dir, 'session-2044.json');
+  fs.writeFileSync(file, JSON.stringify({ port: 64289, token: 't', tier: 'all', pid: 2044 }));
+  // lothdesktop/slot1, 2026-10-26: the file was the 2026-10-14 game's; the editor with that pid started at 06:29Z.
+  const stale = new Date('2026-10-14T13:58:35Z');
+  fs.utimesSync(file, stale, stale);
+  const born = Date.parse('2026-10-26T06:29:00Z');
+  assert.equal(readGameChannel(2044, dir, born), undefined);
+  assert.equal(readGameChannel(2044, dir)?.port, 64289, 'with no start time, read as before');
+  const fresh = new Date(born + 60_000);
+  fs.utimesSync(file, fresh, fresh);
+  assert.equal(readGameChannel(2044, dir, born)?.port, 64289);
+
+  // ProcessBirths: no channel while the start time is looked up, then the check; an OS that cannot say reads as before.
+  let asked = 0;
+  const births = new ProcessBirths(async () => (asked++, born + 120_000));
+  assert.equal(births.channel(2044, dir), undefined);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(births.channel(2044, dir), undefined, 'written before this process started');
+  assert.equal(asked, 1, 'looked up once');
+  const unknown = new ProcessBirths(async () => undefined);
+  unknown.channel(2044, dir);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(unknown.channel(2044, dir)?.port, 64289);
 });

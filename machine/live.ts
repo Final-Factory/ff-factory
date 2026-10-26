@@ -31,14 +31,63 @@ export interface GameChannel {
   pid: number;
 }
 
-/** The game's agent channel for one process, from its session file; undefined when there is none (not in play mode). */
-export function readGameChannel(pid: number, dir = agentControlDir()): GameChannel | undefined {
+/** How far a session file's time may lie before its process's start and still be that process's (clock and file-time grain). */
+const BORN_SLACK_MS = 5_000;
+
+/**
+ * The game's agent channel for one process, from its session file; undefined when there is none (not in play mode).
+ * `bornMs`, the process's start time: a file written before it is another, older process's under a reused pid, and is
+ * ignored (w2255: on lothdesktop/slot1, 2026-10-26, editor pid 2044 found session-2044.json from 2026-10-14, and the
+ * restage's first step failed with ECONNREFUSED on that file's port).
+ */
+export function readGameChannel(pid: number, dir = agentControlDir(), bornMs?: number): GameChannel | undefined {
   try {
-    const j = JSON.parse(fs.readFileSync(path.join(dir, `session-${pid}.json`), 'utf8')) as Partial<GameChannel>;
+    const file = path.join(dir, `session-${pid}.json`);
+    if (bornMs !== undefined && fs.statSync(file).mtimeMs < bornMs - BORN_SLACK_MS) return undefined;
+    const j = JSON.parse(fs.readFileSync(file, 'utf8')) as Partial<GameChannel>;
     if (typeof j.port !== 'number' || typeof j.token !== 'string') return undefined;
     return { port: j.port, token: j.token, tier: String(j.tier ?? ''), pid };
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * Each editor process's start time, looked up once per pid from the OS (w2255) for readGameChannel's `bornMs`. `get`
+ * answers undefined while the lookup runs (no channel yet: the callers look again within a second), and null when the OS
+ * could not say (then the file is read as before).
+ */
+export class ProcessBirths {
+  private known = new Map<number, number | null>();
+  private asking = new Set<number>();
+  private readonly look: (pid: number) => Promise<number | undefined>;
+  constructor(look: (pid: number) => Promise<number | undefined>) {
+    this.look = look;
+  }
+
+  get(pid: number): number | null | undefined {
+    if (this.known.has(pid)) return this.known.get(pid);
+    if (!this.asking.has(pid)) {
+      this.asking.add(pid);
+      this.look(pid).then(
+        (t) => this.settle(pid, t ?? null),
+        () => this.settle(pid, null),
+      );
+    }
+    return undefined;
+  }
+
+  private settle(pid: number, t: number | null) {
+    this.asking.delete(pid);
+    if (this.known.size > 64) this.known.clear();
+    this.known.set(pid, t);
+  }
+
+  /** The channel of `pid`, ignoring a file older than the process. */
+  channel(pid: number, dir?: string): GameChannel | undefined {
+    const born = this.get(pid);
+    if (born === undefined) return undefined;
+    return readGameChannel(pid, dir, born ?? undefined);
   }
 }
 
