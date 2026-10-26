@@ -1489,25 +1489,33 @@ LothDesktop and Beast, not just when BEAST is full").
     editors and asks players to quit); the host's run broke after 26 heartbeats, both legs ended "needs a new client
     machine", and it sat Stalled for over 2 h. w2271's live client leg was moved alone by the w2046 move three times
     (09:14Z, 09:45Z, 11:04Z), each cutting the run. A run is **under way** (`livePair` in `server/work.ts`) while it is open,
-    its legs started and none has said DONE.
+    its legs started and none of this attempt's legs has said DONE (a DONE from an earlier attempt's leg does not count, w2305).
     - **The sweep** (`Orchestrators.requeueBrokenPairs`, run by the blocker watch each minute) finds a leg broken: a person
       plays Final Factory on its computer, or is in the grace after (`personPlaying`, `MachineManager.personPlayOf`); its
       computer is offline `PAIR_OFFLINE_MS` (10 min); its worker is gone; it was taken off the request (`movedOff`); or its
       sandbox went to other work (`placeReleased`), which ended what it ran there.
-    - **The re-queue** (`Orchestrators.requeuePair`): every leg is taken off the request and retired (a leg mid-turn is told
-      to stop first), `pair.started` is cleared, the yielding or offline computer joins `pair.avoid`, and the request is
+    - **The re-queue** (`Orchestrators.requeuePair`): every leg is taken off the request and stopped at once, mid-turn or not
+      (w2305: retired at its turn's end, w2276's host 9a4452ce kept working in beast/slot1 after the re-queue), `pair.started` is cleared, the yielding or offline computer joins `pair.avoid`, and the request is
       Queued for capacity (never Stalled; the asker stays Blocked on the same run's report). The dispatcher gets "[ledger]
       PAIR RE-QUEUED (w2304)" and starts every leg again with new workers, together. The log line reads "re-queued as a pair
       run (w2304, 1 of 3; its 2 legs start fresh together, not on lothdesktop): <why>. Old legs stopped: <session (sandbox)>
       ...". At most `PAIR_REQUEUE_MAX` (3) times per run; past it the log says "not re-queued again (w2304)" once and a person
       looks.
-    - **No lone leg moves.** A leg of a run under way keeps its sandbox while the other legs work (`Agents.waitOn` no longer
-      reads "it waits on wNNN: its worker ... works on it" for it, so the w890 release leaves it). The w2046 move never moves
+    - **A leg's sandbox is held until the run is over** (w2305, lothsahn, 2026-10-26: "a sandbox that holds a live pair-run leg
+      is never released to other work while that pair run is in progress"). Right after w2304 deployed, the release took
+      sandboxes from healthy legs and the sweep re-queued both runs under way: w2276's client e5dcf0d3 (12:39Z, "it waits on
+      w2276: its worker 9a4452ce works on it", its own host) and w2298's host 7d3bf3b8 (12:50Z, "its check-in at 13:06 UTC is
+      for work that is over: its request is with another worker now (w2298: e33e6f40)", its own client). `Agents.pairHold`
+      (`pairLegOf` in `server/work.ts`) makes the release pass (`releaseStep`) neither stop nor release a leg of a run under
+      way, whatever its check-in, its wait on its partner or its idle time say; `workOver` and `waitOn` read the partner legs
+      as the same work, never "another worker". list_sandboxes's kept line names the hold.
+    - **No lone leg moves.** The w2046 move never moves
       it (`moveDecision`: it stays, "a pair run under way (w2304)"; once its sandbox went to other work anyway, `requeuePair`
       decision: the whole run is re-queued and its message is not delivered). A paused computer's hand-back (w1532) of a leg
       re-queues the whole run too. Once a leg has reported, the run is over and these rules no longer apply.
-    - Tests: the four w2304 cases in `server/orchestrators.test.ts` (the yield, the cap, the kept sandbox, the move) and the
-      w2304 case in `server/resumeMove.test.ts`.
+    - Tests: the four w2304 cases in `server/orchestrators.test.ts` (the yield, the cap, the kept sandbox, the move), the
+      w2304 case in `server/resumeMove.test.ts`, and the w2305 replays of w2298 and w2276 (no release, no re-queue) and the
+      old legs' stop.
   - **One pair run per pull request and commit, and its result reaches whoever waits on it** (w2057, lothsahn, 2026-10-24).
     w1936, the hand-filed pair run of w665's PR #2340, passed at 12:55 on 10-24, but w665's worker d558ba14 was never told:
     it had filed nothing (its report said "waiting on a Windows or Linux pair worker to run `MP-lowore-pin-pair` for PR
@@ -1669,7 +1677,9 @@ LothDesktop and Beast, not just when BEAST is full").
       whose Live view is up while it waits on a **person** keeps its process, its sandbox and its editor for
       `LIVE_HOLD_MS` (12 h) after its last activity (`Agents.liveHold`; the idle reaper's `keepIdle` too), so the person's
       words reach it at once; past that, or when its sandbox is released any other way, the view ends with the release and
-      its next message asks it to stage the view again ([live-view.md](live-view.md), "While it waits on you"). Never
+      its next message asks it to stage the view again ([live-view.md](live-view.md), "While it waits on you"). **Nor a leg of
+      a pair run under way** (w2305, `Agents.pairHold`): it keeps its sandbox until the run is over or re-queued ("Pair runs
+      are placed as one unit"). Never
       released (`waitReleaseWhy`, `keptWhy`): uncommitted or untracked work its daemon cannot
       save and push first, a branch with a commit its remote lacks, a Unity batch run of that sandbox in flight, another
       agent working there, a message queued for it, a worker mid-turn, with a permission open, or with a background job or
