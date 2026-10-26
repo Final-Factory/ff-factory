@@ -547,7 +547,7 @@ export function pickComputer(places: readonly Computer[], last?: string, prefs: 
     if (t) return t;
     // Never on a computer that takes no timed runs (w1861): with none other open the work waits.
     const rest = pickComputer(places.filter((p) => !p.noTimedRuns), last, prefs, kind, workflows);
-    return rest && { pick: rest.pick, why: `timed work, but no computer${firstKind === 'timed' ? '' : ` on ${firstKind.slice(6)}`} has room; so the general placement: ${rest.why}${noTimedNote(places)}` };
+    return rest && { pick: rest.pick, why: `timed work, but no computer${firstKind === 'timed' ? '' : ` on ${firstKind.slice(6)}`} has room; so the general placement: ${rest.why}${noTimedNote(places)}${timedSkipped(places, prefs, firstKind === 'timed' ? undefined : firstKind.slice(6))}` };
   }
   if ((firstKind === 'live' || firstKind === 'build') && kind === 'game') {
     // Work that needs a Live view (w1600) or builds a player (w1606): the first computer in its list with room, else the general placement.
@@ -624,6 +624,23 @@ export function pickComputer(places: readonly Computer[], last?: string, prefs: 
 }
 
 /** "; never m5 (it takes no timed runs: ...)" (w1861), or "" when every computer takes them. */
+/**
+ * "; waits on lothlaptop: paused from its tray app: paused by hand (w1532), m3: offline" (w2234): every computer timed work
+ * passed over and why (held with its reason, avoided, offline, busy), so a wait does not read as generic. Reports only.
+ */
+export function timedSkipped(places: readonly Computer[], prefs: PlacementPrefs = {}, platform?: string): string {
+  const hold = holdOf(prefs);
+  const avoid = avoidOf(prefs);
+  const out: string[] = [];
+  for (const p of places) {
+    if (p.noTimedRuns || (platform && p.platform !== platform)) continue;
+    if (hold.has(p.id)) out.push(`${p.id}: ${hold.get(p.id)!.startsWith('paused from its tray app') ? hold.get(p.id) : `held (${hold.get(p.id)})`}`);
+    else if (avoid.has(p.id)) out.push(`${p.id}: avoided (${avoid.get(p.id)})`);
+    else if (!hasRoom(p)) out.push(`${p.id}: ${p.online ? `busy (${busyReasons(p).join('; ')})` : 'offline'}`);
+  }
+  return out.length ? `; waits on ${out.join(', ')}` : '';
+}
+
 const noTimedNote = (places: readonly Computer[]) => {
   const no = places.filter((p) => p.noTimedRuns);
   return no.length ? `; never ${no.map((p) => `${p.id} (it takes no timed runs: ${p.noTimedRuns})`).join(', ')}` : '';
@@ -704,7 +721,7 @@ export function timedLine(places: readonly Computer[], last?: string, prefs: Pla
       .filter((x) => x.online && !x.noTimedRuns && !hold.has(x.id) && !avoidOf(prefs).has(x.id))
       .sort((a, b) => a.maxAgents - b.maxAgents || (a.maxEditors ?? 0) - (b.maxEditors ?? 0) || a.id.localeCompare(b.id));
     const order = next.length ? ` When one frees, timed work goes to the first of: ${next.map((x) => classText(x)).join(' > ')} (w1872)${noTimedNote(places)}.` : '';
-    return `No computer has room for timed work now${heldNote(places, prefs, 'game')}.${order}${held}`;
+    return `No computer has room for timed work now${heldNote(places, prefs, 'game')}${timedSkipped(places, prefs)}.${order}${held}`;
   }
   return `Next timed work (benchmarks, perf A/Bs and probes; on the platform it names, w1628): ${p.pick.id} (${p.why}).${held}`;
 }
