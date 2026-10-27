@@ -134,7 +134,7 @@ function runs(t: { after: (f: () => void) => void }, o: { online: Record<string,
   const machine = (id: string): Machine => ({ id, online: o.online[id], lastSeen: o.lastSeen?.[id], sandboxRoot: 'F:/ffw', platform: 'win32' }) as unknown as Machine;
   const r = new TimedRuns({
     dataDir: dir,
-    store: { get: () => undefined, grant: () => {}, begin: () => ({ uploadId: 'u', chunkBytes: 1 }), forget: () => {} } as never,
+    store: { get: (id: string) => (id === 'x' ? { id, sha256: '0'.repeat(64) } : undefined), grant: () => {}, begin: () => ({ uploadId: 'u', chunkBytes: 1 }), forget: () => {} } as never,
     machines: () => ['lothlaptop', 'play1'].map(machine),
     isOnline: (id) => !!o.online[id],
     offers: (id) => !!o.online[id],
