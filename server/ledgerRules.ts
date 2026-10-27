@@ -3,6 +3,7 @@
 // pure: server/ledgerSweep.ts gathers the facts and applies the result.
 import type { SessionInfo, TranscriptEvent, WorkErrorHandled, WorkItem, WorkPr } from '../shared/types.ts';
 import type { Config } from './config.ts';
+import { requestWaitOf } from '../shared/workState.ts';
 import { mergedText } from './mergedIntake.ts';
 import { afterReopen, doneOf } from './work.ts';
 
@@ -512,9 +513,11 @@ export function pausedIn(text: string): Map<string, string> {
  * A/B is running…", and w1820's worker resumed with no timing). It does when the report has `DONE: <ref>`, or a line
  * `For <waiter>: …` (its worker is told to write one, Orchestrators.tellReportWaited), or has no still-open or paused line
  * for `ref` and either names it or has no such line at all. A progress report, or one only about another request's
- * progress, does not.
+ * progress, does not. A timed leg's report to the request that filed it (`leg`, w2377) delivers only by `DONE: <ref>`, the
+ * `For <waiter>:` line, or a still-open line that waits on the waiter (`reportWaitsOn`): w2335 was woken four times on
+ * 2026-10-27 by w2338's turns that said only that its bench ticket was still queued, or "understood".
  */
-export function reportDelivers(report: string | undefined, ref: string, waiter?: string): boolean {
+export function reportDelivers(report: string | undefined, ref: string, waiter?: string, leg = false): boolean {
   if (!report) return false;
   const id = ref.toLowerCase();
   if (doneIdsIn(report).includes(id)) return true;
@@ -522,13 +525,16 @@ export function reportDelivers(report: string | undefined, ref: string, waiter?:
   const open = stillOpenIn(report);
   const paused = pausedIn(report);
   if (waiter && reportWaitsOn(report, ref, waiter)) return true;
+  if (leg) return false;
   if (open.has(id) || paused.has(id)) return false;
   return (!open.size && !paused.size) || new RegExp(`\\b${id}\\b`, 'i').test(report);
 }
 
 /**
  * Whether a report from a worker on `ref` says `ref` now waits on `waiter` (w2357): its still-open or paused line for `ref`
- * names `waiter` ("w2338: still open: waiting for w2335's worker 9524a4bc to send its fix commit"). Then `waiter`, blocked
+ * waits on `waiter` ("w2338: still open: waiting for w2335's worker 9524a4bc to send its fix commit"), read as the ledger
+ * reads a wait (shared/workState.ts requestWaitOf): a mere mention, "its fix-side legs at e947f566c4 on
+ * sandbox/slot3-w2335, queued for biscuit's bench ticket", is no wait on it (w2377). Then `waiter`, blocked
  * on `ref` reporting, has what it can act on (the half that is done, and what is asked of it), and holding it would close
  * a cycle nothing wakes (w2335 and its timed leg w2338, 2026-10-27).
  */
@@ -536,7 +542,7 @@ export function reportWaitsOn(report: string | undefined, ref: string, waiter: s
   if (!report || !/^w\d+$/i.test(waiter) || waiter.toLowerCase() === ref.toLowerCase()) return false;
   const id = ref.toLowerCase();
   const line = stillOpenIn(report).get(id) ?? pausedIn(report).get(id);
-  return !!line && new RegExp(`\\b${waiter.toLowerCase()}\\b`, 'i').test(line);
+  return !!line && requestWaitOf(line, id) === waiter.toLowerCase();
 }
 
 /** The PRs the ledger holds as open that a worker's report says merged (w515: "PR #1089 was merged", ".../pull/1089 merged"). */

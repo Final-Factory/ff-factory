@@ -388,11 +388,16 @@ test('w2357: the side of a cycle that resumes: the one whose next reported since
   assert.equal(cycleBreak(['w1', 'w2'], facts([item('w1'), item('w2')])), undefined, 'no side Blocked: nothing to clear');
 });
 
-test('w2357: a timed leg\'s progress report clears its parent\'s wait on its report; another request\'s does not', () => {
+test('w2377: a timed leg\'s turn with no result leaves its parent Blocked; the leg itself Blocked after the parent\'s gate clears it', () => {
   const b = block({ kind: 'request', ref: 'w2338', on: 'report', what: 'timed leg w2338' });
   const leg = item('w2338', { timedLeg: { for: 'w2335', forSession: 'x', from: 'beast', small: ['m3'] } });
   const f = facts([leg], { reportedSince: () => true, deliveredSince: () => false });
-  assert.equal(blockerVerdict(b, f, 'w2335').state, 'clear');
-  assert.equal(blockerVerdict(b, f, 'w99').state, 'open', 'not its parent');
-  assert.equal(blockerVerdict(b, facts([item('w2338')], { reportedSince: () => true, deliveredSince: () => false }), 'w2335').state, 'open', 'not a timed leg');
+  assert.equal(blockerVerdict(b, f, 'w2335').state, 'open', 'a status-only turn (before w2377: clear)');
+  const later = new Date(Date.parse(b.at) + 60_000).toISOString();
+  const blocked = item('w2338', { status: 'blocked', blocked: block({ kind: 'ci', ref: 'Final-Factory/FinalFactory#1', what: 'lothsahn to pick the save', at: later }), timedLeg: leg.timedLeg });
+  const v = blockerVerdict(b, facts([blocked], { reportedSince: () => true, deliveredSince: () => false }), 'w2335');
+  assert.equal(v.state, 'clear');
+  assert.match(v.why, /its timed leg, is itself Blocked \(lothsahn to pick the save\)/);
+  const before = item('w2338', { status: 'blocked', blocked: block({ kind: 'ci', ref: 'Final-Factory/FinalFactory#1', what: 'x', at: new Date(Date.parse(b.at) - 60_000).toISOString() }), timedLeg: leg.timedLeg });
+  assert.notEqual(blockerVerdict(b, facts([before], { reportedSince: () => true, deliveredSince: () => false }), 'w2335').state, 'clear', 'blocked before the parent\'s gate: already seen');
 });

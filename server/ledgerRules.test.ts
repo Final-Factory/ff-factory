@@ -299,7 +299,17 @@ test('w2357: a report that says it waits on the waiter delivers to it (w2338 wai
   assert.equal(reportDelivers(r, 'w2338', 'w2335'), true);
   assert.equal(reportWaitsOn(r, 'w2338', 'w2320'), false, 'another waiter');
   assert.equal(reportDelivers(r, 'w2338', 'w2320'), false);
-  assert.equal(reportWaitsOn('**w2338: paused:** w2335 first', 'w2338', 'w2335'), true);
+  assert.equal(reportWaitsOn("**w2338: paused:** waiting on w2335's commit", 'w2338', 'w2335'), true);
   assert.equal(reportWaitsOn('w2338: still open: the A/B is running', 'w2338', 'w2335'), false);
   assert.equal(reportWaitsOn("w2335: still open: w2338's numbers", 'w2338', 'w2335'), false, 'a line about another request');
+});
+test("w2377: a timed leg's turn delivers to its parent only with a For line, DONE or a wait on it; a status-only turn or \"understood\" does not", () => {
+  const status = "Still queued.\n\nw2338: still open: fix-side legs at e947f566c4 on sandbox/slot3-w2335 queued for biscuit's bench ticket";
+  assert.equal(reportWaitsOn(status, 'w2338', 'w2335'), false, 'a branch named after the parent is no wait on it');
+  assert.equal(reportDelivers(status, 'w2338', 'w2335', true), false);
+  assert.equal(reportDelivers('Understood: I will wait for the bench ticket.', 'w2338', 'w2335', true), false, 'a reply with no still-open line');
+  assert.equal(reportDelivers('Understood: I will wait for the bench ticket.', 'w2338', 'w2335'), true, 'any other waiter: as before (w1869)');
+  assert.equal(reportDelivers(`${status}\n\nFor w2335: master 41.2 ms, fix 30.1 ms (specs/w2338/ab.md).`, 'w2338', 'w2335', true), true, 'a partial result with a For line');
+  assert.equal(reportDelivers('Both sides timed.\n\nDONE: w2338', 'w2338', 'w2335', true), true);
+  assert.equal(reportDelivers("w2338: still open: waiting for w2335's worker to push its fix commit", 'w2338', 'w2335', true), true, 'a wait on the parent (w2357)');
 });
