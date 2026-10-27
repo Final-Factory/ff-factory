@@ -22,7 +22,7 @@ case "${1:-}" in
 esac
 need_root
 guest=$here/../guest
-for f in fff-machine-ssh machines.ssh; do [ -r "$guest/$f" ] || die "no $guest/$f in this checkout (git -C ~/ff-factory pull)"; done
+for f in fff-machine-ssh machines.ssh; do [ -r "$guest/$f" ] || die "no $guest/$f in this checkout (sudo git -C /opt/ff-factory pull)"; done
 {
   echo 'data=$(mktemp); trap '"'"'rm -f "$data"'"'"' EXIT'
   echo "cat >\"\$data\" <<'FFF_MACHINES_SSH'"

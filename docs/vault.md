@@ -999,7 +999,7 @@ an entry whose file is gone is a deletion, and an entry nobody has a file for is
 On the FFBox host:
 
 ```bash
-cd /opt/ff-factory && git pull
+cd /opt/ff-factory && sudo git pull
 sudo deploy/vm/host/install.sh --guest-only            # the new fffctl (add-claude) in the VM, and fff-vm, vault.sh on the host
 sudo fff-vm ssh 'sudo fffctl update'                   # the VM's portal release with `export` (the nightly copy needs it); this is the portal update
 sudo fff-vm vault-sync                                 # records what has a file; copies the VM-only entries (Max's token) to vault-extra/
@@ -1310,7 +1310,7 @@ through chat. It assumes the portal runs in the VM (w508's cut-over) and this ch
 **1. The portal and the scripts** (lothsahn, on the FFBox host):
 
 ```bash
-cd ~/ff-factory && git pull
+cd /opt/ff-factory && sudo git pull
 sudo deploy/vm/host/install.sh --guest-only          # new fffctl, fff-portal.service, fff-backup; the VM's vault key; fff-vm vault-sync; and, since w744, the host's fff-vm and vault.sh
 sudo fff-vm ssh 'sudo fffctl update'
 sudo fff-vm ssh 'sudo fffctl status'                 # until the release is main's newest and /api/health answers

@@ -91,8 +91,8 @@ grep -Ec 'vmx|svm' /proc/cpuinfo        # above 0, or turn on VT-x/AMD-V in the 
 
 # 2.2 The scripts (already cloned: drop any local edit first, then pull)
 sudo apt-get install -y git
-git clone https://github.com/Final-Factory/ff-factory.git ~/ff-factory    # or: git -C ~/ff-factory checkout -- . && git -C ~/ff-factory pull
-cd ~/ff-factory
+sudo git clone https://github.com/Final-Factory/ff-factory.git /opt/ff-factory    # or: sudo git -C /opt/ff-factory checkout -- . && sudo git -C /opt/ff-factory pull
+cd /opt/ff-factory
 
 # 2.3 Optional: what it would do, changing nothing (it says which answers a real run would still need)
 sudo deploy/vm/host/install.sh --dry-run
@@ -368,7 +368,7 @@ A change to the disk, seed, network or MAC address in `fff-vm.conf` is not the n
 it says what the nightly will apply.
 
 A host installed before 2026-10-06 (w537) has the older `fff-vm`, which restarts the VM without applying anything:
-update the host's scripts once, `git -C ~/ff-factory pull && sudo ~/ff-factory/deploy/vm/host/install.sh --host-only
+update the host's scripts once, `sudo git -C /opt/ff-factory pull && sudo /opt/ff-factory/deploy/vm/host/install.sh --host-only
 --yes` (it leaves the running VM alone).
 
 ## 8. /tmp on the VM's disk (a VM installed before 2026-10-06)
@@ -398,9 +398,9 @@ uses the aliases and pinned keys in [`guest/machines.ssh`](guest/machines.ssh). 
 over `fff-vm ssh` and keeps nothing here:
 
 ```bash
-git -C ~/ff-factory pull --ff-only
-sudo ~/ff-factory/deploy/vm/host/machine-ssh.sh --check   # read only: one line per machine
-sudo ~/ff-factory/deploy/vm/host/machine-ssh.sh --fix     # write the aliases and pinned keys, then the same lines
+sudo git -C /opt/ff-factory pull --ff-only
+sudo /opt/ff-factory/deploy/vm/host/machine-ssh.sh --check   # read only: one line per machine
+sudo /opt/ff-factory/deploy/vm/host/machine-ssh.sh --fix     # write the aliases and pinned keys, then the same lines
 ```
 
 After `--fix`, each line should read `<alias>: alias ok; known_hosts: pinned; tailnet: SHA256:... = pinned; ssh: ok`.
@@ -431,8 +431,8 @@ lines to read first, in the order they help (`portal_logs` for a worker, `fffctl
 ## If it must come off again
 
 ```bash
-sudo ~/ff-factory/deploy/vm/host/uninstall.sh --dry-run
-sudo ~/ff-factory/deploy/vm/host/uninstall.sh --delete-disk    # the VM, its disk, network, firewall table and units
+sudo /opt/ff-factory/deploy/vm/host/uninstall.sh --dry-run
+sudo /opt/ff-factory/deploy/vm/host/uninstall.sh --delete-disk    # the VM, its disk, network, firewall table and units
 ```
 
 Without `--delete-disk` the disk and its snapshots stay. Packages stay unless `--purge-packages`, which removes only
