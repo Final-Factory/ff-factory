@@ -521,8 +521,22 @@ export function reportDelivers(report: string | undefined, ref: string, waiter?:
   if (waiter && /^w\d+$/i.test(waiter) && new RegExp(`^[\\s*_>\`-]*for\\s+${waiter.toLowerCase()}\\b[*_\`]*\\s*[:—–-]`, 'im').test(report)) return true;
   const open = stillOpenIn(report);
   const paused = pausedIn(report);
+  if (waiter && reportWaitsOn(report, ref, waiter)) return true;
   if (open.has(id) || paused.has(id)) return false;
   return (!open.size && !paused.size) || new RegExp(`\\b${id}\\b`, 'i').test(report);
+}
+
+/**
+ * Whether a report from a worker on `ref` says `ref` now waits on `waiter` (w2357): its still-open or paused line for `ref`
+ * names `waiter` ("w2338: still open: waiting for w2335's worker 9524a4bc to send its fix commit"). Then `waiter`, blocked
+ * on `ref` reporting, has what it can act on (the half that is done, and what is asked of it), and holding it would close
+ * a cycle nothing wakes (w2335 and its timed leg w2338, 2026-10-27).
+ */
+export function reportWaitsOn(report: string | undefined, ref: string, waiter: string): boolean {
+  if (!report || !/^w\d+$/i.test(waiter) || waiter.toLowerCase() === ref.toLowerCase()) return false;
+  const id = ref.toLowerCase();
+  const line = stillOpenIn(report).get(id) ?? pausedIn(report).get(id);
+  return !!line && new RegExp(`\\b${waiter.toLowerCase()}\\b`, 'i').test(line);
 }
 
 /** The PRs the ledger holds as open that a worker's report says merged (w515: "PR #1089 was merged", ".../pull/1089 merged"). */

@@ -1,7 +1,7 @@
 // w643: what a Blocked request waits on, and when each kind of blocker clears, stays open, gets stuck or needs a person.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { BLOCKER_STUCK_MS, CI_NO_RUN_MS, CI_UNREADABLE_MS, conflictText, blockerName, blockerProblem, blockerVerdict, gatesName, gatesOf, isWith, latestWorker, newestFirst, prRefOf, sameGate, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
+import { BLOCKER_STUCK_MS, CI_NO_RUN_MS, CI_UNREADABLE_MS, conflictText, cycleBreak, waitCycles, blockerName, blockerProblem, blockerVerdict, gatesName, gatesOf, isWith, latestWorker, newestFirst, prRefOf, sameGate, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
 import type { WorkBlocker, WorkItem } from '../shared/types.ts';
 import { checksState, ghChecks, ghPr, ghPrHealth, prHealthOf, runsState } from './blockerWatch.ts';
 import type { RunResult } from './proc.ts';
@@ -356,4 +356,43 @@ test('w1696: a request is with the worker it was last sent or linked to, not the
   // Every "its newest worker" reader (a gate's resume, the report, the fleet's holder) takes this order.
   assert.deepEqual(newestFirst(w), ['d558ba14', 'dc19eb45']);
   assert.deepEqual(newestFirst({ sessionIds: ['a', 'b', 'c'], links: { a: { at: '2026-10-02T00:00:00Z', how: 'sent' }, b: { at: '2026-10-01T00:00:00Z', how: 'sent' } } }), ['a', 'b', 'c']);
+});
+
+// w2357: w2335 waited on its timed leg w2338's report while w2338's worker waited on w2335's commit; nothing woke either.
+test('w2357: wait cycles: gates and a worker saying it waits back; each cycle once, from its smallest id; none without a loop', () => {
+  const gate = (ref: string, at = ago(2)) => ({ status: 'blocked' as const, blocked: block({ kind: 'request', ref, at }) });
+  const work = [item('w2335', gate('w2338')), item('w2338'), item('w5', gate('w6')), item('w6', gate('w7')), item('w7', gate('w5')), item('w8', gate('w5')), item('w9', gate('w2335'))];
+  const says = (w: WorkItem) => (w.id === 'w2338' ? 'w2335' : undefined);
+  assert.deepEqual(waitCycles(work, says), [['w2335', 'w2338'], ['w5', 'w6', 'w7']]);
+  assert.deepEqual(waitCycles(work), [['w5', 'w6', 'w7']], 'without the derived wait, w2335 -> w2338 is no cycle');
+  // A request that is not open (done, queued) ends a chain; only an active one's worker words count.
+  assert.deepEqual(waitCycles([item('w1', gate('w2')), item('w2', { status: 'queued' })], () => 'w1'), []);
+});
+
+test('w2357: the side of a cycle that resumes: the one whose next reported since its block, then a timed leg\'s parent, then the one blocked longest', () => {
+  const g = (ref: string, h: number) => block({ kind: 'request', ref, at: ago(h) });
+  const leg = item('w2338', { timedLeg: { for: 'w2335', forSession: 'x', from: 'beast', small: ['m3'] } });
+  const parent = item('w2335', { status: 'blocked', blocked: g('w2338', 2) });
+  // The leg is not Blocked (only its worker's words): the parent is the only side with a gate, and the leg reported.
+  const reported = (w: WorkItem) => w.id === 'w2338';
+  assert.match(cycleBreak(['w2335', 'w2338'], facts([parent, leg], { reportedSince: reported }))!.why, /^a wait cycle \(w2335 -> w2338 -> w2335\): w2338's worker reported since w2335 was blocked on it/);
+  // No news: the timed leg's parent, though the leg was blocked longer.
+  const legBlocked = { ...leg, status: 'blocked' as const, blocked: g('w2335', 5) };
+  const r = cycleBreak(['w2335', 'w2338'], facts([parent, legBlocked], { reportedSince: () => false }))!;
+  assert.equal(r.id, 'w2335');
+  assert.match(r.why, /w2335 filed the timed leg in it, and holds what the leg waits for/);
+  // No timed leg: the one blocked longest.
+  const a = item('w1', { status: 'blocked', blocked: g('w2', 1) });
+  const b = item('w2', { status: 'blocked', blocked: g('w1', 3) });
+  assert.equal(cycleBreak(['w1', 'w2'], facts([a, b]))!.id, 'w2');
+  assert.equal(cycleBreak(['w1', 'w2'], facts([item('w1'), item('w2')])), undefined, 'no side Blocked: nothing to clear');
+});
+
+test('w2357: a timed leg\'s progress report clears its parent\'s wait on its report; another request\'s does not', () => {
+  const b = block({ kind: 'request', ref: 'w2338', on: 'report', what: 'timed leg w2338' });
+  const leg = item('w2338', { timedLeg: { for: 'w2335', forSession: 'x', from: 'beast', small: ['m3'] } });
+  const f = facts([leg], { reportedSince: () => true, deliveredSince: () => false });
+  assert.equal(blockerVerdict(b, f, 'w2335').state, 'clear');
+  assert.equal(blockerVerdict(b, f, 'w99').state, 'open', 'not its parent');
+  assert.equal(blockerVerdict(b, facts([item('w2338')], { reportedSince: () => true, deliveredSince: () => false }), 'w2335').state, 'open', 'not a timed leg');
 });

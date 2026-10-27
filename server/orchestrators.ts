@@ -3102,7 +3102,17 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
     const held = w.heldCheckIns?.find((h) => h.session === sid);
     // w2153: its own gates cleared while another worker's still hold the request (a pair run's other leg): its part goes on.
     const lead = still?.length ? `Your wait on ${w.id} is over: ${cleared}. (${w.id} stays Blocked on ${gatesName(still, this.now().getTime())}, another worker's wait: not yours.)` : `${w.id} is unblocked: ${cleared}.`;
-    const note = `${lead}${results}${yours}${ci ? ` Run ff-pr merge now${prs ? ` (${prs})` : ''}: it merges on green, or names the red run to read (gh run view <run> --log-failed) and fix.` : ''}${deploy ? ' The deploy you waited for has happened: do the check that comes after it now (the live read, the health check), then report.' : ''} Carry on from where you left it.${held ? ` Your own check-in, which the block cancelled, is folded into this message; its note was: ${held.note}` : ''}`;
+    // w2357: a timed leg's report travels with the resume too, a partial one above all (its "before" side timed, the "after"
+    // side waiting for this request's commit): w2335 would have resumed knowing nothing of what w2338 asked of it.
+    const legs = gates
+      .filter((g) => g.kind === 'request' && g.on === 'report' && g.ref)
+      .map((g) => this.store.work.get(g.ref!.toLowerCase()))
+      .filter((l): l is WorkItem => !!l?.timedLeg && l.timedLeg.for === w.id)
+      .map((l) => ({ l, r: newestFirst(l).map((sid) => this.store.sessions.get(sid)).find((s) => s?.lastResult)?.lastResult }))
+      .filter((x): x is { l: WorkItem; r: string } => !!x.r)
+      .map(({ l, r }) => ` Timed leg ${l.id}'s report: "${clip(r.trim(), 2000)}" If it waits on you (a commit, a branch), push it, and put a line "For ${l.id}: <the branch and commit>" in your report: that resumes ${l.id}'s worker if it is Blocked on you. Then block on ${l.id} reporting again.`)
+      .join('');
+    const note = `${lead}${results}${legs}${yours}${ci ? ` Run ff-pr merge now${prs ? ` (${prs})` : ''}: it merges on green, or names the red run to read (gh run view <run> --log-failed) and fix.` : ''}${deploy ? ' The deploy you waited for has happened: do the check that comes after it now (the live read, the health check), then report.' : ''} Carry on from where you left it.${held ? ` Your own check-in, which the block cancelled, is folded into this message; its note was: ${held.note}` : ''}`;
     if (!this.wakeNow(sid, note, w.id)) return [];
     this.noteResume(w, sid, note);
     // Folded in above: not handed back again when the rest clears (unblock's handBackCheckIns).
@@ -3597,7 +3607,7 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
     this.stamp(w, `timed leg ask (w1969) from worker ${sessionId.slice(0, 8)} on ${a.from}: handed to ${leg.id}, queued for ${a.needs.join(' > ')}: ${a.why}`);
     this.store.putWork(w);
     console.log(`timed ask (w1969): ${w.id} worker ${sessionId.slice(0, 8)} on ${a.from}: elsewhere -> ${leg.id} queued for ${a.needs.join(' > ')}: ${a.why}`);
-    return { id: leg.id, text: `${head} ${blocked} Do not take an exclusive ticket here for it. Commit and push your work before the turn ends: your sandbox is then released for other work, and the leg's report (a line "For ${w.id}:") resumes you.` };
+    return { id: leg.id, text: `${head} ${blocked} Do not take an exclusive ticket here for it. Commit and push your work before the turn ends, the commits the leg times included (it fetches them from origin): your sandbox is then released for other work, and the leg's report resumes you, perhaps in another sandbox, a partial one too (w2357: a side timed, the other waiting on your commit).` };
   }
 
   /** The asking worker's request when it is a timed leg already widened to the big computers (w2048), else undefined. */
@@ -3631,7 +3641,7 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       [
         x.brief,
         '',
-        `FF Factory filed this for worker ${sessionId} on ${w.id} (w1969, timed_place): its timed leg, moved off a big computer so its exclusive bench turn idles few slots (${x.why}). Build and time BOTH sides of the comparison on the computer you run on, under its exclusive bench ticket (the bench queue, as the game repo's scripts take it): numbers compare only with the same computer's own. ${w.id}'s worker is Blocked on this request's report: report the result with a line "For ${w.id}:" (each side's commit, the computer, the table, where the logs are), then end with DONE: <this request> once the run is over. Do not merge ${w.id}'s pull request: its own worker does.`,
+        `FF Factory filed this for worker ${sessionId} on ${w.id} (w1969, timed_place): its timed leg, moved off a big computer so its exclusive bench turn idles few slots (${x.why}). Build and time BOTH sides of the comparison on the computer you run on, under its exclusive bench ticket (the bench queue, as the game repo's scripts take it): numbers compare only with the same computer's own. ${w.id}'s worker is Blocked on this request's report: report the result with a line "For ${w.id}:" (each side's commit, the computer, the table, where the logs are), then end with DONE: <this request> once the run is over. Do not merge ${w.id}'s pull request: its own worker does. ${w.id}'s worker is stopped while it waits, and its sandbox goes to other work (w2357): it resumes when you report, perhaps in a new sandbox, so take both sides' commits from the branches pushed to origin, never from its sandbox. If a side is not pushed yet, time the side you can, report it with a line "For ${w.id}:" saying what you need (the branch and commit), and block on ${w.id} reporting: that partial report resumes its worker, and its "For <this request>:" reply resumes you.`,
       ].join('\n'),
       8000,
     );

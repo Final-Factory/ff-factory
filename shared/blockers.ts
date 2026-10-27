@@ -245,6 +245,10 @@ export function blockerVerdict(b: WorkBlocker, f: BlockerFacts, waiter?: string)
       if (STATUS_DONE_WORDS[t.status]) return { state: 'decide', why: `${name} was ${STATUS_DONE_WORDS[t.status]} without delivering ${b.what}${t.outcome ? ` (${firstLine(t.outcome)})` : ''}` };
       if (t.status === 'stalled') return { state: 'stuck', why: `${name}, which it waits on, stalled${t.stalled ? `: ${firstLine(t.stalled.reason)}` : ''}` };
       if (b.on === 'report' && f.deliveredSince?.(t, at, waiter)) return { state: 'clear', why: `${name}'s worker reported (${b.what})` };
+      // w2357: a timed leg reports to the request that filed it; any report clears it, a partial one too (the "before" side
+      // timed, the "after" side waiting for that request's commit). w2335 waited for w2338's final report while w2338 waited
+      // for w2335's commit, and nothing woke either.
+      if (b.on === 'report' && waiter && t.timedLeg?.for === waiter && f.reportedSince?.(t, at)) return { state: 'clear', why: `${name}, its timed leg, reported (a partial result counts: read it, and give it what it asks for)` };
       if (b.on === 'report' && f.reportedSince?.(t, at)) return { state: 'open', why: `${name}'s worker reported progress only, not yet ${b.what}` };
       return { state: 'open', why: `${name} is ${t.status === 'blocked' ? 'itself blocked' : t.status}` };
     }
@@ -315,6 +319,70 @@ export function blockerVerdict(b: WorkBlocker, f: BlockerFacts, waiter?: string)
 
 /** A pull request as a ci or pr blocker names it: "owner/repo#123". */
 export const CI_REF = /^([\w.-]+\/[\w.-]+)#(\d+)$/;
+
+/**
+ * Wait cycles among open requests (w2357): each a list of ids where every one waits on the next, and the last on the
+ * first. A wait is a Blocked request's `request` gate, or, through `saysWaitsOn`, the request another open request's idle
+ * worker last said it waits on (the ledger's derived "Blocked on", shared/workState.ts requestWaitOf). w2335 was Blocked on
+ * its timed leg w2338's report while w2338's worker wrote "w2338: still open: waiting for w2335's worker … to send its fix
+ * commit": no blocker in such a cycle clears by itself, so the blocker watch resumes one side (cycleBreak). Each cycle
+ * once, from its smallest id.
+ */
+export function waitCycles(work: Iterable<WorkItem>, saysWaitsOn?: (w: WorkItem) => string | undefined): string[][] {
+  const edges = new Map<string, string[]>();
+  for (const w of work) {
+    const id = w.id.toLowerCase();
+    if (w.status === 'blocked') {
+      const to = gatesOf(w).filter((g) => g.kind === 'request' && g.ref).map((g) => g.ref!.toLowerCase());
+      if (to.length) edges.set(id, to);
+    } else if (w.status === 'active') {
+      const to = saysWaitsOn?.(w)?.toLowerCase();
+      if (to && to !== id) edges.set(id, [to]);
+    }
+  }
+  const out = new Map<string, string[]>();
+  const walk = (path: string[]) => {
+    for (const next of edges.get(path[path.length - 1]) ?? []) {
+      const i = path.indexOf(next);
+      if (i >= 0) {
+        const c = path.slice(i);
+        const start = c.indexOf([...c].sort(byId)[0]);
+        const key = [...c.slice(start), ...c.slice(0, start)];
+        out.set(key.join('>'), key);
+      } else if (path.length < 20) walk([...path, next]);
+    }
+  };
+  for (const id of edges.keys()) walk([id]);
+  return [...out.values()];
+}
+
+const byId = (a: string, b: string) => (Number(a.slice(1)) || 0) - (Number(b.slice(1)) || 0) || a.localeCompare(b);
+
+/**
+ * Which side of a wait cycle to resume (w2357), and its gate on the next one: the side that can act, among the Blocked
+ * ones (a side that only said it waits has no gate to clear; its worker is idle, and is resumed by the other side's
+ * report). First one whose next has reported since it was blocked (it has news: a timed leg's "before" side, what it
+ * asks for); then the request a timed leg in the cycle was filed for (it holds the commit the leg needs); then the one
+ * blocked longest.
+ */
+export function cycleBreak(cycle: readonly string[], f: Pick<BlockerFacts, 'work' | 'reportedSince'>): { id: string; gate: WorkBlocker; why: string } | undefined {
+  const sides = cycle
+    .map((id, i) => {
+      const w = f.work(id);
+      const next = cycle[(i + 1) % cycle.length];
+      const gate = w?.status === 'blocked' ? gatesOf(w).find((g) => g.kind === 'request' && g.ref?.toLowerCase() === next) : undefined;
+      return w && gate ? { w, gate, next: f.work(next) } : undefined;
+    })
+    .filter((s): s is { w: WorkItem; gate: WorkBlocker; next: WorkItem | undefined } => !!s);
+  if (!sides.length) return undefined;
+  const loop = [...cycle, cycle[0]].join(' -> ');
+  const news = sides.find((s) => s.next && f.reportedSince?.(s.next, Date.parse(s.gate.at) || 0));
+  if (news) return { id: news.w.id, gate: news.gate, why: `a wait cycle (${loop}): ${news.next!.id}'s worker reported since ${news.w.id} was blocked on it, and waits on ${news.w.id} in turn, so ${news.w.id} acts on that report` };
+  const parent = sides.find((s) => cycle.some((id) => f.work(id)?.timedLeg?.for === s.w.id));
+  if (parent) return { id: parent.w.id, gate: parent.gate, why: `a wait cycle (${loop}): ${parent.w.id} filed the timed leg in it, and holds what the leg waits for` };
+  const oldest = [...sides].sort((a, b) => (Date.parse(a.gate.at) || 0) - (Date.parse(b.gate.at) || 0))[0];
+  return { id: oldest.w.id, gate: oldest.gate, why: `a wait cycle (${loop}): nothing in it can clear by itself, so ${oldest.w.id}, blocked longest, looks again` };
+}
 
 /** "owner/repo#123" from that, or from a github.com pull request link; undefined for anything else (a bare "#123" has no repo). */
 export function prRefOf(text: string): string | undefined {
