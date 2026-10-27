@@ -70,7 +70,7 @@ import { DaemonVoice, type DaemonVoiceSettings } from './voice.ts';
 import { benchLockDir, readBenchLock, readBenchQueue, readPassedMarks, timedHolder, writeBenchPriorities } from './benchLock.ts';
 import { editorBenchSession, editorSessions, passedShared, raisedSessions, type PassedMark } from './benchRaise.ts';
 import { readBenchWarnings } from './benchWarnings.ts';
-import { askPlayerToQuit, BenchTurn, closedDetail, writeClosedFile, type Holder } from './benchTurn.ts';
+import { askPlayerToQuit, BenchTurn, closedDetail, holderSandboxes, writeClosedFile, type Holder } from './benchTurn.ts';
 import { GRACE_MIN, PersonPlay, personEnds, personHolderText, personHoldText, personTicket, priorityOf, setPriorityOf, treeOf, type PersonPlaySettings } from './personPlay.ts';
 import { benchTicketFor, queueTickets } from './benchQueue.ts';
 import { readBenchHours } from './benchHours.ts';
@@ -592,7 +592,8 @@ export class Daemon {
     this.benchTurn = new BenchTurn({
       // w1894: a timed run's turn first (it ends within its 30 minutes; no new one is granted while a person plays), then a
       // person's game
-      holder: () => timedHolder(cfg.root) ?? this.personHolder(),
+      // w2412: with the holder's own sandboxes besides its ticket's (the one its checkout is in, the one its worker runs in now)
+      holder: () => this.timedHolderHere() ?? this.personHolder(),
       editors: () => this.pool.list().filter((sb) => sb.status === 'ready').map((sb) => ({ id: sb.id, running: sb.unity.state === 'running', ...(sb.unity.pid ? { pid: sb.unity.pid } : {}) })),
       closed: () => this.pool.benchClosedList(),
       players: () => this.leftovers.report().players,
@@ -1724,6 +1725,19 @@ export class Daemon {
    * play mode at once (the timed run cannot wait for a person), scenes and assets saved through the editor, then quit;
    * skipped while it compiles or imports, or has an untitled dirty scene, and never killed.
    */
+  /**
+   * The timed run holding this machine's bench lock (timedHolder), with `own`: its sandboxes besides its ticket's (w2412,
+   * holderSandboxes). The ticket names the FF_SANDBOX_ID it was taken under; a worker placed again elsewhere (w2046), or a
+   * ticket taken with no sandbox, still owns the editor of the sandbox it works in.
+   */
+  private timedHolderHere(): Holder | undefined {
+    const t = timedHolder(this.cfg.root);
+    if (!t) return undefined;
+    const placed = [...this.entries].map(([session, e]) => ({ session, sandbox: e.spec?.sandbox }));
+    const own = holderSandboxes(t, this.pool.list().map((sb) => ({ id: sb.id, path: sb.path })), placed);
+    return own.length ? { ...t, own } : t;
+  }
+
   /** w1894: the turn a person's game holds while they play here (and through the grace after), or undefined. */
   private personHolder(): Holder | undefined {
     const s = this.personPlay.state();

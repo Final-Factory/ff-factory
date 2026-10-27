@@ -49,7 +49,40 @@ export type Holder = QueueTicket & {
   kept?: boolean;
   /** w1894: a person's game holds the turn (machine/personPlay.ts): who plays, and when the turn ends, in words. */
   person?: { who: string; ends: string };
+  /**
+   * w2412: the holder's other own sandboxes, besides the ticket's `sandbox` (its FF_SANDBOX_ID when it was taken): the
+   * sandbox its checkout (`cwd`) is in, and the one its worker session runs in now (holderSandboxes). A worker placed again
+   * in another sandbox (w2046), or a ticket taken with no sandbox (timed_run), still keeps its own editor and players.
+   */
+  own?: string[];
 };
+
+/** Whether sandbox `id` is the holder's own (w2412): its ticket's sandbox or one of `own`. */
+export const holdsSandbox = (h: Pick<Holder, 'sandbox' | 'own'>, id: string | undefined): boolean => !!id && (id === h.sandbox || !!h.own?.includes(id));
+
+/**
+ * The holder's own sandboxes (w2412) besides its ticket's: the one whose folder holds the ticket's `cwd`, and the ones its
+ * worker session is placed in now (`placed`: session id and sandbox). On biscuit on 2026-10-27 worker edc18110 (w2338), placed
+ * again in slot2 after slot3, had its own slot2 editor closed at the grant of its exclusive tickets t00002451 and t00002458.
+ */
+export function holderSandboxes(t: Pick<QueueTicket, 'sandbox' | 'cwd' | 'session'>, sandboxes: { id: string; path: string }[], placed: { session: string; sandbox?: string }[]): string[] {
+  const out = new Set<string>();
+  // Windows folders match in any case and with either slash; a ticket's cwd is os.getcwd() of bench_queue.py.
+  const norm = (p: string) => {
+    const s = p.replace(/\\/g, '/').replace(/\/+$/, '');
+    return /^[a-z]:\//i.test(s) ? s.toLowerCase() : s;
+  };
+  if (t.cwd) {
+    const cwd = norm(t.cwd);
+    for (const sb of sandboxes) {
+      const root = norm(sb.path);
+      if (cwd === root || cwd.startsWith(root + '/')) out.add(sb.id);
+    }
+  }
+  if (t.session) for (const p of placed) if (p.session === t.session && p.sandbox) out.add(p.sandbox);
+  if (t.sandbox) out.delete(t.sandbox);
+  return [...out];
+}
 
 export interface TurnEditor {
   id: string;
@@ -257,7 +290,7 @@ export class BenchTurn {
     for (const id of this.starts.keys()) if (!closed.some((c) => c.id === id)) this.starts.delete(id);
     for (const c of closed) {
       // w1894: a person's turn keeps every mark, whichever turn made it.
-      if (h && c.id !== h.sandbox && (c.ticket === h.ticket || h.person)) continue;
+      if (h && !holdsSandbox(h, c.id) && (c.ticket === h.ticket || h.person)) continue;
       if (c.starting || (c.reopenAt !== undefined && now - c.reopenAt < TURN_RETRY_MS) || (this.retryAt.get(c.id) ?? 0) > now) continue;
       const tries = this.starts.get(c.id) ?? 0;
       if (tries >= REOPEN_TRIES && this.d.giveUp) {
@@ -284,14 +317,14 @@ export class BenchTurn {
     // An editor already marked for this turn is closed or still quitting (its bridge's port file can outlive the quit):
     // it is not closed again, which would take a dead bridge for a skip and drop its mark.
     const marked = new Set(closed.filter((c) => c.ticket === h.ticket || !!h.person).map((c) => c.id));
-    const editors = this.d.editors().filter((e) => e.id !== h.sandbox && e.running && !marked.has(e.id) && !this.closing.has(e.id) && (this.retryAt.get(e.id) ?? 0) <= now);
+    const editors = this.d.editors().filter((e) => !holdsSandbox(h, e.id) && e.running && !marked.has(e.id) && !this.closing.has(e.id) && (this.retryAt.get(e.id) ?? 0) <= now);
     // A holder with no worker session (a person's own timed run, from the main clone) cannot be told apart from the players
     // its script started with --detach (their parent is gone): no player is asked to quit then.
     const players =
       h.session || h.person
         ? this.d.players().filter((p) => {
             if (!p.slot && !p.session) return false; // a person's own game
-            if ((h.sandbox && p.sandbox === h.sandbox) || (h.session && p.session === h.session)) return false;
+            if (holdsSandbox(h, p.sandbox) || (h.session && p.session === h.session)) return false;
             const last = this.asked.get(p.pid);
             return last === undefined || now - last >= PLAYER_ASK_AGAIN_MS;
           })
@@ -308,7 +341,7 @@ export class BenchTurn {
     if (lookBuilds) {
       this.buildsAt = now;
       for (const b of this.d.builds!(procs)) {
-        if (b.sandbox === h.sandbox || holderOwns(b.pid) || this.stopping.has(b.pid) || this.d.exemptSandbox?.(b.sandbox)) continue;
+        if (holdsSandbox(h, b.sandbox) || holderOwns(b.pid) || this.stopping.has(b.pid) || this.d.exemptSandbox?.(b.sandbox)) continue;
         if (h.person) {
           // w1894: idle priority, again at each look for what it started since; never ended (it holds its shared ticket)
           const text = this.d.lowerBuild!(b.pid, procs);
@@ -373,7 +406,7 @@ export class BenchTurn {
         );
     }
     const marks: Record<string, string> = {};
-    for (const c of this.d.closed()) if (c.id !== h.sandbox) marks[c.id] = closedRefusal(by, c.at, h.until, h.kept, h.person);
+    for (const c of this.d.closed()) if (!holdsSandbox(h, c.id)) marks[c.id] = closedRefusal(by, c.at, h.until, h.kept, h.person);
     this.write(marks);
   }
 
