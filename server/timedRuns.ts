@@ -46,7 +46,22 @@ export interface TimedRunRecord {
   movedFrom?: string[];
   /** w2048: when its worker was told that its computer is gone past the wait and no other takes the run. */
   toldStuck?: string;
+  /** w2411: its rounds, kept for its result's message once the order is gone (a later delivery builds it again). */
+  rounds?: number;
+  /** w2411: the worker its result went to (`moved`: its request moved there from the worker that filed it), and the message. */
+  delivered?: { to: string; at: string; moved?: boolean; uuid?: string };
+  /** w2411: a result no worker holds a request of now: kept here and handed to the next worker its request gets (tick). */
+  undelivered?: { since: string; why: string };
 }
+
+/**
+ * w2411: where a message about a run went. Void: to the worker that filed it (the old contract). `to`: that worker, the
+ * message's id in its conversation or send queue; `keep`: no worker holds its request now, so a result waits for one.
+ */
+export type TimedDelivery = void | { to: string; moved?: boolean; uuid?: string } | { keep: string };
+
+/** How long a result waits for a worker on its request before it is given up (w2411); its logs stay as long as the store keeps them. */
+export const UNDELIVERED_KEEP_MS = 3 * 86_400_000;
 
 export interface TimedRunDeps {
   dataDir: string;
@@ -56,8 +71,14 @@ export interface TimedRunDeps {
   /** Whether its daemon's hello offered timed runs. */
   offers: (id: string) => boolean;
   post: (id: string, msg: unknown) => boolean;
-  /** Message the worker (the table, and the logs as an attachment when there are some). */
-  deliver: (session: string, text: string, files: AttachmentRef[]) => Promise<void>;
+  /**
+   * Message the worker (the table, and the logs as an attachment when there are some). w2411: `run` names the run and its
+   * requests, so the message goes to the worker on the request now (server/timedDelivery.ts), not only to `session`, the
+   * one that filed it; `result` marks the run's result, which is kept when no worker holds its request.
+   */
+  deliver: (session: string, text: string, files: AttachmentRef[], run?: { id: string; requests: string[]; result?: boolean }) => Promise<TimedDelivery>;
+  /** w2411: a line for each of the run's requests' logs (a run that can never report, a result given up). */
+  note?: (requests: string[], line: string) => void;
   log?: (line: string) => void;
   now?: () => number;
   /**
@@ -170,7 +191,7 @@ export class TimedRuns {
   private iso = () => new Date(this.now()).toISOString();
 
   private save() {
-    const ended = [...this.runs.values()].filter((r) => r.state === 'done' || r.state === 'failed').sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
+    const ended = [...this.runs.values()].filter((r) => (r.state === 'done' || r.state === 'failed') && !r.undelivered).sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
     for (const r of ended.slice(KEEP_RUNS)) this.runs.delete(r.id);
     writeJsonDurable(this.file, { runs: [...this.runs.values()], pieces: this.pieces } satisfies Saved, { indent: 1 });
   }
@@ -314,8 +335,25 @@ export class TimedRuns {
   /** Send a queued run to its machine when it is online and runs timed runs. */
   private dispatch(r: TimedRunRecord) {
     if (r.state !== 'queued' || !r.order || !this.d.isOnline(r.machine) || !this.d.offers(r.machine)) return;
+    // w2411: a queued run waits for its computer whoever holds its request; it ends only when what it plays is gone
+    const gone = this.goneFrom(r.order);
+    if (gone) {
+      r.error = `the build it needs is gone from the portal (${gone}), so it can never run; call timed_run again to send the builds`;
+      this.d.note?.(r.requests, `timed run ${r.id} for ${r.machine} FAILED before it started: ${r.error}. Nobody waits on it any more.`);
+      this.d.log?.(`timed run ${r.id}: ${r.error}`);
+      void this.finish(r, 'failed');
+      return;
+    }
     this.d.store.grant(r.machine, [...Object.values(r.order.pieceIds), r.order.save.id]);
     if (this.d.post(r.machine, { type: 'timed_run', order: r.order })) this.set(r, 'sent', `sent to ${r.machine}`);
+  }
+
+  /** w2411: what of a run's order the portal's store no longer has (its pieces and save, by sha), or undefined. */
+  private goneFrom(o: TimedRunOrder): string | undefined {
+    const want: [string, string][] = [...Object.entries(o.pieceIds), [o.save.sha256, o.save.id]];
+    const gone = want.filter(([sha, id]) => this.d.store.get(id)?.sha256 !== sha);
+    if (!gone.length) return undefined;
+    return `${gone.length} of its ${want.length} pieces deleted, ${gone.slice(0, 3).map(([sha]) => `${sha.slice(0, 12)}…`).join(', ')}${gone.some(([sha]) => sha === o.save.sha256) ? ', the save among them' : ''}`;
   }
 
   /** A daemon said hello: what it runs now; runs sent to it before and not among them are sent again (it restarted). */
@@ -390,27 +428,76 @@ export class TimedRuns {
 
   /** Tell the worker how it went, with the logs. */
   private async finish(r: TimedRunRecord, state: 'done' | 'failed') {
-    const o = r.order;
+    if (r.order) r.rounds = r.order.settings.rounds;
     delete r.order;
     this.set(r, state);
+    await this.deliverResult(r);
+  }
+
+  /** The result's message (w2411: built again for a later delivery, so it is not kept). */
+  private resultText(r: TimedRunRecord, rec: { id: string } | undefined): string {
     const legs = r.legs ?? [];
     const ok = legs.filter((l) => l.ok).length;
-    const rec = r.result ? this.d.store.get(r.result) : undefined;
-    const text = [
-      `[timed run ${r.id} on ${r.machine}] ${state === 'done' ? 'done' : 'FAILED'}: ${ok} of ${legs.length} legs with numbers${r.error ? `; ${r.error}` : ''}.`,
+    return [
+      `[timed run ${r.id} on ${r.machine}] ${r.state === 'done' ? 'done' : 'FAILED'}: ${ok} of ${legs.length} legs with numbers${r.error ? `; ${r.error}` : ''}.`,
       ...(r.summary ? ['', r.summary] : []),
       '',
       rec
-        ? `The logs are in your Inbox as timed-${r.id}.tar.gz: tar -xzf it into $TMPDIR, then python scripts/bench/probe_table.py "$TMPDIR/${r.id}"/*/round* (probe_ab_win.sh's layout; ab_stop.py reads it too). contention.txt has each leg's start load; run.json the machine and settings. Numbers are from ${r.machine} alone: compare them only with ${r.machine}'s own.`
+        ? `The logs are in your Inbox as timed-${r.id}.tar.gz (attachment ${rec.id}; fetch_attachment gets it again): tar -xzf it into $TMPDIR, then python scripts/bench/probe_table.py "$TMPDIR/${r.id}"/*/round* (probe_ab_win.sh's layout; ab_stop.py reads it too). contention.txt has each leg's start load; run.json the machine and settings. Numbers are from ${r.machine} alone: compare them only with ${r.machine}'s own.`
         : 'No logs came back.',
-      `It ran under ${r.machine}'s exclusive bench ticket${o ? ` (${o.settings.rounds} rounds, order flipped on even rounds)` : ''}. If you set a wake_me check-in for it, cancel_wake it now.`,
+      `It ran under ${r.machine}'s exclusive bench ticket${r.rounds ? ` (${r.rounds} rounds, order flipped on even rounds)` : ''}. If you set a wake_me check-in for it, cancel_wake it now.`,
       `Every number in it comes from ${r.machine}: compare them only with each other or with other runs on ${r.machine}, never with another computer's (w2048, lothsahn: "Timings can't be compared across machines at all"); your report names ${r.machine}.${r.movedFrom?.length ? ` It moved here from ${r.movedFrom.join('; ')}, so every build, the baseline included, was played again here.` : ''}`,
     ].join('\n');
+  }
+
+  /**
+   * Hand an ended run's result to the worker on its request now (w2411), or keep it for the next one: tick() tries a kept
+   * one again until a worker holds its request, for UNDELIVERED_KEEP_MS.
+   */
+  private async deliverResult(r: TimedRunRecord) {
+    if (this.delivering.has(r.id)) return;
+    this.delivering.add(r.id);
+    const rec = r.result ? this.d.store.get(r.result) : undefined;
+    let out: TimedDelivery;
     try {
-      await this.d.deliver(r.session, text, rec ? [publicRef(rec)] : []);
+      out = await this.d.deliver(r.session, this.resultText(r, rec), rec ? [publicRef(rec)] : [], { id: r.id, requests: r.requests, result: true });
     } catch (e) {
+      // kept: tried again on the next tick, whoever holds its request then
+      out = { keep: `its message could not be sent: ${(e as Error).message}` };
       this.d.log?.(`timed run ${r.id}: could not tell worker ${r.session}: ${(e as Error).message}`);
     }
+    if (out && 'keep' in out) {
+      if (!r.undelivered) this.d.log?.(`timed run ${r.id}: result kept for its request's next worker: ${out.keep}`);
+      r.undelivered = { since: r.undelivered?.since ?? this.iso(), why: out.keep.slice(0, 300) };
+    } else {
+      r.delivered = { to: out?.to ?? r.session, at: this.iso(), ...(out?.moved ? { moved: true } : {}), ...(out?.uuid ? { uuid: out.uuid } : {}) };
+      delete r.undelivered;
+    }
+    this.delivering.delete(r.id);
+    this.save();
+  }
+
+  /** The runs whose result is on its way to a worker now (deliverResult), so a tick does not send it twice. */
+  private readonly delivering = new Set<string>();
+
+  /**
+   * w2411: a message FF Factory dropped from a worker's send queue (its request had moved off that worker, w2079): when it
+   * was a run's result, it goes again, to the worker on the request now. True when it was one.
+   */
+  dropped(uuid: string): boolean {
+    if (!uuid) return false;
+    const r = [...this.runs.values()].find((x) => x.delivered?.uuid === uuid);
+    if (!r) return false;
+    this.d.log?.(`timed run ${r.id}: its result to worker ${r.delivered!.to} was dropped (its request moved off it): sent again`);
+    delete r.delivered;
+    r.undelivered = { since: this.iso(), why: `its message to worker ${r.session} was dropped` };
+    void this.deliverResult(r);
+    return true;
+  }
+
+  /** A message about a run that is not its result (moved, stuck): to the worker on its request now; dropped when there is none. */
+  private tell(r: TimedRunRecord, text: string) {
+    void this.d.deliver(r.session, text, [], { id: r.id, requests: r.requests }).catch((e) => this.d.log?.(`timed run ${r.id}: could not tell worker ${r.session}: ${(e as Error).message}`));
   }
 
   /** When each target was first seen unavailable by tick (w2048); its offline time comes from Machine.lastSeen when known. */
@@ -449,22 +536,14 @@ export class TimedRuns {
         r.toldStuck = this.iso();
         this.set(r, 'queued', `waiting for ${from}: ${why}; no other computer takes a timed run now`);
         this.d.log?.(`timed run ${r.id}: stuck on ${from} (w2048): ${why}; no other target; worker told to ask timed_place`);
-        void this.d
-          .deliver(r.session, `[timed run ${r.id}] still queued for ${from}: ${why}, and no other computer that takes a timed run can take it now. It stays queued and goes out if ${from} comes back. To time it now instead, call timed_place again with via "leg": with no small computer available it answers "here", and you time every side on your own computer (all of its numbers from that one computer, the baseline re-measured there).`, [])
-          .catch((e) => this.d.log?.(`timed run ${r.id}: could not tell worker ${r.session}: ${(e as Error).message}`));
+        this.tell(r, `[timed run ${r.id}] still queued for ${from}: ${why}, and no other computer that takes a timed run can take it now. It stays queued and goes out if ${from} comes back. To time it now instead, call timed_place again with via "leg": with no small computer available it answers "here", and you time every side on your own computer (all of its numbers from that one computer, the baseline re-measured there).`);
         continue;
       }
       r.movedFrom = [...(r.movedFrom ?? []), `${from}: ${why}`];
       r.machine = to.id;
       this.set(r, 'queued', `moved from ${from} (w2048): ${why}`);
       this.d.log?.(`timed run ${r.id}: moved from ${from} to ${to.id} (w2048 baseline re-run): ${why}`);
-      void this.d
-        .deliver(
-          r.session,
-          `[timed run ${r.id}] moved from ${from} to ${to.id} (w2048): ${why}. It plays every build again on ${to.id}, your baseline included, so all of its numbers come from ${to.id}. Compare them with no number measured on ${from} or any other computer (lothsahn: "Timings can't be compared across machines at all"); your report names ${to.id} as the computer they come from.`,
-          [],
-        )
-        .catch((e) => this.d.log?.(`timed run ${r.id}: could not tell worker ${r.session}: ${(e as Error).message}`));
+      this.tell(r, `[timed run ${r.id}] moved from ${from} to ${to.id} (w2048): ${why}. It plays every build again on ${to.id}, your baseline included, so all of its numbers come from ${to.id}. Compare them with no number measured on ${from} or any other computer (lothsahn: "Timings can't be compared across machines at all"); your report names ${to.id} as the computer they come from.`);
       this.dispatch(r);
       moved.push(r.id);
     }
@@ -487,7 +566,21 @@ export class TimedRuns {
         if (held) this.cancelOn(r.machine, r.id, `the portal gave up on it: ${r.error}`);
       }
     }
-    const old = Object.entries(this.pieces).filter(([, p]) => now - Date.parse(p.usedAt) > PIECE_KEEP_MS);
+    // w2411: a result kept for its request's next worker goes once one holds it; given up after UNDELIVERED_KEEP_MS
+    for (const r of this.runs.values()) {
+      if (!r.undelivered) continue;
+      if (now - Date.parse(r.undelivered.since) > UNDELIVERED_KEEP_MS) {
+        this.d.note?.(r.requests, `timed run ${r.id}'s result was given up: no worker held the request for ${Math.round(UNDELIVERED_KEEP_MS / 3_600_000)} h (${r.undelivered.why})${r.result ? `; its logs are attachment ${r.result} while the portal keeps them` : ''}`);
+        this.d.log?.(`timed run ${r.id}: result given up after ${Math.round(UNDELIVERED_KEEP_MS / 3_600_000)} h undelivered: ${r.undelivered.why}`);
+        delete r.undelivered;
+        this.save();
+        continue;
+      }
+      void this.deliverResult(r);
+    }
+    // w2411: a run still waiting keeps every piece it plays, however long its computer stays away
+    const waiting = new Set([...this.runs.values()].flatMap((r) => (r.order ? [...Object.keys(r.order.pieceIds), r.order.save.sha256] : [])));
+    const old = Object.entries(this.pieces).filter(([sha, p]) => !waiting.has(sha) && now - Date.parse(p.usedAt) > PIECE_KEEP_MS);
     if (old.length) {
       this.d.store.forget(old.map(([, p]) => p.id));
       for (const [sha] of old) delete this.pieces[sha];

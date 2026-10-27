@@ -519,7 +519,11 @@ const timedRuns = new TimedRuns({
   isOnline: (id) => machines.isOnline(id),
   offers: (id) => machines.offersTimedRuns(id),
   post: (id, msg) => machines.postTo(id, msg as ToDaemon),
-  deliver: (session, text, files) => agents.timedRunDelivered(session, text, files),
+  deliver: (session, text, files, run) => agents.timedRunDelivered(session, text, files, run),
+  // w2411: a run that can never report, or a result no worker took, is said on its requests' logs
+  note: (requests, line) => {
+    for (const id of requests) agents.orchestrators.noteMove(id, line);
+  },
   log: (line) => console.log(line),
   // w1996: a small worker computer that takes timed runs times builds made on the big ones, like a play-only one
   smallWorker: (m) => {

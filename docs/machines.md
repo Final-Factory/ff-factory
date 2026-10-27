@@ -1037,6 +1037,15 @@ and w1891 waited behind it there, and w1789 waited on LothDesktop behind shared 
   offline or unavailable too long"). Its order holds every build, so the baseline is played again there, and its worker is
   told that the numbers left behind do not compare. When no other computer can take it, the worker is told once to time it
   itself through `timed_place`. Every result names the one computer all its numbers come from.
+- **A result follows its request** (w2411; lothsahn: "File a fix so timed-run results follow the request to its new
+  worker"). A run's messages go to the worker that filed it only while that worker still holds one of the run's requests;
+  once FF Factory has moved the request off it, they go to the request's newest live worker (`server/timedDelivery.ts`
+  `timedRoute`, from `Agents.timedRunDelivered`), led by a line that says so. With no worker on the request the result is
+  kept on the run (`undelivered`) and every 5-minute tick tries again, so the next worker that takes the request gets it;
+  after 3 days it is given up (`UNDELIVERED_KEEP_MS`). A result queued for an old worker and dropped by the w2079 rule is
+  sent again to the worker on the request now (`TimedRuns.dropped`, from `Agents.roomMove`). The request's log says where
+  every result went or that it is kept. A move drops no queued run; a queued run whose build or save is gone from the
+  portal fails before it is sent, and its request's log says so. Pieces a waiting run still needs are not expired.
 - **The guard**: the verdict rides the bench priorities to the machine (`BenchPriority.timed`, and the machine's
   `timed_ask` mark in priorities.json, `machine/benchLock.ts` `readTimedAsk`). On a big computer, `checkTimedAsk`
   refuses `bench_queue.py timed`, `bench_queue.py run --mode exclusive`, `unity-bridge.py --timed`, `bench_lock --timing`,

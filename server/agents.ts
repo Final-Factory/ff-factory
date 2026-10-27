@@ -62,7 +62,8 @@ import { sandboxUseText, unitySlotsLine } from '../shared/fleet.ts';
 import { isMidTurn, midTurnRefusal, othersMidTurn, snapshotOf, type OptionsFactory, type QueuedSend, type SessionHandle, type SessionManager, type TurnEndMeta } from './sessions.ts';
 import { FLAG_LABEL, WORK_BLOCKER_KINDS, WORK_OPEN, WORK_PRIORITIES, type WorkBlockerKind, type WorkSource, type BenchPriority, type BenchAway, type AttachmentRef, type DeliveredAttachment, type ImageInput, type PermissionMode, type Requester, type Sandbox, type SessionInfo, type TranscriptEvent, type WorkItem, type WorkPriority, type WorkStatus } from '../shared/types.ts';
 import { attachmentForMachine, publicRef, publishableFile, uploadForMachine, type AttachmentStore } from './attachments.ts';
-import type { TimedRuns } from './timedRuns.ts';
+import type { TimedDelivery, TimedRuns } from './timedRuns.ts';
+import { timedRoute } from './timedDelivery.ts';
 import { REVIEW_DEFAULTS, type ReviewStore } from './review.ts';
 import { INBOX_DIR, MAX_ATTACHMENTS, attachmentLine, fmtBytes, publishedAttachmentText } from '../shared/attachments.ts';
 import { MACHINE_ACCOUNT, SECRET_KEYS, dispatcherOwnAccount, machineRunEnv, maskSecret, pinnedDispatcherEnv, poolRunEnv, redactSecrets } from './secrets.ts';
@@ -1604,9 +1605,21 @@ export class Agents {
   }
 
   /** A timed run's end, for its worker (w1946): its check-in for the run is taken back, then the table and the logs. */
-  async timedRunDelivered(session: string, text: string, files: AttachmentRef[]) {
-    const cancelled = this.cancelWake(session);
-    await this.sendWithAttachments(session, cancelled ? `${text}\nYour check-in (${cancelled}) was cancelled with this message.` : text, 'system', { attachments: files });
+  async timedRunDelivered(session: string, text: string, files: AttachmentRef[], run?: { id: string; requests: string[]; result?: boolean }): Promise<TimedDelivery> {
+    // w2411: to the worker on the run's request now, which may not be the one that filed it (server/timedDelivery.ts)
+    const route = run ? timedRoute(session, run.requests, (id) => this.store.work.get(id), (id) => this.store.sessions.get(id)) : { to: session, moved: false, work: [] };
+    const what = run ? `timed run ${run.id}${run.result ? "'s result" : "'s notice"}` : '';
+    if ('keep' in route) {
+      if (!run?.result) return { keep: route.keep };
+      for (const w of route.work) if (!w.log.some((l) => l.includes(`${what} is kept on the request`))) this.orchestrators.noteMove(w.id, `${what} is kept on the request: ${route.keep}; its next worker gets it`);
+      return { keep: route.keep };
+    }
+    const to = route.to;
+    const moved = route.moved ? `[for ${route.work.map((w) => w.id).join(', ')}] This timed run was filed by worker ${session}, which ${route.work.length > 1 ? 'these requests were' : 'the request was'} moved off since; its result is yours.\n` : '';
+    const cancelled = this.cancelWake(to);
+    const uuid = await this.sendWithAttachments(to, `${moved}${text}${cancelled ? `\nYour check-in (${cancelled}) was cancelled with this message.` : ''}`, 'system', { attachments: files });
+    if (run?.result) for (const w of route.work) this.orchestrators.noteMove(w.id, `${what} went to worker ${to}${route.moved ? `, which holds ${w.id} now (filed by worker ${session}, moved off since)` : ', which filed it'}`);
+    return { to, moved: route.moved, ...(uuid ? { uuid } : {}) };
   }
 
   /** The cancel_wake tool (w754): a worker takes back its own pending check-in. */
@@ -2851,7 +2864,11 @@ export class Agents {
     if (now - (Date.parse(q.at) || now) < MOVE_AFTER_MS || info.pendingPermissions.length || isMidTurn(info)) return undefined;
     const { reqs, owned, gone } = this.movableWorkOf(info);
     if (owned.length || gone.length) this.leaveToOwners(info, owned, gone, hold, !reqs.length);
-    if (!reqs.length && (owned.length || gone.length)) return true;
+    if (!reqs.length && (owned.length || gone.length)) {
+      // w2411: a timed run's result waiting here goes again, to the worker on its request now
+      this.timedRuns?.dropped(q.uuid);
+      return true;
+    }
     const d = moveDecision(this.moveFacts(info, reqs));
     if ('requeuePair' in d) {
       // w2304: its pair run starts again whole; this worker is retired with the other legs, so its message is not delivered.
@@ -3533,7 +3550,9 @@ export class Agents {
     for (const r of this.timedRuns?.runsOn(machineId) ?? []) {
       if (out[r.session]) continue;
       const info = this.store.sessions.get(r.session);
-      const open = info ? this.openWorkOf(info, bySession) : [];
+      // w2411: a worker moved off the run's request serves it no more; the run keeps its request's priority
+      const mine = info ? this.openWorkOf(info, bySession) : [];
+      const open = mine.length ? mine : r.requests.map((id) => this.store.work.get(id)).filter((w): w is WorkItem => !!w && isOpen(w));
       const top = open.length ? open.reduce((a, w) => (WORK_PRIORITIES.indexOf(w.priority) > WORK_PRIORITIES.indexOf(a) ? w.priority : a), 'low' as WorkPriority) : 'normal';
       out[r.session] = { priority: top, requests: open.length ? open.map((w) => w.id) : r.requests };
     }
