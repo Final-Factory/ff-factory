@@ -108,6 +108,11 @@ export interface WorkLiveFacts {
   roomSince?: Readonly<Record<string, number>>;
   /** How many more workers each computer with room takes, `${kind}:${id}` (w1944, RoomNow.slots); absent: room for every one. */
   roomSlots?: Readonly<Record<string, number>>;
+  /**
+   * w2358: why computer `id`'s room is not for single game work `w` (its last free sandbox held for an older pair run or for
+   * timed work: Agents.pairHoldProblem, timedHoldProblem, as start_agent refuses it), or undefined.
+   */
+  roomHeld?: (id: string, w: WorkItem) => string | undefined;
   /** Who each computer's room goes to first (w1944, roomShares), set by workLiveAll from `items` and roomSlots. */
   shares?: ReadonlyMap<string, RoomShare>;
   /** The urgent release build that paused this worker (w1841, server/buildPlans.ts pausedFor); undefined when none did. */
@@ -566,7 +571,7 @@ function queueLive(s: SessionInfo, q: QueueWait): WorkLive {
 }
 
 /** The computers with room for `w` (of `wanted`, when named): those it can run on (`fits`), and those it cannot, with why. */
-type RoomFacts = Pick<WorkLiveFacts, 'room' | 'agentRoom' | 'reservedRoom' | 'roomFit' | 'roomSlots'>;
+type RoomFacts = Pick<WorkLiveFacts, 'room' | 'agentRoom' | 'reservedRoom' | 'roomFit' | 'roomSlots' | 'roomHeld'>;
 
 function roomFor(w: WorkItem, f: RoomFacts, wanted: readonly string[] | undefined) {
   const needs = wanted?.map((n) => n.toLowerCase());
@@ -577,6 +582,12 @@ function roomFor(w: WorkItem, f: RoomFacts, wanted: readonly string[] | undefine
   const room = [...(known ?? []), ...reserved.filter((r) => admitsPriority(r.min, w.priority)).map((r) => r.id)].filter((id) => !needs?.length || needs.includes(id.toLowerCase()));
   // w1944: a computer it cannot run on (a Mac for an MP scenario, the m5 for timed work) is no room for it, and says why.
   const unfit = room.map((id) => ({ id, why: unfitWhy(w, id, f.roomFit) })).filter((x): x is { id: string; why: string } => !!x.why);
+  // w2358: nor is room start_agent refuses it (a sandbox held for an older pair run or for timed work): w2363 read "beast has
+  // room" at 09:05Z while start_agent refused beast/slot4, held for w2360's pair run until 09:23Z.
+  if (f.roomHeld && kind === 'game' && !w.pair) for (const id of room) if (!unfit.some((u) => u.id === id)) {
+    const why = f.roomHeld(id, w);
+    if (why) unfit.push({ id, why });
+  }
   const fits = room.filter((id) => !unfit.some((u) => u.id === id));
   return { needs, kind, known, reserved, unfit, fits };
 }

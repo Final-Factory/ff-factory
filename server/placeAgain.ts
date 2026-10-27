@@ -611,8 +611,9 @@ export class PlaceAgain {
         const key = `${m.id}/${sb.id}`;
         f ??= this.facts(m.id);
         if (this.saving.has(key) || f.saveRefused?.(sb.id) || f.unityHolders.includes(`sandbox:${sb.id}`)) continue;
+        // As free() reads it: a stopped worker there that holds nothing (its work over, never released) does not keep its
+        // changes unsaved while the sandbox shows FREE but takes nobody; it is told of the save as a released one is.
         if (f.sessions.some((o) => o.machineSandbox === sb.id && (occupies(o, f!.live(o.id), f!.now) || (!o.placeReleased && o.status !== 'stopped')))) continue;
-        if (f.sessions.some((o) => o.machineSandbox === sb.id && !o.placeReleased)) continue;
         if (this.claimedBy(m.id, sb.id)) continue;
         this.saving.add(key);
         const p = this.saveOrphan(m, sb, g.branch).finally(() => {
@@ -632,7 +633,7 @@ export class PlaceAgain {
       this.saveFailed.delete(key);
       const at = new Date(this.now()).toISOString();
       for (const o of this.d.sessions()) {
-        if (o.machineId !== m.id || o.placeReleased?.branch !== branch) continue;
+        if (o.machineId !== m.id || (o.placeReleased ? o.placeReleased.branch !== branch : o.machineSandbox !== sb.id)) continue;
         if (res.sha) o.savedWork = { sha: res.sha, files: res.files, pushed: res.pushed, branch, at };
         this.d.save(o);
         this.d.note(o.id, `Uncommitted work left on its branch ${branch} in ${key} after its release was saved there (${res.notes.join('; ')}): it is yours when you resume.`);

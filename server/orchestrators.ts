@@ -246,6 +246,11 @@ export interface OrchestratorsDeps {
   relocateTimedLeg?: (w: WorkItem) => string | undefined;
   /** w2277: withdraw big-computer fallback "here" answers once a small timed computer is idle (Agents.withdrawStaleTimedHere). */
   withdrawStaleTimedHere?: () => string[];
+  /**
+   * w2358: why `machine`'s last free sandbox is not for new single game work `w` now (an older pair run or timed work waits
+   * for it: Agents.pairHoldProblem, timedHoldProblem), as start_agent refuses it, or undefined. Room held so is no room for its queue.
+   */
+  heldFor?: (machine: string, w: WorkItem) => string | undefined;
   /** Whether a machine is online; undefined for a machine this portal does not have (w643: blockers). */
   machineOnline?: (id: string) => boolean | undefined;
   /** w2304: who plays Final Factory on a machine now, or in the grace after (w1894, MachineManager.personPlayOf), as a phrase. */
@@ -2840,14 +2845,17 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       // w1944: room that queued work ahead of it takes (one free sandbox, older requests that fit it) is not its: it queues.
       const share = roomShares([...this.store.work.values()], this.liveRoom(facts), { w: { ...w, pair }, wanted: needs })?.get(w.id);
       const ahead = fitting.ids.length && share && !share.gets ? fitting.ids : [];
-      const room = ahead.length ? [] : fitting.ids;
+      // w2358: a sandbox start_agent would refuse it (held for an older pair run or for timed work) is no room for it either:
+      // w2362's queue was refused "beast has room" at 08:45Z while start_agent refused beast/slot1, held for w2360's pair run.
+      const holds = ahead.length ? [] : this.heldOn(w, pair, fitting.ids);
+      const room = ahead.length ? [] : fitting.ids.filter((id) => !holds.some((h) => h.id === id));
       if (room.length) {
         throw new Error(
           `queue is for capacity only, and ${room.join(', ')} ${room.length > 1 ? 'have' : 'has'} ${kind === 'agent' ? 'an agent slot (it needs no editor and no game sandbox, w1098)' : 'room'} for ${w.id} now: ${pair ? `start its ${pair.legs} legs together (start_agent with work_id "${w.id}", sandbox for leg 1, the host, and pair_sandboxes for the others, each a FREE sandbox on another computer)` : `start it there (start_agent with work_id "${w.id}")`}, or, if it waits for something else, decide_work block with what it waits for${needs.length ? '' : ' (or queue with needs: the computers that can take it, when only busy ones can)'}`,
         );
       }
       // Held computers, and those placement.minPriority reserves above its priority (w1643), with room it may not use.
-      const held = [unusableText({ ...facts, held: facts.held.filter((h) => !needs.length || needs.includes(h.id)), reserved: (facts.reserved ?? []).filter((r) => !needs.length || needs.includes(r.id)) }, kind, w.priority), ...(fitting.short ? [fitting.short] : []), ...fitting.unfit.map((u) => `${u.id} has room but cannot take it: ${u.why}`), ahead.length ? `${ahead.join(', ')} ${ahead.length > 1 ? 'have' : 'has'} room, but ${aheadText(share!)}` : ''].filter(Boolean).join('; ');
+      const held = [unusableText({ ...facts, held: facts.held.filter((h) => !needs.length || needs.includes(h.id)), reserved: (facts.reserved ?? []).filter((r) => !needs.length || needs.includes(r.id)) }, kind, w.priority), ...(fitting.short ? [fitting.short] : []), ...fitting.unfit.map((u) => `${u.id} has room but cannot take it: ${u.why}`), ...holds.map((h) => h.why), ahead.length ? `${ahead.join(', ')} ${ahead.length > 1 ? 'have' : 'has'} room, but ${aheadText(share!)}` : ''].filter(Boolean).join('; ');
       // w1863: a leg for named computers of a request whose own worker carries on elsewhere ("queued for capacity on m5 … I
       // start a timing worker there when a slot frees"). It was the request's status, so the next message to that worker
       // (linkWorker: active) dropped it, and w1789's and w1785's m5 legs waited 8 hours unseen. Now it is its own entry.
@@ -6415,6 +6423,15 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
   }
 
   /** decide_work queue's refusal for timed work whose needs name a computer that takes no timed runs (w1872), else undefined. */
+  /** w2358: of `ids`, the computers whose last free sandbox start_agent would not give single game work `w` (deps heldFor), with why. */
+  private heldOn(w: WorkItem, pair: WorkItem['pair'], ids: readonly string[]): { id: string; why: string }[] {
+    if (pair || needsOf(w) !== 'game' || !this.d.heldFor) return [];
+    return ids.flatMap((id) => {
+      const why = this.d.heldFor!(id, w);
+      return why ? [{ id, why }] : [];
+    });
+  }
+
   private noTimedIn(w: WorkItem, needs: readonly string[]): string | undefined {
     const timed = this.timedOf(w);
     const bad = timed ? needs.filter((n) => timed.f.noTimed[n]) : [];
@@ -6467,7 +6484,7 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
 
   /** RoomNow as the live states read it (shared/workState.ts WorkLiveFacts), for roomShares (w1944). */
   private liveRoom(r: RoomNow) {
-    return { room: r.game, agentRoom: r.agent, heldRoom: r.held, ...(r.reserved ? { reservedRoom: r.reserved } : {}), ...(r.fit ? { roomFit: r.fit } : {}), ...(r.slots ? { roomSlots: r.slots } : {}), now: this.now().getTime() };
+    return { ...(this.d.heldFor ? { roomHeld: this.d.heldFor } : {}), room: r.game, agentRoom: r.agent, heldRoom: r.held, ...(r.reserved ? { reservedRoom: r.reserved } : {}), ...(r.fit ? { roomFit: r.fit } : {}), ...(r.slots ? { roomSlots: r.slots } : {}), now: this.now().getTime() };
   }
 
   /** When each request was last flagged Queued while a computer had room (at most once an hour each). */
@@ -6492,7 +6509,10 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       const since = Date.parse(w.queuedFor?.at ?? w.updatedAt) || now;
       if (now - since < ROOM_GRACE_MS || now - (this.roomFlags.get(w.id) ?? 0) < 3_600_000) continue;
       // w1944: only computers it can run on (no Mac for an MP scenario, no m5 for timed work), whose room has stood a while.
-      const on = roomStood(facts, needsOf(w), roomForWork(facts, w, w.queuedFor?.needs).ids, now);
+      const stood = roomStood(facts, needsOf(w), roomForWork(facts, w, w.queuedFor?.needs).ids, now);
+      // w2358: nor where its start would be refused for a hold (an older pair run's or timed work's last free sandbox).
+      const held = this.heldOn(w, w.pair, stood);
+      const on = stood.filter((id) => !held.some((h) => h.id === id));
       // w1945: a pair run is wrongly Queued only beside room that has stood for all its legs at once.
       if (!roomEnough(facts, w, on)) continue;
       this.roomFlags.set(w.id, now);
@@ -6551,7 +6571,12 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       // The room now, not the room when the event happened: only a queued request that a computer with room could take is worth
       // a ping; w1944: one it can run on (no Mac for an MP scenario, no m5 for timed work).
       const facts = this.roomNow();
-      const fit = (w: WorkItem) => roomForWork(facts, w, roomNeeds(w));
+      // w2358: nor a computer whose last free sandbox start_agent would refuse it (held for an older pair run or timed work).
+      const fit = (w: WorkItem) => {
+        const r = roomForWork(facts, w, roomNeeds(w));
+        const held = this.heldOn(w, w.pair, r.ids);
+        return held.length ? { ...r, ids: r.ids.filter((id) => !held.some((h) => h.id === id)), unfit: [...r.unfit, ...held] } : r;
+      };
       const usable = queued.filter((w) => fit(w).ids.length);
       // Too soon after the last wake, or too many this hour: wait until one is allowed rather than dropping it. w1944: urgent
       // work that fits is not held by the hourly cap, only by the gap.

@@ -141,10 +141,12 @@ export function timedMention(text: string): boolean {
  * prefer boxes with a small number of slots and players for timed runs, not beast since it's big" (server/placement.ts
  * pickTimed).
  */
-export function needsTimed(w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes'> | undefined, text = ''): false | 'any' | 'win32' | 'darwin' {
+export function needsTimed(w: (Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes'> & Partial<Pick<WorkItem, 'timedBrief'>>) | undefined, text = ''): false | 'any' | 'win32' | 'darwin' {
   if (w && needsOf(w) === 'agent') return false;
   // Oldest first: the title and brief as filed, then people's notes in order, then `text` (a dispatcher's brief).
-  const parts = [...(w ? [w.title, w.brief, ...(w.notes ?? []).map((n) => n.text)] : []), text].filter(Boolean);
+  // w2358: the brief start_agent was refused for (WorkItem.timedBrief) reads as a note of its time.
+  const later = [...(w?.notes ?? []), ...(w?.timedBrief ? [w.timedBrief] : [])].sort((a, b) => (a.at ?? '').localeCompare(b.at ?? ''));
+  const parts = [...(w ? [w.title, w.brief, ...later.map((n) => n.text)] : []), text].filter(Boolean);
   if (!timedMention(parts.join('\n'))) return false;
   // w2358: a requester's "any OS" clears what was implied before it, when nothing newer names an OS again (w2346's brief
   // cited data "Measured by w2332 on m3"; its note said "any OS. m3 is not required."). A mention that rules an OS out
@@ -253,12 +255,13 @@ export interface RoomFit {
  * [WRONG: biscuit, m5 have room]" while the m5, a Mac that takes no timed runs, could never run them, and the capacity ping
  * listed them as fitting its room. Unknown facts fit: a computer whose platform nobody reported is not ruled out.
  */
-export function unfitWhy(w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes'> & { pair?: WorkPair }, id: string, fit: Readonly<Record<string, RoomFit>> | undefined): string | undefined {
+export function unfitWhy(w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes'> & Partial<Pick<WorkItem, 'timedBrief' | 'timedLeg'>> & { pair?: WorkPair }, id: string, fit: Readonly<Record<string, RoomFit>> | undefined): string | undefined {
   // w2041: a retry of a pair run never goes back to a computer an earlier leg failed on.
   if (w.pair?.avoid?.includes(id)) return `${id} is where an earlier leg of this pair run failed (${w.pair.retryOf ?? 'its first run'}): a retry goes on other computers (w2041)`;
   const f = fit?.[id];
   if (!f) return undefined;
-  const timed = needsTimed(w) || (w.pair?.timed ? 'any' : false);
+  // w2358: a timed leg (w1969) is timed work whatever its title says, as start_agent's timed hold reads it.
+  const timed = needsTimed(w) || (w.pair?.timed || w.timedLeg ? (w.timedLeg?.platform === 'win32' || w.timedLeg?.platform === 'darwin' ? w.timedLeg.platform : 'any') : false);
   if (timed && f.noTimedRuns) return `${id} takes no timed runs (${f.noTimedRuns})`;
   if ((timed === 'win32' || timed === 'darwin') && f.platform && f.platform !== timed) return `${id} is not on ${timed === 'win32' ? 'Windows' : 'macOS'}, which its timed work names`;
   // w2282: a Mac fits a pair run, as its host only; pairRoom keeps the clients off Macs. A pair's MP scenario runs one peer

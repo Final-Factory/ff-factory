@@ -4,3 +4,6 @@
   - A stopped worker whose requests are closed gives up its sandbox even when a pair run left it on a clean detached HEAD, or another agent there runs a Unity batch run; a worker on an agent seat (FF Factory or FFBox work) is never kept by the game tree beside it.
   - After a portal restart, a computer takes no moved or resumed work until its daemon has reported (a person playing there was not known yet).
   - start_agent no longer flags sibling requests that only both cite one earlier request (one profiling run's fixes) as the same work.
+- Room that start_agent refuses is no room anywhere else either (w2358 follow-up): a computer whose last free sandbox is held for an older pair run or for timed work no longer refuses decide_work queue, flags the request WRONG, shows "has room" on its Queued line or sends the capacity ping for it.
+- A request the dispatcher's brief made timed (or put on the Mac) keeps that brief after start_agent refuses it, so the m5's room is no room for its queue and it takes no share of beast's room ahead of work that can run there; a later "any OS" note still wins.
+- A sandbox with uncommitted changes and only a stopped worker that holds nothing there is saved too (it showed FREE and took nobody).

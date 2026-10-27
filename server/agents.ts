@@ -841,6 +841,7 @@ export class Agents {
       recentCommits: () => this.recentCommits,
       room: () => this.roomNow(),
       roomFacts: () => this.roomFacts(),
+      heldFor: (m, w) => this.pairHoldProblem(m, w) ?? this.timedHoldProblem(m, w, !!w.timedLeg || !!timedKind(needsTimed(w))),
       timedFacts: (t) => timedFacts(this.places(), this.placement(), t),
       timedSmall: () => {
         const places = this.places();
@@ -4453,6 +4454,20 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
     return `placement: ${id} ${kind} work${live ? ` (${live === true ? 'live' : live})` : ''} started on ${on}; placement named ${p ? `${p.pick.id} (${p.why})` : 'no computer with room'}; every online computer's load now: ${all}`;
   }
 
+  /**
+   * w2358: a start refused for timing that the dispatcher's brief gave the request (its own text names none, or another OS):
+   * the brief is kept on it (WorkItem.timedBrief), so decide_work queue and the room shares read it as start_agent did. On
+   * 2026-10-27 start_agent refused timed work on the m5 while decide_work queue refused it for the m5's room, and a request
+   * the brief put on the Mac took beast's room share ahead of w2363. Returns the refusal.
+   */
+  private keepTimedBrief(w: WorkItem | undefined, prompt: string | undefined, refusal: string): string {
+    if (w && prompt?.trim() && needsTimed(w, prompt) !== needsTimed(w)) {
+      w.timedBrief = { at: new Date().toISOString(), text: prompt.slice(0, 8000) };
+      this.store.putWork(w);
+    }
+    return refusal;
+  }
+
   /** The refusal for timed or exclusive-lock work pinned to a computer that takes none (w1861, w1872; placement.ts timedPinRefusal). */
   private timedPinProblem(on: string | undefined, t: TimedKind | false): string | undefined {
     return on && t ? timedPinRefusal(on, this.places(), this.placement(), t) : undefined;
@@ -4739,10 +4754,10 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
             if (reserved) throw new Error(reserved);
             // Timed or exclusive-lock work pinned to a computer that takes none goes back to the caller (w1861, w1872).
             const timedPin = this.timedPinProblem(this.machineOf(a.sandbox, a.machine), timedKind(needsTimed(w, a.prompt)));
-            if (timedPin) throw new Error(timedPin);
+            if (timedPin) throw new Error(this.keepTimedBrief(w, a.prompt, timedPin));
             // w2168: timed work is placed by the timing order when it starts too: an idle small computer first, never a busy big one.
             const timedOrder = a.extra_agent ? undefined : this.timedOrderProblem(this.machineOf(a.sandbox, a.machine), w, a.prompt);
-            if (timedOrder) throw new Error(timedOrder);
+            if (timedOrder) throw new Error(this.keepTimedBrief(w, a.prompt, timedOrder));
             // The title is the job (w575): "wNNN: <description>", checked before anything starts. Without a work_id the
             // start is recorded as the next request, so its id is known now too.
             if (ctx.role === 'dispatcher' && !a.title?.trim()) throw new Error(TITLE_HELP);
@@ -6348,6 +6363,8 @@ ${w.repo ?? ''}
       heldRoom: extras.heldRoom,
       reservedRoom: extras.reservedRoom,
       roomFit: extras.roomFit,
+      // w2358: room start_agent refuses single game work for (a pair run's or timed work's hold) is not its room.
+      roomHeld: (id, w) => (w.pair || needsOf(w) !== 'game' ? undefined : this.pairHoldProblem(id, w) ?? this.timedHoldProblem(id, w, !!w.timedLeg || !!timedKind(needsTimed(w)))),
       ...(extras.roomSince ? { roomSince: extras.roomSince } : {}),
       ...(extras.roomSlots ? { roomSlots: extras.roomSlots } : {}),
       // w1841: a worker an urgent release's build paused shows Blocked on it; a report waiting on a held bench lock, on that.

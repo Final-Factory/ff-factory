@@ -3,6 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { needsTimed } from '../shared/capacity.ts';
+import { roomShares } from '../shared/workState.ts';
 import type { Machine, MachineSandbox, SessionInfo, WorkItem } from '../shared/types.ts';
 import { STRONG, overlapOf } from './work.ts';
 import { PlaceAgain, keptWhy, placeFor, releaseStep, type PlaceFacts } from './placeAgain.ts';
@@ -105,6 +106,12 @@ test('w2358: uncommitted work nobody holds (beast/slot3\'s main.unity after d2d9
   assert.deepEqual(d2.savedWork, { sha: 'abc1234', files: 1, pushed: true, branch, at: iso(NOW) });
   assert.match(notes[0]!, /^d2d9c644: Uncommitted work left on its branch sandbox\/slot3-w2341 in beast\/slot3/);
   assert.deepEqual(freed, ['sandbox beast/slot3 saved and free']);
+  // A stopped worker there that holds nothing and was never released (its work over) does not keep the changes unsaved.
+  saves.length = 0;
+  const host = worker('p1', { status: 'stopped', machineSandbox: 'slot1' });
+  await run([host], [sandbox('slot1', {}, { branch: 'w2276-pair-host', dirty: 10 })]);
+  assert.deepEqual(saves, ['beast/slot1 w2276-pair-host -: FF Factory: saved the uncommitted work left in beast/slot1 (w2358)']);
+  assert.equal(host.savedWork?.branch, 'w2276-pair-host');
 });
 
 test('w2358: once saved, the released worker waiting on beast (9524a4bc, w2335) takes the sandbox the dirty tree had kept from it', () => {
@@ -124,4 +131,22 @@ test('w2358: sibling fixes from one profiling run are not the same work as each 
   assert.ok((overlapOf(shadows, entry('w2340', 'Cheaper shadows: shadow distance', ['work:w2332']))?.score ?? 0) >= STRONG, 'a sibling with a similar title is strong');
   // A worker on that request is still the same work (its keys are its requests').
   assert.equal(overlapOf(shadows, { ref: 'd2d9c644', kind: 'session', title: 'w2332: profile', keys: ['work:w2332'] })?.score, 1);
+});
+
+test('w2358 case 4: a request that cannot run on a computer takes no share of its room; nor does room start_agent refuses (held for a pair run)', () => {
+  const q = (id: string, at: string, extra: Partial<WorkItem> = {}): WorkItem => ({ id, title: `${id} fix`, brief: 'Fix it.', priority: 'normal', keys: [], requestedBy: { userId: 'lothsahn', displayName: 'Lothsahn' }, requesters: [], humanAsked: true, status: 'queued', queuedFor: { at }, createdAt: at, updatedAt: at, sessionIds: [], overlaps: [], asks: 0, log: [], needs: 'game', ...extra }) as WorkItem;
+  const f = { room: ['beast'], agentRoom: ['beast'], roomFit: { beast: { platform: 'win32' } }, roomSlots: { 'game:beast': 1, 'agent:beast': 1 } };
+  // As it was at 09:05Z: w2347 (SkyBackground), older, read untimed, so it took beast's one slot ahead of w2363.
+  const w2347 = q('w2347', '2026-10-27T07:50:00.000Z');
+  const w2363 = q('w2363', '2026-10-27T08:40:00.000Z');
+  assert.equal(roomShares([w2347, w2363], f)!.get('w2363')!.gets, undefined);
+  // The brief start_agent refused it for puts it on the Mac: now it is no taker of beast's room, and w2363 gets it.
+  const mac = { ...w2347, timedBrief: { at: '2026-10-27T08:00:00.000Z', text: 'Benchmark the sky before and after on the Mac (m3).' } };
+  assert.equal(needsTimed(mac), 'darwin');
+  const shares = roomShares([mac, w2363], f)!;
+  assert.equal(shares.get('w2347')!.gets, undefined);
+  assert.equal(shares.get('w2363')!.gets, 'beast');
+  // Case 1: beast's last free sandbox held for w2360's pair run is no room for w2363 either.
+  const held = roomShares([mac, w2363], { ...f, roomHeld: (id: string, w: WorkItem) => (id === 'beast' && w.id === 'w2363' ? "beast's last free sandbox is held for w2360" : undefined) })!;
+  assert.equal(held.get('w2363')!.gets, undefined);
 });
