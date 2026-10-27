@@ -211,7 +211,7 @@ test('w2218: the portal stops a run it no longer waits for: given up on while it
   let online = true;
   const tr = new TimedRuns({
     dataDir: path.join(d, 'portal'),
-    store: { forget: () => {}, get: () => undefined } as unknown as AttachmentStore,
+    store: { forget: () => {}, get: () => undefined, grant: () => {} } as unknown as AttachmentStore,
     machines: () => [{ id: 'lothlaptop', platform: 'win32' } as unknown as Machine],
     isOnline: () => online,
     offers: () => true,

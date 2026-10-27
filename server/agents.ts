@@ -529,6 +529,16 @@ const timedKind = timedKindOf;
 /** w2358: one run's computers, room and hold answers for heldFor (Agents.heldFor). */
 type HoldMemo = { places?: Computer[]; facts?: RoomNow; why: Map<string, string | undefined> };
 
+/**
+ * w2414: a queued message's text as it goes with a room move. Its attachments (a timed run's logs among them) were copied
+ * into the old sandbox's Inbox only, so the moved text names each by id for fetch_attachment on the new computer.
+ */
+export function movedText(q: Pick<QueuedSend, 'text' | 'attachments'>): string {
+  const a = (q.attachments ?? []).filter((x) => x.id);
+  if (!a.length) return q.text;
+  return `${q.text}\n\n[attachments of this message, left in the Inbox of the computer it was queued on: fetch_attachment gets each here by id: ${a.map((x) => `${x.id} (${x.name})`).join(', ')}]`;
+}
+
 export class Agents {
   private readonly cfg: Config;
   private readonly store: Store;
@@ -2858,7 +2868,7 @@ export class Agents {
     if (info.kind !== 'worker' || !info.machineId || !info.machineSandbox || !ROOM_WAIT.test(hold)) return undefined;
     const moving = this.roomMoving.get(info.id);
     if (moving) {
-      moving.texts.push(q.text);
+      moving.texts.push(movedText(q));
       return true;
     }
     if (now - (Date.parse(q.at) || now) < MOVE_AFTER_MS || info.pendingPermissions.length || isMidTurn(info)) return undefined;
@@ -2885,7 +2895,7 @@ export class Agents {
       return kept;
     }
     this.roomKept.delete(info.id);
-    const entry = { to: d.move.to, texts: [q.text] };
+    const entry = { to: d.move.to, texts: [movedText(q)] };
     this.roomMoving.set(info.id, entry);
     const waited = Math.round((now - (Date.parse(q.at) || now)) / 1000);
     console.log(`room move: worker ${info.id} on ${info.machineId}/${info.machineSandbox} (${reqs.map((w) => w.id).join(', ')}) moves to ${d.move.to} ${waited} s after its message was queued: ${hold}; ${d.move.why}`);
