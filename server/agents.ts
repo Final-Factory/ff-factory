@@ -4349,8 +4349,26 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
    * system_status and the placement hint read.
    */
   places(): Computer[] {
+    if (this.placesPass) return (this.placesPass.places ??= this.placeAgain.withClaimsMemo(() => this.placesNow()));
     return this.placeAgain.withClaimsMemo(() => this.placesNow());
   }
+
+  /**
+   * w2358: runs read-only `fn` with places() computed once. workLive read it five times a pass (roomExtras > roomFacts twice,
+   * roomNow, and the holds' memo twice), each placesNow asking free() of every sandbox: on 2026-10-27 after #722 the portal's
+   * stall profile showed places() 10-21 s a minute against 4.4-9.8 s before #720. Only for passes that change nothing.
+   */
+  private withPlacesOnce<T>(fn: () => T): T {
+    if (this.placesPass) return fn();
+    this.placesPass = {};
+    try {
+      return fn();
+    } finally {
+      this.placesPass = undefined;
+    }
+  }
+
+  private placesPass?: { places?: Computer[] };
 
   private placesNow(): Computer[] {
     const out: Computer[] = [];
@@ -6382,6 +6400,10 @@ ${w.repo ?? ''}
   /** list_work's answer: one request in full, or one line per request. */
   /** Every open or stalled request's live state (shared/workState.ts), from this host's sessions and send queue. */
   workLive(): Map<string, WorkLive> {
+    return this.withPlacesOnce(() => this.workLiveNow());
+  }
+
+  private workLiveNow(): Map<string, WorkLive> {
     const queued = this.sessions.queued();
     const extras = this.roomExtras();
     return workLiveAll([...this.store.work.values()], {

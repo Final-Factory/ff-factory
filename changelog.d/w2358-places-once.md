@@ -1,0 +1,1 @@
+- w2358: the live states read the computers once a pass: workLive computed places() five times (room, room facts, the holds), which kept the portal's event loop about twice as busy after #720 and #722.
