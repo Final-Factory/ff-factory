@@ -343,7 +343,7 @@ export class BlockerWatch {
       deliveredSince: (w: WorkItem, since: number, waiter?: string) =>
         w.sessionIds.some((sid) => {
           const s = store.sessions.get(sid);
-          return !!s && !BUSY.has(s.status) && (Date.parse(s.lastActivityAt) || 0) > since && reportDelivers(s.lastResult, w.id, waiter);
+          return !!s && !BUSY.has(s.status) && (Date.parse(s.lastActivityAt) || 0) > since && reportDelivers(s.lastResult, w.id, waiter, !!waiter && w.timedLeg?.for?.toLowerCase() === waiter.toLowerCase());
         }),
       portalSha: this.d.portalSha?.(),
       ...(this.d.daemonSha ? { daemonSha: this.d.daemonSha } : {}),

@@ -730,9 +730,13 @@ without one means it is off or failing, worth a person's look.
   unjam sweep found it). Three rules:
   - a report whose still-open or paused line for wX names the waiting request ("waiting for w2335's …") delivers to it
     (`reportWaitsOn`): the waiter has the half that is done and what is asked of it;
-  - a timed leg's report, any report, a progress one included, clears the wait of the request it was filed for
-    (`blockerVerdict`, `timedLeg.for`), and the resume message carries the leg's report and asks for a `For <leg>:` line
-    with the branch and commit, which resumes the leg's worker if it waits back;
+  - a timed leg's report with a result for the request it was filed for clears that request's wait (`reportDelivers` with
+    `leg`, `timedLeg.for`): a `For <parent>:` line (a partial result too), `DONE: <leg>`, or a still-open line that waits
+    on the parent ("waiting for w2335's worker to send its fix commit", read by `requestWaitOf`: a mere mention, a branch
+    `sandbox/slot3-w2335`, is none); so does the leg itself turning Blocked after the parent's gate. A turn that says only
+    that its bench ticket is still queued, or "understood", leaves the parent Blocked (w2377: w2338's turns woke w2335
+    four times on 2026-10-27, when any turn of a leg cleared it). The resume message carries the leg's report and asks for
+    a `For <leg>:` line with the branch and commit, which resumes the leg's worker if it waits back;
   - the blocker watch finds wait cycles (`shared/blockers.ts` `waitCycles`): `request` gates of Blocked requests, plus the
     request an active request's idle worker last said it waits on (the ledger's derived "Blocked on", `requestWaitOf`). In
     a cycle it resumes one Blocked side (`cycleBreak`): the one whose next reported since its block, else the request a

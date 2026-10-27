@@ -6929,20 +6929,25 @@ test("w2357: w2335 and its timed leg w2338 as it happened: the parent Blocked on
   assert.match(note, /put a line "For w2: <the branch and commit>" in your report: that resumes w2's worker/);
 });
 
-test("w2357: any report from a timed leg clears its parent's wait, a progress one too; another request's progress report does not", async (t) => {
+test("w2377: a timed leg's status-only turns leave its parent Blocked (w2338's \"queued for biscuit's bench ticket\" and \"understood\" woke w2335 four times); its For line clears it", async (t) => {
   const { store, agents, o, dispatcher, call } = await setupOnMachine(t);
   agentsRoom(agents, []);
-  putRequests(store, [{ id: 'w1', status: 'active' }, { id: 'w2', status: 'active', timedLeg: { for: 'w1', forSession: 'x', from: 'pc', small: ['m3'] } }, { id: 'w3', status: 'active' }, { id: 'w4', status: 'active' }]);
-  for (const [id, ref] of [['w1', 'w2'], ['w3', 'w4']]) {
-    const r = await call(dispatcher().info, 'decide_work', { id, action: 'block', note: 'x', blocker: { kind: 'request', ref, on: 'report', what: `${ref}'s timing` } });
-    assert.equal(r.isError, false, r.text);
+  putRequests(store, [{ id: 'w1', status: 'active' }, { id: 'w2', status: 'active', timedLeg: { for: 'w1', forSession: 'x', from: 'pc', small: ['biscuit'] } }]);
+  const r = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'block', note: 'x', blocker: { kind: 'request', ref: 'w2', on: 'report', what: "w2's fix-side numbers" } });
+  assert.equal(r.isError, false, r.text);
+  const watch = new BlockerWatch({ store, orchestrators: o });
+  const turns = [
+    "Understood: I hold until biscuit's bench ticket is granted.",
+    "Ticket still queued.\n\nw2: still open: fix-side legs at e947f566c4 on sandbox/slot3-w1 queued for biscuit's bench ticket",
+  ];
+  for (const [i, text] of turns.entries()) {
+    putReport(store, 'w2', `k${i}`, text, 1000 * (i + 1));
+    assert.equal((await watch.tick()).get('w1'), undefined, `turn ${i}: no result in it`);
+    assert.equal(store.work.get('w1')!.status, 'blocked');
   }
-  putReport(store, 'w2', 'k2', 'Base side built.\n\nw2: still open: the A/B is running');
-  putReport(store, 'w4', 'k4', 'Base side built.\n\nw4: still open: the A/B is running');
-  const did = await new BlockerWatch({ store, orchestrators: o }).tick();
-  assert.match(did.get('w1') ?? '', /^clear: w2, its timed leg, reported \(a partial result counts/);
-  assert.equal(did.get('w3'), undefined);
-  assert.equal(store.work.get('w3')!.status, 'blocked');
+  putReport(store, 'w2', 'k9', "Fix side timed.\n\nFor w1: master 41.2 ms, fix 30.1 ms on biscuit at e947f566c4 (specs/w2/ab.md).\n\nw2: still open: the second run", 5000);
+  assert.match((await watch.tick()).get('w1') ?? '', /^clear: w2's worker reported/);
+  assert.notEqual(store.work.get('w1')!.status, 'blocked');
 });
 
 test('w2357: the blocker watch finds a wait cycle that no report clears (a gate on done, a worker that says it waits back) and resumes the side that can act, logging it', async (t) => {

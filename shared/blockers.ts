@@ -245,10 +245,12 @@ export function blockerVerdict(b: WorkBlocker, f: BlockerFacts, waiter?: string)
       if (STATUS_DONE_WORDS[t.status]) return { state: 'decide', why: `${name} was ${STATUS_DONE_WORDS[t.status]} without delivering ${b.what}${t.outcome ? ` (${firstLine(t.outcome)})` : ''}` };
       if (t.status === 'stalled') return { state: 'stuck', why: `${name}, which it waits on, stalled${t.stalled ? `: ${firstLine(t.stalled.reason)}` : ''}` };
       if (b.on === 'report' && f.deliveredSince?.(t, at, waiter)) return { state: 'clear', why: `${name}'s worker reported (${b.what})` };
-      // w2357: a timed leg reports to the request that filed it; any report clears it, a partial one too (the "before" side
-      // timed, the "after" side waiting for that request's commit). w2335 waited for w2338's final report while w2338 waited
-      // for w2335's commit, and nothing woke either.
-      if (b.on === 'report' && waiter && t.timedLeg?.for === waiter && f.reportedSince?.(t, at)) return { state: 'clear', why: `${name}, its timed leg, reported (a partial result counts: read it, and give it what it asks for)` };
+      // w2377: a timed leg's turn wakes the request that filed it only with a result for it (deliveredSince above: a
+      // "For <waiter>:" line, DONE, or a wait on it, w2357), or once the leg itself is Blocked after that request's gate: a
+      // turn that says only that its bench ticket is still queued, or "understood", leaves it Blocked (w2335 woke four times
+      // so on 2026-10-27; before, any turn of the leg cleared it).
+      if (b.on === 'report' && waiter && t.timedLeg?.for?.toLowerCase() === waiter.toLowerCase() && t.status === 'blocked' && gatesOf(t).some((g) => (Date.parse(g.at) || 0) > at))
+        return { state: 'clear', why: `${name}, its timed leg, is itself Blocked (${gatesOf(t).map((g) => g.what ?? g.ref ?? g.kind).join('; ')}): read its report` };
       if (b.on === 'report' && f.reportedSince?.(t, at)) return { state: 'open', why: `${name}'s worker reported progress only, not yet ${b.what}` };
       return { state: 'open', why: `${name} is ${t.status === 'blocked' ? 'itself blocked' : t.status}` };
     }
