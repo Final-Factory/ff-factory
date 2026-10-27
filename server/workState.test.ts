@@ -201,7 +201,7 @@ test('workState: stalled at once when nothing works on it and nothing waits on a
 
 test('workState: counts per state', () => {
   const n = liveCounts([{ state: 'working', why: '' }, { state: 'stalled', why: '' }, { state: 'stalled', why: '' }]);
-  assert.deepEqual(n, { working: 1, waiting: 0, queued: 0, blocked: 0, paused: 0, followup: 0, stalled: 2 });
+  assert.deepEqual(n, { working: 1, sleeping: 0, waiting: 0, queued: 0, blocked: 0, paused: 0, followup: 0, stalled: 2 });
 });
 
 // ---- w691: a worker that waits on a person is Waiting on input, never Working; a dead agent host is Blocked ----

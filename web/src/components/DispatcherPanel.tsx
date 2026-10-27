@@ -219,7 +219,7 @@ export function DispatcherPanel({ app, tab, onClose }: { app: AppState; tab?: st
 }
 
 /** A live state's tone: working blue, waiting on input amber, queued grey, blocked violet, merged with a follow-up green, stalled red. */
-const LIVE_TONE: Record<WorkLiveState, Tone> = { working: 'blue', waiting: 'amber', queued: 'grey', blocked: 'violet', paused: 'grey', followup: 'green', stalled: 'red' };
+const LIVE_TONE: Record<WorkLiveState, Tone> = { working: 'blue', sleeping: 'grey', waiting: 'amber', queued: 'grey', blocked: 'violet', paused: 'grey', followup: 'green', stalled: 'red' };
 
 /** The live states picked on one list, kept in this browser across reloads (w418, Lothsahn: "select multiple types"). */
 function usePickedStates(key: string): [ReadonlySet<WorkLiveState>, (next: ReadonlySet<WorkLiveState>) => void] {

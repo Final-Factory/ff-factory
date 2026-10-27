@@ -9,6 +9,15 @@
 // machine, a usage limit, a lock, a time, CI) and names it. A worker between turns with its own work still going (a
 // background job such as CI, a check-in it set) is Working: it holds the request and comes back to it by itself.
 //
+// w2428 (lothsahn: "If it's not on a machine and it's not actively doing work it shouldn't be working"; w2014 showed
+// "Working (71ecf40d stopped until its check-in tomorrow 16:04 UTC)"): a request whose only pending thing is its own
+// stopped worker's check-in, still ahead, is Sleeping, "until tomorrow 16:04 UTC". Only when no worker of it is mid-turn or
+// alive between turns (a live process holds an agent slot and may run a job or a bench ticket), and its sleeper holds no
+// sandbox (released, or none) and has no message queued (one queued resumes it now: a released worker spoken for by a
+// sandbox is one of those, placeAgain.claims). Every earlier line (a person, a gate, a queue, a bench lock, a build hold)
+// still wins. A check-in that has come due is not Sleeping: it is Working for its 2-minute grace (OVERDUE_MS, the check-in
+// fires), then Stalled when nothing resumed it, as before.
+//
 // w691 (w665: a worker that needed a person to reboot a Mac set check-ins and showed Working for 10 hours): a worker that
 // says only a person can move it on is Waiting on input, check-in or not. Its own declaration (the waiting_on_person
 // tool, SessionInfo.waitingOn) comes first; the "still open:" line of its report is read as a backstop (personWaitIn).
@@ -32,15 +41,16 @@
 // the request, read from the log). A worker that waits on another request's worker (its files, its results) is Blocked on
 // that request. And a worker that says it waits on the orchestrator for its own work says so in the Stalled line.
 import type { BenchLock, BuildHold, SessionInfo, WorkItem } from './types.ts';
-import { agentState, hostFailureText } from './agentState.ts';
+import { agentState, holdsSandbox, hostFailureText } from './agentState.ts';
 import { gatesName, gatesOf } from './blockers.ts';
 import { admitsPriority, needsOf, pairRoom, pairText, reservedText, ROOM_STAND_MS, unfitWhy, type ReservedRoom, type RoomFit } from './capacity.ts';
 import type { QueueWait } from './queueWaits.ts';
 
-export type WorkLiveState = 'working' | 'waiting' | 'queued' | 'blocked' | 'paused' | 'followup' | 'stalled';
-export const WORK_LIVE_STATES: readonly WorkLiveState[] = ['working', 'waiting', 'queued', 'blocked', 'paused', 'followup', 'stalled'];
+export type WorkLiveState = 'working' | 'sleeping' | 'waiting' | 'queued' | 'blocked' | 'paused' | 'followup' | 'stalled';
+export const WORK_LIVE_STATES: readonly WorkLiveState[] = ['working', 'sleeping', 'waiting', 'queued', 'blocked', 'paused', 'followup', 'stalled'];
 export const WORK_LIVE_LABEL: Record<WorkLiveState, string> = {
   working: 'Working',
+  sleeping: 'Sleeping',
   waiting: 'Waiting on input',
   queued: 'Queued',
   blocked: 'Blocked',
@@ -694,6 +704,23 @@ function legLive(w: WorkItem, f: WorkLiveFacts): WorkLive | undefined {
   return queuedLive(w, f, w.legs.flatMap((l) => l.needs), head, 'start a worker for it there', `${w.id}:leg`);
 }
 
+/**
+ * Sleeping (w2428): every worker of the request is stopped or gone, and the first check-in still ahead is a stopped worker's
+ * that holds no sandbox and has no message queued. Undefined when any of that fails: the caller's Working line stands.
+ */
+function sleepingOf(mine: readonly SessionInfo[], f: Pick<WorkLiveFacts, 'queuedSend' | 'now'>): WorkLive | undefined {
+  if (mine.some((s) => s.status !== 'stopped' && s.status !== 'error')) return undefined;
+  const sleepers = mine.filter((s) => {
+    const a = agentState(s, undefined, f.now);
+    const queued = f.queuedSend?.(s.id) ?? s.queuedSend;
+    return a.state === 'stopped' && !!a.resumes?.startsWith('check-in') && !a.held && !queued && !!s.wakeAt && Date.parse(s.wakeAt) > f.now;
+  });
+  // Any stopped worker that keeps a sandbox (its check-in near, not released yet) keeps the request on a machine: Working.
+  if (!sleepers.length || mine.some((s) => !!s.machineSandbox && holdsSandbox(s, f.now))) return undefined;
+  const first = [...sleepers].sort((a, b) => Date.parse(a.wakeAt!) - Date.parse(b.wakeAt!))[0];
+  return { state: 'sleeping', why: `until ${agentState(first, undefined, f.now).resumes!.replace(/^check-in /, '')} at ${first.id}'s check-in; it is stopped and holds no sandbox, agent slot or job` };
+}
+
 export function workLive(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: string) => Holds): WorkLive | undefined {
   if (!live(w)) return undefined;
   const holds = holdsFor ?? ((sid: string) => holdsOf(sid, f.items));
@@ -847,6 +874,10 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: s
   // w1863: a leg waiting for its computer is Queued, also while the request's own worker is between turns elsewhere.
   if (leg) return leg;
 
+  if (coming) {
+    const asleep = sleepingOf(mine, f);
+    if (asleep) return asleep;
+  }
   if (coming) return withMachines({ state: 'working', why: `${coming.a.state === 'stopped' ? `${coming.s.id} stopped until its ${coming.a.resumes}` : `${coming.s.id} between turns: ${coming.a.waitsOn}`}${sharedWith([coming.s])}` }, [coming.s]);
 
   const decide = serving.find((s) => asksAPerson(s.lastResult) && stands(reportAt(s), names(w.requesters), (s.lastResult ?? '').trim().slice(-600)));
@@ -990,8 +1021,8 @@ export function liveCounts(states: Iterable<WorkLive>): Record<WorkLiveState, nu
  * cannot differ: before, the row counted each request's stored status, so a request whose worker's message waits for a free
  * agent slot (stored active) counted active there and Queued on the page.
  */
-export const GLANCE_ORDER: readonly WorkLiveState[] = ['waiting', 'working', 'queued', 'blocked', 'stalled', 'followup', 'paused'];
-const GLANCE_WORD: Record<WorkLiveState, string> = { waiting: 'waiting', working: 'working', queued: 'queued', blocked: 'blocked', stalled: 'stalled', followup: 'to follow up', paused: 'paused' };
+export const GLANCE_ORDER: readonly WorkLiveState[] = ['waiting', 'working', 'sleeping', 'queued', 'blocked', 'stalled', 'followup', 'paused'];
+const GLANCE_WORD: Record<WorkLiveState, string> = { waiting: 'waiting', working: 'working', sleeping: 'sleeping', queued: 'queued', blocked: 'blocked', stalled: 'stalled', followup: 'to follow up', paused: 'paused' };
 export function ledgerGlance(states: Iterable<WorkLive>): [number, string][] {
   const n = liveCounts(states);
   return GLANCE_ORDER.filter((s) => n[s]).map((s) => [n[s], GLANCE_WORD[s]] as [number, string]);
