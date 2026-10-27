@@ -725,6 +725,23 @@ without one means it is off or failing, worth a person's look.
   `For <waiting request>:` (`Orchestrators.tellReportWaited`; not a worker that waits on a person, whose declaration a
   message would end). The gate's `what` is what they are told, so name the result there ("dec9a619's LothDesktop timing
   of A vs A"), not "w1785 reporting". A lock's holder still frees it with any report.
+- **A wait never closes a loop** (w2357; 2026-10-27: w2335 was Blocked on its timed leg w2338's report while w2338's
+  worker reported "w2338: still open: waiting for w2335's worker 9524a4bc to send its fix commit", and only the 4-hourly
+  unjam sweep found it). Three rules:
+  - a report whose still-open or paused line for wX names the waiting request ("waiting for w2335's …") delivers to it
+    (`reportWaitsOn`): the waiter has the half that is done and what is asked of it;
+  - a timed leg's report, any report, a progress one included, clears the wait of the request it was filed for
+    (`blockerVerdict`, `timedLeg.for`), and the resume message carries the leg's report and asks for a `For <leg>:` line
+    with the branch and commit, which resumes the leg's worker if it waits back;
+  - the blocker watch finds wait cycles (`shared/blockers.ts` `waitCycles`): `request` gates of Blocked requests, plus the
+    request an active request's idle worker last said it waits on (the ledger's derived "Blocked on", `requestWaitOf`). In
+    a cycle it resumes one Blocked side (`cycleBreak`): the one whose next reported since its block, else the request a
+    timed leg in the cycle was filed for, else the one blocked longest, and logs `blocker watch: CYCLE: w1 -> w2 -> w1:
+    resuming w1 (…)`. A direct gate each way is still refused when it is set (`blockerProblem`).
+
+  The parent's sandbox is not kept for its leg: a leg can wait hours Queued for a small computer, and timed_place moves it
+  off a big computer exactly so its slots do not idle (w1969). The parent pushes the commits the leg times before it ends
+  its turn, and the leg's brief says the parent may resume in a new sandbox, so the leg takes both sides from origin.
 - **It unblocks by itself.** The blocker watch (`server/blockerWatch.ts`) looks at every blocked request each minute,
   and at once when one is blocked or the nightly lab reports. When the blocker clears, a worker whose check-in the block
   cancelled gets it back (below, "No poll is left behind") and the request is its again (`active`); otherwise the request

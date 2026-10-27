@@ -19,10 +19,11 @@
 import type { Store } from './store.ts';
 import type { Orchestrators } from './orchestrators.ts';
 import { run as runProc, type RunOptions, type RunResult } from './proc.ts';
-import { blockerVerdict, CI_REF, gateSetter, gatesOf, RESUME_SWEEP_MS, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
+import { blockerVerdict, CI_REF, cycleBreak, gateSetter, gatesOf, newestFirst, RESUME_SWEEP_MS, waitCycles, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
 import { conditionalVerdict } from '../shared/conditional.ts';
 import { ghRunner } from './githubTokens.ts';
-import { reportDelivers } from './ledgerRules.ts';
+import { reportDelivers, stillOpenIn } from './ledgerRules.ts';
+import { requestWaitOf } from '../shared/workState.ts';
 import type { SessionInfo, WorkBlocker, WorkItem } from '../shared/types.ts';
 import type { RoomNow } from './placement.ts';
 
@@ -178,6 +179,21 @@ export class BlockerWatch {
           console.warn(`blocker watch: ${w.id}: ${(e as Error).message}`);
         }
       }
+      // w2357: a wait cycle (A Blocked on B, B Blocked on A) clears by itself never: the side that can act is resumed, and it
+      // is logged. w2335 and its timed leg w2338 waited on each other until the 4-hourly unjam sweep found them.
+      for (const cycle of waitCycles(this.d.store.work.values(), (w) => this.saysWaitsOn(w))) {
+        try {
+          const brk = cycleBreak(cycle, facts);
+          const w = brk && this.d.store.work.get(brk.id.toLowerCase());
+          if (!brk || !w || w.status !== 'blocked') continue;
+          console.warn(`blocker watch: CYCLE: ${[...cycle, cycle[0]].join(' -> ')}: resuming ${brk.id} (${brk.why})`);
+          if (gatesOf(w).length === 1) this.d.orchestrators.unblock(w.id, brk.why);
+          else this.d.orchestrators.gatesCleared(w.id, [brk.gate], brk.why);
+          did.set(w.id, `cycle: ${brk.why}`);
+        } catch (e) {
+          console.warn(`blocker watch: CYCLE: ${cycle.join(', ')}: ${(e as Error).message}`);
+        }
+      }
       // w1094, the backstop: a request still Blocked on CI that finished more than RESUME_SWEEP_MS ago (the clearing above
       // threw for it) is said loudly, once, and its CI gate is cleared again.
       const now = this.now();
@@ -289,6 +305,17 @@ export class BlockerWatch {
       this.d.orchestrators.mergedOnGreen!(w.id, x.v.why, g);
     }
     if (rest.length) this.d.orchestrators.gatesCleared(w.id, rest.map((x) => x.g), rest.map((x) => x.v.why).join('; '));
+  }
+
+  /**
+   * The request an open request's idle worker last said it waits on (w2357): its newest report's still-open line for it,
+   * read as the ledger reads it (shared/workState.ts requestWaitOf). A busy worker is acting, so it waits on nothing yet.
+   */
+  private saysWaitsOn(w: WorkItem): string | undefined {
+    const s = newestFirst(w).map((sid) => this.d.store.sessions.get(sid)).find((x) => x?.kind === 'worker' && x.lastResult);
+    if (!s || BUSY.has(s.status)) return undefined;
+    const line = stillOpenIn(s.lastResult!).get(w.id.toLowerCase());
+    return line ? requestWaitOf(line, w.id) : undefined;
   }
 
   private facts(ci: ReadonlyMap<string, CiState | undefined>, pr: ReadonlyMap<string, PrState | undefined>, health: ReadonlyMap<string, PrHealth | undefined>): BlockerFacts {

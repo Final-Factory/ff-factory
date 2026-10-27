@@ -6891,3 +6891,81 @@ test('w2305: a re-queue stops its old legs at once, not at their turn\'s end (w2
   await until('the old leg stopped', () => !sessions.sessions.get(a.id)?.live);
   assert.equal(w.status, 'queued');
 });
+
+// ---------------------------------------------------------------- w2357: a request and its timed leg waiting on each other
+
+/** A worker on `work` that finished a turn `ms` from now with `report`. */
+function putReport(store: Store, work: string, sid: string, report: string, ms = 1000) {
+  store.putSession({ id: sid, kind: 'worker', title: `${work}: leg`, status: 'idle', permissionMode: 'default', createdAt: T0, lastActivityAt: new Date(Date.now() + ms).toISOString(), turns: 2, costUsd: 1, pendingPermissions: [], lastResult: report });
+  store.putWork({ ...store.work.get(work)!, sessionIds: [sid] });
+}
+
+test("w2357: w2335 and its timed leg w2338 as it happened: the parent Blocked on the leg's report, the leg reporting that it waits for the parent's commit; the parent resumes with that partial report", async (t) => {
+  const { store, agents, o, dispatcher, call } = await setupOnMachine(t);
+  agentsRoom(agents, ['pc']);
+  // w1 stands for w2335 (the Leech fix), w2 for w2338 (its timed leg, already filed and running on another computer).
+  putRequests(store, [{ id: 'w1', status: 'active' }, { id: 'w2', title: 'Timed leg for w1: Leech stack probe', status: 'active', needs: 'game', timedLeg: { for: 'w1', forSession: 'x', from: 'pc', small: ['biscuit'] } }]);
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Fix the Leech slowness', title: 'w1: Leech', work_id: 'w1' });
+  assert.equal(started.isError, false, started.text);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  await until('its first turn', () => store.sessions.get(id)!.status === 'idle');
+  // The parent hands its measurement to the leg (timed_place): Blocked on w2 reporting, by its own worker.
+  const filed = o.fileTimedLeg(id, { what: 'Leech stack probe', brief: 'Time master and the fix.', from: 'pc', needs: ['biscuit'], why: 'pc is big' });
+  assert.equal(filed.id, 'w2');
+  assert.match(filed.text, /perhaps in another sandbox, a partial one too/);
+  const gate = store.work.get('w1')!.blocked!;
+  assert.deepEqual([store.work.get('w1')!.status, gate.kind, gate.ref, gate.on], ['blocked', 'request', 'w2', 'report']);
+  const watch = new BlockerWatch({ store, orchestrators: o });
+  assert.equal((await watch.tick()).get('w1'), undefined, 'the leg has not reported: still blocked');
+  // The leg times the master side and reports, word for word as edc18110 did, that the other side waits for the parent's
+  // commit. Before w2357 that was a progress report only: w1 stayed Blocked, w2's worker idle, and nothing woke either.
+  putReport(store, 'w2', 'leg2338', "Master side on biscuit: 41.2 ms per frame (specs/w2/master.md).\n\nw2: still open: waiting for w1's worker 9524a4bc to send its fix commit on sandbox/slot3-w1, then the fix-side legs on biscuit");
+  const did = await watch.tick();
+  assert.match(did.get('w1') ?? '', /^clear: w2's worker reported/);
+  assert.notEqual(store.work.get('w1')!.status, 'blocked');
+  const note = agents.waker.pending(id)?.note ?? '';
+  assert.match(note, /^w1 is unblocked: w2 reporting cleared \(w2's worker reported/);
+  assert.match(note, /Timed leg w2's report: "Master side on biscuit: 41\.2 ms per frame .*w2: still open: waiting for w1's worker 9524a4bc to send its fix commit/s);
+  assert.match(note, /put a line "For w2: <the branch and commit>" in your report: that resumes w2's worker/);
+});
+
+test("w2357: any report from a timed leg clears its parent's wait, a progress one too; another request's progress report does not", async (t) => {
+  const { store, agents, o, dispatcher, call } = await setupOnMachine(t);
+  agentsRoom(agents, []);
+  putRequests(store, [{ id: 'w1', status: 'active' }, { id: 'w2', status: 'active', timedLeg: { for: 'w1', forSession: 'x', from: 'pc', small: ['m3'] } }, { id: 'w3', status: 'active' }, { id: 'w4', status: 'active' }]);
+  for (const [id, ref] of [['w1', 'w2'], ['w3', 'w4']]) {
+    const r = await call(dispatcher().info, 'decide_work', { id, action: 'block', note: 'x', blocker: { kind: 'request', ref, on: 'report', what: `${ref}'s timing` } });
+    assert.equal(r.isError, false, r.text);
+  }
+  putReport(store, 'w2', 'k2', 'Base side built.\n\nw2: still open: the A/B is running');
+  putReport(store, 'w4', 'k4', 'Base side built.\n\nw4: still open: the A/B is running');
+  const did = await new BlockerWatch({ store, orchestrators: o }).tick();
+  assert.match(did.get('w1') ?? '', /^clear: w2, its timed leg, reported \(a partial result counts/);
+  assert.equal(did.get('w3'), undefined);
+  assert.equal(store.work.get('w3')!.status, 'blocked');
+});
+
+test('w2357: the blocker watch finds a wait cycle that no report clears (a gate on done, a worker that says it waits back) and resumes the side that can act, logging it', async (t) => {
+  const { store, agents, o, dispatcher, call } = await setupOnMachine(t);
+  agentsRoom(agents, []);
+  putRequests(store, [{ id: 'w1', status: 'active' }, { id: 'w2', status: 'active' }]);
+  // A direct gate each way is refused (blockerProblem), so the cycle is a gate and a worker's words, as w2335's was.
+  const b1 = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'block', note: 'x', blocker: { kind: 'request', ref: 'w2', what: "w2's fix" } });
+  assert.equal(b1.isError, false, b1.text);
+  const watch = new BlockerWatch({ store, orchestrators: o });
+  assert.equal((await watch.tick()).get('w1'), undefined, 'no cycle yet');
+  putReport(store, 'w2', 'k2', "Half done.\n\nw2: still open: waiting for w1's commit on its branch");
+  const warned: string[] = [];
+  const warn = console.warn;
+  console.warn = (...a: unknown[]) => void warned.push(a.join(' '));
+  let did: Map<string, string>;
+  try {
+    did = await watch.tick();
+  } finally {
+    console.warn = warn;
+  }
+  assert.match(did.get('w1') ?? '', /^cycle: a wait cycle \(w1 -> w2 -> w1\): w2's worker reported since w1 was blocked on it, and waits on w1 in turn, so w1 acts on that report/);
+  assert.notEqual(store.work.get('w1')!.status, 'blocked');
+  assert.ok(warned.some((l) => /blocker watch: CYCLE: w1 -> w2 -> w1: resuming w1/.test(l)), warned.join('\n'));
+  assert.match(store.work.get('w1')!.log.join('\n'), /unblocked: .*a wait cycle \(w1 -> w2 -> w1\)/);
+});

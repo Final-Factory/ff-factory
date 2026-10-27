@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { afterMergeReason, cleanupSettings, cutOffOf, deployStep, doneProblem, isRelease, mergedMentionsIn, mergePrs, pausedIn, ownerAt, partOfIdsIn, partOfReason, postDeployStep, prsOf, prUrlsIn, reportDelivers, reportVerdict, requestIdsIn, stallCandidate, stillOpenIn, supersededBy, titleIdsIn, type PrRecord } from './ledgerRules.ts';
+import { afterMergeReason, cleanupSettings, cutOffOf, deployStep, doneProblem, isRelease, mergedMentionsIn, mergePrs, pausedIn, ownerAt, partOfIdsIn, partOfReason, postDeployStep, prsOf, prUrlsIn, reportDelivers, reportVerdict, reportWaitsOn, requestIdsIn, stallCandidate, stillOpenIn, supersededBy, titleIdsIn, type PrRecord } from './ledgerRules.ts';
 import { reportClip } from './sessions.ts';
 import type { WorkItem } from '../shared/types.ts';
 
@@ -291,4 +291,15 @@ test('w1869: a report delivers what a request blocked on it waits for only with 
   assert.equal(reportDelivers('w1790: still open: the clips', 'w1785', 'w1820'), false, "only another request's progress");
   assert.equal(reportDelivers('w1785 timing is in timing.md.\nw1790: still open: the clips', 'w1785', 'w1820'), true);
   assert.equal(reportDelivers(undefined, 'w1785', 'w1820'), false);
+});
+
+test('w2357: a report that says it waits on the waiter delivers to it (w2338 waited on w2335\'s commit while w2335 waited on its report)', () => {
+  const r = "Master side: 41.2 ms.\n\nw2338: still open: waiting for w2335's worker 9524a4bc to send its fix commit on sandbox/slot3-w2335, then the fix-side legs on biscuit";
+  assert.equal(reportWaitsOn(r, 'w2338', 'w2335'), true);
+  assert.equal(reportDelivers(r, 'w2338', 'w2335'), true);
+  assert.equal(reportWaitsOn(r, 'w2338', 'w2320'), false, 'another waiter');
+  assert.equal(reportDelivers(r, 'w2338', 'w2320'), false);
+  assert.equal(reportWaitsOn('**w2338: paused:** w2335 first', 'w2338', 'w2335'), true);
+  assert.equal(reportWaitsOn('w2338: still open: the A/B is running', 'w2338', 'w2335'), false);
+  assert.equal(reportWaitsOn("w2335: still open: w2338's numbers", 'w2338', 'w2335'), false, 'a line about another request');
 });
