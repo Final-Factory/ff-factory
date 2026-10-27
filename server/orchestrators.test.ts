@@ -6969,3 +6969,44 @@ test('w2357: the blocker watch finds a wait cycle that no report clears (a gate 
   assert.ok(warned.some((l) => /blocker watch: CYCLE: w1 -> w2 -> w1: resuming w1/.test(l)), warned.join('\n'));
   assert.match(store.work.get('w1')!.log.join('\n'), /unblocked: .*a wait cycle \(w1 -> w2 -> w1\)/);
 });
+
+// ---------------------------------------------------------------- w2358: room start_agent refuses is no room for queue
+
+test('w2358 as it happened: a sandbox held for an older pair run, and the m5 for work timed by the dispatcher brief, are no room for decide_work queue', async (t) => {
+  const { store, agents, o, dispatcher, call } = setup(t);
+  const f: RoomNow = { game: ['beast', 'm5'], agent: ['beast', 'm5'], held: [], fit: { beast: { platform: 'win32' }, m5: { platform: 'darwin', noTimedRuns: "Ben's own Mac" } } };
+  (agents as unknown as { roomNow: () => RoomNow }).roomNow = () => f;
+  agents.roomFacts = () => f;
+  // 08:45Z: beast/slot1, beast's last free sandbox, was held for w2360's pair run; start_agent refused w2362 there.
+  const hold = "beast's last free sandbox is held for w2360 \"knock pair run\" (normal, Queued since 08:28 UTC), a pair run of 2 legs, which starts only when that many computers have room at once (w1945)";
+  (agents as unknown as { pairHoldProblem: (m: string) => string | undefined }).pairHoldProblem = (m) => (m === 'beast' ? hold : undefined);
+  store.putWork({ ...queuedItem('w2362', 'Right-size Unity job worker count (idle spin CPU)', 'normal'), status: 'new', queuedFor: undefined });
+  const before = await call(dispatcher().info, 'decide_work', { id: 'w2362', action: 'queue', note: 'beast is held for the pair' });
+  // The m5 still has room for it (untimed game work): refused, naming m5 alone, not beast.
+  assert.equal(before.isError, true);
+  assert.match(before.text, /queue is for capacity only, and m5 has room for w2362 now/);
+  f.game = ['beast'];
+  f.agent = ['beast'];
+  const ok = await call(dispatcher().info, 'decide_work', { id: 'w2362', action: 'queue', note: 'beast is held for the pair' });
+  assert.equal(ok.isError, false, ok.text);
+  assert.equal(store.work.get('w2362')!.status, 'queued');
+  assert.ok(store.work.get('w2362')!.log.at(-1)!.includes(hold), String(store.work.get('w2362')!.log.at(-1)));
+  // Nor is it flagged WRONG beside that held room.
+  (o as unknown as { now: () => Date }).now = () => new Date(Date.now() + 3_600_000);
+  assert.deepEqual(o.flagQueuedWithRoom(f), []);
+
+  // Case 3: a request whose own text names no timing, timed by the brief start_agent got (a refused pin on the m5).
+  f.game = ['m5'];
+  f.agent = ['m5'];
+  const w = { ...queuedItem('w2366', 'Startup cost fixes', 'normal'), status: 'new' as const, queuedFor: undefined };
+  store.putWork(w);
+  assert.equal((await call(dispatcher().info, 'decide_work', { id: 'w2366', action: 'queue', note: 'm5 takes no timed runs' })).isError, true, 'untimed, the m5 is room');
+  store.putWork({ ...store.work.get('w2366')!, timedBrief: { at: T0, text: 'Benchmark the startup before and after on the Mac.' } });
+  assert.equal(needsTimed(store.work.get('w2366')), 'darwin', 'the brief start_agent was refused for reads as a note');
+  assert.equal(needsTimed({ ...store.work.get('w2366')!, notes: [{ at: '2026-10-27T09:00:00.000Z', by: 'lothsahn', text: 'Any OS.' }] }), 'any', 'a later note wins');
+  const timed = await call(dispatcher().info, 'decide_work', { id: 'w2366', action: 'queue', note: 'm5 takes no timed runs' });
+  assert.equal(timed.isError, false, timed.text);
+  assert.match(store.work.get('w2366')!.log.at(-1)!, /m5 has room but cannot take it: m5 takes no timed runs/);
+  // A timed leg (w1969) is timed work too, whatever its title says.
+  assert.equal(unfitWhy({ ...queuedItem('w2365', 'w2351 leg', 'normal'), timedLeg: { for: 'w2351', forSession: 's', from: 'beast', small: ['lothlaptop'] } }, 'm5', f.fit), "m5 takes no timed runs (Ben's own Mac)");
+});

@@ -2153,6 +2153,13 @@ export interface WorkItem {
    */
   timedLeg?: { for: string; forSession: string; from: string; small: string[]; widened?: string; platform?: string };
   /**
+   * w2358: the dispatcher's brief (start_agent's prompt) that made this timed work, or named its OS, when start_agent refused
+   * it for that: needsTimed reads it as a note of that time, so decide_work queue and the room shares read the request as
+   * start_agent did (the m5's room is no room for it; nor is beast's for one the brief puts on the Mac), and a later note
+   * ("any OS") still wins.
+   */
+  timedBrief?: { at: string; text: string };
+  /**
    * Its last hand-back (w1532, server/machinePause.ts): its worker's machine was paused, so it was taken off that worker and
    * Queued for another computer, whose worker picks it up from `branch` with `note` (the worker's own line, or where it
    * stopped) and the `message` that would have resumed it, in its handover.
