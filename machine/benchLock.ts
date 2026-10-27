@@ -75,7 +75,7 @@ export function readBenchQueue(root: string | undefined, alive: (pid: number) =>
  * `no_timed_runs` {why, elsewhere} (w1861): this machine takes no timed runs, so bench_queue.py refuses every exclusive
  * ticket here and names the machines in `elsewhere`. Errors are logged, never thrown: the queue then goes on in its old order.
  */
-export function writeBenchPriorities(root: string | undefined, sessions: Record<string, BenchPriority>, at = new Date(), singleWorker?: boolean, noTimedRuns?: NoTimedRuns, timedAsk?: TimedAskMark, passed?: Record<string, PassedMark>): string | undefined {
+export function writeBenchPriorities(root: string | undefined, sessions: Record<string, BenchPriority>, at = new Date(), singleWorker?: boolean, noTimedRuns?: NoTimedRuns, timedAsk?: TimedAskMark, passed?: Record<string, PassedMark>, placed?: Record<string, string>): string | undefined {
   if (!root) return undefined;
   const dir = benchQueueDir(benchLockDir(root));
   const file = path.join(dir, 'priorities.json');
@@ -88,7 +88,10 @@ export function writeBenchPriorities(root: string | undefined, sessions: Record<
     // w1969: `timed_ask` {required, why}: whether workers here ask timed_place before an exclusive timing ticket
     // w1962: `passed`, the daemon's own marks (machine/benchRaise.ts), kept here so a restarted daemon goes on with them
     const kept = passed && Object.keys(passed).length ? { passed } : {};
-    fs.writeFileSync(tmp, JSON.stringify({ at: at.toISOString(), ...marks, ...(noTimedRuns ? { no_timed_runs: noTimedRuns } : {}), ...(timedAsk ? { timed_ask: timedAsk } : {}), ...kept, sessions }));
+    // w2413: `placed` {session: sandbox}, where each worker session runs now: bench_queue.py own_sandboxes lets that
+    // sandbox's editor ride along with the session's exclusive ticket (a worker placed again elsewhere, a timed_run ticket)
+    const where = placed && Object.keys(placed).length ? { placed } : {};
+    fs.writeFileSync(tmp, JSON.stringify({ at: at.toISOString(), ...marks, ...(noTimedRuns ? { no_timed_runs: noTimedRuns } : {}), ...(timedAsk ? { timed_ask: timedAsk } : {}), ...kept, ...where, sessions }));
     fs.renameSync(tmp, file);
     return file;
   } catch (e) {

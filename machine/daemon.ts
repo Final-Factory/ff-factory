@@ -1572,11 +1572,12 @@ export class Daemon {
       const tickets = queueTickets(benchLockDir(root), pidAlive);
       const placed = [...this.entries].map(([session, e]) => ({ session, sandbox: e.spec?.sandbox }));
       const base = { ...editorSessions(placed, this.benchMarks), ...this.benchMarks };
-      this.benchPassed = passedShared(tickets, this.benchPassed ?? readPassedMarks(root), new Date(), base);
+      const where = Object.fromEntries(placed.filter((p) => p.sandbox).map((p) => [p.session, p.sandbox!]));
+      this.benchPassed = passedShared(tickets, this.benchPassed ?? readPassedMarks(root), new Date(), base, where);
       const { sessions, raised } = raisedSessions(base, tickets, this.benchPassed);
-      const key = JSON.stringify([sessions, this.benchPassed, this.benchSent]);
+      const key = JSON.stringify([sessions, this.benchPassed, this.benchSent, where]);
       if (key === this.benchWritten) return;
-      if (writeBenchPriorities(root, sessions, new Date(), this.benchSent.singleWorker, this.benchSent.noTimedRuns, this.benchSent.timedAsk, this.benchPassed)) this.benchWritten = key;
+      if (writeBenchPriorities(root, sessions, new Date(), this.benchSent.singleWorker, this.benchSent.noTimedRuns, this.benchSent.timedAsk, this.benchPassed, where)) this.benchWritten = key;
       const now = raised.join(',');
       if (now !== this.benchRaised) {
         this.benchRaised = now;
