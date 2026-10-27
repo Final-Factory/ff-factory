@@ -185,8 +185,10 @@ export interface BlockerFacts {
   reportedSince?: (w: WorkItem, since: number) => boolean;
   /**
    * Whether a worker on `w` reported after `since` (ms) with what `waiter` waits for (w1869): its DONE, a `For <waiter>:`
-   * line, or a report on `w` with no still-open or paused line for it (server/ledgerRules.ts `reportDelivers`). A
-   * progress report (`w1785: still open: the A/B is running`) is not one.
+   * line, or a still-open line that waits on `waiter` (server/ledgerRules.ts `reportDelivers`). A progress report
+   * (`w1785: still open: the A/B is running`), a reply, or a turn end with no status line is not one (w2426). A pair run's
+   * client legs never deliver by themselves: its host leg's `For <waiter>:` line with DONE, or every leg's DONE
+   * (`pairDelivers`, w2426).
    */
   deliveredSince?: (w: WorkItem, since: number, waiter?: string) => boolean;
   /** The commit the portal runs now. */

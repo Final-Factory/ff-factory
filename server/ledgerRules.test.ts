@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { afterMergeReason, cleanupSettings, cutOffOf, deployStep, doneProblem, isRelease, mergedMentionsIn, mergePrs, pausedIn, ownerAt, partOfIdsIn, partOfReason, postDeployStep, prsOf, prUrlsIn, reportDelivers, reportVerdict, reportWaitsOn, requestIdsIn, stallCandidate, stillOpenIn, supersededBy, titleIdsIn, type PrRecord } from './ledgerRules.ts';
+import { afterMergeReason, pairDelivers, cleanupSettings, cutOffOf, deployStep, doneProblem, isRelease, mergedMentionsIn, mergePrs, pausedIn, ownerAt, partOfIdsIn, partOfReason, postDeployStep, prsOf, prUrlsIn, reportDelivers, reportVerdict, reportWaitsOn, requestIdsIn, stallCandidate, stillOpenIn, supersededBy, titleIdsIn, type PrRecord } from './ledgerRules.ts';
 import { reportClip } from './sessions.ts';
 import type { WorkItem } from '../shared/types.ts';
 
@@ -279,7 +279,7 @@ test('w915: pausedIn reads a worker\'s set-aside lines, by request, as written; 
   assert.equal(pausedIn('').size, 0);
 });
 
-test('w1869: a report delivers what a request blocked on it waits for only with DONE, a "For <waiter>:" line, or no progress line for it', () => {
+test('w1869, w2426: a report delivers what a request blocked on it waits for only with DONE, a "For <waiter>:" line, or a wait on it', () => {
   // w1820 waited on w1785's timing; this progress line cleared it.
   assert.equal(reportDelivers('B building.\n\nw1785: still open: the LothDesktop A/B is running…', 'w1785', 'w1820'), false);
   assert.equal(reportDelivers('**w1785: paused:** w1790 first', 'w1785', 'w1820'), false);
@@ -287,9 +287,9 @@ test('w1869: a report delivers what a request blocked on it waits for only with 
   assert.equal(reportDelivers('Timing: 41 ms.\n\n**For w1820:** A 41.2 ms, A 41.0 ms\n\nw1785: still open: the PR', 'w1785', 'w1820'), true);
   assert.equal(reportDelivers('For w1821: something else\n\nw1785: still open: the PR', 'w1785', 'w1820'), false, 'addressed to another request');
   assert.equal(reportDelivers('Learned: nothing new\nDONE: w1785', 'w1785', 'w1820'), true);
-  assert.equal(reportDelivers('Timing table in specs/633/timing.md.', 'w1785'), true, 'no status line at all: as before');
+  assert.equal(reportDelivers('Timing table in specs/633/timing.md.', 'w1785', 'w1820'), false, 'no status line at all: no longer (w2426)');
   assert.equal(reportDelivers('w1790: still open: the clips', 'w1785', 'w1820'), false, "only another request's progress");
-  assert.equal(reportDelivers('w1785 timing is in timing.md.\nw1790: still open: the clips', 'w1785', 'w1820'), true);
+  assert.equal(reportDelivers('w1785 timing is in timing.md.\nw1790: still open: the clips', 'w1785', 'w1820'), false, 'naming it is no result (w2426)');
   assert.equal(reportDelivers(undefined, 'w1785', 'w1820'), false);
 });
 
@@ -306,10 +306,28 @@ test('w2357: a report that says it waits on the waiter delivers to it (w2338 wai
 test("w2377: a timed leg's turn delivers to its parent only with a For line, DONE or a wait on it; a status-only turn or \"understood\" does not", () => {
   const status = "Still queued.\n\nw2338: still open: fix-side legs at e947f566c4 on sandbox/slot3-w2335 queued for biscuit's bench ticket";
   assert.equal(reportWaitsOn(status, 'w2338', 'w2335'), false, 'a branch named after the parent is no wait on it');
-  assert.equal(reportDelivers(status, 'w2338', 'w2335', true), false);
-  assert.equal(reportDelivers('Understood: I will wait for the bench ticket.', 'w2338', 'w2335', true), false, 'a reply with no still-open line');
-  assert.equal(reportDelivers('Understood: I will wait for the bench ticket.', 'w2338', 'w2335'), true, 'any other waiter: as before (w1869)');
-  assert.equal(reportDelivers(`${status}\n\nFor w2335: master 41.2 ms, fix 30.1 ms (specs/w2338/ab.md).`, 'w2338', 'w2335', true), true, 'a partial result with a For line');
-  assert.equal(reportDelivers('Both sides timed.\n\nDONE: w2338', 'w2338', 'w2335', true), true);
-  assert.equal(reportDelivers("w2338: still open: waiting for w2335's worker to push its fix commit", 'w2338', 'w2335', true), true, 'a wait on the parent (w2357)');
+  assert.equal(reportDelivers(status, 'w2338', 'w2335'), false);
+  assert.equal(reportDelivers('Understood: I will wait for the bench ticket.', 'w2338', 'w2335'), false, 'a reply with no still-open line');
+  assert.equal(reportDelivers('Understood: I will wait for the bench ticket.', 'w2338', 'w2320'), false, 'any other waiter too (w2426)');
+  assert.equal(reportDelivers(`${status}\n\nFor w2335: master 41.2 ms, fix 30.1 ms (specs/w2338/ab.md).`, 'w2338', 'w2335'), true, 'a partial result with a For line');
+  assert.equal(reportDelivers('Both sides timed.\n\nDONE: w2338', 'w2338', 'w2335'), true);
+  assert.equal(reportDelivers("w2338: still open: waiting for w2335's worker to push its fix commit", 'w2338', 'w2335'), true, 'a wait on the parent (w2357)');
+});
+
+test("w2426: a pair run delivers to its asker only by the host leg's For line with DONE, or every leg's DONE; a client leg's turn end never does", () => {
+  // w2425's client leg f4e9f56c, 2026-10-27 21:00 and 21:01 UTC, while the host leg was still building: w2419 resumed on both.
+  const client1 = 'My client player of 7dd91b2c6c is built (manifest confirms the commit). I\'ve told the host I\'m ready and am now waiting for its "listening" message with the port and seed.';
+  const client2 = 'Nothing has changed: my client player of 7dd91b2c6c is built and I\'m still waiting for the host leg (beast/slot4) to say it is listening. The "For w2419:" result line will come from the host leg\'s report once the run is over.';
+  for (const c of [client1, client2]) {
+    assert.equal(reportDelivers(c, 'w2425', 'w2419'), false, 'no status line: no delivery');
+    assert.equal(pairDelivers([undefined, c], 'w2425', 'w2419'), false, 'the host has not reported');
+  }
+  assert.equal(pairDelivers([undefined, 'For w2419: PASS\n\nDONE: w2425'], 'w2425', 'w2419'), false, "a client leg's For line and DONE: the host has not reported");
+  assert.equal(pairDelivers(['Host built.\n\nw2425: still open: running the game', client2], 'w2425', 'w2419'), false, 'host mid-run');
+  assert.equal(pairDelivers(['For w2419: PASS, 4800 heartbeats, hashes match\n\nw2425: still open: waiting for the client to end', client2], 'w2425', 'w2419'), false, 'the host result without its DONE');
+  assert.equal(pairDelivers(['For w2419: PASS, 4800 heartbeats, hashes match\n\nDONE: w2425', client2], 'w2425', 'w2419'), true, "the host's result and DONE");
+  assert.equal(pairDelivers(['Run over (result in my earlier report).\nDONE: w2425', 'Client side clean.\nDONE: w2425'], 'w2425', 'w2419'), true, 'every leg ended');
+  assert.equal(pairDelivers(["w2425: still open: waiting for w2419's worker to push a fix commit", client2], 'w2425', 'w2419'), true, 'the host waits on the asker (w2357)');
+  assert.equal(pairDelivers([undefined, "w2425: still open: waiting for w2419's worker to push a fix commit"], 'w2425', 'w2419'), false, "a client's wait line is no result");
+  assert.equal(pairDelivers([], 'w2425', 'w2419'), false, 'not started');
 });

@@ -22,7 +22,7 @@ import { run as runProc, type RunOptions, type RunResult } from './proc.ts';
 import { blockerVerdict, CI_REF, cycleBreak, gateSetter, gatesOf, newestFirst, RESUME_SWEEP_MS, waitCycles, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
 import { conditionalVerdict } from '../shared/conditional.ts';
 import { ghRunner } from './githubTokens.ts';
-import { reportDelivers, stillOpenIn } from './ledgerRules.ts';
+import { pairDelivers, reportDelivers, stillOpenIn } from './ledgerRules.ts';
 import { lastOpenLine, reportAt, requestWaitOf } from '../shared/workState.ts';
 import type { SessionInfo, WorkBlocker, WorkItem } from '../shared/types.ts';
 import type { RoomNow } from './placement.ts';
@@ -387,11 +387,18 @@ export class BlockerWatch {
           const s = store.sessions.get(sid);
           return !!s && !BUSY.has(s.status) && !!s.lastResult && (Date.parse(s.lastActivityAt) || 0) > since;
         }),
-      deliveredSince: (w: WorkItem, since: number, waiter?: string) =>
-        w.sessionIds.some((sid) => {
+      deliveredSince: (w: WorkItem, since: number, waiter?: string) => {
+        // w2426: a pair run delivers through its host leg's result or every leg's DONE, never one client leg's turn end.
+        if (w.pair) {
+          const legs = (w.pair.started?.legs ?? []).map((l) => store.sessions.get(l.session));
+          const fresh = legs.some((s) => !!s && !BUSY.has(s.status) && (Date.parse(s.lastActivityAt) || 0) > since);
+          return fresh && pairDelivers(legs.map((s) => (s && !BUSY.has(s.status) ? s.lastResult : undefined)), w.id, waiter);
+        }
+        return w.sessionIds.some((sid) => {
           const s = store.sessions.get(sid);
-          return !!s && !BUSY.has(s.status) && (Date.parse(s.lastActivityAt) || 0) > since && reportDelivers(s.lastResult, w.id, waiter, !!waiter && w.timedLeg?.for?.toLowerCase() === waiter.toLowerCase());
-        }),
+          return !!s && !BUSY.has(s.status) && (Date.parse(s.lastActivityAt) || 0) > since && reportDelivers(s.lastResult, w.id, waiter);
+        });
+      },
       portalSha: this.d.portalSha?.(),
       ...(this.d.daemonSha ? { daemonSha: this.d.daemonSha } : {}),
       ...(this.d.online ? { online: this.d.online } : {}),

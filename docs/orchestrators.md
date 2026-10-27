@@ -718,9 +718,17 @@ without one means it is off or failing, worth a person's look.
   turn after T whose report (`server/ledgerRules.ts` `reportDelivers`):
   - has `DONE: wX` (even one the ledger refuses while a PR is open: the result is in it), or
   - has a line `For <waiting request>: …`, or
-  - has no `wX: still open:` (or `NOT DONE`, `paused`) line for wX, and names wX or has no such line for any request.
+  - has a still-open or paused line for wX that waits on the waiting request (`reportWaitsOn`, below).
 
-  A progress report (a still-open or paused line for wX) or one about another request only leaves it Blocked. So that the result can be told from progress, when such a
+  A progress report, one about another request only, a reply ("understood") or a turn end with no status line at all
+  leaves it Blocked (w2426; before, a report with no still-open line for wX, or naming wX, cleared it).
+  **A pair run** (`WorkItem.pair`, w1945) delivers only through its legs in `pair.started.legs` (`pairDelivers`, w2426,
+  lothsahn: "a request blocked on a pair run resumes only once the host leg has reported its result (the "For wNNN:"
+  line and DONE), or once every leg has ended"): the host leg's (leg 1) report with both the `For <waiting request>:`
+  line and `DONE: wX`, a host still-open line that waits on the waiting request, or every leg's `DONE: wX`. A client
+  leg's turn never clears it, whatever it says: on 2026-10-27 at 21:00 and 21:01 UTC w2425's client leg ended two idle
+  turns ("still waiting for the host leg… The "For w2419:" result line will come from the host leg's report") while the
+  host was still building, and each resumed w2419's worker, which could have merged PR #2725 unchecked. So that the result can be told from progress, when such a
   gate is set the workers on wX are sent what it waits for and asked to mark the report that carries it with
   `For <waiting request>:` (`Orchestrators.tellReportWaited`; not a worker that waits on a person, whose declaration a
   message would end). The gate's `what` is what they are told, so name the result there ("dec9a619's LothDesktop timing
@@ -730,8 +738,8 @@ without one means it is off or failing, worth a person's look.
   unjam sweep found it). Three rules:
   - a report whose still-open or paused line for wX names the waiting request ("waiting for w2335's …") delivers to it
     (`reportWaitsOn`): the waiter has the half that is done and what is asked of it;
-  - a timed leg's report with a result for the request it was filed for clears that request's wait (`reportDelivers` with
-    `leg`, `timedLeg.for`): a `For <parent>:` line (a partial result too), `DONE: <leg>`, or a still-open line that waits
+  - a timed leg's report with a result for the request it was filed for clears that request's wait (`reportDelivers`;
+    since w2426 the same rule for every waiter): a `For <parent>:` line (a partial result too), `DONE: <leg>`, or a still-open line that waits
     on the parent ("waiting for w2335's worker to send its fix commit", read by `requestWaitOf`: a mere mention, a branch
     `sandbox/slot3-w2335`, is none); so does the leg itself turning Blocked after the parent's gate. A turn that says only
     that its bench ticket is still queued, or "understood", leaves the parent Blocked (w2377: w2338's turns woke w2335

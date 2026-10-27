@@ -510,24 +510,41 @@ export function pausedIn(text: string): Map<string, string> {
 /**
  * Whether a report from a worker on request `ref` carries what `waiter`, blocked on `ref` reporting, waits for (w1869;
  * lothsahn: a block on "w1785 reporting (dec9a619's LothDesktop timing …)" cleared on "w1785: still open: the LothDesktop
- * A/B is running…", and w1820's worker resumed with no timing). It does when the report has `DONE: <ref>`, or a line
- * `For <waiter>: …` (its worker is told to write one, Orchestrators.tellReportWaited), or has no still-open or paused line
- * for `ref` and either names it or has no such line at all. A progress report, or one only about another request's
- * progress, does not. A timed leg's report to the request that filed it (`leg`, w2377) delivers only by `DONE: <ref>`, the
- * `For <waiter>:` line, or a still-open line that waits on the waiter (`reportWaitsOn`): w2335 was woken four times on
- * 2026-10-27 by w2338's turns that said only that its bench ticket was still queued, or "understood".
+ * A/B is running…", and w1820's worker resumed with no timing). It does only with `DONE: <ref>`, a line `For <waiter>: …`
+ * (its worker is told to write one, Orchestrators.tellReportWaited), or a still-open line that waits on the waiter
+ * (`reportWaitsOn`, w2357). A progress report, a reply ("understood"), or a turn end with no status line at all does not:
+ * w2335 was woken four times on 2026-10-27 by its timed leg w2338's turns that said only that its bench ticket was still
+ * queued (w2377), and w2419 twice the same evening by its pair run w2425's client leg saying it waited for the host (w2426,
+ * lothsahn: "a request blocked on a pair run resumes only once the host leg has reported its result"). Before w2426 any
+ * other waiter also took a report with no still-open line, or one naming `ref`, as delivery.
  */
-export function reportDelivers(report: string | undefined, ref: string, waiter?: string, leg = false): boolean {
+export function reportDelivers(report: string | undefined, ref: string, waiter?: string): boolean {
   if (!report) return false;
+  if (doneIdsIn(report).includes(ref.toLowerCase())) return true;
+  return !!waiter && (reportFor(report, waiter) || reportWaitsOn(report, ref, waiter));
+}
+
+/** Whether a report has a line `For <waiter>: …` (w1869): the result a request blocked on its request's report waits for. */
+export function reportFor(report: string | undefined, waiter: string): boolean {
+  return !!report && /^w\d+$/i.test(waiter) && new RegExp(`^[\\s*_>\`-]*for\\s+${waiter.toLowerCase()}\\b[*_\`]*\\s*[:—–-]`, 'im').test(report);
+}
+
+/**
+ * Whether pair run `ref`'s legs have delivered its result to `waiter`, the request that asked for it (w2426, lothsahn: "a
+ * request blocked on a pair run resumes only once the host leg has reported its result (the "For wNNN:" line and DONE), or
+ * once every leg has ended. A leg's mid-run turn end (waiting on message_pair, a build finished) must not unblock it").
+ * `legs` are the legs' latest finished reports, leg 1 (the host) first (undefined: none yet, or mid-turn). It delivers when
+ * the host's report has both the `For <waiter>:` line and `DONE: <ref>`, when the host's still-open line waits on the
+ * waiter (w2357: a cycle nothing else wakes), or when every leg's report says `DONE: <ref>`. A client leg's report never
+ * delivers by itself, whatever it names: w2425's client said "The "For w2419:" result line will come from the host leg's
+ * report" while the host was still building, and w2419 resumed on it (2026-10-27 21:00 and 21:01 UTC).
+ */
+export function pairDelivers(legs: readonly (string | undefined)[], ref: string, waiter?: string): boolean {
   const id = ref.toLowerCase();
-  if (doneIdsIn(report).includes(id)) return true;
-  if (waiter && /^w\d+$/i.test(waiter) && new RegExp(`^[\\s*_>\`-]*for\\s+${waiter.toLowerCase()}\\b[*_\`]*\\s*[:—–-]`, 'im').test(report)) return true;
-  const open = stillOpenIn(report);
-  const paused = pausedIn(report);
-  if (waiter && reportWaitsOn(report, ref, waiter)) return true;
-  if (leg) return false;
-  if (open.has(id) || paused.has(id)) return false;
-  return (!open.size && !paused.size) || new RegExp(`\\b${id}\\b`, 'i').test(report);
+  const host = legs[0];
+  if (host && waiter && doneIdsIn(host).includes(id) && reportFor(host, waiter)) return true;
+  if (host && waiter && reportWaitsOn(host, ref, waiter)) return true;
+  return legs.length > 0 && legs.every((r) => !!r && doneIdsIn(r).includes(id));
 }
 
 /**
