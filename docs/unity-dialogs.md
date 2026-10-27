@@ -89,6 +89,11 @@ ambiguous is "notify": it is reported to the orchestrator, which restarts the ed
     `HasARGV` right before showing this dialog) that reloads without asking. It is not used: it would
     also throw away unsaved scene edits.
 
+- **Recovering Scene Backups** (w2255): a start with no `*.unity` file changed moves `Temp/__Backupscenes` into
+  `Logs/scene-backups-<time>` before it launches (`setSceneBackupsAside` in `machine/unity.ts`), so the alert never shows
+  and the backups are kept. On a Mac with its screen locked the watch saw no window: m5/slot1's editor sat at the alert
+  (`Application::HandleDanglingSceneBackups` -> `NSAlert runModal`) for 30 min, 2026-10-27 00:36Z to 01:05Z, and a Live view's
+  restage hung behind it. With a changed scene file the folder stays and the rule above sends the dialog to a person.
 - **Administrator**: avoided by never running elevated (above). This is the one that stalled
   blackhole-master.
 - **Safe Mode** (w1495, measured on 6000.3.19f1, lothdesktop/slot1, 2026-10-18, with a deliberate `error CS0103` in a

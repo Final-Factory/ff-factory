@@ -341,6 +341,29 @@ test('w1839: a daemon that restarted starts the view again with its recipe, and 
   assert.deepEqual(fresh.ops.at(-1)?.op, 'restage');
 });
 
+test('w2255: a daemon that restarted mid-replay is asked for it again, and the view is not left "setting up" for good', async () => {
+  const k = hub();
+  await k.h.tool(k.session, { action: 'start', materials: ['M'], stage: [{ load: SAVE }, { ffauto: 'ui.hide|true' }] });
+  const id = k.info().liveId;
+  assert.equal(await k.h.restage(id, 'Ben'), true);
+  assert.equal(k.info().restaging?.who, 'Ben');
+  k.ops.length = 0;
+  await k.h.daemonHello('beast', []);
+  assert.deepEqual(k.ops.map((o) => o.op), ['start', 'restage']);
+  assert.equal(k.info().restaging?.who, 'Ben');
+  k.h.staged('beast', { type: 'live_staged', liveId: id, ok: true, detail: 'staged', ms: 1000, legs: {} });
+  assert.equal(k.info().restaging, undefined);
+  assert.equal(await k.h.restage(id, 'Ben'), true);
+
+  // A new daemon that refuses the replay leaves the view free for the next opening, not marked for good.
+  let calls = 0;
+  const refusing = hub({ live: async (op) => { if (op.op === 'restage' && ++calls > 1) throw new Error('busy'); return 'ok'; } });
+  await refusing.h.tool(refusing.session, { action: 'start', materials: ['M'], stage: [{ ffauto: 'ui.hide|true' }] });
+  assert.equal(await refusing.h.restage(refusing.info().liveId, 'Ben'), true);
+  await refusing.h.daemonHello('beast', []);
+  assert.equal(refusing.info().restaging, undefined);
+});
+
 // ---------------------------------------------------------------------------------------------------- the wake
 
 const later = () => new Promise((r) => setImmediate(r));

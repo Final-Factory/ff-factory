@@ -325,12 +325,18 @@ export class LiveHub {
     for (const v of [...this.views.values()]) {
       if (v.info.machineId !== machineId || ids.has(v.info.liveId)) continue;
       const { liveId, sessionId, sandbox, fps, width, materials } = v.info;
+      // A replay the old daemon was running went with it and will never say how it went: its mark held the view "setting
+      // up" for good and refused every later restage, a person's opening included (w2255). Ask the new daemon for it again.
+      const lost = v.info.restaging;
+      if (lost) this.touch(v, { restaging: undefined });
       if (running) this.setState(v, 'starting', "the machine's daemon restarted: starting the stream again");
       try {
         await this.deps.machines.live(machineId, { op: 'start', liveId, sessionId, sandbox, fps, width, materials, ...(v.stage.length ? { stage: v.stage } : {}) });
       } catch (e) {
         if (this.views.get(liveId) === v) this.setState(v, 'holding', `the machine's daemon restarted and the view did not start again: ${(e as Error).message}`);
+        continue;
       }
+      if (lost && this.views.get(liveId) === v) await this.restage(liveId, lost.who);
     }
     for (const r of running ?? []) {
       if (this.views.has(r.liveId)) continue;

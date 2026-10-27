@@ -223,6 +223,11 @@ first frame was that turn. Now the worker records once how it staged the view, a
   Meanwhile the view's `holding` detail is the progress ("setting the view up again: loading the save ..."), so the 1 s tick does not
   overwrite it with "not in play mode", and the view reads `setting-up` (below). The streaming itself starts by itself once the game
   is in play mode, as always.
+- **A daemon that restarts mid-replay** loses the replay, and it never sends `live_staged`. Until w2255 the portal's
+  `restaging` mark then stayed for good: status read "The daemon is setting it up again now" and every later restage was
+  refused ("it is setting it up already"), a person's opening included (m5/slot1, 2026-10-27 00:40Z, the m5 daemon restarted
+  4 min into a replay). Now `daemonHello` clears the mark of a view the new daemon does not run, starts the view and asks for
+  the replay again.
 - **When it runs instead of the wake** (`LiveIdleCloser.viewerOpened`, `nudge`; `LiveHub.restage`): a person opens a view whose
   editor is stopped, crashed or idle-closed, or whose game is not in play mode, and
   - the view has a recipe, and its machine's daemon offers `liveRestage` (hello), and it is not replaying already;
