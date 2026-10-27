@@ -2742,7 +2742,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
         try {
           this.sessions.send(sid, `[about ${x.id} "${clip(x.title, 80)}"]
 ${waiter.id} ("${clip(waiter.title, 80)}") is blocked until a report of yours on ${x.id} carries: ${g.what}.
-When one does, put a line "For ${waiter.id}: <the result, or where it is>" in that report: that line, or your "DONE: ${x.id}", unblocks ${waiter.id}. A "${x.id}: still open:" progress line does not. Nothing else changes: carry on with your work (between turns, end this one with a line).`, 'system');
+${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line "For ${waiter.id}: <the result, or where it is>" and its "DONE: ${x.id}", or every leg's "DONE: ${x.id}", unblocks ${waiter.id}; another leg's turn end never does, whatever it says.` : `When one does, put a line "For ${waiter.id}: <the result, or where it is>" in that report: that line, or your "DONE: ${x.id}", unblocks ${waiter.id}.`} A "${x.id}: still open:" progress line does not. Nothing else changes: carry on with your work (between turns, end this one with a line).`, 'system');
           out.push(sid);
         } catch {
           // gone or at a limit: its DONE still clears the block
@@ -4165,6 +4165,7 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
     w.waitRecorded = a.key;
     this.stamp(w, `blocked on ${gatesName([gate], this.now().getTime())} (${gate.what}): the ledger recorded the wait its worker ${sessionId}'s report names, which no blocked_on recorded (w2422: "${clip(a.line, 120)}"); that worker is resumed when it clears`);
     this.store.putWork(w);
+    this.tellReportWaited(w, [gate]);
     console.warn(`ledger: ${w.id}: recorded the wait on ${ref} its worker ${sessionId}'s report names, with no blocked_on (w2422)`);
     return true;
   }

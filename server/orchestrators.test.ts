@@ -2215,7 +2215,10 @@ test('w643: decide_work block records a structured blocker; the request reads Bl
   assert.equal((await watch.tick()).size, 0, 'a progress report does not unblock it');
   assert.equal(store.work.get('w2')!.status, 'blocked');
   // w1's worker reports the table (a turn ends after the block): w2 unblocks, back to the dispatcher, which is told to start it.
-  store.putSession({ ...store.sessions.get('k1')!, lastActivityAt: new Date(Date.now() + 2000).toISOString(), lastResult: 'Timing table in specs/633/timing.md.' });
+  // w2426: a turn end with no status line is no result any more; the report marked "For w2:" is.
+  store.putSession({ ...store.sessions.get('k1')!, lastActivityAt: new Date(Date.now() + 1500).toISOString(), lastResult: 'Timing table in specs/633/timing.md.' });
+  assert.equal((await watch.tick()).size, 0, 'an unmarked turn end does not unblock it (w2426)');
+  store.putSession({ ...store.sessions.get('k1')!, lastActivityAt: new Date(Date.now() + 2000).toISOString(), lastResult: 'Timing table done.\n\nFor w2: specs/633/timing.md' });
   const did = await watch.tick();
   assert.match(did.get('w2')!, /^clear: w1's worker reported/);
   assert.equal(store.work.get('w2')!.status, 'new');
@@ -7306,4 +7309,35 @@ test('w2422: a stopped worker whose report says it is blocked on another request
   Object.assign(info, { lastResult: 'w1: still open: blocked on w2 again', lastResultAt: new Date(clock - REPORTED_WAIT_MS - 60_000).toISOString() });
   assert.equal((await watch.tick()).has('w1'), false);
   assert.equal(w.blocked, undefined);
+});
+
+test("w2426: a request Blocked on a pair run's report stays Blocked through its client leg's mid-run turns (w2425's client woke w2419 twice), and clears on the host leg's For line with DONE", async (t) => {
+  const { store, agents, o, dispatcher, call } = await setupOnMachine(t);
+  agentsRoom(agents, []);
+  // w1 stands for w2419 (the PR's worker), w2 for w2425 (its pair run): leg 1 (the host) h, leg 2 (the client) c.
+  const pair = { legs: 2, for: 'w1', started: { at: T0, legs: [{ session: 'h', sandbox: 'beast/slot4' }, { session: 'c', sandbox: 'lothdesktop/slot1' }] } };
+  putRequests(store, [{ id: 'w1', status: 'active' }, { id: 'w2', title: 'Pair run for w1: determinism check on PR #2725', status: 'active', pair }]);
+  const r = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'block', note: 'x', blocker: { kind: 'request', ref: 'w2', on: 'report', what: 'w2 host leg\'s "For w1:" PASS/FAIL on PR #2725' } });
+  assert.equal(r.isError, false, r.text);
+  const leg = (sid: string, report: string, ms: number, status: 'idle' | 'running' = 'idle') =>
+    store.putSession({ id: sid, kind: 'worker', title: `w2: leg`, status, permissionMode: 'default', createdAt: T0, lastActivityAt: new Date(Date.now() + ms).toISOString(), turns: 2, costUsd: 1, pendingPermissions: [], lastResult: report });
+  store.putWork({ ...store.work.get('w2')!, sessionIds: ['h', 'c'] });
+  const watch = new BlockerWatch({ store, orchestrators: o });
+  leg('h', '', 500, 'running');
+  const client = [
+    'My client player of 7dd91b2c6c is built (manifest confirms the commit). I\'ve told the host I\'m ready and am now waiting for its "listening" message with the port and seed. That message will resume me.',
+    'Nothing has changed: my client player of 7dd91b2c6c is built and I\'m still waiting for the host leg (beast/slot4) to say it is listening. The "For w1:" result line will come from the host leg\'s report once the run is over.',
+    'Client connected; the run is going.\n\nw2: still open: the run, then my DONE',
+  ];
+  for (const [i, text] of client.entries()) {
+    leg('c', text, 1000 * (i + 1));
+    assert.equal((await watch.tick()).get('w1'), undefined, `client turn ${i}: the host has not reported`);
+    assert.equal(store.work.get('w1')!.status, 'blocked');
+  }
+  leg('h', 'Host built and listening.\n\nw2: still open: running the game for 5 minutes', 5000);
+  assert.equal((await watch.tick()).get('w1'), undefined, 'the host mid-run');
+  assert.equal(store.work.get('w1')!.status, 'blocked');
+  leg('h', 'For w1: PASS on 7dd91b2c6c, 4800 heartbeats, desync hashes match, no errors.\n\nDONE: w2', 6000);
+  assert.match((await watch.tick()).get('w1') ?? '', /^clear: w2's worker reported/);
+  assert.notEqual(store.work.get('w1')!.status, 'blocked');
 });
