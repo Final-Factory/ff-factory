@@ -46,6 +46,13 @@ export class BenchWarner {
       if (!w?.ticket || !w.session || typeof w.deadline !== 'number') continue;
       const key = `${machineId}:${w.ticket}:${w.deadline}`;
       if (this.sent.has(key)) continue;
+      // w2412: an editor's own life ticket ("running editor <sandbox>", session editor:<sandbox>, w1962) is warned when an
+      // exclusive ticket waits behind it; no worker holds it (the turn closes that editor and tells its worker, w1829).
+      if (w.session.startsWith('editor:')) {
+        this.sent.set(key, now);
+        this.d.log?.(`bench warning for ${w.ticket} on ${machineId}: it is the ${w.session.slice(7)} editor's own ticket (w1962), held while that editor runs; no worker to tell`);
+        continue;
+      }
       const info = this.d.session(w.session);
       if (!info) {
         this.sent.set(key, now);
