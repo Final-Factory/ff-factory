@@ -41,6 +41,10 @@ export interface UnityDeps {
   now(): number;
   /** Turn App Nap off for the editor app at `bin` (optional: the real Mac writes NSAppSleepDisabled). */
   noAppNap?(bin: string): Promise<void>;
+  /** No *.unity file in the clone at `dir` has uncommitted changes (git status); false when git cannot tell (w2255). */
+  sceneFilesClean?(dir: string): Promise<boolean>;
+  /** Move a folder (w2255: Unity's scene backups, set aside before a launch). */
+  move?(from: string, to: string): void;
 }
 
 const norm = (p: string) => p.replace(/[\\/]+$/, '');
@@ -363,6 +367,7 @@ export class MacUnity {
     if (eds.length) return `Already running (pid ${eds.map((e) => e.pid).join(', ')}).`;
     const lock = this.lock;
     if (this.d.exists(lock)) this.d.remove(lock); // no editor has the project open, so the lock is stale
+    const aside = await this.setSceneBackupsAside();
     const bin = this.bin();
     await this.noAppNap(bin);
     const pid = await this.d.launch(bin, ['-projectPath', this.repo, ...(this.logFile ? ['-logFile', this.logFile] : [])], this.repo);
@@ -370,7 +375,29 @@ export class MacUnity {
       await this.d.sleep(1000);
       if (this.editors(await this.d.procs()).length) break;
     }
-    return `Started ${bin} (pid ${pid}). The Unity MCP bridge comes up once the project has loaded (a minute or more); wait for it before Unity MCP calls.`;
+    return `${aside ? `${aside}. ` : ''}Started ${bin} (pid ${pid}). The Unity MCP bridge comes up once the project has loaded (a minute or more); wait for it before Unity MCP calls.`;
+  }
+
+  /**
+   * Unity's scene backups of a killed editor (`Temp/__Backupscenes`) make the next launch stop at a modal "Recovering Scene
+   * Backups" alert before the project loads. On a Mac whose screen is locked the dialog watch sees no window to press "No"
+   * on, so the editor sat there, the bridge never came up and a Live view's restage hung (w2255: m5/slot1, 2026-10-27
+   * 00:36Z to 01:05Z, after the idle close's kill at 2026-10-26 20:00Z; `Application::HandleDanglingSceneBackups` ->
+   * `NSAlert runModal` in a sample of the editor). With no scene file changed (the watch's own condition for "No"), the
+   * folder is moved into `Logs/scene-backups-<time>` instead: kept, as "No" does not, and the alert never shows.
+   */
+  private async setSceneBackupsAside(): Promise<string | undefined> {
+    const p = this.platform === 'win32' ? path.win32 : path.posix;
+    const dir = p.join(this.repo, 'Temp', '__Backupscenes');
+    if (!this.d.move || !this.d.sceneFilesClean || !this.d.exists(dir)) return undefined;
+    try {
+      if (!(await this.d.sceneFilesClean(this.repo))) return undefined;
+      const rel = `Logs/scene-backups-${new Date(this.d.now()).toISOString().replace(/[:.]/g, '-')}`;
+      this.d.move(dir, p.join(this.repo, ...rel.split('/')));
+      return `set Unity's scene backups of a killed editor aside in ${rel}, so the launch does not stop at "Recovering Scene Backups"`;
+    } catch {
+      return undefined; // the watch's rule still answers the dialog where it can see it
+    }
   }
 
   /**
@@ -478,6 +505,11 @@ function realDepsMac(): UnityDeps {
     remove: (p) => fs.rmSync(p, { force: true }),
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     now: () => Date.now(),
+    sceneFilesClean: (dir) => sceneFilesUnchanged(dir),
+    move: (from, to) => {
+      fs.mkdirSync(path.dirname(to), { recursive: true });
+      fs.renameSync(from, to);
+    },
     noAppNap: async (bin) => {
       // .../Unity.app/Contents/MacOS/Unity -> the app's bundle id (Unity has used com.unity3d.UnityEditor5.x for years).
       const app = bin.replace(/\/Contents\/MacOS\/[^/]+$/, '');

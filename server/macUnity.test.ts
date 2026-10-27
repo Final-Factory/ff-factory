@@ -65,6 +65,25 @@ test('mac unity: stop is graceful, then forced; force kills at once; the stale l
   assert.match(await u.status(), /^running: pid \d+/);
 });
 
+test('w2255: start sets a killed editor\'s scene backups aside when no scene file changed, so no "Recovering Scene Backups" alert', async () => {
+  const { world, deps } = fakeMac();
+  const moved: string[] = [];
+  let clean = true;
+  const u = new MacUnity(REPO, { ...deps, sceneFilesClean: async () => clean, move: (a, b) => { moved.push(`${a} -> ${b}`); world.files.delete(a); } }, () => BIN);
+  world.files.add(`${REPO}/Temp/__Backupscenes`);
+  clean = false;
+  assert.doesNotMatch(await u.start(), /scene backups/);
+  assert.deepEqual(moved, [], 'a changed scene file: the backups may hold work, so a person decides at the dialog');
+  world.procs = [];
+  clean = true;
+  const out = await u.start();
+  assert.match(out, /^set Unity's scene backups of a killed editor aside in Logs\/scene-backups-2026-09-24T16-00-\d\d-\d{3}Z, so the launch/);
+  assert.match(moved[0], /^\/Users\/u\/games\/MyGame\/Temp\/__Backupscenes -> \/Users\/u\/games\/MyGame\/Logs\/scene-backups-/);
+  world.procs = [];
+  assert.doesNotMatch(await u.start(), /scene backups/, 'none left: nothing to do');
+  assert.equal(moved.length, 1);
+});
+
 test('mac unity watch: a hung editor is restarted; a quit one left closed; a crash restarted; at most 3 in 30 min', async () => {
   const { world, editor, u } = fakeMac();
   const reports: string[] = [];
