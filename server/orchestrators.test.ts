@@ -6969,3 +6969,42 @@ test('w2357: the blocker watch finds a wait cycle that no report clears (a gate 
   assert.ok(warned.some((l) => /blocker watch: CYCLE: w1 -> w2 -> w1: resuming w1/.test(l)), warned.join('\n'));
   assert.match(store.work.get('w1')!.log.join('\n'), /unblocked: .*a wait cycle \(w1 -> w2 -> w1\)/);
 });
+
+// ---------------------------------------------------------------- w2371: a past wait is no wait cycle
+// w2335 (the Leech fix) was woken three times between 08:54Z and 08:56Z on 2026-10-27 by "a wait cycle (w2335 -> w2338
+// -> w2335)": its timed leg w2338's newest report still said it waited for w2335's fix commit, which w2335's worker had
+// pushed in a turn after that report, and w2338 waited only for a free sandbox on biscuit (a message queued for it).
+async function w2371Setup(t: Parameters<typeof setupOnMachine>[0]) {
+  const env = await setupOnMachine(t);
+  agentsRoom(env.agents, []);
+  putRequests(env.store, [{ id: 'w1', status: 'active' }, { id: 'w2', title: 'Timed leg for w1: Leech stack probe', status: 'active', needs: 'game', timedLeg: { for: 'w1', forSession: 'p1', from: 'pc', small: ['biscuit'] } }]);
+  // The leg's report, a minute ago: it waits for the parent's commit.
+  putReport(env.store, 'w2', 'k2', "w2: still open: waiting for w1's worker p1 to send its fix commit on sandbox/slot3-w1, then the fix-side run", -60_000);
+  return env;
+}
+
+test("w2371: a timed leg's past wait on its parent is no cycle once the parent's worker finished a turn after it: the parent stays Blocked on the leg", async (t) => {
+  const { store, o, dispatcher, call } = await w2371Setup(t);
+  // The parent's worker read that report and pushed its commit in a turn that ended after it, then blocked again.
+  store.putSession({ id: 'p1', kind: 'worker', title: 'w1: Leech', status: 'idle', permissionMode: 'default', createdAt: T0, lastActivityAt: new Date().toISOString(), lastResultAt: new Date(Date.now() - 1000).toISOString(), turns: 5, costUsd: 1, pendingPermissions: [], lastResult: 'Pushed e947f566c4.\n\nw1: still open: blocked on w2 reporting' });
+  store.putWork({ ...store.work.get('w1')!, sessionIds: ['p1'] });
+  const b = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'block', note: 'x', blocker: { kind: 'request', ref: 'w2', on: 'report', what: 'w2 reporting' } });
+  assert.equal(b.isError, false, b.text);
+  const watch = new BlockerWatch({ store, orchestrators: o });
+  for (let i = 0; i < 3; i++) assert.equal((await watch.tick()).get('w1'), undefined, `tick ${i}: no cycle`);
+  assert.equal(store.work.get('w1')!.status, 'blocked');
+  assert.doesNotMatch(store.work.get('w1')!.log.join('\n'), /wait cycle/);
+});
+
+test('w2371: a timed leg whose worker has a message waiting for a sandbox waits for capacity, not on its parent: no cycle', async (t) => {
+  const { store, o, dispatcher, call } = await w2371Setup(t);
+  store.putSession({ ...store.sessions.get('k2')!, queuedSend: 'no sandbox on biscuit is free' });
+  const b = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'block', note: 'x', blocker: { kind: 'request', ref: 'w2', on: 'report', what: 'w2 reporting' } });
+  assert.equal(b.isError, false, b.text);
+  const watch = new BlockerWatch({ store, orchestrators: o });
+  assert.equal((await watch.tick()).get('w1'), undefined);
+  assert.equal(store.work.get('w1')!.status, 'blocked');
+  // Control: the same leg with no message waiting and a parent that has not run since its report is a cycle (w2357).
+  store.putSession({ ...store.sessions.get('k2')!, queuedSend: undefined });
+  assert.match((await watch.tick()).get('w1') ?? '', /^cycle: a wait cycle \(w1 -> w2 -> w1\): w1 filed the timed leg in it/);
+});
