@@ -55,6 +55,9 @@ test('w1746: what is not activity: a session gone, a tool left over between turn
   assert.equal(block({ status: 'error', pendingPermissions: [{}] as unknown as SessionInfo['pendingPermissions'] }), undefined);
   // A check-in further off: its wake starts the editor again, so it does not hold it now.
   assert.equal(block({ wakeAt: iso(NOW + min(90)) }), undefined);
+  // A check-in long past has fired: it holds nothing (w2255: one from 21:31Z held m5/slot1's editor open past 00:00Z).
+  assert.equal(block({ wakeAt: iso(NOW - min(150)) }), undefined);
+  assert.equal(block({ wakeAt: iso(NOW - min(1)) }), `w1 has a check-in pending (${iso(NOW - min(1))})`, 'one just due is still firing');
   // A stopped worker's check-in soon still holds it.
   assert.equal(block({ status: 'stopped', wakeAt: iso(NOW + min(5)) }), `w1 has a check-in pending (${iso(NOW + min(5))})`);
   // The other worker of the sandbox, stopped with a tool left over, does not hold it either.

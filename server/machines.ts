@@ -2205,7 +2205,9 @@ export class MachineManager {
         // daemon's copy keeps the sandbox it first ran in); the daemon owns run state.
         // The account its process started on (ranAs, ranFor) is the portal's too: the daemon keeps the copy of the session's
         // first start, which would put a restart on another person's tokens back on the first account (w1076).
-        const { id: _i, kind: _k, machineId: _m, standingId: _s, sandboxId: _b, title: _t, createdAt: _c, label: _l, labelAt: _la, activeTool: _at, stoppedOnPurpose: _sp, waitingOn: _wo, hostFailure: _hf, machineSandbox: _ms, placeReleased: _pr, movedFrom: _mf, liveLost: _ll, releaseDue: _rd, savedWork: _sw, ranAs: _ra, ranFor: _rf, ranOn: _ro, ...run } = msg.info;
+        // Its check-in and queued message are the portal's waker's (Agents.syncWaiting): the daemon's copy is the one sent with its
+        // first send, so a check-in long past came back on every report and held an idle Live view's editor open (w2255).
+        const { id: _i, kind: _k, machineId: _m, standingId: _s, sandboxId: _b, title: _t, createdAt: _c, label: _l, labelAt: _la, activeTool: _at, stoppedOnPurpose: _sp, waitingOn: _wo, hostFailure: _hf, machineSandbox: _ms, placeReleased: _pr, movedFrom: _mf, liveLost: _ll, releaseDue: _rd, savedWork: _sw, ranAs: _ra, ranFor: _rf, ranOn: _ro, wakeAt: _wa, wakeNote: _wn, queuedSend: _qs, queuedOn: _qo, ...run } = msg.info;
         // The portal sees the daemon's events as they come (Store.noteActivity): never step activity back.
         if (run.lastActivityAt && s.info.lastActivityAt && run.lastActivityAt < s.info.lastActivityAt) run.lastActivityAt = s.info.lastActivityAt;
         // "The login of the computer it runs on", there: this Mac's login, not this host's. On the portal's own host

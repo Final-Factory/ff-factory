@@ -8,6 +8,7 @@
 // why not). The view, the sandbox, its branch and the conversation stay. The editor starts again at the next message to a
 // worker there (the daemon's `send`); a person who opens the view wakes its worker, so it starts the editor and stages the
 // view again by itself.
+import { OVERDUE_MS } from '../shared/agentState.ts';
 import type { LiveViewInfo, MachineSandbox, SessionInfo } from '../shared/types.ts';
 
 export const LIVE_IDLE_DEFAULT_MINUTES = 15;
@@ -56,7 +57,8 @@ export function liveIdleBlock(
   if (v.viewers > 0) return `${v.viewers} page${v.viewers > 1 ? 's' : ''} watching`;
   for (const s of f.sessions) {
     const wake = s.wakeAt ? Date.parse(s.wakeAt) : f.wakePending(s.id) ? now : undefined;
-    const wakeNear = wake !== undefined && !(wake - now > LIVE_IDLE_WAKE_HOLD_MS);
+    // A check-in long past has fired or is failing to (shared/agentState.ts OVERDUE_MS): it holds nothing (w2255).
+    const wakeNear = wake !== undefined && wake > now - OVERDUE_MS && !(wake - now > LIVE_IDLE_WAKE_HOLD_MS);
     if (GONE.has(s.status)) {
       if (wakeNear) return `${s.id} has a check-in pending${s.wakeAt ? ` (${s.wakeAt})` : ''}`;
       continue;
