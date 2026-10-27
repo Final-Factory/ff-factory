@@ -7073,3 +7073,18 @@ test('w2358: the holds read the computers and the room once per pass, not once p
   o.flagQueuedWithRoom(f);
   assert.ok(places <= 2 && facts <= 3, `places() ${places}, roomFacts() ${facts} after the WRONG flag`);
 });
+
+test('w2358: one workLive pass computes the computers once, for the room, the room facts and the holds alike', (t) => {
+  // After #722 the portal still spent 10-21 s a minute in places() (stall profile, 2026-10-27 11:04-11:11Z) against 4.4-9.8 s
+  // before #720: workLive read places() five times a pass (roomExtras > roomFacts > roomNow, roomNow, the holds' memo).
+  const { store, agents } = setup(t);
+  let n = 0;
+  (agents as unknown as { placesNow: () => unknown[] }).placesNow = () => (n++, []);
+  for (let i = 0; i < 5; i++) store.putWork(queuedItem(`w${3100 + i}`, `queued game work ${i}`, 'normal'));
+  agents.workLive();
+  assert.equal(n, 1, `placesNow ran ${n} times in one workLive`);
+  // Outside a pass each read is fresh again (start_agent's checks).
+  agents.places();
+  agents.places();
+  assert.equal(n, 3);
+});
