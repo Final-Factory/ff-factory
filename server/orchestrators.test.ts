@@ -7049,3 +7049,22 @@ test('w2371: a timed leg whose worker has a message waiting for a sandbox waits 
   store.putSession({ ...store.sessions.get('k2')!, queuedSend: undefined });
   assert.match((await watch.tick()).get('w1') ?? '', /^cycle: a wait cycle \(w1 -> w2 -> w1\): w1 filed the timed leg in it/);
 });
+
+test('w2358: the holds read the computers and the room once per pass, not once per queued request and computer', (t) => {
+  // After #720 went live on 2026-10-27 workLive asked pairHoldProblem and timedHoldProblem for every queued request and every
+  // computer with room, each reading places() and roomFacts() afresh: the event loop blocked 46.8 s at 10:02:11Z.
+  const { store, agents, o } = setup(t);
+  const ids = ['beast', 'biscuit', 'm3', 'lothlaptop', 'lothdesktop'];
+  const f: RoomNow = { game: ids, agent: ids, held: [], fit: Object.fromEntries(ids.map((id) => [id, { platform: 'win32' }])) };
+  (agents as unknown as { roomNow: () => string[] }).roomNow = () => ids;
+  let places = 0;
+  let facts = 0;
+  (agents as unknown as { places: () => unknown[] }).places = () => (places++, ids.map((id) => ({ id, freeSandboxes: 1 })));
+  agents.roomFacts = () => (facts++, f);
+  for (let i = 0; i < 20; i++) store.putWork(queuedItem(`w${3000 + i}`, `queued game work ${i}`, 'normal'));
+  agents.workLive();
+  assert.ok(places <= 2 && facts <= 2, `places() ${places}, roomFacts() ${facts} for 20 queued requests on 5 computers`);
+  // Nor the ping's and the WRONG flag's reads, in the same run of code.
+  o.flagQueuedWithRoom(f);
+  assert.ok(places <= 2 && facts <= 3, `places() ${places}, roomFacts() ${facts} after the WRONG flag`);
+});
