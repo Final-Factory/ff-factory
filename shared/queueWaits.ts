@@ -46,9 +46,12 @@ export function benchWaitOn(machine: string, b: BenchState, mine: BenchTicketGla
     const more = b.runningCount > names.length ? ` and ${b.runningCount - names.length} more` : '';
     const held = `held by ${b.runningCount} shared ticket${b.runningCount === 1 ? '' : 's'}: ${names.join(', ')}${more}`;
     // A shared ticket waits only behind an exclusive one ahead of it (nobody passes a waiting exclusive ticket).
-    const ahead = mine.mode === 'shared' ? (b.waiters ?? []).find((t) => t.mode === 'exclusive' && t.ahead < mine.ahead) : undefined;
+    const ahead = mine.mode === 'shared' ? [...(b.waiters ?? []), ...(b.nextExclusive ? [b.nextExclusive] : [])].find((t) => t.mode === 'exclusive' && !t.parked && t.ahead < mine.ahead) : undefined;
     if (ahead) return `the shared bench lock on ${machine} (a shared lock, ${held}; behind the exclusive ticket ${ticketName(ahead)}, which waits for them; ${place})`;
-    return `the shared bench lock on ${machine} (a shared lock, ${held}; an exclusive ticket waits for all of them to finish; ${place})`;
+    // w2410: said only of an exclusive ticket, which waits for every shared holder; a shared one with no exclusive ticket
+    // ahead of it was told "an exclusive ticket waits for all of them to finish" when none did (BEAST, 2026-10-27).
+    if (mine.mode === 'exclusive') return `the shared bench lock on ${machine} (a shared lock, ${held}; an exclusive ticket waits for all of them to finish; ${place})`;
+    return `the shared bench lock on ${machine} (a shared lock, ${held}; no exclusive ticket waits ahead of it; ${place})`;
   }
   return `the bench queue on ${machine} (${place})`;
 }
@@ -64,6 +67,8 @@ export function queueWaitsOf(machine: string, st: Pick<MachineStats, 'bench' | '
   const out: QueueWait[] = [];
   const b = st?.bench;
   for (const t of b?.waiters ?? []) {
+    // w2410: a parked ticket (its worker away, w1984) is nobody's wait: its worker is not there to use it
+    if (t.parked) continue;
     const since = hhmm(t.since);
     const what = `${t.mode === 'exclusive' ? 'an exclusive' : 'a shared'} ticket ${t.ticket} (${clip(t.what, 80)})${since ? `, waiting since ${since}` : ''}`;
     const on = benchWaitOn(machine, b!, t);

@@ -824,7 +824,14 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: s
     const a = agentState(s, undefined, f.now);
     return (a.state === 'between_turns' && a.kind !== 'queued') || !!a.resumes?.startsWith('check-in');
   };
-  const inQueue = mine.map((s) => ({ s, q: queueWaitOf(s, f, needsOf(w) === 'game' && comesBack(s)) })).find((x) => x.q);
+  // w2410: a stopped worker's own wait counts only while it holds its sandbox and something brings it back: one stopped with
+  // nothing ahead, or with its sandbox released, uses no ticket granted now (its waiting tickets are parked, w1984), so the
+  // request shows its real block (BEAST, 2026-10-27: w2367 showed d2d9c644's ticket t00002471 for hours, not w2402).
+  const usesItsQueue = (s: SessionInfo) => {
+    const a = agentState(s, undefined, f.now);
+    return a.state !== 'stopped' || (!!a.resumes && !a.released);
+  };
+  const inQueue = mine.filter(usesItsQueue).map((s) => ({ s, q: queueWaitOf(s, f, needsOf(w) === 'game' && comesBack(s)) })).find((x) => x.q);
   if (inQueue) return queueLive(inQueue.s, inQueue.q!);
 
   // w1841 (a): its report waits on a machine's bench lock, which a timed run holds now: Blocked on that lock. Its check-in

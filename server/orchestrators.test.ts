@@ -5051,6 +5051,24 @@ test('w1984: a worker stopped on purpose, or whose timed work is on another mach
   assert.deepEqual(agents.benchPriorities('pc')[b.id].away, { why: `its worker ${b.id.slice(0, 8)}'s timed leg was placed elsewhere (w9)`, exclusive_only: true });
 });
 
+// w2410, lothsahn: a queued bench ticket must not outlive its worker's wait. On BEAST worker d2d9c644's t00002471 waited at
+// the front for hours after its worker stopped blocked on w2402 and its sandbox was released.
+test('w2410: a stopped worker whose sandbox was released is marked away in its machine\'s bench priorities; one that keeps its sandbox is not', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents } = env;
+  putRequests(store, [{ id: 'w1', by: BEN, status: 'active' }]);
+  const a = await startedFor(env, 'w1');
+  const info = store.sessions.get(a.id)!;
+  const status = info.status;
+  info.status = 'stopped';
+  assert.equal(agents.benchPriorities('pc')[a.id].away, undefined, 'stopped, its sandbox still its own (a check-in, a run going): it keeps its place');
+  info.placeReleased = { at: '2026-10-27T14:07:00.000Z', sandbox: 'slot4', branch: 'sandbox/slot4-w1', why: 'stopped idle while it waits' };
+  assert.deepEqual(agents.benchPriorities('pc')[a.id].away, { why: `its worker ${a.id.slice(0, 8)} stopped and released its sandbox slot4 at 14:07 UTC (stopped idle while it waits)` });
+  delete info.placeReleased;
+  info.status = status;
+  assert.equal(agents.benchPriorities('pc')[a.id].away, undefined, 'placed again: its tickets queue again at the back');
+});
+
 // w1984 with w1983, lothsahn (via the orchestrator): when stop_agent move_to moves a worker to another computer, its bench
 // tickets on the old machine are dropped. Its requests leave it, so only the move's mark keeps it in that machine's list.
 test("w1984: after a move, no ticket of that worker holds anyone back in the old machine's bench queue", async (t) => {

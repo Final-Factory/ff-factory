@@ -712,6 +712,8 @@ export interface BenchTicketGlance {
    * No `until` then: no turn end applies until a ticket of its priority or higher waits.
    */
   keeps?: { since: string; why?: string; priority?: string };
+  /** w2410: a waiting ticket parked because its worker is away (bench_queue.py, w1984): why. It holds nobody back and waits last. */
+  parked?: string;
 }
 
 /**
