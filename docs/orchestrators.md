@@ -738,6 +738,11 @@ without one means it is off or failing, worth a person's look.
     a cycle it resumes one Blocked side (`cycleBreak`): the one whose next reported since its block, else the request a
     timed leg in the cycle was filed for, else the one blocked longest, and logs `blocker watch: CYCLE: w1 -> w2 -> w1:
     resuming w1 (…)`. A direct gate each way is still refused when it is set (`blockerProblem`).
+  - a worker's words count as a wait only while they hold now (w2371: w2338's stale line "waiting for w2335's worker to
+    send its fix commit" woke w2335 three times in 3 min on 2026-10-27, after w2335 had pushed it and while w2338 waited
+    only for a free sandbox on biscuit): not while a message to that worker waits in the send queue (`queuedSend`: it was
+    answered and waits for capacity), and not once a worker of the request it names finished a turn after that report
+    (`lastResultAt`: that request was resumed on it, so one report wakes it once). `BlockerWatch.saysWaitsOn`.
 
   The parent's sandbox is not kept for its leg: a leg can wait hours Queued for a small computer, and timed_place moves it
   off a big computer exactly so its slots do not idle (w1969). The parent pushes the commits the leg times before it ends

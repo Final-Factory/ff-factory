@@ -310,12 +310,24 @@ export class BlockerWatch {
   /**
    * The request an open request's idle worker last said it waits on (w2357): its newest report's still-open line for it,
    * read as the ledger reads it (shared/workState.ts requestWaitOf). A busy worker is acting, so it waits on nothing yet.
+   * Only a wait that holds now counts (w2371: w2338's report "waiting for w2335's worker to send its fix commit" kept
+   * waking w2335 three times between 08:54Z and 08:56Z, after w2335 had pushed it and w2338 waited only for a sandbox):
+   * none while a message to the worker waits in the send queue (it was answered, and waits for capacity), and none once
+   * a worker of the request it names finished a turn after that report (it was resumed on it, and blocked again).
    */
   private saysWaitsOn(w: WorkItem): string | undefined {
     const s = newestFirst(w).map((sid) => this.d.store.sessions.get(sid)).find((x) => x?.kind === 'worker' && x.lastResult);
-    if (!s || BUSY.has(s.status)) return undefined;
+    if (!s || BUSY.has(s.status) || s.queuedSend) return undefined;
     const line = stillOpenIn(s.lastResult!).get(w.id.toLowerCase());
-    return line ? requestWaitOf(line, w.id) : undefined;
+    const on = line ? requestWaitOf(line, w.id) : undefined;
+    if (!on) return undefined;
+    const said = Date.parse(s.lastResultAt ?? s.lastActivityAt) || 0;
+    const t = this.d.store.work.get(on.toLowerCase());
+    const actedSince = t?.sessionIds.some((sid) => {
+      const x = this.d.store.sessions.get(sid);
+      return x?.kind === 'worker' && (Date.parse(x.lastResultAt ?? '') || 0) > said;
+    });
+    return actedSince ? undefined : on;
   }
 
   private facts(ci: ReadonlyMap<string, CiState | undefined>, pr: ReadonlyMap<string, PrState | undefined>, health: ReadonlyMap<string, PrHealth | undefined>): BlockerFacts {
