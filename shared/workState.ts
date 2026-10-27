@@ -283,12 +283,19 @@ export function outsideWaitOf(line: string, team: readonly string[] = []): strin
 export const outsideDeclared = (d: Pick<NonNullable<SessionInfo['waitingOn']>, 'who' | 'what'>, team: readonly string[] = []) =>
   (OUTSIDE_ROLE.test(d.who) && !team.some((p) => personKey(p) === personKey(d.who))) || OUTSIDE_WAIT.test(d.what) || (/\b(?:discord|ffbox)\b/i.test(d.what) && !team.some((p) => personKey(p) === personKey(d.who)));
 
-/** w1841 (e): "needs the w1761 stills", "waiting for w1761's worker": the other request a line waits on (its words up to a ; or .). */
+/**
+ * w1841 (e): "needs the w1761 stills", "waiting for w1761's worker": the other request a line waits on (its words up to a
+ * ; or ., or a "then": what follows it is the next step, not the wait). The request a report is addressed to ("For
+ * w2396:") is no wait on it (w2405): w2401's "waiting for lothdesktop's exclusive bench ticket, then the "For w2396:"
+ * report" waits on a bench lock, and read as a wait on w2396 it made a false cycle with w2396 (Blocked on that report)
+ * that resumed w2396's worker for nothing, twice in five minutes.
+ */
 const WAITS_ON_WORK = /\b(?:needs?|waiting (?:for|on)|waits (?:for|on)|blocked on|until)\b([^;.]{0,140})/gi;
+const ADDRESSEE = /\bfor\s+w\d+\b[*_`]*\s*[:—–]/gi;
 export function requestWaitOf(line: string, selfId: string): string | undefined {
-  const body = line.replace(/^\s*w\d+\s*[:—–-]\s*(?:still open|not done)\s*:?/i, '');
+  const body = line.replace(/^\s*w\d+\s*[:—–-]\s*(?:still open|not done)\s*:?/i, '').replace(ADDRESSEE, ' ');
   for (const m of body.matchAll(WAITS_ON_WORK)) {
-    const id = /\b(w\d+)\b/i.exec(m[1])?.[1]?.toLowerCase();
+    const id = /\b(w\d+)\b/i.exec(m[1].split(/\bthen\b/i)[0])?.[1]?.toLowerCase();
     if (id && id !== selfId.toLowerCase()) return id;
   }
   return undefined;

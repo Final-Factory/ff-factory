@@ -332,7 +332,8 @@ export const CI_REF = /^([\w.-]+\/[\w.-]+)#(\d+)$/;
  */
 export function waitCycles(work: Iterable<WorkItem>, saysWaitsOn?: (w: WorkItem) => string | undefined): string[][] {
   const edges = new Map<string, string[]>();
-  for (const w of work) {
+  const all = [...work];
+  for (const w of all) {
     const id = w.id.toLowerCase();
     if (w.status === 'blocked') {
       const to = gatesOf(w).filter((g) => g.kind === 'request' && g.ref).map((g) => g.ref!.toLowerCase());
@@ -340,6 +341,17 @@ export function waitCycles(work: Iterable<WorkItem>, saysWaitsOn?: (w: WorkItem)
     } else if (w.status === 'active') {
       const to = saysWaitsOn?.(w)?.toLowerCase();
       if (to && to !== id) edges.set(id, [to]);
+    }
+  }
+  // w2405: a gate whose words say the request it waits on "needs nothing from" it rules out a wait back read from that
+  // request's worker's words (w2396 Blocked on "w2401's report …; it needs nothing from w2396"): no cycle through it.
+  for (const w of all) {
+    if (w.status !== 'blocked') continue;
+    const id = w.id.toLowerCase();
+    for (const g of gatesOf(w)) {
+      const to = g.kind === 'request' ? g.ref?.toLowerCase() : undefined;
+      const back = to ? all.find((x) => x.id.toLowerCase() === to) : undefined;
+      if (back?.status === 'active' && edges.get(to!)?.includes(id) && new RegExp(`\\bneeds? nothing from ${id}\\b`, 'i').test(g.what ?? '')) edges.delete(to!);
     }
   }
   const out = new Map<string, string[]>();

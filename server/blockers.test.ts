@@ -369,6 +369,16 @@ test('w2357: wait cycles: gates and a worker saying it waits back; each cycle on
   assert.deepEqual(waitCycles([item('w1', gate('w2')), item('w2', { status: 'queued' })], () => 'w1'), []);
 });
 
+test('w2405: a gate that says the request it waits on "needs nothing from" it rules out a wait back from words; a real gate back still loops', () => {
+  const parent = item('w2396', { status: 'blocked', blocked: block({ kind: 'request', ref: 'w2401', on: 'report', at: ago(1), what: "w2401's PERF-w1805 timing report (2b2b2cd7af vs master 465ac177, uncapped); it needs nothing from w2396" }) });
+  const leg = item('w2401', { timedLeg: { for: 'w2396', forSession: 'x', from: 'lothdesktop', small: ['lothlaptop'] } });
+  assert.deepEqual(waitCycles([parent, leg], (w) => (w.id === 'w2401' ? 'w2396' : undefined)), [], 'the leg\'s words are outweighed by the gate');
+  const legGate = { ...leg, status: 'blocked' as const, blocked: block({ kind: 'request', ref: 'w2396', at: ago(2) }) };
+  assert.deepEqual(waitCycles([parent, legGate]), [['w2396', 'w2401']], 'a real block back is a cycle whatever the words say');
+  const plain = { ...parent, blocked: block({ kind: 'request', ref: 'w2401', on: 'report', at: ago(1), what: "w2401's report" }) };
+  assert.deepEqual(waitCycles([plain, leg], (w) => (w.id === 'w2401' ? 'w2396' : undefined)), [['w2396', 'w2401']]);
+});
+
 test('w2357: the side of a cycle that resumes: the one whose next reported since its block, then a timed leg\'s parent, then the one blocked longest', () => {
   const g = (ref: string, h: number) => block({ kind: 'request', ref, at: ago(h) });
   const leg = item('w2338', { timedLeg: { for: 'w2335', forSession: 'x', from: 'beast', small: ['m3'] } });
