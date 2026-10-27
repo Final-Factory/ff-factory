@@ -1,0 +1,1 @@
+- w2358: a timed-leg pass of the blocker watch reads the computers once, and afresh only after a leg started, moved or was re-queued: it read them once per timed request, 6-10 s of every minute on the portal.

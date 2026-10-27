@@ -853,6 +853,8 @@ export class Agents {
       },
       // w2055: a Queued timed leg's next step, and FF Factory starting it itself (pre-empting a small computer's movable work).
       timedLegStep: (w) => this.timedLegStepFor(w),
+      placesOnce: (fn) => this.withPlacesOnce(fn),
+      placesChanged: () => this.placesChanged(),
       startTimedLeg: (w, m, why, moves) => this.startTimedLeg(w, m, why, moves),
       // w2168: a started leg waiting for an exclusive ticket on a big computer moves to a small one that became idle.
       relocateTimedLeg: (w) => this.relocateTimedLeg(w),
@@ -4356,9 +4358,10 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
   /**
    * w2358: runs read-only `fn` with places() computed once. workLive read it five times a pass (roomExtras > roomFacts twice,
    * roomNow, and the holds' memo twice), each placesNow asking free() of every sandbox: on 2026-10-27 after #722 the portal's
-   * stall profile showed places() 10-21 s a minute against 4.4-9.8 s before #720. Only for passes that change nothing.
+   * stall profile showed places() 10-21 s a minute against 4.4-9.8 s before #720. A pass that changes placement calls
+   * placesChanged after each change (Orchestrators.timedLegBound).
    */
-  private withPlacesOnce<T>(fn: () => T): T {
+  withPlacesOnce<T>(fn: () => T): T {
     if (this.placesPass) return fn();
     this.placesPass = {};
     try {
@@ -4366,6 +4369,11 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
     } finally {
       this.placesPass = undefined;
     }
+  }
+
+  /** Within withPlacesOnce: the next places() computes afresh (a timed leg started, moved or was re-queued). */
+  placesChanged(): void {
+    if (this.placesPass) delete this.placesPass.places;
   }
 
   private placesPass?: { places?: Computer[] };
