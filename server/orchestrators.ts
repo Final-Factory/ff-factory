@@ -4143,6 +4143,33 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
   }
 
   /**
+   * w2422: the ledger records a wait its stopped worker's report names ("w2335: still open: blocked on w2338 reporting")
+   * when no blocked_on came with it (a call lost while the portal was unreachable: w2335 sat Stalled 9 hours after w2338
+   * closed). The gate is the worker's own, from the time of its report, so the blocker watch clears it as any other and
+   * resumes that worker (unblock). Returns false when it records nothing (not open, already gated, not in the ledger).
+   */
+  recordReportedWait(id: string, sessionId: string, a: { ref: string; onReport: boolean; line: string; at: number; key: string }): boolean {
+    const w = this.store.work.get(id.toLowerCase());
+    const ref = a.ref.trim().toLowerCase();
+    if (!w || (w.status !== 'active' && w.status !== 'stalled') || gatesOf(w).length || !this.store.work.get(ref) || ref === w.id) return false;
+    const gate = this.makeGate(
+      { kind: 'request', ref, ...(a.onReport ? { on: 'report' as const } : {}), what: a.onReport ? `${ref}'s worker reporting` : `${ref} finishing` },
+      new Date(a.at).toISOString(),
+      `worker ${sessionId}`,
+    );
+    w.blocked = gate;
+    w.alsoBlocked = undefined;
+    noteWaitedOn(w, [gate]);
+    w.stalled = undefined;
+    w.status = 'blocked';
+    w.waitRecorded = a.key;
+    this.stamp(w, `blocked on ${gatesName([gate], this.now().getTime())} (${gate.what}): the ledger recorded the wait its worker ${sessionId}'s report names, which no blocked_on recorded (w2422: "${clip(a.line, 120)}"); that worker is resumed when it clears`);
+    this.store.putWork(w);
+    console.warn(`ledger: ${w.id}: recorded the wait on ${ref} its worker ${sessionId}'s report names, with no blocked_on (w2422)`);
+    return true;
+  }
+
+  /**
    * The merge-on-green pilot at blocked_on (w2045, server/mergeOnGreen.ts): a request in the arm waiting on CI alone may
    * leave its worker's after-merge report on the gate (merge on green). Without one, the worker is told it may; with one
    * that does not fit (out of the arm, other gates, no head, no DONE line for this request), the wait is set without it and

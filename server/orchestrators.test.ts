@@ -14,7 +14,7 @@ import { crossOwnerLine, delegationConstraints, DispatcherChatRefused, DISPATCHE
 import { configPath, type Config } from './config.ts';
 import { memoryDirFor } from './orchestratorMemory.ts';
 import { handoverNote, isOpen, requestAsFiled } from './work.ts';
-import { BlockerWatch } from './blockerWatch.ts';
+import { BlockerWatch, REPORTED_WAIT_MS } from './blockerWatch.ts';
 import { poolForRef, type GatePoolToken } from './usageGate.ts';
 import { personForWork, sessionPerson, setVaultContext } from './vault.ts';
 import { fakeToken, useFakeVault } from './testVault.ts';
@@ -7267,4 +7267,43 @@ test("w2417: a timed leg's report longer than every cut, with files published: t
   const lines = store.work.get('w2')!.log.filter((l) => l.includes('files its workers published'));
   assert.equal(lines.length, 1, lines.join(' | '));
   assert.ok(lines[0].endsWith(`files its workers published (publish_attachment): ${ids.join(', ')}`), lines[0]);
+});
+
+test('w2422: a stopped worker whose report says it is blocked on another request, with no blocked_on recorded (the portal was unreachable), is gated on it by the ledger, and resumed once when that request closes as done', async (t) => {
+  const { store, agents, o, dispatcher, call } = await setupOnMachine(t);
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }, { id: 'w2' }]);
+  const clock = Date.now();
+  const watch = new BlockerWatch({ store, orchestrators: o, now: () => clock, checkInPending: (id) => agents.waker.pending(id) !== undefined });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Fix it', title: 'w1: fix', work_id: 'w1' });
+  assert.equal(started.isError, false, started.text);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const info = store.sessions.get(id)!;
+  await until('its first turn', () => info.status === 'idle');
+  // w2335 on 2026-10-27: its blocked_on failed while the portal restarted, and the turn ended on this line.
+  Object.assign(info, { status: 'stopped', lastResult: 'Pushed the fix.\n\nw1: still open: blocked on w2 reporting (the ledger may not show the block because the portal was unreachable)', lastResultAt: new Date(clock - 60_000).toISOString() });
+  const w = store.work.get('w1')!;
+  assert.equal(w.blocked, undefined, 'no gate: the blocked_on was lost');
+  assert.match((await watch.tick()).get('w1') ?? '', /^recorded: the wait on w2 its worker \w+'s report names \(w2422\)/);
+  const g = store.work.get('w1');
+  assert.deepEqual([w.status, g!.blocked?.kind, g!.blocked?.ref, g!.blocked?.on, g!.blocked?.by], ['blocked', 'request', 'w2', 'report', `worker ${id}`]);
+  assert.match(w.log.at(-1)!, /the ledger recorded the wait its worker \w+'s report names, which no blocked_on recorded \(w2422/);
+  // w2 still open: it stays Blocked (not Stalled), and nobody is resumed.
+  assert.equal((await watch.tick()).has('w1'), false);
+  assert.equal(agents.waker.pending(id), undefined);
+  // w2 closes as done: the worker is resumed within a minute, as if its own blocked_on had been recorded.
+  store.work.get('w2')!.status = 'done';
+  assert.match((await watch.tick()).get('w1') ?? '', /^clear: w2 closed as done/);
+  assert.equal(w.status, 'active');
+  const wake = agents.waker.pending(id)!;
+  assert.ok(wake && Date.parse(wake.at) - Date.now() <= 61_000, 'resumed within a minute');
+  assert.ok(w.log.at(-1)!.includes(`unblocked (its worker ${id} resumes within a minute)`), w.log.at(-1)!);
+  // The same report is never recorded again, even once the resume has fired and the worker shows stopped on it still.
+  agents.waker.cancel(id);
+  assert.equal((await watch.tick()).has('w1'), false);
+  assert.equal(w.status, 'active');
+  // A worker mid-turn, or one whose report is too old, is left be.
+  Object.assign(info, { lastResult: 'w1: still open: blocked on w2 again', lastResultAt: new Date(clock - REPORTED_WAIT_MS - 60_000).toISOString() });
+  assert.equal((await watch.tick()).has('w1'), false);
+  assert.equal(w.blocked, undefined);
 });
