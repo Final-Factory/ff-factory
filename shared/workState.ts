@@ -588,7 +588,7 @@ function roomFor(w: WorkItem, f: RoomFacts, wanted: readonly string[] | undefine
   const reserved = (f.reservedRoom ?? []).filter((r) => r.for.includes(kind) && (!needs?.length || needs.includes(r.id.toLowerCase())));
   const room = [...(known ?? []), ...reserved.filter((r) => admitsPriority(r.min, w.priority)).map((r) => r.id)].filter((id) => !needs?.length || needs.includes(id.toLowerCase()));
   // w1944: a computer it cannot run on (a Mac for an MP scenario, the m5 for timed work) is no room for it, and says why.
-  const unfit = room.map((id) => ({ id, why: unfitWhy(w, id, f.roomFit) })).filter((x): x is { id: string; why: string } => !!x.why);
+  const unfit = room.map((id) => ({ id, why: unfitWhy(w, id, f.roomFit, needs) })).filter((x): x is { id: string; why: string } => !!x.why);
   // w2358: nor is room start_agent refuses it (a sandbox held for an older pair run or for timed work): w2363 read "beast has
   // room" at 09:05Z while start_agent refused beast/slot4, held for w2360's pair run until 09:23Z.
   if (f.roomHeld && kind === 'game' && !w.pair) for (const id of room) if (!unfit.some((u) => u.id === id)) {

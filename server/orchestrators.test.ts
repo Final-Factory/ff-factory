@@ -5270,6 +5270,71 @@ test('w1863: w1789 as it happened: a leg queued for a full m5 beside the request
   assert.doesNotMatch((await list()).split('\n')[0], /Queued/);
 });
 
+test('w2415: w2320 as it happened: a timed leg held for lothlaptop, biscuit, beast or lothdesktop, whose notes name m3 only as where its worker ran, is not Mac work; the ledger line agrees with Next timed work, it is flagged WRONG when biscuit has room, and goes when a worker starts there', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o, dispatcher, call, heard } = env;
+  agentsRoomFacts(agents, { game: ['pc'] });
+  // w2320 at 11:58 UTC on 2026-10-27: its brief asks for a timed run; lothsahn's notes name m3 as where worker 8b4357c9 sat.
+  putRequests(store, [{
+    id: 'w1',
+    title: 'Mass Driver FPS drop, part 2',
+    brief: 'Measure before and after on the same machine: a timed run through the bench queue.',
+    notes: [
+      { at: '2026-10-27T03:57:00Z', text: 'Unjam: worker 8b4357c9 stopped waiting. Its tools route the timed run back to m3.' },
+      { at: '2026-10-27T11:57:00Z', text: 'Unjam: Worker 8b4357c9 is on m3, which is offline. Dispatcher: please carry on with cut 2 on an online machine.' },
+    ],
+  } as Partial<WorkItem> & { id: string }]);
+  const w = () => store.work.get('w1')!;
+  assert.equal(needsTimed(w()), 'any', 'm3 named as where a worker ran names no OS');
+  await startedFor(env, 'w1');
+  agentsRoomFacts(agents, {});
+  const needs = ['lothlaptop', 'biscuit', 'beast', 'lothdesktop'];
+  const q = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'queue', note: 'Cut 2 leg, held for an online computer that takes timed runs', needs });
+  assert.equal(q.isError, false, q.text);
+  const list = async () => (await call(dispatcher().info, 'list_work', { id: 'w1' })).text;
+
+  // 11:58: biscuit (Linux) and beast free up. Before w2415: "no computer that could take it has room; beast has room but cannot
+  // take it: beast is not on macOS", and never flagged, while Next timed work said "biscuit has ROOM: start them now".
+  const fit = { biscuit: { platform: 'linux' }, beast: { platform: 'win32' }, lothdesktop: { platform: 'win32' } };
+  const room = { game: ['biscuit', 'beast'], agent: [] as string[], held: [], fit };
+  agents.roomNow = () => room.game;
+  agents.roomFacts = () => room;
+  const line = (await list()).split('\n')[0];
+  assert.match(line, /Queued \[WRONG: biscuit, beast have room\]/);
+  assert.doesNotMatch(line, /not on macOS|no computer that could take it has room/);
+  const biscuit: Computer = { id: 'biscuit', online: true, live: 0, midTurn: 0, maxAgents: 4, sandboxes: 3, maxSandboxes: 3, freeSandboxes: 3, editors: 0, maxEditors: 2, platform: 'linux', legs: [{ id: 'w1', since: w().legs![0].at }] };
+  assert.match(timedLine([biscuit, { ...biscuit, id: 'lothlaptop', maxAgents: 1, freeSandboxes: 0, sandboxes: 1, maxSandboxes: 1, platform: 'win32' }]) ?? '', /biscuit: w1 \(since \d\d:\d\dZ\) \(biscuit has ROOM: start it now/);
+
+  // Ten minutes on, the dispatcher hears it at once.
+  const later = Date.now() + 11 * 60_000;
+  (o as unknown as { now: () => Date }).now = () => new Date(later);
+  assert.deepEqual(o.flagQueuedWithRoom(agents.roomFacts()), ['w1']);
+  await until('the dispatcher hears it', () => heard(dispatcher().info.id, '[ledger] WRONG STATE').length > 0);
+  assert.match(heard(dispatcher().info.id, '[ledger] WRONG STATE')[0].text, /w1 "Mass Driver FPS drop, part 2" \(Lothsahn, normal; room on biscuit, beast/);
+
+  // The dispatcher starts it on biscuit: the leg goes.
+  o.linkWorker('w1', { id: '786d0973', title: 'w1: cut 2 on biscuit', machineId: 'biscuit' }, 'started worker 786d0973 in biscuit/slot2');
+  assert.equal(w().legs, undefined);
+  assert.doesNotMatch((await list()).split('\n')[0], /Queued/);
+});
+
+test('w2415: an OS read from the words never rules out a computer the queue names; a timed leg\'s own platform still does; machine names name no OS', () => {
+  const work = (title: string, brief = '', notes: string[] = []) => ({ title, brief, notes: notes.map((text) => ({ text })), needs: 'game' }) as unknown as WorkItem;
+  const fit = { biscuit: { platform: 'linux' }, beast: { platform: 'win32' } };
+  const mac = work('Timed A/B of the Mac player');
+  assert.equal(needsTimed(mac), 'darwin');
+  assert.equal(unfitWhy(mac, 'biscuit', fit), 'biscuit is not on macOS, which its timed work names', 'unnamed: the OS still rules');
+  assert.equal(unfitWhy(mac, 'biscuit', fit, ['lothlaptop', 'biscuit']), undefined, 'named by the queue: the dispatcher placed it');
+  assert.equal(unfitWhy(mac, 'beast', fit, ['biscuit']), 'beast is not on macOS, which its timed work names', 'only the named ones');
+  const leg = { ...work('Timed leg for w2: Mac player A/B'), timedLeg: { platform: 'darwin' } } as unknown as WorkItem;
+  assert.equal(unfitWhy(leg, 'biscuit', fit, ['biscuit']), 'biscuit is not on macOS, which its timed work names', 'a timed leg\'s platform is the work\'s own');
+  const r: RoomNow = { game: ['biscuit', 'beast'], agent: [], held: [], fit };
+  assert.deepEqual(roomForWork(r, mac, ['biscuit', 'beast']).ids, ['biscuit', 'beast']);
+  // The words that made w2320 and w2336 Mac work, and w2358's brief: computers, not OSes.
+  for (const s of ['Worker 8b4357c9 is on m3, which is offline.', 'worker f2b771ec has been on m3/slot1 since 09:39', 'Measured by w2332 on m3.', 'probe run on beast first', 'lothdesktop built both players']) assert.equal(needsTimed(work('Benchmark the belt pass', s)), 'any', s);
+  assert.equal(needsTimed(work('Benchmark the belt pass', 'probe_ab_win.sh rounds 3')), 'win32', 'the Windows bench script is the work\'s own OS');
+});
+
 test('w1863: a leg is dropped by decide_work queue drop_leg, refused without one; a request with no worker queues as before', async (t) => {
   const env = await setupOnMachine(t);
   const { store, agents, dispatcher, call } = env;

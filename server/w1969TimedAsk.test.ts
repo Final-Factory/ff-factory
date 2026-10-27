@@ -132,3 +132,22 @@ test('w1969: the mark and each session\'s verdict go through priorities.json to 
   writeBenchPriorities(root, { s1: { priority: 'normal', requests: ['w1891'] } });
   assert.equal(readTimedAsk(root, 's1')?.mark, undefined);
 });
+
+test('w2415: an A/B that names no OS goes as a leg to an idle biscuit rather than wait behind a busy LothLaptop; a Windows A/B and an idle timed_run computer keep timed_run; never m5', () => {
+  // 2026-10-27: LothLaptop busy with another timed run, biscuit idle, BEAST and LothDesktop full of other work.
+  const places = fleet().map((c) => (c.id === 'lothlaptop' ? full(c) : c.id === 'biscuit' ? { ...c, live: 0 } : c));
+  const any = decideTimedPlace({ here: at('beast'), places, timedRun: ['lothlaptop'] });
+  assert.equal(any.verdict, 'elsewhere');
+  assert.deepEqual(any.needs, ['biscuit'], any.why);
+  assert.equal(any.timedRun, undefined);
+  assert.match(any.why, /names no OS and biscuit \(large, 4 agent slots, 0 live, room now\) is idle: the leg goes there, both sides built and timed on one machine \(w2415\); not by timed_run: lothlaptop runs other work/);
+  // A Windows player A/B still goes to LothLaptop by timed_run (biscuit is Linux).
+  assert.equal(decideTimedPlace({ here: at('beast'), places, platform: 'win32', timedRun: ['lothlaptop'] }).timedRun, 'lothlaptop');
+  // An idle LothLaptop keeps the timed_run route; so does a worker that asked for timed_run.
+  const free = fleet().map((c) => (c.id === 'biscuit' ? { ...c, live: 0 } : c));
+  assert.equal(decideTimedPlace({ here: at('beast'), places: free, timedRun: ['lothlaptop'] }).timedRun, 'lothlaptop');
+  assert.equal(decideTimedPlace({ here: at('beast'), places, via: 'timed_run', timedRun: ['lothlaptop'] }).timedRun, 'lothlaptop');
+  // An idle m5 is never chosen (w1861).
+  const m5 = decideTimedPlace({ here: at('beast'), places: places.map((c) => (c.id === 'biscuit' ? { ...c, live: 1 } : c)), timedRun: ['lothlaptop'] });
+  assert.ok(!m5.needs?.includes('m5'), m5.why);
+});

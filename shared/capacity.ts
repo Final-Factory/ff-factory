@@ -162,9 +162,12 @@ export function needsTimed(w: (Pick<WorkItem, 'needs' | 'title' | 'brief' | 'not
 
 // w2358: words that say the timed work runs on any OS ("any OS", "whichever computer takes the timed run").
 const ANY_OS = /\bany (?:os|platform|operating system)\b|\b(?:either|both) (?:os(?:es)?|platforms?)\b|\bwhichever (?:computer|machine|box)\b|\bos(?:-| )(?:agnostic|independent)\b/i;
-const WIN_WORDS = /\bwindows\b|\bwin(?:64)? (?:player|build)\b|probe_ab_win|\bbeast\b|\blothdesktop\b/gi;
-// Not m5 (w1872): it takes no timed runs, so a brief naming it ("queued for m5", w1789) asks for no Mac; m3 is the Mac that does.
-const MAC_WORDS = /\bmac(?:os)?\b|\bm3\b/gi;
+// w2415: OS words only, never a computer's name. A name says where a worker ran or what an earlier run measured on ("Worker
+// 8b4357c9 is on m3, which is offline"), not what the work needs: w2320 and w2336 read as Mac work from such notes and sat
+// held 6 h beside an idle biscuit (w1789's m5 and w2358's m3 were the same mistake). A computer the work must run on is a pin
+// (decide_work queue with needs), which unfitWhy honours.
+const WIN_WORDS = /\bwindows\b|\bwin(?:64)? (?:player|build)\b|probe_ab_win/gi;
+const MAC_WORDS = /\bmac(?:os)?\b/gi;
 
 /** Whether `text` names an OS by `words` other than to rule it out ("m3 is not required", "not on the Mac"), as timedMention. */
 function osMention(text: string, words: RegExp): boolean {
@@ -255,7 +258,7 @@ export interface RoomFit {
  * [WRONG: biscuit, m5 have room]" while the m5, a Mac that takes no timed runs, could never run them, and the capacity ping
  * listed them as fitting its room. Unknown facts fit: a computer whose platform nobody reported is not ruled out.
  */
-export function unfitWhy(w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes'> & Partial<Pick<WorkItem, 'timedBrief' | 'timedLeg'>> & { pair?: WorkPair }, id: string, fit: Readonly<Record<string, RoomFit>> | undefined): string | undefined {
+export function unfitWhy(w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes'> & Partial<Pick<WorkItem, 'timedBrief' | 'timedLeg'>> & { pair?: WorkPair }, id: string, fit: Readonly<Record<string, RoomFit>> | undefined, named?: readonly string[]): string | undefined {
   // w2041: a retry of a pair run never goes back to a computer an earlier leg failed on.
   if (w.pair?.avoid?.includes(id)) return `${id} is where an earlier leg of this pair run failed (${w.pair.retryOf ?? 'its first run'}): a retry goes on other computers (w2041)`;
   const f = fit?.[id];
@@ -263,7 +266,10 @@ export function unfitWhy(w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes'
   // w2358: a timed leg (w1969) is timed work whatever its title says, as start_agent's timed hold reads it.
   const timed = needsTimed(w) || (w.pair?.timed || w.timedLeg ? (w.timedLeg?.platform === 'win32' || w.timedLeg?.platform === 'darwin' ? w.timedLeg.platform : 'any') : false);
   if (timed && f.noTimedRuns) return `${id} takes no timed runs (${f.noTimedRuns})`;
-  if ((timed === 'win32' || timed === 'darwin') && f.platform && f.platform !== timed) return `${id} is not on ${timed === 'win32' ? 'Windows' : 'macOS'}, which its timed work names`;
+  // w2415: an OS read from the words never rules out a computer the queue names (decide_work queue with needs): the list is
+  // the dispatcher's own placement, the OS a guess. Only a timed leg's own platform (timed_place) still does.
+  const pinned = !!named?.some((n) => n.toLowerCase() === id.toLowerCase()) && w.timedLeg?.platform !== timed;
+  if ((timed === 'win32' || timed === 'darwin') && !pinned && f.platform && f.platform !== timed) return `${id} is not on ${timed === 'win32' ? 'Windows' : 'macOS'}, which its timed work names`;
   // w2282: a Mac fits a pair run, as its host only; pairRoom keeps the clients off Macs. A pair's MP scenario runs one peer
   // per computer, so needsMpPeers (every peer on one computer) does not rule a Mac out for it.
   if (f.platform === 'darwin' && needsMpPeers(w) && !w.pair) return `${id} is a Mac, which refuses the multiplayer client its MP scenario starts (w665)`;
