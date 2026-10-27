@@ -320,6 +320,10 @@ sandbox, its branch, the worker's conversation and its hold stay.
     `waiting_permission`) counts. A stopped or errored session counts only for a check-in due soon.
   - A check-in more than 30 minutes away: its wake's message starts the editor again, as such a check-in already lets a
     sandbox take other work.
+  - A check-in long past (w2255): one more than `OVERDUE_MS` (2 min) overdue has fired or is failing to. The daemon's
+    session reports carried the `wakeAt` of the worker's first send and overwrote the portal's, so m5/slot1's editor
+    stayed open from 22:32Z to past 00:00Z on 2026-10-26 on a check-in due at 21:31:50Z. The portal now keeps the check-in
+    and queue fields its waker owns (`Agents.syncWaiting`) out of a daemon's `session` report (`server/machines.ts`).
   - A portal restart: a view the portal takes back from a daemon (`LiveHub.daemonHello`) counts its idle time from its
     sessions' last activity, not from the restart.
 - **No work lost.** The portal sends the daemon `live` op `idleClose`; the daemon (`idleCloseEditor`,
@@ -352,6 +356,13 @@ sandbox, its branch, the worker's conversation and its hold stay.
      What the close wrote is copied first into `Logs/live-close-backup-<stamp>/` (ignored by git), and the close's log line
      names the files. Skipping editors that hold a view instead would undo the close itself (lothsahn's ask above).
   A skipped close is asked again after another idle period. The crash watch is told first, so the quit is not restarted.
+- **Testing it** (w2255). A worker whose check-in is more than 30 minutes away is released from its sandbox and its view
+  stopped (`releaseStep`, `server/placeAgain.ts`), unless it waits on a person (`Agents.liveHold`). So in practice only a
+  view whose worker waits on a person is ever closed idle. To see one close and come back: stage the view with a recipe,
+  declare `waiting_on_person`, set a check-in at least 46 minutes out (15 idle minutes, then more than 30 still to go),
+  and end the turn. At the check-in, `portal_logs` grep `live idle` shows the close, and `live_view restage` then `status`
+  shows "Staged again ok" with its legs. A person's opening needs their signed-in page (`/live/<sessionId>`), so a worker
+  cannot make one.
 - **Shown and logged.** A closed sandbox carries `idleClosed` (`MachineSandbox`, kept in the daemon's `sandboxes.json`):
   list_sandboxes shows "editor closed: idle 15 min; reopens on resume (closed HH:MMZ, saved ... first)" in place of
   `unity stopped`, system_status has a "Live view idle close" line with the setting, the editors closed now and each view

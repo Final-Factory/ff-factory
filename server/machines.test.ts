@@ -995,6 +995,12 @@ test('machine: redeploying an outdated daemon resumes only the agent live mid-tu
   // An outdated daemon may report an agent it holds with a stale mark and a fresh time, but not live.
   onMessage({ type: 'session', info: { ...old[1].info, status: 'stopped', turnOpenSince: hoursAgo(13), lastActivityAt: new Date().toISOString() }, live: false });
   assert.equal(old[1].live, false);
+  // Its check-in and queue are the portal's waker's: a daemon's copy of a check-in long past does not come back (w2255).
+  const due = new Date(Date.now() + 3_600_000).toISOString();
+  old[2].info.wakeAt = due;
+  onMessage({ type: 'session', info: { ...old[2].info, wakeAt: hoursAgo(2), queuedSend: 'stale' }, live: false });
+  assert.equal(old[2].info.wakeAt, due, "the daemon's check-in does not replace the portal's");
+  assert.equal(old[2].info.queuedSend, undefined);
 
   // The daemon turns out to be outdated (a protocol the portal no longer drives): with an agent running, it waits.
   mm.portalHead = '5b181de0123456789abcdef0123456789abcdef0';
