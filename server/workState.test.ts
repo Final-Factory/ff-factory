@@ -655,6 +655,11 @@ test("w1841 (e): a worker waiting on files from another request's worker is Bloc
   assert.equal(requestWaitOf(line, 'w1818'), 'w1761');
   assert.equal(requestWaitOf('w1818: still open: the proof run, then the PR', 'w1818'), undefined);
   assert.equal(requestWaitOf('w1818: still open: needs w1818 stills', 'w1818'), undefined, 'not itself');
+  // w2405: the request a report goes to, and a step after "then", are no wait.
+  assert.equal(requestWaitOf('w2401: still open: four timed runs waiting for lothdesktop\'s exclusive bench ticket, then the "For w2396:" report', 'w2401'), undefined);
+  assert.equal(requestWaitOf('w2401: still open: waiting for the bench ticket, then the report to w2396', 'w2401'), undefined);
+  assert.equal(requestWaitOf("w2338: still open: waiting for w2335's worker to send its fix commit, then the fix-side legs", 'w2338'), 'w2335');
+  assert.equal(requestWaitOf('w2338: still open: waiting for w2335\'s commit, to report "For w2335:" after', 'w2338'), 'w2335');
   const w = item('w1818', { sessionIds: ['b45c63e0'] });
   const s = session('b45c63e0', { status: 'stopped', lastResult: line });
   const l = one(w, [s], [item('w1761')])!;

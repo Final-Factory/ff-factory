@@ -19,6 +19,7 @@ import { poolForRef, type GatePoolToken } from './usageGate.ts';
 import { personForWork, sessionPerson, setVaultContext } from './vault.ts';
 import { fakeToken, useFakeVault } from './testVault.ts';
 import { parseNotice } from '../shared/notices.ts';
+import { requestWaitOf } from '../shared/workState.ts';
 import { HELD_MARK, inPersonWords } from '../shared/conditional.ts';
 import { splitReply, splitSent } from '../shared/replies.ts';
 import type { PrHealth } from '../shared/blockers.ts';
@@ -6973,6 +6974,37 @@ test('w2357: the blocker watch finds a wait cycle that no report clears (a gate 
   assert.notEqual(store.work.get('w1')!.status, 'blocked');
   assert.ok(warned.some((l) => /blocker watch: CYCLE: w1 -> w2 -> w1: resuming w1/.test(l)), warned.join('\n'));
   assert.match(store.work.get('w1')!.log.join('\n'), /unblocked: .*a wait cycle \(w1 -> w2 -> w1\)/);
+});
+
+test("w2405 as it happened: a timed leg queued behind other requests' bench tickets, whose report will go \"For\" its parent, is no wait on the parent: no cycle, no resume", async (t) => {
+  const { store, agents, o, dispatcher, call } = await setupOnMachine(t);
+  agentsRoom(agents, ['pc']);
+  // w1 stands for w2396 (the master batch fix), w2 for w2401 (its timed leg), w3 and w4 for w2383 and w2355, whose shared
+  // bench tickets on lothdesktop the leg's exclusive one queues behind.
+  putRequests(store, [{ id: 'w1', status: 'active' }, { id: 'w2', title: 'Timed leg for w1: held-blueprint frametime', status: 'active', needs: 'game', timedLeg: { for: 'w1', forSession: 'x', from: 'pc', small: ['biscuit'] } }, { id: 'w3', status: 'active' }, { id: 'w4', status: 'active' }]);
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Fix the master batch', title: 'w1: batch', work_id: 'w1' });
+  assert.equal(started.isError, false, started.text);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  await until('its first turn', () => store.sessions.get(id)!.status === 'idle');
+  const filed = o.fileTimedLeg(id, { what: 'held-blueprint frametime', brief: 'Time 2b2b2cd7af and master.', from: 'pc', needs: ['biscuit'], why: 'pc is big' });
+  assert.equal(filed.id, 'w2');
+  const watch = new BlockerWatch({ store, orchestrators: o });
+  // The leg's worker, word for word as b8061486 wrote at 13:21, 13:24 and 13:27 UTC.
+  const lines = [
+    'w2: still open: the four timed runs (waiting for lothdesktop\'s exclusive bench ticket), then the "For w1:" report',
+    'w2: still open: four timed runs waiting for lothdesktop\'s exclusive bench ticket, then the "For w1:" report',
+  ];
+  for (const [i, line] of lines.entries()) {
+    assert.equal(requestWaitOf(line, 'w2'), undefined, line);
+    putReport(store, 'w2', `b${i}`, `Ticket t00001972 queued behind w3's and w4's shared tickets.\n\n${line}`, 1000 * (i + 1));
+    assert.equal((await watch.tick()).get('w1'), undefined, `turn ${i}: no cycle, no clear`);
+    assert.equal(store.work.get('w1')!.status, 'blocked');
+    assert.equal(agents.waker.pending(id), undefined, `turn ${i}: w1's worker is not resumed`);
+  }
+  assert.doesNotMatch(store.work.get('w1')!.log.join('\n'), /wait cycle|unblocked/);
+  // Its real report clears the parent's gate as before.
+  putReport(store, 'w2', 'b9', 'Both sides timed.\n\nFor w1: A 3.49/5.38 ms, B 3.51/5.40 ms on lothdesktop.\n\nw2: still open: the last run', 5000);
+  assert.match((await watch.tick()).get('w1') ?? '', /^clear: w2's worker reported/);
 });
 
 // ---------------------------------------------------------------- w2358: room start_agent refuses is no room for queue
