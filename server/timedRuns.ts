@@ -52,6 +52,8 @@ export interface TimedRunRecord {
   delivered?: { to: string; at: string; moved?: boolean; uuid?: string };
   /** w2411: a result no worker holds a request of now: kept here and handed to the next worker its request gets (tick). */
   undelivered?: { since: string; why: string };
+  /** w2414: when its daemon could not fetch its pieces (the portal had lost their grant) and the portal sent it again once. */
+  refetched?: string;
 }
 
 /**
@@ -172,6 +174,9 @@ export function variantProblem(v: TimedVariant): string | undefined {
   for (const [p, size] of sizes) if ((covered.get(p) ?? 0) !== size) return `${v.name}: ${p} is not wholly in its pieces`;
   return undefined;
 }
+
+/** w2414: the daemon's words when the portal refuses it a piece (machine/attachments.ts fetchAttachment). */
+const NO_GRANT = /no such attachment for this machine/;
 
 export class TimedRuns {
   private readonly file: string;
@@ -344,8 +349,18 @@ export class TimedRuns {
       void this.finish(r, 'failed');
       return;
     }
-    this.d.store.grant(r.machine, [...Object.values(r.order.pieceIds), r.order.save.id]);
+    this.grantPieces(r);
     if (this.d.post(r.machine, { type: 'timed_run', order: r.order })) this.set(r, 'sent', `sent to ${r.machine}`);
+  }
+
+  /**
+   * w2414: let a run's machine fetch its pieces and save. Grants live in the portal's memory for 6 h (attachments.ts
+   * GRANT_MS), and a daemon fetches a run's pieces only when the run's turn comes, so a portal restart, or a long wait
+   * behind other runs, left tr_e93675645e's pieces refused ("no such attachment for this machine"). So every hello and
+   * every report of a run still going grants them again.
+   */
+  private grantPieces(r: TimedRunRecord) {
+    if (r.order) this.d.store.grant(r.machine, [...Object.values(r.order.pieceIds), r.order.save.id]);
   }
 
   /** w2411: what of a run's order the portal's store no longer has (its pieces and save, by sha), or undefined. */
@@ -366,6 +381,8 @@ export class TimedRuns {
     }
     for (const r of this.runs.values()) {
       if (r.machine !== machineId) continue;
+      // w2414: a run its daemon still holds (queued there behind others) fetches its pieces later: its grant may be gone
+      if (r.state === 'sent' || r.state === 'running') this.grantPieces(r);
       if ((r.state === 'sent' || r.state === 'running') && !(active ?? []).includes(r.id)) this.set(r, 'queued', `${machineId}'s daemon restarted: sent again`);
       if (r.state === 'queued') this.dispatch(r);
     }
@@ -381,10 +398,23 @@ export class TimedRuns {
       return;
     }
     if (m.type === 'timed_run_status') {
+      if (r.state !== 'uploading') this.grantPieces(r);
       this.set(r, m.state === 'running' ? 'running' : r.state === 'queued' ? 'sent' : r.state, String(m.line ?? '').slice(0, 300));
       return;
     }
     if (m.type === 'timed_run_done') {
+      // w2414: its daemon was refused its pieces (a grant the portal lost) while the portal still has them: send it once
+      // more, granted, rather than fail a run that never played; a second refusal fails it with words that say to redo it
+      if (m.ok !== true && NO_GRANT.test(String(m.error ?? '')) && r.order && !this.goneFrom(r.order)) {
+        if (!r.refetched) {
+          r.refetched = this.iso();
+          this.d.log?.(`timed run ${r.id}: ${machineId} could not fetch its pieces (${String(m.error).slice(0, 120)}); granted and sent again`);
+          this.set(r, 'queued', `its pieces were refused to ${machineId}: granted and sent again`);
+          this.dispatch(r);
+          return;
+        }
+        m.error = `${String(m.error).slice(0, 200)}; it never played, twice: call timed_run again to redo it`;
+      }
       r.legs = Array.isArray(m.legs) ? m.legs.slice(0, 200) : [];
       r.summary = String(m.summary ?? '').slice(0, 20_000);
       if (m.error) r.error = String(m.error).slice(0, 500);

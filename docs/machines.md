@@ -1046,6 +1046,14 @@ and w1891 waited behind it there, and w1789 waited on LothDesktop behind shared 
   sent again to the worker on the request now (`TimedRuns.dropped`, from `Agents.roomMove`). The request's log says where
   every result went or that it is kept. A move drops no queued run; a queued run whose build or save is gone from the
   portal fails before it is sent, and its request's log says so. Pieces a waiting run still needs are not expired.
+- **A queued run keeps the right to fetch its pieces** (w2414; lothsahn: "Timed run tr_e93675645e's results were lost when
+  w2369 moved workers"). A daemon fetches a run's pieces only when the run's turn comes, and the portal's grants
+  (`AttachmentStore.grant`, 6 h, in memory) were given only when the run was sent: a portal restart, or a wait behind
+  other runs past 6 h, left them refused ("the portal has no such attachment for this machine") and the run failed
+  unplayed. Every hello and every status of a run still going now grants its pieces again (`TimedRuns.grantPieces`); a
+  run its daemon was refused its pieces for anyway is sent again once while the portal still has them, and a second
+  refusal fails it with "call timed_run again to redo it". A message that moves with its request (`movedText` in
+  `Agents.roomMove`) names its attachments by id, since they were copied into the old sandbox's Inbox only.
 - **The guard**: the verdict rides the bench priorities to the machine (`BenchPriority.timed`, and the machine's
   `timed_ask` mark in priorities.json, `machine/benchLock.ts` `readTimedAsk`). On a big computer, `checkTimedAsk`
   refuses `bench_queue.py timed`, `bench_queue.py run --mode exclusive`, `unity-bridge.py --timed`, `bench_lock --timing`,
