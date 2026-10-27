@@ -42,7 +42,7 @@ export function queueNote(w: Pick<WorkItem, 'log' | 'outcome'>): string {
  */
 export function liveBefore(w: Pick<WorkItem, 'status'>, wasStatus: WorkItem['status'], now: WorkLive): string {
   if (wasStatus === 'new' && now.state === 'working' && /^the dispatcher has it to decide/.test(now.why)) return 'Queued (waiting for the dispatcher to decide it)';
-  if (now.state === 'working' && / between turns: | stopped until its check-in/.test(now.why)) return `Waiting (${now.why})`;
+  if (now.state === 'sleeping' || (now.state === 'working' && / between turns: | stopped until its check-in/.test(now.why))) return `Waiting (${now.why})`;
   if (now.state === 'blocked' && /^a message to \S+ waits for its machine/.test(now.why)) return `Queued (${now.why.replace('waits for its machine', 'waits for a free agent slot')})`;
   if (wasStatus === 'queued') return 'Queued (the dispatcher queued it for capacity)';
   return liveText(now);

@@ -118,8 +118,31 @@ test("a request whose worker is between turns on its own check-in shows Working 
   const w = { id: 'w448', title: 'x', brief: '', priority: 'normal', keys: [], requestedBy: BEN, requesters: [BEN], humanAsked: true, status: 'active', createdAt: T, updatedAt: T, sessionIds: ['eb9632fd'], overlaps: [], asks: 0, log: [] } as WorkItem;
   const worker = s('eb9632fd', { wakeAt: iso(12) });
   assert.deepEqual(workLive(w, { items: [w], session: () => worker, now: NOW }), { state: 'working', why: 'eb9632fd between turns: check-in 06:12 UTC' });
-  assert.deepEqual(workLive(w, { items: [w], session: () => s('eb9632fd', { status: 'stopped', wakeAt: iso(12) }), now: NOW }), { state: 'working', why: 'eb9632fd stopped until its check-in 06:12 UTC' }, 'stopped until its check-in: it comes back by itself');
+  assert.deepEqual(workLive(w, { items: [w], session: () => s('eb9632fd', { status: 'stopped', wakeAt: iso(12), machineSandbox: 'slot2' }), now: NOW }), { state: 'working', why: 'eb9632fd stopped until its check-in 06:12 UTC' }, 'stopped until its check-in, its sandbox kept: it comes back by itself (w2428: Working while it keeps a sandbox)');
   assert.equal(workLive(w, { items: [w], session: () => s('eb9632fd'), now: NOW })?.state, 'stalled', 'Idle with nothing pending: stalled, as before');
+});
+
+test("w2428: a request whose stopped worker holds nothing until its check-in is Sleeping; a job, a kept sandbox or a due check-in is not", () => {
+  const w = { id: 'w2014', title: 'x', brief: '', priority: 'normal', keys: [], requestedBy: BEN, requesters: [BEN], humanAsked: true, status: 'active', createdAt: T, updatedAt: T, sessionIds: ['71ecf40d'], overlaps: [], asks: 0, log: [] } as WorkItem;
+  const live = (worker: SessionInfo, more: { now?: number; queuedSend?: (id: string) => string | undefined } = {}) => workLive(w, { items: [w], session: () => worker, now: more.now ?? NOW, ...(more.queuedSend ? { queuedSend: more.queuedSend } : {}) });
+  const released = { at: iso(-5), sandbox: 'slot2', branch: 'sandbox/slot2-w2014', why: 'its check-in is 24 h away' };
+  // The w2014 case: stopped, its sandbox released, check-in a day away.
+  const sleeper = s('71ecf40d', { status: 'stopped', wakeAt: iso(24 * 60), machineSandbox: 'slot2', placeReleased: released });
+  assert.deepEqual(live(sleeper), { state: 'sleeping', why: "until tomorrow 06:00 UTC at 71ecf40d's check-in; it is stopped and holds no sandbox, agent slot or job" });
+  assert.equal(live(s('71ecf40d', { status: 'stopped', wakeAt: iso(90) }))?.state, 'sleeping', 'a stopped worker with no sandbox (an agent seat) holds nothing either');
+  // Between turns with a background job (CI) and a check-in: a live process, its own work going: Working.
+  const job = live(s('71ecf40d', { backgroundTasks: 1, wakeAt: iso(60), machineSandbox: 'slot2' }));
+  assert.equal(job?.state, 'working', 'between turns with a background job stays Working');
+  assert.match(job!.why, /^71ecf40d between turns: /);
+  assert.equal(live(s('71ecf40d', { wakeAt: iso(60) }))?.state, 'working', 'alive between turns on its check-in alone: its process holds an agent slot');
+  assert.equal(live(s('71ecf40d', { status: 'stopped', wakeAt: iso(20), machineSandbox: 'slot2' }))?.state, 'working', 'stopped but keeping its sandbox (check-in near): Working');
+  // A message queued for it resumes it now (a released worker a sandbox is spoken for by): not Sleeping.
+  assert.notEqual(live(sleeper, { queuedSend: () => 'waiting for a sandbox on beast' })?.state, 'sleeping');
+  // The check-in passed: due within its grace, then Stalled when nothing resumed it. Never left Sleeping.
+  const due = s('71ecf40d', { status: 'stopped', wakeAt: iso(-1), machineSandbox: 'slot2', placeReleased: released });
+  assert.equal(live(due)?.state, 'working', 'a check-in that has come due fires: Working for its grace');
+  const passed = s('71ecf40d', { status: 'stopped', wakeAt: iso(-30), machineSandbox: 'slot2', placeReleased: released });
+  assert.equal(live(passed)?.state, 'stalled', 'a passed check-in with no resume: the stalled check applies');
 });
 
 test("the Overview lists a place's agents Working, Waiting, Idle, a stopped one its check-in will resume, and the places by status", () => {
