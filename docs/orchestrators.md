@@ -1185,14 +1185,17 @@ finished without being able to read their briefs) they can **read** the entries 
 
 | call | answers | who may |
 |---|---|---|
-| `read_work {}` | the worker's own requests and the ones they name, one entry each | every worker |
-| `read_work {id}` | one request in full: status and live state, its people, source, workers, PRs (with merge commits), related ids, brief, constraints, notes, latest report, DONE reports, the last 60 log lines | own and named requests, any status; with the grant, any open or stalled one too |
+| `read_work {}` | the worker's own requests, the ones they name and the ones they wait or waited on, one entry each | every worker |
+| `read_work {id}` | one request in full: status and live state, its people, source, workers, PRs (with merge commits), related ids, brief, constraints, notes, latest report, DONE reports, the last 60 log lines | own, named and awaited requests, any status; with the grant, any open or stalled one too. The files its workers published (publish_attachment) lead the entry (w2417) |
 | `read_work {all: true, status?, state?, person?, offset?, limit?}` | the open and stalled requests (status `open`, `stalled` or `open_and_stalled`, the default), narrowed to live states (as `list_work`'s `state`) and a person, one entry each: the start of its brief (1,200 characters), its latest report (400) and its last 5 log lines | only with the grant |
 
 **Scope** (`readScope`). A worker's **own** requests are those whose `sessionIds` hold its session: started, messaged
 or linked with their `work_id`. The requests they **name** are, one hop only: their `relatedIds`, every `wNNN` in their
 title, brief, constraints, notes and their PRs' titles and branches, what one was merged into, and the requests merged
-into one of them. A worker reads those in any status. Anything else is refused with what it may read and how to get
+into one of them. The requests they **wait on** (w2417: 2f4319fd, Blocked on its timed leg w2403, was refused
+`read_work w2403` and never saw the leg's attachment id) are every request gate one of them has or had (`blocked_on`
+`reports`/`requests` or the dispatcher's block; `WorkItem.waitedOn` keeps them after the gate clears) and the timed legs
+and pair runs filed for one of them (`timedLeg.for`, `pair.for`). A worker reads those in any status. Anything else is refused with what it may read and how to get
 more ("w20 is outside what you may read: your requests (w10) and the ones they name (w11, w12). Wider reading takes a
 ledger-read grant …"). The one-hop rule is the request's own wording ("any request those name"); following names
 further would reach most of the ledger in a few steps.

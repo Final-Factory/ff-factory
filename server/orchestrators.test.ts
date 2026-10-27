@@ -36,6 +36,7 @@ import { roomForWork, timedLine, type Computer, type RoomNow } from './placement
 import type { Occupant } from './timedLegPlace.ts';
 import { TOOL_MANIFEST, deferredToolsLine, toolsOf } from './toolManifest.ts';
 import { buildOptions } from './launch.ts';
+import { AttachmentStore } from './attachments.ts';
 
 /**
  * People's own orchestrators and the dispatcher (docs/orchestrators.md), end to end on a real Agents with the scripted
@@ -7219,4 +7220,51 @@ test('w2358: a timed-leg pass reads the computers once, and afresh only after a 
   n = 0;
   assert.deepEqual(o.timedLegBound(), [], 'unchanged: nothing to do');
   assert.equal(n, 1, `places() ran ${n} times in a pass over 6 unchanged timed legs`);
+});
+
+// w2417: w2402 published three zips and w2403 one; each waiting worker got a report cut before the ids (reportClip, the
+// 2000-character leg quote) and had to ask a person for them.
+test("w2417: a timed leg's report longer than every cut, with files published: the waiting worker's resume lists every attachment id, and read_work of the leg shows them", async (t) => {
+  const { dir, store, agents, o, dispatcher, call } = await setupOnMachine(t);
+  agentsRoom(agents, ['pc']);
+  const files = new AttachmentStore(path.join(dir, 'att'));
+  agents.attachments = files;
+  putRequests(store, [{ id: 'w1', status: 'active' }, { id: 'w2', title: 'Timed leg for w1: startup A/B', status: 'active', needs: 'game', timedLeg: { for: 'w1', forSession: 'x', from: 'pc', small: ['biscuit'] } }]);
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Speed up startup', title: 'w1: startup', work_id: 'w1' });
+  assert.equal(started.isError, false, started.text);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  await until('its first turn', () => store.sessions.get(id)!.status === 'idle');
+  o.fileTimedLeg(id, { what: 'startup A/B', brief: 'Time A and B.', from: 'pc', needs: ['biscuit'], why: 'pc is big' });
+  assert.equal(store.work.get('w1')!.blocked?.ref, 'w2');
+  // The leg's worker publishes three zips (as w2402 did) and one other worker an unrelated file.
+  const ids: string[] = [];
+  for (const name of ['A-runs.zip', 'B-runs.zip', 'profile.zip']) {
+    const f = path.join(dir, name);
+    fs.writeFileSync(f, `bytes of ${name}`);
+    ids.push((await files.addFile(f, { source: 'worker "w2: leg" (leg2402 on biscuit)', session: 'leg2402' })).id);
+  }
+  const other = path.join(dir, 'other.zip');
+  fs.writeFileSync(other, 'not the leg');
+  const stranger = (await files.addFile(other, { source: 'worker "w9" (someone)', session: 'someone' })).id;
+  // A report far longer than every cut, its ids in the middle (where reportClip drops them) and done with a For line.
+  const middle = `Zips: ${ids.join(', ')}.`;
+  putReport(store, 'w2', 'leg2402', `${'A: 7.975 s, B: 7.762 s. '.repeat(120)}${middle}${' More detail.'.repeat(300)}\n\nFor w1: done, numbers above.`);
+  const watch = new BlockerWatch({ store, orchestrators: o });
+  const did = await watch.tick();
+  assert.match(did.get('w1') ?? '', /^clear: w2's worker reported/);
+  const note = agents.waker.pending(id)?.note ?? '';
+  assert.match(note, /Timed leg w2's report: "/);
+  assert.match(note, /Published files of w2's workers \(publish_attachment; hand one on with attachments: \[id\], or get your own copy with fetch_attachment\): A-runs\.zip \(/);
+  for (const a of ids) assert.ok(note.includes(a), `${a} reaches the waiting worker`);
+  assert.ok(!note.includes(stranger), "another worker's file is not listed");
+  assert.ok(note.indexOf(ids[2]) > note.indexOf('Timed leg w2\'s report: "') + 2000, 'the files come after the cut report, outside it');
+  // The waiting worker reads the leg it waited on, gate cleared, with no ledger-read grant: the files lead the entry.
+  const read = agents.readWorkFor(id, { id: 'w2' });
+  for (const a of ids) assert.ok(read.includes(a), `read_work w2 lists ${a}`);
+  // The ledger's report entry of the leg carries the ids on a line of their own, once while they stay the same.
+  o.workerTurnEnded(store.sessions.get('leg2402')!, 'Numbers above.');
+  o.workerTurnEnded(store.sessions.get('leg2402')!, 'Numbers above, again.');
+  const lines = store.work.get('w2')!.log.filter((l) => l.includes('files its workers published'));
+  assert.equal(lines.length, 1, lines.join(' | '));
+  assert.ok(lines[0].endsWith(`files its workers published (publish_attachment): ${ids.join(', ')}`), lines[0]);
 });

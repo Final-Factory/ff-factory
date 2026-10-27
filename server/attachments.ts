@@ -34,6 +34,8 @@ export interface AttachmentRecord extends AttachmentRef {
    * it runs, e.g. `"Fix belts" (3f2a… on lothdesktop/pr-fix)`, or the review folder and the orchestrator that took it.
    */
   source?: string;
+  /** w2417: the worker session that published it (publish_attachment), so a request's report can list its files. */
+  session?: string;
   createdAt: string;
   /** Uploaded, sent with a message or handed to an agent: retention counts from the last of these. */
   lastUsedAt: string;
@@ -46,6 +48,7 @@ interface PartialMeta {
   size: number;
   uploadedBy?: string;
   source?: string;
+  session?: string;
   /** A machine's upload (publish_attachment): only that machine's token may send its chunks. */
   machineId?: string;
   /** The SHA-256 the sender announced: the finished file must match it, or it is dropped. */
@@ -57,6 +60,8 @@ interface PartialMeta {
 export interface UploadOrigin {
   uploadedBy?: string;
   source?: string;
+  /** w2417: the worker session publishing it (publish_attachment). */
+  session?: string;
   /** Bind the upload to this machine: its chunks come over PUT /machine/attachments/uploads/<id> with its token. */
   machineId?: string;
   /** The SHA-256 the sender computed; checked when the last byte arrives. */
@@ -136,6 +141,7 @@ export class AttachmentStore {
       size,
       ...(input.uploadedBy ? { uploadedBy: input.uploadedBy } : {}),
       ...(input.source ? { source: input.source } : {}),
+      ...(input.session ? { session: input.session } : {}),
       ...(input.machineId ? { machineId: input.machineId } : {}),
       ...(sha256 ? { sha256 } : {}),
       createdAt: new Date(this.now()).toISOString(),
@@ -211,7 +217,7 @@ export class AttachmentStore {
    * Store a file of this computer as an attachment (publish_attachment from a host sandbox, attach_review_file): the
    * same path as an upload, so the same size cap, hashing and record. The caller decides which files may be read.
    */
-  async addFile(file: string, origin: Pick<UploadOrigin, 'uploadedBy' | 'source'> = {}): Promise<AttachmentRecord> {
+  async addFile(file: string, origin: Pick<UploadOrigin, 'uploadedBy' | 'source' | 'session'> = {}): Promise<AttachmentRecord> {
     const st = await fs.promises.stat(file).catch(() => undefined);
     if (!st?.isFile()) throw new AttachmentError(404, `${file}: no such file`);
     const u = this.begin({ name: path.basename(file), size: st.size, ...origin });
@@ -253,7 +259,7 @@ export class AttachmentStore {
     fs.rmSync(this.metaPath(meta.uploadId), { force: true });
     const now = new Date(this.now()).toISOString();
     const { kind, mediaType } = attachmentKind(meta.name);
-    const rec: AttachmentRecord = { id: this.newId(), name: meta.name, size, sha256: kept, kind, mediaType, ...(meta.uploadedBy ? { uploadedBy: meta.uploadedBy } : {}), ...(meta.source ? { source: meta.source } : {}), createdAt: now, lastUsedAt: now };
+    const rec: AttachmentRecord = { id: this.newId(), name: meta.name, size, sha256: kept, kind, mediaType, ...(meta.uploadedBy ? { uploadedBy: meta.uploadedBy } : {}), ...(meta.source ? { source: meta.source } : {}), ...(meta.session ? { session: meta.session } : {}), createdAt: now, lastUsedAt: now };
     this.records.set(rec.id, rec);
     this.save();
     return rec;
@@ -263,6 +269,20 @@ export class AttachmentStore {
 
   get(id: string): AttachmentRecord | undefined {
     return this.records.get(String(id ?? '').trim().toLowerCase());
+  }
+
+  /**
+   * What these worker sessions published (w2417), oldest first: a record that names its session, or an older one whose
+   * source names it (`worker "<title>" (<session id> ...)`, Agents.publisher before the session field).
+   */
+  publishedBy(sessionIds: Iterable<string>): AttachmentRecord[] {
+    const ids = new Set([...sessionIds].map((x) => String(x).trim()).filter(Boolean));
+    if (!ids.size) return [];
+    const bySource = (src: string | undefined) => {
+      const m = src?.match(/^worker\b.*\(([^\s()]+)/);
+      return !!m && ids.has(m[1]);
+    };
+    return [...this.records.values()].filter((r) => (r.session ? ids.has(r.session) : bySource(r.source))).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }
 
   /** The attachments `ids` name, in order, without repeats; throws naming any it does not have. */
@@ -458,10 +478,19 @@ export function attachmentForMachine(store: AttachmentStore, machineId: string, 
 }
 
 /**
+ * The files a request's workers published, as a block that travels outside any cut of their report (w2417: w2402's three
+ * zips and w2403's one were cut off the report its waiting worker got). Empty when there are none.
+ */
+export function publishedFilesBlock(records: readonly Pick<AttachmentRecord, 'id' | 'name' | 'size'>[], whose: string): string {
+  if (!records.length) return '';
+  return `Published files of ${whose} (publish_attachment; hand one on with attachments: [id], or get your own copy with fetch_attachment): ${records.map((r) => `${r.name} (${fmtBytes(r.size)}) ${r.id}`).join('; ')}.`;
+}
+
+/**
  * publish_attachment from an agent on a machine (docs/attachments.md, "Agents' files"): open an upload of the file its
  * daemon announced (name, size, SHA-256), bound to that machine, and answer what the daemon sends it by, as JSON.
  */
-export function uploadForMachine(store: AttachmentStore, machineId: string, a: Record<string, unknown>, origin: Pick<UploadOrigin, 'uploadedBy' | 'source'>): string {
+export function uploadForMachine(store: AttachmentStore, machineId: string, a: Record<string, unknown>, origin: Pick<UploadOrigin, 'uploadedBy' | 'source' | 'session'>): string {
   if (typeof a.sha256 !== 'string') throw new AttachmentError(400, "sha256: the daemon sends the file's SHA-256");
   const u = store.begin({ name: a.name, size: a.size, sha256: a.sha256, machineId, ...origin });
   return JSON.stringify({ uploadId: u.uploadId, name: u.name, size: u.size, chunkBytes: u.chunkBytes });

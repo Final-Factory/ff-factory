@@ -84,7 +84,7 @@ test('a worker reads a request its own names, closed or open, and another person
 });
 
 test('an unrelated request is refused without the grant, and so is the ledger list; the refusal says how to get it', () => {
-  assert.throws(() => readWork(ledger(), ME, { id: 'w20' }, NO_LIVE), /w20 is outside what you may read: your requests \(w10\) and the ones they name \(w11, w12, w13, w14\)\. Wider reading takes a ledger-read grant/);
+  assert.throws(() => readWork(ledger(), ME, { id: 'w20' }, NO_LIVE), /w20 is outside what you may read: your requests \(w10\), the ones they name \(w11, w12, w13, w14\) and the ones they wait or waited on \(none\)\. Wider reading takes a ledger-read grant/);
   assert.throws(() => readWork(ledger(), ME, { all: true }, NO_LIVE), /listing the ledger needs a ledger-read grant on one of your open requests \(w10\)/);
   // A worker on no request reads nothing but the empty list of its own.
   assert.throws(() => readWork(ledger(), 'stranger', { id: 'w10' }, NO_LIVE), /outside what you may read/);
@@ -178,4 +178,23 @@ test('read-only: no argument changes the ledger, whatever a caller adds', () => 
   readWork(items, ME, { ...write, all: true }, NO_LIVE);
   assert.throws(() => readWork(items, ME, { ...write, id: 'w22' }, NO_LIVE));
   assert.deepEqual(items, before);
+});
+
+// w2417: 2f4319fd, Blocked on its timed leg w2403, was refused read_work w2403 and never saw the leg's attachment id.
+test('w2417: a worker reads the requests its own wait or waited on (a request gate, a timed leg or pair run filed for it) with no ledger-read grant', () => {
+  const items = [
+    item('w30', { sessionIds: [ME], blocked: { kind: 'request', ref: 'w31', on: 'report', what: "w31's numbers", at: '2026-10-27T12:00:00Z', by: `worker ${ME}` }, waitedOn: ['w32'] }),
+    item('w31'),
+    item('w32', { status: 'done' }),
+    item('w33', { status: 'done', timedLeg: { for: 'w30', forSession: ME, from: 'beast', small: ['pc'] } }),
+    item('w34', { status: 'done', pair: { for: 'w30' } } as Partial<WorkItem>),
+    item('w35'),
+  ];
+  const s = readScope(items, ME);
+  assert.deepEqual(s.awaits, ['w31', 'w32', 'w33', 'w34']);
+  assert.deepEqual(s.grantedBy, []);
+  const out = readWork(items, ME, { id: 'w33' }, new Map(), () => '', (w) => (w.id === 'w33' ? 'Published files of w33\'s workers: a.zip (1 KB) att_w9e475y577lo.' : ''));
+  assert.match(out, /^Ledger entries, read-only.*\n\nPublished files of w33's workers: a\.zip \(1 KB\) att_w9e475y577lo\.\n\nw33 /s);
+  assert.match(readWork(items, ME, {}, new Map()), /They wait or waited on: w31, w32, w33, w34\./);
+  assert.throws(() => readWork(items, ME, { id: 'w35' }, new Map()), /w35 is outside what you may read: .*the ones they wait or waited on \(w31, w32, w33, w34\)/);
 });
