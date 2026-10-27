@@ -14,7 +14,7 @@ test('w2358: a requester\'s "any OS" note clears the Mac a brief only implied', 
   // w2346 as filed (2026-10-27 07:54Z): its brief cites earlier data from m3, so it read as timed work on darwin and beast
   // ("beast is not on macOS, which its timed work names") could not take it.
   const brief = 'Measured by w2332 on m3 (release player, master f3f76ac, 1920x1080, empty new game).\nDone when: fps before/after on the same machine and plan (scripts/bench/zoom_run.sh), labelled measured.\nHold the bench lock briefly.';
-  assert.equal(needsTimed(work('Cheaper shadows: shadow map size and distance', brief)), 'darwin', 'as filed, the brief alone names m3');
+  assert.equal(needsTimed(work('Cheaper shadows: shadow map size and distance', brief)), 'any', 'w2415: a computer named in the brief (where earlier data came from) names no OS');
   const note = 'Clarification from the orchestrator: "the same machine" means before and after are measured on one machine, any OS. m3 is not required. Measure on whichever computer takes the timed run.';
   assert.equal(needsTimed(work('Cheaper shadows: shadow map size and distance', brief, [note])), 'any', 'the note, newest, says any OS');
   // A note that names an OS again after the "any OS" one rules.

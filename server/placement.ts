@@ -836,7 +836,7 @@ export function roomForWork(r: RoomNow, w: Pick<WorkItem, 'needs' | 'title' | 'b
   const unfit: { id: string; why: string }[] = [];
   for (const id of roomIds(r, w.needs ?? 'game', w.priority)) {
     if (want?.length && !want.includes(id.toLowerCase())) continue;
-    const why = unfitWhy(w, id, r.fit);
+    const why = unfitWhy(w, id, r.fit, needs);
     if (why) unfit.push({ id, why });
     else ids.push(id);
   }

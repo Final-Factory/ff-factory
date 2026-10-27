@@ -13,7 +13,7 @@
 // it moves a whole request, most of whose turns are code work, while the ask moves only the leg (docs/machines.md, "Where a
 // timed leg runs").
 import { avoidOf, classOf, classRank, holdOf, hasRoom, type Computer, type PlacementPrefs } from './placement.ts';
-import { bySize, timedEligible } from './timedLegPlace.ts';
+import { bySize, notIdle, timedEligible } from './timedLegPlace.ts';
 import type { TimedAskMark, TimedVerdict, TimedVerdictKind } from '../shared/types.ts';
 
 /**
@@ -238,6 +238,13 @@ export function decideTimedPlace(a: TimedPlaceInput): TimedPlaceDecision {
   // w1996: a Windows player A/B is built here (shared tickets) and timed on a timed_run computer, so no worker or seat is
   // taken there and nothing is rebuilt; anything else timed goes as a leg to a new worker on a small computer.
   const play = a.via !== 'leg' && a.platform !== 'darwin' ? a.timedRun?.find((id) => id !== here.id) : undefined;
+  // w2415 (lothsahn: "Why is biscuit free but not doing timed runs?"; his rule: before and after on one machine, any OS): an
+  // A/B that names no OS goes as a leg to an idle computer of any class (biscuit builds and times both Linux players) rather
+  // than wait behind a busy timed_run computer or idle this one. A Windows or Mac A/B keeps its OS.
+  const idle = a.platform || a.via === 'timed_run' ? [] : [...a.places].filter((c) => c.id !== here.id && !timedEligible(c, a.prefs ?? {}) && !notIdle(c)).sort(bySize);
+  const playBusy = play ? notIdle(a.places.find((c) => c.id === play) ?? { ...here, id: play, online: false }) : undefined;
+  if (idle.length && (!play || playBusy) && !small.some((c) => !notIdle(c)))
+    return { verdict: 'elsewhere', needs: idle.map((c) => c.id), why: `${idles}; it names no OS and ${idle.map(sizeText).join(' > ')} ${idle.length === 1 ? 'is' : 'are'} idle: the leg goes there, both sides built and timed on one machine (w2415)${playBusy ? `; not by timed_run: ${playBusy}` : ''}` };
   if (play) return { verdict: 'elsewhere', timedRun: play, ...(a.via ? {} : { choose: true }), why: `${idles}; a Windows player A/B goes to ${play} by timed_run, built here (w1946, w1996)` };
   if (!small.length) {
     const gone = unavailableText(smallTimedStates(a.places, a.prefs, a.platform, here.id, a.now, a.waitMs));
