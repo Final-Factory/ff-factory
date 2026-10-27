@@ -143,12 +143,36 @@ export function timedMention(text: string): boolean {
  */
 export function needsTimed(w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes'> | undefined, text = ''): false | 'any' | 'win32' | 'darwin' {
   if (w && needsOf(w) === 'agent') return false;
-  const all = `${w ? `${w.title}\n${w.brief}\n${(w.notes ?? []).map((n) => n.text).join('\n')}\n` : ''}${text}`;
-  if (!timedMention(all)) return false;
-  const win = /\bwindows\b|\bwin(?:64)? (?:player|build)\b|probe_ab_win|\bbeast\b|\blothdesktop\b/i.test(all);
-  // Not m5 (w1872): it takes no timed runs, so a brief naming it ("queued for m5", w1789) asks for no Mac; m3 is the Mac that does.
-  const mac = /\bmac(?:os)?\b|\bm3\b/i.test(all);
+  // Oldest first: the title and brief as filed, then people's notes in order, then `text` (a dispatcher's brief).
+  const parts = [...(w ? [w.title, w.brief, ...(w.notes ?? []).map((n) => n.text)] : []), text].filter(Boolean);
+  if (!timedMention(parts.join('\n'))) return false;
+  // w2358: a requester's "any OS" clears what was implied before it, when nothing newer names an OS again (w2346's brief
+  // cited data "Measured by w2332 on m3"; its note said "any OS. m3 is not required."). A mention that rules an OS out
+  // ("m3 is not required") names none.
+  for (const part of [...parts].reverse()) {
+    if (ANY_OS.test(part)) return 'any';
+    if (osMention(part, WIN_WORDS) || osMention(part, MAC_WORDS)) break;
+  }
+  const win = parts.some((p) => osMention(p, WIN_WORDS));
+  const mac = parts.some((p) => osMention(p, MAC_WORDS));
   return win === mac ? 'any' : win ? 'win32' : 'darwin';
+}
+
+// w2358: words that say the timed work runs on any OS ("any OS", "whichever computer takes the timed run").
+const ANY_OS = /\bany (?:os|platform|operating system)\b|\b(?:either|both) (?:os(?:es)?|platforms?)\b|\bwhichever (?:computer|machine|box)\b|\bos(?:-| )(?:agnostic|independent)\b/i;
+const WIN_WORDS = /\bwindows\b|\bwin(?:64)? (?:player|build)\b|probe_ab_win|\bbeast\b|\blothdesktop\b/gi;
+// Not m5 (w1872): it takes no timed runs, so a brief naming it ("queued for m5", w1789) asks for no Mac; m3 is the Mac that does.
+const MAC_WORDS = /\bmac(?:os)?\b|\bm3\b/gi;
+
+/** Whether `text` names an OS by `words` other than to rule it out ("m3 is not required", "not on the Mac"), as timedMention. */
+function osMention(text: string, words: RegExp): boolean {
+  for (const m of text.matchAll(words)) {
+    const at = m.index ?? 0;
+    const before = text.slice(Math.max(0, at - 60), at).split(/[.;:,!?\n(]/).pop() ?? '';
+    const after = text.slice(at + m[0].length, at + m[0].length + 60);
+    if (!NEGATED_BEFORE.test(before) && !NEGATED_AFTER.test(after)) return true;
+  }
+  return false;
 }
 
 /**

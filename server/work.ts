@@ -197,13 +197,20 @@ const keyName = (k: string) => {
 /** How much `e` overlaps a request with these keys and title, and why; undefined below the listing bar. */
 export function overlapOf(req: { keys: readonly string[]; title: string }, e: PoolEntry): WorkOverlap | undefined {
   const shared = req.keys.filter((k) => e.keys.includes(k));
-  const identity = shared.find((k) => IDENTITY.test(k));
+  // w2358: two requests that both name a third (w2346..w2355, each brief "Measured by w2332 on m3") are siblings of one
+  // parent, not the same work: start_agent read "same request w2332, strong" for w2346 against w2334, w2336, w2337 and w2344.
+  // A request's own id is in its pool keys (Orchestrators.pool), so naming the entry itself is still the same work.
+  const sibling = (k: string) => e.kind === 'work' && k.startsWith('work:') && k !== `work:${e.ref.toLowerCase()}`;
+  const identity = shared.find((k) => IDENTITY.test(k) && !sibling(k));
+  const parent = shared.find(sibling);
   const sim = jaccard(words(req.title), words(`${e.title} ${e.text ?? ''}`));
   // A shared spec or "#N" says the same subject, not the same work: strong only with a similar title.
   const spec = shared.find((k) => k.startsWith('spec:') || k.startsWith('ref:'));
   let score = sim;
   let why = 'similar title';
   if (identity) [score, why] = [1, `same ${keyName(identity)}`];
+  else if (parent && sim >= 0.5) [score, why] = [STRONG, `both name ${keyName(parent)}, similar title`];
+  else if (parent) [score, why] = [Math.max(sim, 0.5), `both name ${keyName(parent)}`];
   else if (spec && sim >= 0.2) [score, why] = [STRONG, `same ${keyName(spec)}, similar title`];
   else if (spec && sim < 0.5) [score, why] = [0.5, `same ${keyName(spec)}`];
   if (score < LISTED) return undefined;
