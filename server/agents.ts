@@ -61,7 +61,7 @@ import { playHolds, playLine } from '../shared/personPlay.ts';
 import { sandboxUseText, unitySlotsLine } from '../shared/fleet.ts';
 import { isMidTurn, midTurnRefusal, othersMidTurn, snapshotOf, type OptionsFactory, type QueuedSend, type SessionHandle, type SessionManager, type TurnEndMeta } from './sessions.ts';
 import { FLAG_LABEL, WORK_BLOCKER_KINDS, WORK_OPEN, WORK_PRIORITIES, type WorkBlockerKind, type WorkSource, type BenchPriority, type BenchAway, type AttachmentRef, type DeliveredAttachment, type ImageInput, type PermissionMode, type Requester, type Sandbox, type SessionInfo, type TranscriptEvent, type WorkItem, type WorkPriority, type WorkStatus } from '../shared/types.ts';
-import { attachmentForMachine, publicRef, publishableFile, uploadForMachine, type AttachmentStore } from './attachments.ts';
+import { attachmentForMachine, publicRef, publishableFile, publishedFilesBlock, uploadForMachine, type AttachmentStore } from './attachments.ts';
 import type { TimedDelivery, TimedRuns } from './timedRuns.ts';
 import { timedRoute } from './timedDelivery.ts';
 import { REVIEW_DEFAULTS, type ReviewStore } from './review.ts';
@@ -864,6 +864,8 @@ export class Agents {
       },
       // w2055: a Queued timed leg's next step, and FF Factory starting it itself (pre-empting a small computer's movable work).
       timedLegStep: (w) => this.timedLegStepFor(w),
+      // w2417: the files a request's workers published, a block every report relay carries outside its cut.
+      publishedFiles: (w) => this.publishedFilesOf(w),
       placesOnce: (fn) => this.withPlacesOnce(fn),
       placesChanged: () => this.placesChanged(),
       startTimedLeg: (w, m, why, moves) => this.startTimedLeg(w, m, why, moves),
@@ -882,7 +884,8 @@ export class Agents {
       pendingWake: (id) => this.waker.pending(id),
       restoreWake: (id, note, resumeOf) => {
         try {
-          this.waker.schedule(id, 1, note, resumeOf);
+          // w2417: a resume carries a quoted report and the files its request published: 2000 characters cut the ids off.
+          this.waker.schedule(id, 1, note, resumeOf, 16_000);
           return true;
         } catch {
           return false;
@@ -1376,8 +1379,19 @@ export class Agents {
   }
 
   /** Who published an attachment (docs/attachments.md, "Agents' files"): the person the agent works for, and the agent. */
-  private static publisher(info: SessionInfo | undefined, sessionId: string): { uploadedBy?: string; source: string } {
-    return { ...(info?.requestedBy ? { uploadedBy: info.requestedBy.userId } : {}), source: `worker ${info ? reviewBy(info) : sessionId}` };
+  private static publisher(info: SessionInfo | undefined, sessionId: string): { uploadedBy?: string; source: string; session: string } {
+    return { ...(info?.requestedBy ? { uploadedBy: info.requestedBy.userId } : {}), source: `worker ${info ? reviewBy(info) : sessionId}`, session: info?.id ?? sessionId };
+  }
+
+  /** w2417: the "Published files" block of request `w` (its workers' publish_attachment files), or ''. */
+  publishedFilesOf(w: WorkItem): string {
+    return this.attachments ? publishedFilesBlock(this.attachments.publishedBy(w.sessionIds), `${w.id}'s workers`) : '';
+  }
+
+  /** w2417: the files of the requests a worker is on, as a paragraph after its report ([worker update]), or ''. */
+  private publishedFilesNote(info: SessionInfo): string {
+    const blocks = this.workIdsOf(info).map((id) => this.store.work.get(id)).filter((w): w is WorkItem => !!w).map((w) => this.publishedFilesOf(w)).filter(Boolean);
+    return blocks.length ? `\n\n${blocks.join('\n')}` : '';
   }
 
   /** publish_attachment from a machine: open an upload bound to it; its daemon sends the file (machine/attachments.ts). */
@@ -1750,7 +1764,7 @@ export class Agents {
   /** read_work for worker session `sessionId` (w642, server/workRead.ts): its own requests, the ones they name, the ledger with a grant. */
   readWorkFor(sessionId: string, raw: Record<string, unknown>): string {
     const { args: a, warnings } = clampArgs(raw, { limit: [1, 50], offset: [0] });
-    return withWarnings(readWork([...this.store.work.values()], sessionId, a as ReadWorkArgs, this.workLive(), (id) => costLine(this.spend, id)), warnings);
+    return withWarnings(readWork([...this.store.work.values()], sessionId, a as ReadWorkArgs, this.workLive(), (id) => costLine(this.spend, id), (w) => this.publishedFilesOf(w)), warnings);
   }
 
   /**
@@ -2461,7 +2475,7 @@ export class Agents {
       people,
       // The report alone (w1866): what to do with it is the brief's (its [worker update] and Evidence and labels lines);
       // the paragraph that followed every report until then was 22% of what these messages added to lothsahn's orchestrator.
-      `[worker update] ${this.label(s)} finished a turn. Its final message:\n\n${text.slice(0, 3000)}`,
+      `[worker update] ${this.label(s)} finished a turn. Its final message:\n\n${text.slice(0, 3000)}${this.publishedFilesNote(s.info)}`,
     );
   }
 

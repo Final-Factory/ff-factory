@@ -128,6 +128,20 @@ move it.) A worker hands a file to another worker, on any computer, with no pers
    [id]` on `message_agent`, `start_agent` or `request_work`.
 3. The other worker gets its own copy in `Inbox/`, fetched by its machine's daemon as above.
 
+**A worker waiting on the publisher's request gets the ids by itself** (w2417, asked by lothsahn: w2402's three zips and
+w2403's one were cut off the report their waiting workers got, and each asked a person for them). Each record keeps the
+publishing worker's `session` (older records: the session id in `source`), and `AttachmentStore.publishedBy` lists a
+request's files from its `sessionIds`. A "Published files of wNNN's workers: name (size) att_…; …" block then travels
+outside every cut of the report:
+
+| relay | where |
+|---|---|
+| The resume of a worker whose request gate on wNNN cleared (blocked_on `reports`/`requests`, a timed leg, a pair run), after the quoted report; the resume's wake note keeps 16,000 characters, not a check-in's 2,000 | `Orchestrators.resumeGatedWorker`, `gatePublished`; `Wake.schedule` `max` |
+| A pair run's result sent to the request it serves, and the dispatcher's fallback line | `pairFinished`, `requestPair` |
+| `[worker update]` to the orchestrator, after the report's first 3,000 characters | `Agents.publishedFilesNote` |
+| `read_work {id}`: first after the header, so no clip of a long entry drops it | `readWork` `published` |
+| The request's log: a line "files its workers published (publish_attachment): att_…" when they change | `Orchestrators.stampPublished` |
+
 An orchestrator or the dispatcher can also make an id of a file in the review folder (what workers published with
 `publish_review`, [review.md](review.md)): **`attach_review_file {path}`**, path absolute or relative to `review.root`.
 Only files in that folder; the uploads in progress there (`.uploads/`) are refused.

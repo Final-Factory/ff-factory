@@ -213,6 +213,13 @@ const INTAKE_GATHER_MS = 60_000;
 /** "Capacity may have freed" wakes of the dispatcher: after a quiet spell, at least this far apart, at most this many an hour. */
 const CAPACITY = { quietMs: 30_000, gapMs: 2 * 60_000, perHour: 20, maxQuietMs: 2 * 60_000 };
 
+/** w2417: remember the requests these gates wait on (WorkItem.waitedOn), so read_work keeps them readable after they clear. */
+export function noteWaitedOn(w: WorkItem, gates: readonly WorkBlocker[]) {
+  const refs = gates.filter((g) => g.kind === 'request' && g.ref).map((g) => g.ref!.toLowerCase());
+  if (!refs.length) return;
+  w.waitedOn = [...new Set([...(w.waitedOn ?? []), ...refs])].slice(-40);
+}
+
 export interface OrchestratorsDeps {
   cfg: Config;
   store: Store;
@@ -240,6 +247,11 @@ export interface OrchestratorsDeps {
   timedSmall?: () => { states: SmallState[]; waitWhy: string };
   /** A Queued timed leg's next step, and whether its needs reach the big computers (w2055, Agents.timedLegStepFor). */
   timedLegStep?: (w: WorkItem) => { step: LegStep; big: boolean } | undefined;
+  /**
+   * w2417: the files request `w`'s workers published (publish_attachment), as one "Published files" block, or '' (Agents
+   * publishedFilesOf). Every relay of a request's report to a worker waiting on it carries it outside the report's cut.
+   */
+  publishedFiles?: (w: WorkItem) => string;
   /** w2358: runs `fn` with the computers (Agents.places) computed once, until placesChanged (Agents.withPlacesOnce). */
   placesOnce?: <T>(fn: () => T) => T;
   placesChanged?: () => void;
@@ -2891,6 +2903,7 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       if (gates.length > MAX_GATES) throw new Error(`a request has at most ${MAX_GATES} gates; ${w.id} would have ${gates.length}`);
       w.blocked = gates[0];
       w.alsoBlocked = gates.length > 1 ? gates.slice(1) : undefined;
+      noteWaitedOn(w, gates);
       const cancelled = this.cancelCheckIns(w);
       what = `blocked on ${gatesName(gates, now.getTime())} (${gates.map((g) => g.what).join('; ')}); it starts by itself when ${gates.length > 1 ? 'all of them clear' : 'that clears'}${cancelled}`;
     } else if (input.action === 'reject') what = 'declined';
@@ -3123,7 +3136,9 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       .filter((x): x is { l: WorkItem; r: string } => !!x.r)
       .map(({ l, r }) => ` Timed leg ${l.id}'s report: "${clip(r.trim(), 2000)}" If it waits on you (a commit, a branch), push it, and put a line "For ${l.id}: <the branch and commit>" in your report: that resumes ${l.id}'s worker if it is Blocked on you. Then block on ${l.id} reporting again.`)
       .join('');
-    const note = `${lead}${results}${legs}${yours}${ci ? ` Run ff-pr merge now${prs ? ` (${prs})` : ''}: it merges on green, or names the red run to read (gh run view <run> --log-failed) and fix.` : ''}${deploy ? ' The deploy you waited for has happened: do the check that comes after it now (the live read, the health check), then report.' : ''} Carry on from where you left it.${held ? ` Your own check-in, which the block cancelled, is folded into this message; its note was: ${held.note}` : ''}`;
+    // w2417: the files each request it waited on published, whatever the report's cut (w2402's three zips, w2403's one).
+    const files = this.gatePublished(gates);
+    const note = `${lead}${results}${legs}${files}${yours}${ci ? ` Run ff-pr merge now${prs ? ` (${prs})` : ''}: it merges on green, or names the red run to read (gh run view <run> --log-failed) and fix.` : ''}${deploy ? ' The deploy you waited for has happened: do the check that comes after it now (the live read, the health check), then report.' : ''} Carry on from where you left it.${held ? ` Your own check-in, which the block cancelled, is folded into this message; its note was: ${held.note}` : ''}`;
     if (!this.wakeNow(sid, note, w.id)) return [];
     this.noteResume(w, sid, note);
     // Folded in above: not handed back again when the rest clears (unblock's handBackCheckIns).
@@ -3172,6 +3187,24 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
   }
 
   /** Records a gate's resume of `sid` for the sweep (w1094, sweepResumes). */
+  /**
+   * w2417: the attachment ids its workers published, as a log line of its own when they changed, so the ledger's report
+   * entry carries them whatever the report's first line (each log line keeps 300 characters).
+   */
+  private stampPublished(w: WorkItem) {
+    const ids = (this.d.publishedFiles?.(w) ?? '').match(/att_[a-z0-9]{12}/g);
+    if (!ids?.length) return;
+    const line = `files its workers published (publish_attachment): ${[...new Set(ids)].join(', ')}`;
+    const last = [...w.log].reverse().find((l) => l.includes('files its workers published (publish_attachment): '));
+    if (!last?.endsWith(line)) this.stamp(w, line);
+  }
+
+  /** w2417: the "Published files" blocks of the requests these gates wait on, each after a space, or ''. */
+  private gatePublished(gates: readonly WorkBlocker[]): string {
+    const refs = [...new Set(gates.filter((g) => g.kind === 'request' && g.ref).map((g) => g.ref!.toLowerCase()))];
+    return refs.map((ref) => this.store.work.get(ref)).map((r) => (r ? this.d.publishedFiles?.(r) : '')).filter(Boolean).map((b) => ` ${b}`).join('');
+  }
+
   private noteResume(w: WorkItem, sid: string, note: string) {
     const r: GateResume = { session: sid, at: this.now().toISOString(), mark: note.slice(0, 120), note, seq: this.store.lastSeq(sid), tries: 1 };
     w.gateResumes = [...(w.gateResumes ?? []).filter((x) => x.session !== sid), r];
@@ -3421,7 +3454,7 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       if (same) {
         this.stamp(w, `worker ${sessionId} asked for a pair run of ${pr} at ${commit!.slice(0, 10)} (request_pair): answered with ${same.id}, which finished on that commit; nothing filed (w2057)`);
         this.store.putWork(w);
-        return `Nothing filed: ${same.id} "${clip(same.title, 80)}", a pair run of ${pr} on ${commit!.slice(0, 10)}, already finished (w2057). Its result: "${this.pairResult(same, w.id)}". Carry on from it now (merge on its pass, fix on its fail); your request is not blocked. Only if that run could not have checked your change (a leg failed, the check did not run), ask again with retry: true.`;
+        return `Nothing filed: ${same.id} "${clip(same.title, 80)}", a pair run of ${pr} on ${commit!.slice(0, 10)}, already finished (w2057). Its result: "${this.pairResult(same, w.id)}". Carry on from it now (merge on its pass, fix on its fail); your request is not blocked. Only if that run could not have checked your change (a leg failed, the check did not run), ask again with retry: true.${this.gatePublished([{ kind: 'request', ref: same.id, what: '', at: '', by: '' }])}`;
       }
       if (!commit && done.length) {
         const d = done[0];
@@ -4039,10 +4072,10 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       told.add(r.id);
       if (gatesOf(r).some((g) => g.kind === 'request' && g.ref === p.id)) continue;
       const sid = newestFirst(r).find((s) => this.store.sessions.get(s)?.kind === 'worker');
-      const note = `[ledger] Pair run ${p.id} "${clip(p.title, 100)}"${pr ? ` of ${pr}` : ''} has finished (w2057; ${why}). Its result: "${this.pairResult(p, r.id)}". Carry on with ${r.id} from it now (merge on its pass, fix on its fail): nothing else runs it, and a request_pair for the same pull request and commit answers with this result.`;
+      const note = `[ledger] Pair run ${p.id} "${clip(p.title, 100)}"${pr ? ` of ${pr}` : ''} has finished (w2057; ${why}). Its result: "${this.pairResult(p, r.id)}". Carry on with ${r.id} from it now (merge on its pass, fix on its fail): nothing else runs it, and a request_pair for the same pull request and commit answers with this result.${this.gatePublished([{ kind: 'request', ref: p.id, what: '', at: '', by: '' }])}`;
       const woke = !!sid && this.wakeNow(sid, note, r.id);
       if (woke) this.noteResume(r, sid!, note);
-      else this.toDispatcher(`[ledger] Pair run ${p.id}${pr ? ` of ${pr}` : ''} finished, and ${r.id} "${clip(r.title, 80)}" (${why}) has no worker to tell: start it (start_agent with work_id "${r.id}") with the result: "${clip(this.pairResult(p, r.id), 600)}" (w2057).`);
+      else this.toDispatcher(`[ledger] Pair run ${p.id}${pr ? ` of ${pr}` : ''} finished, and ${r.id} "${clip(r.title, 80)}" (${why}) has no worker to tell: start it (start_agent with work_id "${r.id}") with the result: "${clip(this.pairResult(p, r.id), 600)}" (w2057).${this.gatePublished([{ kind: 'request', ref: p.id, what: '', at: '', by: '' }])}`);
       this.stamp(r, `ledger: pair run ${p.id}${pr ? ` of ${pr}` : ''} finished (${why}); ${woke ? `its worker ${sid} was resumed with the result` : 'no worker of it could be resumed: the dispatcher was told'} (w2057)`);
       this.store.putWork(r);
       out.push(r.id);
@@ -4094,6 +4127,7 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
     const all = [...kept, ...gates];
     w.blocked = all[0];
     w.alsoBlocked = all.length > 1 ? all.slice(1) : undefined;
+    noteWaitedOn(w, gates);
     w.stalled = undefined;
     w.status = 'blocked';
     const resumes = (w.gateResumes ?? []).filter((r) => kept.some((k) => gateSetter(k) === r.session));
@@ -4340,6 +4374,7 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       if (!latest) continue;
       w.outcome = latest;
       this.stamp(w, `worker ${s.id}: ${latest}`);
+      this.stampPublished(w);
       this.store.putWork(w);
     }
     this.askStatus(s, text, served);

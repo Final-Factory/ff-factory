@@ -6,7 +6,7 @@ import path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { Readable } from 'node:stream';
-import { AttachmentError, AttachmentStore, attachmentForMachine, downloadDisposition, machineAttachment, prepareInbox, publicRef, publishableFile, uploadForMachine } from './attachments.ts';
+import { AttachmentError, AttachmentStore, attachmentForMachine, downloadDisposition, machineAttachment, prepareInbox, publicRef, publishableFile, publishedFilesBlock, uploadForMachine } from './attachments.ts';
 import { attachmentBlock, attachmentKind, attachmentName, fmtBytes, inboxName } from '../shared/attachments.ts';
 
 /**
@@ -319,4 +319,25 @@ test('publishableFile: only a file inside the given folders, links followed; nev
     return t.diagnostic('no symlinks here (Windows without developer mode): the link case is not run');
   }
   await assert.rejects(publishableFile(work, 'link.json', roots), (e: AttachmentError) => e.status === 403);
+});
+
+// w2417: the files a request's workers published, by session; older records name the session only in their source.
+test('w2417: publishedBy lists what these sessions published, oldest first, from the session field or an older record\'s source', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-att-pub-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  let at = Date.parse('2026-10-27T10:00:00Z');
+  const store = new AttachmentStore(path.join(dir, 'data'), () => undefined, () => (at += 1000));
+  const add = async (name: string, origin: { source?: string; session?: string }) => {
+    const f = path.join(dir, name);
+    fs.writeFileSync(f, name);
+    return (await store.addFile(f, origin)).id;
+  };
+  const a = await add('a.zip', { source: 'worker "w1: leg (A/B)" (sess-1 in slot2)', session: 'sess-1' });
+  const old = await add('old.zip', { source: 'worker "w1: leg (A/B)" (sess-2 on biscuit/alpha)' });
+  await add('mine.zip', { source: 'worker "w9" (sess-9)', session: 'sess-9' });
+  await add('review.png', { source: 'the review folder (x/y.png), by sess-1' });
+  assert.deepEqual(store.publishedBy(['sess-1', 'sess-2']).map((r) => r.id), [a, old]);
+  assert.deepEqual(store.publishedBy([]), []);
+  assert.equal(publishedFilesBlock([], 'w1'), '');
+  assert.match(publishedFilesBlock(store.publishedBy(['sess-1']), "w1's workers"), new RegExp(`^Published files of w1's workers .*: a\\.zip \\(\\d+ B\\) ${a}\\.$`));
 });

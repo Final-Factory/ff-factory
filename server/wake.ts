@@ -43,13 +43,17 @@ export class Waker {
     this.file = file;
   }
 
-  /** Message `sessionId` with `note` after `minutes` (one pending wake per session: a new one replaces it). */
-  schedule(sessionId: string, minutes: number, note: string, resumeOf?: string): string {
+  /**
+   * Message `sessionId` with `note` after `minutes` (one pending wake per session: a new one replaces it). A worker's own
+   * note keeps 2000 characters; FF Factory's resume of a gate (`max`, w2417) more, so the files a report's request
+   * published, which follow the quoted report, are never cut off.
+   */
+  schedule(sessionId: string, minutes: number, note: string, resumeOf?: string, max = 2000): string {
     if (!Number.isFinite(minutes) || minutes < 1 || minutes > 24 * 60) throw new Error('minutes must be between 1 and 1440');
     refuseInDryRun('wake_me');
     this.sessions.get(sessionId);
     const at = this.now() + minutes * 60_000;
-    this.arm(sessionId, { at, note: note.trim().slice(0, 2000), ...(resumeOf ? { resumeOf } : {}) });
+    this.arm(sessionId, { at, note: note.trim().slice(0, max), ...(resumeOf ? { resumeOf } : {}) });
     this.save();
     return `I will message you at ${new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} (${minutes} min) with your note. End your turn now; that message resumes you.`;
   }

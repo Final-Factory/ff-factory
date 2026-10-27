@@ -2124,6 +2124,11 @@ export interface WorkItem {
    * waiting to fire, no message waiting for a sandbox), and tells the dispatcher after a few tries.
    */
   gateResumes?: GateResume[];
+  /**
+   * w2417: every request this one has waited on (a request gate, set by blocked_on or the dispatcher), kept after the gate
+   * clears: its workers may read those requests' reports and files with read_work (server/workRead.ts readScope).
+   */
+  waitedOn?: string[];
   /** w2140: the held deploy's head (a red CI on the portal's main) whose fix this request's worker was resumed for, once. */
   deployHeldTold?: string;
   /**
