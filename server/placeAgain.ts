@@ -102,7 +102,7 @@ export function releaseWhy(s: Pick<SessionInfo, 'wakeAt' | 'queuedSend' | 'heldS
 }
 
 /** Whether `o` is stopped with its own release due, so it keeps no other stopped worker there from releasing (w656). */
-const releasable = (o: SessionInfo, f: PlaceFacts) => !f.live(o.id) && o.status === 'stopped' && !o.placeReleased && !o.pendingPermissions.length && !!releaseWhy(o, f.now, f.over?.(o));
+const releasable = (o: SessionInfo, f: PlaceFacts) => !f.live(o.id) && o.status === 'stopped' && !o.placeReleased && !o.pendingPermissions.length && !!(releaseWhy(o, f.now, f.over?.(o)) ?? (o.queuedSend ? undefined : f.waitOf?.(o)));
 
 /** Facts about a machine the release and the placement read. */
 export interface PlaceFacts {
@@ -116,6 +116,10 @@ export interface PlaceFacts {
   over?: (s: SessionInfo) => string | undefined;
   /** Its daemon saves uncommitted work before a release (w656); false: it cannot yet, undefined: not asked. */
   canSave?: boolean;
+  /** w2358: what an agent there waits on (CI, a deploy, a person, a request), for the others in a sandbox: it releases too. */
+  waitOf?: (s: SessionInfo) => string | undefined;
+  /** w2358: whether an agent's open work is all not the game's (w1098): it sits on an agent seat, not in the game tree. */
+  agentOnly?: (s: SessionInfo) => boolean;
   /** Why the last save of a sandbox failed, while it is not tried again (RETRY_FAILED_MS), or undefined. */
   saveRefused?: (sandbox: string) => string | undefined;
 }
@@ -136,9 +140,18 @@ export function keptWhy(s: SessionInfo, sb: MachineSandbox, f: PlaceFacts): stri
   // The stop that made its release due writes a line of its own (it moves lastActivityAt): the work is what counts (w890,
   // measured live on 2026-10-10: stop 19:29:40Z, release 19:31:40Z, waiting for the daemon's next 2-minute git read).
   if (g && Date.parse(g.at ?? '') < Date.parse(s.releaseDue?.workedAt ?? s.lastActivityAt)) return 'its git state has not been read since the worker last worked';
-  if (g && (g.branch === 'detached HEAD' || g.branch === '?')) return 'it is not on a branch';
-  if (f.unityHolders.includes(`sandbox:${sb.id}`)) return 'a Unity batch run of that sandbox is in flight';
+  const over = f.over?.(s);
+  // w2358: a pair leg leaves its sandbox on the commit it ran (biscuit/slot2, d54d715f, w2281 done: "the sandbox is on
+  // detached HEAD", held from 2026-10-26 11:08Z on). With nothing uncommitted and its work over, nothing of it is there:
+  // the commit stays in the worktree's HEAD reflog, and the release names it.
+  if (g && g.branch === 'detached HEAD' && !(over && !dirtyOf(sb))) return 'it is not on a branch';
+  if (g && g.branch === '?') return 'it is not on a branch';
   const other = f.sessions.find((o) => o.id !== s.id && o.machineSandbox === sb.id && occupies(o, f.live(o.id), f.now) && !releasable(o, f));
+  // w2358: for a worker whose work is over, another agent there keeps the sandbox by itself (free() counts it), and a
+  // Unity batch run of that sandbox is that agent's (the holder is per sandbox, not per worker: beast/slot2's bfa0f5c7,
+  // w2311 and w2325 done, was held by "a Unity batch run of that sandbox is in flight" beside w2337's worker).
+  if (over && other) return undefined;
+  if (f.unityHolders.includes(`sandbox:${sb.id}`)) return 'a Unity batch run of that sandbox is in flight';
   if (other) return `agent ${other.id} works there too, on the same branch`;
   if (g && !dirtyOf(sb)) return undefined;
   // Its daemon commits and pushes them first (w656), unless its last try failed a moment ago.
@@ -221,12 +234,16 @@ export function releaseStep(s: SessionInfo, sb: MachineSandbox | undefined, f: P
       const why = f.workOver ? `its work is over: ${f.workOver}` : ci ?? (idle >= RELEASE_AFTER_MS ? `idle for ${span(idle)} with no check-in` : undefined);
       step = why ? { do: 'stop', why, due: true } : undefined;
     }
-    return step && !keptWhy(s, sb, f) ? step : undefined;
+    return step && (f.agentOnly?.(s) || !keptWhy(s, sb, f)) ? step : undefined;
   }
   if (s.status !== 'stopped' || s.pendingPermissions.length) return undefined;
   // Waiting on CI, a deploy or a person (w846, w890): released whatever its check-in, which places it again when it comes.
   const why = (s.queuedSend ? undefined : ci) ?? releaseWhy(s, f.now, f.workOver);
-  if (!why || keptWhy(s, sb, f)) return undefined;
+  if (!why) return undefined;
+  // w2358: a worker on an agent seat (w1098: dafd0fe0's w2191 beside d54d715f in biscuit/slot2) has no work in the game
+  // tree: what is there (its branch, uncommitted files, a batch run) is the sandbox's other agents', never its to keep.
+  if (f.agentOnly?.(s)) return { do: 'release', why, branch: sb.git?.branch ?? sb.branch };
+  if (keptWhy(s, sb, f)) return undefined;
   // w1983: with its git state unread, the save reads it (keptWhy): on the sandbox's own branch.
   return { do: 'release', why, branch: sb.git?.branch ?? sb.branch, ...(dirtyOf(sb) || !sb.git ? { save: true } : {}) };
 }
@@ -314,6 +331,8 @@ export function movedNote(m: Pick<Machine, 'id'>, from: NonNullable<SessionInfo[
 export interface PlaceAgainDeps {
   sessions: () => Iterable<SessionInfo>;
   machine: (id: string) => Machine | undefined;
+  /** Every machine, for the save of sandboxes nobody holds (w2358, orphanSave); absent in tests that do not need it. */
+  machines?: () => Iterable<Machine>;
   isLive: (id: string) => boolean;
   online: (machineId: string) => boolean;
   /** Unity slot holders with a batch run granted or waiting on the machine ("sandbox:<id>"). */
@@ -411,6 +430,8 @@ export class PlaceAgain {
       unityHolders: this.d.unityHolders(machineId),
       now: this.now(),
       over: this.d.workOver,
+      waitOf: (s) => this.d.ciWait?.(s) ?? this.d.waitOn?.(s),
+      ...(this.d.agentOnly ? { agentOnly: this.d.agentOnly } : {}),
       ...(this.d.canSave ? { canSave: this.d.canSave(machineId) } : {}),
       saveRefused: (sandbox) => {
         const x = this.saveFailed.get(`${machineId}/${sandbox}`);
@@ -558,6 +579,7 @@ export class PlaceAgain {
         did.push(`${s.id} holds ${m.id}/${sb.id} again: its check-in is near`);
       }
     }
+    this.orphanSave(did);
     for (const line of did) console.log(`place again: ${line}`);
     // A worker stopped to release its sandbox is released by the next pass: do not leave that a minute away (w890).
     if (stoppedDue) this.d.soon?.();
@@ -566,6 +588,62 @@ export class PlaceAgain {
     const free = [...freed].filter((key) => !this.occupiedNow(key));
     if (free.length) this.d.freed?.(`sandbox${free.length > 1 ? 'es' : ''} ${free.join(', ')} released`);
     return did;
+  }
+
+  /**
+   * w2358: save the uncommitted changes in sandboxes nobody holds, onto the branch they are on, so they are room again.
+   * Measured 2026-10-27 ~08:05Z: beast/slot1 (10 .mat files on w2276-pair-host) and beast/slot3 (Assets/Scenes/main.unity on
+   * sandbox/slot3-w2341, written after d2d9c644's release had saved nothing) showed FREE, but a start there was refused by
+   * the branch switch and a resume skipped them (usable), so ten queued requests and a waiting worker sat beside them.
+   * Saved, never discarded: committed on its own branch and pushed (saveWork refuses master, main and develop, and too
+   * much untracked output); a released worker on that branch gets it back when it resumes there. Only with the editor
+   * closed (an open one may write again), no Unity batch run, no agent there and no claim on it.
+   */
+  private orphanSave(did: string[]) {
+    if (!this.d.saveWork || !this.d.machines) return;
+    for (const m of this.d.machines()) {
+      if (!this.d.online(m.id) || (this.d.canSave && !this.d.canSave(m.id))) continue;
+      let f: PlaceFacts | undefined;
+      for (const sb of m.sandboxes ?? []) {
+        const g = sb.git;
+        if (sb.status !== 'ready' || !g || g.dirty <= 0 || sb.unity.state !== 'stopped' || sb.lingering?.length) continue;
+        if (g.branch === 'detached HEAD' || g.branch === '?') continue;
+        const key = `${m.id}/${sb.id}`;
+        f ??= this.facts(m.id);
+        if (this.saving.has(key) || f.saveRefused?.(sb.id) || f.unityHolders.includes(`sandbox:${sb.id}`)) continue;
+        if (f.sessions.some((o) => o.machineSandbox === sb.id && (occupies(o, f!.live(o.id), f!.now) || (!o.placeReleased && o.status !== 'stopped')))) continue;
+        if (f.sessions.some((o) => o.machineSandbox === sb.id && !o.placeReleased)) continue;
+        if (this.claimedBy(m.id, sb.id)) continue;
+        this.saving.add(key);
+        const p = this.saveOrphan(m, sb, g.branch).finally(() => {
+          this.saving.delete(key);
+          this.pending.delete(p);
+        });
+        this.pending.add(p);
+        did.push(`saving the ${g.dirty} uncommitted change(s) left in ${key} on ${g.branch}, which no worker holds, so it is room again (w2358)`);
+      }
+    }
+  }
+
+  private async saveOrphan(m: Machine, sb: MachineSandbox, branch: string) {
+    const key = `${m.id}/${sb.id}`;
+    try {
+      const res = await this.d.saveWork!(m.id, sb.id, branch, `FF Factory: saved the uncommitted work left in ${key} (w2358)\n\nNo worker held the sandbox, and a new start there would have been refused over it. \`git reset HEAD~1\` gives the work back uncommitted.`);
+      this.saveFailed.delete(key);
+      const at = new Date(this.now()).toISOString();
+      for (const o of this.d.sessions()) {
+        if (o.machineId !== m.id || o.placeReleased?.branch !== branch) continue;
+        if (res.sha) o.savedWork = { sha: res.sha, files: res.files, pushed: res.pushed, branch, at };
+        this.d.save(o);
+        this.d.note(o.id, `Uncommitted work left on its branch ${branch} in ${key} after its release was saved there (${res.notes.join('; ')}): it is yours when you resume.`);
+      }
+      console.log(`place again: saved the uncommitted work left in ${key} on ${branch} (${res.notes.join('; ')})`);
+      if (!this.occupiedNow(key)) this.d.freed?.(`sandbox ${key} saved and free`);
+    } catch (e) {
+      const why = (e as Error).message;
+      this.saveFailed.set(key, { at: this.now(), why });
+      console.warn(`place again: saving the uncommitted work left in ${key} failed: ${why}`);
+    }
   }
 
   /**

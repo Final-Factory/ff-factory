@@ -749,6 +749,7 @@ export class Agents {
     this.placeAgain = new PlaceAgain({
       sessions: () => store.sessions.values(),
       machine: (id) => store.machines.get(id),
+      machines: () => store.machines.values(),
       isLive: (id) => !!sessions.sessions.get(id)?.live,
       online: (id) => machines.isOnline(id),
       unityHolders: (id) => {
@@ -3920,8 +3921,12 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
    * A sandbox ready for new work: ready, with no live agent and none between turns to come back to it (w475). Its label is
    * its name and says nothing about use (w575).
    */
-  private free(x: { id: string; status: string; sessionIds: string[]; lingering?: unknown[]; path?: string }, machineId?: string) {
+  private free(x: { id: string; status: string; sessionIds: string[]; lingering?: unknown[]; path?: string; git?: { dirty: number } }, machineId?: string) {
     if (x.status !== 'ready') return false;
+    // w2358: uncommitted changes nobody holds (beast/slot1's 10 .mat files, slot3's main.unity on 2026-10-27): a start there
+    // is refused by the branch switch and a resume skips it (placeAgain usable), so it is no room until the release pass
+    // has saved them onto its branch (PlaceAgain.orphanSave).
+    if ((x.git?.dirty ?? 0) > 0) return false;
     // A timed run from its folder holds the machine's bench lock (w1607): its worktree must not change under it.
     if (machineId && x.path && benchLockIn(this.machines.statsOf(machineId)?.benchLock, x.path)) return false;
     // An old agent host's tree still runs there while its daemon stops it (w799: one ran on beside the next worker).
@@ -4335,7 +4340,10 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
       const total = st ? st.memTotalBytes : m.local ? mem.total : undefined;
       out.push({
         id: m.id,
-        online: this.machines.isOnline(m.id),
+        // w2358: not before its daemon's first report since this portal started (one every 15 s): until then a person playing
+        // there (w1894) and its load are not known. After the 08:07Z restart on 2026-10-27 a room move sent 9524a4bc (w2335)
+        // to lothdesktop at 08:07:14, five seconds before its report said lothsahn was playing there.
+        online: this.machines.isOnline(m.id) && (!!st || !!m.local),
         live: mine.filter((s) => s.live).length,
         midTurn: mine.filter((s) => isMidTurn(s.info)).length,
         maxAgents: agentCap(m),

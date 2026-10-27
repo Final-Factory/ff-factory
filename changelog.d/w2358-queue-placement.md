@@ -1,0 +1,6 @@
+- **No idle sandboxes beside queued work** (w2358, lothsahn: "We should not have idle slots if there is queued work").
+  - A request's timed work reads the requester's latest word: a note saying "any OS" (or "m3 is not required") clears the Mac a brief only implied, so ten render fixes stop waiting for m3 while beast is free.
+  - A sandbox with uncommitted changes nobody holds is no longer FREE (a start there was refused over them), and FF Factory commits and pushes that work on the sandbox's own branch, never discarding it, so the sandbox is room again; the released worker of that branch is told when it resumes.
+  - A stopped worker whose requests are closed gives up its sandbox even when a pair run left it on a clean detached HEAD, or another agent there runs a Unity batch run; a worker on an agent seat (FF Factory or FFBox work) is never kept by the game tree beside it.
+  - After a portal restart, a computer takes no moved or resumed work until its daemon has reported (a person playing there was not known yet).
+  - start_agent no longer flags sibling requests that only both cite one earlier request (one profiling run's fixes) as the same work.

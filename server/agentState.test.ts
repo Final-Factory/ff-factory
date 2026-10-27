@@ -183,7 +183,7 @@ async function setup(t: { after: (fn: () => void | Promise<void>) => void }) {
     fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
   });
   await pc.connect(machines);
-  return { store, sessions, agents, pc };
+  return { store, sessions, agents, pc, machines };
 }
 
 type WakerLike = { schedule: (id: string, m: number, n: string) => string; cancel: (id: string) => boolean };
@@ -360,4 +360,25 @@ test('places computes each machine\'s claims once per call (w2044: 1.0-1.1 s por
   calls = 0;
   agents.places();
   assert.ok(calls <= 2, 'a second call computes them again (no memo outlives the call)');
+});
+
+test('w2358: a sandbox with uncommitted changes nobody holds is not FREE (a start there is refused over them), and a machine is no target before its first report since the portal started', async (t) => {
+  // beast, 2026-10-27 08:10Z: slot1 (10 .mat files) and slot3 (Assets/Scenes/main.unity) showed FREE, "ROOM 46%, 2 of 5
+  // sandboxes free", while start_agent there was refused: "the working tree has 1 uncommitted change(s)".
+  const { store, agents, machines } = await setup(t);
+  const beta = store.machines.get('pc')!.sandboxes!.find((x) => x.id === 'beta')!;
+  const free = () => agents.places().find((p) => p.id === 'pc')?.freeSandboxes;
+  assert.equal(free(), 2);
+  beta.git = { branch: 'sandbox/beta-w9', dirty: 1, untracked: 0, at: new Date().toISOString() } as typeof beta.git;
+  assert.equal(free(), 1);
+  assert.doesNotMatch(agents.describeAllSandboxes(), /pc\/beta FREE/);
+  beta.git = { ...beta.git!, dirty: 0 };
+  assert.equal(free(), 2, 'once saved it is room again');
+  // The restart race (08:07:14Z, 9524a4bc to lothdesktop five seconds before its report said lothsahn was playing there).
+  const pc = () => agents.places().find((p) => p.id === 'pc')!;
+  assert.ok(!store.machines.get('pc')!.local);
+  Object.defineProperty(machines, 'statsOf', { value: () => undefined, configurable: true });
+  assert.equal(pc().online, false, 'no report yet: not a place');
+  Object.defineProperty(machines, 'statsOf', { value: () => ({ memTotalBytes: 64e9, memFreeBytes: 32e9 }), configurable: true });
+  assert.equal(pc().online, true, 'its first report: a place again');
 });
