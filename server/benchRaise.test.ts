@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { benchLockDir, pidAlive, readPassedMarks, writeBenchPriorities } from '../machine/benchLock.ts';
 import { BenchTicket, benchQueueDir, findBenchQueueScript, queueTickets, rulesVersion, type QueueTicket } from '../machine/benchQueue.ts';
-import { editorBenchSession, editorSessions, passedShared, raisedSessions } from '../machine/benchRaise.ts';
+import { editorBenchSession, editorSessions, passedShared, raisedSessions, sandboxOfPath } from '../machine/benchRaise.ts';
 import type { BenchPriority } from '../shared/types.ts';
 
 /**
@@ -236,4 +236,28 @@ test('w1962: against the real bench_queue.py, a raised build joins a running urg
   writeBenchPriorities(root, r.sessions, new Date(), false, undefined, undefined, passed);
   assert.equal((await build.wait(10_000)).kind, 'granted', 'raised, the build joins the running shared group');
   assert.equal((await leg.wait(500)).kind, 'waiting', 'the timed leg still never runs beside shared work');
+});
+
+test('w2413: the holder\'s own editor rides along by its checkout and its session\'s placement, never another sandbox\'s', () => {
+  // biscuit, 2026-10-27: worker edc18110 (w2338), placed again in slot2 after slot3; its tickets named slot3
+  const ed = tk('t2', 'shared', 'running editor slot2', { session: editorBenchSession('slot2'), sandbox: 'slot2' });
+  const moved = tk('t1', 'exclusive', 'Leech probe', { session: 'edc18110', sandbox: 'slot3', cwd: 'F:\\ffw\\Sandboxes\\Slot2\\scripts', granted });
+  assert.deepEqual(passedShared([moved, ed], {}, NOW), {}, 'its checkout is in slot2');
+  const timedRun = tk('t1', 'exclusive', 'timed run r1', { session: 'edc18110', cwd: '/home/ben-ryding/ffw', granted });
+  assert.deepEqual(Object.keys(passedShared([timedRun, ed], {}, NOW)), ['t2'], 'no sandbox, no placement: passed, as before');
+  assert.deepEqual(passedShared([timedRun, ed], {}, NOW, {}, { edc18110: 'slot2' }), {}, 'its session is placed in slot2');
+  const ed22 = tk('t3', 'shared', 'running editor slot22', { session: editorBenchSession('slot22'), sandbox: 'slot22' });
+  assert.deepEqual(Object.keys(passedShared([timedRun, ed22], {}, NOW, {}, { edc18110: 'slot2' })), ['t3'], 'slot22 is not slot2');
+  assert.equal(sandboxOfPath('/r/ffw/sandboxes/slot22/Assets'), 'slot22');
+  assert.equal(sandboxOfPath('V:\\ffw\\SANDBOXES\\Slot2'), 'slot2');
+  assert.equal(sandboxOfPath('/r/ffw/sandboxes'), '');
+});
+
+test('w2413: the sessions\' placement is written into priorities.json for bench_queue.py own_sandboxes', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'w2413-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const file = writeBenchPriorities(root, {}, NOW, false, undefined, undefined, undefined, { edc18110: 'slot2' })!;
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).placed, { edc18110: 'slot2' });
+  writeBenchPriorities(root, {}, NOW, false);
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).placed, undefined, 'none placed: no key');
 });

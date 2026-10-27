@@ -30,11 +30,24 @@ export const editorBenchSession = (id: string) => `editor:${id}`;
 
 const LIFE_PREFIXES = ['running editor ', 'running player '];
 
-/** bench_queue.py rides_along: the life ticket of an editor in an exclusive ticket's own sandbox, or of a player of its
- * own worker, never holds that exclusive ticket back, so its turn passes nothing. */
-function ridesAlong(t: QueueTicket, ex: QueueTicket): boolean {
+/** The sandbox whose folder holds `p` (bench_queue.py sandbox_of_path, w2413): the name after its last `sandboxes` folder,
+ * else ''. Either slash; a Windows drive path in any case. */
+export function sandboxOfPath(p: string | undefined): string {
+  let parts = String(p ?? '').replace(/\\/g, '/').split('/').filter(Boolean);
+  if (parts.length && /^[a-z]:$/i.test(parts[0])) parts = parts.map((x) => x.toLowerCase());
+  for (let i = parts.length - 2; i >= 0; i--) if (parts[i] === 'sandboxes') return parts[i + 1];
+  return '';
+}
+
+/** bench_queue.py rides_along (w2413 own_sandboxes): the life ticket of an editor in one of an exclusive ticket's own
+ * sandboxes (its ticket's, its checkout's, and the one its session is placed in now, `placed`), or of a player of its own
+ * worker, never holds that exclusive ticket back, so its turn passes nothing. Names match whole: slot22 is not slot2. */
+function ridesAlong(t: QueueTicket, ex: QueueTicket, placed: Record<string, string> = {}): boolean {
   if (t.mode !== 'shared' || ex.mode !== 'exclusive' || !LIFE_PREFIXES.some((p) => t.what.startsWith(p))) return false;
-  return (!!ex.sandbox && t.sandbox === ex.sandbox) || (!!ex.session && t.session === ex.session);
+  if (ex.session && t.session === ex.session) return true;
+  const theirs = (t.sandbox || sandboxOfPath(t.cwd)).toLowerCase();
+  const own = [ex.sandbox, sandboxOfPath(ex.cwd), ex.session ? placed[ex.session] : undefined].filter(Boolean).map((x) => x!.toLowerCase());
+  return !!theirs && own.includes(theirs);
 }
 
 /**
@@ -46,7 +59,7 @@ function ridesAlong(t: QueueTicket, ex: QueueTicket): boolean {
  * held the lock, so the first case never marked it. A mark lasts while its ticket waits (`prev`, the last look's) and
  * goes when the ticket is granted, revoked or gone. `tickets`: the queue's live tickets (queueTickets).
  */
-export function passedShared(tickets: QueueTicket[], prev: Record<string, PassedMark>, now: Date, sessions: Record<string, BenchPriority> = {}): Record<string, PassedMark> {
+export function passedShared(tickets: QueueTicket[], prev: Record<string, PassedMark>, now: Date, sessions: Record<string, BenchPriority> = {}, placed: Record<string, string> = {}): Record<string, PassedMark> {
   const holders = tickets.filter((t) => t.mode === 'exclusive' && t.granted && !t.revoked);
   const rank = (t: QueueTicket) => RANKS.indexOf((t.session && sessions[t.session]?.priority) || 'normal');
   const num = (t: QueueTicket) => Number(t.ticket.replace(/\D/g, ''));
@@ -59,7 +72,7 @@ export function passedShared(tickets: QueueTicket[], prev: Record<string, Passed
       out[t.ticket] = mark;
       continue;
     }
-    const h = holders.find((x) => !ridesAlong(t, x)) ?? later.find((x) => num(x) > num(t) && rank(x) < rank(t) && !ridesAlong(t, x));
+    const h = holders.find((x) => !ridesAlong(t, x, placed)) ?? later.find((x) => num(x) > num(t) && rank(x) < rank(t) && !ridesAlong(t, x, placed));
     if (h) out[t.ticket] = { by: h.ticket, since: now.toISOString() };
   }
   return out;
