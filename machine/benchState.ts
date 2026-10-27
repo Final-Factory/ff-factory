@@ -119,6 +119,7 @@ function glance(t: QueueTicket, info: Record<string, unknown> | undefined, m: Ma
   }
   if (exempt) out.exempt = exempt;
   if (preempt) out.preempt = true;
+  if (!t.granted && t.parked) out.parked = String(t.parked.why ?? 'its worker is away').slice(0, 160);
   const ks = keep ? iso(typeof keep.since === 'number' ? keep.since * 1000 : since) : undefined;
   if (keep && ks) out.keeps = { since: ks, ...(keep.why ? { why: String(keep.why).slice(0, 160) } : {}), ...(keep.priority ? { priority: String(keep.priority) } : {}) };
   return out;
@@ -197,10 +198,12 @@ export function readBenchState(root: string | undefined, now: number = Date.now(
   const sorted = [...live].sort((a, b) => cmp(keys.get(a.ticket)!, keys.get(b.ticket)!));
   // Exclusive holders first: the one that sets the mode leads the list.
   const running = sorted.filter((t) => t.granted).sort((a, b) => (a.mode === b.mode ? 0 : a.mode === 'exclusive' ? -1 : 1));
-  const waiting = sorted.filter((t) => !t.granted);
+  // w2410: a parked waiter (its worker away, w1984) waits last and is nobody's turn, as bench_queue.py orders them.
+  const parked = (t: QueueTicket) => !t.granted && !!t.parked;
+  const waiting = [...sorted.filter((t) => !t.granted && !parked(t)), ...sorted.filter(parked)];
   // A waiting urgent release goes ahead of every waiter, and nobody else starts meanwhile (bench_queue.py evaluate).
-  const urgent = waiting.findIndex((t) => urgentRelease(t, infos.get(t.ticket), m));
-  const next = urgent >= 0 ? urgent : waiting.findIndex((t) => t.mode === 'exclusive');
+  const urgent = waiting.findIndex((t) => !parked(t) && urgentRelease(t, infos.get(t.ticket), m));
+  const next = urgent >= 0 ? urgent : waiting.findIndex((t) => !parked(t) && t.mode === 'exclusive');
   const waiters = new Set(waiting.map((t) => t.ticket));
   const old = readBenchLock(root, now, alive);
   const legacy = old && !/\[t\d{8}\]/.test(old.owner) ? { owner: old.owner, since: old.since } : undefined;

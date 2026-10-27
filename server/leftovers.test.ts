@@ -323,6 +323,29 @@ test('never ended: an interactive editor and what it started, the main clone, th
   assert.equal((await early.look(1)).length, 1);
 });
 
+test('w2410, BEAST 2026-10-27: a stopped worker\'s own `unity-slot run` names the daemon\'s folder, yet it and its bench ticket\'s helper end like its other leftovers; the agent host is still spared', async () => {
+  // Worker d2d9c644's run waited for ticket t00002471 from 12:23 UTC; at 14:03 UTC the reaper ended only the bash and sh
+  // around it, and the run (with its Unity slot and its waiting ticket) outlived its worker by hours.
+  const slotRun = { pid: 600, ppid: 9212, cmd: `/usr/bin/node --experimental-strip-types ${ROOT}/daemon/app/machine/unitySlots.ts run --label "w2367 release base for launch clip" -- unity`, env: env('d2d9c644', 'slot4') };
+  const helper = { pid: 601, ppid: 600, cmd: `python3 ${ROOT}/sandboxes/slot4/scripts/bench/bench_queue.py --lock ${ROOT}/tmp/bench.lock hold --mode shared --what "unity: w2367" --owner-pid 600`, env: env('d2d9c644', 'slot4') };
+  const host = { pid: 602, ppid: 9212, cmd: `/usr/bin/node ${ROOT}/daemon/app/machine/agentHost.ts ${ROOT}/daemon/hosts/d2d9c644`, env: env('d2d9c644', 'slot4') };
+  const m = machine([SYSTEMD, DAEMON, slotRun, helper, host], { sessions: { d2d9c644: { resumable: true } } });
+  await m.look(0);
+  for (let i = 0; i < 9; i++) assert.deepEqual(await m.look(1), [], `minute ${i + 1}: kept (a request still waits for it)`);
+  await m.look(1);
+  assert.ok(!m.alive(600) && !m.alive(601), 'the run and its ticket helper ended');
+  assert.ok(m.alive(602) && m.alive(100), 'the agent host and the daemon untouched');
+  assert.match(m.st.events.join('\n'), /left by worker d2d9c644/);
+  // A check-in ahead keeps them, as for any process of a worker coming back to look at its job.
+  const back = machine([SYSTEMD, DAEMON, { ...slotRun }, { ...helper }], { sessions: { d2d9c644: { resumable: true, wakeAt: 1_000 * HOUR + 60 * MIN } } });
+  for (let i = 0; i < 30; i++) await back.look(1);
+  assert.ok(back.alive(600) && back.alive(601), 'kept until its check-in is due');
+  // And never while its worker runs (between turns too).
+  const live = machine([SYSTEMD, DAEMON, { ...slotRun }, { ...helper }], { sessions: { d2d9c644: { live: true } } });
+  for (let i = 0; i < 30; i++) await live.look(10);
+  assert.deepEqual(live.st.signals, []);
+});
+
 test('a shared build server a stopped worker started ends only once it is idle: another worker\'s build may be compiling through it', async () => {
   const vbcs = { pid: 500, ppid: 9212, cmd: 'dotnet exec /opt/Unity/Editor/Data/DotNetSdkRoslyn/VBCSCompiler.dll -pipename:abc', env: env('gone'), cpu: 0 };
   const m = machine([SYSTEMD, vbcs], { sessions: { gone: {} } });

@@ -32,8 +32,8 @@
 //
 // Never touched: anything while its worker's process runs (between turns too); an interactive Unity editor, and what it
 // started (the sandbox pool stops idle editors; a person's editor is never ours); a process that names the machine's main
-// clone or the daemon's own folder (the agent hosts, which hostWatch.ts owns); a process carrying another machine's id or
-// a session this machine never ran (the portal's own orchestrators where a daemon shares its host); a shared build server
+// clone or the daemon's own folder (the agent hosts, which hostWatch.ts owns; not a worker's own `unity-slot`, w2410); a
+// process carrying another machine's id or a session this machine never ran (the portal's own orchestrators where a daemon shares its host); a shared build server
 // (VBCSCompiler, MSBuild nodes, bee) while it still uses CPU, since another worker's build may be using it; anything
 // before the portal's welcome since the daemon started (until then who is live or waited for is not known). Every end is
 // logged with what, why and whose, and told to the portal.
@@ -161,6 +161,14 @@ const DISPLAY = /^(xvfb|xvnc|xephyr|xdummy|x11vnc|xvfb-run|openbox|fluxbox|icewm
 const SERVER = /VBCSCompiler|MSBuild(\.dll|\.exe)?["']?\s.*node(mode|reuse)|dotnet[^\n]*build-server|bee_backend/i;
 
 const posix = (p: string) => p.replace(/\\/g, '/');
+/**
+ * w2410: a worker's own `unity-slot` command (the shim runs `node <daemon folder>/machine/unitySlots.ts run ...`, so its
+ * command line names the daemon's folder) is no part of the daemon: it is judged as the worker's like any other process,
+ * not spared with the agent hosts. On BEAST, 2026-10-27, worker d2d9c644's `unity-slot run` waited for a bench ticket
+ * (t00002471) from 12:23 UTC, holding a Unity slot meanwhile (a run takes its slot before its ticket), and outlived its
+ * worker by hours: the reaper ended only the bash and sh around it, at 14:03 UTC.
+ */
+const WORKER_CLI = /\/machine\/unitySlots\.ts(?=$|[\s"'])/i;
 const key = (p: string, platform: UnityPlatform) => (platform === 'win32' ? posix(p).replace(/\/+$/, '').toLowerCase() : p.replace(/\/+$/, ''));
 
 /** A path as a whole word of a command line: not a longer path that starts with it (~/FinalFactory-sandboxes for ~/FinalFactory). */
@@ -416,7 +424,7 @@ export class LeftoverReaper {
     for (const pid of self) spared.add(pid);
     for (const p of procs) {
       const c = d.platform === 'win32' ? posix(p.cmd).toLowerCase() : p.cmd;
-      if (!INIT.test(c) && prot.some((re) => re.test(c))) spare(p.pid);
+      if (!INIT.test(c) && !WORKER_CLI.test(c) && prot.some((re) => re.test(c))) spare(p.pid);
     }
     const env = await d.envOf(procs.map((p) => p.pid).filter((pid) => pid > 0 && !spared.has(pid)));
     const leases = d.leases();

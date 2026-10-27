@@ -3555,6 +3555,13 @@ export class Agents {
     const moved = this.movedAwayFrom(info, machineId);
     if (moved) return moved;
     if (info.stoppedOnPurpose) return { why: `${who} was stopped on purpose` };
+    // w2410 (lothsahn, 2026-10-27): stopped, with its sandbox released while it waits (on another request, a pull request,
+    // a person, a far check-in): nobody is there to use a ticket granted now. On BEAST worker d2d9c644's shared ticket
+    // t00002471 waited at the front for hours after its worker stopped blocked on w2402. A worker that keeps its sandbox
+    // between turns (a near check-in, a background job) keeps its place; this one queues again at the back once it is
+    // placed again (bench_queue.py parks and re-queues, w1984).
+    const released = info.placeReleased;
+    if (info.status === 'stopped' && released) return { why: `${who} stopped and released its sandbox ${released.sandbox} at ${released.at.slice(11, 16)} UTC (${released.why.slice(0, 80)})` };
     const now = Date.now();
     for (const [m, st] of Object.entries(this.machines?.allStats?.() ?? {})) {
       if (m === machineId || !st.bench || !(now - Date.parse(st.at ?? '') < BENCH_STATE_FRESH_MS)) continue;
