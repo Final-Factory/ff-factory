@@ -525,6 +525,9 @@ export function mainCloneGrantBrief(c: { path: string; requests: string[]; by: s
 /** needsTimed's answer as a placement kind (w1628). */
 const timedKind = timedKindOf;
 
+/** w2358: one run's computers, room and hold answers for heldFor (Agents.heldFor). */
+type HoldMemo = { places?: Computer[]; facts?: RoomNow; why: Map<string, string | undefined> };
+
 export class Agents {
   private readonly cfg: Config;
   private readonly store: Store;
@@ -841,7 +844,7 @@ export class Agents {
       recentCommits: () => this.recentCommits,
       room: () => this.roomNow(),
       roomFacts: () => this.roomFacts(),
-      heldFor: (m, w) => this.pairHoldProblem(m, w) ?? this.timedHoldProblem(m, w, !!w.timedLeg || !!timedKind(needsTimed(w))),
+      heldFor: (m, w) => this.heldFor(m, w),
       timedFacts: (t) => timedFacts(this.places(), this.placement(), t),
       timedSmall: () => {
         const places = this.places();
@@ -4037,6 +4040,32 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
   }
 
   /**
+   * w2358: why single game work `w` may not take `machine`'s last free sandbox (an older pair run's hold, then timed work's), as
+   * start_agent reads it, for the queue, the WRONG flag, the room shares and the capacity ping. Each queued request asks it for
+   * each computer with room, and each answer read places() and roomFacts() afresh: after #720 went live on 2026-10-27 the event
+   * loop blocked 46.8 s at 10:02:11Z (pairHoldProblem 58.1 s of the stall profile, under roomFor) and the health check restarted
+   * the portal. So the computers, the room and each answer are read once per run of synchronous code (until the next
+   * microtask): nothing that changes them runs in between without an await. start_agent's own checks read them fresh.
+   */
+  heldFor(machine: string, w: WorkItem): string | undefined {
+    if (!this.holdMemo) {
+      const memo: HoldMemo = { why: new Map() };
+      this.holdMemo = memo;
+      queueMicrotask(() => {
+        if (this.holdMemo === memo) this.holdMemo = undefined;
+      });
+    }
+    const memo = this.holdMemo;
+    const key = `${machine}\0${w.id}`;
+    if (memo.why.has(key)) return memo.why.get(key);
+    const why = this.pairHoldProblem(machine, w, memo) ?? this.timedHoldProblem(machine, w, !!w.timedLeg || !!timedKind(needsTimed(w)), memo);
+    memo.why.set(key, why);
+    return why;
+  }
+
+  private holdMemo?: HoldMemo;
+
+  /**
    * Why new game work may not take `machine`'s last free sandbox (w1945), or undefined: an older pair run that is Queued, of
    * at least this work's priority, fits that computer, and waits for computers to have room at once. Left to chance, single
    * work takes each sandbox as it frees and a pair, which needs two at the same moment, waits forever (lothsahn: "queues
@@ -4045,16 +4074,16 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
    * name this computer alone is never held off it, and a hold lapses PAIR_HOLD_MS after that computer's room began while
    * the pair still cannot start, so a pair waiting for a partner never keeps a sandbox idle for long.
    */
-  pairHoldProblem(machine: string | undefined, w: WorkItem | undefined): string | undefined {
+  pairHoldProblem(machine: string | undefined, w: WorkItem | undefined, memo?: HoldMemo): string | undefined {
     if (!machine) return undefined;
-    const place = this.places().find((p) => p.id === placeId(machine));
+    const place = (memo ? (memo.places ??= this.places()) : this.places()).find((p) => p.id === placeId(machine));
     if (!place || place.freeSandboxes > 1) return undefined;
     // w1983: work that can run only here (lothsahn's "Move one timed run to LothLaptop", w1789) is not sent elsewhere.
     const needs = w?.queuedFor?.needs;
     if (needs?.length && needs.every((n) => placeId(n) === place.id)) return undefined;
     const rank = (p: WorkPriority | undefined) => WORK_PRIORITIES.indexOf(p ?? 'normal');
     const since = (x: WorkItem) => Date.parse(x.queuedFor?.at ?? x.createdAt) || 0;
-    const facts = this.roomFacts();
+    const facts = memo ? (memo.facts ??= this.roomFacts()) : this.roomFacts();
     const pair = [...this.store.work.values()]
       .filter((p) => p.pair && !p.pair.started && p.status === 'queued' && p.id !== w?.id)
       .filter((p) => rank(p.priority) >= rank(w?.priority) && (!w || since(p) <= since(w) || rank(p.priority) > rank(w.priority)))
@@ -4079,15 +4108,15 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
    * at 05:27Z. Not held: timed work itself, work whose needs name this computer alone, a pair with no other computers for
    * its legs, and, TIMED_HOLD_MS after that computer's room began, anything (a hold nobody acts on never idles a sandbox).
    */
-  timedHoldProblem(machine: string | undefined, w: WorkItem | undefined, timed: boolean): string | undefined {
+  timedHoldProblem(machine: string | undefined, w: WorkItem | undefined, timed: boolean, memo?: HoldMemo): string | undefined {
     if (!machine || timed) return undefined;
-    const place = this.places().find((p) => p.id === placeId(machine));
+    const place = (memo ? (memo.places ??= this.places()) : this.places()).find((p) => p.id === placeId(machine));
     if (!place || place.freeSandboxes > 1 || place.noTimedRuns || !isSmallTimed(place)) return undefined;
     const needs = w?.queuedFor?.needs;
     if (needs?.length && needs.every((n) => placeId(n) === place.id)) return undefined;
     const rank = (p: WorkPriority | undefined) => WORK_PRIORITIES.indexOf(p ?? 'normal');
     const since = (x: WorkItem) => Date.parse(x.queuedFor?.at ?? x.createdAt) || 0;
-    const facts = this.roomFacts();
+    const facts = memo ? (memo.facts ??= this.roomFacts()) : this.roomFacts();
     const kindOf = (t: WorkItem) => (t.timedLeg ? 'any' : needsTimed(t));
     const waiting = [...this.store.work.values()]
       .filter((t) => t.status === 'queued' && t.id !== w?.id && !t.pair && kindOf(t))
@@ -6364,7 +6393,7 @@ ${w.repo ?? ''}
       reservedRoom: extras.reservedRoom,
       roomFit: extras.roomFit,
       // w2358: room start_agent refuses single game work for (a pair run's or timed work's hold) is not its room.
-      roomHeld: (id, w) => (w.pair || needsOf(w) !== 'game' ? undefined : this.pairHoldProblem(id, w) ?? this.timedHoldProblem(id, w, !!w.timedLeg || !!timedKind(needsTimed(w)))),
+      roomHeld: (id, w) => (w.pair || needsOf(w) !== 'game' ? undefined : this.heldFor(id, w)),
       ...(extras.roomSince ? { roomSince: extras.roomSince } : {}),
       ...(extras.roomSlots ? { roomSlots: extras.roomSlots } : {}),
       // w1841: a worker an urgent release's build paused shows Blocked on it; a report waiting on a held bench lock, on that.

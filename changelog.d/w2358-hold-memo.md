@@ -1,0 +1,1 @@
+- The room checks no longer stall the portal (w2358): the holds the queue, the room shares, the WRONG flag and the capacity ping read (#720) read the computers and the room once per pass, not once per queued request and computer. On 2026-10-27 at 10:02Z one pass blocked the portal for 46.8 s and the health check restarted it.
