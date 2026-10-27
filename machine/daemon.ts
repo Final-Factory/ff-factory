@@ -37,6 +37,7 @@ import { run } from '../server/proc.ts';
 import { ensureGitBashTmp, keepGitBashTmp } from '../server/gitBashTmp.ts';
 import { readImage } from '../server/images.ts';
 import { publishFromMachine } from './review.ts';
+import { PortalCalls } from './portalCalls.ts';
 import { LOG_MAINTAIN_EVERY_MS, maintainLogs, maintenanceLine } from './logRetention.ts';
 import { DEV_TIER_SNIPPET, LiveSession, ProcessBirths, gameCommand, type LiveDeps } from './live.ts';
 import { backupScenes, idleCloseEditor, idleClosedDetail, idleReopenNote, putBackMats, snapshotMats, type MatSnapshot } from './liveIdle.ts';
@@ -346,7 +347,12 @@ export class Daemon {
   private readonly procs: () => Promise<{ pid: number; ppid: number; cmd: string }[]>;
   private readonly events = new EventEmitter();
   private readonly outbox: string[] = [];
-  private readonly rpcs = new Map<string, { resolve: (t: string) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
+  /** Tool calls to the portal; the ones that set a request's wait are held across an outage (w2422, machine/portalCalls.ts). */
+  private readonly calls = new PortalCalls({
+    open: () => this.ws?.readyState === WebSocket.OPEN,
+    send: (msg) => this.send(msg as FromDaemon),
+    log: (line) => log(line),
+  });
   /** Per session, the sends still fetching their attachments: later messages wait for them, so the order holds. */
   private readonly sending = new Map<string, Promise<void>>();
   private attempt = 0;
@@ -1306,6 +1312,7 @@ export class Daemon {
       if (this.ws !== ws) return;
       this.ws = undefined;
       this.selfUpdate.linkDown();
+      this.calls.linkDown();
       if (this.stopped) return;
       // Sleep, wake, a network change or a portal restart: try again, forever. For the first two minutes
       // every ~2 s (a portal restart takes 20-60 s), then back off to 30 s.
@@ -1487,6 +1494,8 @@ export class Daemon {
     void this.selfUpdate.tick().catch((e) => log(`update job report: ${(e as Error).message}`));
     // The portal showed these stopped while the link was down; give it their real state.
     for (const e of this.entries.values()) this.send({ type: 'session', info: e.s.info, live: e.s.live });
+    // Calls that set what a request waits on, held while the link was down (w2422): after the sessions, so the portal knows them.
+    this.calls.linkUp();
     this.reportSandboxes();
     void this.reportStats();
     // The last gh login reading (w1463): a portal that restarted, or a new one, has it at once.
@@ -2141,20 +2150,7 @@ export class Daemon {
 
   private handlers(sessionId: string): Partial<Record<CatalogTool, ToolHandler>> {
     const call = (method: CatalogTool, timeoutMs = 60_000) => (args: Record<string, unknown>) =>
-      new Promise<string>((resolve, reject) => {
-        const id = randomUUID();
-        const timer = setTimeout(() => {
-          this.rpcs.delete(id);
-          reject(new Error(`the portal did not answer in ${timeoutMs / 1000} s`));
-        }, timeoutMs);
-        this.rpcs.set(id, { resolve, reject, timer });
-        if (this.ws?.readyState !== WebSocket.OPEN) {
-          clearTimeout(timer);
-          this.rpcs.delete(id);
-          return reject(new Error('the portal is unreachable right now'));
-        }
-        this.send({ type: 'rpc', id, sessionId, method, args });
-      });
+      this.calls.call({ type: 'rpc', id: randomUUID(), sessionId, method, args }, timeoutMs);
     // Every tool the portal can answer: it decides per session which ones it serves (MachineManager.answer), and
     // the spec decides which ones the agent sees. (A fixed list here once left wake_me and unity out on the Macs.)
     const all: Partial<Record<CatalogTool, ToolHandler>> = Object.fromEntries((Object.keys(CATALOG) as CatalogTool[]).map((k) => [k, call(k)]));
@@ -2806,12 +2802,7 @@ export class Daemon {
         return;
       }
       case 'rpc_result': {
-        const p = this.rpcs.get(msg.id);
-        if (!p) return;
-        this.rpcs.delete(msg.id);
-        clearTimeout(p.timer);
-        if (msg.ok) p.resolve(msg.text);
-        else p.reject(new Error(msg.text));
+        this.calls.answer(msg.id, msg.ok, msg.text);
         return;
       }
     }

@@ -13,6 +13,7 @@ import { emit, type Store } from './store.ts';
 import { COMPACTING, isMidTurn, type AutoCompaction, type SessionHandle, type SessionManager } from './sessions.ts';
 import type { CatalogTool, LaunchSpec, ToolHandler } from './launch.ts';
 import type { RemoteVoiceStatus } from '../shared/voice.ts';
+import { AnsweredCalls } from './answeredCalls.ts';
 import { ATTACHMENT_PROTOCOL, BATCH_CLEAR_PROTOCOL, MAIN_CLONE_NO_AGENTS, RELOCATE_FALLBACK_MINUTES, RELOCATE_PROTOCOL, SANDBOX_PROTOCOL, protocolProblem, relocateProblem, type DaemonLiveView, type DaemonSandbox, type FromDaemon, type LinkUpdateFlags, type LinkUpdateReport, type ToDaemon } from './machineProtocol.ts';
 import { LINK_ACK_MS, PendingCalls, UpdateBundles, UpdateNotReached, unwaitedAnswer } from './machineLink.ts';
 import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
@@ -2803,7 +2804,15 @@ export class MachineManager {
     return (await this.fsCall(machineId, { op: 'list', dirs })).files ?? [];
   }
 
+  /** Call ids answered lately (w2422): a held call a daemon sends again after a dropped link is applied once. */
+  private readonly answered = new AnsweredCalls<ToDaemon>();
+
   private async answer(id: string, msg: Extract<FromDaemon, { type: 'rpc' }>) {
+    const reply = await this.answered.once(`${id}:${msg.id}`, () => this.reply(id, msg));
+    this.post(id, reply, false);
+  }
+
+  private async reply(id: string, msg: Extract<FromDaemon, { type: 'rpc' }>): Promise<ToDaemon> {
     let reply: ToDaemon;
     try {
       const s = this.handle(msg.sessionId);
@@ -2814,7 +2823,7 @@ export class MachineManager {
     } catch (e) {
       reply = { type: 'rpc_result', id: msg.id, ok: false, text: (e as Error).message };
     }
-    this.post(id, reply, false);
+    return reply;
   }
 }
 

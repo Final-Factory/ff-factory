@@ -2125,6 +2125,11 @@ export interface WorkItem {
    */
   gateResumes?: GateResume[];
   /**
+   * w2422: the worker report ("<session>@<report ms>") whose "still open: blocked on wNNN" the ledger made a gate of
+   * itself, since no blocked_on was recorded with it (server/blockerWatch.ts recordReportedWaits); kept so it does so once.
+   */
+  waitRecorded?: string;
+  /**
    * w2417: every request this one has waited on (a request gate, set by blocked_on or the dispatcher), kept after the gate
    * clears: its workers may read those requests' reports and files with read_work (server/workRead.ts readScope).
    */

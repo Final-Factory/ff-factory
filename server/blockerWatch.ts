@@ -23,7 +23,7 @@ import { blockerVerdict, CI_REF, cycleBreak, gateSetter, gatesOf, newestFirst, R
 import { conditionalVerdict } from '../shared/conditional.ts';
 import { ghRunner } from './githubTokens.ts';
 import { reportDelivers, stillOpenIn } from './ledgerRules.ts';
-import { requestWaitOf } from '../shared/workState.ts';
+import { lastOpenLine, reportAt, requestWaitOf } from '../shared/workState.ts';
 import type { SessionInfo, WorkBlocker, WorkItem } from '../shared/types.ts';
 import type { RoomNow } from './placement.ts';
 
@@ -48,11 +48,13 @@ export type PrState = { state: 'open' | 'merged' | 'closed'; text: string; sha?:
 export interface BlockerWatchDeps {
   store: Store;
   orchestrators: Pick<Orchestrators, 'unblock' | 'blockerStuck' | 'blockerDecide' | 'gatesCleared' | 'flagQueuedWithRoom' | 'carryOutConditional' | 'dropConditional'> &
-    Partial<Pick<Orchestrators, 'noteCiRead' | 'sweepResumes' | 'requeueCapacityBlocks' | 'requeueBrokenPairs' | 'replaceNoTimedWaits' | 'timedLegBound' | 'mergedOnGreen' | 'undecidedBound'>>;
+    Partial<Pick<Orchestrators, 'recordReportedWait' | 'noteCiRead' | 'sweepResumes' | 'requeueCapacityBlocks' | 'requeueBrokenPairs' | 'replaceNoTimedWaits' | 'timedLegBound' | 'mergedOnGreen' | 'undecidedBound'>>;
   /** w1841: tell the workers waiting on a bench lock that is free now (Agents.resumeBenchWaits): request id to what it did. */
   benchResume?: () => [string, string][];
   /** Whether a message to a session waits in the send queue (for a sandbox, a slot or its machine): its resume is on its way (w1094). */
   queued?: (sessionId: string) => boolean;
+  /** Whether a session's wake_me check-in is pending (w2422: a worker that will come back by itself is left be). */
+  checkInPending?: (sessionId: string) => boolean;
   /** The commit the portal runs. */
   portalSha?: () => string | undefined;
   /** The commit a machine's daemon runs. */
@@ -82,6 +84,11 @@ export interface BlockerWatchDeps {
   roomFacts?: () => RoomNow;
   now?: () => number;
 }
+
+/** w2422: how old a worker's report may be for the ledger to record the wait it names (older ones are a person's to look at). */
+export const REPORTED_WAIT_MS = 3 * 24 * 3600_000;
+/** A worker that is not in a turn. */
+const STOPPED: ReadonlySet<string> = new Set(['idle', 'stopped', 'error']);
 
 export class BlockerWatch {
   private timer?: NodeJS.Timeout;
@@ -123,6 +130,43 @@ export class BlockerWatch {
     clearInterval(this.timer);
   }
 
+  /**
+   * w2422: an open request with no gate whose newest worker stopped on a report that says it is blocked on another request
+   * ("w2335: still open: blocked on w2338 reporting (the ledger may not show the block because the portal was
+   * unreachable)") gets that wait as a gate, as if its blocked_on had been recorded. Before, the line showed Blocked only
+   * while w2338 was open, nothing resumed the worker when it closed, and w2335 sat Stalled for 9 hours. Once per report; a
+   * worker mid-turn, with a check-in pending or a message on its way, a wait on a request that waits on this one (a cycle,
+   * w2357) and a report older than REPORTED_WAIT_MS are left be.
+   */
+  recordReportedWaits(): [string, string][] {
+    const record = this.d.orchestrators.recordReportedWait?.bind(this.d.orchestrators);
+    if (!record) return [];
+    const now = this.now();
+    const out: [string, string][] = [];
+    for (const w of [...this.d.store.work.values()]) {
+      try {
+        if ((w.status !== 'active' && w.status !== 'stalled') || gatesOf(w).length) continue;
+        const sid = newestFirst(w).find((x) => this.d.store.sessions.get(x));
+        const s = sid ? this.d.store.sessions.get(sid) : undefined;
+        if (!s || !STOPPED.has(s.status) || s.queuedSend || this.d.queued?.(s.id) || this.d.checkInPending?.(s.id)) continue;
+        const l = lastOpenLine(w, s, now);
+        const ref = l ? requestWaitOf(l.line, w.id) : undefined;
+        if (!l || !ref) continue;
+        const at = l.at ?? reportAt(s);
+        const key = `${s.id}@${at}`;
+        if (w.waitRecorded === key || !at || now - at > REPORTED_WAIT_MS) continue;
+        // One the request it names waits on in turn is a wait cycle: the cycle break (w2357, below) resumes a side of it.
+        const other = this.d.store.work.get(ref);
+        if (other && gatesOf(other).some((g) => g.kind === 'request' && g.ref?.toLowerCase() === w.id.toLowerCase())) continue;
+        const onReport = new RegExp(`\\b${ref}\\b[^;.]{0,40}\\breport`, 'i').test(l.line);
+        if (record(w.id, s.id, { ref, onReport, line: l.line, at, key })) out.push([w.id, `recorded: the wait on ${ref} its worker ${s.id}'s report names (w2422)`]);
+      } catch (e) {
+        console.warn(`blocker watch: ${w.id}: recording its worker's reported wait: ${(e as Error).message}`);
+      }
+    }
+    return out;
+  }
+
   /** Look now (a request was just blocked, or something it may wait on changed). */
   kick() {
     setImmediate(() => void this.tick());
@@ -141,6 +185,9 @@ export class BlockerWatch {
       for (const id of this.d.orchestrators.requeueCapacityBlocks?.() ?? []) did.set(id, 'requeued: a block that waited only for capacity');
       // w2304: a pair run that lost a leg mid-run starts again whole, Queued, never Stalled.
       for (const id of this.d.orchestrators.requeueBrokenPairs?.() ?? []) did.set(id, 'requeued: a pair run that lost a leg mid-run');
+      // w2422: a wait a stopped worker's report names with no blocked_on recorded becomes its gate first, so the look below
+      // clears it and resumes that worker like any other.
+      for (const [id, why] of this.recordReportedWaits()) did.set(id, why);
       const blocked = [...this.d.store.work.values()].filter((w) => w.status === 'blocked' && w.blocked && w.blocked.by !== 'ledger cleanup');
       const ci = new Map<string, CiState | undefined>();
       const pr = new Map<string, PrState | undefined>();
