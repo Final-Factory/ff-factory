@@ -240,6 +240,9 @@ export interface OrchestratorsDeps {
   timedSmall?: () => { states: SmallState[]; waitWhy: string };
   /** A Queued timed leg's next step, and whether its needs reach the big computers (w2055, Agents.timedLegStepFor). */
   timedLegStep?: (w: WorkItem) => { step: LegStep; big: boolean } | undefined;
+  /** w2358: runs `fn` with the computers (Agents.places) computed once, until placesChanged (Agents.withPlacesOnce). */
+  placesOnce?: <T>(fn: () => T) => T;
+  placesChanged?: () => void;
   /** Start a timed leg on `machine` itself, its movable workers moved first (w2055, Agents.startTimedLeg); false when under way. */
   startTimedLeg?: (w: WorkItem, machine: string, why: string, moves: readonly Occupant[]) => boolean;
   /** w2168: a started leg waiting for an exclusive ticket on a big computer moves to an idle small one: its log line, if it did. */
@@ -3736,9 +3739,20 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
 
   timedLegBound(): string[] {
     if (!this.d.timedLegStep) return this.timedLegBoundW2048();
+    // w2358: each leg's step and each move read places() afresh, every sandbox's free() asked again for every timed request on
+    // every blocker-watch pass: on 2026-10-27 11:48-11:56Z (stall profile) timedLegBound took 6.1-10.4 s of a minute, nearly
+    // all of it in places(). The computers are read once and again only after a leg started, moved or was re-queued.
+    return this.d.placesOnce ? this.d.placesOnce(() => this.timedLegBoundNow()) : this.timedLegBoundNow();
+  }
+
+  private timedLegBoundNow(): string[] {
     const done: string[] = [];
+    const did = (id: string) => {
+      done.push(id);
+      this.d.placesChanged?.();
+    };
     const widened: string[] = [];
-    for (const id of this.d.withdrawStaleTimedHere?.() ?? []) if (!done.includes(id)) done.push(id);
+    for (const id of this.d.withdrawStaleTimedHere?.() ?? []) if (!done.includes(id)) did(id);
     for (const w of this.store.work.values()) {
       const leg = w.timedLeg;
       if (!isOpen(w)) continue;
@@ -3749,7 +3763,7 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
         if (moved) {
           this.stamp(w, moved);
           this.store.putWork(w);
-          done.push(w.id);
+          did(w.id);
         }
         continue;
       }
@@ -3759,11 +3773,11 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
         if (moved) {
           this.stamp(w, moved);
           this.store.putWork(w);
-          done.push(w.id);
+          did(w.id);
         }
         continue;
       }
-      const r = this.d.timedLegStep(w);
+      const r = this.d.timedLegStep?.(w);
       if (!r) continue;
       const { step, big } = r;
       if ('start' in step || 'preempt' in step) {
@@ -3772,7 +3786,7 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
           this.stamp(w, `${'preempt' in step ? 'ledger: PRE-EMPTED' : 'starting'} on ${to} by FF Factory (w2055): ${step.why}`);
           this.store.putWork(w);
           console.log(`timed leg (w2055): ${w.id} (timed leg of ${leg.for}, ${w.priority}) ${'preempt' in step ? 'pre-empts' : 'starts on'} ${to}: ${step.why}`);
-          done.push(w.id);
+          did(w.id);
         }
         continue;
       }
@@ -3794,7 +3808,7 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       }
       console.log(`timed ask (w2055): ${w.id} (timed leg of ${leg.for}, ${w.priority}) queued for ${needs.join(' > ')}${big ? ' (big-computer fallback)' : ''}: ${step.why}`);
       if (first) widened.push(w.id);
-      done.push(w.id);
+      did(w.id);
     }
     if (widened.length)
       this.toDispatcher(

@@ -7088,3 +7088,20 @@ test('w2358: one workLive pass computes the computers once, for the room, the ro
   agents.places();
   assert.equal(n, 3);
 });
+
+test('w2358: a timed-leg pass reads the computers once, and afresh only after a leg changed', (t) => {
+  // On 2026-10-27 11:48-11:56Z (stall profile) timedLegBound took 6.1-10.4 s of a minute, nearly all in places(): every queued
+  // timed leg's step and every move read it afresh.
+  const { store, agents, o } = setup(t);
+  let n = 0;
+  (agents as unknown as { placesNow: () => unknown[] }).placesNow = () => (n++, []);
+  const at = new Date().toISOString();
+  putRequests(store, Array.from({ length: 6 }, (_, i) => ({ id: `w${3200 + i}`, title: `Timed leg for w9: belt ${i}`, status: 'queued' as const, needs: 'game' as const, queuedFor: { at, needs: ['pc'] }, timedLeg: { for: 'w9', forSession: 'nobody', from: 'beast', small: ['pc'] } })));
+  const first = o.timedLegBound();
+  const firstReads = n;
+  // Each leg the first pass re-queued is a change: the next reads afresh, so at most one read per change and one more.
+  assert.ok(firstReads <= first.length + 1, `places() ${firstReads} for ${first.length} changes`);
+  n = 0;
+  assert.deepEqual(o.timedLegBound(), [], 'unchanged: nothing to do');
+  assert.equal(n, 1, `places() ran ${n} times in a pass over 6 unchanged timed legs`);
+});
