@@ -2471,6 +2471,39 @@ test('w1378: a worker waiting on a person reaches that person’s orchestrator o
   assert.equal(store.work.get('w1')!.needsYou!.kind, 'report');
 });
 
+test('w2478: a worker\'s waiting_on_person and decide_work ask on a request with review stills are refused without one inline, accepted with one, and the opt-out is logged', async (t) => {
+  const { dir, store, machines, dispatcher, chat, call } = await setupOnMachine(t);
+  const ben = chat(BEN).info;
+  await call(ben, 'request_work', { title: 'Circuit button look', brief: 'A new icon.' });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Do it', title: 'w1: Circuit button look', work_id: 'w1' });
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const info = store.sessions.get(id)!;
+  await until('its first turn', () => info.status === 'idle');
+  const h = machines.hooks!.handlersFor(info, store.machines.get('pc')!);
+  const what = 'pick the circuit button look';
+  const question = (q: string) => [{ question: q, options: [{ label: 'The blue one', recommended: true }, { label: 'The grey one' }] }];
+  // A non-visual request asks as before.
+  assert.match(String(await h.waiting_on_person!({ who: 'Ben', what, questions: question('Which look should the button have?'), request: 'w1' })), /buttons on Ben's card/);
+  // Its worker publishes stills (here under a topic not named after the request): now the question must show one.
+  const topic = path.join(dir, '_review', 'circuit-icon');
+  fs.mkdirSync(topic, { recursive: true });
+  const still = path.join(topic, 'blue.png');
+  fs.writeFileSync(still, 'x');
+  store.putWork({ ...store.work.get('w1')!, reviewTopics: ['circuit-icon'] });
+  await assert.rejects(h.waiting_on_person!({ who: 'Ben', what, questions: question('Which look should the button have?'), request: 'w1' }), /Not shown: this question is about w1[\s\S]*blue\.png[\s\S]*Nothing was recorded/);
+  assert.match(String(await h.waiting_on_person!({ who: 'Ben', what, questions: question(`Which look should the button have? ![the blue one](<${still}>)`), request: 'w1' })), /buttons on Ben's card/);
+  await h.waiting_on_person!({ who: 'Ben', what: 'say when the release goes out', questions: question('Should it ship today?'), request: 'w1', no_previews: 'asks a date; nothing to look at' });
+  assert.ok(store.work.get('w1')!.log.some((l) => /waiting_on_person from worker \w+ without previews, though w1 has review media \(no_previews, w2478\): "asks a date; nothing to look at"/.test(l)), store.work.get('w1')!.log.join('\n'));
+  // The dispatcher's decide_work ask passes the same check.
+  await call(ben, 'request_work', { title: 'Circuit button, second pass', brief: 'Another look.' });
+  store.putWork({ ...store.work.get('w2')!, reviewTopics: ['circuit-icon'] });
+  const refused = await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'ask', note: 'Ben: which look?', questions: question('Which look should the button have?') });
+  assert.equal(refused.isError, true, refused.text);
+  assert.match(refused.text, /Not shown: this question is about w2/);
+  const shown = await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'ask', note: 'Ben: which look?', questions: question(`Which look? ![the blue one](<${still}>)`) });
+  assert.equal(shown.isError, false, shown.text);
+});
+
 test('w1597: a worker asks with questions: refused with a path, a PR list or no answers; kept on the wait and the record, listed in [needs you]; the answer a click sends, recorded, resumes the worker', async (t) => {
   const { store, machines, agents, sessions, dispatcher, chat, call, heard } = await setupOnMachine(t);
   const ben = chat(BEN).info;
@@ -2887,7 +2920,7 @@ test('w1384: review media reaches the person inline: a [needs you] for a folder 
   fs.utimesSync(still, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
   const ben = chat(BEN).info;
   await call(ben, 'request_work', { title: 'Fog of war', brief: 'Explored stays explored.' });
-  await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'ask', note: 'Ben: does fog preview v4 at /srv/fff/review/w1-fog-look-v4/ look right?', questions: [{ question: 'Which one?', options: [{ label: 'The first', recommended: true }, { label: 'The second' }] }] });
+  await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'ask', note: 'Ben: does fog preview v4 at /srv/fff/review/w1-fog-look-v4/ look right?', questions: [{ question: `Which one? ![fog v4](<${clip}>)`, options: [{ label: 'The first', recommended: true }, { label: 'The second' }] }] });
   await until('Ben hears it', () => heard(ben.id, '[needs you]').length === 1);
   const msg = heard(ben.id, '[needs you]')[0].text;
   assert.ok(msg.includes(`- ![fog-v4-1920.mp4](<${clip}>)\n- ![sheet.png](<${still}>)`), msg);

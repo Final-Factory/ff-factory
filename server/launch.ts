@@ -199,6 +199,7 @@ export const CATALOG = {
     after: z.string().min(1).max(WAIT_LINE_CHARS).describe('What happens once they answer ("I merge the fix and it ships in the next dev build"; "I build the picked look and bring you its clip").'),
     request: z.string().max(16).optional().describe('The request ("w665") it is about, when you serve several; default: all of them.'),
     decided_override: z.string().max(300).optional().describe('Only after a refusal that their note already decided it (w2085): what that note leaves open.'),
+    no_previews: z.string().max(300).optional().describe('Only for a question about nothing visual on a request that has review stills or clips: why no preview applies, in a line (w2478). Logged on the request.'),
   },
   unity: {
     action: z.enum(['status', 'start', 'stop', 'restart', 'clear_batch']),

@@ -2090,6 +2090,11 @@ export interface WorkItem {
    * full with its context, so the page shows it whole and the message goes once per question (server/needsYou.ts).
    */
   needsYou?: WorkNeedsYou;
+  /**
+   * w2478: review topics its workers published stills and clips to (publish_review), newest last, at most 20: with topics
+   * named for it (`w2186`, `w2186-*`), what makes a question about it visual (server/visualAsk.ts).
+   */
+  reviewTopics?: string[];
   /** What happened, oldest first: "10:02 filed by Lothsahn", "10:03 merged into w11: same fix". */
   log: string[];
   /**
@@ -2286,6 +2291,11 @@ export interface WorkNeedsYou {
   report?: string;
   /** Review stills, clips and folders the question or report names. */
   previews: string[];
+  /**
+   * w2478: the request's own review stills and clips (its review topics), newest first, that `previews` does not name: what
+   * the orchestrator's relay lists to inline, since ask_person refuses a question on a visual request that inlines none.
+   */
+  media?: string[];
   /** Pull requests it names ("Final-Factory/FinalFactory#1799"). */
   prs: string[];
   /**

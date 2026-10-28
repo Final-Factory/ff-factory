@@ -284,22 +284,97 @@ const WARDEN = {
   ],
 };
 
-test("w1602: a question that names a request with review media and carries none is refused, listing the newest files; the same call again goes through", async (t) => {
+test("w1602, w2478: a question that names a request with review media and carries none is refused, listing the newest files; the same call again is refused too", async (t) => {
   const env = setup(t);
   const dir = reviewFolder(env, 'w77-warden', ['old.mp4', 'mid.png', 'new.mp4']);
   reviewFolder(env, 'w78-other', ['unrelated.png']);
   const ben = env.o.personalFor(BEN);
   const first = await env.call(ben.info, ASK_TOOL, WARDEN);
   assert.equal(first.isError, true);
-  assert.match(first.text, /Not shown yet: your question names w77/);
-  assert.match(first.text, /in the card/);
+  assert.match(first.text, /Not shown: this question is about w77/);
+  assert.match(first.text, /IN the card/);
+  assert.match(first.text, /no_previews/);
   assert.ok(first.text.includes(`![new.mp4](<${path.resolve(dir, 'new.mp4')}>)`), first.text); // the native path, as the folder is read (w1758)
   assert.ok(first.text.indexOf('new.mp4') < first.text.indexOf('mid.png') && first.text.indexOf('mid.png') < first.text.indexOf('old.mp4'), 'newest first');
   assert.doesNotMatch(first.text, /unrelated/);
-  // Nothing was shown, and the same call again (the media is not for this question) is shown as it is.
+  // w2478: a repeat is how a card went out bare; it is refused again (the way through is no_previews, with a reason).
   const again = await env.call(ben.info, ASK_TOOL, WARDEN);
-  assert.equal(again.isError, false, again.text);
-  assert.match(again.text, /Shown to Ben as 2 buttons/);
+  assert.equal(again.isError, true, again.text);
+  assert.equal(ben.info.openAsks, undefined, 'nothing reached the Waiting tab');
+});
+
+// ---------------------------------------------------------------- w2478: every visual question carries its previews
+
+/** The w2186 case: the request in `request`, no id in the words (the brief keeps ids out of the question, w1597). */
+const CALC = {
+  question: 'Are the new operator rows and buttons of the Calculation window OK as they are?',
+  options: [
+    { label: 'Yes, the window looks good as it is', description: 'Keep it and open the pull request.', recommended: true },
+    { label: 'Change the operator rows', description: 'Say what to change.' },
+  ],
+  request: 'w2186',
+};
+
+test('w2478: refused without media: a question whose request (named only in `request`) has review stills carries none, so it never reaches the Waiting tab', async (t) => {
+  const env = setup(t);
+  const dir = reviewFolder(env, 'w2186-calc', ['before.png', 'after_de.png', 'after_en.png']);
+  const ben = env.o.personalFor(BEN);
+  const r = await env.call(ben.info, ASK_TOOL, CALC);
+  assert.equal(r.isError, true, r.text);
+  assert.match(r.text, /Not shown: this question is about w2186, whose work has review stills or clips, and the card carries none of them\./);
+  assert.ok(r.text.includes(`![after_en.png](<${path.resolve(dir, 'after_en.png')}>)`), r.text);
+  assert.ok(r.text.indexOf('after_en.png') < r.text.indexOf('before.png'), 'newest first');
+  // A still that is not there shows on no card: refused as well.
+  const broken = await env.call(ben.info, ASK_TOOL, { ...CALC, question: `${CALC.question} ![after](<${dir}/gone.png>)` });
+  assert.equal(broken.isError, true, broken.text);
+  assert.match(broken.text, /not in the review folder/);
+});
+
+test("w2478: accepted with media: a still of the request's, in the question or an option, shows the card", async (t) => {
+  const env = setup(t);
+  const dir = reviewFolder(env, 'w2186-calc', ['after_en.png']);
+  const ben = env.o.personalFor(BEN);
+  const r = await env.call(ben.info, ASK_TOOL, { ...CALC, question: `${CALC.question} ![the window in English](<${dir}/after_en.png>)` });
+  assert.equal(r.isError, false, r.text);
+  assert.match(r.text, /Shown to Ben as 2 buttons/);
+  const inOption = await env.call(ben.info, ASK_TOOL, { ...CALC, options: [{ ...CALC.options[0], description: `Keep it. ![en](<${dir}/after_en.png>)` }, CALC.options[1]] });
+  assert.equal(inOption.isError, false, inOption.text);
+});
+
+test('w2478: accepted for a non-visual request: a request with no review media asks without previews, as before', async (t) => {
+  const env = setup(t);
+  reviewFolder(env, 'w2187-other', ['x.png']);
+  const ben = env.o.personalFor(BEN);
+  const r = await env.call(ben.info, ASK_TOOL, { ...CALC, request: 'w2186' });
+  assert.equal(r.isError, false, r.text);
+});
+
+test('w2478: the request is visual when its worker published to a topic named otherwise (reviewTopics), or its last [needs you] named a still', async (t) => {
+  const env = setup(t);
+  reviewFolder(env, 'circuit-calc-stills', ['a.png']);
+  const ben = env.o.personalFor(BEN);
+  env.store.putWork({ ...pending('w2186'), reviewTopics: ['circuit-calc-stills'] } as WorkItem);
+  const r = await env.call(ben.info, ASK_TOOL, CALC);
+  assert.equal(r.isError, true, r.text);
+  assert.match(r.text, /a\.png/);
+  const dir = reviewFolder(env, 'loose', ['named.png']);
+  env.store.putWork({ ...pending('w2190'), needsYou: { key: "k", kind: "declared", question: "q", who: [], to: [], at: new Date(0).toISOString(), previews: [`${dir}/named.png`], prs: [] } } as unknown as WorkItem);
+  const named = await env.call(ben.info, ASK_TOOL, { ...CALC, request: 'w2190' });
+  assert.equal(named.isError, true, named.text);
+  assert.match(named.text, /named\.png/);
+});
+
+test('w2478: the opt-out: no_previews with a reason shows a non-visual question on a visual request, and logs it on the request', async (t) => {
+  const env = setup(t);
+  reviewFolder(env, 'w2186-calc', ['after_en.png']);
+  env.store.putWork(pending('w2186'));
+  const ben = env.o.personalFor(BEN);
+  const short = await env.call(ben.info, ASK_TOOL, { ...CALC, no_previews: 'n/a' });
+  assert.equal(short.isError, true, 'a reason, not a word');
+  const r = await env.call(ben.info, ASK_TOOL, { ...CALC, question: 'Should the pull request merge before the nightly or after it?', no_previews: 'asks when to merge; nothing to look at' });
+  assert.equal(r.isError, false, r.text);
+  const log = env.store.work.get('w2186')!.log.join('\n');
+  assert.match(log, /ask_person to Ben shown without previews, though w2186 has review media \(no_previews, w2478\): "asks when to merge; nothing to look at"/);
 });
 
 test('w1602: media in the question or in any option lets the call through at once; so does a request without review media', async (t) => {

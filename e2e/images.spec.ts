@@ -307,7 +307,7 @@ test("w1602: the Warden question's shape: a message with its clips, then a card 
     ],
   };
   const refused = await useTool(page.request, me.orchestratorId!, 'ask_person', bare);
-  expect(refused).toMatch(/Not shown yet: your question names w000/);
+  expect(refused).toMatch(/Not shown: this question is about w000/);
   expect(refused).toMatch(/!\[[^\]]+\]\(<[^>]*\/review\/w000-[^>]+\.(png|webm)>\)/);
   await expect(page.getByTestId('ask').filter({ hasText: tag })).toHaveCount(0);
   const withMedia = {
@@ -315,7 +315,7 @@ test("w1602: the Warden question's shape: a message with its clips, then a card 
     question: `${bare.question} ![Halo today](<${review}/option-a-1280.png>)`,
     options: [{ ...bare.options[0], description: `Ship it. ![Halo clip](<${review}/clip.webm>)` }, bare.options[1]],
   };
-  expect(await useTool(page.request, me.orchestratorId!, 'ask_person', withMedia)).not.toMatch(/Not shown yet|^ERROR/);
+  expect(await useTool(page.request, me.orchestratorId!, 'ask_person', withMedia)).not.toMatch(/Not shown|^ERROR/);
   const card = page.getByTestId('ask').filter({ hasText: tag });
   await card.scrollIntoViewIfNeeded();
   await expectLoaded(card.locator('.md-img img'));

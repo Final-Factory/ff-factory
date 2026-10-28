@@ -2990,11 +2990,23 @@ orchestrator asks every question to its person with **`ask_person`**, one at a t
   card, and media left only above it is not in it. So `Orchestrators.previewsMissing` refuses an `ask_person` call whose
   question, labels and descriptions name a request wNNN with stills or clips in its review folder (`reviewMedia.previewsOf`:
   `<root>/wNNN` or `<root>/wNNN-*`, newest first) while none of them carries an `![..](..)`. The refusal lists the newest
-  files (up to 6 per request) as `![name](<path>)` lines, and the same call sent again goes through, for a question the
-  media is not about. It refuses rather than attaches: a folder holds every iteration (w1465's Warden clips next to older
+  files (up to 6 per request) as `![name](<path>)` lines. It refuses rather than attaches: a folder holds every iteration (w1465's Warden clips next to older
   takes), a wrong still on a button is worse than none, and the orchestrator alone knows which belongs to which option. The
   page draws a refused call (`tool_result` with `isError`) as an ordinary tool step, not a card, and `answerWords` refuses a
   click on one. The brief has the rule in one line (`agents.ts`, "Ask every question to").
+- **Every Waiting-tab question passes the same preview check** (w2478). Ben, 2026-10-28, w2186: "i need to see previews.
+  stop asking me questions in the intakes without showing my previews when applicable". The w1602 check read request ids
+  only from the words, while the brief keeps ids out of them and in `request`, and a repeat went through silently, so
+  visual cards still reached Ben bare. `server/visualAsk.ts` `visualAskCheck` now runs on all three paths that put a card
+  on the Waiting tab: `ask_person` (`Orchestrators.previewsMissing`, ids from `request` and the words), a worker's
+  `waiting_on_person` (`Agents.declareWaiting`, its open requests; a file the question names also counts) and the
+  dispatcher's `decide_work` `ask`. A request is visual when it has review stills or clips (`requestMedia`): files in
+  `<root>/wNNN` or `<root>/wNNN-*`, in a topic its workers published media to (`WorkItem.reviewTopics`, recorded by
+  `publish_review`), or named in its last [needs you] (`needsYou.previews`). The question passes when it or an option
+  inlines one existing file under the review root as `![..](<path>)`; a path outside the folder or a missing file does not
+  count. For a question about nothing visual, `no_previews: "<why, 12+ characters>"` lets it through and logs the reason
+  on the request. A repeat no longer passes. The [needs you] relay lists the request's other review files, newest first,
+  to inline (`WorkNeedsYou.media`, up to 8).
 - **A click is the person's own message.** `POST /api/sessions/<id>/answer` with the question's seq and the option's index
   (`Orchestrators.answerWords`). The server reads the label and the question from the transcript, never from the page, and
   sends it as a reply (shared/replies.ts, "Replies and reactions"): the person's words are the label, then `REPLY_MARK` and

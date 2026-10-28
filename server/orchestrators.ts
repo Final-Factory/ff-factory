@@ -61,11 +61,12 @@ import type { LegStep, Occupant } from './timedLegPlace.ts';
 import { minPriorityText } from '../shared/capacity.ts';
 import { repoSlug } from './ciReadHealth.ts';
 import { actionName, CONDITIONAL_DAYS, CONDITIONAL_MAX_DAYS, CONDITIONAL_PER_REQUEST, conditionalLine, conditionName, HELD_MARK, inPersonWords, parseCondition, type ConditionInput } from '../shared/conditional.ts';
-import { askExcerpt, answerOf, checkAsk, isAskTool, splitMedia, type Ask } from '../shared/ask.ts';
+import { ASK_TOOL, askExcerpt, answerOf, checkAsk, isAskTool, splitMedia, type Ask } from '../shared/ask.ts';
 import { excerptOf, isEmoji, PERSON_MESSAGE_CHARS, reactionRemovedText, reactionsByMessage, reactionText, REPLY_MARK, replyText, sentText, splitReply, type Quoted } from '../shared/replies.ts';
 import { grantCovers, grantKey, grantWords, GRANT_MS, isNo, isYes, PROPOSAL_MAX_AGE_MS, proposalText, type GateNeed, type ReactionGrant } from '../shared/reactionGrant.ts';
 import { NOTICE_TAG } from '../shared/notices.ts';
-import { mediaLine, previewsOf, reviewRootOf } from './reviewMedia.ts';
+import { reviewRootOf } from './reviewMedia.ts';
+import { visualAskCheck } from './visualAsk.ts';
 import { personNotes, relatedRequests } from './priorDecisions.ts';
 import { alreadySent, asksSame, matchedAsk, needsYouDigestText, needsYouRecord, needsYouText, whoOf, type NeedsYouWait } from './needsYou.ts';
 import { asksAnsweredBy, sameAsk, WAIT_LINE_CHARS } from '../shared/waitSummary.ts';
@@ -2096,7 +2097,7 @@ export class Orchestrators {
     // w1812: a question this person already answered is not asked again (refused once; a repeat goes through).
     const again = this.repeatRefusal(chat.info.id, owner, checked.ask);
     if (again) throw new Error(again);
-    const missing = this.previewsMissing(chat.info.id, checked.ask, owner.displayName);
+    const missing = this.previewsMissing(checked.ask, input, owner.displayName);
     if (missing) throw new Error(missing);
     const pick = checked.ask.options[0].recommended ? `, ${checked.ask.options[0].label} recommended` : '';
     const shown = `Shown to ${owner.displayName} as ${checked.ask.options.length} buttons${pick}, and a last "Chat more about this" that only opens their reply box. End your turn now. Their click arrives as their own message (their words are the label, your question quoted under the reply mark), in their own turn; they may also just type. Do not ask it again in text.`;
@@ -2221,31 +2222,28 @@ export class Orchestrators {
     return `Closed #${seq} (${why}): it left the Waiting on input tab.`;
   }
 
-  /** Questions refused once for their missing previews (w1602), by chat and question: the same call again goes through. */
-  private readonly askNoPreviews = new Set<string>();
-
   /**
-   * w1602 (Ben, 2026-10-19, after a question about the Warden whose clips sat in the message above the card: "when you ask
-   * me about visual things you have to include the previews"): a question or option that names a request whose review
-   * folder holds stills or clips, while the question and every option carry none, is refused with the newest files as
-   * ready-to-paste lines. Refused rather than attached: a folder holds every iteration, and only the orchestrator knows which
-   * stills belong to which option. A repeat of the same call goes through (the question may not be about the folder's media).
+   * w1602, w2478 (server/visualAsk.ts): a question about a request whose work has review stills or clips carries one of them
+   * in the card, or says why none applies (no_previews, logged on the request). The request is the call's `request` and any
+   * wNNN its words name: the brief tells the orchestrator to keep ids out of the question (w1597), so w1602's check, which
+   * read only the words, let w2186's operator-rows question out bare on 2026-10-28.
    */
-  private previewsMissing(sessionId: string, ask: Ask, person: string): string | undefined {
+  private previewsMissing(ask: Ask, input: unknown, person: string): string | undefined {
+    const raw = (input ?? {}) as { request?: unknown; no_previews?: unknown };
     const parts = [ask.question, ...ask.options.flatMap((o) => [o.label, o.description])];
-    if (parts.some((p) => splitMedia(p).media.length)) return undefined;
-    const ids = [...new Set(parts.flatMap((p) => [...splitMedia(p).text.matchAll(/\bw\d+\b/gi)].map((m) => m[0].toLowerCase())))];
-    const found = previewsOf(ids, { root: reviewRootOf(this.d.cfg) });
-    if (!found.length) return undefined;
-    const key = `${sessionId}\n${JSON.stringify([ask.question, ask.options.map((o) => [o.label, o.description])])}`;
-    if (this.askNoPreviews.has(key)) return undefined;
-    this.askNoPreviews.add(key);
-    const lines = found.map((f) => `${f.id} (newest first):\n${f.files.slice(0, 6).map(mediaLine).join('\n')}`).join('\n');
-    return (
-      `Not shown yet: your question names ${found.map((f) => f.id).join(', ')}, whose review folder holds stills or clips, but neither the question nor any option carries one, and ${person} sees only what is IN the card (the message above it does not stand in). ` +
-      'A question about visual work carries its previews in the card: put each still or clip as ![what it shows](<absolute path>) in `question` (up to 4) and in the `description` of the option it belongs to (up to 4 each). Pick the ones that show what is asked; these are the newest:\n' +
-      `${lines}\nIf none of them is relevant to this question, call ask_person again with the same question and options and it is shown as it is.`
-    );
+    const named = typeof raw.request === 'string' && /^w\d+$/i.test(raw.request.trim()) ? [raw.request.trim().toLowerCase()] : [];
+    const ids = [...new Set([...named, ...parts.flatMap((p) => [...splitMedia(p).text.matchAll(/\bw\d+\b/gi)].map((m) => m[0].toLowerCase()))])];
+    const reqs = ids.map((id) => this.store.work.get(id) ?? { id });
+    const v = visualAskCheck({ texts: parts, reqs, root: reviewRootOf(this.d.cfg), noPreviews: raw.no_previews, tool: ASK_TOOL, person });
+    if (!v.ok) {
+      console.log(`ask_person refused (w2478) for ${person}: ${v.ids.join(', ')} has review media and the card carries none`);
+      return v.problem;
+    }
+    if ('optedOut' in v) {
+      console.log(`ask_person shown without previews (w2478) for ${person} on ${v.ids.join(', ')}: ${v.optedOut}`);
+      for (const id of v.ids) if (this.store.work.has(id)) this.noteOnRequest(id, `ask_person to ${person} shown without previews, though ${id} has review media (no_previews, w2478): "${v.optedOut}"`);
+    }
+    return undefined;
   }
 
   /** The ask_person call at `seq` of a chat and its person's answer to it, if any (a click on an option; typing leaves it open). */

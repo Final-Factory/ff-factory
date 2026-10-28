@@ -142,11 +142,11 @@ export function publishedCopy(ref: string, o: ReviewMediaOptions): string | unde
 }
 
 /**
- * The stills and clips of each request id's review folder (`root/w1465` or a topic `root/w1465-warden`), newest first (at
- * most MEDIA_PER_FOLDER), for the ids that have any. What a question about a request's visual work should carry
+ * The stills and clips of each request id's review folder (`root/w1465` or a topic `root/w1465-warden`, or a topic
+ * `topicsOf` names for it), newest first (at most `cap`, MEDIA_PER_FOLDER by default), for the ids that have any. What a question about a request's visual work should carry
  * (ask_person, w1602).
  */
-export function previewsOf(ids: readonly string[], o: ReviewMediaOptions): { id: string; files: string[] }[] {
+export function previewsOf(ids: readonly string[], o: ReviewMediaOptions, topicsOf: (id: string) => readonly string[] = () => [], cap = MEDIA_PER_FOLDER): { id: string; files: string[] }[] {
   if (!isDir(o.root)) return [];
   const root = path.resolve(o.root);
   let topics: string[];
@@ -158,11 +158,11 @@ export function previewsOf(ids: readonly string[], o: ReviewMediaOptions): { id:
   const out: { id: string; files: string[] }[] = [];
   for (const id of ids) {
     const key = id.toLowerCase();
-    const files = topics
-      .filter((t) => t.toLowerCase() === key || t.toLowerCase().startsWith(`${key}-`))
-      .flatMap((t) => mediaIn(path.join(root, t)))
+    // w2478: and the topics its workers published to under another name (WorkItem.reviewTopics, recorded by publish_review).
+    const own = new Set(topicsOf(key).map((t) => t.toLowerCase()));
+    const files = [...new Set(topics.filter((t) => t.toLowerCase() === key || t.toLowerCase().startsWith(`${key}-`) || own.has(t.toLowerCase())).flatMap((t) => mediaIn(path.join(root, t))))]
       .sort((a, b) => mtime(b) - mtime(a) || b.localeCompare(a))
-      .slice(0, MEDIA_PER_FOLDER);
+      .slice(0, cap);
     if (files.length) out.push({ id: key, files });
   }
   return out;
