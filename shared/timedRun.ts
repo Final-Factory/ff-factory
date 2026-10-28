@@ -30,7 +30,7 @@ export interface Piece {
 /** A player to time, as the timing machine rebuilds it. */
 export interface TimedVariant {
   name: string;
-  /** Its own -ff switches (TIMED_ARG rules), after the fixed arguments. */
+  /** Its own -ff switches and -force-device-index N (timedArgsProblem), after the fixed arguments. */
   args: string[];
   /** Every file of the folder, for the check that nothing is missing after the pieces are laid out. */
   files: { path: string; size: number }[];
@@ -138,20 +138,35 @@ const OWN_SWITCH = /^-ff(Automation|SoloQuit|Solo|LoadSave|Bench)/i;
 const PLACEMENT_SWITCH = /^-ffBenchStartTile$/i;
 /** A number or a comma list of them, negatives included (a tile "-1,-228"), as the value after a switch. */
 const NUMBERS = /^-?\d+(\.\d+)?(,-?\d+(\.\d+)?){0,3}$/;
+/**
+ * Unity's own player switches a variant may pass, each with the value it takes (w2456): -force-device-index picks the GPU
+ * (Unity's adapter index, 0 = the first; w2320 times LothLaptop's integrated Radeon, Steam Deck class, beside its RTX 4070).
+ */
+const UNITY_SWITCHES: Record<string, RegExp> = { '-force-device-index': /^\d{1,2}$/ };
 
-/** Why a variant's own arguments are refused, or undefined: -ff switches only, each optionally followed by one plain value. */
+/**
+ * Why a variant's own arguments are refused, or undefined: -ff switches, each optionally followed by one plain value, and
+ * the Unity switches of UNITY_SWITCHES with their value.
+ */
 export function timedArgsProblem(args: unknown): string | undefined {
   if (args === undefined) return undefined;
   if (!Array.isArray(args) || args.length > 8) return 'args: at most 8 strings';
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (typeof a !== 'string') return 'args: strings only';
+    const unity = Object.hasOwn(UNITY_SWITCHES, a) ? UNITY_SWITCHES[a] : undefined;
+    if (unity) {
+      const v = args[i + 1];
+      if (typeof v !== 'string' || !unity.test(v)) return `args: ${a} takes a number after it (e.g. ${a} 1)`;
+      i++;
+      continue;
+    }
     if (SWITCH.test(a)) {
       if (OWN_SWITCH.test(a) && !PLACEMENT_SWITCH.test(a)) return `args: ${a} is set by the run itself (the save, the commands, the quit); only other -ff switches`;
       continue;
     }
     if (i > 0 && SWITCH.test(String(args[i - 1])) && ((VALUE.test(a) && !a.startsWith('-')) || NUMBERS.test(a))) continue;
-    return `args: "${a.slice(0, 40)}" is not a -ff switch or a plain value after one (a timed run takes the game's own -ff switches only, w1946)`;
+    return `args: "${a.slice(0, 40)}" is not a -ff switch or a plain value after one (a timed run takes the game's own -ff switches, w1946, and -force-device-index N, w2456)`;
   }
   return undefined;
 }
