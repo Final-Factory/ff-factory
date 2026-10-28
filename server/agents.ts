@@ -3609,13 +3609,19 @@ export class Agents {
     }
     // w1996: a timed_run sent to this computer queues here for its worker elsewhere, at that worker's request priority
     for (const r of this.timedRuns?.runsOn(machineId) ?? []) {
-      if (out[r.session]) continue;
+      // w2446: the portal sent it here, so it is answered "here": a big computer's queue (timed_ask, w1995) refused the
+      // run's exclusive ticket, carrying the session of a worker elsewhere that never asked about this machine
+      const here: TimedVerdict = { verdict: 'here', why: `timed run ${r.id} was sent to ${machineId} (w2446)`, until: new Date(Date.now() + 60 * 60_000).toISOString() };
+      if (out[r.session]) {
+        if (out[r.session].timed?.verdict !== 'here') out[r.session].timed = here;
+        continue;
+      }
       const info = this.store.sessions.get(r.session);
       // w2411: a worker moved off the run's request serves it no more; the run keeps its request's priority
       const mine = info ? this.openWorkOf(info, bySession) : [];
       const open = mine.length ? mine : r.requests.map((id) => this.store.work.get(id)).filter((w): w is WorkItem => !!w && isOpen(w));
       const top = open.length ? open.reduce((a, w) => (WORK_PRIORITIES.indexOf(w.priority) > WORK_PRIORITIES.indexOf(a) ? w.priority : a), 'low' as WorkPriority) : 'normal';
-      out[r.session] = { priority: top, requests: open.length ? open.map((w) => w.id) : r.requests };
+      out[r.session] = { priority: top, requests: open.length ? open.map((w) => w.id) : r.requests, timed: here };
     }
     return out;
   }

@@ -83,6 +83,8 @@ export interface TimedRunDeps {
   /** w2411: a line for each of the run's requests' logs (a run that can never report, a result given up). */
   note?: (requests: string[], line: string) => void;
   log?: (line: string) => void;
+  /** w2446: just before a run is sent to `machine` (index.ts: push the bench priorities, so its "here" is there first). */
+  beforeSend?: (machine: string) => void;
   now?: () => number;
   /**
    * w1996: which other computers take a timed run beside the play-only ones: a small worker computer that takes timed runs
@@ -352,6 +354,8 @@ export class TimedRuns {
       return;
     }
     this.grantPieces(r);
+    // w2446: its machine's bench queue reads the run's "here" (Agents.benchPriorities) when the runner asks for the ticket
+    this.d.beforeSend?.(r.machine);
     if (this.d.post(r.machine, { type: 'timed_run', order: r.order })) this.set(r, 'sent', `sent to ${r.machine}`);
   }
 
