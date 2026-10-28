@@ -61,6 +61,8 @@ export interface BlockerWatchDeps {
   daemonSha?: (machineId: string) => string | undefined;
   /** Whether a machine is online; undefined for one this portal does not have. */
   online?: (machineId: string) => boolean | undefined;
+  /** w2443: whether a machine is paused from its tray app. */
+  paused?: (machineId: string) => boolean;
   /** Whether a Claude account's meters are clear (by its email or label); undefined when unknown. */
   usageClear?: (account: string) => boolean | undefined;
   /** When the nightly lab last posted its results (ms). */
@@ -404,6 +406,7 @@ export class BlockerWatch {
       portalSha: this.d.portalSha?.(),
       ...(this.d.daemonSha ? { daemonSha: this.d.daemonSha } : {}),
       ...(this.d.online ? { online: this.d.online } : {}),
+      ...(this.d.paused ? { paused: this.d.paused } : {}),
       ...(this.d.usageClear ? { usageClear: this.d.usageClear } : {}),
       nightlyAt: this.d.nightlyAt?.(),
       ci: (ref) => ci.get(ref),

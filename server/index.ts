@@ -858,6 +858,7 @@ const blockerWatch = new BlockerWatch({
   portalSha: () => appVersion().sha,
   daemonSha: (id) => agents.daemonSha?.(id),
   online: (id) => (store.machines.has(id.toLowerCase()) ? machines.isOnline(id.toLowerCase()) : undefined),
+  paused: (id) => !!store.machines.get(id.toLowerCase())?.pause?.paused,
   // A usage gate naming a vault token (w1109: the dispatcher token's stop) clears when that token's owner's pool can serve a
   // worker again, on that token or another; any other account when its meters are clear.
   usageClear: (account) => ownerPoolServes(account) ?? accountClear(account),

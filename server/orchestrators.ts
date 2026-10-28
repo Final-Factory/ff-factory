@@ -286,6 +286,8 @@ export interface OrchestratorsDeps {
   machineOnline?: (id: string) => boolean | undefined;
   /** w2304: who plays Final Factory on a machine now, or in the grace after (w1894, MachineManager.personPlayOf), as a phrase. */
   personPlaying?: (id: string) => string | undefined;
+  /** w2443: why a machine is paused from its tray (pauseWhy), or undefined while it runs. */
+  machinePaused?: (id: string) => string | undefined;
   /** w2045: whether a request is in the merge-on-green pilot's arm (server/mergeOnGreen.ts); absent: no request is. */
   mergeOnGreenPilot?: (requestId: string) => boolean;
   /** The commit the portal runs (no id), or a machine's daemon (w643: a deploy blocker clears when it changes). */
@@ -2908,7 +2910,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       keptBefore = kept;
       const asked = input.blockers?.length ? input.blockers : input.blocker ? [input.blocker] : [];
       if (!asked.length && !kept.length) throw new Error('block needs blocker (or blockers, for several): what it waits for (kind, ref, what; until for a time). A person it waits on is ask; capacity is queue.');
-      const facts = { now: now.getTime(), work: (id: string) => this.store.work.get(id.toLowerCase()), ...(this.d.machineOnline ? { online: this.d.machineOnline } : {}) };
+      const facts = { now: now.getTime(), work: (id: string) => this.store.work.get(id.toLowerCase()), ...(this.d.machineOnline ? { online: this.d.machineOnline } : {}), ...(this.d.machinePaused ? { paused: (id: string) => !!this.d.machinePaused!(id) } : {}) };
       for (const b of asked) {
         const problem = blockerProblem(b, w.id, facts);
         if (problem) throw new Error(problem);
@@ -3127,7 +3129,10 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const cutOff = gates.filter((g) => g.kind === 'machine' && g.by === `worker ${sid}`);
     const status = this.store.sessions.get(sid)?.status;
     if (cutOff.length && cutOff.length === gates.length && status && BUSY.includes(status)) return [sid];
-    const back = cutOff.length ? ` Your turn stopped when ${cutOff.map((g) => g.ref).join(', ')} went offline at ${cutOff[0].at.slice(11, 16)} UTC, and this is your resume in your own sandbox: your folder is as you left it. Check git status for half-written edits, re-pin your Unity instance if you use one (the editor may have restarted), and continue where you left off.` : '';
+    const paused = cutOff.filter((g) => g.pause);
+    const back = paused.length
+      ? ` FF Factory stopped your turn when ${paused.map((g) => g.ref).join(', ')} was paused from its tray app at ${paused[0].at.slice(11, 16)} UTC (w2443); it runs again, and this is your resume in your own sandbox. Your work was pushed as a WIP commit on your sandbox branch if you had not pushed it: \`git log -1\` shows it; carry on and commit on top of it (it is pushed: never reset it away or force-push). Check git status, re-pin your Unity instance if you use one (FF Factory closed the editor at the pause), start again any timed run, build or test the pause cancelled, and continue where you left off.`
+      : cutOff.length ? ` Your turn stopped when ${cutOff.map((g) => g.ref).join(', ')} went offline at ${cutOff[0].at.slice(11, 16)} UTC, and this is your resume in your own sandbox: your folder is as you left it. Check git status for half-written edits, re-pin your Unity instance if you use one (the editor may have restarted), and continue where you left off.` : '';
     const ciGates = gates.filter((g) => g.kind === 'ci');
     // Not the "read its checks" hint when CI could not start (w907: the PR conflicts, or its head never got a run): the worker pushes first.
     const ci = ciGates.length > 0 && !/CI can't run|no CI run exists/.test(cleared);
@@ -3397,7 +3402,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   /** Whether a gate may still be open: judged here only where the facts are at hand; the rest waits for the blocker watch. */
   private gateOpen(g: WorkBlocker): boolean {
     if (!['request', 'time', 'machine', 'lock'].includes(g.kind)) return true;
-    const f: BlockerFacts = { now: this.now().getTime(), work: (id) => this.store.work.get(id.toLowerCase()), ...(this.d.machineOnline ? { online: this.d.machineOnline } : {}) };
+    const f: BlockerFacts = { now: this.now().getTime(), work: (id) => this.store.work.get(id.toLowerCase()), ...(this.d.machineOnline ? { online: this.d.machineOnline } : {}), ...(this.d.machinePaused ? { paused: (id: string) => !!this.d.machinePaused!(id) } : {}) };
     return blockerVerdict(g, f).state !== 'clear';
   }
 
@@ -3623,6 +3628,8 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       const leg = `leg ${i + 1} (${i === 0 ? 'host' : 'client'} ${l.session})`;
       const play = this.d.personPlaying?.(machine);
       if (play) return { why: `${play} on ${machine} (the w1894 player-yield), where ${leg} runs`, avoid: [machine] };
+      const paused = this.d.machinePaused?.(machine);
+      if (paused) return { why: `${machine} is ${paused}, where ${leg} runs (w2443)`, avoid: [machine] };
       const key = `${p.id}:${machine}`;
       if (this.d.machineOnline?.(machine) === false) {
         const since = this.pairOffline.get(key) ?? now;
@@ -4135,7 +4142,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     }
     if (!asked.length) throw new Error('name what it waits for: requests (ids), reports (ids of requests whose worker must report first), prs (owner/repo#123 or a github.com link) and/or deploys ("portal" or a machine id). A person is waiting_on_person; a time is wake_me');
     asked[0] = { ...asked[0], what: clip(what, 200) };
-    const facts = { now: now.getTime(), work: (id: string) => this.store.work.get(id.toLowerCase()), ...(this.d.machineOnline ? { online: this.d.machineOnline } : {}) };
+    const facts = { now: now.getTime(), work: (id: string) => this.store.work.get(id.toLowerCase()), ...(this.d.machineOnline ? { online: this.d.machineOnline } : {}), ...(this.d.machinePaused ? { paused: (id: string) => !!this.d.machinePaused!(id) } : {}) };
     for (const b of asked) {
       const problem = blockerProblem(b, w.id, facts);
       if (problem) throw new Error(problem);
@@ -4227,6 +4234,28 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   }
 
   /**
+   * w2443: a request whose worker a paused machine stopped (server/machinePause.ts MachinePauses.blockAll). It stays with
+   * that worker, Blocked on the machine's pause, the worker's own gate: the blocker watch clears it once the machine is online
+   * and runs again, and resumes that worker in its own sandbox (unblock), as after an offline machine (w2433). A leg of a pair
+   * run under way starts the whole run again off the paused computer instead (w2304), its other legs stopped.
+   */
+  pausedOff(w: WorkItem, s: Pick<SessionInfo, 'id'>, h: HandBack) {
+    if (!isOpen(w)) return;
+    if (livePair(w) && w.pair!.started!.legs.some((l) => l.session === s.id)) {
+      if (this.requeuePair(w, `its leg ${s.id}'s computer ${h.machine} is ${h.why} (w2443)`, [h.machine])) return;
+    }
+    const m = h.machine.trim().toLowerCase();
+    const at = this.now().toISOString();
+    const gate = { ...this.makeGate({ kind: 'machine', ref: m, what: `${m} running again: its worker ${s.id} was stopped there by its pause` }, at, `worker ${s.id}`), pause: true };
+    w.blocked = gate;
+    w.alsoBlocked = undefined;
+    w.stalled = undefined;
+    w.status = 'blocked';
+    this.stamp(w, `blocked on ${m}'s pause (w2443): ${h.why}; its worker ${s.id}${h.sandbox ? ` in ${m}/${h.sandbox}` : ''} stopped (${h.how}), branch ${h.branch ?? 'unknown'}; note: ${clip(h.note, 200)}${h.saved ? `; ${h.saved}` : ''}. That worker is resumed in its own sandbox when ${m} runs again`);
+    this.store.putWork(w);
+  }
+
+  /**
    * w2433: a worker that ends a turn is alive, so the gate on its machine it was given when the machine dropped (workersCutOff:
    * a short drop its process lived through) goes; a request with no other gate is Active again.
    */
@@ -4235,7 +4264,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     for (const w of this.store.work.values()) {
       if (w.status !== 'blocked' || !w.sessionIds.includes(sid)) continue;
       const gates = gatesOf(w);
-      const rest = gates.filter((g) => !(g.kind === 'machine' && g.by === by));
+      const rest = gates.filter((g) => !(g.kind === 'machine' && g.by === by && !g.pause));
       if (rest.length === gates.length) continue;
       w.blocked = rest[0];
       w.alsoBlocked = rest.length > 1 ? rest.slice(1) : undefined;

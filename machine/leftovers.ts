@@ -121,6 +121,11 @@ export interface LeftoverDeps {
   wakeAt(id: string): number | undefined;
   /** The sandboxes with a live worker. */
   liveSandboxes(): Set<string>;
+  /**
+   * w2443: why this machine's pause ends everything FF Factory started here now (its deadline passed, machine/pauseStop.ts),
+   * or undefined. While set, a worker's process running keeps nothing, an orphan has no grace and a build server no idle wait.
+   */
+  pauseEnds?(): string | undefined;
   /** The portal's welcome came since the daemon started. */
   ready(): boolean;
   /** The player slot roots (server/ownLeftovers.ts playerSlotRoots). */
@@ -506,7 +511,9 @@ export class LeftoverReaper {
       const cpu = facts.get(c.p.pid)?.cpuMs;
       if (v.end && c.kind === 'server' && (look.cpuMs === undefined || cpu === undefined || cpu - look.cpuMs >= LEFTOVER.SERVER_IDLE_CPU_MS)) v = { end: false, why: `${v.why}; a shared build server still at work, ended once idle` };
       look.cpuMs = cpu;
-      if (!ready && v.end) v = { end: false, why: `${v.why}; waiting for the portal's welcome before ending anything` };
+      const paused = d.pauseEnds?.();
+      if (paused) v = { end: true, why: `${paused} (w2443): ${v.why}` };
+      else if (!ready && v.end) v = { end: false, why: `${v.why}; waiting for the portal's welcome before ending anything` };
       look.n++;
       if (c.kind === 'player') players.push({ pid: c.p.pid, ...(c.slot ? { slot: c.slot } : {}), ...(c.session ? { session: c.session } : {}), ...(c.sandbox ? { sandbox: c.sandbox } : {}), ...(age !== undefined ? { ageMin: Math.round(age / MIN) } : {}), owner, ...(v.until !== undefined ? { endsInMin: Math.max(0, Math.ceil((v.until - now) / MIN)) } : {}) });
       else if (owner === 'stopped') others++;

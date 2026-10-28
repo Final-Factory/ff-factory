@@ -55,7 +55,7 @@ import { WORKER_READ_RULES_TOOL, workerRuleText } from './workerRules.ts';
 import { activityLine, Waker } from './wake.ts';
 import { TIMER_LIMITS, Timers, scheduleText, type TimerView } from './timers.ts';
 import { EVEN_MARGIN, RAM_BUSY_PCT, benchText, buildOf, busyReasons, capacityLines, classRank, forPriority, hasRoom, holdReason, liveOf, loadText, lowestPriority, minOf, pickComputer, placeId, pinnedWork, placementHint, reservedReason, roomEnough, roomForWork, roomNow, timedFacts, timedKindOf, timedPinRefusal, voiceVram, type Computer, type FirstKind, type NeedKind, type PlacementPrefs, type RoomNow, type TimedKind } from './placement.ts';
-import { MachinePauses, pauseHolds, type HandBack } from './machinePause.ts';
+import { MachinePauses, PAUSE_TICK_MS, pauseHolds, pauseWhy, type HandBack } from './machinePause.ts';
 import { MOVE_AFTER_MS, NONE_MARK, ROOM_WAIT, briefOf, moveDecision, movedPrompt, stayLine, type MoveFacts } from './resumeMove.ts';
 import { playHolds, playLine } from '../shared/personPlay.ts';
 import { sandboxUseText, unitySlotsLine } from '../shared/fleet.ts';
@@ -646,8 +646,8 @@ export class Agents {
     sessions.codeMove = (s) => this.codeMove(s);
     // w1376: a computer on hold (config placement.hold) resumes nobody, not even the workers it already has.
     sessions.machineHold = (s) => this.machineHold(s);
-    // w1532: a machine paused from its tray app hands its work back (server/machinePause.ts): workers mid-turn are told,
-    // a turn that ends there hands its requests back, and a resume the pause holds hands them back with the message.
+    // w1532, w2443: a machine paused from its tray app stops what runs there (server/machinePause.ts): workers mid-turn are
+    // told to push and stop, interrupted, then stopped; their requests wait Blocked on the pause and resume on the unpause.
     this.pauses = new MachinePauses({
       machines: () => store.machines.values(),
       machine: (id) => store.machines.get(id),
@@ -672,7 +672,7 @@ export class Agents {
       },
       save: (i, branch, message) => this.saveSandboxWork(i, branch, message, 'at a pause'),
       branchOf: (i) => this.branchNow(i),
-      handBack: (w, i, h) => this.orchestrators?.handBack(w, i, h),
+      block: (w, i, h) => this.orchestrators?.pausedOff(w, i, h),
       log: (line) => console.log(line),
     });
     sessions.pauseHeld = (s, text) => this.pauses.heldResume(s.info, text);
@@ -742,11 +742,11 @@ export class Agents {
       file: dryRun() ? undefined : path.join(cfg.dataDir, 'builds.json'),
     });
     this.builds.restore();
-    const pauseTick = setInterval(() => {
-      this.pauses.tick();
-      void this.builds.tick().catch((e) => console.warn('build: tick failed:', (e as Error).message));
-    }, 30_000);
+    // w2443: the pause's deadlines are seconds apart, so it is looked at every PAUSE_TICK_MS; the build plans every 30 s.
+    const pauseTick = setInterval(() => this.pauses.tick(), PAUSE_TICK_MS);
     pauseTick.unref?.();
+    const buildTick = setInterval(() => void this.builds.tick().catch((e) => console.warn('build: tick failed:', (e as Error).message)), 30_000);
+    buildTick.unref?.();
     // w1128: a gate's resume that waited while its request was blocked again is kept for the new gates, not delivered.
     sessions.staleResume = (work, sid, note) => this.orchestrators?.staleResume(work, sid, note);
     sessions.poolBlock = (s, why, next) => this.poolBlock(s, why, next);
@@ -875,6 +875,10 @@ export class Agents {
       relocateTimedLeg: (w) => this.relocateTimedLeg(w),
       withdrawStaleTimedHere: () => this.withdrawStaleTimedHere(),
       machineOnline: (id) => (store.machines.has(id.toLowerCase()) ? machines.isOnline(id.toLowerCase()) : undefined),
+      machinePaused: (id) => {
+        const p = store.machines.get(id.toLowerCase())?.pause;
+        return p?.paused ? pauseWhy(p) : undefined;
+      },
       personPlaying: (id) => {
         const p = machines.personPlayOf(id.toLowerCase());
         return p ? `${p.who} ${p.until ? `played Final Factory (its grace runs until ${p.until.slice(11, 16)}Z)` : `is playing Final Factory since ${p.since.slice(11, 16)}Z`}` : undefined;

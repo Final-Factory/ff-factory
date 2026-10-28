@@ -80,6 +80,7 @@ import { timedRunFromMachine } from './timedRunPack.ts';
 import { readBenchState } from './benchState.ts';
 import { attachmentLine } from '../shared/attachments.ts';
 import { PauseKeeper, pauseFile } from './pause.ts';
+import { PauseStop } from './pauseStop.ts';
 import { trayView } from './pauseRules.ts';
 import { TrayHost, trayInstance } from './tray.ts';
 import { FirefoxCloser, closeFirefox, firefoxFile, winFirefoxDeps } from './firefox.ts';
@@ -436,6 +437,8 @@ export class Daemon {
   readonly voice?: DaemonVoice;
   /** Its owner's pause (w1532, machine/pause.ts): the tray's, the schedule's and a person's input, kept in pause.json. */
   readonly pause: PauseKeeper;
+  /** w2443: what a pause ends here by itself: timed runs at once, every worker's tree, editor and player 90 s after it. */
+  readonly pauseStop: PauseStop;
   /** Updates, restarts and unloads on the portal's word over this link (w1596, machine/selfUpdate.ts). */
   readonly selfUpdate: SelfUpdater;
   /** How a restart over the link ends this process (its supervisor starts it again); tests replace it. */
@@ -498,7 +501,30 @@ export class Daemon {
       changed: (p) => {
         this.send({ type: 'pause', pause: p });
         this.trayState();
+        this.pauseStop?.update(p.paused, p.detail);
       },
+    });
+    this.pauseStop = new PauseStop({
+      machineId: cfg.id,
+      timedRuns: () => this.timed?.active() ?? [],
+      cancelTimed: (id, why) => void this.timed?.cancel(id, why),
+      liveSessions: () => [...new Set([...[...this.entries].filter(([, e]) => e.s.live).map(([id]) => id), ...[...this.hostSessions].filter(([, h]) => h.live).map(([id]) => id)])],
+      endSession: async (id, why) => {
+        const h = this.hostSessions.get(id);
+        if (h) return h.endNow(why);
+        this.entries.get(id)?.s.stop();
+      },
+      editors: () => this.pool.list().filter((sb) => this.pool.editorUp(sb.id)).map((sb) => sb.id),
+      closeEditor: (id) => this.pool.unity(id, 'stop', false),
+      endLeftovers: async () => (await this.leftovers.look()).map((e) => e.line),
+      now: () => Date.now(),
+      setTimer: (fn, ms) => {
+        const t = setTimeout(fn, ms);
+        t.unref?.();
+        return { cancel: () => clearTimeout(t) };
+      },
+      log: (line) => log(line),
+      event: (text) => this.send({ type: 'sandbox_event', text }),
     });
     this.slots = new UnitySlots({
       dir: cfg.unitySlotsDir ?? path.join(appDirOfConfig(cfg), 'unity-slots'),
@@ -593,6 +619,7 @@ export class Daemon {
       onEvent: (text) => this.send({ type: 'sandbox_event', text: `Leftover processes: ${text}` }),
       afterKill: () => this.slots.tick(),
       personPlay: () => this.personSettings.enabled,
+      pauseEnds: () => this.pauseStop.endsNow(),
       ...leftoverDeps,
     });
     this.benchTurn = new BenchTurn({
@@ -1034,6 +1061,8 @@ export class Daemon {
     }
     // The pause (w1532): its schedule and a person's 90 minutes run here; the tray app shows it and feeds it on a Windows PC.
     this.pause.start();
+    // w2443: a daemon that starts (or restarts) on a paused machine ends what runs there the same way.
+    this.pauseStop.update(this.pause.paused, this.pause.current().detail);
     if (this.cfg.tray && process.platform === 'win32') {
       const appDir = appDirOfConfig(this.cfg);
       this.firefox = new FirefoxCloser({
@@ -2527,7 +2556,11 @@ export class Daemon {
       case 'timed_run':
         // w1946: a run for this play-only machine, as data; the runner checks every path against the player folder.
         if (!this.timed) log(`timed run ${msg.order?.id}: this daemon is no worker install, so it plays none`);
-        else this.timed.enqueue(msg.order);
+        else if (this.pauseStop.refuseTimed() && msg.order?.id) {
+          // w2443: a paused machine starts no run; the portal finds it another computer or the run waits for the unpause.
+          log(`timed run ${msg.order.id}: refused, this machine is paused`);
+          this.send({ type: 'timed_run_done', id: msg.order.id, ok: false, error: this.pauseStop.refuseTimed(), summary: '', legs: [] });
+        } else this.timed.enqueue(msg.order);
         return;
       case 'timed_run_upload':
         this.timed?.uploadReady(msg.id, msg.uploadId, msg.chunkBytes);

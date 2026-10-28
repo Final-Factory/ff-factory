@@ -76,14 +76,14 @@ const utc = (iso: string | undefined, now: number) => {
 };
 
 /** What "Blocked on …" names: "w633 finishing", "a portal deploy", "lothdesktop coming back", "CI on PR #12". */
-export function blockerName(b: Pick<WorkBlocker, 'kind' | 'ref' | 'on' | 'until' | 'holder'>, now: number = Date.now()): string {
+export function blockerName(b: Pick<WorkBlocker, 'kind' | 'ref' | 'on' | 'until' | 'holder' | 'pause'>, now: number = Date.now()): string {
   switch (b.kind) {
     case 'request':
       return `${b.ref} ${b.on === 'report' ? 'reporting' : 'finishing'}`;
     case 'deploy':
       return b.ref === 'machines' ? "the machines' update" : b.ref ? `${b.ref}'s update` : 'a portal deploy';
     case 'machine':
-      return `${b.ref} coming back online`;
+      return b.pause ? `${b.ref} running again (its pause)` : `${b.ref} coming back online`;
     case 'usage':
       return `${b.ref ?? 'a Claude account'}'s usage limit`;
     case 'lock':
@@ -197,6 +197,8 @@ export interface BlockerFacts {
   daemonSha?: (machineId: string) => string | undefined;
   /** Whether a machine is online; undefined for a machine this portal does not have. */
   online?: (machineId: string) => boolean | undefined;
+  /** w2443: whether a machine is paused from its tray app (a pause gate waits for both online and not paused). */
+  paused?: (machineId: string) => boolean;
   /** Whether a Claude account's meters are clear; undefined when unknown. */
   usageClear?: (account: string) => boolean | undefined;
   /** When the nightly lab last posted its results (ms), if ever. */
@@ -264,7 +266,8 @@ export function blockerVerdict(b: WorkBlocker, f: BlockerFacts, waiter?: string)
     }
     case 'machine': {
       const on = b.ref ? f.online?.(b.ref) : undefined;
-      if (on === true) return { state: 'clear', why: `${b.ref} is online` };
+      if (on === true && b.pause && b.ref && f.paused?.(b.ref)) return late(`${b.ref} is still paused from its tray app`);
+      if (on === true) return { state: 'clear', why: b.pause ? `${b.ref} is online and runs again` : `${b.ref} is online` };
       if (on === undefined && f.online) return { state: 'stuck', why: `${b.ref ?? 'its machine'} is not a machine of this portal` };
       return late(`${b.ref} is offline`);
     }
