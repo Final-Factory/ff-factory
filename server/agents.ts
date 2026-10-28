@@ -29,7 +29,7 @@ import { inlineReviewMedia, outsideReview, publishedCopy, reviewRootOf } from '.
 import { BLOCKER_KIND_HELP, conflictText, gateSetter, gatesName, gatesOf, isWith, latestWorker, newestFirst, prLabel, prRefOf, type PrHealth } from '../shared/blockers.ts';
 import { isSamePerson, personForWork, poolOwnerOf, withPool } from './vault.ts';
 import { githubFromVault, githubTokens } from './githubTokens.ts';
-import { READ_LIST_MAX, READ_MAX_CHARS, readWork, type ReadWorkArgs } from './workRead.ts';
+import { namedIds, READ_LIST_MAX, READ_MAX_CHARS, readWork, type ReadWorkArgs } from './workRead.ts';
 import { readPortalLogs, realJournal, type PortalLogsInput } from './portalLogs.ts';
 import { cliTranscriptPath } from './cliTranscript.ts';
 
@@ -246,7 +246,7 @@ export const noTimedWaitNotice = (id: string, line: string, machine: string, why
 
 const REQUEST_PAIR_TOOL = `Ask for a check that needs several computers at once (w1945): a two-machine multiplayer or determinism check, a host and its clients. It files ONE pair request whose legs the dispatcher starts together, a new worker on each computer, as soon as that many computers have room at once (never one leg at a time), and Blocks your request on its report, as blocked_on with reports does: commit and push, then end your turn with a "wNNN: still open: blocked on <the pair request>" line. Your sandbox is released at once for other work while you wait, and the host leg's result (a line "For wNNN:") resumes you. what: one line; brief: what the legs run (the branch or commit, the scenario, what passes, where the result goes), since each leg is a new worker; legs: 2 by default; cross_os only for the reasons it names (w1692; without it no leg goes on a Mac, and with it a Mac only hosts); timed when a leg takes timing measurements (never on the m5). One open pair run per request: asked again, you wait on the one there is, unless it is spent (w2041): a leg already reported, a leg's computer is offline or its worker errored, or you pass retry: true. Then that run is cancelled and a fresh one is filed, with new legs on other computers than the failed ones (avoid adds computers you saw fail, such as one whose Tailscale is stuck), and only the fresh run's report resumes you. pr and commit (w2057): the pull request and the head commit the legs run (default: the pull request named in what or brief, else your request's one open pull request). A pull request with an open pair run (yours or one an orchestrator filed) is never run twice: you wait on that one. One whose pair run finished on that commit is answered with its result and nothing is filed (retry: true runs it again). When the run finishes, its result comes with your resume. Never ask an orchestrator in your report for a pair run: nobody reads that as a filing.`;
 
-const TIMED_PLACE_TOOL = `Ask where a timed leg runs BEFORE you take an exclusive bench ticket for it (w1969, lothsahn: "every time a worker needs an exclusive lock it should ask the dispatcher"): an exclusive turn idles every other slot of its computer, so a leg from a big computer (BEAST, LothDesktop) goes to a small one (LothLaptop, m3, biscuit; never m5). On a big computer the harness refuses bench_queue.py timed, --timed, bench_lock --timing, unity-slot --bench exclusive and the bench scripts (probe_ab_win.sh, cpu_budget_run.sh, ...) until you asked; a small computer needs no ask. It answers "here" (take your ticket as before; it holds 12 h) or "elsewhere". Elsewhere for a Windows player A/B (w1996: a save played by two builds, probe_ab_win.sh's legs) names a computer for timed_run: build both players here under shared tickets, call timed_run, and that computer's daemon times them under its own exclusive ticket, with no new worker and no rebuild there. Elsewhere for anything else timed (via "leg": a snippet timed in the editor, a Performance test, a profiler capture, a Mac player): FF Factory files the leg as its own request, Queued for the small computers (a big one only when none of them can take it: offline past a wait that grows with the fleet's load, held, or without a game sandbox; w2048), whose new worker builds and times BOTH sides there and reports to you, and Blocks your request on that report (as request_pair does): commit and push, then end your turn. what: the leg in one line; brief: what it runs, as a new worker needs it (the branch and the commit of each side, the save, the script and its settings, what to report); platform: windows or mac when the leg needs one (default any); same_machine: only when its numbers must come from this computer (a side of the A/B already ran here), and why; via: timed_run for a Windows player A/B, leg for anything else (unset: timed_run when a computer takes one, and the answer says when to ask again with leg).`;
+const TIMED_PLACE_TOOL = `Ask where a timed leg runs BEFORE you take an exclusive bench ticket for it (w1969, lothsahn: "every time a worker needs an exclusive lock it should ask the dispatcher"): an exclusive turn idles every other slot of its computer, so a leg from a big computer (BEAST, LothDesktop) goes to a small one (LothLaptop, m3, biscuit; never m5). On a big computer the harness refuses bench_queue.py timed, --timed, bench_lock --timing, unity-slot --bench exclusive and the bench scripts (probe_ab_win.sh, cpu_budget_run.sh, ...) until you asked; a small computer needs no ask. It answers "here" (take your ticket as before; it holds 12 h) or "elsewhere". Elsewhere for a Windows player A/B (w1996: a save played by two builds, probe_ab_win.sh's legs) names a computer for timed_run: build both players here under shared tickets, call timed_run, and that computer's daemon times them under its own exclusive ticket, with no new worker and no rebuild there. Elsewhere for anything else timed (via "leg": a snippet timed in the editor, a Performance test, a profiler capture, a Mac player): FF Factory files the leg as its own request, Queued for the small computers (a big one only when none of them can take it: offline past a wait that grows with the fleet's load, held, or without a game sandbox; w2048), whose new worker builds and times BOTH sides there and reports to you, and Blocks your request on that report (as request_pair does): commit and push, then end your turn. what: the leg in one line; brief: what it runs, as a new worker needs it (the branch and the commit of each side, the save, the script and its settings, what to report); platform: windows or mac when the leg needs one (default any); same_machine: only when its numbers must come from this computer (a side of the A/B already ran here), and why; via: timed_run for a Windows player A/B, leg for anything else (unset: timed_run when a computer takes one, and the answer says when to ask again with leg). cancel (w2442): a timed run id ("tr_..."), of your request or of one it names, to stop it instead of asking: its player ends, its bench ticket goes back and its worker is told why (what: the reason).`;
 
 const MESSAGE_PAIR_TOOL = `For a leg of a pair run (w1945): send a message to the workers of the other legs of your pair run (where the host listens and on which commit, that a client joined, that your leg failed). It reaches them as a message, which resumes a leg that ended its turn; their messages come back to you the same way.`;
 
@@ -1580,6 +1580,22 @@ export class Agents {
   }
 
   /**
+   * w2442: timed_place's cancel: a worker stops a timed run of its own, of a request it is on, or of a request one of those
+   * names (a request filed to stop another's run names it), with `why` for the run's worker.
+   */
+  private timedCancel(info: SessionInfo, id: string, why: string): string {
+    const tr = this.timedRuns;
+    if (!tr) throw new Error('timed runs are not wired into this server');
+    const open = this.openWorkOf(info);
+    const mine = new Set(open.flatMap((w) => [w.id.toLowerCase(), ...namedIds(w)]));
+    return tr.cancel(id, `${why} (asked by worker ${info.id.slice(0, 8)}${open.length ? ` on ${open.map((w) => w.id).join(', ')}` : ''})`, (r) =>
+      r.session === info.id || r.requests.some((q) => mine.has(q.toLowerCase()))
+        ? undefined
+        : `timed run ${id} is ${r.requests.join(', ') || `worker ${r.session.slice(0, 8)}`}'s, not your request's or one it names: ask that request's worker or your orchestrator`,
+    );
+  }
+
+  /**
    * timed_place (w1969, server/timedAsk.ts): where the asking worker's timed leg runs. "here" is kept for its session and
    * sent to its machine, whose guard then lets its exclusive tickets through; "elsewhere" files the leg as its own request
    * Queued for the small computers (Orchestrators.fileTimedLeg), or names the play-only computer for timed_run. Each
@@ -1589,6 +1605,7 @@ export class Agents {
     refuseInDryRun('timed_place');
     const what = String(a.what ?? '').replace(/\s+/g, ' ').trim();
     if (!what) throw new Error('give what: the timed leg in one line ("RoundRobin belt output A/B on PR #2347")');
+    if (typeof a.cancel === 'string' && a.cancel) return this.timedCancel(info, a.cancel, what);
     const platform = a.platform === 'windows' ? 'win32' : a.platform === 'mac' ? 'darwin' : undefined;
     const places = this.places();
     const here = places.find((p) => p.id === placeId(machineId));

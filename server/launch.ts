@@ -182,6 +182,7 @@ export const CATALOG = {
     same_machine: z.string().max(300).optional().describe('Only when its numbers must come from this computer (a side of the A/B already ran here, the brief names it): why. It then runs here.'),
     via: z.enum(['leg', 'timed_run']).optional().describe('timed_run: a Windows player A/B (a save played by two builds), built here and timed by a computer that takes timed runs (w1946, w1996); leg: anything else timed, handed to a new worker on a small computer. Unset: timed_run when such a computer is up, and the answer says when to ask again with leg.'),
     request: z.string().max(16).optional().describe('The request ("w1891") it is for, when you serve several; default: the one you are on.'),
+    cancel: z.string().regex(/^tr_[0-9a-f]{10}$/).optional().describe('w2442: instead of asking, stop this timed run ("tr_225384a69f"), one of your own request, or of a request it names: its player ends, its bench ticket goes back, and its worker is told why (what: the reason).'),
   },
   /** w1945: a leg of a pair run tells the other legs' workers something. */
   message_pair: {
