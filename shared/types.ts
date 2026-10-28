@@ -2378,6 +2378,8 @@ export interface WorkBlocker {
   at: string;
   /** Who set it: "dispatcher", "worker <id>" (its blocked_on tool, w754) or "ledger cleanup" (a merged request whose only step left is a deploy). */
   by: string;
+  /** machine (w2443): its machine was paused from its tray app; it clears when that machine is online and runs again. */
+  pause?: boolean;
   /** deploy: the commit the portal (or the machine's daemon) ran when it was set; a different one is the deploy. */
   sha?: string;
   /**

@@ -23,7 +23,7 @@ import { requestWaitOf } from '../shared/workState.ts';
 import { latestLine } from '../shared/latestLine.ts';
 import { HELD_MARK, inPersonWords } from '../shared/conditional.ts';
 import { splitReply, splitSent } from '../shared/replies.ts';
-import type { PrHealth } from '../shared/blockers.ts';
+import { blockerName, type PrHealth } from '../shared/blockers.ts';
 import { answersText } from '../shared/questionCard.ts';
 import { needsTimed, PAIR_HOLD_MS, TIMED_HOLD_MS, unfitWhy } from '../shared/capacity.ts';
 import { benchLockIn, type Requester, type SessionInfo, type TranscriptEvent, type UserInfo, type WorkItem } from '../shared/types.ts';
@@ -7478,4 +7478,51 @@ test('w2433: what a sandbox holds, for the long-offline notice', () => {
   assert.equal(offlineNoticeMs({}), 60 * 60_000);
   assert.equal(offlineNoticeMs({ ledger: { offlineNoticeMinutes: 90 } }), 90 * 60_000);
   assert.equal(offlineNoticeMs({ ledger: { offlineNoticeMinutes: 1 } }), 5 * 60_000, 'at least 5 minutes');
+});
+
+// ---------------------------------------------------------------- w2443: a paused machine's work waits Blocked on its pause
+
+test('w2443: a worker a pause stopped holds its request Blocked on the pause (online is not enough), and is resumed in its own sandbox when the machine runs again', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o } = env;
+  putRequests(store, [{ id: 'w1', by: LOTH, status: 'active', title: 'Mass Driver FPS part 2' }]);
+  const id = (await startedFor(env, 'w1')).id;
+  const info = store.sessions.get(id)!;
+  const w = store.work.get('w1')!;
+  o.pausedOff(w, info, { machine: 'pc', sandbox: 'alpha', branch: 'w1-fps', why: 'paused from its tray app: paused by hand (w1532)', note: 'w1: still open: paused on pc; branch w1-fps pushed; the shader is half done', how: 'by its worker', saved: 'its sandbox had no uncommitted work on w1-fps' });
+  assert.deepEqual([w.status, w.blocked?.kind, w.blocked?.ref, w.blocked?.by, w.blocked?.pause], ['blocked', 'machine', 'pc', `worker ${id}`, true]);
+  assert.match(w.log.at(-1)!, new RegExp(`blocked on pc's pause \\(w2443\\): paused from its tray app: paused by hand \\(w1532\\); its worker ${id} in pc/alpha stopped \\(by its worker\\), branch w1-fps`));
+  assert.equal(blockerName(w.blocked!), 'pc running again (its pause)');
+  // Its turn end does not lift a pause's gate (w2433 lifts a drop's).
+  o.workerTurnEnded(info, 'w1: still open: paused on pc; branch w1-fps pushed');
+  assert.equal(w.blocked?.pause, true);
+  let paused = true;
+  const watch = new BlockerWatch({ store, orchestrators: o, online: (m) => (m === 'pc' ? true : undefined), paused: (m) => m === 'pc' && paused });
+  assert.equal((await watch.tick()).has('w1'), false, 'online but paused: it waits');
+  assert.equal(w.status, 'blocked');
+  assert.equal(agents.waker.pending(id), undefined);
+  paused = false;
+  assert.match((await watch.tick()).get('w1') ?? '', /^clear: pc is online and runs again/);
+  assert.equal(w.status, 'active');
+  const wake = agents.waker.pending(id)!;
+  assert.ok(wake && Date.parse(wake.at) - Date.now() <= 61_000, 'resumed within a minute, in its own sandbox');
+  assert.match(wake.note, /FF Factory stopped your turn when pc was paused from its tray app at \d\d:\d\d UTC \(w2443\); it runs again, and this is your resume in your own sandbox/);
+  assert.match(wake.note, /never reset it away or force-push/);
+});
+
+test('w2443: a leg of a pair run on a paused machine starts the whole run again off that machine; its other leg is stopped, not left hanging', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, sessions, o } = env;
+  putRequests(store, [{ id: 'w2276', by: LOTH, status: 'active' }]);
+  const a = await startedFor(env, 'w2276');
+  store.putSession({ id: '9a4452ce', kind: 'worker', title: 'host leg', status: 'running', permissionMode: 'bypassPermissions', createdAt: T0, lastActivityAt: T0, turns: 1, costUsd: 0, pendingPermissions: [], requestedBy: LOTH, machineId: 'beast', machineSandbox: 'slot1' } as SessionInfo);
+  const w = store.work.get('w2276')!;
+  w.sessionIds = ['9a4452ce', a.id];
+  w.pair = { legs: 2, started: { at: T0, legs: [{ session: '9a4452ce', sandbox: 'beast/slot1' }, { session: a.id, sandbox: 'pc/alpha' }] } };
+  store.putWork(w);
+  o.pausedOff(w, store.sessions.get(a.id)!, { machine: 'pc', sandbox: 'alpha', why: 'paused from its tray app: someone is using it (w1532)', note: 'no note', how: 'forced (stopped)' });
+  await until('the old leg stopped', () => !sessions.sessions.get(a.id)?.live);
+  assert.equal(w.status, 'queued', 'Queued again as a whole run, not Blocked');
+  assert.equal(w.blocked, undefined);
+  assert.ok(w.log.some((l) => /its leg \w+'s computer pc is paused from its tray app: someone is using it \(w1532\) \(w2443\)/.test(l)), w.log.join('\n'));
 });

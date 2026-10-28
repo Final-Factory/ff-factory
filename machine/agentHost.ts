@@ -414,6 +414,15 @@ export class HostedSession implements SessionHandle {
     if (this.running) this.command({ op: 'stop', onPurpose });
   }
 
+  /**
+   * w2443: end it now, whatever it is doing (a paused machine's deadline): not live from here, and its host's whole process
+   * tree (claude, its shells, builds and players under it) ended at once, without the host's own close. Resolves when it is gone.
+   */
+  endNow(why: string): Promise<void> {
+    if (this.running || this.liveNow) this.ended(why);
+    return this.stoppingNow ?? this.teardown(0);
+  }
+
   decide(requestId: string, allow: boolean, message?: string) {
     if (!this.running) return false;
     this.command({ op: 'decide', requestId, allow, ...(message ? { message } : {}) });
