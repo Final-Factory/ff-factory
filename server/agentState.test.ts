@@ -331,6 +331,11 @@ test("w613, w656: an agent whose daemon went away under it keeps its sandbox unt
   const later = Date.parse(info.heldSince!) + HOLD_PLACE_MS + 1;
   assert.equal(holdsItsPlace(info, later), false, 'half an hour later the ledger no longer counts it as coming back');
   assert.equal(holdsSandbox(info, later), true, 'but its sandbox stays its until the release pass releases it, its worktree clean');
+  // w2433: back after an hour offline, without its process: the hold counts from the return, so the release pass does not
+  // take its sandbox before its worker resumes there.
+  info.heldSince = new Date(Date.now() - 60 * 60_000).toISOString();
+  (agents.machines as unknown as { onMessage(id: string, msg: unknown): void }).onMessage('pc', { type: 'hello', protocol: 1, live: [] });
+  assert.ok(Date.now() - Date.parse(store.sessions.get('eb9632fd')!.heldSince!) < 60_000, 'its hold restarted at the hello');
   // stop_agent (on purpose) releases it at once.
   agents.machines.stoppedOnPurpose(alpha);
   assert.equal(store.sessions.get('eb9632fd')!.heldSince, undefined);

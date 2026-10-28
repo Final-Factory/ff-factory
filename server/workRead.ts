@@ -4,6 +4,7 @@
 // orchestrator) it also lists and reads every open and stalled request. Nothing here writes: the answer is built from a
 // copy of what the store holds, and the tool takes no argument that changes anything.
 import { WORK_LIVE_LABEL, WORK_LIVE_STATES, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
+import { latestLine } from '../shared/latestLine.ts';
 import { WORK_OPEN, type WorkItem } from '../shared/types.ts';
 import { cleanBlock, cleanLine, sourceTag, UNTRUSTED_HEADER } from './intakeRules.ts';
 import { ledgerOrder, liveLine, names } from './work.ts';
@@ -214,7 +215,7 @@ function full(w: WorkItem, now?: WorkLive, cost = ''): string {
     fence(w, w.brief, 12_000, 400),
     ...(w.constraints ? ['Constraints:', fence(w, w.constraints, 2_000, 60)] : []),
     ...(notes ? ["Its people's notes:", fence(w, notes, 6_000, 120)] : []),
-    ...(w.outcome ? ['Latest report:', fence(w, w.outcome, 4_000, 80)] : []),
+    ...(w.outcome ? ['Latest report:', fence(w, latestLine(w)!, 4_000, 80)] : []),
     ...(done ? ['DONE reports:', fence(w, done, 2_000, 20)] : []),
     `Log (${Math.min(w.log.length, 60)} of ${w.log.length}, newest last):`,
     fence(w, w.log.slice(-60).join('\n'), 12_000, 60),
@@ -230,7 +231,7 @@ function brief(w: WorkItem, now?: WorkLive, cost = ''): string {
     ...(w.prs?.length ? ['PRs:', ...prLines(w, 5)] : []),
     'Brief (start):',
     fence(w, w.brief, 1_200, 25),
-    ...(w.outcome ? ['Latest report:', fence(w, w.outcome, 400, 8)] : []),
+    ...(w.outcome ? ['Latest report:', fence(w, latestLine(w)!, 400, 8)] : []),
     ...(w.log.length ? [`Log (last ${Math.min(w.log.length, 5)}):`, fence(w, w.log.slice(-5).join('\n'), 1_500, 5)] : []),
   ].join('\n');
 }

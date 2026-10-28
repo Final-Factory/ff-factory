@@ -65,7 +65,8 @@
     }
   },
   "ledger": {
-    "cleanup": { "enabled": true, "everyHours": 4 }
+    "cleanup": { "enabled": true, "everyHours": 4 },
+    "offlineNoticeMinutes": 60
   },
   "intake": {
     "discord": {

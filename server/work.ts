@@ -5,6 +5,7 @@ import { WORK_LIVE_LABEL, type WorkLive } from '../shared/workState.ts';
 import { sourceTag } from './intakeRules.ts';
 import { WORK_OPEN, type AttachmentRef, type Requester, type WorkItem, type WorkOverlap, type WorkPriority, type WorkStatus } from '../shared/types.ts';
 import { fmtBytes } from '../shared/attachments.ts';
+import { latestLine } from '../shared/latestLine.ts';
 import { needsBuild, needsLive, needsTimed } from '../shared/capacity.ts';
 import { isReleaseBranch, releaseBranchWarning } from './releaseHandBack.ts';
 
@@ -359,7 +360,7 @@ export function describeItem(w: WorkItem, workerLine: (id: string) => string, no
   const runs = w.runsFor ? ` Runs for ${w.runsFor.displayName} (${clip(oneLine(w.runsFor.why), 120)}): their Claude pool and GitHub token.` : '';
   // w1600: placed by the Capacity block's "Next Live view work" line (BEAST first), not the general one.
   const live = short ? '' : needsLive(w) ? ` Needs a Live view${w.liveView ? ` (its worker started one on ${w.liveView.machine})` : ''}: place it by "Next Live view work".` : needsBuild(w) ? ` An urgent release${w.build ? ` (its worker declared its build on ${w.build.machine})` : ''}: place it by "Next urgent release work" (w1639: BEAST, else LothDesktop when BEAST is offline).` : needsTimed(w) ? ` Timed work${needsTimed(w) === 'any' ? '' : ` on ${needsTimed(w)}`}: place it by "Next timed work" (w1872: the default unless a machine is named; a computer that takes no timed runs refuses it).` : '';
-  return `- ${w.id} [${w.status}${merged}${w.priority !== 'normal' ? `, ${w.priority}` : ''}${tag ? `; ${tag}` : ''}]${state} "${w.title}" for ${who}, ${w.createdAt.slice(0, 16).replace('T', ' ')}.${runs}${live}${workers}${prs}${stalled}${cost}${w.outcome ? ` Latest: ${clip(oneLine(w.outcome), text)}` : ''}${waits ? `\n${waits}` : ''}`;
+  return `- ${w.id} [${w.status}${merged}${w.priority !== 'normal' ? `, ${w.priority}` : ''}${tag ? `; ${tag}` : ''}]${state} "${w.title}" for ${who}, ${w.createdAt.slice(0, 16).replace('T', ' ')}.${runs}${live}${workers}${prs}${stalled}${cost}${w.outcome ? ` Latest: ${clip(oneLine(latestLine(w)!), text)}` : ''}${waits ? `\n${waits}` : ''}`;
 }
 
 /**
@@ -649,7 +650,7 @@ export function handoverNote(w: Pick<WorkItem, 'id'>, h: Handover): string {
     lines.push(`Requests ${w.id} names or builds on (read each with read_work; their PRs are listed):`);
     for (const r of h.related) {
       const prs = r.prs?.length ? `PRs: ${r.prs.map((p) => `#${p.number} ${p.state}`).join(', ')}` : 'no PRs';
-      lines.push(`- ${r.id} "${clip(r.title, 100)}" (${r.status}; ${prs})${r.outcome ? `. Latest: ${clip(oneLine(r.outcome), 200)}` : ''}`);
+      lines.push(`- ${r.id} "${clip(r.title, 100)}" (${r.status}; ${prs})${r.outcome ? `. Latest: ${clip(oneLine(latestLine(r)!), 200)}` : ''}`);
     }
   } else lines.push(`${w.id} names no other request. If it builds on one anyway, ask for it with read_work rather than guessing.`);
   return lines.join('\n');

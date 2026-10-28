@@ -10,7 +10,7 @@ import { Agents } from './agents.ts';
 import { Identity } from './identity.ts';
 import { PERSONAL_TOOLS, beltFor } from './belts.ts';
 import { OPS_ID } from './opsWorker.ts';
-import { crossOwnerLine, delegationConstraints, DispatcherChatRefused, DISPATCHER_CHAT_REFUSED, FILINGS_PER_MESSAGE, loopGuards, FOLLOW_UPS_PER_MESSAGE, MESSAGES_PER_PERSON, OWNER_LOOP_MESSAGES_PER_HOUR, PERSON_MESSAGE_CHARS, type Orchestrators } from './orchestrators.ts';
+import { crossOwnerLine, delegationConstraints, DispatcherChatRefused, DISPATCHER_CHAT_REFUSED, FILINGS_PER_MESSAGE, loopGuards, FOLLOW_UPS_PER_MESSAGE, MESSAGES_PER_PERSON, OFFLINE_NOTICE_MS, offlineNoticeMs, OWNER_LOOP_MESSAGES_PER_HOUR, PERSON_MESSAGE_CHARS, unpushedText, type Orchestrators } from './orchestrators.ts';
 import { configPath, type Config } from './config.ts';
 import { memoryDirFor } from './orchestratorMemory.ts';
 import { handoverNote, isOpen, requestAsFiled } from './work.ts';
@@ -20,6 +20,7 @@ import { personForWork, sessionPerson, setVaultContext } from './vault.ts';
 import { fakeToken, useFakeVault } from './testVault.ts';
 import { parseNotice } from '../shared/notices.ts';
 import { requestWaitOf } from '../shared/workState.ts';
+import { latestLine } from '../shared/latestLine.ts';
 import { HELD_MARK, inPersonWords } from '../shared/conditional.ts';
 import { splitReply, splitSent } from '../shared/replies.ts';
 import type { PrHealth } from '../shared/blockers.ts';
@@ -2449,9 +2450,18 @@ test('w1378: a worker waiting on a person reaches that person’s orchestrator o
   assert.match(pending!.note, /^\[answer\] Ben answered on w1 "Circuit icon button", in their own words: Looks good, merge it\n\nIt answers what you waited on: "OK the circuit button look/);
   assert.equal(store.work.get('w1')!.needsYou!.answered!.by, 'Ben');
   assert.equal(store.work.get('w1')!.question, undefined, "the dispatcher's question clears with it");
+  // w2433: its Latest line was the question; answered, it says so until the worker reports again (w2320 read "waiting on
+  // lothsahn to pick the next cut" an hour after lothsahn answered).
+  const answered = store.work.get('w1')!;
+  assert.equal(answered.needsYou!.answered!.outcome, answered.outcome);
+  assert.match(latestLine(answered)!, new RegExp(`^Ben answered at \\d\\d:\\d\\d UTC what it waited on; its worker ${id} resumed on the answer and has not reported since\\.$`));
+  const listed = (await call(dispatcher().info, 'list_work', {})).text;
+  assert.ok(listed.includes('Latest: Ben answered at ') && !listed.includes(`Latest: ${answered.outcome}`), listed);
   sessions.send(id, pending!.note, 'system');
   await until('its declaration ends with that message', () => info.waitingOn === undefined);
   await until('the resumed turn', () => info.status === 'idle');
+  sessions.events.emit('turnEnd', handle, 'Merging it now.');
+  assert.equal(latestLine(store.work.get('w1')!), 'Merging it now.', 'its next report is the Latest line again');
 
   // A new question later (its report's "still open" line names Ben) is a new message.
   sessions.events.emit('turnEnd', handle, 'Merged.\n\nw1: still open: waiting on Ben to pick A or B for the hover colour');
@@ -7340,4 +7350,101 @@ test("w2426: a request Blocked on a pair run's report stays Blocked through its 
   leg('h', 'For w1: PASS on 7dd91b2c6c, 4800 heartbeats, desync hashes match, no errors.\n\nDONE: w2', 6000);
   assert.match((await watch.tick()).get('w1') ?? '', /^clear: w2's worker reported/);
   assert.notEqual(store.work.get('w1')!.status, 'blocked');
+});
+
+test('w2433: a worker its machine stopped mid-turn holds its request Blocked on that machine (not Stalled), resumed once in its own sandbox when the machine is back; a long time offline is named to the dispatcher with its sandbox state', async (t) => {
+  const { store, sessions, agents, o, dispatcher, call, heard } = await setupOnMachine(t);
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1', title: 'Mass Driver FPS part 2' }]);
+  let online = false;
+  (o as unknown as { d: { machineOnline: (id: string) => boolean | undefined } }).d.machineOnline = (id) => (id === 'pc' ? online : undefined);
+  const watch = new BlockerWatch({ store, orchestrators: o, online: (id) => (id === 'pc' ? online : undefined) });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Fix it', title: 'w1: fix', work_id: 'w1' });
+  assert.equal(started.isError, false, started.text);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const info = store.sessions.get(id)!;
+  await until('its first turn', () => info.status === 'idle');
+  // Mid-turn when biscuit's link dropped (w2320's 786d0973, 2026-10-26 23:38Z).
+  const handle = sessions.get(id) as unknown as { liveFlag: boolean; seenLive: boolean };
+  Object.assign(info, { status: 'running', turnOpenSince: new Date().toISOString(), lastActivityAt: new Date().toISOString() });
+  handle.liveFlag = true;
+  handle.seenLive = true;
+  const machines = agents.machines as unknown as { detach(id: string): void; cutOff: Map<string, { sessions: string[] }> };
+  machines.detach('pc');
+  const w = store.work.get('w1')!;
+  assert.equal(info.status, 'stopped');
+  assert.match(info.statusDetail ?? '', /machine pc went offline/);
+  assert.deepEqual([w.status, w.blocked?.kind, w.blocked?.ref, w.blocked?.by, w.stalled], ['blocked', 'machine', 'pc', `worker ${id}`, undefined]);
+  assert.match(w.log.at(-1)!, new RegExp(`blocked on pc coming back online: its worker ${id} was stopped mid-turn when pc went offline \\(w2433\\)`));
+  assert.ok(!(machines.cutOff.get('pc')?.sessions ?? []).includes(id), "the gate's clearing resumes it, not the daemon's hello as well");
+  // Offline: it stays Blocked, nobody is resumed, and before the notice's hour nothing is said.
+  assert.equal((await watch.tick()).has('w1'), false);
+  assert.equal(agents.waker.pending(id), undefined);
+  assert.equal(heard(dispatcher().info.id, '[ledger] pc has been offline').length, 0);
+  // An hour on (ledger.offlineNoticeMinutes, default 60), the dispatcher hears which requests wait and what their sandboxes hold.
+  w.blocked!.at = new Date(Date.now() - OFFLINE_NOTICE_MS - 60_000).toISOString();
+  const alpha = store.machines.get('pc')!.sandboxes!.find((b) => b.id === 'alpha')!;
+  alpha.git = { branch: 'w1-fps', upstream: 'origin/w1-fps', ahead: 2, behind: 0, dirty: 0, untracked: 0, at: '2026-10-26T23:37:00.000Z' };
+  assert.match((await watch.tick()).get('w1') ?? '', /named to the dispatcher/);
+  await until('the notice', () => heard(dispatcher().info.id, '[ledger] pc has been offline').length === 1);
+  const notice = heard(dispatcher().info.id, '[ledger] pc has been offline')[0].text;
+  assert.match(notice, /^\[ledger\] pc has been offline 61 min \(since \d\d:\d\d UTC\)\. These requests are Blocked on it coming back/);
+  assert.ok(notice.includes(`- w1 "Mass Driver FPS part 2" (Lothsahn's): worker ${id} in pc/alpha: UNPUSHED WORK: w1-fps is 2 commits ahead of origin/w1-fps (as last seen at 23:37 UTC)`), notice);
+  assert.match(notice, /start one again elsewhere from its pushed branch/);
+  assert.match(w.log.at(-1)!, /the dispatcher was told pc has been offline 61 min/);
+  // Once per gate.
+  assert.equal((await watch.tick()).has('w1'), false);
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(heard(dispatcher().info.id, '[ledger] pc has been offline').length, 1);
+  // Back online: the gate clears and its own worker resumes within a minute, told why its turn stopped.
+  online = true;
+  assert.match((await watch.tick()).get('w1') ?? '', /^clear: pc is online/);
+  assert.equal(w.status, 'active');
+  const wake = agents.waker.pending(id)!;
+  assert.ok(wake && Date.parse(wake.at) - Date.now() <= 61_000, 'resumed within a minute');
+  assert.match(wake.note, /^w1 is unblocked: pc coming back online cleared \(pc is online\)\. Your turn stopped when pc went offline at \d\d:\d\d UTC, and this is your resume in your own sandbox: your folder is as you left it\. Check git status/);
+  // Only once.
+  agents.waker.cancel(id);
+  assert.equal((await watch.tick()).has('w1'), false);
+  assert.equal(agents.waker.pending(id), undefined);
+});
+
+test('w2433: a worker whose process lived through a short drop is not resumed again, and its first turn end lifts the wait on its machine; one waiting on a person is left as it was', async (t) => {
+  const { store, agents, o, dispatcher, call } = await setupOnMachine(t);
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }]);
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Fix it', title: 'w1: fix', work_id: 'w1' });
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const info = store.sessions.get(id)!;
+  await until('its first turn', () => info.status === 'idle');
+  assert.deepEqual(o.workersCutOff('pc', [id]), [id]);
+  const w = store.work.get('w1')!;
+  assert.equal(w.blocked?.kind, 'machine');
+  // Its process ran on (a network blip): the daemon's hello shows it running.
+  info.status = 'running';
+  const watch = new BlockerWatch({ store, orchestrators: o, online: (m) => (m === 'pc' ? true : undefined) });
+  assert.match((await watch.tick()).get('w1') ?? '', /^clear: pc is online/);
+  assert.equal(w.status, 'active');
+  assert.equal(agents.waker.pending(id), undefined, 'a running worker gets no resume message');
+  // Its turn end before the watch looked lifts the gate itself.
+  info.status = 'idle';
+  assert.deepEqual(o.workersCutOff('pc', [id]), [id]);
+  o.workerTurnEnded(info, 'Pushed it.\n\nw1: still open: CI next');
+  assert.deepEqual([w.status, w.blocked], ['active', undefined]);
+  assert.ok(w.log.some((l) => l.includes(`its worker ${id} ended a turn after its machine's drop, so the wait on its machine is over (w2433)`)));
+  // A worker waiting on a person keeps that wait: no machine gate.
+  info.waitingOn = { who: 'Lothsahn', what: 'pick the next cut', at: new Date().toISOString(), request: 'w1' };
+  assert.deepEqual(o.workersCutOff('pc', [id]), []);
+  assert.equal(w.status, 'active');
+});
+
+test('w2433: what a sandbox holds, for the long-offline notice', () => {
+  const at = '2026-10-26T23:37:00.000Z';
+  assert.match(unpushedText(undefined), /unknown .*may hold unpushed work/);
+  assert.equal(unpushedText({ branch: 'b', upstream: 'origin/b', ahead: 0, dirty: 2, untracked: 1, at }), 'UNPUSHED WORK: 2 changed and 1 untracked file on b, not committed (as last seen at 23:37 UTC)');
+  assert.equal(unpushedText({ branch: 'b', dirty: 0, untracked: 0, at }), 'UNPUSHED WORK: b has no upstream, so its commits are not pushed (as last seen at 23:37 UTC)');
+  assert.equal(unpushedText({ branch: 'b', upstream: 'origin/b', ahead: 0, dirty: 0, untracked: 0, at, head: { sha: '0123456789abcdef', subject: 's', date: at } }), 'nothing unpushed: b is clean and pushed at 0123456789ab (as last seen at 23:37 UTC)');
+  assert.equal(offlineNoticeMs({}), 60 * 60_000);
+  assert.equal(offlineNoticeMs({ ledger: { offlineNoticeMinutes: 90 } }), 90 * 60_000);
+  assert.equal(offlineNoticeMs({ ledger: { offlineNoticeMinutes: 1 } }), 5 * 60_000, 'at least 5 minutes');
 });

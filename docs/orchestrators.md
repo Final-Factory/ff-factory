@@ -549,6 +549,13 @@ workers are working on vs which are waiting on input"). It is derived live from 
 | **Merged, follow-up pending** | its PRs merged, none is open, and it is still open | the cleanup's own reason ("still open: its brief asks for a step after the merge"), or that the cleanup has not looked yet |
 | **Stalled** | anything else: nothing works on it and nothing waits on a person, as soon as that is true | why: the cleanup's stall reason, an open PR nobody is on, its worker moved on to another request, finished its turn or stopped (and when), or no worker was ever started |
 
+**The Latest line never shows a question already answered** (w2433). A request's `outcome` (its Latest line in
+`list_work`, `read_work` and the page) is rewritten only when a report comes. w2320's worker 786d0973 declared it waited on
+lothsahn, lothsahn answered at 22:58Z on 2026-10-26, and the worker then worked one long turn without reporting, so the line
+still asked the question an hour later. The answer now records the line it was given on (`WorkNeedsYou.answered.outcome`),
+and while `outcome` is still that line, `shared/latestLine.ts` `latestLine` shows "<who> answered at HH:MM UTC what it
+waited on; its worker <sid> resumed on the answer and has not reported since" instead. The next report replaces it.
+
 ### Waiting, Queued, Blocked
 
 Three kinds of waiting, never mixed (w643, Lothsahn: "Please cleanup the states. ... Make sure you consistently apply
@@ -802,6 +809,27 @@ without one means it is off or failing, worth a person's look.
   ticket is held by the worker's own process, which a parked worker no longer has; `machine/leftovers.ts` ends what it left
   running. The release also frees the sandboxes of workers stopped on a usage gate by w1109's stop line and w1745's token
   switch, which used to keep them.
+- **A worker its machine stopped mid-turn holds its request Blocked on that machine, and resumes in its own sandbox when the
+  machine is back** (w2433, lothsahn). On 2026-10-26 at 23:38Z biscuit's link dropped while w2320's worker 786d0973 was
+  mid-turn; the drop marked it "[stopped: machine biscuit went offline]" and the request read Stalled, then "Merged,
+  follow-up pending". Now the drop (`Machines.detach`, through the `workersCutOff` hook) calls
+  `Orchestrators.workersCutOff`: each active or stalled request a worker stopped mid-turn holds (not one waiting on a
+  person, not the dispatcher, not a request another busy worker on another machine is carrying) gets a `machine` gate on
+  that machine set by that worker ("its worker <sid> was stopped mid-turn when <m> went offline"), status `blocked`. Those
+  workers are left out of the daemon's hello resume (`cutOff`), so the gate's clearing resumes each once: when the machine
+  is online the blocker watch clears the gate and `resumeGatedWorker` wakes the worker within a minute in its own sandbox,
+  told its turn stopped when the machine went offline and to check `git status` and re-pin Unity before it carries on. Its
+  sandbox stays its own meanwhile: the w613 hold restarts at the daemon's hello (`Machines.droppedAt`), so the release pass
+  cannot free it in the minute between the reconnect and the resume. A worker whose process lived through a short drop
+  (it is busy when the gate clears) gets no resume message, and its first turn end lifts the gate itself
+  (`dropCutOffGates`).
+- **A machine offline long is named to the dispatcher** (w2433). Once a cut-off gate is older than config
+  `ledger.offlineNoticeMinutes` (default 60, at least 5) and its machine is still offline, the blocker watch
+  (`Orchestrators.noticeLongOffline`) sends the dispatcher one `[ledger] <m> has been offline N min …` per machine: each
+  request Blocked on it, its worker and sandbox, and what the sandbox holds as last seen (`unpushedText`: "UNPUSHED WORK:
+  …" for uncommitted files, no upstream or commits ahead; "nothing unpushed: … clean and pushed at <sha>"; or unknown).
+  The dispatcher may leave it to resume by itself, or start it again elsewhere from its pushed branch, stopping the old
+  worker first. Once per gate (`WorkBlocker.noticedAt`), logged on each request.
 - **A resume that comes after its request is blocked again does not go** (w1128). w1083's CI resume of a50a8ee1, queued for a
   sandbox at 06:48Z, went at 06:50Z, though the dispatcher had blocked the request on w1070 and w1110 at 06:49Z; w1082's
   (c37a6ec0) waited from 06:13Z and went at 07:33Z the same way. A gate's resume carries its request (`resumeOf`, through

@@ -48,7 +48,7 @@ export type PrState = { state: 'open' | 'merged' | 'closed'; text: string; sha?:
 export interface BlockerWatchDeps {
   store: Store;
   orchestrators: Pick<Orchestrators, 'unblock' | 'blockerStuck' | 'blockerDecide' | 'gatesCleared' | 'flagQueuedWithRoom' | 'carryOutConditional' | 'dropConditional'> &
-    Partial<Pick<Orchestrators, 'recordReportedWait' | 'noteCiRead' | 'sweepResumes' | 'requeueCapacityBlocks' | 'requeueBrokenPairs' | 'replaceNoTimedWaits' | 'timedLegBound' | 'mergedOnGreen' | 'undecidedBound'>>;
+    Partial<Pick<Orchestrators, 'recordReportedWait' | 'noticeLongOffline' | 'noteCiRead' | 'sweepResumes' | 'requeueCapacityBlocks' | 'requeueBrokenPairs' | 'replaceNoTimedWaits' | 'timedLegBound' | 'mergedOnGreen' | 'undecidedBound'>>;
   /** w1841: tell the workers waiting on a bench lock that is free now (Agents.resumeBenchWaits): request id to what it did. */
   benchResume?: () => [string, string][];
   /** Whether a message to a session waits in the send queue (for a sandbox, a slot or its machine): its resume is on its way (w1094). */
@@ -188,6 +188,8 @@ export class BlockerWatch {
       // w2422: a wait a stopped worker's report names with no blocked_on recorded becomes its gate first, so the look below
       // clears it and resumes that worker like any other.
       for (const [id, why] of this.recordReportedWaits()) did.set(id, why);
+      // w2433: requests Blocked on a machine offline past ledger.offlineNoticeMinutes under their workers are named to the dispatcher.
+      for (const id of this.d.orchestrators.noticeLongOffline?.() ?? []) did.set(id, 'named to the dispatcher: its machine has been offline long');
       const blocked = [...this.d.store.work.values()].filter((w) => w.status === 'blocked' && w.blocked && w.blocked.by !== 'ledger cleanup');
       const ci = new Map<string, CiState | undefined>();
       const pr = new Map<string, PrState | undefined>();
