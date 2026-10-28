@@ -311,6 +311,18 @@ export function requestWaitOf(line: string, selfId: string): string | undefined 
   return undefined;
 }
 
+/**
+ * w2457: a wait on an FF Factory change, which only a portal deploy brings ("blocked on FF Factory letting lothdesktop grant
+ * the exclusive ticket", "waiting for the portal fix to deploy"): w2434's worker said so at 03:44 UTC and sat idle until
+ * 07:57, though the fix deployed at 04:28. Not a wait on CI or a pull request in the ff-factory repo ("blocked on CI on
+ * Final-Factory/ff-factory#743"): its worker merges that itself.
+ */
+const PORTAL_WAIT = /\b(?:waiting (?:for|on)|waits (?:for|on)|blocked on|until)\b([^;.]{0,80}?)(?<![\w/-])(?:ff[- ]?factory(?![\w-]*#\d)|the portal|portal (?:fix|deploy|update|change)|(?:a|the|its|next) (?:portal )?deploy)\b/i;
+export function portalWaitIn(line: string): boolean {
+  const m = PORTAL_WAIT.exec(line);
+  return !!m && !/\b(?:ci|checks?|pr|pull request)\b/i.test(m[1]);
+}
+
 /** w1841 (a): "waiting on BEAST's bench lock", "waits on the beast timed-run lock": the machine named, or '' for its own. */
 const BENCH_WAIT = /\b(?:waiting|waits|wait) (?:for|on) (?:the |a )?(?:(\w+)(?:'s)? )?(?:bench(?:[- ]lock| queue)|timed[- ]runs?(?:[- ]lock)?)\b/i;
 export function benchWaitOf(line: string): string | undefined {
