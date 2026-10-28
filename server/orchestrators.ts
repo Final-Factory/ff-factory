@@ -4424,7 +4424,17 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     // w2153: another live worker's own wait (a pair run's other leg) neither stops this one nor is dropped by it; the request
     // stays Blocked on it (a worker moved to another sandbox, w2046, or a pair run's leg started beside it). Elsewhere a
     // start on a gated request still needs a person's override, which drops every gate as before.
-    const others = w.pair || opts.moved ? othersGates(w, s.id) : [];
+    // w2438: a request moved to another computer (w2046) takes its waits with it: its new session is linked even while the
+    // request is gated, the gates the worker it left set become the new one's (the clear resumes it), and the request stays
+    // Blocked on all of them. w2434 on 2026-10-28 01:03Z: moved off lothlaptop while Blocked on w2437, its new session
+    // 172ab5ee started on m3 but was refused here as "gated on w2437", so it ran unlinked and the request showed Queued.
+    if (opts.moved) {
+      for (const g of gatesOf(w)) {
+        const by = gateSetter(g);
+        if (by && by !== s.id && !w.sessionIds.includes(by) && w.movedOff?.[by]) g.by = `worker ${s.id}`;
+      }
+    }
+    const others = opts.moved ? gatesOf(w).filter((g) => this.gateOpen(g)) : w.pair ? othersGates(w, s.id) : [];
     // Gates are checked before the worker starts (gateProblem); an override is recorded here (w754).
     const gated = gatesOf(w).length > others.length ? this.gateProblem(w, opts.overrideGate, others) : undefined;
     if (gated) throw new Error(gated);
@@ -4446,7 +4456,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       w.alsoBlocked = others.length > 1 ? others.slice(1) : undefined;
       w.status = 'blocked';
     } else w.status = 'active';
-    this.stamp(w, `dispatcher: ${what}${was}${others.length ? `; still blocked on ${gatesName(others)}, another worker's wait` : ''}`);
+    this.stamp(w, `dispatcher: ${what}${was}${others.length ? `; still blocked on ${gatesName(others)}, ${opts.moved ? 'the wait it moved with' : "another worker's wait"}` : ''}`);
     this.store.putWork(w);
     if (opts.reply !== false) this.toPeople(w.requesters, dispatchNotice(w, what));
   }

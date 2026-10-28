@@ -4430,6 +4430,37 @@ test("w2153: a leg moved to another sandbox (w2046) while the other leg waits on
   assert.equal(agents.workOver(b.info), undefined);
 });
 
+test('w2438: a request moved to another computer (w2046) while Blocked on another request is linked to its new session, stays Blocked on that request, and the clear resumes the new worker', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }, { id: 'w2' }, { id: 'w1x' }]);
+  const a = await startedFor(env, 'w1');
+  // w2434 on 2026-10-28 01:00Z: its worker blocked on the pair run w2437 reporting, then the timed preempt moved it to m3.
+  await a.h.blocked_on!({ request: 'w1', requests: ['w2'], what: 'w2 (the pair run) reporting' });
+  assert.equal(store.work.get('w1')!.status, 'blocked');
+  o.movedForRoom(store.work.get('w1')!, a.info, { machine: 'pc', sandbox: 'slot1', branch: 'w1-branch', why: 'room', note: '', how: 'moved', to: 'pc' } as Parameters<Orchestrators['movedForRoom']>[2]);
+  // The new session on the computer it moved to (a real one, so the clear can resume it); its own start request is done.
+  const b = await startedFor(env, 'w1x', { override_duplicate: 'the moved session of w1' });
+  store.work.get('w1x')!.status = 'done';
+  const moved = b.info;
+  // Before the fix this threw "w1 is gated on w2 finishing", after the new session had already started: it ran unlinked.
+  o.linkWorker('w1', moved, `started worker ${moved.id}: moved from worker ${a.id} (w2046)`, { moved: true });
+  const w = store.work.get('w1')!;
+  assert.ok(w.sessionIds.includes(moved.id), 'the new session is linked');
+  assert.ok(!w.sessionIds.includes(a.id), 'the worker it left is not');
+  assert.equal(w.status, 'blocked', w.log.slice(-2).join(' | '));
+  assert.deepEqual([w.blocked?.kind, w.blocked?.ref, w.blocked?.by], ['request', 'w2', `worker ${moved.id}`]);
+  assert.equal(w.alsoBlocked, undefined);
+  assert.equal(agents.workLive().get('w1')!.state, 'blocked');
+  assert.equal(agents.workOver(moved), undefined);
+  // w2 closes: w1 is unblocked and its new worker, not the one it left, is resumed.
+  o.unblock('w1', 'w2 finished');
+  const after = store.work.get('w1')!;
+  assert.equal(after.status, 'active', after.log.slice(-2).join(' | '));
+  assert.match(after.log.at(-1)!, new RegExp(`its worker ${moved.id} resumes`));
+});
+
 test('w2045: merge_on_green is ignored, the wait set as usual, out of the arm, without head, or with a report that has no DONE line for the request', async (t) => {
   const env = await setupOnMachine(t);
   const { store, agents, o } = env;

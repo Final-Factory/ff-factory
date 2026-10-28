@@ -3076,7 +3076,13 @@ export class Agents {
       const prompt = `${head}${requestAsFiled(w, head)}${this.handoverFor(w, t, agent ? undefined : branch)}${w.source ? workerRules(w, agent ? this.sandboxBranchOf(t) : branch) : ''}${requestLineRule(w)}`;
       const s = this.startWorker({ sandbox: key, prompt, title: info.title, model: info.model, ...(info.effort ? { effort: info.effort } : {}), permissionMode: info.permissionMode, from: 'orchestrator', ...(info.requestedBy ? { requestedBy: info.requestedBy } : {}), workId: w.id });
       if (s.info.status === 'error') throw new Error(`its session ${s.info.id} did not start: ${s.info.statusDetail}`);
-      this.orchestrators.linkWorker(w.id, s.info, `started ${this.orchestrators.workerLine(s.info.id)} in ${key}: moved from worker ${info.id} on ${info.machineId}/${info.machineSandbox}, since ${hold} (w2046)`, { moved: true });
+      try {
+        this.orchestrators.linkWorker(w.id, s.info, `started ${this.orchestrators.workerLine(s.info.id)} in ${key}: moved from worker ${info.id} on ${info.machineId}/${info.machineSandbox}, since ${hold} (w2046)`, { moved: true });
+      } catch (e) {
+        // w2438: never leave a started session running unlinked: the request is handed back, so its new session stops.
+        this.sessions.sessions.get(s.info.id)?.stop(true);
+        throw new Error(`its session ${s.info.id} started but could not be linked, so it was stopped: ${(e as Error).message}`);
+      }
       // A pair leg (w1945): message_pair and the other legs find it at its new place.
       const leg = w.pair?.started?.legs.find((l) => l.session === info.id);
       if (leg) {
