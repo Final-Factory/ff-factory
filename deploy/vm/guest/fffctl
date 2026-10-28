@@ -420,6 +420,24 @@ cmd_prepare_shutdown() {
     fi
   fi
   echo "portal stopped after $(($(date +%s) - t0)) s; held until the next boot"
+  tailscale_upgrade
+}
+
+# Tailscale is upgraded only here, with the portal stopped for a shutdown (w2474): the package's postinst restarts
+# tailscaled, and every machine's link to the portal and FFBox's dropped with it at 11:07 UTC on 2026-10-28, from the
+# daytime unattended-upgrades run. That run holds it back now (53fff-third-party, install.sh), and Tailscale's own
+# auto-update is off. apt-daily refreshed the package lists an hour before the nightly.
+tailscale_upgrade() {
+  local have want
+  have=$(dpkg-query -W -f='${Version}' tailscale 2>/dev/null || true)
+  want=$(apt-cache policy tailscale 2>/dev/null | sed -n 's/^ *Candidate: *//p')
+  if [ -z "$have" ] || [ -z "$want" ] || [ "$want" = "(none)" ] || [ "$want" = "$have" ]; then return 0; fi
+  if timeout 120 env DEBIAN_FRONTEND=noninteractive apt-get install --only-upgrade -y -q -o DPkg::Lock::Timeout=60 \
+    -o Dpkg::Options::=--force-confold tailscale >/dev/null 2>&1; then
+    echo "tailscale $have -> $want"
+  else
+    echo "tailscale stays $have: its upgrade to $want failed (exit $?); the next shutdown tries again"
+  fi
 }
 
 cmd_tailscale_join() {
@@ -433,7 +451,8 @@ cmd_tailscale_join() {
   fi
   # file: keeps the key off the command line, where any process could read it.
   tailscale up --auth-key="file:$keyfile" --hostname="$host" --advertise-tags="$tag"
-  tailscale set --auto-update
+  # Off (w2474): fffctl prepare-shutdown upgrades Tailscale in the nightly restart, not in the middle of the day.
+  tailscale set --auto-update=false
   tailscale funnel --bg "http://127.0.0.1:$FFF_PORT"
   url=$(tailscale funnel status 2>/dev/null | grep -m1 -o 'https://[^ ]*' || true)
   echo "joined as $host ($tag). Funnel: ${url:-see tailscale funnel status}"

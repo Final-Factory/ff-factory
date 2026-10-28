@@ -70,13 +70,18 @@ c+=$(echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesour
 c+=$(printf 'Package: nodejs\nPin: origin deb.nodesource.com\nPin-Priority: 600\n' | write_file /etc/apt/preferences.d/nodesource 0644)
 c+=$(echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | write_file /etc/apt/sources.list.d/github-cli.list 0644)
 c+=$(echo "deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/ubuntu $codename main" | write_file /etc/apt/sources.list.d/tailscale.list 0644)
-# Security updates for these too, not only Ubuntu's (unattended-upgrades' "site=" pattern).
+# Security updates for these too, not only Ubuntu's (unattended-upgrades' "site=" pattern). Not Tailscale's (w2474): its
+# upgrade restarts tailscaled, which drops every machine's link to the portal (2026-10-28 11:07 UTC, from the 11:00 run).
+# fffctl prepare-shutdown upgrades it instead, with the portal stopped for the host's nightly restart.
 write_file /etc/apt/apt.conf.d/53fff-third-party 0644 >/dev/null <<'EOF'
-// deploy/vm/guest: unattended-upgrades also takes Node (within its major version), gh and Tailscale.
+// deploy/vm/guest: unattended-upgrades also takes Node (within its major version) and gh. Tailscale is upgraded by
+// fffctl prepare-shutdown in the nightly restart (w2474), never by this daytime run.
 Unattended-Upgrade::Origins-Pattern {
   "site=deb.nodesource.com";
   "site=cli.github.com";
-  "site=pkgs.tailscale.com";
+};
+Unattended-Upgrade::Package-Blacklist {
+  "tailscale$";
 };
 EOF
 
@@ -283,6 +288,11 @@ run_cmd systemctl enable fff-portal.service fff-health.timer fff-update.path fff
 # back after a reboot (the unit list is FFF_CRITICAL_UNITS in lib.sh, which fff-watchdog and deploy/vm/test/fff-units.test.sh
 # read too). tailscaled is the package's unit: its postinst enables it, but this does not rely on that.
 run_cmd systemctl enable "${FFF_CRITICAL_UNITS[@]}"
+# Tailscale's own auto-update off (w2474), on a node fffctl tailscale-join set it on: the nightly restart upgrades it
+# (fffctl prepare-shutdown). Only while it is not off already, so an update does not touch tailscaled's prefs again.
+if [ "$DRY_RUN" != 1 ] && tailscale debug prefs 2>/dev/null | jq -e '.AutoUpdate.Apply != false' >/dev/null 2>&1; then
+  run_cmd tailscale set --auto-update=false || warn "tailscale set --auto-update=false failed (exit $?); Tailscale may still update itself in the day"
+fi
 if [ "$DRY_RUN" != 1 ]; then
   for u in "${FFF_CRITICAL_UNITS[@]}"; do
     enable_state_ok "$(systemctl is-enabled "$u" 2>/dev/null || true)" ||

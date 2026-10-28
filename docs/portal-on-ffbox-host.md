@@ -547,9 +547,16 @@ turns it on, without the CUDA wheels (w570; measurements and the choice of model
   is down, and switches. No code change needed.
 - **Manual rollback**: `fffctl rollback`. Data goes back only with the host's disk snapshots (`vm-rollback.sh`),
   because data formats move forward: `durable.ts`'s versions cover crashes, not downgrades.
-- **Node, gh and Tailscale** update through unattended-upgrades (their repositories are added to its origins with
-  `site=` patterns *(sourced: unattended-upgrades README)*), Node within its major version (`node_24.x`). Tailscale
-  also has `tailscale set --auto-update` on. The Claude Code CLI updates itself *(sourced: Claude Code setup docs:
+- **Node and gh** update through unattended-upgrades (their repositories are added to its origins with
+  `site=` patterns *(sourced: unattended-upgrades README)*), Node within its major version (`node_24.x`).
+- **Tailscale** updates only in the nightly restart (w2474): `fffctl prepare-shutdown` upgrades the package after the
+  portal has stopped, so tailscaled's restart falls in the downtime. unattended-upgrades holds it back
+  (`Package-Blacklist` in `53fff-third-party`) and Tailscale's own auto-update is off (`tailscale set
+  --auto-update=false`, by `fffctl tailscale-join` and by `install.sh` on every update). Before, the 11:00 UTC run
+  upgraded it on 2026-10-28 (1.104.2 to 1.104.4, tailscaled restarted 11:07:08–11:07:10 UTC), and every machine and
+  FFBox lost its link to the portal for 5 s to 2 min, 53 minutes before the restart that drops them anyway. Under
+  `NIGHTLY_MODE=if-required` a newer Tailscale waits for a night that restarts for another reason; `off` never
+  upgrades it. The Claude Code CLI updates itself *(sourced: Claude Code setup docs:
   "Native installations automatically update in the background")*. The Agent SDK's own binary moves with ff-factory's
   `package-lock.json`.
 

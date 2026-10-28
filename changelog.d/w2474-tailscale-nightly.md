@@ -1,0 +1,1 @@
+- The portal VM upgrades Tailscale only in the nightly restart, after the portal has stopped (`fffctl prepare-shutdown`). The daytime unattended-upgrades run holds it back, and Tailscale's own auto-update is off. On 2026-10-28 its 11:07 UTC upgrade dropped every machine and FFBox at once (w2474).
