@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
+import fs from 'node:fs';
 import path from 'node:path';
 import { alreadySent, needsYouDigestText, needsYouRecord, needsYouText, previewLine, previewsIn, prsIn, reportTail, whoOf, NEEDS_YOU_REPORT_CHARS } from './needsYou.ts';
 import type { UserInfo, WorkItem } from '../shared/types.ts';
@@ -102,4 +103,27 @@ test('the digest: one message with every question, each with its files and PRs',
   assert.match(text, /w1360 "Circuits[\s\S]*Final-Factory\/FinalFactory#1799[\s\S]*\(worker 14fac04c resumes with the answer\)/);
   assert.match(text, /w1346 "Comet-hit[\s\S]*\(1\) your own ship vanishes[\s\S]*\(worker 0855daf2 resumes with the answer\)/);
   assert.match(text, /record it with update_work on that request, their answer as the note/);
+});
+
+test('w2478: the relay lists the request’s own review stills and clips the words did not name, newest first, to inline', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'w2478-review-'));
+  const mk = (topic: string, name: string, agoS: number) => {
+    fs.mkdirSync(path.join(root, topic), { recursive: true });
+    const f = path.join(root, topic, name);
+    fs.writeFileSync(f, 'x');
+    const t = new Date(Date.now() - agoS * 1000);
+    fs.utimesSync(f, t, t);
+    return f;
+  };
+  const old = mk('w1360-icon', 'old.png', 300);
+  const newest = mk('circuit-look', 'newest.mp4', 10);
+  const mid = mk('w1360-icon', 'mid.png', 100);
+  mk('w1360-icon', 'notes.md', 1);
+  const wv = { ...w, reviewTopics: ['circuit-look'] } as WorkItem;
+  const r = needsYouRecord(wv, { kind: 'question', key: 'q', question: `Which look? ![mid](<${mid}>)`, names: ['Ben'] }, [{ userId: 'ben', displayName: 'Ben' }], 't', { reviewRoot: root });
+  assert.deepEqual(r.media, [newest, old], 'newest first, without the one the words inline, stills and clips only');
+  const text = needsYouText(wv, r, 'Ben');
+  assert.match(text, /More of the review stills and clips of w1360, newest first: inline the ones[\s\S]*w2478\):\n\n- !\[newest\.mp4\]\(<[^>]*newest\.mp4>\)\n- !\[old\.png\]/);
+  const none = needsYouRecord(w, { kind: 'question', key: 'q', question: 'Ship today?', names: ['Ben'] }, [], 't', { reviewRoot: NOWHERE });
+  assert.equal(none.media, undefined);
 });

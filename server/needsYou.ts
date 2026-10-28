@@ -10,6 +10,7 @@
 import { askExcerpt, splitMedia, type Ask } from '../shared/ask.ts';
 import { sameAsk, sameWords } from '../shared/waitSummary.ts';
 import type { Requester, UserInfo, WorkItem, WorkNeedsYou } from '../shared/types.ts';
+import { requestMedia } from './visualAsk.ts';
 import { absoluteTargets, mediaLine, mediaNamed, MEDIA_FILE, PORTAL_REVIEW_ROOT, publishedCopy } from './reviewMedia.ts';
 import { noteLine, noteWhen, possiblyDecided, questionRefs, type PriorNote } from './priorDecisions.ts';
 
@@ -21,6 +22,8 @@ export const NEEDS_YOU_REPORT_CHARS = 3000;
 export const NEEDS_YOU_QUESTION_CHARS = 2000;
 /** At most this many review files and pull requests are listed. */
 const MAX_LISTED = 24;
+/** At most this many of the request's own review files the relay adds (w2478). */
+const MEDIA_LISTED = 8;
 
 /** A wait on a person found on a request, before it is sent. */
 export interface NeedsYouWait {
@@ -127,13 +130,18 @@ export function asksWithCopies(asks: readonly Ask[], o: { root: string; ids?: re
 }
 
 /** The record kept on the request when its wait is sent. */
-export function needsYouRecord(w: Pick<WorkItem, 'prs'> & { id?: string }, wait: NeedsYouWait, to: readonly Requester[], at: string, opts: { reviewRoot?: string; digest?: boolean; also?: readonly string[]; prior?: readonly PriorNote[] } = {}): WorkNeedsYou {
+export function needsYouRecord(w: Pick<WorkItem, 'prs'> & { id?: string; reviewTopics?: readonly string[] }, wait: NeedsYouWait, to: readonly Requester[], at: string, opts: { reviewRoot?: string; digest?: boolean; also?: readonly string[]; prior?: readonly PriorNote[] } = {}): WorkNeedsYou {
   const root = opts.reviewRoot ?? PORTAL_REVIEW_ROOT;
   const ids = w.id ? [w.id] : [];
   // Relative image names in the worker's words made absolute, so the page and the orchestrator's relay can show them (w1384).
   const question = absoluteTargets(clip(wait.question.trim(), NEEDS_YOU_QUESTION_CHARS), { root, ids }).text;
   const report = wait.report?.trim() ? absoluteTargets(reportTail(wait.report.trim()), { root, ids }).text : undefined;
   const prs = prsIn([question, report], w);
+  const previews = previewsIn([question, ...(wait.asks ?? []).flatMap((a) => [a.question, ...a.options.map((o) => o.description)]), wait.report ?? report], root, ids);
+  // w2478: the request's own review stills and clips the words did not name, newest first: ask_person refuses a question on
+  // a visual request that inlines none, so the relay lists them to inline.
+  const listed = new Set(previews.map((p) => p.toLowerCase()));
+  const media = w.id ? (requestMedia([{ id: w.id, reviewTopics: [...(w.reviewTopics ?? [])] }], root)[0]?.files ?? []).filter((f) => !listed.has(f.toLowerCase())).slice(0, MEDIA_LISTED) : [];
   // w2085: the person's earlier notes, and those that name what this question names (its PRs, threads, feature terms).
   const prior = opts.prior ?? [];
   const decided = prior.length ? possiblyDecided(prior, questionRefs([question, wait.about, ...(wait.asks ?? []).map((a) => a.question), wait.report], prs)) : [];
@@ -147,7 +155,8 @@ export function needsYouRecord(w: Pick<WorkItem, 'prs'> & { id?: string }, wait:
     ...(wait.worker ? { worker: wait.worker } : {}),
     ...(report ? { report } : {}),
     // The full report first: the kept tail can cut a file name off mid-word (w1241's "glow_800_closeup.jp").
-    previews: previewsIn([question, ...(wait.asks ?? []).flatMap((a) => [a.question, ...a.options.map((o) => o.description)]), wait.report ?? report], root, ids),
+    previews,
+    ...(media.length ? { media } : {}),
     prs,
     ...(wait.asks?.length ? { asks: asksWithCopies(wait.asks, { root, ids }) } : {}),
     ...(wait.about ? { about: wait.about } : {}),
@@ -209,6 +218,7 @@ function block(w: Pick<WorkItem, 'id' | 'title'>, r: WorkNeedsYou, opts: { repor
   if (r.asks?.length) parts.push(`${r.asks.length === 1 ? 'Ask it' : `Ask these ${r.asks.length} one at a time`} with ask_person, these answers as the buttons (the first is the recommended one when marked):\n\n${r.asks.map((a, i) => `${r.asks!.length > 1 ? `Q${i + 1}. ` : ''}${askExcerpt(a)}`).join('\n\n')}`);
   if (r.after) parts.push(`After the answer: ${r.after}`);
   if (r.previews.length) parts.push(`Look at:\n\n${r.previews.map(previewLine).join('\n')}`);
+  if (r.media?.length) parts.push(`${r.previews.length ? 'More of the' : 'The'} review stills and clips of ${w.id}, newest first: inline the ones that show what is asked as \`![what it shows](<path>)\` in the ask_person question or the option they belong to (a question on a request with review media that shows none is refused, w2478):\n\n${r.media.map(previewLine).join('\n')}`);
   if (r.prs.length) parts.push(`Pull requests: ${r.prs.join(', ')}`);
   if (opts.report && r.report && r.report.trim() !== r.question.trim()) parts.push(`The end of its last report:\n\n${r.report}`);
   return parts.join('\n\n');
