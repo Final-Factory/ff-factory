@@ -521,7 +521,7 @@ export class Daemon {
         this.entries.get(id)?.s.stop();
       },
       editors: () => this.pool.list().filter((sb) => this.pool.editorUp(sb.id)).map((sb) => sb.id),
-      closeEditor: (id) => this.pool.unity(id, 'stop', false),
+      closeEditor: (id, _why, force) => this.pool.unity(id, 'stop', force),
       endLeftovers: async () => (await this.leftovers.look()).map((e) => e.line),
       now: () => Date.now(),
       setTimer: (fn, ms) => {
