@@ -8,6 +8,7 @@
 //
 // w1098 (lothsahn, 2026-10-12: "FFBox and FF Factory updates don't need unity editors"): work on a repository that is not
 // the game's needs only an agent slot, not a free game sandbox, an editor or RAM for Unity. needsOf says which a request is.
+import { steamAccountText, steamLacks, steamSignedIn, type SteamClient } from './steam.ts';
 import type { WorkItem, WorkPair } from './types.ts';
 
 /**
@@ -249,6 +250,8 @@ export const TIMED_HOLD_MS = PAIR_HOLD_MS;
 export interface RoomFit {
   platform?: string;
   noTimedRuns?: string;
+  /** Its Steam client as its daemon reported it (w2459); absent: not reported, which no pair that needs Steam fits. */
+  steam?: SteamClient;
 }
 
 /**
@@ -263,6 +266,11 @@ export function unfitWhy(w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes'
   if (w.pair?.avoid?.includes(id)) return `${id} is where an earlier leg of this pair run failed (${w.pair.retryOf ?? 'its first run'}): a retry goes on other computers (w2041)`;
   const f = fit?.[id];
   if (!f) return undefined;
+  // w2459: a pair run that needs Steam (lobbies, a Steam host or join) goes only where Steam is signed in.
+  if (w.pair?.steam) {
+    const lacks = steamLacks(id, f.steam);
+    if (lacks) return `${lacks}, and its pair run needs Steam (${w.pair.steam})`;
+  }
   // w2358: a timed leg (w1969) is timed work whatever its title says, as start_agent's timed hold reads it.
   const timed = needsTimed(w) || (w.pair?.timed || w.timedLeg ? (w.timedLeg?.platform === 'win32' || w.timedLeg?.platform === 'darwin' ? w.timedLeg.platform : 'any') : false);
   if (timed && f.noTimedRuns) return `${id} takes no timed runs (${f.noTimedRuns})`;
@@ -291,6 +299,21 @@ export const PAIR_MAX_LEGS = 4;
 export function pairRoom(w: { pair?: WorkPair }, ids: readonly string[], fit: Readonly<Record<string, RoomFit>> | undefined): { pick: string[]; short?: undefined } | { pick?: undefined; short: string } {
   const p = w.pair;
   if (!p) return ids.length ? { pick: [ids[0]] } : { short: 'no computer it fits has room' };
+  // w2459: a pair that needs Steam takes one computer per Steam account (two legs on one account cannot both be in a lobby).
+  if (p.steam) {
+    const seen = new Set<number>();
+    const all = ids;
+    ids = ids.filter((id) => {
+      const a = fit?.[id]?.steam?.accountId;
+      if (a === undefined || seen.has(a)) return false;
+      seen.add(a);
+      return true;
+    });
+    if (ids.length < p.legs) {
+      const twins = all.filter((id) => !ids.includes(id));
+      return { short: `a pair run of ${p.legs} legs that needs Steam needs ${p.legs} computers signed in to ${p.legs} different Steam accounts with room at once, and ${ids.length ? `only ${ids.map((id) => `${id} (${steamAccountText(fit![id]!.steam as SteamClient & { accountId: number })})`).join(', ')} ${ids.length > 1 ? 'have' : 'has'} room it fits` : 'no computer it fits has room'}${twins.length ? `; ${twins.join(', ')} ${twins.length > 1 ? 'are' : 'is'} signed in to an account another leg takes` : ''}` };
+    }
+  }
   const os = (id: string) => fit?.[id]?.platform;
   const macs = ids.filter((id) => os(id) === 'darwin');
   const rest = ids.filter((id) => os(id) !== 'darwin');
@@ -311,6 +334,54 @@ export function pairRoom(w: { pair?: WorkPair }, ids: readonly string[], fit: Re
   if (systems.size < 2) return { short: `a cross-OS pair run (${p.crossOs}) needs its legs on two operating systems, and the computers with room it fits (${ids.join(', ')}) are all ${[...systems][0] ?? 'of unknown platform'}` };
   return { pick };
 }
+
+/** Where a pair run that needs Steam goes (w2459). */
+export const PAIR_STEAM = 'only on computers signed in to Steam, a different Steam account on each leg';
+
+/**
+ * Why the whole fleet cannot hold a pair run that needs Steam (w2459), or undefined when it can: fewer computers than legs
+ * (offline or busy ones counted: that much is capacity) are signed in to Steam with different accounts, at most one of them
+ * a Mac (it only hosts, w665). The reason names each computer and what it lacks, so the request is Blocked on it, not Queued.
+ */
+export function steamPairShort(p: WorkPair, machines: readonly { id: string; platform?: string; steam?: SteamClient }[]): string | undefined {
+  if (!p.steam) return undefined;
+  const seen = new Map<number, string>();
+  let macs = 0;
+  const ok: string[] = [];
+  const lacks: string[] = [];
+  for (const m of [...machines].sort((a, b) => a.id.localeCompare(b.id))) {
+    if (p.avoid?.includes(m.id)) {
+      lacks.push(`${m.id} is where an earlier leg failed`);
+      continue;
+    }
+    const why = steamLacks(m.id, m.steam);
+    if (why || !steamSignedIn(m.steam)) {
+      lacks.push(why ?? `${m.id}'s Steam client is not signed in`);
+      continue;
+    }
+    if (seen.has(m.steam.accountId)) {
+      lacks.push(`${m.id} is signed in to ${steamAccountText(m.steam)}, the account ${seen.get(m.steam.accountId)} takes`);
+      continue;
+    }
+    if (m.platform === 'darwin' && macs >= 1) {
+      lacks.push(`${m.id} is a second Mac (a Mac only hosts, w665)`);
+      continue;
+    }
+    seen.set(m.steam.accountId, m.id);
+    if (m.platform === 'darwin') macs++;
+    ok.push(`${m.id} (${steamAccountText(m.steam)})`);
+  }
+  if (ok.length >= p.legs) return undefined;
+  return `a pair run of ${p.legs} legs that needs Steam needs ${p.legs} computers signed in to different Steam accounts, and ${ok.length ? `only ${ok.join(', ')} ${ok.length > 1 ? 'are' : 'is'}` : 'none is'}: ${lacks.join('; ')}`;
+}
+
+/** The computers steamPairShort counts (w2459): every machine with a worker pool (server/machines.ts poolSettingsOf), online or not. */
+export function steamFleetOf(machines: Iterable<{ id: string; platform?: string; steam?: SteamClient; sandboxRoot?: string; playOnly?: string }>): { id: string; platform?: string; steam?: SteamClient }[] {
+  return [...machines].filter((m) => m.sandboxRoot && !m.playOnly?.trim()).map((m) => ({ id: m.id, ...(m.platform ? { platform: m.platform } : {}), ...(m.steam ? { steam: m.steam } : {}) }));
+}
+
+/** Why a Steam pair run's fleet is short now (steamPairShort over steamFleetOf), or undefined. */
+export const steamShortIn = (machines: Iterable<Parameters<typeof steamFleetOf>[0] extends Iterable<infer M> ? M : never>) => (p: WorkPair) => steamPairShort(p, steamFleetOf(machines));
 
 /** Where a pair run that needs no cross-OS pair goes (w2282): any computers, a Mac only as the host. */
 export const PAIR_ANY_OS = 'on any computers, any OS (a Mac only as the host, leg 1)';
@@ -333,4 +404,4 @@ export function repairText(w: Pick<WorkItem, 'constraints' | 'brief'> & { pair?:
 }
 
 /** "a pair run of 2 legs, cross-OS: <why>, timed" (w1945): what a pair needs, as lines about it say it. */
-export const pairText = (p: WorkPair): string => `a pair run of ${p.legs} legs${p.crossOs ? `, cross-OS (${p.crossOs})` : `, ${PAIR_ANY_OS}`}${p.timed ? ', timed (exclusive tickets: not on a computer that takes no timed runs)' : ''}${p.avoid?.length ? `, not on ${p.avoid.join(' or ')}` : ''}`;
+export const pairText = (p: WorkPair): string => `a pair run of ${p.legs} legs${p.crossOs ? `, cross-OS (${p.crossOs})` : `, ${PAIR_ANY_OS}`}${p.steam ? `, ${PAIR_STEAM} (${p.steam})` : ''}${p.timed ? ', timed (exclusive tickets: not on a computer that takes no timed runs)' : ''}${p.avoid?.length ? `, not on ${p.avoid.join(' or ')}` : ''}`;

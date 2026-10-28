@@ -85,6 +85,7 @@ import { trayView } from './pauseRules.ts';
 import { TrayHost, trayInstance } from './tray.ts';
 import { FirefoxCloser, closeFirefox, firefoxFile, winFirefoxDeps } from './firefox.ts';
 import { GhLoginWatch, LOOK_EVERY_MS as GH_LOOK_EVERY_MS, lookHostsFile, type GhLoginDeps } from './ghLogin.ts';
+import { READ_EVERY_MS as STEAM_READ_EVERY_MS, SteamClientWatch, realSteamDeps, type SteamClientDeps } from './steamClient.ts';
 import { machinePlatformOf, type AttachmentRef, type BenchPriority, type CompactionTrigger, type HostHealth, type HostStats, type NoTimedRuns, type TimedAskMark, type PersonPlayReport, type SandboxPoolSettings, type SessionInfo, type TranscriptEvent } from '../shared/types.ts';
 
 export interface DaemonConfig {
@@ -282,6 +283,8 @@ export interface Probes {
   bashTmp?: () => Promise<{ dir?: string; made: boolean; error?: string }>;
   /** gh, for the machine's gh login and its token's scopes (w1463, machine/ghLogin.ts). Tests leave it out: the host's gh is not theirs. */
   gh?: GhLoginDeps['run'];
+  /** The Steam client's keys, files and process (w2459, machine/steamClient.ts). Tests leave it out: the host's Steam is not theirs. */
+  steam?: () => SteamClientDeps;
 }
 
 const REAL_PROBES: Probes = {
@@ -289,6 +292,7 @@ const REAL_PROBES: Probes = {
   usage: (claude) => fetchPlanUsage(usageEnv(process.env), { cwd: HOME, claudeExecutable: claude }),
   bashTmp: () => ensureGitBashTmp(),
   gh: run,
+  steam: realSteamDeps,
 };
 
 /** Builds a session; the real one is an AgentSession, tests pass a fake. */
@@ -400,6 +404,8 @@ export class Daemon {
   private wakes = new Map<string, number>();
   /** The machine's gh login and its token's scopes, names only (w1463, machine/ghLogin.ts); none when the probes have no gh. */
   private ghLogin?: GhLoginWatch;
+  /** The machine's Steam client: installed, running, signed in, as which account (w2459, machine/steamClient.ts). */
+  private steamClient?: SteamClientWatch;
   /** Claude Code's own transcripts on this computer, kept free of the secret values this daemon knows (w1688). */
   private cliScrub?: CliScrubber;
   /** The secrets named so far as too short to mask by value (logged once each, by name). */
@@ -1087,6 +1093,12 @@ export class Daemon {
       this.timers.push(setInterval(() => void this.ghLogin!.tick(), GH_LOOK_EVERY_MS));
       void this.ghLogin.tick();
     }
+    // The machine's Steam client (w2459): read now and every 5 minutes, for pair runs that need Steam.
+    if (this.probes.steam) {
+      this.steamClient = new SteamClientWatch({ ...this.probes.steam(), send: (steam) => this.send({ type: 'steam_client', steam }), log: (line) => log(line) });
+      this.timers.push(setInterval(() => void this.steamClient!.tick(), STEAM_READ_EVERY_MS));
+      void this.steamClient.tick();
+    }
     // The GPU Whisper (w615): installs in the background if needed, then loads and stays loaded while VRAM allows.
     if (this.voice) {
       log(`voice: Whisper ${this.voice.v.model} on ${this.voice.v.device} for the portal's mic, tools in ${this.voice.v.toolsDir}`);
@@ -1529,6 +1541,7 @@ export class Daemon {
     void this.reportStats();
     // The last gh login reading (w1463): a portal that restarted, or a new one, has it at once.
     this.ghLogin?.resend();
+    this.steamClient?.resend();
     // The portal keeps the last report across a reconnect: a flapping link must not start a CLI each time.
     if (Date.now() - this.lastUsage > this.usageMs / 2) void this.reportUsage();
     else this.scheduleUsage();

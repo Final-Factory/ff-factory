@@ -1,4 +1,5 @@
 import type { BenchLock, BenchQueueReport, WorkItem, WorkPriority } from '../shared/types.ts';
+import type { SteamClient } from '../shared/steam.ts';
 import { admitsPriority, minPriorityText, MIN_PRIORITIES, reservedText, pairRoom, ROOM_STAND_MS, unfitWhy, type MinPriority, type ReservedRoom, type RoomFit } from '../shared/capacity.ts';
 
 /**
@@ -61,6 +62,8 @@ export interface Computer {
   untimed?: string;
   /** Its platform (win32, darwin, linux): timed work that names one stays on it (w1628). */
   platform?: string;
+  /** Its Steam client (w2459, Machine.steam): a pair run that needs Steam goes only where it is signed in. */
+  steam?: SteamClient;
   /**
    * The legs requests hold for it in the ledger (w1863, WorkItem.legs), by priority then oldest: work already promised the
    * next place there, so they count as its queued timed work and the Capacity block names them.
@@ -432,7 +435,7 @@ export function roomNow(places: readonly Computer[], prefs: PlacementPrefs = {})
     if (!kinds.length) continue;
     for (const k of kinds) out.slots![`${k}:${p.id}`] = slotsOf(p, k);
     out.detail![p.id] = `${p.freeSandboxes} of ${p.maxSandboxes} sandboxes free, ${p.midTurn} agents mid-turn of ${p.maxAgents} (${p.live} live), ${memPct(p) !== undefined ? `RAM ${memPct(p)}%` : 'RAM unknown'}`;
-    out.fit![p.id] = { ...(p.platform ? { platform: p.platform } : {}), ...(p.noTimedRuns ? { noTimedRuns: p.noTimedRuns } : {}) };
+    out.fit![p.id] = { ...(p.platform ? { platform: p.platform } : {}), ...(p.noTimedRuns ? { noTimedRuns: p.noTimedRuns } : {}), ...(p.steam ? { steam: p.steam } : {}) };
     const why = hold.get(p.id);
     if (why !== undefined) {
       out.held.push({ id: p.id, why, for: kinds });

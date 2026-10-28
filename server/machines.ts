@@ -26,6 +26,7 @@ import { liveLostNote, movedNote, savedNote } from './placeAgain.ts';
 import { safeImage } from './images.ts';
 import { hostStartFailed, offlineDetail } from '../shared/agentState.ts';
 import { ghLoginLabel, sanitizeGhLogin } from '../shared/ghLogin.ts';
+import { sanitizeSteamClient, steamLabel } from '../shared/steam.ts';
 import { HOST_LOGIN, machineLogin, type AccountIdentity } from './usage.ts';
 import type { AttachmentStore } from './attachments.ts';
 import type { BenchPriority, BenchWarning, NoTimedRuns, TimedAskMark, DeliveredAttachment, EffortLevel, ImageInput, Machine, MachineGuardSettings, MachinePause, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PersonPlayReport, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, CleanupSummary } from '../shared/types.ts';
@@ -2385,6 +2386,15 @@ export class MachineManager {
         const was = m.gh ? ghLoginLabel(m.gh) : undefined;
         this.update(id, { gh });
         if (ghLoginLabel(gh) !== was) console.log(`machine ${id}: gh login ${ghLoginLabel(gh)}`);
+        return;
+      }
+      case 'steam_client': {
+        // w2459: the account id and display name only (sanitizeSteamClient); placement of a Steam pair run reads it.
+        const steam = sanitizeSteamClient(msg.steam);
+        if (!steam) return;
+        const was = m.steam ? steamLabel(m.steam) : undefined;
+        this.update(id, { steam });
+        if (steamLabel(steam) !== was) console.log(`machine ${id}: steam client ${steamLabel(steam)}`);
         return;
       }
       case 'self_update_ack':

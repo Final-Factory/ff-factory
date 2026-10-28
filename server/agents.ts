@@ -92,6 +92,7 @@ import { BUILD_PLAN_DOC, BuildPlans, NOT_RELEASE, type BuildPlan, type SeatResul
 import { SEAT_GRACE_MS, seatAction, seatNotice } from './releaseSeat.ts';
 import { RELEASE_RULES } from './releaseLanes.ts';
 import { canPushWorkflows, changesWorkflows, ghBriefLine, ghLoginLabel, ghMachineLine } from '../shared/ghLogin.ts';
+import { steamLabel, steamLacks } from '../shared/steam.ts';
 import { FACTORY_BRANCH_PREFIX, sandboxBranchFor, sourceTag, workerRules } from './intakeRules.ts';
 import { DEV_LIMITS, buildSubmit } from './providerProtocol.ts';
 import { TITLE_HELP, TITLE_MAX, jobTitle } from './jobTitle.ts';
@@ -245,7 +246,7 @@ export const ownWorkNotice = (id: string, line: string) =>
 export const noTimedWaitNotice = (id: string, line: string, machine: string, why: string, takes: readonly string[]) =>
   `[FF Factory] Your report says ${id} waits on ${machine} for timed work: "${line.slice(0, 200)}". ${machine} takes no timed or exclusive-lock work (${why}; w1861), so that wait never ends. Place the timing by "Next timed work" (w1872), smallest computer first: ${takes.length ? takes.join(' > ') : 'none takes it now'}. Call timed_place now: a Windows player A/B goes to timed_run on a small computer while you carry on here; anything else, via "leg". With none online it still files the leg, Queued, and it starts by itself on the first that comes online or frees up (w2055 order); never ask a person for a computer (w2147).`;
 
-const REQUEST_PAIR_TOOL = `Ask for a check that needs several computers at once (w1945): a two-machine multiplayer or determinism check, a host and its clients. It files ONE pair request whose legs the dispatcher starts together, a new worker on each computer, as soon as that many computers have room at once (never one leg at a time), and Blocks your request on its report, as blocked_on with reports does: commit and push, then end your turn with a "wNNN: still open: blocked on <the pair request>" line. Your sandbox is released at once for other work while you wait, and the host leg's result (a line "For wNNN:") resumes you. what: one line; brief: what the legs run (the branch or commit, the scenario, what passes, where the result goes), since each leg is a new worker; legs: 2 by default; cross_os only for the reasons it names (w1692; without it no leg goes on a Mac, and with it a Mac only hosts); timed when a leg takes timing measurements (never on the m5). One open pair run per request: asked again, you wait on the one there is, unless it is spent (w2041): a leg already reported, a leg's computer is offline or its worker errored, or you pass retry: true. Then that run is cancelled and a fresh one is filed, with new legs on other computers than the failed ones (avoid adds computers you saw fail, such as one whose Tailscale is stuck), and only the fresh run's report resumes you. pr and commit (w2057): the pull request and the head commit the legs run (default: the pull request named in what or brief, else your request's one open pull request). A pull request with an open pair run (yours or one an orchestrator filed) is never run twice: you wait on that one. One whose pair run finished on that commit is answered with its result and nothing is filed (retry: true runs it again). When the run finishes, its result comes with your resume. Never ask an orchestrator in your report for a pair run: nobody reads that as a filing.`;
+const REQUEST_PAIR_TOOL = `Ask for a check that needs several computers at once (w1945): a two-machine multiplayer or determinism check, a host and its clients. It files ONE pair request whose legs the dispatcher starts together, a new worker on each computer, as soon as that many computers have room at once (never one leg at a time), and Blocks your request on its report, as blocked_on with reports does: commit and push, then end your turn with a "wNNN: still open: blocked on <the pair request>" line. Your sandbox is released at once for other work while you wait, and the host leg's result (a line "For wNNN:") resumes you. what: one line; brief: what the legs run (the branch or commit, the scenario, what passes, where the result goes), since each leg is a new worker; legs: 2 by default; cross_os only for the reasons it names (w1692; without it no leg goes on a Mac, and with it a Mac only hosts); timed when a leg takes timing measurements (never on the m5); steam (w2459) when the legs need Steam (a lobby, a Steam host or join): its legs then go only on computers whose Steam client is signed in, a different Steam account on each, and while too few computers are, it is Blocked on Steam with each computer and what it lacks named (words such as "lobby" or "Steam join" in what or brief set it too; steam "none" says they do not). One open pair run per request: asked again, you wait on the one there is, unless it is spent (w2041): a leg already reported, a leg's computer is offline or its worker errored, or you pass retry: true. Then that run is cancelled and a fresh one is filed, with new legs on other computers than the failed ones (avoid adds computers you saw fail, such as one whose Tailscale is stuck), and only the fresh run's report resumes you. pr and commit (w2057): the pull request and the head commit the legs run (default: the pull request named in what or brief, else your request's one open pull request). A pull request with an open pair run (yours or one an orchestrator filed) is never run twice: you wait on that one. One whose pair run finished on that commit is answered with its result and nothing is filed (retry: true runs it again). When the run finishes, its result comes with your resume. Never ask an orchestrator in your report for a pair run: nobody reads that as a filing.`;
 
 const TIMED_PLACE_TOOL = `Ask where a timed leg runs BEFORE you take an exclusive bench ticket for it (w1969, lothsahn: "every time a worker needs an exclusive lock it should ask the dispatcher"): an exclusive turn idles every other slot of its computer, so a leg from a big computer (BEAST, LothDesktop) goes to a small one (LothLaptop, m3, biscuit; never m5). On a big computer the harness refuses bench_queue.py timed, --timed, bench_lock --timing, unity-slot --bench exclusive and the bench scripts (probe_ab_win.sh, cpu_budget_run.sh, ...) until you asked; a small computer needs no ask. It answers "here" (take your ticket as before; it holds 12 h) or "elsewhere". Elsewhere for a Windows player A/B (w1996: a save played by two builds, probe_ab_win.sh's legs) names a computer for timed_run: build both players here under shared tickets, call timed_run, and that computer's daemon times them under its own exclusive ticket, with no new worker and no rebuild there. Elsewhere for anything else timed (via "leg": a snippet timed in the editor, a Performance test, a profiler capture, a Mac player): FF Factory files the leg as its own request, Queued for the small computers (a big one only when none of them can take it: offline past a wait that grows with the fleet's load, held, or without a game sandbox; w2048), whose new worker builds and times BOTH sides there and reports to you, and Blocks your request on that report (as request_pair does): commit and push, then end your turn. what: the leg in one line; brief: what it runs, as a new worker needs it (the branch and the commit of each side, the save, the script and its settings, what to report); platform: windows or mac when the leg needs one (default any); same_machine: only when its numbers must come from this computer (a side of the A/B already ran here), and why; via: timed_run for a Windows player A/B, leg for anything else (unset: timed_run when a computer takes one, and the answer says when to ask again with leg). cancel (w2442): a timed run id ("tr_..."), of your request or of one it names, to stop it instead of asking: its player ends, its bench ticket goes back and its worker is told why (what: the reason).`;
 
@@ -1728,6 +1729,7 @@ export class Agents {
       ...(typeof a.legs === 'number' ? { legs: a.legs } : {}),
       ...(typeof a.cross_os === 'string' ? { cross_os: a.cross_os } : {}),
       ...(a.timed === true ? { timed: true } : {}),
+      ...(typeof a.steam === 'string' && a.steam.trim() ? { steam: a.steam } : {}),
       ...(typeof a.request === 'string' && a.request.trim() ? { request: a.request } : {}),
       ...(a.retry === true ? { retry: true } : {}),
       ...(Array.isArray(a.avoid) ? { avoid: a.avoid.filter((x): x is string => typeof x === 'string').slice(0, 6) } : {}),
@@ -4071,7 +4073,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
     const refs = [a.sandbox, ...(a.pair_sandboxes ?? [])].filter((x): x is string => !!x?.trim());
     const fitNow = () => {
       const r = this.roomFacts();
-      const f = roomForWork(r, { ...w, pair: { legs: want ?? 2, ...(crossOs ? { crossOs } : {}), ...(w.pair?.timed ? { timed: true } : {}) } });
+      const f = roomForWork(r, { ...w, pair: { legs: want ?? 2, ...(crossOs ? { crossOs } : {}), ...(w.pair?.timed ? { timed: true } : {}), ...(w.pair?.steam ? { steam: w.pair.steam } : {}) } });
       return f.short ? f.short : `computers with room it fits now: ${f.ids.join(', ')}`;
     };
     if (!a.pair_sandboxes?.length) throw new Error(`${w.id} is ${pairText(w.pair!)}: start every leg together, sandbox for leg 1 (the host) and pair_sandboxes for the others, each a FREE sandbox on another computer (${fitNow()}). When fewer computers than that have room, queue it (decide_work queue): it is never started one leg at a time.`);
@@ -4106,6 +4108,18 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
       if (timedHold) throw new Error(`${leg}: ${timedHold} Nothing was started.`);
       if (m?.platform === 'darwin' && i > 0) {
         throw new Error(`${leg}: ${l.machine} is a Mac, and a Mac refuses a multiplayer client (w665): in a pair run a Mac only hosts (leg 1, sandbox; w2282). Nothing was started.`);
+      }
+      // w2459: w2458's client leg went on biscuit, which has no Steam client, and died at its Steam check.
+      const noSteam = w.pair?.steam ? steamLacks(l.machine, m?.steam) : undefined;
+      if (noSteam) throw new Error(`${leg}: ${noSteam}, and ${w.id} needs Steam (${w.pair!.steam}): its legs go only on computers signed in to Steam (${fitNow()}). Nothing was started.`);
+    }
+    if (w.pair?.steam) {
+      // w2459: two legs on one Steam account cannot meet in a lobby (one account is signed in on one computer at a time).
+      const accounts = legs.map((l) => this.store.machines.get(l.machine)?.steam);
+      const same = legs.findIndex((_, i) => accounts.findIndex((s) => s?.accountId === accounts[i]?.accountId) !== i);
+      if (same > 0) {
+        const first = accounts.findIndex((s) => s?.accountId === accounts[same]?.accountId);
+        throw new Error(`legs ${first + 1} (${legs[first].machine}) and ${same + 1} (${legs[same].machine}) are both signed in to Steam as ${steamLabel(accounts[same])}, and ${w.id} needs a different Steam account on each leg (${fitNow()}). Nothing was started.`);
       }
     }
     if (crossOs && new Set(legs.map((l) => this.store.machines.get(l.machine)?.platform ?? l.machine)).size < 2) throw new Error(`a cross-OS pair run (${crossOs}) needs its legs on two operating systems; ${legs.map((l) => `${l.machine} is ${this.store.machines.get(l.machine)?.platform ?? 'unknown'}`).join(', ')}. Nothing was started.`);
@@ -4521,6 +4535,8 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
         // Its timing calls outside an exclusive ticket in the last hour (w1923): the orchestrators' bench audit sees them.
         ...(untimedText(st?.bench) ? { untimed: untimedText(st?.bench) } : {}),
         ...(m.platform ? { platform: m.platform } : {}),
+        // Its Steam client (w2459): a pair run that needs Steam goes only where it is signed in.
+        ...(m.steam ? { steam: m.steam } : {}),
         // Its CPU use over the last minute (w2054): placement spills past it at placement.spillAtPercent.
         ...(this.machines.cpuOf(m.id) !== undefined ? { cpuPct: this.machines.cpuOf(m.id) } : {}),
         ...(legsHere.length ? { legs: legsHere } : {}),
@@ -5518,7 +5534,7 @@ ${w.repo ?? ''}
     const standing = m.sessionIds.filter((id) => this.store.sessions.get(id)?.kind === 'standing');
     return [
       `- "${displayName(m)}" (machine ${m.id}${m.name ? ` "${m.name}"` : ''}, ${machineKind(m)}, ${m.local ? "this host itself (the portal's own computer), no ssh" : `ssh ${m.host}`}): ${this.machines.isOnline(m.id) ? 'online' : `offline${m.lastSeen ? ` since ${m.lastSeen}` : ''}`}${m.daemonStopped ? ' (daemon stopped on purpose; machine_daemon start brings it back)' : ''}; ${m.status}${m.statusDetail ? ` (${m.statusDetail})` : ''}`,
-      `  repo ${m.repoPath || '?'}; ${m.info ? `${m.info.os}, node ${m.info.node}, claude ${m.info.claude ?? '?'}` : 'no daemon report yet'}; ${ghMachineLine(m.gh)}${githubFromVault(this.cfg, m.id) ? ' (runs for a person with a vault GitHub token use theirs instead: machines.githubFromVault)' : ''}; ${pool ? 'workers in its sandboxes' : 'no workers (no sandbox_root)'}; up to ${agentCap(m)} agents in all, standing agents included; Claude account of its agents: ${MACHINE_ACCOUNT}`,
+      `  repo ${m.repoPath || '?'}; ${m.info ? `${m.info.os}, node ${m.info.node}, claude ${m.info.claude ?? '?'}` : 'no daemon report yet'}; ${ghMachineLine(m.gh)}${githubFromVault(this.cfg, m.id) ? ' (runs for a person with a vault GitHub token use theirs instead: machines.githubFromVault)' : ''}; Steam: ${steamLabel(m.steam)}; ${pool ? 'workers in its sandboxes' : 'no workers (no sandbox_root)'}; up to ${agentCap(m)} agents in all, standing agents included; Claude account of its agents: ${MACHINE_ACCOUNT}`,
       ...(detail ? [`  folders: ${describeDirs(m)}${m.protectedPaths?.length ? `; protected: ${m.protectedPaths.join(', ')}` : ''}`] : []),
       sandboxes,
       // A person playing Final Factory there (w1894): why it is busy and until when.
