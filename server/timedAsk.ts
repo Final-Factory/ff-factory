@@ -23,6 +23,20 @@ import type { TimedAskMark, TimedVerdict, TimedVerdictKind } from '../shared/typ
  * computer, about one slot's work, so it pays where the turn would idle 5 or more.
  */
 export const SMALL_TIMED_MAX_AGENTS = 4;
+
+/**
+ * w2442: big worker computers that take timed runs anyway. A run there holds the machine's exclusive bench ticket for each
+ * turn, as on a small one; it is ranked after every small computer (timedRuns.ts rankTargets), so a run lands there when it
+ * is asked for by name or no small one can take it.
+ */
+export const BIG_TIMED_RUNS: Readonly<Record<string, string>> = {
+  lothdesktop: 'lothsahn, 2026-10-28 (w2442): "Move that job to another machine"; LothDesktop takes timed runs',
+};
+
+/** Whether a worker computer with `agents` agent slots takes timed runs by its size (w1996), or by name (w2442). */
+export function timedRunSize(id: string, agents: number): boolean {
+  return agents >= 1 && (agents <= SMALL_TIMED_MAX_AGENTS || !!BIG_TIMED_RUNS[id]);
+}
 // Since w2055 the leg rules go by size class (placement.ts sizeClass): a small or medium computer (1 to 3 agent slots) times
 // where it is and takes legs; a large or xlarge one asks. SMALL_TIMED_MAX_AGENTS stays only for timed_run's worker
 // computers (index.ts timedRunSmall), a player A/B that takes no slot.
