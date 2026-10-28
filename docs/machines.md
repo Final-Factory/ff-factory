@@ -1861,6 +1861,12 @@ LothDesktop and Beast, not just when BEAST is full").
     itself when the start fails, go to the dispatcher Queued for that computer ([ledger] MOVED). The journal says
     `room move: ...` for each, and `room move: worker <id> ... stays: <why>` or `... waits: <why>` once per reason for one
     that did not move, so a wait can be checked from the journal afterwards.
+  - **Its waits move with it** (w2438, `Orchestrators.linkWorker` with `moved`). Its new session is linked even when the
+    request is gated: the gates the worker it left set (blocked_on) become the new worker's, so their clear resumes the new
+    one, and the request stays Blocked on every open gate. It is never refused as "gated", which no move can satisfy: on
+    2026-10-28 01:03Z w2434 moved off lothlaptop for timed leg w2436 while Blocked on w2437, its session 172ab5ee started
+    on m3 and was then refused the link, so it ran unlinked ("Yours: none", blocked_on refused) while w2434 showed Queued.
+    A start whose link still fails stops the session it started before the request is handed back (`Agents.startMoved`).
   - **When it stays** (its Queued line says why, marked "it stays on its computer (w2046)"): commits only that computer
     has (its sandbox on its branch with commits not pushed, or a branch that does not track its own remote branch),
     uncommitted work its daemon cannot save, a timed run from its sandbox holding the bench lock, a timed leg (w1969:
