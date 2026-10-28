@@ -38,6 +38,7 @@ import type { Occupant } from './timedLegPlace.ts';
 import { TOOL_MANIFEST, deferredToolsLine, toolsOf } from './toolManifest.ts';
 import { buildOptions } from './launch.ts';
 import { AttachmentStore } from './attachments.ts';
+import { readTimedAsk, writeBenchPriorities } from '../machine/benchLock.ts';
 
 /**
  * People's own orchestrators and the dispatcher (docs/orchestrators.md), end to end on a real Agents with the scripted
@@ -5052,6 +5053,33 @@ test('w1628: each worker\'s bench priority is the highest of its open requests, 
   // w1832: the worker of the scheduled nightly run (the portal's nightly schedule files it as source kind nightly-run).
   store.putWork({ ...store.work.get('w2')!, source: { kind: 'nightly-run', untrusted: false, channel: 'nightly e2e', nightlyRun: { date: '2026-10-23', machine: 'pc' } } });
   assert.equal(agents.benchPriorities('pc')[b.id].exempt, 'nightly');
+});
+
+test('w2446: a timed run sent to an xlarge computer carries "here" in its bench priorities, so its exclusive ticket is granted', async (t) => {
+  // lothsahn, 2026-10-28 (w2446): tr_b6230bd66f and tr_c29be76860 on LothDesktop (xlarge) "gave up: w1995: an exclusive
+  // timing ticket here waits for the dispatcher's answer": the run's ticket carries its worker's session (172ab5ee, on m3),
+  // which never asked timed_place about LothDesktop, and bench_queue.py timed_ask_refusal passes only a "here"
+  const env = await setupOnMachine(t);
+  const { store, agents } = env;
+  putRequests(store, [{ id: 'w1', by: BEN, status: 'active', priority: 'high' }, { id: 'w2', by: BEN, status: 'active', priority: 'normal' }]);
+  const local = await startedFor(env, 'w2');
+  const runs = [
+    { id: 'tr_b6230bd66f', session: 'sess-on-m3', requests: ['w1'], machine: 'pc', state: 'sent' },
+    { id: 'tr_c29be76860', session: local.id, requests: ['w2'], machine: 'pc', state: 'queued' },
+  ];
+  (agents as unknown as { timedRuns: unknown }).timedRuns = { runsOn: (m: string) => runs.filter((r) => r.machine === m) };
+  const p = agents.benchPriorities('pc');
+  assert.equal(p['sess-on-m3'].timed?.verdict, 'here', 'the worker elsewhere: the ticket of its run passes the w1995 ask');
+  assert.match(p['sess-on-m3'].timed!.why, /tr_b6230bd66f was sent to pc/);
+  assert.ok(Date.parse(p['sess-on-m3'].timed!.until) > Date.now() + 30 * 60_000, 'it outlasts a 30-minute turn; the push each minute renews it');
+  assert.equal(p[local.id].timed?.verdict, 'here', 'a worker of this computer with a run here and no verdict: here too');
+  assert.deepEqual(agents.benchPriorities('elsewhere'), {}, 'no run there: nothing');
+  // what the daemon writes and the guard reads back (machine/benchLock.ts), on a computer that asks first (timed_ask)
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'w2446-'));
+  writeBenchPriorities(root, p, new Date(), false, undefined, { required: true, why: 'lothdesktop is a xlarge computer (10 agent slots)' });
+  assert.equal(readTimedAsk(root, 'sess-on-m3')?.verdict?.verdict, 'here');
+  runs.length = 0;
+  assert.equal(agents.benchPriorities('pc')['sess-on-m3'], undefined, 'the run ended: its "here" goes with it');
 });
 
 test('w2044: bench priorities read the ledger once per machine, not once per worker it ever had', async (t) => {
