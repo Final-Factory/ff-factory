@@ -26,6 +26,7 @@ import { pairDelivers, reportDelivers, stillOpenIn } from './ledgerRules.ts';
 import { lastOpenLine, portalWaitIn, reportAt, requestWaitOf } from '../shared/workState.ts';
 import type { SessionInfo, WorkBlocker, WorkItem } from '../shared/types.ts';
 import type { RoomNow } from './placement.ts';
+import { steamShortIn } from '../shared/capacity.ts';
 
 const EVERY_MS = 60_000;
 /**
@@ -48,7 +49,7 @@ export type PrState = { state: 'open' | 'merged' | 'closed'; text: string; sha?:
 export interface BlockerWatchDeps {
   store: Store;
   orchestrators: Pick<Orchestrators, 'unblock' | 'blockerStuck' | 'blockerDecide' | 'gatesCleared' | 'flagQueuedWithRoom' | 'carryOutConditional' | 'dropConditional'> &
-    Partial<Pick<Orchestrators, 'recordReportedWait' | 'noticeLongOffline' | 'noteCiRead' | 'sweepResumes' | 'requeueCapacityBlocks' | 'requeueBrokenPairs' | 'replaceNoTimedWaits' | 'timedLegBound' | 'mergedOnGreen' | 'undecidedBound' | 'flagDeadWait'>>;
+    Partial<Pick<Orchestrators, 'recordReportedWait' | 'noticeLongOffline' | 'noteCiRead' | 'sweepResumes' | 'requeueCapacityBlocks' | 'requeueBrokenPairs' | 'replaceNoTimedWaits' | 'timedLegBound' | 'mergedOnGreen' | 'undecidedBound' | 'holdSteamPairs' | 'flagDeadWait'>>;
   /** w1841: tell the workers waiting on a bench lock that is free now (Agents.resumeBenchWaits): request id to what it did. */
   benchResume?: () => [string, string][];
   /** Whether a message to a session waits in the send queue (for a sandbox, a slot or its machine): its resume is on its way (w1094). */
@@ -160,7 +161,8 @@ export class BlockerWatch {
         if (!l || (!ref && !portal)) continue;
         const at = l.at ?? reportAt(s);
         const key = `${s.id}@${at}`;
-        if (w.waitRecorded === key || !at || now - at > REPORTED_WAIT_MS) continue;
+        // w2457: a report from before its last gate went names a wait that is over (the deploy that woke it, the request it named).
+        if (w.waitRecorded === key || !at || now - at > REPORTED_WAIT_MS || (w.gateEndedAt && at <= w.gateEndedAt)) continue;
         if (ref) {
           // One the request it names waits on in turn is a wait cycle: the cycle break (w2357, below) resumes a side of it.
           const other = this.d.store.work.get(ref);
@@ -336,6 +338,8 @@ export class BlockerWatch {
       for (const id of this.d.orchestrators.replaceNoTimedWaits?.() ?? []) did.set(id, 're-placed: timed work off a computer that takes no timed runs');
       // A Queued timed leg (w1969, w2048, w2055): started on an idle computer, pre-empted onto a small one, or re-queued by priority.
       for (const id of this.d.orchestrators.timedLegBound?.() ?? []) did.set(id, 'timed leg: started, pre-empted or re-queued (w2055)');
+      // A Steam pair run on a fleet short of computers signed in to Steam (w2459): Blocked on that, not Queued.
+      for (const id of this.d.orchestrators.holdSteamPairs?.() ?? []) did.set(id, 'blocked: too few computers signed in to Steam for its pair run (w2459)');
       // Queued with room (w643): the same room test the page and decide_work queue read, for game work and for agent-slot work (w1098).
       const room: RoomNow | undefined = this.d.roomFacts?.() ?? (this.d.room ? { game: this.d.room(), agent: [], held: [] } : undefined);
       if (room && (room.game.length || room.agent.length || room.reserved?.length)) for (const id of this.d.orchestrators.flagQueuedWithRoom(room)) did.set(id, 'flagged: queued while a computer has room');
@@ -448,6 +452,7 @@ export class BlockerWatch {
         });
       },
       portalSha: this.d.portalSha?.(),
+      steamShort: (p) => steamShortIn(store.machines?.values() ?? [])(p),
       ...(this.d.daemonSha ? { daemonSha: this.d.daemonSha } : {}),
       ...(this.d.online ? { online: this.d.online } : {}),
       ...(this.d.paused ? { paused: this.d.paused } : {}),
