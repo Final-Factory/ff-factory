@@ -7555,7 +7555,7 @@ test("w2474: a worker whose process ran on through its machine's drop is not Blo
   // 2026-10-28: biscuit dropped five times (a heartbeat miss, an update, the portal VM's Tailscale restarting) while
   // cc1ab138 (w2466) ran on; each drop marked w2466 "stopped mid-turn" and Blocked, and the gate cleared on the socket
   // opening, before the daemon's hello said the worker was running.
-  const { store, agents, o, dispatcher, call } = await setupOnMachine(t);
+  const { store, agents, sessions, o, dispatcher, call } = await setupOnMachine(t);
   agentsRoom(agents, ['pc']);
   putRequests(store, [{ id: 'w1' }]);
   const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Fix it', title: 'w1: fix', work_id: 'w1' });
@@ -7564,7 +7564,7 @@ test("w2474: a worker whose process ran on through its machine's drop is not Blo
   await until('its first turn', () => info.status === 'idle');
   const m = agents.machines as unknown as { detach(id: string): void; onMessage(id: string, msg: unknown): void; hasHello(id: string): boolean };
   const midTurn = () => {
-    const h = agents.sessions.get(id) as unknown as RemoteSession;
+    const h = sessions.sessions.get(id) as unknown as RemoteSession;
     h.liveFlag = true;
     h.seenLive = true;
     info.status = 'running';
