@@ -25,7 +25,7 @@ import { HELD_MARK, inPersonWords } from '../shared/conditional.ts';
 import { splitReply, splitSent } from '../shared/replies.ts';
 import { blockerName, type PrHealth } from '../shared/blockers.ts';
 import { answersText } from '../shared/questionCard.ts';
-import { needsTimed, PAIR_HOLD_MS, TIMED_HOLD_MS, unfitWhy } from '../shared/capacity.ts';
+import { needsTimed, PAIR_HOLD_MS, TIMED_HOLD_MS, pairText, unfitWhy } from '../shared/capacity.ts';
 import { benchLockIn, type Machine, type Requester, type SessionInfo, type TranscriptEvent, type UserInfo, type WorkItem } from '../shared/types.ts';
 import { LIVE_HOLD_MS, releaseWhy } from './placeAgain.ts';
 import { MOVE_AFTER_MS } from './resumeMove.ts';
@@ -7691,6 +7691,51 @@ test("w2459: start_agent never puts a Steam pair run's leg on a computer without
   const ok = await start();
   assert.equal(ok.isError, false, ok.text);
   assert.equal(p().sessionIds.length, 2);
+});
+
+// w2459 (lothsahn, 2026-10-28): w2460's rerun 2 put its host leg on m5, signed in to Steam but with its screen locked, where
+// the game's menus take no clicks, so neither check ran.
+test("w2459: start_agent never puts a leg that clicks the game's menus on a computer whose screen is locked", async (t) => {
+  const env = await twoComputers(t);
+  const { store, dispatcher, call } = env;
+  const set = (id: string, m: Partial<Machine>) => store.putMachine({ ...store.machines.get(id)!, ...m });
+  const signedIn = (accountId: number, persona: string) => ({ checkedAt: T0, installed: true, running: true, accountId, persona });
+  set('pc', { steam: signedIn(7155839, 'Lothsahn'), desktop: { checkedAt: T0 } });
+  set('beast', { steam: signedIn(1234567, 'slims'), desktop: { checkedAt: T0, locked: true } });
+  putRequests(store, [
+    { id: 'w2', by: BEN, status: 'new', pair: { legs: 2, steam: 'a Steam lobby join' } },
+    { id: 'w3', by: BEN, status: 'new', pair: { legs: 2, menus: 'the title menu and the load dialog' } },
+    { id: 'w4', by: BEN, status: 'new', pair: { legs: 2 } },
+  ]);
+  const start = (id: string, title: string) => call(dispatcher().info, 'start_agent', { work_id: id, prompt: 'Run the check.', title, sandbox: 'pc/alpha', pair_sandboxes: ['beast/slot1'] });
+  for (const id of ['w2', 'w3']) {
+    const r = await start(id, `menus pair ${id}`);
+    assert.equal(r.isError, true, id);
+    assert.match(r.text, /leg 2 on beast\/slot1: beast's screen is locked, and w\d+'s legs click the game's menus, which take no clicks there.*Nothing was started\./, id);
+    assert.deepEqual(store.work.get(id)!.sessionIds, [], `${id}: nothing was started`);
+  }
+  set('beast', { desktop: { checkedAt: T0 } });
+  const ok = await start('w2', 'lobby pair');
+  assert.equal(ok.isError, false, ok.text);
+  assert.equal(store.work.get('w2')!.sessionIds.length, 2);
+});
+
+test('w2459: request_pair marks a pair that names a menu or a click as clicking menus; a Steam pair needs no mark; menus "none" clears it', async (t) => {
+  const env = await twoComputers(t);
+  const { store } = env;
+  putRequests(store, ['w2760', 'w2761', 'w2762'].map((id) => ({ id, by: BEN, status: 'active' as const })));
+  let n = 2760;
+  const file = async (x: Record<string, unknown>) => {
+    const a = await startedFor(env, `w${n++}`);
+    const out = String(await a.h.request_pair!(x));
+    if (!/^Filed /.test(out)) throw new Error(out.slice(0, 400));
+    return store.work.get(/^Filed (w\d+)/.exec(out)![1])!.pair!;
+  };
+  const menus = await file({ what: 'load a save on PR #2760', brief: 'Host and client click Load in the title menu.' });
+  assert.match(menus.menus ?? '', /read from its words/);
+  assert.match(pairText(menus), /only on computers whose screen is unlocked/);
+  assert.equal((await file({ what: 'determinism on PR #2761', brief: 'Both legs run the headless soak with -ffSoloQuitAfterSeconds.' })).menus, undefined);
+  assert.equal((await file({ what: 'load a save on PR #2762', brief: 'Click Load in the title menu.', menus: 'none' })).menus, undefined);
 });
 
 test('w2459: request_pair steam "none" files a pair with no Steam mark, whatever its words; a run with no Steam words needs none', async (t) => {

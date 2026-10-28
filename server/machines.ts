@@ -27,6 +27,7 @@ import { safeImage } from './images.ts';
 import { hostStartFailed, offlineDetail } from '../shared/agentState.ts';
 import { ghLoginLabel, sanitizeGhLogin } from '../shared/ghLogin.ts';
 import { sanitizeSteamClient, steamLabel } from '../shared/steam.ts';
+import { desktopLabel, sanitizeDesktop } from '../shared/desktop.ts';
 import { HOST_LOGIN, machineLogin, type AccountIdentity } from './usage.ts';
 import type { AttachmentStore } from './attachments.ts';
 import type { BenchPriority, BenchWarning, NoTimedRuns, TimedAskMark, DeliveredAttachment, EffortLevel, ImageInput, Machine, MachineGuardSettings, MachinePause, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PersonPlayReport, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, CleanupSummary } from '../shared/types.ts';
@@ -2393,8 +2394,12 @@ export class MachineManager {
         const steam = sanitizeSteamClient(msg.steam);
         if (!steam) return;
         const was = m.steam ? steamLabel(m.steam) : undefined;
-        this.update(id, { steam });
+        // Its desktop session (w2459, shared/desktop.ts), read beside it: an older daemon sends none, which locks nothing out.
+        const desktop = sanitizeDesktop(msg.desktop);
+        const wasDesk = desktopLabel(m.desktop);
+        this.update(id, desktop ? { steam, desktop } : { steam });
         if (steamLabel(steam) !== was) console.log(`machine ${id}: steam client ${steamLabel(steam)}`);
+        if (desktop && desktopLabel(desktop) !== wasDesk) console.log(`machine ${id}: screen ${desktopLabel(desktop)}`);
         return;
       }
       case 'self_update_ack':

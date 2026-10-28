@@ -60,7 +60,7 @@ import { MOVE_AFTER_MS, NONE_MARK, ROOM_WAIT, briefOf, moveDecision, movedPrompt
 import { playHolds, playLine } from '../shared/personPlay.ts';
 import { sandboxUseText, unitySlotsLine } from '../shared/fleet.ts';
 import { isMidTurn, midTurnRefusal, othersMidTurn, snapshotOf, type OptionsFactory, type QueuedSend, type SessionHandle, type SessionManager, type TurnEndMeta } from './sessions.ts';
-import { FLAG_LABEL, WORK_BLOCKER_KINDS, WORK_OPEN, WORK_PRIORITIES, type WorkBlockerKind, type WorkSource, type BenchPriority, type BenchAway, type AttachmentRef, type DeliveredAttachment, type ImageInput, type PermissionMode, type Requester, type Sandbox, type SessionInfo, type TranscriptEvent, type WorkItem, type WorkPriority, type WorkStatus } from '../shared/types.ts';
+import { FLAG_LABEL, SET_BLOCKER_KINDS, WORK_BLOCKER_KINDS, WORK_OPEN, WORK_PRIORITIES, type WorkBlockerKind, type WorkSource, type BenchPriority, type BenchAway, type AttachmentRef, type DeliveredAttachment, type ImageInput, type PermissionMode, type Requester, type Sandbox, type SessionInfo, type TranscriptEvent, type WorkItem, type WorkPriority, type WorkStatus } from '../shared/types.ts';
 import { attachmentForMachine, publicRef, publishableFile, publishedFilesBlock, uploadForMachine, type AttachmentStore } from './attachments.ts';
 import type { TimedDelivery, TimedRuns } from './timedRuns.ts';
 import { timedRoute } from './timedDelivery.ts';
@@ -93,6 +93,7 @@ import { SEAT_GRACE_MS, seatAction, seatNotice } from './releaseSeat.ts';
 import { RELEASE_RULES } from './releaseLanes.ts';
 import { canPushWorkflows, changesWorkflows, ghBriefLine, ghLoginLabel, ghMachineLine } from '../shared/ghLogin.ts';
 import { steamLabel, steamLacks } from '../shared/steam.ts';
+import { desktopLabel, desktopLacks, pairDrivesMenus } from '../shared/desktop.ts';
 import { FACTORY_BRANCH_PREFIX, sandboxBranchFor, sourceTag, workerRules } from './intakeRules.ts';
 import { DEV_LIMITS, buildSubmit } from './providerProtocol.ts';
 import { TITLE_HELP, TITLE_MAX, jobTitle } from './jobTitle.ts';
@@ -222,7 +223,7 @@ const OVERRIDE_GATE = z
 
 /** decide_work's blocker (w643), also one of its blockers (w754). */
 const BLOCKER_SHAPE = z.object({
-  kind: z.enum(WORK_BLOCKER_KINDS as unknown as [WorkBlockerKind, ...WorkBlockerKind[]]),
+  kind: z.enum(SET_BLOCKER_KINDS as unknown as [WorkBlockerKind, ...WorkBlockerKind[]]),
   ref: z.string().max(200).optional(),
   on: z.enum(['done', 'report']).optional(),
   holder: z.string().max(20).optional(),
@@ -1730,6 +1731,7 @@ export class Agents {
       ...(typeof a.cross_os === 'string' ? { cross_os: a.cross_os } : {}),
       ...(a.timed === true ? { timed: true } : {}),
       ...(typeof a.steam === 'string' && a.steam.trim() ? { steam: a.steam } : {}),
+      ...(typeof a.menus === 'string' && a.menus.trim() ? { menus: a.menus } : {}),
       ...(typeof a.request === 'string' && a.request.trim() ? { request: a.request } : {}),
       ...(a.retry === true ? { retry: true } : {}),
       ...(Array.isArray(a.avoid) ? { avoid: a.avoid.filter((x): x is string => typeof x === 'string').slice(0, 6) } : {}),
@@ -4112,6 +4114,9 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
       // w2459: w2458's client leg went on biscuit, which has no Steam client, and died at its Steam check.
       const noSteam = w.pair?.steam ? steamLacks(l.machine, m?.steam) : undefined;
       if (noSteam) throw new Error(`${leg}: ${noSteam}, and ${w.id} needs Steam (${w.pair!.steam}): its legs go only on computers signed in to Steam (${fitNow()}). Nothing was started.`);
+      // w2459 (w2460's rerun 2): a leg that clicks the game's menus is never started behind a locked screen.
+      const locked = pairDrivesMenus(w.pair) ? desktopLacks(l.machine, m?.desktop) : undefined;
+      if (locked) throw new Error(`${leg}: ${locked}, and ${w.id}'s legs click the game's menus, which take no clicks there: its legs go only on computers whose screen is unlocked (${fitNow()}). Nothing was started.`);
     }
     if (w.pair?.steam) {
       // w2459: two legs on one Steam account cannot meet in a lobby (one account is signed in on one computer at a time).
@@ -4537,6 +4542,8 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
         ...(m.platform ? { platform: m.platform } : {}),
         // Its Steam client (w2459): a pair run that needs Steam goes only where it is signed in.
         ...(m.steam ? { steam: m.steam } : {}),
+        // Its desktop session (w2459): a pair run that clicks the game's menus goes only where it is unlocked.
+        ...(m.desktop ? { desktop: m.desktop } : {}),
         // Its CPU use over the last minute (w2054): placement spills past it at placement.spillAtPercent.
         ...(this.machines.cpuOf(m.id) !== undefined ? { cpuPct: this.machines.cpuOf(m.id) } : {}),
         ...(legsHere.length ? { legs: legsHere } : {}),
@@ -5534,7 +5541,7 @@ ${w.repo ?? ''}
     const standing = m.sessionIds.filter((id) => this.store.sessions.get(id)?.kind === 'standing');
     return [
       `- "${displayName(m)}" (machine ${m.id}${m.name ? ` "${m.name}"` : ''}, ${machineKind(m)}, ${m.local ? "this host itself (the portal's own computer), no ssh" : `ssh ${m.host}`}): ${this.machines.isOnline(m.id) ? 'online' : `offline${m.lastSeen ? ` since ${m.lastSeen}` : ''}`}${m.daemonStopped ? ' (daemon stopped on purpose; machine_daemon start brings it back)' : ''}; ${m.status}${m.statusDetail ? ` (${m.statusDetail})` : ''}`,
-      `  repo ${m.repoPath || '?'}; ${m.info ? `${m.info.os}, node ${m.info.node}, claude ${m.info.claude ?? '?'}` : 'no daemon report yet'}; ${ghMachineLine(m.gh)}${githubFromVault(this.cfg, m.id) ? ' (runs for a person with a vault GitHub token use theirs instead: machines.githubFromVault)' : ''}; Steam: ${steamLabel(m.steam)}; ${pool ? 'workers in its sandboxes' : 'no workers (no sandbox_root)'}; up to ${agentCap(m)} agents in all, standing agents included; Claude account of its agents: ${MACHINE_ACCOUNT}`,
+      `  repo ${m.repoPath || '?'}; ${m.info ? `${m.info.os}, node ${m.info.node}, claude ${m.info.claude ?? '?'}` : 'no daemon report yet'}; ${ghMachineLine(m.gh)}${githubFromVault(this.cfg, m.id) ? ' (runs for a person with a vault GitHub token use theirs instead: machines.githubFromVault)' : ''}; Steam: ${steamLabel(m.steam)}; screen: ${desktopLabel(m.desktop)}; ${pool ? 'workers in its sandboxes' : 'no workers (no sandbox_root)'}; up to ${agentCap(m)} agents in all, standing agents included; Claude account of its agents: ${MACHINE_ACCOUNT}`,
       ...(detail ? [`  folders: ${describeDirs(m)}${m.protectedPaths?.length ? `; protected: ${m.protectedPaths.join(', ')}` : ''}`] : []),
       sandboxes,
       // A person playing Final Factory there (w1894): why it is busy and until when.
@@ -6383,7 +6390,7 @@ ${w.repo ?? ''}
             .describe("link or queue of a request that has an open gate: a person's own words saying to go ahead anyway. A lifted hold or a plain \"go\" is not that: gates stay (w754)."),
           blocker: BLOCKER_SHAPE
             .optional()
-            .describe(`block: what it waits on. ${WORK_BLOCKER_KINDS.map((k) => `${k}: ${BLOCKER_KIND_HELP[k]}`).join('. ')}.`),
+            .describe(`block: what it waits on. ${SET_BLOCKER_KINDS.map((k) => `${k}: ${BLOCKER_KIND_HELP[k]}`).join('. ')}.`),
           title: z
             .string()
             .optional()

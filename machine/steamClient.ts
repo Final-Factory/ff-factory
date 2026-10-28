@@ -4,14 +4,17 @@
 // sets to the signed-in account id and back to 0 at sign-out) and `tasklist` for steam.exe; on macOS and Linux Steam's
 // registry.vdf (the same keys) and pgrep. The display name comes from <Steam>/config/loginusers.vdf, read for the signed-in
 // account's PersonaName and WantsOfflineMode only: its login name is never kept, logged or sent. No drive is scanned.
+// Beside it, the desktop session (readDesktopSession): whether the screen is locked, since a pair run's menus need clicks.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { run, type RunOptions, type RunResult } from '../server/proc.ts';
-import { loginUserOf, parseVdf, steamLabel, vdfGet, type SteamClient } from '../shared/steam.ts';
+import { loginUserOf, parseVdf, steamConnection, steamLabel, vdfGet, type SteamClient } from '../shared/steam.ts';
+import { desktopLabel, type DesktopSession } from '../shared/desktop.ts';
+import { SESSION_SCRIPT } from './macDialogs.ts';
 
-/** How often it is read: three small commands and two small files, so a sign-out shows within minutes. */
-export const READ_EVERY_MS = 5 * 60_000;
+/** How often it is read: four small commands and two small files, so a sign-out or a locked screen shows within minutes. */
+export const READ_EVERY_MS = 2 * 60_000;
 
 export interface SteamClientDeps {
   run: (cmd: string, args: string[], opts?: RunOptions) => Promise<RunResult>;
@@ -94,20 +97,51 @@ export async function readSteamClient(d: SteamClientDeps): Promise<SteamClient> 
     const base: SteamClient = { checkedAt, installed: true, running };
     if (!running || !accountId) return base;
     const users = d.read(path.join(root, 'config', 'loginusers.vdf'));
-    return { ...base, accountId, ...(users ? loginUserOf(users, accountId) : {}) };
+    // w2461: signed in is not connected; its connection log's tail says whether it is (the file grows to megabytes).
+    const log = d.read(path.join(root, 'logs', 'connection_log.txt'));
+    const notConnected = log ? steamConnection(log.slice(-64_000)) : undefined;
+    return { ...base, accountId, ...(users ? loginUserOf(users, accountId) : {}), ...(notConnected ? { notConnected } : {}) };
   } catch (e) {
     return { checkedAt, installed: false, running: false, error: `read failed: ${(e as Error).message}`.slice(0, 120) };
   }
 }
 
+/**
+ * The desktop session once (w2459, shared/desktop.ts; w2460's rerun 2: a Mac with a locked screen takes no menu clicks).
+ * macOS: CGSessionCopyCurrentDictionary through osascript (macDialogs.ts SESSION_SCRIPT, as the dialog watch reads it).
+ * Windows: whether LogonUI.exe, the lock screen, runs (tasklist). Elsewhere, or when it cannot be read: unknown (undefined),
+ * which locks no computer out. Never throws.
+ */
+export async function readDesktopSession(d: Pick<SteamClientDeps, 'run' | 'platform' | 'now'>): Promise<DesktopSession | undefined> {
+  const checkedAt = d.now().toISOString();
+  try {
+    if (d.platform === 'darwin') {
+      const r = await d.run('osascript', ['-l', 'JavaScript', '-e', SESSION_SCRIPT], RUN);
+      if (r.code !== 0) return undefined;
+      const s = JSON.parse(r.stdout.trim() || '{}') as { locked?: boolean; onConsole?: boolean };
+      if (s.locked === undefined && s.onConsole === undefined) return undefined;
+      return { checkedAt, ...(s.locked ? { locked: true } : {}), ...(s.onConsole === false ? { away: true } : {}) };
+    }
+    if (d.platform === 'win32') {
+      const t = await d.run('tasklist', ['/FI', 'IMAGENAME eq LogonUI.exe', '/NH', '/FO', 'CSV'], RUN);
+      if (t.code !== 0) return undefined;
+      return { checkedAt, ...(/^"LogonUI\.exe"/im.test(t.stdout) ? { locked: true } : {}) };
+    }
+  } catch {
+    // unknown
+  }
+  return undefined;
+}
+
 /** The daemon's watch of its Steam client: reads it every READ_EVERY_MS, sends it when it changed, and again after each hello. */
 export class SteamClientWatch {
   private last?: SteamClient;
+  private lastDesktop?: DesktopSession;
   private lastSent = '';
   private reading = false;
-  private readonly d: SteamClientDeps & { send: (s: SteamClient) => void; log: (line: string) => void };
+  private readonly d: SteamClientDeps & { send: (s: SteamClient, desktop?: DesktopSession) => void; log: (line: string) => void };
 
-  constructor(d: SteamClientDeps & { send: (s: SteamClient) => void; log: (line: string) => void }) {
+  constructor(d: SteamClientDeps & { send: (s: SteamClient, desktop?: DesktopSession) => void; log: (line: string) => void }) {
     this.d = d;
   }
 
@@ -116,7 +150,7 @@ export class SteamClientWatch {
   }
 
   resend() {
-    if (this.last) this.d.send(this.last);
+    if (this.last) this.d.send(this.last, this.lastDesktop);
   }
 
   async tick(): Promise<void> {
@@ -124,12 +158,14 @@ export class SteamClientWatch {
     this.reading = true;
     try {
       const s = await readSteamClient(this.d);
+      const desktop = await readDesktopSession(this.d);
       this.last = s;
-      const key = JSON.stringify({ ...s, checkedAt: undefined });
+      this.lastDesktop = desktop;
+      const key = JSON.stringify({ ...s, checkedAt: undefined, desktop: desktop ? { ...desktop, checkedAt: undefined } : undefined });
       if (key === this.lastSent) return;
-      this.d.log(`steam client: ${steamLabel(s)}`);
+      this.d.log(`steam client: ${steamLabel(s)}; screen: ${desktopLabel(desktop)}`);
       this.lastSent = key;
-      this.d.send(s);
+      this.d.send(s, desktop);
     } finally {
       this.reading = false;
     }

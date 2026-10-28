@@ -20,6 +20,12 @@ export interface SteamClient {
   persona?: string;
   /** The account is set to start in offline mode, where Steam lobbies do not work. */
   offline?: boolean;
+  /**
+   * Signed in but not connected to Steam's servers, as its logs/connection_log.txt last says (steamConnection): lobbies
+   * need the connection. w2461 (2026-10-28): BEAST's Steam ran with its account set, but had been logged off since
+   * 2026-10-25 ('Logged In Elsewhere') and every sign-in since failed ('Try another CM').
+   */
+  notConnected?: string;
   /** Why it could not be read, in FF Factory's own words. */
   error?: string;
 }
@@ -46,6 +52,7 @@ export function sanitizeSteamClient(raw: unknown): SteamClient | undefined {
     ...(accountId ? { accountId } : {}),
     ...(persona ? { persona } : {}),
     ...(r.offline === true ? { offline: true } : {}),
+    ...(typeof r.notConnected === 'string' && cleanText(r.notConnected, ERRORS) ? { notConnected: cleanText(r.notConnected, ERRORS) } : {}),
     ...(error ? { error } : {}),
   };
 }
@@ -60,7 +67,7 @@ function cleanText(text: string, max: number): string {
 }
 
 /** Signed in and online: what a Steam lobby needs. */
-export const steamSignedIn = (s: SteamClient | undefined): s is SteamClient & { accountId: number } => !!s?.installed && s.running && !!s.accountId && !s.offline;
+export const steamSignedIn = (s: SteamClient | undefined): s is SteamClient & { accountId: number } => !!s?.installed && s.running && !!s.accountId && !s.offline && !s.notConnected;
 
 /** Why computer `id` cannot run a leg that needs Steam, or undefined when it can: "biscuit has no Steam client installed". */
 export function steamLacks(id: string, s: SteamClient | undefined): string | undefined {
@@ -70,6 +77,7 @@ export function steamLacks(id: string, s: SteamClient | undefined): string | und
   if (!s.running) return `${id}'s Steam client is not running`;
   if (!s.accountId) return `${id}'s Steam client is signed out${s.error ? ` (${s.error})` : ''}`;
   if (s.offline) return `${id}'s Steam client is in offline mode${s.persona ? ` (${s.persona})` : ''}`;
+  if (s.notConnected) return `${id}'s Steam client${s.persona ? ` (${s.persona})` : ''} is not connected to Steam: ${s.notConnected}`;
   return undefined;
 }
 
@@ -79,7 +87,7 @@ export function steamLabel(s: SteamClient | undefined): string {
   if (!s.installed) return s.error ? `unknown (${s.error})` : 'not installed';
   if (!s.running) return 'installed, not running';
   if (!s.accountId) return `running, signed out${s.error ? ` (${s.error})` : ''}`;
-  return `${s.persona ?? `account ${s.accountId}`} (signed in${s.offline ? ', offline mode: no lobbies' : ''})`;
+  return `${s.persona ?? `account ${s.accountId}`} (signed in${s.offline ? ', offline mode: no lobbies' : ''}${s.notConnected ? `, not connected: ${s.notConnected}` : ''})`;
 }
 
 /** The account's name as lines about a pair run say it: its display name, else its account id. */
@@ -145,6 +153,32 @@ const STEAM_WORDS: readonly RegExp[] = [
   /\bsigned (?:in|out) (?:of|to) steam\b/i,
 ];
 export const mentionsSteam = (...texts: (string | undefined)[]): boolean => texts.some((t) => !!t && STEAM_WORDS.some((re) => re.test(t)));
+
+/**
+ * Whether the client is connected to Steam's servers, from the tail of its logs/connection_log.txt (w2461): undefined when
+ * its last state is Logged On after its last log-off, else why not ("logged off at 2026-10-25 14:03:15 (Logged In
+ * Elsewhere); 9 sign-ins failed since, the last at 2026-10-28 02:59:11 ('Try another CM')"). No log or no state line: undefined.
+ */
+export function steamConnection(tail: string): string | undefined {
+  let state: string | undefined;
+  let off: string | undefined;
+  let fails = 0;
+  let lastFail: string | undefined;
+  for (const line of tail.split(/\r?\n/)) {
+    const m = /^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\] \[([A-Za-z ]+), \d+, \d+\]/.exec(line);
+    if (!m) continue;
+    state = m[2];
+    const r = /RecvMsgClientLogOnResponse\(\) : (?:\[[^\]]*\] )?'([^']+)'/.exec(line);
+    if (r && r[1] === 'OK') { off = undefined; fails = 0; lastFail = undefined; continue; }
+    if (r) { fails++; lastFail = `${m[1]} ('${r[1]}')`; continue; }
+    const lo = /RecvMsgClientLoggedOff\('([^']+)'\)/.exec(line);
+    if (lo) { off = `logged off at ${m[1]} (${lo[1]})`; fails = 0; lastFail = undefined; }
+  }
+  if (!state) return undefined;
+  if (state === 'Logged On' && !off && !fails) return undefined;
+  const failed = fails ? `${fails} sign-in${fails > 1 ? 's' : ''} failed${off ? ' since' : ''}, the last at ${lastFail}` : '';
+  return [off, failed].filter(Boolean).join('; ') || `its connection is ${state}`;
+}
 
 /** Why a pair run needs Steam when its words said so and its filer did not (WorkPair.steam). */
 export const STEAM_READ = 'read from its words: a lobby or a Steam host or join; request_pair steam "none" says it needs none';

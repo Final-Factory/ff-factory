@@ -8,6 +8,7 @@
 //
 // w1098 (lothsahn, 2026-10-12: "FFBox and FF Factory updates don't need unity editors"): work on a repository that is not
 // the game's needs only an agent slot, not a free game sandbox, an editor or RAM for Unity. needsOf says which a request is.
+import { desktopLacks, pairDrivesMenus, type DesktopSession } from './desktop.ts';
 import { steamAccountText, steamLacks, steamSignedIn, type SteamClient } from './steam.ts';
 import type { WorkItem, WorkPair } from './types.ts';
 
@@ -252,6 +253,8 @@ export interface RoomFit {
   noTimedRuns?: string;
   /** Its Steam client as its daemon reported it (w2459); absent: not reported, which no pair that needs Steam fits. */
   steam?: SteamClient;
+  /** Its desktop session (w2459, shared/desktop.ts): a pair run that clicks the game's menus goes only where it is unlocked. */
+  desktop?: DesktopSession;
 }
 
 /**
@@ -270,6 +273,12 @@ export function unfitWhy(w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes'
   if (w.pair?.steam) {
     const lacks = steamLacks(id, f.steam);
     if (lacks) return `${lacks}, and its pair run needs Steam (${w.pair.steam})`;
+  }
+  // w2459 (w2460's rerun 2: m5's host leg, signed in to Steam, behind a locked screen): a pair run that clicks the game's
+  // menus goes only where the desktop is unlocked; a locked Mac's menus take no clicks.
+  if (pairDrivesMenus(w.pair)) {
+    const lacks = desktopLacks(id, f.desktop);
+    if (lacks) return `${lacks}, and its pair run clicks the game's menus (${w.pair!.steam ? 'its Steam lobby' : w.pair!.menus}), which take no clicks there`;
   }
   // w2358: a timed leg (w1969) is timed work whatever its title says, as start_agent's timed hold reads it.
   const timed = needsTimed(w) || (w.pair?.timed || w.timedLeg ? (w.timedLeg?.platform === 'win32' || w.timedLeg?.platform === 'darwin' ? w.timedLeg.platform : 'any') : false);
@@ -299,18 +308,21 @@ export const PAIR_MAX_LEGS = 4;
 export function pairRoom(w: { pair?: WorkPair }, ids: readonly string[], fit: Readonly<Record<string, RoomFit>> | undefined): { pick: string[]; short?: undefined } | { pick?: undefined; short: string } {
   const p = w.pair;
   if (!p) return ids.length ? { pick: [ids[0]] } : { short: 'no computer it fits has room' };
+  // w2459: a pair that clicks the game's menus never takes a computer whose screen is locked (unfitWhy says why).
+  if (pairDrivesMenus(p)) ids = ids.filter((id) => !desktopLacks(id, fit?.[id]?.desktop));
   // w2459: a pair that needs Steam takes one computer per Steam account (two legs on one account cannot both be in a lobby).
   if (p.steam) {
     const seen = new Set<number>();
-    const all = ids;
+    const twins: string[] = [];
     ids = ids.filter((id) => {
-      const a = fit?.[id]?.steam?.accountId;
+      const s = fit?.[id]?.steam;
+      const a = steamSignedIn(s) ? s.accountId : undefined;
+      if (a !== undefined && seen.has(a)) twins.push(id);
       if (a === undefined || seen.has(a)) return false;
       seen.add(a);
       return true;
     });
     if (ids.length < p.legs) {
-      const twins = all.filter((id) => !ids.includes(id));
       return { short: `a pair run of ${p.legs} legs that needs Steam needs ${p.legs} computers signed in to ${p.legs} different Steam accounts with room at once, and ${ids.length ? `only ${ids.map((id) => `${id} (${steamAccountText(fit![id]!.steam as SteamClient & { accountId: number })})`).join(', ')} ${ids.length > 1 ? 'have' : 'has'} room it fits` : 'no computer it fits has room'}${twins.length ? `; ${twins.join(', ')} ${twins.length > 1 ? 'are' : 'is'} signed in to an account another leg takes` : ''}` };
     }
   }
@@ -336,7 +348,7 @@ export function pairRoom(w: { pair?: WorkPair }, ids: readonly string[], fit: Re
 }
 
 /** Where a pair run that needs Steam goes (w2459). */
-export const PAIR_STEAM = 'only on computers signed in to Steam, a different Steam account on each leg';
+export const PAIR_STEAM = 'only on computers signed in to Steam, a different Steam account on each leg, each screen unlocked';
 
 /**
  * Why the whole fleet cannot hold a pair run that needs Steam (w2459), or undefined when it can: fewer computers than legs
@@ -404,4 +416,4 @@ export function repairText(w: Pick<WorkItem, 'constraints' | 'brief'> & { pair?:
 }
 
 /** "a pair run of 2 legs, cross-OS: <why>, timed" (w1945): what a pair needs, as lines about it say it. */
-export const pairText = (p: WorkPair): string => `a pair run of ${p.legs} legs${p.crossOs ? `, cross-OS (${p.crossOs})` : `, ${PAIR_ANY_OS}`}${p.steam ? `, ${PAIR_STEAM} (${p.steam})` : ''}${p.timed ? ', timed (exclusive tickets: not on a computer that takes no timed runs)' : ''}${p.avoid?.length ? `, not on ${p.avoid.join(' or ')}` : ''}`;
+export const pairText = (p: WorkPair): string => `a pair run of ${p.legs} legs${p.crossOs ? `, cross-OS (${p.crossOs})` : `, ${PAIR_ANY_OS}`}${p.steam ? `, ${PAIR_STEAM} (${p.steam})` : ''}${p.menus && !p.steam ? `, only on computers whose screen is unlocked (it clicks the game's menus: ${p.menus})` : ''}${p.timed ? ', timed (exclusive tickets: not on a computer that takes no timed runs)' : ''}${p.avoid?.length ? `, not on ${p.avoid.join(' or ')}` : ''}`;

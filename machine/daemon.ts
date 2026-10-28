@@ -1095,7 +1095,7 @@ export class Daemon {
     }
     // The machine's Steam client (w2459): read now and every 5 minutes, for pair runs that need Steam.
     if (this.probes.steam) {
-      this.steamClient = new SteamClientWatch({ ...this.probes.steam(), send: (steam) => this.send({ type: 'steam_client', steam }), log: (line) => log(line) });
+      this.steamClient = new SteamClientWatch({ ...this.probes.steam(), send: (steam, desktop) => this.send({ type: 'steam_client', steam, ...(desktop ? { desktop } : {}) }), log: (line) => log(line) });
       this.timers.push(setInterval(() => void this.steamClient!.tick(), STEAM_READ_EVERY_MS));
       void this.steamClient.tick();
     }

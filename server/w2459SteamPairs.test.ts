@@ -5,8 +5,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { pairRoom, pairText, steamFleetOf, steamPairShort, unfitWhy, type RoomFit } from '../shared/capacity.ts';
 import { blockerVerdict, type BlockerFacts } from '../shared/blockers.ts';
-import { loginUserOf, mentionsSteam, parseVdf, sanitizeSteamClient, steamLabel, steamLacks, type SteamClient } from '../shared/steam.ts';
-import { readSteamClient, type SteamClientDeps } from '../machine/steamClient.ts';
+import { loginUserOf, mentionsSteam, parseVdf, sanitizeSteamClient, steamConnection, steamLabel, steamLacks, steamSignedIn, type SteamClient } from '../shared/steam.ts';
+import { desktopLacks, mentionsMenus, sanitizeDesktop } from '../shared/desktop.ts';
+import { readDesktopSession, readSteamClient, type SteamClientDeps } from '../machine/steamClient.ts';
 import type { WorkBlocker, WorkItem, WorkPair } from '../shared/types.ts';
 
 const AT = '2026-10-28T08:00:00.000Z';
@@ -51,7 +52,7 @@ test('w2459: pairRoom picks only computers signed in to Steam, never two on the 
     assert.equal(new Set(pick.map((id) => twin[id].steam!.accountId)).size, 2, `one account per leg from ${ids.join()}`);
     for (const id of pick) assert.equal(steamLacks(id, twin[id].steam), undefined);
   }
-  assert.match(pairText(STEAM), /only on computers signed in to Steam, a different Steam account on each leg \(a Steam lobby join/);
+  assert.match(pairText(STEAM), /only on computers signed in to Steam, a different Steam account on each leg, each screen unlocked \(a Steam lobby join/);
 });
 
 test('w2459: steamPairShort names every computer and what it lacks; fleet-wide (offline and busy ones count) it is ok with two accounts', () => {
@@ -151,4 +152,78 @@ test('w2459: request_pair reads a Steam need from a lobby or a Steam join, not f
   assert.ok(mentionsSteam('', 'leg 2 joins the host through a Steam invite'));
   assert.ok(mentionsSteam('SteamMatchmaking callbacks fire on both legs'));
   assert.ok(!mentionsSteam('MP-lowore-pin-pair on PR #2340', 'Run it on the build the Steam development branch carries; join over the direct address.'));
+});
+
+// w2459 (lothsahn, 2026-10-28): w2460's rerun 2 put its host leg on m5, signed in to Steam but with its screen locked, where
+// the game's menus take no clicks.
+test("w2459: a pair that clicks the game's menus (every Steam pair) never goes behind a locked screen; one that clicks none still does", () => {
+  const SLIMS2 = on(7654321, 'slims2');
+  const fit: Record<string, RoomFit> = {
+    beast: { platform: 'win32', steam: SLIMS, desktop: { checkedAt: AT } },
+    lothdesktop: { platform: 'win32', steam: LOTH, desktop: { checkedAt: AT, locked: true } },
+    m5: { platform: 'darwin', steam: SLIMS2, desktop: { checkedAt: AT, locked: true } },
+    lothlaptop: { platform: 'win32', steam: SLIMS2, desktop: { checkedAt: AT, away: true } },
+    m3: { platform: 'darwin', steam: LOTH },
+  };
+  assert.match(unfitWhy(work(), 'm5', fit) ?? '', /^m5's screen is locked, and its pair run clicks the game's menus \(its Steam lobby\), which take no clicks there/);
+  assert.match(unfitWhy(work(), 'lothlaptop', fit) ?? '', /^lothlaptop's console is another user's session/);
+  assert.equal(unfitWhy(work(), 'm3', fit), undefined, 'a daemon that reports no session (an older one, Linux) locks nothing out');
+  const menus: WorkPair = { legs: 2, menus: 'the title menu' };
+  assert.match(unfitWhy(work(menus), 'm5', fit) ?? '', /^m5's screen is locked, and its pair run clicks the game's menus \(the title menu\)/);
+  assert.equal(unfitWhy(work({ legs: 2 }), 'm5', fit), undefined, 'a headless pair still goes on a locked Mac');
+  assert.deepEqual(pairRoom(work(), ['lothdesktop', 'm5', 'beast', 'm3'], fit).pick?.sort(), ['beast', 'm3']);
+  assert.ok(pairRoom(work(), ['lothdesktop', 'm5', 'beast'], fit).short, 'one unlocked Steam computer is short');
+  assert.match(pairText(STEAM), /each screen unlocked/);
+  assert.ok(mentionsMenus('Click Load in the title menu') && mentionsMenus('host a lobby') && !mentionsMenus('headless soak, -ffSoloQuitAfterSeconds 600'));
+});
+
+test('w2459: readDesktopSession asks macOS for its session and Windows whether its lock screen runs; nothing else', async () => {
+  const mac = (out: string) => fake({ platform: 'darwin', procs: out });
+  assert.deepEqual(await readDesktopSession(mac('{"locked":true,"onConsole":true}')), { checkedAt: AT, locked: true });
+  assert.deepEqual(await readDesktopSession(mac('{"locked":false,"onConsole":false}')), { checkedAt: AT, away: true });
+  assert.deepEqual(await readDesktopSession(mac('{"locked":false,"onConsole":true,"displayAsleep":false}')), { checkedAt: AT });
+  assert.equal(await readDesktopSession(mac('{}')), undefined, 'unreadable: unknown');
+  const m = mac('{"locked":true}');
+  await readDesktopSession(m);
+  assert.match(m.ran[0], /^osascript -l JavaScript -e .*CGSessionCopyCurrentDictionary/s);
+  const win = fake({ platform: 'win32', procs: '"LogonUI.exe","1234","Console","1","40,000 K"\r\n' });
+  assert.deepEqual(await readDesktopSession(win), { checkedAt: AT, locked: true });
+  assert.deepEqual(win.ran, ['tasklist /FI IMAGENAME eq LogonUI.exe /NH /FO CSV']);
+  assert.deepEqual(await readDesktopSession(fake({ platform: 'win32', procs: 'INFO: No tasks are running which match the specified criteria.' })), { checkedAt: AT });
+  assert.equal(await readDesktopSession(fake({ platform: 'linux', procs: '1' })), undefined);
+  assert.deepEqual(sanitizeDesktop({ checkedAt: AT, locked: true, name: 'x' }), { checkedAt: AT, locked: true });
+  assert.equal(desktopLacks('m5', undefined), undefined);
+});
+
+// BEAST's connection_log.txt as w2461 read it (2026-10-28), and LothDesktop's own as measured that morning.
+const BEAST_LOG = [
+  "[2026-10-25 09:10:02] [Logged On, 4, 7] [U:1:1234567] RecvMsgClientLogOnResponse() : processing complete",
+  "[2026-10-25 14:03:15] [Logged On, 4, 7] [U:1:1234567] RecvMsgClientLoggedOff('Logged In Elsewhere')",
+  "[2026-10-25 14:03:15] [Logged Off, 4, 7] [U:1:1234567] not auto reconnecting",
+  "[2026-10-28 02:58:40] [Logging On, 4, 7] [U:1:1234567] RecvMsgClientLogOnResponse() : [U:1:1234567] 'Try another CM'",
+  "[2026-10-28 02:59:11] [Logging On, 4, 7] [U:1:1234567] RecvMsgClientLogOnResponse() : [U:1:1234567] 'Try another CM'",
+].join('\r\n');
+const LOTH_LOG = [
+  "[2026-10-28 04:02:59] [Connected, 4, 7] [U:1:7155839] Logging on [U:1:7155839]",
+  "[2026-10-28 04:02:59] [Logging On, 4, 7] [U:1:7155839] RecvMsgClientLogOnResponse() : [U:1:7155839] 'OK'",
+  "[2026-10-28 04:02:59] [Logged On, 4, 7] [U:1:7155839] RecvMsgClientLogOnResponse() : processing complete",
+  "[2026-10-28 05:02:59] CClientJobGetClientUpdateHosts: cached copy new expiration: Fri Oct 30 15:05:31 2026",
+].join('\r\n');
+
+test("w2459: a running Steam whose connection log says it is not connected (w2461: BEAST, 'Logged In Elsewhere') counts as not signed in", async () => {
+  assert.equal(steamConnection(LOTH_LOG), undefined);
+  assert.equal(steamConnection(BEAST_LOG), "logged off at 2026-10-25 14:03:15 (Logged In Elsewhere); 2 sign-ins failed since, the last at 2026-10-28 02:59:11 ('Try another CM')");
+  assert.equal(steamConnection(''), undefined, 'no log: unknown, the registry decides');
+  assert.equal(steamConnection(`${BEAST_LOG}\n${LOTH_LOG}`), undefined, 'a later OK clears it');
+  const beast = fake({
+    platform: 'win32',
+    reg: { 'HKCU\\Software\\Valve\\Steam': 'REG_SZ    c:/games/steam', 'HKCU\\Software\\Valve\\Steam\\ActiveProcess': 'REG_DWORD    0x12d687' },
+    files: { 'c:/games/steam/steam.exe': '', 'c:/games/steam/logs/connection_log.txt': BEAST_LOG },
+    procs: '"steam.exe","9796","Console","1","120,000 K"\r\n',
+  });
+  const s = await readSteamClient(beast);  assert.match(s.notConnected ?? '', /Logged In Elsewhere/);
+  assert.equal(steamSignedIn(s), false);
+  assert.match(steamLacks('beast', s) ?? '', /^beast's Steam client is not connected to Steam: logged off at 2026-10-25 14:03:15/);
+  assert.match(unfitWhy(work(), 'beast', { beast: { platform: 'win32', steam: s } }) ?? '', /not connected to Steam/);
+  assert.deepEqual(sanitizeSteamClient(s), s);
 });

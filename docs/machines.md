@@ -1373,7 +1373,7 @@ LothDesktop and Beast, not just when BEAST is full").
     ("lothdesktop has an agent slot (it needs no editor and no game sandbox, w1098)"). A game request is not refused for
     want of an editor-free slot.
 - **The machine's Steam client** (w2459; `machine/steamClient.ts`, `shared/steam.ts`). Each daemon reads, at start and
-  every 5 minutes, whether a Steam client is installed for its user, runs, and is signed in, as which account, and sends it
+  every 2 minutes, whether a Steam client is installed for its user, runs, and is signed in, as which account, and sends it
   as `steam_client` when it changed (and after each hello); the portal keeps it on the machine record (`Machine.steam`)
   after `sanitizeSteamClient`, and `list_machines` says it ("Steam: Lothsahn (signed in)"). It reads only Steam's own keys
   and files, never scanning a drive: on Windows `reg query HKCU\Software\Valve\Steam /v SteamPath`, that folder's
@@ -1384,7 +1384,9 @@ LothDesktop and Beast, not just when BEAST is full").
   LothDesktop (2026-10-28):* SteamPath `c:/games/steam`, ActiveUser 7155839 (SteamID64 76561197967421567), steam.exe
   running, persona "Lothsahn". The Linux and macOS paths (`~/.steam/registry.vdf`, `~/.local/share/Steam`, the Flatpak's
   `~/.var/app/com.valvesoftware.Steam`, `~/Library/Application Support/Steam`) are Steam's usual layout (a guess), not yet
-  measured here. The daemon runs as the machine's own user, so HKCU is that user's Steam.
+  measured here. The daemon runs as the machine's own user, so HKCU is that user's Steam. It reads every 2 minutes, and
+  also the tail of `<Steam>/logs/connection_log.txt` (connected or not) and the desktop session (locked or not): "Pair
+  runs" below.
 - **Work that changes `.github/workflows` goes where its push is allowed** (w1463, Ben: "the harness, not memory, stops this
   from happening a fifth time", after four pushes of a workflow file were refused for a machine's gh token without the
   `workflow` scope, the latest w1459's on BEAST; final-factory-agents PR #241). GitHub refuses to create or change a file
@@ -1554,6 +1556,24 @@ LothDesktop and Beast, not just when BEAST is full").
     (`Orchestrators.holdSteamPairs`) for one already New or Queued. The gate names each computer and what it lacks
     ("only lothdesktop ("Lothsahn") is: biscuit has no Steam client installed; m3's daemon has not reported its Steam client
     yet"), and the blocker watch clears it once enough are signed in; the run goes back to the dispatcher as New.
+  - **Signed in means connected** (w2461, 2026-10-28: BEAST's Steam ran with its account set, but had been logged off
+    since 2026-10-25 14:03:15 with `RecvMsgClientLoggedOff('Logged In Elsewhere')`, and every sign-in since failed with
+    `'Try another CM'`). The daemon reads the tail of `<Steam>/logs/connection_log.txt` too (`steamConnection`,
+    `shared/steam.ts`): a log-off or a failed sign-in after the last `'OK'` sets `SteamClient.notConnected`, and such a
+    computer counts as not signed in (`steamSignedIn`, `steamLacks`: "beast's Steam client (slims) is not connected to
+    Steam: logged off at ..."). No log, or no state line in it: the registry decides.
+  - **A run whose legs click the game's menus goes only where the screen is unlocked** (w2459, lothsahn, 2026-10-28:
+    w2460's rerun 2 put its host leg on m5, signed in to Steam, but m5's screen was locked, and the game's menus take no
+    clicks on a Mac with a locked screen, so neither check ran). Every Steam pair clicks menus (its lobby); any other pair
+    does when `request_pair menus` says what it clicks, or its words name a menu, a lobby, a click, a button or a dialog
+    (`mentionsMenus`, `shared/desktop.ts`; `menus: "none"` clears it). The daemon reports its desktop session beside
+    its Steam client (`steam_client`'s `desktop`): on macOS `CGSessionCopyCurrentDictionary` through osascript (the
+    dialog watch's `SESSION_SCRIPT`, `machine/macDialogs.ts`: `CGSSessionScreenIsLocked`, `kCGSSessionOnConsoleKey`), on
+    Windows whether `LogonUI.exe`, the lock screen, runs (`tasklist`); Linux and older daemons report none, which locks no
+    computer out. `unfitWhy` and `pairRoom` skip a locked computer ("m5's screen is locked, and its pair run clicks the
+    game's menus (its Steam lobby), which take no clicks there"), `startPairLegs` refuses a leg there, and `list_machines`
+    shows "screen: locked". A locked screen is no Steam gate: the run waits Queued for an unlocked computer. *Measured on
+    LothDesktop (2026-10-28):* Steam connected, the screen unlocked (no LogonUI.exe).
   - **A run that loses a leg mid-run is re-queued whole** (w2304, lothsahn, 2026-10-26: "when one leg is stopped
     (player-yield or a move), re-queue the pair instead of stalling"). w2276, the pair run for w2263's PR #2607, had its
     client leg on lothdesktop stopped by the w1894 player-yield at 09:24Z (lothsahn started playing; the yield closes

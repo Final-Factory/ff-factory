@@ -5,6 +5,7 @@ import type { TurnUsage } from './spend.ts';
 import type { GithubPermissionId } from './githubRequirements.ts';
 import type { GhLogin } from './ghLogin.ts';
 import type { SteamClient } from './steam.ts';
+import type { DesktopSession } from './desktop.ts';
 import type { Ask } from './ask.ts';
 
 /** 'blocked': the editor is alive but stuck on a modal dialog, or silent for too long while starting (see unity.blocked). */
@@ -957,6 +958,8 @@ export interface Machine {
   gh?: GhLogin;
   /** Its Steam client as its daemon last read it (w2459, shared/steam.ts): installed, running, the signed-in account id and name. */
   steam?: SteamClient;
+  /** Its desktop session as its daemon last read it (w2459, shared/desktop.ts): a locked screen takes no menu clicks. */
+  desktop?: DesktopSession;
   git?: GitStatus;
   /** The daemon's last clean-up pass (server/cleanup.ts). */
   lastCleanup?: CleanupSummary;
@@ -1953,6 +1956,11 @@ export interface WorkPair {
    * pairRoom), and while fewer computers than legs are, it is Blocked on Steam (a `steam` gate), not Queued.
    */
   steam?: string;
+  /**
+   * Why its legs click the game's menus (w2459: request_pair menus, or read from its words; every Steam pair does): its
+   * legs then go only on computers whose desktop is unlocked (shared/desktop.ts): a locked Mac's menus take no clicks.
+   */
+  menus?: string;
   /** A leg takes timing measurements (exclusive bench tickets): never on a computer that takes no timed runs (m5, w1861). */
   timed?: boolean;
   /** When its legs started together, and where: leg 1 (the host) first. */
@@ -2355,6 +2363,8 @@ export interface WorkPr {
  */
 export type WorkBlockerKind = 'request' | 'deploy' | 'machine' | 'usage' | 'lock' | 'time' | 'ci' | 'pr' | 'steam';
 export const WORK_BLOCKER_KINDS: readonly WorkBlockerKind[] = ['request', 'deploy', 'machine', 'usage', 'lock', 'time', 'ci', 'pr', 'steam'];
+/** The kinds decide_work block may set: `steam` only FF Factory sets (w2459), so it stays out of the dispatcher's always-loaded schema. */
+export const SET_BLOCKER_KINDS: readonly WorkBlockerKind[] = WORK_BLOCKER_KINDS.filter((k) => k !== 'steam');
 
 /** A worker a gate's clearing resumed (w1094, WorkItem.gateResumes). */
 export interface GateResume {
