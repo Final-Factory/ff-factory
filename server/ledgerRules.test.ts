@@ -331,3 +331,27 @@ test("w2426: a pair run delivers to its asker only by the host leg's For line wi
   assert.equal(pairDelivers([undefined, "w2425: still open: waiting for w2419's worker to push a fix commit"], 'w2425', 'w2419'), false, "a client's wait line is no result");
   assert.equal(pairDelivers([], 'w2425', 'w2419'), false, 'not started');
 });
+
+test('w2446: a release is what the request did: a bump PR is one; PRs only in the harness repos are not, whatever the title says', () => {
+  // w2444 as filed (2026-10-28): harness work on the release skill; its DONE was refused for patch notes it never had to post
+  const w2444 = {
+    title: 'Release harness: post patch notes once live on development; never gate them on a Steam branch choice',
+    brief: 'Goal: release workers post a release\'s patch notes as Max in #dev-patch-notes as soon as the build is live on the Steam development branch.',
+    constraints: '',
+  };
+  const harness = [{ repo: 'Final-Factory/ff-factory', number: 740, state: 'merged' as const, head: 'w2444-release-notes-live' }];
+  assert.ok(isRelease(w2444), 'no PR yet: its words are all the ledger has');
+  assert.equal(isRelease({ ...w2444, prs: harness }), false);
+  assert.equal(doneProblem({ ...w2444, prs: harness }, 'Done: both PRs are merged on green CI.'), undefined);
+  assert.equal(afterMergeReason({ ...w2444, prs: harness }, ['Done.']), undefined);
+  const skills = [...harness, { repo: 'Final-Factory/final-factory-agents', number: 445, state: 'merged' as const }];
+  assert.equal(isRelease({ ...w2444, prs: skills }), false);
+  // a game PR next to them: the words count again
+  assert.ok(isRelease({ ...w2444, prs: [...skills, { repo: 'Final-Factory/FinalFactory', number: 2750, state: 'merged' as const }] }));
+  // a version bump PR (trigger-ci-release.sh pushes release/<version>, the urgent lane urgent/<version>) is a release run
+  const bump = (head: string) => ({ title: 'Push a new dev build for the testers', brief: 'Do it.', prs: [{ repo: 'Final-Factory/FinalFactory', number: 2751, state: 'merged' as const, head }] });
+  assert.ok(isRelease(bump('release/1.0.0.23')));
+  assert.ok(isRelease(bump('urgent/1.0.0.24')));
+  assert.equal(isRelease(bump('w2440-notes')), false);
+  assert.match(doneProblem(bump('release/1.0.0.23'), 'Merged.')!, /link the posted notes/);
+});

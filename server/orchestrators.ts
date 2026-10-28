@@ -4180,7 +4180,10 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   recordReportedWait(id: string, sessionId: string, a: { ref: string; onReport: boolean; line: string; at: number; key: string }): boolean {
     const w = this.store.work.get(id.toLowerCase());
     const ref = a.ref.trim().toLowerCase();
-    if (!w || (w.status !== 'active' && w.status !== 'stalled') || gatesOf(w).length || !this.store.work.get(ref) || ref === w.id) return false;
+    // w2446: never a wait on a request already closed (blocked_on refuses one too, blockerProblem): it cleared at once and the
+    // next report, quoting the same text (a bench error naming w1995), recorded it again, a false unblock each time
+    const t = this.store.work.get(ref);
+    if (!w || (w.status !== 'active' && w.status !== 'stalled') || gatesOf(w).length || !t || !isOpen(t) || ref === w.id) return false;
     const gate = this.makeGate(
       { kind: 'request', ref, ...(a.onReport ? { on: 'report' as const } : {}), what: a.onReport ? `${ref}'s worker reporting` : `${ref} finishing` },
       new Date(a.at).toISOString(),
