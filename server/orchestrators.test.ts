@@ -25,8 +25,8 @@ import { HELD_MARK, inPersonWords } from '../shared/conditional.ts';
 import { splitReply, splitSent } from '../shared/replies.ts';
 import { blockerName, type PrHealth } from '../shared/blockers.ts';
 import { answersText } from '../shared/questionCard.ts';
-import { needsTimed, PAIR_HOLD_MS, TIMED_HOLD_MS, unfitWhy } from '../shared/capacity.ts';
-import { benchLockIn, type Requester, type SessionInfo, type TranscriptEvent, type UserInfo, type WorkItem } from '../shared/types.ts';
+import { needsTimed, PAIR_HOLD_MS, TIMED_HOLD_MS, pairText, unfitWhy } from '../shared/capacity.ts';
+import { benchLockIn, type Machine, type Requester, type SessionInfo, type TranscriptEvent, type UserInfo, type WorkItem } from '../shared/types.ts';
 import { LIVE_HOLD_MS, releaseWhy } from './placeAgain.ts';
 import { MOVE_AFTER_MS } from './resumeMove.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
@@ -7640,4 +7640,116 @@ test('w2446: a report naming a request already closed records no wait (w2434 quo
   pending = false;
   agents.waker.cancel(id);
   assert.equal(facts.reportedSince(w, 0, { notCheckIn: true }), true);
+});
+
+test('w2459: a pair run that needs Steam is Blocked while too few computers are signed in to different Steam accounts, and clears when they are', async (t) => {
+  const env = await twoComputers(t);
+  const { store } = env;
+  const o = env.agents.orchestrators;
+  const steam = (id: string, s: Machine['steam']) => store.putMachine({ ...store.machines.get(id)!, steam: s });
+  const signedIn = (accountId: number, persona: string) => ({ checkedAt: T0, installed: true, running: true, accountId, persona });
+  steam('pc', signedIn(7155839, 'Lothsahn'));
+  // w2458's case: the client computer has no Steam client (biscuit), here beast before its daemon reports one.
+  putRequests(store, [{ id: 'w2757', by: BEN, status: 'active' }]);
+  const a = await startedFor(env, 'w2757');
+  const out = String(await a.h.request_pair!({ what: 'lobby browser on PR #2757', brief: 'Host a Steam lobby on leg 1; leg 2 sees it in the lobby browser and joins.' }));
+  const id = /^Filed (w\d+)/.exec(out)![1];
+  const p = () => store.work.get(id)!;
+  assert.match(p().pair!.steam ?? '', /^read from its words/, 'inferred from "Steam lobby"');
+  assert.deepEqual([p().status, p().blocked?.kind], ['blocked', 'steam'], out);
+  assert.match(p().blocked!.what, /only pc \("Lothsahn"\) is: beast's daemon has not reported its Steam client yet/);
+  assert.match(out, /needs Steam and is blocked on computers signed in to Steam/);
+  const watch = new BlockerWatch({ store, orchestrators: o });
+  // One account on both computers: still short, and the reason says which computer takes it.
+  steam('beast', signedIn(7155839, 'Lothsahn'));
+  await watch.tick();
+  assert.equal(p().status, 'blocked');
+  steam('beast', { checkedAt: T0, installed: true, running: true });
+  await watch.tick();
+  assert.equal(p().status, 'blocked');
+  // Signed in to another account: the gate clears and the dispatcher gets it back to start.
+  steam('beast', signedIn(1234567, 'slims'));
+  await watch.tick();
+  assert.equal(p().status, 'new');
+});
+
+test("w2459: start_agent never puts a Steam pair run's leg on a computer without signed-in Steam, nor two legs on one Steam account", async (t) => {
+  const env = await twoComputers(t);
+  const { store, dispatcher, call } = env;
+  const steam = (id: string, s: Machine['steam']) => store.putMachine({ ...store.machines.get(id)!, steam: s });
+  const signedIn = (accountId: number, persona: string) => ({ checkedAt: T0, installed: true, running: true, accountId, persona });
+  steam('pc', signedIn(7155839, 'Lothsahn'));
+  putRequests(store, [{ id: 'w2', by: BEN, status: 'new', pair: { legs: 2, steam: 'a Steam lobby join' } }]);
+  const id = 'w2';
+  const p = () => store.work.get(id)!;
+  const start = () => call(dispatcher().info, 'start_agent', { work_id: id, prompt: 'Run the lobby check.', title: 'lobby pair', sandbox: 'pc/alpha', pair_sandboxes: ['beast/slot1'] });
+  steam('beast', { checkedAt: T0, installed: false, running: false });
+  const none = await start();
+  assert.equal(none.isError, true);
+  assert.match(none.text, /leg 2 on beast\/slot1: beast has no Steam client installed, and w\d+ needs Steam .*Nothing was started\./);
+  steam('beast', signedIn(7155839, 'Lothsahn'));
+  const same = await start();
+  assert.equal(same.isError, true);
+  assert.match(same.text, /legs 1 \(pc\) and 2 \(beast\) are both signed in to Steam as Lothsahn \(signed in\), and w\d+ needs a different Steam account on each leg.*Nothing was started\./);
+  assert.deepEqual(p().sessionIds, [], 'nothing was started');
+  steam('beast', signedIn(1234567, 'slims'));
+  const ok = await start();
+  assert.equal(ok.isError, false, ok.text);
+  assert.equal(p().sessionIds.length, 2);
+});
+
+// w2459 (lothsahn, 2026-10-28): w2460's rerun 2 put its host leg on m5, signed in to Steam but with its screen locked, where
+// the game's menus take no clicks, so neither check ran.
+test("w2459: start_agent never puts a leg that clicks the game's menus on a computer whose screen is locked", async (t) => {
+  const env = await twoComputers(t);
+  const { store, dispatcher, call } = env;
+  const set = (id: string, m: Partial<Machine>) => store.putMachine({ ...store.machines.get(id)!, ...m });
+  const signedIn = (accountId: number, persona: string) => ({ checkedAt: T0, installed: true, running: true, accountId, persona });
+  set('pc', { steam: signedIn(7155839, 'Lothsahn'), desktop: { checkedAt: T0 } });
+  set('beast', { steam: signedIn(1234567, 'slims'), desktop: { checkedAt: T0, locked: true } });
+  putRequests(store, [
+    { id: 'w2', by: BEN, status: 'new', pair: { legs: 2, steam: 'a Steam lobby join' } },
+    { id: 'w3', by: BEN, status: 'new', pair: { legs: 2, menus: 'the title menu and the load dialog' } },
+    { id: 'w4', by: BEN, status: 'new', pair: { legs: 2 } },
+  ]);
+  const start = (id: string, title: string) => call(dispatcher().info, 'start_agent', { work_id: id, prompt: 'Run the check.', title, sandbox: 'pc/alpha', pair_sandboxes: ['beast/slot1'] });
+  for (const id of ['w2', 'w3']) {
+    const r = await start(id, `menus pair ${id}`);
+    assert.equal(r.isError, true, id);
+    assert.match(r.text, /leg 2 on beast\/slot1: beast's screen is locked, and w\d+'s legs click the game's menus, which take no clicks there.*Nothing was started\./, id);
+    assert.deepEqual(store.work.get(id)!.sessionIds, [], `${id}: nothing was started`);
+  }
+  set('beast', { desktop: { checkedAt: T0 } });
+  const ok = await start('w2', 'lobby pair');
+  assert.equal(ok.isError, false, ok.text);
+  assert.equal(store.work.get('w2')!.sessionIds.length, 2);
+});
+
+test('w2459: request_pair marks a pair that names a menu or a click as clicking menus; a Steam pair needs no mark; menus "none" clears it', async (t) => {
+  const env = await twoComputers(t);
+  const { store } = env;
+  putRequests(store, ['w2760', 'w2761', 'w2762'].map((id) => ({ id, by: BEN, status: 'active' as const })));
+  let n = 2760;
+  const file = async (x: Record<string, unknown>) => {
+    const a = await startedFor(env, `w${n++}`);
+    const out = String(await a.h.request_pair!(x));
+    if (!/^Filed /.test(out)) throw new Error(out.slice(0, 400));
+    return store.work.get(/^Filed (w\d+)/.exec(out)![1])!.pair!;
+  };
+  const menus = await file({ what: 'load a save on PR #2760', brief: 'Host and client click Load in the title menu.' });
+  assert.match(menus.menus ?? '', /read from its words/);
+  assert.match(pairText(menus), /only on computers whose screen is unlocked/);
+  assert.equal((await file({ what: 'determinism on PR #2761', brief: 'Both legs run the headless soak with -ffSoloQuitAfterSeconds.' })).menus, undefined);
+  assert.equal((await file({ what: 'load a save on PR #2762', brief: 'Click Load in the title menu.', menus: 'none' })).menus, undefined);
+});
+
+test('w2459: request_pair steam "none" files a pair with no Steam mark, whatever its words; a run with no Steam words needs none', async (t) => {
+  const env = await twoComputers(t);
+  const { store } = env;
+  putRequests(store, [{ id: 'w2758', by: BEN, status: 'active' }]);
+  const a = await startedFor(env, 'w2758');
+  const out = String(await a.h.request_pair!({ what: 'lobby code sync on PR #2758', brief: 'Join over the direct address; the lobby code is not used.', steam: 'none' }));
+  const id = /^Filed (w\d+)/.exec(out)![1];
+  assert.equal(store.work.get(id)!.pair!.steam, undefined);
+  assert.equal(store.work.get(id)!.status, 'new');
 });

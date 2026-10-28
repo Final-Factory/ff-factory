@@ -107,7 +107,11 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // workers then run as the control arm with the pilot's prompt mark), and a newer daemon with an older portal never gets it.
 // w2218 (no bump): `timed_run_cancel`, the portal stopping a timed run it no longer waits for; an older daemon drops it (its
 // onMessage switch has no default case, machine/daemon.ts), and its run then ends as before; an older portal never sends it.
-const DECIDED = { protocol: 9, fingerprint: '697b0399463ab2df' };
+// w2459 (no bump): `steam_client`, the machine's Steam client, which an older portal's onMessage drops (no default case), and
+// `steam` on request_pair, which an older daemon's catalog does not offer its workers; the portal then reads it from the words.
+// Its optional `desktop` (locked or not) the same way: an older daemon sends none, which locks no computer out; and `menus` on
+// request_pair, read from the words where an older daemon's catalog lacks it.
+const DECIDED = { protocol: 9, fingerprint: '38839cee4954906e' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

@@ -712,6 +712,7 @@ had room, which read as "LothDesktop can take more work but the queue isn't movi
 | `time` | none; `until` | `until` passes | never |
 | `ci` | the pull request, "owner/repo#123" | none of its checks is still running (it says which failed: a failed, timed-out or cancelled run is finished too), or it merged or closed (`gh pr view`, at most every 2 minutes, w846; where GitHub refuses the checks, its head commit's Actions runs, w829). Checks it cannot read for 15 minutes clear it too, and its worker looks itself | 6 hours: it clears, and its worker looks at the hung run (w1094) |
 | `pr` (w754) | the pull request, "owner/repo#123" | it MERGED (`gh pr view`, at most every 2 minutes). Closed without merging: it asks its requester. For "wait for #1291 to merge"; `ci` also clears when the checks finish unmerged, and a request closes later than its PR merges | 7 days |
+| `steam` (w2459) | none | the fleet has as many pool computers signed in to different Steam accounts as the pair run has legs (busy and offline ones count), or the request is no pair run that needs Steam (`steamPairShort`, [machines.md](machines.md) "Pair runs"). Set by FF Factory itself, never asked for: a Steam pair run is Blocked on it, not Queued, when the fleet lacks the computers; the gate names each computer and what it lacks | 7 days |
 
 The stuck times are judgments (`shared/blockers.ts` `BLOCKER_STUCK_MS`): a CI run takes minutes to an hour; a lock held
 a day is a run that never ended; a machine away three days is down, not asleep; a weekly usage limit resets within 7

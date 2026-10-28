@@ -3,7 +3,7 @@
 // request finishing or reporting, a deploy, a machine, a usage limit, a lock, a time, or CI. Pure: the blocker watch
 // (server/blockerWatch.ts) reads the verdicts and unblocks, stalls or asks; list_work, read_work and the Dispatcher page
 // name the blocker (docs/orchestrators.md, "Waiting, Queued, Blocked").
-import type { WorkBlocker, WorkBlockerKind, WorkItem } from './types.ts';
+import type { WorkBlocker, WorkBlockerKind, WorkItem, WorkPair } from './types.ts';
 import { capacityBlockProblem } from './capacity.ts';
 
 const HOUR = 3_600_000;
@@ -26,6 +26,8 @@ export const BLOCKER_STUCK_MS: Record<WorkBlockerKind, number | undefined> = {
   time: undefined,
   ci: 6 * HOUR,
   pr: 7 * DAY,
+  // w2459: signing in to Steam is a person's act; a week without it is worth their look.
+  steam: 7 * DAY,
 };
 
 /**
@@ -94,6 +96,8 @@ export function blockerName(b: Pick<WorkBlocker, 'kind' | 'ref' | 'on' | 'until'
       return `CI on ${b.ref}`;
     case 'pr':
       return `PR ${b.ref} merging`;
+    case 'steam':
+      return 'computers signed in to Steam';
   }
 }
 
@@ -175,6 +179,7 @@ export const BLOCKER_KIND_HELP: Record<WorkBlockerKind, string> = {
   time: 'a time (until: ISO): clears when it passes',
   ci: 'CI or checks on a pull request (ref: "owner/repo#123"): clears when no check is still running, or the PR merged or closed',
   pr: 'a pull request MERGING (ref: "owner/repo#123"): clears when it merges; one closed without merging asks the requester. Use it for "wait for #1291 to merge"; ci clears when the checks finish, merged or not',
+  steam: 'a pair run that needs Steam (w2459; no ref): fewer computers than its legs are signed in to Steam with different accounts; clears when enough are (FF Factory sets it itself when such a pair is filed or queued)',
 };
 
 export interface BlockerFacts {
@@ -211,6 +216,8 @@ export interface BlockerFacts {
   ciUnreadable?: (ref: string) => { since: number; why: string } | undefined;
   /** A pull request's state (w754, the pr blocker): open, merged, or closed without merging; undefined when unknown. */
   pr?: (ref: string) => { state: 'open' | 'merged' | 'closed'; text: string } | undefined;
+  /** w2459: why the fleet cannot hold this pair run that needs Steam (shared/capacity.ts steamPairShort), undefined when it can. */
+  steamShort?: (pair: WorkPair) => string | undefined;
 }
 
 /**
@@ -321,6 +328,15 @@ export function blockerVerdict(b: WorkBlocker, f: BlockerFacts, waiter?: string)
       const h = b.ref && b.by.startsWith('worker ') ? f.prHealth?.(b.ref) : undefined;
       if (h?.state === 'open' && h.conflict) return { state: 'clear', why: conflictText(b.ref, h.conflict.base) };
       return late(p?.text ?? `PR ${b.ref} is open`);
+    }
+    case 'steam': {
+      // w2459: clears once enough computers are signed in to different Steam accounts for the pair run (busy or offline
+      // ones count: what is left is capacity, and the request goes back to the dispatcher to queue or start).
+      const t = waiter ? f.work(waiter) : undefined;
+      if (!t?.pair?.steam) return { state: 'clear', why: `${waiter ?? 'it'} is no pair run that needs Steam` };
+      const short = f.steamShort?.(t.pair);
+      if (short === undefined && f.steamShort) return { state: 'clear', why: 'enough computers are signed in to different Steam accounts' };
+      return late(short ?? 'this portal does not know the computers\' Steam clients');
     }
   }
 }
@@ -450,5 +466,7 @@ export function blockerProblem(b: Pick<WorkBlocker, 'kind' | 'ref' | 'until' | '
     case 'ci':
     case 'pr':
       return b.ref && CI_REF.test(b.ref) ? undefined : 'blocker.ref: the pull request, "owner/repo#123"';
+    case 'steam':
+      return f.work(self)?.pair?.steam ? undefined : `${self} is no pair run that needs Steam: a steam gate holds only one (w2459)`;
   }
 }

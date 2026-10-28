@@ -4,6 +4,8 @@
 import type { TurnUsage } from './spend.ts';
 import type { GithubPermissionId } from './githubRequirements.ts';
 import type { GhLogin } from './ghLogin.ts';
+import type { SteamClient } from './steam.ts';
+import type { DesktopSession } from './desktop.ts';
 import type { Ask } from './ask.ts';
 
 /** 'blocked': the editor is alive but stuck on a modal dialog, or silent for too long while starting (see unity.blocked). */
@@ -954,6 +956,10 @@ export interface Machine {
   info?: { hostname: string; os: string; node: string; claude?: string; daemon: string; platform?: MachinePlatform };
   /** Its own gh login as its daemon last read it (w1463, shared/ghLogin.ts): the account and scope names, never the token. */
   gh?: GhLogin;
+  /** Its Steam client as its daemon last read it (w2459, shared/steam.ts): installed, running, the signed-in account id and name. */
+  steam?: SteamClient;
+  /** Its desktop session as its daemon last read it (w2459, shared/desktop.ts): a locked screen takes no menu clicks. */
+  desktop?: DesktopSession;
   git?: GitStatus;
   /** The daemon's last clean-up pass (server/cleanup.ts). */
   lastCleanup?: CleanupSummary;
@@ -1944,6 +1950,17 @@ export interface WorkPair {
    * the host, and no other leg (a Mac refuses a multiplayer client, w665; w2282).
    */
   crossOs?: string;
+  /**
+   * Why its legs need Steam (w2459: lobbies, a Steam host or join; request_pair steam, or read from its words): its legs
+   * then go only on computers whose Steam client is signed in, a different Steam account on each (shared/capacity.ts
+   * pairRoom), and while fewer computers than legs are, it is Blocked on Steam (a `steam` gate), not Queued.
+   */
+  steam?: string;
+  /**
+   * Why its legs click the game's menus (w2459: request_pair menus, or read from its words; every Steam pair does): its
+   * legs then go only on computers whose desktop is unlocked (shared/desktop.ts): a locked Mac's menus take no clicks.
+   */
+  menus?: string;
   /** A leg takes timing measurements (exclusive bench tickets): never on a computer that takes no timed runs (m5, w1861). */
   timed?: boolean;
   /** When its legs started together, and where: leg 1 (the host) first. */
@@ -2347,10 +2364,13 @@ export interface WorkPr {
 /**
  * What a blocked request waits on (w643; shared/blockers.ts says when each clears): another request finishing or
  * reporting, a deploy of the portal or a machine's update, a machine coming back, a Claude account's usage limit, a lock
- * (the nightly lab.lock), a time, the CI checks of a pull request, or (w754) a pull request merging.
+ * (the nightly lab.lock), a time, the CI checks of a pull request, (w754) a pull request merging, or (w2459) enough
+ * computers signed in to Steam for a pair run that needs it.
  */
-export type WorkBlockerKind = 'request' | 'deploy' | 'machine' | 'usage' | 'lock' | 'time' | 'ci' | 'pr';
-export const WORK_BLOCKER_KINDS: readonly WorkBlockerKind[] = ['request', 'deploy', 'machine', 'usage', 'lock', 'time', 'ci', 'pr'];
+export type WorkBlockerKind = 'request' | 'deploy' | 'machine' | 'usage' | 'lock' | 'time' | 'ci' | 'pr' | 'steam';
+export const WORK_BLOCKER_KINDS: readonly WorkBlockerKind[] = ['request', 'deploy', 'machine', 'usage', 'lock', 'time', 'ci', 'pr', 'steam'];
+/** The kinds decide_work block may set: `steam` only FF Factory sets (w2459), so it stays out of the dispatcher's always-loaded schema. */
+export const SET_BLOCKER_KINDS: readonly WorkBlockerKind[] = WORK_BLOCKER_KINDS.filter((k) => k !== 'steam');
 
 /** A worker a gate's clearing resumed (w1094, WorkItem.gateResumes). */
 export interface GateResume {
@@ -2370,7 +2390,7 @@ export interface WorkBlocker {
   /**
    * What it names. request: the request id ("w633"). deploy: a machine id for that machine's daemon update, absent for
    * the portal. machine: the machine id. usage: the Claude account (its email or label). lock: the lock ("lab.lock").
-   * ci and pr: the pull request ("owner/repo#123"). time: absent.
+   * ci and pr: the pull request ("owner/repo#123"). time and steam: absent (steam reads the blocked pair run itself).
    */
   ref?: string;
   /** request (and a lock some request holds): clears when that request closes as done (`done`, default) or reports. */
