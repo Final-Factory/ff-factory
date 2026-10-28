@@ -2147,6 +2147,12 @@ export interface WorkItem {
    */
   waitRecorded?: string;
   /**
+   * w2457: when its last gate went (unblocked, re-queued, asked about): a worker report written before then names a wait
+   * already over, so recordReportedWaits makes no gate of it (w2457's own "blocked on a portal deploy" line was recorded
+   * again a minute after that deploy woke it, a wait on the next deploy).
+   */
+  gateEndedAt?: number;
+  /**
    * w2417: every request this one has waited on (a request gate, set by blocked_on or the dispatcher), kept after the gate
    * clears: its workers may read those requests' reports and files with read_work (server/workRead.ts readScope).
    */

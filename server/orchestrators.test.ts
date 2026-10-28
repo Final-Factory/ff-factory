@@ -7415,6 +7415,11 @@ test('w2457: a stopped worker whose report says it waits on an FF Factory change
   agents.waker.cancel(id);
   assert.equal((await watch.tick()).has('w1'), false);
   assert.equal(w.blocked, undefined);
+  // Nor the report its worker wrote after a blocked_on, before that wait cleared (w2457 live: its own "blocked on a portal
+  // deploy" line, read while its resume was still being placed, became a wait on the next deploy).
+  Object.assign(info, { lastResult: 'w1: still open: blocked on a portal deploy', lastResultAt: new Date((w.gateEndedAt ?? 0) - 5_000).toISOString() });
+  assert.equal((await watch.tick()).has('w1'), false, 'a report from before the deploy that woke it');
+  assert.equal(w.blocked, undefined);
   // Before this change the line recorded nothing: w1 idle with no wait, w3 Blocked on its report. That dead wait is flagged
   // once, 30 minutes on, in w3's log.
   Object.assign(info, { lastActivityAt: new Date(clock - 31 * 60_000).toISOString() });

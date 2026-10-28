@@ -122,7 +122,7 @@ test("w2223: a finished worker's rebuildable bulk goes; unpushed work, unpublish
   // The clones that stay are listed for a person, with why.
   const listed = new Map(p.listed.map((l) => [rel(done, l.path), l.why]));
   assert.match(listed.get('revert') ?? '', /work on no remote/);
-  assert.match(listed.get('shotclone') ?? '', /published nowhere else.*out\/look\.png/);
+  assert.match(listed.get('shotclone') ?? '', /published nowhere else.*out[\\/]look\.png/); // path.relative: out\look.png on Windows
   // And they go: the folder, the unpushed clone, the clip and the notes are still there.
   const run = await runCleanup(p.items.filter((i) => within(i.path, done)), guard);
   assert.deepEqual(run.failed, []);

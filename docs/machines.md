@@ -1112,6 +1112,11 @@ and w1891 waited behind it there, and w1789 waited on LothDesktop behind shared 
   shared tickets, and that computer's daemon times them. The answer says to ask again with `via: "leg"` for anything else
   timed (a snippet timed in the editor, a Performance test, a profiler capture, a Mac player), which keeps the hand-off
   above.
+- **Pick the GPU** (w2456): a build's `args` may carry Unity's `-force-device-index N` (`UNITY_SWITCHES`,
+  `shared/timedRun.ts`). On LothLaptop (measured, timed run tr_f076796916, 2026-10-28, Direct3D 11) index **0** is the
+  NVIDIA GeForce RTX 4070 Laptop GPU (the default) and index **1** the integrated AMD Radeon(TM) 610M, the Steam Deck-class
+  GPU: `args: ["-force-device-index", "1"]`. Each leg's player.log `Direct3D:` block, `Renderer:` line, names the GPU it ran on.
+  Windows can reorder adapters (a per-app graphics preference), so a report checks that line rather than trusting the index.
 - **Not yet**: the game repo's bench_queue.py does not read the verdict itself (the guard sees only commands it can parse).
 
 **A play-only timing machine** (w1946, lothsahn, 2026-10-23: "I have a desktop with 16GB ram. Windows takes 12G so there's
