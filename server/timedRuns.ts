@@ -450,6 +450,27 @@ export class TimedRuns {
     return undefined;
   }
 
+  /**
+   * w2442: stop run `id` at a worker's ask (lothsahn, 2026-10-28: "Stop w2434's timing run on LothLaptop now"). Before it
+   * was sent it just ends; sent or running, its daemon is told to end its leg's player and give its ticket back
+   * (machine/timedRunner.ts cancel), now or on its next hello. Its worker gets the usual FAILED result with `why`.
+   * `may` says whether the asking worker may stop it; undefined when it may.
+   */
+  cancel(id: string, why: string, may: (r: TimedRunRecord) => string | undefined): string {
+    const r = this.runs.get(id);
+    if (!r) throw new Error(`the portal has no timed run ${id}`);
+    const refused = may(r);
+    if (refused) throw new Error(refused);
+    if (r.state === 'done' || r.state === 'failed') return `timed run ${id} on ${r.machine} already ended (${r.state}${r.error ? `: ${r.error.slice(0, 120)}` : ''})`;
+    const held = r.state === 'sent' || r.state === 'running';
+    const was = r.state;
+    r.error = `cancelled: ${why}`;
+    this.d.log?.(`timed run ${id}: cancelled (w2442) while ${was} on ${r.machine}: ${why}`);
+    void this.finish(r, 'failed');
+    if (held) this.cancelOn(r.machine, r.id, `cancelled: ${why}`);
+    return `timed run ${id} cancelled (it was ${was} on ${r.machine})${held ? `: ${r.machine}'s daemon ends its leg's player and gives its bench ticket back${this.d.isOnline(r.machine) ? ' now' : ' when it says hello'}` : ''}; its worker ${r.session.slice(0, 8)} is told why`;
+  }
+
   /** w2218: tell `machineId`'s daemon to stop run `id` and give its ticket back (machine/timedRunner.ts cancel); an offline one is told on its hello. */
   private cancelOn(machineId: string, id: string, why: string) {
     const sent = this.d.isOnline(machineId) && this.d.post(machineId, { type: 'timed_run_cancel', id, why });
