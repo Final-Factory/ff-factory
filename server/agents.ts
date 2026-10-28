@@ -104,6 +104,7 @@ import type { BuildHold, HostHealth, TimedVerdict } from '../shared/types.ts';
 import { decideTimedPlace, fleetLoad, isSmallTimed, smallTimedStates, timedAskMark, unavailableWait, TIMED_VERDICT_MS, TIMED_WAIT_IDLE_MIN } from './timedAsk.ts';
 import { notIdle, reachesBig, timedEligible, timedLegStep, timedRelocateStep, timedStartProblem, type LegStep, type Occupant } from './timedLegPlace.ts';
 import { machineAskProblem } from '../shared/machineAsk.ts';
+import { releaseBranchAskProblem } from '../shared/releaseBranchAsk.ts';
 import { StandingAgents } from './standing.ts';
 import type { MachineManager } from './machines.ts';
 import type { CatalogTool, LaunchSpec } from './launch.ts';
@@ -1500,6 +1501,13 @@ export class Agents {
       if (request) this.orchestrators.noteOnRequest(request, `waiting_on_person from worker ${sessionId.slice(0, 8)} refused (w2147): its only ask was a computer ("${clip(what, 160)}"); a capacity wait is Queued, never a question for a person`);
       console.log(`waiting_on_person refused (w2147) for worker ${sessionId.slice(0, 8)}: a capacity ask: ${clip(what, 160)}`);
       throw new Error(capacityAsk);
+    }
+    // w2444: a Steam branch (choose it, set it, move it) is never a card: a release's notes post once it is live on any branch.
+    const branchAsk = releaseBranchAskProblem(what, checked && 'asks' in checked ? checked.asks.map((x) => x.question) : []);
+    if (branchAsk) {
+      if (request) this.orchestrators.noteOnRequest(request, `waiting_on_person from worker ${sessionId.slice(0, 8)} refused (w2444): it asked about a Steam branch ("${clip(what, 160)}"); the patch notes post once the build is live on any branch, and a branch move is a person's own act, never a question`);
+      console.log(`waiting_on_person refused (w2444) for worker ${sessionId.slice(0, 8)}: a Steam branch ask: ${clip(what, 160)}`);
+      throw new Error(branchAsk);
     }
     // w1868: what the request is and what happens after the answer, as the card says them. A daemon older than w1868 has
     // neither in its tool: the card derives them from the request.

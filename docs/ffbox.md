@@ -95,7 +95,8 @@ per rolling 24 hours; operators are not capped.
   Steam once the run's tests pass, sets the main app live on `development` (`scripts/release_lane.py` `SETLIVE`; nothing sets
   `pre-release` or the default branch: Ben or Lothsahn move those by hand), and
   opens a PR for any files the build regenerated. `ff-agents:ci-release` drives it. A requested
-  release is done only when it is live on its branch and its patch notes are posted once, as Max,
+  release is done only when it is live on its branch (landed on the branch the lane sets, `development` included: the
+  notes never wait for `pre-release` or the default, w2444) and its patch notes are posted once, as Max,
   in #dev-patch-notes (from any machine, with `post_as_max`: FFBox posts, [Posting as Max](#posting-as-max-w901)).
 
 ## Crash and desync intake
