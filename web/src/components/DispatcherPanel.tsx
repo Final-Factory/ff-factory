@@ -4,6 +4,7 @@ import { FLAG_LABEL, type AppState, type IntakeSummary, type WorkItem, type Work
 /** The priorities the dashboard sets (w2049), highest first. */
 const PRIORITY_CHOICES: readonly WorkPriority[] = ['urgent', 'high', 'normal', 'low'];
 import { decisionOf } from '../../../shared/decision';
+import { latestLine } from '../../../shared/latestLine';
 import { api } from '../api';
 import { isMine, ledgerOrder } from '../../../shared/workOrder';
 import { WORK_LIVE_LABEL, WORK_LIVE_STATES, liveCounts, type WorkLive, type WorkLiveState } from '../../../shared/workState';
@@ -710,7 +711,7 @@ function WorkRow({ app, w, live, open, onToggle, now }: { app: AppState; w: Work
           {w.outcome && (
             <p className="small">
               <span className="dim">Latest: </span>
-              {w.outcome}
+              {latestLine(w)}
             </p>
           )}
           {w.autoClosed && (

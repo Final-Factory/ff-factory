@@ -74,7 +74,7 @@ import { OPS_ID, OPS_PEOPLE } from './opsWorker.ts';
 import { isSamePerson, personForWork, sessionPerson, tokenPersonForWork } from './vault.ts';
 import { MERGE_ON_GREEN_MARK } from './mergeOnGreen.ts';
 import { commitsIn, normPr, pairCommitsOf, pairPrOf, pairRanCommit, prIn, resultFor, sameCommit, samePr } from './pairRuns.ts';
-import type { AttachmentRef, ConditionalDecision, OpenAsk, WorkNeedsYou, GateResume, Machine, WorkAutoClosed, WorkBlocker, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPair, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
+import type { AttachmentRef, ConditionalDecision, OpenAsk, WorkNeedsYou, GateResume, GitStatus, Machine, WorkAutoClosed, WorkBlocker, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPair, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
 import { WORK_PRIORITIES } from '../shared/types.ts';
 
 /** w2045: the most of a worker's after-merge report a merge-on-green gate keeps (a DONE report is rarely longer). */
@@ -83,6 +83,22 @@ const MERGE_ON_GREEN_REPORT_CHARS = 12_000;
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);
 const BUSY: SessionInfo['status'][] = ['running', 'starting', 'waiting_permission'];
+/** A request Blocked on a machine its worker was cut off on is named to the dispatcher after this long offline (w2433, ledger.offlineNoticeMinutes). */
+export const OFFLINE_NOTICE_MS = 60 * 60_000;
+/** The offline notice's wait (ledger.offlineNoticeMinutes, at least 5 minutes), else OFFLINE_NOTICE_MS. */
+export function offlineNoticeMs(cfg: Pick<Config, 'ledger'>): number {
+  const m = cfg.ledger?.offlineNoticeMinutes;
+  return typeof m === 'number' && Number.isFinite(m) ? Math.max(5, m) * 60_000 : OFFLINE_NOTICE_MS;
+}
+/** What a sandbox's last git report says of the work in it (w2433): whether a restart elsewhere from its pushed branch loses any. */
+export function unpushedText(git: GitStatus | undefined): string {
+  if (!git) return 'its git state is unknown (its daemon never reported it): it may hold unpushed work';
+  const seen = `as last seen at ${git.at.slice(11, 16)} UTC`;
+  if (git.dirty + git.untracked) return `UNPUSHED WORK: ${git.dirty} changed and ${git.untracked} untracked file${git.untracked === 1 ? '' : 's'} on ${git.branch}, not committed (${seen})`;
+  if (!git.upstream) return `UNPUSHED WORK: ${git.branch} has no upstream, so its commits are not pushed (${seen})`;
+  if (git.ahead) return `UNPUSHED WORK: ${git.branch} is ${git.ahead} commit${git.ahead === 1 ? '' : 's'} ahead of ${git.upstream} (${seen})`;
+  return `nothing unpushed: ${git.branch} is clean and pushed${git.head ? ` at ${git.head.sha.slice(0, 12)}` : ''} (${seen})`;
+}
 /** How many times FF Factory re-queues one pair run by itself after a leg broke mid-run (w2304); past it a person looks. */
 export const PAIR_REQUEUE_MAX = 3;
 /** A pair leg's computer offline this long breaks the run (w2304): a daemon restart or a short reconnect is shorter. */
@@ -958,7 +974,7 @@ export class Orchestrators {
       const who = to.map((p) => p.displayName);
       const a = answerAfter([w, ...carriers], raised, who, questionShareKey(wait.key));
       if (a) {
-        r.answered = { by: a.by, at: a.at, ...(a.on !== w.id ? { on: a.on } : {}) };
+        r.answered = { by: a.by, at: a.at, ...(a.on !== w.id ? { on: a.on } : {}), ...(w.outcome ? { outcome: w.outcome } : {}) };
         w.needsYou = r;
         this.stamp(w, `[needs you] not sent: ${a.by} already answered it${a.on !== w.id ? ` on ${a.on}` : ''} at ${a.at.slice(11, 16)} UTC, after the question was raised (w1812): it is not asked again`);
         this.store.putWork(w);
@@ -969,7 +985,7 @@ export class Orchestrators {
     const holder = carriers.find((x) => x.needsYou && !x.needsYou.sharedWith && x.needsYou.key === wait.key) ?? carriers.find((x) => x.needsYou && !x.needsYou.sharedWith && questionShareKey(x.needsYou.key) === questionShareKey(wait.key));
     if (holder) {
       const h = holder.needsYou!;
-      w.needsYou = { ...r, sharedWith: holder.id, ...(h.answered ? { answered: { ...h.answered, on: h.answered.on ?? holder.id } } : {}) };
+      w.needsYou = { ...r, sharedWith: holder.id, ...(h.answered ? { answered: { ...h.answered, on: h.answered.on ?? holder.id, outcome: w.outcome } } : {}) };
       this.stamp(w, `[needs you] not sent again: the same question from worker ${wait.worker} is with ${h.who.join(', ')} as ${holder.id}'s [needs you]${h.answered ? `, answered by ${h.answered.by}` : ''}; an answer on either answers both (w1812)`);
       this.store.putWork(w);
       if (!(h.also ?? []).includes(w.id)) {
@@ -1070,7 +1086,8 @@ export class Orchestrators {
         if (words.length > 1) note = words.join('\n\n');
       }
     }
-    r.answered = { by: by.displayName, at: this.now().toISOString() };
+    // w2433: with the Latest line it answers, which shows as answered until the request's next report.
+    r.answered = { by: by.displayName, at: this.now().toISOString(), ...(w.outcome ? { outcome: w.outcome } : {}) };
     const sid = r.worker;
     // w1812: the same question from the same worker on other requests is answered by this too: none of them waits on input
     // any more, and none is asked again (Ben, w1768: "i already answered this why are you asking me ... still").
@@ -1079,7 +1096,7 @@ export class Orchestrators {
       ? [...this.store.work.values()].filter((x) => x !== w && isOpen(x) && x.needsYou && !x.needsYou.answered && x.needsYou.worker === sid && questionShareKey(x.needsYou.key) === share)
       : [];
     for (const x of also) {
-      x.needsYou!.answered = { ...r.answered, on: w.id };
+      x.needsYou!.answered = { ...r.answered, on: w.id, outcome: x.outcome };
       this.stamp(x, `[needs you] answered by ${by.displayName} on ${w.id}: the same question from worker ${sid}, not asked again (w1812)`);
       this.store.putWork(x);
     }
@@ -3106,6 +3123,11 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const owner = this.gateOwner(w, gates);
     if (!owner) return [];
     const sid = owner.sid;
+    // w2433: a worker its machine's drop stopped mid-turn. One whose process lived through the drop runs on: nothing to resume.
+    const cutOff = gates.filter((g) => g.kind === 'machine' && g.by === `worker ${sid}`);
+    const status = this.store.sessions.get(sid)?.status;
+    if (cutOff.length && cutOff.length === gates.length && status && BUSY.includes(status)) return [sid];
+    const back = cutOff.length ? ` Your turn stopped when ${cutOff.map((g) => g.ref).join(', ')} went offline at ${cutOff[0].at.slice(11, 16)} UTC, and this is your resume in your own sandbox: your folder is as you left it. Check git status for half-written edits, re-pin your Unity instance if you use one (the editor may have restarted), and continue where you left off.` : '';
     const ciGates = gates.filter((g) => g.kind === 'ci');
     // Not the "read its checks" hint when CI could not start (w907: the PR conflicts, or its head never got a run): the worker pushes first.
     const ci = ciGates.length > 0 && !/CI can't run|no CI run exists/.test(cleared);
@@ -3138,7 +3160,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       .join('');
     // w2417: the files each request it waited on published, whatever the report's cut (w2402's three zips, w2403's one).
     const files = this.gatePublished(gates);
-    const note = `${lead}${results}${legs}${files}${yours}${ci ? ` Run ff-pr merge now${prs ? ` (${prs})` : ''}: it merges on green, or names the red run to read (gh run view <run> --log-failed) and fix.` : ''}${deploy ? ' The deploy you waited for has happened: do the check that comes after it now (the live read, the health check), then report.' : ''} Carry on from where you left it.${held ? ` Your own check-in, which the block cancelled, is folded into this message; its note was: ${held.note}` : ''}`;
+    const note = `${lead}${back}${results}${legs}${files}${yours}${ci ? ` Run ff-pr merge now${prs ? ` (${prs})` : ''}: it merges on green, or names the red run to read (gh run view <run> --log-failed) and fix.` : ''}${deploy ? ' The deploy you waited for has happened: do the check that comes after it now (the live read, the health check), then report.' : ''} Carry on from where you left it.${held ? ` Your own check-in, which the block cancelled, is folded into this message; its note was: ${held.note}` : ''}`;
     if (!this.wakeNow(sid, note, w.id)) return [];
     this.noteResume(w, sid, note);
     // Folded in above: not handed back again when the rest clears (unblock's handBackCheckIns).
@@ -4171,6 +4193,106 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   }
 
   /**
+   * w2433: workers a machine's going offline stopped mid-turn (Machines' detach, server/machines.ts). Each open request one
+   * holds, Active or Stalled with no other worker running on it, is Blocked on that machine coming back, the worker's own
+   * gate: the blocker watch clears it once the machine is online and resumes that worker in its own sandbox (unblock), not
+   * Stalled or "Merged, follow-up pending" meanwhile. A worker that waits on a person is left as it is. Returns the workers
+   * that got a gate (their resume is the gate's, so Machines does not resume them as well).
+   */
+  workersCutOff(machineId: string, sessionIds: readonly string[]): string[] {
+    const m = machineId.trim().toLowerCase();
+    const at = this.now().toISOString();
+    const items = [...this.store.work.values()];
+    const gated = new Set<string>();
+    for (const sid of sessionIds) {
+      const s = this.store.sessions.get(sid);
+      if (!s || s.waitingOn || sid === this.dispatcherId) continue;
+      for (const id of holdsOf(sid, items).held) {
+        const w = this.store.work.get(id);
+        if (!w || (w.status !== 'active' && w.status !== 'stalled')) continue;
+        const running = w.sessionIds.filter((o) => o !== sid).map((o) => this.store.sessions.get(o)).some((o) => o && BUSY.includes(o.status) && o.machineId?.toLowerCase() !== m);
+        if (running) continue;
+        const gate = this.makeGate({ kind: 'machine', ref: m, what: `its worker ${sid} was stopped mid-turn when ${m} went offline` }, at, `worker ${sid}`);
+        w.blocked = gate;
+        w.alsoBlocked = undefined;
+        w.stalled = undefined;
+        w.status = 'blocked';
+        this.stamp(w, `blocked on ${m} coming back online: its worker ${sid} was stopped mid-turn when ${m} went offline (w2433); that worker is resumed in its own sandbox when ${m} is back`);
+        this.store.putWork(w);
+        gated.add(sid);
+      }
+    }
+    if (gated.size) console.log(`ledger: ${m} went offline under ${[...gated].join(', ')} mid-turn; their requests are Blocked on it (w2433)`);
+    return [...gated];
+  }
+
+  /**
+   * w2433: a worker that ends a turn is alive, so the gate on its machine it was given when the machine dropped (workersCutOff:
+   * a short drop its process lived through) goes; a request with no other gate is Active again.
+   */
+  private dropCutOffGates(sid: string) {
+    const by = `worker ${sid}`;
+    for (const w of this.store.work.values()) {
+      if (w.status !== 'blocked' || !w.sessionIds.includes(sid)) continue;
+      const gates = gatesOf(w);
+      const rest = gates.filter((g) => !(g.kind === 'machine' && g.by === by));
+      if (rest.length === gates.length) continue;
+      w.blocked = rest[0];
+      w.alsoBlocked = rest.length > 1 ? rest.slice(1) : undefined;
+      if (!rest.length) w.status = 'active';
+      this.stamp(w, `its worker ${sid} ended a turn after its machine's drop, so the wait on its machine is over (w2433)`);
+      this.store.putWork(w);
+    }
+  }
+
+  /**
+   * w2433: requests Blocked on a machine that has been offline past ledger.offlineNoticeMinutes (default 60) since it
+   * stopped their workers mid-turn: one `[ledger]` notice per machine names them, their workers and sandboxes, and whether
+   * each sandbox holds unpushed work (its daemon's last git report), so the dispatcher can start them again elsewhere from
+   * the pushed branch. Once per gate. Returns the requests named. Called by the blocker watch.
+   */
+  noticeLongOffline(): string[] {
+    const now = this.now().getTime();
+    const after = offlineNoticeMs(this.d.cfg);
+    const byMachine = new Map<string, { w: WorkItem; g: WorkBlocker }[]>();
+    for (const w of this.store.work.values()) {
+      if (w.status !== 'blocked') continue;
+      for (const g of gatesOf(w)) {
+        if (g.kind !== 'machine' || !g.ref || g.noticedAt || !gateSetter(g) || now - Date.parse(g.at) < after) continue;
+        if (this.d.machineOnline?.(g.ref) !== false) continue;
+        byMachine.set(g.ref, [...(byMachine.get(g.ref) ?? []), { w, g }]);
+      }
+    }
+    if (!byMachine.size) return [];
+    const { machines } = this.d.places();
+    const named: string[] = [];
+    for (const [m, list] of byMachine) {
+      const since = Math.min(...list.map((x) => Date.parse(x.g.at)));
+      const boxes = machines.find((x) => x.id.toLowerCase() === m)?.sandboxes ?? [];
+      const lines = list.map(({ w, g }) => {
+        const sid = gateSetter(g)!;
+        const box = this.store.sessions.get(sid)?.machineSandbox;
+        const sb = box ? boxes.find((b) => b.id === box) : undefined;
+        return `- ${w.id} "${clip(w.title, 80)}" (${names(w.requesters)}'s): worker ${sid}${box ? ` in ${m}/${box}` : ''}: ${box ? unpushedText(sb?.git) : 'no sandbox recorded, so its git state is unknown'}`;
+      });
+      const minutes = Math.round((now - since) / 60_000);
+      const text = [
+        `[ledger] ${m} has been offline ${minutes} min (since ${new Date(since).toISOString().slice(11, 16)} UTC). These requests are Blocked on it coming back: their workers were stopped mid-turn when it went offline (w2433).`,
+        ...lines,
+        `Each resumes by itself in its own sandbox when ${m} is back. To go on without waiting, start one again elsewhere from its pushed branch (stop its old worker first, so it does not resume beside the new one): work marked UNPUSHED stays in that sandbox until ${m} is back, so weigh that before you move it.`,
+      ].join('\n');
+      this.toDispatcher(text, list[0].w.requesters[0]);
+      for (const { w, g } of list) {
+        g.noticedAt = new Date(now).toISOString();
+        this.stamp(w, `the dispatcher was told ${m} has been offline ${minutes} min, with its worker's sandbox state, to start it elsewhere if it should not wait (w2433)`);
+        this.store.putWork(w);
+        named.push(w.id);
+      }
+    }
+    return named;
+  }
+
+  /**
    * The merge-on-green pilot at blocked_on (w2045, server/mergeOnGreen.ts): a request in the arm waiting on CI alone may
    * leave its worker's after-merge report on the gate (merge on green). Without one, the worker is told it may; with one
    * that does not fit (out of the arm, other gates, no head, no DONE line for this request), the wait is set without it and
@@ -4388,6 +4510,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   workerTurnEnded(s: SessionInfo, text: string) {
     // What this turn was on, before its markers close any of it.
     const served = servedBy(s.id, [...this.store.work.values()]);
+    this.dropCutOffGates(s.id);
     this.intakeMarkers(s, text);
     this.doneMarkers(s, text);
     this.mergedMentions(s, text);
@@ -4401,6 +4524,8 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       const latest = open.has(w.id) ? clip(open.get(w.id)!, 300) : line;
       if (!latest) continue;
       w.outcome = latest;
+      // w2433: a report after the answer is the Latest line again, whatever it says (shared/latestLine.ts).
+      if (w.needsYou?.answered?.outcome !== undefined) delete w.needsYou.answered.outcome;
       this.stamp(w, `worker ${s.id}: ${latest}`);
       this.stampPublished(w);
       this.store.putWork(w);

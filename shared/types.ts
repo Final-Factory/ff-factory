@@ -2277,8 +2277,12 @@ export interface WorkNeedsYou {
   after?: string;
   /** Sent in the one-off digest of waits already open when w1378 shipped, or after a restart. */
   digest?: boolean;
-  /** A person answered it with a note in their own turn: who and when, and on which request when not this one (w1812). */
-  answered?: { by: string; at: string; on?: string };
+  /**
+   * A person answered it with a note in their own turn: who and when, and on which request when not this one (w1812).
+   * `outcome` (w2433): the request's Latest line when it was answered; while it is still that line, the Latest shows the
+   * answer instead (shared/latestLine.ts), since the line is the question.
+   */
+  answered?: { by: string; at: string; on?: string; outcome?: string };
   /**
    * Of several questions, the ones a person's note answered so far, by index into `asks` (w1868, w1821: the frame look was
    * answered and the Station strip question still waited). The record is answered, and its worker resumes, once all are.
@@ -2393,6 +2397,11 @@ export interface WorkBlocker {
    * (Windows tests: failure)"); `sha` the held head, whose hold its person was told of once.
    */
   held?: { sha: string; text: string; at: string };
+  /**
+   * machine, set for a worker its machine's going offline stopped mid-turn (w2433, docs/orchestrators.md "Waiting, Queued,
+   * Blocked"): when the dispatcher was told the machine had been offline past ledger.offlineNoticeMinutes. Once per gate.
+   */
+  noticedAt?: string;
 }
 
 /**

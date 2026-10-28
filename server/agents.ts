@@ -831,6 +831,8 @@ export class Agents {
     machines.placeAgain = (info) => this.placeAgain.answer(info);
     // w1944: a daemon that connects (every one after a portal restart, which drops a capacity ping still waiting) is room news.
     machines.onOnline = (id) => this.orchestrators.capacityMayHaveFreed(`${id}'s daemon connected`);
+    // w2433: a worker its machine's going offline stopped mid-turn: its requests are Blocked on that machine.
+    machines.workersCutOff = (id, sids) => this.orchestrators.workersCutOff(id, sids);
     this.placeAgainTick = setInterval(() => this.placeAgain.tick(), 60_000);
     this.placeAgainTick.unref?.();
     this.timers = new Timers(

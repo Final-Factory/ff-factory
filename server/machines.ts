@@ -592,6 +592,13 @@ export class MachineManager {
 
   /** Agents that were mid-turn when a machine's link dropped: resumed if its daemon comes back without them. */
   private readonly cutOff = new Map<string, { at: number; why: string; sessions: string[] }>();
+  /** When each machine's link last dropped while this server ran (w2433: the sandbox holds restart from its return). */
+  private readonly droppedAt = new Map<string, number>();
+  /**
+   * Workers cut off mid-turn by a machine's link dropping (w2433, wired by index.ts to the ledger): their requests are
+   * marked Blocked on the machine. Returns the workers that got a gate, whose resume the gate's clearing does.
+   */
+  workersCutOff?: (machineId: string, sessionIds: string[]) => string[];
   /** Why the next drop of a machine's link is expected (a forced redeploy, a daemon restart); false: do not resume. */
   private readonly dropWhy = new Map<string, string | false>();
 
@@ -2082,11 +2089,16 @@ export class MachineManager {
     const midTurn = [...this.sessions.sessions.values()]
       .filter((s) => s.info.machineId === id && s instanceof RemoteSession && cutOffMidTurn(s.info, s.seenLive, Date.now()))
       .map((s) => s.info.id);
+    // w2433: a worker cut off mid-turn marks the requests it holds Blocked on this machine; the gate's clearing (the blocker
+    // watch, once the machine is online) resumes it, so it is not resumed here as well.
+    const gated = why !== false && midTurn.length ? new Set(this.workersCutOff?.(id, midTurn) ?? []) : new Set<string>();
+    const resume = midTurn.filter((sid) => !gated.has(sid));
     if (why === false) this.cutOff.delete(id);
-    else if (midTurn.length) {
+    else if (resume.length) {
       const had = this.cutOff.get(id);
-      this.cutOff.set(id, { at: had?.at ?? Date.now(), why: had?.why ?? why, sessions: [...new Set([...(had?.sessions ?? []), ...midTurn])] });
+      this.cutOff.set(id, { at: had?.at ?? Date.now(), why: had?.why ?? why, sessions: [...new Set([...(had?.sessions ?? []), ...resume])] });
     }
+    if (why !== false) this.droppedAt.set(id, Date.now());
     // Its processes may well still be running, but nothing reaches them: show them stopped until it is back.
     for (const s of this.sessions.sessions.values()) {
       if (s.info.machineId !== id || !(s instanceof RemoteSession)) continue;
@@ -2174,6 +2186,8 @@ export class MachineManager {
         if (msg.liveView) this.onLiveHello?.(id, Array.isArray(msg.liveViews) ? msg.liveViews : undefined);
         const live = new Set(msg.live);
         this.helloLive.set(id, { at: Date.now(), live });
+        const dropped = this.droppedAt.get(id);
+        this.droppedAt.delete(id);
         for (const sid of m.sessionIds) {
           const s = this.handle(sid);
           if (!s) continue;
@@ -2182,6 +2196,11 @@ export class MachineManager {
           // Taken back alive (w605's agent hosts): the hold on its sandbox (w613) is over.
           if (s.liveFlag && s.info.heldSince) {
             delete s.info.heldSince;
+            this.store.putSession(s.info);
+          } else if (!s.liveFlag && s.info.heldSince && dropped !== undefined) {
+            // w2433: the hold counts from its machine's return, not from its drop: a machine back after an hour offline would
+            // otherwise have its sandboxes released at the next place-again pass, before their workers resume in them.
+            s.info.heldSince = new Date().toISOString();
             this.store.putSession(s.info);
           }
         }
