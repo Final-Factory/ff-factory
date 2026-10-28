@@ -525,6 +525,8 @@ const timedRuns = new TimedRuns({
     for (const id of requests) agents.orchestrators.noteMove(id, line);
   },
   log: (line) => console.log(line),
+  // w2446: the run's "here" reaches the bench queue before the run does
+  beforeSend: () => machines.pushBenchPriorities(),
   // w1996: a small worker computer that takes timed runs times builds made on the big ones, like a play-only one;
   // w2442: so does a big one BIG_TIMED_RUNS names (LothDesktop)
   smallWorker: (m) => {
