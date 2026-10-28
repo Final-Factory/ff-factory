@@ -28,6 +28,8 @@ export const BLOCKER_STUCK_MS: Record<WorkBlockerKind, number | undefined> = {
   pr: 7 * DAY,
   // w2459: signing in to Steam is a person's act; a week without it is worth their look.
   steam: 7 * DAY,
+  // w2476: a leg that runs a day without its DONE or a final report is worth a person's look.
+  worker: DAY,
 };
 
 /**
@@ -98,6 +100,8 @@ export function blockerName(b: Pick<WorkBlocker, 'kind' | 'ref' | 'on' | 'until'
       return `PR ${b.ref} merging`;
     case 'steam':
       return 'computers signed in to Steam';
+    case 'worker':
+      return `worker ${b.ref}'s part`;
   }
 }
 
@@ -180,6 +184,7 @@ export const BLOCKER_KIND_HELP: Record<WorkBlockerKind, string> = {
   ci: 'CI or checks on a pull request (ref: "owner/repo#123"): clears when no check is still running, or the PR merged or closed',
   pr: 'a pull request MERGING (ref: "owner/repo#123"): clears when it merges; one closed without merging asks the requester. Use it for "wait for #1291 to merge"; ci clears when the checks finish, merged or not',
   steam: 'a pair run that needs Steam (w2459; no ref): fewer computers than its legs are signed in to Steam with different accounts; clears when enough are (FF Factory sets it itself when such a pair is filed or queued)',
+  worker: "another worker of the same request (w2476; ref: its session id): clears when it says DONE for its part or stops with a final report (no still-open line); FF Factory sets it from a stopped worker's report that waits on it",
 };
 
 export interface BlockerFacts {
@@ -218,6 +223,8 @@ export interface BlockerFacts {
   pr?: (ref: string) => { state: 'open' | 'merged' | 'closed'; text: string } | undefined;
   /** w2459: why the fleet cannot hold this pair run that needs Steam (shared/capacity.ts steamPairShort), undefined when it can. */
   steamShort?: (pair: WorkPair) => string | undefined;
+  /** w2476: a worker's report when it stopped after `since` (ms) with a final one on `workId` (no still-open line), else undefined. */
+  workerEnded?: (sessionId: string, since: number, workId: string) => string | undefined;
 }
 
 /**
@@ -337,6 +344,18 @@ export function blockerVerdict(b: WorkBlocker, f: BlockerFacts, waiter?: string)
       const short = f.steamShort?.(t.pair);
       if (short === undefined && f.steamShort) return { state: 'clear', why: 'enough computers are signed in to different Steam accounts' };
       return late(short ?? 'this portal does not know the computers\' Steam clients');
+    }
+    case 'worker': {
+      // w2476: another worker of the same request: its DONE for its part, a final report, or its leaving the request clears it.
+      const t = waiter ? f.work(waiter) : undefined;
+      const sid = b.ref ?? '';
+      if (!t) return { state: 'clear', why: `${waiter ?? 'the request'} is not in the ledger` };
+      const done = t.done?.[sid];
+      if (done && (Date.parse(done.at) || 0) > at) return { state: 'clear', why: `worker ${sid} said DONE for its part${done.report ? `: ${firstLine(done.report)}` : ''}` };
+      if (!t.sessionIds.includes(sid) || t.movedOff?.[sid]) return { state: 'clear', why: `worker ${sid} is no longer on ${t.id}` };
+      const ended = f.workerEnded?.(sid, at, t.id);
+      if (ended !== undefined) return { state: 'clear', why: `worker ${sid} stopped with its final report${ended ? `: ${firstLine(ended)}` : ''}` };
+      return late(`worker ${sid} is still on its part`);
     }
   }
 }
@@ -470,5 +489,7 @@ export function blockerProblem(b: Pick<WorkBlocker, 'kind' | 'ref' | 'until' | '
       return b.ref && CI_REF.test(b.ref) ? undefined : 'blocker.ref: the pull request, "owner/repo#123"';
     case 'steam':
       return f.work(self)?.pair?.steam ? undefined : `${self} is no pair run that needs Steam: a steam gate holds only one (w2459)`;
+    case 'worker':
+      return b.ref && f.work(self)?.sessionIds.includes(b.ref) ? undefined : `blocker.ref: a worker's session id on ${self} (w2476)`;
   }
 }

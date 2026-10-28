@@ -2367,10 +2367,10 @@ export interface WorkPr {
  * (the nightly lab.lock), a time, the CI checks of a pull request, (w754) a pull request merging, or (w2459) enough
  * computers signed in to Steam for a pair run that needs it.
  */
-export type WorkBlockerKind = 'request' | 'deploy' | 'machine' | 'usage' | 'lock' | 'time' | 'ci' | 'pr' | 'steam';
-export const WORK_BLOCKER_KINDS: readonly WorkBlockerKind[] = ['request', 'deploy', 'machine', 'usage', 'lock', 'time', 'ci', 'pr', 'steam'];
-/** The kinds decide_work block may set: `steam` only FF Factory sets (w2459), so it stays out of the dispatcher's always-loaded schema. */
-export const SET_BLOCKER_KINDS: readonly WorkBlockerKind[] = WORK_BLOCKER_KINDS.filter((k) => k !== 'steam');
+export type WorkBlockerKind = 'request' | 'deploy' | 'machine' | 'usage' | 'lock' | 'time' | 'ci' | 'pr' | 'steam' | 'worker';
+export const WORK_BLOCKER_KINDS: readonly WorkBlockerKind[] = ['request', 'deploy', 'machine', 'usage', 'lock', 'time', 'ci', 'pr', 'steam', 'worker'];
+/** The kinds decide_work block may set: `steam` (w2459) and `worker` (w2476) only FF Factory sets, so it stays out of the dispatcher's always-loaded schema. */
+export const SET_BLOCKER_KINDS: readonly WorkBlockerKind[] = WORK_BLOCKER_KINDS.filter((k) => k !== 'steam' && k !== 'worker');
 
 /** A worker a gate's clearing resumed (w1094, WorkItem.gateResumes). */
 export interface GateResume {
@@ -2391,6 +2391,7 @@ export interface WorkBlocker {
    * What it names. request: the request id ("w633"). deploy: a machine id for that machine's daemon update, absent for
    * the portal. machine: the machine id. usage: the Claude account (its email or label). lock: the lock ("lab.lock").
    * ci and pr: the pull request ("owner/repo#123"). time and steam: absent (steam reads the blocked pair run itself).
+   * worker (w2476): another worker's session id on the same request, whose DONE for its part or final report clears it.
    */
   ref?: string;
   /** request (and a lock some request holds): clears when that request closes as done (`done`, default) or reports. */
