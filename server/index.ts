@@ -860,7 +860,9 @@ const blockerWatch = new BlockerWatch({
   orchestrators: agents.orchestrators,
   portalSha: () => appVersion().sha,
   daemonSha: (id) => agents.daemonSha?.(id),
-  online: (id) => (store.machines.has(id.toLowerCase()) ? machines.isOnline(id.toLowerCase()) : undefined),
+  // w2474: online once its daemon has said hello on this link, not when the socket opens: the hello lifts the waits of
+  // workers that ran on through the drop (Machines.workersLived), so the watch never resumes one still mid-turn.
+  online: (id) => (store.machines.has(id.toLowerCase()) ? machines.hasHello(id.toLowerCase()) : undefined),
   paused: (id) => !!store.machines.get(id.toLowerCase())?.pause?.paused,
   // A usage gate naming a vault token (w1109: the dispatcher token's stop) clears when that token's owner's pool can serve a
   // worker again, on that token or another; any other account when its meters are clear.
