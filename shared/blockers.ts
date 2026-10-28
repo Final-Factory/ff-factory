@@ -385,7 +385,7 @@ const byId = (a: string, b: string) => (Number(a.slice(1)) || 0) - (Number(b.sli
  * asks for); then the request a timed leg in the cycle was filed for (it holds the commit the leg needs); then the one
  * blocked longest.
  */
-export function cycleBreak(cycle: readonly string[], f: Pick<BlockerFacts, 'work' | 'reportedSince'>): { id: string; gate: WorkBlocker; why: string } | undefined {
+export function cycleBreak(cycle: readonly string[], f: Pick<BlockerFacts, 'work' | 'reportedSince' | 'deliveredSince'>): { id: string; gate: WorkBlocker; why: string } | undefined {
   const sides = cycle
     .map((id, i) => {
       const w = f.work(id);
@@ -396,7 +396,9 @@ export function cycleBreak(cycle: readonly string[], f: Pick<BlockerFacts, 'work
     .filter((s): s is { w: WorkItem; gate: WorkBlocker; next: WorkItem | undefined } => !!s);
   if (!sides.length) return undefined;
   const loop = [...cycle, cycle[0]].join(' -> ');
-  const news = sides.find((s) => s.next && f.reportedSince?.(s.next, Date.parse(s.gate.at) || 0));
+  // w2464: a pair run's news is its delivered result (its host leg's "For <waiter>:" line), never a leg's progress line.
+  const since = (s: { gate: WorkBlocker }) => Date.parse(s.gate.at) || 0;
+  const news = sides.find((s) => s.next && (s.next.pair ? f.deliveredSince?.(s.next, since(s), s.w.id) : f.reportedSince?.(s.next, since(s))));
   if (news) return { id: news.w.id, gate: news.gate, why: `a wait cycle (${loop}): ${news.next!.id}'s worker reported since ${news.w.id} was blocked on it, and waits on ${news.w.id} in turn, so ${news.w.id} acts on that report` };
   const parent = sides.find((s) => cycle.some((id) => f.work(id)?.timedLeg?.for === s.w.id));
   if (parent) return { id: parent.w.id, gate: parent.gate, why: `a wait cycle (${loop}): ${parent.w.id} filed the timed leg in it, and holds what the leg waits for` };

@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { BLOCKER_STUCK_MS, CI_NO_RUN_MS, CI_UNREADABLE_MS, conflictText, cycleBreak, waitCycles, blockerName, blockerProblem, blockerVerdict, gatesName, gatesOf, isWith, latestWorker, newestFirst, prRefOf, sameGate, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
 import type { WorkBlocker, WorkItem } from '../shared/types.ts';
+import { requestWaitOf } from '../shared/workState.ts';
 import { checksState, ghChecks, ghPr, ghPrHealth, prHealthOf, runsState } from './blockerWatch.ts';
 import type { RunResult } from './proc.ts';
 
@@ -396,6 +397,19 @@ test('w2357: the side of a cycle that resumes: the one whose next reported since
   const b = item('w2', { status: 'blocked', blocked: g('w1', 3) });
   assert.equal(cycleBreak(['w1', 'w2'], facts([a, b]))!.id, 'w2');
   assert.equal(cycleBreak(['w1', 'w2'], facts([item('w1'), item('w2')])), undefined, 'no side Blocked: nothing to clear');
+});
+
+test("w2464: a pair leg's lobby name is no wait back, and its progress line is no news for the cycle break", () => {
+  const line = 'w2463: still open: waiting for leg 1 (BEAST) to host "w2450-same-beast", then step B, ff-leftovers and DONE';
+  const parent = item('w2450', { status: 'blocked', blocked: block({ kind: 'request', ref: 'w2463', on: 'report', at: ago(1) }) });
+  const pair = item('w2463', { pair: { legs: 2, for: 'w2450' } });
+  assert.deepEqual(waitCycles([parent, pair], (w) => (w.id === 'w2463' ? requestWaitOf(line, w.id) : undefined)), [], 'no wait on w2450, no cycle');
+  // Were it a cycle, a pair leg's turn end (reportedSince) is not its result; only its delivered "For w2450:" is.
+  const pairGate = { ...pair, status: 'blocked' as const, blocked: block({ kind: 'request', ref: 'w2450', at: ago(3) }) };
+  const r = cycleBreak(['w2450', 'w2463'], facts([parent, pairGate], { reportedSince: (w) => w.id === 'w2463', deliveredSince: () => false }))!;
+  assert.doesNotMatch(r.why, /w2463's worker reported since/);
+  const d = cycleBreak(['w2450', 'w2463'], facts([parent, pairGate], { reportedSince: () => false, deliveredSince: (w, _s, waiter) => w.id === 'w2463' && waiter === 'w2450' }))!;
+  assert.match(d.why, /w2463's worker reported since w2450 was blocked on it/);
 });
 
 test('w2377: a timed leg\'s turn with no result leaves its parent Blocked; the leg itself Blocked after the parent\'s gate clears it', () => {

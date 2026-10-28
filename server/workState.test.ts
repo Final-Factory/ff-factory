@@ -660,6 +660,14 @@ test("w1841 (e): a worker waiting on files from another request's worker is Bloc
   assert.equal(requestWaitOf('w2401: still open: waiting for the bench ticket, then the report to w2396', 'w2401'), undefined);
   assert.equal(requestWaitOf("w2338: still open: waiting for w2335's worker to send its fix commit, then the fix-side legs", 'w2338'), 'w2335');
   assert.equal(requestWaitOf('w2338: still open: waiting for w2335\'s commit, to report "For w2335:" after', 'w2338'), 'w2335');
+  // w2464: an id inside a name, a path or quotes is no wait; one standing alone still is.
+  assert.equal(requestWaitOf('w2463: still open: waiting for leg 1 (BEAST) to host "w2450-same-beast", then step B, ff-leftovers and DONE', 'w2463'), undefined);
+  for (const l of ['waiting for leg 1 to host w2450-same-beast', 'waiting for the w2450_proof capture', 'blocked on lobby `w2450`', 'waiting for ffbox-f/w2450 to build', 'waiting on specs/w2450/proofs', 'needs the w2450.zip save', "waiting on the lobby 'w2450-x'"]) {
+    assert.equal(requestWaitOf(`w2463: still open: ${l}`, 'w2463'), undefined, l);
+  }
+  for (const l of ['waiting on w2450', 'blocked on w2450 finishing', "waiting for w2450's worker", 'blocked on w2450.', 'blocked on w2450, then the PR', 'blocked on (w2450)', 'waiting on w2450 - its report']) {
+    assert.equal(requestWaitOf(`w2463: still open: ${l}`, 'w2463'), 'w2450', l);
+  }
   const w = item('w1818', { sessionIds: ['b45c63e0'] });
   const s = session('b45c63e0', { status: 'stopped', lastResult: line });
   const l = one(w, [s], [item('w1761')])!;

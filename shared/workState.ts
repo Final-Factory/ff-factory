@@ -300,12 +300,19 @@ export const outsideDeclared = (d: Pick<NonNullable<SessionInfo['waitingOn']>, '
  * report" waits on a bench lock, and read as a wait on w2396 it made a false cycle with w2396 (Blocked on that report)
  * that resumed w2396's worker for nothing, twice in five minutes.
  */
-const WAITS_ON_WORK = /\b(?:needs?|waiting (?:for|on)|waits (?:for|on)|blocked on|until)\b([^;.]{0,140})/gi;
+const WAITS_ON_WORK = /\b(?:needs?|waiting (?:for|on)|waits (?:for|on)|blocked on|until)\b((?:[^;.]|\.(?=\w)){0,140})/gi;
 const ADDRESSEE = /\bfor\s+w\d+\b[*_`]*\s*[:—–]/gi;
+/**
+ * w2464: a request id counts only as a token of its own, not inside quotes or as part of a name or a path. w2463's pair
+ * leg wrote `waiting for leg 1 (BEAST) to host "w2450-same-beast"` (a lobby name), the ledger read a wait on w2450, found a
+ * cycle with w2450 (Blocked on w2463) and woke w2450's worker for nothing. "w2450's worker" and "w2450." still count.
+ */
+const QUOTED = /"[^"\n]*"|“[^”\n]*”|`[^`\n]*`/g;
+const LONE_ID = /(?<![\w/\\.-])(w\d+)(?![\w/\\]|[-.]\w)/i;
 export function requestWaitOf(line: string, selfId: string): string | undefined {
-  const body = line.replace(/^\s*w\d+\s*[:—–-]\s*(?:still open|not done)\s*:?/i, '').replace(ADDRESSEE, ' ');
+  const body = line.replace(/^\s*w\d+\s*[:—–-]\s*(?:still open|not done)\s*:?/i, '').replace(ADDRESSEE, ' ').replace(QUOTED, ' ');
   for (const m of body.matchAll(WAITS_ON_WORK)) {
-    const id = /\b(w\d+)\b/i.exec(m[1].split(/\bthen\b/i)[0])?.[1]?.toLowerCase();
+    const id = LONE_ID.exec(m[1].split(/\bthen\b/i)[0])?.[1]?.toLowerCase();
     if (id && id !== selfId.toLowerCase()) return id;
   }
   return undefined;
