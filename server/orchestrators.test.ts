@@ -19,7 +19,7 @@ import { poolForRef, type GatePoolToken } from './usageGate.ts';
 import { personForWork, sessionPerson, setVaultContext } from './vault.ts';
 import { fakeToken, useFakeVault } from './testVault.ts';
 import { parseNotice } from '../shared/notices.ts';
-import { requestWaitOf } from '../shared/workState.ts';
+import { portalWaitIn, requestWaitOf } from '../shared/workState.ts';
 import { latestLine } from '../shared/latestLine.ts';
 import { HELD_MARK, inPersonWords } from '../shared/conditional.ts';
 import { splitReply, splitSent } from '../shared/replies.ts';
@@ -7378,6 +7378,55 @@ test('w2422: a stopped worker whose report says it is blocked on another request
   Object.assign(info, { lastResult: 'w1: still open: blocked on w2 again', lastResultAt: new Date(clock - REPORTED_WAIT_MS - 60_000).toISOString() });
   assert.equal((await watch.tick()).has('w1'), false);
   assert.equal(w.blocked, undefined);
+});
+
+test('w2457: a stopped worker whose report says it waits on an FF Factory change (w2434: "blocked on FF Factory letting lothdesktop grant …") is gated on the next portal deploy and resumed when it lands; a request waiting on it meanwhile is flagged once', async (t) => {
+  const { store, agents, o, dispatcher, call } = await setupOnMachine(t);
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }, { id: 'w2', status: 'done' }, { id: 'w3', status: 'active' }]);
+  let sha = 'aaa1111';
+  (o as unknown as { d: { deploySha: () => string } }).d.deploySha = () => sha;
+  let clock = Date.now();
+  const watch = new BlockerWatch({ store, orchestrators: o, now: () => clock, portalSha: () => sha, checkInPending: (id) => agents.waker.pending(id) !== undefined });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Time it', title: 'w1: A/B', work_id: 'w1' });
+  assert.equal(started.isError, false, started.text);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const info = store.sessions.get(id)!;
+  await until('its first turn', () => info.status === 'idle');
+  const w = store.work.get('w1')!;
+  // w3 (w2446) waits on w1's report, as blocked_on reports recorded it, while w1's worker sat idle.
+  Object.assign(store.work.get('w3')!, { status: 'blocked', blocked: { kind: 'request', ref: 'w1', on: 'report', what: "w1's worker reporting", at: new Date(clock).toISOString(), by: 'worker zz' } });
+  // w2434 at 03:44 UTC: the line names no open request (w2, closed, is quoted), only FF Factory.
+  Object.assign(info, { status: 'stopped', lastActivityAt: new Date(clock - 60_000).toISOString(), lastResult: 'w1: still open: blocked on FF Factory letting lothdesktop grant the exclusive ticket to timed runs (the w2 gate refused two), or lothsahn naming another timing machine', lastResultAt: new Date(clock - 60_000).toISOString() });
+  assert.match((await watch.tick()).get('w1') ?? '', /^recorded: the wait on a portal deploy its worker \w+'s report names \(w2457\)/);
+  assert.deepEqual([w.status, w.blocked?.kind, w.blocked?.ref, w.blocked?.sha, w.blocked?.by], ['blocked', 'deploy', undefined, 'aaa1111', `worker ${id}`]);
+  assert.equal(store.work.get('w3')!.log.some((l) => /flagged/.test(l)), false, 'w1 waits on something now: no dead wait');
+  // Hours pass with no deploy: it stays Blocked, nobody is resumed.
+  clock += 3 * 3600_000;
+  assert.equal((await watch.tick()).has('w1'), false);
+  assert.equal(agents.waker.pending(id), undefined);
+  // The fix deploys (the portal runs another commit): the worker is resumed within a minute, with no person's nudge.
+  sha = 'bbb2222';
+  assert.match((await watch.tick()).get('w1') ?? '', /^clear: the portal runs bbb2222 now \(aaa1111 when it was blocked\)/);
+  assert.equal(w.status, 'active');
+  const wake = agents.waker.pending(id)!;
+  assert.ok(wake && Date.parse(wake.at) - Date.now() <= 61_000, 'resumed within a minute');
+  // The same report is not recorded again.
+  agents.waker.cancel(id);
+  assert.equal((await watch.tick()).has('w1'), false);
+  assert.equal(w.blocked, undefined);
+  // Before this change the line recorded nothing: w1 idle with no wait, w3 Blocked on its report. That dead wait is flagged
+  // once, 30 minutes on, in w3's log.
+  Object.assign(info, { lastActivityAt: new Date(clock - 31 * 60_000).toISOString() });
+  assert.match((await watch.tick()).get('w3') ?? '', /^flagged: w1, which it waits on, has nothing to wake it: its worker \w+ stopped 31 min ago/);
+  assert.match(store.work.get('w3')!.log.at(-1)!, /flagged \(w2457\): w1, which it waits on, has nothing to wake it/);
+  assert.equal((await watch.tick()).has('w3'), false, 'once');
+  // Not a wait on CI or a pull request in the ff-factory repo, nor a line about FF Factory that waits on nothing.
+  assert.equal(portalWaitIn('w1: still open: blocked on CI on Final-Factory/ff-factory#743'), false);
+  assert.equal(portalWaitIn('w1: still open: waiting for CI on the FF Factory PR'), false);
+  assert.equal(portalWaitIn('w1: still open: the FF Factory fix is merged; next the timing run'), false);
+  assert.equal(portalWaitIn('w1: still open: waiting for the portal deploy, then the rerun'), true);
+  assert.equal(portalWaitIn('w1: still open: waiting on ff-factory #742 to deploy'), true);
 });
 
 test("w2426: a request Blocked on a pair run's report stays Blocked through its client leg's mid-run turns (w2425's client woke w2419 twice), and clears on the host leg's For line with DONE", async (t) => {

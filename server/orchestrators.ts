@@ -4194,8 +4194,9 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    * closed). The gate is the worker's own, from the time of its report, so the blocker watch clears it as any other and
    * resumes that worker (unblock). Returns false when it records nothing (not open, already gated, not in the ledger).
    */
-  recordReportedWait(id: string, sessionId: string, a: { ref: string; onReport: boolean; line: string; at: number; key: string }): boolean {
+  recordReportedWait(id: string, sessionId: string, a: ({ ref: string; onReport: boolean } | { deploy: 'portal' }) & { line: string; at: number; key: string }): boolean {
     const w = this.store.work.get(id.toLowerCase());
+    if ('deploy' in a) return this.recordReportedDeploy(w, sessionId, a);
     const ref = a.ref.trim().toLowerCase();
     // w2446: never a wait on a request already closed (blocked_on refuses one too, blockerProblem): it cleared at once and the
     // next report, quoting the same text (a bench error naming w1995), recorded it again, a false unblock each time
@@ -4217,6 +4218,40 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     this.tellReportWaited(w, [gate]);
     console.warn(`ledger: ${w.id}: recorded the wait on ${ref} its worker ${sessionId}'s report names, with no blocked_on (w2422)`);
     return true;
+  }
+
+  /**
+   * w2457: the wait on the next portal deploy a stopped worker's report names ("blocked on FF Factory letting lothdesktop
+   * grant the exclusive ticket"), with no blocked_on: the gate is the worker's own, so the deploy resumes it (unblock).
+   * w2434's worker sat idle 3.5 hours after the fix it waited on deployed. Not when the portal's commit is unknown (the
+   * gate could never clear).
+   */
+  private recordReportedDeploy(w: WorkItem | undefined, sessionId: string, a: { line: string; at: number; key: string }): boolean {
+    if (!w || (w.status !== 'active' && w.status !== 'stalled') || gatesOf(w).length || !this.d.deploySha?.()) return false;
+    const gate = this.makeGate({ kind: 'deploy', what: 'a portal deploy (FF Factory change)' }, new Date(a.at).toISOString(), `worker ${sessionId}`);
+    w.blocked = gate;
+    w.alsoBlocked = undefined;
+    w.stalled = undefined;
+    w.status = 'blocked';
+    w.waitRecorded = a.key;
+    this.stamp(w, `blocked on a portal deploy: the ledger recorded the wait on FF Factory its worker ${sessionId}'s report names, which no blocked_on recorded (w2457: "${clip(a.line, 120)}"); that worker is resumed when the portal runs another commit than ${gate.sha?.slice(0, 12)}`);
+    this.store.putWork(w);
+    console.warn(`ledger: ${w.id}: recorded the wait on a portal deploy its worker ${sessionId}'s report names, with no blocked_on (w2457)`);
+    return true;
+  }
+
+  /**
+   * w2457: a request Blocked on another whose worker is idle with nothing to wake it (no wait of its own, no check-in, no
+   * message on its way): w2446 waited on w2434's report while w2434 waited on w2446's fix to deploy, with nothing to break
+   * it. Said once in its log and to its people, so a person or the dispatcher resumes one side.
+   */
+  flagDeadWait(id: string, text: string) {
+    const w = this.store.work.get(id.toLowerCase());
+    if (!w || w.status !== 'blocked') return;
+    this.stamp(w, `flagged (w2457): ${text}`);
+    this.store.putWork(w);
+    this.toPeople(w.requesters, dispatchNotice(w, `may wait forever: ${text}`));
+    console.warn(`blocker watch: DEAD WAIT: ${w.id}: ${text}`);
   }
 
   /**

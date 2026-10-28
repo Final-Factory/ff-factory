@@ -23,7 +23,7 @@ import { blockerVerdict, CI_REF, cycleBreak, gateSetter, gatesOf, newestFirst, R
 import { conditionalVerdict } from '../shared/conditional.ts';
 import { ghRunner } from './githubTokens.ts';
 import { pairDelivers, reportDelivers, stillOpenIn } from './ledgerRules.ts';
-import { lastOpenLine, reportAt, requestWaitOf } from '../shared/workState.ts';
+import { lastOpenLine, portalWaitIn, reportAt, requestWaitOf } from '../shared/workState.ts';
 import type { SessionInfo, WorkBlocker, WorkItem } from '../shared/types.ts';
 import type { RoomNow } from './placement.ts';
 import { steamShortIn } from '../shared/capacity.ts';
@@ -49,7 +49,7 @@ export type PrState = { state: 'open' | 'merged' | 'closed'; text: string; sha?:
 export interface BlockerWatchDeps {
   store: Store;
   orchestrators: Pick<Orchestrators, 'unblock' | 'blockerStuck' | 'blockerDecide' | 'gatesCleared' | 'flagQueuedWithRoom' | 'carryOutConditional' | 'dropConditional'> &
-    Partial<Pick<Orchestrators, 'recordReportedWait' | 'noticeLongOffline' | 'noteCiRead' | 'sweepResumes' | 'requeueCapacityBlocks' | 'requeueBrokenPairs' | 'replaceNoTimedWaits' | 'timedLegBound' | 'mergedOnGreen' | 'undecidedBound' | 'holdSteamPairs'>>;
+    Partial<Pick<Orchestrators, 'recordReportedWait' | 'noticeLongOffline' | 'noteCiRead' | 'sweepResumes' | 'requeueCapacityBlocks' | 'requeueBrokenPairs' | 'replaceNoTimedWaits' | 'timedLegBound' | 'mergedOnGreen' | 'undecidedBound' | 'holdSteamPairs' | 'flagDeadWait'>>;
   /** w1841: tell the workers waiting on a bench lock that is free now (Agents.resumeBenchWaits): request id to what it did. */
   benchResume?: () => [string, string][];
   /** Whether a message to a session waits in the send queue (for a sandbox, a slot or its machine): its resume is on its way (w1094). */
@@ -92,6 +92,8 @@ export interface BlockerWatchDeps {
 export const REPORTED_WAIT_MS = 3 * 24 * 3600_000;
 /** A worker that is not in a turn. */
 const STOPPED: ReadonlySet<string> = new Set(['idle', 'stopped', 'error']);
+/** w2457: how long a waited-on request's worker sits idle with nothing to wake it before the wait is flagged. */
+const DEAD_WAIT_MS = 30 * 60_000;
 
 export class BlockerWatch {
   private timer?: NodeJS.Timeout;
@@ -102,6 +104,7 @@ export class BlockerWatch {
   private readonly ciDoneAt = new Map<string, number>();
   /** w1094: requests the sweep has said are still Blocked on finished CI ("<id>@<ref>"), so it says each once. */
   private readonly swept = new Set<string>();
+  private readonly deadFlagged = new Set<string>();
   /** w829: pull requests whose checks could not be read: since when, why, and when that was last logged. */
   private readonly ciFailing = new Map<string, { since: number; why: string; logged: number }>();
   private readonly healthSeen = new Map<string, { at: number; state?: PrHealth }>();
@@ -154,17 +157,56 @@ export class BlockerWatch {
         if (!s || !STOPPED.has(s.status) || s.queuedSend || this.d.queued?.(s.id) || this.d.checkInPending?.(s.id)) continue;
         const l = lastOpenLine(w, s, now);
         const ref = l ? requestWaitOf(l.line, w.id) : undefined;
-        if (!l || !ref) continue;
+        const portal = !!l && portalWaitIn(l.line);
+        if (!l || (!ref && !portal)) continue;
         const at = l.at ?? reportAt(s);
         const key = `${s.id}@${at}`;
         if (w.waitRecorded === key || !at || now - at > REPORTED_WAIT_MS) continue;
-        // One the request it names waits on in turn is a wait cycle: the cycle break (w2357, below) resumes a side of it.
-        const other = this.d.store.work.get(ref);
-        if (other && gatesOf(other).some((g) => g.kind === 'request' && g.ref?.toLowerCase() === w.id.toLowerCase())) continue;
-        const onReport = new RegExp(`\\b${ref}\\b[^;.]{0,40}\\breport`, 'i').test(l.line);
-        if (record(w.id, s.id, { ref, onReport, line: l.line, at, key })) out.push([w.id, `recorded: the wait on ${ref} its worker ${s.id}'s report names (w2422)`]);
+        if (ref) {
+          // One the request it names waits on in turn is a wait cycle: the cycle break (w2357, below) resumes a side of it.
+          const other = this.d.store.work.get(ref);
+          if (other && gatesOf(other).some((g) => g.kind === 'request' && g.ref?.toLowerCase() === w.id.toLowerCase())) continue;
+          const onReport = new RegExp(`\\b${ref}\\b[^;.]{0,40}\\breport`, 'i').test(l.line);
+          if (record(w.id, s.id, { ref, onReport, line: l.line, at, key })) {
+            out.push([w.id, `recorded: the wait on ${ref} its worker ${s.id}'s report names (w2422)`]);
+            continue;
+          }
+        }
+        // w2457: no open request named (w2434's line quoted w1995, closed), but it waits on FF Factory: the next portal deploy.
+        if (portal && record(w.id, s.id, { deploy: 'portal', line: l.line, at, key })) out.push([w.id, `recorded: the wait on a portal deploy its worker ${s.id}'s report names (w2457)`]);
       } catch (e) {
         console.warn(`blocker watch: ${w.id}: recording its worker's reported wait: ${(e as Error).message}`);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * w2457: a request Blocked on another request (its finishing or its report) whose worker is stopped with nothing to wake
+   * it for DEAD_WAIT_MS: no gate of its own, no check-in, no message on its way, no person asked. w2446 waited on w2434's
+   * report while w2434's worker sat idle waiting on w2446's fix, which no gate named. Flagged once per stop of that worker
+   * (Orchestrators.flagDeadWait), never cleared here: a person or the dispatcher decides which side moves.
+   */
+  flagDeadWaits(): [string, string][] {
+    const flag = this.d.orchestrators.flagDeadWait?.bind(this.d.orchestrators);
+    if (!flag) return [];
+    const now = this.now();
+    const out: [string, string][] = [];
+    for (const w of [...this.d.store.work.values()]) {
+      if (w.status !== 'blocked') continue;
+      for (const g of gatesOf(w)) {
+        const t = g.kind === 'request' && g.ref ? this.d.store.work.get(g.ref.toLowerCase()) : undefined;
+        if (!t || (t.status !== 'active' && t.status !== 'stalled') || gatesOf(t).length) continue;
+        const sid = newestFirst(t).find((x) => this.d.store.sessions.get(x));
+        const s = sid ? this.d.store.sessions.get(sid) : undefined;
+        if (!s || !STOPPED.has(s.status) || s.queuedSend || s.waitingOn || this.d.queued?.(s.id) || this.d.checkInPending?.(s.id)) continue;
+        const since = Date.parse(s.lastActivityAt) || 0;
+        const key = `${w.id}>${t.id}@${since}`;
+        if (!since || now - since < DEAD_WAIT_MS || this.deadFlagged.has(key)) continue;
+        this.deadFlagged.add(key);
+        const why = `${t.id}, which it waits on, has nothing to wake it: its worker ${s.id} stopped ${Math.round((now - since) / 60_000)} min ago with no wait of its own, no check-in and no message on its way. Resume ${t.id}'s worker, or unblock ${w.id}`;
+        flag(w.id, why);
+        out.push([w.id, `flagged: ${why}`]);
       }
     }
     return out;
@@ -246,6 +288,7 @@ export class BlockerWatch {
           console.warn(`blocker watch: CYCLE: ${cycle.join(', ')}: ${(e as Error).message}`);
         }
       }
+      for (const [id, why] of this.flagDeadWaits()) did.set(id, why);
       // w1094, the backstop: a request still Blocked on CI that finished more than RESUME_SWEEP_MS ago (the clearing above
       // threw for it) is said loudly, once, and its CI gate is cleared again.
       const now = this.now();
