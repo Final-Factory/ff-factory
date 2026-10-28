@@ -23,7 +23,7 @@ import { blockerVerdict, CI_REF, cycleBreak, gateSetter, gatesOf, newestFirst, R
 import { conditionalVerdict } from '../shared/conditional.ts';
 import { ghRunner } from './githubTokens.ts';
 import { pairDelivers, reportDelivers, stillOpenIn } from './ledgerRules.ts';
-import { lastOpenLine, portalWaitIn, reportAt, requestWaitOf } from '../shared/workState.ts';
+import { lastOpenLine, portalWaitIn, reportAt, requestWaitOf, siblingWaitOf } from '../shared/workState.ts';
 import type { SessionInfo, WorkBlocker, WorkItem } from '../shared/types.ts';
 import type { RoomNow } from './placement.ts';
 import { steamShortIn } from '../shared/capacity.ts';
@@ -152,29 +152,51 @@ export class BlockerWatch {
     for (const w of [...this.d.store.work.values()]) {
       try {
         if ((w.status !== 'active' && w.status !== 'stalled') || gatesOf(w).length) continue;
-        const sid = newestFirst(w).find((x) => this.d.store.sessions.get(x));
-        const s = sid ? this.d.store.sessions.get(sid) : undefined;
-        if (!s || !STOPPED.has(s.status) || s.queuedSend || this.d.queued?.(s.id) || this.d.checkInPending?.(s.id)) continue;
-        const l = lastOpenLine(w, s, now);
-        const ref = l ? requestWaitOf(l.line, w.id) : undefined;
-        const portal = !!l && portalWaitIn(l.line);
-        if (!l || (!ref && !portal)) continue;
-        const at = l.at ?? reportAt(s);
-        const key = `${s.id}@${at}`;
-        // w2457: a report from before its last gate went names a wait that is over (the deploy that woke it, the request it named).
-        if (w.waitRecorded === key || !at || now - at > REPORTED_WAIT_MS || (w.gateEndedAt && at <= w.gateEndedAt)) continue;
-        if (ref) {
-          // One the request it names waits on in turn is a wait cycle: the cycle break (w2357, below) resumes a side of it.
-          const other = this.d.store.work.get(ref);
-          if (other && gatesOf(other).some((g) => g.kind === 'request' && g.ref?.toLowerCase() === w.id.toLowerCase())) continue;
-          const onReport = new RegExp(`\\b${ref}\\b[^;.]{0,40}\\breport`, 'i').test(l.line);
-          if (record(w.id, s.id, { ref, onReport, line: l.line, at, key })) {
-            out.push([w.id, `recorded: the wait on ${ref} its worker ${s.id}'s report names (w2422)`]);
+        // The newest worker's report (w2422); w2476: any other worker still on it, for a wait on another of its workers only (w2448's
+        // b9cd085e waited on 17cae99a, the newer one, which ran on).
+        const newest = newestFirst(w).find((x) => this.d.store.sessions.get(x));
+        for (const sid of newestFirst(w)) {
+          const s = this.d.store.sessions.get(sid);
+          if (!s || (sid !== newest && (w.done?.[sid] || w.movedOff?.[sid]))) continue;
+          if (!STOPPED.has(s.status) || s.queuedSend || this.d.queued?.(s.id) || this.d.checkInPending?.(s.id)) continue;
+          const l = lastOpenLine(w, s, now);
+          const ref = l ? requestWaitOf(l.line, w.id) : undefined;
+          const portal = !!l && portalWaitIn(l.line);
+          // w2476: another worker of this request, still on it ("waiting for worker 17cae99a's LothLaptop leg").
+          const siblings = w.sessionIds
+            .filter((x) => x !== s.id && !w.done?.[x] && !w.movedOff?.[x])
+            .map((x) => this.d.store.sessions.get(x))
+            .filter((x): x is SessionInfo => !!x)
+            .map((x) => ({ id: x.id, names: [x.machineId ?? '', x.sandboxId ?? ''] }));
+          const sibling = l ? siblingWaitOf(l.line, siblings) : undefined;
+          if (!l || (!sibling && (sid !== newest || (!ref && !portal)))) continue;
+          const at = l.at ?? reportAt(s);
+          const key = `${s.id}@${at}`;
+          // w2457: a report from before its last gate went names a wait that is over (the deploy that woke it, the request it named).
+          if (w.waitRecorded === key || !at || now - at > REPORTED_WAIT_MS || (w.gateEndedAt && at <= w.gateEndedAt)) continue;
+          if (sibling) {
+            if (record(w.id, s.id, { worker: sibling, line: l.line, at, key })) {
+              out.push([w.id, `recorded: the wait on worker ${sibling} its worker ${s.id}'s report names (w2476)`]);
+              break;
+            }
             continue;
           }
+          if (ref) {
+            // One the request it names waits on in turn is a wait cycle: the cycle break (w2357, below) resumes a side of it.
+            const other = this.d.store.work.get(ref);
+            if (other && gatesOf(other).some((g) => g.kind === 'request' && g.ref?.toLowerCase() === w.id.toLowerCase())) continue;
+            const onReport = new RegExp(`\\b${ref}\\b[^;.]{0,40}\\breport`, 'i').test(l.line);
+            if (record(w.id, s.id, { ref, onReport, line: l.line, at, key })) {
+              out.push([w.id, `recorded: the wait on ${ref} its worker ${s.id}'s report names (w2422)`]);
+              break;
+            }
+          }
+          // w2457: no open request named (w2434's line quoted w1995, closed), but it waits on FF Factory: the next portal deploy.
+          if (portal && record(w.id, s.id, { deploy: 'portal', line: l.line, at, key })) {
+            out.push([w.id, `recorded: the wait on a portal deploy its worker ${s.id}'s report names (w2457)`]);
+            break;
+          }
         }
-        // w2457: no open request named (w2434's line quoted w1995, closed), but it waits on FF Factory: the next portal deploy.
-        if (portal && record(w.id, s.id, { deploy: 'portal', line: l.line, at, key })) out.push([w.id, `recorded: the wait on a portal deploy its worker ${s.id}'s report names (w2457)`]);
       } catch (e) {
         console.warn(`blocker watch: ${w.id}: recording its worker's reported wait: ${(e as Error).message}`);
       }
@@ -452,6 +474,12 @@ export class BlockerWatch {
         });
       },
       portalSha: this.d.portalSha?.(),
+      // w2476: a worker that stopped after `since` with a final report on the request (no still-open line for it).
+      workerEnded: (sid: string, since: number, workId: string) => {
+        const s = store.sessions.get(sid);
+        if (!s || BUSY.has(s.status) || !s.lastResult || (Date.parse(s.lastActivityAt) || 0) <= since || this.d.checkInPending?.(sid) || s.waitingOn) return undefined;
+        return stillOpenIn(s.lastResult).has(workId.toLowerCase()) ? undefined : s.lastResult;
+      },
       steamShort: (p) => steamShortIn(store.machines?.values() ?? [])(p),
       ...(this.d.daemonSha ? { daemonSha: this.d.daemonSha } : {}),
       ...(this.d.online ? { online: this.d.online } : {}),

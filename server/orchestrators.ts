@@ -3175,9 +3175,16 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       .filter((x): x is { l: WorkItem; r: string } => !!x.r)
       .map(({ l, r }) => ` Timed leg ${l.id}'s report: "${clip(r.trim(), 2000)}" If it waits on you (a commit, a branch), push it, and put a line "For ${l.id}: <the branch and commit>" in your report: that resumes ${l.id}'s worker if it is Blocked on you. Then block on ${l.id} reporting again.`)
       .join('');
+    // w2476: the report of the other worker it waited on travels with the resume (its DONE's text, else its last report).
+    const siblings = gates
+      .filter((g) => g.kind === 'worker' && g.ref)
+      .map((g) => ({ sid: g.ref!, r: doneOf(w)[g.ref!]?.text ?? this.store.sessions.get(g.ref!)?.lastResult }))
+      .filter((x): x is { sid: string; r: string } => !!x.r)
+      .map(({ sid: o, r }) => ` Worker ${o}'s report: "${r.trim().slice(-2000)}"`)
+      .join('');
     // w2417: the files each request it waited on published, whatever the report's cut (w2402's three zips, w2403's one).
     const files = this.gatePublished(gates);
-    const note = `${lead}${back}${results}${legs}${files}${yours}${ci ? ` Run ff-pr merge now${prs ? ` (${prs})` : ''}: it merges on green, or names the red run to read (gh run view <run> --log-failed) and fix.` : ''}${deploy ? ' The deploy you waited for has happened: do the check that comes after it now (the live read, the health check), then report.' : ''} Carry on from where you left it.${held ? ` Your own check-in, which the block cancelled, is folded into this message; its note was: ${held.note}` : ''}`;
+    const note = `${lead}${back}${results}${legs}${siblings}${files}${yours}${ci ? ` Run ff-pr merge now${prs ? ` (${prs})` : ''}: it merges on green, or names the red run to read (gh run view <run> --log-failed) and fix.` : ''}${deploy ? ' The deploy you waited for has happened: do the check that comes after it now (the live read, the health check), then report.' : ''} Carry on from where you left it.${held ? ` Your own check-in, which the block cancelled, is folded into this message; its note was: ${held.note}` : ''}`;
     if (!this.wakeNow(sid, note, w.id)) return [];
     this.noteResume(w, sid, note);
     // Folded in above: not handed back again when the rest clears (unblock's handBackCheckIns).
@@ -4203,9 +4210,10 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    * closed). The gate is the worker's own, from the time of its report, so the blocker watch clears it as any other and
    * resumes that worker (unblock). Returns false when it records nothing (not open, already gated, not in the ledger).
    */
-  recordReportedWait(id: string, sessionId: string, a: ({ ref: string; onReport: boolean } | { deploy: 'portal' }) & { line: string; at: number; key: string }): boolean {
+  recordReportedWait(id: string, sessionId: string, a: ({ ref: string; onReport: boolean } | { deploy: 'portal' } | { worker: string }) & { line: string; at: number; key: string }): boolean {
     const w = this.store.work.get(id.toLowerCase());
     if ('deploy' in a) return this.recordReportedDeploy(w, sessionId, a);
+    if ('worker' in a) return this.recordReportedWorker(w, sessionId, a);
     const ref = a.ref.trim().toLowerCase();
     // w2446: never a wait on a request already closed (blocked_on refuses one too, blockerProblem): it cleared at once and the
     // next report, quoting the same text (a bench error naming w1995), recorded it again, a false unblock each time
@@ -4246,6 +4254,27 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     this.stamp(w, `blocked on a portal deploy: the ledger recorded the wait on FF Factory its worker ${sessionId}'s report names, which no blocked_on recorded (w2457: "${clip(a.line, 120)}"); that worker is resumed when the portal runs another commit than ${gate.sha?.slice(0, 12)}`);
     this.store.putWork(w);
     console.warn(`ledger: ${w.id}: recorded the wait on a portal deploy its worker ${sessionId}'s report names, with no blocked_on (w2457)`);
+    return true;
+  }
+
+  /**
+   * w2476: the wait on another worker of the same request a stopped worker's report names ("waiting for worker 17cae99a's
+   * LothLaptop leg", siblingWaitOf), with no blocked_on: the gate is the worker's own, so that worker's DONE for its part, or
+   * its stopping with a final report, resumes it with that report (unblock). On w2448, b9cd085e sat Stalled 1.5 hours after
+   * 17cae99a said DONE for its part, until the orchestrator messaged it by hand.
+   */
+  private recordReportedWorker(w: WorkItem | undefined, sessionId: string, a: { worker: string; line: string; at: number; key: string }): boolean {
+    const ref = a.worker.trim();
+    if (!w || (w.status !== 'active' && w.status !== 'stalled') || gatesOf(w).length || ref === sessionId || !w.sessionIds.includes(ref)) return false;
+    const gate = this.makeGate({ kind: 'worker', ref, what: `worker ${ref}'s part (its DONE or final report)` }, new Date(a.at).toISOString(), `worker ${sessionId}`);
+    w.blocked = gate;
+    w.alsoBlocked = undefined;
+    w.stalled = undefined;
+    w.status = 'blocked';
+    w.waitRecorded = a.key;
+    this.stamp(w, `blocked on ${gatesName([gate], this.now().getTime())}: the ledger recorded the wait on worker ${ref} its worker ${sessionId}'s report names, which no blocked_on recorded (w2476: "${clip(a.line, 120)}"); that worker is resumed with ${ref}'s report when ${ref} says DONE for its part or stops with a final report`);
+    this.store.putWork(w);
+    console.warn(`ledger: ${w.id}: recorded the wait on worker ${ref} its worker ${sessionId}'s report names, with no blocked_on (w2476)`);
     return true;
   }
 

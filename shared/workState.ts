@@ -330,6 +330,28 @@ export function portalWaitIn(line: string): boolean {
   return !!m && !/\b(?:ci|checks?|pr|pull request)\b/i.test(m[1]);
 }
 
+/**
+ * w2476: another worker of the same request a line waits on, by its session id ("waiting for worker 17cae99a's LothLaptop
+ * leg") or as "the <X> leg" (X its machine or sandbox: "waiting on the LothLaptop leg"). w2448's worker b9cd085e said so at
+ * 09:41 and 10:22 UTC, 17cae99a said DONE for its part at 10:43, and nothing resumed b9cd085e for 1.5 hours. `siblings`:
+ * the other workers still on the request, each with the names its leg goes by (machine, sandbox).
+ */
+const WAITS_ON_WORKER = /\b(?:waiting (?:for|on)|waits (?:for|on)|blocked on|until)\b([^;.]{0,140})/gi;
+export function siblingWaitOf(line: string, siblings: readonly { id: string; names: readonly string[] }[]): string | undefined {
+  if (!siblings.length) return undefined;
+  for (const m of line.matchAll(WAITS_ON_WORKER)) {
+    const tail = m[1].split(/\bthen\b/i)[0];
+    const byId = siblings.find((s) => new RegExp(`(?<![\\w-])${s.id}(?![\\w-])`, 'i').test(tail));
+    if (byId) return byId.id;
+    const leg = /\bthe (\S+?)(?:'s)? (?:client |host )?leg\b/i.exec(tail)?.[1]?.toLowerCase();
+    if (!leg) continue;
+    const named = siblings.filter((s) => s.names.some((n) => n && (n.toLowerCase() === leg || n.toLowerCase().split('/')[0] === leg)));
+    if (named.length === 1) return named[0].id;
+    if (/^(?:other|second|first)$/.test(leg) && siblings.length === 1) return siblings[0].id;
+  }
+  return undefined;
+}
+
 /** w1841 (a): "waiting on BEAST's bench lock", "waits on the beast timed-run lock": the machine named, or '' for its own. */
 const BENCH_WAIT = /\b(?:waiting|waits|wait) (?:for|on) (?:the |a )?(?:(\w+)(?:'s)? )?(?:bench(?:[- ]lock| queue)|timed[- ]runs?(?:[- ]lock)?)\b/i;
 export function benchWaitOf(line: string): string | undefined {

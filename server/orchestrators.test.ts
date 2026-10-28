@@ -19,7 +19,7 @@ import { poolForRef, type GatePoolToken } from './usageGate.ts';
 import { personForWork, sessionPerson, setVaultContext } from './vault.ts';
 import { fakeToken, useFakeVault } from './testVault.ts';
 import { parseNotice } from '../shared/notices.ts';
-import { portalWaitIn, requestWaitOf } from '../shared/workState.ts';
+import { portalWaitIn, requestWaitOf, siblingWaitOf } from '../shared/workState.ts';
 import { latestLine } from '../shared/latestLine.ts';
 import { HELD_MARK, inPersonWords } from '../shared/conditional.ts';
 import { splitReply, splitSent } from '../shared/replies.ts';
@@ -7432,6 +7432,62 @@ test('w2457: a stopped worker whose report says it waits on an FF Factory change
   assert.equal(portalWaitIn('w1: still open: the FF Factory fix is merged; next the timing run'), false);
   assert.equal(portalWaitIn('w1: still open: waiting for the portal deploy, then the rerun'), true);
   assert.equal(portalWaitIn('w1: still open: waiting on ff-factory #742 to deploy'), true);
+});
+
+test("w2476: a stopped worker whose report waits on another worker of the same request (w2448: \"waiting for worker 17cae99a's LothLaptop leg\") is Blocked on it, not Stalled, and resumed with that worker's report when it says DONE for its part", async (t) => {
+  const { store, agents, o, dispatcher, call } = await setupOnMachine(t);
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1', title: 'Wittlebase uncapped judder', status: 'active' }]);
+  // B stands for b9cd085e (w2448's BEAST worker, a live session so it can be resumed); 17cae99a is its LothLaptop worker.
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Fix the judder', title: 'w1: judder', work_id: 'w1' });
+  assert.equal(started.isError, false, started.text);
+  const B = /Started agent (\w+)/.exec(started.text)![1];
+  await until('its first turn', () => store.sessions.get(B)!.status === 'idle');
+  const at = (ms: number) => new Date(Date.now() + ms).toISOString();
+  const worker = (id: string, machineId: string, report: string, ms: number) =>
+    store.putSession({ ...store.sessions.get(id), id, kind: 'worker', title: 'w1: judder', status: 'stopped', permissionMode: 'default', createdAt: T0, lastActivityAt: at(ms), lastResultAt: at(ms), machineId, turns: 2, costUsd: 1, pendingPermissions: [], lastResult: report });
+  worker(B, 'beast', '', -120_000);
+  worker('17cae99a', 'lothlaptop', '', -120_000);
+  Object.assign(store.sessions.get('17cae99a')!, { status: 'running' });
+  store.putWork({ ...store.work.get('w1')!, sessionIds: [B, '17cae99a'] });
+  const watch = new BlockerWatch({ store, orchestrators: o });
+  // 10:22: b9cd085e's report, as w2448's log has it.
+  worker(B, 'beast', "The BEAST side is done.\n\nw1: still open: waiting for worker 17cae99a's LothLaptop leg (G-SYNC check, uncapped judder before/after); PR #2756 (adaptive vSync) is held until the laptop shows smooth uncapped movement", -60_000);
+  assert.match((await watch.tick()).get('w1') ?? '', /^recorded: the wait on worker 17cae99a its worker \w+'s report names \(w2476\)/);
+  const w = store.work.get('w1')!;
+  assert.deepEqual([w.status, w.blocked?.kind, w.blocked?.ref, w.blocked?.by], ['blocked', 'worker', '17cae99a', `worker ${B}`]);
+  assert.equal(w.stalled, undefined, 'Blocked on that worker, not Stalled');
+  // 17cae99a still on its leg: it stays Blocked, nobody is resumed.
+  assert.equal((await watch.tick()).has('w1'), false);
+  assert.equal(agents.waker.pending(B), undefined);
+  // 10:43: 17cae99a says DONE for its part ("still on it: b9cd085e"): b9cd085e is resumed, with 17cae99a's report.
+  const done = 'LothLaptop: uncapped movement is smooth with G-SYNC on (before: 41 ms spikes; after: none).\n\nDONE: w1\nLearned: nothing new';
+  worker('17cae99a', 'lothlaptop', done, 0);
+  o.workerTurnEnded(store.sessions.get('17cae99a')!, done);
+  assert.match(w.log.join('\n'), /worker 17cae99a said DONE for its part; still on it: \w+$/m);
+  assert.match((await watch.tick()).get('w1') ?? '', /^clear: worker 17cae99a said DONE for its part/);
+  assert.equal(store.work.get('w1')!.status, 'active', store.work.get('w1')!.log.slice(-3).join(' | '));
+  const wake = agents.waker.pending(B);
+  assert.ok(wake, 'b9cd085e is resumed');
+  assert.match(wake!.note, /Worker 17cae99a's report: "LothLaptop: uncapped movement is smooth/);
+  // A final report with no still-open line clears it as well; a still-open one does not.
+  w.status = 'active';
+  agents.waker.cancel(B);
+  w.waitRecorded = undefined;
+  w.gateEndedAt = undefined;
+  w.done = undefined;
+  worker('17cae99a', 'lothlaptop', 'Measuring.\n\nw1: still open: the after leg', -30_000);
+  worker(B, 'beast', 'w1: still open: waiting on the LothLaptop leg', -20_000);
+  assert.match((await watch.tick()).get('w1') ?? '', /^recorded: the wait on worker 17cae99a/);
+  assert.equal((await watch.tick()).has('w1'), false, 'its earlier still-open report');
+  worker('17cae99a', 'lothlaptop', 'The after leg is measured: no spikes.', 0);
+  assert.match((await watch.tick()).get('w1') ?? '', /^clear: worker 17cae99a stopped with its final report: The after leg is measured/);
+  // The parser: by id or by the leg's machine, never the worker itself or one not on the request.
+  const sibs = [{ id: '17cae99a', names: ['lothlaptop', 'lothlaptop/slot1'] }];
+  assert.equal(siblingWaitOf('w1: still open: blocked on the lothlaptop leg reporting', sibs), '17cae99a');
+  assert.equal(siblingWaitOf('w1: still open: waiting for the other leg', sibs), '17cae99a');
+  assert.equal(siblingWaitOf('w1: still open: waiting for worker 0badf00d', sibs), undefined);
+  assert.equal(siblingWaitOf('w1: still open: 17cae99a measured; next the PR', sibs), undefined);
 });
 
 test("w2426: a request Blocked on a pair run's report stays Blocked through its client leg's mid-run turns (w2425's client woke w2419 twice), and clears on the host leg's For line with DONE", async (t) => {
