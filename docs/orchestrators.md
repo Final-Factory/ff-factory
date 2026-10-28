@@ -824,6 +824,16 @@ without one means it is off or failing, worth a person's look.
   cannot free it in the minute between the reconnect and the resume. A worker whose process lived through a short drop
   (it is busy when the gate clears) gets no resume message, and its first turn end lifts the gate itself
   (`dropCutOffGates`).
+- **A worker that ran on through its machine's drop is not Blocked once its daemon says hello** (w2474, ben). On
+  2026-10-28 biscuit's link dropped five times in 45 minutes (a heartbeat miss, its daemon update, the portal VM's
+  Tailscale restarting at 11:07Z) while w2466's worker cc1ab138 ran on throughout. Each drop logged it "stopped mid-turn"
+  and Blocked w2466, and the gate was judged clear on the socket opening (`links.has`), before the hello, so a blocker-watch
+  tick in that gap read the worker as still `stopped` and woke it with "Your turn stopped…" into the turn it was running.
+  Now the daemon's hello (`Machines` 'hello', after a drop: `droppedAt`) hands the workers in its `live` list to
+  `Orchestrators.workersLived` (the `workersLived` hook), which lifts their cut-off gates at once with no message ("ran on
+  through <m>'s drop (its daemon reports it running)"), and the blocker watch counts a machine online only after its hello
+  on the current link (`BlockerFacts.online` is `Machines.hasHello`). A worker not in the hello's `live` list keeps its gate
+  and is resumed by it as before.
 - **A machine offline long is named to the dispatcher** (w2433). Once a cut-off gate is older than config
   `ledger.offlineNoticeMinutes` (default 60, at least 5) and its machine is still offline, the blocker watch
   (`Orchestrators.noticeLongOffline`) sends the dispatcher one `[ledger] <m> has been offline N min …` per machine: each
