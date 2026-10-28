@@ -59,6 +59,16 @@ test('a variant takes -ff switches only, never the run\'s own or a command', () 
   assert.match(timedArgsProblem(['cmd.exe']) ?? '', /not a -ff switch/);
   assert.match(timedArgsProblem(['-ffX', 'a b']) ?? '', /not a -ff switch/);
   assert.match(timedArgsProblem(['-ffX', '&calc']) ?? '', /not a -ff switch/);
+  // w2456: Unity's GPU pick, with its number only.
+  assert.equal(timedArgsProblem(['-force-device-index', '1']), undefined);
+  assert.equal(timedArgsProblem(['-ffNoHangWatchdog', '-force-device-index', '0', '-ffShadowQuality', '2']), undefined);
+  assert.match(timedArgsProblem(['-force-device-index']) ?? '', /takes a number/);
+  assert.match(timedArgsProblem(['-force-device-index', 'x']) ?? '', /takes a number/);
+  assert.match(timedArgsProblem(['-force-device-index', '-1']) ?? '', /takes a number/);
+  assert.match(timedArgsProblem(['-force-device-index', '-ffX']) ?? '', /takes a number/);
+  assert.match(timedArgsProblem(['-force-d3d12']) ?? '', /not a -ff switch/);
+  assert.match(timedArgsProblem(['-ffX', '-force-device-index']) ?? '', /takes a number/);
+  assert.match(timedArgsProblem(['-toString']) ?? '', /not a -ff switch/);
 });
 
 test('the legs are probe_ab_win.sh\'s: its arguments, and the order flipped on even rounds', () => {
@@ -70,6 +80,7 @@ test('the legs are probe_ab_win.sh\'s: its arguments, and the order flipped on e
   assert.equal(at('-ffAutomationAutoQuit'), 'true');
   assert.equal(at('-logFile'), 'V:/out/player.log');
   assert.equal(a[a.length - 1], '-ffX');
+  assert.deepEqual(legArgs(TIMED_DEFAULTS, { name: 'igpu', args: ['-force-device-index', '1'] }, 1, 's', 'l').slice(-2), ['-force-device-index', '1']);
   assert.deepEqual(
     legOrder(['base', 'fix'], 2).map((l) => `${l.variant}${l.round}`),
     ['base1', 'fix1', 'fix2', 'base2'],

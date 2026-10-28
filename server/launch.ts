@@ -238,7 +238,7 @@ export const CATALOG = {
         z.object({
           name: z.string().max(24).describe('The variant name in the table, e.g. "base" or "fix" (letters, digits, - and _).'),
           path: z.string().max(400).describe('The built Windows player folder (finalfactory.exe beside finalfactory_Data), in your sandbox, your temp folder or the worker install of this computer.'),
-          args: z.array(z.string().max(64)).max(8).optional().describe('Its own -ff switches after the fixed arguments (e.g. ["-ffNoHangWatchdog"]); one build may be listed twice with different switches.'),
+          args: z.array(z.string().max(64)).max(8).optional().describe('Its own -ff switches after the fixed arguments (e.g. ["-ffNoHangWatchdog"]), and the Unity switch -force-device-index N to pick the GPU (e.g. ["-force-device-index", "1"]); one build may be listed twice with different switches.'),
         }),
       )
       .min(1)
