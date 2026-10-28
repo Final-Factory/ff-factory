@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { PAUSE_DAEMON_KILL_MS, PAUSE_RESWEEP_MS, PauseStop, type PauseStopDeps } from '../machine/pauseStop.ts';
+import { PAUSE_DAEMON_KILL_MS, PAUSE_EDITOR_CLOSE_MS, PAUSE_RESWEEP_MS, PauseStop, type PauseStopDeps } from '../machine/pauseStop.ts';
 import { PAUSE_DAEMON_KILL_MS as PORTAL_KILL_MS, PAUSE_GRACE_MS, PAUSE_STOP_AFTER_MS } from './machinePause.ts';
 import { LeftoverReaper, type LeftoverDeps, type ProcEnv } from '../machine/leftovers.ts';
 import { realHostProcs } from '../machine/hostWatch.ts';
@@ -12,7 +12,7 @@ import type { Proc } from '../machine/unity.ts';
 // few minutes. There's no way it should keep running". The daemon's own end of it (machine/pauseStop.ts): timed runs at once;
 // at 90 s every worker's process tree, every sandbox editor and every process FF Factory started; never a person's own.
 
-function daemon(o: { timed?: string[]; sessions?: string[]; editors?: string[] } = {}) {
+function daemon(o: { timed?: string[]; sessions?: string[]; editors?: string[]; hungEditor?: boolean } = {}) {
   const st = {
     now: 1_000_000,
     timed: [...(o.timed ?? [])],
@@ -39,8 +39,10 @@ function daemon(o: { timed?: string[]; sessions?: string[]; editors?: string[] }
       st.sessions.delete(id);
     },
     editors: () => [...st.editors],
-    closeEditor: async (id) => {
-      st.closed.push(id);
+    closeEditor: async (id, _why, force) => {
+      st.closed.push(`${id}${force ? ' (forced)' : ''}`);
+      // A hung editor ignores the ask to quit: its graceful stop waits out its 30 s grace.
+      if (o.hungEditor && !force) return new Promise<string>(() => {});
       st.editors.delete(id);
       return 'stopped';
     },
@@ -97,24 +99,39 @@ test('w2443: a timed run is cancelled the moment the machine is paused, with why
 test('w2443: a nonresponsive worker, its editor and its leftovers are ended by the daemon at 90 s, and again while paused; nothing after the unpause', async () => {
   const t = daemon({ sessions: ['ab12cd34'], editors: ['slot2'] });
   t.ps.update(true, 'someone is using this PC');
-  await t.advance(PAUSE_DAEMON_KILL_MS - 1000);
-  assert.deepEqual([t.st.ended, t.st.closed, t.st.leftoverLooks], [[], [], 0], 'the worker has until 90 s to push and stop by itself');
+  await t.advance(PAUSE_EDITOR_CLOSE_MS - 1000);
+  assert.deepEqual(t.st.closed, [], 'the editor is left alone while its worker may still save in it');
+  await t.advance(1000);
+  assert.deepEqual(t.st.closed, ['slot2'], 'at 60 s, when the portal interrupts the turn, the editor is asked to quit');
+  assert.match(t.st.events[0], /^Paused \(w2443\): editor of slot2 closed/);
+  await t.advance(PAUSE_DAEMON_KILL_MS - PAUSE_EDITOR_CLOSE_MS - 1000);
+  assert.deepEqual([t.st.ended, t.st.leftoverLooks], [[], 0], 'the worker has until 90 s to push and stop by itself');
   assert.equal(t.ps.endsNow(), undefined, 'the leftover reaper keeps its graces until the deadline');
   await t.advance(1000);
   assert.deepEqual(t.st.ended, ['ab12cd34'], 'the worker that ignored the notice, the interrupt and the stop is ended with its process tree');
-  assert.deepEqual(t.st.closed, ['slot2']);
   assert.equal(t.st.leftoverLooks, 2, 'two looks: the reaper ends a process once two looks have seen it');
   assert.match(t.ps.endsNow()!, /lothdesktop was paused/);
-  assert.match(t.st.events[0], /worker ab12cd34 ended with its process tree; editor of slot2 closed/);
-  // Something started meanwhile (a new editor) goes at the next sweep.
+  assert.match(t.st.events[1], /worker ab12cd34 ended with its process tree/);
+  // Something started meanwhile (a new editor) goes at the next sweep, forced.
   t.st.editors.add('slot3');
   await t.advance(PAUSE_RESWEEP_MS);
-  assert.deepEqual(t.st.closed, ['slot2', 'slot3']);
+  assert.deepEqual(t.st.closed, ['slot2', 'slot3 (forced)']);
   t.ps.update(false, 'running');
   t.st.sessions.add('ef56ab78');
   await t.advance(10 * PAUSE_DAEMON_KILL_MS);
   assert.deepEqual(t.st.ended, ['ab12cd34'], 'unpaused: nothing more is ended');
   assert.equal(t.ps.endsNow(), undefined);
+});
+
+test('w2443, LothLaptop live check (2026-10-28): an editor that will not quit is forced at 90 s, and the players go at 90 s, not behind its grace', async () => {
+  // lothsahn: "I paused it and it took a while to close". The editor was asked at 90 s and gone at 123 s; the player and its
+  // crash handler waited behind it (gone at 117 s).
+  const t = daemon({ editors: ['slot1'], hungEditor: true });
+  t.ps.update(true, 'paused from the tray at 15:18');
+  await t.advance(PAUSE_DAEMON_KILL_MS);
+  assert.equal(t.st.leftoverLooks, 2, 'the leftovers are ended at 90 s, while the editor still hangs');
+  assert.deepEqual(t.st.closed, ['slot1', 'slot1 (forced)'], 'asked at 60 s, force-killed at 90 s');
+  assert.equal(t.st.editors.size, 0);
 });
 
 test('w2443: unpaused before the deadline: nothing is ended', async () => {

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { MachinePauses, PAUSE_DAEMON_KILL_MS, PAUSE_GRACE_MS, PAUSE_STOP_AFTER_MS, handedBackIn, pauseHolds, pauseNotice, pauseWhy, type HandBack, type PauseDeps } from './machinePause.ts';
+import { MachinePauses, PAUSE_DAEMON_KILL_MS, PAUSE_GRACE_MS, PAUSE_STOP_AFTER_MS, SAVE_RETRY_FOR_MS, SAVE_RETRY_MS, handedBackIn, pauseHolds, pauseNotice, pauseWhy, type HandBack, type PauseDeps } from './machinePause.ts';
 import { holdReason, pickComputer, roomNow, type Computer } from './placement.ts';
 import { handoverNote } from './work.ts';
 import type { Machine, MachinePause, SessionInfo, WorkItem } from '../shared/types.ts';
@@ -143,6 +143,46 @@ test('w2443: a worker that stops by itself: stopped, its sandbox saved, its requ
   assert.match(h.note, /^w1: still open: paused on beast; branch feature\/x pushed/);
   assert.match(h.saved!, /saved as WIP commit abc1234def on sandbox\/slot5-w1532 and pushed/);
   assert.equal(t.work.get('w1')!.status, 'blocked');
+});
+
+test('w2443, LothLaptop live check (2026-10-28): a save the daemon refuses while the worker\'s process still runs is tried again until it lands', async () => {
+  // Worker 8cf0b0be's save came 5 s after the interrupt, was refused ("agent 8cf0b0be runs in sandbox slot1") and was never tried again.
+  const t = world();
+  t.worker('mid1', { live: true, mid: true, requests: [['w1', 'active']] });
+  let refusals = 2;
+  const waited: number[] = [];
+  t.d.save = async (i, branch): Promise<SaveResult> => {
+    if (refusals-- > 0) throw new Error(`agent ${i.id} runs in sandbox ${i.machineSandbox}`);
+    t.saved.push(`${i.machineSandbox}@${branch}`);
+    return { sha: 'abc1234def5678', files: 1, pushed: true, notes: [] };
+  };
+  t.d.wait = async (ms) => void waited.push(ms);
+  const p = new MachinePauses(t.d);
+  t.pause(PAUSED);
+  p.onPause('beast');
+  t.mid.delete('mid1');
+  p.turnEnded(t.sessions.get('mid1')!, '');
+  for (let i = 0; i < 10; i++) await settle();
+  assert.deepEqual(waited, [SAVE_RETRY_MS, SAVE_RETRY_MS]);
+  assert.deepEqual(t.saved, ['slot5@sandbox/slot5-w1532']);
+  assert.match(t.handed[0].h.saved!, /saved as WIP commit abc1234def on sandbox\/slot5-w1532 and pushed/);
+  // Another failure is not waited on, and a refusal that never ends gives up in time.
+  const u = world();
+  u.worker('mid2', { live: true, mid: true, requests: [['w2', 'active']] });
+  let tries = 0;
+  u.d.save = async (i) => {
+    tries++;
+    throw new Error(`agent ${i.id} runs in sandbox slot5`);
+  };
+  u.d.wait = async () => {};
+  const q = new MachinePauses(u.d);
+  u.pause(PAUSED);
+  q.onPause('beast');
+  u.mid.delete('mid2');
+  q.turnEnded(u.sessions.get('mid2')!, '');
+  for (let i = 0; i < 60; i++) await settle();
+  assert.equal(tries, SAVE_RETRY_FOR_MS / SAVE_RETRY_MS + 1);
+  assert.match(u.handed[0].h.saved!, /could not be saved \(agent mid2 runs in sandbox slot5\)/);
 });
 
 test('w2443: a nonresponsive worker (ignores the notice and the interrupt) is interrupted at 60 s and stopped at 75 s, its work saved and Blocked', async () => {

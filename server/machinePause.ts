@@ -99,8 +99,18 @@ export interface PauseDeps {
    */
   block: (w: WorkItem, info: SessionInfo, h: HandBack) => void;
   now?: () => number;
+  /** A pause between save attempts (tests make it instant). */
+  wait?: (ms: number) => Promise<void>;
   log: (line: string) => void;
 }
+
+/**
+ * The daemon refuses a save while the sandbox's agent process still runs ("agent 8cf0b0be runs in sandbox slot1", w656). On
+ * LothLaptop's live check (2026-10-28) the one save came 5 s after the interrupt, before the process was gone, and the WIP was
+ * never pushed: try again every SAVE_RETRY_MS until the daemon's 90 s sweep has surely ended it.
+ */
+export const SAVE_RETRY_MS = 5_000;
+export const SAVE_RETRY_FOR_MS = 120_000;
 
 /** One hand-back (a move, w1600) or a pause's block (w2443), as the ledger and the next worker see it (WorkItem.handedBack). */
 export interface HandBack {
@@ -254,7 +264,18 @@ export class MachinePauses {
       let saved: string | undefined;
       if (this.d.save && sbBranch && s.machineSandbox) {
         try {
-          const r = await this.d.save(s, sbBranch, `FF Factory: WIP saved from ${s.id} when ${s.machineId} was paused (w2443)\n\n${picks.map((w) => w.id).join(', ') || 'Its work'} waits Blocked on the pause: ${why}. Its worker carries on from it when the machine runs again.`);
+          const message = `FF Factory: WIP saved from ${s.id} when ${s.machineId} was paused (w2443)\n\n${picks.map((w) => w.id).join(', ') || 'Its work'} waits Blocked on the pause: ${why}. Its worker carries on from it when the machine runs again.`;
+          const wait = this.d.wait ?? ((ms: number) => new Promise<void>((res) => setTimeout(res, ms)));
+          let r: SaveResult | undefined;
+          for (let tries = 0; ; tries++) {
+            try {
+              r = await this.d.save(s, sbBranch, message);
+              break;
+            } catch (e) {
+              if (!/runs in sandbox/.test((e as Error).message) || (tries + 1) * SAVE_RETRY_MS > SAVE_RETRY_FOR_MS) throw e;
+              await wait(SAVE_RETRY_MS);
+            }
+          }
           saved = r.sha ? `its sandbox's uncommitted work (${r.files} file(s)) was saved as WIP commit ${r.sha.slice(0, 10)} on ${sbBranch}${r.pushed ? ' and pushed' : `, not pushed (${r.notes.join('; ')})`}` : `its sandbox had no uncommitted work on ${sbBranch}`;
         } catch (e) {
           saved = `its sandbox's uncommitted work could not be saved (${(e as Error).message}); it is still in the sandbox`;

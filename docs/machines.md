@@ -590,12 +590,15 @@ hand their jobs back to the dispatcher to be scheduled on other computers."). Wi
   | 0 s | daemon | every timed run there is cancelled (`TimedRunner.cancel`): its player ended, its bench ticket freed, its worker told "cancelled: <machine> was paused from its tray app …". A timed run that arrives while paused is refused the same way. |
   | 0 s | portal | each worker there mid-turn is told once ("[FF Factory] PAUSE: …", `pauseNotice`): commit and push everything unfinished on its sandbox branch as a WIP commit in one call (no PR, no merge, no force push), release a lock, slot or player it holds, and end its turn with `wNNN: still open: paused on <machine>; branch <branch> pushed; <where it stopped>`. A worker between turns is not woken: its process is stopped. |
   | 60 s | portal | a worker still mid-turn has its turn interrupted (`PAUSE_GRACE_MS`). |
+  | 60 s | daemon | every sandbox's Unity editor is asked to quit (`PAUSE_EDITOR_CLOSE_MS`), so its graceful close is over by the 90 s sweep. |
   | 75 s | portal | still running: its process and every process under it are stopped (`PAUSE_STOP_AFTER_MS`). |
-  | 90 s | daemon | whatever FF Factory still runs there is ended, the portal reachable or not (`machine/pauseStop.ts`, `PAUSE_DAEMON_KILL_MS`): every worker's agent host with its whole process tree (`HostedSession.endNow`: Windows `taskkill /PID <pid> /T /F`; a Mac or Linux its process group and every descendant, SIGKILL; `machine/hostWatch.ts` `killTree`), every sandbox's Unity editor (closed, forced after 30 s), and every process left that FF Factory started (game players, batch Unity, builds, servers, Xvfb, shells: `LeftoverReaper` with `pauseEnds`, no grace, no wait for a session to end). |
+  | 90 s | daemon | whatever FF Factory still runs there is ended, the portal reachable or not (`machine/pauseStop.ts`, `PAUSE_DAEMON_KILL_MS`): every worker's agent host with its whole process tree (`HostedSession.endNow`: Windows `taskkill /PID <pid> /T /F`; a Mac or Linux its process group and every descendant, SIGKILL; `machine/hostWatch.ts` `killTree`), every sandbox's Unity editor still up (force-killed), and every process left that FF Factory started (game players, batch Unity, builds, servers, Xvfb, shells: `LeftoverReaper` with `pauseEnds`, no grace, no wait for a session to end), all three at once. |
   | every 15 s | daemon | the same sweep again while it stays paused (`PAUSE_RESWEEP_MS`), so nothing started meanwhile keeps running. |
 
-  The portal looks every 5 s (`PAUSE_TICK_MS`), so its steps slip by at most 5 s; an editor's close is the last thing to
-  finish, by about 120 s. A daemon restarted while paused applies the deadline from its start. Processes FF Factory did not
+  The portal looks every 5 s (`PAUSE_TICK_MS`), so its steps slip by at most 5 s; everything is gone by about 95 s. On
+  LothLaptop's live check (2026-10-28, lothsahn: "I paused it and it took a while to close"), before the 60 s editor step
+  and with the 90 s sweep's steps one after another, the worker was gone at 69 s but the player and crash handler waited
+  behind the editor's 30 s close (117 s) and the editor at 123 s. A daemon restarted while paused applies the deadline from its start. Processes FF Factory did not
   start are never touched: the reaper ends only processes carrying a worker's `FF_SESSION_ID`, a player slot lease or a
   worker's temp folder, and spares a person's own game and an interactive editor (w1894); the editors closed are the
   sandboxes' own, never the main clone's. Tests: `server/machinePause.test.ts` (the notice, a nonresponsive worker
@@ -603,7 +606,8 @@ hand their jobs back to the dispatcher to be scheduled on other computers."). Wi
   editor and leftovers at 90 s, a real three-process tree ended whole), `server/orchestrators.test.ts` "w2443".
 - **Its requests wait Blocked on the pause and resume in their own sandboxes** (`Orchestrators.pausedOff`,
   `WorkBlocker.pause`). When a worker's turn ends on a paused machine (or its process is gone), its sandbox's uncommitted work
-  is saved on its branch and pushed (w656's `save_work`), and each request it was working on is set Blocked on "<machine>
+  is saved on its branch and pushed (w656's `save_work`; while the daemon still sees its agent running there and refuses,
+  the portal tries again every 5 s for up to 2 minutes, `SAVE_RETRY_MS`, `SAVE_RETRY_FOR_MS`), and each request it was working on is set Blocked on "<machine>
   running again (its pause)", its log naming the branch and the worker's line. The gate does not clear while the machine is
   online but paused (`BlockerFacts.paused`), and a turn end does not lift it (unlike w2433's drop gate). On the unpause the
   blocker watch resumes that same worker in its own sandbox, as after an offline machine (w2433), telling it its work was
