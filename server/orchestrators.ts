@@ -1267,6 +1267,7 @@ export class Orchestrators {
     // they go when the request starts (active), stalls, closes or is queued for capacity, or the unblock drops them itself.
     if (w.blocked && !GATE_STATUSES.has(w.status)) {
       w.blocked = undefined;
+      w.gateEndedAt = this.now().getTime();
       w.alsoBlocked = undefined;
     }
     // The check-ins a block held (w829) go with its gates. A request still open (a start, a stall, a question, a queue)
@@ -3390,6 +3391,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const was = w.blocked ? ` (it was blocked on ${gatesName(gatesOf(w), this.now().getTime())})` : '';
     w.status = 'active';
     w.blocked = undefined;
+    w.gateEndedAt = this.now().getTime();
     w.alsoBlocked = undefined;
     w.heldCheckIns = undefined;
     this.stamp(w, `the deploy happened (${why}); its worker ${sid} resumes within a minute for its step after it: ${clip(step, 160)}${was}`);
@@ -3575,6 +3577,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     p.constraints = pairText(p.pair);
     p.status = 'queued';
     p.blocked = undefined;
+    p.gateEndedAt = this.now().getTime();
     p.alsoBlocked = undefined;
     p.queuedFor = { at };
     const not = avoid.length ? `, not on ${avoid.join(' or ')}` : '';
@@ -4422,6 +4425,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const handed = this.handBackCheckIns(w, `${w.id} is unblocked: FF Factory merged ${g.ref} on green CI (${why})`, m.session);
     w.status = 'active';
     w.blocked = undefined;
+    w.gateEndedAt = this.now().getTime();
     w.alsoBlocked = undefined;
     w.heldCheckIns = undefined;
     w.gateResumes = undefined;
@@ -6572,6 +6576,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const resumed = resumedIds.length > 0;
     w.status = back.length ? 'active' : 'new';
     w.blocked = undefined;
+    w.gateEndedAt = this.now().getTime();
     w.alsoBlocked = undefined;
     w.heldCheckIns = undefined;
     // The hand-back goes first: a log line is clipped, and a CI reason can be long.
@@ -6642,6 +6647,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     w.status = 'question';
     // A gate that died is the person's to rule on (w754): none of its gates is kept through that question.
     w.blocked = undefined;
+    w.gateEndedAt = this.now().getTime();
     w.alsoBlocked = undefined;
     // The card's question and answers (w1597): the gate's detail stays in `text`, behind Details.
     const asks: Ask[] = [
@@ -6676,6 +6682,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       const what = gates.map((g) => g.what).join('; ');
       w.status = 'queued';
       w.blocked = undefined;
+      w.gateEndedAt = this.now().getTime();
       w.alsoBlocked = undefined;
       w.queuedFor = { at: first.at };
       this.stamp(w, `ledger: was blocked on ${gatesName(gates, this.now().getTime())} (${clip(what, 160)}), set by ${first.by}; that is a wait for capacity, so it is Queued, and the queue places it on the first place that frees`);

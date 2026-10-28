@@ -160,7 +160,8 @@ export class BlockerWatch {
         if (!l || (!ref && !portal)) continue;
         const at = l.at ?? reportAt(s);
         const key = `${s.id}@${at}`;
-        if (w.waitRecorded === key || !at || now - at > REPORTED_WAIT_MS) continue;
+        // w2457: a report from before its last gate went names a wait that is over (the deploy that woke it, the request it named).
+        if (w.waitRecorded === key || !at || now - at > REPORTED_WAIT_MS || (w.gateEndedAt && at <= w.gateEndedAt)) continue;
         if (ref) {
           // One the request it names waits on in turn is a wait cycle: the cycle break (w2357, below) resumes a side of it.
           const other = this.d.store.work.get(ref);
