@@ -15,6 +15,7 @@ import { publicRef } from './attachments.ts';
 import { readJsonDurable, writeJsonDurable } from './durable.ts';
 import type { AttachmentRef, Machine } from '../shared/types.ts';
 import { legOrder, MAX_VARIANTS, PIECE_MAX_BYTES, runBoundMinutes, timedArgsProblem, timedSettingsOf, variantNameProblem, type LegSummary, type Piece, type TimedRunOrder, type TimedSettings, type TimedVariant } from '../shared/timedRun.ts';
+import { SMALL_TIMED_MAX_AGENTS } from './timedAsk.ts';
 
 export type TimedRunState = 'uploading' | 'queued' | 'sent' | 'running' | 'done' | 'failed';
 
@@ -122,7 +123,8 @@ export interface TimedTarget {
  * small worker computers (a play-only turn idles nobody), then the fewest runs ahead, the fewest agent slots, the id.
  */
 export function rankTargets(all: readonly TimedTarget[]): TimedTarget[] {
-  const key = (t: TimedTarget) => [t.held ? 1 : 0, t.online && t.offers ? 0 : 1, t.kind === 'play-only' ? 0 : 1, t.runs.length, t.agents];
+  // w2442: a big computer that takes timed runs (BIG_TIMED_RUNS) comes after every small one: a run there idles more slots
+  const key = (t: TimedTarget) => [t.held ? 1 : 0, t.online && t.offers ? 0 : 1, t.kind === 'play-only' ? 0 : 1, t.agents > SMALL_TIMED_MAX_AGENTS ? 1 : 0, t.runs.length, t.agents];
   return [...all].sort((a, b) => {
     const [x, y] = [key(a), key(b)];
     for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return x[i] - y[i];
@@ -224,7 +226,7 @@ export class TimedRuns {
       const small = isPlayOnly(m) ? undefined : this.d.smallWorker?.(m);
       if (!isPlayOnly(m) && !small) continue;
       const held = this.d.held?.(m.id);
-      out.push({ ...(held ? { held } : {}), id: m.id, kind: isPlayOnly(m) ? 'play-only' : 'small', online: this.d.isOnline(m.id), offers: this.d.offers(m.id), why: isPlayOnly(m) ? m.playOnly!.trim() : `a small worker computer (${small!.agents} agent slot${small!.agents === 1 ? '' : 's'})`, runs: this.runsOn(m.id), ...(m.platform ? { platform: m.platform } : {}), agents: small?.agents ?? 0 });
+      out.push({ ...(held ? { held } : {}), id: m.id, kind: isPlayOnly(m) ? 'play-only' : 'small', online: this.d.isOnline(m.id), offers: this.d.offers(m.id), why: isPlayOnly(m) ? m.playOnly!.trim() : `a ${small!.agents > SMALL_TIMED_MAX_AGENTS ? 'big' : 'small'} worker computer (${small!.agents} agent slot${small!.agents === 1 ? '' : 's'})`, runs: this.runsOn(m.id), ...(m.platform ? { platform: m.platform } : {}), agents: small?.agents ?? 0 });
     }
     return out;
   }

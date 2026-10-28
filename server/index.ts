@@ -11,7 +11,7 @@ import { SessionManager, compactCommand, seedSdkCost, snapshotOf } from './sessi
 import { TIMER_LIMITS } from './timers.ts';
 import { Agents } from './agents.ts';
 import { MachineManager, agentCap, enrolledMachines, machineForPath, revokeMachineToken } from './machines.ts';
-import { SMALL_TIMED_MAX_AGENTS } from './timedAsk.ts';
+import { timedRunSize } from './timedAsk.ts';
 import { LiveError, LiveHub } from './live.ts';
 import { LIVE_IDLE_DEFAULT_MINUTES, LiveIdleCloser, liveIdleStatusLine } from './liveIdle.ts';
 import { BenchWarner } from './benchWarnings.ts';
@@ -525,10 +525,11 @@ const timedRuns = new TimedRuns({
     for (const id of requests) agents.orchestrators.noteMove(id, line);
   },
   log: (line) => console.log(line),
-  // w1996: a small worker computer that takes timed runs times builds made on the big ones, like a play-only one
+  // w1996: a small worker computer that takes timed runs times builds made on the big ones, like a play-only one;
+  // w2442: so does a big one BIG_TIMED_RUNS names (LothDesktop)
   smallWorker: (m) => {
     const agents = m.sandboxRoot ? agentCap(m) : 0;
-    return agents >= 1 && agents <= SMALL_TIMED_MAX_AGENTS && !machines.noTimedRuns(m.id) ? { agents } : undefined;
+    return timedRunSize(m.id, agents) && !machines.noTimedRuns(m.id) ? { agents } : undefined;
   },
   held: (id) => holdReason(id, agents.placement(false)),
   // w2048: a run whose computer stays unavailable past this wait (scaled by the fleet's load) plays every side elsewhere
