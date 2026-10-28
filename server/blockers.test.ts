@@ -411,3 +411,12 @@ test('w2377: a timed leg\'s turn with no result leaves its parent Blocked; the l
   const before = item('w2338', { status: 'blocked', blocked: block({ kind: 'ci', ref: 'Final-Factory/FinalFactory#1', what: 'x', at: new Date(Date.parse(b.at) - 60_000).toISOString() }), timedLeg: leg.timedLeg });
   assert.notEqual(blockerVerdict(b, facts([before], { reportedSince: () => true, deliveredSince: () => false }), 'w2335').state, 'clear', 'blocked before the parent\'s gate: already seen');
 });
+
+test('w2446: a lock blocker stays while its holder ended a turn with a check-in pending (its timed run still holds the lock)', () => {
+  const lock = block({ kind: 'lock', ref: 'lothdesktop bench lock', holder: 'w633', what: 'a timed run' });
+  const seen: unknown[] = [];
+  const reportedSince = (_w: WorkItem, _since: number, o?: { notCheckIn?: boolean }) => (seen.push(o), !o?.notCheckIn);
+  assert.equal(blockerVerdict(lock, facts([item('w633')], { reportedSince })).state, 'open', 'a check-in report: still held');
+  assert.deepEqual(seen, [{ notCheckIn: true }]);
+  assert.equal(blockerVerdict(lock, facts([item('w633')], { reportedSince: () => true })).state, 'clear', 'a turn with no check-in pending: let go');
+});

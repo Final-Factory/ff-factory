@@ -181,8 +181,8 @@ export interface BlockerFacts {
   now: number;
   /** A request by id. */
   work: (id: string) => WorkItem | undefined;
-  /** Whether a worker on `w` finished a turn (reported) after `since` (ms). */
-  reportedSince?: (w: WorkItem, since: number) => boolean;
+  /** Whether a worker on `w` finished a turn (reported) after `since` (ms); `notCheckIn` (w2446): not one that ended with a check-in pending. */
+  reportedSince?: (w: WorkItem, since: number, o?: { notCheckIn?: boolean }) => boolean;
   /**
    * Whether a worker on `w` reported after `since` (ms) with what `waiter` waits for (w1869): its DONE, a `For <waiter>:`
    * line, or a still-open line that waits on `waiter` (server/ledgerRules.ts `reportDelivers`). A progress report
@@ -281,7 +281,8 @@ export function blockerVerdict(b: WorkBlocker, f: BlockerFacts, waiter?: string)
     case 'lock': {
       const h = b.holder ? follow(b.holder, f) : undefined;
       if (h && !['new', 'question', 'queued', 'blocked', 'active'].includes(h.status)) return { state: 'clear', why: `${h.id}, which held ${b.ref ?? 'it'}, is ${h.status}` };
-      if (h && f.reportedSince?.(h, at)) return { state: 'clear', why: `${h.id}, which held ${b.ref ?? 'it'}, reported` };
+      // w2446: a turn the holder ended with a check-in pending (its timed run still holds the lock) is no report that it let go
+      if (h && f.reportedSince?.(h, at, { notCheckIn: true })) return { state: 'clear', why: `${h.id}, which held ${b.ref ?? 'it'}, reported` };
       if (f.nightlyAt && f.nightlyAt > at) return { state: 'clear', why: `the nightly lab reported since (${new Date(f.nightlyAt).toISOString().slice(0, 16).replace('T', ' ')} UTC)` };
       if (b.until && f.now >= Date.parse(b.until)) return { state: 'clear', why: `time to look again at ${b.ref ?? 'the lock'} (${utc(b.until, f.now)})` };
       return late(`${b.ref ?? 'the lock'} is held${h ? ` by ${h.id}` : ''}`);

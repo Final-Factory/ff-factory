@@ -386,9 +386,10 @@ export class BlockerWatch {
     return {
       now: this.now(),
       work: (id) => store.work.get(id.toLowerCase()),
-      reportedSince: (w: WorkItem, since: number) =>
+      reportedSince: (w: WorkItem, since: number, o?: { notCheckIn?: boolean }) =>
         w.sessionIds.some((sid) => {
           const s = store.sessions.get(sid);
+          if (o?.notCheckIn && this.d.checkInPending?.(sid)) return false;
           return !!s && !BUSY.has(s.status) && !!s.lastResult && (Date.parse(s.lastActivityAt) || 0) > since;
         }),
       deliveredSince: (w: WorkItem, since: number, waiter?: string) => {

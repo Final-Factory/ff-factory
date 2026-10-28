@@ -7554,3 +7554,36 @@ test('w2443: a leg of a pair run on a paused machine starts the whole run again 
   assert.equal(w.blocked, undefined);
   assert.ok(w.log.some((l) => /its leg \w+'s computer pc is paused from its tray app: someone is using it \(w1532\) \(w2443\)/.test(l)), w.log.join('\n'));
 });
+
+test('w2446: a report naming a request already closed records no wait (w2434 quoted "gave up: w1995: …" and was unblocked at once, twice)', async (t) => {
+  const { store, agents, o, dispatcher, call } = await setupOnMachine(t);
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }, { id: 'w2', status: 'done' }, { id: 'w3' }]);
+  let clock = Date.now();
+  let pending = false;
+  const watch = new BlockerWatch({ store, orchestrators: o, now: () => clock, checkInPending: (id) => pending || agents.waker.pending(id) !== undefined });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Time it', title: 'w1: A/B', work_id: 'w1' });
+  assert.equal(started.isError, false, started.text);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const info = store.sessions.get(id)!;
+  await until('its first turn', () => info.status === 'idle');
+  const w = store.work.get('w1')!;
+  for (const n of [1, 2]) {
+    Object.assign(info, { status: 'stopped', lastResult: `Run ${n} failed.\n\nw1: still open: waiting on the bench queue, which "gave up: w2: an exclusive timing ticket here waits for the dispatcher's answer"`, lastResultAt: new Date(clock - 60_000).toISOString() });
+    assert.equal((await watch.tick()).has('w1'), false, `report ${n}: nothing recorded`);
+    assert.deepEqual([w.status, w.blocked], ['active', undefined]);
+    clock += 120_000;
+  }
+  assert.ok(!w.log.some((l) => /unblocked|recorded the wait/.test(l)), w.log.join(' | '));
+  // an open request named the same way is still a wait (w2422)
+  Object.assign(info, { lastResult: 'w1: still open: blocked on w3 reporting', lastResultAt: new Date(clock - 60_000).toISOString() });
+  assert.match((await watch.tick()).get('w1') ?? '', /^recorded: the wait on w3/);
+  // the lock holder's turn ended with a check-in pending: no report that it let go (BlockerWatch facts reportedSince)
+  const facts = (watch as unknown as { facts(a: Map<string, never>, b: Map<string, never>, c: Map<string, never>): { reportedSince(w: WorkItem, since: number, o?: { notCheckIn?: boolean }): boolean } }).facts(new Map<string, never>(), new Map<string, never>(), new Map<string, never>());
+  pending = true;
+  assert.equal(facts.reportedSince(w, 0, { notCheckIn: true }), false);
+  assert.equal(facts.reportedSince(w, 0), true, 'any other gate still reads the turn end');
+  pending = false;
+  agents.waker.cancel(id);
+  assert.equal(facts.reportedSince(w, 0, { notCheckIn: true }), true);
+});

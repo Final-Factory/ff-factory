@@ -185,14 +185,26 @@ const PLAN = /\bPR ?([1-9])\b[^]*\bPR ?([2-9])\b|\b(phase|part|step|stage) ?\d+ 
 const MORE_COMING = /\b(more (is |are )?coming|second pr|next pr|follow-?up pr|follow-?ups?|remaining (steps?|work|items?)|still (needs?|to do|have to|open)|next steps?|will (then )?(open|file|do|follow|post|send)|not yet|todo|to do next|left to do|waiting (for|on)|blocked)\b/i;
 
 /** Whether the request is a release (its work ends when the build is live and the patch notes are posted). */
-export const isRelease = (w: Pick<WorkItem, 'title' | 'brief'>) => RELEASE_TITLE.test(w.title) || RELEASE_BRIEF.test(w.brief);
+export const isRelease = (w: Pick<WorkItem, 'title' | 'brief'> & Partial<Pick<WorkItem, 'prs'>>) =>
+  releaseRun(w) || ((RELEASE_TITLE.test(w.title) || RELEASE_BRIEF.test(w.brief)) && !harnessOnly(w));
+
+/** The repos of FF Factory and the agents' harness: a request whose every PR is in one changes tooling, not a build (w2446). */
+const HARNESS_REPOS = new Set(['final-factory/ff-factory', 'final-factory/final-factory-agents', 'final-factory/finalfactory-agent-kit']);
+/**
+ * What the request did, over the words of its title (w2446; lothsahn, 2026-10-28: "Release detection should come from what
+ * the request does (a release run), not from "release" or "patch notes" in its title"): a version bump PR of it (head
+ * release/<n> or urgent/<v>, trigger-ci-release.sh) is a release run; PRs only in the harness repos are not (w2444, "Release
+ * harness: post patch notes once live on development", ff-factory #740, was held for notes it never had to post).
+ */
+const releaseRun = (w: Partial<Pick<WorkItem, 'prs'>>) => (w.prs ?? []).some((p) => /^(urgent\/|release\/\d)/.test(p.head ?? ''));
+const harnessOnly = (w: Partial<Pick<WorkItem, 'prs'>>) => !!w.prs?.length && w.prs.every((p) => HARNESS_REPOS.has(p.repo.toLowerCase()));
 
 /**
  * What is still left after a PR of this request merged, in words, or undefined when nothing is: a release is done when
  * its build is live and its notes are posted; a request that asks for a check after the merge (a 2-peer run) or plans
  * several PRs is not done by one; nor is one whose worker's last report says more is coming or waits on someone.
  */
-export function afterMergeReason(w: Pick<WorkItem, 'title' | 'brief' | 'constraints' | 'question' | 'flag' | 'legs'>, reports: readonly string[]): string | undefined {
+export function afterMergeReason(w: Pick<WorkItem, 'title' | 'brief' | 'constraints' | 'question' | 'flag' | 'legs'> & Partial<Pick<WorkItem, 'prs'>>, reports: readonly string[]): string | undefined {
   if (w.question) return 'it waits on a question';
   // w1863: w1789 merged two PRs while its m5 timing leg waited; the leg is work left, not a report's words.
   if (w.legs?.length) return `its leg${w.legs.length > 1 ? 's' : ''} for ${w.legs.map((l) => l.needs.join(' or ')).join(' and ')} ${w.legs.length > 1 ? 'are' : 'is'} queued and not started`;
@@ -226,7 +238,7 @@ const sentences = (t: string) => t.split(/(?<=[.!?;])\s+|\n+/).filter((s) => s.t
  * something besides a deploy is (afterMergeReason still finds a reason once the sentences about deploying are set aside).
  * `portal`: this app's portal must run the merge; `machines`: every connected worker machine's daemon too.
  */
-export function deployStep(w: Pick<WorkItem, 'title' | 'brief' | 'constraints' | 'question' | 'flag' | 'legs'>, reports: readonly string[]): { portal: boolean; machines: boolean } | undefined {
+export function deployStep(w: Pick<WorkItem, 'title' | 'brief' | 'constraints' | 'question' | 'flag' | 'legs'> & Partial<Pick<WorkItem, 'prs'>>, reports: readonly string[]): { portal: boolean; machines: boolean } | undefined {
   if (w.question || w.flag || w.legs?.length || isRelease(w)) return undefined;
   if (!afterMergeReason(w, reports)) return undefined;
   const aside: string[] = [];
