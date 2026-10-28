@@ -578,23 +578,41 @@ hand their jobs back to the dispatcher to be scheduled on other computers."). Wi
   `placement.hold` with "paused from its tray app: someone is using it (w1532)", so no new work is placed there, the Capacity
   block reads `ROOM n% but HELD (…)`, nothing resumes there (w1376), and it is no capacity ping's room. The machines view
   shows it amber, "Paused", with why and until when.
-- **Its work is handed back** (`server/machinePause.ts`, `Orchestrators.handBack`, `server/machinePause.test.ts`):
-  - A worker **mid-turn** is told once ("[FF Factory] PAUSE: …"): finish the step it is on, commit and push everything
-    unfinished on its branch (a WIP commit is fine), release a Unity slot, a bench lock or a player it holds, and end with
-    `wNNN: handed back: branch <branch> pushed; <where it stopped>` for each request. When its turn ends, its process stops,
-    its sandbox's uncommitted work is saved on its branch and pushed (w656's `save_work`), and each request it was working on
-    is taken off it, set Queued with `WorkItem.handedBack` (branch, note, how), and the dispatcher is told at once to
-    `switch_branch` a FREE sandbox on a computer that is not paused to that branch, then `start_agent` with the work id. The
-    new worker's handover says where the work is and quotes the note (`handoverNote`).
-  - A worker whose turn ends without a hand-back line gets 60 seconds for its notice to start a turn of its own (the notice
-    reached the turn as it ended); then FF Factory hands back for it. Still mid-turn **15 minutes** after the notice, its turn
-    is interrupted, and stopped 2 minutes later if that does not end it; the save keeps its sandbox's uncommitted work either
-    way. A worker holding a lock gets no longer: a benchmark measured while a person uses the machine measures nothing, and the
-    notice asks it to release the lock first.
-  - A worker **between turns** is not woken for it: its process stops, and its requests stay with it until something would
-    resume it (its check-in, CI, a person's reply). The pause holds that message, so the requests are handed back then, the
-    message going to the next worker in its handover (`SessionManager.pauseHeld`).
-- **Standing agents** start no run on a paused machine (the run waits, as for an offline one); a run in progress finishes.
+- **A pause stops what runs there within two minutes** (w2443, lothsahn, 2026-10-27: "Pausing a machine should stop
+  existing runs on that machine. They should terminate in a minute or two. Please make this fix so that pausing the machine
+  gets workers to stop, upload, and quit quickly", and "The worker harness should be authoritative and if the worker is
+  nonresponsive, should kill the worker after a few minutes. There's no way it should keep running"). Before w2443 a worker
+  mid-turn got 15 minutes and its work went to other computers. The clock from the pause, for every reason (tray, schedule,
+  someone at the PC):
+
+  | after | who | what |
+  |---|---|---|
+  | 0 s | daemon | every timed run there is cancelled (`TimedRunner.cancel`): its player ended, its bench ticket freed, its worker told "cancelled: <machine> was paused from its tray app …". A timed run that arrives while paused is refused the same way. |
+  | 0 s | portal | each worker there mid-turn is told once ("[FF Factory] PAUSE: …", `pauseNotice`): commit and push everything unfinished on its sandbox branch as a WIP commit in one call (no PR, no merge, no force push), release a lock, slot or player it holds, and end its turn with `wNNN: still open: paused on <machine>; branch <branch> pushed; <where it stopped>`. A worker between turns is not woken: its process is stopped. |
+  | 60 s | portal | a worker still mid-turn has its turn interrupted (`PAUSE_GRACE_MS`). |
+  | 75 s | portal | still running: its process and every process under it are stopped (`PAUSE_STOP_AFTER_MS`). |
+  | 90 s | daemon | whatever FF Factory still runs there is ended, the portal reachable or not (`machine/pauseStop.ts`, `PAUSE_DAEMON_KILL_MS`): every worker's agent host with its whole process tree (`HostedSession.endNow`: Windows `taskkill /PID <pid> /T /F`; a Mac or Linux its process group and every descendant, SIGKILL; `machine/hostWatch.ts` `killTree`), every sandbox's Unity editor (closed, forced after 30 s), and every process left that FF Factory started (game players, batch Unity, builds, servers, Xvfb, shells: `LeftoverReaper` with `pauseEnds`, no grace, no wait for a session to end). |
+  | every 15 s | daemon | the same sweep again while it stays paused (`PAUSE_RESWEEP_MS`), so nothing started meanwhile keeps running. |
+
+  The portal looks every 5 s (`PAUSE_TICK_MS`), so its steps slip by at most 5 s; an editor's close is the last thing to
+  finish, by about 120 s. A daemon restarted while paused applies the deadline from its start. Processes FF Factory did not
+  start are never touched: the reaper ends only processes carrying a worker's `FF_SESSION_ID`, a player slot lease or a
+  worker's temp folder, and spares a person's own game and an interactive editor (w1894); the editors closed are the
+  sandboxes' own, never the main clone's. Tests: `server/machinePause.test.ts` (the notice, a nonresponsive worker
+  interrupted at 60 s and stopped at 75 s), `server/pauseStop.test.ts` (timed runs at once, a worker that ignores the stop, an
+  editor and leftovers at 90 s, a real three-process tree ended whole), `server/orchestrators.test.ts` "w2443".
+- **Its requests wait Blocked on the pause and resume in their own sandboxes** (`Orchestrators.pausedOff`,
+  `WorkBlocker.pause`). When a worker's turn ends on a paused machine (or its process is gone), its sandbox's uncommitted work
+  is saved on its branch and pushed (w656's `save_work`), and each request it was working on is set Blocked on "<machine>
+  running again (its pause)", its log naming the branch and the worker's line. The gate does not clear while the machine is
+  online but paused (`BlockerFacts.paused`), and a turn end does not lift it (unlike w2433's drop gate). On the unpause the
+  blocker watch resumes that same worker in its own sandbox, as after an offline machine (w2433), telling it its work was
+  pushed as a WIP commit to build on (never reset or force-push it), to re-pin Unity (the editor was closed) and to start
+  again any timed run, build or test the pause cancelled. A message that would resume a worker while paused (its check-in, CI,
+  a person's reply) waits for the unpause (`SessionManager.pauseHeld`); a stale pause notice is dropped then.
+- **A pair run's leg there** starts the whole run again away from the paused machine (`requeuePair`, its other legs stopped at
+  once, w2305); the pair check (`pairLegBroken`) re-queues it the same way if it finds the leg first.
+- **Standing agents** start no run on a paused machine (the run waits, as for an offline one); a run in progress is ended by the daemon's 90 s sweep with its process tree, like any agent host there (w2443).
   **The ops worker's machine updates do not pause**: an update takes a minute, keeps the fleet on one daemon commit and is what
   updates the tray itself.
 - **Protocol**: `pause` in the hello and a `pause` message, no bump: an older portal's switch drops it, and a daemon before it

@@ -12,7 +12,7 @@
 //   as after an offline machine (w2433). A pair run's leg there starts the run again elsewhere, its partner told (w2304).
 // - A worker between turns there is not woken for it. Its process (if any) is stopped; a message that would resume it (its
 //   check-in, CI, a person's reply) waits in the send queue for the unpause (the machine hold, w1376).
-// Lothsahn (2026-10-28, w2443): "Pausing a machine should stop existing runs on that machine. They should terminate in a
+// Lothsahn (2026-10-27, w2443): "Pausing a machine should stop existing runs on that machine. They should terminate in a
 // minute or two. Please make this fix so that pausing the machine gets workers to stop, upload, and quit quickly", and "The
 // worker harness should be authoritative and if the worker is nonresponsive, should kill the worker after a few minutes.
 // There's no way it should keep running". (w1532 handed the work to other computers after up to 17 minutes.)
