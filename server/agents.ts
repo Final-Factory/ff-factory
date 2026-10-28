@@ -836,6 +836,8 @@ export class Agents {
     machines.onOnline = (id) => this.orchestrators.capacityMayHaveFreed(`${id}'s daemon connected`);
     // w2433: a worker its machine's going offline stopped mid-turn: its requests are Blocked on that machine.
     machines.workersCutOff = (id, sids) => this.orchestrators.workersCutOff(id, sids);
+    // w2474: ...and one whose process ran on through the drop is not Blocked on it once its daemon says so.
+    machines.workersLived = (id, sids) => void this.orchestrators.workersLived(id, sids);
     this.placeAgainTick = setInterval(() => this.placeAgain.tick(), 60_000);
     this.placeAgainTick.unref?.();
     this.timers = new Timers(

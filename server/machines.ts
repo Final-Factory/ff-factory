@@ -601,6 +601,8 @@ export class MachineManager {
    * marked Blocked on the machine. Returns the workers that got a gate, whose resume the gate's clearing does.
    */
   workersCutOff?: (machineId: string, sessionIds: string[]) => string[];
+  /** Workers the daemon's hello reports still running after a drop (w2474): the wait their cut-off gave them goes. */
+  workersLived?: (machineId: string, sessionIds: string[]) => void;
   /** Why the next drop of a machine's link is expected (a forced redeploy, a daemon restart); false: do not resume. */
   private readonly dropWhy = new Map<string, string | false>();
 
@@ -2205,6 +2207,11 @@ export class MachineManager {
             s.info.heldSince = new Date().toISOString();
             this.store.putSession(s.info);
           }
+        }
+        // w2474: a worker the drop cut off mid-turn whose process ran on is not Blocked on this machine any more.
+        if (dropped !== undefined) {
+          const lived = m.sessionIds.filter((sid) => live.has(sid));
+          if (lived.length) this.workersLived?.(id, lived);
         }
         if (why || behind) this.checkOutdated();
         // After the daemon's own session reports (sent right after its hello), so a resume starts from its state.

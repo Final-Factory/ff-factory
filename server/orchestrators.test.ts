@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { Store } from './store.ts';
 import { promptText, SessionManager, setQueryForTesting, type SessionHandle } from './sessions.ts';
-import { MachineManager, STANDING_CAP_NO_POOL, agentCap } from './machines.ts';
+import { MachineManager, STANDING_CAP_NO_POOL, agentCap, type RemoteSession } from './machines.ts';
 import { Agents } from './agents.ts';
 import { Identity } from './identity.ts';
 import { PERSONAL_TOOLS, beltFor } from './belts.ts';
@@ -7605,6 +7605,44 @@ test('w2433: a worker whose process lived through a short drop is not resumed ag
   info.waitingOn = { who: 'Lothsahn', what: 'pick the next cut', at: new Date().toISOString(), request: 'w1' };
   assert.deepEqual(o.workersCutOff('pc', [id]), []);
   assert.equal(w.status, 'active');
+});
+
+test("w2474: a worker whose process ran on through its machine's drop is not Blocked once its daemon says hello, and the watch never resumes it mid-turn; one that did not run on stays Blocked", async (t) => {
+  // 2026-10-28: biscuit dropped five times (a heartbeat miss, an update, the portal VM's Tailscale restarting) while
+  // cc1ab138 (w2466) ran on; each drop marked w2466 "stopped mid-turn" and Blocked, and the gate cleared on the socket
+  // opening, before the daemon's hello said the worker was running.
+  const { store, agents, sessions, o, dispatcher, call } = await setupOnMachine(t);
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }]);
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Fix it', title: 'w1: fix', work_id: 'w1' });
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const info = store.sessions.get(id)!;
+  await until('its first turn', () => info.status === 'idle');
+  const m = agents.machines as unknown as { detach(id: string): void; onMessage(id: string, msg: unknown): void; hasHello(id: string): boolean };
+  const midTurn = () => {
+    const h = sessions.sessions.get(id) as unknown as RemoteSession;
+    h.liveFlag = true;
+    h.seenLive = true;
+    info.status = 'running';
+  };
+  midTurn();
+  m.detach('pc');
+  const w = store.work.get('w1')!;
+  assert.deepEqual([w.status, w.blocked?.kind, w.blocked?.by], ['blocked', 'machine', `worker ${id}`]);
+  // Back with its process running: the hello lifts the wait at once, with no message to the worker.
+  m.onMessage('pc', { type: 'hello', protocol: 1, live: [id] });
+  assert.deepEqual([w.status, w.blocked], ['active', undefined]);
+  assert.ok(w.log.some((l) => l.includes(`its worker ${id} ran on through pc's drop (its daemon reports it running), so the wait on pc is over (w2474)`)), w.log.join('\n'));
+  assert.equal(agents.waker.pending(id), undefined, 'a running worker gets no resume message');
+  // Dropped again, and back without it (its process ended): Blocked until the hello, then resumed in its own sandbox.
+  midTurn();
+  m.detach('pc');
+  assert.equal(w.status, 'blocked');
+  m.onMessage('pc', { type: 'hello', protocol: 1, live: [] });
+  assert.equal(w.status, 'blocked', 'not running: the wait stays for the watch to resume it');
+  const watch = new BlockerWatch({ store, orchestrators: o, online: (x) => (x === 'pc' ? true : undefined) });
+  assert.match((await watch.tick()).get('w1') ?? '', /^clear: pc is online/);
+  assert.match(agents.waker.pending(id)?.note ?? '', /Your turn stopped when pc went offline/);
 });
 
 test('w2433: what a sandbox holds, for the long-offline notice', () => {

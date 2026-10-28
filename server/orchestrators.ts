@@ -4352,8 +4352,9 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    * w2433: a worker that ends a turn is alive, so the gate on its machine it was given when the machine dropped (workersCutOff:
    * a short drop its process lived through) goes; a request with no other gate is Active again.
    */
-  private dropCutOffGates(sid: string) {
+  private dropCutOffGates(sid: string, why = `its worker ${sid} ended a turn after its machine's drop, so the wait on its machine is over (w2433)`) {
     const by = `worker ${sid}`;
+    let dropped = 0;
     for (const w of this.store.work.values()) {
       if (w.status !== 'blocked' || !w.sessionIds.includes(sid)) continue;
       const gates = gatesOf(w);
@@ -4362,9 +4363,24 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       w.blocked = rest[0];
       w.alsoBlocked = rest.length > 1 ? rest.slice(1) : undefined;
       if (!rest.length) w.status = 'active';
-      this.stamp(w, `its worker ${sid} ended a turn after its machine's drop, so the wait on its machine is over (w2433)`);
+      this.stamp(w, why);
       this.store.putWork(w);
+      dropped++;
     }
+    return dropped;
+  }
+
+  /**
+   * w2474: workers a machine's daemon reports still running when it says hello again after a drop (a network blip, the
+   * portal VM's Tailscale restarting, a daemon update that adopted them): their processes lived through it, so the wait
+   * their drop gave their requests (workersCutOff) goes now, before the blocker watch can judge it cleared and resume
+   * them with a "your turn stopped" note they would read mid-turn. Returns the workers whose wait went.
+   */
+  workersLived(machineId: string, sessionIds: readonly string[]): string[] {
+    const m = machineId.trim().toLowerCase();
+    const lived = sessionIds.filter((sid) => this.dropCutOffGates(sid, `its worker ${sid} ran on through ${m}'s drop (its daemon reports it running), so the wait on ${m} is over (w2474)`) > 0);
+    if (lived.length) console.log(`ledger: ${m} is back and ${lived.join(', ')} ran on through its drop; their requests are no longer Blocked on it (w2474)`);
+    return lived;
   }
 
   /**
