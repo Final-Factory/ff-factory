@@ -451,7 +451,7 @@ export class BlockerWatch {
         });
       },
       portalSha: this.d.portalSha?.(),
-      steamShort: steamShortIn(store.machines.values()),
+      steamShort: (p) => steamShortIn(store.machines?.values() ?? [])(p),
       ...(this.d.daemonSha ? { daemonSha: this.d.daemonSha } : {}),
       ...(this.d.online ? { online: this.d.online } : {}),
       ...(this.d.paused ? { paused: this.d.paused } : {}),
