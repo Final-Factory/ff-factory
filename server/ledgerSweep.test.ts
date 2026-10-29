@@ -1027,6 +1027,81 @@ test('w643: a Blocked request whose blocker is open and progressing is never sta
   assert.equal(get('w650').status, 'done', get('w650').log.join('\n'));
 });
 
+// ---------------------------------------------------------------- w2493: moved and re-blocked, still open
+
+test('w2493: w2443 as it happened: merged and deployed, moved off its worker (w1600) and re-blocked on another request, stays open and is not resumed', async (t) => {
+  const { request, worker, pr, world, sweep, get, o } = setup(t);
+  const woke: string[] = [];
+  (o as unknown as { d: { restoreWake: (id: string, note: string) => boolean } }).d.restoreWake = (id) => (woke.push(id), true);
+  // 2026-10-28: #755 merged at 19:48, the portal ran it at 20:04, the worker waited for a throwaway target for the live check.
+  request('w1', {
+    sessionIds: ['s1'],
+    brief: 'Pausing a machine stops its runs.\n\nDone-criteria:\n- A live check on one machine: pause it with work running.\n- PR merged on green CI and deployed.',
+  });
+  worker('s1', { lastActivityAt: ago(4), lastResult: 'w1: still open: waiting on the orchestrator to place a throwaway target on LothLaptop once w9 ends, for the live pause re-check' });
+  world.prs = [pr(755, { repo: APP, body: 'Request: w1', sha: 'c'.repeat(40) })];
+  world.portal = 'd0d0d0d';
+  world.ancestors.add(`${'c'.repeat(40)}:d0d0d0d`);
+  // 23:57: stop_agent move_to takes it off s1; 23:58: the dispatcher blocks it on w9 finishing.
+  o.moveOff(get('w1'), 's1', 'moved: it moves to lothdesktop: beast is cleared for a build');
+  o.ledgerEdit('w1', 'dispatcher: blocked on w9 finishing', (x) => {
+    x.status = 'blocked';
+    x.blocked = { kind: 'request', ref: 'w9', what: 'w9 finishing, for the live pause check', at: ago(0.05), by: 'dispatcher' };
+  });
+  assert.deepEqual(get('w1').sessionIds, [], 'the move took it off its worker');
+  await sweep.run();
+  const w = get('w1');
+  assert.equal(w.status, 'blocked', w.log.join('\n'));
+  assert.equal(w.blocked?.ref, 'w9', 'its blocker is kept');
+  assert.deepEqual(woke, [], 'no resume: its blocker resumes it');
+  assert.doesNotMatch(w.log.join('\n'), /closed automatically/);
+  await sweep.run();
+  assert.equal(get('w1').status, 'blocked', 'nor on a later pass');
+});
+
+test('w2493: w2014 as it happened: merged, moved off its worker and blocked on a time for its 7-day comparison, stays open', async (t) => {
+  const { request, worker, pr, world, sweep, get, o } = setup(t);
+  request('w1', { sessionIds: ['s1'], brief: 'Add the read-chain hook as a 50/50 pilot. After 7 days, compare cost per merged PR between the arms.' });
+  worker('s1', { lastActivityAt: ago(8), lastResult: 'w1: still open: the 7-day comparison of the read-chain pilot is due 2026-10-31' });
+  world.prs = [pr(648, { body: 'Request: w1' })];
+  o.moveOff(get('w1'), 's1', 'moved: it moves to lothdesktop');
+  o.ledgerEdit('w1', 'dispatcher: blocked on 10-31 16:04 UTC', (x) => {
+    x.status = 'blocked';
+    x.blocked = { kind: 'time', until: new Date(NOW + 3 * 86_400_000).toISOString(), what: "the read-chain pilot's 7-day comparison", at: ago(0.05), by: 'dispatcher' };
+  });
+  await sweep.run();
+  assert.equal(get('w1').status, 'blocked', get('w1').log.join('\n'));
+  // Moved and not re-blocked yet: its moved-off worker's last report still says what is left.
+  request('w2', { sessionIds: ['s2'] });
+  worker('s2', { lastActivityAt: ago(8), lastResult: 'w2: still open: the 7-day comparison is due 2026-10-31' });
+  world.prs = [pr(648, { body: 'Request: w1' }), pr(649, { body: 'Request: w2' })];
+  o.moveOff(get('w2'), 's2', 'moved: it moves to lothdesktop');
+  await sweep.run();
+  assert.notEqual(get('w2').status, 'done', get('w2').log.join('\n'));
+  assert.match(get('w2').log.join('\n'), /PR #649 merged; still open: its worker's last report says more is coming: "w2: still open: the 7-day comparison/, "its moved-off worker's report is read");
+});
+
+test('w2493: a merged request whose worker waits on a person for it, or that is blocked after its DONE, stays open; one blocked before its DONE, or with nothing left after a move, closes', async (t) => {
+  const { request, worker, pr, world, sweep, get, o } = setup(t);
+  // Waiting on a person (waiting_on_person), even with a DONE line in an older report.
+  request('w1', { sessionIds: ['s1'] });
+  worker('s1', { lastActivityAt: ago(5), lastResult: 'Merged.\nDONE: w1', waitingOn: { who: 'lothsahn', what: 'press Pause on LothLaptop', at: ago(5), request: 'w1' } });
+  // Blocked by the dispatcher after its worker's DONE: a step it found left.
+  request('w2', { sessionIds: ['s2'], status: 'blocked', blocked: { kind: 'machine', ref: 'm5', what: 'the M5 for the live check', at: ago(2), by: 'dispatcher' } });
+  worker('s2', { lastActivityAt: ago(4), lastResult: 'Merged.\nDONE: w2' });
+  // Nothing left, its worker moved off after its DONE: closes as before.
+  request('w3', { sessionIds: ['s3'] });
+  worker('s3', { lastActivityAt: ago(4), lastResult: 'PR #73 merged and verified.\nDONE: w3' });
+  world.prs = [pr(71, { body: 'Request: w1' }), pr(72, { body: 'Request: w2' }), pr(73, { body: 'Request: w3' })];
+  o.moveOff(get('w3'), 's3', 'moved: it moves to lothdesktop');
+  await sweep.run();
+  assert.notEqual(get('w1').status, 'done', get('w1').log.join('\n'));
+  assert.match(get('w1').log.join('\n'), /its worker s1 waits on lothsahn to press Pause on LothLaptop/);
+  assert.equal(get('w2').status, 'blocked', get('w2').log.join('\n'));
+  assert.match(get('w2').log.join('\n'), /it is blocked on the M5 for the live check \(set by dispatcher\)/);
+  assert.equal(get('w3').status, 'done', get('w3').log.join('\n'));
+});
+
 // ---------------------------------------------------------------- w631: finished requests close themselves
 
 test('w631: a request whose only step left after the merge is a portal deploy closes once the portal runs the merge, not before; w1870: on its worker’s DONE', async (t) => {

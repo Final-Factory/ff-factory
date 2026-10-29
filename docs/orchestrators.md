@@ -1494,6 +1494,21 @@ stalled. Ben's requests are included. In this order, the first that fits applies
    its workers' last activity) is stalled with the reason: no worker ever started, its last worker's own status line
    ("its worker said: "w12: still open: the portal deploy"", w631), or its last worker ended and its report is not clear.
 
+**Never while blocked, waiting on a person, or just moved** (w2493, lothsahn, 2026-10-29: "the cleanup never closes a
+request that is blocked (on a time, another request, a machine or a person) ... including after the dispatcher moves it to
+another machine"). w2443 (pausing a machine stops its runs) and w2014 (read-chain pilot) closed at 00:00Z on 2026-10-29
+as "merged as #755 ...; deployed since" and "merged as #648", three minutes after a w1600 move off BEAST for an urgent
+build, while the dispatcher had them blocked on w2482 and on 2026-10-31 16:04Z. The move (`Orchestrators.moveOff`) takes
+the request off its worker (`sessionIds`, remembered in `WorkItem.movedOff`), and the cleanup read reports only from the
+current workers: with none, their "still open" reports went unread, rule 1 found only the brief's deploy, and the
+close fired. Now, with no current worker, the workers it was moved off speak for it (their last reports, newest move
+first) until it has a new one; they are not resumed or re-placed from here. And `heldOpenReason`
+(`server/ledgerRules.ts`) keeps open a request with a question, a worker waiting on a person for it (waiting_on_person,
+`SessionInfo.waitingOn`), or a blocker the dispatcher or a worker set after its last DONE (a time, another request, a
+machine, a lock, CI, a PR, a deploy): in the merged-PR close, the deploy close (and its resume, which would drop the
+block), the delivered close and the refused-DONE re-check. Only the cleanup's own deploy block still closes on the
+deploy, and a request whose worker said DONE after the block was set (w643's w650) closes as before.
+
 **Never on an errored turn, nor without its DONE** (w1870, lothsahn, 2026-10-23: "Please fix the closing job so it
 doesn't close out jobs with errors. Those should be resumed to fix the error or escalated to an operator if the error
 can't be fixed"). The cleanup closed w1829 (the bench-lock demo) at 15:39 because its PRs #548 and #556 had merged and the

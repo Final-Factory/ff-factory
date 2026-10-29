@@ -480,6 +480,29 @@ export function notDoneReason(w: Pick<WorkItem, 'id' | 'done' | 'reopenedAt'>, w
   return `its latest worker ${last.id}'s last report is not a DONE for ${w.id}${line ? ` ("${line.length > 120 ? `${line.slice(0, 119)}…` : line}")` : ''}`;
 }
 
+/**
+ * Why a merged request must stay open whatever its PRs and reports say (w2493, lothsahn: "the cleanup never closes a request
+ * that is blocked (on a time, another request, a machine or a person)"): a question open, a worker waiting on a person for
+ * it (waiting_on_person), or a blocker the dispatcher or a worker set (not the cleanup's own deploy block, which the deploy
+ * clears) after the last DONE for it. w2443 and w2014 were closed at 00:00Z on 2026-10-29 while the dispatcher had them
+ * blocked on w2482 and on 2026-10-31 16:04Z. Undefined when nothing holds it.
+ */
+export function heldOpenReason(w: Pick<WorkItem, 'id' | 'status' | 'blocked' | 'question' | 'done' | 'reopenedAt'>, workers: readonly SessionInfo[]): string | undefined {
+  if (w.question) return 'it waits on a question';
+  const id = w.id.toLowerCase();
+  const waiting = workers.find((s) => s.waitingOn && (!s.waitingOn.request || s.waitingOn.request.toLowerCase() === id));
+  if (waiting?.waitingOn) return `its worker ${waiting.id} waits on ${waiting.waitingOn.who} to ${waiting.waitingOn.what.replace(/\s+/g, ' ').slice(0, 120)}`;
+  const b = w.status === 'blocked' ? w.blocked : undefined;
+  if (!b || b.by === 'ledger cleanup') return undefined;
+  // A DONE for it after the block was set says the block is the last thing left behind it (w643's w650).
+  const dones = [
+    ...Object.values(doneOf(w)).map((d) => Date.parse(d.at) || 0),
+    ...workers.filter((s) => doneIdsIn(s.lastResult ?? '').includes(id) && afterReopen(w, s.lastResultAt ?? s.lastActivityAt)).map((s) => Date.parse(s.lastResultAt ?? s.lastActivityAt) || 0),
+  ];
+  if (dones.some((t) => t >= (Date.parse(b.at) || 0))) return undefined;
+  return `it is blocked on ${b.what.replace(/\s+/g, ' ').slice(0, 120)} (set by ${b.by})`;
+}
+
 // ---------------------------------------------------------------- DONE: wNNN (w419)
 
 /**

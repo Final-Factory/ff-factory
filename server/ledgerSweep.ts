@@ -32,6 +32,7 @@ import {
   FOLLOW_UP_EVERY_MS,
   afterMergeReason,
   deployStep,
+  heldOpenReason,
   partOfReason,
   postDeployStep,
   cleanupSettings,
@@ -243,9 +244,13 @@ export class LedgerSweep {
         if (!live || !(isOpen(live) || live.status === 'stalled')) continue;
         if (live.approval?.state === 'pending') continue;
         const workers = live.sessionIds.map((id) => this.d.store.sessions.get(id)).filter((s): s is SessionInfo => !!s && !replacedLeg(live, s));
+        // Whose reports say what is left (w2493): its workers, or, with none (a w1600 move takes the request off its worker
+        // until the dispatcher places it again), the workers it was moved off. w2443 and w2014 had no worker at 00:00Z on
+        // 2026-10-29, three minutes after their move, so their last "still open" reports went unread and they closed.
+        const reporters = workers.length ? workers : this.movedOffWorkers(live);
         // A DONE refused while a PR was open, whose PRs are all merged or closed now (w515): it closes on that DONE, unless its
         // latest worker's turn since ended in an error or was interrupted (w1870): that is handled below instead.
-        if (Object.keys(doneOf(live)).length && !(live.prs ?? []).some((p) => p.state === 'open') && !this.troubleOf(workers) && this.d.orchestrators.recheckDone(live.id, 'its PRs have merged or closed since')) {
+        if (Object.keys(doneOf(live)).length && !(live.prs ?? []).some((p) => p.state === 'open') && !this.troubleOf(workers) && !heldOpenReason(live, reporters) && this.d.orchestrators.recheckDone(live.id, 'its PRs have merged or closed since')) {
           console.log(`ledger cleanup: closed ${live.id} on its refused DONE: its PRs have merged or closed since`);
           continue;
         }
@@ -265,7 +270,7 @@ export class LedgerSweep {
           continue;
         }
         try {
-          if (prs && (await this.prStep(live, workers, prs, acts))) continue;
+          if (prs && (await this.prStep(live, workers, prs, acts, reporters))) continue;
           if (!full) continue;
           // An errored or interrupted turn acted on now ends the request's pass; one handled before still lets it be asked
           // about or stall after its quiet day (it reaches its person), but never closes it.
@@ -538,7 +543,7 @@ export class LedgerSweep {
   }
 
   /** Link PRs, note what changed, close or leave open. True when the request was closed (it needs nothing more). */
-  private async prStep(w: WorkItem, workers: readonly SessionInfo[], all: readonly PrRecord[], acts: Action[]): Promise<boolean> {
+  private async prStep(w: WorkItem, workers: readonly SessionInfo[], all: readonly PrRecord[], acts: Action[], reporters: readonly SessionInfo[] = workers): Promise<boolean> {
     const found = prsOf(w, all, { opened: await this.openedBy(w, workers) });
     // A linked PR the list no longer reaches was read by number already this pass (refreshStates).
     let prs = mergePrs(w.prs ?? [], found);
@@ -572,10 +577,10 @@ export class LedgerSweep {
       return false;
     }
     const partOf = partOfReason(w.id, prs);
-    const reason = partOf ?? afterMergeReason(w, workers.map((s) => s.lastResult ?? ''));
+    const reason = partOf ?? afterMergeReason(w, reporters.map((s) => s.lastResult ?? ''));
     // ONLY A DEPLOY LEFT, AND IT HAPPENED (w631): w605, w513, w537 and w600 waited on a portal deploy or machine updates,
     // which the ops worker or a person then did, and nothing told the ledger. What runs now is the evidence.
-    const step = reason && !partOf ? await this.appDeployStep(w, workers, merged) : undefined;
+    const step = reason && !partOf ? await this.appDeployStep(w, reporters, merged) : undefined;
     const deployed = step ? await this.deployedText(step, merged) : undefined;
     if (deployed) {
       // Its worker's own step after the deploy (w890: w889's "then I verify a live PR read and the health check") is not
@@ -583,10 +588,13 @@ export class LedgerSweep {
       const would = `${prMergedText(last)}; deployed since: ${deployed}`;
       // Never on an errored or interrupted turn (w1870): resumed, placed again or escalated instead.
       if (this.troubleStep(w, workers, acts, would)) return false;
+      // Nor while it is blocked or waits on a person (w2493): its blocker resumes it, and a resume here would drop that block.
+      const held = heldOpenReason(w, reporters);
+      if (held) return this.holdOpen(w, last, would, held, acts, 'held:blocked');
       // Nor on a report that is not a DONE (w1870): the deploy it waited for happened, so its worker carries on now.
-      const after = postDeployStep(workers.map((s) => s.lastResult ?? ''));
+      const after = postDeployStep(reporters.map((s) => s.lastResult ?? ''));
       if (after && this.d.orchestrators.resumeAfterDeploy(w.id, deployed, after)) return false;
-      const notDone = notDoneReason(w, workers);
+      const notDone = notDoneReason(w, reporters);
       if (notDone) {
         // Once a day at most: a worker that answers without a DONE is not sent the same thing every pass.
         const asked = Date.parse(w.followUp?.at ?? '') || 0;
@@ -612,8 +620,10 @@ export class LedgerSweep {
     }
     // Merged PRs are not enough on their own (w1870): not on an errored or interrupted turn, nor without its worker's DONE.
     if (this.troubleStep(w, workers, acts, prMergedText(last))) return false;
-    const notDone = notDoneReason(w, workers);
+    const notDone = notDoneReason(w, reporters);
     if (notDone) return this.holdOpen(w, last, prMergedText(last), notDone, acts);
+    const held = heldOpenReason(w, reporters);
+    if (held) return this.holdOpen(w, last, prMergedText(last), held, acts, 'held:blocked');
     this.closeAsDone(w, { how: 'prs', pr: last.number, sha: last.sha, mergedAt: last.at, text: prMergedText(last) }, acts);
     return true;
   }
@@ -624,11 +634,11 @@ export class LedgerSweep {
    * report without a DONE or a still-open line is asked about a moment after its turn (server/orchestrators.ts). False:
    * the request was not closed.
    */
-  private holdOpen(w: WorkItem, last: WorkPr, would: string, why: string, acts: Action[]): false {
-    const key = 'held:not-done';
+  private holdOpen(w: WorkItem, last: WorkPr, would: string, why: string, acts: Action[], key = 'held:not-done'): false {
     if (last.noted !== key) {
       const prs = (w.prs ?? []).map((q) => (q.number === last.number && q.repo === last.repo ? { ...q, noted: key } : q));
-      this.d.orchestrators.ledgerEdit(w.id, `not closed by the ledger cleanup (${would}): ${why}; it closes on its worker's DONE (w1870)`, (x) => void (x.prs = prs), true);
+      const closes = key === 'held:blocked' ? 'it stays open until that clears and its worker says DONE (w2493)' : "it closes on its worker's DONE (w1870)";
+      this.d.orchestrators.ledgerEdit(w.id, `not closed by the ledger cleanup (${would}): ${why}; ${closes}`, (x) => void (x.prs = prs), true);
     }
     acts.push({ id: w.id, title: w.title, who: w.requesters, kind: 'open', text: `${would}; not closed: ${why}` });
     return false;
@@ -743,6 +753,14 @@ export class LedgerSweep {
 
   // ---------------------------------------------------------------- finished, cut off, stalled (w306)
 
+  /** The workers request `w` was moved off (Orchestrators.moveOff, WorkItem.movedOff), newest move first. */
+  private movedOffWorkers(w: WorkItem): SessionInfo[] {
+    return Object.entries(w.movedOff ?? {})
+      .sort((a, b) => b[1].localeCompare(a[1]))
+      .map(([id]) => this.d.store.sessions.get(id))
+      .filter((s): s is SessionInfo => !!s);
+  }
+
   private latest(workers: readonly SessionInfo[]): SessionInfo | undefined {
     return [...workers].sort((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt))[0];
   }
@@ -759,6 +777,8 @@ export class LedgerSweep {
   private deliveredStep(w: WorkItem, workers: readonly SessionInfo[], acts: Action[]): boolean {
     if (!workers.length || w.question || w.flag) return false;
     if ((w.prs ?? []).some((p) => p.state === 'open')) return false;
+    // Not while it is blocked or waits on a person (w2493).
+    if (heldOpenReason(w, workers)) return false;
     const last = this.latest(workers);
     // A report from before a reopen (w731) says nothing about the reopened work: the worker has to report again.
     if (last && !afterReopen(w, last.lastActivityAt)) return false;
