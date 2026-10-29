@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Store } from './store.ts';
-import { SessionManager, setQueryForTesting } from './sessions.ts';
+import { SessionManager, setQueryForTesting, type QueuedSend } from './sessions.ts';
 import { MachineManager } from './machines.ts';
 import { Agents } from './agents.ts';
 import { Identity } from './identity.ts';
@@ -1796,4 +1796,61 @@ test('w2140: with no worker of the merge left, the blocked worker is resumed ins
   assert.deepEqual(o.deployHeld({ sha: '5a1909756' + 'e'.repeat(31), text, prs: [682], repo: APP }), { told: ['w5'], resumed: ['s5'] });
   assert.deepEqual(woke, ['s5']);
   assert.equal(get('w5').status, 'blocked');
+});
+
+// w2566: w2542 moved off its worker e6d3dfe1, stopped on LothLaptop, which was then paused from its tray; c278888e on biscuit
+// said DONE at 17:00Z on 2026-10-29, and the request stayed open 3 hours "still on it: e6d3dfe1", a message to it held for
+// LothLaptop, until an orchestrator closed it by hand.
+function awayWorld(t: Parameters<typeof setup>[0], pause: boolean) {
+  const s = setup(t);
+  s.store.putMachine({ id: 'lothlaptop', host: 'lothlaptop', purpose: 'unused', status: 'ready', online: false, repoPath: '/r', home: '/h', portalUrl: 'http://x', sessionIds: [], createdAt: '', ...(pause ? { pause: { paused: true, reason: 'manual', since: ago(2) } } : {}) } as never);
+  const held = (id: string) => (s.sessions as unknown as { queue: QueuedSend[] }).queue.push({ uuid: `q-${id}`, id, text: 'carry on', from: 'orchestrator', at: ago(2), why: 'lothlaptop is paused from its tray app', on: 'machine' });
+  return { ...s, held };
+}
+
+for (const pause of [true, false]) {
+  test(`w2566: a worker stopped on a ${pause ? 'paused' : 'offline'} computer no longer holds a request open once another worker said DONE: it is taken off and its held message dropped`, (t) => {
+    const { request, worker, o, get, sessions, held } = awayWorld(t, pause);
+    request('w1', { sessionIds: ['e6d3dfe1', 'c278888e'] });
+    worker('e6d3dfe1', { status: 'stopped', machineId: 'lothlaptop', machineSandbox: 'slot1', lastResult: 'w1: still open: paused on lothlaptop; branch sandbox/slot1-w1 pushed' });
+    held('e6d3dfe1');
+    o.workerTurnEnded(worker('c278888e', { machineId: 'biscuit', machineSandbox: 'slot1' }), 'Report r2 is filed and PR #2817 merged.\nDONE: w1\nLearned: nothing new');
+    const w = get('w1');
+    assert.equal(w.status, 'done', w.log.join('\n'));
+    assert.deepEqual(w.sessionIds, ['c278888e']);
+    assert.ok(w.movedOff?.['e6d3dfe1'], 'e6d3dfe1 is recorded as moved off');
+    assert.match(w.log.join('\n'), new RegExp(`taken off worker e6d3dfe1: it is stopped and lothlaptop is ${pause ? 'paused' : 'offline'}.*worker c278888e said DONE for its part`));
+    assert.doesNotMatch(w.log.join('\n'), /still on it: e6d3dfe1/);
+    assert.equal(sessions.queued().filter((q) => q.id === 'e6d3dfe1').length, 0, 'its held message is dropped');
+  });
+}
+
+test('w2566: a worker stopped on a running computer with work still open on it keeps holding the request after another DONE', (t) => {
+  const { request, worker, o, get, agents, held } = awayWorld(t, false);
+  // lothlaptop is online and not paused: s1's open work there is not stale.
+  (agents as unknown as { machines: { links: Map<string, unknown> } }).machines.links.set('lothlaptop', {});
+  request('w1', { sessionIds: ['s1', 's2'] });
+  worker('s1', { status: 'stopped', machineId: 'lothlaptop', lastResult: 'w1: still open: the soak test runs until 18:00' });
+  held('s1');
+  o.workerTurnEnded(worker('s2', { machineId: 'biscuit' }), 'My part is in.\nDONE: w1\nLearned: nothing new');
+  assert.equal(get('w1').status, 'active');
+  assert.match(get('w1').log.join('\n'), /still on it: s1$/m);
+});
+
+test('w2566: a new worker started over the pause wait of one stopped on its paused computer takes the request off it', (t) => {
+  const { request, worker, o, get, sessions, held } = awayWorld(t, true);
+  request('w1', { sessionIds: ['e6d3dfe1'], status: 'blocked', blocked: { kind: 'machine', ref: 'lothlaptop', what: "lothlaptop's pause", at: ago(2), by: 'worker e6d3dfe1' } as never });
+  worker('e6d3dfe1', { status: 'stopped', machineId: 'lothlaptop', machineSandbox: 'slot1', lastResult: 'w1: still open: paused on lothlaptop' });
+  held('e6d3dfe1');
+  const c = worker('c59d84ed', { status: 'running', machineId: 'lothdesktop', machineSandbox: 'slot2' });
+  o.linkWorker('w1', c, 'started worker c59d84ed in lothdesktop/slot2', { overrideGate: 'lothsahn: "w1 should move to LothDesktop"' });
+  const w = get('w1');
+  assert.deepEqual(w.sessionIds, ['c59d84ed']);
+  assert.equal(w.status, 'active');
+  assert.ok(w.movedOff?.['e6d3dfe1']);
+  assert.match(w.log.join('\n'), /taken off worker e6d3dfe1: a new worker, c59d84ed, took w1 on while it is stopped and lothlaptop is paused/);
+  assert.equal(sessions.queued().filter((q) => q.id === 'e6d3dfe1').length, 0);
+  // Its DONE alone closes it now.
+  o.workerTurnEnded(worker('c59d84ed', { machineId: 'lothdesktop' }), 'Done.\nDONE: w1\nLearned: nothing new');
+  assert.equal(get('w1').status, 'done');
 });
