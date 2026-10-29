@@ -23,7 +23,7 @@ import { blockerVerdict, CI_REF, cycleBreak, gateSetter, gatesOf, newestFirst, R
 import { conditionalVerdict } from '../shared/conditional.ts';
 import { ghRunner } from './githubTokens.ts';
 import { pairDelivers, reportDelivers, stillOpenIn } from './ledgerRules.ts';
-import { lastOpenLine, portalWaitIn, reportAt, requestWaitOf, siblingWaitOf } from '../shared/workState.ts';
+import { lastOpenLine, personWaitOn, portalWaitIn, reportAt, requestWaitOf, siblingWaitOf } from '../shared/workState.ts';
 import type { SessionInfo, WorkBlocker, WorkItem } from '../shared/types.ts';
 import type { RoomNow } from './placement.ts';
 import { steamShortIn } from '../shared/capacity.ts';
@@ -154,14 +154,19 @@ export class BlockerWatch {
         if ((w.status !== 'active' && w.status !== 'stalled') || gatesOf(w).length) continue;
         // The newest worker's report (w2422); w2476: any other worker still on it, for a wait on another of its workers only (w2448's
         // b9cd085e waited on 17cae99a, the newer one, which ran on).
+        const team = [...new Set([w.requestedBy, ...w.requesters].map((r) => r.displayName))];
         const newest = newestFirst(w).find((x) => this.d.store.sessions.get(x));
         for (const sid of newestFirst(w)) {
           const s = this.d.store.sessions.get(sid);
           if (!s || (sid !== newest && (w.done?.[sid] || w.movedOff?.[sid]))) continue;
           if (!STOPPED.has(s.status) || s.queuedSend || this.d.queued?.(s.id) || this.d.checkInPending?.(s.id)) continue;
           const l = lastOpenLine(w, s, now);
+          // w2495: a line that waits on a person is the person's wait (the live state's Waiting on input), never a gate the
+          // ledger infers, whatever else it names: w2443's "waiting on lothsahn to click Pause in FF Factory's tray" became
+          // a deploy gate and held lothsahn's answer.
+          if (l && personWaitOn(l.line, team)) continue;
           const ref = l ? requestWaitOf(l.line, w.id) : undefined;
-          const portal = !!l && portalWaitIn(l.line);
+          const portal = !!l && portalWaitIn(l.line, team);
           // w2476: another worker of this request, still on it ("waiting for worker 17cae99a's LothLaptop leg").
           const siblings = w.sessionIds
             .filter((x) => x !== s.id && !w.done?.[x] && !w.movedOff?.[x])

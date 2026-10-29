@@ -7467,6 +7467,65 @@ test('w2457: a stopped worker whose report says it waits on an FF Factory change
   assert.equal(portalWaitIn('w1: still open: waiting on ff-factory #742 to deploy'), true);
 });
 
+test("w2495: a report that waits on a person (w2443: \"waiting on lothsahn to click Pause in FF Factory's tray\") is the person's wait, never a deploy's; the person's answer resumes its worker through a gate the ledger read from its report, and keeps a real gate", async (t) => {
+  const { store, sessions, agents, o, dispatcher, chat, call, heard } = await setupOnMachine(t);
+  agentsRoom(agents, ['pc']);
+  let sha = 'aaa1111';
+  (o as unknown as { d: { deploySha: () => string } }).d.deploySha = () => sha;
+  const clock = Date.now();
+  const watch = new BlockerWatch({ store, orchestrators: o, now: () => clock, portalSha: () => sha, checkInPending: (id) => agents.waker.pending(id) !== undefined });
+  const loth = chat(LOTH).info;
+  chat(LOTH).lastFrom = 'human';
+  await call(loth, 'request_work', { title: 'Machine pause', brief: 'Pausing a machine stops every run on it.' });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Test it live', title: 'w1: Machine pause', work_id: 'w1' });
+  assert.equal(started.isError, false, started.text);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const info = store.sessions.get(id)!;
+  await until('its first turn', () => info.status === 'idle');
+  const w = store.work.get('w1')!;
+  // w2443's worker 4812780c at 00:50 UTC on 2026-10-29, word for word.
+  const line = "w1: still open: waiting on lothsahn to click Pause in FF Factory's tray on LothLaptop for the live test";
+  sessions.events.emit('turnEnd', sessions.get(id), `Ready for the live test.\n\n${line}`);
+  await until('Lothsahn hears it', () => heard(loth.id, '[needs you]').length === 1);
+  Object.assign(info, { status: 'stopped', lastActivityAt: new Date(clock - 60_000).toISOString(), lastResult: `Ready for the live test.\n\n${line}`, lastResultAt: new Date(clock - 60_000).toISOString() });
+  // 1. The person's wait wins: no deploy gate (it was "blocked on a portal deploy (FF Factory change)").
+  assert.equal((await watch.tick()).has('w1'), false);
+  assert.deepEqual([w.status, w.blocked], ['active', undefined]);
+  assert.equal(portalWaitIn(line, ['lothsahn']), false);
+  assert.equal(portalWaitIn(line), false, 'a "<who> to <do>" before the product name, with no people known');
+  assert.equal(portalWaitIn('w1: still open: waiting on a person to restart the FF Factory tray'), false);
+  // A real wait on a deploy still is one.
+  assert.equal(portalWaitIn('w1: still open: blocked on the portal deploy of PR #752', ['lothsahn']), true);
+  assert.equal(portalWaitIn('w1: still open: waiting for the portal fix to deploy', ['lothsahn']), true);
+
+  // 2. The gate the ledger read from this report before the fix (as it stood on w2443), beside a real gate the dispatcher set.
+  const key = `${id}@${clock - 60_000}`;
+  const inferred = { kind: 'deploy' as const, what: 'a portal deploy (FF Factory change)', at: new Date(clock - 60_000).toISOString(), by: `worker ${id}`, sha, reported: key };
+  const real = { kind: 'request' as const, ref: 'w2', what: 'w2 finishing', at: new Date(clock).toISOString(), by: 'dispatcher' };
+  putRequests(store, [{ id: 'w2', status: 'active' }]);
+  Object.assign(w, { status: 'blocked', blocked: inferred, alsoBlocked: [real], waitRecorded: key });
+  await until('Lothsahn’s turn ends', () => chat(LOTH).info.status === 'idle');
+  chat(LOTH).lastFrom = 'human';
+  const r = await call(loth, 'update_work', { id: 'w1', note: 'Paused. Go ahead.' });
+  assert.match(r.text, new RegExp(`answers the \\[needs you\\] question: sent to its worker ${id}, which resumes with it .*; the wait on a portal deploy the ledger read from that worker's report is cleared by the answer \\(w2495\\), and it stays blocked on w2`));
+  assert.deepEqual([w.status, w.blocked?.ref, w.alsoBlocked], ['blocked', 'w2', undefined], 'the real gate stays (w754)');
+  const pending = agents.waker.pending(id)!;
+  assert.match(pending.note, /^\[answer\] Lothsahn answered on w1 "Machine pause", in their own words: Paused\. Go ahead\./);
+  // Its resume is delivered though the request is Blocked on w2 ("kept for when that clears" held it on w2443); another
+  // resume still waits for the gate.
+  assert.equal(o.staleResume('w1', id, pending.note), undefined);
+  assert.match(o.staleResume('w1', id, 'w1: CI finished') ?? '', /blocked again on w2 finishing; the resume is kept/);
+
+  // 3. With only the inferred gate, the answer leaves it Working.
+  Object.assign(w, { status: 'blocked', blocked: { ...inferred }, alsoBlocked: undefined, needsYou: { ...w.needsYou!, answered: undefined } });
+  agents.waker.cancel(id);
+  await until('Lothsahn’s turn ends', () => chat(LOTH).info.status === 'idle');
+  chat(LOTH).lastFrom = 'human';
+  await call(loth, 'update_work', { id: 'w1', note: 'Unpaused now.' });
+  assert.deepEqual([w.status, w.blocked], ['active', undefined]);
+  assert.ok(agents.waker.pending(id));
+});
+
 test("w2476: a stopped worker whose report waits on another worker of the same request (w2448: \"waiting for worker 17cae99a's LothLaptop leg\") is Blocked on it, not Stalled, and resumed with that worker's report when it says DONE for its part", async (t) => {
   const { store, agents, o, dispatcher, call } = await setupOnMachine(t);
   agentsRoom(agents, ['pc']);

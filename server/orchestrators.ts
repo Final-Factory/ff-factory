@@ -85,6 +85,8 @@ const MERGE_ON_GREEN_REPORT_CHARS = 12_000;
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);
+/** How a person's answer to a [needs you] starts its resume (answerNeedsYou); staleResume always lets it go (w2495). */
+const ANSWER_MARK = '[answer] ';
 const BUSY: SessionInfo['status'][] = ['running', 'starting', 'waiting_permission'];
 /** A request Blocked on a machine its worker was cut off on is named to the dispatcher after this long offline (w2433, ledger.offlineNoticeMinutes). */
 export const OFFLINE_NOTICE_MS = 60 * 60_000;
@@ -1109,11 +1111,31 @@ export class Orchestrators {
     const s = sid ? this.store.sessions.get(sid) : undefined;
     if (!sid || !s) return `answers the [needs you] question${both}${sid ? ` (its worker ${sid} is gone: start the work with it)` : ''}`;
     if (BUSY.includes(s.status)) return `answers the [needs you] question${both}; its worker ${sid} is mid-turn: pass it on with message_agent`;
+    const cleared = this.clearReportedGates(w, sid);
     const text =
-      `[answer] ${by.displayName} answered on ${w.id} "${clip(w.title, 100)}", in their own words: ${note}\n\n` +
+      `${ANSWER_MARK}${by.displayName} answered on ${w.id} "${clip(w.title, 100)}", in their own words: ${note}\n\n` +
       `It answers what you waited on: "${clip(r.question, 300)}"${also.length ? `, which you asked on ${[w, ...also].map((x) => x.id).join(' and ')}: it answers it on all of them` : ''}. Carry on with it.`;
     if (!this.wakeNow(sid, text, w.id)) return `answers the [needs you] question${both}; its worker ${sid} could not be resumed: pass it on with message_agent`;
-    return `answers the [needs you] question${both}: sent to its worker ${sid}, which resumes with it (nothing for you to pass on)`;
+    return `answers the [needs you] question${both}: sent to its worker ${sid}, which resumes with it (nothing for you to pass on)${cleared}`;
+  }
+
+  /**
+   * w2495: the gates the ledger inferred from worker `sid`'s own report (WorkBlocker.reported), which a person's answer to
+   * its [needs you] clears: the answer is what that worker waited on. Gates set with blocked_on or decide_work, and
+   * another worker's, stay (w754). w2443's worker said "waiting on lothsahn to click Pause in FF Factory's tray", the
+   * ledger made a deploy gate of it, and lothsahn's answer was held for a deploy that never came. Returns the log's words.
+   */
+  private clearReportedGates(w: WorkItem, sid: string): string {
+    const all = gatesOf(w);
+    const gone = all.filter((g) => g.reported && gateSetter(g) === sid);
+    if (!gone.length) return '';
+    const kept = all.filter((g) => !gone.includes(g));
+    const name = gatesName(gone, this.now().getTime());
+    w.blocked = kept[0];
+    w.alsoBlocked = kept.length > 1 ? kept.slice(1) : undefined;
+    w.gateEndedAt = this.now().getTime();
+    if (!kept.length && w.status === 'blocked') w.status = 'active';
+    return `; the wait on ${name} the ledger read from that worker's report is cleared by the answer (w2495)${kept.length ? `, and it stays blocked on ${gatesName(kept, this.now().getTime())}` : ''}`;
   }
 
   /**
@@ -3207,7 +3229,10 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     // no gate left has nothing to hand it back, so the resume goes.
     // w2153: not when every gate left is another live worker's (a pair run's other leg): this worker's own wait is over.
     const othersOnly = gatesOf(w).length > 0 && othersGates(w, sessionId).length === gatesOf(w).length;
-    if (w.blocked && (w.status === 'blocked' || w.status === 'question') && !othersOnly) {
+    // w2495: a person's answer to its [needs you] (answerNeedsYou) always goes: it is what the worker waits on, and the gates
+    // it keeps (w754) still hold the request; the worker sees them and blocks on them again if it must.
+    const answer = note.startsWith(ANSWER_MARK);
+    if (w.blocked && (w.status === 'blocked' || w.status === 'question') && !othersOnly && !answer) {
       const name = gatesName(gatesOf(w), this.now().getTime());
       if (!(w.heldCheckIns ?? []).some((h) => h.session === sessionId && h.note === note)) w.heldCheckIns = [...(w.heldCheckIns ?? []), { session: sessionId, at: this.now().toISOString(), note, resume: true }];
       const left = (w.gateResumes ?? []).filter((r) => r.session !== sessionId);
@@ -4228,6 +4253,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     w.stalled = undefined;
     w.status = 'blocked';
     w.waitRecorded = a.key;
+    gate.reported = a.key;
     this.stamp(w, `blocked on ${gatesName([gate], this.now().getTime())} (${gate.what}): the ledger recorded the wait its worker ${sessionId}'s report names, which no blocked_on recorded (w2422: "${clip(a.line, 120)}"); that worker is resumed when it clears`);
     this.store.putWork(w);
     this.tellReportWaited(w, [gate]);
@@ -4249,6 +4275,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     w.stalled = undefined;
     w.status = 'blocked';
     w.waitRecorded = a.key;
+    gate.reported = a.key;
     this.stamp(w, `blocked on a portal deploy: the ledger recorded the wait on FF Factory its worker ${sessionId}'s report names, which no blocked_on recorded (w2457: "${clip(a.line, 120)}"); that worker is resumed when the portal runs another commit than ${gate.sha?.slice(0, 12)}`);
     this.store.putWork(w);
     console.warn(`ledger: ${w.id}: recorded the wait on a portal deploy its worker ${sessionId}'s report names, with no blocked_on (w2457)`);
@@ -4270,6 +4297,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     w.stalled = undefined;
     w.status = 'blocked';
     w.waitRecorded = a.key;
+    gate.reported = a.key;
     this.stamp(w, `blocked on ${gatesName([gate], this.now().getTime())}: the ledger recorded the wait on worker ${ref} its worker ${sessionId}'s report names, which no blocked_on recorded (w2476: "${clip(a.line, 120)}"); that worker is resumed with ${ref}'s report when ${ref} says DONE for its part or stops with a final report`);
     this.store.putWork(w);
     console.warn(`ledger: ${w.id}: recorded the wait on worker ${ref} its worker ${sessionId}'s report names, with no blocked_on (w2476)`);

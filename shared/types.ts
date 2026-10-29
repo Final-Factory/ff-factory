@@ -2417,6 +2417,8 @@ export interface WorkBlocker {
   by: string;
   /** machine (w2443): its machine was paused from its tray app; it clears when that machine is online and runs again. */
   pause?: boolean;
+  /** w2495: the report it was read from ("<session>@<ms>"), when the ledger inferred it from a worker's report with no blocked_on (w2422, w2457, w2476); a person's answer to that worker's [needs you] clears it. */
+  reported?: string;
   /** deploy: the commit the portal (or the machine's daemon) ran when it was set; a different one is the deploy. */
   sha?: string;
   /**
