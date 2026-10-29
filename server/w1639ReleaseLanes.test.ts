@@ -121,3 +121,18 @@ test('w1668: read_rules release puts the urgent build in slot1 of its computer, 
   assert.match(RELEASE_RULES, /a builder in another sandbox is moved into slot1 by FF Factory at build_plan start/);
   assert.match(RELEASE_RULES, /told to build where it is if slot1 cannot be emptied within 10 minutes/);
 });
+
+test('w2536: a release that follows work items asks no A-or-B card, waits for them, and bumps on master\'s tip', () => {
+  const r = RELEASE_RULES;
+  const rule = r.split('\n').find((l) => l.startsWith('A RELEASE AFTER WORK ITEMS HAS NO CARD'))!;
+  assert.ok(rule, 'the rule has its own paragraph');
+  assert.match(rule, /"If someone asks for a release after a workitem or set of work items, always build off the tip when those work items merge\."/);
+  assert.match(rule, /"Because they need to have those there\."/);
+  assert.match(rule, /there is no A-or-B card: the release request is blocked on those items/);
+  assert.match(rule, /once they have merged it bumps on master's tip \(A\)/);
+  assert.match(rule, /closes without a merged change, the person is asked \(waiting_on_person\) before the release goes ahead/);
+  assert.match(rule, /Every other release request keeps the A-or-B card/);
+  // Both lanes' ONE CARD FIRST clauses point at it.
+  assert.match(r.split('\n').find((l) => l.startsWith('- NORMAL'))!, /except a release that follows work items, which has no card/);
+  assert.match(r.split('\n').find((l) => l.startsWith('- URGENT'))!, /or the release follows work items \(no card/);
+});
