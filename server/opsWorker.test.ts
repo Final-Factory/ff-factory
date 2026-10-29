@@ -950,11 +950,25 @@ test('w1596: machine_update of a machine whose daemon updates over its own link:
       asked.push({ id, flags });
       return outcome;
     },
+    setRecordLimits: (id, limits) => {
+      if ((limits.maxUnity ?? 0) > 8) throw new Error('maxUnity must be a whole number from 0 to 8');
+      recorded.push({ id, limits });
+    },
   });
+  const recorded: { id: string; limits: unknown }[] = [];
   const ben = orch('be', BEN);
-  assert.match(ops.machineInstall(ben, { machine: 'coosego', workId: 'w847', maxUnity: 3 }), /over its daemon's own link \(w1596; no ssh, no worker job\) with maxUnity 3/);
+  const said = ops.machineInstall(ben, { machine: 'coosego', workId: 'w847', maxUnity: 3 });
+  assert.match(said, /over its daemon's own link \(w1596; no ssh, no worker job\) with maxUnity 3/);
+  // w2474: the daemon runs by the record's limits (its welcome), so the record is set too; daemon.json alone changed nothing.
+  assert.deepEqual(recorded, [{ id: 'coosego', limits: { maxUnity: 3 } }], 'the portal record gets the editor limit');
+  assert.match(said, /record of coosego now says maxUnity 3/);
   await new Promise((r) => setTimeout(r, 50));
   assert.deepEqual(asked, [{ id: 'coosego', flags: { maxUnity: 3 } }], 'only the settings named');
+  // A value the record refuses stops the update before anything runs.
+  assert.throws(() => ops.machineInstall(ben, { machine: 'coosego', workId: 'w847', maxUnity: 12 }), /from 0 to 8/);
+  assert.equal(asked.length, 1, 'no update for a refused limit');
+  // No limit named: the record is left alone.
+  recorded.length = 0;
   assert.equal(store.readTranscript(OPS_ID, 20).filter((e) => e.kind === 'user').length, 0, 'the ops worker was not given a job');
   assert.match(told[0], /^\[machine update for w847\] coosego updated over its daemon's link\. 1111111 → c5a93e0\./);
   assert.match(told[0], /~ sandboxes\.maxUnity: 2 -> 3/);
@@ -965,6 +979,7 @@ test('w1596: machine_update of a machine whose daemon updates over its own link:
   ops.machineInstall(ben, { machine: 'coosego', workId: 'w847' });
   await new Promise((r) => setTimeout(r, 50));
   assert.match(told[1], /did not run: coosego refused it: an update job of this machine is still running/);
+  assert.equal(recorded.length, 0, 'an update with no limit named leaves the record alone');
   ops.close();
 
   // w1918: a connected daemon that offered no update over its link is never handed to ssh: the reason, and nothing run.

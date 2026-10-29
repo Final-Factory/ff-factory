@@ -454,6 +454,12 @@ reinstalling beast and m5 on 2026-10-07, f3f19c0 → 9ea8476):
   paths and the test-install options. `--max-sandboxes`, `--max-agents-per-sandbox` and `--max-unity`
   (`-MaxSandboxes`, …) change only what they name. It prints the settings that changed, `~ key: before -> after`.
   Before, a plain re-run rewrote `daemon.json` and dropped the tuned settings.
+- **The editor and agent limits a daemon runs by are the portal record's** (w2474). The portal's welcome carries them
+  (`server/machines.ts` `setRootSettings`; `machine/daemon.ts` `currentPool` prefers it to `daemon.json`), and a hello
+  takes back only the sandbox count (`adoptLayout`). So `--max-unity` or `--max-agents-per-sandbox` alone change
+  `daemon.json` and nothing the daemon uses: biscuit kept 2 editors after `machine_update max_unity 1` on 2026-10-28.
+  `ops_worker machine_update` now also sets them on the record, which reaches the daemon at once; `add_machine
+  max_unity` does the same without an update.
 - **It fetches nothing of the game repo.** The root's clone is kept as it is, and the daemon fetches with the user's
   own credentials when it next makes a sandbox. Over ssh a Mac's login keychain is out of reach, and the install's
   `git fetch origin` failed on m5 for that reason.

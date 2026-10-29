@@ -934,6 +934,7 @@ export class Agents {
       // w1596: a machine whose daemon updates over its own link is updated by the portal itself, not over ssh.
       linkUpdate: (id, flags) => (machines.canLink(id) ? machines.linkUpdate(id, { flags }) : undefined),
       linkProblem: (id) => machines.linkProblem(id),
+      setRecordLimits: (id, limits) => void machines.deployMachine({ id, ...limits }),
     });
     // After a verified portal deploy, every worker machine's daemon is updated by FF Factory itself (w887), and its agent tools (w1476).
     this.rollout = new MachineRollout({
