@@ -24,8 +24,9 @@ import { TimersButton } from './Timers';
 import { IntakeApproveCard, WaitingTab } from './WaitingTab';
 import { orchestratorAsks, waitingItems } from '../../../shared/waiting';
 import { useKeepScroll } from '../scrollKeep';
+import { ReportPage, ReportsTab, WorkReports } from './Reports';
 
-type Tab = 'requests' | 'waiting' | 'intake' | 'spend' | 'conversation';
+type Tab = 'requests' | 'waiting' | 'intake' | 'reports' | 'spend' | 'conversation';
 
 const names = (w: WorkItem) => w.requesters.map((r) => r.displayName).join(', ');
 
@@ -87,7 +88,9 @@ export function DispatcherPanel({ app, tab, onClose }: { app: AppState; tab?: st
   const open = work.filter(isOpenWork);
   const stalled = work.filter((w) => w.status === 'stalled');
   const closed = work.filter((w) => !isOpenWork(w) && w.status !== 'stalled');
-  const current: Tab = tab === 'conversation' ? 'conversation' : tab === 'waiting' ? 'waiting' : tab === 'intake' ? 'intake' : tab === 'spend' ? 'spend' : 'requests';
+  // A report's page (w2541) is "rN", under the Reports tab.
+  const reportId = tab && /^r\d+$/.test(tab) ? tab : undefined;
+  const current: Tab = tab === 'conversation' ? 'conversation' : tab === 'waiting' ? 'waiting' : tab === 'intake' ? 'intake' : tab === 'reports' || reportId ? 'reports' : tab === 'spend' ? 'spend' : 'requests';
   const focus = tab && /^w\d+$/.test(tab) ? tab : undefined;
   const setTab = (t: Tab) => navigate({ view: 'dispatcher', tab: t === 'requests' ? undefined : t }, true);
   const owner = app.me?.role === 'owner';
@@ -182,6 +185,9 @@ export function DispatcherPanel({ app, tab, onClose }: { app: AppState; tab?: st
             Intake {waiting > 0 && <span className="tone-amber" title="Needs a human">{waiting}</span>}
           </button>
         )}
+        <button role="tab" aria-selected={current === 'reports'} className={`tab${current === 'reports' ? ' active' : ''}`} onClick={() => setTab('reports')} data-testid="tab-reports">
+          Reports {app.reports?.length ? <span className="dim">{app.reports.length}</span> : null}
+        </button>
         <button role="tab" aria-selected={current === 'spend'} className={`tab${current === 'spend' ? ' active' : ''}`} onClick={() => setTab('spend')}>
           Spend
         </button>
@@ -193,6 +199,7 @@ export function DispatcherPanel({ app, tab, onClose }: { app: AppState; tab?: st
       {current === 'requests' && <Requests app={app} work={work} open={open} stalled={stalled} closed={closed} focus={focus} now={now} waiting={queue.length} onMe={onMe} />}
       {current === 'waiting' && <WaitingTab app={app} items={queue} asks={asks} now={now} />}
       {current === 'intake' && app.intake && <IntakeTab app={app} intake={app.intake} work={work} now={now} />}
+      {current === 'reports' && (reportId ? <ReportPage key={reportId} app={app} id={reportId} now={now} /> : <ReportsTab app={app} now={now} />)}
       {current === 'spend' && <SpendTab />}
       {current === 'conversation' &&
         (session ? (
@@ -730,6 +737,7 @@ function WorkRow({ app, w, live, open, onToggle, now }: { app: AppState; w: Work
             </p>
           )}
           <RequestSpendBlock id={w.id} app={app} />
+          {w.reports?.length ? <WorkReports reports={w.reports} /> : w.report && isOpenWork(w) ? <p className="small dim" data-testid={`work-report-due-${w.id}`}>Its result is a report ({w.report.kind}, asked by {w.report.by}); none filed yet.</p> : null}
           {w.prs?.length ? (
             <p className="small dim" data-testid={`prs-${w.id}`}>
               Pull requests:{' '}

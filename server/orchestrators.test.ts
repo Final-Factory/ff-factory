@@ -28,6 +28,8 @@ import { answersText } from '../shared/questionCard.ts';
 import { needsTimed, PAIR_HOLD_MS, TIMED_HOLD_MS, pairText, unfitWhy } from '../shared/capacity.ts';
 import { benchLockIn, type Machine, type Requester, type SessionInfo, type TranscriptEvent, type UserInfo, type WorkItem } from '../shared/types.ts';
 import { LIVE_HOLD_MS, releaseWhy } from './placeAgain.ts';
+import { ReportStore } from './reports.ts';
+import { reportProblem } from './ledgerRules.ts';
 import { MOVE_AFTER_MS } from './resumeMove.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { PR2395_DIFF, W1958_0459, W1958_1632 } from './priorDecisions.fixtures.ts';
@@ -7981,4 +7983,38 @@ test('w2521: a request whose constraints say "Must run on LothLaptop" is refused
   // An unknown machine name is refused.
   assert.throws(() => place('pc', store.sessions.get(id)!, { what: 'x', machine: 'gsyncbox' }), /machine "gsyncbox" is no computer FF Factory knows/);
   void o;
+});
+
+test('w2541: a request marked for a report refuses DONE until its worker files one; the report links to the request and its person finds it', async (t) => {
+  const { store, agents, machines, dispatcher, chat, call, cfg } = await setupOnMachine(t);
+  agents.reports = new ReportStore(cfg.dataDir, () => []);
+  const ben = chat(BEN).info;
+  const filed = await call(ben, 'request_work', { title: 'Profile the belt renderer', brief: 'Where do the frames go?', report: 'profile' });
+  assert.match(filed.text, /its result is a report \(profile\), which its worker files with file_report/);
+  assert.deepEqual({ ...store.work.get('w1')!.report, at: undefined }, { kind: 'profile', at: undefined, by: 'Ben' });
+  assert.match(reportProblem(store.work.get('w1')!)!, /file it first with mcp__machine__file_report/);
+  // The dispatcher marks one its person did not, and takes the mark back.
+  await call(ben, 'request_work', { title: 'Splitter designs', brief: 'Three ways a splitter could pick.' });
+  // A refused decision leaves the mark as it was.
+  assert.match((await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'queue', note: 'A design; no sandbox free.', report: 'design' })).text, /^ERROR: queue is for capacity only/);
+  assert.equal(store.work.get('w2')!.report, undefined);
+  assert.match((await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'block', note: 'After the belt profile.', report: 'design', blocker: { kind: 'request', ref: 'w1', what: 'the belt profile' } })).text, /^w2: its result is a design report/);
+  assert.equal(store.work.get('w2')!.report?.by, 'the dispatcher');
+  assert.match((await call(ben, 'update_work', { id: 'w2', report: false })).text, /w2: no report needed any more/);
+  assert.equal(store.work.get('w2')!.report, undefined);
+
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Profile the belt renderer', title: 'Belt profile', work_id: 'w1' });
+  assert.equal(started.isError, false, started.text);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const h = machines.hooks!.handlersFor(store.sessions.get(id)!, store.machines.get('pc')!);
+  const out = await h.file_report!({ title: 'Belt render profile', kind: 'profile', body: 'BeltRenderSystem: 62 ms a frame (measured).' });
+  assert.match(out, /^r1 filed for w1, Ben's report/);
+  assert.deepEqual(store.work.get('w1')!.reports, [{ id: 'r1', title: 'Belt render profile', kind: 'profile' }]);
+  assert.equal(reportProblem(store.work.get('w1')!), undefined, 'filed: DONE is no longer held');
+  await h.file_report!({ id: 'r1', title: 'Belt render profile, two saves', kind: 'profile', body: 'Measured again.', note: 'second save' });
+  assert.deepEqual(store.work.get('w1')!.reports, [{ id: 'r1', title: 'Belt render profile, two saves', kind: 'profile' }]);
+  assert.match(store.work.get('w1')!.log.at(-1)!, /report revised \(revision 2\): r1/);
+
+  assert.match((await call(ben, 'list_reports', { person: 'ben' })).text, /r1 · profile · w1 · for Ben · .* · 2 revisions · "Belt render profile, two saves"/);
+  assert.match((await call(ben, 'read_report', { id: 'r1', rev: 1 })).text, /revision 1 of 2[\s\S]*BeltRenderSystem: 62 ms/);
 });

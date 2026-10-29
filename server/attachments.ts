@@ -105,6 +105,8 @@ export class AttachmentStore {
   private readonly grants = new Map<string, Map<string, number>>();
   private readonly config: () => Partial<AttachmentConfig> | undefined;
   private readonly now: () => number;
+  /** Attachment ids something still holds whatever their age (w2541: the ones a report names); retention keeps them. */
+  keep: () => Iterable<string> = () => [];
 
   constructor(dataDir: string, config: () => Partial<AttachmentConfig> | undefined = () => undefined, now: () => number = Date.now) {
     this.root = path.join(dataDir, 'attachments');
@@ -371,8 +373,9 @@ export class AttachmentStore {
     const days = this.settings.retentionDays;
     let records = 0;
     if (days > 0) {
+      const kept = new Set(this.keep());
       for (const r of [...this.records.values()]) {
-        if (now - Date.parse(r.lastUsedAt) > days * 86_400_000) {
+        if (!kept.has(r.id) && now - Date.parse(r.lastUsedAt) > days * 86_400_000) {
           this.records.delete(r.id);
           records++;
         }

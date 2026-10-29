@@ -1299,6 +1299,13 @@ the character cap decides first when entries are long.
 Workers on a machine get the tool once both the portal and the machine's daemon have this version: an older daemon
 leaves a tool it does not know out (`buildOptions`).
 
+### Reports (w2541)
+
+A design or an analysis a person asked for ends as a report on the portal's Reports tab, tagged with that person: the
+person's orchestrator marks the request with `request_work`/`update_work report <kind>`, or the dispatcher with
+`decide_work report <kind>`; its worker files it with `file_report`, and its DONE waits for one. Everything else (where
+it is kept, media, revisions, the tools, the tab): `docs/reports.md`.
+
 ### Work in a machine's main clone (w936)
 
 A machine's main clone is a person's own project folder (Ben's `/Users/benryding/nevergames/FinalFactory` on the m5), and

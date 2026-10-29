@@ -49,7 +49,7 @@ import {
 } from './work.ts';
 import { autoApproveProblem, cleanBlock, cleanLine, crashFacts, crashKinship, crashPeersBlock, identityKeys, ownApprovalCount, parseMarkers, quoteUntrusted, sourceTag, titleOnly } from './intakeRules.ts';
 import { readDiscordConfig } from './discordConfig.ts';
-import { LIMIT_END, doneIdsIn, doneProblem, learnedProblem, mergedMentionsIn, notDoneReason, pausedIn, reportVerdict, stillOpenIn, toolErrors, turnEvidence, turnTroubleOf, type TurnTrouble } from './ledgerRules.ts';
+import { LIMIT_END, doneIdsIn, doneProblem, learnedProblem, reportProblem, mergedMentionsIn, notDoneReason, pausedIn, reportVerdict, stillOpenIn, toolErrors, turnEvidence, turnTroubleOf, type TurnTrouble } from './ledgerRules.ts';
 import { aheadText, answerAfter, asksAPerson, holdsOf, personWaitIn, questionShareKey, reportWaitKey, roomShares, servedBy, UNDECIDED_BOUND_MS } from '../shared/workState.ts';
 import { capacityBlockProblem, capacityWaitIn, needsOf, needsTimed, pairRoom, pairText, PAIR_MAX_LEGS, resolveNeeds, steamShortIn } from '../shared/capacity.ts';
 import { mentionsSteam, STEAM_READ } from '../shared/steam.ts';
@@ -79,7 +79,7 @@ import { isSamePerson, personForWork, sessionPerson, tokenPersonForWork } from '
 import { MERGE_ON_GREEN_MARK } from './mergeOnGreen.ts';
 import { commitsIn, normPr, pairCommitsOf, pairPrOf, pairRanCommit, prIn, resultFor, sameCommit, samePr } from './pairRuns.ts';
 import type { AttachmentRef, ConditionalDecision, OpenAsk, WorkNeedsYou, GateResume, GitStatus, Machine, WorkAutoClosed, WorkBlocker, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPair, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
-import { WORK_PRIORITIES } from '../shared/types.ts';
+import { REPORT_KINDS, WORK_PRIORITIES, type ReportKind, type ReportSummary } from '../shared/types.ts';
 
 /** w2045: the most of a worker's after-merge report a merge-on-green gate keeps (a DONE report is rarely longer). */
 const MERGE_ON_GREEN_REPORT_CHARS = 12_000;
@@ -144,7 +144,7 @@ interface HeldCall {
   why: string;
 }
 /** update_work's input (Agents' tool). */
-type UpdateInput = { id: string; note?: string; priority?: WorkPriority; close?: 'done' | 'cancelled'; reopen?: boolean; approve?: boolean; decline?: boolean; subjects?: string[]; ledger_read?: boolean; main_clone?: string | false; when?: ConditionInput; words?: string; expires_days?: number; assign_to?: string };
+type UpdateInput = { id: string; note?: string; priority?: WorkPriority; close?: 'done' | 'cancelled'; reopen?: boolean; approve?: boolean; decline?: boolean; subjects?: string[]; ledger_read?: boolean; main_clone?: string | false; when?: ConditionInput; words?: string; expires_days?: number; assign_to?: string; report?: ReportKind | false };
 
 /** Held calls kept per chat at most, and for how long. */
 const HELD_MAX = 10;
@@ -506,6 +506,8 @@ export interface WorkInput {
   subjects?: string[];
   /** A ledger task (w642): its workers may list and read every open and stalled request (read_work all). */
   ledger_read?: boolean;
+  /** w2541: its result is a report of this kind (a design, an analysis, a profile, research): its worker files one. */
+  report?: ReportKind;
   /**
    * w936: the machine whose main clone its workers may work in (quit the editor open there, back up, git fetch and
    * checkout, reopen Unity). Only in a turn of its person's own, and only when the request explicitly asks for work there.
@@ -1702,18 +1704,19 @@ export class Orchestrators {
       needs: placed.needs,
       ...(input.repo?.trim() ? { repo: clip(input.repo.trim(), 120) } : {}),
       ...(input.ledger_read ? { ledgerRead: { by: owner.displayName, at: now.toISOString() } } : {}),
+      ...(input.report && (REPORT_KINDS as readonly string[]).includes(input.report) ? { report: { kind: input.report, at: now.toISOString(), by: owner.displayName } } : {}),
       ...(cloneMachine ? { mainCloneAccess: { machine: cloneMachine, by: owner.displayName, at: now.toISOString() } } : {}),
       overlaps: [],
       asks: 0,
       log: [],
     };
     w.overlaps = findOverlaps({ keys: w.keys, title: w.title }, this.pool(id));
-    this.stamp(w, `filed by ${owner.displayName}${w.humanAsked ? '' : ' (not in a turn of theirs)'}; needs ${placed.needs === 'agent' ? 'an agent slot only (no editor, no game sandbox)' : 'a game sandbox'} (${placed.how})${w.ledgerRead ? '; its workers may read the ledger' : ''}${cloneMachine ? `; its workers may work in ${cloneMachine}'s main clone` : ''}`);
+    this.stamp(w, `filed by ${owner.displayName}${w.humanAsked ? '' : ' (not in a turn of theirs)'}; needs ${placed.needs === 'agent' ? 'an agent slot only (no editor, no game sandbox)' : 'a game sandbox'} (${placed.how})${w.ledgerRead ? '; its workers may read the ledger' : ''}${w.report ? `; its result is a report (${w.report.kind})` : ''}${cloneMachine ? `; its workers may work in ${cloneMachine}'s main clone` : ''}`);
     this.store.putWork(w);
     this.store.dropWork(pruneIds(this.store.work.values(), undefined, this.now().getTime()));
     this.gatherForDispatcher(owner, requestNotice(w));
     const overlap = w.overlaps.length ? ` Possible overlap: ${w.overlaps.slice(0, 3).map(overlapLine).join('; ')}. Tell ${owner.displayName}; the dispatcher decides.` : '';
-    return `Filed ${id} with the dispatcher.${overlap} You get a [dispatch] message with its decision.`;
+    return `Filed ${id} with the dispatcher${w.report ? `; its result is a report (${w.report.kind}), which its worker files with file_report` : ''}.${overlap} You get a [dispatch] message with its decision.`;
   }
 
   /**
@@ -1962,6 +1965,12 @@ export class Orchestrators {
     if (input.ledger_read !== undefined) {
       readLine = this.setLedgerRead(owner, w, input.ledger_read);
       if (!input.note?.trim() && !input.priority && !input.close && !input.reopen && !input.subjects?.length && !input.approve && !input.decline) return readLine;
+    }
+    // A REPORT (w2541): mark the request as one whose result is a report, or take the mark back.
+    if (input.report !== undefined) {
+      if (!isFor(w, owner.userId) && !this.reviewers().some((r) => same(r.userId, owner.userId))) throw new Error(`${w.id} is not ${owner.displayName}'s request`);
+      const reportLine = this.setReport(w, input.report, owner.displayName);
+      if (!input.note?.trim() && !input.priority && !input.close && !input.reopen && !input.subjects?.length && !input.approve && !input.decline && input.ledger_read === undefined && input.main_clone === undefined) return reportLine;
     }
     // MAIN-CLONE WORK (w936): grant or take back; with nothing else asked, that is the whole update.
     if (input.main_clone !== undefined) {
@@ -2607,6 +2616,38 @@ export class Orchestrators {
    * may then list and read every open and stalled request (read_work all). Its own person's orchestrator only, and never
    * on a request from the intake, whose text is not a person's own. It widens reading only, so it needs no turn of theirs.
    */
+  /**
+   * Mark a request as one whose result is a report (w2541, docs/reports.md), or take the mark back (false): its workers
+   * are told to file one with file_report, and a DONE is refused until one is filed. By its person's orchestrator
+   * (request_work, update_work) or the dispatcher (decide_work report) for a request a person asked a design or an
+   * analysis of.
+   */
+  setReport(w: WorkItem, kind: ReportKind | false, by: string): string {
+    if (kind !== false && !(REPORT_KINDS as readonly string[]).includes(kind)) throw new Error(`report: one of ${REPORT_KINDS.join(', ')}, or false`);
+    if (kind === false) {
+      if (!w.report) return `${w.id} was not marked as needing a report.`;
+      w.report = undefined;
+      this.stamp(w, `${by}: no report needed any more`);
+    } else {
+      if (w.report?.kind === kind) return `${w.id} is already marked: its result is a ${kind} report.`;
+      w.report = { kind, at: this.now().toISOString(), by };
+      this.stamp(w, `${by}: its result is a report (${kind})`);
+    }
+    this.store.putWork(w);
+    return kind === false ? `${w.id}: no report needed any more.` : `${w.id}: its result is a ${kind} report; its worker files it with file_report, and DONE waits for it${w.reports?.length ? ` (${w.reports.map((r) => r.id).join(', ')} filed already)` : ''}.`;
+  }
+
+  /** A report was filed or revised for `workId` (w2541): the request links to it. */
+  reportFiled(workId: string, r: ReportSummary, created: boolean) {
+    const w = this.store.work.get(workId);
+    if (!w) return;
+    const link = { id: r.id, title: r.title, kind: r.kind };
+    const i = (w.reports ?? []).findIndex((x) => x.id === r.id);
+    w.reports = i < 0 ? [...(w.reports ?? []), link] : (w.reports ?? []).map((x, k) => (k === i ? link : x));
+    this.stamp(w, `${created ? 'report filed' : `report revised (revision ${r.revisions})`}: ${r.id} "${r.title}"`);
+    this.store.putWork(w);
+  }
+
   private setLedgerRead(owner: Requester, w: WorkItem, on: boolean): string {
     if (!isFor(w, owner.userId)) throw new Error(`${w.id} is not ${owner.displayName}'s request: only its own people grant its workers ledger reading`);
     if (on && w.source) throw new Error(`${w.id} came from the intake (${w.source.kind}): its workers read their own requests and the ones they name, never the whole ledger`);
@@ -2797,10 +2838,16 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   }
 
   /** The dispatcher decides about a request (decide_work); the requesters' orchestrators get the reply. */
-  decide(input: { id: string; action: Decision; note: string; into?: string; session_ids?: string[]; needs?: string[]; blocker?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>; blockers?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>[]; add_blocker?: boolean; drop_leg?: boolean; override_gate?: string; asks?: Ask[]; pair_legs?: number }): string {
+  decide(input: { id: string; action: Decision; note: string; into?: string; session_ids?: string[]; needs?: string[]; blocker?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>; blockers?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>[]; add_blocker?: boolean; drop_leg?: boolean; override_gate?: string; asks?: Ask[]; pair_legs?: number; report?: ReportKind | false }): string {
     let keptBefore: WorkBlocker[] = [];
     const w = this.requireWork(input.id);
     if (w.approval?.state === 'pending') throw new Error(`${w.id} waits for a person to approve it (intake); it is not yours to decide yet`);
+    // w2541: the dispatcher marks a request whose result is a report (a person asked for a design or an analysis).
+    // The decision first: a refused one leaves the mark as it was.
+    if (input.report !== undefined) {
+      const decided = this.decide({ ...input, report: undefined });
+      return `${this.setReport(this.requireWork(input.id), input.report, 'the dispatcher')} ${decided}`;
+    }
     const into = input.into ? this.requireWork(input.into) : undefined;
     // w2057: a pair run that repeats one that already finished (w665's second run of PR #2340, queued at 15:58 after w1936
     // passed) could not be dropped: start_agent refuses one leg, and a queued request cannot be queued again. pair_legs 0
@@ -5042,7 +5089,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
         this.store.putWork(w);
         continue;
       }
-      const problem = doneProblem(w, text) ?? learnedProblem(w, text);
+      const problem = doneProblem(w, text) ?? learnedProblem(w, text) ?? reportProblem(w);
       // The ledger's PR states are a copy, read every few minutes, and a DONE often comes seconds after its PR merged (w515:
       // #1080, #1089, #1092 and #1095 were refused as "still open"). Read the open ones live before refusing.
       if (problem && this.prsLive && (w.prs ?? []).some((p) => p.state === 'open')) {
@@ -5071,7 +5118,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
         const r = await this.prsLive!(id).catch(() => ({ unverified: before }));
         const w = this.store.work.get(id);
         if (!w || !(isOpen(w) || w.status === 'stalled')) return;
-        const problem = doneProblem(w, text, r.unverified) ?? learnedProblem(w, text);
+        const problem = doneProblem(w, text, r.unverified) ?? learnedProblem(w, text) ?? reportProblem(w);
         if (problem) return this.refuseDone(w, s, problem, refused);
         this.closeOnDone(w, s.id, report, `${speaker} said DONE: ${w.id} (its PR states read live from GitHub)`, also.get(id));
       }),

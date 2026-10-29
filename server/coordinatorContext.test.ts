@@ -148,7 +148,10 @@ test('w1158: what a coordinator carries in every call stays within its budget', 
   // the pull request gate does not run); the owner's brief measured 28,312, so the cap moved to 28,350.
   // w2253 (Ben: "Add a way for an orchestrator to restore one of its OWN memory files") added "Lost by mistake: restore_memory
   // it." to every brief's memory rules (36 characters); the dispatcher's measured 28,385, so the cap moved to 28,400.
-  const PROMPT_MAX = 28_400;
+  // w2541 (reports; lothsahn: "make sure theyre tagged with the operator that requested them") gave the dispatcher one line on marking such
+  // a request (trimmed from 560 characters to 205; the rest is decide_work's report parameter): measured 28,597, so the cap
+  // moved to 28,600.
+  const PROMPT_MAX = 28_600;
   // w1163: the always-loaded sets now follow measured use (docs/tool-manifest.md); the dispatcher's is 23,436 characters
   // since w1159 gave list_work, list_sandboxes, list_machines and agent_transcript their output options. w1597 gave decide_work
   // its questions (one plain question per decision with its answers, as the person's card asks them; Ben, 2026-10-19: "just ask
@@ -159,7 +162,9 @@ test('w1158: what a coordinator carries in every call stays within its budget', 
   // multiple machines and doesn't waste slots?") gave start_agent pair_sandboxes, a pair run's legs started together (trimmed from
   // three parameters and 950 characters to one and 216; the rule itself is in read_rules machines): the dispatcher's measured
   // 24,888, so the cap moved to 24,900.
-  const ALWAYS_LOADED_MAX = 24_900;
+  // w2541 (reports) gave decide_work report, a request's result kept as a report of one kind (trimmed from 330 characters of
+  // text to 110; the rest is the kinds' enum): the dispatcher's measured 25,187, so the cap moved to 25,200.
+  const ALWAYS_LOADED_MAX = 25_200;
   await withCoordinators((agents, kinds) => {
     for (const [kind, info] of kinds) {
       const prompt = asOnLinuxCi(promptOf(agents, info)).length;

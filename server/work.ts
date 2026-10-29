@@ -367,8 +367,17 @@ export function describeItem(w: WorkItem, workerLine: (id: string) => string, no
  * What a worker is told about its request's PRs: the `Request: wNNN` line the ledger links them by, and that the request
  * closes itself when they merge (docs/orchestrators.md, "Pull requests"), so a step that follows the merge belongs in the brief.
  */
-export const requestLineRule = (w: Pick<WorkItem, 'id'>) =>
-  `\n\nWhen you open a pull request for this request, put a line \`Request: ${w.id}\` in its description. The ledger links the PR to the request by it, and closes the request when the PR merges and nothing is left; if more work follows the merge, say so in your last report. A PR that is only one step of the request (a fix the real work needs first) gets a line \`Part of: ${w.id}\` instead: linked the same way, but its merge leaves the request open.${doneRule(w)}`;
+export const requestLineRule = (w: Pick<WorkItem, 'id'> & Partial<Pick<WorkItem, 'report'>>) =>
+  `\n\nWhen you open a pull request for this request, put a line \`Request: ${w.id}\` in its description. The ledger links the PR to the request by it, and closes the request when the PR merges and nothing is left; if more work follows the merge, say so in your last report. A PR that is only one step of the request (a fix the real work needs first) gets a line \`Part of: ${w.id}\` instead: linked the same way, but its merge leaves the request open.${doneRule(w)}${reportRule(w)}`;
+
+/**
+ * w2541 (docs/reports.md): a request whose result is a report. Its worker files the whole result with file_report before
+ * its DONE, which the ledger refuses until one is filed (server/ledgerRules.ts reportProblem).
+ */
+export const reportRule = (w: Partial<Pick<WorkItem, 'id' | 'report'>>) =>
+  w.report
+    ? ` ${w.id}'s result is a report (${w.report.kind}, asked by ${w.report.by}): file it with mcp__machine__file_report (a title, kind ${w.report.kind}, the whole result as Markdown: the findings, the numbers with their evidence labels, and the stills and clips from publish_review as ![what it shows](<path>)), and revise it with its id when the result changes; it keeps every older revision. Your report then names it (r<N>) instead of repeating it. The ledger refuses ${w.id}'s DONE until one is filed.`
+    : '';
 
 /**
  * The DONE marker (w419): how a worker closes its request itself once every step is finished, post-merge steps included.

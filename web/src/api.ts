@@ -1,5 +1,7 @@
 import { SOCKET_PING_MS } from '../../shared/types';
 import type {
+  Report,
+  ReportHit,
   AppSettings,
   TimersAnswer,
   AppState,
@@ -112,6 +114,10 @@ export const api = {
   state: () => request<AppState>('GET', '/api/state'),
   // What work costs (w859, docs/spend.md): each request's cost, one request in full, and the analysis.
   spendSummary: () => request<SpendSummaryReply>('GET', '/api/spend/summary'),
+  /** Reports (w2541, docs/reports.md): search them with every filter, and read one at a revision (the latest by default). */
+  searchReports: (f: { q?: string; kind?: string; request?: string; person?: string; since?: string; until?: string }) =>
+    request<ReportHit[]>('GET', `/api/reports/search?${new URLSearchParams(Object.entries(f).filter((e): e is [string, string] => !!e[1]))}`),
+  report: (id: string, rev?: number) => request<Report>('GET', `/api/reports/${encodeURIComponent(id)}${rev ? `?rev=${rev}` : ''}`),
   spendRequest: (id: string) => request<SpendRequestReply>('GET', `/api/spend/request/${encodeURIComponent(id)}`),
   spendReport: (days = 7, top = 10) => request<SpendReportReply>('GET', `/api/spend/report?days=${days}&top=${top}`),
   // FFBox, as its connector reported it (docs/ffbox-integration.md): newest first.

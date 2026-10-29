@@ -48,6 +48,7 @@ import { TimedRuns } from './timedRuns.ts';
 import { BenchHoursStore } from './benchHoursStore.ts';
 import type { ToDaemon } from './machineProtocol.ts';
 import { REVIEW_DEFAULTS, ReviewStore, reviewHttp } from './review.ts';
+import { ReportError, ReportStore, isReportKind } from './reports.ts';
 import { HostHealthMonitor } from './hostHealth.ts';
 import { PATH_HEALTH_FILE, PathHealthMonitor, filePathHealth } from './pathHealth.ts';
 import { withDismissed } from '../shared/dismissals.ts';
@@ -567,6 +568,12 @@ review.onPublished = (file) => {
   if (VIDEO_FILE.test(file)) void previews.ensure(file);
 };
 agents.review = review;
+// Reports (w2541, docs/reports.md): a design, an analysis or a profile a worker filed, kept beside the ledger with copies
+// of the review media it shows, so it outlives the review folder's retention.
+const reports = new ReportStore(cfg.dataDir, () => [review.root]);
+agents.reports = reports;
+agents.onReport = (report) => broadcast({ type: 'report', report });
+attachments.keep = () => reports.attachmentIds();
 
 /** The signed-in person making this request, as work records them (a route only runs for a signed-in user). */
 function requesterOf(req: http.IncomingMessage) {
@@ -987,6 +994,7 @@ function appState(user: string | undefined): AppState {
     dispatcherId: agents.dispatcherId,
     me,
     work: agents.orchestrators.forPage(),
+    reports: reports.all(),
     room: agents.roomNow(),
     ...agents.roomExtras(),
     intake: intake.summary(),
@@ -1620,6 +1628,40 @@ route('GET', '/api/image', async (_r, _p, url) => {
     const gone = review.contains(file) ? removedMedia(path.resolve(file)) : undefined;
     if (gone && VIDEO_FILE.test(file)) throw new HttpError(410, removedText(file, gone.days));
     if (gone) return new FileReply('image/svg+xml', placeholderSvg(gone.days));
+    throw new HttpError(404, (e as Error).message);
+  }
+});
+
+// Reports (w2541, docs/reports.md): search them, read one (any revision), and the media it keeps.
+const reportCall = <T>(f: () => T): T => {
+  try {
+    return f();
+  } catch (e) {
+    if (e instanceof ReportError) throw new HttpError(e.status, e.message);
+    throw e;
+  }
+};
+route('GET', '/api/reports/search', async (_r, _p, url) => {
+  const q = (k: string) => url.searchParams.get(k)?.trim() || undefined;
+  const kind = q('kind');
+  if (kind && !isReportKind(kind)) throw new HttpError(400, `kind: unknown report kind ${kind}`);
+  return reportCall(() => reports.search({ query: q('q'), kind, request: q('request'), person: q('person'), since: q('since'), until: q('until') }));
+});
+route('GET', '/api/reports/(r[0-9]+)', async (_r, [id], url) => {
+  const rev = url.searchParams.get('rev');
+  return reportCall(() => reports.get(id, rev ? Number(rev) : undefined));
+});
+route('GET', '/api/reports/(r[0-9]+)/media/([^/]+)', async (_r, [id, name]) => {
+  const file = reports.mediaFile(id, decodeURIComponent(name));
+  if (!file) throw new HttpError(404, `${id} keeps no file ${name}`);
+  try {
+    if (VIDEO_FILE.test(file)) {
+      const v = openVideo(file, [reports.root]);
+      return new StreamReply(v.mediaType, v.path, v.size);
+    }
+    const img = readImage(file, [reports.root]);
+    return new FileReply(img.mediaType, img.data);
+  } catch (e) {
     throw new HttpError(404, (e as Error).message);
   }
 });

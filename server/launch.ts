@@ -18,6 +18,19 @@ import type { StandingToolGroup } from '../shared/types.ts';
 import { WORK_LIVE_STATES, type WorkLiveState } from '../shared/workState.ts';
 import type { SecretRules } from './secretGuard.ts';
 import { WORKER_RULE_TOPICS } from './workerRules.ts';
+import { REPORT_KINDS } from '../shared/types.ts';
+import { MAX_REPORT_BODY } from './reports.ts';
+
+/** list_reports' filters (w2541), for workers and orchestrators alike. */
+export const REPORT_FILTER = {
+  query: z.string().max(200).optional().describe('Words that must all be in its title, text, kind, request or operators.'),
+  kind: z.enum(REPORT_KINDS).optional(),
+  request: z.string().max(16).optional().describe('Only the reports of this request ("w2531").'),
+  person: z.string().max(64).optional().describe('Only the reports of requests this operator asked for (user id or display name).'),
+  since: z.string().max(40).optional().describe('Updated at or after this ISO date or time.'),
+  until: z.string().max(40).optional().describe('Updated at or before this ISO date or time (a bare date takes in its day).'),
+  limit: z.number().int().min(1).max(100).optional().describe('At most this many, newest first; default 30.'),
+};
 import { DESCRIPTION_CHARS, LABEL_INPUT_CHARS, MAX_OPTIONS, MEDIA_CHARS, MIN_OPTIONS } from '../shared/ask.ts';
 import { CARD_QUESTION_CHARS, MAX_ASKS } from '../shared/questionCard.ts';
 import { rangedNumber } from './forgiving.ts';
@@ -353,6 +366,21 @@ export const CATALOG = {
     offset: rangedNumber(0, undefined, 'Skip this many matching requests (the next page).').optional(),
     limit: rangedNumber(1, 50, 'Requests per page, default 20; a page also stops at 40,000 characters.').optional(),
   },
+  /** docs/reports.md (w2541): a request's result written down as a report, kept in the portal and shown on its Reports tab. */
+  file_report: {
+    title: z.string().min(1).max(200).describe('What it is about, in a few words: "Late-game frame time on M3".'),
+    kind: z.enum(REPORT_KINDS).describe('analysis, profile, investigation, root-cause, design, research or other.'),
+    body: z.string().min(1).max(MAX_REPORT_BODY).describe('The whole result as Markdown: the question, the findings, the numbers with their labels (measured, sourced, guess), what it recommends. Stills and clips from publish_review as ![what it shows](<path>): they are copied into the report and kept with it.'),
+    id: z.string().max(12).optional().describe('Revise this report (r12) of your request: a new revision, the older text kept.'),
+    note: z.string().max(500).optional().describe('With id: what changed ("added the BEAST numbers").'),
+    request: z.string().max(16).optional().describe('The request it is the result of, when you are on more than one ("w2531").'),
+    attachments: z.array(z.string().max(40)).max(20).optional().describe('Attachment ids from publish_attachment (a capture, a data file) to keep with it.'),
+  },
+  read_report: {
+    id: z.string().max(12).describe('The report, e.g. "r12".'),
+    rev: z.number().int().min(1).optional().describe('An older revision (1 is the first); default the latest.'),
+  },
+  list_reports: REPORT_FILTER,
   /** docs/portal-logs.md (w920). Read-only: the portal answers from a fixed list of sources (server/portalLogs.ts). */
   portal_logs: {
     source: z.string().max(40).optional().describe('What to read (journal, portal, updater, health, cleanup, update_result, update_verified, update_prepared, update_verifying, machine_rollout, auto_deploy, unit_watchdog, coordinator_context, bench_hours). Absent: the list of sources and what is there now.'),
