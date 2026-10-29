@@ -257,7 +257,15 @@ function stillOpenLine(report: string, workId: string): string | undefined {
 export function personWaitIn(report: string | undefined, workId: string, people: readonly string[] = []): { who?: string; line: string } | undefined {
   if (!report) return undefined;
   const line = stillOpenLine(report.trim().slice(-2000), workId);
-  if (!line) return undefined;
+  return line ? personWaitOn(line, people) : undefined;
+}
+
+/**
+ * Whether one line (a "still open:" line as written) waits on a person, by personWaitIn's words: who, or no who for "a
+ * person". w2495: the ledger reads it before any wait it infers from a report (blockerWatch recordReportedWaits), so a
+ * person's wait that names a product ("waiting on lothsahn to click Pause in FF Factory's tray") is never a deploy's.
+ */
+export function personWaitOn(line: string, people: readonly string[] = []): { who?: string; line: string } | undefined {
   const known = people.find((p) => new RegExp(`\\b${WAITS}\\s+${escapeRe(p)}(?:\\s+to\\b|'s\\s+${WHAT_THEY_GIVE}\\b)`, 'i').test(line));
   if (known) return { who: known, line };
   const named = NAMED.exec(line)?.[1];
@@ -325,9 +333,17 @@ export function requestWaitOf(line: string, selfId: string): string | undefined 
  * Final-Factory/ff-factory#743"): its worker merges that itself.
  */
 const PORTAL_WAIT = /\b(?:waiting (?:for|on)|waits (?:for|on)|blocked on|until)\b([^;.]{0,80}?)(?<![\w/-])(?:ff[- ]?factory(?![\w-]*#\d)|the portal|portal (?:fix|deploy|update|change)|(?:a|the|its|next) (?:portal )?deploy)\b/i;
-export function portalWaitIn(line: string): boolean {
+/**
+ * w2495: a "<who> to <do>" before the product name is someone else acting, not FF Factory: w2443's worker wrote "waiting
+ * on lothsahn to click Pause in FF Factory's tray on LothLaptop for the live test", the ledger read a wait on a portal
+ * deploy, and lothsahn's answer was held for a deploy that never came. A person's wait (personWaitOn, with `people` the
+ * request's people) is never a deploy's either.
+ */
+const SOMEONE_ACTS = /^\s*(?:the |a |an )?[A-Za-z][\w.'-]*\s+to\s+\w/i;
+export function portalWaitIn(line: string, people: readonly string[] = []): boolean {
+  if (personWaitOn(line, people)) return false;
   const m = PORTAL_WAIT.exec(line);
-  return !!m && !/\b(?:ci|checks?|pr|pull request)\b/i.test(m[1]);
+  return !!m && !/\b(?:ci|checks?|pr|pull request)\b/i.test(m[1]) && !SOMEONE_ACTS.test(m[1]);
 }
 
 /**

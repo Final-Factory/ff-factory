@@ -960,8 +960,15 @@ without one means it is off or failing, worth a person's look.
   20 to 25 minutes with `wake_me`, and a pending check-in made the ledger say Working). Three parts:
   1. **The signal is structured**: the worker tool `blocked_on` ({requests?, prs?, what, request?}; `Agents.declareBlocked` →
      `Orchestrators.workerBlocked`) blocks the request on those (`by: worker <id>`; `prs` are `pr` gates), cancels the
-     worker's check-in and tells it to end its turn. The dispatcher's `decide_work block` is the other way in. Nothing parses
-     a report's prose for it (the `still open:` line is read only for a person, `personWaitIn`).
+     worker's check-in and tells it to end its turn. The dispatcher's `decide_work block` is the other way in. The backstop
+     for a lost call is the report's `still open:` line (`BlockerWatch.recordReportedWaits`): a stopped worker's line that
+     waits on an open request (w2422, `requestWaitOf`), on FF Factory, which only a portal deploy brings (w2457,
+     `portalWaitIn`), or on another worker of the request (w2476, `siblingWaitOf`) becomes that worker's own gate, marked
+     `reported` (the report it was read from). **A line that waits on a person is never read so** (w2495, `personWaitOn`, with
+     the request's people): it is the person's wait (Waiting on input, below), whatever product it names. w2443's worker wrote
+     "waiting on lothsahn to click Pause in FF Factory's tray on LothLaptop for the live test", the ledger made a portal
+     deploy gate of it, and lothsahn's answer was held for a deploy that never came. `portalWaitIn` also refuses a "<who> to
+     <do>" before the product name (someone else acting); "blocked on the portal deploy of PR #752" is still a deploy wait.
   2. **Blocked beats a check-in** (`workLive`): a blocked request with gates is Blocked whatever check-ins its worker has
      pending; a worker mid-turn, or running a background job (CI, a build), is still Working.
   3. **No poll is left behind**: blocking a request (`decide_work block`, `blocked_on`) cancels the pending check-in of each
@@ -2444,6 +2451,12 @@ own turn only (`humanAsked`): a note in a turn that is not theirs answers nothin
   (`wakeNow`, the same path a cleared CI gate resumes it by). That message ends its `waiting_on_person`, so the request leaves
   Waiting on input and the card goes. A worker mid-turn, or gone, is named in the dispatcher's `[work update]` instead
   ("pass it on with message_agent").
+- **always goes, even while the request shows Blocked** (w2495): `staleResume` holds a resume for a request blocked again
+  (w1128, w754) but never an `[answer]`, since the answer is what the worker waited on. The gates the ledger read from that
+  worker's own report (`WorkBlocker.reported`, recordReportedWaits above) are cleared by the answer
+  (`clearReportedGates`; the request goes back to Working when none is left). Gates set with `blocked_on` or `decide_work`
+  (another request, CI, a PR, a deploy), and another worker's, stay (w754): the worker resumes with the answer and the
+  request stays Blocked on them; the worker blocks on them again if it must.
 - The dispatcher's `[work update]` says "sent to its worker …, which resumes with it (nothing for you to pass on)"; its brief
   says not to message the worker again, and not to `decide_work ask` for a worker's own wait.
 
