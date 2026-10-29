@@ -13,7 +13,7 @@ import { OPS_ID } from './opsWorker.ts';
 import { crossOwnerLine, delegationConstraints, DispatcherChatRefused, DISPATCHER_CHAT_REFUSED, FILINGS_PER_MESSAGE, loopGuards, FOLLOW_UPS_PER_MESSAGE, MESSAGES_PER_PERSON, OFFLINE_NOTICE_MS, offlineNoticeMs, OWNER_LOOP_MESSAGES_PER_HOUR, PERSON_MESSAGE_CHARS, unpushedText, type Orchestrators } from './orchestrators.ts';
 import { configPath, type Config } from './config.ts';
 import { memoryDirFor } from './orchestratorMemory.ts';
-import { handoverNote, isOpen, requestAsFiled } from './work.ts';
+import { handoverNote, isOpen, requestAsFiled, requestNotice } from './work.ts';
 import { BlockerWatch, REPORTED_WAIT_MS } from './blockerWatch.ts';
 import { poolForRef, type GatePoolToken } from './usageGate.ts';
 import { personForWork, sessionPerson, setVaultContext } from './vault.ts';
@@ -8017,4 +8017,80 @@ test('w2541: a request marked for a report refuses DONE until its worker files o
 
   assert.match((await call(ben, 'list_reports', { person: 'ben' })).text, /r1 · profile · w1 · for Ben · .* · 2 revisions · "Belt render profile, two saves"/);
   assert.match((await call(ben, 'read_report', { id: 'r1', rev: 1 })).text, /revision 1 of 2[\s\S]*BeltRenderSystem: 62 ms/);
+});
+
+// w2548: w2547, a timed leg, was started twice in lothdesktop/slot1 on 2026-10-29: at 15:19:59Z by FF Factory's timing order
+// (w2055) as 9a3c8e5d, and at 15:20Z by the dispatcher (start_agent work_id w2547) as 57ab10fc, which its [work request]
+// had told to "Decide: start it". The first worker's process had not started yet (its brief waited on the save download),
+// so its status was still "stopped" and start_agent's live check skipped it; the sandbox check skipped it as the request's own.
+const timedLegRow = (id: string): Partial<WorkItem> & { id: string } => ({
+  id,
+  title: `Timed leg for w1: w1: profiled capture on pc`,
+  status: 'queued',
+  queuedFor: { at: T0, needs: ['pc'] },
+  timedLeg: { for: 'w1', forSession: 'aaaaaaaa', from: 'm3', small: ['pc'] },
+});
+
+test('w2548: the timing order starts a timed leg, and the dispatcher starting it again within a minute is refused, naming the worker', async (t) => {
+  const env = await setupOnMachine(t, {}, { sandboxes: ['alpha', 'beta'] });
+  const { store, agents, dispatcher, call } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1', status: 'blocked' }, timedLegRow('w2')]);
+  // 15:19:54Z: the pass starts it on pc itself.
+  assert.equal(agents.startTimedLeg(store.work.get('w2')!, 'pc', 'pc is idle (no other work on it)'), true);
+  await until('the leg is linked to its worker', () => store.work.get('w2')!.sessionIds.length === 1);
+  const first = store.work.get('w2')!.sessionIds[0];
+  const info = store.sessions.get(first)!;
+  assert.equal(info.machineSandbox, 'alpha');
+  // Its first prompt still waits (the save being fetched into its Inbox): no process yet, as 9a3c8e5d at 15:20Z.
+  await until('its first turn', () => info.status === 'idle');
+  store.putSession({ ...info, status: 'stopped', turns: 0, sdkSessionId: undefined });
+  // 15:20Z: the dispatcher, told to decide it, starts it in the same sandbox.
+  const again = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Profile it', title: 'w2: profiled capture', work_id: 'w2' });
+  assert.equal(again.isError, true, again.text);
+  assert.match(again.text, new RegExp(`^ERROR: w2 already has worker ${first} "w2: timed leg for w1`));
+  // With an override it is still refused in that sandbox: the leg's own worker occupies it.
+  const forced = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Profile it', title: 'w2: profiled capture', work_id: 'w2', override_duplicate: 'a second look' });
+  assert.equal(forced.isError, true, forced.text);
+  assert.match(forced.text, new RegExp(`sandbox pc/alpha is not free: ${first} "w2: timed leg for w1`));
+  assert.deepEqual(store.work.get('w2')!.sessionIds, [first], 'one worker on the leg');
+  assert.equal(store.machines.get('pc')!.sandboxes!.find((x) => x.id === 'alpha')!.sessionIds.filter((id) => store.sessions.get(id)?.kind === 'worker').length, 1);
+});
+
+test('w2548: a start under way holds the request: start_agent during the timing order\'s start is refused, and the order skips a leg start_agent is starting', async (t) => {
+  const env = await setupOnMachine(t, {}, { sandboxes: ['alpha', 'beta'] });
+  const { store, agents, dispatcher, call } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1', status: 'blocked' }, timedLegRow('w2'), timedLegRow('w3')]);
+  // The order's start has begun (its sandbox being handed over) and has no worker yet: the dispatcher's start is refused,
+  // into the same sandbox or another, override or not.
+  assert.equal(agents.startTimedLeg(store.work.get('w2')!, 'pc', 'pc is idle'), true);
+  for (const extra of [{ sandbox: 'pc/alpha' }, { sandbox: 'pc/beta', override_duplicate: 'a second look', extra_agent: true }]) {
+    const r = await call(dispatcher().info, 'start_agent', { prompt: 'Profile it', title: 'w2: profiled capture', work_id: 'w2', ...extra });
+    assert.equal(r.isError, true, r.text);
+    assert.match(r.text, /^ERROR: w2 is being started already: FF Factory is starting it itself on pc now \(its timing order, w2055\)/);
+  }
+  await until('the leg is linked to its worker', () => store.work.get('w2')!.sessionIds.length === 1);
+  await until('the order has let go of it', () => agents.startUnderWay('w2') === undefined);
+  assert.equal(store.work.get('w2')!.sessionIds.length, 1, 'one worker on the leg');
+  // The other way round: while start_agent starts w3, the order does not start it too.
+  const p = call(dispatcher().info, 'start_agent', { sandbox: 'pc/beta', prompt: 'Profile it', title: 'w3: profiled capture', work_id: 'w3', extra_agent: true });
+  await until('start_agent holds w3', () => agents.startUnderWay('w3') !== undefined);
+  assert.match(agents.startUnderWay('w3')!, /a start_agent for it is starting it in/);
+  assert.equal(agents.startTimedLeg(store.work.get('w3')!, 'pc', 'pc is idle'), false);
+  const r = await p;
+  assert.equal(r.isError, false, r.text);
+  assert.equal(store.work.get('w3')!.sessionIds.length, 1);
+  // Once it has a worker the order skips it, even from an older copy of the request.
+  assert.equal(agents.startTimedLeg({ ...store.work.get('w3')!, sessionIds: [] }, 'pc', 'pc is idle'), false);
+});
+
+test("w2548: a timed leg's [work request] tells the dispatcher FF Factory starts it itself, not to decide it", () => {
+  const leg = { ...timedLegRow('w2'), brief: 'Time it.', priority: 'normal', keys: [], requestedBy: LOTH, requesters: [LOTH], humanAsked: false, createdAt: T0, updatedAt: T0, sessionIds: [], overlaps: [], asks: 0, log: [] } as WorkItem;
+  const text = requestNotice(leg);
+  assert.match(text, /^\[work request\] w2 from Lothsahn: "Timed leg for w1/);
+  assert.match(text, /Nothing to decide: FF Factory starts this timed leg itself \(its timing order, w2055.*\) when pc can take it/);
+  assert.match(text, /Do not start_agent it/);
+  assert.doesNotMatch(text, /Decide: start it/);
+  assert.match(requestNotice({ ...leg, timedLeg: undefined }), /Decide: start it \(start_agent with work_id "w2"\)/);
 });
