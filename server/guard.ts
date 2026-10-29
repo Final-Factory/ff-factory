@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { repoIsPublic } from './publicGit.ts';
 import { checkOffDriveScan, checkOutsideRootDelete } from './rootFence.ts';
 import { headBranch, isUrgentBranch } from './releaseHandBack.ts';
+import fs from 'node:fs';
 import { checkMainCloneShell, flatten, normPath, pathSpellings, spellingsRegex, type MainCloneGrant } from './mainCloneGuard.ts';
 import { checkTiming } from './timingGuard.ts';
 import { checkTimedAsk, type TimedAskState } from './timedAsk.ts';
@@ -177,7 +178,7 @@ export function sandboxGuard(opts: {
       const reason =
         checkShell(cmd, { cwd: input.cwd || opts.sandboxPath, gameRepos: opts.gameRepos ?? [], remotes: opts.remotes ?? gitRemotes, prBase: opts.prBase ?? ghPrBase, publicIdentity: opts.publicIdentity, env: opts.env }) ??
         (opts.editorRunning?.() ? checkEditorSwitch(cmd, input.cwd || opts.sandboxPath, opts.sandboxPath) : undefined) ??
-        checkReleaseBranchCommit(cmd, input.cwd || opts.sandboxPath, opts.sandboxPath) ??
+        checkReleaseBranchCommit(cmd, input.cwd || opts.sandboxPath, opts.sandboxPath, repoBranch, opts.env) ??
         checkPlayerLaunch(cmd, opts.sandboxId) ??
         // w2015: no CI check read the vault token cannot make, no wait that only sleeps (server/waitGuard.ts).
         checkChecksRead(cmd) ??
@@ -463,7 +464,14 @@ const COMMITTING = new Set(['commit', 'merge', 'cherry-pick', 'revert', 'am', 'p
  * it, and after 1.0.0.12 a worker that found BEAST's slot1 left on urgent/1.0.0.12 committed its work there. `branchOf`
  * reads the branch checked out in a folder (releaseHandBack.headBranch). Exported for tests.
  */
-export function checkReleaseBranchCommit(cmd: string, cwd: string | undefined, sandboxPath: string, branchOf: (dir: string) => string | undefined = headBranch): string | undefined {
+export function checkReleaseBranchCommit(
+  command: string,
+  cwd: string | undefined,
+  sandboxPath: string,
+  branchOf: (dir: string) => string | undefined = repoBranch,
+  env?: ShellEnv,
+): string | undefined {
+  const cmd = withoutTextArgs(command);
   const n = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
   const inside = (d: string | undefined) => !d || n(d) === n(sandboxPath) || n(d).startsWith(n(sandboxPath) + '/');
   let dir = cwd;
@@ -474,24 +482,41 @@ export function checkReleaseBranchCommit(cmd: string, cwd: string | undefined, s
       .filter(Boolean)
       .map((w) => w.replace(/^["']|["']$/g, ''));
     const lower = raw.map((w) => w.toLowerCase());
-    if (['cd', 'pushd', 'chdir', 'set-location', 'sl'].includes(lower[0] ?? '')) dir = resolveDir(dir, raw[1]);
+    if (['cd', 'pushd', 'chdir', 'set-location', 'sl'].includes(lower[0] ?? '')) dir = resolveDir(dir, raw[1], env);
     const g = lower.findIndex((w) => w === 'git' || w.endsWith('/git') || w.endsWith('git.exe'));
     if (g < 0) continue;
     let gitDir = dir;
     let i = g + 1;
     while (i < raw.length && raw[i].startsWith('-')) {
-      if (raw[i] === '-C') gitDir = resolveDir(gitDir, raw[i + 1]);
+      if (raw[i] === '-C') gitDir = resolveDir(gitDir, raw[i + 1], env);
       i += raw[i] === '-C' || raw[i] === '-c' ? 2 : 1;
     }
     const sub = lower[i];
     if (!sub || !COMMITTING.has(sub)) continue;
     if (lower.slice(i + 1).some((w) => w === '-h' || w === '--help' || w === '--abort')) continue;
     if (!inside(gitDir)) continue;
-    const branch = branchOf(sandboxPath);
+    // w2503: the branch of the repository the commit runs in (a clone of its own inside the sandbox has its own branch),
+    // not the sandbox's. A folder the text does not reveal is judged as the sandbox, and the refusal says so.
+    const branch = branchOf(gitDir ?? sandboxPath);
     if (!isUrgentBranch(branch)) continue;
+    if (!gitDir) return `git ${sub} is blocked here: the folder it runs in could not be followed from the command's text (a \`cd\` or \`git -C\` through a variable this shell does not have, or a command substitution), so it counts as this sandbox, which is on ${branch}, the urgent release lane's pointer, which nobody commits on (w1856). If you commit in a clone of your own, name its path plainly: \`git -C <path> ${sub} ...\` or \`cd <path> && git ${sub} ...\` ($TMPDIR, $HOME and ~ are followed).`;
     return `git ${sub} is blocked here: this sandbox is on ${branch}, the urgent release lane's pointer at the commit it builds, which nobody commits on (w1856). A release build left the sandbox on it. Put your work on your own branch first: mcp__machine__switch_branch with your branch (create_from origin/master for new work; it refuses uncommitted changes, so with the editor stopped \`git switch -c <your-branch>\` takes them along instead).`;
   }
   return undefined;
+}
+
+/**
+ * The branch checked out in the git repository that holds `dir` (the nearest folder up from it with a .git, a worktree's
+ * .git file included), or undefined: a detached HEAD, or no repository (w2503).
+ */
+export function repoBranch(dir: string): string | undefined {
+  let d = path.resolve(dir);
+  for (;;) {
+    if (fs.existsSync(path.join(d, '.git'))) return headBranch(d);
+    const up = path.dirname(d);
+    if (up === d) return undefined;
+    d = up;
+  }
 }
 
 /** A repo's remotes (name -> push URL), or undefined when `dir` is not a readable git repo. */
@@ -696,11 +721,39 @@ function ghRepoArgument(raw: string[]): string | undefined {
   return undefined;
 }
 
+/** Flags whose value is text for a person (a PR title or body, a commit message), never a command (w2503). */
+const TEXT_FLAG = String.raw`--title|--body|--message|--subject|--notes|--summary|-m|-t|-b`;
+/** The value of a text flag: a quoted string, or a PowerShell literal here-string (@'...'@). */
+const TEXT_ARG = new RegExp(String.raw`(^|\s)(${TEXT_FLAG})(=|\s+)("(?:[^"\\]|\\.)*"|'[^']*'|@'\r?\n[\s\S]*?\r?\n'@)`, 'g');
+/** A heredoc whose delimiter is quoted (its body is not expanded), and the text before it on its line. */
+const QUOTED_HEREDOC = /(^|\n)([^\n]*?)<<-?\s*(['"])(\w+)\3([^\n]*)\n([\s\S]*?)\n[ \t]*\4[ \t]*(?=\n|$)/g;
+/** Commands that only store a heredoc's text (a commit message, a PR body, a file), never run it. */
+const TEXT_SINKS = new Set(['git', 'gh', 'ff-pr', 'cat', 'tee']);
+
+/**
+ * `cmd` with the text a person reads taken out: the quoted values of title, body and message flags (`--title "..."`,
+ * `-m '...'`), and the body of a quoted heredoc fed to git, gh, ff-pr, cat or tee. The rules judge the command that runs,
+ * not the words of a PR title: w2474's `ff-pr push --title "... OOM kill ..."` was refused as a process kill (w2503).
+ * A double-quoted value that runs a command ($(...), backticks) stays, since the shell runs it. Exported for tests.
+ */
+export function withoutTextArgs(cmd: string): string {
+  const out = cmd.replace(TEXT_ARG, (m, lead: string, flag: string, sep: string, val: string) =>
+    val.startsWith('"') && /\$\(|`/.test(val) ? m : `${lead}${flag}${sep}""`,
+  );
+  return out.replace(QUOTED_HEREDOC, (m, lead: string, before: string, _q: string, delim: string, after: string) => {
+    const seg = before.split(/&&|\|\||[;|]/).pop()?.trim() ?? '';
+    const first = (seg.split(/\s+/)[0] ?? '').replace(/^.*[\\/]/, '').toLowerCase().replace(/\.exe$/, '');
+    return TEXT_SINKS.has(first) ? `${lead}${before}<<'${delim}'${after}\n${delim}` : m;
+  });
+}
+
 /**
  * Why a shell command is refused, or undefined. Exported for tests. Without a context, or with no
  * game repo configured, every master/main push or PR counts as the game repo's.
  */
-export function checkShell(cmd: string, ctx?: ShellContext): string | undefined {
+export function checkShell(command: string, ctx?: ShellContext): string | undefined {
+  // Judge the command that runs, not the words in its PR title, body or commit message (w2503).
+  const cmd = withoutTextArgs(command);
   let dir = ctx?.cwd;
   // The text of the last `cd` / `git -C` target that could not be followed, for the refusal's reason.
   let lost: string | undefined;
@@ -828,8 +881,8 @@ export function checkShell(cmd: string, ctx?: ShellContext): string | undefined 
     }
   }
   // Process kills are judged on the whole command: `Get-Process Unity | Stop-Process` splits the
-  // target and the kill across a pipe.
-  const all = cmd.toLowerCase().split(/[\s|;&]+/);
+  // target and the kill across a pipe. Quotes, brackets and backticks split words too, so `"$(pkill -f node)"` is seen (w2503).
+  const all = cmd.toLowerCase().split(/[\s|;&()`"']+/);
   const killer = all.some((w) => ['taskkill', 'taskkill.exe', 'stop-process', 'kill', 'pkill', 'killall', 'spps'].includes(w));
   // The FF Factory daemon's LaunchAgent and scheduled task, for every agent: on a machine, and in the sandboxes of the
   // portal's own host, whose daemon runs beside the portal (docs/beast-machine.md).

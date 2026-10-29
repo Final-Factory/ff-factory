@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { branchNow, handBackBranch, headBranch, isReleaseBranch, isUrgentBranch, nextReleaseSwitch, releaseBranchWarning } from './releaseHandBack.ts';
-import { checkReleaseBranchCommit } from './guard.ts';
+import { checkReleaseBranchCommit, repoBranch } from './guard.ts';
 import { handoverNote } from './work.ts';
 
 /**
@@ -89,4 +89,46 @@ test('w1856: a new worker whose sandbox is still on a release branch is warned i
   assert.match(warned, /Never commit on it \(the shell guard refuses commits on urgent\/\*\): switch_branch to your own branch first/);
   const plain = handoverNote({ id: 'w1767' }, { sandbox: { id: 'beast/slot1', branch: 'w1767-circuit-visibility' }, related: [] });
   assert.doesNotMatch(plain, /WARNING \(w1856\)/);
+});
+
+test('w2503: a commit in a clone of its own is judged by that clone\'s branch, not the sandbox\'s', () => {
+  // w2474's worker, in beast/slot1 left on urgent/1.0.0.23 by a release build, had `cd "$TMPDIR/ff-factory" && git commit`
+  // refused: the guard could not follow $TMPDIR, so it judged the sandbox's branch, and the worker committed through a script.
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'w2503-'));
+  try {
+    const sb = path.join(d, 'sandboxes', 'slot1').replace(/\\/g, '/');
+    const tmp = path.join(d, 'tmp', 'ffa-1').replace(/\\/g, '/');
+    const head = (dir: string, branch: string) => {
+      fs.mkdirSync(path.join(dir, '.git'), { recursive: true });
+      fs.writeFileSync(path.join(dir, '.git', 'HEAD'), `ref: refs/heads/${branch}\n`);
+    };
+    head(sb, 'urgent/1.0.0.23');
+    head(`${tmp}/ff-factory`, 'w2474-oom-policy');
+    head(`${sb}/Temp/ff-factory`, 'w2474-oom-policy');
+    fs.mkdirSync(`${sb}/Assets/Scripts`, { recursive: true });
+    const env = { TMPDIR: tmp, HOME: path.join(d, 'home') };
+    const run = (cmd: string) => checkReleaseBranchCommit(cmd, sb, sb, repoBranch, env);
+    // The misfire: each of these commits in the worker's own clone, on its own branch.
+    for (const cmd of [
+      'cd "$TMPDIR/ff-factory" && git add -A && git commit -m "w2474: OOMPolicy=continue"',
+      'cd $TMPDIR/ff-factory && git commit -m x',
+      'git -C "$TMPDIR/ff-factory" commit -m x',
+      'git -C ${TMPDIR}/ff-factory merge origin/main',
+      `git -C ${sb}/Temp/ff-factory commit -m x`,
+      `cd ${sb}/Temp/ff-factory && git commit -m x`,
+    ]) assert.equal(run(cmd), undefined, cmd);
+    // The guard still holds in the sandbox itself, from its root or a folder inside it.
+    for (const cmd of ['git commit -m x', 'cd Assets/Scripts && git commit -m x', `git -C ${sb} merge origin/master`]) {
+      assert.match(run(cmd) ?? '', /this sandbox is on urgent\/1\.0\.0\.23/, cmd);
+    }
+    // A folder the text does not reveal counts as the sandbox, and the refusal says why and how to name it.
+    const lost = run('cd "$NOT_SET/ff-factory" && git commit -m x');
+    assert.match(lost ?? '', /could not be followed/);
+    assert.match(lost ?? '', /git -C <path>/);
+    // Once the sandbox is back on a worker's branch nothing is refused.
+    head(sb, 'sandbox/slot1-w2474');
+    assert.equal(run('git commit -m x'), undefined);
+  } finally {
+    fs.rmSync(d, { recursive: true, force: true });
+  }
 });
