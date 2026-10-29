@@ -1702,6 +1702,19 @@ check-in, its gate or the ledger cleanup (which resumes, re-places or escalates,
 worker's DONE records only its own part. And `workerEnded` never closes a request on the orchestration worker's DONE
 alone: that DONE is for its job (a deploy, a restart), so the request waits for its own worker's DONE.
 
+**A worker stopped on a paused or offline computer does not hold a finished request open** (w2566, lothsahn: "When a
+request has moved off a worker, that worker must no longer count as still on it"). On 2026-10-29 w2542 moved off
+e6d3dfe1, stopped on LothLaptop and paused from its tray: the dispatcher started c59d84ed over its pause wait (gate
+overridden), and nothing took e6d3dfe1 off. Its last report said "w2542: still open: paused on lothlaptop", so `pendingOn`
+kept it on after c278888e's DONE at 17:00Z, and a message held for LothLaptop made the request read "Blocked on
+lothlaptop" for 3 hours, until an orchestrator closed it by hand. Now (`releaseStoppedAway`, `server/orchestrators.ts`)
+such a worker (stopped or errored, its computer paused now, or offline, never a pair run's leg) is taken off the request
+(`moveOff`, `movedOff`), the machine gate it set on its own computer dropped, and, when it holds nothing else, the
+messages held for it dropped (`SessionManager.dropQueued`) and its check-in cancelled, in two cases: a new worker is
+linked over its wait on that computer (`linkWorker`: that start is the request's move), or another worker said DONE for
+its part (`doneMarkers`, `workerEnded`, `recheckDone`). The request then closes on that DONE as usual. A stopped worker
+on a computer that runs keeps the w1972 rule.
+
 **The wrap-up** (w419). When the dispatcher sends a worker a related request that is not yet one of its own (`message_agent` with `work_id`, [One session per request](#one-session-per-request)) and the
 worker's current turn is on other requests (`servedBy`, [What a request is doing now](#what-a-request-is-doing-now)),
 the message starts with `[wrap-up]`: for each request it holds (not only the one its turn was on, w915), end the reply

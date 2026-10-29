@@ -1382,6 +1382,19 @@ export class SessionManager {
     return did;
   }
 
+  /**
+   * Drop the messages waiting for session `id` (w2566): its work was taken off it, so a message held for its paused or
+   * offline computer would only resume it on nothing. Said in its transcript and the server log. Returns how many went.
+   */
+  dropQueued(id: string, why: string): number {
+    const n = this.queue.filter((q) => q.id === id).length;
+    if (!n) return 0;
+    this.queue = this.queue.filter((q) => q.id !== id);
+    this.saveQueue();
+    this.notDelivered(id, `${n > 1 ? `${n} waiting messages were` : 'its waiting message was'} dropped: ${why}`);
+    return n;
+  }
+
   /** Whether the message with this uuid is waiting for a slot. */
   isQueued(uuid: string) {
     return this.queue.some((q) => q.uuid === uuid);

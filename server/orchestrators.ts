@@ -1402,6 +1402,59 @@ export class Orchestrators {
   }
 
   /**
+   * w2566: why worker `sid` of request `w` is stopped on a computer that is away now (paused from its tray, or offline), or
+   * undefined. Never a pair run's leg (its run moves whole, w2304).
+   */
+  private stoppedAway(w: WorkItem, sid: string): string | undefined {
+    const s = this.store.sessions.get(sid);
+    if (!s || s.kind !== 'worker' || (s.status !== 'stopped' && s.status !== 'error') || !s.machineId) return undefined;
+    if (w.pair?.started?.legs.some((l) => l.session === sid)) return undefined;
+    const paused = this.d.machinePaused?.(s.machineId);
+    if (paused) return `${s.machineId} is paused (${paused})`;
+    return this.d.machineOnline?.(s.machineId) === false ? `${s.machineId} is offline` : undefined;
+  }
+
+  /**
+   * w2566: take request `w` off its workers stopped on an away computer (stoppedAway) that `which` picks, and end what they
+   * still hold for it: the machine gate each set on its own computer, and, when it has nothing else in hand, the message held
+   * for that computer and its check-in. On w2542, e6d3dfe1 sat stopped on paused LothLaptop after the request moved on;
+   * c278888e's DONE at 17:00Z on 2026-10-29 left it "still on it: e6d3dfe1", and the message held for LothLaptop kept it
+   * open 3 hours, until an orchestrator closed it by hand. Returns the workers taken off.
+   */
+  private releaseStoppedAway(w: WorkItem, which: (sid: string) => boolean, why: (sid: string, away: string) => string): string[] {
+    const out: string[] = [];
+    for (const sid of [...w.sessionIds]) {
+      if (!which(sid)) continue;
+      const away = this.stoppedAway(w, sid);
+      if (!away) continue;
+      const m = this.store.sessions.get(sid)!.machineId!.toLowerCase();
+      const gates = gatesOf(w);
+      const rest = gates.filter((g) => !(g.kind === 'machine' && g.ref?.toLowerCase() === m && gateSetter(g) === sid));
+      if (rest.length < gates.length) {
+        w.blocked = rest[0];
+        w.alsoBlocked = rest.length > 1 ? rest.slice(1) : undefined;
+        if (!rest.length && w.status === 'blocked') w.status = 'active';
+      }
+      this.moveOff(w, sid, why(sid, away));
+      if (!this.handsOf(sid).length) {
+        this.sessions.dropQueued(sid, `${w.id} was taken off it while ${away} (w2566)`);
+        this.d.cancelWake?.(sid);
+      }
+      console.log(`ledger: ${w.id}: taken off worker ${sid}, stopped while ${away} (w2566)`);
+      out.push(sid);
+    }
+    return out;
+  }
+
+  /** w2566: once a worker said DONE for its part of `w`, its workers stopped on an away computer no longer hold it open. */
+  private releaseAfterDone(w: WorkItem): string[] {
+    const done = doneOf(w);
+    const by = Object.keys(done).sort((a, b) => done[b].at.localeCompare(done[a].at))[0];
+    if (!by) return [];
+    return this.releaseStoppedAway(w, (sid) => !done[sid], (_sid, away) => `it is stopped and ${away}, and worker ${by} said DONE for its part, so it no longer holds ${w.id} open (w2566)`);
+  }
+
+  /**
    * A request handed back from a paused machine (w1532, server/machinePause.ts): taken off its worker, Queued for another
    * computer with the branch and the note its next worker's handover carries (WorkItem.handedBack), and the dispatcher told
    * at once how to place it. The paused machine is held (placement.hold), so placement never picks it.
@@ -4739,6 +4792,16 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const gated = gatesOf(w).length > others.length ? this.gateProblem(w, opts.overrideGate, others) : undefined;
     if (gated) throw new Error(gated);
     if (opts.overrideGate?.trim() && gatesOf(w).length) what += ` (gate overridden: "${clip(opts.overrideGate.trim(), 200)}")`;
+    // w2566: a new worker started over the wait of one stopped on its paused or offline computer is the request's move: that
+    // one is taken off it, so it no longer counts as still on it (w2542's e6d3dfe1, left on LothLaptop when c59d84ed started).
+    if (!w.sessionIds.includes(s.id)) {
+      const waits = gatesOf(w).filter((g) => g.kind === 'machine' && g.ref);
+      this.releaseStoppedAway(
+        w,
+        (sid) => waits.some((g) => gateSetter(g) === sid && g.ref!.toLowerCase() === this.store.sessions.get(sid)?.machineId?.toLowerCase()),
+        (_sid, away) => `a new worker, ${s.id}, took ${w.id} on while it is stopped and ${away} (w2566)`,
+      );
+    }
     w.sessionIds = [...new Set([...w.sessionIds, s.id])];
     w.links = { ...w.links, [s.id]: { at: this.now().toISOString(), how: 'sent' } };
     // Started or sent to a worker: whatever held it is over (stamp drops a blocker or a capacity note).
@@ -5044,7 +5107,12 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   workerEnded(s: Pick<SessionInfo, 'id'>) {
     for (const w of [...this.store.work.values()]) {
       const done = doneOf(w);
-      if (!isOpen(w) || !w.sessionIds.includes(s.id) || !Object.keys(done).length || done[s.id] || this.stillOn(w, s.id).length) continue;
+      if (!isOpen(w) || !w.sessionIds.includes(s.id) || !Object.keys(done).length || done[s.id]) continue;
+      if (this.releaseAfterDone(w).includes(s.id)) {
+        this.recheckDone(w.id, `its worker ${s.id} ended on a paused or offline computer after another worker's DONE (w2566)`);
+        continue;
+      }
+      if (this.stillOn(w, s.id).length) continue;
       const status = this.store.sessions.get(s.id)?.status;
       if (status && status !== 'stopped' && status !== 'error' && this.stillOn(w).length) continue;
       const ended = this.store.sessions.get(s.id);
@@ -5128,6 +5196,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       const prior = doneOf(w)[s.id];
       const was = prior?.text;
       w.done = { ...doneOf(w), [s.id]: { at: this.now().toISOString(), report, text: (was ? `${was}\n\n${text}` : text).slice(-DONE_TEXT_CHARS) } };
+      this.releaseAfterDone(w);
       const others = this.stillOn(w, s.id);
       if (others.length) {
         const still = others.join(', ');
@@ -5231,6 +5300,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   recheckDone(id: string, why: string): boolean {
     const w = this.store.work.get(id);
     if (!w || !Object.keys(doneOf(w)).length || !(isOpen(w) || w.status === 'stalled') || w.question || w.flag) return false;
+    this.releaseAfterDone(w);
     if (this.stillOn(w).length) return false;
     const all = [...this.store.work.values()];
     if (w.sessionIds.some((sid) => { const x = this.store.sessions.get(sid); return BUSY.includes(x?.status ?? 'stopped') && !(x && replacedLeg(w, x)) && servedBy(sid, all).has(w.id); })) return false;
