@@ -418,6 +418,61 @@ export interface ImageInput {
 }
 
 /**
+ * w2541: a report, the written result of a design, an analysis, a profile, an investigation or research a person asked
+ * for (docs/reports.md). Kept in the portal's data folder (data/reports/r<N>/), every revision as its own file.
+ */
+export const REPORT_KINDS = ['analysis', 'profile', 'investigation', 'root-cause', 'design', 'research', 'other'] as const;
+export type ReportKind = (typeof REPORT_KINDS)[number];
+
+/** One revision of a report: revision 1 is the first filing; each update adds one and keeps the older text. */
+export interface ReportRevision {
+  n: number;
+  at: string;
+  /** The worker session that filed it. */
+  sessionId?: string;
+  /** What changed, in the worker's words ("added the M3 numbers"). */
+  note?: string;
+  title: string;
+}
+
+/** A report as the list shows it (AppState.reports, the `report` event). */
+export interface ReportSummary {
+  /** "r" and a number: r1, r2, …. */
+  id: string;
+  title: string;
+  kind: ReportKind;
+  /** The request it is the result of, and that request's title when it was filed. */
+  workId: string;
+  workTitle: string;
+  /** The operators who asked for that request (its requesters), never the worker: whose report it is. */
+  requesters: Requester[];
+  /** The worker session that filed the latest revision. */
+  sessionId?: string;
+  createdAt: string;
+  updatedAt: string;
+  /** How many revisions it has (the latest is shown). */
+  revisions: number;
+  /** The start of its text, plain, for the list. */
+  excerpt: string;
+  /** Files filed with it (attachment ids, kept as long as the report). */
+  attachments: AttachmentRef[];
+}
+
+/** A report with its text: the latest revision's, or the one asked for (`rev`). */
+export interface Report extends ReportSummary {
+  body: string;
+  /** The revision `body` is. */
+  rev: number;
+  history: ReportRevision[];
+}
+
+/** A full-text search hit: the report and the words around the first match. */
+export interface ReportHit {
+  report: ReportSummary;
+  snippet: string;
+}
+
+/**
  * A file a person attached to a message (docs/attachments.md): a save, a bug-report zip, a log, a desync report.
  * Stored once by its SHA-256 in the portal's data folder, never unpacked or run there; served for download only.
  */
@@ -2095,6 +2150,14 @@ export interface WorkItem {
    * named for it (`w2186`, `w2186-*`), what makes a question about it visual (server/visualAsk.ts).
    */
   reviewTopics?: string[];
+  /**
+   * w2541: this request's result is a report (a design, an analysis, a profile, research): set at filing by the
+   * orchestrator (request_work `report`) or later (update_work). Its worker files it with file_report, and DONE is
+   * refused until it has.
+   */
+  report?: { kind: ReportKind; at: string; by: string };
+  /** w2541: the reports filed for it, oldest first (the link from the request to its reports). */
+  reports?: { id: string; title: string; kind: ReportKind }[];
   /** What happened, oldest first: "10:02 filed by Lothsahn", "10:03 merged into w11: same fix". */
   log: string[];
   /**
@@ -2888,6 +2951,8 @@ export interface AppState {
   me?: UserInfo;
   /** The work ledger: every open item, and the ones closed in the last 3 days (at most 100). */
   work?: WorkItem[];
+  /** w2541: every report, newest first (docs/reports.md); absent from a server older than this field. */
+  reports?: ReportSummary[];
   /** The computers with room for one more worker now (w643: a Queued request while one has room is flagged). */
   room?: string[];
   /** The computers with an agent slot for work that needs no editor (w1098); the same RoomNow as `room` (server/placement.ts). */
@@ -3031,6 +3096,7 @@ export type ServerEvent =
   | { type: 'live'; views: LiveViewInfo[] }
   | { type: 'session'; session: SessionInfo }
   | { type: 'session_removed'; id: string }
+  | { type: 'report'; report: ReportSummary }
   | { type: 'standing'; agent: StandingAgent }
   | { type: 'standing_removed'; id: string }
   | { type: 'delegation'; request: DelegationRequest }

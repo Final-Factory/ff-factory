@@ -281,6 +281,9 @@ function applyEvent(ev: ServerEvent) {
     case 'work':
       set((s) => (s.app ? { app: { ...s.app, work: upsertById(s.app.work ?? [], ev.item) } } : {}));
       return;
+    case 'report':
+      set((s) => (s.app ? { app: { ...s.app, reports: upsertById(s.app.reports ?? [], ev.report) } } : {}));
+      return;
     case 'ledger':
       set((s) => (s.app ? { app: { ...s.app, ledger: ev.ledger } } : {}));
       return;

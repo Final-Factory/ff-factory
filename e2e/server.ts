@@ -245,6 +245,37 @@ const events: Unnumbered[] = [
 fs.mkdirSync(path.join(dataDir, 'transcripts'), { recursive: true });
 fs.writeFileSync(path.join(dataDir, 'transcripts', 'gallery1.jsonl'), events.map((e, i) => JSON.stringify({ seq: i + 1, ...e })).join('\n') + '\n');
 
+// Two reports (w2541, e2e/reports.spec.ts): a profile with a kept still and a revision, and a design, asked by two people.
+{
+  const { ReportStore } = await import('../server/reports.ts');
+  const media = path.join(base, 'review-media');
+  fs.mkdirSync(media, { recursive: true });
+  // The same three systems as the report's table, named, in a sans font like the page around it.
+  const bars = (
+    [
+      ['BeltRenderSystem', 62],
+      ['InserterSystem', 41],
+      ['PowerGridSystem', 18],
+    ] as const
+  )
+    .map(([name, v], i) => `<text x="10" y="${36 + i * 38}" font-size="13" fill="#ccc">${name}</text><rect x="140" y="${20 + i * 38}" width="${v * 3.5}" height="22" rx="3" fill="#4f8ef7"/><text x="${148 + v * 3.5}" y="${36 + i * 38}" font-size="13" fill="#ccc">${v} ms</text>`)
+    .join('');
+  fs.writeFileSync(path.join(media, 'frame-time.svg'), `<svg xmlns="http://www.w3.org/2000/svg" width="420" height="140" font-family="system-ui, -apple-system, Segoe UI, sans-serif"><rect width="420" height="140" fill="#1c1f26"/>${bars}</svg>`);
+  let clock = Date.parse(T0);
+  const reports = new ReportStore(dataDir, () => [media], () => new Date((clock += 3_600_000)));
+  const tester = { userId: 'tester', displayName: 'Tester' };
+  const mate = { userId: MATE, displayName: 'Team Mate' };
+  const body = (n: number) =>
+    `## Where the frame goes\n\nA 1000-belt save on BEAST, 60 s after load (measured):\n\n| System | ms per frame |\n|---|---|\n| BeltRenderSystem | ${n} |\n| InserterSystem | 41 |\n| PowerGridSystem | 18 |\n\n![Frame time by system (measured)](<${path.join(media, 'frame-time.svg')}>)\n\n**Next**: batch the belt meshes (a guess: about half of BeltRenderSystem).`;
+  const first = reports.file({ title: 'Belt render profile on a 1000-belt save', kind: 'profile', body: body(71) }, { id: 'w9001', title: 'Profile the belt renderer', requesters: [tester] }, 'gallery1');
+  reports.file({ id: first.report.id, title: 'Belt render profile on a 1000-belt save', kind: 'profile', body: body(62), note: 'measured again after the editor restart' }, { id: 'w9001', title: 'Profile the belt renderer', requesters: [tester] }, 'gallery1');
+  reports.file(
+    { title: 'Splitter priority: three designs', kind: 'design', body: '## The choice\n\n1. **Left first**, as Factorio does.\n2. **Round robin** per item (recommended).\n3. A filter per output.\n\nRound robin keeps the three outputs within one item of each other (measured in the test save).' },
+    { id: 'w9002', title: 'Design splitter priority', requesters: [mate] },
+    undefined,
+  );
+}
+
 // No stored claude.ai login here, so the plan meter reports "unavailable" instead of starting a CLI;
 // and no agents' token from the environment this runs in, which the meter would poll for real.
 process.env.CLAUDE_CONFIG_DIR = path.join(base, 'claude');

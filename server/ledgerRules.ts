@@ -647,6 +647,15 @@ export function learnedProblem(w: Pick<WorkItem, 'reopenedAt'>, report: string):
   return undefined;
 }
 
+/**
+ * Why a live DONE needs its report first (w2541, docs/reports.md): the request is marked as one whose result is a report
+ * (a design, an analysis, a profile, research) and none is filed for it yet.
+ */
+export function reportProblem(w: Pick<WorkItem, 'report' | 'reports'>): string | undefined {
+  if (!w.report || w.reports?.length) return undefined;
+  return `its result is a report (${w.report.kind}, asked by ${w.report.by}): file it first with mcp__machine__file_report (title, kind ${w.report.kind}, the whole result as Markdown with its stills and evidence labels), then say DONE again`;
+}
+
 // ---------------------------------------------------------------- asking about a merged request (w419)
 
 /** No word about a merged request this long, and the cleanup asks its worker whether it is done (see followUpDecision). */
