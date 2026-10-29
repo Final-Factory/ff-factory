@@ -72,7 +72,7 @@ import { REPORT_KINDS, type ReportSummary } from '../shared/types.ts';
 import { INBOX_DIR, MAX_ATTACHMENTS, attachmentLine, fmtBytes, publishedAttachmentText } from '../shared/attachments.ts';
 import { MACHINE_ACCOUNT, SECRET_KEYS, dispatcherOwnAccount, machineRunEnv, maskSecret, pinnedDispatcherEnv, poolRunEnv, redactSecrets } from './secrets.ts';
 import { Identity, forLine } from './identity.ts';
-import { crossOwnerLine, INVESTIGATE_AT, loopGuards, Orchestrators, OWNER_LOOP_MESSAGES_PER_HOUR, PERSON_MESSAGE_CHARS, timerFilings } from './orchestrators.ts';
+import { crossOwnerLine, INVESTIGATE_AT, loopGuards, Orchestrators, OWNER_LOOP_MESSAGES_PER_HOUR, PERSON_MESSAGE_CHARS, timerFilings, unpushedText } from './orchestrators.ts';
 import { beltFor, type BeltRole } from './belts.ts';
 import { TurnModels } from './turnModel.ts';
 import { deferredToolsLine, sdkExtras, toolsOf } from './toolManifest.ts';
@@ -109,6 +109,7 @@ import { describeCleanup, describeCleanupItems, describeCleanupLog } from './cle
 import type { BuildHold, HostHealth, TimedVerdict } from '../shared/types.ts';
 import { decideTimedPlace, fleetLoad, isSmallTimed, smallTimedStates, timedAskMark, unavailableWait, TIMED_VERDICT_MS, TIMED_WAIT_IDLE_MIN } from './timedAsk.ts';
 import { machinePinOf, pinFromText, pinRefusal, type MachinePin } from './machinePin.ts';
+import { awayLead, awayLine, awayOf, longAway, namesMachine, type Away, type AwayFacts } from './machineAway.ts';
 import { notIdle, pinnedLegStep, reachesBig, timedEligible, timedLegStep, timedRelocateStep, timedStartProblem, type LegStep, type Occupant } from './timedLegPlace.ts';
 import { machineAskProblem } from '../shared/machineAsk.ts';
 import { releaseBranchAskProblem } from '../shared/releaseBranchAsk.ts';
@@ -175,6 +176,8 @@ export function describeTimers(list: TimerView[], today: number, now = Date.now(
 
 /** How long list_timers shows an ended timer with its note (w1866). */
 const ENDED_TIMERS_SHOWN_MS = 24 * 3_600_000;
+/** A send-queue hold for an offline computer (server/sessions.ts OFFLINE): past the grace its work moves (w2544). */
+const OFFLINE_HOLD = /\bis offline\b/;
 
 type ToolMaker = <S extends z.ZodRawShape>(name: string, description: string, schema: S, handler: (a: z.infer<z.ZodObject<S>>) => Promise<ToolResult>) => ToolSpec;
 
@@ -213,6 +216,7 @@ const FOR_USER = z
   .describe('The user id of the person this is for, when no work_id says it: someone this conversation shows asking, or the system payer for work nobody asked for.');
 
 /** The ledger request a dispatcher tool call serves (docs/orchestrators.md). */
+const PIN_WORDS = z.string().optional().describe("Who named this computer, their quoted words (w2544); never your pick.");
 const WORK_ID = z.string().optional().describe('The work request this serves ("w12"): the worker runs for its requester, and the request is marked active and linked to it.');
 
 /** The report tools' descriptions (w2541, docs/reports.md). */
@@ -328,6 +332,9 @@ CLAUDE.md's "Discord: FFBox owns #bug-reports" binds you: read and download ther
  */
 /** The dispatcher's rule for pair runs (w1945), in read_rules machines: placing, queueing and holding for them. */
 const PAIR_RULES = `**Pair runs** (w1945, lothsahn: "Can we make the dispatcher smart enough so it queues work properly that requires running together across multiple machines and doesn't waste slots?"): a request marked "a pair run of N legs" (a worker's request_pair, or one you file or see that needs two computers at once, such as a two-machine determinism check: queue that one with decide_work pair_legs, so it is marked) starts ALL its legs together: start_agent with its work_id, sandbox for leg 1 (the host) and pair_sandboxes for the others, each a FREE sandbox on another computer. Never start one leg alone, and never leave a worker holding its sandbox while it waits for a partner leg: a worker that asks you for a second machine's worker is told to use request_pair. With fewer computers that fit having room than it has legs, queue it: a pair is room, and WRONG, only where that many computers have room at once. While an older pair run of at least the same priority is Queued, each computer's last free sandbox it fits is held for it: start other work elsewhere (start_agent refuses it, naming the pair; work of higher priority goes first). Legs go on any free computers, any OS (w2282, lothsahn: "Not windows by default, any OS. Being particular about a machine or OS limits the fleet we can use."): a Mac may be the host (leg 1), never a client (a Mac refuses a multiplayer client, w665); a cross-OS pair (only for w1692's reasons) also needs two operating systems; timed legs never on the m5. A pair run that repeats one that finished on the same pull request and commit (w2057) is not marked: decide_work queue with pair_legs refuses it; pair_legs 0 clears the mark of one whose legs never started, and done closes a never-started repeat with the finished run's result, which reaches whoever waits on it.`;
+
+/** The dispatcher's rule for computers away past the grace and a person's named computer (w2544), in read_rules machines. */
+const AWAY_RULES = `**A computer away past the grace takes nothing and keeps nothing** (w2544, lothsahn, 2026-10-29: "the dispatcher should not be scheduling work on offline computers--at least ones that have been offline for a few minutes or more. Make sure those get moved somewhere else"): offline or paused for 5 min (timing.unavailableIdleMinutes) or more (every drop the portal journal showed came back within about 2 min), start_agent and stop_agent move_to refuse it, and FF Factory moves what waits on it by itself: a worker Blocked on it or stopped there with a message held, onto the computer placement picks, from its pushed branch with a hand-off that says what may be lost; a Queued request's needs naming only it are dropped. Each move is on the request's log and its list_work line ("moved from lothlaptop (offline 6 min) to lothdesktop/slot2"). A shorter blip moves nothing. A request whose brief names that computer ("must run on X", or a pin) stays, and you get one \`[ledger] KEPT (w2544)\` notice: tell its requester's orchestrator, do nothing else. **A person names a computer for a request** ("w2542 should move to LothDesktop"): pass their words in \`pin_words\` with start_agent (its work_id and a sandbox there) or stop_agent move_to; the request is pinned there, so the timing order lets it go and nothing moves it off. Only a person's words, never your own pick.`;
 
 /** read_rules's topics (w1158): rules a coordinator reads only when a turn needs them (Agents.rulesText). */
 export const RULE_TOPICS = ['ffbox', 'intake', 'release', 'machines', 'reactions', 'ui', 'builds'] as const;
@@ -3045,7 +3052,19 @@ export class Agents {
    */
   private roomMove(h: SessionHandle, q: QueuedSend, hold: string, now: number): true | string | undefined {
     const info = h.info;
-    if (info.kind !== 'worker' || !info.machineId || !info.machineSandbox || !ROOM_WAIT.test(hold)) return undefined;
+    if (info.kind !== 'worker' || !info.machineId || !info.machineSandbox) return undefined;
+    // w2544: a message held only because its computer is offline moves once that computer has been away past the grace.
+    const away = OFFLINE_HOLD.test(hold) ? this.longAwayOf(info.machineId, now) : undefined;
+    if (!away && !ROOM_WAIT.test(hold)) return undefined;
+    if (away) {
+      const moving = this.roomMoving.get(info.id);
+      if (moving) {
+        moving.texts.push(movedText(q));
+        return true;
+      }
+      if (isMidTurn(info) || info.pendingPermissions.length) return undefined;
+      return this.moveAway(info, away, hold, q);
+    }
     const moving = this.roomMoving.get(info.id);
     if (moving) {
       moving.texts.push(movedText(q));
@@ -3086,6 +3105,125 @@ export class Agents {
   /** Whether worker `id`'s work is being moved to another computer now (w2046): the resume sweep does not resume it then (w2079). */
   isMoving(id: string): boolean {
     return this.roomMoving.has(id);
+  }
+
+  /**
+   * Whether computer `id` has been away (offline or paused) past the grace (w2544, server/machineAway.ts): FF Factory's blip
+   * window, timing.unavailableIdleMinutes (5 min by default). Undefined while it runs or its drop is a blip.
+   */
+  longAwayOf(id: string, now = Date.now(), fallbackSince?: number): { away: Away; line: string } | undefined {
+    const m = this.store.machines.get(id.toLowerCase());
+    if (!m) return undefined;
+    const f: AwayFacts = { online: this.machines.isOnline(m.id), ...(m.lastSeen ? { offlineSince: m.lastSeen } : {}), ...(m.pause ? { pause: m.pause } : {}), ...(fallbackSince !== undefined ? { fallbackSince } : {}) };
+    const a = awayOf(f, now);
+    return longAway(a, f, this.timedBlip().ms, now) ? { away: a, line: awayLine(m.id, a) } : undefined;
+  }
+
+  /**
+   * Move worker `info`'s work off its long-away computer (w2544): its requests that name that computer (their pin) stay, their
+   * orchestrator told once; the rest go where moveDecision (with `away`) places them, as a resume's move does (w2046): game
+   * work in a free sandbox, agent-slot work on an agent seat, timed work only where timed runs go, a pair run under way
+   * started again whole. Returns true when a move started, a string when it waits as it is (the reason), undefined when
+   * nothing applies.
+   */
+  private moveAway(info: SessionInfo, a: { away: Away; line: string }, hold: string, q?: QueuedSend): true | string | undefined {
+    if (this.roomMoving.has(info.id) || this.timedMoving.has(info.id)) return undefined;
+    const m = info.machineId!.toLowerCase();
+    const { reqs: all, owned, gone } = this.movableWorkOf(info);
+    if (owned.length || gone.length) this.leaveToOwners(info, owned, gone, hold, !all.length);
+    const pinned = all.filter((w) => namesMachine(this.pinOf(w)?.ids, m));
+    for (const w of pinned) this.orchestrators.awayKeptNotice(w, m, a.line, this.pinOf(w)!.why, info.id);
+    const reqs = all.filter((w) => !pinned.includes(w));
+    if (!reqs.length) return pinned.length ? stayLine(hold, `${pinned.map((w) => w.id).join(', ')} names ${m} (w2544)`) : undefined;
+    const d = moveDecision({ ...this.moveFacts(info, reqs), away: a.line });
+    if ('requeuePair' in d) {
+      const w = reqs.find((x) => x.id === d.requeuePair.id);
+      const did = w && this.orchestrators.requeuePair(w, `its computer is ${a.line} (w2544)`, [m]);
+      console.log(`away move: worker ${info.id} on ${info.machineId}/${info.machineSandbox} (${d.requeuePair.id}): ${did ?? 'its pair run was not re-queued'}`);
+      return did ? true : stayLine(hold, d.requeuePair.why);
+    }
+    if (!('move' in d)) {
+      const why = 'stay' in d ? d.stay : d.none;
+      if (this.roomKept.get(info.id) !== why) console.log(`away move: worker ${info.id} on ${info.machineId}/${info.machineSandbox} (${reqs.map((w) => w.id).join(', ')}) waits: ${why}`);
+      this.roomKept.set(info.id, why);
+      return 'stay' in d ? stayLine(hold, d.stay) : `${hold}; ${NONE_MARK}: ${d.none}`;
+    }
+    this.roomKept.delete(info.id);
+    const to = d.move.to;
+    const sb = this.store.machines.get(m)?.sandboxes?.find((x) => x.id === info.machineSandbox);
+    const branch = info.placeReleased?.branch ?? this.branchNow(info);
+    const ids = reqs.map((w) => w.id).join(', ');
+    const lead = awayLead({
+      ids,
+      first: reqs[0].id,
+      worker: info.id,
+      from: `${info.machineId}/${info.machineSandbox}`,
+      machine: m,
+      line: a.line,
+      kind: a.away.kind,
+      graceMin: Math.round(this.timedBlip().ms / 60_000),
+      to,
+      why: d.move.why,
+      ...(branch ? { branch } : {}),
+      lost: info.placeReleased ? `its sandbox was released before ${m} went away, and its work saved and pushed then` : unpushedText(sb?.git && (!branch || sb.git.branch === branch) ? sb.git : undefined),
+      timedLeg: reqs.some((w) => !!w.timedLeg),
+    });
+    const entry = { to, texts: q ? [movedText(q)] : [], how: `moved by FF Factory: ${a.line} (w2544)`, lead, reason: `${a.line}, and ${to} has room (w2544)`, away: a.line };
+    this.roomMoving.set(info.id, entry);
+    console.log(`away move: worker ${info.id} on ${info.machineId}/${info.machineSandbox} (${ids}) moves to ${to}: ${a.line}; ${d.move.why}`);
+    for (const w of reqs) this.orchestrators.dropAwayGates(w, m, a.line);
+    void this.moveForRoom(info, reqs, to, d.move.why, a.line, entry, q).finally(() => this.roomMoving.delete(info.id));
+    return true;
+  }
+
+  /**
+   * The blocker watch's sweep for computers away past the grace (w2544): workers Blocked on such a computer (stopped there by
+   * its drop, w2433, or its pause, w2443) move as moveAway says, and Queued requests waiting only for such computers
+   * (queuedFor.needs) wait for them no longer, unless they name them. A held message for a worker there moves through the
+   * send queue's own roomMove. Returns what it did, request id to a line.
+   */
+  moveAwayWork(now = Date.now()): [string, string][] {
+    const did: [string, string][] = [];
+    const workers = new Map<string, { info: SessionInfo; a: { away: Away; line: string } }>();
+    for (const w of this.store.work.values()) {
+      if (!isOpen(w)) continue;
+      if (w.status === 'blocked') {
+        for (const g of gatesOf(w)) {
+          const sid = g.kind === 'machine' && g.ref ? gateSetter(g) : undefined;
+          const info = sid ? this.store.sessions.get(sid) : undefined;
+          if (!info || info.kind !== 'worker' || info.machineId?.toLowerCase() !== g.ref!.toLowerCase() || !info.machineSandbox) continue;
+          if (workers.has(info.id) || this.sessions.sessions.get(info.id)?.live || isMidTurn(info)) continue;
+          const a = this.longAwayOf(g.ref!, now, Date.parse(g.at) || undefined);
+          if (a) workers.set(info.id, { info, a });
+        }
+      }
+      if (w.status === 'queued') did.push(...this.unpinAwayNeeds(w, now));
+    }
+    for (const { info, a } of workers.values()) {
+      const ids = this.workIdsOf(info);
+      if (this.moveAway(info, a, a.line) === true) for (const id of ids) did.push([id, `moved off ${a.line} (w2544)`]);
+    }
+    return did;
+  }
+
+  /** A Queued request's waits for computers that have all been away past the grace (w2544): dropped, unless it names one. */
+  private unpinAwayNeeds(w: WorkItem, now: number): [string, string][] {
+    const needs = w.queuedFor?.needs ?? [];
+    if (!needs.length) return [];
+    const away = needs.map((n) => this.longAwayOf(n, now, Date.parse(w.queuedFor!.at) || undefined));
+    if (away.some((a) => !a)) return [];
+    const lines = away.map((a) => a!.line).join(', ');
+    const pin = this.pinOf(w);
+    const named = needs.find((n) => namesMachine(pin?.ids, placeId(n)));
+    if (named) {
+      this.orchestrators.awayKeptNotice(w, placeId(named), lines, pin!.why);
+      return [];
+    }
+    this.orchestrators.ledgerEdit(w.id, `its wait for ${lines} dropped (w2544): away past the grace, so it is placed on any computer that fits`, (x) => {
+      if (x.queuedFor) x.queuedFor = { at: x.queuedFor.at };
+      x.awayMove = { at: new Date(now).toISOString(), line: `no longer waits for ${lines}` };
+    });
+    return [[w.id, `no longer waits for ${lines} (w2544)`]];
   }
 
   /**
@@ -3163,9 +3301,9 @@ export class Agents {
    * work) or on an agent seat (work in its own clone), with a hand-off carrying its last report, its brief and the waiting
    * message. Its other open requests, and the request itself when the start fails, go back to the dispatcher Queued for `to`.
    */
-  private async moveForRoom(info: SessionInfo, reqs: WorkItem[], to: string, why: string, hold: string, entry: { texts: string[]; how?: string; lead?: string }, q?: QueuedSend) {
+  private async moveForRoom(info: SessionInfo, reqs: WorkItem[], to: string, why: string, hold: string, entry: { texts: string[]; how?: string; lead?: string; reason?: string; away?: string }, q?: QueuedSend) {
     const from = `${info.machineId}/${info.machineSandbox}`;
-    const reason = `${hold}, and ${to} has room (w2046)`;
+    const reason = entry.reason ?? `${hold}, and ${to} has room (w2046)`;
     const how = entry.how ?? 'moved by FF Factory: its computer was full (w2046)';
     const h = this.sessions.sessions.get(info.id);
     if (h?.live) {
@@ -3192,7 +3330,7 @@ export class Agents {
     this.store.putSession(info);
     // Its own check-in would wake a session its requests have left: the new one sets its own.
     this.waker.cancel(info.id);
-    this.store.append(info.id, { kind: 'system', text: `Its work moved to ${to} (w2046): ${hold}, and ${to} had room. Its sandbox ${from} is released${saved ? ` (${saved})` : ''}; FF Factory ends what it left running there, and its temp folder goes by itself. Its requests go on in a fresh session on ${to}.` });
+    this.store.append(info.id, { kind: 'system', text: `Its work moved to ${to}: ${reason}. Its sandbox ${from} is released${saved ? ` (${saved})` : ''}; FF Factory ends what it left running there, and its temp folder goes by itself. Its requests go on in a fresh session on ${to}.` });
     const message = entry.texts.join('\n\n---\n\n');
     const primary = reqs.find((w) => w.id === q?.resumeOf?.work) ?? reqs.find((w) => w.status !== 'queued') ?? reqs[0];
     const stage = view ? `Its Live view ran on ${from} (materials ${JSON.stringify(view.materials)}, fps ${view.fps}, width ${view.width}): stage it again in your sandbox's editor and tell the person it streams again from ${to}. ` : '';
@@ -3203,6 +3341,8 @@ export class Agents {
       try {
         const started = await this.startMoved(info, primary, to, why, hold, branch, entry.lead, { machine: info.machineId!, sandbox: info.machineSandbox!, ...(branch ? { branch } : {}), why: reason, note, how, ...(saved ? { saved } : {}), ...(message ? { message } : {}), to });
         console.log(`room move: ${primary.id} moved from worker ${info.id} on ${from} to ${started} (${why})`);
+        // w2544: "moved from lothlaptop (offline 6 min) to lothdesktop/slot2", on its log and its live state.
+        if (entry.away) this.orchestrators.awayMoved(primary.id, `moved from ${entry.away} to ${started.split(' as ')[0]}`);
         this.machines.report?.(`[machines] ${primary.id} moved from ${from} to ${started}: ${hold} (w2046).`);
       } catch (e) {
         const err = (e as Error).message;
@@ -3561,7 +3701,7 @@ export class Agents {
    * the request goes on in a new session there, whose handover carries the note. Refused mid-turn, and when `to` is offline,
    * held, or has no room for game work (the worker stays where it is then).
    */
-  private async moveWorker(sessionId: string, to: string, why: string): Promise<string> {
+  private async moveWorker(sessionId: string, to: string, why: string, pinWords?: string): Promise<string> {
     const h = this.sessions.get(sessionId);
     const info = h.info;
     if (info.kind !== 'worker' || !info.machineId || !info.machineSandbox) throw new Error(`${sessionId} is not a worker in a machine sandbox: nothing to move`);
@@ -3572,6 +3712,10 @@ export class Agents {
     if (!place) throw new Error(`${target} is not a computer that takes workers (list_machines)`);
     const held = holdReason(target, this.placement());
     if (held) throw new Error(`${held}; ${sessionId} stays on ${from}`);
+    // w2544: the person named this computer: each request it serves is pinned there, so the timing order lets it go.
+    if (pinWords?.trim()) for (const w of this.openWorkOf(info)) this.orchestrators.pinByPerson(w, target, pinWords);
+    const awayNo = this.openWorkOf(info).map((w) => this.awayProblem(target, w)).find(Boolean);
+    if (awayNo) throw new Error(`${awayNo} ${sessionId} stays on ${from}.`);
     // A move is new work there (w1643): every request it serves must reach the computer's placement.minPriority.
     const below = this.openWorkOf(info).filter((w) => reservedReason(target, this.placement(), w.priority));
     if (below.length) throw new Error(`${target} is ${reservedReason(target, this.placement(), lowestPriority(below))}: ${below.map((w) => `${w.id} (${w.priority})`).join(', ')} may not go there; ${sessionId} stays on ${from}. Move it elsewhere, or raise the request's priority first.`);
@@ -4830,6 +4974,14 @@ When a person asked for a design or an analysis (a profile, an investigation, a 
   }
 
   /** The computers request `w` must run on (w2521, server/machinePin.ts), or undefined: anywhere. */
+  /** w2544: why no new work goes to `on` now, or undefined: it has been away past the grace and `w` does not name it. */
+  private awayProblem(on: string, w: WorkItem | undefined): string | undefined {
+    const a = this.longAwayOf(on);
+    if (!a || namesMachine(this.pinOf(w)?.ids, placeId(on))) return undefined;
+    const room = this.places().filter((p) => p.id !== placeId(on) && hasRoom(p)).map((p) => p.id);
+    return `${a.line} is away past the ${Math.round(this.timedBlip().ms / 60_000)} min grace (w2544): no new work goes there. ${room.length ? `Room now: ${room.join(', ')}.` : 'No other computer has room now: queue it.'} If the person named ${placeId(on)} for it, pass their words in pin_words.`;
+  }
+
   pinOf(w: WorkItem | undefined): MachinePin | undefined {
     return machinePinOf(w, this.knownMachines());
   }
@@ -4879,13 +5031,14 @@ When a person asked for a design or an analysis (a profile, an investigation, a 
     const t = w?.timedLeg ? 'timed' : timedKind(needsTimed(w, prompt));
     if (!on) return undefined;
     const target = placeId(on);
+    // w2521, w2544: work pinned to its computer (its constraints, or a person's words passed with pin_words) goes there,
+    // whatever is idle elsewhere or waits for it.
+    if (this.pinOf(w)?.ids.includes(target)) return undefined;
     if (!t) {
       const claim = this.timedClaimOn(target, w?.id);
       return claim ? `${target} is kept for timed work that waits for it: ${claim}. Start ${w?.id ?? 'this'}, which is not timed work, on another computer (w2277: a small computer that takes timed runs goes to waiting timed work first; it stays off placement.prefer for overflow otherwise).` : undefined;
     }
     if (w?.queuedFor?.needs?.length && !w.timedLeg && w.queuedFor.needs.some((n) => placeId(n) === target)) return undefined;
-    // w2521: work pinned to its computer goes there, whatever is idle elsewhere.
-    if (this.pinOf(w)?.ids.includes(target)) return undefined;
     const platform = t === 'timed:win32' ? 'win32' : t === 'timed:darwin' ? 'darwin' : w?.timedLeg?.platform;
     return timedStartProblem(w?.id ?? 'this', target, this.places(), this.placement(), platform);
   }
@@ -5076,7 +5229,7 @@ When a person asked for a design or an analysis (a profile, an investigation, a 
         ),
         tool(
           'start_agent',
-          'Start a new Claude Code worker agent with a task prompt, in a sandbox on a machine ("lothdesktop/sb1": its own worktree and editor there; a bare name is this host\'s own daemon\'s). Every worker runs in a sandbox (w536): a machine alone is refused. The worker has the full Final Factory harness (CLAUDE.md, ff-agents / ff-speckit / ff-discord skills, the Unity MCP bridge for its own editor). Write the prompt as a complete brief: goal, done-criteria, constraints, and which skill to use if one fits; for work that spends, publishes, changes something live, releases or changes what players see, also the decisions it must settle. You will get a [worker update] message when it finishes a turn.',
+          'Start a Claude Code worker with a task prompt, in a sandbox on a machine ("lothdesktop/sb1": its own worktree and editor there; a bare name is this host\'s own daemon\'s; w536: never a machine alone). The worker has the full Final Factory harness (CLAUDE.md, the skills, its editor\'s Unity MCP bridge). Write the prompt as a complete brief: goal, done-criteria, constraints, and which skill to use if one fits; for work that spends, publishes, changes something live, releases or changes what players see, also the decisions it must settle. You will get a [worker update] message when it finishes a turn.',
           {
             sandbox: z.string().optional().describe(SANDBOX_ID),
             machine: z.string().optional().describe('A machine id from list_machines: the machine of a bare sandbox name (machine alone is refused: workers run in sandboxes only).'),
@@ -5103,6 +5256,7 @@ When a person asked for a design or an analysis (a profile, an investigation, a 
             override_gate: OVERRIDE_GATE,
             extra_agent: z.boolean().optional().describe("Dispatcher: true puts this request's worker beside another request's live agent in the sandbox on purpose (w1089): only for work that needs no editor and no game tree (FF Factory, FFBox, the plugin: it works in its own clone in its temp folder, w1098), and not past max_agents_per_sandbox. It never switches the sandbox's branch; game work beside a busy worker is refused even with it (w1607). Without it start_agent refuses a sandbox that is not FREE."),
             pair_sandboxes: z.array(z.string()).max(PAIR_MAX_LEGS - 1).optional().describe('Pair run: its other legs\' FREE sandboxes, one per computer; sandbox is leg 1 (host).'),
+            pin_words: PIN_WORDS,
           },
           wrap(async (a) => {
             if (a.work_id && ctx.role !== 'dispatcher') throw new Error(WORK_ID_ONLY);
@@ -5150,6 +5304,15 @@ When a person asked for a design or an analysis (a profile, an investigation, a 
               const timedHold = this.timedHoldProblem(this.newWorkOn(a.sandbox, a.machine), w, !!w?.timedLeg || !!timedKind(needsTimed(w, a.prompt)));
               if (timedHold) throw new Error(timedHold);
             }
+            // w2544: a person named this computer for it: pinned there, so the timing order and later moves keep it there.
+            const pinOn = this.machineOf(a.sandbox, a.machine);
+            if (a.pin_words?.trim()) {
+              if (!w || !pinOn) throw new Error('pin_words goes with a work_id and the sandbox the person named');
+              this.orchestrators.pinByPerson(w, pinOn, a.pin_words);
+            }
+            // w2544: no new work on a computer away (offline or paused) past the grace, unless the request names it.
+            const awayNo = pinOn ? this.awayProblem(pinOn, w) : undefined;
+            if (awayNo) throw new Error(awayNo);
             // A computer reserved for higher work (w1643, placement.minPriority) takes no new work below its level.
             const reserved = this.reservedProblem(this.machineOf(a.sandbox, a.machine), w);
             if (reserved) throw new Error(reserved);
@@ -5355,14 +5518,16 @@ ${w.repo ?? ''}
         ),
         tool(
           'stop_agent',
-          'Stop a worker agent process. It keeps its history and resumes when messaged again. In a machine sandbox, its uncommitted work is saved on its branch and the sandbox released within a few minutes (w656); it is placed again when it resumes. With move_to (w1600, e.g. Live view work to beast): a worker between turns stops, its view ends, its work is saved, and its requests are Queued for that computer; the reply says how to place them there.',
+          'Stop a worker. It keeps its history and resumes when messaged. In a machine sandbox its uncommitted work is saved on its branch and the sandbox released (w656); it is placed again when it resumes. move_to (w1600): a worker between turns stops, its work is saved, its requests are Queued there; the reply says how to place them.',
           {
             session_id: z.string(),
-            move_to: z.string().optional().describe('Computer to move its requests to ("beast"): refused mid-turn, held, full, or reserved by placement.minPriority above a request it serves (w1643).'),
+            move_to: z.string().optional().describe('Computer to move its requests to ("beast"): refused mid-turn, held, full, away (w2544), or reserved above its priority (w1643).'),
             why: z.string().optional().describe('With move_to: why, one line.'),
+            pin_words: PIN_WORDS,
           },
-          wrap(async ({ session_id, move_to, why }) => {
-            if (move_to?.trim()) return this.moveWorker(session_id, move_to, why ?? '');
+          wrap(async ({ session_id, move_to, why, pin_words }) => {
+            if (pin_words?.trim() && !move_to?.trim()) throw new Error('pin_words goes with move_to: the computer the person named');
+            if (move_to?.trim()) return this.moveWorker(session_id, move_to, why ?? '', pin_words);
             worker(session_id).stop();
             return 'Stopped.';
           }),
@@ -7001,7 +7166,7 @@ ${fp}`;
     return `
 You are the dispatcher of FF Factory, the control room for parallel work on **Final Factory** (a Unity 6 DOTS space automation game with deterministic lockstep multiplayer). People do not chat with you: each person has their own orchestrator, which talks with them and files work requests with you (${this.peopleLine() || 'one login so far'}). You turn requests into sandboxes and workers without the same work being done twice, keep track of them, and answer through the ledger. Nobody writes in this chat, the owner included: you hear only the harness and the ledger.
 ${ownerLine(this.cfg)}
-- Pair runs (w1945: legs started together): \`read_rules machines\` before you start, queue or hold one.
+- Pair runs (w1945), away computers (w2544): \`read_rules machines\` before you place, queue or move one.
 ## What you control
 ${this.worldBrief(true)}
 
@@ -7165,7 +7330,7 @@ The rule for every agent: the ff-agents evidence-gate skill's lessons/whats-in-a
           ? `Low disk on a machine is never a question for ${n} or the machine's owner (w626): when a worker or a notice says a machine is short of space, file clean-up work for that machine (request_work: remove FF Factory's own leftovers there and report what was freed) instead of asking anyone to free space or to approve the removal. The work deletes only inside the machine's worker install folder (its root, in list_machines: D:/work/ffw, F:/ffw, ~/ffw; lothsahn, 2026-10-10, w896: "in general we should only be clearing data in the install folder for the worker"); outside it the brief asks for sizes and a list of what makes FF Factory write there, never a delete, and on a Windows machine nothing at all: there the work reads, measures and deletes only on the install folder's drive (V: on LothDesktop, F: on BEAST) and never on C: (lothsahn, 2026-10-22, w1755: "Fix the instructions for Windows boxes to only look at v:"), apart from reading the game's data folders under AppData (AppData\\LocalLow\\Never Games, and Local's and Roaming's), which nothing modifies (lothsahn, 2026-10-22, w1755: "Let's let it scan the never games folder, but not the rest of C.  And it shouldn't modify it." and "By never games I mean in appdata"). Never write a delete outside the folder into the brief (C:, AppData, system temp, caches, installers, ~/.claude transcripts, the game's data folder), nor, for a Windows machine, any look at C: (a size, a scan, "where did AppData's space go"). Never write a list of live or "will resume" workers into a clean-up brief either (w1379: w1374's list missed a735f37c, on the stalled w1332, and its builds were deleted): the brief says to run \`ff-leftovers folders\` and delete only its DELETE rows, because the ledger, not the brief, knows which stopped or stalled workers' requests are still open.`
           : `Low disk on a computer (a \`[machine <id>] Clean-up cannot free enough disk space\` notice, DISK in list_machines, a worker saying so) is fixed by the machine, never by its owner (Ben, 2026-10-07, w626): run machine_cleanup on it (below the soft threshold its daemon also removes FF Factory's own leftovers: player slots nobody holds, pushed agent worktrees, finished agents' temp, unused Unity editors), and when that is not enough, start a clean-up worker there (a free sandbox on that machine) with the biggest consumers the notice names; its brief says to remove FF Factory's own leftovers itself and report what it removed and freed. Never ask the machine's owner or anyone else to free space or to approve removing FF Factory's leftovers; only a person's own files (documents, their own projects, saves) are theirs, and the worker lists those in its report. A clean-up worker deletes only inside the machine's worker install folder (lothsahn, 2026-10-10, w896: "in general we should only be clearing data in the install folder for the worker"; the root is in list_machines and the machine's root.json: D:/work/ffw, F:/ffw, ~/ffw): put that in its brief, and never write a delete outside the folder into one (C:, AppData, system temp, Temp entries, the Unity Hub installer, dotnet or package caches, the game's data folder under LocalLow, ~/.claude transcripts, a person's files). On a Windows machine the brief keeps the work on the install folder's drive (the drive of its root: V: on LothDesktop, F: on BEAST): never a read, measurement or scan of C: (lothsahn, 2026-10-22, w1755: "Fix the instructions for Windows boxes to only look at v:"; the guard refuses one), and never a question about what fills C:. On macOS and Linux, for what is outside the folder the brief asks for measuring only: sizes, plus a list of every setting, script or reference that makes FF Factory write there so it can be moved inside the folder (a request of its own). The notice names the biggest consumers (on Windows only those on the install drive) and tags the ones outside the folder "measure only": a big one outside is a finding to report, not a thing to delete. The daemon's own pass follows the same rule (it lists what is outside and removes nothing there; on Windows it neither measures nor lists anything off the install drive). Never write a list of live or "will resume" workers into a clean-up brief (w1379: w1374's list missed a735f37c, on the stalled w1332, and its builds were deleted): tell the worker to run \`ff-leftovers folders\` and delete only its DELETE rows, because the ledger, not the brief, knows which stopped or stalled workers' requests are still open.`;
         const reserved = `A computer may be reserved for higher work (w1643, lothsahn, 2026-10-20: "If normal (all work), if high, high and urgent, if urgent, urgent only"): config placement.minPriority, { "<machine>": "high" | "urgent" } (normal, the default, takes all work, low included). Its Capacity line reads "ROOM n% but RESERVED for ...", and the block's "Reserved by priority" line says where high and urgent work goes; the Next lines are for low and normal work. A request below a computer's level never goes there, not even when nothing else has room: it waits Queued, since a reservation that overflowed would reserve nothing. The priority is the request's now: one a person raises to the level may go there at once. start_agent, message_agent with a request the worker is not on yet, and stop_agent move_to are refused for work below the level; the workers already there go on and resume there, and a release build declared with build_plan counts as urgent.`;
-        return [clone, installers, update, disk, reserved, PAIR_RULES].join('\n\n');
+        return [clone, installers, update, disk, reserved, PAIR_RULES, AWAY_RULES].join('\n\n');
       }
     }
   }

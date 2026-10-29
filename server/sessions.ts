@@ -1471,7 +1471,8 @@ export class SessionManager {
         continue;
       }
       // w2046: a resume that waits only for room on its own computer moves to one with room, or says why it stays.
-      if (hold && !onHold && !restart && !OFFLINE.test(hold) && this.roomMove) {
+      // w2544: an offline hold goes too: roomMove moves it once the computer has been away past the grace, else leaves it.
+      if (hold && !onHold && !restart && this.roomMove) {
         const r = this.roomMove(s, q, hold, now);
         if (r === true) {
           drop();
