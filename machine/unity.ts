@@ -5,6 +5,7 @@ import path from 'node:path';
 import { run } from '../server/proc.ts';
 import { DEFAULT_HANG, bridgeInfo, bridgePing, editorVerdict, restartAllowed, type HangThresholds } from '../server/unityHang.ts';
 import { closeWindow, decide, decideClose, describeDialog, findClosable, findDialogs, listWindows, mainWindow, parsePsJson, pressButton, sceneFilesUnchanged, type Dialog } from '../server/watchdog.ts';
+import { scoped } from './linuxScope.ts';
 import { accessibilityStep, axPrompt, axTrusted, closeMacWindow, listMacDialogs, macPermissionProblem, nodeBinary, pressMacButton, sessionAway, sessionState, tccAccessibility, type SessionState } from './macDialogs.ts';
 
 /**
@@ -447,7 +448,11 @@ export function realDeps(platform: UnityPlatform = 'darwin'): UnityDeps {
   const base = realDepsMac();
   if (platform === 'linux') {
     const { noAppNap: _n, ...linux } = base;
-    return linux;
+    // Each editor in a systemd scope of its own, out of the daemon's cgroup (machine/linuxScope.ts, w2474).
+    return { ...linux, launch: (bin, args, cwd) => {
+      const cmd = scoped('unity', path.basename(cwd), bin, args, { platform: 'linux' });
+      return base.launch(cmd.bin, cmd.args, cwd);
+    } };
   }
   if (platform !== 'win32') return base;
   const ps = (script: string, timeoutMs: number) => run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { timeoutMs });

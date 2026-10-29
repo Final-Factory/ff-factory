@@ -31,6 +31,7 @@ import { addSecretEnv, redactSecrets, redactValue } from '../server/secrets.ts';
 import type { FromDaemon, SignalName } from '../server/machineProtocol.ts';
 import type { DeliveredAttachment, ImageInput, PermissionMode, Requester, SessionInfo, TranscriptEvent } from '../shared/types.ts';
 import { meterStates } from '../server/meterStates.ts';
+import { scoped } from './linuxScope.ts';
 import { HOST_WATCH, endHostTree, hostIdentity, pidAlive, realHostProcs, removeHostDir, type HostProcs } from './hostWatch.ts';
 
 export { pidAlive };
@@ -230,13 +231,17 @@ export interface HostDeps {
   hungMs?: number;
 }
 
-/** Start a host: detached (outside node's own kill-on-exit job on Windows, its own session on a Mac), output to host.log. */
+/**
+ * Start a host: detached (outside node's own kill-on-exit job on Windows, its own session on a Mac, its own systemd scope
+ * on Linux: machine/linuxScope.ts, w2474), output to host.log.
+ */
 export function launchHost(dir: string, start: HostStart, env: NodeJS.ProcessEnv = process.env): number {
   const f = hostFiles(dir);
   const log = fs.openSync(f.log, 'a');
   try {
     // Not in its own folder (w799): Windows refuses to delete a folder a live process works in, and the daemon removes it.
-    const child = spawn(process.execPath, [...hostNodeArgs(), path.join(import.meta.dirname, 'agentHost.ts'), dir], {
+    const cmd = scoped('agent', path.basename(dir), process.execPath, [...hostNodeArgs(), path.join(import.meta.dirname, 'agentHost.ts'), dir]);
+    const child = spawn(cmd.bin, cmd.args, {
       cwd: path.dirname(dir),
       detached: true,
       stdio: ['pipe', log, log],
