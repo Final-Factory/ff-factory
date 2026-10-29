@@ -454,6 +454,12 @@ reinstalling beast and m5 on 2026-10-07, f3f19c0 → 9ea8476):
   paths and the test-install options. `--max-sandboxes`, `--max-agents-per-sandbox` and `--max-unity`
   (`-MaxSandboxes`, …) change only what they name. It prints the settings that changed, `~ key: before -> after`.
   Before, a plain re-run rewrote `daemon.json` and dropped the tuned settings.
+- **The editor and agent limits a daemon runs by are the portal record's** (w2474). The portal's welcome carries them
+  (`server/machines.ts` `setRootSettings`; `machine/daemon.ts` `currentPool` prefers it to `daemon.json`), and a hello
+  takes back only the sandbox count (`adoptLayout`). So `--max-unity` or `--max-agents-per-sandbox` alone change
+  `daemon.json` and nothing the daemon uses: biscuit kept 2 editors after `machine_update max_unity 1` on 2026-10-28.
+  `ops_worker machine_update` now also sets them on the record, which reaches the daemon at once; `add_machine
+  max_unity` does the same without an update.
 - **It fetches nothing of the game repo.** The root's clone is kept as it is, and the daemon fetches with the user's
   own credentials when it next makes a sandbox. Over ssh a Mac's login keychain is out of reach, and the install's
   `git fetch origin` failed on m5 for that reason.
@@ -992,7 +998,7 @@ daemon runs as a **systemd user service** (`server/machineDeployLinux.ts`), as t
 | The unit | `~/.config/systemd/user/com.fffactory.daemon.service`, enabled; `systemctl --user status com.fffactory.daemon`, log in `<root>/daemon/logs/daemon.log` |
 | Supervisor | `Restart=always` (10 s), the Mac's KeepAlive; `requireSupervisor` checks it and `KillMode=process` |
 | Agents through a restart | `KillMode=process`: a restart or an update stops the daemon only, so its agent hosts and Unity editors keep running (w605); systemd's default would kill everything in the unit's cgroup. A stop or an uninstall ends the agent hosts itself |
-| Out of the daemon's cgroup | each Unity editor and agent host starts in a transient scope of its own, `systemd-run --user --scope --unit=ffw-unity-…`/`ffw-agent-…` (`machine/linuxScope.ts`, w2474), so systemd-oomd, which ends a whole cgroup when memory and swap run out, takes that editor and not the daemon with it (biscuit, 2026-10-28 10:23 and 10:52 UTC). `systemd-cgls --user` shows them. The daemon first checks that a scope's command really runs (with no user bus `systemd-run` runs nothing and still exits 0) and starts them as before where it does not |
+| Out of the daemon's cgroup | each Unity editor and agent host starts in a transient scope of its own, `systemd-run --user --scope --unit=ffw-unity-…`/`ffw-agent-…` (`machine/linuxScope.ts`, w2474), so an out-of-memory kill takes that editor and not the daemon with it. On biscuit on 2026-10-28 at 10:23 and 10:52 UTC the kernel's OOM killer ended a Unity of 9.6 GB and then one of 13.4 GB in the daemon's cgroup, and systemd's default `OOMPolicy=stop` failed the whole unit with `oom-kill` (systemd-oomd logged nothing). The unit also says `OOMPolicy=continue`, for what still runs in it (agents adopted from before, or a PC where scopes do not start). `systemd-cgls --user` shows them. The daemon first checks that a scope's command really runs (with no user bus `systemd-run` runs nothing and still exits 0) and starts them as before where it does not |
 | Display | `WantedBy=graphical-session.target`: the daemon starts with the desktop session and gets its `DISPLAY`/`WAYLAND_DISPLAY`, which Unity needs. Turn on automatic login for a PC nobody sits at. The installer says so when the user's manager has no display yet |
 | After a logout, over ssh | the installer runs `loginctl enable-linger`, so the user's manager (and the daemon) keeps running and `systemctl --user` works over ssh, which the portal's `machine_daemon` uses. If polkit refuses it, it says to run `sudo loginctl enable-linger <user>` |
 | Sleep | the daemon holds a logind inhibitor (`systemd-inhibit --what=idle:sleep`) while agents run; for a PC that must never sleep, also `sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target` |

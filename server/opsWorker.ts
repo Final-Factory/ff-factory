@@ -634,6 +634,11 @@ export interface OpsDeps {
   linkUpdate?: (machineId: string, flags: LinkUpdateFlags) => Promise<LinkUpdateReport> | undefined;
   /** Why its connected daemon does not take one (server/machines.ts linkProblem, w1918): then no ssh either; undefined otherwise. */
   linkProblem?: (machineId: string) => string | undefined;
+  /**
+   * Set a root install's editor and agent limits on the portal's record (w2474, server/machines.ts deployMachine ->
+   * setRootSettings): what its daemon runs by, sent to it in a new welcome. Throws on a value the record refuses.
+   */
+  setRecordLimits?: (machineId: string, limits: { maxUnity?: number; maxAgentsPerSandbox?: number }) => void;
   /** Its turn of a job sent for requests ended: the ledger reads its DONE and still-open lines; answers what it did (w631). */
   workTurnEnded?: (info: SessionInfo, text: string, job: { workIds: readonly string[]; by: Requester }) => string[];
   now?: () => number;
@@ -929,6 +934,17 @@ export class OpsWorker {
     const dev = { devDrive: o.devDrive, moveToDevDrive: o.moveToDevDrive, devDriveMaxGB: o.devDriveMaxGB };
     if ((dev.devDrive || dev.moveToDevDrive || dev.devDriveMaxGB !== undefined) && m.platform !== 'win32') throw new Error(`dev_drive, move_to_dev_drive and dev_drive_max_gb: a Dev Drive is a Windows feature, and ${m.id} is not a Windows PC`);
     if (dev.devDriveMaxGB !== undefined && (!Number.isInteger(dev.devDriveMaxGB) || dev.devDriveMaxGB < 50 || dev.devDriveMaxGB > 65536)) throw new Error('dev_drive_max_gb: a whole number of GB from 50 (Windows\' own minimum for a Dev Drive) to 65536');
+    // w2474: the editor and agent limits a root install's daemon runs by are the portal record's: its welcome carries them
+    // (server/machines.ts setRootSettings, machine/daemon.ts currentPool), and a hello never takes them back from
+    // daemon.json (adoptLayout keeps the record's). The installer's flag alone wrote daemon.json and changed nothing the
+    // daemon used: biscuit kept 2 editors after machine_update max_unity 1. So the record is set first (a value it refuses
+    // stops the update before it runs), and the daemon has it at once, from a new welcome.
+    const rec = Object.fromEntries(Object.entries({ maxUnity: nums.maxUnity, maxAgentsPerSandbox: nums.maxAgentsPerSandbox }).filter(([, v]) => v !== undefined)) as { maxUnity?: number; maxAgentsPerSandbox?: number };
+    let recorded = '';
+    if (Object.keys(rec).length && this.d.setRecordLimits) {
+      this.d.setRecordLimits(m.id, rec);
+      recorded = ` The portal's record of ${m.id} now says ${Object.entries(rec).map(([k, v]) => `${k} ${v}`).join(', ')} (what its daemon runs by; it has it already, and list_machines shows it).`;
+    }
     // Over the machine's own daemon link (w1596) when it takes one: the portal runs it, no ssh and no worker job.
     const flags: LinkUpdateFlags = Object.fromEntries(Object.entries({ ...nums, ...dev }).filter(([, v]) => v !== undefined && v !== false));
     const viaLink = this.d.linkUpdate?.(m.id, flags);
@@ -939,7 +955,7 @@ export class OpsWorker {
         (r) => this.d.tellOrchestrator(person, linkUpdateMessage(m.id, id, r)),
         (e) => this.d.tellOrchestrator(person, `[machine update for ${id}] ${m.id}'s update over its daemon's link did not run: ${(e as Error).message}. Nothing was changed unless the line says it was; ask again once that is fixed (a daemon offline is updated when it is back, by the next machine_update).`),
       );
-      return `Updating ${m.id}'s worker install over its daemon's own link (w1596; no ssh, no worker job)${named ? ` with ${named}` : ' with no setting changed'}. The portal sends its update job's report to you as a [machine update] message when it ends (a few minutes; the new daemon takes the agents back, and a daemon that does not come back is put back by the job itself). It does not close ${id}: tell ${person.displayName} what it says, and close the request with update_work once it is done.`;
+      return `Updating ${m.id}'s worker install over its daemon's own link (w1596; no ssh, no worker job)${named ? ` with ${named}` : ' with no setting changed'}. The portal sends its update job's report to you as a [machine update] message when it ends (a few minutes; the new daemon takes the agents back, and a daemon that does not come back is put back by the job itself). It does not close ${id}: tell ${person.displayName} what it says, and close the request with update_work once it is done.${recorded}`;
     }
     // A connected daemon is never sent to ssh (w1918: LothLaptop joined without it; port 22 timed out and nothing said why).
     const why = this.d.linkProblem?.(m.id);
@@ -949,7 +965,7 @@ export class OpsWorker {
     const command = `ssh ${m.target} '${workerUpdateRemote({ root: m.root, platform: m.platform }, extra)}'`;
     const what = extra ? `with these settings changed: ${extra}` : 'with no setting changed';
     const text = `[machine update for ${id}, approved by ${person.displayName} through that request] Update ${m.id}'s worker install ${what}. Run exactly this, once, and nothing else on the machine (docs/worker-install.md, "Updating"; it asks nothing, keeps every other setting, the machine's own credential and the PATH, restarts the daemon; never issue a credential for it):\n\n${command}\n\nThen check with list_machines that ${m.id} is online again${extra ? ' and shows the new limits' : ''}, and report what the update printed (the \`~ key: before -> after\` lines) and what the portal sees.${dev.moveToDevDrive ? ` This one moves the sandboxes onto a Dev Drive (docs/worker-install.md, "The Dev Drive"): it refuses, naming them, while an agent is in a sandbox or a Unity editor runs from one, and then nothing has changed: report which and stop. When it can go ahead it takes an hour or more (it saves each sandbox's work on its branch first, moves the Library seed, and re-creates each sandbox): run it in the background and read its output until it ends, never twice at once, and never interrupt it; if it stops half way, run the same command again (it picks up where it stopped). Report the free space on the root's drive before and after (\`Get-PSDrive <letter>\` on the machine) and the sandboxes it moved.` : dev.devDrive ? ' This one also makes the Dev Drive (docs/worker-install.md, "The Dev Drive") but moves no sandbox; report the letter it chose and the size it printed.' : ''}`;
-    return this.send(caller, text, false, [id], true);
+    return `${this.send(caller, text, false, [id], true)}${recorded}`;
   }
 
   /**

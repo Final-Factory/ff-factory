@@ -17,6 +17,7 @@ test('linux: the unit runs the root\'s daemon, restarted always, and a restart l
   assert.match(u, /^ExecStart="\/home\/u\/\.local\/node\/bin\/node" "--disable-warning=ExperimentalWarning" "\/home\/u\/ffw\/daemon\/app\/machine\/daemon\.ts" "\/home\/u\/ffw\/daemon\/daemon\.json"$/m);
   assert.match(u, /^Restart=always$/m);
   assert.match(u, /^KillMode=process$/m, 'systemd would otherwise kill the agent hosts and editors in its cgroup (w605)');
+  assert.match(u, /^OOMPolicy=continue$/m, "the default (stop) ends the daemon when the kernel OOM-kills a Unity in its cgroup (w2474, biscuit 2026-10-28)");
   assert.match(u, /^WantedBy=graphical-session\.target$/m, 'starts with the desktop session, which gives it a display for Unity');
   assert.match(u, /^StandardOutput=append:\/home\/u\/ffw\/daemon\/logs\/daemon\.log$/m);
   assert.match(systemdUnit({ ...UNIT, flag: true }), /node" "--experimental-strip-types" "--disable/);
