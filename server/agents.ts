@@ -3264,6 +3264,35 @@ export class Agents {
 
   /** w2055: timed legs being started by FF Factory itself (leg id to where), so a pass does not start one twice. */
   private readonly legStarting = new Map<string, string>();
+  /** w2548: requests start_agent is starting now (work id to its sandbox), from its checks until its worker is linked. */
+  private readonly agentStarting = new Map<string, string>();
+
+  /**
+   * Why request `id` takes no new start now because one is under way (w2548), or undefined: FF Factory's own timed leg start
+   * (w2055, legStarting) or a start_agent for it (agentStarting), each holding it from its checks until its worker is linked.
+   * 2026-10-29 15:19Z: the timing order started w2547 in lothdesktop/slot1 as 9a3c8e5d while the dispatcher, told by its
+   * [work request] to decide it, started it again there as 57ab10fc.
+   */
+  startUnderWay(id: string, mine?: 'leg' | 'agent'): string | undefined {
+    const leg = mine !== 'leg' ? this.legStarting.get(id) : undefined;
+    if (leg) return `FF Factory is starting it itself on ${leg} now (its timing order, w2055)`;
+    const agent = mine !== 'agent' ? this.agentStarting.get(id) : undefined;
+    if (agent) return `a start_agent for it is starting it in ${agent} now`;
+    return undefined;
+  }
+
+  /**
+   * The workers request `w` has now (w2548): live, mid-turn, idle, or holding their sandbox (placeAgain occupies). A worker
+   * just started counts while its first prompt still waits (status "stopped" until its process starts: an attachment being
+   * fetched, a held pool), which the status list alone missed: 9a3c8e5d, w2547's first worker, was such a one.
+   */
+  workersOn(w: WorkItem): string[] {
+    return w.sessionIds.filter((id) => {
+      const info = this.store.sessions.get(id);
+      if (!info || info.kind !== 'worker') return false;
+      return ['running', 'starting', 'waiting_permission', 'idle'].includes(info.status) || occupies(info, !!this.sessions.sessions.get(id)?.live);
+    });
+  }
   /** Workers a timed move (w2277, relocateTimedLeg) is taking off their computer now. */
   private readonly timedMoving = new Set<string>();
 
@@ -3450,6 +3479,8 @@ export class Agents {
    */
   startTimedLeg(w: WorkItem, machine: string, why: string, moves: readonly Occupant[] = []): boolean {
     if (this.legStarting.has(w.id) || [...this.legStarting.values()].includes(machine)) return false;
+    // w2548: never beside a start_agent of it, nor once it has a worker (the pass may hold an older copy of the request).
+    if (this.agentStarting.has(w.id) || this.workersOn(this.store.work.get(w.id) ?? w).length) return false;
     this.legStarting.set(w.id, machine);
     void this.runTimedLegStart(w, machine, why, moves)
       .catch((e) => {
@@ -3497,10 +3528,19 @@ export class Agents {
       if (!sb) await new Promise((r) => setTimeout(r, 500));
     }
     if (!sb) throw new Error(`no free sandbox on ${machine}`);
-    const cur = this.store.work.get(w.id);
+    let cur = this.store.work.get(w.id);
     if (!cur || cur.status !== 'queued' || !isOpen(cur)) throw new Error(`${w.id} is no longer Queued`);
     const key = `${machine}/${sb.id}`;
     const handed = await this.prepareForNewWork(sb.id, machine, cur.id, cur.source, false);
+    // w2548: checked again after the wait, in the same run as the start below, so nothing starts it in between.
+    cur = this.store.work.get(w.id);
+    if (!cur || cur.status !== 'queued' || !isOpen(cur)) throw new Error(`${w.id} is no longer Queued`);
+    const late = this.agentStarting.get(cur.id);
+    if (late) throw new Error(`a start_agent for it is starting it in ${late} now (w2548)`);
+    const has = this.workersOn(cur);
+    if (has.length) throw new Error(`it already has ${has.map((id) => this.orchestrators.workerLine(id)).join(', ')} (w2548)`);
+    const there = this.sessionsOf(sb.sessionIds).filter((x) => x.kind === 'worker' && occupies(x, !!this.sessions.sessions.get(x.id)?.live));
+    if (there.length) throw new Error(`${key} is no longer free: ${there.map((x) => this.orchestrators.workerLine(x.id)).join(', ')} (w2548)`);
     const head = `[timed leg, w2055] FF Factory started this timed leg in ${key} by itself: ${why}. Build and time it here under this computer's exclusive bench ticket, as the brief says.\n\n${cur.brief}`;
     const t = this.target(sb.id, machine);
     const prompt = `${head}${requestAsFiled(cur, head)}${this.handoverFor(cur, t, handed.branch)}${cur.source ? workerRules(cur, handed.branch ?? this.sandboxBranchOf(t)) : ''}${requestLineRule(cur)}`;
@@ -4427,7 +4467,7 @@ When a person asked for a design or an analysis (a profile, an investigation, a 
    * lothdesktop/slot5 (max_agents_per_sandbox 2)"). A request's worker goes into a FREE sandbox. The dispatcher may put it
    * beside another agent on purpose with `extra_agent` (work that needs no editor and no game tree, w1098: it works in its
    * own clone in its temp folder), and even then not past max_agents_per_sandbox, where it could only wait in the send queue.
-   * Agents already on this request do not count (a second session for the same request). Game work never goes beside a
+   * Agents already on this request count too (w2548: a second worker of it there would share the tree). Game work never goes beside a
    * BUSY worker even with `extra_agent` (w1607, busyIn): it would use the worktree a build or test of the other is compiling.
    * Throws, saying what is there.
    */
@@ -4442,7 +4482,9 @@ When a person asked for a design or an analysis (a profile, an investigation, a 
     const sb = m?.sandboxes?.find((x) => x.id === t.machineSandbox);
     if (!m || !sb) return;
     const mine = workId ? this.store.work.get(workId.toLowerCase())?.sessionIds ?? [] : [];
-    const there = this.sessionsOf(sb.sessionIds).filter((x) => x.kind === 'worker' && !mine.includes(x.id) && occupies(x, !!this.sessions.sessions.get(x.id)?.live));
+    // w2548: the request's own workers count too: two workers of one request in one sandbox share its tree as two
+    // requests' would (w2547's 9a3c8e5d and 57ab10fc in lothdesktop/slot1, 2026-10-29).
+    const there = this.sessionsOf(sb.sessionIds).filter((x) => x.kind === 'worker' && occupies(x, !!this.sessions.sessions.get(x.id)?.live));
     const busy = this.busyIn(m, sb, mine);
     if (!there.length && !busy.length) return;
     const who = there.length ? there.map((x) => `${x.id} "${x.title}" (${agentStateText(this.withQueue(x))})`).join('; ') : busy.join('; ');
@@ -5085,7 +5127,10 @@ When a person asked for a design or an analysis (a profile, an investigation, a 
               if (crashPeers.length && !override) {
                 throw new Error(`${w.id} may be the same crash as ${crashPeers.map((x) => x.id).join(', ')}, which a worker is on.\n\n${this.orchestrators.crashPeersText(w, crashPeers)}`);
               }
-              const live = w.sessionIds.filter((id) => ['running', 'starting', 'waiting_permission', 'idle'].includes(this.store.sessions.get(id)?.status ?? 'stopped'));
+              // w2548: a start under way (FF Factory's timed leg start, another start_agent) is refused even with an override.
+              const underWay = this.startUnderWay(w.id);
+              if (underWay) throw new Error(`${w.id} is being started already: ${underWay}. Do not start it again: its worker reports to its person's orchestrator once it runs.`);
+              const live = this.workersOn(w);
               if (live.length && !override) {
                 throw new Error(`${w.id} already has ${live.map((id) => this.orchestrators.workerLine(id)).join(', ')}: send it there (message_agent with work_id), or pass override_duplicate saying why it needs another worker.`);
               }
@@ -5137,7 +5182,22 @@ ${w.repo ?? ''}
             const placedLog = newOn ? this.placedLog(w?.id ?? nextId, newOn, needs, needsLive(w, a.prompt) ? 'live' : needsBuild(w, a.prompt) ? 'build' : timedKind(needsTimed(w, a.prompt)), w?.priority) : undefined;
             // A sandbox a waiting worker released on its own branch is switched to a fresh one first (w640), never for work
             // that needs only an agent seat, nor under a worker there (w1607).
-            const handed = await this.prepareForNewWork(a.sandbox, a.machine, w?.id ?? nextId, w?.source, !!a.extra_agent || needs === 'agent');
+            // w2548: the request is held from here until its worker is linked, and checked again after the wait in the same
+            // run as the start, so FF Factory's timed leg start (or another start_agent) cannot start it alongside.
+            if (w) this.agentStarting.set(w.id, newOn ?? a.sandbox ?? '?');
+            let handed: Awaited<ReturnType<Agents['prepareForNewWork']>>;
+            try {
+              handed = await this.prepareForNewWork(a.sandbox, a.machine, w?.id ?? nextId, w?.source, !!a.extra_agent || needs === 'agent');
+            } finally {
+              if (w) this.agentStarting.delete(w.id);
+            }
+            if (w) {
+              const underWay = this.startUnderWay(w.id, 'agent');
+              if (underWay) throw new Error(`${w.id} is being started already: ${underWay}. Do not start it again: its worker reports to its person's orchestrator once it runs.`);
+              const live = this.workersOn(this.store.work.get(w.id) ?? w);
+              if (live.length && !override) throw new Error(`${w.id} already has ${live.map((id) => this.orchestrators.workerLine(id)).join(', ')}, started while this start_agent waited: send it there (message_agent with work_id).`);
+            }
+            if (ctx.role === 'dispatcher') this.sharedSandboxProblem(a.sandbox, a.machine, a.work_id, a.extra_agent, needs);
             // An intake request always carries its rules (untrusted text, posting limits, the markers), whatever the brief says.
             // The request as filed goes with every brief (w496), then the intake rules and the PR line.
             const prompt = `${a.prompt}${w ? requestAsFiled(w, a.prompt) : ''}${w ? this.handoverFor(w, this.target(a.sandbox, a.machine), handed.branch) : ''}${w?.source ? workerRules(w, handed.branch ?? this.sandboxBranchOf(this.target(a.sandbox, a.machine))) : ''}${w ? requestLineRule(w) : ''}`;

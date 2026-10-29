@@ -404,8 +404,11 @@ fewest timed legs queued, then `placement.prefer`. A one-worker computer ranks f
   ("lothdesktop (10 agent slots, 3 editors, 5 live); no room now: m3 (4 agent slots), beast (12 agent slots); never m5").
 - **A timed leg asked for at its ticket** (w1969, docs/machines.md "Where a timed leg runs"): a worker on a big computer
   calls `timed_place` before an exclusive ticket; a leg handed off arrives as "Timed leg for wNNN: ...", Queued for the small
-  computers it names. Start it on the first of them with room; a big one takes it only after the ledger widens its needs
-  (60 minutes Queued). Its asking worker is Blocked on its report: do not start that worker for it.
+  computers it names. **FF Factory starts it itself** (w2055's timing order: an idle computer first, then pre-emption, then
+  by priority), and its `[work request]` says "Nothing to decide" instead of "Decide: start it" (w2548: at 15:19Z on
+  2026-10-29 the order started w2547 in lothdesktop/slot1 and the dispatcher, told to decide it, started it there again).
+  Do not `start_agent` it; start one only when a `[ledger]` line hands it to you (a big computer after it widened, w2048).
+  Its asking worker is Blocked on its report: do not start that worker for it.
 
 A timed A/B compares its legs on one computer, so a slower one gives as good an answer.
 
@@ -679,8 +682,16 @@ had room, which read as "LothDesktop can take more work but the queue isn't movi
    - **`start_agent` refuses a sandbox another request's agent occupies** (w1089, `Agents.sharedSandboxProblem`): "sandbox
      lothdesktop/slot5 is not free: a50a8ee1 \"w1083: …\" (Working)", and "is full" at `max_agents_per_sandbox`, where it used
      to start the worker and queue its brief. The dispatcher may pass `extra_agent: true` to share on purpose (work that
-     needs no editor and no game tree, w1098), never past the per-sandbox limit. A second session for the request already
-     there, and `message_agent` with a work_id (w740's new session in the worker's sandbox), are not affected.
+     needs no editor and no game tree, w1098), never past the per-sandbox limit. The request's own worker there counts as
+     well (w2548): a second worker of one request in one sandbox shares its tree, Library and bench ticket as two requests'
+     would. `message_agent` with a work_id (w740's new session in the worker's sandbox) is not affected.
+   - **One start of a request at a time** (w2548, `Agents.startUnderWay`, `Agents.workersOn`): `start_agent` with a work_id
+     is refused while FF Factory's own timed leg start (w2055) or another `start_agent` is starting it ("w2547 is being
+     started already: FF Factory is starting it itself on lothdesktop now"), override or not, and without
+     `override_duplicate` while it has a worker, one just started included (its status reads "stopped" until its process
+     runs, while its brief waits on an attachment's download or a held pool: the miss of 2026-10-29). Each start holds the
+     request from its checks until its worker is linked and checks again after its one wait (the sandbox hand-over), in the
+     same run as the start, and the timing order's pass skips a request a `start_agent` holds or that has a worker.
    - **A busy sandbox's branch never moves for new work** (w1607: w1602's `extra_agent` start switched beast/slot1 under
      w1440's Unity batch build). Busy is a worker there mid-turn, between turns with a background job (a build, a test,
      a bench: "Working: … between turns"), or a timed run from its folder holding the machine's bench lock
