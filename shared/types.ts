@@ -2193,6 +2193,12 @@ export interface WorkItem {
    */
   timedLeg?: { for: string; forSession: string; from: string; small: string[]; widened?: string; platform?: string };
   /**
+   * w2521: the computers this work must run on, for a hardware reason (a display, a GPU, an OS), and why: set by timed_place's
+   * `machine` on the leg it files. It goes there or waits for them, never elsewhere (server/machinePin.ts; a request's
+   * constraints' words, "must run on X", pin it the same way without this field).
+   */
+  machinePin?: { ids: string[]; why: string };
+  /**
    * w2358: the dispatcher's brief (start_agent's prompt) that made this timed work, or named its OS, when start_agent refused
    * it for that: needsTimed reads it as a note of that time, so decide_work queue and the room shares read the request as
    * start_agent did (the m5's room is no room for it; nor is beast's for one the brief puts on the Mac), and a later note
