@@ -56,7 +56,7 @@ import { mentionsSteam, STEAM_READ } from '../shared/steam.ts';
 import { mentionsMenus, MENUS_READ } from '../shared/desktop.ts';
 import type { HandBack } from './machinePause.ts';
 import { machinePinOf } from './machinePin.ts';
-import { heldText, roomEnough, roomForWork, roomIds, roomStood, timedKindOf, unusableText, type RoomNow, type TimedFacts, type TimedKind } from './placement.ts';
+import { heldText, placeId, roomEnough, roomForWork, roomIds, roomStood, timedKindOf, unusableText, type RoomNow, type TimedFacts, type TimedKind } from './placement.ts';
 import { TIMED_LEG_WAIT_MS, unavailableText, bigFallbackRules, type SmallState } from './timedAsk.ts';
 import type { LegStep, Occupant } from './timedLegPlace.ts';
 import { minPriorityText } from '../shared/capacity.ts';
@@ -4533,6 +4533,62 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       }
     }
     return named;
+  }
+
+  /**
+   * w2544: the waits on machine `m` that a long-away machine's work move ends (Agents.moveAwayWork): its cut-off (w2433) and
+   * pause (w2443) gates go, so the moved session is not Blocked on a computer it left. A request with no other gate is Active.
+   */
+  dropAwayGates(w: WorkItem, m: string, line: string): void {
+    const gates = gatesOf(w);
+    const rest = gates.filter((g) => !(g.kind === 'machine' && g.ref?.toLowerCase() === m.toLowerCase()));
+    if (rest.length === gates.length) return;
+    w.blocked = rest[0];
+    w.alsoBlocked = rest.length > 1 ? rest.slice(1) : undefined;
+    if (!rest.length && w.status === 'blocked') w.status = 'active';
+    this.stamp(w, `its wait on ${line} is over: its work moves to another computer (w2544)`);
+    this.store.putWork(w);
+  }
+
+  /** w2544: a move off a long-away computer, on the request's log and its live state (list_work). */
+  awayMoved(id: string, line: string): void {
+    const w = this.store.work.get(id);
+    if (!w) return;
+    w.awayMove = { at: this.now().toISOString(), line };
+    this.stamp(w, `${line} (w2544)`);
+    this.store.putWork(w);
+  }
+
+  /**
+   * w2544: a request that waits on a long-away computer its brief names (its pin) stays: its orchestrator is told once per
+   * machine. Returns whether it told now.
+   */
+  awayKeptNotice(w: WorkItem, m: string, line: string, pinWhy: string, worker?: string): boolean {
+    if (w.awayKept?.machine === m) return false;
+    w.awayKept = { machine: m, at: this.now().toISOString() };
+    this.stamp(w, `stays waiting for ${line}: it names ${m} (${clip(pinWhy, 160)}), so it is not moved (w2544); its orchestrator was told`);
+    this.store.putWork(w);
+    const move = worker ? `stop_agent its worker ${worker} with move_to (and pin_words with the person's words if they asked for the new computer)` : "start it elsewhere with start_agent (pin_words with the person's words naming the new computer)";
+    this.toDispatcher(
+      `[ledger] KEPT (w2544): ${w.id} "${clip(w.title, 80)}" (${names(w.requesters)}, ${w.priority}) waits for ${line}. Its brief names ${m} (${clip(pinWhy, 200)}), so FF Factory does not move it as it moves other work off a computer away past the grace. If its person says it may go elsewhere, ${move}. Said once.`,
+      w.requesters[0],
+    );
+    return true;
+  }
+
+  /**
+   * w2544: a person's own words name the computer for `w` (lothsahn, 2026-10-29: "w2542 should move to LothDesktop", twice
+   * refused by the timing order). The dispatcher passes them with start_agent or stop_agent move_to (pin_words): `w` is
+   * pinned there (machinePin), so the timing order, room moves and placement take that computer and no other.
+   */
+  pinByPerson(w: WorkItem, machine: string, words: string): void {
+    const m = placeId(machine);
+    const why = `a person's words, passed by the dispatcher: ${clip(words.trim(), 280)}`;
+    if (w.machinePin?.ids.length === 1 && w.machinePin.ids[0] === m && w.machinePin.why === why) return;
+    w.machinePin = { ids: [m], why };
+    w.awayKept = undefined;
+    this.stamp(w, `pinned to ${m} (w2544): ${why}`);
+    this.store.putWork(w);
   }
 
   /**

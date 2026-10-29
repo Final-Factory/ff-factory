@@ -882,6 +882,7 @@ const blockerWatch = new BlockerWatch({
   // w2422: a worker whose own check-in is pending comes back by itself; its reported wait is not recorded for it.
   checkInPending: (id) => agents.waker.pending(id) !== undefined,
   benchResume: () => agents.resumeBenchWaits(),
+  awayMove: () => agents.moveAwayWork(),
   githubPerson: (w) => githubPersonOf(tokenPersonForWork(cfg, w), w, identity.systemPayer().userId),
 });
 agents.blockerWatch = blockerWatch;

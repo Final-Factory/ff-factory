@@ -2262,6 +2262,13 @@ export interface WorkItem {
    */
   machinePin?: { ids: string[]; why: string };
   /**
+   * w2544: its last move off a computer that was offline or paused past the grace (Agents.moveAwayWork): the line its log and
+   * list_work's live state show ("moved from lothlaptop (offline 6 min) to lothdesktop/slot2").
+   */
+  awayMove?: { at: string; line: string };
+  /** w2544: it names `machine` (its pin), so it waited for that computer instead of moving: its orchestrator was told once. */
+  awayKept?: { machine: string; at: string };
+  /**
    * w2358: the dispatcher's brief (start_agent's prompt) that made this timed work, or named its OS, when start_agent refused
    * it for that: needsTimed reads it as a note of that time, so decide_work queue and the room shares read the request as
    * start_agent did (the m5's room is no room for it; nor is beast's for one the brief puts on the Mac), and a later note

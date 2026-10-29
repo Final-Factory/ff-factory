@@ -1211,6 +1211,38 @@ online or frees up.
 - The first correction of this kind was w847 (the dispatcher asked Ben to re-run an installer; lothsahn: "When we say
   update the machines, do the update"), so an ask to run an installer or update a computer is refused the same way.
 
+### A computer away past the grace (w2544)
+
+lothsahn, 2026-10-29: "LothLaptop is getting shut down for the day, so watch for anyone getting stuck on it. That
+indicates a general scheduling problem--the dispatcher should not be scheduling work on offline computers--at least ones
+that have been offline for a few minutes or more. Make sure those get moved somewhere else".
+
+- **The grace** is `Agents.timedBlip()` (timing.unavailableIdleMinutes, default 5 min), the one w2048 set for timed legs.
+  Measured from the portal journal (2026-10-27..29): every drop came back within about 2¼ min, most within 1 to 20 s; the
+  longest, 133 s, was a portal restart. A computer is away from its last sight (`lastSeen`) when offline, from
+  `pause.since` when paused (`server/machineAway.ts` `awayOf`, `longAway`); a pause that ends within the grace is a blip.
+- **No new work there**: start_agent and stop_agent move_to refuse a computer away past the grace (`Agents.awayProblem`),
+  naming the computers with room, unless the request names it. New placement already skipped offline and paused
+  computers (holdReason), and timed legs widen past an offline class (w2055).
+- **Stuck work moves by itself** (`Agents.moveAwayWork`, every blocker-watch pass, `server/blockerWatch.ts` `awayMove`):
+  - a worker Blocked on that computer (a w2433 cut-off or w2443 pause gate) and not running: its machine gate is dropped
+    (`Orchestrators.dropAwayGates`) and it moves through the room move (`moveForRoom`) onto the computer placement picks;
+  - a message held for a worker there ("is offline", `server/sessions.ts` now hands offline holds to `roomMove` too):
+    after the grace the worker moves with the message, before it the message waits as before;
+  - a paused computer's held message was already handed back (w1532, `pauseHeld`);
+  - a Queued request (or timed leg) whose `queuedFor.needs` name only away computers: the needs are dropped
+    (`unpinAwayNeeds`), so it starts on the first computer that fits.
+  `moveDecision` (`server/resumeMove.ts`) gets `away`: the bench lock, a timed leg, unpushed or uncommitted work and no
+  branch no longer keep it there (nothing there can be fetched). The new worker starts from the pushed branch and the old
+  transcript, with a `[moved, w2544]` lead that says what may be lost (`awayLead`). Each move goes on the request's log
+  (`moved from lothlaptop (offline 6 min) to lothdesktop/slot2 (w2544)`) and its list_work live line for an hour
+  (`WorkItem.awayMove`, `shared/workState.ts` `AWAY_MOVE_SHOWN_MS`). A pair leg under way never moves alone.
+- **A request that names the computer stays** (its constraints "must run on X", w2521, or a machine pin): the dispatcher
+  gets one `[ledger] KEPT (w2544)` notice per computer (`WorkItem.awayKept`) to pass to its requester's orchestrator.
+- **A person's named computer** (lothsahn: "w2542 should move to LothDesktop", which the timing order refused twice):
+  the dispatcher passes the person's words in `pin_words` on start_agent or stop_agent move_to;
+  `Orchestrators.pinByPerson` sets `machinePin` with the words, and `timedOrderProblem` checks the pin before anything else.
+
 ### Merge on green, a pilot (w2045)
 
 lothsahn, 2026-10-24: "Have FF Factory merge green PRs itself with no model; the worker reports before the wait" (chosen over

@@ -69,6 +69,12 @@ export interface MoveFacts {
   prefs: PlacementPrefs;
   /** The computer the last piece of new work went to (spread's turn-taking). */
   last?: string;
+  /**
+   * w2544: its computer has been offline or paused past the grace ("lothlaptop (offline 6 min)"). What only that computer
+   * has can no longer be waited for, so its git state, bench lock and a timed leg's one-computer rule do not keep it there:
+   * the new session's hand-off says what may be lost. A pin to it (its brief names it) and a pair run under way still hold.
+   */
+  away?: string;
 }
 
 export type MoveDecision = { move: { to: string; why: string } } | { stay: string } | { none: string } | { requeuePair: { id: string; why: string } };
@@ -80,7 +86,7 @@ export type MoveDecision = { move: { to: string; why: string } } | { stay: strin
 export function moveDecision(f: MoveFacts): MoveDecision {
   const here = placeId(f.machine);
   if (!f.requests.length) return { none: 'it serves no open request' };
-  if (f.benchHeld) return { stay: `a timed run from its sandbox holds ${here}'s bench lock: its numbers compare only with ${here}'s own` };
+  if (f.benchHeld && !f.away) return { stay: `a timed run from its sandbox holds ${here}'s bench lock: its numbers compare only with ${here}'s own` };
   // w2304: a leg of a pair run under way (no leg has reported) never moves alone: its game is joined to the other legs', and
   // w2271's client leg was moved three times mid-run (09:14Z, 09:45Z, 11:04Z on 2026-10-26), each move cutting the run. It
   // keeps its own sandbox; once that went to other work (released) what it ran there is gone, so the pair starts again whole.
@@ -93,13 +99,13 @@ export function moveDecision(f: MoveFacts): MoveDecision {
   const pin = f.requests.find((r) => r.pinned?.length && r.pinned.every((p) => placeId(p) === here));
   if (pin) return { stay: `${pin.id} is pinned to ${here}` };
   const leg = f.requests.find((r) => r.timedLeg);
-  if (leg) return { stay: `${leg.id} is a timed leg (w1969): it builds and times both its sides on ${here}, and numbers from two computers do not compare` };
-  if (!f.branch) return { stay: `its branch is not known, so its work may exist only on ${here}` };
-  if (!f.released && f.git && f.git.dirty + f.git.untracked > 0 && !f.canSave) return { stay: `its sandbox has uncommitted work that ${here}'s daemon cannot save and push` };
+  if (leg && !f.away) return { stay: `${leg.id} is a timed leg (w1969): it builds and times both its sides on ${here}, and numbers from two computers do not compare` };
+  if (!f.branch && !f.away) return { stay: `its branch is not known, so its work may exist only on ${here}` };
+  if (!f.released && !f.away && f.git && f.git.dirty + f.git.untracked > 0 && !f.canSave) return { stay: `its sandbox has uncommitted work that ${here}'s daemon cannot save and push` };
   // Ahead counts only against its own remote branch: one tracking origin/master (or nothing) says nothing about what was pushed.
   const tracks = !!f.git?.upstream && f.git.upstream.replace(/^[^/]+\//, '') === f.branch;
-  if (f.git && !tracks) return { stay: `its branch ${f.branch} does not track its own remote branch (${f.git.upstream ? `it tracks ${f.git.upstream}` : 'no upstream'}): its commits may exist only on ${here}` };
-  if (f.git && (f.git.ahead ?? 0) > 0) return { stay: `${f.git.ahead} commit(s) on ${f.branch} are not pushed: only ${here} has them` };
+  if (f.git && !f.away && !tracks) return { stay: `its branch ${f.branch} does not track its own remote branch (${f.git.upstream ? `it tracks ${f.git.upstream}` : 'no upstream'}): its commits may exist only on ${here}` };
+  if (f.git && !f.away && (f.git.ahead ?? 0) > 0) return { stay: `${f.git.ahead} commit(s) on ${f.branch} are not pushed: only ${here} has them` };
   const kind: NeedKind = f.requests.some((r) => r.kind === 'game') ? 'game' : 'agent';
   const ids = f.requests.map((r) => r.id);
   const priority = lowestPriority(f.requests);

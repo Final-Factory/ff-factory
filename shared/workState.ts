@@ -778,7 +778,18 @@ function sleepingOf(mine: readonly SessionInfo[], f: Pick<WorkLiveFacts, 'queued
   return { state: 'sleeping', why: `until ${agentState(first, undefined, f.now).resumes!.replace(/^check-in /, '')} at ${first.id}'s check-in; it is stopped and holds no sandbox, agent slot or job` };
 }
 
+/** How long a move off a computer away past the grace (w2544, WorkItem.awayMove) stays on the request's live line. */
+export const AWAY_MOVE_SHOWN_MS = 60 * 60_000;
+
+/** A request's live state (list_work, the page), with its recent move off an away computer (w2544) said after why. */
 export function workLive(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: string) => Holds): WorkLive | undefined {
+  const l = workLiveOf(w, f, holdsFor);
+  const m = w.awayMove;
+  if (!l || !m || f.now - Date.parse(m.at) > AWAY_MOVE_SHOWN_MS) return l;
+  return { ...l, why: `${l.why}; ${m.line} at ${m.at.slice(11, 16)} UTC (w2544)` };
+}
+
+function workLiveOf(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: string) => Holds): WorkLive | undefined {
   if (!live(w)) return undefined;
   const holds = holdsFor ?? ((sid: string) => holdsOf(sid, f.items));
   const workers = w.sessionIds.map((id) => f.session(id)).filter((s): s is SessionInfo => !!s);
