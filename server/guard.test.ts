@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
-import { checkEditorSwitch, checkShell, sandboxGuard } from './guard.ts';
+import { checkEditorSwitch, checkShell, sandboxGuard, withoutTextArgs } from './guard.ts';
 
 const decide = async (g: ReturnType<typeof sandboxGuard>, tool_name: string, tool_input: unknown, cwd = '') => {
   const input = { hook_event_name: 'PreToolUse', tool_name, tool_input, tool_use_id: 'x', session_id: 's', transcript_path: '', cwd };
@@ -382,4 +382,43 @@ test('w1166: a PR into the retired develop is not merged or opened through gh pr
   assert.match(checkShell('gh pr merge 1579 --merge', ctx) ?? '', /This PR \(1579\) targets the Final Factory game repo's develop, which is retired.*gh pr edit 1579 --base master.*merge origin\/master into its branch/);
   // Without a resolver (checkShell's other callers), merges are not looked up.
   assert.equal(checkShell('gh pr merge 1579 --merge', { cwd: sb, gameRepos: ['https://github.com/example-org/example-game.git'], remotes }), undefined);
+});
+
+test('w2503: a kill or shutdown word inside a PR title, body or commit message is text, not a command', () => {
+  // w2474's worker had `ff-pr push` refused for the words "OOM kill" in its PR title, and reworded it to get through.
+  const text = [
+    'ff-pr push --base main --title "w2474: daemon unit OOMPolicy=continue, so an OOM kill of one Unity or node child does not stop it" --body-file "$TMPDIR/body.md"',
+    "gh pr create --base master --title 'w2474: survive an OOM kill of node' --body 'taskkill Unity.exe no longer needed'",
+    'git commit -m "w2474: an OOM kill of claude or node ends only that child"',
+    'git commit -m="kill node; shutdown /r"',
+    'gh pr comment 12 -b "pkill -f node was the old way"',
+    "git commit -F - <<'EOF'\nw2474: the OOM kill of node\n\ntaskkill //IM Unity.exe was the old way\nEOF",
+    "gh pr create --title x --body-file - <<'MSG'\nkill node; shutdown /r /t 0\nMSG",
+    "git commit -m @'\nw2474: an OOM kill of node\n'@",
+  ];
+  for (const cmd of text) assert.equal(checkShell(cmd), undefined, cmd);
+  // The command still runs what it runs: a kill outside the text, or text the shell runs, is judged as before.
+  const kills = [
+    'git commit -m "w2474: OOM kill" && taskkill //IM Unity.exe //F',
+    'gh pr create --title "x" --body "y"; pkill -f node',
+    'git commit -m "$(pkill -f node)"',
+    'git commit -m "`kill node`"',
+    'bash -c "pkill -f node"',
+    "sh -c 'kill node'",
+    'powershell -Command "Get-Process Unity | Stop-Process -Force"',
+    'pwsh -c "Stop-Process -Name node"',
+    "bash <<'EOF'\npkill -f node\nEOF",
+    'cat <<EOF\n$(pkill -f node)\nEOF',
+    'git commit -m "x" && shutdown /r /t 0',
+  ];
+  for (const cmd of kills) assert.ok(checkShell(cmd), cmd);
+});
+
+test('w2503: text arguments are blanked, everything else is left as written', () => {
+  assert.equal(withoutTextArgs('ff-pr push --title "OOM kill" --body-file b.md'), 'ff-pr push --title "" --body-file b.md');
+  assert.equal(withoutTextArgs("git commit -m 'kill node'"), 'git commit -m ""');
+  assert.equal(withoutTextArgs('git commit -m "$(kill node)"'), 'git commit -m "$(kill node)"');
+  assert.equal(withoutTextArgs('bash -c "kill node"'), 'bash -c "kill node"');
+  assert.equal(withoutTextArgs("git commit -F - <<'EOF'\nkill node\nEOF\ngit push"), "git commit -F - <<'EOF'\nEOF\ngit push");
+  assert.equal(withoutTextArgs("bash <<'EOF'\nkill node\nEOF"), "bash <<'EOF'\nkill node\nEOF");
 });
