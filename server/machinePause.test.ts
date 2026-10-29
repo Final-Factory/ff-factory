@@ -124,6 +124,33 @@ test('w2443: at a pause, a worker mid-turn is told once; one between turns is st
   assert.equal(t.told.length, 1, 'told once');
 });
 
+test('w2443, LothLaptop live check (2026-10-29): a worker between turns with nothing pending is saved and Blocked; one a person, check-in or message resumes is not', async () => {
+  const t = world();
+  // w2494's target: it ended its turn with a background job going, so no check-in or message would ever resume it.
+  t.worker('bg1', { live: true, requests: [['w1', 'active']] });
+  t.worker('person1', { live: true, requests: [['w2', 'active']] });
+  t.sessions.get('person1')!.waitingOn = { who: 'lothsahn', what: 'decide', at: '2026-10-29T00:00:00Z' };
+  t.worker('wake1', { live: true, requests: [['w3', 'active']] });
+  t.sessions.get('wake1')!.wakeAt = '2026-10-29T01:30:00Z';
+  t.worker('msg1', { live: true, requests: [['w4', 'active']] });
+  t.sessions.get('msg1')!.queuedSend = 'CI finished';
+  const p = new MachinePauses(t.d);
+  t.pause(PAUSED);
+  p.onPause('beast');
+  await settle();
+  await settle();
+  assert.deepEqual(t.stopped.sort(), ['bg1', 'msg1', 'person1', 'wake1'], 'every live worker there is stopped');
+  assert.equal(t.told.length, 0, 'none is woken');
+  assert.deepEqual(t.handed.map((x) => x.w), ['w1'], 'only the one nothing else would resume is Blocked on the pause');
+  assert.equal(t.handed[0].h.how, 'stopped between turns');
+  assert.match(t.handed[0].h.saved!, /saved as WIP commit abc1234def on sandbox\/slot5-w1532 and pushed/);
+  assert.equal(t.work.get('w1')!.status, 'blocked');
+  assert.equal(t.work.get('w3')!.status, 'active', 'its check-in, held by the pause, resumes it');
+  p.tick();
+  await settle();
+  assert.equal(t.handed.length, 1, 'blocked once');
+});
+
 test('w2443: a worker that stops by itself: stopped, its sandbox saved, its request Blocked on the pause with its branch and line', async () => {
   const t = world();
   t.worker('mid1', { live: true, mid: true, requests: [['w1', 'active'], ['w9', 'blocked']] });

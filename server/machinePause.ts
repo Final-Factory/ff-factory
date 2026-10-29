@@ -11,7 +11,10 @@
 //   pause (Orchestrators.pausedOff): when the machine runs again the blocker watch resumes that worker in its own sandbox,
 //   as after an offline machine (w2433). A pair run's leg there starts the run again elsewhere, its partner told (w2304).
 // - A worker between turns there is not woken for it. Its process (if any) is stopped; a message that would resume it (its
-//   check-in, CI, a person's reply) waits in the send queue for the unpause (the machine hold, w1376).
+//   check-in, CI, a person's reply) waits in the send queue for the unpause (the machine hold, w1376). With nothing like
+//   that pending (it ended its turn with a background job going, as w2494's target did on LothLaptop's live check,
+//   2026-10-29), its sandbox is saved and the requests it was working on are Blocked on the pause like a mid-turn one's:
+//   nothing else would resume it, and the request showed Stalled.
 // Lothsahn (2026-10-27, w2443): "Pausing a machine should stop existing runs on that machine. They should terminate in a
 // minute or two. Please make this fix so that pausing the machine gets workers to stop, upload, and quit quickly", and "The
 // worker harness should be authoritative and if the worker is nonresponsive, should kill the worker after a few minutes.
@@ -197,7 +200,12 @@ export class MachinePauses {
         return;
       }
       // Between turns: not woken. Its process stops; a message that would resume it waits for the unpause (the machine hold).
-      if (live && !this.handing.has(s.id)) this.d.stop(s.id, `Stopped by FF Factory: ${s.machineId} is ${pauseWhy(p)}. A message that would resume you waits until it runs again.`);
+      // With none pending (no person, check-in or queued message), the requests it was working on are Blocked on the pause.
+      if (live && !this.handing.has(s.id)) {
+        const picks = s.waitingOn || s.wakeAt || s.queuedSend ? [] : this.workingOn(s.id);
+        this.d.stop(s.id, `Stopped by FF Factory: ${s.machineId} is ${pauseWhy(p)}. ${picks.length ? `${picks.map((w) => w.id).join(', ')} wait${picks.length === 1 ? 's' : ''} Blocked on its pause, and you are resumed here when it runs again.` : 'A message that would resume you waits until it runs again.'}`);
+        if (picks.length) void this.blockAll(s, 'it was between turns when the machine was paused', 'stopped between turns', picks);
+      }
       return;
     }
     if (!t) {
