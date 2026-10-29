@@ -5,11 +5,12 @@ import { spawnSync } from 'node:child_process';
  * (`systemd-run --user --scope`), so they are not in the daemon's own cgroup.
  *
  * Why: the daemon's unit has `KillMode=process` (server/machineDeployLinux.ts) so that a restart leaves its agents and
- * editors running, and with that alone they all stayed in the unit's one cgroup. systemd-oomd (on by default on Ubuntu
- * desktops) kills a whole cgroup when memory and swap run out. On biscuit on 2026-10-28, Unity filled RAM and swap, and the
- * kills at 10:23 and 10:52 UTC took the daemon with them: the portal saw biscuit close its link at 10:23:11 and come back
- * 11 s later, which is the unit's RestartSec=10. In its own scope an editor (or an agent with its batch Unity) is what
- * gets killed, and the daemon and its link stay up.
+ * editors running, and with that alone they all stayed in the unit's one cgroup. On biscuit on 2026-10-28, Unity filled
+ * RAM and swap, the kernel's OOM killer ended an editor at 10:23 and another at 10:52 UTC, and systemd, whose default
+ * OOMPolicy=stop ends a unit when any of its processes is OOM-killed, stopped the daemon with them: the portal saw biscuit
+ * close its link at 10:23:11 and come back 11 s later, which is the unit's RestartSec=10. In its own scope an editor (or
+ * an agent with its batch Unity) is all that goes, and the daemon and its link stay up (the unit also has
+ * OOMPolicy=continue now, server/machineDeployLinux.ts).
  *
  * `--scope` runs the command in place: the process systemd-run starts IS the command after an exec, so the pid the
  * daemon keeps, its start time (machine/hostWatch.ts) and its stdin are the command's (measured in Ubuntu 24.04,

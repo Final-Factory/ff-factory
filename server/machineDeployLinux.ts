@@ -7,6 +7,12 @@
  * - `KillMode=process`: a restart or an update stops the daemon only. Its agent hosts (machine/agentHost.ts, w605) and
  *   the Unity editors it started run in the unit's cgroup, and systemd's default (control-group) would kill them all.
  *   A stop or an uninstall ends the agent hosts itself (pkill, as on a Mac).
+ * - `OOMPolicy=continue` (w2474): when the kernel's OOM killer ends a process in the unit's cgroup, systemd's default
+ *   (`stop`, systemd.service(5)) stops the whole unit, the daemon too. On biscuit on 2026-10-28 at 10:23 and 10:52 UTC the
+ *   kernel killed a Unity editor of 9.6 GB and then one of 13.4 GB, and systemd failed the daemon's unit with 'oom-kill'
+ *   (the ops worker's read of biscuit's journal). Editors and agent hosts now start in scopes of their own
+ *   (machine/linuxScope.ts); this covers what still runs in the unit (ones adopted from before, or started where no
+ *   user manager answers).
  * - `WantedBy=graphical-session.target`: the daemon starts with the user's desktop session, so it gets the session's
  *   DISPLAY / WAYLAND_DISPLAY and XAUTHORITY (the desktop imports them into the user manager) and Unity editors can
  *   open windows. Lingering (`loginctl enable-linger`) keeps the user manager, and so the daemon and its agents,
@@ -54,6 +60,7 @@ Environment=${unitWord(`PATH=${o.path}`)}
 Restart=always
 RestartSec=10
 KillMode=process
+OOMPolicy=continue
 StandardOutput=append:${unitPath(dir)}/logs/daemon.log
 StandardError=append:${unitPath(dir)}/logs/daemon.log
 
