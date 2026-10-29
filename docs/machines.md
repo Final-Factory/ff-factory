@@ -588,7 +588,7 @@ hand their jobs back to the dispatcher to be scheduled on other computers."). Wi
   | after | who | what |
   |---|---|---|
   | 0 s | daemon | every timed run there is cancelled (`TimedRunner.cancel`): its player ended, its bench ticket freed, its worker told "cancelled: <machine> was paused from its tray app …". A timed run that arrives while paused is refused the same way. |
-  | 0 s | portal | each worker there mid-turn is told once ("[FF Factory] PAUSE: …", `pauseNotice`): commit and push everything unfinished on its sandbox branch as a WIP commit in one call (no PR, no merge, no force push), release a lock, slot or player it holds, and end its turn with `wNNN: still open: paused on <machine>; branch <branch> pushed; <where it stopped>`. A worker between turns is not woken: its process is stopped. |
+  | 0 s | portal | each worker there mid-turn is told once ("[FF Factory] PAUSE: …", `pauseNotice`): commit and push everything unfinished on its sandbox branch as a WIP commit in one call (no PR, no merge, no force push), release a lock, slot or player it holds, and end its turn with `wNNN: still open: paused on <machine>; branch <branch> pushed; <where it stopped>`. A worker between turns is not woken: its process is stopped, and unless a person, a check-in or a queued message will resume it, its sandbox is saved and its requests are Blocked on the pause like a mid-turn one's (below). |
   | 60 s | portal | a worker still mid-turn has its turn interrupted (`PAUSE_GRACE_MS`). |
   | 60 s | daemon | every sandbox's Unity editor is asked to quit (`PAUSE_EDITOR_CLOSE_MS`), so its graceful close is over by the 90 s sweep. |
   | 75 s | portal | still running: its process and every process under it are stopped (`PAUSE_STOP_AFTER_MS`). |
@@ -605,7 +605,7 @@ hand their jobs back to the dispatcher to be scheduled on other computers."). Wi
   interrupted at 60 s and stopped at 75 s), `server/pauseStop.test.ts` (timed runs at once, a worker that ignores the stop, an
   editor and leftovers at 90 s, a real three-process tree ended whole), `server/orchestrators.test.ts` "w2443".
 - **Its requests wait Blocked on the pause and resume in their own sandboxes** (`Orchestrators.pausedOff`,
-  `WorkBlocker.pause`). When a worker's turn ends on a paused machine (or its process is gone), its sandbox's uncommitted work
+  `WorkBlocker.pause`). When a worker's turn ends on a paused machine (or its process is gone, or it was between turns with nothing pending to resume it: on LothLaptop's live check, 2026-10-29, a target that had ended its turn with a background job going was stopped and saved but left Stalled, so nothing resumed it), its sandbox's uncommitted work
   is saved on its branch and pushed (w656's `save_work`; while the daemon still sees its agent running there and refuses,
   the portal tries again every 5 s for up to 2 minutes, `SAVE_RETRY_MS`, `SAVE_RETRY_FOR_MS`), and each request it was working on is set Blocked on "<machine>
   running again (its pause)", its log naming the branch and the worker's line. The gate does not clear while the machine is
