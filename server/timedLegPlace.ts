@@ -201,3 +201,15 @@ export function timedRelocateStep(from: string, places: readonly Computer[], pre
   if (!idle) return undefined;
   return { to: idle.id, why: `${classText(idle)} became idle while it waited on ${classText(here)} ${waits}, which would idle every other slot there; a timed leg runs on the smallest idle computer${osText(platform)} (w2055, w2168)` };
 }
+
+/**
+ * A Queued timed leg pinned to its computers (w2521, server/machinePin.ts): timedLegStep among those alone, and never a
+ * widen: with none idle or freeable, or all offline, it waits on them, however idle another computer is.
+ */
+export function pinnedLegStep(a: LegInput, pin: { ids: readonly string[]; why: string }): LegStep {
+  const ids = pin.ids.map((id) => id.toLowerCase());
+  const step = timedLegStep({ ...a, places: a.places.filter((c) => ids.includes(c.id)) });
+  if ('start' in step || 'preempt' in step) return step;
+  const on = ids.join(' or ');
+  return { wait: [...ids], why: `it must run on ${on} only (${pin.why}): it waits Queued on ${on} and starts there by itself when ${ids.length > 1 ? 'one' : 'it'} can take it, never on another computer, however idle (w2521); ${step.why}` };
+}

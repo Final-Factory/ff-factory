@@ -1059,6 +1059,21 @@ and w1891 waited behind it there, and w1789 waited on LothDesktop behind shared 
   offline or unavailable too long"). Its order holds every build, so the baseline is played again there, and its worker is
   told that the numbers left behind do not compare. When no other computer can take it, the worker is told once to time it
   itself through `timed_place`. Every result names the one computer all its numbers come from.
+- **A leg pinned to one computer runs there or waits there** (w2521; lothsahn, 2026-10-29: "the placement queues it on
+  that machine only. It never falls back to an idle or big computer, and it says plainly that it is waiting on that
+  machine"). Work that must run on one named computer for a hardware reason (LothLaptop's G-SYNC panel, its GPU) carries a
+  pin (`server/machinePin.ts` `machinePinOf`): the request's `machinePin`, set by `timed_place`'s `machine` argument on the
+  leg it files, or its constraints' own words ("must run on X", "only on X", "X only", "needs X's ...", naming exactly one
+  known computer). A pin wins over every other rule: `decideTimedPlace` answers **here** only on the pinned computer and
+  otherwise **elsewhere**, Queued for it alone, saying whether it is busy, free or offline (before w2055's idle rule and
+  `same_machine`); `pinnedLegStep` (`server/timedLegPlace.ts`) starts or pre-empts on it alone and never widens; the w2046
+  room move (`moveFacts`) and the w2168 relocation keep it there; `start_agent` and the decide_work queue action refuse any
+  other computer, and a queue with no machines is Queued for the pin. `same_machine` means **this** computer: a leg for
+  another named computer is `machine`. Three misses before it (2026-10-28/29): w2501's worker on BEAST heard "here" from
+  the idle rule with "needs LothLaptop's G-SYNC panel" in its what; w2499 ("Must run on LothLaptop ...; no other
+  machine" in its constraints) was moved to m3 by the room move, which read only `queuedFor.needs`; w2448's worker on
+  biscuit put "Must run on LothLaptop" in `same_machine` and heard "here". Tests: `w2521MachinePin.test.ts` and the w2521
+  case in `orchestrators.test.ts`.
 - **A result follows its request** (w2411; lothsahn: "File a fix so timed-run results follow the request to its new
   worker"). A run's messages go to the worker that filed it only while that worker still holds one of the run's requests;
   once FF Factory has moved the request off it, they go to the request's newest live worker (`server/timedDelivery.ts`

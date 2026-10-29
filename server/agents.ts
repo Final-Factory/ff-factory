@@ -105,7 +105,8 @@ import { type HostHealthMonitor } from './hostHealth.ts';
 import { describeCleanup, describeCleanupItems, describeCleanupLog } from './cleanup.ts';
 import type { BuildHold, HostHealth, TimedVerdict } from '../shared/types.ts';
 import { decideTimedPlace, fleetLoad, isSmallTimed, smallTimedStates, timedAskMark, unavailableWait, TIMED_VERDICT_MS, TIMED_WAIT_IDLE_MIN } from './timedAsk.ts';
-import { notIdle, reachesBig, timedEligible, timedLegStep, timedRelocateStep, timedStartProblem, type LegStep, type Occupant } from './timedLegPlace.ts';
+import { machinePinOf, pinFromText, pinRefusal, type MachinePin } from './machinePin.ts';
+import { notIdle, pinnedLegStep, reachesBig, timedEligible, timedLegStep, timedRelocateStep, timedStartProblem, type LegStep, type Occupant } from './timedLegPlace.ts';
 import { machineAskProblem } from '../shared/machineAsk.ts';
 import { releaseBranchAskProblem } from '../shared/releaseBranchAsk.ts';
 import { StandingAgents } from './standing.ts';
@@ -250,7 +251,7 @@ export const noTimedWaitNotice = (id: string, line: string, machine: string, why
 
 const REQUEST_PAIR_TOOL = `Ask for a check that needs several computers at once (w1945): a two-machine multiplayer or determinism check, a host and its clients. It files ONE pair request whose legs the dispatcher starts together, a new worker on each computer, as soon as that many computers have room at once (never one leg at a time), and Blocks your request on its report, as blocked_on with reports does: commit and push, then end your turn with a "wNNN: still open: blocked on <the pair request>" line. Your sandbox is released at once for other work while you wait, and the host leg's result (a line "For wNNN:") resumes you. what: one line; brief: what the legs run (the branch or commit, the scenario, what passes, where the result goes), since each leg is a new worker; legs: 2 by default; cross_os only for the reasons it names (w1692; without it no leg goes on a Mac, and with it a Mac only hosts); timed when a leg takes timing measurements (never on the m5); steam (w2459) when the legs need Steam (a lobby, a Steam host or join): its legs then go only on computers whose Steam client is signed in, a different Steam account on each, and while too few computers are, it is Blocked on Steam with each computer and what it lacks named (words such as "lobby" or "Steam join" in what or brief set it too; steam "none" says they do not). One open pair run per request: asked again, you wait on the one there is, unless it is spent (w2041): a leg already reported, a leg's computer is offline or its worker errored, or you pass retry: true. Then that run is cancelled and a fresh one is filed, with new legs on other computers than the failed ones (avoid adds computers you saw fail, such as one whose Tailscale is stuck), and only the fresh run's report resumes you. pr and commit (w2057): the pull request and the head commit the legs run (default: the pull request named in what or brief, else your request's one open pull request). A pull request with an open pair run (yours or one an orchestrator filed) is never run twice: you wait on that one. One whose pair run finished on that commit is answered with its result and nothing is filed (retry: true runs it again). When the run finishes, its result comes with your resume. Never ask an orchestrator in your report for a pair run: nobody reads that as a filing.`;
 
-const TIMED_PLACE_TOOL = `Ask where a timed leg runs BEFORE you take an exclusive bench ticket for it (w1969, lothsahn: "every time a worker needs an exclusive lock it should ask the dispatcher"): an exclusive turn idles every other slot of its computer, so a leg from a big computer (BEAST, LothDesktop) goes to a small one (LothLaptop, m3, biscuit; never m5). On a big computer the harness refuses bench_queue.py timed, --timed, bench_lock --timing, unity-slot --bench exclusive and the bench scripts (probe_ab_win.sh, cpu_budget_run.sh, ...) until you asked; a small computer needs no ask. It answers "here" (take your ticket as before; it holds 12 h) or "elsewhere". Elsewhere for a Windows player A/B (w1996: a save played by two builds, probe_ab_win.sh's legs) names a computer for timed_run: build both players here under shared tickets, call timed_run, and that computer's daemon times them under its own exclusive ticket, with no new worker and no rebuild there. Elsewhere for anything else timed (via "leg": a snippet timed in the editor, a Performance test, a profiler capture, a Mac player): FF Factory files the leg as its own request, Queued for the small computers (a big one only when none of them can take it: offline past a wait that grows with the fleet's load, held, or without a game sandbox; w2048), whose new worker builds and times BOTH sides there and reports to you, and Blocks your request on that report (as request_pair does): commit and push, then end your turn. what: the leg in one line; brief: what it runs, as a new worker needs it (the branch and the commit of each side, the save, the script and its settings, what to report); platform: windows or mac when the leg needs one (default any); same_machine: only when its numbers must come from this computer (a side of the A/B already ran here), and why; via: timed_run for a Windows player A/B, leg for anything else (unset: timed_run when a computer takes one, and the answer says when to ask again with leg). cancel (w2442): a timed run id ("tr_..."), of your request or of one it names, to stop it instead of asking: its player ends, its bench ticket goes back and its worker is told why (what: the reason).`;
+const TIMED_PLACE_TOOL = `Ask where a timed leg runs BEFORE you take an exclusive bench ticket for it (w1969, lothsahn: "every time a worker needs an exclusive lock it should ask the dispatcher"): an exclusive turn idles every other slot of its computer, so a leg from a big computer (BEAST, LothDesktop) goes to a small one (LothLaptop, m3, biscuit; never m5). On a big computer the harness refuses bench_queue.py timed, --timed, bench_lock --timing, unity-slot --bench exclusive and the bench scripts (probe_ab_win.sh, cpu_budget_run.sh, ...) until you asked; a small computer needs no ask. It answers "here" (take your ticket as before; it holds 12 h) or "elsewhere". Elsewhere for a Windows player A/B (w1996: a save played by two builds, probe_ab_win.sh's legs) names a computer for timed_run: build both players here under shared tickets, call timed_run, and that computer's daemon times them under its own exclusive ticket, with no new worker and no rebuild there. Elsewhere for anything else timed (via "leg": a snippet timed in the editor, a Performance test, a profiler capture, a Mac player): FF Factory files the leg as its own request, Queued for the small computers (a big one only when none of them can take it: offline past a wait that grows with the fleet's load, held, or without a game sandbox; w2048), whose new worker builds and times BOTH sides there and reports to you, and Blocks your request on that report (as request_pair does): commit and push, then end your turn. what: the leg in one line; brief: what it runs, as a new worker needs it (the branch and the commit of each side, the save, the script and its settings, what to report); platform: windows or mac when the leg needs one (default any); machine (w2521): the one computer the leg must run on for a hardware reason (its display, its GPU, its OS; "lothlaptop" for the G-SYNC/VRR screen): it runs there or waits Queued there, never on an idle or bigger computer ("must run on X" in the request's constraints, or in what, brief or same_machine, pins it the same way); same_machine: only when its numbers must come from THIS computer (a side of the A/B already ran here), and why; via: timed_run for a Windows player A/B, leg for anything else (unset: timed_run when a computer takes one, and the answer says when to ask again with leg). cancel (w2442): a timed run id ("tr_..."), of your request or of one it names, to stop it instead of asking: its player ends, its bench ticket goes back and its worker is told why (what: the reason).`;
 
 const MESSAGE_PAIR_TOOL = `For a leg of a pair run (w1945): send a message to the workers of the other legs of your pair run (where the host listens and on which commit, that a client joined, that your leg failed). It reaches them as a message, which resumes a leg that ended its turn; their messages come back to you the same way.`;
 
@@ -1656,7 +1657,9 @@ export class Agents {
     const here = places.find((p) => p.id === placeId(machineId));
     const timedRun = (this.timedRuns?.windowsTargets() ?? []).filter((t) => t.online && t.offers && !t.held).map((t) => t.id);
     const wait = this.timedBlip();
+    const pinned = this.timedPinFor(info, a, typeof a.request === 'string' && a.request.trim() ? a.request : undefined);
     const d = decideTimedPlace({
+      ...(pinned ? { pinned } : {}),
       here,
       places,
       prefs: this.placement(),
@@ -1683,7 +1686,7 @@ export class Agents {
       this.orchestrators.noteTimedAsk(info.id, request, `timed leg ask (w1969) from worker ${info.id.slice(0, 8)} on ${machineId}: to ${d.timedRun} by timed_run (w1996): ${d.why} ("${clip(what, 80)}")`);
       text = `Elsewhere (w1969, w1996): ${d.why}. Build both players here (a build takes a shared ticket), then call timed_run with machine "${d.timedRun}": its daemon times both there, interleaved, under that computer's own exclusive ticket, and the table and logs come back to you; no worker starts there and nothing is rebuilt. Take no exclusive ticket here.${d.choose ? ` That is for a Windows player A/B (a save played by two builds, probe_ab_win.sh's legs). For anything else timed (a snippet timed in the editor, a Performance test, a profiler capture, a Mac player), call timed_place again with via "leg": a new worker on a small computer then builds and times it.` : ''}`;
     } else {
-      const leg = this.orchestrators.fileTimedLeg(info.id, { what, brief: String(a.brief ?? ''), from: machineId, needs: d.needs ?? [], why: d.why, ...(request ? { request } : {}), ...(platform ? { platform } : {}) });
+      const leg = this.orchestrators.fileTimedLeg(info.id, { what, brief: String(a.brief ?? ''), from: machineId, needs: d.needs ?? [], why: d.why, ...(request ? { request } : {}), ...(platform ? { platform } : {}), ...(pinned && d.pinned ? { pinned } : {}) });
       this.setTimedVerdict(info, { verdict: 'elsewhere', why: d.why, until, leg: leg.id });
       this.blockerWatch?.kick();
       text = `Elsewhere (w1969): ${d.why}. ${leg.text}`;
@@ -3045,7 +3048,8 @@ export class Agents {
           priority: w.priority,
           kind: needsOf(w),
           ...(first ? { first } : {}),
-          ...(w.queuedFor?.needs?.length ? { pinned: w.queuedFor.needs } : {}),
+          // w2521: its constraints' "must run on X" pins it too (w2499 went to m3 by this move at 02:48Z on 2026-10-29).
+          ...(w.queuedFor?.needs?.length ? { pinned: w.queuedFor.needs } : this.pinOf(w) ? { pinned: this.pinOf(w)!.ids } : {}),
           ...(w.timedLeg ? { timedLeg: true } : {}),
           ...(mine >= 0 ? { pair: { leg: mine + 1, others, crossOs: !!w.pair!.crossOs, ...(w.pair!.avoid ? { avoid: w.pair!.avoid } : {}), ...(livePair(w) ? { live: true } : {}) } } : {}),
         };
@@ -3226,7 +3230,11 @@ export class Agents {
     const platform = leg.platform ?? (os.length === 1 && os[0] ? os[0] : undefined);
     const occupants: Record<string, Occupant[]> = {};
     for (const p of places) if (p.online && !p.noTimedRuns) occupants[p.id] = this.preemptOccupants(p.id);
-    const step = timedLegStep({ id: w.id, priority: w.priority, ...(platform ? { platform } : {}), places, prefs: this.placement(), occupants, now: Date.now(), blipMs: this.timedBlip().ms });
+    const input = { id: w.id, priority: w.priority, ...(platform ? { platform } : {}), places, prefs: this.placement(), occupants, now: Date.now(), blipMs: this.timedBlip().ms };
+    // w2521: a leg pinned to its computer (a display, a GPU) starts or waits there alone, and never widens.
+    const pin = this.pinOf(w);
+    if (pin) return { step: pinnedLegStep(input, pin), big: false };
+    const step = timedLegStep(input);
     const ids = 'widen' in step ? step.widen : 'wait' in step ? step.wait : [];
     return { step, big: reachesBig(ids, places) };
   }
@@ -3245,6 +3253,9 @@ export class Agents {
     // for a shared ticket behind w2257's exclusive one, when LothLaptop became idle at 07:23Z on 2026-10-26; nothing moved them.
     const kind = leg ? 'timed' : timedKind(needsTimed(w));
     if (!kind || w.status === 'queued' || !isOpen(w) || this.legStarting.has(w.id)) return undefined;
+    // w2521: work pinned to its computer is never moved to an idle one.
+    const pin = this.pinOf(w);
+    if (pin) return { stays: `it must run on ${pin.ids.join(' or ')} (${pin.why})` };
     const live = w.sessionIds.map((id) => this.store.sessions.get(id)).filter((s): s is SessionInfo => !!s && s.kind === 'worker' && !!s.machineId && occupies(s, !!this.sessions.sessions.get(s.id)?.live, Date.now()));
     if (live.length !== 1) return undefined;
     const info = live[0];
@@ -4670,6 +4681,46 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
     return refusal;
   }
 
+  /** Every machine id the portal knows (w2521: the names a machine pin may use). */
+  knownMachines(): string[] {
+    return [...this.store.machines.keys()].map(placeId);
+  }
+
+  /** The computers request `w` must run on (w2521, server/machinePin.ts), or undefined: anywhere. */
+  pinOf(w: WorkItem | undefined): MachinePin | undefined {
+    return machinePinOf(w, this.knownMachines());
+  }
+
+  /**
+   * timed_place's pin (w2521), first that names one: its `machine` argument; the asking request's own pin (its constraints'
+   * "must run on X"); "must run on X" or "needs X's ..." in its same_machine, what or brief (w2448's worker put "Must run on
+   * LothLaptop" in same_machine on biscuit, w2501's "needs LothLaptop's G-SYNC panel" in what on BEAST). Throws on a machine
+   * the portal does not know or one that takes no timed runs.
+   */
+  private timedPinFor(info: SessionInfo, a: Record<string, unknown>, request: string | undefined): { id: string; why: string } | undefined {
+    const known = this.knownMachines();
+    let pin: { id: string; why: string } | undefined;
+    if (typeof a.machine === 'string' && a.machine.trim()) {
+      const id = placeId(a.machine);
+      if (!known.includes(id)) throw new Error(`machine "${a.machine}" is no computer FF Factory knows: one of ${known.join(', ')}`);
+      pin = { id, why: `its worker named ${id} (timed_place machine)` };
+    }
+    if (!pin) {
+      const own = this.pinOf(this.orchestrators.timedAsker(info.id, request));
+      if (own?.ids.length === 1) pin = { id: own.ids[0], why: own.why };
+    }
+    for (const [key, field] of [['same_machine', 'its same_machine'], ['what', 'its what'], ['brief', 'its brief']] as const) {
+      if (pin) break;
+      const text = typeof a[key] === 'string' ? (a[key] as string) : undefined;
+      const ids = pinFromText(text, known);
+      if (ids.length === 1) pin = { id: ids[0], why: `${field}: "${text!.replace(/\s+/g, ' ').trim().slice(0, 160)}"` };
+    }
+    if (!pin) return undefined;
+    const p = this.places().find((c) => c.id === pin!.id);
+    if (p?.noTimedRuns) throw new Error(`${pin.id} takes no timed runs (${p.noTimedRuns}; w1861), so a timed leg cannot be pinned there (${pin.why}). Ask the person who set that what to do instead.`);
+    return pin;
+  }
+
   /** The refusal for timed or exclusive-lock work pinned to a computer that takes none (w1861, w1872; placement.ts timedPinRefusal). */
   private timedPinProblem(on: string | undefined, t: TimedKind | false): string | undefined {
     return on && t ? timedPinRefusal(on, this.places(), this.placement(), t) : undefined;
@@ -4690,6 +4741,8 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
       return claim ? `${target} is kept for timed work that waits for it: ${claim}. Start ${w?.id ?? 'this'}, which is not timed work, on another computer (w2277: a small computer that takes timed runs goes to waiting timed work first; it stays off placement.prefer for overflow otherwise).` : undefined;
     }
     if (w?.queuedFor?.needs?.length && !w.timedLeg && w.queuedFor.needs.some((n) => placeId(n) === target)) return undefined;
+    // w2521: work pinned to its computer goes there, whatever is idle elsewhere.
+    if (this.pinOf(w)?.ids.includes(target)) return undefined;
     const platform = t === 'timed:win32' ? 'win32' : t === 'timed:darwin' ? 'darwin' : w?.timedLeg?.platform;
     return timedStartProblem(w?.id ?? 'this', target, this.places(), this.placement(), platform);
   }
@@ -4957,6 +5010,10 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
             // Timed or exclusive-lock work pinned to a computer that takes none goes back to the caller (w1861, w1872).
             const timedPin = this.timedPinProblem(this.machineOf(a.sandbox, a.machine), timedKind(needsTimed(w, a.prompt)));
             if (timedPin) throw new Error(this.keepTimedBrief(w, a.prompt, timedPin));
+            // w2521: work that must run on one computer (its constraints: "must run on LothLaptop") starts there or nowhere.
+            const pinTarget = this.machineOf(a.sandbox, a.machine);
+            const pinNo = w && pinTarget ? pinRefusal(w.id, this.pinOf(w), pinTarget) : undefined;
+            if (pinNo) throw new Error(pinNo);
             // w2168: timed work is placed by the timing order when it starts too: an idle small computer first, never a busy big one.
             const timedOrder = a.extra_agent ? undefined : this.timedOrderProblem(this.machineOf(a.sandbox, a.machine), w, a.prompt);
             if (timedOrder) throw new Error(this.keepTimedBrief(w, a.prompt, timedOrder));

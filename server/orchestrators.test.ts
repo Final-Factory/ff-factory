@@ -7939,3 +7939,46 @@ test('w2459: request_pair steam "none" files a pair with no Steam mark, whatever
   assert.equal(store.work.get(id)!.pair!.steam, undefined);
   assert.equal(store.work.get(id)!.status, 'new');
 });
+
+// ---------------------------------------------------------------- w2521: work that must run on one named computer
+
+test('w2521: a request whose constraints say "Must run on LothLaptop" is refused on another computer by start_agent, queued only for lothlaptop, and its timed_place leg is pinned there', async (t) => {
+  const { store, agents, o, dispatcher, call } = await setupOnMachine(t);
+  store.putMachine({ ...store.machines.get('pc')!, platform: 'win32' });
+  store.putMachine({ ...store.machines.get('pc')!, id: 'lothlaptop', name: 'LothLaptop', platform: 'win32', sandboxes: [] });
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [
+    { id: 'w1', title: 'LothLaptop leg 2: adaptive vSync step-up', constraints: 'Must run on LothLaptop (its RTX 4070 and the 240 Hz panel); no other machine.' },
+    { id: 'w2', title: 'G-SYNC detection', status: 'active' },
+  ]);
+  // Case 2 (w2499 at 02:48Z on 2026-10-29): placed on another computer with room. Now refused, saying where it must go.
+  const refused = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Run the leg', title: 'w1: leg', work_id: 'w1' });
+  assert.equal(refused.isError, true);
+  assert.match(refused.text, /w1 must run on lothlaptop only \(w2521: its constraints: "Must run on LothLaptop/);
+  // Queued with no machines: queued for lothlaptop alone; with another machine: refused.
+  const wrong = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'queue', note: 'busy', needs: ['pc'] });
+  assert.equal(wrong.isError, true);
+  assert.match(wrong.text, /queue it for lothlaptop, not pc/);
+  agentsRoom(agents, []);
+  const queued = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'queue', note: 'LothLaptop is busy' });
+  assert.equal(queued.isError, false, queued.text);
+  assert.deepEqual([store.work.get('w1')!.status, store.work.get('w1')!.queuedFor?.needs], ['queued', ['lothlaptop']]);
+
+  // Case 1 (w2501's worker 9bdafcfe at 05:49Z): a worker on pc asks timed_place for a leg that needs LothLaptop's panel.
+  agentsRoom(agents, ['pc']);
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'G-SYNC work', title: 'w2: G-SYNC', work_id: 'w2' });
+  assert.equal(started.isError, false, started.text);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  await until('its first turn', () => store.sessions.get(id)!.status === 'idle');
+  const place = (agents as unknown as { timedPlaceTool: (m: string, i: SessionInfo, a: Record<string, unknown>) => string }).timedPlaceTool.bind(agents);
+  const text = place('pc', store.sessions.get(id)!, { what: "w2501 G-SYNC A/B on PR #2795: needs LothLaptop's G-SYNC panel (BEAST is 60 Hz, …", brief: 'Time base and head on the G-SYNC panel.', platform: 'windows' });
+  assert.match(text, /^Elsewhere \(w1969\): it must run on lothlaptop only \(its what: .*\): the leg waits on lothlaptop/);
+  const leg = [...store.work.values()].find((w) => w.timedLeg?.for === 'w2')!;
+  assert.deepEqual(leg.queuedFor?.needs, ['lothlaptop']);
+  assert.deepEqual(leg.machinePin?.ids, ['lothlaptop']);
+  assert.match(leg.constraints ?? '', /^Must run on lothlaptop only \(w2521/);
+  assert.deepEqual(agents.pinOf(leg)?.ids, ['lothlaptop'], 'its own constraints pin it again when read back');
+  // An unknown machine name is refused.
+  assert.throws(() => place('pc', store.sessions.get(id)!, { what: 'x', machine: 'gsyncbox' }), /machine "gsyncbox" is no computer FF Factory knows/);
+  void o;
+});

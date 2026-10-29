@@ -179,6 +179,8 @@ export interface TimedPlaceDecision {
   choose?: boolean;
   /** here on a big computer because no small one can take it (w2048): the small computers and why each cannot. */
   bigFallback?: string;
+  /** w2521: the leg must run on its `needs` alone and never widens to another computer. */
+  pinned?: boolean;
   why: string;
 }
 
@@ -211,6 +213,11 @@ export interface TimedPlaceInput {
   waitWhy?: string;
   /** The asking worker's request is a timed leg already widened to the big computers (w2048): it times where it is. */
   widenedLeg?: string;
+  /**
+   * w2521: the one computer the leg must run on (timed_place's `machine`, the asking request's constraints, or "must run on X"
+   * in its what, brief or same_machine) and why. It runs there or waits there, never anywhere else (server/machinePin.ts).
+   */
+  pinned?: { id: string; why: string };
 }
 
 /**
@@ -224,6 +231,14 @@ export function decideTimedPlace(a: TimedPlaceInput): TimedPlaceDecision {
   const here = a.here;
   const os = a.platform === 'win32' ? ' on Windows' : a.platform === 'darwin' ? ' on macOS' : '';
   if (a.exempt) return { verdict: 'here', why: `the ${a.exempt === 'release' ? 'urgent release lane' : 'nightly'} times on its own computer (w1832)` };
+  if (a.pinned) {
+    // w2521: before every other rule, w2055's idle computer and same_machine included: a pin is a hardware need, not a cost.
+    const id = a.pinned.id;
+    if (here?.id === id) return { verdict: 'here', pinned: true, why: `it must run on ${id} (${a.pinned.why}), and this is ${id}` };
+    const p = a.places.find((c) => c.id === id);
+    const state = !p ? 'not known to the portal now' : !p.online ? 'offline now' : hasRoom(p) ? 'free now' : `busy now (${p.live} of ${p.maxAgents} agent slot${p.maxAgents === 1 ? '' : 's'} live)`;
+    return { verdict: 'elsewhere', needs: [id], pinned: true, why: `it must run on ${id} only (${a.pinned.why}): the leg waits on ${id}, which is ${state}, and starts there by itself when ${id} can take it; it never falls back to another computer, however idle (w2521)` };
+  }
   if (!here) return { verdict: 'here', why: 'the portal does not know this computer: time here as before' };
   const small = smallTimedRank(a.places, a.prefs, a.platform, here.id, a.now, a.waitMs);
   const smallText = small.map(sizeText).join(' > ');

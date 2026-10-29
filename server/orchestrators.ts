@@ -55,6 +55,7 @@ import { capacityBlockProblem, capacityWaitIn, needsOf, needsTimed, pairRoom, pa
 import { mentionsSteam, STEAM_READ } from '../shared/steam.ts';
 import { mentionsMenus, MENUS_READ } from '../shared/desktop.ts';
 import type { HandBack } from './machinePause.ts';
+import { machinePinOf } from './machinePin.ts';
 import { heldText, roomEnough, roomForWork, roomIds, roomStood, timedKindOf, unusableText, type RoomNow, type TimedFacts, type TimedKind } from './placement.ts';
 import { TIMED_LEG_WAIT_MS, unavailableText, bigFallbackRules, type SmallState } from './timedAsk.ts';
 import type { LegStep, Occupant } from './timedLegPlace.ts';
@@ -2885,6 +2886,14 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       if (gated) throw new Error(`${gated} It waits for those, not for capacity: leave it blocked.`);
       // Queued is capacity only (w643): with a computer that could take it free, it is started or blocked, not queued.
       const needs = [...new Set((input.needs ?? []).map((n) => n.trim().toLowerCase()).filter(Boolean))];
+      // w2521: work that must run on one computer (its constraints: "must run on LothLaptop") waits there and nowhere else:
+      // queued with no machines it is queued for its own; with others it is refused.
+      const pin = machinePinOf(w, this.machineIds());
+      if (pin) {
+        const off = needs.filter((n) => !pin.ids.includes(n));
+        if (off.length) throw new Error(`${w.id} must run on ${pin.ids.join(' or ')} only (w2521: ${pin.why}): queue it for ${pin.ids.join(' or ')}, not ${off.join(', ')}`);
+        if (!needs.length) needs.push(...pin.ids);
+      }
       // w1872: timed work never waits on a computer that takes no timed runs (m5), even when its worker asked for it by name.
       const noTimed = this.noTimedIn(w, needs);
       if (noTimed) throw new Error(noTimed);
@@ -3720,13 +3729,20 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    * Queued for the small computers `needs` names (best first), with the asking request Blocked on its report. One open leg
    * per request: asked again, it waits on the one there is. Returns the leg's id and what the worker is told.
    */
-  fileTimedLeg(sessionId: string, a: { what: string; brief: string; from: string; needs: string[]; why: string; request?: string; platform?: string }): { id: string; text: string } {
+  fileTimedLeg(sessionId: string, a: { what: string; brief: string; from: string; needs: string[]; why: string; request?: string; platform?: string; pinned?: { id: string; why: string } }): { id: string; text: string } {
     const w = this.workerRequest(sessionId, a.request, 'timed_place');
     const what = clip(a.what.replace(/\s+/g, ' ').trim(), 100);
     const brief = a.brief.trim();
     if (!what || !brief) throw new Error('give what (one line: "RoundRobin belt output A/B on PR #2347") and brief (what the leg runs, as a new worker needs it: the branch and the commits of both sides, the save, the script and its settings, what to report)');
     const open = [...this.store.work.values()].find((x) => x.timedLeg?.for === w.id && isOpen(x));
-    const leg = open ?? this.newTimedLeg(w, sessionId, { what, brief, from: a.from, needs: a.needs, why: a.why, ...(a.platform ? { platform: a.platform } : {}) });
+    const leg = open ?? this.newTimedLeg(w, sessionId, { what, brief, from: a.from, needs: a.needs, why: a.why, ...(a.platform ? { platform: a.platform } : {}), ...(a.pinned ? { pinned: a.pinned } : {}) });
+    // w2521: asked again with a pin, an open leg still Queued takes it (it then waits on that computer alone).
+    if (open && a.pinned && open.status === 'queued' && !open.machinePin) {
+      open.machinePin = { ids: [a.pinned.id], why: a.pinned.why };
+      open.queuedFor = { at: open.queuedFor?.at ?? open.createdAt, needs: [a.pinned.id] };
+      this.stamp(open, `pinned to ${a.pinned.id} by timed_place (w2521): ${a.pinned.why}; it waits there and nowhere else`);
+      this.store.putWork(open);
+    }
     const blocked = this.workerBlocked(sessionId, { request: w.id, reports: [leg.id], what: `timed leg ${leg.id}: ${what}` });
     const head = open
       ? `${w.id} already has an open timed leg, ${leg.id} (${leg.status}: ${clip(leg.title, 80)}); you wait on it, and nothing new was filed.`
@@ -3735,6 +3751,20 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     this.store.putWork(w);
     console.log(`timed ask (w1969): ${w.id} worker ${sessionId.slice(0, 8)} on ${a.from}: elsewhere -> ${leg.id} queued for ${a.needs.join(' > ')}: ${a.why}`);
     return { id: leg.id, text: `${head} ${blocked} Do not take an exclusive ticket here for it. Commit and push your work before the turn ends, the commits the leg times included (it fetches them from origin): your sandbox is then released for other work, and the leg's report resumes you, perhaps in another sandbox, a partial one too (w2357: a side timed, the other waiting on your commit).` };
+  }
+
+  /** The request a timed_place ask is for (w2521: its machine pin), or undefined when the worker serves none. */
+  timedAsker(sessionId: string, request: string | undefined): WorkItem | undefined {
+    try {
+      return this.workerRequest(sessionId, request, 'timed_place');
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Every machine id the portal knows (w2521: the names a machine pin may use). */
+  machineIds(): string[] {
+    return [...this.store.machines.keys()].map((id) => id.toLowerCase());
   }
 
   /** The asking worker's request when it is a timed leg already widened to the big computers (w2048), else undefined. */
@@ -3761,13 +3791,14 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   }
 
   /** The request fileTimedLeg files (w1969): the asking request's people and priority, a game sandbox, Queued for the small computers. */
-  private newTimedLeg(w: WorkItem, sessionId: string, x: { what: string; brief: string; from: string; needs: string[]; why: string; platform?: string }): WorkItem {
+  private newTimedLeg(w: WorkItem, sessionId: string, x: { what: string; brief: string; from: string; needs: string[]; why: string; platform?: string; pinned?: { id: string; why: string } }): WorkItem {
     const now = this.now().toISOString();
     const title = clip(`Timed leg for ${w.id}: ${x.what}`, 120);
     const brief = clip(
       [
         x.brief,
         '',
+        ...(x.pinned ? [`It must run on ${x.pinned.id} only (w2521: ${x.pinned.why}): FF Factory starts it there and nowhere else.`, ''] : []),
         `FF Factory filed this for worker ${sessionId} on ${w.id} (w1969, timed_place): its timed leg, moved off a big computer so its exclusive bench turn idles few slots (${x.why}). Build and time BOTH sides of the comparison on the computer you run on, under its exclusive bench ticket (the bench queue, as the game repo's scripts take it): numbers compare only with the same computer's own. ${w.id}'s worker is Blocked on this request's report: report the result with a line "For ${w.id}:" (each side's commit, the computer, the table, where the logs are), then end with DONE: <this request> once the run is over. Do not merge ${w.id}'s pull request: its own worker does. ${w.id}'s worker is stopped while it waits, and its sandbox goes to other work (w2357): it resumes when you report, perhaps in a new sandbox, so take both sides' commits from the branches pushed to origin, never from its sandbox. If a side is not pushed yet, time the side you can, report it with a line "For ${w.id}:" saying what you need (the branch and commit), and block on ${w.id} reporting: that partial report resumes its worker, and its "For <this request>:" reply resumes you.`,
       ].join('\n'),
       8000,
@@ -3776,7 +3807,8 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       id: `w${++this.store.workSeq}`,
       title,
       brief,
-      constraints: `a timed leg (w1969): runs on ${x.needs.join(' or ')}`,
+      constraints: x.pinned ? `Must run on ${x.pinned.id} only (w2521: ${x.pinned.why}); never on any other computer, however idle` : `a timed leg (w1969): runs on ${x.needs.join(' or ')}`,
+      ...(x.pinned ? { machinePin: { ids: [x.pinned.id], why: x.pinned.why } } : {}),
       priority: w.priority,
       relatedIds: [w.id],
       keys: textKeys(title, this.knownBranches()),
