@@ -181,6 +181,8 @@ export interface TimedPlaceDecision {
   bigFallback?: string;
   /** w2521: the leg must run on its `needs` alone and never widens to another computer. */
   pinned?: boolean;
+  /** w2610: the asker is itself the timed leg: an "elsewhere" moves it (needs), and never files a new leg. */
+  ownLeg?: string;
   why: string;
 }
 
@@ -214,6 +216,13 @@ export interface TimedPlaceInput {
   /** The asking worker's request is a timed leg already widened to the big computers (w2048): it times where it is. */
   widenedLeg?: string;
   /**
+   * w2610: the asking worker's request is itself a timed leg (filed by timed_place): its placement already put this worker
+   * here, so the answer follows it and never files another leg for the same work. `widened`: it may run on any computer that
+   * takes timed runs (w2048's fallback, or w2544's drop of its wait for a computer away past the grace); `small`: the
+   * computers it was filed for.
+   */
+  ownLeg?: { id: string; widened?: string; small: readonly string[] };
+  /**
    * w2521: the one computer the leg must run on (timed_place's `machine`, the asking request's constraints, or "must run on X"
    * in its what, brief or same_machine) and why. It runs there or waits there, never anywhere else (server/machinePin.ts).
    */
@@ -237,11 +246,15 @@ export function decideTimedPlace(a: TimedPlaceInput): TimedPlaceDecision {
     if (here?.id === id) return { verdict: 'here', pinned: true, why: `it must run on ${id} (${a.pinned.why}), and this is ${id}` };
     const p = a.places.find((c) => c.id === id);
     const state = !p ? 'not known to the portal now' : !p.online ? 'offline now' : hasRoom(p) ? 'free now' : `busy now (${p.live} of ${p.maxAgents} agent slot${p.maxAgents === 1 ? '' : 's'} live)`;
-    return { verdict: 'elsewhere', needs: [id], pinned: true, why: `it must run on ${id} only (${a.pinned.why}): the leg waits on ${id}, which is ${state}, and starts there by itself when ${id} can take it; it never falls back to another computer, however idle (w2521)` };
+    return { verdict: 'elsewhere', needs: [id], pinned: true, ...(a.ownLeg ? { ownLeg: a.ownLeg.id } : {}), why: `it must run on ${id} only (${a.pinned.why}): the leg waits on ${id}, which is ${state}, and starts there by itself when ${id} can take it; it never falls back to another computer, however idle (w2521)` };
   }
   if (!here) return { verdict: 'here', why: 'the portal does not know this computer: time here as before' };
   const small = smallTimedRank(a.places, a.prefs, a.platform, here.id, a.now, a.waitMs);
   const smallText = small.map(sizeText).join(' > ');
+  if (here.noTimedRuns && a.ownLeg) {
+    const need = a.ownLeg.small.filter((id) => id !== here.id);
+    return { verdict: 'elsewhere', ownLeg: a.ownLeg.id, needs: need, why: `${here.id} takes no timed runs (${here.noTimedRuns}; w1861), and ${a.ownLeg.id} is itself the timed leg: it moves${need.length ? ` to ${need.join(' > ')}` : ''}, and no new leg is filed (w2610)` };
+  }
   if (here.noTimedRuns) {
     if (!small.length) {
       // w2147 (lothsahn: "Stop asking to bring computers online ... Use and schedule resources based on what you have. Don't
@@ -262,6 +275,16 @@ export function decideTimedPlace(a: TimedPlaceInput): TimedPlaceDecision {
   if (a.widenedLeg) {
     const why = `${a.widenedLeg} is a timed leg FF Factory widened to the big computers, as no small computer could take it (w2048)`;
     return { verdict: 'here', bigFallback: why, why: `${why}: time here. ${bigFallbackRules(here.id)}` };
+  }
+  if (a.ownLeg) {
+    // w2610: the leg's own worker. Its placement put it here; filing another leg for the same work loops (w2607 -> w2608 -> w2609).
+    const o = a.ownLeg;
+    if (o.widened) {
+      const why = `${o.id} is itself the timed leg, and FF Factory let it run on any computer that takes timed runs (${o.widened})`;
+      return { verdict: 'here', ownLeg: o.id, bigFallback: why, why: `${why}: time here. ${bigFallbackRules(here.id)}` };
+    }
+    if (o.small.includes(here.id)) return { verdict: 'here', ownLeg: o.id, why: `${o.id} is itself the timed leg, filed for ${o.small.join(' or ')}, and this is ${here.id}` };
+    return { verdict: 'elsewhere', ownLeg: o.id, needs: [...o.small], why: `${o.id} is itself the timed leg, filed for ${o.small.join(' or ') || 'a small computer'}, not ${here.id} (${here.maxAgents} agent slots: an exclusive turn here idles the others): it moves there, and no new leg is filed (w2610)` };
   }
   const idles = `${here.id} has ${here.maxAgents} agent slots (${here.live} live now): an exclusive turn there idles all the others`;
   // w1996: a Windows player A/B is built here (shared tickets) and timed on a timed_run computer, so no worker or seat is

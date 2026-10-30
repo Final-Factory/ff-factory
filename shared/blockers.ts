@@ -259,6 +259,8 @@ export function blockerVerdict(b: WorkBlocker, f: BlockerFacts, waiter?: string)
       const t = b.ref ? follow(b.ref, f) : undefined;
       if (!t) return { state: 'stuck', why: `${b.ref ?? 'the request it waits on'} is not in the ledger` };
       const name = t.id === b.ref ? t.id : `${b.ref} (merged into ${t.id})`;
+      // w2610: merged into the request it blocks (w2607 Blocked on w2608, its own copy): a wait on itself, gone.
+      if (waiter && t.id.toLowerCase() === waiter.toLowerCase()) return { state: 'clear', why: `${b.ref} was merged into ${waiter} itself, so nothing is left to wait for (w2610)` };
       if (t.status === 'done') return { state: 'clear', why: `${name} closed as done${t.outcome ? `: ${firstLine(t.outcome)}` : ''}` };
       if (STATUS_DONE_WORDS[t.status]) return { state: 'decide', why: `${name} was ${STATUS_DONE_WORDS[t.status]} without delivering ${b.what}${t.outcome ? ` (${firstLine(t.outcome)})` : ''}` };
       if (t.status === 'stalled') return { state: 'stuck', why: `${name}, which it waits on, stalled${t.stalled ? `: ${firstLine(t.stalled.reason)}` : ''}` };
@@ -267,8 +269,12 @@ export function blockerVerdict(b: WorkBlocker, f: BlockerFacts, waiter?: string)
       // "For <waiter>:" line, DONE, or a wait on it, w2357), or once the leg itself is Blocked after that request's gate: a
       // turn that says only that its bench ticket is still queued, or "understood", leaves it Blocked (w2335 woke four times
       // so on 2026-10-27; before, any turn of the leg cleared it).
-      if (b.on === 'report' && waiter && t.timedLeg?.for?.toLowerCase() === waiter.toLowerCase() && t.status === 'blocked' && gatesOf(t).some((g) => (Date.parse(g.at) || 0) > at))
-        return { state: 'clear', why: `${name}, its timed leg, is itself Blocked (${gatesOf(t).map((g) => g.what ?? g.ref ?? g.kind).join('; ')}): read its report` };
+      // w2610: only a leg Blocked on the waiter itself (it needs a commit or an answer from it) wakes it; a leg Blocked on anything
+      // else (a copy of itself, a time, a person) leaves the waiter Blocked, which clears on the leg's real report or done:
+      // w2597 was woken three times on 2026-10-30 by w2607 Blocked on its own copies, and blocked again each time.
+      const onWaiter = (g: WorkBlocker) => (g.kind === 'request' || g.kind === 'lock') && [g.ref, g.holder].some((r) => r && follow(r, f)?.id.toLowerCase() === waiter?.toLowerCase());
+      if (b.on === 'report' && waiter && t.timedLeg?.for?.toLowerCase() === waiter.toLowerCase() && t.status === 'blocked' && gatesOf(t).some((g) => (Date.parse(g.at) || 0) > at && onWaiter(g)))
+        return { state: 'clear', why: `${name}, its timed leg, is itself Blocked on ${waiter} (${gatesOf(t).filter(onWaiter).map((g) => g.what ?? g.ref ?? g.kind).join('; ')}): read its report` };
       if (b.on === 'report' && f.reportedSince?.(t, at)) return { state: 'open', why: `${name}'s worker reported progress only, not yet ${b.what}` };
       return { state: 'open', why: `${name} is ${t.status === 'blocked' ? 'itself blocked' : t.status}` };
     }
@@ -462,6 +468,7 @@ export function blockerProblem(b: Pick<WorkBlocker, 'kind' | 'ref' | 'until' | '
     if (id.toLowerCase() === self.toLowerCase()) return 'a request cannot be blocked on itself';
     const t = follow(id, f as BlockerFacts);
     if (!t) return `no request "${id}"`;
+    if (t.id.toLowerCase() === self.toLowerCase()) return `${id} is merged into ${self}: a wait on it is a wait on ${self} itself, which never clears (w2610)`;
     if (t.status === 'done' || t.status === 'rejected' || t.status === 'cancelled') return `${id} is ${t.status} already: start this one, or say what else it waits for`;
     if (gatesOf(t).some((g) => g.kind === 'request' && g.ref?.toLowerCase() === self.toLowerCase())) return `${id} is itself blocked on ${self}: they would wait on each other`;
     return undefined;
