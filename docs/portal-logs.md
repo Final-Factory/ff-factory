@@ -132,6 +132,20 @@ elsewhere, a worker usually cannot read it: lothdesktop's is `D:\work\ffw\daemon
 worker harness refuses as a protected path (measured, w1536, 2026-10-19). Say so in the report and leave it to the
 orchestrator (the ops worker or ssh).
 
+### A picture a page could not show: `[media]` and `[image]` lines (w2576)
+
+Ben, 2026-10-30: "a lot of previews in the waiting on input are not showing their preview images". No agent has a
+person's login, so the page reports for them. Each page posts a still it could not show to `POST /api/client/media-trouble`:
+one that failed, or one that sat on screen 15 s without being drawn (`web/src/mediaTrouble.ts`). The server writes one line
+per person, kind and still, at most once in 10 minutes (`shared/mediaTrouble.ts`, `mediaTroubleLine`):
+
+    [media] ben's page could not show a still (error) in text on #/dispatcher/waiting: F:\...\spire.png; requests 1, last: status 400, 35 B, 2 ms; complete true, width 0; <browser>
+
+`surface` is `card` (a card's thumbnails) or `text` (an image in Markdown: a card's Details, the chat). "Never requested" means
+the browser did not ask for the still. `status 0` means the browser did not say: Safari and Firefox never do. The server also
+logs its own refusals of `GET /api/image` as `[image] refused <path> (session …): <why>` (no session and no machine) and
+`[image] 404 <path> [via <machine>]: <why>`. Read both with `portal_logs` source `journal`, grep `[media]` or `[image]`.
+
 ### "ERROR: the portal is unreachable right now" (w1536)
 
 A worker's portal-backed tool (`publish_review`, `wake_me`, `portal_logs`, `waiting_on_person`, every `mcp__machine__*`

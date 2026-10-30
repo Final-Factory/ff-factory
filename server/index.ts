@@ -76,7 +76,7 @@ import { collectNetwork, loadOutsideWatchState, outsideWatchConfig, saveOutsideW
 import { endMaybeGzip } from './compress.ts';
 import { serveStatic, webBuild } from './webStatic.ts';
 import { placeholderSvg, removedMedia, removedText, runMediaRetention, withMedia } from './mediaRetention.ts';
-import { appendCleanupLog, staleAtFile, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, sessionTempDir, staleUnityLibraries, volumeStat } from './cleanup.ts';
+import { appendCleanupLog, staleAtFile, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, sessionTempDir, staleUnityLibraries, tempFolderSession, volumeStat } from './cleanup.ts';
 import { cleanupPass, defaultNightlyRoots, planStaleOutput, staleContextOf, staleOutputSettings, type StalePlace } from './staleOutput.ts';
 import { TASK_NAME, checkElevation } from './elevation.ts';
 import { Drainer, clearPendingRestart, describeUncleanStop, isBusy, mayRecoverUnclean, parseRestartRequest, readAlive, survivesRestart, systemdSupervised, takePendingRestart, takeResumeFile, writeAlive, writePendingRestart, writeResumeFile, writeUpdateWanted, type RestartRequest } from './restart.ts';
@@ -99,6 +99,7 @@ import { SpendStore, buildReport } from './spend.ts';
 import { backfillSpend, repairSpend } from './spendJobs.ts';
 import type { SpendSummaryReply } from '../shared/spend.ts';
 import { dataGuardSettings, footprint, gzipRatioCached, runDataGuard } from './dataGuard.ts';
+import { cleanMediaTrouble, mediaTroubleLine } from '../shared/mediaTrouble.ts';
 import { LoopWatch } from './loopWatch.ts';
 import { StallProfiler } from './stallProfile.ts';
 
@@ -1593,6 +1594,9 @@ function sessionImageRoots(sessionId: string, file?: string): ImageRoots {
   const temp = sessionTempDir(os.tmpdir(), s.id);
   if (s.standingId) return { roots: [agents.standing.require(s.standingId).folder, temp] };
   if (s.kind === 'orchestrator') {
+    // A worker's still in its own temp folder on a machine (w2576): read as that worker, whose folder its daemon allows.
+    const owner = file ? sessions.sessions.get(tempFolderSession(file) ?? '')?.info : undefined;
+    if (owner?.machineId) return { machine: owner.machineId, session: owner.id, roots: [] };
     const onMachine = file ? machineForPath(file, machines.list()) : undefined;
     if (onMachine) return { machine: onMachine.id, roots: [] };
     return { roots: [cfg.repo.basePath, cfg.sandboxRoot, cfg.standingRoot] };
@@ -1607,7 +1611,13 @@ const readImageIn = (where: ImageRoots, file: string) => (where.machine ? machin
 
 route('GET', '/api/image', async (_r, _p, url) => {
   const file = need(url.searchParams.get('path'), 'path');
-  const where = imageRoots(url, file);
+  let where: ImageRoots;
+  try {
+    where = imageRoots(url, file);
+  } catch (e) {
+    console.log(`[image] refused ${file} (session ${url.searchParams.get('session') ?? 'none'}): ${(e as Error).message}`);
+    throw e;
+  }
   try {
     if (VIDEO_FILE.test(file)) {
       if (where.machine) throw new Error('videos on a machine cannot be shown yet');
@@ -1629,8 +1639,28 @@ route('GET', '/api/image', async (_r, _p, url) => {
     const gone = review.contains(file) ? removedMedia(path.resolve(file)) : undefined;
     if (gone && VIDEO_FILE.test(file)) throw new HttpError(410, removedText(file, gone.days));
     if (gone) return new FileReply('image/svg+xml', placeholderSvg(gone.days));
+    // w2576: what the page cannot show, in the journal (portal_logs grep "[image]").
+    console.log(`[image] 404 ${file}${where.machine ? ` via ${where.machine}` : ''}: ${(e as Error).message}`);
     throw new HttpError(404, (e as Error).message);
   }
+});
+
+/**
+ * A still a page could not show (w2576, shared/mediaTrouble.ts): one journal line each, so a person's view of a card can be
+ * read with portal_logs (grep "[media]") without their login. At most one line per person and still in 10 minutes, and 40.
+ */
+const mediaTroubleSeen = new Map<string, number>();
+route('POST', '/api/client/media-trouble', async (req) => {
+  const t = cleanMediaTrouble(await readJson<unknown>(req, 16 * 1024));
+  if (!t) throw new HttpError(400, 'not a media report');
+  const who = auth.user(req) ?? '?';
+  const now = Date.now();
+  for (const [k, at] of mediaTroubleSeen) if (now - at > 10 * 60_000) mediaTroubleSeen.delete(k);
+  const key = `${who} ${t.kind} ${t.src}`;
+  if (mediaTroubleSeen.has(key) || mediaTroubleSeen.size >= 40) return {};
+  mediaTroubleSeen.set(key, now);
+  console.log(mediaTroubleLine(who, t, String(req.headers['user-agent'] ?? '')));
+  return {};
 });
 
 // Reports (w2541, docs/reports.md): search them, read one (any revision), and the media it keeps.

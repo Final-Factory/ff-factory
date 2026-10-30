@@ -1027,6 +1027,9 @@ export function describeCleanupItems(s: CleanupSummary, removed: { path: string;
 /** The per-session temp folder: TMP, TEMP and TMPDIR of one agent's process, removed after its session ends. */
 export const sessionTempDir = (root: string, sessionId: string) => path.join(root, `ffa-${sessionId.replace(/[^\w-]/g, '').slice(0, 40)}`);
 
+/** The session whose temp folder (`ffa-<id>`, sessionTempDir) holds a file, from its path alone; undefined outside one. */
+export const tempFolderSession = (file: string): string | undefined => /[\\/]ffa-([\w-]{1,40})[\\/]/.exec(file)?.[1];
+
 /** The per-session temp folder as TMP, TEMP and TMPDIR, made if missing (called as the process starts). */
 export function sessionTempEnv(root: string, sessionId: string): Record<string, string> {
   const d = sessionTempDir(root, sessionId);
