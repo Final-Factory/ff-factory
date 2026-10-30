@@ -631,6 +631,15 @@ ledger request, or a line on the request already fixing it.
      broke again), so it is filed afresh with the done one listed as an overlap.
   More to file in one night than `intake.nightly.batchOver` (default 4) become **one request for the night**, keyed by
   every scenario: many at once usually share a cause (a broken build, the lab).
+- **Every scenario reaches the worker, wherever it runs** (w2613: w2593's brief, 11 scenarios of about 2,000 characters
+  each, was cut at 7,800 characters partway through the 7th, and the night's report.md was only on the lab). A batch's
+  brief (`nightlyRules.ts` `batchBrief`) lists every failing scenario first, one line each with its step and reason (the
+  reasons cut shorter until the list fits half the brief), then as many **whole** sections as fit under
+  `NIGHTLY_BRIEF_MAX` (7,800; `fileIntake` keeps 8,000), then a line naming the scenarios whose sections were left out.
+  The whole night (every section uncut, and the lab's report.md when the lab sends it as `markdown`, up to 300,000
+  characters) is filed as a **report on the request** (`IntakeManager.fileNightReport`, `nightlyReportBody`), so
+  `read_report` reads it from any computer; the brief names it by id. read_work's facts and the nightly worker rules
+  also list every scenario from the request's `source.nightly.scenarios`, whatever a brief kept.
 - **The request.** Title `Nightly e2e: <scenario> fails on master <sha9>` (`… (shipped in 0.50.0.53)` when it did);
   priority **urgent when the failing code is in a release, high otherwise**; triage `regression`; billed to the system
   payer. The brief carries the commit tested, the scenario and its file, the oracle's verdict, the last green and first

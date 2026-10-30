@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { intakeSettings, identityKeys, workerRules } from './intakeRules.ts';
-import { mentionsScenario, NIGHTLY_JOBS_MAX, nightlyDraft, nightStatus, parseNightlyJobs, nightlyPriority, nightlySkip, parseNightlyReport, releaseLine, type NightlyReport } from './nightlyRules.ts';
+import { mentionsScenario, NIGHT_REPORT_REF, NIGHTLY_JOBS_MAX, nightlyDraft, nightlyReportBody, scenarioBlock, nightStatus, parseNightlyJobs, nightlyPriority, nightlySkip, parseNightlyReport, releaseLine, type NightlyReport } from './nightlyRules.ts';
 
 /** The nightly e2e lab's report, checked and turned into requests (docs/intake.md, "Nightly e2e regressions"). */
 
@@ -195,6 +195,74 @@ test('nightly draft: a batch names every scenario and keys each, so a later nigh
   assert.deepEqual(identityKeys(d.source), ['nightly:a1-x', 'nightly:a2-y', 'nightly:a3-z']);
   for (const s of ['A1-x broke', 'A2-y broke', 'A3-z broke']) assert.ok(d.brief.includes(s));
   assert.equal(d.priority, 'high');
+});
+
+/** A night of `n` failing scenarios whose sections are each about 2,000 characters, as 2026-10-30's were (w2613). */
+export function longNight(n: number, extra: Record<string, unknown> = {}) {
+  return body(
+    Array.from({ length: n }, (_, i) => {
+      const scenario = `MP-w365-placement-${i + 1}p`;
+      return {
+        scenario,
+        class: 'new',
+        title: `Host and clients place Mass Drivers in multiplayer (hotbar, placeitem, blueprint, copy, paste, edge of range, out of range, on a station, paid from storage), with ${i + 1} peers`,
+        file: `scripts/nightly/scenarios/${scenario}.json`,
+        step: '76',
+        reason: `${scenario} broke: the storage-paid driver is built on every peer: 2 mismatch(es): ${'host (4,-18): state frame != built; '.repeat(14)}`,
+        firstTry: `the storage-paid driver is built on every peer: ${'a (4,-18): state frame != built; '.repeat(10)}`,
+        evidence: `V:\\ffw\\nightly-history\\runs\\2026-10-30\\${scenario}-try2`,
+        lastGreen: { night: '2026-10-29', sha: GREEN },
+        firstRed: { night: '2026-10-30', sha: SHA },
+        compare: `https://github.com/Final-Factory/FinalFactory/compare/${GREEN}...${SHA}`,
+        release: { shipped: 'maybe', version: '1.0.0.24', sha: GREEN },
+        repro: `python3 scripts/nightly/ffnightly.py run --sha ${SHA} --player <build of aaaaaaaaa> --scenario ${scenario} --no-retry --out /tmp/repro`,
+      };
+    }),
+    { report: { lab: 'V:/ffw/nightly-history/runs/2026-10-30/report.md' }, ...extra },
+  );
+}
+
+test('nightly draft (w2613): a batch of 12 long sections names every scenario, step and reason at the top, and cuts only whole sections', () => {
+  const rep = parse(longNight(12));
+  const d = nightlyDraft(rep, rep.results);
+  assert.ok(d.brief.length <= 7800, `the brief fits the intake's 8,000 (${d.brief.length})`);
+  assert.ok(rep.results.map((r) => scenarioBlock(r).join('\n').length).reduce((a, b) => a + b) > 20_000, 'the sections alone are far over the cap');
+  const list = d.brief.indexOf('Failing scenarios (12, every one');
+  const firstSection = d.brief.indexOf('### ');
+  assert.ok(list > 0 && list < firstSection, 'the list comes before the first section');
+  for (const r of rep.results) {
+    const line = d.brief.slice(list, firstSection).split('\n').find((l) => l.startsWith(`- ${r.scenario} (`));
+    assert.ok(line, `the list names ${r.scenario}`);
+    assert.match(line, /step 76: MP-w365-placement-\d+p broke: the storage-paid driver/, 'with its step and reason');
+  }
+  // Sections are whole or absent: every one present ends with its repro line, and the rest are named as left out.
+  const shown = rep.results.filter((r) => d.brief.includes(`### ${r.scenario} (`));
+  assert.ok(shown.length >= 1 && shown.length < 12);
+  for (const r of shown) assert.ok(d.brief.includes(`--scenario ${r.scenario} --no-retry`), `${r.scenario}'s section is whole`);
+  const cut = d.brief.split('\n').find((l) => l.startsWith('The sections of '))!;
+  assert.match(cut, new RegExp(`^The sections of ${12 - shown.length} more are left out for length`));
+  for (const r of rep.results.slice(shown.length)) assert.ok(cut.includes(r.scenario), `the left-out line names ${r.scenario}`);
+  assert.match(d.brief, /reproduce it first/, 'what to do stays at the end');
+  assert.match(d.brief, new RegExp(NIGHT_REPORT_REF.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  // The report filed on the request has every section uncut.
+  const whole = nightlyReportBody(rep, rep.results);
+  for (const r of rep.results) assert.ok(whole.includes(`### ${r.scenario} (`) && whole.includes(r.reason!), `the report has ${r.scenario} whole`);
+  // A worker's intake rules name every one too, from the request's source.
+  const rules = workerRules({ id: 'w90', source: d.source, brief: d.brief, triage: d.triage });
+  assert.ok(rep.results.every((r) => rules.includes(r.scenario)));
+  assert.match(rules, /Failing scenarios \(12, every one\)/);
+});
+
+test("nightly report (w2613): the lab's report.md rides along whole, into the report and not the brief", () => {
+  const md = `# Nightly 2026-10-30\n\n${'A long table row | x | y |\n'.repeat(2000)}`;
+  const rep = parse(longNight(5, { markdown: md }));
+  assert.equal(rep.markdown, md.trim());
+  const d = nightlyDraft(rep, rep.results);
+  assert.ok(d.brief.length <= 7800);
+  assert.ok(!d.brief.includes('A long table row'));
+  assert.ok(nightlyReportBody(rep, rep.results).endsWith(md.trim()));
+  assert.equal(parse(longNight(2, { markdown: 'x'.repeat(400_000) })).markdown!.length, 300_000, 'kept to 300,000 characters');
+  assert.equal(parse(longNight(2, { markdown: 42 })).markdown, undefined);
 });
 
 test("a person's request names a scenario only by its whole id", () => {

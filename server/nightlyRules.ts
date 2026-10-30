@@ -7,6 +7,8 @@ import type { NightlyNight, NightlyRelease, WorkPriority, WorkTriage } from '../
 
 export const NIGHTLY_REPORT_VERSION = 1;
 const MAX_RESULTS = 60;
+/** The most of the lab's report.md a night keeps (a report holds 400,000 characters; the rest is the sections). */
+const MAX_MARKDOWN = 300_000;
 
 export type NightlyClass = 'new' | 'still' | 'flaky';
 
@@ -48,6 +50,8 @@ export interface NightlyReport {
   release?: NightlyRelease;
   /** Where the night's report.md is: on the lab, and BEAST's copy. */
   report?: { lab?: string; beast?: string };
+  /** The night's report.md as the lab wrote it (w2613), when it sends it: filed on the request, so any computer reads it. */
+  markdown?: string;
   results: NightlyResult[];
   /**
    * How the night went (w864; a lab from before says nothing, and its results decide): passed, failed (a new or still
@@ -164,6 +168,7 @@ export function parseNightlyReport(body: unknown): { report: NightlyReport } | {
   const c = obj(b.counts);
   const count = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.min(10_000, Math.round(v))) : 0);
   const request = str(b.request, 12);
+  const markdown = typeof b.markdown === 'string' ? b.markdown.replace(/\0/g, '').slice(0, MAX_MARKDOWN).trim() : '';
   return {
     report: {
       v: NIGHTLY_REPORT_VERSION,
@@ -175,6 +180,7 @@ export function parseNightlyReport(body: unknown): { report: NightlyReport } | {
       ...(c ? { counts: { ran: count(c.ran), passed: count(c.passed), failed: count(c.failed), flaky: count(c.flaky), env: count(c.env) } } : {}),
       ...(/^w\d{1,7}$/.test(request) ? { request } : {}),
       ...(rel ? { release: rel } : {}),
+      ...(markdown ? { markdown } : {}),
       ...(rep
         ? {
             report: {
@@ -262,6 +268,81 @@ function header(rep: NightlyReport): string[] {
 /** The keys that make a later night's result the same work: `nightly:<scenario>` (server/intakeRules.ts identityKeys). */
 export const nightlyKey = (scenario: string) => `nightly:${scenario.toLowerCase()}`;
 
+/**
+ * The longest brief a nightly request gets: fileIntake keeps 8,000 characters of any intake brief, and a brief cut there
+ * once lost four of a night's eleven scenarios (w2613). nightlyBrief fits under it by leaving out whole sections.
+ */
+export const NIGHTLY_BRIEF_MAX = 7800;
+/** The text the intake replaces with the id of the night's report once it filed it on the request (w2613). */
+export const NIGHT_REPORT_REF = "the night's report filed on this request (its id is on read_work's Reports line)";
+
+/** One line per failing scenario (w2613): its id, its class, the step it failed at and why, the reason cut to `reasonMax`. */
+export function scenarioLine(r: NightlyResult, reasonMax: number): string {
+  const why = reasonMax > 0 ? `: ${r.step ? `step ${r.step}: ` : ''}${clip(r.reason ?? 'no reason recorded', reasonMax)}` : r.step ? `: step ${r.step}` : '';
+  return `- ${r.scenario} (${what(r)})${why}`;
+}
+
+/** The list of every failing scenario, its reasons cut as short as it takes to stay within `budget` characters. */
+export function scenarioList(results: readonly NightlyResult[], budget: number): string[] {
+  for (const n of [240, 160, 100, 60, 0]) {
+    const lines = results.map((r) => scenarioLine(r, n));
+    if (n === 0 || lines.join('\n').length <= budget) return lines;
+  }
+  return [];
+}
+
+/**
+ * A batch's brief (w2613): the header, then every failing scenario on one line, then as many whole sections as fit, then
+ * the rest named, then what to do. Only whole sections are left out, never a scenario's name: a worker reads every one.
+ */
+function batchBrief(rep: NightlyReport, results: readonly NightlyResult[]): string {
+  const head = [
+    ...header(rep),
+    `- ${results.length} scenarios failed at once, more than intake.nightly.batchOver, so they are one request: often one cause (a broken build, the lab). Split it with decide_work if they turn out to differ.`,
+    `- Every scenario's whole section${rep.markdown ? " and the lab's report.md" : ''} is in ${NIGHT_REPORT_REF}: read_report from any computer.`,
+    '',
+    `Failing scenarios (${results.length}, every one; the sections below give each one's facts):`,
+  ].join('\n');
+  const tail = ['', ...TODO].join('\n');
+  const room = NIGHTLY_BRIEF_MAX - head.length - tail.length - 2;
+  const list = scenarioList(results, Math.floor(room / 2)).join('\n');
+  const sections: string[] = [];
+  let left = room - list.length - 1;
+  let i = 0;
+  for (; i < results.length; i++) {
+    const block = ['', ...scenarioBlock(results[i])].join('\n');
+    // Room kept for the line naming the sections left out.
+    const keep = i < results.length - 1 ? 600 : 0;
+    if (block.length + keep > left) break;
+    sections.push(block);
+    left -= block.length + 1;
+  }
+  const rest = results.slice(i).map((r) => r.scenario);
+  const cut = rest.length
+    ? ['', clip(`The sections of ${rest.length} more are left out for length (the brief holds ${NIGHTLY_BRIEF_MAX} characters): ${rest.join(', ')}. Each is on the list above, and whole in ${NIGHT_REPORT_REF}.`, Math.max(200, left))]
+    : [];
+  return clip([head, list, ...sections, ...cut, tail].join('\n'), NIGHTLY_BRIEF_MAX);
+}
+
+/**
+ * The night's whole report for a request (w2613), filed on it so a worker on any computer reads it with read_report: the
+ * list, every section uncut and, when the lab sent it, its report.md as written. The lab's own copy is on the lab only.
+ */
+export function nightlyReportBody(rep: NightlyReport, results: readonly NightlyResult[]): string {
+  return [
+    `# Nightly e2e ${rep.date}: ${results.length} failing scenario${results.length === 1 ? '' : 's'} on master ${short(rep.sha)}`,
+    '',
+    ...header(rep),
+    '',
+    `## Failing scenarios (${results.length})`,
+    ...results.map((r) => scenarioLine(r, 600)),
+    '',
+    '## Each scenario',
+    ...results.flatMap((r) => ['', ...scenarioBlock(r)]),
+    ...(rep.markdown ? ['', `## The lab's report.md, as written`, '', rep.markdown] : []),
+  ].join('\n');
+}
+
 /** The request for one scenario, or for a night's batch when more fail at once than intake.nightly.batchOver. */
 export function nightlyDraft(rep: NightlyReport, results: readonly NightlyResult[]): IntakeDraft & { priority: WorkPriority; triage: WorkTriage } {
   const batch = results.length > 1;
@@ -269,20 +350,12 @@ export function nightlyDraft(rep: NightlyReport, results: readonly NightlyResult
   const title = batch
     ? clip(`Nightly e2e ${rep.date}: ${results.length} regressions on master ${short(rep.sha)}${results.some((r) => r.release?.shipped === 'yes') ? ' (some shipped)' : ''}`, 120)
     : nightlyTitle(results[0], rep.sha);
-  const brief = [
-    ...header(rep),
-    ...(batch
-      ? [
-          `- ${results.length} scenarios failed at once, more than intake.nightly.batchOver, so they are one request: often one cause (a broken build, the lab). Split it with decide_work if they turn out to differ.`,
-        ]
-      : []),
-    '',
-    ...results.flatMap((r) => [...scenarioBlock(r), '']),
-    ...TODO,
-  ].join('\n');
+  const brief = batch
+    ? batchBrief(rep, results)
+    : [...header(rep), ...(rep.markdown ? [`- The lab's report.md is in ${NIGHT_REPORT_REF}: read_report from any computer.`] : []), '', ...scenarioBlock(results[0]), '', ...TODO].join('\n');
   return {
     title,
-    brief: clip(brief, 7800),
+    brief: clip(brief, NIGHTLY_BRIEF_MAX),
     priority: nightlyPriority(results),
     triage: {
       class: 'regression',
