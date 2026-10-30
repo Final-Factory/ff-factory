@@ -138,6 +138,10 @@ test('stalling: waiting requests are not candidates; a newer finished release or
 test('w419: DONE lines, what a DONE still misses, and when the follow-up is due', async () => {
   const { doneIdsIn, doneProblem, followUpDue, FOLLOW_UP_QUIET_MS, FOLLOW_UP_EVERY_MS } = await import('./ledgerRules.ts');
   assert.deepEqual(doneIdsIn('Merged.\n\nDONE: w342\n- **DONE: W12**\n> DONE w7.'), ['w342', 'w12', 'w7']);
+  // w2614: the w2555 worker's report (a parenthesised title, then bold text) and other forms with text after the id.
+  assert.deepEqual(doneIdsIn("DONE: w2555 (make it obvious when the player's Von Neumann probe takes damage) **TL;DR:** the hit glow merged."), ['w2555']);
+  assert.deepEqual(doneIdsIn('**DONE: w12** (title)\nDONE: w7 — merged\nDONE: w8: merged\nDONE: w9 - merged'), ['w12', 'w7', 'w8', 'w9']);
+  assert.deepEqual(doneIdsIn('DONE: w12 (the other one is w13)\nDONE: w130 and w131\nDONE: w14x'), ['w12'], 'only the line\'s first id; prose after it is no DONE');
   assert.deepEqual(doneIdsIn('Reply DONE: w342 when sure.\nDONE: w342 and more text\nDONE: wNNN'), [], 'only a line of its own counts');
   const base = { title: 'Fix it', brief: 'Make it work.', prs: [{ repo: 'r/r', number: 1, state: 'merged' as const }] };
   assert.equal(doneProblem(base, 'Done.'), undefined);

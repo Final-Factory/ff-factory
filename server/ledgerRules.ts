@@ -507,11 +507,13 @@ export function heldOpenReason(w: Pick<WorkItem, 'id' | 'status' | 'blocked' | '
 
 /**
  * The requests a worker's report says are finished: lines that are only `DONE: w342` (markdown around it allowed), one
- * request per line, several lines allowed. A mention inside a sentence ("reply DONE: w342") is not one.
+ * request per line, several lines allowed. The id may be followed by a parenthesised title, a dash or colon, or bold text
+ * (w2614: `DONE: w2555 (make it obvious …) **TL;DR:** …` is one). A mention inside a sentence ("reply DONE: w342") or
+ * prose straight after the id ("DONE: w342 and more text") is not one.
  */
 export function doneIdsIn(text: string): string[] {
   const out = new Set<string>();
-  for (const m of (text ?? '').matchAll(/^[\s*_>`-]*DONE:?\s+(w\d+)[\s.`*_]*$/gim)) out.add(m[1].toLowerCase());
+  for (const m of (text ?? '').matchAll(/^[\s*_>`-]*DONE:?\s+(w\d+)(?!\w)(?:[\s.`*_]*$|[`*_]*\s*(?:[(—–:]|-\s|\*\*|__).*$)/gim)) out.add(m[1].toLowerCase());
   return [...out];
 }
 
