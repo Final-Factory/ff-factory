@@ -19,6 +19,7 @@
  */
 import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
 import { benchTicketFor, type TicketState } from './benchQueue.ts';
+import { ownTimedHold } from './benchLock.ts';
 
 /** Unity MCP tools that compile, import or run tests in the editor (mcp-for-unity's names). */
 export const EDITOR_LOAD_TOOL =
@@ -33,10 +34,23 @@ export const GATE_KEEP_PLACE_MS = 30 * 60_000;
 /** A ticket granted while no call waited is kept this long for the call made again. */
 export const GATE_GRANTED_UNUSED_MS = 2 * 60_000;
 
-/** One gate per sandbox in this process: a sandbox's agents share one editor, and the options are rebuilt per run. */
+/**
+ * One gate per sandbox and worker session in this process (the options are rebuilt per run). w2605: it was one per
+ * sandbox, so a later worker placed in that sandbox reused the first one's gate, its tickets carried the first worker's
+ * session (not the one that holds a timed ticket now), and a ticket granted to one session let another session's calls
+ * through.
+ */
 const gates = new Map<string, ReturnType<typeof editorBenchGate>>();
+/** A gate that holds no ticket and saw no call this long is closed and forgotten (one per session now, so they add up). */
+export const GATE_FORGET_MS = 6 * 60 * 60_000;
 export function editorBenchGateFor(o: EditorBenchGateOptions): ReturnType<typeof editorBenchGate> {
-  const key = `${o.root ?? ''}|${o.sandboxPath}`;
+  const key = `${o.root ?? ''}|${o.sandboxPath}|${o.env?.FF_SESSION_ID ?? ''}`;
+  for (const [k, old] of gates) {
+    if (k !== key && old.idleMs() > GATE_FORGET_MS) {
+      old.close();
+      gates.delete(k);
+    }
+  }
   let g = gates.get(key);
   if (!g) gates.set(key, (g = editorBenchGate(o)));
   return g;
@@ -60,11 +74,17 @@ export interface EditorBenchGateOptions {
   log?: (line: string) => void;
   /** For tests: how long a call waits inside the hook. */
   waitMs?: number;
+  /**
+   * w2605: the granted exclusive (timed) ticket this gate's worker session holds, else undefined (default
+   * machine/benchLock.ts ownTimedHold for env.FF_SESSION_ID). While it holds one, its own calls go without a ticket.
+   */
+  ownHold?: () => string | undefined;
 }
 
-export function editorBenchGate(o: EditorBenchGateOptions): { hook: HookCallback; tick(): void; close(): void } {
+export function editorBenchGate(o: EditorBenchGateOptions): { hook: HookCallback; tick(): void; close(): void; idleMs(): number } {
   const now = o.now ?? Date.now;
   const log = o.log ?? ((l: string) => console.log(`editor bench gate (${o.sandboxId}): ${l}`));
+  const ownHold = o.ownHold ?? (() => ownTimedHold(o.root, o.env?.FF_SESSION_ID || undefined));
   const ticketFor =
     o.ticketFor ??
     ((what: string) => benchTicketFor({ mode: 'shared', what, checkouts: [o.sandboxPath], root: o.root, env: o.env, maxMin: 30 }));
@@ -72,6 +92,7 @@ export function editorBenchGate(o: EditorBenchGateOptions): { hook: HookCallback
   let granted = false;
   let lastUse = 0;
   let lastAsk = 0;
+  let lastCall = now();
 
   const drop = (why: string) => {
     if (!ticket) return;
@@ -99,11 +120,21 @@ export function editorBenchGate(o: EditorBenchGateOptions): { hook: HookCallback
     if (input.hook_event_name !== 'PreToolUse' || !o.root) return {};
     const tool = String(input.tool_name ?? '');
     if (!tool.toLowerCase().startsWith('mcp__unitymcp__')) return {};
+    lastCall = now();
     if (ticket && granted) {
       lastUse = now();
       return {};
     }
     if (!EDITOR_LOAD_TOOL.test(tool)) return {};
+    // w2605: the worker's own timed run. Its session holds the machine's running exclusive ticket, so no other timed leg
+    // runs now and its own compile or test run can spoil only its own numbers. A shared ticket would wait behind that
+    // exclusive one and refuse the call "Queued" (w2603: run_tests under t00000880). Other sessions still queue.
+    const own = ownHold();
+    if (own) {
+      if (ticket && !granted) drop(`its session holds the timed ticket ${own}`);
+      log(`its session holds the timed ticket ${own}; ${tool} goes ahead (w2605)`);
+      return {};
+    }
     if (!ticket) {
       const t = ticketFor(`editor compile/tests ${o.sandboxId}`);
       if (!t.ticket) {
@@ -141,6 +172,7 @@ export function editorBenchGate(o: EditorBenchGateOptions): { hook: HookCallback
   return {
     hook,
     tick,
+    idleMs: () => (ticket ? 0 : now() - lastCall),
     close: () => {
       clearInterval(timer);
       drop('the session ended');
