@@ -3,6 +3,7 @@ import { splitMedia, type Ask } from '../../../shared/ask';
 import { cardMedia } from '../../../shared/questionCard';
 import { isVideoPath } from '../../../shared/imagePaths';
 import { holdReload } from '../freshness';
+import { reportStill, watchStill } from '../mediaTrouble';
 import { useKeptState } from '../keep';
 import { openLightbox, toast } from '../store';
 import { clearPending } from '../upload';
@@ -44,7 +45,7 @@ export function Previews({ media, session }: { media: CardMedia[]; session?: str
       ))}
       {stills.map(({ m, it }, i) => (
         <button key={m.url} type="button" className="qc-thumb" data-testid="qc-still" title={`${it.name}: open full size`} aria-label={`Open ${it.name} full size`} onClick={() => openLightbox(stills.map((x) => x.it), i)}>
-          <img src={it.src} alt={it.name} loading="lazy" onError={() => lost(m.url)} />
+          <img ref={watchStill('card')} src={it.src} alt={it.name} loading="lazy" onError={(e) => (reportStill(e.currentTarget, 'card', 'error'), lost(m.url))} />
         </button>
       ))}
     </div>

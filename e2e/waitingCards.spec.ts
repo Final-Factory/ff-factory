@@ -1,7 +1,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import type { Page } from '@playwright/test';
-import { appState, expect, isMobile, settle, signIn, test, uniq, useTool } from './fixtures.ts';
+import { GALLERY, appState, expect, isMobile, machineSandbox, settle, signIn, test, uniq, useTool } from './fixtures.ts';
 import type { AppState, ServerEvent, SessionInfo, WorkItem } from '../shared/types.ts';
 import { waitingCases } from '../server/fixtures/waitingCards.ts';
 
@@ -151,4 +151,46 @@ test('w1868: every open question of your orchestrator is a card: three requests 
   }
   const events = (await (await page.request.get(`/api/sessions/${me.orchestratorId}/events?limit=500`)).json()) as { kind: string; from?: string; text?: string }[];
   for (let n = 1; n <= 5; n++) expect(events.some((e) => e.kind === 'user' && e.from === 'human' && e.text?.startsWith(`Go ahead (${n} ${tag})`)), `answer ${n} in the chat`).toBe(true);
+});
+
+test('w2576: a still in the Details text at a path of the worker that waits shows the picture, not its alt text', async ({ page }) => {
+  // Ben, 2026-10-30: "a lot of previews in the waiting on input are not showing their preview images". The Details text read
+  // every still without the worker's session, so a still outside the review folder was refused (400) and showed its alt.
+  await signIn(page);
+  const app0 = await appState(page.request);
+  const gallery = machineSandbox(app0, GALLERY);
+  const sep = gallery.path.includes('\\') ? '\\' : '/';
+  const shot = `${gallery.path}${sep}Screenshots${sep}orch-proof.png`;
+  const base = waitingCases(Date.now()).find((c) => c.w.id === 'w1797')!.w;
+  const w = {
+    ...base,
+    id: 'w9576',
+    requestedBy: TESTER,
+    requesters: [TESTER],
+    sessionIds: ['gallery1'],
+    needsYou: { ...base.needsYou!, key: 'declared:gallery1:x', kind: 'declared', worker: 'gallery1', who: ['tester'], to: ['tester'], answeredAsks: [], question: `OK the spire? ![Beacon Spire next to a portal](<${shot}>)` },
+  } as WorkItem;
+  delete (w.needsYou as { asks?: unknown }).asks;
+  await page.routeWebSocket('**/ws', (ws) => {
+    const server = ws.connectToServer();
+    server.onMessage((raw) => {
+      const e = JSON.parse(String(raw)) as ServerEvent;
+      // The waiting worker as the ledger has it: gallery1, declared on the tester.
+      const waiting = (s: SessionInfo) => (s.id === 'gallery1' ? ({ ...s, title: 'w9576: worker', requestedBy: TESTER, waitingOn: { who: 'tester', what: w.needsYou!.question, at: w.needsYou!.at } } as SessionInfo) : s);
+      if (e.type === 'state') return ws.send(JSON.stringify({ type: 'state', state: { ...e.state, work: [...(e.state.work ?? []), w], sessions: e.state.sessions.map(waiting) } as AppState } satisfies ServerEvent));
+      if (e.type === 'work' || (e.type === 'session' && e.session.id === 'gallery1')) return;
+      ws.send(raw);
+    });
+    ws.onMessage((m) => server.send(m));
+  });
+  await page.goto('/#/dispatcher/waiting');
+  await page.reload();
+  const card = page.getByTestId('waiting-tab').getByTestId('wait-w9576');
+  await expect(card).toBeVisible();
+  await card.getByTestId('qc-details').locator('summary').click();
+  const words = card.getByTestId('wait-question-w9576');
+  await expect(words.locator('code', { hasText: 'Beacon Spire next to a portal' })).toHaveCount(0);
+  const img = words.locator('img[alt="Beacon Spire next to a portal"]');
+  await img.scrollIntoViewIfNeeded();
+  await expect.poll(() => img.evaluate((i) => (i as HTMLImageElement).naturalWidth)).toBeGreaterThan(0);
 });

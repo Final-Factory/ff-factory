@@ -3,6 +3,7 @@ import ReactMarkdown, { defaultUrlTransform, type Components, type ExtraProps } 
 import remarkGfm from 'remark-gfm';
 import { DATA_IMAGE_URI, isVideoPath, localPath, MAX_DATA_URI } from '../../../shared/imagePaths';
 import { sanitizeSvg } from '../../../shared/svg';
+import { reportStill, watchStill } from '../mediaTrouble';
 import { openLightbox } from '../store';
 import { baseName, FullQualityLink, PreviewVideo } from './Images';
 import { CopyButton, Icon } from './ui';
@@ -61,7 +62,7 @@ function InlineImage({ src, name, alt }: { src: string; name: string; alt?: stri
   if (broken) return <code title="This image is not available">{alt || name}</code>;
   return (
     <button type="button" className="md-img" title={alt || name} onClick={() => openLightbox([{ src, name }], 0)}>
-      <img src={src} alt={alt || name} loading="lazy" onError={() => setBroken(true)} />
+      <img ref={watchStill('text')} src={src} alt={alt || name} loading="lazy" onError={(e) => (reportStill(e.currentTarget, 'text', 'error'), setBroken(true))} />
     </button>
   );
 }

@@ -117,8 +117,11 @@ function PrLink({ pr }: { pr: string }) {
   );
 }
 
-/** Review stills in Details text are shown as stills (the review folder needs no session); other paths are names. */
-const reviewImage = (p: string) => `/api/image?${new URLSearchParams({ path: p })}`;
+/**
+ * Stills in Details text: a review still needs no session; any other path is read through the worker that waits (w2576:
+ * without it every such still was refused with 400 and showed only its alt text).
+ */
+export const detailsImage = (worker?: string) => (p: string) => `/api/image?${new URLSearchParams({ ...(worker ? { session: worker } : {}), path: p })}`;
 
 /**
  * Everything a card does not ask (w1597, behind its Details link): who asked and when, the request, the worker's own words
@@ -132,7 +135,7 @@ function CardDetails({ app, item, now }: { app: AppState; item: WaitingItem; now
   const asker = ask === 'approve' ? 'The intake' : r && r.kind !== 'question' ? `Worker ${r.worker ?? ''}`.trim() : 'The dispatcher';
   const age = waitAge(since, now);
   return (
-    <LocalImages.Provider value={reviewImage}>
+    <LocalImages.Provider value={detailsImage(r?.worker)}>
       <DetailLine label="Asked">
         {asker},{' '}
         <span className={`tone-${AGE_TONE[age]}`} title={new Date(since).toLocaleString()} data-testid={`wait-age-${w.id}`}>
