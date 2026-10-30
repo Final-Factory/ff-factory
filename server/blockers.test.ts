@@ -412,18 +412,30 @@ test("w2464: a pair leg's lobby name is no wait back, and its progress line is n
   assert.match(d.why, /w2463's worker reported since w2450 was blocked on it/);
 });
 
-test('w2377: a timed leg\'s turn with no result leaves its parent Blocked; the leg itself Blocked after the parent\'s gate clears it', () => {
+test('w2377/w2610: a timed leg\'s turn with no result leaves its parent Blocked; so does the leg Blocked on anything but the parent itself', () => {
   const b = block({ kind: 'request', ref: 'w2338', on: 'report', what: 'timed leg w2338' });
   const leg = item('w2338', { timedLeg: { for: 'w2335', forSession: 'x', from: 'beast', small: ['m3'] } });
-  const f = facts([leg], { reportedSince: () => true, deliveredSince: () => false });
-  assert.equal(blockerVerdict(b, f, 'w2335').state, 'open', 'a status-only turn (before w2377: clear)');
+  const rs = { reportedSince: () => true, deliveredSince: () => false };
+  assert.equal(blockerVerdict(b, facts([leg], rs), 'w2335').state, 'open', 'a status-only turn (before w2377: clear)');
   const later = new Date(Date.parse(b.at) + 60_000).toISOString();
-  const blocked = item('w2338', { status: 'blocked', blocked: block({ kind: 'ci', ref: 'Final-Factory/FinalFactory#1', what: 'lothsahn to pick the save', at: later }), timedLeg: leg.timedLeg });
-  const v = blockerVerdict(b, facts([blocked], { reportedSince: () => true, deliveredSince: () => false }), 'w2335');
+  const legBlocked = (g: WorkBlocker, extra: WorkItem[] = []) => blockerVerdict(b, facts([item('w2338', { status: 'blocked', blocked: g, timedLeg: leg.timedLeg }), item('w2335', { status: 'blocked' }), ...extra], rs), 'w2335');
+  // w2610: w2597 was woken three times by w2607 Blocked on its own copies; each of these leaves the parent Blocked.
+  assert.equal(legBlocked(block({ kind: 'ci', ref: 'Final-Factory/FinalFactory#1', what: 'lothsahn to pick the save', at: later })).state, 'open', 'Blocked on CI or a person');
+  assert.equal(legBlocked(block({ kind: 'request', ref: 'w2339', what: 'its own copy', at: later }), [item('w2339', { status: 'merged', mergedInto: 'w2338' })]).state, 'open', 'Blocked on a copy of itself');
+  assert.equal(legBlocked(block({ kind: 'time', until: new Date(NOW + 3_600_000).toISOString(), what: 'a quiet hour', at: later })).state, 'open', 'Blocked on a time');
+  const v = legBlocked(block({ kind: 'request', ref: 'w2335', what: 'w2335\'s fix commit', at: later }));
+  assert.equal(v.state, 'clear', 'Blocked on the parent itself: they would wait on each other');
+  assert.match(v.why, /its timed leg, is itself Blocked on w2335 \(w2335's fix commit\)/);
+  assert.notEqual(legBlocked(block({ kind: 'request', ref: 'w2335', what: 'x', at: new Date(Date.parse(b.at) - 60_000).toISOString() })).state, 'clear', 'blocked before the parent\'s gate: already seen');
+});
+
+test('w2610: a gate on a request merged into the blocked request itself clears, and blocking on one is refused', () => {
+  const work = [item('w2607', { status: 'blocked' }), item('w2608', { status: 'merged', mergedInto: 'w2607' })];
+  const v = blockerVerdict(block({ kind: 'request', ref: 'w2608', on: 'report', what: 'timed leg w2608' }), facts(work), 'w2607');
   assert.equal(v.state, 'clear');
-  assert.match(v.why, /its timed leg, is itself Blocked \(lothsahn to pick the save\)/);
-  const before = item('w2338', { status: 'blocked', blocked: block({ kind: 'ci', ref: 'Final-Factory/FinalFactory#1', what: 'x', at: new Date(Date.parse(b.at) - 60_000).toISOString() }), timedLeg: leg.timedLeg });
-  assert.notEqual(blockerVerdict(b, facts([before], { reportedSince: () => true, deliveredSince: () => false }), 'w2335').state, 'clear', 'blocked before the parent\'s gate: already seen');
+  assert.match(v.why, /w2608 was merged into w2607 itself/);
+  assert.match(blockerProblem({ kind: 'request', ref: 'w2608', what: 'x' }, 'w2607', facts(work))!, /w2608 is merged into w2607: a wait on it is a wait on w2607 itself/);
+  assert.match(blockerProblem({ kind: 'request', ref: 'w2607', what: 'x' }, 'w2607', facts(work))!, /cannot be blocked on itself/);
 });
 
 test('w2446: a lock blocker stays while its holder ended a turn with a check-in pending (its timed run still holds the lock)', () => {

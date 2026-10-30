@@ -2934,6 +2934,8 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       this.stamp(t, `merged ${w.id} from ${names(w.requesters)}: ${note}`);
       this.store.putWork(t);
       w.mergedInto = t.id;
+      // w2610: a gate of t on w now names t itself (w2607 Blocked on w2608, its own copy): it can never clear, so it goes.
+      this.dropSelfGates(t, w.id);
       const workers = t.sessionIds.filter((sid) => this.store.sessions.get(sid)).map((sid) => this.workerLine(sid));
       what = `merged into ${t.id} "${clip(t.title, 80)}" (${t.status}${workers.length ? `: ${workers.join(', ')}` : ''}), which ${names(t.requesters)} will hear about`;
     } else if (input.action === 'link') {
@@ -3831,6 +3833,8 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    */
   fileTimedLeg(sessionId: string, a: { what: string; brief: string; from: string; needs: string[]; why: string; request?: string; platform?: string; pinned?: { id: string; why: string } }): { id: string; text: string } {
     const w = this.workerRequest(sessionId, a.request, 'timed_place');
+    // w2610: a timed leg never files a leg of itself (w2607's worker did twice and blocked on each copy forever).
+    if (w.timedLeg) throw new Error(`${w.id} is itself a timed leg (of ${w.timedLeg.for}): no leg is filed for it. Time it where timed_place says, or wait to be moved.`);
     const what = clip(a.what.replace(/\s+/g, ' ').trim(), 100);
     const brief = a.brief.trim();
     if (!what || !brief) throw new Error('give what (one line: "RoundRobin belt output A/B on PR #2347") and brief (what the leg runs, as a new worker needs it: the branch and the commits of both sides, the save, the script and its settings, what to report)');
@@ -3875,6 +3879,40 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     } catch {
       return undefined;
     }
+  }
+
+  /**
+   * w2610: the asking worker's request when it is itself a timed leg (timed_place filed it), with where its placement lets it
+   * run: `widened` when FF Factory let it go to any computer that takes timed runs (w2048's fallback, or w2544's drop of its
+   * wait for a computer away past the grace: its awayMove), and the computers it was filed for. Undefined for any other request.
+   */
+  ownTimedLegOf(sessionId: string, request: string | undefined): { id: string; widened?: string; small: string[] } | undefined {
+    let w: WorkItem;
+    try {
+      w = this.workerRequest(sessionId, request, 'timed_place');
+    } catch {
+      return undefined;
+    }
+    const leg = w.timedLeg;
+    if (!leg) return undefined;
+    const widened = leg.widened ? `widened at ${leg.widened.slice(11, 16)} UTC, w2048` : w.awayMove ? `${w.awayMove.line} at ${w.awayMove.at.slice(11, 16)} UTC, w2544` : undefined;
+    return { id: w.id, ...(widened ? { widened } : {}), small: [...leg.small] };
+  }
+
+  /**
+   * w2610: timed_place told a timed leg's own worker it may not time where it is: no new leg is filed (that looped, w2607 ->
+   * w2608 -> w2609); its log says so and the dispatcher is told to move it. Returns what the worker is told.
+   */
+  misplacedTimedLeg(sessionId: string, id: string, from: string, needs: readonly string[], why: string): string {
+    const w = this.store.work.get(id);
+    const to = needs.length ? needs.join(' > ') : 'a computer that takes timed runs';
+    if (w) {
+      this.stamp(w, `timed leg ask (w1969) from its own worker ${sessionId.slice(0, 8)} on ${from}: not here, it moves to ${to}; no new leg filed (w2610): ${why}`);
+      this.store.putWork(w);
+      this.toDispatcher(`[ledger] ${w.id} "${clip(w.title, 80)}" is a timed leg whose own worker ${sessionId.slice(0, 8)} runs on ${from}, where timed_place does not let it time (${why}). Move it: stop_agent with move_to ${needs[0] ?? 'a computer that takes timed runs'}, or decide_work queue it with needs ${to}. FF Factory filed no new leg (w2610).`, w.requestedBy);
+    }
+    console.log(`timed ask (w2610): ${id} own worker ${sessionId.slice(0, 8)} on ${from}: not here, moves to ${to}; no new leg: ${why}`);
+    return `Do not time it here and file nothing: ${id} is itself the timed leg, and the dispatcher was told to move it to ${to}. Commit and push anything of yours, then end your turn with a line "${id}: still open: waiting to be moved to ${to} for its timed run (w2610)". Do not call blocked_on for this.`;
   }
 
   /** A timed_place answer that keeps the leg where it is (w1969): a line in the asking request's log and the portal's journal. */
@@ -6899,6 +6937,20 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    * Some of a blocked request's gates cleared, others have not (w754): the cleared ones go, the request stays Blocked on
    * the rest, and its log says so. (All cleared is unblock.)
    */
+  /**
+   * w2610: the gates of `t` on request `merged`, just merged into `t`: a wait on itself that can never clear (w2607 Blocked on
+   * w2608, a copy of it, after the dispatcher merged w2608 into it). They go; with none left, `t` is unblocked.
+   */
+  private dropSelfGates(t: WorkItem, merged: string): void {
+    if (t.status !== 'blocked' || !t.blocked) return;
+    const m = merged.toLowerCase();
+    const self = gatesOf(t).filter((g) => (g.kind === 'request' && g.ref?.toLowerCase() === m) || (g.kind === 'lock' && g.holder?.toLowerCase() === m));
+    if (!self.length) return;
+    const why = `${merged} was merged into ${t.id}, so a wait on it was a wait on ${t.id} itself (w2610)`;
+    if (self.length === gatesOf(t).length) this.unblock(t.id, why);
+    else this.gatesCleared(t.id, self, why);
+  }
+
   gatesCleared(id: string, cleared: readonly WorkBlocker[], why: string) {
     const w = this.store.work.get(id);
     if (!w || w.status !== 'blocked' || !w.blocked) return;

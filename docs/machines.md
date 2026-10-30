@@ -968,6 +968,22 @@ and w1891 waited behind it there, and w1789 waited on LothDesktop behind shared 
   **here**, with the same reason, and the log line says "here on a big computer (w2048 fallback: ...)". A widened leg's
   worker hears **here** wherever it is started. Before w2048 a leg widened after `TIMED_LEG_WAIT_MS` (60 minutes) even
   when its small computer was only busy.
+- **A timed leg's own worker never files a leg** (w2610, asked by Ben). On 2026-10-30 w2607 (the timed leg of w2597, the
+  5-arm Ship Assembler benchmark) waited for m3; w2544 dropped that wait at 17:18 (m3 away past the grace) and the
+  dispatcher started its worker on BEAST, but the drop left `timedLeg.widened` unset, so `timed_place` treated the leg's
+  own worker like any worker on a big computer, refused BEAST and filed w2608, a leg of the leg, and blocked w2607 on it;
+  merged back, the next call filed w2609. The rule now, one for the ask, the room flag and the dispatcher: **a w2544 drop of
+  a timed leg's wait is a widening** (`agents.ts` `unpinAwayNeeds` stamps `widened`; `orchestrators.ts` `ownTimedLegOf`
+  also reads `awayMove` for a leg dropped before this), so its worker hears **here** on any computer that takes timed runs,
+  the same computers `flagQueuedWithRoom` counts as room once the needs are gone. A leg that is not widened hears **here**
+  on one of its `small` computers, else **not here**: the dispatcher is told to move it (`misplacedTimedLeg`) and no leg is
+  filed; `fileTimedLeg` refuses a timed leg outright. When a narrowing (`timedLegBound`) sets the needs again it deletes
+  `widened`, and both sides agree on the small computers again. Two gates went with it (`shared/blockers.ts`): a block on a
+  request merged into the blocked request itself is refused (`blockerProblem`) and, set before, cleared at the merge
+  (`Orchestrators.dropSelfGates`, and `blockerVerdict` on the next pass); and a parent Blocked on its timed leg's report
+  wakes when the leg is Blocked only if the leg waits on the parent itself (a commit or an answer), never on its own copy,
+  a time, CI or a person: w2597 was resumed three times with "w2607, its timed leg, is itself Blocked" and blocked again
+  each time. Tests: `w2544AwayMachines.test.ts` "w2610: ...", `blockers.test.ts` "w2377/w2610" and "w2610".
 - **Size classes, and the timing order with pre-emption** (w2055; lothsahn, 2026-10-24: "Small:1 slot, medium:2-3 slots.
   Large:4-6 slots. Xlarge:7+"; "If timing runs arrive and small machines (single slot) are working on non timing work, the
   dispatcher should pre-empt their existing work and move it to make space for the timing work if it's possible for the

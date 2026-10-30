@@ -14,6 +14,7 @@ import { MachineManager } from './machines.ts';
 import { Agents } from './agents.ts';
 import { Identity } from './identity.ts';
 import { awayLead, awayLine, awayOf, longAway } from './machineAway.ts';
+import { decideTimedPlace } from './timedAsk.ts';
 import { moveDecision, type MoveFacts } from './resumeMove.ts';
 import { workLive } from '../shared/workState.ts';
 import type { Computer } from './placement.ts';
@@ -250,4 +251,51 @@ test("w2544: a person's named computer for timed work is honoured by the timing 
   assert.deepEqual(after.machinePin, { ids: ['lothdesktop'], why: 'a person\'s words, passed by the dispatcher: lothsahn: "w2542 should move to LothDesktop"' });
   assert.equal(x.timedOrderProblem('lothdesktop', after), undefined);
   assert.ok(after.log.some((l) => /pinned to lothdesktop \(w2544\)/.test(l)));
+});
+
+// w2610: w2607, w2597's timed leg Queued for m3, lost its wait for m3 (w2544) and was started on BEAST; its worker asked
+// timed_place, which filed w2608 (a leg of the leg) and blocked w2607 on it; merged back, w2609 was filed the same way.
+test('w2610: a timed leg whose wait for an away computer was dropped times where it was started; no leg of a leg; a merged copy is no gate', async (t) => {
+  const { store, agents, laptop, request, worker } = await setup(t);
+  const o = agents.orchestrators;
+  laptop({ lastSeen: ago(30 * MIN) });
+  store.putWork({ id: 'w2541', title: 'Station refill fix', brief: 'Fix it.', priority: 'high', keys: [], requestedBy: BEN, requesters: [BEN], humanAsked: true, status: 'blocked', blocked: { kind: 'request', ref: 'w2542', on: 'report', what: 'timed leg w2542', at: ago(40 * MIN), by: 'worker 2e4db6f1' }, createdAt: OLD, updatedAt: OLD, sessionIds: [], overlaps: [], asks: 0, log: [] });
+  const leg = { for: 'w2541', forSession: '2e4db6f1', from: 'lothdesktop', small: ['lothlaptop'] };
+  request({ title: 'Timed leg for w2541: 5 arms', status: 'queued', sessionIds: [], timedLeg: leg, queuedFor: { at: ago(25 * MIN), needs: ['lothlaptop'] } });
+  // 1. The wait is dropped (w2544): the leg may run on any computer that fits, and that is recorded as its widening.
+  assert.deepEqual(agents.moveAwayWork(NOW), [['w2542', 'no longer waits for lothlaptop (offline 30 min) (w2544)']]);
+  assert.ok(store.work.get('w2542')!.timedLeg?.widened, 'the drop widens the leg');
+  // 2. The dispatcher starts it on BEAST (flagged: queued while beast has room); its worker asks timed_place there.
+  worker('9b0ad6be', { status: 'idle', machineId: 'beast', machineSandbox: 'slot3' });
+  store.putWork({ ...store.work.get('w2542')!, status: 'active', queuedFor: undefined, sessionIds: ['9b0ad6be'] });
+  const own = o.ownTimedLegOf('9b0ad6be', undefined);
+  assert.equal(own?.id, 'w2542');
+  const beast = pcx('beast', { live: 3, midTurn: 3, freeSandboxes: 2, maxSandboxes: 5 });
+  // m3 offline 20 min, shorter than the busy fleet's wait: before w2610 the answer filed a new leg queued for it.
+  const places = [beast, pcx('m3', { maxAgents: 3, maxSandboxes: 1, online: false, offlineSince: ago(20 * MIN) })];
+  const ask = { here: beast, places, now: NOW, waitMs: 60 * MIN };
+  assert.equal(decideTimedPlace(ask).verdict, 'elsewhere', 'the asker as any worker: a leg for m3 (the loop)');
+  const d = decideTimedPlace({ ...ask, ownLeg: own });
+  assert.equal(d.verdict, 'here', d.why);
+  assert.match(d.why, /^w2542 is itself the timed leg, and FF Factory let it run on any computer that takes timed runs \(widened at \d\d:\d\d UTC, w2048\): time here\. Every number of this comparison comes from beast/);
+  // A leg never files a leg of itself, whatever asks.
+  assert.throws(() => o.fileTimedLeg('9b0ad6be', { what: '5 arms', brief: 'Time them.', from: 'beast', needs: ['m3'], why: 'beast is big' }), /w2542 is itself a timed leg \(of w2541\): no leg is filed for it/);
+  assert.equal(store.work.get('w2543'), undefined);
+  // Not widened and started on a big computer it was not filed for: told to move, still no new leg.
+  const narrow = decideTimedPlace({ ...ask, ownLeg: { id: 'w2542', small: ['m3'] } });
+  assert.deepEqual([narrow.verdict, narrow.ownLeg, narrow.needs], ['elsewhere', 'w2542', ['m3']]);
+  assert.match(o.misplacedTimedLeg('9b0ad6be', 'w2542', 'beast', ['m3'], narrow.why), /^Do not time it here and file nothing: w2542 is itself the timed leg, and the dispatcher was told to move it to m3/);
+  assert.equal(store.work.get('w2543'), undefined);
+  // 3. Had a copy been filed and the leg blocked on it, merging the copy into the leg clears that gate (it named itself).
+  store.putWork({ id: 'w2543', title: 'Timed leg for w2542: 5 arms', brief: 'Time them.', priority: 'high', keys: [], requestedBy: BEN, requesters: [BEN], humanAsked: false, status: 'queued', queuedFor: { at: ago(MIN), needs: ['m3'] }, timedLeg: { for: 'w2542', forSession: '9b0ad6be', from: 'beast', small: ['m3'] }, createdAt: OLD, updatedAt: OLD, sessionIds: [], overlaps: [], asks: 0, log: [] });
+  store.workSeq = 2543;
+  store.putWork({ ...store.work.get('w2542')!, status: 'blocked', blocked: { kind: 'request', ref: 'w2543', on: 'report', what: 'timed leg w2543', at: ago(MIN), by: 'worker 9b0ad6be' } });
+  o.decide({ id: 'w2543', action: 'merge', into: 'w2542', note: 'This repeats w2542, the timed leg itself.' });
+  const after = store.work.get('w2542')!;
+  assert.equal(store.work.get('w2543')!.status, 'merged');
+  assert.notEqual(after.status, 'blocked', after.log.join(' | '));
+  assert.equal(after.blocked, undefined);
+  assert.ok(after.log.some((l) => /w2543 was merged into w2542, so a wait on it was a wait on w2542 itself \(w2610\)/.test(l)), after.log.join(' | '));
+  // The parent stays Blocked on its leg's report all along: nothing above was its result.
+  assert.equal(store.work.get('w2541')!.status, 'blocked');
 });

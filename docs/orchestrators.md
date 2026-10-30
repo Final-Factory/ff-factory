@@ -761,7 +761,9 @@ without one means it is off or failing, worth a person's look.
   - a timed leg's report with a result for the request it was filed for clears that request's wait (`reportDelivers`;
     since w2426 the same rule for every waiter): a `For <parent>:` line (a partial result too), `DONE: <leg>`, or a still-open line that waits
     on the parent ("waiting for w2335's worker to send its fix commit", read by `requestWaitOf`: a mere mention, a branch
-    `sandbox/slot3-w2335`, is none); so does the leg itself turning Blocked after the parent's gate. A turn that says only
+    `sandbox/slot3-w2335`, is none); so does the leg itself turning Blocked on the parent after the parent's gate (since w2610 only on the parent: a leg
+    Blocked on its own merged copy, a time, CI or a person leaves the parent Blocked; w2597 woke three times on
+    2026-10-30 on "w2607, its timed leg, is itself Blocked" and blocked again each time). A turn that says only
     that its bench ticket is still queued, or "understood", leaves the parent Blocked (w2377: w2338's turns woke w2335
     four times on 2026-10-27, when any turn of a leg cleared it). The resume message carries the leg's report and asks for
     a `For <leg>:` line with the branch and commit, which resumes the leg's worker if it waits back;

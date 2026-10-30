@@ -1762,6 +1762,8 @@ export class Agents {
     const timedRun = (this.timedRuns?.windowsTargets() ?? []).filter((t) => t.online && t.offers && !t.held).map((t) => t.id);
     const wait = this.timedBlip();
     const pinned = this.timedPinFor(info, a, typeof a.request === 'string' && a.request.trim() ? a.request : undefined);
+    // w2610: a timed leg's own worker asks too (its rules say so): the answer follows the leg's placement, never a new leg.
+    const ownLeg = this.orchestrators.ownTimedLegOf(info.id, typeof a.request === 'string' && a.request.trim() ? a.request : undefined);
     const d = decideTimedPlace({
       ...(pinned ? { pinned } : {}),
       here,
@@ -1776,6 +1778,7 @@ export class Agents {
       waitMs: wait.ms,
       waitWhy: wait.why,
       widenedLeg: this.orchestrators.widenedLegOf(info.id, typeof a.request === 'string' && a.request.trim() ? a.request : undefined),
+      ...(ownLeg ? { ownLeg } : {}),
     });
     const until = new Date(Date.now() + TIMED_VERDICT_MS).toISOString();
     const request = typeof a.request === 'string' && a.request.trim() ? a.request : undefined;
@@ -1789,6 +1792,9 @@ export class Agents {
       this.setTimedVerdict(info, { verdict: 'elsewhere', why: d.why, until, timedRun: d.timedRun });
       this.orchestrators.noteTimedAsk(info.id, request, `timed leg ask (w1969) from worker ${info.id.slice(0, 8)} on ${machineId}: to ${d.timedRun} by timed_run (w1996): ${d.why} ("${clip(what, 80)}")`);
       text = `Elsewhere (w1969, w1996): ${d.why}. Build both players here (a build takes a shared ticket), then call timed_run with machine "${d.timedRun}": its daemon times both there, interleaved, under that computer's own exclusive ticket, and the table and logs come back to you; no worker starts there and nothing is rebuilt. Take no exclusive ticket here.${d.choose ? ` That is for a Windows player A/B (a save played by two builds, probe_ab_win.sh's legs). For anything else timed (a snippet timed in the editor, a Performance test, a profiler capture, a Mac player), call timed_place again with via "leg": a new worker on a small computer then builds and times it.` : ''}`;
+    } else if (d.ownLeg) {
+      this.setTimedVerdict(info, { verdict: 'elsewhere', why: d.why, until });
+      text = `Not here (w1969, w2610): ${d.why}. ${this.orchestrators.misplacedTimedLeg(info.id, d.ownLeg, machineId, d.needs ?? [], d.why)}`;
     } else {
       const leg = this.orchestrators.fileTimedLeg(info.id, { what, brief: String(a.brief ?? ''), from: machineId, needs: d.needs ?? [], why: d.why, ...(request ? { request } : {}), ...(platform ? { platform } : {}), ...(pinned && d.pinned ? { pinned } : {}) });
       this.setTimedVerdict(info, { verdict: 'elsewhere', why: d.why, until, leg: leg.id });
@@ -3222,6 +3228,9 @@ export class Agents {
     this.orchestrators.ledgerEdit(w.id, `its wait for ${lines} dropped (w2544): away past the grace, so it is placed on any computer that fits`, (x) => {
       if (x.queuedFor) x.queuedFor = { at: x.queuedFor.at };
       x.awayMove = { at: new Date(now).toISOString(), line: `no longer waits for ${lines}` };
+      // w2610: a timed leg placed "on any computer that fits" is widened (w2048), so timed_place answers its worker "here"
+      // wherever the flag for room (flagQueuedWithRoom) and the dispatcher start it: one rule for both.
+      if (x.timedLeg && !x.timedLeg.widened) x.timedLeg = { ...x.timedLeg, widened: new Date(now).toISOString() };
     });
     return [[w.id, `no longer waits for ${lines} (w2544)`]];
   }
