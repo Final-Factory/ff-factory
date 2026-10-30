@@ -941,6 +941,10 @@ export function workerRules(w: Pick<WorkItem, 'id' | 'source' | 'brief' | 'triag
       head,
       '',
       `This came from the team's own nightly e2e lab (${s.nightly?.lab ?? 'the lab'}, ${s.nightly?.date ?? ''}, master ${s.nightly?.sha?.slice(0, 9) ?? '?'}): a scripted oracle failed. No players' text is involved.`,
+      // w2613: every scenario named here, whatever the dispatcher's brief kept; the whole night is a report on the request.
+      ...(s.nightly?.scenarios.length
+        ? [`- Failing scenarios (${s.nightly.scenarios.length}, every one): ${s.nightly.scenarios.join(', ')}. \`read_work ${w.id}\` has each one's step and reason at the top of its brief; a section the brief left out for length is whole in the report on its Reports line (read_report, from any computer). Never wait on a person or the lab for a scenario's facts.`]
+        : []),
       '- Reproduce it first: `python3 scripts/nightly/ffnightly.py run --scenario <id> --no-retry` on a player built from the commit tested (specs/075-nightly-e2e-regression/quickstart.md; players launch from the slot pool, never a new exe path). Say in your report whether it reproduced.',
       "- Then fix the game bug, or, when the scenario is what is wrong, fix the scenario with the evidence for why. Never loosen an oracle, add an allowlist line or quarantine a scenario to hide a real regression; a quarantine is Ben's call.",
       '- It is determinism-critical: follow CLAUDE.md (fp math, the crown-jewel surfaces, save compatibility) and verify a multiplayer fix with the determinism audit. Show the scenario red before and green after.',

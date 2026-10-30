@@ -9,12 +9,15 @@ import { SessionManager, setQueryForTesting } from './sessions.ts';
 import { MachineManager } from './machines.ts';
 import { Agents } from './agents.ts';
 import { Identity } from './identity.ts';
-import { IntakeManager, type DiscordReader } from './intake.ts';
+import { IntakeManager, type DiscordReader, type IntakeDeps } from './intake.ts';
 import type { BoardAnswer } from './orchestrators.ts';
 import { beltFor } from './belts.ts';
 import { limitProblem } from './work.ts';
 import { UNTRUSTED_HEADER, parseBugThread, type DiscordMessage, type DiscordThread } from './intakeRules.ts';
-import type { NightlyReport, NightlyResult } from './nightlyRules.ts';
+import { NIGHT_REPORT_REF, parseNightlyReport, type NightlyReport, type NightlyResult } from './nightlyRules.ts';
+import { longNight } from './nightlyRules.test.ts';
+import { ReportStore } from './reports.ts';
+import { readWork } from './workRead.ts';
 import { ESCALATION } from './escalationRules.test.ts';
 import { DIAGNOSIS } from './diagnosisRules.test.ts';
 import type { Diagnosis } from './diagnosisRules.ts';
@@ -596,6 +599,40 @@ test('a reviewer approves or declines from their own chat, only in a turn of the
 const NSHA = (c: string) => c.repeat(40);
 const night = (date: string, sha: string, results: NightlyResult[]): NightlyReport => ({ v: 1, date, lab: 'lothdesktop', sha, results });
 const fail = (scenario: string, o: Partial<NightlyResult> = {}): NightlyResult => ({ scenario, class: 'new', step: '3 assert', reason: `${scenario}: census differs`, ...o });
+
+test('nightly (w2613): a night of 12 long scenario sections files one request whose brief, read_work and report name every one', (t) => {
+  const { intake, work, store, dir, o } = setup(t, { nightly: { enabled: true } });
+  // The report store as server/index.ts wires it.
+  const reports = new ReportStore(dir);
+  (intake as unknown as { d: IntakeDeps }).d.fileReport = (w, title, body) => {
+    const r = reports.file({ title, kind: 'other', body }, { id: w.id, title: w.title, requesters: w.requesters }, undefined);
+    o.reportFiled(w.id, r.report, r.created);
+    return r.report.id;
+  };
+  const md = '# report.md as the lab wrote it\n\nThe TL;DR and every table.';
+  const parsed = parseNightlyReport(longNight(12, { date: '2026-10-30', markdown: md }));
+  assert.ok('report' in parsed);
+  const out = intake.onNightly(parsed.report)!;
+  assert.deepEqual(out.map((r) => r.action), Array(12).fill('filed'), 'more than batchOver: one request for the night');
+  const [w] = work();
+  const names = parsed.report.results.map((r) => r.scenario);
+  assert.ok(w.brief.length <= 8000);
+  for (const s of names) assert.ok(new RegExp(`^- ${s} \\(new regression\\): step 76: ${s} broke`, 'm').test(w.brief), `the brief lists ${s} with its step and reason`);
+  // The night's report is filed on it, and the brief names it by id.
+  assert.deepEqual(w.reports?.map((r) => r.id), ['r1']);
+  assert.match(w.brief, /whole section and the lab's report\.md is in report r1: read_report from any computer/);
+  assert.ok(!w.brief.includes(NIGHT_REPORT_REF));
+  const whole = reports.get('r1')!.body;
+  for (const s of names) assert.ok(whole.includes(`### ${s} (new regression)`) && whole.includes(`--scenario ${s} --no-retry`), `the report has ${s}'s whole section`);
+  assert.ok(whole.includes(md));
+  // A worker on it reads every name with read_work.
+  w.sessionIds.push('worker-1');
+  store.putWork(w);
+  const read = readWork(work(), 'worker-1', { id: w.id }, new Map());
+  for (const s of names) assert.ok(new RegExp(`^- ${s} \\(new regression\\): step 76`, 'm').test(read), `read_work's brief lists ${s}`);
+  assert.match(read, new RegExp(`^Failing scenarios \\(12\\): ${names.join(', ')}$`, 'm'));
+  assert.match(read, /Reports: r1 "Nightly e2e 2026-10-30: 12 failing scenarios"/);
+});
 
 test('nightly: off by default; nothing is filed', (t) => {
   const { intake, work } = setup(t);

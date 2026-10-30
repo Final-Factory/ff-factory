@@ -65,7 +65,7 @@ import {
   type DiscordMessage,
   type IntakeSettings,
 } from './intakeRules.ts';
-import { brokenNightDraft, mentionsScenario, NIGHT_BROKEN, nightlyAgainLine, nightlyDraft, nightlyKey, nightlyReviewDraft, nightlyRunDraft, nightlySkip, nightStatus, parseNightlyJobs, type NightlyReport, type NightlyResult } from './nightlyRules.ts';
+import { brokenNightDraft, mentionsScenario, NIGHT_BROKEN, NIGHT_REPORT_REF, nightlyReportBody, nightlyAgainLine, nightlyDraft, nightlyKey, nightlyReviewDraft, nightlyRunDraft, nightlySkip, nightStatus, parseNightlyJobs, type NightlyReport, type NightlyResult } from './nightlyRules.ts';
 import { NIGHTLY_SENTRY, unattributedPerson } from './vault.ts';
 import { nextDaily } from './timers.ts';
 import type { NightlyReviewSettings, NightlyRunSettings } from './intakeRules.ts';
@@ -159,6 +159,11 @@ export interface IntakeDeps {
   mintNightlyKey?: () => string;
   /** Tell FFBox a player's report is obsolete, or no longer (server/providers.ts pushReportObsolete); false when it could not go. */
   pushReportObsolete?: (o: ReportObsolete & { withdrawn?: true }) => boolean;
+  /**
+   * File a report on a request (w2613; server/index.ts: the report store, linked on the request): its id, or undefined
+   * when it could not be filed. A nightly request's whole night goes there, readable from any computer.
+   */
+  fileReport?: (w: WorkItem, title: string, body: string) => string | undefined;
   now?: () => number;
 }
 
@@ -1278,6 +1283,7 @@ export class IntakeManager {
         limit: () => capProblem(this.d.store.work.values(), NIGHTLY_KINDS, s.nightly.dailyCap, now),
       });
       this.outcome('nightly', draft.title, draft.source.url, res);
+      if (res.item && !res.repeat) this.fileNightReport(res.item, rep, g);
       for (const r of g) {
         if (res.skipped) out.push({ scenario: r.scenario, action: 'skipped', why: res.skipped });
         else out.push({ scenario: r.scenario, action: res.repeat ? 'attached' : 'filed', workId: res.item?.id, ...(g.length > 1 ? { why: `the night's batch of ${g.length}` } : {}) });
@@ -1285,6 +1291,25 @@ export class IntakeManager {
     }
     this.lastNightly(rep, out);
     return out;
+  }
+
+  /**
+   * The night's whole report on the request just filed (w2613): every scenario's section uncut and the lab's report.md
+   * when it sent it, so a worker on any computer has them (the lab's own copy is on the lab only). The brief then names
+   * the report by its id.
+   */
+  private fileNightReport(w: WorkItem, rep: NightlyReport, results: readonly NightlyResult[]) {
+    if (!this.d.fileReport || (results.length < 2 && !rep.markdown)) return;
+    let id: string | undefined;
+    try {
+      id = this.d.fileReport(w, `Nightly e2e ${rep.date}: ${results.length === 1 ? results[0].scenario : `${results.length} failing scenarios`}`, nightlyReportBody(rep, results));
+    } catch (e) {
+      console.warn(`intake: the night's report for ${w.id} was not filed: ${(e as Error).message}`);
+    }
+    if (!id) return;
+    const cur = this.d.store.work.get(w.id) ?? w;
+    cur.brief = cur.brief.split(NIGHT_REPORT_REF).join(`report ${id}`);
+    this.d.store.putWork(cur);
   }
 
   private lastNightly(rep: NightlyReport, out: { action: string }[]) {

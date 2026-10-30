@@ -827,6 +827,13 @@ const intake = new IntakeManager({
   pushBoard: (ref, answer) => providers.pushBoard(ref, answer),
   pushReportFixed: (fix) => providers.pushReportFixed(fix),
   pushReportObsolete: (o) => providers.pushReportObsolete(o),
+  // A nightly request's whole night (w2613): filed as a report on it, so a worker off the lab reads every scenario.
+  fileReport: (w, title, body) => {
+    const r = reports.file({ title, kind: 'other', body, note: 'filed by the nightly intake' }, { id: w.id, title: w.title, requesters: w.requesters }, undefined);
+    agents.orchestrators.reportFiled(w.id, r.report, r.created);
+    agents.onReport?.(r.report);
+    return r.report.id;
+  },
   // FFBox runs ffbox master, which takes maybe: no offer list gates it (docs/ffbox-connector-contract.md, "No negotiation").
   takesMaybe: () => true,
   // The nightly run's key (w864): minted at each fire under one name, so the night before's dies; redacted from now on.
@@ -2231,7 +2238,8 @@ const server = http.createServer(async (req, res) => {
       const who = auth.bearer(req);
       if (!who.ok) return send(res, who.status, { error: who.status === 429 ? 'too many failures' : 'API key required' });
       if (who.scope !== 'nightly') return send(res, 403, { error: 'a nightly-scoped key is required (node server/apikey.ts <name> --scope nightly)' });
-      const parsed = parseNightlyReport(await readJson(req, 256 * 1024));
+      // 2 MB: the night's report.md rides along (w2613; the portal keeps 300,000 characters of it).
+      const parsed = parseNightlyReport(await readJson(req, 2 * 1024 * 1024));
       if ('error' in parsed) return send(res, 400, { error: parsed.error });
       // The nightly lab ran (and let go of its lab.lock): a lock blocker on it clears (w643).
       nightlyAt = Date.now();

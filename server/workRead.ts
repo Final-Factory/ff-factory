@@ -193,6 +193,8 @@ function facts(w: WorkItem): string[] {
   return [
     `For ${names(w.requesters)}; filed ${w.createdAt.slice(0, 16).replace('T', ' ')}, updated ${w.updatedAt.slice(0, 16).replace('T', ' ')}.`,
     tag ? `Source: ${tag}` : '',
+    // Every failing scenario of a nightly request, from its source rather than its brief (w2613: a cut brief lost four).
+    w.source?.kind === 'nightly' && w.source.nightly?.scenarios.length ? `Failing scenarios (${w.source.nightly.scenarios.length}): ${w.source.nightly.scenarios.map((s) => cleanLine(s, 80)).join(', ')}` : '',
     w.delegation ? `From standing agent "${cleanLine(w.delegation.agentName, 80)}" (delegation ${w.delegation.id}).` : '',
     w.sessionIds.length ? `Workers: ${w.sessionIds.join(', ')}` : 'Workers: none yet',
     w.relatedIds?.length ? `Related: ${w.relatedIds.map((r) => cleanLine(r, 60)).join(', ')}` : '',
