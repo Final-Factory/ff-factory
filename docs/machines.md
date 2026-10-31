@@ -289,6 +289,20 @@ it running, mid-turn or idle. The next daemon takes it back.
   message reaches the running process, and the restart comes with a later one. The first message of a process on other
   code than its last opens with an `[updated]` line (`updatedNote`): its system prompt and guard are the current ones,
   and where they differ from what it read earlier in the conversation, they win.
+- **A restart on new code starts a new host** (w2625). A host keeps its loaded code (`LOADED_CODE`, machine/VERSION) and
+  the worker tools of the spec it started with (`toolsOf`, a hash of the tools its `CATALOG` serves), and its `host.json`
+  says both. On 2026-10-30 w2618's worker bcd8d4e5 on BEAST had a host started at 19:51:45 MDT, during the daemon update
+  (done 19:52:09), on the code from before PR #773 (`list_ffbox_files` reading bug threads); at 19:54:19 the w1166 restart
+  stopped its agent, and the new daemon handed the next message to the old host, still in its `CLOSE_GRACE_MS`, which
+  started the agent again inside itself on the old code and tools: the tool stayed missing until a person stepped in. Now
+  `HostedSession.send`, for a host whose agent has ended (`otherThanHost`), compares its `host.json` with this daemon's
+  code and the run's tool list, as it does the credentials (w1745): either differs, or a host from before w2625 says
+  neither, and the host gets a stop, and a new host started once it has closed carries the message. A live agent is never
+  touched: only between turns. A worker that still ends a turn waiting for someone to restart its agent host or tools
+  (`restartWait`, shared/workState.ts) is told none is needed (`restartWaitNotice`), its `ranOn` forgotten so that very
+  message starts it again on its machine's code; a tool still missing then waits on a deploy (`blocked_on` deploys).
+  Tests: `server/hostCode.test.ts`, and the whole race with real daemons and a host in `server/agentHost.test.ts`
+  ("w2625").
 - **A host's end** (w799, BEAST 2026-10-09: the daemon dropped two hosts whose heartbeats were 30 s late under a release
   build while their processes ran on; it could not remove their folders, `EPERM` on Windows, and never ended them. One,
   w790's worker 38a203f0 in slot1, ran half an hour more with its claude.exe and Unity MCP chain, its `publish_attachment`

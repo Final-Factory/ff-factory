@@ -11,6 +11,7 @@
  *   "#slow"        streams for a few seconds (for the running state and interrupts)
  *   "#fail"        ends the turn with an error result
  *   "#die"         the agent process ends mid-turn (as when the server's process tree is stopped)
+ *   "#tools"       says the worker tools its in-process MCP servers serve: "Tools: <name>, <name>" (w2625)
  *   "#wait <s>"    stays mid-turn that many seconds, then says "Waited <s> s." (w605: a turn across a daemon restart)
  *   "#bg"          starts a background task (a background command, a watcher) and ends the turn
  *   "#printenv <NAME>..."  a Bash call that prints those variables with their values, URL-encoded and base64 (w1688), also
@@ -271,6 +272,16 @@ export function fakeQuery(fake: FakeOptions = {}) {
           }
           const branch = git('rev-parse', '--abbrev-ref', 'HEAD');
           const reply = `Committed and pushed my unfinished work.\n\n${ids.map((id) => `${id}: handed back: branch ${branch} pushed; stopped after the first step, the rest is left`).join('\n')}`;
+          yield text(reply);
+          yield result(uuid, true, reply);
+        } else if (/^#tools\s*$/i.test(words.trim())) {
+          // w2625: the worker tools its in-process MCP servers serve, as a turn that lists them sees them.
+          const names: string[] = [];
+          for (const [serverName, cfg] of Object.entries(options?.mcpServers ?? {})) {
+            if (cfg.type !== 'sdk' || !('instance' in cfg)) continue;
+            names.push(...(await (await client(serverName, cfg as never)).listTools()).tools.map((t) => t.name));
+          }
+          const reply = `Tools: ${names.sort().join(', ') || 'none'}`;
           yield text(reply);
           yield result(uuid, true, reply);
         } else if (/#wait\s+\d+/i.test(words)) {

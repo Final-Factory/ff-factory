@@ -385,6 +385,19 @@ export const orchestratorWaitIn = (line: string) => ORCHESTRATOR_WAIT.test(line)
 const OWN_WORK = /\bto (?:run|do|start|kick off|trigger|launch|finish|make) (?:the |a |my |its |our )?[^;.]{0,60}?\b(?:check|build|ci|tests?|audit|run|clips?|playtest|capture)\b/i;
 export const ownWorkWait = (line: string) => ORCHESTRATOR_WAIT.test(line) && OWN_WORK.test(line) && !/\b(?:worker|sandbox|place|move)\b/i.test(line);
 
+/**
+ * A wait for someone to restart or reload the worker's own agent host, process, session or tools (w2625; w2618's worker
+ * bcd8d4e5: "waiting on the orchestrator to restart my agent host on beast so the new tool list loads"). Nobody does that
+ * by hand and none needs to: a worker's process starts again on its machine's code between turns by itself (w1166), in a
+ * new agent host when its host runs other code or another tool list (w2625). A restart of Unity, the game or a build is
+ * another thing.
+ */
+const RESTART_WORD = /\b(?:restart|reload|relaunch|respawn)(?:s|ed|ing)?\b/i;
+const OWN_PROCESS = /\b(?:agent[- ]host|host|process|session|tool[- ]list|tools?|mcp(?:[- ]servers?)?)\b/i;
+const NOT_MINE = /\b(?:unity|editor|game|player|steam|build)\b/i;
+export const restartWait = (line: string) =>
+  /\b(?:waiting|waits|wait|blocked|needs?|until)\b/i.test(line) && line.split(/;|\.\s/).some((c) => RESTART_WORD.test(c) && OWN_PROCESS.test(c) && !NOT_MINE.test(c));
+
 /** A wait word, then within the clause a timing word: "waiting for a sandbox on m5 for the timed runs" (w1996). */
 const WAIT_WORD = /\b(?:waiting|waits|wait|queued|held) (?:for|on)\b/i;
 const TIMING_WORD = /\b(?:tim(?:ed|ing)|bench(?:mark)?s?|a\/b|exclusive|perf(?:ormance)?)\b/i;
@@ -1051,7 +1064,9 @@ function workLiveOf(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: string
   const orch = lines.find((x) => orchestratorWaitIn(x.l.line));
   if (orch) {
     const own = ownWorkWait(orch.l.line);
-    return { state: 'stalled', why: `${orch.s.id} says it waits on the orchestrator: "${orch.l.line.slice(0, 160)}"${own ? '; that is its own work (pair and two-machine checks, builds, its CI): tell it to run it' : ''}` };
+    // w2625: a wait for its agent host or tools to restart is no one's: any message starts its next turn on new code.
+    const restart = !own && restartWait(orch.l.line);
+    return { state: 'stalled', why: `${orch.s.id} says it waits on the orchestrator: "${orch.l.line.slice(0, 160)}"${own ? '; that is its own work (pair and two-machine checks, builds, its CI): tell it to run it' : restart ? "; nobody restarts a worker's agent host by hand (w2625): any message to it starts its next turn on its machine's code and tools" : ''}` };
   }
   const last = [...mine].sort((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt))[0];
   return { state: 'stalled', why: `${last.id} ${last.status === 'error' ? 'failed' : last.status === 'idle' ? 'finished its turn' : 'stopped'} ${ago(last.lastActivityAt, f.now)}${pr}, nothing waits on a person` };

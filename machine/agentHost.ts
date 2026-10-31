@@ -122,6 +122,29 @@ export function credsOf(env: Record<string, string | undefined> | undefined): st
   return h.digest('hex').slice(0, 32);
 }
 
+/**
+ * The FF Factory code this process loaded (w2625): the commit its install's machine/VERSION names, read once at load, so a
+ * daemon and each host it starts know what they run. A checkout without the file reads '' (alike everywhere). Fake hosts
+ * only (tests): FF_AGENT_HOST_CODE stands in for it.
+ */
+export const LOADED_CODE = ((): string => {
+  if (process.env.FF_AGENT_HOST_FAKE === '1' && process.env.FF_AGENT_HOST_CODE) return process.env.FF_AGENT_HOST_CODE;
+  try {
+    return fs.readFileSync(path.join(import.meta.dirname, 'VERSION'), 'utf8').trim();
+  } catch {
+    return '';
+  }
+})();
+
+/**
+ * The worker tools a host started from `spec` serves, as a hash (w2625): the spec's tools this code's CATALOG knows (as
+ * buildOptions leaves out the rest), each with its description and loading hints, in name order.
+ */
+export function toolsOf(spec: Pick<LaunchSpec, 'mcp'>): string {
+  const tools = (spec.mcp?.tools ?? []).filter((t) => t.name in CATALOG).sort((a, b) => a.name.localeCompare(b.name));
+  return createHash('sha256').update(JSON.stringify([spec.mcp?.server ?? '', tools.map((t) => [t.name, t.description, t.alwaysLoad ?? false, t.searchHint ?? ''])])).digest('hex').slice(0, 32);
+}
+
 /** What a daemon sends a host. `n` numbers them, so a host that closed says how many it carried out. */
 export type HostCommand = { n: number } & (
   | { op: 'send'; info: Pick<SessionInfo, 'title' | 'model' | 'permissionMode' | 'sdkSessionId'>; text: string; from: 'human' | 'orchestrator' | 'system'; uuid: string; images?: ImageInput[]; requestedBy?: Requester; attachments?: DeliveredAttachment[] }
@@ -167,6 +190,9 @@ export interface HostRecord {
   sessionId: string;
   pid: number;
   startedAt: string;
+  /** The FF Factory code it loaded (LOADED_CODE) and the tools it serves (toolsOf), w2625; a host from before wrote neither. */
+  code?: string;
+  tools?: string;
 }
 
 const readJson = <T>(file: string): T | undefined => {
@@ -369,19 +395,18 @@ export class HostedSession implements SessionHandle {
       ...(requestedBy ? { requestedBy } : {}),
       ...(attachments?.length ? { attachments } : {}),
     } as const;
+    let other: string | undefined;
     if (this.stoppingNow || this.waiting.length) {
       // Its old host's tree is still being stopped (w799): the new host starts once it is gone, with this message.
       this.waiting.push(cmd);
-    } else if (this.running && !this.liveNow && this.creds !== credsOf(this.deps.spec().env)) {
-      // w1745: its agent ended (a usage limit, a stop for another account) and its host is closing, while this message's run
-      // has other credentials (the portal moved it to another token). A host keeps the environment it started with, so given
-      // this message it would start the agent again on the old token: the old host is told to stop, and a new host, started
-      // with the run's credentials now, carries the message once the old one has closed. A host an older daemon started
-      // recorded none (no creds.sha): unknown counts as other, since its agent has ended anyway (9888f324 on Biscuit,
-      // 2026-10-22 19:10:37Z, went back onto its used-up token in a host adopted across the daemon update).
+    } else if (this.running && !this.liveNow && (other = this.otherThanHost())) {
+      // Its agent ended (a usage limit, a stop to move it) and its host is closing, while this message's run differs from
+      // what the host started with. A host keeps its environment, its code and its launch spec, so given this message it
+      // would start the agent again on those: the old host is told to stop, and a new host, started from this run, carries
+      // the message once the old one has closed.
       this.waiting.push(cmd);
       this.command({ op: 'stop', onPurpose: false });
-      this.deps.log(`agent host ${this.info.id}: a message for other credentials than its host started with: a new host carries it once this one has closed (w1745)`);
+      this.deps.log(`agent host ${this.info.id}: a message for ${other}: a new host carries it once this one has closed`);
     } else if (!this.running) {
       // No host started (w665, w691): nothing runs, so it is not mid-turn. Marking it so reported a worker running for
       // hours that had nothing running, and the portal showed its request Working.
@@ -396,6 +421,27 @@ export class HostedSession implements SessionHandle {
     this.info.status = 'running';
     this.info.turnOpenSince ??= new Date().toISOString();
     return uuid;
+  }
+
+  /**
+   * How this message's run differs from what its host started with, or undefined (it may start the agent again).
+   * - w1745: other credentials (the portal moved it to another token). A host an older daemon started recorded none (no
+   *   creds.sha): unknown counts as other, since its agent has ended anyway (9888f324 on Biscuit, 2026-10-22 19:10:37Z,
+   *   went back onto its used-up token in a host adopted across the daemon update).
+   * - w2625: other FF Factory code, or other worker tools. A host adopted across a daemon update runs the code it loaded
+   *   (w605), so the portal's restart on the new code (w1166) went into it and the tools the update added stayed missing:
+   *   w2618's worker bcd8d4e5 on beast, whose host started at 19:51:45 MDT 2026-10-30 during the update (done 19:52:09),
+   *   was started again inside it at 19:54:19 and waited two hours. A host from before this recorded neither: other, too.
+   *   A host this daemon started that has not written host.json yet runs this daemon's code from this daemon's spec.
+   */
+  private otherThanHost(): string | undefined {
+    const spec = this.deps.spec();
+    if (this.creds !== credsOf(spec.env)) return 'other credentials than its host started with (w1745)';
+    const rec = readJson<HostRecord>(this.files.host);
+    if (!rec) return undefined;
+    if (rec.code !== LOADED_CODE) return `FF Factory code ${LOADED_CODE.slice(0, 7) || 'from a checkout'}, while its host runs ${rec.code === undefined ? 'code from before w2625' : rec.code.slice(0, 7) || 'a checkout'} (w2625)`;
+    if (rec.tools !== toolsOf(spec)) return 'another worker tool list than its host serves (w2625)';
+    return undefined;
   }
 
   async interrupt() {
@@ -780,7 +826,7 @@ export async function runHost(dir: string, start: HostStart): Promise<void> {
   const id = start.info.id;
   // The run's secrets, whatever they are called (w1688): the spec's secretEnv names what the vault gave, SECRET_ENV the rest.
   addSecretEnv(start.spec.env, Array.isArray(start.spec.secretEnv) ? start.spec.secretEnv : []);
-  fs.writeFileSync(f.host, JSON.stringify({ hostProtocol: HOST_PROTOCOL, sessionId: id, pid: process.pid, startedAt: new Date().toISOString() } satisfies HostRecord));
+  fs.writeFileSync(f.host, JSON.stringify({ hostProtocol: HOST_PROTOCOL, sessionId: id, pid: process.pid, startedAt: new Date().toISOString(), code: LOADED_CODE, tools: toolsOf(start.spec) } satisfies HostRecord));
   const beat = () => {
     try {
       fs.writeFileSync(f.beat, String(Date.now()));
