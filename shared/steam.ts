@@ -5,6 +5,7 @@
 // registry.vdf and pgrep) and reports the account id and display name only; a pair run that needs Steam (WorkPair.steam)
 // goes only on computers signed in to Steam, a different account on each leg (shared/capacity.ts pairRoom). The login name
 // (loginusers.vdf AccountName, half of a credential) is never read out of the file. Pure, shared by the daemon and the portal.
+import { affirmedMention } from './mentions.ts';
 
 /** What a daemon reports of its machine's Steam client (FromDaemon `steam_client`). */
 export interface SteamClient {
@@ -152,7 +153,7 @@ const STEAM_WORDS: readonly RegExp[] = [
   /\bSteam(?:Matchmaking|Networking|Friends|Client)\b/,
   /\bsigned (?:in|out) (?:of|to) steam\b/i,
 ];
-export const mentionsSteam = (...texts: (string | undefined)[]): boolean => texts.some((t) => !!t && STEAM_WORDS.some((re) => re.test(t)));
+export const mentionsSteam = (...texts: (string | undefined)[]): boolean => texts.some((t) => !!t && STEAM_WORDS.some((re) => affirmedMention(t, re)));
 
 /**
  * Whether the client is connected to Steam's servers, from the tail of its logs/connection_log.txt (w2461): undefined when

@@ -5,6 +5,7 @@
 // pair that needs Steam, a request_pair `menus` mark, or words that name a menu, a lobby or a click) goes only where it is
 // unlocked (shared/capacity.ts unfitWhy), and a leg is refused on a locked one (server/agents.ts startPairLegs).
 import type { WorkPair } from './types.ts';
+import { affirmedMention } from './mentions.ts';
 
 export interface DesktopSession {
   checkedAt: string;
@@ -32,11 +33,20 @@ export const desktopLabel = (d: DesktopSession | undefined): string => (!d ? 'no
 
 const MENU_WORDS = [/\bmenus?\b/i, /\blobb(y|ies)\b/i, /\bclick(s|ed|ing)?\b/i, /\bbuttons?\b/i, /\bdialogs?\b/i];
 
-/** Whether words name what a leg clicks: a menu, a lobby, a button, a dialog. */
-export const mentionsMenus = (...texts: (string | undefined)[]): boolean => texts.some((t) => !!t && MENU_WORDS.some((re) => re.test(t)));
+/**
+ * Whether words name what a leg clicks: a menu, a lobby, a button, a dialog, other than to rule it out (w2648: w2631's
+ * "Direct IP, no Steam, no menus" is no menu click; shared/mentions.ts affirmedMention).
+ */
+export const mentionsMenus = (...texts: (string | undefined)[]): boolean => texts.some((t) => !!t && MENU_WORDS.some((re) => affirmedMention(t, re)));
+
+/** A request_pair `menus` (or `steam`) that says its legs click none (need none): "none", "no", "false", "off". */
+export const saysNone = (said: string | undefined): boolean => /^(?:none|no|false|off)$/i.test((said ?? '').trim());
 
 /** Why a pair run clicks the game's menus when its words said so and its filer did not (WorkPair.menus). */
 export const MENUS_READ = 'read from its words: a menu, a lobby, a click; request_pair menus "none" says it clicks none';
+
+/** Why a pair run's legs click no menus, when its filer or the dispatcher said so (WorkPair.noMenus): its words are not read. */
+export const MENUS_NONE = 'none: its legs click no menus, as its filer said (request_pair menus "none")';
 
 /** Whether a pair run's legs click the game's menus: every pair that needs Steam (its lobby is a menu), or one marked so. */
 export const pairDrivesMenus = (p: Pick<WorkPair, 'steam' | 'menus'> | undefined): boolean => !!(p?.steam || p?.menus);

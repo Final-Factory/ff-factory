@@ -1221,6 +1221,11 @@ online or frees up.
   and the caller is told how it waits Queued instead. A blocker only that person can clear (their own login, password or
   FileVault, a reboot of their own machine, an admin prompt) still goes through. "machine" alone counts only beside a
   word of the fleet's work, since a factory's machines are a game noun.
+- **Nor is a placement fork** (w2648, `placementForkProblem`): a card one of whose questions has answers that differ only in
+  machines, legs, sandboxes or waiting (read from the answers' labels: "re-file 2 legs, starts now", "3 legs, wait for
+  lothdesktop", "leave queued") is refused by `decide_work ask` and `waiting_on_person`, naming the answer that starts on what
+  is there now. It got past `machineAskProblem` on w2631 (2026-10-31 08:40) because its question asked for no computer, and
+  sat with lothsahn about 3 hours. A card that names money, a merge, a release, an approval or a login still goes through.
 - The first correction of this kind was w847 (the dispatcher asked Ben to re-run an installer; lothsahn: "When we say
   update the machines, do the update"), so an ask to run an installer or update a computer is refused the same way.
 

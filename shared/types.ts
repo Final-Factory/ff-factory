@@ -2016,6 +2016,11 @@ export interface WorkPair {
    * legs then go only on computers whose desktop is unlocked (shared/desktop.ts): a locked Mac's menus take no clicks.
    */
   menus?: string;
+  /**
+   * Its legs click no menus, as its filer or the dispatcher said (w2648: request_pair menus "none", decide_work pair_menus
+   * "none"): its words are then never read for menu clicks again (w2631's "no menus" was).
+   */
+  noMenus?: string;
   /** A leg takes timing measurements (exclusive bench tickets): never on a computer that takes no timed runs (m5, w1861). */
   timed?: boolean;
   /** When its legs started together, and where: leg 1 (the host) first. */
