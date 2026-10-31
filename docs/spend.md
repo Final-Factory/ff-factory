@@ -653,7 +653,7 @@ A smaller after-push share that only comes from more research or implementing is
 
 lothsahn, 2026-10-24: "nudge workers to hand long read/search chains to Explore". The exploration runs above are the game repo's
 delegation rule ("a lookup you expect to need five or more reads") done inline. In a share of worker sessions
-(`worker.readChainPilotPercent`, default 50, set_app_config; 0 off; by a hash of the session id drawn apart from the compaction
+(`worker.readChainPilotPercent`, default 100 since the result below (it was 50), set_app_config; 0 off; by a hash of the session id drawn apart from the compaction
 and terse-prose pilots, server/readChain.ts) the agent host adds a PostToolUse hook (server/readChainHook.ts): after the fifth
 Read, Grep, Glob or read-only Bash call in a row on the main thread, one line, `five reads in a row: hand the rest of this search
 to ff-agents:Explore or scout and keep the conclusion (CLAUDE.md, Delegation policy)`, once per chain. Any other tool call and a
@@ -668,6 +668,33 @@ To read it, on each worker machine: `python scripts/compact-compare.py --since <
 (cost a call, a session and a request per arm), and cost per merged PR and reopens per arm from `spend_report` and the ledger for
 those ids. Compare within one model and effort, and mind the other two pilots: each arm holds about half of each of them. The phase split above (w2018) is the before: the research share is where a nudge that works shows first.
 
+**Result, rolled out** (w2014; beast's transcripts, worker sessions started 2026-10-24 12:10Z to 10-31 16:04Z, Opus 5.5, list
+price, main thread and subagents; `scripts/read-chain-compare/`, measured unless marked):
+
+| | Control (132 sessions) | Pilot (152 sessions) |
+|---|---|---|
+| Cost, total (subagents) | $912 ($116) | $998 ($115) |
+| Cost a session, mean / median | $6.91 / $4.36 | $6.57 / $4.63 |
+| PRs pushed in the window / merged | 132 / 129 | 145 / 143 |
+| Cost per merged PR | $7.07 | $6.98 (-1%; 90% bootstrap interval -20% to +21%) |
+| Requests with a DONE / reopened since | 90 / 1 | 82 / 0 |
+| Points where the hook fires (its own classifier) | 335, an Agent call within 3 calls after 9 (3%) | 346, after 33 (10%) |
+| Reads past the fifth of a chain | 1,020 (5.5% of calls) | 706 (3.4%) |
+| Explore and scout calls | 25 | 94 |
+
+The nudge fired 333 times in the pilot and never in control; 327 of them (98%) sat on a chain of five or more reads by the
+hook's own rules ported to Python, the other 6 a guess: parallel calls finishing out of order. So it moved behaviour the way
+the delegation rule asks (three times the hand-offs after a chain, a third fewer reads past the fifth), and cost per merged PR
+did not move beyond noise. What it could save is small (a guess from the counts above: the reads it cut were about 2% of calls,
+about 2% of cost before the subagent's own price), well under what two arms of ~140 sessions can show (about ±20%), and a
+longer pilot would need months to show 2%. The split by the terse-prose pilot shows the noise: with it the pilot cost 11% more a
+merged PR, without it 12% less. The compaction pilot was at 100% for all but 13 of these sessions, so it does not confound.
+lothsahn's request asked for a rollout or a rollback; with the behaviour measured, no harm seen and a line of context the only
+cost, `worker.readChainPilotPercent` defaults to 100 (w2014); set it under 100 for a control arm again.
+
+Two traps for the next pilot that moves work to subagents: `compact-compare.py` prices only the main thread, and a subagent's
+messages are in `<session>/subagents/*.jsonl`, not in the main file (the first pass here read $0 of subagent cost); and a
+simpler read classifier than the hook's finds a tenth of its chains (34 points against 346), so port the hook's own.
 ### Merging green PRs with no model turn, a pilot (w2045)
 
 lothsahn asked for "a Sonnet helper for CI waits and merges only", then chose, after the measurements below, "Have FF Factory

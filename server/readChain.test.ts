@@ -106,9 +106,9 @@ test("the hook: a subagent's calls neither count nor reset; a new prompt starts 
   assert.equal(await run(g, post('PreToolUse' as never)), undefined);
 });
 
-test('readChainPercent: 50 by default; config sets it; 0 is off; over 100 is all', () => {
-  assert.equal(READ_CHAIN_DEFAULT_PERCENT, 50);
-  assert.equal(readChainPercent({}), 50);
+test('readChainPercent: 100 by default (rolled out, w2014); config sets it; 0 is off; over 100 is all', () => {
+  assert.equal(READ_CHAIN_DEFAULT_PERCENT, 100);
+  assert.equal(readChainPercent({}), 100);
   assert.equal(readChainPercent(worker(20)), 20);
   assert.equal(readChainPercent(worker(0)), 0);
   assert.equal(readChainPercent(worker(250)), 100);
@@ -117,9 +117,9 @@ test('readChainPercent: 50 by default; config sets it; 0 is off; over 100 is all
 });
 
 test('the arm: a stable half of session ids, drawn apart from the compaction and terse-prose pilots', () => {
-  const half = ids.filter((id) => inReadChainPilot(id, {}));
+  const half = ids.filter((id) => inReadChainPilot(id, worker(50)));
   assert.ok(half.length > 900 && half.length < 1100, `${half.length} of 2000 at 50%`);
-  assert.deepEqual(ids.filter((id) => inReadChainPilot(id, {})), half, 'the same session always answers the same');
+  assert.deepEqual(ids.filter((id) => inReadChainPilot(id, worker(50))), half, 'the same session always answers the same');
   assert.equal(ids.filter((id) => inReadChainPilot(id, worker(0))).length, 0);
   // Overlap with each other pilot as chance says (a quarter of the sessions), so each one's effect reads apart.
   for (const [name, other] of [['early', (id: string) => inEarlyCompactPilot(id, { worker: { earlyCompactPilotPercent: 50 } } as Config)], ['terse', (id: string) => inTerseProsePilot(id, {})], ['compact', (id: string) => inPilot(id, 50)]] as const) {
@@ -129,11 +129,11 @@ test('the arm: a stable half of session ids, drawn apart from the compaction and
 });
 
 test('withReadChainMark: the mark ends a pilot prompt only', () => {
-  const inside = ids.find((id) => inReadChainPilot(id, {}))!;
-  const outside = ids.find((id) => !inReadChainPilot(id, {}))!;
-  assert.equal(withReadChainMark('BRIEF', outside, {}), 'BRIEF');
-  assert.ok(withReadChainMark('BRIEF', inside, {}).startsWith(`BRIEF\n\n${READ_CHAIN_MARK}\n`));
-  assert.ok(withReadChainMark('BRIEF', inside, {}).length < 'BRIEF'.length + 150, 'the mark is read on every call of a pilot session');
+  const inside = ids.find((id) => inReadChainPilot(id, worker(50)))!;
+  const outside = ids.find((id) => !inReadChainPilot(id, worker(50)))!;
+  assert.equal(withReadChainMark('BRIEF', outside, worker(50)), 'BRIEF');
+  assert.ok(withReadChainMark('BRIEF', inside, worker(50)).startsWith(`BRIEF\n\n${READ_CHAIN_MARK}\n`));
+  assert.ok(withReadChainMark('BRIEF', inside, worker(50)).length < 'BRIEF'.length + 150, 'the mark is read on every call of a pilot session');
 });
 
 test('buildOptions: a PostToolUse hook only when the spec asks for the nudge', () => {
