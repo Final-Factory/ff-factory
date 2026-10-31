@@ -22,7 +22,7 @@ import { idleClosedPart } from './liveIdle.ts';
 import { HOLD_PLACE_MS, LIVE_HOLD_MS, PlaceAgain, RELEASE_AFTER_MS, RELEASE_WAKE_NOTE, handOverBranch, occupies, releasedOn } from './placeAgain.ts';
 import { agentQueueAll, agentQueueFacts, editorSlotRefusal, queueWaitsAll } from '../shared/queueWaits.ts';
 import { pairWaitLine, pairWaitNotice } from './pairRuns.ts';
-import { WORK_LIVE_LABEL, WORK_LIVE_STATES, asksAPerson, benchWaitOf, lastOpenLine, liveCounts, otherWorkWait, outsideDeclared, outsideWaitOf, ownWorkWait, noTimedWaitOf, personWaitIn, reportWaitKey, servedBy, workLiveAll, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
+import { WORK_LIVE_LABEL, WORK_LIVE_STATES, asksAPerson, benchWaitOf, lastOpenLine, liveCounts, otherWorkWait, outsideDeclared, outsideWaitOf, ownWorkWait, noTimedWaitOf, restartWait, personWaitIn, reportWaitKey, servedBy, workLiveAll, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
 import { prsIn, reportTail, whoOf, type NeedsYouWait } from './needsYou.ts';
 import { addedLines, asksLookOk, decidedRefusal, personNotes, quoteCovered, quotedPhrases, relatedRequests } from './priorDecisions.ts';
 import { stillOpenIn } from './ledgerRules.ts';
@@ -247,6 +247,16 @@ const BLOCKER_SHAPE = z.object({
 });
 
 /** The blocked_on tool's text (w754), for workers; docs/orchestrators.md, "Waiting, Queued, Blocked". */
+/**
+ * What a worker that ended its turn waiting for someone to restart its agent host, process or tools is told (w2625; w2618's
+ * worker bcd8d4e5 on beast sat 2 h "waiting on the orchestrator to restart my agent host on beast so the new tool list
+ * loads"). No orchestrator or person can, and none needs to: FF Factory starts its process again on its machine's code
+ * between turns (w1166), in a new agent host when the old one runs other code or another tool list (w2625). The portal
+ * forgets which code its process ran (SessionInfo.ranOn), so this very message starts that new process first.
+ */
+export const restartWaitNotice = (id: string, line: string) =>
+  `[FF Factory] Your report says ${id} waits for a restart of your agent host, process or tools: "${line.slice(0, 200)}". Nobody restarts those by hand, and no orchestrator or person can: FF Factory starts your process again on your machine's FF Factory code between turns by itself (w1166), in a new agent host when the old one ran other code or another tool list (w2625), and this message started such a turn. Look at your tool list now (ToolSearch \`select:<name>\`) and carry on. If a tool is still missing, the code that adds it has not reached your machine yet: blocked_on with deploys [your machine's id] (its daemon update) or ["portal"], and you are resumed when it lands.`;
+
 /**
  * What a worker that ended its turn waiting on the orchestrator for its own work is told (w1841 (d); w1685: "waiting on the
  * orchestrator to run the two-machine check `MP-W1685-black-hole-swallow-2p`").
@@ -2639,6 +2649,8 @@ export class Agents {
     // w1812: the same question on several of its requests goes once.
     this.orchestrators.needsYouAll(this.personWaits({ worker: s.info.id, report: text }));
     // w1841 (d): a turn that ends waiting on the orchestrator for the worker's own work is told at once that it is its own.
+    // w2625: one that waits for someone to restart its agent host or tools is told none is needed, on new code at once.
+    this.restartWaitNudge(s.info, text);
     this.pairWaitNudge(s.info, text);
     this.ownWorkNudge(s.info, text);
     // w1996: a turn that ends waiting on a computer that takes no timed runs (m5) for timed work is re-placed at once.
@@ -2671,7 +2683,7 @@ export class Agents {
   private pairWaitNudge(info: SessionInfo, text: string) {
     for (const [id, line] of stillOpenIn(text)) {
       // A wait on the orchestrator to run it is the own-work nudge's (w1841), which names request_pair too.
-      if (!pairWaitLine(line) || ownWorkWait(line)) continue;
+      if (!pairWaitLine(line) || ownWorkWait(line) || restartWait(line)) continue;
       const key = `${info.id}:${id}`;
       if (this.ownWorkTold.has(key)) continue;
       if (this.orchestrators.pairFiledFor(id)) continue;
@@ -2686,6 +2698,29 @@ export class Agents {
     }
   }
 
+  /**
+   * w2625, w2618: "w2618: still open: waiting on the orchestrator to restart my agent host on beast so the new tool list
+   * loads" waited 2 h on a step nobody has a tool for. The worker is told at once, once per request, that none is needed;
+   * its process's recorded code (ranOn) is forgotten first, so the notice reaches it through a process started again on
+   * its machine's code (codeMove: a process with no ranOn counts as other code; between turns only, never with a
+   * background task running), in a new host when its host ran other code or another tool list (HostedSession.send).
+   */
+  private restartWaitNudge(info: SessionInfo, text: string) {
+    for (const [id, line] of stillOpenIn(text)) {
+      if (!restartWait(line)) continue;
+      const key = `${info.id}:${id}`;
+      if (this.ownWorkTold.has(key)) continue;
+      this.ownWorkTold.add(key);
+      try {
+        delete info.ranOn;
+        this.sessions.send(info.id, restartWaitNotice(id, line), 'system');
+        this.orchestrators.ledgerEdit(id, `worker ${info.id} ended its turn waiting for a restart of its agent host or tools ("${line.slice(0, 120)}"): told none is needed and started again on its machine's code (w2625)`, () => undefined);
+      } catch (e) {
+        console.warn(`restart-wait nudge: could not tell ${info.id}: ${(e as Error).message}`);
+      }
+    }
+  }
+
   /** w1841: the requests a worker was told its own-work wait is its own ("<session>:<request>"): once each. */
   private readonly ownWorkTold = new Set<string>();
 
@@ -2696,7 +2731,7 @@ export class Agents {
    */
   private ownWorkNudge(info: SessionInfo, text: string) {
     for (const [id, line] of stillOpenIn(text)) {
-      if (!ownWorkWait(line)) continue;
+      if (!ownWorkWait(line) || restartWait(line)) continue;
       const key = `${info.id}:${id}`;
       if (this.ownWorkTold.has(key)) continue;
       this.ownWorkTold.add(key);
@@ -4186,7 +4221,7 @@ ${ownerLine(this.cfg)}
 ${ghBriefLine(m.id, m.gh, github, workflowMachines)}${github ? `\n- GitHub: that token (GH_TOKEN) is the GitHub account of the person this work is for (docs/vault.md section 13); \`gh auth status\` shows whose it is. A fine-grained token cannot read check runs, so \`gh pr checks\` and \`--json statusCheckRollup\` answer "Resource not accessible by personal access token": read CI with \`gh run list --commit <head sha>\` and \`gh run view\`. FFBox takes a pull request comment or review from an FFBox operator's account (lothsahn's) as that operator's own instruction (#codereview, and any comment on its ffbox/ pull requests), billed to them: post none there unless the person asked for it.` : ''}
 ${clone ? mainCloneGrantBrief(clone) : `- Protected: the machine's main clone \`${m.repoPath}\` (the user's own work) and the FF Factory daemon's folder. Never write there or run commands naming them; the harness blocks it.`}
 - Machine steps are yours, not a person's: an editor open on a project you must change, your sandbox's or a person's own project folder, you close cleanly (save its scenes, or back up unsaved edits), then you do the work, and reopen it if a person was using it. Closing or opening Unity, git commands, copying files and installers are never handed to a person (a "what you need to do" list for a person is a miss); a person is asked only for what the rules reserve to them: approvals, design decisions, spending, publishing, admin acts that need their own words. If the harness refuses a step (the main clone is protected above), name the tool and path it refused and hand that step to your orchestrator for the ops worker or ssh.
-- Tools: ${deferredToolsLine('worker', 'Your FF Factory tools (mcp__machine__*) are')} Rules few tasks need are in \`mcp__machine__read_rules\` (\`read_rules <topic>\`), named below where they apply: read the topic before you act in that case; it binds like this prompt. The ff-agents skills' scripts (ui_look.py, ui_layout.py, pr_evidence.py, record_clip.py, ...) are in \`$FF_SKILLS/<skill>/\` (\`python "$FF_SKILLS/unity-ui/ui_look.py"\`; PowerShell \`$env:FF_SKILLS\`): never search a disk for them.
+- Tools: ${deferredToolsLine('worker', 'Your FF Factory tools (mcp__machine__*) are')} Rules few tasks need are in \`mcp__machine__read_rules\` (\`read_rules <topic>\`), named below where they apply: read the topic before you act in that case; it binds like this prompt. The ff-agents skills' scripts (ui_look.py, ui_layout.py, pr_evidence.py, record_clip.py, ...) are in \`$FF_SKILLS/<skill>/\` (\`python "$FF_SKILLS/unity-ui/ui_look.py"\`; PowerShell \`$env:FF_SKILLS\`): never search a disk for them. A tool a message names that your list lacks: your process starts again on your machine's FF Factory code between turns by itself, so nobody restarts your agent host or process and you never ask anyone to; if the tool is still missing, blocked_on with deploys [your machine's id] or ["portal"].
 
 ## Unity
 Your sandbox has its own Unity editor, managed by the FF Factory daemon on this ${mac}. Use \`mcp__machine__unity\` to check its state, start, stop or restart it (force: true for a frozen one); restart it whenever it is hung, crashed or misbehaving, without asking. Use the tool, never taskkill or kill: other sandboxes' editors share this ${mac}, so the harness refuses killing Unity by hand. Every Unity process on this ${mac} counts toward its limit of ${poolSettingsOf(m)?.maxUnity ?? 2} editors, whoever started it, and a start is refused while it is full or while launches wait ahead of yours (the refusal says who holds them; wake_me and try again). Run every other Unity launch (a -batchmode build or test run, a second editor for a peer run) under \`unity-slot run [--count N] [--label "<what>"] -- <command>\`, and \`read_rules unity\` before your first one, when a start is refused for a batch build, or at a fresh sandbox's first boot. Your own player build (a fix, a clip, a playtest) needs no plan: build where you are under \`unity-slot run\`. A release is FFBox's and builds nothing here; only an urgent release's build (a quick or urgent release) goes through \`build_plan\`, as soon as you know (its description says how). Your editor's MCP instance is \`${unityInstanceName(sb.path)}\`: before ANY Unity MCP call, \`set_active_instance\` with it, in one call (no \`mcpforunity://instances\` read needed; read it only if the pin is refused, and pin the \`${sb.id}@\` whose path is your worktree). The harness refuses Unity MCP calls until you pin, and refuses any other instance.${m.platform === 'win32' ? ' This is Windows: the Bash tool is Git Bash; paths are like D:\\... (forward slashes work in Bash and in git).' : ''}

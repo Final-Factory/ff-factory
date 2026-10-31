@@ -10,10 +10,11 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import { Store } from './store.ts';
-import { SessionManager, type SessionHandle, type TurnEndMeta } from './sessions.ts';
+import { SessionManager, isMidTurn, type SessionHandle, type TurnEndMeta } from './sessions.ts';
 import { MachineManager, RESUME_DELAY_MS } from './machines.ts';
 import { LineTail, hostAlive, hostFiles, pidAlive } from '../machine/agentHost.ts';
 import type { Config } from './config.ts';
+import type { CatalogTool, LaunchSpec } from './launch.ts';
 import type { MachineSandbox } from '../shared/types.ts';
 
 const DAEMON = path.join(import.meta.dirname, '..', 'machine', 'daemon.ts');
@@ -27,7 +28,7 @@ const until = async (what: string, cond: () => boolean, ms = 20_000, more = () =
 };
 
 /** A throwaway portal with one machine, and a way to start that machine's daemon as a process of its own. */
-async function setup(o: { env?: Record<string, string>; secretEnv?: string[]; daemonEnv?: Record<string, string> } = {}) {
+async function setup(o: { env?: Record<string, string>; secretEnv?: string[]; daemonEnv?: Record<string, string>; mcp?: () => LaunchSpec['mcp'] } = {}) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-hosts-'));
   const cfg = { dataDir: path.join(tmp, 'data'), limits: { maxSessions: 6 }, repo: { url: 'x' }, worker: { effort: 'high' } } as unknown as Config;
   fs.mkdirSync(cfg.dataDir);
@@ -38,7 +39,7 @@ async function setup(o: { env?: Record<string, string>; secretEnv?: string[]; da
   // The worker is in sandbox "sb" on the portal's side; this daemon has no pool, so its spec names no sandbox (as in
   // machines.test.ts) and it runs under the machine's agent cap.
   mm.hooks = {
-    specFor: (info) => ({ cwd: agentDir, settingSources: [], append: '', strictMcp: true, guard: { id: 'x', ownPath: agentDir, protectedPaths: [], gameRepos: [] }, model: info.model, ...(o.env ? { env: o.env } : {}), ...(o.secretEnv ? { secretEnv: o.secretEnv } : {}) }),
+    specFor: (info) => ({ cwd: agentDir, settingSources: [], append: '', strictMcp: true, guard: { id: 'x', ownPath: agentDir, protectedPaths: [], gameRepos: [] }, model: info.model, ...(o.env ? { env: o.env } : {}), ...(o.secretEnv ? { secretEnv: o.secretEnv } : {}), ...(o.mcp ? { mcp: o.mcp() } : {}) }),
     handlersFor: () => ({}),
   };
   const server = http.createServer();
@@ -58,8 +59,8 @@ async function setup(o: { env?: Record<string, string>; secretEnv?: string[]; da
   );
   const daemons: ChildProcess[] = [];
   let logs = '';
-  const daemon = () => {
-    const d = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', DAEMON, configFile], { env: { ...process.env, FF_AGENT_HOST_FAKE: '1', ...o.daemonEnv }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+  const daemon = (env: Record<string, string> = {}) => {
+    const d = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', DAEMON, configFile], { env: { ...process.env, FF_AGENT_HOST_FAKE: '1', ...o.daemonEnv, ...env }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     d.stdout!.on('data', (c) => (logs += c));
     d.stderr!.on('data', (c) => (logs += c));
     daemons.push(d);
@@ -183,6 +184,53 @@ test('w605: a host that died with its agent is not taken back; the portal resume
   const rec = JSON.parse(fs.readFileSync(hostFiles(hostDir(id)).host, 'utf8')) as { startedAt: string };
   assert.ok(Date.parse(rec.startedAt) >= goneAt, `in a new host (started ${rec.startedAt}, the old one gone at ${new Date(goneAt).toISOString()})`);
   assert.ok(hostAlive(hostDir(id)));
+});
+
+test("w2625: a host started before a daemon update that added a worker tool: the worker's next turn, restarted on the new code, runs in a new host and sees the tool", { timeout: 180_000 }, async (t) => {
+  // w2618, worker bcd8d4e5 on beast, 2026-10-30: its agent host (pid 50752) started at 19:51:45 MDT, during the daemon
+  // update that finished at 19:52:09, so it loaded the code from before PR #773 (the bug-thread listing). At 19:54:19 the
+  // portal stopped its idle process to start it again on the new code (w1166, agents.ts codeMove), and the daemon handed
+  // the next message to the old host, still closing, which started the agent again inside itself, on its own code and the
+  // launch spec it was started with. The tool stayed missing, and the worker waited two hours for a restart nobody could do.
+  let tools: { name: CatalogTool; description: string }[] = [{ name: 'wake_me', description: 'Come back later.' }];
+  const { sessions, mm, daemon, kill, hostPid, cleanup, logs } = await setup({ mcp: () => ({ server: 'machine', tools }) });
+  t.after(cleanup);
+  const turnEnds: string[] = [];
+  sessions.events.on('turnEnd', (_s: SessionHandle, text: string) => turnEnds.push(text));
+  // FF_AGENT_HOST_CODE stands in for the commit each install's machine/VERSION names (fake hosts only).
+  const d1 = daemon({ FF_AGENT_HOST_CODE: 'aaaaaaa' });
+  await until('online', () => mm.isOnline('mx') && mm.protocolOf('mx') !== undefined, 60_000, logs);
+  const s = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'w', permissionMode: 'default' });
+  const id = s.info.id;
+  sessions.send(id, '#tools');
+  await until('its first turn', () => turnEnds.includes('Tools: wake_me'), 60_000, logs);
+  await until('idle', () => s.info.status === 'idle');
+  const pid = hostPid(id);
+
+  // The update: the old daemon stops, the new code (a tool more) is installed, and the new daemon takes the host back.
+  await kill(d1);
+  tools = [...tools, { name: 'list_ffbox_files', description: 'Bug threads.' }];
+  daemon({ FF_AGENT_HOST_CODE: 'bbbbbbb' });
+  await until('back online', () => mm.isOnline('mx'), 60_000, logs);
+  await until('reported live again', () => s.live, 20_000, logs);
+  assert.equal(hostPid(id), pid, 'the host outlived the update (w605)');
+
+  // The portal's w1166 path: its process started on other code, so between turns it stops, and its next process starts
+  // with the next message (the portal then records that process as on the new code).
+  let moved = false;
+  sessions.codeMove = (h) => {
+    if (h.info.id !== id || moved) return undefined;
+    if (!h.live) {
+      moved = true;
+      return undefined;
+    }
+    return isMidTurn(h.info) ? undefined : 'its process started on FF Factory aaaaaaa and mx runs bbbbbbb now';
+  };
+  sessions.send(id, '#tools');
+  await until('its next turn', () => turnEnds.length === 2, 60_000, logs);
+  assert.ok(moved, 'its process was started again');
+  assert.equal(turnEnds[1], 'Tools: list_ffbox_files, wake_me', 'the next turn sees the tool the update added');
+  assert.notEqual(hostPid(id), pid, 'in a new host, on the code the machine runs now');
 });
 
 test('w605: LineTail reads whole lines only, any length, from an offset kept across restarts', () => {

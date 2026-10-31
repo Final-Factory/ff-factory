@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { answerAfter, asksAPerson, benchWaitOf, holdsOf, lastOpenLine, liveCounts, outsideWaitOf, ownWorkWait, personWaitIn, personWaitSettled, questionShareKey, reportWaitKey, requestWaitOf, servedBy, workLive, workLiveAll, type WorkLiveFacts } from '../shared/workState.ts';
+import { answerAfter, asksAPerson, benchWaitOf, holdsOf, lastOpenLine, liveCounts, outsideWaitOf, ownWorkWait, personWaitIn, restartWait, personWaitSettled, questionShareKey, reportWaitKey, requestWaitOf, servedBy, workLive, workLiveAll, type WorkLiveFacts } from '../shared/workState.ts';
 import type { Requester, SessionInfo, WorkItem } from '../shared/types.ts';
 
 const NOW = Date.parse('2026-10-05T06:00:00Z');
@@ -648,6 +648,19 @@ test('w1841 (d): a worker waiting on the orchestrator for its own work stays Sta
   const l = one(w, [session('d582a5da', { status: 'idle', lastResult: line })])!;
   assert.equal(l.state, 'stalled');
   assert.match(l.why, /^d582a5da says it waits on the orchestrator: ".*"; that is its own work \(pair and two-machine checks, builds, its CI\): tell it to run it$/);
+});
+
+test('w2625: a worker waiting for someone to restart its agent host or tools is told nobody does: the ledger says any message restarts it', () => {
+  // w2618's worker bcd8d4e5 on beast, 2026-10-30, which sat 2 h on it.
+  const line = 'w2618: still open: waiting on the orchestrator to restart my agent host on beast so the new tool list loads';
+  assert.equal(restartWait(line), true);
+  assert.equal(ownWorkWait(line), false, 'not the own-work nudge too');
+  for (const l of ['w1: still open: blocked until my session is restarted with the new tools', 'w1: still open: needs a reload of my MCP tools to see list_ffbox_files', 'w1: still open: waiting for my process to relaunch on the new code']) assert.equal(restartWait(l), true, l);
+  for (const l of ['w1: still open: waiting for Unity to restart after the import', 'w1: still open: waiting on the editor process to restart', 'w1: still open: CI on PR #12', 'w1: still open: waiting on Ben to pick a host for the lobby', 'w1: still open: restart the game host, then the pair run']) assert.equal(restartWait(l), false, l);
+  const w = item('w2618', { sessionIds: ['bcd8d4e5'] });
+  const l = one(w, [session('bcd8d4e5', { status: 'idle', lastResult: line })])!;
+  assert.equal(l.state, 'stalled');
+  assert.match(l.why, /^bcd8d4e5 says it waits on the orchestrator: ".*"; nobody restarts a worker's agent host by hand \(w2625\): any message to it starts its next turn on its machine's code and tools$/);
 });
 
 test("w1841 (e): a worker waiting on files from another request's worker is Blocked on that request while it is open", () => {
