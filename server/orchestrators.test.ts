@@ -5654,6 +5654,51 @@ test('w2620: once the timed leg a verdict sent the worker to has finished, its n
   assert.equal(agents.benchPriorities('pc')[id].timed?.verdict, 'here');
 });
 
+// w2660 (lothsahn: "Please fix the factory"): on 2026-10-31 worker 1de7e4b5 had closed w2654 as done when lothsahn's
+// orchestrator followed up (message_agent) asking it to profile the player pass. timed_place answered "here" twice, yet the
+// bench queue refused every exclusive ticket (benchPriorities left out a session with no open request, so the "here" never
+// reached the machine), and the hand-off to a small computer was refused "you are on no request in the ledger".
+test('w2660: a worker followed up about its closed request takes an exclusive ticket on a "here", and hands a timed run off, which reopens the request', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o, chat, call } = env;
+  fixTimedFacts(o);
+  agentsRoomFacts(agents, { game: ['pc'] });
+  putRequests(store, [{ id: 'w1', title: 'Construction assigner: incremental task order' }]);
+  const { id, h } = await startedFor(env, 'w1');
+  // It finished: closed as done (as w2654 at 17:18Z).
+  const w1 = store.work.get('w1')!;
+  w1.status = 'done';
+  w1.updatedAt = new Date().toISOString();
+  store.putWork(w1);
+  assert.equal(agents.benchPriorities('pc')[id], undefined, 'no follow-up yet: nothing of it on the bench');
+  // The follow-up arrives.
+  const sent = await call(chat(LOTH).info, 'message_agent', { session_id: id, text: 'Profile the remaining 0.76 ms of the player pass and recommend cuts.' });
+  assert.equal(sent.isError, false, sent.text);
+  assert.equal(store.sessions.get(id)!.followUpOn?.id, 'w1');
+  assert.match(store.work.get('w1')!.log.join('\n'), /Lothsahn's follow-up reached worker \w{8} with w1 done: its timed work attaches to w1/);
+  await until('the follow-up turn ends', () => store.sessions.get(id)!.status === 'idle');
+  // "here": the verdict reaches the machine with the request it is for, so the guard grants its exclusive ticket.
+  agents.places = () => askFleet().map((c) => (c.id === 'pc' ? { ...c, live: 1 } : c));
+  const cmd = 'python scripts/bench/bench_queue.py timed --what "w1 assigner stage profile" --minutes 20';
+  const guard = () => checkTimedAsk(cmd, { mark: agents.timedAskFor('pc'), verdict: agents.benchPriorities('pc')[id]?.timed }, Date.now());
+  assert.match(guard()!, /Call timed_place/, 'before it asks, refused as for any worker');
+  assert.match(String(await h.timed_place!({ what: 'w1 assigner stage profile', same_machine: 'r26 was measured on pc' })), /^Here \(w1969\)/);
+  assert.equal(guard(), undefined, 'granted');
+  assert.deepEqual(agents.benchPriorities('pc')[id].requests, ['w1'], 'the ticket is tied to w1');
+  assert.equal(store.work.get('w1')!.status, 'done', 'a "here" leaves it closed');
+  assert.match(store.work.get('w1')!.log.join('\n'), /timed leg ask \(w1969\) from worker \w{8} on pc: here/);
+  // pc busy again: the run goes to a small computer, and w1 waits on its report, reopened.
+  agents.places = () => askFleet();
+  const out = String(await h.timed_place!({ what: 'w1 assigner stage profile', brief: 'Branch w1-stage-profile; AssignerPerfBenchmark by stage, Burst on; report the table.' }));
+  assert.match(out, /^Elsewhere \(w1969\).*Filed w2, the timed leg of w1/);
+  const again = store.work.get('w1')!;
+  assert.equal(again.status, 'blocked');
+  assert.match(again.log.join('\n'), /reopened \(its earlier .*DONEs no longer count.*\): worker \w{8}'s timed_place on Lothsahn's follow-up of \d\d:\d\d UTC made it wait, so it is open again until its worker's next DONE \(w2660\)/);
+  assert.equal(store.work.get('w2')!.timedLeg?.for, 'w1');
+  assert.equal(store.sessions.get(id)!.followUpOn, undefined, 'the request is open: its own work from here');
+  assert.deepEqual(agents.benchPriorities('pc')[id].requests, ['w1']);
+});
+
 test('w1969: with a reason its numbers must come from here, the leg stays, the verdict lets its ticket through, and the log says why', async (t) => {
   const env = await setupOnMachine(t);
   const { store, agents, o } = env;
