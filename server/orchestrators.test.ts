@@ -38,6 +38,7 @@ import { afterMergeReason } from './ledgerRules.ts';
 import { roomForWork, timedLine, type Computer, type RoomNow } from './placement.ts';
 import type { Occupant } from './timedLegPlace.ts';
 import { TOOL_MANIFEST, deferredToolsLine, toolsOf } from './toolManifest.ts';
+import { checkTimedAsk } from './timedAsk.ts';
 import { buildOptions } from './launch.ts';
 import { AttachmentStore } from './attachments.ts';
 import { readTimedAsk, writeBenchPriorities } from '../machine/benchLock.ts';
@@ -5154,7 +5155,8 @@ test('w1984: a worker stopped on purpose, or whose timed work is on another mach
   machines.allStats = (() => bench(new Date(Date.now() - 10 * 60_000).toISOString())) as unknown as typeof machines.allStats;
   assert.equal(agents.benchPriorities('pc')[b.id].away, undefined, 'a stale bench state counts for nothing');
   machines.allStats = real;
-  // Its timed leg placed elsewhere (timed_place).
+  // Its timed leg placed elsewhere (timed_place), the leg still open (w2620: a closed one holds nothing).
+  putRequests(store, [{ id: 'w9', by: BEN, status: 'queued' }]);
   store.sessions.get(b.id)!.timedVerdict = { verdict: 'elsewhere', why: 'big computer', until: new Date(Date.now() + 3_600_000).toISOString(), leg: 'w9' };
   assert.deepEqual(agents.benchPriorities('pc')[b.id].away, { why: `its worker ${b.id.slice(0, 8)}'s timed leg was placed elsewhere (w9)`, exclusive_only: true });
 });
@@ -5585,6 +5587,41 @@ test('w1969: a worker on a big computer asks timed_place; its leg is filed Queue
   assert.deepEqual(o.timedLegBound(), ['w2']);
   assert.deepEqual(store.work.get('w2')!.queuedFor?.needs, ['lothlaptop']);
   assert.equal(store.work.get('w2')!.timedLeg?.widened, undefined);
+});
+
+// w2620 (lothsahn): on LothDesktop worker 2e4db6f1 (w2597) had every exclusive ticket refused "sent to w2607", a timed leg
+// that had long finished, for the rest of its verdict's 12 h, until it called timed_place again before each ticket.
+test('w2620: once the timed leg a verdict sent the worker to has finished, its next ticket is not refused naming it: it is placed afresh, and a "here" then holds', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o } = env;
+  fixTimedFacts(o);
+  agentsRoomFacts(agents, { game: ['pc'] });
+  putRequests(store, [{ id: 'w1', title: 'Ship Assembler refill timing', brief: 'Time the retry arms.' }]);
+  const { id, h } = await startedFor(env, 'w1');
+  agents.places = () => askFleet();
+  const cmd = 'python scripts/bench/bench_queue.py timed --what "launch-slot arm" --minutes 20';
+  const guard = () => checkTimedAsk(cmd, { mark: agents.timedAskFor('pc'), verdict: agents.benchPriorities('pc')[id]?.timed }, Date.now());
+  assert.match(String(await h.timed_place!({ what: 'retry arms A/B', brief: 'Branch w1: both arms, 4 rounds; report the table.' })), /^Elsewhere \(w1969\).*Filed w2, the timed leg of w1/);
+  assert.match(guard()!, /sent this timed leg to w2/, 'while the leg runs, its ticket here is refused');
+  // The leg ran on m3 and reported: closed as done. The verdict still says 12 h.
+  const leg = store.work.get('w2')!;
+  leg.status = 'done';
+  store.putWork(leg);
+  assert.equal(store.sessions.get(id)!.timedVerdict?.leg, 'w2');
+  assert.equal(agents.benchPriorities('pc')[id].timed, undefined, 'a finished leg holds no verdict');
+  assert.equal(agents.benchPriorities('pc')[id].away, undefined, 'nor parks its tickets here as placed elsewhere');
+  const refusal = guard()!;
+  assert.doesNotMatch(refusal, /w2\b/, 'the finished leg is never named');
+  assert.match(refusal, /Call timed_place/, 'it is placed afresh');
+  // A stalled leg is not finished: its worker is resumed, and no second leg would be filed beside it.
+  leg.status = 'stalled';
+  assert.equal(agents.benchPriorities('pc')[id].timed?.leg, 'w2');
+  leg.status = 'done';
+  // Asked afresh with pc idle but for this worker: "here", and the ticket is granted while it holds.
+  agents.places = () => askFleet().map((c) => (c.id === 'pc' ? { ...c, live: 1 } : c));
+  assert.match(String(await h.timed_place!({ what: 'launch-slot arm', brief: 'same A/B, the new arm' })), /^Here \(w1969\)/);
+  assert.equal(guard(), undefined, 'granted');
+  assert.equal(agents.benchPriorities('pc')[id].timed?.verdict, 'here');
 });
 
 test('w1969: with a reason its numbers must come from here, the leg stays, the verdict lets its ticket through, and the log says why', async (t) => {
