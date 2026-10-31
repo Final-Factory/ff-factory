@@ -16,6 +16,7 @@ import { isRealModelId } from '../shared/models.ts';
 import { ContextMeter, IMAGE_CHARS, MIN_BASE, carriedTotals, type Cumulative, type MeterState, type TurnUsage } from '../shared/spend.ts';
 import type { MeterStates } from './meterStates.ts';
 import { CliTranscriptTail, cliTranscriptPath, rebuildMeter } from './cliTranscript.ts';
+import { refreshKeptTools, sdkToolsNow } from './keptTools.ts';
 
 /** A session is mid-turn: working, starting or waiting for a permission answer. Only these count toward the agent limits (w384). */
 export const MID_TURN: ReadonlySet<SessionInfo['status']> = new Set(['running', 'starting', 'waiting_permission']);
@@ -624,6 +625,9 @@ export class AgentSession implements SessionHandle {
     this.cli = { cwd, env: options.env ?? process.env, fromStart: !sid, misses: 0 };
     if (sid) {
       const file = cliTranscriptPath(cwd, sid, this.cli.env);
+      // w2626: ToolSearch shows this process's own tools as they are now, not as the conversation first loaded them.
+      const fresh = refreshKeptTools(file, sdkToolsNow(options.mcpServers));
+      if (fresh.length > 0) this.store.append(this.info.id, { kind: 'system', text: `Tool schemas changed since this conversation loaded them; it sees them as they are now: ${fresh.join(', ')} (w2626).` });
       if (file) this.cli.tail = new CliTranscriptTail(file, false);
       this.meter.resume(this.resumeState(sid, file));
     }

@@ -303,6 +303,17 @@ it running, mid-turn or idle. The next daemon takes it back.
   message starts it again on its machine's code; a tool still missing then waits on a deploy (`blocked_on` deploys).
   Tests: `server/hostCode.test.ts`, and the whole race with real daemons and a host in `server/agentHost.test.ts`
   ("w2625").
+- **A resumed conversation sees each tool as it is now** (w2626, lothsahn: "File a fix so workers' tool search shows the
+  current tool descriptions"). Claude Code (2.1.312, "kept deferred tools") writes a deferred tool's description and
+  input schema into the transcript the first time ToolSearch loads it (an attachment `deferred_tools_record`); a process
+  that resumes the conversation resolves a later ToolSearch of the same name against that record, not against the tool
+  our MCP server lists now, so a new host alone does not refresh it. On 2026-10-31 w2618's worker bcd8d4e5 on BEAST, on a
+  host started after 08b6e2e, was shown `list_ffbox_files` with `symbols|reports|diagnosis` while its `threads` call went
+  through (its record at 01:34 UTC). Now `AgentSession.start` (server/sessions.ts), before a resumed process starts,
+  drops each record entry of the session's own in-process MCP tools whose description or schema differs from the
+  server's (`refreshKeptTools`, `sdkToolsNow` in server/keptTools.ts), in place at the line's own length, and the
+  session's log says which. Only between turns, as every process start is. A tool no longer served keeps its record.
+  Tests: `server/keptTools.test.ts` ("w2626").
 - **A host's end** (w799, BEAST 2026-10-09: the daemon dropped two hosts whose heartbeats were 30 s late under a release
   build while their processes ran on; it could not remove their folders, `EPERM` on Windows, and never ended them. One,
   w790's worker 38a203f0 in slot1, ran half an hour more with its claude.exe and Unity MCP chain, its `publish_attachment`
