@@ -1,5 +1,6 @@
 import type { APIRequestContext, BrowserContextOptions, Page } from '@playwright/test';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { BOX, appState, expect, expectNoHorizontalOverflow, expectTapTargets, isMobile, sendToChat, test, uniq, useTool } from './fixtures.ts';
 import type { TranscriptEvent } from '../shared/types.ts';
@@ -227,4 +228,38 @@ asAsker(`ask: a turn that answers and then asks shows the answer on screen, the 
     await page.waitForTimeout(500);
     await expect(card.getByTestId('ask-more')).toBeInViewport();
   } else await expect(card.locator('.ask-q')).toBeInViewport({ ratio: 1 });
+});
+
+// w2664 (Ben, 2026-10-31, w2580's card seq 61907: "you didnt show me previews for C and D and you didnt give me the multiple
+// choice options"): a design pick with 2 stills in the question and 2 in each of 4 options draws every still and every
+// button, in the chat and on the Waiting tab.
+test('w2664: a 4-option design pick with 2 stills each shows all 10 stills and all 4 buttons, in the chat and on the Waiting tab', async ({ authed: page }) => {
+  test.setTimeout(120_000);
+  const review = path.join(os.tmpdir(), `ffsb-e2e-${new URL(test.info().project.use.baseURL!).port}`, 'review');
+  const dir = path.join(review, 'w9580-station-info-redesign');
+  fs.mkdirSync(dir, { recursive: true });
+  const src = path.join(review, 'w000-options', '1-option-A-left-of-item-rows-1920.png');
+  const names = ['q-desk', 'q-dock', ...['strip', 'card', 'tiles', 'banner'].flatMap((n) => [`${n}-desk`, `${n}-dock`])];
+  for (const n of names) fs.copyFileSync(src, path.join(dir, `${n}.png`));
+  const p = (n: string) => `![${n}](<${dir.split(path.sep).join('/')}/${n}.png>)`;
+  const tag = uniq('w2664');
+  const opt = (l: string, n: string) => ({ label: `${l} ${tag}`, description: `What ${l} does. ${p(`${n}-desk`)} ${p(`${n}-dock`)}` });
+  const me = await appState(page.request);
+  await useTool(page.request, me.orchestratorId, 'ask_person', {
+    question: `Which Station Info design should I build? ${tag} ${p('q-desk')} ${p('q-dock')}`,
+    options: [{ ...opt('A Strip', 'strip'), recommended: true }, opt('B Card', 'card'), opt('C Tiles', 'tiles'), opt('D Banner', 'banner')],
+    request: 'w9580',
+  });
+  for (const where of ['chat', 'waiting'] as const) {
+    if (where === 'waiting') await page.goto('/#/dispatcher/waiting');
+    const card = where === 'chat' ? page.getByTestId('ask').filter({ hasText: tag }).last() : page.getByTestId('waiting-tab').locator('.qc').filter({ hasText: tag });
+    await expect(card).toBeVisible();
+    for (const l of ['A Strip', 'B Card', 'C Tiles', 'D Banner']) await expect(card.getByRole('button', { name: new RegExp(`^${l}`) })).toBeVisible();
+    const imgs = card.locator('img');
+    await expect(imgs).toHaveCount(10);
+    for (let i = 0; i < 10; i++) {
+      await imgs.nth(i).scrollIntoViewIfNeeded();
+      await expect.poll(() => imgs.nth(i).evaluate((e: HTMLImageElement) => e.complete && e.naturalWidth > 0), { message: `${where}: still ${i + 1} of 10 drawn`, timeout: 10_000 }).toBe(true);
+    }
+  }
 });

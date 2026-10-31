@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import { splitMedia } from '../shared/ask.ts';
+import { MAX_MEDIA, splitMedia } from '../shared/ask.ts';
 import type { WorkItem } from '../shared/types.ts';
 import { mediaLine, mediaNamed, onDisk, previewsOf } from './reviewMedia.ts';
 
@@ -55,6 +55,46 @@ export function noPreviewsReason(v: unknown): string | undefined {
   return r ? r.slice(0, NO_PREVIEWS_MAX) : undefined;
 }
 
+/** An answer that is no design of its own ("None of these", "Something else", "Keep it as it is"): it needs no still. */
+const NO_DESIGN = /^(none|neither|other|something else|keep|leave|skip|no change|not yet|later|stop|cancel)\b/i;
+/** Words of a question that make it a pick between looks, when its request has review media ("Which design…", "A or B"). */
+const DESIGN_WORDS = /\b(designs?|mock(?:s|ups?)?|layouts?|variants?|concepts?|which (?:one|look|style|version)|[a-d] or [a-d])\b/i;
+
+export interface PickAsk {
+  question: string;
+  options: readonly { label: string; description?: string }[];
+}
+
+/**
+ * A pick between designs shows each design's own still or clip in its own option (w2664; Ben, 2026-10-31: "you didnt show
+ * me previews for C and D", and "for all the choices above you didnt show the preview images for the mocks"): a still in
+ * the question or in one option does not stand for the others, and no_previews cannot excuse it. A pick is a question
+ * where two or more options carry a review still, or, on a request with review media, one whose words say it picks a look
+ * (DESIGN_WORDS). An approval ("OK as is" with a still, "Change it" without) is no pick.
+ * Returns the refusal's words, or undefined.
+ */
+export function designPickProblem(asks: readonly PickAsk[], root: string, visual: boolean, tool: string): string | undefined {
+  for (const a of asks) {
+    const designs = a.options.filter((o) => !NO_DESIGN.test(o.label.trim()));
+    if (designs.length < 2) continue;
+    const shows = (o: PickAsk['options'][number]) => splitMedia(o.description ?? '').media.some((m) => reviewFile(m.url, root));
+    const bare = designs.filter((o) => !shows(o));
+    if (!bare.length) continue;
+    // Two designs with stills and one without (w2580's C and D), or a question that says it picks a look.
+    const some = designs.length - bare.length >= 2;
+    if (!some && !(visual && DESIGN_WORDS.test(splitMedia(a.question).text))) continue;
+    const where = tool === 'ask_person' ? 'its `description`' : "its answer's `description`";
+    return (
+      `Not shown: "${clipText(splitMedia(a.question).text)}" picks between designs, and ${bare.map((o) => `"${o.label}"`).join(', ')} ${bare.length === 1 ? 'carries' : 'carry'} no still of its own. ` +
+      `Each design shows its own still or clip in ${where} as ![what it shows](<review path>), up to ${MAX_MEDIA} each; a still in the question or in another option does not stand for it ` +
+      `(w2664, Ben: "you didnt show me previews for C and D"). no_previews does not excuse a pick between designs. Publish the missing stills with publish_review and call ${tool} again.`
+    );
+  }
+  return undefined;
+}
+
+const clipText = (t: string) => (t.length > 120 ? `${t.slice(0, 119)}…` : t);
+
 export type VisualAskVerdict =
   | { ok: true; visual: false }
   | { ok: true; visual: true; shown: string[] }
@@ -63,13 +103,16 @@ export type VisualAskVerdict =
 
 /**
  * The check. `texts`: what the card shows (the question and every option's label and description; a worker's `what` too).
+ * `asks`: the same questions with their options apart, for the pick-between-designs rule (designPickProblem).
  * `alsoNamed`: whether a bare path or file name in the texts counts as shown (a worker's card lists what its words name; an
  * ask_person card shows only `![..](<path>)`). `tool`: the tool's name, for the refusal's words.
  */
-export function visualAskCheck(input: { texts: readonly string[]; reqs: readonly Req[]; root: string; noPreviews?: unknown; tool: string; person: string; alsoNamed?: boolean }): VisualAskVerdict {
+export function visualAskCheck(input: { texts: readonly string[]; asks?: readonly PickAsk[]; reqs: readonly Req[]; root: string; noPreviews?: unknown; tool: string; person: string; alsoNamed?: boolean }): VisualAskVerdict {
   const found = requestMedia(input.reqs, input.root);
-  if (!found.length) return { ok: true, visual: false };
   const ids = found.map((f) => f.id);
+  const pick = input.asks ? designPickProblem(input.asks, input.root, found.length > 0, input.tool) : undefined;
+  if (pick) return { ok: false, ids, problem: pick };
+  if (!found.length) return { ok: true, visual: false };
   const inline = input.texts.flatMap((t) => splitMedia(t).media.map((m) => m.url));
   const named = input.alsoNamed ? mediaNamed(input.texts, { root: input.root, ids }).files : [];
   // One of the request's files, or another file in the review folder (an older iteration, a reference): it shows.

@@ -154,7 +154,10 @@ test('w1158: what a coordinator carries in every call stays within its budget', 
   // w2648 (lothsahn: "Use and schedule resources based on what you have. Don't ask for permission.") gave the dispatcher one
   // line saying a card whose answers differ only in placement is refused (trimmed from 860 characters to 340; the rest is in
   // decide_work's pair_menus and the refusal itself): measured 28,943, so the cap moved to 28,950.
-  const PROMPT_MAX = 28_950;
+  // w2664 (Ben: "you didnt show me previews for C and D") gave the dispatcher's decide_work ask a clause that a pick between
+  // designs shows each answer's own still (trimmed from 196 characters to 61; the rest is in decide_work's questions and
+  // no_previews and the refusal itself): measured 29,008, so the cap moved to 29,050.
+  const PROMPT_MAX = 29_050;
   // w1163: the always-loaded sets now follow measured use (docs/tool-manifest.md); the dispatcher's is 23,436 characters
   // since w1159 gave list_work, list_sandboxes, list_machines and agent_transcript their output options. w1597 gave decide_work
   // its questions (one plain question per decision with its answers, as the person's card asks them; Ben, 2026-10-19: "just ask
@@ -169,7 +172,9 @@ test('w1158: what a coordinator carries in every call stays within its budget', 
   // text to 110; the rest is the kinds' enum): the dispatcher's measured 25,187, so the cap moved to 25,200.
   // w2648 gave decide_work pair_menus, the re-mark of a pair run whose legs never started (trimmed from 590 characters to 60;
   // the rule is in read_rules machines): the dispatcher's measured 25,325, so the cap moved to 25,350.
-  const ALWAYS_LOADED_MAX = 25_350;
+  // w2664 gave ask_person, decide_work and waiting_on_person a clause each on a pick between designs and on stills shown
+  // in the card only (trimmed from 690 characters to 290): the owner's measured 25,501, so the cap moved to 25,525.
+  const ALWAYS_LOADED_MAX = 25_525;
   await withCoordinators((agents, kinds) => {
     for (const [kind, info] of kinds) {
       const prompt = asOnLinuxCi(promptOf(agents, info)).length;

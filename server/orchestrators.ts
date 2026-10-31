@@ -66,6 +66,7 @@ import { ASK_TOOL, askExcerpt, answerOf, checkAsk, isAskTool, splitMedia, type A
 import { excerptOf, isEmoji, PERSON_MESSAGE_CHARS, reactionRemovedText, reactionsByMessage, reactionText, REPLY_MARK, replyText, sentText, splitReply, type Quoted } from '../shared/replies.ts';
 import { grantCovers, grantKey, grantWords, GRANT_MS, isNo, isYes, PROPOSAL_MAX_AGE_MS, proposalText, type GateNeed, type ReactionGrant } from '../shared/reactionGrant.ts';
 import { NOTICE_TAG } from '../shared/notices.ts';
+import { MD_IMAGE } from '../shared/imagePaths.ts';
 import { reviewRootOf } from './reviewMedia.ts';
 import { visualAskCheck } from './visualAsk.ts';
 import { personNotes, relatedRequests } from './priorDecisions.ts';
@@ -86,6 +87,10 @@ const MERGE_ON_GREEN_REPORT_CHARS = 12_000;
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);
+/** Every still or clip a message shows as `![..](..)` (w2664: not capped like a card's). */
+const inlined = (text: string) => [...text.matchAll(MD_IMAGE)].map((m) => (m[1] ?? m[2] ?? '').trim()).filter(Boolean);
+/** The stills and clips an ask_person card shows, in its question and its options. */
+const cardMedia = (ask: Ask) => new Set([ask.question, ...ask.options.map((o) => o.description)].flatMap((t) => splitMedia(t).media.map((m) => m.url)));
 /** How a person's answer to a [needs you] starts its resume (answerNeedsYou); staleResume always lets it go (w2495). */
 const ANSWER_MARK = '[answer] ';
 const BUSY: SessionInfo['status'][] = ['running', 'starting', 'waiting_permission'];
@@ -1863,11 +1868,15 @@ export class Orchestrators {
 
   /** The note a chat's tool result carries after FF Factory filed an investigation bug for it (w1867). */
   private withBugNote(chat: SessionHandle, text: string): string {
-    const note = this.bugNotes.get(chat.info.id);
-    if (!note) return text;
+    const notes = [this.bugNotes.get(chat.info.id), this.cardNotes.get(chat.info.id)].filter(Boolean);
+    if (!notes.length) return text;
     this.bugNotes.delete(chat.info.id);
-    return `${text}\n\n${note}`;
+    this.cardNotes.delete(chat.info.id);
+    return `${text}\n\n${notes.join('\n\n')}`;
   }
+
+  /** w2664: the note a chat's next result carries after its message showed its last card's stills again. */
+  private readonly cardNotes = new Map<string, string>();
 
   /**
    * FF Factory's own bug request (w1867), for the orchestrator's person, on FF Factory's repo: what reached INVESTIGATE_AT,
@@ -2195,8 +2204,29 @@ export class Orchestrators {
     const missing = this.previewsMissing(checked.ask, input, owner.displayName);
     if (missing) throw new Error(missing);
     const pick = checked.ask.options[0].recommended ? `, ${checked.ask.options[0].label} recommended` : '';
-    const shown = `Shown to ${owner.displayName} as ${checked.ask.options.length} buttons${pick}, and a last "Chat more about this" that only opens their reply box. End your turn now. Their click arrives as their own message (their words are the label, your question quoted under the reply mark), in their own turn; they may also just type. Do not ask it again in text.`;
-    return checked.warnings.length ? `${shown} WARNING: ${checked.warnings.join('; ')}.` : shown;
+    const media = cardMedia(checked.ask);
+    const shown = `Shown to ${owner.displayName} as ${checked.ask.options.length} buttons${pick}, and a last "Chat more about this" that only opens their reply box.${media.size ? ` The card shows its ${media.size} still${media.size === 1 ? '' : 's'} and clips itself: do not show them again in a message (w2664).` : ''} End your turn now. Their click arrives as their own message (their words are the label, your question quoted under the reply mark), in their own turn; they may also just type. Do not ask it again in text.`;
+    const warnings = [...checked.warnings];
+    // w2664: previews go in the card only. A message earlier in this turn that showed the same stills showed them twice.
+    const twice = this.shownThisTurn(chat.info.id, media);
+    if (twice.length) {
+      console.log(`ask_person (w2664) for ${owner.displayName}: the message before the card showed ${twice.length} of its stills again`);
+      warnings.push(`your message before this card already showed ${twice.length} of its stills (${twice.slice(0, 2).map((u) => u.split('/').pop()).join(', ')}${twice.length > 2 ? ', …' : ''}), so ${owner.displayName} saw them twice; next time put a visual question's previews in the card only, never in the message beside it (w2664, Ben: "you did the multiple choice thing above which was correct, then immediately showed all the previews again in yoru next message for seemingly no reason")`);
+    }
+    if (media.size) this.cardShown.set(chat.info.id, { media, person: owner.displayName });
+    return this.withBugNote(chat, warnings.length ? `${shown} WARNING: ${warnings.join('; ')}.` : shown);
+  }
+
+  /** The stills of the last card a chat showed in this turn (w2664): a message after it that shows them again is told. */
+  private readonly cardShown = new Map<string, { media: ReadonlySet<string>; person: string }>();
+
+  /** Of `media`, the ones a message of this chat's showed since its person last wrote (w2664). */
+  private shownThisTurn(sid: string, media: ReadonlySet<string>): string[] {
+    if (!media.size) return [];
+    const events = this.store.readTranscript(sid, 400);
+    const from = events.findLastIndex((e) => e.kind === 'user' && e.from === 'human');
+    const shown = new Set(events.slice(from + 1).flatMap((e) => (e.kind === 'assistant' ? inlined(e.text) : [])));
+    return [...media].filter((u) => shown.has(u));
   }
 
   // ---------------------------------------------------------------- open questions on the Waiting on input tab (w1868)
@@ -2224,7 +2254,19 @@ export class Orchestrators {
       if (!e.isError) this.openAsk(call);
       return;
     }
+    // w2664: a message after a card, in the same turn, that shows the card's stills again: told on the chat's next result.
+    if (e.kind === 'assistant') {
+      const card = this.cardShown.get(sid);
+      const again = card ? inlined(e.text).filter((u) => card.media.has(u)) : [];
+      if (card && again.length) {
+        this.cardShown.delete(sid);
+        console.log(`ask_person (w2664) for ${card.person}: the message after the card showed ${again.length} of its stills again`);
+        this.cardNotes.set(sid, `[FF Factory] Your message after your last ask_person card showed ${again.length} of its stills again, so ${card.person} saw them twice. A visual question's previews go in the card only, never repeated in a message beside it (w2664, Ben: "you did the multiple choice thing above which was correct, then immediately showed all the previews again in yoru next message for seemingly no reason"). After ask_person, end your turn without a message.`);
+      }
+      return;
+    }
     if (e.kind === 'user' && e.from === 'human') {
+      this.cardShown.delete(sid);
       const seq = splitReply(e.text, HELD_MARK).quote?.seq;
       if (seq !== undefined) this.closeAsks(sid, (a) => a.seq === seq);
     }
@@ -2329,9 +2371,9 @@ export class Orchestrators {
     const named = typeof raw.request === 'string' && /^w\d+$/i.test(raw.request.trim()) ? [raw.request.trim().toLowerCase()] : [];
     const ids = [...new Set([...named, ...parts.flatMap((p) => [...splitMedia(p).text.matchAll(/\bw\d+\b/gi)].map((m) => m[0].toLowerCase()))])];
     const reqs = ids.map((id) => this.store.work.get(id) ?? { id });
-    const v = visualAskCheck({ texts: parts, reqs, root: reviewRootOf(this.d.cfg), noPreviews: raw.no_previews, tool: ASK_TOOL, person });
+    const v = visualAskCheck({ texts: parts, asks: [ask], reqs, root: reviewRootOf(this.d.cfg), noPreviews: raw.no_previews, tool: ASK_TOOL, person });
     if (!v.ok) {
-      console.log(`ask_person refused (w2478) for ${person}: ${v.ids.join(', ')} has review media and the card carries none`);
+      console.log(`ask_person refused (w2478, w2664) for ${person}${v.ids.length ? ` on ${v.ids.join(', ')}` : ''}: ${v.problem.slice(0, 160)}`);
       return v.problem;
     }
     if ('optedOut' in v) {

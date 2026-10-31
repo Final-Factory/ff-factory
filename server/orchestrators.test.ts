@@ -2523,17 +2523,19 @@ test('w2478: a worker\'s waiting_on_person and decide_work ask on a request with
   const still = path.join(topic, 'blue.png');
   fs.writeFileSync(still, 'x');
   store.putWork({ ...store.work.get('w1')!, reviewTopics: ['circuit-icon'] });
-  await assert.rejects(h.waiting_on_person!({ who: 'Ben', what, questions: question('Which look should the button have?'), request: 'w1' }), /Not shown: this question is about w1[\s\S]*blue\.png[\s\S]*Nothing was recorded/);
-  assert.match(String(await h.waiting_on_person!({ who: 'Ben', what, questions: question(`Which look should the button have? ![the blue one](<${still}>)`), request: 'w1' })), /buttons on Ben's card/);
+  await assert.rejects(h.waiting_on_person!({ who: 'Ben', what, questions: question('Is the button colour right?'), request: 'w1' }), /Not shown: this question is about w1[\s\S]*blue\.png[\s\S]*Nothing was recorded/);
+  assert.match(String(await h.waiting_on_person!({ who: 'Ben', what, questions: question(`Is the button colour right? ![the blue one](<${still}>)`), request: 'w1' })), /buttons on Ben's card/);
+  // w2664: a pick between designs needs each design's own still; one in the question stands for none.
+  await assert.rejects(h.waiting_on_person!({ who: 'Ben', what, questions: question(`Which look should the button have? ![the blue one](<${still}>)`), request: 'w1' }), /picks between designs[\s\S]*"The blue one", "The grey one"/);
   await h.waiting_on_person!({ who: 'Ben', what: 'say when the release goes out', questions: question('Should it ship today?'), request: 'w1', no_previews: 'asks a date; nothing to look at' });
   assert.ok(store.work.get('w1')!.log.some((l) => /waiting_on_person from worker \w+ without previews, though w1 has review media \(no_previews, w2478\): "asks a date; nothing to look at"/.test(l)), store.work.get('w1')!.log.join('\n'));
   // The dispatcher's decide_work ask passes the same check.
   await call(ben, 'request_work', { title: 'Circuit button, second pass', brief: 'Another look.' });
   store.putWork({ ...store.work.get('w2')!, reviewTopics: ['circuit-icon'] });
-  const refused = await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'ask', note: 'Ben: which look?', questions: question('Which look should the button have?') });
+  const refused = await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'ask', note: 'Ben: which look?', questions: question('Is the button colour right?') });
   assert.equal(refused.isError, true, refused.text);
   assert.match(refused.text, /Not shown: this question is about w2/);
-  const shown = await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'ask', note: 'Ben: which look?', questions: question(`Which look? ![the blue one](<${still}>)`) });
+  const shown = await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'ask', note: 'Ben: which look?', questions: question(`Is the button colour right? ![the blue one](<${still}>)`) });
   assert.equal(shown.isError, false, shown.text);
 });
 
@@ -2953,7 +2955,7 @@ test('w1384: review media reaches the person inline: a [needs you] for a folder 
   fs.utimesSync(still, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
   const ben = chat(BEN).info;
   await call(ben, 'request_work', { title: 'Fog of war', brief: 'Explored stays explored.' });
-  await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'ask', note: 'Ben: does fog preview v4 at /srv/fff/review/w1-fog-look-v4/ look right?', questions: [{ question: `Which one? ![fog v4](<${clip}>)`, options: [{ label: 'The first', recommended: true }, { label: 'The second' }] }] });
+  await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'ask', note: 'Ben: does fog preview v4 at /srv/fff/review/w1-fog-look-v4/ look right?', questions: [{ question: `Does fog v4 look right? ![fog v4](<${clip}>)`, options: [{ label: 'Yes, ship it', recommended: true }, { label: 'No, change it' }] }] });
   await until('Ben hears it', () => heard(ben.id, '[needs you]').length === 1);
   const msg = heard(ben.id, '[needs you]')[0].text;
   assert.ok(msg.includes(`- ![fog-v4-1920.mp4](<${clip}>)\n- ![sheet.png](<${still}>)`), msg);
