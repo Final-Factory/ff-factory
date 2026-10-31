@@ -177,6 +177,12 @@ export interface SessionInfo {
   statusDetail?: string;
   /** w1969: the worker's last timed_place verdict, kept with the session so a portal restart does not drop it (w1829). */
   timedVerdict?: TimedVerdict;
+  /**
+   * w2660: the closed request a person's follow-up (message_agent) was about, while the worker serves no open one. Its
+   * timed work attaches to it: its bench tickets carry it, timed_place's "here" reaches the machine's guard, and a hand-off
+   * (a timed leg, blocked_on, request_pair) reopens it (Orchestrators.followUpRequest). Holds FOLLOW_UP_TIMED_MS.
+   */
+  followUpOn?: { id: string; at: string; by: string };
   model?: string;
   permissionMode: PermissionMode;
   /** Reasoning effort for this session's model; unset = the server default (config worker.effort). */

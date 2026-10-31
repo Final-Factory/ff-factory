@@ -1707,7 +1707,10 @@ export class Agents {
     const tr = this.timedRuns;
     if (!tr) throw new Error('timed runs are not wired into this server');
     if (a.phase === 'plan') {
-      const open = this.openWorkOf(info);
+      // w2660: a worker followed up about a closed request times it for that request
+      const own = this.openWorkOf(info);
+      const followUp = own.length ? undefined : this.orchestrators.followUpRequest(info.id);
+      const open = followUp ? [followUp] : own;
       const what = `${open.length ? `${open.map((w) => w.id).join(', ')} ${clip(open[0].title, 60)}` : clip(info.title, 60)} (worker ${info.id.slice(0, 8)})`;
       return tr.plan(machineId, { session: info.id, requests: open.map((w) => w.id), what, ...(info.requestedBy ? { uploadedBy: info.requestedBy.userId } : {}) }, a);
     }
@@ -3986,7 +3989,10 @@ export class Agents {
     const bySession = this.workBySession();
     for (const info of this.store.sessions.values()) {
       if (info.kind !== 'worker' || info.machineId !== machineId) continue;
-      const open = this.openWorkOf(info, bySession);
+      const own = this.openWorkOf(info, bySession);
+      // w2660: a follow-up about a closed request attaches the worker's timed work to it, so its "here" reaches this guard
+      const followUp = own.length ? undefined : this.orchestrators.followUpRequest(info.id);
+      const open = followUp ? [followUp] : own;
       // w1984: a worker moved off this machine serves no request here any more, but its old waiters may still hold tickets
       const moved = this.movedAwayFrom(info, machineId);
       if (moved && !open.length) {

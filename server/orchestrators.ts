@@ -91,6 +91,8 @@ const ANSWER_MARK = '[answer] ';
 const BUSY: SessionInfo['status'][] = ['running', 'starting', 'waiting_permission'];
 /** A request Blocked on a machine its worker was cut off on is named to the dispatcher after this long offline (w2433, ledger.offlineNoticeMinutes). */
 export const OFFLINE_NOTICE_MS = 60 * 60_000;
+/** w2660: how long a follow-up about a closed request attaches its worker's timed work to it (Orchestrators.followUpRequest). */
+export const FOLLOW_UP_TIMED_MS = 24 * 3_600_000;
 /** The offline notice's wait (ledger.offlineNoticeMinutes, at least 5 minutes), else OFFLINE_NOTICE_MS. */
 export function offlineNoticeMs(cfg: Pick<Config, 'ledger'>): number {
   const m = cfg.ledger?.offlineNoticeMinutes;
@@ -3623,7 +3625,24 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    * 7d8eebb0 could no longer register its wait for w1078's PR), else the one it serves now when it serves one; open and
    * being worked.
    */
-  private workerRequest(sessionId: string, request: string | undefined, tool: string): WorkItem {
+  private workerRequest(sessionId: string, request: string | undefined, tool: string, opts: { reopen?: boolean } = {}): WorkItem {
+    // w2660: a follow-up about a closed request attaches the worker to it; a hand-off that makes it wait reopens it.
+    const f = this.followUpRequest(sessionId);
+    if (f && (!request?.trim() || request.trim().toLowerCase() === f.id)) {
+      if (opts.reopen) {
+        const s = this.store.sessions.get(sessionId);
+        const words = this.reopened(f);
+        f.status = 'active';
+        f.stalled = undefined;
+        this.stamp(f, `${words}: worker ${sessionId.slice(0, 8)}'s ${tool} on ${s?.followUpOn?.by ?? 'a person'}'s follow-up of ${s?.followUpOn?.at.slice(11, 16) ?? '?'} UTC made it wait, so it is open again until its worker's next DONE (w2660)`);
+        this.store.putWork(f);
+        if (s) {
+          delete s.followUpOn;
+          this.store.putSession(s);
+        }
+      }
+      return f;
+    }
     const items = [...this.store.work.values()];
     const byId = (id: string) => this.store.work.get(id);
     const serves = [...servedBy(sessionId, items)].map(byId).filter((x): x is WorkItem => !!x);
@@ -3646,7 +3665,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    * turn ends, and the report resumes it. One open pair run per request: asked again, it waits on the one there is.
    */
   filePair(sessionId: string, a: { what?: string; brief?: string; legs?: number; cross_os?: string; timed?: boolean; request?: string; retry?: boolean; avoid?: string[]; pr?: string; commit?: string; steam?: string; menus?: string }): string {
-    const w = this.workerRequest(sessionId, a.request, 'request_pair');
+    const w = this.workerRequest(sessionId, a.request, 'request_pair', { reopen: true });
     const what = clip(String(a.what ?? '').replace(/\s+/g, ' ').trim(), 100);
     const brief = String(a.brief ?? '').trim();
     if (!what || !brief) throw new Error('give what (one line: "MP-lowore-pin-pair on PR #2340") and brief (what the legs run: the branch or commit, the scenario or steps, what passes, where the result goes)');
@@ -3885,7 +3904,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    * per request: asked again, it waits on the one there is. Returns the leg's id and what the worker is told.
    */
   fileTimedLeg(sessionId: string, a: { what: string; brief: string; from: string; needs: string[]; why: string; request?: string; platform?: string; pinned?: { id: string; why: string } }): { id: string; text: string } {
-    const w = this.workerRequest(sessionId, a.request, 'timed_place');
+    const w = this.workerRequest(sessionId, a.request, 'timed_place', { reopen: true });
     // w2610: a timed leg never files a leg of itself (w2607's worker did twice and blocked on each copy forever).
     if (w.timedLeg) throw new Error(`${w.id} is itself a timed leg (of ${w.timedLeg.for}): no leg is filed for it. Time it where timed_place says, or wait to be moved.`);
     const what = clip(a.what.replace(/\s+/g, ' ').trim(), 100);
@@ -4396,7 +4415,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   }
 
   workerBlocked(sessionId: string, a: { request?: string; requests?: string[]; reports?: string[]; prs?: string[]; deploys?: string[]; what: string; head?: string; mergeOnGreen?: string }): string {
-    const w = this.workerRequest(sessionId, a.request, 'blocked_on');
+    const w = this.workerRequest(sessionId, a.request, 'blocked_on', { reopen: true });
     const what = (a.what ?? '').split(/ +/).join(' ').trim();
     if (!what) throw new Error('say what it waits for (what), for example: w727 PR 1291 and w752 fix merged into master');
     // w1089: a wait for a sandbox, slot, editor or RAM is capacity, which is Queued and done by the send queue, not a block.
@@ -6833,11 +6852,46 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const max = loopGuards(this.d.cfg).followUps;
     if (n >= max) throw new Error(`${max} follow-ups to ${worker.id} since ${owner.displayName} last wrote; ask them first`);
     this.followUps.set(key, n + 1);
+    this.attachFollowUp(worker, about, owner.displayName);
     for (const w of this.itemsOf(worker.id)) {
       this.stamp(w, `${owner.displayName}'s orchestrator followed up with ${worker.id}${across ? ` (an owner, on ${names(across)}'s work)` : ''}`);
       this.store.putWork(w);
     }
     return { about, ...(across ? { across } : {}) };
+  }
+
+  /**
+   * w2660: a follow-up about a closed request, to a worker that serves no open one, attaches the worker to that request
+   * for its timed work (SessionInfo.followUpOn). On 2026-10-31 lothsahn's orchestrator asked worker 1de7e4b5 to profile
+   * w2654's player pass after w2654 had closed as done: timed_place answered "here" twice, yet the bench queue refused every
+   * exclusive ticket (Agents.benchPriorities left out a session with no open request, so its "here" never reached the
+   * machine) and the hand-off to a small computer was refused "you are on no request in the ledger" (workerRequest).
+   * A follow-up about an open request, or to a worker that serves one, clears the mark: its timed work is that request's.
+   */
+  private attachFollowUp(worker: SessionInfo, about: readonly WorkItem[], by: string) {
+    const serving = servedBy(worker.id, [...this.store.work.values()]).size > 0;
+    const first = about[0];
+    const next = !serving && first && !isOpen(first) && first.status !== 'stalled' ? { id: first.id, at: this.now().toISOString(), by } : undefined;
+    if (!next && !worker.followUpOn) return;
+    if (next) {
+      worker.followUpOn = next;
+      this.stamp(first, `${by}'s follow-up reached worker ${worker.id.slice(0, 8)} with ${first.id} ${first.status}: its timed work attaches to ${first.id} (bench tickets, timed_place); a hand-off of it (a timed leg, blocked_on, request_pair) reopens ${first.id} (w2660)`);
+      this.store.putWork(first);
+    } else delete worker.followUpOn;
+    this.store.putSession(worker);
+  }
+
+  /**
+   * w2660: the closed request `sessionId`'s worker was followed up about (attachFollowUp), while the mark holds
+   * (FOLLOW_UP_TIMED_MS), it is still linked to the worker and closed, and the worker serves no open request; else undefined.
+   */
+  followUpRequest(sessionId: string): WorkItem | undefined {
+    const f = this.store.sessions.get(sessionId)?.followUpOn;
+    if (!f || this.now().getTime() - Date.parse(f.at) > FOLLOW_UP_TIMED_MS) return undefined;
+    const w = this.store.work.get(f.id);
+    if (!w || isOpen(w) || !w.sessionIds.includes(sessionId)) return undefined;
+    if (servedBy(sessionId, [...this.store.work.values()]).size) return undefined;
+    return w;
   }
 
   /**
