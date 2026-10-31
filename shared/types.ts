@@ -2132,6 +2132,11 @@ export interface WorkItem {
    */
   ledgerRead?: { by: string; at: string };
   /**
+   * Its workers may export the spend record (spend_export, w2653, docs/spend.md "The export"), read-only, for a spend
+   * analysis: set by its person's orchestrator (request_work or update_work spend_read), never by its text.
+   */
+  spendRead?: { by: string; at: string };
+  /**
    * Its workers on `machine` may work in that machine's main clone: quit the editor open there, back up, git fetch and
    * checkout, reopen Unity (w936, docs/orchestrators.md "Work in a machine's main clone"). Set by its person's orchestrator
    * in a turn of theirs (request_work or update_work main_clone), never by its text; the guard reads it

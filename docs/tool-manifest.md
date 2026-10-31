@@ -26,7 +26,7 @@ The groups (`TOOL_GROUPS`), picked from what the tools are used for together:
 | Group | Tools |
 |---|---|
 | `core` | `read_rules`, `compact_conversation`, `delete_memory`, `restore_memory`, `message_person`, `ask_person` |
-| `ledger` | `list_work`, `request_work`, `update_work`, `decide_work`, `conditional_decisions`, `read_work`, `file_report`, `list_reports`, `read_report` |
+| `ledger` | `list_work`, `request_work`, `update_work`, `decide_work`, `conditional_decisions`, `read_work`, `spend_export`, `file_report`, `list_reports`, `read_report` |
 | `workers` | `start_agent`, `message_agent`, `set_agent_title`, `interrupt_agent`, `stop_agent`, `agent_transcript`, `search_transcripts` |
 | `sandboxes` | `list_sandboxes`, `create_sandbox`, `delete_sandbox`, `list_branches`, `switch_branch`, `unity`, `live_view` |
 | `machines` | `list_machines`, `system_status`, `add_machine`, `set_machine_label`, `machine_daemon`, `convert_machine`, `relocate_machines`, `machine_cleanup`, `cleanup_log`, `remove_machine`, `host_recovery`, `ops_worker`, `portal_logs`, `build_plan`, `timed_run`, `timed_place` |

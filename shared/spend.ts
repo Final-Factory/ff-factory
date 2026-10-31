@@ -135,6 +135,31 @@ export interface TurnUsage {
   meter?: MeterTurn;
   /** The first result of a new agent process whose totals started again from zero (the SDK did not carry the saved ones): `cum` is this turn in full. */
   restarted?: boolean;
+  /**
+   * w2653: the model and reasoning effort the process ran this turn on, as it passed them to the SDK (AgentSession.start and
+   * switchModel; effort absent: none was passed, so the CLI's own default). Absent on a daemon older than w2653.
+   */
+  run?: TurnRun;
+}
+
+/** w2653: what a turn ran on. */
+export interface TurnRun {
+  model?: string;
+  effort?: string;
+}
+
+/**
+ * w2653: one stretch of a session on one model and effort: the first is how it started, each later one a change. `src`
+ * recorded: the turn's own result said so (TurnUsage.run, or the session's launch fields); inferred: filled in from a
+ * default (the config default of its role at the time, or the model that billed most), never seen.
+ */
+export interface SessionRun {
+  at: string;
+  model?: string;
+  effort?: string;
+  src: 'recorded' | 'inferred';
+  /** With src inferred: what it was inferred from, in a few words. */
+  from?: string;
 }
 
 /**
@@ -837,6 +862,10 @@ export interface SessionSpend {
   coordSplit?: boolean;
   /** The backfill has read this session's transcript. */
   backfilled?: boolean;
+  /** w2653: the sandbox it worked in (a host sandbox, or a machine's), when known. */
+  sandbox?: string;
+  /** w2653: the model and effort it ran on, at its start and at every change, oldest first (SessionRun). */
+  runs?: SessionRun[];
 }
 
 /** One request's spend (or a bucket's: ids starting with "_"). */
@@ -864,6 +893,8 @@ export interface RequestSpend {
   phaseDays?: Record<string, PhaseDay>;
   /** Tokens and dollars by UTC day, for a report over a window. Workers and coordinators together. */
   days: Record<string, Tok>;
+  /** w2653: when it was filed (the ledger's createdAt), while the ledger held it. */
+  filedAt?: string;
   /**
    * The part of `days` that coordinators' turns (dispatcher, a person's orchestrator, the ops worker) spent on this request
    * (w1160), by the coordinator's SESSION id and UTC day. The workers' own cost is `days` minus this. Turns from before the

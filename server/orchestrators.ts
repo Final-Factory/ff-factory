@@ -144,7 +144,7 @@ interface HeldCall {
   why: string;
 }
 /** update_work's input (Agents' tool). */
-type UpdateInput = { id: string; note?: string; priority?: WorkPriority; close?: 'done' | 'cancelled'; reopen?: boolean; approve?: boolean; decline?: boolean; subjects?: string[]; ledger_read?: boolean; main_clone?: string | false; when?: ConditionInput; words?: string; expires_days?: number; assign_to?: string; report?: ReportKind | false };
+type UpdateInput = { id: string; note?: string; priority?: WorkPriority; close?: 'done' | 'cancelled'; reopen?: boolean; approve?: boolean; decline?: boolean; subjects?: string[]; ledger_read?: boolean; spend_read?: boolean; main_clone?: string | false; when?: ConditionInput; words?: string; expires_days?: number; assign_to?: string; report?: ReportKind | false };
 
 /** Held calls kept per chat at most, and for how long. */
 const HELD_MAX = 10;
@@ -506,6 +506,8 @@ export interface WorkInput {
   subjects?: string[];
   /** A ledger task (w642): its workers may list and read every open and stalled request (read_work all). */
   ledger_read?: boolean;
+  /** A spend analysis (w2653): its workers may export the spend record (spend_export). */
+  spend_read?: boolean;
   /** w2541: its result is a report of this kind (a design, an analysis, a profile, research): its worker files one. */
   report?: ReportKind;
   /**
@@ -1757,6 +1759,7 @@ export class Orchestrators {
       needs: placed.needs,
       ...(input.repo?.trim() ? { repo: clip(input.repo.trim(), 120) } : {}),
       ...(input.ledger_read ? { ledgerRead: { by: owner.displayName, at: now.toISOString() } } : {}),
+      ...(input.spend_read ? { spendRead: { by: owner.displayName, at: now.toISOString() } } : {}),
       ...(input.report && (REPORT_KINDS as readonly string[]).includes(input.report) ? { report: { kind: input.report, at: now.toISOString(), by: owner.displayName } } : {}),
       ...(cloneMachine ? { mainCloneAccess: { machine: cloneMachine, by: owner.displayName, at: now.toISOString() } } : {}),
       overlaps: [],
@@ -1764,7 +1767,7 @@ export class Orchestrators {
       log: [],
     };
     w.overlaps = findOverlaps({ keys: w.keys, title: w.title }, this.pool(id));
-    this.stamp(w, `filed by ${owner.displayName}${w.humanAsked ? '' : ' (not in a turn of theirs)'}; needs ${placed.needs === 'agent' ? 'an agent slot only (no editor, no game sandbox)' : 'a game sandbox'} (${placed.how})${w.ledgerRead ? '; its workers may read the ledger' : ''}${w.report ? `; its result is a report (${w.report.kind})` : ''}${cloneMachine ? `; its workers may work in ${cloneMachine}'s main clone` : ''}`);
+    this.stamp(w, `filed by ${owner.displayName}${w.humanAsked ? '' : ' (not in a turn of theirs)'}; needs ${placed.needs === 'agent' ? 'an agent slot only (no editor, no game sandbox)' : 'a game sandbox'} (${placed.how})${w.ledgerRead ? '; its workers may read the ledger' : ''}${w.spendRead ? '; its workers may export the spend record' : ''}${w.report ? `; its result is a report (${w.report.kind})` : ''}${cloneMachine ? `; its workers may work in ${cloneMachine}'s main clone` : ''}`);
     this.store.putWork(w);
     this.store.dropWork(pruneIds(this.store.work.values(), undefined, this.now().getTime()));
     this.gatherForDispatcher(owner, requestNotice(w));
@@ -2015,8 +2018,13 @@ export class Orchestrators {
     const w = this.requireWork(input.id);
     // LEDGER READING (w642): grant or take back; with nothing else asked, that is the whole update.
     let readLine = '';
+    // SPEND EXPORT (w2653): the same, for spend_export.
+    if (input.spend_read !== undefined) {
+      readLine = this.setSpendRead(owner, w, input.spend_read);
+      if (!input.note?.trim() && !input.priority && !input.close && !input.reopen && !input.subjects?.length && !input.approve && !input.decline && input.ledger_read === undefined && input.report === undefined && input.main_clone === undefined) return readLine;
+    }
     if (input.ledger_read !== undefined) {
-      readLine = this.setLedgerRead(owner, w, input.ledger_read);
+      readLine = [readLine, this.setLedgerRead(owner, w, input.ledger_read)].filter(Boolean).join(' ');
       if (!input.note?.trim() && !input.priority && !input.close && !input.reopen && !input.subjects?.length && !input.approve && !input.decline) return readLine;
     }
     // A REPORT (w2541): mark the request as one whose result is a report, or take the mark back.
@@ -2525,7 +2533,7 @@ export class Orchestrators {
       else hint = turn.hint;
       if (!click) throw new GateRefused(`a decision that waits for a fact is recorded only in a turn ${n} started with a message of their own (this turn is the harness's: a check-in, a timer or a relayed message)${hint}`);
     }
-    if (input.reopen || input.priority || input.subjects?.length || input.ledger_read !== undefined || input.main_clone !== undefined) throw new Error('when goes with one action (approve, decline or close) and its note, nothing else');
+    if (input.reopen || input.priority || input.subjects?.length || input.ledger_read !== undefined || input.spend_read !== undefined || input.main_clone !== undefined) throw new Error('when goes with one action (approve, decline or close) and its note, nothing else');
     if (actions.length !== 1) throw new Error('when needs exactly one action: approve, decline, or close (done or cancelled)');
     const action = actions[0];
     const when = parseCondition(input.when!, w.id);
@@ -2709,6 +2717,17 @@ export class Orchestrators {
     this.stamp(w, `${owner.displayName}: ${on ? 'its workers may read the ledger' : 'ledger reading taken back'}`);
     this.store.putWork(w);
     return `${w.id}: ${on ? 'its workers may now list and read every open and stalled request (read_work all)' : 'ledger reading taken back'}.`;
+  }
+
+  /** w2653: grant or take back spend_export for a request's workers, on the same terms as ledger reading. */
+  private setSpendRead(owner: Requester, w: WorkItem, on: boolean): string {
+    if (!isFor(w, owner.userId)) throw new Error(`${w.id} is not ${owner.displayName}'s request: only its own people grant its workers the spend export`);
+    if (on && w.source) throw new Error(`${w.id} came from the intake (${w.source.kind}): its workers never export the spend record`);
+    if (on === !!w.spendRead) return `${w.id} ${on ? 'already grants' : 'does not grant'} the spend export.`;
+    w.spendRead = on ? { by: owner.displayName, at: this.now().toISOString() } : undefined;
+    this.stamp(w, `${owner.displayName}: ${on ? 'its workers may export the spend record' : 'spend export taken back'}`);
+    this.store.putWork(w);
+    return `${w.id}: ${on ? 'its workers may now export the spend record (spend_export)' : 'spend export taken back'}.`;
   }
 
   /** The machine id a main_clone names, or why it cannot be granted: only in a turn of the person's own (w936). */

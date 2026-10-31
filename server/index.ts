@@ -55,7 +55,7 @@ import { withDismissed } from '../shared/dismissals.ts';
 import { UNIT_WATCHDOG_FILE, UnitWatchdogMonitor, fileUnitWatchdog } from './unitWatchdog.ts';
 import { dataRecoveries, describeRecovery } from './durable.ts';
 import { DispatcherChatRefused, PermissionAnswerRefused } from './orchestrators.ts';
-import { OPS_PEOPLE, OPS_REFUSED } from './opsWorker.ts';
+import { OPS_LIMITS, OPS_PEOPLE, OPS_REFUSED } from './opsWorker.ts';
 import { backupMemory, healMemory, MEMORY_TRASH_DAYS, memoryDirFor, memoryRootOf, pruneMemoryTrash } from './orchestratorMemory.ts';
 import { deleteLogin, serveLoginDeletes } from './loginDelete.ts';
 import { describeMemoryGit, versionMemory } from './memoryGit.ts';
@@ -175,7 +175,7 @@ if (!isDryRun) new StallProfiler({ dataDir: cfg.dataDir, worstLagSince: (t) => l
 
 const store = new Store(cfg.dataDir);
 // What each request costs (w859, docs/spend.md): fed by every transcript event, whether the session runs here or on a machine.
-const spend = new SpendStore(cfg.dataDir, { work: () => store.work.values(), session: (id) => store.sessions.get(id), priorResults: (id) => store.countResults(id, 2), accountLabel: (i) => (i.account ? `account ${i.account}` : undefined) });
+const spend = new SpendStore(cfg.dataDir, { work: () => store.work.values(), session: (id) => store.sessions.get(id), priorResults: (id) => store.countResults(id, 2), accountLabel: (i) => (i.account ? `account ${i.account}` : undefined), effortDefault: (role) => (role === 'worker' || role === 'standing' ? cfg.worker.effort : role === 'ops' ? OPS_LIMITS.effort : cfg.orchestrator.effort) });
 // And each person's open ask_person questions, the cards of their Waiting on input tab (w1868), once the orchestrators exist.
 let observeAsk: ((sid: string, e: TranscriptEvent) => void) | undefined;
 store.onEvent = (sid, e) => {
@@ -634,10 +634,19 @@ setTimeout(() => {
 }, 90_000).unref();
 setTimeout(() => {
   if (!isDryRun) void repairSpend(store, spend);
+  // w2653: past sessions' model and effort, once (docs/spend.md "The per-session record").
+  if (!isDryRun) {
+    const n = spend.backfillRuns();
+    if (n) console.log(`spend: model and effort filled in for ${n} past sessions (w2653)`);
+  }
 }, 150_000).unref();
 
 // The ledger moves on (requests close, titles change, closed ones drop out after a week): the spend record follows (w859).
-setInterval(() => spend.syncWork(), 5 * 60_000).unref();
+// w2653: and sessions the transcript backfill added since get their model and effort.
+setInterval(() => {
+  spend.syncWork();
+  spend.backfillRuns();
+}, 5 * 60_000).unref();
 // Who hears about a session (docs/orchestrators.md): a person's own orchestrator only them, the dispatcher's turns
 // nobody (its questions and errors the owners), a worker's finished turns the people it works for.
 notifier.audience = (s, kind) => {
