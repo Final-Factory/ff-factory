@@ -206,6 +206,20 @@ have a person with the `ffdiscord` config download it. A deploy note: the portal
 version for the tool to exist (`launch: no tool "fetch_discord_thread_files" in this version; left out` on a daemon that does
 not), and FFBox must run ffbox master from 2026-10-09 (w787) or later; before that it answers `unsupported`.
 
+### Bug threads in a window, read from FF Factory (w2618)
+
+ben, 2026-10-30: "Two Discord bug sweeps in a row stopped because their worker couldn't list the window's threads: w2487,
+then w2617 today." Only orchestrators had `ffbox_activity`, and its conversations view gave no channel or thread URL. **A
+worker lists them itself**: `list_ffbox_files {what: "threads", since, until?, channel?, limit?}` (orchestrators:
+`ffbox_activity {show: "threads", since, until?}`) answers every thread created in #bug-reports and dev_bug_reports in the
+window, newest first: its created time (read from the thread's Discord id, a snowflake), channel alias, jump URL, title,
+FFBox conversation id, and that conversation's state, verdict and PR; then the older threads written in during the window
+(`server/ffboxThreadList.ts`). It reads FFBox's read-only `bug_threads` query, the one the bug-thread watch reads
+(`server/ffboxBugThreads.ts`; nothing new on FFBox), up to 5 pages; the verdict comes from the 500 conversations the
+connector reported (`ProviderManager.conversations`), so an older conversation shows its id without one. Titles are
+FFBox-redacted, cleaned again here and headed as untrusted players' data; a link that is not a Discord thread link is never
+passed on. The conversations view now also names each conversation's Discord thread id (`thread <id>`).
+
 ### Release symbols and diagnosis files, read from FF Factory (w1542)
 
 lothsahn, 2026-10-19: "Please make it so that you can request PDB's and diagnostic information from ffbox over the ffbox

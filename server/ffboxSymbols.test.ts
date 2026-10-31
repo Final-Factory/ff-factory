@@ -151,7 +151,7 @@ test('list_ffbox_files: the symbols args are checked here first, and the answers
   assert.match(files, /up to 200\.0 MB a file/);
   for (const q of ['symbols', 'symbol_file', 'diagnosis_files', 'diagnosis_file']) assert.ok((PROVIDER_QUERIES as readonly string[]).includes(q), q);
   assert.deepEqual(Object.keys(CATALOG.fetch_ffbox_symbols).sort(), ['app', 'commit', 'file', 'id', 'platform', 'version'], 'names and words, never a path');
-  assert.deepEqual(Object.keys(CATALOG.list_ffbox_files).sort(), ['app', 'commit', 'id', 'kind', 'limit', 'name', 'offset', 'platform', 'since', 'until', 'version', 'what']);
+  assert.deepEqual(Object.keys(CATALOG.list_ffbox_files).sort(), ['app', 'channel', 'commit', 'id', 'kind', 'limit', 'name', 'offset', 'platform', 'since', 'until', 'version', 'what']);
 });
 
 test("fetch_ffbox_report diagnosis: the newest run that kept the file, SHA-256 checked; a refusal keeps nothing", async (t) => {
