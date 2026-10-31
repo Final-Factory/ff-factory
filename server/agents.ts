@@ -3941,7 +3941,7 @@ export class Agents {
       const exempt = release ? 'release' : open.some((w) => w.source?.kind === 'nightly-run') ? 'nightly' : undefined;
       // w1969: its timed_place verdict while it holds, for this machine's guard
       const v = info.timedVerdict;
-      const timed = v && Date.parse(v.until) > Date.now() ? v : undefined;
+      const timed = v && Date.parse(v.until) > Date.now() && !this.timedLegFinished(v) ? v : undefined;
       const away = release ? undefined : this.benchAway(info, machineId, timed);
       out[info.id] = { priority: release ? 'urgent' : top, requests: open.map((w) => w.id), ...(exempt ? { exempt } : {}), ...(timed ? { timed } : {}), ...(away ? { away } : {}) };
     }
@@ -3962,6 +3962,19 @@ export class Agents {
       out[r.session] = { priority: top, requests: open.length ? open.map((w) => w.id) : r.requests, timed: here };
     }
     return out;
+  }
+
+  /**
+   * w2620: an "elsewhere" verdict whose timed leg request has closed (done, merged, rejected, cancelled) holds nothing. The leg ran and reported (or was
+   * closed), so the worker's next exclusive ticket is a new timed leg: its guard asks timed_place afresh rather than refuse
+   * it as "sent to" the finished leg. On LothDesktop worker 2e4db6f1 (w2597) had every ticket refused naming w2607, a leg
+   * that had long finished, for the rest of the verdict's 12 h, until it called timed_place again before each one.
+   */
+  private timedLegFinished(v: TimedVerdict): boolean {
+    if (v.verdict !== 'elsewhere' || !v.leg) return false;
+    // a stalled leg is not finished: its worker is resumed, and timed_place would not file a second leg beside it
+    const leg = this.store.work.get(v.leg);
+    return !leg || !(isOpen(leg) || leg.status === 'stalled');
   }
 
   /**
