@@ -33,6 +33,22 @@ export function reportStill(img: HTMLImageElement, surface: string, kind: MediaT
 }
 
 const timers = new WeakMap<HTMLImageElement, number>();
+const nudges = new WeakMap<HTMLImageElement, number>();
+
+/**
+ * A still on screen this long and never asked for is asked for again, eagerly (w2664): on 2026-10-31 Ben's Firefox 158
+ * left the stills of options C and D on screen and blank, and its resource timing never saw a request for them
+ * ("never requested", journal 20:44 to 20:50 UTC), while the server logged no error. A lazy still that the browser
+ * never fetched is fetched now; one whose request is under way is left alone.
+ */
+export const NUDGE_AFTER_MS = 4000;
+function nudge(img: HTMLImageElement) {
+  if (!img.isConnected || img.naturalWidth > 0 || img.complete) return;
+  const src = img.getAttribute('src');
+  if (!src || src.startsWith('data:') || performance.getEntriesByName(new URL(src, location.href).href, 'resource').length) return;
+  img.loading = 'eager';
+  img.src = src;
+}
 const surfaces = new WeakMap<HTMLImageElement, string>();
 let observer: IntersectionObserver | undefined;
 const watcher = () =>
@@ -40,7 +56,9 @@ const watcher = () =>
     for (const e of list) {
       const img = e.target as HTMLImageElement;
       clearTimeout(timers.get(img));
+      clearTimeout(nudges.get(img));
       if (!e.isIntersecting || img.naturalWidth > 0) continue;
+      nudges.set(img, window.setTimeout(() => nudge(img), NUDGE_AFTER_MS));
       timers.set(
         img,
         window.setTimeout(() => {
@@ -70,6 +88,7 @@ export function watchStill(surface: string): (img: HTMLImageElement | null) => v
         if (x.isConnected) continue;
         watched.delete(x);
         clearTimeout(timers.get(x));
+        clearTimeout(nudges.get(x));
         observer?.unobserve(x);
       }
     };

@@ -377,6 +377,90 @@ test('w2478: the opt-out: no_previews with a reason shows a non-visual question 
   assert.match(log, /ask_person to Ben shown without previews, though w2186 has review media \(no_previews, w2478\): "asks when to merge; nothing to look at"/);
 });
 
+// ---------------------------------------------------------------- w2664: a pick between designs shows every design's stills
+
+/** w2580's card of 2026-10-31 (seq 61907): 2 stills in the question, 2 in each of 4 options. */
+function stationPick(env: ReturnType<typeof setup>, bare: string[] = []) {
+  const names = ['q-desk', 'q-dock', ...['strip', 'card', 'tiles', 'banner'].flatMap((n) => [`${n}-desk`, `${n}-dock`])];
+  const dir = reviewFolder(env, 'w2580-station-info-redesign', names.map((n) => `${n}.png`));
+  const p = (n: string) => `![${n}](<${dir}/${n}.png>)`;
+  const opt = (l: string, n: string) => ({ label: l, description: `What ${l} does.${bare.includes(l) ? '' : ` ${p(`${n}-desk`)} ${p(`${n}-dock`)}`}` });
+  return {
+    question: `Which Station Info design should I build? ${p('q-desk')} ${p('q-dock')}`,
+    options: [{ ...opt('A Strip', 'strip'), recommended: true }, opt('B Card', 'card'), opt('C Tiles', 'tiles'), opt('D Banner', 'banner')],
+    request: 'w2580',
+  };
+}
+
+test('w2664: a 4-option design pick with 2 stills in each option shows; every still stays on the card', async (t) => {
+  const env = setup(t);
+  const ben = env.o.personalFor(BEN);
+  const input = stationPick(env);
+  const r = await env.call(ben.info, ASK_TOOL, input);
+  assert.equal(r.isError, false, r.text);
+  assert.match(r.text, /Shown to Ben as 4 buttons/);
+  assert.match(r.text, /The card shows its 10 stills and clips itself: do not show them again in a message \(w2664\)/);
+  const checked = checkAsk(input);
+  assert.ok('ask' in checked);
+  assert.equal(splitMedia(checked.ask.question).media.length, 2);
+  for (const o of checked.ask.options) assert.equal(splitMedia(o.description).media.length, 2, o.label);
+});
+
+test("w2664: refused: a design pick where C and D carry no still of their own, even with stills in the question and no_previews", async (t) => {
+  const env = setup(t);
+  const ben = env.o.personalFor(BEN);
+  const r = await env.call(ben.info, ASK_TOOL, { ...stationPick(env, ['C Tiles', 'D Banner']), no_previews: 'the mocks are already in report r28' });
+  assert.equal(r.isError, true, r.text);
+  assert.match(r.text, /picks between designs, and "C Tiles", "D Banner" carry no still of its own/);
+  assert.match(r.text, /no_previews does not excuse a pick between designs/);
+  assert.equal(ben.info.openAsks, undefined, 'nothing reached the Waiting tab');
+  // The question's stills do not stand for the options: a pick whose words say so with no option shown is refused too.
+  const none = await env.call(ben.info, ASK_TOOL, { ...stationPick(env, ['A Strip', 'B Card', 'C Tiles', 'D Banner']), no_previews: 'the mocks are already in report r28' });
+  assert.equal(none.isError, true, none.text);
+  assert.match(none.text, /"A Strip", "B Card", "C Tiles", "D Banner" carry no still/);
+});
+
+test('w2664: an approval is no pick: a still on "OK as is" and none on "Change it" still shows; "None of these" needs no still', async (t) => {
+  const env = setup(t);
+  const dir = reviewFolder(env, 'w2186-calc', ['after_en.png']);
+  const ben = env.o.personalFor(BEN);
+  const ok = await env.call(ben.info, ASK_TOOL, { ...CALC, options: [{ ...CALC.options[0], description: `Keep it. ![en](<${dir}/after_en.png>)` }, CALC.options[1]] });
+  assert.equal(ok.isError, false, ok.text);
+  const input = stationPick(env);
+  const withNone = await env.call(ben.info, ASK_TOOL, { ...input, options: [...input.options.slice(0, 3), { label: 'None of these', description: 'Say what to change.' }] });
+  assert.equal(withNone.isError, false, withNone.text);
+});
+
+test('w2664: a card over the media limit is refused with the reason, never cut short without a word', () => {
+  const still = (i: number) => `![s${i}](</srv/fff/review/w1/s${i}.png>)`;
+  const five = [0, 1, 2, 3, 4].map(still).join(' ');
+  const q = checkAsk({ question: `Which one? ${five}`, options: [{ label: 'A', description: '' }, { label: 'B', description: '' }] });
+  assert.ok('problem' in q && /question: 5 stills or clips, and a card shows at most 4 per question and 4 per option/.test(q.problem), JSON.stringify(q));
+  const o = checkAsk({ question: 'Which one?', options: [{ label: 'A', description: five }, { label: 'B', description: '' }] });
+  assert.ok('problem' in o && /option 1 \("A"\): 5 stills or clips/.test(o.problem), JSON.stringify(o));
+  assert.ok('ask' in checkAsk({ question: 'Which one?', options: [{ label: 'A', description: [0, 1, 2, 3].map(still).join(' ') }, { label: 'B', description: '' }] }), 'four is the limit');
+});
+
+test("w2664: previews go in the card only: a message that shows the card's stills again, before or after it, is told", async (t) => {
+  const env = setup(t);
+  env.store.onEvent = (sid, e) => env.o.observeAsk(sid, e);
+  const ben = env.o.personalFor(BEN);
+  const input = stationPick(env);
+  const c1 = splitMedia(input.options[2].description).media[0].url;
+  env.store.append(ben.info.id, { kind: 'user', from: 'human', text: 'show me the station info designs' } as never);
+  env.store.append(ben.info.id, { kind: 'assistant', text: `Here is C: ![C](<${c1}>)` });
+  const before = await env.call(ben.info, ASK_TOOL, input);
+  assert.equal(before.isError, false, before.text);
+  assert.match(before.text, /WARNING: your message before this card already showed 1 of its stills \(tiles-desk\.png\)/);
+  // After the card, in the same turn: the next result carries the note.
+  env.store.append(ben.info.id, { kind: 'assistant', text: `All four again: ${input.options.map((o) => o.description).join(' ')}` });
+  const next = await env.call(ben.info, ASK_TOOL, { ...CALC, request: 'w9999' });
+  assert.match(next.text, /\[FF Factory\] Your message after your last ask_person card showed 8 of its stills again, so Ben saw them twice/);
+  // A message with other stills, or one after the person wrote again, is not told.
+  const later = await env.call(ben.info, ASK_TOOL, { ...CALC, request: 'w9998' });
+  assert.doesNotMatch(later.text, /FF Factory\] Your message after/);
+});
+
 test('w1602: media in the question or in any option lets the call through at once; so does a request without review media', async (t) => {
   const env = setup(t);
   const dir = reviewFolder(env, 'w77', ['clip.mp4']);

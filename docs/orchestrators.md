@@ -3110,6 +3110,27 @@ orchestrator asks every question to its person with **`ask_person`**, one at a t
   count. For a question about nothing visual, `no_previews: "<why, 12+ characters>"` lets it through and logs the reason
   on the request. A repeat no longer passes. The [needs you] relay lists the request's other review files, newest first,
   to inline (`WorkNeedsYou.media`, up to 8).
+- **A pick between designs shows each design's own stills, in the card only** (w2664). Ben, 2026-10-31, on w2580's
+  Station Info pick (card seq 61907): "you didnt show me previews for C and D and you didnt give me the multiple choice
+  options like you usually do", then "you did the multiple choice thing above which was correct, then immediately showed
+  all the previews again in yoru next message for seemingly no reason". Four rules, on all three paths:
+  - `designPickProblem` (`server/visualAsk.ts`, run first in `visualAskCheck`): a question where two or more options carry
+    a review still, or, on a request with review media, whose words pick a look (`DESIGN_WORDS`: "which design", "mocks",
+    "layout", "A or B"…), is refused while any design option lacks a still of its own in its description. A still in the
+    question stands for no option, and `no_previews` cannot excuse it. "None of these", "Something else", "Keep…" (`NO_DESIGN`)
+    need none, and an approval (a still on "OK as is", none on "Change it") is no pick.
+  - `checkAsk` (`shared/ask.ts`) refuses more than `MAX_MEDIA` (4) stills or clips in the question or in one option, naming
+    which; `splitMedia` used to drop the rest without a word.
+  - Previews go in the card only. `askWithButtons` warns in its result when a message earlier in the turn already showed the
+    card's stills (`shownThisTurn`), and `observeAsk` notes a message after the card that shows them again; the chat's next
+    result carries that note (`cardNotes`, via `withBugNote`). The ask_person result says not to show them again.
+  - A card's stills load eagerly (`QuestionCard` `loading="eager"`), and a still on screen for `NUDGE_AFTER_MS` (4 s) that its
+    browser never requested is asked for again (`web/src/mediaTrouble.ts` `nudge`): Ben's Firefox 158 left C's and D's
+    stills on screen and blank with no request in its resource timing (journal `[media]` lines, 20:44 to 20:50 UTC), while
+    the server logged no `[image]` error. That cause is not settled (a browser lazy-load miss is a guess); the e2e
+    `askPreviews.ask.spec.ts` shows a 4-option card with 2 stills each drawing all 10 stills and all 4 buttons in the chat
+    and on the Waiting tab, in Chromium and Firefox. A refused ask_person draws no card and no buttons (`Transcript.tsx`), so
+    the brief says to fix and call again, never to paste the previews into a message instead.
 - **A click is the person's own message.** `POST /api/sessions/<id>/answer` with the question's seq and the option's index
   (`Orchestrators.answerWords`). The server reads the label and the question from the transcript, never from the page, and
   sends it as a reply (shared/replies.ts, "Replies and reactions"): the person's words are the label, then `REPLY_MARK` and

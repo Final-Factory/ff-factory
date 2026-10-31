@@ -98,11 +98,22 @@ export function shortenLabel(label: string): string {
  * option's description, and a warning says so (w1869, lothsahn: "Analyze your recent tool failures"): the page checks the
  * same input again to draw it, so both read the same shortened label.
  */
+/** How many stills and clips `s` names as `![..](..)`, before splitMedia keeps MAX_MEDIA of them. */
+export const mediaCount = (s: string) => [...s.matchAll(MD_IMAGE)].length;
+
+/**
+ * Over MAX_MEDIA a card used to drop the rest without a word (w2664): the asker believed the person saw them. Now the
+ * call is refused, saying so.
+ */
+const tooMuchMedia = (where: string, n: number) =>
+  `${where}: ${n} stills or clips, and a card shows at most ${MAX_MEDIA} per question and ${MAX_MEDIA} per option (the rest would not show). Keep the ones that decide it; put the others in the option they belong to.`;
+
 export function checkAsk(input: unknown): { ask: Ask; warnings: string[] } | { problem: string } {
   const o = (input ?? {}) as { question?: unknown; options?: unknown };
   const question = typeof o.question === 'string' ? o.question.trim() : '';
   if (!splitMedia(question).text) return { problem: 'question: the question, in a sentence' };
   if (splitMedia(question).text.length > QUESTION_CHARS) return { problem: `question: at most ${QUESTION_CHARS} characters of words (put the detail in your message above it)` };
+  if (mediaCount(question) > MAX_MEDIA) return { problem: tooMuchMedia('question', mediaCount(question)) };
   if (!Array.isArray(o.options) || o.options.length < MIN_OPTIONS || o.options.length > MAX_OPTIONS) return { problem: `options: ${MIN_OPTIONS} to ${MAX_OPTIONS} (the page adds "${CHAT_MORE_LABEL}" itself)` };
   const options: AskOption[] = [];
   const warnings: string[] = [];
@@ -114,6 +125,7 @@ export function checkAsk(input: unknown): { ask: Ask; warnings: string[] } | { p
     if (label.toLowerCase() === CHAT_MORE_LABEL.toLowerCase()) return { problem: `"${CHAT_MORE_LABEL}" is added by the page; leave it out` };
     if (options.some((x) => x.label.toLowerCase() === label.toLowerCase())) return { problem: `two options are both "${label}"` };
     const written = typeof raw?.description === 'string' ? raw.description : '';
+    if (mediaCount(written) > MAX_MEDIA) return { problem: tooMuchMedia(`option ${i + 1} ("${label}")`, mediaCount(written)) };
     // The full label rides in front of the words the option had, and the room grows by its length so those are not cut for it.
     const description = label === full ? (written ? withMedia(written, DESCRIPTION_CHARS) : '') : withMedia(`${full}${splitMedia(written).text ? ' - ' : ''}${written}`, DESCRIPTION_CHARS + full.length + 3);
     options.push({ label, description, ...(raw?.recommended === true ? { recommended: true } : {}) });

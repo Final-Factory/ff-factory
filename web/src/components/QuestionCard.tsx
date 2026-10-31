@@ -45,7 +45,7 @@ export function Previews({ media, session }: { media: CardMedia[]; session?: str
       ))}
       {stills.map(({ m, it }, i) => (
         <button key={m.url} type="button" className="qc-thumb" data-testid="qc-still" title={`${it.name}: open full size`} aria-label={`Open ${it.name} full size`} onClick={() => openLightbox(stills.map((x) => x.it), i)}>
-          <img ref={watchStill('card')} src={it.src} alt={it.name} loading="lazy" onError={(e) => (reportStill(e.currentTarget, 'card', 'error'), lost(m.url))} />
+          <img ref={watchStill('card')} src={it.src} alt={it.name} loading="eager" onError={(e) => (reportStill(e.currentTarget, 'card', 'error'), lost(m.url))} />
         </button>
       ))}
     </div>
