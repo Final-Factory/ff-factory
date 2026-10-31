@@ -71,3 +71,74 @@ export function machineAskProblem(what: string | undefined, questions: readonly 
     ? `${head} Timed work: timed_run queues for its computer and goes out by itself when that one is back, and timed_place always files the leg, Queued, which starts by itself on the first computer that fits in the timing order (smallest free first, then pre-emption, then the queue; never m5). A check on several computers: request_pair, which waits for them. Anything else that needs a computer that is offline or busy: commit and push, then end your turn with your report and a line "wNNN: still open: queued for <the computer or kind of computer it needs>"; the dispatcher queues it (decide_work queue) and it starts when one fits. ${only}`
     : `${head} Use decide_work queue with needs naming the computers that can take it: it starts by itself on the first that comes online or frees up, in order. ${only}`;
 }
+
+/**
+ * A fork whose answers differ only in where or when work runs (w2648) is the dispatcher's to decide, never a person's. At
+ * 08:40 on 2026-10-31 the dispatcher asked lothsahn about w2631 (a 3-leg pair run that only beast fitted), and the card got
+ * past machineAskProblem because its question asked for no computer: only its answers differed, "re-file 2 legs, starts
+ * now", "3 legs, wait for lothdesktop", "leave queued". It sat for about 3 hours until lothsahn answered with w2147's rule.
+ */
+// Words that name where or when work runs: a fork whose answers differ by one of them is a placement fork.
+const PLACE_STRONG = new Set(
+  (
+    'leg legs machine machines computer computers pc pcs mac macs laptop laptops desktop desktops sandbox sandboxes slot slots ' +
+    'host hosts client clients joiner joiners peer peers process processes instance instances wait waits waiting waited queue ' +
+    'queued queues queueing now later online offline paused asleep busy idle available unavailable capacity cluster'
+  ).split(' '),
+);
+// Verbs and words that go with placement but also with a person's own fork ("Put it in" or "Leave it out", w1597): an
+// answer may differ by them only beside a word above.
+const PLACE_WORDS = new Set([
+  ...PLACE_STRONG,
+  ...(
+    'box boxes hold holds held keep kept leave left park parked file filed refile refiled rerun retry start starts started ' +
+    'starting run runs running ran go goes place placed put free frees freed back comes come returns room fit fits fitting ' +
+    'schedule scheduled two three four fewer more extra daemon'
+  ).split(' '),
+]);
+const ASK_STOP = new Set(
+  (
+    'a an the and or but so it its this that these those to of in on at for with by from as is are be been was were will ' +
+    'would can could should may might do does not no yes then than there here we you i me my our your they them their he ' +
+    'she his her who what which when where how if just only also too very same other another each every all both any some ' +
+    'one ones until after before while about into out over up down off again still yet already re s t ll ve d m recommended'
+  ).split(' '),
+);
+/** Words that make a fork a person's even when its answers say only where or when: money, publishing, approvals, deletes. */
+const RESERVED = /\$|\b(?:spend|spends|spending|cost|costs|money|budget|pay|paid|approv\w*|publish\w*|release\w*|merge\w*|delet\w*|ship it|steam branch)\b/i;
+
+const askWords = (s: string): string[] => s.toLowerCase().replace(/['’]/g, '').match(/[a-z0-9#]+/g) ?? [];
+
+/** Whether an ask's answers differ only in machines, legs, sandboxes or waiting (w2648), read from their labels. */
+export function placementOnlyAsk(ask: { question: string; options: readonly { label: string; description?: string }[] }, ids: readonly string[] = []): boolean {
+  if (ask.options.length < 2) return false;
+  const all = [ask.question, ...ask.options.flatMap((o) => [o.label, o.description ?? ''])].join(' ');
+  if (PERSON_ONLY.test(all) || RESERVED.test(all)) return false;
+  const fleet = new Set(ids.map((id) => id.toLowerCase()));
+  const place = (w: string) => PLACE_WORDS.has(w) || fleet.has(w);
+  const sets = ask.options.map((o) => new Set(askWords(o.label).filter((w) => !ASK_STOP.has(w))));
+  const union = new Set(sets.flatMap((s) => [...s]));
+  const diff = [...union].filter((w) => !sets.every((s) => s.has(w)));
+  const strong = (w: string) => PLACE_STRONG.has(w) || fleet.has(w);
+  const number = (w: string) => /^(?:\d+|w\d+|#\d+)$/.test(w);
+  // "2 legs" against "3 legs" differs only in a number beside a word of placement both say.
+  if (!diff.length || ![...union].some(strong) || !diff.some((w) => strong(w) || number(w))) return false;
+  return diff.every((w) => place(w) || number(w));
+}
+
+/**
+ * Why a card is refused as a placement fork (w2648), or undefined: one of its questions has answers that differ only in
+ * machines, legs, sandboxes or waiting. It names the answer to take: the one that starts on what is there now.
+ */
+export function placementForkProblem(asks: readonly { question: string; options: readonly { label: string; description?: string; recommended?: boolean }[] }[], ids: readonly string[], who: 'worker' | 'dispatcher'): string | undefined {
+  const fork = asks.find((a) => placementOnlyAsk(a, ids));
+  if (!fork) return undefined;
+  const now = fork.options.find((o) => /\b(?:now|starts?|start(?:ed|ing))\b/i.test(o.label) && !/\bwait/i.test(o.label)) ?? fork.options.find((o) => o.recommended) ?? fork.options[0];
+  const q = flat(fork.question);
+  const head = `Nothing was recorded (w2648, after w2147; lothsahn, 2026-10-25: "Use and schedule resources based on what you have. Don't ask for permission"): the answers to "${q.length > 120 ? `${q.slice(0, 119)}…` : q}" differ only in machines, legs, sandboxes or waiting, and that choice is yours. Take the one that starts on what is there now ("${clipLabel(now.label)}"), and say what you did in your note.`;
+  return who === 'dispatcher'
+    ? `${head} A pair run whose legs never started is re-marked with decide_work pair_legs and pair_menus (any action; queue on a Queued one only re-marks it), then started with start_agent; work for a computer that is not up is queued with needs. Ask a person only for what only they can give (a login, a reboot of their own machine, money, an approval).`
+    : `${head} A check on several computers: request_pair, asked again with legs or menus to re-mark a run whose legs never started; timed work: timed_place or timed_run. Ask a person only for what only they can give (a login, a reboot of their own machine, money, an approval).`;
+}
+
+const clipLabel = (s: string) => (s.length > 80 ? `${s.slice(0, 79)}…` : s);

@@ -151,7 +151,10 @@ test('w1158: what a coordinator carries in every call stays within its budget', 
   // w2541 (reports; lothsahn: "make sure theyre tagged with the operator that requested them") gave the dispatcher one line on marking such
   // a request (trimmed from 560 characters to 205; the rest is decide_work's report parameter): measured 28,597, so the cap
   // moved to 28,600.
-  const PROMPT_MAX = 28_600;
+  // w2648 (lothsahn: "Use and schedule resources based on what you have. Don't ask for permission.") gave the dispatcher one
+  // line saying a card whose answers differ only in placement is refused (trimmed from 860 characters to 340; the rest is in
+  // decide_work's pair_menus and the refusal itself): measured 28,943, so the cap moved to 28,950.
+  const PROMPT_MAX = 28_950;
   // w1163: the always-loaded sets now follow measured use (docs/tool-manifest.md); the dispatcher's is 23,436 characters
   // since w1159 gave list_work, list_sandboxes, list_machines and agent_transcript their output options. w1597 gave decide_work
   // its questions (one plain question per decision with its answers, as the person's card asks them; Ben, 2026-10-19: "just ask
@@ -164,7 +167,9 @@ test('w1158: what a coordinator carries in every call stays within its budget', 
   // 24,888, so the cap moved to 24,900.
   // w2541 (reports) gave decide_work report, a request's result kept as a report of one kind (trimmed from 330 characters of
   // text to 110; the rest is the kinds' enum): the dispatcher's measured 25,187, so the cap moved to 25,200.
-  const ALWAYS_LOADED_MAX = 25_200;
+  // w2648 gave decide_work pair_menus, the re-mark of a pair run whose legs never started (trimmed from 590 characters to 60;
+  // the rule is in read_rules machines): the dispatcher's measured 25,325, so the cap moved to 25,350.
+  const ALWAYS_LOADED_MAX = 25_350;
   await withCoordinators((agents, kinds) => {
     for (const [kind, info] of kinds) {
       const prompt = asOnLinuxCi(promptOf(agents, info)).length;

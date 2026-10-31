@@ -6628,6 +6628,75 @@ test('w2057: the dispatcher cannot mark a repeat of a finished pair run, clears 
   assert.match(w.outcome ?? '', /^repeats w1936, which passed \(a repeat of pair run w1936, which finished; its result: For w665: PASS on 1a2b3c4d, 0 diverged\.\)$/);
 });
 
+test('w2648: w2631 as it happened: the dispatcher re-marks a Queued pair run read from its words to 2 legs and menus none, and a placement fork is never asked', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, dispatcher, call } = env;
+  agentsRoom(agents, []);
+  const read = { legs: 3, for: 'w2622', menus: 'read from its words: a menu, a lobby, a click; request_pair menus "none" says it clicks none' };
+  putRequests(store, [
+    { id: 'w2622', status: 'blocked' },
+    { id: 'w2631', status: 'queued', title: 'Pair run for w2622: ship-dispatch-v2 3-peer determinism check', brief: 'Direct IP, no Steam, no menus.', pair: read, constraints: pairText(read) },
+  ]);
+  const marked = await call(dispatcher().info, 'decide_work', { id: 'w2631', action: 'queue', pair_legs: 2, pair_menus: 'none', note: "lothsahn's rule: run it on what is free" });
+  assert.equal(marked.isError, false, marked.text);
+  assert.match(marked.text, /^w2631 is now a pair run of 2 legs, .* \(it was a pair run of 3 legs, .*only on computers whose screen is unlocked.*\) and stays Queued\./);
+  const w = store.work.get('w2631')!;
+  assert.equal(w.status, 'queued');
+  assert.equal(w.pair!.legs, 2);
+  assert.equal(w.pair!.menus, undefined);
+  assert.match(w.pair!.noMenus ?? '', /^none/);
+  assert.equal(w.constraints, pairText(w.pair!), "request_pair's constraints follow the marks");
+  assert.match(w.log.join('\n'), /dispatcher \(w2648\): now a pair run of 2 legs, .*: lothsahn's rule: run it on what is free \(it was a pair run of 3 legs/);
+  // queue with pair_legs no longer reads "menus" back from its words.
+  const again = await call(dispatcher().info, 'decide_work', { id: 'w2631', action: 'queue', pair_legs: 2, note: 'again' });
+  assert.match(again.text, /^w2631 is already a pair run of 2 legs/);
+  assert.equal(store.work.get('w2631')!.pair!.menus, undefined);
+  // The card of 08:40 is refused, and names the answer that starts now; nothing reaches lothsahn.
+  const ask = await call(dispatcher().info, 'decide_work', {
+    id: 'w2631',
+    action: 'ask',
+    note: 'lothsahn: how should w2631 run?',
+    questions: [
+      {
+        question: 'w2631 is queued: it needs 3 computers at once and only beast fits. How should it run?',
+        options: [
+          { label: 'Re-file 2 legs, starts now', description: 'm5 hosts and beast runs both clients.', recommended: true },
+          { label: '3 legs, wait for pc', description: 'It starts when pc is free.' },
+          { label: 'Leave queued', description: 'It waits for three free computers.' },
+        ],
+      },
+    ],
+  });
+  assert.equal(ask.isError, true, ask.text);
+  assert.match(ask.text, /w2648.*Take the one that starts on what is there now \("Re-file 2 legs, starts now"\)/);
+  assert.equal(store.work.get('w2631')!.status, 'queued');
+  assert.equal(store.work.get('w2631')!.asks, 0);
+  // A run whose legs started keeps its marks.
+  legsStarted(store, 'w2631', 'h2631', 'c2631');
+  const late = await call(dispatcher().info, 'decide_work', { id: 'w2631', action: 'queue', pair_legs: 3, note: 'too late' });
+  assert.match(late.text, /w2631's legs started together at .* its marks stay as they are/);
+});
+
+test('w2648: a worker\'s request_pair menus "none" is kept, and asked again with legs or menus it re-marks its run whose legs never started', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, dispatcher, call } = env;
+  agentsRoom(agents, []);
+  putRequests(store, [{ id: 'w2622', by: LOTH }]);
+  const a = await startedFor(env, 'w2622');
+  const brief = 'Built players, direct IP. Click Host in the title menu on the host.';
+  const filed = String(await a.h.request_pair!({ what: '3-peer ship dispatch check', brief, legs: 3, menus: 'none', commit: 'aa5039cd82' }));
+  const id = /^Filed (w\d+)/.exec(filed)![1];
+  assert.equal(store.work.get(id)!.pair!.menus, undefined, 'its own menus field rules over its words');
+  assert.match(store.work.get(id)!.pair!.noMenus ?? '', /^none/);
+  // The dispatcher's queue does not read the brief's "title menu" back.
+  await call(dispatcher().info, 'decide_work', { id, action: 'queue', pair_legs: 3, note: 'no room' });
+  assert.equal(store.work.get(id)!.pair!.menus, undefined);
+  const re = String(await a.h.request_pair!({ what: '3-peer ship dispatch check', brief, legs: 2, commit: 'aa5039cd82' }));
+  assert.match(re, new RegExp(`^w2622 already has an open pair run, ${id}`));
+  assert.equal(store.work.get(id)!.pair!.legs, 2);
+  assert.match(store.work.get(id)!.log.join('\n'), /asked again \(w2648\): now a pair run of 2 legs, .*\(it was a pair run of 3 legs/);
+});
+
 test('w2057: a worker that ends its turn waiting on a pair run with none filed is told to file it with request_pair, once; one whose PR has a pair run is not', async (t) => {
   const env = await setupOnMachine(t);
   const { store, agents, sessions } = env;

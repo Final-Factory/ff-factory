@@ -1631,7 +1631,13 @@ LothDesktop and Beast, not just when BEAST is full").
     w2460's rerun 2 put its host leg on m5, signed in to Steam, but m5's screen was locked, and the game's menus take no
     clicks on a Mac with a locked screen, so neither check ran). Every Steam pair clicks menus (its lobby); any other pair
     does when `request_pair menus` says what it clicks, or its words name a menu, a lobby, a click, a button or a dialog
-    (`mentionsMenus`, `shared/desktop.ts`; `menus: "none"` clears it). The daemon reports its desktop session beside
+    (`mentionsMenus`, `shared/desktop.ts`; `menus: "none"` clears it). Its own `menus` field rules and its words are read
+    only without one; a mention its own clause rules out ("no menus", "no Steam, no menus", "without clicking", "doesn't
+    click any menu") counts as none (w2648, `shared/mentions.ts` `affirmedMention`, the Steam reader too: w2631's "Direct
+    IP, no Steam, no menus" kept it off m5 and m3 for about 3 hours). "none" is kept on the run (`WorkPair.noMenus`), so
+    the dispatcher's queue never reads its words back. A run whose legs never started is re-marked: its worker asks
+    `request_pair` again with `legs` or `menus`, or the dispatcher passes `decide_work` `pair_legs` (2 and up) and
+    `pair_menus` with any action (queue on a Queued run only re-marks it). The daemon reports its desktop session beside
     its Steam client (`steam_client`'s `desktop`): on macOS `CGSessionCopyCurrentDictionary` through osascript (the
     dialog watch's `SESSION_SCRIPT`, `machine/macDialogs.ts`: `CGSSessionScreenIsLocked`, `kCGSSessionOnConsoleKey`), on
     Windows whether `LogonUI.exe`, the lock screen, runs (`tasklist`); Linux and older daemons report none, which locks no
