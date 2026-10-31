@@ -1,13 +1,15 @@
-// The read-chain nudge's pilot arm (w2014; docs/spend.md "Read chains handed to a subagent, a pilot"). Half of worker sessions by
-// default, by a hash of the session id drawn apart from the other pilots' (autoCompact.ts inPilot: the compaction pilot's
-// `early:`, the terse-prose pilot's `terse:`), so each one's effect can be read apart. A pilot session's launch spec carries
+// The read-chain nudge's arm (w2014; docs/spend.md "Read chains handed to a subagent, a pilot"). Every worker session by default
+// since the pilot's 7-day result (it was half); under 100, by a hash of the session id drawn apart from the other pilots'
+// (autoCompact.ts inPilot: the compaction pilot's `early:`, the terse-prose pilot's `terse:`), so each one's effect can be read
+// apart. An arm session's launch spec carries
 // readChainNudge (the agent host adds the hook, server/readChainHook.ts) and its system prompt ends with READ_CHAIN_MARK, which
 // marks the arm in its transcript (scripts/compact-compare.py --marker reads it).
 import type { Config } from './config.ts';
 import { inPilot } from './autoCompact.ts';
 
-/** The pilot's share of worker sessions, in percent, when worker.readChainPilotPercent is not set. */
-export const READ_CHAIN_DEFAULT_PERCENT = 50;
+/** The share of worker sessions nudged, in percent, when worker.readChainPilotPercent is not set: every worker since the
+ * pilot's 7-day result (w2014, docs/spend.md); under 100 brings a control arm back. */
+export const READ_CHAIN_DEFAULT_PERCENT = 100;
 
 /** Appended to a pilot worker's system prompt: it marks the arm in the transcript. */
 export const READ_CHAIN_MARK = '## Read chains (pilot)';
