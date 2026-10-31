@@ -446,6 +446,8 @@ export class AgentSession implements SessionHandle {
   private readonly pickModel?: TurnModelPick;
   /** The model the live process answers with now: set at its start, changed by setModel (w1158). */
   private liveModel?: string;
+  /** w2653: the reasoning effort this process was started with (absent: none passed, the CLI's own default). */
+  private liveEffort?: string;
 
   constructor(info: SessionInfo, store: SessionSink, makeOptions: OptionsFactory, events: EventEmitter, pickModel?: TurnModelPick) {
     this.info = info;
@@ -601,6 +603,7 @@ export class AgentSession implements SessionHandle {
     this.abort = new AbortController();
     const base = this.makeOptions(this.info);
     this.liveModel = model ?? this.info.model ?? base.model;
+    this.liveEffort = base.effort === undefined ? undefined : String(base.effort);
     const options: Options = {
       ...base,
       model: this.liveModel,
@@ -906,6 +909,8 @@ export class AgentSession implements SessionHandle {
       ...(Object.keys(cum).length ? { cum } : {}),
       ...(u ? { main: { in: u.input_tokens ?? 0, out: u.output_tokens ?? 0, cr: u.cache_read_input_tokens ?? 0, cw: u.cache_creation_input_tokens ?? 0 } } : {}),
       ...(drain ? { meter: this.drainMeter() } : {}),
+      // w2653: what this process ran the turn on, for the per-session record (server/spend.ts).
+      run: { ...((this.liveModel ?? this.info.model) ? { model: this.liveModel ?? this.info.model } : {}), ...(this.liveEffort ? { effort: this.liveEffort } : {}) },
     };
   }
 

@@ -34,6 +34,7 @@ export const REPORT_FILTER = {
 import { DESCRIPTION_CHARS, LABEL_INPUT_CHARS, MAX_OPTIONS, MEDIA_CHARS, MIN_OPTIONS } from '../shared/ask.ts';
 import { CARD_QUESTION_CHARS, MAX_ASKS } from '../shared/questionCard.ts';
 import { rangedNumber } from './forgiving.ts';
+import { EXPORT_GROUPS, EXPORT_ROLES, EXPORT_VIEWS } from './spendExport.ts';
 
 /**
  * Questions for a person as their card asks them (w1597, Ben: "just ask the question clearly, give me the option selections
@@ -366,6 +367,16 @@ export const CATALOG = {
     person: z.string().max(64).optional().describe('Only the requests of this person (user id or display name).'),
     offset: rangedNumber(0, undefined, 'Skip this many matching requests (the next page).').optional(),
     limit: rangedNumber(1, 50, 'Requests per page, default 20; a page also stops at 40,000 characters.').optional(),
+  },
+  /** docs/spend.md "The export" (w2653): the spend record as CSV, read-only, with a spend-read grant. */
+  spend_export: {
+    view: z.enum(EXPORT_VIEWS).optional().describe('summary (default), requests, sessions or turns.'),
+    since: z.string().max(40).optional().describe('An ISO time with a zone (2026-10-24T07:20:00Z) or a UTC date; default 7 days before until.'),
+    until: z.string().max(40).optional().describe('An ISO time with a zone or a UTC date, not included; default now.'),
+    group_by: z.enum(EXPORT_GROUPS).optional().describe('view turns: request (default), session, model, effort, role, day, or none for one row per turn.'),
+    role: z.enum(EXPORT_ROLES).optional().describe('Only sessions or turns of this role: worker, dispatcher, personal (a person\'s orchestrator), ops, standing.'),
+    offset: rangedNumber(0, undefined, 'Rows to skip (the next page: the answer says which offset).').optional(),
+    limit: rangedNumber(1, 2000, 'Rows per page, default 500; a page also stops at 40,000 characters.').optional(),
   },
   /** docs/reports.md (w2541): a request's result written down as a report, kept in the portal and shown on its Reports tab. */
   file_report: {

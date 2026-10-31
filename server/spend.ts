@@ -21,7 +21,7 @@ import { SnapshotFile, readJsonDurable, checkObject } from './durable.ts';
 import { SESSION_REQUESTS_TOP } from './toolOutput.ts';
 import type { SessionInfo, TranscriptEvent, WorkItem } from '../shared/types.ts';
 import { WORK_OPEN } from '../shared/types.ts';
-import { UNRECORDED_ACCOUNT, coordKey, coordLabel, isCoordinatorRole, COORDINATION_NOTE, type Coordination, type How, PHASES, PHASE_LABEL, type Phase, type PhaseDay, type PhaseRow, type ReportOptions, type RequestSpend, type SessionSpend, type SpendReport, type SpendRole } from '../shared/spend.ts';
+import { UNRECORDED_ACCOUNT, coordKey, coordLabel, isCoordinatorRole, COORDINATION_NOTE, type Coordination, type How, PHASES, PHASE_LABEL, type Phase, type PhaseDay, type PhaseRow, type ReportOptions, type RequestSpend, type SessionRun, type SessionSpend, type SpendReport, type SpendRole } from '../shared/spend.ts';
 export type { How, ReportOptions, RequestSpend, SessionSpend, SpendReport, SpendRole };
 import { addCats, carriedTotals, addModels, addTok, fmtTokens, fmtUsd, listUsd, priceOf, scaleTok, sumTok, zeroTok, CATEGORY_LABEL, CHARS_PER_TOKEN, OUTPUT_TOKENS_PER_CHAR, type Cats, type MeterTurn, type ModelTok, type Tok, type TurnUsage } from '../shared/spend.ts';
 
@@ -43,8 +43,43 @@ export interface SpendContext {
   priorResults: (sessionId: string) => number;
   /** A label for a session's account when the process left none (ranAs): a host session's account key. */
   accountLabel?: (info: SessionInfo) => string | undefined;
+  /** w2653: the effort a session of this role runs on when none was asked for (the config's default now): an inferred value. */
+  effortDefault?: (role: SpendRole) => string | undefined;
   now?: () => number;
 }
+
+/**
+ * w2653: the effort a session of `role` ran on when nothing recorded one, by when it started: the config defaults as they
+ * were. Workers and standing agents ran on cfg.worker.effort, high from the first release until w2000 (FF Factory PR #629)
+ * made it settable and it was set to medium at 2026-10-24 07:20 UTC (r15); w2010 (PR #642) then made medium the code
+ * default. Orchestrators, the dispatcher and the ops worker ran on medium throughout (cfg.orchestrator.effort; OPS_LIMITS
+ * since w597). Every value from here is inferred.
+ */
+export const WORKER_MEDIUM_FROM = '2026-10-24T07:20:00Z';
+export function inferredEffort(role: SpendRole, at: string): string {
+  if (role === 'worker' || role === 'standing') return at < WORKER_MEDIUM_FROM ? 'high' : 'medium';
+  return 'medium';
+}
+
+/** w2653: one live turn in the turn log (data/spend-turns/YYYY-MM.jsonl), the export's exact any-range source. */
+export interface TurnLine {
+  at: string;
+  /** session id, role, machine, sandbox */
+  s: string;
+  role: SpendRole;
+  m?: string;
+  sb?: string;
+  model?: string;
+  effort?: string;
+  /** whether model and effort were recorded by the process or inferred */
+  src: 'recorded' | 'inferred';
+  /** [request id, weight] */
+  req: [string, number][];
+  models: ModelTok;
+  est?: true;
+}
+
+export const TURN_LOG_DIR = 'spend-turns';
 
 export const isBucket = (id: string) => id.startsWith('_');
 
@@ -291,10 +326,13 @@ export class SpendStore {
   /** The messages that began each session's current turn, newest last: in memory only; a restart falls back to the links. */
   private readonly texts = new Map<string, { uuid?: string; text: string }[]>();
   private readonly now: () => number;
+  /** w2653: where each live turn is appended, one file per UTC month. */
+  readonly turnDir: string;
 
   constructor(dataDir: string, ctx: SpendContext) {
     this.ctx = ctx;
     this.now = ctx.now ?? Date.now;
+    this.turnDir = path.join(dataDir, TURN_LOG_DIR);
     const file = path.join(dataDir, 'spend.json');
     this.path = file;
     this.file = new SnapshotFile(file, () => JSON.stringify(this.persisted()), SAVE);
@@ -370,8 +408,71 @@ export class SpendStore {
       s.role = roleOf(info);
       if (info.machineId) s.machine = info.machineId;
       if (info.requestedBy) s.person = info.requestedBy.displayName;
+      const sb = info.machineSandbox ?? info.sandboxId;
+      if (sb) s.sandbox = sb;
     }
     return s;
+  }
+
+  /**
+   * w2653: what a live turn ran on. The process's own word (usage.run, a daemon from w2653 on) is recorded; without it the
+   * session's model (set from the SDK's init) and the effort it was started with are recorded, and an effort nobody set is the
+   * role's default, inferred.
+   */
+  private runOf(s: SessionSpend, info: SessionInfo | undefined, u: TurnUsage | undefined, at: string): Omit<SessionRun, 'at'> {
+    const r = u?.run;
+    if (r && (r.model || r.effort)) {
+      const effort = r.effort ?? info?.effort;
+      if (r.effort || info?.effort) return { model: r.model ?? info?.model, effort, src: 'recorded', from: 'process' };
+      // a process passed no effort: the CLI ran on its own default, which nothing here reads
+      return { model: r.model ?? info?.model, effort: this.ctx.effortDefault?.(s.role) ?? inferredEffort(s.role, at), src: 'inferred', from: 'default' };
+    }
+    if (info?.effort) return { model: info.model, effort: info.effort, src: info.model ? 'recorded' : 'inferred', from: 'session' };
+    return { model: info?.model ?? mainModel(s), effort: this.ctx.effortDefault?.(s.role) ?? inferredEffort(s.role, at), src: 'inferred', from: 'default' };
+  }
+
+  /** A session's runs grow by one when what it runs on changes (a coordinator's per-turn model, w1158; a new process). */
+  private noteRun(s: SessionSpend, at: string, run: Omit<SessionRun, 'at'>) {
+    const last = s.runs?.at(-1);
+    if (last && last.model === run.model && last.effort === run.effort && last.src === run.src) return;
+    (s.runs ??= []).push({ at, ...(run.model ? { model: run.model } : {}), ...(run.effort ? { effort: run.effort } : {}), src: run.src, ...(run.from ? { from: run.from } : {}) });
+  }
+
+  /** One line per live turn (w2653), appended: a failure costs the line, never the turn's record. */
+  private logTurn(line: TurnLine) {
+    try {
+      fs.mkdirSync(this.turnDir, { recursive: true });
+      fs.appendFileSync(path.join(this.turnDir, `${line.at.slice(0, 7)}.jsonl`), JSON.stringify(line) + '\n');
+    } catch (e) {
+      console.warn(`spend: the turn log missed a turn of ${line.s}: ${(e as Error).message}`);
+    }
+  }
+
+  /**
+   * w2653: past sessions' model and effort, once, for every session with no runs: the session's own model and effort while it
+   * is still in the state (recorded), else the model that billed most and the role's default effort when it started (inferred).
+   * Returns how many it filled.
+   */
+  backfillRuns(): number {
+    let n = 0;
+    for (const s of this.sessions.values()) {
+      if (s.runs?.length) continue;
+      const info = this.ctx.session(s.id);
+      const model = info?.model ?? mainModel(s);
+      const effort = info?.effort;
+      const run: SessionRun = {
+        at: s.firstAt,
+        ...(model ? { model } : {}),
+        effort: effort ?? inferredEffort(s.role, s.firstAt),
+        // both from the session's own record, or at least one guessed
+        src: info?.model && effort ? 'recorded' : 'inferred',
+        from: `backfill: model ${info?.model ? 'recorded' : 'billed most'}, effort ${effort ? 'recorded' : 'default'}`,
+      };
+      s.runs = [run];
+      n++;
+    }
+    if (n) this.changed();
+    return n;
   }
 
   /** The turn's own spend: the difference of the SDK's cumulative totals, or an estimate when there is no baseline. */
@@ -440,7 +541,22 @@ export class SpendStore {
     const startMs = (Date.parse(at) || this.now()) - durationMs;
     const items = [...this.ctx.work()];
     const allocs = attribute(info ?? infoOfRecord(s), items, texts, startMs);
+    const run = this.runOf(s, info, u, at);
+    this.noteRun(s, at, run);
     this.add({ s, at, models, total, estimated, meter: u?.meter, allocs, items, info, account: this.accountOf(info) });
+    this.logTurn({
+      at,
+      s: s.id,
+      role: s.role,
+      ...(s.machine ? { m: s.machine } : {}),
+      ...(s.sandbox ? { sb: s.sandbox } : {}),
+      ...(run.model ? { model: run.model } : {}),
+      ...(run.effort ? { effort: run.effort } : {}),
+      src: run.src,
+      req: allocs.map((a) => [a.id, a.weight] as [string, number]),
+      models: roundModels(models),
+      ...(estimated ? { est: true as const } : {}),
+    });
     this.changed();
   }
 
@@ -516,7 +632,7 @@ export class SpendStore {
     let r = this.requests.get(id);
     if (!r) {
       const w = (items ?? [...this.ctx.work()]).find((x) => x.id.toLowerCase() === id);
-      r = { id, title: w?.title ?? bucketTitle(id), kind: w ? kindOfWork(w) : isBucket(id) ? 'overhead' : 'other', firstAt: at, lastAt: at, turns: 0, total: zeroTok(), models: {}, estimated: zeroTok(), sessions: {}, cats: {}, calls: 0, compactions: 0, days: {} };
+      r = { id, title: w?.title ?? bucketTitle(id), kind: w ? kindOfWork(w) : isBucket(id) ? 'overhead' : 'other', firstAt: at, lastAt: at, turns: 0, total: zeroTok(), models: {}, estimated: zeroTok(), sessions: {}, cats: {}, calls: 0, compactions: 0, days: {}, ...(w ? { filedAt: w.createdAt } : {}) };
       this.requests.set(id, r);
     }
     return r;
@@ -545,6 +661,10 @@ export class SpendStore {
       r.status = w.status;
       r.person = person;
       r.kind = kindOfWork(w);
+      if (!r.filedAt && w.createdAt) {
+        r.filedAt = w.createdAt;
+        changed = true;
+      }
       if (open) {
         if (r.closedAt) {
           r.closedAt = undefined;
@@ -1322,4 +1442,12 @@ export function renderSession(spend: SpendStore, id: string, link: (sessionId: s
   const ph = s.phaseDays ? phaseRow([s.phaseDays], '0000', '9999') : undefined;
   if (ph) lines.push(`By phase (w2018): ${phaseLine(ph)}.`);
   return lines.join('\n');
+}
+
+/** The model that billed most in a session: its main loop's, nearly always (subagents run cheaper). */
+function mainModel(s: SessionSpend): string | undefined {
+  let best: string | undefined;
+  let usd = -1;
+  for (const [m, t] of Object.entries(s.models)) if (t.usd > usd && m !== 'unknown') [best, usd] = [m, t.usd];
+  return best;
 }

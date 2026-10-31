@@ -1325,6 +1325,11 @@ who set or took it back, and `list_work {id}` shows it. It counts only while the
 a granted worker may then list the open and stalled requests and read any of them by id. Closed requests stay limited
 to its own and named ones.
 
+**The spend export** (w2653) is granted the same way and on the same terms: `request_work spend_read: true` or
+`update_work {id, spend_read: true|false}` (`Orchestrators.setSpendRead`) sets `spendRead {by, at}` on the person's own
+request, never on one from the intake; while that request is open or stalled its workers may call `spend_export`
+(docs/spend.md, "The export"). It reads, never writes, and carries no account, key or token.
+
 **Read-only.** The tool has no argument that changes anything, and its handler builds its answer from the store
 without writing (tested by comparing the ledger before and after calls that pass `close`, `note`, `reopen` and
 `ledger_read`). A worker still has no `update_work`, `request_work`, `decide_work` or `list_work`.

@@ -18,6 +18,7 @@ among kinds of content (always an estimate; the totals it splits are not).
 |---|---|
 | `list_work` | each request's line ends `Cost so far: $12.34 (3 session(s); in …, out …, read …, write …)`; `list_work` with an `id` adds the full spend (below) |
 | `read_work` (workers) | the same cost line on their own requests |
+| `spend_export` (workers, with a grant) | the record as CSV for any time range, by request, session, model, effort and role (w2653; "The export" below) |
 | `spend_report` (orchestrators) | no argument: the last 7 days' top requests (by the workers' own cost, coordination beside it: see "Coordination") with where their tokens went, cost by kind of work, where the money goes inside sessions, the transcripts' footprint. `days`, `top`; `request: "w859"` one request in full (models, every session with tokens, cost and a link to its transcript, how long each transcript is kept); `session: "<id>"` (its top 20 requests by cost and a count of the rest; `requests: N` lists up to 2,000, w1159); `footprint: true` |
 | Dashboard | Dispatcher page: a cost on each request's row, a **Spend** block in its opened row (models, sessions with transcript links, categories), and a **Spend** tab: the analysis |
 | HTTP | `GET /api/spend/summary`, `/api/spend/request/<id>`, `/api/spend/report?days=7&top=10` |
@@ -26,6 +27,61 @@ among kinds of content (always an estimate; the totals it splits are not).
 A **request page** (the opened row) lists every session that worked on the request with its tokens and cost, its role
 (worker, dispatcher, personal orchestrator, ops worker, standing agent) and a link to its transcript (`#/session/<id>`), and says
 when each transcript may be deleted.
+
+## The per-session record of model and effort (w2653)
+
+Each session in `data/spend.json` carries `runs`: what it ran on, one entry per change, `{at, model, effort, src, from}`, and its
+`sandbox`. `AgentSession` (server/sessions.ts) puts `usage.run {model, effort}` on every result line: the model it passed the SDK
+(`start`, and a coordinator's per-turn `switchModel`, w1158) and the effort it passed (`Options.effort`); absent effort means none
+was passed and the CLI ran on its own default. `SpendStore.runOf` labels a turn's run:
+
+| | `src` | `from` |
+|---|---|---|
+| `usage.run` with an effort, or the session's own `effort` (a daemon from w2653 on) | recorded | `process` |
+| no `usage.run` (an older daemon), the session's `model` and an `effort` it was started with | recorded | `session` |
+| an effort nobody passed: the role's default (the config now, else the table below) | inferred | `default` |
+
+A new entry is added when the model, effort or label changes. Requests carry `filedAt` (the ledger's `createdAt`) beside
+`closedAt`.
+
+**The turn log.** Every live turn is also appended to `data/spend-turns/YYYY-MM.jsonl` (UTC month), one line:
+`{at, s, role, m, sb, model, effort, src, req: [[id, weight]], models, est}`. It is what lets the export cut any time range
+exactly; `spend.json` keeps whole-life totals and UTC days only. It starts at w2653's deploy (2026-10-31); `correctHistory` and
+the transcript backfill do not write it. No account is in it.
+
+**Backfill** (`SpendStore.backfillRuns`, at start and every 5 minutes for sessions the transcript backfill added since): a
+session with no `runs` gets one, at its first turn. Model: the session's own while it is still in the state (set from the SDK's
+init), recorded; else the model that billed most in it, inferred. Effort: the session's own `effort` if one was asked for,
+recorded; else the role's default when it started, inferred (`inferredEffort`, server/spend.ts):
+
+| Role | Default effort | Source |
+|---|---|---|
+| worker, standing agent | `high` before 2026-10-24 07:20 UTC, `medium` from then | `cfg.worker.effort` (agents.ts `machineSandboxSpec`, standing.ts); set to medium after w2000 (PR #629) made it settable (r15's boundary); w2010 (PR #642) made medium the code default |
+| personal orchestrator, dispatcher | `medium` | `cfg.orchestrator.effort` (`orchestratorOptions`) since the first release |
+| ops worker | `medium` | `OPS_LIMITS.effort` (server/opsWorker.ts) since w597 |
+
+`from` says which part was guessed: `backfill: model recorded, effort default` is inferred, because one value was a default.
+
+## The export (w2653)
+
+`spend_export` is a worker tool (group `ledger`, server/spendExport.ts), read-only and granted per request the way ledger
+reading is: the person's orchestrator sets `spend_read` on its own request (`request_work spend_read: true`, or
+`update_work {id, spend_read: true}`; never on an intake request; docs/orchestrators.md, "Workers read the ledger"). A worker
+who needs it says so in its report; its orchestrator grants it. The answer is CSV with `#` header lines, paged at 40,000
+characters (`offset`, `limit` up to 2,000 rows). `since` and `until` take any ISO time with a zone, or a UTC date (default: the
+last 7 days); `role` filters sessions and turns.
+
+| `view` | Rows | Columns |
+|---|---|---|
+| `summary` (default) | requests closed **done** in the range, all and by kind; sessions **started** in the range by role × model × effort they started on | count, sum, mean and median of the workers' own dollars and the coordinators'; count, recorded/inferred, output tokens and dollars (sum, mean, median) |
+| `requests` | requests closed in the range, or open and active in it | id, title, kind, status, person, filed/first/last/closed times, `worker_usd`, `coord_usd`, `total_usd` (whole life, split exactly by `splitOf`), the workers' tokens, turns, worker sessions, their model/effort runs |
+| `sessions` | sessions active in the range | role, machine, sandbox, person, first/last, model, effort, `src`, changes, every run, turns, in, out, cache read, cache write, dollars, the requests it served with dollars |
+| `turns` | the turn log cut exactly to the range; `group_by` request (by weight), session, model, effort, role, day, or `none` (one row per turn) | turns, sessions, tokens, dollars |
+
+Cost per finished request: `summary` (or `requests` filtered on status done). Output tokens per session by model and effort:
+`summary`'s sessions rows, or `sessions`. Nothing is subtracted by the reader: the workers' and coordinators' dollars are
+separate columns. The export names no account (not even its label), token or key: the person column is the session's or
+request's person's display name.
 
 ## What is recorded, and where it comes from
 

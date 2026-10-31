@@ -7,6 +7,7 @@ import { Store } from './store.ts';
 import { promptText, SessionManager, setQueryForTesting, type SessionHandle } from './sessions.ts';
 import { MachineManager, STANDING_CAP_NO_POOL, agentCap, type RemoteSession } from './machines.ts';
 import { Agents } from './agents.ts';
+import { SpendStore } from './spend.ts';
 import { Identity } from './identity.ts';
 import { PERSONAL_TOOLS, beltFor } from './belts.ts';
 import { OPS_ID } from './opsWorker.ts';
@@ -2186,6 +2187,35 @@ test('w642: a worker reads its own request and the ones it names, is refused oth
   const intake = { ...store.work.get('w2')!, id: 'w9', source: { kind: 'discord-bug', untrusted: true, channel: '#bugs' } } as WorkItem;
   store.putWork(intake);
   assert.match((await call(ben, 'update_work', { id: 'w9', ledger_read: true })).text, /^ERROR: w9 came from the intake/);
+});
+
+test('w2653: a worker exports the spend record only once its person grants it, and an intake request never gets the grant', async (t) => {
+  const { store, machines, agents, dispatcher, chat, call } = await setupOnMachine(t);
+  const ben = chat(BEN).info;
+  const loth = chat(LOTH).info;
+  agents.spend = new SpendStore(fs.mkdtempSync(path.join(os.tmpdir(), 'spend-grant-')), { work: () => store.work.values(), session: (id) => store.sessions.get(id), priorResults: () => 1 });
+  await call(ben, 'request_work', { title: 'What a finished request costs', brief: 'From the spend record.' });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Cost per request', title: 'Spend', work_id: 'w1' });
+  assert.equal(started.isError, false, started.text);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const info = store.sessions.get(id)!;
+  const m = store.machines.get('pc')!;
+  assert.ok(machines.hooks!.specFor(info, m).mcp?.tools.some((x) => x.name === 'spend_export'), 'a worker has spend_export');
+  const h = machines.hooks!.handlersFor(info, m);
+  await assert.rejects(h.spend_export!({}), /spend_export needs a spend-read grant on one of your open requests \(w1\)/);
+  assert.match((await call(loth, 'update_work', { id: 'w1', spend_read: true })).text, /^ERROR: w1 is not Lothsahn's request/);
+  const granted = await call(ben, 'update_work', { id: 'w1', spend_read: true });
+  assert.match(granted.text, /w1: its workers may now export the spend record/);
+  assert.equal(store.work.get('w1')!.spendRead?.by, 'Ben');
+  assert.match((await call(ben, 'list_work', { id: 'w1' })).text, /Its workers may export the spend record \(spend_export; granted by Ben\)/);
+  assert.match(await h.spend_export!({ view: 'summary', since: '2026-10-01' }), /^# spend_export view=summary since=2026-10-01T00:00:00\.000Z/);
+  assert.equal((await call(ben, 'update_work', { id: 'w1', spend_read: false })).isError, false);
+  await assert.rejects(h.spend_export!({}), /needs a spend-read grant/);
+  await call(ben, 'request_work', { title: 'Spend by model', brief: 'Tokens per session.', spend_read: true });
+  assert.equal(store.work.get('w2')!.spendRead?.by, 'Ben');
+  const intake = { ...store.work.get('w2')!, id: 'w9', spendRead: undefined, source: { kind: 'discord-bug', untrusted: true, channel: '#bugs' } } as WorkItem;
+  store.putWork(intake);
+  assert.match((await call(ben, 'update_work', { id: 'w9', spend_read: true })).text, /^ERROR: w9 came from the intake/);
 });
 
 // ---------------------------------------------------------------- w643: Waiting on input, Queued, Blocked

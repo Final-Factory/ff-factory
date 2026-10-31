@@ -61,6 +61,7 @@ export const TOOL_MANIFEST = {
   decide_work: { group: 'ledger', kinds: [D], always: [D] },
   conditional_decisions: { group: 'ledger', kinds: [P] },
   read_work: { group: 'ledger', kinds: [W] },
+  spend_export: { group: 'ledger', kinds: [W] },
   // reports (w2541, docs/reports.md)
   file_report: { group: 'ledger', kinds: [W] },
   list_reports: { group: 'ledger', kinds: [D, P, R, W] },
