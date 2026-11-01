@@ -42,6 +42,25 @@ add".
   refused key all mean the person's own token is used, as before, and the health line says why. When GitHub refuses an app
   token on a portal call, the call is made again on the person's token and the app's token is minted again at the next tick.
 
+## What a worker runs (w2755)
+
+A worker mints nothing and reads no file: its git and gh already use the app's token for a covered repository. It checks
+that its run may use the app (`echo "$FF_GH_APP_NAMES"` names `app-gherik`), then:
+
+```sh
+# The repositories the installation covers. `installation/repositories` names no repository, so GH_REPO tells the shim
+# which installation (any repository it covers):
+GH_REPO=Gherik1/TowBot gh api installation/repositories --jq '.repositories[].full_name'
+git clone https://github.com/Gherik1/TowBot.git "$TMPDIR/towbot"
+```
+
+Measured 2026-11-01 from lothdesktop/slot2: 11 repositories of Gherik1, TowBot cloned. The token is never printed
+(`gh auth token` under the shim prints it: don't). Gherik's repositories are read-only for us: nothing is pushed,
+opened or commented there. This route comes before a Steam Workshop or steamcmd download of a mod; a mod the
+installation does not cover goes that way, and a run without `FF_GH_APP_NAMES` gets "Repository not found". The
+worker's side, with matching a commit to a Workshop item: the ff-agents project-memory note
+`mod-source-through-app-gherik.md`.
+
 ## Who may install it (the allowlist)
 
 The app must be **public** ("Any account"), or Gherik cannot install it. GitHub's docs: a private app "can only be
