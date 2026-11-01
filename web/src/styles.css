@@ -2344,6 +2344,45 @@ button.react-chip:hover {
   white-space: nowrap;
 }
 
+/* The recipient's own messages another person's message answers (w2758), above its words. */
+.answered-quotes {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 0 8px;
+}
+
+.answered-quote {
+  margin: 0;
+  padding: 4px 10px;
+  border-left: 3px solid var(--border);
+  border-radius: 0 8px 8px 0;
+  background: var(--hover);
+  color: var(--text-2);
+  font-size: var(--fs-sm);
+}
+
+.answered-quote.maybe {
+  border-left-style: dashed;
+}
+
+.answered-quote-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-3);
+  font-weight: 600;
+}
+
+.answered-quote-text {
+  display: -webkit-box;
+  overflow: hidden;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 6;
+}
+
 /* The composer says what is being replied to, inside its box. */
 .composer-reply {
   display: flex;

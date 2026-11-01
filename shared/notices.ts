@@ -1,7 +1,9 @@
 // The harness's own messages to an agent ([worker update], [heartbeat], [unity blocked], …) as the page
 // shows them: what kind, a one-line summary, whether it needs the user, and the ids to turn into names
-// and links. The formats are the server's (agents.ts, standing.ts, wake.ts, restart.ts). No imports, so
-// the browser bundle and `node --test` can both load it.
+// and links. The formats are the server's (agents.ts, standing.ts, wake.ts, restart.ts). It imports only
+// import-free shared files, so the browser bundle and `node --test` can both load it.
+
+import { splitAnswered, type Answered } from './replies.ts';
 
 export type NoticeKind =
   | 'worker-done'
@@ -50,6 +52,11 @@ export interface Notice {
   /** The person another person's message is from (message_person), by user id and name. */
   fromUserId?: string;
   fromName?: string;
+  /** That message's id (message_person's reply_to, w2758), and the recipient's own messages it answers. */
+  messageId?: string;
+  answers?: Answered[];
+  /** Who that message is to, by name. */
+  toName?: string;
 }
 
 /** A harness message starts with its tag: [worker update], [heartbeat], [run r-12], … */
@@ -185,8 +192,22 @@ export function parseNotice(text: string): Notice {
 
   // Another person's message, written by their orchestrator (server/orchestrators.ts personMessage).
   if (tag === 'person message') {
-    const p = /^From (.+?)'s orchestrator \(user id ([^)]+)\), written for \1:\n\n([\s\S]*)\n\nThis is \1's message to /.exec(rest);
-    if (p) return { kind: 'person-message', summary: `${p[1]}: ${clip(oneLine(p[3]), 150)}`, attention: true, body: p[3].trim(), fromName: p[1], fromUserId: p[2] };
+    // Since w2758 the header names the message's id, and the words may quote the recipient's messages they answer.
+    const p = /^From (.+?)'s orchestrator \(user id ([^)]+)\), written for \1(?: \(message ([\w-]+)\))?:\n\n([\s\S]*)\n\nThis is \1's message to (.+?), relayed /.exec(rest);
+    if (p) {
+      const { words, answers } = splitAnswered(p[4]);
+      return {
+        kind: 'person-message',
+        summary: `${p[1]}: ${clip(oneLine(words), 150)}`,
+        attention: true,
+        body: words,
+        fromName: p[1],
+        fromUserId: p[2],
+        toName: p[5],
+        ...(p[3] ? { messageId: p[3] } : {}),
+        ...(answers.length ? { answers } : {}),
+      };
+    }
     return { kind: 'person-message', summary: clip(oneLine(rest), 160), attention: true, body: rest.trim() };
   }
   if (tag === 'app restarted') return { kind: 'restarted', summary: 'FF Factory restarted', attention: false, body: rest.trim() };

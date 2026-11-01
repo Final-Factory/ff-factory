@@ -189,3 +189,62 @@ export function splitSent(text: string): { text: string; sentTo?: { userId: stri
   const m = SENT_LINE.exec(text);
   return m ? { text: text.slice(0, m.index) + text.slice(m.index + m[0].length), sentTo: { displayName: m[1], userId: m[2] } } : { text };
 }
+
+// ---------------------------------------------------------------- the message a person's message answers (w2758)
+
+/**
+ * A message of the recipient's own that another person's message answers (w2758, lothsahn: "When replying to an operator,
+ * the operator should see the message replied to as well as the reply"). It rides the [person message] text after the
+ * sender's words, so the recipient's chat and their orchestrator read the same quote.
+ */
+export interface Answered {
+  /** When the recipient sent it, ISO. */
+  at: string;
+  /** Its words, clipped to ANSWER_EXCERPT_CHARS. */
+  excerpt: string;
+  /** False when FF Factory guessed it (the sender named none and several were open): "maybe in answer to". */
+  sure: boolean;
+}
+
+/** The longest excerpt of one answered message a [person message] carries. Several can ride one message. */
+export const ANSWER_EXCERPT_CHARS = 600;
+
+/** The most answered messages one [person message] quotes. */
+export const ANSWERS_MAX = 3;
+
+const ANSWER_HEAD = /^\[FF Factory, not the sender's words: (maybe )?in answer to (.+?)'s message of (\d{4}-\d\d-\d\d) (\d\d:\d\d) UTC[^\]\n]*\]$/;
+
+/** The words of a person's message without the answered messages it quotes, clipped for a quote of its own. */
+export function answerExcerpt(text: string): string {
+  const own = splitAnswered(text).words;
+  return own.length > ANSWER_EXCERPT_CHARS ? `${own.slice(0, ANSWER_EXCERPT_CHARS).trimEnd()}… (${own.length - ANSWER_EXCERPT_CHARS} more characters)` : own;
+}
+
+/**
+ * The sender's words, then one block per message of the recipient's they answer:
+ * `[FF Factory, not the sender's words: in answer to Lothsahn's message of 2026-10-31 08:00 UTC]` and its words, "> " quoted.
+ */
+export function answeredText(words: string, recipient: string, answers: readonly Answered[]): string {
+  const blocks = answers.map((a) => {
+    const head = `[FF Factory, not the sender's words: ${a.sure ? '' : 'maybe '}in answer to ${recipient}'s message of ${utc(a.at)}${a.sure ? '' : ' (the sender did not say which)'}]`;
+    return `${head}\n${(a.excerpt || '(no text)').split('\n').map((l) => `> ${l}`).join('\n')}`;
+  });
+  return [words.trim(), ...blocks].join('\n\n');
+}
+
+/** Read answeredText back: the sender's own words, and the messages they answer. Text without a quote is all words. */
+export function splitAnswered(text: string): { words: string; answers: Answered[] } {
+  const lines = text.split('\n');
+  const first = lines.findIndex((l) => ANSWER_HEAD.test(l));
+  if (first < 0) return { words: text.trim(), answers: [] };
+  const answers: Answered[] = [];
+  for (let i = first; i < lines.length; i++) {
+    const m = ANSWER_HEAD.exec(lines[i]);
+    if (!m) continue;
+    const quoted: string[] = [];
+    for (let j = i + 1; j < lines.length && (lines[j].startsWith('> ') || lines[j] === '>'); j++) quoted.push(lines[j].slice(2));
+    const excerpt = quoted.join('\n');
+    answers.push({ at: `${m[3]}T${m[4]}:00.000Z`, excerpt: excerpt === '(no text)' ? '' : excerpt, sure: !m[1] });
+  }
+  return { words: lines.slice(0, first).join('\n').trim(), answers };
+}
