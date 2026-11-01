@@ -6,6 +6,7 @@ import type { GithubPermissionId } from './githubRequirements.ts';
 import type { GhLogin } from './ghLogin.ts';
 import type { SteamClient } from './steam.ts';
 import type { DesktopSession } from './desktop.ts';
+import type { Answered } from './replies.ts';
 import type { Ask } from './ask.ts';
 
 /** 'blocked': the editor is alive but stuck on a modal dialog, or silent for too long while starting (see unity.blocked). */
@@ -157,6 +158,8 @@ export interface PersonMessageMark {
   at: string;
   /** The sender's words as their orchestrator wrote them (at most PERSON_MESSAGE_CHARS); absent before w1546. */
   text?: string;
+  /** The recipient's own messages these words answer (w2758, shared/replies.ts Answered), quoted over them in the bubble. */
+  answers?: Answered[];
 }
 
 export interface SessionInfo {
@@ -248,6 +251,11 @@ export interface SessionInfo {
    * (w1546): opening or writing to the chat, and the orchestrator relaying one, leave them unread.
    */
   personMessages?: PersonMessageMark[];
+  /**
+   * Where this chat's transcript was (its last seq) when it last messaged each person, by lowercased user id (w2758): their
+   * [person message]s after it are the ones a message to them may answer (Orchestrators.answersFor).
+   */
+  peopleMessaged?: Record<string, number>;
   /**
    * Restart bookkeeping (server/restart.ts), saved at once: since when its current turn has been open. Set by a
    * message, cleared when the turn ends or the session is stopped or interrupted on purpose, and kept when the

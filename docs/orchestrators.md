@@ -1901,6 +1901,44 @@ On a phone under 520 px wide the box takes the whole width, with the mic and Sen
 Tests: `server/orchestrators.test.ts` ("reply from the bubble"), `server/replies.test.ts`, `e2e/orchestrators.spec.ts`
 (dictated reply, Enter, the 375 and 390 px phone widths).
 
+### A reply shows the message it answers (w2758)
+
+lothsahn, 2026-10-31: "When replying to an operator, the operator should see the message replied to as well as the
+reply." Ben's answers had reached him as bare `[person message]`s ("sure") after he had sent several questions in a row,
+so he could not tell which one each answered. Now every message from one person to another can carry the messages of
+the recipient's it answers, quoted, in the recipient's chat, in the bubble over their message box and in the text their
+orchestrator reads.
+
+- **Each `[person message]` names its id.** The header reads `From <Name>'s orchestrator (user id <id>), written for
+  <Name> (message pm-…):`, the id of the unread mark (`PersonMessageMark.id`), and the footer tells the orchestrator to
+  answer with `reply_to ["pm-…"]` when its reply answers that message (`personMessage`, `server/orchestrators.ts`).
+- **message_person takes `reply_to`**, the ids of the `[person message]`s from that person in this chat that it answers
+  (up to `ANSWERS_MAX`, 3); `[]` says it is a new subject. An id this chat never received from them is refused with
+  the ids it has (`Orchestrators.answersFor`).
+- **With no `reply_to`, FF Factory infers it** (`answersFor`), in this order: the `[person message]` the person's own
+  latest chat message replied to (the w866 reply quote, `REPLY_MARK`), when it came after this chat last messaged
+  them; else the messages from them since this chat last messaged them (`SessionInfo.peopleMessaged`, the transcript
+  seq at each send, with a transcript scan for chats from before w2758). One open message is quoted as answered;
+  several are all quoted, newest 3, as **maybe** ("the sender did not say which"), and the tool's answer tells the
+  orchestrator to name one next time. None open: nothing quoted. Its answer always says what was quoted.
+- **Reply from the bubble** (w1831) quotes the message it was opened on, always as answered.
+- **The quote format** (`answeredText`/`splitAnswered`, `shared/replies.ts`), after the words in the `[person message]`
+  text: `[FF Factory, not the sender's words: (maybe )in answer to <Recipient>'s message of YYYY-MM-DD HH:MM UTC]`, then
+  the quoted message on `> ` lines, its own quotes stripped and clipped to `ANSWER_EXCERPT_CHARS` (600,
+  `answerExcerpt`). `parseNotice` (`shared/notices.ts`) returns the words as `body` and the quotes as `answers`, so a
+  summary and the person's notification never carry the quote; a `[person message]` from before w2758 still parses.
+- **It renders** above the words as "In answer to your message · <time>" (dashed and "Maybe in answer to" when
+  guessed), in the chat's `[person message]` notice (`Transcript.tsx`) and in the bubble (`PeopleMessages.tsx`), both
+  through `AnsweredQuotes.tsx`, clamped to 6 lines.
+- **Not changed: FFBox.** An operator's answer to an FFBox question their request waits on (`server/devRequests.ts`) is
+  their own words to their own orchestrator, not someone's reply to them; `[needs you]` and intake answers go to
+  workers and the dispatcher, not a person's chat; and every in-chat reply already quotes (w866).
+- **The tool belt has a character budget** (the "w1158: what a coordinator carries" test): message_person's
+  description stays short, and the guidance on answering lives in the `[person message]` footer and the brief.
+
+Tests: `server/orchestrators.test.ts` ("message_person (w2758)", "personMessage and splitAnswered (w2758)", "reply
+from the bubble"), `e2e/orchestrators.spec.ts` ("w2758: a reply to your message shows it quoted").
+
 ## Evidence and labels
 
 In October 2026 an ad campaign went live on click caps nobody had researched, relayed to the person as recommendations,
