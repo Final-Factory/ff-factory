@@ -237,8 +237,9 @@ test('thread: bad input is refused before anything is asked; FFBox not finding t
 
 test('no write path: the thread surface is two read-only queries and a worker tool that only fetches', () => {
   assert.ok(PROVIDER_QUERIES.includes('thread_files') && PROVIDER_QUERIES.includes('thread_file'));
-  // post_message (w901, server/ffboxPost.test.ts) and close_thread (w2670, server/ffboxClose.test.ts) are the two queries that write: one guarded message as Max, one thread archived.
-  assert.deepEqual(PROVIDER_QUERIES.filter((q) => /delete|purge|remove|move|write|rerun|re_run|upload|post|react|close|lock/.test(q)), ['post_message', 'close_thread'], 'no query names a change but posting as Max and closing a thread');
+  // post_message (w901, server/ffboxPost.test.ts) and close_thread (w2670, server/ffboxClose.test.ts) write a message or archive a thread
+  // as Max; set_config (w2672, server/ffboxConfig.test.ts) changes one live FFBox setting, never a secret.
+  assert.deepEqual(PROVIDER_QUERIES.filter((q) => /delete|purge|remove|move|write|rerun|re_run|upload|post|react|close|lock|set_/.test(q)), ['post_message', 'close_thread', 'set_config'], 'no query names a change but posting as Max, closing a thread and setting a live FFBox setting');
   assert.ok(FROM_CONNECTOR_TYPES.includes('report_chunk') && FROM_CONNECTOR_TYPES.includes('report_end'));
   assert.deepEqual(Object.keys(CATALOG.fetch_discord_thread_files).sort(), ['file', 'sha256', 'thread'], 'the worker tool takes a thread, a file name and a hash, nothing else');
   const src = fs.readFileSync(new URL('./ffboxThreadFiles.ts', import.meta.url), 'utf8');

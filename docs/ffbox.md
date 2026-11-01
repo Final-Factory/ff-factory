@@ -365,6 +365,30 @@ The answer is never kept as a "last known" one. Deploy: the portal and each mach
 the tool to exist, and FFBox must run ffbox master with `post_message` (connector 2.9.0); before that it answers
 `unsupported`.
 
+### Changing an FFBox setting (w2672)
+
+lothsahn, 2026-10-31: "Give yourself a way to update ffbox settings over the tunnel", and "It should only change
+settings in settings.json, not the secrets in secrets.env." The orchestrator tool **`set_ffbox_config`** asks FFBox's
+`set_config` query (server/ffboxConfig.ts), and FFBox changes one setting of its `~/.config/ffbox/config.json`:
+
+- **Which keys**: only those of FFBox's `scripts/ffbox_settings.py` `LIVE` table, today
+  `subscription.new_conversation_hold_pct` and `subscription.review_hold_pct` (a share of the operator's Claude window
+  from 0 to 1 past which a new conversation or a #codereview review waits; `null` never waits). FFBox holds the list;
+  `FFBOX_SETTABLE_KEYS` here only names them early. Never secrets.env, a token or an operator's identity: no path is
+  taken from the caller, and FFBox's `test_query_set_config` refuses each of them.
+- **Who**: the dispatcher and Lothsahn's and Ben's own orchestrators, as `set_app_config` (`user_asked: true`; an
+  orchestrator only in a turn its person started with a message of their own, `personalSettingProblem`; the
+  dispatcher's under `USER_ASKED_TOOLS`). Workers do not have it.
+- **What happens on FFBox**: the old file is kept as `config.json.prev`; the new one is written and read back through
+  ffwatch's own loader (a value it would not take puts the old file back and is `refused`); the change is applied live,
+  in place, with no restart, so a release build is never cut short (FFBox's updater leaves these keys out of its restart
+  fingerprint); the change is a row of FFBox's `settings-changes.jsonl` and a journal line
+  `fff: set_config <key> <old> -> <new> by <who> (<reason>): change <id>, applied live, effective <value>, no restart`.
+- **The answer**: old, new and the effective value read back live, and the change id. `revert` with that id puts the
+  old value back (refused when a later change came since). No key: the settable keys, their values now and the last ten
+  changes. A timeout says the change may have been made: list before asking again.
+- Here, every call is a `ffbox config:` line in the portal's log, with who asked and why.
+
 ## Security model
 
 `docs/docker-security-model.md` is the reference. In short:
