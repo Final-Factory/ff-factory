@@ -3,6 +3,8 @@
   get rid of 5 hour session limits." Anthropic removed the 5-hour limit for verified Ultra (formerly Max 20x) accounts on
   2026-10-30, and vault-ben-3, vault-ben-1 and vault-lothsahn-1 stopped getting the `anthropic-ratelimit-unified-5h-*`
   headers at their next 5-hour reset. `metersOf` filled the missing meter in as 50%, shown as "5-hour 50%" as if read. A
-  reading with the weekly window and no 5-hour one now reads "no 5-hour limit" in the accounts lines, the poll log, the
-  pool line, the reserve line and the dashboard, counts as 0% on that meter (the 80% hold and the 20% buffer never trip),
-  and a live session's 5-hour rate-limit event brings the meter back. A meter still missing otherwise reads "unknown".
+  reading with the weekly window and no 5-hour one now shows the weekly figure only, with no session text, in the accounts
+  lines, the poll log, the pool line, the reserve line and the dashboard (lothsahn: "Have the portal and ffbox only show the
+  session limit if one applies. Otherwise just show nothing for the session limit and display the weekly limit only"). The
+  pool counts it as 0% on that meter (the 80% hold and the 20% buffer never trip), and a live session's 5-hour rate-limit
+  event brings the meter back. A meter still missing otherwise reads "unknown".

@@ -4,7 +4,7 @@ import { PoolHeldError, isSamePerson, vaultContext, type VaultContext, type Vaul
 import { githubFromVault } from './githubTokens.ts';
 import { tokenKey, usageEnv } from './usage.ts';
 import { poolLimits, reserveOf, reserveReason, type PoolLimits, type Reserve } from './tokenPool.ts';
-import { noSessionLimit, sessionText, type PlanUsage } from '../shared/types.ts';
+import { noSessionLimit, type PlanUsage } from '../shared/types.ts';
 import { maybeTokenShape, redactTokenShapes, secretEnvNames } from '../shared/secretShapes.ts';
 
 /**
@@ -506,7 +506,7 @@ export function reserveLines(
     const name = cred.what.replace(/^the /, '');
     const nums = r.noReading
       ? 'no reading yet (counted as inside its reserve)'
-      : `weekly ${w ? `${Math.round(w.percent)}%` : 'unknown'}, reserve ${Math.round(r.weekly)}% (${r.daysLeft.toFixed(r.daysLeft < 1 ? 1 : 0)} day${Math.round(r.daysLeft) === 1 ? '' : 's'} to reset); 5-hour ${sessionText(u)}${noSessionLimit(u) ? '' : `, reserve ${Math.round(r.session)}%`}`;
+      : `weekly ${w ? `${Math.round(w.percent)}%` : 'unknown'}, reserve ${Math.round(r.weekly)}% (${r.daysLeft.toFixed(r.daysLeft < 1 ? 1 : 0)} day${Math.round(r.daysLeft) === 1 ? '' : 's'} to reset)${noSessionLimit(u) ? '' : `; 5-hour ${u?.session ? `${Math.round(u.session.percent)}%` : 'unknown'}, reserve ${Math.round(r.session)}%`}`;
     const others = r.inReserve ? othersOn(cred.key, cred.role) : 0;
     return {
       cred,

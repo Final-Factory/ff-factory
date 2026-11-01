@@ -364,8 +364,8 @@ logged in the portal journal with who made it; they apply at the next process st
 
 A token with no numbers yet counts as 50% on both meters, so it passes every rule and ranks last (no weekly reset time, so no score); its
 line says both are unknown. A token whose reading has a weekly window and no 5-hour one is on a plan with **no 5-hour limit**
-(Ultra since 2026-10-30, w2709): it counts as 0% on that meter, so the 5-hour hold and buffer never apply, and its line says
-"5-hour no limit" (`noSessionLimit`, `shared/types.ts`). "Live" counts the
+(Ultra since 2026-10-30, w2709): it counts as 0% on that meter, so the 5-hour hold and buffer never apply, and its line shows the
+weekly figure only (`noSessionLimit`, `shared/types.ts`). "Live" counts the
 sessions whose process started on the token, not the asking session itself, and a pick made in the last 20 seconds before
 its process shows (two starts cannot both take the last slot).
 

@@ -111,9 +111,7 @@ export function usageSummary(u: PlanUsage | undefined, now: Date): string {
     return `Claude plan usage: unavailable (${u.why ?? 'unknown'}), ${asOf}${spend}`;
   }
   const fmt = (m: UsageMeter) => `${m.label} ${Math.round(m.percent)}% used${m.resetsAt ? `, ${describeReset(m.resetsAt, now)}` : ''}`;
-  const meters = [u.weekly, u.session, ...u.models].filter((m): m is UsageMeter => !!m).map(fmt);
-  if (noSessionLimit(u)) meters.splice(1, 0, 'no 5-hour limit');
-  return `Claude plan${u.plan ? ` (${u.plan})` : ''} usage, ${asOf}${u.source ? `, from ${u.source}` : ''}: ${meters.join('; ')}`;
+  return `Claude plan${u.plan ? ` (${u.plan})` : ''} usage, ${asOf}${u.source ? `, from ${u.source}` : ''}: ${[u.weekly, u.session, ...u.models].filter((m): m is UsageMeter => !!m).map(fmt).join('; ')}`;
 }
 
 /**
@@ -589,7 +587,7 @@ class LoginProblem extends Error {}
 /** "Weekly 41%, Session (5 h) 33%" for the poll log. */
 const brief = (u: PlanUsage) =>
   u.available
-    ? [...[u.weekly, u.session, ...u.models].filter((m): m is UsageMeter => !!m).map((m) => `${m.label} ${Math.round(m.percent)}%`), ...(noSessionLimit(u) ? ['no 5-hour limit'] : [])].join(', ')
+    ? [u.weekly, u.session, ...u.models].filter((m): m is UsageMeter => !!m).map((m) => `${m.label} ${Math.round(m.percent)}%`).join(', ')
     : `no numbers: ${u.why ?? 'unknown'}`;
 
 // ---------------------------------------------------------------- the tracker

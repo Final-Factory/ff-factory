@@ -605,13 +605,12 @@ test('w1539/w1659: the settings: hours 0 (off) to 168, the floor a whole number 
   assert.equal(judgePool([near, tok('b')], OFF, NOW).get('a')!.state, 'one-at-a-time');
 });
 
-test('a plan with no 5-hour window (w2709): "no limit", 0% on that meter, so the 5-hour hold and buffer never trip', () => {
+test('a plan with no 5-hour window (w2709): weekly only, 0% on that meter, so the 5-hour hold and buffer never trip', () => {
   const t = tok('ultra', { weekly: 79, weeklyDays: 3 });
   delete t.usage!.session;
   const v = judge(t, L);
   assert.equal(v.state, 'ok');
-  assert.equal(v.shown, '5-hour no limit, weekly 79%');
-  assert.doesNotMatch(v.shown, /50%/, 'never the made-up 50% the pool used to show');
+  assert.equal(v.shown, 'weekly 79%', 'no session text at all (lothsahn: "display the weekly limit only")');
   assert.equal(metersOf(t.usage).session, 0);
   assert.equal(metersOf(t.usage).noSessionLimit, true);
   assert.equal(scoreOf(t, NOW).perDay, scoreOf(tok('full', { session: 0, weekly: 79, weeklyDays: 3 }), NOW).perDay, 'scored with the whole 5-hour room');

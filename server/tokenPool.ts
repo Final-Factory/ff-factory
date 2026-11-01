@@ -19,7 +19,8 @@
 //     and only a pool whose every token is used up stops it.
 // A token with no numbers yet counts as 50% on both meters: it passes every rule and ranks after the ones with a score.
 // A token whose plan has no 5-hour window (noSessionLimit, w2709: Ultra since 2026-10-30) counts as 0% on it, so the 5-hour
-// hold and buffer never trip; its line says "5-hour no limit". A meter that is missing otherwise reads "unknown".
+// hold and buffer never trip; its line shows the weekly figure only (lothsahn, w2709: "Otherwise just show nothing for the
+// session limit and display the weekly limit only"). A meter that is missing otherwise reads "unknown".
 // A reading kept from before (data/usage.json) stands in for a poll that failed or has not answered yet, aged by its reset
 // times and floored at 50% once older than STALE_READING_MS (server/usage.ts effectiveUsage, w1041).
 //
@@ -250,8 +251,7 @@ export function judge(t: PoolToken, limits: PoolLimits, now: number = Date.now()
   const base = { session: m.session, weekly: m.weekly, known: m.known, sessionResetsAt: m.sessionResetsAt, weeklyResetsAt: m.weeklyResetsAt };
   // A reading this portal did not just take (the latest poll failed, or none has answered since it started) says so (w1041).
   const read = (x: UsageMeter | undefined, n: number) => (x ? `${pc(n)}%` : 'unknown (counted as 50%)');
-  const fiveHour = m.noSessionLimit ? 'no limit' : read(t.usage?.session, m.session);
-  const numbers = `5-hour ${fiveHour}, weekly ${read(t.usage?.weekly, m.weekly)}${t.usage?.reading ? ` [${t.usage.reading.kind} reading: ${t.usage.reading.why}]` : ''}`;
+  const numbers = `${m.noSessionLimit ? '' : `5-hour ${read(t.usage?.session, m.session)}, `}weekly ${read(t.usage?.weekly, m.weekly)}${t.usage?.reading ? ` [${t.usage.reading.kind} reading: ${t.usage.reading.why}]` : ''}`;
   const meters = m.known ? numbers : 'no numbers yet: 5-hour and weekly unknown (counted as 50%, placed after every token with a reading)';
   if (m.weekly >= 100 || m.session >= 100) {
     const until = m.weekly >= 100 ? m.weeklyResetsAt : m.sessionResetsAt;
