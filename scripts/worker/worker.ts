@@ -30,7 +30,7 @@ import * as win from '../../server/machineDeployWin.ts';
 import { DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT, type SandboxPoolSettings } from '../../shared/types.ts';
 import { slotsPointer } from '../../machine/unitySlots.ts';
 import { rootBackupOf } from '../../machine/selfUpdate.ts';
-import { carryDevDrive, claudeSlug, decideDevDrive, defaultMaxGB, devDriveDirs, devDriveGuard, gbOf, hostDirOf, linkRootFolders, moveSandboxes, parseDevDriveOutput, realMoveDeps, unlinkRootFolder, type DevDriveRecord, type DevDriveState } from './devdrive.ts';
+import { cancelledGrow, carryDevDrive, claudeSlug, decideDevDrive, defaultMaxGB, devDriveDirs, devDriveGuard, gbOf, hostDirOf, linkRootFolders, moveSandboxes, parseDevDriveOutput, realMoveDeps, unlinkRootFolder, type DevDriveRecord, type DevDriveState } from './devdrive.ts';
 import { REINSTALL_KEEPS, driveRootOf, isHostFile, moveMap, readMoved, rebaseJson, rebasePath, rebaseText, writeMoved } from './driveRoot.ts';
 import { readJsonDurable as readJsonFile } from '../../server/durable.ts';
 import { publishAgentTools } from '../../server/agentTools.ts';
@@ -1096,6 +1096,17 @@ async function wantDevDriveGrow(host: string, wantGB: number, haveGB: number, en
   say(`Dev Drive: ${haveGB} GB now, ${wantGB} GB asked: the daemon grows it in place (ffsb-helper-grow) once no agent or editor is in a sandbox, holding new ones for the minute or two it takes.`);
 }
 
+/** An ask at or below the drive's maximum takes back a grow an earlier update asked for and the daemon has not done (w2748). */
+function cancelDevDriveGrow(host: string, askedGB: number, haveGB: number) {
+  const file = devDriveFile(host);
+  const st = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^﻿/, '')) as Record<string, unknown>;
+  // maxGB: the update's own reading of the VHDX, as wantDevDriveGrow writes it (w1947).
+  const next = cancelledGrow({ ...st, maxGB: haveGB }, askedGB);
+  if (!next) return;
+  fs.writeFileSync(file, JSON.stringify(next, null, 2));
+  say(`Dev Drive: the grow to ${st.wantGB} GB is taken back: ${askedGB} GB asked, and the drive is already ${haveGB} GB.`);
+}
+
 /**
  * A new drive's maximum: the flag's, else what the pool's sandboxes and agents need, capped by the host volume's free space
  * (w1910, devdrive.ts defaultMaxGB), said in the install's log. Throws when the host cannot hold even Windows' 50 GB minimum.
@@ -1163,6 +1174,7 @@ async function setupDevDrive(o: InstallOptions, l: Layout, f: Facts & { probe: {
     state = await devDriveEnsure(host, ensureArgs(maxGB));
   }
   if (had && o.devDriveMaxGB !== undefined && o.devDriveMaxGB > state.maxGB) await wantDevDriveGrow(host, o.devDriveMaxGB, state.maxGB, ensureArgs(state.maxGB));
+  else if (had && o.devDriveMaxGB !== undefined) cancelDevDriveGrow(host, o.devDriveMaxGB, state.maxGB);
   say(`Dev Drive: ${state.created ? 'created' : 'reused'} ${state.vhdx} as ${state.letter}: (${state.fileSystem || 'ReFS'}${state.devDrive ? ', Dev Drive' : ', not a Dev Drive format'}, block clone ${state.blockClone ? 'yes' : 'not reported'}, up to ${state.maxGB} GB).`);
   if (state.letterChangedFrom) say(`Dev Drive: its letter was ${state.letterChangedFrom}: and is taken, so it is ${state.letter}: now.`);
   const room = { vhdx: state.vhdx || path.join(host, 'devdrive.vhdx'), maxGB: state.maxGB || had?.maxGB || 0 };
