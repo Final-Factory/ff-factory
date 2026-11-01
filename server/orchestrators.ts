@@ -69,7 +69,7 @@ import { NOTICE_TAG } from '../shared/notices.ts';
 import { MD_IMAGE } from '../shared/imagePaths.ts';
 import { reviewRootOf } from './reviewMedia.ts';
 import { visualAskCheck } from './visualAsk.ts';
-import { personNotes, relatedRequests } from './priorDecisions.ts';
+import { notesSettle, personNotes, relatedRequests, settledRefusal } from './priorDecisions.ts';
 import { alreadySent, asksSame, matchedAsk, needsYouDigestText, needsYouRecord, needsYouText, whoOf, type NeedsYouWait } from './needsYou.ts';
 import { asksAnsweredBy, sameAsk, WAIT_LINE_CHARS } from '../shared/waitSummary.ts';
 import { holdsItsPlace, stoppedOffline } from '../shared/agentState.ts';
@@ -2201,6 +2201,8 @@ export class Orchestrators {
     // w1812: a question this person already answered is not asked again (refused once; a repeat goes through).
     const again = this.repeatRefusal(chat.info.id, owner, checked.ask);
     if (again) throw new Error(again);
+    const settled = this.settledByNotes(owner, checked.ask, input);
+    if (settled) throw new Error(settled);
     const missing = this.previewsMissing(checked.ask, input, owner.displayName);
     if (missing) throw new Error(missing);
     const pick = checked.ask.options[0].recommended ? `, ${checked.ask.options[0].label} recommended` : '';
@@ -2357,6 +2359,35 @@ export class Orchestrators {
     }
     if (!this.closeAsks(chat.info.id, (a) => a.seq === seq)) throw new Error(`#${seq} is not an open question of yours (${open.map((a) => a.seq).join(', ') || 'none open'})`);
     return `Closed #${seq} (${why}): it left the Waiting on input tab.`;
+  }
+
+  /**
+   * w2756 (server/priorDecisions.ts notesSettle; Ben, 2026-11-01, w2651: "didnt i already talk to you about this above?"): a
+   * question a sentence of the person's own notes on its request may settle is refused, with that sentence, until the call
+   * says what the notes leave open (notes_leave_open, logged on the request). The request is the call's `request` and any wNNN
+   * its words name, as for previews; w1812's repeatRefusal compares only with earlier questions, never with the notes.
+   */
+  private settledByNotes(person: Requester, ask: Ask, input: unknown): string | undefined {
+    const raw = (input ?? {}) as { request?: unknown; notes_leave_open?: unknown };
+    const parts = [ask.question, ...ask.options.flatMap((o) => [o.label, o.description])];
+    const named = typeof raw.request === 'string' && /^w\d+$/i.test(raw.request.trim()) ? [raw.request.trim().toLowerCase()] : [];
+    const ids = [...new Set([...named, ...parts.flatMap((p) => [...splitMedia(p).text.matchAll(/\bw\d+\b/gi)].map((m) => m[0].toLowerCase()))])];
+    const open = typeof raw.notes_leave_open === 'string' ? raw.notes_leave_open.replace(/\s+/g, ' ').trim().slice(0, 300) : '';
+    for (const id of ids) {
+      const w = this.store.work.get(id);
+      if (!w || !isOpen(w)) continue;
+      const settled = notesSettle([ask], personNotes([w], [person.displayName, person.userId]));
+      if (!settled.length) continue;
+      const by = settled[0].note;
+      if (open) {
+        this.noteOnRequest(id, `ask_person to ${person.displayName} let through past their note of ${by.at.slice(11, 16)} UTC, which may settle it: "${open}" (notes_leave_open, w2756)`);
+        return undefined;
+      }
+      console.log(`ask_person refused (w2756) for ${person.displayName} on ${id}: their note of ${by.at} may settle it`);
+      this.noteOnRequest(id, `ask_person to ${person.displayName} refused (w2756): their own note of ${by.at.slice(11, 16)} UTC may settle it`);
+      return settledRefusal(settled, 'ask_person', id);
+    }
+    return undefined;
   }
 
   /**
