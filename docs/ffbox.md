@@ -333,6 +333,17 @@ any machine (beast, biscuit, m3, m5, LothDesktop) posts with the machine tool **
   folder or its temp folder, at most 16 KB; the daemon reads it, `skip_lines` leaves out its first lines: a
   release-notes file is `file: "cicd/release-notes/<version>.md", skip_lines: 2`), `thread` (a thread of that
   channel) and `key`.
+- `images` (w2723; lothsahn: "Can't you send it to a worker and do this work and send it back to discord?"): up to 4
+  PNG or JPEG files in the worker's working folder or temp folder, at most 4 MB each and 8 MB together, posted with the
+  text (a post always has text). The daemon checks each by its first bytes, not its name, and sends them to the portal
+  with the call (`postImagesFromFiles`, `server/ffboxPostFile.ts`). The portal checks them again (`postImages`,
+  `server/ffboxPost.ts`) and sends each to FFBox as `post_file_put` parts of 45000 bytes, 4 in flight. FFBox's connector
+  answers those itself (ffbox `scripts/fffconnector.py`): it writes a part only at the offset it holds and keeps a
+  file whose SHA-256 matches its name. Then `post_message` names them in `files` (`<sha256>:<name>,...`), and `ffwatch`
+  checks each again (complete, the caps, the first bytes) and passes `ffdiscord post --file` for each. Discord shows
+  each image under its file name. The images are part of the dedupe identity of a post without a key. An orchestrator's
+  `post_as_max` takes none (it has no folder to read them from). A computer whose app is older answers that the images
+  option is too new for it, and an FFBox without `post_file_put` answers `unsupported`; nothing is posted either way.
 - `key` is the dedupe key: the same key in the same place posts **once**, and a repeat answers the first message's link
   (`Already posted`). `dev_patch_notes` needs it: the release's version. Without a key the same text in the same place
   posts once a day.
