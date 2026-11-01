@@ -34,7 +34,7 @@ The groups (`TOOL_GROUPS`), picked from what the tools are used for together:
 | `ffbox` | `ffbox_activity`, `send_to_ffbox`, `reply_to_ffbox`, `fetch_ffbox_report`, `fetch_discord_thread_files`, `list_ffbox_files`, `fetch_ffbox_symbols` |
 | `max` | `max_activity`, `post_as_max` |
 | `spend` | `spend_report` |
-| `admin` | `set_app_config`, `set_pool`, `request_app_update`, `republish_public` |
+| `admin` | `set_app_config`, `set_ffbox_config`, `set_pool`, `request_app_update`, `republish_public` |
 | `standing` | the standing-agent and delegation tools, `request_delegation`, `my_delegations` |
 | `review` | `attach_review_file`, `publish_review`, `publish_attachment`, `fetch_attachment` |
 | `chat` | `/mcp`'s `ask_orchestrator`, `orchestrator_transcript`, `orchestrator_send`, `orchestrator_inbox`, `orchestrator_attach` |
