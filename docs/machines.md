@@ -1906,6 +1906,15 @@ LothDesktop and Beast, not just when BEAST is full").
     are neither saved nor counted: they stay, uncommitted, for the release sweep (w1983: an 80 MB
     `.nightly-builds/…/UnityPlayer.dll` held lothdesktop/slot6 from 03:27Z on 2026-10-24, since the game repo does not
     ignore that folder and only some machines' clones exclude it).
+    Materials the Unity editor only re-serialized are restored to HEAD, not saved (w2782, `server/editorNoise.ts`): the
+    game's `StartController.PreventRenderAssetUnloading` sets `m_ObjectHideFlags: 32` on render materials in play mode,
+    and the editor writes them out with URP's validation changes; auto-saves e0eefbfd47 and aa3232bb34 committed seven
+    each on 2026-11-01 and turned the game repo's "Shared shader and material users" check red (PRs #2967, #2968). A
+    modified `.mat` counts as noise only when every changed line is a known editor kind (HideFlags 0 to 32, the
+    `MOTIONVECTORS` pass re-enabled, `_EMISSION` in `m_ValidKeywords`, `m_LightmapFlags` EmissiveIsBlack, a custom render
+    queue back to 2000, URP Lit defaults added, a float re-rounded within 1e-6, the animated `_BeamTime`); one other line
+    and the whole file is saved, noise included. All 346 `.mat` diffs in the 187 earlier auto-saves were noise by that
+    rule; of 799 in other master commits it flagged 28, each itself editor noise or a revert of it (measured).
     GitHub refuses a file over 100 MiB and warns from 50 MiB ("About large files on GitHub"), and a worker's new
     scripts and `.meta` files are a few kB each; on the M3 on 2026-10-07 slot1 held 41,491 untracked files, about
     10 GB of builds, clips and audit runs (measured), which belong in the temp folder, not on a branch. A daemon from
