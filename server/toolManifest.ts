@@ -134,6 +134,7 @@ export const TOOL_MANIFEST = {
   spend_report: { group: 'spend', kinds: [D, P, R] },
   // admin
   set_app_config: { group: 'admin', kinds: [D, P, R] },
+  set_ffbox_config: { group: 'admin', kinds: [D, P] },
   request_app_update: { group: 'admin', kinds: [D, R] },
   republish_public: { group: 'admin', kinds: [D, R] },
   // standing
