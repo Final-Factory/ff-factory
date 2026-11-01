@@ -176,7 +176,7 @@ test('meters: open, every computer is a row and every account its limits and age
   await expect(token).toHaveClass(/pl-yellow/);
   await expect(token).toHaveAttribute('data-tip', /host token …9AAA\n5-hour session: 12%\. Resets Thu 15:00 UTC \(in 3 h\)\nWeekly: 98%\. Resets Sun 00:00 UTC \(in 2 d 12 h\)\nWeekly Fable: 22%\. Resets Sun 00:00 UTC \(in 2 d 12 h\)\nIn use now: \d agents?\nthe agents' token on BEAST, m5/);
   const login = foot.getByTestId('account-owner');
-  await expect(login).toHaveText(planLine('owner', '23%', '?'), { useInnerText: true });
+  await expect(login).toHaveText(planLine('owner', '23%'), { useInnerText: true });
   await expect(login).toHaveClass(/pl-blue/);
   await expect(login).toHaveAttribute('data-tip', /Not in use\nBEAST login\nm5 login/);
   // The plans come before the computers.
@@ -244,10 +244,10 @@ const VAULT = (name: string, last4: string, weekly: number, where: string[], age
   usage: { available: true, asOf: NOW.toISOString(), plan: 'max', source: 'rate limits', weekly: { label: 'Weekly', percent: weekly, resetsAt: at(70) }, session: { label: 'Session (5 h)', percent: 9, resetsAt: at(2) }, models: [] },
 });
 
-/** A plan's line: "name - weekly 62%, session 38%"; in a narrow list (the desktop sidebar) the numbers are a second line and the dash is dropped. */
-const planLine = (name: string, weekly: string, session: string) => {
+/** A plan's line: "name - weekly 62%, session 38%"; in a narrow list (the desktop sidebar) the numbers are a second line and the dash is dropped. With no session, a plan with no 5-hour limit: weekly only (w2709). */
+const planLine = (name: string, weekly: string, session?: string) => {
   const esc = (t: string) => t.replace(/[.+*?^$()[\]{}|\\]/g, '\\$&');
-  return new RegExp(`^${esc(name)}\\s+(-\\s+)?weekly ${esc(weekly)}, session ${esc(session)}$`);
+  return new RegExp(`^${esc(name)}\\s+(-\\s+)?weekly ${esc(weekly)}${session === undefined ? '' : `, session ${esc(session)}`}$`);
 };
 
 /** The footer's plan line: "Plan in use: name  weekly 98%, session 12%  1 of 3 plans spent", its pieces on one line or several. */
