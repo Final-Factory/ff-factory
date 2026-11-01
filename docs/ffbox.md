@@ -324,7 +324,11 @@ any machine (beast, biscuit, m3, m5, LothDesktop) posts with the machine tool **
 - `channel`: `dev_patch_notes` (a release's notes), `dev_chat` or `agent_testing` (a test channel), or `conversation`:
   a conversation FFBox holds (w1640), named by `conversation` (FFBox's id) or `thread` (its Discord thread, an id or a
   URL), #bug-reports and dev_bug_reports threads included, and an #ask-assistant conversation (FFBox replies to its
-  anchor message). Never `bug_reports` or `dev_bug_reports` as a channel: a post there goes in one of their threads.
+  anchor message). **A worker posts as Max in a bug thread only when asked** (lothsahn, 2026-10-31, w2711: "Stop"): a worker posts as Max
+  (`post_as_max`) in a #bug-reports, dev_bug_reports or feedback thread only when someone in that thread mentioned
+  Max, or when a person asked for that post; never to ask a player a question on its own initiative. If it needs
+  something from a reporter (a save, a repro step), it puts that in its report as a blocker, and the person's
+  orchestrator decides. Never `bug_reports` or `dev_bug_reports` as a channel: a post there goes in one of their threads.
 - `text` (at most 2000 characters, Discord's limit for one message) **or** `file` (a file in the worker's working
   folder or its temp folder, at most 16 KB; the daemon reads it, `skip_lines` leaves out its first lines: a
   release-notes file is `file: "cicd/release-notes/<version>.md", skip_lines: 2`), `thread` (a thread of that
@@ -428,7 +432,8 @@ through the tunnel, and it will post what you say. Workers and you should avoid 
 player's message answered in an ffagent container, and "fix merged / fixed in <version>" on the thread when a PR with
 its `Discord:` line merges. Everything else FF Factory's agents say there goes through FFBox on purpose: an
 orchestrator's `reply_to_ffbox` in a conversation linked to its person's request, and `post_as_max` with channel
-`conversation` from an orchestrator or a worker, e.g. asking a reporter for their save. Both keep FFBox's secret scan and
+`conversation` from an orchestrator or a worker (a worker only when someone in that thread mentioned Max or a person
+asked for that post, never to ask a player a question on its own initiative: w2711, [above](#posting-as-max-from-any-machine-w901)). Both keep FFBox's secret scan and
 its ban on mentions. They read those threads and download their files (on a computer without the ffdiscord config,
 with `fetch_discord_thread_files`, [above](#bug-threads-files-read-from-ff-factory-w787)), and never react, rename or
 close there (a person's orchestrator closes one as Max when its person asks: [below](#closing-bug-threads-as-max-w2670)), never post with `ffdiscord` (it refuses them; `server/agents.ts`, `DISCORD_RULES`), and never post that
@@ -605,8 +610,9 @@ The orchestrator answers with
 **`reply_to_ffbox`** `{ request?, conversation?, text }` (a person's own orchestrator only, for that person's own
 linked conversations), which sends a `dev_reply` FFBox posts in that conversation, a report thread included (w1640;
 by Max DM from w417 until then). It errors plainly, "FFBox's connector is offline; nothing was sent", while the link is
-down. For a conversation that is not linked to one of the person's requests (a reporter's thread a worker needs a save
-from), `post_as_max` with channel `conversation` posts there ([above](#posting-as-max-from-any-machine-w901)).
+down. For a conversation that is not linked to one of the person's requests (a reporter's thread), `post_as_max` with
+channel `conversation` posts there, from a worker only when someone in that thread mentioned Max or a person asked for
+that post (w2711; a save a worker needs is a blocker in its report) ([above](#posting-as-max-from-any-machine-w901)).
 
 ### Operators' own words (w831)
 
@@ -716,8 +722,8 @@ for FFBox's record and its merge watcher. No "Waiting on input from a developer.
 
 Everything else a thread hears is FF Factory's own words, posted by FFBox as given: the orchestrator's `reply_to_ffbox`
 in the conversation it is about (a report thread included), and `post_as_max` channel `conversation` from any worker or
-orchestrator, into any conversation FFBox holds, #bug-reports and dev_bug_reports threads included (asking a reporter
-for a save). FFBox keeps its guards on both: no mention, the secret scan, links, repo names and branches out of a public
+orchestrator, into any conversation FFBox holds, #bug-reports and dev_bug_reports threads included (from a worker only when someone in that thread
+mentioned Max or a person asked for that post, w2711). FFBox keeps its guards on both: no mention, the secret scan, links, repo names and branches out of a public
 post (`public_text`), the length and the rate; and it refuses a "fixed" or "merged" text in a thread that already has
 its merge notice, so the merge is said once, by FFBox. Never post a fixed or merged notice yourself. A can't-fix leaves
 the thread open (Lothsahn, w278: "For can't fix, don't archive the conversation or close the thread"); only a merged

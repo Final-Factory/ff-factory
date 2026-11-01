@@ -23,7 +23,11 @@ and reports merged fixes there. The intake never files from them, and the `ffdis
 edit, rename or close in those channels and their threads. Since w1640 (lothsahn, 2026-10-20: "you or workers should be
 able to post direct to discord by asking ffbox to do it on your behalf through the tunnel, and it will post what you
 say") an orchestrator or a worker posts in one of their threads through FFBox: `reply_to_ffbox` or `post_as_max` with
-channel `conversation` ([ffbox.md](ffbox.md#discord)), never a "fixed" or "merged" notice. Since w2670 (lothsahn,
+channel `conversation` ([ffbox.md](ffbox.md#discord)), never a "fixed" or "merged" notice. **A worker posts as Max in a bug thread only when asked** (lothsahn, 2026-10-31, w2711: "Stop"): a worker posts as Max
+(`post_as_max`) in a #bug-reports, dev_bug_reports or feedback thread only when someone in that thread mentioned
+Max, or when a person asked for that post; never to ask a player a question on its own initiative. If it needs
+something from a reporter (a save, a repro step), it puts that in its report as a blocker, and the person's
+orchestrator decides. Since w2670 (lothsahn,
 2026-10-31: "I would like to be able to ask you to scan all the open bug reports and close ones that are done, or to
 close specific ones I ask for") a person's orchestrator also closes their threads through FFBox, as Max:
 `open_bug_threads` and `close_bug_threads` ([ffbox.md](ffbox.md#closing-bug-threads-as-max-w2670)). A close is an
