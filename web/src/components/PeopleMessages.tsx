@@ -9,6 +9,7 @@ import { attempt, focusEvent, hidePersonMessages, useStore } from '../store';
 import { fmtClock, fmtRelative, useNow } from '../util';
 import { onScreenKeyboard } from '../viewport';
 import { useTextareaDictation } from '../voice/useTextareaDictation';
+import { AnsweredQuotes } from './AnsweredQuotes';
 import { Markdown } from './Markdown';
 import { DictationBar, MicButton } from './Mic';
 import { Icon } from './ui';
@@ -201,6 +202,7 @@ export const PeopleMessages = memo(function PeopleMessages({ session }: { sessio
                         </button>
                       </span>
                     </div>
+                    <AnsweredQuotes answers={m.answers} whose="your" />
                     <div className="pmsg-text">{m.text ? <Markdown text={m.text} /> : <p className="pmsg-old">Sent before this box kept the words: it is in the conversation above.</p>}</div>
                     {replying === idOf(m) && <ReplyBox sessionId={session.id} mark={m} onClose={() => setReplying(null)} onSent={replied} />}
                   </li>

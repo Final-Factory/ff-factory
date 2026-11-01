@@ -193,3 +193,95 @@ export function decidedRefusal(n: PriorNote, quote: string, pr: string, self?: s
     `If your question asks something that note does not settle (a new component, a layout change, art, or a choice it leaves open), call waiting_on_person again with decided_override saying what it leaves open.`
   );
 }
+
+// ---------------------------------------------------------------- w2756: a question the person's own notes already settle
+//
+// The fourth time (Ben, 2026-11-01, w2651: "didnt i already talk to you about this above?"; w1958, w1768 before it). On
+// w2651 Ben's 20:51 note picked "Build D, the right rail", behind a feature toggle, the hover card left of the rail and
+// Crafting stopping above Station Info; at 04:57 the worker asked him whether it may merge behind its toggle, whether the
+// Deck rail stays wide and whether Crafting keeps stopping above Station Info. Nothing held it: w1812 compares a question
+// with earlier QUESTIONS (asksSame), w2085's refusal reads only a look or merge OK, and only the note's quoted words against
+// the pull request's diff (Ben's quote "a column on the right that never moves" is not in #2946's code, and the rest of the
+// note, in the orchestrator's words, is not in quotes), and its POSSIBLY DECIDED flag on the card is advice the orchestrator
+// may pass over. This compares each question itself, with the answer the asker recommends, against every sentence of the
+// person's notes on that request: a sentence that shares SETTLE_MIN of its words (stemmed, stop words out) may settle it.
+// waiting_on_person and ask_person refuse it once with that sentence; a reason the notes leave it open lets it through,
+// logged on the request (Agents.refuseDecided, Orchestrators.askWithButtons).
+
+/** A note sentence sharing this many of a question's words (with its recommended answer) may settle it. */
+export const SETTLE_MIN = 3;
+
+/** Words that say nothing about what a question decides, on top of STOP. */
+const SETTLE_STOP = new Set('keep let lets make stay stays show shows shown see seen may might instead rather either use using go goes get set want yes nothing found move moves moved above below behind beside inside outside across against toward between'.split(' '));
+
+/** A word's stem, enough to meet "stops", "stopping" and "stop", or "columns" and "column". */
+export function stem(w: string): string {
+  let s = w;
+  if (s.length > 5 && s.endsWith('ing')) s = s.slice(0, -3);
+  else if (s.length > 4 && s.endsWith('ed')) s = s.slice(0, -2);
+  else if (s.length > 4 && /(ss|sh|ch|x)es$/.test(s)) s = s.slice(0, -2);
+  else if (s.length > 3 && s.endsWith('s') && !s.endsWith('ss')) s = s.slice(0, -1);
+  if (/([b-df-hj-np-tv-z])\1$/.test(s) && !/(ll|ss|ff|zz)$/.test(s)) s = s.slice(0, -1);
+  return s;
+}
+
+/** The stems a text decides with: its content words, media out, stop words out, three letters or more. */
+export function settleStems(s: string): Set<string> {
+  const text = s.replace(/!\[[^\]]*\]\([^)]*\)/g, ' ');
+  return new Set(contentWords(text).filter((x) => !SETTLE_STOP.has(x)).map(stem).filter((x) => x.length >= 3 && !SETTLE_STOP.has(x)));
+}
+
+/** A note's sentences: split at . ! ? ; : (a closing quote kept) and at line ends. */
+export function noteSentences(text: string): string[] {
+  return text
+    .split(/(?<=[.!?;:][”"]?)\s+|\n+/)
+    .map((s) => s.replace(/^[“”"\s]+|[“”"\s]+$/g, '').trim())
+    .filter((s) => s.length >= 8);
+}
+
+/** A question the notes may settle: which one (0-based), the note and its sentence, and the words they share. */
+export interface SettledAsk {
+  ask: number;
+  question: string;
+  note: PriorNote;
+  sentence: string;
+  shared: string[];
+}
+
+/**
+ * The questions of `asks` that a sentence of `notes` may settle (SETTLE_MIN shared stems with the question and its recommended
+ * answer), each with the sentence that shares the most, the newest note first on a tie. A flag that refuses once, never an
+ * answer: the asker confirms, or says what the note leaves open.
+ */
+export function notesSettle(asks: readonly { question: string; options?: readonly { label: string; recommended?: boolean }[] }[], notes: readonly PriorNote[]): SettledAsk[] {
+  const out: SettledAsk[] = [];
+  const newest = [...notes].sort((a, b) => b.at.localeCompare(a.at));
+  asks.forEach((a, i) => {
+    const pick = (a.options ?? []).find((o) => o.recommended)?.label ?? '';
+    const q = new Set([...settleStems(a.question), ...settleStems(pick)]);
+    let best: SettledAsk | undefined;
+    for (const n of newest) {
+      for (const sentence of noteSentences(n.text)) {
+        const shared = [...settleStems(sentence)].filter((x) => q.has(x));
+        if (shared.length >= SETTLE_MIN && (!best || shared.length > best.shared.length)) best = { ask: i, question: a.question, note: n, sentence, shared };
+      }
+    }
+    if (best) out.push(best);
+  });
+  return out;
+}
+
+/** The refusal of questions their notes may settle (w2756): each with the sentence, and the way past it. */
+export function settledRefusal(settled: readonly SettledAsk[], call: 'waiting_on_person' | 'ask_person', self?: string): string {
+  const by = settled[0].note.by;
+  const lines = settled.map((s) => {
+    const q = s.question.replace(/!\[[^\]]*\]\([^)]*\)/g, '').replace(/\s+/g, ' ').trim();
+    return `- Question ${s.ask + 1} ("${clip(q, 140)}"): ${s.note.by}'s note at ${noteWhen(s.note, self)} says "${clip(s.sentence, 300)}" (both name ${s.shared.slice(0, 5).join(', ')}).`;
+  });
+  const field = call === 'ask_person' ? 'notes_leave_open' : 'decided_override';
+  return (
+    `Not ${call === 'ask_person' ? 'asked' : 'recorded'}: ${by}'s own notes${self ? ` on ${self}` : ''} may already settle ${settled.length === 1 ? 'this question' : `${settled.length} of these questions`} (w2756; Ben, 2026-11-01: "didnt i already talk to you about this above?"):\n${lines.join('\n')}\n` +
+    `Do what the note says and ask only what it leaves open: drop a settled question (carry it out, quoting the note with its time), and keep the rest. ` +
+    `If a note really leaves a question open (it decided something else, or the facts changed since), call ${call} again with ${field} saying, for each one, what the note leaves open; that reason is logged on the request.`
+  );
+}

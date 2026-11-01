@@ -11,6 +11,7 @@ import { api } from '../api';
 import { sessionRoute } from '../attention';
 import { attempt, clearFocusEvent, focusEvent, focusPermission, sessionIndex, useStore } from '../store';
 import { displayName, fmtClock, fmtCost, fmtDivider, fmtDuration, FREE_TEXT, navigate, sameTitle, useNow, type Route } from '../util';
+import { AnsweredQuotes } from './AnsweredQuotes';
 import { LocalImages, Markdown } from './Markdown';
 import { fileUrl, ImageStrip, MentionedImages, uploadUrl } from './Images';
 import { AttachmentList } from './Attachments';
@@ -884,7 +885,12 @@ function NoticeRow({ ev }: { ev: UserEv }) {
           </button>
         )}
       </div>
-      {open && <div className="notice-body">{n.kind === 'worker-done' || n.kind === 'auto-finished' || n.kind === 'needs-you' ? <Markdown text={n.body ?? ev.text} /> : <div className="pre-wrap">{n.body ?? ev.text}</div>}</div>}
+      {open && (
+        <div className="notice-body">
+          {n.answers && <AnsweredQuotes answers={n.answers} whose={n.toName && n.toName !== chat?.me?.displayName ? `${n.toName}'s` : 'your'} />}
+          {n.kind === 'worker-done' || n.kind === 'auto-finished' || n.kind === 'needs-you' ? <Markdown text={n.body ?? ev.text} /> : <div className="pre-wrap">{n.body ?? ev.text}</div>}
+        </div>
+      )}
       <Reactions seq={ev.seq} />
     </div>
   );
