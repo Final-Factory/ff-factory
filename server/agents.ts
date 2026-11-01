@@ -26,7 +26,7 @@ import { agentQueueAll, agentQueueFacts, editorSlotRefusal, queueWaitsAll } from
 import { pairWaitLine, pairWaitNotice } from './pairRuns.ts';
 import { WORK_LIVE_LABEL, WORK_LIVE_STATES, asksAPerson, benchWaitOf, lastOpenLine, liveCounts, otherWorkWait, outsideDeclared, outsideWaitOf, ownWorkWait, noTimedWaitOf, restartWait, personWaitIn, reportWaitKey, holdsOf, servedBy, workLiveAll, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
 import { prsIn, reportTail, whoOf, type NeedsYouWait } from './needsYou.ts';
-import { addedLines, asksLookOk, decidedRefusal, personNotes, quoteCovered, quotedPhrases, relatedRequests } from './priorDecisions.ts';
+import { addedLines, asksLookOk, decidedRefusal, notesSettle, personNotes, quoteCovered, quotedPhrases, relatedRequests, settledRefusal } from './priorDecisions.ts';
 import { stillOpenIn } from './ledgerRules.ts';
 import { inlineReviewMedia, MEDIA_FILE, outsideReview, publishedCopy, reviewRootOf } from './reviewMedia.ts';
 import { visualAskCheck } from './visualAsk.ts';
@@ -1598,8 +1598,26 @@ export class Agents {
     const questions = Array.isArray(a.questions) ? (a.questions as { question?: unknown; options?: { label?: unknown; description?: unknown }[] }[]) : [];
     const texts = [a.what, a.about, ...questions.flatMap((q) => [q?.question, ...(Array.isArray(q?.options) ? q.options.map((o) => o?.label) : [])])].map((t) => (typeof t === 'string' ? t : ''));
     const override = typeof a.decided_override === 'string' ? a.decided_override.replace(/\s+/g, ' ').trim().slice(0, 300) : '';
-    if (!open.length || !this.prDiff || !asksLookOk(texts)) return;
     const names = String(a.who ?? '').split(/,|\band\b/).map((s) => s.trim()).filter(Boolean);
+    // w2756: any question (a design choice too) that a sentence of the asked person's own notes on the request may settle.
+    const asks = questions.map((q) => ({
+      question: typeof q?.question === 'string' ? q.question : '',
+      options: (Array.isArray(q?.options) ? q.options : []).map((o) => ({ label: typeof o?.label === 'string' ? o.label : '', recommended: (o as { recommended?: unknown })?.recommended === true })),
+    }));
+    for (const w of open) {
+      const who = whoOf(names, this.identity.list(), w.requesters).flatMap((p) => [p.displayName, p.userId]);
+      const settled = notesSettle(asks, personNotes([w], who));
+      if (!settled.length) continue;
+      const which = `question${settled.length > 1 ? 's' : ''} ${settled.map((x) => x.ask + 1).join(', ')} of ${asks.length}`;
+      if (override) {
+        this.orchestrators.noteOnRequest(w.id, `waiting_on_person from worker ${info.id.slice(0, 8)} let through past ${settled[0].note.by}'s notes, which may settle ${which}: "${override}" (decided_override, w2756)`);
+        return;
+      }
+      console.log(`waiting_on_person refused for ${w.id} (worker ${info.id.slice(0, 8)}): ${settled[0].note.by}'s notes may settle ${which} (w2756)`);
+      this.orchestrators.noteOnRequest(w.id, `waiting_on_person from worker ${info.id.slice(0, 8)} refused (w2756): ${settled[0].note.by}'s own notes may settle ${which}`);
+      throw new Error(settledRefusal(settled, 'waiting_on_person', w.id));
+    }
+    if (!open.length || !this.prDiff || !asksLookOk(texts)) return;
     for (const w of open) {
       const who = whoOf(names, this.identity.list(), w.requesters).flatMap((p) => [p.displayName, p.userId]);
       const notes = personNotes(relatedRequests(w, this.store.work.values()), who).filter((n) => quotedPhrases(n.text).length);
@@ -6873,6 +6891,7 @@ ${w.repo ?? ''}
           request: z.string().max(16).optional().describe('The request it is about ("w1821"): its card on the Waiting on input tab says what that request is.'),
           after: z.string().max(WAIT_LINE_CHARS).optional().describe('What happens once they answer, in a line.'),
           no_previews: z.string().max(300).optional().describe('Only for a question about nothing visual on a request that has review stills or clips (a plan, a cost, a merge order): why no preview applies, in a line. Logged on the request (w2478). Never for a design pick (w2664).'),
+          notes_leave_open: z.string().max(300).optional().describe('After a w2756 refusal only: what their notes leave open.'),
         },
         wrap(async (a) => o.askWithButtons(chat(), a)),
       ),

@@ -33,7 +33,7 @@ import { ReportStore } from './reports.ts';
 import { reportProblem } from './ledgerRules.ts';
 import { MOVE_AFTER_MS } from './resumeMove.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
-import { PR2395_DIFF, W1958_0459, W1958_1632 } from './priorDecisions.fixtures.ts';
+import { PR2395_DIFF, W1958_0459, W1958_1632, W2651_0457, W2651_2051 } from './priorDecisions.fixtures.ts';
 import { startTestMachine, type TestMachineOptions } from './testMachine.ts';
 import { afterMergeReason } from './ledgerRules.ts';
 import { roomForWork, timedLine, type Computer, type RoomNow } from './placement.ts';
@@ -6967,6 +6967,57 @@ test('w2085: no diff reader, or a design choice, refuses nothing', async (t) => 
   };
   await h.waiting_on_person!(q('OK the low-ore tooltip look so #2395 can merge'));
   assert.ok(info.waitingOn, 'recorded');
+});
+
+test('w2756: the replay of w2651 at 04:57: the worker\'s three questions are refused with Ben\'s 20:51 note, and so is the orchestrator\'s card; a stated reason lets each through, logged', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, machines, dispatcher, chat, call } = env;
+  const ben = chat(BEN).info;
+  await call(ben, 'request_work', { title: 'Player Inventory UX rethink', brief: 'Mocks for one consistent inventory panel.' });
+  // 20:51: Ben picks Build D, the note as the ledger holds it.
+  chat(BEN).lastFrom = 'human';
+  await call(ben, 'update_work', { id: 'w1', note: W2651_2051 });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Do it', title: 'w1: inventory rail', work_id: 'w1' });
+  assert.equal(started.isError, false, started.text);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const info = store.sessions.get(id)!;
+  await until('its first turn', () => info.status === 'idle');
+  const h = machines.hooks!.handlersFor(info, store.machines.get('pc')!);
+  // 04:57: worker 8fe9af40's three questions (its stills left out: they live on the portal's review root).
+  const bare = (s: string) => s.replace(/\n*!\[[^\]]*\]\([^)]*\)/g, '');
+  const questions = W2651_0457.map((q) => ({ ...q, question: bare(q.question) }));
+  const ask = {
+    who: 'Ben',
+    what: "look at the built-game stills and clips of the right-rail inventory and say whether it may merge (behind its toggle, off for players), and answer two layout questions at the Deck's 1280x800 size",
+    about: 'The Player Inventory becomes one window in a column on the right that never moves (your pick, Build D), behind a toggle players never see',
+    after: 'On your OK I update the HUD pin rules to match, then merge on green CI',
+    questions,
+  };
+  await assert.rejects(h.waiting_on_person!(ask), (e: Error) => {
+    assert.match(e.message, /^Not recorded: Ben's own notes on w1 may already settle 2 of these questions \(w2756/);
+    assert.match(e.message, /Question 1 .*"move the hover card to the left of the rail/);
+    assert.match(e.message, /Question 3 .*make Crafting stop above Station Info instead of hiding it/);
+    return true;
+  });
+  assert.equal(info.waitingOn, undefined, 'nothing recorded: the request does not show Waiting on input');
+  assert.match(store.work.get('w1')!.log.join('\n'), /waiting_on_person from worker \w+ refused \(w2756\): Ben's own notes may settle questions 1, 3 of 3/);
+  // Asked only what the note leaves open (the Deck rail's width), it goes through.
+  await h.waiting_on_person!({ ...ask, questions: [questions[1]] });
+  assert.ok(info.waitingOn, 'the open question is recorded');
+  // With what the note leaves open, the whole card goes through, logged.
+  await h.waiting_on_person!({ ...ask, decided_override: 'his note asked for an OK on built stills before merging' });
+  assert.match(store.work.get('w1')!.log.join('\n'), /let through past Ben's notes, which may settle questions 1, 3 of 3: "his note asked for an OK on built stills/);
+
+  // Ben's orchestrator builds its card from it: refused with the note, until it says what the note leaves open.
+  await until('that turn ends', () => chat(BEN).info.status === 'idle');
+  const card = await call(ben, 'ask_person', { ...questions[2], request: 'w1' });
+  assert.equal(card.isError, true, card.text);
+  assert.match(card.text, /Not asked: Ben's own notes on w1 may already settle this question \(w2756.*make Crafting stop above Station Info/s);
+  assert.match(card.text, /notes_leave_open/);
+  assert.equal((await call(ben, 'ask_person', { ...questions[1], request: 'w1' })).isError, false, 'the question the note leaves open is asked');
+  const past = await call(ben, 'ask_person', { ...questions[2], request: 'w1', notes_leave_open: 'the Tiles Station Info is taller than the one his note saw' });
+  assert.equal(past.isError, false, past.text);
+  assert.match(store.work.get('w1')!.log.join('\n'), /ask_person to Ben let through past their note of [\d:]+ UTC, which may settle it: "the Tiles Station Info/);
 });
 // ---------------------------------------------------------------- w2168: timed work follows the timing order at start and while it waits
 

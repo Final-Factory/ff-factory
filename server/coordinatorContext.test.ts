@@ -174,7 +174,10 @@ test('w1158: what a coordinator carries in every call stays within its budget', 
   // the rule is in read_rules machines): the dispatcher's measured 25,325, so the cap moved to 25,350.
   // w2664 gave ask_person, decide_work and waiting_on_person a clause each on a pick between designs and on stills shown
   // in the card only (trimmed from 690 characters to 290): the owner's measured 25,501, so the cap moved to 25,525.
-  const ALWAYS_LOADED_MAX = 25_525;
+  // w2756 (Ben: "didnt i already talk to you about this above?") gave ask_person notes_leave_open, what the person's own notes
+  // leave open after a refusal (trimmed from 170 characters to 55; the rule is in the refusal): the owner's measured 25,627, so
+  // the cap moved to 25,650.
+  const ALWAYS_LOADED_MAX = 25_650;
   await withCoordinators((agents, kinds) => {
     for (const [kind, info] of kinds) {
       const prompt = asOnLinuxCi(promptOf(agents, info)).length;

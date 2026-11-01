@@ -2547,6 +2547,21 @@ page clears. Never answer it for them. …
     decisions, and gets theirs on its related requests.
   Tests: `server/priorDecisions.test.ts`, `server/orchestrators.test.ts` and `server/freshAfterMerge.test.ts` ("w2085"),
   with w1958's replay against PR #2395's diff (`server/fixtures/w2085-pr2395.diff`).
+- **A question the person's own notes may settle is refused once** (w2756; Ben, 2026-11-01: "didnt i already talk to you
+  about this above?"). On w2651 Ben's 20:51 note said the right rail, behind its toggle, the hover card left of the rail
+  and Crafting stopping above Station Info; at 04:57 the worker still asked him whether the rail might merge behind its
+  toggle and whether Crafting should stop above Station Info. w1812 compares a question only with earlier QUESTIONS, and
+  w2085 refuses only a look OK whose note quote is in the diff (his paraphrased note quoted nothing the diff held); its
+  `POSSIBLY DECIDED` flag is advice. `notesSettle` (`server/priorDecisions.ts`) compares each question, with its
+  recommended answer, with every sentence of the person's notes on that request (not its related ones, to keep false
+  refusals low): stemmed content words less a stop list of verbs and prepositions every UI question has (keep, move,
+  above, ...); a sentence sharing 3 (`SETTLE_MIN`) flags it. `waiting_on_person` then refuses, naming each flagged
+  question with the sentence and the words they share; `decided_override` lets it through, logged on the request.
+  `ask_person` refuses the same way for a request it names (`request` or a wNNN in the words); `notes_leave_open`
+  lets it through, logged. What a note leaves open in other words (w2651's "keep the Deck rail wide", against a brief's
+  goal) is not caught: that stays the asker's to read. Tests: `server/priorDecisions.test.ts` and
+  `server/orchestrators.test.ts` ("w2756"), with w2651's 04:57 questions and Ben's 20:51 note
+  (`server/priorDecisions.fixtures.ts`).
 - **The digest.** 3 minutes after the portal starts (`NEEDS_YOU_DIGEST_MS`, once the machines' workers have reported in),
   every wait on a person the ledger shows whose key was never sent goes as one `[needs you] digest` per person, and is
   recorded as sent. The first start after w1378 ships sends the waits already open; later starts find none unless something
