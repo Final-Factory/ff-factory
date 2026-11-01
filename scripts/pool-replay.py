@@ -16,7 +16,7 @@ meter rises K points per weekly point (fitted to the readings) and closes 5 h af
 --one-proc % weekly an hour; work no token may take waits and is served first the next hour. It does not model processes
 running past the 99% retire cap (the measured resets show they do), so it overstates what lifting that cap gains.
 Schemes (w1659): the w971 score alone, w1539's near-reset "goes first" with its caps lifted, the score with a hard offset
-(hours less 12 or 18, floored at 1 h) and with a soft one (--soft: h - o (1 - e^(-h/o)), server/tokenPool.ts effectiveHours),
+(hours less 12 or 18, floored at 1 h) and with a soft one (--soft: h - o (1 - e^(-h/o)), the w1659 effectiveHours, retired by w2722),
 each with and without the caps lifted (--near-h, --floor), and with a burst guard on the weight (--guard N:ROOM). Columns:
 room lost per reset, room left 24 h before a reset (lower: used sooner), waiting work, hours with <= 1 token ready,
 token-hours unusable for the weekly caps, and the worst-case / mean share of the busiest measured 5 h the pool could absorb.

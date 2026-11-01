@@ -85,20 +85,20 @@ test("pool: a person's runs use that person's own tokens only: no shared token, 
   assert.equal(v.claudeTokens().length, 4);
 });
 
-test('pool: the token with the most weekly headroom per hour to its reset is used first (w971); a held or retired one is skipped', (t) => {
+test('pool: the token whose weekly window resets soonest is used first (w2722); a held or retired one is skipped', (t) => {
   const { make } = setup(t);
   const v = poolVault(make);
   const m = {
     [fp(B1)]: usage(10, 30, { weeklyDays: 5, sessionHours: 3 }),
     [fp(B2)]: usage(10, 60, { weeklyDays: 2, sessionHours: 3 }),
   };
-  assert.equal(v.forRun(run('ben'), { claude: true, ...world(m) }).claude?.entry.name, 'ben-b', '40% over 2 days beats 70% over 5');
+  assert.equal(v.forRun(run('ben'), { claude: true, ...world(m) }).claude?.entry.name, 'ben-b', 'its week resets in 2 days, ben-a in 5');
   m[fp(B2)] = usage(85, 60, { weeklyDays: 2, sessionHours: 3 });
   assert.equal(v.forRun(run('ben'), { claude: true, ...world(m) }).claude?.entry.name, 'ben-a', 'ben-b is at 85% of its 5-hour window: held');
   m[fp(B2)] = usage(10, 99.4, { weeklyDays: 2 });
   assert.equal(v.forRun(run('ben'), { claude: true, ...world(m) }).claude?.entry.name, 'ben-a', 'ben-b retired until its week resets');
   // The limits are the config's (system-wide), read at each pick.
-  m[fp(B1)] = usage(10, 90, { weeklyDays: 5 }); // little headroom left, so ben-b still scores higher at 60% of its 5-hour window
+  m[fp(B1)] = usage(10, 90, { weeklyDays: 5 }); // ben-b still resets sooner, and 60% of its 5-hour window is under the default hold
   m[fp(B2)] = usage(60, 60, { weeklyDays: 2 });
   const strict = () => poolLimits({ vault: { pool: { sessionHoldPercent: 50 } } });
   assert.equal(v.forRun(run('ben'), { claude: true, ...world(m), limits: strict }).claude?.entry.name, 'ben-a', 'held at 50% with the changed limit');
@@ -186,7 +186,7 @@ test('pools(): every person pool as the rules read it, no token in it', (t) => {
   const pools = v.pools({ ...world(m, { [fp(B2)]: 1 }), now: () => NOW });
   assert.deepEqual([...pools.keys()].sort(), ['ben', 'lothsahn'], 'the owner-less token is in no pool');
   const ben = pools.get('ben')!;
-  assert.deepEqual(ben.map((x) => [x.entry.name, x.view.state]), [['ben-a', 'held'], ['ben-b', 'one-at-a-time']]);
+  assert.deepEqual(ben.map((x) => [x.entry.name, x.view.state]), [['ben-b', 'one-at-a-time'], ['ben-a', 'held']], 'neither may take a worker: by the soonest weekly reset');
   assert.equal(ben.find((x) => x.entry.name === 'ben-b')!.live, 1);
   assert.ok(!JSON.stringify([...pools]).includes(B1.slice(13, 40)), 'no value in it');
   assert.equal(pools.get('lothsahn')![0].view.state, 'ok');
@@ -417,7 +417,7 @@ test('set_app_config: the pool limits are anyone\'s, checked, applied live and c
   assert.equal(normalizeSetting('claudeAccounts.dispatcher', 'vault'), undefined, 'the account setting is the owner\'s only (w1078)');
   assert.equal(OWNER_ONLY_KEYS.has('claudeAccounts.dispatcher'), true);
   // Not owner-only keys: the pool limits are one system-wide set that any person's orchestrator may change.
-  for (const k of ['vault.pool.sessionHoldPercent', 'vault.pool.onePerWeeklyPercent', 'vault.pool.retireWeeklyPercent', 'vault.pool.reservePerDayPercent', 'vault.pool.reserveSessionPercent', 'vault.pool.dispatcherStopPercent', 'vault.pool.nearResetHours', 'vault.pool.nearResetFloorTokens', 'vault.pool.resetOffsetHours'] as const) {
+  for (const k of ['vault.pool.sessionHoldPercent', 'vault.pool.onePerWeeklyPercent', 'vault.pool.retireWeeklyPercent', 'vault.pool.reservePerDayPercent', 'vault.pool.reserveSessionPercent', 'vault.pool.dispatcherStopPercent', 'vault.pool.nearResetHours', 'vault.pool.nearResetFloorTokens'] as const) {
     assert.equal(OWNER_ONLY_KEYS.has(k), false, k);
   }
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pool-cfg-'));
@@ -450,18 +450,11 @@ test('set_app_config: the pool limits are anyone\'s, checked, applied live and c
   assert.equal(poolLimits(cfg).nearResetFloor, 2);
   for (const bad of [169, -1, 'soon', '']) assert.throws(() => setAppConfig(file, cfg, 'vault.pool.nearResetHours', bad as never), /nearResetHours is a number of hours from 0 \(off\) to 168/, String(bad));
   for (const bad of [1.5, 11, -1]) assert.throws(() => setAppConfig(file, cfg, 'vault.pool.nearResetFloorTokens', bad as never), /nearResetFloorTokens is a whole number of tokens from 0 to 10/, String(bad));
-  // The score's soft offset (w1659): hours from 0 (off) to 168.
-  assert.equal(poolLimits(cfg).resetOffsetHours, 24);
-  setAppConfig(file, cfg, 'vault.pool.resetOffsetHours', '18');
-  assert.equal(poolLimits(cfg).resetOffsetHours, 18);
-  setAppConfig(file, cfg, 'vault.pool.resetOffsetHours', 0);
-  assert.equal(poolLimits(cfg).resetOffsetHours, 0);
-  for (const bad of [169, -1, 'soon', '']) assert.throws(() => setAppConfig(file, cfg, 'vault.pool.resetOffsetHours', bad as never), /resetOffsetHours is a number of hours from 0 \(off\) to 168/, String(bad));
-  setAppConfig(file, cfg, 'vault.pool.resetOffsetHours', null);
-  assert.equal(poolLimits(cfg).resetOffsetHours, 24);
+  // The score's soft offset (w1659) is retired with the score (w2722): no longer a key to set.
+  assert.throws(() => setAppConfig(file, cfg, 'vault.pool.resetOffsetHours' as never, 18 as never));
 });
 
-// ---------------------------------------------------------------- w971: the reserve is enforced, the score orders
+// ---------------------------------------------------------------- w971: the reserve is enforced, the order (w2722) ranks the rest
 
 test("w971: the dispatcher's token in a person's pool, inside its reserve, goes to no worker, no ops worker and no orchestrator while another token has room", (t) => {
   const { make } = setup(t);
@@ -477,9 +470,10 @@ test("w971: the dispatcher's token in a person's pool, inside its reserve, goes 
   assert.equal(token(machineRunEnv(cfg, { id: 'm3' }, { role: 'workers', requestedBy: ben, sessionId: 'w1' }, ctx).env), B2, 'a worker');
   assert.equal(token(poolRunEnv({ role: 'ops', personId: 'ben', sessionId: 'ops1' }, ctx).env), B2, 'the ops worker');
   assert.equal(token(poolRunEnv({ role: 'orchestrator', personId: 'ben', sessionId: 'orch1' }, ctx).env), B2, 'the orchestrator');
-  // Without the reserve known (the old code), the token with the sooner... both reset together, so it would have been by name: the point is the reserve decides.
-  const noReserve = { ...ctx, reservedFor: undefined };
-  assert.equal(token(machineRunEnv(cfg, { id: 'm3' }, { role: 'workers', requestedBy: ben, sessionId: 'w2' }, noReserve).env), B2, 'by score alone ben-b wins too');
+  // Without the reserve known (the old code), both reset together, so it goes by name to ben-a: the reserve is what decides.
+  // Read through pools(), which starts no run (a run started on ben-a would take its one-at-a-time slot below).
+  const noReserve = v.pools({ usageOf: (f) => meters[f], liveOn: () => 0, limits: () => poolLimits(undefined), now: () => NOW }).get('ben')!;
+  assert.deepEqual(noReserve.filter((x) => x.priority).map((x) => x.entry.name), ['ben-a'], 'by the order alone ben-a (w2722: same reset, then the name)');
   // The other token fills up (5-hour window held): the worker waits, the orchestrator uses the reserve, the ops worker (w1112)
   // the held token, keeping the dispatcher's buffer.
   meters[fp(B2)] = usage(90, 27, { weeklyDays: 4, sessionHours: 2 });
@@ -493,7 +487,7 @@ test("w971: the dispatcher's token in a person's pool, inside its reserve, goes 
   assert.match(orch.account, /inside the dispatcher's reserve: no other token has room/);
   // The week runs out: the buffer (5% a day) shrinks below what is left and the token is an ordinary one again (94% at 0.5 days: buffer 2.5%).
   meters[fp(DISP)] = usage(10, 94, { weeklyDays: 0.5, sessionHours: 3 });
-  meters[fp(B2)] = usage(10, 90, { weeklyDays: 4, sessionHours: 3 }); // little headroom: the score now favours the ex-reserved token
+  meters[fp(B2)] = usage(10, 90, { weeklyDays: 4, sessionHours: 3 }); // the ex-reserved token resets sooner (w2722)
   assert.equal(token(machineRunEnv(cfg, { id: 'm3' }, { role: 'workers', requestedBy: ben, sessionId: 'w4' }, ctx).env), DISP);
   // A session already running on it is never touched: only the next start asks the pool.
 });
@@ -522,11 +516,11 @@ test('w979: the pool listing orders by the picker, labels each token, and marks 
   assert.equal(taken.pools.get('lothsahn')!.filter((x) => x.priority).length, 0);
   // The best token fills its 5-hour window: priority moves to the next.
   const held = labels({ ...m, [fp(B2)]: usage(85, 27, { weeklyDays: 4, sessionHours: 2 }) });
-  assert.deepEqual(held.ben, ['ben-c pool:ok priority', 'ben-b pool:held', 'ben-a pool:reserved']);
+  assert.deepEqual(held.ben, ['ben-c pool:ok priority', 'ben-a pool:reserved', 'ben-b pool:held'], 'the ones no worker may take after, by their resets');
   assert.ok(!r.ben.concat(r.loth).join(' ').match(/score|%\/day|left over/));
 });
 
-test('w1539/w1659: a token near its reset takes priority in the listing by weight, on exactly one token per pool, and its caps read as lifted', (t) => {
+test('w1539/w2722: a token near its reset takes priority in the listing by its reset, on exactly one token per pool, and its caps read as lifted', (t) => {
   const { make } = setup(t);
   const v = make();
   v.add({ name: 'ben-a', kind: 'claude', value: B1, owner: 'ben', share: 'owner' });
@@ -542,22 +536,21 @@ test('w1539/w1659: a token near its reset takes priority in the listing by weigh
   // ben-a: 93% used, resets in 11 h; ben-b fresh (6 days); ben-c 60% (3 days). lothsahn's one token far from its reset.
   const m = { [fp(B1)]: usage(0, 93, { weeklyDays: 11 * H }), [fp(B2)]: usage(0, 1, { weeklyDays: 6 }), [fp(SHARED)]: usage(0, 60, { weeklyDays: 3 }), [fp(L1)]: usage(0, 40, { weeklyDays: 4 }) };
   const r = labels(m);
-  assert.deepEqual(r.ben, ['ben-a pool:ok priority', 'ben-b pool:ok', 'ben-c pool:ok'], 'the near-reset token first, by the soft offset');
+  assert.deepEqual(r.ben, ['ben-a pool:ok priority', 'ben-c pool:ok', 'ben-b pool:ok'], 'the soonest weekly reset first (w2722)');
   assert.deepEqual(r.loth, ['loth-a pool:ok priority']);
   assert.deepEqual(r.priorities, [1, 1], 'exactly one priority per pool');
-  // Both rules off: the score order of w971, priority on the fresh token.
-  const off = labels(m, {}, { vault: { pool: { nearResetHours: 0, resetOffsetHours: 0 } } });
-  assert.deepEqual(off.ben, ['ben-b pool:ok priority', 'ben-a pool:ok', 'ben-c pool:ok']);
-  // At 97% with a job on it, inside the window: its one-at-a-time cap is lifted (pool:ok, not one-at-a-time), and its last 3%
-  // 11 h out still outweighs the fresh token (1.38 against 0.82 %/h with the 24 h offset), on exactly one token. At 99% it no
-  // longer does (0.46).
+  // The near-reset rule off: at 93% no cap is lifted, and the order is the same.
+  const off = labels(m, {}, { vault: { pool: { nearResetHours: 0 } } });
+  assert.deepEqual(off.ben, ['ben-a pool:ok priority', 'ben-c pool:ok', 'ben-b pool:ok']);
+  // At 97% with a job on it, inside the window: its one-at-a-time cap is lifted (pool:ok, not one-at-a-time), and it keeps
+  // the priority by its reset, on exactly one token.
   const late = labels({ ...m, [fp(B1)]: usage(0, 97, { weeklyDays: 11 * H }) }, { [fp(B1)]: 1 });
-  assert.deepEqual(late.ben, ['ben-a pool:ok priority', 'ben-b pool:ok', 'ben-c pool:ok']);
+  assert.deepEqual(late.ben, ['ben-a pool:ok priority', 'ben-c pool:ok', 'ben-b pool:ok']);
   assert.deepEqual(late.priorities, [1, 1]);
-  const later = labels({ ...m, [fp(B1)]: usage(0, 99, { weeklyDays: 11 * H }) }, { [fp(B1)]: 1 });
-  assert.deepEqual(later.ben, ['ben-b pool:ok priority', 'ben-c pool:ok', 'ben-a pool:ok']);
-  // lothsahn's case (w1659, Ben's pool at ~06:00Z 2026-10-21): 12% left 26 h out takes priority over 58% left 119 h out.
+  // The same with the rule off: one at a time with its slot taken, so it takes no worker and goes after the ones that may.
+  const lateOff = labels({ ...m, [fp(B1)]: usage(0, 97, { weeklyDays: 11 * H }) }, { [fp(B1)]: 1 }, { vault: { pool: { nearResetHours: 0 } } });
+  assert.deepEqual(lateOff.ben, ['ben-c pool:ok priority', 'ben-b pool:ok', 'ben-a pool:one-at-a-time']);
+  // lothsahn's case (w1659, Ben's pool at ~06:00Z 2026-10-21): the token resetting in 26 h goes before 45 h and 119 h.
   const ben = { [fp(B1)]: usage(4, 42, { weeklyDays: 119 * H }), [fp(B2)]: usage(0, 88, { weeklyDays: 26 * H }), [fp(SHARED)]: usage(8, 78, { weeklyDays: 45 * H }), [fp(L1)]: usage(0, 40, { weeklyDays: 4 }) };
   assert.deepEqual(labels(ben).ben, ['ben-b pool:ok priority', 'ben-c pool:ok', 'ben-a pool:ok']);
-  assert.deepEqual(labels(ben, {}, { vault: { pool: { resetOffsetHours: 0 } } }).ben, ['ben-a pool:ok priority', 'ben-b pool:ok', 'ben-c pool:ok'], 'without the offset: the 58% token, as the portal showed');
 });
