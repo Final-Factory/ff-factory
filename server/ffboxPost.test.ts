@@ -7,7 +7,8 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { ProviderManager } from './providers.ts';
 import { PROVIDER_QUERIES, QUERY_LIMITS, mintProviderToken, tokenSha256 } from './providerProtocol.ts';
-import { POST_CHANNELS, POST_RETRY, POST_TARGETS, postArgs, postAsMax } from './ffboxPost.ts';
+import { POST_CHANNELS, POST_RETRY, POST_TARGETS, postArgs, postAsMax, postImages, type PostImage } from './ffboxPost.ts';
+import { createHash } from 'node:crypto';
 import { CATALOG } from './launch.ts';
 import { MockConnector } from '../e2e/mockConnector.ts';
 import { CliEventSchema } from './maxEvents.ts';
@@ -59,7 +60,7 @@ test('post_message is a query the portal asks, waits 20 s for, and never keeps a
 });
 
 test('the worker tool takes a channel of the allowlist, text or a file, a thread, a conversation and a key, and no bug channel', () => {
-  assert.deepEqual(Object.keys(CATALOG.post_as_max).sort(), ['channel', 'conversation', 'file', 'key', 'new_thread', 'skip_lines', 'text', 'thread']);
+  assert.deepEqual(Object.keys(CATALOG.post_as_max).sort(), ['channel', 'conversation', 'file', 'images', 'key', 'new_thread', 'skip_lines', 'text', 'thread']);
   assert.deepEqual([...POST_CHANNELS], ['dev_patch_notes', 'dev_chat', 'agent_testing']);
   for (const bug of ['bug_reports', 'dev_bug_reports']) {
     assert.ok(!CATALOG.post_as_max.channel.safeParse(bug).success, `${bug} is not a channel this tool posts into`);
@@ -255,4 +256,107 @@ test('w1664: a refusal is never asked again', async (t) => {
   t.after(onQuery(c, (q) => (n++, c.send({ type: 'query_result', id: q.id, what: 'post_message', ok: false, error: 'refused', reason: 'no' }))));
   await assert.rejects(postAsMax(pm, { channel: 'agent_testing', text: 'x', key: 'k' }, 's', undefined, noWait(60_000)), /refused/);
   assert.equal(n, 1);
+});
+
+// --- w2723: images on a post ------------------------------------------------------------------------------------------
+
+const PNG_HEAD = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const png = (n: number, fill = 7) => Buffer.concat([PNG_HEAD, Buffer.alloc(n - PNG_HEAD.length, fill)]);
+const jpg = (n: number) => Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(n - 4, 3)]);
+const wire = (name: string, b: Buffer) => ({ name, data: b.toString('base64') });
+const sha = (b: Buffer) => createHash('sha256').update(b).digest('hex');
+
+/** FFBox's connector as post_file_put sees it (ffbox scripts/fffconnector.py): a part only at the offset it holds. */
+function connectorFiles(c: MockConnector, opts: { drop?: (q: Q) => boolean; unsupported?: boolean } = {}) {
+  const held = new Map<string, Buffer>();
+  const done = new Set<string>();
+  const seen: Q[] = [];
+  const stop = onQuery(c, (q) => {
+    seen.push(q);
+    if (q.what === 'post_message') return c.send(posted(q.id));
+    if (opts.unsupported) return c.send({ type: 'query_result', id: q.id, what: q.what, ok: false, error: 'unsupported' });
+    const a = q.args as unknown as { file: string; bytes: number; offset: number; data: string };
+    const answer = () => c.send({ type: 'query_result', id: q.id, what: q.what, ok: true, data: { file: a.file, have: done.has(a.file) ? a.bytes : (held.get(a.file)?.length ?? 0), bytes: a.bytes, complete: done.has(a.file) } });
+    if (opts.drop?.(q) || done.has(a.file)) return answer();
+    const have = held.get(a.file) ?? Buffer.alloc(0);
+    if (a.offset === have.length) {
+      const next = Buffer.concat([have, Buffer.from(a.data, 'base64')]);
+      held.set(a.file, next);
+      if (next.length === a.bytes && sha(next) === a.file) done.add(a.file);
+    }
+    answer();
+  });
+  return { held, done, seen, stop };
+}
+
+test('w2723: the worker tool takes up to 4 image paths, and an orchestrator\'s post_as_max none', () => {
+  assert.ok(CATALOG.post_as_max.images.safeParse(['a.png', 'b.jpg']).success);
+  assert.ok(!CATALOG.post_as_max.images.safeParse(['1.png', '2.png', '3.png', '4.png', '5.png']).success);
+});
+
+test('w2723: postImages takes PNG and JPEG by their first bytes, within the caps, and says what is wrong otherwise', () => {
+  const ok = postImages([wire('power.png', png(1000)), wire('heat.jpg', jpg(500))]) as { images: PostImage[] };
+  assert.deepEqual(ok.images.map((i) => [i.name, i.bytes.length, i.sha256]), [['power.png', 1000, sha(png(1000))], ['heat.jpg', 500, sha(jpg(500))]]);
+  assert.deepEqual(postImages(undefined), { images: [] });
+  assert.deepEqual(postImages([]), { images: [] });
+  const bad = (raw: unknown, re: RegExp) => assert.match((postImages(raw) as { error: string }).error ?? '', re);
+  bad(['Temp/a.png'], /older than the images option/);
+  bad([1, 2, 3, 4, 5].map((n) => wire(`${n}.png`, png(100, n))), /at most 4/);
+  bad([wire('big.png', png(4 * 1024 * 1024 + 1))], /at most 4 MB/);
+  bad([wire('a.png', png(3 * 1024 * 1024, 1)), wire('b.png', png(3 * 1024 * 1024, 2)), wire('c.png', png(3 * 1024 * 1024, 3))], /more than 8 MB together/);
+  bad([wire('fake.png', Buffer.from('not an image at all'))], /not a PNG image/);
+  bad([wire('swap.png', jpg(100))], /not a PNG image/);
+  bad([wire('notes.txt', png(100))], /not an image file name/);
+  bad([wire('../x.png', png(100))], /not an image file name/);
+  bad([wire('a.png', png(100)), wire('b.png', png(100))], /same image/);
+  bad([{ name: 'a.png' }], /without its bytes/);
+});
+
+test('w2723: postArgs sends the images as files, SHA-256 and name, to a channel and to a conversation', () => {
+  const images = (postImages([wire('a.png', png(100, 1)), wire('b.jpg', jpg(80))]) as { images: PostImage[] }).images;
+  const files = `${sha(png(100, 1))}:a.png,${sha(jpg(80))}:b.jpg`;
+  assert.deepEqual(postArgs({ channel: 'agent_testing', text: 'shots', images }), { args: { channel: 'agent_testing', text: 'shots', files } });
+  assert.deepEqual(postArgs({ channel: 'conversation', conversation: '940', text: 'shots', images }), { args: { channel: 'conversation', text: 'shots', conversation: '940', files } });
+  assert.match((postArgs({ channel: 'agent_testing', text: ' ', images }) as { error: string }).error, /nothing to post/, 'a post with images still needs its text');
+  assert.match((postArgs({ channel: 'bug_reports', text: 'x', images }) as { error: string }).error, /use channel "conversation"/, 'images change no channel rule');
+});
+
+test('w2723: each image goes to FFBox in parts before the post, and the post names them', async (t) => {
+  const { pm, c } = await setup(t);
+  const conn = connectorFiles(c);
+  t.after(conn.stop);
+  const a = png(100_000, 1);
+  const b = jpg(1_000);
+  const images = (postImages([wire('power.png', a), wire('heat.jpg', b)]) as { images: PostImage[] }).images;
+  const r = await postAsMax(pm, { channel: 'conversation', conversation: '940', text: 'The panels from your save.', key: 'w2723-shots', images }, 'sess1', () => new Date('2026-10-10T18:00:01Z'));
+  assert.ok(conn.done.has(sha(a)) && conn.done.has(sha(b)), 'FFBox holds both images whole');
+  assert.ok(conn.held.get(sha(a))!.equals(a));
+  const puts = conn.seen.filter((q) => q.what === 'post_file_put');
+  assert.ok(puts.every((q) => String(q.args!.data).length <= 60_000), 'every part fits a frame');
+  const post = conn.seen.filter((q) => q.what === 'post_message');
+  assert.equal(post.length, 1);
+  assert.ok(conn.seen.indexOf(post[0]) > conn.seen.indexOf(puts[puts.length - 1]), 'the post comes after the parts');
+  assert.equal(post[0].args!.files, `${sha(a)}:power.png,${sha(b)}:heat.jpg`);
+  assert.match(r.text, /Posted as Max by FFBox: .*2 images\)/);
+});
+
+test('w2723: a part FFBox did not write is sent again from where it stands', async (t) => {
+  const { pm, c } = await setup(t);
+  let dropped = false;
+  const conn = connectorFiles(c, { drop: (q) => q.what === 'post_file_put' && Number(q.args!.offset) === 45_000 && !dropped && (dropped = true) });
+  t.after(conn.stop);
+  const a = png(200_000, 2);
+  const images = (postImages([wire('signal.png', a)]) as { images: PostImage[] }).images;
+  await postAsMax(pm, { channel: 'agent_testing', text: 'x', key: 'w2723-resend', images }, 'sess1');
+  assert.ok(dropped);
+  assert.ok(conn.held.get(sha(a))!.equals(a), 'the image arrives whole, in order');
+});
+
+test('w2723: an FFBox without images posts nothing and says so', async (t) => {
+  const { pm, c } = await setup(t);
+  const conn = connectorFiles(c, { unsupported: true });
+  t.after(conn.stop);
+  const images = (postImages([wire('a.png', png(100))]) as { images: PostImage[] }).images;
+  await assert.rejects(postAsMax(pm, { channel: 'agent_testing', text: 'x', images }, 'sess1'), /FFBox does not take images yet.*nothing was posted/);
+  assert.equal(conn.seen.filter((q) => q.what === 'post_message').length, 0);
 });

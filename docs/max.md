@@ -4,7 +4,8 @@ Max is the Discord bot Final Factory's agents post as, through the `ffdiscord` C
 plugin (final-factory-agents). Max's own process runs on FFBox. FF Factory's agents post as Max in two ways: through
 FFBox, on any machine, with the machine tool `post_as_max` (w901; FFBox holds the bot, so no computer needs the token:
 [ffbox.md](ffbox.md#posting-as-max-from-any-machine-w901)), or with the `ffdiscord` CLI on a computer that has its
-config. FF Factory shows three things about Max, read-only: nothing on the Max page posts.
+config. A `post_as_max` post can carry up to four PNG or JPEG images with its text (w2723), a worker's only (an
+orchestrator has no folder to take them from). FF Factory shows three things about Max, read-only: nothing on the Max page posts.
 
 | where | what |
 |---|---|
