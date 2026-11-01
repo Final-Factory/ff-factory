@@ -215,10 +215,10 @@ proofs-through-`publish_review` rule.
 
 ### D and E: release trim and re-seeding (FF Factory PR #465)
 
-- **D:** the release trim (`server/cacheTrim.ts`, `playerCacheDirs`) drops `Library/EntitySceneBundles` and each
-  `Library/PlayerDataCache/<target>` whole once nothing in it was written for 24 h. It never trims part of one: a
-  half-kept folder could leave a build trusting archives that are gone. A dry run on LothDesktop found 1.48 GB to drop
-  today (slot2's Linux64 cache, untouched for 158 h). Every other sandbox had built a player within 8 h.
+- **D:** the release trim dropped `Library/EntitySceneBundles` and each `Library/PlayerDataCache/<target>` whole once nothing
+  in it was written for 24 h (1.48 GB on LothDesktop). Withdrawn by w2752 (lothsahn, 2026-11-01: "A cold unity station is quite
+  slow so we should make sure to not do it often"): the next player build of that sandbox was then a cold one. The trim now takes
+  only stale entries of `BuildCache` and `BurstCache` (`docs/self-recovery.md`, "Sandbox Library caches").
 - **E:** a sandbox nobody used for 3 days (`RESEED_IDLE_DAYS`) gets its Library cloned from the seed again. It acts
   only where the copy is a block clone (`librarySeedCopy: 'clone'`, or a Mac). No sandbox on LothDesktop qualified
   today.

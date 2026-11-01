@@ -1002,9 +1002,28 @@ nothing, BuildCache is 0.4 GB and BurstCache 3.2 GB. Player build of one commit 
 Burst SSE2+SSE4, no other build running): fully warm 112 s; with every file older than a day pruned (6.3 GB) 106 s; both caches
 removed (the rest of `Library` warm) 530 s, 5 times longer. A wipe costs that on the next worker's first build; a trim does not.
 
-**The trim** (`server/cacheTrim.ts`, `TRIM_DEFAULTS`: keep files written within 24 h, then each cache cut oldest-first to 4 GB, give up
-after 10 min; the numbers are a guess on top of the measurements above, kept above one commit's working set): removes cache
-*files*, never a whole cache folder and nothing else under `Library`. **When**: `SandboxPool.trimReleased`
+**Measured again (w2752, lothdesktop/slot5, 2026-11-01, commit c5fb73c0 of the game; the build legs under an exclusive bench
+ticket, the editor legs beside two other editors, machine 28 to 69 % busy).** Lothsahn: "Doesn't deleting the burst caches make
+the next startup really slow and use a lot of CPU?", then "A cold unity station is quite slow so we should make sure to not do it
+often. LothDszktop is almost always at full CPU and doesn't have any to spare." Player build (`build_player.sh`, win):
+`BuildCache` and `BurstCache` both absent 534 s and 3,844 CPU-seconds (7.2 cores); warm right after 131 s and 208 CPU-seconds,
+18 times less CPU. Editor open + play (`unity start`, bridge up, play): `BurstCache` absent, ready in 25 s but Burst then
+recompiles `JIT` (84 files, 2.1 GB) in the background for about 3.5 min, 2,389 CPU-seconds over the 311 s watched (7.7 cores);
+warm, 252 CPU-seconds over 176 s. A cold `BurstCache/Windows-Intel` after one build: one 95 MB `.dll`+`.pdb` pair and 3.3 GB
+of `Hashes`. A warm build wrote nothing in `BuildCache` and no Burst library: a reused entry keeps its old write time, and V:
+(ReFS) updates no access times, so write time cannot tell a reused entry from a dead one.
+
+**The trim** (`server/cacheTrim.ts`, `staleCacheEntries`, `TRIM_DEFAULTS`; w2752 replaced the w898 file-age trim): only what
+nothing current uses, and never a live cache whole. `BurstCache/<target>` (every folder but `JIT`): the `<hash>.dll`/`.pdb`
+pairs of all but the newest `playerBuildsKept` 2 player builds (Burst checks an entry before it reuses one and compiles again on
+a miss); the manifest, `Hashes` and `AotSettings_*.hash` stay. `BuildCache`: whole entry folders `<2 hex>/<hash>/<version>`,
+the Scriptable Build Pipeline's own prune unit (a single file removed failed a build, w1211): every folder the newest build wrote
+(within an hour of the newest write) stays, then the newest up to `buildCacheGB` 2 (one commit's build writes 0.4 GB), the rest
+goes. Never: `BurstCache/JIT` (no on-disk sign of which entries the editor still uses), `PlayerDataCache`, `EntitySceneBundles`
+(w1576 dropped those whole after 24 h: no longer, a build trusts them whole and a cold one is the 534 s above), `Artifacts`,
+`Bee`, `ScriptAssemblies`, `PackageCache`. A dry run on lothdesktop the same day: slot2 3.2 GB stale (0.9 GB of Burst player
+builds, 10 of 12, and 2.3 GB of BuildCache), slot4 0.09 GB, the other four nothing. Gives up after 10 min. **When**:
+`SandboxPool.trimReleased`
 (`machine/sandboxes.ts`) watches each sandbox's live agents (the daemon's own sessions, `liveIn`) at every 30 s look and trims the
 moment the last one is gone, whichever way the worker left (request closed, a wait for CI or a person, a stop, the idle
 reaper): the portal needs no new message. **State**: the sandbox is `cleanup` (`SandboxStatus`) from that moment: not free
@@ -1016,10 +1035,13 @@ two files when a lock file appears. **Failure**: a hung, failing or slow trim is
 back to `ready` and the pool logs why (and tells the orchestrator when it stopped early); a daemon restart reads `cleanup` back
 as `ready`. `daemon.json` `sandboxCacheTrim` sets the limits or `false` for never.
 
-**Backstop** (`cleanupRules`, for sandboxes nobody releases): `sandbox-lib-cache-idle` (whole `BuildCache`/`BurstCache`, unused
-for `libraryCacheIdleHours` 48), `sandbox-lib-cache-cap` (a cache over `libraryCacheCapGB` 6, idle an hour) and
-`sandbox-lib-cache-low` (all idle ones, while free space is below the soft threshold), each only while the project has no
-`Temp/UnityLockfile` and, as every rule, with the entry renamed first so one with an open file is skipped.
+**Backstop** (`cleanupRules`, for sandboxes nobody releases): `sandbox-lib-cache-stale` takes the same stale entries in every
+pass, once nothing in the two caches was written for an hour, no `Temp/UnityLockfile` is there and no agent uses the sandbox.
+**Last resort**, `sandbox-lib-cache-last-resort`: only while free space is below the critical line (the pool's
+`disk_critical_gb`, `CleanupSettings.criticalFreeGB`, or a `critical` trigger; an asked or low-space pass is not enough), the two
+caches whole of the one idle sandbox whose project was opened longest ago, costing its next build the cold numbers above. Before
+w2752 a pass wiped whole caches after 48 h unused, over 6 GB, and in every idle sandbox while space was low. Every entry is
+renamed first, so one with an open file is skipped.
 
 **Seeds.** A new sandbox's Library comes from the configured `librarySeed`, which keeps its caches (a warm start; lothdesktop's is
 0.7 + 2.5 GB). When the seed is missing the copy falls back to the main clone's or a sandbox's Library, and now leaves their

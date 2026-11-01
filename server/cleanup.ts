@@ -6,6 +6,7 @@ import type { CleanupPolicy } from './config.ts';
 import { CLEANUP_SOFT_GB_DEFAULT, type CleanupSummary, type MediaSummary } from '../shared/types.ts';
 import type { StaleOutputSettings } from './staleOutput.ts';
 import { inNeverGames, installDrive, onInstallDrive } from './rootFence.ts';
+import { LIBRARY_CACHES, staleCacheEntries } from './cacheTrim.ts';
 
 export { DEFAULT_CLEANUP, type CleanupPolicy } from './config.ts';
 
@@ -57,8 +58,11 @@ export interface CleanupRule {
   /** Entry name globs never taken by this rule (another rule handles them). */
   except?: string[];
   olderThanHours: number;
-  /** 'low': only in a pass while free space is below the soft threshold (whole caches that are re-downloaded). */
-  when?: 'always' | 'low';
+  /**
+   * 'low': only in a pass while free space is below the soft threshold (whole caches that are re-downloaded). 'critical': only
+   * while it is below the critical line (a live Unity cache, w2752).
+   */
+  when?: 'always' | 'low' | 'critical';
   /** What it is, for the log. */
   what: string;
   /**
@@ -74,6 +78,12 @@ export interface CleanupRule {
   unityIdle?: boolean;
   /** Only an entry larger than this many bytes (a cap, not an age). */
   overBytes?: number;
+  /** With overBytes: the cap is on the entries `names` matches in the folder together, not each (w2752). */
+  overBytesTogether?: boolean;
+  /** `dir` is a Unity project's Library: what of its caches nothing current uses goes, entry by entry (cacheTrim.ts staleCacheEntries). */
+  staleCacheEntries?: boolean;
+  /** Of all the folders `dir` expands to, only the one whose project was opened longest ago (staleUnityLibraries' measure). */
+  idlestOnly?: boolean;
 }
 
 /** What never goes: known paths (and whatever holds them), paths agents use now, and the home folder itself. */
@@ -208,8 +218,7 @@ export function fenceToRoot<T extends { path: string }>(items: T[], root: string
 
 const H = 1;
 const D = 24;
-/** The Library folders that grow without bound and are rebuilt on demand (Library/BuildCache, Library/BurstCache). */
-export const LIBRARY_CACHES = ['BuildCache', 'BurstCache'];
+export { LIBRARY_CACHES };
 
 /**
  * The built-in rules for a platform plus the policy's own (temp scratch, agent clones, age rules). Folders that
@@ -241,15 +250,17 @@ export function cleanupRules(env: CleanupEnv, policy: CleanupPolicy): CleanupRul
   for (const r of env.sandboxRoots ?? []) {
     rules.push({ id: 'sandbox-builds', dir: j(r, '*', 'Builds'), olderThanHours: policy.buildsOlderThanDays * D, insideKept: true, repos: 'skip', what: 'a build in a sandbox untouched for days' });
   }
-  // A sandbox's Unity Library caches (w898): content-addressed, rebuilt on demand, and 87 GB across lothdesktop's six sandboxes
-  // (BuildCache 6.2-12.7 GB, BurstCache 4.8-6.7 GB each; a fresh seed holds 0.7 and 2.5). Only while no editor or build has the
-  // project open. Three rules over one list of caches: unused for a while, over a cap, and all of them while space is low.
+  // A sandbox's Unity Library caches (w898, w2752): BuildCache and BurstCache only grow (87 GB across lothdesktop's six sandboxes,
+  // 2026-10-10). Routine clean-up takes only what nothing current uses (cacheTrim.ts staleCacheEntries: superseded Burst player
+  // builds, build-cache entries older than the newest build), never a live cache whole: a cold one costs the next player build
+  // about 7 minutes of a busy machine's CPU (docs/self-recovery.md, "Measured"). Lothsahn, 2026-11-01: "A cold unity station is
+  // quite slow so we should make sure to not do it often." Only while no editor or build has the project open and nothing in
+  // its caches was written for an hour. Below the critical line, and only then, the two caches of the one sandbox opened longest
+  // ago go whole.
   for (const r of env.cacheRoots ?? []) {
-    const dir = j(r, '*', 'Library');
-    const common = { dir, names: [...LIBRARY_CACHES], insideKept: true, unityIdle: true };
-    if (policy.libraryCacheIdleHours > 0) rules.push({ ...common, id: 'sandbox-lib-cache-idle', olderThanHours: policy.libraryCacheIdleHours, what: "a sandbox's Unity build cache nobody used" });
-    if (policy.libraryCacheCapGB > 0) rules.push({ ...common, id: 'sandbox-lib-cache-cap', olderThanHours: H, overBytes: policy.libraryCacheCapGB * 1024 ** 3, what: `a sandbox's Unity build cache grown past ${policy.libraryCacheCapGB} GB` });
-    rules.push({ ...common, id: 'sandbox-lib-cache-low', olderThanHours: H, when: 'low', what: "a sandbox's Unity build cache (rebuilt on demand)" });
+    const common = { dir: j(r, '*', 'Library'), insideKept: true, unityIdle: true, olderThanHours: H };
+    rules.push({ ...common, id: 'sandbox-lib-cache-stale', staleCacheEntries: true, what: "a sandbox's Unity cache entry nothing current uses" });
+    rules.push({ ...common, id: 'sandbox-lib-cache-last-resort', names: [...LIBRARY_CACHES], when: 'critical', idlestOnly: true, what: "the Unity build caches of the sandbox opened longest ago (the disk is critically low; rebuilt on demand)" });
   }
   rules.push({ id: 'worker-archives', dir: j(env.home, 'ff-worker'), names: ['*.tar', '*.tgz', '*.tar.gz', '*.zip', '*.bundle'], olderThanHours: policy.buildsOlderThanDays * D, what: 'a build or bundle archive' });
   // A GitHub Actions runner's job folders: checkouts and scratch it recreates for the next job.
@@ -517,6 +528,29 @@ export function rulesOnInstallDrive(rules: CleanupRule[], roots: string | string
 
 const LEFTOVER = /\.ffclean-\d+$/;
 
+async function anyTouchedSince(paths: string[], cutoff: number): Promise<boolean> {
+  for (const p of paths) if (fs.existsSync(p) && (await touchedSince(p, cutoff))) return true;
+  return false;
+}
+
+/**
+ * Of the Library folders `dirs`, the one whose project was opened longest ago (the newest change to Library's own entries, Temp,
+ * Logs or UserSettings, as staleUnityLibraries measures it), skipping one an editor or build has open: [] when there is none.
+ */
+async function idlestProject(dirs: string[], rule: CleanupRule): Promise<string[]> {
+  const mtime = async (p: string) => (await fs.promises.lstat(p).catch(() => undefined))?.mtimeMs ?? 0;
+  let best: { dir: string; at: number } | undefined;
+  for (const dir of dirs) {
+    const project = path.dirname(dir);
+    if (rule.unityIdle && fs.existsSync(path.join(project, 'Temp', 'UnityLockfile'))) continue;
+    if (!rule.names?.some((n) => fs.existsSync(path.join(dir, n)))) continue;
+    let at = Math.max(await mtime(dir), await mtime(path.join(project, 'Temp')), await mtime(path.join(project, 'Logs')), await mtime(path.join(project, 'UserSettings')));
+    for (const n of await fs.promises.readdir(dir).catch(() => [] as string[])) at = Math.max(at, await mtime(path.join(dir, n)));
+    if (!best || at < best.at) best = { dir, at };
+  }
+  return best ? [best.dir] : [];
+}
+
 /**
  * What a pass would remove now. Reads only, so it can be shown before anything goes. `low`: free space is
  * below the soft threshold, so the 'low' rules count too.
@@ -525,6 +559,8 @@ export async function planCleanup(opts: {
   rules: CleanupRule[];
   guard: CleanupGuard;
   low?: boolean;
+  /** Free space is below the critical line: the 'critical' rules count too (a live Unity cache, the last resort). */
+  critical?: boolean;
   now?: number;
   /** Unity projects under `roots` whose Library goes once the project was not opened for `deleteDays`. */
   libraries?: { roots: string[]; deleteDays: number };
@@ -532,9 +568,12 @@ export async function planCleanup(opts: {
   const now = opts.now ?? Date.now();
   const items = new Map<string, CleanupItem>();
   for (const r0 of opts.rules) {
-   for (const dir of await expandDir(r0.dir)) {
+   if (r0.when === 'low' && !opts.low) continue;
+   if (r0.when === 'critical' && !opts.critical) continue;
+   let dirs = await expandDir(r0.dir);
+   if (r0.idlestOnly) dirs = await idlestProject(dirs, r0);
+   for (const dir of dirs) {
     const rule = { ...r0, dir };
-    if (rule.when === 'low' && !opts.low) continue;
     const guard = rule.insideKept ? relaxFor(dir, opts.guard) : opts.guard;
     if (!ruleDirAllowed(rule.dir, guard)) continue;
     let names: string[];
@@ -545,10 +584,24 @@ export async function planCleanup(opts: {
     }
     // An editor or a batchmode build has the project open while Temp/UnityLockfile exists: its caches are not ours.
     if (rule.unityIdle && fs.existsSync(path.join(path.dirname(rule.dir), 'Temp', 'UnityLockfile'))) continue;
+    if (rule.staleCacheEntries) {
+      // Not while a build or an editor wrote its caches in the last olderThanHours (one between two of its passes).
+      if (await anyTouchedSince(LIBRARY_CACHES.map((c) => path.join(rule.dir, c)), now - rule.olderThanHours * 3_600_000)) continue;
+      for (const e of (await staleCacheEntries(path.dirname(rule.dir))).stale) {
+        if (!items.has(e.path) && !neverDelete(e.path, guard)) items.set(e.path, { path: e.path, rule: rule.id, why: `${rule.what}: ${e.why}`, base: dir });
+      }
+      continue;
+    }
     const match = rule.names?.map(glob);
     const except = rule.except?.map(glob);
     const old = rule.supersededOnly ? new Set(superseded(names)) : undefined;
     const cutoff = now - rule.olderThanHours * 3_600_000;
+    let togetherBytes: number | undefined;
+    if (rule.overBytes !== undefined && rule.overBytesTogether) {
+      togetherBytes = 0;
+      for (const n of names) if (!match || match.some((r) => r.test(n))) togetherBytes += await sizeOf(path.join(rule.dir, n));
+      if (togetherBytes <= rule.overBytes) continue;
+    }
     for (const n of names) {
       const p = path.join(rule.dir, n);
       if (items.has(p)) continue;
@@ -561,7 +614,7 @@ export async function planCleanup(opts: {
       if (old && !old.has(n)) continue;
       if (neverDelete(p, guard)) continue;
       if (fs.existsSync(path.join(p, 'Editor', 'Unity.exe')) || fs.existsSync(path.join(p, 'Unity.app'))) continue;
-      if (rule.overBytes !== undefined && (await sizeOf(p)) <= rule.overBytes) continue;
+      if (rule.overBytes !== undefined && togetherBytes === undefined && (await sizeOf(p)) <= rule.overBytes) continue;
       if (await touchedSince(p, cutoff)) continue;
       const repos = await reposIn(p);
       if (repos.length && rule.repos !== 'any') {
@@ -741,6 +794,11 @@ export interface CleanupSettings {
   everyMinutes: number;
   /** Below this much free space on any watched volume: a pass every LOW_PASS_MINUTES, and the 'low' rules. */
   softFreeGB: number;
+  /**
+   * Below this much free space a pass is critical (its 'critical' rules count: a live Unity cache, the last resort), as a
+   * 'critical' trigger is. Absent: only that trigger (the portal's host, hostHealth.ts criticalFreeGB).
+   */
+  criticalFreeGB?: number;
   /** Stale build and run output (server/staleOutput.ts, w459): its own schedule; absent: never looked at. */
   staleOutput?: StaleOutputSettings;
 }
@@ -749,6 +807,8 @@ export interface CleanupSettings {
 export interface PassOptions {
   stale: boolean;
   dryRun: boolean;
+  /** Below the critical line (CleanupSettings.criticalFreeGB, or a 'critical' trigger): the last-resort rules too. */
+  critical?: boolean;
 }
 
 /**
@@ -907,7 +967,8 @@ export class CleanupRunner {
           this.d.staleAt?.save(this.lastStaleAt);
         }
       }
-      const r = await this.d.pass(low, { stale: withStale, dryRun });
+      const critical = trigger === 'critical' || (before !== undefined && s.criticalFreeGB !== undefined && before < s.criticalFreeGB * GB);
+      const r = await this.d.pass(low, { stale: withStale, dryRun, ...(critical ? { critical } : {}) });
       const vols = await this.volumes();
       const after = vols.free;
       const soft = softFreeBytes(s.softFreeGB, this.d.fitSoftToVolume ? vols.total : undefined);
