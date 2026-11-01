@@ -31,6 +31,7 @@ export const USER_ASKED_TOOLS: ReadonlySet<string> = new Set([
   'delete_sandbox',
   'request_app_update',
   'set_app_config',
+  'set_ffbox_config',
   'republish_public',
   'add_machine',
   'remove_machine',

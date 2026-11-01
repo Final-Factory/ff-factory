@@ -743,7 +743,9 @@ FF Factory can ask FFBox a fixed set of read-only questions on the open link. No
 - **What answers them.** FFBox's host, never a container or a model. `ffwatch` writes each answer in advance, cut
   down: the config through an allowlist, ids for the ledger log, fixed words and numbers for the status. It scans
   each answer with `secret_in()`. The connector picks the file by the query's name, scans it again, and logs every
-  query. Every query is a read; none can write, start a container, change a setting or reach a model.
+  query. Every query is a read but two: `post_message` posts one guarded message as Max (w901, docs/ffbox.md "Posting
+  as Max"), and `set_config` changes one live setting of FFBox's config.json (w2672, below). None starts a container,
+  touches secrets.env or reaches a model.
 
 | `what` | args | `data` |
 |---|---|---|
@@ -764,6 +766,7 @@ FF Factory can ask FFBox a fixed set of read-only questions on the open link. No
 | `diagnosis_files` | `id` (required, a report id) | `report`, `runs` newest first (each: `conversation`, `run`, `files` with `name` and `bytes`: the top-level `.md`, `.txt`, `.log`, `.csv`, `.sym` and `.dmp` files of a run directory under `conversations/`; a run still in its pool is left out), `untrusted` |
 | `diagnosis_file` | `id`, `run` (the run id `diagnosis_files` gives) and `name` (all required) | `report`, `conversation`, `run`, `file`, `transfer` (at most 64 MB) and `untrusted`, or `refused` (off the allowlist, a symlink, or `withheld:` a text file carrying a secret's shape) with no `transfer`. Errors `not_found` (no such run of that report), `busy` |
 | `status` | none | `box` (`state`, `config` ok or misconfigured, `killed`, `draining`, `dry_run`, `commit`, `since`), `services` (`ffwatch`, `ffweb`, `ffdiscord-listener`, `ffintake`, `fffconnector`, `ffbox-modelproxy`, `ffbox-docker`, `ffbox-egress`, `ffbox-update.timer`: `active`, `inactive`, `failed`, ...), `queue`, `classes` (name, network, model, tier, free, max), `holds`, `dev_requests` (`mode` prefer or off, `ok`, `window_hours`, the counts `handed`, `taken`, `fallback`, `skipped`, and `last_fallback` `{ at, conversation, turn, error }`: operators' ffdev turns of the last 24 hours, `ok` false while the newest decided one fell back and ran on FFBox; an FFBox from before 2026-10-03 sends none), `connector` (version, protocol, since) |
+| `set_config` | `key` (one of FFBox's `ffbox_settings.LIVE`: `subscription.new_conversation_hold_pct`, `subscription.review_hold_pct`), `value` (JSON text: a number 0-1 or `null`), `reason` (required), `by`, or `revert` (a change id) instead of key and value; none of them: list | **changes one setting** (w2672): `key`, `old`, `new`, `effective` (read back live), `change` (`s` + 10 hex), `at`, `by`, `restart` (always false), `prev` (`config.json.prev`), `revert_of`; listing: `settable` (`key`, `kind`, `min`, `max`, `what`, `effective`), `file`, `recent` (the last ten changes). Or `refused` with a `reason`. Only config.json, never secrets.env; the value is applied live, so nothing restarts |
 
 ### A report's bytes: `report_chunk` and `report_end` (FFBox w320)
 
