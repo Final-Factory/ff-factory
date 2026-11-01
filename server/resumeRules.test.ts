@@ -13,6 +13,7 @@ import { PoolHeldError, Vault, fingerprintOf, newKeyText, type KeySource, type V
 import { machineRunEnv } from './secrets.ts';
 import { holdReason } from './placement.ts';
 import { poolForRef } from './usageGate.ts';
+import { outOfPool, poolLimits } from './tokenPool.ts';
 import { agentState } from '../shared/agentState.ts';
 import type { Config } from './config.ts';
 import type { PlanUsage, SessionInfo, UserInfo } from '../shared/types.ts';
@@ -294,4 +295,40 @@ test('w1863: on a computer held except w1785, a message to w1785’s own worker 
   const q = sessions.queued().filter((x) => x.id === 'd0ea49a2');
   assert.equal(q.length, 2);
   assert.ok(q.every((x) => x.on === 'machine' && /^lothdesktop is on hold \(.*except w1785\)/.test(x.why)));
+});
+
+test('w2785: a token at its own weekly cap (vault-ben-3 at 90%) gets no new work; a worker on it moves at its next turn; it comes back after its weekly reset', (t) => {
+  const { vault, ctx, on } = benVault(t);
+  const limits = poolLimits({ vault: { pool: { weeklyCapPercent: { 'vault-ben-3': 90 } } } });
+  const capped: VaultContext = { ...ctx, limits: () => limits };
+  const resume = (sid: string) => machineRunEnv({ machines: [] } as never, { id: 'lothdesktop' } as never, { role: 'workers', requestedBy: { userId: 'ben', displayName: 'Ben' }, sessionId: sid }, capped);
+  // Under its cap vault-ben-3 serves as before (its weekly window resets first, so the pick takes it).
+  on(B2, usage(0, 40, 4));
+  on(B3, usage(0, 89.9, 2));
+  assert.match(resume('w-cap').account, /vault-ben-3/, 'below the cap: no change');
+  // At the cap: no new work, and the worker that ran on it resumes on vault-ben-2.
+  on(B3, usage(0, 90, 2));
+  assert.match(resume('w-new').account, /vault-ben-2/, 'a new job never gets the capped token');
+  assert.match(resume('w-cap').account, /vault-ben-2/, 'the worker that ran on it is not kept there (sticky does not hold a capped token)');
+  // The move between turns: Agents.accountMove reads tokenUnusable, built from the pool's views as server/index.ts builds it.
+  const unusable = (account: string) => {
+    for (const list of vault.pools({ usageOf: ctx.usageOf, now: () => NOW, limits: () => limits }).values())
+      for (const x of list) if (`token:${x.entry.fingerprint}` === account && outOfPool(x.view)) return `vault token ${x.entry.name} …${x.entry.last4} (${x.view.why})`;
+    return undefined;
+  };
+  assert.match(unusable(KEY3) ?? '', /weekly 90% \(cap 90%\): retired until/);
+  assert.equal(unusable(KEY2), undefined);
+  const { agents, sessions, add } = world(t);
+  agents.tokenUnusable = unusable;
+  const idle = add(info('w-on-ben-3'));
+  sessions.send('w-on-ben-3', 'carry on', 'system');
+  assert.equal(idle.stops, 1, 'idle on the capped token: its process stops, so the next start picks vault-ben-2');
+  assert.match(sessions.queued()[0].why, /vault-ben-3 .*cap 90%.*restarts on its person's usable account/);
+  // Without a cap the same 90% is an ordinary token (today's behaviour).
+  assert.match(machineRunEnv({ machines: [] } as never, { id: 'lothdesktop' } as never, { role: 'workers', requestedBy: { userId: 'ben', displayName: 'Ben' }, sessionId: 'w-nocap' }, ctx).account, /vault-ben-3/, 'no cap: 90% weekly still serves');
+  // The weekly reset: the reading falls below the cap and the token takes work again.
+  on(B3, usage(0, 3, 7));
+  on(B2, usage(0, 100, 4));
+  assert.match(resume('w-after').account, /vault-ben-3/, 'after its reset vault-ben-3 takes new work again');
+  assert.equal(unusable(KEY3), undefined, 'after the reset it is usable again');
 });

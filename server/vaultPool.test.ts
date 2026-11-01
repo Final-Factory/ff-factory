@@ -554,3 +554,30 @@ test('w1539/w2722: a token near its reset takes priority in the listing by its r
   const ben = { [fp(B1)]: usage(4, 42, { weeklyDays: 119 * H }), [fp(B2)]: usage(0, 88, { weeklyDays: 26 * H }), [fp(SHARED)]: usage(8, 78, { weeklyDays: 45 * H }), [fp(L1)]: usage(0, 40, { weeklyDays: 4 }) };
   assert.deepEqual(labels(ben).ben, ['ben-b pool:ok priority', 'ben-c pool:ok', 'ben-a pool:ok']);
 });
+
+test('w2785: set_app_config vault.pool.weeklyCapPercent merges one token\'s cap, is checked, applied live, and dropped by off or null', (t) => {
+  assert.equal(OWNER_ONLY_KEYS.has('vault.pool.weeklyCapPercent'), false, 'a pool limit like the others');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pool-cap-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'config.json');
+  fs.writeFileSync(file, JSON.stringify({ port: 8790, vault: { pool: { sessionHoldPercent: 70 } } }));
+  const cfg = { voice: { vocabulary: [], ttsVoice: 'af_heart', device: 'auto' }, vault: { pool: { sessionHoldPercent: 70 } } } as unknown as Config;
+  assert.deepEqual(setAppConfig(file, cfg, 'vault.pool.weeklyCapPercent', 'vault-ben-3=90'), { before: undefined, after: { 'vault-ben-3': 90 } });
+  assert.deepEqual(poolLimits(cfg).weeklyCaps, { 'vault-ben-3': 90 }, 'live: the next pick reads it');
+  setAppConfig(file, cfg, 'vault.pool.weeklyCapPercent', { 'vault-lothsahn-1': '80' });
+  assert.deepEqual(poolLimits(cfg).weeklyCaps, { 'vault-ben-3': 90, 'vault-lothsahn-1': 80 }, 'merged: the other cap is kept');
+  setAppConfig(file, cfg, 'vault.pool.weeklyCapPercent', '{"vault-ben-3": 85}');
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).vault.pool, { sessionHoldPercent: 70, weeklyCapPercent: { 'vault-ben-3': 85, 'vault-lothsahn-1': 80 } }, 'written to config.json beside the other limits');
+  for (const bad of ['vault-ben-3=101', 'vault-ben-3=lots', 'nonsense', 90, '{bad json', { 'a b': 50 }]) assert.throws(() => setAppConfig(file, cfg, 'vault.pool.weeklyCapPercent', bad as never), /weeklyCapPercent/, String(bad));
+  assert.deepEqual(poolLimits(cfg).weeklyCaps, { 'vault-ben-3': 85, 'vault-lothsahn-1': 80 }, 'a refused value changes nothing');
+  setAppConfig(file, cfg, 'vault.pool.weeklyCapPercent', 'vault-lothsahn-1=off');
+  assert.deepEqual(poolLimits(cfg).weeklyCaps, { 'vault-ben-3': 85 });
+  setAppConfig(file, cfg, 'vault.pool.weeklyCapPercent', { 'vault-ben-3': null });
+  assert.equal(poolLimits(cfg).weeklyCaps, undefined, 'the last cap dropped: none');
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).vault.pool.weeklyCapPercent, undefined);
+  setAppConfig(file, cfg, 'vault.pool.weeklyCapPercent', 'vault-ben-3=90');
+  setAppConfig(file, cfg, 'vault.pool.weeklyCapPercent', null);
+  assert.equal(poolLimits(cfg).weeklyCaps, undefined, 'null drops them all');
+  checkAccountConfig({ vault: { pool: { weeklyCapPercent: { 'vault-ben-3': 90 } } } } as never);
+  assert.throws(() => checkAccountConfig({ vault: { pool: { weeklyCapPercent: { 'vault-ben-3': 190 } } } } as never), /percent from 0 to 100/);
+});

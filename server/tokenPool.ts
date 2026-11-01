@@ -11,6 +11,10 @@
 //   - 5-hour meter at or above `sessionHold` (80): no new process on it until that window resets;
 //   - weekly at or above `onePerWeekly` (95): one live process at a time;
 //   - weekly at or above `retireWeekly` (99): not handed out until the weekly window resets;
+//   - weekly at or above a token's own cap (`weeklyCaps`, config vault.pool.weeklyCapPercent, keyed by vault entry name; w2785,
+//     Ben: "stopping using ryding.ben@gmail.com account at 90% so I have 10% for personal use"): retired the same way, and
+//     kept for its person's own use: the near-reset rule never lifts it, and neither the orchestrator's use-it-up nor the ops
+//     worker takes it (capped, pickPool); it comes back once its weekly window resets below the cap;
 //   - a meter at 100 (or a rejection): used up, handed to nobody until it resets;
 //   - a person's own orchestrator, when every pool token is past its caps but none is used up, still runs on the one with
 //     the most room until it is used up: the caps keep workers from eating the person's own use, they do not lock them out;
@@ -44,6 +48,8 @@ export interface PoolLimits {
   onePerWeekly: number;
   /** Weekly meter at or above: the token is not handed out until the weekly window resets. */
   retireWeekly: number;
+  /** Per-token weekly caps by vault entry name (w2785): at or above its own cap a token is retired and taken by nothing (`capped`). None: no cap. */
+  weeklyCaps?: Readonly<Record<string, number>>;
   /** The dispatcher's token keeps this many percent of the weekly window per day left until that window resets. */
   reservePerDay: number;
   /** ... and this many percent of the 5-hour window. */
@@ -73,7 +79,27 @@ export interface PoolConfig {
   dispatcherStopPercent?: number;
   nearResetHours?: number;
   nearResetFloorTokens?: number;
+  /** Per-token weekly caps, percent, by vault entry name (w2785): `{ "vault-ben-3": 90 }`. */
+  weeklyCapPercent?: Record<string, number>;
 }
+
+/** The pool setting that is a map, not a number (w2785). */
+export const WEEKLY_CAP_KEY = 'weeklyCapPercent';
+/** A vault entry name as a cap's key. */
+export const CAP_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+/** Why `v` is not a vault.pool.weeklyCapPercent map, or undefined. */
+export function weeklyCapsProblem(v: unknown): string | undefined {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return 'config vault.pool.weeklyCapPercent is a map of vault entry name to a percent from 0 to 100, e.g. { "vault-ben-3": 90 }';
+  for (const [k, n] of Object.entries(v as Record<string, unknown>)) {
+    if (!CAP_NAME.test(k)) return `config vault.pool.weeklyCapPercent: "${k}" is not a vault entry name (letters, digits, ".", "_" and "-")`;
+    if (typeof n !== 'number' || !Number.isFinite(n) || n < 0 || n > 100) return `config vault.pool.weeklyCapPercent.${k} is a percent from 0 to 100`;
+  }
+  return undefined;
+}
+
+/** A token's own weekly cap (w2785), or undefined: none set. */
+export const capOf = (name: string, limits: PoolLimits): number | undefined => limits.weeklyCaps?.[name];
 
 export const POOL_CONFIG_KEYS = ['sessionHoldPercent', 'onePerWeeklyPercent', 'retireWeeklyPercent', 'reservePerDayPercent', 'reserveSessionPercent', 'dispatcherStopPercent', 'nearResetHours', 'nearResetFloorTokens'] as const;
 export type PoolConfigKey = (typeof POOL_CONFIG_KEYS)[number];
@@ -117,6 +143,9 @@ export function poolLimits(cfg: { vault?: { pool?: PoolConfig } } | undefined): 
   };
   // A hand-edited config.json that breaks the order is read as the retire limit for both (checkPoolConfig refuses it at load).
   if (out.onePerWeekly > out.retireWeekly) out.onePerWeekly = out.retireWeekly;
+  // Per-token caps (w2785): only a usable map counts (checkPoolConfig refuses a bad one at load); none leaves the field off.
+  const caps = p?.weeklyCapPercent;
+  if (caps !== undefined && !weeklyCapsProblem(caps) && Object.keys(caps).length) out.weeklyCaps = { ...caps };
   return out;
 }
 
@@ -125,7 +154,11 @@ export function checkPoolConfig(p: unknown): string | undefined {
   if (p === undefined) return undefined;
   if (!p || typeof p !== 'object' || Array.isArray(p)) return `config vault.pool is an object: ${POOL_CONFIG_KEYS.join(', ')}`;
   const o = p as Record<string, unknown>;
-  for (const k of Object.keys(o)) if (!(POOL_CONFIG_KEYS as readonly string[]).includes(k) && !RETIRED_POOL_KEYS.includes(k)) return `config vault.pool.${k} is not a setting (${POOL_CONFIG_KEYS.join(', ')})`;
+  for (const k of Object.keys(o)) if (!(POOL_CONFIG_KEYS as readonly string[]).includes(k) && k !== WEEKLY_CAP_KEY && !RETIRED_POOL_KEYS.includes(k)) return `config vault.pool.${k} is not a setting (${[...POOL_CONFIG_KEYS, WEEKLY_CAP_KEY].join(', ')})`;
+  if (o[WEEKLY_CAP_KEY] !== undefined) {
+    const why = weeklyCapsProblem(o[WEEKLY_CAP_KEY]);
+    if (why) return why;
+  }
   for (const k of POOL_CONFIG_KEYS) {
     const why = o[k] === undefined ? undefined : poolSettingProblem(k, o[k]);
     if (why) return why;
@@ -176,7 +209,12 @@ export interface PoolView {
   shown: string;
   /** The near-reset rule applies to the token (w1539, judgePool): its one-at-a-time and retire caps are lifted until its weekly reset. */
   nearReset?: boolean;
+  /** `retired` by the token's own weekly cap (w2785): kept for its person, so no use-it-up pick (orchestrator, ops worker) takes it either. */
+  capped?: boolean;
 }
+
+/** Whether running processes on a token in this view move off it at their next message (w1375): retired (the cap included) or used up. */
+export const outOfPool = (v: PoolView): boolean => v.state === 'retired' || v.state === 'exhausted';
 
 /** Whether a new job may start on a token in this view: `ok`, or `one-at-a-time` with its slot free. */
 export const usable = (v: PoolView): boolean => v.state === 'ok' || (v.state === 'one-at-a-time' && !v.slotTaken);
@@ -214,12 +252,19 @@ export function judge(t: PoolToken, limits: PoolLimits, now: number = Date.now()
   const base = { session: m.session, weekly: m.weekly, known: m.known, sessionResetsAt: m.sessionResetsAt, weeklyResetsAt: m.weeklyResetsAt };
   // A reading this portal did not just take (the latest poll failed, or none has answered since it started) says so (w1041).
   const read = (x: UsageMeter | undefined, n: number) => (x ? `${pc(n)}%` : 'unknown (counted as 50%)');
-  const numbers = `${m.noSessionLimit ? '' : `5-hour ${read(t.usage?.session, m.session)}, `}weekly ${read(t.usage?.weekly, m.weekly)}${t.usage?.reading ? ` [${t.usage.reading.kind} reading: ${t.usage.reading.why}]` : ''}`;
-  const meters = m.known ? numbers : 'no numbers yet: 5-hour and weekly unknown (counted as 50%, placed after every token with a reading)';
+  const cap = capOf(t.name, limits);
+  const capText = cap !== undefined ? ` (cap ${cap}%)` : '';
+  const numbers = `${m.noSessionLimit ? '' : `5-hour ${read(t.usage?.session, m.session)}, `}weekly ${read(t.usage?.weekly, m.weekly)}${capText}${t.usage?.reading ? ` [${t.usage.reading.kind} reading: ${t.usage.reading.why}]` : ''}`;
+  const meters = m.known ? numbers : `no numbers yet: 5-hour and weekly unknown (counted as 50%, placed after every token with a reading)${capText}`;
   if (m.weekly >= 100 || m.session >= 100) {
     const until = m.weekly >= 100 ? m.weeklyResetsAt : m.sessionResetsAt;
     const why = `${numbers}: used up until ${clock(until)}`;
     return { ...base, state: 'exhausted', why, shown: why, ...(until ? { until } : {}) };
+  }
+  // The token's own cap (w2785): a known weekly reading at or above it retires the token, near its reset too (the room is its person's).
+  if (cap !== undefined && typeof t.usage?.weekly?.percent === 'number' && m.weekly >= cap) {
+    const why = `weekly ${pc(m.weekly)}% (cap ${cap}%): retired until ${clock(m.weeklyResetsAt)}`;
+    return { ...base, state: 'retired', capped: true, why, shown: why, ...(m.weeklyResetsAt ? { until: m.weeklyResetsAt } : {}) };
   }
   if (m.weekly >= limits.retireWeekly && !nearReset) {
     const why = `weekly ${pc(m.weekly)}% (>= ${limits.retireWeekly}): retired until ${clock(m.weeklyResetsAt)}`;
@@ -375,14 +420,15 @@ export function pickPool(tokens: readonly PoolToken[], o: { orchestrator: boolea
     const keptReserved = o.sticky ? tokens.find((t) => t.id === o.sticky && free(t)) : undefined;
     const reserved = keptReserved ?? [...tokens].filter(free).sort(order)[0];
     if (reserved) return { token: reserved, how: 'in-reserve', views };
-    const capped = tokens.filter((t) => ['held', 'one-at-a-time', 'retired'].includes(state(t)) || (state(t) === 'reserved' && !free(t)));
+    // A token at its own weekly cap (w2785) is its person's: the orchestrator does not use it up.
+    const capped = tokens.filter((t) => !views.get(t.id)!.capped && (['held', 'one-at-a-time', 'retired'].includes(state(t)) || (state(t) === 'reserved' && !free(t))));
     const keptCapped = o.sticky ? capped.find((t) => t.id === o.sticky) : undefined;
     const use = keptCapped ?? [...capped].sort((a, b) => room(b) - room(a) || bySoonestReset(a, b))[0];
     if (use) return { token: use, how: 'over-cap', views };
   }
   if (o.ops) {
     // Every token not used up, the dispatcher's own last (its reserve), then the most room, then the soonest reset (w1112).
-    const left = tokens.filter((t) => state(t) !== 'exhausted');
+    const left = tokens.filter((t) => state(t) !== 'exhausted' && !views.get(t.id)!.capped);
     const use = [...left].sort((a, b) => Number(!!a.reserve) - Number(!!b.reserve) || room(b) - room(a) || bySoonestReset(a, b))[0];
     if (use) return { token: use, how: use.reserve?.inReserve ? 'in-reserve' : 'over-cap', views };
   }

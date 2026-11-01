@@ -12,7 +12,7 @@ import { placeId } from './placement.ts';
 import { MIN_PRIORITIES, type MinPriority } from '../shared/capacity.ts';
 import { DEV_DEFAULTS, type DevRequestsConfig } from './devRequests.ts';
 import { STALE_OUTPUT_DEFAULTS, staleOutputSettings, type StaleOutputSettings } from './staleOutput.ts';
-import { poolLimits, poolSettingProblem, type PoolConfigKey } from './tokenPool.ts';
+import { poolLimits, poolSettingProblem, weeklyCapsProblem, type PoolConfigKey } from './tokenPool.ts';
 import { AUTO_COMPACT_LIMITS, EARLY_COMPACT_MIN_TOKENS } from './autoCompact.ts';
 
 /** The efforts worker.effort takes (w2000, lothsahn's brief: "validated to low, medium, high or max"). */
@@ -83,6 +83,9 @@ export const SETTABLE_KEYS = [
   // The near-reset rule (w1539): its window in hours before a token's weekly reset (0: off), and the burst floor in tokens.
   'vault.pool.nearResetHours',
   'vault.pool.nearResetFloorTokens',
+  // A token's own weekly cap (w2785, docs/vault.md section 4): a map of vault entry name to percent, merged into the one set
+  // ({ "vault-ben-3": 90 }; a name set to null drops its cap; null drops them all). At its cap a token is retired for all work.
+  'vault.pool.weeklyCapPercent',
   // Who automatic work (scheduled standing runs, intake-triggered FFBox work) is attributed and billed to.
   'systemPayer',
   // Files people attach to messages (docs/attachments.md): the largest one, and how long one nobody sends on is kept.
@@ -568,6 +571,34 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       if (key === 'vault.pool.onePerWeeklyPercent' && n > now.retireWeekly) throw new Error(`${key} (${n}) cannot be above vault.pool.retireWeeklyPercent (${now.retireWeekly}): one at a time starts before a token is retired`);
       if (key === 'vault.pool.retireWeeklyPercent' && n < now.onePerWeekly) throw new Error(`${key} (${n}) cannot be below vault.pool.onePerWeeklyPercent (${now.onePerWeekly}): one at a time starts before a token is retired`);
       return n;
+    }
+    case 'vault.pool.weeklyCapPercent': {
+      // Per-token weekly caps (w2785): merged into the map in effect, so setting one token's cap keeps the others'.
+      if (value === null || value === undefined) return undefined;
+      let given: unknown = value;
+      if (typeof value === 'string') {
+        const t = value.trim();
+        if (t.startsWith('{')) {
+          try {
+            given = JSON.parse(t);
+          } catch {
+            throw new Error(`${key} is a map of vault entry name to a percent, e.g. {"vault-ben-3": 90}, or "vault-ben-3=90" ("vault-ben-3=off" drops it)`);
+          }
+        } else {
+          const m = /^([^=\s]+)\s*=\s*(\S+)$/.exec(t);
+          if (!m) throw new Error(`${key} is a map of vault entry name to a percent, e.g. {"vault-ben-3": 90}, or "vault-ben-3=90" ("vault-ben-3=off" drops it)`);
+          given = { [m[1]]: /^(off|null|none)$/i.test(m[2]) ? null : Number(m[2]) };
+        }
+      }
+      if (!given || typeof given !== 'object' || Array.isArray(given)) throw new Error(`${key} is a map of vault entry name to a percent, e.g. {"vault-ben-3": 90}`);
+      const merged: Record<string, unknown> = { ...(cfg?.vault?.pool?.weeklyCapPercent ?? {}) };
+      for (const [name, n] of Object.entries(given as Record<string, unknown>)) {
+        if (n === null) delete merged[name];
+        else merged[name] = typeof n === 'string' && n.trim() !== '' ? Number(n) : n;
+      }
+      const why = weeklyCapsProblem(merged);
+      if (why) throw new Error(why.replace('config vault.pool.', 'vault.pool.'));
+      return Object.keys(merged).length ? merged : undefined;
     }
     case 'vault.pool.nearResetHours':
     case 'vault.pool.nearResetFloorTokens': {

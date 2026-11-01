@@ -4,7 +4,8 @@
 //
 // An agent keeps the token its process started on while that token works: nothing here moves one early. A token is OUT when
 // Claude refuses it (a rate_limit_event with status "rejected" on any session's own requests, or a turn that ends on Claude's
-// usage-limit line, ledgerRules LIMIT_END), or when the pool rule retires it (weekly at vault.pool.retireWeeklyPercent). A
+// usage-limit line, ledgerRules LIMIT_END), or when the pool rule retires it (weekly at vault.pool.retireWeeklyPercent, or at the
+// token's own cap, vault.pool.weeklyCapPercent, w2785). A
 // refusal marks the token used up in the usage tracker until that window's reset (UsageTracker.markOut), so pickPool hands it
 // to nobody and Agents.accountMove restarts every idle agent on it, at its next message, on its person's best token
 // (w1375's path; never mid-turn, never with a background task running). This module adds the rest:
@@ -103,6 +104,8 @@ export interface PoolTokenView {
   label: string;
   state: string;
   why: string;
+  /** Retired by the token's own weekly cap (w2785): kept for its person, so leaving it is like leaving a used-up one. */
+  capped?: boolean;
 }
 
 /**
@@ -117,7 +120,9 @@ export function orchestratorOut(pools: Iterable<readonly [string, readonly PoolT
   const hit = all.flatMap(([, list]) => list).find((t) => t.key === account);
   if (!hit || (hit.state !== 'retired' && hit.state !== 'exhausted')) return undefined;
   const mine = all.find(([who]) => who.trim().toLowerCase() === pool.trim().toLowerCase())?.[1] ?? [];
-  const better = (t: PoolTokenView) => t.key !== account && t.state !== 'exhausted' && (hit.state === 'exhausted' || t.state !== 'retired');
+  // Off a capped token (w2785) any token not used up and not capped is better, as off a used-up one.
+  const leaving = hit.state === 'exhausted' || !!hit.capped;
+  const better = (t: PoolTokenView) => t.key !== account && t.state !== 'exhausted' && !t.capped && (leaving || t.state !== 'retired');
   return mine.some(better) ? `vault token ${hit.label} (${hit.why})` : undefined;
 }
 

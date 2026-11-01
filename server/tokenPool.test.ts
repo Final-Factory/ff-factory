@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { POOL_DEFAULTS, bySoonestReset, judgePool, pickOrder, checkPoolConfig, clock, heldReason, judge, metersOf, poolLabel, usable, pickPool, poolBanner, poolKind, poolLimits, reserveOf, reserveReason, resetIn, warningsForUser, type PoolToken } from './tokenPool.ts';
+import { POOL_DEFAULTS, bySoonestReset, judgePool, pickOrder, checkPoolConfig, clock, heldReason, judge, metersOf, outOfPool, poolLabel, usable, pickPool, poolBanner, poolKind, poolLimits, reserveOf, reserveReason, resetIn, warningsForUser, type PoolToken } from './tokenPool.ts';
 import type { PlanUsage } from '../shared/types.ts';
 
 const NOW = Date.parse('2026-10-09T12:00:00Z');
@@ -593,4 +593,55 @@ test('a plan with no 5-hour window (w2709): weekly only, 0% on that meter, so th
   const w = tok('odd', { session: 30 });
   delete w.usage!.weekly;
   assert.equal(judge(w, L).shown, '5-hour 30%, weekly unknown (counted as 50%)');
+});
+
+test('w2785: a token\'s own weekly cap: at or above it retired (cap shown), below it unchanged, no cap is today\'s behaviour, the reset brings it back', () => {
+  const C = poolLimits({ vault: { pool: { weeklyCapPercent: { b3: 90 } } } });
+  assert.deepEqual(C.weeklyCaps, { b3: 90 });
+  assert.equal(poolLimits(undefined).weeklyCaps, undefined, 'no cap set: the field is off');
+  const at = judge(tok('b3', { weekly: 90, weeklyDays: 2 }), C, NOW);
+  assert.equal(at.state, 'retired');
+  assert.equal(at.capped, true);
+  assert.equal(outOfPool(at), true, 'its agents move off it at their next turn');
+  assert.match(at.shown, /^weekly 90% \(cap 90%\): retired until \w{3} \d\d:\d\dZ$/);
+  assert.equal(at.until, iso(NOW + 2 * DAY), 'it lifts at the weekly reset');
+  const under = judge(tok('b3', { weekly: 86, weeklyDays: 2 }), C, NOW);
+  assert.equal(under.state, 'ok');
+  assert.match(under.shown, /weekly 86% \(cap 90%\)/, 'the line shows the cap under it too');
+  assert.equal(judge(tok('b2', { weekly: 90 }), C, NOW).state, 'ok', 'a token without a cap is untouched');
+  assert.equal(judge(tok('b3', { weekly: 90 }), L, NOW).state, 'ok', 'no cap config: 90% is an ordinary token');
+  assert.equal(judge(tok('b3', { none: true }), poolLimits({ vault: { pool: { weeklyCapPercent: { b3: 40 } } } }), NOW).state, 'ok', 'no reading: the cap needs a real weekly figure');
+  // The reset: the same token read below its cap after its window reset serves again.
+  assert.equal(judge(tok('b3', { weekly: 1, weeklyDays: 7 }), C, NOW).state, 'ok');
+});
+
+test('w2785: an account at its cap gets no new work from anyone: worker, orchestrator use-it-up, ops worker; near its reset too', () => {
+  const C = poolLimits({ vault: { pool: { weeklyCapPercent: { b3: 90 } } } });
+  const b2 = tok('b2', { weekly: 40, weeklyDays: 4 });
+  const b3 = tok('b3', { weekly: 90, weeklyDays: 2 });
+  assert.equal(pickAt([b2, b3], { orchestrator: false, limits: C }).token?.name, 'b2', 'the worker gets the other token, though b3 resets first');
+  assert.equal(pickAt([b2, b3], { orchestrator: false, limits: C, sticky: 'b3' }).token?.name, 'b2', 'a session on it moves off');
+  // Every other token past its limits: the orchestrator and the ops worker use those up, never the capped one.
+  const b2full = tok('b2', { weekly: 99.5, weeklyDays: 4 });
+  assert.equal(pickAt([b2full, b3], { orchestrator: true, limits: C }).token?.name, 'b2', 'the orchestrator uses the retired b2 up, not the capped b3 with more room');
+  assert.equal(pickAt([b2full, b3], { orchestrator: false, ops: true, limits: C }).token?.name, 'b2', 'the ops worker likewise');
+  const b2out = tok('b2', { weekly: 100, weeklyDays: 4 });
+  const none = pickAt([b2out, b3], { orchestrator: true, limits: C });
+  assert.equal(none.token, undefined, 'only the capped token left: the orchestrator is held, the 10% stays its person\'s');
+  assert.equal(pickAt([b2out, b3], { orchestrator: false, ops: true, limits: C }).token, undefined, 'the ops worker too');
+  assert.match(none.held?.why ?? '', /b3: weekly 90% \(cap 90%\): retired until/);
+  // Inside the last hours before its weekly reset the near-reset rule lifts the 95/99 caps, never the token's own.
+  const near = tok('b3', { weekly: 92, weeklyDays: 0.2 });
+  const views = judgePool([tok('b2', { weekly: 10, weeklyDays: 4 }), near], C, NOW);
+  assert.equal(views.get('b3')?.state, 'retired');
+  assert.equal(views.get('b3')?.capped, true);
+});
+
+test('w2785: the weeklyCapPercent config is a map of vault entry name to a percent', () => {
+  assert.equal(checkPoolConfig({ weeklyCapPercent: { 'vault-ben-3': 90 } }), undefined);
+  assert.equal(checkPoolConfig({ weeklyCapPercent: {} }), undefined);
+  assert.match(checkPoolConfig({ weeklyCapPercent: { 'vault-ben-3': 101 } }) ?? '', /weeklyCapPercent\.vault-ben-3 is a percent from 0 to 100/);
+  assert.match(checkPoolConfig({ weeklyCapPercent: 90 }) ?? '', /map of vault entry name/);
+  assert.match(checkPoolConfig({ weeklyCapPercent: { 'a b': 90 } }) ?? '', /not a vault entry name/);
+  assert.equal(poolLimits({ vault: { pool: { weeklyCapPercent: { x: 500 } } } }).weeklyCaps, undefined, 'a bad map is read as none');
 });
