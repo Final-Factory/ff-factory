@@ -70,8 +70,8 @@ test('judge: ok, held at the 5-hour limit, one at a time at 95% weekly, retired 
   assert.equal(none.state, 'ok');
   assert.equal(none.known, false);
   assert.equal(none.session, 50);
-  assert.match(none.why, /no numbers yet/);
-  assert.deepEqual(metersOf({ available: false, asOf: '', models: [] }), { session: 50, weekly: 50, known: false });
+  assert.match(none.why, /no numbers yet: 5-hour and weekly unknown/);
+  assert.deepEqual(metersOf({ available: false, asOf: '', models: [] }), { session: 50, weekly: 50, known: false, noSessionLimit: false });
   // The limits are the config's.
   const strict = { ...L, sessionHold: 50 };
   assert.equal(judge(tok('a', { session: 60 }), strict).state, 'held');
@@ -603,4 +603,21 @@ test('w1539/w1659: the settings: hours 0 (off) to 168, the floor a whole number 
   // Off: no token's caps are lifted, however near its reset.
   const near = tok('a', { weekly: 97, weeklyDays: 2 * HOUR, others: 1 });
   assert.equal(judgePool([near, tok('b')], OFF, NOW).get('a')!.state, 'one-at-a-time');
+});
+
+test('a plan with no 5-hour window (w2709): weekly only, 0% on that meter, so the 5-hour hold and buffer never trip', () => {
+  const t = tok('ultra', { weekly: 79, weeklyDays: 3 });
+  delete t.usage!.session;
+  const v = judge(t, L);
+  assert.equal(v.state, 'ok');
+  assert.equal(v.shown, 'weekly 79%', 'no session text at all (lothsahn: "display the weekly limit only")');
+  assert.equal(metersOf(t.usage).session, 0);
+  assert.equal(metersOf(t.usage).noSessionLimit, true);
+  assert.equal(scoreOf(t, NOW).perDay, scoreOf(tok('full', { session: 0, weekly: 79, weeklyDays: 3 }), NOW).perDay, 'scored with the whole 5-hour room');
+  const r = reserveOf(t.usage, L, NOW);
+  assert.equal(r.sessionIn || r.stopSession, false);
+  // A reading with the 5-hour window and no weekly one keeps the weekly as unknown, labelled, never a bare 50%.
+  const w = tok('odd', { session: 30 });
+  delete w.usage!.weekly;
+  assert.equal(judge(w, L).shown, '5-hour 30%, weekly unknown (counted as 50%)');
 });

@@ -1890,6 +1890,14 @@ export interface PlanUsage {
 }
 
 /**
+ * The plan has no 5-hour window (w2709): a reading that carries the weekly window but no 5-hour one. Anthropic dropped the
+ * 5-hour limit for verified Ultra (formerly Max 20x) accounts on 2026-10-30, and their replies stopped carrying the
+ * `anthropic-ratelimit-unified-5h-*` headers at each token's next 5-hour reset (portal journal, 2026-10-30/31). A token with
+ * no reading at all has an unknown 5-hour window, not none.
+ */
+export const noSessionLimit = (u: PlanUsage | undefined): boolean => !!u?.available && !!u.weekly && !u.session;
+
+/**
  * One Claude account the portal's agents or the user's machines run on, with its plan usage. Identified
  * safely: the last 4 characters of a token, or a login's email; never the credential itself.
  */

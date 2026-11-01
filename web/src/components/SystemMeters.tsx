@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef, useState, type ReactNode } from 'react';
-import type { AccountUsage, AppState, CleanupSummary, HostHealth, HostStats, PlanUsage, Provider, ProviderMetrics, SessionInfo, SystemStats, UnitySlotsReport, UsageMeter } from '../../../shared/types';
+import { noSessionLimit, type AccountUsage, type AppState, type CleanupSummary, type HostHealth, type HostStats, type PlanUsage, type Provider, type ProviderMetrics, type SessionInfo, type SystemStats, type UnitySlotsReport, type UsageMeter } from '../../../shared/types';
 import { resetClock, resetText, resetWhen } from '../../../shared/resetText';
 import { unitySlotsLine } from '../../../shared/fleet';
 import { cpuPct, disksHint, memPct, metricsLine, metricsStale, rootDisk } from '../../../shared/providerMetrics';
@@ -242,7 +242,7 @@ export function planRows(app: AppState, now: number): PlanRow[] {
     const title = [
       ...(a.vaultEmail ? [a.vaultEmail] : []),
       a.label,
-      ...(u ? [win('5-hour session', u.session), win('Weekly', u.weekly), ...u.models.map((m) => win(m.label, m))] : [a.usage ? `Usage unavailable${a.usage.why ? `: ${a.usage.why}` : ''}` : 'Usage not fetched yet']),
+      ...(u ? [...(noSessionLimit(u) ? [] : [win('5-hour session', u.session)]), win('Weekly', u.weekly), ...u.models.map((m) => win(m.label, m))] : [a.usage ? `Usage unavailable${a.usage.why ? `: ${a.usage.why}` : ''}` : 'Usage not fetched yet']),
       st.spentUntil !== undefined ? `Spent${st.spentUntil ? ` until ${resetWhen(st.spentUntil, now)}` : ''}` : live ? `In use now: ${live} agent${live === 1 ? '' : 's'}` : 'Not in use',
       ...a.where.filter((w) => w !== a.vaultEmail),
       ...(a.pool ? [a.pool.text] : []),
@@ -281,7 +281,7 @@ function PlanSummary({ rows, now }: { rows: PlanRow[]; now: number }) {
       </span>{' '}
       {first && u && (
         <>
-          <span className={`pf-nums pl-${planTone(first)}`}>{`weekly ${pct(u.weekly)}, session ${pct(u.session)}`}</span>{' '}
+          <span className={`pf-nums pl-${planTone(first)}`}>{`weekly ${pct(u.weekly)}${noSessionLimit(u) ? '' : `, session ${pct(u.session)}`}`}</span>{' '}
         </>
       )}
       {spent.length === rows.length ? (
@@ -572,7 +572,7 @@ function PlanList({ rows, now }: { rows: PlanRow[]; now: number }) {
               <span className="plan-item-name">{r.name}</span>
               <span className="plan-item-tail">
                 <span className="plan-item-sep">{' - '}</span>
-                {u ? `weekly ${pct(u.weekly)}, session ${pct(u.session)}` : r.a.usage ? 'usage unavailable' : 'not fetched yet'}
+                {u ? `weekly ${pct(u.weekly)}${noSessionLimit(u) ? '' : `, session ${pct(u.session)}`}` : r.a.usage ? 'usage unavailable' : 'not fetched yet'}
               </span>
             </div>
           );
