@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { run } from './proc.ts';
 import { parseStatus } from './gitStatus.ts';
+import { noiseFiles } from './editorNoise.ts';
 
 /**
  * Save a released worker's uncommitted work before its sandbox goes to other work (w656, run by its machine's daemon):
@@ -13,6 +14,7 @@ import { parseStatus } from './gitStatus.ts';
  * shared one (develop, master, main), or the untracked files are more than a commit should carry (SAVE_LIMITS: build
  * output, captures and recordings belong in the temp folder, not on a branch). Build output in the sandbox's own build
  * folders (SAVE_SKIPS) is neither saved nor counted: it stays where it is, uncommitted, and the release sweep clears it.
+ * Materials the Unity editor only re-serialized in play mode (editorNoise.ts, w2782) are restored to HEAD, not committed.
  */
 
 /**
@@ -95,6 +97,17 @@ export async function untrackedProblem(dir: string, limits = SAVE_LIMITS): Promi
   return undefined;
 }
 
+/**
+ * Restore to HEAD the modified .mat files whose every change is the editor's own (editorNoise.ts, w2782), and name them.
+ * The diff is against HEAD, so a staged change counts like an unstaged one; the restore resets both.
+ */
+export async function restoreEditorNoise(dir: string): Promise<string[]> {
+  const diff = await must(dir, ['diff', 'HEAD', '-U0', '--no-color', '--no-ext-diff', '--no-renames', '--no-textconv', '--', '*.mat'], 'reading the material changes');
+  const files = noiseFiles(diff);
+  if (files.length) await must(dir, ['checkout', 'HEAD', '--', ...files.map((f) => `:(literal)${f}`)], 'restoring editor noise');
+  return files;
+}
+
 export async function saveWork(opts: { dir: string; branch: string; message: string; limits?: typeof SAVE_LIMITS; env?: NodeJS.ProcessEnv }): Promise<SaveResult> {
   const { dir, branch } = opts;
   const st = parseStatus(await must(dir, ['status', '--porcelain=v2', '--branch'], 'git status'));
@@ -103,12 +116,14 @@ export async function saveWork(opts: { dir: string; branch: string; message: str
   if (!st.dirty && !st.untracked) return { files: 0, pushed: false, notes: ['nothing to save'] };
   const problem = st.untracked ? await untrackedProblem(dir, opts.limits) : undefined;
   if (problem) throw new Error(problem);
+  const restored = st.dirty ? await restoreEditorNoise(dir) : [];
+  const noise = restored.length ? [`restored ${restored.length} material(s) the Unity editor only re-serialized to HEAD instead of saving them (w2782): ${restored.join(', ')}`] : [];
   await must(dir, ['add', '-A', '--', '.', ...(await skipSpecs(dir))], 'git add');
   const files = (await must(dir, ['diff', '--cached', '--name-only', '-z'], 'listing what is saved')).split('\0').filter(Boolean).length;
-  if (!files) return { files: 0, pushed: false, notes: [`nothing to save (build output in ${SAVE_SKIPS.join(' or ')} stays, uncommitted)`] };
+  if (!files) return { files: 0, pushed: false, notes: [...noise, restored.length ? 'nothing else to save' : `nothing to save (build output in ${SAVE_SKIPS.join(' or ')} stays, uncommitted)`] };
   await must(dir, ['commit', '-q', '--no-verify', '-m', opts.message], 'git commit');
   const sha = (await must(dir, ['rev-parse', '--short', 'HEAD'], 'reading the commit')).trim();
-  const notes = [`committed ${files} file(s) on ${branch} as ${sha}`];
+  const notes = [...noise, `committed ${files} file(s) on ${branch} as ${sha}`];
   const push = await git(dir, ['push', '-u', 'origin', `${branch}:${branch}`], 5 * 60_000, opts.env);
   if (push.code === 0) notes.push(`pushed ${branch}`);
   else notes.push(`not pushed (${(push.stderr || push.stdout).trim().split('\n').slice(-1)[0]}): the commit is in this machine's repository, and the next switch away pushes it`);
