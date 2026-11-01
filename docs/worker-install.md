@@ -934,6 +934,11 @@ expands it, attaches it again at its letter (in a `finally`, so a failed expand 
 online (`Resize-Partition` to `Get-PartitionSupportedSize`'s maximum), and writes the new `maxGB` with the want cleared. The
 next update records that maximum for the host guard's estimate.
 
+A grow not yet done is taken back by the same control (w2748, lothsahn: "Change FF Factory so a 300 GB update clears the
+pending grow"): `machine_update` with `dev_drive_max_gb` at or below the drive's maximum drops `wantGB` from `devdrive.json`
+(`scripts/worker/worker.ts` `cancelDevDriveGrow`, `scripts/worker/devdrive.ts` `cancelledGrow`), and the guard has no grow
+pending. Never edit the state file by hand.
+
 A drive made before the task existed gets it the first time a larger size is asked: the update runs `devdrive.ps1 -Action
 ensure` again, elevated, which registers the helpers with `grow` among them. That is one administrator prompt on the PC's
 desktop, waited for 5 minutes (the daemon runs in the user's session, so its update can show one; an ssh session, in session 0,

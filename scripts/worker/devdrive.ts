@@ -124,6 +124,19 @@ export function defaultMaxGB(pool: { maxSandboxes: number; maxAgentsPerSandbox: 
 }
 
 /**
+ * The state file without a pending grow, when an update asks for a maximum the drive already has (w2748, lothsahn: "Change FF
+ * Factory so a 300 GB update clears the pending grow"): `dev_drive_max_gb` at or below `maxGB` drops a `wantGB` above it, so the
+ * host guard's `pendingGrow` sees none and never grows the drive. undefined: nothing to take back (no want, the want is already
+ * met, or the ask is larger, which `wantDevDriveGrow` writes as the new want). Exported for tests.
+ */
+export function cancelledGrow(st: Record<string, unknown>, askedGB: number): Record<string, unknown> | undefined {
+  const maxGB = Number(st.maxGB) || 0;
+  if (!('wantGB' in st) || askedGB > maxGB) return undefined;
+  const { wantGB: _want, ...rest } = st;
+  return rest;
+}
+
+/**
  * The Dev Drive record install() writes into root.json (w1038). install() builds a new manifest on every run, and the first
  * version (w900) left `devDrive` out of it: the first re-run after the move wrote root.json without it, the next update then saw
  * "no drive", took none, and daemon.json's sandbox root and seed went back to the root's own folders (LothDesktop, 2026-10-11,

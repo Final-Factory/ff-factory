@@ -9,7 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { carryDevDrive, claudeSlug, decideDevDrive, DEV_DRIVE_SIZES, defaultMaxGB, devDriveDirs, devDriveNeedGB, devDriveGuard, linkRootFolders, moveSandboxes, parseDevDriveOutput, type MoveDeps, type PoolRec } from './worker/devdrive.ts';
+import { cancelledGrow, carryDevDrive, claudeSlug, decideDevDrive, DEV_DRIVE_SIZES, defaultMaxGB, devDriveDirs, devDriveNeedGB, devDriveGuard, linkRootFolders, moveSandboxes, parseDevDriveOutput, type MoveDeps, type PoolRec } from './worker/devdrive.ts';
 import { daemonJson, devDriveFlags, layoutOf, manifestFor, parseArgs, planUpdate, preflightProblems, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
 import { saveWork } from '../server/saveWork.ts';
 import { fenceToRoot } from '../server/cleanup.ts';
@@ -680,4 +680,15 @@ test('moving the sandboxes: a worktree the pool names by another spelling of its
   assert.ok(!said.some((l) => /no longer lists|set aside/.test(l)), said.join('\n'));
   assert.equal(fs.readFileSync(path.join(w.newSandboxes, 'slot1', 'notes.txt'), 'utf8'), 'new file\n');
   fs.rmSync(w.base, { recursive: true, force: true });
+});
+
+test('w2748: an update asking for the maximum the drive already has takes back a pending grow; a larger ask or no want changes nothing', () => {
+  // LothDesktop, 2026-11-01: a 320 GB grow asked of a 300 GB drive, then cancelled with dev_drive_max_gb 300.
+  const lothdesktop = { vhdx: 'D:/work/ffw/devdrive.vhdx', letter: 'V', maxGB: 300, label: 'ffw', wantGB: 320 };
+  const kept = { vhdx: 'D:/work/ffw/devdrive.vhdx', letter: 'V', maxGB: 300, label: 'ffw' };
+  assert.deepEqual(cancelledGrow(lothdesktop, 300), kept);
+  assert.deepEqual(cancelledGrow(lothdesktop, 200), kept, 'smaller (it cannot shrink) still takes the grow back');
+  assert.equal('wantGB' in lothdesktop, true, 'the record read is not changed in place');
+  assert.equal(cancelledGrow(lothdesktop, 310), undefined, 'a larger ask is a new want, written by wantDevDriveGrow');
+  assert.equal(cancelledGrow({ letter: 'V', maxGB: 300 }, 300), undefined, 'no want: the file is left as it is');
 });
