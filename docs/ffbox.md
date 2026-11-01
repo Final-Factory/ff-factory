@@ -396,9 +396,40 @@ orchestrator's `reply_to_ffbox` in a conversation linked to its person's request
 `conversation` from an orchestrator or a worker, e.g. asking a reporter for their save. Both keep FFBox's secret scan and
 its ban on mentions. They read those threads and download their files (on a computer without the ffdiscord config,
 with `fetch_discord_thread_files`, [above](#bug-threads-files-read-from-ff-factory-w787)), and never react, rename or
-close there, never post with `ffdiscord` (it refuses them; `server/agents.ts`, `DISCORD_RULES`), and never post that
+close there (a person's orchestrator closes one as Max when its person asks: [below](#closing-bug-threads-as-max-w2670)), never post with `ffdiscord` (it refuses them; `server/agents.ts`, `DISCORD_RULES`), and never post that
 something is fixed or merged: a fix PR from an FF Factory worker carries one `Discord: <thread url>` line per thread, so
 FFBox reports it, and FFBox refuses a "fixed" or "merged" post in a thread it already told.
+
+### Closing bug threads as Max (w2670)
+
+Lothsahn, 2026-10-31: "Please add support for closing bug reports to FF factory" and "I would like to be able to ask you
+to scan all the open bug reports and close ones that are done, or to close specific ones I ask for", and of the scan:
+"I'd actually want you to scan for things that are on the ledger as already fixed." FFBox holds the bot, so a close is
+one more ask through the connector, like posting: no machine or portal holds a Discord token.
+
+- **Who**: a person's orchestrator only (`server/toolManifest.ts`, kinds `[P]`), when its person asks. No worker, no
+  dispatcher, and never a player's thread as a test: tests run in agent_testing.
+- **`open_bug_threads`** (`server/ffboxClose.ts`, `scanOpenThreads`): FFBox's `open_threads` query lists the unarchived
+  threads of every `bug_report` and `suggestion` watch entry (#bug-reports, dev_bug_reports, feedback), or of
+  agent_testing, with what FFBox knows of each (its conversation, its FF Factory hand-overs, its merge notice, its last
+  close). The portal judges each against the ledger first (`judgeThread`): the requests for it are found by its
+  `discord:<thread>` key (`requestsFor`), its `ffbox:<conversation>` key and FFBox's hand-overs, merges followed. **Done**:
+  a request is done (the answer names it, its PR and the release that carries it, `delivery.releasedIn`), or no request
+  but FFBox posted its merge notice and nobody wrote after it. **Not done**: a request is still open or stalled.
+  **Unclear**: no request, a declined or cancelled one, or a person wrote after the notice or the last close. Each
+  channel's line counts FFBox's closes there in 30 days; failures there are where the bot lacks Manage Threads.
+- **`close_bug_threads`** (`closeThreads`): at most 25 threads a call, each a thread id or link or "conversation <id>",
+  and an optional closing message. The orchestrator closes only what its person named or confirmed from a list it showed
+  them, never a whole scan unasked. FFBox's `close_thread` query archives, never locks (a reply reopens the thread). A
+  thread FFBox holds a conversation for is closed on its next pass behind every gate of its own close: after its merge
+  notice still going out, after its 👀 comes off and after earlier posts; a close already queued is the same close. The
+  conversation is marked closed, and one Max is answering is `busy`. FFBox posts its merge notice whatever the
+  conversation's state and then files the thread away again, so an early close never cuts the notice off or doubles it.
+  The closing message has post_as_max's guards, and FFBox refuses a "fixed" one after its notice.
+- **A thread to test on**: `post_as_max` with channel agent_testing and `new_thread` (a name) makes a thread off the
+  message that archives itself after a day; refused anywhere else.
+- **FFBox's side**: its README, "Closing a thread as Max"; `fff.close.enabled` and `fff.close.per_hour` (30) in its
+  config.md; every close is a `max_close` row there. Deploy: ffbox master from `382d4bd` (2026-10-31) and the portal.
 
 ## Touchpoints with FF Factory
 

@@ -352,6 +352,7 @@ export const CATALOG = {
     thread: z.string().max(200).optional().describe("A Discord thread id of that channel; with channel conversation, the conversation's Discord thread (its id or URL)."),
     conversation: z.string().max(20).optional().describe("With channel conversation: FFBox's conversation id (ffbox_activity and FFBox's messages name it)."),
     key: z.string().max(80).optional().describe('The dedupe key: a message with the same key in the same place is posted once, and a repeat answers the first one\'s link. Required for dev_patch_notes: the release\'s version, e.g. 0.50.0.94.'),
+    new_thread: z.string().max(100).optional().describe('agent_testing only, with no thread: a name; FFBox makes a thread off the posted message (it archives itself after a day), for trying a close where no player is.'),
   },
   /** docs/orchestrators.md, "Workers read the ledger" (w642). Read-only: the portal answers from the ledger (server/workRead.ts). */
   /** A worker's rules most tasks do not need (w1482, server/workerRules.ts). */

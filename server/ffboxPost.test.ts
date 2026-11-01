@@ -59,7 +59,7 @@ test('post_message is a query the portal asks, waits 20 s for, and never keeps a
 });
 
 test('the worker tool takes a channel of the allowlist, text or a file, a thread, a conversation and a key, and no bug channel', () => {
-  assert.deepEqual(Object.keys(CATALOG.post_as_max).sort(), ['channel', 'conversation', 'file', 'key', 'skip_lines', 'text', 'thread']);
+  assert.deepEqual(Object.keys(CATALOG.post_as_max).sort(), ['channel', 'conversation', 'file', 'key', 'new_thread', 'skip_lines', 'text', 'thread']);
   assert.deepEqual([...POST_CHANNELS], ['dev_patch_notes', 'dev_chat', 'agent_testing']);
   for (const bug of ['bug_reports', 'dev_bug_reports']) {
     assert.ok(!CATALOG.post_as_max.channel.safeParse(bug).success, `${bug} is not a channel this tool posts into`);
