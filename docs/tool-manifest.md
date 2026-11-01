@@ -32,7 +32,7 @@ The groups (`TOOL_GROUPS`), picked from what the tools are used for together:
 | `machines` | `list_machines`, `system_status`, `add_machine`, `set_machine_label`, `machine_daemon`, `convert_machine`, `relocate_machines`, `machine_cleanup`, `cleanup_log`, `remove_machine`, `host_recovery`, `ops_worker`, `portal_logs`, `build_plan`, `timed_run`, `timed_place` |
 | `timers` | `wake_me`, `set_timer`, `list_timers`, `update_timer`, `cancel_timer`, `set_heartbeat`, `cancel_wake`, `blocked_on`, `waiting_on_person` |
 | `ffbox` | `ffbox_activity`, `send_to_ffbox`, `reply_to_ffbox`, `fetch_ffbox_report`, `fetch_discord_thread_files`, `list_ffbox_files`, `fetch_ffbox_symbols` |
-| `max` | `max_activity`, `post_as_max` |
+| `max` | `max_activity`, `post_as_max`, `open_bug_threads`, `close_bug_threads` (a person's orchestrator only, w2670) |
 | `spend` | `spend_report` |
 | `admin` | `set_app_config`, `set_pool`, `request_app_update`, `republish_public` |
 | `standing` | the standing-agent and delegation tools, `request_delegation`, `my_delegations` |

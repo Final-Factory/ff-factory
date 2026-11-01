@@ -246,7 +246,7 @@ interface PendingTransfer {
 }
 
 /** Answers never kept for the "last known" fallback: a page of logs or reports, or one report, would answer another question, and an earlier post's link would pass for this one's. */
-const NOT_KEPT = new Set(['logs', 'reports', 'report', 'thread_files', 'thread_file', 'bug_threads', 'thread_messages', 'post_message', 'symbols', 'symbol_file', 'diagnosis_files', 'diagnosis_file', 'symbols_put', 'symbols_ingest']);
+const NOT_KEPT = new Set(['logs', 'reports', 'report', 'thread_files', 'thread_file', 'bug_threads', 'thread_messages', 'post_message', 'close_thread', 'open_threads', 'symbols', 'symbol_file', 'diagnosis_files', 'diagnosis_file', 'symbols_put', 'symbols_ingest']);
 
 /** FFBox's conversation id (docs/ffbox-connector-contract.md, `conversation`). */
 export const CONVERSATION_ID = /^[A-Za-z0-9._:-]{1,80}$/;

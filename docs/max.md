@@ -22,7 +22,11 @@ and reports merged fixes there. The intake never files from them, and the `ffdis
 edit, rename or close in those channels and their threads. Since w1640 (lothsahn, 2026-10-20: "you or workers should be
 able to post direct to discord by asking ffbox to do it on your behalf through the tunnel, and it will post what you
 say") an orchestrator or a worker posts in one of their threads through FFBox: `reply_to_ffbox` or `post_as_max` with
-channel `conversation` ([ffbox.md](ffbox.md#discord)), never a "fixed" or "merged" notice. A worker that
+channel `conversation` ([ffbox.md](ffbox.md#discord)), never a "fixed" or "merged" notice. Since w2670 (lothsahn,
+2026-10-31: "I would like to be able to ask you to scan all the open bug reports and close ones that are done, or to
+close specific ones I ask for") a person's orchestrator also closes their threads through FFBox, as Max:
+`open_bug_threads` and `close_bug_threads` ([ffbox.md](ffbox.md#closing-bug-threads-as-max-w2670)). A close is an
+archive, never a lock, and no worker closes one. A worker that
 fixes a bug from one adds `Discord: https://discord.com/channels/<guild id>/<thread id>` to its PR description instead
 ([intake.md](intake.md#ffbox-owns-bug-reports)). The Discord inbound below still shows them, read-only.
 

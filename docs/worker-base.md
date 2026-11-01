@@ -104,7 +104,9 @@ Within one part, removed by the no-decision PRs (each rule stays, said once):
 Across parts (each worker reads both; removing one copy is a decision, D7 and D9):
 - **Discord.** Worker prompt (w1640): "#bug-reports and dev_bug_reports belong to FFBox: read their threads and download their
   files freely; never react, rename or close there or post with `ffdiscord`. When your work calls for a word to a reporter
-  (asking for their save), post it through FFBox with `post_as_max` channel `conversation`." CLAUDE.md: "Agents outside an
+  (asking for their save), post it through FFBox with `post_as_max` channel `conversation`." (A close is a person's
+  orchestrator's `close_bug_threads`, w2670; a worker's own test thread comes from `post_as_max` `new_thread` in
+  agent_testing.) CLAUDE.md: "Agents outside an
   FFBox turn read their threads and download files, and never post, reply, react, rename or close there (`ffdiscord` refuses
   them" (the game repo's copy follows w1640 in its own PR). Worker: "When you merge
   or land an `ffbox/*` branch or PR (a `review/*` rebase included), never post a "fixed" or "merged" notice to the reporter, in any

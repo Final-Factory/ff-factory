@@ -127,6 +127,9 @@ export const TOOL_MANIFEST = {
   // max
   max_activity: { group: 'max', kinds: [D, P, R], always: [P] },
   post_as_max: { group: 'max', kinds: [W, P] },
+  // w2670: closing bug threads as Max through FFBox, a person's orchestrator only.
+  open_bug_threads: { group: 'max', kinds: [P] },
+  close_bug_threads: { group: 'max', kinds: [P] },
   // spend
   spend_report: { group: 'spend', kinds: [D, P, R] },
   // admin
