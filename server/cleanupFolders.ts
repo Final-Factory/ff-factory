@@ -6,6 +6,7 @@ import { requestIdsIn, CONTEXT_MAX_AGE_HOURS } from './staleOutput.ts';
 import type { SessionOwner } from './resumable.ts';
 import { finishedBulkIn, INSTALL_LEFTOVER_DEFAULTS, newestWrite } from './installLeftovers.ts';
 import type { PublishedRecord } from './published.ts';
+import { leaseLive, mentions, OWN_LEFTOVER_DEFAULTS, type SlotLease } from './ownLeftovers.ts';
 
 /**
  * The folders a clean-up worker may delete, judged against the ledger (w1379). On 2026-10-15 w1374, LothDesktop's low-disk
@@ -55,7 +56,7 @@ export interface CleanupFacts {
 
 export interface FolderRow {
   path: string;
-  kind: 'session-temp' | 'session-bulk' | 'scratch' | 'sandbox-output' | 'named' | 'other';
+  kind: 'session-temp' | 'session-bulk' | 'scratch' | 'sandbox-output' | 'player-slot' | 'named' | 'other';
   verdict: 'keep' | 'delete';
   why: string;
   bytes?: number;
@@ -117,8 +118,59 @@ export function judgeSandbox(id: string, f: CleanupFacts): Pick<FolderRow, 'verd
   return { verdict: 'delete', why: `no worker in ${id} is running or on an open, stalled or paused request` };
 }
 
+/** What a player slot's verdict needs beyond the facts (w2796): who this machine is, which pids live, what runs now. */
+export interface SlotContext {
+  /** This machine's host name, as player_slots.py writes it in a lease (socket.gethostname().lower()). */
+  host: string;
+  alive: (pid: number) => boolean;
+  /** The command lines of the processes running now; undefined when they could not be read (then nothing is deleted). */
+  procs?: string[];
+}
+
+const readJson = (p: string): unknown => {
+  try {
+    return JSON.parse(fs.readFileSync(p, 'utf8'));
+  } catch {
+    return undefined;
+  }
+};
+
+/**
+ * A player slot (<root>/players/slotK, scripts/nightly/player_slots.py) by its own lease files (w2796), as the pool judges
+ * them (Pool._live: a local lease while its pid lives, a remote one by its age, none past FF_PLAYER_SLOT_MAX_AGE_H): leased
+ * is KEEP; unleased is DELETE, the next launch fills it again from the build. Also kept: a fill in progress (slot.json
+ * "filling": the pool copies the build before it writes the lease) and a slot a running process names (a game player
+ * nobody leased, a person's game, w1894). Before w2796 `check` called every slot "not a place with an owner in the
+ * ledger", and w2795's worker had to read the leases by hand to find nine free slots (about 17 GB).
+ */
+export function judgePlayerSlot(slot: string, ctx: SlotContext | undefined, now = Date.now()): Pick<FolderRow, 'verdict' | 'why'> {
+  if (!ctx) return { verdict: 'keep', why: 'a player slot: its leases were not read here' };
+  const leasesDir = path.join(slot, 'leases');
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(leasesDir).filter((n) => n.endsWith('.json'));
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') return { verdict: 'keep', why: `a player slot whose leases cannot be read (${(e as Error).message})` };
+  }
+  const leases = names.map((n) => readJson(path.join(leasesDir, n))).filter((l): l is SlotLease => !!l && typeof l === 'object');
+  const maxAgeHours = OWN_LEFTOVER_DEFAULTS.leaseMaxAgeHours;
+  const live = leases.filter((l) => leaseLive(l, { host: ctx.host, now, maxAgeHours, alive: ctx.alive }));
+  if (live.length) {
+    const who = live.map((l) => [l.session ? `worker ${l.session}` : '', l.host ? `on ${l.host}` : '', l.pid ? `pid ${l.pid}` : ''].filter(Boolean).join(' ')).join('; ');
+    return { verdict: 'keep', why: `a player slot leased now (${who}): a run plays from it` };
+  }
+  const marker = readJson(path.join(slot, 'slot.json')) as { state?: string; filled?: number } | undefined;
+  if (marker?.state === 'filling' && now - Number(marker.filled) * 1000 < maxAgeHours * 3_600_000) return { verdict: 'keep', why: 'a launch is filling this player slot now (slot.json "filling"; its lease comes after the copy)' };
+  if (!ctx.procs) return { verdict: 'keep', why: 'a player slot with no live lease, but the running processes could not be read to see that nothing plays from it' };
+  if (ctx.procs.some((c) => mentions(c, slot))) return { verdict: 'keep', why: "a player slot no lease holds, but a running process plays from it (a person's game, or a run whose lease went stale)" };
+  const stale = leases.length ? ` (${leases.length} lease file(s), none live)` : '';
+  return { verdict: 'delete', why: `a player slot no live lease holds${stale}: the next launch fills it again from the build. Its files may be hard links to a build that still exists, so it can free less than its size` };
+}
+
+const isSlotDir = (name: string) => /^slot[\w-]*$/i.test(name);
+
 /** The verdict for one path, wherever it is. */
-export function judgePath(p: string, f: CleanupFacts, now = Date.now()): FolderRow {
+export function judgePath(p: string, f: CleanupFacts, now = Date.now(), slots?: SlotContext): FolderRow {
   const row = (kind: FolderRow['kind'], r: Pick<FolderRow, 'verdict' | 'why'>): FolderRow => ({ path: p, kind, ...r });
   const bad = factsProblem(f, now);
   if (bad) return row('other', { verdict: 'keep', why: bad });
@@ -138,6 +190,7 @@ export function judgePath(p: string, f: CleanupFacts, now = Date.now()): FolderR
   }
   const rel = norm(p).slice(norm(root).length + 1).split('/');
   if (rel[0] === 'scratch' && rel.length >= 2) return row('scratch', judgeNamed(rel[1]!, f, now));
+  if (rel[0] === 'players' && rel.length >= 2 && isSlotDir(rel[1]!)) return row('player-slot', judgePlayerSlot(path.join(root, 'players', rel[1]!), slots, now));
   const named = rel.find((seg) => requestIdsIn(seg).length);
   if (named) return row('named', judgeNamed(named, f, now));
   return row('other', { verdict: 'keep', why: 'not a place with an owner in the ledger' });
@@ -242,19 +295,20 @@ export async function finishedRows(dir: string, f: CleanupFacts, o: { now?: numb
 }
 
 /** Every folder a clean-up could take, judged. Sizes are measured for the deletable ones only unless `sizes` asks for all. */
-export async function planFolders(f: CleanupFacts, o: { now?: number; sizes?: 'all' | 'delete' | 'none'; localWork?: (dir: string) => Promise<string | undefined>; published?: Map<string, PublishedRecord[]>; ignoredEvidence?: (repo: string) => Promise<string[] | undefined> } = {}): Promise<FolderRow[]> {
+export async function planFolders(f: CleanupFacts, o: { now?: number; sizes?: 'all' | 'delete' | 'none'; localWork?: (dir: string) => Promise<string | undefined>; published?: Map<string, PublishedRecord[]>; ignoredEvidence?: (repo: string) => Promise<string[] | undefined>; slots?: SlotContext } = {}): Promise<FolderRow[]> {
   const now = o.now ?? Date.now();
   const bad = factsProblem(f, now);
   if (bad) return [{ path: f.root ?? '(no install folder)', kind: 'other', verdict: 'keep', why: bad }];
   const paths: string[] = [];
   if (f.tempRoot) for (const e of entries(f.tempRoot)) if (e.isDirectory() && sessionOfDir(e.name)) paths.push(path.join(f.tempRoot, e.name));
   for (const e of entries(path.join(f.root!, 'scratch'))) paths.push(path.join(f.root!, 'scratch', e.name));
+  for (const e of entries(path.join(f.root!, 'players'))) if (e.isDirectory() && isSlotDir(e.name)) paths.push(path.join(f.root!, 'players', e.name));
   for (const sb of f.sandboxes) {
     for (const top of ['Builds', '.nightly-builds']) for (const e of entries(path.join(sb.path, top))) paths.push(path.join(sb.path, top, e.name));
   }
   const rows: FolderRow[] = [];
   for (const p of paths) {
-    const r = await withGitCheck(judgePath(p, f, now), f.root, o.localWork);
+    const r = await withGitCheck(judgePath(p, f, now, o.slots), f.root, o.localWork);
     rows.push(r);
     const sid = r.kind === 'session-temp' ? sessionOfDir(path.basename(p)) : undefined;
     if (r.verdict === 'keep' && sid && finishedSession(sid, f)) rows.push(...(await finishedRows(p, f, { now, published: o.published, localWork: o.localWork, ignoredEvidence: o.ignoredEvidence })));
@@ -278,7 +332,7 @@ export function renderFolders(rows: FolderRow[], f: CleanupFacts | undefined, no
     `Folders under ${f!.root} judged against the ledger (facts ${Math.max(0, Math.round((now - Date.parse(f!.at)) / 1000))} s old): ${keep.length} to KEEP, ${del.length} deletable${total ? ` (${gb(total)})` : ''}.`,
     ...keep.map(line),
     ...del.map(line),
-    'Delete only the DELETE rows, and only inside the install folder. A KEEP row belongs to a request that has not closed (open, stalled or paused), holds a git repo with work on no remote or evidence published nowhere else, or could not be attributed: report it, never remove it. A DELETE row inside a kept folder (a finished worker\'s bulk, w2223) goes alone; its folder stays.',
+    'Delete only the DELETE rows, and only inside the install folder. A KEEP row belongs to a request that has not closed (open, stalled or paused), holds a git repo with work on no remote or evidence published nowhere else, or could not be attributed: report it, never remove it. A DELETE row inside a kept folder (a finished worker\'s bulk, w2223) goes alone; its folder stays. A player slot is judged by its lease files (w2796).',
     '`ff-leftovers check <path>...` judges any other path before you delete it.',
     '',
   ].join('\n');

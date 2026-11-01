@@ -41,7 +41,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { run } from '../server/proc.ts';
-import { factsProblem, finishedRows, finishedSession, judgePath, planFolders, renderFolders, withGitCheck, type CleanupFacts, type FolderRow } from '../server/cleanupFolders.ts';
+import { factsProblem, finishedRows, finishedSession, judgePath, planFolders, renderFolders, withGitCheck, type CleanupFacts, type FolderRow, type SlotContext } from '../server/cleanupFolders.ts';
+import { isAlive } from '../server/proc.ts';
 import { norm, within } from '../server/cleanup.ts';
 import { publishedFile, readPublished } from '../server/published.ts';
 import { parsePsJson } from '../server/watchdog.ts';
@@ -825,8 +826,8 @@ export function readCleanupFacts(file: string | undefined): CleanupFacts | undef
 }
 
 /** One path for `check`: by the ledger, and inside a finished worker's kept folder by its rebuildable bulk (w2223). */
-async function checkPath(p: string, facts: CleanupFacts, now: number, published: ReturnType<typeof readPublished>): Promise<Pick<FolderRow, 'verdict' | 'why'>> {
-  const r = await withGitCheck(judgePath(p, facts, now), facts.root);
+async function checkPath(p: string, facts: CleanupFacts, now: number, published: ReturnType<typeof readPublished>, slots?: SlotContext): Promise<Pick<FolderRow, 'verdict' | 'why'>> {
+  const r = await withGitCheck(judgePath(p, facts, now, slots), facts.root);
   if (r.verdict === 'delete' || r.kind !== 'session-temp' || !facts.tempRoot) return r;
   const name = norm(p).slice(norm(facts.tempRoot).length + 1).split('/')[0]!;
   const dir = path.join(facts.tempRoot, name);
@@ -842,7 +843,15 @@ async function checkPath(p: string, facts: CleanupFacts, now: number, published:
  * given paths and exits 1 when any is to be kept. Whatever is not provably closed or ownerless is kept, and so is a folder
  * holding a git repo with uncommitted changes, commits on no remote or a stash (w1387), as the portal's own clean-up keeps it.
  */
-export async function foldersMain(cmd: 'folders' | 'check', args: string[], e: NodeJS.ProcessEnv = process.env, now = Date.now(), out: (s: string) => void = (s) => void process.stdout.write(s)): Promise<number> {
+/** The player slots' context for `folders` and `check` (w2796): this host, live pids and the running processes' command lines. */
+export async function slotContext(): Promise<SlotContext> {
+  const platform: UnityPlatform = process.platform === 'win32' ? 'win32' : process.platform === 'linux' ? 'linux' : 'darwin';
+  const { realDeps } = await import('./unity.ts');
+  const procs = await realDeps(platform).procs().then((ps) => ps.map((p) => p.cmd), () => undefined);
+  return { host: os.hostname().toLowerCase(), alive: isAlive, procs };
+}
+
+export async function foldersMain(cmd: 'folders' | 'check', args: string[], e: NodeJS.ProcessEnv = process.env, now = Date.now(), out: (s: string) => void = (s) => void process.stdout.write(s), slots: () => Promise<SlotContext> = slotContext): Promise<number> {
   const facts = readCleanupFacts(e.FF_CLEANUP_FACTS);
   // What this machine's workers published, beside the facts in the daemon's folder (w2223): a finished worker's evidence published there may go.
   const published = readPublished(e.FF_CLEANUP_FACTS ? publishedFile(path.dirname(e.FF_CLEANUP_FACTS)) : undefined);
@@ -852,6 +861,7 @@ export async function foldersMain(cmd: 'folders' | 'check', args: string[], e: N
       return 2;
     }
     const bad = factsProblem(facts, now);
+    const ctx = bad ? undefined : await slots();
     let kept = 0;
     for (const a of args) {
       // w1755: on Windows a path off the install drive (C:) is not looked at, not even for its git state.
@@ -865,13 +875,13 @@ export async function foldersMain(cmd: 'folders' | 'check', args: string[], e: N
           ? { verdict: 'keep' as const, why: "the game's data folder under AppData (Never Games): read-only, never deleted, moved or written by a clean-up (w1755)" }
         : offDrive
           ? { verdict: 'keep' as const, why: `not looked at: off this Windows computer's install drive ${driveLabel(facts!.root!)}; disk work never reads, measures or touches C: (w1755)` }
-          : await checkPath(path.resolve(a), facts!, now, published);
+          : await checkPath(path.resolve(a), facts!, now, published, ctx);
       if (r.verdict === 'keep') kept++;
       out(`${r.verdict === 'keep' ? 'KEEP  ' : 'DELETE'}  ${a}\n        ${r.why}\n`);
     }
     return kept ? 1 : 0;
   }
-  const rows = factsProblem(facts, now) ? [] : await planFolders(facts!, { now, published });
+  const rows = factsProblem(facts, now) ? [] : await planFolders(facts!, { now, published, slots: await slots() });
   out(renderFolders(rows, facts, now));
   return factsProblem(facts, now) ? 1 : 0;
 }

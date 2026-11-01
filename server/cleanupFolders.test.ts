@@ -315,3 +315,61 @@ test("w1755: ff-leftovers check of the game's AppData Never Games folder says KE
   assert.match(text, /the game's data folder under AppData \(Never Games\): read-only, never deleted, moved or written by a clean-up \(w1755\)/);
   assert.match(text, /not looked at: off this Windows computer's install drive V:/);
 });
+
+/**
+ * w2796: `ff-leftovers check` called every V:\ffw\players\slotN-M "not a place with an owner in the ledger", and w2795's worker
+ * read the pool's lease files by hand to find nine free slots (about 17 GB). A slot is now judged by its own leases.
+ */
+test('w2796: a player slot is KEEP while leased, filling or played from, and DELETE when no live lease holds it', async (t) => {
+  const { root, facts } = world(t);
+  const NOW = Date.now();
+  const slot = (name: string, o: { leases?: object[]; marker?: object } = {}) => {
+    const d = path.join(root, 'players', name);
+    fs.mkdirSync(path.join(d, 'player'), { recursive: true });
+    fs.mkdirSync(path.join(d, 'leases'), { recursive: true });
+    fs.writeFileSync(path.join(d, 'player', 'FinalFactory.exe'), 'x');
+    fs.writeFileSync(path.join(d, 'slot.json'), JSON.stringify(o.marker ?? { state: 'ready', sha: 'abc', used: NOW / 1000 }));
+    (o.leases ?? []).forEach((l, i) => fs.writeFileSync(path.join(d, 'leases', `l${i}.json`), JSON.stringify(l)));
+    return d;
+  };
+  const t0 = NOW / 1000;
+  const leased = slot('slot0', { leases: [{ pid: 42, host: 'lothdesktop', time: t0 - 60, session: 'a735f37c' }] });
+  const dead = slot('slot1', { leases: [{ pid: 7, host: 'lothdesktop', time: t0 - 60 }] });
+  const old = slot('slot2-1', { leases: [{ pid: 42, host: 'lothdesktop', time: t0 - 13 * 3600 }] });
+  const remote = slot('slot3', { leases: [{ pid: 9, host: 'm5', time: t0 - 600 }] });
+  const filling = slot('slot4', { marker: { state: 'filling', filled: t0 - 30 } });
+  const played = slot('slot5-2');
+  const empty = slot('slot6');
+  const ctx = { host: 'lothdesktop', alive: (pid: number) => pid === 42, procs: [`"${path.join(played, 'player', 'FinalFactory.exe')}" -screen-fullscreen 0`] };
+  const at = (p: string, c: typeof ctx | undefined = ctx) => judgePath(p, facts, NOW, c);
+  assert.equal(at(leased).verdict, 'keep');
+  assert.match(at(leased).why, /leased now \(worker a735f37c on lothdesktop pid 42\)/);
+  assert.equal(at(remote).verdict, 'keep', "a remote holder's lease holds by its age alone");
+  assert.equal(at(filling).verdict, 'keep');
+  assert.match(at(filling).why, /filling/);
+  assert.equal(at(played).verdict, 'keep');
+  assert.match(at(played).why, /running process plays from it/);
+  for (const p of [dead, old, empty]) {
+    assert.equal(at(p).kind, 'player-slot');
+    assert.equal(at(p).verdict, 'delete', p);
+    assert.match(at(p).why, /no live lease holds/);
+  }
+  // A path inside a slot takes the slot's verdict; without the context, or the process list, nothing is deleted.
+  assert.equal(at(path.join(dead, 'player', 'FinalFactory.exe')).verdict, 'delete');
+  assert.equal(judgePath(dead, facts, NOW).verdict, 'keep');
+  assert.equal(at(dead, { ...ctx, procs: undefined as unknown as string[] }).verdict, 'keep');
+  assert.equal(judgePath(path.join(root, 'players', 'slots.lock'), facts, NOW, ctx).verdict, 'keep');
+
+  // `folders` lists every slot with its verdict; `check` agrees and exits 1 on a leased one.
+  const rows = await planFolders(facts, { now: NOW, sizes: 'none', slots: ctx });
+  const slotRows = Object.fromEntries(rows.filter((r) => r.kind === 'player-slot').map((r) => [path.basename(r.path), r.verdict]));
+  assert.deepEqual(slotRows, { slot0: 'keep', slot1: 'delete', 'slot2-1': 'delete', slot3: 'keep', slot4: 'keep', 'slot5-2': 'keep', slot6: 'delete' });
+  const file = path.join(root, 'cleanup-facts.json');
+  fs.writeFileSync(file, JSON.stringify(facts));
+  const out: string[] = [];
+  const env = { FF_CLEANUP_FACTS: file } as NodeJS.ProcessEnv;
+  const say = (s: string) => void out.push(s);
+  assert.equal(await foldersMain('check', [dead, empty], env, NOW, say, async () => ctx), 0);
+  assert.equal(await foldersMain('check', [dead, leased], env, NOW, say, async () => ctx), 1);
+  assert.match(out.join(''), /KEEP .*slot0/);
+});
