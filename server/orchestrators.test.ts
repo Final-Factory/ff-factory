@@ -20,7 +20,7 @@ import { poolForRef, type GatePoolToken } from './usageGate.ts';
 import { personForWork, sessionPerson, setVaultContext } from './vault.ts';
 import { fakeToken, useFakeVault } from './testVault.ts';
 import { parseNotice } from '../shared/notices.ts';
-import { portalWaitIn, requestWaitOf, siblingWaitOf } from '../shared/workState.ts';
+import { holdsOf, portalWaitIn, requestWaitOf, siblingWaitOf } from '../shared/workState.ts';
 import { latestLine } from '../shared/latestLine.ts';
 import { HELD_MARK, inPersonWords } from '../shared/conditional.ts';
 import { splitReply, splitSent } from '../shared/replies.ts';
@@ -8200,6 +8200,33 @@ test('w2541: a request marked for a report refuses DONE until its worker files o
 
   assert.match((await call(ben, 'list_reports', { person: 'ben' })).text, /r1 · profile · w1 · for Ben · .* · 2 revisions · "Belt render profile, two saves"/);
   assert.match((await call(ben, 'read_report', { id: 'r1', rev: 1 })).text, /revision 1 of 2[\s\S]*BeltRenderSystem: 62 ms/);
+});
+
+// w2741: d17c8672 was sent w2709 (an investigation with report r36), then w2722; its title named w2722, so file_report
+// (workIdsOf: servedBy and the title) refused its revision of r36, though the ledger showed it on w2709 still (holdsOf).
+test("w2741: a worker whose title names one request and which holds another files and revises the other request's report", async (t) => {
+  const { store, agents, machines, dispatcher, chat, call, cfg } = await setupOnMachine(t);
+  agents.reports = new ReportStore(cfg.dataDir, () => []);
+  const ben = chat(BEN).info;
+  await call(ben, 'request_work', { title: 'Why tokens show no session usage', brief: 'Find out.', report: 'investigation' });
+  await call(ben, 'request_work', { title: 'Token pool: soonest reset', brief: 'Change the pool.' });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Investigate', title: 'w1: why no session usage', work_id: 'w1' });
+  assert.equal(started.isError, false, started.text);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const h = machines.hooks!.handlersFor(store.sessions.get(id)!, store.machines.get('pc')!);
+  assert.match(await h.file_report!({ title: 'No session usage', kind: 'investigation', body: 'First pass.' }), /^r1 filed for w1/);
+  // It is sent w2 later, and its title follows: w1 is no longer the request it was last sent, nor the one its title names.
+  const w2 = store.work.get('w2')!;
+  w2.sessionIds.push(id);
+  w2.links = { ...w2.links, [id]: { at: new Date(Date.now() + 60_000).toISOString(), how: 'sent' } };
+  store.sessions.get(id)!.title = 'w2: token pool';
+  assert.deepEqual([...holdsOf(id, [...store.work.values()]).held].sort(), ['w1', 'w2'], 'the ledger shows it on both');
+  const out = await h.file_report!({ id: 'r1', title: 'No session usage, revised', kind: 'investigation', body: 'Second pass.' });
+  assert.match(out, /^r1 revised: revision 2 for w1/);
+  assert.match(await h.file_report!({ title: 'Another', kind: 'investigation', body: 'x', request: 'w1' }), /^r2 filed for w1/);
+  // Said DONE on w1: it holds w1 no more, so w1's reports are not its to revise.
+  store.work.get('w1')!.done = { [id]: { at: new Date().toISOString(), report: 'DONE: w1' } };
+  await assert.rejects(h.file_report!({ id: 'r1', title: 'x', kind: 'investigation', body: 'x' }), /r1 is w1's report; you revise only your own open requests' reports \(yours: w2\)/);
 });
 
 // w2548: w2547, a timed leg, was started twice in lothdesktop/slot1 on 2026-10-29: at 15:19:59Z by FF Factory's timing order

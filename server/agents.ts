@@ -24,7 +24,7 @@ import { idleClosedPart } from './liveIdle.ts';
 import { HOLD_PLACE_MS, LIVE_HOLD_MS, PlaceAgain, RELEASE_AFTER_MS, RELEASE_WAKE_NOTE, handOverBranch, occupies, releasedOn } from './placeAgain.ts';
 import { agentQueueAll, agentQueueFacts, editorSlotRefusal, queueWaitsAll } from '../shared/queueWaits.ts';
 import { pairWaitLine, pairWaitNotice } from './pairRuns.ts';
-import { WORK_LIVE_LABEL, WORK_LIVE_STATES, asksAPerson, benchWaitOf, lastOpenLine, liveCounts, otherWorkWait, outsideDeclared, outsideWaitOf, ownWorkWait, noTimedWaitOf, restartWait, personWaitIn, reportWaitKey, servedBy, workLiveAll, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
+import { WORK_LIVE_LABEL, WORK_LIVE_STATES, asksAPerson, benchWaitOf, lastOpenLine, liveCounts, otherWorkWait, outsideDeclared, outsideWaitOf, ownWorkWait, noTimedWaitOf, restartWait, personWaitIn, reportWaitKey, holdsOf, servedBy, workLiveAll, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
 import { prsIn, reportTail, whoOf, type NeedsYouWait } from './needsYou.ts';
 import { addedLines, asksLookOk, decidedRefusal, personNotes, quoteCovered, quotedPhrases, relatedRequests } from './priorDecisions.ts';
 import { stillOpenIn } from './ledgerRules.ts';
@@ -2930,15 +2930,21 @@ export class Agents {
   /** Set by server/index.ts: a worker's final message, for the nightly merge review's jobs (IntakeManager.onNightlyWorkerTurn, w905). */
   nightlyWorkerTurn?: (workIds: readonly string[], text: string) => void;
 
-  /** The requests a worker serves: by link, and the one its title names ("w901: ..."), which its first process starts before. */
   /** Whether this worker's title or one of its requests (title and brief) names marketing work (MARKETING_WORK). */
   private marketingWork(info: SessionInfo): boolean {
     const texts = [info.title ?? '', ...this.workIdsOf(info).map((id) => this.store.work.get(id)).flatMap((w) => (w ? [w.title, w.brief] : []))];
     return texts.some((t) => MARKETING_WORK.test(t ?? ''));
   }
 
+  /**
+   * The requests a worker is on: every one the ledger shows it holding (shared/workState.ts holdsOf: the one it was last
+   * sent, those linked to it since, and those it was sent earlier and has not said DONE, paused or let go of; an [about
+   * wNNN] follow-up goes only to a request it holds), and the one its title names ("w901: ..."), which its first process
+   * starts before. w2741: servedBy alone left out a request it went on with (d17c8672, titled w2722, could not revise
+   * w2709's report r36), though the ledger (shared/fleet.ts, by holdsOf) showed it on w2709.
+   */
   private workIdsOf(info: SessionInfo, bySession?: Map<string, WorkItem[]>): string[] {
-    const ids = new Set(servedBy(info.id, bySession ? (bySession.get(info.id) ?? []) : [...this.store.work.values()]));
+    const ids = new Set(holdsOf(info.id, bySession ? (bySession.get(info.id) ?? []) : [...this.store.work.values()]).held);
     const named = /^(w\d+):/.exec(info.title ?? '')?.[1];
     if (named) ids.add(named);
     return [...ids];
