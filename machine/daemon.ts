@@ -736,7 +736,8 @@ export class Daemon {
       log,
     });
     this.cleaner = new CleanupRunner({
-      settings: () => ({ everyMinutes: this.cleanupSettings.everyMinutes, softFreeGB: this.cleanupSettings.softFreeGB, staleOutput: staleOutputSettings(this.cleanupSettings.staleOutput) }),
+      // Below the pool's disk_critical_gb a pass may take a live Unity cache, the last resort (w2752).
+      settings: () => ({ everyMinutes: this.cleanupSettings.everyMinutes, softFreeGB: this.cleanupSettings.softFreeGB, criticalFreeGB: this.currentPool()?.diskCriticalGB, staleOutput: staleOutputSettings(this.cleanupSettings.staleOutput) }),
       // The portal's one soft threshold for every machine, fitted to this one's drive (w1918: an empty 80 GB V: read as low).
       fitSoftToVolume: true,
       // The temp folder apart: a RAM-backed one (a Linux tmpfs) is never the disk (w566).
@@ -756,7 +757,7 @@ export class Daemon {
           opts,
           guard,
           mode: settings.mode,
-          regular: () => planCleanup({ rules, guard, low, libraries: { roots: onInstallDrive(HOME, this.cfg.root) ? [HOME] : [], deleteDays: DEFAULT_CLEANUP.libraryDeleteDays } }),
+          regular: () => planCleanup({ rules, guard, low, critical: opts.critical, libraries: { roots: onInstallDrive(HOME, this.cfg.root) ? [HOME] : [], deleteDays: DEFAULT_CLEANUP.libraryDeleteDays } }),
           // Plus the install folder's own leftovers (w899): build caches, the nightly lab, stopped sessions' temp, runaway task output.
           stale: async () =>
             mergePlans(

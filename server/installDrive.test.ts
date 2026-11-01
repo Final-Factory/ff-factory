@@ -249,7 +249,7 @@ test("the daemon's clean-up plan on Windows reads only the install drive: no rul
   const kept = rulesOnInstallDrive(all, ['V:\\ffw'], env.home);
   assert.ok(kept.length > 0);
   assert.deepEqual(kept.filter((r) => !/^V:/i.test(r.dir)).map((r) => r.dir), []);
-  assert.ok(kept.some((r) => r.id === 'agent-temp') && kept.some((r) => r.id === 'sandbox-lib-cache-low'));
+  assert.ok(kept.some((r) => r.id === 'agent-temp') && kept.some((r) => r.id === 'sandbox-lib-cache-stale'));
   // A Dev Drive's folders (another root) keep their rules; a root on C: keeps only what is inside it.
   assert.ok(rulesOnInstallDrive(cleanupRules({ ...env, agentTemp: 'W:\\tmp' }, DEFAULT_CLEANUP), ['V:\\ffw', 'W:\\'], env.home).some((r) => r.dir === 'W:\\tmp'));
   const onC = rulesOnInstallDrive(cleanupRules({ ...env, agentTemp: 'C:\\ffw\\tmp', sandboxRoots: ['C:\\ffw\\sandboxes'], cacheRoots: ['C:\\ffw\\sandboxes'] }, DEFAULT_CLEANUP), ['C:\\ffw'], env.home);

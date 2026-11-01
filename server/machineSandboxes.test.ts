@@ -1317,7 +1317,7 @@ test('w640: a worker stopped with a far check-in frees its sandbox; new work the
 
 // ---------------------------------------------------------------- release trims the Library caches (w898)
 
-/** Library/BuildCache and Library/BurstCache files in a sandbox: some days old, some fresh. */
+/** Library/BuildCache and Library/BurstCache files in a sandbox: three Burst player builds (the oldest is stale, w2752) and live entries. */
 function fillCaches(dir: string) {
   const make = (rel: string, hours: number) => {
     const f = path.join(dir, 'Library', rel);
@@ -1326,12 +1326,15 @@ function fillCaches(dir: string) {
     const at = new Date(Date.now() - hours * 3_600_000);
     fs.utimesSync(f, at, at);
   };
-  make('BuildCache/ab/old', 24 * 9);
-  make('BuildCache/ab/new', 2);
-  make('BurstCache/Windows-Intel/old.dll', 24 * 9);
-  make('BurstCache/Windows-Intel/new.dll', 2);
+  const lib = (c: string) => `BurstCache/Windows-Intel/${c.repeat(32)}.dll`;
+  make('BuildCache/ab/h1/v1/old', 24 * 9);
+  make('BuildCache/ab/h2/v1/new', 2);
+  make(lib('a'), 24 * 9);
+  make(lib('b'), 4);
+  make(lib('c'), 2);
+  make('BurstCache/JIT/old.dll', 24 * 9);
   make('ArtifactDB/keep', 24 * 9);
-  return { gone: ['BuildCache/ab/old', 'BurstCache/Windows-Intel/old.dll'], kept: ['BuildCache/ab/new', 'BurstCache/Windows-Intel/new.dll', 'ArtifactDB/keep'] };
+  return { gone: [lib('a')], kept: ['BuildCache/ab/h1/v1/old', 'BuildCache/ab/h2/v1/new', lib('b'), lib('c'), 'BurstCache/JIT/old.dll', 'ArtifactDB/keep'] };
 }
 
 test("w898: the last agent leaving a sandbox sends it to 'cleanup', trims the caches, then frees it; a start in between is refused", async (t) => {
@@ -1355,7 +1358,7 @@ test("w898: the last agent leaving a sandbox sends it to 'cleanup', trims the ca
   await assert.rejects(p.switch('sb1', 'other'), /is cleanup/, 'so is a branch switch (the hand-over)');
   await until('the trim to end', () => p.list()[0].status === 'ready');
   assert.deepEqual(statuses.filter((s) => s.startsWith('sb1:')), ['sb1:creating', 'sb1:ready', 'sb1:cleanup', 'sb1:ready'], 'ready, cleanup, ready: in that order and once');
-  assert.ok(files.gone.every((f) => !exists(f)) && files.kept.every(exists), 'old cache files gone, recent ones and the rest of Library kept');
+  assert.ok(files.gone.every((f) => !exists(f)) && files.kept.every(exists), 'the superseded Burst player build gone, live entries and the rest of Library kept');
   await p.tick();
   assert.equal(p.list()[0].status, 'ready', 'it does not trim again until the next release');
   assert.equal((await p.trim('sb1')).files, 0);

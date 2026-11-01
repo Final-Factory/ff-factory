@@ -22,90 +22,90 @@ function project(t: { after: (fn: () => void) => void }, files: Record<string, [
   return { dir, now, has: (rel: string) => fs.existsSync(path.join(dir, rel)) };
 }
 
-test('trim: files older than the keep age go, the recent ones stay, the rest of Library is never touched, empty folders go', async (t) => {
+const HEX = (c: string) => c.repeat(32);
+
+test('trim: superseded Burst player builds go, the newest two stay with the manifest and Hashes, JIT and the rest of Library are never touched (w2752)', async (t) => {
   const p = project(t, {
-    'Library/BuildCache/ab/old.bin': [100, 1000],
-    'Library/BuildCache/ab/new.bin': [3, 1000],
-    'Library/BuildCache/cd/old.bin': [60, 1000],
-    'Library/BurstCache/Windows-Intel/old.dll': [72, 5000],
-    'Library/BurstCache/Windows-Intel/new.dll': [1, 5000],
+    [`Library/BurstCache/Windows-Intel/${HEX('a')}.dll`]: [1, 900],
+    [`Library/BurstCache/Windows-Intel/${HEX('a')}.pdb`]: [1, 1900],
+    [`Library/BurstCache/Windows-Intel/${HEX('b')}.dll`]: [5, 900],
+    [`Library/BurstCache/Windows-Intel/${HEX('b')}.pdb`]: [5, 1900],
+    [`Library/BurstCache/Windows-Intel/${HEX('c')}.dll`]: [9, 900],
+    [`Library/BurstCache/Windows-Intel/${HEX('c')}.pdb`]: [9, 1900],
+    [`Library/BurstCache/Windows-Intel/${HEX('d')}.dll`]: [30, 900],
+    'Library/BurstCache/Windows-Intel/BurstCacheManifest.cm': [300, 50],
+    'Library/BurstCache/Windows-Intel/Hashes/x.bhc': [300, 5],
     'Library/BurstCache/AotSettings_StandaloneWindows.hash': [200, 16],
-    'Library/ArtifactDB/keep': [500, 10],
+    [`Library/BurstCache/JIT/${HEX('e')}.dll`]: [500, 700],
+    'Library/PlayerDataCache/Win642/Data/level0': [500, 10],
+    'Library/EntitySceneBundles/a.archive': [500, 10],
+    'Library/Artifacts/ab/x': [500, 10],
     'Library/Bee/keep': [500, 10],
-    'Assets/keep.cs': [500, 10],
   });
-  const r = await trimLibraryCaches(p.dir, { ...TRIM_DEFAULTS, keepHours: 48, capGB: 0 }, { now: p.now });
+  const r = await trimLibraryCaches(p.dir, TRIM_DEFAULTS, { now: p.now });
   assert.equal(r.skipped, undefined);
   assert.equal(r.stopped, undefined);
-  assert.equal(r.files, 4, 'the four old cache files');
-  assert.equal(r.removedBytes, 1000 + 1000 + 5000 + 16);
-  assert.equal(r.keptBytes, 1000 + 5000);
-  for (const kept of ['Library/BuildCache/ab/new.bin', 'Library/BurstCache/Windows-Intel/new.dll', 'Library/ArtifactDB/keep', 'Library/Bee/keep', 'Assets/keep.cs']) assert.ok(p.has(kept), kept);
-  for (const gone of ['Library/BuildCache/ab/old.bin', 'Library/BuildCache/cd/old.bin', 'Library/BuildCache/cd', 'Library/BurstCache/Windows-Intel/old.dll', 'Library/BurstCache/AotSettings_StandaloneWindows.hash']) assert.ok(!p.has(gone), gone);
-  assert.ok(p.has('Library/BuildCache') && p.has('Library/BurstCache'), 'the cache folders themselves stay');
+  assert.equal(r.files, 3, 'the c pair and d');
+  assert.equal(r.removedBytes, 900 + 1900 + 900);
+  for (const gone of [`${HEX('c')}.dll`, `${HEX('c')}.pdb`, `${HEX('d')}.dll`]) assert.ok(!p.has(`Library/BurstCache/Windows-Intel/${gone}`), gone);
+  for (const kept of [
+    `Library/BurstCache/Windows-Intel/${HEX('a')}.dll`,
+    `Library/BurstCache/Windows-Intel/${HEX('b')}.pdb`,
+    'Library/BurstCache/Windows-Intel/BurstCacheManifest.cm',
+    'Library/BurstCache/Windows-Intel/Hashes/x.bhc',
+    'Library/BurstCache/AotSettings_StandaloneWindows.hash',
+    `Library/BurstCache/JIT/${HEX('e')}.dll`,
+    'Library/PlayerDataCache/Win642/Data/level0',
+    'Library/EntitySceneBundles/a.archive',
+    'Library/Artifacts/ab/x',
+    'Library/Bee/keep',
+  ])
+    assert.ok(p.has(kept), kept);
 });
 
-test('trim: a cap keeps the newest files of the two caches together up to the cap, even young ones past it go oldest first (w2752)', async (t) => {
+test('trim: BuildCache entry folders go whole, never a file of one: the newest build\'s own stay, then the newest up to the cap (w2752, w1211)', async (t) => {
   const p = project(t, {
-    'Library/BuildCache/a/1': [1, 400],
-    'Library/BuildCache/a/2': [2, 400],
-    'Library/BuildCache/a/3': [3, 400],
-    'Library/BurstCache/x/1': [5, 300],
-    'Library/BurstCache/x/2': [0.5, 300],
+    'Library/BuildCache/ab/h1/v1/a.info': [1, 10],
+    'Library/BuildCache/ab/h1/v1/a.bundle': [200, 600], // an old file in a folder the newest build rewrote: kept with it
+    'Library/BuildCache/ab/h2/v1/b.bundle': [1.5, 600], // the same build (within an hour of the newest write)
+    'Library/BuildCache/cd/h3/v1/c.bundle': [5, 300], // fits under the cap after those
+    'Library/BuildCache/cd/h3/v2/c.bundle': [8, 400], // past it
+    'Library/BuildCache/ef/h4/v9/d.bundle': [50, 10],
   });
-  const r = await trimLibraryCaches(p.dir, { keepHours: 48, capGB: 1000 / 1024 ** 3, timeoutMs: 1000 }, { now: p.now });
+  const r = await trimLibraryCaches(p.dir, { ...TRIM_DEFAULTS, buildCacheGB: 1600 / 1024 ** 3 }, { now: p.now });
   assert.deepEqual(
-    ['Library/BurstCache/x/2', 'Library/BuildCache/a/1', 'Library/BuildCache/a/2', 'Library/BuildCache/a/3', 'Library/BurstCache/x/1'].map(p.has),
-    [true, true, false, false, true],
-    'newest first across both caches: 300 + 400 fit under 1000 bytes, the next two 400s do not, the last 300 still fits (each cache alone is under the cap, as lothdesktop/slot2 kept 4 + 4 GB)',
+    ['ab/h1/v1/a.bundle', 'ab/h2/v1/b.bundle', 'cd/h3/v1/c.bundle', 'cd/h3/v2', 'ef/h4/v9', 'ef'].map((f) => p.has(`Library/BuildCache/${f}`)),
+    [true, true, true, false, false, false],
+    'the newest build (610 + 600) and 300 more under 1.6 kB stay; the 400 does not fit, and everything older than it goes too (newest first, as the pipeline\'s own prune)',
   );
-  assert.equal(r.removedBytes, 400 + 400);
-  assert.equal(r.keptBytes, 300 + 400 + 300);
 });
 
 test('trim: never while an editor or build has the project open, and it stops when one opens meanwhile', async (t) => {
-  const open = project(t, { 'Library/BuildCache/a/old': [500, 100], 'Temp/UnityLockfile': [0, 0] });
+  const open = project(t, { 'Library/BuildCache/ab/h/v/old': [500, 100], 'Temp/UnityLockfile': [0, 0] });
   const r = await trimLibraryCaches(open.dir, TRIM_DEFAULTS, { now: open.now });
   assert.match(r.skipped ?? '', /editor or build/);
-  assert.ok(open.has('Library/BuildCache/a/old'));
+  assert.ok(open.has('Library/BuildCache/ab/h/v/old'));
   // Opened meanwhile: a cache of many files, the lock appears after the listing.
   const files: Record<string, [number, number]> = {};
-  for (let i = 0; i < 600; i++) files[`Library/BuildCache/a/f${i}`] = [500, 10];
+  for (let i = 0; i < 600; i++) files[`Library/BuildCache/ab/h${i}/v/f`] = [500 + i, 10];
   const busy = project(t, files);
   const ac = new AbortController();
   let n = 0;
-  const unlink = fs.promises.unlink;
-  t.mock.method(fs.promises, 'unlink', async (f: fs.PathLike) => {
+  const rename = fs.promises.rename;
+  t.mock.method(fs.promises, 'rename', async (from: fs.PathLike, to: fs.PathLike) => {
     if (++n === 50) fs.mkdirSync(path.join(busy.dir, 'Temp'), { recursive: true }), fs.writeFileSync(path.join(busy.dir, 'Temp', 'UnityLockfile'), '');
-    return unlink(f);
+    return rename(from, to);
   });
-  const r2 = await trimLibraryCaches(busy.dir, TRIM_DEFAULTS, { now: busy.now, signal: ac.signal });
+  const r2 = await trimLibraryCaches(busy.dir, { ...TRIM_DEFAULTS, buildCacheGB: 0 }, { now: busy.now, signal: ac.signal });
   assert.match(r2.stopped ?? '', /opened the project/);
   assert.ok(r2.files > 0 && r2.files < 600, `stopped partway (${r2.files})`);
 });
 
 test('trim: an aborted signal stops it between files', async (t) => {
-  const p = project(t, { 'Library/BuildCache/a/1': [500, 10], 'Library/BuildCache/a/2': [500, 10] });
+  const p = project(t, { 'Library/BuildCache/ab/h1/v/1': [500, 10], 'Library/BuildCache/ab/h2/v/2': [500, 10] });
   const ac = new AbortController();
   ac.abort();
   const r = await trimLibraryCaches(p.dir, TRIM_DEFAULTS, { now: p.now, signal: ac.signal });
   assert.equal(r.stopped, 'timed out');
-  assert.ok(p.has('Library/BuildCache/a/1') && p.has('Library/BuildCache/a/2'));
-});
-
-test('w1576: a player-build cache goes whole once nothing in it was written for the keep age, and stays whole while anything was', async (t) => {
-  const p = project(t, {
-    'Library/EntitySceneBundles/ContentArchives/a.archive': [100, 3000],
-    'Library/EntitySceneBundles/abc.entityheader': [90, 10],
-    'Library/PlayerDataCache/Linux642/Data/level0': [150, 2000],
-    'Library/PlayerDataCache/Linux642/ScriptsOnlyCache.yaml': [150, 5],
-    'Library/PlayerDataCache/Win642/Data/level0': [200, 2000],
-    'Library/PlayerDataCache/Win642/DataBuildDirtyInfo.json': [2, 5],
-  });
-  const r = await trimLibraryCaches(p.dir, { ...TRIM_DEFAULTS, keepHours: 24 }, { now: p.now });
-  assert.equal(r.files, 4, 'EntitySceneBundles and the Linux target, all of them');
-  assert.equal(r.removedBytes, 3000 + 10 + 2000 + 5);
-  assert.equal(r.keptBytes, 2000 + 5, 'the Windows target was written 2 h ago: kept whole, its old file too');
-  for (const gone of ['Library/EntitySceneBundles', 'Library/PlayerDataCache/Linux642']) assert.ok(!p.has(gone), gone);
-  for (const kept of ['Library/PlayerDataCache/Win642/Data/level0', 'Library/PlayerDataCache/Win642/DataBuildDirtyInfo.json']) assert.ok(p.has(kept), kept);
+  assert.ok(p.has('Library/BuildCache/ab/h1/v/1') && p.has('Library/BuildCache/ab/h2/v/2'));
 });

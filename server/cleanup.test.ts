@@ -437,57 +437,90 @@ test('volumeStat: the free space, size, filesystem type and device of a real fol
   assert.equal(await volumeStat(path.join(os.tmpdir(), 'no-such-folder-w566', 'x')), undefined);
 });
 
-test("a sandbox's Library caches (w898): unused, over the cap, or all of them while space is low; never with an editor or build on the project", async (t) => {
+test("a sandbox's Library caches (w898, w2752): only stale entries routinely, never a live cache whole; below the critical line the caches of the sandbox opened longest ago", async (t) => {
   const w = world(t);
   const home = path.join(w.root, 'home');
   const sandboxes = path.join(w.root, 'sandboxes');
   fs.mkdirSync(home, { recursive: true });
-  const D = 24;
-  /** A sandbox with Library/<cache> folders of `kb` KB each, `hours` old; `open`: an editor or build has the project (Temp/UnityLockfile). */
-  const sandbox = (name: string, hours: number, o: { kb?: number; open?: boolean } = {}) => {
-    const lib = path.join(sandboxes, name, 'Library');
-    const out: Record<string, string> = {};
-    for (const c of ['BuildCache', 'BurstCache', 'ArtifactDB']) {
-      out[c] = w.make(`sandboxes/${name}/Library/${c}`, hours);
-      if (o.kb) {
-        fs.writeFileSync(path.join(out[c], 'big'), 'x'.repeat(o.kb * 1024));
-        w.age(path.join(out[c], 'big'), hours);
-        w.age(out[c], hours);
-      }
-    }
-    if (o.open) {
-      w.make(`sandboxes/${name}/Temp`, hours);
-      fs.writeFileSync(path.join(sandboxes, name, 'Temp', 'UnityLockfile'), '');
-    }
-    return { BuildCache: out.BuildCache, BurstCache: out.BurstCache, ArtifactDB: out.ArtifactDB, lib };
+  const H = 3_600_000;
+  const file = (rel: string, hours: number, bytes = 10) => {
+    const f = path.join(sandboxes, rel);
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(f, 'x'.repeat(bytes));
+    const at = new Date(w.now - hours * H);
+    fs.utimesSync(f, at, at);
+    return f;
   };
-  const unused = sandbox('slot1', 3 * D); // untouched for 3 days: past the 48 h
-  const recent = sandbox('slot2', 5); // small, used 5 hours ago
-  const openOld = sandbox('slot3', 30 * D, { open: true }); // an editor has it: never
-  const bigRecent = sandbox('slot4', 2, { kb: 20 }); // 20 KB each, over the (tiny) cap, idle for 2 hours
-  const bigBusy = sandbox('slot5', 0.2, { kb: 20 }); // over the cap, but written 12 minutes ago
-  const bigTogether = sandbox('slot6', 2, { kb: 6 }); // w2752: 6 KB each, under the cap, 12 KB together over it, idle for 2 hours
-  const caches = (s: ReturnType<typeof sandbox>) => [s.BuildCache, s.BurstCache];
+  const hex = (c: string) => c.repeat(32);
+  /** A sandbox with three Burst player builds, an old BuildCache entry, JIT and the rest of Library, the newest written `hours` ago. */
+  const sandbox = (name: string, hours: number, o: { open?: boolean } = {}) => {
+    const s = {
+      lib: path.join(sandboxes, name, 'Library'),
+      burstNew: file(`${name}/Library/BurstCache/Windows-Intel/${hex('a')}.dll`, hours),
+      burstMid: file(`${name}/Library/BurstCache/Windows-Intel/${hex('b')}.dll`, hours + 1),
+      burstOld: file(`${name}/Library/BurstCache/Windows-Intel/${hex('c')}.dll`, hours + 2),
+      manifest: file(`${name}/Library/BurstCache/Windows-Intel/BurstCacheManifest.cm`, hours + 50),
+      jit: file(`${name}/Library/BurstCache/JIT/${hex('d')}.dll`, hours + 100),
+      buildNew: file(`${name}/Library/BuildCache/ab/h1/v1/a.info`, hours),
+      buildOld: file(`${name}/Library/BuildCache/cd/h2/v1/b.bundle`, hours + 30),
+      artifacts: file(`${name}/Library/Artifacts/ab/x`, hours + 100),
+      BuildCache: path.join(sandboxes, name, 'Library', 'BuildCache'),
+      BurstCache: path.join(sandboxes, name, 'Library', 'BurstCache'),
+    };
+    const ageDirs = (d: string) => {
+      for (const e of fs.readdirSync(d, { withFileTypes: true })) if (e.isDirectory()) ageDirs(path.join(d, e.name));
+      const at = new Date(w.now - hours * H);
+      fs.utimesSync(d, at, at);
+    };
+    ageDirs(s.lib);
+    if (o.open) file(`${name}/Temp/UnityLockfile`, 0, 0);
+    return s;
+  };
+  const idle = sandbox('slot1', 3 * 24); // opened 3 days ago
+  const recent = sandbox('slot2', 5); // a build 5 hours ago
+  const busy = sandbox('slot3', 0.2); // a build wrote its caches 12 minutes ago
+  const open = sandbox('slot4', 30 * 24, { open: true }); // an editor has it, however old
+  const all = [idle, recent, busy, open];
 
-  const policy = { ...DEFAULT_CLEANUP, libraryCacheIdleHours: 48, libraryCacheCapGB: 10 / 1024 / 1024 }; // cap 10 KB
-  const rules = cleanupRules({ platform: 'win32', home, tmp: path.join(w.root, 'Temp'), cacheRoots: [sandboxes] }, policy).map((r) => ({ ...r, dir: r.dir.replace(/[\/]/g, path.sep) }));
-  assert.deepEqual(rules.filter((r) => r.id.startsWith('sandbox-lib-cache')).map((r) => [r.id, r.when ?? 'always', r.olderThanHours]), [['sandbox-lib-cache-idle', 'always', 48], ['sandbox-lib-cache-cap', 'always', 1], ['sandbox-lib-cache-low', 'low', 1]]);
-  assert.ok(!cleanupRules({ platform: 'win32', home, tmp: 'C:\T' }, policy).some((r) => r.id.startsWith('sandbox-lib-cache')), 'only where there are sandboxes');
-  assert.ok(!cleanupRules({ platform: 'win32', home, tmp: 'C:\T', cacheRoots: [sandboxes] }, { ...policy, libraryCacheIdleHours: 0, libraryCacheCapGB: 0 }).some((r) => /idle|cap/.test(r.id)), '0 turns the age and the cap off');
+  const rules = cleanupRules({ platform: 'win32', home, tmp: path.join(w.root, 'Temp'), cacheRoots: [sandboxes] }, DEFAULT_CLEANUP).map((r) => ({ ...r, dir: r.dir.replace(/[\/]/g, path.sep) }));
+  assert.deepEqual(rules.filter((r) => r.id.startsWith('sandbox-lib-cache')).map((r) => [r.id, r.when ?? 'always']), [['sandbox-lib-cache-stale', 'always'], ['sandbox-lib-cache-last-resort', 'critical']]);
+  assert.ok(!cleanupRules({ platform: 'win32', home, tmp: 'C:\T' }, DEFAULT_CLEANUP).some((r) => r.id.startsWith('sandbox-lib-cache')), 'only where there are sandboxes');
   const guard: CleanupGuard = { home, keep: [sandboxes], inUse: [] };
-  const plan = async (low: boolean) => (await planCleanup({ rules, guard, low, now: w.now })).map((i) => i.path).sort();
+  const plan = async (o: { low?: boolean; critical?: boolean; guard?: CleanupGuard } = {}) => (await planCleanup({ rules, guard: o.guard ?? guard, low: o.low, critical: o.critical, now: w.now })).map((i) => i.path).sort();
 
-  assert.deepEqual(await plan(false), [...caches(unused), ...caches(bigRecent), ...caches(bigTogether)].sort(), 'unused for days, and the idle ones whose two caches together are over the cap (w2752: each under it, as lothdesktop/slot2 after its release trim)');
-  assert.deepEqual(await plan(true), [...caches(unused), ...caches(recent), ...caches(bigRecent), ...caches(bigTogether)].sort(), 'low space: every idle cache, but not one written minutes ago and not an open project');
-  for (const s of [unused, recent, openOld, bigRecent, bigBusy, bigTogether]) assert.ok(!(await plan(true)).includes(s.ArtifactDB), 'only the two caches, never the rest of Library');
-  for (const p of [...caches(openOld), ...caches(bigBusy)]) assert.ok(!(await plan(true)).includes(p), `kept: ${p}`);
+  const routine = [idle.burstOld, recent.burstOld].sort();
+  assert.deepEqual(await plan(), routine, 'the third Burst player build of each idle sandbox, nothing else: not one written minutes ago, not an open project');
+  assert.deepEqual(await plan({ low: true }), routine, 'low space wipes no live cache either (it did before w2752)');
+  assert.deepEqual(await plan({ guard: { ...guard, inUse: [path.join(sandboxes, 'slot1')] } }), [recent.burstOld], 'never in a sandbox an agent uses');
+  assert.deepEqual(await plan({ critical: true }), [...routine, idle.BuildCache, idle.BurstCache].sort(), 'critical: the two caches of the one sandbox opened longest ago, the open one older still is not it');
+  for (const s of all) for (const p of [s.burstNew, s.burstMid, s.manifest, s.jit, s.buildNew, s.buildOld, s.artifacts]) assert.ok(!(await plan()).includes(p), `kept: ${p}`);
 
-  const items = await planCleanup({ rules, guard, low: true, now: w.now });
-  const r = await runCleanup(items, guard);
+  const r = await runCleanup(await planCleanup({ rules, guard, now: w.now }), guard);
   assert.deepEqual(r.failed, []);
-  assert.ok(r.bytes > 0);
-  for (const p of [...caches(unused), ...caches(recent), ...caches(bigRecent), ...caches(bigTogether)]) assert.ok(!fs.existsSync(p), `removed: ${p}`);
-  for (const p of [...caches(openOld), ...caches(bigBusy), unused.ArtifactDB, unused.lib]) assert.ok(fs.existsSync(p), `kept: ${p}`);
+  assert.ok(!fs.existsSync(idle.burstOld) && !fs.existsSync(recent.burstOld));
+  for (const s of all) for (const p of [s.burstNew, s.burstMid, s.manifest, s.jit, s.buildNew, s.buildOld, s.artifacts]) assert.ok(fs.existsSync(p), `kept: ${p}`);
+  for (const s of [busy, open]) assert.ok(fs.existsSync(s.burstOld), `kept: ${s.burstOld}`);
+});
+
+test('w2752: a pass is critical below CleanupSettings.criticalFreeGB or on a critical trigger, never only because it was asked', async () => {
+  let free = 15 * GB;
+  const seen: (boolean | undefined)[] = [];
+  const r = new CleanupRunner({
+    settings: () => ({ everyMinutes: 60, softFreeGB: 80, criticalFreeGB: 10 }),
+    diskPaths: () => ['V:/ffw'],
+    statfs: async () => ({ free, total: 300 * GB }),
+    pass: async (_low, o) => (seen.push(o.critical), { removed: [], failed: [], bytes: 0 }),
+    consumers: async () => [],
+    log: () => undefined,
+    done: () => undefined,
+    now: () => 0,
+  });
+  await r.run('asked');
+  free = 9 * GB;
+  await r.run('hourly');
+  free = 50 * GB;
+  await r.run('critical');
+  assert.deepEqual(seen, [undefined, true, true]);
 });
 
 test("w1918: the soft threshold is at most a quarter of the volume's size, never below the 20 GB clean-up line: an empty 80 GB Dev Drive is not low", async () => {

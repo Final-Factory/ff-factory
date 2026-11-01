@@ -727,7 +727,7 @@ const hostHealth = new HostHealthMonitor({
         opts,
         guard,
         mode: settings.mode,
-        regular: () => planCleanup({ rules: cleanupRules(env, cfg.hostGuard.cleanup), guard, low, libraries }),
+        regular: () => planCleanup({ rules: cleanupRules(env, cfg.hostGuard.cleanup), guard, low, critical: opts.critical, libraries }),
         stale: () => planStaleOutput({ places: hostStalePlaces(), nightlyRoots: settings.nightlyRoots ?? defaultNightlyRoots(), ctx: staleContextOf(store.work.values()), settings, guard }),
       });
       // The pictures and videos of idle conversations (w2268, server/mediaRetention.ts): only inside data/uploads and the
