@@ -529,6 +529,28 @@ disk stalls every worker on the machine. What cannot be rebuilt (unpushed commit
 hold to end, as before. `ff-leftovers folders` lists the same bulk as DELETE rows inside the kept folder (kind
 `session-bulk`, on the facts' `low`), and `ff-leftovers check` agrees.
 
+**A held worker's capture frames go too, and player slots are judged by their leases (w2796).** On 2026-11-01
+LothDesktop's clean-up (w2795) reached about 24 GB free of a 30 GB goal. The reopen hold still kept finished workers'
+per-run folders whole: ffa-f6caa21c's `tour*` (about 29 GB), ffa-8802c424's `audit-*` and `w2485-*` (audit-after-171748
+alone 5.6 GB) and ffa-631ef092's `before-`/`after-client` and `-sp` (about 8.6 GB). Measured there, almost all of it was
+frame dumps: folders of 416 to 5,450 JPGs each (`clip-medium`, `resize-1920/clip-reopen`, `frames-host`), every frame
+counted as unpublished evidence. `installLeftovers.ts` `frameFolder` now calls a folder of `FRAME_MIN_IMAGES` (100) or more
+images, holding nothing else that is evidence (sidecars such as an ffmpeg list, a CSV or a log may sit beside them), a
+capture's frames: `finishedBulkIn` takes it, and a per-run folder holding only frames and test output goes whole. The
+stills, clips and notes beside them stay until published or the hold ends. The clock is w2223's, for the reason given
+there: no write in the folder for 24 h (a reopen mostly comes within minutes or hours), 15 minutes while the disk is low.
+100 because the smallest frame folder measured held 416 images and a set of stills 7 to 12.
+
+`ff-leftovers check` called every `<root>/players/slotN-M` "not a place with an owner in the ledger", so w2795's worker read
+the lease files by hand to find nine free slots (about 17 GB). `cleanupFolders.ts` `judgePlayerSlot` now judges a slot by
+its own leases as `player_slots.py` `Pool._live` does (`ownLeftovers.ts` `leaseLive`: a local lease while its pid lives, a
+remote one by its age, none older than 12 h): leased is KEEP, and so are a slot whose `slot.json` says `filling` (the pool
+copies the build before it writes the lease) and a slot a running process plays from (a game nobody leased, a person's,
+w1894). Otherwise it is DELETE: the next launch fills it again. `ff-leftovers folders` lists every slot under
+`<root>/players`. The daemon's own sweep (`planPlayerSlots`) still waits 24 h untouched, so a slot is reused while its build
+is current; a clean-up worker may take it sooner. A slot's files are hard links to its build while that build exists, so
+deleting a slot frees only what it alone holds.
+
 ### Install-folder leftovers (w899)
 
 On 2026-10-10 LothDesktop's D: fell from 104 GB to 60 GB free while the clean-up kept most of the cause as "not

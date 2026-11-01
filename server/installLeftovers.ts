@@ -292,6 +292,29 @@ const agoText = (ms: number) => (ms < 2 * HOUR ? `${Math.max(0, Math.round(ms / 
  * published (server/published.ts). Logs, JSON and XML reports are test output: a rerun makes them again.
  */
 const EVIDENCE = /\.(png|jpe?g|gif|bmp|webp|tga|svg|mp4|mkv|webm|mov|avi|md|pdf|html?|zip)$/i;
+/** An image a capture writes frame by frame (w2796). */
+const FRAME_IMAGE = /\.(png|jpe?g|bmp|tga|webp)$/i;
+/**
+ * A folder of at least this many images and nothing else that is evidence is a capture's frames (w2796), not stills a
+ * person looks at. Measured on LothDesktop 2026-11-01: the per-run folders the reopen hold kept (tour*, audit-*, before-/
+ * after-*) held 416 to 5,450 JPGs per frame folder (about 40 GB in all), and a set of stills beside them 7 PNGs.
+ */
+export const FRAME_MIN_IMAGES = 100;
+
+/**
+ * The number of frames in `dir` when it is a capture's frame folder (w2796): only files, at least FRAME_MIN_IMAGES images
+ * and no other evidence (a clip, a note, a page) beside them; sidecars such as an ffmpeg list or a CSV do not count.
+ * What a person reviews is the clip or the stills taken from them; a reopened worker records again.
+ */
+export async function frameFolder(dir: string): Promise<number | undefined> {
+  let images = 0;
+  for (const e of await children(dir)) {
+    if (!e.isFile()) return undefined;
+    if (FRAME_IMAGE.test(e.name)) images++;
+    else if (EVIDENCE.test(e.name)) return undefined;
+  }
+  return images >= FRAME_MIN_IMAGES ? images : undefined;
+}
 /** What only a Unity Library holds: a folder with two of these is a copy of one, whatever its name (w2223). */
 const LIBRARY_MARK = /^(artifactdb|sourceassetdb|artifacts|bee|scriptassemblies|packagecache|burstcache|buildcache|shadercache|playerdatacache|il2cpp_cache)$/i;
 /** How deep a finished worker's folder is taken apart around what it keeps. */
@@ -332,7 +355,9 @@ export function gitIgnoredEvidence(repo: string, timeoutMs = 60_000): Promise<st
  * hold (server/resumable.ts, w1575) keeps the folder. Beyond the caches idleCachesIn finds (its whole Library included):
  * a git clone, checkout or worktree with nothing on no remote (cloned again on demand) unless git ignores evidence in it
  * that was published nowhere else; a copy of a Unity Library outside its project; and test output, a folder holding no
- * repo, no Unity project and no unpublished evidence, or a loose file of 1 MiB or more that is not evidence. What stays:
+ * repo, no Unity project and no unpublished evidence, or a loose file of 1 MiB or more that is not evidence; and a
+ * capture's frames (frameFolder, w2796), so a per-run folder (a tour, an audit, a before/after leg) loses its frames while
+ * its stills, clips and notes published nowhere else stay. What stays:
  * evidence published nowhere else, a repo with work on no remote, a Unity project's own files, the Claude task folders and
  * the Inbox. A cache inside a repo that stays goes only when git ignores it, as idle caches do.
  */
@@ -360,7 +385,7 @@ export async function finishedBulkIn(session: string, o: FinishedBulkOptions = {
         const p = path.join(d, e.name);
         if (cacheAt.has(norm(p)) || e.isSymbolicLink()) continue;
         if (e.isFile() && unpublished(p)) return 'evidence';
-        if (e.isDirectory()) stack.push(p);
+        if (e.isDirectory() && !(await frameFolder(p))) stack.push(p);
       }
     }
     return undefined;
@@ -398,6 +423,11 @@ export async function finishedBulkIn(session: string, o: FinishedBulkOptions = {
       }
       if ((await children(p)).filter((c) => LIBRARY_MARK.test(c.name)).length >= 2) {
         take.push({ path: p, what: "a copy of a Unity project's Library caches" });
+        continue;
+      }
+      const frames = await frameFolder(p);
+      if (frames) {
+        take.push({ path: p, what: `a capture's frames (${frames} images and no clip, note or other evidence beside them; what a person reviews is the clip or stills made from them)` });
         continue;
       }
       if (isPlayerBuild(p, e.name)) continue; // idleCachesIn has it, or it lies past its depth: a build is never test output here

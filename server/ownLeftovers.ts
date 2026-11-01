@@ -95,6 +95,8 @@ export interface SlotLease {
   pid?: number;
   host?: string;
   time?: number;
+  /** The worker that took it (w1196), when it was taken by one. */
+  session?: string;
 }
 
 /** Whether a lease still holds its slot, as player_slots.py's Pool._live judges it. */

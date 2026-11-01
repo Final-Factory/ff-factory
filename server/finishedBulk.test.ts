@@ -193,3 +193,51 @@ function within(p: string, dir: string) {
   const r = path.relative(dir, p);
   return !!r && !r.startsWith('..') && !path.isAbsolute(r);
 }
+
+/**
+ * w2796: LothDesktop's clean-up (w2795) reached about 24 GB free of a 30 GB goal while the reopen hold kept finished workers'
+ * per-run folders: ffa-f6caa21c's tour* (clip-medium, -strong, -subtle: 3,179 to 4,096 JPGs each), ffa-8802c424's audit-*
+ * (resize-1920/clip-reopen: 1,047 JPGs) and ffa-631ef092's before-/after-client (frames-host: 5,450 JPGs and a CSV). Each frame
+ * counted as unpublished evidence, so the whole run stayed. The frames go now; the stills, clips and notes beside them stay.
+ */
+test("w2796: a finished worker's per-run folders lose their capture frames; their unpublished stills, clips and notes stay", async (t) => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ff-frames-')));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
+  const s = path.join(root, 'ffa-f6caa21c');
+  const frames = (dir: string, n: number, ext = 'jpg') => {
+    for (let i = 0; i < n; i++) w(s, `${dir}/${String(i).padStart(6, '0')}.${ext}`);
+  };
+  // A tour: three frame folders with an ffmpeg list each, and the stills a person looks at beside them.
+  for (const c of ['clip-medium', 'clip-strong', 'clip-subtle']) {
+    frames(`tour-130032/${c}`, 120);
+    w(s, `tour-130032/${c}/list.txt`);
+  }
+  w(s, 'tour-130032/0-idle.png');
+  w(s, 'tour-130032/0-idle.json');
+  // An audit: frames two levels down, and its notes.
+  frames('audit-after-171748/resize-1920/clip-reopen', 150);
+  w(s, 'audit-after-171748/resize-1920.out');
+  w(s, 'audit-after-171748/notes.md');
+  // A before/after leg with only frames, a CSV and logs: it goes whole.
+  frames('after-client-200639/frames-host', 110);
+  w(s, 'after-client-200639/frames-host/timing.csv');
+  w(s, 'after-client-200639/host.log');
+  // Not frames: a set of stills, a frame folder with its clip beside it, and a folder under the threshold.
+  frames('census-after4/1920', 12, 'png');
+  frames('final-111027', 130, 'png');
+  w(s, 'final-111027/subtle.mp4');
+  frames('crit', 99);
+
+  const got = await finishedBulkIn(s, {});
+  assert.deepEqual(got.take.map((x) => rel(s, x.path)).sort(), [
+    'after-client-200639',
+    'audit-after-171748/resize-1920',
+    'tour-130032/clip-medium',
+    'tour-130032/clip-strong',
+    'tour-130032/clip-subtle',
+  ]);
+  assert.ok(got.take.filter((x) => x.path.includes('tour-')).every((x) => /a capture's frames \(120 images/.test(x.what)));
+  // The stills, the clip with its frames, the notes and the short folder are evidence published nowhere else: they stay.
+  assert.ok(got.keep.some((k) => k.path === s && /published nowhere else/.test(k.why)));
+  assert.ok(!got.take.some((x) => /census|final-111027|crit|0-idle|notes\.md/.test(x.path)));
+});
