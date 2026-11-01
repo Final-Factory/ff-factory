@@ -65,7 +65,7 @@ import { accountSetupLines, addSecretEnv, addSecretValues, reserveLines, reserve
 import { scrubAtStart } from './scrubSecrets.ts';
 import { CliScrubber } from './cliScrub.ts';
 import { cliProjectsDir } from './cliTranscript.ts';
-import { clock, firstFree, poolBanner, poolLabel, poolKind, poolLimits, warningsForUser } from './tokenPool.ts';
+import { clock, firstFree, outOfPool, poolBanner, poolLabel, poolKind, poolLimits, warningsForUser } from './tokenPool.ts';
 import { poolForRef, type GatePoolToken } from './usageGate.ts';
 import { VAULT_FILE, VAULT_KINDS, VAULT_ROLES, Vault, keySource, setVaultContext, tokenPersonForWork, vaultStatusLine, type VaultKind, type VaultRole, type VaultShare } from './vault.ts';
 import { GithubTokens, PORTAL_MACHINE, ghRunner, githubFromVault, githubPersonOf, githubTokens, setGithubTokens } from './githubTokens.ts';
@@ -2781,11 +2781,15 @@ function tokenReport(now = Date.now()): { lines: string[]; warnings: TokenWarnin
           : kind === 'slot-taken'
             ? `no token is free for a new job right now (the ones that still work are busy with their one job): a new job starts when the running one finishes${next ? `, or when a limit lifts ${clock(next)}` : ''}`
             : 'workers and agents served';
-    lines.push(`Claude token pool, ${person} (${list.length} token${list.length === 1 ? '' : 's'}, the one a new job gets is marked priority; caps ${poolLimits(cfg).sessionHold}% 5-hour / ${poolLimits(cfg).onePerWeekly}% one at a time / ${poolLimits(cfg).retireWeekly}% retired): ${each.join('; ')}. ${verdict}`);
+    lines.push(`Claude token pool, ${person} (${list.length} token${list.length === 1 ? '' : 's'}, the one a new job gets is marked priority; caps ${poolLimits(cfg).sessionHold}% 5-hour / ${poolLimits(cfg).onePerWeekly}% one at a time / ${poolLimits(cfg).retireWeekly}% retired${ownCaps(list.map((t) => t.entry.name))}): ${each.join('; ')}. ${verdict}`);
     const banner = poolBanner(list.map((t) => ({ name: t.entry.name, last4: t.entry.last4, view: t.view })), 'your', vaultOrch);
     // For this person's own pages only (broadcast and appState filter on `person`): nobody else's top banner shows it.
     if (banner) warnings.push({ id: `pool:${person}`, kind: banner.kind, person, text: banner.text });
   }
+  // A per-token cap (w2785) whose name is no Claude token of any pool does nothing: say so, so a typo shows.
+  const named = new Set([...pools.values()].flat().map((t) => t.entry.name));
+  const stray = Object.keys(poolLimits(cfg).weeklyCaps ?? {}).filter((n) => !named.has(n));
+  if (stray.length) lines.push(`WARNING: vault.pool.weeklyCapPercent names ${stray.join(', ')}, which ${stray.length === 1 ? 'is' : 'are'} no Claude token in the vault: that cap does nothing`);
   const others = (key: string, role: 'dispatcher') =>
     role === 'dispatcher' ? [...store.sessions.values()].filter((s) => s.account === key && s.status !== 'stopped' && s.status !== 'error' && !(s.kind === 'orchestrator' && s.orchestratorRole === 'dispatcher')).length : 0;
   const reserves = reserveLines(cfg, usageOfKey, others, now);
@@ -2798,6 +2802,12 @@ function tokenReport(now = Date.now()): { lines: string[]; warnings: TokenWarnin
   // A GitHub token that lacks a required repository or permission (w904), or GitHub rate limiting its account (w1186): for its person and the owners.
   for (const b of github.banners()) warnings.push({ id: b.id, kind: b.kind, ...(b.person ? { person: b.person } : {}), owners: true, text: b.text });
   return { lines, warnings };
+}
+/** "; own weekly cap vault-ben-3 90%" for the tokens of one pool that have a cap (w2785), else empty. */
+function ownCaps(names: readonly string[]): string {
+  const caps = poolLimits(cfg).weeklyCaps ?? {};
+  const mine = names.filter((n) => caps[n] !== undefined).map((n) => `${n} ${caps[n]}%`);
+  return mine.length ? `; own weekly cap${mine.length === 1 ? '' : 's'} ${mine.join(', ')}` : '';
 }
 let tokenWarningsShown = '';
 /** The dashboard's token banners follow the meters and the sessions: refreshed on a timer, broadcast when they change. */
@@ -2843,7 +2853,7 @@ agents.hasPool = (userId) => vault.hasClaudeFor(userId);
 agents.tokenUnusable = (account) => {
   for (const list of gatePoolsRaw().values()) {
     for (const t of list) {
-      if (`token:${t.entry.fingerprint}` !== account || (t.view.state !== 'retired' && t.view.state !== 'exhausted')) continue;
+      if (`token:${t.entry.fingerprint}` !== account || !outOfPool(t.view)) continue;
       return `vault token ${t.entry.name} …${t.entry.last4} (${t.view.why})`;
     }
   }
@@ -2856,7 +2866,7 @@ const tokenLabel = (account: string) => {
   const e = vault.list().find((x) => x.kind === 'claude' && `token:${x.fingerprint}` === account);
   return e ? `${e.name} …${e.last4}` : undefined;
 };
-const poolViews = () => [...gatePoolsRaw()].map(([person, list]) => [person, list.map((t) => ({ key: `token:${t.entry.fingerprint}`, label: `${t.entry.name} …${t.entry.last4}`, state: t.view.state, why: t.view.why }))] as const);
+const poolViews = () => [...gatePoolsRaw()].map(([person, list]) => [person, list.map((t) => ({ key: `token:${t.entry.fingerprint}`, label: `${t.entry.name} …${t.entry.last4}`, state: t.view.state, why: t.view.why, ...(t.view.capped ? { capped: true } : {}) }))] as const);
 agents.orchestratorTokenOut = (account, pool) => orchestratorOut(poolViews(), account, pool);
 const tokenSwitch = new TokenSwitch({
   file: path.join(cfg.dataDir, 'token-switches.json'),

@@ -247,7 +247,7 @@ out and then have the dispatcher notice and change them once out?" A running age
 while that token works: nothing moves it early, at any meter, so a token is used up before its reset. Each point *read* from the
 code and covered by `server/tokenSwitch.test.ts`:
 - **Out.** A token is out when Claude refuses it, or when the pool retires it (weekly at `vault.pool.retireWeeklyPercent`,
-  above). A refusal is a session's `rate_limit_event` with status `rejected` (not `allowed_warning`, not an `overage` one), or a
+  or at the token's own `vault.pool.weeklyCapPercent`, w2785, above). A refusal is a session's `rate_limit_event` with status `rejected` (not `allowed_warning`, not an `overage` one), or a
   turn that ends on Claude's limit line ("You've hit your weekly limit · resets 3am", `LIMIT_END` in `server/ledgerRules.ts`),
   on any session, the dispatcher's included. It marks the token's refused window (the event's type, else the line's words, else
   the fuller meter) **used up** until that window's reset (the event's `resetsAt`, else the meter's, else an hour):
@@ -359,6 +359,7 @@ logged in the portal journal with who made it; they apply at the next process st
 | `vault.pool.nearResetHours` | 12 | (hours, 0 to 168; 0 turns it off) inside these last hours before its **weekly reset**: its one-at-a-time and retire caps are lifted ("Near a weekly reset" above, w1539) |
 | `vault.pool.nearResetFloorTokens` | 1 | (whole tokens, 0 to 10) the near-reset rule applies only while at least this many **other** tokens of the pool can take a new process |
 | `vault.pool.resetOffsetHours` | (retired) | retired with the score by w2722: still accepted in config.json, does nothing, and `set_app_config` no longer takes it |
+| `vault.pool.weeklyCapPercent` | none | (a map of vault entry name to percent, e.g. `{"vault-ben-3": 90}`) that token's **own** weekly cap (w2785, Ben: "stopping using ryding.ben@gmail.com account at 90% so I have 10% for personal use"): at or above it the token is **retired** for all work, kept for its person: the near-reset rule never lifts it, and neither the orchestrator's use-it-up nor the ops worker takes it; its agents move at their next turn as off any retired token (w1375, w1745); it comes back once its weekly window resets below the cap. `set_app_config` merges what it is given into the map (`"vault-ben-3=90"`, or `{"vault-ben-3": 90}`); a name set to `null` (or `"vault-ben-3=off"`) drops that cap, `null` drops them all. The token's line in system_status reads `weekly 91% (cap 90%): retired until Mon 05:00Z`; a cap naming no Claude token gets a WARNING line. The dispatcher's pinned token stays the dispatcher's (`claudeAccounts.dispatcher`): a cap keeps workers and other agents off it, not the dispatcher |
 | `vault.pool.dispatcherStopPercent` | 95 | the **dispatcher's pinned token** only, either meter: its workers are asked to save and stop, and no new worker starts on it until that window resets ("The stop line" below, w1109) |
 | (at 100) | | either meter: **used up**, handed to nobody until it resets (a rejection by the API counts as 100) |
 

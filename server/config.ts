@@ -339,6 +339,7 @@ export interface Config {
      * dispatcherStopPercent (95: either meter of the dispatcher's token at or above it stops its workers, w1109),
      * nearResetHours (12: the near-reset caps' window before a token's weekly reset, 0 off, w1539), nearResetFloorTokens (1).
      * resetOffsetHours (w1659) is retired with the score (w2722): accepted, does nothing.
+     * weeklyCapPercent (w2785): a token's own weekly cap by vault entry name ({ "vault-ben-3": 90 }), docs/vault.md section 4.
      */
     pool?: PoolConfig;
   };

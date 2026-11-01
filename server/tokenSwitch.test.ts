@@ -406,3 +406,12 @@ test('w1745: a worker left idle on the out token after its resume is resumed aga
   assert.equal(w.resumed.length, 4);
   for (const line of w.logs) for (const tok of [B1, B2]) assert.ok(!line.includes(tok) && !line.includes(fingerprintOf(tok)), `no token or key in "${line.slice(0, 80)}"`);
 });
+
+test('w2785: an orchestrator moves off a token at its own weekly cap to any token not used up and not capped, a retired one included', () => {
+  const v = (key: string, state: string, capped = false) => ({ key, label: `${key} …AAAA`, state, why: capped ? 'weekly 91% (cap 90%): retired until Mon 05:00Z' : state, ...(capped ? { capped } : {}) });
+  const pools = (b2: string) => [['ben', [v('b2', b2), v('b3', 'retired', true)]] as const];
+  assert.match(orchestratorOut(pools('ok'), 'b3', 'ben') ?? '', /^vault token b3 …AAAA \(weekly 91% \(cap 90%\)/);
+  assert.ok(orchestratorOut(pools('retired'), 'b3', 'ben'), 'off a capped token even a token past the 99% line is better: the 10% is its person\'s');
+  assert.equal(orchestratorOut(pools('exhausted'), 'b3', 'ben'), undefined, 'nothing better: it stays (its pick holds it at its next start)');
+  assert.equal(orchestratorOut([['ben', [v('b2', 'retired', true), v('b3', 'retired', true)]]], 'b3', 'ben'), undefined, 'another capped token is not better');
+});
