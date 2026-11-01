@@ -4,7 +4,7 @@ import path from 'node:path';
 import { checkObject, readJsonDurable } from './durable.ts';
 import { withFileLock, writeJsonOwned } from './machineTokens.ts';
 import type { PlanUsage, VaultEntryMeta, VaultKind, VaultRole, VaultShare, VaultStatus, WorkItem } from '../shared/types.ts';
-import { POOL_DEFAULTS, pickOrder, pickPool, reserveOf, type PoolLimits, type PoolToken, type PoolView } from './tokenPool.ts';
+import { POOL_DEFAULTS, pickOrder, pickPool, reserveOf, usable, type PoolLimits, type PoolToken, type PoolView } from './tokenPool.ts';
 
 /**
  * The token vault (docs/vault.md, w512): the secrets worker runs need, kept by the portal, encrypted value by value with a
@@ -777,9 +777,10 @@ export class Vault {
       // `priority`: the token a new worker would get now (w979), at most one per pool; none when nothing may serve a worker.
       const pick = pickPool(list.map((x) => x.t), { orchestrator: false, limits, now });
       const first = pick.token?.id;
-      // Listed in the order the picker uses (w1659), with the states it read (the near-reset caps need the whole pool, w1539).
-      const order = pickOrder(limits, now);
-      out.set(person, [...list].sort((a, b) => order(a.t, b.t)).map(({ e, t }) => ({ entry: this.meta(e), view: pick.views.get(t.id)!, live: t.others, priority: t.id === first })));
+      // Listed as the picker reads it (w1659): the tokens a worker may take first, each part by the soonest weekly reset (w2722),
+      // with the states it read (the near-reset caps need the whole pool, w1539).
+      const takes = (x: { t: PoolToken }) => (usable(pick.views.get(x.t.id)!) ? 0 : 1);
+      out.set(person, [...list].sort((a, b) => takes(a) - takes(b) || pickOrder(a.t, b.t)).map(({ e, t }) => ({ entry: this.meta(e), view: pick.views.get(t.id)!, live: t.others, priority: t.id === first })));
     }
     return out;
   }

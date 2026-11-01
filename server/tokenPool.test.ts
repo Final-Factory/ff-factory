@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { POOL_DEFAULTS, MIN_HOURS_TO_RESET, bySoonestReset, byScore, scoreOf, effectiveHours, judgePool, pickOrder, checkPoolConfig, clock, heldReason, judge, metersOf, poolLabel, usable, pickPool, poolBanner, poolKind, poolLimits, reserveOf, reserveReason, resetIn, warningsForUser, type PoolToken } from './tokenPool.ts';
+import { POOL_DEFAULTS, bySoonestReset, judgePool, pickOrder, checkPoolConfig, clock, heldReason, judge, metersOf, poolLabel, usable, pickPool, poolBanner, poolKind, poolLimits, reserveOf, reserveReason, resetIn, warningsForUser, type PoolToken } from './tokenPool.ts';
 import type { PlanUsage } from '../shared/types.ts';
 
 const NOW = Date.parse('2026-10-09T12:00:00Z');
@@ -31,7 +31,7 @@ const L = POOL_DEFAULTS;
 const pickAt = (tokens: PoolToken[], o: { orchestrator: boolean; ops?: boolean; limits: typeof L; sticky?: string }) => pickPool(tokens, { ...o, now: NOW });
 
 test('pool limits: defaults 80 / 95 / 99 and 5% a day + 20%, config overrides, bad values refused', () => {
-  assert.deepEqual(poolLimits(undefined), { sessionHold: 80, onePerWeekly: 95, retireWeekly: 99, reservePerDay: 5, reserveSession: 20, dispatcherStop: 95, nearResetHours: 12, nearResetFloor: 1, resetOffsetHours: 24 });
+  assert.deepEqual(poolLimits(undefined), { sessionHold: 80, onePerWeekly: 95, retireWeekly: 99, reservePerDay: 5, reserveSession: 20, dispatcherStop: 95, nearResetHours: 12, nearResetFloor: 1 });
   assert.equal(poolLimits({ vault: { pool: { sessionHoldPercent: 70, reservePerDayPercent: 8 } } }).sessionHold, 70);
   assert.equal(poolLimits({ vault: { pool: { sessionHoldPercent: 70, reservePerDayPercent: 8 } } }).reservePerDay, 8);
   assert.equal(poolLimits({ vault: { pool: { sessionHoldPercent: 700 } } }).sessionHold, 80, 'a value out of range is the default');
@@ -87,7 +87,7 @@ test('order: the weekly reset that comes first, then the 5-hour reset, then the 
   assert.equal(bySoonestReset(tok('x', { weeklyDays: 1 }), tok('y', { weeklyDays: 1 })), -1, 'equal resets: the name');
 });
 
-test('pickPool: the highest score is picked; a token past its cap is skipped for the next', () => {
+test('pickPool: the soonest weekly reset is picked; a token past its cap is skipped for the next', () => {
   const tokens = [tok('late', { weeklyDays: 6 }), tok('soon', { weeklyDays: 1 }), tok('mid', { weeklyDays: 3 })];
   const p = pickAt(tokens, { orchestrator: false, limits: L });
   assert.equal(p.token?.name, 'soon');
@@ -95,7 +95,7 @@ test('pickPool: the highest score is picked; a token past its cap is skipped for
   // The soonest one reaches the session cap: the next soonest.
   tokens[1] = tok('soon', { weeklyDays: 1, session: 82, sessionHours: 3 });
   assert.equal(pickAt(tokens, { orchestrator: false, limits: L }).token?.name, 'mid');
-  // The window resets (its meter is low again): the best score again.
+  // The window resets (its meter is low again): the soonest again.
   tokens[1] = tok('soon', { weeklyDays: 1, session: 5, sessionHours: 5 });
   assert.equal(pickAt(tokens, { orchestrator: false, limits: L }).token?.name, 'soon');
 });
@@ -324,51 +324,73 @@ test('w747: a pool banner is for its own person only; the whole-system banners a
   assert.equal(warningsForUser(undefined, 'ben'), undefined);
 });
 
-// ---------------------------------------------------------------- w971: the score
+// ---------------------------------------------------------------- w2722: the soonest weekly reset first
 
-test('w971: score = weekly % left per hour to the reset, x the 5-hour room: the 3%-left-3-days token scores ~1%/day, the 73%-left-4-days one ~18%/day', () => {
-  // lothsahn's example, at a fresh 5-hour window so the factor is 1.
+test('w2722: the soonest weekly reset first, not the most headroom: the 3%-left token resetting in 3 days before the 73%-left one in 4', () => {
+  // lothsahn, 2026-10-31: "Now that there is no session limit for most of the subscriptions, we just want to use the one that will reset soonest."
   const ben2 = tok('vault-ben-2', { weekly: 97, weeklyDays: 3, session: 0 });
   const ben1 = tok('vault-ben-1', { weekly: 27, weeklyDays: 4, session: 0 });
-  const s2 = scoreOf(ben2, NOW).perDay!;
-  const s1 = scoreOf(ben1, NOW).perDay!;
-  assert.ok(Math.abs(s2 - 1) < 0.01, `3% over 3 days is 1%/day, got ${s2}`);
-  assert.ok(Math.abs(s1 - 18.25) < 0.01, `73% over 4 days is 18.25%/day, got ${s1}`);
-  // Whichever order the pool lists them in, ben-1 is picked, by a worker and by the orchestrator.
-  for (const list of [[ben2, ben1], [ben1, ben2]]) for (const orchestrator of [false, true]) assert.equal(pickAt(list, { orchestrator, limits: L }).token?.name, 'vault-ben-1');
-  assert.deepEqual([ben2, ben1].sort(byScore(NOW)).map((t) => t.name), ['vault-ben-1', 'vault-ben-2']);
-  // The soonest reset alone no longer wins: ben-2 resets first and used to be tried first.
-  assert.equal([ben2, ben1].sort(bySoonestReset)[0].name, 'vault-ben-2');
+  const ben3 = tok('vault-ben-3', { weekly: 5, weeklyDays: 6, session: 0 });
+  for (const list of [[ben2, ben1, ben3], [ben3, ben1, ben2], [ben1, ben3, ben2]]) {
+    for (const orchestrator of [false, true]) assert.equal(pickAt(list, { orchestrator, limits: L }).token?.name, 'vault-ben-2');
+    assert.deepEqual([...list].sort(pickOrder).map((t) => t.name), ['vault-ben-2', 'vault-ben-1', 'vault-ben-3']);
+  }
 });
 
-test('w971: more headroom beats a sooner reset; the same headroom goes to the sooner reset; the 5-hour room scales the score', () => {
-  const big = tok('big', { weekly: 10, weeklyDays: 6, session: 0 }); // 90% over 6 days = 15%/day
-  const small = tok('small', { weekly: 70, weeklyDays: 1, session: 0 }); // 30% over 1 day = 30%/day: more per hour, wins
-  assert.equal(pickAt([big, small], { orchestrator: false, limits: L }).token?.name, 'small');
-  const tight = tok('tight', { weekly: 85, weeklyDays: 1, session: 0 }); // 15%/day
-  assert.equal(pickAt([big, tight], { orchestrator: false, limits: L }).token?.name, 'tight', 'equal score (15%/day): the sooner weekly reset');
-  assert.equal(pickAt([tight, big], { orchestrator: false, limits: L }).token?.name, 'tight', 'whatever the list order');
-  // Equal in everything: fewer live runs, then the name.
-  const a = tok('a', { weekly: 50, weeklyDays: 2, session: 0, sessionHours: 3, others: 2 });
-  const b = tok('b', { weekly: 50, weeklyDays: 2, session: 0, sessionHours: 3, others: 1 });
-  assert.equal(pickAt([a, b], { orchestrator: false, limits: L }).token?.name, 'b');
-  assert.equal(pickAt([tok('y', { weekly: 50, weeklyDays: 2 }), tok('x', { weekly: 50, weeklyDays: 2 })], { orchestrator: false, limits: L }).token?.name, 'x');
-  // The 5-hour window is in the picture: 70% used there is a third of the room.
-  const busy5 = tok('busy5', { weekly: 20, weeklyDays: 3, session: 70 });
-  const calm5 = tok('calm5', { weekly: 40, weeklyDays: 3, session: 0 });
-  assert.ok(scoreOf(busy5, NOW).perDay! < scoreOf(calm5, NOW).perDay!, '80% x 0.3 < 60% x 1');
-  assert.equal(pickAt([busy5, calm5], { orchestrator: false, limits: L }).token?.name, 'calm5');
-  // The caps are unchanged: a token at the 5-hour limit is skipped whatever it scores.
-  assert.equal(pickAt([tok('top', { weekly: 0, weeklyDays: 3, session: 80, sessionHours: 2 }), small], { orchestrator: false, limits: L }).token?.name, 'small');
+test('w2722: no 5-hour factor in the order: a busy 5-hour window under its hold, or none at all, is ordered by its weekly reset alone', () => {
+  const busy5 = tok('busy5', { weekly: 20, weeklyDays: 2, session: 70, sessionHours: 1 });
+  const calm5 = tok('calm5', { weekly: 20, weeklyDays: 3, session: 0 });
+  assert.equal(pickAt([calm5, busy5], { orchestrator: false, limits: L }).token?.name, 'busy5', '70% of its 5-hour window is under the 80% hold');
+  const ultra = tok('ultra', { weekly: 20, weeklyDays: 2.5 });
+  delete ultra.usage!.session;
+  assert.deepEqual([calm5, ultra, busy5].sort(pickOrder).map((t) => t.name), ['busy5', 'ultra', 'calm5']);
+  // The 5-hour reset is no tie-break any more: same weekly reset, the sooner 5-hour reset does not go first.
+  const a = tok('a', { weekly: 20, weeklyDays: 2, session: 10, sessionHours: 1 });
+  const b = tok('b', { weekly: 20, weeklyDays: 2, session: 10, sessionHours: 4 });
+  assert.deepEqual([b, a].sort(pickOrder).map((t) => t.name), ['a', 'b'], 'by name');
+  assert.deepEqual([a, b].sort(pickOrder).map((t) => t.name), ['a', 'b']);
 });
 
-test('w971: no reset time, no score: ranked after every scored token; a reset a few minutes off does not score as infinite', () => {
-  assert.equal(scoreOf(tok('n', { none: true }), NOW).perDay, undefined);
-  assert.equal(scoreOf(tok('n', { weekly: 50 }), NOW).perDay, undefined, 'meters but no weekly reset time');
-  assert.equal(pickAt([tok('fresh', { none: true }), tok('known', { weekly: 90, weeklyDays: 5 })], { orchestrator: false, limits: L }).token?.name, 'known');
-  // 3% left, 5 minutes to go: the hours are floored at MIN_HOURS_TO_RESET, so 3 / 1 h x 24 = 72%/day, not 864.
-  const edge = tok('edge', { weekly: 97, weeklyDays: 5 / 1440, session: 0 });
-  assert.ok(Math.abs(scoreOf(edge, NOW).perDay! - (3 / MIN_HOURS_TO_RESET) * 24) < 0.01);
+test('w2722: every cap still applies first: the soonest token is skipped when held, one-at-a-time and busy, retired, used up or reserved', () => {
+  const later = tok('later', { weekly: 10, weeklyDays: 5, session: 0 });
+  const soon = (o: { weekly?: number; session?: number; others?: number }) => tok('soon', { weekly: o.weekly ?? 30, session: o.session ?? 0, others: o.others ?? 0, weeklyDays: 2, sessionHours: 2 });
+  assert.equal(pickAt([later, soon({})], { orchestrator: false, limits: L }).token?.name, 'soon', 'it passes: it goes first');
+  const skipped = (t: PoolToken, state: string, why: string) => {
+    const pick = pickAt([later, t], { orchestrator: false, limits: L });
+    assert.equal(pick.token?.name, 'later', why);
+    assert.equal(pick.views.get('soon')!.state, state, why);
+  };
+  skipped(soon({ session: 80 }), 'held', 'the 5-hour hold at 80%');
+  skipped(soon({ weekly: 96, others: 1 }), 'one-at-a-time', 'one at a time from 95%, its slot taken');
+  skipped(soon({ weekly: 99.2 }), 'retired', 'retired at 99%');
+  skipped(soon({ weekly: 100 }), 'exhausted', 'used up at 100%');
+  const reserved = { ...soon({}), reserve: { weekly: 30, session: 20, daysLeft: 2, noReading: false, inReserve: true, weeklyIn: true, sessionIn: false, stopSession: false, stopWeekly: false, stopLine: 95 } };
+  skipped(reserved, 'reserved', "inside the dispatcher's reserve");
+  // One at a time with its slot free still serves, and goes first by its reset.
+  assert.equal(pickAt([later, soon({ weekly: 96 })], { orchestrator: false, limits: L }).token?.name, 'soon');
+});
+
+test('w2722: a token with no weekly reset time goes after every one with; ties: the fewer live runs, then the name', () => {
+  const fresh = tok('fresh', { none: true });
+  const noReset = tok('no-reset', { weekly: 5 });
+  const known = tok('known', { weekly: 90, weeklyDays: 6 });
+  assert.equal(pickAt([fresh, noReset, known], { orchestrator: false, limits: L }).token?.name, 'known');
+  assert.deepEqual([fresh, noReset, known].sort(pickOrder).map((t) => t.name), ['known', 'fresh', 'no-reset'], 'the two with none: by name');
+  // Equal weekly resets: the fewer live runs, then the name.
+  const x = tok('x', { weekly: 50, weeklyDays: 2, others: 2 });
+  const y = tok('y', { weekly: 50, weeklyDays: 2, others: 1 });
+  const z = tok('z', { weekly: 50, weeklyDays: 2, others: 1 });
+  assert.deepEqual([x, z, y].sort(pickOrder).map((t) => t.name), ['y', 'z', 'x']);
+  assert.equal(pickAt([x, z, y], { orchestrator: false, limits: L }).token?.name, 'y');
+});
+
+test('w2722: stickiness is unchanged: a session keeps its token while it passes, even when another resets sooner', () => {
+  const soon = tok('soon', { weekly: 30, weeklyDays: 1 });
+  const late = tok('late', { weekly: 30, weeklyDays: 5, sessionHours: 2 });
+  assert.equal(pickPool([soon, late], { orchestrator: false, limits: L, sticky: 'late', now: NOW }).token?.name, 'late');
+  // Once it no longer passes (here the 5-hour hold), the next process goes to the soonest reset.
+  const heldLate = tok('late', { weekly: 30, weeklyDays: 5, session: 85, sessionHours: 2 });
+  assert.equal(pickPool([soon, heldLate], { orchestrator: false, limits: L, sticky: 'late', now: NOW }).token?.name, 'soon');
 });
 
 // ---------------------------------------------------------------- w971: the dispatcher's reserve is enforced
@@ -394,7 +416,7 @@ test("w971: a pool token inside the dispatcher's reserve goes to no worker, no o
   // A session already on it (sticky) moves at its next start.
   assert.equal(pickAt([ben2, ben1], { orchestrator: true, limits: L, sticky: 'vault-ben-2' }).token?.name, 'vault-ben-1');
   assert.equal(pickAt([ben2, ben1], { orchestrator: false, limits: L, sticky: 'vault-ben-2' }).token?.name, 'vault-ben-1');
-  // Even when it would score best: a reserved token with plenty of room left in a long week is still not handed out.
+  // Even when it would come first: a reserved token with plenty of room left in a long week is still not handed out.
   const roomy = withReserve(tok('roomy', { weekly: 70, weeklyDays: 6, session: 0 })); // reserve 30%: 70 >= 70, inside
   assert.equal(judge(roomy, L, NOW).state, 'reserved');
   assert.equal(pickAt([roomy, tok('other', { weekly: 90, weeklyDays: 6, session: 0 })], { orchestrator: false, limits: L }).token?.name, 'other');
@@ -472,57 +494,11 @@ test('w971: poolKind and the banner read a reserved token as not free (workers c
   assert.match(banner?.text ?? '', /the orchestrator keeps running on the token with the most room/);
 });
 
-// ---------------------------------------------------------------- w1539: the near-reset caps; w1659: the score's soft offset
+// ---------------------------------------------------------------- w1539: the near-reset caps
 
-/** Both rules off: the order and caps as they were before w1539. */
-const OFF = { ...L, nearResetHours: 0, resetOffsetHours: 0 };
+/** The near-reset rule off: the caps as they were before w1539. */
+const OFF = { ...L, nearResetHours: 0 };
 const HOUR = 1 / 24;
-
-test("w1659: lothsahn's case: the 12%-left token 26 h from its reset now outranks the 58%-left one 119 h away", () => {
-  // Ben's pool at ~06:00Z 2026-10-21 (journal usage lines): the w971 score alone ranked ben-3 first (0.47 > 0.46 > 0.45 %/h).
-  const ben3 = tok('vault-ben-3', { weekly: 42, session: 4, weeklyDays: 119 * HOUR });
-  const ben2 = tok('vault-ben-2', { weekly: 88, session: 0, weeklyDays: 26 * HOUR });
-  const ben1 = tok('vault-ben-1', { weekly: 78, session: 8, weeklyDays: 45 * HOUR });
-  const pool = [ben3, ben1, ben2];
-  const perHour = (t: PoolToken, offset: number) => scoreOf(t, NOW, offset).perDay! / 24;
-  assert.deepEqual([perHour(ben3, 0), perHour(ben2, 0), perHour(ben1, 0)].map((x) => x.toFixed(2)), ['0.47', '0.46', '0.45'], 'the scores the portal showed');
-  assert.equal(pickPool(pool, { orchestrator: false, limits: OFF, now: NOW }).token?.name, 'vault-ben-3', 'before: the score alone');
-  // With the default soft offset of 24 h (lothsahn: "Let's make the new setting 24 hours, not 12"): 26 h counts as 10.1, 45 h
-  // as 24.7, 119 h as 95.2, so 1.19 > 0.82 > 0.59 %/h; with 12 h: 15.4, 33.3, 107.0.
-  assert.equal(L.resetOffsetHours, 24);
-  assert.deepEqual([26, 45, 119].map((h) => effectiveHours(h, 24).toFixed(1)), ['10.1', '24.7', '95.2']);
-  assert.deepEqual([ben2, ben1, ben3].map((t) => perHour(t, 24).toFixed(2)), ['1.19', '0.82', '0.59']);
-  assert.deepEqual([26, 45, 119].map((h) => effectiveHours(h, 12).toFixed(1)), ['15.4', '33.3', '107.0']);
-  assert.equal(pickPool(pool, { orchestrator: false, limits: L, now: NOW }).token?.name, 'vault-ben-2');
-  assert.deepEqual([...pool].sort(pickOrder(L, NOW)).map((t) => t.name), ['vault-ben-2', 'vault-ben-1', 'vault-ben-3'], 'the soonest reset first, by weight');
-  // 12 and 18 h order them the same; 0 turns the offset off.
-  for (const o of [12, 18]) assert.deepEqual([...pool].sort(pickOrder({ ...L, resetOffsetHours: o }, NOW)).map((t) => t.name), ['vault-ben-2', 'vault-ben-1', 'vault-ben-3'], `${o} h`);
-  assert.equal(pickPool(pool, { orchestrator: false, limits: { ...L, resetOffsetHours: 0 }, now: NOW }).token?.name, 'vault-ben-3');
-});
-
-test('w1659: the offset is a weight, not a switch: smooth in the hours, about h - offset far out, never below the 1 h floor', () => {
-  // Far from the reset it is the hours less the offset (lothsahn's "subtract 12 or 18 hours").
-  assert.ok(Math.abs(effectiveHours(168, 12) - 156) < 0.01);
-  assert.ok(Math.abs(effectiveHours(168, 18) - 150) < 0.01);
-  assert.equal(effectiveHours(40, 0), 40, '0: the hours as they are');
-  // Never at or below 0: floored at MIN_HOURS_TO_RESET, and rising with the hours, with no jump at any minute.
-  let last = effectiveHours(0, 12);
-  assert.equal(last, MIN_HOURS_TO_RESET);
-  for (let m = 1; m <= 168 * 60; m++) {
-    const h = effectiveHours(m / 60, 12);
-    assert.ok(h >= last && h - last < 1 / 60 + 1e-9, `minute ${m}: ${last} -> ${h}`);
-    last = h;
-  }
-  // A token with little room near its reset does not jump ahead at a fixed hour mark (w1539's "goes first" did inside 12 h):
-  // with 24 h, 2% left 24 h out scores 0.23 %/h, under the 0.79 of 60% left 100 h out; 3 h out it scores 2 %/h and leads.
-  const fresh = tok('b', { weekly: 40, session: 0, weeklyDays: 100 * HOUR });
-  const near = (h: number) => tok('a', { weekly: 98, session: 0, weeklyDays: h * HOUR });
-  assert.equal(pickAt([near(24), fresh], { orchestrator: false, limits: L }).token?.id, 'b');
-  assert.equal(pickAt([near(3), fresh], { orchestrator: false, limits: L }).token?.id, 'a');
-  // The 5-hour room still scales it: at 70% of its 5-hour window the near token's weight is a third.
-  const busy = tok('a', { weekly: 88, session: 70, weeklyDays: 26 * HOUR });
-  assert.equal(pickAt([busy, tok('c', { weekly: 42, session: 0, weeklyDays: 119 * HOUR })], { orchestrator: false, limits: L }).token?.id, 'c');
-});
 
 test('w1539: inside the last 12 h a token past its 95% or 99% cap takes work again; held and used up still hold', () => {
   const b = tok('b', { weekly: 1, weeklyDays: 6, session: 0 });
@@ -536,7 +512,7 @@ test('w1539: inside the last 12 h a token past its 95% or 99% cap takes work aga
     assert.equal(v.shown, `5-hour 0%, weekly ${weekly}%`, 'the label line keeps only the meters (w979)');
   }
   const near = (o: { weekly?: number; session?: number }) => tok('a', { weekly: o.weekly ?? 93, weeklyDays: 6 * HOUR, session: o.session ?? 0, sessionHours: 2 });
-  assert.equal(pickAt([near({}), b], { orchestrator: false, limits: L }).token?.id, 'a', '7% left 6 h out outweighs 99% left 6 days out');
+  assert.equal(pickAt([near({}), b], { orchestrator: false, limits: L }).token?.id, 'a', 'its reset 6 h out is the soonest');
   // The 5-hour hold still applies: held at 80%.
   const held = pickAt([near({ session: 80 }), b], { orchestrator: false, limits: L });
   assert.equal(held.token?.id, 'b');
@@ -566,7 +542,7 @@ test('w1539: the burst floor: the rule holds only while another token of the poo
   assert.equal(judgePool([reserved, c], L, NOW).get('a')!.state, 'reserved');
 });
 
-test('w1539: the caps change for no token far from its reset; with the offset off, the order is the w971 score', () => {
+test('w1539: the caps change for no token far from its reset', () => {
   // Every pool of three tokens drawn from these meters, all resetting more than 12 h away: the same pick, states and order.
   const weekly = [0, 40, 80, 96, 99.5];
   const session = [0, 50, 85];
@@ -576,22 +552,19 @@ test('w1539: the caps change for no token far from its reset; with the offset of
   for (let i = 0; i < 300; i++) {
     const pool = ['a', 'b', 'c'].map((n) => tok(n, { weekly: rnd(weekly), session: rnd(session), weeklyDays: rnd(days), sessionHours: 2, others: rnd([0, 1]) }));
     for (const o of [{ orchestrator: false }, { orchestrator: true }, { orchestrator: false, ops: true }]) {
-      const now = pickPool(pool, { ...o, limits: { ...L, resetOffsetHours: 0 }, now: NOW });
+      const now = pickPool(pool, { ...o, limits: L, now: NOW });
       const before = pickPool(pool, { ...o, limits: OFF, now: NOW });
       assert.equal(now.token?.id, before.token?.id, `pool ${i}`);
       assert.deepEqual([...now.views.values()].map((v) => v.state), [...before.views.values()].map((v) => v.state));
-      assert.deepEqual([...pool].sort(pickOrder({ ...L, resetOffsetHours: 0 }, NOW)).map((t) => t.id), [...pool].sort(byScore(NOW)).map((t) => t.id));
-      assert.deepEqual([...pickPool(pool, { ...o, limits: L, now: NOW }).views.values()].map((v) => v.state), [...before.views.values()].map((v) => v.state), 'the offset moves no state');
     }
   }
 });
 
-test('w1539/w1659: the settings: hours 0 (off) to 168, the floor a whole number of tokens 0 to 10, the offset 0 (off) to 168 h', () => {
-  assert.equal(poolLimits({ vault: { pool: { resetOffsetHours: 18 } } }).resetOffsetHours, 18);
-  assert.equal(poolLimits({ vault: { pool: { resetOffsetHours: 0 } } }).resetOffsetHours, 0);
-  assert.equal(poolLimits({ vault: { pool: { resetOffsetHours: 200 } } }).resetOffsetHours, 24, 'out of range is the default');
-  assert.equal(checkPoolConfig({ resetOffsetHours: 168 }), undefined);
-  assert.match(checkPoolConfig({ resetOffsetHours: -1 }) ?? '', /resetOffsetHours is a number of hours from 0 \(off\) to 168/);
+test('w1539: the settings: hours 0 (off) to 168, the floor a whole number of tokens 0 to 10; the retired offset (w1659) still loads', () => {
+  // w2722 retired the score's soft offset with the score: a config.json that still sets it loads, and it changes nothing.
+  assert.equal(checkPoolConfig({ resetOffsetHours: 24 }), undefined);
+  assert.deepEqual(poolLimits({ vault: { pool: { resetOffsetHours: 18 } as never } }), L);
+  assert.match(checkPoolConfig({ resetOffsetMinutes: 5 }) ?? '', /resetOffsetMinutes is not a setting/);
   assert.equal(poolLimits({ vault: { pool: { nearResetHours: 0 } } }).nearResetHours, 0);
   assert.equal(poolLimits({ vault: { pool: { nearResetHours: 24, nearResetFloorTokens: 2 } } }).nearResetFloor, 2);
   assert.equal(poolLimits({ vault: { pool: { nearResetHours: 500 } } }).nearResetHours, 12, 'out of range is the default');
@@ -613,7 +586,7 @@ test('a plan with no 5-hour window (w2709): weekly only, 0% on that meter, so th
   assert.equal(v.shown, 'weekly 79%', 'no session text at all (lothsahn: "display the weekly limit only")');
   assert.equal(metersOf(t.usage).session, 0);
   assert.equal(metersOf(t.usage).noSessionLimit, true);
-  assert.equal(scoreOf(t, NOW).perDay, scoreOf(tok('full', { session: 0, weekly: 79, weeklyDays: 3 }), NOW).perDay, 'scored with the whole 5-hour room');
+  assert.deepEqual([tok('later', { session: 0, weekly: 10, weeklyDays: 4 }), t].sort(pickOrder).map((x) => x.name), ['ultra', 'later'], 'ordered by its weekly reset like any other (w2722)');
   const r = reserveOf(t.usage, L, NOW);
   assert.equal(r.sessionIn || r.stopSession, false);
   // A reading with the 5-hour window and no weekly one keeps the weekly as unknown, labelled, never a bare 50%.

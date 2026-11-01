@@ -208,19 +208,18 @@ my default pool for another operator (ben) and then all my billing goes there, o
   person. `spend_report` attributes each turn to that account, and to the request and its person as before (`docs/spend.md`), so
   Ben's tokens show lothsahn's spend under their own account label, and lothsahn's requests stay lothsahn's.
 
-**The order (w971, w1659).** The token with the highest **score** first. The score is its weekly headroom per hour until its
-weekly window resets: `(100 - weekly %) / hours to the weekly reset`, the hours less a soft offset of about 24 ("Near a weekly
-reset" below), scaled by the room left in its 5-hour window, `(100 - 5-hour %) / 100`. The score only orders the pool; it is not shown anywhere (w979, below). lothsahn, 2026-10-11:
-"let's prefer the token weighted by the reset, but not solely based on the reset. Basically like use the token with the largest
-remaining %/time left or something like that." Reading it as headroom per hour: a token with 3% left and 3 days to go scores
-1%/day, one with 73% left and 4 days scores 18%/day, so the second is picked; the old "soonest reset first" would have tried the
-nearly used-up one first (vault-ben-2 at 97% on 2026-10-11 04:32Z). Details *(guesses, no data behind them yet)*:
-- The hours to the reset are never counted below one (`MIN_HOURS_TO_RESET`), so a token minutes from its reset does not score as
-  infinite; a token about to reset with room left still scores high, which is right: that room is lost if unused.
-- The 5-hour room is a multiplier, so a token at 70% of its 5-hour window scores 0.3 of what a fresh one would. The caps stay
-  as they were (80% 5-hour: held; 95% weekly: one at a time; 99%: retired; 100: used up) and apply before the score.
-- **Ties** (scores equal to 9 digits): the soonest weekly reset, then the 5-hour reset, then the fewer live runs, then the name.
-- A token with no weekly reset time (no numbers yet) has no score and goes after every scored token.
+**The order (w2722).** The token whose **weekly window resets soonest** first, among the tokens the caps allow. lothsahn,
+2026-10-31: "Now that there is no session limit for most of the subscriptions, we just want to use the one that will reset soonest."
+Room left at a weekly reset is lost, so the token that resets first is used first (`pickOrder`, `server/tokenPool.ts`).
+- **Every cap applies first**, as before: the 5-hour hold at 80% (only on a token with a 5-hour limit), one at a time from 95%
+  weekly, retired at 99%, used up at 100%, the dispatcher's reserve and its stop line, and the near-reset lift below. The order
+  only ranks the tokens that pass (`pickPool` filters by `usable`, then sorts).
+- **No 5-hour factor**: the 5-hour meter only holds a token at its cap; it neither scales the order nor breaks a tie.
+- **Ties** (the same weekly reset time): the fewer live runs, then the name. A token with no weekly reset time (no numbers yet)
+  goes after every one with one.
+- It replaced the headroom-per-hour score (w971, w1659: `(100 - weekly %) / hours to the reset`, scaled by the 5-hour room,
+  with `MIN_HOURS_TO_RESET` and the 24 h soft offset), which lothsahn asked for on 2026-10-11 while most tokens had a 5-hour
+  limit. The portal's pool listing (`Vault.pools`, w979) lists the tokens a worker may take first, each part in this order.
 - The same order applies to workers, standing agents, a person's orchestrator and the ops worker; a session still keeps its token
   while it passes (sticky), but not one inside the dispatcher's reserve (below).
 - **A resume picks its account by the same rule as a new job (w1375).** Ben, 2026-10-15: "Resuming a worker whose vault account is
@@ -297,25 +296,26 @@ code and covered by `server/tokenSwitch.test.ts`:
   vault-ben-2 …dAAA: vault-ben-1 …nQAA ran out ("You've hit your weekly limit ...")`. `system_status` also lists each token
   out now ("Token out (w1745): ... Still on it: ...") and the moves waiting for their next process, and the last 24 hours of
   switches (`data/token-switches.json` keeps the last 20). A token is only ever named by its vault name and last four characters.
-**Near a weekly reset (w1539, w1659).** lothsahn, 2026-10-21: "Instead of having it go first like that, can we just adjust the
+**Near a weekly reset (w1539; the w1659 offset retired by w2722).** lothsahn, 2026-10-21: "Instead of having it go first like that, can we just adjust the
 weighting so it gets used sooner? Like subtract 12 or 18 hours from the time remaining so that it starts getting consumed
 first?", then "Let's make the new setting 24 hours, not 12", with his earlier limit (2026-10-19): "We don't want it to always use the token about to expire first, though, as we
 want to be able to handle a sudden 5 hour burst of activity--and if all the tokens are used up except one, we'll only have 1 5
-hour session to pull from." Two rules (`server/tokenPool.ts`):
-- **The soft offset (the order, `effectiveHours`, `pickOrder`).** The score divides by the hours to the reset less
+hour session to pull from." Two rules (`server/tokenPool.ts`); the first is retired since w2722, the order now being the soonest reset outright:
+- **The soft offset (retired by w2722; was the order, `effectiveHours`).** The score divides by the hours to the reset less
   `vault.pool.resetOffsetHours` (24), softly: `h - 24 x (1 - e^(-h/24))`, never below 1 h. Days from the reset that is the hours
   less 24; near it the weight grows smoothly (26 h counts as 10.1, 12 h as 2.6, 3 h as 1), so no token jumps the queue at an
   hour mark, and a token with little room left near its reset still waits behind one with much more. On 2026-10-21 ~06:00Z the
   score alone ranked vault-ben-3 (58% left, 119 h) over vault-ben-2 (12%, 26 h) and vault-ben-1 (22%, 45 h), 0.47 / 0.46 / 0.45
-  %/h; with the offset the order is ben-2 (1.19), ben-1 (0.82), ben-3 (0.59). 0 turns it off.
+  %/h; with the offset the order was ben-2 (1.19), ben-1 (0.82), ben-3 (0.59). `vault.pool.resetOffsetHours` is still accepted in
+  config.json so an old file loads, and does nothing.
 - **The caps lifted (`judgePool`).** Inside the last `vault.pool.nearResetHours` (12) before a token's weekly reset its
   **one-at-a-time (95%) and retire (99%) caps are lifted**: room left at the reset is lost, so it may take parallel work up to
   100%. Only while at least `vault.pool.nearResetFloorTokens` (1) **other** token of the pool can take a new process on its own
   reading, so a burst always has more than one 5-hour window; a pool of one token never lifts its caps. The 5-hour hold, the
-  dispatcher's reserve and stop line, and 100% still apply. Nothing "goes first": the order is the score's.
+  dispatcher's reserve and stop line, and 100% still apply. The order is unchanged by it: the soonest weekly reset (w2722).
 - The orchestrator's and the ops worker's rules are unchanged: they read the same states and the same order.
 
-*What it rests on* (w1659, `scripts/pool-replay.py` on the journal's `usage:` lines from 2026-10-06 to 2026-10-21 06:00Z, 4,171
+*What the offset rested on* (history, w1659, `scripts/pool-replay.py` on the journal's `usage:` lines from 2026-10-06 to 2026-10-21 06:00Z, 4,171
 readings; the portal keeps no other meter history). Measured: the room left at the pooled tokens' weekly resets was 0-3% (ben-1
 1%, ben-2 0%, ben-3 0%, lothsahn-1 2% and 3%). Replayed (an estimate; Ben's three tokens 2026-10-12..21, 30 shuffled quiet and busy
 weeks of the measured days, at 0.7 / 0.85 / 1.0 of the measured demand; a 5-hour point is 6.5 weekly points, fitted):
@@ -358,11 +358,11 @@ logged in the portal journal with who made it; they apply at the next process st
 | `vault.pool.retireWeeklyPercent` | 99 | its weekly meter: **retired**, handed to nobody until the weekly window resets |
 | `vault.pool.nearResetHours` | 12 | (hours, 0 to 168; 0 turns it off) inside these last hours before its **weekly reset**: its one-at-a-time and retire caps are lifted ("Near a weekly reset" above, w1539) |
 | `vault.pool.nearResetFloorTokens` | 1 | (whole tokens, 0 to 10) the near-reset rule applies only while at least this many **other** tokens of the pool can take a new process |
-| `vault.pool.resetOffsetHours` | 24 | (hours, 0 to 168; 0 turns it off) not a cap: the pick order takes about this many hours, softly, off each token's time to its **weekly reset**, so room that a reset would lose is used sooner ("Near a weekly reset" above, w1659) |
+| `vault.pool.resetOffsetHours` | (retired) | retired with the score by w2722: still accepted in config.json, does nothing, and `set_app_config` no longer takes it |
 | `vault.pool.dispatcherStopPercent` | 95 | the **dispatcher's pinned token** only, either meter: its workers are asked to save and stop, and no new worker starts on it until that window resets ("The stop line" below, w1109) |
 | (at 100) | | either meter: **used up**, handed to nobody until it resets (a rejection by the API counts as 100) |
 
-A token with no numbers yet counts as 50% on both meters, so it passes every rule and ranks last (no weekly reset time, so no score); its
+A token with no numbers yet counts as 50% on both meters, so it passes every rule and ranks last (no weekly reset time); its
 line says both are unknown. A token whose reading has a weekly window and no 5-hour one is on a plan with **no 5-hour limit**
 (Ultra since 2026-10-30, w2709): it counts as 0% on that meter, so the 5-hour hold and buffer never apply, and its line shows the
 weekly figure only (`noSessionLimit`, `shared/types.ts`). "Live" counts the
@@ -396,7 +396,7 @@ line ... Remove all the other calculations entirely"):
 - `pool:held`, `pool:retired`, `pool:exhausted`, `pool:reserved`: the rarer states, in the same form, with their reason
   after it as before (held until, retired until, used up until, the dispatcher's buffer).
 - ` priority` after the label on the one token per pool that the picker would hand a new worker now (`pickPool` without a sticky
-  session: the best score among the tokens a worker may use). At most one per pool; none when nothing may serve a worker.
+  session: the soonest weekly reset among the tokens a worker may use, w2722). At most one per pool; none when nothing may serve a worker.
   Example: `vault-ben-1 …nQAA pool:ok priority`.
 - Kept: the 5-hour and weekly percent with their resets, the agents running on it. Gone: the %/day score, the 5-hour-room factor,
   "N% weekly left over N days", "N% left before it stops", and the slot-free/taken sentence on the line.
@@ -507,7 +507,7 @@ and covered by `server/dispatcherStop.test.ts`:
 
 **The dispatcher on a vault token (w996).** `claudeAccounts.dispatcher` takes `"vault:<entry name>"`, e.g.
 `"vault:vault-lothsahn-1"` (lothsahn, 2026-10-11: "Please make Lothsahn's token the dispatcher token"). It is one named token,
-not "a person's pool": the dispatcher has no person, picking from a pool by score would put it on whichever token scores best
+not "a person's pool": the dispatcher has no person, picking from a pool by its order would put it on whichever token comes first
 that day rather than the token asked for, and the reserve needs one credential to sit on. An owner's setting
 (`OWNER_ONLY_KEYS`, `server/appConfig.ts`); `set_app_config` refuses a name that is not an enabled Claude entry the key opens, and the
 config check refuses the value for the orchestrator. What it changes, each point *read* from the code:
