@@ -32,6 +32,8 @@ export interface PostInput {
   key?: string;
   /** Who asked, for FFBox's log: the request or the session. */
   by?: string;
+  /** agent_testing only, no thread: FFBox makes a thread with this name off the posted message (w2670: a thread to try a close on). */
+  new_thread?: string;
 }
 
 /** The query's args out of a call, or a sentence saying what is wrong with it. */
@@ -63,7 +65,10 @@ export function postArgs(input: PostInput): { args: Record<string, string> } | {
   }
   const thread = String(input.thread ?? '').trim();
   if (thread && !SNOWFLAKE.test(thread)) return { error: 'thread: a Discord thread id (a thread of that channel)' };
-  return { args: { channel, text, ...(thread ? { thread } : {}), ...(key ? { key } : {}), ...(by ? { by } : {}) } };
+  const newThread = clean(String(input.new_thread ?? '').replace(/\s+/g, ' '), 100).trim();
+  if (newThread && (channel !== 'agent_testing' || thread)) return { error: 'new_thread: only in agent_testing, and not with a thread (it makes one off the message, for trying a close where no player is)' };
+  if (newThread && MENTION.test(newThread)) return { error: 'new_thread: mentions someone' };
+  return { args: { channel, text, ...(thread ? { thread } : {}), ...(newThread ? { new_thread: newThread } : {}), ...(key ? { key } : {}), ...(by ? { by } : {}) } };
 }
 
 export interface PostResult {
@@ -135,9 +140,11 @@ export async function postAsMax(providers: ProviderManager, input: PostInput, se
   // FFBox answers a conversation post's channel as "conversation <id>".
   const place = channel.startsWith('conversation') ? `FFBox ${channel}` : `#${channel.replace(/_/g, '-')}`;
   const facts = `${link || `message ${str(d.message_id, 25)}`} (${place}${d.thread ? `, thread ${str(d.thread, 25)}` : ''}, ${Number(d.chars) || '?'} characters)`;
-  if (dup) return { text: `Already posted, nothing was sent again: ${facts}. FFBox found the same ${parsed.args.key ? `key "${parsed.args.key}"` : 'text'} posted there before.` };
+  const nt = d.new_thread && typeof d.new_thread === 'object' ? (d.new_thread as Record<string, unknown>) : undefined;
+  const made = nt ? ` New thread: ${str(nt.link, 200) || str(nt.id, 25)} (archives itself after a day).` : '';
+  if (dup) return { text: `Already posted, nothing was sent again: ${facts}. FFBox found the same ${parsed.args.key ? `key "${parsed.args.key}"` : 'text'} posted there before.${made}` };
   return {
-    text: `Posted as Max by FFBox: ${facts}. ${late ? `FFBox's first answer came late; asked again with the same ${parsed.args.key ? 'key' : 'text'}, it answered the post it had made. ` : ''}Put the link in your report.`,
+    text: `Posted as Max by FFBox: ${facts}.${made} ${late ? `FFBox's first answer came late; asked again with the same ${parsed.args.key ? 'key' : 'text'}, it answered the post it had made. ` : ''}Put the link in your report.`,
     event: {
       v: 1,
       at: now().toISOString(),

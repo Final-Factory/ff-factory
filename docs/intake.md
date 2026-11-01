@@ -60,6 +60,8 @@ been fixed' comments, and the FFBox harness is designed to see merged PRs and re
   own word, and a reviewer's card for a thread nothing owns; neither posts there.
 - **Workers read, never write there.** They may read a thread and download its files; the ffdiscord CLI refuses to post,
   reply, react, edit, rename or close in those channels and their threads (the ff-discord plugin, final-factory-agents).
+  Closing one is a person's orchestrator's act, through FFBox as Max, when that person asks (`close_bug_threads`, w2670;
+  [ffbox.md](ffbox.md#closing-bug-threads-as-max-w2670)).
   An intake request already filed from one gets worker rules that say so (`workerRules`), and no release follow-up
   (`releaseDraft` skips them).
 - **The PR says which thread.** A worker that fixes a bug from a thread adds one line per thread to its PR
