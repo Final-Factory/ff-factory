@@ -18,6 +18,8 @@
 //     by the caps either: past them it runs on the person's token with the most room, the dispatcher's reserved token last,
 //     and only a pool whose every token is used up stops it.
 // A token with no numbers yet counts as 50% on both meters: it passes every rule and ranks after the ones with a score.
+// A token whose plan has no 5-hour window (noSessionLimit, w2709: Ultra since 2026-10-30) counts as 0% on it, so the 5-hour
+// hold and buffer never trip; its line says "5-hour no limit". A meter that is missing otherwise reads "unknown".
 // A reading kept from before (data/usage.json) stands in for a poll that failed or has not answered yet, aged by its reset
 // times and floored at 50% once older than STALE_READING_MS (server/usage.ts effectiveUsage, w1041).
 //
@@ -31,7 +33,7 @@
 // `nearResetFloor` (1) other token of the pool can take a new process, so a sudden 5-hour burst always has more than one window
 // to draw on. No token "goes first" any more (w1659): the soft offset of the score (`resetOffsetHours`) does that by weight.
 
-import type { PlanUsage } from '../shared/types.ts';
+import { noSessionLimit, type PlanUsage, type UsageMeter } from '../shared/types.ts';
 
 /** The system-wide limits, percent (config vault.pool.*). */
 export interface PoolLimits {
@@ -185,13 +187,14 @@ export const usable = (v: PoolView): boolean => v.state === 'ok' || (v.state ===
 /** The label under a pooled token (w979, lothsahn): `pool:ok`, `pool:one-at-a-time`, `pool:held` ..., then ` priority` for the one the picker would choose now. */
 export const poolLabel = (v: PoolView, priority = false): string => `pool:${v.state}${priority ? ' priority' : ''}`;
 
-/** The meters of a token, or the 50% default. */
-export function metersOf(u: PlanUsage | undefined): { session: number; weekly: number; known: boolean; sessionResetsAt?: string; weeklyResetsAt?: string } {
-  if (!u?.available) return { session: 50, weekly: 50, known: false };
+/** The meters of a token: a plan with no 5-hour window counts 0% on it (w2709), a meter with no reading the 50% default. */
+export function metersOf(u: PlanUsage | undefined): { session: number; weekly: number; known: boolean; noSessionLimit: boolean; sessionResetsAt?: string; weeklyResetsAt?: string } {
+  if (!u?.available) return { session: 50, weekly: 50, known: false, noSessionLimit: false };
   const s = u.session?.percent;
   const w = u.weekly?.percent;
   const known = typeof s === 'number' || typeof w === 'number';
-  return { session: typeof s === 'number' ? s : 50, weekly: typeof w === 'number' ? w : 50, known, sessionResetsAt: u.session?.resetsAt, weeklyResetsAt: u.weekly?.resetsAt };
+  const none = noSessionLimit(u);
+  return { session: typeof s === 'number' ? s : none ? 0 : 50, weekly: typeof w === 'number' ? w : 50, known, noSessionLimit: none, sessionResetsAt: u.session?.resetsAt, weeklyResetsAt: u.weekly?.resetsAt };
 }
 
 /** "Fri 14:05Z" for a reset time, or "its next reset". */
@@ -246,8 +249,10 @@ export function judge(t: PoolToken, limits: PoolLimits, now: number = Date.now()
   const m = metersOf(t.usage);
   const base = { session: m.session, weekly: m.weekly, known: m.known, sessionResetsAt: m.sessionResetsAt, weeklyResetsAt: m.weeklyResetsAt };
   // A reading this portal did not just take (the latest poll failed, or none has answered since it started) says so (w1041).
-  const numbers = `5-hour ${pc(m.session)}%, weekly ${pc(m.weekly)}%${t.usage?.reading ? ` [${t.usage.reading.kind} reading: ${t.usage.reading.why}]` : ''}`;
-  const meters = m.known ? numbers : 'no numbers yet (counted as 50%)';
+  const read = (x: UsageMeter | undefined, n: number) => (x ? `${pc(n)}%` : 'unknown (counted as 50%)');
+  const fiveHour = m.noSessionLimit ? 'no limit' : read(t.usage?.session, m.session);
+  const numbers = `5-hour ${fiveHour}, weekly ${read(t.usage?.weekly, m.weekly)}${t.usage?.reading ? ` [${t.usage.reading.kind} reading: ${t.usage.reading.why}]` : ''}`;
+  const meters = m.known ? numbers : 'no numbers yet: 5-hour and weekly unknown (counted as 50%, placed after every token with a reading)';
   if (m.weekly >= 100 || m.session >= 100) {
     const until = m.weekly >= 100 ? m.weeklyResetsAt : m.sessionResetsAt;
     const why = `${numbers}: used up until ${clock(until)}`;

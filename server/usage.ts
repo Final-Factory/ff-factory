@@ -4,7 +4,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { HOST_ROLES, roleNames, type Config, type HostRole } from './config.ts';
-import type { AccountUsage, PlanUsage, SessionInfo, SessionKind, UsageMeter } from '../shared/types.ts';
+import { noSessionLimit, type AccountUsage, type PlanUsage, type SessionInfo, type SessionKind, type UsageMeter } from '../shared/types.ts';
 import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
 import { dryRun } from './dryRun.ts';
 
@@ -111,7 +111,9 @@ export function usageSummary(u: PlanUsage | undefined, now: Date): string {
     return `Claude plan usage: unavailable (${u.why ?? 'unknown'}), ${asOf}${spend}`;
   }
   const fmt = (m: UsageMeter) => `${m.label} ${Math.round(m.percent)}% used${m.resetsAt ? `, ${describeReset(m.resetsAt, now)}` : ''}`;
-  return `Claude plan${u.plan ? ` (${u.plan})` : ''} usage, ${asOf}${u.source ? `, from ${u.source}` : ''}: ${[u.weekly, u.session, ...u.models].filter((m): m is UsageMeter => !!m).map(fmt).join('; ')}`;
+  const meters = [u.weekly, u.session, ...u.models].filter((m): m is UsageMeter => !!m).map(fmt);
+  if (noSessionLimit(u)) meters.splice(1, 0, 'no 5-hour limit');
+  return `Claude plan${u.plan ? ` (${u.plan})` : ''} usage, ${asOf}${u.source ? `, from ${u.source}` : ''}: ${meters.join('; ')}`;
 }
 
 /**
@@ -587,7 +589,7 @@ class LoginProblem extends Error {}
 /** "Weekly 41%, Session (5 h) 33%" for the poll log. */
 const brief = (u: PlanUsage) =>
   u.available
-    ? [u.weekly, u.session, ...u.models].filter((m): m is UsageMeter => !!m).map((m) => `${m.label} ${Math.round(m.percent)}%`).join(', ')
+    ? [...[u.weekly, u.session, ...u.models].filter((m): m is UsageMeter => !!m).map((m) => `${m.label} ${Math.round(m.percent)}%`), ...(noSessionLimit(u) ? ['no 5-hour limit'] : [])].join(', ')
     : `no numbers: ${u.why ?? 'unknown'}`;
 
 // ---------------------------------------------------------------- the tracker
@@ -884,7 +886,8 @@ export class UsageTracker {
     const u = entry?.usage;
     if (!entry || !u?.available || typeof info.utilization !== 'number' || !Number.isFinite(info.utilization) || info.utilization < 0) return;
     const field = info.rateLimitType === 'five_hour' ? 'session' : info.rateLimitType === 'seven_day' ? 'weekly' : undefined;
-    const meter = field ? u[field] : undefined;
+    // A 5-hour event on a token whose plan sent no 5-hour window (w2709) brings the window back until the next poll.
+    const meter = field === 'session' && !u.session ? { label: 'Session (5 h)', percent: -1 } : field ? u[field] : undefined;
     if (!field || !meter) return;
     const percent = info.utilization <= 1 ? info.utilization * 100 : info.utilization;
     if (percent <= meter.percent) return;

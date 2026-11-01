@@ -30,6 +30,7 @@ import {
   type StoredLogin,
   type UsageReply,
 } from './usage.ts';
+import { noSessionLimit, sessionText, type PlanUsage } from '../shared/types.ts';
 
 /** How the meters label a vault token (a vault entry's name and the last four characters; never the value). */
 const tokenLabel = (token: string) => `vault-ben-1 …${token.slice(-4)}`;
@@ -895,4 +896,15 @@ test('accounts (w785): a vault token shows the account email a person recorded o
   const lines = accountLines(withEmail, new Map([['w1', { id: 'w1', kind: 'worker' as const, status: 'running' as const }]]), new Date(AS_OF));
   assert.match(lines[1], /^- vault-ben-2 …7BBB \[ben@example\.com; agents on it: w1\]: /);
   assert.match(accountLines(without, new Map(), new Date(AS_OF))[1], /^- vault-ben-2 …7BBB \[agents on it: /);
+});
+
+test('no 5-hour window (w2709): the account line and the poll log say "no 5-hour limit"; a 5-hour event brings the window back', () => {
+  const now = new Date(AS_OF);
+  const u: PlanUsage = { available: true, asOf: AS_OF, models: [], weekly: { label: 'Weekly', percent: 79 } };
+  assert.match(usageSummary(u, now), /Weekly 79% used; no 5-hour limit$/);
+  assert.equal(noSessionLimit(u), true);
+  assert.equal(sessionText(u), 'no limit');
+  assert.equal(sessionText(undefined), 'unknown');
+  assert.equal(sessionText({ ...u, session: { label: 'Session (5 h)', percent: 28.4 } }), '28%');
+  assert.equal(noSessionLimit({ available: false, asOf: AS_OF, models: [] }), false, 'no reading is unknown, not none');
 });

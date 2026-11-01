@@ -362,7 +362,10 @@ logged in the portal journal with who made it; they apply at the next process st
 | `vault.pool.dispatcherStopPercent` | 95 | the **dispatcher's pinned token** only, either meter: its workers are asked to save and stop, and no new worker starts on it until that window resets ("The stop line" below, w1109) |
 | (at 100) | | either meter: **used up**, handed to nobody until it resets (a rejection by the API counts as 100) |
 
-A token with no numbers yet counts as 50% on both meters, so it passes every rule and ranks last (no weekly reset time, so no score). "Live" counts the
+A token with no numbers yet counts as 50% on both meters, so it passes every rule and ranks last (no weekly reset time, so no score); its
+line says both are unknown. A token whose reading has a weekly window and no 5-hour one is on a plan with **no 5-hour limit**
+(Ultra since 2026-10-30, w2709): it counts as 0% on that meter, so the 5-hour hold and buffer never apply, and its line says
+"5-hour no limit" (`noSessionLimit`, `shared/types.ts`). "Live" counts the
 sessions whose process started on the token, not the asking session itself, and a pick made in the last 20 seconds before
 its process shows (two starts cannot both take the last slot).
 
