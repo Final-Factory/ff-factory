@@ -74,6 +74,8 @@ export interface CleanupRule {
   unityIdle?: boolean;
   /** Only an entry larger than this many bytes (a cap, not an age). */
   overBytes?: number;
+  /** With overBytes: the cap is on the entries `names` matches in the folder together, not each (w2752). */
+  overBytesTogether?: boolean;
 }
 
 /** What never goes: known paths (and whatever holds them), paths agents use now, and the home folder itself. */
@@ -248,7 +250,9 @@ export function cleanupRules(env: CleanupEnv, policy: CleanupPolicy): CleanupRul
     const dir = j(r, '*', 'Library');
     const common = { dir, names: [...LIBRARY_CACHES], insideKept: true, unityIdle: true };
     if (policy.libraryCacheIdleHours > 0) rules.push({ ...common, id: 'sandbox-lib-cache-idle', olderThanHours: policy.libraryCacheIdleHours, what: "a sandbox's Unity build cache nobody used" });
-    if (policy.libraryCacheCapGB > 0) rules.push({ ...common, id: 'sandbox-lib-cache-cap', olderThanHours: H, overBytes: policy.libraryCacheCapGB * 1024 ** 3, what: `a sandbox's Unity build cache grown past ${policy.libraryCacheCapGB} GB` });
+    // The cap is on the two caches together (w2752): lothdesktop/slot2 kept 4.000 GiB of each after its release trim, under a
+    // 6 GB cap on each, and so 8 GB more than its neighbours until the disk ran low or 48 h went by.
+    if (policy.libraryCacheCapGB > 0) rules.push({ ...common, id: 'sandbox-lib-cache-cap', olderThanHours: H, overBytes: policy.libraryCacheCapGB * 1024 ** 3, overBytesTogether: true, what: `a sandbox's Unity build caches grown past ${policy.libraryCacheCapGB} GB together` });
     rules.push({ ...common, id: 'sandbox-lib-cache-low', olderThanHours: H, when: 'low', what: "a sandbox's Unity build cache (rebuilt on demand)" });
   }
   rules.push({ id: 'worker-archives', dir: j(env.home, 'ff-worker'), names: ['*.tar', '*.tgz', '*.tar.gz', '*.zip', '*.bundle'], olderThanHours: policy.buildsOlderThanDays * D, what: 'a build or bundle archive' });
@@ -549,6 +553,12 @@ export async function planCleanup(opts: {
     const except = rule.except?.map(glob);
     const old = rule.supersededOnly ? new Set(superseded(names)) : undefined;
     const cutoff = now - rule.olderThanHours * 3_600_000;
+    let togetherBytes: number | undefined;
+    if (rule.overBytes !== undefined && rule.overBytesTogether) {
+      togetherBytes = 0;
+      for (const n of names) if (!match || match.some((r) => r.test(n))) togetherBytes += await sizeOf(path.join(rule.dir, n));
+      if (togetherBytes <= rule.overBytes) continue;
+    }
     for (const n of names) {
       const p = path.join(rule.dir, n);
       if (items.has(p)) continue;
@@ -561,7 +571,7 @@ export async function planCleanup(opts: {
       if (old && !old.has(n)) continue;
       if (neverDelete(p, guard)) continue;
       if (fs.existsSync(path.join(p, 'Editor', 'Unity.exe')) || fs.existsSync(path.join(p, 'Unity.app'))) continue;
-      if (rule.overBytes !== undefined && (await sizeOf(p)) <= rule.overBytes) continue;
+      if (rule.overBytes !== undefined && togetherBytes === undefined && (await sizeOf(p)) <= rule.overBytes) continue;
       if (await touchedSince(p, cutoff)) continue;
       const repos = await reposIn(p);
       if (repos.length && rule.repos !== 'any') {

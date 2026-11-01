@@ -466,6 +466,7 @@ test("a sandbox's Library caches (w898): unused, over the cap, or all of them wh
   const openOld = sandbox('slot3', 30 * D, { open: true }); // an editor has it: never
   const bigRecent = sandbox('slot4', 2, { kb: 20 }); // 20 KB each, over the (tiny) cap, idle for 2 hours
   const bigBusy = sandbox('slot5', 0.2, { kb: 20 }); // over the cap, but written 12 minutes ago
+  const bigTogether = sandbox('slot6', 2, { kb: 6 }); // w2752: 6 KB each, under the cap, 12 KB together over it, idle for 2 hours
   const caches = (s: ReturnType<typeof sandbox>) => [s.BuildCache, s.BurstCache];
 
   const policy = { ...DEFAULT_CLEANUP, libraryCacheIdleHours: 48, libraryCacheCapGB: 10 / 1024 / 1024 }; // cap 10 KB
@@ -476,16 +477,16 @@ test("a sandbox's Library caches (w898): unused, over the cap, or all of them wh
   const guard: CleanupGuard = { home, keep: [sandboxes], inUse: [] };
   const plan = async (low: boolean) => (await planCleanup({ rules, guard, low, now: w.now })).map((i) => i.path).sort();
 
-  assert.deepEqual(await plan(false), [...caches(unused), ...caches(bigRecent)].sort(), 'unused for days, and the one over the cap that is idle');
-  assert.deepEqual(await plan(true), [...caches(unused), ...caches(recent), ...caches(bigRecent)].sort(), 'low space: every idle cache, but not one written minutes ago and not an open project');
-  for (const s of [unused, recent, openOld, bigRecent, bigBusy]) assert.ok(!(await plan(true)).includes(s.ArtifactDB), 'only the two caches, never the rest of Library');
+  assert.deepEqual(await plan(false), [...caches(unused), ...caches(bigRecent), ...caches(bigTogether)].sort(), 'unused for days, and the idle ones whose two caches together are over the cap (w2752: each under it, as lothdesktop/slot2 after its release trim)');
+  assert.deepEqual(await plan(true), [...caches(unused), ...caches(recent), ...caches(bigRecent), ...caches(bigTogether)].sort(), 'low space: every idle cache, but not one written minutes ago and not an open project');
+  for (const s of [unused, recent, openOld, bigRecent, bigBusy, bigTogether]) assert.ok(!(await plan(true)).includes(s.ArtifactDB), 'only the two caches, never the rest of Library');
   for (const p of [...caches(openOld), ...caches(bigBusy)]) assert.ok(!(await plan(true)).includes(p), `kept: ${p}`);
 
   const items = await planCleanup({ rules, guard, low: true, now: w.now });
   const r = await runCleanup(items, guard);
   assert.deepEqual(r.failed, []);
   assert.ok(r.bytes > 0);
-  for (const p of [...caches(unused), ...caches(recent), ...caches(bigRecent)]) assert.ok(!fs.existsSync(p), `removed: ${p}`);
+  for (const p of [...caches(unused), ...caches(recent), ...caches(bigRecent), ...caches(bigTogether)]) assert.ok(!fs.existsSync(p), `removed: ${p}`);
   for (const p of [...caches(openOld), ...caches(bigBusy), unused.ArtifactDB, unused.lib]) assert.ok(fs.existsSync(p), `kept: ${p}`);
 });
 

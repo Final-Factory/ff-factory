@@ -6,7 +6,7 @@ import { LIBRARY_CACHES } from './cleanup.ts';
  * Trimming a sandbox's Unity Library caches when the sandbox is released (w898). Library/BuildCache and Library/BurstCache
  * only ever grow: every code change adds entries and nothing removes the old ones (4.8-12.7 GB each per sandbox, 87 GB over
  * lothdesktop's six, measured 2026-10-10). A trim keeps what a restart of the same work needs (entries written in the last
- * `keepHours`, the newest first up to `capGB` per cache) and drops the rest. It is a trim, not a wipe: the next worker's first
+ * `keepHours`, the newest first up to `capGB` for the two together) and drops the rest. It is a trim, not a wipe: the next worker's first
  * build stays warm. Never while an editor or a batchmode build has the project open (Temp/UnityLockfile).
  *
  * The player-build caches go whole once nothing in them was written for `keepHours` (w1576): Library/EntitySceneBundles (the
@@ -18,7 +18,10 @@ import { LIBRARY_CACHES } from './cleanup.ts';
 export interface TrimPolicy {
   /** Files written within this many hours stay. */
   keepHours: number;
-  /** Each cache is cut, oldest first, to at most this many GB. 0: no cap. */
+  /**
+   * The two caches together are cut, oldest first, to at most this many GB (w2752: it was each, so a released sandbox kept
+   * 4 + 4 GB, over the regular clean-up's 6 GB cap for the two together). 0: no cap.
+   */
   capGB: number;
   /** The trim is given up (the sandbox is handed back as it is) after this long. */
   timeoutMs: number;
@@ -105,35 +108,34 @@ export async function trimLibraryCaches(project: string, policy: TrimPolicy = TR
     if (++n % 200 === 0 && projectOpen(project)) return 'an editor or build opened the project';
     return undefined;
   };
-  for (const cache of LIBRARY_CACHES) {
-    const dir = path.join(project, 'Library', cache);
-    const all: Entry[] = [];
-    await listFiles(dir, all, stop);
-    const why = stop();
-    if (why) return { ...res, stopped: why };
-    const cap = policy.capGB > 0 ? policy.capGB * 1024 ** 3 : Infinity;
-    // Old files go; then, newest kept first, whatever does not fit under the cap.
-    const young = all.filter((e) => e.mtimeMs >= cutoff).sort((a, b) => b.mtimeMs - a.mtimeMs);
-    let kept = 0;
-    const doomed = all.filter((e) => e.mtimeMs < cutoff);
-    for (const e of young) {
-      if (kept + e.size > cap) doomed.push(e);
-      else kept += e.size;
-    }
-    for (const e of doomed) {
-      const w = stop();
-      if (w) return { ...res, keptBytes: res.keptBytes + kept, stopped: w };
-      try {
-        await fs.promises.unlink(e.file);
-        res.files++;
-        res.removedBytes += e.size;
-      } catch {
-        kept += e.size; // locked or gone: it stays
-      }
-    }
-    await pruneEmpty(dir);
-    res.keptBytes += kept;
+  // One budget for BuildCache and BurstCache together (w2752): lothdesktop/slot2 kept exactly 4.000 GiB of each after a day of
+  // player builds, 8 GB more than a sandbox the regular clean-up had wiped, and each under its 6 GB cap (sandbox-lib-cache-cap).
+  const all: Entry[] = [];
+  for (const cache of LIBRARY_CACHES) await listFiles(path.join(project, 'Library', cache), all, stop);
+  const why = stop();
+  if (why) return { ...res, stopped: why };
+  const cap = policy.capGB > 0 ? policy.capGB * 1024 ** 3 : Infinity;
+  // Old files go; then, newest kept first, whatever does not fit under the cap.
+  const young = all.filter((e) => e.mtimeMs >= cutoff).sort((a, b) => b.mtimeMs - a.mtimeMs);
+  let kept = 0;
+  const doomed = all.filter((e) => e.mtimeMs < cutoff);
+  for (const e of young) {
+    if (kept + e.size > cap) doomed.push(e);
+    else kept += e.size;
   }
+  for (const e of doomed) {
+    const w = stop();
+    if (w) return { ...res, keptBytes: res.keptBytes + kept, stopped: w };
+    try {
+      await fs.promises.unlink(e.file);
+      res.files++;
+      res.removedBytes += e.size;
+    } catch {
+      kept += e.size; // locked or gone: it stays
+    }
+  }
+  for (const cache of LIBRARY_CACHES) await pruneEmpty(path.join(project, 'Library', cache));
+  res.keptBytes += kept;
   for (const dir of playerCacheDirs(project)) {
     const all: Entry[] = [];
     await listFiles(dir, all, stop);

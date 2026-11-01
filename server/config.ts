@@ -846,7 +846,7 @@ export interface CleanupPolicy {
   libraryDeleteDays: number;
   /** A sandbox's Library/BuildCache and Library/BurstCache (rebuilt on demand) go once unused this many hours while no editor or build has the project open. 0: never by age. */
   libraryCacheIdleHours: number;
-  /** ...and when either grows past this many GB (while idle for an hour). 0: no cap. */
+  /** ...and when the two together grow past this many GB (while idle for an hour; w2752: it was either). 0: no cap. */
   libraryCacheCapGB: number;
   /** Agent temp clones (fff-*, ffsb-*), removed when older than this and without uncommitted or unpushed work. 0: never. */
   cloneOlderThanDays: number;

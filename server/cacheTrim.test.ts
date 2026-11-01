@@ -45,17 +45,22 @@ test('trim: files older than the keep age go, the recent ones stay, the rest of 
   assert.ok(p.has('Library/BuildCache') && p.has('Library/BurstCache'), 'the cache folders themselves stay');
 });
 
-test('trim: a cap keeps the newest files of each cache up to the cap, even young ones past it go oldest first', async (t) => {
+test('trim: a cap keeps the newest files of the two caches together up to the cap, even young ones past it go oldest first (w2752)', async (t) => {
   const p = project(t, {
     'Library/BuildCache/a/1': [1, 400],
     'Library/BuildCache/a/2': [2, 400],
     'Library/BuildCache/a/3': [3, 400],
     'Library/BurstCache/x/1': [5, 300],
+    'Library/BurstCache/x/2': [0.5, 300],
   });
-  const r = await trimLibraryCaches(p.dir, { keepHours: 48, capGB: 900 / 1024 ** 3, timeoutMs: 1000 }, { now: p.now });
-  assert.deepEqual(['Library/BuildCache/a/1', 'Library/BuildCache/a/2', 'Library/BuildCache/a/3', 'Library/BurstCache/x/1'].map(p.has), [true, true, false, true], 'the oldest of BuildCache over 900 bytes; BurstCache is its own cap');
-  assert.equal(r.removedBytes, 400);
-  assert.equal(r.keptBytes, 800 + 300);
+  const r = await trimLibraryCaches(p.dir, { keepHours: 48, capGB: 1000 / 1024 ** 3, timeoutMs: 1000 }, { now: p.now });
+  assert.deepEqual(
+    ['Library/BurstCache/x/2', 'Library/BuildCache/a/1', 'Library/BuildCache/a/2', 'Library/BuildCache/a/3', 'Library/BurstCache/x/1'].map(p.has),
+    [true, true, false, false, true],
+    'newest first across both caches: 300 + 400 fit under 1000 bytes, the next two 400s do not, the last 300 still fits (each cache alone is under the cap, as lothdesktop/slot2 kept 4 + 4 GB)',
+  );
+  assert.equal(r.removedBytes, 400 + 400);
+  assert.equal(r.keptBytes, 300 + 400 + 300);
 });
 
 test('trim: never while an editor or build has the project open, and it stops when one opens meanwhile', async (t) => {

@@ -1002,7 +1002,7 @@ nothing, BuildCache is 0.4 GB and BurstCache 3.2 GB. Player build of one commit 
 Burst SSE2+SSE4, no other build running): fully warm 112 s; with every file older than a day pruned (6.3 GB) 106 s; both caches
 removed (the rest of `Library` warm) 530 s, 5 times longer. A wipe costs that on the next worker's first build; a trim does not.
 
-**The trim** (`server/cacheTrim.ts`, `TRIM_DEFAULTS`: keep files written within 24 h, then each cache cut oldest-first to 4 GB, give up
+**The trim** (`server/cacheTrim.ts`, `TRIM_DEFAULTS`: keep files written within 24 h, then the two caches together cut oldest-first to 4 GB (w2752: it was each, so a sandbox kept 8 GB), give up
 after 10 min; the numbers are a guess on top of the measurements above, kept above one commit's working set): removes cache
 *files*, never a whole cache folder and nothing else under `Library`. **When**: `SandboxPool.trimReleased`
 (`machine/sandboxes.ts`) watches each sandbox's live agents (the daemon's own sessions, `liveIn`) at every 30 s look and trims the
@@ -1017,7 +1017,7 @@ back to `ready` and the pool logs why (and tells the orchestrator when it stoppe
 as `ready`. `daemon.json` `sandboxCacheTrim` sets the limits or `false` for never.
 
 **Backstop** (`cleanupRules`, for sandboxes nobody releases): `sandbox-lib-cache-idle` (whole `BuildCache`/`BurstCache`, unused
-for `libraryCacheIdleHours` 48), `sandbox-lib-cache-cap` (a cache over `libraryCacheCapGB` 6, idle an hour) and
+for `libraryCacheIdleHours` 48), `sandbox-lib-cache-cap` (the two caches together over `libraryCacheCapGB` 6, idle an hour; w2752: it was each, so lothdesktop/slot2 kept 4.000 GiB of each after its release trim, 8 GB over its neighbours, until the disk ran low or 48 h went by) and
 `sandbox-lib-cache-low` (all idle ones, while free space is below the soft threshold), each only while the project has no
 `Temp/UnityLockfile` and, as every rule, with the entry renamed first so one with an open file is skipped.
 
