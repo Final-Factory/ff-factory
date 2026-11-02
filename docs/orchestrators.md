@@ -540,6 +540,7 @@ workers are working on vs which are waiting on input"). It is derived live from 
 | **Waiting on input** | a PERSON must act: an intake approval is pending, the dispatcher's question or a design question is open, a worker it serves waits for a permission | what, and on whom: "a reviewer", the requester, the design question's people, the worker's person |
 | **Blocked** | a worker it serves has no agent host: its message found none to run in (`hostFailure`, w691) | on that machine; goes when its host's first event arrives |
 | **Waiting on input** | a worker it serves declared it waits on a person (`waiting_on_person`, w691), or its report's `wNNN: still open:` line says one must act (the backstop), and that person has not answered since nor has a PR it names merged (w1504); on a Blocked request only a wait newer than its gates | on the person named, or its requesters |
+| **Waiting on input** (on the orchestrator) | a worker of it ended its turn with a `wNNN: still open:` line that waits on the orchestrator for a step workers have no tool for ("waiting on the orchestrator to send me the run files", or the orchestrator as the one who acts: "the orchestrator runs the live ffbox_activity demo ... workers don't have those tools"; `orchestratorAskIn`, w2870), and the requester has not added a note since; a check-in it set does not make it Working, and it wins over **Merged, follow-up pending**. Not its own work (a pair or two-machine check, a build, its CI), a restart of its host or tools, a pair run, nor the dispatcher's: those keep their rows below | "a53036df waits on the orchestrator for a step workers have no tool for (sent to it once): ...", on "lothsahn's orchestrator"; its orchestrator was sent `[orchestrator step]` once ("Waiting, Queued, Blocked", below) |
 | **Working** (between turns) | a worker that holds it is between turns with its own work still going: a background job (CI it watches, a build, a test run) or a check-in it set with `wake_me` (w475's Waiting, renamed by w643), also while it is stopped until that check-in and still keeps its sandbox | "ab12cd34 between turns: CI on PR #1098 · check-in 06:10 UTC" |
 | **Sleeping** | the only thing ahead is its own worker's check-in, still to come, and nothing of it is on a machine (w2428): every worker that holds it is stopped (no process: no agent slot, no background job, no bench ticket), one of them has a check-in ahead with no message queued for it, and none keeps a sandbox (`holdsSandbox`: released, or none). Every row above wins over it | "Sleeping (until tomorrow 16:04 UTC at 71ecf40d's check-in; it is stopped and holds no sandbox, agent slot or job)" |
 | **Waiting on input** | a worker it serves stopped asking for a decision (its last report ends asking a person to decide, or with a question) | on its requesters |
@@ -946,9 +947,24 @@ without one means it is off or failing, worth a person's look.
     re-queued whole"); one for a PR whose run is open joins it, one for a PR and
     commit whose run finished is answered with its result, and a finished run resumes every request it serves with its
     result; a report waiting on a pair run with none filed is told to file it (w2057, "One pair run per pull request");
-  - a worker that waits on the orchestrator stays Stalled and the line says so, adding "that is its own work" for a pair or
-    two-machine check, a build, a test run or its CI (w1685). Such a worker is told at its turn's end, once per request
-    (`Agents.ownWorkNudge`), and every worker's prompt says these are its own work.
+  - a worker that waits on the orchestrator for its own work stays Stalled and the line says so, adding "that is its own
+    work" for a pair or two-machine check, a build, a test run or its CI (w1685). Such a worker is told at its turn's end,
+    once per request (`Agents.ownWorkNudge`), and every worker's prompt says these are its own work.
+  - **a worker that waits on its orchestrator for a step only an orchestrator can take is Waiting on input, on that
+    orchestrator** (w2870, lothsahn: "the orchestrator must get an actionable alert. The live state must say it waits on
+    the orchestrator"). w2833's PR #797 merged and deployed by 05:27 UTC; its worker a53036df reported four times, 05:24
+    to 05:55, "still open: the orchestrator runs the live ffbox_activity demo for conversations 1487 and 1488 and sends the
+    results to worker c6e1d6f2; workers don't have those tools". The ledger read **Merged, follow-up pending**: that row
+    came before the orchestrator-wait check, and the check (`orchestratorWaitIn`) only knew "waiting on the orchestrator",
+    so nothing was sent; the demo ran at 07:57 when a sweep timer noticed, and w2700 sat stalled 2.5 h on it. Now
+    `shared/workState.ts` `orchestratorAskIn` reads both forms (not own work, a restart, a pair run or the dispatcher), the
+    request shows "<worker> waits on the orchestrator for a step workers have no tool for", on "<requester>'s
+    orchestrator" (`WorkLive.orchestrator`), and at the turn's end `Orchestrators.orchestratorStep` sends the requester's
+    orchestrator one `[orchestrator step]` message with the line and what to do: run it with its own tools, send the
+    result to the worker that needs it (`message_agent`) or record it with `update_work`. It is kept on the request
+    (`WorkItem.orchestratorStep`): the same worker re-reporting the wait sends nothing; a report on the request without
+    it ends the wait, and a later one goes again. It is never a person's `[needs you]`: the person is not asked. Workers
+    get no new tools from this; a worker lacking an orchestrator's tool is intended.
 - **If the blocker fails, it is flagged.** What it waited on stalled, or did not clear in its time: the request stalls
   (`stalled.kind` `blocked`) with the reason, for its people to close or reopen. What it waited on was declined or
   cancelled without delivering: a person must decide now, so it becomes a question to its requester (Waiting on input).

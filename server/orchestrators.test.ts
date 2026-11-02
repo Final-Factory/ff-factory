@@ -2529,6 +2529,40 @@ test('w691: a worker that needs a person declares it (waiting_on_person) and its
   await until('the next turn', () => info.waitingOn === undefined);
 });
 
+test('w2870: a worker waiting on its orchestrator for a step workers have no tool for tells that orchestrator once, as [orchestrator step], never [needs you]', async (t) => {
+  const { store, sessions, dispatcher, chat, call, heard } = await setupOnMachine(t);
+  const loth = chat(LOTH).info;
+  await call(loth, 'request_work', { title: 'FFBox run-file view', brief: "Let orchestrators read a run's files." });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Do it', title: 'w1: FFBox run-file view', work_id: 'w1' });
+  assert.equal(started.isError, false, started.text);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const info = store.sessions.get(id)!;
+  await until('its first turn', () => info.status === 'idle');
+  const handle = sessions.get(id);
+  // w2833's a53036df, 05:24 to 05:55 UTC: the same wait, reported four times.
+  const report = "PR #797 merged and deployed.\n\nw1: still open: the orchestrator runs the live ffbox_activity demo for conversations 1487 and 1488 and sends the results to worker c6e1d6f2; workers don't have those tools";
+  sessions.events.emit('turnEnd', handle, report);
+  await until('lothsahn’s orchestrator hears it', () => heard(loth.id, '[orchestrator step]').length === 1);
+  const msg = heard(loth.id, '[orchestrator step]')[0].text;
+  assert.match(msg, new RegExp(`^\\[orchestrator step\\] w1 "FFBox run-file view"\\nIts worker ${id} ended its turn waiting on you, Lothsahn's orchestrator`));
+  assert.match(msg, /the orchestrator runs the live ffbox_activity demo for conversations 1487 and 1488/);
+  assert.deepEqual({ worker: store.work.get('w1')!.orchestratorStep?.worker, to: store.work.get('w1')!.orchestratorStep?.to }, { worker: id, to: ['lothsahn'] });
+  assert.ok(store.work.get('w1')!.log.some((l) => l.includes("[orchestrator step] sent to Lothsahn's orchestrator")));
+
+  // The same wait re-reported: nothing more; and never a person's [needs you].
+  sessions.events.emit('turnEnd', handle, report);
+  sessions.events.emit('turnEnd', handle, report.replace('PR #797 merged and deployed.', 'Still waiting.'));
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(heard(loth.id, '[orchestrator step]').length, 1, 'one message per wait');
+  assert.equal(heard(loth.id, '[needs you]').length, 0, 'no question for the person');
+
+  // The step taken, the worker reports on w1 without the wait: it ends; a later wait goes again.
+  sessions.events.emit('turnEnd', handle, 'w1: still open: checking the demo output against the brief');
+  await until('the wait ends', () => store.work.get('w1')!.orchestratorStep === undefined);
+  sessions.events.emit('turnEnd', handle, 'w1: still open: waiting on the orchestrator to send me the summary.md of d1488t1');
+  await until('a new wait goes', () => heard(loth.id, '[orchestrator step]').length === 2);
+});
+
 test('w1378: a worker waiting on a person reaches that person’s orchestrator once, as [needs you] with the question in full; the answer in chat resumes the worker', async (t) => {
   const { store, machines, sessions, agents, dispatcher, chat, call, heard } = await setupOnMachine(t);
   const ben = chat(BEN).info;
@@ -5834,7 +5868,7 @@ test('w1944: a worker whose still-open line waits on another request, the orches
   assert.match(waitOn(b.info) ?? '', /^it waits on w2: w3 \(its report/);
   const c = await startedFor(env, 'w3', { override_duplicate: 'another request' });
   said(c, 'w3: still open: waiting on the orchestrator to start the Windows client leg');
-  assert.match(waitOn(c.info) ?? '', /^it waits on w3: the orchestrator/);
+  assert.match(waitOn(c.info) ?? '', /^it waits on w3: (?:the|Lothsahn's) orchestrator/); // w2870: Waiting on its orchestrator
   // Work of its own left, or no line at all: it keeps the sandbox.
   const d = await startedFor(env, 'w4', { override_duplicate: 'another request' });
   said(d, 'w4: still open: I re-run the scenario after the fix');
