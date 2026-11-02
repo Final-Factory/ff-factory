@@ -31,7 +31,7 @@ import { addSecretEnv, redactSecrets, redactValue } from '../server/secrets.ts';
 import type { FromDaemon, SignalName } from '../server/machineProtocol.ts';
 import type { DeliveredAttachment, ImageInput, PermissionMode, Requester, SessionInfo, TranscriptEvent } from '../shared/types.ts';
 import { meterStates } from '../server/meterStates.ts';
-import { scoped } from './linuxScope.ts';
+import { scopeEndCause, scoped } from './linuxScope.ts';
 import { HOST_WATCH, endHostTree, hostIdentity, pidAlive, realHostProcs, removeHostDir, type HostProcs } from './hostWatch.ts';
 
 export { pidAlive };
@@ -110,7 +110,7 @@ export class LineTail {
 
 export function hostFiles(dir: string) {
   const f = (n: string) => path.join(dir, n);
-  return { dir, in: f('in.jsonl'), out: f('out.jsonl'), host: f('host.json'), state: f('state.json'), place: f('place.json'), offset: f('daemon.offset'), beat: f('beat'), log: f('host.log'), creds: f('creds.sha') };
+  return { dir, in: f('in.jsonl'), out: f('out.jsonl'), host: f('host.json'), state: f('state.json'), place: f('place.json'), offset: f('daemon.offset'), beat: f('beat'), log: f('host.log'), creds: f('creds.sha'), scope: f('scope') };
 }
 
 const CREDENTIAL_ENV = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'GH_TOKEN'] as const;
@@ -255,6 +255,8 @@ export interface HostDeps {
   stopping?: (s: HostedSession, on: boolean) => void;
   /** How long a stale host may stay silent before it is stopped (HOST_WATCH.HUNG_MS); tests shorten it. */
   hungMs?: number;
+  /** Why a host's systemd scope ended (machine/linuxScope.ts scopeEndCause, w2884); tests stand in for journalctl. */
+  scopeEndCause?: (unit: string) => string | undefined;
 }
 
 /**
@@ -267,6 +269,8 @@ export function launchHost(dir: string, start: HostStart, env: NodeJS.ProcessEnv
   try {
     // Not in its own folder (w799): Windows refuses to delete a folder a live process works in, and the daemon removes it.
     const cmd = scoped('agent', path.basename(dir), process.execPath, [...hostNodeArgs(), path.join(import.meta.dirname, 'agentHost.ts'), dir]);
+    // Its systemd scope's name (w2884): read when the host dies, for why (an OOM kill names itself in that scope's journal).
+    if (cmd.unit) fs.writeFileSync(f.scope, cmd.unit);
     const child = spawn(cmd.bin, cmd.args, {
       cwd: path.dirname(dir),
       detached: true,
@@ -572,7 +576,7 @@ export class HostedSession implements SessionHandle {
         return;
       case 'gone':
         this.tail.poll();
-        if (this.running) this.ended('its agent host stopped unexpectedly');
+        if (this.running) this.ended(this.goneWhy('its agent host stopped unexpectedly'));
         return;
       case 'starting':
         if (Date.now() - this.launchedAt > START_MS) this.ended(`its agent host did not start (see ${this.files.log})`);
@@ -607,13 +611,23 @@ export class HostedSession implements SessionHandle {
         if (!this.running || this.stoppingNow) return;
         if (who === 'gone' || who === 'other') {
           this.tail?.poll();
-          this.ended(who === 'gone' ? 'its agent host stopped unexpectedly' : `its agent host is gone (pid ${pid} is another program now)`);
+          this.ended(who === 'gone' ? this.goneWhy('its agent host stopped unexpectedly') : `its agent host is gone (pid ${pid} is another program now)`);
         } else if (hung) {
           this.tail?.poll();
           this.ended(`its agent host gave no heartbeat for ${Math.round((Date.now() - this.staleSince!) / 60_000)} min while its process ran: stopped`);
         }
       })
       .finally(() => (this.checking = false));
+  }
+
+  /**
+   * Why its host died, as far as this machine says (w2884): on Linux its systemd scope's journal names an OOM kill
+   * ("A process of this unit has been killed by the OOM killer."), which ended the whole scope under OOMPolicy=stop.
+   */
+  private goneWhy(why: string): string {
+    const unit = readFileOr(this.files.scope, '').trim();
+    const cause = unit ? (this.deps.scopeEndCause ?? scopeEndCause)(unit) : undefined;
+    return cause ? `${why} (its scope ${unit}: ${cause})` : why;
   }
 
   private saveOffset() {

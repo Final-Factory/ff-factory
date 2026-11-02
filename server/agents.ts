@@ -877,6 +877,8 @@ export class Agents {
     machines.workersCutOff = (id, sids) => this.orchestrators.workersCutOff(id, sids);
     // w2474: ...and one whose process ran on through the drop is not Blocked on it once its daemon says so.
     machines.workersLived = (id, sids) => void this.orchestrators.workersLived(id, sids);
+    // w2884: a worker whose agent host died mid-turn, resumed by Machines: said on its requests' logs.
+    machines.workerNote = (sid, text) => void this.orchestrators.noteOnHeld(sid, text);
     this.placeAgainTick = setInterval(() => this.placeAgain.tick(), 60_000);
     this.placeAgainTick.unref?.();
     this.timers = new Timers(
