@@ -107,7 +107,7 @@ text; only the owner's message decides. What a yes becomes:
 | the thread already has | outcome |
 |---|---|
 | an open, approved request (its source, a thread merged into it, its `subjects` or listed `scope.threads`) | nothing filed and nothing judged: a second reply never duplicates it (`owned`) |
-| a request that is done | nothing filed (`owned`) |
+| a request that is done, a sweep only for a thread its merged PR names in a `Discord:` line (w2844, `deliveredThread`) | nothing filed (`owned`) |
 | a request waiting for a reviewer (one the coverage check filed) | approved in the owner's name (`approved`) |
 | nothing, but the ledger check's high band matches an open request by meaning | the thread joins it as a subject (`joined`) |
 | nothing | filed at once as the owner's own request, approved by that owner (`approval.by`), triage `person`, source `discord-bug` with the thread, so the worker gets the FFBox-owned channel's rules (`filed`) |
@@ -122,7 +122,9 @@ active in the last `windowDays` (7), active or archived, is checked against thre
 thread (as above; any status but merged), a game-repo pull request, open or merged, whose description has its
 `Discord:` line (`gh pr list --search`, 45 days back), and an FFBox conversation on it with a PR open or merged. A broad
 request's window ("every thread since Oct 15") owns no thread it does not list: a sweep that picked titles is how the
-first miss happened. Each unowned thread is filed once through the intake for the system payer, `needs-human`, so it
+first miss happened. A finished sweep that lists a thread still owns it here (w2844): its triage was a person's
+decision, so the check does not send it back for review; an owner's acknowledgement there, a dev request and FFBox's
+`board_check` treat that sweep as done only for a thread its merged PR fixed. Each unowned thread is filed once through the intake for the system payer, `needs-human`, so it
 waits on the Waiting on input tab for a reviewer to approve (a fix) or decline with why (not a bug, a feature request,
 already fixed); the reason names what `classifyBug` reads it as. A thread the check filed counts as owned from then on,
 and an owner's acknowledgement there approves it. At most `coverage.perDay` (15) a day, inside `workLimits.intake`; with
@@ -395,7 +397,8 @@ request whose linked pull requests merged.
   so a report cannot make itself look like work in flight.
 - A bug report that strongly repeats an **open** bug report is merged into it, and its thread is added to that one's
   `alsoThreads`, so the fix's reply and the release follow-up reach both reporters. A worker already on it is told.
-- A strong overlap with finished work is listed on the request; the worker checks origin/master first and ends with
+- A strong overlap with finished work is listed on the request (the intake files it all the same; only a dev request,
+  `board_check` and an owner's acknowledgement answer "done", by `deliveredThread`, [ffbox.md](ffbox.md)); the worker checks origin/master first and ends with
   `RESOLVED: already fixed` when it is.
 
 ## Injection resistance
