@@ -5686,6 +5686,37 @@ const askFleet = (): Computer[] => {
   return [box('pc', 6, 'win32', { live: 6 }), box('lothlaptop', 1, 'win32', { live: 1, midTurn: 1, freeSandboxes: 0 }), box('m3', 2, 'darwin'), box('m5', 4, 'darwin', { noTimedRuns: M5_NO })];
 };
 
+test('w2900: parallel workers on one request each get their own timed leg; a different brief or platform files another; only the same worker repeating the same measurement folds', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o } = env;
+  fixTimedFacts(o);
+  agentsRoomFacts(agents, { game: ['pc'] });
+  putRequests(store, [{ id: 'w1', title: 'FFU engine: fan out every unblocked PLAN.md row to parallel workers', brief: 'Rows D and E, in parallel.' }]);
+  const rowE = await startedFor(env, 'w1');
+  const rowD = await startedFor(env, 'w1', { override_duplicate: 'row D of the fan-out, a parallel worker' });
+  assert.notEqual(rowD.id, rowE.id);
+  agents.places = () => askFleet();
+  const legs = () => [...store.work.values()].filter((x) => x.timedLeg?.for === 'w1');
+  const metal = { what: 'ffu Metal frame times on M3', brief: 'Indirect vs direct at 250k on branch ffu-e, commit aaaa111; report the table.', via: 'leg', platform: 'mac' };
+  const windows = { what: 'ffu Windows edit-loop timing', brief: 'Edit-to-running on branch ffu-d, commit bbbb222; report the median of 10.', via: 'leg', platform: 'windows' };
+  assert.match(String(await rowE.h.timed_place!(metal)), /Filed w2, the timed leg of w1/);
+  // Row D's worker (another worker, another measurement): its own leg, not folded into row E's (w2895 -> w2897).
+  assert.match(String(await rowD.h.timed_place!(windows)), /Filed w3, the timed leg of w1/);
+  assert.deepEqual(legs().map((x) => [x.id, x.timedLeg?.forSession, x.timedLeg?.platform]), [['w2', rowE.id, 'darwin'], ['w3', rowD.id, 'win32']]);
+  assert.match(store.work.get('w3')!.brief, /Edit-to-running on branch ffu-d/, 'the leg carries row D\'s own brief');
+  // Each worker waits on its own leg; neither wait replaces the other's (w2153).
+  const gates = [store.work.get('w1')!.blocked, ...(store.work.get('w1')!.alsoBlocked ?? [])].map((g) => g?.ref).sort();
+  assert.deepEqual(gates, ['w2', 'w3']);
+  // A true repeat (the same worker, the same brief up to whitespace and case, the same platform) folds.
+  assert.match(String(await rowE.h.timed_place!({ ...metal, brief: '  indirect vs direct at 250k on branch ffu-e,   commit aaaa111; report the table. ' })), /You already have an open timed leg for this measurement on w1, w2 .*nothing new was filed/);
+  assert.match(String(await rowD.h.timed_place!(windows)), /You already have an open timed leg for this measurement on w1, w3/);
+  assert.equal(legs().length, 2);
+  // The same worker, another measurement or another platform: a leg of its own each.
+  assert.match(String(await rowE.h.timed_place!({ ...metal, brief: 'Windowed capture check on branch ffu-e, commit aaaa111.' })), /Filed w4, the timed leg of w1/);
+  assert.match(String(await rowE.h.timed_place!({ ...metal, platform: 'windows' })), /Filed w5, the timed leg of w1/);
+  assert.equal(legs().length, 4);
+});
+
 test('w1969: a worker on a big computer asks timed_place; its leg is filed Queued for the small computers, its request waits on the leg\'s report, the guard keeps its ticket off here, and the decision is in the log', async (t) => {
   const env = await setupOnMachine(t);
   const { store, agents, o } = env;
@@ -5702,7 +5733,7 @@ test('w1969: a worker on a big computer asks timed_place; its leg is filed Queue
   const leg = store.work.get('w2')!;
   assert.equal(leg.status, 'queued');
   assert.deepEqual(leg.queuedFor?.needs, ['m3', 'lothlaptop'], 'small ones only: never pc (big) or m5');
-  assert.deepEqual(leg.timedLeg, { for: 'w1', forSession: id, from: 'pc', small: ['m3', 'lothlaptop'] });
+  assert.deepEqual(leg.timedLeg, { for: 'w1', forSession: id, from: 'pc', small: ['m3', 'lothlaptop'], ask: 'branch w1891-roundrobin: base 1a2b3c4, fix 5d6e7f8; probe_ab_win.sh 4 rounds on the just play save; report the table.' });
   assert.match(leg.title, /^Timed leg for w1: RoundRobin belt output A\/B on PR #2347$/);
   assert.match(leg.brief, /Build and time BOTH sides of the comparison on the computer you run on, under its exclusive bench ticket/);
   assert.match(leg.brief, /a line "For w1:"/);
@@ -5715,8 +5746,8 @@ test('w1969: a worker on a big computer asks timed_place; its leg is filed Queue
   // w1829: the verdict is kept with the session, so a portal restart does not drop it (BEAST, 2026-10-24 13:43Z).
   store.flush();
   assert.equal(new Store(env.cfg.dataDir).sessions.get(id)?.timedVerdict?.leg, 'w2', 'kept across a portal restart');
-  // Asked again: no second leg.
-  assert.match(String(await h.timed_place!({ what: 'the same A/B', brief: 'again' })), /w1 already has an open timed leg, w2/);
+  // Asked again by the same worker for the same measurement (w2900: a true repeat): no second leg.
+  assert.match(String(await h.timed_place!({ what: 'the same A/B', brief: 'Branch w1891-roundrobin: base 1a2b3c4,  fix 5d6e7f8; probe_ab_win.sh 4 rounds on the Just Play save; report the table.' })), /You already have an open timed leg for this measurement on w1, w2/);
   assert.equal([...store.work.values()].filter((x) => x.timedLeg).length, 1);
 
   // w2055: nothing idle (pc runs 6 agents, m3 and lothlaptop one each) and no worker of theirs to move: a normal leg waits
@@ -7466,6 +7497,7 @@ test("w2357: w2335 and its timed leg w2338 as it happened: the parent Blocked on
   const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Fix the Leech slowness', title: 'w1: Leech', work_id: 'w1' });
   assert.equal(started.isError, false, started.text);
   const id = /Started agent (\w+)/.exec(started.text)![1];
+  Object.assign(store.work.get('w2')!.timedLeg!, { forSession: id, ask: 'time master and the fix.' }); // w2900: the leg this worker filed for this ask, so asking again folds
   await until('its first turn', () => store.sessions.get(id)!.status === 'idle');
   // The parent hands its measurement to the leg (timed_place): Blocked on w2 reporting, by its own worker.
   const filed = o.fileTimedLeg(id, { what: 'Leech stack probe', brief: 'Time master and the fix.', from: 'pc', needs: ['biscuit'], why: 'pc is big' });
@@ -7542,6 +7574,7 @@ test("w2405 as it happened: a timed leg queued behind other requests' bench tick
   const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Fix the master batch', title: 'w1: batch', work_id: 'w1' });
   assert.equal(started.isError, false, started.text);
   const id = /Started agent (\w+)/.exec(started.text)![1];
+  Object.assign(store.work.get('w2')!.timedLeg!, { forSession: id, ask: 'time 2b2b2cd7af and master.' }); // w2900: the leg this worker filed for this ask, so asking again folds
   await until('its first turn', () => store.sessions.get(id)!.status === 'idle');
   const filed = o.fileTimedLeg(id, { what: 'held-blueprint frametime', brief: 'Time 2b2b2cd7af and master.', from: 'pc', needs: ['biscuit'], why: 'pc is big' });
   assert.equal(filed.id, 'w2');
@@ -7706,6 +7739,7 @@ test("w2417: a timed leg's report longer than every cut, with files published: t
   const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Speed up startup', title: 'w1: startup', work_id: 'w1' });
   assert.equal(started.isError, false, started.text);
   const id = /Started agent (\w+)/.exec(started.text)![1];
+  Object.assign(store.work.get('w2')!.timedLeg!, { forSession: id, ask: 'time a and b.' }); // w2900: the leg this worker filed for this ask, so asking again folds
   await until('its first turn', () => store.sessions.get(id)!.status === 'idle');
   o.fileTimedLeg(id, { what: 'startup A/B', brief: 'Time A and B.', from: 'pc', needs: ['biscuit'], why: 'pc is big' });
   assert.equal(store.work.get('w1')!.blocked?.ref, 'w2');

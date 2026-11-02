@@ -4189,7 +4189,9 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   /**
    * timed_place's hand-off (w1969, server/timedAsk.ts): the timed leg of `sessionId`'s request filed as its own request,
    * Queued for the small computers `needs` names (best first), with the asking request Blocked on its report. One open leg
-   * per request: asked again, it waits on the one there is. Returns the leg's id and what the worker is told.
+   * per worker and measurement (w2900): the same worker asking again with the same brief, platform and pin waits on the one
+   * there is; another worker on the request (a parallel row, w2895), or a different brief, platform or pinned computer,
+   * files a leg of its own. Returns the leg's id and what the worker is told.
    */
   fileTimedLeg(sessionId: string, a: { what: string; brief: string; from: string; needs: string[]; why: string; request?: string; platform?: string; pinned?: { id: string; why: string } }): { id: string; text: string } {
     const w = this.workerRequest(sessionId, a.request, 'timed_place', { reopen: true });
@@ -4198,7 +4200,9 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const what = clip(a.what.replace(/\s+/g, ' ').trim(), 100);
     const brief = a.brief.trim();
     if (!what || !brief) throw new Error('give what (one line: "RoundRobin belt output A/B on PR #2347") and brief (what the leg runs, as a new worker needs it: the branch and the commits of both sides, the save, the script and its settings, what to report)');
-    const open = [...this.store.work.values()].find((x) => x.timedLeg?.for === w.id && isOpen(x));
+    // w2900: one open leg per worker and measurement, not per request: parallel rows of one request (w2895) each get their
+    // own. Only a true repeat folds: the same worker, the same brief, platform and pinned computer.
+    const open = [...this.store.work.values()].find((x) => x.timedLeg?.for === w.id && isOpen(x) && sameTimedAsk(x, sessionId, brief, a.platform, a.pinned?.id));
     const leg = open ?? this.newTimedLeg(w, sessionId, { what, brief, from: a.from, needs: a.needs, why: a.why, ...(a.platform ? { platform: a.platform } : {}), ...(a.pinned ? { pinned: a.pinned } : {}) });
     // w2521: asked again with a pin, an open leg still Queued takes it (it then waits on that computer alone).
     if (open && a.pinned && open.status === 'queued' && !open.machinePin) {
@@ -4209,7 +4213,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     }
     const blocked = this.workerBlocked(sessionId, { request: w.id, reports: [leg.id], what: `timed leg ${leg.id}: ${what}` });
     const head = open
-      ? `${w.id} already has an open timed leg, ${leg.id} (${leg.status}: ${clip(leg.title, 80)}); you wait on it, and nothing new was filed.`
+      ? `You already have an open timed leg for this measurement on ${w.id}, ${leg.id} (${leg.status}: ${clip(leg.title, 80)}); you wait on it, and nothing new was filed (w2900: a different brief, platform or machine, or another worker, files a leg of its own).`
       : `Filed ${leg.id}, the timed leg of ${w.id}, Queued for ${a.needs.length ? a.needs.join(' > ') : 'the first computer that takes timed runs to come online'}: it starts by itself when one fits (w2055 order; w2147: a capacity wait, so ask no person for a computer), and a new worker there builds and times both sides of it on that one computer, and reports to you.`;
     this.stamp(w, `timed leg ask (w1969) from worker ${sessionId.slice(0, 8)} on ${a.from}: handed to ${leg.id}, queued for ${a.needs.join(' > ')}: ${a.why}`);
     this.store.putWork(w);
@@ -4319,7 +4323,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       updatedAt: now,
       sessionIds: [],
       needs: 'game',
-      timedLeg: { for: w.id, forSession: sessionId, from: x.from, small: [...x.needs], ...(x.platform ? { platform: x.platform } : {}) },
+      timedLeg: { for: w.id, forSession: sessionId, from: x.from, small: [...x.needs], ask: timedAskKey(x.brief), ...(x.platform ? { platform: x.platform } : {}) },
       overlaps: [],
       asks: 0,
       log: [],
@@ -7766,4 +7770,23 @@ export function remarkPair(p: WorkPair, x: { legs?: number; menus?: string }): {
   }
   const changed = next.legs !== p.legs || next.menus !== p.menus || next.noMenus !== p.noMenus;
   return { pair: next, was, changed };
+}
+
+/** w2900: a timed leg's brief as compared for a repeat ask: whitespace and case folded. */
+export function timedAskKey(brief: string): string {
+  return brief.replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+/**
+ * w2900: whether an open timed leg is the one this ask repeats: filed for the same worker, with the same brief, the same
+ * platform and no other pinned computer. A leg not yet pinned takes a pin asked again (w2521). A leg filed before w2900 has
+ * no `ask`; its brief starts with the asked one.
+ */
+export function sameTimedAsk(leg: WorkItem, sessionId: string, brief: string, platform: string | undefined, pin: string | undefined): boolean {
+  const t = leg.timedLeg;
+  if (!t || t.forSession !== sessionId) return false;
+  if ((t.platform ?? '') !== (platform ?? '')) return false;
+  if (pin && leg.machinePin && !leg.machinePin.ids.includes(pin)) return false;
+  const key = timedAskKey(brief);
+  return t.ask !== undefined ? t.ask === key : timedAskKey(leg.brief).startsWith(key);
 }

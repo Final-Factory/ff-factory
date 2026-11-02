@@ -980,7 +980,14 @@ and w1891 waited behind it there, and w1789 waited on LothDesktop behind shared 
 - **The hand-off**: elsewhere files the leg as its own request, "Timed leg for wNNN: ...", Queued for those small computers
   (`Orchestrators.fileTimedLeg`, modelled on w1945's `request_pair`): a new worker there builds and times both sides of the
   comparison on that one computer (any OS) and reports "For wNNN:", and the asking request is Blocked on that report, so its
-  sandbox goes to other work meanwhile. One open leg per request. With `via: "timed_run"` and a play-only computer up
+  sandbox goes to other work meanwhile. **One open leg per worker and measurement, not per request** (w2900): a request
+  fanned out to parallel workers (w2895's rows) gets a leg for each worker that asks, and the same worker asking for a
+  different brief, platform (`windows`/`mac`) or pinned computer (`machine`) gets another. Only a true repeat folds into
+  the open leg ("you wait on it, and nothing new was filed"): the same worker, the same brief (whitespace and case
+  ignored, `timedLeg.ask`), the same platform, and no other pin (a pin asked again still pins a Queued leg that has none,
+  w2521). Each worker is Blocked on its own leg's report (its own gate, w2153). Before w2900 every ask on the request
+  folded into its first open leg: row D's Windows edit-loop timing on BEAST went into w2897, row E's m3-only Metal leg,
+  which never carried row D's brief (`Orchestrators.fileTimedLeg`, `sameTimedAsk`). With `via: "timed_run"` and a play-only computer up
   (w1946), a Windows player A/B goes there by `timed_run` instead, built where the worker is.
 - **The wait bound, and the fall-back to a big computer** (w2048; lothsahn, 2026-10-24: "sometimes machines go offline. We
   should still allow timed runs on larger machines if there are no other machines available to take them"). A leg Queued
