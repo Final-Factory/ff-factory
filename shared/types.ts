@@ -2300,8 +2300,9 @@ export interface WorkItem {
    * A timed leg handed off to a small computer (w1969, timed_place): the request whose worker asked and that worker (Blocked
    * on this one's report meanwhile), where it came from and the small computers it waits on. Queued for those; after
    * TIMED_LEG_WAIT_MS (server/timedAsk.ts) its needs widen to every computer that takes timed runs, and `widened` says when.
+   * `ask` (w2900): the asked brief, folded (timedAskKey), so only the same worker's repeat of it folds into this leg.
    */
-  timedLeg?: { for: string; forSession: string; from: string; small: string[]; widened?: string; platform?: string };
+  timedLeg?: { for: string; forSession: string; from: string; small: string[]; widened?: string; platform?: string; ask?: string };
   /**
    * w2521: the computers this work must run on, for a hardware reason (a display, a GPU, an OS), and why: set by timed_place's
    * `machine` on the leg it files. It goes there or waits for them, never elsewhere (server/machinePin.ts; a request's
