@@ -376,28 +376,48 @@ The answer is never kept as a "last known" one. Deploy: the portal and each mach
 the tool to exist, and FFBox must run ffbox master with `post_message` (connector 2.9.0); before that it answers
 `unsupported`.
 
-### Changing an FFBox setting (w2672)
+### Changing an FFBox setting (w2672, w2835)
 
 lothsahn, 2026-10-31: "Give yourself a way to update ffbox settings over the tunnel", and "It should only change
-settings in settings.json, not the secrets in secrets.env." The orchestrator tool **`set_ffbox_config`** asks FFBox's
-`set_config` query (server/ffboxConfig.ts), and FFBox changes one setting of its `~/.config/ffbox/config.json`:
+settings in settings.json, not the secrets in secrets.env." 2026-11-01 (w2835): "Please update ffbox's tunnel so you can
+change its settings yourself." The orchestrator tool **`set_ffbox_config`** asks FFBox's `set_config` query
+(server/ffboxConfig.ts), and FFBox changes one setting of its `~/.config/ffbox/config.json`:
 
-- **Which keys**: only those of FFBox's `scripts/ffbox_settings.py` `LIVE` table, today
-  `subscription.new_conversation_hold_pct` and `subscription.review_hold_pct` (a share of the operator's Claude window
-  from 0 to 1 past which a new conversation or a #codereview review waits; `null` never waits). FFBox holds the list;
-  `FFBOX_SETTABLE_KEYS` here only names them early. Never secrets.env, a token or an operator's identity: no path is
-  taken from the caller, and FFBox's `test_query_set_config` refuses each of them.
+- **Which keys**: those of FFBox's `scripts/ffbox_settings.py` `SETTABLE` table, about 85, each with its kind and check
+  matching how ffwatch reads it: a fraction, an int or a number with its range, true or false, one of a fixed set (the
+  model aliases, the agent classes, `prefer`/`off`), a string with its pattern (a model name, `H:MM`, a time zone) or a
+  list of strings; some take `null`. Among them `fff.dev_requests`, the `fff.*` switches and the classes' model and
+  tier, the intake pools and automatic diagnoses, the GitHub review and feedback settings, the main loop's timings,
+  the classifier, the models, Discord rates, quiet hours, conversation clustering, the release lane's housekeeping and
+  the two subscription holds. FFBox holds the list; call the tool with no key to see it with each value now. A key
+  this side's pattern refuses at once: one naming a token, a secret, a credential, `operators` or `steam`.
+- **Never settable** (`NOT_SETTABLE`, listed in the answer with why): secrets.env; tokens and the names of the
+  variables holding them; operator identities (`operators`, `intake.auto.by`, `intake.fff_handoff.operator`); the
+  Steam account; the paths and programs ffwatch runs; the addresses it sends tokens and posts to (`fff.url`,
+  `github.api_base`, `github.repo`, `intake.post_to`, `release.channel`, `model_proxy`); the git refs it pushes from
+  and to; the release decisions (`release.enabled`, `branches`, `upload`, `regenerated_paths`); the per-class
+  `pools.<class>` blocks (derived at load and coupled to `max_concurrent_runs`); `approve_before_send` (a start flag
+  also sets it); and the top-level `agent_secs`-style keys ffwatch does not read. FFBox's `test_query_set_config`
+  checks every DEFAULTS key is in one table or the other.
+- **Live or restart**: a live key is read by ffwatch at the moment it decides, so FFBox applies it in place with no
+  restart (its updater leaves live keys out of its restart fingerprint). A restart key (`dry_run`,
+  `max_concurrent_runs`, `workload_reserve`, `subscription.refresh_secs`, `subscription.timeout_secs`) is read at
+  start: FFBox writes it and its updater restarts ffbox on its next pass, every 3 minutes. FFBox **refuses** a restart
+  key while a release builds or uploads (a step of its release lane runs, or a release under 5 hours old is still
+  building or uploading; an unreadable release ledger counts as one), saying which release, so a restart never cuts
+  a release short. Ask again once it has finished.
 - **Who**: the dispatcher and Lothsahn's and Ben's own orchestrators, as `set_app_config` (`user_asked: true`; an
   orchestrator only in a turn its person started with a message of their own, `personalSettingProblem`; the
   dispatcher's under `USER_ASKED_TOOLS`). Workers do not have it.
 - **What happens on FFBox**: the old file is kept as `config.json.prev`; the new one is written and read back through
-  ffwatch's own loader (a value it would not take puts the old file back and is `refused`); the change is applied live,
-  in place, with no restart, so a release build is never cut short (FFBox's updater leaves these keys out of its restart
-  fingerprint); the change is a row of FFBox's `settings-changes.jsonl` and a journal line
-  `fff: set_config <key> <old> -> <new> by <who> (<reason>): change <id>, applied live, effective <value>, no restart`.
-- **The answer**: old, new and the effective value read back live, and the change id. `revert` with that id puts the
-  old value back (refused when a later change came since). No key: the settable keys, their values now and the last ten
-  changes. A timeout says the change may have been made: list before asking again.
+  ffwatch's own loader (a value it would not take puts the old file back and is `refused`); a write that would change
+  anything but the key is refused; the change is a row of FFBox's `settings-changes.jsonl` and a journal line
+  `fff: set_config <key> <old> -> <new> by <who> (<reason>): change <id>, applied live, effective <value>, no restart`
+  (a restart key: `written, applies when ffbox restarts (...)`).
+- **The answer**: old, new, the effective value read back (a restart key: the value it runs with until the restart),
+  whether it waits for a restart, and the change id. `revert` with that id puts the old value back (refused when a
+  later change came since). No key: every settable key with its kind, live or restart and value now, what is never
+  settable and why, and the last ten changes. A timeout says the change may have been made: list before asking again.
 - Here, every call is a `ffbox config:` line in the portal's log, with who asked and why.
 
 ## Security model
