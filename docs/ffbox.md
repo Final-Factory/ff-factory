@@ -586,8 +586,14 @@ for the fix #N" is gone) or when the request ends with nothing merged ("Done: ..
 records each. The thread hears what the orchestrator answers with `reply_to_ffbox` (posted in the conversation, a report
 thread included, no longer by Max DM) and, when the fix merges, the merge notice ("Fixed in PR #N, coming in version
 <build> and later."). So **an orchestrator answers the conversation with `reply_to_ffbox` before it closes the request**:
-the close says nothing there. "Already fixed" at filing is still posted as FF Factory wrote it, and a developer's
-question to the operator still goes by Max DM. The 👀 stays until an outcome arrives (w415): the PR up, the request done,
+the close says nothing there. "Already fixed" (or "Already done as w123") at filing is posted in the conversation
+as FF Factory wrote it, and a developer's question to the operator is posted there too, both as a reply in place like
+`reply_to_ffbox`'s (w2848; lothsahn, 2026-11-01: "let's get rid of the DM's and just have Max reply in threads.
+originally I was worried about leaking private info, but we can stop worrying about that."). Until w2848 FFBox sent
+those two by Max DM ("wNNN's line DMed to lothsahn (the thread hears none of it)") while the orchestrator's reply went
+in the thread, so the operator heard one request in two places. The orchestrator is told FFBox already said the
+"Already fixed" line (its `[from FFBox, …]` line), so its own reply adds to it and never repeats it. FFBox sends no DM
+for a dev request any more; a reply to a question Max DMed before w2848 still answers it. The 👀 stays until an outcome arrives (w415): the PR up, the request done,
 declined or cancelled, or its fix merged, or the orchestrator's reply. In a chat channel conversation (#ask-assistant)
 every line FFBox posts replies to the newest message of the hand-over turn that spoke to Max (an @-mention or a reply to
 Max), not to the turn's last message (w649: on 2026-10-07 "Queued as w648" answered the chat line after lothsahn's
@@ -606,6 +612,7 @@ need the person to confirm it in a turn of theirs.
 ffweb for the other sources), their own words relayed, and a busy worker on the request gets it too. Their own words
 from Discord, GitHub, FFBox's shell or ffweb, matched by FFBox to them, are a turn of theirs, like a message typed in FF
 Factory; everything else in the turn is relayed as the harness's message ([below](#operators-own-words-w831)).
+The operator's answer to a question FFBox posted in the conversation is such a message (w2848).
 The orchestrator answers with
 **`reply_to_ffbox`** `{ request?, conversation?, text }` (a person's own orchestrator only, for that person's own
 linked conversations), which sends a `dev_reply` FFBox posts in that conversation, a report thread included (w1640;
@@ -618,7 +625,7 @@ that post (w2711; a save a worker needs is a blocker in its report) ([above](#po
 
 Lothsahn, 2026-10-10: "operator messages are always trusted. Only some intake messages are untrusted." An operator's
 own message on Discord or GitHub, authenticated by FFBox, is a turn of theirs in FF Factory, like a message typed in
-their FF Factory chat: "approve w814" in a Discord thread, in a reply to Max's DM or in a PR comment approves w814.
+their FF Factory chat: "approve w814" in a Discord thread, in a DM to Max or in a PR comment approves w814.
 Players' text, Max's diagnoses, FFBox's model output and workers' reports stay data, as before.
 
 **How FFBox knows it is the operator, by channel** (ffbox `scripts/ffwatch.py`, read 2026-10-10):
@@ -707,14 +714,14 @@ say. Workers and you should avoid duplicate messages with 2." So from a `dev_upd
   merge inside that release's bump commit). "Already fixed in <version> (PR #N)" at filing names a merged fix too, and
   is still posted.
 - **a question** (`question`, while the request is `question`: a worker's DESIGN-QUESTION or the dispatcher's
-  `decide_work` ask) to the operator who filed the request, as a DM from Max in a developer's words. The operator
-  answers by replying to that DM; FFBox sends the reply as a `dev_message` on the request, naming the thread's
-  conversation, and it answers the request (`Orchestrators.answerFromFfbox`: a note, the request open again, the
-  dispatcher told to resume it). A thread no operator filed (a request from FFBox's own report or escalation) has
-  nobody to DM: its update carries `held` instead of the question, and the question stays with the request's people in
+  `decide_work` ask), posted in the conversation as a reply in place, in a developer's words (w2848; a Max DM to the
+  operator who filed the request from w351 until then). The operator answers there; FFBox sends the answer as a
+  `dev_message` on the request, and it answers the request (`Orchestrators.answerFromFfbox`: a note, the request open again, the
+  dispatcher told to resume it). A thread no operator filed (a request from FFBox's own report or escalation) is a
+  player's: its update carries `held` instead of the question, and the question stays with the request's people in
   FF Factory (the `[intake question]` the design reviewers are sent).
 
-FFBox records, and no longer posts or DMs, "Queued as w123", "PR is up for the fix #N", the PR summary, and a result
+FFBox records, and no longer posts, "Queued as w123", "PR is up for the fix #N", the PR summary, and a result
 with nothing merged ("Done: …", declined, cancelled with the reason). `summary` and `pr` still come once the worker's
 PR is ready for review (not a draft; read with `gh pr view` at most once a minute), with work ids, sandbox branches,
 session ids, GitHub links, repo names and ffbox branches taken out (`prSummary`, `publicText`, `withoutRepo`, w352),
