@@ -514,8 +514,8 @@ test('Final-Factory/ffu is required (w2898): a token without it warns, one with 
   const { vault } = setup(t);
   const without = tokens(vault, {}, undefined, { fetch: fakeGithub({ [BEN]: { deny: ['repo:ffu'] } }).fetch, probePortalLogin: false });
   await without.tick();
-  assert.ok(without.list().find((h) => h.name === 'vault-ben-github')!.problems.includes('Final-Factory/ffu: not selected'));
+  assert.ok(without.list().find((h) => h.name === 'vault-ben-github')!.problems?.includes('Final-Factory/ffu: not selected'));
   const withIt = tokens(vault, {}, undefined, { fetch: fakeGithub({ [BEN]: {} }).fetch, probePortalLogin: false });
   await withIt.tick();
-  assert.ok(!withIt.list().find((h) => h.name === 'vault-ben-github')!.problems.some((p) => p.includes('ffu')));
+  assert.ok(!withIt.list().find((h) => h.name === 'vault-ben-github')!.problems?.some((p) => p.includes('ffu')));
 });
