@@ -67,7 +67,7 @@ test('w2870: orchestratorAskIn reads a step only the orchestrator takes, and not
 test('w2870: a merged request whose worker waits on the orchestrator for its step is Waiting on that orchestrator, not "Merged, follow-up pending"', () => {
   const report = `PR #797 merged and deployed.\n\n${W2833_LINE}`;
   const l = live(item(), worker(report));
-  assert.equal(l?.state, 'waiting', l?.why);
+  assert.equal(l?.state, 'waiting', l?.why ?? '');
   assert.equal(l?.orchestrator, true);
   assert.deepEqual(l?.waitsOn, ["lothsahn's orchestrator"]);
   assert.equal(l?.worker, 'a53036df');
@@ -75,11 +75,11 @@ test('w2870: a merged request whose worker waits on the orchestrator for its ste
 
   // A check-in the worker set does not make it Working: no wake-up runs the orchestrator's step.
   const sleeping = live(item(), worker(report, { status: 'stopped', wakeAt: ago(-30) }));
-  assert.equal(sleeping?.state, 'waiting', sleeping?.why);
+  assert.equal(sleeping?.state, 'waiting', sleeping?.why ?? '');
 
   // The requester's note after the line (their orchestrator recorded the step's result) settles it.
   const noted = live(item({ notes: [{ at: ago(10), by: 'lothsahn', text: 'Ran the demo; results sent to c6e1d6f2.' }] }), worker(report));
-  assert.equal(noted?.state, 'followup', noted?.why);
+  assert.equal(noted?.state, 'followup', noted?.why ?? '');
 
   // Without the wait it is what it was.
   assert.equal(live(item(), worker('PR #797 merged.\n\nw2833: still open: the cleanup checks the deploy'))?.state, 'followup');
