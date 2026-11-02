@@ -18,6 +18,8 @@ import { AttachmentStore, sha256File } from './attachments.ts';
 import { mintProviderToken, tokenSha256 } from './providerProtocol.ts';
 import { SETTABLE_KEYS, checkDevRequests } from './appConfig.ts';
 import { LEDGER } from './boardMatch.fixtures.ts';
+import { deliveredThread } from './orchestrators.ts';
+import { mergePrs } from './ledgerRules.ts';
 import { MockConnector } from '../e2e/mockConnector.ts';
 import type { Config } from './config.ts';
 import type { GitStatus, Requester, ServerEvent, SessionInfo, TranscriptEvent, UserInfo, WorkItem } from '../shared/types.ts';
@@ -533,6 +535,65 @@ test('dedup: already fixed is answered with the release and PR; force files it a
   assert.match(String(forced.text), /^Filed as w\d+; it may repeat w90\.$/);
   assert.equal(store.work.size, 2);
   assert.ok(store.work.get(String(forced.workId))!.log.some((l) => l.includes('Possibly the same as w90')));
+});
+
+/** A finished Discord sweep like w2786: three threads in its scope, each one of its subjects, their titles in its brief. */
+function sweep(store: Store, threads: string[], extra: Partial<WorkItem> = {}): WorkItem {
+  return seed(store, {
+    id: 'w2786',
+    title: 'Discord bug sweep: triage and fix the new #bug-reports threads (Oct 31 – Nov 1)',
+    brief: 'Triage the new threads. Titles: German letters (umlauts) cannot be typed in text boxes; quick tip should show landing zone names; host quit auto-save missing after multiplayer.',
+    status: 'done',
+    keys: threads.map((x) => `discord:${x}`),
+    subjects: threads.map((x) => `discord:${x}`),
+    scope: { threads },
+    ...extra,
+  });
+}
+
+test('w2844: a finished sweep that only triaged a thread does not answer its dev request as done: filed, the sweep related', async (t) => {
+  const { connect, store, o } = await setup(t);
+  const threads = [newThread(), newThread(), newThread()];
+  sweep(store, threads);
+  const c = await connect();
+  c.send(devRequest('dev-1468-1528', { thread: threads[0], title: 'German letters (umlauts) cannot be typed in text boxes', brief: 'On the Linux player, ä ö ü do nothing in a text field.' }));
+  await c.next('dev_ack');
+  const filed = await c.next('dev_filed');
+  assert.equal(filed.outcome, 'linked', JSON.stringify(filed));
+  assert.match(String(filed.text), /^Filed as w\d+; it may repeat w2786\.$/);
+  const w = store.work.get(String(filed.workId))!;
+  assert.notEqual(w.id, 'w2786');
+  assert.deepEqual(w.relatedIds, ['w2786']);
+  assert.equal(store.work.get('w2786')!.log.some((l) => l.includes('answered: Already done')), false);
+  // FFBox's board_check and an owner's acknowledgement read the same rule: the sweep is a candidate, not the fix.
+  const board = o.boardCheck({ keys: [`discord:${threads[1]}`], title: 'quick tip should show landing zone names' }, 14, { maybe: true });
+  assert.equal(board.verdict, 'maybe', JSON.stringify(board));
+  assert.equal(deliveredThread(store.work.get('w2786')!, threads[1]), false);
+});
+
+test('w2844: a finished sweep whose merged PR carries the thread\'s Discord line still answers it as already done', async (t) => {
+  const { connect, store, o } = await setup(t);
+  const threads = [newThread(), newThread(), newThread()];
+  sweep(store, threads, { prs: [{ repo: 'Final-Factory/FinalFactory', number: 2976, state: 'merged', via: 'line', threads: [threads[2]] }] });
+  const c = await connect();
+  c.send(devRequest('dev-1438-1540', { thread: threads[2], title: 'Host quit auto-save missing after multiplayer', brief: 'Is this fixed?' }));
+  await c.next('dev_ack');
+  const fixed = await c.next('dev_filed');
+  assert.equal(fixed.outcome, 'fixed', JSON.stringify(fixed));
+  assert.equal(fixed.workId, 'w2786');
+  assert.equal(fixed.text, 'Already fixed in PR #2976 (w2786); not in a release yet.');
+  assert.equal(store.work.size, 1, 'nothing filed');
+  assert.equal(o.boardCheck({ keys: [`discord:${threads[2]}`] }, 14).verdict, 'done');
+  // The PR's other threads are still only triaged.
+  assert.notEqual(o.boardCheck({ keys: [`discord:${threads[0]}`] }, 14).verdict, 'done');
+});
+
+test('w2844: a merged PR link keeps the threads its description names', () => {
+  const pr = { repo: 'a/b', number: 5, url: '', title: 't', head: 'h', base: 'master', state: 'merged' as const, createdAt: '2026-11-01T00:00:00Z', mergedAt: '2026-11-01T01:00:00Z', via: 'line' as const };
+  const body = 'Request: w2786\n\nDiscord: https://discord.com/channels/1/1566283382030082109\nDiscord: https://discord.com/channels/1/1566276931744305218/123';
+  const linked = mergePrs([], [{ ...pr, body }]);
+  assert.deepEqual(linked[0].threads, ['1566283382030082109', '1566276931744305218']);
+  assert.deepEqual(mergePrs(linked, [{ ...pr, body: '' }])[0].threads, ['1566283382030082109', '1566276931744305218'], 'a read by number keeps them');
 });
 
 test("w1637: the conversation's own finished request does not answer its next hand-over; an open one still joins it", async (t) => {

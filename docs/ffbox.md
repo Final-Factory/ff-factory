@@ -569,10 +569,19 @@ is checked three ways:
    (its title's, its `subjects`; a brief's mentions are references, w343). A window
    needs a bound, so no request covers a whole channel forever.
 
+**"Already done" needs the delivered fix (w2844).** A finished broad request (a sweep: a window, or more than one thread
+in its `scope`) is done for a thread only when one of its own merged pull requests carries that thread's `Discord:` line
+(`WorkPr.threads`, read from the description when the ledger links the PR), or its title names the thread
+(`deliveredThread` in `server/orchestrators.ts`). Otherwise its high-band match drops to medium in `rankBoard`: the dev
+request is filed (`linked`, "Filed as w124; it may repeat w38.") with the sweep in its `relatedIds`, and
+FFBox's `board_check` answers `maybe` or `clear`, never `done`. A request for one thread is that thread's work, as before.
+Lothsahn, 2026-11-02: four dev requests were answered "Already done as w2786", a sweep that only triaged those threads
+("Needs player info", "Suggestion") and fixed none.
+
 | what matched | outcome | `dev_filed` text (FF Factory's views; FFBox posts "Already fixed" as written and nothing for any other outcome, w1640) |
 |---|---|---|
 | a high-band open request, or an open request whose scope covers it | `covered`: it joins that request (a log line with the conversation and the operator, the thread added to its keys and, on an intake request, to its threads, the person added to its people, the files added, and a busy worker gets the note and a copy of each file in its Inbox) | "Covered by w38 (in progress)." |
-| a high-band request that is done | `fixed`: nothing filed; the link is recorded on the done one | "Already fixed in 0.50.0.69 (PR #412)." |
+| a high-band request that is done (a sweep only for a thread its merged PR fixed, above) | `fixed`: nothing filed; the link is recorded on the done one | "Already fixed in 0.50.0.69 (PR #412)." |
 | medium-band candidates | `linked`: filed, the candidates named in its log for the dispatcher and the person to merge | "Filed as w124; it may repeat w38, w40." |
 | nothing | `filed` | "Filed as w123." |
 

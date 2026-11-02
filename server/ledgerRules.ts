@@ -4,7 +4,7 @@
 import type { SessionInfo, TranscriptEvent, WorkErrorHandled, WorkItem, WorkPr } from '../shared/types.ts';
 import type { Config } from './config.ts';
 import { requestWaitOf } from '../shared/workState.ts';
-import { mergedText } from './mergedIntake.ts';
+import { discordThreadsIn, mergedText } from './mergedIntake.ts';
 import { afterReopen, doneOf } from './work.ts';
 
 export interface CleanupSettings {
@@ -148,6 +148,8 @@ export function mergePrs(stored: readonly WorkPr[], found: readonly (PrRecord & 
   for (const f of found) {
     const key = `${f.repo.toLowerCase()}#${f.number}`;
     const was = out.get(key);
+    // A PR read by number with no description keeps the threads its link read.
+    const threads = f.body ? [...new Set(discordThreadsIn(f.body))].slice(0, 20) : was?.threads;
     out.set(key, {
       repo: f.repo,
       number: f.number,
@@ -158,6 +160,7 @@ export function mergePrs(stored: readonly WorkPr[], found: readonly (PrRecord & 
       ...(f.via ? { via: f.via } : was?.via ? { via: was.via } : {}),
       // A link found now says whether it is `Part of:`; a PR only looked up by number keeps what its link said.
       ...((f.via ? f.partOf : was?.partOf) ? { partOf: true } : {}),
+      ...(threads?.length ? { threads } : {}),
       ...(f.state === 'merged' ? { at: f.mergedAt, ...(f.sha ? { sha: f.sha } : {}) } : f.state === 'closed' ? { at: f.closedAt } : {}),
       ...(was?.noted && was.state === f.state ? { noted: was.noted } : {}),
     });
