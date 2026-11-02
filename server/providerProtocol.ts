@@ -230,7 +230,7 @@ export type ToConnector =
  * The queries the ffbox_activity tool offers. Not a gate: any name matching QUERY_NAME may be sent, and FFBox answers
  * error unsupported for one it does not know.
  */
-export const PROVIDER_QUERIES = ['config', 'board_log', 'status', 'conversation', 'logs', 'reports', 'report', 'thread_files', 'thread_file', 'bug_threads', 'thread_messages', 'post_message', 'close_thread', 'open_threads', 'set_config', 'symbols', 'symbol_file', 'diagnosis_files', 'diagnosis_file'] as const;
+export const PROVIDER_QUERIES = ['config', 'board_log', 'status', 'conversation', 'logs', 'reports', 'report', 'thread_files', 'thread_file', 'bug_threads', 'thread_messages', 'post_message', 'close_thread', 'open_threads', 'set_config', 'run_file', 'symbols', 'symbol_file', 'diagnosis_files', 'diagnosis_file'] as const;
 export const QUERY_NAME = /^[a-z_]{1,32}$/;
 export type ProviderQuery = (typeof PROVIDER_QUERIES)[number];
 
@@ -243,7 +243,7 @@ export const QUERY_LIMITS = {
   inFlight: 8,
   /** conversation and logs are answered on FFBox's next pass (about 5 s; logs reads the journal for up to 6 s), and the
    * connector gives up at 12 s. */
-  timeoutMsByQuery: { conversation: 15_000, logs: 15_000, reports: 15_000, report: 15_000, thread_files: 15_000, thread_file: 15_000, bug_threads: 15_000, thread_messages: 15_000, post_message: 20_000, close_thread: 20_000, open_threads: 20_000, set_config: 20_000, symbols: 15_000, symbol_file: 15_000, diagnosis_files: 15_000, diagnosis_file: 15_000, symbols_put: 10_000, symbols_ingest: 15_000 } as Record<string, number>,
+  timeoutMsByQuery: { conversation: 15_000, logs: 15_000, reports: 15_000, report: 15_000, thread_files: 15_000, thread_file: 15_000, bug_threads: 15_000, thread_messages: 15_000, post_message: 20_000, close_thread: 20_000, open_threads: 20_000, set_config: 20_000, run_file: 15_000, symbols: 15_000, symbol_file: 15_000, diagnosis_files: 15_000, diagnosis_file: 15_000, symbols_put: 10_000, symbols_ingest: 15_000 } as Record<string, number>,
   /** Conversations whose last answer is kept for the fallback. */
   keptConversations: 20,
 } as const;
