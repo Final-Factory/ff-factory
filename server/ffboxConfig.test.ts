@@ -1,4 +1,4 @@
-// set_ffbox_config (w2672): one of FFBox's live settings changed over the connector's `set_config` query.
+// set_ffbox_config (w2672, w2835): one of FFBox's settings changed over the connector's `set_config` query.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -8,7 +8,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { ProviderManager } from './providers.ts';
 import { PROVIDER_QUERIES, QUERY_LIMITS, mintProviderToken, tokenSha256 } from './providerProtocol.ts';
-import { FFBOX_SETTABLE_KEYS, ffboxConfigArgs, setFfboxConfig } from './ffboxConfig.ts';
+import { ffboxConfigArgs, setFfboxConfig } from './ffboxConfig.ts';
 import { USER_ASKED_TOOLS } from './belts.ts';
 import { TOOL_MANIFEST } from './toolManifest.ts';
 import { MockConnector } from '../e2e/mockConnector.ts';
@@ -47,19 +47,27 @@ test('set_config is a query the portal asks, waits 20 s for, and the tool is a p
   assert.equal(QUERY_LIMITS.timeoutMsByQuery.set_config, 20_000);
   assert.ok(USER_ASKED_TOOLS.has('set_ffbox_config'), "the dispatcher's runs only when a person asked");
   assert.deepEqual(TOOL_MANIFEST.set_ffbox_config, { group: 'admin', kinds: ['dispatcher', 'personal'] }, 'orchestrators only: no worker and no /mcp key');
-  assert.deepEqual([...FFBOX_SETTABLE_KEYS], ['subscription.new_conversation_hold_pct', 'subscription.review_hold_pct']);
 });
 
-test('the args: a settable key and a 0-1 number or null with a reason, or a revert id; never a secret or a path', () => {
+test('the args: a listed key and a value of any kind FFBox takes with a reason, or a revert id; never a secret, a token or an identity', () => {
   assert.deepEqual(ffboxConfigArgs({ key: 'subscription.review_hold_pct', value: 0.76, reason: 'demo', by: 'Lothsahn (lothsahn)' }), { args: { key: 'subscription.review_hold_pct', value: '0.76', reason: 'demo', by: 'Lothsahn (lothsahn)' } });
   assert.deepEqual(ffboxConfigArgs({ key: 'subscription.review_hold_pct', value: null, reason: 'off' }), { args: { key: 'subscription.review_hold_pct', value: 'null', reason: 'off', by: '' } });
   assert.deepEqual(ffboxConfigArgs({ revert: 's0123456789', reason: 'back' }), { args: { revert: 's0123456789', reason: 'back', by: '' } });
   assert.deepEqual(ffboxConfigArgs({}), { args: { by: '' } }, 'no key: the list');
   const bad = (input: Parameters<typeof ffboxConfigArgs>[0], re: RegExp) => assert.match(String((ffboxConfigArgs(input) as { error?: string }).error), re, JSON.stringify(input));
-  for (const key of ['secrets.env', '../secrets.env', 'ANTHROPIC_API_KEY', 'app_token', 'operators.lothsahn', 'github.pr_token', 'subscription']) bad({ key, value: 0.5, reason: 'x' }, /changes only/);
-  bad({ key: 'subscription.review_hold_pct', value: 1.5, reason: 'x' }, /value:/);
-  bad({ key: 'subscription.review_hold_pct', value: -0.1, reason: 'x' }, /value:/);
+  // w2835: strings, enums, booleans and lists go as JSON text; FFBox checks each against the key's kind.
+  assert.deepEqual(ffboxConfigArgs({ key: 'github.feedback_prs', value: 'all', reason: 'demo' }), { args: { key: 'github.feedback_prs', value: '"all"', reason: 'demo', by: '' } });
+  assert.deepEqual(ffboxConfigArgs({ key: 'github.announce_merges', value: false, reason: 'quiet' }), { args: { key: 'github.announce_merges', value: 'false', reason: 'quiet', by: '' } });
+  assert.deepEqual(ffboxConfigArgs({ key: 'intake.auto.max_per_day', value: 30, reason: 'x' }), { args: { key: 'intake.auto.max_per_day', value: '30', reason: 'x', by: '' } });
+  assert.deepEqual(ffboxConfigArgs({ key: 'release.branches', value: ['master'], reason: 'x' }), { args: { key: 'release.branches', value: '["master"]', reason: 'x', by: '' } });
+  for (const key of ['secrets.env', '../secrets.env', 'ANTHROPIC_API_KEY', 'github.token', 'github.token_env', 'fff.escalate.key_name', 'operators.lothsahn.discord', 'operators', 'release.steam.account', 'release.steam', 'a.b.c.d.e', 'Subscription.x', '']) {
+    if (key) bad({ key, value: 0.5, reason: 'x' }, /changes only the settings it lists/);
+  }
   bad({ key: 'subscription.review_hold_pct', value: Number.NaN, reason: 'x' }, /value:/);
+  bad({ key: 'subscription.review_hold_pct', value: { a: 1 } as unknown as number, reason: 'x' }, /value:/);
+  bad({ key: 'release.branches', value: [1] as unknown as string[], reason: 'x' }, /value:/);
+  bad({ key: 'model.container', value: 'x'.repeat(500), reason: 'x' }, /at most 400/);
+  bad({ key: 'model.container', value: `sk-ant-oat01-${'Q'.repeat(48)}`, reason: 'x' }, /looks like a secret/);
   bad({ key: 'subscription.review_hold_pct', value: 0.5 }, /reason:/);
   bad({ revert: 'nope', reason: 'x' }, /revert:/);
   bad({ key: 'subscription.review_hold_pct', revert: 's0123456789', reason: 'x' }, /not both/);
@@ -78,7 +86,7 @@ test('setFfboxConfig: the query goes out, the answer reads old, new and the effe
   assert.equal(seen.length, 1);
   assert.equal(seen[0].what, 'set_config');
   assert.deepEqual(seen[0].args, { key: 'subscription.review_hold_pct', value: '0.76', reason: 'demo', by: 'Lothsahn (lothsahn)' });
-  assert.match(text, /^FFBox: subscription\.review_hold_pct 0\.75 -> 0\.76; effective now 0\.76 \(read back live\), change s0123456789/);
+  assert.match(text, /^FFBox: subscription\.review_hold_pct 0\.75 -> 0\.76\. Applied live, no restart; effective now 0\.76 \(read back live\)\. Change s0123456789/);
   assert.match(text, /no restart/);
   assert.match(text, /revert "s0123456789"/);
 });
@@ -90,7 +98,8 @@ test('setFfboxConfig: a refusal says FFBox changed nothing, a timeout says it ma
     onQuery(c, (q) => {
       if (mode === 'refused') c.send({ type: 'query_result', id: q.id, what: 'set_config', ok: false, error: 'refused', reason: 'subscription.review_hold_pct: value: 1.5 is outside 0 to 1' });
       else if (mode === 'timeout') c.send({ type: 'query_result', id: q.id, what: 'set_config', ok: false, error: 'timeout' });
-      else c.send({ type: 'query_result', id: q.id, what: 'set_config', ok: true, at: '2026-10-31T10:00:00Z', data: { settable: [{ key: 'subscription.review_hold_pct', kind: 'fraction', min: 0, max: 1, what: 'a review waits', effective: 0.75 }], file: 'config.json', recent: [] } });
+      else if (mode === 'restart') c.send({ type: 'query_result', id: q.id, what: 'set_config', ok: true, at: '2026-10-31T10:00:00Z', data: { key: 'poll_secs', old: 5, new: 6, effective: 5, change: 's0123456789', at: '2026-10-31T10:00:00Z', by: 'x', restart: true, restart_note: "the updater restarts ffbox on its next pass, every 3 minutes", prev: 'config.json.prev' } });
+      else c.send({ type: 'query_result', id: q.id, what: 'set_config', ok: true, at: '2026-10-31T10:00:00Z', data: { settable: [{ key: 'subscription.review_hold_pct', kind: 'fraction', min: 0, max: 1, nullable: true, apply: 'live', what: 'a review waits', effective: 0.75 }, { key: 'fff.dev_requests', kind: 'enum', values: ['prefer', 'off'], apply: 'live', what: 'ffdev turns go to FF Factory', effective: 'prefer' }, { key: 'poll_secs', kind: 'int', min: 1, max: 600, apply: 'restart', what: 'the main loop', effective: 5 }], not_settable: ['github.token: a token', 'operators.*: operator identities'], file: 'config.json', recent: [] } });
     }),
   );
   await assert.rejects(setFfboxConfig(pm, { key: 'subscription.review_hold_pct', value: 0.5, reason: 'x' }), /^Error: FFBox changed nothing: refused \(subscription\.review_hold_pct: value: 1\.5 is outside 0 to 1\)\.$/);
@@ -98,13 +107,19 @@ test('setFfboxConfig: a refusal says FFBox changed nothing, a timeout says it ma
   await assert.rejects(setFfboxConfig(pm, { key: 'subscription.review_hold_pct', value: 0.5, reason: 'x' }), /may have been made/);
   mode = 'list';
   const text = await setFfboxConfig(pm, {});
-  assert.match(text, /- subscription\.review_hold_pct = 0\.75 \(fraction 0 to 1\): a review waits/);
+  assert.match(text, /- subscription\.review_hold_pct = 0\.75 \(fraction 0 to 1 or null; live\): a review waits/);
+  assert.match(text, /- fff\.dev_requests = "prefer" \(one of "prefer", "off"; live\): ffdev turns go to FF Factory/);
+  assert.match(text, /- poll_secs = 5 \(int 1 to 600; restarts FFBox\): the main loop/);
+  assert.match(text, /Never settable here: github\.token: a token; operators\.\*: operator identities\./);
   assert.match(text, /No changes yet\./);
+  mode = 'restart';
+  const r = await setFfboxConfig(pm, { key: 'poll_secs', value: 6, reason: 'x' });
+  assert.match(r, /^FFBox: poll_secs 5 -> 6\. Written; ffwatch reads this key only at start, so it takes effect when FFBox restarts \(the updater restarts ffbox on its next pass, every 3 minutes\); effective now 5\. Change s0123456789/);
 });
 
 test('a call the checks refuse never reaches FFBox', async (t) => {
   const { pm, c } = await setup(t);
-  await assert.rejects(setFfboxConfig(pm, { key: 'secrets.env', value: 0.5, reason: 'x' }), /changes only/);
+  await assert.rejects(setFfboxConfig(pm, { key: 'secrets.env', value: 0.5, reason: 'x' }), /changes only the settings it lists/);
   await new Promise((r) => setTimeout(r, 50));
   assert.equal(c.received.filter((m) => m.type === 'query').length, 0);
 });
