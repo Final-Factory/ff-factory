@@ -187,7 +187,7 @@ test('probe (w904): every required repository and every readable permission; a 4
   assert.equal(ben.login, 'bryding');
   assert.equal(ben.userId, 481770);
   assert.equal(ben.expiresAt, '2026-10-20T00:00:00.000Z');
-  assert.equal(ben.repos?.length, GITHUB_REQUIRED_REPOS.length, 'all ten');
+  assert.equal(ben.repos?.length, GITHUB_REQUIRED_REPOS.length, 'all eleven');
   assert.deepEqual(ben.repos!.find((r) => r.repo === 'Final-Factory/FinalFactory')!.access, { metadata: 'read', contents: 'read', 'pull-requests': 'read', actions: 'denied', issues: 'read', 'commit-statuses': 'read', discussions: 'read' });
   assert.deepEqual(ben.repos!.find((r) => r.repo === 'Final-Factory/ffbox')!.access, { metadata: 'not-selected' });
   assert.deepEqual(ben.problems, [
@@ -507,4 +507,15 @@ test('w1463: entryFor names the vault GitHub entry a person\'s runs on a machine
   assert.equal(on.entryFor('beast', 'sam'), undefined, 'nobody else\'s own token');
   assert.equal(on.entryFor('beast', undefined), 'vault-ben-github …bbbb', 'no person: the system payer\'s');
   for (const name of [on.entryFor('beast', 'ben')!, on.entryFor('beast', 'lothsahn')!]) assert.ok(!name.includes(BEN) && !name.includes(LOTH) && !name.includes('b'.repeat(5)));
+});
+
+test('Final-Factory/ffu is required (w2898): a token without it warns, one with it does not', async (t) => {
+  assert.ok(GITHUB_REQUIRED_REPOS.includes('Final-Factory/ffu'));
+  const { vault } = setup(t);
+  const without = tokens(vault, {}, undefined, { fetch: fakeGithub({ [BEN]: { deny: ['repo:ffu'] } }).fetch, probePortalLogin: false });
+  await without.tick();
+  assert.ok(without.list().find((h) => h.name === 'vault-ben-github')!.problems.includes('Final-Factory/ffu: not selected'));
+  const withIt = tokens(vault, {}, undefined, { fetch: fakeGithub({ [BEN]: {} }).fetch, probePortalLogin: false });
+  await withIt.tick();
+  assert.ok(!withIt.list().find((h) => h.name === 'vault-ben-github')!.problems.some((p) => p.includes('ffu')));
 });

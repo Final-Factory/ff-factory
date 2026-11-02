@@ -23,6 +23,7 @@ export const GITHUB_REQUIRED_REPOS: readonly string[] = [
   'Final-Factory/KNN',
   'Final-Factory/ff-marketing',
   'Final-Factory/ff-orchestrator-memory',
+  'Final-Factory/ffu',
 ];
 
 export type GithubPermissionId = 'actions' | 'artifact-metadata' | 'commit-statuses' | 'contents' | 'discussions' | 'issues' | 'metadata' | 'pull-requests' | 'workflows' | 'self-hosted-runners';
