@@ -498,8 +498,9 @@ one more ask through the connector, like posting: no machine or portal holds a D
   container classes (network, model, tier, free places), its conversations as metadata, and the
   reports `ffintake` files, with no text from inside a report.
 - **The ledger check.** Before FFBox starts a fix it calls `board_check`: `in_flight` answers with
-  the branch to watch, `done` with the version the fix is in. What FFBox cannot fix it files as a
-  ledger request, and its `ffbox/*` PRs arrive as review-and-merge requests
+  the branch to watch, `done` with the version the fix is in. What an operator's turn on FFBox cannot fix it files
+  as a ledger request (`fff.escalate`; a player's turn never files, [Who may hand work to FF Factory](#who-may-hand-work-to-ff-factory-w2887)),
+  and its `ffbox/*` PRs arrive as review-and-merge requests
   ([intake.md](intake.md)). Review those like any PR before merging.
 - **`ffbox_activity`** is the orchestrators' read-only view of FFBox, one tool with the same schema for the dispatcher,
   every person's orchestrator and `/mcp` keys (`server/agents.ts`). Its `show` picks the view. From what the connector
@@ -545,9 +546,25 @@ one more ask through the connector, like posting: no machine or portal holds a D
 An operator's ffdev turn on FFBox (a Discord message in a watched channel or thread, `ffwatch submit`, ffweb's prompt
 box, #codereview or an operator's PR feedback) can be handed to FF Factory instead of starting a container there
 (Lothsahn, 2026-10-03; w240). FFBox does it by default while its connector is up, and runs the turn itself when FF
-Factory is unreachable or refuses. The messages are the contract's
+Factory is unreachable or refuses, and that fallback does the work itself (below). The messages are the contract's
 [Dev requests](ffbox-connector-contract.md#dev-requests-an-operators-ffdev-turn-handed-to-ff-factory); FF Factory's
 side is `server/devRequests.ts` and `Orchestrators.fileDevRequest` (`server/orchestrators.ts`).
+
+### Who may hand work to FF Factory (w2887)
+
+Lothsahn, 2026-11-02: "Ffbox should never hand off untrusted requests like ffagent. For ffdev it can", "ffdiagnose can
+and should handoff ... It's less risky than direct discord messages", and "for ffdev, the default is to route directly
+to fffactory if it's online. Keep this. But if fffactory is offline, we want the backup path to also be solid".
+
+| Class | Who starts it | Hands off to FF Factory? | How |
+|-------|---------------|--------------------------|-----|
+| ffagent | a player's Discord message (`discord.user_pool`) | **never**, whatever FFBox's config says | `handoff_refused` in ffbox `scripts/ffwatch.py` refuses it in `fff_dev_gate` (dev requests, follow-ups included) and in `fff_escalate_turn` (`fff.escalate` filing of `dev_work`); test `test_an_ffagent_turn_never_hands_work_to_ff_factory` |
+| ffdev | an operator (Discord, `ffwatch submit`, ffweb, #codereview, PR feedback) | yes, as a dev request while the connector is up (`fff.dev_requests` `"prefer"`, the default); its `dev_work` is filed when `fff.escalate` is on | when FF Factory is offline or refuses, the turn runs on FFBox and is told to do the work there (`preamble_ffdev_here` in `scripts/discord-task.sh`): `ffshot` screenshots, `ffsave`, `ffverify`, `ffplaytest`, the editor, `ffmode2`, a pushed fix. Only performance numbers cannot be had there (no GPU, CPUs shared with CI) |
+| ffdiagnose | a player's crash, desync or hang upload, diagnosed on FFBox | yes, on its own routes | `intake.fff_handoff` (a desync diagnosis that pushed a branch goes as a dev request, default on) and `fff.escalate.intake` (filing a diagnosis, default off), unchanged by w2887 |
+
+One pull path is FF Factory's own: any `ffbox/*` branch FFBox pushes, an ffagent conversation's included while
+`discord.route_all_to_ledger` is off, becomes a "Review and merge" request here (`ffboxReviewFrom`,
+`server/intakeRules.ts`). That is a PR to review, never a player's words acted on.
 
 **Who it is for.** FFBox sends the name its config's `operators` block gives the operator who wrote the turn (FFBox
 authenticated them by their Discord, GitHub, unix or web id), and those names are FF Factory's logins (`ben`,
