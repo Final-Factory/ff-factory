@@ -271,6 +271,42 @@ test('the coverage check files each unowned thread once for a reviewer, and list
   assert.equal((f[0].approval?.by as Requester).userId, 'ben');
 });
 
+test("w2844: an owner's \"Will fix\" on a thread a finished sweep only triaged files it; a sweep's merged Discord line still owns its thread", async (t) => {
+  const { store, discord, watch, work, forThread } = setup(t);
+  const th = discord.thread(-120, 'Quick tip should show landing zone names', 'The minimap tooltip shows no name for a landing zone.');
+  const fixedThread = discord.thread(-110, 'Artifact animation runs when deleting a building');
+  const at = new Date(Date.now() - 3_600_000).toISOString();
+  store.putWork({
+    id: 'w2786',
+    title: 'Discord bug sweep: triage and fix the new #bug-reports threads',
+    brief: 'Triage the new threads.',
+    priority: 'normal',
+    keys: [`discord:${th}`, `discord:${fixedThread}`],
+    subjects: [`discord:${th}`, `discord:${fixedThread}`],
+    scope: { threads: [th, fixedThread] },
+    prs: [{ repo: 'Final-Factory/FinalFactory', number: 2975, state: 'merged', via: 'line', threads: [fixedThread] }],
+    requestedBy: BEN,
+    requesters: [BEN],
+    humanAsked: true,
+    status: 'done',
+    createdAt: at,
+    updatedAt: at,
+    sessionIds: [],
+    overlaps: [],
+    asks: 0,
+    log: [],
+  });
+  discord.say(th, BEN_ID, 'Will fix', -60);
+  discord.say(fixedThread, BEN_ID, 'Will fix', -50);
+  await watch.sweep({ coverage: false });
+  const filed = forThread(th).filter((w) => w.id !== 'w2786');
+  assert.equal(filed.length, 1, 'the triaged thread is filed as new work');
+  assert.equal(filed[0].source?.threadId, th);
+  assert.equal(forThread(fixedThread).length, 1, 'the delivered thread stays the sweep\'s');
+  assert.equal(work().length, 2);
+  assert.deepEqual(watch.summary().acks.map((a) => a.outcome).sort(), ['filed', 'owned']);
+});
+
 test("a thread an open request names in its brief is that request's: the owner's word joins it, the check files nothing (w1782)", async (t) => {
   const { o, store, discord, watch, work, forThread } = setup(t);
   const th = discord.thread(-120, 'Missing Crafting Material Quantities in Japanese', 'In Japanese the crafting panel shows the materials but not how many of each.');

@@ -422,6 +422,19 @@ export function isBroad(w: Pick<WorkItem, 'scope'>): boolean {
 }
 
 /**
+ * Whether a finished request delivered a thread's fix (w2844), so a dev request, a board_check or an owner's
+ * acknowledgement on that thread may be answered by it as done. A request for one thread is that thread's work. A broad
+ * one (a sweep) only lists the threads it triaged: it delivered a thread's fix only by a merged pull request of its own
+ * whose `Discord:` line names the thread, or by naming the thread in its title (lothsahn, 2026-11-02: four dev requests
+ * were answered "Already done as w2786", a sweep that rated those threads a suggestion or "needs player info").
+ */
+export function deliveredThread(w: Pick<WorkItem, 'title' | 'scope' | 'source' | 'prs'>, threadId: string): boolean {
+  if (!isBroad(w)) return true;
+  if ((w.prs ?? []).some((p) => p.state === 'merged' && p.threads?.includes(threadId))) return true;
+  return !w.source?.untrusted && textKeys(w.title).includes(`discord:${threadId}`);
+}
+
+/**
  * The thread and report keys that name a request's own subject (w343): its title (unless players wrote it), its
  * `subjects`, the threads of its dev links and of a broad scope. Anything else a brief or a related id named is a
  * reference, never a key FFBox's board_check should answer by.
@@ -6299,6 +6312,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const pool = this.pool(undefined, lookbackDays * 86_400_000).filter((e) => e.kind === 'work' && !own(this.store.work.get(e.ref)!));
     // BY KEY: the same thread, report, PR or branch is the same work (score 1); a shared spec or "#N" says the subject.
     const byKey = new Map(findOverlaps({ keys: q.keys, title: '' }, pool).map((o) => [o.ref, o]));
+    const threads = q.keys.filter((k) => /^discord:\d{15,25}$/.test(k)).map((k) => k.slice('discord:'.length));
     // BY MEANING: the report's words against each request's title and the start of its brief (server/boardMatch.ts),
     // weighted by how rare each concept is in this ledger. The text is only compared, never shown to a model.
     const report = concepts([q.title, q.summary].filter(Boolean).join('\n'));
@@ -6323,6 +6337,11 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       // A request merged into another is that one.
       let w = item;
       if (w.status === 'merged' && w.mergedInto && this.store.work.get(w.mergedInto)) w = this.store.work.get(w.mergedInto)!;
+      // A finished sweep that did not deliver the asked thread's fix (w2844) is related work, never "already done".
+      if (top.band === 'high' && !isOpen(w) && isBroad(w) && !threads.some((th) => deliveredThread(w, th))) {
+        top.band = 'medium';
+        top.why += threads.length ? '; a finished sweep that names the thread but merged no fix for it' : '; a finished sweep, by meaning';
+      }
       const was = best.get(w.id);
       if (!was || top.score > was.score) best.set(w.id, { w, ...top });
     });
@@ -6555,7 +6574,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const highDone = ranked.find((x) => x.band === 'high' && x.w.status === 'done');
     if (highDone && !f.force) {
       const w = highDone.w;
-      const text = this.fixedLine(w);
+      const text = this.fixedLine(w, c.threadId);
       w.ffboxDev = [...(w.ffboxDev ?? []), link('fixed')].slice(-20);
       this.stamp(w, `FFBox dev request ${f.ref} from ${f.operator} (${person.displayName}) asked for it again (${highDone.why}); answered: ${text}`);
       this.store.putWork(w);
@@ -6615,6 +6634,9 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       triage: { class: 'person', reason: `asked for by ${f.operator} (${person.displayName}) through FFBox` },
       ffboxDev: [link(candidates.length ? 'linked' : 'filed')],
     };
+    // A finished request it may repeat is related work (w2844): the worker reads what it found or triaged.
+    const related = candidates.filter((x) => x.w.status === 'done').map((x) => x.w.id);
+    if (related.length) w.relatedIds = related;
     this.stamp(w, `filed from FFBox dev request ${f.ref} for ${person.displayName} (operator ${f.operator}${f.force ? ', filed anyway at their word' : ''}): ${where}`);
     if (candidates.length) {
       this.stamp(w, `Possibly the same as ${candidates.map((x) => `${x.w.id} (${x.score}, ${x.why})`).join(', ')}: the dev request's ledger check found them. Merge it into one of them if so.`);
@@ -6658,8 +6680,9 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   }
 
   /** "Already fixed in 0.50.0.69 (PR #412).": the release that carries a finished request's fix, else its PR or commit. */
-  private fixedLine(w: WorkItem): string {
-    let pr = w.ffbox?.pr ?? w.source?.pr;
+  private fixedLine(w: WorkItem, threadId?: string): string {
+    // The merged PR whose Discord line names the asked thread is the fix that thread got (w2844).
+    let pr = (threadId ? w.prs?.find((p) => p.state === 'merged' && p.threads?.includes(threadId))?.number : undefined) ?? w.ffbox?.pr ?? w.source?.pr;
     for (const sid of newestFirst(w)) {
       if (pr) break;
       const s = this.store.sessions.get(sid);
