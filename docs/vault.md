@@ -1131,7 +1131,7 @@ it to `shared/githubRequirements.ts` and this table in a pull request, and says 
 **Not checked:** the write half of every "Read and write" permission, and Workflows, which is write only. Reading them would
 mean writing, so the probe does not try, and the banner says which ones it could not check.
 
-The required repositories (config `vault.githubRepos`, default these nine, lothsahn's list) *(what FF Factory does in each:
+The required repositories (config `vault.githubRepos`, default these eleven, lothsahn's list) *(what FF Factory does in each:
 measured from `gh repo list Final-Factory` and the repositories named in this repo's code and the worker briefs)*:
 
 | Repository | What FF Factory does there | Needed |
@@ -1144,6 +1144,7 @@ measured from `gh repo list Final-Factory` and the repositories named in this re
 | Final-Factory/ff-marketing (private) | marketing skills' work | required |
 | Final-Factory/ff-orchestrator-memory (private) | the orchestrators' memory (the portal's D7 push) | required |
 | Final-Factory/KNN (internal) | the game's KNN package (lothsahn, w904) | required |
+| Final-Factory/ffu (private) | workers read its code and CI; the portal reads its CI (w2894); created 2026-11-01 (w2898) | required |
 | Final-Factory/Facepunch.Steamworks (public) | the game's Steamworks fork (lothsahn, w904) | required |
 | Final-Factory/ff-factory-private, multiplayer-community-contributions, nevergames-website | none found in this repo's code or briefs | no ("All repositories" covers them anyway) |
 | Final-Factory/FinalFactoryModTemplate (public) | the mod template (game repo `CLAUDE.md`, "Modding"); moved from bryding/ into the organization (w1650), where a vault token's push and pull request worked | required |
@@ -1327,7 +1328,7 @@ sudo fff-vm ssh 'sudo fffctl vault list'             # "key: loaded"
   prints.
 - **GitHub:** github.com → Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new
   token:
-  - Resource owner: **Final-Factory**; Repository access: **All repositories** (or select the nine of section 13.2);
+  - Resource owner: **Final-Factory**; Repository access: **All repositories** (or select the eleven of section 13.2);
   - Permissions: the list in section 13.2 ([GitHub tokens per person](#13-github-tokens-per-person-w868)): repository
     permissions Actions, Commit statuses, Contents, Discussions, Issues, Pull requests and Workflows: Read and write;
     Artifact metadata: Read-only; Metadata: Read-only (required); organization permission Self-hosted runners: Read-only;
