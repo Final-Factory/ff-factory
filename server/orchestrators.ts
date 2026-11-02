@@ -80,7 +80,7 @@ import { isSamePerson, personForWork, sessionPerson, tokenPersonForWork } from '
 import { MERGE_ON_GREEN_MARK } from './mergeOnGreen.ts';
 import { commitsIn, normPr, pairCommitsOf, pairPrOf, pairRanCommit, prIn, resultFor, sameCommit, samePr } from './pairRuns.ts';
 import type { AttachmentRef, ConditionalDecision, OpenAsk, WorkNeedsYou, GateResume, GitStatus, Machine, WorkAutoClosed, WorkBlocker, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPair, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
-import { REPORT_KINDS, WORK_PRIORITIES, type ReportKind, type ReportSummary } from '../shared/types.ts';
+import { REPORT_KINDS, WORK_PRIORITIES, questionFor, type ReportKind, type ReportSummary } from '../shared/types.ts';
 
 /** w2045: the most of a worker's after-merge report a merge-on-green gate keeps (a DONE report is rarely longer). */
 const MERGE_ON_GREEN_REPORT_CHARS = 12_000;
@@ -151,7 +151,7 @@ interface HeldCall {
   why: string;
 }
 /** update_work's input (Agents' tool). */
-type UpdateInput = { id: string; note?: string; priority?: WorkPriority; close?: 'done' | 'cancelled'; reopen?: boolean; approve?: boolean; decline?: boolean; subjects?: string[]; ledger_read?: boolean; spend_read?: boolean; main_clone?: string | false; when?: ConditionInput; words?: string; expires_days?: number; assign_to?: string; report?: ReportKind | false };
+type UpdateInput = { id: string; question_for?: string; already_asked?: boolean; note?: string; priority?: WorkPriority; close?: 'done' | 'cancelled'; reopen?: boolean; approve?: boolean; decline?: boolean; subjects?: string[]; ledger_read?: boolean; spend_read?: boolean; main_clone?: string | false; when?: ConditionInput; words?: string; expires_days?: number; assign_to?: string; report?: ReportKind | false };
 
 /** Held calls kept per chat at most, and for how long. */
 const HELD_MAX = 10;
@@ -675,6 +675,30 @@ export class Orchestrators {
   }
 
   /** Stop the timers (notices gathered for the dispatcher, the capacity wake): the server or a test is ending. */
+  /**
+   * The one-off fix of w2867 (done-when 3): w2850's question, which lothsahn handed to Ben ("Ask ben" on card 70556, then
+   * "keep waiting on ben's pick"), showed as Waiting on input on lothsahn. Once, at a boot: its open question, unchanged in
+   * words and answers, is Ben's, handed by its requester, and its [needs you] is kept for Ben without a message (he has it
+   * by message_person). Does nothing once done, closed, or already handed. Remove after 2026-12-01.
+   */
+  fixW2850() {
+    const w = this.store.work.get('w2850');
+    if (!w || !isOpen(w) || w.question?.for?.length || w.log.some((l) => l.includes('(w2867 one-off)'))) return;
+    const ben = w.requesters.find((r) => r.displayName.toLowerCase() === 'ben' || r.userId.toLowerCase() === 'ben');
+    const open = w.needsYou && !w.needsYou.answered ? w.needsYou : undefined;
+    const text = w.question?.text ?? open?.question;
+    if (!ben || !text || !['new', 'question'].includes(w.status)) return;
+    // The key its [needs you] went with stays, so the boot digest does not send it again.
+    const at = w.question?.at ?? (open?.key.startsWith('question:') ? open.key.slice('question:'.length) : undefined) ?? this.now().toISOString();
+    const asks = w.question?.asks ?? open?.asks;
+    w.status = 'question';
+    w.question = { text, at, ...(asks?.length ? { asks } : {}), for: [ben], by: w.requestedBy.displayName };
+    if (open?.kind === 'question') w.needsYou = { ...open, who: [ben.displayName] };
+    this.stamp(w, `ledger: its question is ${ben.displayName}'s, as ${w.requestedBy.displayName} handed it ("Ask ben"), and waits on his answer; no message sent, he has it (w2867 one-off)`);
+    this.store.putWork(w);
+    console.log(`ledger: w2850's question handed to ${ben.displayName} (w2867 one-off)`);
+  }
+
   /** The one-off [needs you] digest after a boot (w1378, scheduleNeedsYouDigest). */
   private digestTimer: NodeJS.Timeout | undefined;
 
@@ -683,6 +707,7 @@ export class Orchestrators {
    * `[needs you]` go out as one digest per person (needsYouDigest). `waits` reads them then (Agents.personWaits).
    */
   scheduleNeedsYouDigest(waits: () => { w: WorkItem; wait: NeedsYouWait }[], ms: number) {
+    this.fixW2850();
     clearTimeout(this.digestTimer);
     this.digestTimer = setTimeout(() => {
       try {
@@ -1055,9 +1080,9 @@ export class Orchestrators {
    * this why are you asking me in the waiting on input for this still"); or when another request already carries it to the
    * person (recorded as shared with that one). Otherwise the record, kept, and whom to send it to.
    */
-  private placeNeedsYou(w: WorkItem, wait: NeedsYouWait, opts: { also?: readonly WorkItem[]; digest?: boolean; at?: string }): { r: WorkNeedsYou; to: Requester[] } | undefined {
+  private placeNeedsYou(w: WorkItem, wait: NeedsYouWait, opts: { also?: readonly WorkItem[]; digest?: boolean; at?: string; told?: string }): { r: WorkNeedsYou; to: Requester[] } | undefined {
     if (!isOpen(w) || alreadySent(w, wait.key)) return undefined;
-    const to = whoOf(wait.names, this.d.identity.list(), wait.kind === 'question' ? [w.requestedBy] : w.requesters);
+    const to = whoOf(wait.names, this.d.identity.list(), wait.kind === 'question' ? questionFor(w) : w.requesters);
     const at = opts.at ?? this.now().toISOString();
     const carriers = this.carriers(w, wait);
     // w2085: the asked person's notes on this request, its related requests and the others its worker holds go on the card.
@@ -1089,7 +1114,7 @@ export class Orchestrators {
       console.log(`ledger: [needs you] ${w.id} shared with ${holder.id} (worker ${wait.worker}): not sent again`);
       return undefined;
     }
-    this.keepNeedsYou(w, r);
+    this.keepNeedsYou(w, r, opts.told);
     return { r, to };
   }
 
@@ -1127,9 +1152,10 @@ export class Orchestrators {
     return n;
   }
 
-  private keepNeedsYou(w: WorkItem, r: WorkNeedsYou) {
+  private keepNeedsYou(w: WorkItem, r: WorkNeedsYou, told?: string) {
     w.needsYou = r;
-    this.stamp(w, `[needs you]${r.digest ? ' (digest)' : ''} sent to ${r.who.join(', ')}'s orchestrator: ${clip(r.question.replace(/\s+/g, ' '), 160)}`);
+    // w2867: kept as sent without a message when the person already has the question (told says how).
+    this.stamp(w, told ? `[needs you] kept for ${r.who.join(', ')}, not sent: ${told}` : `[needs you]${r.digest ? ' (digest)' : ''} sent to ${r.who.join(', ')}'s orchestrator: ${clip(r.question.replace(/\s+/g, ' '), 160)}`);
     this.store.putWork(w);
     console.log(`ledger: [needs you]${r.digest ? ' (digest)' : ''} ${w.id} to ${r.who.join(', ')} (${r.kind}${r.worker ? `, worker ${r.worker}` : ''})`);
   }
@@ -1139,18 +1165,22 @@ export class Orchestrators {
    * the end of its newest worker's report for context. A question while a worker's wait on a person is still unanswered is
    * the same wait (the dispatcher asking on the worker's behalf, as its brief told it before w1378): no second message.
    */
-  private askPerson(w: WorkItem): string {
+  private askPerson(w: WorkItem, told?: string): string {
     const q = w.question;
     if (!q) return '';
-    const open = w.needsYou && !w.needsYou.answered && w.needsYou.kind !== 'question' ? w.needsYou : undefined;
+    const asked = questionFor(w);
+    const open = w.needsYou && !w.needsYou.answered && w.needsYou.kind !== 'question' && asked.every((p) => w.needsYou!.who.some((n) => n.toLowerCase() === p.displayName.toLowerCase())) ? w.needsYou : undefined;
     if (open) {
       this.stamp(w, `the dispatcher's question folded into the [needs you] already with ${open.who.join(', ')} (sent ${open.at.slice(11, 16)} UTC): not sent again`);
       this.store.putWork(w);
       return `${open.who.join(', ')}'s orchestrator already has this wait as [needs you] (worker ${open.worker ?? '?'}'s question, sent ${open.at.slice(11, 16)} UTC): no second message. Their answer comes back as a [work update] and goes to that worker.`;
     }
     const worker = newestFirst(w).map((id) => this.store.sessions.get(id)).find((s) => s?.kind === 'worker' && s.lastResult);
-    const to = this.needsYou(w, { kind: 'question', key: `question:${q.at}`, question: q.text, names: [w.requestedBy.displayName], ...(worker?.lastResult ? { report: worker.lastResult } : {}) });
-    return to.length ? `${names(to)}'s orchestrator has your question as [needs you].` : `${names([w.requestedBy])}'s orchestrator already has this question.`;
+    const wait: NeedsYouWait = { kind: 'question', key: `question:${q.at}`, question: q.text, names: asked.map((p) => p.displayName), ...(worker?.lastResult ? { report: worker.lastResult } : {}), ...(q.asks?.length ? { asks: q.asks } : {}) };
+    // w2867: a person who already has it (message_person, or a one-off fix) gets no second message; the record is kept.
+    if (told) return this.placeNeedsYou(w, wait, { told }) ? `${names(asked)} already has it (${told}): kept as their [needs you], no message sent.` : `${names(asked)}'s orchestrator already has this question.`;
+    const to = this.needsYou(w, wait);
+    return to.length ? `${names(to)}'s orchestrator has your question as [needs you].` : `${names(asked)}'s orchestrator already has this question.`;
   }
 
   /**
@@ -2089,6 +2119,48 @@ export class Orchestrators {
     return `${w.id} is handed to ${target.displayName}; it stays ${w.status} and ${from.displayName} is off it.`;
   }
 
+  /** A person named by user id or display name, or an error listing the people (`to`: what for). */
+  private personNamed(name: string, to: string): Requester {
+    const q = name.trim().toLowerCase();
+    const people = this.d.identity.list();
+    const u = people.find((x) => x.userId.toLowerCase() === q) ?? people.find((x) => x.displayName.toLowerCase() === q);
+    if (!u) throw new Error(`no person "${name}" ${to}; the people are ${people.map((x) => `${x.displayName} (${x.userId})`).join(', ')}`);
+    return asRequester(u);
+  }
+
+  /**
+   * w2867: the open question of `w` (the dispatcher's, a design question or a worker's [needs you]) handed to another person:
+   * the request stays open and its requester's, Waiting on input on that person, who gets it as [needs you] (not when
+   * `alreadyAsked`: they have it already). Their note answers it; a note by anyone else keeps it with them, and the
+   * undecided re-offer (w2217) passes it by, as it does every question. Handed back to the requester, a note of theirs answers it.
+   */
+  private handQuestion(chat: SessionHandle, w: WorkItem, from: Requester, toName: string, note: string | undefined, alreadyAsked?: boolean): string {
+    const to = this.personNamed(toName, `to hand ${w.id}'s question to`);
+    if (!isFor(w, from.userId) && !questionFor(w).some((r) => same(r.userId, from.userId)) && !this.reviewers().some((r) => same(r.userId, from.userId))) throw new Error(`${w.id} is not ${from.displayName}'s request, nor is its question theirs to hand on`);
+    if (!['new', 'question', 'stalled'].includes(w.status)) throw new Error(`${w.id} is ${w.status}: question_for hands on a question it waits on (new, question or stalled). A worker's own wait goes to a person through that worker (message_agent).`);
+    const open = w.needsYou && !w.needsYou.answered ? w.needsYou : undefined;
+    const text = w.question?.text ?? w.flag?.text ?? open?.question ?? note;
+    if (!text?.trim()) throw new Error(`${w.id} has no open question to hand to ${to.displayName}: say it in note`);
+    const asks = w.question?.asks ?? open?.asks;
+    const at = this.now().toISOString();
+    if (note) w.notes = [...(w.notes ?? []), { at, by: from.displayName, text: note.slice(0, 2000) }].slice(-20);
+    w.humanAsked = (chat.turnFrom ?? chat.lastFrom) === 'human';
+    w.status = 'question';
+    w.stalled = undefined;
+    w.flag = undefined;
+    w.question = { text: clip(text, 1000), at, ...(asks?.length ? { asks } : {}), for: [to], by: from.displayName };
+    // The requester's own cards about it leave their Waiting on input tab: it is not theirs to answer now.
+    if (w.humanAsked && !same(to.userId, from.userId)) {
+      const mine = this.personalOf(from.userId);
+      if (mine) this.closeAsks(mine.info.id, (a) => a.request === w.id);
+    }
+    this.stamp(w, `${from.displayName} handed the question to ${to.displayName}${note ? `: ${note}` : ''}`);
+    this.store.putWork(w);
+    const sent = this.askPerson(w, alreadyAsked ? `${from.displayName}'s orchestrator says ${to.displayName} already has it` : undefined);
+    this.gatherForDispatcher(from, updateNotice(w, from, `handed its question to ${to.displayName}${note ? `: ${note}` : ''}. It waits on ${to.displayName}'s answer, which comes back as a note: nothing to decide or ask meanwhile.`));
+    return `${w.id} is question, Waiting on input on ${to.displayName}. ${sent}`;
+  }
+
   /** A requester's update (update_work): a note (an answer to a question reopens it), a priority, closing or reopening. */
   update(chat: SessionHandle, input: UpdateInput): string {
     try {
@@ -2152,9 +2224,12 @@ export class Orchestrators {
       }
       return input.approve ? `${done.id} approved by ${owner.displayName}: the dispatcher decides it now.` : `${done.id} declined by ${owner.displayName}.`;
     }
-    if (!isFor(w, owner.userId)) return this.closeForOther(chat, owner, w, input);
+    // w2867: the person a question was handed to answers it (a note) or hands it on, though the request is not theirs.
+    const holdsQuestion = !isFor(w, owner.userId) && questionFor(w).some((r) => same(r.userId, owner.userId));
+    if (holdsQuestion && (input.close || input.reopen || input.priority || input.assign_to)) throw new Error(`${w.id} is ${names(w.requesters)}'s request: you hold its question, so a note answers it, or question_for hands it on; closing, reopening, priority and assign_to stay theirs`);
+    if (!isFor(w, owner.userId) && !holdsQuestion) return this.closeForOther(chat, owner, w, input);
     const note = input.note?.trim();
-    if (!note && !input.priority && !input.close && !input.reopen && !input.assign_to) throw new Error('give a note, a priority, close, assign_to or reopen');
+    if (!note && !input.priority && !input.close && !input.reopen && !input.assign_to && !input.question_for) throw new Error('give a note, a priority, close, assign_to, question_for or reopen');
     const problem = updateProblem(w, input, this.now().getTime());
     if (problem) throw new Error(problem);
     this.spendUpdate(chat, owner, input, w.id);
@@ -2165,12 +2240,21 @@ export class Orchestrators {
       if (input.close || input.reopen || input.priority) throw new Error('assign_to stands alone (a note giving the reason is fine): a close ends the request for everyone on it, a hand-off keeps it open');
       return this.handOff(w, owner, input.assign_to, note);
     }
+    // A QUESTION HANDED ON (w2867, lothsahn on card 70556 of w2850: "Ask ben"): the request stays theirs, its open question
+    // goes to that person, and waits on them until they answer.
+    if (input.question_for) {
+      if (input.close || input.reopen || input.priority) throw new Error('question_for stands alone (a note giving the reason is fine): it hands the open question on and keeps the request open');
+      return this.handQuestion(chat, w, owner, input.question_for, note, input.already_asked);
+    }
     // What the person asks now is what the dispatcher acts on: it counts as theirs only when said in their own turn.
     w.humanAsked = (chat.turnFrom ?? chat.lastFrom) === 'human';
     const what: string[] = [];
     // ACTING (w1031): their own words in this turn, never a harness message or a worker's report relayed to their chat.
+    // w2867: a question handed to another person stays theirs: a note by anyone else (lothsahn's "keep waiting on ben's
+    // pick" on w2850) adds to it and answers nothing.
+    const keeps = !!note && !!w.question?.for?.length && !w.question.for.some((r) => same(r.userId, owner.userId)) ? w.question : undefined;
     if (w.humanAsked) {
-      const answers = !!note && (w.status === 'question' || !!w.question || !!w.flag);
+      const answers = !!note && !keeps && (w.status === 'question' || !!w.question || !!w.flag);
       const acted = input.reopen ? 'reopened it' : answers ? `answered ${w.flag ? (w.flag.kind === 'error' ? 'the escalated error' : 'the design question') : 'the question'} on it` : note ? 'added a note' : input.priority && input.priority !== w.priority ? `changed its priority to ${input.priority}` : undefined;
       if (acted) this.takeOver(w, owner, `${owner.displayName} ${acted}`);
     }
@@ -2195,8 +2279,9 @@ export class Orchestrators {
       what.push(`note: ${note}`);
       // Kept whole for the workers' briefs (w496); the log line is clipped.
       w.notes = [...(w.notes ?? []), { at: this.now().toISOString(), by: owner.displayName, text: note.slice(0, 2000) }].slice(-20);
-      if (w.status === 'question') w.status = 'new';
-      w.question = undefined;
+      if (keeps) what.push(`the question stays with ${names(keeps.for!)} (handed by ${keeps.by ?? 'the dispatcher'}): it waits on their answer, nothing to decide meanwhile`);
+      if (w.status === 'question' && !keeps) w.status = 'new';
+      if (!keeps) w.question = undefined;
       // A hold lifted or a "go" does not lift a gate (w754, w750: w727 was still open when lothsahn said "unblock the release"):
       // it goes back to Blocked on what it kept, and starts by itself when they clear.
       if (w.status === 'new' && w.blocked) {
@@ -2208,7 +2293,7 @@ export class Orchestrators {
         w.flag = undefined;
       }
       // w1378: a person's own answer to a [needs you] question goes to the worker that waits on it.
-      if (w.humanAsked && w.needsYou && !w.needsYou.answered) what.push(this.answerNeedsYou(w, owner, note));
+      if (w.humanAsked && w.needsYou && !w.needsYou.answered && !keeps) what.push(this.answerNeedsYou(w, owner, note));
       // w1868: and the open question cards about it that the note answers leave the person's Waiting on input tab.
       if (w.humanAsked) this.closeAsksAnsweredBy(owner, w, note);
     }
@@ -3060,7 +3145,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   }
 
   /** The dispatcher decides about a request (decide_work); the requesters' orchestrators get the reply. */
-  decide(input: { id: string; action: Decision; note: string; into?: string; session_ids?: string[]; needs?: string[]; blocker?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>; blockers?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>[]; add_blocker?: boolean; drop_leg?: boolean; override_gate?: string; asks?: Ask[]; pair_legs?: number; pair_menus?: string; report?: ReportKind | false }): string {
+  decide(input: { id: string; action: Decision; note: string; into?: string; session_ids?: string[]; needs?: string[]; blocker?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>; blockers?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>[]; add_blocker?: boolean; drop_leg?: boolean; override_gate?: string; asks?: Ask[]; for?: string; pair_legs?: number; pair_menus?: string; report?: ReportKind | false }): string {
     let keptBefore: WorkBlocker[] = [];
     const w = this.requireWork(input.id);
     if (w.approval?.state === 'pending') throw new Error(`${w.id} waits for a person to approve it (intake); it is not yours to decide yet`);
@@ -3156,14 +3241,19 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       w.links = { ...w.links, ...Object.fromEntries(ids.map((sid) => [sid, { at, how: 'linked' as const }])) };
       what = `linked to ${ids.map((sid) => this.workerLine(sid)).join(', ')}, already on it`;
     } else if (input.action === 'ask') {
+      // w2867: asked of the person it is for (`for`), else its requester; a question handed on is not asked of the requester.
+      const target = input.for?.trim() ? this.personNamed(input.for, `to ask about ${w.id}`) : undefined;
+      const handed = w.question?.for?.length && w.question.by ? w.question : undefined;
+      if (handed && !target) throw new Error(`${w.id}'s question is with ${names(handed.for!)}: ${handed.by} handed it on at ${handed.at.slice(11, 16)} UTC and it waits on their answer (w2867). Leave it; to ask ${names(handed.for!)} something new, pass for: "${handed.for![0].displayName}".`);
+      const person = target ?? w.requestedBy;
       // w1812: the filer already answered this, on this request or on another its worker holds with the same question.
       const holders = [w, ...[...this.store.work.values()].filter((x) => x !== w && x.sessionIds.some((sid) => w.sessionIds.includes(sid)))];
       for (const a of input.asks?.length ? input.asks : [{ question: note }]) {
-        const again = this.repeatRefusal('dispatcher', w.requestedBy, a, holders, 'decide_work ask');
+        const again = this.repeatRefusal('dispatcher', person, a, holders, 'decide_work ask');
         if (again) throw new Error(again);
       }
       w.asks++;
-      w.question = { text: clip(note, 1000), at: this.now().toISOString(), ...(input.asks?.length ? { asks: input.asks } : {}) };
+      w.question = { text: clip(note, 1000), at: this.now().toISOString(), ...(input.asks?.length ? { asks: input.asks } : {}), ...(target && !same(target.userId, w.requestedBy.userId) ? { for: [target] } : {}) };
       what = 'a question';
     } else if (input.action === 'queue' && input.drop_leg) {
       // w1863: a leg nobody needs any more (its worker measured elsewhere, the person changed the plan).

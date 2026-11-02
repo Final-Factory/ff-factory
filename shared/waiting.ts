@@ -1,7 +1,7 @@
 // The requests that wait on a person (w1228), for the Dispatcher page's "Waiting on input" tab: what each one is, what is
 // asked, whose move it is, how long it has waited, and FF Factory's read of it. A pure function over the ledger and the
 // live states (shared/workState.ts), so the sidebar, the phone's bell and the tab all count the same items.
-import { FLAG_LABEL, WORK_OPEN, type OpenAsk, type SessionInfo, type WorkItem } from './types.ts';
+import { FLAG_LABEL, questionFor, WORK_OPEN, type OpenAsk, type SessionInfo, type WorkItem } from './types.ts';
 import { openAsksOf, sameAsk, sameWords } from './waitSummary.ts';
 import type { WorkLive } from './workState.ts';
 
@@ -63,7 +63,7 @@ export function describe(w: WorkItem, live: WorkLive): { ask: WaitingAsk; text: 
       recommendation: intakeRecommendation(w),
     };
   }
-  if (w.question) return { ask: 'answer', text: `The dispatcher asks: ${w.question.text}`, since: w.question.at };
+  if (w.question) return { ask: 'answer', text: `${w.question.by ? `${w.question.by} handed this question to ${questionFor(w).map((r) => r.displayName).join(', ')}` : 'The dispatcher asks'}: ${w.question.text}`, since: w.question.at };
   if (w.flag) return { ask: 'answer', text: `${FLAG_LABEL[w.flag.kind]}: ${w.flag.text}`, since: w.flag.at };
   return { ask: 'check', text: live.why, since: w.updatedAt };
 }
@@ -71,7 +71,7 @@ export function describe(w: WorkItem, live: WorkLive): { ask: WaitingAsk; text: 
 /** Whose move it is, for a request in the live state "waiting". */
 export function isMyMove(w: WorkItem, live: WorkLive, ask: WaitingAsk, me: WaitingViewer): boolean {
   if (ask === 'approve') return me.reviewer;
-  if (w.question) return same(w.requestedBy.userId, me.userId);
+  if (w.question) return questionFor(w).some((r) => same(r.userId, me.userId));
   if (w.flag) return w.flag.for.some((r) => same(r.userId, me.userId));
   const on = (live.waitsOn ?? []).map((n) => n.toLowerCase());
   if (on.length) return on.includes(me.displayName.toLowerCase());
@@ -163,7 +163,7 @@ export function decisionsOn(work: readonly WorkItem[], me: WaitingViewer): Decis
     if (w.approval?.state === 'pending') {
       if (me.reviewer) out.push({ w, ask: 'approve', at: w.createdAt, text: `Approve or decline ${w.id}` });
     } else if (w.question) {
-      if (same(w.requestedBy.userId, me.userId)) out.push({ w, ask: 'answer', at: w.question.at, text: `Answer ${w.id}: ${clip(w.question.text, 90)}` });
+      if (questionFor(w).some((r) => same(r.userId, me.userId))) out.push({ w, ask: 'answer', at: w.question.at, text: `Answer ${w.id}: ${clip(w.question.text, 90)}` });
     } else if (w.flag) {
       if (w.flag.for.some((r) => same(r.userId, me.userId))) out.push({ w, ask: 'answer', at: w.flag.at, text: `Answer ${w.id}: ${clip(w.flag.text, 90)}` });
     }
