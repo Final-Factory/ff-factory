@@ -15,7 +15,7 @@ import { isFor } from './work.ts';
 import { cleanBlock, cleanLine, intakeSettings } from './intakeRules.ts';
 import { redactSecrets } from './secrets.ts';
 import { DEV_LIMITS, type DevOwn, type DevAck, type DevAckError, type DevChunkMessage, type DevFiled, type DevFiledError, type DevMessageMessage, type DevReceivedMessage, type DevReply, type DevRequestMessage, type DevUpdate } from './providerProtocol.ts';
-import type { AttachmentRef, Requester, WorkItem } from '../shared/types.ts';
+import { questionFor, type AttachmentRef, type Requester, type WorkItem } from '../shared/types.ts';
 
 /** config providers.ffbox.devRequests. */
 export interface DevRequestsConfig {
@@ -284,7 +284,9 @@ export function devFacts(
   if (w.status !== 'done') {
     const out: Omit<DevUpdate, 'type' | 'id' | 'request' | 'conversation'> = { status: 'open', ...(facts.watch?.pr ? { watch: facts.watch } : {}) };
     if (facts.watch?.pr && extra.summary && extra.prUrl) Object.assign(out, { summary: extra.summary, pr: { number: facts.watch.pr, url: extra.prUrl } });
-    const asked = w.status === 'question' ? cleanBlock(w.flag?.text ?? w.question?.text ?? '', 1000) : '';
+    // w2867: a question handed to another person is theirs to answer, not a question for the thread's requester.
+    const handed = !!w.question && !questionFor(w).some((r) => r.userId.toLowerCase() === w.requestedBy.userId.toLowerCase());
+    const asked = w.status === 'question' && !handed ? cleanBlock(w.flag?.text ?? w.question?.text ?? '', 1000) : '';
     if (asked) out.question = asked;
     // HELD IN THE INTAKE (w299): the thread hears that a developer has to look first; nothing else is said about it.
     if (w.approval?.state === 'pending') out.held = true;

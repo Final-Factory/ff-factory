@@ -850,6 +850,12 @@ export interface BenchLock {
  * Whether the run holding `lock` runs in the folder `dir` or below it (w1607): the owner line ends with the run's folder,
  * `($PWD)`, which Git Bash writes as /f/ffw/... for F:\ffw\.... Compared without case and slash differences.
  */
+/**
+ * Whom a request's open question waits on (w2867): the person it was handed to, else its requester. w2850 read "Waiting on
+ * input on lothsahn" after lothsahn said "Ask ben", because every reader took the requester.
+ */
+export const questionFor = (w: Pick<WorkItem, 'question' | 'requestedBy'>): Requester[] => (w.question?.for?.length ? w.question.for : [w.requestedBy]);
+
 export function benchLockIn(lock: BenchLock | undefined, dir: string): boolean {
   const ran = /\(([^()]+)\)\s*$/.exec(lock?.owner ?? '')?.[1];
   if (!ran) return false;
@@ -2168,9 +2174,11 @@ export interface WorkItem {
   /**
    * The question it waits on, from the dispatcher (decide_work ask) to its requester, until a note answers it (w278:
    * FFBox posts it in the requester's thread). A design question is `flag` instead. `asks` (w1597): the questions as the
-   * card asks them, each with its 2-4 answers (shared/questionCard.ts).
+   * card asks them, each with its 2-4 answers (shared/questionCard.ts). `for` (w2867): the person it was handed to (a
+   * requester's "Ask ben", update_work question_for, or decide_work ask for), whom it waits on instead of the requester;
+   * `by`: who handed it. questionFor reads it.
    */
-  question?: { text: string; at: string; asks?: Ask[] };
+  question?: { text: string; at: string; asks?: Ask[]; for?: Requester[]; by?: string };
   /**
    * The newest wait on a person that went to their own orchestrators as a `[needs you]` message (w1378, Ben: "Those should
    * just be surfaced to you the orchestrator and then I'll answer you and you send the response back"): the question in

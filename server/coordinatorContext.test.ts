@@ -177,7 +177,10 @@ test('w1158: what a coordinator carries in every call stays within its budget', 
   // w2756 (Ben: "didnt i already talk to you about this above?") gave ask_person notes_leave_open, what the person's own notes
   // leave open after a refusal (trimmed from 170 characters to 55; the rule is in the refusal): the owner's measured 25,627, so
   // the cap moved to 25,650.
-  const ALWAYS_LOADED_MAX = 25_650;
+  // w2867 (lothsahn: "Make sure that the state is reflected correctly and fix the issue causing the state to be attributed wrong")
+  // gave update_work question_for and already_asked, a question handed to another person (trimmed from 590 characters to
+  // 85; the rule is in docs/orchestrators.md): the owner's measured 25,842, so the cap moved to 25,850.
+  const ALWAYS_LOADED_MAX = 25_850;
   await withCoordinators((agents, kinds) => {
     for (const [kind, info] of kinds) {
       const prompt = asOnLinuxCi(promptOf(agents, info)).length;

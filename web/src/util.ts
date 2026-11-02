@@ -4,6 +4,7 @@ import { ledgerGlance, workLiveAll, type WorkLive } from '../../shared/workState
 import { agentQueueAll, agentQueueFacts, queueWaitsAll, type AgentQueue, type QueueWait } from '../../shared/queueWaits.ts';
 import type { AppState, BenchLock, AppVersion, CompactionTrigger, ImageInput, Machine, MachineSandbox, MaxSummary, PermissionMode, PersonPlayReport, Provider, Sandbox, SessionInfo, WorkItem, WorkStatus, SessionStatus, UnityState, SandboxStatus, StandingAgent, StandingRunOutcome, StandingTrigger } from '../../shared/types';
 import { displayName, isUnused } from '../../shared/labels';
+import { questionFor } from '../../shared/types';
 import { playGlance } from '../../shared/personPlay';
 import { updaterHealth } from '../../shared/updaterHealth';
 import { devRequestsHealth } from '../../shared/devRequestsHealth';
@@ -364,7 +365,7 @@ export function useWorkLive(app: AppState, work: readonly WorkItem[], now: numbe
  * turn; amber only when one of its questions waits on `me`.
  */
 export function dispatcherGlance(dispatcher: SessionInfo | undefined, work: WorkItem[], live: ReadonlyMap<string, WorkLive>, me?: string): Glance {
-  const mine = me ? work.some((w) => w.status === 'question' && w.requestedBy.userId.toLowerCase() === me.toLowerCase()) : false;
+  const mine = me ? work.some((w) => w.status === 'question' && questionFor(w).some((r) => r.userId.toLowerCase() === me.toLowerCase())) : false;
   const parts = ledgerGlance(live.values());
   const busy = isBusy(dispatcher);
   const tone: Tone = busy ? 'blue' : mine ? 'amber' : 'grey';

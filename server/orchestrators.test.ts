@@ -38,6 +38,7 @@ import { startTestMachine, type TestMachineOptions } from './testMachine.ts';
 import { afterMergeReason } from './ledgerRules.ts';
 import { roomForWork, timedLine, type Computer, type RoomNow } from './placement.ts';
 import type { Occupant } from './timedLegPlace.ts';
+import { decisionsOn } from '../shared/waiting.ts';
 import { TOOL_MANIFEST, deferredToolsLine, toolsOf } from './toolManifest.ts';
 import { checkTimedAsk } from './timedAsk.ts';
 import { buildOptions } from './launch.ts';
@@ -615,7 +616,7 @@ test('requests: a question goes to its filer, whose answer brings it back; closi
   assert.equal(store.work.get('w1')!.status, 'question');
   // w1378: a question for a person comes as [needs you], in full, with how to answer it.
   await until('Lothsahn hears the question', () => heard(loth.id, '[needs you]').length === 1);
-  assert.match(heard(loth.id, '[needs you]')[0].text, /^\[needs you\] w1 "Playtest the new tutorial"\nQuestion \(the dispatcher asks Lothsahn\):\n\nSingle-player or co-op\?\n\nTo answer: /);
+  assert.match(heard(loth.id, '[needs you]')[0].text, /^\[needs you\] w1 "Playtest the new tutorial"\nQuestion \(the dispatcher asks Lothsahn\):\n\nSingle-player or co-op\?\n\n(Ask it with ask_person[^]*?\n\n)?To answer: /);
   assert.equal(heard(loth.id, '[dispatch]').length, 0, 'not a second message as [dispatch]');
   assert.match((await call(loth, 'update_work', { id: 'w1', note: 'Single-player' })).text, /^w1 is new: note: Single-player\./);
   // Filed and answered within a moment: the dispatcher gets both in one message.
@@ -8485,4 +8486,108 @@ test("w2548: a timed leg's [work request] tells the dispatcher FF Factory starts
   assert.match(text, /Do not start_agent it/);
   assert.doesNotMatch(text, /Decide: start it/);
   assert.match(requestNotice({ ...leg, timedLeg: undefined }), /Decide: start it \(start_agent with work_id "w2"\)/);
+});
+
+test('w2867: a question its requester hands to another person ("Ask ben") waits on that person, goes to them, and no note, re-offer or re-ask turns it back to the requester', async (t) => {
+  const { store, o, dispatcher, chat, call, heard } = setup(t);
+  const loth = chat(LOTH).info;
+  const ben = chat(BEN).info;
+  await call(loth, 'request_work', { title: 'Far space past 20k', brief: 'Investigate what far space contains.' });
+  await until('the dispatcher hears it', () => heard(dispatcher().info.id, '[work request] w1').length === 1);
+  const questions = [{ question: 'What should far space contain?', options: [{ label: 'Add asteroids to Deep Space', recommended: true }, { label: 'Leave it as it is' }] }];
+  const asked = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'ask', note: 'Design pick for far space (report r62).', questions });
+  assert.equal(asked.isError, false, asked.text);
+  await until('lothsahn has it', () => heard(loth.id, '[needs you]').length === 1);
+  const live = async () => (await call(dispatcher().info, 'list_work', { id: 'w1' })).text;
+  assert.match(await live(), /Waiting on input on Lothsahn/);
+
+  // lothsahn answers "Ask ben": his orchestrator hands the question on. The words and answers stay; it waits on Ben.
+  chat(LOTH).lastFrom = 'human';
+  const handed = await call(loth, 'update_work', { id: 'w1', note: 'Ask ben', question_for: 'ben' });
+  assert.equal(handed.isError, false, handed.text);
+  assert.match(handed.text, /Waiting on input on Ben/);
+  const w = store.work.get('w1')!;
+  assert.equal(w.status, 'question');
+  assert.deepEqual({ text: w.question!.text, asks: w.question!.asks!.map((a) => a.question), for: w.question!.for, by: w.question!.by }, { text: 'Design pick for far space (report r62).', asks: ['What should far space contain?'], for: [BEN], by: 'Lothsahn' });
+  assert.match(await live(), /Waiting on input on Ben \(the question Lothsahn handed to Ben/);
+  assert.doesNotMatch(await live(), /Waiting on input on Lothsahn/);
+  await until('Ben gets it as [needs you]', () => heard(ben.id, '[needs you]').length === 1);
+  assert.match(heard(ben.id, '[needs you]')[0].text, /Design pick for far space/);
+  assert.equal(w.needsYou!.who.join(), 'Ben');
+  // The Waiting tab: Ben's move, not lothsahn's.
+  assert.deepEqual(decisionsOn([w], { userId: 'ben', displayName: 'Ben', reviewer: false }).map((d) => d.w.id), ['w1']);
+  assert.deepEqual(decisionsOn([w], { userId: 'lothsahn', displayName: 'Lothsahn', reviewer: false }), []);
+
+  // A later note of lothsahn's ("keep waiting on ben's pick") keeps it with Ben: no new question, nothing back to him.
+  const kept = await call(loth, 'update_work', { id: 'w1', note: "keep waiting on ben's pick" });
+  assert.match(kept.text, /the question stays with Ben \(handed by Lothsahn\)/);
+  assert.equal(store.work.get('w1')!.status, 'question');
+  assert.deepEqual(store.work.get('w1')!.question!.for, [BEN]);
+  assert.match(await live(), /Waiting on input on Ben/);
+
+  // The w2217 re-offer passes it by: it is a question, not undecided.
+  const when = Date.now() + 40 * 60_000;
+  (o as unknown as { now: () => Date }).now = () => new Date(when);
+  assert.deepEqual(o.undecidedBound(), []);
+
+  // The dispatcher's re-ask without `for` is refused; with `for` it goes to Ben, never to lothsahn.
+  const reask = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'ask', note: 'For Ben: far space pick?', questions: [{ question: 'Which far space?', options: [{ label: 'Asteroids', recommended: true }, { label: 'As is' }] }] });
+  assert.equal(reask.isError, true);
+  assert.match(reask.text, /question is with Ben: Lothsahn handed it on .* pass for: "Ben"/);
+  const forBen = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'ask', for: 'ben', note: 'For Ben: a second pick?', questions: [{ question: 'Push the edge out too?', options: [{ label: 'Yes', recommended: true }, { label: 'No' }] }] });
+  assert.equal(forBen.isError, false, forBen.text);
+  assert.match(forBen.text, /Ben's orchestrator has your question as \[needs you\]/);
+  await until('Ben gets the second', () => heard(ben.id, '[needs you]').length === 2);
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(heard(loth.id, '[needs you]').length, 1, 'lothsahn never hears it again');
+  assert.match(await live(), /Waiting on input on Ben/);
+
+  // Ben answers in his own words: the question clears.
+  chat(BEN).lastFrom = 'human';
+  const answered = await call(ben, 'update_work', { id: 'w1', note: 'Add asteroids' });
+  assert.equal(answered.isError, false, answered.text);
+  assert.equal(store.work.get('w1')!.question, undefined);
+  assert.equal(store.work.get('w1')!.status, 'new');
+});
+
+test('w2867: already_asked records the handed question without a message; the requester can take it back', async (t) => {
+  const { store, dispatcher, chat, call, heard } = setup(t);
+  const loth = chat(LOTH).info;
+  const ben = chat(BEN).info;
+  await call(loth, 'request_work', { title: 'Far space past 20k', brief: 'Investigate.' });
+  await until('the dispatcher hears it', () => heard(dispatcher().info.id, '[work request] w1').length === 1);
+  await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'ask', note: 'Far space pick.', questions: [{ question: 'Which?', options: [{ label: 'A', recommended: true }, { label: 'B' }] }] });
+  chat(LOTH).lastFrom = 'human';
+  const r = await call(loth, 'update_work', { id: 'w1', question_for: 'Ben', already_asked: true });
+  assert.match(r.text, /Ben already has it .*no message sent/);
+  await new Promise((r2) => setTimeout(r2, 200));
+  assert.equal(heard(ben.id, '[needs you]').length, 0);
+  assert.match(store.work.get('w1')!.log.join('\n'), /\[needs you\] kept for Ben, not sent/);
+  // Taken back: lothsahn's own note answers it.
+  await call(loth, 'update_work', { id: 'w1', question_for: 'lothsahn', already_asked: true });
+  assert.deepEqual(store.work.get('w1')!.question!.for, [LOTH]);
+  await call(loth, 'update_work', { id: 'w1', note: 'B' });
+  assert.equal(store.work.get('w1')!.question, undefined);
+  // Nothing open: refused.
+  const none = await call(loth, 'update_work', { id: 'w1', question_for: 'ben' });
+  assert.equal(none.isError, true);
+});
+
+test('w2867: the one-off fix makes w2850 Waiting on input on Ben, its question and answers unchanged, and sends nobody anything', async (t) => {
+  const { store, o, agents, dispatcher, chat, call, heard } = setup(t);
+  const ben = chat(BEN).info;
+  const loth = chat(LOTH).info;
+  const at = '2026-11-02T07:02:10.000Z';
+  const asks = [{ question: 'What should far space contain?', options: [{ label: 'Add asteroids', description: 'Fill it.', recommended: true }, { label: 'Leave it', description: 'Keep it empty.' }] }];
+  const text = "For Ben: w2850 works as designed, per report r62. lothsahn left the pick to Ben (\"Ask ben\", then \"keep waiting on ben's pick\").";
+  putRequests(store, [{ id: 'w2850', title: 'THAT is hilarious', status: 'question', requesters: [LOTH, BEN], question: { text, at, asks }, needsYou: { key: `question:${at}`, kind: 'question', question: text, who: ['Lothsahn'], to: ['lothsahn'], at, previews: [], prs: [], asks } as unknown as WorkItem['needsYou'] }]);
+  o.fixW2850();
+  const w = store.work.get('w2850')!;
+  assert.deepEqual({ status: w.status, text: w.question!.text, asks: w.question!.asks, at: w.question!.at, for: w.question!.for }, { status: 'question', text, asks, at, for: [BEN] });
+  assert.match((await call(dispatcher().info, 'list_work', { id: 'w2850' })).text, /Waiting on input on Ben/);
+  assert.equal(o.needsYouDigest(agents.personWaits()), 0, 'the boot digest sends nothing');
+  o.fixW2850();
+  assert.equal(w.log.filter((l) => l.includes('(w2867 one-off)')).length, 1, 'once');
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(heard(ben.id, '[needs you]').length + heard(loth.id, '[needs you]').length, 0);
 });
