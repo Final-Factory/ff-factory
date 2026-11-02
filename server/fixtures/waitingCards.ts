@@ -249,3 +249,40 @@ export function orchestratorQuestions(now: number): OpenAsk[] {
     q(105, 20, 'Should the brake ease out at the end, or stop at a constant rate?', 'w1797', ['Ease out at the end', 'Constant rate to the stop']),
   ];
 }
+
+/**
+ * lothsahn's orchestrator's open ask_person questions of 2026-11-02 (w2856, lothsahn: "The waiting on input tab on the
+ * dispatcher does a terrible job of letting me know what you need"): the two the request quotes (70477, 70556), their words
+ * finished where the brief cut them (reconstructed), and the still one of them names. Their requests are not in the ledger
+ * the test serves, so each card stands alone.
+ */
+export function openQuestions2856(now: number, still = '/srv/fff/review/w2836-rehost/rehost-1280.png'): OpenAsk[] {
+  return [
+    {
+      seq: 70477,
+      at: ago(now, 95),
+      request: 'w2836',
+      ask: {
+        question: `Should the w2836 worker build the re-host-in-place design, where the client that takes over keeps its own world and the others rejoin it? ![The re-host flow as drafted](<${still}>)`,
+        options: [
+          { label: 'Build re-host in place', description: 'Nobody reloads a save when the host drops; about two days of work and a two-machine check.', recommended: true },
+          { label: 'Keep save-and-rejoin', description: 'The new host loads the last autosave and everyone rejoins; a few hours, but up to a minute of play is lost.' },
+        ],
+      },
+      after: 'The orchestrator tells the w2836 worker, which starts on the design you pick.',
+    },
+    {
+      seq: 70556,
+      at: ago(now, 60),
+      request: 'w2851',
+      ask: {
+        question: 'What should far space past 20,000 units contain?',
+        options: [
+          { label: 'Rare asteroid fields and derelicts', description: 'A reason to fly out: richer ore and salvage, guarded more heavily the farther you go.', recommended: true },
+          { label: 'Nothing: keep it empty', description: 'Far space stays a void; the map boundary stays where players stop today.' },
+          { label: 'Enemy bases only', description: 'Combat targets out there, no new resources.' },
+        ],
+      },
+    },
+  ];
+}

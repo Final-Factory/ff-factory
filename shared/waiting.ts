@@ -176,3 +176,28 @@ export function decisionsOnMe(work: readonly WorkItem[], me: WaitingViewer): { c
   const d = decisionsOn(work, me);
   return { count: d.length, since: d[0]?.at ?? '' };
 }
+
+/** The live facts of a worker session that say it stands still on a person (w2856). */
+export type HoldingSession = Pick<SessionInfo, 'id' | 'kind' | 'status' | 'pendingPermissions' | 'waitingOn'>;
+
+/**
+ * Whether answering a request's wait lets a worker go on (w2856, lothsahn: "have it have the question at the top so it's easy
+ * to answer"): a worker of it waits for an OK on a tool, or declared it waits on a person (waiting_on_person, or the
+ * unanswered [needs you] of a worker that still exists). A stopped or errored worker holds nothing; the dispatcher's own
+ * question or an intake approval holds no worker either.
+ */
+export function holdsWorker(w: Pick<WorkItem, 'sessionIds' | 'needsYou'> | undefined, sessions: readonly HoldingSession[]): boolean {
+  if (!w) return false;
+  const mine = sessions.filter((s) => s.kind === 'worker' && w.sessionIds.includes(s.id) && s.status !== 'stopped' && s.status !== 'error');
+  if (mine.some((s) => s.pendingPermissions?.length || s.waitingOn)) return true;
+  const r = w.needsYou;
+  return !!r && !r.answered && !!r.worker && r.kind !== 'question' && mine.some((s) => s.id === r.worker);
+}
+
+/**
+ * The order of the tab's cards (w2856): the questions that hold up a worker first, then the rest; oldest first within each.
+ * Stable for equal times.
+ */
+export function waitOrder<T extends { at: string; holds: boolean }>(cards: readonly T[]): T[] {
+  return [...cards].sort((x, y) => Number(y.holds) - Number(x.holds) || x.at.localeCompare(y.at));
+}

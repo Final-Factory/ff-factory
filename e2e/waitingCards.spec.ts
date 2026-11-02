@@ -2,8 +2,8 @@ import os from 'node:os';
 import path from 'node:path';
 import type { Page } from '@playwright/test';
 import { GALLERY, appState, expect, isMobile, machineSandbox, settle, signIn, test, uniq, useTool } from './fixtures.ts';
-import type { AppState, ServerEvent, SessionInfo, WorkItem } from '../shared/types.ts';
-import { waitingCases } from '../server/fixtures/waitingCards.ts';
+import type { AppState, OpenAsk, ServerEvent, SessionInfo, WorkItem } from '../shared/types.ts';
+import { openQuestions2856, waitingCases } from '../server/fixtures/waitingCards.ts';
 
 /**
  * The Waiting on input tab's cards (w1868, lothsahn, 2026-10-23: "The existing cards are impossible to know what I need to
@@ -23,7 +23,7 @@ function reviewFiles() {
 }
 
 /** Today's cases as the tester's own: their people are the tester, their media the seeded review files, their workers sessions. */
-function fixtureState(s: AppState, now: number, media: { clip: string; still: string }): AppState {
+function fixtureState(s: AppState, now: number, media: { clip: string; still: string }, asks: OpenAsk[] = []): AppState {
   const cases = waitingCases(now);
   const swap = (t: string) => t.replace(/\/srv\/fff\/review\/w1797-braking\/brake-1\.5s\.mp4/g, media.clip).replace(/\/srv\/fff\/review\/w1821-frames\/[\w.-]+\.png/g, media.still);
   const work: WorkItem[] = cases.map(({ w }) => {
@@ -52,7 +52,9 @@ function fixtureState(s: AppState, now: number, media: { clip: string; still: st
     } as unknown as SessionInfo;
     return [info];
   });
-  return { ...s, work, sessions: [...s.sessions, ...workers] };
+  // The tester's orchestrator's open ask_person questions (w2856), in a chat of their own.
+  const orch = asks.length ? [{ id: 'orch-w2856', kind: 'orchestrator', orchestratorRole: 'personal', title: 'Orchestrator', status: 'idle', createdAt: new Date(now - 86_400_000).toISOString(), requestedBy: TESTER, pendingPermissions: [], openAsks: asks } as unknown as SessionInfo] : [];
+  return { ...s, work, sessions: [...s.sessions, ...workers, ...orch] };
 }
 
 async function shot(page: Page, name: string) {
@@ -193,4 +195,76 @@ test('w2576: a still in the Details text at a path of the worker that waits show
   const img = words.locator('img[alt="Beacon Spire next to a portal"]');
   await img.scrollIntoViewIfNeeded();
   await expect.poll(() => img.evaluate((i) => (i as HTMLImageElement).naturalWidth)).toBeGreaterThan(0);
+});
+
+test('w2856: every card leads with its question, its answers right under it; what holds up a worker comes first', async ({ page, browserName }) => {
+  const now = Date.now();
+  const media = reviewFiles();
+  await page.routeWebSocket('**/ws', (ws) => {
+    const server = ws.connectToServer();
+    server.onMessage((raw) => {
+      const e = JSON.parse(String(raw)) as ServerEvent;
+      if (e.type === 'state') return ws.send(JSON.stringify({ type: 'state', state: fixtureState(e.state, now, media, openQuestions2856(now, media.still)) } satisfies ServerEvent));
+      if (e.type === 'session' || e.type === 'session_removed' || e.type === 'work') return;
+      ws.send(raw);
+    });
+    ws.onMessage((m) => server.send(m));
+  });
+  if (!isMobile(page)) await page.setViewportSize({ width: 1440, height: 2400 });
+  await signIn(page);
+  await page.goto('/#/dispatcher/waiting');
+  const tab = page.getByTestId('waiting-tab');
+  const cards = tab.getByTestId('waiting-mine').locator(':scope > .qc');
+  // Seven requests and the two open questions of the orchestrator (70477, 70556); a parallel test may add its own.
+  for (const id of ['wait-w1797', 'wait-w1839', 'wait-w1829', 'wait-w1853', 'wait-w1842', 'wait-w1820', 'wait-w1821', 'ask-70477', 'ask-70556']) await expect(cards.and(tab.getByTestId(id)), id).toHaveCount(1);
+  await expect(tab.getByTestId('ask-70556').getByTestId('qc-question')).toHaveText('What should far space past 20,000 units contain?');
+  await expect(tab.getByTestId('ask-70477').getByTestId('qc-still')).toHaveCount(1);
+  const n = await cards.count();
+  const holds: boolean[] = [];
+  for (let i = 0; i < n; i++) {
+    const card = cards.nth(i);
+    const id = (await card.getAttribute('data-testid')) ?? String(i);
+    // The question is the card's first line (a multi-question card's progress may sit above it), whole and readable.
+    const first = await card.evaluate((el) => (el.firstElementChild?.getAttribute('data-testid') === 'qc-progress' ? el.children[1] : el.firstElementChild)?.getAttribute('data-testid'));
+    expect(first, `${id}: the question first`).toBe('qc-question');
+    const q = card.getByTestId('qc-question');
+    await expect(q, id).not.toBeEmpty();
+    await expect(q, id).not.toHaveText(/…$/);
+    // Its answers (or its answer box) right under the question, and what it is, who acts and since when under those.
+    const answer = (await card.getByTestId('qc-option').count()) ? card.getByTestId('qc-option').first() : card.locator('.qc-free-text');
+    const qBox = (await q.boundingBox())!;
+    const aBox = (await answer.boundingBox())!;
+    const cBox = (await card.getByTestId('qc-context').boundingBox())!;
+    expect(aBox.y, `${id}: answers under the question`).toBeGreaterThan(qBox.y);
+    expect(cBox.y, `${id}: the context under the answers`).toBeGreaterThan(aBox.y);
+    await expect(card.getByTestId('qc-meta'), id).toContainText(/must act · waiting/);
+    // The recommended answer first.
+    if ((await card.getByTestId('qc-recommended').count()) > 0) await expect(card.getByTestId('qc-option').first().getByTestId('qc-recommended'), id).toBeVisible();
+    holds.push((await card.getByTestId('qc-holds').count()) > 0);
+    // Nothing runs off the card at a phone's width.
+    expect(await card.evaluate((el) => el.scrollWidth <= el.clientWidth + 1), `${id}: fits its width`).toBe(true);
+  }
+  // The questions that hold up a worker first, then the rest (the orchestrator's two hold none here).
+  expect(holds.some(Boolean), 'some hold a worker').toBe(true);
+  expect(holds.indexOf(false) === -1 || !holds.slice(holds.indexOf(false)).some(Boolean), `holding cards first: ${holds.join(',')}`).toBe(true);
+  await expect(tab.getByTestId('waiting-summary')).toContainText('up a worker, then the rest; oldest first.');
+  // An intake approval's question names what "this" is right under it.
+  await expect(tab.getByTestId('wait-w1853').getByTestId('qc-what')).toHaveText(/^The nightly game tests of 2026-10-23/);
+  // The stills (WAITING_SHOTS): the first screen, and the whole tab in a window tall enough to hold it (it scrolls inside the
+  // page, so a full-page capture alone stops at the window). A phone's width in Chromium too: Playwright's WebKit plays no WebM.
+  const dir = process.env.WAITING_SHOTS;
+  if (dir) {
+    const narrow = isMobile(page);
+    await page.screenshot({ path: path.join(dir, `w2856-top-${narrow ? 'narrow' : 'desktop'}.png`) });
+    const sizes: [string, number][] = narrow ? [] : [['desktop', 1440], ...(browserName === 'chromium' ? ([['narrow-chromium', 390]] as [string, number][]) : [])];
+    for (const [name, width] of sizes) {
+      await page.setViewportSize({ width, height: 9000 });
+      await settle(page);
+      const h = await tab.evaluate((el) => (el.lastElementChild?.getBoundingClientRect().bottom ?? el.scrollHeight) + 40);
+      await page.setViewportSize({ width, height: Math.ceil(Math.min(h, 16000)) });
+      await settle(page);
+      await page.screenshot({ path: path.join(dir, `w2856-all-${name}.png`) });
+      if (width === 390) await page.setViewportSize({ width, height: 844 }), await settle(page), await page.screenshot({ path: path.join(dir, 'w2856-top-narrow-chromium.png') });
+    }
+  }
 });

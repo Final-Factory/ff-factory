@@ -2685,6 +2685,15 @@ question on w1821 (the Station strip) refused twice by the w1812 guard once the 
 6. **What happens after the answer**: the worker's `after`, else what FF Factory does (its worker resumes within a minute, or at
    the next free sandbox; the dispatcher decides).
 
+**The card's order (w2856).** lothsahn, 2026-11-02: "The waiting on input tab on the dispatcher does a terrible job of letting
+me know what you need. Can we have it have the question at the top so it's easy to answer?" A card (`QuestionCard.tsx`) reads
+top down: the question (part 3; a wait with no ask leads with its one step, else part 1), then part 1 under it for an approval,
+the stale line, the stills and clips (5), the answers (4) with the free box, the after line (6), and last a footer
+(`qc-context`) with the title and the id, who acts and how long (2). The tab (`WaitingTab.tsx`) sorts each section with
+`waiting.ts` `waitOrder`: first the cards that hold up a running worker (`holdsWorker`: its worker has a pending permission
+or a declared wait, or an unanswered declared or report `[needs you]` from a live worker), marked "A worker waits on this"
+with an amber left edge, then the rest; oldest first in each group. What counts as waiting is unchanged.
+
 **Stale.** A card says "May be out of date: …" when, after its `[needs you]` went out, the request's log shows a dispatcher
 decision, a reopen or someone's note, or the worker that asked is gone, failed or said DONE (`staleOf`). FF Factory's own
 bookkeeping lines (PR states read, follow-ups) are no change.
@@ -2721,7 +2730,7 @@ same. Tests: `orchestrators.test.ts` "w1955" (two).
 `list_work` shows each waiting request's six parts under its line (`Agents.waitSummaryOf`, `summaryText`). Tests:
 `server/waitSummary.test.ts` (today's cases in `server/fixtures/waitingCards.ts`), `server/orchestrators.test.ts` ("w1868"),
 `e2e/waitingCards.spec.ts` (the cards with a still and a playing clip, desktop and narrow; five orchestrator questions, each
-answered by a click).
+answered by a click; "w2856": the question first and the order, desktop and phone), `server/waitOrder.test.ts`.
 
 ## Review media inline, never a bare path (w1384)
 
