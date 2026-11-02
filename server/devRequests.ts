@@ -272,9 +272,9 @@ export function devFacts(
   facts: { watch?: DevUpdate['watch']; version?: string | null; mergedIn?: string | null; branch?: string },
   extra: { summary?: string; prUrl?: string; fixPr?: { number: number; url: string } } = {},
 ): Omit<DevUpdate, 'type' | 'id' | 'request' | 'conversation'> {
-  // QUESTIONS AND RESULTS ARE FOR A DEVELOPER (w351): FFBox DMs a question to the operator who filed the request, so
-  // it keeps its internal detail (ids, files, PRs), and since w1640 it records a result and the PR summary without
-  // posting them; only its merge notice reaches the thread by itself (docs/ffbox.md, "What FFBox posts by itself").
+  // QUESTIONS AND RESULTS ARE FOR A DEVELOPER (w351): FFBox posts a question in the conversation of the operator who
+  // filed the request (w2848; by DM until then), so it keeps its internal detail (ids, files, PRs), and since w1640 it
+  // records a result and the PR summary without posting them; only its merge notice reaches the thread by itself (docs/ffbox.md, "What FFBox posts by itself").
   if (w.status === 'rejected' || w.status === 'cancelled') {
     const reason = cleanLine(w.outcome ?? '', 300);
     return { status: w.status === 'rejected' ? 'declined' : 'cancelled', ...(reason ? { result: reason } : {}) };

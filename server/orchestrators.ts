@@ -6583,7 +6583,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
         workId: w.id,
         matches: ranked.map(wire),
         text,
-        personLine: `${head} ${person.displayName}'s request through FFBox, "${clip(title, 100)}" (${where}), was not filed: ${w.id} "${clip(w.title, 80)}" already did it (${highDone.why}). FFBox told them: ${text} If it is not fixed, ${f.operator} can file it anyway with !fff new.${files} ${relayed}`,
+        personLine: `${head} ${person.displayName}'s request through FFBox, "${clip(title, 100)}" (${where}), was not filed: ${w.id} "${clip(w.title, 80)}" already did it (${highDone.why}). FFBox said it in their conversation: ${text} Don't repeat it with reply_to_ffbox; reply there only to add what it lacks. If it is not fixed, ${f.operator} can file it anyway with !fff new.${files} ${relayed}`,
       };
     }
 
