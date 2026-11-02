@@ -105,8 +105,12 @@ export interface QuestionCardProps {
   /** Everything else, behind one Details link. */
   details: ReactNode;
   busy?: boolean;
-  /** What it is, who acts and since when, and what follows the answer (w1868): shown in place of the title. */
+  /** What it is, who acts and since when, and what follows the answer (w1868): shown under the answers, in place of the title. */
   summary?: CardSummary;
+  /** The question speaks of "this" (an intake approval): what it is about goes right under it, not down with the rest. */
+  subject?: boolean;
+  /** Answering it lets a worker go on (w2856): said beside who acts. */
+  holds?: boolean;
 }
 
 /**
@@ -327,29 +331,26 @@ export function QuestionCard(p: QuestionCardProps) {
   const media = cardMedia(ask, p.previews);
   const optionMedia = options.map((o) => ({ label: o.label, media: cardMedia(undefined, splitMedia(o.description ?? '').media.map((m) => m.url)) })).filter((x) => x.media.length);
   const sum = p.summary;
+  // w2856 (lothsahn: "have it have the question at the top so it's easy to answer"): the question first, whatever the wait;
+  // one with no words of its own leads with its one step, else with what it is.
+  const top = q || sum?.step || sum?.what || p.title;
+  const stepOnTop = !q && !!sum?.step;
+  const subject = p.subject && sum ? sum.what : undefined;
+  const whatBelow = sum && !subject && top !== sum.what ? sum.what : undefined;
   return (
-    <article className={`qc${p.mine ? ' mine' : ''}`} data-testid={p.testId}>
-      {sum ? (
-        <header className="qc-head qc-head-sum">
-          <span className="qc-what" data-testid="qc-what">
-            {sum.what}
-          </span>
-          <span className="small dim qc-meta" data-testid="qc-meta">
-            {sum.meta}
-          </span>
-        </header>
-      ) : (
-        <header className="qc-head">
-          <span className="qc-title">{p.title}</span>
-        </header>
-      )}
-      {sum?.stale && (
-        <p className="small tone-amber qc-stale" data-testid="qc-stale">
-          May be out of date: {sum.stale}
+    <article className={`qc${p.mine ? ' mine' : ''}${p.holds ? ' qc-holding' : ''}`} data-testid={p.testId}>
+      {progress}
+      <QuestionText q={top} legacy={!ask && !stepOnTop && !!q} />
+      {subject && (
+        <p className="qc-subject" data-testid="qc-what">
+          {subject}
         </p>
       )}
-      {progress}
-      <QuestionText q={q} legacy={!ask} />
+      {sum?.stale && (
+        <p className="small dim qc-stale" data-testid="qc-stale">
+          <span className="tone-amber">May be out of date:</span> {sum.stale}
+        </p>
+      )}
       {p.note && (
         <p className="small dim qc-note" data-testid="qc-note">
           {p.note}
@@ -361,7 +362,7 @@ export function QuestionCard(p: QuestionCardProps) {
           It asks about something you have to see, but no still or clip came with it: ask for one before you answer.
         </p>
       )}
-      {sum?.step && (
+      {sum?.step && !stepOnTop && (
         <p className="small qc-step" data-testid="qc-step">
           {sum.step}
         </p>
@@ -386,6 +387,26 @@ export function QuestionCard(p: QuestionCardProps) {
           <span className="dim">After you answer:</span> {sum.after}
         </p>
       )}
+      {/* What it is, who acts and since when (w1868), below the answers since w2856: context, not the ask. */}
+      <footer className="qc-context" data-testid="qc-context">
+        {whatBelow && (
+          <span className="qc-what" data-testid="qc-what">
+            {whatBelow}
+          </span>
+        )}
+        {sum ? (
+          <span className="small dim qc-meta" data-testid="qc-meta">
+            {p.holds && (
+              <span className="chip chip-amber qc-holds" data-testid="qc-holds">
+                A worker waits on this
+              </span>
+            )}
+            {sum.meta}
+          </span>
+        ) : (
+          <span className="qc-title">{p.title}</span>
+        )}
+      </footer>
       {others}
       {details}
     </article>

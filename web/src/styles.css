@@ -7788,13 +7788,6 @@ a.wc-pr:hover {
   margin: 0;
 }
 
-.qc-head {
-  display: flex;
-  align-items: baseline;
-  gap: var(--s-2);
-  min-width: 0;
-}
-
 .qc-title {
   font-size: var(--fs-sm);
   font-weight: 600;
@@ -7802,18 +7795,37 @@ a.wc-pr:hover {
   overflow-wrap: anywhere;
 }
 
-/* w1868: what it is, then who acts and since when, in place of the title. */
-.qc-head-sum {
-  flex-direction: column;
-  align-items: stretch;
+/* w1868: what it is, then who acts and since when; under the answers since w2856 (the question leads the card). */
+.qc-context {
+  display: grid;
   gap: 2px;
+  min-width: 0;
+  padding-top: var(--s-2);
+  border-top: 1px solid var(--border);
 }
 
 .qc-what {
-  font-size: var(--fs-base);
-  font-weight: 600;
+  font-size: var(--fs-sm);
+  font-weight: 500;
   color: var(--text-2);
   overflow-wrap: anywhere;
+}
+
+/* The thing an intake question's "this" means, right under the question (w2856). */
+.qc-subject {
+  font-size: var(--fs-base);
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+/* A card whose answer lets a worker go on (w2856): marked down its left edge, to be seen while scanning the list. */
+.qc.qc-holding {
+  border-left: 3px solid var(--amber);
+}
+
+.qc-holds {
+  margin-right: 6px;
+  vertical-align: 1px;
 }
 
 .qc-meta .qc-id {

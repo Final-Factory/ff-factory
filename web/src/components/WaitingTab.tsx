@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { Ask } from '../../../shared/ask';
 import { answerMessage, answersText, cardMedia, cardQuestions, legacySteps, namesForPaths, plainQuestion } from '../../../shared/questionCard';
 import { FLAG_LABEL, type AppState, type WorkItem } from '../../../shared/types';
-import { intakeRecommendation, waitAge, type AskItem, type WaitingItem } from '../../../shared/waiting';
+import { holdsWorker, intakeRecommendation, waitAge, waitOrder, type AskItem, type WaitingItem } from '../../../shared/waiting';
 import { APPROVE_LABEL, DECLINE_LABEL, approveAsk, waitSummary, waitedFor, whatOf, type WaitSummary } from '../../../shared/waitSummary';
 import { namesReporter, sourceLabel, untrustedLabel } from '../../../shared/workLabels';
 import { api } from '../api';
@@ -26,8 +26,15 @@ const AGE_TONE = { fresh: 'grey', old: 'amber', stale: 'red' } as const;
 export function WaitingTab({ app, items, asks = [], now }: { app: AppState; items: WaitingItem[]; asks?: AskItem[]; now: number }) {
   const mine = items.filter((i) => i.mine);
   const others = items.filter((i) => !i.mine);
-  // The viewer's own orchestrator's open questions (w1868) sit among their own requests' cards, oldest first.
-  const ownCards = [...mine.map((i) => ({ at: i.since, key: `w:${i.w.id}`, el: <WaitCard key={`w:${i.w.id}`} app={app} item={i} now={now} /> })), ...asks.map((a) => ({ at: a.a.at, key: `a:${a.sessionId}:${a.a.seq}`, el: <AskWaitCard key={`a:${a.sessionId}:${a.a.seq}`} app={app} item={a} now={now} /> }))].sort((x, y) => x.at.localeCompare(y.at));
+  // w2856: the questions that hold up a worker first (one answer and it goes on), then the rest, oldest first within each.
+  // The viewer's own orchestrator's open questions (w1868) sit among their own requests' cards.
+  const holds = (w: AskItem['w']) => holdsWorker(w, app.sessions);
+  const ownCards = waitOrder([
+    ...mine.map((i) => ({ at: i.since, holds: holds(i.w), key: `w:${i.w.id}`, el: <WaitCard key={`w:${i.w.id}`} app={app} item={i} now={now} holds={holds(i.w)} /> })),
+    ...asks.map((a) => ({ at: a.a.at, holds: holds(a.w), key: `a:${a.sessionId}:${a.a.seq}`, el: <AskWaitCard key={`a:${a.sessionId}:${a.a.seq}`} app={app} item={a} now={now} holds={holds(a.w)} /> })),
+  ]);
+  const otherCards = waitOrder(others.map((i) => ({ at: i.since, holds: holds(i.w), key: i.w.id, el: <WaitCard key={i.w.id} app={app} item={i} now={now} holds={holds(i.w)} /> })));
+  const holding = ownCards.filter((c) => c.holds).length;
   const onYou = mine.length + asks.length;
   // A "Needs you" item names the request it is about (w1356): put its card at the top, with its buttons in view, and flash it.
   const focusId = useStore((s) => s.focusWaitId);
@@ -46,7 +53,7 @@ export function WaitingTab({ app, items, asks = [], now }: { app: AppState; item
     <div className="sa-scroll waiting-tab" data-testid="waiting-tab" ref={root}>
       <p className="dim small ledger-none" data-testid="waiting-summary">
         {items.length || asks.length
-          ? `${items.length} ${items.length === 1 ? 'request waits' : 'requests wait'} on input: ${mine.length} on you, ${others.length} on someone else.${asks.length ? ` Your orchestrator asks you ${asks.length} more question${asks.length > 1 ? 's' : ''}.` : ''} The oldest waits first.`
+          ? `${items.length} ${items.length === 1 ? 'request waits' : 'requests wait'} on input: ${mine.length} on you, ${others.length} on someone else.${asks.length ? ` Your orchestrator asks you ${asks.length} more question${asks.length > 1 ? 's' : ''}.` : ''} ${holding ? `First the ${holding === 1 ? 'one' : holding} that ${holding === 1 ? 'holds' : 'hold'} up a worker, then the rest; oldest first.` : 'The oldest waits first.'}`
           : 'Nothing waits on input.'}
       </p>
       <h3 className="intake-h">Waiting on you · {onYou}</h3>
@@ -61,9 +68,7 @@ export function WaitingTab({ app, items, asks = [], now }: { app: AppState; item
         <>
           <h3 className="intake-h">Waiting on someone else · {others.length}</h3>
           <div className="wait-list" data-testid="waiting-others">
-            {others.map((i) => (
-              <WaitCard key={i.w.id} app={app} item={i} now={now} />
-            ))}
+            {otherCards.map((c) => c.el)}
           </div>
         </>
       )}
@@ -261,11 +266,12 @@ export function ApproveCard({ app, w, mine, reviewers, details, testId, summary 
       {...(repeat ? { note: `It may repeat “${repeat.title.length > 80 ? `${repeat.title.slice(0, 79)}…` : repeat.title}” (${repeat.why}).` } : {})}
       details={details}
       {...(summary ? { summary } : {})}
+      subject
     />
   );
 }
 
-function WaitCard({ app, item, now }: { app: AppState; item: WaitingItem; now: number }) {
+function WaitCard({ app, item, now, holds }: { app: AppState; item: WaitingItem; now: number; holds?: boolean }) {
   const { w, ask, mine } = item;
   const [sent, setSent] = useState(false);
   const workers = sessionsByIds(app.sessions, w.sessionIds);
@@ -275,7 +281,8 @@ function WaitCard({ app, item, now }: { app: AppState; item: WaitingItem; now: n
   const reviewers = app.intake?.reviewers.join(' or ') || 'A reviewer';
   // The six parts (w1868, shared/waitSummary.ts): what it is, who acts and since when, the question, its answers, media, what follows.
   const sum = waitSummary(item, { session: (id) => app.sessions.find((x) => x.id === id), reviewers: app.intake?.reviewers.join(' or ') });
-  const summary = cardSummary(sum, now, w.title);
+  // Its number, not its title again: the line above says what it is in plain words (w2856).
+  const summary = cardSummary(sum, now, undefined, w.id);
   if (ask === 'approve') return <ApproveCard app={app} w={w} mine={mine} reviewers={reviewers} details={details} testId={`wait-${w.id}`} summary={summary} />;
   const r = w.needsYou;
   const cq = cardQuestions(w);
@@ -336,6 +343,7 @@ function WaitCard({ app, item, now }: { app: AppState; item: WaitingItem; now: n
       extra={permissions}
       details={details}
       summary={summary}
+      holds={!!holds}
     />
   );
 }
@@ -345,7 +353,7 @@ function WaitCard({ app, item, now }: { app: AppState; item: WaitingItem; now: n
  * clips, and what follows. A click answers it exactly as the click in the chat does (POST /api/sessions/<id>/answer: the
  * person's own message, the question quoted); typed words go as a reply to it. The card goes once the server sees the answer.
  */
-function AskWaitCard({ app, item, now }: { app: AppState; item: AskItem; now: number }) {
+function AskWaitCard({ app, item, now, holds }: { app: AppState; item: AskItem; now: number; holds?: boolean }) {
   const { a, w, sessionId } = item;
   const [sent, setSent] = useState(false);
   const me = app.me?.displayName ?? 'you';
@@ -397,6 +405,7 @@ function AskWaitCard({ app, item, now }: { app: AppState; item: AskItem; now: nu
       {...(sent ? { done: <p className="small tone-green">Sent to your orchestrator. The card goes when it has your answer.</p> } : {})}
       details={details}
       summary={summary}
+      holds={!!holds}
     />
   );
 }
