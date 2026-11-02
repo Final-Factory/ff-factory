@@ -2475,6 +2475,8 @@ export interface WorkPr {
   via?: 'line' | 'worker' | 'branch' | 'title';
   /** Its description says `Part of: <id>` (w424): one step of the request, whose merge leaves it open for what follows. */
   partOf?: boolean;
+  /** The Discord threads its description's `Discord:` lines name (w2844): a merged one is the fix those threads got. */
+  threads?: string[];
   /** What the log already said about it, so a sweep notes a state once ("merged:release", "closed"). */
   noted?: string;
 }

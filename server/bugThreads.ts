@@ -18,7 +18,7 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { Config } from './config.ts';
 import type { Store } from './store.ts';
 import type { Identity } from './identity.ts';
-import type { Orchestrators } from './orchestrators.ts';
+import { deliveredThread, type Orchestrators } from './orchestrators.ts';
 import { threadsOf, discordThreadsIn } from './mergedIntake.ts';
 import { bugBrief, bugSource, bugTitle, classifyBug, cleanBlock, intakeSettings, parseBugThread, quoteUntrusted, type DiscordMessage } from './intakeRules.ts';
 import { isOpen, textKeys } from './work.ts';
@@ -515,11 +515,13 @@ export class BugThreadWatch {
     const working = reqs.find((w) => isOpen(w) && w.approval?.state !== 'pending');
     if (working) return this.note({ ...base, outcome: 'owned', workId: working.id, why: `the thread is already ${working.id}'s (${working.status}); nothing filed, not judged` });
     const pending = reqs.find((w) => isOpen(w) && w.approval?.state === 'pending');
-    const done = reqs.find((w) => w.status === 'done');
+    // A finished sweep that only triaged the thread did not deliver its fix (w2844): the owner's word on it is new work.
+    const done = reqs.find((w) => w.status === 'done' && deliveredThread(w, t.id));
     if (done && !pending) return this.note({ ...base, outcome: 'owned', workId: done.id, why: `the thread's ${done.id} is done; nothing filed, not judged` });
     const named = namedThreads(this.d.store.work.values()).get(t.id) ?? [];
     const namedOpen = named.find((w) => isOpen(w));
-    if (!pending && !namedOpen && named[0]) return this.note({ ...base, outcome: 'owned', workId: named[0].id, why: `${named[0].id}, which is done, names the thread; nothing filed, not judged` });
+    const namedDone = named.find((w) => !isOpen(w) && deliveredThread(w, t.id));
+    if (!pending && !namedOpen && namedDone) return this.note({ ...base, outcome: 'owned', workId: namedDone.id, why: `${namedDone.id}, which is done, names the thread; nothing filed, not judged` });
     const dc = this.d.discord!;
     let starter: DiscordMessage | undefined;
     try {
