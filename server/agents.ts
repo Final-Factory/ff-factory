@@ -24,7 +24,7 @@ import { idleClosedPart } from './liveIdle.ts';
 import { HOLD_PLACE_MS, LIVE_HOLD_MS, PlaceAgain, RELEASE_AFTER_MS, RELEASE_WAKE_NOTE, handOverBranch, occupies, releasedOn } from './placeAgain.ts';
 import { agentQueueAll, agentQueueFacts, editorSlotRefusal, queueWaitsAll } from '../shared/queueWaits.ts';
 import { pairWaitLine, pairWaitNotice } from './pairRuns.ts';
-import { WORK_LIVE_LABEL, WORK_LIVE_STATES, asksAPerson, benchWaitOf, lastOpenLine, liveCounts, otherWorkWait, outsideDeclared, outsideWaitOf, ownWorkWait, noTimedWaitOf, restartWait, personWaitIn, reportWaitKey, holdsOf, servedBy, workLiveAll, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
+import { WORK_LIVE_LABEL, WORK_LIVE_STATES, asksAPerson, benchWaitOf, lastOpenLine, liveCounts, otherWorkWait, outsideDeclared, outsideWaitOf, ownWorkWait, noTimedWaitOf, orchestratorAskIn, restartWait, personWaitIn, reportWaitKey, holdsOf, servedBy, workLiveAll, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
 import { prsIn, reportTail, whoOf, type NeedsYouWait } from './needsYou.ts';
 import { addedLines, asksLookOk, decidedRefusal, notesSettle, personNotes, quoteCovered, quotedPhrases, relatedRequests, settledRefusal } from './priorDecisions.ts';
 import { stillOpenIn } from './ledgerRules.ts';
@@ -2702,6 +2702,8 @@ export class Agents {
     // w1378: a turn that ends waiting on a person sends its question to that person's orchestrator, once.
     // w1812: the same question on several of its requests goes once.
     this.orchestrators.needsYouAll(this.personWaits({ worker: s.info.id, report: text }));
+    // w2870: a turn that ends waiting on the orchestrator for a step only it can take tells the requester's orchestrator, once.
+    this.orchestrators.orchestratorStep(s.info.id, text, stillOpenIn(text));
     // w1841 (d): a turn that ends waiting on the orchestrator for the worker's own work is told at once that it is its own.
     // w2625: one that waits for someone to restart its agent host or tools is told none is needed, on new code at once.
     this.restartWaitNudge(s.info, text);
@@ -7115,6 +7117,8 @@ ${w.repo ?? ''}
       if (!l || (l.state !== 'waiting' && !only) || w.approval?.state === 'pending' || w.flag) continue;
       // w1841: a wait on the bug's reporter or a player is FFBox's to pass on, never a person's [needs you].
       if (l.state === 'waiting' && l.outside) continue;
+      // w2870: a wait on the orchestrator's own step is sent as [orchestrator step] (Orchestrators.orchestratorStep), never here.
+      if (l.orchestrator) continue;
       // A dispatcher question asked while a worker's wait is still unanswered was folded into that wait (askPerson): it is that wait.
       const folded = !!w.needsYou && !w.needsYou.answered && w.needsYou.kind !== 'question';
       if (w.question && !folded) {
@@ -7140,7 +7144,7 @@ ${w.repo ?? ''}
       // w1841: a line that waits on the reporter or a player ("waiting on Reteoteigam to answer in the Discord thread") is FFBox's.
       const said = mine
         .map((s) => ({ s, p: personWaitIn(report(s), w.id, people) }))
-        .filter((x) => !(x.p && outsideWaitOf(x.p.line, people)))
+        .filter((x) => !(x.p && (outsideWaitOf(x.p.line, people) || orchestratorAskIn(x.p.line))))
         .find((x) => x.p || (l.state === 'waiting' && asksAPerson(report(x.s))));
       if (!said) continue;
       const line = said.p?.line ?? reportTail((report(said.s) ?? '').trim(), 600);

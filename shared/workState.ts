@@ -81,6 +81,11 @@ export interface WorkLive {
   outside?: boolean;
   /** Waiting on input on a worker's own words (w1868): its whole line, where `why` quotes it cut short. */
   line?: string;
+  /**
+   * Waiting on input on its requester's orchestrator (w2870): a step only an orchestrator can take (a tool workers lack). Sent
+   * to that orchestrator once as `[orchestrator step]` (Orchestrators.orchestratorStep), never as a person's [needs you].
+   */
+  orchestrator?: boolean;
 }
 
 /**
@@ -379,6 +384,19 @@ export function benchWaitOf(line: string): string | undefined {
 const ORCHESTRATOR_WAIT = /\b(?:waiting|waits|wait) (?:for|on) (?:the |my |its |ben'?s |lothsahn'?s )?(?:orchestrator|dispatcher)\b/i;
 export const orchestratorWaitIn = (line: string) => ORCHESTRATOR_WAIT.test(line);
 /**
+ * w2870: a step only the orchestrator can take, as a still-open line says it: "waiting on the orchestrator to …", or the
+ * orchestrator as the one who acts (w2833's worker a53036df, four reports from 05:24 UTC: "still open: the orchestrator runs
+ * the live ffbox_activity demo for conversations 1487 and 1488 and sends the results to worker c6e1d6f2; workers don't have
+ * those tools"). Not the worker's own work (ownWorkWait: a pair or two-machine check, a build, its CI), not a restart of its
+ * host or tools (restartWait), not a pair run (request_pair), and not the dispatcher's: those keep their own nudges.
+ */
+const ORCHESTRATOR_ONLY_WAIT = /\b(?:waiting|waits|wait) (?:for|on) (?:the |my |its |your |[a-z]+'s )?orchestrator\b/i;
+const ORCHESTRATOR_ACTS =
+  /\b(?:the|my|its|your|[a-z]+'s) orchestrator(?: (?:must|needs to|has to|should|will|can|to|then|first))? (?:runs?|sends?|calls?|starts?|files?|passes?|relays?|posts?|fetch(?:es)?|reads?|asks?|tells?|forwards?|does|uses?|checks?|confirms?|pulls?|gets?|downloads?|uploads?)\b/i;
+const NOT_THE_ORCHESTRATORS = /\b(?:pair (?:run|check|worker)s?|two-machine|second machine|request_pair)\b/i;
+export const orchestratorAskIn = (line: string) =>
+  (ORCHESTRATOR_ONLY_WAIT.test(line) || ORCHESTRATOR_ACTS.test(line)) && !NOT_THE_ORCHESTRATORS.test(line) && !ownWorkWait(line) && !restartWait(line);
+/**
  * Work a worker does itself (w1841, w1685: "waiting on the orchestrator to run the two-machine check"): a pair or two-machine
  * check, a build, its CI, a test or audit run. Not a second machine's worker, which only the dispatcher starts.
  */
@@ -597,6 +615,16 @@ function blockedLive(gates: readonly NonNullable<WorkItem['blocked']>[], now: nu
 }
 
 /** Waiting on someone outside the team (w1841 (b)): the reporter or a player, through FFBox and Discord. */
+/** w2870: Waiting on input on the requester's orchestrator, for a step only an orchestrator can take. */
+const orchestratorLive = (w: Pick<WorkItem, 'requestedBy'>, worker: string, line: string): WorkLive => ({
+  state: 'waiting',
+  why: `${worker} waits on the orchestrator for a step workers have no tool for (sent to it once): "${line.slice(0, 160)}"`,
+  waitsOn: [`${w.requestedBy.displayName}'s orchestrator`],
+  worker,
+  orchestrator: true,
+  line,
+});
+
 const outsideLive = (worker: string, who: string, line: string): WorkLive => ({
   state: 'waiting',
   why: `${worker} waits on ${who} to answer through FFBox and Discord: "${line.slice(0, 160)}"`,
@@ -914,6 +942,13 @@ function workLiveOf(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: string
     .find((x) => !!x);
   if (outsider && !(coming && coming.a.kind === 'job')) return outsideLive(outsider.s.id, outsider.who, outsider.line);
 
+  // w2870: its report waits on the orchestrator for a step only an orchestrator can take: Waiting, on the requester's
+  // orchestrator (a check-in does not move it), until the worker reports again or the requester adds a note.
+  const orchAsk = mine
+    .map((s) => ({ s, line: s.lastResult ? stillOpenLine(s.lastResult.trim().slice(-2000), w.id) : undefined }))
+    .find((x) => !!x.line && orchestratorAskIn(x.line) && stands(reportAt(x.s), names(w.requesters), x.line));
+  if (orchAsk && !(coming && coming.a.kind === 'job')) return orchestratorLive(w, orchAsk.s.id, orchAsk.line!);
+
   // w1841 (a): a worker an urgent release's build paused (w1475 and w1768 for w1836 on BEAST) is Blocked on that build. One
   // asked to pause mid-turn is told to carry on when it is done (server/buildPlans.ts done); one paused between turns comes
   // back by its own check-in or held message, which the build holds until then. One with nothing to bring it back is left
@@ -1041,6 +1076,9 @@ function workLiveOf(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: string
   }
   const benchedLate = benchedOf(lines.map((x) => x.s), (s) => lines.find((x) => x.s === s)?.l.line, f);
   if (benchedLate) return benchedLate;
+  // w2870: a wait on the orchestrator's step, said in its log, wins over "Merged, follow-up pending" (w2833 read so for 2.5 h).
+  const orchLate = lines.find((x) => !weighed(x) && orchestratorAskIn(x.l.line) && stands(atOf(x), names(w.requesters), x.l.line));
+  if (orchLate) return orchestratorLive(w, orchLate.s.id, orchLate.l.line);
 
   // Merged, follow-up pending: its pull requests merged, none is open, and the request is still open.
   const prs = w.prs ?? [];

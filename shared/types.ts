@@ -2178,6 +2178,13 @@ export interface WorkItem {
    */
   needsYou?: WorkNeedsYou;
   /**
+   * w2870: the step only an orchestrator can take that a worker of it ended its turn waiting for (its still-open line: "the
+   * orchestrator runs the live ffbox_activity demo …"), sent once to its requester's orchestrator as `[orchestrator step]`.
+   * Kept while that worker keeps reporting the wait, so a re-report sends nothing; dropped when it reports on the request
+   * without it, so a later wait goes again (Orchestrators.orchestratorStep).
+   */
+  orchestratorStep?: { worker: string; line: string; at: string; to: string[] };
+  /**
    * w2478: review topics its workers published stills and clips to (publish_review), newest last, at most 20: with topics
    * named for it (`w2186`, `w2186-*`), what makes a question about it visual (server/visualAsk.ts).
    */
