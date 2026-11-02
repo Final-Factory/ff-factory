@@ -40,7 +40,7 @@
 // person counts whichever worker of the request said it, also one that went on to other work since (its last report on
 // the request, read from the log). A worker that waits on another request's worker (its files, its results) is Blocked on
 // that request. And a worker that says it waits on the orchestrator for its own work says so in the Stalled line.
-import type { BenchLock, BuildHold, SessionInfo, WorkItem } from './types.ts';
+import { questionFor, type BenchLock, type BuildHold, type SessionInfo, type WorkItem } from './types.ts';
 import { agentState, holdsSandbox, hostFailureText } from './agentState.ts';
 import { gatesName, gatesOf } from './blockers.ts';
 import { admitsPriority, needsOf, pairRoom, pairText, reservedText, ROOM_STAND_MS, unfitWhy, type ReservedRoom, type RoomFit } from './capacity.ts';
@@ -836,7 +836,7 @@ function workLiveOf(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: string
 
   // Waiting on input: a person must approve, answer, decide or allow something.
   if (w.approval?.state === 'pending') return { state: 'waiting', why: 'an intake request waiting for a reviewer to approve or decline it', waitsOn: ['a reviewer'] };
-  if (w.question) return { state: 'waiting', why: `the dispatcher's question: ${w.question.text}`, waitsOn: names([w.requestedBy]) };
+  if (w.question) return { state: 'waiting', why: `${w.question.by ? `the question ${w.question.by} handed to ${names(questionFor(w)).join(', ')}` : "the dispatcher's question"}: ${w.question.text}`, waitsOn: names(questionFor(w)) };
   if (w.flag) return { state: 'waiting', why: `${w.flag.kind === 'error' ? 'an error the ledger cleanup escalated' : 'a design question'}: ${w.flag.text}`, waitsOn: names(w.flag.for) };
   const asking = mine.find((s) => s.status === 'waiting_permission');
   if (asking) {

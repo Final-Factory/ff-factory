@@ -255,7 +255,8 @@ The dispatcher then does one of these for each request:
 | link it | `decide_work link` to workers already doing it (a worker with another request in hand takes only a related one) | `active` |
 | queue it | `decide_work queue`: capacity only, no computer that could take it has room (`needs`: the computers that can, when only some can); refused while one of them has room. On an active request with a worker, `needs` queues a **leg** there instead (w1863, [machines.md](machines.md), "Placing work"): it stays active, the leg shows Queued and goes when a worker starts for it on one of those computers (`drop_leg` drops it) | `queued` (a leg: unchanged) |
 | block it | `decide_work block` with `blocker`: the thing it waits on (another request, a deploy, a machine, a usage limit, a lock, a time, CI); it starts by itself when that clears | `blocked` |
-| ask | `decide_work ask`, at most 3 questions per request: what only a person can answer or decide | `question` |
+| ask | `decide_work ask`, at most 3 questions per request: what only a person can answer or decide; `for` names the person when it is not the requester (one the requester handed it to, another person on the request), and a question already handed on is refused without it (w2867) | `question` |
+| hand the question on | `update_work question_for: "<person>"` from the requester, their orchestrator, the question's holder or a reviewer, when a person says "Ask ben": the request stays the requester's, its question waits on that person (`already_asked: true` when they already have it: no `[needs you]` is sent); the requester's own name takes it back (w2867) | `question` |
 | reject it, or close it | `decide_work reject` / `done`, saying why | `rejected` / `done` |
 
 Where it runs is the dispatcher's choice: `list_sandboxes` starts with each computer's room (BUSY or ROOM n%, live
@@ -571,6 +572,14 @@ had room, which read as "LothDesktop can take more work but the queue isn't movi
    whom, and what is asked: a worker that stopped asking names its question (w1868). `list_work` and the tab show its six
    parts (what it is, who acts and since when, the question whole, its answers or the one step, its stills and clips, what
    follows the answer): "What a waiting card says", below.
+   **A question can be handed to another person** (w2867, lothsahn: "the request list in the dispatcher says it's
+   waiting on input from me. Make sure that the state is reflected correctly"): when the requester says "Ask ben", their
+   orchestrator calls `update_work question_for: "ben"` (with `already_asked: true` if Ben already has it). The question
+   is stored with `for` and `by` (`WorkItem.question`, `questionFor` in `shared/types.ts`): the request reads "Waiting on
+   input on Ben", his `[needs you]` and Waiting tab carry it, his note answers it, and anyone else's note is only
+   recorded, so it stays with him. The undecided re-offer (w2217) skips it, since it is `question`, not `new`, and a
+   `decide_work ask` without `for` is refused while it is handed on. Before w2867 the requester's "Ask ben" note
+   answered the question and reopened the request: the re-offer then re-asked the requester (w2850, 2026-11-02).
 2. **Queued**: capacity ONLY: no free computer, sandbox, editor or agent slot for it. `decide_work queue` is refused
    while a computer that could take it has room (all of them, or those its `needs` names), and a request left queued
    at least 10 minutes while one has room is a bug, flagged loudly: the line says `WRONG` with the computers that have
@@ -2471,7 +2480,7 @@ sends it and keeps it on the request (`WorkItem.needsYou`):
 
 | the wait | sent when | to |
 |---|---|---|
-| the dispatcher's question (`decide_work ask`, or a dead gate's "is it still needed?", `blockerDecide`) | it is asked (`askPerson`), in place of the `[dispatch] … a question` notice | the request's filer |
+| the dispatcher's question (`decide_work ask`, or a dead gate's "is it still needed?", `blockerDecide`) | it is asked (`askPerson`), in place of the `[dispatch] … a question` notice | the request's filer, or the person it was handed to (`question_for`, `decide_work ask for`; w2867) |
 | a worker's `waiting_on_person` | its turn ends (`Agents.onWorkerTurnEnd` → `personWaits`) | the people its `who` names, else the requesters |
 | a worker report whose `wNNN: still open:` line names a person (`personWaitIn`), or that ends asking for a decision while the ledger reads Waiting | its turn ends | the person the line names, else the requesters |
 
