@@ -11,7 +11,7 @@ import type { Duplex } from 'node:stream';
 import { Store } from './store.ts';
 import { QUEUE_HOLD_MS, SessionManager, snapshotOf, type SessionHandle, type SessionSink } from './sessions.ts';
 import { collectResume } from './restart.ts';
-import { MachineManager, RESUME_DELAY_MS, RemoteSession, cutOffMidTurn, daemonBehind, enrolledMachines, issueMachineToken, minutesText, revokeMachineToken } from './machines.ts';
+import { HOST_DIED, HOST_DIED_RESUME_MS, MachineManager, RESUME_DELAY_MS, RemoteSession, cutOffMidTurn, daemonBehind, enrolledMachines, issueMachineToken, minutesText, revokeMachineToken } from './machines.ts';
 import { OLDEST_DAEMON_PROTOCOL, PROTOCOL_VERSION, protocolProblem } from './machineProtocol.ts';
 import { buildOptions } from './launch.ts';
 import { HOST_LOGIN } from './usage.ts';
@@ -1509,4 +1509,90 @@ test('machine: createJoin makes the waiting record and a code for its tailnet de
   assert.throws(() => mm.createJoin({ id: 'mx', limits: {}, by: 'Lothsahn' }), /already has a record .*migrate/);
   assert.throws(() => mm.createJoin({ id: 'nb', portalUrl: 'https://fff.example.ts.net', limits: { maxSandboxes: 9 }, by: 'Lothsahn' }), /maxSandboxes must be a whole number from 1 to 8/);
   assert.equal(store.machines.get('nb'), undefined, 'a refused join makes no record');
+});
+
+/** A FakeAgent whose agent host can die under it, as machine/agentHost.ts HostedSession reports it (w2884). */
+class DyingAgent extends FakeAgent {
+  static all: DyingAgent[] = [];
+  constructor(...a: ConstructorParameters<typeof FakeAgent>) {
+    super(...a);
+    DyingAgent.all.push(this);
+  }
+  /** A resume stays mid-turn too, as the long build it resumes would. */
+  send(text: string, ...rest: [('human' | 'orchestrator' | 'system')?, string?, ImageInput[]?]) {
+    return super.send(text.startsWith('[machine ') ? `long ${text}` : text, ...rest);
+  }
+  /** Its host is gone: stopped with why, its turn mark kept (the portal decides whether to resume it), 'ended'. */
+  die(why = 'its agent host stopped unexpectedly') {
+    this.live = false;
+    Object.assign(this.info, { status: 'stopped', statusDetail: why, pendingPermissions: [] });
+    (this as unknown as { sink: SessionSink }).sink.putSession(this.info);
+    (this as unknown as { events: EventEmitter }).events.emit('ended', this);
+  }
+}
+
+test('w2884: a worker whose agent host died mid-turn (its daemon still connected) is resumed once in its own sandbox, with a note; a second death within the hour is only noted', async (t) => {
+  const { store, sessions, mm, daemon, cleanup } = await setup();
+  t.after(cleanup);
+  HOST_DIED_RESUME_MS.value = 50;
+  t.after(() => (HOST_DIED_RESUME_MS.value = 3000));
+  const reports: string[] = [];
+  const notes: string[] = [];
+  mm.report = (text) => reports.push(text);
+  mm.workerNote = (sid, text) => notes.push(`${sid}: ${text}`);
+  daemon(undefined, DyingAgent);
+  await until('online', () => mm.isOnline('mx') && mm.protocolOf('mx') !== undefined);
+  const s = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'w', permissionMode: 'default' });
+  const users = () => store.readTranscript(s.info.id).filter((e) => e.kind === 'user').map((e) => (e as { text: string }).text);
+  sessions.send(s.info.id, 'long build');
+  await until('mid-turn', () => s.info.status === 'running' && s.live);
+  const agent = DyingAgent.all.find((a) => a.info.id === s.info.id)!;
+
+  // Its systemd scope was ended by the OOM killer (biscuit, 2026-11-02): the daemon says so, its link stays up.
+  agent.die('its agent host stopped unexpectedly (its scope ffw-agent-x.scope: A process of this unit has been killed by the OOM killer.)');
+  await until('stopped', () => s.info.status === 'stopped' && !s.live);
+  assert.ok(mm.isOnline('mx'), 'the daemon is still connected');
+  assert.ok(s.info.heldSince, 'its sandbox is held for it until the resume goes');
+  await until('resumed', () => users().length === 2, 5000);
+  assert.match(users()[1], /^long \[machine mx\] Your agent host \(the process that ran your session\) died at \d\d:\d\dZ while you were mid-turn: its agent host stopped unexpectedly \(its scope ffw-agent-x\.scope: .*OOM killer/);
+  assert.match(users()[1], /resumed you in your own sandbox/);
+  assert.equal(s.info.machineSandbox, 'sb', 'in its own sandbox');
+  assert.equal(notes.length, 1, notes.join('\n'));
+  assert.match(notes[0], new RegExp(`^${s.info.id}: its worker ${s.info.id}'s agent host on mx died mid-turn at .*resumed it in its own sandbox`));
+  assert.ok(reports.some((r) => /mx: resumed .* after its agent host died mid-turn/.test(r)), reports.join('\n'));
+
+  // It dies again within the hour: only noted, not resumed again (no loop on a host that dies at every start).
+  await until('the resume runs', () => s.info.status === 'running' && s.live);
+  DyingAgent.all.filter((a) => a.info.id === s.info.id).at(-1)!.die();
+  await until('stopped again', () => s.info.status === 'stopped' && !s.live).catch((e) => {
+    throw new Error(`${e.message}: status=${s.info.status} live=${s.live} agents=${DyingAgent.all.filter((a) => a.info.id === s.info.id).map((a) => `${a.live}/${a.info.status}`).join(',')}`);
+  });
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(users().length, 2, `not resumed twice: ${JSON.stringify(users())}`);
+  assert.match(notes[1], /died again at .* not resumed again \(w2884\); message it to continue/);
+});
+
+test('w2884: a worker whose host dies between turns is not resumed by the host-death path (its next message starts a new host)', async (t) => {
+  const { store, sessions, mm, daemon, cleanup } = await setup();
+  t.after(cleanup);
+  HOST_DIED_RESUME_MS.value = 50;
+  t.after(() => (HOST_DIED_RESUME_MS.value = 3000));
+  const notes: string[] = [];
+  mm.workerNote = (sid, text) => notes.push(`${sid}: ${text}`);
+  daemon(undefined, DyingAgent);
+  await until('online', () => mm.isOnline('mx') && mm.protocolOf('mx') !== undefined);
+  const s = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'w', permissionMode: 'default' });
+  const users = () => store.readTranscript(s.info.id).filter((e) => e.kind === 'user').map((e) => (e as { text: string }).text);
+  sessions.send(s.info.id, 'quick');
+  await until('turn done', () => s.info.status === 'idle' && s.live);
+  DyingAgent.all.find((a) => a.info.id === s.info.id)!.die();
+  await until('stopped', () => s.info.status === 'stopped' && !s.live);
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(users().length, 1, 'between turns: its next message (or check-in) starts a new host');
+  assert.deepEqual(notes, []);
+});
+
+test('w2884: HOST_DIED names every way a daemon reports a dead agent host, and nothing else', () => {
+  for (const w of ['its agent host stopped unexpectedly', 'its agent host stopped unexpectedly (its scope u: killed by the OOM killer)', 'its agent host is gone (pid 4 is another program now)', 'its agent host gave no heartbeat for 10 min while its process ran: stopped']) assert.ok(HOST_DIED.test(w), w);
+  for (const w of ['its agent host did not start (see x)', 'stopped by stop_agent', 'mx is offline']) assert.ok(!HOST_DIED.test(w), w);
 });

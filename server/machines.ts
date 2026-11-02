@@ -85,6 +85,12 @@ const RESUME_WITHIN_MS = 6 * 3_600_000;
  * 4 to 13 hours after each crash, with workers stranded on it, and nobody heard). Exported for tests.
  */
 export const OFFLINE_ALERT_MS = { value: 30 * 60_000 };
+/** A daemon's words for a worker's agent host that died under it (machine/agentHost.ts HostedSession, w2884). Exported for tests. */
+export const HOST_DIED = /^its agent host (stopped unexpectedly|is gone|gave no heartbeat)/;
+/** How long after a host's death its worker's resume goes out (the daemon's teardown of the old host first); tests shorten it. */
+export const HOST_DIED_RESUME_MS = { value: 3000 };
+/** A worker whose host dies again within this long of its automatic resume is not resumed again. */
+const HOST_DIED_AGAIN_MS = 60 * 60_000;
 /** How long after a daemon's hello the resume messages go out. */
 export const RESUME_DELAY_MS = { value: 3000 };
 export { MAIN_CLONE_NO_AGENTS };
@@ -664,6 +670,55 @@ export class MachineManager {
       }
     }
     if (resumed.length) this.report?.(`[machines] ${machineId} is back after its daemon ${c.why}; resumed ${resumed.length} agent(s) that were mid-turn: ${resumed.join(', ')}.`);
+  }
+
+  // ---------------------------------------------------------------- agents whose host died under them (w2884)
+
+  /** Workers resumed after their agent host died, and when: one resumed within HOST_DIED_AGAIN_MS is not resumed again. */
+  private readonly hostDiedResumed = new Map<string, number>();
+  /** A note on the open requests a worker holds (wired by Agents to the ledger, w2884). */
+  workerNote?: (sessionId: string, text: string) => void;
+
+  /**
+   * Its daemon, still connected, reports a worker's agent host dead mid-turn (machine/agentHost.ts: "its agent host
+   * stopped unexpectedly", "is gone", "gave no heartbeat"): nothing else resumes it (resumeCutOff is for a dropped link,
+   * and its turn's end never comes), so w2879's worker sat Stalled 40 min and w2872's until a person messaged it. It is
+   * resumed once, in its own sandbox (held meanwhile), with a note on its requests; a second death within the hour is
+   * only noted, so a host that dies at every start does not loop.
+   */
+  private hostDied(machineId: string, s: RemoteSession, now = Date.now()) {
+    const i = s.info;
+    if (i.status !== 'stopped' || !HOST_DIED.test(i.statusDetail ?? '') || !cutOffMidTurn(i, true, now)) return;
+    const why = i.statusDetail!;
+    const at = new Date(now).toISOString().slice(11, 16) + 'Z';
+    const last = this.hostDiedResumed.get(i.id);
+    if (last !== undefined && now - last < HOST_DIED_AGAIN_MS) {
+      const text = `its worker ${i.id}'s agent host on ${machineId} died again at ${at} (${why}), within an hour of the last automatic resume: not resumed again (w2884); message it to continue`;
+      this.workerNote?.(i.id, text);
+      this.report?.(`[machines] ${text}.`);
+      return;
+    }
+    this.hostDiedResumed.set(i.id, now);
+    // Its sandbox stays its while the resume is on its way (w613's hold); the resume's send ends the hold.
+    if (i.machineSandbox && !i.heldSince) {
+      i.heldSince = new Date(now).toISOString();
+      this.store.putSession(i);
+    }
+    const timer = setTimeout(() => {
+      if (this.handle(i.id) !== s || s.liveFlag || i.stoppedOnPurpose || !this.isOnline(machineId)) return;
+      try {
+        this.sessions.send(
+          i.id,
+          `[machine ${machineId}] Your agent host (the process that ran your session) died at ${at} while you were mid-turn: ${why}. FF Factory resumed you in your own sandbox (w2884). Your folder is as you left it. Check git status for half-written edits; a build, test run or player you started may have ended with it (check its log and ff-leftovers list); re-pin your Unity instance if you use one; then continue where you left off.`,
+          'system',
+        );
+        this.workerNote?.(i.id, `its worker ${i.id}'s agent host on ${machineId} died mid-turn at ${at} (${why}); FF Factory resumed it in its own sandbox (w2884)`);
+        this.report?.(`[machines] ${machineId}: resumed ${i.id} after its agent host died mid-turn at ${at}: ${why}.`);
+      } catch (e) {
+        this.workerNote?.(i.id, `its worker ${i.id}'s agent host on ${machineId} died mid-turn at ${at} (${why}); resuming it failed: ${(e as Error).message}`);
+      }
+    }, HOST_DIED_RESUME_MS.value);
+    timer.unref?.();
   }
 
   /** A machine's clean-up settings (config machines.cleanup; wired by index.ts). */
@@ -2236,6 +2291,7 @@ export class MachineManager {
         // first start, which would put a restart on another person's tokens back on the first account (w1076).
         // Its check-in and queued message are the portal's waker's (Agents.syncWaiting): the daemon's copy is the one sent with its
         // first send, so a check-in long past came back on every report and held an idle Live view's editor open (w2255).
+        const wasLive = s.liveFlag;
         const { id: _i, kind: _k, machineId: _m, standingId: _s, sandboxId: _b, title: _t, createdAt: _c, label: _l, labelAt: _la, activeTool: _at, stoppedOnPurpose: _sp, waitingOn: _wo, hostFailure: _hf, machineSandbox: _ms, placeReleased: _pr, movedFrom: _mf, liveLost: _ll, releaseDue: _rd, savedWork: _sw, ranAs: _ra, ranFor: _rf, ranOn: _ro, wakeAt: _wa, wakeNote: _wn, queuedSend: _qs, queuedOn: _qo, ...run } = msg.info;
         // The portal sees the daemon's events as they come (Store.noteActivity): never step activity back.
         if (run.lastActivityAt && s.info.lastActivityAt && run.lastActivityAt < s.info.lastActivityAt) run.lastActivityAt = s.info.lastActivityAt;
@@ -2251,6 +2307,7 @@ export class MachineManager {
         if (msg.live) s.seenLive = true;
         if (msg.live) delete s.info.heldSince;
         this.store.putSession(s.info);
+        if (wasLive && !msg.live && s instanceof RemoteSession) this.hostDied(id, s);
         return;
       }
       case 'event':
