@@ -1,0 +1,1 @@
+- A worker's report counts as handing up follow-up requests only when the worker itself says, outside quotation marks, that it could not file them ("I couldn't file the five build requests"). A report that describes the mechanism, quotes another report or says "someone must file" no longer holds its DONE. Workers hand follow-ups up with `hand_up_requests` (w2977).
