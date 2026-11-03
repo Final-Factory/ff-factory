@@ -331,7 +331,33 @@ export class TimedRuns {
     const bound = runBoundMinutes(o.settings, o.variants.length);
     const mb = (n: number) => `${(n / 1024 ** 2).toFixed(0)} MB`;
     const where = (r.state as TimedRunState) === 'sent' ? `handed to ${r.machine}` : `queued for ${r.machine}, which is ${this.d.isOnline(r.machine) ? 'connected but not on a daemon that runs timed runs yet (it is updated by itself once idle)' : 'offline'}: it starts when ${r.machine} is back`;
-    return `Timed run ${r.id} ${where}: ${o.variants.map((v) => v.name).join(' vs ')}, ${legs} legs of ${o.settings.settleS} s settle + ${o.settings.sampleS} s sample on ${o.settings.res}, under ${r.machine}'s exclusive bench ticket. Sent ${mb(r.sentBytes)} of ${mb(r.totalBytes ?? 0)} (the rest was on the portal from earlier runs). FF Factory messages you with the table and the logs (timed-${r.id}.tar.gz in your Inbox: probe_ab_win.sh's layout, so scripts/bench/probe_table.py and ab_stop.py read it) when it ends; its bound is about ${bound} min. End your turn now with a wake_me check-in of ${bound + 15} minutes as the fallback; do not wait in the foreground.`;
+    const text = `Timed run ${r.id} ${where}: ${o.variants.map((v) => v.name).join(' vs ')}, ${legs} legs of ${o.settings.settleS} s settle + ${o.settings.sampleS} s sample on ${o.settings.res}, under ${r.machine}'s exclusive bench ticket. Sent ${mb(r.sentBytes)} of ${mb(r.totalBytes ?? 0)} (the rest was on the portal from earlier runs). FF Factory messages you with the table and the logs (timed-${r.id}.tar.gz in your Inbox: probe_ab_win.sh's layout, so scripts/bench/probe_table.py and ab_stop.py read it) when it ends; its bound is about ${bound} min. End your turn now with a wake_me check-in of ${bound + 15} minutes as the fallback; do not wait in the foreground.`;
+    // w2928: its daemon answered the worker's call before the pieces were all sent, so this answer goes as a message
+    if (a.late === true) {
+      this.d.log?.(`timed run ${r.id}: every piece arrived from ${r.from} after its call answered; ${where}`);
+      this.tell(r, `[timed run ${r.id}] its pieces have all arrived now (your timed_run call answered before they had). ${text.replace(/ End your turn now with a wake_me[^]*$/, ` Its bound is about ${bound} min from now: move your wake_me check-in to ${bound + 15} minutes if it is sooner.`)}`);
+    }
+    return text;
+  }
+
+  /**
+   * w2928: the worker's daemon could not send a run's pieces. With `tell` (the agent's call answered before; its daemon
+   * went on sending in the background) the run fails and its worker is told why; without it the agent already has the
+   * error, so the run is only forgotten. Before this a run whose sending failed sat in "uploading" until tick() gave up.
+   */
+  abort(session: string, a: Record<string, unknown>): string {
+    const r = this.runs.get(String(a.runId ?? ''));
+    if (!r || r.session !== session) throw new Error('no such timed run of yours');
+    if (r.state !== 'uploading') return `timed run ${r.id} is ${r.state} already`;
+    r.error = `its pieces could not be sent from ${r.from}: ${String(a.error ?? 'no reason given').slice(0, 300)}; call timed_run again to redo it`;
+    this.d.log?.(`timed run ${r.id}: ${r.error}`);
+    delete r.uploads;
+    if (a.tell === true) void this.finish(r, 'failed');
+    else {
+      delete r.order;
+      this.set(r, 'failed');
+    }
+    return `timed run ${r.id} failed: ${r.error}`;
   }
 
   private set(r: TimedRunRecord, state: TimedRunState, line?: string) {

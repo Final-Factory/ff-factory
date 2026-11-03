@@ -2284,7 +2284,7 @@ export class Daemon {
       const folder = this.entries.get(sessionId)?.spec?.cwd;
       if (!folder) throw new Error('this session has no working folder on this machine yet');
       const temp = sessionTempDir(agentTempRoot(this.cfg.tempDir), sessionId);
-      return timedRunFromMachine({ portalUrl: this.cfg.portalUrl, token: this.cfg.token, roots: [folder, temp, ...(this.cfg.root ? [this.cfg.root] : [])], saveRoots: [folder, temp], cwd: folder, tempDir: temp, args, rpc: (a) => call('timed_run', 900_000)(a), log: (line) => log(line) });
+      return timedRunFromMachine({ portalUrl: this.cfg.portalUrl, token: this.cfg.token, roots: [folder, temp, ...(this.cfg.root ? [this.cfg.root] : [])], saveRoots: [folder, temp], cwd: folder, tempDir: temp, args, key: sessionId, rpc: (a) => call('timed_run', 900_000)(a), log: (line) => log(line) });
     };
     // publish_attachment (docs/attachments.md, "Agents' files"): the portal opens an upload for this machine; the file
     // goes from here over HTTP with this machine's token and comes back as an attachment id.

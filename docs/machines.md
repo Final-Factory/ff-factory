@@ -1139,6 +1139,18 @@ and w1891 waited behind it there, and w1789 waited on LothDesktop behind shared 
   run its daemon was refused its pieces for anyway is sent again once while the portal still has them, and a second
   refusal fails it with "call timed_run again to redo it". A message that moves with its request (`movedText` in
   `Agents.roomMove`) names its attachments by id, since they were copied into the old sandbox's Inbox only.
+- **A slow send answers in time** (w2928; found by lothsahn's 4-hourly unjam rule). The agent host waits 20 min for its
+  daemon's answer (`machine/agentHost.ts RPC_ANSWER_MS`), and `timed_run` used to hold the call until every piece was sent
+  and the run handed over. On 2026-11-03 m3's four builds for LothDesktop took 40 min 47 s (tr_affa494c34: planned
+  03:17:03Z, its bench ticket taken on LothDesktop 03:57:50Z, measured from the journal and the lock): the worker's call
+  failed at 20 min while m3 went on sending, the worker called again (tr_2b5e6e6230, planned 03:37:08Z, 20 min 5 s later,
+  all 40 pieces again beside the first, since a run's pieces count as on the portal only at its `go`), then gave up on
+  both and filed w2927 for a worker-run leg, while tr_affa494c34 took LothDesktop's exclusive ticket for a run nobody
+  waited for. Now the daemon answers within 10 min (`ANSWER_WITHIN_MS`) with the run id and how much is sent, and goes on
+  sending in the background; `go` with `late` makes the portal message the worker when the run is handed over, and a send
+  that fails says `abort` (the run fails at once, and its worker is told why, instead of sitting in "uploading" until
+  `tick` gives up). A second `timed_run` from the same session while one still sends is refused, naming the first.
+  Test: `server/w2928TimedSlowSend.test.ts`.
 - **The guard**: the verdict rides the bench priorities to the machine (`BenchPriority.timed`, and the machine's
   `timed_ask` mark in priorities.json, `machine/benchLock.ts` `readTimedAsk`). On a big computer, `checkTimedAsk`
   refuses `bench_queue.py timed`, `bench_queue.py run --mode exclusive`, `unity-bridge.py --timed`, `bench_lock --timing`,
