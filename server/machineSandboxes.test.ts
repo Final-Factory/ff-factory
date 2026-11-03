@@ -550,6 +550,40 @@ test('machine sandboxes: editors are limited by max_unity; a switch waits for th
   assert.equal(running.size, 0, 'an idle one is stopped');
 });
 
+test("w2988: a sandbox handed to a worker's branch still holding another worker's untracked folder: both CI-wait saves commit only the worker's own files, the folder stays untracked and never reaches the branch, and the worker is told", async (t) => {
+  const r = repos();
+  t.after(r.cleanup);
+  const { p } = pool(r);
+  await p.create({ id: 'slot1', branch: 'regress/fog-lock', base: 'origin/master', seedLibrary: false, startUnity: false });
+  await ready(p, 'slot1');
+  const sb = p.list().find((s) => s.id === 'slot1')!.path;
+  // m5/slot1 on 2026-11-03: worker 3be01245's `ffu-bake asteroid --preview` output, and its editor's .meta files.
+  const theirs = ['Assets/_RM1Preview.meta', 'Assets/_RM1Preview/asteroid.obj', 'Assets/_RM1Preview/asteroid.obj.meta', 'Assets/_RM1Preview/asteroid_albedo.tga'];
+  fs.mkdirSync(path.join(sb, 'Assets', '_RM1Preview'), { recursive: true });
+  for (const f of theirs) fs.writeFileSync(path.join(sb, f), 'not w2979s');
+  const hand = await p.switch('slot1', 'sandbox/slot1-w2979', 'origin/master');
+  assert.match(hand.notes.join('; '), /4 untracked file\(s\) were already here from before, not yours.*Assets\/_RM1Preview/, 'the worker placed there is told');
+
+  fs.writeFileSync(path.join(sb, 'Mine.cs'), 'w2979');
+  fs.writeFileSync(path.join(sb, 'README.md'), 'changed by w2979');
+  const first = await p.saveWork('slot1', 'sandbox/slot1-w2979', 'FF Factory: saved 5589ceba (w656)');
+  assert.equal(first.files, 2, 'its new file and its change, nothing of the folder');
+  assert.match(first.notes.join('; '), /left 4 untracked file\(s\) uncommitted.*not this worker's \(w2988\)/);
+  const onBranch = r.git(r.origin, 'ls-tree', '-r', '--name-only', 'sandbox/slot1-w2979');
+  assert.match(onBranch, /Mine\.cs/);
+  assert.doesNotMatch(onBranch, /_RM1Preview/, 'never pushed to the PR branch');
+  for (const f of theirs) assert.ok(fs.existsSync(path.join(sb, f)), `${f} is left where it was`);
+  assert.deepEqual(r.git(sb, 'status', '--porcelain', '-uall', '--', 'Assets').split('\n').sort(), theirs.map((f) => `?? ${f}`).sort(), 'still untracked');
+
+  // Rewritten in the sandbox meanwhile (the editor re-imported it at 10:41), released again: the PR head does not move.
+  const head = r.git(r.origin, 'rev-parse', 'sandbox/slot1-w2979');
+  fs.writeFileSync(path.join(sb, theirs[1]), 'rewritten');
+  const second = await p.saveWork('slot1', 'sandbox/slot1-w2979', 'FF Factory: saved 5589ceba (w656)');
+  assert.equal(second.sha, undefined);
+  assert.match(second.notes.join('; '), /nothing else to save/);
+  assert.equal(r.git(r.origin, 'rev-parse', 'sandbox/slot1-w2979'), head, "the PR's head stays, so its merge on green holds");
+});
+
 test('machine sandboxes: the default disk guard (w628) starts an editor at 25 GB free; a full Library copy needs the Library', async (t) => {
   const r = repos();
   t.after(r.cleanup);

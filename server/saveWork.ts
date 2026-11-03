@@ -15,6 +15,8 @@ import { noiseFiles } from './editorNoise.ts';
  * output, captures and recordings belong in the temp folder, not on a branch). Build output in the sandbox's own build
  * folders (SAVE_SKIPS) is neither saved nor counted: it stays where it is, uncommitted, and the release sweep clears it.
  * Materials the Unity editor only re-serialized in play mode (editorNoise.ts, w2782) are restored to HEAD, not committed.
+ * Untracked files that were already there when the sandbox was switched to the branch (recordForeign, w2988) are not the
+ * worker's: they stay untracked, and the notes name them.
  */
 
 /**
@@ -78,9 +80,47 @@ async function must(dir: string, args: string[], what: string, timeoutMs?: numbe
 
 const mb = (n: number) => `${(n / 1024 / 1024).toFixed(n < 10 * 1024 * 1024 ? 1 : 0)} MB`;
 
-/** Why the untracked files of `dir` are too many or too big to commit, or undefined. Stops reading at the first excess. */
-export async function untrackedProblem(dir: string, limits = SAVE_LIMITS): Promise<string | undefined> {
-  const list = (await must(dir, ['ls-files', '--others', '--exclude-standard', '-z', '--', '.', ...(await skipSpecs(dir))], 'listing untracked files')).split('\0').filter(Boolean);
+/** The untracked files of `dir` a save would take (ignored files and the build folders left out), paths from its root. */
+async function untrackedFiles(dir: string): Promise<string[]> {
+  return (await must(dir, ['ls-files', '--others', '--exclude-standard', '-z', '--', '.', ...(await skipSpecs(dir))], 'listing untracked files')).split('\0').filter(Boolean);
+}
+
+/**
+ * Where a worktree keeps the untracked files that were there before its branch's worker (w2988): its own git dir, so no
+ * other worktree reads it and git never shows it. m5/slot1 was handed to w2979's branch on 2026-11-03 at 17:12Z still
+ * holding Assets/_RM1Preview (9 files, 25 MB: another worker's `ffu-bake asteroid --preview` output from 12:20Z), and both
+ * CI-wait saves of w2979's worker 5589ceba committed and pushed it (a9fc3dfa54, a0892916e7): the first made its PR
+ * conflict, the second moved its head, so the merge on green failed with "Head branch was modified".
+ */
+async function foreignPath(dir: string): Promise<string> {
+  return path.join((await must(dir, ['rev-parse', '--absolute-git-dir'], 'finding the git dir')).trim(), 'ff-foreign-untracked.json');
+}
+
+/** Record the untracked files in `dir` as not `branch`'s worker's, just after the sandbox was switched to it; returns them. */
+export async function recordForeign(dir: string, branch: string): Promise<string[]> {
+  const files = await untrackedFiles(dir);
+  const at = await foreignPath(dir);
+  if (files.length) fs.writeFileSync(at, JSON.stringify({ branch, files }));
+  else fs.rmSync(at, { force: true });
+  return files;
+}
+
+/** The untracked files recorded for `branch` by recordForeign; none for another branch or no record. */
+export async function foreignFiles(dir: string, branch: string): Promise<Set<string>> {
+  try {
+    const rec = JSON.parse(fs.readFileSync(await foreignPath(dir), 'utf8')) as { branch?: string; files?: string[] };
+    return new Set(rec.branch === branch && Array.isArray(rec.files) ? rec.files : []);
+  } catch {
+    return new Set();
+  }
+}
+
+/** A few of `files` by name, for a note. */
+export const someFiles = (files: string[], n = 5) => `${files.slice(0, n).join(', ')}${files.length > n ? ` and ${files.length - n} more` : ''}`;
+
+/** Why the untracked files of `dir` (but `skip`) are too many or too big to commit, or undefined. Stops at the first excess. */
+export async function untrackedProblem(dir: string, limits = SAVE_LIMITS, skip: Set<string> = new Set()): Promise<string | undefined> {
+  const list = (await untrackedFiles(dir)).filter((f) => !skip.has(f));
   if (list.length > limits.files) return `${list.length} untracked files there, more than the ${limits.files} a save commits (build output, captures or recordings belong in the temp folder): commit what matters, delete or ignore the rest`;
   let total = 0;
   for (const f of list) {
@@ -114,13 +154,20 @@ export async function saveWork(opts: { dir: string; branch: string; message: str
   if (st.branch !== branch) throw new Error(`the sandbox is on ${st.branch}, not the worker's branch ${branch}: nothing was saved`);
   if (SHARED.test(branch)) throw new Error(`its work is on ${branch}, a shared branch: committing there is a decision for a person`);
   if (!st.dirty && !st.untracked) return { files: 0, pushed: false, notes: ['nothing to save'] };
-  const problem = st.untracked ? await untrackedProblem(dir, opts.limits) : undefined;
+  const foreign = st.untracked ? await foreignFiles(dir, branch) : new Set<string>();
+  const problem = st.untracked ? await untrackedProblem(dir, opts.limits, foreign) : undefined;
   if (problem) throw new Error(problem);
   const restored = st.dirty ? await restoreEditorNoise(dir) : [];
   const noise = restored.length ? [`restored ${restored.length} material(s) the Unity editor only re-serialized to HEAD instead of saving them (w2782): ${restored.join(', ')}`] : [];
-  await must(dir, ['add', '-A', '--', '.', ...(await skipSpecs(dir))], 'git add');
+  const left = foreign.size ? (await untrackedFiles(dir)).filter((f) => foreign.has(f)) : [];
+  if (left.length) noise.push(`left ${left.length} untracked file(s) uncommitted that were already in the sandbox when it was switched to ${branch}, so not this worker's (w2988): ${someFiles(left)}`);
+  const specs = ['.', ...(await skipSpecs(dir)), ...left.map((f) => `:(exclude,literal)${f}`)];
+  // From a file: another worker's leftovers can be hundreds of paths, past Windows' command line.
+  const specFile = path.join(path.dirname(await foreignPath(dir)), 'ff-save-pathspec');
+  fs.writeFileSync(specFile, specs.join('\0'));
+  await must(dir, ['add', '-A', `--pathspec-from-file=${specFile}`, '--pathspec-file-nul'], 'git add');
   const files = (await must(dir, ['diff', '--cached', '--name-only', '-z'], 'listing what is saved')).split('\0').filter(Boolean).length;
-  if (!files) return { files: 0, pushed: false, notes: [...noise, restored.length ? 'nothing else to save' : `nothing to save (build output in ${SAVE_SKIPS.join(' or ')} stays, uncommitted)`] };
+  if (!files) return { files: 0, pushed: false, notes: [...noise, restored.length || left.length ? 'nothing else to save' : `nothing to save (build output in ${SAVE_SKIPS.join(' or ')} stays, uncommitted)`] };
   await must(dir, ['commit', '-q', '--no-verify', '-m', opts.message], 'git commit');
   const sha = (await must(dir, ['rev-parse', '--short', 'HEAD'], 'reading the commit')).trim();
   const notes = [...noise, `committed ${files} file(s) on ${branch} as ${sha}`];
