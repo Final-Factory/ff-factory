@@ -60,7 +60,7 @@ import {
   type PrRecord,
 } from './ledgerRules.ts';
 import type { LedgerCleanupState, Requester, SessionInfo, WorkErrorHandled, WorkItem, WorkPr } from '../shared/types.ts';
-import { holdsOf, servedBy } from '../shared/workState.ts';
+import { handUpsPending, holdsOf, servedBy } from '../shared/workState.ts';
 import { BLOCKER_STUCK_MS } from '../shared/blockers.ts';
 import { holdsItsPlace } from '../shared/agentState.ts';
 import { appVersion } from './version.ts';
@@ -741,6 +741,8 @@ export class LedgerSweep {
   }
 
   private closeAsDone(w: WorkItem, how: { how: 'prs' | 'report' | 'deploy'; pr?: number; sha?: string; mergedAt?: string; text: string }, acts: Action[]) {
+    // w2969: follow-up requests its worker handed up are not filed yet: it closes once they are, or its person drops them.
+    if (handUpsPending(w)) return;
     const at = new Date(this.now()).toISOString();
     this.d.orchestrators.ledgerEdit(w.id, `closed automatically by the ledger cleanup: ${how.text}`, (x) => {
       x.status = 'done';
@@ -976,6 +978,9 @@ export class LedgerSweep {
   private followUpStep(w: WorkItem, workers: readonly SessionInfo[], acts: Action[]): boolean {
     // A blocked request waits on its blocker (w643): the blocker watch unblocks, stalls or asks, not "Is it done?".
     if (!isOpen(w) || w.question || w.flag || w.status === 'blocked') return false;
+    // w2969: what is left is filing the follow-ups its worker handed up, which no worker can do: its person's orchestrator
+    // is reminded once, instead of asking the worker "Is it done?" (w2194 closed on that answer with five stages unfiled).
+    if (handUpsPending(w)) return this.d.orchestrators.handUpReminder(w);
     const prs = w.prs ?? [];
     if (!prs.some((p) => p.state === 'merged') || prs.some((p) => p.state === 'open')) return false;
     const reason = partOfReason(w.id, prs) ?? afterMergeReason(w, workers.map((s) => s.lastResult ?? '')) ?? notDoneReason(w, workers);

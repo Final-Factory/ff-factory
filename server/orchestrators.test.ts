@@ -2615,6 +2615,70 @@ test('w2870: a worker waiting on its orchestrator for a step workers have no too
   await until('a new wait goes', () => heard(loth.id, '[orchestrator step]').length === 2);
 });
 
+test('w2969: the w2194 dragon case: a worker that could not file the approved stages hands them to its person’s orchestrator, and its DONE closes the request only once they are filed', async (t) => {
+  const { store, machines, sessions, dispatcher, chat, call, heard } = await setupOnMachine(t);
+  const ben = chat(BEN).info;
+  await call(ben, 'request_work', { title: 'Ancient Dragon design', brief: 'Design the Ancient Dragon boss and write the build briefs.' });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Design it', title: 'w1: Ancient Dragon design', work_id: 'w1' });
+  assert.equal(started.isError, false, started.text);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const m = store.machines.get('pc')!;
+  const info = store.sessions.get(id)!;
+  await until('its first turn', () => info.status === 'idle');
+  const handle = sessions.get(id);
+  // The worker has the tool and is told to use it; it has no request_work.
+  const spec = machines.hooks!.specFor(info, m);
+  assert.ok(spec.mcp?.tools.some((x) => x.name === 'hand_up_requests'), 'a worker has hand_up_requests');
+  assert.ok(!spec.mcp?.tools.some((x) => (x.name as string) === 'request_work'), 'a worker has no request_work');
+  assert.match(spec.append, /You cannot file a request\. Briefs for new requests .* go to `mcp__machine__hand_up_requests`/);
+  // Ben approves on 2026-10-28, in his words; then the worker's 20:27 report: the briefs written, "couldn't file", and DONE.
+  await call(ben, 'update_work', { id: 'w1', note: 'Build it in the five stages as designed, numbers tuned in stage 5' });
+  sessions.events.emit('turnEnd', handle, "PR #2774 merged: the design and the five build briefs are in specs/w2194-ancient-dragon/build-requests.md. I couldn't file the five build requests myself, because none of my tools can create a request.\n\nDONE: w1\nLearned: nothing new");
+  await until('Ben’s orchestrator hears it', () => heard(ben.id, '[follow-ups to file]').length === 1);
+  const msg = heard(ben.id, '[follow-ups to file]')[0].text;
+  assert.match(msg, new RegExp(`^\\[follow-ups to file\\] w1 "Ancient Dragon design"\\nIts worker ${id} wrote 5 follow-up requests to file`));
+  assert.match(msg, /Ben's newest note on w1 \(.*\): "Build it in the five stages as designed, numbers tuned in stage 5"/);
+  assert.match(msg, /file each now with request_work, related_ids \["w1"\]/);
+  await new Promise((r) => setTimeout(r, 200));
+  const w1 = store.work.get('w1')!;
+  assert.notEqual(w1.status, 'done', 'its DONE does not close it while the stages are unfiled');
+  assert.ok(w1.done?.[id], 'its DONE is kept');
+  assert.deepEqual({ count: w1.handedUp?.count, to: w1.handedUp?.to, filed: w1.handedUp?.filed }, { count: 5, to: ['ben'], filed: [] });
+  // The same report again sends nothing more.
+  sessions.events.emit('turnEnd', handle, "I couldn't file the five build requests myself.\n\nDONE: w1\nLearned: nothing new");
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(heard(ben.id, '[follow-ups to file]').length, 1, 'one message per hand-up');
+
+  // Ben's orchestrator files the five stages, related to w1: the last one closes w1 on its worker's DONE.
+  for (let n = 1; n <= 5; n++) {
+    const filed = await call(ben, 'request_work', { title: `Ancient Dragon stage ${n}`, brief: `Stage ${n} of specs/w2194-ancient-dragon/build-requests.md, as it stands.`, related_ids: ['w1'] });
+    assert.equal(filed.isError, false, filed.text);
+    if (n < 5) assert.notEqual(store.work.get('w1')!.status, 'done', `still open after ${n}`);
+  }
+  await until('w1 closes', () => store.work.get('w1')!.status === 'done');
+  assert.equal(store.work.get('w1')!.handedUp?.filed.length, 5);
+  assert.ok(store.work.get('w1')!.log.some((l) => l.includes('its follow-up requests are filed (w2969)')));
+
+  // The tool path: briefs handed up with hand_up_requests; not wanted, their person closes the request by hand.
+  const f2 = await call(ben, 'request_work', { title: 'Boss music design', brief: 'Design the boss music.' });
+  const id2 = /Filed (w\d+)/.exec(f2.text)![1];
+  const s2 = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Design it', title: `${id2}: Boss music`, work_id: id2, extra_agent: true });
+  assert.equal(s2.isError, false, s2.text);
+  const wid = /Started agent (\w+)/.exec(s2.text)![1];
+  const info2 = store.sessions.get(wid)!;
+  await until('its first turn', () => info2.status === 'idle');
+  const said = await machines.hooks!.handlersFor(info2, m).hand_up_requests!({ items: [{ title: 'Boss music stage 1', brief: 'Compose the intro.' }, { title: 'Boss music stage 2', brief: 'Compose the loop.' }] });
+  assert.match(String(said), new RegExp(`^Handed up 2 follow-up requests for ${id2} to Ben's orchestrator`));
+  await until('Ben’s orchestrator hears the briefs', () => heard(ben.id, '[follow-ups to file]').length === 2);
+  assert.match(heard(ben.id, '[follow-ups to file]')[1].text, /1\. Boss music stage 1\nCompose the intro\.\n\n2\. Boss music stage 2\nCompose the loop\./);
+  sessions.events.emit('turnEnd', sessions.get(wid), `Design done.\n\nDONE: ${id2}\nLearned: nothing new`);
+  await new Promise((r) => setTimeout(r, 200));
+  assert.notEqual(store.work.get(id2)!.status, 'done');
+  const closed = await call(ben, 'update_work', { id: id2, close: 'done', note: 'Not this month.' });
+  assert.equal(closed.isError, false, closed.text);
+  assert.equal(store.work.get(id2)!.status, 'done');
+});
+
 test('w1378: a worker waiting on a person reaches that person’s orchestrator once, as [needs you] with the question in full; the answer in chat resumes the worker', async (t) => {
   const { store, machines, sessions, agents, dispatcher, chat, call, heard } = await setupOnMachine(t);
   const ben = chat(BEN).info;
