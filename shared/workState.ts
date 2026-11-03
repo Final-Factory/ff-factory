@@ -434,6 +434,35 @@ export function noTimedWaitOf(line: string, noTimed: Readonly<Record<string, str
   return Object.keys(noTimed).find((id) => new RegExp(`\\b${id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(rest));
 }
 
+/**
+ * w2956: a still-open line that hands the dispatcher legs to start: "the dispatcher starts the ten rows above" (w2895's
+ * planning worker 2d1ac9f7 at 05:14 UTC 2026-11-03; nothing started until a person's note at 11:57), "waiting on the
+ * dispatcher to start rows M2.3 and M2.6", "for the dispatcher to open one leg per row". A [worker update] reaches only
+ * the requester's orchestrators, so without this the dispatcher never had a turn for it (Orchestrators.dispatcherLegs).
+ */
+const DISPATCHER_STARTS =
+  /\b(?:the |a |your )?dispatcher(?: (?:must|needs to|has to|should|will|can|to|then|now|first))? (?:starts?|opens?|launch(?:es)?|places?|spawns?|hands? out|fans? out|kicks? off)\b|\b(?:waiting|waits|wait) (?:for|on) (?:the )?dispatcher to (?:start|open|launch|place|spawn|hand out|fan out|kick off)\b|\b(?:start(?:ed)?|open(?:ed)?|launch(?:ed)?) by the dispatcher\b/i;
+export const dispatcherAskIn = (line: string | undefined) => !!line && DISPATCHER_STARTS.test(line);
+
+/**
+ * w2956: a request's standing target of legs running at once, as its people wrote it: "Keep at least 8 to 10 rows running
+ * at once" (Ben on w2895, 2026-11-02 23:26), "keep 6 workers going". The newest note that says one wins, else the brief.
+ * `min` is what the ledger holds it to; undefined when nothing asks for one (an "aim for 6–8" is no standing ask).
+ */
+const KEEP_RUNNING =
+  /\bkeep(?:ing)? (?:at least |about |around )?(\d{1,2})(?:\s*(?:to|-|–|or)\s*(\d{1,2}))? (?:\w+ ){0,2}?(?:rows?|workers?|legs?|agents?|sessions?)? ?(?:running|going|busy|in flight|working|active)\b/i;
+export function standingTargetOf(w: Pick<WorkItem, 'brief' | 'notes'>): { min: number; max: number; words: string } | undefined {
+  for (const text of [...(w.notes ?? []).map((n) => n.text).reverse(), w.brief]) {
+    const m = KEEP_RUNNING.exec(text ?? '');
+    if (!m) continue;
+    const a = Number(m[1]);
+    const b = m[2] ? Number(m[2]) : a;
+    if (!(a > 0)) continue;
+    return { min: Math.min(a, b), max: Math.max(a, b), words: m[0] };
+  }
+  return undefined;
+}
+
 /** "waiting on a Windows or Linux pair worker", "waits for another worker": a worker only the dispatcher can start (w1944). */
 const WORKER_WAIT = /\b(?:waiting|waits|wait) (?:for|on) (?:a|an|the|another|its|my)\b[^;.]{0,60}?\bworker\b/i;
 

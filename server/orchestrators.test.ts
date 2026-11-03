@@ -2529,6 +2529,58 @@ test('w691: a worker that needs a person declares it (waiting_on_person) and its
   await until('the next turn', () => info.waitingOn === undefined);
 });
 
+test('w2956: the w2895 stall: a planning worker that hands the dispatcher its rows reaches the dispatcher, and a request under its standing "keep N running" is named to it', async (t) => {
+  const { store, sessions, agents, dispatcher, chat, call, heard } = await setupOnMachine(t);
+  (agents.orchestrators as unknown as { d: { fanOutSettleMs: number } }).d.fanOutSettleMs = 50;
+  const ben = chat(BEN).info;
+  await call(ben, 'request_work', { title: 'FFU engine: fan out every unblocked PLAN.md row', brief: 'One worker per row. Aim for 6–8 rows at once.' });
+  // Ben's standing ask on w2895, 2026-11-02 23:26 UTC, as a note.
+  const w = store.work.get('w1')!;
+  w.notes = [{ at: '2026-11-02T23:26:00Z', by: 'ben', text: 'Keep at least 8 to 10 rows running at once, and start the next row as soon as one merges.' }];
+  store.putWork(w);
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'List the startable rows', title: 'w1: list startable PLAN.md rows', work_id: 'w1' });
+  assert.equal(started.isError, false, started.text);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const info = store.sessions.get(id)!;
+  await until('its first turn', () => info.status === 'idle');
+  const before = heard(dispatcher().info.id, '[work update]').length;
+
+  // 2d1ac9f7's report at 05:14 UTC 2026-11-03, shortened.
+  const report =
+    'Ten rows can start now at ffu main ebca077: M2.17, M2.19, M2.3, M2.6, M2.11, M1.2c, P0.12, R.F1, R.M1, R.T3.\n\n' +
+    "w1: still open: the dispatcher starts the ten rows above, M2.13 (thin bots, PR #107) is rebased, its timed hour runs, and Ben answers M1.7's rate-mode decision";
+  sessions.events.emit('turnEnd', sessions.get(id), report);
+  await until('the dispatcher hears the rows', () => heard(dispatcher().info.id, '[work update]').some((e) => e.text.includes('handing you legs to start')));
+  const ask = heard(dispatcher().info.id, '[work update]').find((e) => e.text.includes('handing you legs to start'))!.text;
+  assert.match(ask, new RegExp(`^\\[work update\\] w1 "FFU engine: fan out every unblocked PLAN.md row" \\(Ben, \\w+\\)`));
+  assert.match(ask, /M2\.17, M2\.19, M2\.3, M2\.6, M2\.11, M1\.2c, P0\.12, R\.F1, R\.M1, R\.T3/);
+  assert.match(ask, /keep at least 8 running/);
+  assert.equal(store.work.get('w1')!.dispatcherAsk?.worker, id);
+
+  // The planner is idle with no check-in: no leg runs, under the standing 8. The dispatcher is told once.
+  await until('the standing target is checked', () => heard(dispatcher().info.id, '[work update]').some((e) => /runs 0 legs now, under its people's standing ask/.test(e.text)));
+  const under = heard(dispatcher().info.id, '[work update]').find((e) => /runs 0 legs now/.test(e.text))!.text;
+  assert.match(under, /Start legs up to 8 now/);
+  assert.match(under, new RegExp(`its worker ${id} last handed you "w1: still open: the dispatcher starts the ten rows above`));
+  assert.deepEqual({ live: store.work.get('w1')!.fanOut?.live, min: store.work.get('w1')!.fanOut?.min }, { live: 0, min: 8 });
+
+  // The same report again, the worker stopping, a daemon connecting: nothing more within the gap.
+  sessions.events.emit('turnEnd', sessions.get(id), report);
+  agents.orchestrators.capacityMayHaveFreed("pc's daemon connected");
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(heard(dispatcher().info.id, '[work update]').length, before + 2, 'one rows notice, one target notice');
+
+  // Past the gap with a leg lost since: told again. A request with no standing ask is never named.
+  const later = store.work.get('w1')!;
+  later.fanOut = { at: new Date(Date.now() - 31 * 60_000).toISOString(), live: 3, min: 8 };
+  store.putWork(later);
+  assert.deepEqual(agents.orchestrators.fanOutCheck(), ['w1']);
+  later.notes = [];
+  later.fanOut = undefined;
+  store.putWork(later);
+  assert.deepEqual(agents.orchestrators.fanOutCheck(), [], 'no "keep N running": no notice');
+});
+
 test('w2870: a worker waiting on its orchestrator for a step workers have no tool for tells that orchestrator once, as [orchestrator step], never [needs you]', async (t) => {
   const { store, sessions, dispatcher, chat, call, heard } = await setupOnMachine(t);
   const loth = chat(LOTH).info;

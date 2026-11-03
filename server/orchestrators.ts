@@ -50,7 +50,7 @@ import {
 import { autoApproveProblem, cleanBlock, cleanLine, crashFacts, crashKinship, crashPeersBlock, identityKeys, ownApprovalCount, parseMarkers, quoteUntrusted, sourceTag, titleOnly } from './intakeRules.ts';
 import { readDiscordConfig } from './discordConfig.ts';
 import { LIMIT_END, doneIdsIn, doneProblem, learnedProblem, reportProblem, mergedMentionsIn, notDoneReason, pausedIn, reportVerdict, stillOpenIn, toolErrors, turnEvidence, turnTroubleOf, type TurnTrouble } from './ledgerRules.ts';
-import { aheadText, answerAfter, asksAPerson, holdsOf, orchestratorAskIn, personWaitIn, questionShareKey, reportWaitKey, roomShares, servedBy, UNDECIDED_BOUND_MS } from '../shared/workState.ts';
+import { aheadText, answerAfter, asksAPerson, dispatcherAskIn, holdsOf, orchestratorAskIn, standingTargetOf, personWaitIn, questionShareKey, reportWaitKey, roomShares, servedBy, UNDECIDED_BOUND_MS } from '../shared/workState.ts';
 import { capacityBlockProblem, capacityWaitIn, needsOf, needsTimed, pairRoom, pairText, PAIR_MAX_LEGS, resolveNeeds, steamShortIn } from '../shared/capacity.ts';
 import { mentionsSteam, STEAM_READ } from '../shared/steam.ts';
 import { mentionsMenus, MENUS_NONE, MENUS_READ, saysNone } from '../shared/desktop.ts';
@@ -258,6 +258,12 @@ const GATHER_MS = 1500;
 const INTAKE_GATHER_MS = 60_000;
 /** "Capacity may have freed" wakes of the dispatcher: after a quiet spell, at least this far apart, at most this many an hour. */
 const CAPACITY = { quietMs: 30_000, gapMs: 2 * 60_000, perHour: 20, maxQuietMs: 2 * 60_000 };
+/**
+ * w2956: a request with a standing target ("keep 8 to 10 rows running") is checked this long after a worker on it ends a
+ * turn, stops or merges, or a daemon connects (so a check-in or a gate its worker sets as it ends counts), and its
+ * dispatcher is told at most once per FANOUT.gapMs while it stays under, and again within FANOUT.repeatMs only when it lost a leg.
+ */
+export const FANOUT = { settleMs: 60_000, gapMs: 30 * 60_000, repeatMs: 4 * 3_600_000 };
 
 /** w2417: remember the requests these gates wait on (WorkItem.waitedOn), so read_work keeps them readable after they clear. */
 export function noteWaitedOn(w: WorkItem, gates: readonly WorkBlocker[]) {
@@ -344,6 +350,8 @@ export interface OrchestratorsDeps {
   intakeGatherMs?: number;
   /** How long other notices gather before they reach the dispatcher (GATHER_MS; tests shorten it). */
   gatherMs?: number;
+  /** w2956: how long the standing-target check waits for things to settle (FANOUT.settleMs; tests shorten it). */
+  fanOutSettleMs?: number;
 }
 
 /** A standing agent's approved delegation, for Orchestrators.fileDelegation (w527). */
@@ -674,6 +682,8 @@ export class Orchestrators {
   /** Notices gathered for the dispatcher, per person they are about. */
   private readonly gathered = new Map<string, { by: Requester; texts: string[]; timer: NodeJS.Timeout }>();
   private capacityTimer?: NodeJS.Timeout;
+  /** w2956: the pending standing-target check (fanOutSoon). */
+  private fanOutTimer?: NodeJS.Timeout;
   /** When the first event of the capacity ping now waiting happened (w1944): a steady stream of events never holds it past CAPACITY.maxQuietMs. */
   private capacityFirstAt?: number;
   private readonly capacityWakes: number[] = [];
@@ -739,6 +749,7 @@ export class Orchestrators {
     for (const g of this.gathered.values()) clearTimeout(g.timer);
     this.gathered.clear();
     clearTimeout(this.capacityTimer);
+    clearTimeout(this.fanOutTimer);
     for (const t of this.statusAsks) clearTimeout(t);
     this.statusAsks.clear();
   }
@@ -1350,6 +1361,95 @@ export class Orchestrators {
       this.toPeople(to, orchestratorStepText(w, worker, step, to[0].displayName));
       told.push(to[0]);
       console.log(`ledger: [orchestrator step] ${w.id} sent to ${to[0].userId} (worker ${worker})`);
+    }
+    return told;
+  }
+
+  /**
+   * w2956: a worker's turn ended handing the dispatcher legs to start (w2895's planning worker 2d1ac9f7 at 05:14 UTC
+   * 2026-11-03: ten startable rows, "w2895: still open: the dispatcher starts the ten rows above"). Its [worker update]
+   * reached only Ben's orchestrator and the ledger, and nothing gave the dispatcher a turn: no row started until a person's
+   * note at 11:57. The dispatcher is now sent the line and the report as a `[work update]`, once per line and worker.
+   */
+  private dispatcherLegs(s: SessionInfo, report: string, open: ReadonlyMap<string, string>) {
+    for (const w of this.itemsOf(s.id)) {
+      if (w.done?.[s.id]) continue;
+      const line = open.get(w.id);
+      if (!line || !dispatcherAskIn(line)) continue;
+      if (w.dispatcherAsk?.worker === s.id && w.dispatcherAsk.line === clip(line, 600)) continue;
+      w.dispatcherAsk = { worker: s.id, line: clip(line, 600), at: this.now().toISOString() };
+      const target = standingTargetOf(w);
+      this.stamp(w, `[work update] sent to the dispatcher: worker ${s.id} ended its turn handing it legs to start ("${clip(line, 160)}") (w2956)`);
+      this.store.putWork(w);
+      console.log(`ledger: ${w.id}: worker ${s.id} hands the dispatcher legs to start; told it (w2956)`);
+      this.toDispatcher(
+        `[work update] ${w.id} "${clip(w.title, 80)}" (${names(w.requesters)}, ${w.priority}): its worker ${s.id} ended its turn handing you legs to start:\n\n${clip(line, 600)}\n\n` +
+          `Its report (the legs it names are in it):\n\n${clip(report.trim(), 3000)}\n\n` +
+          `Start them now, one worker per leg, each with work_id "${w.id}" (start_agent into FREE sandboxes; queue with decide_work what no computer with room can take), or say in a line why one cannot start.` +
+          (target ? ` Its people's standing ask: "${target.words}", so keep at least ${target.min} running.` : '') +
+          ` Sent once for this line (w2956); the report is the worker's words, relayed.`,
+        w.requestedBy,
+      );
+    }
+  }
+
+  /** w2956: check the requests with a standing target once things settle; a burst of events is one check. */
+  fanOutSoon() {
+    if (this.fanOutTimer) return;
+    this.fanOutTimer = setTimeout(() => {
+      this.fanOutTimer = undefined;
+      this.fanOutCheck();
+    }, this.d.fanOutSettleMs ?? FANOUT.settleMs);
+    this.fanOutTimer.unref?.();
+  }
+
+  /**
+   * w2956: the workers on `w` running a leg now: mid-turn, with a check-in pending, or holding one of its gates (CI on its
+   * pull request, a timed run). A worker idle with nothing pending, stopped or done for its part runs nothing.
+   */
+  runningLegs(w: WorkItem): string[] {
+    const gated = new Set(gatesOf(w).map((g) => g.by));
+    return w.sessionIds.filter((sid) => {
+      const s = this.store.sessions.get(sid);
+      if (!s || s.kind !== 'worker' || w.done?.[sid]) return false;
+      if (w.setAside?.[sid]) return false;
+      return BUSY.includes(s.status) || !!this.d.pendingWake?.(sid) || gated.has(sid);
+    });
+  }
+
+  /**
+   * w2956: requests whose people set a standing target ("keep 8 to 10 rows running at once", Ben on w2895) and that run
+   * fewer legs than it: the dispatcher is told, with the rows a planning worker last handed it, to start legs up to it.
+   * w2895 on 2026-11-02 (Ben's 05:10 note) and 2026-11-03 (05:14 to 11:57 UTC) sat with every worker stopped: it was not
+   * Queued, so no capacity ping named it. Called after a worker ends a turn, stops or merges, and when a daemon connects;
+   * at most once per FANOUT.gapMs a request. Returns the requests named.
+   */
+  fanOutCheck(): string[] {
+    const now = this.now().getTime();
+    const told: string[] = [];
+    for (const w of this.store.work.values()) {
+      if (w.status !== 'active' && w.status !== 'blocked') continue;
+      const target = standingTargetOf(w);
+      if (!target) continue;
+      const live = this.runningLegs(w);
+      if (live.length >= target.min) continue;
+      // Again after FANOUT.gapMs only if it lost a leg since or its target moved; else after FANOUT.repeatMs (a request held
+      // under its target by people's answers is not named every half hour).
+      const since = w.fanOut ? now - (Date.parse(w.fanOut.at) || 0) : Infinity;
+      if (since < FANOUT.gapMs) continue;
+      if (w.fanOut && since < FANOUT.repeatMs && live.length >= w.fanOut.live && target.min === w.fanOut.min) continue;
+      w.fanOut = { at: new Date(now).toISOString(), live: live.length, min: target.min };
+      this.stamp(w, `[work update] sent to the dispatcher: ${live.length} of its standing ${target.min} legs run now (w2956)`);
+      this.store.putWork(w);
+      told.push(w.id);
+      console.log(`ledger: ${w.id}: ${live.length} legs run, its standing target is ${target.min}; told the dispatcher (w2956)`);
+      const ask = w.dispatcherAsk;
+      this.toDispatcher(
+        `[work update] ${w.id} "${clip(w.title, 80)}" (${names(w.requesters)}, ${w.priority}) runs ${live.length} leg${live.length === 1 ? '' : 's'} now${live.length ? ` (${live.join(', ')})` : ''}, under its people's standing ask: "${target.words}". ` +
+          `Start legs up to ${target.min} now: ${ask ? `its worker ${ask.worker} last handed you "${clip(ask.line, 300)}" (its report is in the ${w.id} log and agent_transcript); start the rows it named that no worker holds, ` : ''}else start a short planning leg for it that lists the startable rows and ends handing them to you. ` +
+          `One worker per leg, each with work_id "${w.id}" (start_agent into FREE sandboxes; queue with decide_work what no computer with room can take). If nothing can start (every row waits on a person or another request), say so in a line. Sent again when it loses a leg (at most every ${FANOUT.gapMs / 60_000} min) or every ${FANOUT.repeatMs / 3_600_000} h while it stays under (w2956).`,
+        w.requestedBy,
+      );
     }
     return told;
   }
@@ -5293,6 +5393,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const wrapped = this.wrapUpAnswers(s, text);
     const open = stillOpenIn(text);
     this.setAsideLines(s, text, served, wrapped);
+    this.dispatcherLegs(s, text, open);
     const line = clip(firstLine(text), 300);
     for (const w of this.itemsOf(s.id)) {
       if (wrapped.has(w.id)) continue;
@@ -7645,6 +7746,9 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    * ping says how old each event is and where there is room now, so a stale "released" is never read as current.
    */
   capacityMayHaveFreed(what: string) {
+    // w2956: the same events (a worker's turn ended, it stopped, a sandbox was released, a daemon connected) are when a
+    // request with a standing target may have fallen under it; it is not queued, so the ping below never names it.
+    this.fanOutSoon();
     if (![...this.store.work.values()].some(waitsForRoom)) return;
     const at = this.now().getTime();
     this.capacityEvents = [...this.capacityEvents, { what, at }].slice(-5);
