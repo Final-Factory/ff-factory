@@ -2023,9 +2023,9 @@ export class MachineManager {
   /** What each daemon was last told of its resumable sessions (joined ids), so a change is sent once. */
   private readonly sentResumable = new Map<string, string>();
 
-  /** A machine's sessions that a request still waits for: their temp folders survive a stop (server/resumable.ts, w1097). */
+  /** A machine's sessions that a request or a pending check-in still waits for: their temp folders survive a stop (server/resumable.ts, w1097, w2987). */
   private resumableOf(m: Machine): string[] {
-    return resumableSessions(m.sessionIds.filter((sid) => this.store.sessions.has(sid)), this.store.work.values());
+    return resumableSessions(m.sessionIds.filter((sid) => this.store.sessions.has(sid)), this.store.work.values(), Date.now(), Object.keys(this.wakesOf(m)));
   }
 
   /** The machine's sessions with a request not yet closed, and the requests they are on (w1379): what `ff-leftovers folders` checks a delete against. */
