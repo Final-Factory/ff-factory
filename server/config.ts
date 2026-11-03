@@ -4,7 +4,7 @@ import type { DevRequestsConfig } from './devRequests.ts';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { PermissionMode } from '../shared/types.ts';
+import type { PermissionMode, ProjectView } from '../shared/types.ts';
 import { CLEANUP_SOFT_GB_DEFAULT } from '../shared/types.ts';
 import type { MinPriority } from '../shared/capacity.ts';
 import { checkObject, dataRecoveries, readJsonDurable, writeFileDurable } from './durable.ts';
@@ -167,6 +167,92 @@ export interface IntakeConfig {
   reviewers?: string[];
   /** How far back finished requests count as duplicates (days, default 14). */
   lookbackDays?: number;
+}
+
+/** A portal's project (config `project`, docs/project.md): the seam between FF Factory's core and the job it runs. */
+export interface ProjectConfig {
+  /** The project's name in the briefs ("Final Factory"). */
+  name: string;
+  /** One phrase after the name in the orchestrators' first line. */
+  description: string;
+  /** Whether workers' sandboxes have a Unity editor (the worker brief's "Unity" section). Default true. */
+  unity: boolean;
+  /** Whether the Discord, FFBox and Max rules belong in the worker brief. Default true. */
+  community: boolean;
+  /**
+   * How workers land finished work: "pull-request" (Final Factory's: a PR into the trunk, merged on green CI) or
+   * "local" (no pull requests and no CI; the deployment brief says how work lands, e.g. a person approves it).
+   */
+  integration: 'pull-request' | 'local';
+  /** Markdown that replaces the orchestrators' "what there is" list (sandboxes, machines, FFBox...). Optional. */
+  worldBriefFile?: string;
+  /** Markdown appended to both orchestrators' briefs as "This deployment". Optional. */
+  orchestratorBriefFile?: string;
+  /** Markdown appended to every worker's brief as "This deployment", before Reporting. Optional. */
+  workerBriefFile?: string;
+  /** The orchestrator page's empty-state heading (default "What should the factory work on?"). Optional. */
+  heading?: string;
+  /** The orchestrator page's suggestion chips, at most 6 (default Final Factory's). Optional. */
+  suggestions?: string[];
+}
+
+export const PROJECT_DEFAULTS: ProjectConfig = {
+  name: 'Final Factory',
+  description: 'a Unity 6 DOTS space automation game with deterministic lockstep multiplayer',
+  unity: true,
+  community: true,
+  integration: 'pull-request',
+};
+
+/** This portal's project with the defaults filled in. */
+export function projectOf(cfg: Partial<Pick<Config, 'project'>>): ProjectConfig {
+  return { ...PROJECT_DEFAULTS, ...cfg.project };
+}
+
+/** What the web app shows of the project (AppState.config.project). */
+export function projectView(cfg: Partial<Pick<Config, 'project'>>): ProjectView {
+  const p = projectOf(cfg);
+  return {
+    name: p.name,
+    custom: p.name !== PROJECT_DEFAULTS.name,
+    community: p.community,
+    ...(p.heading ? { heading: p.heading } : {}),
+    ...(p.suggestions?.length ? { suggestions: p.suggestions } : {}),
+  };
+}
+
+const briefWarned = new Set<string>();
+/** The text of one of the project's brief files ("" when none is set or it cannot be read; a bad file is logged once). */
+export function projectBrief(cfg: Partial<Pick<Config, 'project'>>, which: 'worldBriefFile' | 'orchestratorBriefFile' | 'workerBriefFile'): string {
+  const rel = projectOf(cfg)[which];
+  if (!rel) return '';
+  const file = path.resolve(ROOT, rel);
+  try {
+    return fs.readFileSync(file, 'utf8').trim();
+  } catch (e) {
+    if (!briefWarned.has(file)) {
+      briefWarned.add(file);
+      console.warn(`[config] project.${which} ${file} cannot be read: ${(e as Error).message}`);
+    }
+    return '';
+  }
+}
+
+/** Checks config `project` (loadConfig). */
+export function checkProjectConfig(cfg: Partial<Pick<Config, 'project'>>): void {
+  const p = cfg.project;
+  if (p === undefined) return;
+  if (typeof p !== 'object' || p === null || Array.isArray(p)) throw new Error('config project is an object, e.g. { "name": "Ken Martin Audiology", "unity": false }');
+  for (const key of ['name', 'description', 'worldBriefFile', 'orchestratorBriefFile', 'workerBriefFile', 'heading'] as const) {
+    if (p[key] !== undefined && (typeof p[key] !== 'string' || !p[key]!.trim())) throw new Error(`config project.${key} is a non-empty string`);
+  }
+  for (const key of ['unity', 'community'] as const) {
+    if (p[key] !== undefined && typeof p[key] !== 'boolean') throw new Error(`config project.${key} is true or false`);
+  }
+  if (p.integration !== undefined && p.integration !== 'pull-request' && p.integration !== 'local') throw new Error('config project.integration is "pull-request" or "local"');
+  if (p.suggestions !== undefined && (!Array.isArray(p.suggestions) || p.suggestions.length > 6 || p.suggestions.some((s) => typeof s !== 'string' || !s.trim()))) {
+    throw new Error('config project.suggestions is a list of at most 6 non-empty strings');
+  }
 }
 
 export interface Config {
@@ -446,6 +532,12 @@ export interface Config {
     idleStopMinutes: number;
     mcpServer?: { command: string; args: string[]; env?: Record<string, string> };
   };
+  /**
+   * What this portal works on (docs/project.md): Final Factory by default. A portal for another job names its project
+   * and points at its own brief files; the switches drop the Unity, community (Discord, FFBox, Max) and pull-request
+   * parts of the agents' briefs. Unset keys keep Final Factory's briefs exactly.
+   */
+  project?: Partial<ProjectConfig>;
   /** Folders (relative to a sandbox or a machine's clone; `*` = any one folder) the Screenshots gallery lists. See server/images.ts. */
   screenshotDirs?: string[];
   /**
@@ -1012,6 +1104,7 @@ export function loadConfig(): Config {
   if (windowsOnly.length) throw new Error(`config.json names Windows paths on ${process.platform}: ${windowsOnly.join(', ')}. Use this computer's paths (the portal VM's template is deploy/vm/guest/config.vm.example.json).`);
   checkAccountConfig(cfg);
   checkConnectorConfig(cfg);
+  checkProjectConfig(cfg);
   cfg.dataDir = path.resolve(ROOT, cfg.dataDir);
   cfg.sandboxRoot = path.resolve(cfg.sandboxRoot || path.join(cfg.dataDir, 'sandboxes'));
   cfg.standingRoot = path.resolve(raw.standingRoot ?? path.join(cfg.sandboxRoot, '_agents'));

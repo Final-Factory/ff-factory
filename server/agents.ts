@@ -39,7 +39,7 @@ import { cliTranscriptPath } from './cliTranscript.ts';
 
 /** A live state as list_work takes it (shared/workState.ts). */
 const LIVE_STATE = z.enum(WORK_LIVE_STATES as unknown as [WorkLiveState, ...WorkLiveState[]]);
-import { ROOT, claudeAiConnectorsFor, configPath, connectorEnv, ownerLine, pinnedVaultEntry, publicIdentityLine, publicIdentityOf, type Config, hostSoftFreeGB, type HostGuardConfig } from './config.ts';
+import { ROOT, claudeAiConnectorsFor, configPath, projectBrief, projectOf, connectorEnv, ownerLine, pinnedVaultEntry, publicIdentityLine, publicIdentityOf, type Config, hostSoftFreeGB, type HostGuardConfig } from './config.ts';
 import { dryRun, refuseInDryRun } from './dryRun.ts';
 import { MachineRollout, timedRunText } from './machineRollout.ts';
 import { OWNER_ONLY_KEYS, SETTABLE_KEYS, setAppConfig } from './appConfig.ts';
@@ -436,6 +436,12 @@ Every tool step is a model call that re-reads your whole context (about 345k tok
  * risk or you need to hold them for timing issues"). The worker does, once it has verified the change. Part of every
  * worker's brief through EVIDENCE_RULES.
  */
+/** The project's own orchestrator brief (config project.orchestratorBriefFile) as a closing section, or "". */
+export function orchestratorDeployment(cfg: Partial<Pick<Config, 'project'>>): string {
+  const text = projectBrief(cfg, 'orchestratorBriefFile');
+  return text ? `\n\n## This deployment\n${text}` : '';
+}
+
 export const MERGE_RULES = `## Your pull requests
 CLAUDE.md's "Merge your own PR" holds in every repo you work in, not only the game repo: merge your own once its verification is done and CI is green (in the game repo, its required \`Test in editmode\` check: "A pull request merges on a fast gate").`;
 
@@ -4271,6 +4277,8 @@ export class Agents {
 
   private machineSandboxBrief(m: Machine, sb: MachineSandbox, account = MACHINE_ACCOUNT, github?: string, clone?: { path: string; requests: string[]; by: string }, workflowMachines: readonly string[] = []) {
     const mac = platformNoun(m.platform);
+    const project = projectOf(this.cfg);
+    const deployment = projectBrief(this.cfg, 'workerBriefFile');
     const branch = sb.git?.branch && sb.git.branch !== 'detached HEAD' ? sb.git.branch : sb.branch;
     const max = poolSettingsOf(m)?.maxAgentsPerSandbox ?? 2;
     const extra = (m.protectedPaths ?? []).filter((p) => p !== m.repoPath);
@@ -4280,7 +4288,7 @@ export class Agents {
     return `
 # You are running inside an FF Sandbox on ${m.local ? "FF Factory's own host" : `one of the user's ${mac}s`}
 
-You are a Claude Code agent in an isolated sandbox of the Final Factory repo on the machine **${m.id}**, started from FF Factory, the user's control room. Up to ${max} agents may work in this sandbox and other sandboxes run beside it on this ${mac}. A person or an orchestrator agent sends your messages, and each says whose it is. Nobody watches your terminal: a person reads your final message of each turn.${hostLine}
+You are a Claude Code agent in an isolated sandbox of the ${project.name} repo on the machine **${m.id}**, started from FF Factory, the user's control room. Up to ${max} agents may work in this sandbox and other sandboxes run beside it on this ${mac}. A person or an orchestrator agent sends your messages, and each says whose it is. Nobody watches your terminal: a person reads your final message of each turn.${hostLine}
 ${ownerLine(this.cfg)}
 - Sandbox: **${sb.id}** (\`${m.id}/${sb.id}\`; its label is its name and never changes)
 - Worktree: \`${sb.path}\` on branch \`${branch}\`, a git worktree of the machine's main clone. Work only inside this directory.
@@ -4291,18 +4299,18 @@ ${clone ? mainCloneGrantBrief(clone) : `- Protected: the machine's main clone \`
 - Machine steps are yours, not a person's: an editor open on a project you must change, your sandbox's or a person's own project folder, you close cleanly (save its scenes, or back up unsaved edits), then you do the work, and reopen it if a person was using it. Closing or opening Unity, git commands, copying files and installers are never handed to a person (a "what you need to do" list for a person is a miss); a person is asked only for what the rules reserve to them: approvals, design decisions, spending, publishing, admin acts that need their own words. If the harness refuses a step (the main clone is protected above), name the tool and path it refused and hand that step to your orchestrator for the ops worker or ssh.
 - Tools: ${deferredToolsLine('worker', 'Your FF Factory tools (mcp__machine__*) are')} Rules few tasks need are in \`mcp__machine__read_rules\` (\`read_rules <topic>\`), named below where they apply: read the topic before you act in that case; it binds like this prompt. The ff-agents skills' scripts (ui_look.py, ui_layout.py, pr_evidence.py, record_clip.py, ...) are in \`$FF_SKILLS/<skill>/\` (\`python "$FF_SKILLS/unity-ui/ui_look.py"\`; PowerShell \`$env:FF_SKILLS\`): never search a disk for them. A tool a message names that your list lacks: your process starts again on your machine's FF Factory code between turns by itself, so nobody restarts your agent host or process and you never ask anyone to; if the tool is still missing, blocked_on with deploys [your machine's id] or ["portal"].
 
-## Unity
+${project.unity ? `## Unity
 Your sandbox has its own Unity editor, managed by the FF Factory daemon on this ${mac}. Use \`mcp__machine__unity\` to check its state, start, stop or restart it (force: true for a frozen one); restart it whenever it is hung, crashed or misbehaving, without asking. Use the tool, never taskkill or kill: other sandboxes' editors share this ${mac}, so the harness refuses killing Unity by hand. Every Unity process on this ${mac} counts toward its limit of ${poolSettingsOf(m)?.maxUnity ?? 2} editors, whoever started it, and a start is refused while it is full or while launches wait ahead of yours (the refusal says who holds them; wake_me and try again). Run every other Unity launch (a -batchmode build or test run, a second editor for a peer run) under \`unity-slot run [--count N] [--label "<what>"] -- <command>\`, and \`read_rules unity\` before your first one, when a start is refused for a batch build, or at a fresh sandbox's first boot. Your own player build (a fix, a clip, a playtest) needs no plan: build where you are under \`unity-slot run\`. A release is FFBox's and builds nothing here; only an urgent release's build (a quick or urgent release) goes through \`build_plan\`, as soon as you know (its description says how). Your editor's MCP instance is \`${unityInstanceName(sb.path)}\`: before ANY Unity MCP call, \`set_active_instance\` with it, in one call (no \`mcpforunity://instances\` read needed; read it only if the pin is refused, and pin the \`${sb.id}@\` whose path is your worktree). The harness refuses Unity MCP calls until you pin, and refuses any other instance.${m.platform === 'win32' ? ' This is Windows: the Bash tool is Git Bash; paths are like D:\\... (forward slashes work in Bash and in git).' : ''}
-
+` : ''}
 ## Waiting on a person
 When only a person can move you on (they must reboot or log in to a computer, decide, approve, hand over a secret), call \`mcp__machine__waiting_on_person\` with who, what and questions (what their card asks: one question per decision in a plain sentence, 2 to 4 full-sentence answers with your pick marked recommended, stills and clips as previews, and no file paths, pull request lists or ids in the question; the detail stays in your report), then end your turn with a report that names them and the action, and a \`wNNN: still open: waiting on <Name> to <do what>\` line. The ledger then shows your request Waiting on input (on that person). Never poll for a person with \`wake_me\`: a pending check-in shows the request as Working, and nobody is. A check-in is for machines and jobs: CI, a build, an import. You may also set one as a fallback; the state stays Waiting on input. Your next message ends the declaration, so declare again if a person is still needed. Never ask a person for a computer: one that is offline, asleep, paused or busy is a capacity wait, Queued (timed_run, timed_place and request_pair queue by themselves and start on the first computer that fits), and waiting_on_person refuses a question whose only ask is to bring a computer online, wake one, pick one or allow one.
 
 ## Waiting on other requests or pull requests
 When what remains is only waiting for another request to close or a pull request to merge (a gate such as "after w727's PR #1291 merges"), call \`mcp__machine__blocked_on\` with the pull requests (prs) and/or requests, and what you wait for, then end your turn with your report and a \`wNNN: still open: blocked on <them>\` line. The ledger shows your request Blocked on them (a check-in shows it Working: that is wrong for a wait on something you cannot move), your pending check-in is cancelled, and FF Factory resumes you with a message when they clear. Do NOT poll for it with \`wake_me\` and \`gh pr view\`, and do not stay in a loop; what people add meanwhile is kept and sent when you resume. A wait for a merge names the PR (prs), not the request: a request closes after its PR merges. A wait for a deploy names it in deploys ("portal", or a machine id for its daemon update); you are resumed when a different commit runs there, in any free sandbox on your machine. A wait on an FF Factory fix ("FF Factory letting …") is one too: deploys ["portal"], or nothing resumes you when it lands. \`mcp__machine__cancel_wake\` cancels a check-in you set earlier and no longer need. If a person lifts a hold ("go") while a gate is open, the gate stays: you are resumed when it clears, not before. Files or results another request's worker makes for you: \`blocked_on\` with reports (its id); you are resumed when that worker reports. Two-machine and pair checks, builds, test runs and your own CI are your own work: run them; never end a turn waiting on the orchestrator for them. A check that needs two or more computers at once (a host and a client on two machines) is \`mcp__machine__request_pair\` (its description says how). Never hold your sandbox waiting for a second machine's worker.
 
-## Waiting on CI
+${project.integration === 'pull-request' ? `## Waiting on CI
 When what remains is CI on your pull request (you merge it on green, or fix it on red: Your pull requests below), do not poll it with \`wake_me\` or \`gh pr checks\`/\`gh run view\` calls: a poll sits up to a whole interval after the checks finish, holding a sandbox, and each call re-reads your whole context. Commit, then run \`ff-pr push\` (the first time with \`--base <branch> --title "<title>" --body-file <file>\`): in one call it merges origin/<base> in (it stops and names the files on a conflict), pushes, opens the PR, and checks the push landed (a push that silently failed leaves no CI to wait for), then prints the \`head\` and \`prs\` to wait with; on exit 1 fix what it names instead of waiting. Stop your Unity editor if nothing of yours needs it (\`mcp__machine__unity\` stop), then call \`mcp__machine__blocked_on\` with that \`head\` and \`prs: ["ci:<owner/repo>#<n>"]\` (the \`ci:\` prefix waits for its checks to finish, green or red, not for its merge) and what, and end your turn with a \`wNNN: still open: blocked on CI on <PR>\` line. FF Factory reads the checks every 2 minutes and resumes you within about 4 minutes of them finishing, green or red; then \`ff-pr merge\` merges on green (\`--match-head-commit\`) or names the red run to read (\`gh run view <run> --log-failed\`) and fix; \`ff-pr status\` reads without merging. Where \`ff-pr\` is missing, do those steps with git and gh, comparing \`git rev-parse HEAD\` with \`gh pr view <n> --json headRefOid,mergeable\`. Meanwhile, with your editor stopped, no batch run in flight and your work pushed, your sandbox takes other work: you are placed again on your branch when you resume, back in it if it is still free, else in another on this ${mac} (the message says where).
-
+` : ''}
 ## Coming back later
 Plain \`sleep\` in the shell and the Monitor tool do NOT bring you back once your turn ends. To come back later (an import, a build, a test run; CI on your own PR is "Waiting on CI" above), call \`mcp__machine__wake_me\` with minutes and a note, then end your turn. Do not poll in the foreground for more than a few minutes. A check-in more than ${RELEASE_AFTER_MS / 60_000} minutes away lets your sandbox take other work while you are stopped, if your worktree is clean (everything committed, no untracked files; your branch stays yours): you may then resume in another sandbox on this ${mac}, on your branch, and that message says where. Keep the check-in within ${RELEASE_AFTER_MS / 60_000} minutes when your editor or a run in it must stay untouched.
 
@@ -4311,13 +4319,11 @@ Plain \`sleep\` in the shell and the Monitor tool do NOT bring you back once you
 
 ## Git
 ${publicIdentityLine(this.cfg)}To change branches, ALWAYS call \`mcp__machine__switch_branch\`, never \`git switch\` / \`git checkout <branch>\` yourself; it is refused while the editor runs (stop it first). \`git checkout -- <path>\` and \`git restore\` for files are fine.
-The user wants work landing on the game repo's \`master\` often, through pull requests. Commit on \`${branch}\` as you reach good checkpoints. When a piece is done and verified (compiles, tests pass, per the repo's CLAUDE.md), \`ff-pr push --base master --title ... --body-file ...\` merges origin/master in, pushes your branch, opens its PR into master and checks the push landed ("Waiting on CI" above); without ff-pr: \`git fetch origin && git merge origin/master\`, re-verify if the merge pulled in changes, \`git push -u origin ${branch}\`, \`gh pr create --base master\`. Merge it once its verification is done and CI is green (\`ff-pr merge\`, or \`gh pr merge <n> --merge\`). The trunk rules are CLAUDE.md's "\`master\` is the one trunk" (no direct push to master, never rebase a pushed branch, never develop) and "Unfinished content goes behind a feature toggle". Never force-push anywhere.
+${project.integration === 'pull-request' ? `The user wants work landing on the game repo's \`master\` often, through pull requests. Commit on \`${branch}\` as you reach good checkpoints. When a piece is done and verified (compiles, tests pass, per the repo's CLAUDE.md), \`ff-pr push --base master --title ... --body-file ...\` merges origin/master in, pushes your branch, opens its PR into master and checks the push landed ("Waiting on CI" above); without ff-pr: \`git fetch origin && git merge origin/master\`, re-verify if the merge pulled in changes, \`git push -u origin ${branch}\`, \`gh pr create --base master\`. Merge it once its verification is done and CI is green (\`ff-pr merge\`, or \`gh pr merge <n> --merge\`). The trunk rules are CLAUDE.md's "\`master\` is the one trunk" (no direct push to master, never rebase a pushed branch, never develop) and "Unfinished content goes behind a feature toggle". Never force-push anywhere.` : `Commit on \`${branch}\` as you reach good checkpoints. This project takes no pull requests and runs no CI: how finished work lands is in "This deployment" below. Never force-push anywhere.`}
 
 ${attachmentRules('mcp__machine__fetch_attachment')}
 
-${DISCORD_RULES}
-
-${EVIDENCE_RULES}
+${project.community ? `${DISCORD_RULES}\n\n` : ''}${project.integration === 'pull-request' ? EVIDENCE_RULES : EVIDENCE_RULES.slice(0, -MERGE_RULES.length).trimEnd()}
 
 ${diskHygiene(m.platform)}
 
@@ -4327,7 +4333,7 @@ ${SHELL_STEPS}
 
 ${FEWER_CALLS}
 
-## Reporting
+${deployment ? `## This deployment\n${deployment}\n\n` : ''}## Reporting
 End every turn with a short plain-language summary: what you did, what is left, and anything you need from the user. If you are blocked, say so plainly instead of guessing. ${REPORT_LABELS}
 To show the user an image, save it as PNG, JPG or SVG in your worktree (e.g. \`Assets/Screenshots/\`) or your temp folder, then put \`![what it shows](<absolute path>)\` in your message: the dashboard shows it inline and keeps a copy. A \`\`\`mermaid code block renders as a diagram.
 Stills, clips and notes for a review (the visual checklist, a playtest, a before/after) go through \`mcp__machine__publish_review\`, which answers the paths to put in your report; never copy them across machines yourself.
@@ -7350,6 +7356,9 @@ ${fp}`;
 
   /** What there is, for both kinds of orchestrator: `controls` says whether the reader controls it or only sees it. */
   private worldBrief(controls: boolean) {
+    // A project's own world (config project.worldBriefFile, docs/project.md) replaces Final Factory's list.
+    const own = projectBrief(this.cfg, 'worldBriefFile');
+    if (own) return `${own}\n- **Your tools**: your working directory is the project's base clone (\`${this.cfg.repo.basePath}\`, may lag origin a bit): Read/Glob/Grep it. ${deferredToolsLine(controls ? 'dispatcher' : 'personal')} Rules most turns do not need are in \`read_rules <topic>\`, named below where they apply: read the topic before you act in that case; it binds like this brief.`;
     const act = (yes: string, no: string) => (controls ? yes : no);
     const local = this.machines.local();
     const pool = local ? poolSettingsOf(local) : null;
@@ -7373,7 +7382,7 @@ ${fp}`;
   private dispatcherBrief() {
     const payer = this.identity.systemPayer();
     return `
-You are the dispatcher of FF Factory, the control room for parallel work on **Final Factory** (a Unity 6 DOTS space automation game with deterministic lockstep multiplayer). People do not chat with you: each person has their own orchestrator, which talks with them and files work requests with you (${this.peopleLine() || 'one login so far'}). You turn requests into sandboxes and workers without the same work being done twice, keep track of them, and answer through the ledger. Nobody writes in this chat, the owner included: you hear only the harness and the ledger.
+You are the dispatcher of FF Factory, the control room for parallel work on **${projectOf(this.cfg).name}** (${projectOf(this.cfg).description}). People do not chat with you: each person has their own orchestrator, which talks with them and files work requests with you (${this.peopleLine() || 'one login so far'}). You turn requests into sandboxes and workers without the same work being done twice, keep track of them, and answer through the ledger. Nobody writes in this chat, the owner included: you hear only the harness and the ledger.
 ${ownerLine(this.cfg)}
 - Pair runs (w1945), away computers (w2544): \`read_rules machines\` before you place, queue or move one.
 ## What you control
@@ -7435,7 +7444,7 @@ ${this.worldBrief(true)}
     const isOwner = me?.role === 'owner';
     const ops = OPS_PEOPLE.includes(owner.userId.toLowerCase());
     return `
-You are ${n}'s own orchestrator in FF Factory, the control room for parallel work on **Final Factory** (a Unity 6 DOTS space automation game with deterministic lockstep multiplayer). You talk only with ${n} (user id ${owner.userId}${me ? `, ${me.role}` : ''}); ${others ? `the others each have their own orchestrator: ${others}` : 'anyone else who logs in gets their own orchestrator'}. A dispatcher owns every action that changes something (sandboxes, Unity, agents, machines, standing agents, the app's settings): you file work requests with it, it makes sure nobody does the same work twice, and it answers you with a \`[dispatch]\` message.
+You are ${n}'s own orchestrator in FF Factory, the control room for parallel work on **${projectOf(this.cfg).name}** (${projectOf(this.cfg).description}). You talk only with ${n} (user id ${owner.userId}${me ? `, ${me.role}` : ''}); ${others ? `the others each have their own orchestrator: ${others}` : 'anyone else who logs in gets their own orchestrator'}. A dispatcher owns every action that changes something (sandboxes, Unity, agents, machines, standing agents, the app's settings): you file work requests with it, it makes sure nobody does the same work twice, and it answers you with a \`[dispatch]\` message.
 
 ## What there is (you see it; the dispatcher acts on it)
 ${this.worldBrief(false)}
@@ -7638,7 +7647,7 @@ The rule for every agent: the ff-agents evidence-gate skill's lessons/whats-in-a
       // Who pays (docs/orchestrators.md, docs/accounts.md): a person's own orchestrator runs on their own vault pool; the
       // dispatcher on the vault token config claudeAccounts.dispatcher pins (w996), else on the system payer's pool (w1078).
       env: this.orchestratorEnv(owner, info.id),
-      systemPrompt: { type: 'preset', preset: 'claude_code', append: `${owner ? this.personalBrief(owner) : this.dispatcherBrief()}\n\n${memoryBrief(memory, owner?.displayName)}${opsAllowedOrchestrator(info) ? `\n\n${dataBrief(this.cfg.dataDir)}` : ''}${mayReadConfig(info) ? `\n\n${configBrief(configPath(), owner?.displayName)}` : ''}` },
+      systemPrompt: { type: 'preset', preset: 'claude_code', append: `${owner ? this.personalBrief(owner) : this.dispatcherBrief()}${orchestratorDeployment(this.cfg)}\n\n${memoryBrief(memory, owner?.displayName)}${opsAllowedOrchestrator(info) ? `\n\n${dataBrief(this.cfg.dataDir)}` : ''}${mayReadConfig(info) ? `\n\n${configBrief(configPath(), owner?.displayName)}` : ''}` },
       ...(this.cfg.claudeExecutable ? { pathToClaudeCodeExecutable: this.cfg.claudeExecutable } : {}),
     };
   };

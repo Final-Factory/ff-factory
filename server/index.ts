@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { HOST_ROLES, configPath, loadConfig, machineActivityPause, machinePersonPlay, machineCleanupSettings, pruneRetiredConfig, publicIdentityOf, retiredKeysLine, ROOT } from './config.ts';
+import { HOST_ROLES, configPath, loadConfig, projectView, machineActivityPause, machinePersonPlay, machineCleanupSettings, pruneRetiredConfig, publicIdentityOf, retiredKeysLine, ROOT } from './config.ts';
 import { migrateConfig, retireOldTokenFile, secretsDirOf } from './configMigration.ts';
 import { Store, bus, emit } from './store.ts';
 import { SessionManager, compactCommand, seedSdkCost, snapshotOf } from './sessions.ts';
@@ -1017,7 +1017,7 @@ function appState(user: string | undefined): AppState {
     ...agents.roomExtras(),
     intake: intake.summary(),
     ledger: ledgerSweep.state(),
-    config: { defaultModel: cfg.defaultModel, models: cfg.models, defaultBase: cfg.defaultBase, attachments: attachments.settings, live: { enabled: cfg.live?.enabled === true } },
+    config: { defaultModel: cfg.defaultModel, models: cfg.models, defaultBase: cfg.defaultBase, attachments: attachments.settings, live: { enabled: cfg.live?.enabled === true }, project: projectView(cfg) },
     settings: store.settings,
     poolPeople: poolPeople(),
     live: liveHub.viewsFor(me.userId),

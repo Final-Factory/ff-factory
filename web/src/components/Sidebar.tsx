@@ -83,7 +83,7 @@ export function Sidebar({
         </div>
         <div className="brand-text">
           <span className="brand-name">FF Factory</span>
-          {app.system?.hostname && <span className="brand-host">{app.system.hostname}</span>}
+          {app.config?.project?.custom ? <span className="brand-host">{app.config.project.name}</span> : app.system?.hostname && <span className="brand-host">{app.system.hostname}</span>}
         </div>
         <button className="btn btn-ghost btn-icon side-icon" title="Search every conversation" aria-label="Search" onClick={() => go({ view: 'search' })}>
           <Icon name="search" size={17} />

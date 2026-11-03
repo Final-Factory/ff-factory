@@ -51,10 +51,11 @@ function Shell({ app }: { app: AppState }) {
   const [newStanding, setNewStanding] = useState(false);
   const [newMachine, setNewMachine] = useState(false);
   const waiting = useAttention(app).length;
+  const brand = app.config?.project?.custom ? app.config.project.name : 'FF Factory';
 
   useEffect(() => {
-    document.title = waiting ? `(${waiting}) FF Factory` : 'FF Factory';
-  }, [waiting]);
+    document.title = waiting ? `(${waiting}) ${brand}` : brand;
+  }, [waiting, brand]);
 
   useEffect(() => {
     if (!mobile) setDrawer(false);
