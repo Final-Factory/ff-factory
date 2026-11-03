@@ -965,6 +965,27 @@ without one means it is off or failing, worth a person's look.
     (`WorkItem.orchestratorStep`): the same worker re-reporting the wait sends nothing; a report on the request without
     it ends the wait, and a later one goes again. It is never a person's `[needs you]`: the person is not asked. Workers
     get no new tools from this; a worker lacking an orchestrator's tool is intended.
+  - **a worker that hands the dispatcher legs to start reaches the dispatcher, and a request with a standing target is
+    kept at it** (w2956, Ben: "keep 8 to 10 rows running at once, and start the next row as soon as one merges"). On
+    w2895 (Ben's FFU fan-out) planning worker 2d1ac9f7 ended its turn at 05:14 UTC 2026-11-03 with ten startable rows and
+    "w2895: still open: the dispatcher starts the ten rows above". Its `[worker update]` went to Ben's orchestrator only
+    (the table in [Where messages go](#where-messages-go): the dispatcher is not woken), the line was neither an
+    orchestrator wait (`orchestratorAskIn`) nor a wait on a worker (`otherWorkWait`), and w2895 was not Queued, so the
+    capacity ping (journal 05:15 UTC: "no capacity ping: worker 2d1ac9f7 … finished a turn, but no computer with room can
+    take w2808 now") never named it. Nothing started until lothsahn's review note at 11:57; Ben's 05:10 note on
+    2026-11-02 had found the same stall. Now:
+    - `dispatcherAskIn` (`shared/workState.ts`) reads a still-open line that hands the dispatcher legs ("the dispatcher
+      starts …", "waiting on the dispatcher to start …", "to be started by the dispatcher"), and at the turn's end
+      `Orchestrators.dispatcherLegs` sends the dispatcher a `[work update]` with the line and the worker's report (the
+      rows are in it), once per worker and line (`WorkItem.dispatcherAsk`).
+    - `standingTargetOf` reads a request's standing target from its people's newest note, else its brief ("keep at least
+      8 to 10 rows running": 8). After a worker ends a turn, stops or is released, a merge on green, or a daemon connects
+      (the events of the capacity ping, settled for a minute), `Orchestrators.fanOutCheck` counts the workers running a
+      leg of each such request (mid-turn, a check-in pending, or holding one of its gates: `runningLegs`); under the
+      target, the dispatcher gets a `[work update]` to start legs up to it, naming the rows a worker last handed it, else
+      to start a short planning leg. Once per 30 minutes at most, and again within 4 hours only when it lost a leg
+      (`WorkItem.fanOut`). An "aim for 6–8" is no standing ask. Tests: `w2956FanOut.test.ts`, and "w2956: the w2895
+      stall" in `orchestrators.test.ts`.
 - **If the blocker fails, it is flagged.** What it waited on stalled, or did not clear in its time: the request stalls
   (`stalled.kind` `blocked`) with the reason, for its people to close or reopen. What it waited on was declined or
   cancelled without delivering: a person must decide now, so it becomes a question to its requester (Waiting on input).
@@ -2463,6 +2484,7 @@ but the question it labelled ("brighten the lamps after w478?") was kept.
 | `[worker update]` (a turn an orchestrator started ended, or a permission is waiting) | the orchestrators of the people the worker works for: its requests' requesters, else whoever started it, else the system payer. The ledger records the worker's last line; the dispatcher is not woken |
 | `[ledger]` | the dispatcher: after a restart or a fresh conversation, the requests still waiting (what it had not answered died with its process); and when requests are queued and a worker ends a turn, after 30 s of quiet, at least 2 minutes apart and at most 20 an hour (a wake that comes too soon waits) |
 | a failed worker of an open request | the dispatcher, as a `[work update]` |
+| a worker's still-open line handing the dispatcher legs to start ("the dispatcher starts the ten rows above"), with its report; a request running fewer legs than its people's standing "keep N running" (w2956) | the dispatcher, as a `[work update]` |
 | `[standing agent]`, `[auto-delegation]` | the orchestrator of the agent's owner (the system payer when it has none): a request waiting for a click, or one its auto-approve rules filed (w527) |
 | `[unity blocked]` | the dispatcher, and the people whose workers are in that sandbox |
 | `[app restarted]`, `[machines]`, `[unity]`, `[host]`, the orchestrator inbox | the dispatcher. A person's orchestrator cut off mid-turn by a restart is told to pick its turn up again |

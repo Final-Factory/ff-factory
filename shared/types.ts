@@ -2193,6 +2193,13 @@ export interface WorkItem {
    */
   orchestratorStep?: { worker: string; line: string; at: string; to: string[] };
   /**
+   * w2956: a worker's still-open line handing the dispatcher legs to start ("the dispatcher starts the ten rows above"),
+   * sent to the dispatcher once as a `[work update]` (Orchestrators.dispatcherLegs); a re-report of the same line sends nothing.
+   */
+  dispatcherAsk?: { worker: string; line: string; at: string };
+  /** w2956: the last time the dispatcher was told this request runs fewer legs than its standing target (Orchestrators.fanOutCheck). */
+  fanOut?: { at: string; live: number; min: number };
+  /**
    * w2478: review topics its workers published stills and clips to (publish_review), newest last, at most 20: with topics
    * named for it (`w2186`, `w2186-*`), what makes a question about it visual (server/visualAsk.ts).
    */
