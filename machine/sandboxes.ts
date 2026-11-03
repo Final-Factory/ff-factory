@@ -7,7 +7,7 @@ import path from 'node:path';
 import { branchProblem, pickEditorLog, pruneEditorLogs, slugify, withBaseRepoLock } from '../server/sandboxes.ts';
 import { switchBranch } from '../server/switchBranch.ts';
 import { restoreCommittedBytes } from '../server/committedBytes.ts';
-import { saveWork, type SaveResult } from '../server/saveWork.ts';
+import { recordForeign, saveWork, someFiles, type SaveResult } from '../server/saveWork.ts';
 import { readGitStatus } from '../server/gitStatus.ts';
 import { diskLevel } from '../server/hostHealth.ts';
 import { bridgeUpSince } from '../server/unityHang.ts';
@@ -1231,6 +1231,11 @@ export class SandboxPool {
       env,
       nameOf: (p) => [...this.recs.values()].find((x) => path.resolve(x.path).toLowerCase() === path.resolve(p).toLowerCase())?.id ?? (path.resolve(p).toLowerCase() === path.resolve(this.o.repoPath).toLowerCase() ? 'the main clone' : undefined),
     });
+    // What was untracked before this branch's worker came is not its work: a save of this branch leaves it (w2988).
+    if (res.from !== res.to) {
+      const foreign = await recordForeign(r.path, res.to).catch(() => []);
+      if (foreign.length) res.notes.push(`${foreign.length} untracked file(s) were already here from before, not yours, and a save of ${res.to} leaves them uncommitted (w2988): ${someFiles(foreign)}`);
+    }
     this.git.set(id, await this.d.gitStatus(r.path));
     this.changed(r, { branch: res.to });
     return res;
