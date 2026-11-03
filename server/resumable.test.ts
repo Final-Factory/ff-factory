@@ -165,7 +165,7 @@ const fanOut = (status: WorkItem['status'] = 'blocked') =>
   item('w2895', status, ['0d38c59a', '11448f7f'], {
     blocked: ciGate('0d38c59a', 'Final-Factory/ffu#167'),
     alsoBlocked: [ciGate('50e2b52d', 'Final-Factory/ffu#135')!],
-    links: { '0d38c59a': { at: '2026-11-03T17:45:00Z' }, '11448f7f': { at: '2026-11-03T17:46:00Z' } } as WorkItem['links'],
+    links: { '0d38c59a': { at: '2026-11-03T17:45:00Z', how: 'sent' }, '11448f7f': { at: '2026-11-03T17:46:00Z', how: 'sent' } },
     movedOff: { '50e2b52d': '2026-11-03T12:40:14Z' },
   });
 
@@ -182,7 +182,7 @@ test('w2987: a worker with its own CI gate on a request is resumable, though ano
 test("w2987: ff-leftovers folders keeps the folder of a worker blocked on its own CI", () => {
   const owners = ownersOf([{ id: '50e2b52d' }], [fanOut()]);
   assert.deepEqual(owners['50e2b52d']?.requests, [{ id: 'w2895', status: 'blocked', with: true }]);
-  const facts = { sandboxes: [], live: [], resumable: resumableSessions(['50e2b52d'], [fanOut()]), owners, open: ['w2895'], closed: [] };
+  const facts = { at: '2026-11-03T15:00:00Z', connected: true, sandboxes: [], live: [], resumable: resumableSessions(['50e2b52d'], [fanOut()]), owners, open: ['w2895'], closed: [] };
   const v = judgeSession('50e2b52d', facts);
   assert.equal(v.verdict, 'keep');
   assert.match(v.why, /still on w2895/);
