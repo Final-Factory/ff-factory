@@ -741,7 +741,7 @@ export class LedgerSweep {
   }
 
   private closeAsDone(w: WorkItem, how: { how: 'prs' | 'report' | 'deploy'; pr?: number; sha?: string; mergedAt?: string; text: string }, acts: Action[]) {
-    // w2969: follow-up requests its worker handed up are not filed yet: it closes once they are, or its person drops them.
+    // w2969: follow-up requests its worker handed up are not filed yet: it closes once they are, or its person closes it.
     if (handUpsPending(w)) return;
     const at = new Date(this.now()).toISOString();
     this.d.orchestrators.ledgerEdit(w.id, `closed automatically by the ledger cleanup: ${how.text}`, (x) => {

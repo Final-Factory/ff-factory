@@ -21,10 +21,10 @@ test('w2969: the w2194 report is read as five follow-ups left to file, with its 
 test('w2969: other ways of saying it, and how many', () => {
   const cases: [string, number][] = [
     ['None of my tools can create a request, so the stages are listed above.', 1],
-    ['The 3 stage requests still need to be filed.', 3],
-    ["Ben's orchestrator needs to file two follow-up requests: stage 4 and stage 5.", 2],
+    ['I could not create the 3 stage requests.', 3],
+    ["I can't file two follow-up requests: stage 4 and stage 5.", 2],
     ['I have no tool to file new requests; the four briefs are in the spec.', 4],
-    ['Someone must file the request for the save fix.', 1],
+    ['Stage 2 is merged. I was unable to open the request for the save fix.', 1],
   ];
   for (const [text, n] of cases) assert.equal(unfiledFollowUpsIn(text)?.count, n, text);
 });
@@ -36,7 +36,34 @@ test('w2969: reports that file nothing are not read as follow-ups', () => {
     'Filed the bug as w2970 with request_pair.',
     'The requests file is at server/requests.ts.',
     "w2194: still open: blocked on CI on PR #2774",
+    // w2977: a description, a third person, history and quotes are not the worker saying it.
+    'Workers can\'t file requests: only a person\'s orchestrator has request_work.',
+    'Someone must file the request for the save fix.',
+    'The 3 stage requests still need to be filed.',
+    'The worker\'s line, "I couldn\'t file the five build requests myself, because none of my tools can create a request", matched no route.',
+    '> I couldn\'t file the five build requests myself.',
+    'It wrote \u201cI cannot create new requests\u201d and closed.',
   ]) assert.equal(unfiledFollowUpsIn(text), undefined, text);
+});
+
+// w2977: w2969's own DONE report (2026-11-03), which describes the feature and quotes the dragon worker; it was read as
+// one follow-up to file, sent Ben's orchestrator [follow-ups to file] and refused the DONE.
+const W2969_REPORT = `**TL;DR:** The fix for the dragon work never starting is merged and live. A worker that can't file a follow-up request now hands it up to the requester's orchestrator with a new \`hand_up_requests\` tool, and its DONE waits until those requests are filed.
+
+**Why the dragon work never started (from the code):**
+1. **Workers can't file requests.** Only a person's orchestrator has \`request_work\` (\`server/toolManifest.ts\`).
+2. **The worker's report reached nobody who could file.** \`onWorkerTurnEnd\` sends a \`[worker update]\` only for a turn the orchestrator started, and this turn came from Ben's note. The worker's line, "I couldn't file the five build requests myself, because none of my tools can create a request", also didn't match either of the two existing routes that pass a worker's ask up.
+3. **The DONE closed it.** \`doneProblem\` had no check for follow-up requests that were never filed. So when the ledger cleanup asked "is it done?", the worker's DONE closed w2194 (the dragon design request).
+4. **The dispatcher promised a step workers can't take.** It wrote that the worker (session c68864ef) would file the build. Its prompt never says workers can't file.
+
+**One thing to fix:** the tool's description still says the request closes once the follow-ups are filed "or its person drops them". It's a one-line follow-up, and I haven't filed it.
+
+Learned: final-factory-agents PR #542 (evidence-gate, \`lessons/research-the-route-before-you-say-cant.md\`, the w2969 section)
+
+DONE: w2969`;
+
+test('w2977: w2969\'s own report, describing the feature and quoting the dragon worker, hands up nothing', () => {
+  assert.equal(unfiledFollowUpsIn(W2969_REPORT), undefined);
 });
 
 test('w2969: a hand-up holds its DONE until each follow-up is filed', () => {

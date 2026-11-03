@@ -441,13 +441,26 @@ export function noTimedWaitOf(line: string, noTimed: Readonly<Record<string, str
  * 2026-11-03). Workers have no request_work (server/toolManifest.ts): such a report is follow-ups for the requester's
  * orchestrator to file. Returns the sentence that says it and how many requests it names (1 when it names no number).
  */
+// w2977: only the worker saying it, in the first person: "I couldn't file the five build requests", "none of my tools
+// can create a request". A description of the mechanism ("a worker that can't file a follow-up request now hands it up",
+// w2969's own report), a third person ("someone must file") and a quote of an earlier report are not a hand-up: the
+// hand_up_requests tool is the route, and this only catches a worker that wrote the sentence instead of calling it.
 const CANNOT_FILE =
-  /\b(?:couldn'?t|could not|can'?t|cannot|can not|unable to|(?:was|am|is|were) not able to|have no (?:way|tool) to)\s+(?:[\w-]+\s+){0,3}?(?:file|create|open|submit|raise|make)\s+(?:[\w-]+\s+){0,5}?(?<!pull |merge )(?:requests?|tickets?)\b|\bnone of my tools (?:can|could|lets? me) (?:file|create|open|submit|make)\b|\bno tool (?:to|that (?:can|could)) (?:file|create|open|submit) (?:a |any |new )?(?:work )?requests?\b|\b(?:requests?|briefs?|stages?)\b[^.\n]{0,60}?\b(?:need|needs|still need|left) to be filed\b|\b(?:someone|somebody|the orchestrator|your orchestrator|[A-Z][a-z]+'s orchestrator|a person)\s+(?:needs to|must|has to|should|will need to)\s+file\b/i;
+  /\bI\s+(?:couldn'?t|could not|can'?t|cannot|can not|was unable to|am unable to|was not able to|am not able to|have no (?:way|tool) to)\s+(?:[\w-]+\s+){0,3}?(?:file|create|open|submit|raise|make)\s+(?:[\w-]+\s+){0,5}?(?<!pull |merge )(?:requests?|tickets?)\b|\bnone of my tools (?:can|could|lets? me) (?:file|create|open|submit|make)\b|\bI have no tool (?:to|that (?:can|could)) (?:file|create|open|submit) (?:a |any |new )?(?:work )?requests?\b/gi;
+/** w2977: inside a quotation on its line (an odd number of quote marks before it) or a > quote line. */
+function quotedAt(text: string, at: number): boolean {
+  const lineStart = text.lastIndexOf('\n', at - 1) + 1;
+  const before = text.slice(lineStart, at);
+  if (/^\s*>/.test(before)) return true;
+  const straight = (before.match(/"/g) ?? []).length;
+  const opens = (before.match(/\u201c/g) ?? []).length, closes = (before.match(/\u201d/g) ?? []).length;
+  return straight % 2 === 1 || opens > closes;
+}
 const COUNT_WORDS: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12 };
 const FILE_COUNT = /\b(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+(?:[\w-]+\s+){0,3}?(?:requests?|briefs?|stages?)\b/i;
 export function unfiledFollowUpsIn(report: string | undefined): { line: string; count: number } | undefined {
   const text = report ?? '';
-  const m = CANNOT_FILE.exec(text);
+  const m = [...text.matchAll(CANNOT_FILE)].find((x) => !quotedAt(text, x.index ?? 0));
   if (!m) return undefined;
   // The sentence it is in: from the last sentence end or line break before it to the next one after it.
   const before = text.slice(0, m.index);

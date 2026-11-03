@@ -993,8 +993,10 @@ without one means it is off or failing, worth a person's look.
       no `[worker update]` went out, the line matched neither route above, and the ledger cleanup's "is it done?" closed
       w2194 on its DONE. Nothing was filed until 2026-11-03. Now a worker hands follow-ups up with `hand_up_requests`
       (one item per request, title and brief), and a report that says it could not file them (`unfiledFollowUpsIn` in
-      `shared/workState.ts`: "couldn't file the five build requests", "none of my tools can create a request", "the 3
-      stage requests still need to be filed") counts as a hand-up too. Either way its requester's orchestrator is sent
+      `shared/workState.ts`: "I couldn't file the five build requests", "none of my tools can create a request") counts
+      as a hand-up too. Only the worker's own first-person words count, outside quotation marks (w2977): w2969's own
+      report described the mechanism ("a worker that can't file a follow-up request now hands it up") and quoted the
+      dragon worker's sentence, and was read as a hand-up. Either way its requester's orchestrator is sent
       `[follow-ups to file]` once (`Orchestrators.handUpTo`) with the briefs or the report and its person's newest note,
       and the request records `WorkItem.handedUp`. Its DONE is kept but refused while any is unfiled
       (`ledgerRules.ts` `handUpProblem`); the cleanup neither asks "is it done?" nor auto-closes it, and reminds the
