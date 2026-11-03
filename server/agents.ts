@@ -927,6 +927,7 @@ export class Agents {
       relocateTimedLeg: (w) => this.relocateTimedLeg(w),
       withdrawStaleTimedHere: () => this.withdrawStaleTimedHere(),
       machineOnline: (id) => (store.machines.has(id.toLowerCase()) ? machines.isOnline(id.toLowerCase()) : undefined),
+      machineOfflineLong: (id) => this.longAwayOf(id)?.away.kind === 'offline',
       machinePaused: (id) => {
         const p = store.machines.get(id.toLowerCase())?.pause;
         return p?.paused ? pauseWhy(p) : undefined;
