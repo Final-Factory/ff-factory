@@ -122,7 +122,24 @@ export interface TimedRunCall {
   rpc: (a: Record<string, unknown>) => Promise<string>;
   publish?: PublishOptions;
   log?: (line: string) => void;
+  /** w2928: the session whose call this is; one of its calls still sending refuses the next (default: no guard). */
+  key?: string;
+  /** w2928: answer the agent within this long of the call's start, the sending going on behind (default ANSWER_WITHIN_MS). */
+  answerWithinMs?: number;
 }
+
+/**
+ * w2928: how long a timed_run call holds its agent before it answers and sends the rest in the background. The agent host
+ * gives a daemon's answer 20 min (agentHost.ts RPC_ANSWER_MS); 4 builds from m3 took 40 min 47 s to reach LothDesktop
+ * (tr_affa494c34, 2026-11-03: planned 03:17:03Z, its ticket taken there 03:57:50Z), so the call failed at 20 min while the
+ * sending went on, the worker called again, and a second run sent all 40 pieces beside the first.
+ */
+export const ANSWER_WITHIN_MS = 10 * 60_000;
+
+/** w2928: the timed runs this daemon is still sending, by session: a second call from one is refused, not sent again. */
+const sending = new Map<string, { runId: string; machine: string; pieces: number; of: number; bytes: number; total: number; since: string }>();
+
+const mb = (n: number) => `${(n / 1024 ** 2).toFixed(0)} MB`;
 
 const abs = (cwd: string, p: unknown) => path.resolve(cwd, String(p ?? '').trim());
 
@@ -132,6 +149,13 @@ const abs = (cwd: string, p: unknown) => path.resolve(cwd, String(p ?? '').trim(
  */
 export async function timedRunFromMachine(c: TimedRunCall): Promise<string> {
   const a = c.args;
+  const startedAt = Date.now();
+  const busy = c.key !== undefined ? sending.get(c.key) : undefined;
+  if (busy) {
+    throw new Error(
+      `timed run ${busy.runId} of yours is still sending its pieces from this computer for ${busy.machine} (${busy.pieces} of ${busy.of} pieces, ${mb(busy.bytes)} of ${mb(busy.total)}, since ${busy.since.slice(11, 16)}Z). FF Factory messages you when it is handed to ${busy.machine}, or when the sending fails: wait for that (end your turn with a wake_me check-in) rather than call timed_run again, which would send every piece again beside it.`,
+    );
+  }
   const builds = Array.isArray(a.builds) ? (a.builds as Record<string, unknown>[]) : [];
   if (builds.length < 1 || builds.length > MAX_VARIANTS) throw new Error(`builds: 1 to ${MAX_VARIANTS} entries of { name, path, args? }`);
   const names = new Set<string>();
@@ -181,24 +205,54 @@ export async function timedRunFromMachine(c: TimedRunCall): Promise<string> {
   for (const v of variants) for (const p of v.pieces) if (!source.has(p.sha256)) source.set(p.sha256, { dir: v.dir, piece: p });
   if (!source.has(savePiece.sha256)) source.set(savePiece.sha256, { dir: path.dirname(savePath), piece: savePiece });
   const uploaded: Record<string, string> = {};
-  let bytes = 0;
+  const total = plan.uploads.reduce((n, u) => n + (source.get(u.sha256)?.piece.size ?? 0), 0);
+  const progress = { runId: plan.runId, machine: plan.machine, pieces: 0, of: plan.uploads.length, bytes: 0, total, since: new Date(startedAt).toISOString() };
+  // w2928: answered before the pieces were all sent, the go's answer and a failure go to the worker as messages
+  let answered = false;
   fs.mkdirSync(c.tempDir, { recursive: true });
-  for (const u of plan.uploads) {
-    const s = source.get(u.sha256);
-    if (!s) throw new Error(`the portal asked for a piece no build here has (${u.sha256.slice(0, 12)}…)`);
-    const tmp = path.join(c.tempDir, `timed-${plan.runId}-${u.sha256.slice(0, 16)}.piece`);
-    await writePiece(s.dir, s.piece, tmp);
-    try {
-      const url = `${c.portalUrl.replace(/\/+$/, '')}/machine/attachments/uploads/${encodeURIComponent(u.uploadId)}`;
-      const body = await sendChunks(url, c.token, tmp, s.piece.size, u.chunkBytes, c.publish ?? {}, (b) => !!b.attachment);
-      const ref = body.attachment as { id: string; sha256: string };
-      if (ref.sha256 !== u.sha256) throw new Error(`a piece arrived as other bytes (sha256 ${String(ref.sha256).slice(0, 12)}…); run timed_run again`);
-      uploaded[u.sha256] = ref.id;
-      bytes += s.piece.size;
-    } finally {
-      await fs.promises.rm(tmp, { force: true });
+  const send = async (): Promise<string> => {
+    for (const u of plan.uploads) {
+      const s = source.get(u.sha256);
+      if (!s) throw new Error(`the portal asked for a piece no build here has (${u.sha256.slice(0, 12)}…)`);
+      const tmp = path.join(c.tempDir, `timed-${plan.runId}-${u.sha256.slice(0, 16)}.piece`);
+      await writePiece(s.dir, s.piece, tmp);
+      try {
+        const url = `${c.portalUrl.replace(/\/+$/, '')}/machine/attachments/uploads/${encodeURIComponent(u.uploadId)}`;
+        const body = await sendChunks(url, c.token, tmp, s.piece.size, u.chunkBytes, c.publish ?? {}, (b) => !!b.attachment);
+        const ref = body.attachment as { id: string; sha256: string };
+        if (ref.sha256 !== u.sha256) throw new Error(`a piece arrived as other bytes (sha256 ${String(ref.sha256).slice(0, 12)}…); run timed_run again`);
+        uploaded[u.sha256] = ref.id;
+        progress.pieces++;
+        progress.bytes += s.piece.size;
+      } finally {
+        await fs.promises.rm(tmp, { force: true });
+      }
     }
-  }
-  c.log?.(`timed_run ${plan.runId}: sent ${plan.uploads.length} piece(s), ${(bytes / 1024 ** 2).toFixed(0)} MB, to the portal for ${plan.machine}`);
-  return c.rpc({ phase: 'go', runId: plan.runId, uploaded, sentBytes: bytes });
+    c.log?.(`timed_run ${plan.runId}: sent ${plan.uploads.length} piece(s), ${mb(progress.bytes)}, to the portal for ${plan.machine} in ${Math.round((Date.now() - startedAt) / 1000)} s`);
+    return c.rpc({ phase: 'go', runId: plan.runId, uploaded, sentBytes: progress.bytes, ...(answered ? { late: true } : {}) });
+  };
+  if (c.key !== undefined) sending.set(c.key, progress);
+  const work = send().finally(() => {
+    if (c.key !== undefined && sending.get(c.key) === progress) sending.delete(c.key);
+  });
+  let timer: NodeJS.Timeout | undefined;
+  const late = Symbol('late');
+  const wait = Math.max(0, startedAt + (c.answerWithinMs ?? ANSWER_WITHIN_MS) - Date.now());
+  const first = await Promise.race([work, new Promise<typeof late>((resolve) => (timer = setTimeout(() => resolve(late), wait)))]).catch(async (e: Error) => {
+    // Failed while the agent still waits: the portal forgets the run quietly, the agent gets the error as before
+    await c.rpc({ phase: 'abort', runId: plan.runId, error: e.message }).catch(() => undefined);
+    throw e;
+  }).finally(() => clearTimeout(timer));
+  if (first !== late) return first;
+  answered = true;
+  work.then(
+    () => c.log?.(`timed_run ${plan.runId}: handed over after its call answered (w2928)`),
+    (e: Error) => {
+      c.log?.(`timed_run ${plan.runId}: sending failed after its call answered: ${e.message}`);
+      // The portal fails the run and tells the worker why (its call answered long ago)
+      void c.rpc({ phase: 'abort', runId: plan.runId, error: e.message, tell: true }).catch((e2: Error) => c.log?.(`timed_run ${plan.runId}: could not tell the portal: ${e2.message}`));
+    },
+  );
+  const minutes = Math.round((Date.now() - startedAt) / 60_000);
+  return `Timed run ${plan.runId} for ${plan.machine}: still sending its pieces after ${minutes} min (${progress.pieces} of ${progress.of} pieces, ${mb(progress.bytes)} of ${mb(total)} sent so far); this computer goes on sending them in the background (w2928). FF Factory messages you when it is handed to ${plan.machine} (with its legs and bound), then again with the table and the logs when it ends, or with the reason if the sending fails. Do not call timed_run again for these builds: it would be refused while this one sends. End your turn now with a wake_me check-in of about 90 minutes as the fallback; do not wait in the foreground.`;
 }

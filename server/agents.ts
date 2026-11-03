@@ -1739,6 +1739,7 @@ export class Agents {
       return tr.plan(machineId, { session: info.id, requests: open.map((w) => w.id), what, ...(info.requestedBy ? { uploadedBy: info.requestedBy.userId } : {}) }, a);
     }
     if (a.phase === 'go') return tr.go(info.id, a);
+    if (a.phase === 'abort') return tr.abort(info.id, a);
     throw new Error(`timed_run needs ${machineId}'s daemon to read and send the builds, and this one is older than w1946: it is updated by itself once idle; try again after that`);
   }
 
