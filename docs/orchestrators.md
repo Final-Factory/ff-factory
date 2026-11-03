@@ -1349,6 +1349,14 @@ from the other pilots, server/mergeOnGreen.ts) is in the arm:
   server/launch.ts): a worker gets it once its daemon has updated and its process has started again. On an older one the
   field is dropped, and the worker is only told again that it may.
 
+- One leg of a request with several workers (a fan-out row, w2972): its report ends with `LEG DONE: wNNN <its leg>` in place
+  of the DONE line, and the pilot takes it. The offer says so when other workers are on the request or its people set a
+  standing target. A `LEG DONE` records that worker's leg as done (`WorkItem.done[...].leg`, legDoneMarkers), so it no longer
+  holds the request open, but nothing closes the request on it: doneMarkers, workerEnded, recheckDone and the cleanup's
+  notDoneReason read only full DONEs (requestDonesOf). With no other worker on it, the dispatcher gets `[ledger] ... finished
+  its leg ... Start its next leg`; with a standing target, the w2956 check runs instead. A plain `DONE` from a leg still
+  closes the request when nobody else is on it at that moment, which is why 50e2b52d (w2895 row M2.17) declined the pilot.
+
 The resume note on a cleared CI gate says `Run ff-pr merge now (<pr>): it merges on green, or names the red run to read`; it
 said `gh pr checks`, which the wait guard refuses (w2015).
 

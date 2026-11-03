@@ -36,6 +36,7 @@ import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { PR2395_DIFF, W1958_0459, W1958_1632, W2651_0457, W2651_2051 } from './priorDecisions.fixtures.ts';
 import { startTestMachine, type TestMachineOptions } from './testMachine.ts';
 import { afterMergeReason } from './ledgerRules.ts';
+import { doneIdsIn, legDoneIdsIn } from './ledgerRules.ts';
 import { roomForWork, timedLine, type Computer, type RoomNow } from './placement.ts';
 import type { Occupant } from './timedLegPlace.ts';
 import { decisionsOn } from '../shared/waiting.ts';
@@ -8740,4 +8741,57 @@ test('w2867: the one-off fix makes w2850 Waiting on input on Ben, its question a
   assert.equal(w.log.filter((l) => l.includes('(w2867 one-off)')).length, 1, 'once');
   await new Promise((r) => setTimeout(r, 200));
   assert.equal(heard(ben.id, '[needs you]').length + heard(loth.id, '[needs you]').length, 0);
+});
+
+test('w2972: one leg of a two-worker request hands its PR to the merge-on-green pilot with LEG DONE: on green FF Factory merges it and files the report, and the request stays open for the other leg until a DONE for the whole of it', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o, dispatcher, heard } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }, { id: 'w1x' }]);
+  mergeOnGreenArm(o, (id) => id === 'w1');
+  const pr = 'Final-Factory/ffu#135';
+  const head = 'abc1234def5678';
+  let checks: { done: boolean; text: string; green?: true } = { done: false, text: `1 of 1 checks on ${pr} still running` };
+  const merges: string[] = [];
+  const watch = new BlockerWatch({ store, orchestrators: o, ci: async () => checks, merge: async (ref) => void merges.push(ref) });
+  const a = await startedFor(env, 'w1');
+  const b = await secondWorkerOn(env, 'w1');
+  // 50e2b52d (w2895 row M2.17) on 2026-11-03: "it requires a `DONE: w2895` line, and that would close the whole fan-out request".
+  const told = String(await a.h.blocked_on!({ request: 'w1', prs: [`ci:${pr}`], head, what: 'CI on ffu PR #135' }));
+  assert.ok(told.includes(`You are one leg of w1 (other workers on it: ${b.id}): end it with "LEG DONE: w1 <your leg>" in place of the DONE line`), told);
+  const report = 'Row M2.17: thin bots merged.\n\nLEG DONE: w1 row M2.17\nLearned: nothing new';
+  const set = String(await a.h.blocked_on!({ request: 'w1', prs: [`ci:${pr}`], head, what: 'CI on ffu PR #135', merge_on_green: report }));
+  assert.doesNotMatch(set, /merge_on_green ignored/, set);
+  assert.equal(store.work.get('w1')!.blocked!.mergeOnGreen?.report, report);
+  checks = { done: true, green: true, text: `CI on ${pr} finished: all 1 checks passed or skipped` };
+  await watch.tick();
+  assert.deepEqual(merges, [pr], 'merged on green');
+  let w = store.work.get('w1')!;
+  assert.notEqual(w.status, 'done', w.log.slice(-3).join(' | '));
+  assert.equal(w.done?.[a.id]?.leg, true, 'its leg is recorded as done');
+  assert.ok(w.log.some((l) => l.includes(`worker ${a.id} said LEG DONE for its leg ("LEG DONE: w1 row M2.17"); w1 stays open, still on it: ${b.id} (w2972)`)), w.log.slice(-3).join(' | '));
+  assert.equal(agents.waker.pending(a.id), undefined, 'the leg worker is not resumed');
+  // The leg's worker ending, and the ledger's re-checks, do not close it on a LEG DONE either.
+  o.workerEnded(a.info);
+  assert.equal(o.recheckDone('w1', 'a test'), false);
+  assert.notEqual(store.work.get('w1')!.status, 'done');
+  // The other leg finishes with LEG DONE too: still open, and the dispatcher hears nobody is on it.
+  const before = heard(dispatcher().info.id, '[ledger]').length;
+  o.workerTurnEnded(b.info, 'Row R.M3 merged.\n\nLEG DONE: w1 row R.M3');
+  w = store.work.get('w1')!;
+  assert.notEqual(w.status, 'done');
+  await until('the dispatcher hears the last leg ended', () => heard(dispatcher().info.id, '[ledger]').length > before);
+  assert.match(heard(dispatcher().info.id, '[ledger]').at(-1)!.text, /w1 .*finished its leg \("LEG DONE: w1 row R\.M3"\), and no other worker is on it now\. Start its next leg/);
+  // A DONE for the whole of it closes it.
+  o.workerTurnEnded(b.info, 'Every row is merged.\n\nDONE: w1\nLearned: nothing new');
+  w = store.work.get('w1')!;
+  assert.equal(w.status, 'done', w.log.slice(-3).join(' | '));
+});
+
+test('w2972: LEG DONE lines are read by request id with words after it; a DONE line is not one, nor a mention in a sentence', () => {
+  assert.deepEqual(legDoneIdsIn('LEG DONE: w2895 row M2.17'), ['w2895']);
+  assert.deepEqual(legDoneIdsIn('**LEG DONE:** w2895 (row R.M3)\n- LEG-DONE w12'), ['w2895', 'w12']);
+  assert.deepEqual(legDoneIdsIn('DONE: w2895'), []);
+  assert.deepEqual(legDoneIdsIn('I will write LEG DONE: w2895 later'), []);
+  assert.deepEqual(doneIdsIn('LEG DONE: w2895 row M2.17'), [], 'a LEG DONE never closes the request');
 });

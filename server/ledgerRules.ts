@@ -5,7 +5,7 @@ import type { SessionInfo, TranscriptEvent, WorkErrorHandled, WorkItem, WorkPr }
 import type { Config } from './config.ts';
 import { handUpsPending, requestWaitOf } from '../shared/workState.ts';
 import { discordThreadsIn, mergedText } from './mergedIntake.ts';
-import { afterReopen, doneOf } from './work.ts';
+import { afterReopen, doneOf, requestDonesOf } from './work.ts';
 
 export interface CleanupSettings {
   enabled: boolean;
@@ -476,7 +476,7 @@ export function notDoneReason(w: Pick<WorkItem, 'id' | 'done' | 'reopenedAt'>, w
   const report = last.lastResult ?? '';
   // A DONE from before a reopen says nothing about the reopened work (w731).
   if (doneIdsIn(report).includes(w.id.toLowerCase()) && afterReopen(w, last.lastResultAt ?? last.lastActivityAt)) return undefined;
-  const said = doneOf(w)[last.id];
+  const said = requestDonesOf(w)[last.id];
   const reportAt = Date.parse(last.lastResultAt ?? '') || 0;
   if (said && (Date.parse(said.at) || 0) >= reportAt - 60_000) return undefined;
   const line = report.replace(/\s+/g, ' ').trim();
@@ -499,7 +499,7 @@ export function heldOpenReason(w: Pick<WorkItem, 'id' | 'status' | 'blocked' | '
   if (!b || b.by === 'ledger cleanup') return undefined;
   // A DONE for it after the block was set says the block is the last thing left behind it (w643's w650).
   const dones = [
-    ...Object.values(doneOf(w)).map((d) => Date.parse(d.at) || 0),
+    ...Object.values(requestDonesOf(w)).map((d) => Date.parse(d.at) || 0),
     ...workers.filter((s) => doneIdsIn(s.lastResult ?? '').includes(id) && afterReopen(w, s.lastResultAt ?? s.lastActivityAt)).map((s) => Date.parse(s.lastResultAt ?? s.lastActivityAt) || 0),
   ];
   if (dones.some((t) => t >= (Date.parse(b.at) || 0))) return undefined;
@@ -517,6 +517,18 @@ export function heldOpenReason(w: Pick<WorkItem, 'id' | 'status' | 'blocked' | '
 export function doneIdsIn(text: string): string[] {
   const out = new Set<string>();
   for (const m of (text ?? '').matchAll(/^[\s*_>`-]*DONE:?\s+(w\d+)(?!\w)(?:[\s.`*_]*$|[`*_]*\s*(?:[(—–:]|-\s|\*\*|__).*$)/gim)) out.add(m[1].toLowerCase());
+  return [...out];
+}
+
+/**
+ * The requests a worker's report says ONE LEG of is finished (w2972): lines that start `LEG DONE: w2895`, any words after the
+ * id (`LEG DONE: w2895 row M2.17`). A fan-out's row worker ends with it: its leg is recorded as done and the request stays
+ * open for its other legs (Orchestrators.legDoneMarkers); only a `DONE: <id>` closes it. 50e2b52d (w2895 row M2.17) declined
+ * the merge-on-green pilot on 2026-11-03 because the pilot took only a DONE line.
+ */
+export function legDoneIdsIn(text: string): string[] {
+  const out = new Set<string>();
+  for (const m of (text ?? '').matchAll(/^[\s*_>`-]*LEG[ -]DONE:?[*_`]*\s+[*_`]*(w\d+)(?!\w)/gim)) out.add(m[1].toLowerCase());
   return [...out];
 }
 

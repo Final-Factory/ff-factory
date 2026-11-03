@@ -39,6 +39,7 @@ import {
   settleByHand,
   reopenWork,
   doneOf,
+  requestDonesOf,
   livePair,
   replacedLeg,
   filingKeys,
@@ -49,7 +50,7 @@ import {
 } from './work.ts';
 import { autoApproveProblem, cleanBlock, cleanLine, crashFacts, crashKinship, crashPeersBlock, identityKeys, ownApprovalCount, parseMarkers, quoteUntrusted, sourceTag, titleOnly } from './intakeRules.ts';
 import { readDiscordConfig } from './discordConfig.ts';
-import { LIMIT_END, doneIdsIn, doneProblem, learnedProblem, reportProblem, mergedMentionsIn, notDoneReason, pausedIn, reportVerdict, stillOpenIn, toolErrors, turnEvidence, turnTroubleOf, type TurnTrouble } from './ledgerRules.ts';
+import { LIMIT_END, doneIdsIn, doneProblem, legDoneIdsIn, learnedProblem, reportProblem, mergedMentionsIn, notDoneReason, pausedIn, reportVerdict, stillOpenIn, toolErrors, turnEvidence, turnTroubleOf, type TurnTrouble } from './ledgerRules.ts';
 import { aheadText, answerAfter, asksAPerson, dispatcherAskIn, handUpsPending, holdsOf, orchestratorAskIn, standingTargetOf, personWaitIn, questionShareKey, reportWaitKey, roomShares, servedBy, UNDECIDED_BOUND_MS, unfiledFollowUpsIn } from '../shared/workState.ts';
 import { capacityBlockProblem, capacityWaitIn, needsOf, needsTimed, pairRoom, pairText, PAIR_MAX_LEGS, resolveNeeds, steamShortIn } from '../shared/capacity.ts';
 import { mentionsSteam, STEAM_READ } from '../shared/steam.ts';
@@ -5275,7 +5276,10 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       if (!inArm || !ciOnly) return {};
       this.stamp(w, `${MERGE_ON_GREEN_MARK}: its worker ${sessionId} is told it may leave its after-merge report`);
       return {
-        note: `${w.id} is in the merge-on-green pilot (w2045): if nothing follows the merge but your report (no deploy check, no second PR, no release step), call blocked_on again now with the same prs and head, and merge_on_green: the report you would write after the merge, whole (its "DONE: ${w.id}" line, Learned:, and the rest). FF Factory then merges on green and files it, with no turn of yours. If something follows the merge, end your turn as below.`,
+        note:
+          `${w.id} is in the merge-on-green pilot (w2045): if nothing follows the merge but your report (no deploy check, no second PR, no release step), call blocked_on again now with the same prs and head, and merge_on_green: the report you would write after the merge, whole (its "DONE: ${w.id}" line, Learned:, and the rest). FF Factory then merges on green and files it, with no turn of yours. ` +
+          this.legOffer(w, sessionId) +
+          `If something follows the merge, end your turn as below.`,
       };
     }
     const why = !inArm
@@ -5284,13 +5288,57 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
         ? "it waits on more than one pull request's CI alone"
         : !head || head.trim().length < 7
           ? 'it needs head (git rev-parse HEAD), the commit FF Factory merges at'
-          : !doneIdsIn(text).includes(w.id)
-            ? `the report has no "DONE: ${w.id}" line (work left after the merge: leave out merge_on_green)`
+          : !doneIdsIn(text).includes(w.id) && !legDoneIdsIn(text).includes(w.id)
+            ? `the report has no "DONE: ${w.id}" line, nor "LEG DONE: ${w.id} <your leg>" for one leg of it (work left after the merge: leave out merge_on_green)`
             : undefined;
     if (why) return { note: `merge_on_green ignored: ${why}; you are resumed when CI finishes, as usual.` };
     gates[0].mergeOnGreen = { head: head!.trim().toLowerCase(), report: text.slice(0, MERGE_ON_GREEN_REPORT_CHARS), session: sessionId };
     this.stamp(w, `${MERGE_ON_GREEN_MARK}: worker ${sessionId} left its after-merge report (${clip(firstLine(text), 160)}); FF Factory merges ${gates[0].ref} on green at ${head!.trim().slice(0, 12)}`);
     return { merge: true };
+  }
+
+  /**
+   * w2972: the pilot's offer to a leg of a fan-out (other workers on the request, or its people's standing target): end the
+   * report with `LEG DONE`, which records the leg and leaves the request open. 50e2b52d (w2895 row M2.17) declined the pilot
+   * on 2026-11-03: "it requires a `DONE: w2895` line, and that would close the whole fan-out request, not just my row".
+   */
+  private legOffer(w: WorkItem, sessionId: string): string {
+    const others = w.sessionIds.filter((id) => id !== sessionId && this.store.sessions.get(id)?.kind === 'worker' && !doneOf(w)[id]);
+    const leg = `end it with "LEG DONE: ${w.id} <your leg>" in place of the DONE line: that records your leg as done and leaves ${w.id} open for the rest; only a "DONE: ${w.id}" closes it, once no other worker is on it. `;
+    if (others.length || standingTargetOf(w)) return `You are one leg of ${w.id} (${others.length ? `other workers on it: ${others.slice(0, 6).join(', ')}` : 'its people keep several legs running'}): ${leg}`;
+    return `If your work is one leg of ${w.id} (one row of a fan-out), ${leg}`;
+  }
+
+  /**
+   * A worker's `LEG DONE: wNNN` lines (w2972, legDoneIdsIn): its leg of the request is done. Recorded as its part
+   * (WorkItem.done, leg) so it no longer holds the request open, but never closes it: only a `DONE: wNNN` does (doneMarkers,
+   * workerEnded, recheckDone read requestDonesOf). With nobody else on it, the dispatcher is told to start its next leg
+   * (a standing target: fanOutSoon, w2956). The worker is not messaged: a reply would cost the turn the pilot saves.
+   */
+  private legDoneMarkers(s: SessionInfo, text: string) {
+    const full = new Set(doneIdsIn(text));
+    for (const id of legDoneIdsIn(text)) {
+      if (full.has(id)) continue;
+      const w = this.store.work.get(id);
+      if (!w || !(isOpen(w) || w.status === 'stalled') || !w.sessionIds.includes(s.id)) continue;
+      // Held as the pilot's report while its merge waits on green CI, as a DONE is (doneMarkers).
+      if (w.status === 'blocked' && gatesOf(w).some((g) => g.mergeOnGreen?.session === s.id)) continue;
+      const prior = doneOf(w)[s.id];
+      if (prior && !prior.leg) continue;
+      const line = clip(firstLine(text.split('\n').find((l) => legDoneIdsIn(l).includes(id)) ?? text), 300);
+      w.done = { ...doneOf(w), [s.id]: { at: this.now().toISOString(), report: line, text: ((prior?.text ? `${prior.text}\n\n` : '') + text).slice(-DONE_TEXT_CHARS), leg: true } };
+      this.releaseAfterDone(w);
+      const others = this.stillOn(w, s.id);
+      this.stamp(w, `worker ${s.id} said LEG DONE for its leg ("${clip(line, 160)}"); ${w.id} stays open${others.length ? `, still on it: ${others.join(', ')}` : ''} (w2972)`);
+      this.store.putWork(w);
+      if (standingTargetOf(w)) this.fanOutSoon();
+      else if (!others.length)
+        this.toDispatcher(
+          `[ledger] ${w.id} "${clip(w.title, 80)}" (${names(w.requesters)}, ${w.priority}): worker ${s.id} finished its leg ("${clip(line, 200)}"), and no other worker is on it now. ` +
+            `Start its next leg (start_agent with work_id "${w.id}"), or, if every leg is done, have a worker check the whole of it and report "DONE: ${w.id}" (w2972: a LEG DONE never closes a request).`,
+          w.requestedBy,
+        );
+    }
   }
 
   /**
@@ -5505,6 +5553,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     // w2969: read before its DONE, so a report that says both ("couldn't file the five build requests … DONE") keeps it open.
     this.unfiledInReport(s, text, served);
     this.doneMarkers(s, text);
+    this.legDoneMarkers(s, text);
     this.mergedMentions(s, text);
     const wrapped = this.wrapUpAnswers(s, text);
     const open = stillOpenIn(text);
@@ -5743,7 +5792,12 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
         this.store.putWork(w);
         continue;
       }
-      const own = Object.entries(done).filter(([id]) => id !== OPS_ID);
+      const own = Object.entries(done).filter(([id, d]) => id !== OPS_ID && !d.leg);
+      if (!own.length && Object.values(done).some((d) => d.leg)) {
+        this.stamp(w, `worker ${s.id} ended; its workers said LEG DONE for their legs only, so it stays open for a DONE for the whole of it (w2972)`);
+        this.store.putWork(w);
+        continue;
+      }
       if (!own.length) {
         this.stamp(w, `worker ${s.id} ended; only the orchestration worker said DONE, for its job, so it stays open for its own worker's DONE (w1972)`);
         this.store.putWork(w);
@@ -5919,12 +5973,12 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    */
   recheckDone(id: string, why: string): boolean {
     const w = this.store.work.get(id);
-    if (!w || !Object.keys(doneOf(w)).length || !(isOpen(w) || w.status === 'stalled') || w.question || w.flag) return false;
+    if (!w || !Object.keys(requestDonesOf(w)).length || !(isOpen(w) || w.status === 'stalled') || w.question || w.flag) return false;
     this.releaseAfterDone(w);
     if (this.stillOn(w).length) return false;
     const all = [...this.store.work.values()];
     if (w.sessionIds.some((sid) => { const x = this.store.sessions.get(sid); return BUSY.includes(x?.status ?? 'stopped') && !(x && replacedLeg(w, x)) && servedBy(sid, all).has(w.id); })) return false;
-    const [sid, last] = Object.entries(doneOf(w)).sort((a, b) => b[1].at.localeCompare(a[1].at))[0];
+    const [sid, last] = Object.entries(requestDonesOf(w)).sort((a, b) => b[1].at.localeCompare(a[1].at))[0];
     if (doneProblem(w, last.text ?? last.report)) return false;
     // A worker turn that ended in an error or an interrupt after that DONE (w1870): the ledger cleanup resumes or escalates it.
     const tr = this.lastTurnTrouble(w);
