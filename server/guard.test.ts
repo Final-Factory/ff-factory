@@ -280,12 +280,45 @@ test('branch switches: refused in the sandbox while its editor runs, fine otherw
   for (const c of denied) assert.match(checkEditorSwitch(c, sb, sb) ?? '', /switch_branch/, c);
   const allowed = ['git checkout -- Assets/a.cs', 'git checkout HEAD -- a.unity', 'git restore Assets/a.cs', 'git switch --help', 'git status', 'git -C C:/tools/other switch main', 'cd C:/tools/other && git checkout main'];
   for (const c of allowed) assert.equal(checkEditorSwitch(c, sb, sb), undefined, c);
+  // w2971: a worker's scratch clone outside the sandbox (its temp folder) is not the tree the editor has open.
+  const env = { TMPDIR: 'C:/ffw/tmp/ffa-1', SB: sb };
+  const scratchOk = [
+    'cd "$TMPDIR/ffu" && git checkout P0.12',
+    'cd $TMPDIR/ffu && git switch -c row origin/main',
+    'git -C "$TMPDIR/ffu" checkout main',
+    'git -C ${TMPDIR}/ffu switch main',
+    'git --git-dir=$TMPDIR/ffu/.git --work-tree=$TMPDIR/ffu checkout main',
+    'git --work-tree C:/ffw/tmp/ffa-1/ffu --git-dir C:/ffw/tmp/ffa-1/ffu/.git checkout main',
+  ];
+  for (const c of scratchOk) assert.equal(checkEditorSwitch(c, sb, sb, env), undefined, c);
+  // From a scratch clone, a command still aimed at the sandbox is refused, and so is one whose directory cannot be told.
+  const scratch = 'C:/ffw/tmp/ffa-1/ffu';
+  const stillDenied = [
+    'git -C C:/ffsb/sb1 checkout other',
+    'git -C $SB switch other',
+    'git -C C:/ffw/tmp/ffa-1/../../../ffsb/sb1 checkout other',
+    'git --work-tree=C:/ffsb/sb1 checkout other',
+    'git --git-dir=C:/ffsb/sb1/.git checkout other',
+    'GIT_WORK_TREE=$SB git checkout other',
+    'cd $SB && git checkout other',
+    'cd $UNSET_DIR && git checkout other',
+    'cd $(pwd) && git switch other',
+  ];
+  for (const c of stillDenied) assert.match(checkEditorSwitch(c, scratch, sb, env) ?? '', /switch_branch/, c);
+  // Without the variables (no env), $TMPDIR cannot be told apart from the sandbox, so it stays refused.
+  assert.match(checkEditorSwitch('cd $TMPDIR/ffu && git checkout x', sb, sb) ?? '', /switch_branch/);
   // Wired into the guard only while the editor is up.
   let running = true;
   const g = sandboxGuard({ sandboxId: 'sb1', sandboxPath: sb, protectedPaths: [], gameRepos: ['https://github.com/example-org/example-game.git'], remotes: () => new Map(), editorRunning: () => running });
   assert.equal(await decide(g, 'Bash', { command: 'git switch other' }, sb), 'deny');
   running = false;
   assert.equal(await decide(g, 'Bash', { command: 'git switch other' }, sb), 'allow');
+  // The guard passes the worker's shell variables on: the scratch clone is allowed, the sandbox refused (w2971).
+  const ge = sandboxGuard({ sandboxId: 'sb1', sandboxPath: sb, protectedPaths: [], gameRepos: ['https://github.com/example-org/example-game.git'], remotes: () => new Map(), editorRunning: () => true, env: { TMPDIR: 'C:/ffw/tmp/ffa-1' } });
+  assert.equal(await decide(ge, 'Bash', { command: 'cd "$TMPDIR/ffu" && git checkout P0.12' }, sb), 'allow');
+  assert.equal(await decide(ge, 'Bash', { command: 'git checkout P0.12' }, 'C:/ffw/tmp/ffa-1/ffu'), 'allow');
+  assert.equal(await decide(ge, 'Bash', { command: 'git checkout other' }, sb), 'deny');
+  assert.equal(await decide(ge, 'Bash', { command: 'git -C C:/ffsb/sb1 checkout other' }, 'C:/ffw/tmp/ffa-1/ffu'), 'deny');
 });
 
 test('public repos: a push whose commits carry a private email is refused', async () => {
