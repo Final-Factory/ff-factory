@@ -2980,6 +2980,19 @@ export interface BuildHold {
   told: boolean;
 }
 
+/**
+ * The project as the web app shows it (config `project`, docs/project.md; w2932): `custom` when it is not Final Factory,
+ * so the sidebar names it; `community` false hides the Max and FFBox strip; `heading` and `suggestions` replace the
+ * orchestrator page's empty state. Absent from a server older than the field.
+ */
+export interface ProjectView {
+  name: string;
+  custom: boolean;
+  community: boolean;
+  heading?: string;
+  suggestions?: string[];
+}
+
 export interface AppState {
   /** The running server's version; absent from a server older than 0.1.0. */
   app?: AppVersion;
@@ -3030,7 +3043,7 @@ export interface AppState {
   intake?: IntakeSummary;
   /** The ledger cleanup (docs/orchestrators.md, "Ledger cleanup"): its switches and its last run. */
   ledger?: LedgerCleanupState;
-  config: { defaultModel: string; models: string[]; defaultBase: string; attachments: AttachmentSettings; live?: { enabled: boolean } };
+  config: { defaultModel: string; models: string[]; defaultBase: string; attachments: AttachmentSettings; live?: { enabled: boolean }; project?: ProjectView };
   settings: AppSettings;
   /** The people the Settings pool menu offers (w1717); absent from a server older than the field. */
   poolPeople?: PoolPerson[];

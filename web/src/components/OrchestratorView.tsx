@@ -46,6 +46,7 @@ export const OrchestratorView = memo(function OrchestratorView({ session, compac
   const heartbeat = useHeartbeat();
   const now = useNow(30_000);
   const account = useStore((s) => (s.app && session ? accountOf(s.app, session.id) : undefined));
+  const project = useStore((s) => s.app?.config?.project);
 
   useEffect(() => (session ? openSession(session.id) : undefined), [session?.id]);
 
@@ -104,10 +105,10 @@ export const OrchestratorView = memo(function OrchestratorView({ session, compac
         <span />
         <span />
       </div>
-      <h1>What should the factory work on?</h1>
+      <h1>{project?.heading ?? 'What should the factory work on?'}</h1>
       <p>Say it in plain words. Your orchestrator checks what is already in flight, hands the work to the dispatcher, and reports back here.</p>
       <div className="chips">
-        {SUGGESTIONS.map((s) => (
+        {(project?.suggestions ?? SUGGESTIONS).map((s) => (
           <button key={s} className="suggest" onClick={() => setPrefill(s)}>
             {s}
           </button>

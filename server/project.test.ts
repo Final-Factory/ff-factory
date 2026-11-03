@@ -8,7 +8,7 @@ import { SessionManager, setQueryForTesting } from './sessions.ts';
 import { MachineManager } from './machines.ts';
 import { Agents, DISCORD_RULES, MERGE_RULES } from './agents.ts';
 import { Identity } from './identity.ts';
-import { PROJECT_DEFAULTS, checkProjectConfig, projectBrief, projectOf, type Config, type ProjectConfig } from './config.ts';
+import { PROJECT_DEFAULTS, checkProjectConfig, projectBrief, projectOf, projectView, type Config, type ProjectConfig } from './config.ts';
 import type { Requester, UserInfo } from '../shared/types.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { useFakeVault } from './testVault.ts';
@@ -126,5 +126,19 @@ test('config project is checked at load', () => {
     [{ name: '' }, /project\.name is a non-empty string/],
     [{ unity: 'no' }, /project\.unity is true or false/],
     [{ integration: 'push' }, /project\.integration is "pull-request" or "local"/],
+    [{ suggestions: 'Check benefits' }, /project\.suggestions is a list of at most 6/],
+    [{ suggestions: ['a', 'b', 'c', 'd', 'e', 'f', 'g'] }, /project\.suggestions is a list of at most 6/],
+    [{ heading: ' ' }, /project\.heading is a non-empty string/],
   ] as const) assert.throws(() => checkProjectConfig({ project: bad as never }), why);
+});
+
+test('the web app sees the project: Final Factory unchanged, another job by name with its own chips', () => {
+  assert.deepEqual(projectView({}), { name: 'Final Factory', custom: false, community: true });
+  assert.deepEqual(projectView({ project: { name: 'Ken Martin Audiology', community: false, heading: 'What should the office work on?', suggestions: ["Check tomorrow's benefits"] } }), {
+    name: 'Ken Martin Audiology',
+    custom: true,
+    community: false,
+    heading: 'What should the office work on?',
+    suggestions: ["Check tomorrow's benefits"],
+  });
 });

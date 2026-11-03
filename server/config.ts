@@ -4,7 +4,7 @@ import type { DevRequestsConfig } from './devRequests.ts';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { PermissionMode } from '../shared/types.ts';
+import type { PermissionMode, ProjectView } from '../shared/types.ts';
 import { CLEANUP_SOFT_GB_DEFAULT } from '../shared/types.ts';
 import type { MinPriority } from '../shared/capacity.ts';
 import { checkObject, dataRecoveries, readJsonDurable, writeFileDurable } from './durable.ts';
@@ -190,6 +190,10 @@ export interface ProjectConfig {
   orchestratorBriefFile?: string;
   /** Markdown appended to every worker's brief as "This deployment", before Reporting. Optional. */
   workerBriefFile?: string;
+  /** The orchestrator page's empty-state heading (default "What should the factory work on?"). Optional. */
+  heading?: string;
+  /** The orchestrator page's suggestion chips, at most 6 (default Final Factory's). Optional. */
+  suggestions?: string[];
 }
 
 export const PROJECT_DEFAULTS: ProjectConfig = {
@@ -203,6 +207,18 @@ export const PROJECT_DEFAULTS: ProjectConfig = {
 /** This portal's project with the defaults filled in. */
 export function projectOf(cfg: Partial<Pick<Config, 'project'>>): ProjectConfig {
   return { ...PROJECT_DEFAULTS, ...cfg.project };
+}
+
+/** What the web app shows of the project (AppState.config.project). */
+export function projectView(cfg: Partial<Pick<Config, 'project'>>): ProjectView {
+  const p = projectOf(cfg);
+  return {
+    name: p.name,
+    custom: p.name !== PROJECT_DEFAULTS.name,
+    community: p.community,
+    ...(p.heading ? { heading: p.heading } : {}),
+    ...(p.suggestions?.length ? { suggestions: p.suggestions } : {}),
+  };
 }
 
 const briefWarned = new Set<string>();
@@ -227,13 +243,16 @@ export function checkProjectConfig(cfg: Partial<Pick<Config, 'project'>>): void 
   const p = cfg.project;
   if (p === undefined) return;
   if (typeof p !== 'object' || p === null || Array.isArray(p)) throw new Error('config project is an object, e.g. { "name": "Ken Martin Audiology", "unity": false }');
-  for (const key of ['name', 'description', 'worldBriefFile', 'orchestratorBriefFile', 'workerBriefFile'] as const) {
+  for (const key of ['name', 'description', 'worldBriefFile', 'orchestratorBriefFile', 'workerBriefFile', 'heading'] as const) {
     if (p[key] !== undefined && (typeof p[key] !== 'string' || !p[key]!.trim())) throw new Error(`config project.${key} is a non-empty string`);
   }
   for (const key of ['unity', 'community'] as const) {
     if (p[key] !== undefined && typeof p[key] !== 'boolean') throw new Error(`config project.${key} is true or false`);
   }
   if (p.integration !== undefined && p.integration !== 'pull-request' && p.integration !== 'local') throw new Error('config project.integration is "pull-request" or "local"');
+  if (p.suggestions !== undefined && (!Array.isArray(p.suggestions) || p.suggestions.length > 6 || p.suggestions.some((s) => typeof s !== 'string' || !s.trim()))) {
+    throw new Error('config project.suggestions is a list of at most 6 non-empty strings');
+  }
 }
 
 export interface Config {

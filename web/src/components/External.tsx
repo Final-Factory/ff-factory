@@ -22,7 +22,7 @@ export function ExternalStrip({ app, route, onNavigate }: { app: AppState; route
   const now = useNow(15_000);
   const m = app.max;
   const f = app.ffbox ?? app.providers?.find((p) => p.id === 'ffbox');
-  if (!m && !f) return null;
+  if ((!m && !f) || app.config?.project?.community === false) return null;
   const go = (r: Route) => {
     navigate(r);
     onNavigate();
