@@ -4,7 +4,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { LEFTOVER, LeftoverReaper, callerPids, envFrom, installLeftoversShim, kindOf, macEnvLine, orphanVerdict, ownLeftovers, readEnvs, readLeases, realInspect, sessionVerdict, slotOf, tempSessionInArgs, tempSessionOf, type LeftoverDeps, type PlayerLease, type ProcEnv } from '../machine/leftovers.ts';
+import { LEFTOVER, LeftoverReaper, callerPids, envFrom, installLeftoversShim, kindOf, macEnvLine, orphanVerdict, ownLeftovers, personGames, readEnvs, readLeases, realInspect, sessionVerdict, slotOf, tempSessionInArgs, tempSessionOf, type LeftoverDeps, type PlayerLease, type ProcEnv } from '../machine/leftovers.ts';
 import { realDeps as realUnityDeps, type Proc, type UnityPlatform } from '../machine/unity.ts';
 import { playerText, unitySlotsLine } from '../shared/fleet.ts';
 
@@ -634,7 +634,7 @@ test('on a real Linux machine or Mac: a detached "player" and "Xvfb" of a stoppe
 
 // ---------------------------------------------------------------- w1894: a person's own game
 
-test("w1894: a game no worker started is a person's (Steam's, or a slot player with no lease and no worker in it); a worker's never is, and the person's is never ended", async () => {
+test("w1894: a game no worker started is a person's (Steam's); a worker's never is, nor a slot player (w2994), and the person's is never ended", async () => {
   const STEAM = { pid: 4242, ppid: 9000, cmd: '/home/u/.steam/steam/steamapps/common/Final Factory/FinalFactory.x86_64 -screen-fullscreen 1' };
   const byHand = { pid: 4343, ppid: 9212, cmd: `${PLAYERS}/slot1-0/player/finalfactory.x86_64 -screen-fullscreen 0` };
   const leased = { pid: 501, ppid: 9212, cmd: `${PLAYERS}/slot2-0/player/finalfactory.x86_64 -batchmode` };
@@ -645,13 +645,71 @@ test("w1894: a game no worker started is a person's (Steam's, or a slot player w
   const leases: PlayerLease[] = [{ slot: 'slot2-0', pid: 501, host: 'biscuit', session: 'cccc3333', sandbox: `${ROOT}/sandboxes/slot2` }];
   const on = machine(procs(), { personPlay: true, leases, sessions: { aaaa1111: { live: true }, cccc3333: { live: true } } });
   await on.look(0);
-  assert.deepEqual(on.reaper.report().persons.sort(), [4242, 4343]);
-  assert.ok(!on.reaper.report().players.some((p) => p.pid === 4343), 'the slot player started by hand is no orphan of a worker');
+  assert.deepEqual(on.reaper.report().persons, [4242]);
+  // w2994: a slot player with no lease of its own is the pool's, judged as an orphan exactly as with the look off.
+  assert.equal(on.reaper.report().players.find((p) => p.pid === 4343)?.owner, 'orphan');
   for (let i = 0; i < 15; i++) await on.look(1);
-  assert.ok(on.alive(4242) && on.alive(4343), "a person's game is never ended");
+  assert.ok(on.alive(4242), "a person's game is never ended");
   // Off on the machine: no person is looked for, and a slot player nobody holds is an orphan as before (w1196).
   const off = machine(procs(), { leases, sessions: { aaaa1111: { live: true }, cccc3333: { live: true } } });
   await off.look(0);
   assert.deepEqual(off.reaper.report().persons, []);
   assert.equal(off.reaper.report().players.find((p) => p.pid === 4343)?.owner, 'orphan');
+});
+
+// ---------------------------------------------------------------- w2994: an ffnightly lab client is no person
+
+// LothDesktop, 2026-11-03 19:37:32Z: the client peer 'a' of MP-W1444-knn-combat-pair (pid 37072), started by lab.py's
+// local-win launch under ffnightly.py run from lothdesktop/slot1, counted as lothsahn playing, and the yield made every lab
+// player quit. Its slot lease held ffnightly's pid (player_slots.py _lease: holder_pid or os.getpid()), not the game's.
+const LOTH = {
+  python: { pid: 30100, ppid: 22000, cmd: String.raw`C:\Python312\python.exe scripts\nightly\ffnightly.py run --scenario MP-W1444-knn-combat-pair` },
+  shell: { pid: 22000, ppid: 21000, cmd: String.raw`"C:\Program Files\Git\usr\bin\bash.exe" -c ffnightly` },
+  game: { pid: 37072, ppid: 30100, cmd: String.raw`"V:\ffw\players\slot1-1\player\finalfactory.exe" -ffAutomationRole client -logFile V:\ffw\tmp\ffa-x\pr18-143254\a.log`, name: 'finalfactory.exe' },
+  steam: { pid: 5000, ppid: 4000, cmd: String.raw`"C:\Program Files (x86)\Steam\steam.exe"` },
+  steamGame: { pid: 5100, ppid: 5000, cmd: String.raw`"C:\Program Files (x86)\Steam\steamapps\common\Final Factory\FinalFactory.exe"`, name: 'FinalFactory.exe' },
+  mainClone: { pid: 5200, ppid: 4100, cmd: String.raw`"V:\ffw\repo\Builds\Windows\finalfactory.exe"`, name: 'finalfactory.exe' },
+  explorer: { pid: 4100, ppid: 900, cmd: String.raw`C:\Windows\explorer.exe` },
+};
+const lothO = (extra: Partial<Parameters<typeof personGames>[3]> = {}) => ({ platform: 'win32' as const, self: new Set<number>([700]), places: ['V:/ffw/sandboxes/slot1', 'V:/ffw/sandboxes/slot2'], tempRoot: 'V:/ffw/tmp', slotRoots: ['V:/ffw/players'], ...extra });
+
+test('w2994: an ffnightly-launched slot-pool client is no person, by its exe path alone, its worker ancestry alone, or its lease holder alone', () => {
+  const procs = Object.values(LOTH);
+  const env = new Map<number, ProcEnv>([[30100, { session: '7d11981c', sandbox: 'slot1', machine: 'lothdesktop' }], [22000, { session: '7d11981c', sandbox: 'slot1', machine: 'lothdesktop' }]]);
+  // The incident's look: no environment read for the game itself, no candidate for it, no lease naming its pid.
+  assert.deepEqual(personGames(procs, [], env, lothO()).sort(), [5100, 5200], 'only Steam\'s game and one a person built and started count');
+  // The exe path alone (no environment read anywhere, no leases): a slot player is never a person's.
+  assert.deepEqual(personGames(procs, [], new Map(), lothO()).sort(), [5100, 5200]);
+  // Its worker ancestry alone (the same client run from outside the pool, as with FF_PLAYER_SLOTS=off): ffnightly's FF_SESSION_ID.
+  const outside = { ...LOTH.game, cmd: String.raw`"V:\ffw\builds\w2990\finalfactory.exe" -ffAutomationRole client` };
+  assert.deepEqual(personGames([LOTH.python, LOTH.shell, outside], [], env, lothO()), []);
+  // Or a lease on this host whose holder pid is its parent (lab.py's lease is ffnightly's pid), with no environment read.
+  assert.deepEqual(personGames([LOTH.python, LOTH.shell, outside], [], new Map(), lothO({ leasePids: new Set([30100]) })), []);
+  assert.deepEqual(personGames([LOTH.python, LOTH.shell, outside], [], new Map(), lothO()), [37072], 'nothing ties it to a worker: a person\'s');
+  // A reused pid is no ancestor: a "parent" that started after the game is not its starter.
+  const born = new Map([[37072, 1_000_000], [30100, 2_000_000], [22000, 500_000]]);
+  assert.deepEqual(personGames([LOTH.python, LOTH.shell, outside], [], env, lothO({ born })), [37072]);
+});
+
+test("w2994: a person's own game (Steam's, or the main clone's build) with no worker in its ancestry still holds the machine, on Windows, macOS and Linux", () => {
+  assert.deepEqual(personGames(Object.values(LOTH), [], new Map(), lothO({ leasePids: new Set([30100]) })).sort(), [5100, 5200]);
+  const mac = [
+    { pid: 1, ppid: 0, cmd: '/sbin/launchd' },
+    { pid: 610, ppid: 1, cmd: '/Applications/Steam.app/Contents/MacOS/steam_osx' },
+    { pid: 620, ppid: 610, cmd: '/Users/l/Library/Application Support/Steam/steamapps/common/Final Factory/FinalFactory.app/Contents/MacOS/FinalFactory' },
+    { pid: 630, ppid: 1, cmd: '/Users/l/ffw/players/slot2-0/player/FinalFactory.app/Contents/MacOS/FinalFactory -batchmode' },
+    { pid: 640, ppid: 1, cmd: '/usr/bin/python3 scripts/nightly/ffnightly.py run' },
+    { pid: 650, ppid: 640, cmd: '/Users/l/ffw/builds/x/FinalFactory.app/Contents/MacOS/FinalFactory -ffAutomationRole host' },
+  ];
+  const macEnv = new Map<number, ProcEnv>([[640, { session: 'aaaa1111', machine: 'm5' }]]);
+  const macO = { platform: 'darwin' as const, self: new Set<number>(), places: ['/Users/l/ffw/sandboxes/slot1'], tempRoot: '/Users/l/ffw/tmp', slotRoots: ['/Users/l/ffw/players'] };
+  // launchd (pid 1) is what every detached process is reparented to: it carries no worker, and the walk stops there.
+  assert.deepEqual(personGames(mac, [], macEnv, macO), [620]);
+  const linux = [
+    { pid: 1, ppid: 0, cmd: '/sbin/init' },
+    { pid: 9212, ppid: 1, cmd: '/usr/lib/systemd/systemd --user' },
+    { pid: 4242, ppid: 9212, cmd: '/home/u/.steam/steam/steamapps/common/Final Factory/FinalFactory.x86_64' },
+    { pid: 4343, ppid: 9212, cmd: `${PLAYERS}/slot1-0/player/finalfactory.x86_64 -screen-fullscreen 0` },
+  ];
+  assert.deepEqual(personGames(linux, [], new Map(), { platform: 'linux', self: new Set([100]), places: [], tempRoot: TMP, slotRoots: [PLAYERS] }), [4242]);
 });

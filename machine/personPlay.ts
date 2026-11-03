@@ -6,8 +6,9 @@
 // How a person is told from an agent: the leftovers' look (machine/leftovers.ts) sees every game player each minute and
 // knows the workers' ones: FF_SESSION_ID in its environment (every worker shell and what it starts carries it), a player slot lease
 // for its pid (player_slots.py launch), a command line naming a worker's temp folder or a sandbox (a build an agent runs
-// from there, a sandbox editor's Build And Run). A game player with none of them is a person's: Steam's launch of the game,
-// or a build a person starts by hand. The game window in front was weighed and not used: a person alt-tabs to a guide or Discord while
+// from there, a sandbox editor's Build And Run), and since w2994 any game under a player slot root and any with a worker in
+// its ancestry (FF_SESSION_ID in a parent's environment, or a local lease's holder pid: lab.py leaves ffnightly's pid on the
+// lease). A game player with none of them is a person's: Steam's launch of the game, or a build a person starts by hand. The game window in front was weighed and not used: a person alt-tabs to a guide or Discord while
 // the game runs and still wants its frames, and an agent's player in front would count as theirs.
 //
 // What happens then is the exclusive turn's (machine/benchTurn.ts, w1829) with a person's game as its holder: the other
