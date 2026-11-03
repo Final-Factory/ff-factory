@@ -435,6 +435,39 @@ export function noTimedWaitOf(line: string, noTimed: Readonly<Record<string, str
 }
 
 /**
+ * w2969: a report that says follow-up requests are left to file and its worker could not file them: "I couldn't file the
+ * five build requests myself, because none of my tools can create a request" (w2194's c68864ef, 2026-10-28 20:27 UTC; it
+ * went nowhere, the request closed on a DONE two days later, and nothing filed the five stages until Ben asked on
+ * 2026-11-03). Workers have no request_work (server/toolManifest.ts): such a report is follow-ups for the requester's
+ * orchestrator to file. Returns the sentence that says it and how many requests it names (1 when it names no number).
+ */
+const CANNOT_FILE =
+  /\b(?:couldn'?t|could not|can'?t|cannot|can not|unable to|(?:was|am|is|were) not able to|have no (?:way|tool) to)\s+(?:[\w-]+\s+){0,3}?(?:file|create|open|submit|raise|make)\s+(?:[\w-]+\s+){0,5}?(?<!pull |merge )(?:requests?|tickets?)\b|\bnone of my tools (?:can|could|lets? me) (?:file|create|open|submit|make)\b|\bno tool (?:to|that (?:can|could)) (?:file|create|open|submit) (?:a |any |new )?(?:work )?requests?\b|\b(?:requests?|briefs?|stages?)\b[^.\n]{0,60}?\b(?:need|needs|still need|left) to be filed\b|\b(?:someone|somebody|the orchestrator|your orchestrator|[A-Z][a-z]+'s orchestrator|a person)\s+(?:needs to|must|has to|should|will need to)\s+file\b/i;
+const COUNT_WORDS: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12 };
+const FILE_COUNT = /\b(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+(?:[\w-]+\s+){0,3}?(?:requests?|briefs?|stages?)\b/i;
+export function unfiledFollowUpsIn(report: string | undefined): { line: string; count: number } | undefined {
+  const text = report ?? '';
+  const m = CANNOT_FILE.exec(text);
+  if (!m) return undefined;
+  // The sentence it is in: from the last sentence end or line break before it to the next one after it.
+  const before = text.slice(0, m.index);
+  const start = Math.max(before.lastIndexOf('\n'), before.lastIndexOf('. '), before.lastIndexOf('! '), before.lastIndexOf('? ')) + 1;
+  const rest = text.slice(m.index);
+  const end = rest.search(/[.!?](?:\s|$)|\n/);
+  const line = text.slice(start, end < 0 ? undefined : m.index + end + 1).replace(/[*_`]+/g, '').trim();
+  const n = FILE_COUNT.exec(line);
+  const count = n ? (COUNT_WORDS[n[1].toLowerCase()] ?? Number(n[1])) : 1;
+  return { line: line.slice(0, 600), count: Math.min(Math.max(count || 1, 1), 12) };
+}
+
+/** w2969: how many of a request's handed-up follow-ups are still to file (0 when none, all filed, or dropped). */
+export function handUpsPending(w: Pick<WorkItem, 'handedUp'>): number {
+  const h = w.handedUp;
+  if (!h) return 0;
+  return Math.max(0, h.count - h.filed.length);
+}
+
+/**
  * w2956: a still-open line that hands the dispatcher legs to start: "the dispatcher starts the ten rows above" (w2895's
  * planning worker 2d1ac9f7 at 05:14 UTC 2026-11-03; nothing started until a person's note at 11:57), "waiting on the
  * dispatcher to start rows M2.3 and M2.6", "for the dispatcher to open one leg per row". A [worker update] reaches only

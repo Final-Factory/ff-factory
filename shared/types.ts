@@ -2197,6 +2197,14 @@ export interface WorkItem {
    * sent to the dispatcher once as a `[work update]` (Orchestrators.dispatcherLegs); a re-report of the same line sends nothing.
    */
   dispatcherAsk?: { worker: string; line: string; at: string };
+  /**
+   * w2969: follow-up requests a worker of it handed up to be filed, by its hand_up_requests tool (`items`) or in a report
+   * that says it could not file them (`line`: w2194's c68864ef, 2026-10-28 20:27 UTC, "I couldn't file the five build
+   * requests myself, because none of my tools can create a request"; nothing filed them for six days). Sent to its
+   * requester's orchestrator (`to`), which files them with request_work naming this request (`filed`, their ids). While
+   * fewer than `count` are filed and none are dropped, a DONE does not close it (ledgerRules.handUpProblem).
+   */
+  handedUp?: WorkHandedUp;
   /** w2956: the last time the dispatcher was told this request runs fewer legs than its standing target (Orchestrators.fanOutCheck). */
   fanOut?: { at: string; live: number; min: number };
   /**
@@ -2400,6 +2408,24 @@ export interface WorkDelegation {
   agentName: string;
   auto: boolean;
   approvedBy?: Requester;
+}
+
+/** w2969: the follow-up requests a worker handed up to be filed (WorkItem.handedUp). */
+export interface WorkHandedUp {
+  worker: string;
+  at: string;
+  /** How many requests it hands up: the tool's items, or the number its report names ("the five build requests"), else 1. */
+  count: number;
+  /** The requests as the worker wrote them (hand_up_requests); empty when only its report said so. */
+  items: { title: string; brief: string }[];
+  /** The report's line that said it could not file them, when that is how it came. */
+  line?: string;
+  /** The people whose orchestrators were sent it. */
+  to: string[];
+  /** The requests filed for it since (their ids). */
+  filed: string[];
+  /** When the requester's orchestrator was reminded (once, Orchestrators.handUpReminder). */
+  remindedAt?: string;
 }
 
 /** One pull request linked to a request: where it is, and what it did. */

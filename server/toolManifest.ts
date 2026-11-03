@@ -114,6 +114,8 @@ export const TOOL_MANIFEST = {
   // w1945: a check on several computers at once, and its legs talking to each other.
   request_pair: { group: 'timers', kinds: [W] },
   message_pair: { group: 'timers', kinds: [W] },
+  // w2969: follow-up requests a worker wrote, handed to its requester's orchestrator to file.
+  hand_up_requests: { group: 'ledger', kinds: [W] },
   waiting_on_person: { group: 'timers', kinds: [W] },
   // ffbox
   ffbox_activity: { group: 'ffbox', kinds: [D, P, R] },
