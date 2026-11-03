@@ -243,12 +243,23 @@ export const slotSandbox = (slot: string | undefined) => /^(slot\d+)-[01]$/i.exe
 /** The sandbox id of a lease's folder: <root>/sandboxes/<id>/... -> id. */
 /**
  * The game players no worker started (w1894, machine/personPlay.ts): not one of the look's candidates (a worker's by its
- * environment, lease, temp folder or arguments, or a slot player with a lease), no FF_SESSION_ID in its environment (a
- * worker of another machine's), not the daemon, and no sandbox or worker temp folder in its command line (an agent's build,
- * a sandbox editor's Build And Run, whose environment is the editor's). What is left is a person's game: Steam's launch, or
+ * environment, lease, temp folder or arguments, or any slot player), no FF_SESSION_ID in its environment (a worker of
+ * another machine's), not the daemon, and no sandbox or worker temp folder in its command line (an agent's build, a
+ * sandbox editor's Build And Run, whose environment is the editor's). What is left is a person's game: Steam's launch, or
  * one started by hand.
+ *
+ * w2994 (LothDesktop, 2026-11-03 19:37Z): pid 37072, the client peer of an ffnightly lab pair run from
+ * V:/ffw/players/slot1-1/player/finalfactory.exe, counted as lothsahn playing: lab.py's local-win launch leaves the slot
+ * lease on ffnightly's own pid (player_slots.py _lease: holder_pid or os.getpid()), so the lease named no game pid, the
+ * game's own environment was not read, and a lease-less slot player was then taken for a person's. The yield made every
+ * lab player quit. So two more signals, on every OS: a game under a player slot root is never a person's (slotOf: the
+ * exe's path, which the command line names on Windows, macOS and Linux alike), and neither is one with a worker in its
+ * ancestry: a parent, grandparent ... with FF_SESSION_ID in its environment, or the holder pid of a lease on this host
+ * (ffnightly.py, lab.py, a worker's shell). The walk stops at init/systemd/launchd and the daemon's own parents (what
+ * orphans are reparented to), and trusts a link only when the parent started before the child (`born`, where known: a
+ * dead parent's pid reused on Windows names an unrelated process).
  */
-export function personGames(procs: Proc[], cands: { p: Proc }[], env: Map<number, ProcEnv>, o: { platform: UnityPlatform; self: Set<number>; places: string[]; tempRoot?: string }): number[] {
+export function personGames(procs: Proc[], cands: { p: Proc }[], env: Map<number, ProcEnv>, o: { platform: UnityPlatform; self: Set<number>; places: string[]; tempRoot?: string; slotRoots?: string[]; leasePids?: Set<number>; born?: Map<number, number> }): number[] {
   const taken = new Set(cands.map((c) => c.p.pid));
   const folders = [...o.places, ...(o.tempRoot ? [o.tempRoot] : [])].filter(Boolean).map((f) => names(key(f, o.platform)));
   return gamePlayers(procs, o.platform)
@@ -257,7 +268,28 @@ export function personGames(procs: Proc[], cands: { p: Proc }[], env: Map<number
       const c = o.platform === 'win32' ? posix(p.cmd).toLowerCase() : p.cmd;
       return !folders.some((re) => re.test(c));
     })
+    .filter((p) => !slotOf(p.cmd, o.slotRoots ?? [], o.platform))
+    .filter((p) => !workerAncestor(p, procs, env, { platform: o.platform, self: o.self, leasePids: o.leasePids, born: o.born }))
     .map((p) => p.pid);
+}
+
+/** w2994: the first ancestor of `p` a worker runs (FF_SESSION_ID in its environment, or a local lease's holder pid), or undefined. */
+export function workerAncestor(p: Proc, procs: Proc[], env: Map<number, ProcEnv>, o: { platform: UnityPlatform; self: Set<number>; leasePids?: Set<number>; born?: Map<number, number> }): number | undefined {
+  const byPid = new Map(procs.map((x) => [x.pid, x]));
+  const seen = new Set<number>([p.pid]);
+  let child = p;
+  for (let i = 0; i < 64; i++) {
+    const parent = byPid.get(child.ppid);
+    if (!parent || parent.pid <= 0 || seen.has(parent.pid) || o.self.has(parent.pid)) return undefined;
+    if (o.platform !== 'win32' && (parent.pid <= 1 || INIT.test(parent.cmd))) return undefined;
+    const cb = o.born?.get(child.pid);
+    const pb = o.born?.get(parent.pid);
+    if (cb !== undefined && pb !== undefined && pb > cb + 1_000) return undefined;
+    if (env.get(parent.pid)?.session || o.leasePids?.has(parent.pid)) return parent.pid;
+    seen.add(parent.pid);
+    child = parent;
+  }
+  return undefined;
 }
 
 export const leaseSandbox = (folder: string | undefined) => /[/\\]sandboxes[/\\]([^/\\]+)/.exec(folder ?? '')?.[1];
@@ -396,6 +428,22 @@ export class LeftoverReaper {
     return this.busy;
   }
 
+  /** w1894/w2994: the person's games of a look, with the start times of their ancestors (personGames, workerAncestor). */
+  private async personsOf(procs: Proc[], cands: Candidate[], env: Map<number, ProcEnv>, self: Set<number>, roots: string[], leases: PlayerLease[]): Promise<number[]> {
+    const d = this.d;
+    const leasePids = new Set(leases.filter((l) => String(l.host ?? '').toLowerCase() === d.host.toLowerCase()).map((l) => Number(l.pid)).filter((pid) => pid > 0));
+    const o = { platform: d.platform, self, places: d.places().map((x) => x.path), tempRoot: d.tempRoot(), slotRoots: roots, leasePids };
+    const first = personGames(procs, cands, env, o);
+    if (!first.length) return first;
+    // Start times only for the few games left and their ancestors, so a reused pid is no worker's ancestor.
+    const byPid = new Map(procs.map((x) => [x.pid, x]));
+    const chain = new Set<number>();
+    for (const pid of first) for (let x = byPid.get(pid), i = 0; x && i < 64 && !chain.has(x.pid); x = byPid.get(x.ppid), i++) chain.add(x.pid);
+    const born = new Map<number, number>();
+    for (const f of await d.inspect([...chain]).catch(() => [] as ProcFacts[])) if (f.startedAt !== undefined) born.set(f.pid, f.startedAt);
+    return personGames(procs, cands, env, { ...o, born });
+  }
+
   /** The game players of the last look, with their owner and age (list_sandboxes, the dashboard). */
   report(): { players: PlayerLine[]; others: number; persons: number[]; at?: string } {
     return { players: this.players, others: this.others, persons: this.persons, ...(this.lastAt ? { at: new Date(this.lastAt).toISOString() } : {}) };
@@ -462,7 +510,9 @@ export class LeftoverReaper {
         else if (fromPath) c = { p, kind, session: fromPath, via: 'path', slot };
         else if (fromArg) c = { p, kind, session: fromArg, via: 'arg', slot };
         else if (kind === 'unity-worker') c = { p, kind };
-        else if (kind === 'player' && slot && !(personOn && !leases.some((l) => l.slot === slot && (Number(l.pid) === p.pid || String(l.host ?? '').toLowerCase() !== d.host.toLowerCase())))) c = { p, kind, slot, sandbox: leaseSandbox(lease?.sandbox) ?? slotSandbox(slot) };
+        // w2994: every slot player is the pool's, never a person's (personGames), so one with no lease of its own is judged
+        // as an orphan whether or not a person's game is looked for (w1196: kept while its starter runs).
+        else if (kind === 'player' && slot) c = { p, kind, slot, sandbox: leaseSandbox(lease?.sandbox) ?? slotSandbox(slot) };
       }
       if (c) cands.push(c);
     }
@@ -530,7 +580,7 @@ export class LeftoverReaper {
     for (const s of [...this.stopped.keys()]) if (!sessions.has(s)) this.stopped.delete(s);
     this.players = players;
     this.others = others;
-    this.persons = personOn ? personGames(procs, cands, env, { platform: d.platform, self, places: d.places().map((x) => x.path), tempRoot: d.tempRoot() }) : [];
+    this.persons = personOn ? await this.personsOf(procs, cands, env, self, roots, leases) : [];
     this.lastAt = now;
     const out: Ended[] = [];
     for (const [group, items] of toEnd) out.push(await this.end(group, items, procs));
@@ -666,7 +716,7 @@ public static class FFProcEnv {
       if (size <= 0 || size > (1 << 22)) size = 65536;
       for (; size >= 4096; size /= 2) {
         byte[] buf = new byte[size]; IntPtr n;
-        if (ReadProcessMemory(h, new IntPtr(env), buf, new IntPtr(size), out n)) return Encoding.Unicode.GetString(buf, 0, (int)n.ToInt64());
+        bool ok = ReadProcessMemory(h, new IntPtr(env), buf, new IntPtr(size), out n); if (ok || n.ToInt64() >= 4096) return Encoding.Unicode.GetString(buf, 0, (int)(n.ToInt64() & ~1L));
       }
       return null;
     } finally { CloseHandle(h); }

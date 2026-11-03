@@ -457,12 +457,21 @@ priority), the Capacity block's `HELD (…)` (above), the machine page (an amber
 panel and `unity status` of each closed editor ("closed while lothsahn playing Final Factory on this PC; reopens when that
 ends, 10 min after the game closes"), and the portal journal (`portal_logs` grep "is playing Final Factory").
 
-**Checking it without a person.** Start a slot player with no worker in it: no `FF_SESSION_ID`, `FF_SANDBOX_ID` or
-`FF_MACHINE_ID` in its environment, not through `player_slots.py` (no lease), and no temp folder in its arguments (no
-`-logFile` there: the game writes its own Player.log), from your own sandbox's slot. A slot path keeps the Windows Firewall rule the install made for it; a new exe path raises the
-firewall prompt.
+**What is never a person's (w2994).** A game under a player slot root (`players/slot*`, by the exe path in its command
+line, on Windows, macOS and Linux) is the pool's, whatever its lease says: lab.py's local launches leave the slot lease
+on ffnightly's own pid, not the game's, and on LothDesktop, 2026-11-03 19:37Z, an ffnightly lab client
+(`V:/ffw/players/slot1-1/player/finalfactory.exe`, pid 37072) counted as lothsahn playing and made every lab player
+quit. Nor is a game with a worker in its ancestry: a parent, grandparent ... with `FF_SESSION_ID` in its environment, or
+the holder pid of a lease on this host. The walk stops at init/systemd/launchd and the daemon's own parents, and trusts a
+link only when the parent started before the child (a dead parent's pid reused on Windows). A slot player with no lease
+of its own is then judged as an orphan, as with the look off (w1196).
 
-Tests: `server/personPlay.test.ts`, the w1894 case in `server/leftovers.test.ts`.
+**Checking it without a person.** Start a game from outside the player pool with no worker in it or above it: no
+`FF_SESSION_ID`, `FF_SANDBOX_ID` or `FF_MACHINE_ID` in its environment or its parents', and no temp folder or sandbox in
+its command line. On Windows, `explorer.exe <exe>` makes Explorer its parent and its environment the desktop's; a new exe
+path raises the Windows Firewall prompt, so use a path whose rule exists (the Steam install's).
+
+Tests: `server/personPlay.test.ts`, the w1894 and w2994 cases in `server/leftovers.test.ts`.
 
 ## Orphaned and hung batch builds are ended (w791)
 
