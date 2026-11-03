@@ -1803,7 +1803,7 @@ test('w2140: with no worker of the merge left, the blocked worker is resumed ins
 // LothLaptop, until an orchestrator closed it by hand.
 function awayWorld(t: Parameters<typeof setup>[0], pause: boolean) {
   const s = setup(t);
-  s.store.putMachine({ id: 'lothlaptop', host: 'lothlaptop', purpose: 'unused', status: 'ready', online: false, repoPath: '/r', home: '/h', portalUrl: 'http://x', sessionIds: [], createdAt: '', ...(pause ? { pause: { paused: true, reason: 'manual', since: ago(2) } } : {}) } as never);
+  s.store.putMachine({ id: 'lothlaptop', host: 'lothlaptop', purpose: 'unused', status: 'ready', online: false, repoPath: '/r', home: '/h', portalUrl: 'http://x', sessionIds: [], createdAt: '', ...(pause ? { pause: { paused: true, reason: 'manual', since: ago(2) } } : { lastSeen: ago(10) }) } as never);
   const held = (id: string) => (s.sessions as unknown as { queue: QueuedSend[] }).queue.push({ uuid: `q-${id}`, id, text: 'carry on', from: 'orchestrator', at: ago(2), why: 'lothlaptop is paused from its tray app', on: 'machine' });
   return { ...s, held };
 }
@@ -1824,6 +1824,23 @@ for (const pause of [true, false]) {
     assert.equal(sessions.queued().filter((q) => q.id === 'e6d3dfe1').length, 0, 'its held message is dropped');
   });
 }
+
+// w2959: PR #810's rollout dropped each daemon for about 10 s (lothdesktop at 12:40:14 UTC on 2026-11-03), and the w2566 sweep
+// took every worker stopped there off w2895, the legs 62d26939, eecab11b and ed655ee7 started at 12:39 among them. They ran on
+// once it was back, refused "you are not on w2895". A drop within the blip grace is no away computer.
+test('w2959: a daemon drop of seconds (its update) takes no worker off a request, even after another worker said DONE', (t) => {
+  const { store, request, worker, o, get } = awayWorld(t, false);
+  const m = store.machines.get('lothlaptop')!;
+  store.putMachine({ ...m, lastSeen: new Date(Date.now() - 10_000).toISOString() } as never);
+  request('w1', { sessionIds: ['00b524a7', '62d26939', 'eecab11b'] });
+  worker('62d26939', { status: 'stopped', machineId: 'lothlaptop', machineSandbox: 'slot1', lastResult: '' });
+  worker('eecab11b', { status: 'stopped', machineId: 'lothlaptop', machineSandbox: 'slot2', lastResult: '' });
+  o.workerTurnEnded(worker('00b524a7', { machineId: 'biscuit', machineSandbox: 'slot1' }), 'Row M1.2b merged.\nDONE: w1\nLearned: nothing new');
+  o.workerEnded({ id: '62d26939' });
+  const w = get('w1');
+  assert.deepEqual([...w.sessionIds].sort(), ['00b524a7', '62d26939', 'eecab11b'], `the bug: "taken off worker 62d26939: it is stopped and lothlaptop is offline"\n${w.log.join('\n')}`);
+  assert.doesNotMatch(w.log.join('\n'), /taken off worker/);
+});
 
 test('w2566: a worker stopped on a running computer with work still open on it keeps holding the request after another DONE', (t) => {
   const { request, worker, o, get, agents, held } = awayWorld(t, false);

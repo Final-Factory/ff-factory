@@ -1773,6 +1773,16 @@ linked over its wait on that computer (`linkWorker`: that start is the request's
 its part (`doneMarkers`, `workerEnded`, `recheckDone`). The request then closes on that DONE as usual. A stopped worker
 on a computer that runs keeps the w1972 rule.
 
+**Offline means offline past the blip grace, not a daemon's update** (w2959). PR #810's rollout on 2026-11-03 dropped
+biscuit, lothdesktop and m5 for about 10 s each (journal: 12:38:37, 12:40:14, 12:41:26 UTC). Each drop marked that
+machine's workers stopped, `workerEnded` ran the sweep against 00b524a7's earlier DONE, and every one of them was taken
+off w2895, among them the legs 62d26939, eecab11b and ed655ee7 that the dispatcher had started on lothdesktop at 12:39.
+They ran on after the reconnect, and blocked_on and timed_place refused them with "you are not on w2895". This was not the
+w2956 fan-out notice or a gate override: `linkWorker` had linked them. Now `stoppedAway` counts an offline computer only
+once it has been offline past FF Factory's blip grace (`Agents.longAwayOf`, `timing.unavailableIdleMinutes`, 5 min by
+default; the dependency `machineOfflineLong`). A pause still counts at once, because a person set it. Test: "w2959: a
+daemon drop of seconds" in `server/ledgerSweep.test.ts`.
+
 **The wrap-up** (w419). When the dispatcher sends a worker a related request that is not yet one of its own (`message_agent` with `work_id`, [One session per request](#one-session-per-request)) and the
 worker's current turn is on other requests (`servedBy`, [What a request is doing now](#what-a-request-is-doing-now)),
 the message starts with `[wrap-up]`: for each request it holds (not only the one its turn was on, w915), end the reply

@@ -324,6 +324,11 @@ export interface OrchestratorsDeps {
   personPlaying?: (id: string) => string | undefined;
   /** w2443: why a machine is paused from its tray (pauseWhy), or undefined while it runs. */
   machinePaused?: (id: string) => string | undefined;
+  /**
+   * w2959: whether a machine has been offline past FF Factory's blip grace (Agents.longAwayOf, timing.unavailableIdleMinutes),
+   * not only for the seconds a daemon update or a reconnect takes. Undefined: offline counts at once (machineOnline).
+   */
+  machineOfflineLong?: (id: string) => boolean;
   /** w2045: whether a request is in the merge-on-green pilot's arm (server/mergeOnGreen.ts); absent: no request is. */
   mergeOnGreenPilot?: (requestId: string) => boolean;
   /** The commit the portal runs (no id), or a machine's daemon (w643: a deploy blocker clears when it changes). */
@@ -1675,7 +1680,12 @@ export class Orchestrators {
     if (w.pair?.started?.legs.some((l) => l.session === sid)) return undefined;
     const paused = this.d.machinePaused?.(s.machineId);
     if (paused) return `${s.machineId} is paused (${paused})`;
-    return this.d.machineOnline?.(s.machineId) === false ? `${s.machineId} is offline` : undefined;
+    // w2959: a daemon's drop for its update is no away computer. PR #810's rollout on 2026-11-03 dropped biscuit, lothdesktop
+    // and m5 for about 10 s each (12:38:37, 12:40:14, 12:41:26 UTC), and every worker stopped there was taken off w2895, the
+    // four legs the dispatcher had started on lothdesktop at 12:39 among them: they ran on, refused as "not on w2895".
+    if (this.d.machineOnline?.(s.machineId) !== false) return undefined;
+    if (this.d.machineOfflineLong && !this.d.machineOfflineLong(s.machineId)) return undefined;
+    return `${s.machineId} is offline`;
   }
 
   /**
