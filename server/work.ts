@@ -548,6 +548,11 @@ export function doneOf(w: Pick<WorkItem, 'done' | 'reopenedAt'>): NonNullable<Wo
   return Object.fromEntries(Object.entries(w.done ?? {}).filter(([, d]) => afterReopen(w, d.at)));
 }
 
+/** w2972: the DONEs that may close `w`: doneOf without a leg's `LEG DONE`, which ends that worker's leg only. */
+export function requestDonesOf(w: Pick<WorkItem, 'done' | 'reopenedAt'>): NonNullable<WorkItem['done']> {
+  return Object.fromEntries(Object.entries(doneOf(w)).filter(([, d]) => !d.leg));
+}
+
 /**
  * Whether pair run `w` is under way (w2304): open, its legs started together, and none of them has reported yet. A leg of it
  * never moves alone (server/resumeMove.ts), keeps its sandbox until the run is over (pairLegOf), and a leg broken mid-run

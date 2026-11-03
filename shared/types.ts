@@ -2137,9 +2137,10 @@ export interface WorkItem {
    * Its workers that said `DONE: <id>` for their part, by session id, with when and the report's first line (w434): the
    * request closes once none of its workers is still on it (each said DONE, ended, or moved on to newer work). `text`:
    * the full text of that worker's DONE reports on it, newest last (the last 4000 characters), which a refused DONE is
-   * checked against again when its PRs change (w515; absent on DONEs recorded before).
+   * checked against again when its PRs change (w515; absent on DONEs recorded before). `leg`: a `LEG DONE: <id>` (w2972), one
+   * leg of a fan-out finished: that worker is no longer on it, but nothing closes the request on it (requestDonesOf).
    */
-  done?: Record<string, { at: string; report: string; text?: string; told?: string }>;
+  done?: Record<string, { at: string; report: string; text?: string; told?: string; leg?: true }>;
   /**
    * When a person (or an owner for them) last reopened it from closed (w731; absent when never). A reopen invalidates
    * what came before it: the workers' DONEs are dropped, the earlier PRs are no longer its own (a PR created before this
