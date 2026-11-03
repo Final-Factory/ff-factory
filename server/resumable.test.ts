@@ -3,10 +3,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { resumableSessions } from './resumable.ts';
+import { ownersOf, resumableSessions } from './resumable.ts';
 import { neverDelete, runCleanup, sessionTempDir } from './cleanup.ts';
 import { SessionSweeper } from './sessionSweep.ts';
 import { planInstallLeftovers } from './installLeftovers.ts';
+import { judgeSession } from './cleanupFolders.ts';
 import type { WorkItem } from '../shared/types.ts';
 
 /**
@@ -153,4 +154,72 @@ test("w1097: the daily pass's stopped-session rule leaves a resumable session's 
   const paths = plan.items.map((i) => i.path);
   assert.ok(paths.includes(gone), JSON.stringify(plan.items));
   assert.ok(!paths.some((p) => p === kept || p.startsWith(kept + path.sep)), JSON.stringify(plan.items));
+});
+
+// w2987: 2026-11-03, worker 50e2b52d (w2895's row M2.17, a fan-out request with many legs) stopped at 14:55Z blocked on CI on
+// ffu #135, but w2566's pass at 12:40Z had taken it off w2895's sessionIds while its CI gate stayed, and other legs were linked
+// later. The daemon was told no request waited for it (ff-leftovers ended its processes at 15:03Z "no request waits for it"),
+// and when CI resumed it at 17:45Z its ffu clone and rust.sh were gone.
+const ciGate = (sid: string, ref: string) => ({ kind: 'ci', ref, what: `CI on ${ref}`, at: '2026-11-03T14:55:00Z', by: `worker ${sid}` }) as WorkItem['blocked'];
+const fanOut = (status: WorkItem['status'] = 'blocked') =>
+  item('w2895', status, ['0d38c59a', '11448f7f'], {
+    blocked: ciGate('0d38c59a', 'Final-Factory/ffu#167'),
+    alsoBlocked: [ciGate('50e2b52d', 'Final-Factory/ffu#135')!],
+    links: { '0d38c59a': { at: '2026-11-03T17:45:00Z', how: 'sent' }, '11448f7f': { at: '2026-11-03T17:46:00Z', how: 'sent' } },
+    movedOff: { '50e2b52d': '2026-11-03T12:40:14Z' },
+  });
+
+test('w2987: a worker with its own CI gate on a request is resumable, though another leg is newer or it was taken off sessionIds', () => {
+  assert.deepEqual(resumableSessions(['50e2b52d', '0d38c59a', '9999aaaa'], [fanOut()]), ['0d38c59a', '50e2b52d']);
+  // the request Active again while the gate stays (another leg's wait cleared): still its own wait
+  assert.deepEqual(resumableSessions(['50e2b52d'], [fanOut('active')]), ['50e2b52d']);
+  // closed: the gates no longer hold anyone
+  assert.deepEqual(resumableSessions(['50e2b52d'], [fanOut('merged')]), []);
+  // a pending check-in (wake_me) keeps a worker too, whatever its requests say
+  assert.deepEqual(resumableSessions(['77777777'], [item('w1', 'active', ['77777777', '88888888'])], Date.now(), ['77777777']), ['77777777']);
+});
+
+test("w2987: ff-leftovers folders keeps the folder of a worker blocked on its own CI", () => {
+  const owners = ownersOf([{ id: '50e2b52d' }], [fanOut()]);
+  assert.deepEqual(owners['50e2b52d']?.requests, [{ id: 'w2895', status: 'blocked', with: true }]);
+  const facts = { at: '2026-11-03T15:00:00Z', connected: true, sandboxes: [], live: [], resumable: resumableSessions(['50e2b52d'], [fanOut()]), owners, open: ['w2895'], closed: [] };
+  const v = judgeSession('50e2b52d', facts);
+  assert.equal(v.verdict, 'keep');
+  assert.match(v.why, /still on w2895/);
+});
+
+test('w2987: a temp folder survives a declared CI wait: the session sweep and the nightly pass leave its clone and scratch files', async (t) => {
+  const { root, temp, guard } = world(t);
+  const dir = sessionTempDir(temp, '50e2b52d');
+  const old = Date.now() / 1000 - 5 * 3600;
+  fs.mkdirSync(path.join(dir, 'ffu', '.git'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'ffu', 'Cargo.toml'), '[workspace]');
+  fs.writeFileSync(path.join(dir, 'rust.sh'), 'cargo test');
+  for (const p of [path.join(dir, 'ffu', 'Cargo.toml'), path.join(dir, 'ffu', '.git'), path.join(dir, 'ffu'), path.join(dir, 'rust.sh'), dir]) fs.utimesSync(p, old, old);
+  const work = [fanOut()];
+  const ids = ['50e2b52d'];
+  let now = Date.now();
+  const res = () => resumableSessions(ids, work, now);
+  const g = () => ({ ...guard, resumable: res().map((id) => sessionTempDir(temp, id)) });
+  const sw = new SessionSweeper({
+    root,
+    tempRoot: () => temp,
+    sessions: () => ids.map((id) => ({ id, live: false, resumable: res().includes(id) })),
+    dirOf: (id) => sessionTempDir(temp, id),
+    guard: g,
+    localWork: async () => false,
+    now: () => now,
+  });
+  // Eight hours of CI wait: past the sweep's 10 min grace and its 6 h clone keep, with a nightly pass on the way.
+  for (let h = 0; h < 8 * 6; h++) {
+    now += 10 * 60_000;
+    await sw.tick();
+    if (h === 30) {
+      const nightly = await planInstallLeftovers({ root, sandboxes: [], tempRoots: [temp], guard: g(), now });
+      await runCleanup(nightly.items, g());
+    }
+  }
+  assert.ok(fs.existsSync(path.join(dir, 'rust.sh')), 'rust.sh kept');
+  assert.ok(fs.existsSync(path.join(dir, 'ffu', 'Cargo.toml')), 'the ffu clone kept');
+  assert.deepEqual(sw.pending(), []);
 });
