@@ -3,7 +3,7 @@
 // pure: server/ledgerSweep.ts gathers the facts and applies the result.
 import type { SessionInfo, TranscriptEvent, WorkErrorHandled, WorkItem, WorkPr } from '../shared/types.ts';
 import type { Config } from './config.ts';
-import { requestWaitOf } from '../shared/workState.ts';
+import { handUpsPending, requestWaitOf } from '../shared/workState.ts';
 import { discordThreadsIn, mergedText } from './mergedIntake.ts';
 import { afterReopen, doneOf, requestDonesOf } from './work.ts';
 
@@ -630,7 +630,22 @@ const STEP_REPORTED = /\b(audit(ed)?|2-peer|two-peer|paired|verif(y|ied|ication)
  * report does not say they all did. `unverified`: open PRs gh could not read just now (w515): the refusal says so rather
  * than "still open", which the ledger cannot know.
  */
-export function doneProblem(w: Pick<WorkItem, 'title' | 'brief' | 'constraints' | 'prs'>, report: string, unverified: readonly number[] = []): string | undefined {
+/**
+ * w2969: why a request does not close while follow-up requests its worker handed up are not filed yet (WorkItem.handedUp):
+ * w2194 closed on c68864ef's DONE on 2026-10-30 with its five build requests unfiled, and nothing filed them for six days.
+ * Its DONE is kept and closes it by itself once they are filed or its person closes it (Orchestrators.handUpFiled).
+ */
+export function handUpProblem(w: Pick<WorkItem, 'handedUp'>): string | undefined {
+  const left = handUpsPending(w);
+  if (!left) return undefined;
+  const h = w.handedUp!;
+  const to = h.to.length ? `${h.to.join(' and ')}'s orchestrator` : 'the requester\'s orchestrator';
+  return `${left} of the ${h.count} follow-up request${h.count === 1 ? '' : 's'} handed up for it ${left === 1 ? 'is' : 'are'} not filed yet (sent to ${to} at ${h.at.slice(11, 16)} UTC, w2969). Nothing more is needed from you: your DONE is kept, and it closes by itself once they are filed or its person closes it`;
+}
+
+export function doneProblem(w: Pick<WorkItem, 'title' | 'brief' | 'constraints' | 'prs' | 'handedUp'>, report: string, unverified: readonly number[] = []): string | undefined {
+  const handUp = handUpProblem(w);
+  if (handUp) return handUp;
   const open = (w.prs ?? []).find((p) => p.state === 'open');
   if (open && unverified.includes(open.number)) return `couldn't verify PR #${open.number} on GitHub just now (the ledger last read it as open): say DONE again in a later report`;
   if (open) return `PR #${open.number} is still open: merge or close it first`;

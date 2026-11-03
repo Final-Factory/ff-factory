@@ -986,6 +986,21 @@ without one means it is off or failing, worth a person's look.
       to start a short planning leg. Once per 30 minutes at most, and again within 4 hours only when it lost a leg
       (`WorkItem.fanOut`). An "aim for 6–8" is no standing ask. Tests: `w2956FanOut.test.ts`, and "w2956: the w2895
       stall" in `orchestrators.test.ts`.
+    - **Follow-up requests a worker wrote reach its person's orchestrator, and its DONE waits for them** (w2969, Ben:
+      "Also fix the harness for whatever caused the dragon work to not start"). Workers cannot file requests. w2194's
+      worker c68864ef wrote five build briefs after Ben's approval and reported at 20:27 UTC on 2026-10-29 "I couldn't
+      file the five build requests myself, because none of my tools can create a request"; that turn followed a note, so
+      no `[worker update]` went out, the line matched neither route above, and the ledger cleanup's "is it done?" closed
+      w2194 on its DONE. Nothing was filed until 2026-11-03. Now a worker hands follow-ups up with `hand_up_requests`
+      (one item per request, title and brief), and a report that says it could not file them (`unfiledFollowUpsIn` in
+      `shared/workState.ts`: "couldn't file the five build requests", "none of my tools can create a request", "the 3
+      stage requests still need to be filed") counts as a hand-up too. Either way its requester's orchestrator is sent
+      `[follow-ups to file]` once (`Orchestrators.handUpTo`) with the briefs or the report and its person's newest note,
+      and the request records `WorkItem.handedUp`. Its DONE is kept but refused while any is unfiled
+      (`ledgerRules.ts` `handUpProblem`); the cleanup neither asks "is it done?" nor auto-closes it, and reminds the
+      orchestrator once after 6 h (`handUpReminder`). Each request filed with `related_ids` naming it counts as one
+      (`countFiledFollowUp`); the last one closes it on that DONE; not wanted, its person closes it by hand. Tests:
+      `w2969HandUp.test.ts`, and "w2969: the w2194 dragon case" in `orchestrators.test.ts`.
 - **If the blocker fails, it is flagged.** What it waited on stalled, or did not clear in its time: the request stalls
   (`stalled.kind` `blocked`) with the reason, for its people to close or reopen. What it waited on was declined or
   cancelled without delivering: a person must decide now, so it becomes a question to its requester (Waiting on input).
@@ -1348,7 +1363,8 @@ said `gh pr checks`, which the wait guard refuses (w2015).
 ### Workers read the ledger
 
 Workers have no ledger tools of their own: they cannot file, update, decide or close anything but their own request
-(with the `DONE:` line). Since w642 (asked by Lothsahn, after w631's worker had to judge which open requests were
+(with the `DONE:` line). Follow-up requests they write go up with `hand_up_requests`, for their requester's orchestrator
+to file (w2969, "Waiting, Queued, Blocked"). Since w642 (asked by Lothsahn, after w631's worker had to judge which open requests were
 finished without being able to read their briefs) they can **read** the entries they need with the machine tool
 `read_work` (`server/workRead.ts`, answered by the portal from `data/work.json`; `server/launch.ts` `CATALOG.read_work`).
 
@@ -2503,6 +2519,7 @@ but the question it labelled ("brighten the lamps after w478?") was kept.
 | `[ledger]` | the dispatcher: after a restart or a fresh conversation, the requests still waiting (what it had not answered died with its process); and when requests are queued and a worker ends a turn, after 30 s of quiet, at least 2 minutes apart and at most 20 an hour (a wake that comes too soon waits) |
 | a failed worker of an open request | the dispatcher, as a `[work update]` |
 | a worker's still-open line handing the dispatcher legs to start ("the dispatcher starts the ten rows above"), with its report; a request running fewer legs than its people's standing "keep N running" (w2956) | the dispatcher, as a `[work update]` |
+| `[follow-ups to file]`: a worker's `hand_up_requests`, or a report saying it could not file the follow-up requests it wrote (w2969) | the orchestrator of the request's requester, once per hand-up, and once more after 6 h while they are unfiled |
 | `[standing agent]`, `[auto-delegation]` | the orchestrator of the agent's owner (the system payer when it has none): a request waiting for a click, or one its auto-approve rules filed (w527) |
 | `[unity blocked]` | the dispatcher, and the people whose workers are in that sandbox |
 | `[app restarted]`, `[machines]`, `[unity]`, `[host]`, the orchestrator inbox | the dispatcher. A person's orchestrator cut off mid-turn by a restart is told to pick its turn up again |

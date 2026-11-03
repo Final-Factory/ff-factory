@@ -190,6 +190,20 @@ export const CATALOG = {
     pr: z.string().max(200).optional().describe('w2057: the pull request the legs check ("#2340", "Final-Factory/FinalFactory#2340" or its link). Default: the one what or brief names, else the one open pull request of your request. An open pair run of it is joined, not run twice.'),
     commit: z.string().max(40).optional().describe('w2057: the head commit the legs run (git rev-parse HEAD). A pair run of the same pull request that finished on it answers with its result, and nothing is filed.'),
   },
+  /** w2969 (docs/orchestrators.md, "Follow-up requests"): briefs a worker wrote for new requests, which only an orchestrator can file. */
+  hand_up_requests: {
+    items: z
+      .array(
+        z.object({
+          title: z.string().min(1).max(160).describe('The request title, as its dashboard row shows it: "w2194 stage 1: the dragon model and rig".'),
+          brief: z.string().min(1).max(4000).describe('The brief as a new worker needs it, whole: what to build, where the design is (file and commit), what done is, what it waits for.'),
+        }),
+      )
+      .min(1)
+      .max(10)
+      .describe('The follow-up requests, one item each, in the order they should be filed.'),
+    request: z.string().max(16).optional().describe('The request ("w2194") they follow from, when you serve several; default: the one you are on.'),
+  },
   /** w1969 (docs/machines.md, "Where a timed leg runs"): asked before an exclusive bench ticket; the portal says here or hands the leg to a small computer. */
   timed_place: {
     what: z.string().min(1).max(100).describe('The timed leg in one line: "RoundRobin belt output A/B on PR #2347".'),

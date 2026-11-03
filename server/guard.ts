@@ -177,7 +177,7 @@ export function sandboxGuard(opts: {
       const cmd = String(args.command ?? '');
       const reason =
         checkShell(cmd, { cwd: input.cwd || opts.sandboxPath, gameRepos: opts.gameRepos ?? [], remotes: opts.remotes ?? gitRemotes, prBase: opts.prBase ?? ghPrBase, publicIdentity: opts.publicIdentity, env: opts.env }) ??
-        (opts.editorRunning?.() ? checkEditorSwitch(cmd, input.cwd || opts.sandboxPath, opts.sandboxPath) : undefined) ??
+        (opts.editorRunning?.() ? checkEditorSwitch(cmd, input.cwd || opts.sandboxPath, opts.sandboxPath, opts.env) : undefined) ??
         checkReleaseBranchCommit(cmd, input.cwd || opts.sandboxPath, opts.sandboxPath, repoBranch, opts.env) ??
         checkPlayerLaunch(cmd, opts.sandboxId) ??
         // w2015: no CI check read the vault token cannot make, no wait that only sleeps (server/waitGuard.ts).
@@ -418,13 +418,15 @@ export function checkRawUnityBatch(cmd: string, personProjects: string[] = []): 
 /**
  * Why a shell command is refused while the sandbox's editor runs, or undefined. Exported for tests. A branch
  * switch under a running editor rewrites open scene files and Unity stops on its "modified externally"
- * question; mcp__sandbox__switch_branch parks the scenes first. Only commands aimed at the sandbox (or at a
- * directory that cannot be told) count.
+ * question; mcp__sandbox__switch_branch parks the scenes first. Only commands aimed at the tree the editor has
+ * open, the sandbox, count (or at a directory that cannot be told): the git command's own tree, from the cwd, a
+ * `cd`, `-C`, `--git-dir` / `--work-tree` or GIT_DIR / GIT_WORK_TREE, with the worker's shell variables filled in
+ * (w2971: `cd "$TMPDIR/ffu" && git checkout x` in a scratch clone was refused because $TMPDIR was not expanded).
  */
-export function checkEditorSwitch(cmd: string, cwd: string | undefined, sandboxPath: string): string | undefined {
+export function checkEditorSwitch(cmd: string, cwd: string | undefined, sandboxPath: string, env?: ShellEnv): string | undefined {
   const inside = (d: string | undefined) => {
     if (!d) return true;
-    const n = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+    const n = (p: string) => path.posix.normalize(p.replace(/\\/g, '/')).replace(/\/+$/, '').toLowerCase();
     return n(d) === n(sandboxPath) || n(d).startsWith(n(sandboxPath) + '/');
   };
   let dir = cwd;
@@ -435,13 +437,30 @@ export function checkEditorSwitch(cmd: string, cwd: string | undefined, sandboxP
       .filter(Boolean)
       .map((w) => w.replace(/^["']|["']$/g, ''));
     const lower = raw.map((w) => w.toLowerCase());
-    if (['cd', 'pushd', 'chdir', 'set-location', 'sl'].includes(lower[0] ?? '')) dir = resolveDir(dir, raw[1]);
+    if (['cd', 'pushd', 'chdir', 'set-location', 'sl'].includes(lower[0] ?? '')) dir = resolveDir(dir, raw[1], env);
     const g = lower.findIndex((w) => w === 'git' || w.endsWith('/git') || w.endsWith('git.exe'));
     if (g < 0) continue;
     let gitDir = dir;
+    // Where the repository and its working tree are, when the command names them; unset: the directory's own.
+    let repo: { given: boolean; at?: string } = { given: false };
+    let tree: { given: boolean; at?: string } = { given: false };
+    for (const w of raw.slice(0, g)) {
+      const a = /^(GIT_DIR|GIT_WORK_TREE)=(.*)$/i.exec(w);
+      if (a && a[1].toUpperCase() === 'GIT_DIR') repo = { given: true, at: resolveDir(dir, a[2], env) };
+      else if (a) tree = { given: true, at: resolveDir(dir, a[2], env) };
+    }
     let i = g + 1;
     while (i < raw.length && raw[i].startsWith('-')) {
-      if (raw[i] === '-C') gitDir = resolveDir(gitDir, raw[i + 1]);
+      const opt = /^(--git-dir|--work-tree)(?:=(.*))?$/i.exec(raw[i]);
+      if (opt) {
+        const value = opt[2] ?? raw[i + 1];
+        const at = { given: true, at: resolveDir(gitDir, value, env) };
+        if (opt[1].toLowerCase() === '--git-dir') repo = at;
+        else tree = at;
+        i += opt[2] === undefined ? 2 : 1;
+        continue;
+      }
+      if (raw[i] === '-C') gitDir = resolveDir(gitDir, raw[i + 1], env);
       i += raw[i] === '-C' || raw[i] === '-c' ? 2 : 1;
     }
     const sub = lower[i];
@@ -449,8 +468,12 @@ export function checkEditorSwitch(cmd: string, cwd: string | undefined, sandboxP
     if (sub !== 'switch' && sub !== 'checkout') continue;
     if (rest.some((w) => w === '-h' || w === '--help')) continue;
     if (sub === 'checkout' && rest.some((w) => w === '--' || w === '-p' || w === '--patch')) continue; // paths, not a branch
-    if (!inside(gitDir)) continue;
-    return `git ${sub} to another branch is blocked while this sandbox's Unity editor is running: Unity would stop on "The open scene(s) have been modified externally". Use mcp__machine__switch_branch instead (it checks the editor and switches safely). To restore files, use git restore <path> or git checkout -- <path>.`;
+    // The files a switch rewrites are the work tree's (git takes the directory itself when only the repository is named);
+    // the branch it moves is the repository's. Either one in the sandbox counts.
+    const files = tree.given ? tree.at : gitDir;
+    const head = repo.given ? repo.at : gitDir;
+    if (!inside(files) && !inside(head)) continue;
+    return `git ${sub} to another branch is blocked while this sandbox's Unity editor is running: Unity would stop on "The open scene(s) have been modified externally". Use mcp__machine__switch_branch instead (it checks the editor and switches safely). To restore files, use git restore <path> or git checkout -- <path>. In another clone (your temp folder), name it plainly (\`git -C <its full path> checkout ...\`) when the guard could not tell where the command runs.`;
   }
   return undefined;
 }
