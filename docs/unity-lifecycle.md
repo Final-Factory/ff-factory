@@ -361,6 +361,16 @@ w1832), the daemon:
   touched. Looked for at the grant, then every 30 s (`BUILD_LOOK_MS`: the process listing costs CPU the run measures).
   Left: the holder's sandbox and its owner's tree, an exempt worker's sandbox (the urgent release builder, the nightly:
   `BenchPriority.exempt`), and a Unity whose project is no sandbox (the main clone, a person's own).
+- **pauses this machine's idle CI runners and ends CI leftovers** (w3112; on m3 on 2026-11-04 GitHub Actions jobs ran
+  from 15:35 to 16:09 beside exclusive ticket t00001116, the 1-minute load average up to 24.1, about 2 idle, and debug
+  `ffu-server` processes the jobs left ran on afterwards): `machine/benchRunners.ts` `BenchRunners`, every 5 s. A
+  `Runner.Listener` is the idle baseline; a running `Runner.Worker` is a job. Each idle listener gets SIGSTOP, so it takes
+  no job, and SIGCONT when the turn ends; a listener running a job is never paused (it renews the job's lock with GitHub)
+  and is paused once its job ends, while the game repo's `bench_queue.py` (`wait_for_ci_quiet`) makes the timing wait for
+  that job (20 minutes at most) and records the turn's runners in its history. A listener that took a job in the instant
+  it was paused is continued at once. A process run from a runner's `_work` folder that no worker started is a leftover:
+  SIGTERM, never forced. What was paused and ended is in `<root>/tmp/bench.queue/runners.json`, so a daemon restarted
+  mid-turn continues them. Windows has no SIGSTOP: its runners are waited out, not paused.
 - **holds the rest as before**: `unity start` queues (a shared ticket), builds, batch compiles and the editor's compiles,
   imports and tests wait for their shared turn, and the guard refuses new players and screen grabs (w1750).
   `unity-slot run` with no ticket of its own (`FF_BENCH_TICKETS=off`; one that cannot be taken stops the run) waits for another worker's
