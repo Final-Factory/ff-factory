@@ -11,7 +11,7 @@ const decide = async (g: ReturnType<typeof sandboxGuard>, tool_name: string, too
 };
 
 // No PR is ever looked up on GitHub here (w1166: gh pr merge reads its PR's base).
-const make = () => sandboxGuard({ sandboxId: 'sb1', sandboxPath: 'C:/ffsb/sb1', protectedPaths: ['C:/Users/dev/games/MyGame', path.join(os.homedir(), 'games', 'MyGame')], prBase: () => undefined });
+const make = () => sandboxGuard({ sandboxId: 'sb1', sandboxPath: 'C:/ffsb/sb1', protectedPaths: ['C:/Users/dev/games/MyGame', path.join(os.homedir(), 'games', 'MyGame')], prBase: () => undefined, evidence: () => undefined });
 
 test('shell access to the protected checkout is denied in every spelling', async () => {
   const g = make();
@@ -97,7 +97,7 @@ test('master/main: blocked for the game repo only, and whenever the target is un
     if (d === 'c:/tmp/tools') return new Map([['origin', 'https://github.com/Final-Factory/ff-factory.git']]);
     return undefined;
   };
-  const g = sandboxGuard({ sandboxId: 'sb1', sandboxPath: 'C:/ffsb/sb1', protectedPaths: [], gameRepos: ['https://github.com/example-org/example-game.git', 'C:/ffsb/_base'], remotes, prBase: () => 'master' });
+  const g = sandboxGuard({ sandboxId: 'sb1', sandboxPath: 'C:/ffsb/sb1', protectedPaths: [], gameRepos: ['https://github.com/example-org/example-game.git', 'C:/ffsb/_base'], remotes, prBase: () => 'master', evidence: () => undefined });
   const sb = 'C:/ffsb/sb1';
   const tools = 'C:/tmp/tools';
   const cases: [string, string, 'allow' | 'deny'][] = [
@@ -385,7 +385,7 @@ test('w1166: a PR into the retired develop is not merged or opened through gh pr
     asked.push([pr, repo]);
     return pr === undefined ? 'develop' : bases[pr];
   };
-  const g = sandboxGuard({ sandboxId: 'sb1', sandboxPath: 'C:/ffsb/sb1', protectedPaths: [], gameRepos: ['https://github.com/example-org/example-game.git'], remotes, prBase });
+  const g = sandboxGuard({ sandboxId: 'sb1', sandboxPath: 'C:/ffsb/sb1', protectedPaths: [], gameRepos: ['https://github.com/example-org/example-game.git'], remotes, prBase, evidence: () => undefined });
   const sb = 'C:/ffsb/sb1';
   const tools = 'C:/tmp/tools';
   const cases: [string, string, 'allow' | 'deny'][] = [

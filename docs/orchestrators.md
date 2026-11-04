@@ -1349,8 +1349,13 @@ from the other pilots, server/mergeOnGreen.ts) is in the arm:
   GitObjectID", ffu#200, w3021). blocked_on records the pull request's own head whole when the worker's `head` is a prefix
   of it (agents.ts ciWaitProblem); a head still recorded short is resolved at the merge from `gh pr view --json headRefOid`,
   and a pull request whose head does not start with it is not merged (ghMerge).
-- Red checks, a reading that is not green (unreadable checks, a PR merged or closed by hand), or a merge GitHub refuses (a newer
-  push, a rule) unblock the request as without the pilot: the worker is resumed with why and told the report was not filed.
+- Before it merges a Final-Factory/FinalFactory pull request, ghMerge runs the Evidence check, `pr_evidence.py --repo <repo>
+  --pr <n>` (the newest copy on the machine, machine/evidenceGate.ts findPrEvidence), and does not merge on anything but
+  exit 0: a FAIL, a usage error, a gh failure, or no script to run (w3088, after #3180 merged on green with a failing
+  Evidence section). `ff-pr merge` (machine/prFlow.ts evidencePasses) and a raw `gh pr merge` or API merge in a worker's
+  shell (server/guard.ts ghEvidence) run the same check. A pull request with no game code or assets passes it.
+- Red checks, a reading that is not green (unreadable checks, a PR merged or closed by hand), a refused Evidence check, or a
+  merge GitHub refuses (a newer push, a rule) unblock the request as without the pilot: the worker is resumed with why and told the report was not filed.
 - `merge_on_green` is in the tool's schema from this version on, which a machine's daemon builds (machine/agentHost.ts reads
   server/launch.ts): a worker gets it once its daemon has updated and its process has started again. On an older one the
   field is dropped, and the worker is only told again that it may.

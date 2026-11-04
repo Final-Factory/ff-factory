@@ -1,0 +1,170 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import path from 'node:path';
+import { evidenceGated, evidencePython, evidenceVerdict, findPrEvidence } from '../machine/evidenceGate.ts';
+import { prMain, type PrDeps, type Ran } from '../machine/prFlow.ts';
+import { ghMerge } from './blockerWatch.ts';
+import { checkShell, type EvidenceResolver } from './guard.ts';
+
+/**
+ * w3088: no merge path skips the game repo's Evidence check. #3180 (w3080, the rejoin census fix) merged on green CI with its
+ * section failing: the worker ran `pr_evidence.py --pr 3180` without --repo (a usage error, exit 2), and `ff-pr merge` in the
+ * same command merged. Now `ff-pr merge`, the merge-on-green pilot (ghMerge) and a raw `gh pr merge` in the guard each run
+ * `pr_evidence.py --repo <repo> --pr <n>` and refuse on anything but exit 0, naming the failing lines.
+ *
+ * The outputs below are what ff-agents 1.34.12's pr_evidence.py printed on BEAST, 2026-11-04: FAIL_3180 for #3180's body as
+ * it merged (its edit history, 15:32Z: the `PAIR_RESULT` basis, `Determinism audit: PAIR_AUDIT`, no 'Not verified:' line;
+ * the body itself is the plugin repo's fixture pr-3180-rejoin-ghost.md), PASS for its fixed body, USAGE for `--pr 3180`.
+ */
+
+const FAIL_3180 = `evidence-gate: FAIL (pr_evidence.py, ff-agents 1.34.12, the evidence-gate skill)
+- 'A rejoin with a queued ghost no longer forks': the basis starts with MEASURED or SOURCED in capitals and a colon, then says how or where ('MEASURED: ui_layout.py check at 1280x720'), not 'PAIR_RESULT'
+- no 'Not verified:' line: name what you could not check, or write 'nothing'
+- 'Determinism audit' does not give the number of heartbeats compared
+`;
+const PASS = 'evidence-gate: PASS (pr_evidence.py, ff-agents 1.34.12, the evidence-gate skill)\n';
+const UNCOVERED = 'PASS: no game code or assets changed, so no Evidence section is needed\n';
+const USAGE = `usage: pr_evidence.py [-h] [--repo REPO] [--pr PR] [--comment]
+                      [--body-file BODY_FILE] [--files-file FILES_FILE]
+pr_evidence.py: error: give --repo and --pr, or --body-file, or --audit
+`;
+
+const SHA = 'a'.repeat(40);
+const GAME = 'https://github.com/Final-Factory/FinalFactory/pull/3180';
+
+function fake(url: string, evidence: Ran | undefined, script: string | null = 'pe.py'): PrDeps & { ran: string[]; said: string } {
+  const ran: string[] = [];
+  const d = {
+    ran,
+    said: '',
+    run: (cmd: string, args: string[]): Ran => {
+      const line = [cmd, ...args].join(' ');
+      ran.push(line);
+      if (line.startsWith('gh pr view')) return { code: 0, out: JSON.stringify({ number: 3180, url, headRefOid: SHA, mergeable: 'MERGEABLE', state: 'OPEN', baseRefName: 'master' }), err: '' };
+      if (line.startsWith('gh run list')) return { code: 0, out: JSON.stringify([{ databaseId: 1, workflowName: 'Test in editmode', status: 'completed', conclusion: 'success' }]), err: '' };
+      if (cmd === 'py') return evidence ?? { code: 0, out: PASS, err: '' };
+      return { code: 0, out: '', err: '' };
+    },
+    write: (s: string) => void (d.said += s),
+    sleep: () => {},
+    evidenceScript: () => script ?? undefined,
+    python: 'py',
+  };
+  return d;
+}
+const merged = (d: { ran: string[] }) => d.ran.some((l) => l.startsWith('gh pr merge'));
+
+test("w3088: ff-pr merge refuses #3180's old body on green CI, naming each failing line", () => {
+  const d = fake(GAME, { code: 1, out: FAIL_3180, err: '' });
+  assert.equal(prMain(['merge', '--pr', '3180'], d), 1);
+  assert.ok(d.ran.includes('py pe.py --repo Final-Factory/FinalFactory --pr 3180'), 'run with --repo and --pr, always both');
+  assert.equal(merged(d), false, 'not merged');
+  assert.match(d.said, /not merged: .*pull\/3180: the Evidence check refused it \(pr_evidence\.py --repo Final-Factory\/FinalFactory --pr 3180, exit 1\)/);
+  assert.match(d.said, /not 'PAIR_RESULT'/);
+  assert.match(d.said, /no 'Not verified:' line/);
+  assert.match(d.said, /'Determinism audit' does not give the number of heartbeats compared/);
+  assert.doesNotMatch(d.said, /evidence-gate: FAIL/, 'the reasons, not the header');
+});
+
+test('w3088: ff-pr merge merges a passing body, and a PR the script does not cover', () => {
+  for (const out of [PASS, UNCOVERED]) {
+    const d = fake(GAME, { code: 0, out, err: '' });
+    assert.equal(prMain(['merge', '--pr', '3180'], d), 0, out);
+    assert.ok(merged(d), out);
+    assert.ok(d.ran.findIndex((l) => l.startsWith('py ')) < d.ran.findIndex((l) => l.startsWith('gh pr merge')), 'checked before the merge');
+    assert.match(d.said, /Evidence: .*PASS/);
+  }
+});
+
+test('w3088: a usage error, a gh failure, no python or no script is a refusal', () => {
+  const usage = fake(GAME, { code: 2, out: '', err: USAGE });
+  assert.equal(prMain(['merge', '--pr', '3180'], usage), 1);
+  assert.equal(merged(usage), false);
+  assert.match(usage.said, /usage error, exit 2/);
+  assert.match(usage.said, /error: give --repo and --pr/);
+  const gh = fake(GAME, { code: 1, out: '', err: 'pr_evidence: gh pr view 3180 failed: HTTP 502' });
+  assert.equal(prMain(['merge', '--pr', '3180'], gh), 1);
+  assert.match(gh.said, /HTTP 502/);
+  const nopy = fake(GAME, { code: 127, out: '', err: 'spawnSync py ENOENT' });
+  assert.equal(prMain(['merge', '--pr', '3180'], nopy), 1);
+  assert.match(nopy.said, /could not run.*ENOENT/s);
+  const none = fake(GAME, undefined, null);
+  assert.equal(prMain(['merge', '--pr', '3180'], none), 1);
+  assert.equal(merged(none), false);
+  assert.match(none.said, /no pr_evidence\.py found/);
+});
+
+test('w3088: other repositories merge with no Evidence check', () => {
+  const d = fake('https://github.com/Final-Factory/ff-factory/pull/7', { code: 1, out: FAIL_3180, err: '' });
+  assert.equal(prMain(['merge', '--pr', '7'], d), 0);
+  assert.ok(merged(d));
+  assert.equal(d.ran.some((l) => l.startsWith('py ')), false);
+  assert.equal(evidenceGated('final-factory/FINALFACTORY'), true);
+  assert.equal(evidenceGated('Final-Factory/ffu'), false);
+});
+
+test('w3088: evidenceVerdict passes exit 0 only; a FAIL names its reasons without the notes', () => {
+  assert.deepEqual(evidenceVerdict(0, PASS, ''), { ok: true, lines: [PASS.trim()] });
+  const v = evidenceVerdict(1, `${FAIL_3180}- note: could not ask GitHub for the released ff-agents version\n`, '');
+  assert.equal(v.ok, false);
+  assert.equal(v.lines.length, 3);
+  assert.ok(v.lines.every((l) => l.startsWith('- ') && !l.startsWith('- note:')));
+  assert.deepEqual(evidenceVerdict(2, '', USAGE).lines.slice(-1), ['pr_evidence.py: error: give --repo and --pr, or --body-file, or --audit']);
+  assert.equal(evidenceVerdict(1, PASS, '').ok, false, 'the exit decides, not the text');
+});
+
+test('w3088: the merge-on-green pilot refuses what the Evidence check fails, and merges what it passes', async () => {
+  const runner = (evidence: { code: number; stdout: string; stderr: string }, calls: string[][]) => async (cmd: string, args: string[]) => {
+    calls.push([cmd, ...args]);
+    return (cmd === 'gh' ? { code: 0, stdout: '', stderr: '' } : evidence) as never;
+  };
+  const failed: string[][] = [];
+  await assert.rejects(
+    ghMerge('Final-Factory/FinalFactory#3180', SHA, runner({ code: 1, stdout: FAIL_3180, stderr: '' }, failed), () => 'pe.py'),
+    (e: Error) => /not merged: the Evidence check refused it/.test(e.message) && /PAIR_RESULT/.test(e.message) && /no 'Not verified:' line/.test(e.message),
+  );
+  assert.deepEqual(failed, [[evidencePython(), 'pe.py', '--repo', 'Final-Factory/FinalFactory', '--pr', '3180']], 'never merged');
+  const usage: string[][] = [];
+  await assert.rejects(ghMerge('Final-Factory/FinalFactory#3180', SHA, runner({ code: 2, stdout: '', stderr: USAGE }, usage), () => 'pe.py'), /usage error, exit 2/);
+  assert.equal(usage.some((c) => c[2] === 'merge'), false);
+  const none: string[][] = [];
+  await assert.rejects(ghMerge('Final-Factory/FinalFactory#3180', SHA, runner({ code: 0, stdout: PASS, stderr: '' }, none), () => undefined), /no pr_evidence\.py found/);
+  assert.deepEqual(none, []);
+  const passed: string[][] = [];
+  await ghMerge('Final-Factory/FinalFactory#3180', SHA, runner({ code: 0, stdout: PASS, stderr: '' }, passed), () => 'pe.py');
+  assert.deepEqual(passed.at(-1), ['gh', 'pr', 'merge', '3180', '-R', 'Final-Factory/FinalFactory', '--merge', '--match-head-commit', SHA]);
+  const other: string[][] = [];
+  await ghMerge('Final-Factory/ffu#200', SHA, runner({ code: 1, stdout: FAIL_3180, stderr: '' }, other), () => undefined);
+  assert.equal(other.length, 1, 'ffu: no Evidence check');
+});
+
+test('w3088: a raw gh pr merge (or the API merge) of a game repo PR is refused when its Evidence check refuses it', () => {
+  const remotes = (dir: string) => (dir.replace(/\\/g, '/').toLowerCase() === 'c:/ffsb/sb1' ? new Map([['origin', 'https://github.com/Final-Factory/FinalFactory.git']]) : new Map([['origin', 'https://github.com/Final-Factory/ff-factory.git']]));
+  const asked: (string | undefined)[] = [];
+  const evidence: EvidenceResolver = (pr) => (asked.push(pr), pr === '3180' ? 'Not merged: the Evidence check refused it (pr_evidence.py --repo Final-Factory/FinalFactory --pr 3180, exit 1): - no \'Not verified:\' line' : undefined);
+  const ctx = { cwd: 'C:/ffsb/sb1', gameRepos: ['https://github.com/Final-Factory/FinalFactory.git'], remotes, prBase: () => 'master', evidence };
+  assert.match(checkShell('gh pr merge 3180 --merge', ctx) ?? '', /Evidence check refused it.*no 'Not verified:' line/);
+  assert.match(checkShell('gh api -X PUT repos/Final-Factory/FinalFactory/pulls/3180/merge', ctx) ?? '', /Evidence check refused it/);
+  assert.equal(checkShell('gh pr merge 3181 --merge', ctx), undefined, 'a passing PR merges');
+  assert.equal(checkShell('gh pr view 3180', ctx), undefined, 'only a merge is checked');
+  assert.equal(checkShell('cd C:/tmp/tools && gh pr merge 3180 --merge', ctx), undefined, 'another repo is not checked');
+  assert.deepEqual(asked, ['3180', '3180', '3181']);
+});
+
+test('w3088: findPrEvidence picks the newest copy by plugin.json version (sort -V, not by name)', () => {
+  const home = '/h';
+  const cache = path.join(home, '.claude', 'plugins', 'cache', 'final-factory-agents', 'ff-agents');
+  const versions: Record<string, string> = { [path.join(cache, '1.34.9')]: '1.34.9', [path.join(cache, '1.34.12')]: '1.34.12', '/ffw/tools/final-factory-agents/plugins/ff-agents': '1.34.10' };
+  const script = (p: string) => path.join(p, 'skills', 'evidence-gate', 'pr_evidence.py');
+  const deps = {
+    env: { FF_WORKER_ROOT: '/ffw' },
+    home,
+    list: (d: string) => (d === cache ? ['1.34.9', '1.34.12'] : []),
+    exists: (p: string) => Object.keys(versions).some((v) => script(v) === p),
+    read: (p: string) => JSON.stringify({ version: versions[path.dirname(path.dirname(p))] }),
+  };
+  assert.equal(findPrEvidence(deps), script(path.join(cache, '1.34.12')));
+  assert.equal(findPrEvidence({ ...deps, list: () => [] }), script('/ffw/tools/final-factory-agents/plugins/ff-agents'));
+  assert.equal(findPrEvidence({ ...deps, list: () => [], env: {} }), undefined);
+  assert.equal(findPrEvidence({ ...deps, env: { FF_PR_EVIDENCE: '/x/pe.py' }, exists: (p) => p === '/x/pe.py' }), '/x/pe.py');
+});
