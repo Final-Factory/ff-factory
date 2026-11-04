@@ -1184,7 +1184,7 @@ measured from `gh repo list Final-Factory` and the repositories named in this re
 ### 13.4 Attribution: what changes when a person's token pushes
 
 - **Commit authorship does not change** *(sourced: git)*: the author and committer of a commit come from git's
-  `user.name`/`user.email` (the machine's, or the public identity for public repositories); the token only authenticates the
+  `user.name`/`user.email` (an agent's: the public identity in every clone, w3093); the token only authenticates the
   push.
 - **PRs and comments do:** a PR a worker opens, a comment, a review or a merge is by the token's account. Today all of it is
   m3's or BEAST's login (measured on m3: `bryding`, for lothsahn's requests too); after the switch lothsahn's requests show
