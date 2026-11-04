@@ -32,7 +32,9 @@ import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
  *     repo has no main, so a PR's `--base main` is not judged. The target is read from the push's remote (`git remote -v` in the command's
  *     directory, following `cd` and `git -C`, through the variables the worker's shell has: $TMPDIR, $HOME, ~) or
  *     gh's -R/--repo/GH_REPO; when it cannot be determined, it counts as the game repo, and the refusal says why
- *     and what it saw. Other repos' master/main are fair game: Final-Factory/ffbox is pushed straight to master by
+ *     and what it saw. The repos in PR_ONLY_REPOS (the ff-agents plugin, FF Factory) take no push to master/main either
+ *     (w3111), and `git push origin HEAD` or a bare `git push` is judged by the branch it pushes. Other repos' master/main
+ *     are fair game: Final-Factory/ffbox is pushed straight to master by
  *     design (docs/ffbox.md; w1132), the repo read from the remote's URL, never from a folder's name. Pushing your own branch and
  *     merging your PR into master is the normal, encouraged flow. (GitHub itself also refuses force pushes, deletion
  *     and direct pushes to master: branch protection requires a PR and green CI, the game repo's `Test in editmode` check since w1180.)
@@ -81,6 +83,8 @@ export function sandboxGuard(opts: {
   /** URLs or paths that name the game repo, whose master/main takes no direct push and whose develop is retired. Empty: every repo counts. */
   gameRepos?: string[];
   remotes?: RemoteResolver;
+  /** w3111: the branch checked out in a folder, for `git push origin HEAD` and a bare `git push`. Default: repoBranch. */
+  branch?: (dir: string) => string | undefined;
   /** A PR's base, for a merge into the retired develop (w1166). Default: gh. */
   prBase?: PrBaseResolver;
   /** w3088: a raw merge of a game repo PR passes pr_evidence.py first, as ff-pr merge does. Default: gh and the script. */
@@ -179,7 +183,7 @@ export function sandboxGuard(opts: {
     if (tool === 'Bash' || tool === 'PowerShell') {
       const cmd = String(args.command ?? '');
       const reason =
-        checkShell(cmd, { cwd: input.cwd || opts.sandboxPath, gameRepos: opts.gameRepos ?? [], remotes: opts.remotes ?? gitRemotes, prBase: opts.prBase ?? ghPrBase, evidence: opts.evidence ?? ghEvidence, publicIdentity: opts.publicIdentity, env: opts.env }) ??
+        checkShell(cmd, { cwd: input.cwd || opts.sandboxPath, gameRepos: opts.gameRepos ?? [], remotes: opts.remotes ?? gitRemotes, branch: opts.branch ?? ((d) => (fs.existsSync(d) ? repoBranch(d) : undefined)), prBase: opts.prBase ?? ghPrBase, evidence: opts.evidence ?? ghEvidence, publicIdentity: opts.publicIdentity, env: opts.env }) ??
         (opts.editorRunning?.() ? checkEditorSwitch(cmd, input.cwd || opts.sandboxPath, opts.sandboxPath, opts.env) : undefined) ??
         checkReleaseBranchCommit(cmd, input.cwd || opts.sandboxPath, opts.sandboxPath, repoBranch, opts.env) ??
         checkPlayerLaunch(cmd, opts.sandboxId) ??
@@ -252,6 +256,14 @@ const PROTECTED_BRANCH = /^(?:refs\/heads\/)?(?:master|main)$/i;
 /** w1137: the game repo's develop branch is retired; master is the one trunk. */
 const RETIRED_BRANCH = /^(?:refs\/heads\/)?develop$/i;
 const DEVELOP_RETIRED = 'develop is retired (w1137, 2026-10-12): master is the one trunk; push your own branch and open a PR into master (`gh pr create --base master`), then merge it when CI is green (the required `Test in editmode` check; the whole suite runs after the merge).';
+/**
+ * w3111: repos besides the game repo whose master/main takes changes only through a pull request, whatever clone pushes:
+ * the ff-agents plugin (a worker's $TMPDIR clone pushed ec77f376 and 46605709 straight to its master during w3099) and FF
+ * Factory itself. Final-Factory/ffbox is not here: its master is pushed straight by design (docs/ffbox.md).
+ */
+export const PR_ONLY_REPOS = ['github.com/final-factory/final-factory-agents', 'github.com/final-factory/ff-factory'];
+const prOnlyFix = (key: string) =>
+  `${key}'s default branch takes changes only through a pull request (w3111), from any clone, a $TMPDIR one too: push your work under its own branch name (\`git push origin HEAD:refs/heads/<branch>\`), open a PR (\`gh pr create --head <branch>\`), and merge it when its checks are green.`;
 const MASTER_BY_PR = 'master takes changes only through a pull request: push your own branch, open a PR into master (`gh pr create --base master`), and merge it when CI is green (the game repo\'s required `Test in editmode` check; the whole suite runs after the merge).';
 
 /** A built Final Factory player (or server) binary: finalfactory.exe, a finalfactory .app bundle or the binary inside one, a Linux build's finalfactory.x86_64. */
@@ -618,6 +630,8 @@ export interface ShellContext {
   cwd?: string;
   gameRepos: string[];
   remotes: RemoteResolver;
+  /** w3111: the branch checked out in a folder (`git push origin HEAD` pushes it under its own name). Absent: HEAD is not resolved. */
+  branch?: (dir: string) => string | undefined;
   /** w1166: reads a PR's base for `gh pr merge` and `gh api .../pulls/<n>/merge`, so a merge into the retired develop is refused. Absent: not checked. */
   prBase?: PrBaseResolver;
   /** w3088: why a merge of this PR is refused by its Evidence check, or undefined to let it through. Absent: not checked. */
@@ -705,14 +719,14 @@ const plainUrl = (u: string) => u.replace(/^([a-z+]+:\/\/)[^@/]*@/i, '$1');
  * the guard saw. Unknown counts as the game repo (`known: false`), and `saw` then says why it could not tell. `lost` is the text of a
  * `cd` / `git -C` target that could not be followed.
  */
-function pushTarget(ctx: ShellContext | undefined, remote: string | undefined, dir: string | undefined, lost?: string): { game: boolean; known: boolean; saw: string } {
+function pushTarget(ctx: ShellContext | undefined, remote: string | undefined, dir: string | undefined, lost?: string): { game: boolean; known: boolean; saw: string; key?: string } {
   const unknown = (saw: string) => ({ game: true, known: false, saw });
   if (!ctx?.gameRepos.length) return unknown('no game repo is configured here, so every master/main push counts as the game repo\'s');
   if (!remote) return unknown('the push names no remote before the branch (write `git push <remote> <branch>`)');
   const game = new Set(ctx.gameRepos.map(repoKey));
   if (/[/:\\]/.test(remote)) {
     const key = repoKey(plainUrl(remote));
-    return { game: game.has(key), known: true, saw: `it pushes to ${key}` };
+    return { game: game.has(key), known: true, saw: `it pushes to ${key}`, key };
   }
   if (!dir) return unknown(`remote ${remote} could not be read: the directory it runs in could not be followed${lost ? ` (\`${lost}\` has a variable the shell does not have, or runs a command)` : ' (no directory is known for it)'}`);
   const remotes = ctx.remotes(dir);
@@ -720,10 +734,25 @@ function pushTarget(ctx: ShellContext | undefined, remote: string | undefined, d
   const url = remotes.get(remote);
   if (!url) return unknown(`remote ${remote} could not be read: ${dir} has remotes ${[...remotes].map(([n, u]) => `${n}=${plainUrl(u)}`).join(', ') || '(none)'}`);
   const key = repoKey(plainUrl(url));
-  return { game: game.has(key), known: true, saw: `remote ${remote} of ${dir} is ${key}` };
+  return { game: game.has(key), known: true, saw: `remote ${remote} of ${dir} is ${key}`, key };
 }
 
 const PUSH_AIM = 'The shell returns to your sandbox after every command: to push another repo (Final-Factory/ffbox master is pushed straight, docs/ffbox.md), name its clone in the same command, `cd <clone> && git push origin HEAD:master` (a path, or one under $TMPDIR), or push to its URL.';
+
+/** Why a push of branch `dst` to `remote` is refused: the game repo's master/main or develop, or a PR-only repo's master/main (w3111). */
+function judgePushDst(ctx: ShellContext | undefined, dst: string, remote: string | undefined, dir: string | undefined, lost: string | undefined): string | undefined {
+  const retired = RETIRED_BRANCH.test(dst);
+  if (!PROTECTED_BRANCH.test(dst) && !retired) return undefined;
+  const target = pushTarget(ctx, remote, dir, lost);
+  if (target.game) {
+    const fix = retired ? DEVELOP_RETIRED : MASTER_BY_PR;
+    return target.known
+      ? `Pushing to the Final Factory game repo's ${retired ? 'develop' : 'master/main'} is blocked: ${target.saw}. ${fix} ${PUSH_AIM}`
+      : `This push's target repo could not be determined (${target.saw}), so it counts as the Final Factory game repo's, where pushing to ${retired ? 'develop' : 'master/main'} is blocked. ${fix} ${PUSH_AIM}`;
+  }
+  if (!retired && target.key && PR_ONLY_REPOS.includes(target.key)) return `Pushing to ${dst} of ${target.key} is blocked: ${target.saw}. ${prOnlyFix(target.key)}`;
+  return undefined;
+}
 
 /** Whether a gh command run in `dir` (or aimed at `repo` by -R/GH_REPO) is about the game repo. Unknown counts as yes. */
 function ghIsGameRepo(ctx: ShellContext | undefined, repo: string | undefined, dir: string | undefined): boolean {
@@ -872,17 +901,17 @@ export function checkShell(command: string, ctx?: ShellContext): string | undefi
         if (w.startsWith('+')) return 'Force pushes (+refspec) are blocked in sandboxes.';
         if (!w.startsWith('-')) {
           const dst = w.includes(':') ? w.slice(w.indexOf(':') + 1) : w;
-          const retired = RETIRED_BRANCH.test(dst);
-          if (PROTECTED_BRANCH.test(dst) || retired) {
-            const target = pushTarget(ctx, remote, pushDir, pushLost);
-            if (target.game) {
-              const fix = retired ? DEVELOP_RETIRED : MASTER_BY_PR;
-              return target.known
-                ? `Pushing to the Final Factory game repo's ${retired ? 'develop' : 'master/main'} is blocked: ${target.saw}. ${fix} ${PUSH_AIM}`
-                : `This push's target repo could not be determined (${target.saw}), so it counts as the Final Factory game repo's, where pushing to ${retired ? 'develop' : 'master/main'} is blocked. ${fix} ${PUSH_AIM}`;
-            }
-          }
+          // w3111: `git push origin HEAD` pushes the checked-out branch under its own name, so judge that name.
+          const named = dst === 'head' || dst === '@' ? (pushDir ? ctx?.branch?.(pushDir) : undefined) : dst;
+          const refused = named ? judgePushDst(ctx, named, remote, pushDir, pushLost) : undefined;
+          if (refused) return refused;
         }
+      }
+      // w3111: a push with no refspec (`git push`, `git push origin`) pushes the checked-out branch to the same name.
+      if (positionals.length <= 1 && pushDir) {
+        const b = ctx?.branch?.(pushDir);
+        const refused = b ? judgePushDst(ctx, b, positionals[0] ?? 'origin', pushDir, pushLost) : undefined;
+        if (refused) return refused;
       }
     }
 
