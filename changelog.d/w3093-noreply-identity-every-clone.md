@@ -1,0 +1,1 @@
+- Workers and standing agents commit as the public noreply identity in every clone, not only public ones (w3093): a fresh clone of a private repo (ffu) in a temp folder used to take the machine's global, private email, and GitHub refused the push for email privacy. The identity is command-scope `user.name`/`user.email` in the agent's environment; nobody's gitconfig changes.

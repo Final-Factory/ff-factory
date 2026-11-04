@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
 import { connectorEnv, ownerLine, publicIdentityOf, type Config } from './config.ts';
+import { workerGitIdentity } from './publicGit.ts';
 import { dryRun, refuseInDryRun } from './dryRun.ts';
 import type { SecretRules } from './secretGuard.ts';
 import type { CatalogTool, LaunchSpec, ToolHandler } from './launch.ts';
@@ -927,6 +928,8 @@ ${a.charter}
         publicIdentity: publicIdentityOf(this.cfg),
         standing: { folder: a.folder, groups: a.tools, offLimits: place.offLimits, secrets: place.secrets },
       },
+      // w3093: it commits as the noreply identity in every clone, as a sandbox worker does (server/publicGit.ts gitIdentityEnv).
+      publicGit: workerGitIdentity(publicIdentityOf(this.cfg), this.cfg.repo.url),
       // What the agent does as Max is tagged with its session (docs/max.md); a machine's daemon sets its own FF_MAX_EVENTS.
       // Its claude.ai connectors: config claudeAiConnectors.standing (w516; on by default).
       env: { ...place.env, FF_STANDING_AGENT: a.id, FF_SESSION_ID: a.sessionId, ...connectorEnv(this.cfg, 'standing') },

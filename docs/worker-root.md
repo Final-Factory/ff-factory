@@ -56,7 +56,7 @@ BEAST `C:\Users\rydin\.ff-factory`, LothDesktop `D:\work\.ff-factory` (its `app_
 | `sandboxes.json` | the sandbox pool across restarts | daemon | M | no | `machine/daemon.ts:241` |
 | `cleanup.json`, `cleanup-log.jsonl`, `cleanup-state.json` | clean-up settings and log | daemon | M | no | `machine/daemon.ts:136,270`; `server/cleanup.ts:537-569` |
 | `outside-watch.json` | the outside watchdog's ntfy topic | daemon | M | **yes** (the topic is the credential) | `machine/daemon.ts:960-969` |
-| `public-identity.gitconfig` | the Final Factory identity for public repos (`GIT_CONFIG_*`) | daemon (`FF_APP_DIR`) | M | no | `server/launch.ts:121-125`, `machine/daemon.ts:1234` |
+| `public-identity.gitconfig` | no longer written or read (w3093: the identity rides `GIT_CONFIG_*` itself); an old one is harmless | daemon (`FF_APP_DIR`) | M | no | — |
 | `unity-slots/` (+ its `unity-slot` shims, put first on workers' PATH) | the Unity slot mailbox (w469) | daemon | M | no | `machine/unitySlots.ts:23-24`, `machine/daemon.ts:440,713-720` |
 | `unity-mcp/<place>/` | each place's own `UNITY_MCP_STATUS_DIR` | daemon | S | no | `machine/unityMcp.ts:16-17,62` |
 | `agents/<id>/` | standing agents assigned to the machine (`NOTES.md`) | portal via daemon | M | no | `server/machineDeploy.ts:353`; docs/machines.md "Standing agents" |
@@ -114,7 +114,7 @@ BEAST `C:\Users\rydin\.ff-factory`, LothDesktop `D:\work\.ff-factory` (its `app_
 | `~/.local/bin/` (`claude.exe`, the `unity` CLI shim) | Claude Code's native binary; the editor-ops fallback | installers | M | 236 MB | no | `server/machineDeployWin.ts:269,354`; ff-agents `editor-ops/references/recovery.md:193` |
 | `~/.gitconfig` | user git config; on BEAST its GitHub credential helper is `gh auth git-credential` (measured) | a person | M | tiny | no | — |
 | gh's token: Windows Credential Manager (BEAST: "keyring", measured), `~/.config/gh` on a Mac, `%APPDATA%\GitHub CLI` | GitHub API and git pushes | `gh auth login` | M | — | **yes** | `server/secretGuard.ts:173-176` |
-| `GIT_CONFIG_COUNT`/`KEY_n`/`VALUE_n` (78 on BEAST, measured) | the public-repo identity, per worker | daemon | A | — | no | `server/launch.ts:121-125` |
+| `GIT_CONFIG_COUNT`/`KEY_n`/`VALUE_n` | the commit identity (`user.name`, `user.email`) in every clone, per worker (w3093) | daemon | A | — | no | `server/publicGit.ts` `gitIdentityEnv` |
 | `~/.ssh/` | keys for ssh peers (`beast`, `m3`) used by lab and audit scripts; the portal's deploy key on BEAST | a person | M | not read | **yes** | `scripts/nightly/lab.py:97-111`; `server/secretGuard.ts:170` |
 | `C:\ProgramData\ssh\administrators_authorized_keys` | the portal's public key for deploys over ssh | the owner (admin) | M | — | no (public key) | docs/machines.md "Setting up a Windows PC" step 3 |
 | `~/.config/ffdiscord/config.json` (or `FFDISCORD_HOME`) | the Discord bot token for posting as Max | a person | M | present on BEAST | **yes** | `scripts/nightly/nightly.sh:42-43` |

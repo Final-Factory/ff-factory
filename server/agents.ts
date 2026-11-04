@@ -105,7 +105,7 @@ import { desktopLabel, desktopLacks, pairDrivesMenus } from '../shared/desktop.t
 import { FACTORY_BRANCH_PREFIX, sandboxBranchFor, sourceTag, workerRules } from './intakeRules.ts';
 import { DEV_LIMITS, buildSubmit } from './providerProtocol.ts';
 import { TITLE_HELP, TITLE_MAX, jobTitle } from './jobTitle.ts';
-import { ghNoreply, githubSlug, publicReposOf } from './publicGit.ts';
+import { workerGitIdentity } from './publicGit.ts';
 import { statsLine, systemStats } from './system.ts';
 import { commandLine, launchIndependent, run } from './proc.ts';
 import { type HostHealthMonitor } from './hostHealth.ts';
@@ -2853,20 +2853,9 @@ export class Agents {
     );
   }
 
-  /**
-   * The identity workers commit with in public repos, and which repos those are: the configured ones plus
-   * every public repo of their owners, the game repo's owner and the gh account (server/publicGit.ts;
-   * cached, refreshed in the background). The name and email default to the gh account's noreply address.
-   */
+  /** The identity workers commit with in every clone, and the public repos the guard holds to it (server/publicGit.ts). */
   private publicGit(): { name: string; email: string; repos: string[] } | undefined {
-    const pub = publicIdentityOf(this.cfg);
-    const me = ghNoreply();
-    const email = pub.email ?? me?.email;
-    const name = pub.name ?? me?.login;
-    if (!email || !name) return undefined;
-    const listed = pub.repos.map(githubSlug).filter((x): x is string => !!x);
-    const owners = [...listed, githubSlug(this.cfg.repo.url) ?? ''].map((s) => s.split('/')[0]).concat(me ? [me.login] : []).filter(Boolean);
-    return { name, email, repos: [...new Set([...listed, ...publicReposOf(owners)])] };
+    return workerGitIdentity(publicIdentityOf(this.cfg), this.cfg.repo.url);
   }
 
   // ---------------------------------------------------------------- transcript search

@@ -12,7 +12,7 @@ import { personHoldReason } from '../machine/personPlay.ts';
 import { closedRefusalFor } from '../machine/benchTurn.ts';
 import { standingGuard } from './standingGuard.ts';
 import { readChainHook } from './readChainHook.ts';
-import { publicIdentityEnv } from './publicGit.ts';
+import { gitIdentityEnv } from './publicGit.ts';
 import { usageEnv } from './usage.ts';
 import type { StandingToolGroup } from '../shared/types.ts';
 import { WORK_LIVE_STATES, type WorkLiveState } from '../shared/workState.ts';
@@ -139,7 +139,7 @@ export interface LaunchSpec {
    * starts from are dropped (usage.ts AUTH_ENV), so only a token in `env` (a person's own) can override the login.
    */
   login?: boolean;
-  /** Commit as this identity in clones of these public repos ("owner/name"), via publicIdentityEnv on the machine. */
+  /** Commit as this identity in every clone (gitIdentityEnv on the machine, w3093); `repos` are the public ones the guard holds to it. */
   publicGit?: { name: string; email: string; repos: string[] };
   claudeExecutable?: string;
   /** Created before the process starts: `cwd` itself, and these files (relative to cwd) when missing. */
@@ -425,15 +425,9 @@ export const CATALOG = {
 export type CatalogTool = keyof typeof CATALOG;
 export type ToolHandler = (args: Record<string, unknown>) => Promise<string>;
 
-/** The spec's public-repo identity as git env (public-identity.gitconfig in the machine daemon's folder, FF_APP_DIR). */
+/** The spec's commit identity as git env, for every clone the agent makes or touches (w3093). */
 function publicGitEnvFor(spec: LaunchSpec, baseEnv: NodeJS.ProcessEnv): Record<string, string> {
-  if (!spec.publicGit?.repos.length) return {};
-  try {
-    return publicIdentityEnv(spec.publicGit, spec.publicGit.repos, path.join(baseEnv.FF_APP_DIR || path.join(os.homedir(), '.ff-factory'), 'public-identity.gitconfig'), baseEnv);
-  } catch (e) {
-    console.warn('public git identity:', (e as Error).message);
-    return {};
-  }
+  return spec.publicGit ? gitIdentityEnv(spec.publicGit, baseEnv) : {};
 }
 
 /**

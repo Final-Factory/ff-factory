@@ -222,10 +222,12 @@ sandbox root of this host's own daemon when `add_machine local` is used, and the
 app's own origin. Any other GitHub repo that GitHub reports as public counts too (`gh api`, cached;
 `server/publicGit.ts`). The guard refuses an agent's push to a public repo when a commit carries an email
 that is not a GitHub noreply address or the configured `email`, on the host and on the machines. Worker
-agents (sandboxes and machines) also commit as that identity automatically in clones of public repos: their
-git gets an `includeIf "hasconfig:remote.*.url:..."` through `GIT_CONFIG_COUNT` for the configured repos and
-every public repo of their owners, the game repo's owner and the gh account (git 2.36+; nobody's gitconfig
-changes). Without a configured `name`/`email` that identity is the gh account's login and noreply address.
+agents (sandboxes, machines and standing agents) also commit as that identity automatically in every clone, private
+ones and fresh clones in a temp folder included (w3093: a private email in a commit makes GitHub refuse the push when
+the account blocks pushes that expose its email): their git gets `user.name` and `user.email` as command-scope config
+through `GIT_CONFIG_COUNT`, which outranks the global config and a clone's own (git 2.31+; nobody's gitconfig changes,
+and `git -c` or `--author` still win). Without a configured `name`/`email` that identity is the gh account's login and
+noreply address.
 
 **The portal runs only the orchestrators** (w510, 2026-10-06; this is what the portal-only mode of w464, config
 `hostSandboxes: false`, [docs/portal-on-ffbox-host.md](docs/portal-on-ffbox-host.md), section 6, changes 1 and 2, became

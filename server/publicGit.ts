@@ -1,10 +1,8 @@
 import { execFile, execFileSync } from 'node:child_process';
-import fs from 'node:fs';
-import path from 'node:path';
 
 /**
- * Which GitHub repos are public, and the git settings that make agents commit to them with the public
- * identity automatically. Used by the guard's identity rule (any repo GitHub reports as public, not only
+ * Which GitHub repos are public, and the git settings that make agents commit with the public identity in every
+ * clone (w3093). Used by the guard's identity rule (any repo GitHub reports as public, not only
  * the configured ones) on the host and on the machines, and by the worker launch (docs/machines.md).
  */
 
@@ -83,28 +81,38 @@ export function githubSlug(url: string): string | undefined {
 }
 
 /**
- * Environment that makes git use `identity` in any clone whose remote is one of `repos` ("owner/name"):
- * command-scope config (GIT_CONFIG_COUNT) holding an includeIf "hasconfig:remote.*.url:..." per URL form,
- * which outranks the clone's own user.name/user.email. Nobody's gitconfig changes; only the agent's
- * processes see it. Needs git 2.36+ (older git ignores the condition). `file` is written here.
+ * Environment that makes git commit as `identity` in every repository an agent touches (w3093): command-scope config
+ * (GIT_CONFIG_COUNT) `user.name` and `user.email`, which outrank the machine's global identity and a clone's own
+ * user.name/user.email, so a fresh clone in a temp folder (ffu, a tool repo) commits as the noreply address too and
+ * GitHub's email-privacy rule ("push declines due to email privacy restrictions") never refuses the push. Nobody's
+ * gitconfig changes; only the agent's processes see it, and `git -c` or `--author` still win where a worker means them.
+ * Appended after the entries already in `baseEnv`. Needs git 2.31+ (GIT_CONFIG_COUNT).
  */
-export function publicIdentityEnv(identity: { name: string; email: string }, repos: string[], file: string, baseEnv: NodeJS.ProcessEnv = {}): Record<string, string> {
-  if (!repos.length) return {};
-  const q = (s: string) => `"${s.replace(/["\\]/g, '')}"`;
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, `# Written by FF Factory: the identity agents commit with in public repos.\n[user]\n\tname = ${q(identity.name)}\n\temail = ${q(identity.email)}\n`);
-  const start = Number(baseEnv.GIT_CONFIG_COUNT ?? 0) || 0;
-  const env: Record<string, string> = {};
-  let n = start;
-  for (const r of [...new Set(repos)].sort()) {
-    for (const url of [`https://github.com/${r}`, `git@github.com:${r}`, `ssh://git@github.com/${r}`]) {
-      env[`GIT_CONFIG_KEY_${n}`] = `includeIf.hasconfig:remote.*.url:${url}**.path`;
-      env[`GIT_CONFIG_VALUE_${n}`] = file.replace(/\\/g, '/');
-      n++;
-    }
-  }
-  env.GIT_CONFIG_COUNT = String(n);
-  return env;
+export function gitIdentityEnv(identity: { name: string; email: string }, baseEnv: NodeJS.ProcessEnv = {}): Record<string, string> {
+  if (!identity.name || !identity.email) return {};
+  const n = Number(baseEnv.GIT_CONFIG_COUNT ?? 0) || 0;
+  return {
+    [`GIT_CONFIG_KEY_${n}`]: 'user.name',
+    [`GIT_CONFIG_VALUE_${n}`]: identity.name,
+    [`GIT_CONFIG_KEY_${n + 1}`]: 'user.email',
+    [`GIT_CONFIG_VALUE_${n + 1}`]: identity.email,
+    GIT_CONFIG_COUNT: String(n + 2),
+  };
+}
+
+/**
+ * The identity workers and standing agents commit with (gitIdentityEnv), and the public repos the guard holds to it: the
+ * configured ones plus every public repo of their owners, the game repo's owner and the gh account (cached, refreshed in
+ * the background). The name and email default to the gh account's noreply address.
+ */
+export function workerGitIdentity(pub: { repos: string[]; name?: string; email?: string }, gameRepoUrl: string): { name: string; email: string; repos: string[] } | undefined {
+  const me = ghNoreply();
+  const email = pub.email ?? me?.email;
+  const name = pub.name ?? me?.login;
+  if (!email || !name) return undefined;
+  const listed = pub.repos.map(githubSlug).filter((x): x is string => !!x);
+  const owners = [...listed, githubSlug(gameRepoUrl) ?? ''].map((s) => s.split('/')[0]).concat(me ? [me.login] : []).filter(Boolean);
+  return { name, email, repos: [...new Set([...listed, ...publicReposOf(owners)])] };
 }
 
 let me: { login: string; id: number; at: number } | undefined;

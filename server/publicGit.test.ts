@@ -4,7 +4,8 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { clearVisibilityCache, githubSlug, publicIdentityEnv, repoIsPublic } from './publicGit.ts';
+import { clearVisibilityCache, gitIdentityEnv, githubSlug, repoIsPublic } from './publicGit.ts';
+import { buildOptions, type LaunchSpec } from './launch.ts';
 
 test('public repos: gh first, then the anonymous API, cached', () => {
   clearVisibilityCache();
@@ -37,24 +38,35 @@ test('public repos: gh first, then the anonymous API, cached', () => {
   assert.equal(githubSlug('https://github.com/Final-Factory/ff-factory'), 'Final-Factory/ff-factory');
 });
 
-// includeIf "hasconfig:remote.*.url:" is git 2.36. An FFBox runner container is Ubuntu 22.04 and has git 2.34.1 (w911).
-const gitVersion = /(\d+)\.(\d+)/.exec(execFileSync('git', ['--version'], { encoding: 'utf8' }));
-const gitTooOld = !gitVersion || Number(gitVersion[1]) < 2 || (Number(gitVersion[1]) === 2 && Number(gitVersion[2]) < 36);
-
-test('public repos: agents commit as the public identity in public clones, their own identity elsewhere', { skip: gitTooOld ? 'needs git 2.36 (includeIf hasconfig:remote.*.url)' : undefined }, (t) => {
+// w3093: four workers in two days had a push refused by GitHub's email-privacy rule after committing in a fresh clone of a
+// private repo (ffu) with the machine's global, private email; the identity used to reach public repos only.
+test('git identity: a worker commits as the noreply identity in every clone, over the global and the clone\'s own identity', (t) => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pubgit-'));
   t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
-  const env = publicIdentityEnv({ name: 'Public Name', email: '1+pub@users.noreply.github.com' }, ['Org/public-kit'], path.join(tmp, 'id.gitconfig'), { GIT_CONFIG_COUNT: '1' });
-  assert.equal(env.GIT_CONFIG_COUNT, '4', 'appended after the entries already in the environment');
-  const base = { ...process.env, GIT_CONFIG_KEY_0: 'core.autocrlf', GIT_CONFIG_VALUE_0: 'false', ...env };
-  const email = (remote: string) => {
-    const dir = path.join(tmp, remote.replace(/\W+/g, '_'));
-    execFileSync('git', ['init', '-q', dir]);
-    execFileSync('git', ['-C', dir, 'config', 'user.email', 'person@example.com']);
-    execFileSync('git', ['-C', dir, 'remote', 'add', 'origin', remote]);
-    return execFileSync('git', ['-C', dir, 'config', 'user.email'], { encoding: 'utf8', env: base }).trim();
+  const global = path.join(tmp, 'owner.gitconfig');
+  fs.writeFileSync(global, '[user]\n\tname = Owner\n\temail = owner-private@example.com\n');
+  const spec: LaunchSpec = { cwd: tmp, settingSources: [], append: '', strictMcp: true, guard: { id: 'x', ownPath: tmp, protectedPaths: [], gameRepos: [] }, publicGit: { name: 'Final Factory', email: '1+pub@users.noreply.github.com', repos: [] } };
+  // The daemon's own environment: the owner's global config, and a command-scope entry already there (kept, appended after).
+  const daemonEnv = { PATH: process.env.PATH, GIT_CONFIG_GLOBAL: global, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.autocrlf', GIT_CONFIG_VALUE_0: 'false' };
+  const env = buildOptions(spec, {}, daemonEnv).env as NodeJS.ProcessEnv;
+  assert.equal(env.GIT_CONFIG_COUNT, '3');
+  assert.equal(env.GIT_CONFIG_KEY_0, 'core.autocrlf', 'an entry already given is kept');
+  const git = (dir: string, ...args: string[]) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8', env }).trim();
+  const commit = (name: string, setup: (dir: string) => void) => {
+    const dir = path.join(tmp, name);
+    execFileSync('git', ['init', '-q', dir], { env });
+    setup(dir);
+    git(dir, 'commit', '-q', '--allow-empty', '-m', 'x');
+    return git(dir, 'log', '-1', '--format=%an <%ae> %ce');
   };
-  assert.equal(email('https://github.com/Org/public-kit.git'), '1+pub@users.noreply.github.com');
-  assert.equal(email('git@github.com:Org/public-kit.git'), '1+pub@users.noreply.github.com');
-  assert.equal(email('https://github.com/Org/private-game.git'), 'person@example.com');
+  const want = 'Final Factory <1+pub@users.noreply.github.com> 1+pub@users.noreply.github.com';
+  assert.equal(commit('private-clone', (d) => git(d, 'remote', 'add', 'origin', 'https://github.com/Org/private-engine.git')), want, 'a fresh clone of a private repo');
+  assert.equal(commit('own-identity', (d) => git(d, 'config', 'user.email', 'owner-private@example.com')), want, "over a clone's own user.email (a main clone's)");
+  assert.equal(commit('no-remote', () => {}), want, 'a repo with no remote');
+  // A worker that means another identity still says so on the command line.
+  const dir = path.join(tmp, 'no-remote');
+  git(dir, '-c', 'user.email=chosen@example.com', 'commit', '-q', '--allow-empty', '-m', 'y');
+  assert.equal(git(dir, 'log', '-1', '--format=%ae'), 'chosen@example.com');
+  // Without an identity in the spec, nothing is added.
+  assert.equal(gitIdentityEnv({ name: '', email: '' }, daemonEnv).GIT_CONFIG_COUNT, undefined);
 });
