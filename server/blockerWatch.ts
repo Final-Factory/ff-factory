@@ -82,6 +82,11 @@ export interface BlockerWatchDeps {
   pr?: (ref: string, person?: string) => Promise<PrState | undefined>;
   /** w2045: merge a pull request at exactly this head (merge-on-green pilot); default gh, as for ci. Throws with what GitHub said. */
   merge?: (ref: string, head: string, person?: string) => Promise<void>;
+  /**
+   * w3110: where the default merge finds pr_evidence.py. The portal passes its own checkout (machine/evidenceGate.ts
+   * portalPrEvidence): this runs on the portal, which has no plugin cache or FF_SKILLS. Default: findLocalPrEvidence.
+   */
+  evidenceScript?: () => string | undefined | Promise<string | undefined>;
   /** Whose GitHub token a request's reads use (w868); undefined: the portal's own gh login. */
   githubPerson?: (w: WorkItem) => string | undefined;
   /** The computers with room for one more game worker now. */
@@ -397,7 +402,7 @@ export class BlockerWatch {
     if (!g || !this.d.orchestrators.mergedOnGreen) return this.d.orchestrators.unblock(w.id, why);
     if (!ci.get(g.ref!)?.green) return this.d.orchestrators.unblock(w.id, `${why}; FF Factory did not merge it (the checks are not all green), and the report you left with merge_on_green was not filed`);
     try {
-      await (this.d.merge ? this.d.merge(g.ref!, g.mergeOnGreen!.head, this.d.githubPerson?.(w)) : ghMerge(g.ref!, g.mergeOnGreen!.head, ghRunner(this.d.githubPerson?.(w), `the merge of ${g.ref}`)));
+      await (this.d.merge ? this.d.merge(g.ref!, g.mergeOnGreen!.head, this.d.githubPerson?.(w)) : ghMerge(g.ref!, g.mergeOnGreen!.head, ghRunner(this.d.githubPerson?.(w), `the merge of ${g.ref}`), this.d.evidenceScript));
     } catch (e) {
       const said = clipLine((e as Error).message, 1200);
       console.warn(`blocker watch: ${w.id}: merge on green of ${g.ref} failed: ${said}`);
@@ -423,7 +428,7 @@ export class BlockerWatch {
     for (const x of merge) {
       const g = x.g;
       try {
-        await (this.d.merge ? this.d.merge(g.ref!, g.mergeOnGreen!.head, this.d.githubPerson?.(w)) : ghMerge(g.ref!, g.mergeOnGreen!.head, ghRunner(this.d.githubPerson?.(w), `the merge of ${g.ref}`)));
+        await (this.d.merge ? this.d.merge(g.ref!, g.mergeOnGreen!.head, this.d.githubPerson?.(w)) : ghMerge(g.ref!, g.mergeOnGreen!.head, ghRunner(this.d.githubPerson?.(w), `the merge of ${g.ref}`), this.d.evidenceScript));
       } catch (e) {
         const said = clipLine((e as Error).message, 1200);
         console.warn(`blocker watch: ${w.id}: merge on green of ${g.ref} failed: ${said}`);
@@ -721,7 +726,7 @@ let rollupRefusedLogged = false;
  * is first resolved to the pull request's own head commit, and only when that commit starts with it: a head that moved
  * since the worker recorded it is never merged.
  */
-export async function ghMerge(ref: string, head: string, run: Runner = runProc, evidenceScript: () => string | undefined = findLocalPrEvidence): Promise<void> {
+export async function ghMerge(ref: string, head: string, run: Runner = runProc, evidenceScript: () => string | undefined | Promise<string | undefined> = findLocalPrEvidence): Promise<void> {
   const m = CI_REF.exec(ref);
   if (!m) throw new Error(`"${ref}" is not a pull request (owner/repo#123)`);
   const opts = { timeoutMs: 60_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } };
@@ -738,7 +743,7 @@ export async function ghMerge(ref: string, head: string, run: Runner = runProc, 
   // #3180 merged on green with its Evidence section failing. Through the same runner, so the script's own gh calls carry the
   // person's token. No script, no python, a FAIL or a usage error: not merged, and the worker hears the failing lines.
   if (evidenceGated(m[1])) {
-    const script = evidenceScript();
+    const script = await evidenceScript();
     if (!script) throw new Error(`not merged: ${noScriptRefusal(m[1], m[2])}`);
     const e = await run(evidencePython(), evidenceArgs(script, m[1], m[2]), { ...opts, timeoutMs: 5 * 60_000 });
     const v = evidenceVerdict(e.code, e.stdout, e.stderr);
