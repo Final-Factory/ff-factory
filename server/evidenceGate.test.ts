@@ -1,7 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
-import { evidenceGated, evidencePython, evidenceVerdict, findPrEvidence } from '../machine/evidenceGate.ts';
+
+type PlatformPath = typeof path.posix;
+import { evidenceGated, evidencePython, evidenceVerdict, findPrEvidence, portalPrEvidence, type GitRun } from '../machine/evidenceGate.ts';
 import { prMain, type PrDeps, type Ran } from '../machine/prFlow.ts';
 import { ghMerge } from './blockerWatch.ts';
 import { checkShell, type EvidenceResolver } from './guard.ts';
@@ -212,4 +216,69 @@ test('w3088: findPrEvidence picks the newest copy by plugin.json version (sort -
   assert.equal(findPrEvidence({ ...deps, list: () => [] }), script('/ffw/tools/final-factory-agents/plugins/ff-agents'));
   assert.equal(findPrEvidence({ ...deps, list: () => [], env: {} }), undefined);
   assert.equal(findPrEvidence({ ...deps, env: { FF_PR_EVIDENCE: '/x/pe.py' }, exists: (p) => p === '/x/pe.py' }), '/x/pe.py');
+});
+
+/**
+ * w3110: the pilot's merge runs in the portal's process, on the portal VM, whichever machine the worker is on. The portal has
+ * no plugin cache, no FF_SKILLS and no FF_WORKER_ROOT, so findLocalPrEvidence found nothing there and FinalFactory #3186,
+ * #3187 and ffu #237 (2026-11-04, workers on BEAST) were refused on green with "no pr_evidence.py found". The portal now
+ * keeps its own checkout of final-factory-agents (portalPrEvidence) and runs the script from it.
+ */
+test('w3110: the merge-on-green pilot on the portal runs pr_evidence.py from its own checkout: refuses a FAIL, merges a PASS', async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'w3110-data-'));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'w3110-home-'));
+  const co = path.join(dataDir, 'tools', 'final-factory-agents');
+  const script = path.join(co, 'plugins', 'ff-agents', 'skills', 'evidence-gate', 'pr_evidence.py');
+  // The bug: the portal's own environment finds no script.
+  assert.equal(findPrEvidence({ env: {}, home }), undefined);
+  const gits: string[][] = [];
+  let cloneWorks = true;
+  const git: GitRun = async (cmd, args) => {
+    gits.push(args.filter((a) => !a.startsWith('credential.') && a !== '-c'));
+    if (args.includes('clone') && cloneWorks) {
+      fs.mkdirSync(path.join(co, '.git'), { recursive: true });
+      fs.mkdirSync(path.dirname(script), { recursive: true });
+      fs.writeFileSync(script, '# pr_evidence.py');
+      fs.mkdirSync(path.join(co, 'plugins', 'ff-agents', '.claude-plugin'));
+      fs.writeFileSync(path.join(co, 'plugins', 'ff-agents', '.claude-plugin', 'plugin.json'), '{"version":"1.34.16"}');
+    }
+    return { code: args.includes('clone') && !cloneWorks ? 128 : 0, stdout: '', stderr: '' };
+  };
+  const portal = () => portalPrEvidence({ dataDir, run: git, env: {}, home });
+  const runner = (evidence: { code: number; stdout: string; stderr: string }, calls: string[][]) => async (cmd: string, args: string[]) => {
+    calls.push([cmd, ...args]);
+    return (cmd === 'gh' ? { code: 0, stdout: '', stderr: '' } : evidence) as never;
+  };
+
+  // No checkout and the clone fails: still refused, never merged without the check.
+  cloneWorks = false;
+  const none: string[][] = [];
+  await assert.rejects(ghMerge('Final-Factory/FinalFactory#3186', SHA, runner({ code: 0, stdout: PASS, stderr: '' }, none), portal), /no pr_evidence\.py found/);
+  assert.deepEqual(none, []);
+
+  cloneWorks = true;
+  const failed: string[][] = [];
+  await assert.rejects(ghMerge('Final-Factory/ffu#237', SHA, runner({ code: 1, stdout: FAIL_FFU_222, stderr: '' }, failed), portal), /no 'Art language:' line/);
+  assert.deepEqual(failed, [[evidencePython(), script, '--repo', 'Final-Factory/ffu', '--pr', '237']], 'cloned, ran, never merged');
+  assert.ok(gits.some((a) => a[0] === 'clone' && a.includes('https://github.com/Final-Factory/final-factory-agents.git') && a.at(-1) === co));
+
+  // The next merge brings the checkout up to date (a stale copy FAILs every PR, w733), then merges on a PASS.
+  const passed: string[][] = [];
+  await ghMerge('Final-Factory/FinalFactory#3187', SHA, runner({ code: 0, stdout: PASS, stderr: '' }, passed), portal);
+  assert.deepEqual(passed[0], [evidencePython(), script, '--repo', 'Final-Factory/FinalFactory', '--pr', '3187']);
+  assert.deepEqual(passed.at(-1), ['gh', 'pr', 'merge', '3187', '-R', 'Final-Factory/FinalFactory', '--merge', '--match-head-commit', SHA]);
+  assert.deepEqual(gits.slice(-2).map((a) => a.slice(2, 3)[0]), ['fetch', 'reset']);
+});
+
+test("w3110: a worker's own lookup (ff-pr merge, the guard) finds FF_SKILLS's script on BEAST (Windows) and on a Mac", () => {
+  const cases: { P: PlatformPath; home: string; skills: string }[] = [
+    { P: path.win32, home: 'C:\\Users\\rydin', skills: 'C:\\Users\\rydin\\.claude\\plugins\\cache\\final-factory-agents\\ff-agents\\1.34.16\\skills' },
+    { P: path.win32, home: 'C:\\Users\\rydin', skills: 'F:/ffw/tools/final-factory-agents/plugins/ff-agents/skills' },
+    { P: path.posix, home: '/Users/ben', skills: '/Users/ben/.claude/plugins/cache/final-factory-agents/ff-agents/1.34.16/skills' },
+  ];
+  for (const c of cases) {
+    const want = c.P.join(c.skills, 'evidence-gate', 'pr_evidence.py');
+    const found = findPrEvidence({ env: { FF_SKILLS: c.skills }, home: c.home, pathApi: c.P, list: () => [], exists: (p) => p === want, read: () => '{"version":"1.34.16"}' });
+    assert.equal(found, want, c.skills);
+  }
 });

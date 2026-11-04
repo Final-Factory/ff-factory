@@ -10,6 +10,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+type PlatformPath = typeof path.posix;
+
 /**
  * The repositories whose pull requests the gate checks (lower case). ffu since w3098: pr_evidence.py holds an ffu PR that
  * touches art/ or the code that draws the image (ffu-bake, ffu-render, a .wgsl; w2895, w3097) to its 'Reference capture:'
@@ -23,11 +25,11 @@ export const evidenceGated = (repo: string) => EVIDENCE_GATED.has(repo.toLowerCa
 export const evidencePython = (env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform) =>
   env.FF_PYTHON || (platform === 'win32' ? 'python' : 'python3');
 
-const SCRIPT = path.join('skills', 'evidence-gate', 'pr_evidence.py');
+const SCRIPT = ['skills', 'evidence-gate', 'pr_evidence.py'];
 
-function pluginVersion(plugin: string, read: (p: string) => string): number[] {
+function pluginVersion(plugin: string, read: (p: string) => string, P: PlatformPath): number[] {
   try {
-    const v = String((JSON.parse(read(path.join(plugin, '.claude-plugin', 'plugin.json'))) as { version?: unknown }).version ?? '');
+    const v = String((JSON.parse(read(P.join(plugin, '.claude-plugin', 'plugin.json'))) as { version?: unknown }).version ?? '');
     return v.split(/[.+-]/).map((p) => (/^\d+$/.test(p) ? Number(p) : 0));
   } catch {
     return [];
@@ -47,6 +49,8 @@ export interface FindDeps {
   exists?: (p: string) => boolean;
   list?: (dir: string) => string[];
   read?: (p: string) => string;
+  /** The path rules of the machine it runs on (tests: path.win32 for BEAST, path.posix for a Mac). Default: this one's. */
+  pathApi?: PlatformPath;
 }
 
 /**
@@ -59,23 +63,76 @@ export function findPrEvidence(d: FindDeps): string | undefined {
   const exists = d.exists ?? ((p: string) => fs.existsSync(p));
   const list = d.list ?? ((dir: string) => { try { return fs.readdirSync(dir); } catch { return []; } });
   const read = d.read ?? ((p: string) => fs.readFileSync(p, 'utf8'));
+  const P = d.pathApi ?? path;
   if (d.env.FF_PR_EVIDENCE) return exists(d.env.FF_PR_EVIDENCE) ? d.env.FF_PR_EVIDENCE : undefined;
-  const cache = path.join(d.env.CLAUDE_CONFIG_DIR || path.join(d.home, '.claude'), 'plugins', 'cache', 'final-factory-agents', 'ff-agents');
-  const plugins = list(cache).map((v) => path.join(cache, v));
-  if (d.env.FF_SKILLS) plugins.push(path.dirname(d.env.FF_SKILLS));
+  const cache = P.join(d.env.CLAUDE_CONFIG_DIR || P.join(d.home, '.claude'), 'plugins', 'cache', 'final-factory-agents', 'ff-agents');
+  const plugins = list(cache).map((v) => P.join(cache, v));
+  if (d.env.FF_SKILLS) plugins.push(P.dirname(d.env.FF_SKILLS));
   const root = d.root ?? d.env.FF_WORKER_ROOT;
-  if (root) plugins.push(path.join(root, 'tools', 'final-factory-agents', 'plugins', 'ff-agents'));
+  if (root) plugins.push(P.join(root, 'tools', 'final-factory-agents', 'plugins', 'ff-agents'));
   let best: { script: string; v: number[] } | undefined;
   for (const p of plugins) {
-    const script = path.join(p, SCRIPT);
+    const script = P.join(p, ...SCRIPT);
     if (!exists(script)) continue;
-    const v = pluginVersion(p, read);
+    const v = pluginVersion(p, read, P);
     if (!best || newer(v, best.v)) best = { script, v };
   }
   return best?.script;
 }
 
 export const findLocalPrEvidence = (env: NodeJS.ProcessEnv = process.env) => findPrEvidence({ env, home: os.homedir() });
+
+/** final-factory-agents, public: cloned with no credential helper and no prompt (server/agentTools.ts publishAgentTools). */
+export const AGENTS_REPO = 'https://github.com/Final-Factory/final-factory-agents.git';
+const AGENTS_BRANCH = 'master';
+
+export type GitRun = (cmd: string, args: string[], opts?: { timeoutMs?: number; env?: NodeJS.ProcessEnv }) => Promise<{ code: number; stdout: string; stderr: string }>;
+
+export interface PortalEvidenceDeps {
+  /** The portal's data folder: its checkout is `<dataDir>/tools/final-factory-agents`, where findPrEvidence's `root` looks. */
+  dataDir: string;
+  run: GitRun;
+  env?: NodeJS.ProcessEnv;
+  home?: string;
+  exists?: (p: string) => boolean;
+  list?: (dir: string) => string[];
+  read?: (p: string) => string;
+}
+
+let refreshing: Promise<void> | undefined;
+
+/**
+ * w3110: the merge-on-green pilot runs in the portal's own process (server/blockerWatch.ts ghMerge, on the portal VM), not
+ * on the worker's machine, and the portal has no plugin cache, no FF_SKILLS and no worker root: every gated merge after
+ * w3088 was refused with "no pr_evidence.py found" (FinalFactory #3186, #3187, ffu #237, 2026-11-04), whichever machine
+ * the worker was on. So the portal keeps its own shallow checkout of final-factory-agents' master, brought up to date
+ * before each check (pr_evidence.py fails every PR from a copy older than the released one, w733), and finds the script
+ * there as findPrEvidence finds a worker root's tools checkout. A clone or fetch that fails leaves the copy it had;
+ * with none, undefined, and the merge is refused.
+ */
+export async function portalPrEvidence(d: PortalEvidenceDeps): Promise<string | undefined> {
+  const co = path.join(d.dataDir, 'tools', 'final-factory-agents');
+  const exists = d.exists ?? ((p: string) => fs.existsSync(p));
+  const env: NodeJS.ProcessEnv = { ...(d.env ?? process.env), GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' };
+  const anon = ['-c', 'credential.helper=', '-c', 'credential.interactive=never'];
+  const git = (args: string[]) => d.run('git', [...anon, ...args], { env, timeoutMs: 2 * 60_000 });
+  // One refresh at a time: two merges at once would race for the checkout's lock.
+  refreshing ??= (async () => {
+    try {
+      if (!exists(path.join(co, '.git'))) {
+        if (exists(co)) return;
+        fs.mkdirSync(path.dirname(co), { recursive: true });
+        await git(['clone', '--quiet', '--depth', '1', '--branch', AGENTS_BRANCH, AGENTS_REPO, co]);
+      } else if ((await git(['-C', co, 'fetch', '--quiet', '--depth', '1', 'origin', AGENTS_BRANCH])).code === 0) {
+        await git(['-C', co, 'reset', '--quiet', '--hard', 'FETCH_HEAD']);
+      }
+    } catch {
+      // The copy it had, if any.
+    }
+  })().finally(() => { refreshing = undefined; });
+  await refreshing;
+  return findPrEvidence({ env: d.env ?? process.env, home: d.home ?? os.homedir(), root: d.dataDir, exists, ...(d.list ? { list: d.list } : {}), ...(d.read ? { read: d.read } : {}) });
+}
 
 /** The command the gate runs: the script, the repository and the pull request, always all three. */
 export const evidenceArgs = (script: string, repo: string, pr: number | string) => [script, '--repo', repo, '--pr', String(pr)];
