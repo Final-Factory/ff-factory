@@ -52,15 +52,49 @@ test('green only when every check passed or skipped: a red, a running or a merge
   assert.equal(runsState({ workflow_runs: [] }, ref).green, undefined);
 });
 
+const FULL = '3e14de3aa5160f0e8d2c7b9a4f1e6d3c2b1a0f9e';
+
 test('ghMerge: gh pr merge at exactly the head, with the repo named; what gh said when it refuses', async () => {
   const calls: string[][] = [];
-  await ghMerge('Final-Factory/FinalFactory#12', 'abc1234def', async (cmd, args) => {
+  await ghMerge('Final-Factory/FinalFactory#12', FULL, async (cmd, args) => {
     calls.push([cmd, ...args]);
     return { code: 0, stdout: '', stderr: '' } as never;
   });
-  assert.deepEqual(calls, [['gh', 'pr', 'merge', '12', '-R', 'Final-Factory/FinalFactory', '--merge', '--match-head-commit', 'abc1234def']]);
+  assert.deepEqual(calls, [['gh', 'pr', 'merge', '12', '-R', 'Final-Factory/FinalFactory', '--merge', '--match-head-commit', FULL]], 'a full sha is passed as is, with no read');
   await assert.rejects(
-    ghMerge('Final-Factory/FinalFactory#12', 'abc1234def', async () => ({ code: 1, stdout: '', stderr: 'Head branch was modified. Review and try the merge again.' }) as never),
+    ghMerge('Final-Factory/FinalFactory#12', FULL, async () => ({ code: 1, stdout: '', stderr: 'Head branch was modified. Review and try the merge again.' }) as never),
     /gh pr merge Final-Factory\/FinalFactory#12: Head branch was modified/,
   );
+});
+
+/** A gh that answers `gh pr view --json headRefOid` with `oid` and records every call. */
+function fakeGh(oid: string | undefined, calls: string[][]) {
+  return async (cmd: string, args: string[]) => {
+    calls.push([cmd, ...args]);
+    if (args[0] === 'pr' && args[1] === 'view') return (oid === undefined ? { code: 1, stdout: '', stderr: 'HTTP 502' } : { code: 0, stdout: JSON.stringify({ headRefOid: oid }), stderr: '' }) as never;
+    return { code: 0, stdout: '', stderr: '' } as never;
+  };
+}
+
+test('w3021: ghMerge resolves a short head to the pull request head it starts with, and passes GitHub the full sha', async () => {
+  // ffu#200 as it happened: the head was recorded as 3e14de3aa516, and GitHub refused it ("Could not coerce value to GitObjectID").
+  const calls: string[][] = [];
+  await ghMerge('Final-Factory/ffu#200', '3E14DE3AA516', fakeGh(FULL, calls));
+  assert.deepEqual(calls, [
+    ['gh', 'pr', 'view', '200', '-R', 'Final-Factory/ffu', '--json', 'headRefOid'],
+    ['gh', 'pr', 'merge', '200', '-R', 'Final-Factory/ffu', '--merge', '--match-head-commit', FULL],
+  ]);
+});
+
+test('w3021: ghMerge never merges when a short head is not the pull request head, or the head cannot be read', async () => {
+  const moved: string[][] = [];
+  await assert.rejects(ghMerge('Final-Factory/ffu#200', '3e14de3aa516', fakeGh('9'.repeat(40), moved)), /not merged: its head is 999999999999, not 3e14de3aa516, the commit recorded to merge/);
+  assert.equal(moved.filter((c) => c[2] === 'merge').length, 0, 'a head that moved is not merged');
+  const unread: string[][] = [];
+  await assert.rejects(ghMerge('Final-Factory/ffu#200', '3e14de3aa516', fakeGh(undefined, unread)), /not merged: its head commit, to resolve 3e14de3aa516, cannot be read: HTTP 502/);
+  assert.equal(unread.filter((c) => c[2] === 'merge').length, 0);
+  const junk: string[][] = [];
+  await assert.rejects(ghMerge('Final-Factory/ffu#200', 'main', fakeGh(FULL, junk)), /not merged: "main" is not a commit sha/);
+  await assert.rejects(ghMerge('Final-Factory/ffu#200', '3e14de', fakeGh(FULL, junk)), /not a commit sha/, 'under 7 characters is too short to trust');
+  assert.deepEqual(junk, [], 'nothing is asked of GitHub for a head that is no sha');
 });

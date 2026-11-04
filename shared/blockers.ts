@@ -66,6 +66,9 @@ export interface PrHealth {
   headSeenAt?: number;
 }
 
+/** A full 40-character commit sha, the only form GitHub's expectedHeadOid (`gh pr merge --match-head-commit`) takes (w3021). */
+export const FULL_SHA = /^[0-9a-f]{40}$/;
+
 /** "PR #283" from "owner/repo#283". */
 export const prLabel = (ref: string | undefined) => `PR #${(ref ?? '').split('#').pop()}`;
 

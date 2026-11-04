@@ -1345,6 +1345,10 @@ from the other pilots, server/mergeOnGreen.ts) is in the arm:
   person's GitHub token (blockerWatch.ts clearAll, ghMerge), then files the report as that worker's turn
   (Orchestrators.mergedOnGreen, workerTurnEnded): its DONE closes the request with every check a DONE has. The worker is not
   resumed. A DONE refused is told back to it as any refused DONE is, which resumes it.
+- `<head>` is always the full 40-character sha: GitHub refuses a short one ("Could not coerce value "3e14de3aa516" to
+  GitObjectID", ffu#200, w3021). blocked_on records the pull request's own head whole when the worker's `head` is a prefix
+  of it (agents.ts ciWaitProblem); a head still recorded short is resolved at the merge from `gh pr view --json headRefOid`,
+  and a pull request whose head does not start with it is not merged (ghMerge).
 - Red checks, a reading that is not green (unreadable checks, a PR merged or closed by hand), or a merge GitHub refuses (a newer
   push, a rule) unblock the request as without the pilot: the worker is resumed with why and told the report was not filed.
 - `merge_on_green` is in the tool's schema from this version on, which a machine's daemon builds (machine/agentHost.ts reads
