@@ -40,7 +40,7 @@ function fake(url: string, evidence: Ran | undefined, script: string | null = 'p
     run: (cmd: string, args: string[]): Ran => {
       const line = [cmd, ...args].join(' ');
       ran.push(line);
-      if (line.startsWith('gh pr view')) return { code: 0, out: JSON.stringify({ number: 3180, url, headRefOid: SHA, mergeable: 'MERGEABLE', state: 'OPEN', baseRefName: 'master' }), err: '' };
+      if (line.startsWith('gh pr view')) return { code: 0, out: JSON.stringify({ number: Number(url.split('/').pop()), url, headRefOid: SHA, mergeable: 'MERGEABLE', state: 'OPEN', baseRefName: 'master' }), err: '' };
       if (line.startsWith('gh run list')) return { code: 0, out: JSON.stringify([{ databaseId: 1, workflowName: 'Test in editmode', status: 'completed', conclusion: 'success' }]), err: '' };
       if (cmd === 'py') return evidence ?? { code: 0, out: PASS, err: '' };
       return { code: 0, out: '', err: '' };
@@ -100,7 +100,35 @@ test('w3088: other repositories merge with no Evidence check', () => {
   assert.ok(merged(d));
   assert.equal(d.ran.some((l) => l.startsWith('py ')), false);
   assert.equal(evidenceGated('final-factory/FINALFACTORY'), true);
-  assert.equal(evidenceGated('Final-Factory/ffu'), false);
+  assert.equal(evidenceGated('Final-Factory/ffu'), true, 'ffu since w3098');
+  assert.equal(evidenceGated('Final-Factory/final-factory-agents'), false);
+});
+
+/**
+ * w3098: what ff-agents 1.34.15's pr_evidence.py printed on BEAST, 2026-11-04, for ffu #222 (R.S1, the dark-mode sky made by
+ * `ffu-bake darksky`) with its 'Reference capture:' and 'Art language:' lines taken out (the plugin repo's fixture
+ * ffu-222-dark-sky.md and .files; its body as merged passes).
+ */
+const FAIL_FFU_222 = `evidence-gate: FAIL (pr_evidence.py, ff-agents 1.34.15, the evidence-gate skill)
+- art changed (crates/ffu-bake/src/darksky.rs, crates/ffu-bake/src/lib.rs, crates/ffu-bake/src/main.rs) and no 'Reference capture:' line: name the still or clip of the reference as a player sees it in the built game (its lighting, bloom, camera and placement), not its texture or model file or the source pack (checklists/visual.md 5o; Ben, w2895: "it doenst look right")
+- no 'Art language:' line: say the two solid main colours and the one bright, bloomy HDR accent, and how they read on screen beside the game's own art (checklists/visual.md 5c; Ben, w2895: "they need to match my art style")
+`;
+const FFU = 'https://github.com/Final-Factory/ffu/pull/222';
+
+test('w3098: ff-pr merge refuses an ffu art PR without its Reference capture and Art language lines, and merges it with them', () => {
+  const bare = fake(FFU, { code: 1, out: FAIL_FFU_222, err: '' });
+  assert.equal(prMain(['merge', '--pr', '222'], bare), 1);
+  assert.ok(bare.ran.includes('py pe.py --repo Final-Factory/ffu --pr 222'));
+  assert.equal(merged(bare), false);
+  assert.match(bare.said, /not merged: .*ffu\/pull\/222/);
+  assert.match(bare.said, /no 'Reference capture:' line/);
+  assert.match(bare.said, /no 'Art language:' line/);
+  const good = fake(FFU, { code: 0, out: PASS, err: '' });
+  assert.equal(prMain(['merge', '--pr', '222'], good), 0);
+  assert.ok(merged(good));
+  const docs = fake('https://github.com/Final-Factory/ffu/pull/208', { code: 0, out: UNCOVERED, err: '' });
+  assert.equal(prMain(['merge', '--pr', '208'], docs), 0, 'a docs-only ffu PR passes the script and merges');
+  assert.ok(merged(docs));
 });
 
 test('w3088: evidenceVerdict passes exit 0 only; a FAIL names its reasons without the notes', () => {
@@ -133,9 +161,16 @@ test('w3088: the merge-on-green pilot refuses what the Evidence check fails, and
   const passed: string[][] = [];
   await ghMerge('Final-Factory/FinalFactory#3180', SHA, runner({ code: 0, stdout: PASS, stderr: '' }, passed), () => 'pe.py');
   assert.deepEqual(passed.at(-1), ['gh', 'pr', 'merge', '3180', '-R', 'Final-Factory/FinalFactory', '--merge', '--match-head-commit', SHA]);
+  // w3098: ffu is checked too; another repository is not.
+  const ffu: string[][] = [];
+  await assert.rejects(ghMerge('Final-Factory/ffu#222', SHA, runner({ code: 1, stdout: FAIL_FFU_222, stderr: '' }, ffu), () => 'pe.py'), /no 'Art language:' line/);
+  assert.deepEqual(ffu, [[evidencePython(), 'pe.py', '--repo', 'Final-Factory/ffu', '--pr', '222']], 'ffu: never merged');
+  const ffuPass: string[][] = [];
+  await ghMerge('Final-Factory/ffu#222', SHA, runner({ code: 0, stdout: PASS, stderr: '' }, ffuPass), () => 'pe.py');
+  assert.deepEqual(ffuPass.at(-1), ['gh', 'pr', 'merge', '222', '-R', 'Final-Factory/ffu', '--merge', '--match-head-commit', SHA]);
   const other: string[][] = [];
-  await ghMerge('Final-Factory/ffu#200', SHA, runner({ code: 1, stdout: FAIL_3180, stderr: '' }, other), () => undefined);
-  assert.equal(other.length, 1, 'ffu: no Evidence check');
+  await ghMerge('Final-Factory/final-factory-agents#572', SHA, runner({ code: 1, stdout: FAIL_3180, stderr: '' }, other), () => undefined);
+  assert.equal(other.length, 1, 'final-factory-agents: no Evidence check');
 });
 
 test('w3088: a raw gh pr merge (or the API merge) of a game repo PR is refused when its Evidence check refuses it', () => {
@@ -149,6 +184,16 @@ test('w3088: a raw gh pr merge (or the API merge) of a game repo PR is refused w
   assert.equal(checkShell('gh pr view 3180', ctx), undefined, 'only a merge is checked');
   assert.equal(checkShell('cd C:/tmp/tools && gh pr merge 3180 --merge', ctx), undefined, 'another repo is not checked');
   assert.deepEqual(asked, ['3180', '3180', '3181']);
+  // w3098: an ffu clone's merge, by its remote or by -R, is checked too (ffu-build-test merges with a raw gh pr merge).
+  const ffuRemotes = (dir: string) => new Map([['origin', dir.includes('ffu') ? 'https://github.com/Final-Factory/ffu.git' : 'https://github.com/Final-Factory/ff-factory.git']]);
+  const ffuAsked: (string | undefined)[] = [];
+  const ffuEvidence: EvidenceResolver = (pr, repo) => (ffuAsked.push(`${repo ?? ''}#${pr}`), pr === '222' ? 'Not merged: the Evidence check refused it (pr_evidence.py --repo Final-Factory/ffu --pr 222, exit 1)' : undefined);
+  const ffuCtx = { cwd: 'C:/tmp/ffu', gameRepos: ['https://github.com/Final-Factory/FinalFactory.git'], remotes: ffuRemotes, prBase: () => 'main', evidence: ffuEvidence };
+  assert.match(checkShell('gh pr merge 222 --merge --match-head-commit abc', ffuCtx) ?? '', /Evidence check refused it/);
+  assert.match(checkShell('cd C:/tmp/tools && gh pr merge 222 -R Final-Factory/ffu --merge', ffuCtx) ?? '', /Evidence check refused it/);
+  assert.match(checkShell('gh api -X PUT repos/Final-Factory/ffu/pulls/222/merge', ffuCtx) ?? '', /Evidence check refused it/);
+  assert.equal(checkShell('cd C:/tmp/tools && gh pr merge 222 --merge', ffuCtx), undefined, 'ff-factory is not checked');
+  assert.deepEqual(ffuAsked, ['#222', 'Final-Factory/ffu#222', 'Final-Factory/ffu#222']);
 });
 
 test('w3088: findPrEvidence picks the newest copy by plugin.json version (sort -V, not by name)', () => {

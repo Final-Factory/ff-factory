@@ -735,6 +735,15 @@ function ghIsGameRepo(ctx: ShellContext | undefined, repo: string | undefined, d
   return [...remotes.values()].some((u) => game.has(repoKey(u)));
 }
 
+/** w3098: a repository whose merges run the Evidence check (evidenceGate.ts EVIDENCE_GATED): the game repo's or a gated one's. */
+function ghIsEvidenceRepo(ctx: ShellContext | undefined, repo: string | undefined, dir: string | undefined): boolean {
+  if (ghIsGameRepo(ctx, repo, dir)) return true;
+  const gated = (r: string) => evidenceGated(repoKey(r).replace(/^github\.com\//, ''));
+  if (repo) return gated(repo);
+  const remotes = dir ? ctx?.remotes(dir) : undefined;
+  return [...(remotes?.values() ?? [])].some(gated);
+}
+
 const retiredMerge = (pr: string | undefined) =>
   `This PR${pr ? ` (${pr})` : ''} targets the Final Factory game repo's develop, which is retired (w1137, 2026-10-12), so merging it is blocked (w1166). Retarget it to master first (\`gh pr edit ${pr ?? '<n>'} --base master\`), merge origin/master into its branch and push, let CI run, then merge it.`;
 
@@ -903,12 +912,13 @@ export function checkShell(command: string, ctx?: ShellContext): string | undefi
       }
       // w1166: a PR opened into develop before it was retired (or by a session on older code) is not merged there: #1579
       // merged into develop at 23:20 UTC on 2026-10-12, after the last sweep into master, and had to be carried over again.
-      if (sub === 'pr merge' && (ctx?.prBase || ctx?.evidence) && ghIsGameRepo(ctx, repoFlag, dir)) {
-        const pr = ghPrMergeArgument(seg);
-        const base = ctx.prBase?.(pr, repoFlag, dir);
-        if (base && RETIRED_BRANCH.test(base)) return retiredMerge(pr);
-        // w3088: then its Evidence check, as ff-pr merge runs it.
-        const refused = ctx.evidence?.(pr, repoFlag, dir, ctx.env);
+      if (sub === 'pr merge' && ctx?.prBase && ghIsGameRepo(ctx, repoFlag, dir)) {
+        const base = ctx.prBase(ghPrMergeArgument(seg), repoFlag, dir);
+        if (base && RETIRED_BRANCH.test(base)) return retiredMerge(ghPrMergeArgument(seg));
+      }
+      // w3088: then its Evidence check, as ff-pr merge runs it, on the game repo and ffu (w3098).
+      if (sub === 'pr merge' && ctx?.evidence && ghIsEvidenceRepo(ctx, repoFlag, dir)) {
+        const refused = ctx.evidence(ghPrMergeArgument(seg), repoFlag, dir, ctx.env);
         if (refused) return refused;
       }
       if (lower[1] === 'api') {
@@ -928,9 +938,9 @@ export function checkShell(command: string, ctx?: ShellContext): string | undefi
             const base = ctx.prBase(pulls[2], apiRepo, dir);
             if (base && RETIRED_BRANCH.test(base)) return retiredMerge(pulls[2]);
           }
-          const refused = pulls[3] ? ctx?.evidence?.(pulls[2], apiRepo, dir, ctx.env) : undefined;
-          if (refused) return refused;
         }
+        const refused = writes && pulls?.[3] && ghIsEvidenceRepo(ctx, apiRepo, dir) ? ctx?.evidence?.(pulls[2], apiRepo, dir, ctx.env) : undefined;
+        if (refused) return refused;
         const pvr = lower.map((w) => /(?:^|\/)repos\/([^/\s]+\/[^/\s]+)\/private-vulnerability-reporting/.exec(w)?.[1]).find(Boolean);
         if (pvr && method && method !== 'GET' && ghIsGameRepo(ctx, pvr, dir)) return "Changing the game repo's security settings is the user's call, not an agent's.";
       }

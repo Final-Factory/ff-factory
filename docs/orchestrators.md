@@ -1354,6 +1354,10 @@ from the other pilots, server/mergeOnGreen.ts) is in the arm:
   exit 0: a FAIL, a usage error, a gh failure, or no script to run (w3088, after #3180 merged on green with a failing
   Evidence section). `ff-pr merge` (machine/prFlow.ts evidencePasses) and a raw `gh pr merge` or API merge in a worker's
   shell (server/guard.ts ghEvidence) run the same check. A pull request with no game code or assets passes it.
+  Final-Factory/ffu is checked the same way since w3098 (EVIDENCE_GATED): an ffu pull request that touches `art/` or the
+  code that draws the image (`crates/ffu-bake/src`, `crates/ffu-render/src` and `effects/`, `crates/ffu-client/src/fx.rs`,
+  any `.wgsl`; w3097) is not merged without its `Reference capture:` and `Art language:` lines, and any other ffu pull
+  request passes. A raw `gh pr merge` in an ffu clone, which ffu-build-test uses, is checked by its remote or `-R`.
 - Red checks, a reading that is not green (unreadable checks, a PR merged or closed by hand), a refused Evidence check, or a
   merge GitHub refuses (a newer push, a rule) unblock the request as without the pilot: the worker is resumed with why and told the report was not filed.
 - `merge_on_green` is in the tool's schema from this version on, which a machine's daemon builds (machine/agentHost.ts reads

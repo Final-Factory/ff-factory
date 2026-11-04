@@ -3,15 +3,19 @@
 // green CI with its section still failing: the worker ran `pr_evidence.py --pr 3180` with no --repo, which printed only a
 // usage error (exit 2), and `ff-pr merge` in the same command merged. So both merge paths that act without a person,
 // `ff-pr merge` (machine/prFlow.ts) and the merge-on-green pilot (server/blockerWatch.ts ghMerge, w2045), run
-// `pr_evidence.py --repo <repo> --pr <n>` first and refuse on anything but exit 0: a FAIL, a usage error, a gh failure, or
+// `pr_evidence.py --repo <repo> --pr <n>` first (for the game repo and ffu, EVIDENCE_GATED) and refuse on anything but exit 0: a FAIL, a usage error, a gh failure, or
 // no python or no script to run. The script decides which pull requests it covers: one with no game code or assets
 // changed prints "PASS: no game code or assets changed" and exits 0, so docs, tools and tests still merge.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-/** The repositories whose pull requests the gate checks (lower case). */
-export const EVIDENCE_GATED = new Set(['final-factory/finalfactory']);
+/**
+ * The repositories whose pull requests the gate checks (lower case). ffu since w3098: pr_evidence.py holds an ffu PR that
+ * touches art/ or the code that draws the image (ffu-bake, ffu-render, a .wgsl; w2895, w3097) to its 'Reference capture:'
+ * and 'Art language:' lines, and passes any other ffu PR ("no game code or assets changed", exit 0).
+ */
+export const EVIDENCE_GATED = new Set(['final-factory/finalfactory', 'final-factory/ffu']);
 
 export const evidenceGated = (repo: string) => EVIDENCE_GATED.has(repo.toLowerCase());
 
