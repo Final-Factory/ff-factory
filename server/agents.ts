@@ -30,7 +30,7 @@ import { addedLines, asksLookOk, decidedRefusal, notesSettle, personNotes, quote
 import { stillOpenIn } from './ledgerRules.ts';
 import { inlineReviewMedia, MEDIA_FILE, outsideReview, publishedCopy, reviewRootOf } from './reviewMedia.ts';
 import { visualAskCheck } from './visualAsk.ts';
-import { BLOCKER_KIND_HELP, conflictText, gateSetter, gatesName, gatesOf, isWith, latestWorker, newestFirst, prLabel, prRefOf, type PrHealth } from '../shared/blockers.ts';
+import { BLOCKER_KIND_HELP, conflictText, FULL_SHA, gateSetter, gatesName, gatesOf, isWith, latestWorker, newestFirst, prLabel, prRefOf, type PrHealth } from '../shared/blockers.ts';
 import { isSamePerson, personForWork, poolOwnerOf, withPool } from './vault.ts';
 import { githubFromVault, githubTokens } from './githubTokens.ts';
 import { namedIds, READ_LIST_MAX, READ_MAX_CHARS, readWork, type ReadWorkArgs } from './workRead.ts';
@@ -1901,7 +1901,7 @@ export class Agents {
     refuseInDryRun('blocked_on');
     const list = (x: unknown) => (Array.isArray(x) ? x.map((y) => String(y)) : []);
     const prs = list(a.prs);
-    const head = typeof a.head === 'string' ? a.head.trim().toLowerCase() : '';
+    let head = typeof a.head === 'string' ? a.head.trim().toLowerCase() : '';
     const warnings: string[] = [];
     for (const raw of prs) {
       const m = /^\s*ci:\s*/i.exec(raw);
@@ -1910,6 +1910,8 @@ export class Agents {
       const problem = await this.ciWaitProblem(ref, head);
       if (problem?.refuse) throw new Error(problem.refuse);
       if (problem?.warn) warnings.push(problem.warn);
+      // w3021: a short head the pull request's own head starts with is recorded whole, as merge on green passes it to GitHub.
+      if (problem?.head) head = problem.head;
     }
     const out = this.orchestrators.workerBlocked(sessionId, {
       ...(typeof a.request === 'string' && a.request.trim() ? { request: a.request } : {}),
@@ -1950,7 +1952,7 @@ export class Agents {
   prHealth?: (ref: string) => Promise<PrHealth | undefined>;
 
   /** Why a ci: wait on `ref` should not be set: its pull request conflicts, or its head is not the pushed `head`; or a warning. */
-  private async ciWaitProblem(ref: string, head: string): Promise<{ refuse?: string; warn?: string } | undefined> {
+  private async ciWaitProblem(ref: string, head: string): Promise<{ refuse?: string; warn?: string; head?: string } | undefined> {
     if (!this.prHealth) return undefined;
     let h: PrHealth | undefined;
     try {
@@ -1964,7 +1966,7 @@ export class Agents {
     if (head) {
       const mine = head.length >= 7 && (h.head ?? '').toLowerCase().startsWith(head);
       if (!mine) return { refuse: `${prLabel(ref)}'s head is ${(h.head ?? 'unknown').slice(0, 12)}, not ${head.slice(0, 12)}, the commit you say you pushed: your push did not land (check git push's output and git ls-remote origin ${h.headRef ?? '<branch>'}). Push it, then call blocked_on again. Nothing was recorded, so you are not waiting on checks that cannot start.` };
-      return undefined;
+      return FULL_SHA.test(head) || !FULL_SHA.test((h.head ?? '').toLowerCase()) ? undefined : { head: h.head!.toLowerCase() };
     }
     return { warn: `FF Factory did not check that your push landed: pass head (git rev-parse HEAD) with a ci: wait, and it refuses one whose pull request head is another commit. ${prLabel(ref)}'s head is ${(h.head ?? 'unknown').slice(0, 12)}.` };
   }

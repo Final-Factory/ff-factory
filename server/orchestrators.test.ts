@@ -15,7 +15,7 @@ import { crossOwnerLine, delegationConstraints, DispatcherChatRefused, DISPATCHE
 import { configPath, type Config } from './config.ts';
 import { memoryDirFor } from './orchestratorMemory.ts';
 import { handoverNote, isOpen, requestAsFiled, requestNotice } from './work.ts';
-import { BlockerWatch, REPORTED_WAIT_MS } from './blockerWatch.ts';
+import { BlockerWatch, ghMerge, REPORTED_WAIT_MS } from './blockerWatch.ts';
 import { poolForRef, type GatePoolToken } from './usageGate.ts';
 import { personForWork, sessionPerson, setVaultContext } from './vault.ts';
 import { fakeToken, useFakeVault } from './testVault.ts';
@@ -4588,6 +4588,50 @@ test('w2045: merge on green: a worker in the arm is told it may leave its report
   assert.equal(w.status, 'done', w.log.slice(-3).join(' | '));
   assert.ok(w.log.some((l) => l.includes(`merge-on-green pilot (w2045): FF Factory merged ${pr} at abc1234def56 on green CI with no model turn`)));
   assert.equal(agents.waker.pending(a.id), undefined, 'the worker is not resumed');
+});
+
+test('w3021: merge on green with a short head: blocked_on records the PR head whole, and a head recorded short still merges at the full sha and files the report', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }, { id: 'w2' }]);
+  mergeOnGreenArm(o, () => true);
+  const full = '3e14de3aa5160f0e8d2c7b9a4f1e6d3c2b1a0f9e';
+  const short = full.slice(0, 12);
+  const report = (id: string) => `TL;DR: merged.\n\nDONE: ${id}\nLearned: nothing new`;
+  const ffu = 'Final-Factory/ffu#200';
+  const other = 'Final-Factory/ffu#201';
+  // w1: the PR is read at blocked_on (w907), and its head starts with the short sha: the full one is recorded.
+  agents.prHealth = async (ref) => ({ state: 'open', head: full, headRef: 'w3016' });
+  const a = await startedFor(env, 'w1');
+  await a.h.blocked_on!({ request: 'w1', prs: [`ci:${ffu}`], head: short, what: 'CI on ffu#200', merge_on_green: report('w1') });
+  assert.equal(store.work.get('w1')!.blocked!.mergeOnGreen!.head, full);
+  // w2: the PR could not be read then (ffu#200 as it happened), so the head stays short on the gate.
+  agents.prHealth = async () => undefined;
+  const b = await startedFor(env, 'w2');
+  await b.h.blocked_on!({ request: 'w2', prs: [`ci:${other}`], head: short, what: 'CI on ffu#201', merge_on_green: report('w2') });
+  assert.equal(store.work.get('w2')!.blocked!.mergeOnGreen!.head, short);
+  // The merge runs through the real ghMerge against a gh that, as GitHub does, refuses any expectedHeadOid but a full sha.
+  const gh: string[][] = [];
+  const run = async (_cmd: string, args: string[]) => {
+    gh.push(args);
+    if (args[1] === 'view') return { code: 0, stdout: JSON.stringify({ headRefOid: full }), stderr: '' } as never;
+    const oid = args[args.indexOf('--match-head-commit') + 1];
+    return (oid === full ? { code: 0, stdout: '', stderr: '' } : { code: 1, stdout: '', stderr: `GraphQL: Could not coerce value "${oid}" to GitObjectID` }) as never;
+  };
+  const green = (ref: string) => ({ done: true, green: true as const, text: `CI on ${ref} finished: all 1 checks passed or skipped` });
+  const watch = new BlockerWatch({ store, orchestrators: o, ci: async (ref) => green(ref), merge: (ref, h) => ghMerge(ref, h, run) });
+  await watch.tick();
+  assert.deepEqual(
+    gh.filter((x) => x[1] === 'merge').map((x) => x[x.indexOf('--match-head-commit') + 1]),
+    [full, full],
+    'both merged at the full sha',
+  );
+  for (const id of ['w1', 'w2']) {
+    const w = store.work.get(id)!;
+    assert.equal(w.status, 'done', `${id}: the report left with merge_on_green was filed: ${w.log.slice(-3).join(' | ')}`);
+    assert.ok(w.log.some((l) => l.includes(`FF Factory merged Final-Factory/ffu#20`) && l.includes(`at ${short} on green CI`)));
+  }
 });
 
 test('w2045: merge on green: red CI, or a merge GitHub refuses, resumes the worker as without it, saying the report was not filed', async (t) => {

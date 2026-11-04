@@ -19,7 +19,7 @@
 import type { Store } from './store.ts';
 import type { Orchestrators } from './orchestrators.ts';
 import { run as runProc, type RunOptions, type RunResult } from './proc.ts';
-import { blockerVerdict, CI_REF, cycleBreak, gateSetter, gatesOf, newestFirst, RESUME_SWEEP_MS, waitCycles, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
+import { blockerVerdict, CI_REF, cycleBreak, FULL_SHA, gateSetter, gatesOf, newestFirst, RESUME_SWEEP_MS, waitCycles, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
 import { conditionalVerdict } from '../shared/conditional.ts';
 import { ghRunner } from './githubTokens.ts';
 import { pairDelivers, reportDelivers, stillOpenIn } from './ledgerRules.ts';
@@ -714,11 +714,26 @@ let rollupRefusedLogged = false;
  * Checks permission, so every read failed and the CI blocks of w814, w818 and w808 never cleared), the PR's state and its
  * head commit's GitHub Actions runs, which "Actions: read" covers. Throws, saying what gh said, when neither can be read.
  */
-/** w2045: `gh pr merge` at exactly `head` (a newer push, or one GitHub's rules refuse, is not merged). Throws with what gh said. */
+/**
+ * w2045: `gh pr merge` at exactly `head` (a newer push, or one GitHub's rules refuse, is not merged). Throws with what gh said.
+ * w3021: GitHub refuses a short sha there ("Could not coerce value "3e14de3aa516" to GitObjectID", ffu#200), so a short head
+ * is first resolved to the pull request's own head commit, and only when that commit starts with it: a head that moved
+ * since the worker recorded it is never merged.
+ */
 export async function ghMerge(ref: string, head: string, run: Runner = runProc): Promise<void> {
   const m = CI_REF.exec(ref);
   if (!m) throw new Error(`"${ref}" is not a pull request (owner/repo#123)`);
-  const r = await run('gh', ['pr', 'merge', m[2], '-R', m[1], '--merge', '--match-head-commit', head], { timeoutMs: 60_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
+  const opts = { timeoutMs: 60_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } };
+  let full = head.trim().toLowerCase();
+  if (!FULL_SHA.test(full)) {
+    if (!/^[0-9a-f]{7,39}$/.test(full)) throw new Error(`gh pr merge ${ref}: not merged: "${head}" is not a commit sha`);
+    const p = await run('gh', ['pr', 'view', m[2], '-R', m[1], '--json', 'headRefOid'], opts);
+    if (p.code !== 0) throw new Error(`gh pr merge ${ref}: not merged: its head commit, to resolve ${full}, cannot be read: ${ghSaid(p)}`);
+    const oid = String((JSON.parse(p.stdout) as { headRefOid?: string }).headRefOid ?? '').toLowerCase();
+    if (!FULL_SHA.test(oid) || !oid.startsWith(full)) throw new Error(`gh pr merge ${ref}: not merged: its head is ${oid.slice(0, 12) || 'unknown'}, not ${full}, the commit recorded to merge`);
+    full = oid;
+  }
+  const r = await run('gh', ['pr', 'merge', m[2], '-R', m[1], '--merge', '--match-head-commit', full], opts);
   if (r.code !== 0) throw new Error(`gh pr merge ${ref}: ${ghSaid(r)}`);
 }
 
