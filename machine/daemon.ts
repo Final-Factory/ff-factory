@@ -71,6 +71,7 @@ import { DaemonVoice, type DaemonVoiceSettings } from './voice.ts';
 import { benchLockDir, readBenchLock, readBenchQueue, readPassedMarks, timedHolder, writeBenchPriorities } from './benchLock.ts';
 import { editorBenchSession, editorSessions, passedShared, raisedSessions, type PassedMark } from './benchRaise.ts';
 import { readBenchWarnings } from './benchWarnings.ts';
+import { BenchRunners, readRunnersFile, sendSignal, writeRunnersFile } from './benchRunners.ts';
 import { askPlayerToQuit, BenchTurn, closedDetail, holderSandboxes, writeClosedFile, type Holder } from './benchTurn.ts';
 import { GRACE_MIN, PersonPlay, personEnds, personHolderText, personHoldText, personTicket, priorityOf, setPriorityOf, treeOf, type PersonPlaySettings } from './personPlay.ts';
 import { benchTicketFor, queueTickets } from './benchQueue.ts';
@@ -383,6 +384,8 @@ export class Daemon {
   readonly leftovers: LeftoverReaper;
   /** Closes the other editors and players while another worker's timed run holds the bench lock (machine/benchTurn.ts, w1829). */
   readonly benchTurn: BenchTurn;
+  /** Pauses this machine's idle CI runners and ends CI leftovers while a timed run holds the bench lock (w3112). */
+  readonly benchRunners: BenchRunners;
   /** w1829: what a worker's next message hears about its player a timed run's turn asked to quit. */
   private readonly benchPlayerNotes = new Map<string, string>();
   /** w1894: a person playing Final Factory here (machine/personPlay.ts): fed by the leftovers' look, it holds a turn. */
@@ -663,6 +666,17 @@ export class Daemon {
       writeClosed: (marks) => cfg.root && writeClosedFile(cfg.root, marks, log),
       log: (line) => log(line),
       now: () => Date.now(),
+    });
+    // w3112: no CI job beside a timed run (a person's game does not pause them: only a timing needs the machine quiet)
+    this.benchRunners = new BenchRunners({
+      holder: () => this.timedHolderHere(),
+      procs: real ? () => pd.procs() : async () => [],
+      signal: (pid, sig) => (real ? sendSignal(pid, sig) : 'not a real daemon'),
+      read: () => (cfg.root ? readRunnersFile(cfg.root) : undefined),
+      write: (st) => cfg.root && writeRunnersFile(cfg.root, st, log),
+      log: (line) => log(line),
+      now: () => Date.now(),
+      platform: process.platform,
     });
     this.pool = new SandboxPool(
       {
@@ -1129,6 +1143,7 @@ export class Daemon {
     this.timers.push(setInterval(() => void this.slotTick(), 5_000));
     // w1829: another worker's timed run holds the bench lock: the other editors and players close, and come back after.
     this.timers.push(setInterval(() => void this.benchTurn.tick(), 5_000));
+    this.timers.push(setInterval(() => void this.benchRunners.tick(), 5_000));
     // w1962: a shared ticket an exclusive turn has passed is raised in priorities.json while it waits (machine/benchRaise.ts)
     this.timers.push(setInterval(() => this.benchPriorities(), 5_000));
     void this.slotTick();
