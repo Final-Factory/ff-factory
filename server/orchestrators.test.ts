@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Store } from './store.ts';
-import { promptText, SessionManager, setQueryForTesting, type SessionHandle } from './sessions.ts';
+import { promptText, reportClip, SessionManager, setQueryForTesting, type SessionHandle } from './sessions.ts';
 import { MachineManager, STANDING_CAP_NO_POOL, agentCap, type RemoteSession } from './machines.ts';
 import { Agents } from './agents.ts';
 import { SpendStore } from './spend.ts';
@@ -7937,6 +7937,44 @@ test("w2417: a timed leg's report longer than every cut, with files published: t
   const lines = store.work.get('w2')!.log.filter((l) => l.includes('files its workers published'));
   assert.equal(lines.length, 1, lines.join(' | '));
   assert.ok(lines[0].endsWith(`files its workers published (publish_attachment): ${ids.join(', ')}`), lines[0]);
+});
+
+// w3105: w3094's ~7 KB DONE report (a run table and eight JSON lines) reached w2895's waiting worker as "5795 chars left
+// out": lastResult keeps 1200 characters (reportClip) and the resume quoted that. The ledger had only its TL;DR.
+test("w3105: a timed leg's 7 KB report, over every cut, reaches the waiting worker's resume whole, and read_work of the leg shows it whole; an ordinary report keeps the cut", async (t) => {
+  const { store, agents, o, dispatcher, call } = await setupOnMachine(t);
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1', status: 'active' }, { id: 'w2', title: 'Timed leg for w1: M1.8 per-tick budget', status: 'active', needs: 'game', timedLeg: { for: 'w1', forSession: 'x', from: 'pc', small: ['biscuit'] } }, { id: 'w3', status: 'active' }]);
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Time the camps', title: 'w1: camps', work_id: 'w1' });
+  assert.equal(started.isError, false, started.text);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  Object.assign(store.work.get('w2')!.timedLeg!, { forSession: id, ask: 'time 4000 and 20000 camps.' });
+  await until('its first turn', () => store.sessions.get(id)!.status === 'idle');
+  o.fileTimedLeg(id, { what: 'M1.8 per-tick budget', brief: 'Time 4000 and 20000 camps.', from: 'pc', needs: ['biscuit'], why: 'pc is big' });
+  assert.equal(store.work.get('w1')!.blocked?.ref, 'w2');
+  // The leg's report as w3094's was: a TL;DR, the For line, a run table and eight whole JSON lines, then DONE.
+  const rows = Array.from({ length: 100 }, (_, i) => `| run ${i + 1} | ${i % 2 ? 20000 : 4000} camps | ${(100 + i * 1.7).toFixed(1)} µs/proj | final_hash 0x${(0xabc000 + i).toString(16)} |`);
+  const json = Array.from({ length: 8 }, (_, i) => JSON.stringify({ cmd: 'phases', camps: i < 4 ? 4000 : 20000, threads: 1, run: i, ns_per_tick: 1_234_567 + i, final_hash: `0x${(0xdead00 + i).toString(16)}` }));
+  const full = `**TL;DR:** the reduced timing plan is finished on pc; final_hash agreed on all runs.\n\nFor w1:\n\n| run | camps | time | hash |\n|---|---|---|---|\n${rows.join('\n')}\n\n${json.join('\n')}\n\nLogs: swept when this request closes.\n\nDONE: w2`;
+  assert.ok(full.length > 7000 && reportClip(full).includes('chars left out'), `the report (${full.length} chars) is over the cut`);
+  putReport(store, 'w2', 'leg3094', reportClip(full)); // what the session keeps of it, as sessions.ts stores lastResult
+  o.workerTurnEnded(store.sessions.get('leg3094')!, full); // the turn's end, with the whole text
+  assert.equal(store.work.get('w2')!.handoff?.text, full.trim(), 'the ledger keeps the hand-off report whole');
+  const watch = new BlockerWatch({ store, orchestrators: o });
+  await watch.tick();
+  const note = agents.waker.pending(id)?.note ?? '';
+  assert.match(note, /Timed leg w2's report: "/, note.slice(0, 300));
+  assert.ok(!note.includes('chars left out'), 'no cut copy in the resume');
+  for (const line of [...json, rows[0], rows.at(-1)!, 'For w1:']) assert.ok(note.includes(line), `the resume holds ${line.slice(0, 60)}`);
+  // The waiting worker can read it again, whole, from the leg's entry.
+  const read = agents.readWorkFor(id, { id: 'w2' });
+  assert.match(read, /Last report in full \(worker leg3094/);
+  for (const line of json) assert.ok(read.includes(line), `read_work w2 holds ${line.slice(0, 60)}`);
+  // An ordinary worker's long report, nobody waiting on it and no For line, keeps only the session's cut and no copy.
+  const plain = `Did some work. ${'More detail. '.repeat(600)}\n\nw3: still open: more to do`;
+  putReport(store, 'w3', 'plain1', reportClip(plain));
+  o.workerTurnEnded(store.sessions.get('plain1')!, plain);
+  assert.equal(store.work.get('w3')!.handoff, undefined, 'an ordinary report is not kept whole');
 });
 
 test('w2422: a stopped worker whose report says it is blocked on another request, with no blocked_on recorded (the portal was unreachable), is gated on it by the ledger, and resumed once when that request closes as done', async (t) => {

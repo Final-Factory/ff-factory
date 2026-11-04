@@ -2142,6 +2142,13 @@ export interface WorkItem {
    */
   done?: Record<string, { at: string; report: string; text?: string; told?: string; leg?: true }>;
   /**
+   * A hand-off request's last worker report in full (w3105): a timed leg, a pair run's leg, one another request is Blocked on
+   * the report of, or one whose report has a `For wNNN:` line. A session's `lastResult` keeps only 1200 characters
+   * (`reportClip`), and w3094's 7 KB run table reached w2895's waiting worker cut short ("5795 chars left out"): the resume
+   * of the waiting worker quotes this, and read_work of the request shows it (at most HANDOFF_REPORT_CHARS, server/handoffReport.ts).
+   */
+  handoff?: { session: string; at: string; text: string; chars: number };
+  /**
    * When a person (or an owner for them) last reopened it from closed (w731; absent when never). A reopen invalidates
    * what came before it: the workers' DONEs are dropped, the earlier PRs are no longer its own (a PR created before this
    * time never links to it), and the ledger cleanup closes it again only on a DONE, a report or a merge after this time.
