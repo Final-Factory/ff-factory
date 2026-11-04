@@ -79,6 +79,7 @@ import { permissionAccess, permissionWhat, type PermissionAccess } from '../shar
 import { OPS_ID, OPS_PEOPLE } from './opsWorker.ts';
 import { isSamePerson, personForWork, sessionPerson, tokenPersonForWork } from './vault.ts';
 import { MERGE_ON_GREEN_MARK } from './mergeOnGreen.ts';
+import { handoffQuote, handoffReport, isHandoff } from './handoffReport.ts';
 import { commitsIn, normPr, pairCommitsOf, pairPrOf, pairRanCommit, prIn, resultFor, sameCommit, samePr } from './pairRuns.ts';
 import type { AttachmentRef, ConditionalDecision, OpenAsk, WorkNeedsYou, GateResume, GitStatus, Machine, WorkAutoClosed, WorkBlocker, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPair, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
 import { REPORT_KINDS, WORK_PRIORITIES, questionFor, type ReportKind, type ReportSummary } from '../shared/types.ts';
@@ -3849,9 +3850,16 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       .filter((g) => g.kind === 'request' && g.on === 'report' && g.ref)
       .map((g) => this.store.work.get(g.ref!.toLowerCase()))
       .filter((l): l is WorkItem => !!l?.timedLeg && l.timedLeg.for === w.id)
-      .map((l) => ({ l, r: newestFirst(l).map((sid) => this.store.sessions.get(sid)).find((s) => s?.lastResult)?.lastResult }))
+      .map((l) => ({ l, r: this.handoffText(l, w.id) }))
       .filter((x): x is { l: WorkItem; r: string } => !!x.r)
-      .map(({ l, r }) => ` Timed leg ${l.id}'s report: "${clip(r.trim(), 2000)}" If it waits on you (a commit, a branch), push it, and put a line "For ${l.id}: <the branch and commit>" in your report: that resumes ${l.id}'s worker if it is Blocked on you. Then block on ${l.id} reporting again.`)
+      .map(({ l, r }) => ` Timed leg ${l.id}'s report: "${r}" If it waits on you (a commit, a branch), push it, and put a line "For ${l.id}: <the branch and commit>" in your report: that resumes ${l.id}'s worker if it is Blocked on you. Then block on ${l.id} reporting again.`)
+      .join('');
+    // w3105: any other request it waited on the report of (blocked_on reports) sends its report too, whole when it fits.
+    const reported = gates
+      .filter((g) => g.kind === 'request' && g.on === 'report' && g.ref)
+      .map((g) => this.store.work.get(g.ref!.toLowerCase()))
+      .filter((r): r is WorkItem => !!r?.handoff && !r.pair && r.timedLeg?.for !== w.id)
+      .map((r) => ` ${r.id}'s report: "${this.handoffText(r, w.id)}"`)
       .join('');
     // w2476: the report of the other worker it waited on travels with the resume (its DONE's text, else its last report).
     const siblings = gates
@@ -3862,7 +3870,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       .join('');
     // w2417: the files each request it waited on published, whatever the report's cut (w2402's three zips, w2403's one).
     const files = this.gatePublished(gates);
-    const note = `${lead}${back}${results}${legs}${siblings}${files}${yours}${ci ? ` Run ff-pr merge now${prs ? ` (${prs})` : ''}: it merges on green, or names the red run to read (gh run view <run> --log-failed) and fix.` : ''}${deploy ? ' The deploy you waited for has happened: do the check that comes after it now (the live read, the health check), then report.' : ''} Carry on from where you left it.${held ? ` Your own check-in, which the block cancelled, is folded into this message; its note was: ${held.note}` : ''}`;
+    const note = `${lead}${back}${results}${legs}${reported}${siblings}${files}${yours}${ci ? ` Run ff-pr merge now${prs ? ` (${prs})` : ''}: it merges on green, or names the red run to read (gh run view <run> --log-failed) and fix.` : ''}${deploy ? ' The deploy you waited for has happened: do the check that comes after it now (the live read, the health check), then report.' : ''} Carry on from where you left it.${held ? ` Your own check-in, which the block cancelled, is folded into this message; its note was: ${held.note}` : ''}`;
     if (!this.wakeNow(sid, note, w.id)) return [];
     this.noteResume(w, sid, note);
     // Folded in above: not handed back again when the rest clears (unblock's handBackCheckIns).
@@ -4847,14 +4855,24 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     return same ? { twin: same, sure: true } : { twin: done[0], sure: false };
   }
 
+  /**
+   * What a waiting worker's resume quotes of hand-off request `l`'s newest report (w3105): its whole kept report when it
+   * fits, else its `For <waiter>:` section, else lastResult's cut copy (a report from before the ledger kept them).
+   */
+  private handoffText(l: WorkItem, waiter: string): string | undefined {
+    if (l.handoff) return handoffQuote(l.handoff, l.id, waiter);
+    return newestFirst(l).map((sid) => this.store.sessions.get(sid)).find((s) => s?.lastResult)?.lastResult?.trim();
+  }
+
   /** What a pair run reported for `waiter` (w2057): its host leg's report from its "For wNNN:" line, else a leg's DONE, else its outcome. */
   private pairResult(p: WorkItem, waiter: string): string {
     const host = p.pair?.started?.legs[0]?.session;
     const done = doneOf(p);
     const sids = [...new Set([...(host ? [host] : []), ...newestFirst(p)])];
     for (const sid of sids) {
-      const text = done[sid]?.text ?? this.store.sessions.get(sid)?.lastResult;
-      const r = resultFor(text, waiter);
+      // w3105: the leg's report kept whole when it was the newest, not lastResult's 1200 characters nor the DONE's tail.
+      const text = (p.handoff?.session === sid ? p.handoff.text : undefined) ?? done[sid]?.text ?? this.store.sessions.get(sid)?.lastResult;
+      const r = resultFor(text, waiter, 8000);
       if (r) return r;
     }
     return resultFor(p.outcome, waiter) || 'its legs left no report';
@@ -5548,6 +5566,8 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   workerTurnEnded(s: SessionInfo, text: string) {
     // What this turn was on, before its markers close any of it.
     const served = servedBy(s.id, [...this.store.work.values()]);
+    // w3105: a hand-off's report is kept whole before any marker below can close the request and resume its waiter.
+    this.keepHandoffReports(s, text);
     this.dropCutOffGates(s.id);
     this.intakeMarkers(s, text);
     // w2969: read before its DONE, so a report that says both ("couldn't file the five build requests … DONE") keeps it open.
@@ -5575,6 +5595,20 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     this.askStatus(s, text, served);
     this.retireCheck(s.id);
     this.capacityMayHaveFreed(`worker ${s.id} "${clip(s.title, 60)}" finished a turn`);
+  }
+
+  /**
+   * The newest report of each hand-off request `s` works on, kept whole (w3105, server/handoffReport.ts): a session's
+   * lastResult is cut to 1200 characters, and the worker Blocked on a timed leg got w3094's run table cut short.
+   */
+  private keepHandoffReports(s: SessionInfo, text: string) {
+    if (!text.trim()) return;
+    const all = [...this.store.work.values()];
+    for (const w of this.itemsOf(s.id)) {
+      if (!isHandoff(w, text, all)) continue;
+      w.handoff = handoffReport(s.id, this.now().toISOString(), text);
+      this.store.putWork(w);
+    }
   }
 
   /**
