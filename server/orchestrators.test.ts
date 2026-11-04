@@ -4666,7 +4666,7 @@ test('w2045: merge on green: red CI, or a merge GitHub refuses, resumes the work
   assert.equal(store.work.get('w1')!.status, 'active');
   assert.match(agents.waker.pending(a.id)!.note, /1 of 1 checks failed \(Test in editmode\); FF Factory did not merge it \(the checks are not all green\), and the report you left with merge_on_green was not filed\)\. Run ff-pr merge now/);
   assert.equal(store.work.get('w2')!.status, 'active');
-  assert.match(agents.waker.pending(b.id)!.note, /FF Factory tried to merge it and GitHub said: gh pr merge Final-Factory\/FinalFactory#2: Head branch was modified\. .*Merge it yourself \(ff-pr merge\)/);
+  assert.match(agents.waker.pending(b.id)!.note, /FF Factory tried to merge it: gh pr merge Final-Factory\/FinalFactory#2: Head branch was modified\. .*Merge it yourself \(ff-pr merge\)/);
   agents.waker.cancel(a.id);
   agents.waker.cancel(b.id);
 });

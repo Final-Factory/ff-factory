@@ -1,4 +1,5 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { evidenceArgs, evidenceGated, evidencePython, evidenceRefusal, evidenceVerdict, findPrEvidence, noScriptRefusal } from '../machine/evidenceGate.ts';
 import { repoIsPublic } from './publicGit.ts';
 import { checkOffDriveScan, checkOutsideRootDelete } from './rootFence.ts';
 import { headBranch, isUrgentBranch } from './releaseHandBack.ts';
@@ -82,6 +83,8 @@ export function sandboxGuard(opts: {
   remotes?: RemoteResolver;
   /** A PR's base, for a merge into the retired develop (w1166). Default: gh. */
   prBase?: PrBaseResolver;
+  /** w3088: a raw merge of a game repo PR passes pr_evidence.py first, as ff-pr merge does. Default: gh and the script. */
+  evidence?: EvidenceResolver;
   /** The environment of the worker's shell: `cd $TMPDIR/ffbox` and `git -C ~/x` are followed through it (w1132). Absent: variables are not followed. */
   env?: Record<string, string | undefined>;
   /** Tool name prefixes to refuse, e.g. "mcp__ffsb__" (the portal's own MCP, which would let an agent launch agents). */
@@ -176,7 +179,7 @@ export function sandboxGuard(opts: {
     if (tool === 'Bash' || tool === 'PowerShell') {
       const cmd = String(args.command ?? '');
       const reason =
-        checkShell(cmd, { cwd: input.cwd || opts.sandboxPath, gameRepos: opts.gameRepos ?? [], remotes: opts.remotes ?? gitRemotes, prBase: opts.prBase ?? ghPrBase, publicIdentity: opts.publicIdentity, env: opts.env }) ??
+        checkShell(cmd, { cwd: input.cwd || opts.sandboxPath, gameRepos: opts.gameRepos ?? [], remotes: opts.remotes ?? gitRemotes, prBase: opts.prBase ?? ghPrBase, evidence: opts.evidence ?? ghEvidence, publicIdentity: opts.publicIdentity, env: opts.env }) ??
         (opts.editorRunning?.() ? checkEditorSwitch(cmd, input.cwd || opts.sandboxPath, opts.sandboxPath, opts.env) : undefined) ??
         checkReleaseBranchCommit(cmd, input.cwd || opts.sandboxPath, opts.sandboxPath, repoBranch, opts.env) ??
         checkPlayerLaunch(cmd, opts.sandboxId) ??
@@ -584,12 +587,41 @@ export const ghPrBase: PrBaseResolver = (pr, repo, dir) => {
   }
 };
 
+export type EvidenceResolver = (pr: string | undefined, repo: string | undefined, dir: string | undefined, env?: Record<string, string | undefined>) => string | undefined;
+
+/**
+ * w3088: a raw `gh pr merge` (or the API's merge) of a Final-Factory/FinalFactory pull request runs the same Evidence check
+ * as `ff-pr merge` (machine/evidenceGate.ts), so no merge path skips it: #3180 merged on green with its section failing.
+ * The PR's own repository is read from GitHub; one outside the gated set, or one gh cannot read (the merge would fail
+ * there too), is let through. The check took 1.5 s on #3180 (measured, BEAST, 2026-11-04).
+ */
+export const ghEvidence: EvidenceResolver = (pr, repo, dir, env) => {
+  let url = '';
+  try {
+    url = execFileSync('gh', ['pr', 'view', ...(pr ? [pr] : []), ...(repo ? ['-R', repo] : []), '--json', 'url', '-q', '.url'], { cwd: dir, encoding: 'utf8', timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim();
+  } catch {
+    return undefined;
+  }
+  const m = /github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/.exec(url);
+  if (!m || !evidenceGated(m[1])) return undefined;
+  const all = { ...process.env, ...env } as NodeJS.ProcessEnv;
+  const script = findPrEvidence({ env: all, home: os.homedir() });
+  const why = (s: string) => `Not merged: ${s}. Fix the evidence or the claim (gh pr edit ${m[2]} --body-file <f>), then merge with ff-pr merge.`;
+  if (!script) return why(noScriptRefusal(m[1], m[2]));
+  const r = spawnSync(evidencePython(all), evidenceArgs(script, m[1], m[2]), { cwd: dir, encoding: 'utf8', timeout: 120_000, windowsHide: true, env: all });
+  const code = r.status ?? (r.error ? 127 : 1);
+  const v = evidenceVerdict(code, r.stdout ?? '', r.stderr ?? (r.error ? r.error.message : ''));
+  return v.ok ? undefined : why(evidenceRefusal(m[1], m[2], code, v));
+};
+
 export interface ShellContext {
   cwd?: string;
   gameRepos: string[];
   remotes: RemoteResolver;
   /** w1166: reads a PR's base for `gh pr merge` and `gh api .../pulls/<n>/merge`, so a merge into the retired develop is refused. Absent: not checked. */
   prBase?: PrBaseResolver;
+  /** w3088: why a merge of this PR is refused by its Evidence check, or undefined to let it through. Absent: not checked. */
+  evidence?: EvidenceResolver;
   publicIdentity?: PublicIdentity;
   /** The worker shell's environment, for `cd $TMPDIR/x`. */
   env?: Record<string, string | undefined>;
@@ -871,10 +903,13 @@ export function checkShell(command: string, ctx?: ShellContext): string | undefi
       }
       // w1166: a PR opened into develop before it was retired (or by a session on older code) is not merged there: #1579
       // merged into develop at 23:20 UTC on 2026-10-12, after the last sweep into master, and had to be carried over again.
-      if (sub === 'pr merge' && ctx?.prBase && ghIsGameRepo(ctx, repoFlag, dir)) {
+      if (sub === 'pr merge' && (ctx?.prBase || ctx?.evidence) && ghIsGameRepo(ctx, repoFlag, dir)) {
         const pr = ghPrMergeArgument(seg);
-        const base = ctx.prBase(pr, repoFlag, dir);
+        const base = ctx.prBase?.(pr, repoFlag, dir);
         if (base && RETIRED_BRANCH.test(base)) return retiredMerge(pr);
+        // w3088: then its Evidence check, as ff-pr merge runs it.
+        const refused = ctx.evidence?.(pr, repoFlag, dir, ctx.env);
+        if (refused) return refused;
       }
       if (lower[1] === 'api') {
         const method = lower.find((w, i) => (lower[i - 1] === '-x' || lower[i - 1] === '--method') && !!w)?.toUpperCase();
@@ -893,6 +928,8 @@ export function checkShell(command: string, ctx?: ShellContext): string | undefi
             const base = ctx.prBase(pulls[2], apiRepo, dir);
             if (base && RETIRED_BRANCH.test(base)) return retiredMerge(pulls[2]);
           }
+          const refused = pulls[3] ? ctx?.evidence?.(pulls[2], apiRepo, dir, ctx.env) : undefined;
+          if (refused) return refused;
         }
         const pvr = lower.map((w) => /(?:^|\/)repos\/([^/\s]+\/[^/\s]+)\/private-vulnerability-reporting/.exec(w)?.[1]).find(Boolean);
         if (pvr && method && method !== 'GET' && ghIsGameRepo(ctx, pvr, dir)) return "Changing the game repo's security settings is the user's call, not an agent's.";

@@ -16,6 +16,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ghEnvFor, readGhAppTokens, remotesOf } from './ghApp.ts';
+import { evidenceArgs, evidenceGated, evidencePython, evidenceRefusal, evidenceVerdict, findLocalPrEvidence, noScriptRefusal } from './evidenceGate.ts';
 
 export interface Ran {
   code: number;
@@ -27,6 +28,9 @@ export interface PrDeps {
   run: Runner;
   write: (s: string) => void;
   sleep: (ms: number) => void;
+  /** w3088: the pr_evidence.py `merge` runs on a gated repository's pull request first (machine/evidenceGate.ts); none refuses. */
+  evidenceScript?: () => string | undefined;
+  python?: string;
 }
 
 /** One workflow run on the PR's head, as `gh run list --json` answers it. */
@@ -117,8 +121,9 @@ export const USAGE = `usage: ff-pr push [--base <branch>] [--title <t> --body-fi
   push: merge origin/<base> in (stops on a conflict), push the branch, open its PR when --title/--body-file are given
         and it has none, check that the PR's head is HEAD and it does not conflict (w907), and print the blocked_on to wait with
   status: the PR and its head's CI (workflow runs), nothing changed
-  merge: merge the PR (--merge --match-head-commit) when every workflow run on its head finished green; else say what is red or running
-Exit: 0 done, 1 you must act (conflict, red, push not landed), 2 usage, 3 CI still running.
+  merge: merge the PR (--merge --match-head-commit) when every workflow run on its head finished green and, in
+         Final-Factory/FinalFactory, pr_evidence.py --repo <repo> --pr <n> passes (w3088); else say what is red, running or failing
+Exit: 0 done, 1 you must act (conflict, red, push not landed, Evidence check failed), 2 usage, 3 CI still running.
 `;
 
 const PR_FIELDS = 'number,url,headRefOid,mergeable,state,baseRefName';
@@ -272,6 +277,29 @@ export function status(d: PrDeps, o: Opts): number {
   return v.state === 'green' ? 0 : v.state === 'red' ? 1 : 3;
 }
 
+/**
+ * w3088: a gated repository's pull request merges only when `pr_evidence.py --repo <repo> --pr <n>` exits 0. A FAIL, a
+ * usage error, a gh failure or no script refuses, naming the failing lines; a pull request the script does not cover
+ * (no game code or assets) passes there by itself.
+ */
+function evidencePasses(d: PrDeps, pr: Pr): boolean {
+  const repo = repoOf(pr.url);
+  if (!evidenceGated(repo)) return true;
+  const script = d.evidenceScript?.();
+  if (!script) {
+    d.write(`ff-pr: not merged: ${noScriptRefusal(repo, pr.number)}\n`);
+    return false;
+  }
+  const r = d.run(d.python ?? evidencePython(), evidenceArgs(script, repo, pr.number));
+  const v = evidenceVerdict(r.code, r.out, r.err);
+  if (v.ok) {
+    d.write(`ff-pr: Evidence: ${v.lines[0]}\n`);
+    return true;
+  }
+  d.write(`ff-pr: not merged: ${pr.url}: ${evidenceRefusal(repo, pr.number, r.code, v)}\nFix the evidence or the claim (gh pr edit ${pr.number} --body-file <f>), then ff-pr merge again.\n`);
+  return false;
+}
+
 export function merge(d: PrDeps, o: Opts): number {
   const got = prAndCi(d, o);
   if (typeof got === 'number') return got;
@@ -288,6 +316,7 @@ export function merge(d: PrDeps, o: Opts): number {
     d.write(`ff-pr: not merged: ${pr.url} ${ciLine(v)}\n${v.state === 'red' ? 'Read a red run with gh run view <run> --log-failed, fix, and ff-pr push.\n' : `${waitLine(pr, pr.headRefOid)}\n`}`);
     return v.state === 'red' ? 1 : 3;
   }
+  if (!evidencePasses(d, pr)) return 1;
   const m = d.run('gh', ['pr', 'merge', String(pr.number), '--merge', '--match-head-commit', pr.headRefOid]);
   if (m.code !== 0) {
     // w1867: a 502 from GitHub can come back on a merge it made ("Merge already in progress" on the retry, the PR page
@@ -326,6 +355,7 @@ export const realPrDeps: PrDeps = {
   },
   write: (s) => void process.stdout.write(s),
   sleep: (ms) => void Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms),
+  evidenceScript: () => findLocalPrEvidence(),
 };
 
 /** Write the ff-pr shims (sh for Git Bash and macOS/Linux, .cmd for PowerShell) into the agents' bin folder. */

@@ -22,6 +22,7 @@ import { run as runProc, type RunOptions, type RunResult } from './proc.ts';
 import { blockerVerdict, CI_REF, cycleBreak, FULL_SHA, gateSetter, gatesOf, newestFirst, RESUME_SWEEP_MS, waitCycles, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
 import { conditionalVerdict } from '../shared/conditional.ts';
 import { ghRunner } from './githubTokens.ts';
+import { evidenceArgs, evidenceGated, evidencePython, evidenceRefusal, evidenceVerdict, findLocalPrEvidence, noScriptRefusal } from '../machine/evidenceGate.ts';
 import { pairDelivers, reportDelivers, stillOpenIn } from './ledgerRules.ts';
 import { lastOpenLine, personWaitOn, portalWaitIn, reportAt, requestWaitOf, siblingWaitOf } from '../shared/workState.ts';
 import type { SessionInfo, WorkBlocker, WorkItem } from '../shared/types.ts';
@@ -398,9 +399,9 @@ export class BlockerWatch {
     try {
       await (this.d.merge ? this.d.merge(g.ref!, g.mergeOnGreen!.head, this.d.githubPerson?.(w)) : ghMerge(g.ref!, g.mergeOnGreen!.head, ghRunner(this.d.githubPerson?.(w), `the merge of ${g.ref}`)));
     } catch (e) {
-      const said = clipLine((e as Error).message, 300);
+      const said = clipLine((e as Error).message, 1200);
       console.warn(`blocker watch: ${w.id}: merge on green of ${g.ref} failed: ${said}`);
-      return this.d.orchestrators.unblock(w.id, `${why}; FF Factory tried to merge it and GitHub said: ${said}. Merge it yourself (ff-pr merge), then report; the report you left with merge_on_green was not filed`);
+      return this.d.orchestrators.unblock(w.id, `${why}; FF Factory tried to merge it: ${said}. Merge it yourself (ff-pr merge), then report; the report you left with merge_on_green was not filed`);
     }
     // Merged: the PR's state is read fresh next time.
     this.prSeen.delete(g.ref!);
@@ -424,9 +425,9 @@ export class BlockerWatch {
       try {
         await (this.d.merge ? this.d.merge(g.ref!, g.mergeOnGreen!.head, this.d.githubPerson?.(w)) : ghMerge(g.ref!, g.mergeOnGreen!.head, ghRunner(this.d.githubPerson?.(w), `the merge of ${g.ref}`)));
       } catch (e) {
-        const said = clipLine((e as Error).message, 300);
+        const said = clipLine((e as Error).message, 1200);
         console.warn(`blocker watch: ${w.id}: merge on green of ${g.ref} failed: ${said}`);
-        rest.push({ g, v: { why: `${x.v.why}; FF Factory tried to merge it and GitHub said: ${said}. Merge it yourself (ff-pr merge), then report; the report you left with merge_on_green was not filed` } });
+        rest.push({ g, v: { why: `${x.v.why}; FF Factory tried to merge it: ${said}. Merge it yourself (ff-pr merge), then report; the report you left with merge_on_green was not filed` } });
         continue;
       }
       this.prSeen.delete(g.ref!);
@@ -720,7 +721,7 @@ let rollupRefusedLogged = false;
  * is first resolved to the pull request's own head commit, and only when that commit starts with it: a head that moved
  * since the worker recorded it is never merged.
  */
-export async function ghMerge(ref: string, head: string, run: Runner = runProc): Promise<void> {
+export async function ghMerge(ref: string, head: string, run: Runner = runProc, evidenceScript: () => string | undefined = findLocalPrEvidence): Promise<void> {
   const m = CI_REF.exec(ref);
   if (!m) throw new Error(`"${ref}" is not a pull request (owner/repo#123)`);
   const opts = { timeoutMs: 60_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } };
@@ -732,6 +733,16 @@ export async function ghMerge(ref: string, head: string, run: Runner = runProc):
     const oid = String((JSON.parse(p.stdout) as { headRefOid?: string }).headRefOid ?? '').toLowerCase();
     if (!FULL_SHA.test(oid) || !oid.startsWith(full)) throw new Error(`gh pr merge ${ref}: not merged: its head is ${oid.slice(0, 12) || 'unknown'}, not ${full}, the commit recorded to merge`);
     full = oid;
+  }
+  // w3088: in a gated repository the pilot merges only what pr_evidence.py passes, as ff-pr merge does (machine/evidenceGate.ts):
+  // #3180 merged on green with its Evidence section failing. Through the same runner, so the script's own gh calls carry the
+  // person's token. No script, no python, a FAIL or a usage error: not merged, and the worker hears the failing lines.
+  if (evidenceGated(m[1])) {
+    const script = evidenceScript();
+    if (!script) throw new Error(`not merged: ${noScriptRefusal(m[1], m[2])}`);
+    const e = await run(evidencePython(), evidenceArgs(script, m[1], m[2]), { ...opts, timeoutMs: 5 * 60_000 });
+    const v = evidenceVerdict(e.code, e.stdout, e.stderr);
+    if (!v.ok) throw new Error(`not merged: ${evidenceRefusal(m[1], m[2], e.code, v)}`);
   }
   const r = await run('gh', ['pr', 'merge', m[2], '-R', m[1], '--merge', '--match-head-commit', full], opts);
   if (r.code !== 0) throw new Error(`gh pr merge ${ref}: ${ghSaid(r)}`);

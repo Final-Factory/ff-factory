@@ -4,6 +4,7 @@ import { inMergeOnGreenPilot, mergeOnGreenPercent } from './mergeOnGreen.ts';
 import { inPilot } from './autoCompact.ts';
 import { normalizeSetting } from './appConfig.ts';
 import { checksState, ghMerge, runsState } from './blockerWatch.ts';
+import { evidencePython } from '../machine/evidenceGate.ts';
 import type { Config } from './config.ts';
 
 /**
@@ -59,10 +60,17 @@ test('ghMerge: gh pr merge at exactly the head, with the repo named; what gh sai
   await ghMerge('Final-Factory/FinalFactory#12', FULL, async (cmd, args) => {
     calls.push([cmd, ...args]);
     return { code: 0, stdout: '', stderr: '' } as never;
-  });
-  assert.deepEqual(calls, [['gh', 'pr', 'merge', '12', '-R', 'Final-Factory/FinalFactory', '--merge', '--match-head-commit', FULL]], 'a full sha is passed as is, with no read');
+  }, () => 'pe.py');
+  assert.deepEqual(
+    calls,
+    [
+      [evidencePython(), 'pe.py', '--repo', 'Final-Factory/FinalFactory', '--pr', '12'],
+      ['gh', 'pr', 'merge', '12', '-R', 'Final-Factory/FinalFactory', '--merge', '--match-head-commit', FULL],
+    ],
+    'a full sha is passed as is, with no read; the game repo runs its Evidence check first (w3088)',
+  );
   await assert.rejects(
-    ghMerge('Final-Factory/FinalFactory#12', FULL, async () => ({ code: 1, stdout: '', stderr: 'Head branch was modified. Review and try the merge again.' }) as never),
+    ghMerge('Final-Factory/FinalFactory#12', FULL, async (cmd) => (cmd === 'gh' ? { code: 1, stdout: '', stderr: 'Head branch was modified. Review and try the merge again.' } : { code: 0, stdout: '', stderr: '' }) as never, () => 'pe.py'),
     /gh pr merge Final-Factory\/FinalFactory#12: Head branch was modified/,
   );
 });
