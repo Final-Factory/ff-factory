@@ -94,7 +94,7 @@ test('master/main: blocked for the game repo only, and whenever the target is un
   const remotes = (dir: string) => {
     const d = dir.replace(/\\/g, '/').toLowerCase();
     if (d === 'c:/ffsb/sb1') return new Map([['origin', 'git@github.com:example-org/example-game.git']]);
-    if (d === 'c:/tmp/tools') return new Map([['origin', 'https://github.com/Final-Factory/ff-factory.git']]);
+    if (d === 'c:/tmp/tools') return new Map([['origin', 'https://github.com/example-org/tools.git']]);
     return undefined;
   };
   const g = sandboxGuard({ sandboxId: 'sb1', sandboxPath: 'C:/ffsb/sb1', protectedPaths: [], gameRepos: ['https://github.com/example-org/example-game.git', 'C:/ffsb/_base'], remotes, prBase: () => 'master', evidence: () => undefined });
@@ -128,7 +128,7 @@ test('master/main: blocked for the game repo only, and whenever the target is un
     [sb, 'cd C:/tmp/tools && git push origin HEAD:main', 'allow'],
     [sb, 'cd /c/tmp/tools && git push origin HEAD:main', 'allow'],
     [sb, 'git -C C:/tmp/tools push origin main', 'allow'],
-    [sb, 'git push https://github.com/Final-Factory/ff-factory HEAD:main', 'allow'],
+    [sb, 'git push https://github.com/example-org/tools HEAD:main', 'allow'],
     [tools, 'git push https://github.com/example-org/example-game.git HEAD:master', 'deny'],
     [tools, 'git push C:/ffsb/_base HEAD:master', 'deny'],
     [tools, 'cd C:/ffsb/sb1 && git push origin HEAD:master', 'deny'],
@@ -334,7 +334,7 @@ test('public repos: a push whose commits carry a private email is refused', asyn
     publicIdentity: { repos: ['https://github.com/Final-Factory/ff-factory'], name: 'Public Name', email: 'bot@example.org', pushedEmails: (_dir, remote, srcs) => (seen.push([remote, ...srcs]), emails), isPublic: (k) => k === 'github.com/final-factory/agent-kit' },
   });
   const cwd = 'C:/tmp/app';
-  assert.equal(await decide(g, 'Bash', { command: 'git push origin HEAD:main' }, cwd), 'allow');
+  assert.equal(await decide(g, 'Bash', { command: 'git push origin HEAD:feature' }, cwd), 'allow');
   assert.deepEqual(seen.at(-1), ['origin', 'HEAD']);
   emails = ['1+someone@users.noreply.github.com', 'person@gmail.example'];
   for (const command of ['git push origin HEAD:main', 'git push', 'git push origin feature:feature', 'git push https://github.com/Final-Factory/ff-factory.git x:y']) {
@@ -454,4 +454,60 @@ test('w2503: text arguments are blanked, everything else is left as written', ()
   assert.equal(withoutTextArgs('bash -c "kill node"'), 'bash -c "kill node"');
   assert.equal(withoutTextArgs("git commit -F - <<'EOF'\nkill node\nEOF\ngit push"), "git commit -F - <<'EOF'\nEOF\ngit push");
   assert.equal(withoutTextArgs("bash <<'EOF'\nkill node\nEOF"), "bash <<'EOF'\nkill node\nEOF");
+});
+
+test('w3111: no push to the ff-agents plugin or FF Factory master/main from any clone, HEAD and bare pushes included', async () => {
+  // During w3099 a worker in a $TMPDIR clone of final-factory-agents committed on its local master and ran
+  // `git push origin HEAD`: the guard judged only the game repo, and only the refspec's text, so ec77f376 and 46605709 landed on master.
+  const tmp = 'C:/ffw/tmp/ffa-1';
+  const remotes = (dir: string) => {
+    const d = dir.replace(/\\/g, '/').toLowerCase();
+    if (d === 'c:/ffsb/sb1') return new Map([['origin', 'git@github.com:example-org/example-game.git']]);
+    if (d === `${tmp}/ffa`.toLowerCase()) return new Map([['origin', 'https://github.com/Final-Factory/final-factory-agents']]);
+    if (d === `${tmp}/fff`.toLowerCase()) return new Map([['origin', 'https://github.com/Final-Factory/ff-factory.git']]);
+    if (d === `${tmp}/ffbox`.toLowerCase()) return new Map([['origin', 'https://github.com/Final-Factory/ffbox.git']]);
+    if (d === `${tmp}/topic`.toLowerCase()) return new Map([['origin', 'https://github.com/Final-Factory/final-factory-agents']]);
+    return undefined;
+  };
+  const branch = (dir: string) => {
+    const d = dir.replace(/\\/g, '/').toLowerCase();
+    if (d.endsWith('/topic')) return 'w3111-guard';
+    if (d.endsWith('/fff')) return 'main';
+    return d === 'c:/ffsb/sb1' ? 'sandbox/sb1' : 'master';
+  };
+  const g = sandboxGuard({ sandboxId: 'sb1', sandboxPath: 'C:/ffsb/sb1', protectedPaths: [], gameRepos: ['https://github.com/example-org/example-game.git'], remotes, branch, prBase: () => 'master', evidence: () => undefined, env: { TMPDIR: tmp } });
+  const sb = 'C:/ffsb/sb1';
+  const cases: [string, string, 'allow' | 'deny'][] = [
+    // The w3099 push, as it was typed, and its spellings.
+    [sb, 'cd $TMPDIR/ffa && git push origin HEAD', 'deny'],
+    [`${tmp}/ffa`, 'git push origin HEAD', 'deny'],
+    [`${tmp}/ffa`, 'git push origin @', 'deny'],
+    [`${tmp}/ffa`, 'git push', 'deny'],
+    [`${tmp}/ffa`, 'git push origin', 'deny'],
+    [`${tmp}/ffa`, 'git push -u origin master', 'deny'],
+    [`${tmp}/ffa`, 'git push origin HEAD:master', 'deny'],
+    [`${tmp}/ffa`, 'git push origin HEAD:refs/heads/main', 'deny'],
+    [sb, `git -C ${tmp}/ffa push origin HEAD`, 'deny'],
+    [sb, 'git push https://github.com/Final-Factory/final-factory-agents.git HEAD:master', 'deny'],
+    [`${tmp}/fff`, 'git push origin HEAD', 'deny'],
+    [`${tmp}/fff`, 'git push origin HEAD:main', 'deny'],
+    // The flow publish-skills teaches: the clone's master pushed under its own branch name, then a PR.
+    [`${tmp}/ffa`, 'git push origin HEAD:refs/heads/w3111-guard', 'allow'],
+    [`${tmp}/ffa`, 'git push -u origin w3111-guard', 'allow'],
+    [`${tmp}/topic`, 'git push origin HEAD', 'allow'],
+    [`${tmp}/topic`, 'git push', 'allow'],
+    // ffbox's master is pushed straight by design (docs/ffbox.md).
+    [`${tmp}/ffbox`, 'git push origin HEAD', 'allow'],
+    [`${tmp}/ffbox`, 'git push origin HEAD:master', 'allow'],
+    // The sandbox's own branch.
+    [sb, 'git push origin HEAD', 'allow'],
+    [sb, 'git push', 'allow'],
+  ];
+  for (const [cwd, command, want] of cases) assert.equal(await decide(g, 'Bash', { command }, cwd), want, `${cwd}: ${command}`);
+  // A game repo clone on its master is refused for a HEAD push too.
+  const onMaster = sandboxGuard({ sandboxId: 'sb1', sandboxPath: 'C:/ffsb/sb1', protectedPaths: [], gameRepos: ['https://github.com/example-org/example-game.git'], remotes, branch: () => 'master', prBase: () => 'master', evidence: () => undefined });
+  assert.equal(await decide(onMaster, 'Bash', { command: 'git push origin HEAD' }, sb), 'deny');
+  // The refusal names the repo and the fix.
+  const ctx = { cwd: `${tmp}/ffa`, gameRepos: ['https://github.com/example-org/example-game.git'], remotes, branch };
+  assert.match(checkShell('git push origin HEAD', ctx) ?? '', /Pushing to master of github\.com\/final-factory\/final-factory-agents is blocked.*only through a pull request \(w3111\).*git push origin HEAD:refs\/heads\/<branch>.*gh pr create --head <branch>/);
 });

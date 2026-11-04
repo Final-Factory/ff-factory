@@ -9,6 +9,7 @@ import { WORK_OPEN, type WorkItem } from '../shared/types.ts';
 import { cleanBlock, cleanLine, sourceTag, UNTRUSTED_HEADER } from './intakeRules.ts';
 import { ledgerOrder, liveLine, names } from './work.ts';
 import { gatesName, gatesOf } from '../shared/blockers.ts';
+import { HANDOFF_REPORT_CHARS } from './handoffReport.ts';
 
 /**
  * The most an answer holds, in characters. Claude Code warns once an MCP result passes 10,000 tokens and saves a result
@@ -107,7 +108,9 @@ export function readWork(items: readonly WorkItem[], sessionId: string, a: ReadW
     if (!w) throw new Error(`no request ${id} in the ledger (it keeps every open request and the recently closed ones)`);
     // w2417: the files its workers published come first after the header, so no clip of a long entry drops them.
     const files = published(w);
-    return clipAnswer(`${HEADER}${files ? `\n\n${files}` : ''}\n\n${full(w, live.get(w.id), cost(w.id))}`);
+    // w3105: a hand-off's newest report whole (a timed leg's run table), next, so no clip of a long entry cuts it.
+    const report = w.handoff ? `\n\n${lastReport(w)}` : '';
+    return clipAnswer(`${HEADER}${files ? `\n\n${files}` : ''}${report}\n\n${full(w, live.get(w.id), cost(w.id))}`);
   }
   const statuses = statusFilter(a.status ?? (a.all ? 'open_and_stalled' : 'any'));
   const states = a.state === undefined ? undefined : new Set(Array.isArray(a.state) ? a.state : [a.state]);
@@ -238,6 +241,13 @@ function brief(w: WorkItem, now?: WorkLive, cost = ''): string {
     ...(w.outcome ? ['Latest report:', fence(w, latestLine(w)!, 400, 8)] : []),
     ...(w.log.length ? [`Log (last ${Math.min(w.log.length, 5)}):`, fence(w, w.log.slice(-5).join('\n'), 1_500, 5)] : []),
   ].join('\n');
+}
+
+/** A hand-off request's newest report in full (w3105, WorkItem.handoff), fenced as the rest of the entry is. */
+function lastReport(w: WorkItem): string {
+  const r = w.handoff!;
+  const cut = r.chars > r.text.length ? ` (the first ${r.text.length} of ${r.chars} characters)` : '';
+  return [`Last report in full (worker ${r.session}, ${r.at.slice(0, 16).replace('T', ' ')})${cut}:`, fence(w, r.text, HANDOFF_REPORT_CHARS, 100_000)].join('\n');
 }
 
 /** At most READ_MAX_CHARS, and a fence the cut left open is closed before the note saying so. */

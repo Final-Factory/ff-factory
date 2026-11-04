@@ -776,7 +776,15 @@ without one means it is off or failing, worth a person's look.
     2026-10-30 on "w2607, its timed leg, is itself Blocked" and blocked again each time). A turn that says only
     that its bench ticket is still queued, or "understood", leaves the parent Blocked (w2377: w2338's turns woke w2335
     four times on 2026-10-27, when any turn of a leg cleared it). The resume message carries the leg's report and asks for
-    a `For <leg>:` line with the branch and commit, which resumes the leg's worker if it waits back;
+    a `For <leg>:` line with the branch and commit, which resumes the leg's worker if it waits back. That report is the
+    leg's whole final message, not the session's 1200-character `lastResult` (w3105, asked by Ben: w3094's 7 KB run table
+    and eight JSON lines reached w2895's worker as "5795 chars left out", and nothing else kept them): a hand-off request
+    (a timed leg, a pair run, a request some request is or was Blocked on the report of, or one whose report has a
+    `For wNNN:` line) keeps its newest report whole in `WorkItem.handoff`, up to 24,000 characters
+    (`server/handoffReport.ts`, `Orchestrators.keepHandoffReports`, before any `DONE:` closes it). The resume quotes it whole
+    up to 12,000 characters, else from its `For <waiter>:` line on, else its start with a pointer to `read_work <leg>`; a
+    pair run's result quotes 8,000 from the host leg's `For` line, and any other request waited on with blocked_on
+    `reports` sends its kept report the same way. Ordinary turns keep the 1200-character cut;
   - the blocker watch finds wait cycles (`shared/blockers.ts` `waitCycles`): `request` gates of Blocked requests, plus the
     request an active request's idle worker last said it waits on (the ledger's derived "Blocked on", `requestWaitOf`). In
     a cycle it resumes one Blocked side (`cycleBreak`): the one whose next reported since its block, else the request a
@@ -1391,7 +1399,7 @@ finished without being able to read their briefs) they can **read** the entries 
 | call | answers | who may |
 |---|---|---|
 | `read_work {}` | the worker's own requests, the ones they name and the ones they wait or waited on, one entry each | every worker |
-| `read_work {id}` | one request in full: status and live state, its people, source, workers, PRs (with merge commits), related ids, brief, constraints, notes, latest report, DONE reports, the last 60 log lines | own, named and awaited requests, any status; with the grant, any open or stalled one too. The files its workers published (publish_attachment) lead the entry (w2417) |
+| `read_work {id}` | one request in full: status and live state, its people, source, workers, PRs (with merge commits), related ids, a hand-off's last report in full (w3105, `WorkItem.handoff`, right after the published files), brief, constraints, notes, latest report, DONE reports, the last 60 log lines | own, named and awaited requests, any status; with the grant, any open or stalled one too. The files its workers published (publish_attachment) lead the entry (w2417) |
 | `read_work {all: true, status?, state?, person?, offset?, limit?}` | the open and stalled requests (status `open`, `stalled` or `open_and_stalled`, the default), narrowed to live states (as `list_work`'s `state`) and a person, one entry each: the start of its brief (1,200 characters), its latest report (400) and its last 5 log lines | only with the grant |
 
 **Scope** (`readScope`). A worker's **own** requests are those whose `sessionIds` hold its session: started, messaged
