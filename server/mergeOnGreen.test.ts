@@ -87,9 +87,10 @@ function fakeGh(oid: string | undefined, calls: string[][]) {
 test('w3021: ghMerge resolves a short head to the pull request head it starts with, and passes GitHub the full sha', async () => {
   // ffu#200 as it happened: the head was recorded as 3e14de3aa516, and GitHub refused it ("Could not coerce value to GitObjectID").
   const calls: string[][] = [];
-  await ghMerge('Final-Factory/ffu#200', '3E14DE3AA516', fakeGh(FULL, calls));
+  await ghMerge('Final-Factory/ffu#200', '3E14DE3AA516', fakeGh(FULL, calls), () => 'pe.py');
   assert.deepEqual(calls, [
     ['gh', 'pr', 'view', '200', '-R', 'Final-Factory/ffu', '--json', 'headRefOid'],
+    [evidencePython(), 'pe.py', '--repo', 'Final-Factory/ffu', '--pr', '200'],  // w3098: ffu runs the Evidence check
     ['gh', 'pr', 'merge', '200', '-R', 'Final-Factory/ffu', '--merge', '--match-head-commit', FULL],
   ]);
 });

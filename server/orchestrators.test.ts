@@ -4613,14 +4613,16 @@ test('w3021: merge on green with a short head: blocked_on records the PR head wh
   assert.equal(store.work.get('w2')!.blocked!.mergeOnGreen!.head, short);
   // The merge runs through the real ghMerge against a gh that, as GitHub does, refuses any expectedHeadOid but a full sha.
   const gh: string[][] = [];
-  const run = async (_cmd: string, args: string[]) => {
+  const run = async (cmd: string, args: string[]) => {
+    // w3098: ffu's merges run the Evidence check first; it passes here.
+    if (cmd !== 'gh') return { code: 0, stdout: 'evidence-gate: PASS', stderr: '' } as never;
     gh.push(args);
     if (args[1] === 'view') return { code: 0, stdout: JSON.stringify({ headRefOid: full }), stderr: '' } as never;
     const oid = args[args.indexOf('--match-head-commit') + 1];
     return (oid === full ? { code: 0, stdout: '', stderr: '' } : { code: 1, stdout: '', stderr: `GraphQL: Could not coerce value "${oid}" to GitObjectID` }) as never;
   };
   const green = (ref: string) => ({ done: true, green: true as const, text: `CI on ${ref} finished: all 1 checks passed or skipped` });
-  const watch = new BlockerWatch({ store, orchestrators: o, ci: async (ref) => green(ref), merge: (ref, h) => ghMerge(ref, h, run) });
+  const watch = new BlockerWatch({ store, orchestrators: o, ci: async (ref) => green(ref), merge: (ref, h) => ghMerge(ref, h, run, () => 'pe.py') });
   await watch.tick();
   assert.deepEqual(
     gh.filter((x) => x[1] === 'merge').map((x) => x[x.indexOf('--match-head-commit') + 1]),
