@@ -71,7 +71,7 @@ import { MD_IMAGE } from '../shared/imagePaths.ts';
 import { reviewRootOf } from './reviewMedia.ts';
 import { visualAskCheck } from './visualAsk.ts';
 import { notesSettle, personNotes, relatedRequests, settledRefusal } from './priorDecisions.ts';
-import { alreadySent, asksSame, matchedAsk, needsYouDigestText, needsYouRecord, needsYouText, whoOf, type NeedsYouWait } from './needsYou.ts';
+import { alreadySent, asksSame, matchedAsk, needsYouDigestText, needsYouRecord, needsYouText, whoOf, workersNamedBy, type NeedsYouWait } from './needsYou.ts';
 import { asksAnsweredBy, sameAsk, WAIT_LINE_CHARS } from '../shared/waitSummary.ts';
 import { holdsItsPlace, stoppedOffline } from '../shared/agentState.ts';
 import { displayName } from '../shared/labels.ts';
@@ -95,6 +95,8 @@ const inlined = (text: string) => [...text.matchAll(MD_IMAGE)].map((m) => (m[1] 
 const cardMedia = (ask: Ask) => new Set([ask.question, ...ask.options.map((o) => o.description)].flatMap((t) => splitMedia(t).media.map((m) => m.url)));
 /** How a person's answer to a [needs you] starts its resume (answerNeedsYou); staleResume always lets it go (w2495). */
 const ANSWER_MARK = '[answer] ';
+/** How a person's note that names one worker of several starts its resume (noteToWorker, w3117); it goes like an answer. */
+const NOTE_MARK = '[note] ';
 const BUSY: SessionInfo['status'][] = ['running', 'starting', 'waiting_permission'];
 /** A request Blocked on a machine its worker was cut off on is named to the dispatcher after this long offline (w2433, ledger.offlineNoticeMinutes). */
 export const OFFLINE_NOTICE_MS = 60 * 60_000;
@@ -1233,6 +1235,52 @@ export class Orchestrators {
     if (told) return this.placeNeedsYou(w, wait, { told }) ? `${names(asked)} already has it (${told}): kept as their [needs you], no message sent.` : `${names(asked)}'s orchestrator already has this question.`;
     const to = this.needsYou(w, wait);
     return to.length ? `${names(to)}'s orchestrator has your question as [needs you].` : `${names(asked)}'s orchestrator already has this question.`;
+  }
+
+  /**
+   * w3117: a person's note on a request with an open [needs you], when several workers are on it, goes to the worker it
+   * names (its session id, or a pull request its own words name) and answers that worker's question only. On w2895 Ben's
+   * note named aa60d124 and ffu #202; it went to b4440e1e as the answer to its open [needs you], b4440e1e took it as a
+   * correction of its own work and asked Ben again. A note that names none of them is sent to nobody: the orchestrator is
+   * told whose question it would settle and names the worker (a note to every worker would leave the question open and
+   * reach workers it is not for, the very misreading w2895 showed). With one worker it answers that worker, as before.
+   */
+  private routeNote(w: WorkItem, by: Requester, note: string): string {
+    const r = w.needsYou!;
+    const on = this.stillOn(w);
+    const others = on.filter((id) => id !== r.worker);
+    if (!others.length) return this.answerNeedsYou(w, by, note);
+    const words = (id: string) => {
+      const s = this.store.sessions.get(id);
+      return [s?.title, s?.lastResult, s?.waitingOn?.what, ...(s?.waitingOn?.asks ?? []).map((a) => a.question), ...(id === r.worker ? [r.question, r.report] : [])];
+    };
+    const ids = r.worker && !on.includes(r.worker) ? [r.worker, ...on] : on;
+    const named = workersNamedBy(note, ids.map((id) => ({ id, words: words(id) })));
+    if (!named.length) {
+      return `names none of the ${ids.length} workers on ${w.id} (${ids.join(', ')}), so it was sent to none of them and answers nothing yet (w3117): it would settle worker ${r.worker ?? '?'}'s [needs you] question "${clip(r.question.replace(/\s+/g, ' '), 160)}". If it answers that, call update_work again naming ${r.worker ?? 'that worker'} (its session id or its PR); if it is for another worker, name that one`;
+    }
+    const out: string[] = [];
+    if (r.worker && named.includes(r.worker)) out.push(this.answerNeedsYou(w, by, note));
+    else out.push(`not an answer to worker ${r.worker ?? '?'}'s [needs you] question, which still waits: the note names ${named.join(', ')} (w3117)`);
+    for (const sid of named.filter((id) => id !== r.worker)) out.push(this.noteToWorker(w, by, note, sid));
+    return out.join('; ');
+  }
+
+  /** w3117: a person's note that names worker `sid`, sent to it alone: the answer to its own wait when it declared one on `w`, else a note. */
+  private noteToWorker(w: WorkItem, by: Requester, note: string, sid: string): string {
+    const s = this.store.sessions.get(sid);
+    if (!s) return `worker ${sid} is gone: start the work with the note`;
+    if (BUSY.includes(s.status)) return `worker ${sid} is mid-turn: pass it on with message_agent`;
+    const wait = s.waitingOn && (!s.waitingOn.request || s.waitingOn.request === w.id) ? s.waitingOn : undefined;
+    const text = wait
+      ? `${ANSWER_MARK}${by.displayName} answered on ${w.id} "${clip(w.title, 100)}", in their own words, naming you: ${note}
+
+It answers what you waited on: "${clip(wait.what, 300)}". Carry on with it.`
+      : `${NOTE_MARK}${by.displayName} added a note on ${w.id} "${clip(w.title, 100)}" that names you, in their own words: ${note}
+
+It is for your part of the work, not an answer to another worker's question.`;
+    if (!this.wakeNow(sid, text, w.id)) return `worker ${sid} could not be resumed: pass it on with message_agent`;
+    return `sent to worker ${sid}${wait ? ' as the answer to its own wait' : ' as a note'}, which resumes with it (nothing for you to pass on)`;
   }
 
   /**
@@ -2559,7 +2607,7 @@ export class Orchestrators {
         w.flag = undefined;
       }
       // w1378: a person's own answer to a [needs you] question goes to the worker that waits on it.
-      if (w.humanAsked && w.needsYou && !w.needsYou.answered && !keeps) what.push(this.answerNeedsYou(w, owner, note));
+      if (w.humanAsked && w.needsYou && !w.needsYou.answered && !keeps) what.push(this.routeNote(w, owner, note));
       // w1868: and the open question cards about it that the note answers leave the person's Waiting on input tab.
       if (w.humanAsked) this.closeAsksAnsweredBy(owner, w, note);
     }
@@ -3897,7 +3945,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const othersOnly = gatesOf(w).length > 0 && othersGates(w, sessionId).length === gatesOf(w).length;
     // w2495: a person's answer to its [needs you] (answerNeedsYou) always goes: it is what the worker waits on, and the gates
     // it keeps (w754) still hold the request; the worker sees them and blocks on them again if it must.
-    const answer = note.startsWith(ANSWER_MARK);
+    const answer = note.startsWith(ANSWER_MARK) || note.startsWith(NOTE_MARK);
     if (w.blocked && (w.status === 'blocked' || w.status === 'question') && !othersOnly && !answer) {
       const name = gatesName(gatesOf(w), this.now().getTime());
       if (!(w.heldCheckIns ?? []).some((h) => h.session === sessionId && h.note === note)) w.heldCheckIns = [...(w.heldCheckIns ?? []), { session: sessionId, at: this.now().toISOString(), note, resume: true }];
