@@ -7005,7 +7005,7 @@ ${w.repo ?? ''}
           for: z.string().optional().describe("ask: who it is for (user id or name) when not the requester (\"Ask ben\"); required once the question was handed on (w2867)."),
           no_previews: z.string().max(300).optional().describe('ask: only for a question about nothing visual on a request with review stills or clips: why no preview applies (w2478); never for a design pick.'),
           into: z.string().optional().describe('merge: the open request it repeats.'),
-          session_ids: z.array(z.string()).optional().describe('link: the workers already doing it.'),
+          session_ids: z.array(z.string()).optional().describe('link: the workers already doing it. block, on a request with several workers: the workers the blocker is about; only their check-ins are held, the others keep theirs (a check-in for their own long job, w3120).'),
           needs: z.array(z.string()).max(12).optional().describe('queue: the computers (machine ids) that can take it, when only some can (a Mac, BEAST); queue is refused while any of them (any computer, without needs) has room. On an active request with a worker: a leg there, kept until a worker starts for it there (w1863).'),
           drop_leg: z.boolean().optional().describe('queue: drop its leg for needs.'),
           pair_legs: z.number().optional(),

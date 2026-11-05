@@ -4513,6 +4513,45 @@ async function secondWorkerOn(env: Awaited<ReturnType<typeof setupOnMachine>>, w
   return b;
 }
 
+test('w3120: w2895 as it happened: two workers on one request, one running a 24 h soak with a check-in for its end; the dispatcher blocks the request on another request\'s merge: the soak keeps its check-in, the named worker\'s is held', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, dispatcher, call } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1', status: 'active' }, { id: 'w2' }, { id: 'w2x' }]);
+  // a (738652d6) runs the soak as a background job; b (aa60d124) waits on CI of its own row and polls.
+  const a = await startedFor(env, 'w2');
+  const b = await secondWorkerOn(env, 'w2');
+  await a.h.wake_me!({ minutes: 12 * 60, note: 'w2: the 24 h soak should have ended' });
+  await b.h.wake_me!({ minutes: 20, note: "w2: check w1's PR" });
+  const pr = { kind: 'pr', ref: 'Final-Factory/ffu#247', what: "w1's CI fix merging" };
+  // A stranger in session_ids is refused, and nothing changes.
+  const bad = await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'block', blocker: pr, session_ids: ['deadbeef'], note: 'x' });
+  assert.equal(bad.isError, true);
+  assert.match(bad.text, /deadbeef is not a worker of w2/);
+  // The block is about b's row: a keeps its soak's check-in; b's is held on the request, to come back when the block ends.
+  const r = await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'block', blocker: pr, session_ids: [b.id.slice(0, 8)], note: "b's row waits on w1's CI fix" });
+  assert.equal(r.isError, false, r.text);
+  assert.equal(agents.waker.pending(a.id)?.note, 'w2: the 24 h soak should have ended', 'the bug: "cancelled 738652d6\'s check-in"');
+  assert.equal(agents.waker.pending(b.id), undefined);
+  const w = store.work.get('w2')!;
+  assert.equal(w.status, 'blocked');
+  assert.deepEqual(w.heldCheckIns?.map((h) => h.session), [b.id]);
+  assert.match(w.log.at(-1)!, new RegExp(`cancelled ${b.id}'s check-in .*; kept ${a.id}'s check-in \\(\\d\\d:\\d\\d UTC\\): the block is not about that worker`));
+  // Blocking again with no session_ids holds nobody else's: a request with several workers cancels only the ones named.
+  await b.h.wake_me!({ minutes: 20, note: 'w2: again' });
+  assert.equal((await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'block', note: 'keeping the gate' })).isError, false);
+  assert.equal(agents.waker.pending(a.id)?.note, 'w2: the 24 h soak should have ended');
+  assert.equal(agents.waker.pending(b.id)?.note, 'w2: again');
+  // One worker alone: the block holds its check-in as before (w754).
+  putRequests(store, [{ id: 'w3' }]);
+  const c = await startedFor(env, 'w3');
+  await c.h.wake_me!({ minutes: 20, note: 'w3: poll' });
+  assert.equal((await call(dispatcher().info, 'decide_work', { id: 'w3', action: 'block', blocker: pr, note: 'waits on the fix' })).isError, false);
+  assert.equal(agents.waker.pending(c.id), undefined);
+  agents.waker.cancel(a.id);
+  agents.waker.cancel(b.id);
+});
+
 test('w1696: w665 as it happened: a request whose title names another request, sent once to that request’s live worker for a side job and then again to its own, stays with its own worker; the release pass does not call its work over', async (t) => {
   const env = await setupOnMachine(t);
   const { store, agents, o } = env;
