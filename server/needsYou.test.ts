@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
-import { alreadySent, needsYouDigestText, needsYouRecord, needsYouText, previewLine, previewsIn, prsIn, reportTail, whoOf, NEEDS_YOU_REPORT_CHARS } from './needsYou.ts';
+import { alreadySent, needsYouDigestText, needsYouRecord, needsYouText, previewLine, previewsIn, prsIn, reportTail, whoOf, workersNamedBy, NEEDS_YOU_REPORT_CHARS } from './needsYou.ts';
 import type { UserInfo, WorkItem } from '../shared/types.ts';
 
 /** The pure parts of w1378's [needs you] routing: what a question carries, whom it goes to, and that it goes once. */
@@ -126,4 +126,17 @@ test('w2478: the relay lists the request’s own review stills and clips the wor
   assert.match(text, /More of the review stills and clips of w1360, newest first: inline the ones[\s\S]*w2478\):\n\n- !\[newest\.mp4\]\(<[^>]*newest\.mp4>\)\n- !\[old\.png\]/);
   const none = needsYouRecord(w, { kind: 'question', key: 'q', question: 'Ship today?', names: ['Ben'] }, [], 't', { reviewRoot: NOWHERE });
   assert.equal(none.media, undefined);
+});
+
+test('w3117: a note names the workers whose session id it gives, or whose own words name a PR it names', () => {
+  const workers = [
+    { id: 'b4440e1e-0000', words: ['w2895: R.T4 strips', 'ffu #149 is open with five strips'] },
+    { id: 'aa60d124-0000', words: ['w2895: R.V3 engine trails', 'waiting on Ben to pick the trail length on ffu #202'] },
+  ];
+  assert.deepEqual(workersNamedBy('For worker aa60d124 (ffu #202): the long trail', workers), ['aa60d124-0000']);
+  assert.deepEqual(workersNamedBy('ffu #202: the long trail', workers), ['aa60d124-0000']);
+  assert.deepEqual(workersNamedBy('AA60D124: the long trail', workers), ['aa60d124-0000']);
+  assert.deepEqual(workersNamedBy('#149 and #202 both merge', workers), ['b4440e1e-0000', 'aa60d124-0000']);
+  assert.deepEqual(workersNamedBy('the long trail, please', workers), []);
+  assert.deepEqual(workersNamedBy('#777 merges', workers), []);
 });

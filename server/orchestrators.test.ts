@@ -2753,6 +2753,54 @@ test('w1378: a worker waiting on a person reaches that person’s orchestrator o
   assert.equal(store.work.get('w1')!.needsYou!.kind, 'report');
 });
 
+test('w3117: on a request with two workers, a note goes to the worker it names, answers only that one\'s [needs you], and a note that names neither goes to nobody', async (t) => {
+  const { store, machines, sessions, agents, dispatcher, chat, call } = await setupOnMachine(t, {}, { sandboxes: ['alpha', 'beta'] });
+  const ben = chat(BEN).info;
+  await call(ben, 'request_work', { title: 'FFU fan-out', brief: 'Strips and engine trails in parallel.' });
+  const start = async (sandbox: string, title: string) => {
+    const r = await call(dispatcher().info, 'start_agent', { sandbox, prompt: 'Do it', title, work_id: 'w1', extra_agent: true, override_duplicate: 'a parallel row' });
+    assert.equal(r.isError, false, r.text);
+    const id = /Started agent (\w+)/.exec(r.text)![1];
+    await until(`${title}'s first turn`, () => store.sessions.get(id)!.status === 'idle');
+    return id;
+  };
+  const strips = await start('pc/alpha', 'w1: R.T4 strips');
+  const trails = await start('pc/beta', 'w1: R.V3 engine trails');
+  const m = store.machines.get('pc')!;
+  // The strips worker (w2895's b4440e1e) waits on Ben about ffu #149: its question is the request's open [needs you].
+  const h = machines.hooks!.handlersFor(store.sessions.get(strips)!, m);
+  await h.waiting_on_person!({ who: 'Ben', what: 'say whether ffu #149 merges without an in-game comparison', request: 'w1' });
+  sessions.events.emit('turnEnd', sessions.get(strips), 'w1: still open: waiting on Ben to say whether ffu #149 merges');
+  // The trails worker (aa60d124) has ffu #202 open.
+  sessions.events.emit('turnEnd', sessions.get(trails), 'Engine trails are up for review on ffu #202.');
+  await until('the strips question is the [needs you]', () => store.work.get('w1')!.needsYou?.worker === strips);
+  const pending = (id: string) => (agents as unknown as { waker: { pending(id: string): { note: string } | undefined } }).waker.pending(id);
+  // Ben's own turn (the [needs you] relayed to his chat opened a turn that was not his).
+  await until("Ben's chat ends that turn", () => ben.status === 'idle');
+  chat(BEN).lastFrom = 'human';
+
+  // Ben answers the R.V3 card; the note names the trails worker and its PR: it goes there, as a note, and the strips question stays open.
+  const v3 = await call(ben, 'update_work', { id: 'w1', note: `For worker ${trails.slice(0, 8)} on ffu #202: keep the long trail` });
+  assert.match(v3.text, new RegExp(`not an answer to worker ${strips}'s \\[needs you\\] question, which still waits: the note names ${trails}`));
+  assert.match(v3.text, new RegExp(`sent to worker ${trails} as a note`));
+  assert.match(pending(trails)!.note, /^\[note\] Ben added a note on w1 "FFU fan-out" that names you, in their own words: For worker \w+ on ffu #202: keep the long trail/);
+  assert.equal(pending(strips), undefined, 'the strips worker is not resumed with it');
+  assert.equal(store.work.get('w1')!.needsYou!.answered, undefined);
+
+  // A note that names neither worker goes to nobody; the orchestrator hears whose question it would settle.
+  const vague = await call(ben, 'update_work', { id: 'w1', note: 'yes, go ahead' });
+  assert.match(vague.text, new RegExp(`names none of the 2 workers on w1 .*sent to none of them.*it would settle worker ${strips}'s \\[needs you\\] question "say whether ffu #149 merges`));
+  assert.equal(pending(strips), undefined);
+  assert.equal(store.work.get('w1')!.needsYou!.answered, undefined);
+
+  // Naming the strips worker's PR answers its question, and only its.
+  const t4 = await call(ben, 'update_work', { id: 'w1', note: 'ffu #149: merge it without the comparison' });
+  assert.match(t4.text, new RegExp(`answers the \\[needs you\\] question: sent to its worker ${strips}`));
+  assert.match(pending(strips)!.note, /^\[answer\] Ben answered on w1 "FFU fan-out", in their own words: ffu #149: merge it/);
+  assert.match(pending(trails)!.note, /keep the long trail/, 'the trails worker still has only its own note');
+  assert.equal(store.work.get('w1')!.needsYou!.answered!.by, 'Ben');
+});
+
 test('w2478: a worker\'s waiting_on_person and decide_work ask on a request with review stills are refused without one inline, accepted with one, and the opt-out is logged', async (t) => {
   const { dir, store, machines, dispatcher, chat, call } = await setupOnMachine(t);
   const ben = chat(BEN).info;
