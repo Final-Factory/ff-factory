@@ -31,7 +31,7 @@ import { desktopLabel, sanitizeDesktop } from '../shared/desktop.ts';
 import { HOST_LOGIN, machineLogin, type AccountIdentity } from './usage.ts';
 import type { AttachmentStore } from './attachments.ts';
 import type { BenchPriority, BenchWarning, NoTimedRuns, TimedAskMark, DeliveredAttachment, EffortLevel, ImageInput, Machine, MachineGuardSettings, MachinePause, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PersonPlayReport, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, CleanupSummary } from '../shared/types.ts';
-import { DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT } from '../shared/types.ts';
+import { DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT, WORK_OPEN } from '../shared/types.ts';
 import type { StaleContext } from './staleOutput.ts';
 import { checkStringMap, readJsonDurable, writeJsonDurable } from './durable.ts';
 import { DRY_RUN_WHY, dryRun, refuseInDryRun } from './dryRun.ts';
@@ -2037,12 +2037,27 @@ export class MachineManager {
     return ownersOf(sessions, this.store.work.values());
   }
 
-  /** The pending wake_me check-ins of a machine's sessions (w1196): its daemon keeps what they left running until then. */
+  /**
+   * The pending wake_me check-ins of a machine's sessions (w1196): its daemon keeps what they left running until then. A
+   * check-in a block holds on an open request (heldCheckIns, w829) counts too (w3120): it still says when the worker's own
+   * job ends, and without it a stopped worker that is not its blocked request's newest counted as one no request waits
+   * for, so the sweep ended 738652d6's 24 h soak 2 min after w2895's block cancelled its check-in.
+   */
   private wakesOf(m: Machine): Record<string, string> {
     const out: Record<string, string> = {};
+    const mine = new Set(m.sessionIds);
+    const later = (sid: string, at: string) => {
+      const t = Date.parse(at);
+      const had = Date.parse(out[sid] ?? '');
+      if (Number.isFinite(t) && !(t <= had)) out[sid] = at;
+    };
     for (const sid of m.sessionIds) {
       const at = this.store.sessions.get(sid)?.wakeAt;
       if (at) out[sid] = at;
+    }
+    for (const w of this.store.work.values()) {
+      if (!w.heldCheckIns || w.status === 'merged' || !(WORK_OPEN.includes(w.status) || w.status === 'stalled')) continue;
+      for (const h of w.heldCheckIns) if (!h.resume && mine.has(h.session) && this.store.sessions.has(h.session)) later(h.session, h.at);
     }
     return out;
   }

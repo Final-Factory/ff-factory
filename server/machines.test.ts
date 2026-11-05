@@ -16,6 +16,7 @@ import { OLDEST_DAEMON_PROTOCOL, PROTOCOL_VERSION, protocolProblem } from './mac
 import { buildOptions } from './launch.ts';
 import { HOST_LOGIN } from './usage.ts';
 import { Daemon, RECONNECT_MS, type Probes } from '../machine/daemon.ts';
+import { sessionVerdict } from '../machine/leftovers.ts';
 import { agentPath, macReloadLines, nodeSupport, plist } from './machineDeploy.ts';
 import type { Config } from './config.ts';
 import type { HostStats, ImageInput, MachineSandbox, PermissionMode, SessionInfo, TranscriptEvent, WorkItem } from '../shared/types.ts';
@@ -1446,6 +1447,46 @@ test("w1196: the daemon hears each worker's pending check-in, so what a stopped 
   store.putSession(s.info);
   (mm as unknown as { heartbeat: () => void }).heartbeat();
   await until('the daemon is told', () => !wakes().has(s.info.id));
+});
+
+test("w3120: a check-in a block holds keeps the stopped worker's run: w2895's block on w3118 cancelled 738652d6's soak check-in and the sweep killed the soak 2 min later", async (t) => {
+  const { store, mm, daemon, cleanup } = await setup();
+  t.after(cleanup);
+  // Two workers on one request: `leg` runs a 24 h soak as a background job; `other` is the request's newest worker.
+  const leg = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'w2: soak', permissionMode: 'default' });
+  const other = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'w2: CI', permissionMode: 'default' });
+  const soakEnds = new Date(Date.now() + 12 * 3_600_000).toISOString();
+  const now = new Date().toISOString();
+  const w: WorkItem = {
+    id: 'w2', title: 'fan-out', brief: 'x', priority: 'normal', keys: [], requestedBy: { userId: 'ben', displayName: 'Ben' }, requesters: [{ userId: 'ben', displayName: 'Ben' }], humanAsked: true,
+    createdAt: now, updatedAt: now, sessionIds: [leg.info.id, other.info.id], links: { [leg.info.id]: { at: now, how: 'sent' }, [other.info.id]: { at: new Date(Date.now() + 1000).toISOString(), how: 'sent' } },
+    overlaps: [], asks: 0, log: [], status: 'blocked', blocked: { kind: 'request', ref: 'w1', what: "w1's CI fix", at: now, by: 'dispatcher' },
+    // The block held the soak worker's check-in (the pre-w3120 decide_work block, or one that names it in session_ids).
+    heldCheckIns: [{ session: leg.info.id, at: soakEnds, note: 'w2: the 24 h soak should have ended' }],
+  } as WorkItem;
+  store.putWork(w);
+  const d = daemon();
+  await until('online', () => mm.isOnline('mx'));
+  const wakes = () => (d as unknown as { wakes: Map<string, number> }).wakes;
+  const resumable = () => (d as unknown as { resumable: Set<string> }).resumable;
+  await until('the welcome names the held check-in', () => wakes().get(leg.info.id) === Date.parse(soakEnds));
+  assert.ok(resumable().has(leg.info.id), 'the bug: not its blocked request’s newest worker and no check-in, so "no request waits for it"');
+  assert.equal(wakes().has(other.info.id), false, 'a worker with nothing pending or held has no wake');
+  // The daemon's verdict on what the stopped soak worker left running: kept until its check-in plus the grace, not 2 min.
+  const v = sessionVerdict({ live: false, resumable: true, wakeAt: Date.parse(soakEnds), stoppedSince: Date.now() - 2 * 60_000, now: Date.now() });
+  assert.equal(v.end, false, v.why);
+  assert.match(v.why, /its check-in comes due at/);
+  // A pending check-in later than the held one wins; the request closing drops the held one.
+  const later = new Date(Date.now() + 20 * 3_600_000).toISOString();
+  leg.info.wakeAt = later;
+  store.putSession(leg.info);
+  (mm as unknown as { heartbeat: () => void }).heartbeat();
+  await until('the later check-in is told', () => wakes().get(leg.info.id) === Date.parse(later));
+  delete leg.info.wakeAt;
+  store.putSession(leg.info);
+  store.putWork({ ...w, status: 'done', blocked: undefined, heldCheckIns: w.heldCheckIns });
+  (mm as unknown as { heartbeat: () => void }).heartbeat();
+  await until('a closed request holds nothing', () => !wakes().has(leg.info.id));
 });
 
 test('w1135: a message queued while its machine was offline goes as soon as the daemon is back (its hello), not at the next half-minute pass; the queue says what holds it now', async (t) => {

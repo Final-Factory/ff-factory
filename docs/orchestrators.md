@@ -1059,6 +1059,12 @@ without one means it is off or failing, worth a person's look.
      worker that serves it alone (`Orchestrators.cancelCheckIns`, via `Agents.cancelWake`; the log says which) and the
      worker brief says not to set one. A worker can also cancel its own with `cancel_wake`. The block clears by itself and
      the dispatcher resumes the worker (`[ledger] … is unblocked … message_agent with work_id to its worker`).
+     **On a request with several workers, the dispatcher's block holds only the check-ins of the workers it names in
+     `session_ids`** (w3120): the others keep theirs, and the log and the reply say whose it kept. w2895's block on w3118
+     (another leg's CI) had cancelled 738652d6's check-in for the end of its own 24 h soak, and the machine's leftover
+     sweep killed the soak 12 h in. A held check-in (`heldCheckIns`) is still sent to the daemon as that worker's wake
+     (`MachineManager.wakesOf`), so what the stopped worker left running is kept until it is due plus the grace
+     (`machine/leftovers.ts` `sessionVerdict`), whether or not it is its request's newest worker.
   6. **A `ci:` wait is checked, and a PR that cannot get CI wakes its worker** (w907): `blocked_on` takes `head` (the commit
      just pushed) and refuses a `ci:` PR that conflicts or whose head is another commit; the blocker watch clears the gate at
      once on a conflict with no check started, or no CI run for the head after 10 minutes, with "PR #N conflicts with <base>

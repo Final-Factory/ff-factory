@@ -3654,6 +3654,8 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
         const problem = blockerProblem(b, w.id, facts);
         if (problem) throw new Error(problem);
       }
+      const strangers = (input.session_ids ?? []).map((x) => x.trim().toLowerCase()).filter((x) => x && !w.sessionIds.some((sid) => sid.startsWith(x)));
+      if (strangers.length) throw new Error(`block's session_ids name the workers the blocker is about, and ${strangers.join(', ')} ${strangers.length > 1 ? 'are not workers' : 'is not a worker'} of ${w.id} (its workers: ${w.sessionIds.map((x) => x.slice(0, 8)).join(', ') || 'none'})`);
       const fresh = asked.map((b) => this.makeGate(this.usageGateOf(b), now.toISOString(), 'dispatcher'));
       // Without a new gate, it blocks again on the ones it kept through a hold (w754). A single blocker replaces what it
       // waited on, unless add_blocker: then it joins the gates it has, and the request starts when all have cleared.
@@ -3662,7 +3664,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       w.blocked = gates[0];
       w.alsoBlocked = gates.length > 1 ? gates.slice(1) : undefined;
       noteWaitedOn(w, gates);
-      const cancelled = this.cancelCheckIns(w);
+      const cancelled = this.cancelCheckIns(w, undefined, input.session_ids);
       what = `blocked on ${gatesName(gates, now.getTime())} (${gates.map((g) => g.what).join('; ')}); it starts by itself when ${gates.length > 1 ? 'all of them clear' : 'that clears'}${cancelled}`;
     } else if (input.action === 'reject') what = 'declined';
     else what = 'done';
@@ -3785,23 +3787,37 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    * cancelled is kept on the request (w829, heldCheckIns) and handed back when the block ends (unblock), so a block that
    * never clears by itself cannot leave the worker with nothing to wake it. A gate a worker set itself (blocked_on) cancels
    * that worker's check-in only (w1094: w1049's other worker, 39772f0c, waited on Ben with a check-in of its own, and
-   * 0b5f813d's CI wait took it). Returns the words for the request's log, or ''.
+   * 0b5f813d's CI wait took it). A dispatcher's block of a request with several workers cancels only those named in
+   * `about` (decide_work session_ids, w3120); the others keep theirs, a check-in for their own job's end. Returns the
+   * words for the request's log, or ''.
    */
-  private cancelCheckIns(w: WorkItem, setter?: string): string {
+  private cancelCheckIns(w: WorkItem, setter?: string, about?: readonly string[]): string {
     if (!this.d.cancelWake) return '';
     const items = [...this.store.work.values()];
     const done: string[] = [];
-    for (const sid of setter ? [setter] : w.sessionIds) {
-      if (!this.store.sessions.get(sid)) continue;
+    const candidates = (setter ? [setter] : w.sessionIds).filter((sid) => {
+      if (!this.store.sessions.get(sid)) return false;
       const serves = servedBy(sid, items);
-      if (serves.size !== 1 || !serves.has(w.id)) continue;
+      return serves.size === 1 && serves.has(w.id);
+    });
+    // w3120: a dispatcher's block of a request with several workers holds only the check-ins of the workers it is about
+    // (session_ids). w2895's block on w3118 (another leg's CI) cancelled 738652d6's check-in for the end of its own 24 h soak,
+    // and the daemon's leftover sweep then killed the soak 2 min after that worker stopped, 12 h into the run.
+    const named = (sid: string) => (about ?? []).some((a) => a.trim() && sid.startsWith(a.trim().toLowerCase()));
+    const kept: string[] = [];
+    for (const sid of candidates) {
+      if (!setter && candidates.length > 1 && !named(sid)) {
+        const pending = this.d.pendingWake?.(sid);
+        if (pending) kept.push(`${sid}'s check-in (${pending.at.slice(11, 16)} UTC)`);
+        continue;
+      }
       const pending = this.d.pendingWake?.(sid);
       const was = this.d.cancelWake(sid);
       if (!was) continue;
       done.push(`${sid}'s check-in (${was})`);
       if (pending) w.heldCheckIns = [...(w.heldCheckIns ?? []).filter((h) => h.session !== sid), { session: sid, at: pending.at, note: pending.note }];
     }
-    return done.length ? `; cancelled ${done.join(', ')}` : '';
+    return `${done.length ? `; cancelled ${done.join(', ')}` : ''}${kept.length ? `; kept ${kept.join(', ')}: the block is not about ${kept.length > 1 ? 'those workers' : 'that worker'} (name a worker in session_ids to hold its check-in, w3120)` : ''}`;
   }
 
   /**
