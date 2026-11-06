@@ -9059,3 +9059,55 @@ test('w2972: LEG DONE lines are read by request id with words after it; a DONE l
   assert.deepEqual(legDoneIdsIn('I will write LEG DONE: w2895 later'), []);
   assert.deepEqual(doneIdsIn('LEG DONE: w2895 row M2.17'), [], 'a LEG DONE never closes the request');
 });
+
+test("w3186: a longer bench turn Ben approved: recorded in his own turn with his words, marked on its machine for the request's worker, counted from the bench state, and ended once its turns were used", async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, machines, o, call } = env;
+  putRequests(store, [{ id: 'w1', by: BEN, status: 'active', priority: 'normal' }, { id: 'w2', by: LOTH, status: 'active', priority: 'normal' }]);
+  const a = await startedFor(env, 'w1');
+  const b = await startedFor(env, 'w2');
+  const ben = o.personalFor(BEN);
+  const words = 'Give each overload run a one-off 60-minute exclusive turn on pc, with the ffu test runners paused';
+  store.append(ben.info.id, { kind: 'user', text: words, from: 'human', uuid: 'u3186' });
+  const ask = { request: 'w1', machine: 'pc', turns: 2, minutes: 60, words };
+
+  ben.lastFrom = 'system';
+  assert.match((await call(ben.info, 'grant_bench_turn', ask)).text, /only Ben, in a turn of theirs, approves a longer bench turn/);
+  ben.lastFrom = 'human';
+  assert.match((await call(ben.info, 'grant_bench_turn', { ...ask, words: 'a 60-minute turn on pc please' })).text, /is not in Ben's own recent messages here/);
+  assert.match((await call(ben.info, 'grant_bench_turn', { ...ask, minutes: 30 })).text, /minutes: more than the 30-minute turn/);
+  assert.match((await call(ben.info, 'grant_bench_turn', { ...ask, machine: 'nowhere' })).text, /machine: one of .*pc/);
+  assert.equal(agents.benchPriorities('pc')[a.id].exempt, undefined, 'nothing is marked before it is recorded');
+  const recorded = await call(ben.info, 'grant_bench_turn', ask);
+  assert.equal(recorded.isError, false, recorded.text);
+  assert.match(recorded.text, /^Recorded w1\.b1: 2 exclusive turns of 60 min on pc, 0 used, expires .*approved by Ben .*: "Give each overload run/);
+  assert.match(store.work.get('w1')!.log.at(-1)!, /Ben: bench grant w1\.b1 recorded in their own turn: 2 exclusive turns of 60 min on pc/);
+
+  const prios = agents.benchPriorities('pc');
+  assert.deepEqual(prios[a.id], { priority: 'normal', requests: ['w1'], exempt: 'approved', approved: { grant: 'w1.b1', by: 'Ben', request: 'w1', turns: 2, turn_min: 60, used: [] } });
+  assert.equal(prios[b.id].exempt, undefined, "another request's worker keeps the 30 minutes");
+  assert.equal(agents.benchPriorities('elsewhere')[a.id], undefined);
+
+  // The machine's bench state: the worker's approved ticket holds; then its second; then none.
+  const stats = machines.statsOf.bind(machines);
+  let running: Record<string, unknown>[] = [];
+  machines.statsOf = ((mid: string) => ({ ...(stats(mid) ?? {}), ...(mid === 'pc' ? { bench: { mode: running.length ? 'exclusive' : 'free', running, runningCount: running.length, waiting: 0 } } : {}) })) as typeof machines.statsOf;
+  t.after(() => void (machines.statsOf = stats));
+  running = [{ ticket: 't00000005', mode: 'exclusive', what: 'probe', session: a.id }];
+  assert.deepEqual(agents.benchPriorities('pc')[a.id].approved?.used, [], 'a ticket taken without the approval is no turn');
+  running = [{ ticket: 't00000007', mode: 'exclusive', what: 'overload 1', session: a.id, approved: true }];
+  assert.deepEqual(agents.benchPriorities('pc')[a.id].approved?.used, ['t00000007']);
+  assert.match(store.work.get('w1')!.log.at(-1)!, /bench grant w1\.b1 on pc: t00000007 took turn 1 of 2 \(60 min\)/);
+  running = [{ ticket: 't00000009', mode: 'exclusive', what: 'overload 2', session: a.id, approved: true }];
+  assert.deepEqual(agents.benchPriorities('pc')[a.id].approved?.used, ['t00000007', 't00000009'], 'the mark stays while the last turn holds');
+  running = [];
+  assert.equal(agents.benchPriorities('pc')[a.id].exempt, undefined, 'both turns used and let go: the 30 minutes again');
+  assert.match(store.work.get('w1')!.log.at(-1)!, /ended: its 2 turns \(t00000007, t00000009\) were used/);
+  assert.equal((await call(ben.info, 'grant_bench_turn', {})).text, 'No approved bench turns hold now.');
+
+  // A new grant, cancelled in his turn.
+  assert.equal((await call(ben.info, 'grant_bench_turn', { ...ask, turns: 1 })).isError, false);
+  assert.match((await call(ben.info, 'grant_bench_turn', {})).text, /^Bench turns approved \(w3186\):\n- w1: w1\.b2: 1 exclusive turn of 60 min on pc/);
+  assert.match((await call(ben.info, 'grant_bench_turn', { cancel: 'w1.b2' })).text, /^Cancelled w1\.b2/);
+  assert.equal(agents.benchPriorities('pc')[a.id].exempt, undefined);
+});

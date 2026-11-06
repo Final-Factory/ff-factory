@@ -671,7 +671,14 @@ export interface BenchPriority {
    * (FF_SESSION_ID, or FF_BENCH_SESSION for the nightly), so a worker has no flag to mark its own job; only a ticket
    * taken under another session's id would carry that session's mark.
    */
-  exempt?: 'release' | 'nightly';
+  exempt?: 'release' | 'nightly' | 'approved';
+  /**
+   * w3186: with `exempt: 'approved'`, the longer exclusive turn a person approved for this worker's request on this machine
+   * (server/benchGrants.ts; ben on w3159: "Give each overload run a one-off 60-minute exclusive turn on biscuit, with the
+   * ffu test runners paused"). Unlike release and nightly it is still a turn the queue limits: `turn_min` minutes each, its
+   * clock started once the machine's CI jobs drained, `turns` of them; `used` names the tickets the portal saw take one.
+   */
+  approved?: ApprovedBenchMark;
   /** w1962 (machine/benchRaise.ts, the daemon only): a session raised to the top while its shared ticket `raisedFor`,
    * which an exclusive turn has passed, waits; `raisedFrom` is its own priority. bench_queue.py reads only `priority`. */
   raisedFrom?: WorkPriority;
@@ -683,6 +690,39 @@ export interface BenchPriority {
    * nobody back (bench_queue.py parks them, and queues them again at the back once the mark goes).
    */
   away?: BenchAway;
+}
+
+/** priorities.json's approved mark (w3186): the grant's id, who approved it (their name), for which request, and its turns. */
+export interface ApprovedBenchMark {
+  grant: string;
+  by: string;
+  request: string;
+  turns: number;
+  turn_min: number;
+  used: string[];
+}
+
+/**
+ * A longer exclusive bench turn a person approved for one request on one machine (w3186), recorded by their own
+ * orchestrator in their own turn with their verbatim words (grant_bench_turn). The 30-minute turn (w1832) stays the rule
+ * for everything else. It ends once its `turns` were used and the last let go, when it is cancelled, when it expires, or
+ * when the request closes.
+ */
+export interface BenchGrant {
+  /** "w3159.b1": unique on its request. */
+  id: string;
+  machine: string;
+  turns: number;
+  minutes: number;
+  by: Requester;
+  at: string;
+  words: string;
+  /** The exclusive tickets that took a turn under it (counted from the machine's bench state). */
+  used: string[];
+  expires: string;
+  /** Set once it ended (ISO), and why. */
+  ended?: string;
+  endedWhy?: string;
 }
 
 /** Why a worker's waiting bench tickets are parked (w1984); `exclusive_only`: only its timed (exclusive) tickets. */
@@ -774,7 +814,11 @@ export interface BenchTicketGlance {
   why?: string;
   release?: boolean;
   /** Work FF Factory exempts from the turn limits (priorities.json, w1832): the urgent release lane's builder or the nightly's worker. */
-  exempt?: 'release' | 'nightly';
+  exempt?: 'release' | 'nightly' | 'approved';
+  /** w3186: an exclusive ticket taken under a person's approved turn (its info.json `approved`), and when its clock started
+   * (turn.json, after the machine's CI jobs drained); `turnMin` is then the approved minutes. */
+  approved?: boolean;
+  turnStart?: string;
   /** The urgent release lane's own ticket (it pre-empts the holders, w1656). */
   preempt?: boolean;
   /**
@@ -2302,6 +2346,8 @@ export interface WorkItem {
    * recorded in their own turn with their words; the blocker watch carries each out, or drops it, when its condition is met.
    */
   conditional?: ConditionalDecision[];
+  /** w3186: longer exclusive bench turns a person approved for this request (server/benchGrants.ts). */
+  benchGrants?: BenchGrant[];
   /**
    * w2217 (w2192 sat 3 h as "the dispatcher has it to decide"): how long it has sat undecided, status `new`. `since`: when
    * the blocker watch first saw it so (its updatedAt then); `reofferedAt`: when FF Factory offered it to the dispatcher again,

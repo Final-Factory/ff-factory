@@ -127,7 +127,8 @@ export function timedHolder(root: string | undefined, now: number = Date.now(), 
     if (t.mode !== 'exclusive' || !t.granted || t.revoked) continue;
     // w1832 (bench_queue.py timed_hold): a turn past its limit goes on while nobody queues behind it, so it still holds
     // the machine; its end is the deadline a waiter set, else its turn's end (or the 5-minute warning from now, past it)
-    const turnEnd = t.granted.ts * 1000 + turnMinOf(t) * 60_000;
+    // w3186: an approved turn runs from its turn.json start, once the CI jobs drained (until then: from now)
+    const turnEnd = (t.approved ? (t.turnStart ? t.turnStart * 1000 : now) : t.granted.ts * 1000) + turnMinOf(t) * 60_000;
     const deadline = typeof t.limit?.deadline === 'number' ? t.limit.deadline * 1000 : undefined;
     // w1860: with no deadline and keep.json, only lower-priority work waits: it keeps the lock until it lets go
     const kept = deadline === undefined && !!t.keep;
@@ -139,7 +140,9 @@ export function timedHolder(root: string | undefined, now: number = Date.now(), 
 /** The game repo's bench_queue.py WARN_LEAD_MIN and turn_min (w1832): a turn of at most 30 minutes, and a ticket from a
  * copy older than w1832 keeps the bound it was taken under (60 by default). */
 export const BENCH_WARN_LEAD_MIN = 5;
-const turnMinOf = (t: QueueTicket) => (t.turnMin ? Math.min(t.turnMin, 30) : (t.maxMin ?? 60));
+/** bench_queue.py APPROVED_MAX_MIN (w3186): the longest turn a person's approval gives. */
+export const APPROVED_MAX_MIN = 240;
+const turnMinOf = (t: QueueTicket) => (t.turnMin ? Math.min(t.turnMin, t.approved ? APPROVED_MAX_MIN : 30) : (t.maxMin ?? 60));
 
 const hhmm = (ms: number) => new Date(ms).toISOString().slice(11, 16) + 'Z';
 

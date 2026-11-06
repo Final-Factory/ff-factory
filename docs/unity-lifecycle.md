@@ -206,6 +206,20 @@ last shared lock work started... And if that was a long time ago, all workers sh
   its work-in-progress branch now (lothsahn: "Workers should be encouraged to push their uncommitted work at the warning
   threshold so they can be scheduled on other machines"). At the deadline the ticket is revoked and the script, command
   and players under it are stopped; a re-request goes to the back of the queue. A waiter that leaves drops the deadline.
+- **A longer turn a person approved** (w3186; ben on w3159, 2026-11-06: "Give each overload run a one-off 60-minute
+  exclusive turn on biscuit, with the ffu test runners paused"). The 30 minutes stay the rule. A person's own orchestrator
+  records an exception with `grant_bench_turn` (request, machine, N turns of M minutes, 31 to 240, and the person's
+  verbatim words; docs/orchestrators.md, "A longer bench turn a person approved"). While it holds, the portal marks that
+  request's worker sessions on that machine `"exempt": "approved"` with `"approved": {grant, by, request, turns,
+  turn_min, used}` in the `bench_priorities` it sends; the daemon writes it into priorities.json, so a worker cannot mark
+  itself. `bench_queue.py` then gives the session's exclusive tickets (while turns are left) M minutes, waits for the
+  machine's running CI jobs up to 60 minutes instead of 20 (`BENCH_APPROVED_RUNNER_WAIT_S`), and starts the turn's clock
+  only once they drained (the ticket's `turn.json`, history `approved-turn`): the deadline, the warning and the revoke run
+  from there. The daemon's runner pause (below) holds through the drain and the turn, and continues the runners when the
+  ticket lets go, its worker dies or it is revoked. The portal counts a turn when the machine's bench state shows such a
+  ticket granted (`server/benchGrants.ts` `countGrant`; the glance's `approved`), and ends the grant once its N turns were
+  used and the last let go, when the request closes, when it is cancelled, or when it expires (7 days by default). It is
+  still a turn: limited, warned and revoked like any other, only longer.
 - **The priority hold** (w1860; lothsahn, 2026-10-23: "If a higher priority job holds the lock and all jobs below it are
   lower priority, it should retain the lock until done. If this is a shared lock, existing shared lock jobs should join it
   directly instead of queuing behind the exclusive lock"). Only a waiter of the same or higher request priority than the
