@@ -28,7 +28,7 @@ import { lastOpenLine, personWaitOn, portalWaitIn, reportAt, requestWaitOf, sibl
 import type { SessionInfo, WorkBlocker, WorkItem } from '../shared/types.ts';
 import type { RoomNow } from './placement.ts';
 import { steamShortIn } from '../shared/capacity.ts';
-import { awaitsOnlyAway, awayLabelsOf, awayNote, isAwayLeg, offlineByMachine, offlineLabels, type Leg } from '../machine/awayRunners.ts';
+import { awayLabelsOf, awayNote, failedNote, isAwayLeg, settleJobs, offlineByMachine, offlineLabels, type Leg } from '../machine/awayRunners.ts';
 
 const EVERY_MS = 60_000;
 /**
@@ -608,8 +608,10 @@ export function checksState(pr: { state?: string; statusCheckRollup?: GhCheck[] 
   const note = all.length > checks.length ? awayNote(all.length - checks.length, away) : '';
   const running = checks.filter((c) => (c.status ? c.status !== 'COMPLETED' : c.state === 'PENDING' || c.state === 'EXPECTED'));
   if (!checks.length) return { done: false, text: `${ref} has no checks yet`, none: true };
-  if (running.length) return { done: false, text: `${running.length} of ${checks.length} checks on ${ref} still running` };
   const failed = checks.filter((c) => ['FAILURE', 'ERROR', 'TIMED_OUT', 'CANCELLED', 'ACTION_REQUIRED'].includes((c.conclusion ?? c.state ?? '').toUpperCase()));
+  // w3272: in a repository with away labels (ffu), a failed leg ends the wait at once, as the Actions-runs reading does.
+  const failFast = failed.length > 0 && awayLabelsOf(CI_REF.exec(ref)?.[1] ?? '').length > 0;
+  if (running.length && !failFast) return { done: false, text: `${running.length} of ${checks.length} checks on ${ref} still running` };
   return failed.length ? { done: true, text: `CI on ${ref} finished: ${failed.length} of ${checks.length} checks failed (${failed.slice(0, 3).map((c) => c.name ?? c.context).join(', ')})` } : { done: true, green: true, text: `CI on ${ref} finished: all ${checks.length} checks passed or skipped${note}` };
 }
 
@@ -807,19 +809,29 @@ async function awayNow(repo: string, run: Runner, opts: RunOptions, online?: (ma
   }
 }
 
-/** w3147: mark each unfinished run that waits only on away legs as a green finish, in place; answers how many away legs it skipped. */
+/**
+ * w3147: mark each unfinished run that waits only on away legs as a green finish, in place; answers how many away legs it
+ * skipped. w3272: and each unfinished run with a failed leg as a red one, whether or not a label is away now.
+ */
 async function settleAwayRuns(repo: string, runs: (GhRun & { id?: number })[], away: readonly string[], run: Runner, opts: RunOptions): Promise<number> {
-  if (!away.length) return 0;
+  if (!awayLabelsOf(repo).length) return 0;
   let legs = 0;
   for (const w of runs) {
     if ((w.status ?? '').toLowerCase() === 'completed' || !w.id) continue;
     const j = await run('gh', ['api', `repos/${repo}/actions/runs/${w.id}/jobs?per_page=100`], opts);
     if (j.code !== 0) continue;
-    const jobs = ((JSON.parse(j.stdout) as { jobs?: Leg[] }).jobs ?? []);
-    if (!awaitsOnlyAway(jobs, away)) continue;
-    legs += jobs.filter((x) => isAwayLeg(x, away)).length;
+    let jobs: Leg[];
+    try {
+      jobs = (JSON.parse(j.stdout) as { jobs?: Leg[] }).jobs ?? [];
+    } catch {
+      continue;
+    }
+    const s = settleJobs(jobs, away);
+    if (!s) continue;
     w.status = 'completed';
-    w.conclusion = 'success';
+    w.conclusion = s.conclusion;
+    if (s.conclusion === 'failure') w.name = `${w.name ?? w.id}${failedNote(s.failed)}`;
+    else legs += s.legs;
   }
   return legs;
 }

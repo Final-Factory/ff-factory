@@ -108,3 +108,85 @@ test('w3147: when the token cannot list the runners, FF Factory seeing the m3 of
   assert.notEqual(on.green, true);
   assert.notEqual(on.done, true);
 });
+
+// w3272: Final-Factory/ffu #318's run 42254706033 as the portal read it at 16:47Z (GitHub's jobs API, read 2026-11-06 23:3xZ:
+// test (ffu-windows) failed 16:46:56Z, both macOS legs queued with every m3 runner offline, the Linux legs still going).
+const JOBS_318_WINDOWS_RED = [
+  { name: 'check', status: 'in_progress', conclusion: null, labels: ['self-hosted', 'ffu-linux'] },
+  { name: 'test (ffu-macos)', status: 'queued', conclusion: null, labels: ['self-hosted', 'ffu-macos'] },
+  { name: 'hashcheck (ffu-windows)', status: 'completed', conclusion: 'success', labels: ['self-hosted', 'ffu-windows'] },
+  { name: 'hashcheck (ffu-macos)', status: 'queued', conclusion: null, labels: ['self-hosted', 'ffu-macos'] },
+  { name: 'test (ffu-windows)', status: 'completed', conclusion: 'failure', labels: ['self-hosted', 'ffu-windows'] },
+  { name: 'hashcheck (ffu-linux)', status: 'queued', conclusion: null, labels: ['self-hosted', 'ffu-linux'] },
+  { name: 'lint', status: 'completed', conclusion: 'success', labels: ['self-hosted', 'ffu-linux'] },
+  { name: 'check-release', status: 'queued', conclusion: null, labels: ['self-hosted', 'ffu-linux'] },
+  { name: 'release', status: 'completed', conclusion: 'skipped', labels: [] },
+];
+// w3272: Final-Factory/ffu #292's run 42249832978 when the portal settled it green at 16:38Z (every leg but macOS done).
+const JOBS_292_GREEN = [
+  { name: 'hashcheck (ffu-macos)', status: 'queued', conclusion: null, labels: ['self-hosted', 'ffu-macos'] },
+  { name: 'test (ffu-macos)', status: 'queued', conclusion: null, labels: ['self-hosted', 'ffu-macos'] },
+  { name: 'check', status: 'completed', conclusion: 'success', labels: ['self-hosted', 'ffu-linux'] },
+  { name: 'lint', status: 'completed', conclusion: 'success', labels: ['self-hosted', 'ffu-linux'] },
+  { name: 'test (ffu-windows)', status: 'completed', conclusion: 'success', labels: ['self-hosted', 'ffu-windows'] },
+  { name: 'hashcheck (ffu-windows)', status: 'completed', conclusion: 'success', labels: ['self-hosted', 'ffu-windows'] },
+  { name: 'hashcheck (ffu-linux)', status: 'completed', conclusion: 'success', labels: ['self-hosted', 'ffu-linux'] },
+  { name: 'check-release', status: 'completed', conclusion: 'success', labels: ['self-hosted', 'ffu-linux'] },
+  { name: 'release', status: 'completed', conclusion: 'skipped', labels: [] },
+];
+
+/** The portal's gh as it is (statusCheckRollup refused, w829), one unfinished run with `jobs`, the runner list `runners` or refused. */
+const portalGh = (jobs: object[], runners?: object) => async (_cmd: string, args: string[]) => {
+  const a = args.join(' ');
+  if (a.includes('statusCheckRollup')) return { code: 1, stdout: '', stderr: 'Resource not accessible by personal access token' };
+  if (a.includes('state,headRefOid')) return { code: 0, stdout: JSON.stringify({ state: 'OPEN', headRefOid: 'b'.repeat(40) }), stderr: '' };
+  if (a.includes('/actions/runners')) return runners ? { code: 0, stdout: JSON.stringify(runners), stderr: '' } : { code: 1, stdout: '', stderr: 'HTTP 403' };
+  if (a.includes('/jobs')) return { code: 0, stdout: JSON.stringify({ jobs }), stderr: '' };
+  if (a.includes('actions/runs?head_sha')) return { code: 0, stdout: JSON.stringify({ workflow_runs: [{ id: 42254706033, name: 'ci', status: 'in_progress', conclusion: null }] }), stderr: '' };
+  return { code: 1, stdout: '', stderr: `unexpected ${a}` };
+};
+const m3 = (on: boolean) => (id: string) => (id === 'm3' ? on : true);
+
+test('w3272: a failed Windows leg with the macOS legs queued ends the portal CI wait at once, red (ffu #318)', async () => {
+  for (const [why, run, online] of [
+    ['runner list refused, m3 offline (as on the portal)', portalGh(JOBS_318_WINDOWS_RED), m3(false)],
+    ['runner list read, m3 offline', portalGh(JOBS_318_WINDOWS_RED, RUNNERS_M3_OFF), m3(false)],
+    ['m3 online: its legs would run, but the run is red already', portalGh(JOBS_318_WINDOWS_RED, RUNNERS_M3_ON), m3(true)],
+  ] as const) {
+    const s = await ghChecks('Final-Factory/ffu#318', run as never, online);
+    assert.equal(s.done, true, why);
+    assert.notEqual(s.green, true, why);
+    assert.match(s.text, /1 of 1 workflow runs failed \(ci \(test \(ffu-windows\) failed/, why);
+  }
+});
+
+test('w3272: every leg that can run green with the macOS legs queued ends the portal CI wait, green (ffu #292)', async () => {
+  const s = await ghChecks('Final-Factory/ffu#292', portalGh(JOBS_292_GREEN) as never, m3(false));
+  assert.equal(s.done, true);
+  assert.equal(s.green, true);
+  assert.match(s.text, /2 ffu-macos legs still queued/);
+  const on = await ghChecks('Final-Factory/ffu#292', portalGh(JOBS_292_GREEN, RUNNERS_M3_ON) as never, m3(true));
+  assert.equal(on.done, false, 'the m3 online: its legs will run, so they are waited for');
+});
+
+test('w3272: ff-pr reads a failed leg as a red run at once, the m3 on or off', () => {
+  for (const runners of [RUNNERS_M3_OFF, RUNNERS_M3_ON]) {
+    const runs: WorkflowRun[] = [{ databaseId: 42254706033, name: 'ci', workflowName: 'ci', status: 'in_progress' }];
+    assert.equal(settleAwayRuns({ run: fakeGh(runners, JOBS_318_WINDOWS_RED) }, 'Final-Factory/ffu', runs), 0);
+    assert.equal(runs[0].status, 'completed');
+    assert.equal(runs[0].conclusion, 'failure');
+    assert.match(String(runs[0].name), /test \(ffu-windows\) failed/);
+  }
+  const game: WorkflowRun[] = [{ databaseId: 1, name: 'ci', workflowName: 'ci', status: 'in_progress' }];
+  settleAwayRuns({ run: fakeGh(RUNNERS_M3_OFF, JOBS_318_WINDOWS_RED) }, 'Final-Factory/FinalFactory', game);
+  assert.equal(game[0].status, 'in_progress', 'repositories without away labels keep waiting for the run');
+});
+
+test('w3272: the rollup reading ends an ffu wait on a failed check while others still run; other repositories wait', () => {
+  const rollup = JOBS_318_WINDOWS_RED.map((j) => ({ name: j.name, status: j.status.toUpperCase(), conclusion: j.conclusion?.toUpperCase() }));
+  const s = checksState({ state: 'OPEN', statusCheckRollup: rollup }, 'Final-Factory/ffu#318', ['ffu-macos']);
+  assert.equal(s.done, true);
+  assert.notEqual(s.green, true);
+  assert.match(s.text, /test \(ffu-windows\)/);
+  assert.equal(checksState({ state: 'OPEN', statusCheckRollup: rollup }, 'Final-Factory/FinalFactory#1', []).done, false);
+});
