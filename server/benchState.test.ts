@@ -382,3 +382,32 @@ test('w2049: in the bench queue a low worker\'s timed leg waits behind a normal 
   fs.rmSync(path.join(benchQueueDir(benchLockDir(root)), 't00000003'), { recursive: true, force: true });
   assert.equal(readBenchState(root, NOW, alive)!.nextExclusive?.what, 'low leg');
 });
+
+test('w3186: an approved ticket shows its approved turn, from the end of the CI drain; without the daemon mark it is a 30-minute one', (t) => {
+  const root = tmp(t);
+  const mark = { priority: 'normal', exempt: 'approved', approved: { grant: 'w3159.b1', by: 'ben', request: 'w3159', turns: 2, turn_min: 60, used: [] } };
+  prios(root, { v: 2, single_worker: false, sessions: { f5b09aea: mark } });
+  ticket(root, 't00000001', { mode: 'exclusive', what: 'ffu M2.16 overload', session: 'f5b09aea', max_min: 60, turn_min: 60, approved: { grant: 'w3159.b1', by: 'ben', turn_min: 60 } }, sec(25));
+  let b = readBenchState(root, NOW, alive)!;
+  assert.equal(b.running[0].exempt, 'approved');
+  assert.equal(b.running[0].approved, true);
+  assert.equal(b.running[0].turnMin, 60);
+  assert.equal(b.running[0].until, undefined, 'its clock has not started while the CI jobs drain');
+  assert.match(benchGlance(b, NOW)!.times, /its approved turn starts once the CI jobs drained/);
+  assert.equal(timedHolder(root, NOW, alive)!.until, NOW + 60 * 60_000, 'the runners stay paused through the drain and the whole turn');
+
+  fs.writeFileSync(path.join(benchQueueDir(benchLockDir(root)), 't00000001', 'turn.json'), JSON.stringify({ start: sec(10), grant: 'w3159.b1' }));
+  b = readBenchState(root, NOW, alive)!;
+  assert.equal(b.running[0].turnStart, new Date(NOW - 10 * 60_000).toISOString());
+  assert.equal(b.running[0].until, new Date(NOW + 50 * 60_000).toISOString(), '60 minutes from the drain, not 30 from the grant');
+  assert.match(benchGlance(b, NOW)!.times, /50m left of its approved 60m turn/);
+  assert.equal(timedHolder(root, NOW, alive)!.until, NOW + 50 * 60_000);
+
+  // The same ticket without the daemon's mark: the queue's 30 minutes from its grant.
+  prios(root, { v: 2, single_worker: false, sessions: { f5b09aea: { priority: 'normal' } } });
+  b = readBenchState(root, NOW, alive)!;
+  assert.equal(b.running[0].exempt, undefined);
+  assert.equal(b.running[0].approved, undefined);
+  assert.equal(b.running[0].turnMin, 30);
+  assert.equal(b.running[0].until, new Date(NOW + 5 * 60_000).toISOString());
+});

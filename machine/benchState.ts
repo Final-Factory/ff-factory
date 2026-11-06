@@ -5,7 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { BenchState, BenchTicketGlance, UntimedTiming } from '../shared/types.ts';
-import { benchLockDir, pidAlive, readBenchLock } from './benchLock.ts';
+import { APPROVED_MAX_MIN, benchLockDir, pidAlive, readBenchLock } from './benchLock.ts';
 import { benchQueueDir, queueTickets, type QueueTicket } from './benchQueue.ts';
 import { closedFile } from './benchTurn.ts';
 
@@ -31,7 +31,7 @@ const readJson = (f: string): Record<string, unknown> | undefined => {
 };
 
 interface Marks {
-  sessions: Record<string, { priority: string; exempt?: 'release' | 'nightly' }>;
+  sessions: Record<string, { priority: string; exempt?: 'release' | 'nightly' | 'approved'; approvedMin?: number }>;
   singleWorker: boolean;
   /** The file is v 2 (the marks are this daemon's); before it, any pre-empt ticket counts as the urgent release. */
   v2: boolean;
@@ -42,11 +42,13 @@ interface Marks {
 function marks(qdir: string): Marks {
   const f = readJson(path.join(qdir, 'priorities.json'));
   const v2 = typeof f?.v === 'number' && f.v >= 2;
-  const raw = (f?.sessions ?? {}) as Record<string, { priority?: string; exempt?: string }>;
+  const raw = (f?.sessions ?? {}) as Record<string, { priority?: string; exempt?: string; approved?: { turn_min?: unknown } }>;
   const sessions = Object.fromEntries(
     Object.entries(raw).map(([k, v]) => {
-      const exempt: Marks['sessions'][string]['exempt'] = v2 && (v?.exempt === 'release' || v?.exempt === 'nightly') ? v.exempt : undefined;
-      return [k, { priority: String(v?.priority ?? ''), ...(exempt ? { exempt } : {}) }];
+      // w3186 (bench_queue.py approved_mark): an approved turn's minutes, capped as the queue caps them
+      const am = v2 && v?.exempt === 'approved' && typeof v.approved?.turn_min === 'number' && v.approved.turn_min > 0 ? Math.min(v.approved.turn_min, APPROVED_MAX_MIN) : undefined;
+      const exempt: Marks['sessions'][string]['exempt'] = v2 && (v?.exempt === 'release' || v?.exempt === 'nightly') ? v.exempt : am ? 'approved' : undefined;
+      return [k, { priority: String(v?.priority ?? ''), ...(exempt ? { exempt } : {}), ...(am ? { approvedMin: am } : {}) }];
     }),
   );
   return { sessions, singleWorker: v2 && f?.single_worker === true, v2 };
@@ -81,20 +83,25 @@ function limitHolds(lim: Record<string, unknown>, live: Set<string>): boolean {
 }
 
 function glance(t: QueueTicket, info: Record<string, unknown> | undefined, m: Marks, live: Set<string>): BenchTicketGlance {
+  const mark = m.sessions[t.session ?? ''];
+  // w3186: an approved ticket's turn runs from its turn.json start (after the CI drain), at the approved minutes
+  const approved = t.mode === 'exclusive' && t.approved && mark?.approvedMin ? mark.approvedMin : undefined;
+  const granted = t.granted ? (approved ? (t.turnStart ? t.turnStart * 1000 : NaN) : t.granted.ts * 1000) : NaN;
   const since = t.granted ? t.granted.ts * 1000 : t.created ? Date.parse(t.created) : NaN;
-  const exempt = m.sessions[t.session ?? '']?.exempt;
+  const exempt = mark?.exempt;
   const preempt = urgentRelease(t, info, m);
   const raw = (t.limit ?? {}) as Record<string, unknown>;
   const lim = (limitHolds(raw, live) ? raw : {}) as { deadline?: unknown; warned?: unknown; why?: unknown; release?: unknown };
   const deadline = typeof lim.deadline === 'number' ? lim.deadline * 1000 : NaN;
   const warned = typeof lim.warned === 'number' ? lim.warned * 1000 : NaN;
-  const turnMin = t.mode === 'exclusive' ? (t.turnMin ? Math.min(t.turnMin, TURN_MIN) : (t.maxMin ?? OLD_TURN_MIN)) : undefined;
+  const turnMin = t.mode === 'exclusive' ? (t.turnMin ? Math.min(t.turnMin, approved ?? TURN_MIN) : (t.maxMin ?? OLD_TURN_MIN)) : undefined;
   // bench_queue.py never_limited: an exempt ticket, the urgent release lane's or one on a single-worker machine has no turn
-  const limited = !exempt && !preempt && !m.singleWorker;
+  // (an approved one has: a longer one, w3186)
+  const limited = (!exempt || exempt === 'approved') && !preempt && !m.singleWorker;
   // w1860: a holder that outranks every waiter keeps the lock (keep.json), while one of those waiters still waits; no
   // deadline and no turn's end apply then, so no countdown is shown that would not fire
   const keep = t.granted && limited && !Number.isFinite(deadline) && t.keep && Array.isArray(t.keep.waiters) && t.keep.waiters.some((n) => live.has(n)) ? t.keep : undefined;
-  const until = Number.isFinite(deadline) ? deadline : t.granted && limited && turnMin && !keep ? since + turnMin * 60_000 : NaN;
+  const until = Number.isFinite(deadline) ? deadline : t.granted && limited && turnMin && !keep ? (t.mode === 'exclusive' ? granted : since) + turnMin * 60_000 : NaN;
   const out: BenchTicketGlance = {
     ticket: t.ticket,
     mode: t.mode,
@@ -118,6 +125,11 @@ function glance(t: QueueTicket, info: Record<string, unknown> | undefined, m: Ma
     if (lim.release) out.release = true;
   }
   if (exempt) out.exempt = exempt;
+  if (approved) {
+    out.approved = true;
+    const ts = iso(granted);
+    if (ts) out.turnStart = ts;
+  }
   if (preempt) out.preempt = true;
   if (!t.granted && t.parked) out.parked = String(t.parked.why ?? 'its worker is away').slice(0, 160);
   const ks = keep ? iso(typeof keep.since === 'number' ? keep.since * 1000 : since) : undefined;

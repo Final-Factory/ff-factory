@@ -239,6 +239,7 @@ export interface TimedPlaceInput {
 export function decideTimedPlace(a: TimedPlaceInput): TimedPlaceDecision {
   const here = a.here;
   const os = a.platform === 'win32' ? ' on Windows' : a.platform === 'darwin' ? ' on macOS' : '';
+  if (a.exempt === 'approved') return { verdict: 'here', why: `a person approved this worker a longer exclusive turn on ${here?.id ?? 'this computer'} (w3186)` };
   if (a.exempt) return { verdict: 'here', why: `the ${a.exempt === 'release' ? 'urgent release lane' : 'nightly'} times on its own computer (w1832)` };
   if (a.pinned) {
     // w2521: before every other rule, w2055's idle computer and same_machine included: a pin is a hardware need, not a cost.

@@ -57,20 +57,25 @@ const FULL = '3e14de3aa5160f0e8d2c7b9a4f1e6d3c2b1a0f9e';
 
 test('ghMerge: gh pr merge at exactly the head, with the repo named; what gh said when it refuses', async () => {
   const calls: string[][] = [];
+  // w3190: the game repo's HUD pins come from the PR's base branch first (machine/evidenceGate.ts fetchHudData).
+  const hud = (args: string[]) => (args.includes('baseRefName') ? '{"baseRefName":"master"}' : args[0] === 'api' ? '{"pins":[]}' : undefined);
   await ghMerge('Final-Factory/FinalFactory#12', FULL, async (cmd, args) => {
     calls.push([cmd, ...args]);
-    return { code: 0, stdout: '', stderr: '' } as never;
+    return { code: 0, stdout: hud(args) ?? '', stderr: '' } as never;
   }, () => 'pe.py');
   assert.deepEqual(
     calls,
     [
+      ['gh', 'pr', 'view', '12', '-R', 'Final-Factory/FinalFactory', '--json', 'baseRefName'],
+      ['gh', 'api', '-H', 'Accept: application/vnd.github.raw+json', 'repos/Final-Factory/FinalFactory/contents/scripts/nightly/ui_layout/hud-pins.json?ref=master'],
+      ['gh', 'api', '-H', 'Accept: application/vnd.github.raw+json', 'repos/Final-Factory/FinalFactory/contents/scripts/nightly/ui_layout/hud-clusters.json?ref=master'],
       [evidencePython(), 'pe.py', '--repo', 'Final-Factory/FinalFactory', '--pr', '12'],
       ['gh', 'pr', 'merge', '12', '-R', 'Final-Factory/FinalFactory', '--merge', '--match-head-commit', FULL],
     ],
     'a full sha is passed as is, with no read; the game repo runs its Evidence check first (w3088)',
   );
   await assert.rejects(
-    ghMerge('Final-Factory/FinalFactory#12', FULL, async (cmd) => (cmd === 'gh' ? { code: 1, stdout: '', stderr: 'Head branch was modified. Review and try the merge again.' } : { code: 0, stdout: '', stderr: '' }) as never, () => 'pe.py'),
+    ghMerge('Final-Factory/FinalFactory#12', FULL, async (cmd, args) => (cmd === 'gh' && hud(args) ? { code: 0, stdout: hud(args), stderr: '' } : cmd === 'gh' ? { code: 1, stdout: '', stderr: 'Head branch was modified. Review and try the merge again.' } : { code: 0, stdout: '', stderr: '' }) as never, () => 'pe.py'),
     /gh pr merge Final-Factory\/FinalFactory#12: Head branch was modified/,
   );
 });

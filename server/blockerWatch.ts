@@ -22,7 +22,7 @@ import { run as runProc, type RunOptions, type RunResult } from './proc.ts';
 import { blockerVerdict, CI_REF, cycleBreak, FULL_SHA, gateSetter, gatesOf, newestFirst, RESUME_SWEEP_MS, waitCycles, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
 import { conditionalVerdict } from '../shared/conditional.ts';
 import { ghRunner } from './githubTokens.ts';
-import { evidenceArgs, evidenceGated, evidencePython, evidenceRefusal, evidenceVerdict, findLocalPrEvidence, noScriptRefusal } from '../machine/evidenceGate.ts';
+import { evidenceArgs, evidenceGated, evidencePython, evidenceRefusal, evidenceVerdict, fetchHudData, findLocalPrEvidence, noScriptRefusal } from '../machine/evidenceGate.ts';
 import { pairDelivers, reportDelivers, stillOpenIn } from './ledgerRules.ts';
 import { lastOpenLine, personWaitOn, portalWaitIn, reportAt, requestWaitOf, siblingWaitOf } from '../shared/workState.ts';
 import type { SessionInfo, WorkBlocker, WorkItem } from '../shared/types.ts';
@@ -749,7 +749,11 @@ export async function ghMerge(ref: string, head: string, run: Runner = runProc, 
   if (evidenceGated(m[1])) {
     const script = await evidenceScript();
     if (!script) throw new Error(`not merged: ${noScriptRefusal(m[1], m[2])}`);
-    const e = await run(evidencePython(), evidenceArgs(script, m[1], m[2]), { ...opts, timeoutMs: 5 * 60_000 });
+    // w3190: the game repo's HUD pins, which the script reads from a game checkout; the portal has none (machine/evidenceGate.ts fetchHudData).
+    const hud = await fetchHudData(m[1], m[2], run, opts);
+    if (hud && 'error' in hud) throw new Error(`not merged: the Evidence check could not run for ${m[1]}#${m[2]}: ${hud.error}`);
+    const env = hud ? { ...opts.env, FF_HUD_DATA: hud.dir } : opts.env;
+    const e = await run(evidencePython(), evidenceArgs(script, m[1], m[2]), { ...opts, env, timeoutMs: 5 * 60_000 });
     const v = evidenceVerdict(e.code, e.stdout, e.stderr);
     if (!v.ok) throw new Error(`not merged: ${evidenceRefusal(m[1], m[2], e.code, v)}`);
   }

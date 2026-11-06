@@ -62,6 +62,7 @@ import { TIMED_LEG_WAIT_MS, unavailableText, bigFallbackRules, type SmallState }
 import type { LegStep, Occupant } from './timedLegPlace.ts';
 import { minPriorityText } from '../shared/capacity.ts';
 import { repoSlug } from './ciReadHealth.ts';
+import { BENCH_GRANT_DAYS, BENCH_TURN_MIN, grantLine, grantProblem } from './benchGrants.ts';
 import { actionName, CONDITIONAL_DAYS, CONDITIONAL_MAX_DAYS, CONDITIONAL_PER_REQUEST, conditionalLine, conditionName, HELD_MARK, inPersonWords, parseCondition, type ConditionInput } from '../shared/conditional.ts';
 import { ASK_TOOL, askExcerpt, answerOf, checkAsk, isAskTool, splitMedia, type Ask } from '../shared/ask.ts';
 import { answerExcerpt, answeredText, ANSWERS_MAX, excerptOf, isEmoji, PERSON_MESSAGE_CHARS, reactionRemovedText, reactionsByMessage, reactionText, REPLY_MARK, replyText, sentText, splitReply, splitSent, type Answered, type Quoted } from '../shared/replies.ts';
@@ -81,7 +82,7 @@ import { isSamePerson, personForWork, sessionPerson, tokenPersonForWork } from '
 import { MERGE_ON_GREEN_MARK } from './mergeOnGreen.ts';
 import { handoffQuote, handoffReport, isHandoff } from './handoffReport.ts';
 import { commitsIn, normPr, pairCommitsOf, pairPrOf, pairRanCommit, prIn, resultFor, sameCommit, samePr } from './pairRuns.ts';
-import type { AttachmentRef, ConditionalDecision, OpenAsk, WorkNeedsYou, GateResume, GitStatus, Machine, WorkAutoClosed, WorkBlocker, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPair, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
+import type { AttachmentRef, BenchGrant, ConditionalDecision, OpenAsk, WorkNeedsYou, GateResume, GitStatus, Machine, WorkAutoClosed, WorkBlocker, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPair, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
 import { REPORT_KINDS, WORK_PRIORITIES, questionFor, type ReportKind, type ReportSummary } from '../shared/types.ts';
 
 /** w2045: the most of a worker's after-merge report a merge-on-green gate keeps (a DONE report is rarely longer). */
@@ -3144,6 +3145,64 @@ It is for your part of the work, not an answer to another worker's question.`;
     this.stamp(w, `${owner.displayName}: conditional decision ${d.id} cancelled (${actionName(d.action)} when ${conditionName(d.when)})`);
     this.store.putWork(w);
     return `Cancelled ${d.id}: ${w.id} will not be ${d.action === 'approve' ? 'approved' : d.action === 'decline' ? 'declined' : d.action === 'done' ? 'closed as done' : 'cancelled'} when ${conditionName(d.when)}.`;
+  }
+
+  /** A ledger line on `w`, kept (w3186: agents.ts benchPriorities notes an approved bench turn's use and end). */
+  noteWork(w: WorkItem, line: string) {
+    this.stamp(w, line);
+    this.store.putWork(w);
+  }
+
+  /**
+   * A longer exclusive bench turn a person approved (w3186, server/benchGrants.ts): `turns` turns of `minutes` on `machine`
+   * for the worker of `request`, recorded only by that person's own orchestrator, in a turn of theirs, with their words
+   * found verbatim in a message of theirs. Without arguments it lists theirs; `cancel` takes one back, in their turn too.
+   */
+  grantBenchTurn(chat: SessionHandle, input: { request?: string; machine?: string; turns?: number; minutes?: number; words?: string; expires_days?: number; cancel?: string }): string {
+    const owner = this.ownerOf(chat.info);
+    if (!owner) throw new Error('only a person’s own orchestrator records a bench turn they approved');
+    const n = owner.displayName;
+    const theirTurn = (chat.turnFrom ?? chat.lastFrom) === 'human';
+    const now = this.now();
+    const all = [...this.store.work.values()].flatMap((w) => (w.benchGrants ?? []).map((g) => ({ w, g })));
+    const cancel = input.cancel?.trim().toLowerCase();
+    if (cancel) {
+      const hit = all.find(({ g }) => g.id === cancel && !g.ended);
+      if (!hit) throw new Error(`no grant "${input.cancel}" that still holds; grant_bench_turn without arguments lists them`);
+      if (!theirTurn) throw new Error(`only ${n}, in a turn of theirs, takes back a bench turn: ask them`);
+      hit.g.ended = now.toISOString();
+      hit.g.endedWhy = `cancelled by ${n}`;
+      this.noteWork(hit.w, `${n}: bench grant ${hit.g.id} cancelled (w3186)`);
+      return `Cancelled ${hit.g.id}: ${hit.w.id}'s worker gets the ${BENCH_TURN_MIN}-minute turn on ${hit.g.machine} from its next ticket (a turn already running keeps its minutes).`;
+    }
+    if (!input.request) {
+      const live = all.filter(({ g }) => !g.ended);
+      return live.length ? `Bench turns approved (w3186):\n${live.map(({ w, g }) => `- ${w.id}: ${grantLine(g)}`).join('\n')}` : 'No approved bench turns hold now.';
+    }
+    if (!theirTurn) throw new Error(`only ${n}, in a turn of theirs, approves a longer bench turn: a check-in or a timer is not their turn`);
+    const w = this.store.work.get(input.request.trim().toLowerCase());
+    if (!w) throw new Error(`no request "${input.request}"; list_work shows them`);
+    if (!isOpen(w)) throw new Error(`${w.id} is ${w.status}: a closed request's worker takes no timing turn`);
+    if (!isFor(w, owner.userId) && !this.isOwnerRole(owner.userId)) throw new Error(`${w.id} is ${names(w.requesters)}'s request, not ${n}'s; only an owner approves bench time for another person's request`);
+    const machine = input.machine?.trim().toLowerCase() ?? '';
+    const ids = this.d.places().machines.map((m) => m.id);
+    if (!ids.includes(machine)) throw new Error(`machine: one of ${ids.join(', ')}`);
+    const problem = grantProblem({ turns: input.turns, minutes: input.minutes, expiresDays: input.expires_days });
+    if (problem) throw new Error(problem);
+    const words = input.words?.trim();
+    if (!words) throw new Error(`words: ${n}'s own words for this approval, verbatim from their message ("Give each overload run a one-off 60-minute exclusive turn on biscuit")`);
+    if (!inPersonWords(words, this.personMessages(chat.info.id))) throw new Error(`words: "${clip(words, 120)}" is not in ${n}'s own recent messages here; quote them verbatim (at least a few words), never your summary`);
+    // The same request and machine again replaces the grant before (its turns, minutes or words may have changed).
+    const before = (w.benchGrants ?? []).find((g) => !g.ended && g.machine === machine);
+    if (before) {
+      before.ended = now.toISOString();
+      before.endedWhy = `replaced by a new grant of ${n}'s`;
+    }
+    const seq = Math.max(0, ...(w.benchGrants ?? []).map((g) => Number(/\.b(\d+)$/.exec(g.id)?.[1] ?? 0))) + 1;
+    const g: BenchGrant = { id: `${w.id}.b${seq}`, machine, turns: input.turns!, minutes: input.minutes!, by: asRequester(owner), at: now.toISOString(), words: clip(words, 500), used: before ? [...before.used] : [], expires: new Date(now.getTime() + (input.expires_days ?? BENCH_GRANT_DAYS) * 86_400_000).toISOString() };
+    w.benchGrants = [...(w.benchGrants ?? []).filter((x) => !x.ended || Date.parse(x.ended) > now.getTime() - 30 * 86_400_000), g];
+    this.noteWork(w, `${n}: bench grant ${g.id} recorded in their own turn: ${g.turns} exclusive turn${g.turns === 1 ? '' : 's'} of ${g.minutes} min on ${machine}, CI runners paused: "${g.words}" (w3186)`);
+    return `Recorded ${grantLine(g)}. Within a minute ${machine}'s daemon marks ${w.id}'s worker sessions there; each of their next ${g.turns} exclusive timing tickets (bench_queue.py timed or hold, with --minutes up to ${g.minutes}) gets a ${g.minutes}-minute turn whose clock starts once ${machine}'s CI jobs drained, with its CI runners paused until it lets go. Tell ${w.id}'s worker (message it): it times on ${machine} with the game repo's bench_queue.py from master (w3186), e.g. \`python scripts/bench/bench_queue.py timed --what "<what>" --minutes ${g.minutes}\`. grant_bench_turn lists it; cancel takes it back when ${n} says so.`;
   }
 
   /** Take a pending decision off its request; undefined when it is gone already. */
