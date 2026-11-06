@@ -745,7 +745,10 @@ every worker's PATH read it (`machine/leftovers.ts`, beside `ff-leftovers list/e
 
 - `ff-leftovers folders`: every folder a clean-up could take under the install folder (`tmp/ffa-<session>`, `scratch/*`, each
   sandbox's `Builds/*` and `.nightly-builds/*`), each `KEEP` or `DELETE` with its owner and why, deletable ones measured.
-- `ff-leftovers check <path>...`: the same verdict for paths about to be deleted; exit 1 if any is to be kept.
+- `ff-leftovers check <path>...`: the same verdict for paths about to be deleted; exit 1 if any is to be kept. The check's own
+  process and the shells that ran it never count as "a running process plays from" a slot (w3204).
+- `ff-leftovers remove-slot <slot>...`: empties idle player slots (`<install>/players/slot<K>-<P>`) as `player_slots.py prune`
+  does: refused while a lease lives, a fill runs or a process plays from the slot; the folder and `leases/` stay (w3204).
 
 **Verdicts** (`server/cleanupFolders.ts`): a session's folder is kept while its worker runs, and while any request that is not
 closed names the session (also one the request has moved on from: the daemon's sweep takes those after the grace of w1097, a hand

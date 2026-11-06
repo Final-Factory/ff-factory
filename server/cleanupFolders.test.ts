@@ -7,7 +7,7 @@ import { execFileSync } from 'node:child_process';
 import { hasLocalWork, localRemotePath, localWorkWhy, norm } from './cleanup.ts';
 import { FACTS_MAX_AGE_MS, factsProblem, judgePath, judgeSession, planFolders, renderFolders, type CleanupFacts } from './cleanupFolders.ts';
 import { ownersOf } from './resumable.ts';
-import { foldersMain, installLeftoversShim } from '../machine/leftovers.ts';
+import { foldersMain, installLeftoversShim, slotContext } from '../machine/leftovers.ts';
 import type { WorkItem } from '../shared/types.ts';
 
 /**
@@ -422,4 +422,97 @@ test('w2796: a player slot is KEEP while leased, filling or played from, and DEL
   assert.equal(await foldersMain('check', [dead, empty], env, NOW, say, async () => ctx), 0);
   assert.equal(await foldersMain('check', [dead, leased], env, NOW, say, async () => ctx), 1);
   assert.match(out.join(''), /KEEP .*slot0/);
+});
+
+/**
+ * w3204: on LothDesktop, 2026-11-06, `ff-leftovers folders` listed every player slot DELETE and `check <slot>` answered KEEP
+ * "a running process plays from it" for each, one that did not exist included: the process naming the slot was the check's
+ * own command line (node leftovers.ts check <slot>). Run as the real command, so the check's own process is in the list.
+ */
+test('w3204: check, run as the command, judges an idle ready slot DELETE as folders does; its own command line plays from nothing', async (t) => {
+  const { root, facts } = world(t);
+  const slotDir = (name: string, leases: object[] = []) => {
+    const d = path.join(root, 'players', name);
+    fs.mkdirSync(path.join(d, 'player'), { recursive: true });
+    fs.mkdirSync(path.join(d, 'leases'), { recursive: true });
+    fs.writeFileSync(path.join(d, 'player', 'FinalFactory.exe'), 'x');
+    fs.writeFileSync(path.join(d, 'slot.json'), JSON.stringify({ state: 'ready', sha: 'abc', used: Date.now() / 1000 }));
+    leases.forEach((l, i) => fs.writeFileSync(path.join(d, 'leases', `l${i}.json`), JSON.stringify(l)));
+    return d;
+  };
+  const idle = slotDir('slot1-1');
+  const leased = slotDir('slot4-1', [{ pid: process.pid, host: os.hostname().toLowerCase(), time: Date.now() / 1000 - 60, session: '00981797' }]);
+  const file = path.join(root, 'cleanup-facts.json');
+  fs.writeFileSync(file, JSON.stringify(facts));
+  const cli = path.join(import.meta.dirname, '..', 'machine', 'leftovers.ts');
+  const runCli = (...args: string[]) => {
+    try {
+      return { code: 0, out: execFileSync(process.execPath, ['--experimental-strip-types', '--no-warnings', cli, ...args], { env: { ...process.env, FF_CLEANUP_FACTS: file }, encoding: 'utf8' }) };
+    } catch (e) {
+      return { code: (e as { status: number }).status, out: String((e as { stdout: string }).stdout) };
+    }
+  };
+  const idleCheck = runCli('check', idle);
+  assert.equal(idleCheck.code, 0, idleCheck.out);
+  assert.match(idleCheck.out, /DELETE .*slot1-1\s+a player slot no live lease holds/);
+  const leasedCheck = runCli('check', leased);
+  assert.equal(leasedCheck.code, 1, leasedCheck.out);
+  assert.match(leasedCheck.out, /KEEP .*slot4-1\s+a player slot leased now \(worker 00981797/);
+
+  // remove-slot, the supported delete: the idle slot is emptied (its folder stays for its path and firewall rule); the leased one is untouched.
+  const removed = runCli('remove-slot', idle, leased);
+  assert.equal(removed.code, 1, removed.out);
+  assert.match(removed.out, /REMOVED .*slot1-1/);
+  assert.match(removed.out, /KEEP .*slot4-1\s+not removed: a player slot leased now/);
+  assert.deepEqual(fs.readdirSync(idle).sort(), ['leases']);
+  assert.ok(fs.existsSync(path.join(leased, 'player', 'FinalFactory.exe')));
+  assert.ok(fs.existsSync(path.join(leased, 'slot.json')));
+});
+
+test('w3204: slotContext leaves out this process and the shells that ran it, never a player under the slot', async () => {
+  const slot = path.join(os.tmpdir(), 'ffw', 'players', 'slot6-0');
+  const procs = [
+    { pid: 100, ppid: 1, cmd: 'claude.exe' },
+    { pid: 200, ppid: 100, cmd: `bash -c "ff-leftovers check ${slot}"` },
+    { pid: 250, ppid: 200, cmd: `/bin/sh ff-leftovers check ${slot}` },
+    { pid: 300, ppid: 250, cmd: `node --experimental-strip-types leftovers.ts check ${slot}` },
+    { pid: 500, ppid: 1, cmd: `"${path.join(slot, 'player', 'FinalFactory.exe')}" -batchmode` },
+  ];
+  const ctx = await slotContext({ procs: async () => procs, self: 300, callers: [250] });
+  assert.deepEqual(ctx.procs, [procs[4]!.cmd], 'the whole chain above the check is left out, the player is not');
+  // A lost ppid (an MSYS parent): the shim's caller list still drops the shells.
+  const lost = await slotContext({ procs: async () => procs.map((p) => (p.pid === 300 ? { ...p, ppid: 9999 } : p)), self: 300, callers: [250, 200] });
+  assert.deepEqual(lost.procs, [procs[4]!.cmd]);
+  assert.equal((await slotContext({ procs: async () => { throw new Error('no ps'); } })).procs, undefined);
+});
+
+test('w3204: remove-slot refuses a slot a process plays from, a path inside a slot, and anything that is not a slot', async (t) => {
+  const { root, facts } = world(t);
+  const d = path.join(root, 'players', 'slot2-0');
+  fs.mkdirSync(path.join(d, 'player'), { recursive: true });
+  fs.mkdirSync(path.join(d, 'leases'), { recursive: true });
+  fs.writeFileSync(path.join(d, 'player', 'FinalFactory.exe'), 'x');
+  fs.writeFileSync(path.join(d, 'slot.json'), JSON.stringify({ state: 'ready' }));
+  const file = path.join(root, 'cleanup-facts.json');
+  fs.writeFileSync(file, JSON.stringify(facts));
+  const env = { FF_CLEANUP_FACTS: file } as NodeJS.ProcessEnv;
+  const out: string[] = [];
+  const say = (s: string) => void out.push(s);
+  const playing = { host: 'lothdesktop', alive: () => false, procs: [`"${path.join(d, 'player', 'FinalFactory.exe')}" -screen-fullscreen 0`] };
+  assert.equal(await foldersMain('remove-slot', [d], env, Date.now(), say, async () => playing), 1);
+  assert.match(out.join(''), /KEEP .*slot2-0\s+not removed: a player slot no lease holds, but a running process plays from it/);
+  assert.ok(fs.existsSync(path.join(d, 'player', 'FinalFactory.exe')));
+  // A process that shows up between the two looks: the player folder is put back.
+  let looks = 0;
+  const late = async () => ({ host: 'lothdesktop', alive: () => false, procs: looks++ ? playing.procs : [] });
+  assert.equal(await foldersMain('remove-slot', [d], env, Date.now(), say, late), 1);
+  assert.match(out.join(''), /put back/);
+  assert.ok(fs.existsSync(path.join(d, 'player', 'FinalFactory.exe')));
+  const idle = async () => ({ host: 'lothdesktop', alive: () => false, procs: [] });
+  out.length = 0;
+  assert.equal(await foldersMain('remove-slot', [path.join(d, 'player'), path.join(root, 'scratch', 'w77-gone')], env, Date.now(), say, idle), 1);
+  assert.equal(out.join('').match(/not a player slot folder/g)?.length, 2, out.join(''));
+  assert.ok(fs.existsSync(path.join(d, 'player', 'FinalFactory.exe')));
+  assert.equal(await foldersMain('remove-slot', [d], env, Date.now(), say, idle), 0);
+  assert.deepEqual(fs.readdirSync(d), ['leases']);
 });
