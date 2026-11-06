@@ -28,6 +28,7 @@ import { lastOpenLine, personWaitOn, portalWaitIn, reportAt, requestWaitOf, sibl
 import type { SessionInfo, WorkBlocker, WorkItem } from '../shared/types.ts';
 import type { RoomNow } from './placement.ts';
 import { steamShortIn } from '../shared/capacity.ts';
+import { awaitsOnlyAway, awayLabelsOf, awayNote, isAwayLeg, offlineLabels, type Leg } from '../machine/awayRunners.ts';
 
 const EVERY_MS = 60_000;
 /**
@@ -599,14 +600,17 @@ interface GhCheck {
 }
 
 /** What a pull request's checks say (statusCheckRollup): done when none is still running, or the PR merged or closed. */
-export function checksState(pr: { state?: string; statusCheckRollup?: GhCheck[] }, ref: string): CiState {
+export function checksState(pr: { state?: string; statusCheckRollup?: GhCheck[] }, ref: string, away: readonly string[] = []): CiState {
   if (pr.state === 'MERGED' || pr.state === 'CLOSED') return { done: true, text: `${ref} is ${pr.state.toLowerCase()}` };
-  const checks = pr.statusCheckRollup ?? [];
+  // w3147: a leg queued on an away runner label (machine/awayRunners.ts) neither holds nor fails the verdict.
+  const all = pr.statusCheckRollup ?? [];
+  const checks = all.filter((c) => !isAwayLeg(c, away));
+  const note = all.length > checks.length ? awayNote(all.length - checks.length, away) : '';
   const running = checks.filter((c) => (c.status ? c.status !== 'COMPLETED' : c.state === 'PENDING' || c.state === 'EXPECTED'));
   if (!checks.length) return { done: false, text: `${ref} has no checks yet`, none: true };
   if (running.length) return { done: false, text: `${running.length} of ${checks.length} checks on ${ref} still running` };
   const failed = checks.filter((c) => ['FAILURE', 'ERROR', 'TIMED_OUT', 'CANCELLED', 'ACTION_REQUIRED'].includes((c.conclusion ?? c.state ?? '').toUpperCase()));
-  return failed.length ? { done: true, text: `CI on ${ref} finished: ${failed.length} of ${checks.length} checks failed (${failed.slice(0, 3).map((c) => c.name ?? c.context).join(', ')})` } : { done: true, green: true, text: `CI on ${ref} finished: all ${checks.length} checks passed or skipped` };
+  return failed.length ? { done: true, text: `CI on ${ref} finished: ${failed.length} of ${checks.length} checks failed (${failed.slice(0, 3).map((c) => c.name ?? c.context).join(', ')})` } : { done: true, green: true, text: `CI on ${ref} finished: all ${checks.length} checks passed or skipped${note}` };
 }
 
 /** A pull request's merge state as REST gives it (GET /repos/{owner}/{repo}/pulls/{n}), with its head commit. */
@@ -757,8 +761,9 @@ export async function ghChecks(ref: string, run: Runner = runProc): Promise<CiSt
   const m = CI_REF.exec(ref);
   if (!m) throw new Error(`"${ref}" is not a pull request (owner/repo#123)`);
   const opts = { timeoutMs: 30_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } };
+  const away = await awayNow(m[1], run, opts);
   const r = await run('gh', ['pr', 'view', m[2], '-R', m[1], '--json', 'state,statusCheckRollup'], opts);
-  if (r.code === 0) return checksState(JSON.parse(r.stdout) as { state?: string; statusCheckRollup?: GhCheck[] }, ref);
+  if (r.code === 0) return checksState(JSON.parse(r.stdout) as { state?: string; statusCheckRollup?: GhCheck[] }, ref, away);
   const p = await run('gh', ['pr', 'view', m[2], '-R', m[1], '--json', 'state,headRefOid'], opts);
   if (p.code !== 0) throw new Error(`gh pr view ${ref}: ${ghSaid(p)}`);
   const pr = JSON.parse(p.stdout) as { state?: string; headRefOid?: string };
@@ -778,5 +783,38 @@ export async function ghChecks(ref: string, run: Runner = runProc): Promise<CiSt
     rollupRefusedLogged = true;
     console.warn(`blocker watch: gh cannot read pull requests' checks (${ghSaid(r)}); CI blocks read their GitHub Actions runs instead`);
   }
-  return runsState(JSON.parse(a.stdout) as { workflow_runs?: GhRun[] }, ref);
+  const body = JSON.parse(a.stdout) as { workflow_runs?: (GhRun & { id?: number })[] };
+  const settled = await settleAwayRuns(m[1], body.workflow_runs ?? [], away, run, opts);
+  const s = runsState({ workflow_runs: body.workflow_runs }, ref);
+  return settled && s.green ? { ...s, text: s.text + awayNote(settled, away) } : s;
+}
+
+/** w3147: the away labels (machine/awayRunners.ts) of `repo` whose runners are all offline now; none when unreadable. */
+async function awayNow(repo: string, run: Runner, opts: RunOptions): Promise<readonly string[]> {
+  const labels = awayLabelsOf(repo);
+  if (!labels.length) return [];
+  const r = await run('gh', ['api', `repos/${repo}/actions/runners?per_page=100`], opts);
+  if (r.code !== 0) return [];
+  try {
+    return offlineLabels(JSON.parse(r.stdout) as Parameters<typeof offlineLabels>[0], labels);
+  } catch {
+    return [];
+  }
+}
+
+/** w3147: mark each unfinished run that waits only on away legs as a green finish, in place; answers how many away legs it skipped. */
+async function settleAwayRuns(repo: string, runs: (GhRun & { id?: number })[], away: readonly string[], run: Runner, opts: RunOptions): Promise<number> {
+  if (!away.length) return 0;
+  let legs = 0;
+  for (const w of runs) {
+    if ((w.status ?? '').toLowerCase() === 'completed' || !w.id) continue;
+    const j = await run('gh', ['api', `repos/${repo}/actions/runs/${w.id}/jobs?per_page=100`], opts);
+    if (j.code !== 0) continue;
+    const jobs = ((JSON.parse(j.stdout) as { jobs?: Leg[] }).jobs ?? []);
+    if (!awaitsOnlyAway(jobs, away)) continue;
+    legs += jobs.filter((x) => isAwayLeg(x, away)).length;
+    w.status = 'completed';
+    w.conclusion = 'success';
+  }
+  return legs;
 }
