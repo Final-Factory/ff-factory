@@ -20,6 +20,14 @@
 // "already acquired": the job (127943935420) had failed at 15:16 with "lost communication with the server". So a
 // listener is paused only when its own log (<runner>/_diag/Runner_*.log, written as it goes) says it is idle and has been
 // for SETTLE_MS, and is continued at once when that log moved on to a job between the look and the pause.
+//
+// The log read is the one the running listener writes: the newest Runner_*.log by modification time, not by name. Every
+// Runner.Listener run writes its own Runner_<start>.log, a `Runner.Listener --version` too: on biscuit on 2026-11-06 a
+// --version run at 16:30:34Z (w3202) left Runner_20261106-163034-utc.log in ~/ffu-runner, newer by name than the live
+// listener's Runner_20261106-084734-utc.log. Read by name it said idle, so under w3159's ticket t00003135 the listener was
+// paused at 17:08:50Z a second after "Acknowledging runner request 'bd216421-…'", and that job (128031308823) escaped
+// being lost only because a newer push cancelled its run at 17:14:16Z. A log read whole with no job or listening line
+// is not a listener's (a listener says "Listening for Jobs" when it starts): it holds the listener like an unread one.
 import fs from 'node:fs';
 import path from 'node:path';
 import { descendsFrom } from './benchTurn.ts';
@@ -89,27 +97,33 @@ export function listenerLog(tail: string | undefined): ListenerLog {
     const state = JOB_MARK.test(m[2]) ? 'job' : IDLE_MARK.test(m[2]) ? 'idle' : undefined;
     if (state) return { state, at: Date.parse(`${m[1].replace(' ', 'T')}Z`), line: lines[i].trimEnd() };
   }
-  return { state: 'idle' }; // a tail with no job line: it has listened for longer than the tail holds
+  // a 64 KB tail with no job line: it has listened for longer than the tail holds; a whole log with none is not a listener's
+  return Buffer.byteLength(tail) >= LOG_TAIL ? { state: 'idle' } : { state: 'unknown' };
 }
 
 /** Why a workerless listener may not be paused now, or nothing when it may (it is idle and settled). */
 export function holdsJob(log: ListenerLog, now: number): string | void {
-  if (log.state === 'unknown') return 'its _diag log could not be read, so a job it was just handed cannot be ruled out';
+  if (log.state === 'unknown') return "its _diag log could not be read or is not a listening runner's, so a job it was just handed cannot be ruled out";
   if (log.at === undefined) return;
   if (log.state === 'job' && now - log.at < STALE_JOB_MS) return `its log says it was handed a job at ${new Date(log.at).toISOString()} and has no worker yet`;
   if (log.state === 'idle' && now - log.at < SETTLE_MS) return 'its last job ended moments ago, when a queued one is handed over';
 }
 
-/** The last 64 KB of the newest <root>/_diag/Runner_*.log (the listener's own log), or undefined when there is none. */
+/** How much of a listener's log is read. */
+export const LOG_TAIL = 64 * 1024;
+
+/** The last 64 KB of the last-written <root>/_diag/Runner_*.log (the running listener's), or undefined when there is none. */
 export function readListenerLog(root: string): string | undefined {
   try {
     const dir = path.join(root, '_diag');
-    const name = fs.readdirSync(dir).filter((f) => /^Runner_.*\.log$/.test(f)).sort().at(-1);
+    const logs = fs.readdirSync(dir).filter((f) => /^Runner_.*\.log$/.test(f));
+    const mtime = (f: string) => fs.statSync(path.join(dir, f)).mtimeMs;
+    const name = logs.map((f) => ({ f, at: mtime(f) })).sort((a, b) => a.at - b.at || a.f.localeCompare(b.f)).at(-1)?.f;
     if (!name) return undefined;
     const fd = fs.openSync(path.join(dir, name), 'r');
     try {
       const size = fs.fstatSync(fd).size;
-      const len = Math.min(size, 64 * 1024);
+      const len = Math.min(size, LOG_TAIL);
       const buf = Buffer.alloc(len);
       fs.readSync(fd, buf, 0, len, size - len);
       return buf.toString('utf8');
