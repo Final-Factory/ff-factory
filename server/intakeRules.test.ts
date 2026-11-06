@@ -392,7 +392,7 @@ test("crash-fix policy (w1827): only FFBox's facts route a crash or hang, its tr
   assert.deepEqual(intakeSettings({}).ffbox.crash, { enabled: true, maxPerDay: 10 });
   assert.deepEqual(intakeSettings({ intake: { ffbox: { crash: { enabled: false, maxPerDay: 500 } } } } as never).ffbox.crash, { enabled: false, maxPerDay: 100 });
   // The policy: reproduce or show the path, a red-then-green test, merge on green, the 1% cost rule, FFBox's wrong cause.
-  for (const re of [/reproduce the crash or hang/, /faulty code path/, /fails on origin\/master and passes with the fix/, /once CI is green/, /less than 1% of master's value/, /PERF-ESCALATION: PR #<n>/, /close FFBox's PR with the reason/, /NOT-A-BUG/, /`Report: <report id>`/]) assert.match(CRASH_FIX_POLICY, re);
+  for (const re of [/reproduce the crash or hang/, /faulty code path/, /fails on origin\/master and passes with the fix/, /once CI is green/, /less than 1% of master's value/, /PERF-ESCALATION: PR #<n>/, /Fix it in place: fetch its ffbox\/ branch fresh/, /close this PR as superseded/, /NOT-A-BUG/, /`Report: <report id>`/]) assert.match(CRASH_FIX_POLICY, re);
   // set_app_config's intake.ffbox block takes it, checked like desync.
   assert.deepEqual(checkFfboxIntake({ crash: { enabled: false, maxPerDay: 4 } }), { crash: { enabled: false, maxPerDay: 4 } });
   assert.throws(() => checkFfboxIntake({ crash: { cap: 1 } }), /intake\.ffbox\.crash: unknown key/);
