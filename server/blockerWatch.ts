@@ -28,7 +28,7 @@ import { lastOpenLine, personWaitOn, portalWaitIn, reportAt, requestWaitOf, sibl
 import type { SessionInfo, WorkBlocker, WorkItem } from '../shared/types.ts';
 import type { RoomNow } from './placement.ts';
 import { steamShortIn } from '../shared/capacity.ts';
-import { awaitsOnlyAway, awayLabelsOf, awayNote, isAwayLeg, offlineLabels, type Leg } from '../machine/awayRunners.ts';
+import { awaitsOnlyAway, awayLabelsOf, awayNote, isAwayLeg, offlineByMachine, offlineLabels, type Leg } from '../machine/awayRunners.ts';
 
 const EVERY_MS = 60_000;
 /**
@@ -581,7 +581,7 @@ export class BlockerWatch {
     let state: CiState | undefined;
     let why = 'no answer';
     try {
-      state = await (this.d.ci ? this.d.ci(ref, person) : ghChecks(ref, ghRunner(person, `CI on ${ref}`)));
+      state = await (this.d.ci ? this.d.ci(ref, person) : ghChecks(ref, ghRunner(person, `CI on ${ref}`), this.d.online));
     } catch (e) {
       why = clipLine((e as Error).message, 300);
     }
@@ -757,11 +757,11 @@ export async function ghMerge(ref: string, head: string, run: Runner = runProc, 
   if (r.code !== 0) throw new Error(`gh pr merge ${ref}: ${ghSaid(r)}`);
 }
 
-export async function ghChecks(ref: string, run: Runner = runProc): Promise<CiState> {
+export async function ghChecks(ref: string, run: Runner = runProc, online?: (machineId: string) => boolean | undefined): Promise<CiState> {
   const m = CI_REF.exec(ref);
   if (!m) throw new Error(`"${ref}" is not a pull request (owner/repo#123)`);
   const opts = { timeoutMs: 30_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } };
-  const away = await awayNow(m[1], run, opts);
+  const away = await awayNow(m[1], run, opts, online);
   const r = await run('gh', ['pr', 'view', m[2], '-R', m[1], '--json', 'state,statusCheckRollup'], opts);
   if (r.code === 0) return checksState(JSON.parse(r.stdout) as { state?: string; statusCheckRollup?: GhCheck[] }, ref, away);
   const p = await run('gh', ['pr', 'view', m[2], '-R', m[1], '--json', 'state,headRefOid'], opts);
@@ -789,16 +789,17 @@ export async function ghChecks(ref: string, run: Runner = runProc): Promise<CiSt
   return settled && s.green ? { ...s, text: s.text + awayNote(settled, away) } : s;
 }
 
-/** w3147: the away labels (machine/awayRunners.ts) of `repo` whose runners are all offline now; none when unreadable. */
-async function awayNow(repo: string, run: Runner, opts: RunOptions): Promise<readonly string[]> {
+/** w3147: the away labels (machine/awayRunners.ts) of `repo` whose runners are all offline now; when the runner list is unreadable, those whose FF Factory machine is offline. */
+async function awayNow(repo: string, run: Runner, opts: RunOptions, online?: (machineId: string) => boolean | undefined): Promise<readonly string[]> {
   const labels = awayLabelsOf(repo);
   if (!labels.length) return [];
   const r = await run('gh', ['api', `repos/${repo}/actions/runners?per_page=100`], opts);
-  if (r.code !== 0) return [];
+  // The runner list needs Administration: read, which the portal's tokens lack: then FF Factory's own link to the machine.
+  if (r.code !== 0) return offlineByMachine(labels, online);
   try {
     return offlineLabels(JSON.parse(r.stdout) as Parameters<typeof offlineLabels>[0], labels);
   } catch {
-    return [];
+    return offlineByMachine(labels, online);
   }
 }
 

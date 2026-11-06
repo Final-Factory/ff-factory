@@ -8,6 +8,19 @@
 /** Runner labels, by repository, whose queued legs do not hold CI while every runner carrying the label is offline. */
 export const AWAY_LABELS: Record<string, readonly string[]> = { 'Final-Factory/ffu': ['ffu-macos'] };
 
+/**
+ * The FF Factory machine whose runners carry each away label. Listing a repository's self-hosted runners needs its
+ * Administration: read permission, which the portal's fine-grained tokens lack (measured 2026-11-06 04:45Z: no ffu CI wait
+ * settled after #829 deployed); FF Factory's own link to that machine stands in when the runner list cannot be read.
+ */
+export const AWAY_MACHINES: Record<string, string> = { 'ffu-macos': 'm3' };
+
+/** The labels of `labels` whose machine FF Factory sees offline (`online` answers false; undefined, an unknown machine, is not away). */
+export function offlineByMachine(labels: readonly string[], online?: (machineId: string) => boolean | undefined): string[] {
+  if (!online) return [];
+  return labels.filter((l) => AWAY_MACHINES[l] !== undefined && online(AWAY_MACHINES[l]) === false);
+}
+
 export function awayLabelsOf(repo: string): readonly string[] {
   const k = Object.keys(AWAY_LABELS).find((r) => r.toLowerCase() === repo.toLowerCase());
   return k ? AWAY_LABELS[k] : [];
