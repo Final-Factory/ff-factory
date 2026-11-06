@@ -1,6 +1,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { evidenceArgs, evidenceGated, evidencePython, evidenceRefusal, evidenceVerdict, findPrEvidence, noScriptRefusal } from '../machine/evidenceGate.ts';
 import { repoIsPublic } from './publicGit.ts';
+import { checkStrayWrite } from './strayWrite.ts';
 import { checkOffDriveScan, checkOutsideRootDelete } from './rootFence.ts';
 import { headBranch, isUrgentBranch } from './releaseHandBack.ts';
 import fs from 'node:fs';
@@ -223,6 +224,11 @@ export function sandboxGuard(opts: {
         const t = norm(target);
         for (const p of protectedPaths) {
           if (t === p || t.startsWith(p + '/')) return deny(`${target} is inside protected path ${p}.`);
+        }
+        // w3257: no new file outside the sandbox and the worker's own temp folder (a probe at a guessed path stays behind).
+        if (tool === 'Write' && opts.workerRoot && opts.env?.TMPDIR) {
+          const stray = checkStrayWrite(target, { sandbox: opts.sandboxPath, temp: opts.env.TMPDIR, home: opts.home ?? os.homedir() });
+          if (stray) return deny(stray);
         }
       }
     }
