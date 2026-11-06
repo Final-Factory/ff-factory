@@ -162,6 +162,17 @@ export interface PersonMessageMark {
   answers?: Answered[];
 }
 
+/** A message of the person's own orchestrator that waits for them (SessionInfo.forYou, w3253, shared/forYou.ts). */
+export interface ForYouMark {
+  /** forYouId(seq). */
+  id: string;
+  /** The orchestrator's message in its chat. */
+  seq: number;
+  at: string;
+  /** Its words without the mark, at most FOR_YOU_CHARS. */
+  text: string;
+}
+
 export interface SessionInfo {
   id: string;
   kind: SessionKind;
@@ -251,6 +262,11 @@ export interface SessionInfo {
    * (w1546): opening or writing to the chat, and the orchestrator relaying one, leave them unread.
    */
   personMessages?: PersonMessageMark[];
+  /**
+   * A person's own orchestrator: its messages marked "[for you]" that wait for the person (w3253), oldest first. In the
+   * same bubble until the person replies to one, the orchestrator closes it (close_question) or the person clears it.
+   */
+  forYou?: ForYouMark[];
   /**
    * Where this chat's transcript was (its last seq) when it last messaged each person, by lowercased user id (w2758): their
    * [person message]s after it are the ones a message to them may answer (Orchestrators.answersFor).

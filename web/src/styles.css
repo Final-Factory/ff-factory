@@ -1617,6 +1617,19 @@ select.input {
   overflow-wrap: anywhere;
 }
 
+/* An orchestrator message marked "[for you]" (w3253): a tag over its words in the chat, as it waits in the bubble. */
+.msg-for-you {
+  display: inline-block;
+  margin-bottom: var(--s-1);
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--amber-soft);
+  border: 1px solid var(--amber);
+  color: var(--amber);
+  font-size: var(--fs-xs);
+  font-weight: 620;
+}
+
 .pmsg-text .md > :first-child {
   margin-top: 0;
 }

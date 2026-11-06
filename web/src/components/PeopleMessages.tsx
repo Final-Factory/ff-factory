@@ -1,27 +1,51 @@
 import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { enterAction } from '../../../shared/keys';
 import { PERSON_MESSAGE_CHARS } from '../../../shared/replies';
-import type { PersonMessageMark, SessionInfo } from '../../../shared/types';
+import type { ForYouMark, PersonMessageMark, SessionInfo } from '../../../shared/types';
 import { api } from '../api';
 import { holdReload } from '../freshness';
 import { useKeptState } from '../keep';
-import { attempt, focusEvent, hidePersonMessages, useStore } from '../store';
-import { fmtClock, fmtRelative, useNow } from '../util';
+import { attempt, focusEvent, hidePersonMessages, startReply, useStore } from '../store';
+import { fmtClock, fmtRelative, navigate, useNow } from '../util';
 import { onScreenKeyboard } from '../viewport';
 import { useTextareaDictation } from '../voice/useTextareaDictation';
 import { AnsweredQuotes } from './AnsweredQuotes';
 import { Markdown } from './Markdown';
+import { glance } from './MessageActions';
 import { DictationBar, MicButton } from './Mic';
 import { Icon } from './ui';
 
 /** How long a clear can be undone before the server hears of it. */
 export const UNDO_MS = 6000;
 
+/** Who a "[for you]" message is from, as the bubble says it (w3253). */
+export const YOUR_ORCHESTRATOR = 'your orchestrator';
+
+/**
+ * One row of the bubble: a message from another person (`pm`), or one of this chat's own orchestrator's "[for you]"
+ * messages (`mine`, w3253), which waits here until its person replies to it or clears it.
+ */
+export interface BubbleItem {
+  id: string;
+  from: string;
+  at: string;
+  text?: string;
+  pm?: PersonMessageMark;
+  mine?: ForYouMark;
+}
+
 const idOf = (m: PersonMessageMark) => m.id ?? m.at;
 
+/** What the bubble holds, oldest first: other people's messages and the orchestrator's own "[for you]" ones. */
+export function bubbleItems(session: Pick<SessionInfo, 'personMessages' | 'forYou'> | undefined): BubbleItem[] {
+  const people = (session?.personMessages ?? []).map((m): BubbleItem => ({ id: idOf(m), from: m.from.displayName, at: m.at, text: m.text, pm: m }));
+  const mine = (session?.forYou ?? []).map((m): BubbleItem => ({ id: m.id, from: YOUR_ORCHESTRATOR, at: m.at, text: m.text, mine: m }));
+  return [...people, ...mine].sort((a, b) => a.at.localeCompare(b.at));
+}
+
 /** The messages still unread here: those the bubble cleared and can still undo are left out (the sidebar's count too). */
-export function unreadHere(list: readonly PersonMessageMark[] | undefined, clearing: readonly string[] | undefined): PersonMessageMark[] {
-  return (list ?? []).filter((m) => !clearing?.includes(idOf(m)));
+export function unreadHere(list: readonly BubbleItem[] | undefined, clearing: readonly string[] | undefined): BubbleItem[] {
+  return (list ?? []).filter((m) => !clearing?.includes(m.id));
 }
 
 /** How long "Sent to <name>" stays in the bubble after a reply (w1831). */
@@ -31,8 +55,8 @@ export const SENT_MS = 4000;
 const UNDO_SETTLE_MS = 700;
 
 /** "Ben", "Ben and Cara", "Ben, Cara and Dee": who the unread messages are from, in the order they came. */
-export function senders(list: readonly PersonMessageMark[]): string {
-  const names = [...new Set(list.map((m) => m.from.displayName))];
+export function senders(list: readonly Pick<BubbleItem, 'from'>[]): string {
+  const names = [...new Set(list.map((m) => m.from))];
   return names.length < 2 ? (names[0] ?? '') : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`;
 }
 
@@ -45,7 +69,7 @@ export function senders(list: readonly PersonMessageMark[]): string {
  * closed within those seconds leaves the message unread.
  */
 export const PeopleMessages = memo(function PeopleMessages({ session }: { session: SessionInfo }) {
-  const all = session.personMessages ?? [];
+  const all = bubbleItems(session);
   const [open, setOpen] = useState(false);
   // The message whose reply box is open (w1831): one at a time.
   const [replying, setReplying] = useState<string | null>(null);
@@ -76,9 +100,9 @@ export const PeopleMessages = memo(function PeopleMessages({ session }: { sessio
     const events = open ? s.transcripts[session.id] : undefined;
     if (!events) return '';
     for (const m of all) {
-      if (!m.text) continue;
+      if (!m.pm?.text) continue;
       const e = events.findLast((x) => x.kind === 'user' && x.from === 'system' && x.text.startsWith('[person message]') && x.text.includes(m.text!));
-      if (e) out[idOf(m)] = e.seq;
+      if (e) out[m.id] = e.seq;
     }
     return JSON.stringify(out);
   });
@@ -127,7 +151,7 @@ export const PeopleMessages = memo(function PeopleMessages({ session }: { sessio
   useEffect(() => {
     if (!list.length) setOpen(false);
   }, [list.length]);
-  const cleared = undo ? all.filter((m) => undo.ids.includes(idOf(m))).length : 0;
+  const cleared = undo ? all.filter((m) => undo.ids.includes(m.id)).length : 0;
   if (!list.length && !cleared && !sent) return null;
 
   const latest = list.at(-1);
@@ -136,8 +160,8 @@ export const PeopleMessages = memo(function PeopleMessages({ session }: { sessio
       type="button"
       className={`btn btn-ghost btn-sm pmsg-clear-all${calm ? ' pmsg-calm' : ''}`}
       onPointerLeave={() => setCalm(false)}
-      onClick={() => Date.now() - undoneAt.current > UNDO_SETTLE_MS && clear(list.map(idOf))}
-      title="Mark them all read: they stay in the chat, and your orchestrator has them">
+      onClick={() => Date.now() - undoneAt.current > UNDO_SETTLE_MS && clear(list.map((m) => m.id))}
+      title="Take them all off this list: they stay in the chat, and your orchestrator has them">
       <Icon name="check" size={14} /> Clear all
     </button>
   );
@@ -172,11 +196,12 @@ export const PeopleMessages = memo(function PeopleMessages({ session }: { sessio
           <>
             <ol className="pmsg-list">
               {list.map((m) => {
-                const seq = seqs[idOf(m)];
+                const seq = m.mine?.seq ?? seqs[m.id];
+                const who = m.mine ? 'Your orchestrator' : m.from;
                 return (
-                  <li key={idOf(m)} className="pmsg-item" data-testid="people-message">
+                  <li key={m.id} className={`pmsg-item${m.mine ? ' pmsg-mine' : ''}`} data-testid="people-message" data-kind={m.mine ? 'for-you' : 'person'}>
                     <div className="pmsg-head">
-                      <span className="pmsg-from">{m.from.displayName}</span>
+                      <span className="pmsg-from">{who}</span>
                       <time dateTime={m.at} title={fmtClock(m.at)}>
                         {fmtRelative(m.at, now)}
                       </time>
@@ -187,30 +212,64 @@ export const PeopleMessages = memo(function PeopleMessages({ session }: { sessio
                             Show in chat
                           </button>
                         )}
+                        {m.mine ? (
+                          // Your own orchestrator's message (w3253): Reply quotes it in the message box, as a reply in the chat does,
+                          // and sending that reply takes it off this list.
+                          <button
+                            type="button"
+                            className="btn btn-ghost btn-xs"
+                            onClick={() => {
+                              startReply(session.id, { seq: m.mine!.seq, from: 'Orchestrator', excerpt: glance(m.mine!.text) });
+                              setOpen(false);
+                            }}
+                            title="Answer it in the message box below: sending your answer takes it off this list"
+                            aria-label="Reply to your orchestrator"
+                            data-testid="pmsg-reply">
+                            <Icon name="reply" size={13} /> Reply
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            className="btn btn-ghost btn-xs"
+                            aria-expanded={replying === m.id}
+                            onClick={() => setReplying((r) => (r === m.id ? null : m.id))}
+                            title={`Answer ${m.from} here: it goes straight to them, and shows in your chat`}
+                            aria-label={`Reply to ${m.from}`}
+                            data-testid="pmsg-reply">
+                            <Icon name="reply" size={13} /> Reply
+                          </button>
+                        )}
                         <button
                           type="button"
                           className="btn btn-ghost btn-xs"
-                          aria-expanded={replying === idOf(m)}
-                          onClick={() => setReplying((r) => (r === idOf(m) ? null : idOf(m)))}
-                          title={`Answer ${m.from.displayName} here: it goes straight to them, and shows in your chat`}
-                          aria-label={`Reply to ${m.from.displayName}`}
-                          data-testid="pmsg-reply">
-                          <Icon name="reply" size={13} /> Reply
-                        </button>
-                        <button type="button" className="btn btn-ghost btn-xs" onClick={() => clear([idOf(m)])} title="Mark it read: it stays in the chat, and your orchestrator has it" aria-label={`Clear the message from ${m.from.displayName}`}>
+                          onClick={() => clear([m.id])}
+                          title={m.mine ? 'Take it off this list: it stays in the chat' : 'Mark it read: it stays in the chat, and your orchestrator has it'}
+                          aria-label={`Clear the message from ${who}`}>
                           <Icon name="check" size={13} /> Clear
                         </button>
                       </span>
                     </div>
-                    <AnsweredQuotes answers={m.answers} whose="your" />
+                    <AnsweredQuotes answers={m.pm?.answers} whose="your" />
                     <div className="pmsg-text">{m.text ? <Markdown text={m.text} /> : <p className="pmsg-old">Sent before this box kept the words: it is in the conversation above.</p>}</div>
-                    {replying === idOf(m) && <ReplyBox sessionId={session.id} mark={m} onClose={() => setReplying(null)} onSent={replied} />}
+                    {m.pm && replying === m.id && <ReplyBox sessionId={session.id} mark={m.pm} onClose={() => setReplying(null)} onSent={replied} />}
                   </li>
                 );
               })}
             </ol>
             <div className="pmsg-foot">
-              <p>Clearing marks a message read. It stays in the conversation, and your orchestrator already has it.</p>
+              <p>
+                Clearing takes a message off this list. It stays in the conversation, and your orchestrator already has it.
+                {/* Its ask_person questions wait as cards on the Waiting on input tab (w1868): linked, never listed twice (w3253). */}
+                {session.openAsks?.length ? (
+                  <>
+                    {' '}
+                    <button type="button" className="link-btn" onClick={() => navigate({ view: 'dispatcher', tab: 'waiting' })} data-testid="pmsg-questions">
+                      Its questions wait on the Waiting on input tab
+                    </button>
+                    .
+                  </>
+                ) : null}
+              </p>
               {clearAll}
             </div>
           </>
