@@ -935,7 +935,9 @@ export class Daemon {
   /** What a clean-up worker may delete is judged by the ledger's facts, not by a list in its brief (server/cleanupFolders.ts, w1379). */
   private cleanupFacts(): CleanupFacts {
     const c = this.cfg;
-    const sessionIds = [...this.entries.keys()].filter((id) => this.sessionLive(id));
+    // w3217: a session whose agent host runs counts even with no entry here (one not adopted, or not yet listed).
+    const hosted = this.hosted ? hostFolders(this.hostsRoot).map((h) => h.sessionId) : [];
+    const sessionIds = [...new Set([...this.entries.keys(), ...hosted])].filter((id) => this.sessionLive(id));
     return {
       at: new Date().toISOString(),
       connected: this.ws?.readyState === WebSocket.OPEN && this.welcomed,
@@ -949,6 +951,7 @@ export class Daemon {
       ...(this.staleCtx ? { contextAt: this.staleCtx.at } : {}),
       // The last pass's free space against the soft threshold: ff-leftovers folders gives a finished worker's bulk minutes, not a day (w2223).
       ...(this.cleaner.last ? { low: !!this.cleaner.last.belowSoft } : {}),
+      ...(this.timed ? { timedRuns: this.timed.active() } : {}),
     };
   }
 
