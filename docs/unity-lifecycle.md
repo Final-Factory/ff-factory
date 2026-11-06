@@ -381,8 +381,12 @@ w1832), the daemon:
   `Runner.Listener` is the idle baseline; a running `Runner.Worker` is a job. Each idle listener gets SIGSTOP, so it takes
   no job, and SIGCONT when the turn ends; a listener running a job is never paused (it renews the job's lock with GitHub)
   and is paused once its job ends, while the game repo's `bench_queue.py` (`wait_for_ci_quiet`) makes the timing wait for
-  that job (20 minutes at most) and records the turn's runners in its history. A listener that took a job in the instant
-  it was paused is continued at once. A process run from a runner's `_work` folder that no worker started is a leftover:
+  that job (20 minutes at most) and records the turn's runners in its history. No worker is not yet idle (w3195): with a
+  CI queue a listener is handed its next job in the second the last one ends and starts the worker only after acquiring
+  it, so a listener is paused only when its own log (`<runner>/_diag/Runner_*.log`) says it listens and has for 10 s
+  (`SETTLE_MS`), and is continued at once when that log took a job as the pause landed (biscuit, 2026-11-06 15:06:11Z:
+  ffu-biscuit-3 was paused between "Acknowledging runner request" and acquirejob, and job 127943935420 lost
+  communication 10 minutes later). A listener whose log cannot be read is not paused. A process run from a runner's `_work` folder that no worker started is a leftover:
   SIGTERM, never forced. What was paused and ended is in `<root>/tmp/bench.queue/runners.json`, so a daemon restarted
   mid-turn continues them. Windows has no SIGSTOP: its runners are waited out, not paused.
 - **holds the rest as before**: `unity start` queues (a shared ticket), builds, batch compiles and the editor's compiles,

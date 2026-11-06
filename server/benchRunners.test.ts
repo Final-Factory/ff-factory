@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { BenchRunners, runnerCensus, type BenchRunnersDeps, type RunnersState } from '../machine/benchRunners.ts';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { BenchRunners, holdsJob, listenerLog, readListenerLog, runnerCensus, SETTLE_MS, type BenchRunnersDeps, type RunnersState } from '../machine/benchRunners.ts';
 import type { Proc } from '../machine/unity.ts';
 
 /**
@@ -20,6 +23,9 @@ const JOB: Proc[] = [
 ];
 const LEFTOVER: Proc = { pid: 700, ppid: 1, cmd: `${H}/actions-runner/_work/ffu/ffu/target/debug/ffu-server --listen 127.0.0.1:0 ffu-peers-test` };
 const OTHER: Proc[] = [{ pid: 800, ppid: 1, cmd: '/System/Library/mediaanalysisd' }];
+const NOW = Date.parse('2026-11-04T15:35:00Z');
+/** A listener that finished its last job long before the turn and has listened since. */
+const IDLE_LOG = '[2026-11-04 14:00:00Z INFO Terminal] WRITE LINE: 2026-11-04 14:00:00Z: Job check completed with result: Succeeded\n';
 
 function harness(o: { platform?: NodeJS.Platform; state?: RunnersState } = {}) {
   const s = {
@@ -27,6 +33,11 @@ function harness(o: { platform?: NodeJS.Platform; state?: RunnersState } = {}) {
     procs: [...LISTENERS, ...JOB, LEFTOVER, ...OTHER] as Proc[],
     /** A listing to give right after the next pause (a job taken in that instant). */
     afterPause: undefined as Proc[] | undefined,
+    /** Each runner root's listener log tail (absent: IDLE_LOG; null: unreadable). */
+    diag: {} as Record<string, string | null>,
+    /** A log to give a root once its listener (pid) is paused (a job line written as the pause landed). */
+    diagAfterPause: undefined as { pid: number; root: string; log: string } | undefined,
+    now: NOW,
     signals: [] as string[],
     written: [] as RunnersState[],
     log: [] as string[],
@@ -46,10 +57,17 @@ function harness(o: { platform?: NodeJS.Platform; state?: RunnersState } = {}) {
     signal: (pid, sig) => {
       s.signals.push(`${sig} ${pid}`);
     },
+    diag: (root) => {
+      const rel = root.slice(H.length + 1);
+      const a = s.diagAfterPause;
+      if (a && a.root === rel && s.signals.includes(`SIGSTOP ${a.pid}`)) s.diag[rel] = a.log;
+      const v = s.diag[rel];
+      return v === null ? undefined : (v ?? IDLE_LOG);
+    },
     read: () => o.state,
     write: (st) => s.written.push(JSON.parse(JSON.stringify(st))),
     log: (t) => s.log.push(t),
-    now: () => Date.parse('2026-11-04T15:35:00Z'),
+    now: () => s.now,
     platform: o.platform ?? 'darwin',
   };
   return { s, r: new BenchRunners(d) };
@@ -128,4 +146,99 @@ test('w3112: Windows runners are not paused (no SIGSTOP): the turn says so once'
   assert.deepEqual(s.signals, []);
   assert.equal(s.listings, 0);
   assert.equal(s.log.filter((l) => /Windows has no SIGSTOP/.test(l)).length, 1);
+});
+
+// w3195: ffu-biscuit-3's own log (_diag/Runner_20261106-073706-utc.log) as w3153's exclusive turn t00003111 paused it: the
+// check-release job ended, the queued check job was acknowledged in the same second, and the listener was paused before
+// its acquirejob came back (the next line is 15:25:27Z, "already acquired"; job 127943935420 lost communication at 15:16).
+const BISCUIT_3 = [
+  '[2026-11-06 15:06:11Z INFO Terminal] WRITE LINE: 2026-11-06 15:06:11Z: Job check-release completed with result: Succeeded',
+  '[2026-11-06 15:06:11Z INFO JobDispatcher] Stop renew job request for job 4eae2ede-db0f-517b-ac95-a12979785c08.',
+  '[2026-11-06 15:06:11Z INFO BrokerMessageListener] Received job status event. JobState: Online',
+  "[2026-11-06 15:06:11Z INFO BrokerMessageListener] Acknowledging runner request '1a5b1101-1f6a-51ed-a9fb-96301946184d'.",
+  '[2026-11-06 15:06:11Z INFO ConfigurationStore] HasCredentials()',
+  '[2026-11-06 15:06:11Z INFO GitHubActionsService] AAD Correlation ID for this token request: Unknown',
+  '',
+].join('\n');
+const PAUSED_AT = Date.parse('2026-11-06T15:06:14Z');
+
+test('w3195: a listener log says whether it holds a job: the newest job or idle line decides', () => {
+  const l = listenerLog(BISCUIT_3);
+  assert.equal(l.state, 'job');
+  assert.equal(l.at, Date.parse('2026-11-06T15:06:11Z'));
+  assert.match(holdsJob(l, PAUSED_AT) ?? '', /handed a job at 2026-11-06T15:06:11/);
+  // the job ended moments ago: the queued one may be on its way
+  const ended = listenerLog(BISCUIT_3.split('\n')[0]);
+  assert.equal(ended.state, 'idle');
+  assert.match(holdsJob(ended, Date.parse('2026-11-06T15:06:14Z')) ?? '', /ended moments ago/);
+  assert.equal(holdsJob(ended, Date.parse('2026-11-06T15:06:11Z') + SETTLE_MS), undefined);
+  // a job line past GitHub's 10-minute lock with no worker is gone; a tail with no job line has listened all along
+  assert.equal(holdsJob(l, Date.parse('2026-11-06T15:19:00Z')), undefined);
+  assert.deepEqual(listenerLog('[2026-11-06 15:06:11Z INFO ConfigurationStore] HasCredentials()\n'), { state: 'idle' });
+  assert.equal(listenerLog(undefined).state, 'unknown');
+  assert.match(holdsJob(listenerLog(undefined), PAUSED_AT) ?? '', /could not be read/);
+  // a restarted runner says it listens
+  assert.equal(listenerLog('[2026-11-02 20:29:52Z INFO Terminal] WRITE LINE: 2026-11-02 20:29:52Z: Listening for Jobs\n').state, 'idle');
+});
+
+test('w3195: a listener handed its next job (acknowledged, no worker yet) is not paused, and is paused once it is idle', async () => {
+  const { s, r } = harness();
+  s.procs = [...LISTENERS, ...OTHER]; // no Runner.Worker anywhere: the old census called all three idle
+  s.diag['ffu-runner'] = BISCUIT_3;
+  s.now = PAUSED_AT;
+  s.holder = { ticket: 't00003111' };
+  await r.tick();
+  assert.deepEqual(s.signals, ['SIGSTOP 501', 'SIGSTOP 503']);
+  assert.deepEqual(r.paused().map((p) => p.pid), [501, 503]);
+  assert.equal(s.log.filter((l) => /listener pid 502\) not paused yet: its log says it was handed a job/.test(l)).length, 1);
+  // its worker starts and runs the job; the next looks leave it alone and say nothing more
+  s.procs = [...LISTENERS, { pid: 630, ppid: 502, cmd: `${H}/ffu-runner/bin/Runner.Worker spawnclient 1 2` }];
+  s.signals = [];
+  await r.tick();
+  assert.deepEqual(s.signals, []);
+  // the job ends: not in the same breath (a queued one comes within a second), but once it has settled
+  s.procs = [...LISTENERS, ...OTHER];
+  s.now = Date.parse('2026-11-06T15:10:00Z');
+  s.diag['ffu-runner'] = `${BISCUIT_3}[2026-11-06 15:09:58Z INFO Terminal] WRITE LINE: 2026-11-06 15:09:58Z: Job check completed with result: Succeeded\n`;
+  await r.tick();
+  assert.deepEqual(s.signals, []);
+  s.now = Date.parse('2026-11-06T15:10:10Z');
+  await r.tick();
+  assert.deepEqual(s.signals, ['SIGSTOP 502']);
+  assert.deepEqual(r.paused().map((p) => p.pid), [501, 503, 502]);
+});
+
+test('w3195: a listener whose log took a job as the pause landed is continued at once', async () => {
+  const { s, r } = harness();
+  s.procs = [...LISTENERS, ...OTHER];
+  s.diag['ffw/ffu-runners/ffu-m3-2'] = BISCUIT_3.split('\n')[0] + '\n'; // its job ended at 15:06:11 ...
+  s.now = Date.parse('2026-11-06T15:06:30Z');
+  s.diagAfterPause = { pid: 503, root: 'ffw/ffu-runners/ffu-m3-2', log: BISCUIT_3 }; // ... and it acknowledged the next one as it was paused
+  s.holder = { ticket: 't00003111' };
+  await r.tick();
+  assert.deepEqual(s.signals, ['SIGSTOP 501', 'SIGSTOP 502', 'SIGSTOP 503', 'SIGCONT 503']);
+  assert.deepEqual(r.paused().map((p) => p.pid), [501, 502]);
+  assert.ok(s.log.some((l) => /ffu-m3-2 \(listener pid 503\) took a job as it was paused: continued/.test(l)));
+});
+
+test('w3195: a listener whose log cannot be read is not paused (a job it holds cannot be ruled out)', async () => {
+  const { s, r } = harness();
+  s.procs = [...LISTENERS, ...OTHER];
+  s.diag['actions-runner'] = null;
+  s.holder = { ticket: 't00003111' };
+  await r.tick();
+  assert.deepEqual(s.signals, ['SIGSTOP 502', 'SIGSTOP 503']);
+  assert.ok(s.log.some((l) => /listener pid 501\) not paused yet: its _diag log could not be read/.test(l)));
+});
+
+test('w3195: readListenerLog reads the tail of the newest Runner_*.log in <root>/_diag', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'runner-'));
+  assert.equal(readListenerLog(root), undefined);
+  fs.mkdirSync(path.join(root, '_diag'));
+  fs.writeFileSync(path.join(root, '_diag', 'Runner_20261104-060908-utc.log'), IDLE_LOG);
+  fs.writeFileSync(path.join(root, '_diag', 'Runner_20261106-073706-utc.log'), 'x'.repeat(100 * 1024) + '\n' + BISCUIT_3);
+  fs.writeFileSync(path.join(root, '_diag', 'Worker_20261106-150436-utc.log'), IDLE_LOG);
+  const tail = readListenerLog(root) ?? '';
+  assert.equal(tail.length, 64 * 1024);
+  assert.equal(listenerLog(tail).state, 'job');
 });
