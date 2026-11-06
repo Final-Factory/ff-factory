@@ -16,6 +16,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ghEnvFor, readGhAppTokens, remotesOf } from './ghApp.ts';
+import { awaitsOnlyAway, awayLabelsOf, awayNote, isAwayLeg, offlineLabels, type Leg } from './awayRunners.ts';
 import { evidenceArgs, evidenceGated, evidencePython, evidenceRefusal, evidenceVerdict, findLocalPrEvidence, noScriptRefusal } from './evidenceGate.ts';
 
 export interface Ran {
@@ -142,14 +143,53 @@ function repoOf(url: string): string {
   return /github\.com\/([^/]+\/[^/]+)\/pull\//.exec(url)?.[1] ?? '<owner/repo>';
 }
 
-function headRuns(d: PrDeps, sha: string): WorkflowRun[] | string {
+function headRuns(d: PrDeps, sha: string, repo?: string): WorkflowRun[] | string {
   const r = d.run('gh', ['run', 'list', '--commit', sha, '--json', 'databaseId,name,workflowName,status,conclusion', '-L', '100']);
   if (r.code !== 0) return (r.err || r.out).trim().split('\n').slice(-3).join(' ');
+  let runs: WorkflowRun[];
   try {
-    return JSON.parse(r.out) as WorkflowRun[];
+    runs = JSON.parse(r.out) as WorkflowRun[];
   } catch {
     return 'gh run list answered no JSON';
   }
+  if (repo) settleAwayRuns(d, repo, runs);
+  return runs;
+}
+
+/**
+ * w3147 (machine/awayRunners.ts): a run that waits only on legs queued for an away runner label, every runner of it offline,
+ * counts as a green finish, so ff-pr merges an ffu PR on green Linux and Windows legs while the m3 is off. In place.
+ */
+export function settleAwayRuns(d: Pick<PrDeps, 'run'>, repo: string, runs: WorkflowRun[]): number {
+  const labels = awayLabelsOf(repo);
+  if (!labels.length || runs.every((w) => w.status === 'completed')) return 0;
+  const rr = d.run('gh', ['api', `repos/${repo}/actions/runners?per_page=100`]);
+  let away: string[] = [];
+  try {
+    if (rr.code === 0) away = offlineLabels(JSON.parse(rr.out) as Parameters<typeof offlineLabels>[0], labels);
+  } catch {
+    away = [];
+  }
+  if (!away.length) return 0;
+  let legs = 0;
+  for (const w of runs) {
+    if (w.status === 'completed') continue;
+    const j = d.run('gh', ['api', `repos/${repo}/actions/runs/${w.databaseId}/jobs?per_page=100`]);
+    if (j.code !== 0) continue;
+    let jobs: Leg[];
+    try {
+      jobs = (JSON.parse(j.out) as { jobs?: Leg[] }).jobs ?? [];
+    } catch {
+      continue;
+    }
+    if (!awaitsOnlyAway(jobs, away)) continue;
+    const n = jobs.filter((x) => isAwayLeg(x, away)).length;
+    legs += n;
+    w.status = 'completed';
+    w.conclusion = 'success';
+    w.name = `${w.name ?? w.workflowName ?? w.databaseId}${awayNote(n, away)}`;
+  }
+  return legs;
 }
 
 function ciLine(v: CiVerdict): string {
@@ -261,7 +301,7 @@ function prAndCi(d: PrDeps, o: Opts): { pr: Pr; v: CiVerdict } | number {
     d.write(`ff-pr: no PR ${o.pr ? o.pr : 'for this branch'} (gh pr view failed)\n`);
     return 1;
   }
-  const runs = headRuns(d, pr.headRefOid);
+  const runs = headRuns(d, pr.headRefOid, repoOf(pr.url));
   if (typeof runs === 'string') {
     d.write(`ff-pr: ${pr.url}: could not read its CI: ${runs}\n`);
     return 1;
