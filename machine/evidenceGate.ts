@@ -164,3 +164,40 @@ export function evidenceRefusal(repo: string, pr: number | string, code: number,
 /** The refusal when there is no pr_evidence.py to run. */
 export const noScriptRefusal = (repo: string, pr: number | string) =>
   `the Evidence check could not run for ${repo}#${pr}: no pr_evidence.py found (the ff-agents plugin cache, FF_SKILLS or the tools checkout); merge it by hand only after pr_evidence.py --repo ${repo} --pr ${pr} passes`;
+
+/** The game repository, whose pr_evidence.py checks read its HUD pins (lower case). */
+const HUD_REPO = 'final-factory/finalfactory';
+/** Where the game repo keeps them (w2998: ui_layout.py's HUD_DATA_DIR), and the files pr_evidence.py's unity-ui import reads. */
+export const HUD_DATA_DIR = 'scripts/nightly/ui_layout';
+const HUD_FILES = ['hud-pins.json', 'hud-clusters.json'] as const;
+
+export type HudData = { dir: string } | { error: string } | undefined;
+
+/**
+ * w3190: pr_evidence.py reads hud-pins.json from a game checkout (unity-ui's ui_layout.hud_data: $FF_HUD_DATA, $FF_GAME_REPO,
+ * else the working directory's), and the merge-on-green pilot runs it on the portal, in no game checkout: #3229 (w3156) was
+ * refused with "hud-pins.json (or the clusters file) lives in the game repo at scripts/nightly/ui_layout/ (w2998)". So before
+ * the check of a game repo pull request the files are read from GitHub at the pull request's base branch, as it is now (no
+ * clone to go stale), into a fresh folder named to the script as FF_HUD_DATA. The base, not the head: a pin changes only
+ * when the person asks, through a harness PR (hud-pins.json's own "about"), so a PR cannot loosen the pins it is checked
+ * against. Undefined for another repository; an error, naming what gh said, when the pins cannot be read.
+ */
+export async function fetchHudData(repo: string, pr: number | string, run: GitRun, opts: { timeoutMs?: number; env?: NodeJS.ProcessEnv } = {}, tmp: string = os.tmpdir()): Promise<HudData> {
+  if (repo.toLowerCase() !== HUD_REPO) return undefined;
+  const said = (r: { code: number; stdout: string; stderr: string }) => (r.stderr || r.stdout || `exit ${r.code}`).replace(/\s+/g, ' ').trim().slice(0, 200);
+  const p = await run('gh', ['pr', 'view', String(pr), '-R', repo, '--json', 'baseRefName'], opts);
+  let base = '';
+  try { base = p.code === 0 ? String((JSON.parse(p.stdout) as { baseRefName?: unknown }).baseRefName ?? '') : ''; } catch { /* below */ }
+  if (!base) return { error: `its base branch cannot be read: ${said(p)}` };
+  const dir = fs.mkdtempSync(path.join(tmp, 'fff-hud-data-'));
+  for (const f of HUD_FILES) {
+    const r = await run('gh', ['api', '-H', 'Accept: application/vnd.github.raw+json', `repos/${repo}/contents/${HUD_DATA_DIR}/${f}?ref=${encodeURIComponent(base)}`], opts);
+    if (r.code !== 0 || !r.stdout.trim()) {
+      // Only the pins are needed (pr_evidence.py pins()); a missing clusters file leaves the script to say so if it reads it.
+      if (f === 'hud-pins.json') return { error: `${HUD_DATA_DIR}/${f} cannot be read from ${repo} at ${base}: ${said(r)}` };
+      continue;
+    }
+    fs.writeFileSync(path.join(dir, f), r.stdout);
+  }
+  return { dir };
+}

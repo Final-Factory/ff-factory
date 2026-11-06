@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 type PlatformPath = typeof path.posix;
-import { evidenceGated, evidencePython, evidenceVerdict, findPrEvidence, portalPrEvidence, type GitRun } from '../machine/evidenceGate.ts';
+import { evidenceGated, evidencePython, evidenceVerdict, fetchHudData, findPrEvidence, portalPrEvidence, type GitRun } from '../machine/evidenceGate.ts';
 import { prMain, type PrDeps, type Ran } from '../machine/prFlow.ts';
 import { ghMerge } from './blockerWatch.ts';
 import { checkShell, type EvidenceResolver } from './guard.ts';
@@ -145,17 +145,22 @@ test('w3088: evidenceVerdict passes exit 0 only; a FAIL names its reasons withou
   assert.equal(evidenceVerdict(1, PASS, '').ok, false, 'the exit decides, not the text');
 });
 
+/** w3190: what gh answers the game repo's HUD pins fetch with (fetchHudData): the base branch, then each file's text. */
+const PINS = '{"pins":[{"name":"Station Info","element":"StationInfo"}]}';
+const ghSays = (args: string[]) => (args.includes('baseRefName') ? '{"baseRefName":"master"}' : args[0] === 'api' ? PINS : '');
+const notHud = (c: string[]) => !(c[0] === 'gh' && (c.includes('baseRefName') || c[1] === 'api'));
+
 test('w3088: the merge-on-green pilot refuses what the Evidence check fails, and merges what it passes', async () => {
   const runner = (evidence: { code: number; stdout: string; stderr: string }, calls: string[][]) => async (cmd: string, args: string[]) => {
     calls.push([cmd, ...args]);
-    return (cmd === 'gh' ? { code: 0, stdout: '', stderr: '' } : evidence) as never;
+    return (cmd === 'gh' ? { code: 0, stdout: ghSays(args), stderr: '' } : evidence) as never;
   };
   const failed: string[][] = [];
   await assert.rejects(
     ghMerge('Final-Factory/FinalFactory#3180', SHA, runner({ code: 1, stdout: FAIL_3180, stderr: '' }, failed), () => 'pe.py'),
     (e: Error) => /not merged: the Evidence check refused it/.test(e.message) && /PAIR_RESULT/.test(e.message) && /no 'Not verified:' line/.test(e.message),
   );
-  assert.deepEqual(failed, [[evidencePython(), 'pe.py', '--repo', 'Final-Factory/FinalFactory', '--pr', '3180']], 'never merged');
+  assert.deepEqual(failed.filter(notHud), [[evidencePython(), 'pe.py', '--repo', 'Final-Factory/FinalFactory', '--pr', '3180']], 'never merged');
   const usage: string[][] = [];
   await assert.rejects(ghMerge('Final-Factory/FinalFactory#3180', SHA, runner({ code: 2, stdout: '', stderr: USAGE }, usage), () => 'pe.py'), /usage error, exit 2/);
   assert.equal(usage.some((c) => c[2] === 'merge'), false);
@@ -247,7 +252,7 @@ test('w3110: the merge-on-green pilot on the portal runs pr_evidence.py from its
   const portal = () => portalPrEvidence({ dataDir, run: git, env: {}, home });
   const runner = (evidence: { code: number; stdout: string; stderr: string }, calls: string[][]) => async (cmd: string, args: string[]) => {
     calls.push([cmd, ...args]);
-    return (cmd === 'gh' ? { code: 0, stdout: '', stderr: '' } : evidence) as never;
+    return (cmd === 'gh' ? { code: 0, stdout: ghSays(args), stderr: '' } : evidence) as never;
   };
 
   // No checkout and the clone fails: still refused, never merged without the check.
@@ -265,7 +270,7 @@ test('w3110: the merge-on-green pilot on the portal runs pr_evidence.py from its
   // The next merge brings the checkout up to date (a stale copy FAILs every PR, w733), then merges on a PASS.
   const passed: string[][] = [];
   await ghMerge('Final-Factory/FinalFactory#3187', SHA, runner({ code: 0, stdout: PASS, stderr: '' }, passed), portal);
-  assert.deepEqual(passed[0], [evidencePython(), script, '--repo', 'Final-Factory/FinalFactory', '--pr', '3187']);
+  assert.deepEqual(passed.filter(notHud)[0], [evidencePython(), script, '--repo', 'Final-Factory/FinalFactory', '--pr', '3187']);
   assert.deepEqual(passed.at(-1), ['gh', 'pr', 'merge', '3187', '-R', 'Final-Factory/FinalFactory', '--merge', '--match-head-commit', SHA]);
   assert.deepEqual(gits.slice(-2).map((a) => a.slice(2, 3)[0]), ['fetch', 'reset']);
 });
@@ -281,4 +286,48 @@ test("w3110: a worker's own lookup (ff-pr merge, the guard) finds FF_SKILLS's sc
     const found = findPrEvidence({ env: { FF_SKILLS: c.skills }, home: c.home, pathApi: c.P, list: () => [], exists: (p) => p === want, read: () => '{"version":"1.34.16"}' });
     assert.equal(found, want, c.skills);
   }
+});
+
+test("w3190: the portal's merge-on-green hands pr_evidence.py the game repo's HUD pins from the PR's base branch", async () => {
+  // What pr_evidence.py (ff-agents 1.34.x, unity-ui ui_layout.hud_data) printed on the portal for #3229, outside a game checkout.
+  const W2998 = 'hud-pins.json (or the clusters file) lives in the game repo at scripts/nightly/ui_layout/ (w2998): run inside a FinalFactory checkout, set FF_GAME_REPO, or pass --pins/--clusters';
+  const calls: string[][] = [];
+  let pinsRead = '';
+  let base = 'master';
+  let api = { code: 0, stdout: PINS, stderr: '' };
+  const run = async (cmd: string, args: string[], opts?: { env?: NodeJS.ProcessEnv }) => {
+    calls.push([cmd, ...args]);
+    if (cmd === 'gh' && args.includes('baseRefName')) return { code: 0, stdout: JSON.stringify({ baseRefName: base }), stderr: '' } as never;
+    if (cmd === 'gh' && args[0] === 'api') return api as never;
+    if (cmd === 'gh') return { code: 0, stdout: '', stderr: '' } as never;
+    // The script: as ui_layout.hud_data, FF_HUD_DATA first; without it (the portal's cwd is no game checkout) the w2998 stop.
+    const dir = opts?.env?.FF_HUD_DATA;
+    if (!dir || !fs.existsSync(path.join(dir, 'hud-pins.json'))) return { code: 1, stdout: '', stderr: W2998 } as never;
+    pinsRead = fs.readFileSync(path.join(dir, 'hud-pins.json'), 'utf8');
+    return { code: 0, stdout: PASS, stderr: '' } as never;
+  };
+
+  // #3229 (w3156, the Power Distributor window): checked with master's pins, then merged.
+  await ghMerge('Final-Factory/FinalFactory#3229', SHA, run, () => 'pe.py');
+  assert.equal(pinsRead, PINS, "the script read the base branch's hud-pins.json");
+  assert.ok(calls.some((c) => c.join(' ') === `gh api -H Accept: application/vnd.github.raw+json repos/Final-Factory/FinalFactory/contents/scripts/nightly/ui_layout/hud-pins.json?ref=master`));
+  assert.deepEqual(calls.at(-1), ['gh', 'pr', 'merge', '3229', '-R', 'Final-Factory/FinalFactory', '--merge', '--match-head-commit', SHA]);
+
+  // Another base branch reads that branch's pins (a release branch's PR).
+  base = 'release/1.0';
+  calls.length = 0;
+  await ghMerge('Final-Factory/FinalFactory#3230', SHA, run, () => 'pe.py');
+  assert.ok(calls.some((c) => c.at(-1) === 'repos/Final-Factory/FinalFactory/contents/scripts/nightly/ui_layout/hud-pins.json?ref=release%2F1.0'));
+
+  // Pins GitHub will not give: refused before the script, never merged, saying why.
+  api = { code: 1, stdout: '', stderr: 'gh: Not Found (HTTP 404)' };
+  calls.length = 0;
+  await assert.rejects(ghMerge('Final-Factory/FinalFactory#3229', SHA, run, () => 'pe.py'), /could not run for Final-Factory\/FinalFactory#3229: scripts\/nightly\/ui_layout\/hud-pins\.json cannot be read .*HTTP 404/);
+  assert.equal(calls.some((c) => c[0] !== 'gh' || c[2] === 'merge'), false);
+
+  // ffu has no HUD pins: no fetch, the script runs as before.
+  calls.length = 0;
+  await ghMerge('Final-Factory/ffu#222', SHA, run, () => 'pe.py').catch(() => undefined);
+  assert.equal(calls.some((c) => c[0] === 'gh' && c[1] === 'api'), false);
+  assert.equal(await fetchHudData('Final-Factory/ffu', 222, run), undefined);
 });
