@@ -3,6 +3,7 @@ import type { Machine, PendingPermission, SessionInfo, StandingAgent, Transcript
 import { NOTICE_TAG, parseNotice, type Notice, type NoticeKind } from '../../../shared/notices';
 import { parseReaction, reactionsByMessage, splitReply, splitSent, splitVia } from '../../../shared/replies';
 import { HELD_MARK } from '../../../shared/conditional';
+import { splitForYou } from '../../../shared/forYou';
 import { checkAsk, isAskTool, type Ask } from '../../../shared/ask';
 import { AskCard, markJump } from './AskCard';
 import { holdReload } from '../freshness';
@@ -706,11 +707,18 @@ function AssistantMessage({ ev, end, sessionId }: { ev: AssistantEv; end?: Resul
   }, [ev.images, sessionId]);
   const chat = useContext(ChatActionsContext);
   const host = useActionsHost(!!chat?.interactive);
+  const forYou = useMemo(() => splitForYou(ev.text), [ev.text]);
   return (
     <div className={`msg msg-assistant${host.open ? ' actions-open' : ''}`} data-seq={ev.seq} data-turn-end={end ? (end.ok ? 'ok' : 'stopped') : undefined} ref={host.ref} onClick={host.onClick}>
-      {chat && <MessageActions seq={ev.seq} from="Orchestrator" excerpt={glance(ev.text)} onDone={host.close} />}
+      {chat && <MessageActions seq={ev.seq} from="Orchestrator" excerpt={glance(forYou.text)} onDone={host.close} />}
+      {/* A message that waits for its person (w3253): its mark shows as a tag, and it sits in the bubble over the message box. */}
+      {forYou.forYou && (
+        <span className="msg-for-you" title="It waits over your message box until you reply to it or clear it" data-testid="for-you-tag">
+          For you
+        </span>
+      )}
       <LocalImages.Provider value={src}>
-        <Markdown text={ev.text} />
+        <Markdown text={forYou.text} />
       </LocalImages.Provider>
       <MentionedImages text={ev.text} src={src} />
       <Reactions seq={ev.seq} />

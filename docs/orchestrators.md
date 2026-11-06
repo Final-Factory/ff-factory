@@ -2073,6 +2073,33 @@ orchestrator reads.
 Tests: `server/orchestrators.test.ts` ("message_person (w2758)", "personMessage and splitAnswered (w2758)", "reply
 from the bubble"), `e2e/orchestrators.spec.ts` ("w2758: a reply to your message shows it quoted").
 
+### Your orchestrator's `[for you]` messages (w3253)
+
+lothsahn, 2026-11-06: "When you have a message or question from me it often gets lost in a wall of text. Can we update
+the portal so messages I don't respond to appear in the list of messages, similar to ones from Ben, that we have to
+clear?"
+
+- **The signal is a mark the orchestrator writes**: a message of its own that starts with `[for you]` (any case, an
+  optional colon; `splitForYou`, `shared/forYou.ts`) needs its person: something to act on, decide or answer that has no
+  ask_person card. The brief says so in one line and keeps relays out (`server/agents.ts`, "`[for you]` (w3253)"). A mark
+  costs no tool call and gives the message's exact seq, which a reply quote and Show in chat use. Only a person's own chat
+  reads it; the dispatcher's is ignored.
+- **It waits in the bubble over the message box** (w1546), beside other people's messages, as "Orchestrator", with
+  Reply and Clear. `Orchestrators.observeForYou` keeps it on the chat's `SessionInfo.forYou` (`ForYouMark`: id `fy-<seq>`,
+  seq, time, words clipped to 2,000 characters; the newest 12). The chat shows the message without the mark, with a For
+  you tag (`AssistantMessage`, `web/src/components/Transcript.tsx`).
+- **It leaves the list three ways.**
+  - Its person replies to it (the chat's reply mark, w866, or Reply in the bubble, which quotes it in the message box):
+    `observeAsk` drops the mark whose seq the reply quotes.
+  - Its person answers it in a later message: their next typed message lists the waiting ones to the orchestrator once
+    each (`cardsOffer`, with the ask_person cards, w1955), and it calls `close_question` with the seq of each one the
+    message answers. `close_question` with no seq lists them.
+  - Its person clears it by hand in the bubble (Clear, Clear all): the same `/person-messages/read` route
+    (`readPersonMessages`), by id.
+- **ask_person cards are not listed twice**: they stay on the Waiting on input tab (w1868), and the bubble's foot links
+  there when the chat has open questions.
+- Each person's list is their own chat's, so Ben's and lothsahn's are separate.
+
 ## Evidence and labels
 
 In October 2026 an ad campaign went live on click caps nobody had researched, relayed to the person as recommendations,

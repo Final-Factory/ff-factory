@@ -345,6 +345,11 @@ const server = http.createServer(async (req, res) => {
   if ((r = m(/^\/api\/sessions\/([^/]+)\/message$/))) {
     const s = find(r[1]);
     if (!s) return json(404, { error: `no session "${r[1]}"` });
+    // A reply to a "[for you]" message takes it off the bubble, as the server's observeAsk does (w3253).
+    if (typeof data.replyTo === 'number' && s.forYou?.some((x) => x.seq === data.replyTo)) {
+      const left = s.forYou.filter((x) => x.seq !== data.replyTo);
+      update(s, { forYou: left.length ? left : undefined });
+    }
     if (s.status === 'running' && s.kind !== 'standing') {
       // Queued behind the turn in flight, as the real server does.
       append(s.id, { kind: 'user', text: data.text, from: 'human' });
@@ -376,8 +381,11 @@ const server = http.createServer(async (req, res) => {
     const ids: string[] | undefined = data.ids;
     const had = s?.personMessages ?? [];
     const keep = had.filter((x) => ids && !ids.includes(x.id ?? x.at));
-    if (s) update(s, { personMessages: keep.length ? keep : undefined });
-    return json(200, { cleared: had.length - keep.length });
+    // The orchestrator's own "[for you]" messages clear the same way (w3253).
+    const mine = s?.forYou ?? [];
+    const keepMine = mine.filter((x) => ids && !ids.includes(x.id));
+    if (s) update(s, { personMessages: keep.length ? keep : undefined, forYou: keepMine.length ? keepMine : undefined });
+    return json(200, { cleared: had.length - keep.length + mine.length - keepMine.length });
   }
   if ((r = m(/^\/api\/sessions\/([^/]+)\/mode$/))) {
     const s = find(r[1]);

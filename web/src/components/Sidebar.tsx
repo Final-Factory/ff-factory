@@ -22,7 +22,7 @@ import {
 } from '../util';
 import { Dot, Icon, type IconName } from './ui';
 import { pushMode, usePush } from '../notify';
-import { unreadHere } from './PeopleMessages';
+import { bubbleItems, unreadHere, type BubbleItem } from './PeopleMessages';
 import { SettingsModal } from './Settings';
 import { SystemFooter } from './SystemMeters';
 import { ExternalStrip } from './External';
@@ -50,9 +50,10 @@ export function Sidebar({
   const attention = useAttention(app);
   const sessionsById = sessionIndex(app.sessions);
   const orch = sessionsById.get(app.orchestratorId);
-  // Messages from people still unread in your chat: those its bubble cleared and can still undo are not counted (w1546).
+  // Messages from people still unread in your chat, and your orchestrator's own "[for you]" ones (w3253): those its bubble
+  // cleared and can still undo are not counted (w1546).
   const clearing = useStore((s) => s.clearing[app.orchestratorId]);
-  const unread = unreadHere(orch?.personMessages, clearing);
+  const unread = unreadHere(bubbleItems(orch), clearing);
   // The other people's own orchestrators (read only here), and the dispatcher with its open requests (docs/orchestrators.md).
   const others = app.sessions.filter((s) => s.id !== app.orchestratorId && chatOwner(s)).sort((a, b) => a.title.localeCompare(b.title));
   const dispatcher = app.dispatcherId ? sessionsById.get(app.dispatcherId) : undefined;
@@ -379,8 +380,8 @@ function ctxHint(what: string, s: SessionInfo): string {
 }
 
 /** "2 from Lothsahn, 1 from Ben": whose messages wait in your chat. */
-function peopleMessagesHint(list: NonNullable<SessionInfo['personMessages']>): string {
+function peopleMessagesHint(list: readonly BubbleItem[]): string {
   const by = new Map<string, number>();
-  for (const m of list) by.set(m.from.displayName, (by.get(m.from.displayName) ?? 0) + 1);
+  for (const m of list) by.set(m.from, (by.get(m.from) ?? 0) + 1);
   return [...by].map(([name, n]) => `${n} ${n === 1 ? 'message' : 'messages'} from ${name}`).join(', ');
 }

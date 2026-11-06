@@ -1931,7 +1931,7 @@ test('crash-fix policy: every FFBox crash or hang diagnosis and its PR arrive ap
   const worker = [...store.sessions.values()].find((s) => s.kind === 'worker')!;
   await until('the worker got its brief', () => store.readTranscript(worker.id).some((e) => e.kind === 'user'));
   const brief = (store.readTranscript(worker.id).find((e) => e.kind === 'user') as Extract<TranscriptEvent, { kind: 'user' }>).text;
-  for (const re of [/FFBox crash-fix policy/, /reproduce the crash or hang/, /fails on origin\/master and passes with the fix/, /close FFBox's PR with the reason/, /less than 1% of master's value/, /PERF-ESCALATION: <one line>` \(crash and hang fixes\)/, /Review FFBox's branch `ffbox\/aggro-1172` \(PR #2165\)/]) assert.match(brief, re);
+  for (const re of [/FFBox crash-fix policy/, /reproduce the crash or hang/, /fails on origin\/master and passes with the fix/, /Fix it in place: fetch its ffbox\/ branch fresh/, /close this PR as superseded/, /less than 1% of master's value/, /PERF-ESCALATION: <one line>` \(crash and hang fixes\)/, /Review FFBox's branch `ffbox\/aggro-1172` \(PR #2165\)/]) assert.match(brief, re);
   assert.doesNotMatch(brief, /FFBox desync PR policy/);
 
   // Switched off, a crash diagnosis takes the w299 triage again.
