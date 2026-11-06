@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { awaitsOnlyAway, awayLabelsOf, isAwayLeg, offlineLabels } from '../machine/awayRunners.ts';
+import { awaitsOnlyAway, awayLabelsOf, isAwayLeg, offlineByMachine, offlineLabels } from '../machine/awayRunners.ts';
 import { settleAwayRuns, type WorkflowRun } from '../machine/prFlow.ts';
 import { checksState, ghChecks } from './blockerWatch.ts';
 
@@ -85,4 +85,26 @@ test('w3147: the portal CI wait reads a run waiting only on queued macOS legs as
   const s = await ghChecks('Final-Factory/ffu#270', run as never);
   assert.equal(s.green, true);
   assert.match(s.text, /all 1 workflow runs passed or skipped; 2 ffu-macos legs/);
+});
+
+test('w3147: when the token cannot list the runners, FF Factory seeing the m3 offline stands in (and online or unknown does not)', async () => {
+  assert.deepEqual(offlineByMachine(['ffu-macos'], (id) => (id === 'm3' ? false : true)), ['ffu-macos']);
+  assert.deepEqual(offlineByMachine(['ffu-macos'], () => true), []);
+  assert.deepEqual(offlineByMachine(['ffu-macos'], () => undefined), []);
+  assert.deepEqual(offlineByMachine(['ffu-macos']), []);
+  // Measured 2026-11-06 04:45Z: the portal's token is refused the repository's runner list (Administration: read).
+  const run = (m3: boolean | undefined) => async (_cmd: string, args: string[]) => {
+    const a = args.join(' ');
+    if (a.includes('statusCheckRollup')) return { code: 1, stdout: '', stderr: 'Resource not accessible by personal access token' };
+    if (a.includes('state,headRefOid')) return { code: 0, stdout: JSON.stringify({ state: 'OPEN', headRefOid: 'a'.repeat(40) }), stderr: '' };
+    if (a.includes('/actions/runners')) return { code: 1, stdout: '', stderr: 'gh: Resource not accessible by personal access token (HTTP 403)' };
+    if (a.includes('/jobs')) return { code: 0, stdout: JSON.stringify({ jobs: JOBS_ONLY_MAC }), stderr: '' };
+    if (a.includes('actions/runs?head_sha')) return { code: 0, stdout: JSON.stringify({ workflow_runs: [{ id: 7, name: 'ci', status: 'in_progress', conclusion: null }] }), stderr: '' };
+    return { code: 1, stdout: '', stderr: `unexpected ${a}` };
+  };
+  const off = await ghChecks('Final-Factory/ffu#212', run(false) as never, (id) => (id === 'm3' ? false : true));
+  assert.equal(off.green, true);
+  const on = await ghChecks('Final-Factory/ffu#212', run(true) as never, () => true);
+  assert.notEqual(on.green, true);
+  assert.notEqual(on.done, true);
 });
