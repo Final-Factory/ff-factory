@@ -43,7 +43,7 @@ import path from 'node:path';
 import { run } from '../server/proc.ts';
 import { factsProblem, finishedRows, finishedSession, judgePath, planFolders, renderFolders, withGitCheck, type CleanupFacts, type FolderRow, type SlotContext } from '../server/cleanupFolders.ts';
 import { isAlive } from '../server/proc.ts';
-import { norm, within } from '../server/cleanup.ts';
+import { norm, sizeOf, within } from '../server/cleanup.ts';
 import { publishedFile, readPublished } from '../server/published.ts';
 import { parsePsJson } from '../server/watchdog.ts';
 import { driveLabel, inNeverGames, installDrive, onInstallDrive } from '../server/rootFence.ts';
@@ -893,18 +893,118 @@ async function checkPath(p: string, facts: CleanupFacts, now: number, published:
  * given paths and exits 1 when any is to be kept. Whatever is not provably closed or ownerless is kept, and so is a folder
  * holding a git repo with uncommitted changes, commits on no remote or a stash (w1387), as the portal's own clean-up keeps it.
  */
-/** The player slots' context for `folders` and `check` (w2796): this host, live pids and the running processes' command lines. */
-export async function slotContext(): Promise<SlotContext> {
+/**
+ * The processes a slot verdict may look at: all of them but this `ff-leftovers` and the chain that ran it (w3204). On
+ * LothDesktop, 2026-11-06, `ff-leftovers check V:/ffw/players/slot1-1` answered KEEP "a running process plays from it" for
+ * every slot, one that did not exist included: the process naming the slot was the check itself (node ... leftovers.ts
+ * check <slot>) and the shells that ran it, while `folders`, whose command line names no slot, said DELETE. The chain is
+ * this pid's parents by ppid, and the MSYS parents the shim found (FF_LEFTOVERS_CALLERS), whose Windows ppid can be lost.
+ */
+export function slotProcs(procs: Proc[], self: number, callers: number[] = []): string[] {
+  const by = new Map(procs.map((p) => [p.pid, p]));
+  const skip = new Set<number>(callers);
+  for (let pid: number | undefined = self, n = 0; pid && pid > 1 && !skip.has(pid) && n < 64; n++) {
+    skip.add(pid);
+    pid = by.get(pid)?.ppid;
+  }
+  for (const c of callers) for (let pid: number | undefined = by.get(c)?.ppid, n = 0; pid && pid > 1 && !skip.has(pid) && n < 64; n++) {
+    skip.add(pid);
+    pid = by.get(pid)?.ppid;
+  }
+  return procs.filter((p) => !skip.has(p.pid)).map((p) => p.cmd);
+}
+
+/** The player slots' context for `folders`, `check` and `remove-slot` (w2796): this host, live pids and the running processes' command lines. */
+export async function slotContext(o: { procs?: () => Promise<Proc[]>; self?: number; callers?: number[] } = {}): Promise<SlotContext> {
   const platform: UnityPlatform = process.platform === 'win32' ? 'win32' : process.platform === 'linux' ? 'linux' : 'darwin';
-  const { realDeps } = await import('./unity.ts');
-  const procs = await realDeps(platform).procs().then((ps) => ps.map((p) => p.cmd), () => undefined);
+  const list = o.procs ?? (async () => (await import('./unity.ts')).realDeps(platform).procs());
+  const procs = await list().then((ps) => slotProcs(ps, o.self ?? process.pid, o.callers ?? callerPids(process.env.FF_LEFTOVERS_CALLERS)), () => undefined);
   return { host: os.hostname().toLowerCase(), alive: isAlive, procs };
 }
 
-export async function foldersMain(cmd: 'folders' | 'check', args: string[], e: NodeJS.ProcessEnv = process.env, now = Date.now(), out: (s: string) => void = (s) => void process.stdout.write(s), slots: () => Promise<SlotContext> = slotContext): Promise<number> {
+/**
+ * `ff-leftovers remove-slot <slot>...` (w3204): empty an idle player slot, the supported way. Before it a clean-up that
+ * `folders` told to delete a slot had only rm (w3201). Each path must be a slot folder itself (<root>/players/slotK-P),
+ * judged DELETE as `check` judges it: refused while a lease lives, a fill runs or a process names the slot. Then, as
+ * player_slots.py prune empties a slot: its player/ is renamed aside (on Windows a running player's open files refuse the
+ * rename), the verdict is taken again (a launch that leased it meanwhile puts the folder back), and the renamed copy,
+ * slot.json and the dead lease files go. The folder and leases/ stay, so the slot's path, and its firewall rule, are
+ * kept. Not under the pool's lock (player_slots.py pool_mutex is an msvcrt/flock byte lock Node cannot take): the
+ * second look is the guard, a guess that a launch's lease or "filling" marker lands before it copies into player/.
+ */
+export async function removeSlots(args: string[], facts: CleanupFacts | undefined, now: number, out: (s: string) => void, slots: () => Promise<SlotContext>, o: { home?: string } = {}): Promise<number> {
+  if (!args.length) {
+    out('usage: ff-leftovers remove-slot <player slot folder>...\n');
+    return 2;
+  }
+  const bad = factsProblem(facts, now);
+  let refused = 0;
+  const no = (a: string, why: string) => {
+    refused++;
+    out(`KEEP    ${a}\n        not removed: ${why}\n`);
+  };
+  for (const a of args) {
+    const p = path.resolve(a);
+    if (bad) {
+      no(a, bad);
+      continue;
+    }
+    const home = o.home ?? (process.env.USERPROFILE || os.homedir());
+    if (!onInstallDrive(a, facts!.root!) || !onInstallDrive(p, facts!.root!) || inNeverGames(p, home)) {
+      no(a, `not a player slot: off this computer's install drive ${driveLabel(facts!.root!)}, or the game's AppData folder (w1755)`);
+      continue;
+    }
+    const first = judgePath(p, facts!, now, await slots());
+    const slotDir = path.join(facts!.root!, 'players', path.basename(p));
+    if (first.kind !== 'player-slot' || norm(slotDir) !== norm(p)) {
+      no(a, 'not a player slot folder (<install>/players/slot<K>-<P>); remove-slot takes the slot itself, nothing else');
+      continue;
+    }
+    if (!fs.existsSync(p)) {
+      no(a, 'no such slot');
+      continue;
+    }
+    if (first.verdict !== 'delete') {
+      no(a, first.why);
+      continue;
+    }
+    const player = path.join(p, 'player');
+    const trash = path.join(p, `trash-${Math.floor(now / 1000)}-${process.pid}`);
+    let moved = false;
+    if (fs.existsSync(player)) {
+      try {
+        fs.renameSync(player, trash);
+        moved = true;
+      } catch (e) {
+        no(a, `its player/ could not be moved aside (${(e as NodeJS.ErrnoException).code ?? (e as Error).message}): a running player may hold its files`);
+        continue;
+      }
+    }
+    const again = judgePath(p, facts!, now, await slots());
+    if (again.verdict !== 'delete') {
+      if (moved) fs.renameSync(trash, player);
+      no(a, `${again.why} (seen after its player/ was moved aside; put back)`);
+      continue;
+    }
+    let size = 0;
+    for (const n of fs.readdirSync(p)) {
+      if (!n.startsWith('trash-')) continue;
+      size += await sizeOf(path.join(p, n)).catch(() => 0);
+      fs.rmSync(path.join(p, n), { recursive: true, force: true });
+    }
+    fs.rmSync(path.join(p, 'slot.json'), { force: true });
+    const leases = path.join(p, 'leases');
+    for (const n of fs.existsSync(leases) ? fs.readdirSync(leases).filter((x) => x.endsWith('.json')) : []) fs.rmSync(path.join(leases, n), { force: true });
+    out(`REMOVED ${a}\n        ${Math.round(size / 1_048_576)} MB (hard links to a build that still exists free less); the folder stays empty, the next launch fills it again\n`);
+  }
+  return refused ? 1 : 0;
+}
+
+export async function foldersMain(cmd: 'folders' | 'check' | 'remove-slot', args: string[], e: NodeJS.ProcessEnv = process.env, now = Date.now(), out: (s: string) => void = (s) => void process.stdout.write(s), slots: () => Promise<SlotContext> = slotContext): Promise<number> {
   const facts = readCleanupFacts(e.FF_CLEANUP_FACTS);
   // What this machine's workers published, beside the facts in the daemon's folder (w2223): a finished worker's evidence published there may go.
   const published = readPublished(e.FF_CLEANUP_FACTS ? publishedFile(path.dirname(e.FF_CLEANUP_FACTS)) : undefined);
+  if (cmd === 'remove-slot') return removeSlots(args, facts, now, out, slots);
   if (cmd === 'check') {
     if (!args.length) {
       out('usage: ff-leftovers check <path>...\n');
@@ -939,11 +1039,11 @@ export async function foldersMain(cmd: 'folders' | 'check', args: string[], e: N
 /** `ff-leftovers [list|end]`: what this worker's session started that still runs, and ending it. */
 export async function leftoversMain(argv: string[], e: NodeJS.ProcessEnv = process.env): Promise<number> {
   const cmd = argv[0] ?? 'list';
-  if (cmd === 'folders' || cmd === 'check') return foldersMain(cmd, argv.slice(1), e);
+  if (cmd === 'folders' || cmd === 'check' || cmd === 'remove-slot') return foldersMain(cmd, argv.slice(1), e);
   const session = e.FF_SESSION_ID;
   const platform: UnityPlatform = process.platform === 'win32' ? 'win32' : process.platform === 'linux' ? 'linux' : 'darwin';
   if (!session || !['list', 'end'].includes(cmd)) {
-    process.stdout.write(`usage: ff-leftovers [list|end|folders|check <path>...]\n  list: what this worker's session (FF_SESSION_ID) started that still runs: players, Xvfb, builds, servers, background jobs\n  end: end them (SIGTERM, then SIGKILL after 5 s), before DONE or a stop\n  folders: a clean-up's candidates under the install folder, each KEEP or DELETE by the ledger (a request not closed keeps its worker's folders)\n  check <path>...: the same verdict for paths you mean to delete; exit 1 if any is to be kept. Only paths in the install folder: on Windows never one on C: or another drive, apart from the game's AppData Never Games folders, which are always KEEP (w1755)\n${session ? '' : 'FF_SESSION_ID is not set: run it from a worker of FF Factory.\n'}`);
+    process.stdout.write(`usage: ff-leftovers [list|end|folders|check <path>...|remove-slot <slot>...]\n  list: what this worker's session (FF_SESSION_ID) started that still runs: players, Xvfb, builds, servers, background jobs\n  end: end them (SIGTERM, then SIGKILL after 5 s), before DONE or a stop\n  folders: a clean-up's candidates under the install folder, each KEEP or DELETE by the ledger (a request not closed keeps its worker's folders)\n  check <path>...: the same verdict for paths you mean to delete; exit 1 if any is to be kept. Only paths in the install folder: on Windows never one on C: or another drive, apart from the game's AppData Never Games folders, which are always KEEP (w1755)\n  remove-slot <slot>...: empty idle player slots (<install>/players/slot<K>-<P>); refused while a lease lives, a fill runs or a process plays from it (w3204)\n${session ? '' : 'FF_SESSION_ID is not set: run it from a worker of FF Factory.\n'}`);
     return session ? 2 : 1;
   }
   const { realDeps } = await import('./unity.ts');
