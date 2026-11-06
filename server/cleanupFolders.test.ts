@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { hasLocalWork, localWorkWhy, norm } from './cleanup.ts';
+import { hasLocalWork, localRemotePath, localWorkWhy, norm } from './cleanup.ts';
 import { FACTS_MAX_AGE_MS, factsProblem, judgePath, judgeSession, planFolders, renderFolders, type CleanupFacts } from './cleanupFolders.ts';
 import { ownersOf } from './resumable.ts';
 import { foldersMain, installLeftoversShim } from '../machine/leftovers.ts';
@@ -225,6 +225,56 @@ test('w1387: localWorkWhy names uncommitted changes, commits on no remote and st
   assert.equal(await localWorkWhy(wt), undefined);
 
   assert.match((await localWorkWhy(path.join(base, 'no-such-repo')))!, /could not be read/, 'unknown counts as work');
+});
+
+function dropRemoteRefs(dir: string) {
+  for (const r of execFileSync('git', ['-C', dir, 'for-each-ref', '--format=%(refname)', 'refs/remotes'], { encoding: 'utf8' }).split(/\r?\n/).filter(Boolean)) git(dir, 'update-ref', '-d', r);
+}
+
+test('w3180: commits a remote holds now are not "on no remote", though the clone never fetched them', async (t) => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'ffw-w3180-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5 }));
+  const remotes = path.join(base, 'remotes');
+  fs.mkdirSync(remotes);
+  // A sandbox whose origin is a bare "GitHub"; a scratch clone of the sandbox, detached at the sandbox's commit X.
+  const sandbox = pushedClone(remotes, path.join(base, 'sb', 'ff'));
+  fs.writeFileSync(path.join(sandbox, 'x.txt'), 'x');
+  git(sandbox, 'add', '.');
+  git(sandbox, 'commit', '-q', '-m', 'x');
+  const x = execFileSync('git', ['-C', sandbox, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  const scratch = path.join(base, 'tmp', 'scratch');
+  git(base, 'clone', '-q', '--shared', sandbox, scratch);
+  git(scratch, 'checkout', '-q', '--detach', x);
+  git(sandbox, 'checkout', '-q', '--detach', 'HEAD~1'); // the sandbox moves on: no ref of it names X any more
+  git(sandbox, 'branch', '-q', '-D', 'main');
+  dropRemoteRefs(scratch); // its snapshot of the sandbox's heads is stale
+  assert.equal(await localWorkWhy(scratch), '1 commit on no remote', 'X is not pushed yet');
+
+  git(sandbox, 'push', '-q', 'origin', `${x}:refs/heads/pushed`);
+  assert.equal(await localWorkWhy(scratch), undefined, "X is on the sandbox's origin now (its refs/remotes)");
+
+  // The same through a file:// URL to the bare repo, with the clone's own remote refs stale.
+  const viaUrl = path.join(base, 'tmp', 'via-url');
+  git(base, 'clone', '-q', sandbox, viaUrl);
+  git(viaUrl, 'checkout', '-q', '--detach', x);
+  const bare = execFileSync('git', ['-C', sandbox, 'remote', 'get-url', 'origin'], { encoding: 'utf8' }).trim();
+  git(viaUrl, 'remote', 'set-url', 'origin', 'file:///' + path.resolve(bare).replace(/\\/g, '/').replace(/^\//, ''));
+  git(viaUrl, 'update-ref', '-d', 'refs/remotes/origin/HEAD');
+  for (const r of execFileSync('git', ['-C', viaUrl, 'for-each-ref', '--format=%(refname)', 'refs/remotes'], { encoding: 'utf8' }).split('\n').filter(Boolean)) git(viaUrl, 'update-ref', '-d', r);
+  assert.equal(await localWorkWhy(viaUrl), undefined, 'X is in the bare repo the file:// URL names');
+  fs.writeFileSync(path.join(viaUrl, 'y.txt'), 'y');
+  git(viaUrl, 'add', '.');
+  git(viaUrl, 'commit', '-q', '-m', 'y');
+  assert.equal(await localWorkWhy(viaUrl), '1 commit on no remote', 'a commit no remote has still counts');
+});
+
+test('w3180: localRemotePath tells a local remote from a network one', () => {
+  assert.equal(localRemotePath('https://github.com/Final-Factory/ff-factory.git', '/x'), undefined);
+  assert.equal(localRemotePath('git@github.com:Final-Factory/ff-factory.git', '/x'), undefined);
+  assert.equal(localRemotePath('ssh://host/repo', '/x'), undefined);
+  assert.equal(localRemotePath('file:///F:/ffw/repo', '/x'), 'F:/ffw/repo');
+  assert.equal(localRemotePath('F:/ffw/sandboxes/slot2', '/x'), path.resolve('/x', 'F:/ffw/sandboxes/slot2'));
+  assert.equal(localRemotePath('../sb', path.resolve('/a/b')), path.resolve('/a/sb'));
 });
 
 test('w1387: a folder the ledger frees stays KEEP while a git repo in it holds work on no remote; check exits 1 and says why', async (t) => {
