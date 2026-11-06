@@ -16,7 +16,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ghEnvFor, readGhAppTokens, remotesOf } from './ghApp.ts';
-import { awaitsOnlyAway, awayLabelsOf, awayNote, isAwayLeg, offlineLabels, type Leg } from './awayRunners.ts';
+import { awayLabelsOf, awayNote, failedNote, offlineLabels, settleJobs, type Leg } from './awayRunners.ts';
 import { evidenceArgs, evidenceGated, evidencePython, evidenceRefusal, evidenceVerdict, findLocalPrEvidence, noScriptRefusal } from './evidenceGate.ts';
 
 export interface Ran {
@@ -158,7 +158,8 @@ function headRuns(d: PrDeps, sha: string, repo?: string): WorkflowRun[] | string
 
 /**
  * w3147 (machine/awayRunners.ts): a run that waits only on legs queued for an away runner label, every runner of it offline,
- * counts as a green finish, so ff-pr merges an ffu PR on green Linux and Windows legs while the m3 is off. In place.
+ * counts as a green finish, so ff-pr merges an ffu PR on green Linux and Windows legs while the m3 is off. w3272: a run
+ * with a failed leg counts as a red finish at once, the m3 on or off. In place.
  */
 export function settleAwayRuns(d: Pick<PrDeps, 'run'>, repo: string, runs: WorkflowRun[]): number {
   const labels = awayLabelsOf(repo);
@@ -170,7 +171,6 @@ export function settleAwayRuns(d: Pick<PrDeps, 'run'>, repo: string, runs: Workf
   } catch {
     away = [];
   }
-  if (!away.length) return 0;
   let legs = 0;
   for (const w of runs) {
     if (w.status === 'completed') continue;
@@ -182,12 +182,16 @@ export function settleAwayRuns(d: Pick<PrDeps, 'run'>, repo: string, runs: Workf
     } catch {
       continue;
     }
-    if (!awaitsOnlyAway(jobs, away)) continue;
-    const n = jobs.filter((x) => isAwayLeg(x, away)).length;
-    legs += n;
+    const s = settleJobs(jobs, away);
+    if (!s) continue;
     w.status = 'completed';
-    w.conclusion = 'success';
-    w.name = `${w.name ?? w.workflowName ?? w.databaseId}${awayNote(n, away)}`;
+    w.conclusion = s.conclusion;
+    const name = `${w.name ?? w.workflowName ?? w.databaseId}`;
+    if (s.conclusion === 'failure') w.name = `${name}${failedNote(s.failed)}`;
+    else {
+      legs += s.legs;
+      w.name = `${name}${awayNote(s.legs, away)}`;
+    }
   }
   return legs;
 }

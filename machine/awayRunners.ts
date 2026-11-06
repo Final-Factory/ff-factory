@@ -66,4 +66,26 @@ export function awaitsOnlyAway(jobs: Leg[], away: readonly string[]): boolean {
   return jobs.filter((j) => (j.status ?? '').toLowerCase() === 'completed').every((j) => GOOD.has((j.conclusion ?? '').toLowerCase()));
 }
 
+const BAD = new Set(['failure', 'timed_out', 'cancelled', 'startup_failure', 'action_required']);
+
+/** The finished legs of a run's jobs that failed (ffu's ci.yml has no continue-on-error, so each fails the run). */
+export function failedLegs(jobs: Leg[]): Leg[] {
+  return jobs.filter((j) => (j.status ?? '').toLowerCase() === 'completed' && BAD.has((j.conclusion ?? '').toLowerCase()));
+}
+
+/**
+ * w3272: how an unfinished run's jobs settle CI's verdict before the run itself ends. A leg that failed ends it red at once:
+ * ffu #318 (run 42254706033) had test (ffu-windows) fail at 16:46:56Z with both macOS legs queued, every m3 runner
+ * offline, and its CI wait sat "still running" until the 6 h cut-off at 22:42Z, because only an all-green run was settled.
+ * Else a run waiting only on away legs is green (w3147). Else undefined: still running.
+ */
+export function settleJobs(jobs: Leg[], away: readonly string[]): { conclusion: 'failure'; failed: string[] } | { conclusion: 'success'; legs: number } | undefined {
+  const failed = failedLegs(jobs);
+  if (failed.length) return { conclusion: 'failure', failed: failed.map((j) => j.name ?? '?') };
+  if (awaitsOnlyAway(jobs, away)) return { conclusion: 'success', legs: jobs.filter((x) => isAwayLeg(x, away)).length };
+  return undefined;
+}
+
+export const failedNote = (failed: string[]) => ` (${failed.slice(0, 3).join(', ')} failed${failed.length > 3 ? `, ${failed.length - 3} more` : ''}; the run's other legs not waited for, w3272)`;
+
 export const awayNote = (n: number, away: readonly string[]) => `; ${n} ${away.join('/')} leg${n === 1 ? '' : 's'} still queued with every ${away.join('/')} runner offline, not waited for (w3147)`;
