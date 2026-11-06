@@ -266,8 +266,9 @@ sure you remember how to do this." It holds until he changes it; config can swit
   waits for a reviewer, still under the policy. The FFBox daily cap, `workLimits.intake`, the duplicate checks (the same
   conversation or keys) and the strong-overlap hold apply as to any intake item. `intake.ffbox.desync.enabled: false`
   gives it the usual triage again.
-- **The worker's brief** carries `DESYNC_PR_POLICY` (`workerRules`). The worker classifies the change first and writes
-  the class and the reason in its first report and the PR:
+- **The worker's brief** carries `DESYNC_PR_POLICY` (`workerRules`). The worker first checks the fix is not already
+  open or merged (as item 0 of the crash policy below), and fixes FFBox's PR in place on its `ffbox/` branch (item 4
+  there). It classifies the change first and writes the class and the reason in its first report and the PR:
   1. **Report generation only** (runs only while a desync report is written or uploaded, no effect on play): the tests
      that show it is safe, then merge.
   2. **A desync fix in the game code**: a test that fails on master and passes with the fix, and a 2-peer built-player
@@ -349,8 +350,15 @@ A hang is worked like a crash. The desync PR policy above and the Discord thread
   1. verify FFBox's findings against the code and read the report (`fetch_ffbox_report`) yourself;
   2. reproduce the crash or hang, or show the faulty code path with file:line from the stack to the fault;
   3. a test that fails on origin/master and passes with the fix, both runs quoted;
-  4. review FFBox's PR like any PR; a wrong cause or a partial fix is fixed properly on the worker's own branch and
-     FFBox's PR closed with the reason and a link;
+  0. first check it is not already fixed or in flight (`gh pr list --state all --search "head:ffbox/"`, master's log
+     for the files it changes); an open or merged PR that fixes the same cause closes this one as superseded, with a
+     link, and the worker ends `RESOLVED: superseded by #<n>` (w3250: #2164-#2168, #2541, #3248, #3249, #3254);
+  4. review FFBox's PR like any PR and fix it in place: fetch its `ffbox/` branch fresh, commit what it lacks, push to
+     that branch (never force) and merge its PR. Only a wrong cause gets the worker's own branch, and FFBox's PR is
+     closed in the same step with the reason and a link (w3250: #3067 and #3259 were re-made only to drop
+     editor-rewritten assets). Workers can push to `ffbox/*` (no ruleset covers it; #2228, #2235, #2536 carry worker
+     commits). FFBox's own push is fast-forward only (ffbox `push_bundle`), so a later FFBox turn on the branch fails
+     rather than overwrites the worker's commits, and a conversation FFBox filed here (`fff_link`) pushes no more;
   5. a fix that adds per-frame or per-tick work: tick and frame time on the biggest save, master against the branch, as
      the desync policy's class 3 measures them; under 1% on each, recorded and merged; above, the PR stays open and the
      worker ends with `PERF-ESCALATION: PR #<n>: <change>; tick a -> b ms (+x%), frame c -> d ms (+y%) on <save>`, which
