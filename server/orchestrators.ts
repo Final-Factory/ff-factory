@@ -5523,7 +5523,8 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     if (problem) throw new Error(problem);
     // w2153: another live worker's own wait (a pair run's other leg) neither stops this one nor is dropped by it; the request
     // stays Blocked on it (a worker moved to another sandbox, w2046, or a pair run's leg started beside it). Elsewhere a
-    // start on a gated request still needs a person's override, which drops every gate as before.
+    // start on a gated request still needs a person's override, which keeps the gates other workers set for themselves
+    // and drops the rest (w3152: w2895's override start erased three workers' merge_on_green CI waits, ffu #254/#269/#275).
     // w2438: a request moved to another computer (w2046) takes its waits with it: its new session is linked even while the
     // request is gated, the gates the worker it left set become the new one's (the clear resumes it), and the request stays
     // Blocked on all of them. w2434 on 2026-10-28 01:03Z: moved off lothlaptop while Blocked on w2437, its new session
@@ -5534,9 +5535,10 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
         if (by && by !== s.id && !w.sessionIds.includes(by) && w.movedOff?.[by]) g.by = `worker ${s.id}`;
       }
     }
-    const others = opts.moved ? gatesOf(w).filter((g) => this.gateOpen(g)) : w.pair ? othersGates(w, s.id) : [];
-    // Gates are checked before the worker starts (gateProblem); an override is recorded here (w754).
-    const gated = gatesOf(w).length > others.length ? this.gateProblem(w, opts.overrideGate, others) : undefined;
+    const exempt = opts.moved ? gatesOf(w).filter((g) => this.gateOpen(g)) : w.pair ? othersGates(w, s.id) : [];
+    // Gates are checked before the worker starts (gateProblem); an override is recorded here (w754). Only `exempt` goes
+    // to the check: without an override a non-pair request gated on another worker's wait is still refused.
+    const gated = gatesOf(w).length > exempt.length ? this.gateProblem(w, opts.overrideGate, exempt) : undefined;
     if (gated) throw new Error(gated);
     if (opts.overrideGate?.trim() && gatesOf(w).length) what += ` (gate overridden: "${clip(opts.overrideGate.trim(), 200)}")`;
     // w2566: a new worker started over the wait of one stopped on its paused or offline computer is the request's move: that
@@ -5549,6 +5551,8 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
         (_sid, away) => `a new worker, ${s.id}, took ${w.id} on while it is stopped and ${away} (w2566)`,
       );
     }
+    // After the release above: a gate the worker taken off set is no longer another worker's to keep.
+    const others = !opts.moved && !w.pair && opts.overrideGate?.trim() ? othersGates(w, s.id) : exempt;
     w.sessionIds = [...new Set([...w.sessionIds, s.id])];
     w.links = { ...w.links, [s.id]: { at: this.now().toISOString(), how: 'sent' } };
     // Started or sent to a worker: whatever held it is over (stamp drops a blocker or a capacity note).
