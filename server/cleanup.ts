@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import type { CleanupPolicy } from './config.ts';
 import { CLEANUP_SOFT_GB_DEFAULT, type CleanupSummary, type MediaSummary } from '../shared/types.ts';
 import type { StaleOutputSettings } from './staleOutput.ts';
@@ -335,7 +335,11 @@ export async function localWorkWhy(dir: string, timeoutMs = 15_000): Promise<str
     const work: string[] = [];
     const status = await git('status', '--porcelain');
     if (status) work.push(n(status.split('\n').length, 'uncommitted change'));
-    const ahead = Number(await git('rev-list', '--count', 'HEAD', '--not', '--remotes'));
+    let ahead = Number(await git('rev-list', '--count', 'HEAD', '--not', '--remotes'));
+    // The clone's own remote refs are a snapshot from its last fetch, and a clone of a sandbox only sees the sandbox's
+    // heads: pushed commits counted as "on no remote" (w3180). Recount against what each remote holds now, read without
+    // fetching (a fetch writes into the clone, which then never ages out).
+    if (ahead > 0) ahead = await aheadOfRemotesNow(dir, ahead, git, timeoutMs);
     if (ahead > 0) work.push(n(ahead, 'commit', 'commits') + ' on no remote');
     const [gitDir, common] = (await git('rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir')).split('\n');
     if (gitDir === common) {
@@ -345,6 +349,71 @@ export async function localWorkWhy(dir: string, timeoutMs = 15_000): Promise<str
     return work.length ? work.join(', ') : undefined;
   } catch (e) {
     return `its git state could not be read (${String((e as Error).message ?? e).split('\n')[0]!.slice(0, 120)})`;
+  }
+}
+
+/** Runs git in `dir` with `input` on stdin (rev lists too long for a command line). */
+function gitWithInput(dir: string, args: string[], input: string, timeoutMs: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const p = spawn('git', ['--no-optional-locks', '-C', dir, ...args], { windowsHide: true, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
+    const timer = setTimeout(() => p.kill(), timeoutMs);
+    let out = '';
+    let err = '';
+    p.stdout.on('data', (d) => (out += d));
+    p.stderr.on('data', (d) => (err += d));
+    p.on('error', (e) => (clearTimeout(timer), reject(e)));
+    p.on('close', (code) => (clearTimeout(timer), code === 0 ? resolve(out.trim()) : reject(new Error(err.trim() || `git ${args[0]} exited ${code}`))));
+    p.stdin.on('error', () => {});
+    p.stdin.end(input);
+  });
+}
+
+/** A remote URL as a local folder, or undefined for a network URL (https, ssh, git@host:path). */
+export function localRemotePath(url: string, base: string): string | undefined {
+  if (/^file:\/\//i.test(url)) {
+    const p = decodeURIComponent(url.replace(/^file:\/\//i, ''));
+    return /^\/[a-z]:[\\/]/i.test(p) ? p.slice(1) : p;
+  }
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) return undefined;
+  if (!/^[a-z]:[\\/]/i.test(url) && /^[^/\\]+:/.test(url)) return undefined; // scp-like git@host:path
+  return path.resolve(base, url);
+}
+
+/**
+ * How many of HEAD's commits no remote holds now: the clone's remote refs plus every tip each remote has at this moment
+ * (a local remote's refs read in place, a network remote's heads and tags by ls-remote), counting only tips this clone
+ * has the objects of. Any failure keeps `fallback` (unknown counts as work).
+ */
+async function aheadOfRemotesNow(dir: string, fallback: number, git: (...a: string[]) => Promise<string>, timeoutMs: number): Promise<number> {
+  const NL = '\n';
+  try {
+    const tips = new Set<string>();
+    const urls = (await git('remote', '-v').catch(() => ''))
+      .split(NL)
+      .filter((l) => l.endsWith('(fetch)'))
+      .map((l) => l.replace(/^\S+\s+/, '').replace(/ \(fetch\)$/, ''));
+    for (const url of new Set(urls)) {
+      const local = localRemotePath(url, dir);
+      const refs = local
+        ? fs.existsSync(local)
+          ? await gitWithInput(local, ['for-each-ref', '--format=%(objectname)'], '', timeoutMs).catch(() => '')
+          : ''
+        : await gitWithInput(dir, ['ls-remote', '--heads', '--tags', url], '', timeoutMs).catch(() => '');
+      for (const line of refs.split(NL)) {
+        const sha = line.split(/\s/)[0];
+        if (sha && /^[0-9a-f]{40,64}$/.test(sha)) tips.add(sha);
+      }
+    }
+    if (!tips.size) return fallback;
+    const have = (await gitWithInput(dir, ['cat-file', '--batch-check=%(objectname) %(objecttype)'], [...tips].join(NL) + NL, timeoutMs))
+      .split(NL)
+      .filter((l) => / (commit|tag)$/.test(l))
+      .map((l) => l.split(' ')[0]!);
+    if (!have.length) return fallback;
+    const count = Number(await gitWithInput(dir, ['rev-list', '--count', 'HEAD', '--not', '--remotes', '--stdin'], have.map((s) => `^${s}`).join(NL) + NL, timeoutMs));
+    return Number.isFinite(count) ? Math.min(count, fallback) : fallback;
+  } catch {
+    return fallback;
   }
 }
 
