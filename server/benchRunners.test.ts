@@ -174,7 +174,7 @@ test('w3195: a listener log says whether it holds a job: the newest job or idle 
   assert.equal(holdsJob(ended, Date.parse('2026-11-06T15:06:11Z') + SETTLE_MS), undefined);
   // a job line past GitHub's 10-minute lock with no worker is gone; a tail with no job line has listened all along
   assert.equal(holdsJob(l, Date.parse('2026-11-06T15:19:00Z')), undefined);
-  assert.deepEqual(listenerLog('[2026-11-06 15:06:11Z INFO ConfigurationStore] HasCredentials()\n'), { state: 'idle' });
+  assert.deepEqual(listenerLog('[2026-11-06 15:06:11Z INFO ConfigurationStore] HasCredentials()\n'.padStart(64 * 1024, 'x')), { state: 'idle' });
   assert.equal(listenerLog(undefined).state, 'unknown');
   assert.match(holdsJob(listenerLog(undefined), PAUSED_AT) ?? '', /could not be read/);
   // a restarted runner says it listens
@@ -241,4 +241,38 @@ test('w3195: readListenerLog reads the tail of the newest Runner_*.log in <root>
   const tail = readListenerLog(root) ?? '';
   assert.equal(tail.length, 64 * 1024);
   assert.equal(listenerLog(tail).state, 'job');
+});
+
+// biscuit, 2026-11-06: `~/ffu-runner/bin/Runner.Listener --version` at 16:30:34Z (w3202) wrote this log, newer by name than
+// the live listener's; read by name it said idle, and at 17:08:50Z under t00003135 the listener was paused holding job bd216421
+const VERSION_LOG = [
+  "[2026-11-06 16:30:34Z INFO HostContext] Well known directory 'Root': '/home/ben-ryding/ffu-runner'",
+  "[2026-11-06 16:30:34Z INFO CommandSettings] Flag 'version': 'True'",
+  '[2026-11-06 16:30:34Z INFO Terminal] WRITE LINE: 2.338.2',
+  '[2026-11-06 16:30:34Z INFO Listener] Runner execution has finished with return code 0',
+  '',
+].join('\n');
+const FFU_RUNNER = [
+  '[2026-11-06 17:08:49Z INFO Terminal] WRITE LINE: 2026-11-06 17:08:49Z: Job check completed with result: Succeeded',
+  "[2026-11-06 17:08:49Z INFO BrokerMessageListener] Acknowledging runner request 'bd216421-e933-59fc-8e1a-12d1c3e62272'.",
+  '[2026-11-06 17:08:50Z INFO GitHubActionsService] AAD Correlation ID for this token request: Unknown',
+  '',
+].join('\n');
+
+test('w3195: the log read is the one the live listener writes, not a --version run newer by name', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'runner-'));
+  const diag = path.join(root, '_diag');
+  fs.mkdirSync(diag);
+  const live = path.join(diag, 'Runner_20261106-084734-utc.log');
+  const version = path.join(diag, 'Runner_20261106-163034-utc.log');
+  fs.writeFileSync(live, 'x'.repeat(100 * 1024) + '\n' + FFU_RUNNER);
+  fs.writeFileSync(version, VERSION_LOG);
+  fs.utimesSync(version, new Date('2026-11-06T16:30:34Z'), new Date('2026-11-06T16:30:34Z'));
+  fs.utimesSync(live, new Date('2026-11-06T17:08:50Z'), new Date('2026-11-06T17:08:50Z'));
+  const l = listenerLog(readListenerLog(root));
+  assert.equal(l.state, 'job');
+  assert.match(holdsJob(l, Date.parse('2026-11-06T17:08:51Z')) ?? '', /handed a job at 2026-11-06T17:08:49/);
+  // a whole log with no job or listening line is not a listener's: it holds like an unread one
+  assert.equal(listenerLog(VERSION_LOG).state, 'unknown');
+  assert.match(holdsJob(listenerLog(VERSION_LOG), Date.parse('2026-11-06T17:08:51Z')) ?? '', /not a listening runner's/);
 });

@@ -386,7 +386,10 @@ w1832), the daemon:
   it, so a listener is paused only when its own log (`<runner>/_diag/Runner_*.log`) says it listens and has for 10 s
   (`SETTLE_MS`), and is continued at once when that log took a job as the pause landed (biscuit, 2026-11-06 15:06:11Z:
   ffu-biscuit-3 was paused between "Acknowledging runner request" and acquirejob, and job 127943935420 lost
-  communication 10 minutes later). A listener whose log cannot be read is not paused. A process run from a runner's `_work` folder that no worker started is a leftover:
+  communication 10 minutes later). The log read is the newest `Runner_*.log` by modification time, not by name: every
+  `Runner.Listener` run writes its own, a `--version` too (biscuit, 2026-11-06: a 16:30:34Z `--version` log, newer by
+  name, said idle, and at 17:08:50Z ffu-runner was paused a second after acknowledging job bd216421). A listener whose
+  log cannot be read, or whose whole log has no job or "Listening for Jobs" line, is not paused. A process run from a runner's `_work` folder that no worker started is a leftover:
   SIGTERM, never forced. What was paused and ended is in `<root>/tmp/bench.queue/runners.json`, so a daemon restarted
   mid-turn continues them. Windows has no SIGSTOP: its runners are waited out, not paused.
 - **holds the rest as before**: `unity start` queues (a shared ticket), builds, batch compiles and the editor's compiles,
