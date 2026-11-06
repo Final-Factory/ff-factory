@@ -43,7 +43,9 @@ function world(t: { after: (fn: () => void) => void }, over: Partial<CleanupFact
     WORK,
   );
   const facts: CleanupFacts = {
-    at: new Date().toISOString(),
+    // A second ahead of the folders made above: a folder's fractional mtimeMs in the same millisecond is later than a
+    // truncated `at`, and sessionSeen (w3217) then keeps it as made after the facts (flaky on CI, PR ff-factory#840).
+    at: new Date(Date.now() + 1000).toISOString(),
     connected: true,
     root,
     tempRoot,
