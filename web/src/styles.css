@@ -1523,8 +1523,12 @@ select.input {
   color: var(--amber);
 }
 
+/* It gives way before the arrow and Clear all: "… from Lothsahn and your orchestrator" (w3253) is wider than a phone. */
 .pmsg-count {
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   font-weight: 620;
   font-size: var(--fs-md);
   white-space: nowrap;

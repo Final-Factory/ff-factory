@@ -230,7 +230,7 @@ asReplier('for you (w3253): an orchestrator message marked [for you] waits over 
   await ask(pick);
   await expect(bubble.getByTestId('people-messages-count')).toHaveText('1 message from your orchestrator');
   await bubble.getByRole('button', { name: /1 message from your orchestrator/ }).click();
-  await bubble.getByRole('button', { name: 'Clear the message from Your orchestrator' }).click();
+  await bubble.getByRole('button', { name: 'Clear the message from Orchestrator' }).click();
   await expect.poll(waiting, { timeout: 15_000 }).toBeUndefined();
   await expect(bubble).toHaveCount(0, { timeout: 15_000 });
   await expect(page.locator('.orch .msg-assistant', { hasText: pick }).first()).toBeVisible();

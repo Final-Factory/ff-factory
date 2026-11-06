@@ -2064,7 +2064,7 @@ clear?"
   ask_person card. The brief says so in one line and keeps relays out (`server/agents.ts`, "`[for you]` (w3253)"). A mark
   costs no tool call and gives the message's exact seq, which a reply quote and Show in chat use. Only a person's own chat
   reads it; the dispatcher's is ignored.
-- **It waits in the bubble over the message box** (w1546), beside other people's messages, as "Your orchestrator", with
+- **It waits in the bubble over the message box** (w1546), beside other people's messages, as "Orchestrator", with
   Reply and Clear. `Orchestrators.observeForYou` keeps it on the chat's `SessionInfo.forYou` (`ForYouMark`: id `fy-<seq>`,
   seq, time, words clipped to 2,000 characters; the newest 12). The chat shows the message without the mark, with a For
   you tag (`AssistantMessage`, `web/src/components/Transcript.tsx`).

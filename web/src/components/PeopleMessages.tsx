@@ -175,7 +175,7 @@ export const PeopleMessages = memo(function PeopleMessages({ session }: { sessio
               <span className="pmsg-icon" aria-hidden>
                 <Icon name="chat" size={15} />
               </span>
-              <span className="pmsg-count" data-testid="people-messages-count">
+              <span className="pmsg-count" title={count} data-testid="people-messages-count">
                 {count}
               </span>
               {!open && <span className="pmsg-preview hide-phone">{latest.text ? latest.text.replace(/\s+/g, ' ') : 'Open to read'}</span>}
@@ -197,7 +197,8 @@ export const PeopleMessages = memo(function PeopleMessages({ session }: { sessio
             <ol className="pmsg-list">
               {list.map((m) => {
                 const seq = m.mine?.seq ?? seqs[m.id];
-                const who = m.mine ? 'Your orchestrator' : m.from;
+                // "Orchestrator", as the chat names it: "Your orchestrator" pushed the row's buttons onto a line of their own on a phone.
+                const who = m.mine ? 'Orchestrator' : m.from;
                 return (
                   <li key={m.id} className={`pmsg-item${m.mine ? ' pmsg-mine' : ''}`} data-testid="people-message" data-kind={m.mine ? 'for-you' : 'person'}>
                     <div className="pmsg-head">
@@ -258,7 +259,7 @@ export const PeopleMessages = memo(function PeopleMessages({ session }: { sessio
             </ol>
             <div className="pmsg-foot">
               <p>
-                Clearing takes a message off this list. It stays in the conversation, and your orchestrator already has it.
+                Clearing takes a message off this list. It stays in the conversation{list.some((m) => m.pm) ? ', and your orchestrator already has it' : ''}.
                 {/* Its ask_person questions wait as cards on the Waiting on input tab (w1868): linked, never listed twice (w3253). */}
                 {session.openAsks?.length ? (
                   <>
