@@ -1233,6 +1233,42 @@ test('w631: a worker whose request names another (a takeover) closes that one wi
   assert.equal(get('w8').status, 'done');
 });
 
+test('w3248: SUPERSEDED closes a request the worker holds or names, with what covers it; anything else goes to the dispatcher', async (t) => {
+  const { request, worker, o, get, store } = setup(t);
+  const toDispatcher: string[] = [];
+  o.toDispatcher = (text: string) => void toDispatcher.push(text);
+  // w3245's case: the release worker found w3254's fix fully covered by #3244, already on master.
+  request('w3245', { title: 'Release 1.0.0.40', requestedBy: LOTH, requesters: [LOTH], brief: 'Ship it. FFBox fix w3254 may be in it.', sessionIds: ['s1'] });
+  request('w3254', { title: 'FFBox crash fix', sessionIds: ['s0'] });
+  worker('s0', { status: 'stopped' });
+  request('w7', { title: 'Unrelated', sessionIds: ['s9'] });
+  request('w8', { title: 'Named but someone is on it', sessionIds: ['s8'] });
+  get('w3245').relatedIds = ['w8'];
+  worker('s8', { status: 'idle' });
+  const s1 = worker('s1', { requestedBy: LOTH });
+  o.workerTurnEnded(s1, 'Release is live.\n**SUPERSEDED: w3254 by #3244, merged on master**\nSUPERSEDED: w7 by w3245\nSUPERSEDED: w8 by #3244\nSUPERSEDED: w9999 by w1\nw3245: still open: notes');
+  assert.equal(get('w3254').status, 'cancelled', 'w3245 names w3254: it closes on the worker’s word');
+  assert.equal(get('w3254').outcome, 'superseded by #3244, merged on master');
+  assert.match(get('w3254').log.join('\n'), /closed as superseded by #3244, merged on master: worker s1 found it fully covered, from w3245 "Release 1.0.0.40" \(Lothsahn's\), which names it/);
+  await until('Ben hears w3254 closed', () => told(store, o, BEN, '[ledger] w3254').length === 1);
+  await until('Lothsahn hears it too', () => told(store, o, LOTH, '[ledger] w3254').length === 1);
+  assert.equal(get('w7').status, 'active', 'nothing of the worker names w7: not closed on its word');
+  assert.equal(get('w8').status, 'active', 'another worker is still on w8');
+  assert.equal(toDispatcher.length, 2);
+  assert.match(toDispatcher[0], /says w7 "Unrelated" \(Ben's, active\) is fully covered by other work: superseded by w3245\. Its word does not close it \(no request of worker s1's names it\)/);
+  assert.match(toDispatcher[1], /says w8 .* superseded by #3244\. Its word does not close it \(.*s8.* is still on it\)/);
+  assert.equal(get('w3245').status, 'active', 'its own request stays open: it said still open');
+  // Its own request, with its PR still open: not closed until the PR is.
+  request('w20', { title: 'Own one', sessionIds: ['s2'], prs: [{ repo: REPO, number: 20, url: 'u', state: 'open' } as never] });
+  o.workerTurnEnded(worker('s2'), 'SUPERSEDED: w20 by w3245');
+  assert.equal(get('w20').status, 'active', 'its PR is open');
+  assert.match(get('w20').log.join('\n'), /not closed: PR #20 is still open/);
+  get('w20').prs = [{ repo: REPO, number: 20, url: 'u', state: 'closed' } as never];
+  o.workerTurnEnded(worker('s2'), 'SUPERSEDED: w20 by w3245');
+  assert.equal(get('w20').status, 'cancelled');
+  assert.equal(get('w20').outcome, 'superseded by w3245');
+});
+
 test('w631: a report without a DONE or still-open line is asked about once, a moment after the turn; one that says how things stand is not', async (t) => {
   const { request, worker, o, get, sweep, world } = setup(t);
   o.statusAskDelayMs = 0;
