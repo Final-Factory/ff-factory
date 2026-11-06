@@ -24,10 +24,10 @@ import { holdsOf, portalWaitIn, requestWaitOf, siblingWaitOf } from '../shared/w
 import { latestLine } from '../shared/latestLine.ts';
 import { HELD_MARK, inPersonWords } from '../shared/conditional.ts';
 import { ANSWER_EXCERPT_CHARS, answeredText, answerExcerpt, splitReply, splitSent } from '../shared/replies.ts';
-import { blockerName, type PrHealth } from '../shared/blockers.ts';
+import { blockerName, gatesOf, type PrHealth } from '../shared/blockers.ts';
 import { answersText } from '../shared/questionCard.ts';
 import { needsTimed, PAIR_HOLD_MS, TIMED_HOLD_MS, pairText, unfitWhy } from '../shared/capacity.ts';
-import { benchLockIn, type Machine, type Requester, type SessionInfo, type TranscriptEvent, type UserInfo, type WorkItem } from '../shared/types.ts';
+import { benchLockIn, type Machine, type Requester, type SessionInfo, type TranscriptEvent, type UserInfo, type WorkBlocker, type WorkItem } from '../shared/types.ts';
 import { LIVE_HOLD_MS, releaseWhy } from './placeAgain.ts';
 import { ReportStore } from './reports.ts';
 import { reportProblem } from './ledgerRules.ts';
@@ -4879,6 +4879,55 @@ test("w2153: a leg moved to another sandbox (w2046) while the other leg waits on
   assert.deepEqual(gateRefs(after), [`worker ${b.id}: ci ${ref}`], after.log.slice(-2).join(' | '));
   assert.equal(after.status, 'blocked');
   assert.equal(agents.workOver(b.info), undefined);
+});
+
+test("w3152: w2895 as it happened: a start with a gate override keeps the gates other still-linked workers set for their own PRs' CI (merge on green), and drops the starting worker's own, a person's and the dispatcher's", async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o, dispatcher, call } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }, { id: 'w1x' }]);
+  const a = await startedFor(env, 'w1');
+  const b = await secondWorkerOn(env, 'w1');
+  const gate = (n: number, by: string, extra: Partial<WorkBlocker> = {}): WorkBlocker => ({ kind: 'ci', ref: `Final-Factory/ffu#${n}`, what: `CI on PR #${n}`, at: T0, by, ...extra });
+  const gatesIn = (...gs: WorkBlocker[]) => {
+    const w = store.work.get('w1')!;
+    w.blocked = gs[0];
+    w.alsoBlocked = gs.length > 1 ? gs.slice(1) : undefined;
+    w.status = 'blocked';
+    store.putWork(w);
+  };
+  const aGate = gate(1, `worker ${a.id}`, { mergeOnGreen: { head: 'abc', report: 'DONE', session: a.id } });
+  const bGate = gate(2, `worker ${b.id}`);
+  const personGate = gate(3, 'Ben');
+  gatesIn(aGate, bGate, personGate, gate(4, 'dispatcher'));
+  const sans = { sandbox: 'pc/alpha', prompt: 'Fix it', title: 'w1: fix', work_id: 'w1', extra_agent: true, override_duplicate: 'another row of the same request' };
+
+  // Without an override the start is refused, as before.
+  const refused = await call(dispatcher().info, 'start_agent', sans);
+  assert.equal(refused.isError, true);
+  assert.match(refused.text, /w1 is gated on /);
+
+  // A new worker started over them with a person's override: the two workers' own waits stay, the other two go.
+  const started = await call(dispatcher().info, 'start_agent', { ...sans, override_gate: 'Ben: start another worker on w1 now' });
+  assert.equal(started.isError, false, started.text);
+  const c = /Started agent (\w+)/.exec(started.text)![1];
+  const w = store.work.get('w1')!;
+  assert.ok(w.sessionIds.includes(c), 'the new worker is linked');
+  assert.deepEqual(gateRefs(w), [`worker ${a.id}: ci Final-Factory/ffu#1`, `worker ${b.id}: ci Final-Factory/ffu#2`].sort(), w.log.slice(-2).join(' | '));
+  assert.deepEqual(gatesOf(w).find((g) => g.by === `worker ${a.id}`)?.mergeOnGreen, aGate.mergeOnGreen);
+  assert.equal(w.status, 'blocked');
+
+  // A worker already on the request started again with an override drops its own gate, a person's and the dispatcher's.
+  gatesIn(aGate, bGate, personGate, gate(4, 'dispatcher'));
+  o.linkWorker('w1', b.info, `sent to worker ${b.id}`, { overrideGate: 'Ben: go' });
+  assert.deepEqual(gateRefs(store.work.get('w1')!), [`worker ${a.id}: ci Final-Factory/ffu#1`]);
+  assert.equal(store.work.get('w1')!.status, 'blocked');
+
+  // When nothing is another worker's, the override leaves it active as before.
+  gatesIn(bGate, personGate);
+  o.linkWorker('w1', b.info, `sent to worker ${b.id}`, { overrideGate: 'Ben: go' });
+  assert.equal(store.work.get('w1')!.blocked, undefined);
+  assert.equal(store.work.get('w1')!.status, 'active');
 });
 
 test('w2438: a request moved to another computer (w2046) while Blocked on another request is linked to its new session, stays Blocked on that request, and the clear resumes the new worker', async (t) => {
