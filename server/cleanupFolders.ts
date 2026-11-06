@@ -50,6 +50,8 @@ export interface CleanupFacts {
   closed: string[];
   /** When the portal said it (ISO). */
   contextAt?: string;
+  /** The timed runs this machine plays now or has queued (machine/timedRunner.ts active()); absent: an older daemon, or none play here (w3217). */
+  timedRuns?: string[];
   /** Free space was below the soft threshold at the daemon's last clean-up pass: a finished worker's bulk goes after minutes, not a day (w2223). */
   low?: boolean;
 }
@@ -108,6 +110,17 @@ export function judgeNamed(name: string, f: CleanupFacts, now = Date.now()): Pic
   return { verdict: 'delete', why: `${ids.join(', ')} closed` };
 }
 
+/**
+ * <root>/timing (w3217): the timed runs' build cache, builds and last runs (machine/timedRunner.ts; it keeps 10 runs
+ * itself). Never a clean-up's to take, but a clean-up asked whether a queued run needs it: the row says.
+ */
+export function judgeTiming(f: CleanupFacts): string {
+  const base = "the timed runs' build cache, builds and last runs (machine/timedRunner.ts keeps 10 runs itself)";
+  if (!f.timedRuns) return `${base}; the daemon did not say which timed runs play or wait here (an older daemon, or none play on this machine)`;
+  if (f.timedRuns.length) return `${base}; timed run(s) ${f.timedRuns.join(', ')} play or wait here now and use it`;
+  return `${base}; no timed run plays or waits here now: its cache/ and builds/ are rebuilt by the next run (a person decides)`;
+}
+
 /** A sandbox's build and capture output belongs to the workers in it. */
 export function judgeSandbox(id: string, f: CleanupFacts): Pick<FolderRow, 'verdict' | 'why'> {
   const here = Object.entries(f.owners ?? {}).filter(([, o]) => o.sandbox === id);
@@ -125,7 +138,37 @@ export interface SlotContext {
   alive: (pid: number) => boolean;
   /** The command lines of the processes running now; undefined when they could not be read (then nothing is deleted). */
   procs?: string[];
+  /** The session the asking worker is (FF_SESSION_ID): its own temp folder is never a candidate (w3217). */
+  self?: string;
+  /** Sessions whose agent host process runs here now (machine/agentHost.ts, its command line names hosts/<session>), seen apart from the daemon's facts (w3217). */
+  hosts?: string[];
 }
+
+/**
+ * What says a session runs that the daemon's facts may miss (w3217). On 2026-11-06 w3213, LothDesktop's clean-up, ran
+ * `ff-leftovers folders` 44 s after its own session started and deleted its own temp folder ffa-9aad7b21 on a DELETE row,
+ * "no open, stalled or paused request names worker 9aad7b21": the facts it read (accepted up to FACTS_MAX_AGE_MS old, and
+ * the daemon was about to restart for an update) predated the session. So a session folder created or written after the
+ * facts, the asking worker's own folder, and one whose agent host process runs are kept whatever the facts say.
+ */
+export function sessionSeen(sid: string, dir: string | undefined, f: CleanupFacts, ctx?: Pick<SlotContext, 'self' | 'hosts'>): string | undefined {
+  if (ctx?.self && ctx.self.toLowerCase() === sid.toLowerCase()) return `it is your own temp folder (worker ${sid}, FF_SESSION_ID)`;
+  if (ctx?.hosts?.some((h) => h.toLowerCase() === sid.toLowerCase())) return `worker ${sid}'s agent host process runs now`;
+  if (!dir) return undefined;
+  let st: fs.Stats;
+  try {
+    st = fs.statSync(dir);
+  } catch {
+    return undefined;
+  }
+  const at = Date.parse(f.at);
+  const seen = Math.max(st.birthtimeMs || 0, st.mtimeMs);
+  if (Number.isFinite(at) && seen > at - FACTS_SLACK_MS) return `it was created or written at ${new Date(seen).toISOString()}, after the ledger facts (${f.at}) were written: they cannot speak for worker ${sid} yet`;
+  return undefined;
+}
+
+/** How long before the facts a folder may be made and still count as unknown to them: none (the daemon lists a session as it makes its folder). */
+const FACTS_SLACK_MS = 0;
 
 const readJson = (p: string): unknown => {
   try {
@@ -179,7 +222,11 @@ export function judgePath(p: string, f: CleanupFacts, now = Date.now(), slots?: 
   if (f.tempRoot && within(p, f.tempRoot) && norm(p) !== norm(f.tempRoot)) {
     const first = norm(p).slice(norm(f.tempRoot).length + 1).split('/')[0]!;
     const sid = sessionOfDir(first);
-    if (sid) return row('session-temp', judgeSession(sid, f));
+    if (sid) {
+      const r = judgeSession(sid, f);
+      const seen = r.verdict === 'delete' ? sessionSeen(sid, path.join(f.tempRoot, first), f, slots) : undefined;
+      return row('session-temp', seen ? { verdict: 'keep', why: seen } : r);
+    }
     return row('other', { verdict: 'keep', why: 'not a worker temp folder (ffa-<session>)' });
   }
   for (const sb of f.sandboxes) {
@@ -191,6 +238,7 @@ export function judgePath(p: string, f: CleanupFacts, now = Date.now(), slots?: 
   const rel = norm(p).slice(norm(root).length + 1).split('/');
   if (rel[0] === 'scratch' && rel.length >= 2) return row('scratch', judgeNamed(rel[1]!, f, now));
   if (rel[0] === 'players' && rel.length >= 2 && isSlotDir(rel[1]!)) return row('player-slot', judgePlayerSlot(path.join(root, 'players', rel[1]!), slots, now));
+  if (rel[0] === 'timing') return row('other', { verdict: 'keep', why: judgeTiming(f) });
   const named = rel.find((seg) => requestIdsIn(seg).length);
   if (named) return row('named', judgeNamed(named, f, now));
   return row('other', { verdict: 'keep', why: 'not a place with an owner in the ledger' });

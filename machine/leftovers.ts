@@ -915,11 +915,23 @@ export function slotProcs(procs: Proc[], self: number, callers: number[] = []): 
 }
 
 /** The player slots' context for `folders`, `check` and `remove-slot` (w2796): this host, live pids and the running processes' command lines. */
-export async function slotContext(o: { procs?: () => Promise<Proc[]>; self?: number; callers?: number[] } = {}): Promise<SlotContext> {
+export async function slotContext(o: { procs?: () => Promise<Proc[]>; self?: number; callers?: number[]; session?: string } = {}): Promise<SlotContext> {
   const platform: UnityPlatform = process.platform === 'win32' ? 'win32' : process.platform === 'linux' ? 'linux' : 'darwin';
   const list = o.procs ?? (async () => (await import('./unity.ts')).realDeps(platform).procs());
-  const procs = await list().then((ps) => slotProcs(ps, o.self ?? process.pid, o.callers ?? callerPids(process.env.FF_LEFTOVERS_CALLERS)), () => undefined);
-  return { host: os.hostname().toLowerCase(), alive: isAlive, procs };
+  const all = await list().catch(() => undefined);
+  const procs = all && slotProcs(all, o.self ?? process.pid, o.callers ?? callerPids(process.env.FF_LEFTOVERS_CALLERS));
+  const self = o.session ?? process.env.FF_SESSION_ID;
+  return { host: os.hostname().toLowerCase(), alive: isAlive, procs, ...(self ? { self } : {}), ...(all ? { hosts: hostSessionsIn(all.map((p) => p.cmd)) } : {}) };
+}
+
+/** The sessions whose agent host runs, from command lines: `node ... agentHost.ts <app>/hosts/<session>` (machine/daemon.ts hostedSession, w3217). */
+export function hostSessionsIn(cmds: string[]): string[] {
+  const out = new Set<string>();
+  for (const c of cmds) {
+    const m = /agentHost\.ts["']?\s+["']?.*?[\\/]hosts[\\/]([\w-]+)["']?\s*$/i.exec(c);
+    if (m) out.add(m[1]!);
+  }
+  return [...out];
 }
 
 /**
@@ -932,6 +944,17 @@ export async function slotContext(o: { procs?: () => Promise<Proc[]>; self?: num
  * kept. Not under the pool's lock (player_slots.py pool_mutex is an msvcrt/flock byte lock Node cannot take): the
  * second look is the guard, a guess that a launch's lease or "filling" marker lands before it copies into player/.
  */
+/**
+ * The slot folder an argument names (w3217): a bare name as `check` and player_slots.py print it (`slot3-0`, or
+ * `players/slot3-0`) is the install's own slot; a path, forward or backslash, is taken as given. In w3213 a clean-up's
+ * `remove-slot slot3-0` resolved against its working folder and every slot was refused.
+ */
+export function slotPathOf(a: string, root: string | undefined): string {
+  const bare = /^(?:players[\\/])?(slot[\w-]+)[\\/]?$/i.exec(a.trim());
+  if (bare && root) return path.join(root, 'players', bare[1]!);
+  return path.resolve(a.trim());
+}
+
 export async function removeSlots(args: string[], facts: CleanupFacts | undefined, now: number, out: (s: string) => void, slots: () => Promise<SlotContext>, o: { home?: string } = {}): Promise<number> {
   if (!args.length) {
     out('usage: ff-leftovers remove-slot <player slot folder>...\n');
@@ -944,20 +967,22 @@ export async function removeSlots(args: string[], facts: CleanupFacts | undefine
     out(`KEEP    ${a}\n        not removed: ${why}\n`);
   };
   for (const a of args) {
-    const p = path.resolve(a);
+    const p = slotPathOf(a, facts?.root);
     if (bad) {
       no(a, bad);
       continue;
     }
     const home = o.home ?? (process.env.USERPROFILE || os.homedir());
-    if (!onInstallDrive(a, facts!.root!) || !onInstallDrive(p, facts!.root!) || inNeverGames(p, home)) {
+    if (!onInstallDrive(p, facts!.root!) || inNeverGames(p, home)) {
       no(a, `not a player slot: off this computer's install drive ${driveLabel(facts!.root!)}, or the game's AppData folder (w1755)`);
       continue;
     }
     const first = judgePath(p, facts!, now, await slots());
     const slotDir = path.join(facts!.root!, 'players', path.basename(p));
     if (first.kind !== 'player-slot' || norm(slotDir) !== norm(p)) {
-      no(a, 'not a player slot folder (<install>/players/slot<K>-<P>); remove-slot takes the slot itself, nothing else');
+      // A backslash path a shell ate (V:ffwplayersslot3-0, or V:\ffw\players$s from "\$s"): say what reached the tool.
+      const lost = /^[a-z]:[^\\/]/i.test(a) || a.includes('$') ? ` (it reached the tool as "${a}": a shell ate its backslashes or a variable; quote the path, use forward slashes, or give the slot name as check prints it, slot3-0)` : '';
+      no(a, `not a player slot folder (<install>/players/slot<K>-<P>, or its name slot<K>-<P>); remove-slot takes the slot itself, nothing else${lost}`);
       continue;
     }
     if (!fs.existsSync(p)) {

@@ -5,9 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { hasLocalWork, localRemotePath, localWorkWhy, norm } from './cleanup.ts';
-import { FACTS_MAX_AGE_MS, factsProblem, judgePath, judgeSession, planFolders, renderFolders, type CleanupFacts } from './cleanupFolders.ts';
+import { FACTS_MAX_AGE_MS, factsProblem, judgePath, judgeSession, judgeTiming, planFolders, renderFolders, type CleanupFacts } from './cleanupFolders.ts';
 import { ownersOf } from './resumable.ts';
-import { foldersMain, installLeftoversShim, slotContext } from '../machine/leftovers.ts';
+import { foldersMain, hostSessionsIn, installLeftoversShim, slotContext, slotPathOf } from '../machine/leftovers.ts';
 import type { WorkItem } from '../shared/types.ts';
 
 /**
@@ -289,8 +289,10 @@ test('w1387: a folder the ledger frees stays KEEP while a git repo in it holds w
   fs.writeFileSync(path.join(ff, 'report.md'), 'x');
   // c1c1c1c1's clone, three levels down, is pushed and clean: nothing to lose.
   const deep = pushedClone(remotes, path.join(orphan, 'legs', 'leg1', 'game'));
+  // The daemon writes its facts after the folders were last written (w3217 keeps a folder written after them).
+  facts.at = new Date(Date.now() + 1000).toISOString();
 
-  const rows = await planFolders(facts);
+  const rows = await planFolders(facts, { now: Date.now() + 1000 });
   const row = (p: string) => rows.find((r) => norm(r.path) === norm(p))!;
   assert.equal(row(closed).verdict, 'keep');
   assert.match(row(closed).why, /holds a git repo with uncommitted or unpushed work \(.*ff: 1 uncommitted change\)/);
@@ -515,4 +517,89 @@ test('w3204: remove-slot refuses a slot a process plays from, a path inside a sl
   assert.ok(fs.existsSync(path.join(d, 'player', 'FinalFactory.exe')));
   assert.equal(await foldersMain('remove-slot', [d], env, Date.now(), say, idle), 0);
   assert.deepEqual(fs.readdirSync(d), ['leases']);
+});
+
+/**
+ * w3217: on LothDesktop, 2026-11-06 17:49, w3213's clean-up (worker 9aad7b21) ran `ff-leftovers folders` 44 s after its
+ * session started; the facts it read predated the session, so its own temp folder was DELETE ("no open, stalled or paused
+ * request names worker 9aad7b21") and it removed it. A running session's folder is KEEP whatever the facts say.
+ */
+test("w3217: a running session's ffa folder is KEEP though the facts do not name it: made after them, its own, or its agent host runs", async (t) => {
+  const { tempRoot, facts } = world(t);
+  // The facts the worker read: written before its session started, naming it nowhere.
+  facts.at = new Date(Date.now() - 44_000).toISOString();
+  const dir = path.join(tempRoot, 'ffa-9aad7b21');
+  fs.mkdirSync(path.join(dir, 'claude'), { recursive: true });
+  const now = Date.now();
+  const made = judgePath(dir, facts, now);
+  assert.equal(made.verdict, 'keep', made.why);
+  assert.match(made.why, /after the ledger facts .* were written: they cannot speak for worker 9aad7b21 yet/);
+  // Facts written after the folder (a later daemon write that still misses the session): the asking worker and its agent host keep it.
+  const later = { ...facts, at: new Date(now + 1000).toISOString() };
+  assert.equal(judgePath(dir, later, now + 1000).verdict, 'delete', 'the control: the ledger alone frees it');
+  const ctx = { host: 'lothdesktop', alive: () => false, procs: [] as string[] };
+  const own = judgePath(dir, later, now + 1000, { ...ctx, self: '9aad7b21' });
+  assert.equal(own.verdict, 'keep');
+  assert.match(own.why, /your own temp folder/);
+  const hosted = judgePath(dir, later, now + 1000, { ...ctx, hosts: ['9aad7b21'] });
+  assert.equal(hosted.verdict, 'keep');
+  assert.match(hosted.why, /agent host process runs now/);
+  // `check` as the clean-up runs it: its own session (FF_SESSION_ID) keeps the folder, exit 1.
+  const file = path.join(path.dirname(tempRoot), 'cleanup-facts.json');
+  fs.writeFileSync(file, JSON.stringify(later));
+  const out: string[] = [];
+  assert.equal(await foldersMain('check', [dir], { FF_CLEANUP_FACTS: file } as NodeJS.ProcessEnv, now + 1000, (s) => void out.push(s), async () => ({ ...ctx, self: '9aad7b21' })), 1);
+  assert.match(out.join(''), /KEEP .*ffa-9aad7b21\n\s+it is your own temp folder/);
+  // `folders` lists it KEEP too.
+  const rows = await planFolders(later, { now: now + 1000, slots: { ...ctx, hosts: ['9aad7b21'] } });
+  assert.equal(rows.find((r) => norm(r.path) === norm(dir))!.verdict, 'keep');
+});
+
+test('w3217: hostSessionsIn reads the agent hosts from their command lines, as LothDesktop shows them', () => {
+  const cmds = [
+    String.raw`"C:\Program Files\nodejs\node.exe" --experimental-strip-types --disable-warning=ExperimentalWarning D:\work\ffw\daemon\app\machine\agentHost.ts D:\work\ffw\daemon\hosts\9aad7b21`,
+    '/usr/bin/node --experimental-strip-types /home/ff/ffw/daemon/app/machine/agentHost.ts /home/ff/ffw/daemon/hosts/1618470e',
+    'node machine/leftovers.ts check V:/ffw/tmp/ffa-6a8d9300',
+    'node daemon.ts --hosts D:/x/hosts/abcdef12 --other',
+  ];
+  assert.deepEqual(hostSessionsIn(cmds), ['9aad7b21', '1618470e']);
+});
+
+test('w3217: remove-slot takes the slot names check prints and both path styles', async (t) => {
+  const { root, facts } = world(t);
+  const slot = (name: string) => {
+    const d = path.join(root, 'players', name);
+    fs.mkdirSync(path.join(d, 'player'), { recursive: true });
+    fs.mkdirSync(path.join(d, 'leases'), { recursive: true });
+    fs.writeFileSync(path.join(d, 'player', 'FinalFactory.exe'), 'x');
+    fs.writeFileSync(path.join(d, 'slot.json'), JSON.stringify({ state: 'ready' }));
+    return d;
+  };
+  const [a, b, c] = [slot('slot3-0'), slot('slot3-1'), slot('slot5-0')];
+  assert.equal(slotPathOf('slot3-0', root), path.join(root, 'players', 'slot3-0'));
+  assert.equal(slotPathOf(String.raw`players\slot3-0`, root), path.join(root, 'players', 'slot3-0'));
+  const file = path.join(root, 'cleanup-facts.json');
+  fs.writeFileSync(file, JSON.stringify(facts));
+  const env = { FF_CLEANUP_FACTS: file } as NodeJS.ProcessEnv;
+  const out: string[] = [];
+  const idle = async () => ({ host: 'lothdesktop', alive: () => false, procs: [] as string[] });
+  // The name as check and folders print it, and players/<name>.
+  assert.equal(await foldersMain('remove-slot', ['slot3-0', 'players/slot3-1'], env, Date.now(), (s) => void out.push(s), idle), 0, out.join(''));
+  assert.deepEqual(fs.readdirSync(a), ['leases']);
+  assert.deepEqual(fs.readdirSync(b), ['leases']);
+  // A Windows path with backslashes, as folders prints it there.
+  const back = process.platform === 'win32' ? c.replaceAll('/', '\\') : c;
+  assert.equal(await foldersMain('remove-slot', [back], env, Date.now(), (s) => void out.push(s), idle), 0, out.join(''));
+  assert.deepEqual(fs.readdirSync(c), ['leases']);
+  // What a shell left of one ("V:\ffw\players\$s" became V:\ffw\players$s): refused, and the answer says what reached it.
+  out.length = 0;
+  assert.equal(await foldersMain('remove-slot', [`${path.join(root, 'players')}$s`, 'V:ffwplayersslot3-0'], env, Date.now(), (s) => void out.push(s), idle), 1);
+  assert.equal(out.join('').match(/a shell ate its backslashes/g)?.length, 2, out.join(''));
+});
+
+test('w3217: check says whether a timed run plays or waits on this machine, for timing/', () => {
+  const base = { at: '', connected: true, sandboxes: [], live: [], resumable: [], open: [], closed: [] } as CleanupFacts;
+  assert.match(judgeTiming({ ...base, timedRuns: ['t42'] }), /timed run\(s\) t42 play or wait here now and use it/);
+  assert.match(judgeTiming({ ...base, timedRuns: [] }), /no timed run plays or waits here now/);
+  assert.match(judgeTiming(base), /did not say which timed runs/);
 });
