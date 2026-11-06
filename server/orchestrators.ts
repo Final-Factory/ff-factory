@@ -2594,8 +2594,15 @@ It is for your part of the work, not an answer to another worker's question.`;
       // Kept whole for the workers' briefs (w496); the log line is clipped.
       w.notes = [...(w.notes ?? []), { at: this.now().toISOString(), by: owner.displayName, text: note.slice(0, 2000) }].slice(-20);
       if (keeps) what.push(`the question stays with ${names(keeps.for!)} (handed by ${keeps.by ?? 'the dispatcher'}): it waits on their answer, nothing to decide meanwhile`);
-      if (w.status === 'question' && !keeps) w.status = 'new';
-      if (!keeps) w.question = undefined;
+      // w3161: only the person's own words answer the question (ACTING above). A note outside their turn (their orchestrator's
+      // "Hold w3155 until Ben says he's ready", relayed on a [needs you]) adds to it: before, it put the request back to `new`
+      // with no question, so the w2217 bound offered it to the dispatcher again as undecided and it asked Ben again.
+      const held = !keeps && !w.humanAsked && !!w.question && !w.flag;
+      if (held) what.push(`the question stays open: a note outside ${owner.displayName}'s own turn answers nothing, it waits on their answer`);
+      else {
+        if (w.status === 'question' && !keeps) w.status = 'new';
+        if (!keeps) w.question = undefined;
+      }
       // A hold lifted or a "go" does not lift a gate (w754, w750: w727 was still open when lothsahn said "unblock the release"):
       // it goes back to Blocked on what it kept, and starts by itself when they clear.
       if (w.status === 'new' && w.blocked) {

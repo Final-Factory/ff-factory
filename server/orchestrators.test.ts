@@ -610,7 +610,7 @@ test('nobody chats with the dispatcher, the owner included; the harness and the 
 
 test('requests: a question goes to its filer, whose answer brings it back; closing as done does not wake the dispatcher', async (t) => {
   // Production's 1.5 s gathering: the filing and the answer to the question must fall in one window.
-  const { store, dispatcher, chat, call, heard } = setup(t, { gatherMs: 1500 });
+  const { store, sessions, dispatcher, chat, call, heard } = setup(t, { gatherMs: 1500 });
   const loth = chat(LOTH).info;
   await call(loth, 'request_work', { title: 'Playtest the new tutorial', brief: 'Look for soft locks.' });
   await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'ask', note: 'Single-player or co-op?', questions: [{ question: 'Which one?', options: [{ label: 'The first', recommended: true }, { label: 'The second' }] }] });
@@ -619,10 +619,13 @@ test('requests: a question goes to its filer, whose answer brings it back; closi
   await until('Lothsahn hears the question', () => heard(loth.id, '[needs you]').length === 1);
   assert.match(heard(loth.id, '[needs you]')[0].text, /^\[needs you\] w1 "Playtest the new tutorial"\nQuestion \(the dispatcher asks Lothsahn\):\n\nSingle-player or co-op\?\n\n(Ask it with ask_person[^]*?\n\n)?To answer: /);
   assert.equal(heard(loth.id, '[dispatch]').length, 0, 'not a second message as [dispatch]');
-  assert.match((await call(loth, 'update_work', { id: 'w1', note: 'Single-player' })).text, /^w1 is new: note: Single-player\./);
+  // w3161: the answer is Lothsahn's own, in a turn of theirs (a note in the [needs you] turn would leave the question open).
+  sessions.send(loth.id, 'Single-player', 'human', undefined, { requestedBy: LOTH });
+  await until('the turn ends', () => loth.status === 'idle');
+  assert.match((await call(loth, 'update_work', { id: 'w1', note: 'Single-player' })).text, /^w1 is new: note: Single-player; answers the \[needs you\] question\./);
   // Filed and answered within a moment: the dispatcher gets both in one message.
   await until('the dispatcher hears the answer', () => heard(dispatcher().info.id, '[work update]').length === 1);
-  assert.match(heard(dispatcher().info.id, '[work update]')[0].text, /^\[work request\] w1 [\s\S]*\n---\n\n\[work update\] w1 "Playtest the new tutorial" \(new\) from Lothsahn: note: Single-player\.$/);
+  assert.match(heard(dispatcher().info.id, '[work update]')[0].text, /^\[work request\] w1 [\s\S]*\n---\n\n\[work update\] w1 "Playtest the new tutorial" \(new\) from Lothsahn: note: Single-player; answers the \[needs you\] question\.$/);
   const before = heard(dispatcher().info.id, '[work').length;
   assert.match((await call(loth, 'update_work', { id: 'w1', close: 'done', note: 'Found none' })).text, /closed as done/);
   await new Promise((r) => setTimeout(r, 1800));
@@ -3694,7 +3697,7 @@ function putRequests(store: Store, rows: (Partial<WorkItem> & { id: string; by?:
 }
 
 test('w754: w750 as it happened: block on A, a hold, the hold lifted with A still open stays blocked; start is refused; gate B joins; each clears in turn and only then does it start', async (t) => {
-  const { store, agents, o, dispatcher, chat, call, heard } = await setupOnMachine(t);
+  const { store, sessions, agents, o, dispatcher, chat, call, heard } = await setupOnMachine(t);
   agentsRoom(agents, ['pc']);
   // w1 stands for w727 (Deck screens), w2 for w752 (the Technology label fix), w3 for w750 (the release), w4 for another release.
   putRequests(store, [{ id: 'w1', status: 'active' }, { id: 'w2', status: 'active' }, { id: 'w3' }, { id: 'w4' }]);
@@ -3709,6 +3712,9 @@ test('w754: w750 as it happened: block on A, a hold, the hold lifted with A stil
   assert.equal(store.work.get('w3')!.status, 'question');
   assert.equal(store.work.get('w3')!.blocked?.ref, 'w1', 'the hold did not drop the gate');
   // 07:27 "You can unblock the release": the hold is lifted and w1 is still open: it goes back to Blocked, not to the dispatcher.
+  // w3161: Lothsahn's own words lift it; a note outside a turn of theirs leaves the hold standing.
+  sessions.send(loth.id, 'You can unblock the release', 'human', undefined, { requestedBy: LOTH });
+  await until('the turn ends', () => loth.status === 'idle');
   const go = await call(loth, 'update_work', { id: 'w3', note: "GO: you can unblock the release. I've verified it's not an issue." });
   assert.equal(go.isError, false, go.text);
   const w3 = store.work.get('w3')!;
@@ -7534,6 +7540,44 @@ test('w2217: a request left undecided past the bound is offered to the dispatche
   assert.equal(ok.isError, false, ok.text);
   o.undecidedBound();
   assert.equal(store.work.get('w1')!.undecided, undefined);
+});
+
+test("w3161: a person's hold note outside their turn keeps the dispatcher's question open: Waiting on input on them, never offered again as undecided", async (t) => {
+  const { store, sessions, o, dispatcher, chat, call, heard } = setup(t);
+  const ben = chat(BEN);
+  await call(ben.info, 'request_work', { title: 'Ben checks the dragon sigil on a real Steam Deck', brief: 'Ben plays it on his Deck.' });
+  await until('the dispatcher hears it', () => heard(dispatcher().info.id, '[work request] w1').length === 1);
+  const asked = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'ask', note: 'w1 waits for Ben, who said he cannot check on the Deck yet.', questions: [{ question: 'Is the orange sigil easy to read on your Deck?', options: [{ label: 'Yes, it reads well', recommended: true }, { label: 'No, make it bolder' }] }] });
+  assert.equal(asked.isError, false, asked.text);
+  // w3155: his orchestrator writes the hold, on the [needs you] line, not in a turn of Ben's.
+  sessions.send(ben.info.id, '[needs you] w1: the dispatcher asks Ben', 'system');
+  await until('the turn ends', () => ben.info.status === 'idle');
+  const hold = await call(ben.info, 'update_work', { id: 'w1', note: "Hold w1 until Ben says he's ready. Don't ask again before then." });
+  assert.equal(hold.isError, false, hold.text);
+  assert.match(hold.text, /the question stays open: a note outside Ben's own turn answers nothing/);
+  const w = store.work.get('w1')!;
+  assert.equal(w.status, 'question');
+  assert.ok(w.question, 'the question stands');
+  const at = (min: number) => {
+    const when = Date.now() + min * 60_000;
+    (o as unknown as { now: () => Date }).now = () => new Date(when);
+  };
+  for (const min of [16, 22, 75]) {
+    at(min);
+    assert.deepEqual(o.undecidedBound(), [], `not offered again at ${min} min`);
+    const live = (await call(dispatcher().info, 'list_work', { id: 'w1' })).text;
+    assert.match(live, /Waiting on input/, live);
+    assert.match(live, /Ben/, live);
+    assert.doesNotMatch(live, /Stalled|undecided/, live);
+  }
+  assert.equal(heard(dispatcher().info.id, '[work request] w1').length, 1, 'the dispatcher heard it once');
+  // Ben's own answer, in his turn, answers it: back to the dispatcher to decide.
+  sessions.send(ben.info.id, "I'm ready", 'human', undefined, { requestedBy: BEN });
+  await until('his turn ends', () => ben.info.status === 'idle');
+  const answer = await call(ben.info, 'update_work', { id: 'w1', note: "I'm ready, send the card." });
+  assert.equal(answer.isError, false, answer.text);
+  assert.equal(store.work.get('w1')!.status, 'new');
+  assert.equal(store.work.get('w1')!.question, undefined);
 });
 
 test('w2239: a pair run closes on its newest attempt\'s DONEs though a leg of an earlier attempt never said DONE (w2175: stopped waiting for LISTENING; w2224: an earlier host leg still alive)', async (t) => {
