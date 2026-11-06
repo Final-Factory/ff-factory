@@ -24,6 +24,7 @@ import { holdsOf, portalWaitIn, requestWaitOf, siblingWaitOf } from '../shared/w
 import { latestLine } from '../shared/latestLine.ts';
 import { HELD_MARK, inPersonWords } from '../shared/conditional.ts';
 import { ANSWER_EXCERPT_CHARS, answeredText, answerExcerpt, splitReply, splitSent } from '../shared/replies.ts';
+import { forYouId, splitForYou } from '../shared/forYou.ts';
 import { blockerName, gatesOf, type PrHealth } from '../shared/blockers.ts';
 import { answersText } from '../shared/questionCard.ts';
 import { needsTimed, PAIR_HOLD_MS, TIMED_HOLD_MS, pairText, unfitWhy } from '../shared/capacity.ts';
@@ -3174,6 +3175,59 @@ test('w1955: a typed message starts its turn with the open cards asked before it
   // The typed message the orchestrator receives keeps the person's words ahead of the mark.
   assert.equal(inPersonWords('We already decided on this in a discussion', [typed + offer]), true);
   assert.equal(inPersonWords('call close_question with its seq', [typed + offer]), false, 'the card note is the harness note, not their words');
+});
+
+test('w3253: a [for you] message waits in its person’s bubble until they reply to it, the orchestrator closes it, or they clear it', async (t) => {
+  const { store, o, chat, call, dispatcher } = setup(t);
+  store.onEvent = (sid, e) => o.observeAsk(sid, e);
+  const loth = chat(LOTH);
+  const ben = chat(BEN);
+  const say = (sid: string, text: string) => store.append(sid, { kind: 'assistant', text }).seq;
+  const waiting = (c = loth) => (o.personalOf(c.info.requestedBy!.userId)!.info.forYou ?? []).map((m) => m.seq);
+  // A plain message, a relay, waits for nobody; one that starts with the mark does, without it.
+  say(loth.info.id, 'w12 started in slot2.');
+  const go = say(loth.info.id, '[for you]\nThe release is ready. Say go and I push it to the beta branch.');
+  const login = say(loth.info.id, '[For you]: BEAST needs you to log in once at its desk.');
+  assert.deepEqual(waiting(), [go, login]);
+  const first = o.personalOf('lothsahn')!.info.forYou![0];
+  assert.equal(first.id, forYouId(go));
+  assert.equal(first.text, 'The release is ready. Say go and I push it to the beta branch.');
+  // Each person has their own list; the dispatcher's messages never wait.
+  const bens = say(ben.info.id, '[for you] Which look do you want for the ledger?');
+  assert.deepEqual(waiting(ben), [bens]);
+  assert.deepEqual(waiting(), [go, login]);
+  say(dispatcher().info.id, '[for you] nothing');
+  assert.equal(dispatcher().info.forYou, undefined);
+  // Their next typed message offers the waiting ones to the orchestrator once, so it closes the ones it answers.
+  const offer = o.heldOffer(loth.info.id, 'Logged in.');
+  assert.match(offer, new RegExp(`- \\[for you\\] ${login} \\(BEAST needs you to log in once at its desk\\.\\)`));
+  assert.match(offer, /call close_question with its seq and why/);
+  assert.equal(o.heldOffer(loth.info.id, 'Ok.'), '', 'offered once');
+  const closed = await call(loth.info, 'close_question', { seq: login, why: 'Lothsahn logged in' });
+  assert.equal(closed.isError, false, closed.text);
+  assert.match(closed.text, /left the list over your person's message box/);
+  assert.deepEqual(waiting(), [go]);
+  // A reply quoting it in the chat (the reply mark, w866) takes it off.
+  store.append(loth.info.id, { kind: 'user', from: 'human', text: o.replyWords(loth.info.id, 'Go.', go), requestedBy: LOTH });
+  assert.deepEqual(waiting(), []);
+  assert.equal(o.personalOf('lothsahn')!.info.forYou, undefined);
+  // Cleared by hand in the bubble: by its id, beside other people's messages, which the same route clears.
+  const again = say(loth.info.id, '[for you] Pick the next request: w20 or w21?');
+  const listed = await call(loth.info, 'close_question', { why: 'list' });
+  assert.match(listed.text, new RegExp(`Waiting \\[for you\\] messages \\(seq: words\\): ${again}: Pick the next request`));
+  assert.equal(o.readPersonMessages(loth.info.id, ['pm-other']), 0, 'an id it does not hold clears nothing');
+  assert.equal(o.readPersonMessages(loth.info.id, [forYouId(again)]), 1);
+  assert.deepEqual(waiting(), []);
+  assert.deepEqual(waiting(ben), [bens], 'Ben’s list is his own');
+  // The route without ids clears all of it.
+  assert.equal(o.readPersonMessages(ben.info.id), 1);
+  assert.deepEqual(waiting(ben), []);
+});
+
+test('w3253: splitForYou takes the mark only at the start of a message', () => {
+  assert.deepEqual(splitForYou('[for you]\nSay go.'), { forYou: true, text: 'Say go.' });
+  assert.deepEqual(splitForYou('  [FOR YOU]: Say go.'), { forYou: true, text: 'Say go.' });
+  assert.deepEqual(splitForYou('Done. [for you] was a typo'), { forYou: false, text: 'Done. [for you] was a typo' });
 });
 
 test('w1868: waiting_on_person refuses a still on the worker’s own machine; the brief asks every question with ask_person', async (t) => {

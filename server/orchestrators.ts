@@ -82,8 +82,9 @@ import { isSamePerson, personForWork, sessionPerson, tokenPersonForWork } from '
 import { MERGE_ON_GREEN_MARK } from './mergeOnGreen.ts';
 import { handoffQuote, handoffReport, isHandoff } from './handoffReport.ts';
 import { commitsIn, normPr, pairCommitsOf, pairPrOf, pairRanCommit, prIn, resultFor, sameCommit, samePr } from './pairRuns.ts';
-import type { AttachmentRef, BenchGrant, ConditionalDecision, OpenAsk, WorkNeedsYou, GateResume, GitStatus, Machine, WorkAutoClosed, WorkBlocker, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPair, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
+import type { AttachmentRef, BenchGrant, ConditionalDecision, ForYouMark, OpenAsk, WorkNeedsYou, GateResume, GitStatus, Machine, WorkAutoClosed, WorkBlocker, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPair, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
 import { REPORT_KINDS, WORK_PRIORITIES, questionFor, type ReportKind, type ReportSummary } from '../shared/types.ts';
+import { FOR_YOU_CHARS, FOR_YOU_KEPT, forYouId, splitForYou } from '../shared/forYou.ts';
 
 /** w2045: the most of a worker's after-merge report a merge-on-green gate keeps (a DONE report is rarely longer). */
 const MERGE_ON_GREEN_REPORT_CHARS = 12_000;
@@ -896,13 +897,18 @@ export class Orchestrators {
    */
   readPersonMessages(sessionId: string, ids?: readonly string[]): number {
     const h = this.sessions.sessions.get(sessionId);
-    const list = h?.info.personMessages;
-    if (!h || !list?.length) return 0;
+    const list = h?.info.personMessages ?? [];
+    // Its own orchestrator's "[for you]" messages sit in the same bubble and clear the same way (w3253).
+    const mine = h?.info.forYou ?? [];
+    if (!h || (!list.length && !mine.length)) return 0;
     const keep = ids ? list.filter((m) => !ids.includes(personMessageId(m))) : [];
-    if (keep.length === list.length) return 0;
+    const keepMine = ids ? mine.filter((m) => !ids.includes(m.id)) : [];
+    const gone = list.length - keep.length + mine.length - keepMine.length;
+    if (!gone) return 0;
     h.info.personMessages = keep.length ? keep : undefined;
+    h.info.forYou = keepMine.length ? keepMine : undefined;
     this.store.putSession(h.info);
-    return list.length - keep.length;
+    return gone;
   }
 
   // ---------------------------------------------------------------- people to people (message_person)
@@ -2740,6 +2746,7 @@ It is for your part of the work, not an answer to another worker's question.`;
     }
     // w2664: a message after a card, in the same turn, that shows the card's stills again: told on the chat's next result.
     if (e.kind === 'assistant') {
+      this.observeForYou(sid, e);
       const card = this.cardShown.get(sid);
       const again = card ? inlined(e.text).filter((u) => card.media.has(u)) : [];
       if (card && again.length) {
@@ -2753,7 +2760,36 @@ It is for your part of the work, not an answer to another worker's question.`;
       this.cardShown.delete(sid);
       const seq = splitReply(e.text, HELD_MARK).quote?.seq;
       if (seq !== undefined) this.closeAsks(sid, (a) => a.seq === seq);
+      if (seq !== undefined) this.closeForYou(sid, (m) => m.seq === seq);
     }
+  }
+
+  /**
+   * w3253 (lothsahn: "When you have a message or question from me it often gets lost in a wall of text"): a message of a
+   * person's own orchestrator that starts with "[for you]" waits for them in the bubble over their message box
+   * (SessionInfo.forYou) until they reply to it (observeAsk), the orchestrator closes it after their answer
+   * (close_question, offered with their next message by cardsOffer), or they clear it (readPersonMessages).
+   */
+  private observeForYou(sid: string, e: Extract<TranscriptEvent, { kind: 'assistant' }>) {
+    const split = splitForYou(e.text);
+    if (!split.forYou || !split.text.trim()) return;
+    const info = this.sessions.sessions.get(sid)?.info ?? this.store.sessions.get(sid);
+    if (!info || !this.isPersonal(info)) return;
+    const id = forYouId(e.seq);
+    const kept = (info.forYou ?? []).filter((m) => m.id !== id);
+    info.forYou = [...kept, { id, seq: e.seq, at: e.t, text: clip(split.text.trim(), FOR_YOU_CHARS) }].slice(-FOR_YOU_KEPT);
+    this.store.putSession(info);
+  }
+
+  /** Close chat `sid`'s waiting "[for you]" messages that `which` picks; returns how many went. */
+  private closeForYou(sid: string, which: (m: ForYouMark) => boolean): number {
+    const info = this.sessions.sessions.get(sid)?.info ?? this.store.sessions.get(sid);
+    const before = info?.forYou ?? [];
+    const kept = before.filter((m) => !which(m));
+    if (!info || kept.length === before.length) return 0;
+    info.forYou = kept.length ? kept : undefined;
+    this.store.putSession(info);
+    return before.length - kept.length;
   }
 
   /** At most this many open questions per chat: the oldest go first. */
@@ -2835,11 +2871,15 @@ It is for your part of the work, not an answer to another worker's question.`;
     const seq = typeof input.seq === 'number' ? input.seq : undefined;
     const why = typeof input.why === 'string' ? input.why.trim().slice(0, 200) : '';
     if (!why) throw new Error('why: in a line, why it no longer needs an answer');
+    const waiting = chat.info.forYou ?? [];
     if (seq === undefined) {
-      if (!open.length) return 'No question of yours is open.';
-      return `Open questions (seq: question): ${open.map((a) => `${a.seq}: ${clip(splitMedia(a.ask.question).text, 100)}`).join('; ')}. Call close_question with the seq of the one to close.`;
+      if (!open.length && !waiting.length) return 'No question or [for you] message of yours is open.';
+      const qs = open.length ? `Open questions (seq: question): ${open.map((a) => `${a.seq}: ${clip(splitMedia(a.ask.question).text, 100)}`).join('; ')}. ` : '';
+      const fy = waiting.length ? `Waiting [for you] messages (seq: words): ${waiting.map((m) => `${m.seq}: ${clip(m.text.replace(/\s+/g, ' '), 100)}`).join('; ')}. ` : '';
+      return `${qs}${fy}Call close_question with the seq of the one to close.`;
     }
-    if (!this.closeAsks(chat.info.id, (a) => a.seq === seq)) throw new Error(`#${seq} is not an open question of yours (${open.map((a) => a.seq).join(', ') || 'none open'})`);
+    if (this.closeForYou(chat.info.id, (m) => m.seq === seq)) return `Closed #${seq} (${why}): it left the list over your person's message box.`;
+    if (!this.closeAsks(chat.info.id, (a) => a.seq === seq)) throw new Error(`#${seq} is not an open question or [for you] message of yours (${[...open, ...waiting].map((a) => a.seq).join(', ') || 'none open'})`);
     return `Closed #${seq} (${why}): it left the Waiting on input tab.`;
   }
 
@@ -3050,10 +3090,14 @@ It is for your part of the work, not an answer to another worker's question.`;
     if (!offered) this.cardsOffered.set(sessionId, (offered = new Set()));
     const seen = offered;
     const fresh = (info.openAsks ?? []).filter((a) => a.seq !== quoted && !seen.has(a.seq));
-    if (!fresh.length) return '';
-    for (const a of fresh) seen.add(a.seq);
+    // w3253: the "[for you]" messages still waiting in the bubble over their message box, offered once each too.
+    const mine = (info.forYou ?? []).filter((m) => m.seq !== quoted && !seen.has(m.seq));
+    for (const x of [...fresh, ...mine]) seen.add(x.seq);
     const lines = fresh.map((a) => `- open question ${a.seq} (${clip(splitMedia(a.ask.question).text.replace(/\s+/g, ' '), 140)}), asked ${a.at}`);
-    return `\nOpen questions of yours on ${n}'s Waiting on input tab, asked before this message (w1955). If ${n}'s words in this message decided one, call close_question with its seq and why in this same turn, or the card stays clickable; leave the ones still open.\n${lines.join('\n')}`;
+    const asks = fresh.length ? `\nOpen questions of yours on ${n}'s Waiting on input tab, asked before this message (w1955). If ${n}'s words in this message decided one, call close_question with its seq and why in this same turn, or the card stays clickable; leave the ones still open.\n${lines.join('\n')}` : '';
+    const waits = mine.map((m) => `- [for you] ${m.seq} (${clip(m.text.replace(/\s+/g, ' '), 140)}), ${m.at}`);
+    const forYou = mine.length ? `\nYour [for you] messages still waiting over ${n}'s message box (w3253). If this message answers or acts on one, call close_question with its seq and why in this same turn; leave the rest.\n${waits.join('\n')}` : '';
+    return `${asks}${forYou}`;
   }
 
   /** The person's own recent messages in this chat, newest last: where a conditional decision's words must be found. */

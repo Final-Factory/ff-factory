@@ -197,3 +197,41 @@ test('reply and reaction over the API: only a message of your own orchestrator c
   if (worker) expect((await post(`/api/sessions/${worker.id}/react`, { seq: 1, emoji: '👍' })).status()).toBe(400);
   expect((await post(`/api/sessions/${me.dispatcherId}/react`, { seq: 1, emoji: '👍' })).status()).toBeGreaterThanOrEqual(400);
 });
+
+asReplier('for you (w3253): an orchestrator message marked [for you] waits over the message box until its person replies to it or clears it', async ({ solo: page }) => {
+  const tag = uniq('foryou');
+  const me = await appState(page.request);
+  const waiting = async () => (await appState(page.request)).sessions.find((s) => s.id === me.orchestratorId)?.forYou?.map((m) => m.text);
+  // A retry starts with nothing waiting.
+  expect((await page.request.post(`/api/sessions/${me.orchestratorId}/person-messages/read`, { data: {} })).ok()).toBe(true);
+  const ask = (words: string) => sendToChat(page.request, me.orchestratorId, `#say [for you]⏎${words}\n#tool close_question {"why":"list"}`);
+  const bubble = page.getByTestId('people-messages');
+
+  // Its message shows in the chat with a For you tag and without the mark, and waits in the bubble.
+  const go = `Say go and I push the build to the beta branch. ${tag}`;
+  await ask(go);
+  const said = page.locator('.orch .msg-assistant', { hasText: go }).first();
+  await expect(said.getByTestId('for-you-tag')).toHaveText('For you');
+  await expect(said).not.toContainText('[for you]');
+  await expect(bubble.getByTestId('people-messages-count')).toHaveText('1 message from your orchestrator');
+  expect(await waiting()).toEqual([go]);
+
+  // Reply in the bubble quotes it in the message box; sending the answer takes it off the list.
+  await bubble.getByRole('button', { name: /1 message from your orchestrator/ }).click();
+  await expect(bubble.getByTestId('people-message')).toHaveAttribute('data-kind', 'for-you');
+  await bubble.getByRole('button', { name: 'Reply to your orchestrator' }).click();
+  await expect(page.getByTestId('composer-reply')).toContainText('Replying to Orchestrator');
+  await say(page, `go ${tag}`);
+  await expect(bubble).toHaveCount(0);
+  expect(await waiting()).toBeUndefined();
+
+  // Cleared by hand: it goes after the undo window, and stays in the chat.
+  const pick = `Pick the next request: w20 or w21? ${tag}`;
+  await ask(pick);
+  await expect(bubble.getByTestId('people-messages-count')).toHaveText('1 message from your orchestrator');
+  await bubble.getByRole('button', { name: /1 message from your orchestrator/ }).click();
+  await bubble.getByRole('button', { name: 'Clear the message from Orchestrator' }).click();
+  await expect.poll(waiting, { timeout: 15_000 }).toBeUndefined();
+  await expect(bubble).toHaveCount(0, { timeout: 15_000 });
+  await expect(page.locator('.orch .msg-assistant', { hasText: pick }).first()).toBeVisible();
+});
