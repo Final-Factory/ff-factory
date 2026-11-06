@@ -34,7 +34,7 @@ export interface BenchGlance {
 
 export const BENCH_LABEL: Record<BenchMode, string> = { exclusive: 'Exclusive', shared: 'Shared', free: 'Free' };
 const TONE: Record<BenchMode, BenchGlance['tone']> = { exclusive: 'amber', shared: 'blue', free: 'grey' };
-const EXEMPT: Record<NonNullable<BenchTicketGlance['exempt']>, string> = { release: 'urgent release', nightly: 'nightly' };
+const EXEMPT: Record<'release' | 'nightly', string> = { release: 'urgent release', nightly: 'nightly' };
 
 /** "12m", "1h 5m": a span of minutes, rounded down, never below 0. */
 export function benchMinutes(ms: number): string {
@@ -49,8 +49,11 @@ const who = (t: BenchTicketGlance) => (t.requests?.length ? t.requests.join(', '
 
 /** The kind of work no turn limit ends: the urgent release lane's ticket or builder, or the nightly. */
 function kind(t: BenchTicketGlance): string {
-  return t.preempt ? EXEMPT.release : t.exempt ? EXEMPT[t.exempt] : '';
+  return t.preempt ? EXEMPT.release : t.exempt && t.exempt !== 'approved' ? EXEMPT[t.exempt] : '';
 }
+
+/** w3186: a turn a person approved is still a turn (longer): it is named, but the turn limits apply to it. */
+const approvedTag = (t: BenchTicketGlance) => (t.approved ? 'approved turn' : '');
 
 /** "ends in 4m", or "ends now" once the deadline passed (the queue revokes it at its next look). */
 const endsIn = (at: number, now: number) => (at > now ? `ends in ${benchMinutes(at - now)}` : 'ends now');
@@ -70,9 +73,10 @@ function times(t: BenchTicketGlance, now: number, singleWorker: boolean, waiting
   if (kind(t) || singleWorker) return `${held}, no turn limit`;
   // w1860: only lower-priority work waits behind it: it keeps the lock until it lets go
   if (t.keeps) return `${held}, keeps the lock: only lower-priority work waits`;
+  if (t.approved && !t.turnStart) return `${held}, its approved turn starts once the CI jobs drained`;
   if (!t.until) return held;
   const left = Date.parse(t.until) - now;
-  const turn = t.turnMin ? `its ${t.turnMin}m turn` : 'its turn';
+  const turn = `its ${t.approved ? 'approved ' : ''}${t.turnMin ? `${t.turnMin}m ` : ''}turn`;
   // Past its turn the queue limits it only once another worker's ticket waits behind it (bench_queue.py _blocked_by): a
   // leg of its own worker's, or one an exempt holder also keeps waiting, sets no deadline.
   return left >= 0 ? `${held}, ${benchMinutes(left)} left of ${turn}` : `${held}, past ${turn}: ${waiting ? 'no deadline set' : 'nobody waits'}`;
@@ -91,6 +95,7 @@ function hintLine(t: BenchTicketGlance, now: number, singleWorker: boolean, wait
   const bits = [
     `${t.mode} ${t.ticket}`,
     kind(t),
+    approvedTag(t),
     t.requests?.length ? t.requests.join(', ') : '',
     t.session ? `worker ${t.session.slice(0, 8)}` : '',
     where,
@@ -130,7 +135,7 @@ export function benchGlance(b: BenchState | undefined, now: number): BenchGlance
   let held = '';
   if (b.mode === 'exclusive') {
     if (lead?.mode === 'exclusive') {
-      detail = [kind(lead), who(lead), lead.session ? `worker ${lead.session.slice(0, 8)}` : ''].filter(Boolean).join(' · ');
+      detail = [kind(lead) || approvedTag(lead), who(lead), lead.session ? `worker ${lead.session.slice(0, 8)}` : ''].filter(Boolean).join(' · ');
       short = [kind(lead), who(lead)].filter(Boolean).join(' · ');
       held = times(lead, now, single, b.waiting);
     } else if (b.legacy) {

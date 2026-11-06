@@ -3154,6 +3154,33 @@ turn and the server carries it out when the fact is met (`shared/conditional.ts`
 - **Listed and cancelled** with `conditional_decisions` (cancel: only in the person's own turn); `list_work` with a
   request's id shows its pending ones. A request carries at most 5; the same decision recorded again replaces it.
 
+### A longer bench turn a person approved (w3186)
+
+A timing turn on a machine's bench queue lasts 30 minutes while another worker waits (w1832, lothsahn's rule; docs/
+unity-lifecycle.md, "Turn limits"), and a timing waits at most 20 minutes for the machine's running CI jobs first. w3159's
+overload runs on biscuit needed longer: 1205 s went to the CI wait, and the turn was revoked ten minutes into the run. ben,
+2026-11-06: "Give each overload run a one-off 60-minute exclusive turn on biscuit, with the ffu test runners paused".
+
+- **Recorded** by the person's own orchestrator with `grant_bench_turn`: `request` (the request whose worker times),
+  `machine`, `turns` (1 to 4), `minutes` (31 to 240), `words` and optionally `expires_days` (default 7, at most 30).
+  For w3159: `grant_bench_turn({request: "w3159", machine: "biscuit", turns: 2, minutes: 60, words: "Give each overload
+  run a one-off 60-minute exclusive turn on biscuit, with the ffu test runners paused"})`.
+- **Only the person's authority.** Only in a turn the person started (`turnFrom`, as for cancelling a conditional
+  decision; a click, a check-in or a timer is not one), with `words` found verbatim in one of their last 20 messages in
+  that chat (`inPersonWords`, as for conditional decisions). The request must be open and theirs, or they an owner. The
+  grant is stored on the request (`WorkItem.benchGrants`, `w3159.b1`), with their words, and its ledger says so.
+- **What it does.** The portal marks the request's worker sessions on that machine (a timed_run sent there included)
+  `exempt: 'approved'` with the grant in the `bench_priorities` it sends each minute (`agents.ts` `benchPriorities`,
+  `markBenchGrants`); the daemon writes the mark into priorities.json, which only it writes, so a worker never grants
+  itself one. The game repo's `bench_queue.py` (from master, w3186) gives those sessions' exclusive tickets the approved
+  minutes, waits up to 60 minutes for running CI jobs, and starts the turn's clock once they drained; the daemon pauses the
+  machine's CI runners for the whole hold and continues them when it ends (w3112, `machine/benchRunners.ts`). timed_place
+  answers "here" for that worker on that machine. Tell the worker to time there with `bench_queue.py timed --minutes M`.
+- **Counted and ended by itself.** A turn is counted when the machine's bench state shows such a ticket granted
+  (`server/benchGrants.ts` `countGrant`); the ledger notes each (`t00001234 took turn 1 of 2`). Once all are used and the
+  last let go, the grant ends and the 30 minutes apply again; it also ends when the request closes or it expires. Without
+  arguments `grant_bench_turn` lists the grants that hold; `cancel` with a grant's id takes one back, in the person's turn.
+
 ### Replies and reactions (w866)
 
 Ben, 2026-10-10: "we should be able to reply to a message and include it in the intput as context. also let us give emoji

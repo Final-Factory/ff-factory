@@ -64,7 +64,7 @@ import { MOVE_AFTER_MS, NONE_MARK, ROOM_WAIT, briefOf, moveDecision, movedPrompt
 import { playHolds, playLine } from '../shared/personPlay.ts';
 import { sandboxUseText, unitySlotsLine } from '../shared/fleet.ts';
 import { isMidTurn, midTurnRefusal, othersMidTurn, snapshotOf, type OptionsFactory, type QueuedSend, type SessionHandle, type SessionManager, type TurnEndMeta } from './sessions.ts';
-import { FLAG_LABEL, SET_BLOCKER_KINDS, WORK_BLOCKER_KINDS, WORK_OPEN, WORK_PRIORITIES, type WorkBlockerKind, type WorkSource, type BenchPriority, type BenchAway, type AttachmentRef, type DeliveredAttachment, type ImageInput, type PermissionMode, type Requester, type Sandbox, type SessionInfo, type TranscriptEvent, type WorkItem, type WorkPriority, type WorkStatus } from '../shared/types.ts';
+import { FLAG_LABEL, SET_BLOCKER_KINDS, WORK_BLOCKER_KINDS, WORK_OPEN, WORK_PRIORITIES, type WorkBlockerKind, type WorkSource, type BenchPriority, type BenchGrant, type BenchAway, type AttachmentRef, type DeliveredAttachment, type ImageInput, type PermissionMode, type Requester, type Sandbox, type SessionInfo, type TranscriptEvent, type WorkItem, type WorkPriority, type WorkStatus } from '../shared/types.ts';
 import { attachmentForMachine, publicRef, publishableFile, publishedFilesBlock, uploadForMachine, type AttachmentStore } from './attachments.ts';
 import type { TimedDelivery, TimedRuns } from './timedRuns.ts';
 import { timedRoute } from './timedDelivery.ts';
@@ -85,6 +85,7 @@ import { deleteMemoryFile, MEMORY_TRASH_DAYS, memoryDirFor, memoryGuard, memoryK
 import { ownerDataReads, portalSecretRules, secretFilesOf, secretReadGuard, type SecretRules } from './secretGuard.ts';
 import { readableConfigFiles } from './configMigration.ts';
 import { conditionalLine, HELD_MARK } from '../shared/conditional.ts';
+import { approvedMark, countGrant, liveGrant } from './benchGrants.ts';
 import { FFBOX_CONVERSATION_DEFAULT_TURNS, FFBOX_REPORTS_DEFAULT, LIST_CARD_NOTE, LIST_WORK_LOG_TAIL, SANDBOX_DETAIL_CHARS, SESSION_REQUESTS_TOP, clip, keyList, logLines } from './toolOutput.ts';
 import { SpendStore, buildReport, costLine, renderReport, renderRequest, renderSession } from './spend.ts';
 import { spendExport, type ExportArgs } from './spendExport.ts';
@@ -3564,7 +3565,8 @@ export class Agents {
     const reqs = this.openWorkOf(info);
     const special = reqs.find((w) => w.timedLeg || w.pair);
     if (special) return { stays: `${special.id} is ${special.timedLeg ? 'a timed leg' : 'a pair run'}` };
-    if (this.benchPriorities(info.machineId!)[info.id]?.exempt) return { stays: 'it is the urgent release lane or the nightly' };
+    const ex = this.benchPriorities(info.machineId!)[info.id]?.exempt;
+    if (ex) return { stays: ex === 'approved' ? 'a person approved it a longer bench turn on this machine (w3186)' : 'it is the urgent release lane or the nightly' };
     if (this.liveHub?.running(info.id)) return { stays: 'its Live view is up' };
     const st = this.machines.statsOf(info.machineId!);
     if (sb.path && benchLockIn(st?.benchLock, sb.path)) return { stays: 'a timed run from its sandbox holds the bench lock' };
@@ -4023,6 +4025,17 @@ export class Agents {
   benchPriorities(machineId: string): Record<string, BenchPriority> {
     const out: Record<string, BenchPriority> = {};
     const bySession = this.workBySession();
+    // w3186: the turns a person approved on this machine, and the worker sessions each one marks
+    const now = Date.now();
+    const grants = new Map<BenchGrant, { w: WorkItem; sessions: Set<string> }>();
+    const grantOf = (session: string, open: WorkItem[]) => {
+      for (const w of open) {
+        const g = liveGrant(w, machineId, now);
+        if (!g) continue;
+        (grants.get(g) ?? grants.set(g, { w, sessions: new Set() }).get(g)!).sessions.add(session);
+        return;
+      }
+    };
     for (const info of this.store.sessions.values()) {
       if (info.kind !== 'worker' || info.machineId !== machineId) continue;
       const own = this.openWorkOf(info, bySession);
@@ -4047,6 +4060,7 @@ export class Agents {
       const timed = v && Date.parse(v.until) > Date.now() && !this.timedLegFinished(v) ? v : undefined;
       const away = release ? undefined : this.benchAway(info, machineId, timed);
       out[info.id] = { priority: release ? 'urgent' : top, requests: open.map((w) => w.id), ...(exempt ? { exempt } : {}), ...(timed ? { timed } : {}), ...(away ? { away } : {}) };
+      if (!exempt) grantOf(info.id, open);
     }
     // w1996: a timed_run sent to this computer queues here for its worker elsewhere, at that worker's request priority
     for (const r of this.timedRuns?.runsOn(machineId) ?? []) {
@@ -4063,8 +4077,29 @@ export class Agents {
       const open = mine.length ? mine : r.requests.map((id) => this.store.work.get(id)).filter((w): w is WorkItem => !!w && isOpen(w));
       const top = open.length ? open.reduce((a, w) => (WORK_PRIORITIES.indexOf(w.priority) > WORK_PRIORITIES.indexOf(a) ? w.priority : a), 'low' as WorkPriority) : 'normal';
       out[r.session] = { priority: top, requests: open.length ? open.map((w) => w.id) : r.requests, timed: here };
+      grantOf(r.session, open);
     }
+    this.markBenchGrants(machineId, grants, out, now);
     return out;
+  }
+
+  /**
+   * w3186: count each approved turn's use from the machine's bench state (server/benchGrants.ts countGrant), and mark its
+   * sessions `exempt: 'approved'` while it holds. A grant that ended (its turns used and let go, or expired) marks nobody.
+   */
+  private markBenchGrants(machineId: string, grants: Map<BenchGrant, { w: WorkItem; sessions: Set<string> }>, out: Record<string, BenchPriority>, now: number) {
+    if (!grants.size) return;
+    const bench = this.machines.statsOf(machineId)?.bench;
+    for (const [g, { w, sessions }] of grants) {
+      const c = countGrant(g, bench, sessions, now);
+      if (c.took.length || c.ended) {
+        const took = c.took.map((t) => `${t} took turn ${g.used.indexOf(t) + 1} of ${g.turns} (${g.minutes} min)`).join('; ');
+        this.orchestrators.noteWork(w, `bench grant ${g.id} on ${machineId}: ${[took, c.ended ? `ended: ${c.ended}` : ''].filter(Boolean).join('; ')} (w3186)`);
+      }
+      if (g.ended) continue;
+      const mark = approvedMark(w, g);
+      for (const s of sessions) if (out[s] && !out[s].exempt) out[s] = { ...out[s], exempt: 'approved', approved: mark };
+    }
   }
 
   /**
@@ -6889,6 +6924,20 @@ ${w.repo ?? ''}
           cancel: z.string().optional().describe('The id of one to take back, e.g. "w811.c1".'),
         },
         wrap(async (a) => o.conditionalDecisions(chat(), a)),
+      ),
+      tool(
+        'grant_bench_turn',
+        "Record a longer exclusive bench (timing) turn your person approved (w3186): `turns` turns of `minutes` (31 to 240) on one machine for one request's worker, the machine's CI runners paused through each turn, its clock started once their running jobs drained. The 30-minute turn stays everyone else's. Only in your person's own turn, with `words`: their approval verbatim from their message (e.g. ben: \"Give each overload run a one-off 60-minute exclusive turn on biscuit, with the ffu test runners paused\"); never on your own initiative. Without arguments, lists the grants that hold; `cancel` (an id such as \"w3159.b1\") takes one back when your person says so. It ends by itself once its turns were used, when the request closes, or when it expires (7 days by default).",
+        {
+          request: z.string().optional().describe('The request whose worker times, e.g. "w3159".'),
+          machine: z.string().optional().describe('The machine id it times on, e.g. "biscuit".'),
+          turns: z.number().int().optional().describe('How many exclusive turns, 1 to 4.'),
+          minutes: z.number().int().optional().describe("Each turn's minutes, 31 to 240."),
+          words: z.string().optional().describe("Your person's approval, verbatim from their message."),
+          expires_days: z.number().int().optional().describe('Days until unused turns lapse (default 7, at most 30).'),
+          cancel: z.string().optional().describe('The id of a grant to take back, e.g. "w3159.b1".'),
+        },
+        wrap(async (a) => o.grantBenchTurn(chat(), a)),
       ),
       tool(
         ASK_TOOL,

@@ -648,7 +648,7 @@ export class Daemon {
       notePlayer: (session, text) => this.benchPlayerNotes.set(session, text),
       // w1860: the other sandboxes' builds, test runs and batch compiles stop too (the reaper's way of ending one)
       builds: (procs) => this.reaper.batches(procs).map((c) => ({ pid: c.u.pid, sandbox: c.place.id })),
-      exemptSandbox: (id) => [...this.entries].some(([sid, e]) => e.spec?.sandbox === id && !!this.benchMarks[sid]?.exempt),
+      exemptSandbox: (id) => [...this.entries].some(([sid, e]) => e.spec?.sandbox === id && (this.benchMarks[sid]?.exempt === 'release' || this.benchMarks[sid]?.exempt === 'nightly')),
       stopBuild: (pid, _sandbox, why) => this.reaper.endBatch(pid, why),
       lowerBuild: (pid, procs) => {
         const tree = treeOf(pid, procs);

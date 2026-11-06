@@ -254,6 +254,16 @@ export interface QueueTicket {
   ownerPid?: number;
   /** w1984/w2410: a waiting ticket bench_queue.py parked because its worker is away (parked: at, ts, why); it holds nobody back. */
   parked?: { at?: string; ts?: number; why?: string };
+  /** w3186: taken under a person's approved turn (info.json `approved`), and when its clock started (turn.json start,
+   * epoch s: once the machine's CI jobs drained). Only the session's priorities.json mark makes the approval count. */
+  approved?: boolean;
+  turnStart?: number;
+}
+
+/** w3186: a ticket's approval and its turn's start (bench_queue.py start_approved_turn), when it has them. */
+function turnOf(info: Record<string, unknown>, turn: { start?: unknown } | undefined): Pick<QueueTicket, 'approved' | 'turnStart'> {
+  if (!info.approved || typeof info.approved !== 'object') return {};
+  return { approved: true, ...(typeof turn?.start === 'number' ? { turnStart: turn.start } : {}) };
 }
 
 /** The tickets in the queue whose helper process lives, in order (read only: the helpers' OS locks are the truth). */
@@ -276,7 +286,7 @@ export function queueTickets(lock: string, alive: (pid: number) => boolean): Que
   for (const n of names) {
     const info = read(path.join(dir, n, 'info.json'));
     if (!info || !Number.isInteger(info.pid) || !alive(info.pid)) continue;
-    out.push({ ticket: n, mode: info.mode === 'shared' ? 'shared' : 'exclusive', what: String(info.what ?? ''), pid: info.pid, sandbox: info.sandbox || undefined, cwd: info.cwd || undefined, created: info.created, granted: read(path.join(dir, n, 'granted')), revoked: read(path.join(dir, n, 'revoked')), session: info.session || undefined, host: info.host || undefined, requests: Array.isArray(info.requests) ? info.requests.map(String) : undefined, maxMin: typeof info.max_min === 'number' ? info.max_min : undefined, turnMin: typeof info.turn_min === 'number' ? info.turn_min : undefined, limit: read(path.join(dir, n, 'limit.json')), keep: read(path.join(dir, n, 'keep.json')), parked: read(path.join(dir, n, 'parked')), ownerPid: Number.isInteger(info.owner_check_pid) ? info.owner_check_pid : Number.isInteger(info.owner_pid) ? info.owner_pid : undefined });
+    out.push({ ticket: n, mode: info.mode === 'shared' ? 'shared' : 'exclusive', what: String(info.what ?? ''), pid: info.pid, sandbox: info.sandbox || undefined, cwd: info.cwd || undefined, created: info.created, granted: read(path.join(dir, n, 'granted')), revoked: read(path.join(dir, n, 'revoked')), session: info.session || undefined, host: info.host || undefined, requests: Array.isArray(info.requests) ? info.requests.map(String) : undefined, maxMin: typeof info.max_min === 'number' ? info.max_min : undefined, turnMin: typeof info.turn_min === 'number' ? info.turn_min : undefined, limit: read(path.join(dir, n, 'limit.json')), keep: read(path.join(dir, n, 'keep.json')), parked: read(path.join(dir, n, 'parked')), ...turnOf(info, read(path.join(dir, n, 'turn.json'))), ownerPid: Number.isInteger(info.owner_check_pid) ? info.owner_check_pid : Number.isInteger(info.owner_pid) ? info.owner_pid : undefined });
   }
   return out;
 }
