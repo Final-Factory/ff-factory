@@ -157,7 +157,10 @@ test('w1158: what a coordinator carries in every call stays within its budget', 
   // w2664 (Ben: "you didnt show me previews for C and D") gave the dispatcher's decide_work ask a clause that a pick between
   // designs shows each answer's own still (trimmed from 196 characters to 61; the rest is in decide_work's questions and
   // no_previews and the refusal itself): measured 29,008, so the cap moved to 29,050.
-  const PROMPT_MAX = 29_050;
+  // w3253 (lothsahn: "When you have a message or question from me it often gets lost in a wall of text") gave the personal brief one
+  // line on starting a message that needs the person with [for you] (trimmed from 418 characters to 240; the rest is in
+  // close_question and docs/orchestrators.md): the owner's measured 29,286, so the cap moved to 29,300.
+  const PROMPT_MAX = 29_300;
   // w1163: the always-loaded sets now follow measured use (docs/tool-manifest.md); the dispatcher's is 23,436 characters
   // since w1159 gave list_work, list_sandboxes, list_machines and agent_transcript their output options. w1597 gave decide_work
   // its questions (one plain question per decision with its answers, as the person's card asks them; Ben, 2026-10-19: "just ask
