@@ -135,6 +135,19 @@ export function readListenerLog(root: string): string | undefined {
   }
 }
 
+/**
+ * w3424: an operations runner, one registered for jobs that time nothing (biscuit's ffu-biscuit-world takes only the
+ * shared FFU world's deploy, label ffu-world), carries this file in its root. Its listener is never paused for a turn, so
+ * a deploy merged during a timed run starts at once instead of after it (run 42394675613 waited 345 s in the game repo's
+ * ci-park hook, which skips such a runner too). Everything else a turn does to it stays: a job it runs is a job
+ * bench_queue.py waits out before a grant, and a process its jobs leave behind is a leftover.
+ */
+export const OPS_RUNNER_MARK = 'ff-ops-runner';
+
+export function isOpsRunner(root: string): boolean {
+  return fs.existsSync(path.join(root, OPS_RUNNER_MARK));
+}
+
 export interface RunnersState {
   /** The turn that paused them. */
   ticket?: string;
@@ -150,6 +163,8 @@ export interface BenchRunnersDeps {
   signal(pid: number, sig: 'SIGSTOP' | 'SIGCONT' | 'SIGTERM'): string | void;
   /** The tail of a runner's listener log (readListenerLog), undefined when it cannot be read. */
   diag(root: string): string | undefined;
+  /** Whether a runner root is an operations runner (isOpsRunner, w3424): never paused. */
+  opsRunner?(root: string): boolean;
   read(): RunnersState | undefined;
   write(s: RunnersState): void;
   log(text: string): void;
@@ -234,6 +249,12 @@ export class BenchRunners {
     const stopped: (RunnerCensus['listeners'][number] & { log: ListenerLog })[] = [];
     for (const l of c.listeners) {
       if (pausedPids.has(l.pid) || l.busy) continue;
+      if (this.d.opsRunner?.(l.root)) {
+        const why = `an operations runner (${OPS_RUNNER_MARK}, w3424): its jobs time nothing, so it takes them during the turn`;
+        if (this.heldSaid.get(l.pid) !== why) this.d.log(`bench runners: runner ${l.root} (listener pid ${l.pid}) not paused: ${why}`);
+        this.heldSaid.set(l.pid, why);
+        continue;
+      }
       // w3195: no worker yet is not idle: a listener handed its next job starts the worker only once it has acquired it
       const log = listenerLog(this.d.diag(l.root));
       const why = holdsJob(log, this.d.now());

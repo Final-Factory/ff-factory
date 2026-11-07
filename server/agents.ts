@@ -1822,6 +1822,8 @@ export class Agents {
     const what = String(a.what ?? '').replace(/\s+/g, ' ').trim();
     if (!what) throw new Error('give what: the timed leg in one line ("RoundRobin belt output A/B on PR #2347")');
     if (typeof a.cancel === 'string' && a.cancel) return this.timedCancel(info, a.cancel, what);
+    // w3425: a worker asking from its own machine runs there: an away move that never happened leaves no mark on it
+    this.awayMoveUndone(info, machineId, `it asked timed_place from ${machineId}`);
     const platform = a.platform === 'windows' ? 'win32' : a.platform === 'mac' ? 'darwin' : undefined;
     const places = this.places();
     const here = places.find((p) => p.id === placeId(machineId));
@@ -4165,7 +4167,32 @@ export class Agents {
   private movedAwayFrom(info: SessionInfo, machineId: string): BenchAway | undefined {
     const m = info.movedAway;
     if (!m || m.machine !== machineId || !(Date.now() - Date.parse(m.at) < BENCH_MOVED_AWAY_MS)) return undefined;
+    if (this.sessions.sessions.get(info.id)?.live && this.awayMoveUndone(info, machineId, `its daemon reports it running on ${machineId}`)) return undefined;
     return { why: `its worker ${info.id.slice(0, 8)} was moved to ${m.to}` };
+  }
+
+  /**
+   * w3425: clears worker `info`'s away mark (movedAway) when the move it records never happened: the worker runs on
+   * `machineId`, the machine the mark says it left, and its open requests still list it (a move that completed took them
+   * off it, Orchestrators.movedForRoom / moveOff), with no move of it under way. On 2026-11-07 the away move of worker
+   * 416bdb60 off beast/slot3 (w3408, w3407) to biscuit at 16:18Z was cut by a portal restart at 16:35Z; the worker ran
+   * on through beast's drop, and its mark parked every exclusive ticket it took on beast (t00006043, t00006054) for over
+   * an hour, through a timed_place "here" at 17:27Z. Returns true when it cleared the mark.
+   */
+  private awayMoveUndone(info: SessionInfo, machineId: string, how: string): boolean {
+    const m = info.movedAway;
+    if (!m || m.machine !== machineId || info.machineId !== machineId) return false;
+    if (this.roomMoving.has(info.id) || this.timedMoving.has(info.id)) return false;
+    // by link only: its title still names the request a completed move took off it
+    const held = [...holdsOf(info.id, [...this.store.work.values()]).held].some((id) => {
+      const w = this.store.work.get(id);
+      return !!w && isOpen(w);
+    });
+    if (!held) return false;
+    delete info.movedAway;
+    this.store.putSession(info);
+    console.log(`away mark: worker ${info.id} was marked moved off ${machineId} to ${m.to} at ${m.at}, but the move never happened (${how}); mark cleared, its bench tickets there count again (w3425)`);
+    return true;
   }
 
   /**

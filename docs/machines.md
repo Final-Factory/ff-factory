@@ -2038,7 +2038,10 @@ LothDesktop and Beast, not just when BEAST is full").
   - **How.** Its process stops, its sandbox's uncommitted work is saved and pushed (w656), its sandbox is released at once
     (`placeReleased`, `movedAway`: lothsahn, "When it moves workers to another box, it should request they clean up and
     force those slots to be released"; FF Factory ends what it left running and its temp folder goes as for any stopped
-    worker). A conversation does not cross computers, so FF Factory itself starts a fresh session for its request in a free
+    worker). `movedAway` parks the worker's waiting bench tickets on the old computer (w1984); a move that never happened
+    (cut by a portal restart, the worker running on through its computer's drop) loses it as soon as the worker is seen
+    running there with its requests still on it, or asks `timed_place` there (w3425, `Agents.awayMoveUndone`; journal
+    `away mark: ... mark cleared`). A conversation does not cross computers, so FF Factory itself starts a fresh session for its request in a free
     sandbox there, switched to its branch (game work) or on an agent seat, whose first message carries its last report,
     the brief its worker started from, the request as filed and the handover (`handedBack`: "Moved (w2046)", its branch,
     the message that was waiting). A pair leg's record points at the new session. Its other open requests, and the request

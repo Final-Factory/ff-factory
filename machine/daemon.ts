@@ -71,7 +71,7 @@ import { DaemonVoice, type DaemonVoiceSettings } from './voice.ts';
 import { benchLockDir, readBenchLock, readBenchQueue, readPassedMarks, timedHolder, writeBenchPriorities } from './benchLock.ts';
 import { editorBenchSession, editorSessions, passedShared, raisedSessions, type PassedMark } from './benchRaise.ts';
 import { readBenchWarnings } from './benchWarnings.ts';
-import { BenchRunners, readListenerLog, readRunnersFile, sendSignal, writeRunnersFile } from './benchRunners.ts';
+import { BenchRunners, isOpsRunner, readListenerLog, readRunnersFile, sendSignal, writeRunnersFile } from './benchRunners.ts';
 import { cpuSampler, LOAD_GATES, LoadGate, readLoadGateFile, winSuspendScript, writeLoadGateFile } from './loadRunners.ts';
 import { askPlayerToQuit, BenchTurn, closedDetail, holderSandboxes, writeClosedFile, type Holder } from './benchTurn.ts';
 import { GRACE_MIN, PersonPlay, personEnds, personHolderText, personHoldText, personTicket, priorityOf, setPriorityOf, treeOf, type PersonPlaySettings } from './personPlay.ts';
@@ -675,6 +675,7 @@ export class Daemon {
       procs: real ? () => pd.procs() : async () => [],
       signal: (pid, sig) => (real ? sendSignal(pid, sig) : 'not a real daemon'),
       diag: (root) => (real ? readListenerLog(root) : undefined),
+      opsRunner: (root) => real && isOpsRunner(root),
       read: () => (cfg.root ? readRunnersFile(cfg.root) : undefined),
       write: (st) => cfg.root && writeRunnersFile(cfg.root, st, log),
       log: (line) => log(line),
