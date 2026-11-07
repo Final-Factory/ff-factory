@@ -172,6 +172,22 @@ function isPlayerBuild(p: string, name: string): boolean {
   return fs.existsSync(path.join(p, 'UnityPlayer.dll')) || fs.existsSync(path.join(p, 'UnityPlayer.so')) || (/\.app$/i.test(name) && fs.existsSync(path.join(p, 'Contents', 'Frameworks', 'UnityPlayer.dylib')));
 }
 
+/**
+ * A Rust build folder (w3330): cargo writes this CACHEDIR.TAG at the top of every target directory it builds into, whatever
+ * its name (an FFU worker's `$TMPDIR/ffu-target`, a clone's `target`). One FFU worker's held 15.4 GB on LothDesktop
+ * (measured, 2026-11-07: debug/deps 10.4 GB, 6.5 GB of it .pdb debug info; debug/incremental 3.9 GB); a cold build
+ * of what it holds takes minutes (ffu-build-test: ffu-client release 1 min 40 s, ffu-headless 31 s, measured).
+ */
+const CARGO_TAG = 'Signature: 8a477f597d28d172789f06886806bc55';
+function isCargoTarget(p: string): boolean {
+  try {
+    const tag = fs.readFileSync(path.join(p, 'CACHEDIR.TAG'), 'utf8');
+    return tag.startsWith(CARGO_TAG) && /created by cargo/i.test(tag);
+  } catch {
+    return false;
+  }
+}
+
 /** A Unity Profiler capture whose digest is done: a `.csv` or `.txt` beside it written after it (bench/cpu_budget_run.sh's budget.txt, the per-frame CSVs). */
 async function digestedCapture(file: string, siblings: fs.Dirent[]): Promise<boolean> {
   const st = await fs.promises.lstat(file).catch(() => undefined);
@@ -254,7 +270,7 @@ export interface IdleCacheOptions {
  * The rebuildable caches in `dir` (w1719), found by what they hold, so the same on every OS: player builds (a worker builds
  * one per commit), a Unity project's Library, Temp and obj, npm's node_modules beside a package.json, Unity Profiler captures
  * whose digest sits beside them (the game repo's bench/capture_raw.sh deletes its own once digested), and a `frames` folder of
- * images beside the clip they came from or went into. Never a `.git`, the session's Claude task folders, nor anything else:
+ * images beside the clip they came from or went into, and a Rust build folder cargo tagged (w3330). Never a `.git`, the session's Claude task folders, nor anything else:
  * clips, stills, logs, reports, saves and clones stay.
  */
 export async function idleCachesIn(dir: string, depth = 1, out: IdleCache[] = [], o: IdleCacheOptions = {}): Promise<IdleCache[]> {
@@ -271,6 +287,7 @@ export async function idleCachesIn(dir: string, depth = 1, out: IdleCache[] = []
     }
     if (!e.isDirectory() || /^\.git$/i.test(e.name) || (depth === 1 && /^claude/i.test(e.name))) continue;
     if (isPlayerBuild(p, e.name)) out.push({ path: p, what: 'a player build' });
+    else if (isCargoTarget(p)) out.push({ path: p, what: 'a Rust build folder (cargo target)' });
     else if (unity && UNITY_CACHE.test(e.name)) {
       if (unityOpen) continue;
       if (o.quick && /^library$/i.test(e.name)) {

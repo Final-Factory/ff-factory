@@ -391,6 +391,34 @@ test('w1719: no cache goes from a folder that is live, written within 24 h, name
   assert.deepEqual((await planInstallLeftovers({ root, sandboxes: [], tempRoots: [tmp], guard: { keep: [], inUse: [], resumable: [open], home }, settings: { ...settings, idleCacheHours: 0 }, now: NOW })).items.filter((i) => i.rule === 'session-idle-cache'), []);
 });
 
+/**
+ * w3330: an FFU worker's Rust build folder (`$TMPDIR/ffu-target`, CARGO_TARGET_DIR in ff-agents' ffu-build-test) held
+ * 15.4 GB on LothDesktop (measured, 2026-11-07). It goes with a stopped worker's other rebuildable caches, found by the
+ * CACHEDIR.TAG cargo writes, whatever the folder is called; a look-alike tag that is not cargo's keeps its folder.
+ */
+test("w3330: a stopped worker's cargo target goes with its idle caches; a live worker's stays", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-cargo-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
+  const tmp = path.join(root, 'tmp');
+  const [stopped, live] = ['ffa-73b11cbd', 'ffa-55555555'].map((n) => path.join(tmp, n));
+  const tag = 'Signature: 8a477f597d28d172789f06886806bc55\n# This file is a cache directory tag created by cargo.\n# For information about cache directory tags see https://bford.info/cachedir/\n';
+  for (const s of [stopped, live]) {
+    const w = (rel: string, data = 'x') => (fs.mkdirSync(path.dirname(path.join(s, rel)), { recursive: true }), fs.writeFileSync(path.join(s, rel), data));
+    w('ffu-target/CACHEDIR.TAG', tag);
+    w('ffu-target/debug/deps/ffu_sim-1234.rlib');
+    w('ffu/Cargo.toml');
+    w('ffu/target/CACHEDIR.TAG', tag);
+    w('ffu/target/release/ffu-headless.exe');
+    w('other/CACHEDIR.TAG', 'Signature: 8a477f597d28d172789f06886806bc55\n# a cache directory tag of another tool\n');
+    w('other/notes.md');
+  }
+  ageAll(tmp, 30);
+  const guard: CleanupGuard = { keep: [], inUse: [live], resumable: [stopped, live], home: path.join(root, 'home') };
+  const items = (await planInstallLeftovers({ root, sandboxes: [], tempRoots: [tmp], guard, procs: [], settings, now: NOW })).items.filter((i) => i.rule === 'session-idle-cache');
+  assert.deepEqual(items.map((i) => rel(tmp, i.path)).sort(), ['ffa-73b11cbd/ffu-target', 'ffa-73b11cbd/ffu/target']);
+  assert.ok(items.every((i) => /a Rust build folder \(cargo target\)/.test(i.why)), 'each says what it is');
+});
+
 /** A tar as Python's tarfile writes one (ustar headers; `pax` puts each name in a pax header, as tarfile does for a long one). */
 function tarOf(entries: { name: string; data: Buffer }[], pax = false): Buffer {
   const header = (name: string, size: number, type = '0') => {
