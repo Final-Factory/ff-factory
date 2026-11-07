@@ -63,7 +63,7 @@ import type { LegStep, Occupant } from './timedLegPlace.ts';
 import { minPriorityText } from '../shared/capacity.ts';
 import { repoSlug } from './ciReadHealth.ts';
 import { BENCH_GRANT_DAYS, BENCH_TURN_MIN, grantLine, grantProblem } from './benchGrants.ts';
-import { actionName, CONDITIONAL_DAYS, CONDITIONAL_MAX_DAYS, CONDITIONAL_PER_REQUEST, conditionalLine, conditionName, HELD_MARK, inPersonWords, parseCondition, type ConditionInput } from '../shared/conditional.ts';
+import { actionName, CONDITIONAL_DAYS, CONDITIONAL_MAX_DAYS, CONDITIONAL_PER_REQUEST, conditionalLine, conditionName, CARDS_MARK, HELD_MARK, inPersonWords, NOTE_MARKS, parseCondition, type ConditionInput } from '../shared/conditional.ts';
 import { ASK_TOOL, askExcerpt, answerOf, checkAsk, isAskTool, splitMedia, type Ask } from '../shared/ask.ts';
 import { answerExcerpt, answeredText, ANSWERS_MAX, excerptOf, isEmoji, PERSON_MESSAGE_CHARS, reactionRemovedText, reactionsByMessage, reactionText, REPLY_MARK, replyText, sentText, splitReply, splitSent, type Answered, type Quoted } from '../shared/replies.ts';
 import { grantCovers, grantKey, grantWords, GRANT_MS, isNo, isYes, PROPOSAL_MAX_AGE_MS, proposalText, type GateNeed, type ReactionGrant } from '../shared/reactionGrant.ts';
@@ -1026,7 +1026,7 @@ export class Orchestrators {
     const lastOut = Math.max(before, this.sessions.sessions.get(sessionId)?.info.peopleMessaged?.[to.userId.toLowerCase()] ?? -1);
     const open = theirs.filter((m) => m.seq > lastOut);
     const mine = events.findLast((e) => e.kind === 'user' && e.from === 'human' && e.seq > lastOut);
-    const quoted = mine?.kind === 'user' ? splitReply(splitSent(mine.text).text, HELD_MARK).quote?.seq : undefined;
+    const quoted = mine?.kind === 'user' ? splitReply(splitSent(mine.text).text, NOTE_MARKS).quote?.seq : undefined;
     const replied = quoted === undefined ? undefined : theirs.find((m) => m.seq === quoted);
     if (replied) return [answer(replied)];
     if (open.length <= 1) return open.map((m) => answer(m));
@@ -2688,7 +2688,7 @@ It is for your part of the work, not an answer to another worker's question.`;
       const tag = NOTICE_TAG.exec(ev.text)?.[1];
       from = ev.from === 'human' ? (ev.requestedBy?.displayName ?? 'your person') : tag ? `a [${tag}] line` : 'a harness line';
     }
-    return { seq, from, at: ev.t, excerpt: excerptOf(ev.text, HELD_MARK) };
+    return { seq, from, at: ev.t, excerpt: excerptOf(ev.text, NOTE_MARKS) };
   }
 
   /** A person's words, with the message they reply to quoted after them when `replyTo` is given (w866); throws when it is no message of the chat. */
@@ -2776,7 +2776,7 @@ It is for your part of the work, not an answer to another worker's question.`;
     }
     if (e.kind === 'user' && e.from === 'human') {
       this.cardShown.delete(sid);
-      const seq = splitReply(e.text, HELD_MARK).quote?.seq;
+      const seq = splitReply(e.text, NOTE_MARKS).quote?.seq;
       if (seq !== undefined) this.closeAsks(sid, (a) => a.seq === seq);
       if (seq !== undefined) this.closeForYou(sid, (m) => m.seq === seq);
     }
@@ -2966,7 +2966,7 @@ It is for your part of the work, not an answer to another worker's question.`;
     const checked = checkAsk(ev.input);
     if ('problem' in checked) throw new Error(checked.problem);
     const humans = later.filter((e): e is Extract<typeof e, { kind: 'user' }> => e.kind === 'user' && e.from === 'human');
-    return { ask: checked.ask, chosen: answerOf(checked.ask, seq, humans, HELD_MARK)?.chosen };
+    return { ask: checked.ask, chosen: answerOf(checked.ask, seq, humans, NOTE_MARKS)?.chosen };
   }
 
   /**
@@ -3022,7 +3022,7 @@ It is for your part of the work, not an answer to another worker's question.`;
     if (!ev || ev.kind !== 'assistant') return undefined;
     const now = this.now().getTime();
     if (now - Date.parse(ev.t) > PROPOSAL_MAX_AGE_MS) return undefined;
-    const g: ReactionGrant = { seq, emoji, yes: isYes(emoji), at: now, text: proposalText(ev.text, HELD_MARK, REPLY_MARK), used: [] };
+    const g: ReactionGrant = { seq, emoji, yes: isYes(emoji), at: now, text: proposalText(ev.text, NOTE_MARKS, REPLY_MARK), used: [] };
     const live = (this.grants.get(sessionId) ?? []).filter((x) => now - x.at < GRANT_MS && !(x.seq === seq && x.emoji === emoji));
     this.grants.set(sessionId, [...live, g].slice(-10));
     return g;
@@ -3076,7 +3076,8 @@ It is for your part of the work, not an answer to another worker's question.`;
   /**
    * The calls a gate refused in this chat, as a note for the end of its person's next message (w830), or ''. The note
    * starts with HELD_MARK: it is FF Factory's, and conditional decisions never take their words from it. Offered once; a
-   * call refused again is held again.
+   * call refused again is held again. The open questions (cardsOffer) follow under their own CARDS_MARK (w3297: lothsahn
+   * read his list of open cards as "held from earlier turns"). The person's chat shows neither (shared/personMessage.ts).
    */
   heldOffer(sessionId: string, typed?: string): string {
     const list = (this.held.get(sessionId) ?? []).filter((h) => this.now().getTime() - Date.parse(h.at) < HELD_MS);
@@ -3086,8 +3087,8 @@ It is for your part of the work, not an answer to another worker's question.`;
     const cards = typed === undefined ? '' : this.cardsOffer(sessionId, typed, n);
     if (!list.length && !cards) return '';
     const lines = list.map((h) => `- ${utcShort(h.at)}: ${h.tool} ${clip(JSON.stringify(h.args), 600)}, refused: ${clip(h.why, 300)}`);
-    const held = list.length ? `\nCalls a gate refused in your earlier turns, offered again with this message of ${n}'s (w830). Make each one ${n} already decided in their own words, now, as it stands; don't ask ${n} again. Leave out any their words do not decide.\n${lines.join('\n')}` : '';
-    return `\n\n${HELD_MARK}${held}${cards}`;
+    const held = list.length ? `\n\n${HELD_MARK}\nCalls a gate refused in your earlier turns, offered again with this message of ${n}'s (w830). Make each one ${n} already decided in their own words, now, as it stands; don't ask ${n} again. Leave out any their words do not decide.\n${lines.join('\n')}` : '';
+    return `${held}${cards ? `\n\n${CARDS_MARK}${cards}` : ''}`;
   }
 
   /** The open questions each chat was already shown at the start of a turn, by seq: a card is offered once. In memory only. */
@@ -3103,7 +3104,7 @@ It is for your part of the work, not an answer to another worker's question.`;
   private cardsOffer(sessionId: string, typed: string, n: string): string {
     const info = this.sessions.sessions.get(sessionId)?.info;
     if (!info || !this.isPersonal(info)) return '';
-    const quoted = splitReply(typed, HELD_MARK).quote?.seq;
+    const quoted = splitReply(typed, NOTE_MARKS).quote?.seq;
     let offered = this.cardsOffered.get(sessionId);
     if (!offered) this.cardsOffered.set(sessionId, (offered = new Set()));
     const seen = offered;

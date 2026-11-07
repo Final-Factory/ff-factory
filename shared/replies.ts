@@ -33,10 +33,20 @@ export const REACTION_MEANINGS = '👍 or ✅ = yes, go ahead, got it; 👎 or �
 
 const utc = (iso: string) => `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
 
+/**
+ * Where the first of FF Factory's notes (`held`: one header, or several, shared/conditional.ts NOTE_MARKS) starts in
+ * `text`, or -1.
+ */
+export function noteIndex(text: string, held: string | readonly string[]): number {
+  const at = (typeof held === 'string' ? [held] : held).filter(Boolean).map((m) => text.indexOf(m)).filter((i) => i >= 0);
+  return at.length ? Math.min(...at) : -1;
+}
+
 /** The excerpt of a message's text: its own words only (an earlier quote or FF Factory note in it is left out), clipped. */
-export function excerptOf(text: string, held = ''): string {
+export function excerptOf(text: string, held: string | readonly string[] = ''): string {
   let own = text.split(REPLY_MARK)[0];
-  if (held) own = own.split(held)[0];
+  const end = noteIndex(own, held);
+  if (end >= 0) own = own.slice(0, end);
   own = own.trim();
   return own.length > EXCERPT_CHARS ? `${own.slice(0, EXCERPT_CHARS).trimEnd()}… (${own.length - EXCERPT_CHARS} more characters)` : own;
 }
@@ -69,13 +79,13 @@ function readQuote(block: string): Quoted | undefined {
 
 /**
  * A message's text apart from the reply quote it carries: the person's own words, and the quoted message when there is one.
- * `held` is where a later note of FF Factory's starts (HELD_MARK), which ends the quote.
+ * `held` is where a later note of FF Factory's starts (NOTE_MARKS), which ends the quote.
  */
-export function splitReply(text: string, held = ''): { words: string; quote?: Quoted } {
+export function splitReply(text: string, held: string | readonly string[] = ''): { words: string; quote?: Quoted } {
   const at = text.indexOf(REPLY_MARK);
   if (at < 0) return { words: text };
   const after = text.slice(at + REPLY_MARK.length).replace(/^\n/, '');
-  const end = held ? after.indexOf(held) : -1;
+  const end = noteIndex(after, held);
   const block = (end < 0 ? after : after.slice(0, end)).replace(/\s+$/, '');
   const rest = end < 0 ? '' : after.slice(end);
   return { words: text.slice(0, at).trim() + (rest ? `\n\n${rest}` : ''), quote: readQuote(block) };
