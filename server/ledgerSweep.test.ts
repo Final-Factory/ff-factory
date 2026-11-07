@@ -1247,7 +1247,7 @@ test('w3281: a worker that holds two requests, files DONE on one through merge o
   const s = worker('ac029c0c', { wakeAt: new Date(Date.now() + 20 * 60_000).toISOString() });
   o.workerTurnEnded(s, 'PR #3270 pushed, waiting on CI.\nw3233: still open: blocked on CI on PR #3270\nw3236: still open: not started');
   await new Promise((r) => setTimeout(r, 30));
-  assert.deepEqual(sent, [], 'a worker that comes back by itself is not resumed');
+  assert.equal(sent.length, 0, 'a worker that comes back by itself is not resumed');
   assert.equal(get('w3236').outcome, 'w3236: still open: not started');
   // 22:09: the merge-on-green pilot merges #3270 and files the report it left, which names only w3233; nothing resumes it.
   const idle = { ...s, wakeAt: undefined };
