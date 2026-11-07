@@ -5854,6 +5854,52 @@ test("w1984: after a move, no ticket of that worker holds anyone back in the old
   assert.notEqual(agents.benchPriorities('pc')[a.id]?.away?.why, why, 'hours later the move mark is gone (its old waiters ended long before)');
 });
 
+// w3425: on 2026-11-07 the away move of worker 416bdb60 off beast/slot3 (w3408, w3407) to biscuit at 16:18Z was cut by a
+// portal restart at 16:35Z. The worker ran on through beast's drop, but its away mark stayed, and bench_queue.py parked
+// every exclusive ticket it took on beast (t00006043, t00006054: "parked: its worker 416bdb60 was moved to biscuit") for
+// over an hour, through a timed_place "here" at 17:27Z.
+test('w3425: an away move that never happened leaves no away mark: the worker running on its own machine, or asking timed_place there, clears it and its waiting tickets count again', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, sessions } = env;
+  agentsRoom(agents, ['pc', 'beast']);
+  putRequests(store, [{ id: 'w1', by: BEN, status: 'active' }, { id: 'w2', by: BEN, status: 'active' }]);
+  const a = await startedFor(env, 'w1');
+  store.work.get('w2')!.sessionIds.push(a.id);
+  store.putWork(store.work.get('w2')!);
+  const handle = sessions.sessions.get(a.id) as unknown as { liveFlag: boolean };
+  const why = `its worker ${a.id.slice(0, 8)} was moved to beast`;
+  const plan = () => {
+    // 1. an away move is planned (moveAway -> moveForRoom marks it), and pc drops: its daemon reports nothing running
+    handle.liveFlag = false;
+    a.info.movedAway = { machine: 'pc', to: 'beast', at: new Date().toISOString() };
+    store.putSession(a.info);
+    assert.deepEqual(agents.benchPriorities('pc')[a.id]?.away, { why }, 'while the move is planned, its waiting tickets on pc are parked');
+  };
+  plan();
+  // 2. pc comes back, 3. its daemon reports the worker ran on through the drop; the move was cut (a portal restart)
+  handle.liveFlag = true;
+  // 4. the mark is gone, and its waiting ticket counts again: an entry of its requests with no away
+  const p = agents.benchPriorities('pc')[a.id];
+  assert.equal(p?.away, undefined, 'its waiting tickets on pc are unparked');
+  assert.deepEqual([...(p?.requests ?? [])].sort(), ['w1', 'w2']);
+  assert.equal(store.sessions.get(a.id)!.movedAway, undefined, 'cleared in the store: a portal restart does not bring it back');
+
+  // A timed_place from pc (the "here" at 17:27Z) clears it too, whatever its daemon last said.
+  plan();
+  await a.h.timed_place!({ what: 'w3408 LeechSystem before/after on LifeAsTwoMegaWave' });
+  assert.equal(store.sessions.get(a.id)!.movedAway, undefined, 'timed_place from its own machine clears the mark');
+  assert.equal(agents.benchPriorities('pc')[a.id]?.away, undefined);
+
+  // A move that completed took its requests off it: the mark stays even if its old process is seen running (w1984).
+  plan();
+  for (const w of [store.work.get('w1')!, store.work.get('w2')!]) {
+    w.sessionIds = w.sessionIds.filter((x) => x !== a.id);
+    store.putWork(w);
+  }
+  handle.liveFlag = true;
+  assert.deepEqual(agents.benchPriorities('pc')[a.id]?.away, { why }, 'a completed move keeps its mark');
+});
+
 // w1643, lothsahn: "let's make the setting the minimum priority work that can go to a machine. If normal (all work), if high,
 // high and urgent, if urgent, urgent only".
 test('w1643: placement.minPriority: start_agent refuses a request below the computer\'s level and takes it once its person raises it; a new request sent to a worker there follows the rule while the worker\'s own goes on', async (t) => {
