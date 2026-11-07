@@ -538,7 +538,9 @@ the folder for 24 h, or for 15 minutes while free space is below the soft thresh
 
 - every cache above;
 - a git clone, checkout or worktree with nothing on no remote (`localWorkWhy`), whose git-ignored evidence is all published,
-  taken whole (a reopened worker clones again);
+  taken whole (a reopened worker clones again). A folder a build downloads into the checkout is not evidence while its
+  marker is there (`FETCHED_FOLDERS`: `Tools/AgentKit` with `VERSION`, the pinned kit the game's `AgentKitFetch.cs` unpacks
+  before a player build; w3434: its 28 `.md` files kept about nine finished workers' 18 GB clones on BEAST for a person);
 - a copy of a Unity Library outside its project (two or more of ArtifactDB, SourceAssetDB, Artifacts, Bee,
   ScriptAssemblies, PackageCache, BurstCache, BuildCache, ShaderCache, PlayerDataCache, il2cpp_cache in it);
 - test output: a folder holding no repo, no Unity project and no unpublished evidence, taken whole; a loose file of 1 MiB

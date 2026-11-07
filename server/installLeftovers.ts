@@ -396,9 +396,18 @@ export interface FinishedBulk {
   keep: { path: string; why: string }[];
 }
 
-/** The evidence files git ignores in `repo`, Unity's and npm's caches apart; undefined when git fails or times out. */
+/**
+ * Ignored folders a build downloads into a game checkout, each with the file that marks the download: what is in them is
+ * fetched again on demand, never a worker's review evidence (w3434: the pinned AgentKit release, which
+ * Assets/Editor/AgentKitFetch.cs unpacks into Tools/AgentKit/{win,mac} with a VERSION file before every player build; its
+ * 28 SKILL.md, CLAUDE.md and HowToPlay.md files kept about nine finished workers' 18 GB clones on BEAST for a person).
+ */
+const FETCHED_FOLDERS: { dir: string; marker: string }[] = [{ dir: 'Tools/AgentKit', marker: 'VERSION' }];
+
+/** The evidence files git ignores in `repo`, Unity's and npm's caches and fetched folders apart; undefined when git fails or times out. */
 export function gitIgnoredEvidence(repo: string, timeoutMs = 60_000): Promise<string[] | undefined> {
   const skip = ['Library', 'Temp', 'obj', 'Logs', 'node_modules'].map((d) => `:(exclude,glob)**/${d}/**`);
+  for (const f of FETCHED_FOLDERS) if (fs.existsSync(path.join(repo, ...f.dir.split('/'), f.marker))) skip.push(`:(exclude,glob)${f.dir}/**`);
   return new Promise((resolve) =>
     execFile('git', ['--no-optional-locks', '-C', repo, 'ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--', '.', ...skip], { timeout: timeoutMs, maxBuffer: 256 * 1024 ** 2, windowsHide: true }, (e, out) =>
       resolve(e ? undefined : String(out).split('\0').filter((f) => f && EVIDENCE.test(f)).map((f) => path.join(repo, f))),

@@ -241,3 +241,32 @@ test("w2796: a finished worker's per-run folders lose their capture frames; thei
   assert.ok(got.keep.some((k) => k.path === s && /published nowhere else/.test(k.why)));
   assert.ok(!got.take.some((x) => /census|final-111027|crit|0-idle|notes\.md/.test(x.path)));
 });
+
+test("w3434: a game clone whose only ignored notes are the downloaded AgentKit goes; real notes or a kit with no VERSION keep it", async (t) => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ff-kit-')));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
+  const o = path.join(root, 'origin');
+  fs.mkdirSync(o, { recursive: true });
+  git(o, 'init', '-q');
+  w(o, '.gitignore', '/[Ll]ibrary/\n/out/\n/Tools/AgentKit/\n');
+  w(o, 'README.md', 'game');
+  git(o, 'add', '.');
+  git(o, 'commit', '-q', '-m', 'first');
+  const session = path.join(root, 'tmp', 'ffa-4c0fdc7a');
+  fs.mkdirSync(session, { recursive: true });
+  // What AgentKitFetch.cs unpacks before a player build (BEAST's clone-3307 held exactly this shape: 28 .md files and VERSION).
+  const kit = (clone: string, version = true) => {
+    for (const p of ['mac', 'win']) for (const f of ['.claude/skills/automate-research/SKILL.md', 'CLAUDE.md', 'HowToPlay.md', 'commands.md']) w(session, `${clone}/Tools/AgentKit/${p}/${f}`);
+    if (version) w(session, `${clone}/Tools/AgentKit/VERSION`, '0.1.1\n');
+  };
+  for (const c of ['clone-3307', 'shots', 'handmade']) git(root, 'clone', '-q', o, path.join(session, c));
+  kit('clone-3307');
+  kit('shots');
+  w(session, 'shots/out/look.png');
+  kit('handmade', false);
+  const got = await finishedBulkIn(session);
+  const takes = (c: string) => got.take.some((x) => x.path === path.join(session, c));
+  assert.ok(takes('clone-3307'), 'the downloaded kit is fetched again on demand: the clone goes');
+  assert.ok(!takes('shots') && got.keep.some((k) => k.path === path.join(session, 'shots') && /1 review file.*look\.png/.test(k.why)), 'a real unpublished still keeps its clone, and only it is counted');
+  assert.ok(!takes('handmade') && got.keep.some((k) => k.path === path.join(session, 'handmade') && /8 review file/.test(k.why)), 'a Tools/AgentKit with no VERSION was not the fetch: kept');
+});
