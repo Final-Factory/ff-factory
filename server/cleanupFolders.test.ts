@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { hasLocalWork, localRemotePath, localWorkWhy, norm } from './cleanup.ts';
-import { FACTS_MAX_AGE_MS, factsProblem, judgePath, judgeSession, judgeTiming, planFolders, renderFolders, type CleanupFacts } from './cleanupFolders.ts';
+import { FACTS_MAX_AGE_MS, factsProblem, gitKeeps, judgePath, judgeSession, judgeTiming, planFolders, renderFolders, type CleanupFacts } from './cleanupFolders.ts';
 import { ownersOf } from './resumable.ts';
 import { foldersMain, hostSessionsIn, installLeftoversShim, slotContext, slotPathOf } from '../machine/leftovers.ts';
 import type { WorkItem } from '../shared/types.ts';
@@ -227,6 +227,50 @@ test('w1387: localWorkWhy names uncommitted changes, commits on no remote and st
   assert.equal(await localWorkWhy(wt), undefined);
 
   assert.match((await localWorkWhy(path.join(base, 'no-such-repo')))!, /could not be read/, 'unknown counts as work');
+});
+
+/**
+ * w3330: `git status` flags a tracked file whose size differs from the index's without reading it. Two temp clones on
+ * LothDesktop (V:/ffw/tmp/ffa-ca699788/clone-before, ffa-6b25d859/clone-3286) showed 4,965 and 2,889 "uncommitted
+ * changes" that way, Git LFS files whose index held their 132-byte pointers' size, while `git diff` found one real change
+ * in each (measured, 2026-11-07). A file rewritten with CRLF endings is the same case. Neither is work; a real edit still is.
+ */
+test('w3330: localWorkWhy counts no stat-only or CRLF-only change as work, and still counts a real one', async (t) => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'ffw-w3330-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5 }));
+  const remotes = path.join(base, 'remotes');
+  fs.mkdirSync(remotes);
+  const status = (d: string) => git(d, 'status', '--porcelain').trim();
+
+  // Its clean filter (autocrlf=input, as LothDesktop's git has it) gives the index's blob back, yet the size differs.
+  const statOnly = pushedClone(remotes, path.join(base, 'stat-only', 'ff'));
+  git(statOnly, 'config', 'core.autocrlf', 'input');
+  fs.writeFileSync(path.join(statOnly, 'a.txt'), 'a\r\n');
+  assert.equal(status(statOnly), 'M a.txt', 'git status flags the file');
+  assert.equal(await localWorkWhy(statOnly), undefined);
+  assert.equal(await hasLocalWork(statOnly), false);
+
+  // No conversion: the blob differs from the index's only in its CR line ends.
+  const crlf = pushedClone(remotes, path.join(base, 'crlf', 'ff'));
+  git(crlf, 'config', 'core.autocrlf', 'false');
+  fs.writeFileSync(path.join(crlf, 'a.txt'), 'a\r\n');
+  fs.writeFileSync(path.join(crlf, '.gitignore'), 'Builds/\r\n');
+  assert.equal(status(crlf).split('\n').length, 2, 'git status flags both files');
+  assert.equal(await localWorkWhy(crlf), undefined);
+  assert.equal(await gitKeeps(path.join(base, 'crlf'), base), undefined, 'its folder is a DELETE row in `ff-leftovers folders`');
+
+  // A real edit, a deleted file and an untracked file count beside a CRLF-only one.
+  const real = pushedClone(remotes, path.join(base, 'real', 'ff'));
+  git(real, 'config', 'core.autocrlf', 'false');
+  fs.writeFileSync(path.join(real, '.gitignore'), 'Builds/\r\n');
+  fs.writeFileSync(path.join(real, 'a.txt'), 'b\r\n');
+  git(real, 'add', 'a.txt');
+  fs.writeFileSync(path.join(real, 'report.md'), 'the report\n');
+  assert.equal(await localWorkWhy(real), '2 uncommitted changes', 'the staged edit and the untracked report');
+  git(real, 'rm', '-q', '--cached', 'a.txt');
+  fs.rmSync(path.join(real, 'a.txt'));
+  assert.equal(await localWorkWhy(real), '2 uncommitted changes', 'the deleted file and the untracked report');
+  assert.match((await gitKeeps(path.join(base, 'real'), base))!, /2 uncommitted changes/, 'its folder stays a KEEP row');
 });
 
 function dropRemoteRefs(dir: string) {
