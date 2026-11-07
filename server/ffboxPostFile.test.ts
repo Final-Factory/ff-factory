@@ -29,8 +29,10 @@ test('a file outside the working and temp folders is refused, and so is one over
   fs.writeFileSync(path.join(cwd, 'big.md'), 'x'.repeat(16 * 1024 + 1));
   await assert.rejects(postTextFromFile(cwd, 'big.md', 0, [cwd]), /at most 2000 characters/);
   await assert.rejects(postTextFromFile(cwd, 'nope.md', 0, [cwd]), /no such file/);
-  fs.symlinkSync(path.join(outside, 'secret.txt'), path.join(cwd, 'link.md'));
-  await assert.rejects(postTextFromFile(cwd, 'link.md', 0, [cwd]), /only a file in your working folder/, 'a symlink out of the folder is followed to where it points, and refused');
+  // A link to a folder outside, as a junction: Windows lets anyone make one (a file symlink needs developer mode or
+  // admin, so it threw EPERM there, w3337), and elsewhere 'junction' is an ordinary folder symlink.
+  fs.symlinkSync(outside, path.join(cwd, 'link'), 'junction');
+  await assert.rejects(postTextFromFile(cwd, path.join('link', 'secret.txt'), 0, [cwd]), /only a file in your working folder/, 'a link out of the folder is followed to where it points, and refused');
 });
 
 test('w2723: images in the working or temp folder are read by their first bytes, named for Discord, within the caps', async (t) => {
