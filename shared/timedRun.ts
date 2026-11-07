@@ -198,6 +198,24 @@ export const legTimeoutS = (s: TimedSettings) => 240 + s.settleS + 2 * s.sampleS
 export const runBoundMinutes = (s: TimedSettings, variants: number) => Math.ceil((s.rounds * variants * legTimeoutS(s)) / 60) + 20;
 
 /**
+ * The part of the bench queue's 30-minute exclusive turn (the game repo's bench_queue.py MAX_HOLD_MIN, w1832) a timed run on
+ * a worker computer plans its legs into: no leg starts that would end past it, by the longest leg so far. The queue warns
+ * at 25 minutes, so the run gives the ticket back before any warning and queues again for the rest (w1996). The longest
+ * leg the settings allow (legTimeoutS at their maxima) fits in it, so the queue never takes a turn back mid-leg (w3398).
+ */
+export const TURN_PLAN_MS = 24 * 60_000;
+
+/**
+ * How many exclusive turns a worker computer plays a run's legs in at most (w3398): every leg at its bound, as many whole
+ * legs as fit in TURN_PLAN_MS per turn, at least one. Each turn after the first queues again at the back, so a run of
+ * more than one turn can take longer than runBoundMinutes on a busy computer.
+ */
+export function runTurns(s: TimedSettings, variants: number): number {
+  const perTurn = Math.max(1, Math.floor(TURN_PLAN_MS / (legTimeoutS(s) * 1000)));
+  return Math.ceil(legOrder(Array.from({ length: variants }, (_, i) => `v${i}`), s.rounds).length / perTurn);
+}
+
+/**
  * The player's arguments for one leg: probe_ab_win.sh's (w565, w1628), so its tables read the logs as they are
  * (scripts/bench/probe_table.py, ab_stop.py): solo, the save, the perf probe after the settle, quit after the dwell.
  */

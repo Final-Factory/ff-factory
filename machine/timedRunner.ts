@@ -18,7 +18,7 @@ import { pipeline } from 'node:stream/promises';
 import { createGzip } from 'node:zlib';
 import { Readable } from 'node:stream';
 import type { AttachmentRef } from '../shared/types.ts';
-import { legArgs, legOrder, legTimeoutS, perfSummaryOf, summaryTable, timedArgsProblem, timedSettingsOf, variantNameProblem, TIMED_SLOTS, type LegSummary, type Piece, type TimedRunOrder, type TimedRunReport, type TimedVariant } from '../shared/timedRun.ts';
+import { legArgs, legOrder, legTimeoutS, perfSummaryOf, summaryTable, timedArgsProblem, timedSettingsOf, variantNameProblem, TIMED_SLOTS, TURN_PLAN_MS, type LegSummary, type Piece, type TimedRunOrder, type TimedRunReport, type TimedVariant } from '../shared/timedRun.ts';
 import { fetchAttachment } from './attachments.ts';
 import { benchLockDir, pidAlive } from './benchLock.ts';
 import { benchQueueDir, queueTickets, type TicketState } from './benchQueue.ts';
@@ -75,12 +75,8 @@ export interface TimedWorkerDeps {
   turnPlanMs?: number;
 }
 
-/**
- * The part of the bench queue's 30-minute exclusive turn (the game repo's bench_queue.py MAX_HOLD_MIN, w1832) a timed run on
- * a worker computer plans its legs into: no leg starts that would end past it, by the longest leg so far. The queue warns
- * at 25 minutes, so the run gives the ticket back before any warning and queues again for the rest (w1996).
- */
-export const TURN_PLAN_MS = 24 * 60_000;
+/** The turn a run's legs are planned into (shared/timedRun.ts, w1996, w3398). */
+export { TURN_PLAN_MS };
 
 /** The node child that owns a run's ticket and leases: it ends when this daemon does (w1996, so BenchTurn spares only it). */
 export function spawnOwner(): { pid: number; end: () => void } {

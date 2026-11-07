@@ -14,7 +14,7 @@ import type { AttachmentStore } from './attachments.ts';
 import { publicRef } from './attachments.ts';
 import { readJsonDurable, writeJsonDurable } from './durable.ts';
 import type { AttachmentRef, Machine } from '../shared/types.ts';
-import { legOrder, MAX_VARIANTS, PIECE_MAX_BYTES, runBoundMinutes, timedArgsProblem, timedSettingsOf, variantNameProblem, type LegSummary, type Piece, type TimedRunOrder, type TimedSettings, type TimedVariant } from '../shared/timedRun.ts';
+import { legOrder, MAX_VARIANTS, PIECE_MAX_BYTES, runBoundMinutes, runTurns, timedArgsProblem, timedSettingsOf, TURN_PLAN_MS, variantNameProblem, type LegSummary, type Piece, type TimedRunOrder, type TimedSettings, type TimedVariant } from '../shared/timedRun.ts';
 import { SMALL_TIMED_MAX_AGENTS } from './timedAsk.ts';
 
 export type TimedRunState = 'uploading' | 'queued' | 'sent' | 'running' | 'done' | 'failed';
@@ -329,9 +329,14 @@ export class TimedRuns {
     this.dispatch(r);
     const legs = legOrder(o.variants.map((v) => v.name), o.settings.rounds).length;
     const bound = runBoundMinutes(o.settings, o.variants.length);
+    // w3398: a worker computer's bench queue ends an exclusive turn at 30 minutes; the run plans its legs into turns that fit
+    // (TURN_PLAN_MS) and queues again for the rest, so the queue's turn-limit warning never cuts a leg
+    const target = this.d.machines().find((m) => m.id === r.machine);
+    const turns = target && !isPlayOnly(target) ? runTurns(o.settings, o.variants.length) : 1;
+    const turnsNote = turns > 1 ? ` Its legs play in up to ${turns} exclusive turns of at most ${TURN_PLAN_MS / 60_000} minutes each (the bench queue's turn is 30, w1832): after each turn its ticket goes back and queues again for the rest, so a turn-limit warning ends no leg, and the run can take longer than its bound when others wait.` : '';
     const mb = (n: number) => `${(n / 1024 ** 2).toFixed(0)} MB`;
     const where = (r.state as TimedRunState) === 'sent' ? `handed to ${r.machine}` : `queued for ${r.machine}, which is ${this.d.isOnline(r.machine) ? 'connected but not on a daemon that runs timed runs yet (it is updated by itself once idle)' : 'offline'}: it starts when ${r.machine} is back`;
-    const text = `Timed run ${r.id} ${where}: ${o.variants.map((v) => v.name).join(' vs ')}, ${legs} legs of ${o.settings.settleS} s settle + ${o.settings.sampleS} s sample on ${o.settings.res}, under ${r.machine}'s exclusive bench ticket. Sent ${mb(r.sentBytes)} of ${mb(r.totalBytes ?? 0)} (the rest was on the portal from earlier runs). FF Factory messages you with the table and the logs (timed-${r.id}.tar.gz in your Inbox: probe_ab_win.sh's layout, so scripts/bench/probe_table.py and ab_stop.py read it) when it ends; its bound is about ${bound} min. End your turn now with a wake_me check-in of ${bound + 15} minutes as the fallback; do not wait in the foreground.`;
+    const text = `Timed run ${r.id} ${where}: ${o.variants.map((v) => v.name).join(' vs ')}, ${legs} legs of ${o.settings.settleS} s settle + ${o.settings.sampleS} s sample on ${o.settings.res}, under ${r.machine}'s exclusive bench ticket. Sent ${mb(r.sentBytes)} of ${mb(r.totalBytes ?? 0)} (the rest was on the portal from earlier runs). FF Factory messages you with the table and the logs (timed-${r.id}.tar.gz in your Inbox: probe_ab_win.sh's layout, so scripts/bench/probe_table.py and ab_stop.py read it) when it ends; its bound is about ${bound} min.${turnsNote} End your turn now with a wake_me check-in of ${bound + 15} minutes as the fallback; do not wait in the foreground.`;
     // w2928: its daemon answered the worker's call before the pieces were all sent, so this answer goes as a message
     if (a.late === true) {
       this.d.log?.(`timed run ${r.id}: every piece arrived from ${r.from} after its call answered; ${where}`);

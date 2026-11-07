@@ -4070,6 +4070,11 @@ export class Agents {
       const here: TimedVerdict = { verdict: 'here', why: `timed run ${r.id} was sent to ${machineId} (w2446)`, until: new Date(Date.now() + 60 * 60_000).toISOString() };
       if (out[r.session]) {
         if (out[r.session].timed?.verdict !== 'here') out[r.session].timed = here;
+        // w3398: this daemon waits on the run's ticket and plays its legs, not the worker, so a worker stopped on the
+        // check-in timed_run asked for (or that released its sandbox, or moved) parks nothing. tr_7673462869's t00004607
+        // sat PARKED on LothDesktop from 10:55Z to 13:49Z "its worker 25e6bb06 was stopped on purpose". The mark is per
+        // session, so its other waiting tickets here keep their place too while the run is live.
+        delete out[r.session].away;
         continue;
       }
       const info = this.store.sessions.get(r.session);

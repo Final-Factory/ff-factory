@@ -1272,6 +1272,13 @@ fewest agent slots. On a worker computer the daemon (`machine/timedRunner.ts` `w
   starts playing mid-turn ends the turn too (w2218): the run waits for them with no ticket, before its next turn. It used to
   wait holding the exclusive ticket, and once the portal no longer counted the run, a one-agent computer's queue set no turn
   limit (`singleWorker`), so nothing took the ticket back.
+- **Never parked for its worker** (w3398): the run's ticket carries the asking worker's session, but the daemon waits on
+  it and plays its legs. `Agents.benchPriorities` drops the session's `away` mark on the machine where one of its runs is
+  live (uploading, queued, sent or running), so a worker stopped on the check-in timed_run asked for (over 30 minutes), or
+  one that released its sandbox, parks nothing there. Before, tr_7673462869's ticket t00004607 sat PARKED on LothDesktop
+  from 10:55Z to 13:49Z ("its worker ... was stopped on purpose"). `go()` also tells the worker how many turns its legs
+  take (`runTurns`, `shared/timedRun.ts`): the longest leg the settings allow (1155 s) fits in one turn, so a turn limit
+  never cuts a leg, and a run of several turns can outlast its bound while others wait.
 - **Borrowed player slots**: the builds are laid out under `<root>/timing/builds/b0|b1`, and during the turn hard-linked into
   the player-slot pair of a sandbox that no live lease holds (`borrowPair`, `slotFree`: the game repo's
   `scripts/nightly/player_slots.py` lease rules), the only folders whose firewall rules exist. The run leases them for its
