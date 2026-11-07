@@ -2618,6 +2618,20 @@ export class MachineManager {
     return this.disks.get(id);
   }
 
+  /**
+   * A disk gate's facts (w3338): the free space of a machine's sandbox volume as its daemon last reported it, and the warning
+   * line it is judged by, its pool's disk_warn_gb from the machine's record here. Not the daemon's own level: a daemon that
+   * just started judges by its daemon.json's number (50 GB on lothdesktop, 80 on beast) until the portal's welcome brings the
+   * pool's (15), so its level flips low and fine again at the same free space. Undefined when the machine has no pool or
+   * its daemon has not reported yet.
+   */
+  diskRoom(id: string): { freeBytes: number; warnGB: number } | undefined {
+    const m = this.store.machines.get(id.toLowerCase());
+    const pool = m ? poolSettingsOf(m) : undefined;
+    const free = this.disks.get(id.toLowerCase())?.freeBytes;
+    return pool && free !== undefined ? { freeBytes: free, warnGB: pool.diskWarnGB } : undefined;
+  }
+
   /** A machine's sandbox by id or name. */
   requireSandbox(machineId: string, sandbox: string): MachineSandbox {
     const m = this.require(machineId);

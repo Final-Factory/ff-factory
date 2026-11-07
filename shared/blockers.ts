@@ -30,7 +30,16 @@ export const BLOCKER_STUCK_MS: Record<WorkBlockerKind, number | undefined> = {
   steam: 7 * DAY,
   // w2476: a leg that runs a day without its DONE or a final report is worth a person's look.
   worker: DAY,
+  // w3338: a sandbox volume low for a day is past its clean-up passes and clean-up workers: worth a person's look.
+  disk: DAY,
 };
+
+/**
+ * w3338: how far above its warning line (disk_warn_gb) a machine's sandbox volume must be before a disk gate clears: the
+ * daemon's own guard lifts its warning at the same margin (machine/sandboxes.ts diskGuard, hysteresisGB 5), so a worker is
+ * not resumed into a disk that drops back under the line with its first build.
+ */
+export const DISK_RESUME_MARGIN_GB = 5;
 
 /**
  * How long a CI blocker may go without FF Factory being able to read the checks before it gives up and lets the worker
@@ -105,6 +114,8 @@ export function blockerName(b: Pick<WorkBlocker, 'kind' | 'ref' | 'on' | 'until'
       return 'computers signed in to Steam';
     case 'worker':
       return `worker ${b.ref}'s part`;
+    case 'disk':
+      return `disk space on ${b.ref ?? 'its machine'}`;
   }
 }
 
@@ -188,6 +199,7 @@ export const BLOCKER_KIND_HELP: Record<WorkBlockerKind, string> = {
   pr: 'a pull request MERGING (ref: "owner/repo#123"): clears when it merges; one closed without merging asks the requester. Use it for "wait for #1291 to merge"; ci clears when the checks finish, merged or not',
   steam: 'a pair run that needs Steam (w2459; no ref): fewer computers than its legs are signed in to Steam with different accounts; clears when enough are (FF Factory sets it itself when such a pair is filed or queued)',
   worker: "another worker of the same request (w2476; ref: its session id): clears when it says DONE for its part or stops with a final report (no still-open line); FF Factory sets it from a stopped worker's report that waits on it",
+  disk: `free disk space (ref: a machine id; w3338): clears ${DISK_RESUME_MARGIN_GB} GB above its warning line`,
 };
 
 export interface BlockerFacts {
@@ -228,6 +240,8 @@ export interface BlockerFacts {
   steamShort?: (pair: WorkPair) => string | undefined;
   /** w2476: a worker's report when it stopped after `since` (ms) with a final one on `workId` (no still-open line), else undefined. */
   workerEnded?: (sessionId: string, since: number, workId: string) => string | undefined;
+  /** w3338: a machine's sandbox volume, its free bytes and its warning line (disk_warn_gb); undefined when unknown. */
+  disk?: (machineId: string) => { freeBytes: number; warnGB: number } | undefined;
 }
 
 /**
@@ -293,6 +307,17 @@ export function blockerVerdict(b: WorkBlocker, f: BlockerFacts, waiter?: string)
       if (on === true) return { state: 'clear', why: b.pause ? `${b.ref} is online and runs again` : `${b.ref} is online` };
       if (on === undefined && f.online) return { state: 'stuck', why: `${b.ref ?? 'its machine'} is not a machine of this portal` };
       return late(`${b.ref} is offline`);
+    }
+    case 'disk': {
+      // w3338: clears above the warning line plus a margin, read against the pool's line (Machines.diskRoom), never while
+      // the machine is away or its free space unknown (a resumed worker could not start there anyway).
+      if (b.ref && f.online?.(b.ref) === false) return late(`${b.ref} is offline`);
+      const d = b.ref ? f.disk?.(b.ref) : undefined;
+      if (!d) return late(`${b.ref ?? 'its machine'}'s free disk space is not known yet`);
+      const free = d.freeBytes / 1024 ** 3;
+      const need = d.warnGB + DISK_RESUME_MARGIN_GB;
+      if (free >= need) return { state: 'clear', why: `${b.ref} has ${free.toFixed(0)} GB free (its warning line ${d.warnGB} GB + ${DISK_RESUME_MARGIN_GB})` };
+      return late(`${b.ref} has ${free.toFixed(0)} GB free, under ${need} GB (its warning line ${d.warnGB} GB + ${DISK_RESUME_MARGIN_GB})`);
     }
     case 'usage': {
       // w1126: whichever comes first, the pool having room again (each usage poll moves it) or the hold's own end (`until`,
@@ -501,5 +526,8 @@ export function blockerProblem(b: Pick<WorkBlocker, 'kind' | 'ref' | 'until' | '
       return f.work(self)?.pair?.steam ? undefined : `${self} is no pair run that needs Steam: a steam gate holds only one (w2459)`;
     case 'worker':
       return b.ref && f.work(self)?.sessionIds.includes(b.ref) ? undefined : `blocker.ref: a worker's session id on ${self} (w2476)`;
+    case 'disk':
+      if (!b.ref) return 'blocker.ref: the machine id';
+      return f.online && f.online(b.ref) === undefined ? `no machine "${b.ref}"` : undefined;
   }
 }

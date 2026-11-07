@@ -7,7 +7,7 @@ import path from 'node:path';
 import { band, concepts, DEFAULT_THRESHOLDS, entryMatch, indexOf, type MatchThresholds } from './boardMatch.ts';
 import { LOOP_GUARD_RANGE, type Config } from './config.ts';
 import type { Store } from './store.ts';
-import { blockerName, blockerProblem, blockerVerdict, gateSetter, latestWorker, newestFirst, RESUME_SWEEP_MS, gatesName, gatesOf, MAX_GATES, othersGates, prRefOf, sameGate, type BlockerFacts } from '../shared/blockers.ts';
+import { blockerName, blockerProblem, blockerVerdict, gateSetter, latestWorker, newestFirst, RESUME_SWEEP_MS, DISK_RESUME_MARGIN_GB, gatesName, gatesOf, MAX_GATES, othersGates, prRefOf, sameGate, type BlockerFacts } from '../shared/blockers.ts';
 import { COORD_TURN_MAX_CALLS, COORD_TURN_MAX_TOKENS_READ, type OptionsFactory, type SessionHandle, type SessionManager, type TurnBudgetHit } from './sessions.ts';
 import { actingFor, asRequester, type Identity } from './identity.ts';
 import {
@@ -3968,7 +3968,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
 
   /** A gate as recorded (w754): the dispatcher's blocker, or a worker's blocked_on. */
   private makeGate(b: Omit<WorkBlocker, 'at' | 'by' | 'sha'>, at: string, by: string): WorkBlocker {
-    const ref = b.kind === 'request' || b.kind === 'machine' || b.kind === 'deploy' ? b.ref?.trim().toLowerCase() : b.ref?.trim();
+    const ref = b.kind === 'request' || b.kind === 'machine' || b.kind === 'deploy' || b.kind === 'disk' ? b.ref?.trim().toLowerCase() : b.ref?.trim();
     const sha = b.kind === 'deploy' ? this.d.deploySha?.(ref) : undefined;
     return {
       kind: b.kind,
@@ -5205,7 +5205,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     return out;
   }
 
-  workerBlocked(sessionId: string, a: { request?: string; requests?: string[]; reports?: string[]; prs?: string[]; deploys?: string[]; what: string; head?: string; mergeOnGreen?: string }): string {
+  workerBlocked(sessionId: string, a: { request?: string; requests?: string[]; reports?: string[]; prs?: string[]; deploys?: string[]; disk?: boolean; what: string; head?: string; mergeOnGreen?: string }): string {
     const w = this.workerRequest(sessionId, a.request, 'blocked_on', { reopen: true });
     const what = (a.what ?? '').split(/ +/).join(' ').trim();
     if (!what) throw new Error('say what it waits for (what), for example: w727 PR 1291 and w752 fix merged into master');
@@ -5230,7 +5230,13 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       if (!ref) continue;
       asked.push(ref === 'portal' ? { kind: 'deploy', what: 'a portal deploy' } : { kind: 'deploy', ref, what: `${ref}'s daemon update` });
     }
-    if (!asked.length) throw new Error('name what it waits for: requests (ids), reports (ids of requests whose worker must report first), prs (owner/repo#123 or a github.com link) and/or deploys ("portal" or a machine id). A person is waiting_on_person; a time is wake_me');
+    // w3338: free disk space on the worker's own machine, back above its warning line.
+    if (a.disk) {
+      const m = this.store.sessions.get(sessionId)?.machineId?.trim().toLowerCase();
+      if (!m) throw new Error('disk: you run on no machine FF Factory knows, so no disk can be waited on');
+      asked.push({ kind: 'disk', ref: m, what: `free disk space on ${m}` });
+    }
+    if (!asked.length) throw new Error('name what it waits for: requests (ids), reports (ids of requests whose worker must report first), prs (owner/repo#123 or a github.com link), deploys ("portal" or a machine id) and/or disk (true: free disk space on your machine). A person is waiting_on_person; a time is wake_me');
     asked[0] = { ...asked[0], what: clip(what, 200) };
     const facts = { now: now.getTime(), work: (id: string) => this.store.work.get(id.toLowerCase()), ...(this.d.machineOnline ? { online: this.d.machineOnline } : {}), ...(this.d.machinePaused ? { paused: (id: string) => !!this.d.machinePaused!(id) } : {}) };
     for (const b of asked) {
@@ -5267,9 +5273,10 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    * closed). The gate is the worker's own, from the time of its report, so the blocker watch clears it as any other and
    * resumes that worker (unblock). Returns false when it records nothing (not open, already gated, not in the ledger).
    */
-  recordReportedWait(id: string, sessionId: string, a: ({ ref: string; onReport: boolean } | { deploy: 'portal' } | { worker: string }) & { line: string; at: number; key: string }): boolean {
+  recordReportedWait(id: string, sessionId: string, a: ({ ref: string; onReport: boolean } | { deploy: 'portal' } | { worker: string } | { disk: string }) & { line: string; at: number; key: string }): boolean {
     const w = this.store.work.get(id.toLowerCase());
     if ('deploy' in a) return this.recordReportedDeploy(w, sessionId, a);
+    if ('disk' in a) return this.recordReportedDisk(w, sessionId, a);
     if ('worker' in a) return this.recordReportedWorker(w, sessionId, a);
     const ref = a.ref.trim().toLowerCase();
     // w2446: never a wait on a request already closed (blocked_on refuses one too, blockerProblem): it cleared at once and the
@@ -5313,6 +5320,28 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     this.stamp(w, `blocked on a portal deploy: the ledger recorded the wait on FF Factory its worker ${sessionId}'s report names, which no blocked_on recorded (w2457: "${clip(a.line, 120)}"); that worker is resumed when the portal runs another commit than ${gate.sha?.slice(0, 12)}`);
     this.store.putWork(w);
     console.warn(`ledger: ${w.id}: recorded the wait on a portal deploy its worker ${sessionId}'s report names, with no blocked_on (w2457)`);
+    return true;
+  }
+
+  /**
+   * w3338: the wait on disk space a stopped worker's report names ("paused for low disk", diskWaitIn), with no blocked_on: the
+   * gate is the worker's own, on its machine, so that machine's sandbox volume back above its warning line (with a margin,
+   * DISK_RESUME_MARGIN_GB) resumes it (unblock). On 2026-11-07 five lothdesktop workers sat Stalled from 07:07Z after the
+   * disk guard's warning, and nothing resumed them when 28 GB was free again at 07:58Z.
+   */
+  private recordReportedDisk(w: WorkItem | undefined, sessionId: string, a: { disk: string; line: string; at: number; key: string }): boolean {
+    const ref = a.disk.trim().toLowerCase();
+    if (!w || (w.status !== 'active' && w.status !== 'stalled') || gatesOf(w).length || !ref || w.diskCleanup) return false;
+    const gate = this.makeGate({ kind: 'disk', ref, what: `free disk space on ${ref}` }, new Date(a.at).toISOString(), `worker ${sessionId}`);
+    w.blocked = gate;
+    w.alsoBlocked = undefined;
+    w.stalled = undefined;
+    w.status = 'blocked';
+    w.waitRecorded = a.key;
+    gate.reported = a.key;
+    this.stamp(w, `blocked on disk space on ${ref}: the ledger recorded the wait on low disk its worker ${sessionId}'s report names, which no blocked_on recorded (w3338: "${clip(a.line, 120)}"); that worker is resumed when ${ref}'s sandbox volume is ${DISK_RESUME_MARGIN_GB} GB above its warning line`);
+    this.store.putWork(w);
+    console.warn(`ledger: ${w.id}: recorded the wait on disk space on ${ref} its worker ${sessionId}'s report names, with no blocked_on (w3338)`);
     return true;
   }
 

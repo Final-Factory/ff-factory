@@ -409,7 +409,7 @@ export class HostHealthMonitor {
     if (first) {
       for (const s of this.d.sessions().filter((x) => x.kind !== 'orchestrator' && !x.machineId && BUSY.has(x.status))) {
         try {
-          this.d.tell(s.id, '[disk critical] Free disk space on this machine is critically low. Commit and push your work now (a WIP commit is fine) and end your turn; new work waits until space is freed. You will be told when to continue.');
+          this.d.tell(s.id, '[disk critical] Free disk space on this machine is critically low. Commit and push your work now (a WIP commit is fine), call blocked_on with disk: true and end your turn; new work waits until space is freed. You are resumed when the disk of this machine is back above its warning line.');
         } catch {
           // it will see the gate on its next action
         }

@@ -24,7 +24,7 @@ import { conditionalVerdict } from '../shared/conditional.ts';
 import { ghRunner } from './githubTokens.ts';
 import { evidenceArgs, evidenceGated, evidencePython, evidenceRefusal, evidenceVerdict, fetchHudData, findLocalPrEvidence, noScriptRefusal } from '../machine/evidenceGate.ts';
 import { pairDelivers, reportDelivers, stillOpenIn } from './ledgerRules.ts';
-import { lastOpenLine, personWaitOn, portalWaitIn, reportAt, requestWaitOf, siblingWaitOf } from '../shared/workState.ts';
+import { diskWaitIn, lastOpenLine, personWaitOn, portalWaitIn, reportAt, requestWaitOf, siblingWaitOf } from '../shared/workState.ts';
 import type { SessionInfo, WorkBlocker, WorkItem } from '../shared/types.ts';
 import type { RoomNow } from './placement.ts';
 import { steamShortIn } from '../shared/capacity.ts';
@@ -70,6 +70,8 @@ export interface BlockerWatchDeps {
   paused?: (machineId: string) => boolean;
   /** Whether a Claude account's meters are clear (by its email or label); undefined when unknown. */
   usageClear?: (account: string) => boolean | undefined;
+  /** w3338: a machine's sandbox volume, its free bytes and its warning line (Machines.diskRoom); undefined when unknown. */
+  disk?: (machineId: string) => { freeBytes: number; warnGB: number } | undefined;
   /** When the nightly lab last posted its results (ms). */
   nightlyAt?: () => number | undefined;
   /**
@@ -176,6 +178,8 @@ export class BlockerWatch {
           if (l && personWaitOn(l.line, team)) continue;
           const ref = l ? requestWaitOf(l.line, w.id) : undefined;
           const portal = !!l && portalWaitIn(l.line, team);
+          // w3338: a worker that stopped for low disk on its machine ("paused for low disk"), never a disk clean-up's own worker (w3328).
+          const disk = !!l && !w.diskCleanup && !!s.machineId && diskWaitIn(l.line, team) ? s.machineId : undefined;
           // w2476: another worker of this request, still on it ("waiting for worker 17cae99a's LothLaptop leg").
           const siblings = w.sessionIds
             .filter((x) => x !== s.id && !w.done?.[x] && !w.movedOff?.[x])
@@ -183,7 +187,7 @@ export class BlockerWatch {
             .filter((x): x is SessionInfo => !!x)
             .map((x) => ({ id: x.id, names: [x.machineId ?? '', x.sandboxId ?? ''] }));
           const sibling = l ? siblingWaitOf(l.line, siblings) : undefined;
-          if (!l || (!sibling && (sid !== newest || (!ref && !portal)))) continue;
+          if (!l || (!sibling && (sid !== newest || (!ref && !portal && !disk)))) continue;
           const at = l.at ?? reportAt(s);
           const key = `${s.id}@${at}`;
           // w2457: a report from before its last gate went names a wait that is over (the deploy that woke it, the request it named).
@@ -204,6 +208,11 @@ export class BlockerWatch {
               out.push([w.id, `recorded: the wait on ${ref} its worker ${s.id}'s report names (w2422)`]);
               break;
             }
+          }
+          // w3338: no open request named, but it stopped for low disk on its machine: that disk's recovery resumes it.
+          if (disk && !ref && record(w.id, s.id, { disk, line: l.line, at, key })) {
+            out.push([w.id, `recorded: the wait on disk space on ${disk} its worker ${s.id}'s report names (w3338)`]);
+            break;
           }
           // w2457: no open request named (w2434's line quoted w1995, closed), but it waits on FF Factory: the next portal deploy.
           if (portal && record(w.id, s.id, { deploy: 'portal', line: l.line, at, key })) {
@@ -503,6 +512,7 @@ export class BlockerWatch {
       ...(this.d.online ? { online: this.d.online } : {}),
       ...(this.d.paused ? { paused: this.d.paused } : {}),
       ...(this.d.usageClear ? { usageClear: this.d.usageClear } : {}),
+      ...(this.d.disk ? { disk: this.d.disk } : {}),
       nightlyAt: this.d.nightlyAt?.(),
       ci: (ref) => ci.get(ref),
       ciUnreadable: (ref) => {
