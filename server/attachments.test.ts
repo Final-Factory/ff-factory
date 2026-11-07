@@ -186,12 +186,13 @@ test('retention: unused past retentionDays goes, with its stored file unless ano
   clock.now += 20 * DAY;
   const fresh = await upload(store, 'b.log', shared);
   store.touch([oldShared.id]);
-  // An unfinished upload is aged by its file's mtime.
+  clock.now += 15 * DAY;
+  // An unfinished upload is aged by its file's mtime, against the store's clock (aging it from the real clock made this
+  // test fail once the real date passed the fake one, 2026-11-07, w3305).
   const partial = path.join(dir, 'data', 'attachments', 'partial', uploadId);
-  const longAgo = new Date(Date.now() - 2 * DAY);
+  const longAgo = new Date(clock.now - 2 * DAY);
   fs.utimesSync(partial, longAgo, longAgo);
   fs.utimesSync(`${partial}.json`, longAgo, longAgo);
-  clock.now += 15 * DAY;
   const r = store.prune();
   assert.deepEqual(r, { records: 1, blobs: 1, partials: 1 });
   assert.equal(store.get(old.id), undefined);

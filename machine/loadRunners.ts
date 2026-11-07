@@ -123,7 +123,9 @@ export class LoadGate {
       return;
     }
     this.samples.push({ at: now, pct: this.d.cpu() });
-    const keep = Math.max(g.pauseOverMs, g.resumeOverMs);
+    // A slack past the longest window: ticks land a little over 5 s apart, so trimming at the window itself left the
+    // oldest sample always under resumeOverMs old and the gate never reopened (LothDesktop, 2026-11-07 09:08..10:03Z).
+    const keep = Math.max(g.pauseOverMs, g.resumeOverMs) + 30_000;
     while (this.samples.length && now - this.samples[0].at > keep) this.samples.shift();
     const hi = this.mean(g.pauseOverMs);
     const lo = this.mean(g.resumeOverMs);
