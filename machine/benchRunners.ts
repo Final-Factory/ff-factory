@@ -11,7 +11,10 @@
 // is continued at once. A process run from a runner's _work folder that no worker of that runner started is a job's
 // leftover: it is ended (SIGTERM, never forced) during the turn. What was paused and ended is kept in
 // <root>/tmp/bench.queue/runners.json, so a daemon restarted mid-turn or after it continues its paused listeners, and
-// bench_queue.py reports it in the ticket's history. Windows has no SIGSTOP: its runners are waited out, not paused.
+// bench_queue.py reports it in the ticket's history. On Windows (w3454) the listener is suspended (NtSuspendProcess, the
+// daemon's signal for SIGSTOP and SIGCONT there, as machine/loadRunners.ts does): until then BEAST's five ffu runners
+// took new jobs under exclusive ticket t00006095 on 2026-11-07 (jobs 5, 4, 5, 4, 3, 4, 5, 3, 2 while it waited). A
+// Windows leftover is not ended: process.kill there is TerminateProcess, a forced end.
 //
 // No Runner.Worker is not idle (w3195). With a CI queue a listener takes its next job in the second its last one ends:
 // it acknowledges the job message, acquires the job and only then starts the worker. On biscuit on 2026-11-06 under w3153's
@@ -159,8 +162,8 @@ export interface BenchRunnersDeps {
   /** The timed run holding this machine's lock (its ticket and owner pid), or undefined. */
   holder(): { ticket: string; ownerPid?: number } | undefined;
   procs(): Promise<Proc[]>;
-  /** Send a signal; answers why it could not be sent, nothing when sent. */
-  signal(pid: number, sig: 'SIGSTOP' | 'SIGCONT' | 'SIGTERM'): string | void;
+  /** Send a signal (on Windows SIGSTOP and SIGCONT suspend and resume); answers why it could not be sent, nothing when sent. */
+  signal(pid: number, sig: 'SIGSTOP' | 'SIGCONT' | 'SIGTERM'): string | void | Promise<string | void>;
   /** The tail of a runner's listener log (readListenerLog), undefined when it cannot be read. */
   diag(root: string): string | undefined;
   /** Whether a runner root is an operations runner (isOpsRunner, w3424): never paused. */
@@ -176,7 +179,6 @@ export class BenchRunners {
   private readonly d: BenchRunnersDeps;
   private st: RunnersState;
   private ticking = false;
-  private windowsSaid = false;
   /** Listeners already said to be held this turn, and why (one line per reason, not one every 5 s). */
   private heldSaid = new Map<number, string>();
 
@@ -209,14 +211,6 @@ export class BenchRunners {
 
   private async step() {
     const h = this.d.holder();
-    if (this.d.platform === 'win32') {
-      if (h && !this.windowsSaid) {
-        this.windowsSaid = true;
-        this.d.log(`bench runners: ${h.ticket}: Windows has no SIGSTOP: this machine's CI runners are not paused for the turn (bench_queue.py waits out a running job)`);
-      }
-      if (!h) this.windowsSaid = false;
-      return;
-    }
     if (!h) {
       if (!this.st.paused.length && !this.st.ticket) return; // no turn, nothing paused: no listing taken
       const procs = await this.d.procs();
@@ -224,7 +218,7 @@ export class BenchRunners {
       for (const p of this.st.paused) {
         // the pid may be another program's after a reboot: only a listener of that runner is continued
         if (!listening.has(`${p.pid} ${p.root}`)) continue;
-        const err = this.d.signal(p.pid, 'SIGCONT');
+        const err = await this.d.signal(p.pid, 'SIGCONT');
         this.d.log(`bench runners: ${this.st.ticket ?? 'the turn'} ended: runner ${p.root} (listener pid ${p.pid}) ${err ? `could not be continued: ${err}` : 'continued: it takes CI jobs again'}`);
       }
       this.st = { paused: [], ended: [] };
@@ -264,7 +258,7 @@ export class BenchRunners {
         continue;
       }
       this.heldSaid.delete(l.pid);
-      const err = this.d.signal(l.pid, 'SIGSTOP');
+      const err = await this.d.signal(l.pid, 'SIGSTOP');
       if (err) {
         this.d.log(`bench runners: runner ${l.root} (listener pid ${l.pid}) could not be paused: ${err}`);
         continue;
@@ -280,7 +274,7 @@ export class BenchRunners {
         const after = listenerLog(this.d.diag(l.root));
         const handed = after.state !== 'idle' || after.line !== l.log.line;
         if (c.listeners.find((x) => x.pid === l.pid)?.busy || handed) {
-          this.d.signal(l.pid, 'SIGCONT');
+          await this.d.signal(l.pid, 'SIGCONT');
           this.d.log(`bench runners: runner ${l.root} (listener pid ${l.pid}) took a job as it was paused: continued; paused once the job ends`);
           continue;
         }
@@ -290,9 +284,9 @@ export class BenchRunners {
       }
     }
     const busy = new Set(c.workers.map((w) => w.root));
-    for (const x of c.leftovers) {
+    for (const x of this.d.platform === 'win32' ? [] : c.leftovers) {
       if (busy.has(x.root) || this.st.ended.some((e) => e.pid === x.pid)) continue;
-      const err = this.d.signal(x.pid, 'SIGTERM');
+      const err = await this.d.signal(x.pid, 'SIGTERM');
       this.d.log(`bench runners: CI leftover pid ${x.pid} of ${x.root} (${x.cmd.slice(0, 120)}): ${err ? `could not be ended: ${err}` : 'sent SIGTERM'}`);
       if (!err) {
         this.st.ended.push({ pid: x.pid, root: x.root, args: x.cmd, at: now });

@@ -835,6 +835,8 @@ export interface BenchTicketGlance {
    * (turn.json, after the machine's CI jobs drained); `turnMin` is then the approved minutes. */
   approved?: boolean;
   turnStart?: string;
+  /** w3454: the grant still waits out the machine's CI jobs (turn.json ci_wait): its turn has not started. */
+  ciWait?: boolean;
   /** The urgent release lane's own ticket (it pre-empts the holders, w1656). */
   preempt?: boolean;
   /**

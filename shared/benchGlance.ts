@@ -74,6 +74,7 @@ function times(t: BenchTicketGlance, now: number, singleWorker: boolean, waiting
   // w1860: only lower-priority work waits behind it: it keeps the lock until it lets go
   if (t.keeps) return `${held}, keeps the lock: only lower-priority work waits`;
   if (t.approved && !t.turnStart) return `${held}, its approved turn starts once the CI jobs drained`;
+  if (t.ciWait) return `${held}, waits out the CI jobs: its turn starts after them (w3454)`;
   if (!t.until) return held;
   const left = Date.parse(t.until) - now;
   const turn = `its ${t.approved ? 'approved ' : ''}${t.turnMin ? `${t.turnMin}m ` : ''}turn`;
