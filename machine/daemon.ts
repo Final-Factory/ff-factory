@@ -2535,10 +2535,14 @@ export class Daemon {
    * or the daemon exits (keepAwakeCommand). Both end with the daemon, so a crash cannot leave the machine awake.
    */
   private awake() {
-    const live = this.liveCount() > 0;
+    // Not after shutdown: its agents are detached but still live, and a holder started then was never killed (w3337).
+    const live = !this.stopped && this.liveCount() > 0;
     const cmd = live && !this.caffeinate ? keepAwakeCommand(process.platform, process.pid) : undefined;
     if (cmd) {
       this.caffeinate = spawn(cmd[0], cmd.slice(1), { stdio: 'ignore', windowsHide: true });
+      // It waits for this process to exit, so it must not keep this process alive: a ref'd holder and its daemon each
+      // waited for the other, and server/machines.test.ts never ended (w3337: two full suites hung over an hour).
+      this.caffeinate.unref();
       this.caffeinate.on('error', (e) => log(`keep-awake: ${e.message}`));
       this.caffeinate.on('exit', () => (this.caffeinate = undefined));
     } else if (!live && this.caffeinate) {
