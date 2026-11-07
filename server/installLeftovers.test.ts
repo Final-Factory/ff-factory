@@ -6,7 +6,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { cleanupPass, type StaleContext } from './staleOutput.ts';
 import type { CleanupGuard } from './cleanup.ts';
-import { descendants, installLeftoverSettings, mergePlans, newestWrite, planInstallLeftovers, tarOfPlayer, type ProcLite } from './installLeftovers.ts';
+import { cargoTargetBusy, descendants, installLeftoverSettings, mergePlans, newestWrite, planInstallLeftovers, tarOfPlayer, type ProcLite } from './installLeftovers.ts';
 import { runCleanup, touchedWhy } from './cleanup.ts';
 
 /**
@@ -417,6 +417,75 @@ test("w3330: a stopped worker's cargo target goes with its idle caches; a live w
   const items = (await planInstallLeftovers({ root, sandboxes: [], tempRoots: [tmp], guard, procs: [], settings, now: NOW })).items.filter((i) => i.rule === 'session-idle-cache');
   assert.deepEqual(items.map((i) => rel(tmp, i.path)).sort(), ['ffa-73b11cbd/ffu-target', 'ffa-73b11cbd/ffu/target']);
   assert.ok(items.every((i) => /a Rust build folder \(cargo target\)/.test(i.why)), 'each says what it is');
+});
+
+/**
+ * w3396: running and blocked FFU workers' cargo targets refilled LothDesktop's V: (four of them, 9-20 GB each, r133) after
+ * w3330 pruned only stopped workers'. While disk is low, a live worker's target goes once cargo is done with it: no write in
+ * it for lowCacheSettleMinutes, no process naming it, no cargo-like process in the worker's tree. The rest of the live
+ * worker's caches stay, and nothing goes without a low pass.
+ */
+test("w3396: while disk is low, a live worker's idle cargo target goes; a building or just-written one stays", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-cargo-live-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
+  const tmp = path.join(root, 'tmp');
+  const ids = { idle: 'ffa-11111111', named: 'ffa-22222222', building: 'ffa-33333333', fresh: 'ffa-44444444', testing: 'ffa-55555555' };
+  const dir = Object.fromEntries(Object.entries(ids).map(([k, n]) => [k, path.join(tmp, n)])) as Record<keyof typeof ids, string>;
+  const tag = 'Signature: 8a477f597d28d172789f06886806bc55\n# This file is a cache directory tag created by cargo.\n';
+  for (const s of Object.values(dir)) {
+    const w = (r: string) => (fs.mkdirSync(path.dirname(path.join(s, r)), { recursive: true }), fs.writeFileSync(path.join(s, r), 'x'));
+    fs.writeFileSync(path.join(s, 'ffu-target', 'CACHEDIR.TAG'), tag);
+    w('ffu-target/debug/deps/ffu_sim-1234.rlib');
+    w('ffu-target/debug/deps/ffu_sim-1234.exe');
+    w('node_modules/x/index.js');
+    w('package.json');
+  }
+  ageAll(tmp, 1); // an hour since anything was written: past the 15 min settle, inside the 24 h idle window
+  // fresh: a build wrote an artifact 2 minutes ago (deps/ moves with it).
+  const recent = (NOW - 2 * 60_000) / 1000;
+  fs.writeFileSync(path.join(dir.fresh, 'ffu-target', 'debug', 'deps', 'ffu_ui-9.rlib'), 'x');
+  fs.utimesSync(path.join(dir.fresh, 'ffu-target', 'debug', 'deps'), recent, recent);
+  const shell = (pid: number, s: string, ppid = 1) => ({ pid, ppid, cmd: `"C:\\Program Files\\Git\\bin\\bash.exe" -c "export TEMP='${s}' && cd ${s}/ffu && cargo test"` });
+  const procs: ProcLite[] = [
+    // named: a shell of its worker runs, nothing of cargo's.
+    { pid: 10, ppid: 1, cmd: `"C:\\Program Files\\Git\\bin\\bash.exe" -c "export TEMP='${dir.named}' && git status"` },
+    // building: its shell started cargo, whose command line names neither folder.
+    shell(20, dir.building),
+    { pid: 21, ppid: 20, cmd: 'C:\\Users\\x\\.cargo\\bin\\cargo.exe test -p ffu-sim' },
+    // testing: a test binary runs from the target.
+    { pid: 30, ppid: 1, cmd: `${path.join(dir.testing, 'ffu-target', 'debug', 'deps', 'ffu_sim-1234.exe')} --test-threads 4` },
+  ];
+  const guard: CleanupGuard = { keep: [], inUse: [dir.idle, dir.fresh, dir.testing], resumable: Object.values(dir), home: path.join(root, 'home') };
+  const plan = (low: boolean) => planInstallLeftovers({ root, sandboxes: [], tempRoots: [tmp], guard, procs, settings, now: NOW, low, heldMinBytes: 0 });
+  const low = await plan(true);
+  const gone = low.items.filter((i) => i.rule === 'live-session-cargo-target');
+  assert.deepEqual(gone.map((i) => rel(tmp, i.path)).sort(), [`${ids.idle}/ffu-target`, `${ids.named}/ffu-target`]);
+  assert.ok(gone.every((i) => i.inSession && /no cargo process and no write for 15 min while disk is low/.test(i.why)), 'each says why');
+  assert.deepEqual(low.items.filter((i) => /node_modules/.test(i.path)), [], "a live worker's other caches stay");
+  const heldWhy = (id: string) => (low.held ?? []).filter((h) => rel(tmp, h.path).startsWith(`${id}/ffu-target`)).map((h) => h.why).join(' ');
+  assert.match(heldWhy(ids.building), /its worker runs a build \(pid 2[01]/);
+  assert.match(heldWhy(ids.testing), /a running process uses it \(pid 30/);
+  assert.match(heldWhy(ids.fresh), /written 2 min ago/);
+  // Without a low pass a live worker's caches are its own (w1813), and so is a stopped-but-named one's target.
+  assert.deepEqual((await plan(false)).items.filter((i) => /ffu-target/.test(i.path)), []);
+  // No process list: nothing of a live worker's goes.
+  const blind = await planInstallLeftovers({ root, sandboxes: [], tempRoots: [tmp], guard, settings, now: NOW, low: true });
+  assert.deepEqual(blind.items.filter((i) => i.rule === 'live-session-cargo-target'), []);
+});
+
+test('w3396: cargoTargetBusy reads only the top levels of a target and needs a process list', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-cargo-busy-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
+  const target = path.join(root, 'ffa-1', 'ffu-target');
+  fs.mkdirSync(path.join(target, 'debug', 'deps'), { recursive: true });
+  fs.writeFileSync(path.join(target, 'debug', 'deps', 'a.rlib'), 'x');
+  ageAll(root, 1);
+  const since = NOW - 15 * 60_000;
+  assert.equal(await cargoTargetBusy(target, path.join(root, 'ffa-1'), [], since, NOW), undefined);
+  assert.match((await cargoTargetBusy(target, path.join(root, 'ffa-1'), undefined, since, NOW))!, /process list could not be read/);
+  // rustc names the target in --out-dir.
+  const rustc = { pid: 5, ppid: 1, cmd: `rustc --crate-name ffu_sim --out-dir ${path.join(target, 'debug', 'deps')}` };
+  assert.match((await cargoTargetBusy(target, path.join(root, 'ffa-1'), [rustc], since, NOW))!, /pid 5/);
 });
 
 /** A tar as Python's tarfile writes one (ustar headers; `pax` puts each name in a pax header, as tarfile does for a long one). */
