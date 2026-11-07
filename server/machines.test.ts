@@ -178,6 +178,16 @@ test('w536: a machine record that still has max_agents loses it on load, said on
   assert.deepEqual((await load()).reports, []);
 });
 
+test('w3337: a daemon that has shut down starts no keep-awake holder, though its detached agents still count as live', async (t) => {
+  const { daemon, cleanup } = await setup();
+  t.after(cleanup);
+  const d = daemon() as unknown as { liveCount: () => number; awake: () => void; caffeinate?: unknown; shutdown: () => void };
+  d.liveCount = () => 1;
+  d.shutdown();
+  d.awake();
+  assert.equal(d.caffeinate, undefined, 'a holder started after shutdown is never killed, and its test file never ended');
+});
+
 test('machine: a revoked credential drops the link and keeps the daemon out; a new one lets it back (w512, docs/vault.md)', async (t) => {
   const { mm, daemon, cleanup, tmp, upgrades } = await setup();
   t.after(cleanup);
