@@ -663,6 +663,11 @@ export class SandboxPool {
       await withBaseRepoLock(async () => {
         step('fetching origin');
         await must(['fetch', '--prune', 'origin'], 15 * 60_000);
+        // git-lfs writes lfs.repositoryformatversion into the clone's shared .git/config the first time it runs there (the
+        // checkout's smudge and the dedup below, both outside this lock). A worktree add of another sandbox reading that
+        // config meanwhile failed on Windows: "unable to access '.git/config': Permission denied" (w3337: CI's w1918 run on
+        // 2026-11-07). Written here, under the lock, git-lfs finds it and never writes the file again (measured).
+        if ((await this.d.git(['config', '--get', 'lfs.repositoryformatversion'], { signal })).code !== 0) await must(['config', 'lfs.repositoryformatversion', '0'], 60_000);
         // A remake a daemon restart cut off: the worktree it added is there (repaired, in case the cut came before the repair),
         // so only the checkout below is left to do. A .git that no longer leads to the clone is dropped and added again.
         let added = false;
