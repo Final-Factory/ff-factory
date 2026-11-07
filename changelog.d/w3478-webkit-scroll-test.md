@@ -1,0 +1,1 @@
+- **The WebKit chat-scroll e2e no longer races its own socket** (w3478): the test sent its rows before the server held the page's socket and scrolled before all rows had arrived. Test-only.
