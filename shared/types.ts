@@ -1162,6 +1162,13 @@ export interface MachineSandboxUnity {
  */
 export const DISK_WARN_GB_DEFAULT = 15;
 export const DISK_CRITICAL_GB_DEFAULT = 10;
+/**
+ * w3328: a disk clean-up request's worker (WorkItem.diskCleanup) starts past a machine's low-disk gate, the warn and the critical
+ * level both, down to this many GB free on every low volume; below it even that worker waits. A fresh worker with one clone
+ * wrote 68 MB to its temp folder (measured on BEAST, 2026-11-06), so 3 GB leaves it about forty times that, with room for the
+ * agents told to commit and end their turn at the critical level to finish their last writes.
+ */
+export const DISK_CLEANUP_FLOOR_GB = 3;
 /** A machine's clean-up soft threshold (config machines.cleanup.softFreeGB) when config names none: 20 GB (w1951; it was 80). */
 export const CLEANUP_SOFT_GB_DEFAULT = 20;
 
@@ -2239,6 +2246,12 @@ export interface WorkItem {
    * (server/mainCloneGuard.ts).
    */
   mainCloneAccess?: { machine: string; by: string; at: string };
+  /**
+   * w3328: its work is freeing disk space on `machine` (a clean-up request): its workers there start past the machine's low-disk
+   * gate, down to DISK_CLEANUP_FLOOR_GB free (machine/daemon.ts startRefusal, docs/self-recovery.md "A clean-up request starts
+   * on a low disk"). Set by its person's orchestrator (request_work or update_work disk_cleanup), never read from its title.
+   */
+  diskCleanup?: { machine: string; by: string; at: string };
   /**
    * The question it waits on, from the dispatcher (decide_work ask) to its requester, until a note answers it (w278:
    * FFBox posts it in the requester's thread). A design question is `flag` instead. `asks` (w1597): the questions as the

@@ -111,7 +111,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // `steam` on request_pair, which an older daemon's catalog does not offer its workers; the portal then reads it from the words.
 // Its optional `desktop` (locked or not) the same way: an older daemon sends none, which locks no computer out; and `menus` on
 // request_pair, read from the words where an older daemon's catalog lacks it.
-const DECIDED = { protocol: 9, fingerprint: '38839cee4954906e' };
+// w3328 (no bump): LaunchSpec `diskCleanup`, a clean-up request's worker passing the low-disk gate; an older daemon ignores it
+// (the worker waits at the gate as before), and an older portal never sends it.
+const DECIDED = { protocol: 9, fingerprint: '2bb1bcfa0296f1a0' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

@@ -84,6 +84,31 @@ daemon.json):
 | warn | below the warn level | a `[host]` message to the orchestrator and a push (kind "Host health"); on a machine's daemon, new sandbox agents and editors there are also refused with the reason |
 | critical | below the critical level | also: a clean-up pass with every rule runs (at most every 10 minutes); the daemon's guard also stops sandbox editors nobody is working in |
 
+**A clean-up request starts on a low disk** (w3328). The warn and critical levels refuse every new sandbox agent, and that
+used to include the worker sent to free the space: on LothDesktop, 2026-11-07, w3247's clean-up worker was refused at
+16 GB free and w3327's at 17 GB ("disk space is critically low ... new agent processes wait until space is freed"), so
+nothing but the daemon's own pass could free space. Now a request whose work is freeing disk on a machine carries the
+flag `diskCleanup` (WorkItem.diskCleanup, `{ machine, by, at }`), and its workers on that machine start past both levels:
+
+- **Who sets it**: the person's orchestrator, `request_work` (or `update_work`) with `disk_cleanup: "<machine id>"`
+  (`false` takes it back), or the dispatcher, `start_agent` with `work_id` and `disk_cleanup: true`, which marks the
+  request for the sandbox's machine. Never the title or the brief: a request titled "clean-up" without the flag waits at
+  the gate like any other (server/orchestrators.test.ts, the w3328 test). The orchestrator's and dispatcher's low-disk
+  rules (server/agents.ts, the `disk` rule) tell them to set it on every clean-up they file or start.
+- **How it reaches the gate**: `machineSandboxSpec` (server/agents.ts) puts `diskCleanup: true` in the worker's
+  LaunchSpec when a request it serves, open or stalled, is a clean-up of that machine; the daemon's `startRefusal`
+  (machine/daemon.ts) passes it to the guard's `blockReason('agent', { diskCleanup })` (server/hostHealth.ts). An older
+  daemon ignores the field, and the worker waits as before.
+- **The floor**: `DISK_CLEANUP_FLOOR_GB`, 3 GB (shared/types.ts). Below it on any low volume (for a Dev Drive's host
+  volume, the room its file can still grow), even a clean-up worker waits, with "disk space is below the clean-up
+  floor". Why 3: a fresh worker with one clone wrote 68 MB to its temp folder (measured on BEAST, 2026-11-06), so 3 GB
+  is about forty times its own writes, and leaves room for the agents the critical level asked to commit and end their
+  turn to finish their last writes. Below it a full volume is near enough that a start could fail mid-way, and the
+  daemon's own pass (every 10 minutes while critical) is the safer first step.
+- **What it does not change**: an offline or growing Dev Drive still refuses every agent; the flag never starts an editor
+  (`blockReason('editor')` ignores it); what the worker may delete is still its guard's (the worker install folder only,
+  w896). Other work stays gated as before.
+
 **The sandbox drive** (a machine daemon's guard; the portal's has none). When the sandbox root disappears:
 1. The guard remembers the editors that were up and the agents mid-turn in sandboxes (from its
    last look), stops those turns, and reports.

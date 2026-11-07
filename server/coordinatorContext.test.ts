@@ -183,7 +183,10 @@ test('w1158: what a coordinator carries in every call stays within its budget', 
   // w2867 (lothsahn: "Make sure that the state is reflected correctly and fix the issue causing the state to be attributed wrong")
   // gave update_work question_for and already_asked, a question handed to another person (trimmed from 590 characters to
   // 85; the rule is in docs/orchestrators.md): the owner's measured 25,842, so the cap moved to 25,850.
-  const ALWAYS_LOADED_MAX = 25_850;
+  // w3328 (a disk clean-up worker refused by the low-disk gate it was sent to clear) gave request_work and update_work
+  // disk_cleanup and start_agent its flag (trimmed from 760 characters of text to 100; the rule is in docs/self-recovery.md):
+  // the owner's measured 26,003, so the cap moved to 26,025.
+  const ALWAYS_LOADED_MAX = 26_025;
   await withCoordinators((agents, kinds) => {
     for (const [kind, info] of kinds) {
       const prompt = asOnLinuxCi(promptOf(agents, info)).length;

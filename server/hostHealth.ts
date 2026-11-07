@@ -4,7 +4,7 @@ import { hostSoftFreeGB, type Config, type HostGuardConfig } from './config.ts';
 import { CleanupRunner, describeCleanupItems, type CleanupRun, type PassOptions, type VolumeStat } from './cleanup.ts';
 import { staleOutputSettings } from './staleOutput.ts';
 import type { HelperAction, HelperResult } from './privileged.ts';
-import type { DiskLevel, HostHealth, Sandbox, SessionInfo } from '../shared/types.ts';
+import { DISK_CLEANUP_FLOOR_GB, type DiskLevel, type HostHealth, type Sandbox, type SessionInfo } from '../shared/types.ts';
 
 /**
  * The host guard (docs/self-recovery.md): watches free disk space, the sandbox drive and memory, and acts so
@@ -45,15 +45,29 @@ const diskWords = (d: { path: string; freeBytes?: number; growthBytes?: number }
 
 export const worstLevel = (levels: DiskLevel[]): DiskLevel => (levels.includes('critical') ? 'critical' : levels.includes('warn') ? 'warn' : 'ok');
 
-/** Why a new editor or a new agent process is refused right now, or undefined. */
+/** The room a low volume still has for new files: its free space, or less when the Dev Drive's file can grow less than that. */
+const roomOf = (d: { freeBytes?: number; growthBytes?: number }) => Math.min(d.freeBytes ?? 0, d.growthBytes ?? Infinity);
+
+/**
+ * Why a new editor or a new agent process is refused right now, or undefined. `o.diskCleanup` (w3328): the agent serves a disk
+ * clean-up request for this machine, so low disk lets it start while every low volume keeps DISK_CLEANUP_FLOOR_GB; an offline
+ * drive still refuses it, and editors never take it.
+ */
 export function blockReason(
   h: Pick<HostHealth, 'sandboxRoot' | 'level' | 'disks' | 'detail'>,
   kind: 'editor' | 'agent',
   mem: { freeGB: number; minFreeRamGB: number },
+  o: { diskCleanup?: boolean } = {},
 ): string | undefined {
   if (h.sandboxRoot !== 'ok') return `the sandbox drive is offline (${h.sandboxRoot}${h.detail ? `: ${h.detail}` : ''}); the app is reattaching it and resumes the work afterwards`;
   if (h.level !== 'ok') {
-    const low = h.disks.filter((d) => d.level !== 'ok').map(diskWords);
+    const lowDisks = h.disks.filter((d) => d.level !== 'ok');
+    if (kind === 'agent' && o.diskCleanup) {
+      const short = lowDisks.filter((d) => roomOf(d) < DISK_CLEANUP_FLOOR_GB * GB);
+      if (!short.length) return undefined;
+      return `disk space is below the clean-up floor (${short.map(diskWords).join(', ')}; a clean-up worker starts down to ${DISK_CLEANUP_FLOOR_GB} GB free); it waits until the machine's own clean-up pass frees space`;
+    }
+    const low = lowDisks.map(diskWords);
     return `disk space is ${h.level === 'critical' ? 'critically ' : ''}low (${low.join(', ')}); new ${kind === 'editor' ? 'editors' : 'agent processes'} wait until space is freed`;
   }
   if (kind === 'editor' && mem.minFreeRamGB > 0 && mem.freeGB < mem.minFreeRamGB) {
@@ -180,11 +194,11 @@ export class HostHealthMonitor {
   }
 
   /** Why a new editor / agent process must wait, or undefined. */
-  blockReason(kind: 'editor' | 'agent'): string | undefined {
+  blockReason(kind: 'editor' | 'agent', o: { diskCleanup?: boolean } = {}): string | undefined {
     // Between two looks, a drive that is gone blocks at once (the next look starts the remount).
     const gone = this.health.sandboxRoot === 'ok' && this.watchesDrive() && !this.d.exists(this.d.cfg.sandboxRoot);
     const h = gone ? { ...this.health, sandboxRoot: 'missing' as const } : this.health;
-    return blockReason(h, kind, { freeGB: this.d.mem().free / GB, minFreeRamGB: this.d.cfg.limits.minFreeRamGB });
+    return blockReason(h, kind, { freeGB: this.d.mem().free / GB, minFreeRamGB: this.d.cfg.limits.minFreeRamGB }, o);
   }
 
   /** This guard has a sandbox drive (HostDeps.watchDrive): a machine's daemon's does, the portal's does not (w510). */

@@ -9266,3 +9266,44 @@ test("w3186: a longer bench turn Ben approved: recorded in his own turn with his
   assert.match((await call(ben.info, 'grant_bench_turn', { cancel: 'w1.b2' })).text, /^Cancelled w1\.b2/);
   assert.equal(agents.benchPriorities('pc')[a.id].exempt, undefined);
 });
+
+test('w3328: disk_cleanup marks a request a disk clean-up of a machine, from request_work, update_work or the dispatcher\'s start_agent; its worker\'s spec carries it, an ordinary one\'s and a title alone do not', async (t) => {
+  const { store, machines, dispatcher, chat, call } = await setupOnMachine(t);
+  const ben = chat(BEN);
+  const m = store.machines.get('pc')!;
+  const startOn = async (id: string, extra: Record<string, unknown> = {}) => {
+    const r = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'go', title: `${id}: job`, work_id: id, override_duplicate: 'separate test request', extra_agent: true, ...extra });
+    assert.equal(r.isError, false, r.text);
+    const info = store.sessions.get(/Started agent (\w+)/.exec(r.text)![1])!;
+    return () => machines.hooks!.specFor(info, m);
+  };
+
+  // Filed with the flag: the field, the log, and the worker's launch spec.
+  await call(ben.info, 'request_work', { title: 'pc V: clean-up', brief: 'Free disk space on pc.', needs: 'agent', disk_cleanup: 'pc' });
+  assert.deepEqual({ ...store.work.get('w1')!.diskCleanup, at: '' }, { machine: 'pc', by: 'Ben', at: '' });
+  const spec1 = await startOn('w1');
+  assert.equal(spec1().diskCleanup, true);
+
+  // An ordinary request, even one titled like a clean-up: no flag, the gate holds its worker.
+  await call(ben.info, 'request_work', { title: 'pc disk clean-up, free space', brief: 'Clean up the disk on pc.', needs: 'agent' });
+  assert.equal(store.work.get('w2')!.diskCleanup, undefined);
+  const spec2 = await startOn('w2');
+  assert.equal(spec2().diskCleanup, undefined);
+
+  // Marked later by update_work: the running worker's next spec carries it; false takes it back.
+  assert.match((await call(ben.info, 'update_work', { id: 'w2', disk_cleanup: 'nowhere' })).text, /disk_cleanup: no machine "nowhere"/);
+  assert.match((await call(ben.info, 'update_work', { id: 'w2', disk_cleanup: 'pc' })).text, /w2: marked a disk clean-up of pc/);
+  assert.equal(spec2().diskCleanup, true);
+  assert.match((await call(ben.info, 'update_work', { id: 'w2', disk_cleanup: '' })).text, /no longer a disk clean-up of pc/);
+  assert.equal(spec2().diskCleanup, undefined);
+
+  // The dispatcher marks it with start_agent, for the sandbox's machine.
+  await call(ben.info, 'request_work', { title: 'Leftovers', brief: 'Remove FF Factory leftovers on pc.', needs: 'agent' });
+  const spec3 = await startOn('w3', { disk_cleanup: true });
+  assert.deepEqual({ ...store.work.get('w3')!.diskCleanup, at: '' }, { machine: 'pc', by: 'the dispatcher', at: '' });
+  assert.equal(spec3().diskCleanup, true);
+
+  // A flag for another machine does not reach a worker on this one.
+  store.work.get('w3')!.diskCleanup = { machine: 'elsewhere', by: 'Ben', at: '' };
+  assert.equal(spec3().diskCleanup, undefined);
+});
