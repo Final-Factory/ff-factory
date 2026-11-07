@@ -321,9 +321,16 @@ const ADDRESSEE = /\bfor\s+w\d+\b[*_`]*\s*[:—–]/gi;
  * cycle with w2450 (Blocked on w2463) and woke w2450's worker for nothing. "w2450's worker" and "w2450." still count.
  */
 const QUOTED = /"[^"\n]*"|“[^”\n]*”|`[^`\n]*`/g;
+/**
+ * w3294: the request the work is for ("timing base vs fix for w3241") is no wait on it either, unless the "for" is the
+ * wait's own ("waiting for w3241"). w3252's worker wrote "waiting on timed run tr_d4822d1546 (lothdesktop timing base vs
+ * fix for w3241), first in line for the exclusive bench ticket", the ledger read a wait on w3241, and w3241 (Blocked on
+ * w3252 reporting) resumed for nothing at 02:09 and 02:11 UTC on 2026-11-07 (server/ledgerRules.ts reportWaitsOn).
+ */
+const FOR_WHOM = /(?<!\b(?:waiting|waits)\s+)\bfor\s+w\d+\b(?:'s)?/gi;
 const LONE_ID = /(?<![\w/\\.-])(w\d+)(?![\w/\\]|[-.]\w)/i;
 export function requestWaitOf(line: string, selfId: string): string | undefined {
-  const body = line.replace(/^\s*w\d+\s*[:—–-]\s*(?:still open|not done)\s*:?/i, '').replace(ADDRESSEE, ' ').replace(QUOTED, ' ');
+  const body = line.replace(/^\s*w\d+\s*[:—–-]\s*(?:still open|not done)\s*:?/i, '').replace(ADDRESSEE, ' ').replace(QUOTED, ' ').replace(FOR_WHOM, ' ');
   for (const m of body.matchAll(WAITS_ON_WORK)) {
     const id = LONE_ID.exec(m[1].split(/\bthen\b/i)[0])?.[1]?.toLowerCase();
     if (id && id !== selfId.toLowerCase()) return id;

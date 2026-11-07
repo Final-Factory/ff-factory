@@ -780,7 +780,10 @@ without one means it is off or failing, worth a person's look.
   - a timed leg's report with a result for the request it was filed for clears that request's wait (`reportDelivers`;
     since w2426 the same rule for every waiter): a `For <parent>:` line (a partial result too), `DONE: <leg>`, or a still-open line that waits
     on the parent ("waiting for w2335's worker to send its fix commit", read by `requestWaitOf`: a mere mention, a branch
-    `sandbox/slot3-w2335`, is none); so does the leg itself turning Blocked on the parent after the parent's gate (since w2610 only on the parent: a leg
+    `sandbox/slot3-w2335`, is none, and so is the request the work is for, "timing base vs fix for w3241", since w3294:
+    w3252's "still open: waiting on timed run tr_d4822d1546 (lothdesktop timing base vs fix for w3241), first in line for
+    the exclusive bench ticket" woke w3241 at 02:09 and 02:11 UTC on 2026-11-07, then made a false wait cycle w3241 → w3252
+    → w3241 that woke it four times more); so does the leg itself turning Blocked on the parent after the parent's gate (since w2610 only on the parent: a leg
     Blocked on its own merged copy, a time, CI or a person leaves the parent Blocked; w2597 woke three times on
     2026-10-30 on "w2607, its timed leg, is itself Blocked" and blocked again each time). A turn that says only
     that its bench ticket is still queued, or "understood", leaves the parent Blocked (w2377: w2338's turns woke w2335
@@ -943,7 +946,9 @@ without one means it is off or failing, worth a person's look.
     live and holds no open request (the 1.0.0.10 clearing listed 7819);
   - a report waiting on a machine's bench lock while a timed run holds it is **Blocked on that lock**; when the lock is free,
     the blocker watch tells a worker with no check-in and no message on its way to carry on (`Agents.resumeBenchWaits`, once
-    per report);
+    per report). Free means no lock file and no ticket running or waiting in its bench queue (w3294: lothdesktop had no
+    lock file while four shared tickets ran and w3252's exclusive one waited, and w3252's worker 25e6bb06 was told "free"
+    after each of its turns on 2026-11-07, four times in five minutes);
   - a wait on the bug's reporter or a player ("waiting on the reporter X to answer in the Discord thread", or a
     `waiting_on_person` whose who is the reporter) is **Waiting on input on them** (`outside`), never sent to a person's
     orchestrator as [needs you]: FFBox passes their answer on (w1778);

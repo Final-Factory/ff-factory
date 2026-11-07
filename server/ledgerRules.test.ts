@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { afterMergeReason, pairDelivers, cleanupSettings, cutOffOf, deployStep, doneProblem, isRelease, mergedMentionsIn, mergePrs, pausedIn, ownerAt, partOfIdsIn, partOfReason, postDeployStep, prsOf, prUrlsIn, reportDelivers, reportVerdict, reportWaitsOn, requestIdsIn, stallCandidate, stillOpenIn, supersededBy, supersededIn, titleIdsIn, type PrRecord } from './ledgerRules.ts';
 import { reportClip } from './sessions.ts';
 import type { WorkItem } from '../shared/types.ts';
+import { requestWaitOf } from '../shared/workState.ts';
 
 const T = '2026-10-03T10:00:00.000Z';
 const item = (o: Partial<WorkItem> & { id: string }): WorkItem =>
@@ -365,4 +366,25 @@ test('w3248: SUPERSEDED lines name the request and what covers it, markdown allo
     { id: 'w3254', by: '#3244, merged on master' },
     { id: 'w7', by: 'w3245' },
   ]);
+});
+
+test("w3294: a leg's still-open line that names its waiter as whom the work is for is no wait on it, and delivers nothing", () => {
+  // w3252's worker 25e6bb06, 2026-11-07 02:09 and 02:11 UTC: w3241 (Blocked on w3252 reporting) resumed on each of these.
+  const lines = [
+    'w3252: still open: waiting on timed run tr_d4822d1546 (lothdesktop timing base vs fix for w3241), queued for the exclusive bench ticket',
+    'w3252: still open: waiting on timed run tr_d4822d1546 (lothdesktop timing base vs fix for w3241), first in line for the exclusive bench ticket',
+  ];
+  for (const l of lines) {
+    const r = `Nothing new for w3241. The bench lock is still held.\n\n${l}`;
+    assert.equal(requestWaitOf(l, 'w3252'), undefined, 'work done for w3241 is no wait on it');
+    assert.equal(reportWaitsOn(r, 'w3252', 'w3241'), false);
+    assert.equal(reportDelivers(r, 'w3252', 'w3241'), false, 'a status-only turn end');
+    assert.equal(pairDelivers([r], 'w3252', 'w3241'), false, 'a pair host leg saying the same');
+  }
+  assert.equal(reportDelivers(`For w3241: base 0.52 ms, fix 0.03 ms (lothdesktop).\n\n${lines[1]}`, 'w3252', 'w3241'), true, 'a For line still delivers');
+  assert.equal(reportDelivers('Both sides timed.\n\nDONE: w3252', 'w3252', 'w3241'), true, 'DONE still delivers');
+  assert.equal(pairDelivers(['For w3241: PASS\n\nDONE: w3252'], 'w3252', 'w3241'), true, "a host leg's For line with DONE");
+  // A wait on the waiter itself still breaks the w2357 cycle, "for" or not.
+  assert.equal(reportDelivers("w3252: still open: waiting for w3241's worker to push the fix commit", 'w3252', 'w3241'), true);
+  assert.equal(reportDelivers('w3252: still open: waiting on w3241, then the timed run for w3241', 'w3252', 'w3241'), true);
 });
