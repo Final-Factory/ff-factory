@@ -474,6 +474,55 @@ test("w3396: while disk is low, a live worker's idle cargo target goes; a buildi
   assert.deepEqual(blind.items.filter((i) => i.rule === 'live-session-cargo-target'), []);
 });
 
+/**
+ * w3426: cargo never deletes what an older build left, so one FFU worker's target held 23.6 GB on BEAST while fresh ones were
+ * 3.3-3.6 GB, and F: (73 GB free) never reached the low pass. A target over cargoTargetCapGB goes on any pass once cargo is done
+ * with it; a building one, a just-written one and one under the cap stay.
+ */
+test('w3426: a cargo target over the size cap goes on a normal pass once idle; a building, fresh or small one stays', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-cargo-cap-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
+  const tmp = path.join(root, 'tmp');
+  const ids = { idle: 'ffa-a1111111', building: 'ffa-a2222222', fresh: 'ffa-a3333333', stopped: 'ffa-a4444444' };
+  const dir = Object.fromEntries(Object.entries(ids).map(([k, n]) => [k, path.join(tmp, n)])) as Record<keyof typeof ids, string>;
+  const tag = 'Signature: 8a477f597d28d172789f06886806bc55\n# This file is a cache directory tag created by cargo.\n';
+  for (const s of Object.values(dir)) {
+    fs.mkdirSync(path.join(s, 'ffu', 'target', 'debug', 'deps'), { recursive: true });
+    fs.writeFileSync(path.join(s, 'ffu', 'target', 'CACHEDIR.TAG'), tag);
+    fs.writeFileSync(path.join(s, 'ffu', 'target', 'debug', 'deps', 'ffu_server-1.rlib'), Buffer.alloc(4096));
+    fs.mkdirSync(path.join(s, 'node_modules', 'x'), { recursive: true });
+    fs.writeFileSync(path.join(s, 'node_modules', 'x', 'index.js'), 'x');
+  }
+  ageAll(tmp, 1); // past the 15 min settle, inside the 24 h idle window
+  const recent = (NOW - 2 * 60_000) / 1000;
+  fs.utimesSync(path.join(dir.fresh, 'ffu', 'target', 'debug', 'deps'), recent, recent);
+  const procs: ProcLite[] = [
+    { pid: 40, ppid: 1, cmd: `"C:\\Program Files\\Git\\bin\\bash.exe" -c "cd ${dir.building}/ffu && cargo test"` },
+    { pid: 41, ppid: 40, cmd: 'C:\\Users\\x\\.cargo\\bin\\cargo.exe test -p ffu-sim' },
+  ];
+  const guard: CleanupGuard = { keep: [], inUse: [dir.idle, dir.building, dir.fresh], resumable: Object.values(dir), home: path.join(root, 'home') };
+  const plan = (capGB: number, p: ProcLite[] | null = procs) =>
+    planInstallLeftovers({ root, sandboxes: [], tempRoots: [tmp], guard, procs: p ?? undefined, settings: { ...settings, cargoTargetCapGB: capGB }, now: NOW, low: false, heldMinBytes: 0 });
+  const capped = (await plan(1024 / 1024 ** 3)).items.filter((i) => i.rule === 'cargo-target-cap');
+  assert.deepEqual(capped.map((i) => rel(tmp, i.path)).sort(), [`${ids.idle}/ffu/target`, `${ids.stopped}/ffu/target`]);
+  assert.ok(capped.every((i) => i.inSession && /over the .* GB cap, with no cargo process and no write for 15 min/.test(i.why)), 'each says why');
+  const all = await plan(1024 / 1024 ** 3);
+  assert.deepEqual(all.items.filter((i) => /node_modules/.test(i.path) && /ffa-a[123]/.test(i.path)), [], "a live worker's other caches stay");
+  // Under the cap (8 GB, the default): nothing of a live worker's goes without a low pass.
+  assert.deepEqual((await plan(8)).items.filter((i) => /[\\/]target$/.test(i.path) && !/ffa-a4/.test(i.path)), []);
+  // No process list: a build cannot be ruled out, so nothing goes; cap 0 turns the rule off.
+  assert.deepEqual((await plan(1024 / 1024 ** 3, null)).items.filter((i) => i.rule === 'cargo-target-cap'), []);
+  assert.deepEqual((await plan(0)).items.filter((i) => i.rule === 'cargo-target-cap'), []);
+  // When dropping debug/incremental alone brings it under the cap, only that goes (a 52 s rebuild against 215 s, measured).
+  const inc = path.join(dir.idle, 'ffu', 'target', 'debug', 'incremental', 'ffu_sim-1');
+  fs.mkdirSync(inc, { recursive: true });
+  fs.writeFileSync(path.join(inc, 'query-cache.bin'), Buffer.alloc(8192));
+  ageAll(dir.idle, 1);
+  const trimmed = (await plan(6000 / 1024 ** 3)).items.filter((i) => i.rule === 'cargo-target-cap');
+  assert.deepEqual(trimmed.map((i) => rel(tmp, i.path)), [`${ids.idle}/ffu/target/debug/incremental`]);
+  assert.match(trimmed[0].why, /^the incremental cache of a Rust build folder/);
+});
+
 test('w3396: cargoTargetBusy reads only the top levels of a target and needs a process list', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-cargo-busy-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
