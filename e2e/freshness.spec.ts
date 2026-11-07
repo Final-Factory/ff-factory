@@ -237,9 +237,11 @@ test('a chat scrolled up is at the same message after the reload', async ({ page
   const tag = uniq('scroll');
   for (let i = 0; i < 14; i++) await sendMessage(page.request, me.orchestratorId, `row ${i} ${tag} ${'filler '.repeat(60)}`);
   const row = (n: number): Locator => page.locator('.orch .msg-assistant', { hasText: `row ${n} ${tag}` });
-  // Every row, not just the last: rows still arriving above the one scrolled to move it down on WebKit (no scroll
-  // anchoring), after `where` is measured, and the page then keeps the place it moved to (w3478).
-  for (let i = 0; i < 14; i++) await expect(row(i)).toHaveCount(1);
+  // Every reply, not just the last: the fake agent's replies do not all land in order on a loaded runner, and a reply that
+  // arrives after the scroll draws above row 5 and moves it down by its own height (w3478: CI run 42413648380, replies 3 and 4
+  // arrived 0.8 s after `where` was read, 2 x 208 px; the page keeps the place the reader then sees, so the reload matched
+  // that, not `where`).
+  await expect(page.locator('.orch .msg-assistant', { hasText: tag })).toHaveCount(14);
   const topOf = (r: Locator) => r.evaluate((el) => Math.round(el.getBoundingClientRect().top - el.closest('.transcript-scroll')!.getBoundingClientRect().top));
   await row(5).evaluate((el) => {
     const sc = el.closest('.transcript-scroll')!;

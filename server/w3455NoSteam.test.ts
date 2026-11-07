@@ -7,9 +7,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ownWords } from '../shared/mentions.ts';
 import { saysNone } from '../shared/desktop.ts';
-import { mentionsSteam, STEAM_READ } from '../shared/steam.ts';
+import { mentionsSteam, saysNoSteam, STEAM_READ } from '../shared/steam.ts';
 import { pairText } from '../shared/capacity.ts';
-import { remarkPair } from './orchestrators.ts';
+import { remarkPair, restatedSteam } from './orchestrators.ts';
 
 // w3392's brief as filed (read_work w3392, 2026-11-07 12:59), the lines that name Steam, sign-ins or a lobby.
 const W3392 = [
@@ -52,4 +52,16 @@ test('w3455: remarkPair steam "none" drops a Steam mark and keeps its words unre
   assert.equal(remarkPair(r.pair, { steam: 'none' }).changed, false);
   const back = remarkPair(r.pair, { steam: 'a Steam lobby join' });
   assert.deepEqual(back.pair, { legs: 2, for: 'w3315', steam: 'a Steam lobby join' });
+});
+
+test('w3455: restatedSteam drops a stored mark that says none or was read from FF Factory\'s own words; saysNoSteam reads a person\'s "no Steam"', () => {
+  const none = restatedSteam({ title: 't', brief: W3431, pair: { legs: 2, steam: 'none: a direct (non-Steam) host and join' } });
+  assert.equal(none?.steam, undefined);
+  assert.match(none?.noSteam ?? '', /^none: /);
+  const read = restatedSteam({ title: 'Pair run for w3360', brief: W3392, pair: { legs: 2, steam: STEAM_READ } });
+  assert.ok(read && read.steam === undefined && !read.noSteam);
+  assert.equal(restatedSteam({ title: 't', brief: 'Both legs meet in a Steam lobby.', pair: { legs: 2, steam: STEAM_READ } }), undefined, 'its own words still name Steam');
+  assert.equal(restatedSteam({ title: 't', brief: '', pair: { legs: 2, steam: 'a Steam lobby join' } }), undefined, 'a said reason stands');
+  for (const yes of ['Yes, no Steam: start the planner rejoin run now', 'Yes, no Steam: start it when two computers have room', 'run it without Steam', 'a direct (non-Steam) host']) assert.equal(saysNoSteam(yes), true, yes);
+  for (const no of ['go ahead', 'start it on two Steam computers', 'Steam is fine', 'nonsteamy']) assert.equal(saysNoSteam(no), false, no);
 });

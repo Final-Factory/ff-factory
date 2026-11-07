@@ -186,3 +186,9 @@ export const STEAM_NONE = 'none: its legs need no Steam, as its filer said (requ
 
 /** Why a pair run needs Steam when its words said so and its filer did not (WorkPair.steam). */
 export const STEAM_READ = 'read from its words: a lobby or a Steam host or join; request_pair steam "none" says it needs none';
+
+/**
+ * Whether a person's words rule Steam out (w3455: Ben's "Yes, no Steam: start the planner rejoin run now", given to
+ * decide_work as override_gate on a pair run Blocked on Steam sign-ins): "no Steam", "without Steam", "non-Steam".
+ */
+export const saysNoSteam = (words: string | undefined): boolean => /(?:\b(?:no|without)\s+|\bnon-?\s*)steam\b/i.test(words ?? '');
