@@ -392,6 +392,11 @@ w1832), the daemon:
   log cannot be read, or whose whole log has no job or "Listening for Jobs" line, is not paused. A process run from a runner's `_work` folder that no worker started is a leftover:
   SIGTERM, never forced. What was paused and ended is in `<root>/tmp/bench.queue/runners.json`, so a daemon restarted
   mid-turn continues them. Windows has no SIGSTOP: its runners are waited out, not paused.
+  An operations runner is never paused (w3424): a runner whose root holds an `ff-ops-runner` file (biscuit's
+  `ffu-biscuit-world`, label `ffu-world`, takes only the shared FFU world's deploy) takes its jobs during the turn, and
+  the game repo's `ci-park` hook skips it too, so a deploy merged during a timed run starts within seconds. Its job still
+  counts as a job before a grant, and its leftovers are still ended. The mark is per runner, so only a runner registered
+  for jobs that time nothing gets one.
 - **holds the rest as before**: `unity start` queues (a shared ticket), builds, batch compiles and the editor's compiles,
   imports and tests wait for their shared turn, and the guard refuses new players and screen grabs (w1750).
   `unity-slot run` with no ticket of its own (`FF_BENCH_TICKETS=off`; one that cannot be taken stops the run) waits for another worker's

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { BenchRunners, holdsJob, listenerLog, readListenerLog, runnerCensus, SETTLE_MS, type BenchRunnersDeps, type RunnersState } from '../machine/benchRunners.ts';
+import { BenchRunners, holdsJob, isOpsRunner, listenerLog, OPS_RUNNER_MARK, readListenerLog, runnerCensus, SETTLE_MS, type BenchRunnersDeps, type RunnersState } from '../machine/benchRunners.ts';
 import type { Proc } from '../machine/unity.ts';
 
 /**
@@ -27,7 +27,7 @@ const NOW = Date.parse('2026-11-04T15:35:00Z');
 /** A listener that finished its last job long before the turn and has listened since. */
 const IDLE_LOG = '[2026-11-04 14:00:00Z INFO Terminal] WRITE LINE: 2026-11-04 14:00:00Z: Job check completed with result: Succeeded\n';
 
-function harness(o: { platform?: NodeJS.Platform; state?: RunnersState } = {}) {
+function harness(o: { platform?: NodeJS.Platform; state?: RunnersState; opsRunner?: (root: string) => boolean } = {}) {
   const s = {
     holder: undefined as { ticket: string; ownerPid?: number } | undefined,
     procs: [...LISTENERS, ...JOB, LEFTOVER, ...OTHER] as Proc[],
@@ -69,6 +69,7 @@ function harness(o: { platform?: NodeJS.Platform; state?: RunnersState } = {}) {
     log: (t) => s.log.push(t),
     now: () => s.now,
     platform: o.platform ?? 'darwin',
+    opsRunner: o.opsRunner,
   };
   return { s, r: new BenchRunners(d) };
 }
@@ -275,4 +276,26 @@ test('w3195: the log read is the one the live listener writes, not a --version r
   // a whole log with no job or listening line is not a listener's: it holds like an unread one
   assert.equal(listenerLog(VERSION_LOG).state, 'unknown');
   assert.match(holdsJob(listenerLog(VERSION_LOG), Date.parse('2026-11-06T17:08:51Z')) ?? '', /not a listening runner's/);
+});
+
+test('w3424: an operations runner (ff-ops-runner in its root) is never paused for a turn; the others are, as before', async () => {
+  const { s, r } = harness({ opsRunner: (root) => root === `${H}/ffw/ffu-runners/ffu-m3-2` });
+  s.procs = [...LISTENERS, ...OTHER];
+  s.holder = { ticket: 't00003511', ownerPid: 4000 };
+  await r.tick();
+  await r.tick();
+  assert.deepEqual(s.signals, ['SIGSTOP 501', 'SIGSTOP 502']);
+  assert.deepEqual(r.paused().map((p) => p.pid), [501, 502]);
+  assert.equal(s.log.filter((l) => /listener pid 503\) not paused: an operations runner \(ff-ops-runner, w3424\)/.test(l)).length, 1, 'said once, not every look');
+  s.holder = undefined;
+  s.signals = [];
+  await r.tick();
+  assert.deepEqual(s.signals, ['SIGCONT 501', 'SIGCONT 502']);
+});
+
+test('w3424: isOpsRunner reads the mark file in the runner root', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ops-runner-'));
+  assert.equal(isOpsRunner(root), false);
+  fs.writeFileSync(path.join(root, OPS_RUNNER_MARK), 'w3424: the shared FFU world deploy only\n');
+  assert.equal(isOpsRunner(root), true);
 });
