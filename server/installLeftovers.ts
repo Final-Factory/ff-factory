@@ -60,6 +60,13 @@ export interface InstallLeftoverSettings {
    * its rebuildable caches at once, a whole Library apart (only its build caches go: w1813); 0: never.
    */
   lowCacheSettleMinutes: number;
+  /**
+   * A running or blocked worker's cargo target over this many GB goes once cargo is done with it (no cargo-like process in the
+   * worker's tree, no write for lowCacheSettleMinutes, or 15 min when that is 0), whatever the drive's free space (w3426):
+   * cargo never deletes what an older build left, so one worker's target grew to 23.6 GB. 8 GB is about 1.4 times a fresh
+   * target (5.8 GB, measured), so three workers stay near 20 GB; 0: never.
+   */
+  cargoTargetCapGB: number;
 }
 
 export const INSTALL_LEFTOVER_DEFAULTS: InstallLeftoverSettings = {
@@ -74,6 +81,7 @@ export const INSTALL_LEFTOVER_DEFAULTS: InstallLeftoverSettings = {
   outputCapGB: 2,
   idleCacheHours: 24,
   lowCacheSettleMinutes: 15,
+  cargoTargetCapGB: 8,
 };
 
 /** The settings in force: the defaults under whatever config gave (unknown or ill-typed values ignored). */
@@ -93,6 +101,7 @@ export function installLeftoverSettings(raw: unknown): InstallLeftoverSettings {
     outputCapGB: n('outputCapGB', 0.1, 1000),
     idleCacheHours: n('idleCacheHours', 0, 24 * 30),
     lowCacheSettleMinutes: n('lowCacheSettleMinutes', 0, 24 * 60),
+    cargoTargetCapGB: n('cargoTargetCapGB', 0, 10_000),
   };
 }
 
@@ -730,8 +739,43 @@ export async function planInstallLeftovers(o: {
    * once the folder is idle for idleCacheHours. A Unity lockfile no process names was left by a crashed editor: it holds nothing.
    * Nothing git holds goes: an item inside a repo's work tree only when git ignores it, never one holding a repo.
    */
+  /**
+   * A worker's cargo target over cargoTargetCapGB goes once cargo is done with it, on any pass (w3426): cargo never deletes the
+   * artifacts an older build left, so a worker that rebuilt all day held 23.6 GB (13.8 GB in debug/deps, 34 copies of one crate)
+   * while a fresh target is 3.3-5.5 GB, and a drive with room never reached the low pass that prunes it (w3396). The same checks
+   * as there (cargoTargetBusy): no process names it, no cargo-like process in the worker's tree, nothing written in its top three
+   * levels within the settle time. Running, blocked and stopped workers alike; the worker's next build rebuilds it.
+   */
+  const capCargo = async (session: string, t: string) => {
+    if (!s.cargoTargetCapGB || !o.procs) return;
+    const capBytes = s.cargoTargetCapGB * 1024 ** 3;
+    const projectOpen = (d: string) => o.procs!.some((p) => mentions(p.cmd, d));
+    const settle = s.lowCacheSettleMinutes || 15;
+    for (const c of await idleCachesIn(session, 1, [], { projectOpen, quick: true })) {
+      if (!/cargo target/.test(c.what) || items.has(c.path) || !within(c.path, root)) continue;
+      const bytes = await sizeOf(c.path);
+      if (bytes <= capBytes) continue;
+      const size = `${(bytes / 1024 ** 3).toFixed(1)} GB, over the ${s.cargoTargetCapGB} GB cap`;
+      const busy = await cargoTargetBusy(c.path, session, o.procs, now - settle * 60_000, now);
+      const no = busy ?? neverDelete(c.path, sessionRelaxed(session, relaxed(t))) ?? (await gitHolds(c.path, session));
+      if (no) {
+        await hold(c.path, [c], `${size}, but ${no}`);
+        continue;
+      }
+      // Measured on BEAST (w3426, ffu main, a rebuild after an edit to ffu-sim): 30 s with the target whole, 52 s without
+      // debug/incremental, 173 s without debug/deps and incremental, 215 s without debug (a clean build: 213 s). So only
+      // incremental goes when that brings the target under the cap; otherwise the whole target, which costs about the same
+      // as losing deps and also drops release/ and the stale build-script output.
+      const incremental = path.join(c.path, 'debug', 'incremental');
+      const inc = await sizeOf(incremental);
+      const why = `with no cargo process and no write for ${settle} min (rebuildable)`;
+      if (inc > 0 && bytes - inc <= capBytes) items.set(incremental, { path: incremental, rule: 'cargo-target-cap', why: `the incremental cache of ${c.what} (${(inc / 1024 ** 3).toFixed(1)} GB of its ${size}), ${why}`, base: t, inSession: session });
+      else items.set(c.path, { path: c.path, rule: 'cargo-target-cap', why: `${c.what}, ${size}, ${why}`, base: t, inSession: session });
+    }
+  };
   const idleCaches = async (session: string, t: string) => {
     if (!within(session, root)) return;
+    if (!o.low) await capCargo(session, t);
     const quickOn = !!o.low && s.lowCacheSettleMinutes > 0;
     if (!s.idleCacheHours && !quickOn) return;
     // A live session's caches are its worker's: only a low pass looks at them, to say so (w1813).
