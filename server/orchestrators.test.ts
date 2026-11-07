@@ -22,7 +22,8 @@ import { fakeToken, useFakeVault } from './testVault.ts';
 import { parseNotice } from '../shared/notices.ts';
 import { holdsOf, portalWaitIn, requestWaitOf, siblingWaitOf } from '../shared/workState.ts';
 import { latestLine } from '../shared/latestLine.ts';
-import { HELD_MARK, inPersonWords } from '../shared/conditional.ts';
+import { CARDS_MARK, HELD_MARK, inPersonWords } from '../shared/conditional.ts';
+import { personMessageView } from '../shared/personMessage.ts';
 import { ANSWER_EXCERPT_CHARS, answeredText, answerExcerpt, splitReply, splitSent } from '../shared/replies.ts';
 import { forYouId, splitForYou } from '../shared/forYou.ts';
 import { blockerName, gatesOf, type PrHealth } from '../shared/blockers.ts';
@@ -3200,7 +3201,7 @@ test('w1955: a typed message starts its turn with the open cards asked before it
   // Typed words that quote no card: both cards are offered, under FF Factory's own mark.
   const typed = 'We already decided on this in a discussion. Reference those decisions.';
   const offer = o.heldOffer(loth.info.id, typed);
-  assert.match(offer, /^\n\n\[FF Factory, not your person: held from earlier turns\]\nOpen questions of yours on Lothsahn's Waiting on input tab, asked before this message \(w1955\)/);
+  assert.match(offer, /^\n\n\[FF Factory, not your person: your questions still open with them\]\nOpen questions of yours on Lothsahn's Waiting on input tab, asked before this message \(w1955\)/);
   assert.match(offer, new RegExp(`- open question ${cleanup} \\(Should LothLaptop keep its clean-up line\\?\\)`));
   assert.match(offer, new RegExp(`- open question ${timing} `));
   assert.match(offer, /close_question with its seq and why in this same turn/);
@@ -3221,6 +3222,52 @@ test('w1955: a typed message starts its turn with the open cards asked before it
   // The typed message the orchestrator receives keeps the person's words ahead of the mark.
   assert.equal(inPersonWords('We already decided on this in a discussion', [typed + offer]), true);
   assert.equal(inPersonWords('call close_question with its seq', [typed + offer]), false, 'the card note is the harness note, not their words');
+});
+
+test("w3297: the open-questions note and the held calls reach the orchestrator, each under its own header, and the person's chat shows only their words", async (t) => {
+  const { store, o, chat, agents } = setup(t);
+  store.onEvent = (sid, e) => o.observeAsk(sid, e);
+  const loth = chat(LOTH);
+  const asked = (question: string, toolUseId: string) => {
+    const ev = store.append(loth.info.id, { kind: 'tool_use', toolUseId, name: 'mcp__sandboxes__ask_person', input: { question, options: [{ label: 'Yes', description: '', recommended: true }, { label: 'No', description: '' }] } });
+    store.append(loth.info.id, { kind: 'tool_result', toolUseId, isError: false, text: 'Shown' });
+    return ev.seq;
+  };
+  const sentLast = () => (store.readTranscript(loth.info.id).filter((e) => e.kind === 'user' && e.from === 'human').at(-1) as { text: string }).text;
+  const card = asked('Should LothLaptop keep its clean-up line?', 'h1');
+  // A typed message while a card is open: the orchestrator receives the card list after the person's words.
+  agents.operatorTurn(LOTH, 'When I ask questions, why does it show a huge block?');
+  const received = sentLast();
+  assert.ok(received.includes(`- open question ${card} (Should LothLaptop keep its clean-up line?)`), 'the orchestrator still gets the list');
+  // Lothsahn's chat draws only what he wrote.
+  assert.equal(personMessageView(received).words, 'When I ask questions, why does it show a huge block?');
+  // The list has its own header: it is not "held from earlier turns" (w830's held calls).
+  assert.ok(received.includes(`\n\n${CARDS_MARK}\nOpen questions of yours on Lothsahn's Waiting on input tab`), received);
+  assert.ok(!received.includes(HELD_MARK), 'the open questions are not "held from earlier turns"');
+  // A reply quoting another card carries the quote and the note: the bubble keeps the quote and the words, never the note.
+  const other = asked('Should the idle stop be 10 minutes?', 'h2');
+  const third = asked('Which look for the new panel?', 'h3');
+  agents.operatorTurn(LOTH, o.replyWords(loth.info.id, 'Yes, 10.', other));
+  const reply = personMessageView(sentLast());
+  assert.equal(reply.words, 'Yes, 10.');
+  assert.equal(reply.quote?.seq, other);
+  assert.match(sentLast(), new RegExp(`open question ${third} `));
+  // A held call (w830) goes under HELD_MARK, the cards under their own header after it; the chat shows neither.
+  (o as unknown as { held: Map<string, unknown[]> }).held.set(loth.info.id, [{ at: new Date().toISOString(), tool: 'update_work', args: { id: 'w4', note: 'move it' }, why: 'the filings limit' }]);
+  const fourth = asked('Should the dispatcher retry?', 'h4');
+  agents.operatorTurn(LOTH, 'how is it going?');
+  const both = sentLast();
+  assert.ok(both.startsWith(`how is it going?\n\n${HELD_MARK}\nCalls a gate refused in your earlier turns`), both);
+  assert.ok(both.indexOf(CARDS_MARK) > both.indexOf('update_work {"id":"w4"'), both);
+  assert.match(both.slice(both.indexOf(CARDS_MARK)), new RegExp(`open question ${fourth} `));
+  assert.equal(personMessageView(both).words, 'how is it going?');
+  // Held calls alone: only HELD_MARK.
+  (o as unknown as { held: Map<string, unknown[]> }).held.set(loth.info.id, [{ at: new Date().toISOString(), tool: 'update_work', args: { id: 'w5' }, why: 'gate' }]);
+  const heldOnly = o.heldOffer(loth.info.id, 'ok');
+  assert.ok(heldOnly.startsWith(`\n\n${HELD_MARK}\n`) && !heldOnly.includes(CARDS_MARK), heldOnly);
+  // Conditional decisions never take words from either note.
+  assert.equal(inPersonWords('call close_question with its seq', [received]), false);
+  assert.equal(inPersonWords('why does it show a huge block', [received]), true);
 });
 
 test('w3253: a [for you] message waits in its person’s bubble until they reply to it, the orchestrator closes it, or they clear it', async (t) => {

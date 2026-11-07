@@ -116,9 +116,9 @@ export function grantWords(g: Pick<ReactionGrant, 'emoji' | 'seq'>, sentence: st
 }
 
 /** The proposal's own words, for grants: the message minus an earlier quote or FF Factory note, clipped. */
-export function proposalText(text: string, held: string, mark: string): string {
+export function proposalText(text: string, held: string | readonly string[], mark: string): string {
   let own = text.split(mark)[0];
-  if (held) own = own.split(held)[0];
+  for (const h of typeof held === 'string' ? [held] : held) if (h) own = own.split(h)[0];
   own = own.trim();
   return own.length > PROPOSAL_CHARS ? own.slice(0, PROPOSAL_CHARS) : own;
 }

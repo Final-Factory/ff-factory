@@ -2910,8 +2910,13 @@ takes `request` and `after`, and the orchestrator's brief says to ask every ques
 **Typed answers (w1955).** Words typed in the chat carry no mark of the card they answer, so nothing closes the card by itself and
 FF Factory never guesses. Two nudges tell the orchestrator to `close_question` the ones the words decided, in the same turn:
 (1) at the start of a turn the person typed, `Orchestrators.heldOffer(id, typed)` appends the chat's open questions asked before
-that message ("open question N (...)"), each card offered once, under HELD_MARK like the w830 held calls, so conditional decisions
-never take their words from it; a click, a reply quoting a card (that card is left out) and the harness's own turns offer none.
+that message ("open question N (...)"), each card offered once, under its own header `CARDS_MARK` ("[FF Factory, not your
+person: your questions still open with them]"; before w3297 it rode under the w830 held calls' HELD_MARK, and lothsahn asked
+"why does it show [held from previous turns] and a huge block of text?"), so conditional decisions never take their words from
+it. **What the person sees** (w3297, lothsahn: "hide that note from my chat"): only their own words. The note is in the text
+the orchestrator receives and in the transcript, but their chat's bubble draws the message through
+`shared/personMessage.ts` `personMessageView`, which cuts at the first of `NOTE_MARKS` (HELD_MARK, CARDS_MARK); a reply's
+quote still shows above the bubble, and the remote session's recap (`server/remoteChat.ts`) leaves the note out too. A click, a reply quoting a card (that card is left out) and the harness's own turns offer none.
 The typed routes pass their text: the page, FFBox operator words, the remote Claude Code key, `askOrchestrator`. This covers the
 answer that leads to no filing. (2) `request_work` and `update_work` in a turn the person started end their result with the
 open questions asked before that message that are still open (`Orchestrators.withOpenCards`), once per turn. The brief says the
@@ -3465,7 +3470,9 @@ their next message; don't ask Lothsahn again." With the person's next message (t
 authenticated operator turn, or the remote-session route), `heldOffer` appends the held calls under `HELD_MARK`
 ("[FF Factory, not your person: held from earlier turns]"): that turn is the person's, the limit has started again, and
 the orchestrator makes each call their words decide, as it stands. The note is FF Factory's: a conditional decision's
-words are never taken from it. The orchestrator prompt's "How to work" says the same.
+words are never taken from it. HELD_MARK heads the held calls only; the open questions that may follow carry their own
+`CARDS_MARK` ("Typed answers (w1955)" above, w3297). The person never sees either note: their chat shows their own words
+alone (`personMessageView`, w3297). The orchestrator prompt's "How to work" says the same.
 - Only its person writes to a personal orchestrator (HTTP 403 otherwise). Nobody writes to the dispatcher, the owner
   included (Ben, 2026-10-03: people talk to their own orchestrator, which files work with it): `POST
   /api/sessions/<dispatcher id>/message` answers 403 "nobody chats with the dispatcher…" for every login and key

@@ -9,7 +9,7 @@
 // FF Factory's mark and the question quoted), so it reads, gates and renders like a reply they typed. The buttons lock by
 // reading the transcript: a message of the person's that quotes this event is the answer. No imports from the page or the
 // server, so both and `node --test` load it.
-import { splitReply } from './replies.ts';
+import { noteIndex, splitReply } from './replies.ts';
 import { MD_IMAGE } from './imagePaths.ts';
 
 /** The tool's name; the transcript shows it as `mcp__<server>__ask_person`. */
@@ -150,10 +150,11 @@ export function questionOf(excerpt: string): string | undefined {
 }
 
 /** Which option a person's message chose, if it answers the question at `askSeq`: its index in `ask.options`, else undefined. */
-export function chosenIn(ask: Ask, text: string, held = ''): number | undefined {
-  // A held-calls note (HELD_MARK) rides after a message's words and is FF Factory's, not theirs.
+export function chosenIn(ask: Ask, text: string, held: string | readonly string[] = ''): number | undefined {
+  // A note of FF Factory's (NOTE_MARKS: held calls, open questions) rides after a message's words and is not theirs.
   const words = splitReply(text, held).words;
-  const own = (held ? words.split(held)[0] : words).trim();
+  const end = noteIndex(words, held);
+  const own = (end < 0 ? words : words.slice(0, end)).trim();
   const i = ask.options.findIndex((o) => o.label === own);
   return i < 0 ? undefined : i;
 }
@@ -163,7 +164,7 @@ export function chosenIn(ask: Ask, text: string, held = ''): number | undefined 
  * still open. A message of theirs that quotes the question but is not one of its labels (a typed reply to it) leaves it
  * open: only a click settles it.
  */
-export function answerOf(ask: Ask, askSeq: number, later: readonly { text: string }[], held = ''): { chosen: number } | undefined {
+export function answerOf(ask: Ask, askSeq: number, later: readonly { text: string }[], held: string | readonly string[] = ''): { chosen: number } | undefined {
   for (const m of later) {
     if (splitReply(m.text, held).quote?.seq !== askSeq) continue;
     const chosen = chosenIn(ask, m.text, held);

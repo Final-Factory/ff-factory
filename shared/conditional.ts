@@ -17,6 +17,20 @@ export const CONDITIONAL_PER_REQUEST = 5;
  * what follows is the harness's, never the person's words.
  */
 export const HELD_MARK = '[FF Factory, not your person: held from earlier turns]';
+/**
+ * Where FF Factory's list of the orchestrator's open questions and [for you] messages starts in a person's message (w1955,
+ * w3253; its own header since w3297, lothsahn: "why does it show [held from previous turns]"). Messages before w3297 carry
+ * that list under HELD_MARK.
+ */
+export const CARDS_MARK = '[FF Factory, not your person: your questions still open with them]';
+/** Every header of a note of FF Factory's that rides after a person's words (w3297): what follows the first is never theirs. */
+export const NOTE_MARKS: readonly string[] = [HELD_MARK, CARDS_MARK];
+
+/** A person's message up to FF Factory's first note in it (NOTE_MARKS): their words, and a reply's quote if any. */
+export function beforeNote(text: string): string {
+  const at = Math.min(...NOTE_MARKS.map((m) => text.indexOf(m)).filter((i) => i >= 0));
+  return Number.isFinite(at) ? text.slice(0, at) : text;
+}
 
 /** What update_work's `when` takes: exactly one. */
 export interface ConditionInput {
@@ -103,11 +117,11 @@ const norm = (s: string) =>
 
 /**
  * Whether `words` are a person's own, verbatim (case, quotes and spacing aside): found in one of their messages, before
- * FF Factory's own note in it (HELD_MARK, or SENT_MARK on a reply sent straight to another person, w1831), or the message
+ * FF Factory's own notes in it (NOTE_MARKS, or SENT_MARK on a reply sent straight to another person, w1831), or the message
  * they quoted in a reply (REPLY_MARK, w866). Outer quotes and end punctuation of `words` do not count.
  */
 export function inPersonWords(words: string, messages: readonly string[]): boolean {
   const w = norm(words).replace(/^["'\s]+|["'\s.,;!]+$/g, '');
   if (w.length < 6) return false;
-  return messages.some((m) => norm(m.split(HELD_MARK)[0].split(SENT_MARK)[0].split(REPLY_MARK)[0]).includes(w));
+  return messages.some((m) => norm(beforeNote(m).split(SENT_MARK)[0].split(REPLY_MARK)[0]).includes(w));
 }

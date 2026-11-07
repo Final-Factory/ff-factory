@@ -1,9 +1,9 @@
 import { createContext, memo, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { Machine, PendingPermission, SessionInfo, StandingAgent, TranscriptEvent } from '../../../shared/types';
 import { NOTICE_TAG, parseNotice, type Notice, type NoticeKind } from '../../../shared/notices';
-import { parseReaction, reactionsByMessage, splitReply, splitSent, splitVia } from '../../../shared/replies';
-import { HELD_MARK } from '../../../shared/conditional';
+import { parseReaction, reactionsByMessage } from '../../../shared/replies';
 import { splitForYou } from '../../../shared/forYou';
+import { personMessageView } from '../../../shared/personMessage';
 import { checkAsk, isAskTool, type Ask } from '../../../shared/ask';
 import { AskCard, markJump } from './AskCard';
 import { holdReload } from '../freshness';
@@ -614,11 +614,7 @@ function UserMessage({ ev, sessionId, owner }: { ev: UserEv; sessionId: string; 
   // A reply carries the message it answers after their words (shared/replies.ts): the words are the bubble, the quote sits above it.
   // A message from Claude Code or Desktop starts with its client's label line (w1021): shown as a tag, not as text.
   // A reply sent straight to another person from the bubble over the message box carries FF Factory's note (w1831): a tag.
-  const { words, quote, via, sentTo } = useMemo(() => {
-    const v = splitVia(ev.text);
-    const sent = splitSent(v.text);
-    return { ...splitReply(sent.text, HELD_MARK), via: v.via, sentTo: sent.sentTo };
-  }, [ev.text]);
+  const { words, quote, via, sentTo } = useMemo(() => personMessageView(ev.text), [ev.text]);
   const q = quote && quoteLabel(quote.from, quote.excerpt, chat?.me?.displayName);
   const mine = !ev.requestedBy || ev.requestedBy.userId === chat?.me?.userId;
   return (
