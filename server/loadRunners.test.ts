@@ -99,6 +99,22 @@ test('w3305: hysteresis: it resumes only after two minutes under 55%, not at 60%
   assert.ok(s.log.some((l) => /resumed: it takes CI jobs again/.test(l)));
 });
 
+test('w3305: ticks a little over 5 s apart (a tick waits on the process listing) still reopen the gate', async () => {
+  const { s, g } = harness();
+  const tick = async (n: number, cpu: number) => {
+    for (let i = 0; i < n; i++) {
+      s.cpu = cpu;
+      await g.tick();
+      s.now += 5_700;
+    }
+  };
+  await tick(15, 95);
+  assert.equal(g.state().suspended.length, 2);
+  await tick(40, 30); // about 3.8 min under 55%
+  assert.equal(g.state().closed, false, 'LothDesktop 2026-11-07: the gate stayed closed at 30-40% CPU for an hour');
+  assert.deepEqual(s.calls.filter((c) => c.startsWith('resume')), ['resume 4101', 'resume 4102']);
+});
+
 test('w3305: a listener taking a job (its log) is not suspended; one that took one as it was suspended is resumed at once', async () => {
   const { s, g, run } = harness();
   s.diag['ffu-lothdesktop-1'] = `${IDLE_LOG}[2026-11-07 01:00:50Z INFO Runner] Acknowledging runner request 'a1'\n`;
