@@ -72,6 +72,7 @@ import { benchLockDir, readBenchLock, readBenchQueue, readPassedMarks, timedHold
 import { editorBenchSession, editorSessions, passedShared, raisedSessions, type PassedMark } from './benchRaise.ts';
 import { readBenchWarnings } from './benchWarnings.ts';
 import { BenchRunners, readListenerLog, readRunnersFile, sendSignal, writeRunnersFile } from './benchRunners.ts';
+import { cpuSampler, LOAD_GATES, LoadGate, readLoadGateFile, winSuspendScript, writeLoadGateFile } from './loadRunners.ts';
 import { askPlayerToQuit, BenchTurn, closedDetail, holderSandboxes, writeClosedFile, type Holder } from './benchTurn.ts';
 import { GRACE_MIN, PersonPlay, personEnds, personHolderText, personHoldText, personTicket, priorityOf, setPriorityOf, treeOf, type PersonPlaySettings } from './personPlay.ts';
 import { benchTicketFor, queueTickets } from './benchQueue.ts';
@@ -386,6 +387,7 @@ export class Daemon {
   readonly benchTurn: BenchTurn;
   /** Pauses this machine's idle CI runners and ends CI leftovers while a timed run holds the bench lock (w3112). */
   readonly benchRunners: BenchRunners;
+  readonly loadGate: LoadGate;
   /** w1829: what a worker's next message hears about its player a timed run's turn asked to quit. */
   private readonly benchPlayerNotes = new Map<string, string>();
   /** w1894: a person playing Final Factory here (machine/personPlay.ts): fed by the leftovers' look, it holds a turn. */
@@ -678,6 +680,22 @@ export class Daemon {
       log: (line) => log(line),
       now: () => Date.now(),
       platform: process.platform,
+    });
+    // w3305: a gated machine's CI runners (LOAD_GATES: LothDesktop's ffu runners) take jobs only while its CPU has room
+    this.loadGate = new LoadGate({
+      settings: real ? LOAD_GATES[cfg.id.toLowerCase()] : undefined,
+      procs: real ? () => pd.procs() : async () => [],
+      cpu: cpuSampler(),
+      suspend: async (pid, resume) => {
+        if (process.platform !== 'win32') return sendSignal(pid, resume ? 'SIGCONT' : 'SIGSTOP');
+        const r = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', winSuspendScript(pid, resume)], { timeoutMs: 60_000 });
+        return r.code !== 0 ? `powershell exited ${r.code}: ${r.stderr.trim().slice(0, 200)}` : r.stdout.trim() || undefined;
+      },
+      diag: (root) => (real ? readListenerLog(root) : undefined),
+      read: () => (cfg.root ? readLoadGateFile(cfg.root) : undefined),
+      write: (st) => cfg.root && writeLoadGateFile(cfg.root, st, log),
+      log: (line) => log(line),
+      now: () => Date.now(),
     });
     this.pool = new SandboxPool(
       {
@@ -1148,6 +1166,7 @@ export class Daemon {
     // w1829: another worker's timed run holds the bench lock: the other editors and players close, and come back after.
     this.timers.push(setInterval(() => void this.benchTurn.tick(), 5_000));
     this.timers.push(setInterval(() => void this.benchRunners.tick(), 5_000));
+    this.timers.push(setInterval(() => void this.loadGate.tick(), 5_000));
     // w1962: a shared ticket an exclusive turn has passed is raised in priorities.json while it waits (machine/benchRaise.ts)
     this.timers.push(setInterval(() => this.benchPriorities(), 5_000));
     void this.slotTick();
