@@ -4239,7 +4239,8 @@ export class Agents {
         if (named === undefined) continue;
         const machine = named || s.machineId?.split('/')[0].trim().toLowerCase();
         const stats = machine ? this.machines.statsOf(machine) : undefined;
-        if (!machine || !stats || stats.benchLock) continue;
+        // w3294: free means no lock file and no ticket running or waiting in the queue; a waiting ticket starts by itself.
+        if (!machine || !stats || stats.benchLock || (stats.bench && (stats.bench.mode !== 'free' || stats.bench.waiting > 0))) continue;
         this.benchTold.add(key);
         try {
           this.sessions.send(s.id, `[FF Factory] ${machine}'s bench lock is free now (w1841): carry on with ${w.id}, which your last report said waits on it. If a timed run takes it again first, wake_me in 10 minutes rather than end your turn with nothing to bring you back.`, 'system');

@@ -5919,13 +5919,21 @@ test('w1841: a worker on a real portal: a reporter wait is Waiting with no [need
   const ms = machines as unknown as { statsOf: (id: string) => unknown };
   const statsOf = ms.statsOf.bind(machines);
   let lock: { owner: string; since: string } | undefined = { owner: 'pc pid 4121 w1739 timed run (/f/ffw/sandboxes/beta)', since: new Date().toISOString() };
-  ms.statsOf = (m: string) => (m === 'pc' ? { ...((statsOf(m) as object) ?? {}), at: new Date().toISOString(), ...(lock ? { benchLock: lock } : {}) } : statsOf(m));
+  let bench: unknown;
+  ms.statsOf = (m: string) => (m === 'pc' ? { ...((statsOf(m) as object) ?? {}), at: new Date().toISOString(), ...(lock ? { benchLock: lock } : {}), ...(bench ? { bench } : {}) } : statsOf(m));
   t.after(() => void (ms.statsOf = statsOf));
   info.lastResult = "w2: still open: waiting on pc's bench lock (w1739's timed run) before the raid clips record";
   info.lastResultAt = new Date(Date.now() + 1000).toISOString();
   assert.match(await live(), /Blocked on pc's bench lock/);
   assert.deepEqual(agents.resumeBenchWaits(), [], 'held: nothing to tell');
   lock = undefined;
+  // w3294: no lock file, but shared tickets hold the queue and an exclusive one waits behind them (lothdesktop, 2026-11-07
+  // 02:08-02:12 UTC: w3252's worker 25e6bb06 was told "bench lock is free" four times while four shared tickets held it).
+  bench = { mode: 'shared', running: [], runningCount: 4, waiting: 1 };
+  assert.deepEqual(agents.resumeBenchWaits(), [], 'shared tickets hold the queue: nothing to tell');
+  bench = { mode: 'free', running: [], runningCount: 0, waiting: 1 };
+  assert.deepEqual(agents.resumeBenchWaits(), [], 'a ticket still waits: it starts by itself');
+  bench = { mode: 'free', running: [], runningCount: 0, waiting: 0 };
   assert.deepEqual(agents.resumeBenchWaits(), [['w2', `told ${id} that pc's bench lock is free`]]);
   assert.deepEqual(agents.resumeBenchWaits(), [], 'once per report');
   await until('the bench notice reaches it', () => store.readTranscript(id).some((e) => e.kind === 'user' && /pc's bench lock is free now \(w1841\): carry on with w2/.test((e as { text: string }).text)));
