@@ -422,6 +422,22 @@ machine (one exclusive ticket, then the waiting shared group, within a priority;
 Tests: `server/benchTurn.test.ts`, `server/benchBuilds.test.ts` (w1860), the w1829 cases in
 `server/machineSandboxes.test.ts` and `server/macUnity.test.ts`.
 
+## CI runners on a loaded machine (w3305)
+
+LothDesktop's ffu runners (`V:/ffw/ffu-runners/ffu-lothdesktop-1` and `-2`, label `ffu-windows`) take jobs only while
+the machine has room (Ben, 2026-11-06: "Keep LothDesktop's runners, but have them take ffu jobs only while the machine is
+under about 70% load"). On 2026-11-06 an ffu `test (ffu-windows)` job took a median of 9.2 min and up to 20.3 min there
+against 4.5 min on BEAST (measured, gh api over 60 runs), with its CPU at 60-100% through most of the day.
+`machine/loadRunners.ts` `LoadGate`, every 5 s: when the mean CPU over a minute is 70% or more the gate closes, and every
+idle, settled listener of a gated runner is suspended (`NtSuspendProcess` through PowerShell, no admin, no window;
+SIGSTOP elsewhere), with the same checks as the exclusive turn's pause above (never a listener with a worker, never one
+whose log is taking a job or has not listened for 10 s, resumed at once when its log took a job as the suspend landed).
+A suspended listener does not poll GitHub, so the job goes to another `ffu-windows` runner (BEAST's). The gate opens
+when the mean over two minutes is under 55%, and every suspended listener is resumed. Nothing is ended, and nothing on
+GitHub changes. The machines and thresholds are `LOAD_GATES` (only `lothdesktop`); state is in
+`<root>/tmp/ci-load-gate.json`, so a restarted daemon resumes what it suspended. The daemon's log says each close, open,
+suspend and resume (`ci load gate:`).
+
 ## A person's game: the agents yield while a person plays (w1894)
 
 **Why** (item 1 of w1785's ranked list, filed for lothsahn: "Please file all of w1785s ranked list"). On LothDesktop one
