@@ -53,7 +53,7 @@ import { readDiscordConfig } from './discordConfig.ts';
 import { LIMIT_END, doneIdsIn, doneProblem, legDoneIdsIn, learnedProblem, supersededIn, reportProblem, mergedMentionsIn, notDoneReason, pausedIn, reportVerdict, stillOpenIn, toolErrors, turnEvidence, turnTroubleOf, type TurnTrouble } from './ledgerRules.ts';
 import { aheadText, answerAfter, asksAPerson, dispatcherAskIn, handUpsPending, holdsOf, orchestratorAskIn, standingTargetOf, personWaitIn, questionShareKey, reportWaitKey, roomShares, servedBy, UNDECIDED_BOUND_MS, unfiledFollowUpsIn } from '../shared/workState.ts';
 import { capacityBlockProblem, capacityWaitIn, needsOf, needsTimed, pairRoom, pairText, PAIR_MAX_LEGS, resolveNeeds, steamShortIn } from '../shared/capacity.ts';
-import { mentionsSteam, STEAM_READ } from '../shared/steam.ts';
+import { mentionsSteam, STEAM_NONE, STEAM_READ } from '../shared/steam.ts';
 import { mentionsMenus, MENUS_NONE, MENUS_READ, saysNone } from '../shared/desktop.ts';
 import type { HandBack } from './machinePause.ts';
 import { machinePinOf } from './machinePin.ts';
@@ -3661,7 +3661,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   }
 
   /** The dispatcher decides about a request (decide_work); the requesters' orchestrators get the reply. */
-  decide(input: { id: string; action: Decision; note: string; into?: string; session_ids?: string[]; needs?: string[]; blocker?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>; blockers?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>[]; add_blocker?: boolean; drop_leg?: boolean; override_gate?: string; asks?: Ask[]; for?: string; pair_legs?: number; pair_menus?: string; report?: ReportKind | false }): string {
+  decide(input: { id: string; action: Decision; note: string; into?: string; session_ids?: string[]; needs?: string[]; blocker?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>; blockers?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>[]; add_blocker?: boolean; drop_leg?: boolean; override_gate?: string; asks?: Ask[]; for?: string; pair_legs?: number; pair_menus?: string; pair_steam?: string; report?: ReportKind | false }): string {
     let keptBefore: WorkBlocker[] = [];
     const w = this.requireWork(input.id);
     if (w.approval?.state === 'pending') throw new Error(`${w.id} waits for a person to approve it (intake); it is not yours to decide yet`);
@@ -3690,12 +3690,12 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     // w2648: w2631 (a pair run whose legs never started) was marked 3 legs that click menus from misread words, and no way
     // re-marked it: queue is refused for a Queued request, start_agent starts it as marked. pair_menus, or pair_legs 2 and up
     // with any action, sets its marks first; queue on a Queued one then only re-marks it.
-    if ((input.pair_legs !== undefined && input.pair_legs !== 0) || input.pair_menus !== undefined) {
+    if ((input.pair_legs !== undefined && input.pair_legs !== 0) || input.pair_menus !== undefined || input.pair_steam !== undefined) {
       if (input.pair_legs !== undefined && !(Number.isInteger(input.pair_legs) && input.pair_legs >= 2 && input.pair_legs <= PAIR_MAX_LEGS)) throw new Error(`pair_legs is the number of legs of a pair run, 2 to ${PAIR_MAX_LEGS} (0 clears the mark), not ${input.pair_legs}`);
       if (w.pair?.started) throw new Error(`${w.id}'s legs started together at ${w.pair.started.at.slice(11, 16)} UTC: its marks stay as they are until they end`);
-      if (!w.pair && input.pair_menus !== undefined) throw new Error(`${w.id} is not a pair run: pair_menus marks one (queue it with pair_legs to mark it a pair run)`);
+      if (!w.pair && (input.pair_menus !== undefined || input.pair_steam !== undefined)) throw new Error(`${w.id} is not a pair run: ${input.pair_steam !== undefined ? 'pair_steam' : 'pair_menus'} marks one (queue it with pair_legs to mark it a pair run)`);
       if (w.pair) {
-        const r = remarkPair(w.pair, { legs: input.pair_legs, menus: input.pair_menus });
+        const r = remarkPair(w.pair, { legs: input.pair_legs, menus: input.pair_menus, steam: input.pair_steam });
         if (r.changed) {
           // A request filed by hand keeps its person's constraints; request_pair's say the marks (newPair).
           if (w.constraints === r.was) w.constraints = pairText(r.pair);
@@ -3703,6 +3703,8 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
           this.roomFlags.delete(w.id);
           this.stamp(w, `dispatcher (w2648): now ${pairText(r.pair)}: ${input.note.trim()} (it was ${r.was})`);
           this.store.putWork(w);
+          // w3455: a pair run a person cleared to run without Steam drops its Steam gate now, not at the blocker watch's next look.
+          if (!r.pair.steam) this.dropSteamGates(w, `its Steam requirement was set to none: ${clip(input.note.trim(), 200)}`);
         }
         if (input.action === 'queue' && w.status === 'queued') {
           const fit = roomForWork(this.roomNow(), w, []).ids;
@@ -3804,7 +3806,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       if (input.pair_legs !== undefined && !(Number.isInteger(input.pair_legs) && input.pair_legs >= 2 && input.pair_legs <= PAIR_MAX_LEGS)) throw new Error(`pair_legs is the number of legs of a pair run, 2 to ${PAIR_MAX_LEGS}, not ${input.pair_legs}`);
       const marked = input.pair_legs && !w.pair?.started ? { ...(w.pair ?? {}), legs: input.pair_legs } : w.pair;
       // w2459: a pair run filed by hand whose words say it needs Steam (a lobby, a Steam join) gets the Steam mark too.
-      const steamed = marked && !marked.steam && !marked.started && input.pair_legs && mentionsSteam(w.title, w.brief) ? { ...marked, steam: STEAM_READ } : marked;
+      const steamed = marked && !marked.steam && !marked.noSteam && !marked.started && input.pair_legs && mentionsSteam(w.title, w.brief) ? { ...marked, steam: STEAM_READ } : marked;
       const pair = steamed && !steamed.menus && !steamed.noMenus && !steamed.steam && !steamed.started && input.pair_legs && mentionsMenus(w.title, w.brief) ? { ...steamed, menus: MENUS_READ } : steamed;
       // w2459: on a fleet with too few computers signed in to different Steam accounts it waits for no capacity: Blocked.
       const steamShort = pair && !pair.started ? this.steamShortOf(pair) : undefined;
@@ -4452,7 +4454,9 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     // w2459: a run that needs Steam (lobbies, a Steam host or join) goes only on computers signed in to it, a different
     // account on each leg: said by the worker, or read from its words; "none" says it needs none.
     const steamSaid = String(a.steam ?? '').replace(/\s+/g, ' ').trim().slice(0, 300);
-    const steam = /^(none|no|false|off)$/i.test(steamSaid) ? undefined : steamSaid || (mentionsSteam(what, brief) ? STEAM_READ : undefined);
+    // w3455: "none: a direct (non-Steam) host and join" says none too, and is kept (noSteam) so nothing reads its words later.
+    const steamNone = saysNone(steamSaid);
+    const steam = steamNone ? undefined : steamSaid || (mentionsSteam(what, brief) ? STEAM_READ : undefined);
     // w2459 (w2460's rerun 2): legs that click the game's menus go only where the screen is unlocked; a Steam pair always does.
     const menusSaid = String(a.menus ?? '').replace(/\s+/g, ' ').trim().slice(0, 300);
     // w2648: its own menus field rules; its words are read only without one, and "none" is kept (noMenus) so nothing reads them later.
@@ -4512,7 +4516,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       head = `${w.id} already has an open pair run, ${p.id} (${p.status}: ${clip(p.title, 80)}); you wait on it, and nothing new was filed.${p.pair?.started ? ' Its legs are running and none has reported yet: if they cannot deliver (a leg is stuck on its computer), ask again with retry: true and avoid naming that computer.' : ''}`;
     } else {
       const avoid = [...new Set([...(open ? this.pairFailedOn(open) : []), ...named])];
-      p = this.newPair(w, sessionId, { what, brief, legs, crossOs, timed: a.timed === true, ...(steam ? { steam } : {}), ...(menus ? { menus } : {}), ...(menusNone ? { noMenus: MENUS_NONE } : {}), ...(open ? { retryOf: open.id } : {}), avoid, ...(pr ? { pr } : {}), ...(commit ? { commit } : {}) });
+      p = this.newPair(w, sessionId, { what, brief, legs, crossOs, timed: a.timed === true, ...(steam ? { steam } : {}), ...(menus ? { menus } : {}), ...(menusNone ? { noMenus: MENUS_NONE } : {}), ...(steamNone ? { noSteam: STEAM_NONE } : {}), ...(open ? { retryOf: open.id } : {}), avoid, ...(pr ? { pr } : {}), ...(commit ? { commit } : {}) });
       if (open) this.supersedePair(open, p, spent!);
       head = open
         ? `${open.id} (${spent}) is cancelled, and its legs no longer count for ${w.id}: filed ${p.id}, a retry, ${pairText(p.pair!)}, with fresh legs. Only ${p.id}'s report resumes you, never one from ${open.id}'s legs. The dispatcher starts its legs together, one new worker on each computer, as soon as that many computers have room at once.`
@@ -5033,7 +5037,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   }
 
   /** The pair request request_pair files (w1945): the asking request's people and priority, a game sandbox per leg. */
-  private newPair(w: WorkItem, sessionId: string, x: { what: string; brief: string; legs: number; crossOs?: string; timed: boolean; steam?: string; menus?: string; noMenus?: string; retryOf?: string; avoid?: string[]; pr?: string; commit?: string }): WorkItem {
+  private newPair(w: WorkItem, sessionId: string, x: { what: string; brief: string; legs: number; crossOs?: string; timed: boolean; steam?: string; menus?: string; noMenus?: string; noSteam?: string; retryOf?: string; avoid?: string[]; pr?: string; commit?: string }): WorkItem {
     const now = this.now().toISOString();
     const pair: WorkPair = {
       legs: x.legs,
@@ -5044,6 +5048,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       ...(x.steam ? { steam: x.steam } : {}),
       ...(x.menus ? { menus: x.menus } : {}),
       ...(x.noMenus ? { noMenus: x.noMenus } : {}),
+      ...(x.noSteam ? { noSteam: x.noSteam } : {}),
       ...(x.retryOf ? { retryOf: x.retryOf } : {}),
       ...(x.avoid?.length ? { avoid: x.avoid } : {}),
       ...(x.pr ? { pr: x.pr } : {}),
@@ -8328,6 +8333,21 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   }
 
   /**
+   * A pair run that no longer needs Steam (w3455: decide_work pair_steam "none" on a person's word) loses its Steam gates:
+   * with no other gate it is unblocked at once (back to the dispatcher), else it stays Blocked on the rest.
+   */
+  private dropSteamGates(w: WorkItem, why: string) {
+    const gates = gatesOf(w);
+    if (!gates.some((g) => g.kind === 'steam')) return;
+    const rest = gates.filter((g) => g.kind !== 'steam');
+    if (!rest.length) return this.unblock(w.id, why);
+    w.blocked = rest[0];
+    w.alsoBlocked = rest.length > 1 ? rest.slice(1) : undefined;
+    this.stamp(w, `dispatcher: no longer blocked on computers signed in to Steam (${why}); still blocked on ${gatesName(rest, this.now().getTime())}`);
+    this.store.putWork(w);
+  }
+
+  /**
    * The blocker watch's sweep (w2459): a Steam pair run New or Queued whose legs have not started, on a fleet short of
    * computers signed in to Steam, is Blocked on it (blockOnSteam). Returns the ids it blocked.
    */
@@ -8522,10 +8542,22 @@ export function personMessage(from: Requester, to: Requester, text: string, id?:
  * game's menus ("none" clears a mark read from its words and keeps them from being read again, WorkPair.noMenus). A Steam
  * pair clicks its lobby whatever menus says. `was` is pairText of the marks before; `changed` whether any moved.
  */
-export function remarkPair(p: WorkPair, x: { legs?: number; menus?: string }): { pair: WorkPair; was: string; changed: boolean } {
+export function remarkPair(p: WorkPair, x: { legs?: number; menus?: string; steam?: string }): { pair: WorkPair; was: string; changed: boolean } {
   const was = pairText(p);
   const next: WorkPair = { ...p };
   if (x.legs !== undefined) next.legs = x.legs;
+  // w3455: steam "none" (a person cleared it to run without Steam) drops a Steam mark, said or read from its words, and keeps
+  // its words from being read again; any other text marks it as needing Steam, for that reason.
+  const steamSaid = String(x.steam ?? '').replace(/\s+/g, ' ').trim().slice(0, 300);
+  if (steamSaid) {
+    if (saysNone(steamSaid)) {
+      delete next.steam;
+      next.noSteam = STEAM_NONE.replace('as its filer said (request_pair steam "none")', 'as the dispatcher said (decide_work pair_steam "none")');
+    } else {
+      next.steam = steamSaid;
+      delete next.noSteam;
+    }
+  }
   const said = String(x.menus ?? '').replace(/\s+/g, ' ').trim().slice(0, 300);
   if (said && !next.steam) {
     if (saysNone(said)) {
@@ -8536,7 +8568,7 @@ export function remarkPair(p: WorkPair, x: { legs?: number; menus?: string }): {
       delete next.noMenus;
     }
   }
-  const changed = next.legs !== p.legs || next.menus !== p.menus || next.noMenus !== p.noMenus;
+  const changed = next.legs !== p.legs || next.menus !== p.menus || next.noMenus !== p.noMenus || next.steam !== p.steam || next.noSteam !== p.noSteam;
   return { pair: next, was, changed };
 }
 

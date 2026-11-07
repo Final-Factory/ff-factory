@@ -29,6 +29,7 @@ import { forYouId, splitForYou } from '../shared/forYou.ts';
 import { blockerName, gatesOf, type PrHealth } from '../shared/blockers.ts';
 import { answersText } from '../shared/questionCard.ts';
 import { cargoShortOf, isCargoRepo, needsTimed, PAIR_HOLD_MS, TIMED_HOLD_MS, pairText, unfitWhy } from '../shared/capacity.ts';
+import { STEAM_READ } from '../shared/steam.ts';
 import { benchLockIn, type Machine, type Requester, type SessionInfo, type TranscriptEvent, type UserInfo, type WorkBlocker, type WorkItem } from '../shared/types.ts';
 import { LIVE_HOLD_MS, releaseWhy } from './placeAgain.ts';
 import { ReportStore } from './reports.ts';
@@ -9474,4 +9475,45 @@ test('w3396: a computer whose sandbox drive is under 30 GB free takes no new FFU
   assert.equal(unfitWhy(work(), 'lothdesktop', fit), undefined, 'game work does not build cargo');
   const r: RoomNow = { game: [], agent: ['lothdesktop', 'beast'], held: [], fit };
   assert.deepEqual(roomForWork(r, work('Final-Factory/ffu'), ['lothdesktop', 'beast']).ids, ['beast']);
+});
+
+// w3455 (ben, 2026-11-07): w3431 and w3392, pair runs Ben cleared to run without Steam, stayed Blocked on Steam sign-ins.
+test('w3455: request_pair steam "none: <why>" needs no Steam, and decide_work pair_steam "none" clears the Steam gate of a Blocked pair run with no re-filing', async (t) => {
+  const env = await twoComputers(t);
+  const { store, agents, dispatcher, call } = env;
+  const o = agents.orchestrators;
+  agentsRoom(agents, []);
+  store.putMachine({ ...store.machines.get('pc')!, steam: { checkedAt: T0, installed: true, running: true, accountId: 7155839, persona: 'Lothsahn' } });
+  // w3431's filing: its worker said steam "none: a direct (non-Steam) host and join ...".
+  putRequests(store, [{ id: 'w3315', by: BEN, status: 'active' }]);
+  const a = await startedFor(env, 'w3315');
+  const out = String(await a.h.request_pair!({ what: 'Production planner client plans kept across a rejoin, PR #3358', brief: "Leg 1 hosts on the repo's usual paired multiplayer path, not Steam; leg 2 joins, quits and rejoins.", steam: "none: a direct (non-Steam) host and join as the repo's paired multiplayer runs do" }));
+  const filed = store.work.get(/^Filed (w\d+)/.exec(out)![1])!;
+  assert.equal(filed.pair!.steam, undefined, out);
+  assert.match(filed.pair!.noSteam ?? '', /^none/);
+  assert.notEqual(filed.blocked?.kind, 'steam', out);
+  // w3392 as it stood: marked as needing Steam from its words, and Blocked on Steam by the blocker watch.
+  const read = { legs: 2, for: 'w3360', steam: STEAM_READ };
+  putRequests(store, [{ id: 'w3392', by: BEN, status: 'queued', title: 'Pair run for w3360: Escape menu open while riding 60 s', brief: 'Ben: "Yes, no Steam: start it when two computers have room".', pair: read, constraints: pairText(read) }]);
+  assert.deepEqual(o.holdSteamPairs(), ['w3392']);
+  const p = () => store.work.get('w3392')!;
+  assert.deepEqual([p().status, p().blocked?.kind], ['blocked', 'steam']);
+  // override_gate and pair_legs leave it blocked; pair_steam "none" clears it.
+  const legs = await call(dispatcher().info, 'decide_work', { id: 'w3392', action: 'queue', pair_legs: 2, override_gate: 'Ben said no Steam', note: 'Ben: "Yes, no Steam"' });
+  assert.equal(p().status, 'blocked', legs.text);
+  const none = await call(dispatcher().info, 'decide_work', { id: 'w3392', action: 'queue', pair_steam: 'none', note: 'Ben, 2026-11-07: "Yes, no Steam: start it when two computers have room"' });
+  assert.equal(none.isError, false, none.text);
+  assert.equal(p().status, 'queued', none.text);
+  assert.equal(p().blocked, undefined);
+  assert.equal(p().pair!.steam, undefined);
+  assert.match(p().pair!.noSteam ?? '', /^none: .*decide_work pair_steam "none"/);
+  assert.equal(p().constraints, pairText(p().pair!));
+  const log = p().log.join('\n');
+  assert.match(log, /dispatcher \(w2648\): now a pair run of 2 legs.*: Ben, 2026-11-07: "Yes, no Steam: start it when two computers have room" \(it was .*signed in to Stea/);
+  assert.match(log, /unblocked: computers signed in to Steam cleared \(its Steam requirement was set to none: Ben, 2026-11-07/);
+  // Neither the blocker watch nor a later queue with pair_legs marks it again from its words.
+  assert.deepEqual(o.holdSteamPairs(), []);
+  await call(dispatcher().info, 'decide_work', { id: 'w3392', action: 'queue', pair_legs: 2, note: 'again' });
+  assert.equal(p().pair!.steam, undefined);
+  assert.equal(p().status, 'queued');
 });
