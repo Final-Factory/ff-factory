@@ -434,6 +434,7 @@ test("w3396: while disk is low, a live worker's idle cargo target goes; a buildi
   const tag = 'Signature: 8a477f597d28d172789f06886806bc55\n# This file is a cache directory tag created by cargo.\n';
   for (const s of Object.values(dir)) {
     const w = (r: string) => (fs.mkdirSync(path.dirname(path.join(s, r)), { recursive: true }), fs.writeFileSync(path.join(s, r), 'x'));
+    fs.mkdirSync(path.join(s, 'ffu-target'), { recursive: true });
     fs.writeFileSync(path.join(s, 'ffu-target', 'CACHEDIR.TAG'), tag);
     w('ffu-target/debug/deps/ffu_sim-1234.rlib');
     w('ffu-target/debug/deps/ffu_sim-1234.exe');
