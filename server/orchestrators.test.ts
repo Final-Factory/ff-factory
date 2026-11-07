@@ -11,7 +11,7 @@ import { SpendStore } from './spend.ts';
 import { Identity } from './identity.ts';
 import { PERSONAL_TOOLS, beltFor } from './belts.ts';
 import { OPS_ID } from './opsWorker.ts';
-import { crossOwnerLine, delegationConstraints, DispatcherChatRefused, DISPATCHER_CHAT_REFUSED, FILINGS_PER_MESSAGE, loopGuards, FOLLOW_UPS_PER_MESSAGE, MESSAGES_PER_PERSON, OFFLINE_NOTICE_MS, offlineNoticeMs, OWNER_LOOP_MESSAGES_PER_HOUR, PERSON_MESSAGE_CHARS, personMessage, unpushedText, type Orchestrators } from './orchestrators.ts';
+import { crossOwnerLine, delegationConstraints, DispatcherChatRefused, DISPATCHER_CHAT_REFUSED, FILINGS_PER_MESSAGE, loopGuards, FOLLOW_UPS_PER_MESSAGE, MESSAGES_PER_PERSON, OFFLINE_NOTICE_MS, offlineNoticeMs, OWNER_LOOP_MESSAGES_PER_HOUR, PERSON_MESSAGE_CHARS, personMessage, toldOf, unpushedText, type Orchestrators } from './orchestrators.ts';
 import { configPath, type Config } from './config.ts';
 import { memoryDirFor } from './orchestratorMemory.ts';
 import { handoverNote, isOpen, requestAsFiled, requestNotice } from './work.ts';
@@ -2396,6 +2396,52 @@ test("w1869: a request blocked on another's report: that request's worker is tol
   report('A vs A on LothDesktop: 41.2 ms and 41.0 ms per frame.\n\nFor w2: the timing is in specs/w1/timing.md (A 41.2 ms, A 41.0 ms)\n\nw1: still open: the transform-walk PR', 2000);
   assert.match((await watch.tick()).get('w2') ?? '', /^clear: w1's worker reported \(dec9a619's LothDesktop timing of A vs A\)/);
   assert.notEqual(store.work.get('w2')!.status, 'blocked');
+});
+
+test("w3289: replay of w3245/w3246: a release blocked on another's live-with-notes report, set before that release's worker started, unblocks from its milestone report with nobody stepping in, not at its DONE", async (t) => {
+  const { store, agents, o, dispatcher, call } = await setupOnMachine(t);
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1', by: BEN }, { id: 'w2', by: BEN }]);
+  // 22:11: the dispatcher blocks the pre-1.0 release (w2) on the 1.0 release (w1) reporting, before w1 has a worker.
+  const what = "w1's report that the 1.0 release is live with its notes posted";
+  const r = await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'block', note: 'Once the 1.0 release is out.', blocker: { kind: 'request', ref: 'w1', on: 'report', what } });
+  assert.equal(r.isError, false, r.text);
+  assert.doesNotMatch(store.work.get('w1')!.log.join('\n'), /w2 waits on its report/, 'nobody to tell yet');
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Cut the 1.0 release', title: 'w1: 1.0 release', work_id: 'w1' });
+  assert.equal(started.isError, false, started.text);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  await until('its first turn', () => store.sessions.get(id)!.status === 'idle');
+  // 23:08: w1's worker reports the release live with its notes posted, keeps w1 open for its 24-hour after-check and
+  // stops on its check-in. Its report has no "For w2:" line: it was never told.
+  const report = (text: string, ms: number, status: SessionInfo['status'] = 'idle') => store.putSession({ ...store.sessions.get(id)!, status, lastActivityAt: new Date(Date.now() + ms).toISOString(), lastResult: text });
+  report('1.0.0.40 is live on development; the notes are posted: https://discord.com/channels/1/2/3\n\nw1: still open: the 24-hour check of player reports on 1.0.0.40, due tomorrow 23:00 UTC', 1000, 'stopped');
+  const watch = new BlockerWatch({ store, orchestrators: o });
+  const notice = () => store.readTranscript(id).filter((e) => e.kind === 'user' && /For w2: <the result, or where it is>/.test((e as { text: string }).text));
+  await watch.tick();
+  assert.equal(store.work.get('w2')!.status, 'blocked', 'the unmarked report does not clear it');
+  await until("the watch tells w1's sleeping worker", () => notice().length === 1);
+  const text = (notice()[0] as { text: string }).text;
+  assert.match(text, new RegExp(`w2 \\("Request w2"\\) is blocked until a report of yours on w1 carries: ${what}\\.`));
+  assert.match(text, /need not wait for your DONE or for an after-check still open on w1/);
+  assert.match(text, /If it has happened already, end this turn with that line now/);
+  assert.deepEqual(store.work.get('w2')!.blocked!.told, [id]);
+  assert.match(store.work.get('w1')!.log.join('\n'), new RegExp(`w2 waits on its report \\(${what}\\): told ${id}`));
+  await until('that turn ends', () => store.sessions.get(id)!.status === 'idle');
+  await watch.tick();
+  assert.equal(notice().length, 1, 'told once');
+  // Its answer marks the milestone and keeps the after-check open: w2 unblocks, though w1 stays open.
+  report('For w2: 1.0.0.40 is live on development and its notes are posted at 23:01 UTC: https://discord.com/channels/1/2/3\n\nw1: still open: the 24-hour check of player reports on 1.0.0.40', 2000);
+  assert.match((await watch.tick()).get('w2') ?? '', /^clear: w1's worker reported/);
+  assert.notEqual(store.work.get('w2')!.status, 'blocked');
+  assert.ok(isOpen(store.work.get('w1')!), 'w1 stays open for its after-check');
+});
+
+test('w3289: toldOf reads a gate set before `told` was kept from the awaited request\'s log', () => {
+  const g = { kind: 'request', ref: 'w1', on: 'report', what: 'x', at: T0, by: 'dispatcher' } as WorkBlocker;
+  const x = { log: ['22:11 w2 waits on its report (its timing: A vs A): told abc123, def456 to mark it "For w2:"', '22:12 w3 waits on its report (other): told zzz to mark it "For w3:"'] };
+  assert.deepEqual([...toldOf(g, x, 'w2')], ['abc123', 'def456']);
+  assert.deepEqual([...toldOf(g, x, 'w4')], []);
+  assert.deepEqual([...toldOf({ ...g, told: ['q'] }, x, 'w2')], ['q']);
 });
 
 /** The computers with room, as the dispatcher's tools see them (Agents.roomNow, read by Orchestrators' `room`). */

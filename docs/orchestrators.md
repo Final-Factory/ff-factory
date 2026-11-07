@@ -763,6 +763,15 @@ without one means it is off or failing, worth a person's look.
   `For <waiting request>:` (`Orchestrators.tellReportWaited`; not a worker that waits on a person, whose declaration a
   message would end). The gate's `what` is what they are told, so name the result there ("dec9a619's LothDesktop timing
   of A vs A"), not "w1785 reporting". A lock's holder still frees it with any report.
+- **A milestone, not a close** (w3289; lothsahn: "Please fix that so that when we chain releases in the future you don't
+  wait like this"). A request that waits for another's milestone ("once the 1.0 release is out": live on Steam with its
+  notes posted) is blocked `on: report` with `what` naming the milestone, never on its DONE: a release request stays open
+  a day for its after-check of player reports. Every worker on the awaited request is told once what to mark
+  (`WorkBlocker.told`): at the block, and by the blocker watch each look for one that was not (`retellReportWaits`: it
+  started after the block, or was asleep on its own check-in, which the message keeps while it resumes it). w3246 (the
+  pre-1.0 release) was blocked on "w3245 reporting" on 2026-11-06 at 22:11, the minute w3245's worker started; nobody told
+  that worker, its 23:08 report (1.0.0.40 live, notes posted, "still open: the 24-hour check") had no `For w3246:` line, and
+  w3246 waited until lothsahn unblocked it at 01:10.
 - **A wait never closes a loop** (w2357; 2026-10-27: w2335 was Blocked on its timed leg w2338's report while w2338's
   worker reported "w2338: still open: waiting for w2335's worker 9524a4bc to send its fix commit", and only the 4-hourly
   unjam sweep found it). Three rules:

@@ -2639,6 +2639,11 @@ export interface WorkBlocker {
   holder?: string;
   /** time: when it clears. lock: when to look again at the latest. */
   until?: string;
+  /**
+   * request with on: report (w3289): the workers on the request it waits on that were told to mark the result with a line
+   * `For <waiter>:` (Orchestrators.tellReportWaited); the blocker watch tells the others once.
+   */
+  told?: string[];
   /** What it waits for, in a few words: "w633's timing table", "the next portal deploy". */
   what: string;
   at: string;
