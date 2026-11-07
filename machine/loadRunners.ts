@@ -36,9 +36,16 @@ export interface LoadGateSettings {
  * thresholds start at Ben's "about 70%"; a pause needs a minute's mean over it (a compile spike of a few seconds is not
  * load), a resume two minutes under 55%.
  */
-export const LOAD_GATES: Record<string, LoadGateSettings> = {
-  lothdesktop: { pauseAtPct: 70, resumeBelowPct: 55, pauseOverMs: 60_000, resumeOverMs: 120_000, runners: /^ffu-/i },
-};
+export const LOTHDESKTOP_GATE: LoadGateSettings = { pauseAtPct: 70, resumeBelowPct: 55, pauseOverMs: 60_000, resumeOverMs: 120_000, runners: /^ffu-/i };
+
+/**
+ * Off since the first live run (w3305, 2026-11-07): within two minutes of the update LothDesktop's two ffu runners each held
+ * a job that stopped moving (a test job stuck in its last step, a hashcheck that started no step), so a listener was
+ * suspended while it held a job: the busy check (a worker under the listener) does not see LothDesktop's jobs. With no
+ * gate set, the daemon resumes every listener the gate left suspended. Turn it back on only with a busy check proven on
+ * LothDesktop's own process listing.
+ */
+export const LOAD_GATES: Record<string, LoadGateSettings> = {};
 
 export interface LoadGateState {
   closed: boolean;

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { cpuSampler, LOAD_GATES, LoadGate, winSuspendScript, type LoadGateDeps, type LoadGateState } from '../machine/loadRunners.ts';
+import { cpuSampler, LOAD_GATES, LOTHDESKTOP_GATE, LoadGate, winSuspendScript, type LoadGateDeps, type LoadGateState } from '../machine/loadRunners.ts';
 import type { Proc } from '../machine/unity.ts';
 
 /**
@@ -17,7 +17,7 @@ const GAME = { pid: 4103, ppid: 1, cmd: `"V:/actions-runner\\bin\\Runner.Listene
 const JOB2: Proc[] = [{ pid: 4200, ppid: 4102, cmd: `"${R}\\ffu-lothdesktop-2\\bin\\Runner.Worker.exe" spawnclient 1 2` }];
 const NOW = Date.parse('2026-11-07T01:00:00Z');
 const IDLE_LOG = '[2026-11-07 00:00:00Z INFO Terminal] WRITE LINE: 2026-11-07 00:00:00Z: Job check completed with result: Succeeded\n';
-const G = LOAD_GATES.lothdesktop;
+const G = LOTHDESKTOP_GATE;
 
 function harness(o: { state?: LoadGateState; settings?: LoadGateDeps['settings'] | null } = {}) {
   const s = {
@@ -125,8 +125,8 @@ test('w3305: a machine with no gate resumes what an old gate left suspended and 
   assert.deepEqual(s.calls, ['resume 4101']);
 });
 
-test('w3305: only LothDesktop is gated (BEAST stays as it is), at Ben\'s about 70%', () => {
-  assert.deepEqual(Object.keys(LOAD_GATES), ['lothdesktop']);
+test('w3305: no machine is gated (off since its first live run held two LothDesktop jobs); its settings stay at Ben\'s about 70%', () => {
+  assert.deepEqual(Object.keys(LOAD_GATES), []);
   assert.equal(G.pauseAtPct, 70);
   assert.ok(G.resumeBelowPct < G.pauseAtPct);
   assert.ok(G.runners.test('ffu-lothdesktop-1') && !G.runners.test('actions-runner'));
