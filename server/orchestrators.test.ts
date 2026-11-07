@@ -28,7 +28,7 @@ import { ANSWER_EXCERPT_CHARS, answeredText, answerExcerpt, splitReply, splitSen
 import { forYouId, splitForYou } from '../shared/forYou.ts';
 import { blockerName, gatesOf, type PrHealth } from '../shared/blockers.ts';
 import { answersText } from '../shared/questionCard.ts';
-import { needsTimed, PAIR_HOLD_MS, TIMED_HOLD_MS, pairText, unfitWhy } from '../shared/capacity.ts';
+import { cargoShortOf, isCargoRepo, needsTimed, PAIR_HOLD_MS, TIMED_HOLD_MS, pairText, unfitWhy } from '../shared/capacity.ts';
 import { benchLockIn, type Machine, type Requester, type SessionInfo, type TranscriptEvent, type UserInfo, type WorkBlocker, type WorkItem } from '../shared/types.ts';
 import { LIVE_HOLD_MS, releaseWhy } from './placeAgain.ts';
 import { ReportStore } from './reports.ts';
@@ -9376,4 +9376,20 @@ test('w3338: diskWaitIn reads the five low-disk pause lines of 2026-11-07 and no
     'w1: still open: the disk clean-up freed 20 GB',
     'w1: still open: waiting on lothsahn to approve',
   ]) assert.equal(diskWaitIn(l, ['lothsahn']), false, l);
+});
+
+test('w3396: a computer whose sandbox drive is under 30 GB free takes no new FFU (cargo) work; other work still fits', () => {
+  const work = (repo?: string) => ({ title: 'Speed up the belt sweep', brief: '', notes: [], needs: 'agent', ...(repo ? { repo } : {}) }) as unknown as WorkItem;
+  assert.equal(cargoShortOf(31 * 1024 ** 3), undefined);
+  assert.equal(cargoShortOf(undefined), undefined, 'unknown free space fits');
+  const short = cargoShortOf(12.5 * 1024 ** 3)!;
+  assert.match(short, /12\.5 GB free, under the 30 GB/);
+  for (const r of ['Final-Factory/ffu', 'https://github.com/Final-Factory/ffu.git', 'final-factory/FFU/']) assert.ok(isCargoRepo(r), r);
+  for (const r of [undefined, 'Final-Factory/FinalFactory', 'Final-Factory/ffu-tools']) assert.ok(!isCargoRepo(r), String(r));
+  const fit = { lothdesktop: { platform: 'win32', cargoShort: short }, beast: { platform: 'win32' } };
+  assert.equal(unfitWhy(work('Final-Factory/ffu'), 'lothdesktop', fit), `lothdesktop: ${short}`);
+  assert.equal(unfitWhy(work('Final-Factory/ffu'), 'beast', fit), undefined, 'a drive with room takes it');
+  assert.equal(unfitWhy(work(), 'lothdesktop', fit), undefined, 'game work does not build cargo');
+  const r: RoomNow = { game: [], agent: ['lothdesktop', 'beast'], held: [], fit };
+  assert.deepEqual(roomForWork(r, work('Final-Factory/ffu'), ['lothdesktop', 'beast']).ids, ['beast']);
 });

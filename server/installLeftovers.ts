@@ -188,6 +188,36 @@ function isCargoTarget(p: string): boolean {
   }
 }
 
+/** A process that builds into, or runs from, a cargo target: cargo, the compiler and linkers, a build script (w3396). */
+const CARGO_PROC = /(^|[\\/\s"'])(cargo|rustc|rustdoc|clippy-driver|rust-lld|lld-link|link|ld|cc|build-script-[\w-]+)(\.exe)?(["'\s]|$)/i;
+
+/**
+ * Why a live or blocked worker's cargo target `target` must stay on a low pass, or undefined once cargo is done with it
+ * (w3396): a process names the target (rustc's --out-dir, a test binary running from it), a cargo-like process runs in the
+ * worker's process tree (a shell naming its folder `session`, and what it started: cargo's own command line names neither),
+ * or something in the target was written after `since` (a build adds files to deps/, .fingerprint/ and incremental/, which
+ * moves those folders' times: the top three levels are read, not the tens of thousands of artifacts). No process list: kept.
+ */
+export async function cargoTargetBusy(target: string, session: string, procs: ProcLite[] | undefined, since: number, now = Date.now()): Promise<string | undefined> {
+  if (!procs) return 'the process list could not be read, so a build in it cannot be ruled out';
+  const user = procs.find((p) => mentions(p.cmd, target));
+  if (user) return `a running process uses it (pid ${user.pid}: ${user.cmd.slice(0, 160)})`;
+  const tree = new Map<number, ProcLite>();
+  for (const p of procs) if (mentions(p.cmd, session)) for (const d of [p, ...descendants(procs, p.pid)]) tree.set(d.pid, d);
+  const builder = [...tree.values()].find((p) => CARGO_PROC.test(p.cmd));
+  if (builder) return `its worker runs a build (pid ${builder.pid}: ${builder.cmd.slice(0, 160)})`;
+  const stack: { p: string; depth: number }[] = [{ p: target, depth: 0 }];
+  while (stack.length) {
+    const { p, depth } = stack.pop()!;
+    const st = await fs.promises.lstat(p).catch(() => undefined);
+    if (!st) continue;
+    if (st.mtimeMs > since) return `written ${agoText(now - st.mtimeMs)} ago (${p}), within the settle time while disk is low`;
+    if (!st.isDirectory() || depth >= 3) continue;
+    for (const e of await children(p)) if (e.isDirectory() || depth < 2) stack.push({ p: path.join(p, e.name), depth: depth + 1 });
+  }
+  return undefined;
+}
+
 /** A Unity Profiler capture whose digest is done: a `.csv` or `.txt` beside it written after it (bench/cpu_budget_run.sh's budget.txt, the per-frame CSVs). */
 async function digestedCapture(file: string, siblings: fs.Dirent[]): Promise<boolean> {
   const st = await fs.promises.lstat(file).catch(() => undefined);
@@ -714,6 +744,28 @@ export async function planInstallLeftovers(o: {
     const quick = quickOn ? await idleCachesIn(session, 1, [], { projectOpen, quick: true }) : [];
     if (!full.length && !quick.length) return;
     const keep = (why: string) => hold(session, quickOn ? quick : full, why);
+    if (quickOn && (isLive || named)) {
+      // w3396: a running or blocked FFU worker's cargo target refilled LothDesktop's V: (four of them, 9-20 GB each, r133).
+      // While disk is low it goes once cargo is done with it; the worker's next build rebuilds it. Everything else stays.
+      const rest: IdleCache[] = [];
+      for (const c of quick) {
+        if (!/cargo target/.test(c.what)) {
+          rest.push(c);
+          continue;
+        }
+        const why = await cargoTargetBusy(c.path, session, o.procs, now - s.lowCacheSettleMinutes * 60_000, now);
+        if (why) {
+          await hold(c.path, [c], why);
+          continue;
+        }
+        const g = sessionRelaxed(session, relaxed(t));
+        const no = neverDelete(c.path, g) ?? (await gitHolds(c.path, session));
+        if (no) await hold(c.path, [c], no);
+        else if (!items.has(c.path)) items.set(c.path, { path: c.path, rule: 'live-session-cargo-target', why: `${c.what}, in a running or blocked worker's temp folder, with no cargo process and no write for ${s.lowCacheSettleMinutes} min while disk is low (rebuildable)`, base: t, inSession: session });
+      }
+      if (!rest.length) return;
+      return hold(session, rest, isLive ? 'its worker runs: a live session (a stopped one whose request resumed it counts too)' : `a running process names it (pid ${named!.pid}: ${named!.cmd.slice(0, 160)})`);
+    }
     if (isLive) return keep('its worker runs: a live session (a stopped one whose request resumed it counts too)');
     if (named) return keep(`a running process names it (pid ${named.pid}: ${named.cmd.slice(0, 160)})`);
     const ageCut = now - s.idleCacheHours * HOUR;

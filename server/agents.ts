@@ -96,7 +96,7 @@ import { WAIT_LINE_CHARS, summaryBrief, summaryText, waitSummary } from '../shar
 import { isMyMove, waitingItemOf } from '../shared/waiting.ts';
 import { checkAsks } from '../shared/questionCard.ts';
 import { DECISIONS, attachmentsNote, describeItem, handoverNote, isFor, isOpen, livePair, pairLegOf, ledgerOrder, names, overlapLine, priorityThenAge, requestAsFiled, requestLineRule, startProblem } from './work.ts';
-import { minPriorityText, needsBuild, needsLive, needsOf, needsTimed, pairText, PAIR_HOLD_MS, PAIR_MAX_LEGS, TIMED_HOLD_MS } from '../shared/capacity.ts';
+import { minPriorityText, needsBuild, needsLive, needsOf, needsTimed, pairText, cargoShortOf, isCargoRepo, PAIR_HOLD_MS, PAIR_MAX_LEGS, TIMED_HOLD_MS } from '../shared/capacity.ts';
 import { BUILD_PLAN_DOC, BuildPlans, NOT_RELEASE, type BuildPlan, type SeatResult } from './buildPlans.ts';
 import { SEAT_GRACE_MS, seatAction, seatNotice } from './releaseSeat.ts';
 import { RELEASE_RULES } from './releaseLanes.ts';
@@ -5052,6 +5052,8 @@ When a person asked for a design or an analysis (a profile, an investigation, a 
         ...(m.steam ? { steam: m.steam } : {}),
         // Its desktop session (w2459): a pair run that clicks the game's menus goes only where it is unlocked.
         ...(m.desktop ? { desktop: m.desktop } : {}),
+        // w3396: a sandbox drive under 30 GB free takes no new FFU (cargo) worker.
+        ...(cargoShortOf(this.machines.diskRoom(m.id)?.freeBytes) ? { cargoShort: cargoShortOf(this.machines.diskRoom(m.id)?.freeBytes) } : {}),
         // Its CPU use over the last minute (w2054): placement spills past it at placement.spillAtPercent.
         ...(this.machines.cpuOf(m.id) !== undefined ? { cpuPct: this.machines.cpuOf(m.id) } : {}),
         ...(legsHere.length ? { legs: legsHere } : {}),
@@ -5498,6 +5500,10 @@ When a person asked for a design or an analysis (a profile, an investigation, a 
             // w2544: no new work on a computer away (offline or paused) past the grace, unless the request names it.
             const awayNo = pinOn ? this.awayProblem(pinOn, w) : undefined;
             if (awayNo) throw new Error(awayNo);
+            // w3396: no new FFU (cargo) worker on a sandbox drive under 30 GB free; it stays Queued (unfitWhy says the same).
+            const cargoOn = ctx.role === 'dispatcher' && w && isCargoRepo(w.repo) && !a.disk_cleanup ? this.newWorkOn(a.sandbox, a.machine) : undefined;
+            const cargoNo = cargoOn ? cargoShortOf(this.machines.diskRoom(cargoOn)?.freeBytes) : undefined;
+            if (cargoNo) throw new Error(`${w!.id} is FFU (Rust) work and ${cargoOn}: ${cargoNo}. Leave it Queued: it starts there, or on a computer with room, once the clean-up frees the drive.`);
             // A computer reserved for higher work (w1643, placement.minPriority) takes no new work below its level.
             const reserved = this.reservedProblem(this.machineOf(a.sandbox, a.machine), w);
             if (reserved) throw new Error(reserved);
