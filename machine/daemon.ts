@@ -810,6 +810,8 @@ export class Daemon {
                 // Finished workers' clones, Library copies and test output go too, published evidence with them (w2223).
                 finished: this.finishedSessionDirs(),
                 published: readPublished(publishedFile(appDirOfConfig(this.cfg))),
+                // The timed runner's folders stay while one of its runs is in flight (w3502).
+                timedBusy: () => (this.timed?.busy() ? 'a timed run is in flight here' : undefined),
               }),
             ),
           endStrays: async (strays) => {
