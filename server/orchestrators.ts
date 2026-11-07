@@ -6578,6 +6578,20 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       if (!w.source || family(w.source.kind) !== prefix || (!isOpen(w) && now - Date.parse(w.updatedAt) > lookback)) continue;
       if (w.keys.some((k) => ids.includes(k))) return w;
     }
+    // ONE BRANCH, ONE REQUEST (w3250). A second FFBox conversation that joined the first one's fix branch (ffwatch
+    // join_fix_branch) files under its own conversation key, so only its branch and PR say it is the same work: conversation
+    // 1566 filed w3285 for ffbox/stopped-belt-refuses-sideload-after-load-… (PR #3289) beside the open w3284 (merged into
+    // w3277) that conversation 1562 had filed for it minutes before. An open request FFBox filed with that branch or PR
+    // takes it, and one merged into another hands it on to that one. A person's own work holding the same branch name or PR
+    // number is never matched (intakeFlow.test.ts, "feature work never matches").
+    if (prefix !== 'ffbox') return undefined;
+    const same = keys.filter((k) => /^branch:ffbox\//.test(k) || /^pr:\d+$/.test(k));
+    if (!same.length) return undefined;
+    for (const w of this.store.work.values()) {
+      if (!w.source || family(w.source.kind) !== 'ffbox' || !w.keys.some((k) => same.includes(k))) continue;
+      const target = w.status === 'merged' && w.mergedInto ? this.store.work.get(w.mergedInto) : w;
+      if (target && isOpen(target)) return target;
+    }
     return undefined;
   }
 

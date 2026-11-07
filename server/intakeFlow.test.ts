@@ -407,6 +407,16 @@ test('intake: FFBox branches become review requests once; its requests and ledge
   assert.deepEqual([req.source?.kind, req.source?.untrusted, req.requestedBy.userId], ['ffbox-request', true, 'ben']);
   assert.ok(req.brief.includes(UNTRUSTED_HEADER));
   assert.equal(intake.onRequest({ type: 'request', ref: 'r2', kind: 'escalate', title: 'Fork needs three peers', brief: 'x', opener: 'player', conversation: 'c9' })!.repeat, true);
+  // w3250: a second conversation that joined the first one's fix branch is the same work, not a second request.
+  const b1 = intake.onRequest({ type: 'request', ref: 'r-b1', kind: 'review-branch', title: 'Stopped belt refuses a side load', brief: 'b', opener: 'system', conversation: '1562', branch: 'ffbox/stopped-belt-d1562t1', pr: 3289 })!;
+  const b2 = intake.onRequest({ type: 'request', ref: 'r-b2', kind: 'review-branch', title: 'Belt will not take items after a load', brief: 'b', opener: 'system', conversation: '1566', branch: 'ffbox/stopped-belt-d1562t1', pr: 3289 })!;
+  assert.deepEqual([b2.workId, b2.repeat], [b1.workId, true], 'the same FFBox branch from another conversation joins its open request');
+  const merged = o.requireWork(b1.workId!);
+  const was = merged.status;
+  Object.assign(merged, { status: 'merged', mergedInto: req.id });
+  const b3 = intake.onRequest({ type: 'request', ref: 'r-b3', kind: 'review-branch', title: 'Side load lost', brief: 'b', opener: 'system', conversation: '1570', pr: 3289 })!;
+  assert.deepEqual([b3.workId, b3.repeat], [req.id, true], 'a request merged into another hands the PR on to that one');
+  Object.assign(merged, { status: was }); delete merged.mergedInto;
   const op = intake.onRequest({ type: 'request', ref: 'r3', kind: 'dev', title: 'Tidy the logs', brief: 'Please.', opener: 'operator', requestedBy: LOTH })!;
   assert.equal(o.requireWork(op.workId!).requestedBy.userId, 'lothsahn', 'an operator’s request is theirs');
 
