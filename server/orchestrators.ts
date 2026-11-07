@@ -201,6 +201,8 @@ const utcShort = (iso: string) => `${iso.slice(5, 16).replace('T', ' ')} UTC`;
 const DONE_TEXT_CHARS = 4000;
 /** A worker is asked how a request stands at most this often (askStatus, w631). */
 const STATUS_ASK_EVERY_MS = 6 * 3_600_000;
+/** A still-open line saying the request was never begun (w3281: "w3236: still open: not started"). */
+const NOT_STARTED = /\b(?:not(?: yet)? (?:started|begun)|(?:has|have)(?:n't| not)(?: yet)? (?:started|begun)|untouched)\b/i;
 
 /**
  * The loop guards' defaults (docs/orchestrators.md, "Loops, limits and safety"). Each is a budget a person's own
@@ -5744,6 +5746,8 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   workerTurnEnded(s: SessionInfo, text: string) {
     // What this turn was on, before its markers close any of it.
     const served = servedBy(s.id, [...this.store.work.values()]);
+    // w3281: each held request's latest word before this report replaces it (a report on another request overwrites it).
+    const before = new Map(this.itemsOf(s.id).map((w) => [w.id, w.outcome]));
     // w3105: a hand-off's report is kept whole before any marker below can close the request and resume its waiter.
     this.keepHandoffReports(s, text);
     this.dropCutOffGates(s.id);
@@ -5772,7 +5776,9 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       this.stampPublished(w);
       this.store.putWork(w);
     }
-    this.askStatus(s, text, served);
+    // w3281: a request it is resumed on is not also asked how it stands.
+    const resumed = this.resumeNotStarted(s, text, before);
+    this.askStatus(s, text, new Set([...served].filter((id) => !resumed.has(id))));
     this.retireCheck(s.id);
     this.capacityMayHaveFreed(`worker ${s.id} "${clip(s.title, 60)}" finished a turn`);
   }
@@ -5864,6 +5870,74 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     }, this.statusAskDelayMs);
     t.unref?.();
     this.statusAsks.add(t);
+  }
+
+  /** When each worker was last resumed on a request it had not started (resumeNotStarted), by "<session>:<request>". */
+  private readonly notStartedResumed = new Map<string, number>();
+
+  /**
+   * w3281: a worker that holds a second request it has not started is resumed on it when its turn ends with nothing else to
+   * bring it back. The dispatcher sent w3236 to ac029c0c, already on w3233; at 22:00 it ended a turn "w3236: still open: not
+   * started" and waited on w3233's CI in the merge-on-green pilot, whose merge files the report it left with no model turn
+   * (mergedOnGreen) and never resumes it. That report closed w3233 and its first line became w3236's latest word, the
+   * worker sat idle until the 62-minute idle stop and its sandbox went to other work, and w3236 showed Stalled for hours.
+   * Resumed rather than handed back: the dispatcher chose this worker for its context and sandbox, and a message to a
+   * stopped worker waits for a sandbox on its machine first. A request still not started after a resume within 6 hours goes
+   * to the dispatcher to place instead. The not-started line is the report's own, or, when the report does not name the
+   * request, the latest word it had before this report (`before`, read before workerTurnEnded overwrote it).
+   */
+  private resumeNotStarted(s: SessionInfo, text: string, before: ReadonlyMap<string, string | undefined>): Set<string> {
+    const open = stillOpenIn(text);
+    const idle = new Set<string>();
+    for (const w of this.itemsOf(s.id)) {
+      const line = open.get(w.id) ?? (new RegExp(`\\b${w.id}\\b`, 'i').test(text) ? undefined : before.get(w.id));
+      if (line && NOT_STARTED.test(line)) idle.add(w.id);
+    }
+    if (!idle.size) return idle;
+    const t = setTimeout(() => {
+      this.statusAsks.delete(t);
+      this.sendNotStarted(s, idle);
+    }, this.statusAskDelayMs);
+    t.unref?.();
+    this.statusAsks.add(t);
+    return idle;
+  }
+
+  private sendNotStarted(s: SessionInfo, ids: ReadonlySet<string>) {
+    const live = this.store.sessions.get(s.id);
+    const now = this.now().getTime();
+    // Mid-turn, a check-in or a queued message ahead: it comes back by itself and sees the request then.
+    if (!live || (live.status !== 'idle' && live.status !== 'stopped') || holdsItsPlace(live, now)) return;
+    const todo = this.itemsOf(s.id).filter((w) => ids.has(w.id) && w.status === 'active' && !w.done?.[s.id] && !w.setAside?.[s.id] && w.approval?.state !== 'pending' && !w.question && !w.flag);
+    if (!todo.length) return;
+    const again = todo.filter((w) => now - (this.notStartedResumed.get(`${s.id}:${w.id}`) ?? -Infinity) < STATUS_ASK_EVERY_MS);
+    const fresh = todo.filter((w) => !again.includes(w));
+    for (const w of again) {
+      this.stamp(w, `worker ${s.id} ended a turn with ${w.id} still not started after it was resumed on it: the dispatcher is told to place it (w3281)`);
+      this.store.putWork(w);
+      this.toDispatcher(
+        `[ledger] NOT STARTED (w3281): ${w.id} "${clip(w.title, 80)}" (${names(w.requesters)}, ${w.priority}) was sent to worker ${s.id}, which was resumed on it and ended its turn again without starting it. Place it: start_agent with work_id "${w.id}" in a FREE sandbox, or send it to ${s.id} again if it is the right worker.`,
+        w.requestedBy,
+      );
+    }
+    if (!fresh.length) return;
+    for (const w of fresh) {
+      this.notStartedResumed.set(`${s.id}:${w.id}`, now);
+      this.stamp(w, `resumed worker ${s.id} on ${w.id}: it ended a turn with it not started and nothing else to bring it back (w3281)`);
+      this.store.putWork(w);
+    }
+    const list = fresh.map((w) => `${w.id} "${clip(w.title, 80)}"`).join(', ');
+    try {
+      this.sessions.send(
+        s.id,
+        `[ledger] You still hold ${list}, sent to you and not started, and nothing else brings you back to ${fresh.length > 1 ? 'them' : 'it'}. Start ${fresh.length > 1 ? 'them' : 'it'} now (read_work ${fresh[0].id} for the brief). If you cannot do it here, end your turn with \`<id>: paused: <why>\` or a still-open line that says what it waits for.`,
+        'system',
+        undefined,
+        { requestedBy: s.requestedBy },
+      );
+    } catch {
+      // it is at a limit: the requests' logs have the resume, and the cleanup finds them
+    }
   }
 
   /** How long after a turn's end askStatus asks (tests set 0). */

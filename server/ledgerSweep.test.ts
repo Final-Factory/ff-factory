@@ -1233,6 +1233,51 @@ test('w631: a worker whose request names another (a takeover) closes that one wi
   assert.equal(get('w8').status, 'done');
 });
 
+test('w3281: a worker that holds two requests, files DONE on one through merge on green and left the other "not started", is resumed on it; still not started after that, the dispatcher places it', async (t) => {
+  const { request, worker, o, get, sessions, store } = setup(t);
+  o.statusAskDelayMs = 0;
+  const sent: { id: string; text: string }[] = [];
+  (sessions as unknown as { send: (id: string, text: string) => void }).send = (id, text) => void (id === 'ac029c0c' && sent.push({ id, text }));
+  const told: string[] = [];
+  t.mock.method(o, 'toDispatcher', (text: string) => void told.push(text));
+  // As on 2026-11-06: ac029c0c was on w3233, and the dispatcher sent it w3236 at 21:09.
+  request('w3233', { title: 'Command Core window label', sessionIds: ['ac029c0c'], links: { ac029c0c: { at: ago(3), how: 'sent' } } });
+  request('w3236', { title: 'Placement hint text unreadable over the green landing bracket', sessionIds: ['ac029c0c'], links: { ac029c0c: { at: ago(2), how: 'sent' } } });
+  // 22:00: it ends a turn waiting on w3233's CI (it holds its place meanwhile) with w3236 not started: not resumed yet.
+  const s = worker('ac029c0c', { wakeAt: new Date(Date.now() + 20 * 60_000).toISOString() });
+  o.workerTurnEnded(s, 'PR #3270 pushed, waiting on CI.\nw3233: still open: blocked on CI on PR #3270\nw3236: still open: not started');
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(sent.length, 0, 'a worker that comes back by itself is not resumed');
+  assert.equal(get('w3236').outcome, 'w3236: still open: not started');
+  // 22:09: the merge-on-green pilot merges #3270 and files the report it left, which names only w3233; nothing resumes it.
+  const idle = { ...s, wakeAt: undefined };
+  store.putSession(idle);
+  const w = get('w3233');
+  w.status = 'blocked';
+  w.blocked = { kind: 'ci', ref: 'Final-Factory/FinalFactory#3270', what: 'CI on PR #3270', at: ago(1), by: 'worker ac029c0c', mergeOnGreen: { head: 'abc', session: 'ac029c0c', report: 'TL;DR: the second switch reads right. PR #3270 merged on green CI.\nDONE: w3233\nLearned: nothing new' } };
+  store.putWork(w);
+  o.mergedOnGreen('w3233', 'its checks passed');
+  assert.equal(get('w3233').status, 'done');
+  await until('the worker is resumed on w3236', () => sent.length === 1);
+  assert.equal(sent[0].id, 'ac029c0c');
+  assert.match(sent[0].text, /You still hold w3236 "Placement hint text unreadable/);
+  assert.match(get('w3236').log.at(-1)!, /resumed worker ac029c0c on w3236: it ended a turn with it not started/);
+  assert.equal(get('w3236').status, 'active');
+  assert.deepEqual(told, []);
+  // It ends that turn without starting it again: the dispatcher is told to place it, and the worker is not resumed twice.
+  o.workerTurnEnded(idle, 'Back on the Command Core stills first.\nw3236: still open: not started');
+  await until('the dispatcher is told', () => told.length === 1);
+  assert.match(told[0], /NOT STARTED \(w3281\): w3236 .*start_agent with work_id "w3236"/);
+  assert.equal(sent.length, 1);
+  // A request it did start, and a worker mid-turn, are left alone.
+  request('w9', { sessionIds: ['s9'] });
+  o.workerTurnEnded(worker('s9', { status: 'running' }), 'w9: still open: not started');
+  request('w10', { sessionIds: ['s10'] });
+  o.workerTurnEnded(worker('s10'), 'w10: still open: the paired audit');
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(sent.length, 1);
+});
+
 test('w3248: SUPERSEDED closes a request the worker holds or names, with what covers it; anything else goes to the dispatcher', async (t) => {
   const { request, worker, o, get, store } = setup(t);
   const toDispatcher: string[] = [];

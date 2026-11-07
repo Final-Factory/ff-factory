@@ -1781,6 +1781,19 @@ request waits on a question or an approval, when any message waits for a free ag
 one), or when the same worker was asked about the same request in the last 6 hours. Its answer is a system turn, so it
 is not relayed to anyone as a `[worker update]`; the request's log has it.
 
+**A request a worker holds and has not started is resumed** (w3281: the dispatcher sent w3236 to ac029c0c, already on
+w3233; it ended a turn "w3236: still open: not started" and waited on w3233's CI in the merge-on-green pilot, whose merge
+filed its report and never resumes it; it sat idle until the 62-minute idle stop, its sandbox went to other work, and
+w3236 showed Stalled until the 4-hourly cleanup). A few seconds after a worker's turn ends (`resumeNotStarted`,
+`server/orchestrators.ts`; the merge-on-green filing is a turn end too), each open request it holds whose still-open line
+says it is not started (the report's own line, or, when the report does not name it, the line the request had before this
+report) and that is Active (not Blocked, Queued, set aside, waiting on a question or an approval) is resumed: the worker
+gets "[ledger] You still hold w3236 …, sent to you and not started … Start it now". Not when the worker is mid-turn or
+holds its place (a check-in, a queued message): it comes back by itself. That request is not also asked how it stands.
+Resumed rather than handed back, because the dispatcher chose that worker for its context, and a message to a stopped
+worker waits for a sandbox on its machine first. A worker resumed on it that ends a turn with it still not started within
+6 hours is not resumed again: the dispatcher gets "[ledger] NOT STARTED (w3281): …" to place it.
+
 A DONE on a request with a linked PR the ledger holds as open first reads that PR live (above), then decides on the
 fresh state. A DONE refused anyway is not forgotten (w515): `WorkItem.done` keeps the text of that worker's DONE
 reports on the request, and once its PRs have all merged or closed (the 5-minute pass, or a live read), the request
