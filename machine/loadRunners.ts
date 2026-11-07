@@ -39,13 +39,15 @@ export interface LoadGateSettings {
 export const LOTHDESKTOP_GATE: LoadGateSettings = { pauseAtPct: 70, resumeBelowPct: 55, pauseOverMs: 60_000, resumeOverMs: 120_000, runners: /^ffu-/i };
 
 /**
- * Off since the first live run (w3305, 2026-11-07): within two minutes of the update LothDesktop's two ffu runners each held
- * a job that stopped moving (a test job stuck in its last step, a hashcheck that started no step), so a listener was
- * suspended while it held a job: the busy check (a worker under the listener) does not see LothDesktop's jobs. With no
- * gate set, the daemon resumes every listener the gate left suspended. Turn it back on only with a busy check proven on
- * LothDesktop's own process listing.
+ * On again since w3305's second pass (2026-11-07). The first live run (04:49-05:26Z) was turned off for three lost
+ * LothDesktop jobs, but the runners' own _diag logs show the gate did not take them. Two were the runner's 30-second
+ * listener-to-worker hand-off running out ("Job request message sending ... been cancelled, kill running worker", with a
+ * Runner.Worker that wrote no log), which those logs show 17 times on 2026-11-03..06, before any gate existed. The third
+ * was a failed test step whose listener renewed its job lock every minute to the end, so it was never suspended. Load is
+ * what makes those hand-offs run out, and keeping load off the runners is the gate's job. No gate set for a machine:
+ * the daemon resumes every listener a gate left suspended.
  */
-export const LOAD_GATES: Record<string, LoadGateSettings> = {};
+export const LOAD_GATES: Record<string, LoadGateSettings> = { lothdesktop: LOTHDESKTOP_GATE };
 
 export interface LoadGateState {
   closed: boolean;
@@ -57,6 +59,8 @@ export interface LoadGateState {
 export interface LoadGateDeps {
   settings: LoadGateSettings | undefined;
   procs(): Promise<Proc[]>;
+  /** An uncached listing for the look after a suspend (procs may answer with the listing taken before it). */
+  freshProcs?(): Promise<Proc[]>;
   /** The machine's CPU percent since the last call (cpuSampler). */
   cpu(): number;
   /** Suspend or resume a process; answers why it could not, nothing when done. */
@@ -67,6 +71,9 @@ export interface LoadGateDeps {
   log(text: string): void;
   now(): number;
 }
+
+/** A job runs on that runner: a worker under its listener, or any worker run from its folder (one whose parent link is lost). */
+const busy = (c: RunnerCensus, l: RunnerCensus['listeners'][number]) => l.busy || c.workers.some((w) => w.root.toLowerCase() === l.root.toLowerCase());
 
 const base = (root: string) => root.replace(/\/+$/, '').split('/').pop() ?? root;
 
@@ -156,7 +163,7 @@ export class LoadGate {
     const done = new Set(kept.map((p) => p.pid));
     const stopped: (RunnerCensus['listeners'][number] & { log: ListenerLog })[] = [];
     for (const l of c.listeners) {
-      if (done.has(l.pid) || l.busy || !g.runners.test(base(l.root))) continue;
+      if (done.has(l.pid) || busy(c, l) || !g.runners.test(base(l.root))) continue;
       const log = listenerLog(this.d.diag(l.root));
       const why = holdsJob(log, this.d.now());
       if (why) {
@@ -175,11 +182,12 @@ export class LoadGate {
     }
     if (stopped.length) {
       // A listener that took a job in the instant it was suspended would hold that job unrenewed: resume it.
-      c = runnerCensus(await this.d.procs());
+      c = runnerCensus(await (this.d.freshProcs ?? this.d.procs)());
       const at = new Date(this.d.now()).toISOString();
       for (const l of stopped) {
         const after = listenerLog(this.d.diag(l.root));
-        if (c.listeners.find((x) => x.pid === l.pid)?.busy || after.state !== 'idle' || after.line !== l.log.line) {
+        const seen = c.listeners.find((x) => x.pid === l.pid);
+        if (!seen || busy(c, seen) || after.state !== 'idle' || after.line !== l.log.line) {
           await this.d.suspend(l.pid, true);
           this.d.log(`ci load gate: runner ${l.root} (listener pid ${l.pid}) took a job as it was suspended: resumed; suspended once the job ends`);
           continue;
