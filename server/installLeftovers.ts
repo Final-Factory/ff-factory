@@ -6,6 +6,9 @@ import { mentions } from './ownLeftovers.ts';
 import { gitIgnores } from './cleanupFolders.ts';
 import { isPublished, type PublishedRecord } from './published.ts';
 import { execFile } from 'node:child_process';
+import { benchQueueDir } from '../machine/benchQueue.ts';
+import { benchLockDir, pidAlive } from '../machine/benchLock.ts';
+import { holdsJob, listenerLog, readListenerLog, runnerCensus } from '../machine/benchRunners.ts';
 
 /**
  * Leftovers inside the install folder (w899, docs/self-recovery.md "Install-folder leftovers"): what w876 had to remove
@@ -67,6 +70,14 @@ export interface InstallLeftoverSettings {
    * target (5.8 GB, measured), so three workers stay near 20 GB; 0: never.
    */
   cargoTargetCapGB: number;
+  /**
+   * A timed run's laid-out build (`<install>/timing/builds/b<i>`, machine/timedRunner.ts) goes once untouched this many hours
+   * while no timing ticket is held or waiting and no timed run is in flight: the next run lays it out again from timing/cache
+   * (w3502: 3.6 GB on LothDesktop's V:).
+   */
+  timingBuildHours: number;
+  /** An FFU runner's job folder (`<install>/ffu-runners/<runner>/_work/<entry>`) goes once untouched this many days while that runner runs no job (w3502). */
+  runnerWorkDays: number;
 }
 
 export const INSTALL_LEFTOVER_DEFAULTS: InstallLeftoverSettings = {
@@ -82,6 +93,8 @@ export const INSTALL_LEFTOVER_DEFAULTS: InstallLeftoverSettings = {
   idleCacheHours: 24,
   lowCacheSettleMinutes: 15,
   cargoTargetCapGB: 8,
+  timingBuildHours: 24,
+  runnerWorkDays: 14,
 };
 
 /** The settings in force: the defaults under whatever config gave (unknown or ill-typed values ignored). */
@@ -102,6 +115,8 @@ export function installLeftoverSettings(raw: unknown): InstallLeftoverSettings {
     idleCacheHours: n('idleCacheHours', 0, 24 * 30),
     lowCacheSettleMinutes: n('lowCacheSettleMinutes', 0, 24 * 60),
     cargoTargetCapGB: n('cargoTargetCapGB', 0, 10_000),
+    timingBuildHours: n('timingBuildHours', 1, 24 * 30),
+    runnerWorkDays: n('runnerWorkDays', 1, 365),
   };
 }
 
@@ -118,6 +133,61 @@ export interface ProcLite {
   ppid: number;
   cmd: string;
 }
+
+/**
+ * Why the timed runner's folders (`<install>/timing/cache` and `builds`) must stay now, or undefined when they may go (w3502):
+ * a timed run in flight (`inFlight`, the daemon's TimedRunner.busy()), or a bench ticket with reason timing held or waiting in
+ * this install's queue (`<install>/tmp/bench.queue/t*`, its helper alive): every timing measurement takes one, the timed
+ * runner's own (timedRunner.ts takeTicket) and bench_queue.py's `timed` alike.
+ */
+export function timingHeld(root: string, inFlight?: string, alive: (pid: number) => boolean = pidAlive): string | undefined {
+  if (inFlight) return inFlight;
+  const dir = benchQueueDir(benchLockDir(root));
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir).filter((n) => /^t\d{8}$/.test(n)).sort();
+  } catch {
+    return undefined;
+  }
+  for (const n of names) {
+    let info: Record<string, unknown> | undefined;
+    try {
+      info = JSON.parse(fs.readFileSync(path.join(dir, n, 'info.json'), 'utf8'));
+    } catch {
+      continue; // as queueTickets: a ticket with no readable info.json is not a live one
+    }
+    if (!info || (info.reason !== 'timing' && info.timed_run !== true)) continue;
+    if (Number.isInteger(info.pid) && !alive(info.pid as number)) continue;
+    return `bench ticket ${n} (reason timing${info.what ? `: ${String(info.what).slice(0, 80)}` : ''}) is held or waiting`;
+  }
+  return undefined;
+}
+
+/**
+ * Why an Actions runner's `_work` must stay now, or undefined when the runner holds no job (w3502): unknown processes, a
+ * Runner.Worker of this runner, any process run from its _work folder, or a listener whose _diag log says it was just handed a
+ * job (machine/benchRunners.ts holdsJob, the check that pauses LothDesktop's FFU runners safely). A runner whose listener is
+ * not running takes no job.
+ */
+export function runnerJobWhy(runner: string, procs: ProcLite[] | undefined, now: number, readLog: (runner: string) => string | undefined = readListenerLog): string | undefined {
+  if (!procs) return 'the process list could not be read, so a running job cannot be ruled out';
+  const mine = (r: string) => norm(r) === norm(runner);
+  const census = runnerCensus(procs);
+  const worker = census.workers.find((w) => mine(w.root));
+  if (worker) return `its Runner.Worker (pid ${worker.pid}) runs a job`;
+  const work = `${norm(runner)}/_work/`;
+  const user = procs.find((p) => p.cmd.replace(/\\/g, '/').replace(/\/+/g, '/').toLowerCase().includes(work));
+  if (user) return `process ${user.pid} runs from its _work folder`;
+  const listener = census.listeners.find((l) => mine(l.root));
+  if (listener) {
+    const why = holdsJob(listenerLog(readLog(runner)), now);
+    if (why) return `its listener (pid ${listener.pid}): ${why}`;
+  }
+  return undefined;
+}
+
+/** An Actions runner's tool cache and action downloads: kept, as the actions-work rule keeps them (server/cleanup.ts). */
+const RUNNER_KEPT = /^_(tool|actions)$/i;
 
 /** A process still writing into a stopped session's folder. */
 export interface Stray {
@@ -627,6 +697,12 @@ export async function planInstallLeftovers(o: {
   localWhy?: (repo: string) => Promise<string | undefined>;
   /** The evidence files git ignores in a repo (tests; default gitIgnoredEvidence). */
   ignoredEvidence?: (repo: string) => Promise<string[] | undefined>;
+  /** Why a timed run is in flight here now (the daemon's TimedRunner.busy()), or undefined: the timing folders stay while it is (w3502). */
+  timedBusy?: () => string | undefined;
+  /** Whether a pid lives (tests; default benchLock.ts pidAlive): a bench ticket's helper. */
+  alive?: (pid: number) => boolean;
+  /** A runner's listener log tail (tests; default benchRunners.ts readListenerLog). */
+  runnerLog?: (runner: string) => string | undefined;
 }): Promise<InstallPlan> {
   const plan: InstallPlan = { items: [], listed: [], strays: [] };
   if (!o.root) return plan; // not a worker-root install: nothing here is the install folder
@@ -644,7 +720,7 @@ export async function planInstallLeftovers(o: {
   const live = (p: string) => o.guard.inUse.some((k) => k && (within(p, k) || within(k, p)));
 
   /** Why `p` must stay, or undefined; `list`: worth showing a person; `split`: the rest of what is in it may still go. */
-  const blocked = async (p: string, base: string, untouchedMs: number | undefined): Promise<{ why: string; list: boolean; split?: boolean } | undefined> => {
+  const blocked = async (p: string, base: string, untouchedMs: number | undefined, anyRepo = false): Promise<{ why: string; list: boolean; split?: boolean } | undefined> => {
     if (!within(p, root)) return { why: 'outside the install folder', list: false };
     if (norm(p) === norm(root) || norm(p) === norm(base)) return { why: 'the install folder or a place itself', list: false };
     const rel = norm(p).slice(norm(base).length).split('/').filter(Boolean);
@@ -654,6 +730,7 @@ export async function planInstallLeftovers(o: {
     const touched = untouchedMs === undefined ? undefined : await touchedWhy(p, now - untouchedMs);
     if (touched === 'changed') return { why: 'changed recently', list: false, split: true };
     if (touched === 'too-big') return { why: 'too many entries to judge its age (over 200,000)', list: true, split: true };
+    if (anyRepo) return undefined; // a CI job's checkout: the job recreates it, and its commits are on the remote
     const repos: string[] = [];
     const down = async (d: string, depth: number) => {
       if (fs.existsSync(path.join(d, '.git'))) return void repos.push(d); // its nested repos are submodules: its status covers them
@@ -667,9 +744,9 @@ export async function planInstallLeftovers(o: {
     }
     return undefined;
   };
-  const take = async (p: string, base: string, rule: string, why: string, untouchedMs: number | undefined) => {
+  const take = async (p: string, base: string, rule: string, why: string, untouchedMs: number | undefined, anyRepo = false) => {
     if (items.has(p)) return;
-    const b = await blocked(p, base, untouchedMs);
+    const b = await blocked(p, base, untouchedMs, anyRepo);
     if (!b) items.set(p, { path: p, rule, why, base });
     else if (b.list) listed.set(p, b.why);
   };
@@ -768,7 +845,9 @@ export async function planInstallLeftovers(o: {
       const busy = await cargoTargetBusy(c.path, session, o.procs, now - settle * 60_000, now);
       const no = busy ?? neverDelete(c.path, sessionRelaxed(session, relaxed(t))) ?? (await gitHolds(c.path, session));
       if (no) {
-        await hold(c.path, [c], `${size}, but ${no}`);
+        // On every pass, not only a low one (w3471): an hourly pass lists no kept item, so a target over the cap that stays
+        // could not be told from a rule that never looked at it.
+        held.push({ path: c.path, bytes, why: `1 rebuildable cache(s) kept: ${size}, but ${no}` });
         continue;
       }
       // Measured on BEAST (w3426, ffu main, a rebuild after an edit to ffu-sim): 30 s with the target whole, 52 s without
@@ -923,6 +1002,57 @@ export async function planInstallLeftovers(o: {
     for (const e of await children(path.join(nightly, 'rehearsals'))) await take(path.join(nightly, 'rehearsals', e.name), nightly, 'nightly-rehearsal', `a nightly rehearsal untouched for ${s.rehearsalDays} days`, s.rehearsalDays * DAY);
     for (const e of await children(path.join(nightly, 'logs'))) {
       if (e.isFile()) await take(path.join(nightly, 'logs', e.name), nightly, 'nightly-log', `a nightly log untouched for ${s.nightlyRunDays} days`, s.nightlyRunDays * DAY);
+    }
+  }
+
+  // ---- the timed runner's own folders (w3502, machine/timedRunner.ts): its build pieces in timing/cache (it trims them to 8 GB
+  // itself after a run) and the builds it lays out of them in timing/builds/b<i>. Nothing else trimmed them: on LothDesktop
+  // 2026-11-07 they held 8.9 + 3.6 GB of a V: at 14.2 GB free, freed by hand (w3482). Both are fetched or laid out again by the
+  // next run, so they go only while no timing ticket is held or waiting and no timed run is in flight: the builds once untouched
+  // timingBuildHours, the cache only below the soft threshold; both after lowCacheSettleMinutes with no write in a low pass.
+  // timing/runs (the results) is the runner's own: it keeps 10.
+  const settleMs = (s.lowCacheSettleMinutes || 15) * 60_000;
+  const keptBig = async (p: string, why: string) => {
+    if (!o.low || !fs.existsSync(p)) return;
+    const bytes = await sizeOf(p, 300_000);
+    if (bytes >= (o.heldMinBytes ?? 256 * 1024 ** 2)) held.push({ path: p, bytes, why });
+  };
+  const timing = path.join(root, 'timing');
+  const timingWhy = timingHeld(root, o.timedBusy?.(), o.alive);
+  if (timingWhy) {
+    await keptBig(path.join(timing, 'cache'), `the timed runs' build cache kept: ${timingWhy}`);
+    await keptBig(path.join(timing, 'builds'), `the timed runs' laid-out builds kept: ${timingWhy}`);
+  } else {
+    for (const e of await children(path.join(timing, 'builds'))) {
+      const age = o.low ? settleMs : s.timingBuildHours * HOUR;
+      await take(path.join(timing, 'builds', e.name), timing, 'timing-build', `a timed run's laid-out build (${e.name}), no timed run in flight or queued, untouched for ${o.low ? `${age / 60_000} min (the disk is low)` : `${s.timingBuildHours} h`}; the next run lays it out again`, age);
+    }
+    if (o.low) {
+      for (const e of await children(path.join(timing, 'cache'))) {
+        await take(path.join(timing, 'cache', e.name), timing, 'timing-cache', `a timed run's cached build piece, no timed run in flight or queued, untouched for ${settleMs / 60_000} min (the disk is low); the next run fetches it again`, settleMs);
+      }
+    }
+  }
+
+  // ---- FFU runners' job folders (w3502): <install>/ffu-runners/<runner>/_work, which the actions-work rule (server/cleanup.ts,
+  // actions-runner* under home or a drive root) never matched. A job recreates them (a cold cargo build costs minutes), so they
+  // go only while that runner runs no job: once untouched runnerWorkDays, or lowCacheSettleMinutes in a low pass. _tool and
+  // _actions stay, as in actions-work.
+  const runners = path.join(root, 'ffu-runners');
+  for (const r of await children(runners)) {
+    if (!r.isDirectory()) continue;
+    const runner = path.join(runners, r.name);
+    const work = path.join(runner, '_work');
+    const entries = (await children(work)).filter((e) => !RUNNER_KEPT.test(e.name));
+    if (!entries.length) continue;
+    const busy = runnerJobWhy(runner, o.procs, now, o.runnerLog);
+    if (busy) {
+      await keptBig(work, `an FFU runner's job folders kept: ${busy}`);
+      continue;
+    }
+    const age = o.low ? settleMs : s.runnerWorkDays * DAY;
+    for (const e of entries) {
+      await take(path.join(work, e.name), runner, 'ffu-runner-work', `FFU runner ${r.name}'s job folder (${e.name}), no job running, untouched for ${o.low ? `${age / 60_000} min (the disk is low)` : `${s.runnerWorkDays} days`}; the next job recreates it`, age, true);
     }
   }
 

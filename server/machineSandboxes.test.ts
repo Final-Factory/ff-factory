@@ -1712,3 +1712,30 @@ test('w1944: a sandbox being handed to new work (its editor stopped, its branch 
   // Handed over and no worker started in it (a failed start): free again.
   assert.equal(free(), 2);
 });
+
+test('w3502: an editor start on a cold Library near the disk line warns (a re-import writes about 18 GB), and starts', async (t) => {
+  const r = repos();
+  t.after(() => fs.rmSync(r.root, { recursive: true, force: true, maxRetries: 5 }));
+  let free = 60 * GB; // above disk_warn_gb 50, below 50 + 18
+  const logs: string[] = [];
+  const { p, events, running } = pool(r, { free: () => free, log: (l) => logs.push(l) });
+  await p.create({ id: 'a', branch: 'sandbox/a', base: 'origin/master', seedLibrary: false, startUnity: false });
+  await ready(p, 'a');
+  const said = await p.unity('a', 'start');
+  assert.match(said, /Warning \(w3502\): its Unity Library is cold .* about 18 GB; with 60 GB free .* disk_warn_gb 50/);
+  assert.match(said, /Started/, 'a warning, not a refusal');
+  assert.equal(running.size, 1);
+  assert.ok(events.some((e) => /sandbox a: Warning \(w3502\)/.test(e.text)), 'the portal is told');
+  assert.ok(logs.some((l) => /Warning \(w3502\)/.test(l)));
+  await p.unity('a', 'stop');
+  // Plenty of room: no word.
+  free = 200 * GB;
+  assert.doesNotMatch(await p.unity('a', 'start'), /w3502/);
+  await p.unity('a', 'stop');
+  // A warm Library (its ArtifactDB) imports only what changed: no word near the line either.
+  free = 60 * GB;
+  const sb = p.list().find((x) => x.id === 'a')!;
+  fs.mkdirSync(path.join(sb.path, 'Library'), { recursive: true });
+  fs.writeFileSync(path.join(sb.path, 'Library', 'ArtifactDB'), 'db');
+  assert.doesNotMatch(await p.unity('a', 'start'), /w3502/);
+});
