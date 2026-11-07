@@ -127,8 +127,9 @@ export function timedHolder(root: string | undefined, now: number = Date.now(), 
     if (t.mode !== 'exclusive' || !t.granted || t.revoked) continue;
     // w1832 (bench_queue.py timed_hold): a turn past its limit goes on while nobody queues behind it, so it still holds
     // the machine; its end is the deadline a waiter set, else its turn's end (or the 5-minute warning from now, past it)
-    // w3186: an approved turn runs from its turn.json start, once the CI jobs drained (until then: from now)
-    const turnEnd = (t.approved ? (t.turnStart ? t.turnStart * 1000 : now) : t.granted.ts * 1000) + turnMinOf(t) * 60_000;
+    // w3186: an approved turn runs from its turn.json start, once the CI jobs drained (until then: from now); w3454: so
+    // does every timing whose grant waited out CI jobs
+    const turnEnd = (t.turnStart ? t.turnStart * 1000 : t.approved || t.ciWait ? now : t.granted.ts * 1000) + turnMinOf(t) * 60_000;
     const deadline = typeof t.limit?.deadline === 'number' ? t.limit.deadline * 1000 : undefined;
     // w1860: with no deadline and keep.json, only lower-priority work waits: it keeps the lock until it lets go
     const kept = deadline === undefined && !!t.keep;

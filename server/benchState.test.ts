@@ -403,11 +403,29 @@ test('w3186: an approved ticket shows its approved turn, from the end of the CI 
   assert.match(benchGlance(b, NOW)!.times, /50m left of its approved 60m turn/);
   assert.equal(timedHolder(root, NOW, alive)!.until, NOW + 50 * 60_000);
 
-  // The same ticket without the daemon's mark: the queue's 30 minutes from its grant.
+  // The same ticket without the daemon's mark: the queue's 30 minutes, from its turn.json start (w3454: as every turn).
   prios(root, { v: 2, single_worker: false, sessions: { f5b09aea: { priority: 'normal' } } });
   b = readBenchState(root, NOW, alive)!;
   assert.equal(b.running[0].exempt, undefined);
   assert.equal(b.running[0].approved, undefined);
   assert.equal(b.running[0].turnMin, 30);
-  assert.equal(b.running[0].until, new Date(NOW + 5 * 60_000).toISOString());
+  assert.equal(b.running[0].until, new Date(NOW + 20 * 60_000).toISOString());
+});
+
+test('w3454: a timing turn starts at "time now", after its grant waited out the CI jobs, not at the grant', (t) => {
+  // beast, 2026-11-07: t00006095 (a 20-minute turn) was granted about 19:39Z, waited out CI jobs and was revoked at
+  // 19:59:56Z before it printed "time now"
+  const root = tmp(t);
+  ticket(root, 't00000001', { mode: 'exclusive', what: 'LeechSystem frame cost', session: 's1', max_min: 20, turn_min: 20 }, sec(18));
+  const turn = path.join(benchQueueDir(benchLockDir(root)), 't00000001', 'turn.json');
+  fs.writeFileSync(turn, JSON.stringify({ ci_wait: sec(18) }));
+  let b = readBenchState(root, NOW, alive)!;
+  assert.equal(b.running[0].until, undefined, 'no turn end while the grant waits out the CI jobs');
+  assert.match(benchGlance(b, NOW)!.times, /waits out the CI jobs: its turn starts after them/);
+  assert.equal(timedHolder(root, NOW, alive)!.until, NOW + 20 * 60_000, 'the runners stay paused through the wait and the whole turn');
+
+  fs.writeFileSync(turn, JSON.stringify({ start: sec(2) }));
+  b = readBenchState(root, NOW, alive)!;
+  assert.equal(b.running[0].until, new Date(NOW + 18 * 60_000).toISOString(), '20 minutes from time now, not from the grant');
+  assert.equal(timedHolder(root, NOW, alive)!.until, NOW + 18 * 60_000);
 });

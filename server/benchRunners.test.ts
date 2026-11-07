@@ -139,14 +139,31 @@ test('w3112: a daemon restarted after a turn continues the listeners its file sa
   assert.deepEqual(s.written.at(-1), { paused: [], ended: [] });
 });
 
-test('w3112: Windows runners are not paused (no SIGSTOP): the turn says so once', async () => {
+test('w3454: Windows runners are paused too (the suspend answers later): idle ones at once, a busy one after its job, none ended', async () => {
+  // BEAST on 2026-11-07 (Win32_Process): four ffu runners on F: and one in rydin's home, each started by run.cmd
+  const W = (pid: number, ppid: number, root: string, exe: string, args: string): Proc => ({ pid, ppid, cmd: `"${root}\\\\bin\\${exe}"  ${args}` });
+  const F = 'F:\\ffw\\ffu-runners\\ffu-beast-';
+  const listeners = [W(35452, 1, `${F}2`, 'Runner.Listener.exe', 'run'), W(29760, 1, `${F}3`, 'Runner.Listener.exe', 'run'), W(33400, 1, 'C:\\Users\\rydin\\ffu-runner', 'Runner.Listener.exe', 'run')];
+  const job = W(25884, 33400, 'C:\\Users\\rydin\\ffu-runner', 'Runner.Worker.exe', 'spawnclient 1980 3588');
+  const leftover: Proc = { pid: 9000, ppid: 1, cmd: 'F:\\ffw\\ffu-runners\\ffu-beast-2\\_work\\ffu\\ffu\\target\\debug\\ffu-server.exe --listen 127.0.0.1:0' };
   const { s, r } = harness({ platform: 'win32' });
-  s.holder = { ticket: 't00001116' };
+  const sync = s.signals;
+  // the daemon's Windows signal is a PowerShell NtSuspendProcess call: it answers after a while
+  (r as unknown as { d: BenchRunnersDeps }).d.signal = (pid, sig) => new Promise((res) => setTimeout(() => res(void sync.push(`${sig} ${pid}`)), 5));
+  s.diag = {};
+  (r as unknown as { d: BenchRunnersDeps }).d.diag = () => IDLE_LOG;
+  s.procs = [...listeners, job, leftover];
+  s.holder = { ticket: 't00006095', ownerPid: 4000 };
   await r.tick();
+  assert.deepEqual(s.signals, ['SIGSTOP 35452', 'SIGSTOP 29760'], 'the busy C: runner is left to finish its job; the leftover is not ended on Windows');
+  assert.deepEqual(r.paused().map((p) => p.root), ['F:/ffw/ffu-runners/ffu-beast-2', 'F:/ffw/ffu-runners/ffu-beast-3']);
+  s.procs = [...listeners];
   await r.tick();
-  assert.deepEqual(s.signals, []);
-  assert.equal(s.listings, 0);
-  assert.equal(s.log.filter((l) => /Windows has no SIGSTOP/.test(l)).length, 1);
+  assert.deepEqual(s.signals.slice(2), ['SIGSTOP 33400'], 'C:/Users/rydin/ffu-runner is paused once its job ends');
+  s.holder = undefined;
+  await r.tick();
+  assert.deepEqual(s.signals.slice(3), ['SIGCONT 35452', 'SIGCONT 29760', 'SIGCONT 33400']);
+  assert.ok(!s.log.some((l) => /Windows has no SIGSTOP/.test(l)));
 });
 
 // w3195: ffu-biscuit-3's own log (_diag/Runner_20261106-073706-utc.log) as w3153's exclusive turn t00003111 paused it: the

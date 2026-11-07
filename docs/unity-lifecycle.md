@@ -391,7 +391,7 @@ w1832), the daemon:
   name, said idle, and at 17:08:50Z ffu-runner was paused a second after acknowledging job bd216421). A listener whose
   log cannot be read, or whose whole log has no job or "Listening for Jobs" line, is not paused. A process run from a runner's `_work` folder that no worker started is a leftover:
   SIGTERM, never forced. What was paused and ended is in `<root>/tmp/bench.queue/runners.json`, so a daemon restarted
-  mid-turn continues them. Windows has no SIGSTOP: its runners are waited out, not paused.
+  mid-turn continues them. On Windows the listener is suspended and resumed instead (NtSuspendProcess, w3454: BEAST's ffu runners took new jobs under ticket t00006095 before), and a leftover is not ended (process.kill there is a forced end).
   An operations runner is never paused (w3424): a runner whose root holds an `ff-ops-runner` file (biscuit's
   `ffu-biscuit-world`, label `ffu-world`, takes only the shared FFU world's deploy) takes its jobs during the turn, and
   the game repo's `ci-park` hook skips it too, so a deploy merged during a timed run starts within seconds. Its job still

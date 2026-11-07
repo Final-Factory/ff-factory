@@ -673,7 +673,8 @@ export class Daemon {
     this.benchRunners = new BenchRunners({
       holder: () => this.timedHolderHere(),
       procs: real ? () => pd.procs() : async () => [],
-      signal: (pid, sig) => (real ? sendSignal(pid, sig) : 'not a real daemon'),
+      // w3454: Windows has no SIGSTOP: a listener is suspended and resumed there (NtSuspendProcess), as the load gate does
+      signal: (pid, sig) => (!real ? 'not a real daemon' : process.platform === 'win32' && sig !== 'SIGTERM' ? winSuspend(pid, sig === 'SIGCONT') : sendSignal(pid, sig)),
       diag: (root) => (real ? readListenerLog(root) : undefined),
       opsRunner: (root) => real && isOpsRunner(root),
       read: () => (cfg.root ? readRunnersFile(cfg.root) : undefined),
@@ -690,8 +691,7 @@ export class Daemon {
       cpu: cpuSampler(),
       suspend: async (pid, resume) => {
         if (process.platform !== 'win32') return sendSignal(pid, resume ? 'SIGCONT' : 'SIGSTOP');
-        const r = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', winSuspendScript(pid, resume)], { timeoutMs: 60_000 });
-        return r.code !== 0 ? `powershell exited ${r.code}: ${r.stderr.trim().slice(0, 200)}` : r.stdout.trim() || undefined;
+        return winSuspend(pid, resume);
       },
       diag: (root) => (real ? readListenerLog(root) : undefined),
       read: () => (cfg.root ? readLoadGateFile(cfg.root) : undefined),
@@ -3014,4 +3014,10 @@ export function reconnectDelayMs(downForMs: number, attempt: number, rand = Math
   const jitter = 0.75 + rand * 0.5;
   if (downForMs < 120_000) return RECONNECT_MS.value * jitter;
   return Math.min(30_000, 1000 * 2 ** attempt) * jitter;
+}
+
+/** Suspend or resume one Windows process of this user's (NtSuspendProcess, no admin): the load gate's (w3305) and the bench turn's (w3454). */
+async function winSuspend(pid: number, resume: boolean): Promise<string | undefined> {
+  const r = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', winSuspendScript(pid, resume)], { timeoutMs: 60_000 });
+  return r.code !== 0 ? `powershell exited ${r.code}: ${r.stderr.trim().slice(0, 200)}` : r.stdout.trim() || undefined;
 }
