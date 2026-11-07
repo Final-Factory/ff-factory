@@ -506,6 +506,10 @@ test('w3426: a cargo target over the size cap goes on a normal pass once idle; a
   const capped = (await plan(1024 / 1024 ** 3)).items.filter((i) => i.rule === 'cargo-target-cap');
   assert.deepEqual(capped.map((i) => rel(tmp, i.path)).sort(), [`${ids.idle}/ffu/target`, `${ids.stopped}/ffu/target`]);
   assert.ok(capped.every((i) => i.inSession && /over the .* GB cap, with no cargo process and no write for 15 min/.test(i.why)), 'each says why');
+  // A target kept over the cap says why on a normal pass too (w3471), so an hourly log tells "kept" from "never looked at".
+  const heldPlan = await plan(1024 / 1024 ** 3);
+  assert.ok((heldPlan.held ?? []).some((h) => h.path.includes(ids.building) && /over the .* GB cap, but its worker runs a build/.test(h.why)), 'the building target is reported kept');
+  assert.ok(!(heldPlan.held ?? []).some((h) => h.path.includes(ids.idle)), 'a target that goes is not also kept');
   const all = await plan(1024 / 1024 ** 3);
   assert.deepEqual(all.items.filter((i) => /node_modules/.test(i.path) && /ffa-a[123]/.test(i.path)), [], "a live worker's other caches stay");
   // Under the cap (8 GB, the default): nothing of a live worker's goes without a low pass.

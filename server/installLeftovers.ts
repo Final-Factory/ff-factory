@@ -768,7 +768,9 @@ export async function planInstallLeftovers(o: {
       const busy = await cargoTargetBusy(c.path, session, o.procs, now - settle * 60_000, now);
       const no = busy ?? neverDelete(c.path, sessionRelaxed(session, relaxed(t))) ?? (await gitHolds(c.path, session));
       if (no) {
-        await hold(c.path, [c], `${size}, but ${no}`);
+        // On every pass, not only a low one (w3471): an hourly pass lists no kept item, so a target over the cap that stays
+        // could not be told from a rule that never looked at it.
+        held.push({ path: c.path, bytes, why: `1 rebuildable cache(s) kept: ${size}, but ${no}` });
         continue;
       }
       // Measured on BEAST (w3426, ffu main, a rebuild after an edit to ffu-sim): 30 s with the target whole, 52 s without
