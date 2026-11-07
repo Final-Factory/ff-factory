@@ -640,6 +640,14 @@ had room, which read as "LothDesktop can take more work but the queue isn't movi
      and `workLive` for list_work and the page. Such a request reads "queued for capacity: no computer that could take it has
      room; m5 has room but cannot take it: m5 is a Mac, which refuses the multiplayer client its MP scenario starts (w665)",
      the ping lists it under "Queued with no room for them now" with that reason, and `decide_work queue` takes it.
+   - **FFU work queues while a drive is low** (w3396, asked by Ben: "Refuse or queue a new cargo worker while its drive
+     has under about 30 GB free"). A request whose `repo` is Final-Factory/ffu (`isCargoRepo`) builds Rust, and one clean
+     debug test build wrote 14.1 GB of target on BEAST before ffu PR #381 (5.5 GB after; measured, 2026-11-07). Each
+     computer's `RoomFit.cargoShort` (`cargoShortOf`, `shared/capacity.ts`) is set while its sandbox drive, as its daemon
+     last reported it (`machines.diskRoom`), has under `CARGO_MIN_FREE_GB` (30) free; `unfitWhy` then rules it out for such
+     work, so the request reads "lothdesktop: its sandbox drive has 12.5 GB free, under the 30 GB a new FFU (cargo) worker
+     needs (w3396)" and stays Queued. start_agent refuses the dispatcher the same (unless `disk_cleanup`). Unknown free
+     space fits. Other work is not held by it: the host guard's 20 GB and 10 GB lines (hostHealth) still apply to all.
    - **Room that freed a moment ago is not yet WRONG** (w1944): the 21 flags came within seconds of the releases, before the
      ping (30 s quiet spell) had reached the dispatcher, which had started three by 22:15. `Agents.roomFacts` keeps since when
      each computer has had room (`RoomNow.since`, read each minute by the blocker watch and at every page or list_work read); a

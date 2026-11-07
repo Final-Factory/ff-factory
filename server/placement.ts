@@ -67,6 +67,8 @@ export interface Computer {
   steam?: SteamClient;
   /** Its desktop session (w2459, Machine.desktop): a pair run that clicks the game's menus goes only where it is unlocked. */
   desktop?: DesktopSession;
+  /** w3396 (shared/capacity.ts cargoShortOf): its sandbox drive is under the free space a new FFU (cargo) worker needs. */
+  cargoShort?: string;
   /**
    * The legs requests hold for it in the ledger (w1863, WorkItem.legs), by priority then oldest: work already promised the
    * next place there, so they count as its queued timed work and the Capacity block names them.
@@ -438,7 +440,7 @@ export function roomNow(places: readonly Computer[], prefs: PlacementPrefs = {})
     if (!kinds.length) continue;
     for (const k of kinds) out.slots![`${k}:${p.id}`] = slotsOf(p, k);
     out.detail![p.id] = `${p.freeSandboxes} of ${p.maxSandboxes} sandboxes free, ${p.midTurn} agents mid-turn of ${p.maxAgents} (${p.live} live), ${memPct(p) !== undefined ? `RAM ${memPct(p)}%` : 'RAM unknown'}`;
-    out.fit![p.id] = { ...(p.platform ? { platform: p.platform } : {}), ...(p.noTimedRuns ? { noTimedRuns: p.noTimedRuns } : {}), ...(p.steam ? { steam: p.steam } : {}), ...(p.desktop ? { desktop: p.desktop } : {}) };
+    out.fit![p.id] = { ...(p.platform ? { platform: p.platform } : {}), ...(p.noTimedRuns ? { noTimedRuns: p.noTimedRuns } : {}), ...(p.steam ? { steam: p.steam } : {}), ...(p.desktop ? { desktop: p.desktop } : {}), ...(p.cargoShort ? { cargoShort: p.cargoShort } : {}) };
     const why = hold.get(p.id);
     if (why !== undefined) {
       out.held.push({ id: p.id, why, for: kinds });

@@ -255,6 +255,28 @@ export interface RoomFit {
   steam?: SteamClient;
   /** Its desktop session (w2459, shared/desktop.ts): a pair run that clicks the game's menus goes only where it is unlocked. */
   desktop?: DesktopSession;
+  /** w3396: why its sandbox drive is too low for a new Rust (cargo) worker, under CARGO_MIN_FREE_GB free; absent when it has room or nobody knows. */
+  cargoShort?: string;
+}
+
+/**
+ * The free space a computer's sandbox drive needs before it takes a new FFU (Rust, cargo) worker (w3396). One clean debug
+ * test build of ffu's workspace wrote 14.1 GB of target on BEAST before w3396's profile change (measured, 2026-11-07), and
+ * LothDesktop's 300 GB V: ran out three times that day under running workers' targets: below this line such work queues.
+ */
+export const CARGO_MIN_FREE_GB = 30;
+
+/** Whether a request's repo is FFU (Final-Factory/ffu), whose workers build Rust with cargo (w3396). */
+export function isCargoRepo(repo: string | undefined): boolean {
+  if (!repo) return false;
+  const n = repo.trim().toLowerCase().replace(/^https?:\/\/github\.com\//, '').replace(/\.git$/, '').replace(/\/+$/, '');
+  return n === 'final-factory/ffu' || n === 'ffu';
+}
+
+/** The cargoShort reason for a drive with `freeBytes` free (w3396), or undefined when it has room. */
+export function cargoShortOf(freeBytes: number | undefined): string | undefined {
+  if (freeBytes === undefined || freeBytes >= CARGO_MIN_FREE_GB * 1024 ** 3) return undefined;
+  return `its sandbox drive has ${(freeBytes / 1024 ** 3).toFixed(1)} GB free, under the ${CARGO_MIN_FREE_GB} GB a new FFU (cargo) worker needs (w3396)`;
 }
 
 /**
@@ -264,11 +286,13 @@ export interface RoomFit {
  * [WRONG: biscuit, m5 have room]" while the m5, a Mac that takes no timed runs, could never run them, and the capacity ping
  * listed them as fitting its room. Unknown facts fit: a computer whose platform nobody reported is not ruled out.
  */
-export function unfitWhy(w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes'> & Partial<Pick<WorkItem, 'timedBrief' | 'timedLeg'>> & { pair?: WorkPair }, id: string, fit: Readonly<Record<string, RoomFit>> | undefined, named?: readonly string[]): string | undefined {
+export function unfitWhy(w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes'> & Partial<Pick<WorkItem, 'timedBrief' | 'timedLeg' | 'repo'>> & { pair?: WorkPair }, id: string, fit: Readonly<Record<string, RoomFit>> | undefined, named?: readonly string[]): string | undefined {
   // w2041: a retry of a pair run never goes back to a computer an earlier leg failed on.
   if (w.pair?.avoid?.includes(id)) return `${id} is where an earlier leg of this pair run failed (${w.pair.retryOf ?? 'its first run'}): a retry goes on other computers (w2041)`;
   const f = fit?.[id];
   if (!f) return undefined;
+  // w3396: an FFU worker's cargo target grows to many GB; a drive under the line takes none until the clean-up frees it.
+  if (f.cargoShort && isCargoRepo(w.repo)) return `${id}: ${f.cargoShort}`;
   // w2459: a pair run that needs Steam (lobbies, a Steam host or join) goes only where Steam is signed in.
   if (w.pair?.steam) {
     const lacks = steamLacks(id, f.steam);
