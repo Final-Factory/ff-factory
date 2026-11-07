@@ -9494,12 +9494,13 @@ test('w3455: request_pair steam "none: <why>" needs no Steam, and decide_work pa
   assert.notEqual(filed.blocked?.kind, 'steam', out);
   // w3392 as it stood: marked as needing Steam from its words, and Blocked on Steam by the blocker watch.
   const read = { legs: 2, for: 'w3360', steam: STEAM_READ };
-  putRequests(store, [{ id: 'w3392', by: BEN, status: 'queued', title: 'Pair run for w3360: Escape menu open while riding 60 s', brief: 'Ben: "Yes, no Steam: start it when two computers have room".', pair: read, constraints: pairText(read) }]);
+  // (Its words name a Steam lobby here, so the mark stands on its own: w3455's restate test below has w3392's real words.)
+  putRequests(store, [{ id: 'w3392', by: BEN, status: 'queued', title: 'Pair run for w3360: Escape menu open while riding 60 s', brief: 'Both legs meet in a Steam lobby.', pair: read, constraints: pairText(read) }]);
   assert.deepEqual(o.holdSteamPairs(), ['w3392']);
   const p = () => store.work.get('w3392')!;
   assert.deepEqual([p().status, p().blocked?.kind], ['blocked', 'steam']);
-  // override_gate and pair_legs leave it blocked; pair_steam "none" clears it.
-  const legs = await call(dispatcher().info, 'decide_work', { id: 'w3392', action: 'queue', pair_legs: 2, override_gate: 'Ben said no Steam', note: 'Ben: "Yes, no Steam"' });
+  // An override_gate that does not rule Steam out and pair_legs leave it blocked; pair_steam "none" clears it.
+  const legs = await call(dispatcher().info, 'decide_work', { id: 'w3392', action: 'queue', pair_legs: 2, override_gate: 'Ben said go', note: 'Ben: "go"' });
   assert.equal(p().status, 'blocked', legs.text);
   const none = await call(dispatcher().info, 'decide_work', { id: 'w3392', action: 'queue', pair_steam: 'none', note: 'Ben, 2026-11-07: "Yes, no Steam: start it when two computers have room"' });
   assert.equal(none.isError, false, none.text);
@@ -9516,4 +9517,48 @@ test('w3455: request_pair steam "none: <why>" needs no Steam, and decide_work pa
   await call(dispatcher().info, 'decide_work', { id: 'w3392', action: 'queue', pair_legs: 2, note: 'again' });
   assert.equal(p().pair!.steam, undefined);
   assert.equal(p().status, 'queued');
+});
+
+// w3455, after #866 deployed: w3431 and w3392 stayed Blocked on Steam, because their marks were stored before it and nothing
+// read them again (w3431: steam "none: a direct (non-Steam) host and join ..."; w3392: read from FF Factory's own filing
+// paragraph), and the dispatcher's queue with pair_legs 2, pair_menus "none" and Ben's words in override_gate kept them.
+test('w3455: a Steam mark stored before the fix is restated with no re-filing, and override_gate words that say "no Steam" clear one', async (t) => {
+  const env = await twoComputers(t);
+  const { store, agents, dispatcher, call } = env;
+  const o = agents.orchestrators;
+  agentsRoom(agents, []);
+  store.putMachine({ ...store.machines.get('pc')!, steam: { checkedAt: T0, installed: true, running: true, accountId: 7155839, persona: 'Lothsahn' } });
+  const gate = { kind: 'steam' as const, what: 'a pair run of 2 legs that needs Steam needs 2 computers signed in to different Steam accounts', at: T0, by: 'dispatcher' };
+  const filing = (p: { legs: number; steam?: string }) =>
+    `FF Factory filed this for worker 96d0517c (w1945, request_pair): ${pairText(p)}. Its legs start together.`;
+  const w3431Pair = { legs: 2, for: 'w3315', steam: "none: a direct (non-Steam) host and join as the repo's paired multiplayer runs do (ff-agents:determinism-audit / LocalMultiplayer automation)" };
+  const w3392Pair = { legs: 2, for: 'w3360', steam: STEAM_READ };
+  const steamPair = { legs: 2, for: 'w3315', steam: 'both legs join through a Steam lobby' };
+  putRequests(store, [
+    { id: 'w3431', by: BEN, status: 'blocked', blocked: gate, title: 'Pair run for w3315: Production planner client plans kept across a rejoin, PR #3358', brief: `Leg 1 (host): host a new multiplayer game from this commit (the repo's usual paired multiplayer path, not Steam).\n\n${filing(w3431Pair)}`, pair: w3431Pair, constraints: pairText(w3431Pair) },
+    { id: 'w3392', by: BEN, status: 'blocked', blocked: gate, title: 'Pair run for w3360: w3360 D: Escape menu open while riding 60 s', brief: `Ben, 2026-11-07: "Yes, no Steam: start it when two computers have room": the legs use a direct LAN or Tailscale host and join.\n\nFF Factory filed this for worker 4696760c on w3360 (w1945, request_pair): a pair run of 2 legs, only on computers whose screen is unlocked (it clicks the game's menus: read from its words: a menu, a lobby, a click).`, pair: w3392Pair, constraints: pairText(w3392Pair) },
+    { id: 'w9001', by: BEN, status: 'blocked', blocked: gate, title: 'Pair run: lobby join', brief: 'Both legs meet in a Steam lobby.', pair: steamPair, constraints: pairText(steamPair) },
+  ]);
+  const w = (id: string) => store.work.get(id)!;
+  // The dispatcher's own call on w3392, as it was refused at 21:52 UTC: it is Queued for capacity now.
+  const q = await call(dispatcher().info, 'decide_work', { id: 'w3392', action: 'queue', pair_legs: 2, pair_menus: 'none', override_gate: 'Ben, 2026-11-07: "Yes, no Steam: start it when two computers have room"', note: 'Ben cleared it to run without Steam.' });
+  assert.equal(q.isError, false, q.text);
+  assert.deepEqual([w('w3392').status, w('w3392').blocked, w('w3392').pair!.steam], ['queued', undefined, undefined], q.text);
+  assert.match(w('w3392').log.join('\n'), /\(w3455\): it needs no Steam: its stored Steam mark was read from FF Factory's own filing text, not its words; now a pair run of 2 legs/);
+  // The blocker watch alone frees w3431, with no dispatcher call: unblocked, back to the dispatcher to start or queue.
+  assert.deepEqual(o.holdSteamPairs(), []);
+  assert.deepEqual([w('w3431').status, w('w3431').blocked, w('w3431').pair!.steam], ['new', undefined, undefined]);
+  assert.match(w('w3431').pair!.noSteam ?? '', /^none: /);
+  assert.equal(w('w3431').constraints, pairText(w('w3431').pair!));
+  assert.match(w('w3431').log.join('\n'), /unblocked: computers signed in to Steam cleared \(its Steam mark was restated/);
+  const q2 = await call(dispatcher().info, 'decide_work', { id: 'w3431', action: 'queue', pair_legs: 2, note: 'Ben: no Steam.' });
+  assert.equal(w('w3431').status, 'queued', q2.text);
+  // A mark its own words make stands until a person's words rule Steam out: Ben's, given as override_gate.
+  assert.equal(w('w9001').status, 'blocked');
+  const go = await call(dispatcher().info, 'decide_work', { id: 'w9001', action: 'queue', override_gate: 'go ahead', note: 'go' });
+  assert.equal(w('w9001').status, 'blocked', go.text);
+  const none = await call(dispatcher().info, 'decide_work', { id: 'w9001', action: 'queue', override_gate: 'Ben, 2026-11-07: "Yes, no Steam: start the planner rejoin run now"', note: 'Ben cleared it to run without Steam.' });
+  assert.equal(none.isError, false, none.text);
+  assert.deepEqual([w('w9001').status, w('w9001').pair!.steam], ['queued', undefined], none.text);
+  assert.deepEqual(o.holdSteamPairs(), []);
 });

@@ -7122,7 +7122,7 @@ ${w.repo ?? ''}
           drop_leg: z.boolean().optional().describe('queue: drop its leg for needs.'),
           pair_legs: z.number().optional(),
           pair_menus: z.string().max(300).optional().describe('an unstarted pair run: what its legs click in menus, or "none"'),
-          pair_steam: z.string().max(300).optional(),
+          pair_steam: z.string().max(300).optional().describe('an unstarted pair run: why its legs need Steam, or "none" (a person cleared it to run without Steam; also read from override_gate words such as "no Steam") to drop its Steam mark and gate'),
           report: z.union([z.enum(REPORT_KINDS), z.literal(false)]).optional().describe('w2541, with any action: its result is a report of this kind (file_report; DONE waits for one); false takes it back.'),
           blockers: z.array(BLOCKER_SHAPE).max(6).optional().describe(`block: SEVERAL things it waits on (a request waiting for w727's PR and w752's fix has two). It starts only when ALL have cleared. Replaces what it waited on. Same shape as blocker.`),
           add_blocker: z.boolean().optional().describe('block with a single blocker on a request that is already blocked: add it to the gates it has, instead of replacing them.'),

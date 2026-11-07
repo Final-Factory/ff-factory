@@ -53,7 +53,7 @@ import { readDiscordConfig } from './discordConfig.ts';
 import { LIMIT_END, doneIdsIn, doneProblem, legDoneIdsIn, learnedProblem, supersededIn, reportProblem, mergedMentionsIn, notDoneReason, pausedIn, reportVerdict, stillOpenIn, toolErrors, turnEvidence, turnTroubleOf, type TurnTrouble } from './ledgerRules.ts';
 import { aheadText, answerAfter, asksAPerson, dispatcherAskIn, handUpsPending, holdsOf, orchestratorAskIn, standingTargetOf, personWaitIn, questionShareKey, reportWaitKey, roomShares, servedBy, UNDECIDED_BOUND_MS, unfiledFollowUpsIn } from '../shared/workState.ts';
 import { capacityBlockProblem, capacityWaitIn, needsOf, needsTimed, pairRoom, pairText, PAIR_MAX_LEGS, resolveNeeds, steamShortIn } from '../shared/capacity.ts';
-import { mentionsSteam, STEAM_NONE, STEAM_READ } from '../shared/steam.ts';
+import { mentionsSteam, saysNoSteam, STEAM_NONE, STEAM_READ } from '../shared/steam.ts';
 import { mentionsMenus, MENUS_NONE, MENUS_READ, saysNone } from '../shared/desktop.ts';
 import type { HandBack } from './machinePause.ts';
 import { machinePinOf } from './machinePin.ts';
@@ -3672,6 +3672,11 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       return `${this.setReport(this.requireWork(input.id), input.report, 'the dispatcher')} ${decided}`;
     }
     const into = input.into ? this.requireWork(input.into) : undefined;
+    // w3455: a Steam mark stored before #866 (w3431's "none: a direct (non-Steam) host ...", w3392's read from FF Factory's
+    // own filing text) is restated first, and a person's words in override_gate that rule Steam out ("Yes, no Steam: start
+    // it now", Ben's for both) set the pair run's Steam need to none, as pair_steam "none" does.
+    this.restateSteam(w, 'dispatcher');
+    if (input.pair_steam === undefined && input.override_gate && w.pair?.steam && !w.pair.started && saysNoSteam(input.override_gate)) input = { ...input, pair_steam: 'none' };
     // w2057: a pair run that repeats one that already finished (w665's second run of PR #2340, queued at 15:58 after w1936
     // passed) could not be dropped: start_agent refuses one leg, and a queued request cannot be queued again. pair_legs 0
     // clears the mark of a pair run whose legs never started; done closes one that never had a worker as a repeat of the run
@@ -8348,11 +8353,29 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   }
 
   /**
+   * w3455: a pair run whose stored Steam mark no longer holds (restatedSteam) gets the mark it has now, and loses its Steam
+   * gate at once, with no re-filing. Returns whether it changed.
+   */
+  private restateSteam(w: WorkItem, by: string): boolean {
+    const next = restatedSteam(w);
+    if (!next || !w.pair) return false;
+    const was = pairText(w.pair);
+    if (w.constraints === was) w.constraints = pairText(next);
+    w.pair = next;
+    this.roomFlags.delete(w.id);
+    this.stamp(w, `${by} (w3455): it needs no Steam: its stored Steam mark was ${next.noSteam ? 'its filer saying it needs none' : "read from FF Factory's own filing text, not its words"}; now ${pairText(next)} (it was ${clip(was, 200)})`);
+    this.store.putWork(w);
+    this.dropSteamGates(w, 'its Steam mark was restated: it needs no Steam (w3455)');
+    return true;
+  }
+
+  /**
    * The blocker watch's sweep (w2459): a Steam pair run New or Queued whose legs have not started, on a fleet short of
    * computers signed in to Steam, is Blocked on it (blockOnSteam). Returns the ids it blocked.
    */
   holdSteamPairs(): string[] {
     const out: string[] = [];
+    for (const w of this.store.work.values()) this.restateSteam(w, 'blocker watch');
     for (const w of this.store.work.values()) {
       if (!w.pair?.steam || w.pair.started || (w.status !== 'new' && w.status !== 'queued') || gatesOf(w).length) continue;
       const short = this.steamShortOf(w.pair);
@@ -8570,6 +8593,28 @@ export function remarkPair(p: WorkPair, x: { legs?: number; menus?: string; stea
   }
   const changed = next.legs !== p.legs || next.menus !== p.menus || next.noMenus !== p.noMenus || next.steam !== p.steam || next.noSteam !== p.noSteam;
   return { pair: next, was, changed };
+}
+
+/**
+ * w3455: an unstarted pair run's Steam mark as it should read now, when the stored one no longer holds (#866 fixed how new
+ * marks are made, and nothing re-read the stored ones): a filer's "none: <why>" kept as the reason it needed Steam (w3431)
+ * says none; a mark read from its words (STEAM_READ) whose words no longer name Steam (w3392, read from FF Factory's own
+ * filing paragraph) goes. Undefined when the stored mark stands.
+ */
+export function restatedSteam(w: Pick<WorkItem, 'title' | 'brief' | 'pair'>): WorkPair | undefined {
+  const p = w.pair;
+  if (!p?.steam || p.started) return undefined;
+  if (saysNone(p.steam)) {
+    const next: WorkPair = { ...p, noSteam: STEAM_NONE };
+    delete next.steam;
+    return next;
+  }
+  if (p.steam === STEAM_READ && !mentionsSteam(w.title, w.brief)) {
+    const next: WorkPair = { ...p };
+    delete next.steam;
+    return next;
+  }
+  return undefined;
 }
 
 /** w2900: a timed leg's brief as compared for a repeat ask: whitespace and case folded. */
