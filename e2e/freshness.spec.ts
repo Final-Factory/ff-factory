@@ -16,11 +16,14 @@ interface Deploy {
   go: () => Promise<void>;
   /** While true, /api/health refuses (the portal is draining or starting). */
   unhealthy: boolean;
+  /** Resolves once the server has the page's socket: its first message came through. */
+  live: Promise<void>;
 }
 
 /** Make the page's server look like it deploys on demand. Call before page.goto. */
 async function deployable(page: Page): Promise<Deploy> {
-  const d: Deploy = { go: async () => {}, unhealthy: false };
+  let live!: () => void;
+  const d: Deploy = { go: async () => {}, unhealthy: false, live: new Promise<void>((r) => (live = r)) };
   let deployed = false;
   // The tab's own spread over a few seconds is covered by the unit test; here it is zero, so each test is quick.
   await page.addInitScript(() => {
@@ -48,6 +51,7 @@ async function deployable(page: Page): Promise<Deploy> {
     const server = ws.connectToServer();
     ws.onMessage((m) => server.send(m));
     server.onMessage((m) => {
+      live();
       try {
         const ev = JSON.parse(String(m));
         if (ev.type === 'state' && deployed) ev.state.app = { ...ev.state.app, web: DEPLOYED };
@@ -226,6 +230,9 @@ test('a chat scrolled up is at the same message after the reload', async ({ page
   await signIn(page, 'reloader', 'e2e-password-680');
   const deploy = await deployable(page);
   await page.goto('/');
+  // The page shows its socket open before the server has it (the proxy opens the page's end first); a message sent in
+  // between reaches the chat by neither the socket nor the read, and its row never comes (w3478).
+  await deploy.live;
   const me = await appState(page.request);
   const tag = uniq('scroll');
   for (let i = 0; i < 14; i++) await sendMessage(page.request, me.orchestratorId, `row ${i} ${tag} ${'filler '.repeat(60)}`);
