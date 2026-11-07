@@ -521,6 +521,21 @@ export function doneIdsIn(text: string): string[] {
 }
 
 /**
+ * The requests a worker's report says are fully covered by other work (w3248; lothsahn: "Please make sure workers close out
+ * work requests if they're fully superseded by another"): lines `SUPERSEDED: w342 by w340` (or `by #3244`, `by PR 3244,
+ * merged on master`), markdown around them allowed, one request per line. `by` is what covers it, as written (200 characters
+ * at most); the first line for a request wins.
+ */
+export function supersededIn(text: string): { id: string; by: string }[] {
+  const out = new Map<string, string>();
+  for (const m of (text ?? '').matchAll(/^[\s*_>`-]*SUPERSEDED:?[*_`]*\s+[*_`]*(w\d+)(?!\w)[*_`]*\s+by\s+(\S.*?)[\s*_`]*$/gim)) {
+    const id = m[1].toLowerCase();
+    if (!out.has(id)) out.set(id, m[2].trim().slice(0, 200));
+  }
+  return [...out].map(([id, by]) => ({ id, by }));
+}
+
+/**
  * The requests a worker's report says ONE LEG of is finished (w2972): lines that start `LEG DONE: w2895`, any words after the
  * id (`LEG DONE: w2895 row M2.17`). A fan-out's row worker ends with it: its leg is recorded as done and the request stays
  * open for its other legs (Orchestrators.legDoneMarkers); only a `DONE: <id>` closes it. 50e2b52d (w2895 row M2.17) declined

@@ -50,7 +50,7 @@ import {
 } from './work.ts';
 import { autoApproveProblem, cleanBlock, cleanLine, crashFacts, crashKinship, crashPeersBlock, identityKeys, ownApprovalCount, parseMarkers, quoteUntrusted, sourceTag, titleOnly } from './intakeRules.ts';
 import { readDiscordConfig } from './discordConfig.ts';
-import { LIMIT_END, doneIdsIn, doneProblem, legDoneIdsIn, learnedProblem, reportProblem, mergedMentionsIn, notDoneReason, pausedIn, reportVerdict, stillOpenIn, toolErrors, turnEvidence, turnTroubleOf, type TurnTrouble } from './ledgerRules.ts';
+import { LIMIT_END, doneIdsIn, doneProblem, legDoneIdsIn, learnedProblem, supersededIn, reportProblem, mergedMentionsIn, notDoneReason, pausedIn, reportVerdict, stillOpenIn, toolErrors, turnEvidence, turnTroubleOf, type TurnTrouble } from './ledgerRules.ts';
 import { aheadText, answerAfter, asksAPerson, dispatcherAskIn, handUpsPending, holdsOf, orchestratorAskIn, standingTargetOf, personWaitIn, questionShareKey, reportWaitKey, roomShares, servedBy, UNDECIDED_BOUND_MS, unfiledFollowUpsIn } from '../shared/workState.ts';
 import { capacityBlockProblem, capacityWaitIn, needsOf, needsTimed, pairRoom, pairText, PAIR_MAX_LEGS, resolveNeeds, steamShortIn } from '../shared/capacity.ts';
 import { mentionsSteam, STEAM_READ } from '../shared/steam.ts';
@@ -5754,6 +5754,8 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     this.intakeMarkers(s, text);
     // w2969: read before its DONE, so a report that says both ("couldn't file the five build requests … DONE") keeps it open.
     this.unfiledInReport(s, text, served);
+    // w3248: before its DONE lines, so a request said to be superseded closes as that, not as done.
+    this.supersededMarkers(s, text);
     this.doneMarkers(s, text);
     this.legDoneMarkers(s, text);
     this.mergedMentions(s, text);
@@ -6146,7 +6148,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
           refused.push(
             ops
               ? `${id}: the job was not sent for it (ops_worker send with work_ids names the requests a job is a step of)`
-              : `${id}: you are not one of its workers and no request of yours names it, so your DONE does not close it (tell the dispatcher in your report instead)`,
+              : `${id}: you are not one of its workers and no request of yours names it, so your DONE does not close it (if other work fully covers it, end a report with a line \`SUPERSEDED: ${id} by <what covers it>\`: it goes to the dispatcher, w3248)`,
           );
           continue;
         }
@@ -6218,6 +6220,79 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   }
 
   /** Tell a worker which of its DONEs were not accepted and why, each reason at most once in 6 hours. */
+  /**
+   * A worker's `SUPERSEDED: wNNN by <what>` lines (w3248, supersededIn): a request it found fully covered by other work (another
+   * request, a PR, a fix already on master). One of its own, or one its request names (namedBy, as for DONE), closes as
+   * cancelled with "superseded by <what>" as its outcome, and its people are told. Not while a PR of it is open (read live
+   * first, as for DONE: the worker closes it on GitHub, naming what supersedes it) or another worker is still on it; such a
+   * request, and one nothing of the worker's names, goes to the dispatcher to decide (a non-owner's request is not closed on
+   * a worker's word alone), and the worker is told where it went.
+   */
+  private supersededMarkers(s: SessionInfo, text: string) {
+    for (const { id, by } of supersededIn(text)) {
+      const w = this.store.work.get(id);
+      if (!w || !(isOpen(w) || w.status === 'stalled')) {
+        if (!w) this.tellWorker(s, `[ledger] SUPERSEDED: ${id}: there is no such request.`);
+        continue;
+      }
+      if (new RegExp(`^\\W*${id}\\b`, 'i').test(by)) {
+        this.tellWorker(s, `[ledger] SUPERSEDED: ${id}: a request is not superseded by itself; name the request, PR or commit that covers it.`);
+        continue;
+      }
+      const open = (w.prs ?? []).some((p) => p.state === 'open');
+      if (open && this.prsLive) void this.prsLive(id).catch(() => undefined).then(() => this.supersede(s, id, by));
+      else this.supersede(s, id, by);
+    }
+  }
+
+  private supersede(s: SessionInfo, id: string, by: string) {
+    const w = this.store.work.get(id);
+    if (!w || !(isOpen(w) || w.status === 'stalled')) return;
+    const own = w.sessionIds.includes(s.id);
+    const from = own ? undefined : this.namedBy(s.id, id);
+    const open = (w.prs ?? []).find((p) => p.state === 'open');
+    if (open) {
+      this.stamp(w, `worker ${s.id} says it is superseded by ${by}, not closed: PR #${open.number} is still open (w3248)`);
+      this.store.putWork(w);
+      return this.tellWorker(s, `[ledger] SUPERSEDED: ${id} not closed: its PR #${open.number} is still open. Close it on GitHub with a comment naming what supersedes it (gh pr close ${open.number} --comment "Superseded by …"), then say \`SUPERSEDED: ${id} by …\` again.`);
+    }
+    const others = this.stillOn(w, s.id);
+    if ((own || from) && !others.length) return this.closeSuperseded(w, s, by, from);
+    const why = others.length ? `${others.map((x) => this.workerLine(x)).join(', ')} ${others.length > 1 ? 'are' : 'is'} still on it` : `no request of worker ${s.id}'s names it`;
+    const hands = this.handsOf(s.id).map((h) => h.id).filter((x) => x !== id);
+    this.stamp(w, `worker ${s.id} says it is superseded by ${by}; sent to the dispatcher to decide (${why}) (w3248)`);
+    this.store.putWork(w);
+    this.toDispatcher(
+      `[ledger] Worker ${s.id}${hands.length ? ` (on ${hands.join(', ')})` : ''} says ${w.id} "${clip(w.title, 80)}" (${names(w.requesters)}'s, ${w.status}) is fully covered by other work: superseded by ${by}. Its word does not close it (${why}). Check it and decide (w3248): reject it with a note "superseded by …" naming what covers it (its people are told), merge it into the request that covers it when that one is open and merge takes it, or leave it open and say what it still needs.`,
+    );
+    this.tellWorker(s, `[ledger] SUPERSEDED: ${id} went to the dispatcher to decide (${why}). Nothing more is needed from you on it.`);
+  }
+
+  /** Closes `w` as superseded on worker `s`'s word (w3248): cancelled, with what covers it as its outcome; its people are told. */
+  private closeSuperseded(w: WorkItem, s: SessionInfo, by: string, from?: WorkItem) {
+    if (from) {
+      w.sessionIds = [...w.sessionIds, s.id];
+      w.links = { ...w.links, [s.id]: { at: this.now().toISOString(), how: 'linked' } };
+    }
+    settleByHand(w);
+    w.status = 'cancelled';
+    w.stalled = undefined;
+    w.outcome = `superseded by ${by}`;
+    const how = `worker ${s.id} found it fully covered${from ? `, from ${from.id} "${clip(from.title, 80)}" (${names(from.requesters)}'s), which names it` : ''}`;
+    this.stamp(w, `closed as superseded by ${by}: ${how} (w3248)`);
+    this.store.putWork(w);
+    const audience = [...w.requesters, ...(from?.requesters ?? []).filter((r) => !isFor(w, r.userId))];
+    this.toPeople(audience, `[ledger] ${w.id} "${clip(w.title, 100)}" (${names(w.requesters)}'s) closed as superseded by ${by}: ${how}.`);
+  }
+
+  private tellWorker(s: SessionInfo, text: string) {
+    try {
+      this.sessions.send(s.id, text, 'system', undefined, { requestedBy: s.requestedBy });
+    } catch {
+      // it is at a limit: the request's log has it
+    }
+  }
+
   private tellRefused(s: SessionInfo, refused: readonly string[], tell?: (lines: string[]) => void) {
     if (!refused.length) return;
     const now = this.now().getTime();
