@@ -258,12 +258,18 @@ export interface QueueTicket {
    * epoch s: once the machine's CI jobs drained). Only the session's priorities.json mark makes the approval count. */
   approved?: boolean;
   turnStart?: number;
+  /** w3454: the grant still waits out the machine's CI jobs (turn.json ci_wait): its turn's clock has not started. */
+  ciWait?: boolean;
 }
 
-/** w3186: a ticket's approval and its turn's start (bench_queue.py start_approved_turn), when it has them. */
-function turnOf(info: Record<string, unknown>, turn: { start?: unknown } | undefined): Pick<QueueTicket, 'approved' | 'turnStart'> {
-  if (!info.approved || typeof info.approved !== 'object') return {};
-  return { approved: true, ...(typeof turn?.start === 'number' ? { turnStart: turn.start } : {}) };
+/** w3186: a ticket's approval and its turn's start (bench_queue.py start_approved_turn), when it has them; w3454: any
+ * timing's turn starts at turn.json start ("time now", after its CI wait), and has not started while ci_wait is set. */
+function turnOf(info: Record<string, unknown>, turn: { start?: unknown; ci_wait?: unknown } | undefined): Pick<QueueTicket, 'approved' | 'turnStart' | 'ciWait'> {
+  const approved = !!info.approved && typeof info.approved === 'object';
+  return {
+    ...(approved ? { approved: true } : {}),
+    ...(typeof turn?.start === 'number' ? { turnStart: turn.start } : turn?.ci_wait !== undefined && turn?.ci_wait !== null ? { ciWait: true } : {}),
+  };
 }
 
 /** The tickets in the queue whose helper process lives, in order (read only: the helpers' OS locks are the truth). */

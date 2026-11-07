@@ -86,7 +86,8 @@ function glance(t: QueueTicket, info: Record<string, unknown> | undefined, m: Ma
   const mark = m.sessions[t.session ?? ''];
   // w3186: an approved ticket's turn runs from its turn.json start (after the CI drain), at the approved minutes
   const approved = t.mode === 'exclusive' && t.approved && mark?.approvedMin ? mark.approvedMin : undefined;
-  const granted = t.granted ? (approved ? (t.turnStart ? t.turnStart * 1000 : NaN) : t.granted.ts * 1000) : NaN;
+  // w3454: any timing's turn starts at its turn.json start, after its CI wait, and has no start while it waits
+  const granted = t.granted ? (t.turnStart ? t.turnStart * 1000 : approved || t.ciWait ? NaN : t.granted.ts * 1000) : NaN;
   const since = t.granted ? t.granted.ts * 1000 : t.created ? Date.parse(t.created) : NaN;
   const exempt = mark?.exempt;
   const preempt = urgentRelease(t, info, m);
@@ -130,6 +131,7 @@ function glance(t: QueueTicket, info: Record<string, unknown> | undefined, m: Ma
     const ts = iso(granted);
     if (ts) out.turnStart = ts;
   }
+  if (t.granted && t.ciWait && !approved) out.ciWait = true;
   if (preempt) out.preempt = true;
   if (!t.granted && t.parked) out.parked = String(t.parked.why ?? 'its worker is away').slice(0, 160);
   const ks = keep ? iso(typeof keep.since === 'number' ? keep.since * 1000 : since) : undefined;
