@@ -20,7 +20,7 @@ import { poolForRef, type GatePoolToken } from './usageGate.ts';
 import { personForWork, sessionPerson, setVaultContext } from './vault.ts';
 import { fakeToken, useFakeVault } from './testVault.ts';
 import { parseNotice } from '../shared/notices.ts';
-import { holdsOf, portalWaitIn, requestWaitOf, siblingWaitOf } from '../shared/workState.ts';
+import { diskWaitIn, holdsOf, portalWaitIn, requestWaitOf, siblingWaitOf } from '../shared/workState.ts';
 import { latestLine } from '../shared/latestLine.ts';
 import { CARDS_MARK, HELD_MARK, inPersonWords } from '../shared/conditional.ts';
 import { personMessageView } from '../shared/personMessage.ts';
@@ -9306,4 +9306,74 @@ test('w3328: disk_cleanup marks a request a disk clean-up of a machine, from req
   // A flag for another machine does not reach a worker on this one.
   store.work.get('w3')!.diskCleanup = { machine: 'elsewhere', by: 'Ben', at: '' };
   assert.equal(spec3().diskCleanup, undefined);
+});
+
+test('w3338: a worker that paused for low disk is Blocked on disk space on its machine and resumed only once that disk is back above its warning line plus the margin; blocked_on disk does the same; a clean-up request is never gated on it', async (t) => {
+  const { store, agents, o, dispatcher, call } = await setupOnMachine(t);
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }]);
+  let clock = Date.now();
+  let freeGB = 11;
+  const GB = 1024 ** 3;
+  const watch = new BlockerWatch({ store, orchestrators: o, now: () => clock, online: (m) => (m === 'pc' ? true : undefined), disk: (m) => (m === 'pc' ? { freeBytes: freeGB * GB, warnGB: 15 } : undefined), checkInPending: (id) => agents.waker.pending(id) !== undefined });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Fix it', title: 'w1: comet catcher', work_id: 'w1' });
+  assert.equal(started.isError, false, started.text);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const info = store.sessions.get(id)!;
+  await until('its first turn', () => info.status === 'idle');
+  const machine = info.machineId!.toLowerCase();
+  const w = store.work.get('w1')!;
+  // c4cdb382 (w3212) on 2026-11-07 at 07:07Z, after the [disk critical] notice.
+  Object.assign(info, { status: 'stopped', lastActivityAt: new Date(clock - 60_000).toISOString(), lastResult: 'w1: still open: paused for low disk on V: (11 GB free); the fix is committed and pushed', lastResultAt: new Date(clock - 60_000).toISOString() });
+  assert.match((await watch.tick()).get('w1') ?? '', /^recorded: the wait on disk space on \S+ its worker \w+'s report names \(w3338\)/);
+  assert.deepEqual([w.status, w.blocked?.kind, w.blocked?.ref], ['blocked', 'disk', machine]);
+  assert.equal(blockerName(w.blocked!), `disk space on ${machine}`);
+  // Still low, and then above the warning line but inside the margin (15 + 5 GB): no resume, so it cannot flap.
+  for (const gb of [11, 17, 19.9]) {
+    freeGB = gb;
+    clock += 10 * 60_000;
+    assert.equal((await watch.tick()).has('w1'), false, `${gb} GB free`);
+    assert.equal(w.status, 'blocked');
+    assert.equal(agents.waker.pending(id), undefined, `not resumed at ${gb} GB`);
+  }
+  // 28 GB free (07:58Z): resumed with no person's nudge.
+  freeGB = 28;
+  assert.match((await watch.tick()).get('w1') ?? '', /^clear: \S+ has 28 GB free \(its warning line 15 GB \+ 5\)/);
+  assert.equal(w.status, 'active');
+  assert.ok(agents.waker.pending(id), 'its worker is resumed');
+  agents.waker.cancel(id);
+  assert.equal((await watch.tick()).has('w1'), false, 'the same report is not recorded again');
+  // blocked_on disk: the worker's own machine.
+  freeGB = 9;
+  o.workerBlocked(id, { disk: true, what: 'disk space back' });
+  assert.deepEqual([w.status, w.blocked?.kind, w.blocked?.ref], ['blocked', 'disk', machine]);
+  assert.equal((await watch.tick()).has('w1'), false);
+  freeGB = 40;
+  assert.match((await watch.tick()).get('w1') ?? '', /^clear: /);
+  assert.equal(w.status, 'active');
+  // A disk clean-up request (w3328) saying the disk is low is doing the freeing, not waiting on it.
+  agents.waker.cancel(id);
+  freeGB = 9;
+  w.diskCleanup = { machine, by: 'lothsahn', at: new Date(clock).toISOString() };
+  clock += 60_000;
+  Object.assign(info, { status: 'stopped', lastActivityAt: new Date(clock - 30_000).toISOString(), lastResult: 'w1: still open: waiting for low disk space to recover after the clean-up', lastResultAt: new Date(clock - 30_000).toISOString() });
+  await watch.tick();
+  assert.equal(w.blocked, undefined, 'a clean-up is never gated on disk');
+});
+
+test('w3338: diskWaitIn reads the five low-disk pause lines of 2026-11-07 and not a clean-up, CI or a person', () => {
+  for (const l of [
+    'w3212: still open: paused for low disk on V: (11 GB free); the fix is committed and pushed',
+    'w3335: still open: paused until disk space is freed on lothdesktop, then the 1.0.0.41 leg',
+    'w3252: still open: stopped because of the disk critical notice; the timed leg waits for free disk space',
+    'w3273: still open: holding for more disk space before the next build',
+    'w3275: still open: waiting on low disk space on lothdesktop',
+    'w1: still open: blocked on disk space on lothdesktop',
+  ]) assert.equal(diskWaitIn(l), true, l);
+  for (const l of [
+    'w1: still open: free more disk space on V: (the clean-up)',
+    'w1: still open: blocked on CI on PR #12',
+    'w1: still open: the disk clean-up freed 20 GB',
+    'w1: still open: waiting on lothsahn to approve',
+  ]) assert.equal(diskWaitIn(l, ['lothsahn']), false, l);
 });

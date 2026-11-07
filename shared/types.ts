@@ -2619,8 +2619,8 @@ export interface WorkPr {
  * (the nightly lab.lock), a time, the CI checks of a pull request, (w754) a pull request merging, or (w2459) enough
  * computers signed in to Steam for a pair run that needs it.
  */
-export type WorkBlockerKind = 'request' | 'deploy' | 'machine' | 'usage' | 'lock' | 'time' | 'ci' | 'pr' | 'steam' | 'worker';
-export const WORK_BLOCKER_KINDS: readonly WorkBlockerKind[] = ['request', 'deploy', 'machine', 'usage', 'lock', 'time', 'ci', 'pr', 'steam', 'worker'];
+export type WorkBlockerKind = 'request' | 'deploy' | 'machine' | 'usage' | 'lock' | 'time' | 'ci' | 'pr' | 'steam' | 'worker' | 'disk';
+export const WORK_BLOCKER_KINDS: readonly WorkBlockerKind[] = ['request', 'deploy', 'machine', 'usage', 'lock', 'time', 'ci', 'pr', 'steam', 'worker', 'disk'];
 /** The kinds decide_work block may set: `steam` (w2459) and `worker` (w2476) only FF Factory sets, so it stays out of the dispatcher's always-loaded schema. */
 export const SET_BLOCKER_KINDS: readonly WorkBlockerKind[] = WORK_BLOCKER_KINDS.filter((k) => k !== 'steam' && k !== 'worker');
 
@@ -2644,6 +2644,7 @@ export interface WorkBlocker {
    * the portal. machine: the machine id. usage: the Claude account (its email or label). lock: the lock ("lab.lock").
    * ci and pr: the pull request ("owner/repo#123"). time and steam: absent (steam reads the blocked pair run itself).
    * worker (w2476): another worker's session id on the same request, whose DONE for its part or final report clears it.
+   * disk (w3338): the machine id whose sandbox volume is low on free space.
    */
   ref?: string;
   /** request (and a lock some request holds): clears when that request closes as done (`done`, default) or reports. */

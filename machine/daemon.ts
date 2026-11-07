@@ -685,6 +685,7 @@ export class Daemon {
     this.loadGate = new LoadGate({
       settings: real ? LOAD_GATES[cfg.id.toLowerCase()] : undefined,
       procs: real ? () => pd.procs() : async () => [],
+      freshProcs: real ? () => realUnityDeps(platform).procs() : async () => [],
       cpu: cpuSampler(),
       suspend: async (pid, resume) => {
         if (process.platform !== 'win32') return sendSignal(pid, resume ? 'SIGCONT' : 'SIGSTOP');

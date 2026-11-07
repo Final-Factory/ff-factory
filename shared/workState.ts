@@ -359,6 +359,19 @@ export function portalWaitIn(line: string, people: readonly string[] = []): bool
 }
 
 /**
+ * w3338: a line that says its worker stopped for low disk space on its machine, so the disk's recovery resumes it. On
+ * 2026-11-07 lothdesktop's V: fell to 11 GB at 07:07Z and five workers ended their turns so: "paused for low disk",
+ * "paused for low disk space", "paused for the disk warning", "waiting on disk space on lothdesktop", "waiting on enough
+ * free space on V: to build the 1.0.0.41 player"; each sat Stalled with no gate, and nothing resumed them when 28 GB was
+ * free again at 07:58Z. A wait or pause word, then the disk in a few words: never a line that only does disk work ("free
+ * more disk space", a clean-up's own step).
+ */
+const DISK_WAIT = /\b(?:paused|pausing|waiting|waits?|blocked|held|holding|stopped|stopping)\b(?:\s+(?:on|for|by|until|because\s+of|due\s+to))?[^;.]{0,40}?\b(?:(?:low|free|enough|more)\s+(?:disk(?:\s+space)?|space)|disk\s+(?:space|warning|guard|critical|is\s+low|low)|the\s+disk\b)/i;
+export function diskWaitIn(line: string, people: readonly string[] = []): boolean {
+  return !personWaitOn(line, people) && DISK_WAIT.test(line);
+}
+
+/**
  * w2476: another worker of the same request a line waits on, by its session id ("waiting for worker 17cae99a's LothLaptop
  * leg") or as "the <X> leg" (X its machine or sandbox: "waiting on the LothLaptop leg"). w2448's worker b9cd085e said so at
  * 09:41 and 10:22 UTC, 17cae99a said DONE for its part at 10:43, and nothing resumed b9cd085e for 1.5 hours. `siblings`:

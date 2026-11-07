@@ -330,7 +330,7 @@ machines.sandboxEvent = (machineId, text, e) => {
   for (const s of store.sessions.values()) {
     if (s.machineId !== machineId || !s.machineSandbox || !['running', 'starting', 'waiting_permission'].includes(s.status)) continue;
     try {
-      sessions.send(s.id, '[disk critical] Free disk space on this machine is critically low. Commit and push your work now (a WIP commit is fine) and end your turn; new work waits until space is freed. You will be told when to continue.', 'system');
+      sessions.send(s.id, '[disk critical] Free disk space on this machine is critically low. Commit and push your work now (a WIP commit is fine), call blocked_on with disk: true and end your turn; new work waits until space is freed. You are resumed when the disk of this machine is back above its warning line.', 'system');
     } catch {
       // it sees the refusal on its next start
     }
@@ -892,6 +892,7 @@ const blockerWatch = new BlockerWatch({
   // A usage gate naming a vault token (w1109: the dispatcher token's stop) clears when that token's owner's pool can serve a
   // worker again, on that token or another; any other account when its meters are clear.
   usageClear: (account) => ownerPoolServes(account) ?? accountClear(account),
+  disk: (id) => machines.diskRoom(id),
   nightlyAt: () => nightlyAt,
   room: () => agents.roomNow(),
   roomFacts: () => agents.roomFacts(),

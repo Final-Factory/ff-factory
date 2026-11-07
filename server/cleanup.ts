@@ -334,7 +334,8 @@ export async function localWorkWhy(dir: string, timeoutMs = 15_000): Promise<str
   try {
     const work: string[] = [];
     const status = await git('status', '--porcelain');
-    if (status) work.push(n(status.split('\n').length, 'uncommitted change'));
+    const changes = status ? await realChanges(dir, status.split('\n'), Math.max(timeoutMs, 60_000)) : 0;
+    if (changes) work.push(n(changes, 'uncommitted change'));
     let ahead = Number(await git('rev-list', '--count', 'HEAD', '--not', '--remotes'));
     // The clone's own remote refs are a snapshot from its last fetch, and a clone of a sandbox only sees the sandbox's
     // heads: pushed commits counted as "on no remote" (w3180). Recount against what each remote holds now, read without
@@ -349,6 +350,40 @@ export async function localWorkWhy(dir: string, timeoutMs = 15_000): Promise<str
     return work.length ? work.join(', ') : undefined;
   } catch (e) {
     return `its git state could not be read (${String((e as Error).message ?? e).split('\n')[0]!.slice(0, 120)})`;
+  }
+}
+
+/**
+ * How many of `git status --porcelain`'s lines are real changes (w3330). Status flags a tracked file whose size differs
+ * from the index's without reading it, and an index can record another size than the file holds: a Git LFS checkout whose
+ * files were linked in after the index was written (its pointers' 132 bytes against the real file), or a file rewritten
+ * with CRLF endings. Two temp clones on LothDesktop showed 2,889 and 4,965 "uncommitted changes" that way, 14 and 18 GB
+ * kept for good, while `git diff` found one real change in each (measured, 2026-11-07). So a tracked line counts only when
+ * `git diff HEAD` compares its content (through the clean filters) and finds it changed, with CR-only line ends ignored;
+ * untracked files always count. Unknown counts as every line, as before. `--name-only` ignores --ignore-cr-at-eol (it lists
+ * a CRLF-only file, measured with git 2.50); `--numstat` leaves such a file out, and shows 0/0 for an empty file added or
+ * deleted, which `--summary` names.
+ */
+async function realChanges(dir: string, lines: string[], timeoutMs: number): Promise<number> {
+  const untracked = lines.filter((l) => l.startsWith('??')).length;
+  if (untracked === lines.length) return untracked;
+  try {
+    const out = await new Promise<string>((resolve, reject) =>
+      execFile('git', ['--no-optional-locks', '-C', dir, 'diff', 'HEAD', '--no-renames', '--ignore-cr-at-eol', '--numstat', '--summary'], { encoding: 'utf8', timeout: timeoutMs, windowsHide: true, maxBuffer: 64 * 1024 * 1024 }, (e, o) => (e ? reject(e) : resolve(String(o)))),
+    );
+    const changed = new Set<string>();
+    for (const l of out.split('\n')) {
+      const num = /^(\d+|-)\t(\d+|-)\t(.*)$/.exec(l);
+      if (num) {
+        if (num[1] !== '0' || num[2] !== '0') changed.add(num[3]!);
+        continue;
+      }
+      const sum = /^ (?:(?:create|delete) mode \d+|mode change \d+ => \d+) (.*)$/.exec(l);
+      if (sum) changed.add(sum[1]!);
+    }
+    return untracked + changed.size;
+  } catch {
+    return lines.length;
   }
 }
 
