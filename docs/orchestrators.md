@@ -1061,8 +1061,15 @@ without one means it is off or failing, worth a person's look.
      worker's check-in and tells it to end its turn. The dispatcher's `decide_work block` is the other way in. The backstop
      for a lost call is the report's `still open:` line (`BlockerWatch.recordReportedWaits`): a stopped worker's line that
      waits on an open request (w2422, `requestWaitOf`), on FF Factory, which only a portal deploy brings (w2457,
-     `portalWaitIn`), or on another worker of the request (w2476, `siblingWaitOf`) becomes that worker's own gate, marked
-     `reported` (the report it was read from). **A line that waits on a person is never read so** (w2495, `personWaitOn`, with
+     `portalWaitIn`), on another worker of the request (w2476, `siblingWaitOf`), or on low disk (w3338, `diskWaitIn`:
+     "paused for low disk", never for a clean-up request, `WorkItem.diskCleanup`) becomes that worker's own gate, marked
+     `reported` (the report it was read from). **Disk gates** (w3338, kind `disk`, ref the worker's machine; also
+     `blocked_on` with `disk: true`, which the `[disk critical]` notice now asks for) show "Blocked on disk space on
+     <machine>" and clear when that machine's reported free space (`Machines.diskRoom`) reaches its pool's `diskWarnGB`
+     plus `DISK_RESUME_MARGIN_GB` (5 GB, the daemon guard's hysteresis), so a disk hovering at the line does not flap. It
+     reads the portal's pool setting, not the daemon's own level, which can use daemon.json's stale `disk_warn_gb` for
+     the seconds after a daemon restart. On 2026-11-07 five lothdesktop workers paused at 07:07Z sat Stalled with no
+     gate and were resumed only by hand after V: had 28 GB free at 07:58Z. **A line that waits on a person is never read so** (w2495, `personWaitOn`, with
      the request's people): it is the person's wait (Waiting on input, below), whatever product it names. w2443's worker wrote
      "waiting on lothsahn to click Pause in FF Factory's tray on LothLaptop for the live test", the ledger made a portal
      deploy gate of it, and lothsahn's answer was held for a deploy that never came. `portalWaitIn` also refuses a "<who> to
