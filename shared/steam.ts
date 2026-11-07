@@ -181,5 +181,8 @@ export function steamConnection(tail: string): string | undefined {
   return [off, failed].filter(Boolean).join('; ') || `its connection is ${state}`;
 }
 
+/** Why a pair run's legs need no Steam, when its filer said so (WorkPair.noSteam): its words are not read. */
+export const STEAM_NONE = 'none: its legs need no Steam, as its filer said (request_pair steam "none")';
+
 /** Why a pair run needs Steam when its words said so and its filer did not (WorkPair.steam). */
 export const STEAM_READ = 'read from its words: a lobby or a Steam host or join; request_pair steam "none" says it needs none';

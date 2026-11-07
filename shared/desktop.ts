@@ -39,8 +39,12 @@ const MENU_WORDS = [/\bmenus?\b/i, /\blobb(y|ies)\b/i, /\bclick(s|ed|ing)?\b/i, 
  */
 export const mentionsMenus = (...texts: (string | undefined)[]): boolean => texts.some((t) => !!t && MENU_WORDS.some((re) => affirmedMention(t, re)));
 
-/** A request_pair `menus` (or `steam`) that says its legs click none (need none): "none", "no", "false", "off". */
-export const saysNone = (said: string | undefined): boolean => /^(?:none|no|false|off)$/i.test((said ?? '').trim());
+/**
+ * A request_pair `menus` (or `steam`) that says its legs click none (need none): "none", "no", "false", "off", alone or
+ * followed by why (w3455: w3431's worker said steam "none: a direct (non-Steam) host and join", and that was kept as
+ * the reason it needed Steam).
+ */
+export const saysNone = (said: string | undefined): boolean => /^(?:none|no|false|off|not needed|not required)(?:$|[\s:;,.(\u2013\u2014-])/i.test((said ?? '').trim());
 
 /** Why a pair run clicks the game's menus when its words said so and its filer did not (WorkPair.menus). */
 export const MENUS_READ = 'read from its words: a menu, a lobby, a click; request_pair menus "none" says it clicks none';

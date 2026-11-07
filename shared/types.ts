@@ -2118,6 +2118,11 @@ export interface WorkPair {
    * "none"): its words are then never read for menu clicks again (w2631's "no menus" was).
    */
   noMenus?: string;
+  /**
+   * Its legs need no Steam, as its filer or a person through the dispatcher said (w3455: request_pair steam "none",
+   * decide_work pair_steam "none"): its words are then never read for Steam again, and it is never Blocked on Steam.
+   */
+  noSteam?: string;
   /** A leg takes timing measurements (exclusive bench tickets): never on a computer that takes no timed runs (m5, w1861). */
   timed?: boolean;
   /** When its legs started together, and where: leg 1 (the host) first. */
