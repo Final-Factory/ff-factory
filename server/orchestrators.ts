@@ -293,6 +293,22 @@ const CAPACITY = { quietMs: 30_000, gapMs: 2 * 60_000, perHour: 20, maxQuietMs: 
  */
 export const FANOUT = { settleMs: 60_000, gapMs: 30 * 60_000, repeatMs: 4 * 3_600_000 };
 
+/**
+ * w3289: the workers already told to mark a result for `waiter` on `x` (tellReportWaited): the gate's `told`, else, for a
+ * gate set before `told` was kept, the ones `x`'s log names ("w3246 waits on its report (…): told a, b to mark it").
+ */
+export function toldOf(g: WorkBlocker, x: Pick<WorkItem, 'log'>, waiter: string): Set<string> {
+  if (g.told) return new Set(g.told);
+  const out = new Set<string>();
+  const mark = `${waiter.toLowerCase()} waits on its report (`;
+  for (const line of x.log) {
+    const at = line.toLowerCase().indexOf(mark);
+    const m = at < 0 ? null : /\): told ([\w, -]+) to mark it/.exec(line.slice(at));
+    if (m) for (const sid of m[1].split(',')) if (sid.trim()) out.add(sid.trim());
+  }
+  return out;
+}
+
 /** w2417: remember the requests these gates wait on (WorkItem.waitedOn), so read_work keeps them readable after they clear. */
 export function noteWaitedOn(w: WorkItem, gates: readonly WorkBlocker[]) {
   const refs = gates.filter((g) => g.kind === 'request' && g.ref).map((g) => g.ref!.toLowerCase());
@@ -3545,6 +3561,13 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
    * w1869: a request newly blocked on another's report (on: report) clears only when that report carries what it waits for
    * (ledgerRules `reportDelivers`), so the other request's workers are told what that is and how to mark it: a line
    * `For <waiter>: …`, or their DONE. Not one that waits on a person: a message would end its declaration. Returns them.
+   * w3289: each worker is told once per gate (`told`), and the blocker watch tells the ones it missed (`retellReportWaits`):
+   * w3246 (the pre-1.0 release) was blocked on "w3245 reporting (the 1.0 release live with its notes posted)" at 22:11 on
+   * 2026-11-06, the minute w3245's worker started, and that worker was never told (w3245's log has no "waits on its
+   * report" line); its 23:08 report said the release was live with its notes posted but ended "w3245: still open: the
+   * 24-hour check …" with no "For w3246:" line, so w3246 sat Blocked until lothsahn unblocked it by hand at 01:10. A worker
+   * stopped between turns on an active request (asleep on its own check-in, as w3245's was for its 24-hour after-check) is
+   * told too: the message resumes it and keeps its check-in, so a milestone it already reached is marked within minutes.
    */
   private tellReportWaited(waiter: WorkItem, gates: readonly WorkBlocker[]): string[] {
     const all = [...this.store.work.values()];
@@ -3553,21 +3576,46 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
       if (g.kind !== 'request' || g.on !== 'report' || !g.ref) continue;
       const x = this.store.work.get(g.ref.toLowerCase());
       if (!x || !isOpen(x)) continue;
+      const told = toldOf(g, x, waiter.id);
+      const now: string[] = [];
       for (const sid of x.sessionIds) {
         const s = this.store.sessions.get(sid);
-        if (!s || s.kind !== 'worker' || s.status === 'stopped' || s.status === 'error' || s.waitingOn || !servedBy(sid, all).has(x.id) || out.includes(sid)) continue;
+        if (!s || s.kind !== 'worker' || s.status === 'error' || (s.status === 'stopped' && x.status !== 'active') || s.waitingOn || !servedBy(sid, all).has(x.id) || out.includes(sid) || told.has(sid)) continue;
         try {
           this.sessions.send(sid, `[about ${x.id} "${clip(x.title, 80)}"]
 ${waiter.id} ("${clip(waiter.title, 80)}") is blocked until a report of yours on ${x.id} carries: ${g.what}.
-${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line "For ${waiter.id}: <the result, or where it is>" and its "DONE: ${x.id}", or every leg's "DONE: ${x.id}", unblocks ${waiter.id}; another leg's turn end never does, whatever it says.` : `When one does, put a line "For ${waiter.id}: <the result, or where it is>" in that report: that line, or your "DONE: ${x.id}", unblocks ${waiter.id}.`} A "${x.id}: still open:" progress line does not. Nothing else changes: carry on with your work (between turns, end this one with a line).`, 'system');
+${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line "For ${waiter.id}: <the result, or where it is>" and its "DONE: ${x.id}", or every leg's "DONE: ${x.id}", unblocks ${waiter.id}; another leg's turn end never does, whatever it says.` : `When one does, put a line "For ${waiter.id}: <the result, or where it is>" in that report: that line, or your "DONE: ${x.id}", unblocks ${waiter.id}. It need not wait for your DONE or for an after-check still open on ${x.id} (a 24-hour look at player reports): once what it waits for has happened, write the line (w3289).`} A "${x.id}: still open:" progress line does not. If it has happened already, end this turn with that line now. Nothing else changes: carry on with your work, and a check-in you set stays set (between turns, end this one with a line).`, 'system');
           out.push(sid);
+          now.push(sid);
         } catch {
-          // gone or at a limit: its DONE still clears the block
+          // gone or at a limit: its DONE still clears the block, and the blocker watch tries again
         }
       }
-      if (out.length) this.stamp(x, `${waiter.id} waits on its report (${g.what}): told ${out.join(', ')} to mark it "For ${waiter.id}:"`);
+      if (now.length) {
+        g.told = [...told, ...now].slice(-20);
+        this.stamp(x, `${waiter.id} waits on its report (${g.what}): told ${now.join(', ')} to mark it "For ${waiter.id}:"`);
+        this.store.putWork(x);
+        this.store.putWork(waiter);
+      }
     }
     return out;
+  }
+
+  /**
+   * w3289: the workers on a request some Blocked request waits on the report of that were not told yet (they started after
+   * the block, or were busy elsewhere or asleep on another request's gate then), told now. The blocker watch calls it on
+   * each look. Returns the waiting requests and whom it told.
+   */
+  retellReportWaits(): [string, string][] {
+    const did: [string, string][] = [];
+    for (const w of [...this.store.work.values()]) {
+      if (w.status !== 'blocked') continue;
+      const gates = gatesOf(w).filter((g) => g.kind === 'request' && g.on === 'report' && !!g.ref);
+      if (!gates.length) continue;
+      const told = this.tellReportWaited(w, gates);
+      if (told.length) did.push([w.id, `told ${told.join(', ')} to mark its result "For ${w.id}:" (w3289)`]);
+    }
+    return did;
   }
 
   /** The dispatcher decides about a request (decide_work); the requesters' orchestrators get the reply. */

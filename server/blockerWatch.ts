@@ -51,7 +51,7 @@ export type PrState = { state: 'open' | 'merged' | 'closed'; text: string; sha?:
 export interface BlockerWatchDeps {
   store: Store;
   orchestrators: Pick<Orchestrators, 'unblock' | 'blockerStuck' | 'blockerDecide' | 'gatesCleared' | 'flagQueuedWithRoom' | 'carryOutConditional' | 'dropConditional'> &
-    Partial<Pick<Orchestrators, 'recordReportedWait' | 'noticeLongOffline' | 'noteCiRead' | 'sweepResumes' | 'requeueCapacityBlocks' | 'requeueBrokenPairs' | 'replaceNoTimedWaits' | 'timedLegBound' | 'mergedOnGreen' | 'undecidedBound' | 'holdSteamPairs' | 'flagDeadWait'>>;
+    Partial<Pick<Orchestrators, 'recordReportedWait' | 'retellReportWaits' | 'noticeLongOffline' | 'noteCiRead' | 'sweepResumes' | 'requeueCapacityBlocks' | 'requeueBrokenPairs' | 'replaceNoTimedWaits' | 'timedLegBound' | 'mergedOnGreen' | 'undecidedBound' | 'holdSteamPairs' | 'flagDeadWait'>>;
   /** w1841: tell the workers waiting on a bench lock that is free now (Agents.resumeBenchWaits): request id to what it did. */
   benchResume?: () => [string, string][];
   /** w2544: work waiting on a computer away (offline or paused) past the grace moves elsewhere (Agents.moveAwayWork). */
@@ -270,6 +270,9 @@ export class BlockerWatch {
       // w2422: a wait a stopped worker's report names with no blocked_on recorded becomes its gate first, so the look below
       // clears it and resumes that worker like any other.
       for (const [id, why] of this.recordReportedWaits()) did.set(id, why);
+      // w3289: a worker on a request others wait on the report of, never told what to mark (it started, or slept, when the
+      // block was set), is told now, so a milestone it reached (a release live with its notes posted) unblocks them.
+      for (const [id, why] of this.d.orchestrators.retellReportWaits?.() ?? []) did.set(id, why);
       // w2433: requests Blocked on a machine offline past ledger.offlineNoticeMinutes under their workers are named to the dispatcher.
       for (const id of this.d.orchestrators.noticeLongOffline?.() ?? []) did.set(id, 'named to the dispatcher: its machine has been offline long');
       const blocked = [...this.d.store.work.values()].filter((w) => w.status === 'blocked' && w.blocked && w.blocked.by !== 'ledger cleanup');
