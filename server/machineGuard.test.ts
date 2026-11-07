@@ -362,3 +362,47 @@ test("w1918: a wanted Dev Drive maximum waits while an agent or editor is in a s
   const none = new MachineGuard(SETTINGS, 'F:/ffsb', fx2, ports);
   assert.equal(none.pendingGrow(), undefined);
 });
+
+test("w3328: below the critical line a disk clean-up request's worker starts on the machine while an ordinary worker is still refused; under the 3 GB floor it waits too", async () => {
+  // lothdesktop, 2026-11-07 05:11 UTC: V:\ffw\sandboxes 17 GB free under its pool's critical 20 (warn 25), and w3327's
+  // clean-up worker 6f0fee97 was refused with "disk space is critically low ... new agent processes wait until space is freed".
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-w3328-'));
+  try {
+    let freeV = 17 * GB;
+    const { fx, ports } = world();
+    const guard = new MachineGuard({ ...SETTINGS, warnFreeGB: 50, criticalFreeGB: 20, hostDiskPaths: ['D:/'] }, String.raw`V:\ffw\sandboxes`, { ...fx, exists: () => true, statfs: async (p) => ({ free: p.startsWith('V') ? freeV : 199 * GB, total: 1000 * GB }) }, { ...ports, poolFloor: () => ({ warnGB: 25, criticalGB: 20 }) });
+    await guard.tick();
+    assert.equal(guard.health.level, 'critical');
+
+    const sbPath = path.join(tmp, 'slot3');
+    const d = new Daemon({ portalUrl: 'http://127.0.0.1:1', id: 'lothdesktop', token: 't', repoPath: tmp, appDir: tmp, maxEventsFile: null }, () => ({}) as unknown as SessionHandle, PROBES) as unknown as {
+      guard?: MachineGuard;
+      pool: { list(): unknown[] };
+      startRefusal(spec: object, id: string): string | undefined;
+      shutdown(): void;
+    };
+    d.guard = guard;
+    d.pool.list = () => [{ id: 'slot3', status: 'ready', path: sbPath }];
+    const ordinary = { cwd: sbPath, sandbox: 'slot3' };
+    const cleanup = { ...ordinary, diskCleanup: true };
+
+    assert.match(d.startRefusal(ordinary, 's-ordinary') ?? '', /disk space is critically low \(V:.ffw.sandboxes 17 GB free\); new agent processes wait/, 'an ordinary worker: refused as before');
+    assert.equal(d.startRefusal(cleanup, 's-cleanup'), undefined, 'the clean-up worker starts');
+    assert.match(guard.blockReason('editor', { diskCleanup: true }) ?? '', /new editors wait/, 'the flag never starts an editor');
+
+    // At the warn level too, and under the floor even the clean-up worker waits.
+    freeV = 31 * GB; // above critical + hysteresis (30), under warn + hysteresis (35)
+    await guard.tick();
+    assert.match(d.startRefusal(ordinary, 's-ordinary') ?? '', /disk space is low/);
+    assert.equal(d.startRefusal(cleanup, 's-cleanup'), undefined);
+    freeV = 2.5 * GB;
+    await guard.tick();
+    assert.match(d.startRefusal(cleanup, 's-cleanup') ?? '', /below the clean-up floor \(V:.ffw.sandboxes 3 GB free; a clean-up worker starts down to 3 GB free\)/);
+    freeV = 3.2 * GB;
+    await guard.tick();
+    assert.equal(d.startRefusal(cleanup, 's-cleanup'), undefined, 'just above the floor: it starts');
+    d.shutdown();
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});

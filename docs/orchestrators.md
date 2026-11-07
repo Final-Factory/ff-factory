@@ -1479,6 +1479,14 @@ person's orchestrator marks the request with `request_work`/`update_work report 
 `decide_work report <kind>`; its worker files it with `file_report`, and its DONE waits for one. Everything else (where
 it is kept, media, revisions, the tools, the tab): `docs/reports.md`.
 
+### A disk clean-up request (w3328)
+
+A request whose work is freeing disk space on a machine carries `diskCleanup {machine, by, at}`, set by `request_work` /
+`update_work` `disk_cleanup: "<machine id>"` (the person's orchestrator) or `start_agent` `disk_cleanup: true` with its
+`work_id` (the dispatcher, for the sandbox's machine). Its workers on that machine start past the machine's low-disk gate
+down to a 3 GB floor, where every other new worker waits; nothing reads it from a title or a brief. Details, the floor and
+why: docs/self-recovery.md, "A clean-up request starts on a low disk".
+
 ### Work in a machine's main clone (w936)
 
 A machine's main clone is a person's own project folder (Ben's `/Users/benryding/nevergames/FinalFactory` on the m5), and

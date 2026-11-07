@@ -90,6 +90,11 @@ export interface LaunchSpec {
   disallowedTools?: string[];
   /** Claude Code settings on top of the machine's own (the SDK's `settings`, the CLI's --settings): w1480's plugins a worker starts without. An older daemon ignores it. */
   settings?: Record<string, unknown>;
+  /**
+   * w3328: the worker serves a disk clean-up request for this machine (WorkItem.diskCleanup): the daemon's low-disk gate lets it
+   * start down to DISK_CLEANUP_FLOOR_GB free. An older daemon ignores it, and the worker waits as before.
+   */
+  diskCleanup?: boolean;
   /** w2014: add the read-chain nudge (server/readChainHook.ts), a PostToolUse hook; a pilot worker's. An older daemon ignores it. */
   readChainNudge?: boolean;
   /** Only the MCP servers named here (plus `mcp`); false loads the user's own too. */

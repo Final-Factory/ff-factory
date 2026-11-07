@@ -2499,8 +2499,9 @@ export class Daemon {
    * maxAgentsPerSandbox, and a sandbox agent needs its sandbox ready at the folder the spec names.
    */
   private startRefusal(spec: LaunchSpec, sessionId: string): string | undefined {
-    // The sandbox drive gone or disk space low on this machine (its host guard, w466): nothing new starts in a sandbox.
-    const gate = spec.sandbox ? this.guard?.blockReason('agent') : undefined;
+    // The sandbox drive gone or disk space low on this machine (its host guard, w466): nothing new starts in a sandbox, except a
+    // disk clean-up request's worker down to DISK_CLEANUP_FLOOR_GB (w3328: the worker sent to free the space was refused by it).
+    const gate = spec.sandbox ? this.guard?.blockReason('agent', { diskCleanup: spec.diskCleanup === true }) : undefined;
     if (gate) return gate;
     // An old agent host's tree still runs there (w799): the sandbox is not free until it is gone.
     const lingering = lingeringRefusal(spec.sandbox, sessionId, this.lingeringHosts());

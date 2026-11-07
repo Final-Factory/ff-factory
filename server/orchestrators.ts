@@ -83,7 +83,7 @@ import { MERGE_ON_GREEN_MARK } from './mergeOnGreen.ts';
 import { handoffQuote, handoffReport, isHandoff } from './handoffReport.ts';
 import { commitsIn, normPr, pairCommitsOf, pairPrOf, pairRanCommit, prIn, resultFor, sameCommit, samePr } from './pairRuns.ts';
 import type { AttachmentRef, BenchGrant, ConditionalDecision, ForYouMark, OpenAsk, WorkNeedsYou, GateResume, GitStatus, Machine, WorkAutoClosed, WorkBlocker, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPair, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
-import { REPORT_KINDS, WORK_PRIORITIES, questionFor, type ReportKind, type ReportSummary } from '../shared/types.ts';
+import { DISK_CLEANUP_FLOOR_GB, REPORT_KINDS, WORK_PRIORITIES, questionFor, type ReportKind, type ReportSummary } from '../shared/types.ts';
 import { FOR_YOU_CHARS, FOR_YOU_KEPT, forYouId, splitForYou } from '../shared/forYou.ts';
 
 /** w2045: the most of a worker's after-merge report a merge-on-green gate keeps (a DONE report is rarely longer). */
@@ -191,7 +191,7 @@ interface HeldCall {
   why: string;
 }
 /** update_work's input (Agents' tool). */
-type UpdateInput = { id: string; question_for?: string; already_asked?: boolean; note?: string; priority?: WorkPriority; close?: 'done' | 'cancelled'; reopen?: boolean; approve?: boolean; decline?: boolean; subjects?: string[]; ledger_read?: boolean; spend_read?: boolean; main_clone?: string | false; when?: ConditionInput; words?: string; expires_days?: number; assign_to?: string; report?: ReportKind | false };
+type UpdateInput = { id: string; question_for?: string; already_asked?: boolean; note?: string; priority?: WorkPriority; close?: 'done' | 'cancelled'; reopen?: boolean; approve?: boolean; decline?: boolean; subjects?: string[]; ledger_read?: boolean; spend_read?: boolean; main_clone?: string | false; disk_cleanup?: string | false; when?: ConditionInput; words?: string; expires_days?: number; assign_to?: string; report?: ReportKind | false };
 
 /** Held calls kept per chat at most, and for how long. */
 const HELD_MAX = 10;
@@ -609,6 +609,8 @@ export interface WorkInput {
    * checkout, reopen Unity). Only in a turn of its person's own, and only when the request explicitly asks for work there.
    */
   main_clone?: string;
+  /** w3328: a machine id: the work is freeing disk space there (a clean-up request); its workers there start past the low-disk gate. */
+  disk_cleanup?: string;
   /** w1098: the repository the work is in, "owner/name"; a repo that is not the game's needs an agent slot only. */
   repo?: string;
   /** w1098: what it needs of a computer when `repo` does not say: `game` (a game sandbox with an editor) or `agent` (only an agent slot). */
@@ -2148,6 +2150,7 @@ It is for your part of the work, not an answer to another worker's question.`;
     if (!title || !brief) throw new Error('give a title and a brief');
     const human = (chat.turnFrom ?? chat.lastFrom) === 'human';
     const cloneMachine = input.main_clone ? this.mainCloneMachine(owner, input.main_clone, human) : undefined;
+    const cleanupMachine = input.disk_cleanup?.trim() ? this.machineIdOf('disk_cleanup', input.disk_cleanup) : undefined;
     const repeat = repeatOf(this.store.work.values(), owner, title);
     if (repeat) {
       this.stamp(repeat, `filed again by ${owner.displayName}'s orchestrator${human ? ' in their own turn' : ''}: ${firstLine(brief)}`);
@@ -2212,6 +2215,7 @@ It is for your part of the work, not an answer to another worker's question.`;
       ...(input.spend_read ? { spendRead: { by: owner.displayName, at: now.toISOString() } } : {}),
       ...(input.report && (REPORT_KINDS as readonly string[]).includes(input.report) ? { report: { kind: input.report, at: now.toISOString(), by: owner.displayName } } : {}),
       ...(cloneMachine ? { mainCloneAccess: { machine: cloneMachine, by: owner.displayName, at: now.toISOString() } } : {}),
+      ...(cleanupMachine ? { diskCleanup: { machine: cleanupMachine, by: owner.displayName, at: now.toISOString() } } : {}),
       overlaps: [],
       asks: 0,
       log: [],
@@ -2513,6 +2517,13 @@ It is for your part of the work, not an answer to another worker's question.`;
     const owner = this.ownerOf(chat.info);
     if (!owner) throw new Error('only a person’s own orchestrator updates its requests');
     const w = this.requireWork(input.id);
+    // DISK CLEAN-UP (w3328): mark or unmark; with nothing else asked, that is the whole update.
+    if (input.disk_cleanup !== undefined) {
+      if (!isFor(w, owner.userId)) throw new Error(`${w.id} is not ${owner.displayName}'s request`);
+      const line = input.disk_cleanup === false || !input.disk_cleanup.trim() ? this.clearDiskCleanup(w, owner.displayName) : this.markDiskCleanup(w, this.machineIdOf('disk_cleanup', input.disk_cleanup), owner.displayName);
+      const rest = { ...input, id: undefined, disk_cleanup: undefined };
+      if (!Object.values(rest).some((v) => v !== undefined && !(Array.isArray(v) && !v.length) && v !== '')) return line;
+    }
     // LEDGER READING (w642): grant or take back; with nothing else asked, that is the whole update.
     let readLine = '';
     // SPEND EXPORT (w2653): the same, for spend_export.
@@ -3406,6 +3417,36 @@ It is for your part of the work, not an answer to another worker's question.`;
     this.stamp(w, `${owner.displayName}: ${on ? 'its workers may export the spend record' : 'spend export taken back'}`);
     this.store.putWork(w);
     return `${w.id}: ${on ? 'its workers may now export the spend record (spend_export)' : 'spend export taken back'}.`;
+  }
+
+  /** The machine id `name` names (list_machines), or an error naming `field`. */
+  private machineIdOf(field: string, name: string): string {
+    const { machines } = this.d.places();
+    const m = machines.find((x) => same(x.id, name.trim()));
+    if (!m) throw new Error(`${field}: no machine "${name}" (machines: ${machines.map((x) => x.id).join(', ') || 'none'})`);
+    return m.id;
+  }
+
+  /**
+   * w3328: mark `w` a disk clean-up of `machine`: its workers there start past that machine's low-disk gate, down to
+   * DISK_CLEANUP_FLOOR_GB (machine/daemon.ts startRefusal). It only lets a worker start: what it may delete is the worker
+   * guard's, as for any worker. Set by the person's orchestrator (request_work, update_work) or the dispatcher (start_agent).
+   */
+  markDiskCleanup(w: WorkItem, machine: string, by: string): string {
+    if (w.diskCleanup && same(w.diskCleanup.machine, machine)) return `${w.id} is already a disk clean-up of ${machine}.`;
+    w.diskCleanup = { machine, by, at: this.now().toISOString() };
+    this.stamp(w, `${by}: a disk clean-up of ${machine}: its workers there start past the low-disk gate (down to ${DISK_CLEANUP_FLOOR_GB} GB free)`);
+    this.store.putWork(w);
+    return `${w.id}: marked a disk clean-up of ${machine}; its workers there start past the low-disk gate, down to ${DISK_CLEANUP_FLOOR_GB} GB free.`;
+  }
+
+  private clearDiskCleanup(w: WorkItem, by: string): string {
+    if (!w.diskCleanup) return `${w.id} is not marked a disk clean-up.`;
+    const was = w.diskCleanup.machine;
+    w.diskCleanup = undefined;
+    this.stamp(w, `${by}: no longer a disk clean-up of ${was}`);
+    this.store.putWork(w);
+    return `${w.id}: no longer a disk clean-up of ${was}; its workers wait at the low-disk gate like any other.`;
   }
 
   /** The machine id a main_clone names, or why it cannot be granted: only in a turn of the person's own (w936). */
