@@ -9,7 +9,7 @@ import { gunzipSync } from 'node:zlib';
 import { AttachmentStore, machineAttachment, machineUploadHttp } from './attachments.ts';
 import { agentCap, poolSettingsOf } from './machines.ts';
 import { TimedRuns, variantProblem } from './timedRuns.ts';
-import { GROUP_MAX_BYTES, legArgs, legOrder, perfSummaryOf, PIECE_MAX_BYTES, planPieces, SMALL_FILE_BYTES, timedArgsProblem, TIMED_DEFAULTS, type TimedRunOrder } from '../shared/timedRun.ts';
+import { GROUP_MAX_BYTES, legArgs, legOrder, legTimeoutS, perfSummaryOf, PIECE_MAX_BYTES, planPieces, runBoundMinutes, runTurns, SMALL_FILE_BYTES, timedArgsProblem, timedSettingsOf, TIMED_DEFAULTS, TURN_PLAN_MS, type TimedRunOrder, type TimedSettings } from '../shared/timedRun.ts';
 import { foreignTicket, releaseTicket, takeTicket, TimedRunner, writeTarGz } from '../machine/timedRunner.ts';
 import { readBenchLock } from '../machine/benchLock.ts';
 import { insideRoots, scanBuild, timedRunFromMachine } from '../machine/timedRunPack.ts';
@@ -246,6 +246,7 @@ test('end to end: two builds made on one computer are timed on a play-only one u
     { name: 'fix', path: 'builds/fix' },
   ]);
   assert.match(answer, /Timed run tr_[0-9a-f]{10} handed to desk: base vs fix, 4 legs/);
+  assert.doesNotMatch(answer, /exclusive turns/, 'w3398: a play-only computer holds one ticket for the whole run, no turns');
   // exe, FFCore.dll (small: one group per build), the shared .resS once, the save: 2 groups + 1 + 1.
   assert.equal(plans[0].uploads.length, 4);
   await done(1);
@@ -306,4 +307,24 @@ test('the results archive is a plain ustar .tar.gz', async (t) => {
   assert.equal(stored, h.reduce((s, b) => s + b, 0));
   assert.equal(tar.subarray(512, 517).toString(), 'hello');
   assert.equal(tar.length % 512, 0);
+});
+
+// w3398 (ben, via the orchestrator): "timed_run's bound and the exclusive-turn limit agree". w3252's run on LothDesktop was
+// given a 63-minute bound while the bench queue warned its exclusive ticket ends after the 30-minute turn. The queue's cap
+// protects the tickets that wait behind a timed run (w1962: a shared ticket waits one exclusive turn at most), so the run
+// keeps the 30-minute turn and splits its legs into turns that fit instead of asking for a longer one.
+test("w3398: every leg the settings allow fits in one planned turn, which ends before the queue's 25-minute warning", () => {
+  const max = timedSettingsOf({ rounds: 20, sample_s: 300, settle_s: 300 }) as TimedSettings;
+  assert.equal(typeof max, 'object');
+  assert.ok(legTimeoutS(max) * 1000 <= TURN_PLAN_MS, `the longest leg (${legTimeoutS(max)} s) fits in a turn: the queue never takes a turn back mid-leg`);
+  assert.ok(TURN_PLAN_MS < 25 * 60_000, 'a turn gives its ticket back before bench_queue.py warns at 25 minutes (MAX_HOLD_MIN 30 - WARN_LEAD_MIN 5)');
+  // w3252's run: 2 builds x 4 rounds at the defaults, 8 legs, a 63-minute bound: two turns on a worker computer
+  const w3252 = timedSettingsOf({ rounds: 4 }) as TimedSettings;
+  assert.equal(legOrder(['base', 'fix'], w3252.rounds).length, 8);
+  const perTurn = Math.floor(TURN_PLAN_MS / (legTimeoutS(w3252) * 1000));
+  assert.equal(runTurns(w3252, 2), Math.ceil(8 / perTurn));
+  assert.ok(runTurns(w3252, 2) * TURN_PLAN_MS >= 8 * legTimeoutS(w3252) * 1000, 'the turns hold every leg at its bound');
+  assert.ok(runBoundMinutes(w3252, 2) > 30, 'its bound is longer than one turn: the run takes more than one');
+  assert.equal(runTurns(max, 4), 80, 'the longest leg plays one per turn');
+  assert.equal(runTurns(timedSettingsOf({ rounds: 1, sample_s: 5, settle_s: 5 }) as TimedSettings, 2), 1, 'a short run: one turn');
 });

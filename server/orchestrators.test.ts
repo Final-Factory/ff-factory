@@ -5795,6 +5795,42 @@ test('w2410: a stopped worker whose sandbox was released is marked away in its m
   assert.equal(agents.benchPriorities('pc')[a.id].away, undefined, 'placed again: its tickets queue again at the back');
 });
 
+// w3398 (ben, via the orchestrator): "A timed_run ticket is never parked because its requesting worker is absent. Exempt
+// tickets whose waiter is the daemon." timed_run tells its worker to end its turn on a long check-in, which stops it; the
+// run's exclusive ticket carries that worker's session, so on LothDesktop, 2026-11-07, t00004607 for tr_7673462869 sat
+// "PARKED since 10:55Z: its worker 25e6bb06 was stopped on purpose" until 13:49Z, though the daemon waited on it.
+test("w3398: a worker stopped on its timed run's check-in is not marked away where that run waits; elsewhere it still is", async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents } = env;
+  putRequests(store, [{ id: 'w1', by: BEN, status: 'active', priority: 'high' }]);
+  const a = await startedFor(env, 'w1');
+  const info = store.sessions.get(a.id)!;
+  const runs: { id: string; session: string; requests: string[]; machine: string; state: string }[] = [];
+  (agents as unknown as { timedRuns: unknown }).timedRuns = { runsOn: (m: string) => runs.filter((r) => r.machine === m) };
+  info.stoppedOnPurpose = true;
+  assert.deepEqual(agents.benchPriorities('pc')[a.id].away, { why: `its worker ${a.id.slice(0, 8)} was stopped on purpose` }, 'w1984 unchanged: no run, its tickets park');
+  runs.push({ id: 'tr_7673462869', session: a.id, requests: ['w1'], machine: 'pc', state: 'sent' });
+  const p = agents.benchPriorities('pc')[a.id];
+  assert.equal(p.away, undefined, "the daemon waits on the run's ticket: nothing of that session parks here");
+  assert.equal(p.timed?.verdict, 'here');
+  assert.equal(p.priority, 'high', "the run keeps its request's priority");
+  // stopped with its sandbox released (a check-in over 30 minutes lets it go, w2410): the same
+  delete info.stoppedOnPurpose;
+  const status = info.status;
+  info.status = 'stopped';
+  info.placeReleased = { at: '2026-11-07T10:55:00.000Z', sandbox: 'slot4', branch: 'sandbox/slot4-w1', why: 'stopped on a 78-minute check-in' };
+  assert.equal(agents.benchPriorities('pc')[a.id].away, undefined, 'released its sandbox, its run waits here: not parked');
+  // the run on another computer: its tickets here are its own waiters', parked as before
+  runs[0].machine = 'laptop';
+  assert.match(agents.benchPriorities('pc')[a.id].away?.why ?? '', /stopped and released its sandbox slot4/);
+  assert.equal(agents.benchPriorities('laptop')[a.id].away, undefined, 'where the run is, not parked');
+  // the run ended: runsOn leaves it out, and the w2410 mark is back
+  runs.length = 0;
+  assert.match(agents.benchPriorities('pc')[a.id].away?.why ?? '', /stopped and released/);
+  delete info.placeReleased;
+  info.status = status;
+});
+
 // w1984 with w1983, lothsahn (via the orchestrator): when stop_agent move_to moves a worker to another computer, its bench
 // tickets on the old machine are dropped. Its requests leave it, so only the move's mark keeps it in that machine's list.
 test("w1984: after a move, no ticket of that worker holds anyone back in the old machine's bench queue", async (t) => {
