@@ -55,6 +55,13 @@ export interface TimedRunRecord {
   undelivered?: { since: string; why: string };
   /** w2414: when its daemon could not fetch its pieces (the portal had lost their grant) and the portal sent it again once. */
   refetched?: string;
+  /**
+   * w3405: the run its daemon plays first (a daemon plays one run at a time), and since when it waits behind it. Its state
+   * stays 'sent' meanwhile, as tr_97da01f124's did for 1.4 hours behind tr_d039d7bdc5 before its worker cancelled it.
+   */
+  behind?: { id: string; since: string };
+  /** w3405: since when it waits for its machine's exclusive bench ticket (its daemon's "waiting" reports); gone once granted. */
+  waitingSince?: string;
 }
 
 /**
@@ -334,9 +341,12 @@ export class TimedRuns {
     const target = this.d.machines().find((m) => m.id === r.machine);
     const turns = target && !isPlayOnly(target) ? runTurns(o.settings, o.variants.length) : 1;
     const turnsNote = turns > 1 ? ` Its legs play in up to ${turns} exclusive turns of at most ${TURN_PLAN_MS / 60_000} minutes each (the bench queue's turn is 30, w1832): after each turn its ticket goes back and queues again for the rest, so a turn-limit warning ends no leg, and the run can take longer than its bound when others wait.` : '';
+    // w3405: its daemon plays one run at a time, so a run already there goes first
+    const ahead = (r.state as TimedRunState) === 'sent' ? this.runsOn(r.machine).filter((x) => x.id !== r.id && (x.state === 'sent' || x.state === 'running')) : [];
+    const aheadNote = ahead.length ? ` ${r.machine} plays one timed run at a time and holds ${ahead.map((x) => `${x.id} (${this.whose(x)}, ${x.state})`).join(', ')} first: this run waits behind ${ahead.length === 1 ? 'it' : 'them'} before it queues for the bench. timed_place with status "${r.id}" says where it stands.` : '';
     const mb = (n: number) => `${(n / 1024 ** 2).toFixed(0)} MB`;
     const where = (r.state as TimedRunState) === 'sent' ? `handed to ${r.machine}` : `queued for ${r.machine}, which is ${this.d.isOnline(r.machine) ? 'connected but not on a daemon that runs timed runs yet (it is updated by itself once idle)' : 'offline'}: it starts when ${r.machine} is back`;
-    const text = `Timed run ${r.id} ${where}: ${o.variants.map((v) => v.name).join(' vs ')}, ${legs} legs of ${o.settings.settleS} s settle + ${o.settings.sampleS} s sample on ${o.settings.res}, under ${r.machine}'s exclusive bench ticket. Sent ${mb(r.sentBytes)} of ${mb(r.totalBytes ?? 0)} (the rest was on the portal from earlier runs). FF Factory messages you with the table and the logs (timed-${r.id}.tar.gz in your Inbox: probe_ab_win.sh's layout, so scripts/bench/probe_table.py and ab_stop.py read it) when it ends; its bound is about ${bound} min.${turnsNote} End your turn now with a wake_me check-in of ${bound + 15} minutes as the fallback; do not wait in the foreground.`;
+    const text = `Timed run ${r.id} ${where}: ${o.variants.map((v) => v.name).join(' vs ')}, ${legs} legs of ${o.settings.settleS} s settle + ${o.settings.sampleS} s sample on ${o.settings.res}, under ${r.machine}'s exclusive bench ticket. Sent ${mb(r.sentBytes)} of ${mb(r.totalBytes ?? 0)} (the rest was on the portal from earlier runs). FF Factory messages you with the table and the logs (timed-${r.id}.tar.gz in your Inbox: probe_ab_win.sh's layout, so scripts/bench/probe_table.py and ab_stop.py read it) when it ends; its bound is about ${bound} min.${turnsNote}${aheadNote} End your turn now with a wake_me check-in of ${bound + 15} minutes as the fallback; do not wait in the foreground.`;
     // w2928: its daemon answered the worker's call before the pieces were all sent, so this answer goes as a message
     if (a.late === true) {
       this.d.log?.(`timed run ${r.id}: every piece arrived from ${r.from} after its call answered; ${where}`);
@@ -367,6 +377,9 @@ export class TimedRuns {
 
   private set(r: TimedRunRecord, state: TimedRunState, line?: string) {
     r.state = state;
+    // w3405: only its daemon's "queued behind" report keeps these (onReport sets them again after this)
+    delete r.behind;
+    if (state !== 'sent' && state !== 'running') delete r.waitingSince;
     if (line !== undefined) r.line = line;
     r.updatedAt = this.iso();
     this.save();
@@ -436,7 +449,18 @@ export class TimedRuns {
     }
     if (m.type === 'timed_run_status') {
       if (r.state !== 'uploading') this.grantPieces(r);
-      this.set(r, m.state === 'running' ? 'running' : r.state === 'queued' ? 'sent' : r.state, String(m.line ?? '').slice(0, 300));
+      const line = String(m.line ?? '').slice(0, 300);
+      // w3405: machine/timedRunner.ts enqueue says "queued behind <the run it plays now>"; a run waiting there is no run
+      // waiting for the bench, and its worker could not tell the two apart
+      const ahead = m.state === 'queued' ? /^queued behind (tr_[0-9a-f]{10})(?![0-9a-f])/.exec(line)?.[1] : undefined;
+      const behind = ahead ? { id: ahead, since: r.behind?.id === ahead ? r.behind.since : this.iso() } : undefined;
+      if (m.state === 'waiting') r.waitingSince ??= this.iso();
+      else delete r.waitingSince;
+      this.set(r, m.state === 'running' ? 'running' : r.state === 'queued' ? 'sent' : r.state, line);
+      if (behind) {
+        r.behind = behind;
+        this.save();
+      }
       return;
     }
     if (m.type === 'timed_run_done') {
@@ -676,10 +700,41 @@ export class TimedRuns {
     }
   }
 
+  /** Whose a run is, in a few words: its requests, else its worker. */
+  private whose(r: TimedRunRecord): string {
+    return r.requests.length ? r.requests.join(', ') : `worker ${r.session.slice(0, 8)}`;
+  }
+
+  /**
+   * w3405: where a run stands, in words a worker reads (timed_place status): its state and its daemon's line, the run it
+   * waits behind on its daemon and what that one waits for, and since when. When the run ahead has waited longer than one
+   * exclusive turn (30 minutes, w1832), the computers that take timed runs and are free now are named, to move to.
+   */
+  statusText(id: string): string {
+    const r = this.runs.get(id);
+    if (!r) throw new Error(`no timed run ${id} on the portal (it keeps the last ${KEEP_RUNS} that ended)`);
+    const at = (iso: string) => `${iso.slice(11, 16)}Z (${Math.max(0, Math.round((this.now() - Date.parse(iso)) / 60_000))} min)`;
+    const head = `Timed run ${r.id} (${this.whose(r)}) on ${r.machine}`;
+    if (r.state === 'done' || r.state === 'failed') return `${head}: ${r.state}${r.error ? `: ${r.error.slice(0, 200)}` : ''}.`;
+    if (!r.behind) return `${head}: ${r.state}${r.waitingSince ? `, waiting for ${r.machine}'s exclusive bench ticket since ${at(r.waitingSince)}` : ''}${r.line ? `: ${r.line}` : ''}.`;
+    const a = this.runs.get(r.behind.id);
+    const live = a && a.machine === r.machine && a.state !== 'done' && a.state !== 'failed';
+    let text = `${head}: queued behind ${r.behind.id}${a ? ` (${this.whose(a)})` : ''} since ${at(r.behind.since)}, on its daemon, which plays one run at a time; it has no bench ticket yet and queues for one when ${r.behind.id} ends.`;
+    if (!live) return `${text} The portal sees ${r.behind.id} ${a ? a.state : 'no more'}, so it starts next.`;
+    text += a.waitingSince ? ` ${a.id} waits for ${a.machine}'s exclusive bench ticket since ${at(a.waitingSince)}${a.line ? `: ${a.line}` : ''}.` : ` ${a.id} is ${a.state}${a.line ? `: ${a.line}` : ''}.`;
+    if (a.waitingSince && this.now() - Date.parse(a.waitingSince) > 30 * 60_000) {
+      const free = this.windowsTargets().filter((t) => t.id !== r.machine && t.online && t.offers && !t.held && !t.runs.length).map((t) => t.id);
+      text += free.length
+        ? ` That is longer than one exclusive turn (30 minutes, w1832): ${free.join(', ')} take${free.length === 1 ? 's' : ''} timed runs and ${free.length === 1 ? 'is' : 'are'} free now. To move, stop this run (timed_place cancel "${r.id}") and call timed_run again with machine "${free[0]}".`
+        : ' That is longer than one exclusive turn (30 minutes, w1832), and no other computer that takes timed runs is free now: it stays queued here.';
+    }
+    return text;
+  }
+
   /** The Capacity block's line: each computer that takes timed runs (play-only first, w1946; small workers, w1996) and its runs. */
   capacityLine(): string | undefined {
     const t = this.windowsTargets();
     if (!t.length) return undefined;
-    return `Timed-run computers (w1946, w1996: a Windows player A/B built where its worker is goes there with timed_run, under that computer's exclusive ticket): ${t.map((x) => `${x.id} (${x.kind === 'play-only' ? 'play-only' : `small, ${x.agents} agent slot${x.agents === 1 ? '' : 's'}`}, ${x.held ? `held (${x.held}), ` : ''}${x.online ? (x.offers ? 'online' : 'online, daemon too old for timed runs') : 'offline'}${x.runs.length ? `; ${x.runs.length} run(s): ${x.runs.map((r) => `${r.id} ${r.state}`).join(', ')}` : '; free'})`).join(', ')}.`;
+    return `Timed-run computers (w1946, w1996: a Windows player A/B built where its worker is goes there with timed_run, under that computer's exclusive ticket): ${t.map((x) => `${x.id} (${x.kind === 'play-only' ? 'play-only' : `small, ${x.agents} agent slot${x.agents === 1 ? '' : 's'}`}, ${x.held ? `held (${x.held}), ` : ''}${x.online ? (x.offers ? 'online' : 'online, daemon too old for timed runs') : 'offline'}${x.runs.length ? `; ${x.runs.length} run(s): ${x.runs.map((r) => `${r.id} ${r.behind ? `queued behind ${r.behind.id}` : r.state}`).join(', ')}` : '; free'})`).join(', ')}.`;
   }
 }

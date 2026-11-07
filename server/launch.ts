@@ -212,7 +212,7 @@ export const CATALOG = {
   },
   /** w1969 (docs/machines.md, "Where a timed leg runs"): asked before an exclusive bench ticket; the portal says here or hands the leg to a small computer. */
   timed_place: {
-    what: z.string().min(1).max(100).describe('The timed leg in one line: "RoundRobin belt output A/B on PR #2347".'),
+    what: z.string().max(100).optional().describe('The timed leg in one line: "RoundRobin belt output A/B on PR #2347" (with cancel: the reason; not needed with status).'),
     brief: z.string().max(6000).optional().describe('What the leg runs, as a new worker on another computer needs it: the branch and the commit of each side, the save, the script and its settings (probe_ab_win.sh rounds), what to report. Needed when it is handed off.'),
     platform: z.enum(['windows', 'mac', 'any']).optional().describe('The OS the leg needs (default any: both sides run on one computer, whichever OS).'),
     machine: z.string().max(41).optional().describe('w2521: the one computer the leg must run on, for a hardware reason (its display, its GPU, its OS): "lothlaptop" for the G-SYNC/VRR screen. It runs there or waits Queued there, never on an idle or bigger computer. Say why in what or brief.'),
@@ -220,6 +220,7 @@ export const CATALOG = {
     via: z.enum(['leg', 'timed_run']).optional().describe('timed_run: a Windows player A/B (a save played by two builds), built here and timed by a computer that takes timed runs (w1946, w1996); leg: anything else timed, handed to a new worker on a small computer. Unset: timed_run when such a computer is up, and the answer says when to ask again with leg.'),
     request: z.string().max(16).optional().describe('The request ("w1891") it is for, when you serve several; default: the one you are on.'),
     cancel: z.string().regex(/^tr_[0-9a-f]{10}$/).optional().describe('w2442: instead of asking, stop this timed run ("tr_225384a69f"), one of your own request, or of a request it names: its player ends, its bench ticket goes back, and its worker is told why (what: the reason).'),
+    status: z.string().regex(/^tr_[0-9a-f]{10}$/).optional().describe('w3405: instead of asking, say where this timed run ("tr_97da01f124") stands: its state, the run it waits behind on its daemon (a daemon plays one at a time) and what that one waits for, since when, and a free computer to move to once the one ahead has waited past a turn.'),
   },
   /** w1945: a leg of a pair run tells the other legs' workers something. */
   message_pair: {
