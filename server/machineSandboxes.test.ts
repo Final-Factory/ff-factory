@@ -23,7 +23,7 @@ import { copyTree, removeTree, run } from './proc.ts';
 import { readGitStatus } from './gitStatus.ts';
 import { testRepos } from './testMachine.ts';
 import type { Config } from './config.ts';
-import type { ImageInput, PermissionMode, SandboxPoolSettings, SessionInfo, WorkItem } from '../shared/types.ts';
+import type { GitStatus, ImageInput, PermissionMode, SandboxPoolSettings, SessionInfo, WorkItem } from '../shared/types.ts';
 
 // Daemons started here keep their Unity slots mailbox in a folder of their own, not the real one in the home folder.
 process.env.FF_UNITY_SLOTS = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-slots-'));
@@ -1286,9 +1286,19 @@ async function twoSandboxes(t: { after: (fn: () => void | Promise<void>) => void
   await until('both ready', () => sbOf('sb1')?.status === 'ready' && sbOf('sb2')?.status === 'ready');
   const path1 = sbOf('sb1')!.path;
   const path2 = sbOf('sb2')!.path;
-  // The portal's copy of a sandbox's git state, read now (the daemon reads it every 2 minutes).
+  // A sandbox's git state read now, as the daemon's own look reads it (every 30 s), and reported to the portal. Not the
+  // portal's copy alone (w3337): the daemon's next report, such as its first look with settings about 30 s after it
+  // starts, carries the daemon's own older read and replaced it, so the release pass read git from before the worker's
+  // last activity and released nothing (keptWhy), in about half of the full-suite runs.
+  const pool = (daemon as unknown as { pool: { ticking: boolean; git: Map<string, GitStatus | undefined> } }).pool;
+  const report = () => (daemon as unknown as { reportSandboxes: () => void }).reportSandboxes();
   const gitNow = async (id: string) => {
-    sbOf(id)!.git = await readGitStatus(sbOf(id)!.path);
+    // A look in flight writes what it read before this one: let it finish first.
+    await until('no daemon look in flight', () => !pool.ticking);
+    const g = await readGitStatus(sbOf(id)!.path);
+    pool.git.set(id, g);
+    report();
+    await until('the portal has this read or a newer one', () => Date.parse(sbOf(id)?.git?.at ?? '') >= Date.parse(g?.at ?? ''));
   };
   const onDaemon = (id: string) => (daemon as unknown as { entries: Map<string, { spec?: { cwd: string } }> }).entries.get(id);
   return { r, store, sessions, mm, agents, sbOf, path1, path2, gitNow, onDaemon };
