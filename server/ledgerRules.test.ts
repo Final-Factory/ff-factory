@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { afterMergeReason, pairDelivers, cleanupSettings, cutOffOf, deployStep, doneProblem, isRelease, mergedMentionsIn, mergePrs, pausedIn, ownerAt, partOfIdsIn, partOfReason, postDeployStep, prsOf, prUrlsIn, reportDelivers, reportVerdict, reportWaitsOn, requestIdsIn, stallCandidate, stillOpenIn, supersededBy, titleIdsIn, type PrRecord } from './ledgerRules.ts';
+import { afterMergeReason, pairDelivers, cleanupSettings, cutOffOf, deployStep, doneProblem, isRelease, mergedMentionsIn, mergePrs, pausedIn, ownerAt, partOfIdsIn, partOfReason, postDeployStep, prsOf, prUrlsIn, reportDelivers, reportVerdict, reportWaitsOn, requestIdsIn, stallCandidate, stillOpenIn, supersededBy, supersededIn, titleIdsIn, type PrRecord } from './ledgerRules.ts';
 import { reportClip } from './sessions.ts';
 import type { WorkItem } from '../shared/types.ts';
 
@@ -358,4 +358,11 @@ test('w2446: a release is what the request did: a bump PR is one; PRs only in th
   assert.ok(isRelease(bump('urgent/1.0.0.24')));
   assert.equal(isRelease(bump('w2440-notes')), false);
   assert.match(doneProblem(bump('release/1.0.0.23'), 'Merged.')!, /link the posted notes/);
+});
+
+test('w3248: SUPERSEDED lines name the request and what covers it, markdown allowed; a mention in a sentence is not one', () => {
+  assert.deepEqual(supersededIn('Done.\n**SUPERSEDED: w3254 by #3244, merged on master**\n- SUPERSEDED: W7 by w3245\nSUPERSEDED: w7 by w1\nI would write SUPERSEDED: w9 by w1 here.\nSUPERSEDED: w10'), [
+    { id: 'w3254', by: '#3244, merged on master' },
+    { id: 'w7', by: 'w3245' },
+  ]);
 });

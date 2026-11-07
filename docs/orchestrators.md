@@ -1742,6 +1742,26 @@ done`); a still-open line becomes the request's latest word. A DONE counts from 
   [ops-worker.md](ops-worker.md)): its report's DONE lines for those close them (`opsTurnEnded`); what the ledger did,
   closed or refused and why, follows its report to the person whose job it is.
 
+**`SUPERSEDED: wNNN by <what>`, a request fully covered by other work** (w3248; lothsahn: "Please make sure workers close
+out work requests if they're fully superseded by another"). w3245's worker found FFBox's crash-fix PR #3254 fully covered
+by #3244, already on master, and left it open because no PR of its own replaced it. A worker that finds a request (or its
+PR) covered by another request, a merged PR or a fix on master closes its open PRs on GitHub with a comment naming what
+supersedes them, and ends its report with a line `SUPERSEDED: w342 by w340` (or `by #3244, merged on master`; one line
+per request, `supersededIn`, `server/ledgerRules.ts`). The brief says so (`doneRule`, `server/work.ts`). At the end of
+that turn (`supersededMarkers`, `server/orchestrators.ts`, read before the DONE lines):
+
+- a request of the worker's own, or one its request names (`namedBy`, as for DONE), closes as **cancelled** with the
+  outcome "superseded by …", is logged, and its people (and the naming request's) are told
+  (`[ledger] w342 … closed as superseded by w340`). None of DONE's checks apply (its own brief's steps are the other
+  work's now);
+- not while a PR of it is open (read live from GitHub first, as for DONE): the worker is told to close it and say the line
+  again;
+- a request nothing of the worker's names, or one another worker is still on, is not closed on the worker's word: it
+  goes to the dispatcher as a `[ledger] … is fully covered` notice, and the worker is told so. The dispatcher checks it and
+  rejects it with a note "superseded by …" (its people are told), merges it into the open request that covers it, or
+  leaves it open; its own duplicate rule (`dispatcherBrief`) says the same for what it finds. A person's orchestrator can
+  also close one (`update_work` close), within the owner rules above.
+
 A DONE is refused, with the reason sent back to the worker (once per reason in 6 hours) and logged, while a PR of the
 request is still open, for a release whose report does not say it is live and link the posted notes, for a brief that
 asks for a step after the merge when the report does not say how it went (an audit, a check, a 2-peer run, a
