@@ -112,13 +112,13 @@ export function judgeNamed(name: string, f: CleanupFacts, now = Date.now()): Pic
 
 /**
  * <root>/timing (w3217): the timed runs' build cache, builds and last runs (machine/timedRunner.ts; it keeps 10 runs
- * itself). Never a clean-up's to take, but a clean-up asked whether a queued run needs it: the row says.
+ * itself). The daemon's clean-up trims its cache and builds while no timed run needs them (installLeftovers.ts, w3502); a clean-up asked whether a queued run needs it: the row says.
  */
 export function judgeTiming(f: CleanupFacts): string {
   const base = "the timed runs' build cache, builds and last runs (machine/timedRunner.ts keeps 10 runs itself)";
   if (!f.timedRuns) return `${base}; the daemon did not say which timed runs play or wait here (an older daemon, or none play on this machine)`;
   if (f.timedRuns.length) return `${base}; timed run(s) ${f.timedRuns.join(', ')} play or wait here now and use it`;
-  return `${base}; no timed run plays or waits here now: its cache/ and builds/ are rebuilt by the next run (a person decides)`;
+  return `${base}; no timed run plays or waits here now: its cache/ and builds/ are rebuilt by the next run, and the daemon's clean-up trims them itself while none plays or waits (w3502: builds after a day, the cache below the soft threshold)`;
 }
 
 /** A sandbox's build and capture output belongs to the workers in it. */

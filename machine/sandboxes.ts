@@ -25,6 +25,8 @@ import type { DiskLevel, GitStatus, MachineSandboxIdleClosed, MachineSandboxUnit
 
 const SLUG = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const GB = 1024 ** 3;
+/** What a sandbox's Library re-import writes, about (w3482: 18 GB for slot1 on LothDesktop, 2026-11-07, measured there). */
+export const LIBRARY_REIMPORT_GB = 18;
 /**
  * A sandbox nobody has used for this many days gets its Library cloned from the seed again (w1576, docs/sandbox-disk.md option E):
  * its own Library had grown to 17-21 GB on LothDesktop (measured 2026-10-19), a fresh clone of the seed costs the drive almost
@@ -606,6 +608,20 @@ export class SandboxPool {
     return this.settings;
   }
 
+  /**
+   * A warning before an editor starts on a cold Library near the disk's line, or undefined (w3502): Unity re-imports the whole
+   * project then, and on LothDesktop 2026-11-07 slot1's re-import took V: from 37.8 to 14.2 GB free and blocked workers (w3482).
+   * The start goes ahead (the disk check refuses it once the line is crossed); the warning tells the worker and the portal why
+   * the disk may fall. Cold: no Library/ArtifactDB, the database a warm Library always has.
+   */
+  async coldLibraryWarning(sb: { path: string }): Promise<string | undefined> {
+    if (fs.existsSync(path.join(sb.path, 'Library', 'ArtifactDB'))) return undefined;
+    const s = this.need();
+    const free = await this.d.freeBytes(fs.existsSync(s.root) ? s.root : path.dirname(s.root));
+    if (free === undefined || free >= (s.diskWarnGB + LIBRARY_REIMPORT_GB) * GB) return undefined;
+    return `Warning (w3502): its Unity Library is cold (no Library/ArtifactDB), so this start re-imports the project, which writes about ${LIBRARY_REIMPORT_GB} GB; with ${(free / GB).toFixed(0)} GB free on ${s.root} that may cross disk_warn_gb ${s.diskWarnGB}, and then no new editor starts until space is freed.`;
+  }
+
   /** Throws unless the sandbox volume keeps `diskWarnGB` + `extraGB` free. Unknown free space is not an error. */
   private async requireFreeSpace(extraGB: number, what: string) {
     const s = this.need();
@@ -1080,6 +1096,12 @@ export class SandboxPool {
     const gate = this.o.startGate?.();
     if (gate) throw new Error(`not started: ${gate}`);
     if (this.disk.level !== 'ok') throw new Error(`not started: disk space is ${this.disk.level} on ${s.root}; new editors wait until space is freed`);
+    const cold = await this.coldLibraryWarning(r);
+    if (cold) {
+      out.push(cold);
+      this.o.log?.(`sandbox ${id}: ${cold}`);
+      this.o.onEvent({ text: `sandbox ${id}: ${cold}` });
+    }
     const current = this.editorFor(r);
     if (current.unity.editors(await this.d.procs()).length) return [...out, `Already running (${await current.unity.status()}).`].join(' ');
     if (this.queuedBoots.has(id)) return [...out, `Already queued in the bench queue (w1615): ${this.unityState.get(id)?.detail ?? 'waiting'}.`].join(' ');
