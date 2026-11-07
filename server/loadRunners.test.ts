@@ -58,7 +58,7 @@ function harness(o: { state?: LoadGateState; settings?: LoadGateDeps['settings']
       s.now += 5_000;
     }
   };
-  return { s, g, run };
+  return { s, g, run, d };
 }
 
 test('w3305: a minute at or over 70% suspends the idle ffu listeners; another runner and a busy one are left', async () => {
@@ -125,8 +125,52 @@ test('w3305: a machine with no gate resumes what an old gate left suspended and 
   assert.deepEqual(s.calls, ['resume 4101']);
 });
 
-test('w3305: no machine is gated (off since its first live run held two LothDesktop jobs); its settings stay at Ben\'s about 70%', () => {
-  assert.deepEqual(Object.keys(LOAD_GATES), []);
+// LothDesktop's ffu-lothdesktop-1 _diag log at the second job the first gate was blamed for (2026-11-07 04:55Z): the
+// listener had just started its worker (pid 49660 here, Runner.Worker.exe spawnclient) when the 30 s hand-off ran out.
+const HANDOFF_LOG = [
+  "[2026-11-07 04:55:33Z INFO BrokerMessageListener] Acknowledging runner request '9ebf3377-1047-5d89-af96-f87195113e4a'.",
+  '[2026-11-07 04:55:37Z INFO Terminal] WRITE LINE: 2026-11-07 04:55:37Z: Running job: test (ffu-windows)',
+  '[2026-11-07 04:55:41Z INFO ProcessInvokerWrapper] Process started with process id 49660, waiting for process exit.',
+  '[2026-11-07 04:55:41Z INFO JobDispatcher] Send job request message to worker for job 9ebf3377-1047-5d89-af96-f87195113e4a.',
+].join('\n');
+const W1 = (ppid: number): Proc => ({ pid: 49660, ppid, cmd: `"V:\\ffw\\ffu-runners\\ffu-lothdesktop-1\\bin\\Runner.Worker.exe" spawnclient 2388 2460` });
+
+test('w3305: a runner whose worker lost its parent link is still busy: never suspended', async () => {
+  const { s, run } = harness();
+  s.procs = [L1, L2, W1(77777), GAME]; // the worker's parent pid is not the listener's (a reused or lost link)
+  s.diag['ffu-lothdesktop-1'] = `${IDLE_LOG}`; // even with a log that says idle
+  await run(65_000, 95);
+  assert.deepEqual(s.calls, ['suspend 4102'], 'ffu-lothdesktop-1 has a worker from its folder');
+});
+
+test('w3305: LothDesktop\'s real hand-off log (a worker just started) holds the listener even with no worker in the listing', async () => {
+  const { s, run } = harness();
+  s.now = Date.parse('2026-11-07T04:54:40Z');
+  s.diag['ffu-lothdesktop-1'] = HANDOFF_LOG;
+  s.procs = [L1, L2, GAME];
+  await run(65_000, 95);
+  assert.deepEqual(s.calls, ['suspend 4102']);
+  assert.ok(s.log.some((l) => /ffu-lothdesktop-1 .*handed a job at 2026-11-07T04:55:37/.test(l)));
+});
+
+test('w3305: the look after a suspend reads a fresh listing: a worker started as it landed resumes the listener', async () => {
+  const { s, g, run, d } = harness();
+  let fresh = 0;
+  d.freshProcs = async () => {
+    fresh++;
+    return [L1, L2, W1(4101), GAME];
+  };
+  s.procs = [L1, L2, GAME]; // the cached listing, from before the suspend
+  await run(60_000, 90);
+  assert.ok(fresh > 0);
+  assert.deepEqual(s.calls.slice(0, 2), ['suspend 4101', 'suspend 4102']);
+  assert.ok(s.calls.includes('resume 4101'), 'ffu-lothdesktop-1 had a worker in the fresh listing');
+  assert.ok(!g.state().suspended.some((x) => x.pid === 4101));
+});
+
+test('w3305: LothDesktop is gated again, at Ben\'s about 70%; BEAST and every other machine are not', () => {
+  assert.deepEqual(Object.keys(LOAD_GATES), ['lothdesktop']);
+  assert.equal(LOAD_GATES.lothdesktop, G);
   assert.equal(G.pauseAtPct, 70);
   assert.ok(G.resumeBelowPct < G.pauseAtPct);
   assert.ok(G.runners.test('ffu-lothdesktop-1') && !G.runners.test('actions-runner'));
