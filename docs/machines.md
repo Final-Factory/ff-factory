@@ -1279,6 +1279,16 @@ fewest agent slots. On a worker computer the daemon (`machine/timedRunner.ts` `w
   from 10:55Z to 13:49Z ("its worker ... was stopped on purpose"). `go()` also tells the worker how many turns its legs
   take (`runTurns`, `shared/timedRun.ts`): the longest leg the settings allow (1155 s) fits in one turn, so a turn limit
   never cuts a leg, and a run of several turns can outlast its bound while others wait.
+- **Queued behind another run** (w3405, ben: "show when a timed run is queued behind another"): a daemon plays one timed
+  run at a time (`current` and `queue` in `machine/timedRunner.ts`), and a run that arrives while another holds it reports
+  "queued behind <id>". The portal keeps its state `sent` and records `behind: {id, since}` (`server/timedRuns.ts`
+  `onReport`), with `waitingSince` on a run that waits for its exclusive bench ticket (cleared once granted). A worker reads it
+  in three places: the `go()` answer names the runs already on that daemon; the Capacity block's line says
+  `tr_B queued behind tr_A`; and `timed_place` with `status: "tr_..."` (`TimedRuns.statusText`) says the run ahead, whose it
+  is, what it waits for (its bench line, which names the tickets ahead) and since when. Once the run ahead has waited longer
+  than one exclusive turn (30 minutes), the answer also names the free computers that take timed runs, so the worker can
+  cancel and run again there. Before, tr_97da01f124 (w3252) sat `sent` for 1.4 hours behind tr_d039d7bdc5 (w3335), whose
+  tickets were never granted, and its worker cancelled it as stuck.
 - **Borrowed player slots**: the builds are laid out under `<root>/timing/builds/b0|b1`, and during the turn hard-linked into
   the player-slot pair of a sandbox that no live lease holds (`borrowPair`, `slotFree`: the game repo's
   `scripts/nightly/player_slots.py` lease rules), the only folders whose firewall rules exist. The run leases them for its
