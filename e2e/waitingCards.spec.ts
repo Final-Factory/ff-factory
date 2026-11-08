@@ -104,9 +104,9 @@ test('w1868: every card of today’s real cases says what it is, who acts, the q
   const w3596 = tab.getByTestId('wait-w3596');
   await expect(w3596.getByTestId('qc-digest')).toContainText('What FFBox found and changed');
   await expect(w3596.getByTestId('qc-digest')).toContainText('FFBox’s summary, a model’s words: check them against the code.');
-  await expect(w3596.getByTestId('qc-digest-row')).toHaveText([/^The player hit: a freeze \(hang\) on LinuxPlayer, game 1\.0\.0\.16$/, /^Cause: the game set the same screen size a second time at launch/, /^The fix: the game no longer re-applies the screen size/, /^Tests: compiled; 16349 of 16361 tests passed, 2 failed, 10 skipped$/, /^Not checked: This container has no Steam overlay/, /^Risk: Low: it only skips a call when nothing would change\./]);
+  await expect(w3596.getByTestId('qc-digest-row')).toHaveText([/^The player hit: a freeze \(hang\) on LinuxPlayer, game 1\.0\.0\.16$/, /^Cause: the game set the same screen size a second time at launch/, /^The fix: the game no longer re-applies the screen size/, /^Tests: compiled; 16349 of 16361 tests passed, 2 failed, 10 skipped$/, /^Not checked: I could not make the freeze happen here, because this machine has no Steam overlay\./, /^Risk: Low for other players: .*fail on master too\./]);
   await expect(w3596.getByTestId('qc-question')).toHaveText('Should a worker review FFBox’s fix for a freeze (hang) on LinuxPlayer and merge it?');
-  await expect(w3596.getByTestId('qc-option').first()).toContainText('fixes the 2 failing tests, opens a pull request and merges it on green');
+  await expect(w3596.getByTestId('qc-option').first()).toContainText('checks the 2 failing tests and fixes any the fix broke, opens a pull request and merges it on green');
   await expect(w3596.getByTestId('qc-option').nth(1)).toContainText('FFBox marks the player’s report obsolete and posts nothing');
   // The summary comes before the question.
   const [digestBox, questionBox] = await Promise.all([w3596.getByTestId('qc-digest').boundingBox(), w3596.getByTestId('qc-question').boundingBox()]);

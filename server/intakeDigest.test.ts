@@ -90,7 +90,7 @@ test('w3602: Approve and Decline say what each sets in motion for an FFBox fix b
   assert.equal(approveQuestion(failing), 'Should a worker review FFBox’s fix “linux launch skip redundant setresolution” and merge it?');
   // With what the player hit known, the question names it, not the branch.
   assert.equal(approveQuestion(review({ digest: { by: 'FFBox', at: AT, hit: 'a freeze (hang) on LinuxPlayer, game 1.0.0.16' } })), 'Should a worker review FFBox’s fix for a freeze (hang) on LinuxPlayer and merge it?');
-  assert.equal(approveAction(failing), 'A worker reviews FFBox’s fix “linux launch skip redundant setresolution” against the code, fixes the 2 failing tests, opens a pull request and merges it on green: one worker session of Claude usage.');
+  assert.equal(approveAction(failing), 'A worker reviews FFBox’s fix “linux launch skip redundant setresolution” against the code, checks the 2 failing tests and fixes any the fix broke, opens a pull request and merges it on green: one worker session of Claude usage.');
   assert.equal(approveAction(review({ pr: 3401 })), 'A worker reviews FFBox’s fix “linux launch skip redundant setresolution” against the code, reviews its pull request #3401 and merges it on green: one worker session of Claude usage.');
   assert.equal(declineAction(failing), 'It closes as declined: nobody reviews FFBox’s branch and it is never merged. FFBox marks the player’s report obsolete and posts nothing. Your reason goes with it if you type one; nothing is spent.');
   // The card's own ask carries them.
@@ -163,6 +163,8 @@ test('w3622: FFBox’s reviewer lines (ffbox diagnose.md) become the card’s pl
   assert.equal(d.cause, 'the game set the same screen size a second time at launch, and on Linux with the Steam overlay that second setup froze the game on its first frame.');
   assert.equal(d.fix, 'the game no longer re-applies the screen size at launch when the window already has it, so a Linux player with the Steam overlay gets past the first frame.');
   // The Risk line alone: not the evidence heading or bullets after it.
-  assert.equal(d.risk, 'Low: it only skips a call when nothing would change. If the check is wrong, a screen size the player picked could be ignored until the next restart.');
+  assert.equal(d.risk, 'Low for other players: it only skips a call when nothing would change, and the 2 tests that fail on this branch fail on master too. Whether it ends this player’s freeze is unproven, since the freeze could not be made to happen here.');
+  assert.match(d.unverified!, /^I could not make the freeze happen here, because this machine has no Steam overlay\./);
+  assert.doesNotMatch(d.unverified!, /swapchain|present|container/);
   assert.equal(digestRows(d).find((r) => r.label === 'Risk')!.text, d.risk);
 });

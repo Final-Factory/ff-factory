@@ -215,7 +215,7 @@ export function approveAction(w: Pick<WorkItem, 'source'>): string {
   const cost = 'one worker session of Claude usage';
   if (!s) return `The dispatcher gets it and a worker starts at the next free sandbox: ${cost}.`;
   const failed = s.digest?.tests?.failed;
-  const fixTests = failed ? `, fixes the ${failed} failing test${failed === 1 ? '' : 's'}` : '';
+  const fixTests = failed ? `, checks the ${failed} failing test${failed === 1 ? '' : 's'} and fixes any the fix broke` : '';
   const pr = s.pr ? `reviews its pull request #${s.pr}` : 'opens a pull request';
   if (s.kind === 'ffbox-branch' || ((s.kind === 'ffbox-diagnosis') && s.branch)) {
     return `A worker reviews FFBox’s fix ${fixFor(s)} against the code${fixTests}, ${pr} and merges it on green: ${cost}.`;
