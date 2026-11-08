@@ -461,8 +461,8 @@ Lothsahn today) may have their own orchestrator close (done or cancelled) or reo
   ("only Lothsahn, in their own words in this turn, closes or reopens Cara's request w234, and this turn is not theirs";
   the call is held for the owner's next message, [Calls a gate refused](#calls-a-gate-refused-w830)). The owner's own
   words on Discord, GitHub, FFBox's shell or ffweb, matched by FFBox to them, are a turn of theirs (w831, w852, below);
-- only with a note saying why. A priority change on someone else's request stays refused: it is its people's to give.
-  A note alone is the next section's (another owner's request only);
+- only with a note saying why. A priority change on someone else's request stays refused, except another owner's in the
+  owner's own turn (the next section, w3606). A note alone is the next section's (another owner's request only);
 - the request's log says `closed as done by Lothsahn (Ben's request), in Lothsahn's own turn: <note>`, or `on
   Lothsahn's orchestrator's judgment, not in a turn of theirs (owners, w677)`, and its people's orchestrators get a
   `[dispatch]` line naming who did it and why. A cancel or a reopen reaches the dispatcher as a `[work update]`, as their
@@ -497,7 +497,21 @@ Between owners (the `owner` role, `Orchestrators.isOwnerRole`; non-owners keep t
   note) and to the dispatcher (`[work update]`, saying which workers have it already). It changes nothing else: no
   status, no priority, no answer to a question asked of its people, no revival of a stalled request. Any turn will do,
   and it counts toward the filings limit as a note on one's own does. A non-owner's request takes no other person's
-  notes.
+  notes. Outside the owner's own turn that is all a note does; in it, it answers (next item).
+- **Answering, moving and prioritising for the other owner** (w3606, lothsahn: "Please make it so that upon our
+  request, ben and I can answer each other's questions and we can move questions to each other"; and "Please make w3596
+  urgent"). On w3563 lothsahn answered Ben's dispatcher question and asked to take it off Ben; both calls were refused
+  and the work had to be re-filed. Now, in a turn the owner started with their own message (`Orchestrators.ownerActsForOwner`;
+  a check-in, a timer, a worker's report, a standing agent or relayed text is refused with a held `GateRefused`, and a
+  note alone there stays the note above), on another owner's request, `update_work` goes through as that owner's own:
+  a note answers the open question (the dispatcher's, a design flag or a worker's `[needs you]`, which goes to that
+  worker), and the asked owner's cards about it leave their tab; `question_for` moves the question between the owners
+  (`handQuestion`: the new owner gets it as `[needs you]`, the old owner's cards close, and `questionFor` takes it off
+  their Waiting tab); a priority changes it (the request stays on its people's pool, `runsFor` untouched; an answer
+  moves it, as a note in their turn does). The log quotes the acting owner's own message (`Lothsahn (an owner, on Ben's
+  request, in their own words: "…")`), and the request's people get `[from another owner] Lothsahn answered the question
+  on it: <note>, on your w1 "…"` with those words. A non-owner's request, and a question that waits on a non-owner,
+  stay theirs. Tests: `w3606:` in `server/orchestrators.test.ts`.
 - **Limits stay per sender.** The follow-up count is per sender orchestrator and worker (`followUps`, keyed by the
   sender's chat): Lothsahn's three to Ben's worker use none of Ben's, and only Lothsahn writing starts his again.
 - **An owner answers any worker's permission request, and it is recorded** (w891, Lothsahn: "I should be able to
