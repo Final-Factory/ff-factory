@@ -11,6 +11,7 @@ import { writeFileDurable } from './durable.ts';
 import { placeId } from './placement.ts';
 import { MIN_PRIORITIES, type MinPriority } from '../shared/capacity.ts';
 import { DEV_DEFAULTS, type DevRequestsConfig } from './devRequests.ts';
+import { MAX_ATTACHMENTS_RANGE } from '../shared/attachments.ts';
 import { STALE_OUTPUT_DEFAULTS, staleOutputSettings, type StaleOutputSettings } from './staleOutput.ts';
 import { poolLimits, poolSettingProblem, weeklyCapsProblem, type PoolConfigKey } from './tokenPool.ts';
 import { AUTO_COMPACT_LIMITS, EARLY_COMPACT_MIN_TOKENS } from './autoCompact.ts';
@@ -91,6 +92,8 @@ export const SETTABLE_KEYS = [
   // Files people attach to messages (docs/attachments.md): the largest one, and how long one nobody sends on is kept.
   'attachments.maxMB',
   'attachments.retentionDays',
+  // w3558: the most files in one message or one tool call's attachments list (default 25).
+  'attachments.maxPerMessage',
   // FFBox's connector (docs/ffbox-integration.md): whether it may connect (default off), and its token,
   // write-only: only its SHA-256 is stored, in a file of the secrets folder that providers.ffbox.tokenSha256File names (w1078).
   'providers.ffbox.enabled',
@@ -675,6 +678,11 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
     }
     case 'orchestrator.timerFilingsPerMessage':
       return checkTimerFilings(value, users ?? []);
+    case 'attachments.maxPerMessage': {
+      const n = Number(value);
+      if (!Number.isInteger(n) || n < MAX_ATTACHMENTS_RANGE.min || n > MAX_ATTACHMENTS_RANGE.max) throw new Error(`attachments.maxPerMessage is a whole number of files from ${MAX_ATTACHMENTS_RANGE.min} to ${MAX_ATTACHMENTS_RANGE.max}`);
+      return n;
+    }
     case 'attachments.retentionDays': {
       const n = Number(value);
       if (!Number.isInteger(n) || n < 1 || n > 3650) throw new Error('attachments.retentionDays is a whole number of days from 1 to 3650');
@@ -1003,8 +1011,8 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   else if (key === 'voice.ttsVoice') cfg.voice.ttsVoice = (v as string | undefined) ?? VOICE_DEFAULTS.ttsVoice;
   else if (key === 'hostGuard.devDriveVhdx') cfg.hostGuard.devDriveVhdx = (v as string | undefined) ?? '';
   else if (key === 'publicUrl') cfg.publicUrl = v as string | undefined;
-  else if (key === 'attachments.maxMB' || key === 'attachments.retentionDays') {
-    const field = key === 'attachments.maxMB' ? 'maxMB' : 'retentionDays';
+  else if (key === 'attachments.maxMB' || key === 'attachments.retentionDays' || key === 'attachments.maxPerMessage') {
+    const field = key === 'attachments.maxMB' ? 'maxMB' : key === 'attachments.retentionDays' ? 'retentionDays' : 'maxPerMessage';
     const a = { ...cfg.attachments };
     if (v === undefined) delete a[field];
     else a[field] = v as number;

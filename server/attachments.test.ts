@@ -154,7 +154,7 @@ test('resolve: unknown ids, too many, and not a list are refused; repeats collap
   assert.throws(() => store.resolve(['att_000000000000']), (e: AttachmentError) => e.status === 404 && /no attachment "att_000000000000"/.test(e.message));
   assert.throws(() => store.resolve(['../../etc']), (e: AttachmentError) => e.status === 404);
   assert.throws(() => store.resolve(a.id), (e: AttachmentError) => e.status === 400);
-  assert.throws(() => store.resolve(Array.from({ length: 11 }, (_, i) => `att_${String(i).padStart(12, '0')}`)), /at most 10/);
+  assert.throws(() => store.resolve(Array.from({ length: 26 }, (_, i) => `att_${String(i).padStart(12, '0')}`)), /at most 25 at once [(]26 given[)]/);
 });
 
 test('copy into an Inbox: <folder>/Inbox/<id>-<name>, byte for byte, never seen by git, and kept when already there', async (t) => {

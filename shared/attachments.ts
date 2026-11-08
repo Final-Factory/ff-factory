@@ -8,8 +8,16 @@ import type { AttachmentRef, DeliveredAttachment } from './types.ts';
 /** An attachment id: "att_" and 12 lowercase letters or digits. What orchestrators pass on (attachments: [id]). */
 export const ATTACHMENT_ID = /^att_[a-z0-9]{12}$/;
 
-/** At most this many files per message (and per request_work, start_agent or message_agent). */
-export const MAX_ATTACHMENTS = 10;
+/**
+ * The default of config attachments.maxPerMessage (w3558, was a fixed 10): at most this many files per message, and
+ * passed by id in one call (request_work, start_agent, message_agent, update_work). A request's own files go to its
+ * worker in full on top of it (Agents.attachmentsFor): the cap counts only the ids a call adds. Also the most files
+ * FF Factory keeps from one FFBox hand-over or escalation (DEV_LIMITS.maxFiles, EscalationSchema).
+ */
+export const MAX_ATTACHMENTS = 25;
+
+/** The range config attachments.maxPerMessage takes. */
+export const MAX_ATTACHMENTS_RANGE = { min: 1, max: 100 } as const;
 
 /** The folder in an agent's working folder that its copies go to. It holds a .gitignore of "*", so git never sees it. */
 export const INBOX_DIR = 'Inbox';

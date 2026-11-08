@@ -7,6 +7,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { redactSecrets } from './secrets.ts';
+import { MAX_ATTACHMENTS } from '../shared/attachments.ts';
 
 /**
  * The protocol number the welcome names. Information only since 2026-10-03 (docs/ffbox-connector-contract.md, "No
@@ -577,7 +578,7 @@ export type ResultMessage = z.infer<typeof ResultSchema>;
 
 export const DEV_LIMITS = {
   /** Files in one request, each file's size, and all of them together. A file is also capped by config attachments.maxMB. */
-  maxFiles: 10,
+  maxFiles: MAX_ATTACHMENTS,
   maxFileBytes: 200 * 1024 * 1024,
   maxRequestBytes: 500 * 1024 * 1024,
   /** Raw bytes in one dev_chunk: 60000 base64 characters in the frame, inside LIMITS.maxMessageBytes. */

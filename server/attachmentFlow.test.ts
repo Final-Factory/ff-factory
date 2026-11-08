@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { Readable } from 'node:stream';
+import { z } from 'zod';
 import { Store } from './store.ts';
 import { isMidTurn, SessionManager, setQueryForTesting } from './sessions.ts';
 import { MachineManager } from './machines.ts';
@@ -262,4 +263,50 @@ test("w677: an owner's follow-up on another owner's worker carries files too, in
   await until('the follow-up', () => !!said(worker, 'The M3 crash report, measured.'));
   assert.deepEqual(said(worker, 'The M3 crash report, measured.')!.attachments?.map((x) => x.id), [a.id]);
   assert.equal(fs.readFileSync(path.join(alpha, 'Inbox', `${a.id}-m3-crash.ips`), 'utf8'), 'EXC_BAD_ACCESS (SIGBUS) in MTLCompilerService');
+});
+
+test('w3558: 25 attachments go to a worker, 26 are refused; a request\'s own files go in full past the cap; the cap is config attachments.maxPerMessage, live', async (t) => {
+  const { store, agents, files, alpha, call, users, dispatcher, chat, upload } = await setupOnMachine(t);
+  const live: { maxPerMessage?: number } = {};
+  (files as unknown as { config: () => typeof live }).config = () => live;
+  const ids: string[] = [];
+  for (let i = 0; i < 26; i++) ids.push((await upload(`log-${i}.txt`, Buffer.from(`log ${i}`))).id);
+  const loth = chat(LOTH).info;
+  const schemaOf = (info: SessionInfo, name: string) => z.object(agents.orchestratorBelt(info).find((x) => x.name === name)!.schema as z.ZodRawShape);
+
+  // The default, 25: the tool schema and the server check agree.
+  const requestWork = schemaOf(loth, 'request_work');
+  assert.equal(requestWork.safeParse({ title: 'x', brief: 'y', attachments: ids.slice(0, 25) }).success, true, 'the schema takes 25');
+  assert.equal(requestWork.safeParse({ title: 'x', brief: 'y', attachments: ids }).success, false, 'the schema refuses 26');
+  const refused = await call(loth, 'request_work', { title: 'Too many', brief: 'x', attachments: ids });
+  assert.match(refused.text, /^ERROR: attachments: at most 25 at once \(26 given\)/);
+  const filed = await call(loth, 'request_work', { title: 'Twenty-five logs', brief: 'Read them all.', attachments: ids.slice(0, 25) });
+  assert.equal(filed.isError, false, filed.text);
+  const w = [...store.work.values()].find((x) => x.title === 'Twenty-five logs')!;
+  assert.equal(w.attachments?.length, 25);
+
+  // start_agent with the work_id: all 25 land in the worker's Inbox.
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Read the logs.', title: 'Logs', work_id: w.id });
+  assert.equal(started.isError, false, started.text);
+  const worker = /Started agent (\w+)/.exec(started.text)![1];
+  await until('the worker got its brief', () => users(worker).length > 0);
+  assert.deepEqual(users(worker)[0].attachments?.map((x: DeliveredAttachment) => [x.id, x.error]), ids.slice(0, 25).map((id) => [id, undefined]));
+  for (let i = 0; i < 25; i++) assert.equal(fs.existsSync(path.join(alpha, 'Inbox', `${ids[i]}-log-${i}.txt`)), true, `Inbox has log-${i}.txt`);
+  await until('the brief turn ends', () => !isMidTurn(store.sessions.get(worker)!));
+
+  // The cap lowered live to 3: the server check moves at once, a schema built now follows, and the request's own 25
+  // still go in full with a work_id (only the ids the call adds count).
+  live.maxPerMessage = 3;
+  assert.equal(schemaOf(loth, 'request_work').safeParse({ title: 'x', brief: 'y', attachments: ids.slice(0, 4) }).success, false, 'a schema built now takes at most 3');
+  assert.equal(schemaOf(dispatcher().info, 'message_agent').safeParse({ session_id: worker, text: 'x', attachments: ids.slice(0, 3) }).success, true);
+  assert.match((await call(loth, 'request_work', { title: 'Four', brief: 'x', attachments: ids.slice(0, 4) })).text, /^ERROR: attachments: at most 3 at once \(4 given\)/);
+  const more = await call(dispatcher().info, 'message_agent', { session_id: worker, text: 'One more log.', work_id: w.id, attachments: [ids[25]] });
+  assert.equal(more.isError, false, more.text);
+  await until('the follow-up', () => users(worker).some((e) => e.text.includes('One more log.')));
+  assert.deepEqual(users(worker).find((e) => e.text.includes('One more log.'))!.attachments?.map((x) => x.id), [ids[25]], 'the worker already has the request\'s 25');
+  await until('the follow-up turn ends', () => !isMidTurn(store.sessions.get(worker)!));
+  const second = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Read them too.', title: 'Logs 2', work_id: w.id, extra_agent: true, override_duplicate: 'w3558 test: a second worker on purpose' });
+  assert.equal(second.isError, false, `a request's own 25 files pass a cap of 3: ${second.text}`);
+  assert.match(second.text, /It gets 25 attachments/);
+  assert.match((await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'x', title: 'Logs 3', work_id: w.id, extra_agent: true, override_duplicate: 'w3558 test', attachments: ids.slice(0, 4) })).text, /^ERROR: attachments: at most 3 at once/, 'the ids a call adds are still capped');
 });

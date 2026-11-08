@@ -579,7 +579,7 @@ request from an operator whose name is no login is refused (`unknown_operator`),
 `devRequests` (all optional): `enabled`
 (default true; false refuses every one `not_enabled`), `operatorTurns` (default true; false relays an operator's own
 words as data instead of a turn of theirs, [below](#operators-own-words-w831)), `perHour` (default 20 a person), `maxFiles` (default and most
-10), `maxRequestMB` (default and most 500). Each file is also capped at 200 MB and at `attachments.maxMB`. A file past
+25, w3558), `maxRequestMB` (default and most 500). Each file is also capped at 200 MB and at `attachments.maxMB`. A file past
 these is dropped and named in the request, never a reason to refuse it (w344). An owner sets them with
 `set_app_config` (the whole `providers.ffbox.devRequests` block); it applies at once.
 
