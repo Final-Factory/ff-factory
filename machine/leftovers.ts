@@ -33,7 +33,9 @@
 // Never touched: anything while its worker's process runs (between turns too); an interactive Unity editor, and what it
 // started (the sandbox pool stops idle editors; a person's editor is never ours); a process that names the machine's main
 // clone or the daemon's own folder (the agent hosts, which hostWatch.ts owns; not a worker's own `unity-slot`, w2410); a
-// process carrying another machine's id or a session this machine never ran (the portal's own orchestrators where a daemon shares its host); a shared build server
+// process carrying another machine's id or a session this machine never ran (the portal's own orchestrators where a daemon shares its host),
+// or another daemon's worker install folder in FF_WORKER_ROOT (a second FF Factory's daemon on the same computer has the
+// same machine id: on BEAST, 2026-11-08, this sweep ended Ben's Light Tree workers' claude four times in 8 min, w3714); a shared build server
 // (VBCSCompiler, MSBuild nodes, bee) while it still uses CPU, since another worker's build may be using it; anything
 // before the portal's welcome since the daemon started (until then who is live or waited for is not known). Every end is
 // logged with what, why and whose, and told to the portal.
@@ -41,7 +43,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { run } from '../server/proc.ts';
-import { factsProblem, finishedRows, finishedSession, judgePath, planFolders, renderFolders, withGitCheck, type CleanupFacts, type FolderRow, type SlotContext } from '../server/cleanupFolders.ts';
+import { factsProblem, finishedRows, finishedSession, judgePath, judgeWithGit, planFolders, renderFolders, type CleanupFacts, type FolderRow, type SlotContext } from '../server/cleanupFolders.ts';
 import { isAlive } from '../server/proc.ts';
 import { norm, sizeOf, within } from '../server/cleanup.ts';
 import { publishedFile, readPublished } from '../server/published.ts';
@@ -88,6 +90,8 @@ export interface ProcEnv {
   session?: string;
   sandbox?: string;
   machine?: string;
+  /** FF_WORKER_ROOT: the worker install folder of the daemon whose worker started it (w3714). */
+  root?: string;
 }
 
 /** One lease file of a player slot (scripts/nightly/player_slots.py `_lease`), with the slot it is in. */
@@ -108,6 +112,11 @@ export interface LeftoverDeps {
   platform: UnityPlatform;
   /** This machine's id (FF_MACHINE_ID of its workers' processes). */
   machineId: string;
+  /**
+   * w3714: this daemon's worker install folder (FF_WORKER_ROOT of its workers' processes). A second FF Factory's daemon on
+   * the same computer has the same machine id and another root: its workers' processes are never this one's.
+   */
+  root?: string;
   procs(): Promise<Proc[]>;
   /** FF_SESSION_ID, FF_SANDBOX_ID and FF_MACHINE_ID of the given processes, where the machine lets them be read. */
   envOf(pids: number[]): Promise<Map<number, ProcEnv>>;
@@ -120,6 +129,8 @@ export interface LeftoverDeps {
   resumable(id: string): boolean;
   /** When the session's pending wake_me check-in comes due (ms), as the portal last said. */
   wakeAt(id: string): number | undefined;
+  /** w3715: the session holds a granted bench ticket of its own (a harness ticket is not its own). */
+  holdsTicket?(session: string): boolean;
   /** When the session's current agent host started (ms, its host.json), for a wait loop an earlier one left (w3673). */
   hostSince?(id: string): number | undefined;
   /** The sandboxes with a live worker. */
@@ -308,6 +319,8 @@ export interface SessionFacts {
   live: boolean;
   resumable: boolean;
   wakeAt?: number;
+  /** w3715: it holds a granted bench ticket of its own (not an editor boot's or a timed run's). */
+  holdsTicket?: boolean;
   /** When this daemon first saw the session not live (its first sight of it, when it never saw it live). */
   stoppedSince: number;
   now: number;
@@ -323,15 +336,19 @@ const clock = (t: number) => new Date(t).toISOString().slice(11, 16) + ' UTC';
  */
 export function sessionVerdict(s: SessionFacts): { end: boolean; until?: number; why: string } {
   if (s.live) return { end: false, why: 'its worker is running' };
-  const grace = s.resumable ? LEFTOVER.STOPPED_GRACE_MS : LEFTOVER.DONE_GRACE_MS;
+  // w3715: a stopped worker's detached bench script holds the machine's one bench lock for as long as we keep it; its
+  // far check-in or waiting request is no reason to make every other worker wait, so neither grace applies.
+  const holds = s.holdsTicket === true;
+  const grace = holds ? LEFTOVER.DONE_GRACE_MS : s.resumable ? LEFTOVER.STOPPED_GRACE_MS : LEFTOVER.DONE_GRACE_MS;
   const after = s.stoppedSince + grace;
-  const wake = s.wakeAt !== undefined ? s.wakeAt + LEFTOVER.WAKE_GRACE_MS : 0;
+  const wake = s.wakeAt !== undefined && !holds ? s.wakeAt + LEFTOVER.WAKE_GRACE_MS : 0;
   const until = Math.max(after, wake);
   const state = `its worker stopped ${ago(s.now - s.stoppedSince)} ago`;
   if (s.now < until) {
-    const why = wake > after ? `its check-in comes due at ${clock(s.wakeAt!)}` : s.resumable ? 'a request still waits for it' : 'its work is over';
+    const why = wake > after ? `its check-in comes due at ${clock(s.wakeAt!)}` : holds ? 'it holds bench ticket(s), so its check-in does not keep them' : s.resumable ? 'a request still waits for it' : 'its work is over';
     return { end: false, until, why: `${state}; ${why}: kept until ${clock(until)}` };
   }
+  if (holds) return { end: true, why: `${state} and holds bench ticket(s), which its check-in or request does not keep` };
   return { end: true, why: `${state}${s.resumable ? ' (a request still waits for it, with no check-in pending)' : ' and no request waits for it'}` };
 }
 
@@ -513,7 +530,8 @@ export class LeftoverReaper {
       let c: Candidate | undefined;
       if (e?.session) {
         // Ours: a process of this machine's workers, or of a session this machine runs or ran.
-        const ours = e.machine ? e.machine.toLowerCase() === d.machineId.toLowerCase() : d.sessionKnown(e.session);
+        // w3714: a process another daemon's worker started (another FF Factory on this computer, same machine id) is not.
+        const ours = sameRoot(e.root, d.root, d.platform) && (e.machine ? e.machine.toLowerCase() === d.machineId.toLowerCase() : d.sessionKnown(e.session));
         if (!ours) continue;
         c = { p, kind, session: e.session, sandbox: e.sandbox, via: 'env', slot };
       } else {
@@ -556,7 +574,7 @@ export class LeftoverReaper {
       let v: { end: boolean; until?: number; why: string };
       let owner: PlayerLine['owner'];
       if (c.session) {
-        v = sessionVerdict({ live: d.sessionLive(c.session), resumable: d.resumable(c.session), wakeAt: d.wakeAt(c.session), stoppedSince: this.stopped.get(c.session) ?? now, now });
+        v = sessionVerdict({ live: d.sessionLive(c.session), resumable: d.resumable(c.session), wakeAt: d.wakeAt(c.session), holdsTicket: d.holdsTicket?.(c.session), stoppedSince: this.stopped.get(c.session) ?? now, now });
         owner = d.sessionLive(c.session) ? 'live' : 'stopped';
         // Named by an argument only: another worker's shell may be reading that folder, so it ends once its starter is gone too.
         const starter = c.via === 'arg' && v.end ? liveParent(c.p, procs, facts, d.platform) : undefined;
@@ -671,7 +689,20 @@ export class LeftoverReaper {
 
 // ---------------------------------------------------------------- the real machine
 
-const WANT = /^(FF_SESSION_ID|FF_SANDBOX_ID|FF_MACHINE_ID)=(.*)$/;
+const WANT = /^(FF_SESSION_ID|FF_SANDBOX_ID|FF_MACHINE_ID|FF_WORKER_ROOT)=(.*)$/;
+
+/**
+ * w3714: whether a process's FF_WORKER_ROOT is this daemon's root. Either unknown (a process of a worker from before
+ * w3714, a daemon with no root) counts as the same, as before; Windows compares without case and either slash.
+ */
+export function sameRoot(theirs: string | undefined, mine: string | undefined, platform: UnityPlatform): boolean {
+  if (!theirs || !mine) return true;
+  const k = (p: string) => {
+    const x = p.replace(/\\/g, '/').replace(/\/+$/, '');
+    return platform === 'win32' ? x.toLowerCase() : x;
+  };
+  return k(theirs) === k(mine);
+}
 
 /** The FF variables of an environment's "NAME=value" entries. */
 export function envFrom(entries: Iterable<string>): ProcEnv {
@@ -681,7 +712,8 @@ export function envFrom(entries: Iterable<string>): ProcEnv {
     if (!m) continue;
     if (m[1] === 'FF_SESSION_ID') o.session = m[2];
     else if (m[1] === 'FF_SANDBOX_ID') o.sandbox = m[2];
-    else o.machine = m[2];
+    else if (m[1] === 'FF_MACHINE_ID') o.machine = m[2];
+    else if (m[2]) o.root = m[2];
   }
   return o;
 }
@@ -695,7 +727,7 @@ export function macEnvLine(line: string): { pid: number; env: ProcEnv } | undefi
   const m = /^\s*(\d+)\s+(.*)$/.exec(line);
   if (!m) return undefined;
   const env: ProcEnv = {};
-  for (const x of m[2].matchAll(/(?:^|\s)(FF_SESSION_ID|FF_SANDBOX_ID|FF_MACHINE_ID)=(\S+)/g)) Object.assign(env, envFrom([`${x[1]}=${x[2]}`]));
+  for (const x of m[2].matchAll(/(?:^|\s)(FF_SESSION_ID|FF_SANDBOX_ID|FF_MACHINE_ID|FF_WORKER_ROOT)=(\S+)/g)) Object.assign(env, envFrom([`${x[1]}=${x[2]}`]));
   return { pid: Number(m[1]), env };
 }
 
@@ -745,7 +777,7 @@ export function winEnvScript(pids: number[]): string {
   const list = pids.filter((p) => Number.isInteger(p) && p > 4).join(',');
   return [
     `Add-Type -TypeDefinition @'\n${WIN_ENV_CS}\n'@`,
-    `$out = foreach ($id in @(${list || '0'})) { $b = $null; try { $b = [FFProcEnv]::Block([int]$id) } catch { }; if ($b -and $b.Contains('FF_SESSION_ID=')) { $m = @{}; foreach ($kv in $b.Split([char]0)) { if ($kv -match '^(FF_SESSION_ID|FF_SANDBOX_ID|FF_MACHINE_ID)=(.*)$') { $m[$matches[1]] = $matches[2] } }; [pscustomobject]@{ pid = [int]$id; session = $m['FF_SESSION_ID']; sandbox = $m['FF_SANDBOX_ID']; machine = $m['FF_MACHINE_ID'] } } }`,
+    `$out = foreach ($id in @(${list || '0'})) { $b = $null; try { $b = [FFProcEnv]::Block([int]$id) } catch { }; if ($b -and $b.Contains('FF_SESSION_ID=')) { $m = @{}; foreach ($kv in $b.Split([char]0)) { if ($kv -match '^(FF_SESSION_ID|FF_SANDBOX_ID|FF_MACHINE_ID|FF_WORKER_ROOT)=(.*)$') { $m[$matches[1]] = $matches[2] } }; [pscustomobject]@{ pid = [int]$id; session = $m['FF_SESSION_ID']; sandbox = $m['FF_SANDBOX_ID']; machine = $m['FF_MACHINE_ID']; root = $m['FF_WORKER_ROOT'] } } }`,
     `@($out) | ConvertTo-Json -Compress`,
   ].join('\n');
 }
@@ -776,8 +808,8 @@ export async function readEnvs(platform: UnityPlatform, pids: number[]): Promise
   }
   const r = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', winEnvScript(pids)], { timeoutMs: 120_000 });
   if (r.code !== 0) throw new Error(`reading process environments failed (${r.code}): ${r.stderr.trim().slice(0, 200)}`);
-  for (const x of parsePsJson<{ pid: number; session?: string; sandbox?: string; machine?: string }>(r.stdout, 'the Windows process environments')) {
-    if (x.session) out.set(Number(x.pid), { session: x.session, ...(x.sandbox ? { sandbox: x.sandbox } : {}), ...(x.machine ? { machine: x.machine } : {}) });
+  for (const x of parsePsJson<{ pid: number; session?: string; sandbox?: string; machine?: string; root?: string }>(r.stdout, 'the Windows process environments')) {
+    if (x.session) out.set(Number(x.pid), { session: x.session, ...(x.sandbox ? { sandbox: x.sandbox } : {}), ...(x.machine ? { machine: x.machine } : {}), ...(x.root ? { root: x.root } : {}) });
   }
   return out;
 }
@@ -899,7 +931,7 @@ export function readCleanupFacts(file: string | undefined): CleanupFacts | undef
 
 /** One path for `check`: by the ledger, and inside a finished worker's kept folder by its rebuildable bulk (w2223). */
 async function checkPath(p: string, facts: CleanupFacts, now: number, published: ReturnType<typeof readPublished>, slots?: SlotContext): Promise<Pick<FolderRow, 'verdict' | 'why'>> {
-  const r = await withGitCheck(judgePath(p, facts, now, slots), facts.root);
+  const r = await judgeWithGit(p, facts, now, slots);
   if (r.verdict === 'delete' || r.kind !== 'session-temp' || !facts.tempRoot) return r;
   const name = norm(p).slice(norm(facts.tempRoot).length + 1).split('/')[0]!;
   const dir = path.join(facts.tempRoot, name);

@@ -55,6 +55,7 @@ import { FRESH_AFTER_MERGE_MARK, freshAfterMergeArm, freshAfterMergeDue, freshAf
 import { AutoCompactor, LONG_WAIT_MS, withEarlyCompactMark, workerAutoCompactWindow } from './autoCompact.ts';
 import { inMergeOnGreenPilot } from './mergeOnGreen.ts';
 import { inReadChainPilot, withReadChainMark } from './readChain.ts';
+import { tempSizeLedgerLine } from './tempSizeHook.ts';
 import { withTerseProse } from './terseProse.ts';
 import { WORKER_READ_RULES_TOOL, workerRuleText } from './workerRules.ts';
 import { activityLine, Waker } from './wake.ts';
@@ -114,7 +115,8 @@ import { statsLine, systemStats } from './system.ts';
 import { commandLine, launchIndependent, run } from './proc.ts';
 import { type HostHealthMonitor } from './hostHealth.ts';
 import { describeCleanup, describeCleanupItems, describeCleanupLog } from './cleanup.ts';
-import type { BuildHold, HostHealth, TimedVerdict } from '../shared/types.ts';
+import type { BenchTicketGlance, BuildHold, HostHealth, TimedVerdict } from '../shared/types.ts';
+import { workerTickets } from './benchHolders.ts';
 import { PLAYERS_IN_SANDBOX } from './cloneGuard.ts';
 import { decideTimedPlace, fleetLoad, isSmallTimed, smallTimedStates, timedAskMark, unavailableWait, TIMED_VERDICT_MS, TIMED_WAIT_IDLE_MIN } from './timedAsk.ts';
 import { machinePinOf, pinFromText, pinRefusal, type MachinePin } from './machinePin.ts';
@@ -360,7 +362,7 @@ CLAUDE.md's "Discord: FFBox owns #bug-reports" binds you: read and download ther
  * carry it verbatim (worldBrief). The longer version is docs/ffbox.md.
  */
 /** The dispatcher's rule for pair runs (w1945), in read_rules machines: placing, queueing and holding for them. */
-const PAIR_RULES = `**Pair runs** (w1945, lothsahn: "Can we make the dispatcher smart enough so it queues work properly that requires running together across multiple machines and doesn't waste slots?"): a request marked "a pair run of N legs" (a worker's request_pair, or one you file or see that needs two computers at once, such as a two-machine determinism check: queue that one with decide_work pair_legs, so it is marked) starts ALL its legs together: start_agent with its work_id, sandbox for leg 1 (the host) and pair_sandboxes for the others, each a FREE sandbox on another computer. Never start one leg alone, and never leave a worker holding its sandbox while it waits for a partner leg: a worker that asks you for a second machine's worker is told to use request_pair. With fewer computers that fit having room than it has legs, queue it: a pair is room, and WRONG, only where that many computers have room at once. While an older pair run of at least the same priority is Queued, each computer's last free sandbox it fits is held for it: start other work elsewhere (start_agent refuses it, naming the pair; work of higher priority goes first). Legs go on any free computers, any OS (w2282, lothsahn: "Not windows by default, any OS. Being particular about a machine or OS limits the fleet we can use."): a Mac may be the host (leg 1), never a client (a Mac refuses a multiplayer client, w665); a cross-OS pair (only for w1692's reasons) also needs two operating systems; timed legs never on the m5. A pair run that repeats one that finished on the same pull request and commit (w2057) is not marked: decide_work queue with pair_legs refuses it; pair_legs 0 clears the mark of one whose legs never started; on one whose legs never started, pair_legs (2 and up), pair_menus (what its legs click in the game's menus, or "none") and pair_steam ("none" when a person cleared it to run without Steam, with their words in note: it drops a Steam mark and its Steam gate at once, w3455) set its marks with any action (w2648: "no menus" in a brief clicks none, and so does a run its worker filed with menus "none"); done closes a never-started repeat with the finished run's result, which reaches whoever waits on it.`;
+const PAIR_RULES = `**Pair runs** (w1945, lothsahn: "Can we make the dispatcher smart enough so it queues work properly that requires running together across multiple machines and doesn't waste slots?"): a request marked "a pair run of N legs" (a worker's request_pair, or one you file or see that needs two computers at once, such as a two-machine determinism check: queue that one with decide_work pair_legs, so it is marked) starts ALL its legs together: start_agent with its work_id, sandbox for leg 1 (the host) and pair_sandboxes for the others, each a FREE sandbox on another computer. Never start one leg alone, and never leave a worker holding its sandbox while it waits for a partner leg: a worker that asks you for a second machine's worker is told to use request_pair. With fewer computers that fit having room than it has legs, queue it: a pair is room, and WRONG, only where that many computers have room at once. While an older pair run of at least the same priority is Queued, each computer's last free sandbox it fits is held for it: start other work elsewhere (start_agent refuses it, naming the pair; work of higher priority goes first). Legs go on any free computers, any OS (w2282, lothsahn: "Not windows by default, any OS. Being particular about a machine or OS limits the fleet we can use."): a Mac may be the host (leg 1), never a client (a Mac refuses a multiplayer client, w665); a cross-OS pair (only for w1692's reasons) also needs two operating systems; timed legs never on the m5. A pair run is timed only when request_pair said timed or decide_work timed true (w3720): its words, notes or the timed runs they quote never make it timed; decide_work timed false clears a request whose words read as timed though it times nothing (a determinism check, a playtest). A pair run that repeats one that finished on the same pull request and commit (w2057) is not marked: decide_work queue with pair_legs refuses it; pair_legs 0 clears the mark of one whose legs never started; on one whose legs never started, pair_legs (2 and up), pair_menus (what its legs click in the game's menus, or "none") and pair_steam ("none" when a person cleared it to run without Steam, with their words in note: it drops a Steam mark and its Steam gate at once, w3455) set its marks with any action (w2648: "no menus" in a brief clicks none, and so does a run its worker filed with menus "none"); done closes a never-started repeat with the finished run's result, which reaches whoever waits on it.`;
 
 /** The dispatcher's rule for computers away past the grace and a person's named computer (w2544), in read_rules machines. */
 const AWAY_RULES = `**A computer away past the grace takes nothing and keeps nothing** (w2544, lothsahn, 2026-10-29: "the dispatcher should not be scheduling work on offline computers--at least ones that have been offline for a few minutes or more. Make sure those get moved somewhere else"): offline or paused for 5 min (timing.unavailableIdleMinutes) or more (every drop the portal journal showed came back within about 2 min), start_agent and stop_agent move_to refuse it, and FF Factory moves what waits on it by itself: a worker Blocked on it or stopped there with a message held, onto the computer placement picks, from its pushed branch with a hand-off that says what may be lost; a Queued request's needs naming only it are dropped. Each move is on the request's log and its list_work line ("moved from lothlaptop (offline 6 min) to lothdesktop/slot2"). A shorter blip moves nothing. A request whose brief names that computer ("must run on X", or a pin) stays, and you get one \`[ledger] KEPT (w2544)\` notice: tell its requester's orchestrator, do nothing else. **A person names a computer for a request** ("w2542 should move to LothDesktop"): pass their words in \`pin_words\` with start_agent (its work_id and a sandbox there) or stop_agent move_to; the request is pinned there, so the timing order lets it go and nothing moves it off. Only a person's words, never your own pick.`;
@@ -391,7 +393,7 @@ const DISK_WINDOWS = ` On a Windows computer, disk work (a clean-up, a low-disk 
 const DISK_UNIX = ` On macOS and Linux, outside the folder you only measure and report.`;
 
 export const DISK_HYGIENE = `## Disk space
-Disk space on this computer is shared and runs out: then new agents and editors wait. Your TMP, TEMP and TMPDIR are a temp folder of your own (ffa-<session>): put everything you make there (clones of other repos, logs, builds, recordings, tour output, screenshot sets, scratch), not in your home folder, the worktree, a shared scratch folder or /tmp (Git Bash's /tmp is not your folder; $TMPDIR is). Never a full clone of the game repo there (its LFS files and a Library copy took 43 GB): a player of another commit is built in your sandbox, one commit at a time, and a scripts-only clone is \`--sparse\` with GIT_LFS_SKIP_SMUDGE=1; the harness refuses the rest. The Write tool takes its absolute path: \`echo $TMPDIR\` before your first Write there, never a probe file at a guessed path (a Write that would make a new file outside your sandbox and temp folder is refused). Leave it there: do not clean up after yourself, since a clean-up command waits for a person's approval. Not mid-task either: never delete in your temp folder to reuse a folder for the next test leg; give every leg a new one, \`$TMPDIR/<leg>-<timestamp>\` (\`OUT="$TMPDIR/f1920-$(date +%H%M%S)"\`), and point your report at the newest. The harness removes it: your temp folder a few minutes after no request waits for you any more (it closed, or moved to another worker; a wait for CI or a person, a stop or a pause keeps it whole), your git clones six hours after that (unless one holds work nothing else has), its rebuildable caches (player builds, Library, node_modules, digested profiler captures) once you are stopped and nothing in it was written for 24 h, or for 15 minutes while the disk is low (a resumed worker rebuilds them), the build and capture output of your sandbox when it is released, player slots nobody holds, old nightly output and stopped sessions' folders. So no clean-up step before DONE, no \`player_slots.py prune\`, and no list of what you removed in your report; publish the proofs your report links (publish_review, specs/<NNN>/proofs) before you end, since the rest goes. If the disk is short in the middle of your task (a huge build), free it with a plain \`rm -rf "$TMPDIR/<name>"\` (or Remove-Item with a path under $env:TEMP): a delete whose every path is written out under $TMPDIR is answered by the session itself with no approval, alone or inside a longer command; anything else (the folder itself, /tmp, .., ~, \`xargs rm\`, a variable after $TMPDIR such as \`$TMPDIR/$S\`) still asks a person, so do not send one. Delete only inside this machine's worker install folder (its root: D:/work/ffw, F:/ffw or ~/ffw; "FF_WORKER_ROOT" in your environment; your sandbox, your temp folder and the player slots are inside it), except your own save copy in the game's saves folder (\`read_rules saves\`).${DISK_WINDOWS}${DISK_UNIX} Never ask a person for a go to free disk space: if the disk is still short, say so in your report. Never delete a person's own files (documents, their own projects and saves) or another agent's work in progress. A request of yours to clear space or measure the disk: \`read_rules cleanup\` before you delete anything.`;
+Disk space on this computer is shared and runs out: then new agents and editors wait. Your TMP, TEMP and TMPDIR are a temp folder of your own (ffa-<session>): put everything you make there (clones of other repos, logs, builds, recordings, tour output, screenshot sets, scratch), not in your home folder, the worktree, a shared scratch folder or /tmp (Git Bash's /tmp is not your folder; $TMPDIR is). Never a full clone of the game repo there (its LFS files and a Library copy took 43 GB): a player of another commit is built in your sandbox, one commit at a time, and a scripts-only clone is \`--sparse\` with GIT_LFS_SKIP_SMUDGE=1; the harness refuses the rest. The Write tool takes its absolute path: \`echo $TMPDIR\` before your first Write there, never a probe file at a guessed path (a Write that would make a new file outside your sandbox and temp folder is refused). Delete the big things you made once you are done with them, and before DONE or a long wait: a clone, a cargo target you will not build in again, a player build, recordings, repeat or tour output, a runaway log, each with a plain \`rm -rf "$TMPDIR/<name>"\` written out (it asks nobody). Check with \`du -sh "$TMPDIR"\` and \`du -sm "$TMPDIR"/* | sort -rn | head\`; FF Factory warns you when it passes 15 GB. Small files may stay. Mid-task, never delete in your temp folder to reuse a folder for the next test leg; give every leg a new one, \`$TMPDIR/<leg>-<timestamp>\` (\`OUT="$TMPDIR/f1920-$(date +%H%M%S)"\`), and point your report at the newest. The harness removes it: your temp folder a few minutes after no request waits for you any more (it closed, or moved to another worker; a wait for CI or a person, a stop or a pause keeps it whole), your git clones six hours after that (unless one holds work nothing else has), its rebuildable caches (player builds, Library, node_modules, digested profiler captures) once you are stopped and nothing in it was written for 24 h, or for 15 minutes while the disk is low (a resumed worker rebuilds them), the build and capture output of your sandbox when it is released, player slots nobody holds, old nightly output and stopped sessions' folders. That sweep comes only after you, so it is no reason to leave GBs behind. Never \`player_slots.py prune\`; publish the proofs your report links (publish_review, specs/<NNN>/proofs) before you end or delete them, since the rest goes. To delete (done with it, or the disk short in the middle of your task), use a plain \`rm -rf "$TMPDIR/<name>"\` (or Remove-Item with a path under $env:TEMP): a delete whose every path is written out under $TMPDIR is answered by the session itself with no approval, alone or inside a longer command; anything else (the folder itself, /tmp, .., ~, \`xargs rm\`, a variable after $TMPDIR such as \`$TMPDIR/$S\`) still asks a person, so do not send one. Delete only inside this machine's worker install folder (its root: D:/work/ffw, F:/ffw or ~/ffw; "FF_WORKER_ROOT" in your environment; your sandbox, your temp folder and the player slots are inside it), except your own save copy in the game's saves folder (\`read_rules saves\`).${DISK_WINDOWS}${DISK_UNIX} Never ask a person for a go to free disk space: if the disk is still short, say so in your report. Never delete a person's own files (documents, their own projects and saves) or another agent's work in progress. A request of yours to clear space or measure the disk: \`read_rules cleanup\` before you delete anything.`;
 
 /**
  * Disk space as a worker on `platform` reads it (w2002, lothsahn: "File the compaction pilot plus the base-context trim and
@@ -818,6 +820,7 @@ export class Agents {
     sessions.staleResume = (work, sid, note) => this.orchestrators?.staleResume(work, sid, note);
     sessions.poolBlock = (s, why, next) => this.poolBlock(s, why, next);
     sessions.poolWait = (s) => this.poolWait(s.info);
+    sessions.benchHolder = (s) => this.benchHeld(s.info).length > 0;
     // The coordinators' routine turns on the routine model, a person's on their own (w1158, server/turnModel.ts).
     const turnModels = new TurnModels(() => this.cfg);
     sessions.turnModel = (info, from, text, opens) => turnModels.pick(info, from, text, opens);
@@ -1162,6 +1165,8 @@ export class Agents {
     bus.on('event', (e) => e.type === 'session' && this.orchestrators.workerStatus(e.session));
     sessions.events.on('ended', (s: SessionHandle) => this.onAgentEnded(s));
     sessions.events.on('permission', (s: SessionHandle, p: { toolName: string; input: unknown }) => this.onWorkerPermission(s, p));
+    // w3686: a worker's temp folder is over its threshold: one line in each open request it serves (the worker was told by its own hook).
+    sessions.events.on('tempSize', (s: SessionHandle, arg?: unknown) => this.onWorkerTempSize(s, arg));
   }
 
   /**
@@ -1304,6 +1309,8 @@ export class Agents {
    * usage limit. When that gate clears (the pool serves, or the hold's end) its message goes again, placed like any released worker.
    */
   private poolWait(i: SessionInfo): string | undefined {
+    // w3715: a bench holder is not parked on its pool's usage limit: it finishes and lets the ticket go
+    if (this.benchHeld(i).length) return undefined;
     const now = Date.now();
     for (const w of this.workOf(i.id)) {
       if (!isWith(w, i.id) || w.status !== 'blocked' || !w.blocked) continue;
@@ -2888,6 +2895,15 @@ export class Agents {
     }
   }
 
+  private onWorkerTempSize(s: SessionHandle, arg: unknown) {
+    const line = tempSizeLedgerLine(s.info.id, arg);
+    if (!line) return;
+    const open = [...this.store.work.values()].filter((w) => isOpen(w) && w.sessionIds.includes(s.info.id));
+    if (!open.length) return console.warn(`${line} (no open request)`);
+    // A note (quiet): it is no activity on the request.
+    for (const w of open) this.orchestrators.ledgerEdit(w.id, line, () => undefined, true);
+  }
+
   private onWorkerPermission(s: SessionHandle, arg: { toolName: string; input: unknown } | undefined) {
     if (s.info.kind !== 'worker' || s.lastFrom !== 'orchestrator') return;
     // A machine's daemon sends the signal without the request (machine/daemon.ts): it is the session's newest pending one.
@@ -3159,7 +3175,17 @@ export class Agents {
     // w1863: a hold that names requests it lets through resumes their workers (lothsahn: "stop all work on LothDesktop
     // except w1785 until it's done"; at 15:15 the hold kept for w1785 queued a message to w1785's own worker).
     const mine = [...this.store.work.values()].filter((w) => isOpen(w) && w.sessionIds.includes(i.id)).map((w) => w.id);
-    return holdReason(i.machineId, this.placement(false), mine) ?? this.builds.resumeHold(i);
+    const why = holdReason(i.machineId, this.placement(false), mine) ?? this.builds.resumeHold(i);
+    // w3715: a worker whose own work holds a bench ticket there goes on through any hold until it lets go (lothsahn: "make
+    // sure stuff holding locks can continue doing stuff"): its messages, wakes and bench warnings reach it, so it can finish
+    // and release. Not a pause: that ends its processes, and with them the ticket (machine/pauseStop.ts).
+    if (why && this.benchHeld(i).length && !holdReason(i.machineId, { hold: pauseHolds(this.store.machines.values()) })) return undefined;
+    return why;
+  }
+
+  /** w3715: the granted bench tickets this worker's own work holds on its machine, from its daemon's last report (server/benchHolders.ts). */
+  benchHeld(i: SessionInfo): BenchTicketGlance[] {
+    return i.kind === 'worker' && i.machineId ? workerTickets(this.machines.statsOf(i.machineId)?.bench, i.id) : [];
   }
 
   /**
@@ -7348,6 +7374,7 @@ ${w.repo ?? ''}
           pair_menus: z.string().max(300).optional().describe('unstarted pair run: menus its legs click, or "none"'),
           pair_steam: z.string().max(300).optional().describe('Steam need or "none"'),
           report: z.union([z.enum(REPORT_KINDS), z.literal(false)]).optional().describe('w2541, with any action: its result is a report of this kind (file_report; DONE waits for one); false takes it back.'),
+          timed: z.boolean().optional().describe('w3720: false: times nothing (a determinism pair); true: measures timing. Beats its words.'),
           blockers: z.array(BLOCKER_SHAPE).max(6).optional().describe(`block: SEVERAL things it waits on (a request waiting for w727's PR and w752's fix has two). It starts only when ALL have cleared. Replaces what it waited on. Same shape as blocker.`),
           add_blocker: z.boolean().optional().describe('block with a single blocker on a request that is already blocked: add it to the gates it has, instead of replacing them.'),
           override_gate: z

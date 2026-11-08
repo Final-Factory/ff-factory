@@ -37,3 +37,31 @@ What it does not do yet: the shared rule blocks (processes, disk, shell steps, e
 places ("a game player left running", "a Steam branch"), and `read_rules` topics are Final Factory's. A job's
 `workerBriefFile` says which of those do not apply. Splitting those blocks into a Final Factory pack is the next step
 (report r76, "Build plan").
+
+## A second portal on machines that already run one (w3714)
+
+What standing up Ben's Light Tree portal on BEAST, m5, m3 and biscuit beside the live one took (2026-11-08, measured):
+
+- **Its own everything.** Its own port, `dataDir`, base clone, vault key, scheduled tasks or LaunchAgents with their own
+  names, and a daemon per machine with its own `root`, token file and `CLAUDE_CONFIG_DIR`. The full worker installer
+  (`scripts/worker/install.sh`) refuses a machine that already has a daemon, so the second daemon is a plain
+  `node machine/daemon.ts <daemon.json>` of a pinned commit.
+- **Make the machine record before the daemon dials.** The portal admits a daemon only for a machine it has a record
+  of; without one each dial is a failed login, and after 10 the address is locked out for 15 minutes (HTTP 429). Make
+  the records first with `POST /api/machines/join` (owners only), which also gives a code a machine on the tailnet can
+  redeem itself at `POST /machine/join`.
+- **Clone the project repo at each daemon's `repoPath`.** The installer clones it; a hand-made daemon must too. Without
+  it `git check-ref-format` fails in a missing folder and `create_sandbox` refuses every branch name as "not a valid
+  branch name", which reads like a portal bug. Later fetches use the vault's GitHub token.
+- **macOS with nobody logged in at the screen** has no `gui/<uid>` launchd domain (bootstrap error 125): bootstrap into
+  `user/<uid>` with `LimitLoadToSessionType` `Background` (keep `Aqua` too), and wait for a `bootout` to finish before
+  the next `bootstrap` (error 5 otherwise).
+- **Each daemon's leftovers sweep spares the other's workers** by their `FF_WORKER_ROOT` (`sameRoot`,
+  machine/leftovers.ts): both daemons on a computer have the same machine id, so before this the live BEAST and m3
+  daemons ended the Light Tree workers' `claude` every few minutes ("exited with code 1"). Give the second daemon its own
+  `root`.
+- **A repository outside the Final-Factory organization** is not probed for the organization's runners and artifacts
+  (`inGithubOrg`, server/githubTokens.ts), and a repository with no pull request yet is "not measured" rather than a CI
+  read fault (`ciUnmeasured`, server/ciReadHealth.ts), so a new instance's dashboard opens without false banners once config `vault.githubRepos` names its own
+  repositories (`["bryding/light-tree"]`); left unset it falls back to Final Factory's (`GITHUB_REQUIRED_REPOS`,
+  server/index.ts), and the token reads as lacking the organization's Self-hosted runners.

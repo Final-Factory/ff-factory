@@ -138,18 +138,44 @@ export function timedMention(text: string): boolean {
 }
 
 /**
+ * Words that say THIS work is not timed (w3720): "not a timing run", "isn't timed work", "not timed", "needs no bench lock",
+ * "no timing", "doesn't need exclusive use", "no exclusive lock". Distinct from a negated mention (timedMention skips "no
+ * bench lock" but goes on reading the rest): a denial is the requester's verdict, and the newest one wins over older words.
+ */
+export const TIMED_DENIAL = /\b(?:isn't|not|never)\s+(?:a\s+|an\s+)?(?:timed|timing)(?:\s+(?:runs?|work|legs?|tests?|measurements?|a\/b))?\b|\b(?:needs?|takes?|wants?|requires?)\s+no\s+(?:bench(?:\s+lock|\s+ticket)?|timing|exclusive)\b|\bdoes(?:n't|\s+not)\s+need\s+(?:a\s+|an\s+)?(?:exclusive|bench|timing)\b|\bno\s+(?:timing|timed)\s+(?:work|runs?|measurements?|needed)\b/i;
+
+/** Whether `text` says the work it is about is not timed (TIMED_DENIAL). */
+export const timedDenial = (text: string): boolean => TIMED_DENIAL.test(text);
+
+/**
  * Whether a request runs timed legs (w1628), and on what platform when its words name one: 'win32' ("Windows", "win
  * player", "probe_ab_win"), 'darwin' ("Mac"), else 'any'; false for no timed work. lothsahn, 2026-10-20: "We should also
  * prefer boxes with a small number of slots and players for timed runs, not beast since it's big" (server/placement.ts
  * pickTimed).
  */
-export function needsTimed(w: (Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes'> & Partial<Pick<WorkItem, 'timedBrief'>>) | undefined, text = ''): false | 'any' | 'win32' | 'darwin' {
+export function needsTimed(w: (Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes'> & Partial<Pick<WorkItem, 'timedBrief' | 'timedMark'>> & { pair?: Pick<WorkPair, 'timed'> }) | undefined, text = ''): false | 'any' | 'win32' | 'darwin' {
   if (w && needsOf(w) === 'agent') return false;
+  // w3720: an explicit mark beats every word. decide_work timed false (or true) says it outright; a pair run is timed only
+  // when request_pair or decide_work said so (WorkPair.timed), never by its words: w3705, a determinism pair run, read as
+  // timed work on darwin from two notes saying it was NOT a timing run ("LothLaptop, whose bench lock is held by w3639's
+  // vSync timed run"; "m5 ... may be the host as a Mac"), so m5 refused it as timed and biscuit as not a Mac, and it sat
+  // Queued beside free room while it gated the 1.0 release.
+  if (w?.timedMark?.timed === false) return false;
+  if (w?.pair && !w.timedMark?.timed) return w.pair.timed ? 'any' : false;
+  if (w?.pair) return 'any';
   // Oldest first: the title and brief as filed, then people's notes in order, then `text` (a dispatcher's brief).
   // w2358: the brief start_agent was refused for (WorkItem.timedBrief) reads as a note of its time.
   const later = [...(w?.notes ?? []), ...(w?.timedBrief ? [w.timedBrief] : [])].sort((a, b) => (a.at ?? '').localeCompare(b.at ?? ''));
   const parts = [...(w ? [w.title, w.brief, ...later.map((n) => n.text)] : []), text].filter(Boolean);
-  if (!timedMention(parts.join('\n'))) return false;
+  if (!w?.timedMark?.timed) {
+    if (!timedMention(parts.join('\n'))) return false;
+    // w3720: the newest words that speak to timing win: a note that says the work is not timed ("it's a determinism check,
+    // not a timing run", "it needs no bench lock and isn't timed work") clears every mention before it, and its own.
+    for (const part of [...parts].reverse()) {
+      if (timedDenial(part)) return false;
+      if (timedMention(part)) break;
+    }
+  }
   // w2358: a requester's "any OS" clears what was implied before it, when nothing newer names an OS again (w2346's brief
   // cited data "Measured by w2332 on m3"; its note said "any OS. m3 is not required."). A mention that rules an OS out
   // ("m3 is not required") names none.

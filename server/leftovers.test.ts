@@ -4,7 +4,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { LEFTOVER, LeftoverReaper, waitLoop, callerPids, envFrom, installLeftoversShim, kindOf, macEnvLine, orphanVerdict, ownLeftovers, personGames, readEnvs, readLeases, realInspect, sessionVerdict, slotOf, tempSessionInArgs, tempSessionOf, type LeftoverDeps, type PlayerLease, type ProcEnv } from '../machine/leftovers.ts';
+import { LEFTOVER, LeftoverReaper, waitLoop, callerPids, envFrom, installLeftoversShim, kindOf, macEnvLine, orphanVerdict, ownLeftovers, personGames, readEnvs, readLeases, realInspect, sameRoot, sessionVerdict, slotOf, tempSessionInArgs, tempSessionOf, type LeftoverDeps, type PlayerLease, type ProcEnv } from '../machine/leftovers.ts';
 import { realDeps as realUnityDeps, type Proc, type UnityPlatform } from '../machine/unity.ts';
 import { playerText, unitySlotsLine } from '../shared/fleet.ts';
 
@@ -33,7 +33,7 @@ interface Session {
 }
 
 /** A fake machine: processes with their environments, start times and CPU, sessions, leases and a clock. */
-function machine(procs: (Proc & { env?: ProcEnv; born?: number; cpu?: number })[], o: { platform?: UnityPlatform; sessions?: Record<string, Session>; leases?: PlayerLease[]; ready?: boolean; known?: string[]; personPlay?: boolean } = {}) {
+function machine(procs: (Proc & { env?: ProcEnv; born?: number; cpu?: number })[], o: { platform?: UnityPlatform; sessions?: Record<string, Session>; leases?: PlayerLease[]; ready?: boolean; known?: string[]; personPlay?: boolean; root?: string } = {}) {
   const t0 = 1_000 * HOUR;
   for (const p of procs) p.born ??= t0 - 30 * HOUR;
   const st = {
@@ -50,6 +50,7 @@ function machine(procs: (Proc & { env?: ProcEnv; born?: number; cpu?: number })[
   const deps: LeftoverDeps = {
     platform: o.platform ?? 'linux',
     machineId: 'biscuit',
+    ...(o.root ? { root: o.root } : {}),
     procs: async () => st.procs.map(({ pid, ppid, cmd, name }) => ({ pid, ppid, cmd, ...(name ? { name } : {}) })),
     envOf: async (pids) => new Map(st.procs.filter((p) => pids.includes(p.pid) && p.env).map((p) => [p.pid, p.env!])),
     inspect: async (pids) => st.procs.filter((p) => pids.includes(p.pid)).map((p) => ({ pid: p.pid, startedAt: p.born, cpuMs: p.cpu ?? 0 })),
@@ -326,6 +327,30 @@ test('never ended: an interactive editor and what it started, the main clone, th
   assert.equal((await early.look(1)).length, 1);
 });
 
+test("w3714, BEAST 2026-11-08: a second FF Factory's worker on the same computer (same machine id, another FF_WORKER_ROOT) is never this daemon's; its own root's is, and one with no root is judged as before", async () => {
+  const procs = [
+    SYSTEMD,
+    // Ben's Light Tree daemon's worker: the live daemon ended its claude four times in 8 min before this.
+    { pid: 500, ppid: 9212, cmd: '/usr/bin/claude --model opus', env: { session: 'a2148455', sandbox: 'slot1', machine: 'biscuit', root: '/home/u/ben-factory/worker' } },
+    { pid: 501, ppid: 9212, cmd: '/usr/bin/sleep 999', env: { session: 'gone', sandbox: 'slot1', machine: 'biscuit', root: `${ROOT}/` } },
+    { pid: 502, ppid: 9212, cmd: '/usr/bin/sleep 998', env: env('gone') },
+  ];
+  const m = machine(procs, { sessions: { gone: {} }, root: ROOT });
+  for (let i = 0; i < 30; i++) await m.look(10);
+  assert.ok(m.alive(500), "another daemon's worker is spared");
+  assert.ok(!m.alive(501), "this daemon's own root's leftover ends");
+  assert.ok(!m.alive(502), 'a leftover with no root (a worker from before w3714) ends as before');
+  assert.ok(!m.st.signals.some((s) => s.endsWith(' 500')));
+  assert.equal(sameRoot('F:\\ffw', 'f:/ffw/', 'win32'), true);
+  assert.equal(sameRoot('F:\\ffw', 'F:/ffw/ben-factory/worker', 'win32'), false);
+  assert.equal(sameRoot('/home/u/FFW', '/home/u/ffw', 'linux'), false);
+  assert.equal(sameRoot(undefined, '/home/u/ffw', 'linux'), true);
+  assert.equal(sameRoot('/home/u/ffw', undefined, 'darwin'), true);
+  assert.deepEqual(envFrom(['FF_SESSION_ID=a2148455', 'FF_MACHINE_ID=beast', 'FF_WORKER_ROOT=F:\\ffw\\ben-factory\\worker']), { session: 'a2148455', machine: 'beast', root: 'F:\\ffw\\ben-factory\\worker' });
+  assert.deepEqual(envFrom(['FF_SESSION_ID=a', 'FF_WORKER_ROOT=']), { session: 'a' });
+  assert.deepEqual(macEnvLine('  812 /usr/bin/claude TERM=xterm FF_SESSION_ID=d51d7def FF_MACHINE_ID=m3 FF_WORKER_ROOT=/Users/b/ben-factory/worker')?.env, { session: 'd51d7def', machine: 'm3', root: '/Users/b/ben-factory/worker' });
+});
+
 test('w2410, BEAST 2026-10-27: a stopped worker\'s own `unity-slot run` names the daemon\'s folder, yet it and its bench ticket\'s helper end like its other leftovers; the agent host is still spared', async () => {
   // Worker d2d9c644's run waited for ticket t00002471 from 12:23 UTC; at 14:03 UTC the reaper ended only the bash and sh
   // around it, and the run (with its Unity slot and its waiting ticket) outlived its worker by hours.
@@ -373,6 +398,26 @@ test('sessionVerdict: live keeps; a done worker 2 min, a waited-for one 10 min, 
   assert.equal(w.end, false);
   assert.match(w.why, /its check-in comes due at/);
   assert.equal(sessionVerdict({ live: false, resumable: true, stoppedSince: now - 5 * HOUR, wakeAt: now - 10 * MIN, now }).end, true);
+});
+
+test('sessionVerdict (w3715): a stopped worker that holds a bench ticket loses its check-in grace; a live one keeps it', () => {
+  const now = 100 * HOUR;
+  const far = { wakeAt: now + 5 * HOUR, resumable: true };
+  // a stopped holder with a far check-in ends DONE_GRACE after it stopped
+  const kept = sessionVerdict({ live: false, ...far, holdsTicket: true, stoppedSince: now - LEFTOVER.DONE_GRACE_MS + 1, now });
+  assert.equal(kept.end, false);
+  assert.equal(kept.until, now + 1);
+  assert.match(kept.why, /holds bench ticket\(s\)/);
+  const ended = sessionVerdict({ live: false, ...far, holdsTicket: true, stoppedSince: now - LEFTOVER.DONE_GRACE_MS, now });
+  assert.equal(ended.end, true);
+  assert.match(ended.why, /holds bench ticket\(s\)/);
+  // without a ticket the check-in still keeps it, and so does a waiting request
+  const woken = sessionVerdict({ live: false, ...far, holdsTicket: false, stoppedSince: now - HOUR, now });
+  assert.equal(woken.end, false);
+  assert.match(woken.why, /its check-in comes due at/);
+  assert.equal(sessionVerdict({ live: false, ...far, stoppedSince: now - HOUR, now }).end, false);
+  // a live holder is kept
+  assert.equal(sessionVerdict({ live: true, ...far, holdsTicket: true, stoppedSince: now - 5 * HOUR, now }).end, false);
 });
 
 test('kinds, slots, temp paths and environments as each platform writes them', () => {
@@ -495,13 +540,13 @@ test('readLeases: every slot\'s lease files, the session player_slots.py writes 
 const platform: UnityPlatform = process.platform === 'win32' ? 'win32' : process.platform === 'linux' ? 'linux' : 'darwin';
 
 test('readEnvs on this machine finds the session of a process started with it, and none in one started without', async () => {
-  const sleeper = (extra: Record<string, string>) => spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { env: { ...process.env, FF_SESSION_ID: '', FF_MACHINE_ID: '', ...extra }, stdio: 'ignore' });
-  const a = sleeper({ FF_SESSION_ID: 'w1196abc', FF_SANDBOX_ID: 'slot9', FF_MACHINE_ID: 'testbox' });
+  const sleeper = (extra: Record<string, string>) => spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { env: { ...process.env, FF_SESSION_ID: '', FF_MACHINE_ID: '', FF_WORKER_ROOT: '', ...extra }, stdio: 'ignore' });
+  const a = sleeper({ FF_SESSION_ID: 'w1196abc', FF_SANDBOX_ID: 'slot9', FF_MACHINE_ID: 'testbox', FF_WORKER_ROOT: '/srv/ffw-test' });
   const b = sleeper({});
   try {
     await new Promise((r) => setTimeout(r, 500));
     const got = await readEnvs(platform, [a.pid!, b.pid!]);
-    assert.deepEqual(got.get(a.pid!), { session: 'w1196abc', sandbox: 'slot9', machine: 'testbox' });
+    assert.deepEqual(got.get(a.pid!), { session: 'w1196abc', sandbox: 'slot9', machine: 'testbox', root: '/srv/ffw-test' });
     assert.equal(got.get(b.pid!), undefined);
   } finally {
     a.kill('SIGKILL');

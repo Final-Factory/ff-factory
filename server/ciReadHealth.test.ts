@@ -12,13 +12,13 @@ const REFUSED_ROLLUP = 'GraphQL: Resource not accessible by personal access toke
 const REFUSED_RUNS = 'gh: Resource not accessible by personal access token (HTTP 403)';
 
 /** A gh whose reads succeed or are refused by kind: rollup (checks), runs (Actions), merge (the PR's merge state). */
-function gh(can: { rollup?: boolean; runs?: boolean; merge?: boolean; list?: boolean }, mergeState = 'unstable') {
+function gh(can: { rollup?: boolean; runs?: boolean; merge?: boolean; list?: boolean | 'empty' }, mergeState = 'unstable') {
   const calls: string[][] = [];
   const run = async (_cmd: string, args: string[], _opts?: RunOptions): Promise<RunResult> => {
     calls.push(args);
     const ok = (stdout: string): RunResult => ({ code: 0, stdout, stderr: '' });
     const no = (stderr: string): RunResult => ({ code: 1, stdout: '', stderr });
-    if (args[0] === 'pr' && args[1] === 'list') return can.list === false ? no('HTTP 401: Bad credentials') : ok(JSON.stringify([{ number: 1393, headRefOid: 'b3c825300c' }]));
+    if (args[0] === 'pr' && args[1] === 'list') return can.list === false ? no('HTTP 401: Bad credentials') : can.list === 'empty' ? ok('[]') : ok(JSON.stringify([{ number: 1393, headRefOid: 'b3c825300c' }]));
     if (args.includes('statusCheckRollup')) return can.rollup ? ok(JSON.stringify({ state: 'OPEN', statusCheckRollup: [] })) : no(REFUSED_ROLLUP);
     if (args.includes('state,statusCheckRollup,headRefOid')) return can.rollup ? ok('{}') : no(REFUSED_ROLLUP);
     if (args.includes('state,headRefOid')) return ok(JSON.stringify({ state: 'OPEN', headRefOid: 'b3c825300c' }));
@@ -119,4 +119,23 @@ test('a rate-limited measurement (w1186) is not "cannot read CI": the last measu
   const refused = new CiReadWatch({ repo: () => 'Final-Factory/FinalFactory', runner: () => gh({}).run, report: (title) => void reports.push(title) });
   await refused.check();
   assert.equal(refused.health?.level, 'none');
+});
+
+test("w3714: a repository with no pull request yet (a new instance's project) is not measured: no WARNING, no banner, no report; the fix names the portal's own repo", async () => {
+  const reports: string[] = [];
+  let can: Parameters<typeof gh>[0] = { list: 'empty' };
+  const w = new CiReadWatch({ repo: () => 'bryding/light-tree', runner: () => gh(can).run, report: (title, body) => reports.push(`${title}: ${body}`), now: () => new Date('2026-11-08T12:00:00Z') });
+  await w.check();
+  assert.equal(w.health?.level, 'none');
+  assert.equal(ciReadBanner(w.health), undefined);
+  assert.match(ciReadLine(w.health), /^GitHub CI reads \(w889\): not measured yet: bryding\/light-tree has no pull request/);
+  assert.deepEqual(reports, []);
+  can = {};
+  await w.check();
+  assert.equal(reports.length, 1, 'a first pull request it cannot read is said');
+  assert.match(ciReadBanner(w.health) ?? '', /"Actions: Read-only" on bryding\/light-tree/);
+  assert.doesNotMatch(ciReadBanner(w.health) ?? '', /Final-Factory/);
+  can = { runs: true };
+  await w.check();
+  assert.match(reports[1], /^FF Factory reads CI on pull requests again/);
 });

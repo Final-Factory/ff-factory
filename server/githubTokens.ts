@@ -419,7 +419,9 @@ export class GithubTokens {
       return x ? access(x.status, notFound) : 'error';
     };
     try {
-      const org = {
+      // The organization's reads only where this portal's repositories are in it: a second instance on a person's own
+      // repositories (w3714) has no Final-Factory runners or artifacts to read, and must not warn that it cannot.
+      const org: NonNullable<GithubTokenHealth['org']> = !inGithubOrg(this.repos()) ? {} : {
         'self-hosted-runners': await status(`orgs/${GITHUB_ORG}/actions/runners?per_page=1`, 'denied'),
         // An unknown digest: 404 when the read is allowed, 403 when refused (measured with a token that may read: 404).
         'artifact-metadata': await status(`orgs/${GITHUB_ORG}/artifacts/sha256:${'0'.repeat(64)}/metadata/storage-records`, 'read'),
@@ -601,6 +603,11 @@ export function ghReader(run: Runner, now: () => number = Date.now): GithubReade
  * repository not selected, a permission's read refused (all repositories at once when it is every one). Reads that got no
  * answer are not counted: a network blip is not the token's fault.
  */
+/** Whether any of these "owner/name" repositories is in GITHUB_ORG, whose runners and artifacts the probe reads (w3714). */
+export function inGithubOrg(repos: readonly string[]): boolean {
+  return repos.some((r) => r.split('/')[0].toLowerCase() === GITHUB_ORG.toLowerCase());
+}
+
 export function githubProblems(h: GithubTokenHealth, repos: readonly string[], now: number): string[] {
   if (!h.checkedAt || h.disabled) return [];
   const out: string[] = [];
@@ -611,7 +618,7 @@ export function githubProblems(h: GithubTokenHealth, repos: readonly string[], n
     else if (days < 14) out.push(`expires ${h.expiresAt.slice(0, 10)} (in ${days} days)`);
   }
   if (!h.repos) return out;
-  for (const p of GITHUB_REQUIRED_PERMISSIONS.filter((x) => x.scope === 'organization' || x.id === 'artifact-metadata')) {
+  for (const p of GITHUB_REQUIRED_PERMISSIONS.filter((x) => inGithubOrg(repos) && (x.scope === 'organization' || x.id === 'artifact-metadata'))) {
     if (h.org?.[p.id] === 'denied') out.push(`${p.label} (organization ${GITHUB_ORG}): read refused`);
   }
   const probed = h.repos.filter((r) => repos.includes(r.repo));

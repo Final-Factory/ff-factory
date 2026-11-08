@@ -139,8 +139,12 @@ export interface LinkUpdateReport {
 /** What the daemon reports of a sandbox; the portal adds purpose and sessionIds (MachineSandbox). */
 export type DaemonSandbox = Omit<MachineSandbox, 'purpose' | 'sessionIds'>;
 
-/** rateLimit (protocol 4): an agent there hit a rate limit, so the portal fetches the token's usage sooner. */
-export type SignalName = 'turnEnd' | 'permission' | 'result' | 'ended' | 'rateLimit';
+/**
+ * rateLimit (protocol 4): an agent there hit a rate limit, so the portal fetches the token's usage sooner.
+ * tempSize (w3686, no bump): a worker's temp folder is over its threshold, arg { total, biggest, step } (server/tempSizeHook.ts); an older
+ * portal re-emits it with no listener, and an older daemon or host never sends it.
+ */
+export type SignalName = 'turnEnd' | 'permission' | 'result' | 'ended' | 'rateLimit' | 'tempSize';
 
 /** The refusal of unity and switch on a machine's main clone, by the portal and by the daemon (w536). */
 export const MAIN_CLONE_NO_AGENTS = "a machine's main clone takes no agents (w536): give a sandbox";
@@ -240,6 +244,12 @@ export type ToDaemon =
    * older daemon ignores it.
    */
   | { type: 'timed_run_cancel'; id: string; why: string }
+  /**
+   * w3715: take back the granted bench ticket a stopped worker's background work holds: the daemon writes the ticket's
+   * `revoked` file (bench_queue.py gives it back) and, if it is still there 90 s later, ends its helper's process tree. Only
+   * that worker's own ticket (`session` must match it), never a harness ticket. An older daemon ignores it.
+   */
+  | { type: 'bench_revoke'; ticket: string; session: string; why: string }
   /** Dial the portal at this base URL from now on (protocol 8, w466); answered by relocate_result, then the link closes. */
   | { type: 'relocate'; id: string; url: string }
   /** How often the daemon polls its Mac's own Claude login's plan usage (config usagePollMinutes), at connect and when it changes. */
@@ -249,9 +259,9 @@ export type ToDaemon =
   /**
    * A dictation clip for this machine's GPU Whisper (w615, machine/voice.ts), answered by transcribe_result. Sent only to a
    * daemon whose hello or `voice` status offered it, so an older daemon never gets one. `audio`: a 16-bit PCM WAV, 16 kHz
-   * mono, in base64 (300 s at most); `prompt`: Whisper's vocabulary. Neither is logged.
+   * mono, in base64 (300 s at most); `prompt`: Whisper's vocabulary. Neither is logged. `fast`: a live pass (w3712), decoded greedily.
    */
-  | { type: 'transcribe'; id: string; audio: string; prompt?: string; language?: string | null }
+  | { type: 'transcribe'; id: string; audio: string; prompt?: string; language?: string | null; fast?: boolean }
   /** A recording started on the portal: load the model now if it is not loaded (w615). */
   | { type: 'voice_warm' }
   /**

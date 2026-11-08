@@ -186,7 +186,10 @@ test('w1158: what a coordinator carries in every call stays within its budget', 
   // w3328 (a disk clean-up worker refused by the low-disk gate it was sent to clear) gave request_work and update_work
   // disk_cleanup and start_agent its flag (trimmed from 760 characters of text to 100; the rule is in docs/self-recovery.md):
   // the owner's measured 26,003, so the cap moved to 26,025.
-  const ALWAYS_LOADED_MAX = 26_025;
+  // w3720 (lothsahn: "we need to make sure we're not doing time runs when we shouldn't be") gave decide_work timed, a request
+  // said outright to be timed work or not, which beats its words (trimmed from 315 characters to 90; the rule is in read_rules
+  // machines and docs/orchestrators.md): the dispatcher's measured 26,154, so the cap moved to 26,175.
+  const ALWAYS_LOADED_MAX = 26_175;
   await withCoordinators((agents, kinds) => {
     for (const [kind, info] of kinds) {
       const prompt = asOnLinuxCi(promptOf(agents, info)).length;

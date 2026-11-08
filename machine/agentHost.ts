@@ -83,7 +83,7 @@ export function cpuSince(before: Map<string, number>, after: Map<string, number>
   return ms;
 }
 
-const SIGNALS: SignalName[] = ['turnEnd', 'permission', 'result', 'ended', 'rateLimit'];
+const SIGNALS: SignalName[] = ['turnEnd', 'permission', 'result', 'ended', 'rateLimit', 'tempSize'];
 
 export const hostsDir = (appDir: string) => path.join(appDir, 'hosts');
 
