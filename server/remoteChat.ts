@@ -5,6 +5,7 @@ import { AttachmentError, type AttachmentStore } from './attachments.ts';
 import { isMidTurn } from './sessions.ts';
 import type { Orchestrators } from './orchestrators.ts';
 import { beforeNote } from '../shared/conditional.ts';
+import { personMessageView } from '../shared/personMessage.ts';
 import { MD_IMAGE, isVideoPath, localPath, mentionedPaths } from '../shared/imagePaths.ts';
 import { REPLY_MARK, splitVia } from '../shared/replies.ts';
 import type { AttachmentRef, Requester, ServerEvent, SessionInfo, TranscriptEvent } from '../shared/types.ts';
@@ -197,7 +198,8 @@ export function describeEvents(events: TranscriptEvent[], sessionId: string, ori
         if (e.text.startsWith('[reaction]')) break;
         const v = splitVia(e.text);
         const words = beforeNote(v.text).split(REPLY_MARK)[0].trim();
-        if (e.from === 'human') lines.push(`#${e.seq} you (${v.via ?? 'web app'}): ${clip(words, CLIP_HUMAN)}`);
+        // A person's own message as their chat shows it, the w1831 "already sent" note out too (w3581).
+        if (e.from === 'human') lines.push(`#${e.seq} you (${v.via ?? 'web app'}): ${clip(personMessageView(e.text).words, CLIP_HUMAN)}`);
         else lines.push(`#${e.seq} [${e.from === 'system' ? 'system' : 'agent'}] ${clip(words, CLIP_SYSTEM)}`);
         break;
       }

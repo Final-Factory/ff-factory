@@ -4,7 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
-import { searchTranscripts, snippet, terms } from './search.ts';
+import { searchableText, searchTranscripts, snippet, terms } from './search.ts';
+import { HELD_MARK } from '../shared/conditional.ts';
 import type { SessionInfo, TranscriptEvent } from '../shared/types.ts';
 
 const session = (id: string, over: Partial<SessionInfo>): SessionInfo => ({
@@ -105,4 +106,12 @@ test('w2044: a search reads asynchronously and gives the event loop back while i
   assert.ok(other, 'another callback ran while the search was going');
   assert.ok(r.slices > 3000 / 256, `the scan of 3000 lines gave the loop back every 256 lines (${r.slices} stretches)`);
   assert.deepEqual(r.hits.map((h) => [h.sessionId, h.seq]), [['big', 1], ['big', 1001], ['big', 2001], ['old', 1]]);
+});
+
+test("w3581: a person's message is searched without FF Factory's notes for their orchestrator", () => {
+  const typed = `go ahead with w12${'\n\n'}${HELD_MARK}${'\n'}- 05:00: request_work {}, refused: 8 filings`;
+  const mine: TranscriptEvent = { seq: 1, t: '2026-11-08T05:00:00Z', kind: 'user', from: 'human', text: typed };
+  assert.equal(searchableText(mine), 'go ahead with w12');
+  const harness: TranscriptEvent = { ...mine, from: 'system' };
+  assert.equal(searchableText(harness), typed, "the harness's own messages are searched whole");
 });
