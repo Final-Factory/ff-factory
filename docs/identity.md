@@ -23,7 +23,14 @@ worker then runs on that person's Claude account when FF Factory holds one for t
   ```
   node server/user.ts lothsahn --name "Lothsahn" --role member          # create, or change the password
   node server/user.ts lothsahn --name "Lothsahn" --role member --keep-password   # profile only
+  node server/user.ts ben --link [--hours 24]                                     # a one-time set-password link
   ```
+
+  `--link` (w3714) lets a person set their own password, so none passes through a chat: it writes
+  `<publicUrl>/set-password#t=<token>` to `data/password-link-<name>.txt` (0600, never printed). The page sets the
+  password once, before its hours run out, logs that browser in and signs the login out everywhere else. Only the
+  token's SHA-256 is kept (`data/password-links.json`), a newer link replaces the older one, and a wrong token counts as a
+  failed login (server/auth.ts `usePasswordLink`).
 
 - `/mcp` API keys can be bound to a login: `node server/apikey.ts loth-laptop --user lothsahn`. Everything
   that key's tools start is requested by that person, and its `for_user` cannot name anyone else. A key

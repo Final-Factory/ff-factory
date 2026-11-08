@@ -38,6 +38,7 @@ import { Notifier } from './notify.ts';
 import { describeBusy } from './wake.ts';
 import { machineLoadLine, systemStats } from './system.ts';
 import { Auth } from './auth.ts';
+import { setPasswordPage } from './setPasswordPage.ts';
 import { Identity, asRequester } from './identity.ts';
 import { routeMcp } from './mcp.ts';
 import { IMAGE_TYPES, SOCKET_PING_MS, WORK_PRIORITIES, type WorkPriority, type ImageInput, type NotifyPrefs, type AnswerRequest, type ReactRequest, type SendMessageRequest } from '../shared/types.ts';
@@ -2315,6 +2316,18 @@ const server = http.createServer(async (req, res) => {
       if (typeof username !== 'string' || typeof password !== 'string') return send(res, 400, { error: 'username and password required' });
       const r = await auth.login(req, username.trim(), password);
       return r.ok ? send(res, 200, { username: username.trim() }, { 'set-cookie': r.cookie }) : send(res, r.status, { error: r.error });
+    }
+    // A one-time set-password link (w3714, `node server/user.ts <name> --link`): the page, then the token and the new password.
+    if (url.pathname === '/set-password' && req.method === 'GET') {
+      const { nonce, html } = setPasswordPage();
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'x-content-type-options': 'nosniff', 'content-security-policy': `default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'; connect-src 'self'; form-action 'none'; frame-ancestors 'none'` });
+      return res.end(html);
+    }
+    if (url.pathname === '/api/set-password' && req.method === 'POST') {
+      const { token, password } = await readJson<{ token?: string; password?: string }>(req);
+      if (typeof token !== 'string' || typeof password !== 'string') return send(res, 400, { error: 'token and password required' });
+      const r = await auth.usePasswordLink(req, token.trim(), password);
+      return r.ok ? send(res, 200, { username: r.username }, { 'set-cookie': r.cookie }) : send(res, r.status, { error: r.error });
     }
     if (url.pathname === '/api/logout' && req.method === 'POST') {
       return send(res, 200, {}, { 'set-cookie': auth.logout(req) });
