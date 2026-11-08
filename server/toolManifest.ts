@@ -61,6 +61,7 @@ export const TOOL_MANIFEST = {
   decide_work: { group: 'ledger', kinds: [D], always: [D] },
   conditional_decisions: { group: 'ledger', kinds: [P] },
   grant_bench_turn: { group: 'ledger', kinds: [P] },
+  clear_crash_hold: { group: 'ledger', kinds: [P] },
   read_work: { group: 'ledger', kinds: [W] },
   spend_export: { group: 'ledger', kinds: [W] },
   // reports (w2541, docs/reports.md)

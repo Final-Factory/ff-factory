@@ -2,6 +2,7 @@
 // work ledger (filing, the dispatcher's decisions, the replies people's orchestrators get), each chat's budget between
 // its person's messages, and where the harness's messages about work and workers go. server/agents.ts builds their
 // options and tool belts on top of this; the rules that are not the model's to decide live here.
+import { crashHoldLine, crashHoldNote, liveCrashHolds } from './crashHolds.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import { band, concepts, DEFAULT_THRESHOLDS, entryMatch, indexOf, type MatchThresholds } from './boardMatch.ts';
@@ -84,7 +85,7 @@ import { isSamePerson, personForWork, sessionPerson, tokenPersonForWork } from '
 import { MERGE_ON_GREEN_MARK } from './mergeOnGreen.ts';
 import { handoffQuote, handoffReport, isHandoff } from './handoffReport.ts';
 import { commitsIn, normPr, pairCommitsOf, pairPrOf, pairRanCommit, prIn, resultFor, sameCommit, samePr } from './pairRuns.ts';
-import type { AttachmentRef, BenchGrant, ConditionalDecision, ForYouMark, OpenAsk, WorkNeedsYou, GateResume, GitStatus, Machine, WorkAutoClosed, WorkBlocker, WorkDigest, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPair, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
+import type { AttachmentRef, BenchGrant, ConditionalDecision, CrashHold, ForYouMark, OpenAsk, WorkNeedsYou, GateResume, GitStatus, Machine, WorkAutoClosed, WorkBlocker, WorkDigest, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPair, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
 import { DISK_CLEANUP_FLOOR_GB, REPORT_KINDS, WORK_PRIORITIES, questionFor, type ReportKind, type ReportSummary } from '../shared/types.ts';
 import { FOR_YOU_CHARS, FOR_YOU_KEPT, forYouId, splitForYou } from '../shared/forYou.ts';
 
@@ -3369,6 +3370,35 @@ It is for your part of the work, not an answer to another worker's question.`;
     return `Recorded ${grantLine(g)}. Within a minute ${machine}'s daemon marks ${w.id}'s worker sessions there; each of their next ${g.turns} exclusive timing tickets (bench_queue.py timed or hold, with --minutes up to ${g.minutes}) gets a ${g.minutes}-minute turn whose clock starts once ${machine}'s CI jobs drained, with its CI runners paused until it lets go. Tell ${w.id}'s worker (message it): it times on ${machine} with the game repo's bench_queue.py from master (w3186), e.g. \`python scripts/bench/bench_queue.py timed --what "<what>" --minutes ${g.minutes}\`. grant_bench_turn lists it; cancel takes it back when ${n} says so.`;
   }
 
+  /**
+   * w3740: clear a crash hold (server/crashHolds.ts) with the person's yes. Without `request`: the holds that hold now. Only
+   * a person's own orchestrator, in a turn of theirs, with their words verbatim from their message, as grant_bench_turn.
+   */
+  clearCrashHold(chat: SessionHandle, input: { request?: string; machine?: string; words?: string }): string {
+    const owner = this.ownerOf(chat.info);
+    if (!owner) throw new Error("only a person's own orchestrator clears a crash hold, with that person's yes");
+    const n = owner.displayName;
+    if (!input.request) {
+      const live = [...this.store.work.values()].filter(isOpen).flatMap((w) => liveCrashHolds(w).map((h) => `- ${crashHoldLine(w, h)}`));
+      return live.length ? `Crash holds (w3740): each request launches no game player on its machine until a person clears it:\n${live.join('\n')}` : 'No crash holds hold now.';
+    }
+    if ((chat.turnFrom ?? chat.lastFrom) !== 'human') throw new Error(`only ${n}, in a turn of theirs, clears a crash hold: a check-in or a timer is not their yes`);
+    const w = this.store.work.get(input.request.trim().toLowerCase());
+    if (!w) throw new Error(`no request "${input.request}"; list_work shows them`);
+    const machine = input.machine?.trim().toLowerCase() ?? '';
+    const held = liveCrashHolds(w, machine || undefined);
+    if (!held.length) throw new Error(`${w.id} has no crash hold${machine ? ` on ${machine}` : ''}; clear_crash_hold without arguments lists them`);
+    if (!machine && new Set(held.map((h) => h.machine)).size > 1) throw new Error(`machine: ${w.id} is held on ${[...new Set(held.map((h) => h.machine))].join(' and ')}; name the one ${n} said yes for`);
+    if (!isFor(w, owner.userId) && !this.isOwnerRole(owner.userId)) throw new Error(`${w.id} is ${names(w.requesters)}'s request, not ${n}'s; only an owner clears a crash hold on another person's request`);
+    const words = input.words?.trim();
+    if (!words) throw new Error(`words: ${n}'s own yes for more runs on ${held[0].machine}, verbatim from their message ("ok, one more run on the m3")`);
+    if (!inPersonWords(words, this.personMessages(chat.info.id))) throw new Error(`words: "${clip(words, 120)}" is not in ${n}'s own recent messages here; quote them verbatim (at least a few words), never your summary`);
+    const at = this.now().toISOString();
+    for (const h of held) Object.assign(h, { cleared: at, clearedBy: n, words: clip(words, 500) });
+    this.noteWork(w, `${n}: crash hold on ${held[0].machine} cleared in their own turn: "${clip(words, 500)}" (w3740)`);
+    return `Cleared ${w.id}'s crash hold on ${held[0].machine}: within a minute its worker's player launches there pass the guard again. Tell ${w.id}'s worker (message it) what ${n} allowed, in their words, and that one more crash there holds it again.`;
+  }
+
   /** Take a pending decision off its request; undefined when it is gone already. */
   private takeConditional(workId: string, decisionId: string): { w: WorkItem; d: ConditionalDecision } | undefined {
     const w = this.store.work.get(workId);
@@ -4258,7 +4288,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const paused = cutOff.filter((g) => g.pause);
     const back = paused.length
       ? ` FF Factory stopped your turn when ${paused.map((g) => g.ref).join(', ')} was paused from its tray app at ${paused[0].at.slice(11, 16)} UTC (w2443); it runs again, and this is your resume in your own sandbox. Your work was pushed as a WIP commit on your sandbox branch if you had not pushed it: \`git log -1\` shows it; carry on and commit on top of it (it is pushed: never reset it away or force-push). Check git status, re-pin your Unity instance if you use one (FF Factory closed the editor at the pause), start again any timed run, build or test the pause cancelled, and continue where you left off.`
-      : cutOff.length ? ` Your turn stopped when ${cutOff.map((g) => g.ref).join(', ')} went offline at ${cutOff[0].at.slice(11, 16)} UTC, and this is your resume in your own sandbox: your folder is as you left it. Check git status for half-written edits, re-pin your Unity instance if you use one (the editor may have restarted), and continue where you left off.` : '';
+      : cutOff.length ? ` Your turn stopped when ${cutOff.map((g) => g.ref).join(', ')} went offline at ${cutOff[0].at.slice(11, 16)} UTC, and this is your resume in your own sandbox: your folder is as you left it. Check git status for half-written edits, re-pin your Unity instance if you use one (the editor may have restarted), and continue where you left off.${[...new Set(cutOff.map((g) => g.ref))].filter((m): m is string => !!m && liveCrashHolds(w, m).length > 0).map((m) => crashHoldNote(m, [w.id])).join('')}` : '';
     const ciGates = gates.filter((g) => g.kind === 'ci');
     // Not the "read its checks" hint when CI could not start (w907: the PR conflicts, or its head never got a run): the worker pushes first.
     const ci = ciGates.length > 0 && !/CI can't run|no CI run exists/.test(cleared);
@@ -5563,13 +5593,25 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    * Stalled or "Merged, follow-up pending" meanwhile. A worker that waits on a person is left as it is. Returns the workers
    * that got a gate (their resume is the gate's, so Machines does not resume them as well).
    */
-  workersCutOff(machineId: string, sessionIds: readonly string[]): string[] {
+  workersCutOff(machineId: string, sessionIds: readonly string[], players: Record<string, string> = {}): string[] {
     const m = machineId.trim().toLowerCase();
     const at = this.now().toISOString();
     const items = [...this.store.work.values()];
     const gated = new Set<string>();
     for (const sid of sessionIds) {
       const s = this.store.sessions.get(sid);
+      // w3740: its game player or timed leg ran there in the last half hour: each open request it holds launches no player
+      // there again until a person says yes (server/crashHolds.ts), a waiting worker's too
+      if (s && players[sid] && sid !== this.dispatcherId) {
+        for (const id of holdsOf(sid, items).held) {
+          const w = this.store.work.get(id);
+          if (!w || !isOpen(w) || liveCrashHolds(w, m).length) continue;
+          const h: CrashHold = { machine: m, at, worker: sid, why: players[sid] };
+          w.crashHolds = [...(w.crashHolds ?? []).slice(-9), h];
+          this.stamp(w, `crash hold on ${m} (w3740): ${crashHoldLine(w, h)}. Its worker launches no game player on ${m} until a person clears it with their own words (clear_crash_hold)`);
+          this.store.putWork(w);
+        }
+      }
       if (!s || s.waitingOn || sid === this.dispatcherId) continue;
       for (const id of holdsOf(sid, items).held) {
         const w = this.store.work.get(id);
@@ -5624,6 +5666,12 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       const gates = gatesOf(w);
       const rest = gates.filter((g) => !(g.kind === 'machine' && g.by === by && !g.pause));
       if (rest.length === gates.length) continue;
+      // w3740: its process lived through the drop, so the machine did not go down: no crash to hold the request for
+      for (const h of liveCrashHolds(w)) {
+        if (h.worker !== sid || !gates.some((g) => g.kind === 'machine' && g.by === by && g.ref === h.machine)) continue;
+        h.cleared = this.now().toISOString();
+        h.clearedBy = `FF Factory: its worker ${sid} ran on through the drop`;
+      }
       w.blocked = rest[0];
       w.alsoBlocked = rest.length > 1 ? rest.slice(1) : undefined;
       if (!rest.length) w.status = 'active';

@@ -4,7 +4,7 @@
 // (docs/live-view.md, "On BEAST first"): a streaming editor in play mode takes the CPU and GPU the run measures.
 import fs from 'node:fs';
 import path from 'node:path';
-import type { BenchLock, BenchPriority, BenchQueueReport, NoTimedRuns, TimedAskMark } from '../shared/types.ts';
+import type { BenchLock, BenchPriority, BenchQueueReport, CrashHoldMark, NoTimedRuns, TimedAskMark } from '../shared/types.ts';
 import type { TimedAskState } from '../server/timedAsk.ts';
 import { benchQueueDir, queueTickets, type QueueTicket } from './benchQueue.ts';
 import type { PassedMark } from './benchRaise.ts';
@@ -110,6 +110,18 @@ export function readTimedAsk(root: string | undefined, session: string | undefin
     const d = JSON.parse(fs.readFileSync(path.join(benchQueueDir(benchLockDir(root)), 'priorities.json'), 'utf8')) as { timed_ask?: TimedAskMark; sessions?: Record<string, BenchPriority> };
     const s = session ? d.sessions?.[session] : undefined;
     return { ...(d.timed_ask ? { mark: d.timed_ask } : {}), ...(s?.timed ? { verdict: s.timed } : {}), ...(s?.exempt ? { exempt: s.exempt } : {}) };
+  } catch {
+    return undefined;
+  }
+}
+
+/** w3740: this worker session's crash hold on this machine in priorities.json (server/crashHolds.ts), or undefined (it fails open). */
+export function readCrashHold(root: string | undefined, session: string | undefined): CrashHoldMark | undefined {
+  if (!root || !session) return undefined;
+  try {
+    const d = JSON.parse(fs.readFileSync(path.join(benchQueueDir(benchLockDir(root)), 'priorities.json'), 'utf8')) as { sessions?: Record<string, BenchPriority> };
+    const h = d.sessions?.[session]?.crashHold;
+    return h && typeof h.at === 'string' && typeof h.why === 'string' && Array.isArray(h.requests) ? h : undefined;
   } catch {
     return undefined;
   }

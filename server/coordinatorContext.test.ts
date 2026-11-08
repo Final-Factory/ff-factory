@@ -84,6 +84,8 @@ test('w1158: the rules moved out of the briefs keep their words and their w-numb
     assert.match(p('machines'), /call ops_worker machine_update once per machine, one after another/);
     assert.match(agents.rulesText('machines', SAM), /file it \(request_work\), and Lothsahn's or Ben's own orchestrator runs it through the ops worker/, 'a member has no ops worker');
     assert.match(p('machines'), /The grant is a field on the request, never text in a brief, and only Ben's own turn sets it/);
+    // w3740: a crash-repro brief states its budget; both coordinators read it here (their briefs are at the w1158 budget).
+    for (const text of [d('machines'), p('machines')]) assert.match(text, /states its budget: stop after one crash, hang or reboot of it/);
     // Replies and reactions (w866, w1039).
     assert.ok(p('reactions').includes(REACTION_MEANINGS));
     assert.ok(p('reactions').includes('(w1039, Ben: "please count my thumbs up as my words")'));

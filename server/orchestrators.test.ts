@@ -31,7 +31,7 @@ import { answersText } from '../shared/questionCard.ts';
 import { cargoShortOf, isCargoRepo, needsTimed, PAIR_HOLD_MS, TIMED_HOLD_MS, pairText, unfitWhy } from '../shared/capacity.ts';
 import { pickReclaim, type Pressure } from './priorityReclaim.ts';
 import { STEAM_READ } from '../shared/steam.ts';
-import { benchLockIn, type Machine, type Requester, type SessionInfo, type TranscriptEvent, type UserInfo, type WorkBlocker, type WorkItem } from '../shared/types.ts';
+import { benchLockIn, type BenchState, type Machine, type Requester, type SessionInfo, type TranscriptEvent, type UserInfo, type WorkBlocker, type WorkItem } from '../shared/types.ts';
 import { LIVE_HOLD_MS, releaseWhy } from './placeAgain.ts';
 import { ReportStore } from './reports.ts';
 import { reportProblem } from './ledgerRules.ts';
@@ -48,7 +48,9 @@ import { TOOL_MANIFEST, deferredToolsLine, toolsOf } from './toolManifest.ts';
 import { checkTimedAsk } from './timedAsk.ts';
 import { buildOptions } from './launch.ts';
 import { AttachmentStore } from './attachments.ts';
-import { readTimedAsk, writeBenchPriorities } from '../machine/benchLock.ts';
+import { readCrashHold, readTimedAsk, writeBenchPriorities } from '../machine/benchLock.ts';
+import { checkCrashHoldLaunch } from './guard.ts';
+import { CRASH_HOLD_WINDOW_MS, liveCrashHolds, noteBench, recentPlayers, riskyTicket, type PlayerSeen } from './crashHolds.ts';
 
 /**
  * People's own orchestrators and the dispatcher (docs/orchestrators.md), end to end on a real Agents with the scripted
@@ -10025,4 +10027,99 @@ test('w3615: at a boot, a question the dispatcher already settled with a block o
   assert.match(store.work.get('w1')!.log.join(' '), /block at .* settled its question.*w3615 repair/);
   assert.ok(told('ben').some((x) => /^\[dispatch\] w1 .*settled its question/.test(x)), told('ben').join(' | '));
   assert.deepEqual(o.settleStaleQuestions(), [], 'a second boot finds nothing');
+});
+
+test("w3740: a machine that drops under a worker's game player holds its request off players there, the resume says why, the guard refuses its launch, and only Ben's own yes clears it", async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o, call } = env;
+  putRequests(store, [{ id: 'w1', by: BEN, status: 'active', priority: 'normal' }, { id: 'w2', by: BEN, status: 'active', priority: 'normal' }]);
+  const a = await startedFor(env, 'w1');
+  const b = await startedFor(env, 'w2');
+  await until('its first turn', () => a.info.status === 'idle');
+  // pc drops (unplanned) with both mid-turn; only a's game player ran there in the last half hour.
+  o.workersCutOff('pc', [a.id, b.id], { [a.id]: 'its "running player pid 57328 slot 0" ticket there, last seen 21:34Z' });
+  const w1 = store.work.get('w1')!;
+  assert.equal(w1.crashHolds?.length, 1);
+  assert.equal(store.work.get('w2')!.crashHolds, undefined, 'no player of its own there: no hold');
+  assert.match(w1.log.find((l) => l.includes('crash hold')) ?? '', /crash hold on pc \(w3740\): pc dropped at \d\d:\d\dZ with w1's worker \w+ mid-turn \(its "running player pid 57328 slot 0" ticket there/);
+  const mark = agents.benchPriorities('pc')[a.id].crashHold;
+  assert.deepEqual(mark?.requests, ['w1']);
+  assert.equal(agents.benchPriorities('pc')[b.id].crashHold, undefined);
+  assert.equal(agents.benchPriorities('elsewhere')[a.id]?.crashHold, undefined);
+
+  // The machine is back: the gate clears and the worker is resumed with the hold in its note.
+  const watch = new BlockerWatch({ store, orchestrators: o, online: (m) => (m === 'pc' ? true : undefined) });
+  await watch.tick();
+  assert.match(agents.waker.pending(a.id)?.note ?? '', /Your turn stopped when pc went offline .* Crash hold \(w3740\): pc went offline while you ran a game player or a timed leg there.*w1 launches no game player on pc .*waiting_on_person/);
+  // The worker's later turn end does not lift it: only a person does.
+  o.workerTurnEnded(a.info, 'Collected the panics.\n\nw1: still open: asking Ben');
+  assert.equal(liveCrashHolds(w1).length, 1);
+
+  // The guard on pc, reading what the daemon writes from that mark.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'w3740-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  writeBenchPriorities(root, agents.benchPriorities('pc'), new Date(), false);
+  const held = () => readCrashHold(root, a.id);
+  assert.match(checkCrashHoldLaunch('python scripts/nightly/player_slots.py launch --scenario gpu-t7', held) ?? '', /^Refused \(w3740\): crash hold\. This machine went offline at \d\d:\d\dZ while w1's worker ran its "running player pid 57328/);
+  assert.equal(checkCrashHoldLaunch('python scripts/nightly/player_slots.py launch --scenario x', () => readCrashHold(root, b.id)), undefined, "another request's worker launches");
+  assert.equal(checkCrashHoldLaunch('git status', held), undefined, 'only a player launch is refused');
+
+  // Clearing: only Ben, in his turn, with his words.
+  const ben = o.personalFor(BEN);
+  const words = 'ok, one more run on the pc, then stop';
+  store.append(ben.info.id, { kind: 'user', text: words, from: 'human', uuid: 'u3740' });
+  assert.match((await call(ben.info, 'clear_crash_hold', {})).text, /^Crash holds \(w3740\).*\n- pc dropped at .* with w1's worker/);
+  (ben as unknown as { turnStarter?: unknown }).turnStarter = undefined;
+  ben.lastFrom = 'system';
+  assert.match((await call(ben.info, 'clear_crash_hold', { request: 'w1', words })).text, /only Ben, in a turn of theirs, clears a crash hold/);
+  ben.lastFrom = 'human';
+  assert.match((await call(ben.info, 'clear_crash_hold', { request: 'w1', words: 'sure go ahead' })).text, /is not in Ben's own recent messages here/);
+  assert.match((await call(ben.info, 'clear_crash_hold', { request: 'w2', words })).text, /w2 has no crash hold/);
+  const cleared = await call(ben.info, 'clear_crash_hold', { request: 'w1', words });
+  assert.equal(cleared.isError, false, cleared.text);
+  assert.match(cleared.text, /^Cleared w1's crash hold on pc/);
+  assert.match(w1.log.at(-1)!, /Ben: crash hold on pc cleared in their own turn: "ok, one more run on the pc, then stop" \(w3740\)/);
+  assert.equal(agents.benchPriorities('pc')[a.id].crashHold, undefined);
+  writeBenchPriorities(root, agents.benchPriorities('pc'), new Date(), false);
+  assert.equal(checkCrashHoldLaunch('python scripts/nightly/player_slots.py launch --scenario gpu-t7', held), undefined, 'cleared: it launches');
+
+  // A second drop under its player holds it again.
+  o.workersCutOff('pc', [a.id], { [a.id]: 'its "probe" ticket there, last seen 22:10Z' });
+  assert.equal(liveCrashHolds(w1, 'pc').length, 1);
+});
+
+test('w3740: a worker that ran on through the drop (a network blip) shows the machine never went down: its crash hold goes with its gate; a planned drop or no recent player holds nothing', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, o, agents } = env;
+  putRequests(store, [{ id: 'w1', by: BEN, status: 'active', priority: 'normal' }]);
+  const a = await startedFor(env, 'w1');
+  await until('its first turn', () => a.info.status === 'idle');
+  o.workersCutOff('pc', [a.id], { [a.id]: 'its "running player pid 1" ticket there, last seen 10:00Z' });
+  assert.equal(liveCrashHolds(store.work.get('w1')!).length, 1);
+  o.workersLived('pc', [a.id]);
+  const w1 = store.work.get('w1')!;
+  assert.equal(liveCrashHolds(w1).length, 0);
+  assert.match(w1.crashHolds![0].clearedBy ?? '', /ran on through the drop/);
+  assert.equal(agents.benchPriorities('pc')[a.id].crashHold, undefined);
+  o.workersCutOff('pc', [a.id]);
+  assert.equal(liveCrashHolds(w1).length, 0, 'a drop with no recent player of its there holds nothing');
+});
+
+test('w3740: the portal notes each worker\'s last game player or exclusive ticket per machine and names it when that machine drops within the half hour', () => {
+  const seen: PlayerSeen = new Map();
+  const t0 = Date.parse('2026-11-08T21:33:00Z');
+  const bench = (running: BenchState['running']): BenchState => ({ mode: 'shared', running, runningCount: running.length, waiting: 0 });
+  noteBench(seen, bench([
+    { ticket: 't1', mode: 'shared', what: 'running player pid 57328 slot 0', session: '7d906e95' },
+    { ticket: 't2', mode: 'shared', what: 'unity-slot build', session: 'bbbb' },
+    { ticket: 't3', mode: 'exclusive', what: 'timed run tr_1', session: 'cccc' },
+    { ticket: 't4', mode: 'exclusive', what: 'probe leg 3', session: 'dddd' },
+  ]), t0);
+  assert.deepEqual([...seen.keys()].sort(), ['7d906e95', 'dddd'], 'a build or a harness ticket is no player');
+  // The player was killed (its ticket gone) 3 minutes before the panic; the drop came 4 minutes after that.
+  noteBench(seen, bench([]), t0 + 3 * 60_000);
+  const drop = t0 + 7 * 60_000;
+  assert.deepEqual(recentPlayers(seen, ['7d906e95-full-id', 'eeee'], drop), { '7d906e95-full-id': 'its "running player pid 57328 slot 0" ticket there, last seen 21:33Z' });
+  assert.deepEqual(recentPlayers(seen, ['7d906e95'], t0 + CRASH_HOLD_WINDOW_MS + 1), {}, 'past the half hour: no hold');
+  assert.equal(riskyTicket({ mode: 'shared', what: 'running player pid 2', session: 'editor:slot1' }), false);
 });

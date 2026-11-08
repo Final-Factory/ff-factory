@@ -1,3 +1,4 @@
+import { noteBench, type PlayerSeen } from './crashHolds.ts';
 import { test } from 'node:test';
 import { neverDelete } from './cleanup.ts';
 import assert from 'node:assert/strict';
@@ -878,7 +879,8 @@ test('machine: agents cut off mid-turn by a forced redeploy or a daemon restart 
   mm.report = (text) => reports.push(text);
   // w3650: the ledger's gate (w2433) is for a drop nobody planned; a drop the portal made itself gates nothing.
   const gatedOn: string[][] = [];
-  mm.workersCutOff = (_m, sids) => (gatedOn.push([...sids]), []);
+  const playersOn: Record<string, string>[] = [];
+  mm.workersCutOff = (_m, sids, players) => (gatedOn.push([...sids]), playersOn.push(players ?? {}), []);
   const d1 = daemon();
   await until('online', () => mm.isOnline('mx') && mm.protocolOf('mx') !== undefined);
   const s = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'w', permissionMode: 'default' });
@@ -903,12 +905,17 @@ test('machine: agents cut off mid-turn by a forced redeploy or a daemon restart 
   // A network blip: the daemon (and the agent) live on; the reconnect finds it live, so no resume message.
   sessions.send(s.info.id, 'long again');
   await until('the daemon has it mid-turn', () => s.info.status === 'running' && users().length === 3);
+  // w3740: its game player ran there a minute ago (a stats report's bench state), so the drop names it for a crash hold
+  const seen: PlayerSeen = new Map();
+  noteBench(seen, { mode: 'shared', running: [{ ticket: 't9', mode: 'shared', what: 'running player pid 9 slot 0', session: s.info.id }], runningCount: 1, waiting: 0 }, Date.now() - 60_000);
+  (mm as unknown as { playerSeen: Map<string, PlayerSeen> }).playerSeen.set('mx', seen);
   (mm as unknown as { links: Map<string, { ws: { terminate(): void } }> }).links.get('mx')!.ws.terminate();
   await until('dropped', () => !mm.isOnline('mx'));
   await until('back', () => mm.isOnline('mx') && s.live, 8000);
   await new Promise((r) => setTimeout(r, 300));
   assert.equal(users().length, 3, 'a live agent is not sent a resume');
   assert.deepEqual(gatedOn, [[s.info.id]], 'an unplanned drop still gates the request it cut off mid-turn');
+  assert.match(playersOn[0][s.info.id] ?? '', /^its "running player pid 9 slot 0" ticket there, last seen \d\d:\d\dZ$/, 'its recent player is named (w3740)');
 
   // machine_daemon stop: on purpose, so nothing is resumed when a daemon comes back later.
   mm.expectDrop('mx', false);
