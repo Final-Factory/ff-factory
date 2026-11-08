@@ -12,6 +12,8 @@ import { DEFAULT_CLEANUP } from '../server/config.ts';
 import { HostHealthMonitor } from '../server/hostHealth.ts';
 import type { HelperAction, HelperResult } from '../server/privileged.ts';
 import { DISK_CRITICAL_GB_DEFAULT, type HostHealth, type MachineGuardSettings, type Sandbox, type SessionInfo } from '../shared/types.ts';
+import { runnerCensus } from './benchRunners.ts';
+import type { Proc } from './unity.ts';
 
 export type { MachineGuardSettings };
 
@@ -27,6 +29,10 @@ export interface MachineGuardEffects {
   now?(): number;
   /** A JSON file (the Dev Drive's devdrive.json beside its VHDX, w1918), undefined when it cannot be read. */
   readJson?(p: string): unknown;
+  /** The GitHub Actions runner listeners running here (root: the runner's folder; busy: a job runs on it), w3721. */
+  runners?(): Promise<{ root: string; busy: boolean }[]>;
+  /** Start a runner's listener again (its scheduled task, else its run.cmd); answers how, or throws (w3721). */
+  restartRunner?(root: string): Promise<string>;
 }
 
 /** Sessions that hold a sandbox (hostHealth.ts's BUSY plus an agent between turns, whose process still runs there). */
@@ -80,6 +86,33 @@ export function machineGuardConfig(s: MachineGuardSettings, sandboxRoot: string)
 }
 
 const EMPTY_RUN = { removed: [], failed: [], bytes: 0 };
+
+const flatLower = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+/** Two paths on one Windows drive letter. */
+export const sameDrive = (a: string, b: string) => {
+  const da = /^([a-z]):/i.exec(a)?.[1]?.toLowerCase();
+  const db = /^([a-z]):/i.exec(b)?.[1]?.toLowerCase();
+  return !!da && da === db;
+};
+const runnerName = (root: string) => flatLower(root).split('/').pop() ?? root;
+
+/**
+ * Start a runner's listener again, as a PowerShell script (w3721): the scheduled task whose action names the runner's
+ * folder (LothDesktop starts ffu-lothdesktop-1 and -2 through tasks of those names, run in the person's own session), else
+ * its run.cmd, hidden and detached. Prints how.
+ */
+export function runnerRestartScript(root: string): string {
+  const win = root.replace(/\//g, '\\').replace(/\\+$/, '');
+  if (!/^[a-z]:\\/i.test(win) || /['\r\n]/.test(win)) throw new Error(`${root} is not a runner folder to start`);
+  return [
+    `$root = '${win}'`,
+    `$re = [regex]::Escape($root) + '(?![\\w.-])'`,
+    `$t = Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { (($_.Actions | ForEach-Object { "$($_.Execute) $($_.Arguments) $($_.WorkingDirectory)" }) -join ' ') -match $re } | Select-Object -First 1`,
+    `if ($t) { Start-ScheduledTask -InputObject $t; [Console]::Out.Write("scheduled task $($t.TaskName)") }`,
+    `elseif (Test-Path -LiteralPath (Join-Path $root 'run.cmd')) { Start-Process -FilePath (Join-Path $root 'run.cmd') -WorkingDirectory $root -WindowStyle Hidden; [Console]::Out.Write('run.cmd') }`,
+    `else { [Console]::Error.Write("no scheduled task and no run.cmd for $root"); exit 3 }`,
+  ].join('\n');
+}
 
 /** The guard on this machine: tick() on a timer, blockReason() before an agent or editor starts in a sandbox. */
 export class MachineGuard {
@@ -184,6 +217,13 @@ export class MachineGuard {
       return say('Dev Drive: grow pending', `the Dev Drive grows from ${p.maxGB} to ${p.wantGB} GB once no agent or editor is in a sandbox; ${what} there now`);
     }
     if (this.monitor.status.sandboxRoot !== 'ok' || now < this.growRetryAt) return;
+    // w3721: the grow detaches the drive, which ends every process run from it, CI runners' listeners included (LothDesktop's
+    // ffu-lothdesktop-1 and -2 live on V:, and the 2026-11-08 20:33Z grow left both offline: nothing starts them again). So
+    // it waits for a job on such a runner to end, and starts every listener that was up again once the drive is back.
+    const runners = (await this.fx.runners?.().catch(() => [])) ?? [];
+    const onDrive = runners.filter((r) => sameDrive(r.root, this.cfg.sandboxRoot));
+    const jobs = onDrive.filter((r) => r.busy);
+    if (jobs.length) return say('Dev Drive: grow pending', `the Dev Drive grows from ${p.maxGB} to ${p.wantGB} GB once no CI job runs on a runner on the drive; ${jobs.length} runner(s) (${jobs.map((r) => runnerName(r.root)).join(', ')}) run one now`);
     this.growing = p.wantGB;
     this.ports.log(`host guard: growing the Dev Drive from ${p.maxGB} to ${p.wantGB} GB (ffsb-helper-grow); new agents and editors wait`);
     try {
@@ -201,8 +241,29 @@ export class MachineGuard {
       }
     } finally {
       this.growing = undefined;
+      if (onDrive.length) await this.restartRunners(onDrive.map((r) => r.root));
     }
     await this.monitor.tick();
+  }
+
+  /** Start again each runner listener of these folders that the grow ended (w3721), and say what came back. */
+  private async restartRunners(roots: string[]) {
+    const up = new Set(((await this.fx.runners?.().catch(() => [])) ?? []).map((r) => flatLower(r.root)));
+    const gone = roots.filter((r) => !up.has(flatLower(r)));
+    if (!gone.length || !this.fx.restartRunner) return;
+    const lines: string[] = [];
+    let failed = 0;
+    for (const root of gone) {
+      try {
+        lines.push(`${runnerName(root)}: started again (${await this.fx.restartRunner(root)})`);
+      } catch (e) {
+        failed++;
+        lines.push(`${runnerName(root)}: could not start it again (${(e as Error).message.slice(0, 200)})`);
+      }
+    }
+    const text = `the grow ended ${gone.length} CI runner listener(s) on the drive: ${lines.join('; ')}`;
+    this.ports.log(`host guard: ${text}`);
+    this.ports.report(failed ? 'Dev Drive: CI runners still down' : 'Dev Drive: CI runners started again', text);
   }
 
   start() {
@@ -219,10 +280,24 @@ export class MachineGuard {
 }
 
 /** The real effects on this machine (Windows: the privileged helpers and the reaper are Windows-only). */
-export async function realGuardEffects(): Promise<MachineGuardEffects> {
+export async function realGuardEffects(procs?: () => Promise<Proc[]>): Promise<MachineGuardEffects> {
   const { runHelper } = await import('../server/privileged.ts');
   const { reapBrowsers } = await import('../server/reaper.ts');
+  const { run } = await import('../server/proc.ts');
   return {
+    ...(procs && process.platform === 'win32'
+      ? {
+          runners: async () => {
+            const c = runnerCensus(await procs());
+            return c.listeners.map((l) => ({ root: l.root, busy: l.busy || c.workers.some((w) => w.root === l.root) }));
+          },
+          restartRunner: async (root: string) => {
+            const r = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', runnerRestartScript(root)], { timeoutMs: 60_000 });
+            if (r.code !== 0) throw new Error((r.stderr || r.stdout || `exit ${r.code}`).trim());
+            return r.stdout.trim() || 'started';
+          },
+        }
+      : {}),
     exists: (p) => fs.existsSync(p),
     statfs: async (p) => {
       try {
