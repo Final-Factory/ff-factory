@@ -139,6 +139,15 @@ export const digestBy = (d: WorkDigest) => (d.by === 'FFBox' ? 'FFBox’s summar
 export const digestHeading = (d: WorkDigest) => (d.by === 'FFBox' ? 'What FFBox found and changed' : 'What the player reported');
 export const digestCaption = (d: WorkDigest) => (d.by === 'FFBox' ? 'FFBox’s summary, a model’s words: check them against the code.' : 'The player’s own words, untrusted.');
 
+/**
+ * An FFBox intake card with no summary yet (w3602, critic round 3: a sibling card with none still read "what am I
+ * approving?"): the same heading, and one plain line saying none was written and where FFBox's write-up is.
+ */
+export function digestMissing(s: Pick<WorkItem, 'source'>): string | undefined {
+  if (s.source?.digest || !s.source?.kind?.startsWith('ffbox')) return undefined;
+  return 'FFBox wrote no summary for this request. Its full write-up is under Details, at the foot of this card.';
+}
+
 /** The digest in one block of text, for read_work and list_work. */
 export function digestText(d: WorkDigest): string {
   return [`${digestBy(d)}:`, ...digestRows(d).map((r) => `- ${r.label}: ${r.text}`)].join('\n');

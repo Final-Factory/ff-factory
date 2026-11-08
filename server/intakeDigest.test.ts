@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { approveAction, approveQuestion, declineAction, digestFromFfbox, digestFromPlayer, digestOfConversation, digestRows, digestText, testsIn } from '../shared/intakeDigest.ts';
+import { approveAction, approveQuestion, declineAction, digestFromFfbox, digestMissing, digestFromPlayer, digestOfConversation, digestRows, digestText, testsIn } from '../shared/intakeDigest.ts';
 import { approveAsk } from '../shared/waitSummary.ts';
 import type { ProviderConversationView, WorkItem, WorkSource } from '../shared/types.ts';
 import { readWork } from './workRead.ts';
@@ -139,4 +139,11 @@ test('w3602: a diagnosis is filed with its digest, and read_work shows it fenced
   const at = out.indexOf('Summary on its card:');
   assert.ok(at > 0 && at < out.indexOf('Brief:'), 'the summary comes before the brief');
   assert.match(out.slice(at), /FFBox’s summary \(a model’s words: check them against the code\):\n- The player hit: a freeze \(hang\) on LinuxPlayer/);
+});
+
+test('w3602: an FFBox card with no summary says so and where the write-up is; other kinds and cards with one say nothing', () => {
+  assert.equal(digestMissing(review()), 'FFBox wrote no summary for this request. Its full write-up is under Details, at the foot of this card.');
+  assert.equal(digestMissing(review({ digest: { by: 'FFBox', at: AT, text: 'x' } })), undefined);
+  assert.equal(digestMissing({ source: { kind: 'discord-bug', untrusted: true } } as Pick<WorkItem, 'source'>), undefined);
+  assert.equal(digestMissing({}), undefined);
 });
