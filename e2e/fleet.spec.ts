@@ -758,6 +758,68 @@ test('fleet: each machine says its bench lock mode, Exclusive, Shared or Free, w
   await proof(page, 'bench-machine-page');
 });
 
+/**
+ * w3730 (lothsahn, about bench locks: "Make sure that this situation can never happen again… get it fixed"): a Stop button
+ * for a worker's bench ticket. The board shows it for the exclusive holder only (BEAST's w1243), never for the nightly's or
+ * an editor's (LothDesktop); the machine page shows it for each worker's ticket, shared ones too. It asks first, then posts
+ * the stop; the server's answer is its toast.
+ */
+test.describe('bench Stop (w3730)', () => {
+  // The service worker answers the page's fetches in WebKit, out of the route's reach (attachments.spec.ts does the same).
+  test.use({ serviceWorkers: 'block' });
+  test("fleet: a person stops a worker's bench ticket from the dashboard, after a confirm, and never a harness or nightly ticket (w3730)", async ({ page }) => {
+    const shared = { ticket: 't00000091', mode: 'shared' as const, what: 'profile capture JustPlay', session: '5e5e5e5e0000', requests: ['w2001'], since: new Date(NOW.getTime() - 5 * 60_000).toISOString() };
+    await fixedFleet(page, '#/overview', (s) => {
+      const f = benchModes(s);
+      const loth = f.machineStats!.lothdesktop!.bench!;
+      return { ...f, machineStats: { ...f.machineStats, lothdesktop: { ...f.machineStats!.lothdesktop!, bench: { ...loth, running: [...loth.running, shared], runningCount: 3 } } } };
+    });
+    // The server refuses what it cannot stop, with the reason (the live server knows no machine "nowhere").
+    const unknown = await page.request.post('/api/machines/nowhere/bench/t00000001/stop', { data: {} });
+    expect(unknown.status()).toBe(404);
+    expect((await unknown.json()).error).toMatch(/^no machine "nowhere"/);
+    const asked: { url: string }[] = [];
+    // A context route, as fixedFleet's: WebKit did not take a page route's glob here (the POST reached the server).
+    await page.context().route(/\/api\/machines\/[^/]+\/bench\/t\d{8}\/stop$/, (r) => {
+      asked.push({ url: new URL(r.request().url()).pathname });
+      return r.fulfill({ json: { note: "Stopping beast's exclusive bench ticket t00000412: its worker 10d5850f was told." } });
+    });
+    const board = page.getByTestId('overview');
+    const stops = board.getByTestId('board-host').getByTestId('bench-stop');
+    await expect(stops).toHaveCount(1);
+    await expect(stops).toHaveText('Stop w1243');
+    await expect(stops).toHaveAttribute('data-ticket', 't00000412');
+    // The nightly's, an editor's and a shared worker ticket get none on the board; a free machine none.
+    await expect(board.getByTestId('board-lothdesktop').getByTestId('bench-stop')).toHaveCount(0);
+    await expect(board.getByTestId('board-m5').getByTestId('bench-stop')).toHaveCount(0);
+
+    // Cancel sends nothing.
+    await stops.click();
+    const dialog = page.getByRole('dialog').filter({ hasText: "Stop beast's bench ticket t00000412?" });
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toContainText('probe_ab.sh radius A round 2');
+    if (!isMobile(page)) await proof(page, 'bench-stop-confirm');
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    await expect(dialog).toHaveCount(0);
+    expect(asked).toEqual([]);
+    // Confirm posts the stop for that ticket on that machine, and shows the server's answer.
+    await stops.click();
+    await dialog.getByRole('button', { name: 'Stop ticket' }).click();
+    await expect.poll(() => asked).toEqual([{ url: '/api/machines/beast/bench/t00000412/stop' }]);
+    await expect(page.locator('.toast', { hasText: "Stopping beast's exclusive bench ticket t00000412" })).toBeVisible();
+
+    // The machine page offers each worker's ticket, the shared one too, and still not the nightly's or the editor's.
+    await page.goto('/#/machine/lothdesktop');
+    const row = page.getByTestId('machine-bench');
+    await expect(page.getByTestId('fl-group-host').or(page.locator('.sb-panel'))).not.toHaveCount(0);
+    if (!(await row.isVisible())) await page.getByRole('button', { name: 'Details', exact: true }).click();
+    await expect(row.getByTestId('bench-stop')).toHaveCount(1);
+    await expect(row.getByTestId('bench-stop')).toHaveAttribute('data-ticket', 't00000091');
+    await expect(row.getByTestId('bench-stop')).toHaveText('Stop w2001');
+    await proof(page, 'bench-stop-machine-page');
+  });
+});
+
 test('fleet: an urgent release holding a machine says so, with no turn limit, and the timed leg waits for it (w1835 after w1832)', async ({ page }) => {
   const t = (m: number) => new Date(NOW.getTime() + m * 60_000).toISOString();
   await fixedFleet(page, '#/overview', (s) =>

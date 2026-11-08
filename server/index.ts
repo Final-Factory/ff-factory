@@ -9,6 +9,7 @@ import { migrateConfig, retireOldTokenFile, secretsDirOf } from './configMigrati
 import { Store, bus, emit } from './store.ts';
 import { SessionManager, compactCommand, isMidTurn, seedSdkCost, snapshotOf } from './sessions.ts';
 import { BenchHolderWatch } from './benchHolders.ts';
+import { BenchStopError } from './benchStop.ts';
 import { TIMER_LIMITS } from './timers.ts';
 import { Agents } from './agents.ts';
 import { MachineManager, agentCap, enrolledMachines, machineForPath, revokeMachineToken } from './machines.ts';
@@ -2077,6 +2078,17 @@ route('POST', '/api/machines/([\\w-]+)/activity-pause', async (req, [id]) => {
   const now = setActivityPause(id, { enabled: b.enabled as boolean | undefined, idleMinutes: idle as number | undefined }, r ? `${r.displayName} (${r.userId}), machine panel` : 'the machine panel');
   machines.pushActivityConfig(id);
   return now;
+});
+
+// w3730: the Stop button on a bench ticket in the machine's bench line (server/benchStop.ts): bench_revoke in the person's name.
+route('POST', '/api/machines/([\\w-]+)/bench/(t\\d{8})/stop', async (req, [id, ticket]) => {
+  const me = requesterOf(req);
+  try {
+    return { note: agents.benchStops.stop(id, ticket, me.displayName, 'from the dashboard') };
+  } catch (e) {
+    if (e instanceof BenchStopError) throw new HttpError(e.status, e.message);
+    throw e;
+  }
 });
 
 route('POST', '/api/machines/([\\w-]+)/label', async (req, [id]) => {

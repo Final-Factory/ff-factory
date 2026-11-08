@@ -4,6 +4,7 @@
 import { useState, type ReactNode } from 'react';
 import type { AppState, HostHealth, Provider, SessionInfo, UserInfo } from '../../../shared/types';
 import { benchGlance } from '../../../shared/benchGlance';
+import { BenchStopButtons } from './BenchStop';
 import { cpuPct, disksHint, memPct, metricsLine, metricsStale, rootDisk } from '../../../shared/providerMetrics';
 import { capacityHint, capacityLine, fleetOf, slotCall, type FleetComputer, type FleetSandbox, type PersonWait, type PlaceAgents, type SlotCall } from '../../../shared/fleet';
 import { liveReady } from '../../../shared/liveReady';
@@ -603,6 +604,8 @@ export function OverviewBoard({ app }: { app: AppState }) {
                   where the agent count beside the name sits. */}
               <div className="board-bench">
                 <BenchLine c={c} now={now} />
+                {/* w3730: Stop on the ticket that holds the lock, asked first (the machine's page has one on every ticket). */}
+                <BenchStopButtons machineId={(c.machine ?? c.daemon)?.id} bench={c.online ? c.bench : undefined} exclusiveOnly />
               </div>
               <Places c={c} viewer={viewerOf(app)} now={now} sel={{}} variant="board" go={go} />
             </article>

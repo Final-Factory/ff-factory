@@ -51,7 +51,10 @@ export function holderNudgeText(machineId: string, t: BenchTicketGlance, revokeA
   ].join(' ');
 }
 
-export function holderRevokeText(machineId: string, t: BenchTicketGlance): string {
+/** `stoppedBy`: a person stopped it (w3730, server/benchStop.ts), not the idle watch. */
+export function holderRevokeText(machineId: string, t: BenchTicketGlance, stoppedBy?: string): string {
+  if (stoppedBy)
+    return `Bench lock (w3730): ${stoppedBy} stopped your ${ticketName(machineId, t)}, and FF Factory revoked it. What ran under it was asked to stop (bench_queue.py's revoke), and is ended 90 seconds later if it has not. Samples already written are kept. Do not take a new ticket for this work until ${stoppedBy} or your requester says so: say in your report what was cut short.`;
   return `Bench lock (w3715): FF Factory revoked your ${ticketName(machineId, t)}: it was held with no turn and no background task of yours running after a warning. What ran under it was asked to stop (bench_queue.py's revoke), and is ended 90 seconds later if it has not. Samples already written are kept; for more, take a new ticket from a turn or a background task you watch: it goes to the back of the queue.`;
 }
 

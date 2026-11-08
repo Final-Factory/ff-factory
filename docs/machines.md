@@ -939,6 +939,20 @@ portal (`unity` and `switch_branch` with a machine alone are refused, and the da
   A busy holder is still pre-empted by the queue's own turn limit when an equal or higher-priority waiter waits (w1832),
   and keeps the lock while only lower-priority work waits (w1860).
 
+  **A person stops a worker's bench ticket** (w3730, lothsahn, 2026-11-08: "Make sure that this situation can never happen
+  again… get it fixed"). Two ways in, one path (`server/benchStop.ts` `BenchStops.stop`):
+  - The **Stop** button beside the bench line: on the board card for the exclusive holder, on the machine's page for each
+    ticket a person may stop. It asks first, then posts `POST /api/machines/<id>/bench/<ticket>/stop`
+    (`web/src/components/BenchStop.tsx`); the toast is the server's answer.
+  - Their own orchestrator's `stop_bench_ticket` (`machine`, `ticket`; without `ticket` it lists what can be stopped), only
+    in a turn of that person's (a check-in or a timer is refused).
+  Both send the daemon's `bench_revoke` with `why` "stopped by <person> from the dashboard / through their orchestrator
+  (w3730)", and tell the holding worker who stopped it and not to take a new ticket for that work until they or its
+  requester say so (`holderRevokeText`). Refused, with the reason: a harness ticket (an editor's: stop the editor; a
+  `timed run` leg's: `timed_place cancel`), the urgent release lane's and the nightly's (`shared/benchStop.ts`
+  `benchStopRefusal`, one rule for the page and the server), a ticket that only waits, one the machine no longer reports,
+  an offline machine. A second stop of one ticket within 135 s answers "already asked" and sends nothing.
+
   **Timing outside an exclusive ticket** (w1923, lothsahn: "How do we make sure workers aren't timing things without
   exclusive locks?"): every timing measurement holds an exclusive ticket, editor snippets and Performance tests included.
   The worker guard (`server/timingGuard.ts`) refuses a Unity MCP `execute_code` whose code reads a clock, a `run_tests`
