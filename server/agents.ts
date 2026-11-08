@@ -21,6 +21,7 @@ import { groupIntake } from '../shared/intake.ts';
 import { describeAutoIntake } from './ffboxAutoIntake.ts';
 import { agentState, agentStateText, holdsItsPlace, holdsSandbox, sortAgents, sortPlaces } from '../shared/agentState.ts';
 import { idleClosedPart } from './liveIdle.ts';
+import { topPriority, type Pressure } from './priorityReclaim.ts';
 import { HOLD_PLACE_MS, LIVE_HOLD_MS, PlaceAgain, RELEASE_AFTER_MS, RELEASE_WAKE_NOTE, handOverBranch, occupies, releasedOn } from './placeAgain.ts';
 import { agentQueueAll, agentQueueFacts, editorSlotRefusal, queueWaitsAll } from '../shared/queueWaits.ts';
 import { pairWaitLine, pairWaitNotice } from './pairRuns.ts';
@@ -877,6 +878,21 @@ export class Agents {
       freed: (what) => this.orchestrators.capacityMayHaveFreed(what),
       canSave: (m) => machines.canSaveWork(m),
       saveWork: (m, sb, branch, message, sessionId) => machines.saveWork(m, sb, branch, message, sessionId ? this.githubTokenFor(m, sessionId, `saving ${sessionId}'s work`) : undefined),
+      // w3507: game sandboxes go out by priority (server/priorityReclaim.ts).
+      pressure: () => this.reclaimPressure(),
+      priorityOf: (info) => topPriority(this.openWorkOf(info).map((w) => w.priority)),
+      reclaimHold: (info, sb) => this.reclaimHold(info, sb),
+      requestsOf: (info) => this.openWorkOf(info).map((w) => w.id),
+      reclaimed: (e) => this.reclaimed(e),
+      reclaimNone: (work, why) => {
+        const w = store.work.get(work);
+        const text = why ? `FF Factory frees no sandbox for it: ${why}` : undefined;
+        if (!w || w.reclaim?.text === text || (!text && !w.reclaim) || (!text && w.reclaim && !w.reclaim.text.startsWith('FF Factory frees no'))) return;
+        if (text) w.reclaim = { at: new Date().toISOString(), text };
+        else delete w.reclaim;
+        store.putWork(w);
+      },
+      tell: (id, text) => void sessions.send(id, text, 'system'),
     });
     machines.placeAgain = (info) => this.placeAgain.answer(info);
     // w1944: a daemon that connects (every one after a portal restart, which drops a capacity ping still waiting) is room news.
@@ -3589,6 +3605,83 @@ export class Agents {
     const d = moveDecision(this.moveFacts(info, reqs));
     if ('move' in d) return { move: d.move.to };
     return { stays: 'stay' in d ? d.stay : 'none' in d ? d.none : d.requeuePair.why };
+  }
+
+  /**
+   * w3507: queued game work, each with the computers a free sandbox would make room on (server/priorityReclaim.ts). Computed
+   * as the dispatcher's room is (roomNow under placement()'s holds and priority reservations, roomForWork with its needs),
+   * then again with one sandbox free on each computer, and for urgent work with one more agent slot: a computer offline,
+   * held, paused, short of RAM or that the work does not fit stays out. Pair runs and timed legs are not here: they have
+   * their own ways to room (w1945, w2055).
+   */
+  private reclaimPressure(): Pressure[] {
+    const items = [...this.store.work.values()].filter((w) => w.status === 'queued' && needsOf(w) === 'game' && !w.pair && !w.timedLeg);
+    if (!items.length) return [];
+    const places = this.places();
+    const prefs = this.placement();
+    const now = roomNow(places, prefs);
+    const plus = roomNow(places.map((p) => ({ ...p, freeSandboxes: Math.max(1, p.freeSandboxes) })), prefs);
+    const plusMid = roomNow(places.map((p) => ({ ...p, freeSandboxes: Math.max(1, p.freeSandboxes), midTurn: Math.max(0, p.midTurn - 1) })), prefs);
+    return items.map((w) => {
+      const needs = w.queuedFor?.needs;
+      const has = roomForWork(now, w, needs).ids;
+      const room = has.length > 0;
+      return { work: w.id, title: w.title, priority: w.priority, room, machines: room ? has : roomForWork(plus, w, needs).ids, preemptOn: room || w.priority !== 'urgent' ? [] : roomForWork(plusMid, w, needs).ids };
+    });
+  }
+
+  /**
+   * w3507: why worker `info`'s sandbox is never taken for higher queued work now, or undefined: what preemptVerdict keeps
+   * (w2055) less what a release handles itself (mid-turn, uncommitted work, which is saved, unpushed commits, which the
+   * switch pushes). A pair or timed leg, the release lane or nightly or an approved bench turn, a Live view, a bench lock,
+   * a player or Unity batch run, a check-in with its editor up, a background job of its running.
+   */
+  private reclaimHold(info: SessionInfo, sb: MachineSandbox): string | undefined {
+    const at = `${info.machineId}/${sb.id}`;
+    if (this.roomMoving.has(info.id) || this.handing.has(at)) return `${info.id} is being moved`;
+    const special = this.openWorkOf(info).find((w) => w.timedLeg || w.pair);
+    if (special) return `${special.id} is ${special.timedLeg ? 'a timed leg' : 'a pair run'}`;
+    const ex = this.benchPriorities(info.machineId!)[info.id]?.exempt;
+    if (ex) return ex === 'approved' ? `${info.id} has a person-approved bench turn` : `${info.id} is the urgent release lane or the nightly`;
+    if (this.builds.releaseBuilder(info.machineId!, info.id)) return `${info.id} builds a release`;
+    if (this.liveHub?.running(info.id)) return `${info.id}'s Live view is up`;
+    const st = this.machines.statsOf(info.machineId!);
+    if (sb.path && benchLockIn(st?.benchLock, sb.path)) return 'a timed run from it holds the bench lock';
+    const u = st?.unity;
+    if (u?.playerList?.some((p) => p.session === info.id)) return `a game player of ${info.id} runs`;
+    if (u?.waiting.some((x) => x.session === info.id) || u?.granted.some((x) => x.holder.includes(info.id) || x.holder.includes(info.id.slice(0, 8)))) return `a Unity batch run of ${info.id} holds or waits for a slot`;
+    if (info.wakeAt && Date.parse(info.wakeAt) > Date.now() && sb.unity.state !== 'stopped') return `${info.id}'s check-in is set and its editor runs (a build, import or test run may be in flight)`;
+    const st2 = agentState(info, undefined, Date.now());
+    if (st2.state === 'between_turns' && st2.kind === 'job') return `a background job of ${info.id} runs`;
+    return undefined;
+  }
+
+  /** w3507: a sandbox is being taken for queued work, or was released for it: both requests' ledgers, the victims' people, the machines log. */
+  private reclaimed(e: { work: string; machine: string; sandbox: string; sessions: SessionInfo[]; why: string; preempt: boolean; released: boolean }) {
+    const key = `${e.machine}/${e.sandbox}`;
+    const w = this.store.work.get(e.work);
+    const theirs = e.sessions.map((s) => ({ s, reqs: this.openWorkOf(s) }));
+    const who = theirs.map(({ s, reqs }) => `worker ${s.id.slice(0, 8)} (${reqs.map((r) => `${r.id}, ${r.priority}`).join('; ') || 'no open request'}${s.reclaimed?.count ? `, moved ${s.reclaimed.count}x` : ''})`).join(', ');
+    const forLine = e.released
+      ? `FF Factory freed ${key} for it from ${who}: released, its work saved on its branch; it resumes there when its own wait ends (w3507).`
+      : e.preempt
+        ? `FF Factory asked ${who} in ${key} to finish at a safe point, push and end its turn, so ${key} goes to this urgent work (w3507).`
+        : `FF Factory is freeing ${key} for it from ${who}: stopping and releasing it, its work kept on its branch (w3507).`;
+    if (w) {
+      w.reclaim = { at: new Date().toISOString(), text: forLine };
+      this.orchestrators.noteWork(w, forLine);
+    }
+    const title = w ? `${e.work} ("${w.title}", ${w.priority})` : e.work;
+    for (const { s, reqs } of theirs) {
+      const line = e.released
+        ? `its sandbox ${key} was released for higher-priority queued work ${title} (w3507); worker ${s.id.slice(0, 8)} lost nothing (its work is on its branch) and is placed again when it resumes.`
+        : e.preempt
+          ? `worker ${s.id.slice(0, 8)} was asked to finish at a safe point, push and end its turn: urgent ${title} takes its sandbox ${key} (w3507). It resumes on its branch after.`
+          : `worker ${s.id.slice(0, 8)} is stopped and its sandbox ${key} released for higher-priority queued work ${title} (w3507); it resumes on its branch when its own wait ends.`;
+      for (const r of reqs) this.orchestrators.noteWork(r, line);
+      if (!e.released) this.notifyPeople(reqs.flatMap((r) => r.requesters?.length ? r.requesters : [r.requestedBy]), `[FF Factory] ${reqs.map((r) => r.id).join(', ') || s.id.slice(0, 8)}: ${line}`);
+    }
+    this.machines.report?.(`[machines] ${e.released ? 'released' : e.preempt ? 'pre-empting' : 'reclaiming'} ${key} for ${e.work} (${w?.priority ?? '?'}) from ${who}`);
   }
 
   /** The workers holding a sandbox on `machineId`, each with whether it can move for a timed leg (w2055). */
