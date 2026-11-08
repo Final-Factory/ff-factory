@@ -1788,7 +1788,10 @@ LothDesktop and Beast, not just when BEAST is full").
     The holds are planned across the fleet at once: first each Queued pair that can start now on computers no earlier pair
     took (by priority, then the oldest) takes one per leg, by `pairRoom`'s pick (a Mac only hosts, a cross-OS pair spans two
     systems, a timed pair never takes m5); then the first pair that still cannot start holds up to its legs less one of the
-    computers left, and no other pair holds anything. So the head pair's holds add up until its last leg frees, and a pair
+    computers left, and no other pair holds anything. A pair the computers that are up could never complete is skipped
+    there (`pairCanFinish`, server/placement.ts: every online computer not held or paused that unfitWhy lets a leg on, busy or
+    not): live after #878, biscuit was held for urgent w3347, whose only other computers were m3 (offline) and lothlaptop
+    (paused by hand), while w3467 and w3469 held nothing. So the head pair's holds add up until its last leg frees, and a pair
     that could complete on room the head pair holds takes it. Before w3530 each computer was held for the oldest pair that
     fit it alone: on 2026-11-08 beast waited for w3460 (timed, which m5 does not take) and m5 for w3469, both holds lapsed,
     and of about ten Queued pairs one ran (w3347 Queued 17 h, w3392 13 h). A younger pair's `start_agent` is refused on a

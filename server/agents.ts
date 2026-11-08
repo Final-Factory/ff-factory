@@ -59,7 +59,7 @@ import { withTerseProse } from './terseProse.ts';
 import { WORKER_READ_RULES_TOOL, workerRuleText } from './workerRules.ts';
 import { activityLine, Waker } from './wake.ts';
 import { TIMER_LIMITS, Timers, scheduleText, type TimerView } from './timers.ts';
-import { EVEN_MARGIN, RAM_BUSY_PCT, benchText, buildOf, busyReasons, capacityLines, classRank, forPriority, hasRoom, holdReason, liveOf, loadText, lowestPriority, minOf, pickComputer, placeId, pinnedWork, placementHint, reservedReason, roomEnough, roomForWork, roomNow, timedFacts, timedKindOf, timedPinRefusal, voiceVram, type Computer, type FirstKind, type NeedKind, type PlacementPrefs, type RoomNow, type TimedKind } from './placement.ts';
+import { EVEN_MARGIN, RAM_BUSY_PCT, benchText, buildOf, busyReasons, capacityLines, classRank, forPriority, hasRoom, holdReason, liveOf, loadText, lowestPriority, minOf, pairCanFinish, pickComputer, placeId, pinnedWork, placementHint, reservedReason, roomEnough, roomForWork, roomNow, timedFacts, timedKindOf, timedPinRefusal, voiceVram, type Computer, type FirstKind, type NeedKind, type PlacementPrefs, type RoomNow, type TimedKind } from './placement.ts';
 import { MachinePauses, PAUSE_TICK_MS, pauseHolds, pauseWhy, type HandBack } from './machinePause.ts';
 import { MOVE_AFTER_MS, NONE_MARK, ROOM_WAIT, briefOf, moveDecision, movedPrompt, stayLine, type MoveFacts } from './resumeMove.ts';
 import { playHolds, playLine } from '../shared/personPlay.ts';
@@ -4906,7 +4906,8 @@ When a person asked for a design or an analysis (a profile, an investigation, a 
     for (const p of pairs) {
       if (started.has(p.id)) continue;
       const ids = fits(p);
-      if (!ids.length) continue;
+      // w3530: a pair the computers that are up could never complete holds nothing; the next one waits holding instead.
+      if (!ids.length || !pairCanFinish(this.places(), this.placement(), p, p.queuedFor?.needs)) continue;
       const macs = ids.filter((id) => facts.fit?.[id]?.platform === 'darwin');
       const short = pairRoom(p, ids, facts.fit).short;
       for (const id of [...macs.slice(0, 1), ...ids.filter((id) => !macs.includes(id))].slice(0, p.pair!.legs - 1)) plan.set(id, { pair: p, short });
