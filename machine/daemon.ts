@@ -49,7 +49,7 @@ import { bridgeExecute, bridgeInfo } from '../server/unityHang.ts';
 import { hostStats } from '../server/system.ts';
 import { fetchPlanUsage, parseUsage, usageEnv, type AccountIdentity, type UsageReply } from '../server/usage.ts';
 import { onInstallDrive } from '../server/rootFence.ts';
-import { CleanupRunner, DEFAULT_CLEANUP, appendCleanupLog, staleAtFile, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, rulesOnInstallDrive, runCleanup, sessionTempDir, sessionTempEnv, staleUnityLibraries, volumeStat, type CleanupGuard } from '../server/cleanup.ts';
+import { CleanupRunner, DEFAULT_CLEANUP, cleanupHoldFloorGB, appendCleanupLog, staleAtFile, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, rulesOnInstallDrive, runCleanup, sessionTempDir, sessionTempEnv, staleUnityLibraries, volumeStat, type CleanupGuard } from '../server/cleanup.ts';
 import { RELEASE_SETTINGS, mergePlans, planInstallLeftovers } from '../server/installLeftovers.ts';
 import { publishedFile, readPublished, recordPublished } from '../server/published.ts';
 import { SessionSweeper, sweepSettings } from '../server/sessionSweep.ts';
@@ -783,6 +783,10 @@ export class Daemon {
       settings: () => ({ everyMinutes: this.cleanupSettings.everyMinutes, softFreeGB: this.cleanupSettings.softFreeGB, criticalFreeGB: this.currentPool()?.diskCriticalGB, staleOutput: staleOutputSettings(this.cleanupSettings.staleOutput) }),
       // The portal's one soft threshold for every machine, fitted to this one's drive (w1918: an empty 80 GB V: read as low).
       fitSoftToVolume: true,
+      // A timed run defers a pass while the disk keeps disk_warn_gb + 5 GB free; below that the pass runs (w3700).
+      hold: () => (this.timed?.busy() ? 'a timed run is in flight here' : undefined),
+      holdFloorGB: () => cleanupHoldFloorGB(this.currentPool()?.diskWarnGB),
+      deferred: (why) => log(`clean-up: ${why}`),
       // The temp folder apart: a RAM-backed one (a Linux tmpfs) is never the disk (w566).
       diskPaths: () => [HOME, cfg.repoPath, ...(this.sandboxRoot() && fs.existsSync(this.sandboxRoot()!) ? [this.sandboxRoot()!] : [])],
       tempPaths: () => [env.tmp],
@@ -1265,7 +1269,8 @@ export class Daemon {
     this.timers.push(setInterval(() => void this.sweeper.tick().catch((e) => log(`session sweep failed: ${(e as Error).message}`)), 30_000));
     // Clean-up: every minute it looks whether a pass is due (every everyMinutes, sooner below softFreeGB).
     // w1946: not while a timed run plays here (its disk work would be in the legs' numbers); the pass comes after it.
-    this.timers.push(setInterval(() => void (this.timed?.busy() ? Promise.resolve() : this.cleaner.tick()).catch((e) => log(`clean-up failed: ${(e as Error).message}`)), 60_000));
+    // A timed run defers the clean-up (its legs measure the disk), but not below disk_warn_gb + 5 GB (w3700: CleanupRunnerDeps.hold).
+    this.timers.push(setInterval(() => void this.cleaner.tick().catch((e) => log(`clean-up failed: ${(e as Error).message}`)), 60_000));
     // Its own logs (w2038): every run's kept, the old ones gzipped, the folder capped (machine/logRetention.ts).
     const logsDir = path.join(appDirOfConfig(this.cfg), 'logs');
     const keepLogs = () => {

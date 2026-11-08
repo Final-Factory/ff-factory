@@ -2,6 +2,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { evidenceArgs, evidenceGated, evidencePython, evidenceRefusal, evidenceVerdict, findPrEvidence, noScriptRefusal } from '../machine/evidenceGate.ts';
 import { repoIsPublic } from './publicGit.ts';
 import { checkStrayWrite } from './strayWrite.ts';
+import { checkGitBashPathInPowerShell } from './gitBashPath.ts';
 import { daemonShell, daemonToolProblem, type DaemonReads } from './daemonReads.ts';
 import { readTargets } from './secretGuard.ts';
 import { checkOffDriveScan, checkOutsideRootDelete } from './rootFence.ts';
@@ -211,6 +212,7 @@ export function sandboxGuard(opts: {
         (opts.timedAsk ? checkTimedAsk(cmd, opts.timedAsk()) : undefined) ??
         checkWholeDiskSearch(cmd, disk(input.cwd || opts.sandboxPath)) ??
         (opts.workerRoot ? checkOutsideRootDelete(cmd, { root: opts.workerRoot, cwd: input.cwd || opts.sandboxPath, allow: [opts.sandboxPath], saveTag }) : undefined) ??
+        (tool === 'PowerShell' && opts.workerRoot ? checkGitBashPathInPowerShell(cmd, opts.workerRoot) : undefined) ??
         (opts.workerRoot ? checkOffDriveScan(cmd, { root: opts.workerRoot, cwd: input.cwd || opts.sandboxPath, allow: [opts.sandboxPath, ...(daemon ? [daemon.dir] : [])] }) : undefined);
       if (reason) return deny(reason);
       let flat = flatten(cmd);

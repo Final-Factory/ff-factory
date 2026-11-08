@@ -322,6 +322,11 @@ Now the host guard and every machine daemon clean up by themselves (`server/clea
 `machine/daemon.ts`), with the same code on Windows and macOS:
 
 - **A pass every hour** (`everyMinutes`, 60).
+- **A timed run defers a due pass on a machine, but only while the disk keeps `disk_warn_gb` + 5 GB free**
+  (`CleanupRunnerDeps.hold`, `cleanupHoldFloorGB`, w3700); below that the pass runs anyway, and the timed runner's own
+  folders stay (`timedBusy`). The daemon logs `clean-up: a <trigger> pass waits: <why>` once per held stretch. Before w3700 a timed run
+  skipped every tick: on LothDesktop on 2026-11-08 one sat queued and fetching from 16:42 to 18:18 UTC, no pass ran from
+  16:23 to 18:18 while V: fell from 58.6 to 14 GB free, and the host guard stopped every new editor and agent.
 - **A pass every 15 minutes while free space is below the soft threshold** (`softFreeGB`), which also runs
   the rules that empty whole caches. On the portal's dedicated VM the soft threshold defaults to its warn level,
   **20 GB** (`hostSoftFreeGB`, w1101; it was warn + 40 = 120 GB for BEAST's sandbox drive, when the portal ran there and
