@@ -3456,6 +3456,21 @@ It is for your part of the work, not an answer to another worker's question.`;
    * (request_work, update_work) or the dispatcher (decide_work report) for a request a person asked a design or an
    * analysis of.
    */
+  /**
+   * w3720: mark a request timed or not timed outright (decide_work timed): needsTimed then reads no words for it, and a pair
+   * run's legs (WorkPair.timed) follow the mark while they have not started. w3705, a determinism pair run, read as timed
+   * work on darwin from notes saying it was not a timing run, and sat Queued while it gated the 1.0 release.
+   */
+  setTimedMark(w: WorkItem, timed: boolean, by: string, note: string): string {
+    const was = needsTimed(w);
+    w.timedMark = { timed, at: this.now().toISOString(), by, note: clip(note.trim(), 300) };
+    if (w.pair && !w.pair.started) w.pair = { ...w.pair, ...(timed ? { timed: true } : { timed: undefined }) };
+    this.roomFlags.delete(w.id);
+    this.stamp(w, `${by}: ${timed ? 'timed work' : 'not timed work'}, said outright (w3720; it read as ${was ? `timed${was === 'any' ? '' : ` on ${was}`}` : 'not timed'}): ${clip(note.trim(), 200)}`);
+    this.store.putWork(w);
+    return timed ? `${w.id} is timed work now (w3720): it goes by "Next timed work", never on a computer that takes no timed runs.` : `${w.id} is not timed work now (w3720), whatever its words say: it goes on any computer with room${was ? `, the m5 included (it read as timed${was === 'any' ? '' : ` on ${was}`} before)` : ''}.`;
+  }
+
   setReport(w: WorkItem, kind: ReportKind | false, by: string): string {
     if (kind !== false && !(REPORT_KINDS as readonly string[]).includes(kind)) throw new Error(`report: one of ${REPORT_KINDS.join(', ')}, or false`);
     if (kind === false) {
@@ -3794,7 +3809,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   }
 
   /** The dispatcher decides about a request (decide_work); the requesters' orchestrators get the reply. */
-  decide(input: { id: string; action: Decision; note: string; into?: string; session_ids?: string[]; needs?: string[]; blocker?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>; blockers?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>[]; add_blocker?: boolean; drop_leg?: boolean; override_gate?: string; asks?: Ask[]; for?: string; pair_legs?: number; pair_menus?: string; pair_steam?: string; report?: ReportKind | false }): string {
+  decide(input: { id: string; action: Decision; note: string; into?: string; session_ids?: string[]; needs?: string[]; blocker?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>; blockers?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>[]; add_blocker?: boolean; drop_leg?: boolean; override_gate?: string; asks?: Ask[]; for?: string; pair_legs?: number; pair_menus?: string; pair_steam?: string; report?: ReportKind | false; timed?: boolean }): string {
     let keptBefore: WorkBlocker[] = [];
     const w = this.requireWork(input.id);
     if (w.approval?.state === 'pending') throw new Error(`${w.id} waits for a person to approve it (intake); it is not yours to decide yet`);
@@ -3803,6 +3818,11 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     if (input.report !== undefined) {
       const decided = this.decide({ ...input, report: undefined });
       return `${this.setReport(this.requireWork(input.id), input.report, 'the dispatcher')} ${decided}`;
+    }
+    // w3720: timing said outright, with any action: needsTimed reads no words for it after this.
+    if (input.timed !== undefined) {
+      const decided = this.decide({ ...input, timed: undefined });
+      return `${this.setTimedMark(this.requireWork(input.id), input.timed, 'dispatcher', input.note)} ${decided}`;
     }
     const into = input.into ? this.requireWork(input.into) : undefined;
     // w3455: a Steam mark stored before #866 (w3431's "none: a direct (non-Steam) host ...", w3392's read from FF Factory's
