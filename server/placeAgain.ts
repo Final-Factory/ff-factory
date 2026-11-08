@@ -408,6 +408,12 @@ export interface PlaceAgainDeps {
    * Read once a pass: claims() and answer() read the pass's copy, since computing it reads free(), which reads claims().
    */
   pressure?: () => readonly Pressure[];
+  /**
+   * w3588: each Queued pair run (Agents.pairPlan) with the computers where one free sandbox lets it start, read once a pass
+   * as pressure is. A released worker of no higher priority yields such a computer to it: it neither claims it nor holds it
+   * again for its check-in.
+   */
+  pairWants?: () => readonly PairWant[];
   /** w3507: the highest priority of a worker's open requests, or undefined for none. */
   priorityOf?: (s: SessionInfo) => WorkPriority | undefined;
   /** w3507: why a worker's sandbox is never taken for higher work now (a pair or timed leg, the release lane, a bench lock, a Live view, ...), or undefined. */
@@ -441,6 +447,13 @@ interface Reclaim {
   released?: boolean;
 }
 
+/** w3588: a Queued pair run and the computers where one free sandbox lets it start (PlaceAgainDeps.pairWants). */
+export interface PairWant {
+  work: string;
+  priority: WorkPriority | undefined;
+  machines: string[];
+}
+
 export class PlaceAgain {
   private readonly d: PlaceAgainDeps;
   /** Placements under way: session id to the machine and sandbox it is being put in. */
@@ -461,6 +474,8 @@ export class PlaceAgain {
   private claimsMemo?: Map<string, Map<string, string>>;
   /** w3507: the pass's queued game work (PlaceAgainDeps.pressure), read by claims() and answer() between passes. */
   private pressureNow: readonly Pressure[] = [];
+  /** w3588: the pass's Queued pair runs that one free sandbox would start (PlaceAgainDeps.pairWants). */
+  private pairsNow: readonly PairWant[] = [];
   /** w3507: sandboxes being taken for queued work, by request id. */
   private readonly reclaims = new Map<string, Reclaim>();
   /** w3507: "<machine>/<sandbox>" to when a reclaim of it lapsed without freeing it: another is tried (RECLAIM_STANDS_MS). */
@@ -524,10 +539,13 @@ export class PlaceAgain {
    * w3507: the higher queued work a released worker on `machineId` waits behind, or undefined: queued game work of strictly
    * higher priority that a free sandbox there would make room for. Its resume claims no sandbox there meanwhile.
    */
-  private yieldsTo(s: SessionInfo, machineId: string): Pressure | undefined {
-    if (!this.pressureNow.length || !this.d.priorityOf) return undefined;
+  private yieldsTo(s: SessionInfo, machineId: string): Pressure | PairWant | undefined {
+    if ((!this.pressureNow.length && !this.pairsNow.length) || !this.d.priorityOf) return undefined;
     const mine = rankOf(this.d.priorityOf(s));
-    return this.pressureNow.find((p) => rankOf(p.priority) > mine && p.machines.includes(machineId));
+    // w3588: a pair run the sandbox would start goes first from its own priority up, as its hold does against single work
+    // (w1945). Live on 2026-11-08: beast/slot1 was released at 05:34:53Z with w3562 (high) holding biscuit for one leg and
+    // fitting beast for the other, and at 05:35:15Z d3f81fb1 held it again for its check-in; pairs were never in pressure.
+    return this.pressureNow.find((p) => rankOf(p.priority) > mine && p.machines.includes(machineId)) ?? this.pairsNow.find((p) => rankOf(p.priority) >= mine && p.machines.includes(machineId));
   }
 
   /** Whether any agent occupies the sandbox "<machine>/<sandbox>" now (a process, mid-turn, a permission open, its place held). */
@@ -670,11 +688,13 @@ export class PlaceAgain {
    */
   private reclaimPass(did: string[]): Map<string, Reclaim> {
     this.pressureNow = this.d.pressure?.() ?? [];
+    this.pairsNow = this.d.pairWants?.() ?? [];
     this.claimsMemo?.clear();
     // The room it read counted the claims of released workers that now yield to it (yieldsTo): read it again without them,
     // or a sandbox one of them would have claimed looks taken and another worker's is freed for nothing.
-    if (this.pressureNow.some((p) => !p.room)) {
+    if (this.pressureNow.some((p) => !p.room) || this.pairsNow.length) {
       this.pressureNow = this.d.pressure?.() ?? [];
+      this.pairsNow = this.d.pairWants?.() ?? [];
       this.claimsMemo?.clear();
     }
     const out = new Map<string, Reclaim>();
@@ -908,6 +928,7 @@ export class PlaceAgain {
     if (!this.d.online(m.id)) return `${m.id} is offline: it is placed again once its daemon is back`;
     if (this.d.agentOnly?.(info)) return this.seat(info, m);
     const ahead = this.yieldsTo(info, m.id);
+    if (ahead && !('room' in ahead)) return `Queued pair run ${ahead.work} (${ahead.priority ?? 'normal'}) starts with the next free sandbox on ${m.id}, so it takes it first (w3588); it is placed again after`;
     if (ahead) return `higher-priority queued work ${ahead.work} (${ahead.priority}) takes the next free sandbox on ${m.id} first (w3507); it is placed again after`;
     const f = this.facts(m.id);
     const taken = this.claims(m.id);

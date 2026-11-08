@@ -3,7 +3,7 @@
 // yield at a safe point. server/priorityReclaim.ts, server/placeAgain.ts.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PlaceAgain } from './placeAgain.ts';
+import { PlaceAgain, type PairWant } from './placeAgain.ts';
 import { RECLAIM_PROTECT_MS, pickReclaim, type Pressure, type SandboxHolders } from './priorityReclaim.ts';
 import type { Machine, MachineSandbox, SessionInfo, WorkPriority } from '../shared/types.ts';
 
@@ -44,7 +44,7 @@ const sandbox = (id: string, git: Partial<NonNullable<MachineSandbox['git']>> = 
 const pressure = (work: string, priority: WorkPriority, o: Partial<Pressure> = {}): Pressure => ({ work, title: `${work} title`, priority, room: false, machines: ['m5'], preemptOn: priority === 'urgent' ? ['m5'] : [], ...o });
 
 /** A PlaceAgain over m5 with `sbs`, the workers `sessions` and their priorities, and what it told and recorded. */
-function rig(sessions: SessionInfo[], sbs: MachineSandbox[], prio: Record<string, WorkPriority | undefined>, o: { pressure?: () => Pressure[]; live?: string[]; hold?: (s: SessionInfo) => string | undefined; pairHold?: (s: SessionInfo) => string | undefined; unityHolders?: string[]; saveWork?: boolean } = {}) {
+function rig(sessions: SessionInfo[], sbs: MachineSandbox[], prio: Record<string, WorkPriority | undefined>, o: { pressure?: () => Pressure[]; pairWants?: () => PairWant[]; live?: string[]; hold?: (s: SessionInfo) => string | undefined; pairHold?: (s: SessionInfo) => string | undefined; unityHolders?: string[]; saveWork?: boolean } = {}) {
   const told: { id: string; text: string }[] = [];
   const events: { work: string; sandbox: string; preempt: boolean; released: boolean; sessions: string[] }[] = [];
   const none: Record<string, string | undefined> = {};
@@ -74,6 +74,7 @@ function rig(sessions: SessionInfo[], sbs: MachineSandbox[], prio: Record<string
     ...(o.pairHold ? { pairHold: o.pairHold } : {}),
     ...(o.saveWork ? { canSave: () => true, saveWork: async (_m: string, sb: string, branch: string) => (saves.push(`${sb}:${branch}`), { sha: 'abc1234', files: 2, pushed: true, notes: ['committed abc1234 and pushed'] }) } : {}),
     pressure: () => pr(),
+    ...(o.pairWants ? { pairWants: o.pairWants } : {}),
     priorityOf: (s) => prio[s.id],
     reclaimHold: (s) => o.hold?.(s),
     requestsOf: (s) => [`req-${s.id}`],
@@ -237,4 +238,33 @@ test('w3507: queued work with room frees nothing, but holds lower released worke
   r.p.tick();
   assert.equal(r.live.has('a'), true);
   assert.deepEqual(r.events, []);
+});
+
+test('w3588: a released worker whose check-in is near yields a sandbox that starts a Queued pair run of at least its priority, and holds it again once the pair has gone', () => {
+  // Live, 2026-11-08: beast/slot1 released at 05:34:53Z, w3562 (high) holding biscuit for one leg and fitting beast for the
+  // other; at 05:35:15Z d3f81fb1 held beast/slot1 again for its check-in, and the pair waited 32 more minutes.
+  const released = () => worker('d3', 'slot1', { wakeAt: iso(NOW + 10 * MIN), placeReleased: { at: iso(NOW - 30 * MIN), sandbox: 'slot1', branch: 'sandbox/slot1-work', why: 'its check-in is 40 min away' } });
+  const sbs = [sandbox('slot1')];
+  let wants: PairWant[] = [{ work: 'w3562', priority: 'high', machines: ['m5'] }];
+  for (const mine of ['normal', 'high'] as const) {
+    const a = released();
+    const r = rig([a], sbs, { d3: mine }, { pairWants: () => wants });
+    assert.deepEqual(r.p.tick().filter((l) => /again/.test(l)), [], `a ${mine} worker yields to the high pair`);
+    assert.ok(a.placeReleased, 'it stays released: the sandbox is the pair\'s');
+    assert.match(r.p.answer(a) ?? '', /^Queued pair run w3562 \(high\) starts with the next free sandbox on m5, so it takes it first \(w3588\)/);
+    // A worker whose message waits claims nothing there meanwhile.
+    a.queuedSend = 'resume';
+    assert.equal(r.p.claims('m5').size, 0);
+  }
+  // Urgent work does not yield to a high pair; a pair that one more sandbox here would not start holds nothing back.
+  const u = released();
+  assert.deepEqual(rig([u], sbs, { d3: 'urgent' }, { pairWants: () => wants }).p.tick(), ['d3 holds m5/slot1 again: its check-in is near']);
+  const elsewhere = released();
+  assert.deepEqual(rig([elsewhere], sbs, { d3: 'normal' }, { pairWants: () => [{ work: 'w3562', priority: 'high', machines: ['beast'] }] }).p.tick(), ['d3 holds m5/slot1 again: its check-in is near']);
+  // The pair started (or left the queue): the next pass holds it again.
+  const b = released();
+  const r = rig([b], sbs, { d3: 'normal' }, { pairWants: () => wants });
+  assert.deepEqual(r.p.tick().filter((l) => /again/.test(l)), []);
+  wants = [];
+  assert.deepEqual(r.p.tick(), ['d3 holds m5/slot1 again: its check-in is near']);
 });
