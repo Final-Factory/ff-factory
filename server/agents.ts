@@ -3420,6 +3420,15 @@ export class Agents {
     const sb = m?.sandboxes?.find((x) => x.id === info.machineSandbox);
     const branch = r?.branch ?? this.branchNow(info);
     const git = sb?.git && sb.git.branch === branch ? sb.git : undefined;
+    const places = this.places();
+    // w3601: a computer's last free sandbox held for a waiting pair run or timed work is not a room move's, as for a new start.
+    const held: Record<string, string> = {};
+    const game = reqs.filter((w) => needsOf(w) === 'game');
+    for (const p of places) {
+      if (p.id === placeId(info.machineId!) || p.freeSandboxes < 1) continue;
+      const why = game.map((w) => this.heldFor(p.id, w)).find(Boolean);
+      if (why) held[p.id] = why.split(/\. Start /)[0]!;
+    }
     return {
       machine: info.machineId!,
       released: !!r,
@@ -3444,9 +3453,10 @@ export class Agents {
           ...(mine >= 0 ? { pair: { leg: mine + 1, others, crossOs: !!w.pair!.crossOs, ...(w.pair!.avoid ? { avoid: w.pair!.avoid } : {}), ...(livePair(w) ? { live: true } : {}) } } : {}),
         };
       }),
-      places: this.places(),
+      places,
       prefs: this.placement(),
       ...(this.lastPlaced ? { last: this.lastPlaced } : {}),
+      ...(Object.keys(held).length ? { held } : {}),
     };
   }
 

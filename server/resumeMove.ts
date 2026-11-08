@@ -75,6 +75,12 @@ export interface MoveFacts {
    * the new session's hand-off says what may be lost. A pin to it (its brief names it) and a pair run under way still hold.
    */
   away?: string;
+  /**
+   * w3601: computers whose last free sandbox is held for other work, with why: a Queued pair run (w1945, w3530) or timed
+   * work (w1995), as start_agent reads it (Agents.heldFor). A game move does not take it: at 07:31:05Z on 2026-11-08 a room
+   * move put w3335 in biscuit/slot2, freed at 07:30:39Z while beast was held for w3573's other leg, and the pair waited 23 min.
+   */
+  held?: Readonly<Record<string, string>>;
 }
 
 export type MoveDecision = { move: { to: string; why: string } } | { stay: string } | { none: string } | { requeuePair: { id: string; why: string } };
@@ -118,6 +124,7 @@ export function moveDecision(f: MoveFacts): MoveDecision {
     if (pinned) unfit.set(p.id, `${pinned.id} is pinned to ${pinned.pinned!.join(' or ')}`);
     const held = holdReason(p.id, f.prefs, ids);
     if (held) unfit.set(p.id, held);
+    if (kind === 'game' && f.held?.[p.id]) unfit.set(p.id, f.held[p.id]!);
     for (const r of f.requests) {
       if (!r.pair) continue;
       if (r.pair.others.some((o) => placeId(o) === p.id)) unfit.set(p.id, `${r.id}'s other leg runs there`);
