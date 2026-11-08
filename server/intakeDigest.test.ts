@@ -156,3 +156,13 @@ test('w3602: an FFBox card with no summary says so and where the write-up is; ot
   assert.equal(digestMissing({ source: { kind: 'discord-bug', untrusted: true } } as Pick<WorkItem, 'source'>), undefined);
   assert.equal(digestMissing({}), undefined);
 });
+
+test('w3622: FFBox’s reviewer lines (ffbox diagnose.md) become the card’s plain Cause, Fix and FFBox’s own Risk', async () => {
+  const { FFBOX_REVIEWER_SUMMARY } = await import('./fixtures/ffboxReviewerSummary.ts');
+  const d = digestFromFfbox(FFBOX_REVIEWER_SUMMARY, AT, { hit: 'a freeze (hang) on LinuxPlayer, game 1.0.0.16' })!;
+  assert.equal(d.cause, 'the game set the same screen size a second time at launch, and on Linux with the Steam overlay that second setup froze the game on its first frame.');
+  assert.equal(d.fix, 'the game no longer re-applies the screen size at launch when the window already has it, so a Linux player with the Steam overlay gets past the first frame.');
+  // The Risk line alone: not the evidence heading or bullets after it.
+  assert.equal(d.risk, 'Low: it only skips a call when nothing would change. If the check is wrong, a screen size the player picked could be ignored until the next restart.');
+  assert.equal(digestRows(d).find((r) => r.label === 'Risk')!.text, d.risk);
+});

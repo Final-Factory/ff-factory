@@ -88,7 +88,11 @@ export function digestFromFfbox(text: string, at: string, o: { hit?: string; ver
   const fix = fixFirst ? plainer(fixFirst.replace(/^(?:fix|the fix|change)\s*:\s*/i, ''), 320) : undefined;
   const unv = section(lines, UNVERIFIED_HEAD);
   const unverified = unv?.length ? sentences(unv.map(plainLine).join(' '), 2, 300) : undefined;
-  const rsk = section(lines, RISK_HEAD);
+  // FFBox's "**Risk:** …" line (ffbox diagnose.md, w3622) is read alone: the evidence that follows it is not the risk. A
+  // bare "**Risk**" heading takes the lines under it.
+  const riskLine = lines.map(plainLine).find((l) => RISK_HEAD.test(l));
+  const riskOwn = riskLine?.replace(RISK_HEAD, '').replace(/^[\s:.)-]+/, '');
+  const rsk = riskOwn ? [riskOwn] : section(lines, RISK_HEAD);
   const risk = rsk?.length ? sentences(rsk.map(plainLine).join(' '), 2, 300) : undefined;
   const v = o.verification;
   const fromRun = v && (v.testsRun !== undefined || v.compiled !== undefined) ? { ...(v.compiled !== undefined ? { compiled: v.compiled } : {}), ...(v.testsRun !== undefined ? { run: v.testsRun } : {}), ...(v.testsPassed !== undefined ? { passed: v.testsPassed } : {}), ...(v.testsFailed !== undefined ? { failed: v.testsFailed } : {}) } : undefined;

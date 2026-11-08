@@ -104,7 +104,7 @@ test('w1868: every card of today’s real cases says what it is, who acts, the q
   const w3596 = tab.getByTestId('wait-w3596');
   await expect(w3596.getByTestId('qc-digest')).toContainText('What FFBox found and changed');
   await expect(w3596.getByTestId('qc-digest')).toContainText('FFBox’s summary, a model’s words: check them against the code.');
-  await expect(w3596.getByTestId('qc-digest-row')).toHaveText([/^The player hit: a freeze \(hang\) on LinuxPlayer, game 1\.0\.0\.16$/, /^Cause: the game rebuilt the swapchain/, /^The fix: Apply now skips Screen\.SetResolution/, /^Tests: compiled; 16349 of 16361 tests passed, 2 failed, 10 skipped$/, /^Not checked: This container has no Steam overlay/, 'Risk: FFBox named none. From the facts: 2 tests fail on its branch; whether the fix ends what the player hit is unchecked (above).']);
+  await expect(w3596.getByTestId('qc-digest-row')).toHaveText([/^The player hit: a freeze \(hang\) on LinuxPlayer, game 1\.0\.0\.16$/, /^Cause: the game set the same screen size a second time at launch/, /^The fix: the game no longer re-applies the screen size/, /^Tests: compiled; 16349 of 16361 tests passed, 2 failed, 10 skipped$/, /^Not checked: This container has no Steam overlay/, /^Risk: Low: it only skips a call when nothing would change\./]);
   await expect(w3596.getByTestId('qc-question')).toHaveText('Should a worker review FFBox’s fix for a freeze (hang) on LinuxPlayer and merge it?');
   await expect(w3596.getByTestId('qc-option').first()).toContainText('fixes the 2 failing tests, opens a pull request and merges it on green');
   await expect(w3596.getByTestId('qc-option').nth(1)).toContainText('FFBox marks the player’s report obsolete and posts nothing');

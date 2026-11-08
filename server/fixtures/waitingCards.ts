@@ -3,6 +3,8 @@
 // the same sense and marked so), the review paths stand for the requests' published stills and clips. The unit test
 // (server/waitSummary.test.ts) and the screenshot test (e2e/intake.spec.ts) both read it.
 import type { Ask } from '../../shared/ask.ts';
+import { digestFromFfbox } from '../../shared/intakeDigest.ts';
+import { FFBOX_REVIEWER_SUMMARY } from './ffboxReviewerSummary.ts';
 import type { OpenAsk, Requester, SessionInfo, WorkItem } from '../../shared/types.ts';
 import type { WorkLive } from '../../shared/workState.ts';
 
@@ -196,17 +198,9 @@ export function waitingCases(now: number): WaitingCase[] {
           platform: 'LinuxPlayer',
           rootCause: 'found',
           reports: ['20261025T073811Z-hang-25862e0e5a'],
-          // FFBox's turn summary as digestOfConversation cut it down (shared/intakeDigest.ts), with the numbers the
-          // dispatcher quoted on w3602 so the card shows a failing count.
-          digest: {
-            by: 'FFBox',
-            at: ago(now, 45),
-            hit: 'a freeze (hang) on LinuxPlayer, game 1.0.0.16',
-            cause: 'the game rebuilt the swapchain for nothing at launch. On this Linux machine, the next frame’s present then blocked forever inside the Steam overlay’s present hook, so the game froze on its first frames.',
-            fix: 'Apply now skips Screen.SetResolution when the window already is what it would ask for: same width, height and mode, and the requested refresh is unspecified or equal to the current one.',
-            tests: { compiled: true, run: 16361, passed: 16349, failed: 2 },
-            unverified: 'This container has no Steam overlay, so I couldn’t reproduce the freeze. The evidence is that presents worked on the first swapchain and hung on the first present after the second, in both sessions.',
-          },
+          // FFBox's turn summary in the form ffbox's diagnose.md asks for (w3622), cut down by the parser the card uses,
+          // with the numbers the dispatcher quoted on w3602 so the card shows a failing count.
+          digest: digestFromFfbox(FFBOX_REVIEWER_SUMMARY, ago(now, 45), { hit: 'a freeze (hang) on LinuxPlayer, game 1.0.0.16', verification: { compiled: true, testsRun: 16361, testsPassed: 16349, testsFailed: 2 } })!,
         },
         triage: { class: 'needs-human', reason: 'needs a human: FFBox work that started from players’ reports or text; a person decides before anyone reviews or merges it' },
         approval: { state: 'pending', why: 'needs a human' },
