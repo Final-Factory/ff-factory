@@ -175,10 +175,22 @@ export interface BenchRunnersDeps {
   platform: NodeJS.Platform;
 }
 
+/**
+ * w3698: the looks in a row that must find no holder before the paused listeners are continued. One look can miss a
+ * ticket that still holds (its info.json or granted file read while bench_queue.py rewrites it, a helper pid check that
+ * failed once), and continuing on that one look let a held turn's listeners take CI jobs (m3, 2026-11-08, t00001186).
+ */
+export const RELEASE_LOOKS = 3;
+/** A step that has not come back in this long (a process listing that hung) no longer blocks the next look. */
+export const STUCK_STEP_MS = 2 * 60_000;
+
 export class BenchRunners {
   private readonly d: BenchRunnersDeps;
   private st: RunnersState;
   private ticking = false;
+  private tickStarted = 0;
+  /** Looks in a row that found no holder while something stays paused (RELEASE_LOOKS). */
+  private freeLooks = 0;
   /** Listeners already said to be held this turn, and why (one line per reason, not one every 5 s). */
   private heldSaid = new Map<number, string>();
 
@@ -194,8 +206,10 @@ export class BenchRunners {
   }
 
   async tick(): Promise<void> {
-    if (this.ticking) return;
+    // w3698: one listing that never came back would otherwise stop every later look, the turn's pauses with it
+    if (this.ticking && this.d.now() - this.tickStarted < STUCK_STEP_MS) return;
     this.ticking = true;
+    this.tickStarted = this.d.now();
     try {
       await this.step();
     } catch (e) {
@@ -213,6 +227,8 @@ export class BenchRunners {
     const h = this.d.holder();
     if (!h) {
       if (!this.st.paused.length && !this.st.ticket) return; // no turn, nothing paused: no listing taken
+      // w3698: a held ticket missed by one look is not a released one; continue only once several looks agree
+      if (++this.freeLooks < RELEASE_LOOKS) return;
       const procs = await this.d.procs();
       const listening = new Set(runnerCensus(procs).listeners.map((l) => `${l.pid} ${l.root}`));
       for (const p of this.st.paused) {
@@ -226,6 +242,7 @@ export class BenchRunners {
       this.save();
       return;
     }
+    this.freeLooks = 0;
     let changed = false;
     if (this.st.ticket !== h.ticket) {
       this.d.log(`bench runners: ${h.ticket} granted: pausing this machine's idle CI runners and ending CI leftovers until it ends (w3112)`);
@@ -270,9 +287,11 @@ export class BenchRunners {
       procs = await this.d.procs();
       c = runnerCensus(procs, h.ownerPid);
       for (const l of stopped) {
-        // a stopped listener writes no more: a job line its log gained since the look was written before the pause
+        // a stopped listener writes no more: a job line its log gained since the look was written before the pause. w3698:
+        // only a line written since the look counts; a job line older than STALE_JOB_MS that holdsJob let through is the
+        // same line read again, and continuing on it paused and continued that listener every look (it took jobs).
         const after = listenerLog(this.d.diag(l.root));
-        const handed = after.state !== 'idle' || after.line !== l.log.line;
+        const handed = after.line !== l.log.line || after.state !== l.log.state;
         if (c.listeners.find((x) => x.pid === l.pid)?.busy || handed) {
           await this.d.signal(l.pid, 'SIGCONT');
           this.d.log(`bench runners: runner ${l.root} (listener pid ${l.pid}) took a job as it was paused: continued; paused once the job ends`);
