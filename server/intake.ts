@@ -74,8 +74,9 @@ import { linkedClosed, linkedDone, mergeCandidates, mergedBy, mergedText, parseL
 import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
 import { dryRun } from './dryRun.ts';
 import { escalationCatchUp, escalationRef, fixLearnable, fixedByPr, followed, reportFixesOf, reportIdsOf, reportLines, reportObsoletesOf, reportSweep, type BoardWatch, type CatchUpLine, type ReportFix, type ReportObsolete, type ReportSweep } from './boardFollow.ts';
-import type { IntakeEntry, IntakeSummary, MaxEvent, NightlyNight, NightlyReview, ProviderConversation, WorkAutoClosed, WorkItem, WorkSource, WorkSourceKind } from '../shared/types.ts';
+import type { IntakeEntry, IntakeSummary, MaxEvent, NightlyNight, NightlyReview, ProviderConversation, ProviderConversationView, WorkAutoClosed, WorkItem, WorkSource, WorkSourceKind } from '../shared/types.ts';
 import { ffboxConversationHref } from '../shared/ffboxLinks.ts';
+import { digestOfConversation } from '../shared/intakeDigest.ts';
 
 const DISCORD_KINDS: readonly WorkSourceKind[] = ['discord-bug', 'discord-request'];
 const FFBOX_KINDS: readonly WorkSourceKind[] = ['ffbox-branch', 'ffbox-diagnosis', 'ffbox-request'];
@@ -164,6 +165,11 @@ export interface IntakeDeps {
    * when it could not be filed. A nightly request's whole night goes there, readable from any computer.
    */
   fileReport?: (w: WorkItem, title: string, body: string) => string | undefined;
+  /**
+   * One FFBox conversation through the connector (server/index.ts: providers.query('conversation') and conversationView):
+   * its newest turn's summary and run verification become an FFBox request's card summary (w3602). Unset: none is read.
+   */
+  conversation?: (id: string) => Promise<ProviderConversationView | undefined>;
   now?: () => number;
 }
 
@@ -278,6 +284,7 @@ export class IntakeManager {
     const once = setTimeout(() => {
       this.catchUpEscalations();
       this.sweepReports();
+      if (s.ffbox.enabled) this.fillMissingDigests();
     }, 30_000);
     once.unref();
     this.timers.push(once);
@@ -539,6 +546,48 @@ export class IntakeManager {
       this.outcome(draft.source.kind, draft.title, draft.source.url, res);
       if (!res.mergedInto) this.linkMaybe(c.id, res.item?.id);
     }
+    if (res.item && !res.mergedInto) void this.fillDigest(res.item, c.id, c.updatedAt);
+  }
+
+  /** When each conversation's summary was last read (w3602): a conversation reported again unchanged is not read again. */
+  private readonly digestRead = new Map<string, string>();
+
+  /**
+   * Read an FFBox request's conversation for its card summary (w3602): FFBox's newest turn summary and its run's
+   * verification, kept on the request's source (shared/intakeDigest.ts). Once per conversation change; a failed read is
+   * tried again at the next change or restart. Resolves to whether the request got a new summary.
+   */
+  async fillDigest(w: WorkItem, conversation: string, updatedAt = ''): Promise<boolean> {
+    if (!this.d.conversation || !w.source || !isOpen(w)) return false;
+    if (w.source.digest && updatedAt && w.source.digest.at >= updatedAt) return false;
+    const key = `${conversation}@${updatedAt}`;
+    if (this.digestRead.get(w.id) === key) return false;
+    this.digestRead.set(w.id, key);
+    try {
+      const view = await this.d.conversation(conversation);
+      const digest = view && digestOfConversation(view, w.source);
+      if (!digest) {
+        this.digestRead.delete(w.id);
+        return false;
+      }
+      return this.d.orchestrators.noteDigest(w.id, digest);
+    } catch (e) {
+      this.digestRead.delete(w.id);
+      console.warn(`intake: ${w.id}: FFBox conversation ${conversation} not read for its card summary: ${(e as Error).message}`);
+      return false;
+    }
+  }
+
+  /** Open FFBox requests filed before w3602, or whose read failed: their card summary, read once at start. */
+  fillMissingDigests(max = 30): number {
+    let n = 0;
+    for (const w of this.d.store.work.values()) {
+      const s = w.source;
+      if (n >= max || !s?.conversation || s.digest || !s.kind.startsWith('ffbox') || !isOpen(w)) continue;
+      void this.fillDigest(w, s.conversation);
+      n++;
+    }
+    return n;
   }
 
   /**

@@ -82,7 +82,7 @@ import { isSamePerson, personForWork, sessionPerson, tokenPersonForWork } from '
 import { MERGE_ON_GREEN_MARK } from './mergeOnGreen.ts';
 import { handoffQuote, handoffReport, isHandoff } from './handoffReport.ts';
 import { commitsIn, normPr, pairCommitsOf, pairPrOf, pairRanCommit, prIn, resultFor, sameCommit, samePr } from './pairRuns.ts';
-import type { AttachmentRef, BenchGrant, ConditionalDecision, ForYouMark, OpenAsk, WorkNeedsYou, GateResume, GitStatus, Machine, WorkAutoClosed, WorkBlocker, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPair, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
+import type { AttachmentRef, BenchGrant, ConditionalDecision, ForYouMark, OpenAsk, WorkNeedsYou, GateResume, GitStatus, Machine, WorkAutoClosed, WorkBlocker, WorkDigest, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPair, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
 import { DISK_CLEANUP_FLOOR_GB, REPORT_KINDS, WORK_PRIORITIES, questionFor, type ReportKind, type ReportSummary } from '../shared/types.ts';
 import { FOR_YOU_CHARS, FOR_YOU_KEPT, forYouId, splitForYou } from '../shared/forYou.ts';
 
@@ -6895,9 +6895,26 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       const files = [...(s.reportFiles ?? [])];
       for (const f of a.source.reportFiles ?? []) if (!files.some((x) => x.sha256 === f.sha256 && x.kind === f.kind)) files.push(f);
       if (files.length) s.reportFiles = files.slice(-60);
+      // The diagnosis's own summary when the request has none (w3602): what its card leads with.
+      if (!s.digest && a.source.digest) s.digest = a.source.digest;
     }
     this.stamp(w, a.line);
     this.store.putWork(w);
+  }
+
+  /**
+   * An intake request's plain-words summary (w3602, shared/intakeDigest.ts), read from FFBox after it was filed: what its
+   * cards lead with. A newer one replaces it; the same one changes nothing.
+   */
+  noteDigest(id: string, digest: WorkDigest): boolean {
+    const w = this.store.work.get(id);
+    const s = w?.source;
+    if (!w || !s || !isOpen(w)) return false;
+    if (s.digest && (s.digest.at > digest.at || JSON.stringify(s.digest) === JSON.stringify(digest))) return false;
+    s.digest = digest;
+    this.stamp(w, `FFBox's summary read for its card (${digest.at.slice(0, 16).replace('T', ' ')})`);
+    this.store.putWork(w);
+    return true;
   }
 
   /** An FFBox review request whose pull request merged or closed on FFBox's side needs nothing more. */

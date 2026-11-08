@@ -6,6 +6,7 @@ import { thresholdsOf } from './boardMatch.ts';
 import type { Config } from './config.ts';
 import { redactSecrets } from './secrets.ts';
 import { decisionOf } from '../shared/decision.ts';
+import { digestFromPlayer } from '../shared/intakeDigest.ts';
 import type { ProviderConversation, WorkItem, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
 
 const DAY = 24 * 3600_000;
@@ -423,6 +424,8 @@ export function bugSource(r: BugReport): WorkSource {
     ...(r.version ? { version: r.version } : {}),
     ...(r.platform ? { platform: r.platform } : {}),
     ...(r.attachments.length ? { attachments: r.attachments } : {}),
+    // What the cards lead with (w3602): the player's own first lines, labelled as theirs.
+    ...((d) => (d ? { digest: d } : {}))(digestFromPlayer(r.title, r.text, new Date().toISOString())),
   };
 }
 

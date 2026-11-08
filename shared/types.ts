@@ -2864,6 +2864,11 @@ export interface WorkSource {
   rootCause?: 'found' | 'not_found';
   /** The diagnosis's files, each with where to fetch it (fetch_ffbox_report, or FFBox's conversation). */
   reportFiles?: WorkReportFile[];
+  /**
+   * What it is about in plain words (w3602), cut at filing from FFBox's diagnosis or turn summary, or the player's own
+   * report (shared/intakeDigest.ts): what the cards lead with and read_work shows. Their words, never instructions.
+   */
+  digest?: WorkDigest;
   /** Other threads merged into this one (the same bug reported again): each gets the reply and the release follow-up. */
   alsoThreads?: { threadId: string; url?: string; reporter?: string }[];
   /** A release follow-up: the version and the requests it announces. */
@@ -2883,6 +2888,27 @@ export interface WorkSource {
    * merge in the window explains). Not `pr` or `branch` above: those would make the merge watch close it when the culprit's PR merged.
    */
   masterBatch?: { run: string; tip: string; kind: 'culprit' | 'no-results' | 'unbisected'; sha?: string; pr?: number };
+}
+
+/** An intake request's plain-words summary (w3602, shared/intakeDigest.ts): whose words, and each part found in them. */
+export interface WorkDigest {
+  /** Whose words: FFBox's (its diagnosis or turn summary) or the player's (a Discord report). */
+  by: 'FFBox' | 'the player';
+  /** When the words were written (FFBox's turn end), or filed. */
+  at: string;
+  /** What the player hit: the report's kind, platform and game version. */
+  hit?: string;
+  cause?: string;
+  /** What the fix branch changes. */
+  fix?: string;
+  /** The run's verification. */
+  tests?: { compiled?: boolean; run?: number; passed?: number; failed?: number };
+  /** What could not be checked. */
+  unverified?: string;
+  /** What merging could break, when FFBox wrote it (w3602). */
+  risk?: string;
+  /** The start of the words, when none of the parts above were found in them. */
+  text?: string;
 }
 
 /** One night's merge review as the portal saw it (w905): fired, then done with what it filed, or missing. */

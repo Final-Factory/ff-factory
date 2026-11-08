@@ -7,6 +7,7 @@ import { WORK_LIVE_LABEL, WORK_LIVE_STATES, type WorkLive, type WorkLiveState } 
 import { latestLine } from '../shared/latestLine.ts';
 import { WORK_OPEN, type WorkItem } from '../shared/types.ts';
 import { cleanBlock, cleanLine, sourceTag, UNTRUSTED_HEADER } from './intakeRules.ts';
+import { digestText } from '../shared/intakeDigest.ts';
 import { ledgerOrder, liveLine, names } from './work.ts';
 import { gatesName, gatesOf } from '../shared/blockers.ts';
 import { HANDOFF_REPORT_CHARS } from './handoffReport.ts';
@@ -218,6 +219,8 @@ function full(w: WorkItem, now?: WorkLive, cost = ''): string {
     ...facts(w),
     ...(cost ? [cost.trim()] : []),
     ...(w.prs?.length ? ['PRs:', ...prLines(w, 20)] : ['PRs: none']),
+    // Its card's summary (w3602): FFBox's or the player's words, cut at filing, fenced as they are.
+    ...(w.source?.digest ? ['Summary on its card:', fence(w, digestText(w.source.digest), 3_000, 20)] : []),
     'Brief:',
     fence(w, w.brief, 12_000, 400),
     ...(w.constraints ? ['Constraints:', fence(w, w.constraints, 2_000, 60)] : []),

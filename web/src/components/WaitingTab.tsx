@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { Ask } from '../../../shared/ask';
 import { answerMessage, answersText, cardMedia, cardQuestions, legacySteps, namesForPaths, plainQuestion } from '../../../shared/questionCard';
-import { FLAG_LABEL, type AppState, type WorkItem } from '../../../shared/types';
+import { FLAG_LABEL, type AppState, type WorkDigest, type WorkItem } from '../../../shared/types';
 import { holdsWorker, intakeRecommendation, waitAge, waitOrder, type AskItem, type WaitingItem } from '../../../shared/waiting';
 import { APPROVE_LABEL, DECLINE_LABEL, approveAsk, waitSummary, waitedFor, whatOf, type WaitSummary } from '../../../shared/waitSummary';
+import { digestCaption, digestHeading, digestMissing, digestRows } from '../../../shared/intakeDigest';
 import { namesReporter, sourceLabel, untrustedLabel } from '../../../shared/workLabels';
 import { api } from '../api';
 import { sessionRoute } from '../attention';
@@ -237,6 +238,34 @@ export function cardSummary(s: WaitSummary, now: number, title?: string, id?: st
 }
 
 /**
+ * An intake request's summary at the top of its card (w3602): what the player hit, the cause, the fix, its tests and what
+ * nobody could check, labelled as FFBox's or the player's words. Plain text: a model or a player wrote it.
+ */
+export function DigestLead({ d }: { d: WorkDigest }) {
+  return (
+    <div className="qc-digest" data-testid="qc-digest">
+      <p className="qc-digest-head">{digestHeading(d)}</p>
+      <p className="qc-digest-by">{digestCaption(d)}</p>
+      {digestRows(d).map((r) => (
+        <p key={r.label} className="qc-digest-row" data-testid="qc-digest-row">
+          <span className="qc-digest-label">{r.label}:</span> {r.text}
+        </p>
+      ))}
+    </div>
+  );
+}
+
+/** An FFBox intake card whose summary is not there (w3602): the same heading, and where FFBox's write-up is. */
+export function DigestMissingLead({ text }: { text: string }) {
+  return (
+    <div className="qc-digest" data-testid="qc-digest">
+      <p className="qc-digest-head">FFBox left no summary for this request</p>
+      <p className="qc-digest-row" data-testid="qc-digest-missing">{text}</p>
+    </div>
+  );
+}
+
+/**
  * An intake request waiting for a reviewer, as a question (w1597): "Should FF Factory work on this?", Approve (marked
  * recommended when the triage says so) or Decline; the free box declines with a reason. The same endpoints as before.
  */
@@ -266,6 +295,7 @@ export function ApproveCard({ app, w, mine, reviewers, details, testId, summary 
       {...(repeat ? { note: `It may repeat “${repeat.title.length > 80 ? `${repeat.title.slice(0, 79)}…` : repeat.title}” (${repeat.why}).` } : {})}
       details={details}
       {...(summary ? { summary } : {})}
+      {...(w.source?.digest ? { lead: <DigestLead d={w.source.digest} /> } : digestMissing(w) ? { lead: <DigestMissingLead text={digestMissing(w)!} /> } : {})}
       subject
     />
   );

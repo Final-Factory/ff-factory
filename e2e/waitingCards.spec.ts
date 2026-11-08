@@ -81,7 +81,7 @@ test('w1868: every card of today’s real cases says what it is, who acts, the q
   await signIn(page);
   await page.goto('/#/dispatcher/waiting');
   const tab = page.getByTestId('waiting-tab');
-  const ids = ['w1797', 'w1839', 'w1829', 'w1853', 'w1842', 'w1820', 'w1821'];
+  const ids = ['w1797', 'w1839', 'w1829', 'w1853', 'w1842', 'w3596', 'w1820', 'w1821'];
   for (const id of ids) {
     const card = tab.getByTestId(`wait-${id}`);
     await expect(card, id).toBeVisible();
@@ -97,7 +97,29 @@ test('w1868: every card of today’s real cases says what it is, who acts, the q
   }
   // The intake cards say what the item is and what each answer does.
   await expect(tab.getByTestId('wait-w1853').getByTestId('qc-what')).toHaveText(/^The nightly game tests of 2026-10-23: 6 scenarios failed on master/);
-  await expect(tab.getByTestId('wait-w1842').getByTestId('qc-option').first()).toContainText('a worker starts at the next free sandbox');
+  await expect(tab.getByTestId('wait-w1842').getByTestId('qc-option').first()).toContainText('A worker reviews FFBox’s fix “circular placement log once” against the code');
+  // w3602: with no summary from FFBox, its card still leads with the heading and says where the write-up is.
+  await expect(tab.getByTestId('wait-w1842').getByTestId('qc-digest-missing')).toHaveText('Its full write-up is under Details, at the foot of this card.');
+  // w3596 (w3602, lothsahn: "What am I approving?"): FFBox's summary leads the card, labelled as FFBox's, and Approve says what it sets in motion.
+  const w3596 = tab.getByTestId('wait-w3596');
+  await expect(w3596.getByTestId('qc-digest')).toContainText('What FFBox found and changed');
+  await expect(w3596.getByTestId('qc-digest')).toContainText('FFBox’s summary, a model’s words: check them against the code.');
+  await expect(w3596.getByTestId('qc-digest-row')).toHaveText([/^The player hit: a freeze \(hang\) on LinuxPlayer, game 1\.0\.0\.16$/, /^Cause: the game rebuilt the swapchain/, /^The fix: Apply now skips Screen\.SetResolution/, /^Tests: compiled; 16349 of 16361 tests passed, 2 failed, 10 skipped$/, /^Not checked: This container has no Steam overlay/, 'Risk: FFBox named none. From the facts: 2 tests fail on its branch; whether the fix ends what the player hit is unchecked (above).']);
+  await expect(w3596.getByTestId('qc-question')).toHaveText('Should a worker review FFBox’s fix for a freeze (hang) on LinuxPlayer and merge it?');
+  await expect(w3596.getByTestId('qc-option').first()).toContainText('fixes the 2 failing tests, opens a pull request and merges it on green');
+  await expect(w3596.getByTestId('qc-option').nth(1)).toContainText('FFBox marks the player’s report obsolete and posts nothing');
+  // The summary comes before the question.
+  const [digestBox, questionBox] = await Promise.all([w3596.getByTestId('qc-digest').boundingBox(), w3596.getByTestId('qc-question').boundingBox()]);
+  expect(digestBox!.y).toBeLessThan(questionBox!.y);
+  if (process.env.WAITING_SHOTS) {
+    // The whole card at once: a viewport as tall as the card, so nothing runs under the phone's sticky header.
+    const box = (await w3596.boundingBox())!;
+    const vp = page.viewportSize()!;
+    await page.setViewportSize({ width: vp.width, height: Math.max(vp.height, Math.ceil(box.height) + 600) });
+    await settle(page);
+    await w3596.screenshot({ path: path.join(process.env.WAITING_SHOTS, `w3596-card-${isMobile(page) ? 'narrow' : 'desktop'}.png`) });
+    await page.setViewportSize(vp);
+  }
   // w1829: the decision itself, flagged as overtaken.
   await expect(tab.getByTestId('wait-w1829').getByTestId('qc-stale')).toContainText('timed runs no longer go to m5');
   // w1821: the frame look answered, the Station strip question asked, with its still.
@@ -224,9 +246,10 @@ test('w2856: every card leads with its question, its answers right under it; wha
   for (let i = 0; i < n; i++) {
     const card = cards.nth(i);
     const id = (await card.getAttribute('data-testid')) ?? String(i);
-    // The question is the card's first line (a multi-question card's progress may sit above it), whole and readable.
-    const first = await card.evaluate((el) => (el.firstElementChild?.getAttribute('data-testid') === 'qc-progress' ? el.children[1] : el.firstElementChild)?.getAttribute('data-testid'));
-    expect(first, `${id}: the question first`).toBe('qc-question');
+    // The question is the card's first line (a multi-question card's progress may sit above it), whole and readable; an
+    // intake card's plain summary of what is being approved sits above it (w3602, lothsahn: "What am I approving?").
+    const lead = await card.evaluate((el) => [...el.children].map((c) => c.getAttribute('data-testid')).filter((t) => t !== 'qc-progress').slice(0, 2));
+    expect(lead[0] === 'qc-digest' ? lead[1] : lead[0], `${id}: the question first`).toBe('qc-question');
     const q = card.getByTestId('qc-question');
     await expect(q, id).not.toBeEmpty();
     await expect(q, id).not.toHaveText(/…$/);

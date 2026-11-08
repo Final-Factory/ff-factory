@@ -14,6 +14,7 @@
 // list_work text and the [needs you] message all read this. No imports from the page or the server: `node --test` loads it.
 import { splitMedia, type Ask } from './ask.ts';
 import { isVideoPath } from './imagePaths.ts';
+import { approveAction, approveQuestion, declineAction } from './intakeDigest.ts';
 import { legacySteps, plainQuestion } from './questionCard.ts';
 import type { SessionInfo, WorkItem } from './types.ts';
 import type { WaitingAsk } from './waiting.ts';
@@ -188,10 +189,11 @@ export function staleOf(w: Pick<WorkItem, 'log' | 'needsYou' | 'done'>, worker: 
 export function approveAsk(w: Pick<WorkItem, 'source'>, recommendation: string | undefined): Ask {
   const approveRec = !!recommendation?.startsWith('Approve');
   return {
-    question: w.source?.kind?.startsWith('ffbox') ? 'Should a worker review FFBox’s work on this and take it on?' : `Should FF Factory work on this ${w.source?.kind === 'discord-bug' ? 'player’s bug report' : 'request'}?`,
+    question: approveQuestion(w),
+    // What each answer sets in motion for this request (w3602, lothsahn: "What am I approving?").
     options: [
-      { label: APPROVE_LABEL, description: 'The dispatcher gets it and a worker starts at the next free sandbox: one worker session of Claude usage.', ...(approveRec ? { recommended: true } : {}) },
-      { label: DECLINE_LABEL, description: 'It closes as declined, with your reason if you type one. The dispatcher never hears of it; nothing is spent.' },
+      { label: APPROVE_LABEL, description: approveAction(w), ...(approveRec ? { recommended: true } : {}) },
+      { label: DECLINE_LABEL, description: declineAction(w) },
     ],
   };
 }
@@ -216,7 +218,8 @@ export function waitSummary(item: { w: WorkItem; live: WorkLive; ask: WaitingAsk
       asks: [a],
       question: '',
       previews: [],
-      after: `Approve: the dispatcher decides where it runs and a worker starts on it. Decline: it is closed as declined and nobody works on it.`,
+      // What each answer does is in its own box (w3602); this says only what the card itself does.
+      after: 'Approve: the request goes to the dispatcher’s queue. Decline: it closes. Either way this card leaves the tab.',
     };
   }
   const r = w.needsYou && !w.needsYou.answered ? w.needsYou : undefined;

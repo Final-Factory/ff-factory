@@ -111,6 +111,11 @@ export interface QuestionCardProps {
   subject?: boolean;
   /** Answering it lets a worker go on (w2856): said beside who acts. */
   holds?: boolean;
+  /**
+   * What it is about, read before the question (w3602, lothsahn: "What am I approving?"): an intake request's summary
+   * in plain words, at the top of the card.
+   */
+  lead?: ReactNode;
 }
 
 /**
@@ -340,6 +345,7 @@ export function QuestionCard(p: QuestionCardProps) {
   return (
     <article className={`qc${p.mine ? ' mine' : ''}${p.holds ? ' qc-holding' : ''}`} data-testid={p.testId}>
       {progress}
+      {p.lead}
       <QuestionText q={top} legacy={!ask && !stepOnTop && !!q} />
       {subject && (
         <p className="qc-subject" data-testid="qc-what">
