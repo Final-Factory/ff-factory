@@ -86,6 +86,7 @@ import { deleteMemoryFile, MEMORY_TRASH_DAYS, memoryDirFor, memoryGuard, memoryK
 import { ownerDataReads, portalSecretRules, secretFilesOf, secretReadGuard, type SecretRules } from './secretGuard.ts';
 import { readableConfigFiles } from './configMigration.ts';
 import { conditionalLine, HELD_MARK } from '../shared/conditional.ts';
+import { personMessageView } from '../shared/personMessage.ts';
 import { approvedMark, countGrant, liveGrant } from './benchGrants.ts';
 import { FFBOX_CONVERSATION_DEFAULT_TURNS, FFBOX_REPORTS_DEFAULT, LIST_CARD_NOTE, LIST_WORK_LOG_TAIL, SANDBOX_DETAIL_CHARS, SESSION_REQUESTS_TOP, clip, keyList, logLines } from './toolOutput.ts';
 import { SpendStore, buildReport, costLine, renderReport, renderRequest, renderSession } from './spend.ts';
@@ -5505,12 +5506,13 @@ When a person asked for a design or an analysis (a profile, an investigation, a 
     return [...cap, ...(cap.length ? [''] : []), ...parts, ...this.ops.groupLines()].join('\n').replace(/^\n+/, '');
   }
 
-  private condensed(events: TranscriptEvent[], full = false) {
+  private condensed(events: TranscriptEvent[], full = false, forPerson = false) {
     return events
       .map((e) => {
         switch (e.kind) {
           case 'user':
-            return `> ${e.from}: ${e.text.slice(0, 400)}`;
+            // A person reading their own chat sees their words as the bubble does: FF Factory's notes after them are the orchestrator's (w3581).
+            return `> ${e.from}: ${(forPerson && e.from === 'human' ? personMessageView(e.text).words : e.text).slice(0, 400)}`;
           case 'assistant':
             return `assistant: ${e.text.slice(0, full ? 1200 : 600)}`;
           case 'tool_use':
@@ -6983,7 +6985,7 @@ ${w.repo ?? ''}
         schema: { last: rangedNumber(5, 400, 'How many events (default 40).').optional() },
         handler: wrap(clamped({ last: [5, 400] }, async (a: Record<string, unknown>) => {
           refused();
-          return this.condensed(this.store.readTranscript(mine(), Number(a.last ?? 40)));
+          return this.condensed(this.store.readTranscript(mine(), Number(a.last ?? 40)), false, true);
         })) as ToolSpec['handler'],
       },
     ];
