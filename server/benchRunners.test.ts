@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { BenchRunners, holdsJob, isOpsRunner, listenerLog, OPS_RUNNER_MARK, readListenerLog, runnerCensus, SETTLE_MS, type BenchRunnersDeps, type RunnersState } from '../machine/benchRunners.ts';
+import { BenchRunners, holdsJob, RELEASE_LOOKS, STALE_JOB_MS, isOpsRunner, listenerLog, OPS_RUNNER_MARK, readListenerLog, runnerCensus, SETTLE_MS, type BenchRunnersDeps, type RunnersState } from '../machine/benchRunners.ts';
 import type { Proc } from '../machine/unity.ts';
 
 /**
@@ -74,6 +74,11 @@ function harness(o: { platform?: NodeJS.Platform; state?: RunnersState; opsRunne
   return { s, r: new BenchRunners(d) };
 }
 
+/** The looks after a ticket is let go until its paused listeners are continued (w3698, RELEASE_LOOKS). */
+async function release(r: BenchRunners) {
+  for (let i = 0; i < RELEASE_LOOKS; i++) await r.tick();
+}
+
 test('w3112: the census: a listener is idle, a worker is a job, a _work process no worker started is a leftover', () => {
   const c = runnerCensus([...LISTENERS, ...JOB, LEFTOVER, ...OTHER]);
   assert.deepEqual(
@@ -111,10 +116,10 @@ test('w3112: an exclusive turn pauses the idle runners, waits for the busy one, 
   await r.tick();
   assert.deepEqual(s.signals, ['SIGSTOP 502']);
   assert.deepEqual(r.paused().map((p) => p.pid), [501, 503, 502]);
-  // the ticket is released: every paused listener is continued, and the file emptied
+  // the ticket is released: once RELEASE_LOOKS looks agree (w3698), every paused listener is continued, and the file emptied
   s.holder = undefined;
   s.signals = [];
-  await r.tick();
+  await release(r);
   assert.deepEqual(s.signals, ['SIGCONT 501', 'SIGCONT 503', 'SIGCONT 502']);
   assert.deepEqual(r.paused(), []);
   assert.deepEqual(s.written.at(-1), { paused: [], ended: [] });
@@ -134,7 +139,7 @@ test('w3112: a listener that took a job in the instant it was paused is continue
 
 test('w3112: a daemon restarted after a turn continues the listeners its file says it paused; a pid that is no listener now is left', async () => {
   const { s, r } = harness({ state: { ticket: 't00001116', paused: [{ pid: 501, root: `${H}/actions-runner`, at: 'x' }, { pid: 999, root: `${H}/gone`, at: 'x' }], ended: [] } });
-  await r.tick();
+  await release(r);
   assert.deepEqual(s.signals, ['SIGCONT 501']);
   assert.deepEqual(s.written.at(-1), { paused: [], ended: [] });
 });
@@ -161,7 +166,7 @@ test('w3454: Windows runners are paused too (the suspend answers later): idle on
   await r.tick();
   assert.deepEqual(s.signals.slice(2), ['SIGSTOP 33400'], 'C:/Users/rydin/ffu-runner is paused once its job ends');
   s.holder = undefined;
-  await r.tick();
+  await release(r);
   assert.deepEqual(s.signals.slice(3), ['SIGCONT 35452', 'SIGCONT 29760', 'SIGCONT 33400']);
   assert.ok(!s.log.some((l) => /Windows has no SIGSTOP/.test(l)));
 });
@@ -306,7 +311,7 @@ test('w3424: an operations runner (ff-ops-runner in its root) is never paused fo
   assert.equal(s.log.filter((l) => /listener pid 503\) not paused: an operations runner \(ff-ops-runner, w3424\)/.test(l)).length, 1, 'said once, not every look');
   s.holder = undefined;
   s.signals = [];
-  await r.tick();
+  await release(r);
   assert.deepEqual(s.signals, ['SIGCONT 501', 'SIGCONT 502']);
 });
 
@@ -315,4 +320,77 @@ test('w3424: isOpsRunner reads the mark file in the runner root', () => {
   assert.equal(isOpsRunner(root), false);
   fs.writeFileSync(path.join(root, OPS_RUNNER_MARK), 'w3424: the shared FFU world deploy only\n');
   assert.equal(isOpsRunner(root), true);
+});
+
+// w3698: m3, 2026-11-08. Under exclusive ticket t00001186 (w3141's FFU timing) the ffu listeners 2208 and 2210 were
+// continued at about 17:53Z and 17:58Z while the ticket still held, and CI builds ran beside the timed leg.
+test('w3698: each runner is paused as it goes idle, one at a time, while the others still run jobs', async () => {
+  const { s, r } = harness();
+  const W = (pid: number, ppid: number, root: string): Proc => ({ pid, ppid, cmd: `${H}/${root}/bin/Runner.Worker spawnclient 1 2` });
+  // both ffu runners run jobs back to back; the old runner is idle
+  s.procs = [...LISTENERS, W(610, 502, 'ffu-runner'), W(611, 503, 'ffw/ffu-runners/ffu-m3-2')];
+  s.holder = { ticket: 't00001184' };
+  await r.tick();
+  assert.deepEqual(s.signals, ['SIGSTOP 501']);
+  // ffu-runner's job ends (its log settled), ffu-m3-2's goes on: ffu-runner is paused now, not when both are idle
+  s.procs = [...LISTENERS, W(611, 503, 'ffw/ffu-runners/ffu-m3-2')];
+  await r.tick();
+  assert.deepEqual(s.signals, ['SIGSTOP 501', 'SIGSTOP 502']);
+  assert.deepEqual(r.paused().map((p) => p.pid), [501, 502]);
+  // then ffu-m3-2's
+  s.procs = [...LISTENERS];
+  await r.tick();
+  assert.deepEqual(s.signals, ['SIGSTOP 501', 'SIGSTOP 502', 'SIGSTOP 503']);
+  assert.deepEqual(r.paused().map((p) => p.pid), [501, 502, 503]);
+});
+
+test('w3698: a listener whose last log line is a job past STALE_JOB_MS stays paused (it was paused and continued every look)', async () => {
+  const { s, r } = harness();
+  s.procs = [...LISTENERS, ...OTHER];
+  const ran = '[2026-11-08 17:40:00Z INFO Terminal] WRITE LINE: 2026-11-08 17:40:00Z: Running job: build (macos)\n';
+  s.diag['ffu-runner'] = ran;
+  s.now = Date.parse('2026-11-08T17:40:00Z') + STALE_JOB_MS + 1000;
+  s.holder = { ticket: 't00001186' };
+  for (let i = 0; i < 4; i++) await r.tick();
+  assert.deepEqual(s.signals, ['SIGSTOP 501', 'SIGSTOP 502', 'SIGSTOP 503'], 'paused once, never continued');
+  assert.deepEqual(r.paused().map((p) => p.pid), [501, 502, 503]);
+  assert.ok(!s.log.some((l) => /took a job as it was paused/.test(l)));
+});
+
+test('w3698: nothing is continued while the ticket holds, even when one look misses it; all are once it is let go', async () => {
+  const { s, r } = harness();
+  s.procs = [...LISTENERS, ...OTHER];
+  s.holder = { ticket: 't00001186' };
+  await r.tick();
+  assert.deepEqual(r.paused().map((p) => p.pid), [501, 502, 503]);
+  for (let look = 0; look < 30; look++) {
+    // every third look reads the queue mid-rewrite and finds no holder
+    s.holder = look % 3 === 1 ? undefined : { ticket: 't00001186' };
+    await r.tick();
+  }
+  assert.ok(!s.signals.some((x) => x.startsWith('SIGCONT')), `continued during the turn: ${s.signals.join(', ')}`);
+  assert.deepEqual(r.paused().map((p) => p.pid), [501, 502, 503]);
+  s.holder = undefined;
+  s.signals = [];
+  await r.tick();
+  await r.tick();
+  assert.deepEqual(s.signals, [], `not on fewer than ${RELEASE_LOOKS} looks`);
+  await r.tick();
+  assert.deepEqual(s.signals, ['SIGCONT 501', 'SIGCONT 502', 'SIGCONT 503']);
+});
+
+test('w3698: a look whose listing never came back does not stop the later looks', async () => {
+  const { s, r } = harness();
+  s.procs = [...LISTENERS, ...OTHER];
+  s.holder = { ticket: 't00001183' };
+  const d = (r as unknown as { d: BenchRunnersDeps }).d;
+  const real = d.procs;
+  d.procs = () => new Promise(() => undefined); // ps hung
+  void r.tick();
+  d.procs = real;
+  await r.tick();
+  assert.deepEqual(s.signals, [], 'a look still running is not doubled');
+  s.now += 3 * 60_000;
+  await r.tick();
+  assert.deepEqual(s.signals, ['SIGSTOP 501', 'SIGSTOP 502', 'SIGSTOP 503']);
 });
