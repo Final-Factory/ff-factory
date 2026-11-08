@@ -120,9 +120,11 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // w3686 (no bump): the `tempSize` signal (SignalName), a worker's temp folder over its threshold, arg { total, biggest, step }; an older
 // portal re-emits it with no listener, and an older daemon or host never sends it (an older daemon under a newer host drops it: it
 // forwards only the names it knows).
+// w3712 (no bump): `fast` on `transcribe`, a live dictation pass decoded greedily; an older daemon builds its Whisper ask
+// field by field and drops it (a full decode, only slower), and an older portal never sends it.
 // w3715 (no bump): `bench_revoke`, the portal taking back a bench ticket an idle worker's work holds; an older daemon drops it
 // (no default case), so the ticket is held as before until the leftovers or its owner end it; an older portal never sends it.
-const DECIDED = { protocol: 9, fingerprint: '74335b4e6af4433c' };
+const DECIDED = { protocol: 9, fingerprint: '4a1cd0d389e76a53' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

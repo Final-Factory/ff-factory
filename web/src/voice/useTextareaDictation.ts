@@ -1,7 +1,7 @@
 import { useEffect, useRef, type KeyboardEvent, type RefObject, type SyntheticEvent } from 'react';
 import { insertTranscript } from '../../../shared/voice';
 import { selectionOffsets, setCaret } from '../editable';
-import { useDictation, type Dictation } from './dictation';
+import { useDictation, type Dictation, type LiveSink } from './dictation';
 
 /** A textarea, or a contenteditable message box (web/src/editable.ts). */
 type Box = HTMLTextAreaElement | HTMLElement;
@@ -9,7 +9,8 @@ const isTextarea = (el: Box): el is HTMLTextAreaElement => el instanceof HTMLTex
 
 /**
  * Dictation into a controlled text box: the transcript goes in at the caret (or replaces the
- * selection), for the user to review. With `onAutoSend` and the device's "send automatically" setting on,
+ * selection), for the user to review. While the user talks, the words so far fill that place and grow (w3712); the
+ * final transcript replaces them on stop, and a cancel puts the box back as it was. With `onAutoSend` and the device's "send automatically" setting on,
  * it is sent at once instead.
  */
 export function useTextareaDictation(opts: {
@@ -42,9 +43,36 @@ export function useTextareaDictation(opts: {
     return () => document.removeEventListener('selectionchange', onChange);
   }, []);
 
+  // The live text's place: the box as it was when the words started, and the selection they replace.
+  const live = useRef<{ base: string; s: number; e: number; caret: number } | null>(null);
+
+  const liveSink: LiveSink = {
+    show: (t) => {
+      const { value, setValue } = latest.current;
+      if (!live.current) {
+        const [s, e] = sel.current ?? [value.length, value.length];
+        live.current = { base: value, s, e, caret: e };
+      }
+      const L = live.current;
+      const next = insertTranscript(L.base, L.s, L.e, t);
+      L.caret = next.caret;
+      setValue(next.text);
+    },
+    end: (keep) => {
+      const L = live.current;
+      live.current = null;
+      if (!L) return;
+      if (keep) sel.current = [L.caret, L.caret];
+      else latest.current.setValue(L.base);
+    },
+  };
+
   const d = useDictation((t, { autoSend }) => {
-    const { value, setValue, ref, onAutoSend } = latest.current;
-    const [s, e] = sel.current ?? [value.length, value.length];
+    const { setValue, ref, onAutoSend } = latest.current;
+    const L = live.current;
+    live.current = null;
+    const value = L ? L.base : latest.current.value;
+    const [s, e] = L ? [L.s, L.e] : (sel.current ?? [value.length, value.length]);
     const next = insertTranscript(value, s, e, t);
     setValue(next.text);
     sel.current = [next.caret, next.caret];
@@ -58,7 +86,7 @@ export function useTextareaDictation(opts: {
         else setCaret(el, next.caret);
       });
     }
-  });
+  }, liveSink);
 
   return {
     d,

@@ -2468,6 +2468,12 @@ export interface WorkItem {
    */
   timedBrief?: { at: string; text: string };
   /**
+   * w3720: timing said outright (decide_work timed true or false): needsTimed then reads no words for it. false: never timed
+   * work, whatever its words say (w3705, a determinism pair run, read as timed from notes saying it was not); true: timed
+   * work even without a timing word. A pair run without it is timed only by WorkPair.timed (request_pair timed).
+   */
+  timedMark?: { timed: boolean; at: string; by: string; note: string };
+  /**
    * Its last hand-back (w1532, server/machinePause.ts): its worker's machine was paused, so it was taken off that worker and
    * Queued for another computer, whose worker picks it up from `branch` with `note` (the worker's own line, or where it
    * stopped) and the `message` that would have resumed it, in its handover.

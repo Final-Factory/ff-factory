@@ -116,13 +116,18 @@ def main():
             pcm, rate = read_wav(base64.b64decode(req["audio"]))
             pcm = resample(pcm, rate)
             t0 = time.time()
+            # A live pass (w3712): greedy, and no retries at higher temperatures (a clip cut mid-word set them off: 6-7 s
+            # on the CPU for a 6 s clip instead of 0.5 s). Without the retries that clip looped ("s-t-t-t-..."), so no
+            # 3-gram may repeat: 0.49 s and a clean text (measured, base.en on 2 threads). The final pass keeps the full search.
+            fast = bool(req.get("fast"))
             segments, _info = model.transcribe(
                 pcm,
                 language=req.get("language") or None,
                 # hotwords go into every 30 s window's prompt; an initial_prompt only steers the first
                 # one unless the previous text is carried too (which invites repetition loops).
                 hotwords=req.get("prompt") or None,
-                beam_size=args.beam_size,
+                beam_size=1 if fast else args.beam_size,
+                **({"temperature": 0.0, "no_repeat_ngram_size": 3} if fast else {}),
                 # Silence and breaths are where Whisper invents text ("Thank you."): cut them out first.
                 vad_filter=True,
                 vad_parameters={"min_silence_duration_ms": 700},
