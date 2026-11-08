@@ -1865,8 +1865,12 @@ LothDesktop and Beast, not just when BEAST is full").
       state,mergeable,baseRefName,headRefOid`; `UNKNOWN`, GitHub still working it out, counts as no conflict) and clears
       a `ci:` gate at once, resuming the worker, when the PR conflicts and no check has started: "PR #283 conflicts with
       main (CI can't run): merge main in, resolve, push, and wait again" (also in the request's log; checks already
-      running keep it waiting); a `pr:` gate its worker set itself clears the same way on a conflict (a dispatcher's does
-      not: the PR may be another worker's); (3) it also clears when no CI run exists for the PR's head (`none` from the
+      running keep it waiting); a `pr:` gate its worker set itself clears the same way on a conflict, only when its request
+      owns the PR (w3572, `ownsPr`: the ledger links it, its description has `Request:` or `Part of:` naming the request,
+      or its head branch is the request's); a dispatcher's does not, nor one on another request's PR, which stays Blocked
+      until that PR merges or closes, while the requests owning it are told once per head commit
+      (`BlockerWatch.tellPrConflicts`, `Orchestrators.tellPrConflict`; ffu#397, w3445's, woke w3423 and five other waiters
+      three times an hour to resolve it); (3) it also clears when no CI run exists for the PR's head (`none` from the
       checks or Actions read) `CI_NO_RUN_MS` = **10 minutes** after the portal first saw that head: the run for #283 was
       created 18:30:39Z for a push made seconds before (measured), so ten minutes is far past any start-up and short
       against the hour lost. It needs the checks to be readable to tell "no run" from "unread" (the w829 15-minute

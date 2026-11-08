@@ -4306,6 +4306,48 @@ test('w907: no CI run for a PR head after ten minutes clears the gate too, resum
   agents.waker.cancel(a.id);
 });
 
+test("w3572: replay of ffu#397: requests waiting for another request's PR to merge stay Blocked when it conflicts; only its owner is told, once per head", async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }, { id: 'w2' }, { id: 'w3' }]);
+  const ref = 'Final-Factory/ffu#397';
+  // w1 (w3445) owns #397: its description says "Request: w1". w2 and w3 (w3423, w3416) only wait for it to merge.
+  const owner = await startedFor(env, 'w1');
+  const b = await startedFor(env, 'w2', { override_duplicate: 'another request' });
+  const c = await startedFor(env, 'w3', { override_duplicate: 'another request' });
+  for (const x of [b, c]) await x.h.blocked_on!({ prs: [ref], what: 'PR Final-Factory/ffu#397 merging' });
+  let clock = Date.now();
+  let seen: PrHealth = { state: 'open', head: 'aaaaaaa1111', headRef: 'w3445-failover', requests: ['w1'], conflict: { base: 'main' } };
+  const watch = new BlockerWatch({ store, orchestrators: o, now: () => clock, pr: async (r) => ({ state: 'open', text: `${r} is still open` }), prHealth: async () => seen });
+  const told = () => store.readTranscript(owner.id).filter((e) => e.kind === 'user' && /PR #397 \(Final-Factory\/ffu#397\) conflicts with main/.test((e as { text: string }).text));
+  const did = await watch.tick();
+  // Before w3572 each waiter was cleared with "PR #397 conflicts with main (CI can't run): merge main in, resolve, push".
+  for (const id of ['w2', 'w3']) {
+    assert.equal(did.has(id), false, `${id} is not woken`);
+    assert.equal(store.work.get(id)!.status, 'blocked', `${id} stays Blocked`);
+    assert.doesNotMatch(store.work.get(id)!.log.join('\n'), /merge main in/);
+  }
+  assert.match(did.get('w1') ?? '', /^told: PR #397 conflicts with main/);
+  await until("the owner's worker is told", () => told().length === 1);
+  const text = (told()[0] as { text: string }).text;
+  assert.match(text, /w2, w3 wait for it to merge\. It is w1's: merge main into its branch, resolve, push, and wait on its CI again/);
+  assert.match(store.work.get('w1')!.log.join('\n'), new RegExp(`${ref} conflicts at aaaaaaa: told ${owner.id}`));
+  // The next looks (still conflicting, same head): nobody is woken or told again.
+  for (let i = 0; i < 3; i++) {
+    clock += 3 * 60_000;
+    const again = await watch.tick();
+    assert.equal(['w1', 'w2', 'w3'].some((id) => again.has(id)), false, 'told once');
+  }
+  assert.equal(told().length, 1);
+  // A new head that conflicts again tells the owner again; the waiters still sleep. Its merge then clears them.
+  seen = { ...seen, head: 'bbbbbbb2222' };
+  clock += 3 * 60_000;
+  assert.match((await watch.tick()).get('w1') ?? '', /^told:/);
+  assert.equal(store.work.get('w2')!.status, 'blocked');
+  for (const id of [owner.id, b.id, c.id]) agents.waker.cancel(id);
+});
+
 test("w890 (found live): a worker's own waiting_on_person counts for every request it is the latest worker on, also one it moved on from, so a worker on two requests that ends its turn waiting on a person frees its sandbox", async (t) => {
   const env = await setupOnMachine(t);
   const { store, agents } = env;

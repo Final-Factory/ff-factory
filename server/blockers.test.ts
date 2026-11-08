@@ -1,7 +1,7 @@
 // w643: what a Blocked request waits on, and when each kind of blocker clears, stays open, gets stuck or needs a person.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { BLOCKER_STUCK_MS, CI_NO_RUN_MS, CI_UNREADABLE_MS, conflictText, cycleBreak, waitCycles, blockerName, blockerProblem, blockerVerdict, gatesName, gatesOf, isWith, latestWorker, newestFirst, prRefOf, sameGate, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
+import { BLOCKER_STUCK_MS, CI_NO_RUN_MS, CI_UNREADABLE_MS, conflictText, ownsPr, cycleBreak, waitCycles, blockerName, blockerProblem, blockerVerdict, gatesName, gatesOf, isWith, latestWorker, newestFirst, prRefOf, sameGate, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
 import type { WorkBlocker, WorkItem } from '../shared/types.ts';
 import { requestWaitOf } from '../shared/workState.ts';
 import { checksState, ghChecks, ghPr, ghPrHealth, prHealthOf, queuedRunsState, runsState } from './blockerWatch.ts';
@@ -348,17 +348,38 @@ test('w907: a ci gate on a pull request that conflicts with its base, or whose h
   assert.match(late.why, /^no CI run exists for PR #283's head 312570c 10 min after it was pushed \(Final-Factory\/ff-factory#283 has no checks yet\): check that your push reached it \(gh pr view 283 --json headRefOid\), push, and wait again$/);
   assert.equal(blockerVerdict(ci, facts([], { ci: () => running, ...seen(60) })).state, 'open', 'a run exists: CI is running, not missing');
   assert.equal(blockerVerdict(ci, facts([], { ci: () => undefined, ...seen(60) })).state, 'open', 'checks unreadable: cannot tell no run from unread (w829 clock decides)');
-  // A pr gate (waiting for a merge): only the one its worker set itself wakes on a conflict.
+  // A pr gate (waiting for a merge): only the one its worker set itself, on a PR its request owns (w3572), wakes on a conflict.
   const pr = block({ kind: 'pr', ref, what: '#283 merged', by: 'worker abc12345' });
   const open = { prs: () => ({ state: 'open' as const, text: `${ref} is still open` }) };
-  assert.deepEqual(blockerVerdict(pr, facts([], { pr: open.prs, ...health({ conflict: { base: 'develop' } }) })), { state: 'clear', why: "PR #283 conflicts with develop (CI can't run): merge develop in, resolve, push, and wait again" });
-  assert.equal(blockerVerdict({ ...pr, by: 'dispatcher' }, facts([], { pr: open.prs, ...health({ conflict: { base: 'develop' } }) })).state, 'open');
-  assert.equal(blockerVerdict(pr, facts([], { pr: open.prs, ...health({}) })).state, 'open');
+  const mine = [item('w1', { prs: [{ repo: 'Final-Factory/ff-factory', number: 283, state: 'open' }] })];
+  assert.deepEqual(blockerVerdict(pr, facts(mine, { pr: open.prs, ...health({ conflict: { base: 'develop' } }) }), 'w1'), { state: 'clear', why: "PR #283 conflicts with develop (CI can't run): merge develop in, resolve, push, and wait again" });
+  assert.equal(blockerVerdict({ ...pr, by: 'dispatcher' }, facts(mine, { pr: open.prs, ...health({ conflict: { base: 'develop' } }) }), 'w1').state, 'open');
+  assert.equal(blockerVerdict(pr, facts(mine, { pr: open.prs, ...health({}) }), 'w1').state, 'open');
+});
+
+test("w3572: a pr gate on another request's PR stays open while that PR conflicts; only the PR's owner is woken", () => {
+  const ref = 'Final-Factory/ffu#397';
+  const pr = block({ kind: 'pr', ref, what: 'PR Final-Factory/ffu#397 merging', by: 'worker 61ce0971' });
+  const conflicting = (h: Partial<PrHealth> = {}): Partial<BlockerFacts> => ({
+    pr: () => ({ state: 'open', text: `${ref} is still open` }),
+    prHealth: () => ({ state: 'open', head: 'abc1234', headRef: 'w3445-failover', requests: ['w3445'], conflict: { base: 'main' }, ...h }),
+  });
+  const all = [item('w3423'), item('w3445'), item('w9', { source: { kind: 'ffbox-branch', branch: 'w3445-failover', untrusted: true } as WorkItem['source'] }), item('w8', { prs: [{ repo: 'final-factory/FFU', number: 397, state: 'open' }] })];
+  // w3423 waits for w3445's PR to merge: it stays Blocked through the conflict (it was woken three times in an hour).
+  assert.deepEqual(blockerVerdict(pr, facts(all, conflicting()), 'w3423'), { state: 'open', why: `${ref} is still open` });
+  // The owner, by its Request: line, its own branch, or the ledger's link, is woken to merge main in.
+  for (const id of ['w3445', 'w9', 'w8']) assert.equal(blockerVerdict(pr, facts(all, conflicting()), id).state, 'clear', id);
+  assert.equal(ownsPr(all[0], ref, { requests: ['w3445'] }), false);
+  assert.equal(ownsPr(all[1], 'Final-Factory/ffu#398', { requests: [] }), false);
+  // No waiter known, or a PR nobody claims: nobody is woken.
+  assert.equal(blockerVerdict(pr, facts(all, conflicting({ requests: undefined, headRef: 'x' }))).state, 'open');
+  // Its merge clears the waiter as before.
+  assert.equal(blockerVerdict(pr, facts(all, { ...conflicting(), pr: () => ({ state: 'merged', text: `${ref} merged` }) }), 'w3423').state, 'clear');
 });
 
 test('w907: gh pr view is read for the head, the base and GitHub\'s mergeability; UNKNOWN is no conflict', async () => {
   const ref = 'Final-Factory/ff-factory#283';
-  const view = (out: unknown) => fakeGh([{ match: /--json state,mergeable,baseRefName,headRefOid,headRefName$/, out }]);
+  const view = (out: unknown) => fakeGh([{ match: /--json state,mergeable,baseRefName,headRefOid,headRefName,body$/, out }]);
   assert.deepEqual(await ghPrHealth(ref, view({ state: 'OPEN', mergeable: 'CONFLICTING', baseRefName: 'main', headRefOid: 'abc', headRefName: 'w890' }).run), { state: 'open', conflict: { base: 'main' }, head: 'abc', headRef: 'w890' });
   assert.deepEqual(await ghPrHealth(ref, view({ state: 'OPEN', mergeable: 'UNKNOWN', baseRefName: 'main', headRefOid: 'abc' }).run), { state: 'open', head: 'abc' });
   assert.deepEqual(await ghPrHealth(ref, view({ state: 'OPEN', mergeable: 'MERGEABLE', baseRefName: 'main', headRefOid: 'abc' }).run), { state: 'open', head: 'abc' });
