@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
-import { localWorkWhy, norm, OUTSIDE_ROOT_WHY, sizeOf, within } from './cleanup.ts';
+import { localWorkWhy, norm, unpushedWorkWhy, OUTSIDE_ROOT_WHY, sizeOf, within } from './cleanup.ts';
 import { requestIdsIn, CONTEXT_MAX_AGE_HOURS } from './staleOutput.ts';
 import type { SessionOwner } from './resumable.ts';
 import { finishedBulkIn, INSTALL_LEFTOVER_DEFAULTS, newestWrite } from './installLeftovers.ts';
@@ -91,8 +91,8 @@ export function judgeSession(sid: string, f: CleanupFacts): Pick<FolderRow, 'ver
     if (withIt.length) return { verdict: 'keep', why: `stopped worker ${sid} is still on ${list(withIt)}, which has not closed: it resumes there and needs its files` };
     return { verdict: 'keep', why: `worker ${sid} was on ${list(open)}, which has not closed (it moved on to another worker; the daemon sweeps these itself, w1097)` };
   }
-  if (f.resumable.includes(sid)) return { verdict: 'keep', why: `a request still waits for worker ${sid}, or closed within the last 7 days and may be reopened to it (w1575): the folder stays, its rebuildable bulk is listed below it once idle (w2223)` };
-  return { verdict: 'delete', why: `no open, stalled or paused request names worker ${sid}: its requests are closed, or it belongs to no request (an orphan)` };
+  if (f.resumable.includes(sid)) return { verdict: 'keep', why: `a request still waits for worker ${sid}, or a check-in of its own is pending: the folder stays, its rebuildable bulk is listed below it once idle (w2223)` };
+  return { verdict: 'delete', why: `no open, stalled or paused request names worker ${sid}: its requests are closed, or it belongs to no request (an orphan); only a clone with commits on no remote or a stash keeps it (w3656)` };
 }
 
 /** A folder named for requests ("w1332-comet-catch-tail", "results-w166"): by those requests' state. */
@@ -314,7 +314,7 @@ export async function withGitCheck(r: FolderRow, root: string | undefined, local
   return why ? { ...r, verdict: 'keep', why: `${why}. The ledger alone said: ${r.why}` } : r;
 }
 
-/** Worker `sid` finished (w2223): stopped, no request that has not closed is on it, and only the 7-day reopen hold keeps its folder. */
+/** Worker `sid` finished (w2223): stopped, no request that has not closed is on it, and only a pending check-in keeps its folder (the 7-day reopen hold went in w3656). */
 export const finishedSession = (sid: string, f: CleanupFacts) => !f.live.includes(sid) && !f.owners?.[sid] && f.resumable.includes(sid);
 
 /**
@@ -343,7 +343,7 @@ export async function finishedRows(dir: string, f: CleanupFacts, o: { now?: numb
 }
 
 /** Every folder a clean-up could take, judged. Sizes are measured for the deletable ones only unless `sizes` asks for all. */
-export async function planFolders(f: CleanupFacts, o: { now?: number; sizes?: 'all' | 'delete' | 'none'; localWork?: (dir: string) => Promise<string | undefined>; published?: Map<string, PublishedRecord[]>; ignoredEvidence?: (repo: string) => Promise<string[] | undefined>; slots?: SlotContext } = {}): Promise<FolderRow[]> {
+export async function planFolders(f: CleanupFacts, o: { now?: number; sizes?: 'all' | 'delete' | 'none'; localWork?: (dir: string) => Promise<string | undefined>; unpushedWork?: (dir: string) => Promise<string | undefined>; published?: Map<string, PublishedRecord[]>; ignoredEvidence?: (repo: string) => Promise<string[] | undefined>; slots?: SlotContext } = {}): Promise<FolderRow[]> {
   const now = o.now ?? Date.now();
   const bad = factsProblem(f, now);
   if (bad) return [{ path: f.root ?? '(no install folder)', kind: 'other', verdict: 'keep', why: bad }];
@@ -355,8 +355,12 @@ export async function planFolders(f: CleanupFacts, o: { now?: number; sizes?: 'a
     for (const top of ['Builds', '.nightly-builds']) for (const e of entries(path.join(sb.path, top))) paths.push(path.join(sb.path, top, e.name));
   }
   const rows: FolderRow[] = [];
+  // A stopped worker whose requests all closed: only commits on no remote or a stash keep its folder (w3656, cleanup.ts unpushedWorkWhy).
+  const unpushed = o.unpushedWork ?? ((d: string) => unpushedWorkWhy(d, 60_000));
   for (const p of paths) {
-    const r = await withGitCheck(judgePath(p, f, now, o.slots), f.root, o.localWork);
+    const judged = judgePath(p, f, now, o.slots);
+    const closedSid = judged.kind === 'session-temp' && judged.verdict === 'delete' ? sessionOfDir(path.basename(p)) : undefined;
+    const r = await withGitCheck(judged, f.root, closedSid ? unpushed : o.localWork);
     rows.push(r);
     const sid = r.kind === 'session-temp' ? sessionOfDir(path.basename(p)) : undefined;
     if (r.verdict === 'keep' && sid && finishedSession(sid, f)) rows.push(...(await finishedRows(p, f, { now, published: o.published, localWork: o.localWork, ignoredEvidence: o.ignoredEvidence })));

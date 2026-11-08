@@ -811,6 +811,8 @@ export class Daemon {
                 low,
                 // Finished workers' clones, Library copies and test output go too, published evidence with them (w2223).
                 finished: this.finishedSessionDirs(),
+                // Stopped workers whose requests all closed: their whole folder goes (w3656).
+                closed: this.closedSessionDirs(),
                 published: readPublished(publishedFile(appDirOfConfig(this.cfg))),
                 // The timed runner's folders stay while one of its runs is in flight (w3502).
                 timedBusy: () => (this.timed?.busy() ? 'a timed run is in flight here' : undefined),
@@ -826,6 +828,7 @@ export class Daemon {
               procs: await this.procs().catch(() => undefined),
               self: [process.pid, process.ppid],
               scope: 'cargo-cap',
+              closed: this.closedSessionDirs(),
             }),
           endStrays: async (strays) => {
             for (const st of strays) {
@@ -965,6 +968,27 @@ export class Daemon {
     if (!this.welcomed || !this.owners) return [];
     const owners = this.owners;
     return [...this.resumable].filter((id) => !owners[id] && !this.sessionLive(id)).map((id) => sessionTempDir(agentTempRoot(this.cfg.tempDir), id));
+  }
+
+  /**
+   * The temp folders of stopped workers whose requests all closed (w3656): an ffa-<session> folder in the agent temp root
+   * whose session is not live, not resumable (no open request waits for it, no check-in) and on no open request (owners).
+   * Empty until the portal's welcome has said both, so nothing is judged closed blind.
+   */
+  private closedSessionDirs(): string[] {
+    if (!this.welcomed || !this.owners) return [];
+    const owners = this.owners;
+    const t = agentTempRoot(this.cfg.tempDir);
+    let names: string[];
+    try {
+      names = fs.readdirSync(t);
+    } catch {
+      return [];
+    }
+    return names
+      .map((n) => /^ffa-([\w-]+)$/i.exec(n)?.[1])
+      .filter((id): id is string => !!id && !owners[id] && !this.resumable.has(id) && !this.sessionLive(id))
+      .map((id) => sessionTempDir(t, id));
   }
 
   /** What a clean-up worker may delete is judged by the ledger's facts, not by a list in its brief (server/cleanupFolders.ts, w1379). */

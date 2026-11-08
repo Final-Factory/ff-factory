@@ -1,9 +1,5 @@
 import { gateSetter, gatesOf, isWith } from '../shared/blockers.ts';
 import { WORK_OPEN, type WorkItem } from '../shared/types.ts';
-import { KEEP_CLOSED_MS } from './work.ts';
-
-/** Closed requests a person may still reopen (server/work.ts updateProblem: done, rejected or cancelled, within KEEP_CLOSED_MS). */
-const REOPENABLE: readonly WorkItem['status'][] = ['done', 'rejected', 'cancelled'];
 
 /**
  * The sessions whose temp folder must survive while they are stopped (w1097): a worker that a request it is on still
@@ -14,17 +10,14 @@ const REOPENABLE: readonly WorkItem['status'][] = ['done', 'rejected', 'cancelle
  * 2026-10-12) ends the process too, and the sweep of w913 emptied those folders (dcf976fc on w1086 lost its "before"
  * clips and a player build in progress). A stalled request counts as open here: the ledger's follow-ups resume it.
  *
- * A closed request counts too while its person may still reopen it (w1575, lothsahn, 2026-10-19: "clean up at end if the
- * worker is done. In the past we've had cleanups delete workspaces a worker came back to and had to do more work in"): a
- * done, rejected or cancelled request can be reopened for KEEP_CLOSED_MS (7 days) after it closed (server/work.ts
- * updateProblem, measured by `updatedAt` as there), and the dispatcher then usually resumes the worker that had it
- * (message_agent: the same session, so the same folder). w1575 itself was closed and reopened at 21:48 the same minute,
- * and went back to its worker. Before, the session sweep emptied a closed request's worker 10 minutes after its process
- * ended, inside that window.
+ * A closed request no longer counts (w3656, lothsahn, 2026-11-08: "once a request closes, why doesn't its temp directory
+ * get cleaned up?"). From w1575 to w3656 a done, rejected or cancelled request kept its worker resumable for 7 days in case
+ * it was reopened, and the folder with it: LothDesktop's tmp reached 166 GB, a closed request's 27 GB clone among it. Its
+ * folder now goes once nothing wrote in it for closedSessionMinutes (installLeftovers.ts closedSessions); a reopen within
+ * that time still finds it, a later one clones again.
  */
-export function resumableSessions(sessionIds: Iterable<string>, work: Iterable<WorkItem>, now = Date.now(), wakes: Iterable<string> = []): string[] {
-  const reopenable = (w: WorkItem) => REOPENABLE.includes(w.status) && now - (Date.parse(w.updatedAt) || 0) < KEEP_CLOSED_MS;
-  const items = [...work].filter((w) => w.status !== 'merged' && (WORK_OPEN.includes(w.status) || w.status === 'stalled' || reopenable(w)));
+export function resumableSessions(sessionIds: Iterable<string>, work: Iterable<WorkItem>, _now = Date.now(), wakes: Iterable<string> = []): string[] {
+  const items = [...work].filter((w) => w.status !== 'merged' && (WORK_OPEN.includes(w.status) || w.status === 'stalled'));
   // w2026: one pass over the requests (the stall profiles of 2026-10-24 had a scan of every request per session here)
   const withThem = new Set<string>(wakes);
   for (const w of items) {
