@@ -717,6 +717,8 @@ export interface BenchPriority {
    * nobody back (bench_queue.py parks them, and queues them again at the back once the mark goes).
    */
   away?: BenchAway;
+  /** w3740: this worker's request is held off game players here after one crashed or dropped the machine (CrashHold). */
+  crashHold?: CrashHoldMark;
 }
 
 /** priorities.json's approved mark (w3186): the grant's id, who approved it (their name), for which request, and its turns. */
@@ -727,6 +729,34 @@ export interface ApprovedBenchMark {
   turns: number;
   turn_min: number;
   used: string[];
+}
+
+/**
+ * w3740 (ben, after w3704 crashed his m3 twice in one request: "you really need to stop crashin git"): a machine went
+ * offline mid-turn under this request's worker within CRASH_HOLD_WINDOW_MS of a game player or exclusive timing ticket of
+ * that worker there, so the request launches no game player on that machine again until a person clears it in their own
+ * turn with their verbatim words (clear_crash_hold). `cleared` ends it; a worker that ran on through the drop (a network
+ * blip, w2474) ends it too, with `clearedBy` saying so.
+ */
+export interface CrashHold {
+  machine: string;
+  /** When the machine dropped. */
+  at: string;
+  /** The worker session cut off there. */
+  worker: string;
+  /** What it ran there last: the ticket's "what" and when the portal last saw it. */
+  why: string;
+  cleared?: string;
+  clearedBy?: string;
+  /** The person's own words that cleared it. */
+  words?: string;
+}
+
+/** w3740: a worker session's crash hold on this machine, as priorities.json carries it for the guard (BenchPriority.crashHold). */
+export interface CrashHoldMark {
+  at: string;
+  why: string;
+  requests: string[];
 }
 
 /**
@@ -2418,6 +2448,8 @@ export interface WorkItem {
   conditional?: ConditionalDecision[];
   /** w3186: longer exclusive bench turns a person approved for this request (server/benchGrants.ts). */
   benchGrants?: BenchGrant[];
+  /** w3740: machines this request's player runs may not touch again until a person says yes (server/crashHolds.ts). */
+  crashHolds?: CrashHold[];
   /**
    * w2217 (w2192 sat 3 h as "the dispatcher has it to decide"): how long it has sat undecided, status `new`. `since`: when
    * the blocker watch first saw it so (its updatedAt then); `reofferedAt`: when FF Factory offered it to the dispatcher again,

@@ -1,3 +1,4 @@
+import { noteBench, recentPlayers, type PlayerSeen } from './crashHolds.ts';
 import { MACHINE_ID, dropStagedToken, enrolledMachines, issueMachineToken, machineTokensFile, promoteStagedToken, readMachineTokens, revokeMachineToken, stageMachineToken, stagedKey, tokenSha } from './machineTokens.ts';
 import { JoinCodes, checkJoinLimits, joinRefusal, machineJoinsFile, type JoinLimits } from './machineJoin.ts';
 import fs from 'node:fs';
@@ -624,7 +625,9 @@ export class MachineManager {
    * Workers cut off mid-turn by a machine's link dropping (w2433, wired by index.ts to the ledger): their requests are
    * marked Blocked on the machine. Returns the workers that got a gate, whose resume the gate's clearing does.
    */
-  workersCutOff?: (machineId: string, sessionIds: string[]) => string[];
+  workersCutOff?: (machineId: string, sessionIds: string[], players?: Record<string, string>) => string[];
+  /** w3740: the last game player or exclusive timing ticket each worker held on each machine (server/crashHolds.ts). */
+  private readonly playerSeen = new Map<string, PlayerSeen>();
   /** Workers the daemon's hello reports still running after a drop (w2474): the wait their cut-off gave them goes. */
   workersLived?: (machineId: string, sessionIds: string[]) => void;
   /** Why the next drop of a machine's link is expected (a forced redeploy, a daemon restart); false: do not resume. */
@@ -2202,7 +2205,10 @@ export class MachineManager {
     // itself (an update over its link after every deploy, a forced redeploy): the daemon is back in seconds and its agents
     // run on (w605), so the gate only flashed the machine's requests Blocked and "went offline" in the ledger every deploy;
     // a worker such a drop did stop is resumed by the cutOff path below instead.
-    const gated = expected === undefined && midTurn.length ? new Set(this.workersCutOff?.(id, midTurn) ?? []) : new Set<string>();
+    // w3740: and a worker whose game player or timed leg ran there in the last half hour holds its requests off players there
+    const players = expected === undefined ? recentPlayers(this.playerSeen.get(id), midTurn, Date.now()) : {};
+    this.playerSeen.delete(id);
+    const gated = expected === undefined && midTurn.length ? new Set(this.workersCutOff?.(id, midTurn, players) ?? []) : new Set<string>();
     const resume = midTurn.filter((sid) => !gated.has(sid));
     if (why === false) this.cutOff.delete(id);
     else if (resume.length) {
@@ -2592,6 +2598,7 @@ export class MachineManager {
         const was = this.stats.get(id)?.personPlay;
         if (!!was !== !!msg.personPlay) console.log(`machine ${id}: ${msg.personPlay ? `${msg.personPlay.who} is playing Final Factory there (pid ${(msg.personPlay.pids ?? []).join(', ')}): held, its agents yield (w1894)` : `the person's game there ended and its grace passed: it takes work again (w1894)`}`);
         this.stats.set(id, stats);
+        if (msg.bench) noteBench(this.playerSeen.get(id) ?? this.playerSeen.set(id, new Map()).get(id)!, msg.bench, Date.now());
         this.noteCpu(id, msg.stats.loadPct);
         emit({ type: 'machine_stats', id, stats });
         if (Array.isArray(msg.benchWarnings) && msg.benchWarnings.length) this.onBenchWarnings?.(id, msg.benchWarnings);

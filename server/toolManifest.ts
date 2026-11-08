@@ -61,6 +61,7 @@ export const TOOL_MANIFEST = {
   decide_work: { group: 'ledger', kinds: [D], always: [D] },
   conditional_decisions: { group: 'ledger', kinds: [P] },
   grant_bench_turn: { group: 'ledger', kinds: [P] },
+  clear_crash_hold: { group: 'ledger', kinds: [P] },
   // w3730: a person stops a worker's bench ticket, as the dashboard's Stop button does.
   stop_bench_ticket: { group: 'machines', kinds: [P] },
   read_work: { group: 'ledger', kinds: [W] },

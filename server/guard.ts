@@ -18,6 +18,7 @@ import { checkSearchTool, checkWholeDiskSearch, type WholeDiskContext } from './
 import os from 'node:os';
 import path from 'node:path';
 import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
+import type { CrashHoldMark } from '../shared/types.ts';
 
 /**
  * A PreToolUse hook that runs even in bypassPermissions mode (canUseTool does not).
@@ -136,6 +137,12 @@ export function sandboxGuard(opts: {
    */
   personBusy?: () => string | undefined;
   /**
+   * w3740: while this worker's request is held off game players here after the machine dropped under its player or timed
+   * leg, the hold (machine/benchLock.ts readCrashHold), else undefined. A game player started by any route is refused then
+   * (checkCrashHoldLaunch). Absent: not checked.
+   */
+  crashHeld?: () => CrashHoldMark | undefined;
+  /**
    * w1829: while another worker's timed run keeps this sandbox's editor closed, the refusal for a Unity MCP call into it
    * (machine/benchTurn.ts closedRefusalFor), else undefined. Absent: not checked.
    */
@@ -209,6 +216,7 @@ export function sandboxGuard(opts: {
         checkTimedSleep(cmd, { timeoutMs: typeof args.timeout === 'number' ? args.timeout : undefined, background: args.run_in_background === true }) ??
         (opts.benchBusy ? checkBenchBusyLaunch(cmd, opts.benchBusy) : undefined) ??
         (opts.personBusy ? checkPersonPlayLaunch(cmd, opts.personBusy) : undefined) ??
+        (opts.crashHeld ? checkCrashHoldLaunch(cmd, opts.crashHeld) : undefined) ??
         checkRawUnityBatch(cmd, cloneSpellings) ??
         // w3703: no full clone of the game repo (its LFS files and Library copies filled V: and F:); players build in the sandbox.
         checkGameRepoClone(cmd, { cwd: input.cwd || opts.sandboxPath, env: opts.env, gameRepos: opts.gameRepos ?? [], sandboxPath: opts.sandboxPath }) ??
@@ -412,6 +420,25 @@ export function checkPersonPlayLaunch(cmd: string, busy: () => string | undefine
     `Refused (w1894): ${held}. No game player or screen capture starts on this machine while a person plays the game ` +
     'here: it would take their frames. Hand the work back to your orchestrator for another machine, or do what needs no ' +
     'player meanwhile; the hold ends by itself (list_machines says when).'
+  );
+}
+
+/**
+ * w3740 (ben: "m3 crashed again. you really need to stop crashin git"): after this machine went offline mid-turn under
+ * this worker's game player or timed leg, a command that starts a game player here, by its binary or through
+ * `player_slots.py launch`, is refused until a person clears the hold (clear_crash_hold, server/crashHolds.ts). `held` is
+ * read only for such a command. Exported for tests.
+ */
+export function checkCrashHoldLaunch(cmd: string, held: () => CrashHoldMark | undefined): string | undefined {
+  if (!checkPersonPlayLaunch(cmd, () => 'x')) return undefined;
+  const h = held();
+  if (!h) return undefined;
+  return (
+    `Refused (w3740): crash hold. This machine went offline at ${h.at.slice(11, 16)}Z while ${h.requests.join(', ')}'s worker ran ${h.why}, so ` +
+    `FF Factory counts it as a crash of a person's machine: no game player starts here for ${h.requests.join(', ')} until a person says yes. ` +
+    "Collect and publish what the crash left (panic, gpuEvent and WindowServer reports, hang reports, Player.log, each leg's times), " +
+    "then ask the machine's person with waiting_on_person whether to run here again; their orchestrator clears the hold with their words " +
+    '(clear_crash_hold). Work that needs no player goes on meanwhile (evidence-gate checklists/crash-repro.md).'
   );
 }
 

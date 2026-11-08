@@ -375,3 +375,17 @@ test('w1923: the worker prompt says every timing measurement holds an exclusive 
   assert.match(PROCESS_HYGIENE, /Every timing measurement holds an exclusive bench ticket on its machine, not only/);
   assert.match(PROCESS_HYGIENE, /bench_queue\.py timed --what/);
 });
+
+test('w3740: crash-repro briefs state their budget (stop after one crash), and every worker is told one crash of a person\'s machine ends its runs there', async (t) => {
+  const { agents, sessions } = world(t);
+  const { CRASH_BUDGET, PROCESS_HYGIENE } = await import('./agents.ts');
+  const brief = (info: SessionInfo) => (agents.orchestratorOptions(info) as { systemPrompt: { append: string } }).systemPrompt.append;
+  void sessions;
+  const ben = agents.orchestrators.personalFor(BEN).info;
+  assert.match(brief(ben), /`read_rules machines` before a crash-repro brief/);
+  assert.match(brief(sessions.get(agents.dispatcherId!).info), /crash repros: `read_rules machines` before/);
+  assert.match(CRASH_BUDGET, /states its budget: stop after one crash, hang or reboot of it/);
+  assert.match(CRASH_BUDGET, /clear_crash_hold/);
+  assert.match(PROCESS_HYGIENE, /One crash of a person's machine ends your runs there \(evidence-gate `checklists\/crash-repro\.md`\)/);
+  assert.match(PROCESS_HYGIENE, /A guard that killed the player or a cool-down that ran out is not a yes/);
+});
