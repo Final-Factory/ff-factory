@@ -78,7 +78,7 @@ import { cpuSampler, LOAD_GATES, LoadGate, readLoadGateFile, winSuspendScript, w
 import { askPlayerToQuit, BenchTurn, closedDetail, holderSandboxes, writeClosedFile, type Holder } from './benchTurn.ts';
 import { GRACE_MIN, PersonPlay, personEnds, personHolderText, personHoldText, personTicket, priorityOf, setPriorityOf, treeOf, type PersonPlaySettings } from './personPlay.ts';
 import { benchTicketFor, queueTickets, type QueueTicket } from './benchQueue.ts';
-import { holdsOwnTicket, revokeTicket } from './benchRevoke.ts';
+import { holdsOwnTicket, resumeRevokes, revokeTicket } from './benchRevoke.ts';
 import { readBenchHours } from './benchHours.ts';
 import { TimedRunner } from './timedRunner.ts';
 import { timedRunFromMachine } from './timedRunPack.ts';
@@ -1159,7 +1159,7 @@ export class Daemon {
       log(`host guard: watching ${root} every ${s.pollSeconds} s (remount through ffsb-helper-mount), disks ${[root, ...s.hostDiskPaths].join(', ')}${s.reapBrowsersAfterHours > 0 ? `, reaping browsers over ${s.reapBrowsersAfterHours} h` : ''}`);
     };
     if (this.guardEffects) go(this.guardEffects);
-    else void realGuardEffects().then(go, (e) => log(`host guard: could not start: ${(e as Error).message}`));
+    else void realGuardEffects(this.procs).then(go, (e) => log(`host guard: could not start: ${(e as Error).message}`));
   }
 
   start() {
@@ -1170,6 +1170,14 @@ export class Daemon {
       log(`agent hosts: could not look for them: ${(e as Error).message}`);
     }
     this.startGuard();
+    // w3731: a revoke whose grace timer the daemon before this one held still ends its helper if the helper ignored it.
+    if (this.cfg.root) {
+      try {
+        resumeRevokes(this.cfg.root, { log: (line) => log(line) });
+      } catch (e) {
+        log(`bench revoke: could not rescan the queue at start: ${(e as Error).message}`);
+      }
+    }
     this.connect();
     // Claude Code writes every tool result to its transcript before anything of ours sees it (w1688): masked in place as it
     // lands, and looked back through for each secret value learnt (server/cliScrub.ts). FF_CLI_SCRUB=off (the tests) skips it.

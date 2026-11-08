@@ -12,6 +12,7 @@ import { checkMainCloneShell, flatten, normPath, pathSpellings, spellingsRegex, 
 import { checkTiming } from './timingGuard.ts';
 import { checkGameRepoClone } from './cloneGuard.ts';
 import { checkTimedAsk, type TimedAskState } from './timedAsk.ts';
+import { checkDetachedBench } from './benchDetachGuard.ts';
 import { checkChecksRead, checkTimedSleep } from './waitGuard.ts';
 import { checkSearchTool, checkWholeDiskSearch, type WholeDiskContext } from './wholeDiskSearch.ts';
 import os from 'node:os';
@@ -221,6 +222,8 @@ export function sandboxGuard(opts: {
         checkGameRepoClone(cmd, { cwd: input.cwd || opts.sandboxPath, env: opts.env, gameRepos: opts.gameRepos ?? [], sandboxPath: opts.sandboxPath }) ??
         timing(tool, args, input.cwd || opts.sandboxPath) ??
         (opts.timedAsk ? checkTimedAsk(cmd, opts.timedAsk()) : undefined) ??
+        // w3731: no bench ticket under nohup, setsid, disown or & (server/benchDetachGuard.ts): run_in_background instead.
+        checkDetachedBench(cmd) ??
         checkWholeDiskSearch(cmd, disk(input.cwd || opts.sandboxPath)) ??
         (opts.workerRoot ? checkOutsideRootDelete(cmd, { root: opts.workerRoot, cwd: input.cwd || opts.sandboxPath, allow: [opts.sandboxPath], saveTag }) : undefined) ??
         (tool === 'PowerShell' && opts.workerRoot ? checkGitBashPathInPowerShell(cmd, opts.workerRoot) : undefined) ??
