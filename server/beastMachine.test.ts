@@ -513,3 +513,44 @@ test('w536: a daemon refuses every agent in its main clone, and checks a standin
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('w3626: the daemon refuses a switch while a night runs in the sandbox or a unity-slot run holds its slot, and switches once neither does', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-dhold-'));
+  try {
+    const d = new Daemon({ portalUrl: 'http://127.0.0.1:1', id: 'lothdesktop', token: 't', repoPath: path.join(dir, 'FinalFactory'), appDir: path.join(dir, 'app'), root: dir, maxEventsFile: null, unitySlotsDir: path.join(dir, 'slots') }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES);
+    const sbPath = path.join(dir, 'sandboxes', 'slot1');
+    const switched: string[] = [];
+    let reqs: unknown[] = [];
+    const inside = d as unknown as { send(m: unknown): void; onMessage(m: unknown): void; pool: { list(): unknown[]; switch(id: string, branch: string): Promise<unknown> }; slots: { holds(): Promise<unknown> } };
+    inside.pool.list = () => [{ id: 'slot1', path: sbPath }];
+    inside.pool.switch = async (id, branch) => (switched.push(`${id}:${branch}`), { from: 'nightly/x', to: branch, notes: [] });
+    inside.slots.holds = async () => ({ reqs, unity: [] });
+    const sent: { type: string; ok?: boolean; error?: string }[] = [];
+    inside.send = (m) => sent.push(m as (typeof sent)[number]);
+    const ask = async (id: string) => {
+      inside.onMessage({ type: 'switch', id, branch: 'w3610-fix', sandbox: 'slot1', callerSessionId: 'w3610-worker' });
+      await new Promise((r) => setTimeout(r, 50));
+      return sent.find((m) => (m as { id?: string }).id === id)!;
+    };
+    // The night (w3598's attempt 2) runs in slot1: its shell is this test's own process, so it is alive.
+    fs.mkdirSync(path.join(dir, 'nightly-history', 'state'), { recursive: true });
+    const state = path.join(dir, 'nightly-history', 'state', '2026-11-08.json');
+    fs.writeFileSync(state, JSON.stringify({ tag: '2026-11-08', date: '2026-11-08', status: 'running', started: Date.now() / 1000, attempt: 2, step: 'build', request: 'w3598', builds: path.join(sbPath, 'Builds', 'cache'), pid: process.pid }));
+    const n = await ask('s1');
+    assert.equal(n.ok, false);
+    assert.match(n.error!, /^switch refused: the nightly run of 2026-11-08 \(request w3598, attempt 2, step build\) runs in it/);
+    // The night is done; its batch build's slot is still held for slot1.
+    fs.writeFileSync(state, JSON.stringify({ date: '2026-11-08', status: 'done', request: 'w3598', builds: path.join(sbPath, 'Builds', 'cache') }));
+    reqs = [{ id: 'b1', holder: 'sandbox:slot1', count: 1, pid: 40100, label: 'nightly build f19f2af5', session: 'w3598-worker', createdAt: Date.now(), grantedAt: Date.now() }];
+    const b = await ask('s2');
+    assert.equal(b.ok, false);
+    assert.match(b.error!, /the unity-slot run "nightly build f19f2af5" holds 1 Unity slot\(s\) for it \(holder sandbox:slot1, session w3598-worker, pid 40100/);
+    assert.deepEqual(switched, [], 'nothing was switched while either held the tree');
+    reqs = [];
+    assert.equal((await ask('s3')).ok, true);
+    assert.deepEqual(switched, ['slot1:w3610-fix']);
+    d.shutdown();
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

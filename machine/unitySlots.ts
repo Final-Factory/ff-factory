@@ -742,6 +742,15 @@ export class UnitySlots {
     return g.length ? `; held by ${g.map((x) => `"${x.label}" (${x.count})`).join(', ')}` : '';
   }
 
+  /**
+   * The requests of a fresh look (granted, waiting and refused) and the Unity processes now running: what switch_branch
+   * reads to refuse a switch under a batch build (w3626, machine/switchHolds.ts).
+   */
+  async holds(): Promise<{ reqs: SlotRequest[]; unity: UnityProcess[] }> {
+    await this.tick();
+    return { reqs: this.last?.reqs ?? [], unity: unityProcesses(await this.d.procs(), this.d.platform) };
+  }
+
   /** The counts as one line (shared/fleet.ts unitySlotsLine), or undefined before the first look. */
   line(): string | undefined {
     const r = this.report();
