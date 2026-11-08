@@ -1961,6 +1961,26 @@ linked over its wait on that computer (`linkWorker`: that start is the request's
 its part (`doneMarkers`, `workerEnded`, `recheckDone`). The request then closes on that DONE as usual. A stopped worker
 on a computer that runs keeps the w1972 rule.
 
+**A pair run's leg that goes on without DONE after the host's DONE is asked once, then the run closes** (w3708). On
+2026-11-08 w3523 (a pair run for w3498) had its host leg c5e722b7 report "For w3498:" and say DONE at 11:06 UTC; its
+client leg 4f65cc5c then ended six times without DONE (11:11, 12:11, 13:31, 14:30 and twice at 15:57 UTC), each logged
+"its other workers said DONE, but it stays open: 4f65cc5c still has work on it: the request is blocked on worker
+4f65cc5c", until an orchestrator closed it by hand at about 20:00 UTC. Three things held it: the `worker` gate the host's
+own report had set on the client (w2476) outlived the host's DONE; `pendingOn` counted that gate on the client as the
+client's own pending work; and nothing told the client the run was over (the legs' brief says "Every leg ends with DONE
+once the run is over", but the host's DONE reached no other leg, and the host's last report still offered a run B). Now
+(`server/orchestrators.ts`):
+- a worker's DONE drops the `worker` gates it set (`dropWorkerWaitsOf`), and a gate on a worker is never that worker's own
+  pending work (`pendingOn`);
+- the host leg's DONE (leg 1, not a LEG DONE) tells every other leg still on the run, once, that the run is over and to end
+  with DONE (`tellLegsRunOver`; `pair.afterHost[sid].told`);
+- a leg that then ends with work pending, or holds the run `PAIR_WRAP_UP_MS` (1 h) after the host's DONE without ending
+  (the ledger's 5-minute pass, `pairLegsOverdue`), is reminded once (`prompted`); at its next end after a turn since the
+  reminder (the same end logged twice is not one), or 1 h after the reminder, the run closes on the host's report with
+  "Leg X did not say DONE after the host's DONE and one reminder: <its state>" (`pairLegLingers`, `closeOnDone`, which
+  tells the request it served). Where the host's report cannot close it (`doneProblem`: an open pull request, an
+  unfinished line), the dispatcher is told once to decide (`escalated`) instead. Tests: `server/ledgerSweep.test.ts`, "w3708".
+
 **Offline means offline past the blip grace, not a daemon's update** (w2959). PR #810's rollout on 2026-11-03 dropped
 biscuit, lothdesktop and m5 for about 10 s each (journal: 12:38:37, 12:40:14, 12:41:26 UTC). Each drop marked that
 machine's workers stopped, `workerEnded` ran the sweep against 00b524a7's earlier DONE, and every one of them was taken
