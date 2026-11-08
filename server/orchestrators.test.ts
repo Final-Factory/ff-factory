@@ -6984,6 +6984,24 @@ test('w3530: a Queued pair run gets its legs while single work arrives as sandbo
   agents.placement = placement;
 });
 
+test('w3588: pairWants names each computer where one free sandbox starts a Queued pair run, for placeAgain to yield it to the pair', async (t) => {
+  const env = await twoComputers(t);
+  const { store, agents } = env;
+  // 2026-11-08 05:34:53Z: w3562 (high) held biscuit for one leg; beast/slot1 freed for the other, and a check-in took it back.
+  putRequests(store, [{ id: 'w2', by: BEN, status: 'queued', priority: 'high', queuedFor: { at: T0 }, pair: { legs: 2 } }]);
+  const places = agents.places.bind(agents);
+  // beast has room and holds the pair's first leg; pc is full: a sandbox freed on pc starts the pair.
+  agents.places = () => places().map((p) => (p.id === 'pc' ? { ...p, freeSandboxes: 0, sandboxes: p.maxSandboxes } : p));
+  assert.deepEqual(agents.pairWants(), [{ work: 'w2', priority: 'high', machines: ['pc'] }]);
+  // A pair the computers that are up could never complete wants nothing (pairCanFinish, w3530).
+  agents.places = () => places().map((p) => (p.id === 'pc' ? { ...p, freeSandboxes: 0, sandboxes: p.maxSandboxes, online: false } : p));
+  assert.deepEqual(agents.pairWants(), []);
+  // Started, or no pair Queued: nothing.
+  agents.places = () => places().map((p) => (p.id === 'pc' ? { ...p, freeSandboxes: 0, sandboxes: p.maxSandboxes } : p));
+  store.work.get('w2')!.status = 'active';
+  assert.deepEqual(agents.pairWants(), []);
+});
+
 test('w1995: a small computer\'s last free sandbox is held for the timed work Queued for it: other work starts elsewhere, a pair leg only when no other computers hold the pair', async (t) => {
   const env = await twoComputers(t);
   const { store, agents, o, dispatcher, call } = env;

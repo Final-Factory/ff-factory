@@ -22,7 +22,7 @@ import { describeAutoIntake } from './ffboxAutoIntake.ts';
 import { agentState, agentStateText, holdsItsPlace, holdsSandbox, sortAgents, sortPlaces } from '../shared/agentState.ts';
 import { idleClosedPart } from './liveIdle.ts';
 import { topPriority, type Pressure } from './priorityReclaim.ts';
-import { HOLD_PLACE_MS, LIVE_HOLD_MS, PlaceAgain, RELEASE_AFTER_MS, RELEASE_WAKE_NOTE, handOverBranch, occupies, releasedOn } from './placeAgain.ts';
+import { HOLD_PLACE_MS, LIVE_HOLD_MS, PlaceAgain, RELEASE_AFTER_MS, RELEASE_WAKE_NOTE, handOverBranch, occupies, releasedOn, type PairWant } from './placeAgain.ts';
 import { agentQueueAll, agentQueueFacts, editorSlotRefusal, queueWaitsAll } from '../shared/queueWaits.ts';
 import { pairWaitLine, pairWaitNotice } from './pairRuns.ts';
 import { WORK_LIVE_LABEL, WORK_LIVE_STATES, asksAPerson, benchWaitOf, lastOpenLine, liveCounts, otherWorkWait, outsideDeclared, outsideWaitOf, ownWorkWait, noTimedWaitOf, orchestratorAskIn, restartWait, personWaitIn, reportWaitKey, holdsOf, servedBy, workLiveAll, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
@@ -894,6 +894,7 @@ export class Agents {
       saveWork: (m, sb, branch, message, sessionId) => machines.saveWork(m, sb, branch, message, sessionId ? this.githubTokenFor(m, sessionId, `saving ${sessionId}'s work`) : undefined),
       // w3507: game sandboxes go out by priority (server/priorityReclaim.ts).
       pressure: () => this.reclaimPressure(),
+      pairWants: () => this.pairWants(),
       priorityOf: (info) => topPriority(this.openWorkOf(info).map((w) => w.priority)),
       reclaimHold: (info, sb) => this.reclaimHold(info, sb),
       requestsOf: (info) => this.openWorkOf(info).map((w) => w.id),
@@ -3673,6 +3674,29 @@ export class Agents {
       const heldWhy = [...held].filter(([, why]) => why).map(([id, why]) => `${id}: ${why.startsWith(`${id}'s `) ? why.slice(id.length + 3) : why}`);
       return { work: w.id, title: w.title, priority: w.priority, room, machines, preemptOn, ...(heldWhy.length ? { held: heldWhy } : {}) };
     });
+  }
+
+  /**
+   * w3588: each Queued pair run with the computers where one free sandbox lets it start (pairPlan read as if that computer
+   * alone had one free, as reclaimPressure's freedOn reads it), for placeAgain: a released worker of no higher priority
+   * yields such a sandbox to the pair rather than holding it again for its check-in. reclaimPressure leaves pairs out, so
+   * before w3588 a check-in re-hold always won: beast/slot1, released at 05:34:53Z on 2026-11-08 with w3562 (high) holding
+   * biscuit for its other leg, went back to d3f81fb1 at 05:35:15Z.
+   */
+  pairWants(): PairWant[] {
+    if (![...this.store.work.values()].some((p) => p.pair && !p.pair.started && p.status === 'queued')) return [];
+    const places = this.places();
+    const prefs = this.placement();
+    const out = new Map<string, PairWant>();
+    for (const c of places) {
+      const ps = places.map((p) => (p.id === c.id ? { ...p, freeSandboxes: Math.max(1, p.freeSandboxes) } : p));
+      const held = this.pairPlan({ ...roomNow(ps, prefs), since: {} }).get(c.id);
+      if (!held || held.short) continue;
+      const want = out.get(held.pair.id) ?? { work: held.pair.id, priority: held.pair.priority, machines: [] };
+      want.machines.push(c.id);
+      out.set(held.pair.id, want);
+    }
+    return [...out.values()];
   }
 
   /**

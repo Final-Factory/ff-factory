@@ -1797,7 +1797,15 @@ LothDesktop and Beast, not just when BEAST is full").
     and of about ten Queued pairs one ran (w3347 Queued 17 h, w3392 13 h). A younger pair's `start_agent` is refused on a
     computer held for an older one, and FF Factory's own timed-leg start (w2055) does not take a held sandbox either.
     Urgent single work still beats a normal pair (a person's "Start now"); single work of the pair's priority waits behind
-    it only if it is younger. A released worker resuming its own work (PlaceAgain, w640) is not held off: its work began first.
+    it only if it is younger. A released worker resuming its own work (PlaceAgain, w640) is not held off a computer the
+    waiting pair holds: its work began first. But a sandbox that would start the pair it yields (w3588, `Agents.pairWants`,
+    read once a placeAgain pass as `pressure` is, and `yieldsTo`): a released worker of no higher priority than the pair
+    neither claims it for a queued message nor holds it again for a near check-in, and its Queued line says the pair takes it
+    first. `reclaimPressure` leaves pairs out, so before w3588 the check-in re-hold always won: beast/slot1, released at
+    05:34:53Z on 2026-11-08 with w3562 (high) holding biscuit for its other leg, went back to d3f81fb1 at 05:35:15Z, and the
+    pair waited until 06:07Z, when beast/slot1 and biscuit/slot2 freed in the same pass. The plan holds nothing in memory: it
+    is read from the ledger and each computer's room every time, so a portal restart keeps it (biscuit was held for w3562 at
+    05:21Z and again at 06:03Z around the 05:22Z restart; the lapse time moves later, as the room's start is read again).
   - **Bounded** (w1983, w3530). A hold lapses `PAIR_HOLD_MS` (45 min since w3530, 20 min before) after that computer's room
     began or the pair was Queued, whichever is later, while the pair still cannot start (its refusal says when: "the hold
     lapses at 04:12 UTC"). 20 min was shorter than the gaps between frees on 2026-11-08 (23 and 37 min), so no hold met its
