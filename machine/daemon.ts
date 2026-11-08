@@ -2883,11 +2883,17 @@ export class Daemon {
         this.entries.delete(msg.sessionId);
         this.awake();
         // Its own temp folder goes with it (docs/self-recovery.md "Per-agent hygiene"), unless it became Git Bash's /tmp (w603).
+        // /tmp is looked up again first: it moves to the first bash's TMP whenever the user's MSYS processes all ended, and a
+        // value up to 5 minutes old removed a folder that had just become /tmp (w3559: every bash on LothDesktop, ffu's CI
+        // runners included, lost /tmp at 2026-11-08 03:30Z until the 5-minute check made it again at 03:34Z).
         const temp = sessionTempDir(agentTempRoot(this.cfg.tempDir), msg.sessionId);
         const same = (a: string, b: string) => (process.platform === 'win32' ? path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase() : path.resolve(a) === path.resolve(b));
-        if (!this.bashTmp || !same(this.bashTmp, temp)) {
-          void fs.promises.rm(temp, { recursive: true, force: true, maxRetries: 2 }).catch(() => undefined);
-        }
+        void this.ensureBashTmp()
+          .catch(() => undefined)
+          .then(() => {
+            if (!this.bashTmp || !same(this.bashTmp, temp)) return fs.promises.rm(temp, { recursive: true, force: true, maxRetries: 2 });
+          })
+          .catch(() => undefined);
         return;
       }
       case 'mode':
