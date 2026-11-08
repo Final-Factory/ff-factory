@@ -97,7 +97,7 @@ import { WAIT_LINE_CHARS, summaryBrief, summaryText, waitSummary } from '../shar
 import { isMyMove, waitingItemOf } from '../shared/waiting.ts';
 import { checkAsks } from '../shared/questionCard.ts';
 import { DECISIONS, attachmentsNote, describeItem, handoverNote, isFor, isOpen, livePair, pairLegOf, ledgerOrder, names, overlapLine, priorityThenAge, requestAsFiled, requestLineRule, startProblem } from './work.ts';
-import { minPriorityText, needsBuild, needsLive, needsOf, needsTimed, pairText, cargoShortOf, isCargoRepo, PAIR_HOLD_MS, PAIR_MAX_LEGS, TIMED_HOLD_MS } from '../shared/capacity.ts';
+import { minPriorityText, needsBuild, needsLive, needsOf, needsTimed, pairRoom, pairText, cargoShortOf, isCargoRepo, PAIR_HOLD_MS, PAIR_MAX_LEGS, TIMED_HOLD_MS } from '../shared/capacity.ts';
 import { BUILD_PLAN_DOC, BuildPlans, NOT_RELEASE, type BuildPlan, type SeatResult } from './buildPlans.ts';
 import { SEAT_GRACE_MS, seatAction, seatNotice } from './releaseSeat.ts';
 import { RELEASE_RULES } from './releaseLanes.ts';
@@ -574,7 +574,10 @@ export function mainCloneGrantBrief(c: { path: string; requests: string[]; by: s
 const timedKind = timedKindOf;
 
 /** w2358: one run's computers, room and hold answers for heldFor (Agents.heldFor). */
-type HoldMemo = { places?: Computer[]; facts?: RoomNow; why: Map<string, string | undefined> };
+type HoldMemo = { places?: Computer[]; facts?: RoomNow; plan?: PairPlan; why: Map<string, string | undefined> };
+
+/** Agents.pairPlan: each computer with room a Queued pair run holds, to the pair and, while it waits for more legs, why it cannot start. */
+type PairPlan = Map<string, { pair: WorkItem; short?: string }>;
 
 /**
  * w2414: a queued message's text as it goes with a room move. Its attachments (a timed run's logs among them) were copied
@@ -3862,6 +3865,12 @@ export class Agents {
     if (this.legStarting.has(w.id) || [...this.legStarting.values()].includes(machine)) return false;
     // w2548: never beside a start_agent of it, nor once it has a worker (the pass may hold an older copy of the request).
     if (this.agentStarting.has(w.id) || this.workersOn(this.store.work.get(w.id) ?? w).length) return false;
+    // w3530: an idle computer's last free sandbox that a Queued pair run holds is not the timed leg's (a pre-empt makes its own room).
+    const held = moves.length ? undefined : this.heldFor(machine, w);
+    if (held) {
+      console.log(`timed leg (w2055): ${w.id} not started on ${machine}: ${held.split(/\. Start /)[0]} (w3530)`);
+      return false;
+    }
     this.legStarting.set(w.id, machine);
     void this.runTimedLegStart(w, machine, why, moves)
       .catch((e) => {
@@ -4771,6 +4780,9 @@ When a person asked for a design or an analysis (a profile, an investigation, a 
       // w1995: a small computer's last free sandbox goes to the timed work Queued for it, while other computers hold the pair.
       const timedHold = this.timedHoldProblem(l.machine, w, !!w.pair?.timed || !!timedKind(needsTimed(w, a.prompt)));
       if (timedHold) throw new Error(`${leg}: ${timedHold} Nothing was started.`);
+      // w3530: a computer held for an older pair run of its priority (or a higher one) is that pair's, not a younger pair's.
+      const pairHold = this.pairHoldProblem(l.machine, w);
+      if (pairHold) throw new Error(`${leg}: ${pairHold} Nothing was started.`);
       if (m?.platform === 'darwin' && i > 0) {
         throw new Error(`${leg}: ${l.machine} is a Mac, and a Mac refuses a multiplayer client (w665): in a pair run a Mac only hosts (leg 1, sandbox; w2282). Nothing was started.`);
       }
@@ -4858,21 +4870,49 @@ When a person asked for a design or an analysis (a profile, an investigation, a 
     // w1983: work that can run only here (lothsahn's "Move one timed run to LothLaptop", w1789) is not sent elsewhere.
     const needs = w?.queuedFor?.needs;
     if (needs?.length && needs.every((n) => placeId(n) === place.id)) return undefined;
+    const facts = memo ? (memo.facts ??= this.roomFacts()) : this.roomFacts();
+    const plan = memo ? (memo.plan ??= this.pairPlan(facts)) : this.pairPlan(facts);
+    const held = plan.get(place.id);
+    if (!held || held.pair.id === w?.id) return undefined;
+    const { pair, short } = held;
     const rank = (p: WorkPriority | undefined) => WORK_PRIORITIES.indexOf(p ?? 'normal');
     const since = (x: WorkItem) => Date.parse(x.queuedFor?.at ?? x.createdAt) || 0;
-    const facts = memo ? (memo.facts ??= this.roomFacts()) : this.roomFacts();
-    const pair = [...this.store.work.values()]
-      .filter((p) => p.pair && !p.pair.started && p.status === 'queued' && p.id !== w?.id)
-      .filter((p) => rank(p.priority) >= rank(w?.priority) && (!w || since(p) <= since(w) || rank(p.priority) > rank(w.priority)))
-      .filter((p) => roomForWork(facts, { ...p, pair: { ...p.pair!, legs: 1 } }, p.queuedFor?.needs).ids.includes(place.id))
-      .sort((x, y) => rank(y.priority) - rank(x.priority) || since(x) - since(y))[0];
-    if (!pair) return undefined;
-    const room = roomForWork(facts, pair, pair.queuedFor?.needs);
-    // w1983: held only PAIR_HOLD_MS from when this computer's room began, while the pair still cannot start.
+    // Work of higher priority than the pair goes first (urgent work: a person's "Start now"), and so does older work of its priority.
+    if (w && (rank(pair.priority) < rank(w.priority) || (rank(pair.priority) === rank(w.priority) && since(pair) > since(w)))) return undefined;
+    // w1983, w3530: a pair still short of legs holds PAIR_HOLD_MS from when this computer's room began or the pair was Queued.
     const freeSince = facts.since?.[`game:${place.id}`];
-    const lapses = freeSince !== undefined ? freeSince + PAIR_HOLD_MS : undefined;
-    if (room.short && lapses !== undefined && (this.orchestrators?.now().getTime() ?? Date.now()) >= lapses) return undefined;
-    return `${place.id}'s last free sandbox is held for ${pair.id} "${pair.title.slice(0, 80)}" (${pair.priority}, Queued since ${(pair.queuedFor?.at ?? pair.createdAt).slice(11, 16)} UTC), ${pairText(pair.pair!)}, which starts only when that many computers have room at once (w1945)${room.short ? `: ${room.short}${lapses !== undefined ? `; the hold lapses at ${new Date(lapses).toISOString().slice(11, 16)} UTC (w1983)` : ''}` : `: it can start now, start its legs first`}. Start ${w ? w.id : 'this'} on another computer; work of higher priority than the pair (a person's "Start now" makes it urgent) goes first.`;
+    const lapses = freeSince !== undefined ? Math.max(freeSince, since(pair)) + PAIR_HOLD_MS : undefined;
+    if (short && lapses !== undefined && (this.orchestrators?.now().getTime() ?? Date.now()) >= lapses) return undefined;
+    return `${place.id}'s last free sandbox is held for ${pair.id} "${pair.title.slice(0, 80)}" (${pair.priority}, Queued since ${(pair.queuedFor?.at ?? pair.createdAt).slice(11, 16)} UTC), ${pairText(pair.pair!)}, which starts only when that many computers have room at once (w1945)${short ? `: ${short}${lapses !== undefined ? `; the hold lapses at ${new Date(lapses).toISOString().slice(11, 16)} UTC (w1983)` : ''}` : `: it can start now, start its legs first`}. Start ${w ? w.id : 'this'} on another computer; work of higher priority than the pair (a person's "Start now" makes it urgent) goes first.`;
+  }
+
+  /**
+   * Which Queued pair run each computer with room is held for (w3530), from `facts`: first every pair that can start now on
+   * computers no earlier pair took, by priority and then the oldest, takes one computer per leg (pairRoom's pick: a Mac only
+   * hosts, a cross-OS pair spans two systems); then the first pair that cannot start but fits a computer left takes up to its
+   * legs less one of them, at most one a Mac, while it waits for the last. Only that one pair waits holding: before w3530
+   * each computer was held for the oldest pair that fit it alone, so on 2026-11-08 beast waited for w3460 (timed, no m5) and
+   * m5 for w3469, both lapsed, and of about ten Queued pairs one ran (w3347 Queued 17 h, w3392 13 h). A pair that could start
+   * on computers the waiting one holds takes them: one pair never holds room that others could complete with.
+   */
+  pairPlan(facts: RoomNow): PairPlan {
+    const rank = (p: WorkPriority | undefined) => WORK_PRIORITIES.indexOf(p ?? 'normal');
+    const since = (x: WorkItem) => Date.parse(x.queuedFor?.at ?? x.createdAt) || 0;
+    const pairs = [...this.store.work.values()].filter((p) => p.pair && !p.pair.started && p.status === 'queued').sort((x, y) => rank(y.priority) - rank(x.priority) || since(x) - since(y) || x.id.localeCompare(y.id));
+    const plan: PairPlan = new Map();
+    const fits = (p: WorkItem) => roomForWork(facts, { ...p, pair: { ...p.pair!, legs: 1 } }, p.queuedFor?.needs).ids.filter((id) => !plan.has(id));
+    for (const p of pairs) for (const id of pairRoom(p, fits(p), facts.fit).pick ?? []) plan.set(id, { pair: p });
+    const started = new Set([...plan.values()].map((x) => x.pair.id));
+    for (const p of pairs) {
+      if (started.has(p.id)) continue;
+      const ids = fits(p);
+      if (!ids.length) continue;
+      const macs = ids.filter((id) => facts.fit?.[id]?.platform === 'darwin');
+      const short = pairRoom(p, ids, facts.fit).short;
+      for (const id of [...macs.slice(0, 1), ...ids.filter((id) => !macs.includes(id))].slice(0, p.pair!.legs - 1)) plan.set(id, { pair: p, short });
+      break;
+    }
+    return plan;
   }
 
   /**

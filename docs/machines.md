@@ -1784,8 +1784,21 @@ LothDesktop and Beast, not just when BEAST is full").
     pair. A computer with two free sandboxes still takes single work, and work of higher priority goes first (a person's
     "Start now" makes a request urgent). Without this each sandbox that frees goes to the next single request, and a pair,
     which needs two at the same moment, waits for a coincidence.
-  - **Bounded** (w1983). A hold lapses `PAIR_HOLD_MS` (20 min) after that computer's room began while the pair still cannot
-    start (its refusal says when: "the hold lapses at 04:12 UTC"), and work whose needs name that computer alone is never
+  - **One plan, one waiting pair** (w3530, lothsahn: "waiting two-player tests get the next free sandbox"; `Agents.pairPlan`).
+    The holds are planned across the fleet at once: first each Queued pair that can start now on computers no earlier pair
+    took (by priority, then the oldest) takes one per leg, by `pairRoom`'s pick (a Mac only hosts, a cross-OS pair spans two
+    systems, a timed pair never takes m5); then the first pair that still cannot start holds up to its legs less one of the
+    computers left, and no other pair holds anything. So the head pair's holds add up until its last leg frees, and a pair
+    that could complete on room the head pair holds takes it. Before w3530 each computer was held for the oldest pair that
+    fit it alone: on 2026-11-08 beast waited for w3460 (timed, which m5 does not take) and m5 for w3469, both holds lapsed,
+    and of about ten Queued pairs one ran (w3347 Queued 17 h, w3392 13 h). A younger pair's `start_agent` is refused on a
+    computer held for an older one, and FF Factory's own timed-leg start (w2055) does not take a held sandbox either.
+    Urgent single work still beats a normal pair (a person's "Start now"); single work of the pair's priority waits behind
+    it only if it is younger. A released worker resuming its own work (PlaceAgain, w640) is not held off: its work began first.
+  - **Bounded** (w1983, w3530). A hold lapses `PAIR_HOLD_MS` (45 min since w3530, 20 min before) after that computer's room
+    began or the pair was Queued, whichever is later, while the pair still cannot start (its refusal says when: "the hold
+    lapses at 04:12 UTC"). 20 min was shorter than the gaps between frees on 2026-11-08 (23 and 37 min), so no hold met its
+    partner. Work whose needs name that computer alone is never
     held off it. Unbounded, it starved everything: lothlaptop/slot1 sat free from 02:50Z to 03:52Z on 2026-10-24, held for
     w1970 and then w1981, while lothsahn's w1789 ("Move one timed run to LothLaptop") waited for it. A pair that can start
     now is held whatever the time: start its legs first.
