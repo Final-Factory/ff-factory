@@ -354,6 +354,39 @@ export async function localWorkWhy(dir: string, timeoutMs = 15_000): Promise<str
 }
 
 /**
+ * What work a clone of a worker whose requests all closed holds that exists nowhere else (w3656): commits on no remote and
+ * stashes only. Uncommitted changes do not count there: the request closed, so what it meant to keep was pushed or dropped,
+ * and LothDesktop kept 13.3 GB for "1 uncommitted change" (ffa-6b25d859/clone-3286) and 8.5 GB for 43,754 of them. A git
+ * that cannot read the clone counts as no work either (a dozen red/green checkout copies on LothDesktop were kept forever
+ * as "its git state could not be read"); only a count git gives keeps it.
+ */
+export async function unpushedWorkWhy(dir: string, timeoutMs = 15_000): Promise<string | undefined> {
+  const git = (...a: string[]) =>
+    new Promise<string>((resolve, reject) =>
+      execFile('git', ['--no-optional-locks', '-C', dir, ...a], { encoding: 'utf8', timeout: timeoutMs, windowsHide: true, maxBuffer: 64 * 1024 * 1024 }, (e, out) => (e ? reject(e) : resolve(String(out).trim()))),
+    );
+  const n = (k: number, one: string, many = `${one}s`) => `${k} ${k === 1 ? one : many}`;
+  const work: string[] = [];
+  try {
+    let ahead = Number(await git('rev-list', '--count', 'HEAD', '--not', '--remotes'));
+    if (ahead > 0) ahead = await aheadOfRemotesNow(dir, ahead, git, timeoutMs);
+    if (ahead > 0) work.push(n(ahead, 'commit', 'commits') + ' on no remote');
+  } catch {
+    // no HEAD, or not readable: nothing git can show
+  }
+  try {
+    const [gitDir, common] = (await git('rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir')).split('\n');
+    if (gitDir === common) {
+      const stashes = await git('stash', 'list');
+      if (stashes) work.push(n(stashes.split('\n').length, 'stash', 'stashes'));
+    }
+  } catch {
+    // as above
+  }
+  return work.length ? work.join(', ') : undefined;
+}
+
+/**
  * How many of `git status --porcelain`'s lines are real changes (w3330). Status flags a tracked file whose size differs
  * from the index's without reading it, and an index can record another size than the file holds: a Git LFS checkout whose
  * files were linked in after the index was written (its pointers' 132 bytes against the real file), or a file rewritten

@@ -134,7 +134,8 @@ test('w2026: the per-pass index of requests by worker holds every request workOv
     assert.deepEqual(mine.map((w) => w.id), work.filter((w) => w.sessionIds.includes(sid) || w.movedOff?.[sid] || isWith(w, sid)).map((w) => w.id), sid);
   }
   // resumable.ts's one-pass forms answer as the scans did
-  const items = work.filter((w) => w.status !== 'done');
+  // w3656: only an open or stalled request keeps its worker resumable; a closed one no longer does (the 7-day hold went)
+  const items = work.filter((w) => w.status !== 'merged' && (WORK_OPEN.includes(w.status) || w.status === 'stalled'));
   // w2987: a worker with a gate of its own on an open request counts as with it, in sessionIds or not
   const ownGate = (w: (typeof work)[number], sid: string) => (WORK_OPEN.includes(w.status) || w.status === 'stalled') && gatesOf(w).some((g) => gateSetter(g) === sid);
   assert.deepEqual(resumableSessions(sessions, work, NOW), sessions.filter((sid) => items.some((w) => (w.sessionIds.includes(sid) && isWith(w, sid)) || ownGate(w, sid))).sort());

@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { hasLocalWork, localWorkWhy, neverDelete, norm, sessionRelaxed, sizeOf, touchedSince, touchedWhy, within, type CleanupGuard, type CleanupItem } from './cleanup.ts';
+import { hasLocalWork, localWorkWhy, neverDelete, unpushedWorkWhy, norm, sessionRelaxed, sizeOf, touchedSince, touchedWhy, within, type CleanupGuard, type CleanupItem } from './cleanup.ts';
 import { CONTEXT_MAX_AGE_HOURS, requestIdsIn, type StaleContext, type StalePlan } from './staleOutput.ts';
 import { mentions } from './ownLeftovers.ts';
 import { gitIgnores } from './cleanupFolders.ts';
@@ -52,6 +52,11 @@ export interface InstallLeftoverSettings {
   rehearsalDays: number;
   /** A stopped session's folder in the agent temp root goes once untouched this many hours. */
   sessionTempHours: number;
+  /**
+   * The folder of a stopped worker whose requests all closed goes once untouched this many minutes, on every pass (w3656);
+   * only its clones with commits on no remote or a stash stay. 0: 15.
+   */
+  closedSessionMinutes: number;
   /** `scratch/` entries go once untouched this many days (and when no open request is named in them). */
   scratchDays: number;
   /** A Claude task `.output` file past this many GB is removed, and its writer ended when its session has stopped. */
@@ -96,6 +101,7 @@ export const INSTALL_LEFTOVER_DEFAULTS: InstallLeftoverSettings = {
   nightlyRunDays: 3,
   rehearsalDays: 2,
   sessionTempHours: 2,
+  closedSessionMinutes: 30,
   scratchDays: 3,
   outputCapGB: 2,
   idleCacheHours: 24,
@@ -119,6 +125,7 @@ export function installLeftoverSettings(raw: unknown): InstallLeftoverSettings {
     nightlyRunDays: n('nightlyRunDays', 1, 365),
     rehearsalDays: n('rehearsalDays', 1, 365),
     sessionTempHours: n('sessionTempHours', 1, 24 * 30),
+    closedSessionMinutes: n('closedSessionMinutes', 0, 24 * 60),
     scratchDays: n('scratchDays', 1, 365),
     outputCapGB: n('outputCapGB', 0.1, 1000),
     idleCacheHours: n('idleCacheHours', 0, 24 * 30),
@@ -724,6 +731,13 @@ export async function planInstallLeftovers(o: {
   /** Pids never named a stray (this daemon and its parents). */
   self?: number[];
   localWork?: (dir: string) => Promise<boolean>;
+  /** Whether a repo holds commits on no remote or a stash (tests; default cleanup.ts unpushedWorkWhy). */
+  unpushedWork?: (dir: string) => Promise<boolean>;
+  /**
+   * Session folders of stopped workers whose requests all closed (w3656: no open, stalled or paused request is on them and
+   * none waits for them; the daemon's closedSessionDirs). Absent: the portal has not said, and none is judged closed.
+   */
+  closed?: string[];
   /** 'sandboxes': only each sandbox's own build and capture output (the sandbox release sweep, w913). 'cargo-cap': only the
    * cargo-target-cap rule over the sessions' temp folders, for the passes the stale-output rules skip (w3471); since w3674 it
    * covers the Unity Library copy cap (library-copy-cap) too. */
@@ -753,6 +767,8 @@ export async function planInstallLeftovers(o: {
   const s = o.settings ?? INSTALL_LEFTOVER_DEFAULTS;
   const now = o.now ?? Date.now();
   const localWork = o.localWork ?? ((d: string) => hasLocalWork(d, 60_000));
+  const unpushedWork = o.unpushedWork ?? (async (d: string) => (await unpushedWorkWhy(d, 60_000)) !== undefined);
+  const closed = new Set((o.closed ?? []).map(norm));
   const items = new Map<string, CleanupItem>();
   const listed = new Map<string, string>();
   const held: NonNullable<InstallPlan['held']> = [];
@@ -763,7 +779,7 @@ export async function planInstallLeftovers(o: {
   const live = (p: string) => o.guard.inUse.some((k) => k && (within(p, k) || within(k, p)));
 
   /** Why `p` must stay, or undefined; `list`: worth showing a person; `split`: the rest of what is in it may still go. */
-  const blocked = async (p: string, base: string, untouchedMs: number | undefined, anyRepo = false): Promise<{ why: string; list: boolean; split?: boolean } | undefined> => {
+  const blocked = async (p: string, base: string, untouchedMs: number | undefined, anyRepo = false, closedWork = false): Promise<{ why: string; list: boolean; split?: boolean } | undefined> => {
     if (!within(p, root)) return { why: 'outside the install folder', list: false };
     if (norm(p) === norm(root) || norm(p) === norm(base)) return { why: 'the install folder or a place itself', list: false };
     const rel = norm(p).slice(norm(base).length).split('/').filter(Boolean);
@@ -783,7 +799,7 @@ export async function planInstallLeftovers(o: {
     await down(p, 0);
     for (const r of repos) {
       if (norm(r).slice(norm(base).length).split('/').some((seg) => FIXTURE_REPO.test(seg))) continue;
-      if (await localWork(r)) return { why: `holds a git repo with uncommitted or unpushed work (${r})`, list: true, split: true };
+      if (closedWork ? await unpushedWork(r) : await localWork(r)) return { why: closedWork ? `holds a git repo with commits on no remote or a stash (${r})` : `holds a git repo with uncommitted or unpushed work (${r})`, list: true, split: true };
     }
     return undefined;
   };
@@ -797,16 +813,31 @@ export async function planInstallLeftovers(o: {
    * A stopped session's folder, or (when it cannot go whole) its entries one by one, down to SPLIT_DEPTH (w1575): a clone with
    * work on no remote stays and is listed, what changed lately stays, the rest goes. A repo is never taken apart.
    */
-  const takeApart = async (p: string, base: string, why: string, untouchedMs: number, depth: number): Promise<void> => {
+  const takeApart = async (p: string, base: string, why: string, untouchedMs: number, depth: number, closedWork = false): Promise<void> => {
     if (items.has(p)) return;
-    const b = await blocked(p, base, untouchedMs);
-    if (!b) return void items.set(p, { path: p, rule: 'stopped-session-temp', why, base });
+    const b = await blocked(p, base, untouchedMs, false, closedWork);
+    if (!b) return void items.set(p, { path: p, rule: closedWork ? 'closed-session-temp' : 'stopped-session-temp', why, base });
     const st = await fs.promises.lstat(p).catch(() => undefined);
     if (!b.split || depth >= SPLIT_DEPTH || !st?.isDirectory() || fs.existsSync(path.join(p, '.git'))) {
       if (b.list) listed.set(p, b.why);
       return;
     }
-    for (const e of await children(p)) await takeApart(path.join(p, e.name), base, why, untouchedMs, depth + 1);
+    for (const e of await children(p)) await takeApart(path.join(p, e.name), base, why, untouchedMs, depth + 1, closedWork);
+  };
+  /**
+   * The folder of a stopped worker whose requests all closed (w3656, lothsahn, 2026-11-08: "once a request closes, why
+   * doesn't its temp directory get cleaned up?"): it goes whole once nothing in it was written for closedSessionMinutes,
+   * on every pass, hourly ones included. Only a clone with commits on no remote or a stash stays, listed; uncommitted
+   * changes and an unreadable git do not keep it (cleanup.ts unpushedWorkWhy). A live session, a process naming the folder,
+   * or an unknown process list keeps it all; Windows' rename before the delete skips a folder with a file open in it.
+   * True when the folder was judged here.
+   */
+  const closedSession = async (dir: string, t: string): Promise<boolean> => {
+    if (!closed.has(norm(dir)) || live(dir)) return false;
+    if (!o.procs || o.procs.some((p) => mentions(p.cmd, dir))) return true;
+    const mins = s.closedSessionMinutes || 15;
+    await takeApart(dir, t, `the temp folder of a stopped worker whose requests all closed, untouched for ${mins} min (w3656)`, mins * 60_000, 0, true);
+    return true;
   };
   /** The player builds under `dir`: a folder holding UnityPlayer.dll or .so, or an .app holding UnityPlayer.dylib. */
   const buildsIn = async (dir: string, depth: number, out: string[]): Promise<string[]> => {
@@ -1090,9 +1121,14 @@ export async function planInstallLeftovers(o: {
         if (!e.isDirectory() || !/^ffa-/i.test(e.name) || !within(path.join(t, e.name), root)) continue;
         await capLibraries(path.join(t, e.name), t);
         await capCargo(path.join(t, e.name), t);
+        // A closed worker's folder goes on the hourly pass too, not only on a low or daily one (w3656).
+        await closedSession(path.join(t, e.name), t);
       }
     }
+    for (const p of [...items.keys()]) if ([...items.keys()].some((q) => q !== p && within(p, q))) items.delete(p);
     plan.items = [...items.values()];
+    for (const l of [...listed.keys()]) if (plan.items.some((i) => within(l, i.path))) listed.delete(l);
+    if (listed.size) plan.listed = [...listed].map(([p, why]) => ({ path: p, why }));
     const kept = held.filter((h) => !plan.items.some((i) => within(h.path, i.path)));
     if (kept.length) plan.held = kept;
     return plan;
@@ -1216,6 +1252,7 @@ export async function planInstallLeftovers(o: {
         for (const p of all.values()) if (!plan.strays.some((x) => x.pid === p.pid)) plan.strays.push({ pid: p.pid, cmd: p.cmd.slice(0, 300), dir, why: `holds ${b.file} (${(b.bytes / GB).toFixed(1)} GB)` });
         if (!all.size) listed.set(`${b.file} (writer unknown)`, 'no process names this stopped session; if space does not come back, its writer still runs');
       }
+      if (await closedSession(dir, t)) continue;
       await takeApart(dir, t, `the temp folder of a session that stopped, untouched for ${s.sessionTempHours} h`, s.sessionTempHours * HOUR, 0);
     }
   }

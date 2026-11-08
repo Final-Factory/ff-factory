@@ -395,18 +395,22 @@ test('w1387: a folder the ledger frees stays KEEP while a git repo in it holds w
   // The daemon writes its facts after the folders were last written (w3217 keeps a folder written after them).
   facts.at = new Date(Date.now() + 1000).toISOString();
 
+  // w3656: its request closed, so an uncommitted change no longer keeps the folder (lothsahn: "once a request closes, why
+  // doesn't its temp directory get cleaned up?").
   const rows = await planFolders(facts, { now: Date.now() + 1000 });
   const row = (p: string) => rows.find((r) => norm(r.path) === norm(p))!;
-  assert.equal(row(closed).verdict, 'keep');
-  assert.match(row(closed).why, /holds a git repo with uncommitted or unpushed work \(.*ff: 1 uncommitted change\)/);
-  assert.match(row(closed).why, /The ledger alone said: no open, stalled or paused request names worker b0b0b0b0/);
+  assert.equal(row(closed).verdict, 'delete', 'a closed request\'s uncommitted change does not keep it (w3656)');
   assert.equal(row(orphan).verdict, 'delete', 'a pushed, clean clone loses nothing');
-  assert.match(renderFolders(rows, facts), /KEEP .*ffa-b0b0b0b0\n\s+holds a git repo/);
 
-  // Unpushed commits, a stash, and a clone nested deeper than the portal's one level each keep it too.
+  // Unpushed commits, a stash, and a clone nested deeper than the portal's one level each keep it.
   git(ff, 'add', '.');
   git(ff, 'commit', '-q', '-m', 'report');
-  assert.match((await planFolders(facts)).find((r) => norm(r.path) === norm(closed))!.why, /1 commit on no remote/);
+  const rows2 = await planFolders(facts, { now: Date.now() + 1000 });
+  const c2 = rows2.find((r) => norm(r.path) === norm(closed))!;
+  assert.equal(c2.verdict, 'keep');
+  assert.match(c2.why, /holds a git repo with uncommitted or unpushed work \(.*ff: 1 commit on no remote\)/);
+  assert.match(c2.why, /The ledger alone said: no open, stalled or paused request names worker b0b0b0b0/);
+  assert.match(renderFolders(rows2, facts), /KEEP .*ffa-b0b0b0b0\n\s+holds a git repo/);
   fs.writeFileSync(path.join(deep, 'a.txt'), 'changed\n');
   git(deep, 'stash', 'push', '-q');
   const o = (await planFolders(facts)).find((r) => norm(r.path) === norm(orphan))!;

@@ -88,7 +88,7 @@ test('w1097: the sweep leaves a stopped worker its folder while its request wait
 
 const DAY = 86_400_000;
 
-test('w1575: a closed request keeps its worker resumable while it may be reopened (7 days), then not', () => {
+test('w3656: a closed request no longer keeps its worker resumable (the 7-day reopen hold of w1575 is gone)', () => {
   const now = Date.parse('2026-10-19T21:48:00Z');
   const at = (ms: number) => new Date(now - ms).toISOString();
   const work = [
@@ -99,13 +99,13 @@ test('w1575: a closed request keeps its worker resumable while it may be reopene
     item('w5', 'merged', ['eeee0005'], { updatedAt: at(DAY) }),
     item('w6', 'done', ['ffff0006', 'gggg0007'], { updatedAt: at(DAY) }),
   ];
-  assert.deepEqual(resumableSessions(['aaaa0001', 'bbbb0002', 'cccc0003', 'dddd0004', 'eeee0005', 'ffff0006', 'gggg0007'], work, now), ['aaaa0001', 'cccc0003', 'dddd0004', 'gggg0007']);
+  assert.deepEqual(resumableSessions(['aaaa0001', 'bbbb0002', 'cccc0003', 'dddd0004', 'eeee0005', 'ffff0006', 'gggg0007'], work, now), []);
 });
 
-test('w1575: a worker that comes back finds its folder intact: after a turn end, and after its request closed and was reopened', async (t) => {
+test('w1575: a worker that comes back after a turn end finds its folder intact; w3656: a closed request\'s worker is swept', async (t) => {
   const { root, temp, session, guard } = world(t);
   const waits = session('aaaa0001'); // its turn ended: blocked on CI
-  const closed = session('bbbb0002'); // its request closed; lothsahn reopens it 3 days later
+  const closed = session('bbbb0002'); // its request closed: no reopen hold since w3656
   const old = session('cccc0003'); // closed 8 days ago: nobody can reopen it
   const start = Date.now();
   let now = start;
@@ -136,14 +136,12 @@ test('w1575: a worker that comes back finds its folder intact: after a turn end,
       await runCleanup(nightly.items, g());
     }
   }
-  for (const d of [waits, closed]) assert.ok(fs.existsSync(path.join(d, 'f1920', 'before.mp4')) && fs.existsSync(path.join(d, 'player-build.log')), `${d} intact`);
-  assert.ok(!fs.existsSync(path.join(old, 'f1920')), 'a session past the reopen window is swept');
-  // CI comes back and lothsahn reopens w2: each worker is resumed into its own folder, as it left it.
-  work[1] = { ...work[1], status: 'new', updatedAt: new Date(now).toISOString() };
+  assert.ok(fs.existsSync(path.join(waits, 'f1920', 'before.mp4')) && fs.existsSync(path.join(waits, 'player-build.log')), `${waits} intact`);
+  for (const d of [closed, old]) assert.ok(!fs.existsSync(path.join(d, 'f1920')), `${d}: a closed request's worker is swept (w3656)`);
+  // CI comes back: the waiting worker is resumed into its own folder, as it left it.
   live.add('aaaa0001');
-  live.add('bbbb0002');
   await sw.tick();
-  for (const d of [waits, closed]) assert.equal(fs.readFileSync(path.join(d, 'f1920', 'before.mp4'), 'utf8'), 'clip');
+  assert.equal(fs.readFileSync(path.join(waits, 'f1920', 'before.mp4'), 'utf8'), 'clip');
 });
 
 test("w1097: the daily pass's stopped-session rule leaves a resumable session's folder", async (t) => {
