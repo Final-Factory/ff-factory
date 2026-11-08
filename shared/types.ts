@@ -2905,6 +2905,8 @@ export interface WorkDigest {
   tests?: { compiled?: boolean; run?: number; passed?: number; failed?: number };
   /** What could not be checked. */
   unverified?: string;
+  /** What merging could break, when FFBox wrote it (w3602). */
+  risk?: string;
   /** The start of the words, when none of the parts above were found in them. */
   text?: string;
 }

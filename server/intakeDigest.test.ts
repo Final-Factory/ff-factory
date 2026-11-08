@@ -41,14 +41,18 @@ const AT = '2026-11-08T12:00:00.000Z';
 test('w3602: FFBox’s write-up cut to what the player hit, the cause, the fix, the tests and what nobody checked', () => {
   const d = digestFromFfbox(W3596_SUMMARY, AT, { hit: 'a freeze (hang) on LinuxPlayer, game 1.0.0.16' })!;
   assert.equal(d.by, 'FFBox');
-  assert.match(d.cause!, /^the game rebuilt the swapchain for nothing at launch\. On this Linux machine .* so the game froze on its first frames\.$/);
+  assert.match(d.cause!, /^the game rebuilt the swapchain for nothing at launch\. On this Linux machine, .* so the game froze on its first frames\.$/);
   assert.match(d.fix!, /^Apply now skips Screen\.SetResolution when the window already is what it would ask for/);
   assert.doesNotMatch(d.fix!, /\*\*|`/, 'markdown out');
   assert.match(d.unverified!, /^This container has no Steam overlay, so I couldn't reproduce the freeze\./);
   // The whole suite's run, not the 10 targeted tests.
   assert.deepEqual(d.tests, { passed: 16351, run: 16361, failed: 0, compiled: true });
   assert.equal(d.text, undefined, 'no fallback when the parts were found');
-  assert.deepEqual(digestRows(d).map((r) => r.label), ['The player hit', 'Cause', 'The fix', 'Tests', 'Not checked']);
+  assert.deepEqual(digestRows(d).map((r) => r.label), ['The player hit', 'Cause', 'The fix', 'Tests', 'Not checked', 'Risk']);
+  // The top of the card in plainer words: the bracketed aside and the sentence that only names code are out.
+  assert.doesNotMatch(d.cause!, /RADV|\(/);
+  assert.doesNotMatch(d.fix!, /ScreenAlreadyMatches/);
+  assert.equal(digestRows(d).at(-1)!.text, 'FFBox named none. From the facts: whether the fix ends what the player hit is unchecked (above).');
   assert.match(digestText(d), /^FFBox’s summary \(a model’s words: check them against the code\):\n- The player hit: a freeze \(hang\) on LinuxPlayer, game 1\.0\.0\.16\n- Cause: /);
 });
 
@@ -56,6 +60,11 @@ test('w3602: the run’s own verification wins over the numbers in the words', (
   const d = digestFromFfbox(W3596_SUMMARY, AT, { verification: { ran: true, compiled: true, testsRun: 16361, testsPassed: 16349, testsFailed: 2 } })!;
   assert.deepEqual(d.tests, { passed: 16349, run: 16361, failed: 2, compiled: true });
   assert.equal(digestRows(d).find((r) => r.label === 'Tests')!.text, 'compiled; 16349 of 16361 tests passed, 2 failed, 10 skipped');
+  assert.equal(digestRows(d).find((r) => r.label === 'Risk')!.text, 'FFBox named none. From the facts: 2 tests fail on its branch; whether the fix ends what the player hit is unchecked (above).');
+  // FFBox's own risk words win.
+  assert.equal(digestFromFfbox(`${W3596_SUMMARY}
+
+**Risk:** a resolution change the player asked for could be skipped.`, AT)!.risk, 'a resolution change the player asked for could be skipped.');
 });
 
 test('w3602: tests in words', () => {
@@ -142,7 +151,7 @@ test('w3602: a diagnosis is filed with its digest, and read_work shows it fenced
 });
 
 test('w3602: an FFBox card with no summary says so and where the write-up is; other kinds and cards with one say nothing', () => {
-  assert.equal(digestMissing(review()), 'FFBox wrote no summary for this request. Its full write-up is under Details, at the foot of this card.');
+  assert.equal(digestMissing(review()), 'Its full write-up is under Details, at the foot of this card.');
   assert.equal(digestMissing(review({ digest: { by: 'FFBox', at: AT, text: 'x' } })), undefined);
   assert.equal(digestMissing({ source: { kind: 'discord-bug', untrusted: true } } as Pick<WorkItem, 'source'>), undefined);
   assert.equal(digestMissing({}), undefined);

@@ -99,12 +99,12 @@ test('w1868: every card of today’s real cases says what it is, who acts, the q
   await expect(tab.getByTestId('wait-w1853').getByTestId('qc-what')).toHaveText(/^The nightly game tests of 2026-10-23: 6 scenarios failed on master/);
   await expect(tab.getByTestId('wait-w1842').getByTestId('qc-option').first()).toContainText('A worker reviews FFBox’s fix “circular placement log once” against the code');
   // w3602: with no summary from FFBox, its card still leads with the heading and says where the write-up is.
-  await expect(tab.getByTestId('wait-w1842').getByTestId('qc-digest-missing')).toHaveText('FFBox wrote no summary for this request. Its full write-up is under Details, at the foot of this card.');
+  await expect(tab.getByTestId('wait-w1842').getByTestId('qc-digest-missing')).toHaveText('Its full write-up is under Details, at the foot of this card.');
   // w3596 (w3602, lothsahn: "What am I approving?"): FFBox's summary leads the card, labelled as FFBox's, and Approve says what it sets in motion.
   const w3596 = tab.getByTestId('wait-w3596');
   await expect(w3596.getByTestId('qc-digest')).toContainText('What FFBox found and changed');
   await expect(w3596.getByTestId('qc-digest')).toContainText('FFBox’s summary, a model’s words: check them against the code.');
-  await expect(w3596.getByTestId('qc-digest-row')).toHaveText([/^The player hit: a freeze \(hang\) on LinuxPlayer, game 1\.0\.0\.16$/, /^Cause: the game rebuilt the swapchain/, /^The fix: Apply now skips Screen\.SetResolution/, /^Tests: compiled; 16349 of 16361 tests passed, 2 failed, 10 skipped$/, /^Not checked: This container has no Steam overlay/]);
+  await expect(w3596.getByTestId('qc-digest-row')).toHaveText([/^The player hit: a freeze \(hang\) on LinuxPlayer, game 1\.0\.0\.16$/, /^Cause: the game rebuilt the swapchain/, /^The fix: Apply now skips Screen\.SetResolution/, /^Tests: compiled; 16349 of 16361 tests passed, 2 failed, 10 skipped$/, /^Not checked: This container has no Steam overlay/, 'Risk: FFBox named none. From the facts: 2 tests fail on its branch; whether the fix ends what the player hit is unchecked (above).']);
   await expect(w3596.getByTestId('qc-question')).toHaveText('Should a worker review FFBox’s fix for a freeze (hang) on LinuxPlayer and merge it?');
   await expect(w3596.getByTestId('qc-option').first()).toContainText('fixes the 2 failing tests, opens a pull request and merges it on green');
   await expect(w3596.getByTestId('qc-option').nth(1)).toContainText('FFBox marks the player’s report obsolete and posts nothing');

@@ -259,7 +259,7 @@ export function DigestLead({ d }: { d: WorkDigest }) {
 export function DigestMissingLead({ text }: { text: string }) {
   return (
     <div className="qc-digest" data-testid="qc-digest">
-      <p className="qc-digest-head">What FFBox found and changed</p>
+      <p className="qc-digest-head">FFBox left no summary for this request</p>
       <p className="qc-digest-row" data-testid="qc-digest-missing">{text}</p>
     </div>
   );

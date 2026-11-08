@@ -46,6 +46,21 @@ const CAUSE = /^root cause\s*[:-]\s*/i;
 const FIX_HEAD = /^(?:what i changed|what (?:the|this) (?:fix|branch) (?:changes|does)|the fix|fix)\b[^:]*?(?:\([^)]*\))?\s*[:.]?/i;
 const UNVERIFIED_HEAD = /^(?:what i (?:can['’]t|cannot|could not|couldn['’]t) (?:prove|check|verify)(?: here)?|not verified|unverified|what is unverified)\b\s*[:.]?/i;
 
+const RISK_HEAD = /^(?:risks?|what (?:this|it) could break|what could (?:break|go wrong))\b\s*[:.]?/i;
+
+/** A class or API name: "Screen.SetResolution", "ScreenAlreadyMatches", "vSyncCount". */
+const CODE_NAME = /\b\w+\.[A-Z]\w*|\b[A-Z][a-z]+[A-Z]\w*|\b[a-z]+[A-Z]\w*/;
+
+/**
+ * Up to two sentences for the top of a card, plainer (w3602, critic round 4: class and API names at the top are the "I
+ * don't know what this means"): asides in brackets out, and sentences naming code dropped while one without remains.
+ */
+function plainer(s: string, max: number): string {
+  const parts = (s.replace(/\s*\([^()]*\)/g, '').match(/(?:[^.!?]|[.!?](?!\s|$))+(?:[.!?]+(?=\s|$)|$)/g) ?? [s]).map((p) => p.trim()).filter(Boolean);
+  const plain = parts.filter((p) => !CODE_NAME.test(p));
+  return clip((plain.length ? plain : parts.slice(0, 1)).slice(0, 2).join(' '), max);
+}
+
 /** The tests a text reports ("16351/16361 passed, 0 failed"): the run with the most tests (the whole suite). */
 export function testsIn(text: string): WorkDigest['tests'] | undefined {
   let best: WorkDigest['tests'];
@@ -66,13 +81,15 @@ export function testsIn(text: string): WorkDigest['tests'] | undefined {
 export function digestFromFfbox(text: string, at: string, o: { hit?: string; verification?: { ran?: boolean; compiled?: boolean; testsRun?: number; testsPassed?: number; testsFailed?: number } } = {}): WorkDigest | undefined {
   const lines = text.split(/\r?\n/);
   const causeLine = lines.map(plainLine).find((l) => CAUSE.test(l));
-  const cause = causeLine ? sentences(causeLine.replace(CAUSE, ''), 2, 320) : undefined;
+  const cause = causeLine ? plainer(causeLine.replace(CAUSE, ''), 320) : undefined;
   const fixLines = section(lines, FIX_HEAD);
   // The first point of what it changed, its "Fix:" label dropped.
   const fixFirst = fixLines?.map(plainLine).find((l) => l && !/^\(?\w+ commits?\)?:?$/i.test(l));
-  const fix = fixFirst ? sentences(fixFirst.replace(/^(?:fix|the fix|change)\s*:\s*/i, ''), 2, 320) : undefined;
+  const fix = fixFirst ? plainer(fixFirst.replace(/^(?:fix|the fix|change)\s*:\s*/i, ''), 320) : undefined;
   const unv = section(lines, UNVERIFIED_HEAD);
   const unverified = unv?.length ? sentences(unv.map(plainLine).join(' '), 2, 300) : undefined;
+  const rsk = section(lines, RISK_HEAD);
+  const risk = rsk?.length ? sentences(rsk.map(plainLine).join(' '), 2, 300) : undefined;
   const v = o.verification;
   const fromRun = v && (v.testsRun !== undefined || v.compiled !== undefined) ? { ...(v.compiled !== undefined ? { compiled: v.compiled } : {}), ...(v.testsRun !== undefined ? { run: v.testsRun } : {}), ...(v.testsPassed !== undefined ? { passed: v.testsPassed } : {}), ...(v.testsFailed !== undefined ? { failed: v.testsFailed } : {}) } : undefined;
   // The run's own numbers win over the words; the words fill what the run did not give.
@@ -87,6 +104,7 @@ export function digestFromFfbox(text: string, at: string, o: { hit?: string; ver
     ...(fix ? { fix } : {}),
     ...(tests ? { tests } : {}),
     ...(unverified ? { unverified } : {}),
+    ...(risk ? { risk } : {}),
     ...(lead ? { text: sentences(lead, 3, 400) } : {}),
   };
   return d.cause || d.fix || d.tests || d.unverified || d.text ? d : undefined;
@@ -120,6 +138,22 @@ export function testsText(t: NonNullable<WorkDigest['tests']>): string {
   return parts.filter(Boolean).join('; ');
 }
 
+/**
+ * The risk of merging (w3602, lothsahn asked for "the risk"): FFBox's own words when it wrote a risk section, else what the
+ * facts say, marked as not FFBox's: failing tests on its branch, and whether the fix was checked where the player hit it.
+ */
+export function riskText(d: WorkDigest): string | undefined {
+  if (d.risk) return d.risk;
+  if (d.by !== 'FFBox' || (!d.fix && !d.tests)) return undefined;
+  const failed = d.tests?.failed ?? 0;
+  const facts = [
+    failed > 0 ? `${failed} test${failed === 1 ? '' : 's'} fail${failed === 1 ? 's' : ''} on its branch` : '',
+    d.unverified ? 'whether the fix ends what the player hit is unchecked (above)' : '',
+    d.tests?.compiled === false ? 'its branch does not compile' : '',
+  ].filter(Boolean);
+  return `FFBox named none.${facts.length ? ` From the facts: ${facts.join('; ')}.` : ''}`;
+}
+
 /** The digest as labelled lines, in the order a reviewer reads them (the card and read_work). */
 export function digestRows(d: WorkDigest): { label: string; text: string }[] {
   return [
@@ -128,6 +162,7 @@ export function digestRows(d: WorkDigest): { label: string; text: string }[] {
     ...(d.fix ? [{ label: 'The fix', text: d.fix }] : []),
     ...(d.tests ? [{ label: 'Tests', text: testsText(d.tests) }] : []),
     ...(d.unverified ? [{ label: 'Not checked', text: d.unverified }] : []),
+    ...(riskText(d) ? [{ label: 'Risk', text: riskText(d)! }] : []),
     ...(d.text ? [{ label: d.by === 'the player' ? 'They wrote' : 'Summary', text: d.text }] : []),
   ];
 }
@@ -145,7 +180,7 @@ export const digestCaption = (d: WorkDigest) => (d.by === 'FFBox' ? 'FFBox’s s
  */
 export function digestMissing(s: Pick<WorkItem, 'source'>): string | undefined {
   if (s.source?.digest || !s.source?.kind?.startsWith('ffbox')) return undefined;
-  return 'FFBox wrote no summary for this request. Its full write-up is under Details, at the foot of this card.';
+  return 'Its full write-up is under Details, at the foot of this card.';
 }
 
 /** The digest in one block of text, for read_work and list_work. */
