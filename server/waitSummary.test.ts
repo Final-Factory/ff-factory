@@ -90,7 +90,8 @@ test('w1868: intake cards say what the item is, and what Approve and Decline do'
     assert.equal(s.kind, 'approve');
     assert.equal(s.who, 'a reviewer (Ben or Lothsahn)');
     assert.deepEqual(s.asks[0].options.map((o) => o.label), [APPROVE_LABEL, DECLINE_LABEL]);
-    assert.match(s.asks[0].options[0].description, /a worker starts at the next free sandbox/);
+    // What Approve sets in motion for this request (w3602): a nightly's worker starts; an FFBox branch is reviewed and merged.
+    assert.match(s.asks[0].options[0].description, id === 'w1842' ? /^A worker reviews FFBox’s fix “circular placement log once” against the code, opens a pull request and merges it on green/ : /a worker starts at the next free sandbox/);
     assert.match(s.asks[0].options[1].description, /closes as declined/);
     assert.match(s.after, /^Approve: .* Decline: /);
   }

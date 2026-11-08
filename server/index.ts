@@ -844,6 +844,8 @@ const intake = new IntakeManager({
     agents.onReport?.(r.report);
     return r.report.id;
   },
+  // An FFBox request's card summary (w3602): its conversation's newest turn, read through the connector.
+  conversation: async (id) => conversationView(id, await providers.query('conversation', { id: conversationQueryId(id), offset: 0, limit: 5 })),
   // FFBox runs ffbox master, which takes maybe: no offer list gates it (docs/ffbox-connector-contract.md, "No negotiation").
   takesMaybe: () => true,
   // The nightly run's key (w864): minted at each fire under one name, so the night before's dies; redacted from now on.

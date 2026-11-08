@@ -5,7 +5,8 @@
 // only: the w312/w331 lesson). Pure: server/intake.ts files it.
 import { z } from 'zod';
 import { classifyBug, cleanBlock, cleanLine, quoteUntrusted } from './intakeRules.ts';
-import type { WorkItem, WorkReportFile, WorkSource, WorkTriage } from '../shared/types.ts';
+import type { WorkDigest, WorkItem, WorkReportFile, WorkSource, WorkTriage } from '../shared/types.ts';
+import { digestFromFfbox, hitOf } from '../shared/intakeDigest.ts';
 
 const oneLine = /^[^\u0000-\u001f]*$/;
 const reportId = z.string().regex(/^\d{8}T\d{6}Z-(crash|desync|hang)-[0-9a-f]{6,32}$/, 'a report id');
@@ -166,7 +167,7 @@ export function diagnosisTitle(d: Diagnosis): string {
 }
 
 /** The ledger source: a player's report FFBox diagnosed (untrusted throughout), with its fetch locators. */
-export function diagnosisSource(d: Diagnosis): WorkSource {
+export function diagnosisSource(d: Diagnosis, at = new Date().toISOString()): WorkSource {
   const files: WorkReportFile[] = (d.attachments ?? []).map((a) => ({
     name: cleanLine(a.name, 160),
     kind: a.kind,
@@ -192,8 +193,12 @@ export function diagnosisSource(d: Diagnosis): WorkSource {
     rootCause: d.rootCause,
     ...(d.pr ? { branch: d.pr.branch, ...(d.pr.number ? { pr: d.pr.number } : {}) } : {}),
     ...(files.length ? { reportFiles: files } : {}),
+    // What the cards lead with (w3602): FFBox's findings cut to cause, fix, tests and what it could not check.
+    ...digestOf(digestFromFfbox(d.findings, at, { hit: hitOf(d.report.kind, d.report.platform, d.report.gameVersion) })),
   };
 }
+
+const digestOf = (digest: WorkDigest | undefined) => (digest ? { digest } : {});
 
 /**
  * The triage of a diagnosis with no desync PR policy route (server/intake.ts takes that first): a player's report,
