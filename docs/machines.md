@@ -1240,7 +1240,12 @@ and the downloaded installer, run as administrator, asks one Windows prompt.
 Within lothsahn's rule ("I don't want a unilateral way into machines... just build scoped commands for the
 functionality needed"), it takes one named operation and nothing else:
 
-1. **A worker's `timed_run`** (builds `[{name, path, args?}]`, save, rounds, sample_s, settle_s, res, machine). Its own daemon
+1. **A worker's `timed_run`** (builds `[{name, path, args?}]`, save, rounds, sample_s, settle_s, res, machine, reason).
+   Both the worker's daemon and the portal refuse a plan past lothsahn's limits (w3711, `shared/timedRun.ts timedPlanProblem`;
+   "It should do 10 minute samples and run no longer than 30m per lock"; "avoid more than 2 tests on each before/after unless
+   there's a strong reason"): a leg planned past 10 minutes (90 s launch and load, settle, sample, dwell), always; and, unless
+   `reason` says why in a sentence, more than 2 rounds (the default is 2) or more legs than fit in one 24-minute turn.
+   The answer quotes the planned play time; its bound (every leg at its kill timeout) is only the check-in's fallback. Its own daemon
    (`machine/timedRunPack.ts`) reads each build folder (a Windows player in the sandbox, the session's temp folder or the
    worker install; `.pdb` files and `*_DoNotShip` folders are left out) and cuts it into pieces named by their SHA-256 (a file
    of 8 MB or more in pieces of at most 64 MB, smaller files grouped up to 16 MB; `shared/timedRun.ts planPieces`). The portal's
@@ -1254,7 +1259,9 @@ functionality needed"), it takes one named operation and nothing else:
    any file path that would leave the player folder. It fetches the pieces it lacks (checked against their SHA-256; it keeps up
    to 8 GB of them between runs) and lays each distinct build out in a player slot. It copies the save into the game's saves
    folder as `ffa-timed-<run>.zip` and removes it afterwards. Once no other live ticket is in its bench queue and nobody plays
-   there (w1894), it holds the machine's exclusive ticket for the whole run. It writes that ticket in the queue's own format
+   there (w1894), it takes the machine's exclusive ticket for one turn: it plays legs while they fit in 24 minutes
+   (`TURN_PLAN_MS`), gives the ticket back whether or not anyone waits, and queues again at the back for the rest (w3711; a
+   worker computer's runner always did, w1832). It writes that ticket in the queue's own format
    (`tNNNNNNNN/info.json`, `granted`, `bench.lock/owner`), held by the daemon's own process: a play-only machine has no checkout
    or python for `bench_queue.py`, so the bench row and `readBenchLock` show it like any other ticket. Each leg is the game
    repo's `scripts/bench/probe_ab_win.sh` leg with its fixed arguments (`legArgs`: solo, the save, the perf probe after the

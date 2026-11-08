@@ -286,8 +286,9 @@ export const CATALOG = {
       .max(4)
       .describe('The players to compare: usually two, the build before your change and the build with it, each built where you are.'),
     save: z.string().max(400).describe('The save every leg loads (.zip, at most 64 MB), copied into your working folder or temp folder.'),
-    rounds: z.number().int().min(1).max(20).optional().describe('Rounds (default 4; even, so each variant runs first as often). Each round runs every variant once, the order reversed on even rounds.'),
-    sample_s: z.number().int().min(5).max(300).optional().describe('Seconds the perf probe samples each leg (default 20).'),
+    rounds: z.number().int().min(1).max(20).optional().describe('Rounds (default 2: at most 2 samples per side of a before/after, w3711). Each round runs every variant once, the order reversed on even rounds. More than 2 needs reason.'),
+    sample_s: z.number().int().min(5).max(300).optional().describe('Seconds the perf probe samples each leg (default 20). A leg (90 s launch and load + settle + sample + 15 s) is refused past 10 minutes, and a run whose legs plan past one exclusive lock (24 of its 30 minutes) needs reason: time fewer legs now and ask again later in a new run, which queues at the back (w3711).'),
+    reason: z.string().max(300).optional().describe('Only for more than 2 rounds, or more legs than one exclusive lock plays: why (a sentence: a strong reason to suspect a result). Its legs then play in turns of at most 30 minutes, each queued again at the back.'),
     settle_s: z.number().int().min(5).max(300).optional().describe('Seconds after the save is ready before the sample (default 25).'),
     res: z.enum(['1920x1080', '1280x720', '1280x800', '2560x1440']).optional().describe('Window size (default 1920x1080).'),
     machine: z.string().max(40).optional().describe('A computer that takes timed runs, by id (a play-only one, or a small worker computer such as lothlaptop; w1996); default: play-only first, then the small ones, the fewest runs ahead.'),
