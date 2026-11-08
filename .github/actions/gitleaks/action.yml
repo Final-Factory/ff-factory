@@ -1,9 +1,7 @@
 name: gitleaks
 description: >
   gitleaks at the version asked for, on the PATH of a GitHub-hosted Linux runner: the release tarball, checked against
-  the release's own checksums file before it is unpacked. When that one file cannot be fetched (GitHub served it 504
-  for hours on 2026-11-08 while the tarball downloaded, w3597), the asset's sha256 digest from GitHub's releases API
-  stands in for it.
+  the release's own checksums file before it is unpacked.
 inputs:
   version:
     description: gitleaks version, e.g. '8.30.1'.
@@ -22,15 +20,16 @@ runs:
         base="https://github.com/gitleaks/gitleaks/releases/download/v${WANT}"
         dir="$RUNNER_TEMP/gitleaks-$WANT"
         mkdir -p "$dir"
-        curl -fsSL --retry 3 -o "$dir/$file" "$base/$file"
-        if curl -fsSL --retry 3 -o "$dir/checksums.txt" "$base/gitleaks_${WANT}_checksums.txt"; then
-          expected=$(awk -v f="$file" '$2 == f { print $1 }' "$dir/checksums.txt")
-          [ -n "$expected" ] || { echo "::error::$file is not in the release's checksums file"; exit 1; }
-        else
-          echo "::warning::the release's checksums file could not be fetched; checking $file against its API digest"
-          digest=$(gh api "repos/gitleaks/gitleaks/releases/tags/v${WANT}" --jq ".assets[] | select(.name == \"$file\") | .digest")
-          case "$digest" in sha256:*) expected="${digest#sha256:}" ;; *) echo "::error::no sha256 digest for $file (got '$digest')"; exit 1 ;; esac
+        sums="gitleaks_${WANT}_checksums.txt"
+        # w3601: on 2026-11-08 from 08:45Z the releases/download URL answered 504 for 40+ min while the API's asset route
+        # (gh release download) served the same files, so main's CI could not pass and the portal deploy waited.
+        if ! { curl -fsSL --retry 3 -o "$dir/$file" "$base/$file" && curl -fsSL --retry 3 -o "$dir/$sums" "$base/$sums"; }; then
+          echo "::warning::the gitleaks release URL failed; downloading the same assets through the GitHub API"
+          gh release download "v${WANT}" -R gitleaks/gitleaks -D "$dir" --clobber -p "$file" -p "$sums"
         fi
+        mv "$dir/$sums" "$dir/checksums.txt"
+        expected=$(awk -v f="$file" '$2 == f { print $1 }' "$dir/checksums.txt")
+        [ -n "$expected" ] || { echo "::error::$file is not in the release's checksums file"; exit 1; }
         actual=$(sha256sum "$dir/$file" | cut -d' ' -f1)
         [ "$actual" = "$expected" ] || { echo "::error::$file does not match its checksum ($actual, want $expected)"; exit 1; }
         tar -xzf "$dir/$file" -C "$dir" gitleaks

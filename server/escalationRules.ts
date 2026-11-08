@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { classifyBug, cleanBlock, cleanLine, quoteUntrusted } from './intakeRules.ts';
 import { DiagnosisSchema, type Diagnosis } from './diagnosisRules.ts';
 import { MAX_ATTACHMENTS } from '../shared/attachments.ts';
+import { digestFromFfbox, digestFromPlayer } from '../shared/intakeDigest.ts';
 import type { WorkSource, WorkTriage } from '../shared/types.ts';
 
 const oneLine = /^[^\u0000-\u001f]*$/;
@@ -85,6 +86,8 @@ export function escalationSource(e: Escalation): WorkSource {
     ...(e.platform ? { platform: e.platform } : {}),
     ...(e.attachments?.length ? { attachments: e.attachments.map((a) => ({ name: cleanLine(a.name, 120), url: a.url, ...(a.bytes !== undefined ? { bytes: a.bytes } : {}) })) } : {}),
     ...(e.verdict ? { verdict: e.verdict } : {}),
+    // What the cards lead with (w3602): Max's diagnosis cut to its parts, else the player's own words.
+    ...((d) => (d ? { digest: d } : {}))(digestFromFfbox(e.diagnosis, new Date().toISOString()) ?? (e.report ? digestFromPlayer(e.title, e.report, new Date().toISOString()) : undefined)),
   };
 }
 

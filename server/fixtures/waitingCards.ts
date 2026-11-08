@@ -177,6 +177,43 @@ export function waitingCases(now: number): WaitingCase[] {
       live: { state: 'waiting', why: 'an intake request waiting for a reviewer to approve or decline it', waitsOn: ['a reviewer'] },
     },
     {
+      was: '"This is terrible. I don’t know what this means, what I’m approving, or anything" (w3596, lothsahn, 2026-11-08): no word of what FFBox found or fixed',
+      w: base(now, 'w3596', {
+        title: 'Review and merge ffbox/linux-launch-skip-redundant-setresolution-d1325t1-0c4a9e21',
+        brief: 'FFBox finished a diagnosis of a player report and pushed `ffbox/linux-launch-skip-redundant-setresolution-d1325t1-0c4a9e21`. Nobody has reviewed it.',
+        requestedBy: LOTH,
+        requesters: [LOTH],
+        humanAsked: false,
+        status: 'new',
+        createdAt: ago(now, 40),
+        source: {
+          kind: 'ffbox-diagnosis',
+          untrusted: true,
+          channel: 'FFBox',
+          conversation: '1325',
+          branch: 'ffbox/linux-launch-skip-redundant-setresolution-d1325t1-0c4a9e21',
+          version: '1.0.0.16',
+          platform: 'LinuxPlayer',
+          rootCause: 'found',
+          reports: ['20261025T073811Z-hang-25862e0e5a'],
+          // FFBox's turn summary as digestOfConversation cut it down (shared/intakeDigest.ts), with the numbers the
+          // dispatcher quoted on w3602 so the card shows a failing count.
+          digest: {
+            by: 'FFBox',
+            at: ago(now, 45),
+            hit: 'a freeze (hang) on LinuxPlayer, game 1.0.0.16',
+            cause: 'the game rebuilt the swapchain for nothing at launch. On this Linux machine, the next frame’s present then blocked forever inside the Steam overlay’s present hook, so the game froze on its first frames.',
+            fix: 'Apply now skips Screen.SetResolution when the window already is what it would ask for: same width, height and mode, and the requested refresh is unspecified or equal to the current one.',
+            tests: { compiled: true, run: 16361, passed: 16349, failed: 2 },
+            unverified: 'This container has no Steam overlay, so I couldn’t reproduce the freeze. The evidence is that presents worked on the first swapchain and hung on the first present after the second, in both sessions.',
+          },
+        },
+        triage: { class: 'needs-human', reason: 'needs a human: FFBox work that started from players’ reports or text; a person decides before anyone reviews or merges it' },
+        approval: { state: 'pending', why: 'needs a human' },
+      }),
+      live: { state: 'waiting', why: 'an intake request waiting for a reviewer to approve or decline it', waitsOn: ['a reviewer'] },
+    },
+    {
       was: 'cut off with "…" (w1820): a report line longer than the 160 characters the ledger kept',
       w: base(now, 'w1820', {
         title: 'JustPlay1003: find what keeps 715 guard spawners and ~840 enemy ships awake, and tighten the wake rule if it’s waste',

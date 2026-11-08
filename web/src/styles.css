@@ -7835,6 +7835,40 @@ a.wc-pr:hover {
   overflow-wrap: anywhere;
 }
 
+/* An intake request's summary, read before its question (w3602): the context footer's look, at the top. */
+.qc-digest {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding-bottom: var(--s-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.qc-digest-head {
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--text);
+}
+
+.qc-digest-by {
+  margin-top: -4px;
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+}
+
+.qc-digest-row {
+  font-size: var(--fs-base);
+  line-height: 1.45;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.qc-digest-label {
+  font-weight: 600;
+  color: var(--text-2);
+}
+
 /* A card whose answer lets a worker go on (w2856): marked down its left edge, to be seen while scanning the list. */
 .qc.qc-holding {
   border-left: 3px solid var(--amber);

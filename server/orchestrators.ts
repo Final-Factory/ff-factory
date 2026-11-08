@@ -82,7 +82,7 @@ import { isSamePerson, personForWork, sessionPerson, tokenPersonForWork } from '
 import { MERGE_ON_GREEN_MARK } from './mergeOnGreen.ts';
 import { handoffQuote, handoffReport, isHandoff } from './handoffReport.ts';
 import { commitsIn, normPr, pairCommitsOf, pairPrOf, pairRanCommit, prIn, resultFor, sameCommit, samePr } from './pairRuns.ts';
-import type { AttachmentRef, BenchGrant, ConditionalDecision, ForYouMark, OpenAsk, WorkNeedsYou, GateResume, GitStatus, Machine, WorkAutoClosed, WorkBlocker, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPair, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
+import type { AttachmentRef, BenchGrant, ConditionalDecision, ForYouMark, OpenAsk, WorkNeedsYou, GateResume, GitStatus, Machine, WorkAutoClosed, WorkBlocker, WorkDigest, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPair, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
 import { DISK_CLEANUP_FLOOR_GB, REPORT_KINDS, WORK_PRIORITIES, questionFor, type ReportKind, type ReportSummary } from '../shared/types.ts';
 import { FOR_YOU_CHARS, FOR_YOU_KEPT, forYouId, splitForYou } from '../shared/forYou.ts';
 
@@ -774,6 +774,31 @@ export class Orchestrators {
     console.log(`ledger: w2850's question handed to ${ben.displayName} (w2867 one-off)`);
   }
 
+  /**
+   * w3615's repair of requests settled before the fix: Blocked on a gate the dispatcher set, or Queued, after the question
+   * pending on it was asked (w3533: asked Ben at 08:26 UTC, blocked on w3612 at 08:27, still Waiting on input on Ben). At a
+   * boot, each is settled as the dispatcher's decision would settle it now (settleQuestion) and its people are told. A
+   * question asked after that decision is a live one and stays. Returns the ids repaired.
+   */
+  settleStaleQuestions(): string[] {
+    const out: string[] = [];
+    for (const w of this.store.work.values()) {
+      if (!isOpen(w) || !w.question) continue;
+      const asked = Date.parse(w.question.at) || 0;
+      const decided = w.status === 'blocked' && w.blocked?.by === 'dispatcher' ? Date.parse(w.blocked.at) : w.status === 'queued' && w.queuedFor ? Date.parse(w.queuedFor.at) : NaN;
+      if (!(decided > asked)) continue;
+      const settled = this.settleQuestion(w, 'the dispatcher');
+      if (!settled) continue;
+      const what = `the dispatcher's ${w.status === 'blocked' ? 'block' : 'queue'} at ${new Date(decided).toISOString().slice(11, 16)} UTC settled its question: ${settled.line}`;
+      this.stamp(w, `ledger: ${what} (w3615 repair)`);
+      this.store.putWork(w);
+      if (settled.asked.length) this.toPeople(settled.asked, dispatchNotice(w, what));
+      console.log(`ledger: ${w.id}'s settled question closed (w3615 repair)`);
+      out.push(w.id);
+    }
+    return out;
+  }
+
   /** The one-off [needs you] digest after a boot (w1378, scheduleNeedsYouDigest). */
   private digestTimer: NodeJS.Timeout | undefined;
 
@@ -783,6 +808,7 @@ export class Orchestrators {
    */
   scheduleNeedsYouDigest(waits: () => { w: WorkItem; wait: NeedsYouWait }[], ms: number) {
     this.fixW2850();
+    this.settleStaleQuestions();
     clearTimeout(this.digestTimer);
     this.digestTimer = setTimeout(() => {
       try {
@@ -2599,6 +2625,7 @@ It is for your part of the work, not an answer to another worker's question.`;
     // What the person asks now is what the dispatcher acts on: it counts as theirs only when said in their own turn.
     w.humanAsked = (chat.turnFrom ?? chat.lastFrom) === 'human';
     const what: string[] = [];
+    let settledFor: { asked: Requester[]; line: string } | undefined;
     // ACTING (w1031): their own words in this turn, never a harness message or a worker's report relayed to their chat.
     // w2867: a question handed to another person stays theirs: a note by anyone else (lothsahn's "keep waiting on ben's
     // pick" on w2850) adds to it and answers nothing.
@@ -2637,6 +2664,12 @@ It is for your part of the work, not an answer to another worker's question.`;
       if (held) what.push(`the question stays open: a note outside ${owner.displayName}'s own turn answers nothing, it waits on their answer`);
       else {
         if (w.status === 'question' && !keeps) w.status = 'new';
+        // w3615: answered by someone it was not asked of (another requester): the asked people's cards about it go too.
+        const settled = !keeps && w.humanAsked ? this.settleQuestion(w, owner.displayName, { except: owner, keepRecord: true }) : undefined;
+        if (settled?.asked.length) {
+          what.push(settled.line);
+          settledFor = { asked: settled.asked, line: settled.line };
+        }
         if (!keeps) w.question = undefined;
       }
       // A hold lifted or a "go" does not lift a gate (w754, w750: w727 was still open when lothsahn said "unblock the release"):
@@ -2667,6 +2700,8 @@ It is for your part of the work, not an answer to another worker's question.`;
     // The others it is for hear that it closed.
     const others = w.requesters.filter((r) => !same(r.userId, owner.userId));
     if (input.close && others.length) this.toPeople(others, dispatchNotice(w, `${input.close === 'done' ? 'closed as done' : 'cancelled'} by ${owner.displayName}`, note));
+    // w3615: the people the question was asked of hear that another's answer settled it.
+    if (settledFor) this.toPeople(settledFor.asked, dispatchNotice(w, `${owner.displayName} answered its question; ${settledFor.line}`, note));
     // Closing as done needs nothing from the dispatcher; anything else may.
     if (input.close !== 'done') {
       const live = w.sessionIds.filter((sid) => BUSY.includes(this.store.sessions.get(sid)?.status ?? 'stopped'));
@@ -2863,6 +2898,32 @@ It is for your part of the work, not an answer to another worker's question.`;
     const hit = about.filter((a) => asksAnsweredBy([a.ask], note).length);
     const go = hit.length ? hit : about.length === 1 ? about : [];
     if (go.length) this.closeAsks(chat.info.id, (a) => go.includes(a));
+  }
+
+  /**
+   * w3615: the question pending on `w` for a person (the dispatcher's, the blocker watch's "is it still needed?", or one
+   * handed on) is settled by something other than that person's own answer: the dispatcher's decision, or another person's
+   * answer. It no longer waits on them: the question goes, its [needs you] is answered by `by` (unless `keepRecord`: the
+   * caller routes the answer to its worker), and the cards about it their orchestrators raised since it was asked leave
+   * their Waiting tab. On w3533 the dispatcher blocked it on w3612 at 08:27 UTC; at 08:40 it still showed Waiting on input
+   * on Ben, his card open. The people it waited on (`except` left out) and the line for the log and their notice;
+   * undefined when no question was pending.
+   */
+  private settleQuestion(w: WorkItem, by: string, opts: { except?: Requester; keepRecord?: boolean } = {}): { asked: Requester[]; line: string } | undefined {
+    const q = w.question;
+    const r = w.needsYou && !w.needsYou.answered && w.needsYou.kind === 'question' ? w.needsYou : undefined;
+    if (!q && !r) return undefined;
+    const asked = (q ? questionFor(w) : whoOf(r!.who, this.d.identity.list(), w.requesters)).filter((p) => !opts.except || !same(p.userId, opts.except.userId));
+    const since = Date.parse(q?.at ?? r!.at) || 0;
+    w.question = undefined;
+    if (r && !opts.keepRecord) r.answered = { by, at: this.now().toISOString(), ...(w.outcome ? { outcome: w.outcome } : {}) };
+    let cards = 0;
+    for (const p of asked) {
+      const chat = this.personalOf(p.userId);
+      if (chat) cards += this.closeAsks(chat.info.id, (a) => a.request === w.id && (Date.parse(a.at) || 0) >= since);
+    }
+    if (!asked.length) return { asked, line: `it settles the question asked at ${(q?.at ?? r!.at).slice(11, 16)} UTC (w3615)` };
+    return { asked, line: `it settles the question that waited on ${names(asked)} (asked ${(q?.at ?? r!.at).slice(11, 16)} UTC): nothing waits on ${asked.length > 1 ? 'them' : 'their answer'} now${cards ? `, and ${cards > 1 ? `${cards} cards about it are` : 'their card about it is'} withdrawn` : ''} (w3615)` };
   }
 
   /** Per chat, the turn (its opening message's uuid) and the open questions already listed to the orchestrator in it. */
@@ -3886,6 +3947,9 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     // Out of stalled by a decision (w643: block, a stalled request found to wait on something): no stale stall reason.
     if (isOpen(w)) w.stalled = undefined;
     if (input.action === 'reject' || input.action === 'done') w.outcome = clip(note, 300);
+    // w3615: any decision but a new question settles the one pending (a dropped leg decides nothing about it).
+    const settled = input.action !== 'ask' && !legOnly ? this.settleQuestion(w, 'the dispatcher') : undefined;
+    if (settled) what = `${what}; ${settled.line}`;
     if (twin) {
       w.outcome = clip(`${note} (a repeat of pair run ${twin.twin.id}, which finished${twin.sure ? ' on the same commit' : ''}; its result: ${this.pairResult(twin.twin, w.pair?.for ?? '')})`, 1500);
       what = `${what || 'closed as done'}: a repeat of ${twin.twin.id} (w2057)`;
@@ -3896,7 +3960,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     if (input.action === 'block') this.tellReportWaited(w, gatesOf(w).filter((g) => !keptBefore.some((k) => sameGate(k, g))));
     // A question is for the person who asked, as [needs you] (w1378); the rest is news for everyone the request is for.
     if (input.action === 'ask') return `${w.id} ${w.status}: ${what}. ${this.askPerson(w)}`;
-    this.toPeople(w.requesters, dispatchNotice(w, what, note));
+    this.toPeople([...w.requesters, ...(settled?.asked ?? [])], dispatchNotice(w, what, note));
     return `${w.id} ${w.status}: ${what}. ${names(w.requesters)}'s orchestrator has your note.`;
   }
 
@@ -5794,6 +5858,9 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     }
     // After the release above: a gate the worker taken off set is no longer another worker's to keep.
     const others = !opts.moved && !w.pair && opts.overrideGate?.trim() ? othersGates(w, s.id) : exempt;
+    // w3615: a new worker started on it settles the question it waited on (a message to one already on it does not).
+    const settled = !w.sessionIds.includes(s.id) ? this.settleQuestion(w, 'the dispatcher') : undefined;
+    if (settled) what += `; ${settled.line}`;
     w.sessionIds = [...new Set([...w.sessionIds, s.id])];
     w.links = { ...w.links, [s.id]: { at: this.now().toISOString(), how: 'sent' } };
     // Started or sent to a worker: whatever held it is over (stamp drops a blocker or a capacity note).
@@ -5813,7 +5880,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     } else w.status = 'active';
     this.stamp(w, `dispatcher: ${what}${was}${others.length ? `; still blocked on ${gatesName(others)}, ${opts.moved ? 'the wait it moved with' : "another worker's wait"}` : ''}`);
     this.store.putWork(w);
-    if (opts.reply !== false) this.toPeople(w.requesters, dispatchNotice(w, what));
+    if (opts.reply !== false || settled?.asked.length) this.toPeople(opts.reply !== false ? [...w.requesters, ...(settled?.asked ?? [])] : settled!.asked, dispatchNotice(w, what));
   }
 
   /**
@@ -6828,9 +6895,26 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       const files = [...(s.reportFiles ?? [])];
       for (const f of a.source.reportFiles ?? []) if (!files.some((x) => x.sha256 === f.sha256 && x.kind === f.kind)) files.push(f);
       if (files.length) s.reportFiles = files.slice(-60);
+      // The diagnosis's own summary when the request has none (w3602): what its card leads with.
+      if (!s.digest && a.source.digest) s.digest = a.source.digest;
     }
     this.stamp(w, a.line);
     this.store.putWork(w);
+  }
+
+  /**
+   * An intake request's plain-words summary (w3602, shared/intakeDigest.ts), read from FFBox after it was filed: what its
+   * cards lead with. A newer one replaces it; the same one changes nothing.
+   */
+  noteDigest(id: string, digest: WorkDigest): boolean {
+    const w = this.store.work.get(id);
+    const s = w?.source;
+    if (!w || !s || !isOpen(w)) return false;
+    if (s.digest && (s.digest.at > digest.at || JSON.stringify(s.digest) === JSON.stringify(digest))) return false;
+    s.digest = digest;
+    this.stamp(w, `FFBox's summary read for its card (${digest.at.slice(0, 16).replace('T', ' ')})`);
+    this.store.putWork(w);
+    return true;
   }
 
   /** An FFBox review request whose pull request merged or closed on FFBox's side needs nothing more. */
@@ -7851,6 +7935,9 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const what = [`note: ${note}`];
     if (w.flag) what.push(`answers the ${w.flag.kind === 'error' ? 'escalated error' : 'design question'} "${clip(w.flag.text, 120)}"`);
     else if (w.question) what.push(`answers "${clip(w.question.text, 120)}"`);
+    // w3615: and the cards about it of anyone else it was asked of leave their Waiting tab.
+    const settled = this.settleQuestion(w, person.displayName, { except: person });
+    if (settled?.asked.length) this.toPeople(settled.asked, dispatchNotice(w, `${person.displayName} answered it on FFBox; ${settled.line}`));
     w.status = 'new';
     w.flag = undefined;
     w.question = undefined;
