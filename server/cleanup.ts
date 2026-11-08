@@ -417,17 +417,23 @@ export function localRemotePath(url: string, base: string): string | undefined {
 /**
  * How many of HEAD's commits no remote holds now: the clone's remote refs plus every tip each remote has at this moment
  * (a local remote's refs read in place, a network remote's heads and tags by ls-remote), counting only tips this clone
- * has the objects of. Any failure keeps `fallback` (unknown counts as work).
+ * has the objects of, then asks each remote whether it contains HEAD (w3616). Any failure keeps `fallback` (unknown counts
+ * as work).
  */
 async function aheadOfRemotesNow(dir: string, fallback: number, git: (...a: string[]) => Promise<string>, timeoutMs: number): Promise<number> {
   const NL = '\n';
   try {
     const tips = new Set<string>();
-    const urls = (await git('remote', '-v').catch(() => ''))
-      .split(NL)
-      .filter((l) => l.endsWith('(fetch)'))
-      .map((l) => l.replace(/^\S+\s+/, '').replace(/ \(fetch\)$/, ''));
-    for (const url of new Set(urls)) {
+    const urls = [
+      ...new Set(
+        // The URLs as configured: `remote -v` shows them after url.<base>.insteadOf, which hides a GitHub remote's name.
+        (await git('config', '--get-regexp', '^remote\..*\.url$').catch(() => ''))
+          .split(NL)
+          .map((l) => l.replace(/^\S+\s+/, ''))
+          .filter(Boolean),
+      ),
+    ];
+    for (const url of urls) {
       const local = localRemotePath(url, dir);
       const refs = local
         ? fs.existsSync(local)
@@ -439,17 +445,87 @@ async function aheadOfRemotesNow(dir: string, fallback: number, git: (...a: stri
         if (sha && /^[0-9a-f]{40,64}$/.test(sha)) tips.add(sha);
       }
     }
-    if (!tips.size) return fallback;
-    const have = (await gitWithInput(dir, ['cat-file', '--batch-check=%(objectname) %(objecttype)'], [...tips].join(NL) + NL, timeoutMs))
-      .split(NL)
-      .filter((l) => / (commit|tag)$/.test(l))
-      .map((l) => l.split(' ')[0]!);
-    if (!have.length) return fallback;
-    const count = Number(await gitWithInput(dir, ['rev-list', '--count', 'HEAD', '--not', '--remotes', '--stdin'], have.map((s) => `^${s}`).join(NL) + NL, timeoutMs));
-    return Number.isFinite(count) ? Math.min(count, fallback) : fallback;
+    let ahead = fallback;
+    const have = tips.size
+      ? (await gitWithInput(dir, ['cat-file', '--batch-check=%(objectname) %(objecttype)'], [...tips].join(NL) + NL, timeoutMs))
+          .split(NL)
+          .filter((l) => / (commit|tag)$/.test(l))
+          .map((l) => l.split(' ')[0]!)
+      : [];
+    if (have.length) {
+      const count = Number(await gitWithInput(dir, ['rev-list', '--count', 'HEAD', '--not', '--remotes', '--stdin'], have.map((s) => `^${s}`).join(NL) + NL, timeoutMs));
+      if (Number.isFinite(count)) ahead = Math.min(count, fallback);
+    }
+    // A single-branch clone whose PR branch was merged and then deleted (w3616): the remote's tips are commits this clone
+    // never fetched, so the count above cannot see that HEAD is in the remote's history, and the clone was kept for good
+    // (two on biscuit, 38.7 GB). Ask the remote itself, still without fetching: a local remote by --contains in place, a
+    // GitHub one by its compare API against the default branch. Any failure leaves the count (unknown counts as work).
+    if (ahead > 0) {
+      const head = await git('rev-parse', 'HEAD');
+      for (const url of urls) if (await remoteContains(url, dir, head, timeoutMs)) return 0;
+    }
+    return ahead;
   } catch {
     return fallback;
   }
+}
+
+/** The owner/repo of a GitHub remote URL (https, ssh or git@github.com:), or undefined for any other. */
+export function githubSlug(url: string): string | undefined {
+  const m = /^(?:https?:\/\/(?:[^@/]+@)?github\.com\/|ssh:\/\/git@github\.com\/|git@github\.com:)([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/i.exec(url.trim());
+  return m ? `${m[1]}/${m[2]}` : undefined;
+}
+
+/**
+ * Whether GitHub's `slug` has commit `sha` in its default branch's history: true, false, or undefined when unknown (gh
+ * missing or logged out, the repo or the commit unknown to GitHub, a timeout). `compare/<sha>...<default>` answers
+ * "ahead" or "identical" when the default branch contains sha (ledgerSweep.ts gitContains reads it the same way).
+ */
+export type GithubContains = (slug: string, sha: string, timeoutMs: number) => Promise<boolean | undefined>;
+
+const gh = (args: string[], timeoutMs: number) =>
+  new Promise<string>((resolve, reject) =>
+    execFile('gh', args, { encoding: 'utf8', timeout: timeoutMs, windowsHide: true, env: { ...process.env, GH_PROMPT_DISABLED: '1', GIT_TERMINAL_PROMPT: '0' } }, (e, out) => (e ? reject(e) : resolve(String(out).trim()))),
+  );
+
+const defaultBranches = new Map<string, string>();
+/** A commit found on a default branch stays there: each pass asks GitHub only about commits it has not found yet. */
+const onDefault = new Set<string>();
+
+const ghContains: GithubContains = async (slug, sha, timeoutMs) => {
+  if (onDefault.has(`${slug} ${sha}`)) return true;
+  try {
+    let branch = defaultBranches.get(slug);
+    if (!branch) {
+      branch = await gh(['api', `repos/${slug}`, '--jq', '.default_branch'], timeoutMs);
+      if (!branch) return undefined;
+      defaultBranches.set(slug, branch);
+    }
+    const status = await gh(['api', `repos/${slug}/compare/${sha}...${encodeURIComponent(branch)}`, '--jq', '.status'], timeoutMs);
+    const yes = status === 'ahead' || status === 'identical';
+    if (yes) onDefault.add(`${slug} ${sha}`);
+    return yes ? true : status === 'behind' || status === 'diverged' ? false : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+let githubContains: GithubContains = ghContains;
+/** Tests swap GitHub's answer; undefined puts gh back. */
+export function setGithubContains(f: GithubContains | undefined): void {
+  githubContains = f ?? ghContains;
+}
+
+/** Whether the remote at `url` holds `sha` now: a ref of a local remote contains it, or a GitHub remote's default branch does. */
+async function remoteContains(url: string, dir: string, sha: string, timeoutMs: number): Promise<boolean> {
+  const local = localRemotePath(url, dir);
+  if (local) {
+    if (!fs.existsSync(local)) return false;
+    const refs = await gitWithInput(local, ['for-each-ref', '--count=1', '--contains', sha, '--format=%(refname)'], '', timeoutMs).catch(() => '');
+    return refs.length > 0;
+  }
+  const slug = githubSlug(url);
+  return slug ? (await githubContains(slug, sha, timeoutMs)) === true : false;
 }
 
 /** The git repos (or worktrees: .git may be a file) at `dir` or one level below. */

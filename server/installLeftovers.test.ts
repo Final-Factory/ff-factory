@@ -531,6 +531,47 @@ test('w3426: a cargo target over the size cap goes on a normal pass once idle; a
   assert.match(trimmed[0].why, /^the incremental cache of a Rust build folder/);
 });
 
+/**
+ * w3617: the cap was per target, so a worker that made a new target per leg slipped past it: ffa-9d583b51 on biscuit held 12
+ * (ffu-target, ffu-target-m13, ffu-target-g10, ...), 22 GB together and each under the 8 GB cap (measured, 2026-11-08). The
+ * cap is on the sum of one worker's targets: the oldest idle targets' incremental caches go first, a busy target never does.
+ */
+test("w3617: a worker's cargo targets over the cap together lose the oldest idle ones' incremental caches; a busy one stays", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-cargo-sum-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
+  const tmp = path.join(root, 'tmp');
+  const session = path.join(tmp, 'ffa-9d583b51');
+  const tag = 'Signature: 8a477f597d28d172789f06886806bc55\n# This file is a cache directory tag created by cargo.\n';
+  // Oldest first: busy (a test binary runs from it), then a, b, c; each 8 KB of deps and incremental, under any cap below.
+  const names = ['ffu-target-busy', 'ffu-target', 'ffu-target-m13', 'ffu-target-g10'];
+  for (const n of names) {
+    const target = path.join(session, n);
+    fs.mkdirSync(path.join(target, 'debug', 'deps'), { recursive: true });
+    fs.mkdirSync(path.join(target, 'debug', 'incremental', 'ffu_sim-1'), { recursive: true });
+    fs.writeFileSync(path.join(target, 'CACHEDIR.TAG'), tag);
+    fs.writeFileSync(path.join(target, 'debug', 'deps', 'ffu_sim-1.rlib'), Buffer.alloc(4096));
+    fs.writeFileSync(path.join(target, 'debug', 'incremental', 'ffu_sim-1', 'query-cache.bin'), Buffer.alloc(4096));
+  }
+  ageAll(session, 1);
+  names.forEach((n, i) => ageAll(path.join(session, n), 4 - i));
+  const one = 4096 * 2 + Buffer.byteLength(tag);
+  const procs: ProcLite[] = [{ pid: 50, ppid: 1, cmd: `${path.join(session, 'ffu-target-busy', 'debug', 'deps', 'ffu_sim-1234.exe')} --test-threads 4` }];
+  const guard: CleanupGuard = { keep: [], inUse: [session], resumable: [session], home: path.join(root, 'home') };
+  const plan = async (capBytes: number) =>
+    (await planInstallLeftovers({ root, sandboxes: [], tempRoots: [tmp], guard, procs, settings: { ...settings, cargoTargetCapGB: capBytes / 1024 ** 3 }, now: NOW, low: false, heldMinBytes: 0, scope: 'cargo-cap' }));
+  const capped = (p: Awaited<ReturnType<typeof plan>>) => p.items.filter((i) => i.rule === 'cargo-target-cap').map((i) => rel(session, i.path)).sort();
+
+  // 4 targets, 1.8 incremental caches over: the two oldest idle ones lose theirs; the busy and the newest stay whole.
+  const over = await plan(4 * one - 1.8 * 4096);
+  assert.deepEqual(capped(over), ['ffu-target-m13/debug/incremental', 'ffu-target/debug/incremental']);
+  for (const i of over.items) assert.match(i.why, /^the incremental cache of a Rust build folder .* in this worker's 4 cargo targets, over the .* GB cap\), with no cargo process/);
+  assert.ok((over.held ?? []).some((h) => h.path.endsWith('ffu-target-busy') && /a running process uses it \(pid 50/.test(h.why)), 'the busy one is reported kept');
+  // Under the summed cap: nothing goes.
+  assert.deepEqual(capped(await plan(4 * one + 1)), []);
+  // More over than every idle incremental cache can save: whole idle targets go, oldest first, until under the cap.
+  assert.deepEqual(capped(await plan(2 * one + 100)), ['ffu-target', 'ffu-target-m13']);
+});
+
 test('w3396: cargoTargetBusy reads only the top levels of a target and needs a process list', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-cargo-busy-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
