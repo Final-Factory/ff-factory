@@ -4,6 +4,7 @@ import { promisify } from 'node:util';
 import zlib from 'node:zlib';
 import type { SearchHit, SessionInfo, TranscriptEvent } from '../shared/types.ts';
 import { redactSecrets } from './secrets.ts';
+import { personMessageView } from '../shared/personMessage.ts';
 
 const gunzip = promisify(zlib.gunzip);
 
@@ -40,6 +41,8 @@ export function terms(q: string): string[] {
 export function searchableText(e: TranscriptEvent): string {
   switch (e.kind) {
     case 'user':
+      // A person's message is searched as their chat shows it: FF Factory's notes after their words are the orchestrator's (w3581).
+      return e.from === 'human' ? personMessageView(e.text).words : e.text;
     case 'assistant':
     case 'thinking':
     case 'system':
