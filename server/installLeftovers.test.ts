@@ -572,6 +572,104 @@ test("w3617: a worker's cargo targets over the cap together lose the oldest idle
   assert.deepEqual(capped(await plan(2 * one + 100)), ['ffu-target', 'ffu-target-m13']);
 });
 
+/**
+ * w3674: one running worker ran scratch_clone.sh --library four times in 50 minutes, each copy a whole 33.9 GB Library, and F:
+ * went from 99 GB free to 0 (the low pass never takes a running worker's Library). A worker's Library folders over
+ * libraryCopyCapGB together lose the oldest idle ones; one a process names, one written lately and a sandbox's stay.
+ */
+function unityClone(session: string, name: string, bytes = 4096) {
+  const proj = path.join(session, name);
+  fs.mkdirSync(path.join(proj, 'ProjectSettings'), { recursive: true });
+  fs.writeFileSync(path.join(proj, 'ProjectSettings', 'ProjectVersion.txt'), 'm_EditorVersion: 6000.3.0f1\n');
+  fs.mkdirSync(path.join(proj, 'Library', 'Artifacts'), { recursive: true });
+  fs.writeFileSync(path.join(proj, 'Library', 'Artifacts', 'import.bin'), Buffer.alloc(bytes));
+  return proj;
+}
+
+test("w3674: a worker's Unity Library copies over the cap lose the oldest idle ones; a named, a fresh and a sandbox's stay", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-library-cap-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
+  const tmp = path.join(root, 'tmp');
+  const session = path.join(tmp, 'ffa-c1111111');
+  const names = ['clone-base1', 'clone-base2', 'clone-base3', 'clone-base4', 'clone-base5'];
+  const proj = Object.fromEntries(names.map((n) => [n, unityClone(session, n)]));
+  // Oldest first: base1 (5 h), base2 (4 h, an editor names it), base3 (3 h), base5 (1 h), base4 (2 min ago).
+  ageAll(proj['clone-base1'], 5);
+  ageAll(proj['clone-base2'], 4);
+  ageAll(proj['clone-base3'], 3);
+  ageAll(proj['clone-base5'], 1);
+  ageAll(proj['clone-base4'], 1);
+  const recent = (NOW - 2 * 60_000) / 1000;
+  fs.utimesSync(path.join(proj['clone-base4'], 'Library', 'Artifacts'), recent, recent);
+  // A sandbox's own Library is far over the cap and never touched.
+  const sandbox = unityClone(path.join(root, 'sandboxes'), 'slot9', 50_000);
+  ageAll(sandbox, 9);
+  const procs: ProcLite[] = [{ pid: 60, ppid: 1, cmd: `C:\\Unity\\Editor\\Unity.exe -batchmode -projectPath ${proj['clone-base2']} -executeMethod Build.Player` }];
+  const guard: CleanupGuard = { keep: [], inUse: [session], resumable: [session], home: path.join(root, 'home') };
+  const plan = (capBytes: number, o: { low?: boolean; scope?: 'cargo-cap'; procs?: ProcLite[] | null; sandboxes?: string[] } = {}) =>
+    planInstallLeftovers({
+      root,
+      sandboxes: o.sandboxes ?? [sandbox],
+      tempRoots: [tmp],
+      guard,
+      procs: o.procs === null ? undefined : (o.procs ?? procs),
+      settings: { ...settings, libraryCopyCapGB: capBytes / 1024 ** 3 },
+      now: NOW,
+      low: o.low ?? false,
+      heldMinBytes: 0,
+      scope: o.scope,
+    });
+  const capped = (p: Awaited<ReturnType<typeof plan>>) => p.items.filter((i) => i.rule === 'library-copy-cap').map((i) => rel(session, i.path)).sort();
+
+  // 20 KB in 5 copies, cap 6000: the idle ones go oldest first until under it; base2 (named) and base4 (fresh) are reported kept.
+  const over = await plan(6000);
+  assert.deepEqual(capped(over), ['clone-base1/Library', 'clone-base3/Library', 'clone-base5/Library']);
+  for (const i of over.items.filter((x) => x.rule === 'library-copy-cap')) {
+    assert.ok(i.inSession, 'carries its session');
+    assert.match(i.why, /^a Unity project's Library in a worker's scratch clone, .* GB, .* GB in this worker's 5 Library copies, over the .* GB cap, with no process naming the project and no write for 15 min \(rebuildable/);
+  }
+  const held = over.held ?? [];
+  assert.ok(held.some((h) => rel(session, h.path) === 'clone-base2/Library' && /a running process names the project \(pid 60/.test(h.why)), 'the named one is reported kept');
+  assert.ok(held.some((h) => rel(session, h.path) === 'clone-base4/Library' && /written 2 min ago, within 15 min/.test(h.why)), 'the fresh one is reported kept');
+  // It stops once under the cap: base3 goes, base5 (newer) stays.
+  assert.deepEqual(capped(await plan(12_300)), ['clone-base1/Library', 'clone-base3/Library']);
+  // Under the cap, or cap 0, or no process list (an open build cannot be ruled out): nothing goes.
+  assert.deepEqual(capped(await plan(5 * 4096)), []);
+  assert.deepEqual(capped(await plan(0)), []);
+  assert.deepEqual(capped(await plan(6000, { procs: null })), []);
+  // A low pass applies it too, and the hourly cap pass (scope 'cargo-cap') runs nothing else.
+  assert.deepEqual(capped(await plan(6000, { low: true })), ['clone-base1/Library', 'clone-base3/Library', 'clone-base5/Library']);
+  const only = await plan(6000, { scope: 'cargo-cap' });
+  assert.deepEqual(only.items.map((i) => rel(session, i.path)).sort(), ['clone-base1/Library', 'clone-base3/Library', 'clone-base5/Library']);
+  assert.ok(only.items.every((i) => i.rule === 'library-copy-cap'));
+  // Nothing in a sandbox, and a project registered as a sandbox is not touched either.
+  assert.ok(!over.items.some((i) => i.path.startsWith(sandbox)));
+  assert.ok(!(await plan(6000, { sandboxes: [proj['clone-base1']] })).items.some((i) => /clone-base1/.test(i.path)));
+});
+
+test('w3674: a Library copy in a git clone goes when git ignores it and stays when the work tree does not', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-library-git-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
+  const tmp = path.join(root, 'tmp');
+  const session = path.join(tmp, 'ffa-c2222222');
+  const ignored = unityClone(session, 'clone-ignored');
+  const open = unityClone(session, 'clone-open');
+  fs.writeFileSync(path.join(ignored, '.gitignore'), '/[Ll]ibrary/\n');
+  for (const d of [ignored, open]) execFileSync('git', ['init', '-q', d]);
+  ageAll(session, 3);
+  const guard: CleanupGuard = { keep: [], inUse: [session], resumable: [session], home: path.join(root, 'home') };
+  const p = await planInstallLeftovers({ root, sandboxes: [], tempRoots: [tmp], guard, procs: [], settings: { ...settings, libraryCopyCapGB: 1 / 1024 ** 3 }, now: NOW, low: false, heldMinBytes: 0, scope: 'cargo-cap' });
+  assert.deepEqual(p.items.map((i) => rel(session, i.path)), ['clone-ignored/Library']);
+  assert.ok((p.held ?? []).some((h) => rel(session, h.path) === 'clone-open/Library' && /does not ignore it/.test(h.why)));
+});
+
+test('w3674: libraryCopyCapGB defaults to 40 and reads from config; 0 is allowed', () => {
+  assert.equal(installLeftoverSettings({}).libraryCopyCapGB, 40);
+  assert.equal(installLeftoverSettings({ libraryCopyCapGB: 60 }).libraryCopyCapGB, 60);
+  assert.equal(installLeftoverSettings({ libraryCopyCapGB: 0 }).libraryCopyCapGB, 0);
+  assert.equal(installLeftoverSettings({ libraryCopyCapGB: -1 }).libraryCopyCapGB, 40);
+});
+
 test('w3396: cargoTargetBusy reads only the top levels of a target and needs a process list', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-cargo-busy-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 }));

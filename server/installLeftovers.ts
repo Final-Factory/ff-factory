@@ -76,6 +76,14 @@ export interface InstallLeftoverSettings {
    */
   cargoTargetCapGB: number;
   /**
+   * The Unity `Library` folders in one worker's temp folder (a `scratch_clone.sh --library` copy of the source's Library, each
+   * a whole copy) together over this many GB lose the oldest idle ones, on every pass and for running, blocked and stopped
+   * workers alike (w3674): one running worker made four such copies in 50 minutes (14:18 to 15:08 UTC, 2026-11-08), each the
+   * size of the source's Library (slot3's: 33.9 GB), used only the newest, and F: went from about 99 GB free to 0, while the
+   * low pass never takes a running worker's Library. 40 lets one warm copy (about 34 GB) stay and not a second; 0: never.
+   */
+  libraryCopyCapGB: number;
+  /**
    * A timed run's laid-out build (`<install>/timing/builds/b<i>`, machine/timedRunner.ts) goes once untouched this many hours
    * while no timing ticket is held or waiting and no timed run is in flight: the next run lays it out again from timing/cache
    * (w3502: 3.6 GB on LothDesktop's V:).
@@ -99,6 +107,7 @@ export const INSTALL_LEFTOVER_DEFAULTS: InstallLeftoverSettings = {
   idleCacheHours: 24,
   lowCacheSettleMinutes: 15,
   cargoTargetCapGB: 8,
+  libraryCopyCapGB: 40,
   timingBuildHours: 24,
   runnerWorkDays: 14,
 };
@@ -122,6 +131,7 @@ export function installLeftoverSettings(raw: unknown): InstallLeftoverSettings {
     idleCacheHours: n('idleCacheHours', 0, 24 * 30),
     lowCacheSettleMinutes: n('lowCacheSettleMinutes', 0, 24 * 60),
     cargoTargetCapGB: n('cargoTargetCapGB', 0, 10_000),
+    libraryCopyCapGB: n('libraryCopyCapGB', 0, 10_000),
     timingBuildHours: n('timingBuildHours', 1, 24 * 30),
     runnerWorkDays: n('runnerWorkDays', 1, 365),
   };
@@ -317,6 +327,22 @@ async function newestTopWrite(target: string): Promise<number> {
     for (const e of await children(p)) if (e.isDirectory() || depth < 2) stack.push({ p: path.join(p, e.name), depth: depth + 1 });
   }
   return newest;
+}
+
+/**
+ * The Library folders of the Unity projects at or under `dir` (w3674), found as idleCachesIn finds a project (a folder with
+ * ProjectSettings/ProjectVersion.txt), down to CACHE_DEPTH; a project is not searched for nested ones.
+ */
+async function libraryCopiesIn(dir: string, depth = 1, out: { project: string; library: string }[] = []): Promise<{ project: string; library: string }[]> {
+  if (fs.existsSync(path.join(dir, 'ProjectSettings', 'ProjectVersion.txt'))) {
+    for (const e of await children(dir)) if (e.isDirectory() && /^library$/i.test(e.name)) out.push({ project: dir, library: path.join(dir, e.name) });
+    return out;
+  }
+  for (const e of await children(dir)) {
+    if (!e.isDirectory() || /^\.git$/i.test(e.name) || (depth === 1 && /^claude/i.test(e.name)) || NEVER_SEGMENT.test(e.name)) continue;
+    if (depth < CACHE_DEPTH) await libraryCopiesIn(path.join(dir, e.name), depth + 1, out);
+  }
+  return out;
 }
 
 /** A Unity Profiler capture whose digest is done: a `.csv` or `.txt` beside it written after it (bench/cpu_budget_run.sh's budget.txt, the per-frame CSVs). */
@@ -713,7 +739,8 @@ export async function planInstallLeftovers(o: {
    */
   closed?: string[];
   /** 'sandboxes': only each sandbox's own build and capture output (the sandbox release sweep, w913). 'cargo-cap': only the
-   * cargo-target-cap rule over the sessions' temp folders, for the passes the stale-output rules skip (w3471). */
+   * cargo-target-cap rule over the sessions' temp folders, for the passes the stale-output rules skip (w3471); since w3674 it
+   * covers the Unity Library copy cap (library-copy-cap) too. */
   scope?: 'all' | 'sandboxes' | 'cargo-cap';
   /** Free space is below the soft threshold (or a person asked for a pass): stopped sessions' caches go after lowCacheSettleMinutes (w1813). */
   low?: boolean;
@@ -931,8 +958,50 @@ export async function planInstallLeftovers(o: {
       total -= c.bytes;
     }
   };
+  /**
+   * A worker's Unity Library copies over libraryCopyCapGB together lose the oldest idle ones, whole, on every pass whatever the
+   * free space (w3674): a worker that ran `scratch_clone.sh --library` four times in 50 minutes held four copies of a 33.9 GB
+   * Library, used the newest, and drove F: from 99 GB free to 0; the low pass never takes a running worker's Library. Oldest
+   * first, by the newest write in a Library's top levels. A project stays when any process names its folder (an open editor or
+   * a batchmode build, build_player.sh, -projectPath: that covers an open lockfile), when anything in its Library's top levels
+   * was written within the settle time, or when the guard or git holds it. Those count toward the sum and are reported kept.
+   * Running, blocked and stopped workers alike; the next build or editor start reimports what goes.
+   */
+  const capLibraries = async (session: string, t: string) => {
+    if (!s.libraryCopyCapGB || !o.procs) return;
+    const capBytes = s.libraryCopyCapGB * 1024 ** 3;
+    const gb = (b: number) => `${(b / 1024 ** 3).toFixed(1)} GB`;
+    const settle = s.lowCacheSettleMinutes || 15;
+    const copies: { project: string; library: string; bytes: number; newest: number }[] = [];
+    for (const c of await libraryCopiesIn(session)) {
+      const st = await fs.promises.lstat(c.library).catch(() => undefined);
+      if (!st?.isDirectory() || items.has(c.library) || !within(c.library, root) || o.sandboxes.some((sb) => within(c.library, sb) || within(sb, c.library))) continue;
+      copies.push({ ...c, bytes: await sizeOf(c.library), newest: await newestTopWrite(c.library) });
+    }
+    let total = copies.reduce((a, c) => a + c.bytes, 0);
+    if (total <= capBytes) return;
+    const over = `${gb(total)} in this worker's ${copies.length} Library cop${copies.length === 1 ? 'y' : 'ies'}, over the ${s.libraryCopyCapGB} GB cap`;
+    copies.sort((a, b) => a.newest - b.newest || a.library.localeCompare(b.library));
+    for (const c of copies) {
+      if (total <= capBytes) break;
+      const user = o.procs.find((p) => mentions(p.cmd, c.project));
+      const busy = user
+        ? `a running process names the project (pid ${user.pid}: ${user.cmd.slice(0, 160)})`
+        : c.newest > now - settle * 60_000
+          ? `its Library was written ${agoText(now - c.newest)} ago, within ${settle} min`
+          : undefined;
+      const no = busy ?? neverDelete(c.library, sessionRelaxed(session, relaxed(t))) ?? (await gitHolds(c.library, session));
+      if (no) {
+        held.push({ path: c.library, bytes: c.bytes, why: `1 rebuildable cache(s) kept: ${gb(c.bytes)}, ${over}, but ${no}` });
+        continue;
+      }
+      items.set(c.library, { path: c.library, rule: 'library-copy-cap', why: `a Unity project's Library in a worker's scratch clone, ${gb(c.bytes)}, ${over}, with no process naming the project and no write for ${settle} min (rebuildable: the next build or editor start reimports it)`, base: t, inSession: session });
+      total -= c.bytes;
+    }
+  };
   const idleCaches = async (session: string, t: string) => {
     if (!within(session, root)) return;
+    await capLibraries(session, t);
     if (!o.low) await capCargo(session, t);
     const quickOn = !!o.low && s.lowCacheSettleMinutes > 0;
     if (!s.idleCacheHours && !quickOn) return;
@@ -1050,6 +1119,7 @@ export async function planInstallLeftovers(o: {
       if (!within(t, root)) continue;
       for (const e of await children(t)) {
         if (!e.isDirectory() || !/^ffa-/i.test(e.name) || !within(path.join(t, e.name), root)) continue;
+        await capLibraries(path.join(t, e.name), t);
         await capCargo(path.join(t, e.name), t);
         // A closed worker's folder goes on the hourly pass too, not only on a low or daily one (w3656).
         await closedSession(path.join(t, e.name), t);
