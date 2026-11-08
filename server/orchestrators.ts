@@ -2477,9 +2477,9 @@ It is for your part of the work, not an answer to another worker's question.`;
    * `alreadyAsked`: they have it already). Their note answers it; a note by anyone else keeps it with them, and the
    * undecided re-offer (w2217) passes it by, as it does every question. Handed back to the requester, a note of theirs answers it.
    */
-  private handQuestion(chat: SessionHandle, w: WorkItem, from: Requester, toName: string, note: string | undefined, alreadyAsked?: boolean): string {
+  private handQuestion(chat: SessionHandle, w: WorkItem, from: Requester, toName: string, note: string | undefined, alreadyAsked?: boolean, forOwner = false, before: Requester[] = questionFor(w)): string {
     const to = this.personNamed(toName, `to hand ${w.id}'s question to`);
-    if (!isFor(w, from.userId) && !questionFor(w).some((r) => same(r.userId, from.userId)) && !this.reviewers().some((r) => same(r.userId, from.userId))) throw new Error(`${w.id} is not ${from.displayName}'s request, nor is its question theirs to hand on`);
+    if (!forOwner && !isFor(w, from.userId) && !questionFor(w).some((r) => same(r.userId, from.userId)) && !this.reviewers().some((r) => same(r.userId, from.userId))) throw new Error(`${w.id} is not ${from.displayName}'s request, nor is its question theirs to hand on`);
     if (!['new', 'question', 'stalled'].includes(w.status)) throw new Error(`${w.id} is ${w.status}: question_for hands on a question it waits on (new, question or stalled). A worker's own wait goes to a person through that worker (message_agent).`);
     const open = w.needsYou && !w.needsYou.answered ? w.needsYou : undefined;
     const text = w.question?.text ?? w.flag?.text ?? open?.question ?? note;
@@ -2493,9 +2493,12 @@ It is for your part of the work, not an answer to another worker's question.`;
     w.flag = undefined;
     w.question = { text: clip(text, 1000), at, ...(asks?.length ? { asks } : {}), for: [to], by: from.displayName };
     // The requester's own cards about it leave their Waiting on input tab: it is not theirs to answer now.
-    if (w.humanAsked && !same(to.userId, from.userId)) {
-      const mine = this.personalOf(from.userId);
-      if (mine) this.closeAsks(mine.info.id, (a) => a.request === w.id);
+    // w3606: and so do those of the owner it waited on, when another owner moves it.
+    if (w.humanAsked) {
+      for (const p of [from, ...(forOwner ? before : [])].filter((r, i, all) => !same(r.userId, to.userId) && all.findIndex((x) => same(x.userId, r.userId)) === i)) {
+        const mine = this.personalOf(p.userId);
+        if (mine) this.closeAsks(mine.info.id, (a) => a.request === w.id);
+      }
     }
     this.stamp(w, `${from.displayName} handed the question to ${to.displayName}${note ? `: ${note}` : ''}`);
     this.store.putWork(w);
@@ -2577,7 +2580,12 @@ It is for your part of the work, not an answer to another worker's question.`;
     // w2867: the person a question was handed to answers it (a note) or hands it on, though the request is not theirs.
     const holdsQuestion = !isFor(w, owner.userId) && questionFor(w).some((r) => same(r.userId, owner.userId));
     if (holdsQuestion && (input.close || input.reopen || input.priority || input.assign_to)) throw new Error(`${w.id} is ${names(w.requesters)}'s request: you hold its question, so a note answers it, or question_for hands it on; closing, reopening, priority and assign_to stay theirs`);
-    if (!isFor(w, owner.userId) && !holdsQuestion) return this.closeForOther(chat, owner, w, input);
+    // w3606 (lothsahn: "upon our request, ben and I can answer each other's questions and we can move questions to each
+    // other"): between owners, in the acting owner's own turn, an answer, a move of the question or a priority goes
+    // through as the request's own owner's would; its people hear who and what.
+    const forOwner = !isFor(w, owner.userId) && !holdsQuestion && this.ownerActsForOwner(chat, owner, w, input);
+    if (!isFor(w, owner.userId) && !holdsQuestion && !forOwner) return this.closeForOther(chat, owner, w, input);
+    const asked = questionFor(w);
     const note = input.note?.trim();
     if (!note && !input.priority && !input.close && !input.reopen && !input.assign_to && !input.question_for) throw new Error('give a note, a priority, close, assign_to, question_for or reopen');
     const problem = updateProblem(w, input, this.now().getTime());
@@ -2594,7 +2602,14 @@ It is for your part of the work, not an answer to another worker's question.`;
     // goes to that person, and waits on them until they answer.
     if (input.question_for) {
       if (input.close || input.reopen || input.priority) throw new Error('question_for stands alone (a note giving the reason is fine): it hands the open question on and keeps the request open');
-      return this.handQuestion(chat, w, owner, input.question_for, note, input.already_asked);
+      if (forOwner) {
+        const to = this.personNamed(input.question_for, `to move ${w.id}'s question to`);
+        if (!this.isOwnerRole(to.userId)) throw new Error(`${w.id} is ${names(w.requesters)}'s request: another owner moves its question only to an owner, and ${to.displayName} is not one (w3606)`);
+        this.stamp(w, `${owner.displayName} (an owner, on ${names(w.requesters)}'s request) moved its question from ${names(asked)} to ${to.displayName}, in their own words: ${this.ownWords(chat, note)}`);
+      }
+      const moved = this.handQuestion(chat, w, owner, input.question_for, note, input.already_asked, forOwner, asked);
+      if (forOwner) this.tellOwnersOfAct(w, owner, `moved the question on it from ${names(asked)} to ${names(w.question?.for ?? [])}`, this.ownWords(chat, note));
+      return moved;
     }
     // What the person asks now is what the dispatcher acts on: it counts as theirs only when said in their own turn.
     w.humanAsked = (chat.turnFrom ?? chat.lastFrom) === 'human';
@@ -2602,11 +2617,14 @@ It is for your part of the work, not an answer to another worker's question.`;
     // ACTING (w1031): their own words in this turn, never a harness message or a worker's report relayed to their chat.
     // w2867: a question handed to another person stays theirs: a note by anyone else (lothsahn's "keep waiting on ben's
     // pick" on w2850) adds to it and answers nothing.
-    const keeps = !!note && !!w.question?.for?.length && !w.question.for.some((r) => same(r.userId, owner.userId)) ? w.question : undefined;
+    // w3606: another owner's answer in their own turn answers it, wherever it waits among the owners.
+    const keeps = !forOwner && !!note && !!w.question?.for?.length && !w.question.for.some((r) => same(r.userId, owner.userId)) ? w.question : undefined;
+    const answering = !!note && !keeps && (w.status === 'question' || !!w.question || !!w.flag || (!!w.needsYou && !w.needsYou.answered));
     if (w.humanAsked) {
       const answers = !!note && !keeps && (w.status === 'question' || !!w.question || !!w.flag);
       const acted = input.reopen ? 'reopened it' : answers ? `answered ${w.flag ? (w.flag.kind === 'error' ? 'the escalated error' : 'the design question') : 'the question'} on it` : note ? 'added a note' : input.priority && input.priority !== w.priority ? `changed its priority to ${input.priority}` : undefined;
-      if (acted) this.takeOver(w, owner, `${owner.displayName} ${acted}`);
+      // Another owner's priority alone leaves the request on its people's pool; an answer moves it, as a note does (w677).
+      if (acted && (!forOwner || answering)) this.takeOver(w, owner, `${owner.displayName} ${acted}`);
     }
     if (input.reopen) {
       w.status = 'new';
@@ -2653,6 +2671,8 @@ It is for your part of the work, not an answer to another worker's question.`;
       if (w.humanAsked && w.needsYou && !w.needsYou.answered && !keeps) what.push(this.routeNote(w, owner, note));
       // w1868: and the open question cards about it that the note answers leave the person's Waiting on input tab.
       if (w.humanAsked) this.closeAsksAnsweredBy(owner, w, note);
+      // w3606: answered for another owner, the asked owners' own cards about it leave their tabs too.
+      if (forOwner && answering) for (const p of asked.filter((r) => !same(r.userId, owner.userId))) this.closeAsksAnsweredBy(p, w, note);
     }
     if (input.close) {
       // A PERSON'S CLOSE IS FINAL (w370): no automatic-close mark or loose PR link survives it for the cleanup's
@@ -2662,8 +2682,9 @@ It is for your part of the work, not an answer to another worker's question.`;
       if (note) w.outcome = clip(note, 300);
       what.push(input.close === 'done' ? 'closed as done' : 'cancelled');
     }
-    this.stamp(w, `${owner.displayName}: ${what.join('; ')}${w.humanAsked ? '' : ' (not in a turn of theirs)'}`);
+    this.stamp(w, `${owner.displayName}${forOwner ? ` (an owner, on ${names(w.requesters)}'s request, in their own words: ${this.ownWords(chat, note)})` : ''}: ${what.join('; ')}${w.humanAsked ? '' : ' (not in a turn of theirs)'}`);
     this.store.putWork(w);
+    if (forOwner) this.tellOwnersOfAct(w, owner, answering ? `answered the question on it: ${clip(firstLine(note ?? ''), 200)}` : `changed its ${what.join('; ')}`, this.ownWords(chat, note));
     // The others it is for hear that it closed.
     const others = w.requesters.filter((r) => !same(r.userId, owner.userId));
     if (input.close && others.length) this.toPeople(others, dispatchNotice(w, `${input.close === 'done' ? 'closed as done' : 'cancelled'} by ${owner.displayName}`, note));
@@ -3495,11 +3516,12 @@ It is for your part of the work, not an answer to another worker's question.`;
    * alone is noteForOther's (w677: another owner's request only). The request's people hear who did it and why; the
    * dispatcher hears a cancel or a reopen, as for their own.
    */
-  private closeForOther(chat: SessionHandle, by: Requester, w: WorkItem, input: { note?: string; priority?: WorkPriority; close?: 'done' | 'cancelled'; reopen?: boolean }): string {
+  private closeForOther(chat: SessionHandle, by: Requester, w: WorkItem, input: { note?: string; priority?: WorkPriority; close?: 'done' | 'cancelled'; reopen?: boolean; question_for?: string }): string {
     const whose = `${names(w.requesters)}'s`;
     const refused = `${w.id} is ${whose} request, not ${by.displayName}'s`;
     if (!this.isOwnerRole(by.userId)) throw new Error(`${refused}; only an owner closes or reopens another person's request, or adds a note to another owner's`);
     if (input.priority) throw new Error(`${refused}: its priority stays its people's to change`);
+    if (input.question_for) throw new Error(`${refused}: its question stays with whoever it waits on (between owners, an owner moves it in their own turn: w3606)`);
     if (!input.close && !input.reopen) return this.noteForOther(chat, by, w, input.note);
     if (input.close && input.reopen) throw new Error('close or reopen, not both');
     // Between owners (w677, Lothsahn: "I don't want that guard between me and ben"): another owner's request closes or
@@ -3539,6 +3561,54 @@ It is for your part of the work, not an answer to another worker's question.`;
       this.gatherForDispatcher(by, updateNotice(w, by, `${verb} for ${names(w.requesters)} (an owner's close or reopen of another person's request): ${note}.${hint}`));
     }
     return `${w.id} (${whose} request) is ${w.status}: ${verb} by ${by.displayName}. ${names(w.requesters)}'s orchestrator is told who and why.`;
+  }
+
+  /**
+   * w3606 (lothsahn: "Please make it so that upon our request, ben and I can answer each other's questions and we can move
+   * questions to each other"; and "Please make w3596 urgent"): whether `by`, an owner, acts on another owner's request `w` as
+   * its own owner would: an answer to its open question (a note), a move of that question to an owner (question_for), or
+   * a priority. Only in a turn `by` started with their own message (never a check-in, a timer, a worker's report or a
+   * relayed message: GateRefused), only between owners (the request's people and whoever its question waits on), and
+   * never with a close or a reopen (closeForOther's). False leaves it to closeForOther (a note alone stays w677's).
+   */
+  private ownerActsForOwner(chat: SessionHandle, by: Requester, w: WorkItem, input: UpdateInput): boolean {
+    if (input.close || input.reopen || input.assign_to) return false;
+    if (!this.isOwnerRole(by.userId) || !w.requesters.every((r) => this.isOwnerRole(r.userId)) || !this.isOwnerRole(w.requestedBy.userId)) return false;
+    const open = !['done', 'cancelled'].includes(w.status) && (w.status === 'question' || !!w.question || !!w.flag || (!!w.needsYou && !w.needsYou.answered));
+    const answer = !!input.note?.trim() && open && !input.priority && !input.question_for;
+    if (!answer && !input.priority && !input.question_for) return false;
+    const whose = `${names(w.requesters)}'s`;
+    const act = input.question_for ? 'moves its question' : input.priority ? 'changes its priority' : 'answers its question';
+    if ((chat.turnFrom ?? chat.lastFrom) !== 'human') {
+      // A note alone outside their turn stays a note (w677); a priority or a move waits for their own words.
+      if (answer) return false;
+      throw new GateRefused(`${w.id} is ${whose} request, not ${by.displayName}'s: ${by.displayName}'s orchestrator ${act} only in a turn ${by.displayName} started with their own words, and this turn is not theirs (a check-in, a timer, a worker's report or a relayed message) (w3606)`);
+    }
+    if (input.priority && input.question_for) throw new Error('question_for stands alone (a note giving the reason is fine): it hands the open question on and keeps the request open');
+    const asked = questionFor(w);
+    if ((answer || input.question_for) && !asked.every((r) => this.isOwnerRole(r.userId))) throw new Error(`${w.id}'s question waits on ${names(asked)}, not on an owner: it stays theirs (w3606: owners answer or move only each other's questions)`);
+    return true;
+  }
+
+  /** The words of the person's own message that opened this turn (w3606), clipped; the orchestrator's note when none is found. */
+  private ownWords(chat: SessionHandle, note?: string): string {
+    const said = this.store.readTranscript(chat.info.id, 400).findLast((e) => e.kind === 'user' && e.from === 'human');
+    const text = said && 'text' in said ? splitMedia(String(said.text)).text.trim() : '';
+    return text ? `"${clip(text.replace(/\s+/g, ' '), 400)}"` : note ? `(their orchestrator's note) ${clip(note, 400)}` : '(no words found)';
+  }
+
+  /** The request's people hear that another owner acted on it (w3606): who, what, and in whose words. */
+  private tellOwnersOfAct(w: WorkItem, by: Requester, did: string, words: string) {
+    const to = w.requesters.filter((r) => !same(r.userId, by.userId));
+    if (!to.length) return;
+    this.toPeople(
+      to,
+      `[from another owner] ${by.displayName} ${did}, on your ${w.id} "${clip(w.title, 80)}" (now ${w.status}).
+` +
+        `${by.displayName} asked for it in their own words: ${words}
+` +
+        `${by.displayName} has the owner role, which lets them answer or move your questions and change your priorities when they ask (w3606). ${w.id} stays yours. Tell them in a line; nothing to do unless they say so.`,
+    );
   }
 
   /**

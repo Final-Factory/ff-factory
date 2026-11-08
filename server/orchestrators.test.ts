@@ -488,7 +488,8 @@ test("w677: an owner's note on another owner's request reaches the dispatcher an
   await until('Ben is told', () => heard(ben.info.id, '[from another owner]').some((e) => e.text.startsWith('[from another owner] Lothsahn added a note to your w1 "Mac GPU page fault": Measured on the M3: the crash is in the Metal cache.\n')));
   await until('the dispatcher hears it', () => heard(dispatcher().info.id, '[work update]').some((e) => /w1 "Mac GPU page fault" \(question\) from Lothsahn: a note on Ben's request from Lothsahn, an owner \(w677\): Measured on the M3/.test(e.text) && e.text.includes(`Its worker ${id} got it already.`)));
   // A priority stays Ben's; a note on a member's request stays refused, and a member still adds none to anyone's.
-  assert.match((await call(loth.info, 'update_work', { id: 'w1', priority: 'urgent' })).text, /its priority stays its people's to change/);
+  // w3606: outside his own turn a priority waits for his own words.
+  assert.match((await call(loth.info, 'update_work', { id: 'w1', priority: 'urgent' })).text, /changes its priority only in a turn Lothsahn started with their own words/);
   await call(chat(CARA).info, 'request_work', { title: "Cara's thing", brief: 'x' });
   assert.match((await call(loth.info, 'update_work', { id: 'w2', note: 'more' })).text, /^ERROR: w2 is Cara's request, not Lothsahn's: an owner adds notes only to another owner's request/);
   assert.match((await call(chat(CARA).info, 'update_work', { id: 'w1', note: 'more' })).text, /^ERROR: w1 is Ben's request, not Cara's; only an owner closes or reopens another person's request, or adds a note to another owner's$/);
@@ -1610,8 +1611,7 @@ test("w402: an owner closes or reopens another person's request in their own tur
   const w = () => store.work.get('w1')!;
   loth.lastFrom = 'human';
   // In his own turn (between owners any turn will do since w677: see below), only a close or a reopen, with a reason.
-  // A priority stays its people's (a note alone is w677's: see below).
-  assert.match((await call(loth.info, 'update_work', { id: 'w1', priority: 'high' })).text, /w1 is Ben's request, not Lothsahn's: its priority stays its people's to change/);
+  // A priority goes alone (w3606: in his own turn it changes as Ben's own would), never with a close (a note alone is w677's: see below).
   assert.match((await call(loth.info, 'update_work', { id: 'w1', close: 'done', priority: 'high', note: 'x' })).text, /its priority stays its people's to change/);
   assert.match((await call(loth.info, 'update_work', { id: 'w1', close: 'done' })).text, /say why in a note: Ben will be told who closed w1 and why/);
   assert.equal(w().status, 'new', 'nothing changed yet');
@@ -9736,4 +9736,108 @@ test('w3522: reclaim frees no sandbox that a pair or timed hold would keep from 
   agents.places = () => places().map((p) => ({ ...p, freeSandboxes: p.id === 'beast' ? 1 : 0, sandboxes: p.maxSandboxes, ...(p.id === 'pc' ? { maxAgents: 1 } : {}) }));
   agentsRoom(agents, ['beast']);
   assert.equal(pressure().room, true);
+});
+
+// w3606 (lothsahn: "Please make it so that upon our request, ben and I can answer each other's questions and we can move
+// questions to each other"): between owners, in the acting owner's own turn.
+async function crossOwnerQuestion(t: Parameters<typeof setup>[0]) {
+  const env = setup(t, { people: OWNERS });
+  const { store, o, dispatcher, chat, call, heard } = env;
+  store.onEvent = (sid, e) => o.observeAsk(sid, e);
+  const ben = chat(BEN);
+  ben.lastFrom = 'human';
+  await call(ben.info, 'request_work', { title: 'FFU owner_term flakes', brief: 'Fix the owner_term flakes.' });
+  await until('the dispatcher hears it', () => heard(dispatcher().info.id, '[work request] w1').length === 1);
+  const asked = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'ask', note: 'Keep w1 open and schedule it later?', questions: [{ question: 'Keep it open?', options: [{ label: 'Keep it open', recommended: true }, { label: 'Cancel it' }] }] });
+  assert.equal(asked.isError, false, asked.text);
+  await until('Ben has it', () => heard(ben.info.id, '[needs you]').length === 1);
+  // Ben's orchestrator shows it as a card of its own too.
+  store.append(ben.info.id, { kind: 'tool_use', toolUseId: 'b1', name: 'mcp__sandboxes__ask_person', input: { question: 'About w1: keep it open and schedule it later?', options: [{ label: 'Keep w1 open', description: '', recommended: true }, { label: 'Cancel w1', description: '' }] } });
+  store.append(ben.info.id, { kind: 'tool_result', toolUseId: 'b1', isError: false, text: 'Shown' });
+  assert.equal(o.personalOf('ben')!.info.openAsks?.length, 1);
+  const loth = chat(LOTH);
+  /** lothsahn writes to his orchestrator: his own turn, with his words in its transcript. */
+  const says = (text: string) => {
+    store.append(loth.info.id, { kind: 'user', text, from: 'human', requestedBy: LOTH });
+    loth.lastFrom = 'human';
+  };
+  const w = () => store.work.get('w1')!;
+  const tab = (p: Requester) => decisionsOn([w()], { ...p, reviewer: false }).map((d) => d.w.id);
+  return { ...env, ben, loth, says, w, tab };
+}
+
+test("w3606: an owner answers the other owner's question in their own words: it is answered, the dispatcher resumes, the log quotes them, its owner hears who and what", async (t) => {
+  const { dispatcher, ben, loth, says, w, tab, call, heard, o } = await crossOwnerQuestion(t);
+  assert.deepEqual([tab(BEN), tab(LOTH)], [['w1'], []]);
+  // Outside his own turn a note stays a note (w677): the question still waits on Ben.
+  loth.lastFrom = 'system';
+  const note = await call(loth.info, 'update_work', { id: 'w1', note: 'Keep it open.' });
+  assert.match(note.text, /It stays Ben's/);
+  assert.deepEqual([w().status, w().question?.text], ['question', 'Keep w1 open and schedule it later?']);
+  says('Yes, keep it open and schedule it when the other higher priority work is done. I have answered for Ben.');
+  const r = await call(loth.info, 'update_work', { id: 'w1', note: 'Keep it open; schedule it after the higher priority work.' });
+  assert.equal(r.isError, false, r.text);
+  assert.deepEqual([w().status, w().question, w().requestedBy.userId], ['new', undefined, 'ben']);
+  assert.deepEqual([tab(BEN), tab(LOTH)], [[], []]);
+  assert.match(w().log.join('\n'), /Lothsahn \(an owner, on Ben's request, in their own words: "Yes, keep it open and schedule it when the other higher priority work is done\. I have answered for Ben\."\): note: Keep it open/);
+  assert.equal(o.personalOf('ben')!.info.openAsks, undefined, "Ben's card left his tab");
+  await until('Ben is told who answered and what', () => heard(ben.info.id, '[from another owner]').some((e) => e.text.startsWith('[from another owner] Lothsahn answered the question on it: Keep it open; schedule it after the higher priority work., on your w1 "FFU owner_term flakes"') && e.text.includes('"Yes, keep it open')));
+  await until('the dispatcher resumes with the answer', () => heard(dispatcher().info.id, '[work update]').some((e) => e.text.includes('w1') && e.text.includes('Keep it open; schedule it after the higher priority work.')));
+});
+
+test("w3606: an owner moves the question waiting on the other owner to themselves: it leaves Ben's tab and comes to theirs", async (t) => {
+  const { ben, loth, says, w, tab, call, heard, o } = await crossOwnerQuestion(t);
+  // Not in his own turn: refused, nothing moves.
+  loth.lastFrom = 'system';
+  const refused = await call(loth.info, 'update_work', { id: 'w1', question_for: 'lothsahn' });
+  assert.equal(refused.isError, true);
+  assert.match(refused.text, /moves its question only in a turn Lothsahn started with their own words/);
+  assert.deepEqual(tab(BEN), ['w1']);
+  says('Take that question off Ben, it is mine now.');
+  const r = await call(loth.info, 'update_work', { id: 'w1', question_for: 'lothsahn', note: 'Lothsahn takes it' });
+  assert.equal(r.isError, false, r.text);
+  assert.deepEqual([w().status, w().question!.for, w().question!.text], ['question', [LOTH], 'Keep w1 open and schedule it later?']);
+  assert.deepEqual([tab(BEN), tab(LOTH)], [[], ['w1']]);
+  assert.equal(o.personalOf('ben')!.info.openAsks, undefined, "Ben's card left his tab");
+  assert.match(w().log.join('\n'), /Lothsahn \(an owner, on Ben's request\) moved its question from Ben to Lothsahn, in their own words: "Take that question off Ben/);
+  await until('lothsahn gets it', () => heard(loth.info.id, '[needs you]').length === 1);
+  await until('Ben is told', () => heard(ben.info.id, '[from another owner]').some((e) => e.text.startsWith('[from another owner] Lothsahn moved the question on it from Ben to Lothsahn, on your w1')));
+  // And it moves back to Ben the same way.
+  const back = await call(loth.info, 'update_work', { id: 'w1', question_for: 'ben' });
+  assert.equal(back.isError, false, back.text);
+  assert.deepEqual([tab(BEN), tab(LOTH)], [['w1'], []]);
+});
+
+test("w3606: an owner changes the other owner's priority in their own words; outside their turn it is refused", async (t) => {
+  const { ben, loth, says, w, call, heard } = await crossOwnerQuestion(t);
+  loth.lastFrom = 'system';
+  const refused = await call(loth.info, 'update_work', { id: 'w1', priority: 'urgent' });
+  assert.match(refused.text, /changes its priority only in a turn Lothsahn started with their own words/);
+  assert.equal(w().priority, 'normal');
+  says('Please make w1 urgent');
+  const r = await call(loth.info, 'update_work', { id: 'w1', priority: 'urgent' });
+  assert.equal(r.isError, false, r.text);
+  assert.deepEqual([w().priority, w().status, w().question?.text, w().runsFor?.userId ?? 'ben'], ['urgent', 'question', 'Keep w1 open and schedule it later?', 'ben'], 'only the priority: the question still waits on Ben, the pool stays his');
+  assert.match(w().log.join('\n'), /Lothsahn \(an owner, on Ben's request, in their own words: "Please make w1 urgent"\): priority normal → urgent/);
+  await until('Ben is told', () => heard(ben.info.id, '[from another owner]').some((e) => e.text.startsWith('[from another owner] Lothsahn changed its priority normal → urgent, on your w1')));
+});
+
+test("w3606: a member's request, or a question waiting on a member, stays theirs even in an owner's own turn", async (t) => {
+  const { store, dispatcher, chat, call, says, loth } = await crossOwnerQuestion(t);
+  const cara = chat(CARA);
+  cara.lastFrom = 'human';
+  await call(cara.info, 'request_work', { title: "Cara's thing", brief: 'x' });
+  await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'ask', note: 'Which one?', questions: [{ question: 'Which?', options: [{ label: 'A', recommended: true }, { label: 'B' }] }] });
+  says('Answer it: A. And make it urgent, and give its question to me.');
+  assert.match((await call(loth.info, 'update_work', { id: 'w2', note: 'A' })).text, /^ERROR: w2 is Cara's request, not Lothsahn's: an owner adds notes only to another owner's request/);
+  assert.match((await call(loth.info, 'update_work', { id: 'w2', priority: 'urgent' })).text, /its priority stays its people's to change/);
+  assert.match((await call(loth.info, 'update_work', { id: 'w2', question_for: 'lothsahn' })).text, /^ERROR: w2 is Cara's request, not Lothsahn's: its question stays with whoever it waits on/);
+  assert.equal(store.work.get('w2')!.status, 'question');
+  // Ben's question handed to Cara stays Cara's.
+  const ben = chat(BEN);
+  ben.lastFrom = 'human';
+  assert.equal((await call(ben.info, 'update_work', { id: 'w1', question_for: 'cara' })).isError, false);
+  says('Answer w1: keep it.');
+  assert.match((await call(loth.info, 'update_work', { id: 'w1', note: 'keep it' })).text, /w1's question waits on Cara, not on an owner: it stays theirs/);
+  assert.deepEqual(store.work.get('w1')!.question!.for, [CARA]);
 });
