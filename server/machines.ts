@@ -2337,8 +2337,11 @@ export class MachineManager {
         // first start, which would put a restart on another person's tokens back on the first account (w1076).
         // Its check-in and queued message are the portal's waker's (Agents.syncWaiting): the daemon's copy is the one sent with its
         // first send, so a check-in long past came back on every report and held an idle Live view's editor open (w2255).
+        // Its timed_place verdict is the portal's too (w3663): the daemon's copy is the one sent with the turn's message, so
+        // a "here" answered mid-turn went back to the older "elsewhere" on the next report, and BEAST parked worker 66b1c43c's
+        // exclusive tickets "placed elsewhere (timed_run on lothdesktop)" from 12:46Z to 15:26Z on 2026-11-07, re-asked 8 times.
         const wasLive = s.liveFlag;
-        const { id: _i, kind: _k, machineId: _m, standingId: _s, sandboxId: _b, title: _t, createdAt: _c, label: _l, labelAt: _la, activeTool: _at, stoppedOnPurpose: _sp, waitingOn: _wo, hostFailure: _hf, machineSandbox: _ms, placeReleased: _pr, movedFrom: _mf, liveLost: _ll, releaseDue: _rd, savedWork: _sw, ranAs: _ra, ranFor: _rf, ranOn: _ro, wakeAt: _wa, wakeNote: _wn, queuedSend: _qs, queuedOn: _qo, ...run } = msg.info;
+        const { id: _i, kind: _k, machineId: _m, standingId: _s, sandboxId: _b, title: _t, createdAt: _c, label: _l, labelAt: _la, activeTool: _at, stoppedOnPurpose: _sp, waitingOn: _wo, hostFailure: _hf, machineSandbox: _ms, placeReleased: _pr, movedFrom: _mf, liveLost: _ll, releaseDue: _rd, savedWork: _sw, ranAs: _ra, ranFor: _rf, ranOn: _ro, wakeAt: _wa, wakeNote: _wn, queuedSend: _qs, queuedOn: _qo, timedVerdict: _tv, ...run } = msg.info;
         // The portal sees the daemon's events as they come (Store.noteActivity): never step activity back.
         if (run.lastActivityAt && s.info.lastActivityAt && run.lastActivityAt < s.info.lastActivityAt) run.lastActivityAt = s.info.lastActivityAt;
         // "The login of the computer it runs on", there: this Mac's login, not this host's. On the portal's own host
