@@ -113,7 +113,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // request_pair, read from the words where an older daemon's catalog lacks it.
 // w3328 (no bump): LaunchSpec `diskCleanup`, a clean-up request's worker passing the low-disk gate; an older daemon ignores it
 // (the worker waits at the gate as before), and an older portal never sends it.
-const DECIDED = { protocol: 9, fingerprint: '2bb1bcfa0296f1a0' };
+// w3670 (no bump): LaunchSpec guard `daemonReads`, the daemon's folder a worker reads its logs in; an older daemon ignores it (its
+// workers stay fenced out of the whole folder, as before), and an older portal never sends it.
+const DECIDED = { protocol: 9, fingerprint: '737eafe680208f85' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

@@ -2,6 +2,8 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { evidenceArgs, evidenceGated, evidencePython, evidenceRefusal, evidenceVerdict, findPrEvidence, noScriptRefusal } from '../machine/evidenceGate.ts';
 import { repoIsPublic } from './publicGit.ts';
 import { checkStrayWrite } from './strayWrite.ts';
+import { daemonShell, daemonToolProblem, type DaemonReads } from './daemonReads.ts';
+import { readTargets } from './secretGuard.ts';
 import { checkOffDriveScan, checkOutsideRootDelete } from './rootFence.ts';
 import { headBranch, isUrgentBranch } from './releaseHandBack.ts';
 import fs from 'node:fs';
@@ -101,6 +103,12 @@ export function sandboxGuard(opts: {
   /** The machine's worker install folder (root.json's root): deleting outside it is refused (checkOutsideRootDelete). Absent: not checked. */
   workerRoot?: string;
   /**
+   * w3670: the machine daemon's folder (a protected path) and its install root: the worker READS the daemon's diagnostic files
+   * there (server/daemonReads.ts DAEMON_READ_ALLOW), every other read there and of the install's secrets folder is refused, and
+   * writes stay refused. Absent: the folder is only a protected path.
+   */
+  daemonReads?: Pick<DaemonReads, 'dir' | 'root'>;
+  /**
    * w2012: the machine's OS and the user's home for the whole-disk search fence (server/wholeDiskSearch.ts), checked on every
    * machine. Default: this process's (process.platform, os.homedir()); the skills folder named in its refusal is env's FF_SKILLS.
    */
@@ -160,6 +168,7 @@ export function sandboxGuard(opts: {
   const tmpName = path.basename((opts.env?.TMPDIR ?? '').replace(/\\/g, '/').replace(/\/+$/, ''));
   const saveTag = /^ffa-./i.test(tmpName) ? tmpName : undefined;
   let pinned = false;
+  const daemon = opts.daemonReads ? { ...opts.daemonReads, ...(opts.home ? { home: opts.home } : {}), ...(opts.platform ? { platform: opts.platform } : {}) } : undefined;
 
   const deny = (reason: string) => ({
     hookSpecificOutput: { hookEventName: 'PreToolUse' as const, permissionDecision: 'deny' as const, permissionDecisionReason: reason },
@@ -180,6 +189,10 @@ export function sandboxGuard(opts: {
     const disk = (cwd: string): WholeDiskContext => ({ win: (opts.platform ?? process.platform) === 'win32', home: opts.home ?? os.homedir(), cwd, ...(opts.env?.FF_SKILLS ? { skills: opts.env.FF_SKILLS } : {}) });
     const wholeDisk = checkSearchTool(tool, args, disk(input.cwd || opts.sandboxPath));
     if (wholeDisk) return deny(wholeDisk);
+    if (daemon) {
+      const closedRead = daemonToolProblem(readTargets(tool, args), { ...daemon, cwd: input.cwd || opts.sandboxPath });
+      if (closedRead) return deny(closedRead);
+    }
 
     if (tool === 'Bash' || tool === 'PowerShell') {
       const cmd = String(args.command ?? '');
@@ -198,7 +211,7 @@ export function sandboxGuard(opts: {
         (opts.timedAsk ? checkTimedAsk(cmd, opts.timedAsk()) : undefined) ??
         checkWholeDiskSearch(cmd, disk(input.cwd || opts.sandboxPath)) ??
         (opts.workerRoot ? checkOutsideRootDelete(cmd, { root: opts.workerRoot, cwd: input.cwd || opts.sandboxPath, allow: [opts.sandboxPath], saveTag }) : undefined) ??
-        (opts.workerRoot ? checkOffDriveScan(cmd, { root: opts.workerRoot, cwd: input.cwd || opts.sandboxPath, allow: [opts.sandboxPath] }) : undefined);
+        (opts.workerRoot ? checkOffDriveScan(cmd, { root: opts.workerRoot, cwd: input.cwd || opts.sandboxPath, allow: [opts.sandboxPath, ...(daemon ? [daemon.dir] : [])] }) : undefined);
       if (reason) return deny(reason);
       let flat = flatten(cmd);
       if (cloneGrant && cloneNames) {
@@ -212,6 +225,12 @@ export function sandboxGuard(opts: {
           flat = flat.replace(cloneNames, ' ');
         }
         cloneNames.lastIndex = 0;
+      }
+      // w3670: a plain read of the daemon's diagnostic files passes; anything else naming its folder is refused here or below.
+      if (daemon) {
+        const d = daemonShell(cmd, { ...daemon, cwd: input.cwd || opts.sandboxPath });
+        if (d.why) return deny(d.why);
+        if (d.named) flat = d.strip(flat);
       }
       for (const s of spellings) {
         if (flat.includes(s)) return deny(`${s} is a protected path (the live co-op checkout or this server). Work only inside ${opts.sandboxPath}.`);
