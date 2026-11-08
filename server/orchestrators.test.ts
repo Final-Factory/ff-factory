@@ -6655,7 +6655,8 @@ test('w1945: request_pair files one pair request and blocks the asking worker on
   const a = await startedFor(env, 'w665');
   await assert.rejects(async () => a.h.request_pair!({ what: 'x', brief: 'y', legs: 1 }), /legs is 2 to 4/);
   const out = String(await a.h.request_pair!({ what: 'MP-lowore-pin-pair on PR #2340', brief: 'Run MP-lowore-pin-pair on branch w665-lowore-pin-no-collider; pass: 400 heartbeats compared, none diverged.' }));
-  assert.match(out, /^Filed (w\d+), a pair run of 2 legs, on any computers, any OS \(a Mac only as the host, leg 1\), for w665\. The dispatcher starts its legs together/);
+  // w3697: its legs each run MP-lowore-pin-pair alone (no pair lab named), so no leg goes on a Mac, and the answer and brief say so.
+  assert.match(out, /^Filed (w\d+), a pair run of 2 legs, on any computers, any OS \(a Mac only as the host, leg 1\), no leg on a Mac \(each leg starts MP-lowore-pin-pair's host and client on its own computer; w3697\), for w665\. The dispatcher starts its legs together/);
   assert.match(out, /Recorded: w665 is Blocked on /);
   assert.match(out, /your sandbox is then released at once for other work/);
   const id = /^Filed (w\d+)/.exec(out)![1];
@@ -6667,6 +6668,7 @@ test('w1945: request_pair files one pair request and blocks the asking worker on
   assert.deepEqual(p.relatedIds, ['w665']);
   assert.equal(p.title, 'Pair run for w665: MP-lowore-pin-pair on PR #2340');
   assert.match(p.brief, /the host leg \(leg 1\) reports the result with a line "For w665:"/);
+  assert.match(p.brief, /No leg goes on a Mac \(w3697\): each leg starts MP-lowore-pin-pair's host and its client on its own computer, and a Mac refuses a multiplayer client/);
   assert.equal(p.overlaps.some((o) => o.ref === 'w665'), false, 'the request it is for is no repeat of it');
   const w = store.work.get('w665')!;
   assert.equal(w.status, 'blocked');
