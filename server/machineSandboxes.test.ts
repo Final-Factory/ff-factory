@@ -1776,3 +1776,29 @@ test("w3518: after a daemon restart the disk guard waits for the portal's pool s
   await n.p.tick();
   assert.match(n.events.map((e) => e.text).join(' | '), /disk space low: 24 GB free/);
 });
+
+test("w3518: a welcome that lands while the pool looks at its sandboxes: the disk guard uses the portal's line, not the look's copy of daemon.json's", async (t) => {
+  const r = repos();
+  t.after(r.cleanup);
+  // beast, 2026-11-08 01:43:25Z: the new daemon connected; its welcome came while a look was awaiting its sandboxes' processes
+  // and git, so that look's guard checked 75 GB against daemon.json's 80 ("disk space low") and the next said "fine again".
+  let free = 500 * GB; // room for the sandbox, then beast's 75 GB
+  const { p, events } = pool(r, { free: () => free, settings: { diskWarnGB: 80, diskCriticalGB: 10 }, awaitConfigure: true });
+  await p.create({ id: 'a', branch: 'sandbox/a', base: 'origin/master', seedLibrary: false, startUnity: false });
+  await ready(p, 'a');
+  free = 75 * GB;
+  const d = (p as unknown as { d: PoolDeps }).d;
+  const procs = d.procs;
+  let welcomed = false;
+  d.procs = async () => {
+    if (!welcomed) {
+      welcomed = true;
+      p.configure(SETTINGS(r.sbRoot, { diskWarnGB: 15, diskCriticalGB: 10 }));
+    }
+    return procs();
+  };
+  await p.tick();
+  assert.equal(welcomed, true, 'the welcome landed inside the look');
+  assert.deepEqual(events.filter((e) => /disk space (low|critical|is fine again)/.test(e.text)).map((e) => e.text), []);
+  assert.equal(p.diskState().level, 'ok');
+});

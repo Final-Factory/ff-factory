@@ -1398,7 +1398,10 @@ export class SandboxPool {
         }
       }
     }
-    if (s && this.settled) dirty = (await this.diskGuard(s)) || dirty;
+    // w3518: the settings in force now, not this look's copy: a welcome that landed during the awaits above settled the pool
+    // with the portal's line, and the copy still held daemon.json's (beast, 2026-11-08 01:44:00Z: 75 GB "below disk_warn_gb 80").
+    const current = this.settings;
+    if (current && this.settled) dirty = (await this.diskGuard(current)) || dirty;
     if (s) dirty = (await this.idleStop()) || dirty;
     if (dirty) this.o.onChange();
   }

@@ -770,7 +770,9 @@ could lower. `hostGuard.warnFreeGB` / `criticalFreeGB` in daemon.json now apply 
 holds daemon.json's `sandboxes` block, whose `disk_warn_gb` can be an old 50 or 80: lothdesktop logged "disk space low: 24
 GB free ... (below disk_warn_gb 50)" at 17:42:22 and "fine again" at 17:42:49 -07:00 on 2026-11-07, the same free space
 both times. `SandboxPool` (`awaitConfigure`) now skips its disk guard until `configure` (a welcome with pool settings) or
-`settle` (one without). Nothing starts on the machine before the welcome, so no check is lost.
+`settle` (one without). Nothing starts on the machine before the welcome, so no check is lost. The guard reads the settings in force
+when it runs, not the copy its look took at the start (`look` in `machine/sandboxes.ts`): on beast, with many sandboxes, the
+welcome landed during a look's awaits and that look still checked 75 GB against 80 (2026-11-08 01:44:00Z).
 
 LothDesktop, for example: `sandbox_root: "D:\work\ffsb"`, `max_sandboxes: 3`, `max_agents_per_sandbox: 2` (six
 sandbox agents in all), `max_unity: 2`.
