@@ -16,7 +16,10 @@ import { checkArray, checkObject, isObject, readJsonDurable, writeJsonDurable, t
  *   - failed logins are rate limited per client IP and globally; an attempt is counted BEFORE the
  *     slow hash (so a burst of parallel guesses cannot all slip in), and at most two password hashes
  *     run at once. Bad API keys are throttled per IP separately, so they cannot lock out a login; a good key
- *     is never throttled.
+ *     is never throttled;
+ *   - a one-time set-password link (w3714, `node server/user.ts <name> --link`) is a random 256-bit token whose
+ *     SHA-256 alone is kept (data/password-links.json); it sets that login's password once, within its hours, and its
+ *     wrong guesses count as failed logins.
  */
 
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
@@ -24,6 +27,7 @@ const sha = (s: string) => createHash('sha256').update(s).digest('hex');
 const SCRYPT: ScryptOptions = { N: 1 << 15, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
 const KEYLEN = 64;
 const SESSION_TTL_MS = 30 * 24 * 3600 * 1000;
+const LINK_TTL_MS = 24 * 3600 * 1000;
 export const COOKIE = 'ffsb_session';
 
 interface UserRecord {
@@ -92,11 +96,14 @@ export const API_KEY_SCOPES: readonly ApiKeyScope[] = ['nightly', 'ffbox'];
 /** users.json: a list of logins, each with a name and a password hash. */
 const checkUsers: Check = (v) => (Array.isArray(v) && v.every((u) => isObject(u) && typeof u.username === 'string' && typeof u.hash === 'string') ? undefined : 'not a list of logins');
 
+type LinkRecord = { sha256: string; username: string; expires: number };
+
 type ApiKeyRecord = { name: string; sha256: string; createdAt: string; user?: string; scope?: ApiKeyScope };
 
 export class Auth {
   private readonly usersFile: string;
   private readonly sessionsFile: string;
+  private readonly linksFile: string;
   private sessions = new Map<string, SessionRecord>();
   private readonly failures = new Map<string, number[]>();
   private globalFailures: number[] = [];
@@ -109,6 +116,7 @@ export class Auth {
   constructor(dataDir: string, opts: { trustProxy: boolean }) {
     this.usersFile = path.join(dataDir, 'users.json');
     this.sessionsFile = path.join(dataDir, 'auth-sessions.json');
+    this.linksFile = path.join(dataDir, 'password-links.json');
     this.trustProxy = opts.trustProxy;
     const raw = readJsonDurable<Record<string, SessionRecord>>(this.sessionsFile, { check: checkObject });
     const now = Date.now();
@@ -293,12 +301,52 @@ export class Auth {
     }
     this.failures.delete(ip);
     this.globalFailures = this.globalFailures.filter((t) => t !== stamp);
+    console.log(`login ok for "${username}" from ${ip}`);
+    return { ok: true, cookie: this.newSession(req, username) };
+  }
+
+  private newSession(req: http.IncomingMessage, username: string): string {
     const id = randomBytes(32).toString('hex');
     this.sessions.set(sha(id), { username, expires: Date.now() + SESSION_TTL_MS });
     this.persistSessions();
-    console.log(`login ok for "${username}" from ${ip}`);
     const secure = this.isHttps(req) ? '; Secure' : '';
-    return { ok: true, cookie: `${COOKIE}=${id}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_TTL_MS / 1000}${secure}` };
+    return `${COOKIE}=${id}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_TTL_MS / 1000}${secure}`;
+  }
+
+  private links(now = Date.now()): LinkRecord[] {
+    return (readJsonDurable<LinkRecord[]>(this.linksFile, { check: checkArray }) ?? []).filter((l) => l.expires > now);
+  }
+
+  /**
+   * A one-time link token that lets whoever holds it set `username`'s password (w3714: a person who never had the
+   * password picks their own, and no password passes through a chat). Replaces any earlier link of that login.
+   */
+  mintPasswordLink(username: string, ttlMs = LINK_TTL_MS): { token: string; expires: number } {
+    if (!this.users().some((u) => u.username === username)) throw new Error(`no login "${username}"`);
+    const token = randomBytes(32).toString('base64url');
+    const expires = Date.now() + ttlMs;
+    writeJsonDurable(this.linksFile, [...this.links().filter((l) => l.username !== username), { sha256: sha(token), username, expires }]);
+    return { token, expires };
+  }
+
+  /** Set the password a link names, once, and log that browser in (every other session of the login ends). */
+  async usePasswordLink(req: http.IncomingMessage, token: string, password: string): Promise<{ ok: true; username: string; cookie: string } | { ok: false; status: number; error: string }> {
+    const ip = this.clientIp(req);
+    if (this.throttled(ip)) return { ok: false, status: 429, error: 'Too many failed attempts. Try again in 15 minutes.' };
+    const all = this.links();
+    const hit = all.find((l) => l.sha256 === sha(token));
+    if (!hit) {
+      const stamp = Date.now();
+      this.failures.get(ip)!.push(stamp);
+      this.globalFailures.push(stamp);
+      console.warn(`set-password link refused from ${ip}`);
+      return { ok: false, status: 401, error: 'This link is used, expired or mistyped. Ask for a new one.' };
+    }
+    if (password.length < 12) return { ok: false, status: 400, error: 'The password must be at least 12 characters.' };
+    writeJsonDurable(this.linksFile, all.filter((l) => l !== hit));
+    await this.setUser(hit.username, password);
+    console.log(`password set by link for "${hit.username}" from ${ip}`);
+    return { ok: true, username: hit.username, cookie: this.newSession(req, hit.username) };
   }
 
   logout(req: http.IncomingMessage) {
