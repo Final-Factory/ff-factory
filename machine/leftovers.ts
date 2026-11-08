@@ -41,7 +41,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { run } from '../server/proc.ts';
-import { factsProblem, finishedRows, finishedSession, judgePath, planFolders, renderFolders, withGitCheck, type CleanupFacts, type FolderRow, type SlotContext } from '../server/cleanupFolders.ts';
+import { factsProblem, finishedRows, finishedSession, judgePath, judgeWithGit, planFolders, renderFolders, type CleanupFacts, type FolderRow, type SlotContext } from '../server/cleanupFolders.ts';
 import { isAlive } from '../server/proc.ts';
 import { norm, sizeOf, within } from '../server/cleanup.ts';
 import { publishedFile, readPublished } from '../server/published.ts';
@@ -899,7 +899,7 @@ export function readCleanupFacts(file: string | undefined): CleanupFacts | undef
 
 /** One path for `check`: by the ledger, and inside a finished worker's kept folder by its rebuildable bulk (w2223). */
 async function checkPath(p: string, facts: CleanupFacts, now: number, published: ReturnType<typeof readPublished>, slots?: SlotContext): Promise<Pick<FolderRow, 'verdict' | 'why'>> {
-  const r = await withGitCheck(judgePath(p, facts, now, slots), facts.root);
+  const r = await judgeWithGit(p, facts, now, slots);
   if (r.verdict === 'delete' || r.kind !== 'session-temp' || !facts.tempRoot) return r;
   const name = norm(p).slice(norm(facts.tempRoot).length + 1).split('/')[0]!;
   const dir = path.join(facts.tempRoot, name);

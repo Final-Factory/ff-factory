@@ -710,3 +710,38 @@ test('w3217: check says whether a timed run plays or waits on this machine, for 
   assert.match(judgeTiming({ ...base, timedRuns: [] }), /no timed run plays or waits here now/);
   assert.match(judgeTiming(base), /did not say which timed runs/);
 });
+
+// ffa-f1beecb0 on LothDesktop, 2026-11-08: a closed worker's folder held build-player-restore-* folders whose .git had loose
+// objects only (no HEAD, no refs). The daemon's pass judged it DELETE, `ff-leftovers check` KEEP ("its git state could not be
+// read"). check now judges a closed worker's folder as the pass does (w3707).
+test('w3707: ff-leftovers check frees a closed worker folder whose .git has no HEAD or refs, and still keeps unpushed commits', async (t) => {
+  const { root, tempRoot, facts } = world(t);
+  const closed = path.join(tempRoot, 'ffa-b0b0b0b0');
+  const objects = path.join(closed, 'build-player-restore-1', '.git', 'objects', 'ab');
+  fs.mkdirSync(objects, { recursive: true });
+  fs.writeFileSync(path.join(objects, 'cdef'), 'x');
+  fs.writeFileSync(path.join(closed, 'build-player-restore-1', 'Player.log'), 'log');
+  facts.at = new Date(Date.now() + 1000).toISOString();
+  const file = path.join(root, 'cleanup-facts.json');
+  fs.writeFileSync(file, JSON.stringify(facts));
+  const out: string[] = [];
+  const env = { FF_CLEANUP_FACTS: file } as NodeJS.ProcessEnv;
+  assert.equal(await foldersMain('check', [closed], env, Date.now(), (s) => void out.push(s)), 0, out.join(''));
+  assert.match(out.join(''), /^DELETE .*ffa-b0b0b0b0/m);
+  assert.doesNotMatch(out.join(''), /could not be read/);
+  const row = (await planFolders(facts, { now: Date.now() + 1000 })).find((r) => norm(r.path) === norm(closed))!;
+  assert.equal(row.verdict, 'delete', 'the listing agrees');
+
+  // A clone with a commit on no remote in the same folder still keeps it, in check and in the listing.
+  const remotes = path.join(root, 'remotes');
+  fs.mkdirSync(remotes);
+  const ff = pushedClone(remotes, path.join(closed, 'ff'));
+  fs.writeFileSync(path.join(ff, 'report.md'), 'x');
+  git(ff, 'add', '.');
+  git(ff, 'commit', '-q', '-m', 'report');
+  facts.at = new Date(Date.now() + 1000).toISOString();
+  fs.writeFileSync(file, JSON.stringify(facts));
+  out.length = 0;
+  assert.equal(await foldersMain('check', [closed], env, Date.now(), (s) => void out.push(s)), 1);
+  assert.match(out.join(''), /ff: 1 commit on no remote/);
+});
