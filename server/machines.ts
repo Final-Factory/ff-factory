@@ -93,6 +93,16 @@ export const HOST_DIED_RESUME_MS = { value: 3000 };
 const HOST_DIED_AGAIN_MS = 60 * 60_000;
 /** How long after a daemon's hello the resume messages go out. */
 export const RESUME_DELAY_MS = { value: 3000 };
+
+/**
+ * The daemon's refusals of a start at an agent cap (machine/daemon.ts startRefusal, machine/sandboxes.ts totalAgentsRefusal):
+ * the machine's sandboxes at max_sandbox_agents, a sandbox at max_agents_per_sandbox, the machine at its agent cap. A
+ * capacity wait, queued again by the portal (w3597), never a failure.
+ */
+export const AGENT_CAP_REFUSAL = /agents running in this machine's sandboxes \(max_sandbox_agents \d+\)|agents mid-turn in sandbox \S+ \(max_agents_per_sandbox\)|agents mid-turn on this machine, in its sandboxes and standing agents together \(its agent cap \d+\)/;
+
+/** How long a turn the portal sent counts as mid-turn before its daemon reports it (w3597, MachineManager.starting). */
+const START_COUNT_MS = 2 * 60_000;
 export { MAIN_CLONE_NO_AGENTS };
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
 
@@ -1274,7 +1284,20 @@ export class MachineManager {
    * process up or not, take no slot.
    */
   runningIn(id: string, sandbox: string | undefined | '*') {
-    return [...this.sessions.sessions.values()].filter((s) => s.info.machineId === id && (sandbox === '*' ? !!s.info.machineSandbox : s.info.machineSandbox === sandbox) && isMidTurn(s.info)).length;
+    return [...this.sessions.sessions.values()].filter((s) => s.info.machineId === id && (sandbox === '*' ? !!s.info.machineSandbox : s.info.machineSandbox === sandbox) && (isMidTurn(s.info) || this.isStarting(s))).length;
+  }
+
+  /**
+   * Sessions this portal sent a message that starts a turn, until their daemon reports them (w3597): when, and the message,
+   * kept so a refusal at an agent cap goes back in the queue (requeueRefused). Counted as mid-turn meanwhile, so resumes sent
+   * in one pass (one merge clearing several requests' gates) do not each see the same free slot.
+   */
+  private starting = new Map<string, { at: number; text: string; from: 'human' | 'orchestrator' | 'system'; uuid: string; images: ImageInput[]; requestedBy?: Requester; attachments: DeliveredAttachment[] }>();
+
+  /** Whether a turn this portal just sent `s` counts as mid-turn before its daemon says so (w3597). */
+  private isStarting(s: SessionHandle) {
+    const st = this.starting.get(s.info.id);
+    return !!st && Date.now() - st.at < START_COUNT_MS;
   }
 
   /**
@@ -1875,6 +1898,8 @@ export class MachineManager {
     const lost = !s.live && s.info.liveLost ? liveLostNote(s.info.liveLost) : undefined;
     const said = [updated, moved ? movedNote(m, s.info.movedFrom!, moved) : undefined, saved, lost, text].filter(Boolean).join('\n\n');
     this.post(m.id, { type: 'send', info: s.info, lastSeq: this.store.lastSeq(s.info.id), spec, text: said, from, uuid, images: withIds, ...(requestedBy ? { requestedBy } : {}), ...(files.length ? { attachments: files } : {}) });
+    // w3597: it takes a slot from now, and its message is kept in case the daemon refuses it at an agent cap.
+    if (!isMidTurn(s.info)) this.starting.set(s.info.id, { at: Date.now(), text: said, from, uuid, images: withIds, ...(requestedBy ? { requestedBy } : {}), attachments });
     if (moved || saved || lost) {
       delete s.info.movedFrom;
       delete s.info.savedWork;
@@ -2300,6 +2325,8 @@ export class MachineManager {
       case 'session': {
         const s = this.handle(msg.info.id);
         if (!s || s.info.machineId !== id) return;
+        // Its daemon has its turn now (w3597): counted by its own mark from here.
+        if (isMidTurn(msg.info)) this.starting.delete(msg.info.id);
         // The portal owns identity, naming and where it works (a worker placed again in another sandbox, w640: the
         // daemon's copy keeps the sandbox it first ran in); the daemon owns run state.
         // The account its process started on (ranAs, ranFor) is the portal's too: the daemon keeps the copy of the session's
@@ -2344,12 +2371,25 @@ export class MachineManager {
       case 'signal': {
         const s = this.handle(msg.sessionId);
         // meta (w1469): a compaction's turn end says so, as an AgentSession's here does; an older daemon sends none.
+        if (s && s.info.machineId === id && (msg.name === 'turnEnd' || msg.name === 'ended')) this.starting.delete(s.info.id);
         if (s && s.info.machineId === id) this.sessions.events.emit(msg.name, s, msg.arg, ...(msg.meta ? [msg.meta] : []));
         return;
       }
       case 'failed': {
         const s = this.handle(msg.sessionId);
         if (!s || s.info.machineId !== id) return;
+        const sent = this.starting.get(msg.sessionId);
+        this.starting.delete(msg.sessionId);
+        // w3597: refused at an agent cap (a slot the portal counted free was not): the message waits for a slot in the
+        // send queue, Queued, instead of the worker ending in error with nothing to retry it.
+        if (sent && AGENT_CAP_REFUSAL.test(msg.error)) {
+          const { at: _a, ...m } = sent;
+          // Worded like the portal's own capacity holds ("N agents mid-turn …"), so a resume may move to a computer with
+          // room (resumeMove.ts ROOM_WAIT, w2046) and the ledger reads it as a wait for a slot.
+          const n = /already (\d+) agents/.exec(msg.error)?.[1] ?? '?';
+          this.sessions.requeueRefused(msg.sessionId, m, `${n} agents mid-turn on ${id} by its daemon's count (it refused the start: ${msg.error})`);
+          return;
+        }
         // A refused start is not the agent doing something: its activity time stays (a refused resume made agents
         // finished for hours look active, 2026-09-29).
         const at = s.info.lastActivityAt;

@@ -73,6 +73,8 @@ export interface QueuedSend {
    * request is blocked again or closed (SessionManager.staleResume).
    */
   resumeOf?: { work: string; note: string };
+  /** When its machine's daemon refused it at an agent cap (w3597, requeueRefused): held until a turn ends or CAP_REFUSED_HOLD_MS. */
+  capRefusedAt?: string;
   /** It waits for its worker's process to restart on another person's Claude tokens (w1076, SessionManager.accountMove). */
   account?: boolean;
   /** It waits for its orchestrator's automatic compaction to finish (w1749, SessionManager.compactHold). */
@@ -98,6 +100,12 @@ export const QUEUE_HOLD_MS = 24 * 3_600_000;
  * days, so it is waited out (the usage blocker's own limit, shared/blockers.ts), not given up after QUEUE_HOLD_MS.
  */
 export const POOL_HOLD_MS = 8 * 24 * 3_600_000;
+
+/**
+ * How long a message its machine's daemon refused at an agent cap (w3597) waits before it is tried again, unless a turn ends
+ * first: the portal counted a free slot the daemon did not have (resumes sent in one pass), so its own count is not enough.
+ */
+export const CAP_REFUSED_HOLD_MS = 60_000;
 
 /**
  * Whether a start was refused because the worker's person's Claude pool is held (w1129: PoolHeldError from machineRunEnv,
@@ -1223,8 +1231,9 @@ export class SessionManager {
       }
     }
     // A slot frees when a turn ends or a process goes: deliver what waits then, and every half minute in case.
-    this.events.on('turnEnd', () => this.drainSoon());
-    this.events.on('ended', () => this.drainSoon());
+    // A turn's end frees a slot: a message a daemon refused at its agent cap (w3597) is tried again with the rest.
+    this.events.on('turnEnd', () => (this.clearCapRefused(), this.drainSoon()));
+    this.events.on('ended', () => (this.clearCapRefused(), this.drainSoon()));
     this.drainTimer = setInterval(() => this.drain(), 30_000);
     this.drainTimer.unref?.();
   }
@@ -1430,6 +1439,36 @@ export class SessionManager {
     return q.uuid;
   }
 
+  private clearCapRefused() {
+    for (const q of this.queue) delete q.capRefusedAt;
+  }
+
+  /** The gate resume (resumeOf) of the last message handed to each session's process: kept if its daemon refuses it (w3597). */
+  private lastResumeOf = new Map<string, QueuedSend['resumeOf']>();
+
+  /**
+   * A message its machine's daemon refused because the machine or the sandbox was at an agent cap (w3597): it waits in the
+   * queue for a slot like one the portal held itself, ahead of any later message to the session, instead of leaving the
+   * worker in error with nothing to retry it. On 2026-11-08 ffu #452's merge cleared three requests' gates on BEAST in one
+   * pass; the portal counted room for each (a process it had just started was not mid-turn yet), the daemon refused the ones
+   * past max_sandbox_agents, and w3564, w3567 and w3587 showed Stalled. It is tried again when a turn ends (any session's
+   * turn end drains the queue) or after CAP_REFUSED_HOLD_MS, and a resume may move to a computer with room (roomMove, w2046).
+   */
+  requeueRefused(id: string, m: Pick<QueuedSend, 'uuid' | 'text' | 'from' | 'images' | 'requestedBy' | 'attachments'>, why: string, now = Date.now()) {
+    if (this.queue.some((q) => q.uuid === m.uuid)) return m.uuid;
+    const resumeOf = this.lastResumeOf.get(id);
+    const q: QueuedSend = { ...m, id, ...(resumeOf ? { resumeOf } : {}), at: new Date(now).toISOString(), why, on: 'capacity', capRefusedAt: new Date(now).toISOString() };
+    for (const k of ['images', 'requestedBy', 'attachments'] as const) if (q[k] === undefined || (Array.isArray(q[k]) && !q[k].length)) delete q[k];
+    // Ahead of any later message to it, so its messages keep their order.
+    const at = this.queue.findIndex((x) => x.id === id);
+    if (at < 0) this.queue.push(q);
+    else this.queue.splice(at, 0, q);
+    this.saveQueue();
+    this.store.append(id, { kind: 'system', text: `Its machine refused to start it at an agent cap (${why}): the message waits for a free agent slot and goes as soon as one frees (w3597; nothing to resend).` });
+    console.log(`sessions: queued a message for ${id} its machine refused at an agent cap: ${why}`);
+    return q.uuid;
+  }
+
   /** A resume that does not go (w1128): said in its transcript and the server log. */
   private notDelivered(id: string, why: string) {
     this.store.append(id, { kind: 'system', text: `A resume was not delivered: ${why}.` });
@@ -1486,7 +1525,9 @@ export class SessionManager {
       // w1376: a held computer resumes nobody; checked before a restart (moveFor) or a slot, so nothing stops or starts there.
       const onHold = this.machineHold?.(s);
       const restart = onHold ? undefined : this.moveFor(s);
-      let hold = onHold ?? (restart || this.fullFor(s));
+      // w3597: refused at its machine's agent cap: it waits for a turn to end there (requeueRefused) or CAP_REFUSED_HOLD_MS.
+      const refused = q.capRefusedAt && now - (Date.parse(q.capRefusedAt) || 0) < CAP_REFUSED_HOLD_MS ? q.why : undefined;
+      let hold = onHold ?? (restart || this.fullFor(s) || refused);
       // w1532: a paused machine's worker hands its requests back instead of waiting for the unpause; the message goes with them.
       if (onHold && this.pauseHeld?.(s, q.text)) {
         drop();
@@ -1519,6 +1560,7 @@ export class SessionManager {
         continue;
       }
       try {
+        this.lastResumeOf.set(q.id, q.resumeOf);
         s.send(q.text, q.from, q.uuid, q.images, q.requestedBy, q.attachments);
         drop();
         sent++;
@@ -1611,6 +1653,7 @@ export class SessionManager {
     // w2043: a pilot worker whose pull request merged goes on in a fresh session; the message goes there.
     if (this.freshStart?.(s, { text, from, ...(images?.length ? { images } : {}), ...(opts.requestedBy ? { requestedBy: opts.requestedBy } : {}), ...(opts.attachments?.length ? { attachments: opts.attachments } : {}) })) return '';
     try {
+      this.lastResumeOf.set(id, opts.resumeOf);
       return s.send(text, from, undefined, images, opts.requestedBy, opts.attachments);
     } catch (e) {
       if (pooled(e)) {
