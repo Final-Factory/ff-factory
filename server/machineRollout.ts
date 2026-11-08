@@ -218,6 +218,7 @@ export class MachineRollout {
   state: RolloutState = { machines: {} };
   private busy = false;
   private timer?: NodeJS.Timeout;
+  private firstTick?: NodeJS.Timeout;
   /**
    * Saved in the background (w2044): tick saved once per machine, each a synchronous write with fsync, and one fsync took
    * 1.0-1.4 s on the portal's disk (stall profiles 2026-10-24 17:33-17:41Z: tick > save > writeJsonDurable > fsync). A
@@ -247,11 +248,13 @@ export class MachineRollout {
   start() {
     this.timer = setInterval(() => void this.tick(), this.lim.tickMs);
     this.timer.unref?.();
-    setTimeout(() => void this.tick(), 5_000).unref?.();
+    this.firstTick = setTimeout(() => void this.tick(), 5_000);
+    this.firstTick.unref?.();
   }
 
   close() {
     clearInterval(this.timer);
+    clearTimeout(this.firstTick);
     if (this.snap.pending) this.saveNow();
   }
 

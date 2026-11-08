@@ -121,6 +121,7 @@ function setup(t: { after: (fn: () => void | Promise<void>) => void }, opts: { l
   const closers: (() => Promise<void>)[] = [];
   t.after(async () => {
     for (const c of closers) await c();
+    agents.close();
     agents.orchestrators.close();
     sessions.stopAll();
     await new Promise((r) => setTimeout(r, 60));

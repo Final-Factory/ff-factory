@@ -60,6 +60,12 @@ export class Waker {
     return `I will message you at ${new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} (${minutes} min) with your note. End your turn now; that message resumes you.`;
   }
 
+  /** The process is stopping (Agents.close, w3746): every pending wake is disarmed and its file left as it is, for the next start. */
+  close() {
+    for (const t of this.timers.values()) clearTimeout(t.timer);
+    this.timers.clear();
+  }
+
   cancel(sessionId: string) {
     const t = this.timers.get(sessionId);
     if (!t) return false;
