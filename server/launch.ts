@@ -131,6 +131,8 @@ export interface LaunchSpec {
      * then judges commands naming it one by one (server/mainCloneGuard.ts). An older daemon ignores it and refuses them all.
      */
     mainClone?: { path: string; requests: string[] };
+    /** w3670: the daemon's folder a worker reads its diagnostic files in (server/daemonReads.ts). An older daemon ignores it. */
+    daemonReads?: { dir: string; root?: string };
   };
   env?: Record<string, string>;
   /**
@@ -486,6 +488,7 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
       denyToolPrefixes: g.denyToolPrefixes,
       publicIdentity: g.publicIdentity,
       workerRoot: g.workerRoot,
+      ...(g.daemonReads ? { daemonReads: g.daemonReads } : {}),
       mainClone: g.mainClone,
       editorRunning,
       // The shell's own variables, so `cd $TMPDIR/ffbox && git push origin HEAD:master` is read where it goes (w1132).
