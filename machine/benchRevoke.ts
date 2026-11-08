@@ -86,6 +86,28 @@ const readJson = (f: string): Record<string, unknown> | undefined => {
 };
 
 /**
+ * End a revoked ticket's helper tree if the ticket still names that pid and it still runs: the grace timer's step, and the
+ * daemon start's (resumeRevokes). The ticket is gone when its helper let go; the pid may be another process's by now, so
+ * nothing is killed then.
+ */
+function endIfStillHeld(infoFile: string, ticket: string, pid: number, d: RevokeDeps, when: string): void {
+  const cur = readJson(infoFile);
+  if (!cur || cur.pid !== pid) {
+    d.log(`bench revoke ${ticket}: gone ${when}, nothing to end`);
+    return;
+  }
+  if (!d.alive(pid)) {
+    d.log(`bench revoke ${ticket}: helper pid ${pid} already ended`);
+    return;
+  }
+  d.log(`bench revoke ${ticket}: still held ${when}; ending helper pid ${pid} and its tree`);
+  d.kill(pid).then(
+    () => d.log(`bench revoke ${ticket}: ended helper pid ${pid}`),
+    (e: Error) => d.log(`bench revoke ${ticket}: ending helper pid ${pid} failed: ${e.message}`),
+  );
+}
+
+/**
  * Take a worker's granted ticket back: write its `revoked` file, and end its helper's tree if the ticket is still there
  * after REVOKE_KILL_GRACE_MS. Returns what happened, in one short line (also logged).
  */
@@ -125,22 +147,55 @@ export function revokeTicket(root: string, msg: RevokeMessage, deps: Partial<Rev
   }
   done(`revoked (${what.slice(0, 60)}; helper pid ${pid}; ${msg.why}); its helper ends after ${REVOKE_KILL_GRACE_MS / 1000} s if it is still there`);
 
-  d.setTimeout(() => {
-    // The ticket is gone when its helper let go; the pid may be another process's by now, so nothing is killed then.
-    const cur = readJson(infoFile);
-    if (!cur || cur.pid !== pid) {
-      d.log(`bench revoke ${msg.ticket}: gone after its grace, nothing to end`);
-      return;
-    }
-    if (!d.alive(pid)) {
-      d.log(`bench revoke ${msg.ticket}: helper pid ${pid} already ended`);
-      return;
-    }
-    d.log(`bench revoke ${msg.ticket}: still held after ${REVOKE_KILL_GRACE_MS / 1000} s; ending helper pid ${pid} and its tree`);
-    d.kill(pid).then(
-      () => d.log(`bench revoke ${msg.ticket}: ended helper pid ${pid}`),
-      (e: Error) => d.log(`bench revoke ${msg.ticket}: ending helper pid ${pid} failed: ${e.message}`),
-    );
-  }, REVOKE_KILL_GRACE_MS);
+  d.setTimeout(() => endIfStillHeld(infoFile, msg.ticket, pid, d, `after its grace (${REVOKE_KILL_GRACE_MS / 1000} s)`), REVOKE_KILL_GRACE_MS);
   return `revoked ${msg.ticket}`;
+}
+
+/**
+ * w3731: the grace timer above lives in this daemon's memory, so a restart between a revoke and its timer would leave a
+ * helper that ignored its `revoked` file holding the ticket for good. At start the daemon rescans the queue: every worker
+ * ticket with a `revoked` file (this daemon's, or bench_queue.py's own turn limit) whose helper still runs has its helper
+ * tree ended now if the revoke is at least REVOKE_KILL_GRACE_MS old, else when that grace ends. Harness tickets (an editor
+ * boot's, a timed run's leg) are never touched, as in revokeTicket. Returns one line per ticket it acted on (also logged).
+ */
+export function resumeRevokes(root: string, deps: Partial<RevokeDeps> = {}): string[] {
+  const d: RevokeDeps = { ...realDeps(deps.log ?? ((l) => console.log(l))), ...deps };
+  const dir = benchQueueDir(benchLockDir(root));
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir).filter((n) => /^t\d{8}$/.test(n)).sort();
+  } catch {
+    return [];
+  }
+  const out: string[] = [];
+  for (const name of names) {
+    const tdir = path.join(dir, name);
+    const revokedFile = path.join(tdir, 'revoked');
+    if (!fs.existsSync(revokedFile)) continue;
+    const infoFile = path.join(tdir, 'info.json');
+    const info = readJson(infoFile);
+    if (!info) continue;
+    const session = typeof info.session === 'string' ? info.session : '';
+    const what = typeof info.what === 'string' ? info.what : '';
+    if (isHarnessTicket({ session, what })) continue;
+    const pid = info.pid;
+    if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 1 || pid === process.pid || !d.alive(pid)) continue;
+    // When it was revoked: the file's ts (epoch s), else its mtime; unreadable counts as now (a full grace from here).
+    const r = readJson(revokedFile);
+    let at = typeof r?.ts === 'number' && Number.isFinite(r.ts) ? r.ts * 1000 : NaN;
+    if (!Number.isFinite(at)) {
+      try {
+        at = fs.statSync(revokedFile).mtimeMs;
+      } catch {
+        at = d.now();
+      }
+    }
+    const left = Math.max(0, at + REVOKE_KILL_GRACE_MS - d.now());
+    const line = `bench revoke ${name}: revoked ${Math.round((d.now() - at) / 1000)} s ago before this daemon started, helper pid ${pid} still runs; ${left === 0 ? 'ending it now' : `ending it in ${Math.ceil(left / 1000)} s if it is still there`}`;
+    d.log(line);
+    out.push(line);
+    if (left === 0) endIfStillHeld(infoFile, name, pid, d, 'past its grace at daemon start');
+    else d.setTimeout(() => endIfStillHeld(infoFile, name, pid, d, `after its grace (re-armed at daemon start)`), left);
+  }
+  return out;
 }
