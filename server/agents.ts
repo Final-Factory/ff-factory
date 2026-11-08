@@ -89,6 +89,7 @@ import { conditionalLine, HELD_MARK } from '../shared/conditional.ts';
 import { personMessageView } from '../shared/personMessage.ts';
 import { approvedMark, countGrant, liveGrant } from './benchGrants.ts';
 import { FFBOX_CONVERSATION_DEFAULT_TURNS, FFBOX_REPORTS_DEFAULT, LIST_CARD_NOTE, LIST_WORK_LOG_TAIL, SANDBOX_DETAIL_CHARS, SESSION_REQUESTS_TOP, clip, keyList, logLines } from './toolOutput.ts';
+import { findingsLines } from './findings.ts';
 import { SpendStore, buildReport, costLine, renderReport, renderRequest, renderSession } from './spend.ts';
 import { spendExport, type ExportArgs } from './spendExport.ts';
 import { dataGuardSettings, footprint, gzipRatioCached, renderFootprint } from './dataGuard.ts';
@@ -7636,6 +7637,7 @@ ${fp}`;
         w.attachments?.length ? attachmentsNote(w.attachments) : '',
         overlaps.length ? `Possible overlaps: ${overlaps.map(overlapLine).join('; ')}.` : 'No overlap with open or recent work.',
         w.humanAsked ? `Asked for by ${w.requestedBy.displayName} in their own turn.` : `Filed outside a turn of ${w.requestedBy.displayName}'s.`,
+        ...findingsLines(w),
         this.spend && a.spend ? `Spend: ${renderRequest(this.spend, w.id, (sid) => this.sessionLink(sid), this.retainDays())}` : '',
         ...logLines(w.log, !!a.full_log),
       ]
