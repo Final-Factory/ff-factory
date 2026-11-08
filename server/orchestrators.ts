@@ -51,6 +51,7 @@ import {
 import { autoApproveProblem, cleanBlock, cleanLine, crashFacts, crashKinship, crashPeersBlock, identityKeys, ownApprovalCount, parseMarkers, quoteUntrusted, sourceTag, titleOnly } from './intakeRules.ts';
 import { readDiscordConfig } from './discordConfig.ts';
 import { LIMIT_END, doneIdsIn, doneProblem, legDoneIdsIn, learnedProblem, supersededIn, reportProblem, mergedMentionsIn, notDoneReason, pausedIn, reportVerdict, stillOpenIn, toolErrors, turnEvidence, turnTroubleOf, type TurnTrouble } from './ledgerRules.ts';
+import { findingTargets, recordFinding } from './findings.ts';
 import { aheadText, answerAfter, asksAPerson, dispatcherAskIn, handUpsPending, holdsOf, orchestratorAskIn, standingTargetOf, personWaitIn, questionShareKey, reportWaitKey, roomShares, servedBy, UNDECIDED_BOUND_MS, unfiledFollowUpsIn } from '../shared/workState.ts';
 import { capacityBlockProblem, capacityWaitIn, macRefusedScenario, MAC_REFUSES_SCENARIO, needsOf, needsTimed, pairRoom, pairText, PAIR_MAX_LEGS, resolveNeeds, steamShortIn } from '../shared/capacity.ts';
 import { mentionsSteam, saysNoSteam, STEAM_NONE, STEAM_READ } from '../shared/steam.ts';
@@ -6017,6 +6018,8 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const served = servedBy(s.id, [...this.store.work.values()]);
     // w3281: each held request's latest word before this report replaces it (a report on another request overwrites it).
     const before = new Map(this.itemsOf(s.id).map((w) => [w.id, w.outcome]));
+    // w3706: its report, whole, joins the Findings / outcome record of each request it was on, before a marker closes one.
+    for (const w of findingTargets(this.itemsOf(s.id), text)) if (recordFinding(w, s.id, text)) this.store.putWork(w);
     // w3105: a hand-off's report is kept whole before any marker below can close the request and resume its waiter.
     this.keepHandoffReports(s, text);
     this.dropCutOffGates(s.id);
@@ -6098,6 +6101,9 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     if (!ids.size) return [];
     const lines: string[] = [];
     const before = new Map([...ids].map((id) => [id, this.store.work.get(id)?.status]));
+    // w3706: its report joins the Findings / outcome record of the requests its job was for, before a DONE closes one.
+    const jobs = [...ids].map((id) => this.store.work.get(id)).filter((w): w is WorkItem => !!w && isOpen(w));
+    for (const w of findingTargets(jobs, text)) if (recordFinding(w, s.id, text)) this.store.putWork(w);
     this.doneMarkers(s, text, { workIds: ids, by: job.by, tell: (l) => void lines.push(...l) });
     for (const [id, line] of stillOpenIn(text)) {
       const w = this.store.work.get(id);

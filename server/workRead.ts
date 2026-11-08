@@ -11,6 +11,7 @@ import { digestText } from '../shared/intakeDigest.ts';
 import { ledgerOrder, liveLine, names } from './work.ts';
 import { gatesName, gatesOf } from '../shared/blockers.ts';
 import { HANDOFF_REPORT_CHARS } from './handoffReport.ts';
+import { FINDINGS_CHARS, findingsLines } from './findings.ts';
 
 /**
  * The most an answer holds, in characters. Claude Code warns once an MCP result passes 10,000 tokens and saves a result
@@ -227,6 +228,8 @@ function full(w: WorkItem, now?: WorkLive, cost = ''): string {
     ...(notes ? ["Its people's notes:", fence(w, notes, 6_000, 120)] : []),
     ...(w.outcome ? ['Latest report:', fence(w, latestLine(w)!, 4_000, 80)] : []),
     ...(done ? ['DONE reports:', fence(w, done, 2_000, 20)] : []),
+    // w3706: its Findings / outcome record, every worker's reports and the final outcome, in full.
+    ...(w.findings?.length || w.finalOutcome ? [findingsLines(w)[0]!, fence(w, findingsLines(w).slice(1).join('\n'), FINDINGS_CHARS + 6_000, 2_000)] : []),
     `Log (${Math.min(w.log.length, 60)} of ${w.log.length}, newest last):`,
     fence(w, w.log.slice(-60).join('\n'), 12_000, 60),
   ].join('\n');

@@ -2076,6 +2076,16 @@ export type WorkPriority = 'low' | 'normal' | 'high' | 'urgent';
 export const WORK_PRIORITIES: readonly WorkPriority[] = ['low', 'normal', 'high', 'urgent'];
 
 /** Work in flight or recently done that a new request may repeat, as the server found it when the request was filed. */
+/** w3706 (server/findings.ts): one worker report kept in a request's Findings / outcome record, its head when cut. */
+export interface WorkFinding {
+  at: string;
+  /** The worker session that wrote it, or "ledger" (an earlier outcome of a reopened request). */
+  by: string;
+  text: string;
+  /** Its full length when `text` is only its head. */
+  chars?: number;
+}
+
 export interface WorkOverlap {
   /** A work item ("w12"), a session id, a delegation id or a commit. */
   ref: string;
@@ -2245,6 +2255,13 @@ export interface WorkItem {
   overlaps: WorkOverlap[];
   /** The latest outcome: a worker's last word, or the note it was closed with. */
   outcome?: string;
+  /**
+   * w3706 (server/findings.ts): its Findings / outcome record. Every report a worker ended a turn on it with, oldest
+   * first, whole up to a few KB, kept across hand-offs and moves; list_work with an id and read_work show it in full.
+   */
+  findings?: WorkFinding[];
+  /** w3706: its final outcome, written by every close (Store.putWork): the close note and the last worker report. */
+  finalOutcome?: { at: string; status: WorkStatus; text: string };
   /** Questions the dispatcher asked about it (at most 3). */
   asks: number;
   /**
