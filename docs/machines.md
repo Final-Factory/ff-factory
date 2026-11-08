@@ -2042,7 +2042,9 @@ LothDesktop and Beast, not just when BEAST is full").
     and the idle stop (2 hours without agent activity) still applies. New work there, or a worker placed in a sandbox,
     stops that sandbox's editor before the switch: a switch under a running editor makes Unity stop on "The open
     scene(s) have been modified externally" on a Mac and fails on files the editor holds open on Windows, and the
-    daemon refuses it on both. A Unity batch run keeps the sandbox held (above). Built players run from the slot pool,
+    daemon refuses it on both. A Unity batch run keeps the sandbox held (above), and the daemon refuses a switch while a
+    nightly run or a unity-slot batch run holds that sandbox, naming the night and request or the run, its slot and owner
+    (w3626, `machine/switchHolds.ts`: on 2026-11-08 a switch moved w3598's nightly build onto another commit's tree). Built players run from the slot pool,
     not from the sandbox, and are not touched. A worker whose editor or run must stay untouched keeps its check-in
     within 30 minutes; the brief says so.
   - **How it learns it moved** (decision 3). Its next message starts with a line from FF Factory: "[moved] While you

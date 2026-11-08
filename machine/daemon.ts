@@ -26,6 +26,7 @@ import type { TrimPolicy } from '../server/cacheTrim.ts';
 import { DEFAULT_BUILD } from '../server/placement.ts';
 import { RELEASE_SANDBOX } from '../server/releaseSeat.ts';
 import { SandboxPool, realPoolDeps, totalAgentsRefusal, type PoolDeps } from './sandboxes.ts';
+import { batchUnityIn, nightsIn, slotRunsFor, switchHoldRefusal } from './switchHolds.ts';
 import { UnitySlots, gamePlayers, installShims, isAlive, runsIn, slotsDir } from './unitySlots.ts';
 import { McpScopes, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp, type StdioServer } from './unityMcp.ts';
 import { addSecretEnv, addSecretValues, redactSecrets, redactValue, skippedSecrets } from '../server/secrets.ts';
@@ -2496,6 +2497,20 @@ export class Daemon {
     return [...this.entries.values()].filter((e) => e.s.live).length;
   }
 
+  /**
+   * What else holds a sandbox's tree, as switch_branch's refusal (w3626, machine/switchHolds.ts): a night running in it
+   * (its state file in nightly-history), a unity-slot run holding slots for it, or a batchmode Unity with its project open.
+   */
+  private async switchHold(sandbox: string): Promise<string | undefined> {
+    const sb = this.pool.list().find((x) => x.id === sandbox);
+    if (!sb) return undefined;
+    const platform = machinePlatformOf(process.platform);
+    const roots = staleOutputSettings(this.cleanupSettings.staleOutput).nightlyRoots ?? defaultNightlyRoots(this.cfg.root);
+    const nights = nightsIn({ roots, checkout: sb.path, platform, alive: isAlive, now: Date.now() });
+    const { reqs, unity } = await this.slots.holds().catch(() => ({ reqs: [], unity: [] }));
+    return switchHoldRefusal(sandbox, { nights, runs: slotRunsFor(reqs, sandbox, sb.path, platform), batch: batchUnityIn(unity, sb.path, platform) });
+  }
+
   /** Live agents in one place: a sandbox, or outside sandboxes (standing agents, sandbox undefined). */
   private liveIn(sandbox: string | undefined) {
     return [...this.entries.values()].filter((e) => e.s.live && e.spec?.sandbox === sandbox).length;
@@ -2780,7 +2795,8 @@ export class Daemon {
           this.send({ type: 'switch_result', id: msg.id, ok: false, error: midTurnRefusal(busy, `sandbox ${msg.sandbox}`) });
           return;
         }
-        void this.pool.switch(msg.sandbox, msg.branch, msg.createFrom, githubNetEnv(msg.githubToken)).then(
+        // w3626: nor under a night or a batch build in that tree (machine/switchHolds.ts).
+        void this.switchHold(msg.sandbox!).then((held) => (held ? Promise.reject(new Error(held)) : this.pool.switch(msg.sandbox!, msg.branch, msg.createFrom, githubNetEnv(msg.githubToken)))).then(
           (r) => this.send({ type: 'switch_result', id: msg.id, ok: true, ...r }),
           (err) => this.send({ type: 'switch_result', id: msg.id, ok: false, error: (err as Error).message }),
         );
