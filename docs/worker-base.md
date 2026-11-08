@@ -125,9 +125,10 @@ Across parts (each worker reads both; removing one copy is a decision, D7 and D9
 - **Merge your own PR.** Worker MERGE_RULES: "Never stop at an open PR waiting for the user. Hold one only for exceptional risk or a
   concrete timing reason, and say in your report which it is and when it will merge." CLAUDE.md: "Don't stop at an open PR waiting
   for him. Hold one only for exceptional risk or a concrete timing reason, and say which it is and when it will merge."
-- **Temp files.** Worker Disk space: "Leave it there: do not clean up after yourself (lothsahn, 2026-10-10, w913: "Random clean up
-  commands take a lot of approvals")". CLAUDE.md: "Leave temp files in `$TMPDIR`; the harness removes them (lothsahn, 2026-10-10,
-  w913: "Random clean up commands take a lot of approvals")". The CLAUDE.md bullet speaks of FF Factory's own sweep, so it is a
+- **Temp files.** Worker Disk space: "Delete the big things you made once you are done with them, and before DONE or a long wait
+  ... each with a plain `rm -rf "$TMPDIR/<name>"` written out (it asks nobody)". CLAUDE.md: "Delete the big temp files you made
+  before DONE; keep them in `$TMPDIR` (Ben, 2026-11-08, w3686 ...)". Both replace w913's "leave it there" (lothsahn: "Random
+  clean up commands take a lot of approvals"): a written-out delete under `$TMPDIR` no longer asks. The CLAUDE.md bullet is a
   worker rule in the file every agent reads.
 - **DONE and Learned.** Brief (`doneRule`): "Your DONE report also carries a line `Learned: ...` or `Learned: nothing new`: a person's
   correction or a reopen always gets the check that would have caught it". CLAUDE.md: "The DONE report carries `Learned: <file or

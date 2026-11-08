@@ -139,8 +139,12 @@ export interface LinkUpdateReport {
 /** What the daemon reports of a sandbox; the portal adds purpose and sessionIds (MachineSandbox). */
 export type DaemonSandbox = Omit<MachineSandbox, 'purpose' | 'sessionIds'>;
 
-/** rateLimit (protocol 4): an agent there hit a rate limit, so the portal fetches the token's usage sooner. */
-export type SignalName = 'turnEnd' | 'permission' | 'result' | 'ended' | 'rateLimit';
+/**
+ * rateLimit (protocol 4): an agent there hit a rate limit, so the portal fetches the token's usage sooner.
+ * tempSize (w3686, no bump): a worker's temp folder is over its threshold, arg { total, biggest, step } (server/tempSizeHook.ts); an older
+ * portal re-emits it with no listener, and an older daemon or host never sends it.
+ */
+export type SignalName = 'turnEnd' | 'permission' | 'result' | 'ended' | 'rateLimit' | 'tempSize';
 
 /** The refusal of unity and switch on a machine's main clone, by the portal and by the daemon (w536). */
 export const MAIN_CLONE_NO_AGENTS = "a machine's main clone takes no agents (w536): give a sandbox";
