@@ -88,7 +88,11 @@ export function digestFromFfbox(text: string, at: string, o: { hit?: string; ver
   const fix = fixFirst ? plainer(fixFirst.replace(/^(?:fix|the fix|change)\s*:\s*/i, ''), 320) : undefined;
   const unv = section(lines, UNVERIFIED_HEAD);
   const unverified = unv?.length ? sentences(unv.map(plainLine).join(' '), 2, 300) : undefined;
-  const rsk = section(lines, RISK_HEAD);
+  // FFBox's "**Risk:** …" line (ffbox diagnose.md, w3622) is read alone: the evidence that follows it is not the risk. A
+  // bare "**Risk**" heading takes the lines under it.
+  const riskLine = lines.map(plainLine).find((l) => RISK_HEAD.test(l));
+  const riskOwn = riskLine?.replace(RISK_HEAD, '').replace(/^[\s:.)-]+/, '');
+  const rsk = riskOwn ? [riskOwn] : section(lines, RISK_HEAD);
   const risk = rsk?.length ? sentences(rsk.map(plainLine).join(' '), 2, 300) : undefined;
   const v = o.verification;
   const fromRun = v && (v.testsRun !== undefined || v.compiled !== undefined) ? { ...(v.compiled !== undefined ? { compiled: v.compiled } : {}), ...(v.testsRun !== undefined ? { run: v.testsRun } : {}), ...(v.testsPassed !== undefined ? { passed: v.testsPassed } : {}), ...(v.testsFailed !== undefined ? { failed: v.testsFailed } : {}) } : undefined;
@@ -211,7 +215,7 @@ export function approveAction(w: Pick<WorkItem, 'source'>): string {
   const cost = 'one worker session of Claude usage';
   if (!s) return `The dispatcher gets it and a worker starts at the next free sandbox: ${cost}.`;
   const failed = s.digest?.tests?.failed;
-  const fixTests = failed ? `, fixes the ${failed} failing test${failed === 1 ? '' : 's'}` : '';
+  const fixTests = failed ? `, checks the ${failed} failing test${failed === 1 ? '' : 's'} and fixes any the fix broke` : '';
   const pr = s.pr ? `reviews its pull request #${s.pr}` : 'opens a pull request';
   if (s.kind === 'ffbox-branch' || ((s.kind === 'ffbox-diagnosis') && s.branch)) {
     return `A worker reviews FFBox’s fix ${fixFor(s)} against the code${fixTests}, ${pr} and merges it on green: ${cost}.`;
