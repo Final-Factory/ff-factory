@@ -156,3 +156,33 @@ test('w2079: a request another live worker carries gets no moved copy, and that 
   await settled();
   assert.deepEqual(starts, []);
 });
+
+test('w3601: a room move does not take the last free sandbox a waiting pair run needs: the pair gets it, and the move waits', async (t) => {
+  const { store, agents, starts, worker, request, queued, roomMove, settled } = await setup(t);
+  const x = agents as unknown as Internals;
+  // 2026-11-08: w3573 (high, a two-computer pair) was Queued since 05:39Z with beast held for one leg. biscuit/slot2 freed at
+  // 07:30:39Z, and at 07:31:05Z a room move put w3335 there (cd71c885 to 2c218ee8): the pair waited 23 more minutes.
+  x.places = () => [pc('m3', { freeSandboxes: 0, sandboxes: 1, maxSandboxes: 1 }), pc('m5', { freeSandboxes: 1 }), pc('biscuit', { freeSandboxes: 1 })];
+  const pair: WorkItem = { id: 'w3573', title: 'Two-computer determinism check', brief: 'Run it.', priority: 'high', keys: [], requestedBy: BEN, requesters: [], humanAsked: true, status: 'queued', queuedFor: { at: OLD }, pair: { legs: 2 }, createdAt: OLD, updatedAt: OLD, sessionIds: [], overlaps: [], asks: 0, log: [] };
+  store.putWork(pair);
+  const released = { at: OLD, sandbox: 'slot1', branch: 'w1903-station-stop-circuits', why: 'it waits on w1903: w1982 reporting' };
+  const d5 = worker('d5ab39da', { machineId: 'm3', machineSandbox: 'slot1', placeReleased: released });
+  request(['d5ab39da']);
+
+  const kept = roomMove(d5, queued('d5ab39da', 'CI on #2369 cleared'));
+  assert.equal(typeof kept, 'string', 'the move waits as it is');
+  assert.match(kept as string, /m5's last free sandbox is held for w3573/);
+  assert.match(kept as string, /biscuit's last free sandbox is held for w3573/);
+  assert.equal(agents.isMoving('d5ab39da'), false);
+  assert.deepEqual(starts, [], 'no moved copy took a sandbox the pair needs');
+  // The pair still starts on both: each computer's last free sandbox stays held for it.
+  const plan = agents.pairPlan(agents.roomFacts());
+  assert.deepEqual([...plan].map(([id, h]) => `${id}:${h.pair.id}${h.short ? ' short' : ''}`).sort(), ['biscuit:w3573', 'm5:w3573']);
+
+  // Once the pair has started (or a computer has a second free sandbox), the move goes.
+  store.work.get('w3573')!.status = 'active';
+  await new Promise((r) => setTimeout(r, 0)); // heldFor's answers last until the next microtask
+  assert.equal(roomMove(d5, queued('d5ab39da', 'CI on #2369 cleared again')), true);
+  await settled();
+  assert.match(starts[0] ?? '', /^(m5|biscuit):new1$/);
+});
