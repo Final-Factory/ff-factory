@@ -19,11 +19,12 @@
 import type { Store } from './store.ts';
 import type { Orchestrators } from './orchestrators.ts';
 import { run as runProc, type RunOptions, type RunResult } from './proc.ts';
-import { blockerVerdict, CI_REF, cycleBreak, FULL_SHA, gateSetter, gatesOf, newestFirst, RESUME_SWEEP_MS, waitCycles, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
+import { blockerVerdict, CI_REF, cycleBreak, FULL_SHA, gateSetter, gatesOf, newestFirst, ownsPr, prLabel, RESUME_SWEEP_MS, waitCycles, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
 import { conditionalVerdict } from '../shared/conditional.ts';
 import { ghRunner } from './githubTokens.ts';
 import { evidenceArgs, evidenceGated, evidencePython, evidenceRefusal, evidenceVerdict, fetchHudData, findLocalPrEvidence, noScriptRefusal } from '../machine/evidenceGate.ts';
-import { pairDelivers, reportDelivers, stillOpenIn } from './ledgerRules.ts';
+import { pairDelivers, reportDelivers, requestIdsIn, stillOpenIn } from './ledgerRules.ts';
+import { isOpen } from './work.ts';
 import { diskWaitIn, lastOpenLine, personWaitOn, portalWaitIn, reportAt, requestWaitOf, siblingWaitOf } from '../shared/workState.ts';
 import type { SessionInfo, WorkBlocker, WorkItem } from '../shared/types.ts';
 import type { RoomNow } from './placement.ts';
@@ -51,7 +52,7 @@ export type PrState = { state: 'open' | 'merged' | 'closed'; text: string; sha?:
 export interface BlockerWatchDeps {
   store: Store;
   orchestrators: Pick<Orchestrators, 'unblock' | 'blockerStuck' | 'blockerDecide' | 'gatesCleared' | 'flagQueuedWithRoom' | 'carryOutConditional' | 'dropConditional'> &
-    Partial<Pick<Orchestrators, 'recordReportedWait' | 'retellReportWaits' | 'noticeLongOffline' | 'noteCiRead' | 'sweepResumes' | 'requeueCapacityBlocks' | 'requeueBrokenPairs' | 'replaceNoTimedWaits' | 'timedLegBound' | 'mergedOnGreen' | 'undecidedBound' | 'holdSteamPairs' | 'flagDeadWait'>>;
+    Partial<Pick<Orchestrators, 'tellPrConflict' | 'recordReportedWait' | 'retellReportWaits' | 'noticeLongOffline' | 'noteCiRead' | 'sweepResumes' | 'requeueCapacityBlocks' | 'requeueBrokenPairs' | 'replaceNoTimedWaits' | 'timedLegBound' | 'mergedOnGreen' | 'undecidedBound' | 'holdSteamPairs' | 'flagDeadWait'>>;
   /** w1841: tell the workers waiting on a bench lock that is free now (Agents.resumeBenchWaits): request id to what it did. */
   benchResume?: () => [string, string][];
   /** w2544: work waiting on a computer away (offline or paused) past the grace moves elsewhere (Agents.moveAwayWork). */
@@ -121,6 +122,8 @@ export class BlockerWatch {
   private readonly healthSeen = new Map<string, { at: number; state?: PrHealth }>();
   /** "<ref>@<head sha>" to when this portal first saw that head (w907: the clock of the no-CI-run rule). */
   private readonly headFirstSeen = new Map<string, number>();
+  /** w3572: the conflicting pull request heads (`ref@head`) whose owner was told, or found to have none: once each. */
+  private readonly conflictTold = new Set<string>();
   private readonly prSeen = new Map<string, { at: number; state?: PrState }>();
   private readonly healthFailing = new Map<string, { since: number; why: string; logged: number }>();
   private readonly prFailing = new Map<string, { since: number; why: string; logged: number }>();
@@ -337,6 +340,7 @@ export class BlockerWatch {
           console.warn(`blocker watch: CYCLE: ${cycle.join(', ')}: ${(e as Error).message}`);
         }
       }
+      for (const [id, why] of this.tellPrConflicts(health)) did.set(id, why);
       for (const [id, why] of this.flagDeadWaits()) did.set(id, why);
       // w1094, the backstop: a request still Blocked on CI that finished more than RESUME_SWEEP_MS ago (the clearing above
       // threw for it) is said loudly, once, and its CI gate is cleared again.
@@ -525,6 +529,45 @@ export class BlockerWatch {
   }
 
   /**
+   * w3572: a pull request other requests wait to merge (a pr gate) conflicts with its base: those requests stay Blocked
+   * (blockerVerdict wakes only the PR's owner, shared/blockers.ts ownsPr), and the requests that own it are told once per
+   * head commit (Orchestrators.tellPrConflict). An owner Blocked on that PR itself (ci: or pr) is not told: its own gate
+   * wakes it with the conflict. ffu#397 (w3445's) conflicted with main and w3423, w3416, w3419, w3421, w3422 and w3424, which
+   * only waited for it to merge, were each woken to "merge main in, resolve, push", several times an hour.
+   */
+  private tellPrConflicts(health: ReadonlyMap<string, PrHealth | undefined>): [string, string][] {
+    const did: [string, string][] = [];
+    const all = [...this.d.store.work.values()];
+    for (const [ref, h] of health) {
+      if (h?.state !== 'open' || !h.conflict) continue;
+      const key = `${ref}@${h.head ?? ''}`;
+      if (this.conflictTold.has(key)) continue;
+      const gated = (w: WorkItem) => w.status === 'blocked' && gatesOf(w).some((g) => (g.kind === 'pr' || g.kind === 'ci') && g.ref === ref);
+      const waiters = all.filter((w) => gated(w) && !ownsPr(w, ref, h)).map((w) => w.id);
+      if (!waiters.length) continue;
+      const owners = all.filter((w) => isOpen(w) && ownsPr(w, ref, h));
+      if (!owners.length) {
+        console.log(`blocker watch: ${ref} conflicts with ${h.conflict.base}; ${waiters.join(', ')} wait for it to merge and no open request owns it (no Request: line, ledger link or branch), so nobody is told (w3572)`);
+        this.conflictTold.add(key);
+        continue;
+      }
+      let told = false;
+      for (const o of owners) {
+        if (gated(o)) { told = true; continue; }
+        const text = `${prLabel(ref)} (${ref}) conflicts with ${h.conflict.base}, so it cannot merge and CI cannot run on it; ${waiters.join(', ')} wait for it to merge. It is ${o.id}'s: merge ${h.conflict.base} into its branch, resolve, push, and wait on its CI again. The requests waiting on it stay Blocked and do not touch it.`;
+        try {
+          if (this.d.orchestrators.tellPrConflict?.(o.id, { mark: `${ref} conflicts at ${(h.head ?? 'its head').slice(0, 7)}`, text })) did.push([o.id, `told: ${prLabel(ref)} conflicts with ${h.conflict.base} (w3572)`]);
+          told = true;
+        } catch (e) {
+          console.warn(`blocker watch: ${o.id}: telling it ${ref} conflicts: ${(e as Error).message}`);
+        }
+      }
+      if (told) this.conflictTold.add(key);
+    }
+    return did;
+  }
+
+  /**
    * A pull request's head and mergeability, read at most every CI_EVERY_MS (w907). A read that fails is logged as for CI
    * and answers undefined (no conflict is assumed). The first time a head commit is seen starts its no-CI-run clock.
    */
@@ -694,13 +737,15 @@ export function prState(pr: { state?: string; mergeCommit?: { oid?: string } | n
 }
 
 /** What `gh pr view` says for a pull request's health (w907): its state, GitHub's mergeability, base branch and head commit. */
-export function prHealthOf(pr: { state?: string; mergeable?: string; baseRefName?: string; headRefOid?: string; headRefName?: string }): PrHealth {
+export function prHealthOf(pr: { state?: string; mergeable?: string; baseRefName?: string; headRefOid?: string; headRefName?: string; body?: string }): PrHealth {
+  const requests = requestIdsIn(pr.body ?? '');
   const state = pr.state === 'MERGED' ? 'merged' : pr.state === 'CLOSED' ? 'closed' : 'open';
   return {
     state,
     ...(pr.mergeable === 'CONFLICTING' ? { conflict: { base: pr.baseRefName || 'its base branch' } } : {}),
     ...(pr.headRefOid ? { head: pr.headRefOid } : {}),
     ...(pr.headRefName ? { headRef: pr.headRefName } : {}),
+    ...(requests.length ? { requests } : {}),
   };
 }
 
@@ -711,7 +756,7 @@ export function prHealthOf(pr: { state?: string; mergeable?: string; baseRefName
 export async function ghPrHealth(ref: string, run: Runner = runProc): Promise<PrHealth> {
   const m = CI_REF.exec(ref);
   if (!m) throw new Error(`"${ref}" is not a pull request (owner/repo#123)`);
-  const r = await run('gh', ['pr', 'view', m[2], '-R', m[1], '--json', 'state,mergeable,baseRefName,headRefOid,headRefName'], { timeoutMs: 30_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
+  const r = await run('gh', ['pr', 'view', m[2], '-R', m[1], '--json', 'state,mergeable,baseRefName,headRefOid,headRefName,body'], { timeoutMs: 30_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
   if (r.code !== 0) throw new Error(`gh pr view ${ref}: ${ghSaid(r)}`);
   return prHealthOf(JSON.parse(r.stdout) as Parameters<typeof prHealthOf>[0]);
 }
