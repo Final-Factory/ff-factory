@@ -2,6 +2,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { evidenceArgs, evidenceGated, evidencePython, evidenceRefusal, evidenceVerdict, findPrEvidence, noScriptRefusal } from '../machine/evidenceGate.ts';
 import { repoIsPublic } from './publicGit.ts';
 import { checkStrayWrite } from './strayWrite.ts';
+import { checkGitBashPathInPowerShell } from './gitBashPath.ts';
 import { daemonShell, daemonToolProblem, type DaemonReads } from './daemonReads.ts';
 import { readTargets } from './secretGuard.ts';
 import { checkOffDriveScan, checkOutsideRootDelete } from './rootFence.ts';
@@ -9,6 +10,7 @@ import { headBranch, isUrgentBranch } from './releaseHandBack.ts';
 import fs from 'node:fs';
 import { checkMainCloneShell, flatten, normPath, pathSpellings, spellingsRegex, type MainCloneGrant } from './mainCloneGuard.ts';
 import { checkTiming } from './timingGuard.ts';
+import { checkGameRepoClone } from './cloneGuard.ts';
 import { checkTimedAsk, type TimedAskState } from './timedAsk.ts';
 import { checkChecksRead, checkTimedSleep } from './waitGuard.ts';
 import { checkSearchTool, checkWholeDiskSearch, type WholeDiskContext } from './wholeDiskSearch.ts';
@@ -207,10 +209,13 @@ export function sandboxGuard(opts: {
         (opts.benchBusy ? checkBenchBusyLaunch(cmd, opts.benchBusy) : undefined) ??
         (opts.personBusy ? checkPersonPlayLaunch(cmd, opts.personBusy) : undefined) ??
         checkRawUnityBatch(cmd, cloneSpellings) ??
+        // w3703: no full clone of the game repo (its LFS files and Library copies filled V: and F:); players build in the sandbox.
+        checkGameRepoClone(cmd, { cwd: input.cwd || opts.sandboxPath, env: opts.env, gameRepos: opts.gameRepos ?? [], sandboxPath: opts.sandboxPath }) ??
         timing(tool, args, input.cwd || opts.sandboxPath) ??
         (opts.timedAsk ? checkTimedAsk(cmd, opts.timedAsk()) : undefined) ??
         checkWholeDiskSearch(cmd, disk(input.cwd || opts.sandboxPath)) ??
         (opts.workerRoot ? checkOutsideRootDelete(cmd, { root: opts.workerRoot, cwd: input.cwd || opts.sandboxPath, allow: [opts.sandboxPath], saveTag }) : undefined) ??
+        (tool === 'PowerShell' && opts.workerRoot ? checkGitBashPathInPowerShell(cmd, opts.workerRoot) : undefined) ??
         (opts.workerRoot ? checkOffDriveScan(cmd, { root: opts.workerRoot, cwd: input.cwd || opts.sandboxPath, allow: [opts.sandboxPath, ...(daemon ? [daemon.dir] : [])] }) : undefined);
       if (reason) return deny(reason);
       let flat = flatten(cmd);
