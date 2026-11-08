@@ -876,6 +876,9 @@ test('machine: agents cut off mid-turn by a forced redeploy or a daemon restart 
   t.after(() => (RESUME_DELAY_MS.value = 3000));
   const reports: string[] = [];
   mm.report = (text) => reports.push(text);
+  // w3650: the ledger's gate (w2433) is for a drop nobody planned; a drop the portal made itself gates nothing.
+  const gatedOn: string[][] = [];
+  mm.workersCutOff = (_m, sids) => (gatedOn.push([...sids]), []);
   const d1 = daemon();
   await until('online', () => mm.isOnline('mx') && mm.protocolOf('mx') !== undefined);
   const s = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'w', permissionMode: 'default' });
@@ -895,6 +898,7 @@ test('machine: agents cut off mid-turn by a forced redeploy or a daemon restart 
   assert.match(users()[1], /^\[machine mx\] The FF Factory daemon on this machine was redeployed \(add_machine with force\) at .* while you were mid-turn/);
   await until('the resumed turn ran', () => s.info.status === 'idle');
   assert.ok(reports.some((r) => /mx is back after its daemon was redeployed \(add_machine with force\); resumed 1 agent\(s\)/.test(r)), reports.join('\n'));
+  assert.deepEqual(gatedOn, [], 'a planned redeploy does not mark the requests Blocked on the machine');
 
   // A network blip: the daemon (and the agent) live on; the reconnect finds it live, so no resume message.
   sessions.send(s.info.id, 'long again');
@@ -904,6 +908,7 @@ test('machine: agents cut off mid-turn by a forced redeploy or a daemon restart 
   await until('back', () => mm.isOnline('mx') && s.live, 8000);
   await new Promise((r) => setTimeout(r, 300));
   assert.equal(users().length, 3, 'a live agent is not sent a resume');
+  assert.deepEqual(gatedOn, [[s.info.id]], 'an unplanned drop still gates the request it cut off mid-turn');
 
   // machine_daemon stop: on purpose, so nothing is resumed when a daemon comes back later.
   mm.expectDrop('mx', false);
