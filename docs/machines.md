@@ -1806,6 +1806,12 @@ LothDesktop and Beast, not just when BEAST is full").
     pair waited until 06:07Z, when beast/slot1 and biscuit/slot2 freed in the same pass. The plan holds nothing in memory: it
     is read from the ledger and each computer's room every time, so a portal restart keeps it (biscuit was held for w3562 at
     05:21Z and again at 06:03Z around the 05:22Z restart; the lapse time moves later, as the room's start is read again).
+    A room move (w2046, a worker whose resume waits for room moved to another computer; w2544, off a long-away one) does not
+    take a held sandbox either (w3601): `Agents.moveFacts` reads each other computer's hold as `start_agent` does
+    (`heldFor`: the pair hold, then the timed one) into `MoveFacts.held`, and `moveDecision` counts a held computer unfit for
+    game work, so the move waits and its Queued line names the hold. Before w3601 biscuit/slot2, freed at 07:30:39Z on
+    2026-11-08 while beast was held for w3573's other leg, went to w3335 by a room move at 07:31:05Z, and the pair waited
+    until 07:54Z.
   - **Bounded** (w1983, w3530). A hold lapses `PAIR_HOLD_MS` (45 min since w3530, 20 min before) after that computer's room
     began or the pair was Queued, whichever is later, while the pair still cannot start (its refusal says when: "the hold
     lapses at 04:12 UTC"). 20 min was shorter than the gaps between frees on 2026-11-08 (23 and 37 min), so no hold met its
