@@ -379,6 +379,17 @@ export interface SessionInfo {
    */
   placeReleased?: { at: string; sandbox: string; branch: string; why: string };
   /**
+   * Machine sandbox workers (w3507, server/priorityReclaim.ts): its sandbox was last taken for higher-priority queued work
+   * `for` at `at` (`preempted`: asked mid-turn to yield, urgent work only); `count` such takes in all, the bounce count;
+   * `backAt`: when it was placed again after. It is not taken from again for RECLAIM_PROTECT_MS after the later of the two.
+   */
+  reclaimed?: { at: string; for: string; count: number; backAt?: string; preempted?: boolean };
+  /**
+   * w3507: urgent work `for` asked it mid-turn at `at` to reach a safe point and end its turn (priorityReclaim.ts
+   * preemptNotice), for its sandbox `sandbox`; cleared when it is released, or told to carry on when the ask lapses.
+   */
+  preempted?: { at: string; for: string; sandbox: string };
+  /**
    * w1856 (server/releaseHandBack.ts): its switch_branch put a sandbox on a release branch (urgent/<v>, release/<v>) from
    * `from`; build_plan done switches the sandbox back to `from` if it is still on `to`, then this goes.
    */
@@ -2392,6 +2403,11 @@ export interface WorkItem {
   undecided?: { since: string; reofferedAt?: string };
   /** The computers the dispatcher said can take it when it queued it for capacity (decide_work queue `needs`, w643). */
   queuedFor?: { at: string; needs?: string[] };
+  /**
+   * w3507: what FF Factory's priority reclaim (server/priorityReclaim.ts) last did for it while Queued: the sandbox it freed
+   * for it and from whom, or why no sandbox qualified. Its Queued line says it (shared/workState.ts queuedLive).
+   */
+  reclaim?: { at: string; text: string };
   /**
    * w1863: legs held for named computers while the request's own worker carries on elsewhere (decide_work queue with `needs`
    * on a request that has a worker): "queued for capacity on m5, I start a timing worker there when a slot frees". Not its

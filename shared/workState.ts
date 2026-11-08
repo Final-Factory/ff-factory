@@ -883,7 +883,9 @@ function queuedLive(w: WorkItem, f: WorkLiveFacts, wanted: readonly string[] | u
   const held = (f.heldRoom ?? []).filter((h) => h.for.includes(kind) && (!needs?.length || needs.includes(h.id.toLowerCase())));
   const reservedWhy = reservedText(reserved, kind, w.priority, slot);
   const heldWhy = `${held.length ? `; ${held.map((h) => `${h.id} has ${slot} but is held (${h.why})`).join('; ')}` : ''}${reservedWhy ? `; ${reservedWhy}` : ''}${unfit.length ? `; ${unfit.map((u) => `${u.id} has ${slot} but cannot take it: ${u.why}`).join('; ')}` : ''}`;
-  return { state: 'queued', why: `${head} ${what}${known ? ': no computer that could take it has ' + slot : ''}${heldWhy}` };
+  // w3507: the sandbox FF Factory frees for it from lower-priority work, or why none may be taken (server/priorityReclaim.ts).
+  const reclaim = w.reclaim && key === w.id ? `; ${w.reclaim.text}` : '';
+  return { state: 'queued', why: `${head} ${what}${known ? ': no computer that could take it has ' + slot : ''}${heldWhy}${reclaim}` };
 }
 
 /**

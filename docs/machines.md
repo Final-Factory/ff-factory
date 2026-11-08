@@ -2064,6 +2064,55 @@ LothDesktop and Beast, not just when BEAST is full").
   - **WRONG.** Any other resume waiting for room on its computer while another computer it fits has had room for
     `ROOM_STAND_MS` reads Queued "… it should move there (w2046)" with `roomOn`, the ledger's WRONG flag
     (`shared/workState.ts`).
+- **Higher-priority work frees a sandbox** (w3507, lothsahn, 2026-11-07: "Can you please make sure sandbox availability is
+  considered based on priority by the dispatcher?"). Before it, priority only ordered the queue: w3496 (a strut fix, high
+  then urgent) sat Queued over an hour while m5 had 3 sandboxes held, 1 of 3 agents mid-turn and no editor open
+  (workers waiting on CI with their editors up, a near check-in, or idle under 30 minutes, none of which the release above
+  frees). `server/priorityReclaim.ts` decides, the release pass (`PlaceAgain.reclaimPass`, every minute) acts:
+  - **Pressure** (`Agents.reclaimPressure`): every Queued game request (no pair run, no timed leg: those have their own
+    ways to room, w1945, w2055) with no computer that has room for it, by the dispatcher's own room test (`roomNow` under
+    `placement()`'s holds, pauses, person-play holds and priority reservations, `roomForWork` with its needs), then again
+    with one sandbox free on each computer. The computers that then take it are where a sandbox may be freed: one offline,
+    held, paused, short of RAM or of agent slots, or that the work does not fit, never is. Urgent work also lists those
+    where one more agent slot would do (for a pre-emption).
+  - **Reclaim an idle holder.** Of the sandboxes there, it takes one whose workers' open work is strictly lower in priority
+    (`WorkItem.priority`; equal never), none of them mid-turn: the lowest priority first, then the longest idle, then one
+    whose editor is stopped. Its workers are stopped (a live one) and released as any release is: uncommitted work saved and
+    pushed on its branch (w656), unpushed commits pushed by the switch that hands the sandbox over (`switch_branch`), the
+    branch kept. It resumes when its own wait ends (check-in, gate, message), placed again on its branch like any released
+    worker (above), so nothing is lost.
+  - **Pre-empt a turn: urgent only, over low or normal, at a safe point.** With nothing reclaimable, urgent work asks one
+    mid-turn low or normal worker (once, `priorityReclaim.ts` `preemptNotice`, a system message it reads between tool
+    calls) to finish the step it is on (never mid git command, merge, push or release step), commit and push, stop its
+    editor and end its turn with "wNNN: paused for urgent wX". It is never interrupted. Its turn's end makes it
+    reclaimable; once released, a message ("Carry on") waits in its send queue and resumes it, on its branch, when it is
+    placed again. If it has not ended its turn within 30 minutes (`PREEMPT_STANDS_MS`) another may be asked, and if the
+    urgent work no longer waits it is told to carry on where it is.
+  - **Never taken** (`Agents.reclaimHold`, `PlaceAgain.holders`, as w2055's `preemptVerdict`): a pair run's leg (`pairHold`)
+    or a timed leg, the urgent release lane's builder or the nightly, a person-approved bench turn, a bench lock from the
+    sandbox, a game player or Unity batch run of its, a Live view, a check-in with its editor up (a build, import or test
+    may be in flight), a background job, a worker starting, being moved or being resumed by a message, another kind of
+    agent there, or a sandbox not ready. A merge or a release happens in a turn: a mid-turn worker is never stopped, and only
+    urgent work asks one to yield. The main clone is never a sandbox; a paused, held or offline computer is never in the
+    pressure.
+  - **No thrash.** A worker moved for higher work is not taken again for 30 minutes after it is placed back
+    (`RECLAIM_PROTECT_MS`: a move costs about 2.5 minutes, so at most two an hour), and its bounce count is kept
+    (`SessionInfo.reclaimed.count`, in the ledger lines). One reclaim stands per request for 15 minutes (`RECLAIM_STANDS_MS`,
+    the release and a dispatcher turn); one that did not free its sandbox in time is not tried on that sandbox again
+    within that span.
+  - **The freed sandbox goes to the higher work.** Released workers claim sandboxes ahead of new work (above), so while
+    higher queued work lists their computer they claim none there and their resume waits ("higher-priority queued work wX
+    (high) takes the next free sandbox on m5 first"); work of their own or lower priority they still go ahead of. The
+    release pings the dispatcher (`capacityMayHaveFreed`), which starts the queued request there.
+  - **Visible.** The Queued line ends with what FF Factory did for it ("FF Factory freed m5/slot2 for it from worker
+    1a2b3c4d (w3400, normal)") or why no sandbox may be taken ("FF Factory frees no sandbox for it: m5/slot1: its work is
+    high, not lower than high; ..."; `WorkItem.reclaim`). Both requests' logs get a line, the yielding worker's people's
+    orchestrators get one, and the machines log one (`[machines] reclaiming ...`).
+  - **No extra sandbox for urgent work** (the proposal's point 6, left out): w3496's limit was sandboxes held with no editor
+    open, which a reclaim frees without more RAM or disk; an extra sandbox costs a worktree, a Library and an editor on
+    computers sized by RAM and by their editor limit (biscuit's is 1). Should "frees no sandbox" lines show urgent work
+    waiting with nothing reclaimable, that is the measurement to decide it on.
+  - Tests: `server/w3507PriorityReclaim.test.ts`.
 - **The numbers are judgments**: 85% RAM (BEAST at 86% was overloaded, LothDesktop at 47% had room; one more editor
   takes 8-12 GB, about 15% of 64 GB) and the 10-point margin (one agent of ten slots, or about 6 GB of 64). Live agents
   count, not only mid-turn ones, because an idle agent's process holds its memory too (docs/orchestrators.md, "Agent

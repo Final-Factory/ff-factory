@@ -609,7 +609,10 @@ had room, which read as "LothDesktop can take more work but the queue isn't movi
      machine should be prioritized by the dispatcher over general work when that machine frees up slots"), then the oldest.
      Pinned work goes first only within its priority: the priority is its person's word, and higher general work that fits
      another computer with room starts there instead (the dispatcher's prompt says so). Released workers resuming on their
-     own machine come before all of it (`PlaceAgain.claims`: their sandboxes are not free for new work). **Low never ages
+     own machine come before all of it (`PlaceAgain.claims`: their sandboxes are not free for new work), except Queued game
+     work of higher priority than theirs that their computer could take: that goes first, and queued game work with no room
+     at all frees a sandbox from strictly lower-priority work (w3507, [machines.md](machines.md), "Higher-priority work frees
+     a sandbox"). **Low never ages
      up**: it waits behind normal work while normal work fits, and starts whenever a slot is free and nothing above it fits,
      so it never leaves a slot idle ("We should not have idle slots if there is queued work"); a person who wants it sooner
      raises it (`update_work priority`, or the Priority control in a request's detail on the Requests page, which its
