@@ -62,4 +62,6 @@ What standing up Ben's Light Tree portal on BEAST, m5, m3 and biscuit beside the
   `root`.
 - **A repository outside the Final-Factory organization** is not probed for the organization's runners and artifacts
   (`inGithubOrg`, server/githubTokens.ts), and a repository with no pull request yet is "not measured" rather than a CI
-  read fault (`ciUnmeasured`, server/ciReadHealth.ts), so a new instance's dashboard opens without false banners.
+  read fault (`ciUnmeasured`, server/ciReadHealth.ts), so a new instance's dashboard opens without false banners once config `vault.githubRepos` names its own
+  repositories (`["bryding/light-tree"]`); left unset it falls back to Final Factory's (`GITHUB_REQUIRED_REPOS`,
+  server/index.ts), and the token reads as lacking the organization's Self-hosted runners.
