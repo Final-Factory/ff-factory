@@ -56,6 +56,11 @@ export interface Pressure {
   machines: string[];
   /** Computers where a free sandbox and one more agent slot are all it lacks: where a pre-emption makes room (urgent only). */
   preemptOn: string[];
+  /**
+   * w3522: computers left out of `machines` and `preemptOn` because a sandbox freed there would be held for other work (an
+   * older pair run, w1945, or timed work on a small computer, w1995), each as "<machine>: <why>", for the Queued line.
+   */
+  held?: string[];
 }
 
 /** One occupied sandbox as reclaim sees it. */
@@ -92,9 +97,10 @@ const order = (a: SandboxHolders, b: SandboxHolders) => rankOf(a.priority) - ran
  * editor is stopped (cheapest to restore); only strictly lower priority, never blocked or protected ones. A mid-turn holder
  * only for urgent work, only low or normal, only where nothing is reclaimable, and only on a computer in `preemptOn`.
  */
-export function pickReclaim(p: Pick<Pressure, 'priority' | 'machines' | 'preemptOn'>, sbs: readonly SandboxHolders[]): ReclaimPick {
+export function pickReclaim(p: Pick<Pressure, 'priority' | 'machines' | 'preemptOn' | 'held'>, sbs: readonly SandboxHolders[]): ReclaimPick {
   const mine = sbs.filter((x) => p.machines.includes(x.machine) || p.preemptOn.includes(x.machine));
-  if (!p.machines.length && !p.preemptOn.length) return { none: 'no computer it can run on lacks only a free sandbox (offline, held, paused, short of RAM or agent slots, or it does not fit there)' };
+  const held = p.held?.length ? `; ${p.held.slice(0, 2).join('; ')}${p.held.length > 2 ? `; and ${p.held.length - 2} more held` : ''}` : '';
+  if (!p.machines.length && !p.preemptOn.length) return { none: p.held?.length ? `a sandbox freed for it would be held for other work: ${p.held.slice(0, 2).join('; ')}${p.held.length > 2 ? `; and ${p.held.length - 2} more` : ''}` : 'no computer it can run on lacks only a free sandbox (offline, held, paused, short of RAM or agent slots, or it does not fit there)' };
   const why = new Map<string, string>();
   const ok: SandboxHolders[] = [];
   for (const x of mine) {
@@ -111,7 +117,7 @@ export function pickReclaim(p: Pick<Pressure, 'priority' | 'machines' | 'preempt
   }
   for (const x of ok) if (x.midTurn) why.set(`${x.machine}/${x.sandbox}`, p.priority === 'urgent' ? `mid-turn on ${x.priority} work, which only urgent work pre-empts, and only low or normal` : `mid-turn (only urgent work pre-empts a turn)`);
   const lines = [...why].map(([k, v]) => `${k}: ${v}`);
-  return { none: lines.length ? `no sandbox it may take: ${lines.slice(0, 4).join('; ')}${lines.length > 4 ? `; and ${lines.length - 4} more` : ''}` : `no occupied sandbox on ${[...new Set([...p.machines, ...p.preemptOn])].join(', ')}` };
+  return { none: (lines.length ? `no sandbox it may take: ${lines.slice(0, 4).join('; ')}${lines.length > 4 ? `; and ${lines.length - 4} more` : ''}` : `no occupied sandbox on ${[...new Set([...p.machines, ...p.preemptOn])].join(', ')}`) + held };
 }
 
 /** What a mid-turn worker is told when urgent work pre-empts it (once). */

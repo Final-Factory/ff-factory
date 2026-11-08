@@ -29,6 +29,7 @@ import { forYouId, splitForYou } from '../shared/forYou.ts';
 import { blockerName, gatesOf, type PrHealth } from '../shared/blockers.ts';
 import { answersText } from '../shared/questionCard.ts';
 import { cargoShortOf, isCargoRepo, needsTimed, PAIR_HOLD_MS, TIMED_HOLD_MS, pairText, unfitWhy } from '../shared/capacity.ts';
+import { pickReclaim, type Pressure } from './priorityReclaim.ts';
 import { STEAM_READ } from '../shared/steam.ts';
 import { benchLockIn, type Machine, type Requester, type SessionInfo, type TranscriptEvent, type UserInfo, type WorkBlocker, type WorkItem } from '../shared/types.ts';
 import { LIVE_HOLD_MS, releaseWhy } from './placeAgain.ts';
@@ -9561,4 +9562,45 @@ test('w3455: a Steam mark stored before the fix is restated with no re-filing, a
   assert.equal(none.isError, false, none.text);
   assert.deepEqual([w('w9001').status, w('w9001').pair!.steam], ['queued', undefined], none.text);
   assert.deepEqual(o.holdSteamPairs(), []);
+});
+
+test('w3522: reclaim frees no sandbox that a pair or timed hold would keep from its work; with neither hold it still does', async (t) => {
+  const env = await twoComputers(t);
+  const { store, agents } = env;
+  const pressure = () => (agents as unknown as { reclaimPressure: () => Pressure[] }).reclaimPressure().find((p) => p.work === 'w3')!;
+  // Every sandbox held (biscuit/slot3 at 00:37Z on 2026-11-08): pc stands for biscuit, beast for lothdesktop.
+  const places = agents.places.bind(agents);
+  let small = false;
+  agents.places = () => places().map((p) => ({ ...p, freeSandboxes: 0, sandboxes: p.maxSandboxes, ...(small && p.id === 'pc' ? { maxAgents: 1 } : {}) }));
+  agentsRoom(agents, []);
+  putRequests(store, [{ id: 'w3', status: 'queued', queuedFor: { at: '2026-10-24T10:00:00Z' } }]);
+  const free = pressure();
+  assert.equal(free.room, false);
+  assert.deepEqual([...free.machines].sort(), ['beast', 'pc'], 'with no hold a freed sandbox on either computer is w3\'s');
+  assert.equal(free.held, undefined);
+  // An older pair run fits both: the sandbox a reclaim frees would be held for it (w1945), so w3 frees none.
+  putRequests(store, [{ id: 'w2', status: 'queued', queuedFor: { at: T0 }, pair: { legs: 2 } }]);
+  const held = pressure();
+  assert.deepEqual(held.machines, []);
+  assert.deepEqual(held.preemptOn, []);
+  assert.equal(held.held?.length, 2);
+  assert.match(held.held![0], /^(pc|beast): last free sandbox is held for w2 "Request w2" \(normal, Queued since 09:00 UTC\), a pair run of 2 legs/);
+  const none = pickReclaim(held, [{ machine: 'pc', sandbox: 'alpha', sessions: [], priority: 'low', midTurn: false, activeAt: 0, editorStopped: true }]);
+  assert.ok('none' in none && /^a sandbox freed for it would be held for other work: (pc|beast): last free sandbox is held for w2/.test(none.none), JSON.stringify(none));
+  // Work above the pair's priority goes first (pairHoldProblem), so it still reclaims.
+  store.work.get('w3')!.priority = 'urgent';
+  assert.deepEqual([...pressure().machines].sort(), ['beast', 'pc']);
+  store.work.get('w3')!.priority = 'normal';
+  store.work.get('w2')!.status = 'done';
+  // A timed hold (w1995) keeps a small computer's last sandbox only while the work has room on another computer; then it has
+  // room and frees nothing. With every sandbox held it steps aside, so the freed sandbox is w3's and the reclaim stands.
+  small = true;
+  putRequests(store, [{ id: 'w5', title: 'Timed leg for w1440: belt A/B', status: 'queued', queuedFor: { at: T0, needs: ['pc'] }, timedLeg: { for: 'w1440', forSession: 'abc', from: 'beast', small: ['pc'] } }]);
+  const timed = pressure();
+  assert.deepEqual([...timed.machines].sort(), ['beast', 'pc']);
+  assert.equal(timed.held, undefined);
+  // With beast free (the only case a timed hold keeps pc's sandbox from w3), w3 has room and frees nothing.
+  agents.places = () => places().map((p) => ({ ...p, freeSandboxes: p.id === 'beast' ? 1 : 0, sandboxes: p.maxSandboxes, ...(p.id === 'pc' ? { maxAgents: 1 } : {}) }));
+  agentsRoom(agents, ['beast']);
+  assert.equal(pressure().room, true);
 });
