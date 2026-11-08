@@ -5,7 +5,7 @@
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { planPieces, skippedInBuild, MAX_VARIANTS, PIECE_MAX_BYTES, timedArgsProblem, variantNameProblem, type Piece, type TimedVariant } from '../shared/timedRun.ts';
+import { planPieces, skippedInBuild, MAX_VARIANTS, PIECE_MAX_BYTES, timedArgsProblem, timedPlanProblem, timedSettingsOf, variantNameProblem, type Piece, type TimedVariant } from '../shared/timedRun.ts';
 import { sendChunks, type PublishOptions } from './review.ts';
 
 /** A build folder holds a Windows player: finalfactory.exe beside finalfactory_Data. */
@@ -158,6 +158,11 @@ export async function timedRunFromMachine(c: TimedRunCall): Promise<string> {
   }
   const builds = Array.isArray(a.builds) ? (a.builds as Record<string, unknown>[]) : [];
   if (builds.length < 1 || builds.length > MAX_VARIANTS) throw new Error(`builds: 1 to ${MAX_VARIANTS} entries of { name, path, args? }`);
+  // w3711: a plan past the limits is refused here, before the builds are hashed; the portal checks it again
+  const settings = timedSettingsOf(a);
+  if (typeof settings === 'string') throw new Error(settings);
+  const planProblem = timedPlanProblem(settings, builds.length, a.reason);
+  if (planProblem) throw new Error(planProblem);
   const names = new Set<string>();
   const variants: (TimedVariant & { dir: string })[] = [];
   for (const b of builds) {
@@ -196,6 +201,7 @@ export async function timedRunFromMachine(c: TimedRunCall): Promise<string> {
       ...(a.sample_s !== undefined ? { sample_s: a.sample_s } : {}),
       ...(a.settle_s !== undefined ? { settle_s: a.settle_s } : {}),
       ...(a.res !== undefined ? { res: a.res } : {}),
+      ...(a.reason !== undefined ? { reason: a.reason } : {}),
       variants: variants.map(({ dir: _dir, ...v }) => v),
       save: { name: path.basename(savePath), size: saveSize, sha256: savePiece.sha256 },
     }),
