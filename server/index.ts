@@ -93,7 +93,7 @@ import { JOIN_PATHS, WINDOWS_INSTALLER_NAME, machineJoinHttp, windowsInstaller }
 import { bundleServedLine, updateBundleFor } from './machineLink.ts';
 import { issueMachineToken } from './machineTokens.ts';
 import { clientAddress, originOf, tailnetOnly } from './remoteChat.ts';
-import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, type SpeakRequest, type TranscribeRequest, type VocabularySource } from '../shared/voice.ts';
+import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, type LiveStats, type SpeakRequest, type TranscribeRequest, type VocabularySource } from '../shared/voice.ts';
 import type { AccountUsage, AppState, CreateSandboxRequest, HostStatus, Machine, TokenWarning, PermissionDecisionRequest, Requester, ServerEvent, SessionInfo, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats, LiveKnobRequest, PoolPerson, TranscriptEvent } from '../shared/types.ts';
 import { slugify } from './sandboxes.ts';
 import { SpendStore, buildReport } from './spend.ts';
@@ -2102,6 +2102,19 @@ function vocabulary(): VocabularySource {
   };
 }
 
+/** The page's live-pass numbers (w3712), only as plain non-negative numbers: they go into a log line. */
+function liveStatsOf(v: unknown): LiveStats | undefined {
+  if (!v || typeof v !== 'object') return undefined;
+  const o = v as Record<string, unknown>;
+  const n = (x: unknown) => (typeof x === 'number' && Number.isFinite(x) && x >= 0 && x < 1e7 ? Math.round(x) : undefined);
+  const passes = n(o.passes);
+  const medianMs = n(o.medianMs);
+  const maxMs = n(o.maxMs);
+  if (passes === undefined || medianMs === undefined || maxMs === undefined) return undefined;
+  const firstTextMs = n(o.firstTextMs);
+  return { passes, medianMs, maxMs, ...(firstTextMs !== undefined ? { firstTextMs } : {}) };
+}
+
 route('GET', '/api/voice', async () => voice.status());
 // Recording started: load the model now, so it is ready when the clip arrives. Voice mode also
 // warms text-to-speech ({ tts: true }): a reply will be read.
@@ -2115,13 +2128,13 @@ route('POST', '/api/voice/install', async () => {
 });
 route('POST', '/api/voice/transcribe', async (req) => {
   // 16 kHz 16-bit mono is 32 KB/s; base64 adds a third.
-  const { audio } = await readJson<TranscribeRequest>(req, Math.ceil(((MAX_DICTATION_SECONDS + 10) * 32_000 * 4) / 3) + 1024);
+  const { audio, partial, live } = await readJson<TranscribeRequest>(req, Math.ceil(((MAX_DICTATION_SECONDS + 10) * 32_000 * 4) / 3) + 1024);
   const wav = Buffer.from(need(audio, 'audio'), 'base64');
   const seconds = wavSeconds(wav);
   if (seconds === undefined) throw new HttpError(400, 'audio: expected a 16-bit PCM WAV');
   if (seconds > MAX_DICTATION_SECONDS + 5) throw new HttpError(413, `audio: at most ${MAX_DICTATION_SECONDS} s`);
   try {
-    return await voice.transcribe(wav);
+    return await voice.transcribe(wav, { partial: partial === true, live: liveStatsOf(live) });
   } catch (e) {
     throw new HttpError(503, (e as Error).message);
   }

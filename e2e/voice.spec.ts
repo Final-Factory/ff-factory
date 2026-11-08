@@ -174,3 +174,84 @@ test('a question card has the chat mic: the words land in its answer box for rev
   expect(await box.evaluate((el) => el.scrollHeight <= el.clientHeight)).toBe(true);
   await shot('q2-dictated');
 });
+
+// w3712: with Whisper, the words fill the box while the user talks. The E2E server has no Whisper, so these tests answer
+// /api/voice/transcribe themselves: a live pass (`partial`) says one word per half second of the audio it got, so the box
+// grows as the clip does; the final pass says a sentence of its own, which must replace the live text.
+type LiveCall = { partial: boolean; seconds: number; at: number; live?: { passes: number; medianMs: number; firstTextMs?: number } };
+async function fakeWhisper(page: Page, final: string) {
+  const calls: LiveCall[] = [];
+  await page.route(/\/api\/voice(\/warm)?$/, (r) => r.fulfill({ json: { state: 'ready', model: 'large-v3-turbo', device: 'cuda', tts: { state: 'idle', voice: 'af_heart' } } }));
+  await page.route(/\/api\/voice\/transcribe$/, async (r) => {
+    const body = r.request().postDataJSON() as { audio: string; partial?: boolean; live?: LiveCall['live'] };
+    const seconds = (Buffer.from(body.audio, 'base64').length - 44) / 32_000;
+    calls.push({ partial: !!body.partial, seconds, at: Date.now(), live: body.live });
+    const words = Array.from({ length: Math.max(1, Math.floor(seconds * 2)) }, (_, i) => `w${i + 1}`).join(' ');
+    await r.fulfill({ json: { text: body.partial ? words : final, model: 'large-v3-turbo', device: 'cuda', audioSeconds: seconds, seconds: 0.2, totalSeconds: 0.3, engine: 'remote', machine: 'beast' } });
+  });
+  return calls;
+}
+
+test('w3712: live Whisper dictation fills the chat box while talking, the final pass replaces it, and a cancel puts the box back', async ({ page, browserName }) => {
+  test.skip(browserName === 'webkit', 'needs real Web Audio for the recorder (the WebKit run fakes AudioContext)');
+  const { panel, tag } = await voicePage(page, browserName, { engine: 'whisper', dictationAutoStop: false });
+  const calls = await fakeWhisper(page, `final words ${tag}`);
+  const box = panel.locator(BOX);
+  await box.click();
+  await box.pressSequentially('Note:');
+
+  await panel.getByRole('button', { name: 'Dictate' }).click();
+  const bar = panel.locator('.dictation-bar');
+  await expect(bar.locator('.rec-dot.live')).toBeVisible();
+  const opened = Date.now();
+  // The first words within two seconds of the mic opening (each live pass answers at once here: this is the page's own
+  // cadence, a 0.6 s minimum of new audio and 0.3 s between passes).
+  await expect.poll(() => boxText(box), { timeout: 2_000, intervals: [50] }).toMatch(/^Note: w1/);
+  const firstWordsMs = Date.now() - opened;
+  // And it keeps growing while the mic is open.
+  await expect.poll(async () => (await boxText(box)).split(' ').length, { timeout: 5_000 }).toBeGreaterThan(5);
+  expect(calls.every((c) => c.partial)).toBe(true);
+  expect(calls.length).toBeGreaterThan(2);
+
+  await bar.getByRole('button', { name: 'Done' }).click();
+  await expect(bar).toBeHidden();
+  await expect.poll(() => boxText(box)).toBe(`Note: final words ${tag}`);
+  const finalCall = calls.find((c) => !c.partial)!;
+  expect(finalCall.seconds).toBeGreaterThan(2);
+  expect(finalCall.live?.passes).toBeGreaterThan(2);
+  expect(finalCall.live?.firstTextMs).toBeLessThan(2_000);
+  console.log(`w3712 e2e (${browserName}): first live words ${firstWordsMs} ms after the mic opened; ${finalCall.live?.passes} live passes`);
+  await expect(panel.locator('.msg-user', { hasText: `final words ${tag}` })).toHaveCount(0);
+
+  // A second dictation, discarded with Esc: its live words leave and the box is as it was.
+  await panel.getByRole('button', { name: 'Dictate' }).click();
+  await expect.poll(() => boxText(box), { timeout: 3_000 }).toMatch(new RegExp(`final words ${tag} w1`));
+  await page.keyboard.press('Escape');
+  await expect(bar).toBeHidden();
+  await expect.poll(() => boxText(box)).toBe(`Note: final words ${tag}`);
+});
+
+test('w3712: a question card answer box fills live while talking, then holds the final transcript', async ({ page, browserName }) => {
+  test.skip(browserName === 'webkit', 'needs real Web Audio for the recorder (the WebKit run fakes AudioContext)');
+  await page.addInitScript(fakeVoice, { fakeAudio: false });
+  await page.addInitScript(() => localStorage.setItem('ffsb.voice.prefs', JSON.stringify({ engine: 'whisper', dictationAutoStop: false })));
+  await signIn(page);
+  const tag = uniq('qclive');
+  const calls = await fakeWhisper(page, `the newest save first ${tag}`);
+  const me = await appState(page.request);
+  const id = (await useTool(page.request, me.orchestratorId, 'request_work', { title: `Live answer ${tag}`, brief: `A live dictation card ${tag}.` })).match(/Filed (w\d+)/)![1];
+  const asks = [{ question: `Which save comes first ${tag}?`, options: [{ label: 'Newest', description: '', recommended: true }, { label: 'Oldest', description: '' }] }];
+  await patchWork(page.request, id, { status: 'question', question: { text: 'Which save comes first?', at: new Date().toISOString(), asks } });
+  await page.goto('/#/dispatcher/waiting');
+  const card = page.getByTestId(`wait-${id}`);
+  const box = card.getByLabel('Or type your own answer');
+  await card.getByRole('button', { name: 'Dictate' }).click();
+  const bar = card.locator('.dictation-bar');
+  await expect(bar.locator('.rec-dot.live')).toBeVisible();
+  await expect(box).toHaveValue(/^w1/, { timeout: 2_000 });
+  await expect.poll(async () => (await box.inputValue()).split(' ').length, { timeout: 5_000 }).toBeGreaterThan(4);
+  await bar.getByRole('button', { name: 'Done' }).click();
+  await expect(box).toHaveValue(`the newest save first ${tag}`);
+  expect(calls.filter((c) => !c.partial)).toHaveLength(1);
+  await expect(card.getByTestId('qc-send')).toHaveText('Send');
+});

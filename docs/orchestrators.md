@@ -379,6 +379,16 @@ That line ranks the computers with room (online, not paused, held or avoided) th
 words name ("Windows", `probe_ab_win`, BEAST or LothDesktop: Windows; "Mac" or m3: macOS; naming m5 asks for no Mac, since it takes no timed runs). The fewest agent slots come
 first, then the lowest editor limit, then the fewest live agents (the workers its exclusive turn would pause), then the
 fewest timed legs queued, then `placement.prefer`. A one-worker computer ranks first; BEAST, the biggest, comes last.
+- **Only timing work is timed, and an explicit word beats the words** (w3720, lothsahn, 2026-11-08: "we need to make sure
+  we're not doing time runs when we shouldn't be"). w3705 (a determinism pair run for w3511, the Sprawl text) was barred
+  from m5 and then from every computer but a Mac by its own notes: an orchestrator's note saying it was "a determinism
+  check, not a timing run" also quoted w3639's vSync timed run and its bench lock, and a later one named m5 "as a Mac".
+  So, in `needsTimed`: a request said outright to be timed or not (decide_work `timed`, `WorkItem.timedMark`) is that
+  and nothing else; a pair run (`WorkItem.pair`) is timed only by its own `timed` flag (request_pair `timed`), never by its
+  words; and a note or brief that denies timing ("not a timing run", "needs no bench lock", `TIMED_DENIAL`) wins over the
+  older words that named it, newest first. A request whose words read as timed though it times nothing: decide_work any
+  action with `timed: false` (the request's log is stamped). Tests: `server/w3720PairNotTimed.test.ts` (w3705's real text)
+  and the w3720 case in `server/orchestrators.test.ts`.
 - **The ranking is the default, unless a machine is named** (lothsahn: "If a worker requests a specific machine for a
   reason, it does need to follow the workers request or the orchestrator's request for that placement. In absence of any
   preference, it should use this list"). Work whose brief or worker names a computer for a reason (a platform, a pairing, the
