@@ -5,6 +5,7 @@ import { machineKind, type AppState, type Machine } from '../../../shared/types'
 import { api, type JoinAnswer } from '../api';
 import { attempt, sessionsByIds, toast, upsertMachine } from '../store';
 import { displayName, fmtRelative, isUnused, machineGlance, machineLabel, machineTone, navigate, useNow } from '../util';
+import { BenchStopButtons } from './BenchStop';
 import { GitFacts } from './Git';
 import { DetailsSection, DetailsSheet, PanelHeader, useDetailsOpen } from './PanelChrome';
 import { Chip, Confirm, CopyButton, Icon, Modal, StateText } from './ui';
@@ -155,6 +156,8 @@ export function MachinePanel({ app, machine: m, onClose }: { app: AppState; mach
             <div className="unity-bar" data-testid="machine-bench" data-mode={bench.mode} title={bench.hint}>
               <Chip tone={bench.tone}>Bench lock {bench.label}</Chip>
               <span className="dim small bench-row-text">{[bench.short, bench.times, bench.waiting, bench.next, bench.closed, bench.untimed].filter(Boolean).join(' · ') || 'no ticket held or waiting'}</span>
+              {/* w3730: a Stop on each worker's ticket there, asked first. */}
+              <BenchStopButtons machineId={m.id} bench={app.machineStats?.[m.id]?.bench} />
             </div>
           )}
           {/* A person playing Final Factory there (w1894): no new work, the agents' editors closed, players quit, builds at idle priority. */}
