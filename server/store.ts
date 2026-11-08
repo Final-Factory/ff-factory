@@ -10,6 +10,7 @@ import type { AppSettings, DelegationRequest, Machine, Sandbox, ServerEvent, Ses
 import { meterStates, type MeterStates } from './meterStates.ts';
 import { removedUpload } from './mediaRetention.ts';
 import { repairText } from '../shared/capacity.ts';
+import { settleOutcome } from './findings.ts';
 
 /** Everything the UI hears about goes through here and out the WebSocket. */
 export const bus = new EventEmitter<{ event: [ServerEvent] }>();
@@ -296,6 +297,8 @@ export class Store {
 
   /** Save a work item (data/work.json, its own file: state.json is rewritten on every session update). */
   putWork(w: WorkItem) {
+    // w3706: every close, whatever made it, writes the request's final outcome before it is saved (server/findings.ts).
+    settleOutcome(w);
     // Its log lines, DONE reports, [needs you] text and notes: never a secret in work.json or on screen (w1584).
     redactInPlace(w);
     this.work.set(w.id, w);

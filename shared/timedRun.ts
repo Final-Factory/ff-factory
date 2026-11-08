@@ -91,7 +91,11 @@ export const SMALL_FILE_BYTES = 8 * 1024 * 1024;
 export const GROUP_MAX_BYTES = 16 * 1024 * 1024;
 export const MAX_VARIANTS = 4;
 export const TIMED_RESOLUTIONS = ['1920x1080', '1280x720', '1280x800', '2560x1440'] as const;
-export const TIMED_DEFAULTS: TimedSettings = { rounds: 4, sampleS: 20, settleS: 25, dwellS: 5, res: '1920x1080' };
+/**
+ * rounds 2 (w3711): lothsahn, 2026-10-26: "workers should avoid more than 2 tests on each before/after unless there's a
+ * strong reason to suspect it's wrong". It was 4, twice that.
+ */
+export const TIMED_DEFAULTS: TimedSettings = { rounds: 2, sampleS: 20, settleS: 25, dwellS: 5, res: '1920x1080' };
 /** Where a play-only machine keeps its players: the install's player slots, which its firewall step already allows (w576). */
 export const TIMED_SLOTS = ['slot1-0', 'slot1-1'] as const;
 
@@ -204,6 +208,43 @@ export const runBoundMinutes = (s: TimedSettings, variants: number) => Math.ceil
  * leg the settings allow (legTimeoutS at their maxima) fits in it, so the queue never takes a turn back mid-leg (w3398).
  */
 export const TURN_PLAN_MS = 24 * 60_000;
+
+/**
+ * What a leg is planned at (w3711), not its kill timeout: the player's launch and the save's load (LEG_LAUNCH_PLAN_S), the
+ * settle, the sample with its 10 s tail, the dwell. The probe samples while the run's own wait runs, so the sample counts
+ * once: tr_eed9317cab's legs at sample 180 and settle 25 took 233 s each on lothlaptop (measured), where legTimeoutS is 640.
+ */
+export const LEG_LAUNCH_PLAN_S = 90;
+export const legPlanS = (s: TimedSettings) => LEG_LAUNCH_PLAN_S + s.settleS + s.sampleS + 10 + s.dwellS;
+/** lothsahn, 2026-10-26: "each test should be short: 5-10 minutes at most"; 2026-11-08 (w3711): "10 minute samples". */
+export const LEG_PLAN_MAX_S = 10 * 60;
+/** More rounds than this needs a stated reason (w3711; lothsahn: "unless there's a strong reason to suspect it's wrong"). */
+export const ROUNDS_WITHOUT_REASON = 2;
+/** The one exclusive lock a run may plan into without a reason (w1832: "at most 30 minutes"), as the runner plans a turn. */
+export const RUN_PLAN_MAX_MS = TURN_PLAN_MS;
+/** A whole run's planned play, every leg at legPlanS, in minutes (what a worker should quote, not runBoundMinutes). */
+export const runPlanMinutes = (s: TimedSettings, variants: number) => Math.ceil((legOrder(Array.from({ length: variants }, (_, i) => `v${i}`), s.rounds).length * legPlanS(s)) / 60);
+
+/**
+ * Why the portal refuses a run's plan, or undefined (w3711). lothsahn, 2026-11-08: "106 minutes is super long. It should do
+ * 10 minute samples and run no longer than 30m per lock." A leg planned past 10 minutes is refused; more than 2 rounds, or
+ * a run planned past one exclusive lock, needs `reason` (then its legs play in turns, each queued again at the back).
+ * Only the portal checks this: a daemon plays the order it was given.
+ */
+export function timedPlanProblem(s: TimedSettings, variants: number, reason?: unknown): string | undefined {
+  const leg = legPlanS(s);
+  if (leg > LEG_PLAN_MAX_S) return `a leg is planned at ${leg} s (${LEG_LAUNCH_PLAN_S} s launch and load + settle_s ${s.settleS} + sample_s ${s.sampleS} + 15 s), past the ${LEG_PLAN_MAX_S / 60}-minute cap on one sample (lothsahn: "10 minute samples"); shorten sample_s or settle_s`;
+  const why = typeof reason === 'string' ? reason.trim() : '';
+  if (why.length >= 20) return undefined;
+  const legs = legOrder(Array.from({ length: variants }, (_, i) => `v${i}`), s.rounds).length;
+  if (s.rounds > ROUNDS_WITHOUT_REASON) return `rounds ${s.rounds}: at most ${ROUNDS_WITHOUT_REASON} samples per side of a before/after unless you have a strong reason to suspect a result (lothsahn); run rounds ${ROUNDS_WITHOUT_REASON}, or say why in reason (a sentence)`;
+  const planMs = legs * leg * 1000;
+  if (planMs > RUN_PLAN_MAX_MS) {
+    const fit = Math.max(1, Math.floor(RUN_PLAN_MAX_MS / (leg * 1000)));
+    return `${legs} legs of about ${leg} s each (launch and load included) plan ${Math.ceil(planMs / 60_000)} minutes, past what one exclusive lock plays (${RUN_PLAN_MAX_MS / 60_000} minutes of its 30, before the 25-minute warning; lothsahn: "run no longer than 30m per lock"); ${fit} legs fit in one. Time fewer builds or rounds, or shorter samples, now; if you still need more, ask again afterwards with a new timed_run (it queues at the back), or say in reason why one run must hold all of them (its legs then play in turns of at most 30 minutes)`;
+  }
+  return undefined;
+}
 
 /**
  * How many exclusive turns a worker computer plays a run's legs in at most (w3398): every leg at its bound, as many whole

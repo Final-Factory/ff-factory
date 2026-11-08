@@ -51,13 +51,15 @@ import {
 import { autoApproveProblem, cleanBlock, cleanLine, crashFacts, crashKinship, crashPeersBlock, identityKeys, ownApprovalCount, parseMarkers, quoteUntrusted, sourceTag, titleOnly } from './intakeRules.ts';
 import { readDiscordConfig } from './discordConfig.ts';
 import { LIMIT_END, doneIdsIn, doneProblem, legDoneIdsIn, learnedProblem, supersededIn, reportProblem, mergedMentionsIn, notDoneReason, pausedIn, reportVerdict, stillOpenIn, toolErrors, turnEvidence, turnTroubleOf, type TurnTrouble } from './ledgerRules.ts';
+import { findingTargets, recordFinding } from './findings.ts';
 import { aheadText, answerAfter, asksAPerson, dispatcherAskIn, handUpsPending, holdsOf, orchestratorAskIn, standingTargetOf, personWaitIn, questionShareKey, reportWaitKey, roomShares, servedBy, UNDECIDED_BOUND_MS, unfiledFollowUpsIn } from '../shared/workState.ts';
-import { capacityBlockProblem, capacityWaitIn, needsOf, needsTimed, pairRoom, pairText, PAIR_MAX_LEGS, resolveNeeds, steamShortIn } from '../shared/capacity.ts';
+import { capacityBlockProblem, capacityWaitIn, macRefusedScenario, MAC_REFUSES_SCENARIO, needsOf, needsTimed, pairRoom, pairText, PAIR_MAX_LEGS, resolveNeeds, steamShortIn } from '../shared/capacity.ts';
 import { mentionsSteam, saysNoSteam, STEAM_NONE, STEAM_READ } from '../shared/steam.ts';
 import { mentionsMenus, MENUS_NONE, MENUS_READ, saysNone } from '../shared/desktop.ts';
 import type { HandBack } from './machinePause.ts';
 import { machinePinOf } from './machinePin.ts';
 import { heldText, placeId, roomEnough, roomForWork, roomIds, roomStood, timedKindOf, unusableText, type RoomNow, type TimedFacts, type TimedKind } from './placement.ts';
+import { PLAYERS_IN_SANDBOX } from './cloneGuard.ts';
 import { TIMED_LEG_WAIT_MS, unavailableText, bigFallbackRules, type SmallState } from './timedAsk.ts';
 import type { LegStep, Occupant } from './timedLegPlace.ts';
 import { minPriorityText } from '../shared/capacity.ts';
@@ -4659,7 +4661,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       if (open) this.supersedePair(open, p, spent!);
       head = open
         ? `${open.id} (${spent}) is cancelled, and its legs no longer count for ${w.id}: filed ${p.id}, a retry, ${pairText(p.pair!)}, with fresh legs. Only ${p.id}'s report resumes you, never one from ${open.id}'s legs. The dispatcher starts its legs together, one new worker on each computer, as soon as that many computers have room at once.`
-        : `Filed ${p.id}, ${pairText(p.pair!)}, for ${w.id}. The dispatcher starts its legs together, one new worker on each computer, as soon as that many computers have room at once; each leg's first message says which leg it is and where the others are.`;
+        : `Filed ${p.id}, ${pairText(p.pair!)}${macRefusedScenario(p) ? `, no leg on a Mac (each leg starts ${macRefusedScenario(p)}'s host and client on its own computer; w3697)` : ''}, for ${w.id}. The dispatcher starts its legs together, one new worker on each computer, as soon as that many computers have room at once; each leg's first message says which leg it is and where the others are.`;
     }
     // w2459: too few computers signed in to different Steam accounts for it: the pair run is Blocked on that, not Queued.
     const steamShort = !p.pair?.started && p.status !== 'blocked' ? this.steamShortOf(p.pair) : undefined;
@@ -4933,7 +4935,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
         x.brief,
         '',
         ...(x.pinned ? [`It must run on ${x.pinned.id} only (w2521: ${x.pinned.why}): FF Factory starts it there and nowhere else.`, ''] : []),
-        `FF Factory filed this for worker ${sessionId} on ${w.id} (w1969, timed_place): its timed leg, moved off a big computer so its exclusive bench turn idles few slots (${x.why}). Build and time BOTH sides of the comparison on the computer you run on, under its exclusive bench ticket (the bench queue, as the game repo's scripts take it): numbers compare only with the same computer's own. ${w.id}'s worker is Blocked on this request's report: report the result with a line "For ${w.id}:" (each side's commit, the computer, the table, where the logs are), then end with DONE: <this request> once the run is over. Do not merge ${w.id}'s pull request: its own worker does. ${w.id}'s worker is stopped while it waits, and its sandbox goes to other work (w2357): it resumes when you report, perhaps in a new sandbox, so take both sides' commits from the branches pushed to origin, never from its sandbox. If a side is not pushed yet, time the side you can, report it with a line "For ${w.id}:" saying what you need (the branch and commit), and block on ${w.id} reporting: that partial report resumes its worker, and its "For <this request>:" reply resumes you.`,
+        `FF Factory filed this for worker ${sessionId} on ${w.id} (w1969, timed_place): its timed leg, moved off a big computer so its exclusive bench turn idles few slots (${x.why}). Build and time BOTH sides of the comparison on the computer you run on, under its exclusive bench ticket (the bench queue, as the game repo's scripts take it): numbers compare only with the same computer's own. ${PLAYERS_IN_SANDBOX} ${w.id}'s worker is Blocked on this request's report: report the result with a line "For ${w.id}:" (each side's commit, the computer, the table, where the logs are), then end with DONE: <this request> once the run is over. Do not merge ${w.id}'s pull request: its own worker does. ${w.id}'s worker is stopped while it waits, and its sandbox goes to other work (w2357): it resumes when you report, perhaps in a new sandbox, so take both sides' commits from the branches pushed to origin, never from its sandbox. If a side is not pushed yet, time the side you can, report it with a line "For ${w.id}:" saying what you need (the branch and commit), and block on ${w.id} reporting: that partial report resumes its worker, and its "For <this request>:" reply resumes you.`,
       ].join('\n'),
       8000,
     );
@@ -5198,7 +5200,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       [
         x.brief,
         '',
-        `FF Factory filed this for worker ${sessionId} on ${w.id} (w1945, request_pair): ${pairText(pair)}. Its legs start together, one worker on each computer (start_agent with pair_sandboxes); each leg's first message says which leg it is and where the others are, and message_pair reaches them. ${w.id}'s worker is Blocked on this request's report: the host leg (leg 1) reports the result with a line "For ${w.id}:" (what ran, the commit every leg ran, what the check compared and found, any desync report files), and every leg ends with DONE once the run is over. Do not merge ${w.id}'s pull request: its own worker does.${x.retryOf ? ` This is a retry of ${x.retryOf}, whose legs did not deliver the result (w2041)${x.avoid?.length ? `: no leg goes on ${x.avoid.join(' or ')}, where one failed` : ''}; start it fresh, nothing of ${x.retryOf}'s legs carries over.` : ''}`,
+        `FF Factory filed this for worker ${sessionId} on ${w.id} (w1945, request_pair): ${pairText(pair)}. Its legs start together, one worker in a game sandbox on each computer (start_agent with pair_sandboxes); ${PLAYERS_IN_SANDBOX} each leg's first message says which leg it is and where the others are, and message_pair reaches them. ${w.id}'s worker is Blocked on this request's report: the host leg (leg 1) reports the result with a line "For ${w.id}:" (what ran, the commit every leg ran, what the check compared and found, any desync report files), and every leg ends with DONE once the run is over. Do not merge ${w.id}'s pull request: its own worker does.${x.retryOf ? ` This is a retry of ${x.retryOf}, whose legs did not deliver the result (w2041)${x.avoid?.length ? `: no leg goes on ${x.avoid.join(' or ')}, where one failed` : ''}; start it fresh, nothing of ${x.retryOf}'s legs carries over.` : ''}`,
       ].join('\n'),
       8000,
     );
@@ -5223,6 +5225,9 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       asks: 0,
       log: [],
     };
+    // w3697: legs that each start an MP scenario's host and client go on no Mac, which the brief says beside pairText's rule.
+    const mp = macRefusedScenario(p);
+    if (mp) p.brief = clip(`${brief} No leg goes on a Mac (w3697): each leg starts ${mp}'s host and its client on its own computer, and ${MAC_REFUSES_SCENARIO}.`, 8000);
     // The request it is for is no repeat of it (its worker waits on it).
     p.overlaps = findOverlaps({ keys: p.keys, title: p.title }, this.pool(p.id)).filter((o) => o.ref !== w.id);
     this.stamp(p, `filed by FF Factory for worker ${sessionId} on ${w.id} (w1945 request_pair): ${pairText(pair)}; counts against no limit`);
@@ -6014,6 +6019,8 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const served = servedBy(s.id, [...this.store.work.values()]);
     // w3281: each held request's latest word before this report replaces it (a report on another request overwrites it).
     const before = new Map(this.itemsOf(s.id).map((w) => [w.id, w.outcome]));
+    // w3706: its report, whole, joins the Findings / outcome record of each request it was on, before a marker closes one.
+    for (const w of findingTargets(this.itemsOf(s.id), text)) if (recordFinding(w, s.id, text)) this.store.putWork(w);
     // w3105: a hand-off's report is kept whole before any marker below can close the request and resume its waiter.
     this.keepHandoffReports(s, text);
     this.dropCutOffGates(s.id);
@@ -6095,6 +6102,9 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     if (!ids.size) return [];
     const lines: string[] = [];
     const before = new Map([...ids].map((id) => [id, this.store.work.get(id)?.status]));
+    // w3706: its report joins the Findings / outcome record of the requests its job was for, before a DONE closes one.
+    const jobs = [...ids].map((id) => this.store.work.get(id)).filter((w): w is WorkItem => !!w && isOpen(w));
+    for (const w of findingTargets(jobs, text)) if (recordFinding(w, s.id, text)) this.store.putWork(w);
     this.doneMarkers(s, text, { workIds: ids, by: job.by, tell: (l) => void lines.push(...l) });
     for (const [id, line] of stillOpenIn(text)) {
       const w = this.store.work.get(id);

@@ -46,6 +46,8 @@ export interface TimedRunnerDeps {
   pollMs?: number;
   /** Most bytes of pieces kept between runs (default 8 GB). */
   cacheMaxBytes?: number;
+  /** A play-only computer's turn plan (default TURN_PLAN_MS, w3711; a worker computer's is worker.turnPlanMs). */
+  turnPlanMs?: number;
   /**
    * w1996: this is a worker computer (it has sandboxes and the game repo's bench queue), not a play-only one. Its exclusive
    * ticket is taken through the bench queue (bench_queue.py hold --reason timing, with the asking worker's session, so the
@@ -538,24 +540,43 @@ export class TimedRunner {
     try {
       if (!worker) {
         // 4. The exclusive ticket, once nobody else holds one and nobody plays here.
-        let ticket: string | undefined;
-        try {
-          for (let waited = 0; ; waited++) {
-            const why = this.d.personBusy() ?? (foreignTicket(root) ? `another ticket is in this machine's bench queue (${foreignTicket(root)})` : undefined);
-            if (!why) break;
-            if (waited % 20 === 0) this.status(o.id, 'waiting', `waiting: ${why}`);
-            await this.nap(o.id, poll);
+        // w3711: in turns, as a worker computer's run (w1832: "at most 30 minutes" per exclusive lock): a turn plays the
+        // legs that fit in TURN_PLAN_MS by the longest leg so far, gives its ticket back, and waits again behind any other.
+        // One ticket for the whole run held a 106-minute plan's lock for all of it.
+        const plan = this.d.turnPlanMs ?? TURN_PLAN_MS;
+        let longest = legTimeoutS(o.settings) * 1000;
+        let seen = false;
+        let next = 0;
+        for (let turn = 1; next < order.length; turn++) {
+          let ticket: string | undefined;
+          try {
+            for (let waited = 0; ; waited++) {
+              const why = this.d.personBusy() ?? (foreignTicket(root) ? `another ticket is in this machine's bench queue (${foreignTicket(root)})` : undefined);
+              if (!why) break;
+              if (waited % 20 === 0) this.status(o.id, 'waiting', `turn ${turn}: waiting: ${why}`);
+              await this.nap(o.id, poll);
+            }
+            ticket = takeTicket(root, { what: `timed run ${o.id}: ${o.what}`, session: o.session, requests: o.requests, maxMin: 30 });
+            this.status(o.id, 'running', `turn ${turn}: holds the exclusive bench ticket ${ticket}: ${order.length - next} legs left`);
+            // 5. The legs.
+            const start = Date.now();
+            let ran = 0;
+            while (next < order.length) {
+              if (ran > 0 && Date.now() - start + longest > plan) break;
+              const leg = order[next];
+              const v = o.variants.find((x) => x.name === leg.variant)!;
+              await this.personWait(o, `before ${leg.variant} round ${leg.round}`, poll);
+              const t0 = Date.now();
+              legs.push(await this.leg(o, v, leg.round, path.join(buildDirs[buildOf.get(v.name)!], PLAYER_EXE), saveName, runDir, contention));
+              longest = seen ? Math.max(longest, Date.now() - t0) : Date.now() - t0;
+              seen = true;
+              next++;
+              ran++;
+            }
+          } finally {
+            if (ticket) releaseTicket(root, ticket);
           }
-          ticket = takeTicket(root, { what: `timed run ${o.id}: ${o.what}`, session: o.session, requests: o.requests, maxMin: Math.ceil((order.length * legTimeoutS(o.settings)) / 60) + 5 });
-          this.status(o.id, 'running', `holds the exclusive bench ticket ${ticket}: ${order.length} legs`);
-          // 5. The legs.
-          for (const leg of order) {
-            const v = o.variants.find((x) => x.name === leg.variant)!;
-            await this.personWait(o, `before ${leg.variant} round ${leg.round}`, poll);
-            legs.push(await this.leg(o, v, leg.round, path.join(buildDirs[buildOf.get(v.name)!], PLAYER_EXE), saveName, runDir, contention));
-          }
-        } finally {
-          if (ticket) releaseTicket(root, ticket);
+          if (next < order.length) this.status(o.id, 'waiting', `turn ${turn} gave its ticket back after ${next} of ${order.length} legs (a turn is at most 30 minutes, w1832); queued again for the rest`);
         }
       } else {
         await this.workerTurns(o, worker, order, { buildOf, buildDirs, buildFiles, saveName, runDir, contention, legs, poll });
@@ -684,7 +705,7 @@ export class TimedRunner {
           }
           const start = Date.now();
           let ran = 0;
-          this.status(o.id, 'running', `turn ${turn}: holds the exclusive bench ticket ${s.ticket}, legs in ${pair.sandbox}'s player slots: ${order.length - next} legs left`);
+          this.status(o.id, 'running', `turn ${turn}: holds the exclusive bench ticket ${s.ticket}, legs in ${pair.sandbox}'s player slots: ${order.length - next} legs left; it gives the ticket back by itself after ${Math.round(plan / 60_000)} min of legs, whether or not anyone waits (w3711)`);
           while (next < order.length) {
             // a turn plays at least one leg; another only when, by the longest leg so far, it ends within the plan
             if (ran > 0 && Date.now() - start + longest > plan) break;

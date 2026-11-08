@@ -14,7 +14,7 @@ import type { AttachmentStore } from './attachments.ts';
 import { publicRef } from './attachments.ts';
 import { readJsonDurable, writeJsonDurable } from './durable.ts';
 import type { AttachmentRef, Machine } from '../shared/types.ts';
-import { legOrder, MAX_VARIANTS, PIECE_MAX_BYTES, runBoundMinutes, runTurns, timedArgsProblem, timedSettingsOf, TURN_PLAN_MS, variantNameProblem, type LegSummary, type Piece, type TimedRunOrder, type TimedSettings, type TimedVariant } from '../shared/timedRun.ts';
+import { legOrder, legPlanS, MAX_VARIANTS, PIECE_MAX_BYTES, runBoundMinutes, runPlanMinutes, runTurns, timedArgsProblem, timedPlanProblem, timedSettingsOf, TURN_PLAN_MS, variantNameProblem, type LegSummary, type Piece, type TimedRunOrder, type TimedSettings, type TimedVariant } from '../shared/timedRun.ts';
 import { SMALL_TIMED_MAX_AGENTS } from './timedAsk.ts';
 
 export type TimedRunState = 'uploading' | 'queued' | 'sent' | 'running' | 'done' | 'failed';
@@ -284,6 +284,9 @@ export class TimedRuns {
     if (new Set(variants.map((v) => v.name)).size !== variants.length) throw new Error('builds: each name once');
     const settings = timedSettingsOf(a);
     if (typeof settings === 'string') throw new Error(settings);
+    // w3711: a leg past 10 minutes is refused; more than 2 rounds, or more legs than one exclusive lock plays, needs a reason
+    const planProblem = timedPlanProblem(settings, variants.length, a.reason);
+    if (planProblem) throw new Error(planProblem);
     const s = a.save as { name?: unknown; size?: unknown; sha256?: unknown } | undefined;
     if (!s || !SHA.test(String(s.sha256)) || !Number.isSafeInteger(s.size) || Number(s.size) <= 0 || Number(s.size) > PIECE_MAX_BYTES) throw new Error('save: a .zip save of at most 64 MB');
     const machine = this.target(a.machine, who);
@@ -348,7 +351,7 @@ export class TimedRuns {
     const aheadNote = ahead.length ? ` ${r.machine} plays one timed run at a time and holds ${ahead.map((x) => `${x.id} (${this.whose(x)}, ${x.state})`).join(', ')} first: this run waits behind ${ahead.length === 1 ? 'it' : 'them'} before it queues for the bench. timed_place with status "${r.id}" says where it stands.` : '';
     const mb = (n: number) => `${(n / 1024 ** 2).toFixed(0)} MB`;
     const where = (r.state as TimedRunState) === 'sent' ? `handed to ${r.machine}` : `queued for ${r.machine}, which is ${this.d.isOnline(r.machine) ? 'connected but not on a daemon that runs timed runs yet (it is updated by itself once idle)' : 'offline'}: it starts when ${r.machine} is back`;
-    const text = `Timed run ${r.id} ${where}: ${o.variants.map((v) => v.name).join(' vs ')}, ${legs} legs of ${o.settings.settleS} s settle + ${o.settings.sampleS} s sample on ${o.settings.res}, under ${r.machine}'s exclusive bench ticket. Sent ${mb(r.sentBytes)} of ${mb(r.totalBytes ?? 0)} (the rest was on the portal from earlier runs). FF Factory messages you with the table and the logs (timed-${r.id}.tar.gz in your Inbox: probe_ab_win.sh's layout, so scripts/bench/probe_table.py and ab_stop.py read it) when it ends; its bound is about ${bound} min.${turnsNote}${aheadNote} End your turn now with a wake_me check-in of ${bound + 15} minutes as the fallback; do not wait in the foreground.`;
+    const text = `Timed run ${r.id} ${where}: ${o.variants.map((v) => v.name).join(' vs ')}, ${legs} legs of ${o.settings.settleS} s settle + ${o.settings.sampleS} s sample on ${o.settings.res}, under ${r.machine}'s exclusive bench ticket. Sent ${mb(r.sentBytes)} of ${mb(r.totalBytes ?? 0)} (the rest was on the portal from earlier runs). FF Factory messages you with the table and the logs (timed-${r.id}.tar.gz in your Inbox: probe_ab_win.sh's layout, so scripts/bench/probe_table.py and ab_stop.py read it) when it ends. It plays about ${runPlanMinutes(o.settings, o.variants.length)} min of legs (about ${legPlanS(o.settings)} s each, launch and load included); ${bound} min is only its bound for your check-in (every leg at its kill timeout, plus sending), not how long it holds the lock: quote the play time.${turnsNote}${aheadNote} End your turn now with a wake_me check-in of ${bound + 15} minutes as the fallback; do not wait in the foreground.`;
     // w2928: its daemon answered the worker's call before the pieces were all sent, so this answer goes as a message
     if (a.late === true) {
       this.d.log?.(`timed run ${r.id}: every piece arrived from ${r.from} after its call answered; ${where}`);

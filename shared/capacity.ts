@@ -226,6 +226,39 @@ export function needsMpPeers(w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'no
 }
 
 /**
+ * The override the game repo's guard reads (scripts/nightly/player_slots.py require_mac_client_ok): FF_MAC_GPU_HANG_OK set to
+ * a request id lets a Mac start a multiplayer client (a w665 repro whose Mac's person agreed to unlock it afterwards).
+ */
+export const MAC_CLIENT_OK_WORDS = /\bFF_MAC_GPU_HANG_OK=w\d+/i;
+/**
+ * A pair run whose peers are spread over its computers, leg 1 the host and the others its clients: a pair lab
+ * (scripts/nightly/lab.pair-m5-beast.json) or the pair relay (scripts/nightly/pair_relay.py; the game repo's
+ * Determinism-Test-Strategy.md, "A pair with no ssh"). Its host leg starts no client, so a Mac may take it.
+ */
+export const SPLIT_PEER_WORDS = /\blab\.pair-[\w.-]+|\bpair_relay\b/;
+/** Why a Mac takes no leg of a pair run whose legs each start an MP scenario's host and client (w3697). */
+export const MAC_REFUSES_SCENARIO =
+  "a Mac refuses a multiplayer client (the game repo's scripts/nightly/player_slots.py require_mac_client_ok, w665; w3697). A pair lab or the relay (leg 1 hosts, the others join), a cross-OS pair or FF_MAC_GPU_HANG_OK=<request> in its words lets a Mac host";
+
+/**
+ * The MP scenario a Mac would have to start a client of (w3697), or undefined when a Mac may take the work. ffnightly.py
+ * starts every peer of an MP scenario on the computer it runs on unless a pair lab or the relay spreads them, so work that
+ * names one starts a client wherever it runs, and the guard refuses that on a Mac. A pair run is no exception: w3669 (the
+ * pair run for PR #3433, MP-W1587-gatling-tiers: "The scenario runs both peers, host and client, on one computer") put leg 1
+ * on m5 at 17:51 UTC on 2026-11-08, and its 3 runs each ended 'env' in about 20 s at the guard after a 10-minute Mac build.
+ * A pair's host leg starts no client only when its peers are spread: a cross-OS pair (its client is on the other OS) or one
+ * whose words name a pair lab or the relay. Unsure is a refusal: a Windows or Linux leg costs nothing, a Mac leg that hits
+ * the guard costs a build and a worker. FF_MAC_GPU_HANG_OK=<request> in its words lifts it, as it lifts the guard.
+ */
+export function macRefusedScenario(w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes'> & { pair?: WorkPair }): string | undefined {
+  if (!needsMpPeers(w)) return undefined;
+  const words = `${w.title}\n${w.brief}\n${(w.notes ?? []).map((n) => n.text).join('\n')}`;
+  if (MAC_CLIENT_OK_WORDS.test(words)) return undefined;
+  if (w.pair && (w.pair.crossOs || SPLIT_PEER_WORDS.test(words))) return undefined;
+  return MP_SCENARIO_WORDS.exec(words)?.[0];
+}
+
+/**
  * How long a computer must have had room before a request still Queued beside it is WRONG (w1944; a judgment): the capacity
  * ping waits a 30 s quiet spell and up to its 2-minute gap, then the dispatcher needs a turn. At 22:13:31 UTC on 2026-10-23
  * three sandboxes freed and list_work flagged 21 requests WRONG within seconds; the dispatcher had started three by 22:15.
@@ -313,9 +346,10 @@ export function unfitWhy(w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes'
   // the dispatcher's own placement, the OS a guess. Only a timed leg's own platform (timed_place) still does.
   const pinned = !!named?.some((n) => n.toLowerCase() === id.toLowerCase()) && w.timedLeg?.platform !== timed;
   if ((timed === 'win32' || timed === 'darwin') && !pinned && f.platform && f.platform !== timed) return `${id} is not on ${timed === 'win32' ? 'Windows' : 'macOS'}, which its timed work names`;
-  // w2282: a Mac fits a pair run, as its host only; pairRoom keeps the clients off Macs. A pair's MP scenario runs one peer
-  // per computer, so needsMpPeers (every peer on one computer) does not rule a Mac out for it.
-  if (f.platform === 'darwin' && needsMpPeers(w) && !w.pair) return `${id} is a Mac, which refuses the multiplayer client its MP scenario starts (w665)`;
+  // w2282: a Mac fits a pair run, as its host only; pairRoom keeps the clients off Macs. w3697: unless every leg starts the
+  // MP scenario's host and its client on its own computer (macRefusedScenario), as w3669's legs did.
+  const mp = f.platform === 'darwin' ? macRefusedScenario(w) : undefined;
+  if (mp) return w.pair ? `${id} is a Mac, and each leg of this pair run starts ${mp}'s host and its client on its own computer: ${MAC_REFUSES_SCENARIO}` : `${id} is a Mac, which refuses the multiplayer client its MP scenario starts (w665)`;
   return undefined;
 }
 

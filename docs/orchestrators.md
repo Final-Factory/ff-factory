@@ -1523,6 +1523,37 @@ person's orchestrator marks the request with `request_work`/`update_work report 
 `decide_work report <kind>`; its worker files it with `file_report`, and its DONE waits for one. Everything else (where
 it is kept, media, revisions, the tools, the tab): `docs/reports.md`.
 
+### Findings and outcome (w3706)
+
+Every request keeps a **Findings / outcome** record, so what its workers found can be looked up without a transcript
+(lothsahn, 2026-11-08: "every time a worker finishes the ledger gets updated for a workitem about its findings or outcomes
+before the workitem is closed. That way you can look things up quickly without the full transcript"). Answering "what
+were the vSync findings?" for w3639 had meant reading two workers' transcripts: the `Latest:` line is cut at 200
+characters, a log line at 300, and the first worker's findings were gone once the second took the request.
+
+- **Worker reports, kept by the server.** Every report a worker (or the ops worker) ends a turn with joins the record of
+  each request that turn was on (only the ones it names, when it names some), whole up to 3,000 characters
+  (`Orchestrators.workerTurnEnded`, `server/findings.ts`). The record is on the request, so a hand-off or a move keeps
+  the earlier worker's reports. It stays under 9,000 characters: older reports shrink to their first 600 characters (the
+  TL;DR) and then the oldest go, each worker's first report after its later ones.
+- **The final outcome, written by every close.** `Store.putWork`, the one place a request is saved, writes
+  `finalOutcome` whenever the request is closed (done, cancelled, rejected, merged), whatever closed it: a DONE, a
+  SUPERSEDED, a person's or the dispatcher's close, the ledger cleanup's merged PR or delivered report, an intake close.
+  No close is saved without one. It is the close note and, when the note does not already hold it, the last worker
+  report: a DONE keeps only its first line as the note, and the cleanup's or a person's note says why it closed, not what
+  was found. A reopened request moves its old outcome into the reports, so the first close stays readable after the
+  second.
+- **Shown in full** by `list_work` with an id (orchestrators) and `read_work` (workers), the outcome first, then the
+  reports newest first. The list view (no id) keeps its short `Latest:` line.
+- **Why the server derives it, not a `set_findings` tool.** Every worker already ends each turn with a report that
+  leads with a TL;DR and labels its numbers measured, sourced or guess (the worker prompt's Reporting), and the server
+  already reads that report for DONE and `still open` lines. Keeping it costs workers nothing and cannot be forgotten;
+  a tool a worker must remember to call would miss the turns it forgot, as the hand-off that lost w3639's first findings
+  did. The worker prompt (`doneRule`) tells workers their reports are kept, so they write them to stand alone.
+- **How it fits the rest.** The `Latest:` line and the log stay the one-line summary and the timeline. A report
+  (`file_report`, w2541) stays the place for a design or an analysis a person asked for; the record names it through
+  the worker's report. `hand_up_requests` files follow-ups as their own requests, each with its own record.
+
 ### A disk clean-up request (w3328)
 
 A request whose work is freeing disk space on a machine carries `diskCleanup {machine, by, at}`, set by `request_work` /
