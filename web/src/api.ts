@@ -222,6 +222,8 @@ export const api = {
   createJoin: (req: { id: string; tailnetName?: string; maxSandboxes?: number; maxAgentsPerSandbox?: number; maxUnity?: number; playOnly?: boolean }) => request<JoinAnswer>('POST', '/api/machines/join', req),
   redeployMachine: (id: string, force = false) => request<Machine>('POST', `/api/machines/${enc(id)}/redeploy`, { force }),
   machineDaemon: (id: string, action: 'start' | 'stop' | 'restart', force = false) => request<{ note: string }>('POST', `/api/machines/${enc(id)}/daemon`, { action, force }),
+  /** w3730: stop a worker's bench ticket there (the daemon's bench_revoke, in this person's name). */
+  stopBenchTicket: (id: string, ticket: string) => request<{ note: string }>('POST', `/api/machines/${enc(id)}/bench/${enc(ticket)}/stop`, {}),
   /** The machine's activity pause (w1574, config machines.activityPause): on or off, and its idle minutes. */
   setActivityPause: (id: string, body: { enabled?: boolean; idleMinutes?: number }) =>
     request<{ enabled: boolean; idleMinutes: number }>('POST', `/api/machines/${enc(id)}/activity-pause`, body),

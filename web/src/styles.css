@@ -6439,6 +6439,15 @@ body {
   display: none;
 }
 
+/* w3730: the Stop buttons for the bench tickets a person may stop, under the bench line (board: the exclusive holder;
+   machine page: each worker's ticket). */
+.bench-stops {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 2px;
+}
+
 /* The machine page's bench row: the text wraps beside its chip, whole, instead of dropping under it or being cut. */
 .bench-row-text {
   flex: 1 1 16em;
