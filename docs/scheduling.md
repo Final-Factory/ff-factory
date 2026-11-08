@@ -84,7 +84,7 @@ BEAST's history is on BEAST only; the portal had no copy. The daemons now send t
    free sandbox held for a w1826 pair leg, and the w1986 pair, since 03:57Z while about 15 single-leg requests waited,
    because no second computer had room). His rule: hold a computer's slot for a pair only while its other computers are
    free too, or due to free within a short window; otherwise the slot goes to the next single-leg request. Where it stands
-   in code: a queued pair request's hold already lapses 20 minutes after that computer's room began
+   in code: a queued pair request's hold already lapses `PAIR_HOLD_MS` (45 minutes since w3530) after that computer's room began or the pair was Queued
    (`Agents.pairHoldProblem`, `PAIR_HOLD_MS`, w1983 #621). A pair's **held leg** (w1863: `legs` held for named computers)
    has no such bound: `roomShares` (`shared/workState.ts` 589) gives it a room slot at its place in the queue whether or not
    its partner can start, so the ledger reads "biscuit has room, but it goes first to w1826" for every request behind it.

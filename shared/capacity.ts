@@ -233,19 +233,21 @@ export function needsMpPeers(w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'no
 export const ROOM_STAND_MS = 5 * 60_000;
 
 /**
- * How long a computer's last free sandbox stays held for an older Queued pair run that still cannot start (w1983): from
- * when that computer's room began. Held longer, it starved everything (lothlaptop/slot1 sat free 02:50Z to 03:52Z on
- * 2026-10-24, held for w1970 and then w1981, while lothsahn's w1789 waited for it). A judgment: four capacity pings' worth
- * of standing room, and sandboxes freed every few minutes in that hour's journal.
+ * How long a computer's last free sandbox stays held for the Queued pair run that still waits for its other legs (w1983,
+ * w3530): from when that computer's room began or the pair was Queued, whichever is later. 20 min at first (w1983:
+ * lothlaptop/slot1 sat free 02:50Z to 03:52Z on 2026-10-24, held for w1970 and then w1981, while lothsahn's w1789 waited for
+ * it). w3530: on 2026-11-08 a second computer freed 23 and 37 min after the first (biscuit/slot3 00:38Z, beast/slot1 01:01Z,
+ * m5/slot2 01:38Z), so each 20 min hold lapsed before its partner came and pairs waited 5 to 17 h. A judgment: 45 min covers
+ * those gaps, and since w3530 only one waiting pair holds (Agents.pairPlan), at most its legs less one sandboxes at a time.
  */
-export const PAIR_HOLD_MS = 20 * 60_000;
+export const PAIR_HOLD_MS = 45 * 60_000;
 
 /**
  * How long a small computer's last free sandbox stays held for Queued timed work that has not started there (w1995), from
- * when that computer's room began: as PAIR_HOLD_MS, so a hold the dispatcher does not act on never keeps a sandbox idle long.
+ * when that computer's room began: 20 min, so a hold the dispatcher does not act on never keeps a sandbox idle long.
  * Timed work fits one sandbox, so it can start the moment the hold begins; the bound only covers a dispatcher that does not.
  */
-export const TIMED_HOLD_MS = PAIR_HOLD_MS;
+export const TIMED_HOLD_MS = 20 * 60_000;
 
 /** What a computer with room is, for whether a request can run there (w1944, RoomNow.fit): its platform, and w1861's no-timed-runs reason. */
 export interface RoomFit {

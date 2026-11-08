@@ -6869,6 +6869,65 @@ test('w1983: a pair hold is bounded: work pinned to that computer goes, and the 
   assert.match(agents.pairHoldProblem('pc', w3) ?? '', /it can start now, start its legs first/);
 });
 
+test('w3530: a Queued pair run gets its legs while single work arrives as sandboxes free: one pair holds, its hold outlasts the gap to the next free computer, and a pair that can start takes what it needs', async (t) => {
+  const env = await twoComputers(t);
+  const { store, agents, o, dispatcher, call } = env;
+  const third = await startTestMachine(env.machines, { id: 'm5', sandboxes: ['slot2'] });
+  env.closers.push(() => third.stop());
+  store.putMachine({ ...store.machines.get('m5')!, platform: 'win32' });
+  // 2026-11-08: about ten pairs Queued (w3347 17 h, w3392 13 h), single work Queued behind them, sandboxes freeing one at a time.
+  putRequests(store, [
+    { id: 'w2', by: BEN, status: 'queued', queuedFor: { at: T0 }, pair: { legs: 2, avoid: ['beast'] } },
+    { id: 'w5', by: BEN, status: 'queued', queuedFor: { at: '2026-09-28T09:30:00.000Z' }, pair: { legs: 2 } },
+    { id: 'w3', by: BEN, status: 'queued', queuedFor: { at: '2026-09-28T10:00:00.000Z' } },
+    { id: 'w4', by: BEN, status: 'queued', queuedFor: { at: '2026-09-28T10:00:00.000Z' } },
+  ]);
+  const w = (id: string) => store.work.get(id)!;
+  const clock = (ms: number) => ((o as unknown as { now: () => Date }).now = () => new Date(ms));
+  const t0 = Date.now();
+  clock(t0);
+  // pc frees first: held for w2, the oldest pair, whatever single work comes for it.
+  agentsRoom(agents, ['pc']);
+  assert.match(agents.pairHoldProblem('pc', w('w3')) ?? '', /^pc's last free sandbox is held for w2 .*the hold lapses at/);
+  const single = await call(dispatcher().info, 'start_agent', { work_id: 'w3', prompt: 'Fix it', title: 'fix', sandbox: 'pc/alpha' });
+  assert.equal(single.isError, true, single.text);
+  assert.deepEqual(w('w3').sessionIds, []);
+  // 30 min later the next computer has not freed yet: the hold stands (before w3530 it lapsed at 20 min, and single work took pc).
+  clock(t0 + 30 * 60_000);
+  assert.match(agents.pairHoldProblem('pc', w('w3')) ?? '', /held for w2/);
+  // m5 frees: w2 (which avoids beast) can start on pc and m5, so both are its, and w4 is held off m5 too.
+  agentsRoom(agents, ['pc', 'm5']);
+  assert.match(agents.pairHoldProblem('m5', w('w4')) ?? '', /^m5's last free sandbox is held for w2 .*it can start now, start its legs first/);
+  // A younger pair is no way round it: w5's legs are refused on w2's computers.
+  const younger = await call(dispatcher().info, 'start_agent', { work_id: 'w5', prompt: 'Run the pair.', title: 'pair', sandbox: 'pc/alpha', pair_sandboxes: ['m5/slot2'] });
+  assert.equal(younger.isError, true, younger.text);
+  assert.match(younger.text, /leg 1 \(the host\) on pc\/alpha: pc's last free sandbox is held for w2 .*Nothing was started\./);
+  assert.deepEqual(w('w5').sessionIds, []);
+  const ok = await call(dispatcher().info, 'start_agent', { work_id: 'w2', prompt: 'Run the pair.', title: 'pair', sandbox: 'pc/alpha', pair_sandboxes: ['m5/slot2'] });
+  assert.equal(ok.isError, false, ok.text);
+  assert.equal(w('w2').sessionIds.length, 2);
+
+  // One pair never holds room another could complete with: w2 back in the queue, waiting on pc alone (beast it avoids),
+  // and beast frees: w5 can start on pc and beast now, so it takes both, not w2's hold on pc.
+  w('w2').status = 'queued';
+  delete w('w2').pair!.started;
+  clock(t0 + 40 * 60_000);
+  agentsRoom(agents, ['pc', 'beast']);
+  assert.match(agents.pairHoldProblem('pc', w('w3')) ?? '', /held for w5 .*it can start now/);
+  assert.match(agents.pairHoldProblem('beast', w('w3')) ?? '', /held for w5 .*it can start now/);
+  // Only one waiting pair holds: with room on pc alone, w2 holds it and w5 holds nothing anywhere.
+  agentsRoom(agents, ['pc']);
+  assert.equal(agents.pairPlan(agents.roomFacts()).size, 1);
+  assert.equal(agents.pairPlan(agents.roomFacts()).get('pc')?.pair.id, 'w2');
+  // Bounded: PAIR_HOLD_MS after pc's room began (or the pair was Queued, if later), single work takes it.
+  clock(Date.now() + PAIR_HOLD_MS + 60_000);
+  assert.equal(agents.pairHoldProblem('pc', w('w3')), undefined);
+  // Urgent single work beats a normal pair at once (a person's "Start now").
+  clock(t0);
+  w('w3').priority = 'urgent';
+  assert.equal(agents.pairHoldProblem('pc', w('w3')), undefined);
+});
+
 test('w1995: a small computer\'s last free sandbox is held for the timed work Queued for it: other work starts elsewhere, a pair leg only when no other computers hold the pair', async (t) => {
   const env = await twoComputers(t);
   const { store, agents, o, dispatcher, call } = env;
