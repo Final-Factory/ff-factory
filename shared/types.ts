@@ -2169,6 +2169,12 @@ export interface WorkPair {
    * how many times so far, and `gaveUp` once it stopped re-queuing it (PAIR_REQUEUE_MAX).
    */
   requeued?: { at: string; why: string; count: number; gaveUp?: string };
+  /**
+   * w3708: its legs other than the host, by session, once the host leg (leg 1) said DONE: `told` when they were told the
+   * run is over, `prompted` when a leg that went on without DONE was asked once to wrap up, `escalated` when its jam went
+   * to the dispatcher (Orchestrators.pairLegLingers). w3523's client leg 4f65cc5c ended six times over 5 h without DONE.
+   */
+  afterHost?: Record<string, { told?: string; prompted?: string; escalated?: string }>;
 }
 
 /** A request for work that a person's orchestrator filed with the dispatcher, and what became of it. */

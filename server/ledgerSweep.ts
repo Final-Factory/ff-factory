@@ -243,6 +243,8 @@ export class LedgerSweep {
         const live = this.d.store.work.get(w.id);
         if (!live || !(isOpen(live) || live.status === 'stalled')) continue;
         if (live.approval?.state === 'pending') continue;
+        // w3708: a pair run's leg that goes on without DONE after the host leg's DONE is asked once, then the run closes.
+        if (this.d.orchestrators.pairLegsOverdue(live.id)) continue;
         const workers = live.sessionIds.map((id) => this.d.store.sessions.get(id)).filter((s): s is SessionInfo => !!s && !replacedLeg(live, s));
         // Whose reports say what is left (w2493): its workers, or, with none (a w1600 move takes the request off its worker
         // until the dispatcher places it again), the workers it was moved off. w2443 and w2014 had no worker at 00:00Z on
