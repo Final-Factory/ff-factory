@@ -240,6 +240,12 @@ export type ToDaemon =
    * older daemon ignores it.
    */
   | { type: 'timed_run_cancel'; id: string; why: string }
+  /**
+   * w3715: take back the granted bench ticket a stopped worker's background work holds: the daemon writes the ticket's
+   * `revoked` file (bench_queue.py gives it back) and, if it is still there 90 s later, ends its helper's process tree. Only
+   * that worker's own ticket (`session` must match it), never a harness ticket. An older daemon ignores it.
+   */
+  | { type: 'bench_revoke'; ticket: string; session: string; why: string }
   /** Dial the portal at this base URL from now on (protocol 8, w466); answered by relocate_result, then the link closes. */
   | { type: 'relocate'; id: string; url: string }
   /** How often the daemon polls its Mac's own Claude login's plan usage (config usagePollMinutes), at connect and when it changes. */

@@ -117,7 +117,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // workers stay fenced out of the whole folder, as before), and an older portal never sends it.
 // w3673 (no bump): `interrupt` carries an optional `id`, answered by `interrupt_result`; an older daemon ignores the id and
 // never answers (interrupt_agent says so after INTERRUPT_ANSWER_MS), and an older portal sends none, so it is never answered.
-const DECIDED = { protocol: 9, fingerprint: 'da04c8b0e7131b95' };
+// w3715 (no bump): `bench_revoke`, the portal taking back a bench ticket an idle worker's work holds; an older daemon drops it
+// (no default case), so the ticket is held as before until the leftovers or its owner end it; an older portal never sends it.
+const DECIDED = { protocol: 9, fingerprint: 'e0496eba30af9c50' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

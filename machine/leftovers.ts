@@ -120,6 +120,8 @@ export interface LeftoverDeps {
   resumable(id: string): boolean;
   /** When the session's pending wake_me check-in comes due (ms), as the portal last said. */
   wakeAt(id: string): number | undefined;
+  /** w3715: the session holds a granted bench ticket of its own (a harness ticket is not its own). */
+  holdsTicket?(session: string): boolean;
   /** When the session's current agent host started (ms, its host.json), for a wait loop an earlier one left (w3673). */
   hostSince?(id: string): number | undefined;
   /** The sandboxes with a live worker. */
@@ -308,6 +310,8 @@ export interface SessionFacts {
   live: boolean;
   resumable: boolean;
   wakeAt?: number;
+  /** w3715: it holds a granted bench ticket of its own (not an editor boot's or a timed run's). */
+  holdsTicket?: boolean;
   /** When this daemon first saw the session not live (its first sight of it, when it never saw it live). */
   stoppedSince: number;
   now: number;
@@ -323,15 +327,19 @@ const clock = (t: number) => new Date(t).toISOString().slice(11, 16) + ' UTC';
  */
 export function sessionVerdict(s: SessionFacts): { end: boolean; until?: number; why: string } {
   if (s.live) return { end: false, why: 'its worker is running' };
-  const grace = s.resumable ? LEFTOVER.STOPPED_GRACE_MS : LEFTOVER.DONE_GRACE_MS;
+  // w3715: a stopped worker's detached bench script holds the machine's one bench lock for as long as we keep it; its
+  // far check-in or waiting request is no reason to make every other worker wait, so neither grace applies.
+  const holds = s.holdsTicket === true;
+  const grace = holds ? LEFTOVER.DONE_GRACE_MS : s.resumable ? LEFTOVER.STOPPED_GRACE_MS : LEFTOVER.DONE_GRACE_MS;
   const after = s.stoppedSince + grace;
-  const wake = s.wakeAt !== undefined ? s.wakeAt + LEFTOVER.WAKE_GRACE_MS : 0;
+  const wake = s.wakeAt !== undefined && !holds ? s.wakeAt + LEFTOVER.WAKE_GRACE_MS : 0;
   const until = Math.max(after, wake);
   const state = `its worker stopped ${ago(s.now - s.stoppedSince)} ago`;
   if (s.now < until) {
-    const why = wake > after ? `its check-in comes due at ${clock(s.wakeAt!)}` : s.resumable ? 'a request still waits for it' : 'its work is over';
+    const why = wake > after ? `its check-in comes due at ${clock(s.wakeAt!)}` : holds ? 'it holds bench ticket(s), so its check-in does not keep them' : s.resumable ? 'a request still waits for it' : 'its work is over';
     return { end: false, until, why: `${state}; ${why}: kept until ${clock(until)}` };
   }
+  if (holds) return { end: true, why: `${state} and holds bench ticket(s), which its check-in or request does not keep` };
   return { end: true, why: `${state}${s.resumable ? ' (a request still waits for it, with no check-in pending)' : ' and no request waits for it'}` };
 }
 
@@ -556,7 +564,7 @@ export class LeftoverReaper {
       let v: { end: boolean; until?: number; why: string };
       let owner: PlayerLine['owner'];
       if (c.session) {
-        v = sessionVerdict({ live: d.sessionLive(c.session), resumable: d.resumable(c.session), wakeAt: d.wakeAt(c.session), stoppedSince: this.stopped.get(c.session) ?? now, now });
+        v = sessionVerdict({ live: d.sessionLive(c.session), resumable: d.resumable(c.session), wakeAt: d.wakeAt(c.session), holdsTicket: d.holdsTicket?.(c.session), stoppedSince: this.stopped.get(c.session) ?? now, now });
         owner = d.sessionLive(c.session) ? 'live' : 'stopped';
         // Named by an argument only: another worker's shell may be reading that folder, so it ends once its starter is gone too.
         const starter = c.via === 'arg' && v.end ? liveParent(c.p, procs, facts, d.platform) : undefined;

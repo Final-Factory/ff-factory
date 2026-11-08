@@ -7,7 +7,8 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import { HOST_ROLES, configPath, loadConfig, projectView, machineActivityPause, machinePersonPlay, machineCleanupSettings, pruneRetiredConfig, publicIdentityOf, retiredKeysLine, ROOT } from './config.ts';
 import { migrateConfig, retireOldTokenFile, secretsDirOf } from './configMigration.ts';
 import { Store, bus, emit } from './store.ts';
-import { SessionManager, compactCommand, seedSdkCost, snapshotOf } from './sessions.ts';
+import { SessionManager, compactCommand, isMidTurn, seedSdkCost, snapshotOf } from './sessions.ts';
+import { BenchHolderWatch } from './benchHolders.ts';
 import { TIMER_LIMITS } from './timers.ts';
 import { Agents } from './agents.ts';
 import { MachineManager, agentCap, enrolledMachines, machineForPath, revokeMachineToken } from './machines.ts';
@@ -457,6 +458,24 @@ setInterval(() => machines.pushBenchPriorities(), 60_000).unref();
 // A holder warned that its bench turn ends (w1832, server/benchWarnings.ts): its worker is messaged once per deadline.
 const benchWarner = new BenchWarner({ session: (id) => store.sessions.get(id), send: (id, text) => void sessions.send(id, text, 'system'), log: (line) => console.log(`[bench] ${line}`) });
 machines.onBenchWarnings = (id, warnings) => benchWarner.handle(id, warnings);
+// w3715: a bench ticket held while its worker has no turn and no background task running is nudged, then revoked; a holder's
+// wake_me fires when its last ticket goes (server/benchHolders.ts).
+const benchHolderWatch = new BenchHolderWatch({
+  machineIds: () => store.machines.keys(),
+  bench: (id) => machines.statsOf(id)?.bench,
+  session: (sid) => store.sessions.get(sid) ?? [...store.sessions.values()].find((i) => i.id.startsWith(sid)),
+  live: (sid) => sessions.sessions.get(sid)?.live === true,
+  midTurn: (info) => isMidTurn(info),
+  send: (sid, text) => void sessions.send(sid, text, 'system'),
+  revoke: (machineId, ticket, session, why) => {
+    if (!machines.isOnline(machineId)) return false;
+    machines.post(machineId, { type: 'bench_revoke', ticket, session, why });
+    return true;
+  },
+  wakeEarly: (sid, why) => agents.waker.fireEarly(sid, why),
+  log: (line) => console.log(`[bench] ${line}`),
+});
+setInterval(() => benchHolderWatch.tick(), 30_000).unref();
 // The live view (w1398, docs/live-view.md): a sandbox's game streamed beside its agent's chat, behind config live.enabled.
 const liveHub = new LiveHub({
   enabled: () => cfg.live?.enabled === true,

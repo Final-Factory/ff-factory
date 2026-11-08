@@ -76,7 +76,8 @@ import { BenchRunners, isOpsRunner, readListenerLog, readRunnersFile, sendSignal
 import { cpuSampler, LOAD_GATES, LoadGate, readLoadGateFile, winSuspendScript, writeLoadGateFile } from './loadRunners.ts';
 import { askPlayerToQuit, BenchTurn, closedDetail, holderSandboxes, writeClosedFile, type Holder } from './benchTurn.ts';
 import { GRACE_MIN, PersonPlay, personEnds, personHolderText, personHoldText, personTicket, priorityOf, setPriorityOf, treeOf, type PersonPlaySettings } from './personPlay.ts';
-import { benchTicketFor, queueTickets } from './benchQueue.ts';
+import { benchTicketFor, queueTickets, type QueueTicket } from './benchQueue.ts';
+import { holdsOwnTicket, revokeTicket } from './benchRevoke.ts';
 import { readBenchHours } from './benchHours.ts';
 import { TimedRunner } from './timedRunner.ts';
 import { timedRunFromMachine } from './timedRunPack.ts';
@@ -618,6 +619,8 @@ export class Daemon {
       sessionKnown: (id) => this.entries.has(id) || this.portalSessions.has(id) || this.hostSessions.has(id),
       resumable: (id) => this.resumable.has(id),
       wakeAt: (id) => this.wakes.get(id),
+      // w3715: a stopped worker's detached bench script keeps the machine's bench lock; its far check-in must not keep it
+      holdsTicket: (id) => cfg.root !== undefined && holdsOwnTicket(this.sweepTickets(cfg.root), id),
       hostSince: (id) => (this.hosted && /^[\w-]+$/.test(id) ? hostStartedAt(path.join(this.hostsRoot, id)) : undefined),
       liveSandboxes: () => new Set([...this.entries.values()].filter((e) => e.s.live && e.spec?.sandbox).map((e) => e.spec!.sandbox!)),
       ready: () => this.welcomed,
@@ -1699,6 +1702,14 @@ export class Daemon {
     return this.slots.describe();
   }
 
+  /** The bench queue's tickets, read at most every 5 s: a leftovers sweep asks once per stopped session it looks at (w3715). */
+  private sweepTicketsCache?: { at: number; tickets: QueueTicket[] };
+  private sweepTickets(root: string): QueueTicket[] {
+    const at = Date.now();
+    if (!this.sweepTicketsCache || at - this.sweepTicketsCache.at > 5_000) this.sweepTicketsCache = { at, tickets: queueTickets(benchLockDir(root), pidAlive) };
+    return this.sweepTicketsCache.tickets;
+  }
+
   /** A look at the Unity slots when due: every 15 s, or at once while a launch waits or holds one. */
 
   /**
@@ -2743,6 +2754,11 @@ export class Daemon {
         return;
       case 'timed_run_upload':
         this.timed?.uploadReady(msg.id, msg.uploadId, msg.chunkBytes);
+        return;
+      case 'bench_revoke':
+        // w3715: a worker's idle background work holds the bench lock; give its ticket back, and end its helper if it will not
+        if (!this.cfg.root) log(`bench revoke ${msg.ticket}: no worker root here`);
+        else revokeTicket(this.cfg.root, msg, { log: (line) => log(line) });
         return;
       case 'timed_run_cancel':
         // w2218: the portal no longer waits for this run; its ticket goes back with it

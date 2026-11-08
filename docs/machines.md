@@ -921,6 +921,24 @@ portal (`unity` and `switch_branch` with a machine alone are refused, and the da
   `machine/benchState.ts`, in the queue's own order: priority, then place), and the page words it (`benchGlance`,
   `shared/benchGlance.ts`); an offline machine, or a daemon from before it, shows no line.
 
+  **A bench holder always goes on; idle work never keeps a ticket** (w3715, lothsahn, 2026-11-08: "make sure stuff holding
+  locks can continue doing stuff"; "We probably should be able to pre empt a worker with a lock but it shouldn't be idle and
+  hold the lock"). On LothDesktop that day w3536's worker left a probe script holding the exclusive ticket for about an hour
+  while placement.hold queued its messages. Now, from the bench state each daemon reports (`server/benchHolders.ts`):
+  - A worker whose own work holds a granted ticket (not a harness ticket: an editor's, or a `timed run` leg's) is let
+    through every hold but a pause (`Agents.machineHold`: placement.hold, a build's or a person's play hold), past its
+    machine's agent cap (`SessionManager.fullFor`) and its pool's usage limit (`Agents.poolWait`): its messages, bench
+    warnings and wake reach it, so it can finish and let go. A pause still ends its processes and with them the ticket.
+  - `BenchHolderWatch` (every 30 s) messages a holder whose worker has no turn and no background task running (or no
+    process) for 2 minutes; still so 10 minutes after that, and idle for the last 2, its ticket is revoked: the portal
+    sends `bench_revoke`, the daemon writes the ticket's `revoked` file (bench_queue.py's own revoke: the script is asked
+    to stop, its samples kept) and ends the helper's process tree 90 s later if it still holds (`machine/benchRevoke.ts`).
+  - When an idle holder's last ticket goes, its pending wake_me fires then (`Waker.fireEarly`), not at its fixed time.
+  - A stopped worker's processes that hold a ticket end 2 minutes after it stopped, whatever its check-in
+    (`sessionVerdict` `holdsTicket`, machine/leftovers.ts).
+  A busy holder is still pre-empted by the queue's own turn limit when an equal or higher-priority waiter waits (w1832),
+  and keeps the lock while only lower-priority work waits (w1860).
+
   **Timing outside an exclusive ticket** (w1923, lothsahn: "How do we make sure workers aren't timing things without
   exclusive locks?"): every timing measurement holds an exclusive ticket, editor snippets and Performance tests included.
   The worker guard (`server/timingGuard.ts`) refuses a Unity MCP `execute_code` whose code reads a clock, a `run_tests`
