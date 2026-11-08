@@ -20,7 +20,7 @@ function gh(can: { rollup?: boolean; runs?: boolean; merge?: boolean; list?: boo
     const no = (stderr: string): RunResult => ({ code: 1, stdout: '', stderr });
     if (args[0] === 'pr' && args[1] === 'list') return can.list === false ? no('HTTP 401: Bad credentials') : ok(JSON.stringify([{ number: 1393, headRefOid: 'b3c825300c' }]));
     if (args.includes('statusCheckRollup')) return can.rollup ? ok(JSON.stringify({ state: 'OPEN', statusCheckRollup: [] })) : no(REFUSED_ROLLUP);
-    if (args.includes('state,statusCheckRollup')) return can.rollup ? ok('{}') : no(REFUSED_ROLLUP);
+    if (args.includes('state,statusCheckRollup,headRefOid')) return can.rollup ? ok('{}') : no(REFUSED_ROLLUP);
     if (args.includes('state,headRefOid')) return ok(JSON.stringify({ state: 'OPEN', headRefOid: 'b3c825300c' }));
     if (args[0] === 'api' && args[1].includes('/actions/runs')) return can.runs ? ok(JSON.stringify({ workflow_runs: [] })) : no(REFUSED_RUNS);
     if (args[0] === 'api' && /\/pulls\/\d+$/.test(args[1])) {

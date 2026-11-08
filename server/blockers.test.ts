@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { BLOCKER_STUCK_MS, CI_NO_RUN_MS, CI_UNREADABLE_MS, conflictText, cycleBreak, waitCycles, blockerName, blockerProblem, blockerVerdict, gatesName, gatesOf, isWith, latestWorker, newestFirst, prRefOf, sameGate, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
 import type { WorkBlocker, WorkItem } from '../shared/types.ts';
 import { requestWaitOf } from '../shared/workState.ts';
-import { checksState, ghChecks, ghPr, ghPrHealth, prHealthOf, runsState } from './blockerWatch.ts';
+import { checksState, ghChecks, ghPr, ghPrHealth, prHealthOf, queuedRunsState, runsState } from './blockerWatch.ts';
 import type { RunResult } from './proc.ts';
 
 const NOW = Date.parse('2026-10-07T12:00:00Z');
@@ -218,6 +218,41 @@ function fakeGh(answers: { match: RegExp; out?: unknown; err?: string }[]) {
   return { run, calls };
 }
 
+test('w3527: a workflow run queued for a runner with zero check runs is CI that exists and is pending, never "no CI run"', async () => {
+  // Measured 2026-11-08 on Final-Factory/ffu#433 (head 4b0cafd): an empty rollup while run 42435334681 sat "pending" with no jobs.
+  const ref = 'Final-Factory/ffu#433';
+  const head = '4b0cafd40ce96249dd45d76437c874b34bfa27f2';
+  const queued = (status: string) =>
+    fakeGh([
+      { match: /actions\/runners/, err: 'gh: Resource not accessible by personal access token (HTTP 403)' },
+      { match: /--json state,statusCheckRollup,headRefOid$/, out: { state: 'OPEN', statusCheckRollup: [], headRefOid: head } },
+      { match: new RegExp(`^gh api repos/Final-Factory/ffu/actions/runs\\?head_sha=${head}&per_page=100$`), out: { workflow_runs: [{ id: 42435334681, name: 'ci', status, conclusion: null }] } },
+    ]);
+  for (const status of ['pending', 'queued', 'waiting']) {
+    const s = await ghChecks(ref, queued(status).run);
+    assert.equal(s.none, undefined, `${status}: not "no CI run"`);
+    assert.equal(s.done, false);
+    assert.equal(s.text, `1 of 1 workflow runs on ${ref} waiting to start, no jobs picked up yet: ci (run 42435334681) ${status}`);
+    // The gate it feeds stays open however long after the push (the 10-minute "no CI run" clear does not fire).
+    const ci = block({ kind: 'ci', ref, what: 'CI on #433', at: new Date(NOW - 20 * 60_000).toISOString() });
+    const facts20 = facts([], { ci: () => s, prHealth: () => ({ state: 'open', head, headSeenAt: NOW - 20 * 60_000 }) });
+    assert.equal(blockerVerdict(ci, facts20).state, 'open');
+  }
+  // No run at all for the head, or runs that cannot be read: the rollup's "no checks yet" stands.
+  const empty = fakeGh([
+    { match: /actions\/runners/, err: 'refused' },
+    { match: /--json state,statusCheckRollup,headRefOid$/, out: { state: 'OPEN', statusCheckRollup: [], headRefOid: head } },
+    { match: /actions\/runs\?head_sha/, out: { workflow_runs: [] } },
+  ]);
+  assert.equal((await ghChecks(ref, empty.run)).none, true);
+  const unread = fakeGh([
+    { match: /actions\/runners/, err: 'refused' },
+    { match: /--json state,statusCheckRollup,headRefOid$/, out: { state: 'OPEN', statusCheckRollup: [], headRefOid: head } },
+  ]);
+  assert.equal((await ghChecks(ref, unread.run)).none, true);
+  assert.equal(queuedRunsState([{ name: 'ci', status: 'completed', conclusion: 'success' }], ref), undefined);
+});
+
 /** What gh says when a fine-grained token reads a check run (representative; GitHub gives those tokens no Checks permission). */
 const REFUSED = 'GraphQL: Resource not accessible by personal access token (repository.pullRequest.commits.nodes.0.commit.statusCheckRollup.contexts.nodes.0)';
 
@@ -226,7 +261,7 @@ test("w829: ghChecks reads the rollup; where GitHub refuses it, the PR state and
   // A token with Checks permission: the rollup, one call.
   const ok = fakeGh([{ match: /statusCheckRollup/, out: { state: 'OPEN', statusCheckRollup: ROLLUP_1338 } }]);
   assert.equal((await ghChecks(ref, ok.run)).done, true);
-  assert.deepEqual(ok.calls, ['gh pr view 1328 -R Final-Factory/FinalFactory --json state,statusCheckRollup']);
+  assert.deepEqual(ok.calls, ['gh pr view 1328 -R Final-Factory/FinalFactory --json state,statusCheckRollup,headRefOid']);
 
   // The portal's fine-grained token: the rollup is refused, the runs are read instead.
   const warned: string[] = [];
