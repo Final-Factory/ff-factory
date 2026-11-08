@@ -22,6 +22,37 @@ from another person in the bubble over the chat's message box, w1831, `PeopleMes
 - While recording, the bar shows a live dot, the elapsed time, a level meter, the engine, and
   Done / discard. Clips stop at 5 minutes.
 
+### Live text while you talk (w3712)
+
+Ben: "I want the transcription for the voice to, like, just transcribe as I talk instead of doing it all at the end".
+While the mic records, the words fill the box (the chat composers and the question cards' answer boxes) and keep growing.
+On stop, the usual full-clip Whisper pass replaces them with the final transcript. Discard or Esc puts the box back the way
+it was. Closing an error bar keeps the live words.
+
+- **How**: chunked Whisper (`shared/liveTranscript.ts`, `liveLoop` in `web/src/voice/dictation.ts`).
+  - About once a second, the page sends the open window of the clip as a `partial: true` request to the same
+    `/api/voice/transcribe` route. That goes to BEAST's GPU when it is up, else the portal's own CPU.
+  - Only one pass is in flight at a time, with 0.3 s between passes.
+  - Past 6 s, a window closes at its longest real pause (at least 0.1 s below 15% of the window's loud level), or at 12 s
+    with no pause. Its text then stays put. Cutting inside a word lost the words on both sides (seen with real speech).
+  - Live passes decode greedily (`fast`: beam 1, temperature 0, no repeated 3-grams). With beam 5 and its temperature
+    retries, one 6 s clip that ended mid-word took the CPU 6-7 s; with greedy decoding it took 0.49 s (measured).
+  - Partial requests are not logged and do not set the last-clip record. The final request carries the page's
+    measurements, which the server appends to its log line: `live: N passes, round trip median X s, slowest Y s, first words Z s after the mic opened`.
+- **Why not the browser's SpeechRecognition**: Chrome sends the audio to Google, Safari needs Siri, and it loses
+  Whisper's vocabulary. The browser engine's interim text now fills the box too.
+- **BEAST offline**: the portal's CPU (base.en, 2 threads) takes the passes. Its wait between passes is as long as the
+  last pass took, so it is busy at most about half the time. After 3 failures in a row the live passes stop, and the
+  final pass still runs.
+- **Measured on m5, 2026-11-08**:
+  - Setup: a local portal built from the branch, real base.en on 2 CPU threads (the VM's fallback setup), and a 10 s
+    macOS `say` sentence fed in as Chromium's fake mic.
+  - First words 1.61 s after the mic opened, about 0.7 s after the speech began.
+  - The box updated every 0.83-0.94 s. Live passes took 0.44 s (median) and 0.46 s at the slowest.
+  - The final transcript was exact, 1.3 s after Done. Clip: `/srv/fff/review/w3712-live-voice/`.
+  - On BEAST's GPU, a pass is mostly the upload over the daemon link (about 0.2-0.3 s for a 6 s window, from the
+    w615 numbers below: a guess until the `live:` log lines show it).
+
 ## Voice mode
 
 One tap on **Voice** opens a full-screen view with one big word: **Listening** (green), **Thinking**

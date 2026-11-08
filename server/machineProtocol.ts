@@ -253,9 +253,9 @@ export type ToDaemon =
   /**
    * A dictation clip for this machine's GPU Whisper (w615, machine/voice.ts), answered by transcribe_result. Sent only to a
    * daemon whose hello or `voice` status offered it, so an older daemon never gets one. `audio`: a 16-bit PCM WAV, 16 kHz
-   * mono, in base64 (300 s at most); `prompt`: Whisper's vocabulary. Neither is logged.
+   * mono, in base64 (300 s at most); `prompt`: Whisper's vocabulary. Neither is logged. `fast`: a live pass (w3712), decoded greedily.
    */
-  | { type: 'transcribe'; id: string; audio: string; prompt?: string; language?: string | null }
+  | { type: 'transcribe'; id: string; audio: string; prompt?: string; language?: string | null; fast?: boolean }
   /** A recording started on the portal: load the model now if it is not loaded (w615). */
   | { type: 'voice_warm' }
   /**

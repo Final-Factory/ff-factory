@@ -264,6 +264,28 @@ test('w615: a clip goes to the machine GPU over the daemon link; the result and 
   assert.ok(!s.lines.some((l) => l.includes('gpu text')), 'the transcript is never logged');
 });
 
+test('w3712: a live pass goes to the GPU like a clip, without a log line or the last-clip record; the final line says how live went', async (t) => {
+  const s = await setup();
+  t.after(s.cleanup);
+  await until('ready', () => s.service.status().state === 'ready');
+  const before = s.lines.length;
+  const p = await s.service.transcribe(clip(2), { partial: true });
+  assert.equal(p.text, 'gpu text');
+  assert.equal(p.engine, 'remote');
+  assert.equal(s.engine.requests.at(-1)?.fast, true, 'a live pass decodes greedily on the GPU worker');
+  assert.equal(s.service.status().last, undefined, 'a live pass is not the last transcription');
+  assert.equal(s.lines.slice(before).filter((l) => l.includes(' s clip:')).length, 0, 'no line per live pass');
+  await s.service.transcribe(clip(2), { live: { passes: 5, medianMs: 640, maxMs: 1210, firstTextMs: 1480 } });
+  const line = s.lines.find((l) => l.includes(' s clip:'));
+  assert.match(line ?? '', /live: 5 passes, round trip median 0\.64 s, slowest 1\.21 s, first words 1\.48 s after the mic opened$/);
+  assert.equal(s.service.status().last?.engine, 'remote');
+  assert.equal(s.engine.requests.at(-1)?.fast, undefined, 'the final pass keeps the full search');
+  // On the portal's own CPU too.
+  s.engine.mode = 'fail';
+  await s.service.transcribe(clip(2), { partial: true });
+  assert.equal((s.localCalls.at(-1) as { fast?: boolean }).fast, true);
+});
+
 test('w615: the portal falls back to its own CPU when the machine errors, times out or goes offline, and says why', async (t) => {
   const s = await setup({ voice: { remote: { ...VOICE_REMOTE_DEFAULTS, timeoutSeconds: 0.3 } } });
   t.after(s.cleanup);

@@ -92,6 +92,8 @@ export interface TranscribeAsk {
   audio: string;
   prompt?: string;
   language?: string | null;
+  /** A live pass (w3712): greedy decoding, no temperature retries. A preview, so speed over the last word. */
+  fast?: boolean;
 }
 
 export interface TranscribeAnswer {
@@ -270,7 +272,7 @@ export class DaemonVoice {
     const t0 = Date.now();
     await this.load();
     const loadSeconds = wasLoaded ? undefined : (Date.now() - t0) / 1000;
-    const r = await this.engine.request({ audio: ask.audio, prompt: ask.prompt ?? '', language: ask.language ?? this.v.language ?? null });
+    const r = await this.engine.request({ audio: ask.audio, prompt: ask.prompt ?? '', language: ask.language ?? this.v.language ?? null, ...(ask.fast ? { fast: true } : {}) });
     this.notify();
     return {
       text: String(r.text ?? ''),
