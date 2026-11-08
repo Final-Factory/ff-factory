@@ -297,6 +297,21 @@ export async function cargoTargetBusy(target: string, session: string, procs: Pr
   return undefined;
 }
 
+/** The newest write in a cargo target's top three levels (cargoTargetBusy reads the same): what a build touches, without its artifacts. */
+async function newestTopWrite(target: string): Promise<number> {
+  let newest = 0;
+  const stack: { p: string; depth: number }[] = [{ p: target, depth: 0 }];
+  while (stack.length) {
+    const { p, depth } = stack.pop()!;
+    const st = await fs.promises.lstat(p).catch(() => undefined);
+    if (!st) continue;
+    newest = Math.max(newest, st.mtimeMs);
+    if (!st.isDirectory() || depth >= 3) continue;
+    for (const e of await children(p)) if (e.isDirectory() || depth < 2) stack.push({ p: path.join(p, e.name), depth: depth + 1 });
+  }
+  return newest;
+}
+
 /** A Unity Profiler capture whose digest is done: a `.csv` or `.txt` beside it written after it (bench/cpu_budget_run.sh's budget.txt, the per-frame CSVs). */
 async function digestedCapture(file: string, siblings: fs.Dirent[]): Promise<boolean> {
   const st = await fs.promises.lstat(file).catch(() => undefined);
@@ -827,39 +842,62 @@ export async function planInstallLeftovers(o: {
    * Nothing git holds goes: an item inside a repo's work tree only when git ignores it, never one holding a repo.
    */
   /**
-   * A worker's cargo target over cargoTargetCapGB goes once cargo is done with it, on any pass (w3426): cargo never deletes the
-   * artifacts an older build left, so a worker that rebuilt all day held 23.6 GB (13.8 GB in debug/deps, 34 copies of one crate)
-   * while a fresh target is 3.3-5.5 GB, and a drive with room never reached the low pass that prunes it (w3396). The same checks
-   * as there (cargoTargetBusy): no process names it, no cargo-like process in the worker's tree, nothing written in its top three
-   * levels within the settle time. Running, blocked and stopped workers alike; the worker's next build rebuilds it.
+   * A worker's cargo targets over cargoTargetCapGB together go once cargo is done with them, on any pass (w3426): cargo never
+   * deletes the artifacts an older build left, so a worker that rebuilt all day held 23.6 GB (13.8 GB in debug/deps, 34 copies
+   * of one crate) while a fresh target is 3.3-5.5 GB, and a drive with room never reached the low pass that prunes it (w3396).
+   * The cap is on the sum of the worker's targets (w3617): one on biscuit held 12 targets, one per leg (ffu-target,
+   * ffu-target-m13, ...), 22 GB together and each under the cap (measured, 2026-11-08). Oldest first (by the newest write in
+   * a target's top three levels): first each idle target's debug/incremental, then, while still over, whole idle targets.
+   * The same checks as the low pass (cargoTargetBusy): no process names it, no cargo-like process in the worker's tree,
+   * nothing written in its top three levels within the settle time. Running, blocked and stopped workers alike; the worker's
+   * next build rebuilds it.
    */
   const capCargo = async (session: string, t: string) => {
     if (!s.cargoTargetCapGB || !o.procs) return;
     const capBytes = s.cargoTargetCapGB * 1024 ** 3;
+    const gb = (b: number) => `${(b / 1024 ** 3).toFixed(1)} GB`;
     const projectOpen = (d: string) => o.procs!.some((p) => mentions(p.cmd, d));
     const settle = s.lowCacheSettleMinutes || 15;
+    const targets: { path: string; what: string; bytes: number; newest: number }[] = [];
     for (const c of await idleCachesIn(session, 1, [], { projectOpen, quick: true })) {
       if (!/cargo target/.test(c.what) || items.has(c.path) || !within(c.path, root)) continue;
-      const bytes = await sizeOf(c.path);
-      if (bytes <= capBytes) continue;
-      const size = `${(bytes / 1024 ** 3).toFixed(1)} GB, over the ${s.cargoTargetCapGB} GB cap`;
+      targets.push({ path: c.path, what: c.what, bytes: await sizeOf(c.path), newest: await newestTopWrite(c.path) });
+    }
+    let total = targets.reduce((a, c) => a + c.bytes, 0);
+    if (total <= capBytes) return;
+    const over =
+      targets.length > 1 ? `${gb(total)} in this worker's ${targets.length} cargo targets, over the ${s.cargoTargetCapGB} GB cap` : `over the ${s.cargoTargetCapGB} GB cap`;
+    const sizeOfTarget = (c: { bytes: number }) => `${gb(c.bytes)}, ${over}`;
+    targets.sort((a, b) => a.newest - b.newest || a.path.localeCompare(b.path));
+    const why = `with no cargo process and no write for ${settle} min (rebuildable)`;
+    const idle: { path: string; what: string; bytes: number; inc: number }[] = [];
+    for (const c of targets) {
       const busy = await cargoTargetBusy(c.path, session, o.procs, now - settle * 60_000, now);
       const no = busy ?? neverDelete(c.path, sessionRelaxed(session, relaxed(t))) ?? (await gitHolds(c.path, session));
-      if (no) {
-        // On every pass, not only a low one (w3471): an hourly pass lists no kept item, so a target over the cap that stays
-        // could not be told from a rule that never looked at it.
-        held.push({ path: c.path, bytes, why: `1 rebuildable cache(s) kept: ${size}, but ${no}` });
-        continue;
-      }
-      // Measured on BEAST (w3426, ffu main, a rebuild after an edit to ffu-sim): 30 s with the target whole, 52 s without
-      // debug/incremental, 173 s without debug/deps and incremental, 215 s without debug (a clean build: 213 s). So only
-      // incremental goes when that brings the target under the cap; otherwise the whole target, which costs about the same
-      // as losing deps and also drops release/ and the stale build-script output.
+      // On every pass, not only a low one (w3471): an hourly pass lists no kept item, so a target over the cap that stays
+      // could not be told from a rule that never looked at it.
+      if (no) held.push({ path: c.path, bytes: c.bytes, why: `1 rebuildable cache(s) kept: ${sizeOfTarget(c)}, but ${no}` });
+      else idle.push({ ...c, inc: await sizeOf(path.join(c.path, 'debug', 'incremental')) });
+    }
+    // Measured on BEAST (w3426, ffu main, a rebuild after an edit to ffu-sim): 30 s with the target whole, 52 s without
+    // debug/incremental, 173 s without debug/deps and incremental, 215 s without debug (a clean build: 213 s). So incremental
+    // goes first; a whole target goes only when the incremental caches cannot bring the worker under the cap, since losing
+    // deps costs about a clean build, which also drops release/ and the stale build-script output.
+    const trimmed = new Set<string>();
+    const all = idle.reduce((a, c) => a + c.inc, 0);
+    for (const c of idle) {
+      if (total <= capBytes || total - all > capBytes) break;
+      if (c.inc <= 0) continue;
       const incremental = path.join(c.path, 'debug', 'incremental');
-      const inc = await sizeOf(incremental);
-      const why = `with no cargo process and no write for ${settle} min (rebuildable)`;
-      if (inc > 0 && bytes - inc <= capBytes) items.set(incremental, { path: incremental, rule: 'cargo-target-cap', why: `the incremental cache of ${c.what} (${(inc / 1024 ** 3).toFixed(1)} GB of its ${size}), ${why}`, base: t, inSession: session });
-      else items.set(c.path, { path: c.path, rule: 'cargo-target-cap', why: `${c.what}, ${size}, ${why}`, base: t, inSession: session });
+      items.set(incremental, { path: incremental, rule: 'cargo-target-cap', why: `the incremental cache of ${c.what} (${gb(c.inc)} of its ${sizeOfTarget(c)}), ${why}`, base: t, inSession: session });
+      trimmed.add(c.path);
+      total -= c.inc;
+    }
+    for (const c of idle) {
+      if (total <= capBytes) break;
+      if (trimmed.has(c.path)) continue;
+      items.set(c.path, { path: c.path, rule: 'cargo-target-cap', why: `${c.what}, ${sizeOfTarget(c)}, ${why}`, base: t, inSession: session });
+      total -= c.bytes;
     }
   };
   const idleCaches = async (session: string, t: string) => {

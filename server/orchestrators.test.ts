@@ -9841,3 +9841,134 @@ test("w3606: a member's request, or a question waiting on a member, stays theirs
   assert.match((await call(loth.info, 'update_work', { id: 'w1', note: 'keep it' })).text, /w1's question waits on Cara, not on an owner: it stays theirs/);
   assert.deepEqual(store.work.get('w1')!.question!.for, [CARA]);
 });
+
+/** w3615: what toPeople sends each person, by userId. */
+function toldPeople(o: Orchestrators) {
+  const told: { to: string; text: string }[] = [];
+  const real = o.toPeople.bind(o);
+  o.toPeople = (people, text) => {
+    for (const p of people) told.push({ to: p.userId, text });
+    real(people, text);
+  };
+  return (userId: string) => told.filter((x) => x.to === userId).map((x) => x.text);
+}
+
+/** w3615: Ben's orchestrator relays request `id`'s question as a card of its own (ask_person about it). */
+function relayAsCard(env: ReturnType<typeof setup>, who: Requester, id: string, toolUseId: string) {
+  const { store, o, chat } = env;
+  store.onEvent = (sid, e) => o.observeAsk(sid, e);
+  const info = chat(who).info;
+  store.append(info.id, { kind: 'tool_use', toolUseId, name: 'mcp__sandboxes__ask_person', input: { question: `Is ${id} still needed now that what it waited on was cancelled?`, options: [{ label: `Yes, keep ${id} open`, description: '', recommended: true }, { label: `No, close ${id}`, description: '' }], request: id } });
+  store.append(info.id, { kind: 'tool_result', toolUseId, isError: false, text: 'Shown' });
+  return info;
+}
+
+test('w3615: w3533 as it happened: its blocker cancelled, the [needs you] question sent, a note outside Ben\'s turn, the dispatcher settles it as blocked on another request: Blocked, the question closed, Ben\'s card withdrawn and Ben told', async (t) => {
+  const env = setup(t);
+  const { store, agents, o, dispatcher, chat, call, heard } = env;
+  agentsRoom(agents, []);
+  // w1 stands for w3545 (the pair run cancelled as replaced), w2 for w3533 (Ben's), w3 for w3612 (the pair run replacing w1).
+  putRequests(store, [{ id: 'w1', status: 'active' }, { id: 'w2', by: BEN }, { id: 'w3', status: 'active' }]);
+  const blocked = await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'block', note: 'waits on the pair run', blocker: { kind: 'request', ref: 'w1', what: "w1's pair run report" } });
+  assert.equal(blocked.isError, false, blocked.text);
+  const watch = new BlockerWatch({ store, orchestrators: o });
+  store.work.get('w1')!.status = 'cancelled';
+  await watch.tick();
+  const w2 = store.work.get('w2')!;
+  assert.equal(w2.status, 'question');
+  const told = toldPeople(o);
+  const ben = chat(BEN).info;
+  await until('Ben gets the question as [needs you]', () => heard(ben.id, '[needs you]').length === 1);
+  relayAsCard(env, BEN, 'w2', 'a1');
+  assert.equal(ben.openAsks?.length, 1, "Ben's card is open");
+  const live = async () => (await call(dispatcher().info, 'list_work', { id: 'w2' })).text;
+  assert.match(await live(), /Waiting on input on Ben/);
+  // 08:27: Ben's note outside his own turn (his orchestrator relays lothsahn's word): it answers nothing (w3161).
+  const noted = await call(ben, 'update_work', { id: 'w2', note: 'Already decided by Lothsahn: wait on w3 instead of w1.' });
+  assert.equal(noted.isError, false, noted.text);
+  assert.ok(w2.question, 'the question stays open after a note outside his turn');
+  // The dispatcher settles it: blocked on w3's report.
+  const settled = await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'block', note: 'Settled by Lothsahn, whose word Ben defers to here.', blocker: { kind: 'request', ref: 'w3', what: "w3's pair run report (replaces w1)" } });
+  assert.equal(settled.isError, false, settled.text);
+  assert.equal(w2.status, 'blocked');
+  assert.equal(w2.question, undefined, 'the question is closed');
+  assert.equal(w2.needsYou?.answered?.by, 'the dispatcher', 'its [needs you] is answered');
+  assert.match(await live(), /Blocked on w3 finishing/);
+  assert.doesNotMatch(await live(), /Waiting on input/);
+  assert.equal(chat(BEN).info.openAsks, undefined, "Ben's card is withdrawn");
+  assert.deepEqual(decisionsOn([...store.work.values()].filter(isOpen), { userId: 'ben', displayName: 'Ben', reviewer: false }), [], 'nothing waits on Ben');
+  assert.match(w2.log.join('\n'), /settles the question that waited on Ben/);
+  assert.ok(told('ben').some((x) => /^\[dispatch\] w2 .*blocked on w3 finishing.*settles the question that waited on Ben.*their card about it is withdrawn/.test(x)), told('ben').join(' | '));
+});
+
+test('w3615: every decide_work action but ask settles a pending question, and so does a new worker started on it; a new ask does not', async (t) => {
+  const env = setup(t);
+  const { store, agents, dispatcher, chat, call } = env;
+  agentsRoom(agents, []);
+  const at = new Date(Date.now() - 60_000).toISOString();
+  const question = { text: 'Is it still needed?', at };
+  putRequests(store, ['w1', 'w2', 'w3', 'w4', 'w5', 'w6', 'w7'].map((id) => ({ id, by: BEN, status: 'question' as const, question })));
+  putRequests(store, [{ id: 'w9', status: 'active' }]);
+  for (const id of ['w1', 'w2', 'w3', 'w4', 'w5', 'w6', 'w7']) relayAsCard(env, BEN, id, `card-${id}`);
+  assert.equal(chat(BEN).info.openAsks?.length, 7);
+  const decide = (id: string, a: Record<string, unknown>) => call(dispatcher().info, 'decide_work', { id, note: 'decided', ...a });
+  const results = [
+    await decide('w1', { action: 'block', blocker: { kind: 'request', ref: 'w9', what: 'w9 first' } }),
+    await decide('w2', { action: 'queue' }),
+    await decide('w3', { action: 'merge', into: 'w9' }),
+    await decide('w4', { action: 'reject' }),
+    await decide('w5', { action: 'done' }),
+  ];
+  for (const r of results) assert.equal(r.isError, false, r.text);
+  // start_agent (and message_agent with work_id) on it: a new worker linked.
+  env.o.linkWorker('w7', { id: 'fresh-worker', title: 'w7: do it' }, 'started worker fresh-worker');
+  for (const id of ['w1', 'w2', 'w3', 'w4', 'w5', 'w7']) assert.equal(store.work.get(id)!.question, undefined, `${id}'s question is closed`);
+  assert.equal(store.work.get('w7')!.status, 'active');
+  // A new ask keeps a question open, and its card.
+  const again = await decide('w6', { action: 'ask', note: 'And what should it wait for?', questions: [{ question: 'What should w6 wait for now?', options: [{ label: 'Wait for w9 to finish first', recommended: true }, { label: 'Start it now without waiting' }] }] });
+  assert.equal(again.isError, false, again.text);
+  assert.ok(store.work.get('w6')!.question);
+  assert.deepEqual((chat(BEN).info.openAsks ?? []).map((a) => a.request), ['w6']);
+});
+
+test('w3615: a question one requester answers withdraws the card of the requester it was asked of, who is told', async (t) => {
+  const env = setup(t);
+  const { store, o, chat, call } = env;
+  const told = toldPeople(o);
+  putRequests(store, [{ id: 'w1', by: BEN, requesters: [BEN, LOTH], status: 'question', question: { text: 'Is w1 still needed?', at: new Date(Date.now() - 60_000).toISOString() } }]);
+  relayAsCard(env, BEN, 'w1', 'b1');
+  assert.equal(chat(BEN).info.openAsks?.length, 1);
+  chat(LOTH).lastFrom = 'human';
+  const r = await call(chat(LOTH).info, 'update_work', { id: 'w1', note: 'Yes, keep w1 open and start it now.' });
+  assert.equal(r.isError, false, r.text);
+  assert.equal(store.work.get('w1')!.question, undefined);
+  assert.equal(chat(BEN).info.openAsks, undefined, "Ben's card is withdrawn: Lothsahn answered it");
+  assert.match(store.work.get('w1')!.log.join(' '), /settles the question that waited on Ben/);
+  assert.ok(told('ben').some((x) => /settles the question that waited on Ben/.test(x)), told('ben').join(' | '));
+});
+
+test('w3615: at a boot, a question the dispatcher already settled with a block or a queue is closed, its card withdrawn and its person told; one asked after the decision stays', async (t) => {
+  const env = setup(t);
+  const { store, o, chat } = env;
+  const told = toldPeople(o);
+  const asked = new Date(Date.now() - 120_000).toISOString();
+  const decided = new Date(Date.now() - 60_000).toISOString();
+  putRequests(store, [
+    { id: 'w1', by: BEN, status: 'blocked', question: { text: 'Is w1 still needed?', at: asked }, blocked: { kind: 'request', ref: 'w9', what: 'w9 reporting', at: decided, by: 'dispatcher' } },
+    { id: 'w2', by: BEN, status: 'queued', question: { text: 'Is w2 still needed?', at: asked }, queuedFor: { at: decided } },
+    { id: 'w3', by: BEN, status: 'blocked', question: { text: 'Is w3 still needed?', at: decided }, blocked: { kind: 'request', ref: 'w9', what: 'w9 reporting', at: asked, by: 'dispatcher' } },
+    { id: 'w9', by: BEN, status: 'active' },
+  ]);
+  relayAsCard(env, BEN, 'w1', 'b1');
+  relayAsCard(env, BEN, 'w3', 'b3');
+  assert.equal(chat(BEN).info.openAsks?.length, 2);
+  assert.deepEqual(o.settleStaleQuestions().sort(), ['w1', 'w2']);
+  assert.equal(store.work.get('w1')!.question, undefined);
+  assert.equal(store.work.get('w2')!.question, undefined);
+  assert.equal(store.work.get('w1')!.status, 'blocked');
+  assert.equal(store.work.get('w3')!.question?.text, 'Is w3 still needed?', 'a question asked after the block still waits');
+  assert.deepEqual(chat(BEN).info.openAsks?.map((a) => a.request), ['w3']);
+  assert.match(store.work.get('w1')!.log.join(' '), /block at .* settled its question.*w3615 repair/);
+  assert.ok(told('ben').some((x) => /^\[dispatch\] w1 .*settled its question/.test(x)), told('ben').join(' | '));
+  assert.deepEqual(o.settleStaleQuestions(), [], 'a second boot finds nothing');
+});

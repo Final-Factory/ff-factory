@@ -1079,6 +1079,18 @@ without one means it is off or failing, worth a person's look.
   last (`unblock`, the dispatcher is told to resume it), stalls the request when any one is stuck (naming that gate) and
   asks the requester when any one closed without delivering (none is kept through the question). Blocked on shows all of
   them (`gatesName`).
+- **A question settled by anything but its person's answer ends for them too** (w3615; w3533 at 08:27 UTC: the dispatcher
+  blocked it on w3612 after its blocker w3545 was cancelled, and at 08:40 it still showed Waiting on input on Ben, his card
+  open). `Orchestrators.settleQuestion` closes the pending question (`w.question`), answers its `[needs you]` record, closes
+  the asked people's open ask_person cards about the request raised since it was asked, and the notice tells their
+  orchestrators it is settled. It runs on every `decide_work` action but `ask` (block, queue, merge, link, reject, done), on a
+  new worker started on the request (`linkWorker`), on an operator's FFBox answer (`answerFromFfbox`), and on a note by a
+  requester the question was not asked of in their own turn (update_work; the asked person's own answer was already handled).
+  The live state then follows what the request waits on now (`shared/workState.ts`: Waiting on input comes from
+  `w.question`).
+  At a boot, `settleStaleQuestions` (from `scheduleNeedsYouDigest`) closes the same way every open question left from
+  before the fix that the dispatcher's later block or queue already settled (`blocked.at` or `queuedFor.at` after
+  `question.at`), stamped `(w3615 repair)`; a question asked after the decision stays.
 - **A worker whose request waits only on other requests or PRs does not poll** (w754; w750's worker polled `gh pr view` every
   20 to 25 minutes with `wake_me`, and a pending check-in made the ledger say Working). Three parts:
   1. **The signal is structured**: the worker tool `blocked_on` ({requests?, prs?, what, request?}; `Agents.declareBlocked` →

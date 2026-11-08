@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { hasLocalWork, localRemotePath, localWorkWhy, norm } from './cleanup.ts';
+import { githubSlug, hasLocalWork, localRemotePath, localWorkWhy, norm, setGithubContains } from './cleanup.ts';
 import { FACTS_MAX_AGE_MS, factsProblem, gitKeeps, judgePath, judgeSession, judgeTiming, planFolders, renderFolders, type CleanupFacts } from './cleanupFolders.ts';
 import { ownersOf } from './resumable.ts';
 import { foldersMain, hostSessionsIn, installLeftoversShim, slotContext, slotPathOf } from '../machine/leftovers.ts';
@@ -312,6 +312,63 @@ test('w3180: commits a remote holds now are not "on no remote", though the clone
   git(viaUrl, 'add', '.');
   git(viaUrl, 'commit', '-q', '-m', 'y');
   assert.equal(await localWorkWhy(viaUrl), '1 commit on no remote', 'a commit no remote has still counts');
+});
+
+test('w3616: a single-branch clone whose PR branch was merged and deleted holds no work; a commit no remote has still does', async (t) => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'ffw-w3616-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5 }));
+  t.after(() => setGithubContains(undefined));
+  const remotes = path.join(base, 'remotes');
+  fs.mkdirSync(remotes);
+  const seed = pushedClone(remotes, path.join(base, 'seed', 'ff'));
+  const bare = execFileSync('git', ['-C', seed, 'remote', 'get-url', 'origin'], { encoding: 'utf8' }).trim();
+  const main = execFileSync('git', ['-C', seed, 'rev-parse', '--abbrev-ref', 'HEAD'], { encoding: 'utf8' }).trim();
+  // A worker's single-branch clone of the default branch: one commit, pushed to a PR branch its refs/remotes never map.
+  const worker = path.join(base, 'tmp', 'w2194-clone');
+  git(base, 'clone', '-q', '--single-branch', '--branch', main, bare, worker);
+  fs.writeFileSync(path.join(worker, 'doc.md'), 'docs\n');
+  git(worker, 'add', '.');
+  git(worker, 'commit', '-q', '-m', 'w2194 docs');
+  git(worker, 'push', '-q', 'origin', 'HEAD:refs/heads/pr');
+  assert.equal(execFileSync('git', ['-C', worker, 'for-each-ref', 'refs/remotes/origin/pr'], { encoding: 'utf8' }).trim(), '', 'no tracking ref for the PR branch');
+  assert.equal(await localWorkWhy(worker), undefined, 'pushed: the PR branch holds it');
+  // The PR merges (a merge commit the clone never fetches) and its branch is deleted.
+  git(seed, 'fetch', '-q', 'origin', 'pr');
+  git(seed, 'merge', '-q', '--no-ff', '-m', 'Merge pull request', 'FETCH_HEAD');
+  git(seed, 'push', '-q', 'origin', main);
+  git(seed, 'push', '-q', 'origin', '--delete', 'pr');
+  assert.equal(await localWorkWhy(worker), undefined, "merged: the commit is in the default branch's history");
+
+  // The same clone with a GitHub URL: GitHub's compare answers (ls-remote still reaches the bare repo by insteadOf).
+  git(worker, 'config', `url.${bare}.insteadOf`, 'https://github.com/Final-Factory/w3616.git');
+  git(worker, 'remote', 'set-url', 'origin', 'https://github.com/Final-Factory/w3616.git');
+  const head = execFileSync('git', ['-C', worker, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  const asked: string[] = [];
+  let answer: boolean | undefined = true;
+  setGithubContains(async (slug, sha) => (asked.push(`${slug} ${sha}`), answer));
+  assert.equal(await localWorkWhy(worker), undefined, 'GitHub says the default branch contains it');
+  assert.deepEqual(asked, [`Final-Factory/w3616 ${head}`]);
+  answer = undefined;
+  assert.equal(await localWorkWhy(worker), '1 commit on no remote', 'GitHub unreachable: kept (fail safe)');
+  answer = false;
+  assert.equal(await localWorkWhy(worker), '1 commit on no remote', 'not on the default branch: kept');
+  git(worker, 'remote', 'set-url', 'origin', bare);
+
+  // A commit truly on no remote still keeps it.
+  fs.writeFileSync(path.join(worker, 'more.md'), 'more\n');
+  git(worker, 'add', '.');
+  git(worker, 'commit', '-q', '-m', 'unpushed');
+  // Kept; the count still includes the merged commit, since the merge commit that holds it is not in this clone.
+  assert.match((await localWorkWhy(worker))!, /^2 commits on no remote$/, 'a commit no remote has still counts');
+});
+
+test('w3616: githubSlug reads GitHub remote URLs only', () => {
+  assert.equal(githubSlug('https://github.com/Final-Factory/FinalFactory.git'), 'Final-Factory/FinalFactory');
+  assert.equal(githubSlug('https://x-access-token@github.com/Final-Factory/ff-factory'), 'Final-Factory/ff-factory');
+  assert.equal(githubSlug('git@github.com:Final-Factory/ff.factory.git'), 'Final-Factory/ff.factory');
+  assert.equal(githubSlug('ssh://git@github.com/o/r.git'), 'o/r');
+  assert.equal(githubSlug('https://gitlab.com/o/r.git'), undefined);
+  assert.equal(githubSlug('F:/ffw/repo'), undefined);
 });
 
 test('w3180: localRemotePath tells a local remote from a network one', () => {
