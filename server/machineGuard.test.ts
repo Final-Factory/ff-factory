@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { MachineGuard, machineGuardConfig, type MachineGuardEffects, type MachineGuardPorts } from '../machine/hostGuard.ts';
+import { MachineGuard, machineGuardConfig, runnerRestartScript, type MachineGuardEffects, type MachineGuardPorts } from '../machine/hostGuard.ts';
 import { HostHealthMonitor, type HostDeps } from './hostHealth.ts';
 import { Store } from './store.ts';
 import { SessionManager, type SessionHandle } from './sessions.ts';
@@ -361,6 +361,73 @@ test("w1918: a wanted Dev Drive maximum waits while an agent or editor is in a s
   // No VHDX (a machine without a Dev Drive): never pending.
   const none = new MachineGuard(SETTINGS, 'F:/ffsb', fx2, ports);
   assert.equal(none.pendingGrow(), undefined);
+});
+
+test('w3721: a Dev Drive grow waits for a CI job on a runner on the drive, then starts again every listener it ended; runners on other drives are not its business', async () => {
+  // lothdesktop, 2026-11-08 20:33 UTC: "growing the Dev Drive from 300 to 320 GB" detached V: mid-job, and ffu-lothdesktop-1
+  // and -2 (V:\ffw\ffu-runners) stayed offline in GitHub until their scheduled tasks were started by hand.
+  const { w, fx, ports: base } = world();
+  const said: string[] = [];
+  const ports: MachineGuardPorts = { ...base, report: (title, text) => (w.reports.push(title), void said.push(text)) };
+  w.sessions = [];
+  w.sandboxes = [];
+  let state: Record<string, unknown> = { letter: 'F', maxGB: 80, wantGB: 112 };
+  let runners = [
+    { root: 'F:/ffsb/ffu-runners/ffu-1', busy: true },
+    { root: 'f:/ffsb/ffu-runners/ffu-2', busy: false },
+    { root: 'C:/Users/x/ffu-runner', busy: true },
+  ];
+  const restarted: string[] = [];
+  const fx2: MachineGuardEffects = {
+    ...fx,
+    readJson: () => state,
+    runners: async () => runners,
+    restartRunner: async (root) => {
+      restarted.push(root);
+      if (root.endsWith('ffu-2')) throw new Error('no scheduled task and no run.cmd');
+      return `scheduled task ${root.split('/').pop()}`;
+    },
+    runHelper: async (a) => {
+      w.log.push(`helper ${a}`);
+      state = { letter: 'F', maxGB: 112 };
+      runners = runners.filter((r) => r.root.startsWith('C')); // the detach ends what ran from F:
+      return { action: a, ok: true, at: new Date(w.now).toISOString(), detail: 'grew F: from 80 to 112 GB' };
+    },
+  };
+  const g = new MachineGuard({ ...SETTINGS, hostDiskPaths: ['C:/', 'D:/'], devDriveVhdx: 'D:/work/ffw/devdrive.vhdx', devDriveMaxGB: 80 }, String.raw`F:\ffsb`, fx2, ports);
+
+  // A job runs on ffu-1 (F:): it waits and names it; the busy runner on C: does not hold it.
+  await g.tick();
+  await g.tick();
+  assert.equal(w.log.filter((l) => l === 'helper grow').length, 0);
+  assert.equal(w.reports.filter((r) => r === 'Dev Drive: grow pending').length, 1);
+  assert.ok(said.some((l) => /once no CI job runs on a runner on the drive; 1 runner\(s\) \(ffu-1\)/.test(l)), said.join('\n'));
+
+  // The job ends: it grows, then starts both F: listeners again, says which one could not be, and leaves C:'s alone.
+  runners[0].busy = false;
+  await g.tick();
+  assert.equal(w.log.filter((l) => l === 'helper grow').length, 1);
+  assert.deepEqual(restarted, ['F:/ffsb/ffu-runners/ffu-1', 'f:/ffsb/ffu-runners/ffu-2']);
+  assert.ok(w.reports.includes('Dev Drive: CI runners still down'));
+  assert.ok(said.some((l) => /ffu-1: started again \(scheduled task ffu-1\); ffu-2: could not start it again \(no scheduled task/.test(l)), said.join('\n'));
+
+  // A listener that came back by itself is not started twice.
+  restarted.length = 0;
+  state = { letter: 'F', maxGB: 112, wantGB: 120 };
+  runners = [{ root: 'F:/ffsb/ffu-runners/ffu-1', busy: false }];
+  fx2.runHelper = async (a) => ({ action: a, ok: true, at: new Date(w.now).toISOString(), detail: 'grew' });
+  await g.tick();
+  assert.deepEqual(restarted, []);
+});
+
+test('w3721: the runner restart script starts the scheduled task naming the runner folder, else its run.cmd, and refuses a path it cannot quote', () => {
+  const s = runnerRestartScript('V:/ffw/ffu-runners/ffu-lothdesktop-1');
+  assert.match(s, /^\$root = 'V:\\ffw\\ffu-runners\\ffu-lothdesktop-1'$/m);
+  assert.ok(s.includes(String.raw`$re = [regex]::Escape($root) + '(?![\w.-])'`), 'ffu-lothdesktop-1 must not match ffu-lothdesktop-10');
+  assert.match(s, /Start-ScheduledTask -InputObject \$t/);
+  assert.match(s, /Start-Process -FilePath \(Join-Path \$root 'run\.cmd'\)/);
+  assert.throws(() => runnerRestartScript("V:/x'; Write-Host hi"), /not a runner folder/);
+  assert.throws(() => runnerRestartScript('/home/x/runner'), /not a runner folder/);
 });
 
 test("w3328: below the critical line a disk clean-up request's worker starts on the machine while an ordinary worker is still refused; under the 3 GB floor it waits too", async () => {

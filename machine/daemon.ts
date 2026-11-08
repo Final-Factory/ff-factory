@@ -613,6 +613,7 @@ export class Daemon {
     this.leftovers = new LeftoverReaper({
       platform,
       machineId: cfg.id,
+      ...(cfg.root ? { root: cfg.root } : {}),
       procs: real ? () => pd.procs() : async () => [],
       envOf: (pids) => readEnvs(platform, pids),
       inspect: realInspect(platform),
@@ -1158,7 +1159,7 @@ export class Daemon {
       log(`host guard: watching ${root} every ${s.pollSeconds} s (remount through ffsb-helper-mount), disks ${[root, ...s.hostDiskPaths].join(', ')}${s.reapBrowsersAfterHours > 0 ? `, reaping browsers over ${s.reapBrowsersAfterHours} h` : ''}`);
     };
     if (this.guardEffects) go(this.guardEffects);
-    else void realGuardEffects().then(go, (e) => log(`host guard: could not start: ${(e as Error).message}`));
+    else void realGuardEffects(this.procs).then(go, (e) => log(`host guard: could not start: ${(e as Error).message}`));
   }
 
   start() {

@@ -926,6 +926,12 @@ commands for the functionality needed ... But no way into machines"). The update
 hears "Dev Drive: grow pending" once, with who is there. While it grows, new agents and editors wait (`blockReason`), and the
 guard does not look at the drive, which is detached on purpose.
 
+The detach ends every process run from the drive, GitHub Actions runners included (w3721: LothDesktop's ffu-lothdesktop-1 and
+-2 live in `V:\ffw\ffu-runners`, and the 2026-11-08 20:33 UTC grow left both offline). So the grow also waits while a runner
+whose folder is on the drive runs a job, and afterwards starts again each such listener that was up before and is gone: the
+scheduled task whose action names the runner folder, else its `run.cmd` (`runnerRestartScript`). The portal hears "Dev Drive:
+CI runners started again", or "... still down" with the reason.
+
 The grow is the SYSTEM task `ffsb-helper-grow` (`scripts/privileged/ffsb-helper.ps1` `grow`), with fixed arguments like the
 other helpers. It reads only `wantGB` from the state file and refuses a size that is smaller (ReFS cannot shrink), larger than
 the volume that holds the VHDX, or wanted while a Unity editor uses the drive. It detaches the VHDX (`diskpart expand vdisk`
