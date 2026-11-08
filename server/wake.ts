@@ -13,6 +13,8 @@ interface WakeRecord {
   note: string;
   /** The request whose gates' clearing this wake resumes (w1128): it is not delivered once that request is blocked again. */
   resumeOf?: string;
+  /** w3715: why it fires before its time (fireEarly), said in its message. */
+  early?: string;
 }
 
 /** Tries to deliver a wake whose session could not be started (the agent limit, the host guard): once a minute. */
@@ -64,6 +66,17 @@ export class Waker {
     clearTimeout(t.timer);
     this.timers.delete(sessionId);
     this.save();
+    return true;
+  }
+
+  /**
+   * w3715: fire a pending wake now, saying why (an idle bench holder whose job let its ticket go: lothsahn, "its wake is due
+   * when its background job ends, not on a fixed timer"). False when none is pending.
+   */
+  fireEarly(sessionId: string, why: string): boolean {
+    const t = this.timers.get(sessionId);
+    if (!t || t.at <= this.now()) return false;
+    this.arm(sessionId, { at: t.at, note: t.note, early: why, ...(t.resumeOf ? { resumeOf: t.resumeOf } : {}) }, 0, 0);
     return true;
   }
 
@@ -128,11 +141,12 @@ export class Waker {
     if (!t || !this.sessions.sessions.has(sessionId)) return void this.save();
     const late = Math.round((this.now() - t.at) / 60_000);
     const when = late >= 2 ? ` (${late} min late: FF Factory was restarting)` : '';
+    const head = t.early ? `Woken early: ${t.early} (it was due at ${new Date(t.at).toISOString().slice(11, 16)}Z)` : `Time is up${when}`;
     try {
-      this.sessions.send(sessionId, `[wake_me] Time is up${when}. Your note: ${t.note || '(none)'}`, 'system', undefined, { ops: 'wake', ...(t.resumeOf ? { resumeOf: { work: t.resumeOf, note: t.note } } : {}) });
+      this.sessions.send(sessionId, `[wake_me] ${head}. Your note: ${t.note || '(none)'}`, 'system', undefined, { ops: 'wake', ...(t.resumeOf ? { resumeOf: { work: t.resumeOf, note: t.note } } : {}) });
     } catch (e) {
       // At the agent limit, the host guard says wait, or its machine is offline: try again in a minute, a few times.
-      if (tries < RETRIES) return this.arm(sessionId, { at: t.at, note: t.note, ...(t.resumeOf ? { resumeOf: t.resumeOf } : {}) }, tries + 1, 60_000);
+      if (tries < RETRIES) return this.arm(sessionId, { at: t.at, note: t.note, ...(t.early ? { early: t.early } : {}), ...(t.resumeOf ? { resumeOf: t.resumeOf } : {}) }, tries + 1, 60_000);
       this.store.append(sessionId, { kind: 'system', text: `wake_me could not wake this session: ${(e as Error).message}` });
     }
     this.save();

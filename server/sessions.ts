@@ -1221,6 +1221,8 @@ export class SessionManager {
    * gate's resume, or any later message, unparks it). Set by Agents.
    */
   poolWait?: (s: SessionHandle) => string | undefined;
+  /** w3715: whether this worker's own work holds a bench ticket now (Agents.benchHeld): it waits for no free running slot. */
+  benchHolder?: (s: SessionHandle) => boolean;
   /**
    * Why a message to this orchestrator must wait for its automatic compaction (w1749: one runs, or a retry is owed), or
    * undefined. Set by AutoCompactor. Checked before anything else may start its process. `incoming`: a message sent now
@@ -1365,6 +1367,8 @@ export class SessionManager {
   /** Why a message to this session must wait for a free running slot, or undefined (it may go now). */
   private fullFor(s: SessionHandle): string | undefined {
     if (s.info.kind === 'orchestrator' || s.info.kind === 'ops' || isMidTurn(s.info)) return undefined;
+    // w3715: a bench holder finishes and lets its ticket go rather than wait for a slot behind workers its ticket holds back
+    if (this.benchHolder?.(s)) return undefined;
     return s.info.machineId ? this.placeFull?.(s) : undefined;
   }
 

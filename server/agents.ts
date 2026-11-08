@@ -115,7 +115,8 @@ import { statsLine, systemStats } from './system.ts';
 import { commandLine, launchIndependent, run } from './proc.ts';
 import { type HostHealthMonitor } from './hostHealth.ts';
 import { describeCleanup, describeCleanupItems, describeCleanupLog } from './cleanup.ts';
-import type { BuildHold, HostHealth, TimedVerdict } from '../shared/types.ts';
+import type { BenchTicketGlance, BuildHold, HostHealth, TimedVerdict } from '../shared/types.ts';
+import { workerTickets } from './benchHolders.ts';
 import { PLAYERS_IN_SANDBOX } from './cloneGuard.ts';
 import { decideTimedPlace, fleetLoad, isSmallTimed, smallTimedStates, timedAskMark, unavailableWait, TIMED_VERDICT_MS, TIMED_WAIT_IDLE_MIN } from './timedAsk.ts';
 import { machinePinOf, pinFromText, pinRefusal, type MachinePin } from './machinePin.ts';
@@ -819,6 +820,7 @@ export class Agents {
     sessions.staleResume = (work, sid, note) => this.orchestrators?.staleResume(work, sid, note);
     sessions.poolBlock = (s, why, next) => this.poolBlock(s, why, next);
     sessions.poolWait = (s) => this.poolWait(s.info);
+    sessions.benchHolder = (s) => this.benchHeld(s.info).length > 0;
     // The coordinators' routine turns on the routine model, a person's on their own (w1158, server/turnModel.ts).
     const turnModels = new TurnModels(() => this.cfg);
     sessions.turnModel = (info, from, text, opens) => turnModels.pick(info, from, text, opens);
@@ -1307,6 +1309,8 @@ export class Agents {
    * usage limit. When that gate clears (the pool serves, or the hold's end) its message goes again, placed like any released worker.
    */
   private poolWait(i: SessionInfo): string | undefined {
+    // w3715: a bench holder is not parked on its pool's usage limit: it finishes and lets the ticket go
+    if (this.benchHeld(i).length) return undefined;
     const now = Date.now();
     for (const w of this.workOf(i.id)) {
       if (!isWith(w, i.id) || w.status !== 'blocked' || !w.blocked) continue;
@@ -3171,7 +3175,17 @@ export class Agents {
     // w1863: a hold that names requests it lets through resumes their workers (lothsahn: "stop all work on LothDesktop
     // except w1785 until it's done"; at 15:15 the hold kept for w1785 queued a message to w1785's own worker).
     const mine = [...this.store.work.values()].filter((w) => isOpen(w) && w.sessionIds.includes(i.id)).map((w) => w.id);
-    return holdReason(i.machineId, this.placement(false), mine) ?? this.builds.resumeHold(i);
+    const why = holdReason(i.machineId, this.placement(false), mine) ?? this.builds.resumeHold(i);
+    // w3715: a worker whose own work holds a bench ticket there goes on through any hold until it lets go (lothsahn: "make
+    // sure stuff holding locks can continue doing stuff"): its messages, wakes and bench warnings reach it, so it can finish
+    // and release. Not a pause: that ends its processes, and with them the ticket (machine/pauseStop.ts).
+    if (why && this.benchHeld(i).length && !holdReason(i.machineId, { hold: pauseHolds(this.store.machines.values()) })) return undefined;
+    return why;
+  }
+
+  /** w3715: the granted bench tickets this worker's own work holds on its machine, from its daemon's last report (server/benchHolders.ts). */
+  benchHeld(i: SessionInfo): BenchTicketGlance[] {
+    return i.kind === 'worker' && i.machineId ? workerTickets(this.machines.statsOf(i.machineId)?.bench, i.id) : [];
   }
 
   /**

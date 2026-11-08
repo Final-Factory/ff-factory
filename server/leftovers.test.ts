@@ -375,6 +375,26 @@ test('sessionVerdict: live keeps; a done worker 2 min, a waited-for one 10 min, 
   assert.equal(sessionVerdict({ live: false, resumable: true, stoppedSince: now - 5 * HOUR, wakeAt: now - 10 * MIN, now }).end, true);
 });
 
+test('sessionVerdict (w3715): a stopped worker that holds a bench ticket loses its check-in grace; a live one keeps it', () => {
+  const now = 100 * HOUR;
+  const far = { wakeAt: now + 5 * HOUR, resumable: true };
+  // a stopped holder with a far check-in ends DONE_GRACE after it stopped
+  const kept = sessionVerdict({ live: false, ...far, holdsTicket: true, stoppedSince: now - LEFTOVER.DONE_GRACE_MS + 1, now });
+  assert.equal(kept.end, false);
+  assert.equal(kept.until, now + 1);
+  assert.match(kept.why, /holds bench ticket\(s\)/);
+  const ended = sessionVerdict({ live: false, ...far, holdsTicket: true, stoppedSince: now - LEFTOVER.DONE_GRACE_MS, now });
+  assert.equal(ended.end, true);
+  assert.match(ended.why, /holds bench ticket\(s\)/);
+  // without a ticket the check-in still keeps it, and so does a waiting request
+  const woken = sessionVerdict({ live: false, ...far, holdsTicket: false, stoppedSince: now - HOUR, now });
+  assert.equal(woken.end, false);
+  assert.match(woken.why, /its check-in comes due at/);
+  assert.equal(sessionVerdict({ live: false, ...far, stoppedSince: now - HOUR, now }).end, false);
+  // a live holder is kept
+  assert.equal(sessionVerdict({ live: true, ...far, holdsTicket: true, stoppedSince: now - 5 * HOUR, now }).end, false);
+});
+
 test('kinds, slots, temp paths and environments as each platform writes them', () => {
   const none = new Set<number>();
   assert.equal(kindOf({ pid: 1, ppid: 0, cmd: player('slot1-1') }, 'linux', none), 'player');

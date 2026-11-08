@@ -332,3 +332,42 @@ test('w2785: a token at its own weekly cap (vault-ben-3 at 90%) gets no new work
   assert.match(resume('w-after').account, /vault-ben-3/, 'after its reset vault-ben-3 takes new work again');
   assert.equal(unusable(KEY3), undefined, 'after the reset it is usable again');
 });
+
+// ---------------------------------------------------------------- w3715: a bench holder goes on through a hold
+
+// lothsahn, 2026-11-08: "make sure stuff holding locks can continue doing stuff". On LothDesktop w3536's worker held the
+// exclusive bench ticket for over an hour while placement.hold queued its messages ("lothdesktop is on hold ...").
+const benchOn = (agents: Agents, machineId: string, running: { ticket: string; session: string; what: string }[]) =>
+  (agents as unknown as { machines: { stats: Map<string, unknown> } }).machines.stats.set(machineId, {
+    bench: { mode: 'exclusive', running: running.map((r) => ({ mode: 'exclusive', ...r })), runningCount: running.length, waiting: 0 },
+  });
+
+test('w3715: an idle worker whose own work holds a bench ticket on a held computer gets its messages and its check-in at once', (t) => {
+  const { sessions, agents, add, store } = world(t, { hold: HOLD });
+  const h = add(info('holder01', { machineId: 'm5', status: 'idle', account: KEY2 }));
+  benchOn(agents, 'm5', [{ ticket: 't00000042', session: 'holder01', what: 'probe A/B leg 3' }]);
+  sessions.send('holder01', 'Bench lock warning: your ticket ends soon', 'system');
+  assert.equal(h.sent.length, 1, 'the holder is not held: it can finish and let go');
+  const waker = new Waker(sessions, store);
+  waker.schedule('holder01', 1, 'read the probe');
+  (waker as unknown as { fire(id: string, tries: number): void }).fire('holder01', 0);
+  assert.equal(h.sent.length, 2, 'its check-in reaches it through the hold');
+  assert.equal(sessions.queued().length, 0);
+  // Its ticket gone: the hold holds it again like anyone.
+  benchOn(agents, 'm5', []);
+  sessions.send('holder01', 'resume', 'system');
+  assert.equal(h.sent.length, 2);
+  assert.match(sessions.queued()[0].why, /m5 is on hold/);
+});
+
+test("w3715: a ticket the harness holds in a worker's name (a timed_run leg, an editor) does not let it through a hold", (t) => {
+  const { sessions, agents, add } = world(t, { hold: HOLD });
+  const w = add(info('timed001', { machineId: 'm5', status: 'idle', account: KEY2 }));
+  benchOn(agents, 'm5', [
+    { ticket: 't00000043', session: 'timed001', what: 'timed run tr-12: fps A/B' },
+    { ticket: 't00000044', session: 'editor:slot1', what: 'running editor slot1' },
+  ]);
+  sessions.send('timed001', 'resume', 'system');
+  assert.equal(w.sent.length, 0, 'the daemon ends a timed run itself; its worker waits like anyone');
+  assert.match(sessions.queued()[0].why, /m5 is on hold/);
+});
