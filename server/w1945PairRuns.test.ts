@@ -15,7 +15,8 @@ const NOW = Date.parse('2026-10-23T23:00:00.000Z');
 const item = (id: string, extra: Partial<WorkItem> = {}): WorkItem => ({
   id,
   title: 'Pair run for w665: MP-lowore-pin-pair on PR #2340',
-  brief: 'Run MP-lowore-pin-pair on branch w665-lowore-pin-no-collider.',
+  // w3697: its peers spread over the legs (a pair lab), so a Mac may host it; legs that each run host and client take no Mac.
+  brief: 'Run MP-lowore-pin-pair on branch w665-lowore-pin-no-collider with --lab scripts/nightly/lab.pair-m3-beast.json.',
   priority: 'urgent',
   keys: [],
   requestedBy: BEN,

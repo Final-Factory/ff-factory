@@ -52,7 +52,7 @@ import { autoApproveProblem, cleanBlock, cleanLine, crashFacts, crashKinship, cr
 import { readDiscordConfig } from './discordConfig.ts';
 import { LIMIT_END, doneIdsIn, doneProblem, legDoneIdsIn, learnedProblem, supersededIn, reportProblem, mergedMentionsIn, notDoneReason, pausedIn, reportVerdict, stillOpenIn, toolErrors, turnEvidence, turnTroubleOf, type TurnTrouble } from './ledgerRules.ts';
 import { aheadText, answerAfter, asksAPerson, dispatcherAskIn, handUpsPending, holdsOf, orchestratorAskIn, standingTargetOf, personWaitIn, questionShareKey, reportWaitKey, roomShares, servedBy, UNDECIDED_BOUND_MS, unfiledFollowUpsIn } from '../shared/workState.ts';
-import { capacityBlockProblem, capacityWaitIn, needsOf, needsTimed, pairRoom, pairText, PAIR_MAX_LEGS, resolveNeeds, steamShortIn } from '../shared/capacity.ts';
+import { capacityBlockProblem, capacityWaitIn, macRefusedScenario, MAC_REFUSES_SCENARIO, needsOf, needsTimed, pairRoom, pairText, PAIR_MAX_LEGS, resolveNeeds, steamShortIn } from '../shared/capacity.ts';
 import { mentionsSteam, saysNoSteam, STEAM_NONE, STEAM_READ } from '../shared/steam.ts';
 import { mentionsMenus, MENUS_NONE, MENUS_READ, saysNone } from '../shared/desktop.ts';
 import type { HandBack } from './machinePause.ts';
@@ -4659,7 +4659,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       if (open) this.supersedePair(open, p, spent!);
       head = open
         ? `${open.id} (${spent}) is cancelled, and its legs no longer count for ${w.id}: filed ${p.id}, a retry, ${pairText(p.pair!)}, with fresh legs. Only ${p.id}'s report resumes you, never one from ${open.id}'s legs. The dispatcher starts its legs together, one new worker on each computer, as soon as that many computers have room at once.`
-        : `Filed ${p.id}, ${pairText(p.pair!)}, for ${w.id}. The dispatcher starts its legs together, one new worker on each computer, as soon as that many computers have room at once; each leg's first message says which leg it is and where the others are.`;
+        : `Filed ${p.id}, ${pairText(p.pair!)}${macRefusedScenario(p) ? `, no leg on a Mac (each leg starts ${macRefusedScenario(p)}'s host and client on its own computer; w3697)` : ''}, for ${w.id}. The dispatcher starts its legs together, one new worker on each computer, as soon as that many computers have room at once; each leg's first message says which leg it is and where the others are.`;
     }
     // w2459: too few computers signed in to different Steam accounts for it: the pair run is Blocked on that, not Queued.
     const steamShort = !p.pair?.started && p.status !== 'blocked' ? this.steamShortOf(p.pair) : undefined;
@@ -5223,6 +5223,9 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       asks: 0,
       log: [],
     };
+    // w3697: legs that each start an MP scenario's host and client go on no Mac, which the brief says beside pairText's rule.
+    const mp = macRefusedScenario(p);
+    if (mp) p.brief = clip(`${brief} No leg goes on a Mac (w3697): each leg starts ${mp}'s host and its client on its own computer, and ${MAC_REFUSES_SCENARIO}.`, 8000);
     // The request it is for is no repeat of it (its worker waits on it).
     p.overlaps = findOverlaps({ keys: p.keys, title: p.title }, this.pool(p.id)).filter((o) => o.ref !== w.id);
     this.stamp(p, `filed by FF Factory for worker ${sessionId} on ${w.id} (w1945 request_pair): ${pairText(pair)}; counts against no limit`);
