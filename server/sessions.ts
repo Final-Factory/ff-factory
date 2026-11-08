@@ -17,6 +17,7 @@ import { ContextMeter, IMAGE_CHARS, MIN_BASE, carriedTotals, type Cumulative, ty
 import type { MeterStates } from './meterStates.ts';
 import { CliTranscriptTail, cliTranscriptPath, rebuildMeter } from './cliTranscript.ts';
 import { refreshKeptTools, sdkToolsNow } from './keptTools.ts';
+import { tempSizeHook } from './tempSizeHook.ts';
 
 /** A session is mid-turn: working, starting or waiting for a permission answer. Only these count toward the agent limits (w384). */
 export const MID_TURN: ReadonlySet<SessionInfo['status']> = new Set(['running', 'starting', 'waiting_permission']);
@@ -633,6 +634,12 @@ export class AgentSession implements SessionHandle {
       env: { ...(base.env ?? process.env), CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: '1', GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' },
     };
     this.tempDir = typeof options.env?.TMPDIR === 'string' ? options.env.TMPDIR : undefined;
+    // w3686: a worker watches its own temp folder (server/tempSizeHook.ts), beside the PostToolUse hooks the options already carry
+    // (the read-chain nudge). Its 'tempSize' signal reaches the portal's ledger the way 'rateLimit' does (machine/agentHost.ts SIGNALS).
+    if (this.info.kind === 'worker' && this.tempDir && /^ffa-/i.test(path.basename(this.tempDir))) {
+      const watch = tempSizeHook(this.tempDir, ({ total, biggest, step }) => this.events.emit('tempSize', this, { total, biggest, step }));
+      options.hooks = { ...options.hooks, PostToolUse: [...(options.hooks?.PostToolUse ?? []), { hooks: [watch] }] };
+    }
     this.costBase = this.info.costUsd;
     // The conversation goes on in a new process (w1484): its history stays in its categories when its tally was kept, or is rebuilt
     // from Claude Code's transcript when it was not (w1556). From here on the transcript's new lines say what the stream does not.
@@ -1143,7 +1150,8 @@ export class SessionManager {
   /**
    * 'turnEnd' (session, text, TurnEndMeta) and 'permission' (session, pending) — the orchestrator listens;
    * 'result' (session, subtype) after every turn result and 'ended' (session) when the process
-   * goes away — standing agents track their runs with these.
+   * goes away — standing agents track their runs with these; 'tempSize' (session, { total, biggest, step }) when a worker's
+   * temp folder is over its threshold (w3686, server/tempSizeHook.ts).
    */
   readonly events = new EventEmitter();
   private readonly cfg: Config;
