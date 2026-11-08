@@ -4678,6 +4678,8 @@ When a person asked for a design or an analysis (a profile, an investigation, a 
         denyToolPrefixes: ['mcp__ffsb__'],
         // w896: a worker deletes only inside the machine's worker install folder (server/rootFence.ts).
         ...(m.root ? { workerRoot: m.root } : {}),
+        // w3670: it reads the daemon's logs and other non-secret files in that protected folder (server/daemonReads.ts).
+        daemonReads: { dir: appDirOf(m), ...(m.root ? { root: m.root } : {}) },
         // w936: a request of this worker's was granted work in the machine's main clone (an older daemon ignores it).
         ...(clone ? { mainClone: { path: clone.path, requests: clone.requests } } : {}),
       },
