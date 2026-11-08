@@ -74,6 +74,24 @@ export const MAX_TTS_CHARS = 1000;
 export interface TranscribeRequest {
   /** Base64 of a 16-bit PCM mono WAV, 16 kHz. */
   audio: string;
+  /**
+   * A live pass while the user still talks (w3712): a few seconds of the clip, whose text shows in the box until the
+   * final pass replaces it. Not logged, not kept, and not the "last transcription" in Settings.
+   */
+  partial?: boolean;
+  /** On the final pass: how the live passes of this dictation went, measured in the page; the server logs it. */
+  live?: LiveStats;
+}
+
+/** The live passes of one dictation (w3712), measured in the page. */
+export interface LiveStats {
+  /** Live passes answered. */
+  passes: number;
+  /** Their round trips, page to page: median and slowest, ms. */
+  medianMs: number;
+  maxMs: number;
+  /** From the mic opening to the first words in the box, ms (absent: no words before the stop). */
+  firstTextMs?: number;
 }
 
 export interface TranscribeResult {

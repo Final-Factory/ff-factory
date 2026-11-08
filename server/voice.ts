@@ -12,7 +12,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import type { Config } from './config.ts';
 import { TTS_WORKER, WORKER, modelDir, setupNeeded, setupRunning, setupVoice, voicePaths } from './voiceSetup.ts';
-import { wavSeconds, type LastTranscription, type RemoteVoiceStatus, type TranscribeResult, type TtsStatus, type VoiceStatus } from '../shared/voice.ts';
+import { wavSeconds, type LastTranscription, type LiveStats, type RemoteVoiceStatus, type TranscribeResult, type TtsStatus, type VoiceStatus } from '../shared/voice.ts';
 
 const REQUEST_TIMEOUT_MS = 120_000;
 const LOAD_TIMEOUT_MS = 180_000;
@@ -208,7 +208,7 @@ export class PyWorker {
 export interface RemoteVoice {
   /** The online machines that offer it, those in `order` first. */
   machines(order: string[]): { machine: string; status: RemoteVoiceStatus }[];
-  transcribe(machine: string, req: { audio: string; prompt?: string; language?: string | null }, timeoutMs: number): Promise<{ text?: string; audioSeconds?: number; seconds?: number; model?: string; device?: string; loadSeconds?: number }>;
+  transcribe(machine: string, req: { audio: string; prompt?: string; language?: string | null; fast?: boolean }, timeoutMs: number): Promise<{ text?: string; audioSeconds?: number; seconds?: number; model?: string; device?: string; loadSeconds?: number }>;
   warm(machine: string): void;
 }
 
@@ -347,37 +347,47 @@ export class VoiceService {
    * A clip to text: on a worker machine's GPU when one offers it (w615), else, or when it fails or is too slow, on this
    * portal's own Whisper. The result says which answered and why it fell back. Never logs the audio or the text.
    */
-  async transcribe(wav: Buffer): Promise<TranscribeResult> {
+  async transcribe(wav: Buffer, opts: { partial?: boolean; live?: LiveStats } = {}): Promise<TranscribeResult> {
     const t0 = Date.now();
-    if (this.v.keepAudio) this.keep(wav, t0);
+    const partial = !!opts.partial;
+    if (this.v.keepAudio && !partial) this.keep(wav, t0);
     const audio = wav.toString('base64');
     const prompt = this.prompt();
     const language = this.v.language || null;
     const clip = wavSeconds(wav) ?? 0;
+    // A live pass decodes greedily: one clip that ends mid-word took the CPU worker 6-7 s with beam 5 and its temperature
+    // retries, against 0.5 s for the clips either side (measured, w3712).
+    const fast = partial ? { fast: true } : {};
     let fallback: string | undefined;
     const r = this.remotePick();
     if (r && remoteUsable(r.status)) {
       const timeoutMs = 1000 * this.v.remote.timeoutSeconds;
       try {
-        const a = await this.remote!.transcribe(r.machine, { audio, prompt, language }, timeoutMs);
-        return this.done(t0, { text: String(a.text ?? ''), audioSeconds: Number(a.audioSeconds ?? clip), seconds: Number(a.seconds ?? 0), model: a.model ?? r.status.model, device: a.device ?? '?', engine: 'remote', machine: r.machine });
+        const a = await this.remote!.transcribe(r.machine, { audio, prompt, language, ...fast }, timeoutMs);
+        return this.done(t0, opts, { text: String(a.text ?? ''), audioSeconds: Number(a.audioSeconds ?? clip), seconds: Number(a.seconds ?? 0), model: a.model ?? r.status.model, device: a.device ?? '?', engine: 'remote', machine: r.machine });
       } catch (e) {
         fallback = `${r.machine}: ${(e as Error).message}`.slice(0, 300);
       }
     } else if (r) fallback = `${r.machine}: Whisper ${r.status.vramShort ? 'waiting for free VRAM' : r.status.state}${r.status.detail ? ` (${r.status.detail})` : ''}`.slice(0, 300);
     const s = this.localStatus();
     if (s.state === 'unavailable' || s.state === 'installing') throw new Error(`${fallback ? `${fallback}; and ` : ''}local Whisper is ${s.state}${s.detail ? `: ${s.detail}` : ''}`);
-    const l = await this.stt.request({ audio, prompt, language });
-    return this.done(t0, { text: String(l.text ?? ''), audioSeconds: Number(l.audioSeconds ?? 0), seconds: Number(l.seconds ?? 0), model: this.v.model, device: this.stt.device ?? '?', engine: 'local', ...(fallback ? { fallback } : {}) });
+    const l = await this.stt.request({ audio, prompt, language, ...fast });
+    return this.done(t0, opts, { text: String(l.text ?? ''), audioSeconds: Number(l.audioSeconds ?? 0), seconds: Number(l.seconds ?? 0), model: this.v.model, device: this.stt.device ?? '?', engine: 'local', ...(fallback ? { fallback } : {}) });
   }
 
-  /** Finish a result: total time, the last-clip record and one log line (which engine, how long; never the words). */
-  private done(t0: number, r: Omit<TranscribeResult, 'totalSeconds'>): TranscribeResult {
+  /**
+   * Finish a result: total time, the last-clip record and one log line (which engine, how long; never the words). A live
+   * pass (w3712) only gets its time: the final pass's line carries how the dictation's live passes went.
+   */
+  private done(t0: number, opts: { partial?: boolean; live?: LiveStats }, r: Omit<TranscribeResult, 'totalSeconds'>): TranscribeResult {
     const res: TranscribeResult = { ...r, totalSeconds: (Date.now() - t0) / 1000 };
+    if (opts.partial) return res;
+    const l = opts.live;
+    const live = l ? `; live: ${l.passes} passes, round trip median ${(l.medianMs / 1000).toFixed(2)} s, slowest ${(l.maxMs / 1000).toFixed(2)} s, first words ${l.firstTextMs === undefined ? 'none' : `${(l.firstTextMs / 1000).toFixed(2)} s`} after the mic opened` : '';
     if (this.v.keepAudio) this.keep(Buffer.from(res.text, 'utf8'), t0, '.txt');
     this.last = { at: new Date().toISOString(), engine: res.engine, ...(res.machine ? { machine: res.machine } : {}), model: res.model, device: res.device, audioSeconds: res.audioSeconds, totalSeconds: res.totalSeconds, ...(res.fallback ? { fallback: res.fallback } : {}) };
     const who = res.engine === 'remote' ? `${res.machine} ${res.device}` : `the portal's ${res.device}`;
-    console.log(`[voice] ${res.audioSeconds.toFixed(1)} s clip: ${who} ${res.model}, model ${res.seconds.toFixed(2)} s, total ${res.totalSeconds.toFixed(2)} s${res.fallback ? ` (fallback: ${res.fallback})` : ''}`);
+    console.log(`[voice] ${res.audioSeconds.toFixed(1)} s clip: ${who} ${res.model}, model ${res.seconds.toFixed(2)} s, total ${res.totalSeconds.toFixed(2)} s${res.fallback ? ` (fallback: ${res.fallback})` : ''}${live}`);
     return res;
   }
 

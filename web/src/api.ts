@@ -33,7 +33,7 @@ import type {
   VaultView,
   WorkPriority,
 } from '../../shared/types';
-import type { TranscribeResult, VoiceStatus } from '../../shared/voice';
+import type { TranscribeRequest, TranscribeResult, VoiceStatus } from '../../shared/voice';
 import type { SpendReportReply, SpendRequestReply, SpendSummaryReply } from '../../shared/spend';
 
 export class UnauthorizedError extends Error {
@@ -261,7 +261,7 @@ export const api = {
   },
   voiceInstall: () => request<VoiceStatus>('POST', '/api/voice/install'),
   /** `audio`: base64 of a 16 kHz mono 16-bit WAV. */
-  voiceTranscribe: (audio: string) => request<TranscribeResult>('POST', '/api/voice/transcribe', { audio }),
+  voiceTranscribe: (audio: string, opts: Omit<TranscribeRequest, 'audio'> = {}) => request<TranscribeResult>('POST', '/api/voice/transcribe', { audio, ...opts }),
   decideDelegation: (id: string, approve: boolean, note?: string) =>
     request<DelegationRequest>('POST', `/api/delegations/${enc(id)}/${approve ? 'approve' : 'reject'}`, { note }),
   /** "Start now" (w527): approves a pending one, and asks the dispatcher to start its ledger request ahead of the queue. */

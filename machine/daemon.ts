@@ -2717,7 +2717,7 @@ export class Daemon {
           this.send({ type: 'transcribe_result', id, ok: false, error: 'Whisper is off on this machine (daemon.json voice.enabled)' });
           return;
         }
-        this.voice.transcribe({ audio: msg.audio, prompt: msg.prompt, language: msg.language }).then(
+        this.voice.transcribe({ audio: msg.audio, prompt: msg.prompt, language: msg.language, fast: msg.fast === true }).then(
           (r) => this.send({ type: 'transcribe_result', id, ok: true, ...r }),
           (e) => this.send({ type: 'transcribe_result', id, ok: false, error: (e as Error).message.slice(0, 300) }),
         );

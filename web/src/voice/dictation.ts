@@ -3,13 +3,17 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from '
 import type { KeyboardEvent as ReactKeyboardEvent } from 'react';
 import {
   MAX_DICTATION_SECONDS,
+  VOICE_RATE,
   chooseEngine,
+  encodeWav,
   isEmptyTranscript,
   micErrorMessage,
   type VoiceEngine,
   type VoiceEnginePref,
+  type LiveStats,
   type VoiceStatus,
 } from '../../../shared/voice';
+import { LIVE, joinLive, liveStats, nextLivePass } from '../../../shared/liveTranscript';
 import { api } from '../api';
 import { EndpointDetector } from '../../../shared/vad';
 import { toast } from '../store';
@@ -167,7 +171,16 @@ export const SHORTCUT_LABEL = 'Ctrl+M';
 
 const isIphone = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 
-export function useDictation(onText: (text: string, opts: { autoSend: boolean }) => void): Dictation {
+/**
+ * Where the words go while the user still talks (w3712): `show` puts the text so far in the box, replacing the last; the
+ * final transcript (onText) replaces it in turn; `end` drops it (keep false: cancelled, nothing heard) or leaves it.
+ */
+export interface LiveSink {
+  show(text: string): void;
+  end(keep: boolean): void;
+}
+
+export function useDictation(onText: (text: string, opts: { autoSend: boolean }) => void, live?: LiveSink): Dictation {
   const [phase, setPhase] = useState<DictationPhase>('idle');
   const [engine, setEngine] = useState<VoiceEngine>();
   const [elapsedMs, setElapsed] = useState(0);
@@ -179,6 +192,10 @@ export function useDictation(onText: (text: string, opts: { autoSend: boolean })
 
   const onTextRef = useRef(onText);
   onTextRef.current = onText;
+  const liveRef = useRef(live);
+  liveRef.current = live;
+  /** This dictation's live passes, for the final request (measured in the page). */
+  const liveRun = useRef<{ rtts: number[]; firstTextMs?: number } | undefined>(undefined);
   const phaseRef = useRef<DictationPhase>('idle');
   const rec = useRef<PcmRecorder | undefined>(undefined);
   const speech = useRef<BrowserSpeech | undefined>(undefined);
@@ -207,6 +224,7 @@ export function useDictation(onText: (text: string, opts: { autoSend: boolean })
 
   const deliver = useCallback((text: string) => {
     if (isEmptyTranscript(text)) {
+      liveRef.current?.end(false);
       toast('Nothing heard');
       return;
     }
@@ -219,7 +237,9 @@ export function useDictation(onText: (text: string, opts: { autoSend: boolean })
       go('transcribing');
       lastClip.current = wav;
       try {
-        const r = await api.voiceTranscribe(toBase64(wav));
+        const run = liveRun.current;
+        const stats: LiveStats | undefined = run?.rtts.length ? liveStats(run.rtts, run.firstTextMs) : undefined;
+        const r = await api.voiceTranscribe(toBase64(wav), stats ? { live: stats } : {});
         if (g !== gen.current) return;
         lastClip.current = undefined;
         // Which engine answered (w615) shows in Settings; the status is fetched again, not guessed from the result.
@@ -252,6 +272,7 @@ export function useDictation(onText: (text: string, opts: { autoSend: boolean })
           if (g !== gen.current) return;
           if (clip.seconds >= 0.3) return transcribe(clip.wav);
           go('idle');
+          liveRef.current?.end(false);
           toast('Too short: hold the mic, or tap once to start and again to stop');
         },
         (e: Error) => g === gen.current && fail(e.message),
@@ -272,10 +293,63 @@ export function useDictation(onText: (text: string, opts: { autoSend: boolean })
     }
   }, [deliver, fail, transcribe]);
 
+  /**
+   * Live text while recording (w3712): about once a second the open window of the clip goes to Whisper as a partial pass,
+   * and its text replaces the last in the box. One pass at a time; on the portal's CPU fallback the wait between passes
+   * is as long as a pass took, so it never runs more than half the time. Ends with the recording; failures only stop it.
+   */
+  const liveLoop = useCallback(async (r: PcmRecorder, g: number) => {
+    const run: { rtts: number[]; firstTextMs?: number } = { rtts: [] };
+    liveRun.current = run;
+    const alive = () => rec.current === r && gen.current === g;
+    const closed: string[] = [];
+    let windowStart = 0;
+    let gap: number = LIVE.minGapMs;
+    let failures = 0;
+    let shown = false;
+    while (alive()) {
+      await new Promise((res) => setTimeout(res, gap));
+      if (!alive() || phaseRef.current !== 'recording') continue;
+      const pcm = r.pcm(windowStart);
+      const pass = nextLivePass(r.seconds(), windowStart, pcm);
+      if (!pass) continue;
+      const t0 = performance.now();
+      let res;
+      try {
+        const clip = pcm.subarray(0, Math.round((pass.to - pass.from) * VOICE_RATE));
+        res = await api.voiceTranscribe(toBase64(encodeWav(clip)), { partial: true });
+      } catch {
+        if (++failures >= LIVE.maxFailures) return;
+        gap = 1000;
+        continue;
+      }
+      failures = 0;
+      const ms = performance.now() - t0;
+      if (!alive()) return;
+      run.rtts.push(ms);
+      gap = res.engine === 'local' ? Math.max(LIVE.minGapMs, ms) : LIVE.minGapMs;
+      if (pass.closes) {
+        closed.push(res.text);
+        windowStart = pass.to;
+      }
+      // A closing pass holds only the words before the cut: the box keeps its longer text until the next pass, or it would
+      // shrink back for a moment (seen with real speech).
+      if (pass.closes && shown) continue;
+      const text = joinLive(pass.closes ? closed : [...closed, res.text]);
+      if (!text) continue;
+      shown = true;
+      run.firstTextMs ??= Date.now() - startedAt.current;
+      liveRef.current?.show(text);
+    }
+  }, []);
+
   const start = useCallback(() => {
     const p = phaseRef.current;
     if (p !== 'idle' && p !== 'error') return;
     gen.current++;
+    // A failed dictation's live text stays in the box: it is the user's text now.
+    liveRef.current?.end(true);
+    liveRun.current = undefined;
     setError(undefined);
     setCanRetry(false);
     lastClip.current = undefined;
@@ -326,6 +400,7 @@ export function useDictation(onText: (text: string, opts: { autoSend: boolean })
           startedAt.current = Date.now();
           go('recording');
           if (stopWanted.current) stop();
+          else void liveLoop(r, gen.current);
         },
         (e: DOMException) => {
           if (rec.current === r) fail(micErrorMessage(e.name || e.message, device));
@@ -333,16 +408,23 @@ export function useDictation(onText: (text: string, opts: { autoSend: boolean })
       );
     } else {
       try {
-        speech.current = new BrowserSpeech(setInterim, (err) => fail(micErrorMessage(err, device)));
+        const g = gen.current;
+        const onInterim = (t: string) => {
+          if (g !== gen.current) return;
+          setInterim(t);
+          if (t.trim()) liveRef.current?.show(t);
+        };
+        speech.current = new BrowserSpeech(onInterim, (err) => fail(micErrorMessage(err, device)));
         go('recording');
       } catch (e) {
         fail((e as Error).message);
       }
     }
-  }, [fail, stop]);
+  }, [fail, stop, liveLoop]);
 
   const cancel = useCallback(() => {
     gen.current++;
+    liveRef.current?.end(false);
     rec.current?.release();
     rec.current = undefined;
     speech.current?.cancel();
@@ -353,6 +435,12 @@ export function useDictation(onText: (text: string, opts: { autoSend: boolean })
     lastClip.current = undefined;
     go('idle');
   }, []);
+
+  // Closing the error bar keeps what the live passes put in the box (cancel and Esc take it out).
+  const dismiss = useCallback(() => {
+    liveRef.current?.end(true);
+    cancel();
+  }, [cancel]);
 
   const retry = useCallback(() => {
     if (lastClip.current) void transcribe(lastClip.current);
@@ -448,7 +536,7 @@ export function useDictation(onText: (text: string, opts: { autoSend: boolean })
     stop,
     cancel,
     retry,
-    dismiss: cancel,
+    dismiss,
     press,
     release,
     onKeyDown,

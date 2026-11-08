@@ -2,6 +2,7 @@
 // 16 kHz mono and packed as a WAV in the browser. Whisper wants exactly that, so the server needs no
 // ffmpeg, and it sidesteps MediaRecorder's per-browser codecs (webm/opus on Chrome, mp4/aac on Safari).
 import { downsample, encodeWav, level } from '../../../shared/voice';
+import { chunksFrom } from '../../../shared/liveTranscript';
 
 // Batches the 128-sample render quanta into ~85 ms messages.
 const WORKLET = `
@@ -36,6 +37,7 @@ export class PcmRecorder {
   private analyser?: AnalyserNode;
   private tap?: AudioNode;
   private readonly chunks: Float32Array[] = [];
+  private kept = 0;
   private readonly scratch = new Uint8Array(1024);
   private closed = false;
 
@@ -86,7 +88,10 @@ export class PcmRecorder {
 
   private take(c: Float32Array) {
     if (this.closed) return;
-    if (this.keep) this.chunks.push(c);
+    if (this.keep) {
+      this.chunks.push(c);
+      this.kept += c.length;
+    }
     this.onChunk?.(c);
   }
 
@@ -100,6 +105,17 @@ export class PcmRecorder {
     if (!this.analyser) return 0;
     this.analyser.getByteTimeDomainData(this.scratch);
     return level(this.scratch);
+  }
+
+  /** Seconds captured so far. */
+  seconds(): number {
+    return this.kept / this.ctx.sampleRate;
+  }
+
+  /** The clip from `from` s to now, at 16 kHz, without stopping: live dictation's passes (w3712). */
+  pcm(from: number): Float32Array {
+    const rate = this.ctx.sampleRate;
+    return downsample(chunksFrom(this.chunks, Math.floor(from * rate)), rate);
   }
 
   /** Stop and return the clip as a 16 kHz WAV. */
