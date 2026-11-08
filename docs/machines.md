@@ -766,6 +766,11 @@ sandboxes, editors and agents there at once, with no installer run. Until w1581 
 `scripts/worker/devdrive.ts`) and every update carries them, so lothdesktop's V: stayed at an old 50 GB that no tool
 could lower. `hostGuard.warnFreeGB` / `criticalFreeGB` in daemon.json now apply only to the guard's other volumes
 (`hostDiskPaths`, the VHDX's host when its maximum is not known). w1581 set Dev Drive (V:) volumes to 25 GB with `add_machine` `disk_warn_gb: 25`; w1951 moved every machine to 15.
+**The sandbox pool's disk guard waits for the portal's welcome** (w3518). Until it arrives after a daemon restart, the pool
+holds daemon.json's `sandboxes` block, whose `disk_warn_gb` can be an old 50 or 80: lothdesktop logged "disk space low: 24
+GB free ... (below disk_warn_gb 50)" at 17:42:22 and "fine again" at 17:42:49 -07:00 on 2026-11-07, the same free space
+both times. `SandboxPool` (`awaitConfigure`) now skips its disk guard until `configure` (a welcome with pool settings) or
+`settle` (one without). Nothing starts on the machine before the welcome, so no check is lost.
 
 LothDesktop, for example: `sandbox_root: "D:\work\ffsb"`, `max_sandboxes: 3`, `max_agents_per_sandbox: 2` (six
 sandbox agents in all), `max_unity: 2`.

@@ -194,7 +194,7 @@ function deps(repoPath: string, o: { free?: () => number | undefined; copyBytes?
 
 const SETTINGS = (root: string, over: Partial<SandboxPoolSettings> = {}): SandboxPoolSettings => ({ root, maxSandboxes: 2, maxAgentsPerSandbox: 2, maxUnity: 1, diskWarnGB: 50, diskCriticalGB: 20, ...over });
 
-function pool(r: ReturnType<typeof repos>, o: { free?: () => number | undefined; copyBytes?: number; settings?: Partial<SandboxPoolSettings>; activity?: (id: string) => { busy: boolean; lastActivityMs: number }; idle?: number; slots?: () => UnitySlots; liveAgents?: (id: string) => number; trim?: PoolOptions['trim']; trimmer?: PoolOptions['trimmer']; releaseSweep?: PoolOptions['releaseSweep']; log?: (l: string) => void; reseedIdleDays?: number; bootTicket?: PoolOptions['bootTicket']; warm?: string[]; bridge?: (project: string, since: number | undefined, running: Set<string>) => boolean } = {}) {
+function pool(r: ReturnType<typeof repos>, o: { free?: () => number | undefined; copyBytes?: number; settings?: Partial<SandboxPoolSettings>; activity?: (id: string) => { busy: boolean; lastActivityMs: number }; idle?: number; slots?: () => UnitySlots; liveAgents?: (id: string) => number; trim?: PoolOptions['trim']; trimmer?: PoolOptions['trimmer']; releaseSweep?: PoolOptions['releaseSweep']; log?: (l: string) => void; reseedIdleDays?: number; bootTicket?: PoolOptions['bootTicket']; warm?: string[]; bridge?: (project: string, since: number | undefined, running: Set<string>) => boolean; awaitConfigure?: boolean } = {}) {
   const events: { text: string; checkpoint?: boolean }[] = [];
   /** The status of each sandbox at every change the portal would be sent, consecutive repeats dropped (w898: the cleanup state's order). */
   const statuses: string[] = [];
@@ -220,6 +220,7 @@ function pool(r: ReturnType<typeof repos>, o: { free?: () => number | undefined;
       ...(o.reseedIdleDays !== undefined ? { reseedIdleDays: o.reseedIdleDays } : {}),
       ...(o.warm ? { warm: o.warm } : {}),
       librarySeedGB: 1,
+      ...(o.awaitConfigure ? { awaitConfigure: true } : {}),
       ...(o.bootTicket ? { bootTicket: o.bootTicket } : {}),
       ...(o.slots ? { editorSlot: (id: string) => o.slots!().startRefusal(`sandbox:${id}`), slotsStatus: async () => (await o.slots!().tick(), o.slots!().describe()) } : {}),
     },
@@ -1738,4 +1739,40 @@ test('w3502: an editor start on a cold Library near the disk line warns (a re-im
   fs.mkdirSync(path.join(sb.path, 'Library'), { recursive: true });
   fs.writeFileSync(path.join(sb.path, 'Library', 'ArtifactDB'), 'db');
   assert.doesNotMatch(await p.unity('a', 'start'), /w3502/);
+});
+
+test("w3518: after a daemon restart the disk guard waits for the portal's pool settings: no disk-low notice from daemon.json's stale disk_warn_gb", async (t) => {
+  const r = repos();
+  t.after(r.cleanup);
+  // lothdesktop, 2026-11-07 17:42 -07:00: 24 GB free, daemon.json's stale disk_warn_gb 50, the portal's pool 15.
+  let free = 24 * GB;
+  const { p, events } = pool(r, { free: () => free, settings: { diskWarnGB: 50, diskCriticalGB: 10 }, awaitConfigure: true });
+  const low = () => events.filter((e) => /disk space (low|critical|is fine again)/.test(e.text)).map((e) => e.text);
+  await p.tick();
+  await p.tick();
+  assert.deepEqual(low(), [], 'no notice before the welcome');
+  assert.equal(p.diskState().level, 'ok');
+  p.configure(SETTINGS(r.sbRoot, { diskWarnGB: 15, diskCriticalGB: 10 }));
+  await p.tick();
+  assert.deepEqual(low(), [], "none at the portal's line either: 24 GB is above 15");
+  assert.equal(p.diskState().level, 'ok');
+  // The guard runs from the welcome on: a real low disk is still reported.
+  free = 12 * GB;
+  await p.tick();
+  assert.match(low().at(-1) ?? '', /disk space low: 12 GB free .*below disk_warn_gb 15/);
+  // A welcome with no pool settings (an older portal, a worker root with no pool yet) settles on daemon.json's line.
+  const r2 = repos();
+  t.after(r2.cleanup);
+  const q = pool(r2, { free: () => 24 * GB, settings: { diskWarnGB: 50, diskCriticalGB: 10 }, awaitConfigure: true });
+  await q.p.tick();
+  assert.equal(q.events.some((e) => /disk space low/.test(e.text)), false);
+  q.p.settle();
+  await q.p.tick();
+  assert.match(q.events.map((e) => e.text).join(' | '), /disk space low: 24 GB free .*below disk_warn_gb 50/);
+  // Without awaitConfigure (a pool built straight from settings, as before) the guard runs at once.
+  const r3 = repos();
+  t.after(r3.cleanup);
+  const n = pool(r3, { free: () => 24 * GB, settings: { diskWarnGB: 50, diskCriticalGB: 10 } });
+  await n.p.tick();
+  assert.match(n.events.map((e) => e.text).join(' | '), /disk space low: 24 GB free/);
 });
