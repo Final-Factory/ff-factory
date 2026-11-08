@@ -231,9 +231,11 @@ test('w1196, w1197: every worker hears to end what it started before DONE, how (
 test("w913: workers are told to leave their temp files, not to clean up; the one delete left is approval-free and narrow", async () => {
   const { DISK_HYGIENE } = await import('./agents.ts');
   const { workerRuleText } = await import('./workerRules.ts');
-  assert.match(DISK_HYGIENE, /Leave it there: do not clean up after yourself, since a clean-up command waits for a person's approval/);
+  assert.match(DISK_HYGIENE, /Delete the big things you made once you are done with them, and before DONE or a long wait: a clone/);
+  assert.match(DISK_HYGIENE, /Check with `du -sh "\$TMPDIR"`/);
+  assert.doesNotMatch(DISK_HYGIENE, /do not clean up after yourself|no clean-up step before DONE/);
   assert.match(DISK_HYGIENE, /The harness removes it: your temp folder a few minutes after no request waits for you any more \(it closed, or moved to another worker; a wait for CI or a person, a stop or a pause keeps it whole\), your git clones six hours after that \(unless one holds work nothing else has\)/);
-  assert.match(DISK_HYGIENE, /no clean-up step before DONE, no `player_slots\.py prune`/);
+  assert.match(DISK_HYGIENE, /Never `player_slots\.py prune`/);
   assert.match(DISK_HYGIENE, /publish the proofs your report links .* before you end/);
   assert.match(DISK_HYGIENE, /a delete whose every path is written out under \$TMPDIR is answered by the session itself with no approval, alone or inside a longer command; anything else .* still asks a person/);
   // w1482: a clean-up request's rules are read when one comes (read_rules cleanup), not on every call.

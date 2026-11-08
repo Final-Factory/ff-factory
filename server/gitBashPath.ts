@@ -1,3 +1,7 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { sizeOf } from './cleanup.ts';
+
 /**
  * w3700 (lothsahn, 2026-11-08: "There's also a v:/v/ffw folder that looks like workers used the wrong path. Please have it
  * clean that up, figure out how it happened, and prevent it from happening again."): a Git Bash path in a PowerShell command.
@@ -41,4 +45,79 @@ export function checkGitBashPathInPowerShell(cmd: string, root: string): string 
     `it as ${drive}:${m[2].replace(/\//g, '\\')}, a folder outside the worker install folder that nobody may clean up (w3700). ` +
     `Write ${win} instead, or $env:TEMP for your temp folder.`
   );
+}
+
+/**
+ * Where a PowerShell command put a worker's temp folder when it read Git Bash's `/v/ffw/tmp/ffa-<id>` (w3707): the agents' temp
+ * root `tempRoot` spelled from the root of its own drive (V:\ffw\tmp -> V:\v\ffw\tmp), or undefined off Windows paths.
+ */
+export function gitBashStrayRoot(tempRoot: string): string | undefined {
+  const bash = gitBashSpelling(tempRoot);
+  if (!bash) return undefined;
+  return `${tempRoot.trim()[0]!.toUpperCase()}:${bash.replace(/\//g, '\\')}`;
+}
+
+export interface StraySweep {
+  removed: { path: string; bytes: number }[];
+  kept: { path: string; why: string }[];
+  /** The empty folders of the stray chain removed after (V:\v\ffw\tmp, V:\v\ffw, V:\v). */
+  emptied: string[];
+}
+
+/**
+ * Remove the temp folders of closed workers from the stray root (w3707, lothsahn, 2026-11-08: "There's also a v:/v/ffw folder
+ * that looks like workers used the wrong path. Please have it clean that up"). Only this one known path, outside the install
+ * folder: `ffa-<id>` folders whose worker `closed(id)` says is stopped with every request closed; anything else in it stays and
+ * is listed. Then the chain's folders are removed while empty, up to the drive's first folder (rmdir, never recursive).
+ */
+export async function sweepGitBashStray(stray: string, top: string, closed: (sid: string) => boolean, dryRun = false): Promise<StraySweep> {
+  const out: StraySweep = { removed: [], kept: [], emptied: [] };
+  let names: string[];
+  try {
+    names = await fs.promises.readdir(stray);
+  } catch {
+    return out;
+  }
+  for (const n of names) {
+    const p = path.join(stray, n);
+    const sid = /^ffa-([\w-]+)$/i.exec(n)?.[1];
+    if (!sid) {
+      out.kept.push({ path: p, why: 'not a worker temp folder' });
+      continue;
+    }
+    if (!closed(sid)) {
+      out.kept.push({ path: p, why: `worker ${sid} is on a request that has not closed, or still runs` });
+      continue;
+    }
+    const bytes = await sizeOf(p).catch(() => 0);
+    if (!dryRun) {
+      try {
+        await fs.promises.rm(p, { recursive: true, force: true, maxRetries: 2 });
+      } catch (e) {
+        out.kept.push({ path: p, why: `could not be removed (${(e as NodeJS.ErrnoException).code ?? (e as Error).message})` });
+        continue;
+      }
+    }
+    out.removed.push({ path: p, bytes });
+  }
+  if (dryRun) return out;
+  // V:\v\ffw\tmp, then V:\v\ffw, then V:\v (`top`): each only while empty.
+  const rel = path.relative(top, stray);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return out;
+  for (let d = stray; ; d = path.dirname(d)) {
+    try {
+      await fs.promises.rmdir(d);
+      out.emptied.push(d);
+    } catch {
+      break;
+    }
+    if (path.resolve(d) === path.resolve(top)) break;
+  }
+  return out;
+}
+
+/** The first folder of the stray chain on its drive (V:\v\ffw\tmp -> V:\v): the outermost one the sweep may remove when empty. */
+export function gitBashStrayTop(stray: string): string {
+  const m = /^([A-Za-z]:)[\\/]+([^\\/]+)/.exec(stray);
+  return m ? `${m[1]}\\${m[2]}` : stray;
 }

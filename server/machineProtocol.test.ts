@@ -117,9 +117,12 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // workers stay fenced out of the whole folder, as before), and an older portal never sends it.
 // w3673 (no bump): `interrupt` carries an optional `id`, answered by `interrupt_result`; an older daemon ignores the id and
 // never answers (interrupt_agent says so after INTERRUPT_ANSWER_MS), and an older portal sends none, so it is never answered.
+// w3686 (no bump): the `tempSize` signal (SignalName), a worker's temp folder over its threshold, arg { total, biggest, step }; an older
+// portal re-emits it with no listener, and an older daemon or host never sends it (an older daemon under a newer host drops it: it
+// forwards only the names it knows).
 // w3715 (no bump): `bench_revoke`, the portal taking back a bench ticket an idle worker's work holds; an older daemon drops it
 // (no default case), so the ticket is held as before until the leftovers or its owner end it; an older portal never sends it.
-const DECIDED = { protocol: 9, fingerprint: 'e0496eba30af9c50' };
+const DECIDED = { protocol: 9, fingerprint: '74335b4e6af4433c' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

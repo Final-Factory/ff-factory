@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { GithubTokens, PORTAL_MACHINE, githubFromVault, githubHealthLine, githubPersonOf, parseExpiry, parseGhInclude, rateLimitOf } from './githubTokens.ts';
+import { GithubTokens, PORTAL_MACHINE, githubFromVault, githubProblems, inGithubOrg, githubHealthLine, githubPersonOf, parseExpiry, parseGhInclude, rateLimitOf } from './githubTokens.ts';
 import { GITHUB_REQUIRED_PERMISSIONS, GITHUB_REQUIRED_REPOS } from '../shared/githubRequirements.ts';
 import { Vault, newKeyText } from './vault.ts';
 import { ghChecks } from './blockerWatch.ts';
@@ -518,4 +518,12 @@ test('Final-Factory/ffu is required (w2898): a token without it warns, one with 
   const withIt = tokens(vault, {}, undefined, { fetch: fakeGithub({ [BEN]: {} }).fetch, probePortalLogin: false });
   await withIt.tick();
   assert.ok(!withIt.list().find((h) => h.name === 'vault-ben-github')!.problems?.some((p) => p.includes('ffu')));
+});
+
+test("w3714: the Final-Factory organization's runner and artifact reads count only for a portal whose repositories are in it", () => {
+  assert.equal(inGithubOrg(['bryding/light-tree']), false);
+  assert.equal(inGithubOrg(['bryding/light-tree', 'final-factory/FinalFactory']), true);
+  const h = { checkedAt: '2026-11-08T12:00:00Z', repos: [], org: { 'self-hosted-runners': 'denied', 'artifact-metadata': 'denied' } } as unknown as Parameters<typeof githubProblems>[0];
+  assert.deepEqual(githubProblems(h, ['bryding/light-tree'], Date.parse('2026-11-08T12:00:00Z')), []);
+  assert.equal(githubProblems(h, GITHUB_REQUIRED_REPOS, Date.parse('2026-11-08T12:00:00Z')).filter((x) => /organization Final-Factory/.test(x)).length, 2);
 });

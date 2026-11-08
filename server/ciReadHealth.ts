@@ -31,6 +31,15 @@ export function repoSlug(url: string | undefined): string | undefined {
 
 const said = (r: RunResult) => (r.stderr || r.stdout || `exit ${r.code}`).trim().split('\n')[0].slice(0, 160);
 
+/** A repository with no pull request yet (a new instance's project, w3714): nothing to measure, so no fault and no banner. */
+export const NO_PR_WHY = 'no pull request to measure on';
+
+/** Whether a measurement found nothing to measure on rather than a credential that cannot read. */
+export const ciUnmeasured = (h: CiReadHealth) => h.level === 'none' && h.pr === undefined && h.why === NO_PR_WHY;
+
+/** Whether a measurement is a fault a person must fix. */
+const ciReadBad = (h: CiReadHealth | undefined) => !!h && !ciReadOk(h.level) && !ciUnmeasured(h);
+
 /** One measurement on the newest pull request of `repo`, read the way the blocker watch reads CI (ghChecks). */
 export async function probeCiRead(repo: string, run: Runner, now = () => new Date()): Promise<CiReadHealth> {
   const opts = { timeoutMs: 30_000 };
@@ -38,7 +47,7 @@ export async function probeCiRead(repo: string, run: Runner, now = () => new Dat
   const list = await run('gh', ['pr', 'list', '-R', repo, '--state', 'all', '--limit', '1', '--json', 'number,headRefOid'], opts);
   if (list.code !== 0) return { level: 'none', repo, at: at(), why: `pull requests: ${said(list)}` };
   const pr = (JSON.parse(list.stdout || '[]') as { number?: number; headRefOid?: string }[])[0];
-  if (!pr?.number || !pr.headRefOid) return { level: 'none', repo, at: at(), why: 'no pull request to measure on' };
+  if (!pr?.number || !pr.headRefOid) return { level: 'none', repo, at: at(), why: NO_PR_WHY };
   const rollup = await run('gh', ['pr', 'view', String(pr.number), '-R', repo, '--json', 'statusCheckRollup'], opts);
   if (rollup.code === 0) return { level: 'checks', repo, pr: pr.number, at: at() };
   const runs = await run('gh', ['api', `repos/${repo}/actions/runs?head_sha=${pr.headRefOid}&per_page=1`], opts);
@@ -52,23 +61,24 @@ export async function probeCiRead(repo: string, run: Runner, now = () => new Dat
 /** Whether a level lets a CI wait end the moment CI does, green or red. */
 export const ciReadOk = (level: CiReadLevel) => level === 'checks' || level === 'actions';
 
-/** The fix, in one line (docs/vault.md section 13.2): what the credential needs on GitHub. */
-export const CI_READ_FIX = 'give the portal\'s GitHub token (D7, fffctl gh-login) "Actions: Read-only" on Final-Factory/FinalFactory (edit the fine-grained token on github.com; its value stays), or install a person\'s vault GitHub token with Actions read and set machines.githubFromVault true machine "portal" (docs/vault.md section 13)';
+/** The fix, in one line (docs/vault.md section 13.2): what the credential needs on GitHub, on this portal's own repo (w3714). */
+export const ciReadFix = (repo: string) => `give the portal's GitHub token (D7, fffctl gh-login) "Actions: Read-only" on ${repo} (edit the fine-grained token on github.com; its value stays), or install a person's vault GitHub token with Actions read and set machines.githubFromVault true machine "portal" (docs/vault.md section 13)`;
 
 /** The system_status line. */
 export function ciReadLine(h: CiReadHealth | undefined): string {
   if (!h) return 'GitHub CI reads (w889): not measured yet (the first probe runs a minute after start)';
+  if (ciUnmeasured(h)) return `GitHub CI reads (w889): not measured yet: ${h.repo} has no pull request to measure on (measured again every half hour)`;
   const where = `${h.repo}${h.pr ? ` (measured on #${h.pr}, ${h.at.slice(11, 16)}Z)` : ''}`;
   if (h.level === 'checks') return `GitHub CI reads (w889): OK, the portal reads pull requests' checks on ${where}`;
   if (h.level === 'actions') return `GitHub CI reads (w889): OK, the portal reads GitHub Actions runs on ${where} (no fine-grained token can read check runs)`;
-  if (h.level === 'merge-state') return `WARNING: GitHub CI reads (w889): the portal can read neither checks nor Actions runs on ${where}, only the merge state: a CI wait that ends green clears within minutes, a red one only after 15 minutes. ${h.why}. Fix: ${CI_READ_FIX}`;
-  return `WARNING: GitHub CI reads (w889): the portal cannot read CI on ${where} at all: every CI wait sits 15 minutes before its worker looks itself. ${h.why ?? ''}. Fix: ${CI_READ_FIX}`;
+  if (h.level === 'merge-state') return `WARNING: GitHub CI reads (w889): the portal can read neither checks nor Actions runs on ${where}, only the merge state: a CI wait that ends green clears within minutes, a red one only after 15 minutes. ${h.why}. Fix: ${ciReadFix(h.repo)}`;
+  return `WARNING: GitHub CI reads (w889): the portal cannot read CI on ${where} at all: every CI wait sits 15 minutes before its worker looks itself. ${h.why ?? ''}. Fix: ${ciReadFix(h.repo)}`;
 }
 
 /** The dashboard banner's text, or undefined when CI reads are fine (or not measured yet). */
 export function ciReadBanner(h: CiReadHealth | undefined): string | undefined {
-  if (!h || ciReadOk(h.level)) return undefined;
-  return `${h.level === 'merge-state' ? 'Only green CI is seen at once; red CI waits 15 minutes' : 'Every CI wait sits 15 minutes'} on ${h.repo}. Fix: ${CI_READ_FIX}.`;
+  if (!h || !ciReadBad(h)) return undefined;
+  return `${h.level === 'merge-state' ? 'Only green CI is seen at once; red CI waits 15 minutes' : 'Every CI wait sits 15 minutes'} on ${h.repo}. Fix: ${ciReadFix(h.repo)}.`;
 }
 
 export interface CiReadWatchDeps {
@@ -114,11 +124,11 @@ export class CiReadWatch {
     // GitHub's rate limit (w1186) says nothing about what the credential can read: keep the last measurement. The banner
     // "GitHub is rate limiting us" (githubTokens.ts) is what a person sees; it is measured again at the next half hour.
     if (!ciReadOk(h.level) && isRateLimitText(h.why)) return this.health;
-    const before = this.health?.level;
+    const before = this.health;
     this.health = h;
-    if (h.level !== before) {
-      if (!ciReadOk(h.level)) this.d.report('FF Factory cannot read CI on pull requests', ciReadLine(h).replace(/^WARNING: /, ''));
-      else if (before && !ciReadOk(before)) this.d.report('FF Factory reads CI on pull requests again', ciReadLine(h));
+    if (h.level !== before?.level || ciReadBad(h) !== ciReadBad(before)) {
+      if (ciReadBad(h)) this.d.report('FF Factory cannot read CI on pull requests', ciReadLine(h).replace(/^WARNING: /, ''));
+      else if (ciReadOk(h.level) && ciReadBad(before)) this.d.report('FF Factory reads CI on pull requests again', ciReadLine(h));
     }
     return h;
   }
