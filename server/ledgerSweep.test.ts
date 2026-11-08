@@ -1827,6 +1827,115 @@ test("w1972: the ops worker's DONE for its job never closes a request on its own
   assert.equal(get('w3').status, 'done');
 });
 
+// ---------------------------------------------------------------- w3708: a pair leg that goes on without DONE after the host's
+// w3523 (2026-11-08): host leg c5e722b7 reported "For w3498:" and said DONE at 11:06 UTC; client leg 4f65cc5c then ended six
+// times over 5 h without DONE, each logged "4f65cc5c still has work on it: the request is blocked on worker 4f65cc5c", and
+// the request stayed Blocked on it until an orchestrator closed it by hand at about 20:00 UTC.
+
+const HOST_DONE = 'TL;DR: the join desync happens on master too.\nFor w3498: run A (2550d7945b) forked at the client join, heartbeat 32 of epoch 1; run B did not run.\nDONE: w3523\nLearned: nothing new';
+
+/** w3523 as it stood at 11:06 UTC: a cross-OS pair run for w3498, Blocked on the client leg by the host's own report (w2476). */
+function w3523(h: ReturnType<typeof setup>, over: Partial<WorkItem> = {}) {
+  const woke: { id: string; note: string }[] = [];
+  const o = h.o as unknown as { now: () => Date; d: { restoreWake: (id: string, note: string) => boolean }; toDispatcher: (text: string) => void };
+  o.d.restoreWake = (id, note) => (woke.push({ id, note }), true);
+  const told: string[] = [];
+  o.toDispatcher = (text) => void told.push(text);
+  h.request('w3523', {
+    title: 'Pair run for w3498: w3498 control: join-time desync on PR #3375 head vs its master parent',
+    status: 'blocked',
+    sessionIds: ['c5e722b7', '4f65cc5c'],
+    pair: { legs: 2, for: 'w3498', crossOs: 'Mac host vs Windows client', started: { at: ago(10), legs: [{ session: 'c5e722b7', sandbox: 'm5/slot3' }, { session: '4f65cc5c', sandbox: 'lothdesktop/slot3' }] } },
+    blocked: { kind: 'worker', ref: '4f65cc5c', what: "worker 4f65cc5c's part (its DONE or final report)", at: ago(9.5), by: 'worker c5e722b7', reported: 'c5e722b7@1' } as WorkItem['blocked'],
+    ...over,
+  });
+  h.worker('c5e722b7', { status: 'idle' });
+  h.worker('4f65cc5c', { status: 'idle', lastResult: 'Built the run B player.\nw3523: still open: run B client waits on the host leg', lastResultAt: ago(1) });
+  return { woke, told, o };
+}
+
+test('w3708: w3523 as it happened: the host leg said DONE, then the client leg kept ending without DONE: it is told the run is over, asked once more, then the run closes on the host report', async (t) => {
+  const h = setup(t);
+  const { woke, o } = w3523(h);
+  o.now = () => new Date(NOW);
+  h.o.workerTurnEnded(h.worker('c5e722b7', { status: 'idle' }), HOST_DONE);
+  const w = h.get('w3523');
+  assert.notEqual(w.status, 'done', 'the client leg is still alive and on it');
+  assert.equal(w.blocked, undefined, "the host's wait on the client leg ends with the host's DONE");
+  assert.notEqual(w.status, 'blocked');
+  assert.deepEqual(woke.map((x) => x.id), ['4f65cc5c'], 'the client leg hears the run is over');
+  assert.match(woke[0].note, /the host leg c5e722b7 filed its report and said DONE .*the run is over.*"DONE: w3523"/);
+  // 11:11 UTC: it ends with its still-open line: asked once to wrap up, and the request stays open.
+  h.worker('4f65cc5c', { status: 'stopped', lastResult: 'w3523: still open: run B client waits on the host leg', lastResultAt: new Date(NOW + 5 * 60_000).toISOString() });
+  o.now = () => new Date(NOW + 5 * 60_000);
+  h.o.workerEnded({ id: '4f65cc5c' });
+  assert.notEqual(h.get('w3523').status, 'done');
+  assert.deepEqual(woke.map((x) => x.id), ['4f65cc5c', '4f65cc5c']);
+  assert.match(woke[1].note, /This is the only reminder/);
+  assert.match(h.get('w3523').log.at(-1)!, /leg 4f65cc5c went on without DONE after the host leg c5e722b7 said DONE .*asked it once to wrap up and say DONE \(w3708\)/);
+  // The same end logged twice (15:57 UTC had two): no turn since the ask, so nothing more.
+  h.o.workerEnded({ id: '4f65cc5c' });
+  assert.notEqual(h.get('w3523').status, 'done');
+  assert.equal(woke.length, 2, 'asked once only');
+  // 12:11 UTC: it ran a turn after the ask and ended again without DONE: closed on the host's report, its state noted.
+  h.worker('4f65cc5c', { status: 'stopped', lastResult: 'w3523: still open: run B client waits on the host leg', lastResultAt: new Date(NOW + 65 * 60_000).toISOString() });
+  o.now = () => new Date(NOW + 65 * 60_000);
+  h.o.workerEnded({ id: '4f65cc5c' });
+  const done = h.get('w3523');
+  assert.equal(done.status, 'done');
+  assert.match(done.outcome!, /^TL;DR: the join desync happens on master too\. \(Leg 4f65cc5c did not say DONE after the host's DONE and one reminder: it ended with work still pending: its last report says "w3523: still open: run B client waits on the host leg"\.\)$/);
+  assert.match(done.log.join('\n'), /closed as done: the host leg c5e722b7 said DONE and leg 4f65cc5c went on without DONE after one reminder \(w3708\)/);
+  assert.equal(woke.length, 2);
+});
+
+test('w3708: a leg that never ends its turn (or ends it on short check-ins) is asked once an hour after the host DONE, and the run closes an hour after that', async (t) => {
+  const h = setup(t);
+  const { woke, o } = w3523(h);
+  o.now = () => new Date(NOW - 3 * 3_600_000);
+  h.o.workerTurnEnded(h.worker('c5e722b7', { status: 'idle' }), HOST_DONE);
+  h.worker('4f65cc5c', { status: 'running' });
+  assert.equal(woke.length, 1);
+  // Under the hour since the host's DONE: nothing.
+  o.now = () => new Date(NOW - 2.5 * 3_600_000);
+  assert.equal(h.o.pairLegsOverdue('w3523'), false);
+  // Past it: asked once.
+  o.now = () => new Date(NOW - 1.5 * 3_600_000);
+  assert.equal(h.o.pairLegsOverdue('w3523'), true);
+  assert.equal(woke.length, 2);
+  assert.match(woke[1].note, /This is the only reminder/);
+  assert.match(woke[1].note, /no DONE 90 min after the host's DONE/);
+  assert.notEqual(h.get('w3523').status, 'done');
+  // The 5-minute ledger pass, an hour after the ask: the run closes on the host's report.
+  o.now = () => new Date(NOW);
+  await h.sweep.checkPrs();
+  assert.equal(h.get('w3523').status, 'done');
+  assert.match(h.get('w3523').outcome!, /Leg 4f65cc5c did not say DONE after the host's DONE and one reminder: no DONE 180 min after the host's DONE/);
+});
+
+test("w3708: where the host's report cannot close the run (a pull request still open), the jam goes to the dispatcher once, never left Blocked on the leg", async (t) => {
+  const h = setup(t);
+  const { woke, told, o } = w3523(h, { prs: [{ repo: REPO, number: 77, url: `https://github.com/${REPO}/pull/77`, state: 'open' }] as WorkItem['prs'] });
+  o.now = () => new Date(NOW);
+  h.o.workerTurnEnded(h.worker('c5e722b7', { status: 'idle' }), HOST_DONE);
+  h.worker('4f65cc5c', { status: 'stopped', lastResult: 'w3523: still open: run B client', lastResultAt: new Date(NOW + 60_000).toISOString() });
+  o.now = () => new Date(NOW + 2 * 60_000);
+  h.o.workerEnded({ id: '4f65cc5c' });
+  assert.equal(woke.length, 2);
+  h.worker('4f65cc5c', { status: 'stopped', lastResult: 'w3523: still open: run B client', lastResultAt: new Date(NOW + 10 * 60_000).toISOString() });
+  o.now = () => new Date(NOW + 11 * 60_000);
+  h.o.workerEnded({ id: '4f65cc5c' });
+  assert.notEqual(h.get('w3523').status, 'done');
+  assert.equal(told.length, 1);
+  assert.match(told[0], /Pair run w3523 .* is jammed: its host leg c5e722b7 said DONE .*cannot close it: PR #77 is still open/);
+  assert.match(h.get('w3523').log.at(-1)!, /so the dispatcher decides \(w3708\)/);
+  // Again, by an end or the pass: the dispatcher is not told twice.
+  h.worker('4f65cc5c', { status: 'stopped', lastResultAt: new Date(NOW + 20 * 60_000).toISOString() });
+  h.o.workerEnded({ id: '4f65cc5c' });
+  o.now = () => new Date(NOW + 5 * 3_600_000);
+  h.o.pairLegsOverdue('w3523');
+  assert.equal(told.length, 1);
+});
+
 // ---------------------------------------------------------------- w2140: a deploy held on red CI reaches its waiters
 
 test('w2140: w2116 as it happened: the auto-deploy held on red master CI turns "Blocked on beast\'s update" into "deploy held: master CI failed" and resumes the worker that merged it, once', async (t) => {

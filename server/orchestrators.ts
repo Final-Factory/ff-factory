@@ -158,6 +158,12 @@ export function unpushedText(git: GitStatus | undefined): string {
 export const PAIR_REQUEUE_MAX = 3;
 /** A pair leg's computer offline this long breaks the run (w2304): a daemon restart or a short reconnect is shorter. */
 export const PAIR_OFFLINE_MS = 10 * 60_000;
+/**
+ * w3708: after the host leg's DONE, how long another leg may go on without its own DONE before it is asked once to wrap
+ * up, and how long after that ask before the run closes on the host's report (or goes to the dispatcher). w3523's client
+ * leg 4f65cc5c ended six times over 5 h without DONE after the host's DONE, and the request stayed Blocked on it.
+ */
+export const PAIR_WRAP_UP_MS = 60 * 60_000;
 /** The statuses a request keeps its gates in (w754): blocked itself, a hold (question) and the dispatcher's turn after a "go" (new). */
 const GATE_STATUSES: ReadonlySet<WorkItem['status']> = new Set(['blocked', 'question', 'new']);
 
@@ -6278,6 +6284,118 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   }
 
   /**
+   * w3708: worker `sid` said DONE for its part, so its own waits on other workers of `w` (w2476 `worker` gates, set from
+   * its report) are over. w3523's host leg c5e722b7 said DONE at 11:06 UTC while the request stayed "blocked on worker
+   * 4f65cc5c's part", a wait only the host had, for the 9 h until a person closed it.
+   */
+  private dropWorkerWaitsOf(w: WorkItem, sid: string) {
+    const all = gatesOf(w);
+    const gone = all.filter((g) => g.kind === 'worker' && gateSetter(g) === sid);
+    if (!gone.length) return;
+    const kept = all.filter((g) => !gone.includes(g));
+    w.blocked = kept[0];
+    w.alsoBlocked = kept.length > 1 ? kept.slice(1) : undefined;
+    w.gateEndedAt = this.now().getTime();
+    if (!kept.length && w.status === 'blocked') w.status = 'active';
+    this.stamp(w, `worker ${sid} said DONE, so its wait on ${gatesName(gone, this.now().getTime())} is over (w3708)`);
+  }
+
+  /**
+   * w3708: the host leg (leg 1) of pair run `w` said DONE while other legs are still on it: each is told once that the run
+   * is over and to end with DONE. The legs' brief says "Every leg ends with DONE once the run is over", but nothing told a
+   * leg the run was over: the host's DONE reached no other leg.
+   */
+  private tellLegsRunOver(w: WorkItem, host: string, others: readonly string[]) {
+    const legs = w.pair?.started?.legs;
+    if (!legs || legs[0]?.session !== host) return;
+    const after = { ...(w.pair!.afterHost ?? {}) };
+    const at = this.now().toISOString();
+    const told: string[] = [];
+    for (const sid of others) {
+      if (!legs.some((l) => l.session === sid) || after[sid]?.told) continue;
+      const note = `[ledger] Pair run ${w.id}: the host leg ${host} filed its report and said DONE${w.pair!.for ? ` (its "For ${w.pair!.for}:" result is delivered)` : ''}, so the run is over and nothing more runs in it. Its report: "${clip(doneOf(w)[host]?.report ?? '', 300)}". Wrap up your leg now: end any player or job you started for it, cancel your check-in (cancel_wake), and end this turn with a short report and a line "DONE: ${w.id}" (and Learned:, as the request rules say). Anything your leg found that the host's report lacks goes in that report. Do not start another run of it and do not wait for the host: it has stopped. A leg that goes on without DONE is asked once more, then ${w.id} closes on the host's report (w3708).`;
+      after[sid] = { ...after[sid], told: at };
+      if (this.wakeNow(sid, note, w.id)) told.push(sid);
+    }
+    w.pair = { ...w.pair!, afterHost: after };
+    if (told.length) this.stamp(w, `the host leg ${host} said DONE: told ${told.join(', ')} the run is over and to end with DONE (w3708)`);
+  }
+
+  /**
+   * w3708: leg `sid` of pair run `w` went on without its DONE after the host leg (leg 1) said DONE (it ended with work
+   * pending, `fromEnd`, or PAIR_WRAP_UP_MS passed, pairLegsOverdue). The first time it is asked once to wrap up; the next
+   * time (an end after a turn of it since the ask, or PAIR_WRAP_UP_MS after it) the run closes on the host's report with
+   * the leg's state noted, or, when the host's report cannot close it (doneProblem), the jam goes to the dispatcher once.
+   * Never left Blocked on the leg: w3523's client leg 4f65cc5c ended six times over 5 h after its host's DONE. True when
+   * it acted.
+   */
+  private pairLegLingers(w: WorkItem, sid: string, state: string, fromEnd: boolean): boolean {
+    const legs = w.pair?.started?.legs;
+    if (!isOpen(w) || !legs || legs.length < 2) return false;
+    const host = legs[0].session;
+    const done = doneOf(w);
+    const hostDone = done[host];
+    if (sid === host || !legs.some((l) => l.session === sid) || !hostDone || hostDone.leg || done[sid]) return false;
+    const now = this.now();
+    const after = w.pair!.afterHost?.[sid] ?? {};
+    if (after.escalated) return true;
+    const save = (x: typeof after) => {
+      w.pair = { ...w.pair!, afterHost: { ...(w.pair!.afterHost ?? {}), [sid]: x } };
+    };
+    if (!after.prompted) {
+      const note = `[ledger] Pair run ${w.id}: the host leg ${host} said DONE at ${hostDone.at.slice(11, 16)} UTC and the run is over, but your leg has not said DONE (${clip(state, 200)}). Finish your leg now: end any player or job you started for it, cancel your check-in (cancel_wake), and end this turn with a short report and a line "DONE: ${w.id}" (and Learned:). If your leg found something the host's report lacks, say it in that report. This is the only reminder: if your leg goes on without DONE, ${w.id} closes on the host's report with your leg's state noted (w3708).`;
+      const woke = this.wakeNow(sid, note, w.id);
+      save({ ...after, prompted: now.toISOString() });
+      this.stamp(w, `leg ${sid} went on without DONE after the host leg ${host} said DONE (${clip(state, 160)}); ${woke ? 'asked it once to wrap up and say DONE' : `it could not be asked, so ${w.id} closes on the host's report`} (w3708)`);
+      if (woke) {
+        this.store.putWork(w);
+        return true;
+      }
+    } else if (fromEnd) {
+      // Only an end after a turn of its since the ask: the same end reported twice (w3523 logged two at 15:57) is not one.
+      const turnAt = Date.parse(this.store.sessions.get(sid)?.lastResultAt ?? '') || 0;
+      if (turnAt <= Date.parse(after.prompted)) return true;
+    }
+    const noted = `Leg ${sid} did not say DONE after the host's DONE and one reminder: ${clip(state, 200)}`;
+    const problem = doneProblem(w, hostDone.text ?? hostDone.report);
+    if (problem) {
+      save({ ...(w.pair!.afterHost?.[sid] ?? {}), escalated: now.toISOString() });
+      this.stamp(w, `${noted}; the host's report cannot close it (${problem}), so the dispatcher decides (w3708)`);
+      this.store.putWork(w);
+      this.toDispatcher(`[ledger] Pair run ${w.id} "${clip(w.title, 100)}" (${names(w.requesters)}'s) is jammed: its host leg ${host} said DONE at ${hostDone.at.slice(11, 16)} UTC, but its leg ${sid} went on without DONE after one reminder (${clip(state, 200)}), and the host's report cannot close it: ${problem}. Decide: close it (decide_work), start what is missing, or ask its person (w3708).`);
+      return true;
+    }
+    this.closeOnDone(w, host, `${hostDone.report} (${noted}.)`, `the host leg ${host} said DONE and leg ${sid} went on without DONE after one reminder (w3708)`);
+    if (!this.handsOf(sid).length) this.d.cancelWake?.(sid);
+    return true;
+  }
+
+  /**
+   * w3708: the ledger's 5-minute pass, for request `id`: a pair run whose host leg said DONE and whose other leg has not,
+   * PAIR_WRAP_UP_MS after the host's DONE (the leg is asked to wrap up) or after that ask (the run closes or goes to the
+   * dispatcher): a leg that never ends its turn, or ends it on short check-ins, holds a run no longer than that.
+   */
+  pairLegsOverdue(id: string): boolean {
+    const w = this.store.work.get(id);
+    const legs = w?.pair?.started?.legs;
+    if (!w || !isOpen(w) || !legs || legs.length < 2) return false;
+    const hostDone = doneOf(w)[legs[0].session];
+    if (!hostDone || hostDone.leg) return false;
+    const now = this.now().getTime();
+    let acted = false;
+    for (const { session: sid } of legs.slice(1)) {
+      if (!isOpen(w) || doneOf(w)[sid] || !w.sessionIds.includes(sid) || w.movedOff?.[sid]) continue;
+      const after = w.pair!.afterHost?.[sid];
+      if (after?.escalated) continue;
+      const since = Date.parse(after?.prompted ?? hostDone.at) || now;
+      if (now - since < PAIR_WRAP_UP_MS) continue;
+      const mins = Math.round((now - (Date.parse(hostDone.at) || now)) / 60_000);
+      acted = this.pairLegLingers(w, sid, `no DONE ${mins} min after the host's DONE`, false) || acted;
+    }
+    return acted;
+  }
+
+  /**
    * What worker `sid` still has pending on request `w` once its process has ended (w1972, lothsahn: "Please fix the closing
    * job so it doesn't close out jobs with errors"): a check-in, a gate on the request, a wait on a person, a question, a
    * last report that says the request is still open, or a stop its machine going offline made (a daemon update or restart
@@ -6291,7 +6409,10 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const wake = this.d.pendingWake?.(sid);
     if (wake) return `its check-in is pending (${wake.at.slice(11, 16)} UTC: "${clip(wake.note, 80)}")`;
     if (s.waitingOn && (!s.waitingOn.request || s.waitingOn.request === w.id)) return `it waits on ${s.waitingOn.who}`;
-    if (w.blocked) return `the request is blocked on ${w.blocked.kind}${w.blocked.ref ? ` ${w.blocked.ref}` : ''}`;
+    // w3708: a gate on this very worker (w2476: another worker's report waits on it) is that worker's wait, not work of its
+    // own: w3523 stayed "blocked on worker 4f65cc5c" as 4f65cc5c's own pending work, six ends over 5 h.
+    const gate = gatesOf(w).find((g) => !(g.kind === 'worker' && g.ref === sid));
+    if (gate) return `the request is blocked on ${gate.kind}${gate.ref ? ` ${gate.ref}` : ''}`;
     if (w.question) return 'a question on it waits on a person';
     const open = s.lastResult ? stillOpenIn(s.lastResult.slice(-2000)).get(w.id.toLowerCase()) : undefined;
     if (open) return `its last report says "${clip(open, 120)}"`;
@@ -6351,6 +6472,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       const ended = this.store.sessions.get(s.id);
       // w2239: an earlier pair attempt's leg has nothing pending once the newest attempt's legs said DONE.
       const pending = ended && replacedLeg(w, ended) ? undefined : this.pendingOn(w, s.id);
+      if (pending && this.pairLegLingers(w, s.id, `it ended with work still pending: ${pending}`, true)) continue;
       if (pending) {
         this.stamp(w, `worker ${s.id} ended; its other workers said DONE, but it stays open: ${s.id} still has work on it: ${pending} (w1972)`);
         this.store.putWork(w);
@@ -6435,7 +6557,9 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       const was = prior?.text;
       w.done = { ...doneOf(w), [s.id]: { at: this.now().toISOString(), report, text: (was ? `${was}\n\n${text}` : text).slice(-DONE_TEXT_CHARS) } };
       this.releaseAfterDone(w);
+      if (!ops) this.dropWorkerWaitsOf(w, s.id);
       const others = this.stillOn(w, s.id);
+      if (others.length && !ops) this.tellLegsRunOver(w, s.id, others);
       if (others.length) {
         const still = others.join(', ');
         w.done[s.id].told = still;
