@@ -6926,6 +6926,20 @@ test('w3530: a Queued pair run gets its legs while single work arrives as sandbo
   clock(t0);
   w('w3').priority = 'urgent';
   assert.equal(agents.pairHoldProblem('pc', w('w3')), undefined);
+  w('w3').priority = 'normal';
+  // A pair the computers that are up could never complete holds nothing (live, 2026-11-08 03:17-04:09Z: biscuit held for
+  // w3347, whose only other computers were m3, offline, and lothlaptop, paused): with m5 offline w2 (which avoids beast) has
+  // no second computer, so w5 waits holding pc instead; with m5 paused from its tray app, the same.
+  const places = agents.places.bind(agents);
+  agents.places = () => places().map((p) => (p.id === 'm5' ? { ...p, online: false } : p));
+  assert.equal(agents.pairPlan(agents.roomFacts()).get('pc')?.pair.id, 'w5');
+  assert.match(agents.pairHoldProblem('pc', w('w3')) ?? '', /held for w5 /);
+  agents.places = places;
+  assert.equal(agents.pairPlan(agents.roomFacts()).get('pc')?.pair.id, 'w2');
+  const placement = agents.placement.bind(agents);
+  agents.placement = (b?: boolean) => ({ ...placement(b), hold: { m5: 'paused from its tray app: paused by hand (w1532)' } });
+  assert.equal(agents.pairPlan(agents.roomFacts()).get('pc')?.pair.id, 'w5');
+  agents.placement = placement;
 });
 
 test('w1995: a small computer\'s last free sandbox is held for the timed work Queued for it: other work starts elsewhere, a pair leg only when no other computers hold the pair', async (t) => {

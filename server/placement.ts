@@ -431,6 +431,25 @@ export function slotsOf(p: Computer, kind: NeedKind): number {
   return Math.max(1, n);
 }
 
+/** What decides which work can run on `p` (RoomNow.fit, shared/capacity.ts unfitWhy). */
+const fitOf = (p: Computer): RoomFit => ({ ...(p.platform ? { platform: p.platform } : {}), ...(p.noTimedRuns ? { noTimedRuns: p.noTimedRuns } : {}), ...(p.steam ? { steam: p.steam } : {}), ...(p.desktop ? { desktop: p.desktop } : {}), ...(p.cargoShort ? { cargoShort: p.cargoShort } : {}) });
+
+/**
+ * Whether pair run `w` could ever get all its legs at once (w3530): pairRoom over every computer that is online and not held
+ * or paused (placement.hold, a tray pause), busy or not, that unfitWhy lets one of its legs on. One that cannot holds no
+ * computer while it waits: after #878 went live (2026-11-08 03:17Z) biscuit was held for w3347, urgent, timed and kept off
+ * beast and lothdesktop, whose only other computers were m3 (offline 51 h) and lothlaptop (paused by hand), so the one waiting
+ * pair could never start and w3467 and w3469, which any two computers fit, held nothing for an hour.
+ */
+export function pairCanFinish(places: readonly Computer[], prefs: PlacementPrefs, w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes' | 'pair'>, needs?: readonly string[]): boolean {
+  const hold = holdOnly(prefs);
+  const want = needs?.map((n) => n.toLowerCase());
+  const up = places.filter((p) => p.online && !hold.has(p.id) && (!want?.length || want.includes(p.id.toLowerCase())));
+  const fit = Object.fromEntries(up.map((p) => [p.id, fitOf(p)]));
+  const one = { ...w, pair: { ...w.pair!, legs: 1 } };
+  return !pairRoom(w, up.map((p) => p.id).filter((id) => !unfitWhy(one, id, fit, needs)), fit).short;
+}
+
 export function roomNow(places: readonly Computer[], prefs: PlacementPrefs = {}): RoomNow {
   const hold = holdOnly(prefs);
   const min = minOf(prefs);
@@ -440,7 +459,7 @@ export function roomNow(places: readonly Computer[], prefs: PlacementPrefs = {})
     if (!kinds.length) continue;
     for (const k of kinds) out.slots![`${k}:${p.id}`] = slotsOf(p, k);
     out.detail![p.id] = `${p.freeSandboxes} of ${p.maxSandboxes} sandboxes free, ${p.midTurn} agents mid-turn of ${p.maxAgents} (${p.live} live), ${memPct(p) !== undefined ? `RAM ${memPct(p)}%` : 'RAM unknown'}`;
-    out.fit![p.id] = { ...(p.platform ? { platform: p.platform } : {}), ...(p.noTimedRuns ? { noTimedRuns: p.noTimedRuns } : {}), ...(p.steam ? { steam: p.steam } : {}), ...(p.desktop ? { desktop: p.desktop } : {}), ...(p.cargoShort ? { cargoShort: p.cargoShort } : {}) };
+    out.fit![p.id] = fitOf(p);
     const why = hold.get(p.id);
     if (why !== undefined) {
       out.held.push({ id: p.id, why, for: kinds });
