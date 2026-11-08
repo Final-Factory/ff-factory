@@ -5875,6 +5875,30 @@ test("w3398: a worker stopped on its timed run's check-in is not marked away whe
   info.status = status;
 });
 
+// w3663 (lothsahn): "a timed run cleared to run on its own computer takes that computer's exclusive ticket without parking".
+// Worker 66b1c43c, answered "here" on BEAST, still had tr_ab680eca38 waiting in LothDesktop's queue: that ticket is
+// LothDesktop's daemon's waiter, carrying the worker's session, not the worker's, so it parks nothing on BEAST.
+test("w3663: a worker's own timed run in another machine's queue does not park its tickets here; another ticket of it still does", async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, machines } = env;
+  putRequests(store, [{ id: 'w1', by: BEN, status: 'active' }]);
+  const a = await startedFor(env, 'w1');
+  const until = new Date(Date.now() + 3_600_000).toISOString();
+  store.sessions.get(a.id)!.timedVerdict = { verdict: 'here', why: 'both sides of an A/B stay on one machine', until };
+  const runs: { id: string; session: string; requests: string[]; machine: string; state: string }[] = [{ id: 'tr_ab680eca38', session: a.id, requests: ['w1'], machine: 'laptop', state: 'sent' }];
+  (agents as unknown as { timedRuns: unknown }).timedRuns = { runsOn: (m: string) => runs.filter((r) => r.machine === m) };
+  const at = new Date().toISOString();
+  const real = machines.allStats.bind(machines);
+  t.after(() => (machines.allStats = real));
+  machines.allStats = (() => ({ laptop: { hostname: 'l', platform: 'win32', cpuCount: 8, loadPct: 5, memTotalBytes: 1, memFreeBytes: 1, at, bench: { mode: 'free' as const, running: [], waiters: [{ ticket: 't00000912', mode: 'exclusive' as const, what: 'timed run tr_ab680eca38', session: a.id, ahead: 0 }], runningCount: 0, waiting: 1 } } })) as unknown as typeof machines.allStats;
+  const p = agents.benchPriorities('pc')[a.id];
+  assert.equal(p.away, undefined, 'its run waits on that daemon; the worker times here');
+  assert.equal(p.timed?.verdict, 'here');
+  // the run ended, and a ticket of its own is still there: parked as before (w1984)
+  runs.length = 0;
+  assert.deepEqual(agents.benchPriorities('pc')[a.id].away, { why: `its worker ${a.id.slice(0, 8)} has ticket t00000912 on laptop now`, exclusive_only: true });
+});
+
 // w1984 with w1983, lothsahn (via the orchestrator): when stop_agent move_to moves a worker to another computer, its bench
 // tickets on the old machine are dropped. Its requests leave it, so only the move's mark keeps it in that machine's list.
 test("w1984: after a move, no ticket of that worker holds anyone back in the old machine's bench queue", async (t) => {
