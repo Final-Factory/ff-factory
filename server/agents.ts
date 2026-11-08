@@ -118,6 +118,7 @@ import { type HostHealthMonitor } from './hostHealth.ts';
 import { describeCleanup, describeCleanupItems, describeCleanupLog } from './cleanup.ts';
 import type { BenchTicketGlance, BuildHold, HostHealth, TimedVerdict } from '../shared/types.ts';
 import { workerTickets } from './benchHolders.ts';
+import { BenchStops } from './benchStop.ts';
 import { PLAYERS_IN_SANDBOX } from './cloneGuard.ts';
 import { decideTimedPlace, fleetLoad, isSmallTimed, smallTimedStates, timedAskMark, unavailableWait, TIMED_VERDICT_MS, TIMED_WAIT_IDLE_MIN } from './timedAsk.ts';
 import { machinePinOf, pinFromText, pinRefusal, type MachinePin } from './machinePin.ts';
@@ -704,6 +705,8 @@ export class Agents {
   readonly pauses: MachinePauses;
   /** Builds first on BEAST (w1606, server/buildPlans.ts): a build declared coming clears its computer, then resumes what it paused. */
   readonly builds: BuildPlans;
+  /** A person stopping a worker's bench ticket (w3730, server/benchStop.ts): the dashboard's Stop and stop_bench_ticket. */
+  readonly benchStops: BenchStops;
   /** Commits that reached the base branch in the last 48 hours, for the ledger's overlap check; refreshed in the background. */
   private recentCommits: { sha: string; subject: string }[] = [];
 
@@ -714,6 +717,16 @@ export class Agents {
     this.machines = machines;
     this.identity = identity;
     this.waker = new Waker(sessions, store, path.join(cfg.dataDir, 'wakes.json'));
+    this.benchStops = new BenchStops({
+      known: (id) => store.machines.has(id),
+      machineIds: () => store.machines.keys(),
+      online: (id) => machines.isOnline(id),
+      bench: (id) => machines.statsOf(id)?.bench,
+      post: (id, msg) => machines.post(id, msg),
+      session: (sid) => store.sessions.get(sid) ?? [...store.sessions.values()].find((i) => i.id.startsWith(sid)),
+      send: (sid, text) => void sessions.send(sid, text, 'system'),
+      log: (line) => console.log(`[bench] ${line}`),
+    });
     // w1384: a person never gets a bare path to review media from their orchestrator: what a reply names is shown inline.
     store.assistantText = (id, text) => this.inlineForPerson(id, text);
     this.autoCompact = new AutoCompactor(sessions, cfg, { settleMs: cfg.orchestrator?.compactSettleMs, waitsLong: (i) => this.waitsLong(i), moving: (s) => this.accountMoveWhy(s) });
@@ -7272,6 +7285,23 @@ ${w.repo ?? ''}
           cancel: z.string().optional().describe('The id of a grant to take back, e.g. "w3159.b1".'),
         },
         wrap(async (a) => o.grantBenchTurn(chat(), a)),
+      ),
+      tool(
+        'stop_bench_ticket',
+        "Stop a worker's bench ticket on a machine when your person asks (w3730), as the Stop button on the machine's bench line does: its daemon revokes it (bench_queue.py's own revoke: what runs under it is asked to stop, its samples kept) and ends its helper's process tree 90 s later if it still holds; the holding worker is told who stopped it. Only in your person's own turn, and their name goes with it. Refused for a harness ticket (an editor's, a timed run's leg: cancel the run instead), the urgent release lane's or the nightly's, one not granted yet, and one the machine does not hold. Without `ticket`: lists the tickets that can be stopped, on `machine` or every machine.",
+        {
+          machine: z.string().optional().describe('The machine id, e.g. "lothdesktop" (list_machines).'),
+          ticket: z.string().optional().describe('The ticket, e.g. "t00000042", from the list or the machine\'s bench line.'),
+        },
+        wrap(async (a) => {
+          const c = chat();
+          const owner = c && o.ownerOf(c.info);
+          if (!c || !owner) throw new Error('only a person’s own orchestrator stops a bench ticket, in their name');
+          if (!a.ticket) return this.benchStops.list(a.machine);
+          if (!a.machine) throw new Error('machine: the machine id that holds the ticket (list_machines)');
+          if ((c.turnFrom ?? c.lastFrom) !== 'human') throw new Error(`only ${owner.displayName}, in a turn of theirs, stops a bench ticket: a check-in or a timer is not their turn`);
+          return this.benchStops.stop(a.machine, a.ticket, owner.displayName, 'through their orchestrator');
+        }),
       ),
       tool(
         ASK_TOOL,

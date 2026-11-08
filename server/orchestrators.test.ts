@@ -9540,6 +9540,45 @@ test("w3186: a longer bench turn Ben approved: recorded in his own turn with his
   assert.equal(agents.benchPriorities('pc')[a.id].exempt, undefined);
 });
 
+test("w3730: a person's orchestrator stops a worker's bench ticket in their name, only in their own turn, and lists what can be stopped", async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, machines, o, call, heard } = env;
+  putRequests(store, [{ id: 'w1', by: BEN, status: 'active', priority: 'normal' }]);
+  const a = await startedFor(env, 'w1');
+  const ben = o.personalFor(BEN);
+  const stats = machines.statsOf.bind(machines);
+  const running = [
+    { ticket: 't00000005', mode: 'exclusive', what: 'perf leg', session: a.id, requests: ['w1'] },
+    { ticket: 't00000006', mode: 'shared', what: 'editor boot', session: 'editor:alpha' },
+  ];
+  machines.statsOf = ((mid: string) => ({ ...(stats(mid) ?? {}), ...(mid === 'pc' ? { bench: { mode: 'exclusive', running, runningCount: running.length, waiting: 0 } } : {}) })) as typeof machines.statsOf;
+  const post = machines.post.bind(machines);
+  const posted: unknown[] = [];
+  machines.post = ((mid: string, msg: { type: string }, ...rest: unknown[]) => (msg.type === 'bench_revoke' ? void posted.push({ mid, ...msg }) : (post as (...a: unknown[]) => unknown)(mid, msg, ...rest))) as typeof machines.post;
+  t.after(() => {
+    machines.statsOf = stats;
+    machines.post = post;
+  });
+
+  (ben as unknown as { turnStarter?: unknown }).turnStarter = undefined; // the worker's start notice opened a turn
+  ben.lastFrom = 'human';
+  const list = await call(ben.info, 'stop_bench_ticket', {});
+  assert.match(list.text, new RegExp(`^Bench tickets that can be stopped on any online machine:\n- pc t00000005: exclusive, w1, worker ${a.id.slice(0, 8)}: "perf leg"$`), list.text);
+  ben.lastFrom = 'system';
+  assert.match((await call(ben.info, 'stop_bench_ticket', { machine: 'pc', ticket: 't00000005' })).text, /only Ben, in a turn of theirs, stops a bench ticket/);
+  ben.lastFrom = 'human';
+  assert.match((await call(ben.info, 'stop_bench_ticket', { machine: 'pc', ticket: 't00000006' })).text, /editor's ticket \(a harness ticket\)/);
+  assert.match((await call(ben.info, 'stop_bench_ticket', { machine: 'pc', ticket: 't00000077' })).text, /pc holds no ticket t00000077 now/);
+  assert.equal(posted.length, 0);
+  const before = heard(a.id, 'Bench lock (w3730)').length;
+  const r = await call(ben.info, 'stop_bench_ticket', { machine: 'pc', ticket: 't00000005' });
+  assert.equal(r.isError, false, r.text);
+  assert.match(r.text, /^Stopping pc's exclusive bench ticket t00000005 \("perf leg"\)/);
+  assert.deepEqual(posted, [{ mid: 'pc', type: 'bench_revoke', ticket: 't00000005', session: a.id, why: 'stopped by Ben through their orchestrator (w3730)' }]);
+  await until('the worker is told who stopped it', () => heard(a.id, 'Bench lock (w3730)').length > before);
+  assert.match(heard(a.id, 'Bench lock (w3730)').at(-1)!.text, /Ben stopped your pc's exclusive bench ticket t00000005/);
+});
+
 test('w3328: disk_cleanup marks a request a disk clean-up of a machine, from request_work, update_work or the dispatcher\'s start_agent; its worker\'s spec carries it, an ordinary one\'s and a title alone do not', async (t) => {
   const { store, machines, dispatcher, chat, call } = await setupOnMachine(t);
   const ben = chat(BEN);
