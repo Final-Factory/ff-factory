@@ -198,7 +198,7 @@ test('end to end: two builds made on one computer are timed on a play-only one u
     },
     deliver: async (session, text, files) => void delivered.push({ session, text, files }),
   });
-  runs.runner = new TimedRunner({
+  const deskDeps: ConstructorParameters<typeof TimedRunner>[0] = {
     root: deskRoot,
     portalUrl,
     token: 'tok-desk',
@@ -208,7 +208,8 @@ test('end to end: two builds made on one computer are timed on a play-only one u
     savesDir: path.join(d, 'saves'),
     pollMs: 5,
     spawnPlayer: (_exe, args, cwd) => spawn(process.execPath, [fake, ...args], { cwd, stdio: 'ignore', env: { ...process.env, FAKE_LOCK: path.join(deskRoot, 'tmp', 'bench.lock') } }),
-  });
+  };
+  runs.runner = new TimedRunner(deskDeps);
 
   // The worker's computer: two builds that share their big asset file, and a save.
   const sandbox = path.join(d, 'beast', 'slot1');
@@ -246,7 +247,8 @@ test('end to end: two builds made on one computer are timed on a play-only one u
     { name: 'fix', path: 'builds/fix' },
   ]);
   assert.match(answer, /Timed run tr_[0-9a-f]{10} handed to desk: base vs fix, 4 legs/);
-  assert.doesNotMatch(answer, /exclusive turns/, 'w3398: a play-only computer holds one ticket for the whole run, no turns');
+  assert.doesNotMatch(answer, /exclusive turns/, 'w3398: a short run on a play-only computer fits in one turn');
+  assert.match(answer, /It plays about \d+ min of legs .*not how long it holds the lock/, 'w3711: the answer quotes the play time, and says the bound is no lock time');
   // exe, FFCore.dll (small: one group per build), the shared .resS once, the save: 2 groups + 1 + 1.
   assert.equal(plans[0].uploads.length, 4);
   await done(1);
@@ -288,6 +290,23 @@ test('end to end: two builds made on one computer are timed on a play-only one u
   await done(2);
   assert.match(delivered[1].text, /done: 4 of 4 legs/);
   assert.ok(posted >= 4);
+
+  // w3711: a play-only computer plays in turns too (w1832: "at most 30 minutes" per exclusive lock). With a turn too short
+  // for a second leg, every leg holds a ticket of its own, given back and taken again between them; before, one ticket held
+  // the whole run (a 106-minute plan's lock for all of it).
+  deskDeps.turnPlanMs = 1;
+  await call([
+    { name: 'base', path: 'builds/base' },
+    { name: 'fix', path: 'builds/fix' },
+  ]);
+  await done(3);
+  assert.match(delivered[2].text, /done: 4 of 4 legs/);
+  const rec3 = store.get(delivered[2].files[0].id)!;
+  const tar3 = gunzipSync(fs.readFileSync(store.pathOf(rec3))).toString('latin1');
+  assert.equal([...tar3.matchAll(/gave its ticket back after \d of 4 legs/g)].length, 3, 'each of the 4 legs in a turn of its own: the ticket given back 3 times');
+  assert.match(tar3, /turn 4: holds the exclusive bench ticket t\d{8}: 1 legs left/);
+  assert.equal([...tar3.matchAll(/lock: timed run tr_[0-9a-f]{10}: /g)].length >= 4, true, 'every leg still played under a ticket');
+  assert.equal(readBenchLock(deskRoot), undefined, 'the last turn gave its ticket back');
 
   // A build outside the worker's folders is refused before anything is read.
   await assert.rejects(call([{ name: 'x', path: path.join(d, 'desk') }]), /outside your sandbox/);
