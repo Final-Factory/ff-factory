@@ -16,7 +16,7 @@ import { bus, type DistributiveOmit } from '../server/store.ts';
 import { CATALOG, buildOptions, githubCredentialEnv, type CatalogTool, type LaunchSpec, type ToolHandler } from '../server/launch.ts';
 import { MAIN_CLONE_NO_AGENTS, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION, RELOCATE_FALLBACK_MINUTES, SELF_UPDATE_VERSION, relocateProblem, type DaemonLiveView, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
 import { writeFileDurable } from '../server/durable.ts';
-import { HOST_PROTOCOL, HostedSession, hostFolders, hostLook, hostNodeArgs, hostPlace, hostsDir, pidAlive, readHostState } from './agentHost.ts';
+import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, pidAlive, readHostState } from './agentHost.ts';
 import { SelfUpdater } from './selfUpdate.ts';
 import { HOST_WATCH, HostWatch, folderLastWrite, lingeringRefusal, realHostProcs, removeHostDir, type LingeringHost } from './hostWatch.ts';
 /** The exit code of a daemon that ends for a newer one of its machine: its supervisor stops instead of starting it again. */
@@ -336,6 +336,11 @@ function wakesOf(w: Record<string, string>): Map<string, number> {
   return new Map(Object.entries(w).map(([id, at]) => [id, Date.parse(at)] as [string, number]).filter(([, t]) => Number.isFinite(t)));
 }
 
+/** An agent's statuses in the middle of a turn. */
+const MID_TURN_STATUSES = new Set(['running', 'starting', 'waiting_permission']);
+/** How long the daemon waits for an interrupted turn to stop before it answers that it has not (w3673); tests shorten it. */
+export const INTERRUPT_WAIT = { MS: 20_000 };
+
 export class Daemon {
   private readonly cfg: DaemonConfig;
   /** The outside watchdog of the portal's host, when this machine is the watcher (machine/outsideWatch.ts). */
@@ -613,6 +618,7 @@ export class Daemon {
       sessionKnown: (id) => this.entries.has(id) || this.portalSessions.has(id) || this.hostSessions.has(id),
       resumable: (id) => this.resumable.has(id),
       wakeAt: (id) => this.wakes.get(id),
+      hostSince: (id) => (this.hosted && /^[\w-]+$/.test(id) ? hostStartedAt(path.join(this.hostsRoot, id)) : undefined),
       liveSandboxes: () => new Set([...this.entries.values()].filter((e) => e.s.live && e.spec?.sandbox).map((e) => e.spec!.sandbox!)),
       ready: () => this.welcomed,
       slotRoots,
@@ -2393,6 +2399,55 @@ export class Daemon {
   }
 
   /**
+   * The hang watch's read of an agent host's tools (w3673): CPU so far of every process under the host's children (its
+   * claude: shells, builds, players), by `pid@start`. Undefined when this machine cannot list or read them.
+   */
+  private async toolsCpu(hostPid: number): Promise<Map<string, number> | undefined> {
+    if (!this.hosted) return undefined;
+    try {
+      const procs = await this.procs();
+      const below = procs.filter((p) => p.ppid === hostPid && p.pid !== hostPid).flatMap((c) => treeOf(c.pid, procs).slice(1));
+      if (!below.length) return new Map();
+      const facts = await inspectProcs(machinePlatformOf(process.platform), [...new Set(below)]);
+      return new Map(facts.filter((f) => f.cpuMs !== undefined).map((f) => [`${f.pid}@${f.startedAt ?? ''}`, f.cpuMs!]));
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * The portal's interrupt (w3673), logged with what became of it, and answered when it carries an id: 316ded29's
+   * interrupt at about 15:00 UTC 2026-11-08 left no line here, so nobody could tell whether it ever arrived. Its turn
+   * ending within INTERRUPT_WAIT.MS says it was taken; an agent that does not stop is reported, not waited for.
+   */
+  private interrupt(sessionId: string, id: string | undefined) {
+    const s = this.entries.get(sessionId)?.s;
+    const host = s instanceof HostedSession ? s : undefined;
+    const delivered = !!s && (host ? host.hostRunning : s.live);
+    const answer = (stopped: boolean, text: string) => {
+      log(`agent ${sessionId}: interrupt${id ? '' : ' (no answer asked)'}: ${text}`);
+      if (id) this.send({ type: 'interrupt_result', id, delivered, stopped, text });
+    };
+    if (!s) return answer(false, 'no such agent on this machine: nothing interrupted');
+    if (!delivered) return answer(false, `its agent is not running here (${s.info.status}): nothing interrupted`);
+    const was = s.info.status;
+    void s.interrupt();
+    if (!MID_TURN_STATUSES.has(was)) return answer(false, `given to its ${host ? 'agent host' : 'agent'}, but it was not mid-turn (${was})`);
+    const t0 = Date.now();
+    const look = setInterval(() => {
+      const now = s.info.status;
+      if (!MID_TURN_STATUSES.has(now) || !s.live) {
+        clearInterval(look);
+        answer(true, `its turn stopped ${((Date.now() - t0) / 1000).toFixed(1)} s after the interrupt (${now})`);
+      } else if (Date.now() - t0 >= INTERRUPT_WAIT.MS) {
+        clearInterval(look);
+        answer(false, `given to its ${host ? `agent host (pid ${host.hostPid ?? '?'})` : 'agent'}, but its turn had not stopped ${Math.round(INTERRUPT_WAIT.MS / 1000)} s later (still ${now}): its agent may be hung${host ? ` (its host's log: ${path.join(host.dir, 'host.log')})` : ''}; FF Factory's hang watch ends and resumes an agent that makes no progress for ${Math.round(HANG_WATCH.SILENT_MS / 60_000)} min mid-turn (w3673)`);
+      }
+    }, 250);
+    look.unref?.();
+  }
+
+  /**
    * Whether a session's agent process runs here (w1196): its entry says so, or its agent host is up (after a daemon restart
    * a host runs before the daemon takes it back). A host folder still starting counts while it is fresh.
    */
@@ -2425,6 +2480,7 @@ export class Daemon {
       },
       changed: () => this.awake(),
       log: (line) => log(line),
+      toolsCpu: (pid) => this.toolsCpu(pid),
       // Its tree being stopped (w799): its sandbox is taken until it is gone.
       stopping: (h, on) => {
         const sandbox = holder.e?.spec?.sandbox ?? hostPlace(h.dir)?.sandbox;
@@ -2899,7 +2955,7 @@ export class Daemon {
         return;
       }
       case 'interrupt':
-        void this.entries.get(msg.sessionId)?.s.interrupt();
+        this.interrupt(msg.sessionId, msg.id);
         return;
       case 'compact': {
         // w1469: only a live agent between turns; anything else is left alone and the portal tries after a later turn.

@@ -11,11 +11,11 @@ import type { Duplex } from 'node:stream';
 import { Store } from './store.ts';
 import { QUEUE_HOLD_MS, SessionManager, snapshotOf, type SessionHandle, type SessionSink } from './sessions.ts';
 import { collectResume } from './restart.ts';
-import { HOST_DIED, HOST_DIED_RESUME_MS, MachineManager, RESUME_DELAY_MS, RemoteSession, cutOffMidTurn, daemonBehind, enrolledMachines, issueMachineToken, minutesText, revokeMachineToken } from './machines.ts';
+import { HOST_DIED, HOST_DIED_RESUME_MS, INTERRUPT_ANSWER_MS, MachineManager, RESUME_DELAY_MS, RemoteSession, cutOffMidTurn, daemonBehind, enrolledMachines, issueMachineToken, minutesText, revokeMachineToken } from './machines.ts';
 import { OLDEST_DAEMON_PROTOCOL, PROTOCOL_VERSION, protocolProblem } from './machineProtocol.ts';
 import { buildOptions } from './launch.ts';
 import { HOST_LOGIN } from './usage.ts';
-import { Daemon, RECONNECT_MS, type Probes } from '../machine/daemon.ts';
+import { Daemon, INTERRUPT_WAIT, RECONNECT_MS, type Probes } from '../machine/daemon.ts';
 import { sessionVerdict } from '../machine/leftovers.ts';
 import { workLive } from '../shared/workState.ts';
 import { ROOM_WAIT } from './resumeMove.ts';
@@ -1651,8 +1651,56 @@ test('w2884: a worker whose host dies between turns is not resumed by the host-d
 });
 
 test('w2884: HOST_DIED names every way a daemon reports a dead agent host, and nothing else', () => {
-  for (const w of ['its agent host stopped unexpectedly', 'its agent host stopped unexpectedly (its scope u: killed by the OOM killer)', 'its agent host is gone (pid 4 is another program now)', 'its agent host gave no heartbeat for 10 min while its process ran: stopped']) assert.ok(HOST_DIED.test(w), w);
+  for (const w of ['its agent host stopped unexpectedly', 'its agent host stopped unexpectedly (its scope u: killed by the OOM killer)', 'its agent host is gone (pid 4 is another program now)', 'its agent host gave no heartbeat for 10 min while its process ran: stopped', 'its agent host made no progress for 35 min mid-turn (its last transcript line or tool call at 02:42 UTC), and its tools used 0.4 s of CPU in 5 min: its process tree was ended so that it is resumed (w3673)']) assert.ok(HOST_DIED.test(w), w);
   for (const w of ['its agent host did not start (see x)', 'stopped by stop_agent', 'mx is offline']) assert.ok(!HOST_DIED.test(w), w);
+});
+
+/** A FakeAgent whose interrupt ends its turn, as a working claude's does. */
+class StoppingAgent extends FakeAgent {
+  async interrupt() {
+    if (this.info.status !== 'running') return;
+    setTimeout(() => {
+      Object.assign(this.info, { status: 'idle', turnOpenSince: undefined });
+      (this as unknown as { sink: SessionSink }).sink.putSession(this.info);
+    }, 30);
+  }
+}
+
+// w3673: the dispatcher's interrupt of worker 316ded29 (lothdesktop, 2026-11-07 15:00) left no line in its daemon's log, and
+// interrupt_agent said "Interrupted." whatever happened. Its daemon now answers what became of it.
+test('w3673: interrupt_agent says what its daemon did: stopped, delivered but not stopped, offline, or no answer', async (t) => {
+  const { sessions, mm, daemon, cleanup } = await setup();
+  t.after(cleanup);
+  INTERRUPT_WAIT.MS = 300;
+  t.after(() => (INTERRUPT_WAIT.MS = 20_000));
+  const d = daemon(undefined, StoppingAgent);
+  await until('online', () => mm.isOnline('mx') && mm.protocolOf('mx') !== undefined);
+  const s = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'w', permissionMode: 'default' }) as RemoteSession;
+  sessions.send(s.info.id, 'long build');
+  await until('mid-turn', () => s.info.status === 'running' && s.live);
+  assert.match(await s.interruptAnswered(), /^Interrupted: mx's daemon says its turn stopped [\d.]+ s after the interrupt \(idle\)\.$/);
+
+  // Between turns: delivered, nothing to stop.
+  await until('idle', () => s.info.status === 'idle');
+  assert.match(await s.interruptAnswered(), /^Interrupt delivered, its turn not stopped: mx's daemon says given to its agent, but it was not mid-turn \(idle\)\.$/);
+
+  // A wedged agent: its interrupt changes nothing (316ded29's case).
+  const agent = (d as unknown as { entries: Map<string, { s: SessionHandle }> }).entries.get(s.info.id)!.s;
+  agent.interrupt = async () => undefined;
+  sessions.send(s.info.id, 'long wait loop');
+  await until('mid-turn again on its machine', () => agent.info.status === 'running');
+  assert.match(await s.interruptAnswered(), /^Interrupt delivered, its turn not stopped: mx's daemon says given to its agent, but its turn had not stopped 0 s later \(still running\): its agent may be hung; FF Factory's hang watch ends and resumes an agent that makes no progress for 30 min mid-turn \(w3673\)\.$/);
+
+  // A daemon that never answers (one older than w3673, or a link that dropped after the send).
+  INTERRUPT_WAIT.MS = 60_000;
+  INTERRUPT_ANSWER_MS.value = 100;
+  t.after(() => (INTERRUPT_ANSWER_MS.value = 30_000));
+  assert.match(await s.interruptAnswered(), /^Interrupt sent to mx, but its daemon did not answer within 0 s .*whether its agent stopped is unknown/);
+
+  // Its machine offline: said so, never "Interrupted."
+  d.shutdown();
+  await until('offline', () => !mm.isOnline('mx'));
+  assert.match(await s.interruptAnswered(), /^Not interrupted: mx is offline, so its daemon was not told/);
 });
 
 test('w3597: a resume its daemon refuses at the agent cap is Queued for a slot, not Stalled in error, and goes by itself when a slot frees', async (t) => {

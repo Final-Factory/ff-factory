@@ -58,6 +58,31 @@ const START_MS = 60_000;
  */
 export const RPC_ANSWER_MS = 20 * 60_000;
 
+/**
+ * The hang watch (w3673): an agent mid-turn whose host still beats but whose agent shows no progress at all. 316ded29
+ * (w3510 on lothdesktop) made its last tool call at 02:42 UTC 2026-11-08 and nothing after it for 12 h, while its host's
+ * heartbeat (a timer, whatever its agent does) had ten daemon restarts adopt it "running, live".
+ * - SILENT_MS: no transcript line, streamed text or tool call to the daemon this long mid-turn. No single step of a
+ *   working agent is that silent: a foreground Bash call ends by 10 min (Claude Code's own limit), a call to this daemon
+ *   by RPC_ANSWER_MS (20), a subagent's steps reach the transcript, and waiting on a person is waiting_permission.
+ * - LOOK_MS: then its tools' CPU (the processes under its claude) is read twice, this far apart.
+ * - BUSY_CPU_MS: that much CPU in LOOK_MS keeps it (a build, a timed run: flagged, never ended), looked at again every
+ *   LOOK_MS. Measured on beast (Git bash): one turn of an `until grep …; do sleep 30; done` wait loop costs 0.115 s of
+ *   CPU, 1.2 s per 5 min; a build or a test run uses minutes of CPU per 5 min.
+ * Otherwise its host's whole tree is ended ("its agent host made no progress ..."), and the portal resumes it (w2884's
+ * hostDied, server/machines.ts HOST_DIED).
+ */
+export const HANG_WATCH = { SILENT_MS: 30 * 60_000, LOOK_MS: 5 * 60_000, BUSY_CPU_MS: 30_000 };
+/** What an agent's host writes only when its agent did something (w3673): `state` and `closed` come from the host too. */
+const PROGRESS_OPS = new Set<HostMessage['op']>(['event', 'delta', 'amend', 'image', 'rpc', 'signal']);
+
+/** CPU used between two reads of the same processes (`pid@start` → ms); a process new in `after` counts in full. */
+export function cpuSince(before: Map<string, number>, after: Map<string, number>): number {
+  let ms = 0;
+  for (const [k, v] of after) ms += Math.max(0, v - (before.get(k) ?? 0));
+  return ms;
+}
+
 const SIGNALS: SignalName[] = ['turnEnd', 'permission', 'result', 'ended', 'rateLimit'];
 
 export const hostsDir = (appDir: string) => path.join(appDir, 'hosts');
@@ -111,7 +136,7 @@ export class LineTail {
 
 export function hostFiles(dir: string) {
   const f = (n: string) => path.join(dir, n);
-  return { dir, in: f('in.jsonl'), out: f('out.jsonl'), host: f('host.json'), state: f('state.json'), place: f('place.json'), offset: f('daemon.offset'), beat: f('beat'), log: f('host.log'), creds: f('creds.sha'), scope: f('scope') };
+  return { dir, in: f('in.jsonl'), out: f('out.jsonl'), host: f('host.json'), state: f('state.json'), place: f('place.json'), offset: f('daemon.offset'), beat: f('beat'), log: f('host.log'), creds: f('creds.sha'), scope: f('scope'), progress: f('daemon.progress') };
 }
 
 const CREDENTIAL_ENV = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'GH_TOKEN'] as const;
@@ -258,6 +283,13 @@ export interface HostDeps {
   hungMs?: number;
   /** Why a host's systemd scope ended (machine/linuxScope.ts scopeEndCause, w2884); tests stand in for journalctl. */
   scopeEndCause?: (unit: string) => string | undefined;
+  /**
+   * CPU used so far by the tools its agent runs (w3673): the processes under its host's children (its claude), by
+   * `pid@start`, in ms; undefined when the machine cannot tell. Without it the hang watch counts its tools as idle.
+   */
+  toolsCpu?: (hostPid: number) => Promise<Map<string, number> | undefined>;
+  /** The hang watch's limits (HANG_WATCH); tests shorten them. */
+  hang?: Partial<typeof HANG_WATCH>;
 }
 
 /**
@@ -321,6 +353,15 @@ export class HostedSession implements SessionHandle {
   private waiting: Omit<Extract<HostCommand, { op: 'send' }>, 'n'>[] = [];
   /** The credentials its running host started with (credsOf), so a message for other ones starts a new host (w1745). */
   private creds?: string;
+  /** When its agent last did something (PROGRESS_OPS) or was given a turn: the hang watch's clock (w3673). */
+  private progressAt = Date.now();
+  private progressSaved = 0;
+  /** The hang watch's look at it (w3673): since when, its tools' CPU then, and the status detail it set. */
+  private hang?: { since: number; cpu?: Map<string, number>; flag?: string };
+  private hangLooking = false;
+  /** adopt() is reading what its host wrote before this daemon: no progress now, only whether there was any (w3673). */
+  private adopting = false;
+  private adoptedProgress = false;
   private readonly files: ReturnType<typeof hostFiles>;
   private readonly deps: HostDeps;
   private readonly procs: HostProcs;
@@ -336,6 +377,11 @@ export class HostedSession implements SessionHandle {
   /** A host process runs or starts for it, or its tree is being stopped: the host watch leaves its folder alone. */
   get followed() {
     return this.running || !!this.stoppingNow;
+  }
+
+  /** A host process runs (or is starting) for it: what it is told reaches its agent (w3673's interrupt answer). */
+  get hostRunning() {
+    return this.running;
   }
 
   /** Its host's tree is being stopped (w799). */
@@ -378,6 +424,18 @@ export class HostedSession implements SessionHandle {
     const alive = look === 'alive' || look === 'stale';
     this.running = alive;
     this.follow(offset);
+    // The hang watch's clock goes on across daemons (w3673): 316ded29 was adopted "running, live" ten times in its 12 h
+    // without a word. What the daemon before last saw, else when out.jsonl was last written; lines read now are older.
+    this.adopting = true;
+    this.adoptedProgress = false;
+    try {
+      this.tail?.poll();
+    } finally {
+      this.adopting = false;
+    }
+    const saved = Number(readFileOr(f.progress, '')) || undefined;
+    this.progressAt = saved ?? fileTime(f.out) ?? Date.now();
+    if (saved !== undefined && this.adoptedProgress) this.progressAt = Math.max(saved, fileTime(f.out) ?? saved);
     if (!alive) {
       // Gone with nothing more to say: whatever it recorded is forwarded; the session is not live, so the portal resumes
       // it when it was mid-turn (resumeCutOff, with its sdkSessionId) and the next message starts a new host.
@@ -421,6 +479,9 @@ export class HostedSession implements SessionHandle {
       }
     } else this.sends.push(this.command(cmd) as Extract<HostCommand, { op: 'send' }>);
     this.lastFrom = from;
+    // A new turn starts the hang watch's clock; a message to an agent mid-turn waits in its host and does not (w3673:
+    // 316ded29's 12:30 follow-up and its disk notices said nothing of its agent).
+    if (this.info.status !== 'running') this.progressAt = Date.now();
     // As AgentSession does, at once: what the agent limits count until the host's own record comes.
     this.liveNow = true;
     this.info.status = 'running';
@@ -529,6 +590,8 @@ export class HostedSession implements SessionHandle {
     const start: HostStart = { hostProtocol: HOST_PROTOCOL, info: { ...this.info, pendingPermissions: [] }, seq: this.seq, spec, editorUp: this.deps.editorUp() };
     this.running = true;
     this.launchedAt = Date.now();
+    this.progressAt = this.launchedAt;
+    this.hang = undefined;
     this.staleSince = undefined;
     this.pid = undefined;
     this.follow(0);
@@ -574,6 +637,7 @@ export class HostedSession implements SessionHandle {
       case 'alive':
         if (this.staleSince !== undefined) this.deps.log(`agent host ${this.info.id}: its heartbeat is back after ${Math.round((Date.now() - this.staleSince) / 1000)} s`);
         this.staleSince = undefined;
+        this.watchProgress();
         return;
       case 'gone':
         this.tail.poll();
@@ -622,6 +686,80 @@ export class HostedSession implements SessionHandle {
   }
 
   /**
+   * The hang watch (w3673, HANG_WATCH): mid-turn, its host beating, and nothing from its agent for SILENT_MS. Its tools'
+   * CPU is read then and LOOK_MS later: busy tools keep it (flagged in its status detail and the log, looked at again every
+   * LOOK_MS); otherwise its host's whole tree is ended and the portal resumes it. CPU this machine cannot read counts as idle.
+   */
+  private watchProgress() {
+    const lim = { ...HANG_WATCH, ...this.deps.hang };
+    if (this.info.status !== 'running' || this.stoppingNow) {
+      this.hang = undefined;
+      return;
+    }
+    const now = Date.now();
+    if (this.hangLooking || now - this.progressAt < lim.SILENT_MS || (this.hang && now - this.hang.since < lim.LOOK_MS)) return;
+    const pid = this.hostPid;
+    const id = this.info.id;
+    const look = `${Math.round(lim.LOOK_MS / 60_000)} min`;
+    this.hangLooking = true;
+    void (pid && this.deps.toolsCpu ? this.deps.toolsCpu(pid).catch(() => undefined) : Promise.resolve(undefined))
+      .then((cpu) => {
+        if (!this.running || this.stoppingNow || this.info.status !== 'running' || Date.now() - this.progressAt < lim.SILENT_MS) return;
+        const silent = `${Math.round((Date.now() - this.progressAt) / 60_000)} min`;
+        const last = new Date(this.progressAt).toISOString().slice(11, 16) + ' UTC';
+        if (!this.hang) {
+          this.hang = { since: Date.now(), cpu };
+          this.flag(`no progress from its agent for ${silent} mid-turn (since ${last}); FF Factory's hang watch reads its tools' CPU for ${look}, then ends and resumes it unless they are busy (w3673)`);
+          return;
+        }
+        const used = cpu && this.hang.cpu ? cpuSince(this.hang.cpu, cpu) : undefined;
+        const usedText = used === undefined ? 'CPU this machine could not read' : `${(used / 1000).toFixed(1)} s of CPU in ${look}`;
+        if (used !== undefined && used >= lim.BUSY_CPU_MS) {
+          this.hang = { since: Date.now(), cpu };
+          this.flag(`no progress from its agent for ${silent} mid-turn (since ${last}), but its tools are at work (${usedText}): kept, looked at again in ${look} (w3673)`);
+          return;
+        }
+        this.deps.log(`agent host ${id}: its agent looks hung: ${silent} without progress mid-turn, its tools used ${usedText}`);
+        void this.endNow(`its agent host made no progress for ${silent} mid-turn (its last transcript line or tool call at ${last}), and its tools used ${usedText}: its process tree was ended so that it is resumed (w3673)`);
+      })
+      .finally(() => (this.hangLooking = false));
+  }
+
+  /** The hang watch's word, in its status detail (what the portal and the ledger show) and the daemon's log (w3673). */
+  private flag(text: string) {
+    this.hang!.flag = text;
+    this.info.statusDetail = text;
+    this.deps.log(`agent host ${this.info.id}: ${text}`);
+    this.deps.out({ type: 'session', info: this.info, live: this.liveNow });
+  }
+
+  /** Its agent did something (w3673): the hang watch's clock starts again, and a look it had begun ends. */
+  private progressed() {
+    if (this.adopting) {
+      this.adoptedProgress = true;
+      return;
+    }
+    const now = Date.now();
+    if (this.hang) {
+      this.deps.log(`agent host ${this.info.id}: its agent made progress again after ${Math.round((now - this.progressAt) / 60_000)} min`);
+      if (this.hang.flag && this.info.statusDetail === this.hang.flag) {
+        delete this.info.statusDetail;
+        this.deps.out({ type: 'session', info: this.info, live: this.liveNow });
+      }
+      this.hang = undefined;
+    }
+    this.progressAt = now;
+    // Kept for the next daemon (adopt), at most once a minute.
+    if (now - this.progressSaved < 60_000 || !fs.existsSync(this.files.dir)) return;
+    try {
+      fs.writeFileSync(this.files.progress, String(now));
+      this.progressSaved = now;
+    } catch {
+      // the next progress tries again
+    }
+  }
+
+  /**
    * Why its host died, as far as this machine says (w2884): on Linux its systemd scope's journal names an OOM kill
    * ("A process of this unit has been killed by the OOM killer."), which ended the whole scope under OOMPolicy=stop.
    */
@@ -651,6 +789,7 @@ export class HostedSession implements SessionHandle {
       return;
     }
     const id = this.info.id;
+    if (PROGRESS_OPS.has(m.op)) this.progressed();
     switch (m.op) {
       case 'state':
         this.applyState(m, true);
@@ -719,6 +858,8 @@ export class HostedSession implements SessionHandle {
     // The host's record replaces the copy here, cleared fields included (the portal clears what is absent).
     for (const k of Object.keys(this.info)) if (!(k in m.info)) delete (this.info as unknown as Record<string, unknown>)[k];
     Object.assign(this.info, m.info);
+    // The hang watch's word stays until its agent makes progress (w3673): its host knows nothing of it.
+    if (this.hang?.flag && m.info.status === 'running' && !m.info.statusDetail) this.info.statusDetail = this.hang.flag;
     this.liveNow = m.live;
     this.lastFrom = m.lastFrom;
     this.turnFrom = m.turnFrom;
@@ -801,6 +942,15 @@ export class HostedSession implements SessionHandle {
 
 const withoutN = ({ n: _n, ...c }: Extract<HostCommand, { op: 'send' }>) => c;
 
+/** When a file was last written (ms), undefined when it is missing. */
+function fileTime(file: string): number | undefined {
+  try {
+    return fs.statSync(file).mtimeMs;
+  } catch {
+    return undefined;
+  }
+}
+
 function readFileOr(file: string, or: string) {
   try {
     return fs.readFileSync(file, 'utf8');
@@ -829,6 +979,8 @@ export function hostFolders(root: string): { sessionId: string; dir: string; rec
 
 /** The session's last record a host wrote (state.json), or undefined before its first. */
 export const readHostState = (dir: string) => readJson<Extract<HostMessage, { op: 'state' }>>(hostFiles(dir).state);
+/** When the agent host in `dir` started (ms, its host.json), or undefined (w3673: what an earlier host left is older). */
+export const hostStartedAt = (dir: string) => Date.parse(readJson<HostRecord>(hostFiles(dir).host)?.startedAt ?? '') || undefined;
 
 /** A host folder's place (its folder and sandbox), for the agent limits and the attachments' Inbox. */
 export const hostPlace = (dir: string) => readJson<{ cwd: string; sandbox?: string }>(hostFiles(dir).place);

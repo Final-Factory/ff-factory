@@ -323,6 +323,22 @@ it running, mid-turn or idle. The next daemon takes it back.
     reused pid is never taken for it or killed.
   - A **late heartbeat with the process alive is not an end**: the host is kept, read and answered on; silent for 5 min
     (`HOST_WATCH.HUNG_MS`) it is stopped. Only a gone pid (or one that is another program now) ends it at once.
+  - **A beating host says nothing of its agent** (w3673): the heartbeat is a timer in the host, so worker 316ded29 on
+    lothdesktop (2026-11-07) was adopted "running, live" by ten daemons over 12 h without a tool call. The **hang watch**
+    (`machine/agentHost.ts` `HANG_WATCH`, `HostedSession.watchProgress`): mid-turn, 30 min without an `event`, `delta`,
+    `amend`, `image`, `rpc` or `signal` line from its host (a message held mid-turn does not count), the daemon reads the
+    CPU of its tools (everything under claude: its shells, builds and MCP servers, not claude itself) and again 5 min later. 30 s or
+    more of CPU keeps it, flagged in its status detail and looked at again every 5 min (a Unity build or a timed run uses
+    minutes per 5 min; a `sleep 30` wait loop on Git Bash 1.2 s, measured on BEAST); less ends its host's tree ("its agent
+    host made no progress ..."), and the portal resumes it once (`HOST_DIED`, w2884). Its clock is kept across daemons in
+    the host folder's `daemon.progress`. A claude Bash call ends by 10 min and an FF MCP call by 20 min (`RPC_ANSWER_MS`),
+    so 30 min silent mid-turn is no wait of the agent's own.
+  - **An interrupt is answered** (w3673): the daemon logs every `interrupt` and answers `interrupt_result` (delivered; its
+    turn stopped within 20 s, or not, naming the host's log); `interrupt_agent` returns that, or says the machine is offline
+    or did not answer in 30 s. It used to say "Interrupted." whatever happened, and a link down dropped it silently.
+  - **Wait loops die with their agent** (w3673): the leftovers reaper ends a live worker's `until`/`while ... sleep` shell
+    (`waitLoop`: its children only sleep, grep, tail and the like) that started before its current agent host
+    (`host.json` `startedAt`): the claude it reported to is gone. Builds and the current agent's loops are kept.
   - **Ending a host** ends its whole process tree (`taskkill /T /F`; on a Mac or Linux its process group and every
     descendant), waits until it is gone, and only then removes its folder, retrying `EPERM`/`EBUSY` with back-off (node's own
     `rmSync` retries miss Windows' access-denied before Node 24.21). A host that closed by itself gets 10 s to exit first. A

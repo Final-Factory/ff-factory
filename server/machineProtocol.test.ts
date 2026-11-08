@@ -115,7 +115,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // (the worker waits at the gate as before), and an older portal never sends it.
 // w3670 (no bump): LaunchSpec guard `daemonReads`, the daemon's folder a worker reads its logs in; an older daemon ignores it (its
 // workers stay fenced out of the whole folder, as before), and an older portal never sends it.
-const DECIDED = { protocol: 9, fingerprint: '737eafe680208f85' };
+// w3673 (no bump): `interrupt` carries an optional `id`, answered by `interrupt_result`; an older daemon ignores the id and
+// never answers (interrupt_agent says so after INTERRUPT_ANSWER_MS), and an older portal sends none, so it is never answered.
+const DECIDED = { protocol: 9, fingerprint: 'da04c8b0e7131b95' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

@@ -86,11 +86,13 @@ const RESUME_WITHIN_MS = 6 * 3_600_000;
  */
 export const OFFLINE_ALERT_MS = { value: 30 * 60_000 };
 /** A daemon's words for a worker's agent host that died under it (machine/agentHost.ts HostedSession, w2884). Exported for tests. */
-export const HOST_DIED = /^its agent host (stopped unexpectedly|is gone|gave no heartbeat)/;
+export const HOST_DIED = /^its agent host (stopped unexpectedly|is gone|gave no heartbeat|made no progress)/;
 /** How long after a host's death its worker's resume goes out (the daemon's teardown of the old host first); tests shorten it. */
 export const HOST_DIED_RESUME_MS = { value: 3000 };
 /** A worker whose host dies again within this long of its automatic resume is not resumed again. */
 const HOST_DIED_AGAIN_MS = 60 * 60_000;
+/** How long the portal waits for a daemon's answer to an interrupt (its own wait is 20 s, w3673); tests shorten it. */
+export const INTERRUPT_ANSWER_MS = { value: 30_000 };
 /** How long after a daemon's hello the resume messages go out. */
 export const RESUME_DELAY_MS = { value: 3000 };
 
@@ -345,8 +347,14 @@ export class RemoteSession implements SessionHandle {
   }
 
   async interrupt() {
+    // Its callers (the UI, the ops worker) do not wait for the answer; the daemon logs it either way.
+    void this.interruptAnswered();
+  }
+
+  /** Interrupt it, and what its daemon says became of that (w3673; MachineManager.interruptRemote). */
+  interruptAnswered(): Promise<string> {
     this.link.stoppedOnPurpose(this);
-    this.link.post(this.info.machineId!, { type: 'interrupt', sessionId: this.info.id }, false);
+    return this.link.interruptRemote(this);
   }
 
   async setMode(mode: PermissionMode) {
@@ -2421,6 +2429,14 @@ export class MachineManager {
           }
         }
         return;
+      case 'interrupt_result': {
+        const p = this.interruptCalls.get(msg.id);
+        if (!p) return;
+        this.interruptCalls.delete(msg.id);
+        clearTimeout(p.timer);
+        p.resolve(`${msg.stopped ? 'Interrupted' : msg.delivered ? 'Interrupt delivered, its turn not stopped' : 'Not interrupted'}: ${id}'s daemon says ${msg.text}.`);
+        return;
+      }
       case 'unity_result': {
         const p = this.unityCalls.get(msg.id);
         if (!p) return;
@@ -2645,6 +2661,35 @@ export class MachineManager {
         clearTimeout(timer);
         this.fsCalls.delete(id);
         reject(e as Error);
+      }
+    });
+  }
+
+  private readonly interruptCalls = new Map<string, { resolve: (text: string) => void; timer: NodeJS.Timeout }>();
+
+  /**
+   * Send a worker's interrupt to its daemon and say what became of it (w3673). Before this the interrupt went out with no
+   * answer and was dropped without a word while its machine was offline, and interrupt_agent said "Interrupted." either
+   * way: the dispatcher's interrupt of 316ded29 at about 15:00 UTC 2026-11-08 left no trace on lothdesktop. The daemon
+   * answers once its agent's turn stopped, or after its own wait (machine/daemon.ts INTERRUPT_WAIT); a daemon from before
+   * w3673 answers nothing, and the reply then says the interrupt was sent but not confirmed.
+   */
+  interruptRemote(s: RemoteSession): Promise<string> {
+    const machineId = s.info.machineId!;
+    if (!this.isOnline(machineId)) return Promise.resolve(`Not interrupted: ${machineId} is offline, so its daemon was not told; it is interrupted only if you send it again once ${machineId} is back.`);
+    const id = randomUUID();
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        if (this.interruptCalls.delete(id)) resolve(`Interrupt sent to ${machineId}, but its daemon did not answer within ${Math.round(INTERRUPT_ANSWER_MS.value / 1000)} s (its link may have dropped, or its daemon predates w3673): whether its agent stopped is unknown; agent_status shows it.`);
+      }, INTERRUPT_ANSWER_MS.value);
+      timer.unref?.();
+      this.interruptCalls.set(id, { resolve, timer });
+      try {
+        this.post(machineId, { type: 'interrupt', sessionId: s.info.id, id });
+      } catch (e) {
+        clearTimeout(timer);
+        this.interruptCalls.delete(id);
+        resolve(`Not interrupted: ${(e as Error).message}.`);
       }
     });
   }

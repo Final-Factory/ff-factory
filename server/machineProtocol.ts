@@ -172,7 +172,9 @@ export type ToDaemon =
   /** sessionId: whose image, so its own temp folder counts too (older daemons ignore it). */
   | { type: 'fs'; id: string; op: 'read'; path: string; sessionId?: string }
   | { type: 'fs'; id: string; op: 'list'; dirs?: string[] }
-  | { type: 'interrupt' | 'stop' | 'remove'; sessionId: string }
+  | { type: 'stop' | 'remove'; sessionId: string }
+  /** Interrupt an agent's turn; with an id, answered by interrupt_result (w3673: a daemon before it answers nothing). */
+  | { type: 'interrupt'; sessionId: string; id?: string }
   /**
    * Compact a live, idle agent's conversation (w1469, the workers' automatic compaction, server/autoCompact.ts): Claude
    * Code's /compact with this focus. Sent only to a daemon whose hello offered `compact`; a session that is not live or is
@@ -382,6 +384,11 @@ export type FromDaemon =
   | { type: 'relocate_result'; id: string; ok: boolean; error?: string }
   | { type: 'fs_result'; id: string; ok: boolean; error?: string; mediaType?: string; data?: string; files?: ImageFile[] }
   | { type: 'unity_result'; id: string; ok: boolean; text: string }
+  /**
+   * What became of an interrupt (w3673): `delivered`, its agent's host was given it (or the agent in this daemon); `stopped`,
+   * its turn ended within the daemon's wait; `text` says so in words for the one who asked.
+   */
+  | { type: 'interrupt_result'; id: string; delivered: boolean; stopped: boolean; text: string }
   /** The daemon's own Unity watch: a hang or crash noticed, an automatic restart, the budget spent. */
   | { type: 'unity_event'; text: string; restarted: boolean; sandbox?: string }
   /** Every sandbox of the machine, whenever one changes (protocol 5): a full snapshot, at most maxSandboxes entries. */
