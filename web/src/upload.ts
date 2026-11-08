@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from 'react';
+import { MAX_ATTACHMENTS } from '../../shared/attachments';
 import type { AttachmentRef } from '../../shared/types';
 import { ApiError, api, notifyUnauthorized, UnauthorizedError } from './api';
 import { fmtBytes } from './util';
@@ -191,7 +192,7 @@ export function clearPending(sessionId: string, sent: PendingFile[]) {
 // ---------------------------------------------------------------- the limits, for every place that takes files
 
 /** Without the app's settings yet: the server's defaults (config attachments). */
-export const ATTACH_DEFAULTS = { maxBytes: 200 * 1024 * 1024, retentionDays: 30, maxPerMessage: 10 };
+export const ATTACH_DEFAULTS = { maxBytes: 200 * 1024 * 1024, retentionDays: 30, maxPerMessage: MAX_ATTACHMENTS };
 
 /**
  * Why `f` cannot be attached when `pending` files already are (empty, over the size limit, one too many); undefined when it

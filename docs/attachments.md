@@ -30,7 +30,7 @@ parsing, no preview.
   link (Tailscale, a phone changing networks) is sent again from where the server says it got, up to 8 times in a
   row with growing pauses. Send waits until every file is up. A failed file shows **failed** with a retry button; the
   x removes a file (and cancels its upload).
-- **Limits**: at most 10 files per message; each at most config `attachments.maxMB` (default 200 MB: the battleship
+- **Limits**: at most config `attachments.maxPerMessage` files per message (default 25, w3558; it was a fixed 10); each at most config `attachments.maxMB` (default 200 MB: the battleship
   save is big). The composer refuses a bigger file before uploading anything; the server refuses it too.
 - In the transcript each file is a chip with its name and size. A click downloads it. Its tooltip has its kind, id,
   SHA-256 and, when an agent did not get its copy, why.
@@ -208,8 +208,17 @@ sandboxes go with their sandbox; on a machine, with the clone's own clean-up or 
 |---|---|---|
 | `attachments.maxMB` | 200 | the largest file a person may attach (1-4096) |
 | `attachments.retentionDays` | 30 | days an attachment nobody sent on is kept (1-3650) |
+| `attachments.maxPerMessage` | 25 | the most files in one message, and attachment ids in one tool call (request_work, start_agent, message_agent, update_work, orchestrator_attach's list); 1-100 (w3558) |
 
-Both are settable with `set_app_config` and apply at once.
+All three are settable with `set_app_config` and apply at once in the server's checks. The tools' list limit (`maxItems`) is
+built into each agent's tool schema when its process starts, so a changed `attachments.maxPerMessage` reaches an agent's
+schema at its next process start; until then the server's check (the new value) still decides.
+
+A hand-over with a `work_id` sends the request's own files in full, however many it gathered (several FFBox threads joined
+into one, `update_work` adding more): the cap counts only the ids the call adds (w3558; before, w3546's 16 files refused
+every `start_agent` and `message_agent` naming it). There is no total-size cap on a person's message or a hand-over: each
+file is capped at `attachments.maxMB`. An FFBox dev hand-over is capped at `providers.ffbox.devRequests.maxFiles` (default
+and most 25) and `maxRequestMB` (500 MB together).
 
 ## The HTTP API
 

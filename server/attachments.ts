@@ -15,14 +15,19 @@ export interface AttachmentConfig {
   maxMB: number;
   /** A file nobody has sent on for this many days is deleted, with its copy in the store. Default 30. */
   retentionDays: number;
+  /**
+   * w3558: the most files in one message, and passed by id in one tool call (the tools' maxItems and resolve's check).
+   * Default MAX_ATTACHMENTS (25), from 1 to 100.
+   */
+  maxPerMessage: number;
 }
 
-export const ATTACHMENT_DEFAULTS: AttachmentConfig = { maxMB: 200, retentionDays: 30 };
+export const ATTACHMENT_DEFAULTS: AttachmentConfig = { maxMB: 200, retentionDays: 30, maxPerMessage: MAX_ATTACHMENTS };
 
 /** The page's view of config attachments. */
 export function attachmentSettings(c: Partial<AttachmentConfig> | undefined): AttachmentSettings {
   const a = { ...ATTACHMENT_DEFAULTS, ...c };
-  return { maxBytes: Math.round(a.maxMB * 1024 * 1024), retentionDays: a.retentionDays, maxPerMessage: MAX_ATTACHMENTS };
+  return { maxBytes: Math.round(a.maxMB * 1024 * 1024), retentionDays: a.retentionDays, maxPerMessage: a.maxPerMessage };
 }
 
 /** A stored attachment: what agents and the page see, and who sent it when. */
@@ -287,12 +292,16 @@ export class AttachmentStore {
     return [...this.records.values()].filter((r) => (r.session ? ids.has(r.session) : bySource(r.source))).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }
 
-  /** The attachments `ids` name, in order, without repeats; throws naming any it does not have. */
-  resolve(ids: unknown): AttachmentRecord[] {
+  /**
+   * The attachments `ids` name, in order, without repeats; throws naming any it does not have, or past `max` of them
+   * (config attachments.maxPerMessage, read at each call; Infinity for a request's own files, which go to its worker in
+   * full, w3558).
+   */
+  resolve(ids: unknown, max = this.settings.maxPerMessage): AttachmentRecord[] {
     if (ids === undefined || ids === null) return [];
     if (!Array.isArray(ids)) throw new AttachmentError(400, 'attachments: a list of attachment ids, e.g. ["att_k2m9x0q7p3a1"]');
     const want = [...new Set(ids.map((x) => String(x ?? '').trim().toLowerCase()).filter(Boolean))];
-    if (want.length > MAX_ATTACHMENTS) throw new AttachmentError(400, `attachments: at most ${MAX_ATTACHMENTS} at once`);
+    if (want.length > max) throw new AttachmentError(400, `attachments: at most ${max} at once (${want.length} given); pass the rest in another call`);
     return want.map((id) => {
       const r = ATTACHMENT_ID.test(id) ? this.records.get(id) : undefined;
       if (!r) throw new AttachmentError(404, `no attachment "${id}" (ids look like att_k2m9x0q7p3a1; one unused for ${this.settings.retentionDays} days is deleted)`);

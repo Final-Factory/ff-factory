@@ -5,6 +5,7 @@
 import { z } from 'zod';
 import { classifyBug, cleanBlock, cleanLine, quoteUntrusted } from './intakeRules.ts';
 import { DiagnosisSchema, type Diagnosis } from './diagnosisRules.ts';
+import { MAX_ATTACHMENTS } from '../shared/attachments.ts';
 import type { WorkSource, WorkTriage } from '../shared/types.ts';
 
 const oneLine = /^[^\u0000-\u001f]*$/;
@@ -29,7 +30,7 @@ export const EscalationSchema = z
     platform: z.string().regex(/^[A-Za-z0-9._+-]{1,40}$/).optional(),
     attachments: z
       .array(z.object({ name: z.string().min(1).max(120).regex(oneLine, 'one line'), url: z.string().regex(cdn), bytes: z.number().int().min(0).max(1e10).optional() }).strict())
-      .max(10)
+      .max(MAX_ATTACHMENTS)
       .optional(),
     verdict: z.string().regex(/^[A-Z][A-Z-]{0,39}$/).optional(),
   })

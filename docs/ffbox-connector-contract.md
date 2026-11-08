@@ -583,7 +583,7 @@ from Max"). `Content-Type: application/json`, at most 32 KB, unknown fields refu
 | `url` | yes | `https://discord.com/channels/<guild>/<thread>[/<message>]` |
 | `channel` | yes | the watch alias, `^[a-z0-9_]{1,40}$` |
 | `reporter`, `version`, `platform` | no | a display name (60, untrusted); `^[A-Za-z0-9._+-]{1,40}$` each |
-| `attachments` | no | up to 10 `{name, url, bytes?}`, Discord CDN URLs only |
+| `attachments` | no | up to 25 `{name, url, bytes?}` (10 before w3558), Discord CDN URLs only |
 | `verdict` | no | `^[A-Z][A-Z-]{0,39}$` |
 
 The answer is always `200` with one of `{"status":"filed","workId","triage","approval"}` (`approval`: `pending` while

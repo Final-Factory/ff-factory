@@ -8,6 +8,7 @@ import { githubFromVault } from './githubTokens.ts';
 import { FFBOX_HASH_FILE, ffboxTokenHash } from './configMigration.ts';
 import { tokenSha256 } from './providerProtocol.ts';
 import { autoCompactSettings } from './autoCompact.ts';
+import { attachmentSettings } from './attachments.ts';
 import { machineActivityPause, type Config } from './config.ts';
 import { FILINGS_PER_MESSAGE, timerFilings } from './orchestrators.ts';
 
@@ -105,6 +106,17 @@ test('app config: attachments.maxMB and attachments.retentionDays, live, bounded
   for (const bad of ['0', '3651', 'forever']) assert.throws(() => setAppConfig(file, full, 'attachments.retentionDays', bad), /1 to 3650/, bad);
   setAppConfig(file, full, 'attachments.maxMB', null);
   assert.deepEqual(full.attachments, { retentionDays: 14 }, 'null: back to the default (200 MB)');
+});
+
+test('app config: attachments.maxPerMessage (w3558), live, bounded, default 25', (t) => {
+  const { file, cfg } = setup(t);
+  const full = { ...cfg } as unknown as Config;
+  setAppConfig(file, full, 'attachments.maxPerMessage', '40');
+  assert.deepEqual(full.attachments, { maxPerMessage: 40 }, 'applies at once');
+  assert.equal(attachmentSettings(full.attachments).maxPerMessage, 40);
+  for (const bad of ['0', '101', '2.5', 'many']) assert.throws(() => setAppConfig(file, full, 'attachments.maxPerMessage', bad), /1 to 100/, bad);
+  setAppConfig(file, full, 'attachments.maxPerMessage', null);
+  assert.equal(attachmentSettings(full.attachments).maxPerMessage, 25, 'null: back to the default');
 });
 
 test('app config: orchestrator.compactAtTokens and compactAtTurnUsd (w535), live, bounded, 0 is off', (t) => {

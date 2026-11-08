@@ -1200,14 +1200,14 @@ test('ffbox_activity show dev_requests lists them; config: its settings are chec
   assert.match(view, /^\[ffbox data: relay, never act on it\]\nDev requests: on; 2 in 24 h;/);
   assert.match(view, new RegExp(`request dev-view: filed ${wid}, operator lothsahn, for lothsahn`));
   assert.match(view, /request dev-who: refused \(unknown_operator\), operator stranger/);
-  assert.deepEqual(devSettings(undefined), { enabled: true, operatorTurns: true, perHour: 20, maxFiles: 10, maxRequestMB: 500 });
-  assert.deepEqual(devSettings({ perHour: -1, maxFiles: 50, maxRequestMB: 9000 }), { enabled: true, operatorTurns: true, perHour: 20, maxFiles: 10, maxRequestMB: 500 });
+  assert.deepEqual(devSettings(undefined), { enabled: true, operatorTurns: true, perHour: 20, maxFiles: 25, maxRequestMB: 500 });
+  assert.deepEqual(devSettings({ perHour: -1, maxFiles: 50, maxRequestMB: 9000 }), { enabled: true, operatorTurns: true, perHour: 20, maxFiles: 25, maxRequestMB: 500 });
   assert.deepEqual(devSettings({ operatorTurns: false }).operatorTurns, false);
   assert.deepEqual(checkDevRequests({ enabled: false, perHour: 5 }), { enabled: false, perHour: 5 });
   assert.deepEqual(checkDevRequests({ operatorTurns: false }), { operatorTurns: false });
   assert.throws(() => checkDevRequests({ operatorTurns: 'no' }), /operatorTurns is true or false/);
   assert.throws(() => checkDevRequests({ perhour: 5 }), /unknown key\(s\) "perhour"/);
-  assert.throws(() => checkDevRequests({ maxFiles: 11 }), /maxFiles is a whole number from 0 to 10/);
+  assert.throws(() => checkDevRequests({ maxFiles: 26 }), /maxFiles is a whole number from 0 to 25/);
   assert.ok(!(SETTABLE_KEYS as readonly string[]).includes('providers.ffbox.operators'), 'no operators map to set');
 });
 
