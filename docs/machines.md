@@ -933,6 +933,17 @@ portal (`unity` and `switch_branch` with a machine alone are refused, and the da
     process) for 2 minutes; still so 10 minutes after that, and idle for the last 2, its ticket is revoked: the portal
     sends `bench_revoke`, the daemon writes the ticket's `revoked` file (bench_queue.py's own revoke: the script is asked
     to stop, its samples kept) and ends the helper's process tree 90 s later if it still holds (`machine/benchRevoke.ts`).
+  - That 90 s timer lives in the daemon's memory, so a daemon that starts again rescans the queue first (w3731,
+    `resumeRevokes`): every worker ticket with a `revoked` file (the portal's or bench_queue.py's own turn limit) whose
+    helper still runs has its helper tree ended at once when the revoke is 90 s old or more, else when the rest of the 90 s
+    runs out. Harness tickets are never touched, as in a revoke.
+  - The worker guard refuses a ticket-taking bench command started detached (w3731, `server/benchDetachGuard.ts`):
+    `bench_queue.py timed`, `run` or `--acquire`, and anything `timedTicketCommand` reads as a ticket (`unity-bridge.py
+    --timed`, `bench_lock --timing`, probe_ab_win.sh and the rest), behind `nohup`, `setsid`, `disown`, a trailing `&`,
+    `start /b`, `Start-Process`, `Start-Job`, `screen -d` or `tmux -d` (inside `bash -c` too). Such a command outlives the
+    Bash call, so the portal saw a worker with no task while its ticket held the lock until `BenchHolderWatch` revoked it
+    12 minutes later. The refusal names the Bash tool's `run_in_background`, a task the portal tracks and ends with the
+    worker. `nohup`, `setsid` and `&` around anything else pass; a script of the worker's own that detaches inside is not seen.
   - When an idle holder's last ticket goes, its pending wake_me fires then (`Waker.fireEarly`), not at its fixed time.
   - A stopped worker's processes that hold a ticket end 2 minutes after it stopped, whatever its check-in
     (`sessionVerdict` `holdsTicket`, machine/leftovers.ts).
