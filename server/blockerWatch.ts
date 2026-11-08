@@ -781,8 +781,12 @@ export async function ghChecks(ref: string, run: Runner = runProc, online?: (mac
   if (!m) throw new Error(`"${ref}" is not a pull request (owner/repo#123)`);
   const opts = { timeoutMs: 30_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } };
   const away = await awayNow(m[1], run, opts, online);
-  const r = await run('gh', ['pr', 'view', m[2], '-R', m[1], '--json', 'state,statusCheckRollup'], opts);
-  if (r.code === 0) return checksState(JSON.parse(r.stdout) as { state?: string; statusCheckRollup?: GhCheck[] }, ref, away);
+  const r = await run('gh', ['pr', 'view', m[2], '-R', m[1], '--json', 'state,statusCheckRollup,headRefOid'], opts);
+  if (r.code === 0) {
+    const pr = JSON.parse(r.stdout) as { state?: string; statusCheckRollup?: GhCheck[]; headRefOid?: string };
+    const s = checksState(pr, ref, away);
+    return s.none && pr.headRefOid ? queuedRunsOr(s, ref, m[1], pr.headRefOid, run, opts) : s;
+  }
   const p = await run('gh', ['pr', 'view', m[2], '-R', m[1], '--json', 'state,headRefOid'], opts);
   if (p.code !== 0) throw new Error(`gh pr view ${ref}: ${ghSaid(p)}`);
   const pr = JSON.parse(p.stdout) as { state?: string; headRefOid?: string };
@@ -806,6 +810,33 @@ export async function ghChecks(ref: string, run: Runner = runProc, online?: (mac
   const settled = await settleAwayRuns(m[1], body.workflow_runs ?? [], away, run, opts);
   const s = runsState({ workflow_runs: body.workflow_runs }, ref);
   return settled && s.green ? { ...s, text: s.text + awayNote(settled, away) } : s;
+}
+
+/**
+ * w3527: a pull request with no check runs may still have a workflow run for its head: a run "pending" on a concurrency
+ * group or "queued" for a busy self-hosted runner has no jobs yet, so no check runs (measured 2026-11-08 on
+ * Final-Factory/ffu#433: run 42435334681 status "pending", zero jobs, an empty rollup for 15+ min). Such a run is CI that
+ * exists and is pending, never "no CI run" (w3504's worker was woken four times in 20 minutes by that clear). When the
+ * runs cannot be read, the rollup's answer stands.
+ */
+async function queuedRunsOr(none: CiState, ref: string, repo: string, head: string, run: Runner, opts: RunOptions): Promise<CiState> {
+  const a = await run('gh', ['api', `repos/${repo}/actions/runs?head_sha=${head}&per_page=100`], opts);
+  if (a.code !== 0) return none;
+  let runs: (GhRun & { id?: number })[];
+  try {
+    runs = (JSON.parse(a.stdout) as { workflow_runs?: (GhRun & { id?: number })[] }).workflow_runs ?? [];
+  } catch {
+    return none;
+  }
+  return queuedRunsState(runs, ref) ?? none;
+}
+
+/** w3527: what a head's workflow runs say when its pull request has no check runs yet: pending while any is unfinished; undefined when it has none or all finished (the rollup's "no checks" stands). */
+export function queuedRunsState(runs: (GhRun & { id?: number })[], ref: string): CiState | undefined {
+  const open = runs.filter((r) => (r.status ?? '').toLowerCase() !== 'completed');
+  if (!open.length) return undefined;
+  const which = open.slice(0, 3).map((r) => `${r.name ?? 'a run'}${r.id ? ` (run ${r.id})` : ''} ${(r.status ?? 'queued').toLowerCase()}`).join(', ');
+  return { done: false, text: `${open.length} of ${runs.length} workflow runs on ${ref} waiting to start, no jobs picked up yet: ${which}` };
 }
 
 /** w3147: the away labels (machine/awayRunners.ts) of `repo` whose runners are all offline now; when the runner list is unreadable, those whose FF Factory machine is offline. */

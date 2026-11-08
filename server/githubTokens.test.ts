@@ -93,7 +93,7 @@ test('portal reads: a 401 marks the token bad and the call is made again on the 
   const logged: string[] = [];
   const gh = fakeGh((token, args) => {
     if (token === LOTH) return [1, '', 'HTTP 401: Bad credentials (https://api.github.com/graphql)'];
-    if (token === BEN && args.includes('state,statusCheckRollup')) return [1, '', 'GraphQL: Resource not accessible by personal access token (repository.pullRequest.statusCheckRollup.nodes.0)'];
+    if (token === BEN && args.includes('state,statusCheckRollup,headRefOid')) return [1, '', 'GraphQL: Resource not accessible by personal access token (repository.pullRequest.statusCheckRollup.nodes.0)'];
     if (token === BEN && args[0] === 'api') return [1, '', 'gh: Resource not accessible by personal access token (HTTP 403)'];
     if (args.includes('state,headRefOid')) return [0, JSON.stringify({ state: 'OPEN', headRefOid: 'abc' }), ''];
     if (args[0] === 'api') return [0, JSON.stringify({ workflow_runs: [{ name: 'CI', status: 'completed', conclusion: 'success' }] }), ''];
@@ -110,7 +110,7 @@ test('portal reads: a 401 marks the token bad and the call is made again on the 
   const before = gh.calls.length;
   const ci = await ghChecks('Final-Factory/FinalFactory#9', g.runner('ben', 'CI on #9'));
   assert.equal(ci.done, true, 'read on the portal login after the 403');
-  assert.deepEqual(gh.calls.slice(before).map((c) => [c.token === BEN ? 'ben' : 'portal', c.args.includes('state,statusCheckRollup') ? 'rollup' : c.args[0] === 'api' ? 'runs' : 'pr']), [
+  assert.deepEqual(gh.calls.slice(before).map((c) => [c.token === BEN ? 'ben' : 'portal', c.args.includes('state,statusCheckRollup,headRefOid') ? 'rollup' : c.args[0] === 'api' ? 'runs' : 'pr']), [
     ['ben', 'rollup'],
     ['ben', 'pr'],
     ['ben', 'runs'],
