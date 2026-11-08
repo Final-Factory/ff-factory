@@ -5948,7 +5948,7 @@ ${w.repo ?? ''}
         ),
         tool(
           'interrupt_agent',
-          "Interrupt a worker agent mid-turn (it stays alive and can be messaged again). The reply says what became of it: a machine worker's daemon answers whether its agent got the interrupt and stopped (w3673).",
+          'Interrupt a worker agent mid-turn (it stays alive and can be messaged again).',
           { session_id: z.string() },
           wrap(async ({ session_id }) => {
             const w = worker(session_id);
