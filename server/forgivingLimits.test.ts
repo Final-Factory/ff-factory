@@ -145,3 +145,14 @@ test("w1869: orchestrator_transcript (the remote API's) takes last: 1 as 5 and s
   assert.ok(!r.isError, r.content[0].text);
   assert.match(r.content[0].text, /WARNING: last was 1, below the least allowed \(5\); used 5\.$/);
 });
+
+test("w3581: orchestrator_transcript shows a person's message without FF Factory's notes for their orchestrator", async (t) => {
+  const env = setup(t);
+  const store = (env.agents as unknown as { store: Store }).store;
+  store.append(env.ben.info.id, { kind: 'user', from: 'human', text: 'Please continue\n\n[FF Factory, not your person: held from earlier turns]\nCalls a gate refused in your earlier turns' } as never);
+  const tool = env.agents.remoteToolSpecs('test', BEN, { who: BEN, keyName: 'test', bound: true } as never).find((x) => x.name === 'orchestrator_transcript')!;
+  const r = await tool.handler({});
+  assert.ok(!r.isError, r.content[0].text);
+  assert.match(r.content[0].text, /> human: Please continue$/m);
+  assert.doesNotMatch(r.content[0].text, /held from earlier turns/);
+});
