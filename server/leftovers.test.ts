@@ -4,7 +4,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { LEFTOVER, LeftoverReaper, callerPids, envFrom, installLeftoversShim, kindOf, macEnvLine, orphanVerdict, ownLeftovers, personGames, readEnvs, readLeases, realInspect, sessionVerdict, slotOf, tempSessionInArgs, tempSessionOf, type LeftoverDeps, type PlayerLease, type ProcEnv } from '../machine/leftovers.ts';
+import { LEFTOVER, LeftoverReaper, waitLoop, callerPids, envFrom, installLeftoversShim, kindOf, macEnvLine, orphanVerdict, ownLeftovers, personGames, readEnvs, readLeases, realInspect, sessionVerdict, slotOf, tempSessionInArgs, tempSessionOf, type LeftoverDeps, type PlayerLease, type ProcEnv } from '../machine/leftovers.ts';
 import { realDeps as realUnityDeps, type Proc, type UnityPlatform } from '../machine/unity.ts';
 import { playerText, unitySlotsLine } from '../shared/fleet.ts';
 
@@ -28,6 +28,8 @@ interface Session {
   resumable?: boolean;
   wakeAt?: number;
   sandbox?: string;
+  /** When its current agent host started (w3673). */
+  hostSince?: number;
 }
 
 /** A fake machine: processes with their environments, start times and CPU, sessions, leases and a clock. */
@@ -55,6 +57,7 @@ function machine(procs: (Proc & { env?: ProcEnv; born?: number; cpu?: number })[
     sessionKnown: (id) => id in st.sessions || (o.known ?? []).includes(id),
     resumable: (id) => !!st.sessions[id]?.resumable,
     wakeAt: (id) => st.sessions[id]?.wakeAt,
+    hostSince: (id) => st.sessions[id]?.hostSince,
     liveSandboxes: () => new Set(Object.values(st.sessions).filter((s) => s.live && s.sandbox).map((s) => s.sandbox!)),
     ready: () => st.ready,
     slotRoots: () => [PLAYERS],
@@ -737,4 +740,42 @@ test('ff-leftovers on Windows (w3637): a native program a Git Bash script left r
   const mine = ownLeftovers('me', procs, env, 43776, 'win32', { callers: callerPids('55384 32460'), born }).map((p) => p.pid);
   assert.deepEqual(mine, [52636, 52700]);
   assert.ok(!mine.includes(4584), 'claude, whose parent is its agent host, is still never a leftover');
+});
+
+// ---------------------------------------------------------------- w3673: a wait loop an earlier agent host left
+
+// lothdesktop, 2026-11-07: worker 316ded29's claude died with its host; resumed under the same id, its session was live
+// again, so the two Git Bash `until grep -q "^exit" $TMPDIR/build.log; do sleep 30; done` loops its old claude ran were
+// kept as a live worker's, and ran on until the ops worker killed them.
+test('w3673: a live worker\'s wait loop from before its current agent host ends; its build, and its current host\'s loops, are kept', async () => {
+  const t0 = 1_000 * HOUR;
+  const loop = (born: number, pid: number) => ({ pid, ppid: 9212, cmd: `/usr/bin/bash -c until grep -q "^exit" $TMPDIR/build.log; do sleep 30; done`, env: env('316ded29', 'slot4'), born });
+  const m = machine(
+    [
+      SYSTEMD,
+      DAEMON,
+      loop(t0 - 12 * HOUR, 5001),
+      { pid: 5002, ppid: 5001, cmd: 'sleep 30', env: env('316ded29', 'slot4'), born: t0 - MIN },
+      // A build its old agent started (unity-slot run), waited on by a loop: not a wait loop, kept.
+      { pid: 5010, ppid: 9212, cmd: `/usr/bin/bash -c while unity-slot run -- Unity -batchmode -quit; do sleep 5; done`, env: env('316ded29', 'slot4'), born: t0 - 12 * HOUR },
+      { pid: 5011, ppid: 5010, cmd: '/opt/unity/Editor/Unity -batchmode -quit -projectPath x', env: env('316ded29', 'slot4'), born: t0 - 12 * HOUR },
+      // Its current agent's own loop.
+      loop(t0 - 10 * MIN, 5020),
+    ],
+    { sessions: { '316ded29': { live: true, resumable: true, sandbox: 'slot4', hostSince: t0 - 30 * MIN } } },
+  );
+  assert.deepEqual(await m.look(0), []);
+  const ended = await m.look(1);
+  assert.equal(ended.length, 1, JSON.stringify(ended));
+  assert.ok(!m.alive(5001), 'the old wait loop ended');
+  for (const pid of [5010, 5011, 5020]) assert.ok(m.alive(pid), `pid ${pid} kept`);
+  assert.match(m.st.events.join('\n'), /a wait loop started \d\d:\d\d UTC, before its worker's current agent host \(\d\d:\d\d UTC\): the agent it waited for is gone \(w3673\)/);
+});
+
+test('w3673: waitLoop is a sleeping until/while shell whose children are what a wait runs', () => {
+  const p = { pid: 1, ppid: 0, cmd: 'bash -c until grep -q done log; do sleep 30; done' };
+  assert.equal(waitLoop(p, [p, { pid: 2, ppid: 1, cmd: 'sleep 30' }], 'linux'), true);
+  assert.equal(waitLoop(p, [p, { pid: 2, ppid: 1, cmd: 'python build.py' }], 'linux'), false, 'a shell running a build is no wait loop');
+  assert.equal(waitLoop({ pid: 1, ppid: 0, cmd: 'bash -c ./build.sh' }, [], 'linux'), false);
+  assert.equal(waitLoop({ pid: 1, ppid: 0, cmd: 'C:/Program Files/Git/usr/bin/bash.exe -c "until grep -q x f; do sleep 30; done"', name: 'bash.exe' }, [], 'win32'), true);
 });

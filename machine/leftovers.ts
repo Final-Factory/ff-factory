@@ -120,6 +120,8 @@ export interface LeftoverDeps {
   resumable(id: string): boolean;
   /** When the session's pending wake_me check-in comes due (ms), as the portal last said. */
   wakeAt(id: string): number | undefined;
+  /** When the session's current agent host started (ms, its host.json), for a wait loop an earlier one left (w3673). */
+  hostSince?(id: string): number | undefined;
   /** The sandboxes with a live worker. */
   liveSandboxes(): Set<string>;
   /**
@@ -344,6 +346,18 @@ export interface OrphanFacts {
   now: number;
 }
 
+const WAIT_CHILD = /^(sleep|grep|egrep|tail|head|cat|test|\[|ls|stat|wc|find|date|timeout)$/i;
+
+/**
+ * A shell that only waits (w3673): its command line is an `until`/`while` loop that sleeps, and all it runs is what such
+ * a loop runs (sleep, grep, tail ...). On lothdesktop on 2026-11-07, two Git Bash `until grep -q "^exit" $TMPDIR/build.log;
+ * do sleep 30; done` loops outlived the claude whose Bash calls they were; nothing could read them any more.
+ */
+export function waitLoop(p: Proc, procs: Proc[], platform: UnityPlatform): boolean {
+  if (!SHELL.test(programOf(p, platform)) || !/\b(until|while)\b/.test(p.cmd) || !/\bsleep\b/.test(p.cmd)) return false;
+  return procs.every((c) => c.ppid !== p.pid || c.pid === p.pid || WAIT_CHILD.test(programOf(c, platform)));
+}
+
 /** A game player under a player slot that names no session: kept while anything may still own it. */
 export function orphanVerdict(o: OrphanFacts): { end: boolean; until?: number; why: string } {
   if (o.parent) return { end: false, why: `no session named, but its starter ${o.parent} still runs` };
@@ -547,6 +561,10 @@ export class LeftoverReaper {
         // Named by an argument only: another worker's shell may be reading that folder, so it ends once its starter is gone too.
         const starter = c.via === 'arg' && v.end ? liveParent(c.p, procs, facts, d.platform) : undefined;
         if (starter) v = { end: false, why: `it names the temp folder of ${c.session}, but its starter ${starter} still runs` };
+        // A wait loop from before its session's current agent host (w3673): it waited for an agent that is gone (a host
+        // ended or replaced, the session resumed under the same id), so nothing reads it; a build or a run is no wait loop.
+        const since = !v.end && born !== undefined ? d.hostSince?.(c.session) : undefined;
+        if (since !== undefined && born! < since - 5_000 && waitLoop(c.p, procs, d.platform)) v = { end: true, why: `a wait loop started ${clock(born!)}, before its worker's current agent host (${clock(since)}): the agent it waited for is gone (w3673)` };
       } else {
         // A remote run's lease (lab.py acquires a peer's slot over ssh, the player has none of its own here). A local lease
         // of another pid is another player's: runs of one build share a slot, so it says nothing about this one.

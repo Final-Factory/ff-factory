@@ -5948,10 +5948,12 @@ ${w.repo ?? ''}
         ),
         tool(
           'interrupt_agent',
-          'Interrupt a worker agent mid-turn (it stays alive and can be messaged again).',
+          "Interrupt a worker agent mid-turn (it stays alive and can be messaged again). The reply says what became of it: a machine worker's daemon answers whether its agent got the interrupt and stopped (w3673).",
           { session_id: z.string() },
           wrap(async ({ session_id }) => {
-            await worker(session_id).interrupt();
+            const w = worker(session_id);
+            if (w.interruptAnswered) return await w.interruptAnswered();
+            await w.interrupt();
             return 'Interrupted.';
           }),
         ),
