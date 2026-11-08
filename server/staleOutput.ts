@@ -284,6 +284,11 @@ export async function cleanupPass(o: {
   mode: StaleOutputSettings['mode'];
   regular: () => Promise<CleanupItem[]>;
   stale: () => Promise<StalePlan>;
+  /**
+   * The one stale rule that runs on every pass: the cargo target cap (w3471; w3426 meant it for any pass, but it rode the daily stale
+   * plan, so an idle target over the cap stayed up to a day). Run when the stale plan is not due and the mode is on.
+   */
+  cap?: () => Promise<StalePlan>;
   /** FF Factory's own leftovers (server/ownLeftovers.ts, w626): the caller passes them only while free space is low. */
   own?: { plan(): Promise<OwnLeftoverPlan>; run(plan: OwnLeftoverPlan): Promise<CleanupRun> };
   /** Ends the plan's strays, before its items go (a deleted file's space comes back only when its writer ends); not in a dry run. */
@@ -305,7 +310,7 @@ export async function cleanupPass(o: {
     return f.inside;
   };
   const regular = fence(await o.regular());
-  const planned = o.opts.stale && o.mode !== 'off' ? await o.stale() : { items: [], listed: [] };
+  const planned: StalePlan = o.opts.stale && o.mode !== 'off' ? await o.stale() : o.mode === 'on' && o.cap ? await o.cap() : { items: [], listed: [] };
   const plan = { ...planned, items: fence(planned.items) };
   const none: OwnLeftoverPlan = { items: [], listed: [] };
   // A failure there must not cost the regular pass: nothing of it is removed then.

@@ -1,0 +1,1 @@
+The cargo target cap now runs on every clean-up pass, not only the daily stale-output pass or a low-disk one. On BEAST an idle 9.9 GB target stayed untouched through an hourly pass because the cap sat inside the stale plan, which runs once a day (w3471).

@@ -206,6 +206,16 @@ test('stale output: removal checks the guard again, logs why, and leaves nothing
   const stale = () => planStaleOutput({ places: places(sb), nightlyRoots: [], ctx: CTX, settings: STALE_OUTPUT_DEFAULTS, guard, now: NOW });
   const pass = (opts: PassOptions, mode: 'on' | 'dry-run' | 'off') => cleanupPass({ opts, guard, mode, regular, stale });
 
+  // w3471: a pass whose stale turn is not due still runs `cap`, in mode on only.
+  const capTarget = put(root, 'tmp/ffa-cap/ffu-target', 24);
+  const cap = async () => ({ items: [{ path: capTarget, rule: 'cargo-target-cap', why: 'a cargo target over the cap' }], listed: [] });
+  const capPass = (mode: 'on' | 'dry-run' | 'off', dryRun = false) => cleanupPass({ opts: { stale: false, dryRun }, guard, mode, regular: async () => [], stale, cap });
+  assert.deepEqual((await capPass('off')).removed, []);
+  assert.deepEqual((await capPass('dry-run')).removed, []);
+  assert.ok(fs.existsSync(capTarget));
+  assert.deepEqual((await capPass('on')).removed.map((r) => r.rule), ['cargo-target-cap']);
+  assert.equal(fs.existsSync(capTarget), false);
+
   const dry = await pass({ stale: true, dryRun: true }, 'on');
   assert.equal(dry.removed.length, 0);
   assert.equal(dry.planned!.length, 8, 'the regular entry and the seven stale ones');
