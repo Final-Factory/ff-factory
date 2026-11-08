@@ -143,6 +143,8 @@ export class Waker {
   private fire(sessionId: string, tries: number) {
     if (dryRun()) return;
     const t = this.timers.get(sessionId);
+    // fired early (a test, a wake folded in): its own timeout must not fire again later and save into a folder maybe gone (w3746)
+    if (t) clearTimeout(t.timer);
     this.timers.delete(sessionId);
     if (!t || !this.sessions.sessions.has(sessionId)) return void this.save();
     const late = Math.round((this.now() - t.at) / 60_000);
