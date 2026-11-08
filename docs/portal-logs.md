@@ -127,10 +127,23 @@ Judge it by `list_work list` per call and the summary's size at the next compact
 A machine daemon's own log is **not** kept by the portal (it holds a daemon's clean-up passes, which `cleanup` shows, and
 nothing else of its log). It is `<app_dir>/logs/daemon.log` on that machine (`daemonLogPath` in `server/machines.ts`: the
 machine's `app_dir`, by default `~/.ff-factory`, `%USERPROFILE%\.ff-factory` on Windows), with every earlier run beside
-it as `daemon.log.<UTC stamp>[.gz]` for 14 days, within 200 MB (docs/machines.md, "The daemon's logs"). Where the `app_dir` is set
-elsewhere, a worker usually cannot read it: lothdesktop's is `D:\work\ffw\daemon`, the daemon's folder, which the
-worker harness refuses as a protected path (measured, w1536, 2026-10-19). Say so in the report and leave it to the
-orchestrator (the ops worker or ssh).
+it as `daemon.log.<UTC stamp>[.gz]` for 14 days, within 200 MB (docs/machines.md, "The daemon's logs"). A worker on that machine reads
+it itself (w3670, lothsahn: "Please give workers read only access to the logs and other reasonable daemon files it might
+ever need"; before it the harness refused the whole folder, w1536, w3650):
+
+| Machine | The daemon's log |
+|---|---|
+| Windows worker install | `<host>\daemon\logs\daemon.log` (with `daemon.err.log`, `supervisor.log`, `update-job.log`): `D:\work\ffw\daemon\logs` on lothdesktop, `F:\ffw\daemon\logs` on beast |
+| Windows, portal-deployed | `%USERPROFILE%\.ff-factory\logs\daemon.log` |
+| macOS, Linux | `~/.ff-factory/logs/daemon.log`, or `<app_dir>/logs` where `app_dir` is set |
+
+The machine's line in the worker's prompt names its daemon folder. Read it by full path with a read-only command (`tail -n
+200 /d/work/ffw/daemon/logs/daemon.log`, `Get-Content ... -Tail 200`, `zcat` of a rolled `.gz`, `grep`, `ls`, the Read
+and Grep tools); a `cd` into the folder is refused. What the guard lets a worker read there, and what stays closed, is
+`server/daemonReads.ts` (`DAEMON_READ_ALLOW`, `HOST_READ_ALLOW`): the logs, the daemon's code, `update/job.json` and
+`result.json`, `sandboxes.json`, `pause.json`, `person-play.json`, the clean-up files, `published.jsonl`,
+`devdrive.json`, `root.json` and `moved.json`; never `daemon.json` (the machine token), `gh-app/`, `hosts/` (other
+workers' messages), `max-events.jsonl`, the update bundles or a `secrets` folder, and no write, delete or run there.
 
 ### A picture a page could not show: `[media]` and `[image]` lines (w2576)
 

@@ -125,7 +125,8 @@ export function shellWords(seg: string): string[] {
   return out;
 }
 
-const READ_ONLY = new Set(['status', 'diff', 'log', 'show', 'rev-parse', 'rev-list', 'ls-files', 'ls-tree', 'describe', 'cat-file', 'merge-base', 'for-each-ref', 'show-ref', 'shortlog', 'blame', 'grep', 'name-rev', 'diff-tree', 'diff-index', 'count-objects']);
+/** git's read-only subcommands (also server/daemonReads.ts, w3670). */
+export const GIT_READ_ONLY = new Set(['status', 'diff', 'log', 'show', 'rev-parse', 'rev-list', 'ls-files', 'ls-tree', 'describe', 'cat-file', 'merge-base', 'for-each-ref', 'show-ref', 'shortlog', 'blame', 'grep', 'name-rev', 'diff-tree', 'diff-index', 'count-objects']);
 const BRANCH_REFUSED = new Set(['-d', '-D', '--delete', '-m', '-M', '--move', '-c', '-C', '--copy', '-f', '--force', '-u', '--set-upstream-to', '--unset-upstream', '--edit-description']);
 const FETCH_REFUSED = new Set(['-p', '--prune', '-P', '--prune-tags', '-f', '--force', '--update-head-ok', '--refetch']);
 const PULL_REFUSED = new Set(['-r', '--rebase', '-f', '--force', '-p', '--prune', '--autostash', '--no-ff', '--squash']);
@@ -247,7 +248,7 @@ export function checkMainCloneShell(cmd: string, grant: MainCloneGrant, spelling
     const refusedFlag = (set: Set<string>) => flags.find((f) => set.has(f) || set.has(f.split('=')[0]));
     const outputFlag = flags.find((f) => f.startsWith('--output') || f === '--open-files-in-pager');
 
-    if (READ_ONLY.has(sub)) return outputFlag ? `git ${sub} ${outputFlag} writes a file` : undefined;
+    if (GIT_READ_ONLY.has(sub)) return outputFlag ? `git ${sub} ${outputFlag} writes a file` : undefined;
     switch (sub) {
       case 'config':
         return ['--get', '--get-all', '--get-regexp', '--list', '-l'].includes(lower[0] ?? '') ? undefined : 'git config only reads (--get, --list)';
