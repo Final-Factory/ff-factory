@@ -827,6 +827,10 @@ export function ownLeftovers(session: string, procs: Proc[], env: Map<number, Pr
     if (!ours(p.pid) || !parent || parent.pid === p.pid || ours(parent.pid)) continue;
     // Orphans are reparented to init, launchd or a user's systemd: that is no agent host.
     if (platform !== 'win32' && (p.ppid <= 1 || INIT.test(parent.cmd))) continue;
+    // Nor is a shell (w3637): on Windows a Git Bash script that started a native program in the background (`python
+    // bench_queue.py timed ... &`) lives on as that program's parent with no environment the reader sees, so the program
+    // looked like the agent itself and was never listed (BEAST, 2026-11-08: pid 52636 kept waiting after "None is left").
+    if (SHELL.test(programOf(parent, platform))) continue;
     const born = o.born?.(p.pid);
     const parentBorn = o.born?.(parent.pid);
     if (born !== undefined && parentBorn !== undefined && parentBorn > born + 2_000) continue;

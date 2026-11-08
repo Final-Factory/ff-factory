@@ -713,3 +713,28 @@ test("w2994: a person's own game (Steam's, or the main clone's build) with no wo
   ];
   assert.deepEqual(personGames(linux, [], new Map(), { platform: 'linux', self: new Set([100]), places: [], tempRoot: TMP, slotRoots: [PLAYERS] }), [4242]);
 });
+
+test('ff-leftovers on Windows (w3637): a native program a Git Bash script left running in the background is listed, though its starter shows no session', () => {
+  // BEAST, 2026-11-08, as Win32_Process listed it: a worker's script started `python ... &` and exited; MSYS keeps the
+  // script's bash.exe as the Windows parent of the native python while it runs, and that bash shows the reader no
+  // environment. So python looked like the agent itself (a session process whose live parent carries none) and `ff-leftovers
+  // end` said "None is left" while `bench_queue.py timed` (pid 52636) kept waiting.
+  const W = (pid: number, ppid: number, name: string, cmd: string) => ({ pid, ppid, name, cmd });
+  const procs: Proc[] = [
+    W(21376, 31748, 'node.exe', '"C:\\nvm4w\\nodejs\\node.exe" F:\\ff\\app\\machine\\agentHost.ts F:\\ff\\hosts\\me'),
+    W(4584, 21376, 'claude.exe', 'C:\\Users\\u\\.local\\bin\\claude.exe --output-format stream-json --verbose'),
+    W(35268, 4584, 'bash.exe', '"C:\\Program Files\\Git\\bin\\bash.exe" -c "ff-leftovers end"'),
+    W(32460, 35268, 'bash.exe', '"C:\\Program Files\\Git\\usr\\bin\\bash.exe" -c "ff-leftovers end"'),
+    W(55384, 44516, 'sh.exe', 'C:\\Program Files\\Git\\usr\\bin\\sh.exe /c/Users/u/.ff-factory/unity-slots/bin/ff-leftovers end'),
+    W(43776, 55384, 'node.exe', '"C:\\nvm4w\\nodejs\\node.exe" F:/ff/app/machine/leftovers.ts end'),
+    W(48876, 57712, 'bash.exe', '"C:\\Program Files\\Git\\usr\\bin\\bash.exe" /f/ff/tmp/ffa-me/leg.sh'),
+    W(52636, 48876, 'python.exe', 'C:\\Python310\\python.exe scripts/bench/bench_queue.py timed --what "w3454 proof" --minutes 20'),
+    W(52700, 52636, 'conhost.exe', '\\??\\C:\\WINDOWS\\system32\\conhost.exe 0x4'),
+  ];
+  // Win32's reader sees the environment of native programs only (w1575): not the MSYS shells'.
+  const env = new Map<number, ProcEnv>([4584, 35268, 55384, 43776, 52636, 52700].map((pid) => [pid, { session: 'me', machine: 'beast' }]));
+  const born = (pid: number) => (pid === 52636 ? 1_000_015 : 1_000_000);
+  const mine = ownLeftovers('me', procs, env, 43776, 'win32', { callers: callerPids('55384 32460'), born }).map((p) => p.pid);
+  assert.deepEqual(mine, [52636, 52700]);
+  assert.ok(!mine.includes(4584), 'claude, whose parent is its agent host, is still never a leftover');
+});
