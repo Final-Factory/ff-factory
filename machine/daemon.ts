@@ -814,6 +814,17 @@ export class Daemon {
                 timedBusy: () => (this.timed?.busy() ? 'a timed run is in flight here' : undefined),
               }),
             ),
+          cap: async () =>
+            planInstallLeftovers({
+              root: this.cfg.root,
+              sandboxes: [],
+              tempRoots: [agentTempRoot(this.cfg.tempDir)],
+              guard,
+              ctx: this.staleCtx,
+              procs: await this.procs().catch(() => undefined),
+              self: [process.pid, process.ppid],
+              scope: 'cargo-cap',
+            }),
           endStrays: async (strays) => {
             for (const st of strays) {
               log(`clean-up: ending process ${st.pid} of a stopped session (${st.why}): ${st.cmd.slice(0, 120)}`);

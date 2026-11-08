@@ -683,8 +683,9 @@ export async function planInstallLeftovers(o: {
   /** Pids never named a stray (this daemon and its parents). */
   self?: number[];
   localWork?: (dir: string) => Promise<boolean>;
-  /** 'sandboxes': only each sandbox's own build and capture output (the sandbox release sweep, w913). */
-  scope?: 'all' | 'sandboxes';
+  /** 'sandboxes': only each sandbox's own build and capture output (the sandbox release sweep, w913). 'cargo-cap': only the
+   * cargo-target-cap rule over the sessions' temp folders, for the passes the stale-output rules skip (w3471). */
+  scope?: 'all' | 'sandboxes' | 'cargo-cap';
   /** Free space is below the soft threshold (or a person asked for a pass): stopped sessions' caches go after lowCacheSettleMinutes (w1813). */
   low?: boolean;
   /** A low pass says which check kept a temp folder's rebuildable caches once they reach this size (plan.held; default 256 MiB). */
@@ -974,6 +975,17 @@ export async function planInstallLeftovers(o: {
       await take(path.join(dir, e.name), base, rule, `${what} ${e.name.slice(0, 12)}, beyond the newest ${s.keepBuilds}, untouched for ${s.buildUntouchedHours} h (rebuildable)`, s.buildUntouchedHours * HOUR);
     }
   };
+
+  if (o.scope === 'cargo-cap') {
+    for (const t of [...new Set(o.tempRoots)]) {
+      if (!within(t, root)) continue;
+      for (const e of await children(t)) if (e.isDirectory() && /^ffa-/i.test(e.name) && within(path.join(t, e.name), root)) await capCargo(path.join(t, e.name), t);
+    }
+    plan.items = [...items.values()];
+    const kept = held.filter((h) => !plan.items.some((i) => within(h.path, i.path)));
+    if (kept.length) plan.held = kept;
+    return plan;
+  }
 
   // ---- each sandbox: per-commit builds, bench builds, capture output
   for (const sb of o.sandboxes) {

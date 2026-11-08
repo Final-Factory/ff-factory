@@ -510,6 +510,10 @@ test('w3426: a cargo target over the size cap goes on a normal pass once idle; a
   const heldPlan = await plan(1024 / 1024 ** 3);
   assert.ok((heldPlan.held ?? []).some((h) => h.path.includes(ids.building) && /over the .* GB cap, but its worker runs a build/.test(h.why)), 'the building target is reported kept');
   assert.ok(!(heldPlan.held ?? []).some((h) => h.path.includes(ids.idle)), 'a target that goes is not also kept');
+  // The hourly passes run only the cap (scope 'cargo-cap', w3471): the same targets go, and no other rule runs.
+  const only = await planInstallLeftovers({ root, sandboxes: [], tempRoots: [tmp], guard, procs, settings: { ...settings, cargoTargetCapGB: 1024 / 1024 ** 3 }, now: NOW, low: false, heldMinBytes: 0, scope: 'cargo-cap' });
+  assert.deepEqual(only.items.map((i) => rel(tmp, i.path)).sort(), [`${ids.idle}/ffu/target`, `${ids.stopped}/ffu/target`]);
+  assert.ok(only.items.every((i) => i.rule === 'cargo-target-cap'), 'only the cap rule runs');
   const all = await plan(1024 / 1024 ** 3);
   assert.deepEqual(all.items.filter((i) => /node_modules/.test(i.path) && /ffa-a[123]/.test(i.path)), [], "a live worker's other caches stay");
   // Under the cap (8 GB, the default): nothing of a live worker's goes without a low pass.
