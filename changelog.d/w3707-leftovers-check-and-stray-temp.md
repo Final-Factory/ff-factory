@@ -1,0 +1,2 @@
+- `ff-leftovers check` judges a closed or orphaned worker's temp folder the way the daemon's pass does (w3656): only commits on no remote or a stash keep it, so a `.git` with no HEAD or refs no longer reads "its git state could not be read" and KEEP (ffa-f1beecb0 on LothDesktop, 2026-11-08; w3707).
+- The daemon's clean-up removes closed workers' temp folders from Git Bash's spelling of the temp root (V:\v\ffw\tmp, where a PowerShell command put them before #907's guard), then that empty chain up to V:\v; nothing else outside the install folder (w3707).

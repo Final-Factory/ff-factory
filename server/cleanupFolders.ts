@@ -314,6 +314,19 @@ export async function withGitCheck(r: FolderRow, root: string | undefined, local
   return why ? { ...r, verdict: 'keep', why: `${why}. The ledger alone said: ${r.why}` } : r;
 }
 
+/**
+ * One path judged by the ledger, then by the git repos in it (planFolders, and `ff-leftovers check`). A temp folder of a
+ * worker whose requests all closed, or of no request, is held only by commits on no remote or a stash (w3656, cleanup.ts
+ * unpushedWorkWhy, as the daemon's own pass judges it); every other DELETE row by any local work (localWorkWhy). Until
+ * w3707 `check` used localWorkWhy for both, so a closed worker's folder holding a .git with no HEAD or refs read
+ * "its git state could not be read" and KEEP while the pass judged it DELETE (ffa-f1beecb0 on LothDesktop, 2026-11-08).
+ */
+export async function judgeWithGit(p: string, f: CleanupFacts, now: number, slots?: SlotContext, o: { localWork?: (dir: string) => Promise<string | undefined>; unpushedWork?: (dir: string) => Promise<string | undefined> } = {}): Promise<FolderRow> {
+  const judged = judgePath(p, f, now, slots);
+  const closed = judged.kind === 'session-temp' && judged.verdict === 'delete';
+  return withGitCheck(judged, f.root, closed ? (o.unpushedWork ?? ((d: string) => unpushedWorkWhy(d, 60_000))) : o.localWork);
+}
+
 /** Worker `sid` finished (w2223): stopped, no request that has not closed is on it, and only a pending check-in keeps its folder (the 7-day reopen hold went in w3656). */
 export const finishedSession = (sid: string, f: CleanupFacts) => !f.live.includes(sid) && !f.owners?.[sid] && f.resumable.includes(sid);
 
@@ -355,12 +368,8 @@ export async function planFolders(f: CleanupFacts, o: { now?: number; sizes?: 'a
     for (const top of ['Builds', '.nightly-builds']) for (const e of entries(path.join(sb.path, top))) paths.push(path.join(sb.path, top, e.name));
   }
   const rows: FolderRow[] = [];
-  // A stopped worker whose requests all closed: only commits on no remote or a stash keep its folder (w3656, cleanup.ts unpushedWorkWhy).
-  const unpushed = o.unpushedWork ?? ((d: string) => unpushedWorkWhy(d, 60_000));
   for (const p of paths) {
-    const judged = judgePath(p, f, now, o.slots);
-    const closedSid = judged.kind === 'session-temp' && judged.verdict === 'delete' ? sessionOfDir(path.basename(p)) : undefined;
-    const r = await withGitCheck(judged, f.root, closedSid ? unpushed : o.localWork);
+    const r = await judgeWithGit(p, f, now, o.slots, o);
     rows.push(r);
     const sid = r.kind === 'session-temp' ? sessionOfDir(path.basename(p)) : undefined;
     if (r.verdict === 'keep' && sid && finishedSession(sid, f)) rows.push(...(await finishedRows(p, f, { now, published: o.published, localWork: o.localWork, ignoredEvidence: o.ignoredEvidence })));

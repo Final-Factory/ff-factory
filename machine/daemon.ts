@@ -51,6 +51,7 @@ import { fetchPlanUsage, parseUsage, usageEnv, type AccountIdentity, type UsageR
 import { onInstallDrive } from '../server/rootFence.ts';
 import { CleanupRunner, DEFAULT_CLEANUP, cleanupHoldFloorGB, appendCleanupLog, staleAtFile, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, rulesOnInstallDrive, runCleanup, sessionTempDir, sessionTempEnv, staleUnityLibraries, volumeStat, type CleanupGuard } from '../server/cleanup.ts';
 import { RELEASE_SETTINGS, mergePlans, planInstallLeftovers } from '../server/installLeftovers.ts';
+import { gitBashStrayRoot, gitBashStrayTop, sweepGitBashStray } from '../server/gitBashPath.ts';
 import { publishedFile, readPublished, recordPublished } from '../server/published.ts';
 import { SessionSweeper, sweepSettings } from '../server/sessionSweep.ts';
 import { cleanupPass, defaultNightlyRoots, planStaleOutput, staleOutputSettings, type StaleContext, type StalePlace } from '../server/staleOutput.ts';
@@ -793,6 +794,7 @@ export class Daemon {
       statfs: volumeStat,
       pass: async (low, opts) => {
         await this.ensureBashTmp();
+        await this.sweepStrayTemp(opts.dryRun);
         const guard = this.cleanupGuard();
         const root = this.sandboxRoot();
         const settings = staleOutputSettings(this.cleanupSettings.staleOutput);
@@ -987,7 +989,6 @@ export class Daemon {
    */
   private closedSessionDirs(): string[] {
     if (!this.welcomed || !this.owners) return [];
-    const owners = this.owners;
     const t = agentTempRoot(this.cfg.tempDir);
     let names: string[];
     try {
@@ -997,8 +998,32 @@ export class Daemon {
     }
     return names
       .map((n) => /^ffa-([\w-]+)$/i.exec(n)?.[1])
-      .filter((id): id is string => !!id && !owners[id] && !this.resumable.has(id) && !this.sessionLive(id))
+      .filter((id): id is string => !!id && this.sessionClosed(id))
       .map((id) => sessionTempDir(t, id));
+  }
+
+  /** Worker `id` is stopped, not resumable, and on no request that has not closed (w3656); false before the portal's welcome. */
+  private sessionClosed(id: string): boolean {
+    return this.welcomed && !!this.owners && !this.owners[id] && !this.resumable.has(id) && !this.sessionLive(id);
+  }
+
+  /**
+   * w3707: closed workers' temp folders that a PowerShell command put at Git Bash's spelling of the temp root (V:\v\ffw\tmp,
+   * server/gitBashPath.ts), outside the install folder; then the empty chain up to V:\v. Only that one path, Windows only.
+   */
+  private async sweepStrayTemp(dryRun?: boolean): Promise<void> {
+    if (process.platform !== 'win32' || !this.welcomed || !this.owners) return;
+    const stray = gitBashStrayRoot(agentTempRoot(this.cfg.tempDir));
+    if (!stray || !fs.existsSync(stray)) return;
+    const r = await sweepGitBashStray(stray, gitBashStrayTop(stray), (id) => this.sessionClosed(id), dryRun).catch((e) => {
+      log(`clean-up: the stray temp folder ${stray} could not be read: ${(e as Error).message}`);
+      return undefined;
+    });
+    if (!r) return;
+    const verb = dryRun ? 'would remove' : 'removed';
+    for (const x of r.removed) log(`clean-up: ${verb} ${x.path} (${Math.round(x.bytes / 1e6)} MB), a closed worker's temp folder at Git Bash's spelling of the temp root (w3707)`);
+    for (const e of r.emptied) log(`clean-up: removed the empty ${e} (w3707)`);
+    if (r.removed.length) for (const k of r.kept) log(`clean-up: kept ${k.path}: ${k.why}`);
   }
 
   /** What a clean-up worker may delete is judged by the ledger's facts, not by a list in its brief (server/cleanupFolders.ts, w1379). */
