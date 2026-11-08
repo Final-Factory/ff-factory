@@ -2183,14 +2183,18 @@ export class MachineManager {
       this.store.putMachine(m);
     }
     // Workers mid-turn now: resumed when the daemon is back without them (resumeCutOff). Standing runs have their own schedule.
-    const why = this.dropWhy.get(id) ?? 'lost its connection to the portal';
+    const expected = this.dropWhy.get(id);
+    const why = expected ?? 'lost its connection to the portal';
     this.dropWhy.delete(id);
     const midTurn = [...this.sessions.sessions.values()]
       .filter((s) => s.info.machineId === id && s instanceof RemoteSession && cutOffMidTurn(s.info, s.seenLive, Date.now()))
       .map((s) => s.info.id);
     // w2433: a worker cut off mid-turn marks the requests it holds Blocked on this machine; the gate's clearing (the blocker
-    // watch, once the machine is online) resumes it, so it is not resumed here as well.
-    const gated = why !== false && midTurn.length ? new Set(this.workersCutOff?.(id, midTurn) ?? []) : new Set<string>();
+    // watch, once the machine is online) resumes it, so it is not resumed here as well. w3650: not for a drop the portal made
+    // itself (an update over its link after every deploy, a forced redeploy): the daemon is back in seconds and its agents
+    // run on (w605), so the gate only flashed the machine's requests Blocked and "went offline" in the ledger every deploy;
+    // a worker such a drop did stop is resumed by the cutOff path below instead.
+    const gated = expected === undefined && midTurn.length ? new Set(this.workersCutOff?.(id, midTurn) ?? []) : new Set<string>();
     const resume = midTurn.filter((sid) => !gated.has(sid));
     if (why === false) this.cutOff.delete(id);
     else if (resume.length) {
@@ -2333,8 +2337,11 @@ export class MachineManager {
         // first start, which would put a restart on another person's tokens back on the first account (w1076).
         // Its check-in and queued message are the portal's waker's (Agents.syncWaiting): the daemon's copy is the one sent with its
         // first send, so a check-in long past came back on every report and held an idle Live view's editor open (w2255).
+        // Its timed_place verdict is the portal's too (w3663): the daemon's copy is the one sent with the turn's message, so
+        // a "here" answered mid-turn went back to the older "elsewhere" on the next report, and BEAST parked worker 66b1c43c's
+        // exclusive tickets "placed elsewhere (timed_run on lothdesktop)" from 12:46Z to 15:26Z on 2026-11-07, re-asked 8 times.
         const wasLive = s.liveFlag;
-        const { id: _i, kind: _k, machineId: _m, standingId: _s, sandboxId: _b, title: _t, createdAt: _c, label: _l, labelAt: _la, activeTool: _at, stoppedOnPurpose: _sp, waitingOn: _wo, hostFailure: _hf, machineSandbox: _ms, placeReleased: _pr, movedFrom: _mf, liveLost: _ll, releaseDue: _rd, savedWork: _sw, ranAs: _ra, ranFor: _rf, ranOn: _ro, wakeAt: _wa, wakeNote: _wn, queuedSend: _qs, queuedOn: _qo, ...run } = msg.info;
+        const { id: _i, kind: _k, machineId: _m, standingId: _s, sandboxId: _b, title: _t, createdAt: _c, label: _l, labelAt: _la, activeTool: _at, stoppedOnPurpose: _sp, waitingOn: _wo, hostFailure: _hf, machineSandbox: _ms, placeReleased: _pr, movedFrom: _mf, liveLost: _ll, releaseDue: _rd, savedWork: _sw, ranAs: _ra, ranFor: _rf, ranOn: _ro, wakeAt: _wa, wakeNote: _wn, queuedSend: _qs, queuedOn: _qo, timedVerdict: _tv, ...run } = msg.info;
         // The portal sees the daemon's events as they come (Store.noteActivity): never step activity back.
         if (run.lastActivityAt && s.info.lastActivityAt && run.lastActivityAt < s.info.lastActivityAt) run.lastActivityAt = s.info.lastActivityAt;
         // "The login of the computer it runs on", there: this Mac's login, not this host's. On the portal's own host

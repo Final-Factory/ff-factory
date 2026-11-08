@@ -876,6 +876,9 @@ test('machine: agents cut off mid-turn by a forced redeploy or a daemon restart 
   t.after(() => (RESUME_DELAY_MS.value = 3000));
   const reports: string[] = [];
   mm.report = (text) => reports.push(text);
+  // w3650: the ledger's gate (w2433) is for a drop nobody planned; a drop the portal made itself gates nothing.
+  const gatedOn: string[][] = [];
+  mm.workersCutOff = (_m, sids) => (gatedOn.push([...sids]), []);
   const d1 = daemon();
   await until('online', () => mm.isOnline('mx') && mm.protocolOf('mx') !== undefined);
   const s = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'w', permissionMode: 'default' });
@@ -895,6 +898,7 @@ test('machine: agents cut off mid-turn by a forced redeploy or a daemon restart 
   assert.match(users()[1], /^\[machine mx\] The FF Factory daemon on this machine was redeployed \(add_machine with force\) at .* while you were mid-turn/);
   await until('the resumed turn ran', () => s.info.status === 'idle');
   assert.ok(reports.some((r) => /mx is back after its daemon was redeployed \(add_machine with force\); resumed 1 agent\(s\)/.test(r)), reports.join('\n'));
+  assert.deepEqual(gatedOn, [], 'a planned redeploy does not mark the requests Blocked on the machine');
 
   // A network blip: the daemon (and the agent) live on; the reconnect finds it live, so no resume message.
   sessions.send(s.info.id, 'long again');
@@ -904,6 +908,7 @@ test('machine: agents cut off mid-turn by a forced redeploy or a daemon restart 
   await until('back', () => mm.isOnline('mx') && s.live, 8000);
   await new Promise((r) => setTimeout(r, 300));
   assert.equal(users().length, 3, 'a live agent is not sent a resume');
+  assert.deepEqual(gatedOn, [[s.info.id]], 'an unplanned drop still gates the request it cut off mid-turn');
 
   // machine_daemon stop: on purpose, so nothing is resumed when a daemon comes back later.
   mm.expectDrop('mx', false);
@@ -1683,4 +1688,28 @@ test('w3597: a resume its daemon refuses at the agent cap is Queued for a slot, 
   await until('resumed', () => store.readTranscript(worker.info.id).some((e) => e.kind === 'user' && e.text.includes('w3564 is unblocked')));
   assert.equal(sessions.queued().some((x) => x.id === worker.info.id), false);
   await until('its turn ran', () => store.readTranscript(worker.info.id).some((e) => e.kind === 'assistant'));
+});
+
+// w3663 (lothsahn): "a newer same_machine 'run it here' timed-run verdict gets overwritten by an older 'run it elsewhere'
+// one". The daemon's copy of a session is the one sent with its turn's message; on BEAST, 2026-11-07, worker 66b1c43c's
+// "here" (asked mid-turn) went back to "elsewhere (timed_run on lothdesktop)" on its next report, and its exclusive tickets
+// parked again minutes after each ask, from 12:46Z to 15:26Z.
+test('w3663: a daemon report does not put back the timed_place verdict its turn started with', async (t) => {
+  const { store, mm, daemon, cleanup } = await setup();
+  t.after(cleanup);
+  daemon();
+  await until('online', () => mm.isOnline('mx') && !!store.machines.get('mx')?.info);
+  const h = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'timed A/B', permissionMode: 'default' });
+  const until12h = new Date(Date.now() + 12 * 3_600_000).toISOString();
+  const elsewhere = { verdict: 'elsewhere' as const, why: 'beast has 6 agent slots', until: until12h, timedRun: 'lothdesktop' };
+  const daemonsCopy = { ...h.info, timedVerdict: elsewhere };
+  // timed_place answers "here" mid-turn (same_machine): the portal's record holds it
+  h.info.timedVerdict = { verdict: 'here', why: 'both sides of an A/B stay on one machine', until: until12h };
+  store.putSession(h.info);
+  const onMessage = (msg: unknown) => (mm as unknown as { onMessage(id: string, msg: unknown): void }).onMessage('mx', msg);
+  onMessage({ type: 'session', info: { ...daemonsCopy, status: 'running' }, live: true });
+  assert.equal(store.sessions.get(h.info.id)!.timedVerdict?.verdict, 'here', 'the latest answer wins over the copy the turn was sent with');
+  onMessage({ type: 'session', info: { ...daemonsCopy, status: 'idle', timedVerdict: undefined }, live: true });
+  assert.equal(store.sessions.get(h.info.id)!.timedVerdict?.verdict, 'here', 'nor does a report without one clear it');
+  assert.equal(store.sessions.get(h.info.id)!.status, 'idle', 'its run state is still the daemon\'s');
 });

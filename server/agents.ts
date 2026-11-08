@@ -4331,6 +4331,8 @@ export class Agents {
     const now = Date.now();
     for (const [m, st] of Object.entries(this.machines?.allStats?.() ?? {})) {
       if (m === machineId || !st.bench || !(now - Date.parse(st.at ?? '') < BENCH_STATE_FRESH_MS)) continue;
+      // w3663: its own timed_run there is that daemon's waiter, not this worker's: the worker stays here and may time here
+      if (this.timedRuns?.runsOn(m).some((r) => r.session === info.id)) continue;
       const t = [...(st.bench.running ?? []), ...(st.bench.waiters ?? [])].find((x) => x.session === info.id);
       if (t) return { why: `${who} has ticket ${t.ticket} on ${m} now`, exclusive_only: true };
     }

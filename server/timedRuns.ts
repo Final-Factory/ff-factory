@@ -55,6 +55,8 @@ export interface TimedRunRecord {
   undelivered?: { since: string; why: string };
   /** w2414: when its daemon could not fetch its pieces (the portal had lost their grant) and the portal sent it again once. */
   refetched?: string;
+  /** w3662: when its daemon's end came after the portal had ended it (a cancel): its words and logs are kept (lateLogs). */
+  lateLogs?: string;
   /**
    * w3405: the run its daemon plays first (a daemon plays one run at a time), and since when it waits behind it. Its state
    * stays 'sent' meanwhile, as tr_97da01f124's did for 1.4 hours behind tr_d039d7bdc5 before its worker cancelled it.
@@ -441,6 +443,7 @@ export class TimedRuns {
   /** What a timing machine's daemon reports of a run. */
   onReport(machineId: string, m: { type: string; id?: string; state?: string; line?: string; ok?: boolean; error?: string; summary?: string; legs?: LegSummary[]; result?: { name?: string; size?: number; sha256?: string }; attachmentId?: string }) {
     const r = this.runs.get(String(m.id ?? ''));
+    if (r?.machine === machineId && r.state === 'failed' && this.lateLogs(r, m)) return;
     if (!r || r.machine !== machineId || r.state === 'done' || r.state === 'failed') {
       // w2218: a run still reporting progress that the portal no longer waits for there is stopped (its ticket goes back)
       const why = m.type === 'timed_run_status' && m.state !== 'uploading' ? this.notHere(machineId, String(m.id ?? '')) : undefined;
@@ -499,6 +502,50 @@ export class TimedRuns {
       else r.error = [r.error, `its logs did not come back${m.error ? `: ${String(m.error).slice(0, 200)}` : ''}`].filter(Boolean).join('; ');
       void this.finish(r, r.legs?.some((l) => l.ok) ? 'done' : 'failed');
     }
+  }
+
+  /**
+   * w3662: the end and the logs of a run the portal had already ended (its worker cancelled it, so its record failed before
+   * its daemon stopped it). Its daemon's words (what it was doing, and since when) join the record's error and its
+   * requests' notes, and its logs are kept as an attachment, so a run that stalled shows why. On 2026-11-07 four of
+   * w3335's runs on LothDesktop ended with only their worker's cancel. True when `m` was one of these.
+   */
+  private lateLogs(r: TimedRunRecord, m: { type: string; error?: string; result?: { name?: string; size?: number; sha256?: string }; attachmentId?: string }): boolean {
+    if (r.result) return false;
+    if (m.type === 'timed_run_done') {
+      if (r.lateLogs) return true;
+      r.lateLogs = this.iso();
+      const said = m.error ? String(m.error).slice(0, 300) : '';
+      // its daemon repeats the cancel's words, then says what it was doing: only that part is new
+      const extra = r.error && said.startsWith(r.error) ? said.slice(r.error.length).trim() : said ? `; ${r.machine} said: ${said}` : '';
+      if (extra) {
+        r.error = `${r.error ?? ''}${extra.startsWith(';') ? '' : ' '}${extra}`.trim().slice(0, 800);
+        this.d.note?.(r.requests, `timed run ${r.id} on ${r.machine}, ended earlier: its daemon stopped it: ${said}`);
+      }
+      this.d.log?.(`timed run ${r.id}: ${r.machine} stopped it${said ? `: ${said}` : ''}`);
+      const res = m.result;
+      if (res && SHA.test(String(res.sha256)) && Number.isSafeInteger(res.size) && Number(res.size) > 0) {
+        try {
+          const u = this.d.store.begin({ name: `timed-${r.id}.tar.gz`, size: Number(res.size), sha256: String(res.sha256), machineId: r.machine, source: `timed run ${r.id} on ${r.machine} (ended)` });
+          this.d.post(r.machine, { type: 'timed_run_upload', id: r.id, uploadId: u.uploadId, chunkBytes: u.chunkBytes });
+        } catch (e) {
+          this.d.log?.(`timed run ${r.id}: its logs could not come back: ${(e as Error).message}`);
+        }
+      }
+      this.save();
+      return true;
+    }
+    if (m.type === 'timed_run_result' && r.lateLogs) {
+      const rec = m.attachmentId ? this.d.store.get(String(m.attachmentId)) : undefined;
+      if (rec && rec.name === `timed-${r.id}.tar.gz`) {
+        r.result = rec.id;
+        this.save();
+        this.d.note?.(r.requests, `timed run ${r.id}'s logs came back from ${r.machine} after it ended: attachment ${rec.id} (fetch_attachment gets it; log.txt has every line it said, with its time)`);
+        this.d.log?.(`timed run ${r.id}: its logs came back after it ended: attachment ${rec.id}`);
+      } else this.d.log?.(`timed run ${r.id}: its logs did not come back after it ended${m.error ? `: ${String(m.error).slice(0, 200)}` : ''}`);
+      return true;
+    }
+    return false;
   }
 
   /** w2218: why the portal no longer waits for run `id` on `machineId` (it never knew it, finished it or moved it), or undefined. */
@@ -715,7 +762,7 @@ export class TimedRuns {
     if (!r) throw new Error(`no timed run ${id} on the portal (it keeps the last ${KEEP_RUNS} that ended)`);
     const at = (iso: string) => `${iso.slice(11, 16)}Z (${Math.max(0, Math.round((this.now() - Date.parse(iso)) / 60_000))} min)`;
     const head = `Timed run ${r.id} (${this.whose(r)}) on ${r.machine}`;
-    if (r.state === 'done' || r.state === 'failed') return `${head}: ${r.state}${r.error ? `: ${r.error.slice(0, 200)}` : ''}.`;
+    if (r.state === 'done' || r.state === 'failed') return `${head}: ${r.state}${r.error ? `: ${r.error.slice(0, 600)}` : ''}${r.result ? ` Its logs: attachment ${r.result}.` : ''}`;
     if (!r.behind) return `${head}: ${r.state}${r.waitingSince ? `, waiting for ${r.machine}'s exclusive bench ticket since ${at(r.waitingSince)}` : ''}${r.line ? `: ${r.line}` : ''}.`;
     const a = this.runs.get(r.behind.id);
     const live = a && a.machine === r.machine && a.state !== 'done' && a.state !== 'failed';
