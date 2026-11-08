@@ -999,6 +999,14 @@ export function softFreeBytes(softFreeGB: number, totalBytes: number | undefined
   if (!totalBytes || totalBytes <= 0) return set;
   return Math.min(set, Math.max(CLEANUP_SOFT_GB_DEFAULT * GB, Math.floor(totalBytes / 4)));
 }
+/**
+ * The free space below which a timed run no longer defers a clean-up pass (w3700): the pool's disk_warn_gb, where the host
+ * guard stops new editors and agents, plus 5 GB, so the pass starts before the guard trips. Unknown warn line: 20 GB.
+ */
+export function cleanupHoldFloorGB(diskWarnGB: number | undefined): number {
+  return (diskWarnGB ?? 15) + 5;
+}
+
 /** A notice that clean-up cannot get above the soft threshold repeats at most this often while it stays so. */
 export const NOTICE_REPEAT_HOURS = 24;
 
@@ -1088,6 +1096,17 @@ export interface CleanupRunnerDeps {
   stale?(): Promise<{ path: string; days: number }[]>;
   /** The pass's full record, for the log file. */
   log(entry: object): void;
+  /**
+   * Something on this machine that disk work would disturb (a timed run, whose legs measure the disk), in words, or undefined
+   * (w3700). While it holds, a due pass waits, but only while the disk keeps `holdFloorGB` free: LothDesktop's V: fell from
+   * 58.6 to 14 GB free with no pass from 16:23 to 18:18 UTC (2026-11-08), every one deferred behind a timed run that sat
+   * queued and fetching for 96 minutes, and the host guard stopped every new editor and agent at 15 GB.
+   */
+  hold?(): string | undefined;
+  /** Below this much free space a hold no longer defers a pass (the pool's disk_warn_gb + 5 GB). Absent: a hold always defers. */
+  holdFloorGB?(): number | undefined;
+  /** A pass a hold deferred, said once per held stretch (the clean-up log shows why no pass ran). */
+  deferred?(why: string): void;
   /** The machine's worker install folder (w896): clean-up deletes only inside it; the notice says so. Absent: none (the portal's host). */
   root?(): string | undefined;
   /** The summary after every pass; `notice` only when clean-up could not get back above the soft threshold. */
@@ -1102,6 +1121,8 @@ export class CleanupRunner {
   private lastStaleAt: number;
   private noticeAt = 0;
   private running = false;
+  /** What deferred the last due pass, while it still does (said once). */
+  private heldBy?: string;
   last?: CleanupSummary;
 
   private readonly d: CleanupRunnerDeps;
@@ -1155,7 +1176,18 @@ export class CleanupRunner {
     if (this.running) return undefined;
     const v = await this.volumes();
     const trigger = this.due(v.free, undefined, this.d.fitSoftToVolume ? v.total : undefined);
-    return trigger ? this.run(trigger) : undefined;
+    if (!trigger) return undefined;
+    const hold = this.d.hold?.();
+    const floor = this.d.holdFloorGB?.();
+    if (hold && !(floor !== undefined && v.free !== undefined && v.free < floor * GB)) {
+      if (this.heldBy !== hold) {
+        this.heldBy = hold;
+        this.d.deferred?.(`a ${trigger} pass waits: ${hold}${floor !== undefined ? `; it runs anyway once free space falls below ${floor} GB` : ''}`);
+      }
+      return undefined;
+    }
+    this.heldBy = undefined;
+    return this.run(trigger);
   }
 
   /**
