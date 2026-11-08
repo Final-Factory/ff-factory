@@ -17,6 +17,8 @@ import { buildOptions } from './launch.ts';
 import { HOST_LOGIN } from './usage.ts';
 import { Daemon, RECONNECT_MS, type Probes } from '../machine/daemon.ts';
 import { sessionVerdict } from '../machine/leftovers.ts';
+import { workLive } from '../shared/workState.ts';
+import { ROOM_WAIT } from './resumeMove.ts';
 import { agentPath, macReloadLines, nodeSupport, plist } from './machineDeploy.ts';
 import type { Config } from './config.ts';
 import type { HostStats, ImageInput, MachineSandbox, PermissionMode, SessionInfo, TranscriptEvent, WorkItem } from '../shared/types.ts';
@@ -1646,4 +1648,39 @@ test('w2884: a worker whose host dies between turns is not resumed by the host-d
 test('w2884: HOST_DIED names every way a daemon reports a dead agent host, and nothing else', () => {
   for (const w of ['its agent host stopped unexpectedly', 'its agent host stopped unexpectedly (its scope u: killed by the OOM killer)', 'its agent host is gone (pid 4 is another program now)', 'its agent host gave no heartbeat for 10 min while its process ran: stopped']) assert.ok(HOST_DIED.test(w), w);
   for (const w of ['its agent host did not start (see x)', 'stopped by stop_agent', 'mx is offline']) assert.ok(!HOST_DIED.test(w), w);
+});
+
+test('w3597: a resume its daemon refuses at the agent cap is Queued for a slot, not Stalled in error, and goes by itself when a slot frees', async (t) => {
+  const { store, sessions, mm, daemon, cleanup } = await setup();
+  t.after(cleanup);
+  const d = daemon();
+  await until('online', () => mm.isOnline('mx') && !!store.machines.get('mx')?.info);
+  // The daemon's own cap is full at one agent mid-turn, while the portal counts room (on 2026-11-08 BEAST refused three
+  // resumes ffu #452's merge sent in one pass: "already 6 agents running in this machine's sandboxes (max_sandbox_agents 6)").
+  (d as unknown as { maxSessions: number }).maxSessions = 1;
+  const busy = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'busy', permissionMode: 'default' });
+  sessions.send(busy.info.id, 'long build');
+  await until('mid-turn', () => busy.info.status === 'running' && busy.live);
+  const worker = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'w3564', permissionMode: 'default' });
+  // Sent: until its daemon answers it takes a slot, so a second resume in the same pass waits instead of being refused too.
+  sessions.send(worker.info.id, 'w3564 is unblocked: PR #452 merged. Carry on from where you left it.', 'system');
+  assert.equal(mm.runningIn('mx', '*'), 2, 'the turn just sent counts as mid-turn before its daemon reports it');
+  await until('requeued', () => sessions.queued().some((q) => q.id === worker.info.id));
+  assert.notEqual(worker.info.status, 'error', 'a cap refusal is no failure');
+  const q = sessions.queued().find((x) => x.id === worker.info.id)!;
+  assert.equal(q.on, 'capacity');
+  assert.match(q.why, /^1 agents mid-turn on mx by its daemon's count \(it refused the start: already 1 agents mid-turn on this machine, in its sandboxes and standing agents together \(its agent cap 1\)\)$/);
+  assert.match(q.why, ROOM_WAIT, 'a resume held so may move to a computer with room (w2046)');
+  assert.equal(mm.runningIn('mx', '*'), 1, 'the refused turn takes no slot');
+  const item: WorkItem = { id: 'w3564', title: 'FFU flake', brief: 'Fix it.', priority: 'normal', keys: [], requestedBy: { userId: 'u', displayName: 'lothsahn' }, requesters: [{ userId: 'u', displayName: 'lothsahn' }], humanAsked: true, status: 'active', createdAt: new Date(Date.now() - 3_600_000).toISOString(), updatedAt: new Date().toISOString(), sessionIds: [worker.info.id], overlaps: [], asks: 0, log: [] };
+  const live = workLive(item, { items: [item], session: (id) => store.sessions.get(id), now: Date.now(), queuedSend: (id) => sessions.queued().find((x) => x.id === id)?.why });
+  assert.equal(live?.state, 'queued', live?.why ?? 'no live state');
+  assert.match(live?.why ?? '', /free agent slot/);
+  // The 30 s pass while the cap is still full: held, not sent again into the same refusal.
+  assert.equal(sessions.drain(), 0);
+  // The busy agent's turn ends (here: it stops): the slot is free, and the resume goes by itself.
+  sessions.get(busy.info.id).stop();
+  await until('resumed', () => store.readTranscript(worker.info.id).some((e) => e.kind === 'user' && e.text.includes('w3564 is unblocked')));
+  assert.equal(sessions.queued().some((x) => x.id === worker.info.id), false);
+  await until('its turn ran', () => store.readTranscript(worker.info.id).some((e) => e.kind === 'assistant'));
 });

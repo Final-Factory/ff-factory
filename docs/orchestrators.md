@@ -3106,6 +3106,14 @@ or not, takes no slot. Orchestrators never count. The Unity editor limits are un
   at once, and a later message to a session with one waiting queues behind it. `message_agent` and `start_agent` say
   "Queued, not refused: …" with the reason. A machine's own guard (its disk, RAM and sandbox drive) still refuses a new
   process there; the portal has no gate of its own.
+- **A cap refusal from a daemon is queued too** (w3597, 2026-11-08: ffu #452's merge cleared three requests' gates on BEAST in
+  one pass, the daemon refused the resumes past `max_sandbox_agents`, and each request sat "Stalled (<worker> failed)"). A
+  turn the portal sends counts as mid-turn from the send until its daemon reports it, at most 2 minutes
+  (`MachineManager.starting`, `server/machines.ts`), so one pass of resumes does not see the same free slot twice. A daemon
+  that still refuses at an agent cap (`AGENT_CAP_REFUSAL`: `max_sandbox_agents`, `max_agents_per_sandbox`, its agent cap)
+  sends `failed`; the portal puts that message back in the send queue (`SessionManager.requeueRefused`) instead of marking
+  the worker in error. The request shows Queued for a free agent slot; the message is tried again when any turn ends or
+  after `CAP_REFUSED_HOLD_MS` (1 min), and may move to a computer with room (w2046).
 - **A worker's brief is never lost** (w496, 2026-10-06: two workers started while LothDesktop's daemon was outdated got
   only the dispatcher's later "Start your brief now"). `start_agent`'s first prompt is sent with `hold`: whatever would
   refuse it now (a machine's daemon that is outdated or offline, a sandbox's attachments not fetchable
