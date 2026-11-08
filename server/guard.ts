@@ -10,6 +10,7 @@ import { headBranch, isUrgentBranch } from './releaseHandBack.ts';
 import fs from 'node:fs';
 import { checkMainCloneShell, flatten, normPath, pathSpellings, spellingsRegex, type MainCloneGrant } from './mainCloneGuard.ts';
 import { checkTiming } from './timingGuard.ts';
+import { checkGameRepoClone } from './cloneGuard.ts';
 import { checkTimedAsk, type TimedAskState } from './timedAsk.ts';
 import { checkChecksRead, checkTimedSleep } from './waitGuard.ts';
 import { checkSearchTool, checkWholeDiskSearch, type WholeDiskContext } from './wholeDiskSearch.ts';
@@ -208,6 +209,8 @@ export function sandboxGuard(opts: {
         (opts.benchBusy ? checkBenchBusyLaunch(cmd, opts.benchBusy) : undefined) ??
         (opts.personBusy ? checkPersonPlayLaunch(cmd, opts.personBusy) : undefined) ??
         checkRawUnityBatch(cmd, cloneSpellings) ??
+        // w3703: no full clone of the game repo (its LFS files and Library copies filled V: and F:); players build in the sandbox.
+        checkGameRepoClone(cmd, { cwd: input.cwd || opts.sandboxPath, env: opts.env, gameRepos: opts.gameRepos ?? [], sandboxPath: opts.sandboxPath }) ??
         timing(tool, args, input.cwd || opts.sandboxPath) ??
         (opts.timedAsk ? checkTimedAsk(cmd, opts.timedAsk()) : undefined) ??
         checkWholeDiskSearch(cmd, disk(input.cwd || opts.sandboxPath)) ??
