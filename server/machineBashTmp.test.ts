@@ -43,6 +43,23 @@ test("w603: the session folder that became Git Bash's /tmp is kept by clean-up a
   assert.ok(fs.existsSync(pinned), "Git Bash's /tmp stays");
 });
 
+test("w3559: a session's removal looks /tmp up again: a folder that became /tmp since the last check stays", async (t) => {
+  let pinned = '';
+  const { d, tempDir } = daemon(t, async () => ({ dir: pinned, made: false }));
+  const old = path.join(tempDir, 'ffa-old');
+  const fresh = path.join(tempDir, 'ffa-fresh');
+  for (const f of [old, fresh]) fs.mkdirSync(f, { recursive: true });
+  pinned = old;
+  await d.ensureBashTmp();
+  // Every MSYS process ended and a new first bash pinned /tmp to ffa-fresh: the daemon's 5-minute check has not run yet.
+  pinned = fresh;
+  d.onMessage({ type: 'remove', sessionId: 'fresh' });
+  d.onMessage({ type: 'remove', sessionId: 'old' });
+  for (let i = 0; i < 100 && fs.existsSync(old); i++) await new Promise((r) => setTimeout(r, 20));
+  assert.ok(!fs.existsSync(old), 'the folder that is no longer /tmp goes');
+  assert.ok(fs.existsSync(fresh), "Git Bash's new /tmp stays");
+});
+
 test('w603: a temp root that is /tmp is not kept whole; without the probe (tests) nothing is looked up', async (t) => {
   const { d, tempDir } = daemon(t, async () => ({ dir: tempDir, made: false }));
   await d.ensureBashTmp();
