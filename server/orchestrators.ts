@@ -6778,6 +6778,33 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     return true;
   }
 
+  /**
+   * w3572: a pull request this request owns conflicts with its base while other requests wait for it to merge
+   * (BlockerWatch.tellPrConflicts). One log line that carries `mark` (once per mark: one head commit), a worker busy on
+   * it (or idle, or asleep on its check-in while the request is active) told, as tellReportWaited does. A request Blocked
+   * on something else keeps the line in its log for its next turn. False when the mark is already on it or it is closed.
+   */
+  tellPrConflict(id: string, a: { mark: string; text: string }): boolean {
+    const w = this.store.work.get(id);
+    if (!w || !isOpen(w) || w.log.some((l) => l.includes(a.mark))) return false;
+    const all = [...this.store.work.values()];
+    const told: string[] = [];
+    for (const sid of newestFirst(w)) {
+      const s = this.store.sessions.get(sid);
+      if (!s || s.kind !== 'worker' || s.status === 'error' || (s.status === 'stopped' && w.status !== 'active') || s.waitingOn || !servedBy(sid, all).has(w.id)) continue;
+      try {
+        this.sessions.send(sid, `[about ${w.id} "${clip(w.title, 80)}"]\n${a.text}`, 'system');
+        told.push(sid);
+        break;
+      } catch {
+        // gone or at a limit: the request's log has it
+      }
+    }
+    this.stamp(w, `${a.mark}: ${told.length ? `told ${told.join(', ')}: ` : ''}${a.text}`);
+    this.store.putWork(w);
+    return true;
+  }
+
   /** A line in an intake request's log (an escalation that repeats it). */
   noteIntake(id: string, line: string) {
     const w = this.store.work.get(id);

@@ -73,6 +73,24 @@ export interface PrHealth {
   headRef?: string;
   /** Since when (ms) this portal has seen this head commit (set by the blocker watch). */
   headSeenAt?: number;
+  /** w3572: the requests its description names with a `Request:` or `Part of:` line (lower case). */
+  requests?: string[];
+}
+
+/**
+ * Whether request `w` owns pull request `ref` (w3572): the ledger linked it to `w` (its Request line, its own worker opened
+ * it, its branch, its title), its description names `w` with a `Request:` or `Part of:` line, or its head branch is `w`'s
+ * own. Only the owner is woken to merge the base into a conflicting PR; a request that only waits for another request's
+ * PR to merge is not (w3423 and five others waiting on ffu#397, w3445's, were each woken three times in an hour to resolve
+ * a conflict on a PR none of them owned).
+ */
+export function ownsPr(w: Pick<WorkItem, 'id' | 'prs' | 'source' | 'mergedInto'> | undefined, ref: string | undefined, h: Pick<PrHealth, 'requests' | 'headRef'> | undefined): boolean {
+  if (!w || !ref) return false;
+  const [repo, num] = [ref.slice(0, ref.lastIndexOf('#')).toLowerCase(), Number(ref.slice(ref.lastIndexOf('#') + 1))];
+  if (w.prs?.some((p) => p.repo.toLowerCase() === repo && p.number === num)) return true;
+  const ids = [w.id, ...(w.mergedInto ? [w.mergedInto] : [])].map((x) => x.toLowerCase());
+  if (h?.requests?.some((r) => ids.includes(r.toLowerCase()))) return true;
+  return !!(h?.headRef && w.source?.branch && h.headRef === w.source.branch);
 }
 
 /** A full 40-character commit sha, the only form GitHub's expectedHeadOid (`gh pr merge --match-head-commit`) takes (w3021). */
@@ -366,8 +384,10 @@ export function blockerVerdict(b: WorkBlocker, f: BlockerFacts, waiter?: string)
       if (p?.state === 'merged') return { state: 'clear', why: p.text };
       if (p?.state === 'closed') return { state: 'decide', why: `${p.text} without delivering ${b.what}` };
       // w907: a PR its own worker waits on cannot merge while it conflicts: the worker is woken to merge the base in.
+      // w3572: only when the waiting request owns it; one that waits for another request's PR stays Blocked until it
+      // merges or closes (its owner is told once, BlockerWatch.tellPrConflicts).
       const h = b.ref && b.by.startsWith('worker ') ? f.prHealth?.(b.ref) : undefined;
-      if (h?.state === 'open' && h.conflict) return { state: 'clear', why: conflictText(b.ref, h.conflict.base) };
+      if (h?.state === 'open' && h.conflict && ownsPr(waiter ? f.work(waiter) : undefined, b.ref, h)) return { state: 'clear', why: conflictText(b.ref, h.conflict.base) };
       return late(p?.text ?? `PR ${b.ref} is open`);
     }
     case 'steam': {
