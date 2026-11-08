@@ -515,8 +515,9 @@ Host lothdesktop
 ## The daemon's logs
 
 A machine daemon logs to `<app_dir>/logs/` on its machine: `<root>/daemon/logs` on a worker install (`F:\ffw\daemon\logs`
-on beast), `~/.ff-factory/logs` (`%USERPROFILE%\.ff-factory\logs`) on a portal-deployed one. Nothing is written outside
-that folder. A restart never erases a log (w2038: two restarts on beast, at about 08:30Z and 11:10Z,
+on beast, `D:\work\ffw\daemon\logs` on lothdesktop), `~/.ff-factory/logs` (`%USERPROFILE%\.ff-factory\logs`) on a
+portal-deployed one. Nothing is written outside that folder. A worker on the machine reads it, read-only (w3670,
+`server/daemonReads.ts`; docs/portal-logs.md has the list of what stays closed). A restart never erases a log (w2038: two restarts on beast, at about 08:30Z and 11:10Z,
 overwrote the one `daemon.log.prev` it then kept and erased 08:15-08:30Z):
 
 - `daemon.log` (and on Windows `daemon.err.log`, `supervisor.log`) is the live file.
