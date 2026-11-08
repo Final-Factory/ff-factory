@@ -167,3 +167,45 @@ test('API keys: a key minted with a scope says so, so /mcp can refuse it; an unk
   assert.deepEqual(bearer(a.createApiKey('ffbox', undefined, 'ffbox')), { ok: true, name: 'ffbox', scope: 'ffbox' }, "FFBox's key for Max's escalations");
   assert.throws(() => a.createApiKey('x-lab', undefined, 'admin' as never), /key scope/);
 });
+
+test('w3714: a one-time set-password link sets the password once, within its hours, and logs that browser in', async (t) => {
+  const dir = dataDir(t);
+  const a = new Auth(dir, { trustProxy: false });
+  await a.setUser('ben', 'a password nobody told him');
+  const before = await a.login(req({ ip: '198.51.100.1' }), 'ben', 'a password nobody told him');
+  assert.ok(before.ok);
+  assert.throws(() => a.mintPasswordLink('nobody'), /no login "nobody"/);
+
+  const { token } = a.mintPasswordLink('ben');
+  assert.match(token, /^[\w-]{43}$/);
+  // Only the token's hash is kept.
+  assert.equal(fs.readFileSync(path.join(dir, 'password-links.json'), 'utf8').includes(token), false);
+
+  // Too short: refused, and the link still works.
+  assert.deepEqual(await a.usePasswordLink(req(), token, 'short'), { ok: false, status: 400, error: 'The password must be at least 12 characters.' });
+  const used = await a.usePasswordLink(req(), token, 'my own long password');
+  assert.ok(used.ok);
+  assert.equal(used.username, 'ben');
+  assert.equal(a.user(req({ cookie: cookieOf(used.cookie) })), 'ben');
+  // The old password and its sessions are gone; the new one logs in.
+  assert.equal(a.user(req({ cookie: cookieOf(before.cookie) })), undefined);
+  assert.equal((await a.login(req({ ip: '198.51.100.2' }), 'ben', 'a password nobody told him')).ok, false);
+  assert.ok((await a.login(req({ ip: '198.51.100.3' }), 'ben', 'my own long password')).ok);
+  // Once only.
+  assert.deepEqual(await a.usePasswordLink(req(), token, 'another long password'), { ok: false, status: 401, error: 'This link is used, expired or mistyped. Ask for a new one.' });
+
+  // A newer link replaces an older one; an expired one is refused.
+  const first = a.mintPasswordLink('ben').token;
+  const second = a.mintPasswordLink('ben').token;
+  assert.equal((await a.usePasswordLink(req({ ip: '198.51.100.4' }), first, 'another long password')).ok, false);
+  const expired = a.mintPasswordLink('ben', -1).token;
+  assert.equal((await a.usePasswordLink(req({ ip: '198.51.100.5' }), expired, 'another long password')).ok, false);
+  assert.equal((await a.usePasswordLink(req({ ip: '198.51.100.5' }), second, 'another long password')).ok, false, 'the expired link replaced it');
+
+  // Wrong guesses count as failed logins: the sixth from one address is throttled.
+  const fresh = a.mintPasswordLink('ben').token;
+  for (let i = 0; i < 5; i++) await a.usePasswordLink(req({ ip: '198.51.100.9' }), `guess-${i}`, 'another long password');
+  const throttled = await a.usePasswordLink(req({ ip: '198.51.100.9' }), fresh, 'another long password');
+  assert.equal(throttled.ok ? 200 : throttled.status, 429);
+  assert.ok((await a.usePasswordLink(req({ ip: '198.51.100.10' }), fresh, 'another long password')).ok);
+});
