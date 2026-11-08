@@ -10,7 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { HostedSession, hostFiles, hostFolders, hostLook, pidAlive, HOST_PROTOCOL, type HostDeps } from '../machine/agentHost.ts';
+import { HostedSession, cpuSince, hostFiles, hostFolders, hostLook, pidAlive, HOST_PROTOCOL, type HostDeps } from '../machine/agentHost.ts';
 import { HOST_WATCH, HostWatch, folderLastWrite, lingeringRefusal, realHostProcs, removeHostDir, sameHost, waitGone, type LingeringHost } from '../machine/hostWatch.ts';
 import type { FromDaemon } from './machineProtocol.ts';
 import type { SessionInfo } from '../shared/types.ts';
@@ -255,4 +255,83 @@ test('w799: a host folder Windows still holds is removed by retrying (EPERM, EBU
   calls = 0;
   assert.match((await removeHostDir('x', { rm: flaky('EINVAL', 99), sleep: async () => undefined }))!, /EINVAL/, 'other errors are not retried');
   assert.equal(calls, 1);
+});
+
+// w3673: worker 316ded29 (lothdesktop, 2026-11-07) sat mid-turn for 12 h without a tool call or a transcript line while
+// its host's heartbeat ran on; ten daemons adopted it "running, live" and nothing looked at its progress. The hang watch
+// reads its tools' CPU after SILENT_MS without progress and LOOK_MS later: idle tools end its tree (the portal resumes
+// it), busy ones (a long build, a timed run) keep it.
+const lastSession = (h: ReturnType<typeof hostedOn>) => h.out.filter((m) => m.type === 'session').at(-1) as Extract<FromDaemon, { type: 'session' }> | undefined;
+
+test('w3673: cpuSince sums what each process used between two reads, a new process in full', () => {
+  const before = new Map([['1@a', 1000], ['2@b', 500]]);
+  const after = new Map([['1@a', 4000], ['2@b', 400], ['3@c', 250]]);
+  assert.equal(cpuSince(before, after), 3000 + 0 + 250);
+});
+
+test('w3673: an agent silent mid-turn whose tools are idle is flagged, then its host tree is ended so it is resumed', { timeout: 60_000 }, async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-w3673-idle-'));
+  const dir = path.join(root, 'h1');
+  const { pid, child } = await fakeHost(dir);
+  t.after(() => cleanUp(root, pid, child));
+  const reads: number[] = [];
+  const h = hostedOn(root, 'h1', {
+    hang: { SILENT_MS: 1, LOOK_MS: 1_000, BUSY_CPU_MS: 30_000 },
+    // A wait loop's CPU: about nothing between the two looks.
+    toolsCpu: async (p) => (reads.push(p), new Map([['9@x', 1_200 + reads.length]])),
+  });
+  assert.equal(h.s.adopt(), true);
+  await until('its folder removed', () => !fs.existsSync(dir));
+  assert.equal(pidAlive(pid), false, 'the host was ended');
+  assert.equal(pidAlive(child), false, 'and its tree');
+  assert.ok(reads.length >= 2 && reads.every((p) => p === pid), `its tools' CPU was read twice under its host: ${reads.join(',')}`);
+  assert.ok(h.logs.some((l) => /hang watch reads its tools' CPU/.test(l)), h.logs.join('\n'));
+  const ended = lastSession(h)!;
+  assert.equal(ended.live, false);
+  assert.match(ended.info.statusDetail ?? '', /^its agent host made no progress for \d+ min mid-turn .*its tools used 0\.0 s of CPU/);
+  assert.ok(h.logs.some((l) => /its agent looks hung/.test(l)), h.logs.join('\n'));
+});
+
+test('w3673: busy tools keep a silent agent (a long build), flagged; progress clears the flag', { timeout: 60_000 }, async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-w3673-busy-'));
+  const dir = path.join(root, 'h2');
+  const { pid, child } = await fakeHost(dir);
+  let used = 0;
+  const h = hostedOn(root, 'h2', {
+    hang: { SILENT_MS: 1, LOOK_MS: 500, BUSY_CPU_MS: 30_000 },
+    // A build: a minute of CPU between every two reads.
+    toolsCpu: async () => new Map([['9@x', (used += 60_000)]]),
+  });
+  t.after(async () => {
+    h.s.detach();
+    await cleanUp(root, pid, child);
+  });
+  assert.equal(h.s.adopt(), true);
+  await until('kept as busy', () => /its tools are at work \(60\.0 s of CPU/.test(lastSession(h)?.info.statusDetail ?? ''));
+  assert.ok(fs.existsSync(dir) && pidAlive(pid), 'its host runs on');
+  assert.ok(!h.out.some((m) => m.type === 'session' && !m.live), 'never ended');
+  // Its agent says something: the flag goes and the clock starts again.
+  h.deps.hang = { SILENT_MS: 60 * 60_000 };
+  fs.appendFileSync(hostFiles(dir).out, JSON.stringify({ op: 'delta', text: 'back' }) + '\n');
+  await until('the flag cleared', () => lastSession(h)?.info.statusDetail === undefined);
+  assert.ok(h.logs.some((l) => /made progress again/.test(l)), h.logs.join('\n'));
+  assert.ok(Number(fs.readFileSync(hostFiles(dir).progress, 'utf8')) > Date.now() - 60_000, 'its progress time kept for the next daemon');
+});
+
+test('w3673: the hang watch\'s clock goes on across daemons (daemon.progress), and a message held mid-turn does not reset it', { timeout: 60_000 }, async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-w3673-adopt-'));
+  const dir = path.join(root, 'h3');
+  const { pid, child } = await fakeHost(dir);
+  // The daemon before this one last saw progress 40 min ago; out.jsonl is newer (state lines), which is no progress.
+  fs.writeFileSync(hostFiles(dir).progress, String(Date.now() - 40 * 60_000));
+  fs.writeFileSync(hostFiles(dir).out, JSON.stringify({ op: 'state', info: info('h3'), live: true }) + '\n');
+  const h = hostedOn(root, 'h3', { hang: { SILENT_MS: 30 * 60_000, LOOK_MS: 60 * 60_000 }, toolsCpu: async () => new Map() });
+  t.after(async () => {
+    h.s.detach();
+    await cleanUp(root, pid, child);
+  });
+  assert.equal(h.s.adopt(), true);
+  // A follow-up arrives mid-turn and is held (the 12:30 follow-up, the disk notices, the 15:00 interrupt in 316ded29).
+  h.s.send('a follow-up held mid-turn', 'orchestrator');
+  await until('flagged from the saved clock', () => /no progress from its agent for 4\d min mid-turn/.test(lastSession(h)?.info.statusDetail ?? ''), 10_000);
 });

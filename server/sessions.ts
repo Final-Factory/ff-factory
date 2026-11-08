@@ -206,6 +206,11 @@ export interface SessionHandle {
   send(text: string, from?: 'human' | 'orchestrator' | 'system', uuid?: string, images?: ImageInput[], requestedBy?: Requester, attachments?: DeliveredAttachment[]): string;
   interrupt(): Promise<void>;
   /**
+   * Interrupt it and say what became of that (w3673): a machine worker's daemon answers whether its agent got the interrupt
+   * and stopped. Sessions in this process have none (interrupt() is the whole answer).
+   */
+  interruptAnswered?(): Promise<string>;
+  /**
    * Compact the conversation now (w518, a person's `/compact [focus]`): Claude Code's own /compact, between turns only.
    * Returns what to tell the person; throws why it cannot. Only sessions in this process have it.
    */
