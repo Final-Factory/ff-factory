@@ -106,6 +106,11 @@ export interface PoolOptions {
   repoPath: string;
   stateFile: string;
   settings?: SandboxPoolSettings | null;
+  /**
+   * w3518: `settings` are daemon.json's, which can be stale (disk_warn_gb 50 or 80 where the portal's pool says 15): the disk
+   * guard waits for the portal's (configure, or settle when its welcome carries none). Until then nothing starts here anyway.
+   */
+  awaitConfigure?: boolean;
   /** Per sandbox, from the daemon's own sessions: an agent mid-turn, and when one there last did anything (ms). */
   activity(id: string): { busy: boolean; lastActivityMs: number };
   /** Something changed: send the portal a snapshot. */
@@ -328,6 +333,7 @@ export class SandboxPool {
   private readonly o: PoolOptions;
   private readonly d: PoolDeps;
   private settings?: SandboxPoolSettings;
+  private settled: boolean;
   private recs = new Map<string, Rec>();
   private readonly unityState = new Map<string, MachineSandboxUnity & { startedAt?: number }>();
   /**
@@ -370,12 +376,23 @@ export class SandboxPool {
     this.o = o;
     this.d = d;
     this.settings = o.settings ?? undefined;
+    this.settled = !o.awaitConfigure;
     this.load();
   }
 
   /** The pool settings (the portal's welcome, or daemon.json until then); null: this machine has no sandboxes. */
   configure(settings: SandboxPoolSettings | null | undefined) {
     this.settings = settings ?? undefined;
+    this.settled = true;
+  }
+
+  /**
+   * w3518: the portal's welcome came, with or without pool settings: the settings in force are current, so the disk guard
+   * runs. Before it, after a daemon restart, daemon.json's stale disk_warn_gb sent "disk space low ... (below disk_warn_gb 50)"
+   * and "fine again" 27 s later at the same free space (lothdesktop, 2026-11-07 17:42:22 and 17:42:49 -07:00).
+   */
+  settle() {
+    this.settled = true;
   }
 
   get configured() {
@@ -1381,7 +1398,7 @@ export class SandboxPool {
         }
       }
     }
-    if (s) dirty = (await this.diskGuard(s)) || dirty;
+    if (s && this.settled) dirty = (await this.diskGuard(s)) || dirty;
     if (s) dirty = (await this.idleStop()) || dirty;
     if (dirty) this.o.onChange();
   }

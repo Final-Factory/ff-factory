@@ -704,6 +704,7 @@ export class Daemon {
         repoPath: cfg.repoPath,
         stateFile: path.join(appDirOfConfig(cfg), 'sandboxes.json'),
         settings: cfg.sandboxes,
+        awaitConfigure: true,
         idleStopMinutes: cfg.sandboxIdleStopMinutes,
         activity: (id) => this.sandboxActivity(id),
         liveAgents: (id) => this.liveIn(id),
@@ -2696,6 +2697,7 @@ export class Daemon {
           this.pool.configure(msg.sandboxes);
           this.reportSandboxes();
         }
+        this.pool.settle();
         const known = new Set(msg.sessions.map((s) => s.id));
         let dropped = 0;
         for (const [id, e] of this.entries) {
