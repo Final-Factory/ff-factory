@@ -3612,7 +3612,8 @@ export class Agents {
    * as the dispatcher's room is (roomNow under placement()'s holds and priority reservations, roomForWork with its needs),
    * then again with one sandbox free on each computer, and for urgent work with one more agent slot: a computer offline,
    * held, paused, short of RAM or that the work does not fit stays out. Pair runs and timed legs are not here: they have
-   * their own ways to room (w1945, w2055).
+   * their own ways to room (w1945, w2055). A computer whose freed sandbox a pair or timed hold would keep for other work stays
+   * out too, named in `held` (w3522).
    */
   private reclaimPressure(): Pressure[] {
     const items = [...this.store.work.values()].filter((w) => w.status === 'queued' && needsOf(w) === 'game' && !w.pair && !w.timedLeg);
@@ -3622,11 +3623,37 @@ export class Agents {
     const now = roomNow(places, prefs);
     const plus = roomNow(places.map((p) => ({ ...p, freeSandboxes: Math.max(1, p.freeSandboxes) })), prefs);
     const plusMid = roomNow(places.map((p) => ({ ...p, freeSandboxes: Math.max(1, p.freeSandboxes), midTurn: Math.max(0, p.midTurn - 1) })), prefs);
+    // w3522: a sandbox freed on a computer whose last free sandbox would then be held for other work (heldFor: an older pair
+    // run, w1945, or timed work on a small computer, w1995) is not this work's. Read as if only that computer had one free, a
+    // hold just begun (no lapse yet). At 00:37Z on 2026-11-08 biscuit/slot3 was freed for w3476 and held for w3347's pair.
+    const freed = new Map<string, HoldMemo>();
+    const freedOn = (id: string): HoldMemo => {
+      let m = freed.get(id);
+      if (!m) {
+        const ps = places.map((p) => (p.id === id ? { ...p, freeSandboxes: Math.max(1, p.freeSandboxes) } : p));
+        m = { places: ps, facts: { ...roomNow(ps, prefs), since: {} }, why: new Map() };
+        freed.set(id, m);
+      }
+      return m;
+    };
     return items.map((w) => {
       const needs = w.queuedFor?.needs;
       const has = roomForWork(now, w, needs).ids;
       const room = has.length > 0;
-      return { work: w.id, title: w.title, priority: w.priority, room, machines: room ? has : roomForWork(plus, w, needs).ids, preemptOn: room || w.priority !== 'urgent' ? [] : roomForWork(plusMid, w, needs).ids };
+      if (room) return { work: w.id, title: w.title, priority: w.priority, room, machines: has, preemptOn: [] };
+      const held = new Map<string, string>();
+      const timed = !!timedKind(needsTimed(w));
+      const free = (ids: string[]) => ids.filter((id) => {
+        if (!held.has(id)) {
+          const why = this.pairHoldProblem(id, w, freedOn(id)) ?? this.timedHoldProblem(id, w, timed, freedOn(id));
+          held.set(id, why ? why.split(/\. Start /)[0] : '');
+        }
+        return !held.get(id);
+      });
+      const machines = free(roomForWork(plus, w, needs).ids);
+      const preemptOn = w.priority !== 'urgent' ? [] : free(roomForWork(plusMid, w, needs).ids);
+      const heldWhy = [...held].filter(([, why]) => why).map(([id, why]) => `${id}: ${why.startsWith(`${id}'s `) ? why.slice(id.length + 3) : why}`);
+      return { work: w.id, title: w.title, priority: w.priority, room, machines, preemptOn, ...(heldWhy.length ? { held: heldWhy } : {}) };
     });
   }
 

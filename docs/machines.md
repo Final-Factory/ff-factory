@@ -2081,7 +2081,12 @@ LothDesktop and Beast, not just when BEAST is full").
     `placement()`'s holds, pauses, person-play holds and priority reservations, `roomForWork` with its needs), then again
     with one sandbox free on each computer. The computers that then take it are where a sandbox may be freed: one offline,
     held, paused, short of RAM or of agent slots, or that the work does not fit, never is. Urgent work also lists those
-    where one more agent slot would do (for a pre-emption).
+    where one more agent slot would do (for a pre-emption). Nor is one whose freed sandbox would be held for other work
+    (w3522): an older pair run of at least its priority that fits there (`pairHoldProblem`, w1945) or timed work on a small
+    computer (`timedHoldProblem`, w1995), read as if only that computer had one sandbox free and the hold had just begun.
+    The Queued line names the hold ("FF Factory frees no sandbox for it: a sandbox freed for it would be held for other
+    work: biscuit: last free sandbox is held for w3347 ..."). On 2026-11-08 at 00:37Z biscuit/slot3 was freed for w3476
+    and kept for w3347's pair; at 01:28Z lothdesktop/slot2, freed for w3259, went to w3460's pair leg.
   - **Reclaim an idle holder.** Of the sandboxes there, it takes one whose workers' open work is strictly lower in priority
     (`WorkItem.priority`; equal never), none of them mid-turn: the lowest priority first, then the longest idle, then one
     whose editor is stopped. Its workers are stopped (a live one) and released as any release is: uncommitted work saved and
