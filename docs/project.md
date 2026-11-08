@@ -56,6 +56,10 @@ What standing up Ben's Light Tree portal on BEAST, m5, m3 and biscuit beside the
 - **macOS with nobody logged in at the screen** has no `gui/<uid>` launchd domain (bootstrap error 125): bootstrap into
   `user/<uid>` with `LimitLoadToSessionType` `Background` (keep `Aqua` too), and wait for a `bootout` to finish before
   the next `bootstrap` (error 5 otherwise).
+- **Each daemon's leftovers sweep spares the other's workers** by their `FF_WORKER_ROOT` (`sameRoot`,
+  machine/leftovers.ts): both daemons on a computer have the same machine id, so before this the live BEAST and m3
+  daemons ended the Light Tree workers' `claude` every few minutes ("exited with code 1"). Give the second daemon its own
+  `root`.
 - **A repository outside the Final-Factory organization** is not probed for the organization's runners and artifacts
   (`inGithubOrg`, server/githubTokens.ts), and a repository with no pull request yet is "not measured" rather than a CI
   read fault (`ciUnmeasured`, server/ciReadHealth.ts), so a new instance's dashboard opens without false banners.

@@ -612,6 +612,7 @@ export class Daemon {
     this.leftovers = new LeftoverReaper({
       platform,
       machineId: cfg.id,
+      ...(cfg.root ? { root: cfg.root } : {}),
       procs: real ? () => pd.procs() : async () => [],
       envOf: (pids) => readEnvs(platform, pids),
       inspect: realInspect(platform),

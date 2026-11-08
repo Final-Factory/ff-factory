@@ -33,7 +33,9 @@
 // Never touched: anything while its worker's process runs (between turns too); an interactive Unity editor, and what it
 // started (the sandbox pool stops idle editors; a person's editor is never ours); a process that names the machine's main
 // clone or the daemon's own folder (the agent hosts, which hostWatch.ts owns; not a worker's own `unity-slot`, w2410); a
-// process carrying another machine's id or a session this machine never ran (the portal's own orchestrators where a daemon shares its host); a shared build server
+// process carrying another machine's id or a session this machine never ran (the portal's own orchestrators where a daemon shares its host),
+// or another daemon's worker install folder in FF_WORKER_ROOT (a second FF Factory's daemon on the same computer has the
+// same machine id: on BEAST, 2026-11-08, this sweep ended Ben's Light Tree workers' claude four times in 8 min, w3714); a shared build server
 // (VBCSCompiler, MSBuild nodes, bee) while it still uses CPU, since another worker's build may be using it; anything
 // before the portal's welcome since the daemon started (until then who is live or waited for is not known). Every end is
 // logged with what, why and whose, and told to the portal.
@@ -88,6 +90,8 @@ export interface ProcEnv {
   session?: string;
   sandbox?: string;
   machine?: string;
+  /** FF_WORKER_ROOT: the worker install folder of the daemon whose worker started it (w3714). */
+  root?: string;
 }
 
 /** One lease file of a player slot (scripts/nightly/player_slots.py `_lease`), with the slot it is in. */
@@ -108,6 +112,11 @@ export interface LeftoverDeps {
   platform: UnityPlatform;
   /** This machine's id (FF_MACHINE_ID of its workers' processes). */
   machineId: string;
+  /**
+   * w3714: this daemon's worker install folder (FF_WORKER_ROOT of its workers' processes). A second FF Factory's daemon on
+   * the same computer has the same machine id and another root: its workers' processes are never this one's.
+   */
+  root?: string;
   procs(): Promise<Proc[]>;
   /** FF_SESSION_ID, FF_SANDBOX_ID and FF_MACHINE_ID of the given processes, where the machine lets them be read. */
   envOf(pids: number[]): Promise<Map<number, ProcEnv>>;
@@ -513,7 +522,8 @@ export class LeftoverReaper {
       let c: Candidate | undefined;
       if (e?.session) {
         // Ours: a process of this machine's workers, or of a session this machine runs or ran.
-        const ours = e.machine ? e.machine.toLowerCase() === d.machineId.toLowerCase() : d.sessionKnown(e.session);
+        // w3714: a process another daemon's worker started (another FF Factory on this computer, same machine id) is not.
+        const ours = sameRoot(e.root, d.root, d.platform) && (e.machine ? e.machine.toLowerCase() === d.machineId.toLowerCase() : d.sessionKnown(e.session));
         if (!ours) continue;
         c = { p, kind, session: e.session, sandbox: e.sandbox, via: 'env', slot };
       } else {
@@ -671,7 +681,20 @@ export class LeftoverReaper {
 
 // ---------------------------------------------------------------- the real machine
 
-const WANT = /^(FF_SESSION_ID|FF_SANDBOX_ID|FF_MACHINE_ID)=(.*)$/;
+const WANT = /^(FF_SESSION_ID|FF_SANDBOX_ID|FF_MACHINE_ID|FF_WORKER_ROOT)=(.*)$/;
+
+/**
+ * w3714: whether a process's FF_WORKER_ROOT is this daemon's root. Either unknown (a process of a worker from before
+ * w3714, a daemon with no root) counts as the same, as before; Windows compares without case and either slash.
+ */
+export function sameRoot(theirs: string | undefined, mine: string | undefined, platform: UnityPlatform): boolean {
+  if (!theirs || !mine) return true;
+  const k = (p: string) => {
+    const x = p.replace(/\\/g, '/').replace(/\/+$/, '');
+    return platform === 'win32' ? x.toLowerCase() : x;
+  };
+  return k(theirs) === k(mine);
+}
 
 /** The FF variables of an environment's "NAME=value" entries. */
 export function envFrom(entries: Iterable<string>): ProcEnv {
@@ -681,7 +704,8 @@ export function envFrom(entries: Iterable<string>): ProcEnv {
     if (!m) continue;
     if (m[1] === 'FF_SESSION_ID') o.session = m[2];
     else if (m[1] === 'FF_SANDBOX_ID') o.sandbox = m[2];
-    else o.machine = m[2];
+    else if (m[1] === 'FF_MACHINE_ID') o.machine = m[2];
+    else if (m[2]) o.root = m[2];
   }
   return o;
 }
@@ -695,7 +719,7 @@ export function macEnvLine(line: string): { pid: number; env: ProcEnv } | undefi
   const m = /^\s*(\d+)\s+(.*)$/.exec(line);
   if (!m) return undefined;
   const env: ProcEnv = {};
-  for (const x of m[2].matchAll(/(?:^|\s)(FF_SESSION_ID|FF_SANDBOX_ID|FF_MACHINE_ID)=(\S+)/g)) Object.assign(env, envFrom([`${x[1]}=${x[2]}`]));
+  for (const x of m[2].matchAll(/(?:^|\s)(FF_SESSION_ID|FF_SANDBOX_ID|FF_MACHINE_ID|FF_WORKER_ROOT)=(\S+)/g)) Object.assign(env, envFrom([`${x[1]}=${x[2]}`]));
   return { pid: Number(m[1]), env };
 }
 
@@ -745,7 +769,7 @@ export function winEnvScript(pids: number[]): string {
   const list = pids.filter((p) => Number.isInteger(p) && p > 4).join(',');
   return [
     `Add-Type -TypeDefinition @'\n${WIN_ENV_CS}\n'@`,
-    `$out = foreach ($id in @(${list || '0'})) { $b = $null; try { $b = [FFProcEnv]::Block([int]$id) } catch { }; if ($b -and $b.Contains('FF_SESSION_ID=')) { $m = @{}; foreach ($kv in $b.Split([char]0)) { if ($kv -match '^(FF_SESSION_ID|FF_SANDBOX_ID|FF_MACHINE_ID)=(.*)$') { $m[$matches[1]] = $matches[2] } }; [pscustomobject]@{ pid = [int]$id; session = $m['FF_SESSION_ID']; sandbox = $m['FF_SANDBOX_ID']; machine = $m['FF_MACHINE_ID'] } } }`,
+    `$out = foreach ($id in @(${list || '0'})) { $b = $null; try { $b = [FFProcEnv]::Block([int]$id) } catch { }; if ($b -and $b.Contains('FF_SESSION_ID=')) { $m = @{}; foreach ($kv in $b.Split([char]0)) { if ($kv -match '^(FF_SESSION_ID|FF_SANDBOX_ID|FF_MACHINE_ID|FF_WORKER_ROOT)=(.*)$') { $m[$matches[1]] = $matches[2] } }; [pscustomobject]@{ pid = [int]$id; session = $m['FF_SESSION_ID']; sandbox = $m['FF_SANDBOX_ID']; machine = $m['FF_MACHINE_ID']; root = $m['FF_WORKER_ROOT'] } } }`,
     `@($out) | ConvertTo-Json -Compress`,
   ].join('\n');
 }
@@ -776,8 +800,8 @@ export async function readEnvs(platform: UnityPlatform, pids: number[]): Promise
   }
   const r = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', winEnvScript(pids)], { timeoutMs: 120_000 });
   if (r.code !== 0) throw new Error(`reading process environments failed (${r.code}): ${r.stderr.trim().slice(0, 200)}`);
-  for (const x of parsePsJson<{ pid: number; session?: string; sandbox?: string; machine?: string }>(r.stdout, 'the Windows process environments')) {
-    if (x.session) out.set(Number(x.pid), { session: x.session, ...(x.sandbox ? { sandbox: x.sandbox } : {}), ...(x.machine ? { machine: x.machine } : {}) });
+  for (const x of parsePsJson<{ pid: number; session?: string; sandbox?: string; machine?: string; root?: string }>(r.stdout, 'the Windows process environments')) {
+    if (x.session) out.set(Number(x.pid), { session: x.session, ...(x.sandbox ? { sandbox: x.sandbox } : {}), ...(x.machine ? { machine: x.machine } : {}), ...(x.root ? { root: x.root } : {}) });
   }
   return out;
 }
