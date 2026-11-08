@@ -348,6 +348,15 @@ export class TimedRunner {
   private stop?: { id: string; why: string };
   private readonly wakers = new Set<() => void>();
   private child?: ChildProcess;
+  /**
+   * w3662: the current run's lines with their times (its log.txt), the step it is in now, and what it has so far, so a run
+   * that fails or is cancelled says what it waited on and keeps its logs. On 2026-11-07 four of w3335's runs on LothDesktop
+   * (tr_d039d7bdc5, tr_d68c80ab53, tr_33683fd25e, tr_ab680eca38) were cancelled after 30 to 135 minutes without a ticket,
+   * and each ended with only the cancel's words and no logs.
+   */
+  private trail: string[] = [];
+  private waitingOn?: { state: string; line: string; since: number };
+  private partial?: { runDir: string; legs: LegSummary[]; contention: string[]; buildOf: Map<string, number> };
 
   constructor(d: TimedRunnerDeps) {
     this.d = d;
@@ -424,11 +433,25 @@ export class TimedRunner {
     const o = this.queue.shift();
     if (!o) return;
     this.current = o.id;
+    this.trail = [];
+    this.waitingOn = undefined;
+    this.partial = undefined;
     try {
       await this.run(o);
     } catch (e) {
-      this.d.log(`timed run ${o.id}: ${(e as Error).message}`);
-      this.d.send({ type: 'timed_run_done', id: o.id, ok: false, error: (e as Error).message, summary: '', legs: [] });
+      // w3662: a failed or cancelled run says what it was waiting on, and keeps its logs (sent after, so the next run
+      // need not wait for the upload)
+      const w = this.waitingOn as TimedRunner['waitingOn']; // set by run()'s status lines
+      const error = `${(e as Error).message}${w ? ` (it was ${w.state} since ${new Date(w.since).toISOString().slice(11, 16)}Z, ${Math.round((Date.now() - w.since) / 60_000)} min: ${w.line})` : ''}`.slice(0, 480);
+      this.d.log(`timed run ${o.id}: ${error}`);
+      this.trail.push(`${new Date().toISOString()} failed ${error}`);
+      const part = this.partial as TimedRunner['partial'];
+      const packed = part ? await this.pack(o, part, 'failed', error).catch((x: Error) => void this.d.log(`timed run ${o.id}: its logs could not be packed: ${x.message}`)) : undefined;
+      const done = { type: 'timed_run_done' as const, id: o.id, ok: false, error, summary: packed?.summary ?? '', legs: part?.legs ?? [] };
+      if (packed) {
+        this.d.log(`timed run ${o.id}: its logs are in ${part!.runDir}`);
+        void this.sendLogs(o.id, { ...done, result: packed.result }, packed.tar);
+      } else this.d.send(done);
     } finally {
       this.current = undefined;
       if (this.stop?.id === o.id) this.stop = undefined;
@@ -438,6 +461,11 @@ export class TimedRunner {
 
   private status(id: string, state: Extract<TimedRunReport, { type: 'timed_run_status' }>['state'], line: string) {
     this.d.log(`timed run ${id}: ${line}`);
+    if (this.current === id) {
+      this.trail.push(`${new Date().toISOString()} ${state} ${line}`);
+      // the step it is in, since it began: a new state starts a new step
+      this.waitingOn = { state, line, since: this.waitingOn?.state === state ? this.waitingOn.since : Date.now() };
+    }
     this.d.send({ type: 'timed_run_status', id, state, line });
   }
 
@@ -456,6 +484,10 @@ export class TimedRunner {
     const runDir = path.join(root, 'timing', 'runs', o.id);
     fs.mkdirSync(cache, { recursive: true });
     fs.mkdirSync(runDir, { recursive: true });
+    // w3662: what the run has so far, kept for its logs whatever the outcome
+    const part = { runDir, legs: [] as LegSummary[], contention: [] as string[], buildOf: new Map<string, number>() };
+    this.partial = part;
+    const { legs, contention } = part;
     // 1. The pieces this machine lacks (a piece is checked against its SHA-256 as it arrives).
     const want = new Map<string, Piece | { sha256: string; size: number }>();
     for (const v of o.variants) for (const p of v.pieces) want.set(p.sha256, p);
@@ -476,7 +508,7 @@ export class TimedRunner {
     // pair (TIMED_SLOTS) now; a worker computer (w1996) lays them beside the slots and links them into a borrowed sandbox
     // pair only during its turn, since those slots are its sandboxes' own.
     const worker = this.d.worker?.sandboxIds().length ? this.d.worker : undefined;
-    const buildOf = new Map<string, number>();
+    const buildOf = part.buildOf;
     const builds = new Map<string, number>();
     const buildDirs: string[] = [];
     for (const v of o.variants) {
@@ -501,8 +533,6 @@ export class TimedRunner {
     const saveName = `ffa-timed-${o.id}`;
     const saveFile = path.join(savesDir, `${saveName}.zip`);
     fs.copyFileSync(path.join(cache, o.save.sha256), saveFile);
-    const legs: LegSummary[] = [];
-    const contention: string[] = [];
     const poll = this.d.pollMs ?? 15_000;
     const order = legOrder(o.variants.map((v) => v.name), o.settings.rounds);
     try {
@@ -535,10 +565,27 @@ export class TimedRunner {
     }
     // 6. The logs back, in probe_ab_win.sh's layout.
     this.checkStop(o.id);
+    const ok = legs.some((l) => l.ok);
+    const packed = await this.pack(o, part, ok ? 'done' : 'failed');
+    try {
+      await this.sendLogs(o.id, { type: 'timed_run_done', id: o.id, ok, ...(ok ? {} : { error: 'no leg produced numbers (see each leg\'s note)' }), summary: packed.summary, legs, result: packed.result }, packed.tar);
+    } finally {
+      trimCache(cache, this.d.cacheMaxBytes ?? 8 * 1024 ** 3, new Set(want.keys()));
+      trimRuns(path.join(root, 'timing', 'runs'), 10);
+    }
+  }
+
+  /**
+   * The run folder's summary.tsv, contention.txt, log.txt (w3662: every line the run said, with its time) and run.json (its
+   * outcome and, when it failed, why), packed into <id>.tar.gz beside it.
+   */
+  private async pack(o: TimedRunOrder, part: NonNullable<TimedRunner['partial']>, outcome: 'done' | 'failed', error?: string) {
+    const { runDir, legs, contention, buildOf } = part;
     const summary = summaryTable(legs);
     fs.writeFileSync(path.join(runDir, 'summary.tsv'), summary + '\n');
     fs.writeFileSync(path.join(runDir, 'contention.txt'), contention.join('\n') + '\n');
-    fs.writeFileSync(path.join(runDir, 'run.json'), JSON.stringify({ id: o.id, what: o.what, requests: o.requests, settings: o.settings, variants: o.variants.map((v) => ({ name: v.name, args: v.args, build: buildOf.get(v.name), files: v.files.length, bytes: v.files.reduce((s, f) => s + f.size, 0) })), machine: os.hostname(), cpus: os.cpus().length, cpu: os.cpus()[0]?.model, memGB: Math.round(os.totalmem() / 1024 ** 3), legs }, null, 2));
+    fs.writeFileSync(path.join(runDir, 'log.txt'), this.trail.join('\n') + '\n');
+    fs.writeFileSync(path.join(runDir, 'run.json'), JSON.stringify({ id: o.id, what: o.what, requests: o.requests, outcome, ...(error ? { error } : {}), settings: o.settings, variants: o.variants.map((v) => ({ name: v.name, args: v.args, build: buildOf.get(v.name), files: v.files.length, bytes: v.files.reduce((s, f) => s + f.size, 0) })), machine: os.hostname(), cpus: os.cpus().length, cpu: os.cpus()[0]?.model, memGB: Math.round(os.totalmem() / 1024 ** 3), legs }, null, 2));
     const files: { name: string; file: string }[] = [];
     const walk = (rel: string) => {
       for (const e of fs.readdirSync(path.join(runDir, rel), { withFileTypes: true })) {
@@ -548,28 +595,30 @@ export class TimedRunner {
       }
     };
     walk('');
-    const tar = path.join(root, 'timing', 'runs', `${o.id}.tar.gz`);
+    const tar = path.join(path.dirname(runDir), `${o.id}.tar.gz`);
     await writeTarGz(files, tar);
-    const st = fs.statSync(tar);
-    const sha256 = await sha256Of(tar);
+    const size = fs.statSync(tar).size;
+    return { summary, tar, result: { name: `timed-${o.id}.tar.gz`, size, sha256: await sha256Of(tar) } };
+  }
+
+  /** Send the run's end with its packed logs, then the logs themselves once the portal opens their upload. */
+  private async sendLogs(id: string, done: Extract<TimedRunReport, { type: 'timed_run_done' }>, tar: string) {
+    const size = done.result!.size;
     const ready = new Promise<{ uploadId: string; chunkBytes?: number }>((resolve, reject) => {
-      this.uploads.set(o.id, resolve);
+      this.uploads.set(id, resolve);
       setTimeout(() => reject(new Error('the portal opened no upload for the results in 10 minutes')), 600_000).unref();
     });
-    const ok = legs.some((l) => l.ok);
-    this.d.send({ type: 'timed_run_done', id: o.id, ok, ...(ok ? {} : { error: 'no leg produced numbers (see each leg\'s note)' }), summary, legs, result: { name: `timed-${o.id}.tar.gz`, size: st.size, sha256 } });
-    this.status(o.id, 'uploading', `sending the logs (${mb(st.size)})`);
+    this.d.send(done);
+    this.status(id, 'uploading', `sending the logs (${(size / 1024 ** 2).toFixed(0)} MB)`);
     try {
       const u = await ready;
       const url = `${this.d.portalUrl.replace(/\/+$/, '')}/machine/attachments/uploads/${encodeURIComponent(u.uploadId)}`;
-      const body = await sendChunks(url, this.d.token, tar, st.size, u.chunkBytes, {}, (b) => !!b.attachment);
-      this.d.send({ type: 'timed_run_result', id: o.id, attachmentId: String((body.attachment as { id: string }).id) });
+      const body = await sendChunks(url, this.d.token, tar, size, u.chunkBytes, {}, (b) => !!b.attachment);
+      this.d.send({ type: 'timed_run_result', id, attachmentId: String((body.attachment as { id: string }).id) });
     } catch (e) {
-      this.d.send({ type: 'timed_run_result', id: o.id, error: (e as Error).message });
+      this.d.send({ type: 'timed_run_result', id, error: (e as Error).message });
     } finally {
-      this.uploads.delete(o.id);
-      trimCache(cache, this.d.cacheMaxBytes ?? 8 * 1024 ** 3, new Set(want.keys()));
-      trimRuns(path.join(root, 'timing', 'runs'), 10);
+      this.uploads.delete(id);
     }
   }
 

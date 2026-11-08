@@ -37,7 +37,8 @@ class Ticket implements RunTicket {
     Ticket.taken++;
     this.s = grant ? { kind: 'granted', ticket: `t${String(Ticket.taken).padStart(8, '0')}`, line: 'granted' } : ({ kind: 'waiting', line: 'behind t00000001' } as unknown as TicketState);
   }
-  wait(): Promise<TicketState> {
+  wait(_ms?: number, onLine?: (line: string) => void): Promise<TicketState> {
+    if (!this.grant) onLine?.(this.s.line);
     return this.grant ? Promise.resolve(this.s) : new Promise(() => {});
   }
   state() {
@@ -243,4 +244,70 @@ test('w2218: the portal stops a run it no longer waits for: given up on while it
   assert.match(cancels()[2], /^lothlaptop tr_f0fd13d330: the portal already ended it/);
   assert.equal(cancels()[3], 'lothlaptop tr_0000000077: the portal has no such run');
   assert.equal(cancels().length, 4, 'tr_00000000e1 is still waited for there: no cancel');
+});
+
+// w3662: lothsahn, 2026-11-07: "a timed run sent to LothDesktop ... keeps its logs whatever the outcome", and "a run that
+// can't get the ticket must say why, both back to its caller and in the log". Four of w3335's runs there ended with only
+// their worker's cancel and no logs.
+test('w3662: a run cancelled while it waits for its ticket says what it waited on, and sends its logs', async (t) => {
+  const r = await rig(t, { grant: false, player: () => node('') });
+  const o = await r.order('tr_00000000d1');
+  r.runner.enqueue(o);
+  await r.until('the run queued for its ticket', () => r.reports.some((x) => x.type === 'timed_run_status' && x.id === o.id && /behind t00000001/.test(x.line)));
+  r.runner.cancel(o.id, 'its worker gave up after 62 min');
+  const end = await r.ended(o.id);
+  assert.equal(end.ok, false);
+  assert.match(end.error ?? '', /^cancelled: its worker gave up after 62 min \(it was waiting since \d\d:\d\dZ, \d+ min: turn 1: behind t00000001\)$/);
+  assert.ok(end.result && end.result.size > 0, 'its logs go with its end');
+  const runDir = path.join(r.d, 'root', 'timing', 'runs', o.id);
+  const run = JSON.parse(fs.readFileSync(path.join(runDir, 'run.json'), 'utf8'));
+  assert.equal(run.outcome, 'failed');
+  assert.equal(run.error, end.error);
+  const log = fs.readFileSync(path.join(runDir, 'log.txt'), 'utf8');
+  assert.match(log, /fetching fetching \d+ of \d+ pieces/);
+  assert.match(log, /waiting turn 1: queued for this computer's exclusive bench ticket/);
+  assert.match(log, /failed cancelled: its worker gave up/);
+  assert.ok(fs.statSync(path.join(r.d, 'root', 'timing', 'runs', `${o.id}.tar.gz`)).size > 0);
+  // the next run does not wait for the upload: its daemon plays it now
+  assert.deepEqual(r.runner.active(), []);
+  assert.deepEqual(Ticket.released, [`timed run ${o.id}: ${o.what}`]);
+});
+
+test('w3662: the portal keeps the words and logs of a run it had already ended', (t) => {
+  const d = tmp(t, 'w3662portal-');
+  const now = new Date().toISOString();
+  const order = { id: 'tr_ab680eca38', what: 'w3335', requests: ['w3335'], session: 'sess-66b1c43c', variants: [], save: { id: 'att_s', name: 'bench.zip', size: 1, sha256: '0'.repeat(64) }, pieceIds: {}, settings: { ...TIMED_DEFAULTS } } as unknown as TimedRunOrder;
+  fs.mkdirSync(path.join(d, 'portal'));
+  fs.writeFileSync(path.join(d, 'portal', 'timed-runs.json'), JSON.stringify({ runs: [{ id: 'tr_ab680eca38', session: 'sess-66b1c43c', requests: ['w3335'], what: 'w3335', from: 'beast', machine: 'lothdesktop', state: 'running', line: 'turn 1: queued', createdAt: now, updatedAt: now, order }], pieces: {} }));
+  const posted: { id: string; msg: { type: string; id: string; uploadId?: string } }[] = [];
+  const notes: string[] = [];
+  const begun: string[] = [];
+  const tr = new TimedRuns({
+    dataDir: path.join(d, 'portal'),
+    store: {
+      forget: () => {},
+      grant: () => {},
+      begin: (x: { name: string }) => (begun.push(x.name), { uploadId: 'up_1', chunkBytes: 1024 }),
+      get: (id: string) => (id === 'att_logs' ? { id, name: 'timed-tr_ab680eca38.tar.gz', sha256: 'a'.repeat(64) } : undefined),
+    } as unknown as AttachmentStore,
+    machines: () => [{ id: 'lothdesktop', platform: 'win32' } as unknown as Machine],
+    isOnline: () => true,
+    offers: () => true,
+    post: (id, msg) => (posted.push({ id, msg: msg as never }), true),
+    deliver: async () => ({ queued: true }) as never,
+    note: (_requests, line) => void notes.push(line),
+    log: () => {},
+  });
+  tr.cancel('tr_ab680eca38', "62 min, never took lothdesktop's free exclusive ticket", () => undefined);
+  assert.equal(tr.get('tr_ab680eca38')?.state, 'failed');
+  const why = "cancelled: 62 min, never took lothdesktop's free exclusive ticket (it was waiting since 14:22Z, 62 min: turn 1: behind t00006001 (w3347))";
+  tr.onReport('lothdesktop', { type: 'timed_run_done', id: 'tr_ab680eca38', ok: false, error: why, summary: '', legs: [], result: { name: 'timed-tr_ab680eca38.tar.gz', size: 2048, sha256: 'a'.repeat(64) } });
+  assert.deepEqual(begun, ['timed-tr_ab680eca38.tar.gz'], 'its logs are taken in');
+  assert.ok(posted.some((p) => p.msg.type === 'timed_run_upload' && p.msg.uploadId === 'up_1'));
+  assert.match(tr.get('tr_ab680eca38')?.error ?? '', /^cancelled: 62 min, never took lothdesktop's free exclusive ticket \(it was waiting since 14:22Z, 62 min: turn 1: behind t00006001 \(w3347\)\)$/);
+  assert.ok(notes.some((n) => /its daemon stopped it: .*behind t00006001/.test(n)), notes.join(' | '));
+  tr.onReport('lothdesktop', { type: 'timed_run_result', id: 'tr_ab680eca38', attachmentId: 'att_logs' });
+  assert.equal(tr.get('tr_ab680eca38')?.result, 'att_logs');
+  assert.equal(tr.get('tr_ab680eca38')?.state, 'failed');
+  assert.match(tr.statusText('tr_ab680eca38'), /behind t00006001.*Its logs: attachment att_logs\./);
 });
