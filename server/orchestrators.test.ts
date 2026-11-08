@@ -6823,6 +6823,34 @@ test('w1945: a pair request starts both legs together, each on its own computer,
 });
 
 
+test('w3720: w3705 as it happened: a determinism pair run whose notes quote another computer\'s timed run starts with its host on a computer that takes no timed runs; decide_work timed marks a request outright', async (t) => {
+  const env = await twoComputers(t);
+  const { store, dispatcher, call } = env;
+  store.putMachine({ ...store.machines.get('pc')!, noTimedRuns: 'lothsahn, 2026-10-23: "The m5 should not be used for timing runs because Ben runs stuff on it personally"' });
+  const notes = [
+    { at: '2026-11-08T20:03:00.000Z', by: 'orchestrator', text: "Orchestrator, for the dispatcher: this pair run doesn't need exclusive use of a machine; it's a determinism check, not a timing run. But its client leg is on LothLaptop, whose bench lock is held by w3639's vSync timed run (tr_dadec6ac06, started about 19:50 UTC, about 106 min). The client launch waits out that lock with --bench-wait (up to 30 min), then fails. Don't break the timed run." },
+    { at: '2026-11-08T20:30:00.000Z', by: 'orchestrator', text: 'w3705 is a determinism pair, not a timing run. It needs no bench lock and isn\'t timed work. m5 also has room (2/3 in use) and may be the host as a Mac; m5 refuses only timing runs.' },
+  ];
+  putRequests(store, [
+    { id: 'w2', by: BEN, status: 'queued', queuedFor: { at: T0 }, title: 'Pair run for w3511: MP Sprawl determinism pair on PR #3451 (w3511)', pair: { legs: 2, for: 'w3511' }, notes },
+    { id: 'w3', by: BEN, title: 'Benchmark-free playtest of the planner', brief: 'Play it and check the planner keeps its routes; a benchmark would be nice later.' },
+  ]);
+  assert.equal(needsTimed(store.work.get('w2')!), false, 'until w3720: timed on darwin');
+  const ok = await call(dispatcher().info, 'start_agent', { work_id: 'w2', prompt: "Run the MP Sprawl determinism pair. LothLaptop's bench lock is held by a timed run.", title: 'w3705 pair', sandbox: 'pc/alpha', pair_sandboxes: ['beast/slot1'] });
+  assert.equal(ok.isError, false, ok.text);
+  assert.match(ok.text, /^Started w2's 2 legs together/);
+
+  // decide_work timed false: a request whose words read as timed is not, and its log says so; true marks it back.
+  assert.equal(needsTimed(store.work.get('w3')!), 'any');
+  const no = await call(dispatcher().info, 'decide_work', { id: 'w3', action: 'block', blocker: { kind: 'request', ref: 'w2', what: 'the pair run first' }, note: 'a playtest: it times nothing', timed: false });
+  assert.equal(no.isError, false, no.text);
+  assert.match(no.text, /w3 is not timed work now \(w3720\)/);
+  assert.equal(needsTimed(store.work.get('w3')!), false);
+  assert.match(store.work.get('w3')!.log.join('\n'), /not timed work, said outright \(w3720; it read as timed\): a playtest: it times nothing/);
+  await call(dispatcher().info, 'decide_work', { id: 'w3', action: 'block', blocker: { kind: 'request', ref: 'w2', what: 'the pair run first' }, note: 'it benchmarks the planner after all', timed: true });
+  assert.equal(needsTimed(store.work.get('w3')!), 'any');
+});
+
 test('w1945: an older Queued pair run holds a computer’s last free sandbox from newer single work of no higher priority; urgent work goes first', async (t) => {
   const env = await twoComputers(t);
   const { store, agents, dispatcher, call } = env;

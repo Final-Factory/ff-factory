@@ -1650,7 +1650,9 @@ LothDesktop and Beast, not just when BEAST is full").
   - **Asking for one: `request_pair`** (a worker tool, `CATALOG.request_pair` in `server/launch.ts`; `Orchestrators.filePair`).
     `what` (a line), `brief` (what the legs run: branch or commit, scenario, what passes, where the result goes; each leg is
     a new worker), `legs` (2 to `PAIR_MAX_LEGS`, 4; default 2), `cross_os` (why, only for the reasons the game repo's
-    Determinism-Test-Strategy.md "Which machines" lists, w1692) and `timed` (a leg takes timing measurements). It files a
+    Determinism-Test-Strategy.md "Which machines" lists, w1692) and `timed` (a leg takes timing measurements; the only
+    thing that makes a pair run timed, w3720: its words, notes and the timed runs they quote are never read for timing,
+    `needsTimed` in `shared/capacity.ts`; decide_work `timed` sets or clears it while its legs have not started). It files a
     request (`WorkItem.pair`: legs, `for` the asking request and `forSession` its worker, `crossOs`, `timed`) for the
     asking request's people at its priority, needing a game sandbox per leg, and Blocks the asking request on its report
     (`blocked_on` `reports`). The w890 release ("it waits on another request", below) then frees the worker's sandbox as
