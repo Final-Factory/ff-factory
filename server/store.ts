@@ -214,7 +214,11 @@ export class Store {
       this.orchestratorId = p.orchestratorId;
       for (const a of p.standingAgents ?? []) this.standing.set(a.id, a);
       for (const d of p.delegations ?? []) this.delegations.set(d.id, d);
-      for (const m of p.machines ?? []) this.machines.set(m.id, { ...m, online: false });
+      // A machine connected when the portal stopped was seen until then, not at its lastSeen (its connect or last git report):
+      // it is offline from this start on (w3843: biscuit read "offline 61 min" right after the 2026-11-09 13:03Z restart,
+      // and its worker w3825 was moved away for it at 13:03:47).
+      const loadedAt = new Date().toISOString();
+      for (const m of p.machines ?? []) this.machines.set(m.id, { ...m, online: false, ...(m.online ? { lastSeen: loadedAt } : {}) });
       this.settings = { ...this.settings, ...p.settings };
     }
     const w = readJsonDurable<{ seq?: number; items?: WorkItem[] }>(workFile, { check: checkWork });

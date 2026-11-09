@@ -126,6 +126,18 @@ export interface PlaceFacts {
   saveRefused?: (sandbox: string) => string | undefined;
   /** w3507: why an agent's sandbox is being taken for higher queued work, for the others in it: it releases too. */
   reclaiming?: (id: string) => string | undefined;
+  /**
+   * w3843: the agents occupying each sandbox (occupiedIn), set where nothing changes them while it is read (PlaceAgain.claims):
+   * usable() looked through every session of the machine for each waiting worker and sandbox.
+   */
+  occupied?: ReadonlyMap<string, readonly string[]>;
+}
+
+/** w3843: the ids of the agents occupying each sandbox of `f` (occupies), by sandbox id. */
+export function occupiedIn(f: PlaceFacts): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const o of f.sessions) if (o.machineSandbox && occupies(o, f.live(o.id), f.now)) (out.get(o.machineSandbox) ?? out.set(o.machineSandbox, []).get(o.machineSandbox)!).push(o.id);
+  return out;
 }
 
 /**
@@ -274,6 +286,7 @@ function usable(s: SessionInfo, sb: MachineSandbox, f: PlaceFacts, taken: Readon
   // Agents there on its own branch share it (w656: stopped workers of one sandbox released it together); new work in a
   // released sandbox is always switched to a fresh branch first (handOverBranch).
   if (sameBranch(sb, s.placeReleased!.branch)) return true;
+  if (f.occupied) return !(f.occupied.get(sb.id) ?? []).some((id) => id !== s.id);
   return !f.sessions.some((o) => o.id !== s.id && o.machineSandbox === sb.id && occupies(o, f.live(o.id), f.now));
 }
 
@@ -472,6 +485,16 @@ export class PlaceAgain {
    * tick > claimedBy > claims > facts). A machine's entry goes when the pass does something there.
    */
   private claimsMemo?: Map<string, Map<string, string>>;
+  /**
+   * w3843: within a claims memo, each machine's placed sessions (facts().sessions), grouped in one pass over the store. After
+   * the 2026-11-09 13:03Z restart every facts() filtered all of the store's sessions again (stall profile: facts, 10-17 s
+   * portal blocks); a pass asked it hundreds of times. Goes with claimsMemo: a machine's entry with its claims.
+   */
+  private sessionsMemo?: Map<string, SessionInfo[]>;
+  /** w3843: d.agentOnly by session within a claims memo (it reads the ledger, which nothing in a memo changes: a send runs outside it). */
+  private agentOnlyMemo?: Map<string, boolean>;
+  /** w3843: bumped by every change answer() and a placement make (placing, failed, a worker back in place): a drain's memo goes. */
+  private changes = 0;
   /** w3507: the pass's queued game work (PlaceAgainDeps.pressure), read by claims() and answer() between passes. */
   private pressureNow: readonly Pressure[] = [];
   /** w3588: the pass's Queued pair runs that one free sandbox would start (PlaceAgainDeps.pairWants). */
@@ -491,13 +514,13 @@ export class PlaceAgain {
 
   private facts(machineId: string): PlaceFacts {
     return {
-      sessions: [...this.d.sessions()].filter((s) => s.machineId === machineId && s.machineSandbox),
+      sessions: this.sessionsOn(machineId),
       live: this.d.isLive,
       unityHolders: this.d.unityHolders(machineId),
       now: this.now(),
       over: this.d.workOver,
       waitOf: (s) => this.d.ciWait?.(s) ?? this.d.waitOn?.(s),
-      ...(this.d.agentOnly ? { agentOnly: this.d.agentOnly } : {}),
+      ...(this.d.agentOnly ? { agentOnly: this.agentOnly } : {}),
       ...(this.d.canSave ? { canSave: this.d.canSave(machineId) } : {}),
       saveRefused: (sandbox) => {
         const x = this.saveFailed.get(`${machineId}/${sandbox}`);
@@ -506,6 +529,47 @@ export class PlaceAgain {
       reclaiming: (id) => this.reclaimOf(id)?.why,
     };
   }
+
+  /** The sessions placed on `machineId`, in store order: grouped once per claims memo (w3843), else filtered now. */
+  private sessionsOn(machineId: string): SessionInfo[] {
+    const memo = this.sessionsMemo;
+    if (!this.claimsMemo || !memo) return [...this.d.sessions()].filter((s) => s.machineId === machineId && s.machineSandbox);
+    const had = memo.get(machineId);
+    if (had) return had;
+    if (!memo.size) {
+      for (const s of this.d.sessions()) if (s.machineId && s.machineSandbox) (memo.get(s.machineId) ?? memo.set(s.machineId, []).get(s.machineId)!).push(s);
+      const all = memo.get(machineId) ?? [];
+      memo.set(machineId, all);
+      return all;
+    }
+    // Its entry went (releasePass did something there): only its own sessions are read again.
+    const out = [...this.d.sessions()].filter((s) => s.machineId === machineId && s.machineSandbox);
+    memo.set(machineId, out);
+    return out;
+  }
+
+  /** w3843: how many placement changes answer() and placements have made: a caller's memo of places and claims goes when it moves. */
+  get gen(): number {
+    return this.changes;
+  }
+
+  /** w3843: within a claims memo, everything computed goes (a worker was sent, moved or placed): the next asks compute afresh. */
+  claimsChanged(): void {
+    this.claimsMemo?.clear();
+    this.sessionsMemo?.clear();
+    this.agentOnlyMemo?.clear();
+  }
+
+  /** d.agentOnly, read once per session within a claims memo (w3843: Agents.workIdsOf scans every request for each ask). */
+  private readonly agentOnly = (s: SessionInfo): boolean => {
+    const read = this.d.agentOnly;
+    if (!read) return false;
+    const memo = this.agentOnlyMemo;
+    if (!memo) return read(s);
+    let v = memo.get(s.id);
+    if (v === undefined) memo.set(s.id, (v = read(s)));
+    return v;
+  };
 
   private failedIn(id: string) {
     return (sandbox: string) => this.now() - (this.failed.get(`${id}/${sandbox}`) ?? -Infinity) < RETRY_FAILED_MS;
@@ -524,9 +588,11 @@ export class PlaceAgain {
     if (!m) return out;
     for (const [id, p] of this.placing) if (p.machine === machineId) out.set(p.sandbox, id);
     for (const [sandbox, id] of this.d.reserved?.(machineId) ?? []) if (!out.has(sandbox)) out.set(sandbox, id);
-    const f = this.facts(machineId);
+    const read = this.facts(machineId);
+    // Nothing below changes who occupies a sandbox: the occupants are read once (w3843).
+    const f: PlaceFacts = { ...read, occupied: occupiedIn(read) };
     // A worker on work that is not the game's takes an agent seat, never a game sandbox (w1135): it claims none.
-    const waiting = f.sessions.filter((s) => s.placeReleased && !f.live(s.id) && !this.placing.has(s.id) && this.d.queued(s.id) && !this.d.agentOnly?.(s) && !this.yieldsTo(s, machineId)).sort((a, b) => (this.d.order?.(a, b) ?? 0) || a.id.localeCompare(b.id));
+    const waiting = f.sessions.filter((s) => s.placeReleased && !f.live(s.id) && !this.placing.has(s.id) && this.d.queued(s.id) && !this.agentOnly(s) && !this.yieldsTo(s, machineId)).sort((a, b) => (this.d.order?.(a, b) ?? 0) || a.id.localeCompare(b.id));
     for (const s of waiting) {
       const p = placeFor(s, m, f, out, this.failedIn(s.id));
       if ('sandbox' in p) out.set(p.sandbox.id, s.id);
@@ -563,7 +629,7 @@ export class PlaceAgain {
   /** Released workers of a machine whose resume waits for a sandbox there (none is free for them). */
   waiting(machineId: string): string[] {
     const claimed = new Set(this.claims(machineId).values());
-    return this.facts(machineId).sessions.filter((s) => s.placeReleased && !this.d.isLive(s.id) && this.d.queued(s.id) && !claimed.has(s.id) && !this.d.agentOnly?.(s)).map((s) => s.id);
+    return this.facts(machineId).sessions.filter((s) => s.placeReleased && !this.d.isLive(s.id) && this.d.queued(s.id) && !claimed.has(s.id) && !this.agentOnly(s)).map((s) => s.id);
   }
 
   /**
@@ -597,10 +663,31 @@ export class PlaceAgain {
   withClaimsMemo<T>(fn: () => T): T {
     if (this.claimsMemo) return fn();
     this.claimsMemo = new Map();
+    this.sessionsMemo = new Map();
+    this.agentOnlyMemo = new Map();
     try {
       return fn();
     } finally {
       this.claimsMemo = undefined;
+      this.sessionsMemo = undefined;
+      this.agentOnlyMemo = undefined;
+    }
+  }
+
+  /** w3843: runs `fn` as outside any claims memo (it changes placement); a memo it ran in is empty after it. */
+  withoutClaimsMemo<T>(fn: () => T): T {
+    const had = !!this.claimsMemo;
+    this.claimsMemo = undefined;
+    this.sessionsMemo = undefined;
+    this.agentOnlyMemo = undefined;
+    try {
+      return fn();
+    } finally {
+      if (had) {
+        this.claimsMemo = new Map();
+        this.sessionsMemo = new Map();
+        this.agentOnlyMemo = new Map();
+      }
     }
   }
 
@@ -625,6 +712,7 @@ export class PlaceAgain {
       else if (!live && s.status === 'stopped' && !(this.now() - Date.parse(s.lastActivityAt) < LIVE_HOLD_MS)) this.d.liveLost?.(s, `nobody came back to it within ${LIVE_HOLD_MS / 3_600_000} h`);
       const step = releaseStep(s, sb, { ...f, workOver: this.d.workOver(s), ciWait: this.d.ciWait?.(s), waitOn: this.d.waitOn?.(s), keepLive: live ? this.d.keepLive(s.id) : undefined, liveHold: this.d.liveHold?.(s), pairHold: this.d.pairHold?.(s), claimedBy: s.placeReleased ? this.claimedBy(m.id, sb.id) : undefined, reclaim: targets.get(s.id)?.why });
       if (!step) continue;
+      // Its sessions stay grouped (sessionsMemo): no step moves a worker to another machine or sandbox in the pass.
       this.claimsMemo?.delete(m.id);
       if (step.do === 'stop') {
         // Stopped while Idle: its sandbox stays its until the next pass releases it, its worktree clean (w656).
@@ -926,7 +1014,7 @@ export class PlaceAgain {
     const m = this.d.machine(info.machineId);
     if (!m) return undefined;
     if (!this.d.online(m.id)) return `${m.id} is offline: it is placed again once its daemon is back`;
-    if (this.d.agentOnly?.(info)) return this.seat(info, m);
+    if (this.agentOnly(info)) return this.seat(info, m);
     const ahead = this.yieldsTo(info, m.id);
     if (ahead && !('room' in ahead)) return `Queued pair run ${ahead.work} (${ahead.priority ?? 'normal'}) starts with the next free sandbox on ${m.id}, so it takes it first (w3588); it is placed again after`;
     if (ahead) return `higher-priority queued work ${ahead.work} (${ahead.priority}) takes the next free sandbox on ${m.id} first (w3507); it is placed again after`;
@@ -936,6 +1024,7 @@ export class PlaceAgain {
     if ('wait' in p) return p.wait;
     const sb = p.sandbox;
     if (sb.id === info.machineSandbox && sb.git?.branch === r.branch) {
+      this.changes++;
       delete info.placeReleased;
       backFrom(info, this.now());
       this.d.save(info);
@@ -955,6 +1044,7 @@ export class PlaceAgain {
     const p = seatFor(info, m, this.facts(m.id), this.d.seats?.(m.id) ?? 2);
     if ('wait' in p) return p.wait;
     const sb = p.sandbox;
+    this.changes++;
     const from = info.machineSandbox!;
     const back = from === sb.id && sb.git?.branch === r.branch;
     if (!back) {
@@ -980,6 +1070,7 @@ export class PlaceAgain {
   private async move(info: SessionInfo, m: Machine, sb: MachineSandbox) {
     const r = info.placeReleased!;
     this.placing.set(info.id, { machine: m.id, sandbox: sb.id });
+    this.changes++;
     try {
       // A switch under a running editor stops Unity on "The open scene(s) have been modified externally" (macOS), and
       // Windows refuses to rewrite files the editor holds open: the daemon refuses it on both.
@@ -1004,10 +1095,12 @@ export class PlaceAgain {
     } catch (e) {
       const why = (e as Error).message;
       this.failed.set(`${info.id}/${sb.id}`, this.now());
+      this.changes++;
       this.d.note(info.id, `Could not place it again in ${m.id}/${sb.id}: ${why}. Another free sandbox is tried next, this one again in ${RETRY_FAILED_MS / 60_000} min.`);
       console.warn(`place again: ${info.id} into ${m.id}/${sb.id} failed: ${why}`);
     } finally {
       this.placing.delete(info.id);
+      this.changes++;
       this.d.drain();
     }
   }

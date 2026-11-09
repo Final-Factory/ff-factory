@@ -1192,6 +1192,17 @@ export class SessionManager {
    */
   roomMove?: (s: SessionHandle, q: QueuedSend, hold: string, now: number) => true | string | undefined;
   /**
+   * w3843: runs a drain with places and claims computed once across its messages (Agents.withPlacesOnce and
+   * PlaceAgain.withClaimsMemo). After the 2026-11-09 13:03Z restart each waiting message computed them again (fullFor's
+   * placement, roomMove's moveFacts), 10-17 s portal blocks. What changes placement runs in placementFree; placementChanged
+   * empties the memo after a change made while deciding. Set by Agents.
+   */
+  placementPass?: <T>(fn: () => T) => T;
+  /** w3843: runs `fn` (a send, a drop, a fresh start) as without placementPass; the memo is empty after it. Set by Agents. */
+  placementFree?: <T>(fn: () => T) => T;
+  /** w3843: within placementPass, the next asks compute afresh (a process was stopped to restart it). Set by Agents. */
+  placementChanged?: () => void;
+  /**
    * A message to a worker between turns that starts a NEW session instead (w2043's pilot, server/freshAfterMerge.ts): true
    * when a pull request of its request merged during its session and the message went to a fresh session in the same
    * sandbox, so it is not delivered here. Checked last, once nothing holds the message. Set by Agents.
@@ -1440,6 +1451,17 @@ export class SessionManager {
 
   private saveQueue() {
     this.onQueueChange?.();
+    // w3843: a drain writes the file once, at its end (each write is an fsync on the event loop).
+    if (this.draining) this.queueDirty = true;
+    else this.writeQueue();
+  }
+
+  /** w3843: a drain under way (a drain asked meanwhile runs again after it, never inside it), and its queue not yet written. */
+  private draining = false;
+  private drainAgain = false;
+  private queueDirty = false;
+
+  private writeQueue() {
     if (!this.queueFile) return;
     try {
       writeJsonDurable(this.queueFile, { queue: this.queue }, { indent: 1 });
@@ -1498,16 +1520,46 @@ export class SessionManager {
 
   /** Deliver the queued messages that may go now, in order. Returns how many went. */
   drain(now = Date.now()): number {
+    // w3843: a drain asked during one (a placement that failed at once drains from its finally) runs after it. Run inside,
+    // it walked the whole queue again (once per sandbox tried) and the outer pass went on over a queue it had changed.
+    if (this.draining) {
+      this.drainAgain = true;
+      return 0;
+    }
+    this.draining = true;
     let sent = 0;
+    try {
+      for (let round = 0; round < 3; round++) {
+        this.drainAgain = false;
+        const at = round ? Date.now() : now;
+        sent += this.placementPass ? this.placementPass(() => this.drainOnce(at)) : this.drainOnce(at);
+        if (!this.drainAgain) break;
+      }
+    } finally {
+      this.draining = false;
+      if (this.queueDirty) {
+        this.queueDirty = false;
+        this.writeQueue();
+      }
+    }
+    if (this.drainAgain) this.drainSoon();
+    return sent;
+  }
+
+  private drainOnce(now: number): number {
+    let sent = 0;
+    // w3843: what changes placement (a send, a drop, a fresh start) runs without the drain's memo of places and claims.
+    const free = <T>(fn: () => T): T => (this.placementFree ? this.placementFree(fn) : fn());
     // A session whose first waiting message cannot go keeps the rest waiting too, so its messages go in order (w496).
     const held = new Set<string>();
     for (const q of [...this.queue]) {
       if (held.has(q.id)) continue;
       const s = this.sessions.get(q.id);
-      const drop = () => {
-        this.queue = this.queue.filter((x) => x !== q);
-        this.saveQueue();
-      };
+      const drop = () =>
+        free(() => {
+          this.queue = this.queue.filter((x) => x !== q);
+          this.saveQueue();
+        });
       if (!s) {
         drop();
         continue;
@@ -1523,14 +1575,16 @@ export class SessionManager {
           held.add(q.id);
           continue;
         }
-        q.parked = undefined;
-        this.saveQueue();
+        free(() => {
+          q.parked = undefined;
+          this.saveQueue();
+        });
       }
       // w1128: a resume whose request was blocked again (or closed) while it waited does not go; its request keeps it.
       const stale = q.resumeOf ? this.staleResume?.(q.resumeOf.work, q.id, q.resumeOf.note) : undefined;
       if (stale) {
         drop();
-        this.notDelivered(q.id, stale);
+        free(() => this.notDelivered(q.id, stale));
         continue;
       }
       // w1749: an orchestrator's automatic compaction goes first; its messages go once it is done.
@@ -1542,11 +1596,13 @@ export class SessionManager {
       // w1376: a held computer resumes nobody; checked before a restart (moveFor) or a slot, so nothing stops or starts there.
       const onHold = this.machineHold?.(s);
       const restart = onHold ? undefined : this.moveFor(s);
+      // Its process may have been stopped for the restart: placement is read again.
+      if (restart) this.placementChanged?.();
       // w3597: refused at its machine's agent cap: it waits for a turn to end there (requeueRefused) or CAP_REFUSED_HOLD_MS.
       const refused = q.capRefusedAt && now - (Date.parse(q.capRefusedAt) || 0) < CAP_REFUSED_HOLD_MS ? q.why : undefined;
       let hold = onHold ?? (restart || this.fullFor(s) || refused);
       // w1532: a paused machine's worker hands its requests back instead of waiting for the unpause; the message goes with them.
-      if (onHold && this.pauseHeld?.(s, q.text)) {
+      if (onHold && free(() => this.pauseHeld?.(s, q.text))) {
         drop();
         continue;
       }
@@ -1572,41 +1628,47 @@ export class SessionManager {
         continue;
       }
       // w2043: a pilot worker whose pull request merged goes on in a fresh session; the message goes there.
-      if (this.freshStart?.(s, q)) {
+      if (free(() => this.freshStart?.(s, q))) {
         drop();
         continue;
       }
-      try {
-        this.lastResumeOf.set(q.id, q.resumeOf);
-        s.send(q.text, q.from, q.uuid, q.images, q.requestedBy, q.attachments);
-        drop();
-        sent++;
-      } catch (e) {
-        // Removed only once delivered (w496: a worker's brief was dropped when LothDesktop's daemon was outdated):
-        // tried again on the next pass, given up only after QUEUE_HOLD_MS, or POOL_HOLD_MS while only its pool holds it (w1129).
-        const why = (e as Error).message;
-        const pool = s.info.kind === 'worker' && poolHeld(e);
-        if (pool !== (q.on === 'pool')) {
-          q.on = pool ? 'pool' : 'machine';
-          this.saveQueue();
-        }
-        const limit = pool ? POOL_HOLD_MS : QUEUE_HOLD_MS;
-        if (now - (Date.parse(q.at) || now) >= limit) {
-          drop();
-          this.store.append(q.id, { kind: 'error', text: `A queued message could not be delivered within ${limit / 3_600_000} hours and was given up: ${why}. It began: ${q.text.replace(/\s+/g, ' ').slice(0, 200)}` });
-          continue;
-        }
-        held.add(q.id);
-        // w2231: its pool held the start: its requests go Blocked on the pool's usage limit and its sandbox is released.
-        if (pool && this.parkOnPool(s, e)) continue;
-        if (q.lastError !== why) {
-          q.lastError = why;
-          this.saveQueue();
-          this.store.append(q.id, { kind: 'system', text: `A waiting message could not be delivered yet (${why}); it is tried again shortly.` });
-        }
-      }
+      if (free(() => this.deliver(s, q, now, held, drop))) sent++;
     }
     return sent;
+  }
+
+  /** One queued message nothing holds goes to its session's process (drainOnce): true once sent, else kept or given up. */
+  private deliver(s: SessionHandle, q: QueuedSend, now: number, held: Set<string>, drop: () => void): boolean {
+    try {
+      this.lastResumeOf.set(q.id, q.resumeOf);
+      s.send(q.text, q.from, q.uuid, q.images, q.requestedBy, q.attachments);
+      drop();
+      return true;
+    } catch (e) {
+      // Removed only once delivered (w496: a worker's brief was dropped when LothDesktop's daemon was outdated):
+      // tried again on the next pass, given up only after QUEUE_HOLD_MS, or POOL_HOLD_MS while only its pool holds it (w1129).
+      const why = (e as Error).message;
+      const pool = s.info.kind === 'worker' && poolHeld(e);
+      if (pool !== (q.on === 'pool')) {
+        q.on = pool ? 'pool' : 'machine';
+        this.saveQueue();
+      }
+      const limit = pool ? POOL_HOLD_MS : QUEUE_HOLD_MS;
+      if (now - (Date.parse(q.at) || now) >= limit) {
+        drop();
+        this.store.append(q.id, { kind: 'error', text: `A queued message could not be delivered within ${limit / 3_600_000} hours and was given up: ${why}. It began: ${q.text.replace(/\s+/g, ' ').slice(0, 200)}` });
+        return false;
+      }
+      held.add(q.id);
+      // w2231: its pool held the start: its requests go Blocked on the pool's usage limit and its sandbox is released.
+      if (pool && this.parkOnPool(s, e)) return false;
+      if (q.lastError !== why) {
+        q.lastError = why;
+        this.saveQueue();
+        this.store.append(q.id, { kind: 'system', text: `A waiting message could not be delivered yet (${why}); it is tried again shortly.` });
+      }
+      return false;
+    }
   }
 
   /**

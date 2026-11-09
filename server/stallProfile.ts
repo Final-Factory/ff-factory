@@ -27,7 +27,9 @@ export type CpuProfile = { nodes: ProfileNode[]; startTime: number; endTime: num
 
 const where = (f: CallFrame) => {
   const file = f.url ? f.url.replace(/^file:\/\//, '').split('/').slice(-2).join('/') : '';
-  return `${f.functionName || '(anonymous)'}${file ? ` (${file}:${f.lineNumber + 1})` : ''}`;
+  // A regular expression's node is named by its source ("RegExp: (?<![\w-])3acf0f5f…"), which can carry ids and text: its kind only (w3843).
+  const name = f.functionName.startsWith('RegExp: ') ? 'RegExp' : f.functionName;
+  return `${name || '(anonymous)'}${file ? ` (${file}:${f.lineNumber + 1})` : ''}`;
 };
 const ours = (f: CallFrame) => /\/(server|shared)\/[^/]+\.ts$/.test(f.url) && !f.url.includes('/node_modules/');
 
