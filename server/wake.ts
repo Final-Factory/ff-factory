@@ -60,6 +60,12 @@ export class Waker {
     return `I will message you at ${new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} (${minutes} min) with your note. End your turn now; that message resumes you.`;
   }
 
+  /** The process is stopping (Agents.close, w3746): every pending wake is disarmed and its file left as it is, for the next start. */
+  close() {
+    for (const t of this.timers.values()) clearTimeout(t.timer);
+    this.timers.clear();
+  }
+
   cancel(sessionId: string) {
     const t = this.timers.get(sessionId);
     if (!t) return false;
@@ -137,6 +143,8 @@ export class Waker {
   private fire(sessionId: string, tries: number) {
     if (dryRun()) return;
     const t = this.timers.get(sessionId);
+    // fired early (a test, a wake folded in): its own timeout must not fire again later and save into a folder maybe gone (w3746)
+    if (t) clearTimeout(t.timer);
     this.timers.delete(sessionId);
     if (!t || !this.sessions.sessions.has(sessionId)) return void this.save();
     const late = Math.round((this.now() - t.at) / 60_000);
