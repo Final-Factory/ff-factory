@@ -1164,7 +1164,7 @@ At most one save a second, that is under 2 % of the main thread at BEAST's size.
 
 **Files covered.** `state.json` (sandboxes, sessions, standing agents, delegations, machines, settings), `work.json`
 (the ledger), `intake.json`, `max.json`, `providers/*.json`, `users.json`, `api-keys.json`, `auth-sessions.json`,
-`machine-tokens.json`, `wakes.json`, `usage.json`, `spend.json`, `push-subscriptions.json`, `vapid.json`,
+`machine-tokens.json`, `wakes.json`, `usage.json`, `spend.json`, `spend-days.json`, `push-subscriptions.json`, `vapid.json`,
 `outside-watch.json`, `resume.json`, `alive.json`, `restart.pending.json`, and `config.json`
 (whose `config.json.prev` counts as one more version). Transcripts stay append-only: a rewrite (a permission decision,
 the secret scrub) is crash-safe without versions, the first append after a start completes a line a crash tore, and

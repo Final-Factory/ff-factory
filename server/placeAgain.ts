@@ -131,6 +131,21 @@ export interface PlaceFacts {
    * usable() looked through every session of the machine for each waiting worker and sandbox.
    */
   occupied?: ReadonlyMap<string, readonly string[]>;
+  /**
+   * w3855: `sessions` by sandbox, in their order, set by the release pass (no step there moves an agent to another sandbox):
+   * keptWhy looked through every session of the machine for each worker it asked about.
+   */
+  bySandbox?: ReadonlyMap<string, readonly SessionInfo[]>;
+}
+
+/** w3855: the sessions of `f` in sandbox `sb`, in their order (bySandbox when the caller grouped them). */
+const inSandbox = (f: PlaceFacts, sb: string): readonly SessionInfo[] => (f.bySandbox ? (f.bySandbox.get(sb) ?? []) : f.sessions.filter((o) => o.machineSandbox === sb));
+
+/** w3855: `f` with its sessions grouped by sandbox (PlaceFacts.bySandbox). */
+export function groupedBySandbox(f: PlaceFacts): PlaceFacts {
+  const by = new Map<string, SessionInfo[]>();
+  for (const o of f.sessions) if (o.machineSandbox) (by.get(o.machineSandbox) ?? by.set(o.machineSandbox, []).get(o.machineSandbox)!).push(o);
+  return { ...f, bySandbox: by };
 }
 
 /** w3843: the ids of the agents occupying each sandbox of `f` (occupies), by sandbox id. */
@@ -162,7 +177,7 @@ export function keptWhy(s: SessionInfo, sb: MachineSandbox, f: PlaceFacts): stri
   // the commit stays in the worktree's HEAD reflog, and the release names it.
   if (g && g.branch === 'detached HEAD' && !(over && !dirtyOf(sb))) return 'it is not on a branch';
   if (g && g.branch === '?') return 'it is not on a branch';
-  const other = f.sessions.find((o) => o.id !== s.id && o.machineSandbox === sb.id && occupies(o, f.live(o.id), f.now) && !releasable(o, f));
+  const other = inSandbox(f, sb.id).find((o) => o.id !== s.id && occupies(o, f.live(o.id), f.now) && !releasable(o, f));
   // w2358: for a worker whose work is over, another agent there keeps the sandbox by itself (free() counts it), and a
   // Unity batch run of that sandbox is that agent's (the holder is per sandbox, not per worker: beast/slot2's bfa0f5c7,
   // w2311 and w2325 done, was held by "a Unity batch run of that sandbox is in flight" beside w2337's worker).
@@ -216,6 +231,13 @@ export function waitReleaseWhy(sb: MachineSandbox, waitOn: string | undefined): 
   return waitOn;
 }
 
+/**
+ * w3855: a released worker that takes no step whatever its waits, holds and work say (releaseStep): live, a message queued, or
+ * no check-in still to come. The release pass skips reading those for it (every released worker the store keeps, most of them).
+ */
+export const staysReleased = (s: Pick<SessionInfo, 'wakeAt' | 'queuedSend'>, live: boolean, now: number) =>
+  live || !s.wakeAt || !!s.queuedSend || Date.parse(s.wakeAt) <= now - OVERDUE_MS;
+
 export function releaseStep(s: SessionInfo, sb: MachineSandbox | undefined, f: PlaceFacts & { workOver?: string; keepLive?: string; claimedBy?: string; ciWait?: string; waitOn?: string; liveHold?: string; pairHold?: string; reclaim?: string }): ReleaseStep {
   if (s.kind !== 'worker' || !s.machineId || !s.machineSandbox || !sb) return undefined;
   // Its Live view is up while it waits on a person (w1582, LIVE_HOLD_MS): neither stopped nor released, so the person's
@@ -232,9 +254,9 @@ export function releaseStep(s: SessionInfo, sb: MachineSandbox | undefined, f: P
     // While its CI runs, or it waits on a deploy or a person, it stays released (w846, w890): its check-in, its unblock or a message places it again.
     if (f.ciWait || f.waitOn) return undefined;
     // Its check-in is near again: back to its own sandbox, while that is still free and on its branch.
-    if (live || far || !s.wakeAt || s.queuedSend || Date.parse(s.wakeAt) <= f.now - OVERDUE_MS) return undefined;
+    if (staysReleased(s, live, f.now) || far) return undefined;
     if (s.placeReleased.sandbox !== sb.id || sb.status !== 'ready' || sb.git?.branch !== s.placeReleased.branch || (f.claimedBy && f.claimedBy !== s.id)) return undefined;
-    const taken = f.sessions.some((o) => o.id !== s.id && o.machineSandbox === sb.id && occupies(o, f.live(o.id), f.now));
+    const taken = inSandbox(f, sb.id).some((o) => o.id !== s.id && occupies(o, f.live(o.id), f.now));
     return taken ? undefined : { do: 'reclaim' };
   }
   if (live) {
@@ -703,13 +725,14 @@ export class PlaceAgain {
       const sb = m?.sandboxes?.find((x) => x.id === s.machineSandbox);
       if (!m || !sb) continue;
       let f = byMachine.get(m.id);
-      if (!f) byMachine.set(m.id, (f = this.facts(m.id)));
+      if (!f) byMachine.set(m.id, (f = groupedBySandbox(this.facts(m.id))));
       const live = this.d.isLive(s.id);
       // Released with a view still up (released before w1582, or the portal took the view back from its daemon): it ends.
       // Stopped past its hold (LIVE_HOLD_MS) with its sandbox still its (unsaved work keeps it): it ends too, so a view nobody
       // came back to does not keep the sandbox's editor from its idle stop (the daemon counts a running view as activity).
       if (!live && s.placeReleased) this.d.liveLost?.(s, s.placeReleased.why);
       else if (!live && s.status === 'stopped' && !(this.now() - Date.parse(s.lastActivityAt) < LIVE_HOLD_MS)) this.d.liveLost?.(s, `nobody came back to it within ${LIVE_HOLD_MS / 3_600_000} h`);
+      if (s.placeReleased && staysReleased(s, live, f.now)) continue;
       const step = releaseStep(s, sb, { ...f, workOver: this.d.workOver(s), ciWait: this.d.ciWait?.(s), waitOn: this.d.waitOn?.(s), keepLive: live ? this.d.keepLive(s.id) : undefined, liveHold: this.d.liveHold?.(s), pairHold: this.d.pairHold?.(s), claimedBy: s.placeReleased ? this.claimedBy(m.id, sb.id) : undefined, reclaim: targets.get(s.id)?.why });
       if (!step) continue;
       // Its sessions stay grouped (sessionsMemo): no step moves a worker to another machine or sandbox in the pass.

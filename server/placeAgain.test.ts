@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { LIVE_HOLD_MS, PlaceAgain, RELEASE_AFTER_MS, farWhy, keptWhy, liveLostNote, movedNote, placeFor, releaseStep, releaseWhy, releasedOn, savedNote, waitReleaseWhy, type PlaceFacts } from './placeAgain.ts';
+import { LIVE_HOLD_MS, PlaceAgain, RELEASE_AFTER_MS, farWhy, groupedBySandbox, keptWhy, liveLostNote, movedNote, placeFor, releaseStep, releaseWhy, releasedOn, savedNote, waitReleaseWhy, type PlaceFacts } from './placeAgain.ts';
 import { agentStateText, holdsItsPlace, holdsSandbox } from '../shared/agentState.ts';
 import { isLiveAgent } from '../shared/fleet.ts';
 import type { Machine, MachineSandbox, SessionInfo } from '../shared/types.ts';
@@ -816,4 +816,51 @@ test('w1668: slot1 kept for an urgent release builder on its way there is spoken
   assert.equal(p.claimedBy('pc', 'slot2'), 'n1', 'its own slot1 is the builder\'s: it goes to slot2');
   const none = new PlaceAgain({ ...deps([nightly], sandbox('slot1')), machine: () => both, queued: () => true });
   assert.equal(none.claimedBy('pc', 'slot1'), 'n1', 'without the reservation it would go back to slot1');
+});
+
+test('w3855: the release pass reads no waits for a released worker that stays released (no check-in to come, overdue, a message queued, live)', () => {
+  const rel = (id: string, over: Partial<SessionInfo> = {}): SessionInfo => worker(id, { placeReleased: { at: iso(NOW - 60 * MIN), sandbox: 'slot1', branch: `feature/${id}`, why: 'far' }, ...over });
+  const stays = [rel('none'), rel('overdue', { wakeAt: iso(NOW - 60 * MIN) }), rel('queued', { wakeAt: iso(NOW + MIN), queuedSend: 'hi' }), rel('live', { wakeAt: iso(NOW + MIN), machineSandbox: 'slot2' })];
+  const near = rel('near', { wakeAt: iso(NOW + MIN) });
+  const machine = { id: 'pc', sandboxes: [sandbox('slot1', {}, { branch: 'feature/near' }), sandbox('slot2')] } as unknown as Machine;
+  const asked: string[] = [];
+  const ask = (s: SessionInfo) => void asked.push(s.id);
+  const p = new PlaceAgain({
+    sessions: () => [...stays, near],
+    machine: () => machine,
+    isLive: (id) => id === 'live',
+    online: () => true,
+    unityHolders: () => [],
+    workOver: ask,
+    ciWait: ask,
+    waitOn: ask,
+    liveHold: ask,
+    pairHold: ask,
+    keepLive: () => undefined,
+    queued: () => false,
+    stopLive: () => undefined,
+    stopEditor: async () => undefined,
+    switchBranch: async () => ({ notes: [] }),
+    save: () => undefined,
+    saveMachine: () => undefined,
+    note: () => undefined,
+    drain: () => undefined,
+    now: () => NOW,
+  });
+  // releaseStep says the same for them with every wait set: they take no step.
+  for (const s of stays) assert.equal(releaseStep(s, machine.sandboxes![0], { ...facts(stays, { liveIds: ['live'] }), workOver: 'over', ciWait: 'ci', waitOn: 'x', liveHold: 'h', pairHold: 'p', reclaim: 'r' }), undefined, s.id);
+  assert.match(p.tick().join('\n'), /near holds pc\/slot1 again: its check-in is near/);
+  assert.deepEqual([...new Set(asked)], ['near'], 'only the worker whose check-in is near was asked about');
+});
+
+test('w3855: keptWhy and releaseStep say the same with the sessions grouped by sandbox (the release pass) as without', () => {
+  const sb = sandbox('slot1');
+  const s = worker('w1', { releaseDue: { at: iso(NOW), why: 'far', workedAt: iso(NOW - 30 * MIN) } });
+  const others = [worker('o1', { status: 'running' }), worker('o2', { machineSandbox: 'slot2', status: 'running' }), worker('o3', { status: 'stopped', wakeAt: iso(NOW + 9 * 60 * MIN) })];
+  for (const sessions of [[s], [s, ...others], [s, others[1]], [s, others[2]]]) {
+    const f = facts(sessions, { liveIds: ['o1', 'o2'] });
+    assert.equal(keptWhy(s, sb, groupedBySandbox(f)), keptWhy(s, sb, f), sessions.map((x) => x.id).join());
+    assert.deepEqual(releaseStep(s, sb, { ...groupedBySandbox(f), workOver: 'over' }), releaseStep(s, sb, { ...f, workOver: 'over' }));
+  }
+  assert.match(keptWhy(s, sb, groupedBySandbox(facts([s, ...others], { liveIds: ['o1'] }))) ?? '', /agent o1 works there too/);
 });

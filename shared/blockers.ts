@@ -184,10 +184,24 @@ export function isWith(w: Pick<WorkItem, 'sessionIds' | 'links' | 'status' | 'bl
  */
 export const latestWorker = (w: Pick<WorkItem, 'sessionIds' | 'links'>): string | undefined => newestFirst(w)[0];
 
+/**
+ * w3855: Date.parse of a link's time, kept by its text: the release pass asks every worker's requests for their newest worker
+ * each minute, and parsing their link times was a fifth of the pass (restart-lag-bench's CPU profile).
+ */
+const parsedTimes = new Map<string, number>();
+function parsedAt(text: string): number {
+  let t = parsedTimes.get(text);
+  if (t === undefined) {
+    if (parsedTimes.size >= 100_000) parsedTimes.clear();
+    parsedTimes.set(text, (t = Date.parse(text)));
+  }
+  return t;
+}
+
 /** A request's workers, the one it was last sent or linked to first (latestWorker); every "its newest worker" reads this. */
 export function newestFirst(w: Pick<WorkItem, 'sessionIds' | 'links'>): string[] {
   const at = (sid: string) => {
-    const t = Date.parse(w.links?.[sid]?.at ?? '');
+    const t = parsedAt(w.links?.[sid]?.at ?? '');
     return Number.isFinite(t) ? t : -Infinity;
   };
   // A stable sort, oldest first, then reversed: on a tie the later in sessionIds comes first.

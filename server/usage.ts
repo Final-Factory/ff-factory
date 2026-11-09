@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { HOST_ROLES, roleNames, type Config, type HostRole } from './config.ts';
 import { noSessionLimit, type AccountUsage, type PlanUsage, type SessionInfo, type SessionKind, type UsageMeter } from '../shared/types.ts';
-import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
+import { checkObject, readJsonDurable, SnapshotFile, writeJsonDurable } from './durable.ts';
 import { dryRun } from './dryRun.ts';
 
 /**
@@ -707,7 +707,12 @@ export interface UsageDeps {
 export class UsageTracker {
   private readonly cfg: Config;
   private readonly file: string;
-  private readonly spendFile: string;
+  /**
+   * The day totals, saved in the background (w3855). Since w859 this was spend.json, SpendStore's file: every cost
+   * increase rewrote the whole of SpendStore's data as read at startup, on the main thread (1.1-1.2 s portal blocks on
+   * 2026-11-09, recordCost under writeJsonDurable), and put spend.json back to that copy until SpendStore saved again.
+   */
+  private readonly spendSnap: SnapshotFile;
   private ledger: Record<string, number> = {};
   private readonly lastCost = new Map<string, number>();
   readonly entries = new Map<string, UsageEntry>();
@@ -747,7 +752,11 @@ export class UsageTracker {
     this.log = deps.log ?? ((line) => console.log(line));
     this.answerMs = deps.answerMs ?? ANSWER_MS;
     this.file = path.join(cfg.dataDir, 'usage.json');
-    this.spendFile = path.join(cfg.dataDir, 'spend.json');
+    this.spendSnap = new SnapshotFile(path.join(cfg.dataDir, 'spend-days.json'), () => JSON.stringify(this.ledger), {
+      delayMs: 2000,
+      intervalMs: 10_000,
+      label: 'usage spend-days',
+    });
     try {
       const f = readJsonDurable<UsageFile | PlanUsage>(this.file, { check: checkObject });
       if (!f) throw new Error('none yet');
@@ -768,7 +777,7 @@ export class UsageTracker {
       // first run
     }
     try {
-      this.ledger = readJsonDurable<Record<string, number>>(this.spendFile, { check: checkObject }) ?? {};
+      this.ledger = readJsonDurable<Record<string, number>>(this.spendSnap.file, { check: checkObject }) ?? {};
     } catch {
       // first run
     }
@@ -944,11 +953,12 @@ export class UsageTracker {
     this.lastCost.set(sessionId, costUsd);
     if (before === undefined || costUsd <= before) return; // first sighting after a restart: no baseline
     this.ledger = addSpend(this.ledger, localDay(), costUsd - before);
-    try {
-      writeJsonDurable(this.spendFile, this.ledger);
-    } catch {
-      // not fatal
-    }
+    this.spendSnap.changed();
+  }
+
+  /** Save the day totals now (shutdown, tests). */
+  flush() {
+    if (this.spendSnap.pending) this.spendSnap.flushSync();
   }
 
   /** A machine daemon reported its Mac's own login (protocol 4). */

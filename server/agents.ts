@@ -887,7 +887,8 @@ export class Agents {
       },
       // w1135: a worker whose open requests are all not the game's (w1098) resumes on an agent seat, not a game sandbox.
       agentOnly: (info) => {
-        const open = this.workIdsOf(info).map((id) => this.store.work.get(id)).filter((w): w is WorkItem => !!w && isOpen(w));
+        // w3855: in the release pass, from its index of each worker's requests (a scan of every request per worker before).
+        const open = this.workIdsOf(info, this.workByWorker, this.workByWorker && this.store.work).map((id) => this.store.work.get(id)).filter((w): w is WorkItem => !!w && isOpen(w));
         return open.length > 0 && open.every((w) => needsOf(w) === 'agent');
       },
       reserved: (id) => this.builds.seats(id),
@@ -3103,8 +3104,8 @@ export class Agents {
    * starts before. w2741: servedBy alone left out a request it went on with (d17c8672, titled w2722, could not revise
    * w2709's report r36), though the ledger (shared/fleet.ts, by holdsOf) showed it on w2709.
    */
-  private workIdsOf(info: SessionInfo, bySession?: Map<string, WorkItem[]>): string[] {
-    const ids = new Set(holdsOf(info.id, bySession ? (bySession.get(info.id) ?? []) : [...this.store.work.values()]).held);
+  private workIdsOf(info: SessionInfo, bySession?: Map<string, WorkItem[]>, byId?: ReadonlyMap<string, WorkItem>): string[] {
+    const ids = new Set(holdsOf(info.id, bySession ? (bySession.get(info.id) ?? []) : [...this.store.work.values()], byId).held);
     const named = /^(w\d+):/.exec(info.title ?? '')?.[1];
     if (named) ids.add(named);
     return [...ids];
