@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
-import { SessionManager, restartMarks, setQueryForTesting, snapshotOf, type SessionHandle } from './sessions.ts';
+import { SessionManager, launchesSettled, restartMarks, setQueryForTesting, snapshotOf, type SessionHandle } from './sessions.ts';
 import { collectResume, resumeMessage } from './restart.ts';
 import { Store, bus } from './store.ts';
 import type { Config } from './config.ts';
@@ -229,6 +229,8 @@ test('stop and resume: a stopped session restarts on the next message, resuming 
   assert.deepEqual(ended, [s.info.id]);
 
   sessions.send(s.info.id, 'are you back?');
+  // w3855: a resumed process launches after the task that sent the message
+  await launchesSettled();
   assert.equal(seen.at(-1)!.options.resume, sdk);
   await until(() => s.info.status === 'idle', 'idle');
 });

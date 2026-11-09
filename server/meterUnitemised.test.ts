@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { ContextMeter, CHARS_PER_TOKEN, type Cats, type MeterState, type MeterTurn } from '../shared/spend.ts';
-import { CliTranscriptTail, attachmentChars, cliTranscriptPath, rebuildMeter, replayLines } from './cliTranscript.ts';
+import { CliTranscriptTail, attachmentChars, cliTranscriptPath, rebuildMeter, rebuildMeterAsync, replayLines } from './cliTranscript.ts';
 import { AgentSession, setQueryForTesting } from './sessions.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { Store } from './store.ts';
@@ -190,7 +190,7 @@ test('w1556: the transcript tail feeds what the CLI appended since the last call
   assert.ok((c.unitemised?.tok ?? 0) < 1);
 });
 
-test('w1556: a conversation with no saved tally is rebuilt from its transcript: the same tally as one kept, no carried', (t) => {
+test('w1556: a conversation with no saved tally is rebuilt from its transcript: the same tally as one kept, no carried', async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-cli-rebuild-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const lines = [
@@ -222,6 +222,9 @@ test('w1556: a conversation with no saved tally is rebuilt from its transcript: 
   near(c['file-read'].tok, 100_000, 3);
   near(c.base.tok, 60_001 + 15_000, 3, 'the base and the CLAUDE.md the second process sent again');
   assert.equal(rebuildMeter(path.join(dir, 'none.jsonl')), undefined);
+  // w3855: the async rebuild (read off the loop, parsed and replayed in slices) gives the same tally
+  assert.deepEqual(await rebuildMeterAsync(file), rebuildMeter(file));
+  assert.equal(await rebuildMeterAsync(path.join(dir, 'none.jsonl')), undefined);
 });
 
 test('w1556: AgentSession reads Claude Code\'s transcript before each call: hook output and reminders have their categories live', async (t) => {
