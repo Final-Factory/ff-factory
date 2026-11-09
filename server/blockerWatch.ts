@@ -21,7 +21,8 @@ import type { Orchestrators } from './orchestrators.ts';
 import { run as runProc, type RunOptions, type RunResult } from './proc.ts';
 import { blockerVerdict, CI_REF, cycleBreak, FULL_SHA, gateSetter, gatesOf, newestFirst, ownsPr, prLabel, RESUME_SWEEP_MS, waitCycles, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
 import { conditionalVerdict } from '../shared/conditional.ts';
-import { ghRunner } from './githubTokens.ts';
+import { ghRunner, isRateLimitText } from './githubTokens.ts';
+import { budgetOf, ghGet, GH_LOW_EVERY_MS, GH_LOW_REMAINING } from './ghBudget.ts';
 import { evidenceArgs, evidenceGated, evidencePython, evidenceRefusal, evidenceVerdict, fetchHudData, findLocalPrEvidence, noScriptRefusal } from '../machine/evidenceGate.ts';
 import { pairDelivers, reportDelivers, requestIdsIn, stillOpenIn } from './ledgerRules.ts';
 import { isOpen } from './work.ts';
@@ -52,7 +53,7 @@ export type PrState = { state: 'open' | 'merged' | 'closed'; text: string; sha?:
 export interface BlockerWatchDeps {
   store: Store;
   orchestrators: Pick<Orchestrators, 'unblock' | 'blockerStuck' | 'blockerDecide' | 'gatesCleared' | 'flagQueuedWithRoom' | 'carryOutConditional' | 'dropConditional'> &
-    Partial<Pick<Orchestrators, 'tellPrConflict' | 'recordReportedWait' | 'retellReportWaits' | 'noticeLongOffline' | 'noteCiRead' | 'sweepResumes' | 'requeueCapacityBlocks' | 'requeueBrokenPairs' | 'replaceNoTimedWaits' | 'timedLegBound' | 'mergedOnGreen' | 'undecidedBound' | 'holdSteamPairs' | 'flagDeadWait'>>;
+    Partial<Pick<Orchestrators, 'tellPrConflict' | 'recordReportedWait' | 'retellReportWaits' | 'noticeLongOffline' | 'noteCiRead' | 'noteReadPaused' | 'sweepResumes' | 'requeueCapacityBlocks' | 'requeueBrokenPairs' | 'replaceNoTimedWaits' | 'timedLegBound' | 'mergedOnGreen' | 'undecidedBound' | 'holdSteamPairs' | 'flagDeadWait'>>;
   /** w1841: tell the workers waiting on a bench lock that is free now (Agents.resumeBenchWaits): request id to what it did. */
   benchResume?: () => [string, string][];
   /** w2544: work waiting on a computer away (offline or paused) past the grace moves elsewhere (Agents.moveAwayWork). */
@@ -118,15 +119,19 @@ export class BlockerWatch {
   private readonly swept = new Set<string>();
   private readonly deadFlagged = new Set<string>();
   /** w829: pull requests whose checks could not be read: since when, why, and when that was last logged. */
-  private readonly ciFailing = new Map<string, { since: number; why: string; logged: number }>();
+  private readonly ciFailing = new Map<string, Failing>();
   private readonly healthSeen = new Map<string, { at: number; state?: PrHealth }>();
   /** "<ref>@<head sha>" to when this portal first saw that head (w907: the clock of the no-CI-run rule). */
   private readonly headFirstSeen = new Map<string, number>();
   /** w3572: the conflicting pull request heads (`ref@head`) whose owner was told, or found to have none: once each. */
   private readonly conflictTold = new Set<string>();
   private readonly prSeen = new Map<string, { at: number; state?: PrState }>();
-  private readonly healthFailing = new Map<string, { since: number; why: string; logged: number }>();
-  private readonly prFailing = new Map<string, { since: number; why: string; logged: number }>();
+  private readonly healthFailing = new Map<string, Failing>();
+  private readonly prFailing = new Map<string, Failing>();
+  /** w3758: pull requests whose reads GitHub's rate limit refuses now (their gates' logs say so once). */
+  private readonly paused = new Set<string>();
+  /** w3758: refusals that do not change, remembered between reads (ghChecks CheckReads). */
+  private readonly refused = new Map<string, number>();
   private readonly d: BlockerWatchDeps;
 
   constructor(d: BlockerWatchDeps) {
@@ -295,14 +300,23 @@ export class BlockerWatch {
         for (const g of gatesOf(w)) {
           if (!g.ref) continue;
           // A pull request several requests wait on is read once, on the first one's person's token.
-          if (g.kind === 'ci' && !ci.has(g.ref)) ci.set(g.ref, await this.ciOf(g.ref, this.d.githubPerson?.(w)));
-          else if (g.kind === 'pr' && !pr.has(g.ref)) pr.set(g.ref, await this.prOf(g.ref, this.d.githubPerson?.(w)));
-          // w907: its head and mergeability, for a ci gate and for a pr gate its worker set itself.
+          // w907: its head and mergeability, for a ci gate and for a pr gate its worker set itself. Read first (w3758): the
+          // CI read takes its state and head from it instead of asking GitHub again.
           if ((g.kind === 'ci' || (g.kind === 'pr' && g.by.startsWith('worker '))) && !health.has(g.ref)) health.set(g.ref, await this.healthOf(g.ref, this.d.githubPerson?.(w)));
+          if (g.kind === 'ci' && !ci.has(g.ref)) ci.set(g.ref, await this.ciOf(g.ref, this.d.githubPerson?.(w), health.get(g.ref)));
+          else if (g.kind === 'pr' && !pr.has(g.ref)) pr.set(g.ref, await this.prOf(g.ref, this.d.githubPerson?.(w)));
         }
       }
       // w1094: what each pull request's checks say now, on its gates, so a gate still open says why in the ledger.
       for (const [ref, state] of ci) if (state) this.d.orchestrators.noteCiRead?.(ref, state.text);
+      // w3758: a read GitHub's rate limit refused pauses the gate (it never clears it), once in each waiting request's log.
+      for (const ref of new Set([...ci.keys(), ...pr.keys()])) {
+        const f = this.ciFailing.get(ref)?.rateLimited ? this.ciFailing.get(ref) : this.prFailing.get(ref)?.rateLimited ? this.prFailing.get(ref) : undefined;
+        if (!!f === this.paused.has(ref)) continue;
+        if (f) this.paused.add(ref);
+        else this.paused.delete(ref);
+        this.d.orchestrators.noteReadPaused?.(ref, f ? `paused: GitHub's rate limit refused the read of ${ref} (${f.why}); FF Factory keeps waiting and reads it again when the limit refills` : undefined);
+      }
       const facts = this.facts(ci, pr, health);
       for (const w of blocked) {
         // One request that throws does not hold up the others (w1094: a throw ended the whole look).
@@ -521,7 +535,7 @@ export class BlockerWatch {
       ci: (ref) => ci.get(ref),
       ciUnreadable: (ref) => {
         const f = this.ciFailing.get(ref);
-        return f && { since: f.since, why: f.why };
+        return f && { since: f.since, why: f.why, ...(f.rateLimited ? { rateLimited: true } : {}) };
       },
       pr: (ref) => pr.get(ref),
       prHealth: (ref) => health.get(ref),
@@ -574,7 +588,7 @@ export class BlockerWatch {
   private async healthOf(ref: string, person?: string): Promise<PrHealth | undefined> {
     const seen = this.healthSeen.get(ref);
     const now = this.now();
-    if (seen && now - seen.at < CI_EVERY_MS) return seen.state;
+    if (seen && now - seen.at < this.every(person)) return seen.state;
     let state: PrHealth | undefined;
     let why = 'no answer';
     try {
@@ -598,7 +612,7 @@ export class BlockerWatch {
   private async prOf(ref: string, person?: string): Promise<PrState | undefined> {
     const seen = this.prSeen.get(ref);
     const now = this.now();
-    if (seen && now - seen.at < CI_EVERY_MS) return seen.state;
+    if (seen && now - seen.at < this.every(person)) return seen.state;
     let state: PrState | undefined;
     let why = 'no answer';
     try {
@@ -607,7 +621,7 @@ export class BlockerWatch {
       why = clipLine((e as Error).message, 300);
     }
     this.prSeen.set(ref, { at: now, state });
-    this.noteRead(this.prFailing, 'the state of', ref, now, state?.text, why);
+    this.noteRead(this.prFailing, 'the state of', ref, now, state?.text, why, console.warn, this.rateLimited(why, person));
     return state;
   }
 
@@ -615,37 +629,70 @@ export class BlockerWatch {
    * Remembers and logs a read of a pull request that failed: the first time, every 30 minutes after, and when it reads
    * again (w829: CI reads failed in silence for hours).
    */
-  private noteRead(failing: Map<string, { since: number; why: string; logged: number }>, what: string, ref: string, now: number, read: string | undefined, why: string, warn: (line: string) => void = console.warn) {
+  private noteRead(failing: Map<string, Failing>, what: string, ref: string, now: number, read: string | undefined, why: string, warn: (line: string) => void = console.warn, rateLimited = false) {
     const was = failing.get(ref);
     if (read !== undefined) {
       if (was) console.log(`blocker watch: ${what} ${ref} reads again after ${Math.round((now - was.since) / 60_000)} min: ${read}`);
       failing.delete(ref);
-    } else if (!was || now - was.logged >= READ_FAIL_LOG_MS) {
-      warn(`blocker watch: cannot read ${what} ${ref}${was ? ` (for ${Math.round((now - was.since) / 60_000)} min)` : ''}: ${why}`);
-      failing.set(ref, { since: was?.since ?? now, why, logged: now });
+    } else if (rateLimited) {
+      // w3758: GitHub's rate limit, not the checks: a pause. Its clock starts again at each refused read, so the w829 rule
+      // (unreadable for CI_UNREADABLE_MS: the worker looks) counts only failures after the limit refilled.
+      if (!was?.rateLimited) warn(`blocker watch: ${what} ${ref} paused: GitHub's rate limit refuses it (${why}); the wait holds until it refills (w3758)`);
+      failing.set(ref, { since: now, why, logged: was?.rateLimited ? was.logged : now, rateLimited: true });
+    } else if (!was || was.rateLimited || now - was.logged >= READ_FAIL_LOG_MS) {
+      warn(`blocker watch: cannot read ${what} ${ref}${was && !was.rateLimited ? ` (for ${Math.round((now - was.since) / 60_000)} min)` : ''}: ${why}`);
+      failing.set(ref, { since: was && !was.rateLimited ? was.since : now, why, logged: now });
     } else failing.set(ref, { ...was, why });
+  }
+
+  /**
+   * w3758: how often a person's pull requests are read now: every CI_EVERY_MS, or every GH_LOW_EVERY_MS while their token's
+   * REST budget (as its last answer reported it) is below GH_LOW_REMAINING, so the portal leaves the rest to the workers' merges.
+   */
+  private every(person?: string): number {
+    const b = budgetOf(person, this.now());
+    return b && b.remaining < GH_LOW_REMAINING ? GH_LOW_EVERY_MS : CI_EVERY_MS;
+  }
+
+  /**
+   * w3758 (w1186's rule): a failed read is GitHub's rate limit, never a missing permission or unreadable checks, when gh or
+   * GitHub says so anywhere in it, or when the token's REST budget is spent: the GraphQL "Resource not accessible by personal
+   * access token" on statusCheckRollup comes first in the words of every failed CI read under a fine-grained token, and
+   * during exhaustion it hid "API rate limit exceeded" behind it (ffu#518 and FinalFactory#3469, 2026-11-08 23:39Z and 00:00Z).
+   */
+  private rateLimited(why: string, person?: string): boolean {
+    return isRateLimitText(why) || budgetOf(person, this.now())?.remaining === 0;
   }
 
   /**
    * A pull request's checks, read at most every CI_EVERY_MS. A read that fails is remembered (ciUnreadable) and logged, the
    * first time and every 30 minutes after (w829: it failed in silence for hours), and so is its recovery.
    */
-  private async ciOf(ref: string, person?: string): Promise<CiState | undefined> {
+  private async ciOf(ref: string, person?: string, health?: PrHealth): Promise<CiState | undefined> {
     const seen = this.ciSeen.get(ref);
     const now = this.now();
-    if (seen && now - seen.at < CI_EVERY_MS) return seen.state;
+    if (seen && now - seen.at < this.every(person)) return seen.state;
     let state: CiState | undefined;
     let why = 'no answer';
-    try {
-      state = await (this.d.ci ? this.d.ci(ref, person) : ghChecks(ref, ghRunner(person, `CI on ${ref}`), this.d.online));
-    } catch (e) {
-      why = clipLine((e as Error).message, 300);
+    const b = budgetOf(person, now);
+    if (b?.remaining === 0) {
+      // w3758: the budget is spent until it refills: a read now is refused for certain, so none is made.
+      why = `GitHub's API rate limit exceeded (0 calls left; it refills at ${new Date(b.resetAt).toISOString().slice(11, 16)}Z)`;
+    } else {
+      try {
+        const known = health?.head ? { state: health.state === 'merged' ? 'MERGED' : health.state === 'closed' ? 'CLOSED' : 'OPEN', head: health.head } : undefined;
+        state = await (this.d.ci ? this.d.ci(ref, person) : ghChecks(ref, ghRunner(person, `CI on ${ref}`), this.d.online, { who: person, refused: this.refused, known, now: () => this.now() }));
+      } catch (e) {
+        why = clipLine((e as Error).message, 300);
+      }
     }
     this.ciSeen.set(ref, { at: now, state });
-    this.noteRead(this.ciFailing, 'CI on', ref, now, state?.text, why);
+    this.noteRead(this.ciFailing, 'CI on', ref, now, state?.text, why, console.warn, !state && this.rateLimited(why, person));
     return state;
   }
 }
+
+type Failing = { since: number; why: string; logged: number; rateLimited?: true };
 
 interface GhCheck {
   name?: string;
@@ -821,38 +868,70 @@ export async function ghMerge(ref: string, head: string, run: Runner = runProc, 
   if (r.code !== 0) throw new Error(`gh pr merge ${ref}: ${ghSaid(r)}`);
 }
 
-export async function ghChecks(ref: string, run: Runner = runProc, online?: (machineId: string) => boolean | undefined): Promise<CiState> {
+/**
+ * w3758: what one portal saves between reads of a pull request's checks, so each read spends as little of the token's hourly
+ * REST budget as it can: the refusals that do not change (a fine-grained token is refused statusCheckRollup and the runner
+ * list every time: one GraphQL and one REST call per read, every two minutes, per gate), each remembered for REFUSED_FOR_MS
+ * and then tried again, and the credential (`who`) its conditional reads are cached by (server/ghBudget.ts ghGet).
+ */
+export interface CheckReads {
+  who?: string;
+  refused: Map<string, number>;
+  /** The pull request's state and head as the watch just read them (its health read): no second `gh pr view` for them. */
+  known?: { state?: string; head?: string };
+  now?: () => number;
+}
+/** How long a refusal that does not change is remembered before it is tried again (a token given the permission is seen within it). */
+export const REFUSED_FOR_MS = 60 * 60_000;
+const refusedNow = (c: CheckReads | undefined, key: string) => !!c && (c.refused.get(`${c.who ?? 'portal'} ${key}`) ?? 0) > (c.now?.() ?? Date.now());
+const noteRefused = (c: CheckReads | undefined, key: string) => c?.refused.set(`${c.who ?? 'portal'} ${key}`, (c.now?.() ?? Date.now()) + REFUSED_FOR_MS);
+/** A refusal for want of a permission, never a rate limit (w1186) or a failure to reach GitHub. */
+const permissionRefusal = (r: RunResult) => r.code !== 0 && /Resource not accessible|HTTP 403/i.test(`${r.stderr}${r.stdout}`) && !isRateLimitText(`${r.stderr}${r.stdout}`);
+
+export async function ghChecks(ref: string, run: Runner = runProc, online?: (machineId: string) => boolean | undefined, reads?: CheckReads): Promise<CiState> {
   const m = CI_REF.exec(ref);
   if (!m) throw new Error(`"${ref}" is not a pull request (owner/repo#123)`);
   const opts = { timeoutMs: 30_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } };
-  const away = await awayNow(m[1], run, opts, online);
-  const r = await run('gh', ['pr', 'view', m[2], '-R', m[1], '--json', 'state,statusCheckRollup,headRefOid'], opts);
+  const get = (path: string) => ghGet(run, path, opts, reads?.who);
+  const away = await awayNow(m[1], run, opts, online, reads);
+  const rollupKey = `${m[1]} statusCheckRollup`;
+  // w3758: a rollup this credential was refused is not asked for again until REFUSED_FOR_MS has passed.
+  const r: RunResult = refusedNow(reads, rollupKey)
+    ? { code: 1, stdout: '', stderr: 'statusCheckRollup: refused to this token (remembered, w3758)' }
+    : await run('gh', ['pr', 'view', m[2], '-R', m[1], '--json', 'state,statusCheckRollup,headRefOid'], opts);
   if (r.code === 0) {
     const pr = JSON.parse(r.stdout) as { state?: string; statusCheckRollup?: GhCheck[]; headRefOid?: string };
     const s = checksState(pr, ref, away);
-    return s.none && pr.headRefOid ? queuedRunsOr(s, ref, m[1], pr.headRefOid, run, opts) : s;
+    return s.none && pr.headRefOid ? queuedRunsOr(s, ref, m[1], pr.headRefOid, get) : s;
   }
-  const p = await run('gh', ['pr', 'view', m[2], '-R', m[1], '--json', 'state,headRefOid'], opts);
-  if (p.code !== 0) throw new Error(`gh pr view ${ref}: ${ghSaid(p)}`);
-  const pr = JSON.parse(p.stdout) as { state?: string; headRefOid?: string };
+  if (permissionRefusal(r)) noteRefused(reads, rollupKey);
+  let pr: { state?: string; headRefOid?: string };
+  if (reads?.known?.head && reads.known.state) pr = { state: reads.known.state, headRefOid: reads.known.head };
+  else {
+    const p = await run('gh', ['pr', 'view', m[2], '-R', m[1], '--json', 'state,headRefOid'], opts);
+    if (p.code !== 0) throw new Error(`gh pr view ${ref}: ${ghSaid(p)}`);
+    pr = JSON.parse(p.stdout) as { state?: string; headRefOid?: string };
+  }
   if (pr.state === 'MERGED' || pr.state === 'CLOSED') return checksState(pr, ref);
   if (!pr.headRefOid) throw new Error(`gh pr view ${ref} gave no head commit; its checks: ${ghSaid(r)}`);
-  const a = await run('gh', ['api', `repos/${m[1]}/actions/runs?head_sha=${pr.headRefOid}&per_page=100`], opts);
+  const a = await get(`repos/${m[1]}/actions/runs?head_sha=${pr.headRefOid}&per_page=100`);
   if (a.code !== 0) {
     // w889: the last reading, the PR's merge state (Pull requests: read), which tells a green finish from a running CI.
-    const ms = await run('gh', ['api', `repos/${m[1]}/pulls/${m[2]}`, '--jq', '{mergeable_state: .mergeable_state, head: .head.sha}'], opts);
+    const ms = await get(`repos/${m[1]}/pulls/${m[2]}`);
     const said = `its checks: ${ghSaid(r)}; its Actions runs: ${ghSaid(a)}`;
     if (ms.code !== 0) throw new Error(`${said}; its merge state: ${ghSaid(ms)}`);
-    const green = mergeStateCi(JSON.parse(ms.stdout) as MergeState, ref);
+    const pull = JSON.parse(ms.stdout) as { mergeable_state?: string; head?: { sha?: string } | string };
+    const state: MergeState = { mergeable_state: pull.mergeable_state, head: typeof pull.head === 'string' ? pull.head : pull.head?.sha };
+    const green = mergeStateCi(state, ref);
     if (green) return green;
-    throw new Error(`${said}; its merge state: ${(JSON.parse(ms.stdout) as MergeState).mergeable_state ?? 'unknown'} (pending or failed checks cannot be told apart from it)`);
+    throw new Error(`${said}; its merge state: ${state.mergeable_state ?? 'unknown'} (pending or failed checks cannot be told apart from it)`);
   }
   if (!rollupRefusedLogged) {
     rollupRefusedLogged = true;
     console.warn(`blocker watch: gh cannot read pull requests' checks (${ghSaid(r)}); CI blocks read their GitHub Actions runs instead`);
   }
   const body = JSON.parse(a.stdout) as { workflow_runs?: (GhRun & { id?: number })[] };
-  const settled = await settleAwayRuns(m[1], body.workflow_runs ?? [], away, run, opts);
+  const settled = await settleAwayRuns(m[1], body.workflow_runs ?? [], away, get);
   const s = runsState({ workflow_runs: body.workflow_runs }, ref);
   return settled && s.green ? { ...s, text: s.text + awayNote(settled, away) } : s;
 }
@@ -864,8 +943,8 @@ export async function ghChecks(ref: string, run: Runner = runProc, online?: (mac
  * exists and is pending, never "no CI run" (w3504's worker was woken four times in 20 minutes by that clear). When the
  * runs cannot be read, the rollup's answer stands.
  */
-async function queuedRunsOr(none: CiState, ref: string, repo: string, head: string, run: Runner, opts: RunOptions): Promise<CiState> {
-  const a = await run('gh', ['api', `repos/${repo}/actions/runs?head_sha=${head}&per_page=100`], opts);
+async function queuedRunsOr(none: CiState, ref: string, repo: string, head: string, get: (path: string) => Promise<RunResult>): Promise<CiState> {
+  const a = await get(`repos/${repo}/actions/runs?head_sha=${head}&per_page=100`);
   if (a.code !== 0) return none;
   let runs: (GhRun & { id?: number })[];
   try {
@@ -885,12 +964,18 @@ export function queuedRunsState(runs: (GhRun & { id?: number })[], ref: string):
 }
 
 /** w3147: the away labels (machine/awayRunners.ts) of `repo` whose runners are all offline now; when the runner list is unreadable, those whose FF Factory machine is offline. */
-async function awayNow(repo: string, run: Runner, opts: RunOptions, online?: (machineId: string) => boolean | undefined): Promise<readonly string[]> {
+async function awayNow(repo: string, run: Runner, opts: RunOptions, online?: (machineId: string) => boolean | undefined, reads?: CheckReads): Promise<readonly string[]> {
   const labels = awayLabelsOf(repo);
   if (!labels.length) return [];
-  const r = await run('gh', ['api', `repos/${repo}/actions/runners?per_page=100`], opts);
+  // w3758: a runner list this credential was refused is not asked for again until REFUSED_FOR_MS has passed (one REST call a read).
+  const key = `${repo} runners`;
+  if (refusedNow(reads, key)) return offlineByMachine(labels, online);
+  const r = await ghGet(run, `repos/${repo}/actions/runners?per_page=100`, opts, reads?.who);
   // The runner list needs Administration: read, which the portal's tokens lack: then FF Factory's own link to the machine.
-  if (r.code !== 0) return offlineByMachine(labels, online);
+  if (r.code !== 0) {
+    if (permissionRefusal(r)) noteRefused(reads, key);
+    return offlineByMachine(labels, online);
+  }
   try {
     return offlineLabels(JSON.parse(r.stdout) as Parameters<typeof offlineLabels>[0], labels);
   } catch {
@@ -902,12 +987,12 @@ async function awayNow(repo: string, run: Runner, opts: RunOptions, online?: (ma
  * w3147: mark each unfinished run that waits only on away legs as a green finish, in place; answers how many away legs it
  * skipped. w3272: and each unfinished run with a failed leg as a red one, whether or not a label is away now.
  */
-async function settleAwayRuns(repo: string, runs: (GhRun & { id?: number })[], away: readonly string[], run: Runner, opts: RunOptions): Promise<number> {
+async function settleAwayRuns(repo: string, runs: (GhRun & { id?: number })[], away: readonly string[], get: (path: string) => Promise<RunResult>): Promise<number> {
   if (!awayLabelsOf(repo).length) return 0;
   let legs = 0;
   for (const w of runs) {
     if ((w.status ?? '').toLowerCase() === 'completed' || !w.id) continue;
-    const j = await run('gh', ['api', `repos/${repo}/actions/runs/${w.id}/jobs?per_page=100`], opts);
+    const j = await get(`repos/${repo}/actions/runs/${w.id}/jobs?per_page=100`);
     if (j.code !== 0) continue;
     let jobs: Leg[];
     try {

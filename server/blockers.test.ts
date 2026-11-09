@@ -209,7 +209,8 @@ test('w829: Actions runs, the reading without Checks permission: running, green,
 function fakeGh(answers: { match: RegExp; out?: unknown; err?: string }[]) {
   const calls: string[] = [];
   const run = async (cmd: string, args: string[]): Promise<RunResult> => {
-    const line = [cmd, ...args].join(' ');
+    // ghGet's `-i` (w3758): the answer has no headers here, so ghGet takes it as gh's plain output.
+    const line = [cmd, ...args.filter((a) => a !== '-i')].join(' ');
     calls.push(line);
     const a = answers.find((x) => x.match.test(line));
     if (!a) return { code: 1, stdout: '', stderr: `unexpected: ${line}` };

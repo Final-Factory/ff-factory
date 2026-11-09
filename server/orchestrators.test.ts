@@ -16,6 +16,7 @@ import { configPath, type Config } from './config.ts';
 import { memoryDirFor } from './orchestratorMemory.ts';
 import { handoverNote, isOpen, requestAsFiled, requestNotice } from './work.ts';
 import { BlockerWatch, ghMerge, REPORTED_WAIT_MS } from './blockerWatch.ts';
+import { noteBudget, resetBudgets } from './ghBudget.ts';
 import { poolForRef, type GatePoolToken } from './usageGate.ts';
 import { personForWork, sessionPerson, setVaultContext } from './vault.ts';
 import { fakeToken, useFakeVault } from './testVault.ts';
@@ -3915,6 +3916,55 @@ test('w754: w750 as it happened: block on A, a hold, the hold lifted with A stil
   // Now it starts without an override.
   const ok = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Release it', title: 'w3: release', work_id: 'w3', override_duplicate: 'not a repeat of w4', extra_agent: true });
   assert.equal(ok.isError, false, ok.text);
+});
+
+test('w3758: ffu#518 (23:39Z) and FinalFactory#3469 (00:00Z) as it happened: CI reads GitHub\'s rate limit refuses hold the wait, paused and logged once, for 40 min; the reads answering again end the pause; a spent budget pauses too', async (t) => {
+  const { store, agents, o, dispatcher, call } = await setupOnMachine(t);
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }, { id: 'w2' }]);
+  const ffu = 'Final-Factory/ffu#518';
+  const game = 'Final-Factory/FinalFactory#3469';
+  assert.equal((await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'block', note: 'x', blocker: { kind: 'ci', ref: ffu, what: 'CI on PR #518' } })).isError, false);
+  assert.equal((await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'block', note: 'x', blocker: { kind: 'ci', ref: game, what: 'CI on PR #3469' } })).isError, false);
+  const warn = console.warn;
+  console.warn = () => undefined;
+  t.after(() => {
+    console.warn = warn;
+    resetBudgets();
+  });
+  let clock = Date.now();
+  // The words of the 00:00Z reads: the GraphQL refusal first, the rate limit behind it.
+  const limited = (ref: string) => `its checks: GraphQL: Resource not accessible by personal access token (repository.pullRequest.statusCheckRollup); its Actions runs: gh: API rate limit exceeded for user ID 10092359. (HTTP 403) (${ref})`;
+  let ci: (ref: string) => { done: boolean; text: string } = (ref) => {
+    throw new Error(limited(ref));
+  };
+  let reads = 0;
+  const watch = new BlockerWatch({ store, orchestrators: o, now: () => clock, ci: async (ref) => (reads++, ci(ref)) });
+  for (let m = 0; m <= 40; m += 5) {
+    assert.equal((await watch.tick()).size, 0, `still waiting at ${m} min`);
+    clock += 5 * 60_000;
+  }
+  for (const [id, ref] of [['w1', ffu], ['w2', game]] as const) {
+    const w = store.work.get(id)!;
+    assert.equal(w.status, 'blocked', `${id} is never cleared by a rate-limited read`);
+    assert.equal(w.log.filter((l) => l.includes(`paused: GitHub's rate limit refused the read of ${ref}`)).length, 1, `${id}: the pause is logged once: ${w.log.join(' | ')}`);
+  }
+  // The limit refills: the reads answer, the pause ends (logged), and running CI holds the wait as before.
+  ci = (ref) => ({ done: false, text: `1 of 1 workflow runs on ${ref} still running` });
+  assert.equal((await watch.tick()).size, 0);
+  for (const [id, ref] of [['w1', ffu], ['w2', game]] as const) assert.match(store.work.get(id)!.log.at(-1)!, new RegExp(`GitHub answers reads of ${ref.replace(/[/#]/g, '.')} again: the rate-limit pause is over`));
+
+  // A spent budget (its last answer said 0 left) pauses a plain GraphQL refusal too, and no read is made until it refills.
+  clock += 5 * 60_000;
+  noteBudget(undefined, (n) => ({ 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': String(Math.round(clock / 1000) + 3600) })[n], clock);
+  const before = reads;
+  for (let m = 0; m <= 20; m += 5) {
+    assert.equal((await watch.tick()).size, 0);
+    clock += 5 * 60_000;
+  }
+  assert.equal(reads, before, 'nothing is read while the budget is spent');
+  assert.equal(store.work.get('w1')!.status, 'blocked');
+  assert.equal(store.work.get('w2')!.status, 'blocked');
 });
 
 test("w829: w814 as it happened: the dispatcher blocks a worker on CI and cancels its check-in; the checks can't be read; it is logged, and after 15 minutes the worker gets its check-in back. CI read red clears too", async (t) => {

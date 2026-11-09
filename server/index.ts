@@ -74,6 +74,7 @@ import { poolForRef, type GatePoolToken } from './usageGate.ts';
 import { VAULT_FILE, VAULT_KINDS, VAULT_ROLES, Vault, keySource, setVaultContext, tokenPersonForWork, vaultStatusLine, type VaultKind, type VaultRole, type VaultShare } from './vault.ts';
 import { GithubTokens, PORTAL_MACHINE, ghRunner, githubFromVault, githubPersonOf, githubTokens, setGithubTokens } from './githubTokens.ts';
 import { GithubApps } from './githubApps.ts';
+import { startGhCallLog } from './ghBudget.ts';
 import { CiReadWatch, ciReadBanner, ciReadLine, repoSlug } from './ciReadHealth.ts';
 import { GITHUB_REQUIRED_REPOS } from '../shared/githubRequirements.ts';
 import { collectNetwork, loadOutsideWatchState, outsideWatchConfig, saveOutsideWatchState, watchedPortalUrl, watcherOf } from './outsideWatch.ts';
@@ -244,6 +245,8 @@ const githubApps = new GithubApps({ vault: () => vault, log: (line) => console.w
 const github = new GithubTokens({ vault: () => vault, cfg, repos: () => cfg.vault?.githubRepos ?? GITHUB_REQUIRED_REPOS, payer: () => identity.systemPayer().userId, apps: githubApps, log: (line) => console.warn(line), report: (title, body) => hostNotice(title, body) });
 setGithubTokens(github);
 github.start();
+// w3758: the portal's gh calls by caller, with the token's budget beside them, every 15 minutes (server/ghBudget.ts).
+startGhCallLog(ghRunner(undefined, 'the rate limit read'));
 // Records and files written before their store redacted, or before a token shape was known (w1584): masked at start, once
 // per scrub version for the whole data folder (server/scrubSecrets.ts). Paths and counts only in the log.
 setTimeout(() => {

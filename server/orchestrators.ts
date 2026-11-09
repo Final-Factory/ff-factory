@@ -4476,6 +4476,18 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   }
 
   /**
+   * w3758: GitHub's rate limit refuses the reads of a pull request (`line`), or reads answer again (undefined): said once in
+   * the log of each request blocked on its CI or its state, so a wait that looks stuck says why, and is never cleared for it.
+   */
+  noteReadPaused(ref: string, line: string | undefined) {
+    for (const w of this.store.work.values()) {
+      if (w.status !== 'blocked' || !gatesOf(w).some((g) => (g.kind === 'ci' || g.kind === 'pr') && g.ref === ref)) continue;
+      this.stamp(w, line ?? `GitHub answers reads of ${ref} again: the rate-limit pause is over (w3758)`);
+      this.store.putWork(w);
+    }
+  }
+
+  /**
    * The portal's automatic deploy is held because CI failed on the head of its main (w2140; server/autoDeploy.ts hold):
    * nothing deploys, so no deploy gate (a portal deploy, a machine's update, the machines' rollout) can clear until a fix
    * lands. w2116 on 2026-10-25 showed "Blocked on beast's update" for over 2.5 h while the deploy waited on
