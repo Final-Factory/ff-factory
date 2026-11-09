@@ -19,7 +19,7 @@
 import type { Store } from './store.ts';
 import type { Orchestrators } from './orchestrators.ts';
 import { run as runProc, type RunOptions, type RunResult } from './proc.ts';
-import { blockerVerdict, CI_REF, cycleBreak, FULL_SHA, gateSetter, gatesOf, newestFirst, ownsPr, prLabel, RESUME_SWEEP_MS, waitCycles, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
+import { blockerVerdict, CI_REF, cycleBreak, FULL_SHA, gateSetter, gatesOf, newestFirst, ownsPr, prLabel, RESUME_SWEEP_MS, sameCommit, waitCycles, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
 import { conditionalVerdict } from '../shared/conditional.ts';
 import { ghRunner, isRateLimitText } from './githubTokens.ts';
 import { budgetOf, ghGet, GH_LOW_EVERY_MS, GH_LOW_REMAINING } from './ghBudget.ts';
@@ -39,6 +39,8 @@ const EVERY_MS = 60_000;
  * on CI is resumed within about 4 minutes of its checks finishing (2 to read, 1 for the watch, 1 for its check-in).
  */
 const CI_EVERY_MS = 2 * 60_000;
+/** w3786: a CI reading is kept per pull request and commit waited on ("owner/repo#1@<sha>"; the bare ref with no head). */
+const ciKey = (ref: string, head?: string) => (head ? `${ref}@${head.toLowerCase()}` : ref);
 /** A pull request that cannot be read is logged when it starts failing and again this often while it does (w829). */
 const READ_FAIL_LOG_MS = 30 * 60_000;
 const BUSY: ReadonlySet<SessionInfo['status']> = new Set(['running', 'starting', 'waiting_permission']);
@@ -46,7 +48,8 @@ const BUSY: ReadonlySet<SessionInfo['status']> = new Set(['running', 'starting',
 /** `none`: no check or workflow run exists for the pull request's head yet (w907: it may never get one). */
 /** `green` (w2045): done with every check passed or skipped, the only reading the merge-on-green pilot merges on. */
 /** `failed` (w2140): the failed runs, "Windows tests: failure", when it finished red. */
-export type CiState = { done: boolean; text: string; none?: boolean; green?: true; failed?: string };
+/** `head` (w3786): the commit the reading is of, when known. */
+export type CiState = { done: boolean; text: string; none?: boolean; green?: true; failed?: string; head?: string };
 /** A pull request's state (w754): open, merged, or closed without merging, and a line saying how. */
 export type PrState = { state: 'open' | 'merged' | 'closed'; text: string; sha?: string };
 
@@ -80,7 +83,7 @@ export interface BlockerWatchDeps {
    * A pull request's checks ("owner/repo#123"); default gh, on the GitHub token of `person` (the person the first request
    * waiting on it is for, w868; server/githubTokens.ts). Throws (or answers undefined) when they cannot be read.
    */
-  ci?: (ref: string, person?: string) => Promise<CiState | undefined>;
+  ci?: (ref: string, person?: string, head?: string) => Promise<CiState | undefined>;
   /** A pull request's head and mergeability ("owner/repo#123", w907); default gh, as for ci. */
   prHealth?: (ref: string, person?: string) => Promise<PrHealth | undefined>;
   /** A pull request's state ("owner/repo#123"); default gh, as for ci. */
@@ -303,12 +306,13 @@ export class BlockerWatch {
           // w907: its head and mergeability, for a ci gate and for a pr gate its worker set itself. Read first (w3758): the
           // CI read takes its state and head from it instead of asking GitHub again.
           if ((g.kind === 'ci' || (g.kind === 'pr' && g.by.startsWith('worker '))) && !health.has(g.ref)) health.set(g.ref, await this.healthOf(g.ref, this.d.githubPerson?.(w)));
-          if (g.kind === 'ci' && !ci.has(g.ref)) ci.set(g.ref, await this.ciOf(g.ref, this.d.githubPerson?.(w), health.get(g.ref)));
+          // w3786: read per commit waited on, so a wait at a new head never takes the old head's reading.
+          if (g.kind === 'ci' && !ci.has(ciKey(g.ref, g.head))) ci.set(ciKey(g.ref, g.head), await this.ciOf(g.ref, this.d.githubPerson?.(w), health.get(g.ref), g.head));
           else if (g.kind === 'pr' && !pr.has(g.ref)) pr.set(g.ref, await this.prOf(g.ref, this.d.githubPerson?.(w)));
         }
       }
       // w1094: what each pull request's checks say now, on its gates, so a gate still open says why in the ledger.
-      for (const [ref, state] of ci) if (state) this.d.orchestrators.noteCiRead?.(ref, state.text);
+      for (const [key, state] of ci) if (state) this.d.orchestrators.noteCiRead?.(key.split('@')[0], state.text);
       // w3758: a read GitHub's rate limit refused pauses the gate (it never clears it), once in each waiting request's log.
       for (const ref of new Set([...ci.keys(), ...pr.keys()])) {
         const f = this.ciFailing.get(ref)?.rateLimited ? this.ciFailing.get(ref) : this.prFailing.get(ref)?.rateLimited ? this.prFailing.get(ref) : undefined;
@@ -367,7 +371,7 @@ export class BlockerWatch {
         if (w.status !== 'blocked') continue;
         const g = gatesOf(w).find((x) => x.kind === 'ci' && x.ref && now - (this.ciDoneAt.get(x.ref) ?? now) >= RESUME_SWEEP_MS);
         if (!g) continue;
-        const text = ci.get(g.ref!)?.text ?? `CI on ${g.ref} finished`;
+        const text = ci.get(ciKey(g.ref!, g.head))?.text ?? `CI on ${g.ref} finished`;
         const key = `${w.id}@${g.ref}`;
         if (!this.swept.has(key)) console.warn(`blocker watch: SWEEP: ${w.id} is still Blocked on CI on ${g.ref}, which finished ${Math.round((now - this.ciDoneAt.get(g.ref!)!) / 60_000)} min ago (${text}); clearing it again`);
         this.swept.add(key);
@@ -428,10 +432,10 @@ export class BlockerWatch {
    * model turn. Red CI, a reading that is not green (unreadable, closed), or a merge GitHub refuses: unblocked as without it,
    * and the worker hears why.
    */
-  private async clearAll(w: WorkItem, gates: readonly { kind: string; ref?: string; mergeOnGreen?: { head: string } }[], why: string, ci: ReadonlyMap<string, CiState | undefined>) {
+  private async clearAll(w: WorkItem, gates: readonly { kind: string; ref?: string; head?: string; mergeOnGreen?: { head: string } }[], why: string, ci: ReadonlyMap<string, CiState | undefined>) {
     const g = gates.length === 1 && gates[0].kind === 'ci' && gates[0].ref && gates[0].mergeOnGreen ? gates[0] : undefined;
     if (!g || !this.d.orchestrators.mergedOnGreen) return this.d.orchestrators.unblock(w.id, why);
-    if (!ci.get(g.ref!)?.green) return this.d.orchestrators.unblock(w.id, `${why}; FF Factory did not merge it (the checks are not all green), and the report you left with merge_on_green was not filed`);
+    if (!ci.get(ciKey(g.ref!, g.head))?.green) return this.d.orchestrators.unblock(w.id, `${why}; FF Factory did not merge it (the checks are not all green), and the report you left with merge_on_green was not filed`);
     try {
       await (this.d.merge ? this.d.merge(g.ref!, g.mergeOnGreen!.head, this.d.githubPerson?.(w)) : ghMerge(g.ref!, g.mergeOnGreen!.head, ghRunner(this.d.githubPerson?.(w), `the merge of ${g.ref}`), this.d.evidenceScript));
     } catch (e) {
@@ -453,7 +457,7 @@ export class BlockerWatch {
   private async clearSome(w: WorkItem, gates: readonly { g: WorkBlocker; v: { why: string } }[], cleared: readonly { g: WorkBlocker; v: { why: string } }[], ci: ReadonlyMap<string, CiState | undefined>) {
     const by = (g: WorkBlocker) => gateSetter(g);
     const merge = this.d.orchestrators.mergedOnGreen
-      ? cleared.filter((x) => x.g.kind === 'ci' && x.g.ref && x.g.mergeOnGreen && ci.get(x.g.ref)?.green && by(x.g) && gates.every((y) => by(y.g) !== by(x.g) || cleared.includes(y)))
+      ? cleared.filter((x) => x.g.kind === 'ci' && x.g.ref && x.g.mergeOnGreen && ci.get(ciKey(x.g.ref, x.g.head))?.green && by(x.g) && gates.every((y) => by(y.g) !== by(x.g) || cleared.includes(y)))
       : [];
     const rest = cleared.filter((x) => !merge.includes(x));
     for (const x of merge) {
@@ -532,7 +536,7 @@ export class BlockerWatch {
       ...(this.d.usageClear ? { usageClear: this.d.usageClear } : {}),
       ...(this.d.disk ? { disk: this.d.disk } : {}),
       nightlyAt: this.d.nightlyAt?.(),
-      ci: (ref) => ci.get(ref),
+      ci: (ref, head) => ci.get(ciKey(ref, head)),
       ciUnreadable: (ref) => {
         const f = this.ciFailing.get(ref);
         return f && { since: f.since, why: f.why, ...(f.rateLimited ? { rateLimited: true } : {}) };
@@ -668,8 +672,8 @@ export class BlockerWatch {
    * A pull request's checks, read at most every CI_EVERY_MS. A read that fails is remembered (ciUnreadable) and logged, the
    * first time and every 30 minutes after (w829: it failed in silence for hours), and so is its recovery.
    */
-  private async ciOf(ref: string, person?: string, health?: PrHealth): Promise<CiState | undefined> {
-    const seen = this.ciSeen.get(ref);
+  private async ciOf(ref: string, person?: string, health?: PrHealth, head?: string): Promise<CiState | undefined> {
+    const seen = this.ciSeen.get(ciKey(ref, head));
     const now = this.now();
     if (seen && now - seen.at < this.every(person)) return seen.state;
     let state: CiState | undefined;
@@ -681,12 +685,13 @@ export class BlockerWatch {
     } else {
       try {
         const known = health?.head ? { state: health.state === 'merged' ? 'MERGED' : health.state === 'closed' ? 'CLOSED' : 'OPEN', head: health.head } : undefined;
-        state = await (this.d.ci ? this.d.ci(ref, person) : ghChecks(ref, ghRunner(person, `CI on ${ref}`), this.d.online, { who: person, refused: this.refused, known, now: () => this.now() }));
+        state = await (this.d.ci ? this.d.ci(ref, person, head) : ghChecks(ref, ghRunner(person, `CI on ${ref}`), this.d.online, { who: person, refused: this.refused, known, ...(head ? { head } : {}), now: () => this.now() }));
       } catch (e) {
         why = clipLine((e as Error).message, 300);
       }
     }
-    this.ciSeen.set(ref, { at: now, state });
+    this.ciSeen.set(ciKey(ref, head), { at: now, state });
+    for (const [k, v] of this.ciSeen) if (now - v.at > 86_400_000) this.ciSeen.delete(k);
     this.noteRead(this.ciFailing, 'CI on', ref, now, state?.text, why, console.warn, !state && this.rateLimited(why, person));
     return state;
   }
@@ -754,21 +759,24 @@ interface GhRun {
   name?: string;
   status?: string;
   conclusion?: string | null;
+  head_sha?: string;
 }
 
 /**
  * What a commit's GitHub Actions runs say (GET /repos/{owner}/{repo}/actions/runs?head_sha=...), the reading for a token
  * without Checks permission (w829): done when none is still queued, waiting or in progress. A re-run is the same run back
- * in progress, so it counts as running again.
+ * in progress, so it counts as running again. w3786: with `head`, only runs at that commit count (a run whose head_sha is
+ * another commit, an older push's, is left out), and the reading says it is of `head`.
  */
-export function runsState(body: { workflow_runs?: GhRun[] }, ref: string): CiState {
-  const runs = body.workflow_runs ?? [];
-  if (!runs.length) return { done: false, text: `${ref} has no workflow runs yet`, none: true };
+export function runsState(body: { workflow_runs?: GhRun[] }, ref: string, head?: string): CiState {
+  const runs = (body.workflow_runs ?? []).filter((r) => !head || !r.head_sha || sameCommit(r.head_sha, head));
+  const at = head ? { head } : {};
+  if (!runs.length) return { done: false, text: `${ref} has no workflow runs yet${head ? ` at ${head.slice(0, 7)}` : ''}`, none: true, ...at };
   const running = runs.filter((r) => (r.status ?? '').toLowerCase() !== 'completed');
-  if (running.length) return { done: false, text: `${running.length} of ${runs.length} workflow runs on ${ref} still running (${running.slice(0, 3).map((r) => r.name).join(', ')})` };
+  if (running.length) return { done: false, text: `${running.length} of ${runs.length} workflow runs on ${ref} still running (${running.slice(0, 3).map((r) => r.name).join(', ')})`, ...at };
   const failed = runs.filter((r) => ['failure', 'timed_out', 'cancelled', 'action_required', 'startup_failure'].includes((r.conclusion ?? '').toLowerCase()));
   const which = failed.slice(0, 3).map((r) => `${r.name}: ${r.conclusion}`).join(', ');
-  return failed.length ? { done: true, failed: which, text: `CI on ${ref} finished: ${failed.length} of ${runs.length} workflow runs failed (${which})` } : { done: true, green: true, text: `CI on ${ref} finished: all ${runs.length} workflow runs passed or skipped` };
+  return failed.length ? { done: true, failed: which, text: `CI on ${ref} finished: ${failed.length} of ${runs.length} workflow runs failed (${which})`, ...at } : { done: true, green: true, text: `CI on ${ref} finished: all ${runs.length} workflow runs passed or skipped`, ...at };
 }
 
 const clipLine = (s: string, n: number) => {
@@ -879,7 +887,18 @@ export interface CheckReads {
   refused: Map<string, number>;
   /** The pull request's state and head as the watch just read them (its health read): no second `gh pr view` for them. */
   known?: { state?: string; head?: string };
+  /**
+   * w3786: the commit the wait is for (its gate's head, what the worker pushed). Only that commit's checks or runs are read:
+   * a pull request whose head is still another commit, as a cached or lagging read says straight after a push, is CI not
+   * started yet, never the old head's verdict.
+   */
+  head?: string;
   now?: () => number;
+}
+
+/** w3786: what a reading at another commit than the wait's says: CI at the wait's head has not been read yet, so it holds. */
+function notAtHead(ref: string, head: string, at: string | undefined): CiState {
+  return { done: false, head: at, text: `${ref}'s head reads ${(at ?? 'unknown').slice(0, 7)}, not ${head.slice(0, 7)} (the commit waited on): CI at ${head.slice(0, 7)} is not read yet` };
 }
 /** How long a refusal that does not change is remembered before it is tried again (a token given the permission is seen within it). */
 export const REFUSED_FOR_MS = 60 * 60_000;
@@ -893,6 +912,7 @@ export async function ghChecks(ref: string, run: Runner = runProc, online?: (mac
   if (!m) throw new Error(`"${ref}" is not a pull request (owner/repo#123)`);
   const opts = { timeoutMs: 30_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } };
   const get = (path: string) => ghGet(run, path, opts, reads?.who);
+  const want = reads?.head?.trim().toLowerCase() || undefined;
   const away = await awayNow(m[1], run, opts, online, reads);
   const rollupKey = `${m[1]} statusCheckRollup`;
   // w3758: a rollup this credential was refused is not asked for again until REFUSED_FOR_MS has passed.
@@ -901,7 +921,10 @@ export async function ghChecks(ref: string, run: Runner = runProc, online?: (mac
     : await run('gh', ['pr', 'view', m[2], '-R', m[1], '--json', 'state,statusCheckRollup,headRefOid'], opts);
   if (r.code === 0) {
     const pr = JSON.parse(r.stdout) as { state?: string; statusCheckRollup?: GhCheck[]; headRefOid?: string };
-    const s = checksState(pr, ref, away);
+    // w3786: a rollup of another commit than the one waited on (GitHub not caught up with the push yet, or a later push)
+    // says nothing of the wait's CI: that commit's own runs are read instead.
+    if (want && pr.state !== 'MERGED' && pr.state !== 'CLOSED' && !sameCommit(pr.headRefOid, want)) return runsAtHead(ref, m[1], want, pr.headRefOid, away, get);
+    const s = { ...checksState(pr, ref, away), ...(pr.headRefOid ? { head: pr.headRefOid } : {}) };
     return s.none && pr.headRefOid ? queuedRunsOr(s, ref, m[1], pr.headRefOid, get) : s;
   }
   if (permissionRefusal(r)) noteRefused(reads, rollupKey);
@@ -914,7 +937,8 @@ export async function ghChecks(ref: string, run: Runner = runProc, online?: (mac
   }
   if (pr.state === 'MERGED' || pr.state === 'CLOSED') return checksState(pr, ref);
   if (!pr.headRefOid) throw new Error(`gh pr view ${ref} gave no head commit; its checks: ${ghSaid(r)}`);
-  const a = await get(`repos/${m[1]}/actions/runs?head_sha=${pr.headRefOid}&per_page=100`);
+  // w3786: the runs of the commit waited on, whatever head the (possibly cached) health read gave.
+  const a = await get(`repos/${m[1]}/actions/runs?head_sha=${want ?? pr.headRefOid}&per_page=100`);
   if (a.code !== 0) {
     // w889: the last reading, the PR's merge state (Pull requests: read), which tells a green finish from a running CI.
     const ms = await get(`repos/${m[1]}/pulls/${m[2]}`);
@@ -922,8 +946,9 @@ export async function ghChecks(ref: string, run: Runner = runProc, online?: (mac
     if (ms.code !== 0) throw new Error(`${said}; its merge state: ${ghSaid(ms)}`);
     const pull = JSON.parse(ms.stdout) as { mergeable_state?: string; head?: { sha?: string } | string };
     const state: MergeState = { mergeable_state: pull.mergeable_state, head: typeof pull.head === 'string' ? pull.head : pull.head?.sha };
+    if (want && !sameCommit(state.head, want)) return notAtHead(ref, want, state.head);
     const green = mergeStateCi(state, ref);
-    if (green) return green;
+    if (green) return { ...green, ...(state.head ? { head: state.head } : {}) };
     throw new Error(`${said}; its merge state: ${state.mergeable_state ?? 'unknown'} (pending or failed checks cannot be told apart from it)`);
   }
   if (!rollupRefusedLogged) {
@@ -932,7 +957,27 @@ export async function ghChecks(ref: string, run: Runner = runProc, online?: (mac
   }
   const body = JSON.parse(a.stdout) as { workflow_runs?: (GhRun & { id?: number })[] };
   const settled = await settleAwayRuns(m[1], body.workflow_runs ?? [], away, get);
-  const s = runsState({ workflow_runs: body.workflow_runs }, ref);
+  const s = runsState({ workflow_runs: body.workflow_runs }, ref, want ?? pr.headRefOid);
+  return settled && s.green ? { ...s, text: s.text + awayNote(settled, away) } : s;
+}
+
+/**
+ * w3786: CI at `head`, the commit a wait is for, read from its own Actions runs when the pull request reads another head
+ * (`at`). No run at it, or runs that cannot be read, hold the wait (notAtHead), never the other head's verdict.
+ */
+async function runsAtHead(ref: string, repo: string, head: string, at: string | undefined, away: readonly string[], get: (path: string) => Promise<RunResult>): Promise<CiState> {
+  const a = await get(`repos/${repo}/actions/runs?head_sha=${head}&per_page=100`);
+  if (a.code !== 0) return notAtHead(ref, head, at);
+  let runs: (GhRun & { id?: number })[];
+  try {
+    runs = (JSON.parse(a.stdout) as { workflow_runs?: (GhRun & { id?: number })[] }).workflow_runs ?? [];
+  } catch {
+    return notAtHead(ref, head, at);
+  }
+  runs = runs.filter((r) => !r.head_sha || sameCommit(r.head_sha, head));
+  if (!runs.length) return { ...notAtHead(ref, head, at), none: true };
+  const settled = await settleAwayRuns(repo, runs, away, get);
+  const s = runsState({ workflow_runs: runs }, ref, head);
   return settled && s.green ? { ...s, text: s.text + awayNote(settled, away) } : s;
 }
 
@@ -952,7 +997,8 @@ async function queuedRunsOr(none: CiState, ref: string, repo: string, head: stri
   } catch {
     return none;
   }
-  return queuedRunsState(runs, ref) ?? none;
+  const q = queuedRunsState(runs, ref);
+  return q ? { ...q, head } : none;
 }
 
 /** w3527: what a head's workflow runs say when its pull request has no check runs yet: pending while any is unfinished; undefined when it has none or all finished (the rollup's "no checks" stands). */

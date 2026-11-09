@@ -276,7 +276,7 @@ test("w829: ghChecks reads the rollup; where GitHub refuses it, the PR state and
         { match: /^gh api repos\/Final-Factory\/FinalFactory\/actions\/runs\?head_sha=b29072e5bb888423364803d52718e93542b53001&per_page=100$/, out: { workflow_runs: runs } },
       ]);
     const running = fg([{ name: 'Test Runner', status: 'in_progress', conclusion: null }]);
-    assert.deepEqual(await ghChecks(ref, running.run), { done: false, text: `1 of 1 workflow runs on ${ref} still running (Test Runner)` });
+    assert.deepEqual(await ghChecks(ref, running.run), { done: false, text: `1 of 1 workflow runs on ${ref} still running (Test Runner)`, head: 'b29072e5bb888423364803d52718e93542b53001' });
     assert.equal(running.calls.length, 3);
     assert.equal(warned.length, 1);
     assert.match(warned[0], /^blocker watch: gh cannot read pull requests' checks \(GraphQL: Resource not accessible by personal access token .*\); CI blocks read their GitHub Actions runs instead$/);
@@ -502,4 +502,86 @@ test('w2446: a lock blocker stays while its holder ended a turn with a check-in 
   assert.equal(blockerVerdict(lock, facts([item('w633')], { reportedSince })).state, 'open', 'a check-in report: still held');
   assert.deepEqual(seen, [{ notCheckIn: true }]);
   assert.equal(blockerVerdict(lock, facts([item('w633')], { reportedSince: () => true })).state, 'clear', 'a turn with no check-in pending: let go');
+});
+
+// ---------------------------------------------------------------- w3786: a ci wait with a head counts only that commit's CI
+
+// Measured 2026-11-09 03:05Z on Final-Factory/ffu#500 (w3681, worker 8744b9a6): the wait was set at fa33b83 and cleared at
+// 03:05:50Z, 03:05:55Z and 03:07:15Z with "3 of 4 workflow runs failed (repeat: cancelled, ci ...: failure, repeat:
+// failure)", the runs of the old head 3514881, while every run at fa33b83 was still queued.
+const OLD_500 = '3514881f6c0a3e2b9d7a15c4e8f2b6d0a9c3e7f1';
+const NEW_500 = 'fa33b83a44337026dc1e4d8dd6c683f1fade1020';
+const RUNS_AT_OLD_500 = [
+  { id: 42553421063, name: 'repeat', status: 'completed', conclusion: 'cancelled', head_sha: OLD_500 },
+  { id: 42553393542, name: 'ci', status: 'completed', conclusion: 'failure', head_sha: OLD_500 },
+  { id: 42553393484, name: 'repeat', status: 'completed', conclusion: 'failure', head_sha: OLD_500 },
+  { id: 42553393500, name: 'lint', status: 'completed', conclusion: 'success', head_sha: OLD_500 },
+];
+const RUNS_AT_NEW_500 = [
+  { id: 42554441789, name: 'ci', status: 'queued', conclusion: null, head_sha: NEW_500 },
+  { id: 42554441757, name: 'repeat', status: 'queued', conclusion: null, head_sha: NEW_500 },
+  { id: 42554452778, name: 'repeat', status: 'queued', conclusion: null, head_sha: NEW_500 },
+  { id: 42554455440, name: 'repeat', status: 'queued', conclusion: null, head_sha: NEW_500 },
+];
+
+test('w3786: a ci wait at a new head is never cleared by the old head\'s runs while its own runs are queued (ffu#500)', async () => {
+  const ref = 'Final-Factory/ffu#500';
+  const runsFor = (sha: string, runs: unknown[]) => ({ match: new RegExp(`^gh api repos/Final-Factory/ffu/actions/runs\\?head_sha=${sha}&per_page=100$`), out: { workflow_runs: runs } });
+  // The portal's fine-grained token is refused the rollup; the health read the watch hands over is cached from before the push.
+  const gh = fakeGh([
+    { match: /actions\/runners/, err: 'gh: Resource not accessible by personal access token (HTTP 403)' },
+    { match: /statusCheckRollup/, err: 'GraphQL: Resource not accessible by personal access token (statusCheckRollup)' },
+    runsFor(OLD_500, RUNS_AT_OLD_500),
+    runsFor(NEW_500, RUNS_AT_NEW_500),
+  ]);
+  const reads = { refused: new Map<string, number>(), known: { state: 'OPEN', head: OLD_500 } };
+  const atNew = await ghChecks(ref, gh.run, undefined, { ...reads, head: NEW_500 });
+  assert.equal(atNew.done, false, atNew.text);
+  assert.equal(atNew.head, NEW_500);
+  assert.match(atNew.text, /^4 of 4 workflow runs on Final-Factory\/ffu#500 still running \(ci, repeat, repeat\)$/);
+  assert.ok(gh.calls.some((c) => c.includes(`head_sha=${NEW_500}`)) && !gh.calls.some((c) => c.includes(`head_sha=${OLD_500}`)), 'only the waited head is asked for');
+  // Without a head (an older wait), the read is still of the PR's head as the health read gave it.
+  const atOld = await ghChecks(ref, gh.run, undefined, reads);
+  assert.equal(atOld.done, true);
+  assert.equal(atOld.head, OLD_500);
+
+  // A runs answer that holds both heads' runs counts only the waited head's.
+  assert.equal(runsState({ workflow_runs: [...RUNS_AT_OLD_500, ...RUNS_AT_NEW_500] }, ref, NEW_500).done, false);
+  assert.equal(runsState({ workflow_runs: RUNS_AT_OLD_500 }, ref, NEW_500).none, true, 'no run at the head yet: none, never the old verdict');
+
+  // A readable rollup GitHub still gives for the old head (it has not caught up with the push): that head's own runs decide.
+  const lagging = fakeGh([
+    { match: /actions\/runners/, err: 'refused' },
+    { match: /statusCheckRollup/, out: { state: 'OPEN', headRefOid: OLD_500, statusCheckRollup: [{ name: 'ci', status: 'COMPLETED', conclusion: 'FAILURE' }] } },
+    runsFor(NEW_500, RUNS_AT_NEW_500),
+  ]);
+  const s = await ghChecks(ref, lagging.run, undefined, { refused: new Map(), head: NEW_500 });
+  assert.equal(s.done, false, s.text);
+  const none = await ghChecks(ref, fakeGh([
+    { match: /actions\/runners/, err: 'refused' },
+    { match: /statusCheckRollup/, out: { state: 'OPEN', headRefOid: OLD_500, statusCheckRollup: [{ name: 'ci', status: 'COMPLETED', conclusion: 'FAILURE' }] } },
+    runsFor(NEW_500, []),
+  ]).run, undefined, { refused: new Map(), head: NEW_500 });
+  assert.equal(none.done, false, none.text);
+
+  // The gate: a reading of another commit than its head holds it, however finished; a reading of its head clears it.
+  const gate = block({ kind: 'ci', ref, head: NEW_500, what: 'CI on #500', at: new Date(NOW - 60_000).toISOString() });
+  const stale = { done: true, failed: 'repeat: cancelled', text: 'CI on Final-Factory/ffu#500 finished: 3 of 4 workflow runs failed (repeat: cancelled, ci: failure, repeat: failure)', head: OLD_500 };
+  const asked: (string | undefined)[] = [];
+  const v = blockerVerdict(gate, facts([], { ci: (_r, h) => (asked.push(h), stale) }));
+  assert.equal(v.state, 'open', v.why);
+  assert.equal(v.why, `CI on ${ref} at fa33b83 is not read yet (the last reading is of 3514881)`);
+  assert.deepEqual(asked, [NEW_500], 'the gate asks for its own head');
+  const done = { done: true, text: 'CI on Final-Factory/ffu#500 finished: all 4 workflow runs passed or skipped', head: NEW_500 };
+  assert.equal(blockerVerdict(gate, facts([], { ci: () => done })).state, 'clear');
+  // A gate with no head keeps the old behaviour.
+  assert.equal(blockerVerdict({ ...gate, head: undefined }, facts([], { ci: () => stale })).state, 'clear');
+
+  // Zero runs at the head straight after the push, the health read still at the old head (seen hours ago): no "no CI run"
+  // clear until CI_NO_RUN_MS after the wait was set.
+  const empty = { done: false, none: true, text: `${ref} has no workflow runs yet at fa33b83`, head: NEW_500 };
+  const oldHealth = () => ({ state: 'open' as const, head: OLD_500, headSeenAt: NOW - 3 * 3_600_000 });
+  assert.equal(blockerVerdict(gate, facts([], { ci: () => empty, prHealth: oldHealth })).state, 'open');
+  const later = block({ ...gate, at: new Date(NOW - CI_NO_RUN_MS - 60_000).toISOString() });
+  assert.equal(blockerVerdict(later, facts([], { ci: () => empty, prHealth: oldHealth })).state, 'clear');
 });

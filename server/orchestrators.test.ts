@@ -4324,6 +4324,8 @@ test('w907: blocked_on ci: refuses a PR that conflicts or whose head is not the 
   const ok = String(await a.h.blocked_on!({ prs: [`ci:${pr}`], head: '312570c', what: 'CI on #283' }));
   assert.match(ok, /^Recorded: w1 is Blocked on CI on Final-Factory\/ff-factory#283\./);
   assert.doesNotMatch(ok, /WARNING/);
+  // w3786: the gate keeps the head waited on, whole, so only CI at that commit clears it.
+  assert.equal(gatesOf(store.work.get('w1')!)[0].head, '312570c');
   // No head given: recorded, with a warning that the push was not checked. A PR that cannot be read warns too.
   putRequests(store, [{ id: 'w2' }]);
   const b = await startedFor(env, 'w2', { override_duplicate: 'another request' });
