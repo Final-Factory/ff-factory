@@ -5390,6 +5390,66 @@ test('w1094: the backstop: a request still Blocked on CI that finished over 5 mi
   }
 });
 
+test('w3796: the backstop never sweeps a wait whose run at its head is still running (a finished headless wait on the same PR left its mark)', async () => {
+  const at = new Date().toISOString();
+  const pr = 'Final-Factory/ffu#533';
+  const OLD = '5c1e2d4f00000000000000000000000000000000';
+  const NEW = '98b6c01a00000000000000000000000000000000';
+  // w3753 on 2026-11-09: its wait set before d24c7e7 carried no head and finished red at 04:08Z; its new wait at 98b6c01
+  // (run 42561523761 in progress) was swept at once at 04:24Z and 04:26Z.
+  const w = { id: 'w3753', status: 'blocked', blocked: { kind: 'ci', ref: pr, what: 'CI on #533', at, by: 'worker a' } } as unknown as WorkItem;
+  const work = new Map([['w3753', w]]);
+  let fail = true;
+  const cleared: string[] = [];
+  const orchestrators = {
+    unblock: (id: string, why: string) => {
+      if (fail) throw new Error('boom');
+      cleared.push(`${id}: ${why}`);
+      w.status = 'active';
+    },
+  } as unknown as ConstructorParameters<typeof BlockerWatch>[0]['orchestrators'];
+  let clock = Date.now();
+  const red = `CI on ${pr} finished: 1 of 1 workflow runs failed (ci: failure)`;
+  const running = `1 of 1 workflow runs on ${pr} still running (ci)`;
+  const done = `CI on ${pr} finished: all 1 workflow runs passed or skipped`;
+  let newDone = false;
+  const ci = async (_ref: string, _person?: string, head?: string) =>
+    !head || head === OLD ? { done: true, text: red, head: OLD } : newDone ? { done: true, text: done, head: NEW } : { done: false, text: running, head: NEW };
+  const watch = new BlockerWatch({ store: { work } as unknown as Store, orchestrators, now: () => clock, ci });
+  const warned: string[] = [];
+  const warn = console.warn;
+  console.warn = (...x: unknown[]) => void warned.push(x.join(' '));
+  try {
+    await watch.tick();
+    fail = false;
+    clock += 60_000;
+    assert.equal((await watch.tick()).get('w3753'), `clear: ${red}`, 'the headless wait clears on its red run');
+    // 16 minutes later the worker pushed 98b6c01 and waits on it; its run is in progress.
+    clock += 16 * 60_000;
+    w.status = 'blocked';
+    w.blocked = { kind: 'ci', ref: pr, head: NEW, what: 'CI on #533', at: new Date(clock).toISOString(), by: 'worker a' } as WorkItem['blocked'];
+    cleared.length = 0;
+    fail = true;
+    for (let i = 0; i < 8; i++) {
+      assert.equal((await watch.tick()).get('w3753'), undefined, `tick ${i}: held while its run is still running`);
+      clock += 60_000;
+    }
+    assert.equal(warned.filter((l) => l.includes('SWEEP')).length, 0, warned.join(' | '));
+    assert.equal(w.status, 'blocked');
+    // The run finishes; the clearing throws, and the backstop sweeps it 5 minutes on, by its own head's reading.
+    newDone = true;
+    for (let i = 0; i < 7; i++) {
+      await watch.tick();
+      clock += 60_000;
+    }
+    assert.equal(warned.filter((l) => l.startsWith(`blocker watch: SWEEP: w3753 is still Blocked on CI on ${pr}, which finished `) && l.includes(done)).length, 1, warned.join(' | '));
+    fail = false;
+    assert.equal((await watch.tick()).get('w3753'), `clear: ${done}`);
+  } finally {
+    console.warn = warn;
+  }
+});
+
 // ---------------------------------------------------------------- w1126, w1128, w1129: a Claude pool hold, and resumes that outlive a gate
 
 const LOTH_TOKEN = 'vault-lothsahn-1 …EAAA';

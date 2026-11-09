@@ -363,17 +363,23 @@ export class BlockerWatch {
       // w1094, the backstop: a request still Blocked on CI that finished more than RESUME_SWEEP_MS ago (the clearing above
       // threw for it) is said loudly, once, and its CI gate is cleared again.
       const now = this.now();
-      for (const [ref, state] of ci) {
-        if (!state?.done) this.ciDoneAt.delete(ref);
-        else if (!this.ciDoneAt.has(ref)) this.ciDoneAt.set(ref, now);
+      // w3796: keyed like the readings (ref@head, w3786), and only for what was read this pass: w3753's wait set before
+      // d24c7e7 had no head, finished at 04:08Z on 2026-11-09 and left its bare "ffu#533" entry, which nothing deleted any
+      // more, so its new wait at 98b6c01 was swept at once at 04:24Z and 04:26Z ("finished 16 min ago (1 of 1 workflow runs
+      // ... still running)").
+      for (const key of this.ciDoneAt.keys()) if (!ci.has(key)) this.ciDoneAt.delete(key);
+      for (const [key, state] of ci) {
+        if (!state?.done) this.ciDoneAt.delete(key);
+        else if (!this.ciDoneAt.has(key)) this.ciDoneAt.set(key, now);
       }
       for (const w of this.d.store.work.values()) {
         if (w.status !== 'blocked') continue;
-        const g = gatesOf(w).find((x) => x.kind === 'ci' && x.ref && now - (this.ciDoneAt.get(x.ref) ?? now) >= RESUME_SWEEP_MS);
+        const g = gatesOf(w).find((x) => x.kind === 'ci' && x.ref && ci.get(ciKey(x.ref, x.head))?.done && now - (this.ciDoneAt.get(ciKey(x.ref, x.head)) ?? now) >= RESUME_SWEEP_MS);
         if (!g) continue;
+        const doneAt = this.ciDoneAt.get(ciKey(g.ref!, g.head))!;
         const text = ci.get(ciKey(g.ref!, g.head))?.text ?? `CI on ${g.ref} finished`;
         const key = `${w.id}@${g.ref}`;
-        if (!this.swept.has(key)) console.warn(`blocker watch: SWEEP: ${w.id} is still Blocked on CI on ${g.ref}, which finished ${Math.round((now - this.ciDoneAt.get(g.ref!)!) / 60_000)} min ago (${text}); clearing it again`);
+        if (!this.swept.has(key)) console.warn(`blocker watch: SWEEP: ${w.id} is still Blocked on CI on ${g.ref}, which finished ${Math.round((now - doneAt) / 60_000)} min ago (${text}); clearing it again`);
         this.swept.add(key);
         try {
           if (gatesOf(w).length === 1) this.d.orchestrators.unblock(w.id, text);
