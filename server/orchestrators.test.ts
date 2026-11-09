@@ -8830,11 +8830,15 @@ test('w2433: a worker its machine stopped mid-turn holds its request Blocked on 
   let online = false;
   (o as unknown as { d: { machineOnline: (id: string) => boolean | undefined } }).d.machineOnline = (id) => (id === 'pc' ? online : undefined);
   const watch = new BlockerWatch({ store, orchestrators: o, online: (id) => (id === 'pc' ? online : undefined) });
+  const ended = new Set<string>();
+  sessions.events.on('turnEnd', (s: { info: { id: string } }) => ended.add(s.info.id));
   const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Fix it', title: 'w1: fix', work_id: 'w1' });
   assert.equal(started.isError, false, started.text);
   const id = /Started agent (\w+)/.exec(started.text)![1];
   const info = store.sessions.get(id)!;
-  await until('its first turn', () => info.status === 'idle');
+  // Its turnEnd signal too, not only the idle status: the daemon sends them as two messages, and under load the signal came
+  // after the drop below, so the portal took it for a turn ended after the drop and lifted the gate (dropCutOffGates, w3759).
+  await until('its first turn to end', () => info.status === 'idle' && ended.has(id));
   // Mid-turn when biscuit's link dropped (w2320's 786d0973, 2026-10-26 23:38Z).
   const handle = sessions.get(id) as unknown as { liveFlag: boolean; seenLive: boolean };
   Object.assign(info, { status: 'running', turnOpenSince: new Date().toISOString(), lastActivityAt: new Date().toISOString() });
