@@ -898,10 +898,12 @@ export class Agents {
       soon: () => void setTimeout(() => !this.closed && this.placeAgain.tick(), 5000).unref?.(),
       pass: (run) => {
         this.workByWorker = workByWorker(this.store.work.values());
+        this.waitLivePass = {};
         try {
           return run();
         } finally {
           this.workByWorker = undefined;
+          this.waitLivePass = undefined;
         }
       },
       // Uncommitted changes keep no process when its daemon saves them before the release (w656).
@@ -943,7 +945,16 @@ export class Agents {
       },
       tell: (id, text) => void sessions.send(id, text, 'system'),
     });
-    machines.placeAgain = (info) => this.placeAgain.answer(info);
+    // w3843: within a drain's memo (SessionManager.placementPass), a worker placed or back in place empties it.
+    machines.placeAgain = (info) => {
+      const gen = this.placeAgain.gen;
+      const why = this.placeAgain.answer(info);
+      if (this.placeAgain.gen !== gen) this.placementChanged();
+      return why;
+    };
+    sessions.placementPass = (fn) => this.withPlacesOnce(() => this.placeAgain.withClaimsMemo(fn));
+    sessions.placementFree = (fn) => this.unmemoized(fn);
+    sessions.placementChanged = () => this.placementChanged();
     // w1944: a daemon that connects (every one after a portal restart, which drops a capacity ping still waiting) is room news.
     machines.onOnline = (id) => this.orchestrators.capacityMayHaveFreed(`${id}'s daemon connected`);
     // w2433: a worker its machine's going offline stopped mid-turn: its requests are Blocked on that machine.
@@ -1206,13 +1217,15 @@ export class Agents {
    * written (and sent to the page).
    */
   syncWaiting() {
-    const queued = this.sessions.queued();
+    // w3843: each session's first queued message, in one pass (a find over the queue for every session before: O(sessions x queue)).
+    const queued = new Map<string, QueuedSend>();
+    for (const x of this.sessions.queued()) if (!queued.has(x.id)) queued.set(x.id, x);
     for (const s of this.store.sessions.values()) {
       const wake = this.waker.pending(s.id);
       const wakeAt = wake?.at;
       // Its note's start (w509): what the agent said it will check then.
       const wakeNote = wake?.note ? wake.note.replace(/\s+/g, ' ').trim().slice(0, 120) : undefined;
-      const q = queued.find((x) => x.id === s.id);
+      const q = queued.get(s.id);
       const queuedSend = q?.why;
       const queuedOn = q?.on === 'machine' || q?.on === 'pool' ? q.on : undefined;
       if (s.wakeAt === wakeAt && s.wakeNote === wakeNote && s.queuedSend === queuedSend && s.queuedOn === queuedOn) continue;
@@ -1363,10 +1376,10 @@ export class Agents {
     // and the w2046 move that followed cut the run.
     if (this.pairHold(i)) return undefined;
     const now = Date.now();
-    if (!this.waitLive || now - this.waitLive.at > 5000) this.waitLive = { at: now, live: this.workLive() };
+    const live = this.liveForWait(now);
     const parts: string[] = [];
     for (const w of items) {
-      const l = this.waitLive.live.get(w.id);
+      const l = live.get(w.id);
       if (l?.state === 'waiting') parts.push(`${w.id}: ${l.waitsOn?.length ? l.waitsOn.join(' and ') : 'a person'} to act`);
       else if (l?.state === 'blocked' && w.status === 'blocked' && w.blocked && gatesOf(w).every((g) => WAIT_RELEASE_KINDS.includes(g.kind))) parts.push(`${w.id}: ${gatesName(gatesOf(w), now)}`);
       // w1944: its own still-open line waits on another request, the orchestrator or a worker they start, with no block
@@ -1428,10 +1441,10 @@ export class Agents {
   /** Who a worker's requests wait on, when one of them is Waiting on input (the ledger's live state), else undefined. */
   private personWait(i: SessionInfo): string | undefined {
     const now = Date.now();
-    if (!this.waitLive || now - this.waitLive.at > 5000) this.waitLive = { at: now, live: this.workLive() };
+    const live = this.liveForWait(now);
     for (const w of this.workOf(i.id)) {
       if (!isWith(w, i.id) || !WORK_OPEN.includes(w.status)) continue;
-      const l = this.waitLive.live.get(w.id);
+      const l = live.get(w.id);
       if (l?.state === 'waiting') return l.waitsOn?.length ? l.waitsOn.join(' and ') : 'a person';
     }
     return undefined;
@@ -1450,6 +1463,20 @@ export class Agents {
   }
   /** Agents.workLive() for the release pass, kept a few seconds: it reads every request, and the pass asks once per worker. */
   private waitLive?: { at: number; live: Map<string, WorkLive> };
+  /** w3843: set during a release pass; once the pass has read waitLive, it keeps that one to its end. */
+  private waitLivePass?: { held?: boolean };
+
+  /**
+   * waitLive, read again when older than 5 s, except within a release pass that read it already (w3843): a pass longer than
+   * 5 s read the whole ledger (and Agents.places) again for every worker after the 5th second, so a slow pass got slower
+   * (11-17 s portal blocks after the 2026-11-09 13:03Z restart, stall profile: tick > pass > waitOn > workLive > places).
+   */
+  private liveForWait(now: number): Map<string, WorkLive> {
+    const pass = this.waitLivePass;
+    if (!this.waitLive || (!pass?.held && now - this.waitLive.at > 5000)) this.waitLive = { at: now, live: this.workLive() };
+    if (pass) pass.held = true;
+    return this.waitLive.live;
+  }
   /** Each released worker's first open request by priority, for resumeOrder, for the rest of this turn of the loop (w2026). */
   private firstOpen?: Map<string, WorkItem>;
   /** During a release pass, the requests by worker (workByWorker, w2026); undefined outside one. */
@@ -3300,7 +3327,7 @@ export class Agents {
     }
     if (now - (Date.parse(q.at) || now) < MOVE_AFTER_MS || info.pendingPermissions.length || isMidTurn(info)) return undefined;
     const { reqs, owned, gone } = this.movableWorkOf(info);
-    if (owned.length || gone.length) this.leaveToOwners(info, owned, gone, hold, !reqs.length);
+    if (owned.length || gone.length) this.unmemoized(() => this.leaveToOwners(info, owned, gone, hold, !reqs.length));
     if (!reqs.length && (owned.length || gone.length)) {
       // w2411: a timed run's result waiting here goes again, to the worker on its request now
       this.timedRuns?.dropped(q.uuid);
@@ -3310,7 +3337,7 @@ export class Agents {
     if ('requeuePair' in d) {
       // w2304: its pair run starts again whole; this worker is retired with the other legs, so its message is not delivered.
       const w = reqs.find((x) => x.id === d.requeuePair.id);
-      const did = w && this.orchestrators.requeuePair(w, d.requeuePair.why);
+      const did = w && this.unmemoized(() => this.orchestrators.requeuePair(w, d.requeuePair.why));
       console.log(`room move: worker ${info.id} on ${info.machineId}/${info.machineSandbox} (${d.requeuePair.id}) not moved alone: ${did ?? `its pair run was not re-queued (${d.requeuePair.why})`}`);
       return did ? true : stayLine(hold, d.requeuePair.why);
     }
@@ -3326,7 +3353,7 @@ export class Agents {
     this.roomMoving.set(info.id, entry);
     const waited = Math.round((now - (Date.parse(q.at) || now)) / 1000);
     console.log(`room move: worker ${info.id} on ${info.machineId}/${info.machineSandbox} (${reqs.map((w) => w.id).join(', ')}) moves to ${d.move.to} ${waited} s after its message was queued: ${hold}; ${d.move.why}`);
-    void this.moveForRoom(info, reqs, d.move.to, d.move.why, hold, entry, q).finally(() => this.roomMoving.delete(info.id));
+    this.unmemoized(() => void this.moveForRoom(info, reqs, d.move.to, d.move.why, hold, entry, q).finally(() => this.roomMoving.delete(info.id)));
     return true;
   }
 
@@ -3358,7 +3385,7 @@ export class Agents {
     if (this.roomMoving.has(info.id) || this.timedMoving.has(info.id)) return undefined;
     const m = info.machineId!.toLowerCase();
     const { reqs: all, owned, gone } = this.movableWorkOf(info);
-    if (owned.length || gone.length) this.leaveToOwners(info, owned, gone, hold, !all.length);
+    if (owned.length || gone.length) this.unmemoized(() => this.leaveToOwners(info, owned, gone, hold, !all.length));
     const pinned = all.filter((w) => namesMachine(this.pinOf(w)?.ids, m));
     for (const w of pinned) this.orchestrators.awayKeptNotice(w, m, a.line, this.pinOf(w)!.why, info.id);
     const reqs = all.filter((w) => !pinned.includes(w));
@@ -3366,7 +3393,7 @@ export class Agents {
     const d = moveDecision({ ...this.moveFacts(info, reqs), away: a.line });
     if ('requeuePair' in d) {
       const w = reqs.find((x) => x.id === d.requeuePair.id);
-      const did = w && this.orchestrators.requeuePair(w, `its computer is ${a.line} (w2544)`, [m]);
+      const did = w && this.unmemoized(() => this.orchestrators.requeuePair(w, `its computer is ${a.line} (w2544)`, [m]));
       console.log(`away move: worker ${info.id} on ${info.machineId}/${info.machineSandbox} (${d.requeuePair.id}): ${did ?? 'its pair run was not re-queued'}`);
       return did ? true : stayLine(hold, d.requeuePair.why);
     }
@@ -3399,8 +3426,10 @@ export class Agents {
     const entry = { to, texts: q ? [movedText(q)] : [], how: `moved by FF Factory: ${a.line} (w2544)`, lead, reason: `${a.line}, and ${to} has room (w2544)`, away: a.line };
     this.roomMoving.set(info.id, entry);
     console.log(`away move: worker ${info.id} on ${info.machineId}/${info.machineSandbox} (${ids}) moves to ${to}: ${a.line}; ${d.move.why}`);
-    for (const w of reqs) this.orchestrators.dropAwayGates(w, m, a.line);
-    void this.moveForRoom(info, reqs, to, d.move.why, a.line, entry, q).finally(() => this.roomMoving.delete(info.id));
+    this.unmemoized(() => {
+      for (const w of reqs) this.orchestrators.dropAwayGates(w, m, a.line);
+      void this.moveForRoom(info, reqs, to, d.move.why, a.line, entry, q).finally(() => this.roomMoving.delete(info.id));
+    });
     return true;
   }
 
@@ -5332,18 +5361,42 @@ When a person asked for a design or an analysis (a profile, an investigation, a 
 
   private placesPass?: { places?: Computer[] };
 
+  /** w3843: within withPlacesOnce and a claims memo, the next asks compute afresh (placesChanged and PlaceAgain.claimsChanged). */
+  private placementChanged(): void {
+    this.placesChanged();
+    this.placeAgain.claimsChanged();
+  }
+
+  /** w3843: runs `fn`, which changes placement, as outside withPlacesOnce and the claims memo; both are empty after it. */
+  private unmemoized<T>(fn: () => T): T {
+    const pass = this.placesPass;
+    this.placesPass = undefined;
+    return this.placeAgain.withoutClaimsMemo(() => {
+      try {
+        return fn();
+      } finally {
+        if (pass) this.placesPass = {};
+      }
+    });
+  }
+
   private placesNow(): Computer[] {
     const out: Computer[] = [];
     const all = [...this.sessions.sessions.values()].filter((s) => s.info.kind !== 'orchestrator');
     const mem = this.hostMem();
     // w1863: the legs requests hold for named computers (decide_work queue with needs beside the request's own worker).
     const legs = [...this.store.work.values()].filter((w) => isOpen(w) && w.status !== 'queued' && w.legs?.length).sort(ledgerOrder);
+    // w3843: each machine's placed sessions in one pass, in store order (a filter of every session per machine before).
+    const placed = new Map<string, SessionHandle[]>();
+    for (const s of all) if (s.info.machineId && s.info.machineSandbox) (placed.get(s.info.machineId) ?? placed.set(s.info.machineId, []).get(s.info.machineId)!).push(s);
     for (const m of this.machines.list()) {
       const pool = poolSettingsOf(m);
       if (!pool) continue;
       const legsHere = legs.filter((w) => w.legs!.some((l) => l.needs.includes(m.id.toLowerCase()))).map((w) => ({ id: w.id, since: w.legs!.find((l) => l.needs.includes(m.id.toLowerCase()))!.at }));
       const sbs = m.sandboxes ?? [];
-      const mine = all.filter((s) => s.info.machineId === m.id && s.info.machineSandbox);
+      const mine = placed.get(m.id) ?? [];
+      const midTurnIn = new Map<string, number>();
+      for (const x of mine) if (isMidTurn(x.info)) midTurnIn.set(x.info.machineSandbox!, (midTurnIn.get(x.info.machineSandbox!) ?? 0) + 1);
       // Its daemon reports its load; this host's own daemon's is this host's.
       const st = this.machines.statsOf(m.id);
       const used = st ? (st.memUsedBytes ?? st.memTotalBytes - st.memFreeBytes) : m.local ? mem.total - mem.free : undefined;
@@ -5363,7 +5416,7 @@ When a person asked for a design or an analysis (a profile, an investigation, a 
         // Released workers whose resume waits for a sandbox there (w640): the next one to free is theirs.
         resumesWaiting: this.placeAgain.waiting(m.id).length,
         // Seats for an agent that needs no editor (w1098): each sandbox's max_agents_per_sandbox less the agents mid-turn in it, and a whole sandbox's worth for each it may still make.
-        agentSeats: sbs.reduce((n, s) => n + Math.max(0, pool.maxAgentsPerSandbox - mine.filter((x) => x.info.machineSandbox === s.id && isMidTurn(x.info)).length), 0) + Math.max(0, pool.maxSandboxes - sbs.length) * pool.maxAgentsPerSandbox,
+        agentSeats: sbs.reduce((n, s) => n + Math.max(0, pool.maxAgentsPerSandbox - (midTurnIn.get(s.id) ?? 0)), 0) +Math.max(0, pool.maxSandboxes - sbs.length) * pool.maxAgentsPerSandbox,
         ...(used !== undefined && total ? { memUsedBytes: used, memTotalBytes: total } : {}),
         // Every Unity process there, as its daemon counts them (w469); a daemon before that reports its sandbox editors only.
         editors: st?.unity?.used ?? sbs.filter((s) => s.unity.state === 'running' || s.unity.state === 'starting').length,

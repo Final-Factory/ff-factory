@@ -186,18 +186,19 @@ export interface Holds {
  * the worker says DONE, writes `<id>: paused: …` (Paused, below), or was asked to wrap it up and said nothing about it
  * (`released`, WorkItem.setAside); being sent the request again, or the one it paused for closing, holds it again.
  * The request it serves now (servedBy) is held whatever else is recorded: a refused DONE leaves its worker on it.
+ * `items` may be only the requests naming the worker in sessionIds (holdsIndex) when `byId` holds them all (w3843).
  */
-export function holdsOf(sessionId: string, items: readonly WorkItem[]): Holds {
+export function holdsOf(sessionId: string, items: readonly WorkItem[], byId?: ReadonlyMap<string, WorkItem>): Holds {
   const served = servedBy(sessionId, items);
   const held = new Set(served);
   const paused = new Map<string, string>();
-  const byId = new Map(items.map((w) => [w.id, w]));
+  let all = byId;
   for (const w of items) {
     if (served.has(w.id) || !live(w) || !w.sessionIds.includes(sessionId) || w.done?.[sessionId]) continue;
     const a = w.setAside?.[sessionId];
     if (a && (Date.parse(a.at) || 0) > linkOf(w, sessionId).at) {
       if (a.kind === 'released') continue;
-      const first = a.for ? byId.get(a.for) : undefined;
+      const first = a.for ? (all ??= new Map(items.map((x) => [x.id, x]))).get(a.for) : undefined;
       if (!a.for || (first && live(first) && !first.done?.[sessionId])) {
         paused.set(w.id, a.for ?? '');
         continue;
@@ -1207,14 +1208,30 @@ function workLiveOf(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: string
   return { state: 'stalled', why: `${last.id} ${last.status === 'error' ? 'failed' : last.status === 'idle' ? 'finished its turn' : 'stopped'} ${ago(last.lastActivityAt, f.now)}${pr}, nothing waits on a person` };
 }
 
+/**
+ * w3843: what holdsOf reads, indexed once: each session's requests (those naming it in sessionIds), in ledger order, and
+ * every request by id. holdsOf(sid, of.get(sid) ?? [], byId) is holdsOf(sid, items): it reads no other request.
+ */
+export function holdsIndex(items: readonly WorkItem[]): { of: Map<string, WorkItem[]>; byId: Map<string, WorkItem> } {
+  const of = new Map<string, WorkItem[]>();
+  const byId = new Map<string, WorkItem>();
+  for (const w of items) {
+    byId.set(w.id, w);
+    for (const sid of new Set(w.sessionIds)) (of.get(sid) ?? of.set(sid, []).get(sid)!).push(w);
+  }
+  return { of, byId };
+}
+
 /** Every open (or stalled) request's live state, by id. */
 export function workLiveAll(items: readonly WorkItem[], f: Omit<WorkLiveFacts, 'items'>): Map<string, WorkLive> {
   const facts: WorkLiveFacts = { ...f, items };
   facts.shares = roomShares(items, facts);
   const cache = new Map<string, Holds>();
+  // w3843: each worker's requests read once, not every request for every worker (1-5 s portal blocks under workLive, 2026-11-09).
+  const index = holdsIndex(items);
   const holds = (sid: string) => {
     let h = cache.get(sid);
-    if (!h) cache.set(sid, (h = holdsOf(sid, items)));
+    if (!h) cache.set(sid, (h = holdsOf(sid, index.of.get(sid) ?? [], index.byId)));
     return h;
   };
   const out = new Map<string, WorkLive>();
