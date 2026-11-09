@@ -104,12 +104,27 @@ const LINUX_EDITOR = '/Editor/Unity';
 const editorTail = (platform: UnityPlatform) => (platform === 'linux' ? LINUX_EDITOR : MAC_EDITOR);
 
 /**
+ * Unity Hub's own helper, not an editor (w3848): on Windows `"C:\Program Files\Unity Hub\resources\unity.exe" serve`,
+ * named Unity.exe, which runs as long as the Hub does and filled LothLaptop's only Unity slot. Known by its program under
+ * the Hub's resources folder (`\Unity Hub\resources\` on Windows, `Unity Hub.app/Contents/Resources/` on a Mac) or by
+ * a first argument `serve`, which no editor takes.
+ */
+export function isUnityHubHelper(cmd: string, platform: UnityPlatform): boolean {
+  if (platform === 'win32') {
+    const [exe = '', first = ''] = splitArgs(cmd);
+    return /[\\/]unity hub[\\/]resources[\\/]/i.test(exe) || first.toLowerCase() === 'serve';
+  }
+  return /\/Unity Hub\.app\/Contents\/Resources\//i.test(cmd);
+}
+
+/**
  * Whether a process is the Unity editor binary itself (not a script that names it in its arguments): on Windows its
  * image name, else the program of its command line; on a Mac (and Linux) a command line that starts with the path of
  * Unity.app's binary (<version>/Editor/Unity) (a path may hold spaces, so the part before it may not hold " /" or
  * " -", which a program's arguments would).
  */
 export function isUnityBinary(p: Pick<Proc, 'cmd' | 'name'>, platform: UnityPlatform): boolean {
+  if (isUnityHubHelper(p.cmd, platform)) return false;
   if (platform === 'win32') {
     if (p.name) return /^unity\.exe$/i.test(p.name);
     return /^unity\.exe$/i.test(path.win32.basename(splitArgs(p.cmd)[0] ?? ''));

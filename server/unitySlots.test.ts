@@ -16,6 +16,7 @@ import {
   gamePlayers,
   grantFile,
   isUnityBinary,
+  isUnityHubHelper,
   parseCli,
   reqFile,
   runsIn,
@@ -102,6 +103,27 @@ test('unity slots: counting on macOS: the Unity binary at the start of the comma
     ],
   );
   assert.deepEqual(gamePlayers(MAC, 'darwin').map((p) => p.pid), [105]);
+});
+
+test("unity slots: Unity Hub's own unity.exe serve is no editor (w3848)", () => {
+  // LothLaptop's listing, 2026-11-09: the only Unity process, with no editor open, filled its one slot.
+  const hub: Proc = { pid: 41484, ppid: 41000, name: 'unity.exe', cmd: '"C:\\Program Files\\Unity Hub\\resources\\unity.exe" serve' };
+  const editor: Proc = { pid: 45848, ppid: 33488, name: 'Unity.exe', cmd: `"${HUB}\\Unity.exe" -projectPath F:\\ffsb\\agent-mcp -logFile F:\\ffsb\\agent-mcp\\Logs\\sandbox-editor.log ` };
+  assert.equal(isUnityHubHelper(hub.cmd, 'win32'), true);
+  assert.equal(isUnityBinary(hub, 'win32'), false);
+  assert.deepEqual(unityProcesses([hub], 'win32'), []);
+  assert.deepEqual(unityProcesses([hub, editor], 'win32').map((x) => [x.pid, x.kind]), [[45848, 'interactive']]);
+  // Either slash, any case, and serve alone (a Hub installed elsewhere).
+  assert.equal(isUnityHubHelper('"D:/apps/unity hub/Resources/Unity.exe" --hub', 'win32'), true);
+  assert.equal(isUnityHubHelper('"E:\\Tools\\Hub\\unity.exe" serve', 'win32'), true);
+  assert.equal(isUnityHubHelper(editor.cmd, 'win32'), false);
+  assert.equal(isUnityHubHelper(`"${HUB}\\Unity.exe" -batchmode -projectPath D:\\serve`, 'win32'), false);
+  // macOS: the Hub's own binary was never matched (Unity Hub.app holds no /Unity.app/), and anything under its
+  // Resources folder is skipped too, should it bundle one.
+  const macHub: Proc = { pid: 200, ppid: 1, cmd: '/Applications/Unity Hub.app/Contents/Resources/Unity.app/Contents/MacOS/Unity serve' };
+  assert.equal(isUnityBinary({ cmd: '/Applications/Unity Hub.app/Contents/MacOS/Unity Hub' }, 'darwin'), false);
+  assert.equal(isUnityBinary(macHub, 'darwin'), false);
+  assert.deepEqual(unityProcesses([macHub, MAC[0]], 'darwin').map((x) => x.pid), [100]);
 });
 
 const T0 = Date.parse('2026-10-05T12:00:00Z');
