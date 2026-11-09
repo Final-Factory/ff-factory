@@ -1,0 +1,16 @@
+{
+  "conclusion": "failure",
+  "id": 128923391679,
+  "name": "test (ffu-windows)",
+  "run_attempt": 1,
+  "run_id": 42538461342,
+  "runner_name": "ffu-beast-2",
+  "status": "completed",
+  "steps": [],
+  "annotations": [
+    {
+      "annotation_level": "failure",
+      "message": "The self-hosted runner lost communication with the server. Verify the machine is running and has a healthy network connection. Anything in your workflow that terminates the runner process, starves it for CPU/Memory, or blocks its network access can cause this error."
+    }
+  ]
+}

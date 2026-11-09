@@ -14,6 +14,7 @@ import { checkGameRepoClone } from './cloneGuard.ts';
 import { checkTimedAsk, type TimedAskState } from './timedAsk.ts';
 import { checkDetachedBench } from './benchDetachGuard.ts';
 import { checkChecksRead, checkTimedSleep } from './waitGuard.ts';
+import { checkFlakyRerun, type RerunReader } from './rerunGuard.ts';
 import { checkSearchTool, checkWholeDiskSearch, type WholeDiskContext } from './wholeDiskSearch.ts';
 import os from 'node:os';
 import path from 'node:path';
@@ -76,6 +77,8 @@ import type { CrashHoldMark } from '../shared/types.ts';
  *     urgent release lane's pointer at the commit it builds (checkReleaseBranchCommit, server/releaseHandBack.ts).
  *   - waits that never work (w2015): `gh pr checks` and `--json statusCheckRollup` (a vault token cannot read checks), and a
  *     command that only sleeps on the clock for over 180 s (checkChecksRead, checkTimedSleep: server/waitGuard.ts).
+ *   - flaky reruns (w3784): `gh run rerun` (and the API's rerun) of a CI job that failed in a step; only a runner that died
+ *     (zero steps, or the lost-communication annotation) may be rerun (checkFlakyRerun, server/rerunGuard.ts).
  *   - whole-disk searches (w2012), on every machine: find / fd / rg / grep -r / du / Get-ChildItem -Recurse / dir /s and the
  *     Grep and Glob tools over `/`, a drive, every user's folder or a home folder (checkWholeDiskSearch, checkSearchTool); the
  *     refusal names FF_SKILLS, where the ff-agents scripts a worker was hunting for are.
@@ -96,6 +99,8 @@ export function sandboxGuard(opts: {
   prBase?: PrBaseResolver;
   /** w3088: a raw merge of a game repo PR passes pr_evidence.py first, as ff-pr merge does. Default: gh and the script. */
   evidence?: EvidenceResolver;
+  /** w3784: reads the CI jobs a `gh run rerun` would start again, so a job that failed in a step is not rerun. Default: gh api. */
+  rerunJobs?: RerunReader;
   /** The environment of the worker's shell: `cd $TMPDIR/ffbox` and `git -C ~/x` are followed through it (w1132). Absent: variables are not followed. */
   env?: Record<string, string | undefined>;
   /** Tool name prefixes to refuse, e.g. "mcp__ffsb__" (the portal's own MCP, which would let an agent launch agents). */
@@ -213,6 +218,8 @@ export function sandboxGuard(opts: {
         checkPlayerLaunch(cmd, opts.sandboxId) ??
         // w2015: no CI check read the vault token cannot make, no wait that only sleeps (server/waitGuard.ts).
         checkChecksRead(cmd) ??
+        // w3784: no rerun of a CI job that failed in a step (a flaky test gets its cause fixed; server/rerunGuard.ts).
+        checkFlakyRerun(cmd, { cwd: input.cwd || opts.sandboxPath, env: opts.env, reader: opts.rerunJobs }) ??
         checkTimedSleep(cmd, { timeoutMs: typeof args.timeout === 'number' ? args.timeout : undefined, background: args.run_in_background === true }) ??
         (opts.benchBusy ? checkBenchBusyLaunch(cmd, opts.benchBusy) : undefined) ??
         (opts.personBusy ? checkPersonPlayLaunch(cmd, opts.personBusy) : undefined) ??
