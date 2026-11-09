@@ -64,6 +64,7 @@ import type { CleanupFacts } from '../server/cleanupFolders.ts';
 import type { SessionOwner } from '../server/resumable.ts';
 import { LeftoverReaper, installLeftoversShim, readEnvs, readLeases, realInspect, type LeftoverDeps } from './leftovers.ts';
 import { installPrShim } from './prFlow.ts';
+import { FFU_SLOTS_DEFAULT_MAX, installFfuSlotShim } from './ffuSlots.ts';
 import { agentNodePathDir } from '../server/agentNode.ts';
 import { ghAppPaths, ghAppRunEnv, installGhAppShims, writeGhAppTokens, type GhAppSetup } from './ghApp.ts';
 import { fetchAttachment, fetchAttachments, publishAttachmentFromMachine } from './attachments.ts';
@@ -1240,6 +1241,8 @@ export class Daemon {
       installLeftoversShim(this.slotBin, undefined, undefined, undefined, cleanupFactsFile(appDirOfConfig(this.cfg)));
       // ff-pr (w1478): a worker's push, PR, landed check and merge on green, one command each.
       installPrShim(this.slotBin);
+      // ffu-slot (w3764): a worker's ffu checkout with a warm cargo target, leased from <install>/ffu-sandboxes.
+      installFfuSlotShim(this.slotBin, cleanupFactsFile(appDirOfConfig(this.cfg)), FFU_SLOTS_DEFAULT_MAX);
     } catch (e) {
       log(`unity slots: could not write the unity-slot commands: ${(e as Error).message}`);
     }
