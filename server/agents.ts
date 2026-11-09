@@ -701,6 +701,10 @@ export class Agents {
   readonly placeAgain: PlaceAgain;
   /** placeAgain's minute tick; a test that removes the data folder clears it first, or a tick writes into a folder gone (w1576). */
   readonly placeAgainTick: ReturnType<typeof setInterval>;
+  /** Every interval this starts (placeAgainTick among them), cleared by close() (w3746). */
+  private readonly ticks: ReturnType<typeof setInterval>[] = [];
+  /** close() ran: a timeout already set does nothing when it fires (w3746). */
+  private closed = false;
   /** Paused machines' hand-backs (w1532, server/machinePause.ts). */
   readonly pauses: MachinePauses;
   /** Builds first on BEAST (w1606, server/buildPlans.ts): a build declared coming clears its computer, then resumes what it paused. */
@@ -836,8 +840,10 @@ export class Agents {
     // w2443: the pause's deadlines are seconds apart, so it is looked at every PAUSE_TICK_MS; the build plans every 30 s.
     const pauseTick = setInterval(() => this.pauses.tick(), PAUSE_TICK_MS);
     pauseTick.unref?.();
+    this.ticks.push(pauseTick);
     const buildTick = setInterval(() => void this.builds.tick().catch((e) => console.warn('build: tick failed:', (e as Error).message)), 30_000);
     buildTick.unref?.();
+    this.ticks.push(buildTick);
     // w1128: a gate's resume that waited while its request was blocked again is kept for the new gates, not delivered.
     sessions.staleResume = (work, sid, note) => this.orchestrators?.staleResume(work, sid, note);
     sessions.poolBlock = (s, why, next) => this.poolBlock(s, why, next);
@@ -851,6 +857,7 @@ export class Agents {
     sessions.onQueueChange = () => this.syncWaiting();
     const reap = setInterval(() => this.reapIdle(), REAP_EVERY_MS);
     reap.unref?.();
+    this.ticks.push(reap);
     // w640: a sandbox is not held for a worker whose check-in is far off; it is placed again when it resumes.
     this.placeAgain = new PlaceAgain({
       sessions: () => store.sessions.values(),
@@ -888,7 +895,7 @@ export class Agents {
         const m = store.machines.get(id);
         return (m && poolSettingsOf(m)?.maxAgentsPerSandbox) || 2;
       },
-      soon: () => void setTimeout(() => this.placeAgain.tick(), 5000).unref?.(),
+      soon: () => void setTimeout(() => !this.closed && this.placeAgain.tick(), 5000).unref?.(),
       pass: (run) => {
         this.workByWorker = workByWorker(this.store.work.values());
         try {
@@ -947,6 +954,7 @@ export class Agents {
     machines.workerNote = (sid, text) => void this.orchestrators.noteOnHeld(sid, text);
     this.placeAgainTick = setInterval(() => this.placeAgain.tick(), 60_000);
     this.placeAgainTick.unref?.();
+    this.ticks.push(this.placeAgainTick);
     this.timers = new Timers(
       {
         // The orchestrators' and the orchestration worker's (w1106: its polls survive deploys, restarts and its idle stop).
@@ -2219,6 +2227,7 @@ export class Agents {
     const opsCut = cutOff.find((i) => i.id === OPS_ID);
     const opsBy = opsCut?.lastRequestedBy ?? opsCut?.requestedBy;
     if (opsBy) setTimeout(() => {
+      if (this.closed) return;
       try {
         this.sessions.send(this.orchestrators.personalFor(opsBy).info.id, `[ops worker] The portal restarted while the orchestration worker (${OPS_ID}) was mid-turn; that turn was cut off and it was not resumed. Read its transcript (agent_transcript ${OPS_ID}) and message it with ops_worker to carry on.`, 'system', undefined, { requestedBy: opsBy });
       } catch (e) {
@@ -2228,7 +2237,9 @@ export class Agents {
     this.standing.boot();
     this.orchestrators.boot();
     void this.refreshRecentCommits();
-    setInterval(() => void this.refreshRecentCommits(), 10 * 60_000).unref?.();
+    const commits = setInterval(() => void this.refreshRecentCommits(), 10 * 60_000);
+    commits.unref?.();
+    this.ticks.push(commits);
     // The wake_me wakes the last server had pending (workers' and the orchestrator's): a restart must not lose them.
     const wakes = this.waker.restore();
     if (wakes) console.log(`wake_me: re-armed ${wakes} pending wake(s)`);
@@ -2240,6 +2251,21 @@ export class Agents {
     // w1378: the waits on a person open when this started and never sent as [needs you], once, as a digest per person.
     this.orchestrators.scheduleNeedsYouDigest(() => this.personWaits(), NEEDS_YOU_DIGEST_MS);
     return cutOff;
+  }
+
+  /**
+   * Stop every timer this started (w3746): its ticks, the orchestrators' timers, the pending wakes (their file kept), the ops
+   * worker's and the rollout's. A test calls it before it removes the data folder: a release pass that fired after the
+   * folder was gone wrote a note into a moved worker's transcript (Store.appendLine), and the ENOENT, thrown in a timer, failed
+   * orchestrators.test.ts on ff-factory #921's Linux CI. Orchestrators.close() and SessionManager.stopAll() stay the caller's.
+   */
+  close() {
+    this.closed = true;
+    for (const t of this.ticks) clearInterval(t);
+    this.timers.stop();
+    this.waker.close();
+    this.ops.close();
+    this.rollout.close();
   }
 
   // ---------------------------------------------------------------- restarts (server/restart.ts)

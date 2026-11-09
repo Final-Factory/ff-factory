@@ -122,6 +122,7 @@ function setup(t: { after: (fn: () => void | Promise<void>) => void }, opts: { l
   const closers: (() => Promise<void>)[] = [];
   t.after(async () => {
     for (const c of closers) await c();
+    agents.close();
     agents.orchestrators.close();
     sessions.stopAll();
     await new Promise((r) => setTimeout(r, 60));
@@ -1502,8 +1503,7 @@ test("w1106: the ops worker's repeating timer survives a portal restart: the fir
 
   assert.equal(fires().length, 0, 'nothing fired before the restart');
   // The portal goes down, 2 h 10 min pass (a fire came due at 2 h), and it starts again on the same data folder.
-  agents.timers.stop();
-  agents.ops.close();
+  agents.close();
   agents.orchestrators.close();
   sessions.stopAll();
   await new Promise((r) => setTimeout(r, 60));
@@ -1513,8 +1513,7 @@ test("w1106: the ops worker's repeating timer survives a portal restart: the fir
   const sessions2 = new SessionManager(cfg, store2);
   const agents2 = new Agents(cfg, store2, sessions2, new MachineManager(cfg, store2, sessions2), new Identity(cfg, () => PEOPLE));
   closers.push(async () => {
-    agents2.timers.stop();
-    agents2.ops.close();
+    agents2.close();
     agents2.orchestrators.close();
     sessions2.stopAll();
     await new Promise((r) => setTimeout(r, 60));
