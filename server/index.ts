@@ -2623,6 +2623,7 @@ function stopServer(req: RestartRequest, drained: ReadonlySet<string> = new Set(
   agents.rollout.close();
   store.flush();
   spend.flush();
+  usage.flush();
   process.exit(0);
 }
 
@@ -3215,6 +3216,7 @@ setTimeout(() => {
       fs.writeFileSync(path.join(cfg.dataDir, 'update.request'), new Date().toISOString());
       store.flush();
       spend.flush();
+      usage.flush();
       process.exit(0);
     }
     agents.resumeAfterRestart(f, cutOff, { head: appHead(), version: appVersion().version }, notes);

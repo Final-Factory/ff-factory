@@ -906,3 +906,29 @@ test('no 5-hour window (w2709): the account line shows the weekly figure only; n
   assert.equal(noSessionLimit({ ...u, session: { label: 'Session (5 h)', percent: 28 } }), false);
   assert.equal(noSessionLimit({ available: false, asOf: AS_OF, models: [] }), false, 'no reading is unknown, not none');
 });
+
+test('w3855: recordCost keeps its day totals in spend-days.json, saved in the background, and never touches spend.json', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-spend-'));
+  // SpendStore's file (server/spend.ts): recordCost rewrote it on every cost increase, as it was at startup, on the main thread.
+  const spendJson = JSON.stringify({ version: 1, requests: { w1: { usd: 5 } }, sessions: {} });
+  fs.writeFileSync(path.join(dir, 'spend.json'), spendJson);
+  const days = path.join(dir, 'spend-days.json');
+  const t = new UsageTracker({ dataDir: dir } as never, () => undefined, { log: () => undefined });
+  t.recordCost('s1', 1); // first sighting: the baseline
+  t.recordCost('s1', 3);
+  t.recordCost('s1', 3.5);
+  assert.equal(fs.existsSync(days), false, 'no write on the main thread per cost increase');
+  t.flush();
+  t.stop();
+  const saved = JSON.parse(fs.readFileSync(days, 'utf8')) as Record<string, number>;
+  assert.deepEqual(Object.values(saved), [2.5]);
+  assert.equal(fs.readFileSync(path.join(dir, 'spend.json'), 'utf8'), spendJson, "SpendStore's file is left alone");
+  // A restart reads the totals back and adds to them.
+  const again = new UsageTracker({ dataDir: dir } as never, () => undefined, { log: () => undefined });
+  again.recordCost('s1', 10);
+  again.recordCost('s1', 11);
+  again.flush();
+  again.stop();
+  assert.deepEqual(Object.values(JSON.parse(fs.readFileSync(days, 'utf8')) as Record<string, number>), [3.5]);
+  fs.rmSync(dir, { recursive: true });
+});
