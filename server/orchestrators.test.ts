@@ -78,6 +78,19 @@ const CARA: Requester = { userId: 'cara', displayName: 'Cara' };
 const WITH_CARA: UserInfo[] = [...PEOPLE, { ...CARA, role: 'member' }];
 const T0 = '2026-09-28T09:00:00.000Z';
 
+/**
+ * Every session whose turnEnd signal a test's portal handled (setup's listener). A worker on a test machine reports the end of
+ * its turn as two messages, its idle status and then the turnEnd signal (server/sessions.ts update then emitTurnEnd), and under
+ * load the portal handled the signal a moment after the idle status was seen: a test that went on at "idle" had that first turn
+ * end land in its next step, after a drop it faked (w2433, w3759) or after a question it raised (w1812, w3766).
+ */
+const turnEnded = new Set<string>();
+
+/** Waits until the session's turn has fully ended: its idle status and its turnEnd signal both handled (turnEnded above). */
+async function firstTurn(info: { id: string; status: string }, what = 'its first turn to end') {
+  await until(what, () => info.status === 'idle' && turnEnded.has(info.id));
+}
+
 async function until(what: string, cond: () => boolean, ms = 5000) {
   const end = Date.now() + ms;
   while (!cond()) {
@@ -113,6 +126,7 @@ function setup(t: { after: (fn: () => void | Promise<void>) => void }, opts: { l
   }
   const store = new Store(dir);
   const sessions = new SessionManager(cfg, store);
+  sessions.events.on('turnEnd', (x: { info: { id: string } }) => turnEnded.add(x.info.id));
   const machines = new MachineManager(cfg, store, sessions);
   const agents = new Agents(cfg, store, sessions, machines, new Identity(cfg, () => opts.people ?? PEOPLE));
   agents.boot();
@@ -2380,7 +2394,7 @@ test("w1869: a request blocked on another's report: that request's worker is tol
   assert.equal(started.isError, false, started.text);
   const id = /Started agent (\w+)/.exec(started.text)![1];
   const info = store.sessions.get(id)!;
-  await until('its first turn', () => info.status === 'idle');
+  await firstTurn(info);
   const r = await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'block', note: 'It needs the timing.', blocker: { kind: 'request', ref: 'w1', on: 'report', what: "dec9a619's LothDesktop timing of A vs A" } });
   assert.equal(r.isError, false, r.text);
   const notice = () => store.readTranscript(id).filter((e) => e.kind === 'user' && /For w2: <the result, or where it is>/.test((e as { text: string }).text));
@@ -2550,7 +2564,7 @@ test('w691: a worker that needs a person declares it (waiting_on_person) and its
   const id = /Started agent (\w+)/.exec(started.text)![1];
   const m = store.machines.get('pc')!;
   const info = store.sessions.get(id)!;
-  await until('its first turn', () => info.status === 'idle');
+  await firstTurn(info);
 
   // The tool is in its spec and its brief says to use it instead of a check-in.
   const spec = machines.hooks!.specFor(info, m);
@@ -2598,7 +2612,7 @@ test('w2956: the w2895 stall: a planning worker that hands the dispatcher its ro
   assert.equal(started.isError, false, started.text);
   const id = /Started agent (\w+)/.exec(started.text)![1];
   const info = store.sessions.get(id)!;
-  await until('its first turn', () => info.status === 'idle');
+  await firstTurn(info);
   const before = heard(dispatcher().info.id, '[work update]').length;
 
   // 2d1ac9f7's report at 05:14 UTC 2026-11-03, shortened.
@@ -2645,7 +2659,7 @@ test('w2870: a worker waiting on its orchestrator for a step workers have no too
   assert.equal(started.isError, false, started.text);
   const id = /Started agent (\w+)/.exec(started.text)![1];
   const info = store.sessions.get(id)!;
-  await until('its first turn', () => info.status === 'idle');
+  await firstTurn(info);
   const handle = sessions.get(id);
   // w2833's a53036df, 05:24 to 05:55 UTC: the same wait, reported four times.
   const report = "PR #797 merged and deployed.\n\nw1: still open: the orchestrator runs the live ffbox_activity demo for conversations 1487 and 1488 and sends the results to worker c6e1d6f2; workers don't have those tools";
@@ -2680,7 +2694,7 @@ test('w2969: the w2194 dragon case: a worker that could not file the approved st
   const id = /Started agent (\w+)/.exec(started.text)![1];
   const m = store.machines.get('pc')!;
   const info = store.sessions.get(id)!;
-  await until('its first turn', () => info.status === 'idle');
+  await firstTurn(info);
   const handle = sessions.get(id);
   // The worker has the tool and is told to use it; it has no request_work.
   const spec = machines.hooks!.specFor(info, m);
@@ -2744,7 +2758,7 @@ test('w1378: a worker waiting on a person reaches that person’s orchestrator o
   const id = /Started agent (\w+)/.exec(started.text)![1];
   const m = store.machines.get('pc')!;
   const info = store.sessions.get(id)!;
-  await until('its first turn', () => info.status === 'idle');
+  await firstTurn(info);
   assert.equal(heard(ben.id, '[needs you]').length, 0, 'a turn that waits on nobody sends nothing');
 
   // It stops for Ben's OK of a look (w1360's words, 2026-10-15) and ends its turn saying so.
@@ -2863,7 +2877,7 @@ test('w2478: a worker\'s waiting_on_person and decide_work ask on a request with
   const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Do it', title: 'w1: Circuit button look', work_id: 'w1' });
   const id = /Started agent (\w+)/.exec(started.text)![1];
   const info = store.sessions.get(id)!;
-  await until('its first turn', () => info.status === 'idle');
+  await firstTurn(info);
   const h = machines.hooks!.handlersFor(info, store.machines.get('pc')!);
   const what = 'pick the circuit button look';
   const question = (q: string) => [{ question: q, options: [{ label: 'The blue one', recommended: true }, { label: 'The grey one' }] }];
@@ -2898,7 +2912,7 @@ test('w1597: a worker asks with questions: refused with a path, a PR list or no 
   const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Do it', title: 'w1: Pre-1.0 release picks', work_id: 'w1' });
   const id = /Started agent (\w+)/.exec(started.text)![1];
   const info = store.sessions.get(id)!;
-  await until('its first turn', () => info.status === 'idle');
+  await firstTurn(info);
   const h = machines.hooks!.handlersFor(info, store.machines.get('pc')!);
   const what = 'Decide the go-live moment and the vision speed-up from /srv/fff/review/w1/REPORT.md';
   // Ben, w1597: "I'm never going to look at files at the /srv/ path ... theres so much information like pull request that i dont care about".
@@ -2945,7 +2959,7 @@ async function twoRequestsOneWorker(t: Parameters<typeof setupOnMachine>[0]) {
   assert.equal(started.isError, false, started.text);
   const id = /Started agent (\w+)/.exec(started.text)![1];
   const info = store.sessions.get(id)!;
-  await until('its first turn', () => info.status === 'idle');
+  await firstTurn(info);
   const linked = await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'link', note: 'One designer for both.', session_ids: [id], title: 'w1 and w2: circuit design and mocks' });
   assert.equal(linked.isError, false, linked.text);
   const h = machines.hooks!.handlersFor(info, store.machines.get('pc')!);
@@ -3022,7 +3036,7 @@ test('w1868: two questions on one request, the first answered: the second can st
   const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Do it', title: 'w1: frames', work_id: 'w1' });
   const id = /Started agent (\w+)/.exec(started.text)![1];
   const info = store.sessions.get(id)!;
-  await until('its first turn', () => info.status === 'idle');
+  await firstTurn(info);
   const h = env.machines.hooks!.handlersFor(info, store.machines.get('pc')!);
   const declared = await h.waiting_on_person!({ who: 'Lothsahn', what: 'Pick the frame look and what comes up over the strip', questions: [FRAME_Q, STRIP_Q], about: 'Stacked game windows let the back window’s text show through.', after: 'I build the picked look and bring you its clips.' });
   assert.match(String(declared), /with 2 questions as buttons/);
@@ -3074,7 +3088,7 @@ test('w2051: a person’s list_work list shows their own waiting card brief and 
     const started = await call(dispatcher().info, 'start_agent', { sandbox, prompt: 'Do it', title: `${w.id}: ${title}`, work_id: w.id });
     const id = /Started agent (\w+)/.exec(started.text)![1];
     const info = store.sessions.get(id)!;
-    await until('its first turn', () => info.status === 'idle');
+    await firstTurn(info);
     const h = env.machines.hooks!.handlersFor(info, store.machines.get('pc')!);
     const q = { question: FRAME_Q.question, options: FRAME_Q.options.map((o) => ({ ...o, description: LONG })) };
     await h.waiting_on_person!({ who: who.displayName, what: 'Pick the frame look', questions: [q, STRIP_Q], about: 'Stacked game windows let the back window’s text show through.', after: 'I build the picked look and bring you its clips.', request: w.id });
@@ -3334,7 +3348,7 @@ test('w1868: waiting_on_person refuses a still on the worker’s own machine; th
   const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Do it', title: 'w1: look', work_id: 'w1' });
   const id = /Started agent (\w+)/.exec(started.text)![1];
   const info = store.sessions.get(id)!;
-  await until('its first turn', () => info.status === 'idle');
+  await firstTurn(info);
   const h = env.machines.hooks!.handlersFor(info, store.machines.get('pc')!);
   await assert.rejects(
     async () => h.waiting_on_person!({ who: 'Lothsahn', what: 'Pick a look', about: 'A look.', after: 'I build it.', questions: [{ question: 'Which look? ![A](<F:/ffw/tmp/ffa-1/a.png>)', options: [{ label: 'The first look, A', recommended: true }, { label: 'The second look, B' }] }] }),
@@ -3974,7 +3988,7 @@ test("w829: w814 as it happened: the dispatcher blocks a worker on CI and cancel
   assert.equal(started.isError, false, started.text);
   const id = /Started agent (\w+)/.exec(started.text)![1];
   const info = store.sessions.get(id)!;
-  await until('its first turn', () => info.status === 'idle');
+  await firstTurn(info);
   const h = machines.hooks!.handlersFor(info, store.machines.get('pc')!);
 
   // 00:16 the worker sets itself an 8-minute check-in to merge #1338 on green; 00:17 the dispatcher blocks it on that CI.
@@ -4059,7 +4073,7 @@ test('w846: a worker blocks on its own PR\'s CI (blocked_on prs "ci:…"); while
     assert.equal(started.isError, false, started.text);
     const id = /Started agent (\w+)/.exec(started.text)![1];
     const info = store.sessions.get(id)!;
-    await until('its first turn', () => info.status === 'idle');
+    await firstTurn(info);
     const h = machines.hooks!.handlersFor(info, store.machines.get('pc')!);
     assert.equal(agents.ciWait(info), undefined, 'working, not waiting on CI');
     // Today's polling (w833: a 10-minute check-in) would hold the sandbox; the gate replaces it (and holds it, w829).
@@ -4124,7 +4138,7 @@ test('w754: a worker whose request waits only on a PR and another request calls 
   assert.equal(started.isError, false, started.text);
   const id = /Started agent (\w+)/.exec(started.text)![1];
   const info = store.sessions.get(id)!;
-  await until('its first turn', () => info.status === 'idle');
+  await firstTurn(info);
   const m = store.machines.get('pc')!;
   const h = machines.hooks!.handlersFor(info, m);
   const spec = machines.hooks!.specFor(info, m);
@@ -4197,7 +4211,7 @@ async function startedFor(env: Awaited<ReturnType<typeof setupOnMachine>>, wid: 
   assert.equal(started.isError, false, started.text);
   const id = /Started agent (\w+)/.exec(started.text)![1];
   const info = store.sessions.get(id)!;
-  await until('its first turn', () => info.status === 'idle');
+  await firstTurn(info);
   return { id, info, h: machines.hooks!.handlersFor(info, store.machines.get('pc')!) };
 }
 
@@ -4531,7 +4545,7 @@ test('w1089: a worker whose sandbox was given away does not block on capacity: b
   const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Do it', title: 'w2: do it', work_id: 'w2' });
   const id = /Started agent (\w+)/.exec(started.text)![1];
   const info = store.sessions.get(id)!;
-  await until('its first turn', () => info.status === 'idle');
+  await firstTurn(info);
   const h = machines.hooks!.handlersFor(info, store.machines.get('pc')!);
   await assert.rejects(async () => h.blocked_on!({ requests: ['w1'], what: 'waiting for a free sandbox: mine was given away' }), /is a wait for capacity .* That is Queued, not Blocked, and FF Factory queues it by itself/);
   assert.equal(store.work.get('w2')!.status, 'active', 'nothing was recorded');
@@ -6085,7 +6099,7 @@ test('w1841: a worker on a real portal: a reporter wait is Waiting with no [need
   assert.equal(started.isError, false, started.text);
   const id = /Started agent (\w+)/.exec(started.text)![1];
   const info = store.sessions.get(id)!;
-  await until('its first turn', () => info.status === 'idle');
+  await firstTurn(info);
   const live = async () => (await call(dispatcher().info, 'list_work', { id: 'w2' })).text;
   const spec = machines.hooks!.specFor(info, store.machines.get('pc')!);
   // (d) Every worker's prompt says pair checks and builds are its own work, and how to wait on another request's worker.
@@ -7757,7 +7771,7 @@ test('w2085: the replay of w1958 at 16:32: a look OK for PR #2395 is refused wit
   assert.equal(started.isError, false, started.text);
   const id = /Started agent (\w+)/.exec(started.text)![1];
   const info = store.sessions.get(id)!;
-  await until('its first turn', () => info.status === 'idle');
+  await firstTurn(info);
   const w1 = store.work.get('w1')!;
   w1.prs = [{ repo: 'Final-Factory/FinalFactory', number: 2395, title: 'w1958: low-ore alert: right click dismisses it for ten minutes, Shift + right click silences it for good', state: 'open', via: 'line' }];
   store.putWork(w1);
@@ -7800,7 +7814,7 @@ test('w2085: no diff reader, or a design choice, refuses nothing', async (t) => 
   const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Do it', title: 'w1: bug sweep', work_id: 'w1' });
   const id = /Started agent (\w+)/.exec(started.text)![1];
   const info = store.sessions.get(id)!;
-  await until('its first turn', () => info.status === 'idle');
+  await firstTurn(info);
   const w1 = store.work.get('w1')!;
   w1.prs = [{ repo: 'Final-Factory/FinalFactory', number: 2395, state: 'open', via: 'line' }];
   store.putWork(w1);
@@ -7829,7 +7843,7 @@ test('w2756: the replay of w2651 at 04:57: the worker\'s three questions are ref
   assert.equal(started.isError, false, started.text);
   const id = /Started agent (\w+)/.exec(started.text)![1];
   const info = store.sessions.get(id)!;
-  await until('its first turn', () => info.status === 'idle');
+  await firstTurn(info);
   const h = machines.hooks!.handlersFor(info, store.machines.get('pc')!);
   // 04:57: worker 8fe9af40's three questions (its stills left out: they live on the portal's review root).
   const bare = (s: string) => s.replace(/\n*!\[[^\]]*\]\([^)]*\)/g, '');
@@ -8644,7 +8658,7 @@ test('w2422: a stopped worker whose report says it is blocked on another request
   assert.equal(started.isError, false, started.text);
   const id = /Started agent (\w+)/.exec(started.text)![1];
   const info = store.sessions.get(id)!;
-  await until('its first turn', () => info.status === 'idle');
+  await firstTurn(info);
   // w2335 on 2026-10-27: its blocked_on failed while the portal restarted, and the turn ended on this line.
   Object.assign(info, { status: 'stopped', lastResult: 'Pushed the fix.\n\nw1: still open: blocked on w2 reporting (the ledger may not show the block because the portal was unreachable)', lastResultAt: new Date(clock - 60_000).toISOString() });
   const w = store.work.get('w1')!;
@@ -8685,7 +8699,7 @@ test('w2457: a stopped worker whose report says it waits on an FF Factory change
   assert.equal(started.isError, false, started.text);
   const id = /Started agent (\w+)/.exec(started.text)![1];
   const info = store.sessions.get(id)!;
-  await until('its first turn', () => info.status === 'idle');
+  await firstTurn(info);
   const w = store.work.get('w1')!;
   // w3 (w2446) waits on w1's report, as blocked_on reports recorded it, while w1's worker sat idle.
   Object.assign(store.work.get('w3')!, { status: 'blocked', blocked: { kind: 'request', ref: 'w1', on: 'report', what: "w1's worker reporting", at: new Date(clock).toISOString(), by: 'worker zz' } });
@@ -8741,7 +8755,7 @@ test("w2495: a report that waits on a person (w2443: \"waiting on lothsahn to cl
   assert.equal(started.isError, false, started.text);
   const id = /Started agent (\w+)/.exec(started.text)![1];
   const info = store.sessions.get(id)!;
-  await until('its first turn', () => info.status === 'idle');
+  await firstTurn(info);
   const w = store.work.get('w1')!;
   // w2443's worker 4812780c at 00:50 UTC on 2026-10-29, word for word.
   const line = "w1: still open: waiting on lothsahn to click Pause in FF Factory's tray on LothLaptop for the live test";
@@ -8880,15 +8894,13 @@ test('w2433: a worker its machine stopped mid-turn holds its request Blocked on 
   let online = false;
   (o as unknown as { d: { machineOnline: (id: string) => boolean | undefined } }).d.machineOnline = (id) => (id === 'pc' ? online : undefined);
   const watch = new BlockerWatch({ store, orchestrators: o, online: (id) => (id === 'pc' ? online : undefined) });
-  const ended = new Set<string>();
-  sessions.events.on('turnEnd', (s: { info: { id: string } }) => ended.add(s.info.id));
   const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Fix it', title: 'w1: fix', work_id: 'w1' });
   assert.equal(started.isError, false, started.text);
   const id = /Started agent (\w+)/.exec(started.text)![1];
   const info = store.sessions.get(id)!;
-  // Its turnEnd signal too, not only the idle status: the daemon sends them as two messages, and under load the signal came
-  // after the drop below, so the portal took it for a turn ended after the drop and lifted the gate (dropCutOffGates, w3759).
-  await until('its first turn to end', () => info.status === 'idle' && ended.has(id));
+  // Its turnEnd signal too, not only the idle status (firstTurn): under load the signal came after the drop below, so the
+  // portal took it for a turn ended after the drop and lifted the gate (dropCutOffGates, w3759).
+  await firstTurn(info);
   // Mid-turn when biscuit's link dropped (w2320's 786d0973, 2026-10-26 23:38Z).
   const handle = sessions.get(id) as unknown as { liveFlag: boolean; seenLive: boolean };
   Object.assign(info, { status: 'running', turnOpenSince: new Date().toISOString(), lastActivityAt: new Date().toISOString() });
@@ -8941,7 +8953,7 @@ test('w2433: a worker whose process lived through a short drop is not resumed ag
   const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Fix it', title: 'w1: fix', work_id: 'w1' });
   const id = /Started agent (\w+)/.exec(started.text)![1];
   const info = store.sessions.get(id)!;
-  await until('its first turn', () => info.status === 'idle');
+  await firstTurn(info);
   assert.deepEqual(o.workersCutOff('pc', [id]), [id]);
   const w = store.work.get('w1')!;
   assert.equal(w.blocked?.kind, 'machine');
@@ -8973,7 +8985,7 @@ test("w2474: a worker whose process ran on through its machine's drop is not Blo
   const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Fix it', title: 'w1: fix', work_id: 'w1' });
   const id = /Started agent (\w+)/.exec(started.text)![1];
   const info = store.sessions.get(id)!;
-  await until('its first turn', () => info.status === 'idle');
+  await firstTurn(info);
   const m = agents.machines as unknown as { detach(id: string): void; onMessage(id: string, msg: unknown): void; hasHello(id: string): boolean };
   const midTurn = () => {
     const h = sessions.sessions.get(id) as unknown as RemoteSession;
@@ -9070,7 +9082,7 @@ test('w2446: a report naming a request already closed records no wait (w2434 quo
   assert.equal(started.isError, false, started.text);
   const id = /Started agent (\w+)/.exec(started.text)![1];
   const info = store.sessions.get(id)!;
-  await until('its first turn', () => info.status === 'idle');
+  await firstTurn(info);
   const w = store.work.get('w1')!;
   for (const n of [1, 2]) {
     Object.assign(info, { status: 'stopped', lastResult: `Run ${n} failed.\n\nw1: still open: waiting on the bench queue, which "gave up: w2: an exclusive timing ticket here waits for the dispatcher's answer"`, lastResultAt: new Date(clock - 60_000).toISOString() });
@@ -9332,7 +9344,7 @@ test('w2548: the timing order starts a timed leg, and the dispatcher starting it
   const info = store.sessions.get(first)!;
   assert.equal(info.machineSandbox, 'alpha');
   // Its first prompt still waits (the save being fetched into its Inbox): no process yet, as 9a3c8e5d at 15:20Z.
-  await until('its first turn', () => info.status === 'idle');
+  await firstTurn(info);
   store.putSession({ ...info, status: 'stopped', turns: 0, sdkSessionId: undefined });
   // 15:20Z: the dispatcher, told to decide it, starts it in the same sandbox.
   const again = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Profile it', title: 'w2: profiled capture', work_id: 'w2' });
@@ -9685,7 +9697,7 @@ test('w3338: a worker that paused for low disk is Blocked on disk space on its m
   assert.equal(started.isError, false, started.text);
   const id = /Started agent (\w+)/.exec(started.text)![1];
   const info = store.sessions.get(id)!;
-  await until('its first turn', () => info.status === 'idle');
+  await firstTurn(info);
   const machine = info.machineId!.toLowerCase();
   const w = store.work.get('w1')!;
   // c4cdb382 (w3212) on 2026-11-07 at 07:07Z, after the [disk critical] notice.
