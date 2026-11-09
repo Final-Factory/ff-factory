@@ -17,7 +17,7 @@
 //   server/dataGuard.ts, prunes them): everything the page and the report show comes from spend.json.
 import fs from 'node:fs';
 import path from 'node:path';
-import { SnapshotFile, readJsonDurable, checkObject } from './durable.ts';
+import { SnapshotFile, readJsonDurable, checkObject, stringifyObjectSliced } from './durable.ts';
 import { SESSION_REQUESTS_TOP } from './toolOutput.ts';
 import type { SessionInfo, TranscriptEvent, WorkItem } from '../shared/types.ts';
 import { WORK_OPEN } from '../shared/types.ts';
@@ -311,6 +311,22 @@ export function attribute(info: Pick<SessionInfo, 'id' | 'kind' | 'orchestratorR
 // The store
 // ---------------------------------------------------------------------------------------------------------------------
 
+/** A request's entry as spend.json keeps it: its counts rounded. */
+const persistRequest = (r: RequestSpend): RequestSpend => ({
+  ...r,
+  total: roundTok(r.total),
+  estimated: roundTok(r.estimated),
+  models: roundModels(r.models),
+  ...(r.accounts ? { accounts: roundModels(r.accounts) } : {}),
+  ...(r.coordDays ? { coordDays: Object.fromEntries(Object.entries(r.coordDays).map(([k, d]) => [k, Object.fromEntries(Object.entries(d).map(([day, t]) => [day, roundTok(t)]))])) } : {}),
+  cats: roundCats(r.cats),
+  ...(r.phaseDays ? { phaseDays: roundPhaseDays(r.phaseDays) } : {}),
+  days: Object.fromEntries(Object.entries(r.days).map(([d, t]) => [d, roundTok(t)])),
+  sessions: Object.fromEntries(Object.entries(r.sessions).map(([k, v]) => [k, { ...v, total: roundTok(v.total), models: roundModels(v.models) }])),
+});
+/** A session's entry as spend.json keeps it. */
+const persistSession = (s: SessionSpend): SessionSpend => ({ ...s, total: roundTok(s.total), estimated: roundTok(s.estimated), models: roundModels(s.models), ...(s.accounts ? { accounts: roundModels(s.accounts) } : {}), cats: roundCats(s.cats), ...(s.phaseDays ? { phaseDays: roundPhaseDays(s.phaseDays) } : {}), requests: Object.fromEntries(Object.entries(s.requests).map(([k, v]) => [k, round(v)])) });
+
 const SAVE = { delayMs: 2000, intervalMs: 10_000, label: 'spend' };
 const roleOf = (i: SessionInfo | undefined): SpendRole => (!i ? 'worker' : i.kind === 'orchestrator' ? (i.orchestratorRole === 'dispatcher' ? 'dispatcher' : 'personal') : i.kind);
 
@@ -335,7 +351,7 @@ export class SpendStore {
     this.turnDir = path.join(dataDir, TURN_LOG_DIR);
     const file = path.join(dataDir, 'spend.json');
     this.path = file;
-    this.file = new SnapshotFile(file, () => JSON.stringify(this.persisted()), SAVE);
+    this.file = new SnapshotFile(file, () => JSON.stringify(this.persisted()), SAVE, () => this.persistedSliced());
     const f = readJsonDurable<SpendFile>(file, { check: checkObject });
     for (const r of Object.values(f?.requests ?? {})) this.requests.set(r.id, r);
     for (const s of Object.values(f?.sessions ?? {})) this.sessions.set(s.id, s);
@@ -351,23 +367,22 @@ export class SpendStore {
 
   private persisted(): SpendFile {
     const requests: Record<string, RequestSpend> = {};
-    for (const [id, r] of this.requests) {
-      requests[id] = {
-        ...r,
-        total: roundTok(r.total),
-        estimated: roundTok(r.estimated),
-        models: roundModels(r.models),
-        ...(r.accounts ? { accounts: roundModels(r.accounts) } : {}),
-        ...(r.coordDays ? { coordDays: Object.fromEntries(Object.entries(r.coordDays).map(([k, d]) => [k, Object.fromEntries(Object.entries(d).map(([day, t]) => [day, roundTok(t)]))])) } : {}),
-        cats: roundCats(r.cats),
-        ...(r.phaseDays ? { phaseDays: roundPhaseDays(r.phaseDays) } : {}),
-        days: Object.fromEntries(Object.entries(r.days).map(([d, t]) => [d, roundTok(t)])),
-        sessions: Object.fromEntries(Object.entries(r.sessions).map(([k, v]) => [k, { ...v, total: roundTok(v.total), models: roundModels(v.models) }])),
-      };
-    }
+    for (const [id, r] of this.requests) requests[id] = persistRequest(r);
     const sessions: Record<string, SessionSpend> = {};
-    for (const [id, s] of this.sessions) sessions[id] = { ...s, total: roundTok(s.total), estimated: roundTok(s.estimated), models: roundModels(s.models), ...(s.accounts ? { accounts: roundModels(s.accounts) } : {}), cats: roundCats(s.cats), ...(s.phaseDays ? { phaseDays: roundPhaseDays(s.phaseDays) } : {}), requests: Object.fromEntries(Object.entries(s.requests).map(([k, v]) => [k, round(v)])) };
-    return { version: 1, requests, sessions, ...(this.backfill ? { backfill: this.backfill } : {}), ...(this.backfillNone.size ? { backfillNone: [...this.backfillNone] } : {}) };
+    for (const [id, s] of this.sessions) sessions[id] = persistSession(s);
+    return { version: 1, requests, sessions, ...this.persistedTail() };
+  }
+
+  private persistedTail(): Pick<SpendFile, 'backfill' | 'backfillNone'> {
+    return { ...(this.backfill ? { backfill: this.backfill } : {}), ...(this.backfillNone.size ? { backfillNone: [...this.backfillNone] } : {}) };
+  }
+
+  /** JSON.stringify(this.persisted()), byte for byte, a request or session at a time (w3855): the background write's text. */
+  private async persistedSliced(): Promise<string> {
+    const requests = await stringifyObjectSliced([...this.requests], persistRequest);
+    const sessions = await stringifyObjectSliced([...this.sessions], persistSession);
+    const tail = JSON.stringify(this.persistedTail()).slice(1, -1);
+    return `{"version":1,"requests":${requests},"sessions":${sessions}${tail ? `,${tail}` : ''}}`;
   }
 
   changed() {

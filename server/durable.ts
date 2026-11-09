@@ -312,11 +312,39 @@ export interface SnapshotOptions extends DurableOptions {
   label: string;
 }
 
+/** How long one slice of stringifyObjectSliced may hold the event loop. */
+export const STRINGIFY_SLICE_MS = 25;
+
+/** An array index key ("0" .. "4294967294"): JSON.stringify puts these first, ascending, then the rest as inserted. */
+const indexKey = (k: string) => /^(0|[1-9]\d*)$/.test(k) && Number(k) < 4294967295;
+
+/**
+ * JSON.stringify of the object these entries make (`Object.fromEntries(entries.map(([k, v]) => [k, value(v)]))`), byte for byte,
+ * one value at a time: the event loop runs every sliceMs (w3855). spend.json's one-go serialize held the portal 1.0-2.2 s six
+ * times in the 13 minutes after the f4c644f restart (2026-11-09 16:54-17:04 UTC, its stall profiles: spend.ts persisted and
+ * JSON.stringify). A value changed between slices is written as it is then; each value is whole.
+ */
+export async function stringifyObjectSliced<T>(entries: [string, T][], value: (v: T) => unknown, sliceMs = STRINGIFY_SLICE_MS): Promise<string> {
+  const idx = entries.filter(([k]) => indexKey(k));
+  const ordered = idx.length ? [...idx.sort((a, b) => Number(a[0]) - Number(b[0])), ...entries.filter(([k]) => !indexKey(k))] : entries;
+  const out: string[] = [];
+  let start = performance.now();
+  for (const [k, v] of ordered) {
+    const j = JSON.stringify(value(v));
+    if (j !== undefined) out.push(`${JSON.stringify(k)}:${j}`);
+    if (performance.now() - start >= sliceMs) {
+      await new Promise((r) => setImmediate(r));
+      start = performance.now();
+    }
+  }
+  return `{${out.join(',')}}`;
+}
+
 /**
  * One JSON file saved in the background. Changes are coalesced: a write starts at most delayMs after the first change
  * (a steady stream of changes can no longer postpone it, as the old trailing debounce did) and at most once per
- * intervalMs. The snapshot is serialized on the main thread; the write and the fsync run off it. A crash loses at most
- * about delayMs..intervalMs plus the write's own time.
+ * intervalMs. The snapshot is serialized on the main thread, in slices when the file gives serializeAsync (w3855); the
+ * write and the fsync run off it. A crash loses at most about delayMs..intervalMs plus the write's own time.
  */
 export class SnapshotFile {
   private timer?: NodeJS.Timeout;
@@ -333,11 +361,14 @@ export class SnapshotFile {
   readonly file: string;
   private readonly serialize: () => string;
   private readonly o: SnapshotOptions;
+  /** The same text built in slices, for the background write (w3855); flushSync still uses serialize. */
+  private readonly serializeAsync?: () => Promise<string>;
 
-  constructor(file: string, serialize: () => string, o: SnapshotOptions) {
+  constructor(file: string, serialize: () => string, o: SnapshotOptions, serializeAsync?: () => Promise<string>) {
     this.file = file;
     this.serialize = serialize;
     this.o = o;
+    this.serializeAsync = serializeAsync;
   }
 
   /** Something in the snapshot changed. */
@@ -384,7 +415,8 @@ export class SnapshotFile {
     this.lastStart = Date.now();
     const v = ++this.version;
     try {
-      if (await writeFileDurableAsync(this.file, this.serialize(), { ...this.o, stillWanted: () => v > this.committed })) this.committed = v;
+      const text = this.serializeAsync ? await this.serializeAsync() : this.serialize();
+      if (await writeFileDurableAsync(this.file, text, { ...this.o, stillWanted: () => v > this.committed })) this.committed = v;
       this.failures = 0;
     } catch (e) {
       this.failed(e);
