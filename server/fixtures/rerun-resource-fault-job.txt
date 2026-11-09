@@ -1,0 +1,7 @@
+2026-11-09T11:29:18.5357971Z [1m[92m    Checking[0m ffu-bots v0.1.0 (F:\ffw\ffu-runners\ffu-beast-3\_work\ffu\ffu\crates\ffu-bots)
+2026-11-09T11:29:18.5358880Z [1m[92m    Checking[0m ffu-client v0.1.0 (F:\ffw\ffu-runners\ffu-beast-3\_work\ffu\ffu\crates\ffu-client)
+2026-11-09T11:29:29.5059644Z [1m[91merror[0m[1m[97m: failed to write F:\ffw\ffu-runners\ffu-beast-3\_work\ffu\ffu\target\debug\examples\libdoze_cpu-2b70d91be8c92266.rmeta: Insufficient quota to complete the requested service. (os error 1453)[0m
+2026-11-09T11:29:29.5060447Z 
+2026-11-09T11:29:30.7102537Z [1m[91merror[0m: could not compile `ffu-server` (example "doze_cpu") due to 1 previous error
+2026-11-09T11:29:30.7167692Z [1m[93mwarning[0m: build failed, waiting for other jobs to finish...
+2026-11-09T11:29:37.5930376Z ##[error]Process completed with exit code 101.

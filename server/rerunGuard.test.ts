@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { checkFlakyRerun, rerunTargets, type RerunJob, type RerunReader, type RerunTarget } from './rerunGuard.ts';
+import { checkFlakyRerun, rerunTargets, resourceFault, type RerunJob, type RerunReader, type RerunTarget } from './rerunGuard.ts';
 import { sandboxGuard } from './guard.ts';
 
 // w3784: both fixtures are the `test (ffu-windows)` job of ffu PR #510's CI run 42538461342, read with
@@ -16,7 +16,7 @@ const OWNER_TERM = load('rerun-owner-term-job.json');
 const OK: RerunJob = { id: 1, name: 'fmt', conclusion: 'success', steps: [{ name: 'cargo fmt', conclusion: 'success' }] };
 
 /** A reader over fixed jobs; records what it was asked. */
-function reader(jobs: Fixture[] | RerunJob[] | { error: string }, notes?: string[] | { error: string }) {
+function reader(jobs: Fixture[] | RerunJob[] | { error: string }, notes?: string[] | { error: string }, logs: Record<number, string> | { error: string } = {}) {
   const asked: { jobs: RerunTarget[]; notes: number[] } = { jobs: [], notes: [] };
   const r: RerunReader = {
     jobs(t) {
@@ -28,6 +28,9 @@ function reader(jobs: Fixture[] | RerunJob[] | { error: string }, notes?: string
       if (notes) return notes;
       const j = (Array.isArray(jobs) ? jobs : []).find((x) => x.id === job) as Fixture | undefined;
       return (j?.annotations ?? []).map((a) => a.message);
+    },
+    log(_repo, job) {
+      return 'error' in logs && typeof logs.error === 'string' ? (logs as { error: string }) : ((logs as Record<number, string>)[job] ?? '');
     },
   };
   return { r, asked };
@@ -98,4 +101,50 @@ test('the sandbox guard denies the owner_term rerun and lets the runner-loss rer
   assert.equal(denied.hookSpecificOutput?.permissionDecision, 'deny');
   assert.match(denied.hookSpecificOutput!.permissionDecisionReason!, /w3784/);
   assert.deepEqual(await call(guard([RUNNER_LOSS])), {});
+});
+
+// w3836: ffu run 42608839428's "clippy (ffu-windows)" (job 129131642138, ffu-beast-3, attempt 1) failed in its clippy step
+// writing an .rmeta: "Insufficient quota to complete the requested service. (os error 1453)". The refused case is a real
+// compile error: run 42537986568's "repeat" (job 128906443375, ffu-biscuit) failed on rustc error[E0433]. Both logs are the
+// failing step's own lines from `gh api repos/Final-Factory/ffu/actions/jobs/<id>/logs` (2026-11-09), trimmed to them.
+const text = (n: string) => fs.readFileSync(path.join(import.meta.dirname, 'fixtures', n), 'utf8');
+const QUOTA_LOG = text('rerun-resource-fault-job.txt');
+const E0433_LOG = text('rerun-compile-error-job.txt');
+const CLIPPY: RerunJob = { id: 129131642138, name: 'clippy (ffu-windows)', conclusion: 'failure', run_attempt: 1, steps: [{ name: 'Set up job', conclusion: 'success' }, { name: 'Run cargo clippy --workspace --all-targets --all-features --locked -- -D warnings', conclusion: 'failure' }] };
+const REPEAT: RerunJob = { id: 128906443375, name: 'repeat', conclusion: 'failure', run_attempt: 1, steps: [{ name: 'Run cargo test --workspace --all-features --locked --no-run', conclusion: 'failure' }] };
+
+test('w3836: the fixture logs read as a resource fault and as a real compile error', () => {
+  assert.match(resourceFault(QUOTA_LOG)!, /Insufficient quota to complete the requested service\. \(os error 1453\)/);
+  assert.equal(resourceFault(E0433_LOG), undefined);
+  for (const line of [
+    'error: linking with `link.exe` failed: exit code: 1171\nLINK : fatal error LNK1171: unable to load mspdbcore.dll (error code: 1455)',
+    'error: failed to write ...: The paging file is too small for this operation to complete. (os error 1455)',
+    'error: could not write output to ...: There is not enough space on the disk. (os error 112)',
+    'error: failed to create directory: No space left on device (os error 28)',
+    'memory allocation of 4294967296 bytes failed',
+    'rustc-LLVM ERROR: out of memory',
+  ])
+    assert.ok(resourceFault(line), line);
+  // A resource line beside a real failure is still a real failure.
+  assert.equal(resourceFault(`${QUOTA_LOG}\ntest result: FAILED. 3 passed; 1 failed`), undefined);
+  assert.equal(resourceFault("thread 'x' panicked at src/lib.rs:3:5:\nNo space left on device (os error 28)"), undefined);
+});
+
+test('w3836: an out-of-resource runner fault at attempt 1 may be rerun once; a compile error or attempt 2 stays refused', () => {
+  const cmd = 'gh run rerun 42608839428 --failed -R Final-Factory/ffu';
+  assert.equal(checkFlakyRerun(cmd, { reader: reader([OK, CLIPPY], undefined, { [CLIPPY.id]: QUOTA_LOG }).r }), undefined);
+  assert.equal(checkFlakyRerun('gh run rerun --job 129131642138 -R Final-Factory/ffu', { reader: reader([CLIPPY], undefined, { [CLIPPY.id]: QUOTA_LOG }).r }), undefined);
+
+  const second = checkFlakyRerun(cmd, { reader: reader([{ ...CLIPPY, run_attempt: 2 }], undefined, { [CLIPPY.id]: QUOTA_LOG }).r });
+  assert.match(second!, /Refused \(w3836\).*os error 1453.*attempt 2: an out-of-resource fault is rerun once, at attempt 1/);
+  assert.match(second!, /a flaky test gets its cause fixed/);
+  assert.match(checkFlakyRerun(cmd, { reader: reader([{ ...CLIPPY, run_attempt: undefined }], undefined, { [CLIPPY.id]: QUOTA_LOG }).r })!, /attempt unknown/);
+
+  const compile = checkFlakyRerun('gh run rerun 42537986568 --failed -R Final-Factory/ffu', { reader: reader([REPEAT], undefined, { [REPEAT.id]: E0433_LOG }).r });
+  assert.match(compile!, /Refused \(w3784\): "repeat" \(job 128906443375\) of run 42537986568 in Final-Factory\/ffu failed in its step .*a real failure/);
+
+  // One resource fault does not carry a real failure in another job of the same run.
+  assert.ok(checkFlakyRerun(cmd, { reader: reader([CLIPPY, REPEAT], undefined, { [CLIPPY.id]: QUOTA_LOG, [REPEAT.id]: E0433_LOG }).r }));
+  // A log gh cannot read is refused (fail closed).
+  assert.match(checkFlakyRerun(cmd, { reader: reader([CLIPPY], undefined, { error: 'HTTP 410: Gone' }).r })!, /its log could not be read \(HTTP 410: Gone\)/);
 });

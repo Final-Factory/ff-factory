@@ -1,0 +1,30 @@
+2026-11-09T00:04:14.9333428Z [1m[92m   Compiling[0m ffu-client v0.1.0 (/home/ben-ryding/ffu-runner/_work/ffu/ffu/crates/ffu-client)
+2026-11-09T00:04:15.2794589Z [1m[91merror[E0433][0m[1m: failed to resolve: use of unresolved module or unlinked crate `tempfile`[0m
+2026-11-09T00:04:15.2814657Z    [1m[94m--> [0mcrates/ffu-server/tests/cluster.rs:183:13
+2026-11-09T00:04:15.2817483Z     [1m[94m|[0m
+2026-11-09T00:04:15.2824734Z [1m[94m183[0m [1m[94m|[0m             tempfile::Builder::new()
+2026-11-09T00:04:15.2825682Z     [1m[94m|[0m             [1m[91m^^^^^^^^[0m [1m[91muse of unresolved module or unlinked crate `tempfile`[0m
+2026-11-09T00:04:15.2826628Z     [1m[94m|[0m
+2026-11-09T00:04:15.2827279Z     [1m[94m= [0m[1mhelp[0m: if you wanted to use a crate named `tempfile`, use `cargo add tempfile` to add it to your `Cargo.toml`
+2026-11-09T00:04:15.2827905Z [1m[96mhelp[0m: consider importing this struct
+2026-11-09T00:04:15.2828269Z     [1m[94m|[0m
+2026-11-09T00:04:15.2828720Z [1m[94m  8[0m [92m+ use std::thread::Builder;[0m
+2026-11-09T00:04:15.2829106Z     [1m[94m|[0m
+2026-11-09T00:04:15.2829484Z [1m[96mhelp[0m: if you import `Builder`, refer to it directly
+2026-11-09T00:04:15.2829881Z     [1m[94m|[0m
+2026-11-09T00:04:15.2830323Z [1m[94m183[0m [91m- [0m            [91mtempfile::[0mBuilder::new()
+2026-11-09T00:04:15.2830823Z [1m[94m183[0m [92m+ [0m            Builder::new()
+2026-11-09T00:04:15.2831195Z     [1m[94m|[0m
+2026-11-09T00:04:15.2831397Z 
+2026-11-09T00:04:21.2648964Z [1m[91merror[E0433][0m[1m: failed to resolve: use of unresolved module or unlinked crate `tempfile`[0m
+2026-11-09T00:04:21.2694127Z    [1m[94m--> [0mcrates/ffu-server/tests/cluster.rs:181:19
+2026-11-09T00:04:21.2695186Z     [1m[94m|[0m
+2026-11-09T00:04:21.2728102Z [1m[94m181[0m [1m[94m|[0m     let dirs: Vec<tempfile::TempDir> = (0..4)
+2026-11-09T00:04:21.2749424Z     [1m[94m|[0m                   [1m[91m^^^^^^^^[0m [1m[91muse of unresolved module or unlinked crate `tempfile`[0m
+2026-11-09T00:04:21.2763534Z     [1m[94m|[0m
+2026-11-09T00:04:21.2790734Z     [1m[94m= [0m[1mhelp[0m: if you wanted to use a crate named `tempfile`, use `cargo add tempfile` to add it to your `Cargo.toml`
+2026-11-09T00:04:21.2791293Z 
+2026-11-09T00:04:21.2791840Z [1mFor more information about this error, try `rustc --explain E0433`.[0m
+2026-11-09T00:04:21.2793910Z [1m[91merror[0m: could not compile `ffu-server` (test "cluster") due to 2 previous errors
+2026-11-09T00:04:21.2794465Z [1m[33mwarning[0m: build failed, waiting for other jobs to finish...
+2026-11-09T00:04:34.1746662Z ##[error]Process completed with exit code 101.
