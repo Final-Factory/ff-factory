@@ -2754,6 +2754,12 @@ export interface WorkBlocker {
   /** deploy: the commit the portal (or the machine's daemon) ran when it was set; a different one is the deploy. */
   sha?: string;
   /**
+   * ci (w3786): the commit the worker pushed and waits on (blocked_on's head). Only a reading of that commit's checks or
+   * runs counts: w3681's wait at fa33b83 on ffu#500 was cleared three times in 90 s by the cached reading of the old head
+   * 3514881 (3 of 4 runs failed) while every run at fa33b83 was still queued.
+   */
+  head?: string;
+  /**
    * ci: what the blocker watch last read of its checks, and when (w1094: w1078 read "Blocked on CI" for 20 minutes while
    * its nested-VM workflow still ran, and the people saw only the worker's own words, so it looked stale).
    */

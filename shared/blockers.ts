@@ -96,6 +96,13 @@ export function ownsPr(w: Pick<WorkItem, 'id' | 'prs' | 'source' | 'mergedInto'>
 /** A full 40-character commit sha, the only form GitHub's expectedHeadOid (`gh pr merge --match-head-commit`) takes (w3021). */
 export const FULL_SHA = /^[0-9a-f]{40}$/;
 
+/** w3786: two commit ids name the same commit (either may be short, at least 7 characters). */
+export const sameCommit = (a: string | undefined, b: string | undefined): boolean => {
+  const x = (a ?? '').trim().toLowerCase();
+  const y = (b ?? '').trim().toLowerCase();
+  return x.length >= 7 && y.length >= 7 && (x.startsWith(y) || y.startsWith(x));
+};
+
 /** "PR #283" from "owner/repo#283". */
 export const prLabel = (ref: string | undefined) => `PR #${(ref ?? '').split('#').pop()}`;
 
@@ -247,7 +254,8 @@ export interface BlockerFacts {
   /** When the nightly lab last posted its results (ms), if ever. */
   nightlyAt?: number;
   /** A pull request's checks: done (none still running, or it merged or closed) and a line saying how. */
-  ci?: (ref: string) => { done: boolean; text: string; none?: boolean } | undefined;
+  /** w3786: `head`, the commit the gate waits on, when it names one; the reading's `head` is the commit it is of. */
+  ci?: (ref: string, head?: string) => { done: boolean; text: string; none?: boolean; head?: string } | undefined;
   /** w907: a pull request's head and mergeability; undefined when it cannot be read. */
   prHealth?: (ref: string) => PrHealth | undefined;
   /** w829: since when (ms) a pull request's checks could not be read, and why; undefined while they can be. */
@@ -359,7 +367,11 @@ export function blockerVerdict(b: WorkBlocker, f: BlockerFacts, waiter?: string)
       return { state: 'open', why: `until ${utc(b.until, f.now)}` };
     }
     case 'ci': {
-      const c = b.ref ? f.ci?.(b.ref) : undefined;
+      const read = b.ref ? f.ci?.(b.ref, b.head) : undefined;
+      // w3786: with a head, only a reading of that commit counts: w3681's wait at fa33b83 on ffu#500 was cleared three
+      // times in 90 s by a reading of the old head 3514881 ("3 of 4 workflow runs failed") while its own runs were queued.
+      const stale = !!b.head && !!read?.head && !sameCommit(read.head, b.head);
+      const c = stale ? { done: false, text: `CI on ${b.ref} at ${b.head!.slice(0, 7)} is not read yet (the last reading is of ${read!.head!.slice(0, 7)})` } : read;
       if (c?.done) return { state: 'clear', why: c.text };
       // w829: checks FF Factory cannot read do not hold the request in silence: after CI_UNREADABLE_MS its worker looks.
       // The clock starts at the later of the first failed read and this block, so a request blocked again on the same
@@ -368,8 +380,10 @@ export function blockerVerdict(b: WorkBlocker, f: BlockerFacts, waiter?: string)
       // not start), nor one whose head has had no run for CI_NO_RUN_MS (a push that never reached it): the worker looks.
       const h = b.ref ? f.prHealth?.(b.ref) : undefined;
       if (h?.state === 'open' && h.conflict && (!c || c.none)) return { state: 'clear', why: conflictText(b.ref, h.conflict.base) };
-      if (h?.state === 'open' && c?.none && h.headSeenAt !== undefined && f.now - h.headSeenAt >= CI_NO_RUN_MS) {
-        return { state: 'clear', why: `no CI run exists for ${prLabel(b.ref)}'s head ${(h.head ?? '').slice(0, 7)} ${Math.round((f.now - h.headSeenAt) / 60_000)} min after it was pushed (${c.text}): check that your push reached it (gh pr view ${b.ref?.split('#')[1]} --json headRefOid), push, and wait again` };
+      // w3786: the head waited on was pushed no earlier than the wait was set when the pull request still reads another head.
+      const pushedAt = h?.headSeenAt === undefined ? undefined : b.head && !sameCommit(h.head, b.head) ? at : h.headSeenAt;
+      if (h?.state === 'open' && c?.none && pushedAt !== undefined && f.now - pushedAt >= CI_NO_RUN_MS) {
+        return { state: 'clear', why: `no CI run exists for ${prLabel(b.ref)}'s head ${(b.head ?? h.head ?? '').slice(0, 7)} ${Math.round((f.now - pushedAt) / 60_000)} min after it was pushed (${c.text}): check that your push reached it (gh pr view ${b.ref?.split('#')[1]} --json headRefOid), push, and wait again` };
       }
       const u = !c && b.ref ? f.ciUnreadable?.(b.ref) : undefined;
       // w3758: a read GitHub's rate limit refused says nothing about the checks: the wait holds (paused) until the limit

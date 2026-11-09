@@ -4179,6 +4179,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       at,
       by,
       ...(sha ? { sha } : {}),
+      ...(b.head && b.kind === 'ci' ? { head: b.head.trim().toLowerCase() } : {}),
     };
   }
 
@@ -5439,7 +5440,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       const ci = /^\s*ci:\s*/i.exec(pr);
       const ref = prRefOf(ci ? pr.slice(ci[0].length) : pr);
       if (!ref) throw new Error(`"${pr}" is not a pull request: give owner/repo#123 or its github.com link (ci:owner/repo#123 for its checks finishing)`);
-      asked.push(ci ? { kind: 'ci', ref, what: `CI on ${ref} finished` } : { kind: 'pr', ref, what: `PR ${ref} merged` });
+      asked.push(ci ? { kind: 'ci', ref, what: `CI on ${ref} finished`, ...(a.head?.trim() ? { head: a.head.trim().toLowerCase() } : {}) } : { kind: 'pr', ref, what: `PR ${ref} merged` });
     }
     // A deploy (w890): "portal", or a machine id for that machine's daemon update. Clears when a different commit runs there.
     for (const d of a.deploys ?? []) {

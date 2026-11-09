@@ -1150,7 +1150,10 @@ without one means it is off or failing, worth a person's look.
      once on a conflict with no check started, or no CI run for the head after 10 minutes, with "PR #N conflicts with <base>
      (CI can't run): merge <base> in, resolve, push, and wait again" ([machines.md](machines.md#placing-work), "A PR that
      cannot get CI"). Changelog notes are one file each in `changelog.d/` since the same day, so PRs stop conflicting on
-     CHANGELOG.md.
+     CHANGELOG.md. Since w3786 the gate keeps that `head`, and only CI at that commit counts: the watch reads its checks
+     and Actions runs per commit (`ghChecks` with `head`, `runsState` drops runs whose `head_sha` is another commit), and a
+     reading of another commit (GitHub or the cached health read not caught up with the push) holds the gate. The
+     10-minute "no CI run" clear counts from the wait while the pull request still reads another head.
   5. **Waiting on a deploy frees the sandbox and wakes the worker** (w890, lothsahn: "We should not wait for a worker waiting
      for a deploy ... once the deploy has happened, the worker can get rescheduled by the dispatcher"). `blocked_on` also
      takes `deploys` (`"portal"`, or a machine id for its daemon update): a `deploy` gate, cleared when a different commit
