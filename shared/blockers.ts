@@ -251,7 +251,7 @@ export interface BlockerFacts {
   /** w907: a pull request's head and mergeability; undefined when it cannot be read. */
   prHealth?: (ref: string) => PrHealth | undefined;
   /** w829: since when (ms) a pull request's checks could not be read, and why; undefined while they can be. */
-  ciUnreadable?: (ref: string) => { since: number; why: string } | undefined;
+  ciUnreadable?: (ref: string) => { since: number; why: string; rateLimited?: boolean } | undefined;
   /** A pull request's state (w754, the pr blocker): open, merged, or closed without merging; undefined when unknown. */
   pr?: (ref: string) => { state: 'open' | 'merged' | 'closed'; text: string } | undefined;
   /** w2459: why the fleet cannot hold this pair run that needs Steam (shared/capacity.ts steamPairShort), undefined when it can. */
@@ -372,6 +372,10 @@ export function blockerVerdict(b: WorkBlocker, f: BlockerFacts, waiter?: string)
         return { state: 'clear', why: `no CI run exists for ${prLabel(b.ref)}'s head ${(h.head ?? '').slice(0, 7)} ${Math.round((f.now - h.headSeenAt) / 60_000)} min after it was pushed (${c.text}): check that your push reached it (gh pr view ${b.ref?.split('#')[1]} --json headRefOid), push, and wait again` };
       }
       const u = !c && b.ref ? f.ciUnreadable?.(b.ref) : undefined;
+      // w3758: a read GitHub's rate limit refused says nothing about the checks: the wait holds (paused) until the limit
+      // refills and a read answers, never cleared (ffu#518 at 23:39Z and FinalFactory#3469 and #3470 at 00:00Z on 2026-11-09
+      // were cleared after 16 minutes of rate-limited reads, waking their workers to CI that was still running).
+      if (u?.rateLimited) return { state: 'open', why: `paused: GitHub's rate limit refuses reads of CI on ${b.ref} (${u.why}); FF Factory reads it again when the limit refills` };
       const unreadableFor = u ? f.now - Math.max(u.since, at) : 0;
       if (u && unreadableFor >= CI_UNREADABLE_MS) return { state: 'clear', why: `FF Factory could not read CI on ${b.ref} for ${Math.round(unreadableFor / 60_000)} min (${u.why}), so its worker checks CI itself` };
       // w1094: a run hung past its limit wakes the worker that waits on it (it looks for itself), never a silent stall.

@@ -940,7 +940,19 @@ without one means it is off or failing, worth a person's look.
   the server log that it does. A read that still fails is logged with what `gh` said (`blocker watch: cannot read CI on
   …`, again every 30 minutes, and `… reads again after N min` when it recovers; the `pr` gate's reads log the same way),
   and after `CI_UNREADABLE_MS` (15 minutes, counted from the later of the first failed read and the block) the block
-  clears with that reason, so its worker checks CI itself.
+  clears with that reason, so its worker checks CI itself. **Except a rate limit** (w3758): GitHub's "API rate limit
+  exceeded", often behind a GraphQL "Resource not accessible by personal access token" (w1186's rule), or a token whose
+  last answer said 0 calls left, pauses the wait however long it lasts: the gate stays open, its request's log says once
+  that reads are paused and once that they answer again, and nothing is read while the budget is spent. On 2026-11-08 the
+  old rule cleared 10 gates (ffu#471..#519, FinalFactory#3469 and #3470) from 23:36Z to 00:00Z while the token was spent.
+  The watch reads REST with the ETag of its last answer (`ghGet`, server/ghBudget.ts; a 304 costs nothing), remembers a
+  refused rollup for an hour instead of asking each read, and reads every 10 minutes instead of 2 while fewer than 500
+  calls are left. Every 15 minutes the server log counts the portal's gh calls by caller beside the token's own budget
+  (`github calls, last 15 min, …`); the difference is the workers'.
+  A worker with a vault GitHub token is held from commands that may call GitHub (gh, curl, scripts) while fewer than 750
+  calls are left before the refill, so one worker's bulk reads cannot spend the portal's CI waits and the merges (w3747's
+  timing scripts did on 2026-11-08); `ff-pr` and `gh pr merge` still run, and a command that spent 300 or more earns its
+  worker a line saying so (server/ghSpendHook.ts).
   Where Actions runs are refused too (w889), the PR's merge state is read: `clean` after `unstable` on the same head commit
   is a green finish and clears the wait at once; a red one still waits `CI_UNREADABLE_MS`. Whether the portal can read CI
   at all is measured at start and every 30 minutes and said loudly when it cannot ([vault.md](vault.md) section 13.2).

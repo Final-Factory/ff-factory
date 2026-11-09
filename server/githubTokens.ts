@@ -15,6 +15,7 @@ import type { GithubAccess, GithubRateLimit, GithubTokenHealth, WorkItem } from 
 import { GITHUB_ORG, GITHUB_REQUIRED_PERMISSIONS, GITHUB_REQUIRED_REPOS, GITHUB_UNPROBED } from '../shared/githubRequirements.ts';
 import { ghRepoOf } from '../shared/githubAppRoute.ts';
 import type { GithubApps } from './githubApps.ts';
+import { noteGhCall } from './ghBudget.ts';
 
 /** The machine id machines.githubFromVault uses for the portal's own GitHub reads. */
 export const PORTAL_MACHINE = 'portal';
@@ -222,7 +223,13 @@ export class GithubTokens {
    * statusCheckRollup, which no fine-grained token can read (the caller reads Actions runs instead).
    */
   runner(person: string | undefined, what: string): Runner {
-    const run = this.o.run ?? runProc;
+    const raw = this.o.run ?? runProc;
+    // w3758: every call counted by caller (server/ghBudget.ts), so the log says who spends the budget.
+    const run: Runner = async (cmd, args, opts) => {
+      const r = await raw(cmd, args, opts);
+      if (cmd === 'gh') noteGhCall(what, args, r);
+      return r;
+    };
     return async (cmd, args, opts = {}) => {
       const plain = { ...(opts.env ?? process.env), GH_PROMPT_DISABLED: '1' };
       // A repository a GitHub App is installed on (w1519): the app's token, where the portal's reads use the vault at all.
@@ -704,5 +711,11 @@ export const githubTokens = () => current;
  * portal's GithubTokens (tests, the daemon), plain gh on the portal's own login.
  */
 export function ghRunner(person: string | undefined, what: string): Runner {
-  return current ? current.runner(person, what) : (cmd, args, opts = {}) => runProc(cmd, args, { ...opts, env: { ...process.env, ...opts.env, GH_PROMPT_DISABLED: '1' } });
+  return current
+    ? current.runner(person, what)
+    : async (cmd, args, opts = {}) => {
+        const r = await runProc(cmd, args, { ...opts, env: { ...process.env, ...opts.env, GH_PROMPT_DISABLED: '1' } });
+        if (cmd === 'gh') noteGhCall(what, args, r);
+        return r;
+      };
 }

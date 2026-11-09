@@ -11,6 +11,7 @@ import { foreignTimedHold, ownTimedHold, readCrashHold, readTimedAsk } from '../
 import { personHoldReason } from '../machine/personPlay.ts';
 import { closedRefusalFor } from '../machine/benchTurn.ts';
 import { standingGuard } from './standingGuard.ts';
+import { ghSpendHooks, rateLimitReader } from './ghSpendHook.ts';
 import { readChainHook } from './readChainHook.ts';
 import { gitIdentityEnv } from './publicGit.ts';
 import { usageEnv } from './usage.ts';
@@ -480,6 +481,9 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
     // A vault GitHub token (GH_TOKEN): gh reads it itself; git gets a helper that reads it (githubCredentialEnv).
     return spec.env?.GH_TOKEN ? { ...env, ...githubCredentialEnv(env) } : env;
   })();
+  // w3758: a worker with a vault GitHub token keeps the token's last calls for the portal's CI waits and merges, and hears
+  // when one command of its own spent hundreds of them (server/ghSpendHook.ts).
+  const spend = spec.env?.GH_TOKEN ? ghSpendHooks(rateLimitReader(spec.env.GH_TOKEN)) : undefined;
   const hooks = [
     sandboxGuard({
       sandboxId: g.id,
@@ -509,6 +513,7 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
       ...(g.workerRoot ? { timedAsk: () => readTimedAsk(g.workerRoot, agentEnv.FF_SESSION_ID) } : {}),
     }),
     ...(g.standing ? [standingGuard(g.standing)] : []),
+    ...(spend ? [spend.pre] : []),
   ];
   // w1628: a sandbox's editor compiles, imports and runs tests only in its turn in the machine's bench queue, never
   // beside a timed leg (machine/editorBenchGate.ts). Its own matcher, so it may wait longer than a plain hook. Its tickets
@@ -549,7 +554,7 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
     hooks: {
       PreToolUse: [{ hooks }, ...(editorGate ? [{ matcher: 'mcp__UnityMCP__.*', hooks: [editorGate.hook], timeout: GATE_HOOK_TIMEOUT_S }] : [])],
       // w2014: the read-chain pilot's one line after five reads or searches in a row.
-      ...(spec.readChainNudge ? { PostToolUse: [{ hooks: [readChainHook()] }] } : {}),
+      ...(spec.readChainNudge || spend ? { PostToolUse: [{ hooks: [...(spec.readChainNudge ? [readChainHook()] : []), ...(spend ? [spend.post] : [])] }] } : {}),
     },
     env: agentEnv,
     ...(spec.claudeExecutable ? { pathToClaudeCodeExecutable: spec.claudeExecutable } : {}),

@@ -12,6 +12,8 @@ const REFUSED_ROLLUP = 'GraphQL: Resource not accessible by personal access toke
 const REFUSED_RUNS = 'gh: Resource not accessible by personal access token (HTTP 403)';
 
 /** A gh whose reads succeed or are refused by kind: rollup (checks), runs (Actions), merge (the PR's merge state). */
+const path = (args: string[]) => args.find((a) => a.startsWith('repos/')) ?? '';
+
 function gh(can: { rollup?: boolean; runs?: boolean; merge?: boolean; list?: boolean | 'empty' }, mergeState = 'unstable') {
   const calls: string[][] = [];
   const run = async (_cmd: string, args: string[], _opts?: RunOptions): Promise<RunResult> => {
@@ -22,8 +24,8 @@ function gh(can: { rollup?: boolean; runs?: boolean; merge?: boolean; list?: boo
     if (args.includes('statusCheckRollup')) return can.rollup ? ok(JSON.stringify({ state: 'OPEN', statusCheckRollup: [] })) : no(REFUSED_ROLLUP);
     if (args.includes('state,statusCheckRollup,headRefOid')) return can.rollup ? ok('{}') : no(REFUSED_ROLLUP);
     if (args.includes('state,headRefOid')) return ok(JSON.stringify({ state: 'OPEN', headRefOid: 'b3c825300c' }));
-    if (args[0] === 'api' && args[1].includes('/actions/runs')) return can.runs ? ok(JSON.stringify({ workflow_runs: [] })) : no(REFUSED_RUNS);
-    if (args[0] === 'api' && /\/pulls\/\d+$/.test(args[1])) {
+    if (args[0] === 'api' && path(args).includes('/actions/runs')) return can.runs ? ok(JSON.stringify({ workflow_runs: [] })) : no(REFUSED_RUNS);
+    if (args[0] === 'api' && /\/pulls\/\d+$/.test(path(args))) {
       if (!can.merge) return no(REFUSED_RUNS);
       return ok(args.includes('.mergeable_state') ? mergeState : JSON.stringify({ mergeable_state: mergeState, head: 'b3c825300c' }));
     }
