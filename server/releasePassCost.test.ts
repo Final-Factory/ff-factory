@@ -229,7 +229,8 @@ test('w2026: a daemon with thousands of sessions is welcomed after its last seqs
   };
   try {
     machines.attach('pc', ws as never);
-    assert.equal(calls, 200, 'one slice in the connect itself');
+    // w3855: a slice also stops at ATTACH_SLICE_MS, so a slow machine may look up fewer than 200 here
+    assert.ok(calls > 0 && calls <= 200, `one slice in the connect itself: ${calls}`);
     assert.equal(sent.length, 0);
     for (let i = 0; i < 50 && !sent.some((m) => m.type === 'welcome'); i++) {
       turn = 0;

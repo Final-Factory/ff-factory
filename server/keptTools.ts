@@ -62,9 +62,62 @@ export function refreshKeptTools(file: string | undefined, now: Map<string, Tool
   } catch {
     return [];
   }
-  const writes: { at: number; bytes: Buffer }[] = [];
-  const dropped = new Set<string>();
+  const out: Stale = { writes: [], dropped: new Set() };
+  scanRecords(buf, now, buf.indexOf(MARK), out);
+  if (out.writes.length === 0) return [];
+  const fd = fs.openSync(file, 'r+');
+  try {
+    for (const w of out.writes) fs.writeSync(fd, w.bytes, 0, w.bytes.length, w.at);
+  } finally {
+    fs.closeSync(fd);
+  }
+  return [...out.dropped];
+}
+
+/** How long the async refresh scans before it lets the event loop run (w3855). */
+const SCAN_SLICE_MS = 50;
+
+/**
+ * refreshKeptTools off the event loop's long tasks (w3855: after a portal restart one turn end started every person's orchestrator
+ * in one task, each reading its whole transcript; 3.7 s blocked on 2026-11-09 15:11:04 UTC): the file is read and written by the
+ * thread pool, and the scan lets the loop run every SCAN_SLICE_MS. `gone`, asked after each wait: the start was stopped meanwhile,
+ * so nothing is written. The same records are dropped as refreshKeptTools drops (keptTools.test.ts).
+ */
+export async function refreshKeptToolsAsync(file: string | undefined, now: Map<string, ToolNow>, gone: () => boolean = () => false): Promise<string[]> {
+  if (!file || now.size === 0) return [];
+  let buf: Buffer;
+  try {
+    buf = await fs.promises.readFile(file);
+  } catch {
+    return [];
+  }
+  const out: Stale = { writes: [], dropped: new Set() };
   for (let hit = buf.indexOf(MARK); hit >= 0; ) {
+    if (gone()) return [];
+    const until = performance.now() + SCAN_SLICE_MS;
+    hit = scanRecords(buf, now, hit, out, () => performance.now() >= until);
+    if (hit >= 0) await new Promise((r) => setImmediate(r));
+  }
+  if (out.writes.length === 0 || gone()) return [];
+  const fh = await fs.promises.open(file, 'r+');
+  try {
+    for (const w of out.writes) await fh.write(w.bytes, 0, w.bytes.length, w.at);
+  } finally {
+    await fh.close();
+  }
+  return [...out.dropped];
+}
+
+interface Stale {
+  writes: { at: number; bytes: Buffer }[];
+  dropped: Set<string>;
+}
+
+/** The record lines from `hit` on, into `out`; returns where to go on when `stop` said so, else -1. */
+function scanRecords(buf: Buffer, now: Map<string, ToolNow>, hit: number, out: Stale, stop: () => boolean = () => false): number {
+  const { writes, dropped } = out;
+  while (hit >= 0) {
+    if (stop()) return hit;
     const start = buf.lastIndexOf(0x0a, hit) + 1;
     let end = buf.indexOf(0x0a, hit);
     if (end < 0) end = buf.length;
@@ -89,12 +142,5 @@ export function refreshKeptTools(file: string | undefined, now: Map<string, Tool
     writes.push({ at: start, bytes: Buffer.concat([json.subarray(0, json.length - 1), Buffer.alloc(raw.length - json.length, 0x20), json.subarray(json.length - 1)]) });
     for (const e of stale) dropped.add(e.name as string);
   }
-  if (writes.length === 0) return [];
-  const fd = fs.openSync(file, 'r+');
-  try {
-    for (const w of writes) fs.writeSync(fd, w.bytes, 0, w.bytes.length, w.at);
-  } finally {
-    fs.closeSync(fd);
-  }
-  return [...dropped];
+  return -1;
 }

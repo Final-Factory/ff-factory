@@ -46,6 +46,11 @@ const DEAD_MS = 45_000;
 export const CPU_WINDOW_MS = 60_000;
 /** Sessions whose last seq a daemon's connect looks up in one loop turn (w2026). */
 const ATTACH_SLICE = 200;
+/**
+ * w3855: and at most this long. On 2026-11-09 the portal VM's first minute after a restart spent 5.4 s in these lookups, several
+ * daemons' slices of 200 in one loop turn (they connect together), inside a 1.7 s block at 15:11:10 UTC.
+ */
+const ATTACH_SLICE_MS = 25;
 /** w1894: a daemon's person-play report older than this holds nothing (its stats come every 15 s). */
 export const PERSON_PLAY_STALE_MS = 3 * 60_000;
 /**
@@ -2140,18 +2145,27 @@ export class MachineManager {
     Object.assign(m, { online: true, lastSeen: new Date().toISOString() });
     this.store.putMachine(m);
     const ids = m.sessionIds.filter((sid) => this.store.sessions.has(sid));
-    // At most ATTACH_SLICE sessions' last seqs a loop turn: a machine lists every session it ever ran, and after a start none is
+    // At most ATTACH_SLICE sessions' last seqs (and ATTACH_SLICE_MS) a loop turn: a machine lists every session it ever ran, and after a start none is
     // remembered (w2026: 738ed3ad2's first minute spent 12.8 s in this lookup, so the daemons' 8 s handshakes timed out and each
     // machine reconnected up to 8 times before it stayed).
-    const seqs = ids.slice(0, ATTACH_SLICE).map((sid) => this.store.lastSeqNow(sid));
-    if (ids.length <= ATTACH_SLICE && seqs.every((n) => n !== undefined)) return this.welcome(id, ws, m, ids.map((sid, i) => ({ id: sid, lastSeq: seqs[i]! })));
+    const seqs: (number | undefined)[] = [];
+    const slice = () => {
+      const until = performance.now() + ATTACH_SLICE_MS;
+      const end = Math.min(ids.length, seqs.length + ATTACH_SLICE);
+      while (seqs.length < end) {
+        seqs.push(this.store.lastSeqNow(ids[seqs.length]));
+        if (performance.now() >= until) break;
+      }
+    };
+    slice();
+    if (seqs.length === ids.length && seqs.every((n) => n !== undefined)) return this.welcome(id, ws, m, ids.map((sid, i) => ({ id: sid, lastSeq: seqs[i]! })));
     // w2026: a compressed transcript without its tail file is unzipped off the main thread first (Store.lastSeqAsync), one at a
     // time, and the welcome waits for it; the loop answers /api/health and the other daemons meanwhile.
     void (async () => {
       while (seqs.length < ids.length) {
         await new Promise((r) => setImmediate(r));
         if (this.links.get(id) !== link) return;
-        for (const sid of ids.slice(seqs.length, seqs.length + ATTACH_SLICE)) seqs.push(this.store.lastSeqNow(sid));
+        slice();
       }
       const sessions: { id: string; lastSeq: number }[] = [];
       for (const [i, sid] of ids.entries()) sessions.push({ id: sid, lastSeq: seqs[i] ?? (await this.store.lastSeqAsync(sid)) });

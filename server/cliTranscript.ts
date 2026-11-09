@@ -101,9 +101,42 @@ export function feedStream(m: ContextMeter, d: D) {
 
 /** The lines of a transcript, each once (a resumed conversation's file can hold a line again). */
 export function readCliLines(file: string): D[] {
+  return finish(cliLinesOf(fs.readFileSync(file, 'utf8')));
+}
+
+/** How many lines a sliced pass handles between its looks at the clock (w3855). */
+const STEP = 500;
+/** How long a sliced pass (rebuildMeterAsync) runs before it lets the event loop run (w3855). */
+const SLICE_MS = 50;
+
+/** A generator's result, run in one go. */
+function finish<T>(g: Generator<void, T>): T {
+  for (;;) {
+    const r = g.next();
+    if (r.done) return r.value;
+  }
+}
+
+/** A generator's result, run in slices of SLICE_MS with the event loop let run between them (w3855). */
+async function finishSliced<T>(g: Generator<void, T>): Promise<T> {
+  for (;;) {
+    const until = performance.now() + SLICE_MS;
+    for (;;) {
+      const r = g.next();
+      if (r.done) return r.value;
+      if (performance.now() >= until) break;
+    }
+    await new Promise((r) => setImmediate(r));
+  }
+}
+
+function* cliLinesOf(text: string): Generator<void, D[]> {
   const seen = new Set<string>();
   const lines: D[] = [];
-  for (const raw of fs.readFileSync(file, 'utf8').split('\n')) {
+  const raws = text.split('\n');
+  for (let k = 0; k < raws.length; k++) {
+    if (k % STEP === STEP - 1) yield;
+    const raw = raws[k];
     if (!raw) continue;
     let d: D;
     try {
@@ -120,21 +153,27 @@ export function readCliLines(file: string): D[] {
   return lines;
 }
 
+type ReplayOptions = { hidden: boolean; make?: () => ContextMeter; carryFirst?: boolean; onTurn?: (t: ReturnType<ContextMeter['drain']>, process: number) => void };
+type Replayed = { meter: ContextMeter; calls: number; processes: number };
+
 /**
  * A transcript's lines through a meter, cut into the processes it shows (a turn whose attachment pass sends the base again began a
  * new process, which resumes the tally: ContextMeter.resume). `hidden` feeds what the stream never shows (the meter since w1556);
  * without it the meter sees only what the stream showed (before). `onTurn` gets each turn's reading.
  */
-export function replayLines(
-  lines: D[],
-  o: { hidden: boolean; make?: () => ContextMeter; carryFirst?: boolean; onTurn?: (t: ReturnType<ContextMeter['drain']>, process: number) => void },
-): { meter: ContextMeter; calls: number; processes: number } {
+export function replayLines(lines: D[], o: ReplayOptions): Replayed {
+  return finish(replaySteps(lines, o));
+}
+
+/** replayLines, stopping every STEP lines so a caller can let the event loop run (w3855). */
+function* replaySteps(lines: D[], o: ReplayOptions): Generator<void, Replayed> {
   const make = o.make ?? (() => new ContextMeter());
   let m = make();
   let calls = 0;
   let processes = 1;
   const drain = () => o.onTurn?.(m.drain(), processes);
   for (let i = 0; i < lines.length; i++) {
+    if (i % STEP === STEP - 1) yield;
     const d = lines[i];
     if (isPrompt(d) && calls > 0 && !cliWritten(d.message.content, false)) {
       drain();
@@ -166,12 +205,33 @@ export function replayLines(
 export function rebuildMeter(file: string | undefined): MeterState | undefined {
   if (!file) return undefined;
   try {
-    const { meter, calls } = replayLines(readCliLines(file), { hidden: true });
+    return meterOf(readCliLines(file));
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * rebuildMeter off the event loop's long tasks (w3855): a resumed session's start, which one daemon's turn end right after a portal
+ * restart ran for every person's orchestrator in one task. The file is read by the thread pool, and its parse and replay let the loop
+ * run every SLICE_MS. The same tally as rebuildMeter (cliTranscript.test.ts).
+ */
+export async function rebuildMeterAsync(file: string | undefined): Promise<MeterState | undefined> {
+  if (!file) return undefined;
+  try {
+    const lines = await finishSliced(cliLinesOf(await fs.promises.readFile(file, 'utf8')));
+    const { meter, calls } = await finishSliced(replaySteps(lines, { hidden: true }));
     meter.drain();
     return calls > 0 ? meter.snapshot() : undefined;
   } catch {
     return undefined;
   }
+}
+
+function meterOf(lines: D[]): MeterState | undefined {
+  const { meter, calls } = replayLines(lines, { hidden: true });
+  meter.drain();
+  return calls > 0 ? meter.snapshot() : undefined;
 }
 
 /**

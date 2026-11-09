@@ -3222,3 +3222,5 @@ setTimeout(() => {
     console.error('resume after restart:', e);
   }
 }, 2000);
+// The last line of the start (w3855): what ran since the loop watch began was the start itself, before the server listened.
+loopWatch.started();
