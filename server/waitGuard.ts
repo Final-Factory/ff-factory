@@ -31,7 +31,7 @@ const SLEEP_REFUSAL =
 const LIMIT_S = 180;
 
 /** Each simple command of a line, through `bash -c` / `powershell -Command`, with its program and words. */
-function simpleCommands(cmd: string): { verb: string; args: string[]; raw: string }[] {
+export function simpleCommands(cmd: string): { verb: string; args: string[]; raw: string }[] {
   const out: { verb: string; args: string[]; raw: string }[] = [];
   const run = (command: string) => {
     for (const stages of statements(command)) {
