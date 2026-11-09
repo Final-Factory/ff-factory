@@ -15,8 +15,8 @@ import { DANGEROUS_REMOVAL, tempDeletesWithin, tempOnlyDelete } from './tempDele
 import { isRealModelId } from '../shared/models.ts';
 import { ContextMeter, IMAGE_CHARS, MIN_BASE, carriedTotals, type Cumulative, type MeterState, type TurnUsage } from '../shared/spend.ts';
 import type { MeterStates } from './meterStates.ts';
-import { CliTranscriptTail, cliTranscriptPath, rebuildMeter } from './cliTranscript.ts';
-import { refreshKeptTools, sdkToolsNow } from './keptTools.ts';
+import { CliTranscriptTail, cliTranscriptPath, rebuildMeterAsync } from './cliTranscript.ts';
+import { refreshKeptToolsAsync, sdkToolsNow } from './keptTools.ts';
 import { tempSizeHook } from './tempSizeHook.ts';
 
 /** A session is mid-turn: working, starting or waiting for a permission answer. Only these count toward the agent limits (w384). */
@@ -158,6 +158,51 @@ class InputQueue implements AsyncIterable<SDKUserMessage> {
 let runQuery: typeof query = query;
 export function setQueryForTesting(q: typeof query) {
   runQuery = q;
+}
+
+/** w3855: the resumed processes waiting to launch, one after the other, each after the event loop has run (launchResumed). */
+let launchTail: Promise<unknown> = Promise.resolve();
+function launchTurn<T>(fn: () => Promise<T>): Promise<T> {
+  const next = launchTail.then(() => new Promise<void>((r) => setImmediate(r))).then(fn);
+  launchTail = next.catch(() => undefined);
+  return next;
+}
+
+/** All resumed processes asked for so far have launched (or were given up): for tests and the restart-lag bench. */
+export function launchesSettled(): Promise<void> {
+  return launchTail.then(() => undefined);
+}
+
+/**
+ * The Query of a process launched a moment later (w3855): iterating it and its control calls (interrupt, setModel,
+ * setPermissionMode, getContextUsage) wait for the launch and go to the real one. A launch given up (`undefined`: the session was
+ * stopped first) ends at once and its calls do nothing; a launch that failed throws from the first read, as a failed start does.
+ */
+function lazyQuery(launched: Promise<Query | undefined>): Query {
+  const iter = {
+    next: async (...a: [] | [unknown]) => {
+      const q = await launched;
+      return q ? q.next(...a) : { value: undefined, done: true as const };
+    },
+    return: async (v: void) => {
+      const q = await launched;
+      return q ? q.return(v) : { value: v, done: true as const };
+    },
+    throw: async (e: unknown) => {
+      const q = await launched;
+      if (q) return q.throw(e);
+      throw e;
+    },
+  };
+  const lazy: Query = new Proxy(iter, {
+    get(t, p) {
+      if (p === Symbol.asyncIterator) return () => lazy;
+      if (typeof p === 'string' && p in t) return t[p as keyof typeof t];
+      if (p === 'then') return undefined;
+      return (...args: unknown[]) => launched.then((q) => (q ? (q as unknown as Record<string | symbol, (...a: unknown[]) => unknown>)[p](...args) : undefined));
+    },
+  }) as unknown as Query;
+  return lazy;
 }
 
 /** Builds the SDK options for a session each time its process (re)starts. */
@@ -411,6 +456,8 @@ export type TurnModelPick = (info: SessionInfo, from: 'human' | 'orchestrator' |
 export class AgentSession implements SessionHandle {
   readonly info: SessionInfo;
   private q?: Query;
+  /** A resumed process start() has not launched yet (w3855, launchResumed): what its messages add to the tally waits for it. */
+  private launching?: { userChars: number[] };
   private input?: InputQueue;
   private abort?: AbortController;
   private readonly pending = new Map<string, { resolve: (r: PermissionResult) => void; seq: number; input: Record<string, unknown> }>();
@@ -524,7 +571,9 @@ export class AgentSession implements SessionHandle {
     // Images arrive stored already (with an id) or are kept here, so the transcript can show them.
     const refs = images.map((i) => ({ id: i.id ?? this.store.saveImage(this.info.id, i.mediaType, i.data), mediaType: i.mediaType }));
     this.store.append(this.info.id, { kind: 'user', text, from, uuid, ...(refs.length ? { images: refs } : {}), ...(attachments.length ? { attachments } : {}), ...(requestedBy ? { requestedBy } : {}) });
-    this.meter.addUser(text.length + 200 + refs.length * IMAGE_CHARS);
+    // A process still being launched (w3855) has not resumed its tally yet: what the message adds goes in after it does.
+    if (this.launching) this.launching.userChars.push(text.length + 200 + refs.length * IMAGE_CHARS);
+    else this.meter.addUser(text.length + 200 + refs.length * IMAGE_CHARS);
     // The files come after the text, as a block the agent reads as data (shared/attachments.ts).
     const files = attachmentBlock(attachments, this.info.kind === 'orchestrator' ? 'orchestrator' : 'worker');
     this.input!.push(promptText(this.info.kind, files ? (text ? `${text}\n\n${files}` : files) : text, from, requestedBy), uuid, images);
@@ -604,6 +653,11 @@ export class AgentSession implements SessionHandle {
     if (!q) return;
     const from = this.liveModel;
     this.liveModel = model;
+    // A process not launched yet (w3855) starts on it: launchResumed reads liveModel when it starts the process.
+    if (this.launching) {
+      this.store.append(this.info.id, { kind: 'system', text: `Model: ${model} from this turn on (${kind === 'routine' ? 'a turn no person started' : kind === 'person' ? "a person's own message" : 'a decision turn'}; w1158).` });
+      return;
+    }
     void q.setModel(model).catch((e: unknown) => {
       // The next turn runs on the old model; the next message tries again.
       if (this.q === q && this.liveModel === model) this.liveModel = from;
@@ -646,20 +700,12 @@ export class AgentSession implements SessionHandle {
     const sid = this.info.sdkSessionId;
     const cwd = typeof options.cwd === 'string' ? options.cwd : process.cwd();
     this.cli = { cwd, env: options.env ?? process.env, fromStart: !sid, misses: 0 };
-    if (sid) {
-      const file = cliTranscriptPath(cwd, sid, this.cli.env);
-      // w2626: ToolSearch shows this process's own tools as they are now, not as the conversation first loaded them.
-      const fresh = refreshKeptTools(file, sdkToolsNow(options.mcpServers));
-      if (fresh.length > 0) this.store.append(this.info.id, { kind: 'system', text: `Tool schemas changed since this conversation loaded them; it sees them as they are now: ${fresh.join(', ')} (w2626).` });
-      if (file) this.cli.tail = new CliTranscriptTail(file, false);
-      this.meter.resume(this.resumeState(sid, file));
-    }
     this.firstResult = true;
     // A new process: the last one's background tasks ended with it.
     this.backgroundTasks = 0;
     this.info.backgroundTasks = undefined;
     this.info.backgroundJobs = undefined;
-    this.q = runQuery({ prompt: this.input, options });
+    this.q = sid ? this.launchResumed(sid, options) : runQuery({ prompt: this.input, options });
     // What this process runs on, whatever the config says later (the account meters, docs/accounts.md).
     this.update({ status: 'starting', account: accountKeyOf(options.env ?? process.env) });
     void this.consume(this.q, this.abort);
@@ -939,11 +985,56 @@ export class AgentSession implements SessionHandle {
    * base was never measured (the carried resumes before w1556: w1510's base sat at 2% and its unitemised at 37%), the conversation
    * rebuilt from Claude Code's transcript (w1556). A meter that already holds the conversation keeps its own (resume ignores it).
    */
-  private resumeState(sid: string, file: string | undefined): MeterState | undefined {
+  private async resumeState(sid: string, file: string | undefined): Promise<MeterState | undefined> {
     if (this.meter.started) return undefined;
     const saved = this.store.meters?.load(sid);
     if (saved && !saved.baseCarried && (saved.base ?? 0) >= MIN_BASE) return saved;
-    return rebuildMeter(file) ?? saved;
+    return (await rebuildMeterAsync(file)) ?? saved;
+  }
+
+  /**
+   * A resumed conversation's process (w3855). What reads its transcript (the tool refresh, w2626; the tally rebuilt, w1556) and the
+   * spawn ran inside start(), in whatever task sent the message: on 2026-11-09 one daemon's turn end, right after a portal restart,
+   * started every person's orchestrator in one task and the event loop stood 3.7 s (15:11:04 UTC; m5, biscuit and lothdesktop
+   * dropped). Now start() does its bookkeeping at once and this launches the process after the event loop has run: one launch at a
+   * time (launchTurn), the files read by the thread pool. The session is running from start() on (`this.q` answers for the process
+   * to come, lazyQuery); its messages queue in its input as before, a model chosen meanwhile is the one it starts on, and a stop
+   * meanwhile launches nothing.
+   */
+  private launchResumed(sid: string, options: Options): Query {
+    const input = this.input!;
+    const abort = this.abort!;
+    const cli = this.cli!;
+    const launching = { userChars: [] as number[] };
+    this.launching = launching;
+    let me: Query | undefined;
+    const gone = () => abort.signal.aborted || this.q !== me;
+    const launched = launchTurn(async () => {
+      try {
+        if (gone()) return undefined;
+        const file = cliTranscriptPath(cli.cwd, sid, cli.env);
+        // w2626: ToolSearch shows this process's own tools as they are now, not as the conversation first loaded them.
+        const fresh = await refreshKeptToolsAsync(file, sdkToolsNow(options.mcpServers), gone);
+        if (gone()) return undefined;
+        if (fresh.length > 0) this.store.append(this.info.id, { kind: 'system', text: `Tool schemas changed since this conversation loaded them; it sees them as they are now: ${fresh.join(', ')} (w2626).` });
+        if (file) cli.tail = new CliTranscriptTail(file, false);
+        const state = await this.resumeState(sid, file);
+        if (gone()) return undefined;
+        this.meter.resume(state);
+        this.launched(launching);
+        return runQuery({ prompt: input, options: { ...options, model: this.liveModel ?? options.model } });
+      } finally {
+        this.launched(launching);
+      }
+    });
+    me = lazyQuery(launched);
+    return me;
+  }
+
+  /** The launch is over (or given up): the messages sent meanwhile go into the tally, in their order. */
+  private launched(launching: { userChars: number[] }) {
+    if (this.launching === launching) this.launching = undefined;
+    for (const n of launching.userChars.splice(0)) this.meter.addUser(n);
   }
 
   /** What Claude Code appended to its transcript since the last call, to the meter (w1556): before each model call. */

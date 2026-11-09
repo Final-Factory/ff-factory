@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
-import { COMPACTING, SessionManager, compactCommand, compactedLine, setQueryForTesting, type SessionHandle } from './sessions.ts';
+import { COMPACTING, SessionManager, compactCommand, compactedLine, launchesSettled, setQueryForTesting, type SessionHandle } from './sessions.ts';
 import { Store } from './store.ts';
 import type { Config } from './config.ts';
 import type { Requester, SessionInfo } from '../shared/types.ts';
@@ -135,6 +135,8 @@ test('a stopped orchestrator resumes its conversation to compact it', async (t) 
   assert.equal(o.live, false);
   sessions.compact(o.info.id);
   assert.equal(o.live, true);
+  // w3855: a resumed process launches after the task that started it
+  await launchesSettled();
   assert.equal(seen.at(-1)!.options.resume, sdk);
   await until(() => lines(store, o.info.id, 'system').some((l) => l.startsWith('Compacted:')), 'the compaction');
 });

@@ -58,3 +58,19 @@ test('w2044: a block of 1 s is logged, and every 10 minutes a line says the wors
   assert.equal(lines.length, 3);
   assert.match(lines[2], /^event loop: worst block 0\.0 s in the last 10 min; 0 of 1 s or more$/);
 });
+
+test('w3855: the start before the portal listens gets its own line, not "blocked"; a block after it still does', () => {
+  let t = 100_000;
+  const lines: string[] = [];
+  const w = new LoopWatch({ now: () => t, log: (l) => lines.push(l) });
+  // the module's one synchronous run: 1.6 s from the watch to listening (37afae31's start, 2026-11-09 15:10:59)
+  t += 1600;
+  w.started();
+  assert.deepEqual(lines, ['startup: 1.6 s from the loop watch to listening (w3855)']);
+  t += LOOP_BEAT_MS;
+  w.beat();
+  assert.equal(w.lagMs(), 0, 'the start is not a lag of the running portal');
+  t += LOOP_BEAT_MS + 1200;
+  w.beat();
+  assert.match(lines[1], /^event loop: blocked for 1\.2 s/);
+});

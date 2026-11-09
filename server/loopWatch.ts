@@ -58,6 +58,17 @@ export class LoopWatch {
     return this;
   }
 
+  /**
+   * The portal's startup is over (w3855): the time since start() went to loading the data folder and wiring the server, in
+   * the module's one synchronous run before it listened, when no client could be connected to be kept waiting. It gets its
+   * own line ("startup: ...") instead of reading as a block of a running portal, and the next beat counts from here.
+   */
+  started() {
+    const now = this.now();
+    this.log(`startup: ${((now - this.last) / 1000).toFixed(1)} s from the loop watch to listening (w3855)`);
+    this.last = now;
+  }
+
   stop() {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;

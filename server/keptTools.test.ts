@@ -9,7 +9,7 @@ import { createSdkMcpServer, tool, type Options } from '@anthropic-ai/claude-age
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { CATALOG } from './launch.ts';
-import { refreshKeptTools, sdkToolsNow, type ToolNow } from './keptTools.ts';
+import { refreshKeptTools, refreshKeptToolsAsync, sdkToolsNow, type ToolNow } from './keptTools.ts';
 import { AgentSession, setQueryForTesting } from './sessions.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { Store } from './store.ts';
@@ -119,6 +119,31 @@ test('w2626: a record of a changed schema or description is dropped in place at 
     // no file, no tools: nothing
     assert.deepEqual(refreshKeptTools(path.join(dir, 'none.jsonl'), now), []);
     assert.deepEqual(refreshKeptTools(file, new Map()), []);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('w3855: refreshKeptToolsAsync drops the same records as refreshKeptTools, byte for byte, and writes nothing once gone', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-kept-async-'));
+  try {
+    const before = await listed(server([['list_ffbox_files', OLD_SHAPE], ['wake_me', SHAPES.wake_me, 'Old words.']]));
+    const now = sdkToolsNow({ machine: server([['list_ffbox_files', SHAPES.list_ffbox_files], ['wake_me', SHAPES.wake_me]]) });
+    const lines: string[] = [];
+    for (let i = 0; i < 400; i++) {
+      lines.push(userLine(`u${i}`, i ? `r${i - 1}` : null, 'x'.repeat(i % 7)));
+      lines.push(recordLine(`r${i}`, `u${i}`, [['mcp__machine__list_ffbox_files', before.get('mcp__machine__list_ffbox_files')!], ['mcp__machine__wake_me', before.get('mcp__machine__wake_me')!]]));
+    }
+    const a = path.join(dir, 'a.jsonl');
+    const b = path.join(dir, 'b.jsonl');
+    const c = path.join(dir, 'c.jsonl');
+    const text = lines.join('\n') + '\n';
+    for (const f of [a, b, c]) fs.writeFileSync(f, text);
+    assert.deepEqual((await refreshKeptToolsAsync(b, now)).sort(), refreshKeptTools(a, now).sort());
+    assert.ok(refreshKeptTools(a, now).length === 0 && !fs.readFileSync(a).equals(Buffer.from(text)), 'the sync pass changed the file');
+    assert.deepEqual(fs.readFileSync(b), fs.readFileSync(a));
+    assert.deepEqual(await refreshKeptToolsAsync(c, now, () => true), []);
+    assert.equal(fs.readFileSync(c).toString('utf8'), text, 'a start stopped meanwhile writes nothing');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

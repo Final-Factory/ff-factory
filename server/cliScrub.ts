@@ -12,7 +12,8 @@ import { secretBytesMatcher, secretValuesSince, secretValuesVersion } from './se
 
 /** Files the CLI writes that hold text: transcripts, tool results, notes. Images and PDFs are left alone. */
 const TEXT = /\.(?:jsonl|json|txt|md|log)$/i;
-const CHUNK = 8 * 1024 * 1024;
+/** w3855: 1 MB, about 15 ms of scanning on the portal VM (a guess from its 2026-11-09 15:11 stall profile), not 8 MB. */
+const CHUNK = 1024 * 1024;
 
 /** The same-length mask (ASCII, JSON-safe): "[redacted******]", or stars when the match is shorter than 10 bytes. */
 export const inPlaceMask = (n: number) => Buffer.from(n >= 10 ? `[redacted${'*'.repeat(n - 10)}]` : '*'.repeat(n), 'latin1');
@@ -22,15 +23,16 @@ export const inPlaceMask = (n: number) => Buffer.from(n >= 10 ? `[redacted${'*'.
  * found), in place: same length, nothing else touched. How many it found (on a dry run: would mask), and the size it read to.
  */
 export async function scrubInPlace(file: string, m: { re: RegExp; maxLen: number }, from = 0, o: { dryRun?: boolean } = {}): Promise<{ count: number; size: number }> {
-  const fd = fs.openSync(file, o.dryRun ? 'r' : 'r+');
+  // w3855: read by the thread pool, CHUNK at a time, so a chunk's scan is the event loop's only long piece (it was 8 MB read here)
+  const fh = await fs.promises.open(file, o.dryRun ? 'r' : 'r+');
   try {
-    const size = fs.fstatSync(fd).size;
+    const size = (await fh.stat()).size;
     const overlap = m.maxLen - 1;
     let pos = Math.max(0, Math.min(from, size) - overlap);
     let count = 0;
     const buf = Buffer.alloc(CHUNK + overlap);
     while (pos < size) {
-      const n = fs.readSync(fd, buf, 0, Math.min(buf.length, size - pos), pos);
+      const { bytesRead: n } = await fh.read(buf, 0, Math.min(buf.length, size - pos), pos);
       if (n <= 0) break;
       const last = pos + n >= size;
       // a match starting in the overlap at the end is found by the next chunk, which starts there
@@ -41,7 +43,7 @@ export async function scrubInPlace(file: string, m: { re: RegExp; maxLen: number
         count++;
         if (!o.dryRun) {
           const mask = inPlaceMask(hit[0].length);
-          fs.writeSync(fd, mask, 0, mask.length, pos + hit.index);
+          await fh.write(mask, 0, mask.length, pos + hit.index);
         }
       }
       if (last) break;
@@ -50,7 +52,7 @@ export async function scrubInPlace(file: string, m: { re: RegExp; maxLen: number
     }
     return { count, size };
   } finally {
-    fs.closeSync(fd);
+    await fh.close();
   }
 }
 
