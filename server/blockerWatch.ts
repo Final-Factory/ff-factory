@@ -56,7 +56,7 @@ export type PrState = { state: 'open' | 'merged' | 'closed'; text: string; sha?:
 export interface BlockerWatchDeps {
   store: Store;
   orchestrators: Pick<Orchestrators, 'unblock' | 'blockerStuck' | 'blockerDecide' | 'gatesCleared' | 'flagQueuedWithRoom' | 'carryOutConditional' | 'dropConditional'> &
-    Partial<Pick<Orchestrators, 'tellPrConflict' | 'recordReportedWait' | 'retellReportWaits' | 'noticeLongOffline' | 'noteCiRead' | 'noteReadPaused' | 'sweepResumes' | 'requeueCapacityBlocks' | 'requeueBrokenPairs' | 'replaceNoTimedWaits' | 'timedLegBound' | 'mergedOnGreen' | 'undecidedBound' | 'holdSteamPairs' | 'flagDeadWait'>>;
+    Partial<Pick<Orchestrators, 'tellPrConflict' | 'recordReportedWait' | 'retellReportWaits' | 'noticeLongOffline' | 'noteCiRead' | 'noteReadPaused' | 'sweepResumes' | 'requeueCapacityBlocks' | 'requeueBrokenPairs' | 'replaceNoTimedWaits' | 'timedLegBound' | 'mergedOnGreen' | 'keepMergeReport' | 'undecidedBound' | 'holdSteamPairs' | 'flagDeadWait'>>;
   /** w1841: tell the workers waiting on a bench lock that is free now (Agents.resumeBenchWaits): request id to what it did. */
   benchResume?: () => [string, string][];
   /** w2544: work waiting on a computer away (offline or paused) past the grace moves elsewhere (Agents.moveAwayWork). */
@@ -447,11 +447,23 @@ export class BlockerWatch {
     } catch (e) {
       const said = clipLine((e as Error).message, 1200);
       console.warn(`blocker watch: ${w.id}: merge on green of ${g.ref} failed: ${said}`);
-      return this.d.orchestrators.unblock(w.id, `${why}; FF Factory tried to merge it: ${said}. Merge it yourself (ff-pr merge), then report; the report you left with merge_on_green was not filed`);
+      return this.d.orchestrators.unblock(w.id, `${why}; FF Factory tried to merge it: ${said}. ${this.afterRefusal(w, g as WorkBlocker, said)}`);
     }
     // Merged: the PR's state is read fresh next time.
     this.prSeen.delete(g.ref!);
     this.d.orchestrators.mergedOnGreen(w.id, why);
+  }
+
+  /**
+   * What the worker is told after GitHub refused a merge on green (w3906). Not mergeable (main moved under the pull request
+   * and conflicts with it): the report it left is kept (Orchestrators.keepMergeReport) and it gets one job, the remerge, after
+   * which its next blocked_on re-arms the merge with that report. Anything else (a head that moved, the Evidence check):
+   * merge it by hand, as before.
+   */
+  private afterRefusal(w: WorkItem, g: WorkBlocker, said: string): string {
+    if (!notMergeableRefusal(said) || !this.d.orchestrators.keepMergeReport) return 'Merge it yourself (ff-pr merge), then report; the report you left with merge_on_green was not filed';
+    this.d.orchestrators.keepMergeReport(w.id, g, said);
+    return remergeJob(g.ref!, g.head ?? g.mergeOnGreen?.head);
   }
 
   /**
@@ -473,7 +485,7 @@ export class BlockerWatch {
       } catch (e) {
         const said = clipLine((e as Error).message, 1200);
         console.warn(`blocker watch: ${w.id}: merge on green of ${g.ref} failed: ${said}`);
-        rest.push({ g, v: { why: `${x.v.why}; FF Factory tried to merge it: ${said}. Merge it yourself (ff-pr merge), then report; the report you left with merge_on_green was not filed` } });
+        rest.push({ g, v: { why: `${x.v.why}; FF Factory tried to merge it: ${said}. ${this.afterRefusal(w, g, said)}` } });
         continue;
       }
       this.prSeen.delete(g.ref!);
@@ -845,6 +857,30 @@ let rollupRefusedLogged = false;
  * Checks permission, so every read failed and the CI blocks of w814, w818 and w808 never cleared), the PR's state and its
  * head commit's GitHub Actions runs, which "Actions: read" covers. Throws, saying what gh said, when neither can be read.
  */
+/**
+ * w3906: GitHub refused a merge because the pull request does not merge into its base as it stands: a conflict ("Pull request
+ * Final-Factory/ffu#593 is not mergeable: the merge commit cannot be cleanly created", 2026-11-09), or a base whose rules want
+ * the branch up to date. Not a head that moved, a red check or the Evidence check: those are the worker's to read.
+ */
+export function notMergeableRefusal(said: string): boolean {
+  return /is not mergeable|cannot be cleanly created|merge conflict|head branch is not up to date|out of date with the base/i.test(said);
+}
+
+/**
+ * w3906: the one job a worker gets when its merge on green was refused as not mergeable: ff-pr push merges the base in and
+ * names the conflicted files; in ffu, its marked sorted lists resolve with tools/keep_sorted.py --remerge (ffu #602, #607).
+ * "not mergeable as it stands" also keeps the resume from saying "Run ff-pr merge now" (Orchestrators.resumeGatedWorker).
+ */
+export function remergeJob(ref: string, head?: string): string {
+  const repo = CI_REF.exec(ref)?.[1] ?? '';
+  const ffu = /\/ffu$/i.test(repo);
+  return (
+    `GitHub says ${ref} is not mergeable as it stands${head ? ` at ${head.slice(0, 12)}` : ''}: its base moved under it and conflicts. FF Factory kept the report you left with merge_on_green (w3906). ` +
+    `Your one job: run ff-pr push, which merges the base in and names the files in conflict; resolve them${ffu ? ` (for a conflict in a keep-sorted list, run tools/keep_sorted.py --remerge <file> on it before git add, ffu #602)` : ''}, build and run the checks the merge touches, commit, and ff-pr push again. ` +
+    `Then call blocked_on with the same prs, the new head, and no merge_on_green: FF Factory re-arms the merge on green with the report it kept. Do not write that report again, and end your turn with only the still-open line.`
+  );
+}
+
 /**
  * w2045: `gh pr merge` at exactly `head` (a newer push, or one GitHub's rules refuse, is not merged). Throws with what gh said.
  * w3021: GitHub refuses a short sha there ("Could not coerce value "3e14de3aa516" to GitObjectID", ffu#200), so a short head

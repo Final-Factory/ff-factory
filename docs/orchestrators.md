@@ -1462,6 +1462,17 @@ from the other pilots, server/mergeOnGreen.ts) is in the arm:
   refuse the merge.
 - Red checks, a reading that is not green (unreadable checks, a PR merged or closed by hand), a refused Evidence check, or a
   merge GitHub refuses (a newer push, a rule) unblock the request as without the pilot: the worker is resumed with why and told the report was not filed.
+- A merge GitHub refuses as not mergeable on green CI (main moved under the pull request and conflicts with it: "is not
+  mergeable: the merge commit cannot be cleanly created"; blockerWatch.ts notMergeableRefusal) keeps the report (w3906:
+  ffu #588, #593 three times and #606 lost theirs between 21:59 and 00:42 UTC on 2026-11-09). It moves to
+  `WorkItem.keptMergeReport` (Orchestrators.keepMergeReport, stamped on the ledger), and the worker is resumed with one job
+  (remergeJob): `ff-pr push` merges the base in and names the conflicts, in ffu `tools/keep_sorted.py --remerge` resolves its
+  sorted lists, then push and call `blocked_on` with the same prs, the new head and no `merge_on_green`; mergeOnGreenAsk
+  re-arms the merge with the kept report, and green CI on the new head merges it and files it as before. Why the worker and
+  not GitHub (measured 2026-11-09, `gh api repos/<repo>` and `.../branches/<main>/protection`): ffu and ff-factory have no
+  protection on main and FinalFactory's required check is not strict, so a branch merely behind its base always merges; the
+  only refusal is a real conflict, which GitHub's update-branch cannot resolve (it is also off, `allow_update_branch`
+  false), and auto-merge (`allow_auto_merge` false) or a merge queue would reject a conflicting pull request the same way.
 - `merge_on_green` is in the tool's schema from this version on, which a machine's daemon builds (machine/agentHost.ts reads
   server/launch.ts): a worker gets it once its daemon has updated and its process has started again. On an older one the
   field is dropped, and the worker is only told again that it may.

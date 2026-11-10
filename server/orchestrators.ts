@@ -4292,7 +4292,8 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       : cutOff.length ? ` Your turn stopped when ${cutOff.map((g) => g.ref).join(', ')} went offline at ${cutOff[0].at.slice(11, 16)} UTC, and this is your resume in your own sandbox: your folder is as you left it. Check git status for half-written edits, re-pin your Unity instance if you use one (the editor may have restarted), and continue where you left off.${[...new Set(cutOff.map((g) => g.ref))].filter((m): m is string => !!m && liveCrashHolds(w, m).length > 0).map((m) => crashHoldNote(m, [w.id])).join('')}` : '';
     const ciGates = gates.filter((g) => g.kind === 'ci');
     // Not the "read its checks" hint when CI could not start (w907: the PR conflicts, or its head never got a run): the worker pushes first.
-    const ci = ciGates.length > 0 && !/CI can't run|no CI run exists/.test(cleared);
+    // w3906: nor when GitHub refused the merge on green as not mergeable: the job is to merge main in, push and block again.
+    const ci = ciGates.length > 0 && !/CI can't run|no CI run exists|not mergeable as it stands/.test(cleared);
     // A deploy (w890): its worker was released while it waited, and does its check after the deploy now.
     const deploy = gates.some((g) => g.kind === 'deploy');
     const prs = ciGates.map((g) => g.ref).filter(Boolean).join(', ');
@@ -5481,7 +5482,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     this.store.putWork(w);
     this.toPeople(w.requesters, dispatchNotice(w, `blocked on ${name} (${gates[0].what}); its worker ${sessionId} stopped polling and is resumed when that clears`));
     const told = this.tellReportWaited(w, gates.filter((g) => !before.some((k) => sameGate(k, g))));
-    if (pilot.merge) return `Recorded: ${w.id} is Blocked on ${name}, merge on green (w2045). ${cancelled ? 'Your pending check-in is cancelled. ' : ''}On green CI FF Factory merges it at ${a.head!.trim().slice(0, 12)} and files the report you left; you are not resumed. On red, or if the merge fails, you are resumed as usual and that report is not filed. End your turn now with only the line "${w.id}: still open: blocked on ${name}" (no DONE line now: it is in the report you left).`;
+    if (pilot.merge) return `Recorded: ${w.id} is Blocked on ${name}, merge on green (w2045)${pilot.rearmed ? ', re-armed with the report you left before (w3906)' : ''}. ${cancelled ? 'Your pending check-in is cancelled. ' : ''}On green CI FF Factory merges it at ${a.head!.trim().slice(0, 12)} and files the report you left; you are not resumed. On red, or if the merge fails, you are resumed as usual and that report is not filed. End your turn now with only the line "${w.id}: still open: blocked on ${name}" (no DONE line now: it is in the report you left).`;
     return `${pilot.note ? `${pilot.note} ` : ''}Recorded: ${w.id} is Blocked on ${name}. ${cancelled ? 'Your pending check-in is cancelled. ' : ''}End your turn now with your report (a line "${w.id}: still open: blocked on ${name}"). Do NOT set a wake_me to poll for it: when it clears, FF Factory resumes you with a message. Anything people add meanwhile is kept for you.${told.length ? ` The worker${told.length > 1 ? 's' : ''} you wait on (${told.join(', ')}) ${told.length > 1 ? 'are' : 'is'} told to mark your result with a line "For ${w.id}:"; a progress report does not unblock you, that line or their DONE does.` : ''}`;
   }
 
@@ -5817,10 +5818,12 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    * that does not fit (out of the arm, other gates, no head, no DONE line for this request), the wait is set without it and
    * the worker hears why. The report's DONE is checked when it is filed (doneMarkers), as any report's is.
    */
-  private mergeOnGreenAsk(w: WorkItem, sessionId: string, gates: WorkBlocker[], head: string | undefined, report: string | undefined): { merge?: true; note?: string } {
+  private mergeOnGreenAsk(w: WorkItem, sessionId: string, gates: WorkBlocker[], head: string | undefined, report: string | undefined): { merge?: true; rearmed?: true; note?: string } {
     const inArm = this.d.mergeOnGreenPilot?.(w.id) === true;
     const ciOnly = gates.length === 1 && gates[0].kind === 'ci';
-    const text = (report ?? '').trim();
+    // w3906: a report kept from a merge GitHub refused as not mergeable re-arms the same pull request's merge when none is given.
+    const kept = w.keptMergeReport && ciOnly && gates[0].ref === w.keptMergeReport.ref && !(report ?? '').trim() ? w.keptMergeReport : undefined;
+    const text = (report ?? '').trim() || (inArm && kept ? kept.report : '');
     if (!text) {
       if (!inArm || !ciOnly) return {};
       this.stamp(w, `${MERGE_ON_GREEN_MARK}: its worker ${sessionId} is told it may leave its after-merge report`);
@@ -5842,8 +5845,9 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
             : undefined;
     if (why) return { note: `merge_on_green ignored: ${why}; you are resumed when CI finishes, as usual.` };
     gates[0].mergeOnGreen = { head: head!.trim().toLowerCase(), report: text.slice(0, MERGE_ON_GREEN_REPORT_CHARS), session: sessionId };
-    this.stamp(w, `${MERGE_ON_GREEN_MARK}: worker ${sessionId} left its after-merge report (${clip(firstLine(text), 160)}); FF Factory merges ${gates[0].ref} on green at ${head!.trim().slice(0, 12)}`);
-    return { merge: true };
+    w.keptMergeReport = undefined;
+    this.stamp(w, `${MERGE_ON_GREEN_MARK}: worker ${sessionId} ${kept ? `re-armed with the report kept from the refused merge at ${kept.head.slice(0, 12)} (w3906)` : 'left its after-merge report'} (${clip(firstLine(text), 160)}); FF Factory merges ${gates[0].ref} on green at ${head!.trim().slice(0, 12)}`);
+    return { merge: true, ...(kept ? { rearmed: true as const } : {}) };
   }
 
   /**
@@ -5896,6 +5900,20 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    * no model turn. A DONE refused is told back to the worker, which resumes it (doneMarkers, tellRefused). A worker that is
    * gone: unblocked for the dispatcher, as unblock does.
    */
+  /**
+   * w3906: GitHub refused the merge on green as not mergeable (main moved under the pull request). The report its worker left
+   * is kept on the request (WorkItem.keptMergeReport), never dropped, and the ledger says so; the caller then resumes the
+   * worker with the remerge job (BlockerWatch remergeJob), and its next blocked_on on that pull request re-arms the merge.
+   */
+  keepMergeReport(id: string, gate: WorkBlocker, said: string) {
+    const w = this.store.work.get(id);
+    const m = gate.mergeOnGreen;
+    if (!w || !m || !gate.ref) return;
+    w.keptMergeReport = { ref: gate.ref, head: m.head, report: m.report, session: m.session, at: this.now().toISOString() };
+    this.stamp(w, `${MERGE_ON_GREEN_MARK}: GitHub refused the merge of ${gate.ref} at ${m.head.slice(0, 12)} on green CI as not mergeable (${clip(said, 200)}); worker ${m.session}'s report is kept, and re-arms when it blocks on ${gate.ref} again (w3906)`);
+    this.store.putWork(w);
+  }
+
   mergedOnGreen(id: string, why: string, only?: WorkBlocker) {
     const w = this.store.work.get(id);
     if (!w || w.status !== 'blocked' || !w.blocked) return;
