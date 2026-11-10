@@ -15,7 +15,7 @@ import { crossOwnerLine, delegationConstraints, DispatcherChatRefused, DISPATCHE
 import { configPath, type Config } from './config.ts';
 import { memoryDirFor } from './orchestratorMemory.ts';
 import { handoverNote, isOpen, requestAsFiled, requestNotice } from './work.ts';
-import { BlockerWatch, ghMerge, REPORTED_WAIT_MS } from './blockerWatch.ts';
+import { BlockerWatch, ghMerge, notMergeableRefusal, remergeJob, REPORTED_WAIT_MS } from './blockerWatch.ts';
 import { noteBudget, resetBudgets } from './ghBudget.ts';
 import { poolForRef, type GatePoolToken } from './usageGate.ts';
 import { personForWork, sessionPerson, setVaultContext } from './vault.ts';
@@ -5022,6 +5022,68 @@ test('w2045: merge on green: red CI, or a merge GitHub refuses, resumes the work
   assert.match(agents.waker.pending(b.id)!.note, /FF Factory tried to merge it: gh pr merge Final-Factory\/FinalFactory#2: Head branch was modified\. .*Merge it yourself \(ff-pr merge\)/);
   agents.waker.cancel(a.id);
   agents.waker.cancel(b.id);
+});
+
+test('w3906: merge on green, CI green but GitHub refuses the merge as not mergeable: the report is kept, the worker gets the remerge job, and its next blocked_on re-arms the merge with that report', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }]);
+  mergeOnGreenArm(o, () => true);
+  const pr = 'Final-Factory/ffu#593';
+  const head = 'abc1234def5678';
+  const after = 'fed9876cba5432';
+  const report = 'TL;DR: M1.34 is in.\n\nDONE: w1\nLearned: nothing new';
+  let checks: { done: boolean; text: string; green?: true } = { done: true, green: true, text: `CI on ${pr} finished: all 6 checks passed or skipped` };
+  const merges: string[][] = [];
+  let refuse = true;
+  const watch = new BlockerWatch({
+    store,
+    orchestrators: o,
+    ci: async () => checks,
+    merge: async (ref, h) => {
+      merges.push([ref, h]);
+      // ffu #593 on 2026-11-09, as gh said it.
+      if (refuse) throw new Error(`gh pr merge ${ref}: Pull request Final-Factory/ffu#593 is not mergeable: the merge commit cannot be cleanly created.`);
+    },
+  });
+  const a = await startedFor(env, 'w1');
+  await a.h.blocked_on!({ request: 'w1', prs: [`ci:${pr}`], head, what: 'CI on ffu#593', merge_on_green: report });
+  await watch.tick();
+  assert.deepEqual(merges, [[pr, head]]);
+  let w = store.work.get('w1')!;
+  assert.equal(w.status, 'active');
+  assert.deepEqual({ ref: w.keptMergeReport?.ref, head: w.keptMergeReport?.head, report: w.keptMergeReport?.report, session: w.keptMergeReport?.session }, { ref: pr, head, report, session: a.id }, 'the report survives');
+  assert.ok(w.log.some((l) => l.includes(`refused the merge of ${pr}`) && l.includes('report is kept')));
+  assert.ok(!w.log.some((l) => l.includes('was not filed')));
+  const note = agents.waker.pending(a.id)!.note;
+  assert.match(note, /not mergeable as it stands at abc1234def56: its base moved under it and conflicts\. FF Factory kept the report you left with merge_on_green/);
+  assert.match(note, /run ff-pr push, which merges the base in.*tools\/keep_sorted\.py --remerge.*call blocked_on with the same prs, the new head, and no merge_on_green/);
+  assert.doesNotMatch(note, /not filed|Run ff-pr merge now/);
+  agents.waker.cancel(a.id);
+  // The worker merged main in and pushed: it blocks again with the new head and no report, and the merge is re-armed with the kept one.
+  const told = String(await a.h.blocked_on!({ request: 'w1', prs: [`ci:${pr}`], head: after, what: 'CI on ffu#593 after the remerge' }));
+  assert.match(told, /merge on green \(w2045\), re-armed with the report you left before \(w3906\)/);
+  w = store.work.get('w1')!;
+  assert.deepEqual(w.blocked!.mergeOnGreen, { head: after, report, session: a.id });
+  assert.equal(w.keptMergeReport, undefined);
+  // Green CI again (never rerun to get it: the same green-only rule holds), and this time it merges, filing the kept report.
+  refuse = false;
+  checks = { done: true, green: true, text: `CI on ${pr} finished: all 6 checks passed or skipped` };
+  (watch as unknown as { ciSeen: Map<string, unknown> }).ciSeen.clear();
+  await watch.tick();
+  assert.deepEqual(merges[1], [pr, after]);
+  w = store.work.get('w1')!;
+  assert.equal(w.status, 'done', w.log.slice(-3).join(' | '));
+  assert.equal(agents.waker.pending(a.id), undefined, 'the worker is not resumed');
+});
+
+test('w3906: a not-mergeable refusal is told apart from the other refusals, which still say merge it yourself', () => {
+  assert.ok(notMergeableRefusal('gh pr merge Final-Factory/ffu#606: Pull request Final-Factory/ffu#606 is not mergeable: the merge commit cannot be cleanly created.'));
+  assert.ok(notMergeableRefusal('GraphQL: Head branch is not up to date with the base branch (mergePullRequest)'));
+  assert.ok(!notMergeableRefusal('gh pr merge Final-Factory/FinalFactory#2: Head branch was modified. Review and try the merge again.'));
+  assert.ok(!notMergeableRefusal('not merged: the Evidence check failed'));
+  assert.doesNotMatch(remergeJob('Final-Factory/FinalFactory#9'), /keep_sorted/, 'the ffu helper only for ffu');
 });
 
 /** w2153: a request's gates, each with the worker that set it (shared/blockers.ts gateSetter), sorted. */

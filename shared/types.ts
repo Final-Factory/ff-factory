@@ -2418,6 +2418,13 @@ export interface WorkItem {
    */
   heldCheckIns?: HeldCheckIn[];
   /**
+   * w3906: the report a worker left with merge_on_green, kept when GitHub refused the merge on green CI as not mergeable (main
+   * moved under the pull request: a conflict). The worker is resumed to merge main in and push; its next blocked_on on the same
+   * pull request with no merge_on_green re-arms the merge with this report (Orchestrators.mergeOnGreenAsk). Ffu #588, #593 (three
+   * times) and #606 lost their reports so on 2026-11-09. `head`: the commit GitHub refused.
+   */
+  keptMergeReport?: { ref: string; head: string; report: string; session: string; at: string };
+  /**
    * w1094: the workers its gates' clearing resumed, until each is seen to take the message (it shows in its transcript).
    * The blocker watch's sweep resumes again, loudly, one that has nothing pending for it 5 minutes later (no check-in
    * waiting to fire, no message waiting for a sandbox), and tells the dispatcher after a few tries.
