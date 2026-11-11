@@ -661,6 +661,16 @@ ledger request, or a line on the request already fixing it.
   "determinism-critical: start its worker on Opus". The worker rules (`workerRules`) repeat the method, forbid hiding a
   regression (a loosened oracle, an allowlist line, a quarantine: Ben's call), require the scenario red before and green
   after, and end with the usual markers.
+- **A scenario's saves reach a worker on any computer** (w3939: a worker on beast needed `w1440-lifesave-0.50.0.105.zip`,
+  which only lothdesktop holds in `<root>/nightly-history/fixtures`, and stalled 3 h). The worker calls
+  `fetch_lab_fixture { sha256, name? }` with the sha256 the scenario's `source` gives and copies the file from its Inbox to
+  `$FF_WORKER_ROOT/nightly-history/fixtures/<name>`. The portal (`server/labFixtures.ts`) reuses a copy its attachment
+  store already has (`AttachmentStore.bySha`), else asks the online computers whose hello offered `labFixtures` (a worker
+  root with that folder, never on drive C:; `machine/labFixtures.ts` lists regular files only, read-only), makes the
+  holder upload the file (15 min), checks the SHA-256 on arrival and grants the caller. When a holder says hello the
+  portal copies its fixtures into the store after 60 s, so the next ask works with lothdesktop off. With no holder
+  online and no copy, the answer says `wake_me 30` and never asks a person to bring a computer online. A file over
+  `attachments.maxMB` is refused with the limit.
 - **Shipped or not** comes from the lab, which has the clone: a release is a commit on `origin/master` that changes `bundleVersion` (ff-agents `ci-release`: the version bump is the release). `yes` when a
   release contains the first failing night's commit, `maybe` when a release lies between the last green and the first
   red night (bisect to tell; high, not urgent), `no` otherwise, with the newest release named. The night's report.md says

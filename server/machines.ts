@@ -1001,7 +1001,7 @@ export class MachineManager {
   // ---------------------------------------------------------------- daemon versions
 
   /** What each connected daemon said in its hello. */
-  private readonly hellos = new Map<string, { protocol: number; oldestPortal?: number; daemon?: string; catalog?: string[]; guard?: boolean; agentHosts?: boolean; saveWork?: boolean; liveView?: boolean; liveIdleClose?: boolean; liveRestage?: boolean; liveKeep?: boolean; compact?: boolean; ghApp?: boolean; selfUpdate?: number; timedRuns?: boolean }>();
+  private readonly hellos = new Map<string, { protocol: number; oldestPortal?: number; daemon?: string; catalog?: string[]; guard?: boolean; agentHosts?: boolean; saveWork?: boolean; liveView?: boolean; liveIdleClose?: boolean; liveRestage?: boolean; liveKeep?: boolean; compact?: boolean; ghApp?: boolean; selfUpdate?: number; timedRuns?: boolean; labFixtures?: boolean }>();
 
   /** Each connected daemon's GPU Whisper (w615), from its hello and its `voice` messages. */
   private readonly voices = new Map<string, RemoteVoiceStatus>();
@@ -2284,11 +2284,13 @@ export class MachineManager {
     if (!m) return;
     switch (msg.type) {
       case 'hello': {
-        this.hellos.set(id, { protocol: msg.protocol, ...(msg.oldestPortal !== undefined ? { oldestPortal: msg.oldestPortal } : {}), daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}), ...(msg.agentHosts ? { agentHosts: true } : {}), ...(msg.saveWork ? { saveWork: true } : {}), ...(msg.liveView ? { liveView: true } : {}), ...(msg.liveIdleClose ? { liveIdleClose: true } : {}), ...(msg.liveRestage ? { liveRestage: true } : {}), ...(msg.liveKeep ? { liveKeep: true } : {}), ...(msg.compact ? { compact: true } : {}), ...(msg.timedRuns ? { timedRuns: true } : {}), ...(msg.ghApp ? { ghApp: true } : {}), ...(typeof msg.selfUpdate === 'number' ? { selfUpdate: msg.selfUpdate } : {}) });
+        this.hellos.set(id, { protocol: msg.protocol, ...(msg.oldestPortal !== undefined ? { oldestPortal: msg.oldestPortal } : {}), daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}), ...(msg.agentHosts ? { agentHosts: true } : {}), ...(msg.saveWork ? { saveWork: true } : {}), ...(msg.liveView ? { liveView: true } : {}), ...(msg.liveIdleClose ? { liveIdleClose: true } : {}), ...(msg.liveRestage ? { liveRestage: true } : {}), ...(msg.liveKeep ? { liveKeep: true } : {}), ...(msg.compact ? { compact: true } : {}), ...(msg.timedRuns ? { timedRuns: true } : {}), ...(msg.labFixtures ? { labFixtures: true } : {}), ...(msg.ghApp ? { ghApp: true } : {}), ...(typeof msg.selfUpdate === 'number' ? { selfUpdate: msg.selfUpdate } : {}) });
         // GitHub App tokens (w1519): a daemon that keeps them gets the current set at once.
         if (msg.ghApp) this.pushGhAppTokens(id);
         // w1946: a play-only machine's timed runs: what it holds now, so the portal sends again what a restart lost.
         if (msg.timedRuns) setImmediate(() => this.timedHello?.(id, Array.isArray(msg.timedActive) ? msg.timedActive.map(String) : []));
+        // w3939: a computer that holds the nightly lab's fixtures: the portal copies the ones it lacks (server/labFixtures.ts).
+        if (msg.labFixtures) setImmediate(() => this.onLabHolder?.(id));
         if (!msg.guard) delete m.guard;
         if (msg.voice && typeof msg.voice === 'object') this.voices.set(id, msg.voice);
         else this.voices.delete(id);
@@ -2644,6 +2646,10 @@ export class MachineManager {
       case 'timed_run_result':
         this.timedReport?.(id, msg);
         return;
+      case 'lab_fixture_result':
+      case 'lab_fixture_sent':
+        this.labFixtureReport?.(id, msg);
+        return;
       case 'bench_hours':
         this.benchHours?.(id, msg.rows);
         return;
@@ -2825,6 +2831,15 @@ export class MachineManager {
   /** w1996: a daemon's exclusive-bench hours (server/benchHoursStore.ts validates them). */
   benchHours?: (machineId: string, rows: unknown) => void;
   timedReport?: (machineId: string, msg: Extract<FromDaemon, { type: 'timed_run_status' | 'timed_run_done' | 'timed_run_result' }>) => void;
+
+  /** w3939: a daemon that holds the nightly lab's fixtures said hello, and what it answers of one (server/labFixtures.ts). */
+  onLabHolder?: (machineId: string) => void;
+  labFixtureReport?: (machineId: string, msg: Extract<FromDaemon, { type: 'lab_fixture_result' | 'lab_fixture_sent' }>) => void;
+
+  /** Whether a machine's daemon is online and holds the nightly lab's fixtures (w3939: its hello offered `labFixtures`). */
+  offersLabFixtures(machineId: string): boolean {
+    return this.isOnline(machineId) && !!this.hellos.get(machineId)?.labFixtures;
+  }
 
   /** Whether a machine's daemon is online and runs timed runs (w1946: its hello offered `timedRuns`). */
   offersTimedRuns(machineId: string): boolean {
