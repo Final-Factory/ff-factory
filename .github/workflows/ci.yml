@@ -167,6 +167,14 @@ jobs:
             echo "update=true" >> "$GITHUB_OUTPUT"
             echo "::warning::Rendering visual baselines instead of comparing them; commit the linux-snapshots artifact into e2e/__screenshots__/."
           fi
+      - name: FORCED FAILURE (w3942 scaffolding, removed before merge) - every Ubuntu mirror unreachable
+        if: steps.need.outputs.run == 'true'
+        run: |
+          for h in azure.archive.ubuntu.com archive.ubuntu.com security.ubuntu.com mirrors.edge.kernel.org; do
+            echo "10.255.255.1 $h" | sudo tee -a /etc/hosts
+          done
+          if timeout 15 curl -sS -o /dev/null http://archive.ubuntu.com/ubuntu/; then echo "::error::archive still reachable"; exit 1; fi
+          echo "archive.ubuntu.com and its mirrors now hang, as on 2026-11-11"
       - name: The browser cache's key
         # The runner image, the Playwright version and the browsers: cached .debs fit only the image that fetched them.
         if: steps.need.outputs.run == 'true'
