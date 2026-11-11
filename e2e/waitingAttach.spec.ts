@@ -16,6 +16,19 @@ import { waitingCases } from '../server/fixtures/waitingCards.ts';
 // The app's service worker (web/public/sw.js) takes the page's requests in WebKit, where page.route never sees them.
 test.use({ serviceWorkers: 'block' });
 
+// Its own login (e2e/server.ts, "attacher"): other files' cards on the owner's Waiting on input tab came and went above
+// this file's card while a click was on its way, the paperclip moved between mousedown and mouseup, the click landed
+// beside it, and no file chooser opened (w3945; Playwright checks the target of the first pointer event only).
+const asAttacher = test.extend<{ attacher: Page }>({
+  attacher: async ({ page }, use) => {
+    await signIn(page, 'attacher', 'e2e-password-814');
+    await page.goto('/');
+    await expect(page.locator('.sidebar')).toBeAttached();
+    await use(page);
+    await page.unrouteAll({ behavior: 'ignoreErrors' });
+  },
+});
+
 const PNG = Buffer.from(RED_PNG, 'base64');
 
 type Sent = Extract<TranscriptEvent, { kind: 'user' }> & { attachments?: DeliveredAttachment[] };
@@ -48,7 +61,7 @@ const shot = async (page: Page, card: ReturnType<Page['getByTestId']>, name: str
   await card.screenshot({ path: path.join(dir, `${name}-${isMobile(page) ? 'narrow' : 'desktop'}.png`) });
 };
 
-test('w1912: a question of your orchestrator takes a pasted screenshot, a picked file and a dropped log, shows each with a remove control, and the answer carries them', async ({ authed: page }) => {
+asAttacher('w1912: a question of your orchestrator takes a pasted screenshot, a picked file and a dropped log, shows each with a remove control, and the answer carries them', async ({ attacher: page }) => {
   const tag = uniq('wa');
   const me = await appState(page.request);
   await useTool(page.request, me.orchestratorId, 'ask_person', {
@@ -102,7 +115,7 @@ test('w1912: a question of your orchestrator takes a pasted screenshot, a picked
   }).toPass({ timeout: 15_000 });
 });
 
-test('w1912: a file alone is an answer, and a click on an option carries the files with it', async ({ authed: page }) => {
+asAttacher('w1912: a file alone is an answer, and a click on an option carries the files with it', async ({ attacher: page }) => {
   const tag = uniq('wb');
   const me = await appState(page.request);
   await useTool(page.request, me.orchestratorId, 'ask_person', {
@@ -140,7 +153,7 @@ test('w1912: a file alone is an answer, and a click on an option carries the fil
   expect(alone?.attachments?.map((a) => a.name)).toEqual(['image.png']);
 });
 
-test('w1912: a file over the limit is refused in the box, before any upload', async ({ authed: page }) => {
+asAttacher('w1912: a file over the limit is refused in the box, before any upload', async ({ attacher: page }) => {
   const tag = uniq('wc');
   const me = await appState(page.request);
   await useTool(page.request, me.orchestratorId, 'ask_person', { question: `Limits for ${tag}?`, options: [{ label: `A ${tag}`, description: 'What it does.' }, { label: `B ${tag}`, description: 'What it does.' }] });

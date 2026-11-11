@@ -119,7 +119,10 @@ Three from the Playwright flakes (w1758):
   `signIn(page, user, password)` in `e2e/fixtures.ts`, the logins in `e2e/server.ts`). The owner's chat takes every other
   file's messages and pictures while a test runs: it scrolled under a tap ("element is not stable", then no request: the
   reaction and the question answer, 20 CI failures) and moved the rows a test had measured. Tagging what you count is not
-  enough when the test touches the layout.
+  enough when the test touches the layout. The same holds for the owner's Waiting on input tab (w3945): other files' cards
+  come and go above yours, and a click whose target moves between mousedown and mouseup reports done and does nothing
+  (Playwright checks the target of the first pointer event only), so a `click()` that passes and is then followed by a
+  timeout waiting for its effect is a layout shift until shown otherwise.
 - **An element screenshot hides the global notice bars** (`.gbars { display: none }`): a parallel test raises one on the
   shared server and it takes 35 px off whatever the shot frames (`e2e/visual.spec.ts`).
 - **A CI step's time limit and retry are part of the job and survive a move between runners**: w1194's move back to GitHub's

@@ -92,6 +92,14 @@ Known causes, so a future failure can be named at once:
     socket after 5 s and Playwright's agent keeps its own forever; the e2e server waits 65 s.
   - `Test timeout of 30000ms exceeded` (4): passing WebKit tests took up to 30.2 s; the timeout is 60 s.
   - The browser install hung on the Ubuntu mirror until the job's 20 minutes (3 on 2026-10-22): see the first item.
+- **`waitingAttach` "a question of your orchestrator takes ... a picked file" timed out on WebKit waiting for the file
+  chooser** (w3945, run 43065049689, once in 120 runs scanned): the click on Attach files had completed (a click still
+  pending is reported as `locator.click` with its call log; this one was `page.waitForEvent`). `waitingCards.spec.ts` ran
+  beside it and added and answered cards on the same owner's Waiting on input tab, above this file's card, so the
+  paperclip moved under the click: a page that grows a block above a button on mousedown reproduces it every time
+  (`pointerdown`/`mousedown` on the button, `mouseup` on the block, `click` on `body`, no chooser, and Playwright says
+  "click action done"), and a local stress of both files lost a click on Send the same way once in 80. The file's owner-tab
+  tests run on a login of their own (`attacher`, e2e/server.ts).
 - **Two traps of a new e2e test** (w1831, PR #550):
   - `page.goto('/#/x')` on a page already at `/` only changes the hash: no load, so a speech fake or any other
     `addInitScript` added since never runs (w1831: the mic found no fake voice). `page.reload()` after it.
