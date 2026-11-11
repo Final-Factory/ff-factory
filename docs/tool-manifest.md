@@ -36,7 +36,7 @@ The groups (`TOOL_GROUPS`), picked from what the tools are used for together:
 | `spend` | `spend_report` |
 | `admin` | `set_app_config`, `set_ffbox_config`, `set_pool`, `request_app_update`, `republish_public` |
 | `standing` | the standing-agent and delegation tools, `request_delegation`, `my_delegations` |
-| `review` | `attach_review_file`, `publish_review`, `publish_attachment`, `fetch_attachment` |
+| `review` | `attach_review_file`, `publish_review`, `publish_attachment`, `fetch_attachment`, `fetch_lab_fixture` |
 | `chat` | `/mcp`'s `ask_orchestrator`, `orchestrator_transcript`, `orchestrator_send`, `orchestrator_inbox`, `orchestrator_attach` |
 
 `set_label` is listed as retired (w575): in `CATALOG` so an old worker gets an answer, given to no kind.

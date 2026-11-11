@@ -70,6 +70,7 @@ import { isMidTurn, midTurnRefusal, othersMidTurn, snapshotOf, type OptionsFacto
 import { FLAG_LABEL, SET_BLOCKER_KINDS, WORK_BLOCKER_KINDS, WORK_OPEN, WORK_PRIORITIES, type WorkBlockerKind, type WorkSource, type BenchPriority, type BenchGrant, type BenchAway, type AttachmentRef, type DeliveredAttachment, type ImageInput, type PermissionMode, type Requester, type Sandbox, type SessionInfo, type TranscriptEvent, type WorkItem, type WorkPriority, type WorkStatus } from '../shared/types.ts';
 import { attachmentForMachine, publicRef, publishableFile, publishedFilesBlock, uploadForMachine, type AttachmentStore } from './attachments.ts';
 import type { TimedDelivery, TimedRuns } from './timedRuns.ts';
+import type { LabFixtures } from './labFixtures.ts';
 import { timedRoute } from './timedDelivery.ts';
 import { REVIEW_DEFAULTS, type ReviewStore } from './review.ts';
 import { ReportError, type ReportStore } from './reports.ts';
@@ -310,6 +311,8 @@ const FFBOX_LIST_TOOL = `See what FFBox (Lothsahn's build server) holds for a cr
 /** file_ffbox_symbols' description (w1639; docs/ffbox.md, "Symbols of an urgent-lane build"). */
 const TIMED_RUN_TOOL = `Time players on another computer (w1946, w1996): a play-only computer (no editor, it only plays the game) or a small worker computer that takes timed runs (LothLaptop), under that computer's exclusive bench ticket, so your A/B is measured away from your own computer's editors and builds and its turn idles few slots. On a big computer (BEAST, LothDesktop) this is how a player A/B is timed: timed_place names the computer. Build the players where you are (the build before your change and the build with it; a Windows player folder each), copy the save into your temp folder, then call this with builds [{ name, path, args? }] and save. Your computer sends the pieces of the builds the portal lacks (a later run sends only what changed), and the timing machine plays the game repo's interleaved A/B legs (scripts/bench/probe_ab_win.sh: solo, the save, the perf probe after the settle, the order flipped on even rounds) and sends the logs back. It answers once the pieces are sent, with the run id and its bound: end your turn with a wake_me check-in of that bound; FF Factory messages you with the table and the logs (a .tar.gz in your Inbox, probe_ab_win.sh's layout) when it ends. Compare its numbers only with the same machine's own (machine: the computer an earlier run used). args: -ff switches, and Unity's -force-device-index N to pick the GPU (w2456: e.g. a laptop's integrated GPU beside its discrete one; Player.log's "Direct3D:" Renderer line names the GPU a leg used). Refused when no computer takes a timed run: then ask timed_place.`;
 const FFBOX_FILE_SYMBOLS_TOOL = `Put an urgent-lane release's symbols into FFBox's symbol store, where list_ffbox_files and fetch_ffbox_symbols find them and FFBox's crash and desync diagnosis reads them. Only for a release built on BEAST or LothDesktop (the game repo's scripts/release/urgent_release.py packs the archives and prints this step); FFBox files only a version the urgent lane claimed, never over symbols it filed itself. First publish_attachment each archive the run lists, then call this with version and entries: one per app and platform, { app: main|demo, platform: WindowsPlayer|OSXPlayer|LinuxPlayer, attachment: its att_ id } (an archive shared by main and the demo is one attachment, named in both). It sends each archive to FFBox in checked parts over FFBox's own link to this portal and asks FFBox to file each build; it answers within about 40 s with how far it got. Call it again with just the version until every build says filed (a release takes minutes), then check list_ffbox_files what "symbols" with the version.`;
+/** fetch_lab_fixture's description, the same on every worker (server/labFixtures.ts, w3939). */
+const LAB_FIXTURE_TOOL = `Fetch a nightly e2e lab fixture (a players' save a scenario names as "save": "lab:<file>") into ${INBOX_DIR}/ in your working folder by its SHA-256, which the scenario's \`source\` text gives. The lab's fixtures live in <root>/nightly-history/fixtures of the computer that runs the night (lothdesktop); this takes the file from there, or from the portal's copy when that computer is off, whichever computer you are on. Read-only on the holder, SHA-256 checked. Then copy it to $FF_WORKER_ROOT/nightly-history/fixtures/<name> so scripts/nightly/ffnightly.py finds lab:<name>. With no holder online and no copy, the answer says so: wake_me 30 and call again; never ask a person to bring a computer online.`;
 /** fetch_ffbox_symbols' description, the same on every worker (docs/ffbox.md, "Release symbols and diagnosis files", w1542). */
 const FFBOX_SYMBOLS_TOOL = `Fetch one release symbol file from FFBox's symbol store into ${INBOX_DIR}/ in your working folder, e.g. the real lib_burst_generated.pdb of 1.0.0.0 to symbolicate a player's dump (never a dev build's pdb for a release's crash). file: its name as list_ffbox_files what "symbols" lists it; version (e.g. "1.0.0.0") or commit picks the release; platform, app or id when the name is in more than one build. Read-only on FFBox. It comes in parts of 64 MiB, each SHA-256 checked, and the whole file at the end; the answer says the size, the time and the rate. Up to the portal's attachment limit a file (config attachments.maxMB; the answer names it when a file is bigger).`;
 
@@ -665,6 +668,8 @@ export class Agents {
   }
   /** Timed runs on play-only machines (w1946, server/timedRuns.ts); wired by index.ts. */
   timedRuns?: TimedRuns;
+  /** The nightly lab's fixtures for workers anywhere (w3939, server/labFixtures.ts); wired by index.ts. */
+  labFixtures?: LabFixtures;
   /** What each request costs (server/spend.ts, docs/spend.md); wired by index.ts. */
   spend?: SpendStore;
   /** Review media (docs/review.md): where publish_review puts workers' files. */
@@ -1158,6 +1163,7 @@ export class Agents {
             fetch_discord_thread_files: async (a) => this.threadFilesForMachine(m.id, info.id, a),
             list_ffbox_files: async (a) => this.listFfboxFiles(a),
             fetch_ffbox_symbols: async (a) => this.ffboxSymbolsForMachine(m.id, info.id, a),
+            fetch_lab_fixture: async (a) => this.labFixtureForMachine(m.id, a),
             file_ffbox_symbols: async (a) => this.fileFfboxSymbols(info, a),
             post_as_max: async (a) => this.postAsMaxFor(m.id, info.id, a),
             publish_review: async (a) => this.reviewPlan(m.id, info, a),
@@ -1185,6 +1191,7 @@ export class Agents {
           fetch_discord_thread_files: async (a) => this.threadFilesForMachine(m.id, info.id, a),
           list_ffbox_files: async (a) => this.listFfboxFiles(a),
           fetch_ffbox_symbols: async (a) => this.ffboxSymbolsForMachine(m.id, info.id, a),
+          fetch_lab_fixture: async (a) => this.labFixtureForMachine(m.id, a),
           file_ffbox_symbols: async (a) => this.fileFfboxSymbols(info, a),
           post_as_max: async (a) => this.postAsMaxFor(m.id, info.id, a),
           publish_review: async (a) => this.reviewPlan(m.id, info, a),
@@ -2203,6 +2210,12 @@ export class Agents {
     const f = await fetchFfboxSymbols(this.providers, this.attachments, { file: String(a.file ?? ''), version: s('version'), commit: s('commit'), platform: s('platform'), app: s('app'), id: s('id') }, by);
     this.attachments.grant(machineId, f.records.map((r) => r.id));
     return JSON.stringify({ text: f.text, refs: f.records.map(publicRef) });
+  }
+
+  /** fetch_lab_fixture on a machine (w3939): the record for its daemon to fetch into the agent's Inbox, or the words that say why not. */
+  private async labFixtureForMachine(machineId: string, a: Record<string, unknown>): Promise<string> {
+    if (!this.labFixtures) throw new Error('lab fixtures are not wired into this server');
+    return JSON.stringify(await this.labFixtures.fetch(machineId, a.sha256, a.name));
   }
 
   /**
@@ -4764,6 +4777,7 @@ When a person asked for a design or an analysis (a profile, an investigation, a 
           fetch_discord_thread_files: FFBOX_THREAD_FILES_TOOL,
           list_ffbox_files: FFBOX_LIST_TOOL,
           fetch_ffbox_symbols: FFBOX_SYMBOLS_TOOL,
+          fetch_lab_fixture: LAB_FIXTURE_TOOL,
           file_ffbox_symbols: FFBOX_FILE_SYMBOLS_TOOL,
           post_as_max: POST_AS_MAX_TOOL,
           publish_review: this.reviewToolText(),

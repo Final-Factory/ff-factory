@@ -82,6 +82,7 @@ import { benchTicketFor, queueTickets, type QueueTicket } from './benchQueue.ts'
 import { holdsOwnTicket, resumeRevokes, revokeTicket } from './benchRevoke.ts';
 import { readBenchHours } from './benchHours.ts';
 import { TimedRunner } from './timedRunner.ts';
+import { findFixtures, listFixtures, offeredDir, sendFixture } from './labFixtures.ts';
 import { timedRunFromMachine } from './timedRunPack.ts';
 import { readBenchState } from './benchState.ts';
 import { attachmentLine } from '../shared/attachments.ts';
@@ -1582,6 +1583,27 @@ export class Daemon {
     if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(msg));
   }
 
+  /**
+   * The portal's questions about the nightly lab's fixtures (w3939, machine/labFixtures.ts): their names, sizes and hashes,
+   * and one file sent by hash over an upload the portal opened. Read-only; answered even with no fixtures folder (a refusal).
+   */
+  private async labFixture(msg: Extract<ToDaemon, { type: 'lab_fixture' | 'lab_fixture_upload' }>) {
+    const dir = offeredDir(this.cfg.root);
+    try {
+      if (!dir) throw new Error('this computer holds no lab fixtures (no <worker root>/nightly-history/fixtures off drive C:)');
+      if (msg.type === 'lab_fixture') {
+        const files = msg.op === 'find' ? await findFixtures(dir, String(msg.sha256 ?? '')) : await listFixtures(dir);
+        this.send({ type: 'lab_fixture_result', id: msg.id, ok: true, files });
+      } else {
+        const attachmentId = await sendFixture(dir, msg.sha256, { portalUrl: this.cfg.portalUrl, token: this.cfg.token, uploadId: msg.uploadId, chunkBytes: msg.chunkBytes });
+        this.send({ type: 'lab_fixture_sent', id: msg.id, attachmentId });
+      }
+    } catch (e) {
+      log(`lab fixture ${msg.type}: ${(e as Error).message}`);
+      this.send(msg.type === 'lab_fixture' ? { type: 'lab_fixture_result', id: msg.id, ok: false, error: (e as Error).message } : { type: 'lab_fixture_sent', id: msg.id, error: (e as Error).message });
+    }
+  }
+
   /** Session records and transcript events are queued while disconnected, so a short outage loses nothing. */
   private out(msg: FromDaemon) {
     const data = JSON.stringify(msg);
@@ -1641,6 +1663,8 @@ export class Daemon {
       compact: true,
       // w1946: it plays timed runs for workers elsewhere (a worker install), and the ones it holds now.
       ...(this.timed ? { timedRuns: true, timedActive: this.timed.active() } : {}),
+      // w3939: it holds the nightly lab's fixtures (<root>/nightly-history/fixtures, never on C:) for the portal to copy.
+      ...(offeredDir(this.cfg.root) ? { labFixtures: true } : {}),
       // Its owner's pause (w1532): a paused machine is held and its workers hand their requests back.
       pause: this.pause.current(),
       // It updates, restarts and unloads itself on the portal's word over this link (w1596): a worker root install.
@@ -2374,6 +2398,20 @@ export class Daemon {
       }
       return [r.text, ...(lines.length ? ['In your Inbox (from FFBox\'s symbol store):', ...lines] : [])].join('\n');
     };
+    // fetch_lab_fixture (docs/intake.md, "Nightly e2e regressions", w3939): the portal has the lab's fixture from its store, or
+    // from the computer that holds them (up to 15 min for a big save), then it comes here like an attachment.
+    all.fetch_lab_fixture = async (args) => {
+      const r = JSON.parse(await call('fetch_lab_fixture', 1_200_000)(args)) as { text: string; refs: AttachmentRef[] };
+      const folder = this.entries.get(sessionId)?.spec?.cwd;
+      if (!folder) throw new Error('this session has no working folder on this machine yet');
+      const lines: string[] = [];
+      for (const ref of r.refs) {
+        const dest = await prepareInbox(folder, ref);
+        await fetchAttachment(this.cfg.portalUrl, this.cfg.token, ref, dest);
+        lines.push(attachmentLine({ ...ref, path: dest }));
+      }
+      return [r.text, ...(lines.length ? ['In your Inbox (a lab fixture):', ...lines] : [])].join('\n');
+    };
     // fetch_discord_thread_files (docs/ffbox.md, "Bug threads' files"): the same for the files of a Discord bug thread
     // (up to ten files, a query to FFBox each: a few minutes at most).
     all.fetch_discord_thread_files = async (args) => {
@@ -2791,6 +2829,10 @@ export class Daemon {
         return;
       case 'timed_run_upload':
         this.timed?.uploadReady(msg.id, msg.uploadId, msg.chunkBytes);
+        return;
+      case 'lab_fixture':
+      case 'lab_fixture_upload':
+        void this.labFixture(msg);
         return;
       case 'bench_revoke':
         // w3715: a worker's idle background work holds the bench lock; give its ticket back, and end its helper if it will not

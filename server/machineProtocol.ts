@@ -239,6 +239,14 @@ export type ToDaemon =
   | { type: 'timed_run'; order: TimedRunOrder }
   | { type: 'timed_run_upload'; id: string; uploadId: string; chunkBytes?: number }
   /**
+   * w3939 (server/labFixtures.ts, machine/labFixtures.ts): ask a machine that offered `labFixtures` about the nightly lab's
+   * fixtures, the players' saves in `<root>/nightly-history/fixtures`. `list`: every file there with its SHA-256; `find`:
+   * the one with this SHA-256. Answered by a `lab_fixture_result`. Read-only on its folder.
+   */
+  | { type: 'lab_fixture'; id: string; op: 'list' | 'find'; sha256?: string }
+  /** w3939: send the fixture with this SHA-256 over this upload (PUT /machine/attachments/uploads/<uploadId>); answered by a `lab_fixture_sent`. */
+  | { type: 'lab_fixture_upload'; id: string; sha256: string; uploadId: string; chunkBytes?: number }
+  /**
    * w2218: stop a timed run the portal no longer waits for (it gave up on it, moved it, finished it, or never knew it): a
    * queued one is dropped, the current one ends its leg and gives its ticket back, answered by a timed_run_done not ok. An
    * older daemon ignores it.
@@ -359,6 +367,8 @@ export type FromDaemon =
       /** It runs timed runs on a play-only machine (w1946, `timed_run`), and the ones it holds now, running first. An older portal ignores both. */
       timedRuns?: boolean;
       timedActive?: string[];
+      /** It holds the nightly lab's fixtures (w3939, `<root>/nightly-history/fixtures`, never on C:) and serves `lab_fixture` and `lab_fixture_upload`. An older portal ignores it. */
+      labFixtures?: boolean;
       /** Its owner's pause (w1532, machine/pause.ts): from its tray, its schedule or a person's input. An older portal ignores it. */
       pause?: MachinePause;
       /** It updates, restarts and unloads itself on the portal's word over this link (w1596, `self_update`, `daemon_control`): the version. An older portal ignores it. */
@@ -423,6 +433,10 @@ export type FromDaemon =
   | { type: 'cleanup_result'; id: string; ok: boolean; summary?: CleanupSummary; error?: string }
   /** A timed run's progress, its end (the table, the legs, the logs' size and hash) and the logs' attachment (w1946). */
   | TimedRunReport
+  /** The answer to a `lab_fixture` (w3939): the fixtures it holds that match, or why not. An older portal drops it. */
+  | { type: 'lab_fixture_result'; id: string; ok: boolean; files?: { name: string; size: number; sha256: string }[]; error?: string }
+  /** The end of a `lab_fixture_upload` (w3939): the attachment the portal made of it, or why it did not arrive. */
+  | { type: 'lab_fixture_sent'; id: string; attachmentId?: string; error?: string }
   /**
    * What the machine's exclusive bench tickets cost it, per UTC hour for the last 72 h (w1996, machine/benchHours.ts): at
    * connect and every hour. The portal merges the hours (server/benchHoursStore.ts). An older portal drops it.

@@ -278,6 +278,14 @@ export class AttachmentStore {
     return this.records.get(String(id ?? '').trim().toLowerCase());
   }
 
+  /** The newest record whose content has this SHA-256 (w3939: the lab fixtures' cache), or undefined. */
+  bySha(sha256: string): AttachmentRecord | undefined {
+    const sha = String(sha256 ?? '').toLowerCase();
+    let best: AttachmentRecord | undefined;
+    for (const r of this.records.values()) if (r.sha256 === sha && (!best || r.createdAt >= best.createdAt)) best = r;
+    return best;
+  }
+
   /**
    * What these worker sessions published (w2417), oldest first: a record that names its session, or an older one whose
    * source names it (`worker "<title>" (<session id> ...)`, Agents.publisher before the session field).

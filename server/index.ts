@@ -49,6 +49,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { keepMessageImages } from './inlineImages.ts';
 import { AttachmentError, AttachmentStore, downloadDisposition, machineAttachment, machineUploadHttp, publicRef } from './attachments.ts';
 import { TimedRuns } from './timedRuns.ts';
+import { LabFixtures } from './labFixtures.ts';
 import { BenchHoursStore } from './benchHoursStore.ts';
 import type { ToDaemon } from './machineProtocol.ts';
 import { REVIEW_DEFAULTS, ReviewStore, reviewHttp } from './review.ts';
@@ -569,6 +570,17 @@ agents.timedRuns = timedRuns;
 machines.timedRunsOn = (id) => timedRuns.runsOn(id).length;
 machines.timedHello = (id, active) => timedRuns.onHello(id, active);
 machines.timedReport = (id, msg) => timedRuns.onReport(id, msg);
+// The nightly lab's fixtures for workers on any computer (w3939): the portal's attachment store caches them, copied from the
+// computer that holds them (lothdesktop) when asked, and when its daemon says hello.
+const labFixtures = new LabFixtures({
+  store: attachments,
+  post: (id, msg) => machines.postTo(id, msg as ToDaemon),
+  holders: () => machines.list().filter((m) => machines.offersLabFixtures(m.id)).map((m) => m.id),
+  log: (line) => console.log(line),
+});
+agents.labFixtures = labFixtures;
+machines.onLabHolder = (id) => labFixtures.onHolder(id);
+machines.labFixtureReport = (id, msg) => labFixtures.onReport(id, msg);
 // What each machine's exclusive bench tickets cost it, per UTC hour (w1996): portal_logs source bench_hours.
 const benchHours = new BenchHoursStore({ dataDir: cfg.dataDir });
 machines.benchHours = (id, rows) => {
