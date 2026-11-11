@@ -30,7 +30,11 @@ Known causes, so a future failure can be named at once:
   (log ends at `azure.archive.ubuntu.com ... InRelease`). Each try gets 4 minutes; a try cut off has its `apt-get`
   ended (it holds dpkg's lock) and the second goes to Ubuntu's own archive instead of Azure's mirror (w922; w1194's move back
   to GitHub's runners lost the limit and w1758 put it back: 3 WebKit jobs hung there on 2026-10-22).
-  `scripts/e2e-legs.test.ts` fails a ci.yml whose browser install has no time limit, cleanup or second try.
+  `scripts/e2e-legs.test.ts` fails a ci.yml whose browser install has no time limit, cleanup or second try. On
+  2026-11-11 archive.ubuntu.com hung too (run 43057579193), so since w3942 the browsers and their `.debs` come from a
+  cache with no apt call (`scripts/playwright-browsers.sh`; `playwright-cache.yml` fills main's every day, keyed on the
+  runner image). A hang there now means a cache miss: a new runner image before the day's fill, or a new Playwright
+  version; the log's "came from the cache" notice is missing. A miss's second try goes to kernel.org's Ubuntu mirror first.
 - **A job shown "in progress" after it finished**: GitHub never marked it completed (5 times in 14 days, all "Commit
   identities are noreply"; on #294 the run sat 89 minutes until it was re-run). Re-run the run. On 2026-10-22 it held two
   pull requests' runs (CI of #532, 14 minutes; "Worker update end to end" of #533, 40) with every job completed green,
