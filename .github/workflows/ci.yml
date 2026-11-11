@@ -138,7 +138,7 @@ jobs:
           if [ "$EVENT" != pull_request ]; then echo "run=true" >> "$GITHUB_OUTPUT"; exit 0; fi
           files=$(git diff --name-only HEAD^1 HEAD)
           rest=$(grep -vE '^(docs/|changelog\.d/|deploy/|\.github/)|^[^/]+\.md$' <<<"$files" || true)
-          ci=$(grep -xF '.github/workflows/ci.yml' <<<"$files" || true)
+          ci=$(grep -xE '\.github/workflows/(ci|playwright-cache)\.yml' <<<"$files" || true)
           if [ -z "$rest" ] && [ -z "$ci" ]; then
             echo "run=false" >> "$GITHUB_OUTPUT"
             echo "::notice::No end-to-end tests: this change touches only docs, changelog notes, deploy/ or .github/."
@@ -167,27 +167,43 @@ jobs:
             echo "update=true" >> "$GITHUB_OUTPUT"
             echo "::warning::Rendering visual baselines instead of comparing them; commit the linux-snapshots artifact into e2e/__screenshots__/."
           fi
-      - name: This job's browser and its system libraries (both when rendering baselines)
+      - name: The browser cache's key
+        # The runner image, the Playwright version and the browsers: cached .debs fit only the image that fetched them.
         if: steps.need.outputs.run == 'true'
-        # 22 s median in Chromium and 37 s in WebKit, 55 s at most over 60 jobs of 2026-10-21/22 (w1758, measured). The Ubuntu
-        # mirror sometimes hangs or trickles instead: 3 WebKit jobs on 2026-10-22 sat in apt-get until the job's 20-minute
-        # timeout, and others took 207 and 827 s. Each try gets 4 minutes (w922 had 3 before w1194 lost it). A try cut off
-        # leaves its sudo apt-get holding dpkg's lock, so that is ended first, and the second try skips Azure's mirror for
-        # Ubuntu's own archive (the runner's mirror list); a second try on the same slow mirror failed the same way.
-        timeout-minutes: 10
-        shell: bash
+        id: pwkey
         env:
           BROWSERS: ${{ steps.snap.outputs.update == 'true' && 'chromium webkit' || matrix.browser }}
-        run: |
-          for try in 1 2; do
-            timeout 240 npx playwright install --with-deps $BROWSERS && exit 0
-            echo "::warning::The browser install (try $try) did not finish in 4 minutes: the Ubuntu mirror is slow or hung."
-            sudo pkill -x apt-get || true
-            for _ in $(seq 30); do sudo fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock >/dev/null 2>&1 || break; sleep 2; done
-            sudo dpkg --configure -a || true
-            sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt || true
-          done
-          exit 1
+        run: bash scripts/playwright-browsers.sh key >> "$GITHUB_OUTPUT"
+      - name: The browsers and their packages from the cache
+        if: steps.need.outputs.run == 'true'
+        id: pwcache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/ms-playwright
+            ~/.cache/playwright-debs
+          key: ${{ steps.pwkey.outputs.key }}
+      - name: This job's browser and its system libraries (both when rendering baselines)
+        if: steps.need.outputs.run == 'true'
+        # From the cache with no apt call whenever this runner image has one (playwright-cache.yml fills main's every day; a
+        # pull request's first run fills its own): on 2026-11-11 Azure's mirror and archive.ubuntu.com both hung (run
+        # 43057579193), which no retry on another mirror could pass (w3942). On a miss, `playwright install --with-deps` in
+        # two tries of 4 minutes, the second on Ubuntu's own archive (w1758; 22 s median in Chromium and 37 s in WebKit over
+        # 60 jobs, measured). scripts/playwright-browsers.sh says how.
+        timeout-minutes: 10
+        id: pwinstall
+        env:
+          BROWSERS: ${{ steps.pwkey.outputs.browsers }}
+          HIT: ${{ steps.pwcache.outputs.cache-hit }}
+        run: bash scripts/playwright-browsers.sh
+      - name: Keep the browsers and their packages for the next run
+        if: steps.pwinstall.outputs.save == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/ms-playwright
+            ~/.cache/playwright-debs
+          key: ${{ steps.pwkey.outputs.key }}
       - name: Build the web UI
         if: steps.need.outputs.run == 'true'
         run: npm --prefix web run build
