@@ -14,6 +14,7 @@ on the FFBox build server's runner containers (`ffgithubrunners`); those now ser
 | `vm-scripts.yml` `e2e` | `ubuntu-24.04` and `ubuntu-26.04` | root, systemd, ZFS, libvirt and KVM: each nests a VM |
 | `ops-socket.yml` (w638), only when its files change | `ubuntu-latest` | `sudo` and a running systemd |
 | `rerun-lost-runner.yml` `rerun` (w906) | `ubuntu-latest` | calls the API itself with its own `GITHUB_TOKEN` (`actions: write`) |
+| `playwright-cache.yml` `fill` (w3942) | `ubuntu-latest` | must match the `e2e` job's runner image: the cache key is that image |
 | `windows.yml`, `dev-drive.yml`, `worker-update.yml` (Windows) | `windows-latest` | Windows: elevated, the virtual disk service, PowerShell 5 and 7 |
 | `worker-update.yml` (macOS) | `macos-latest` | macOS, launchd |
 

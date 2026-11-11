@@ -1,0 +1,69 @@
+name: Playwright browser cache
+
+# w3942: fills main's cache of the Playwright browsers and the Ubuntu packages they need, one entry per browser and runner
+# image, so a pull request's e2e job installs them with no apt call (scripts/playwright-browsers.sh). A pull request can
+# read main's caches but not another pull request's, and ci.yml runs no e2e on main, so without this every pull request's
+# first run went to the Ubuntu archive, which hung on 2026-11-11 (run 43057579193). Daily, because GitHub moves
+# ubuntu-latest to a new image about once a week (a new key) and drops a cache nobody read for 7 days. A day whose entry
+# exists costs a lookup and nothing more.
+
+on:
+  schedule:
+    - cron: '17 5 * * *'
+  push:
+    branches: [main]
+    paths:
+      - package-lock.json
+      - scripts/playwright-browsers.sh
+      - .github/workflows/playwright-cache.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: 24
+
+jobs:
+  fill:
+    name: Cache ${{ matrix.browser }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, webkit]
+    env:
+      BROWSERS: ${{ matrix.browser }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: The cache's key
+        id: pwkey
+        run: bash scripts/playwright-browsers.sh key >> "$GITHUB_OUTPUT"
+      - name: Is this runner image's entry there
+        id: pwcache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/ms-playwright
+            ~/.cache/playwright-debs
+          key: ${{ steps.pwkey.outputs.key }}
+          lookup-only: true
+      - if: steps.pwcache.outputs.cache-hit != 'true'
+        run: npm ci --no-audit --no-fund
+      - name: The browser and its system libraries from the network
+        if: steps.pwcache.outputs.cache-hit != 'true'
+        id: pwinstall
+        timeout-minutes: 10
+        run: bash scripts/playwright-browsers.sh
+      - name: Keep them for pull requests
+        if: steps.pwinstall.outputs.save == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/ms-playwright
+            ~/.cache/playwright-debs
+          key: ${{ steps.pwkey.outputs.key }}
