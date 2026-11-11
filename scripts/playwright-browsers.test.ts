@@ -102,7 +102,7 @@ test('playwright-browsers: a miss gets through a hung first try and keeps its .d
   assert.equal(r.status, 0, r.out);
   assert.match(r.out, /try 1\) did not finish/);
   assert.match(r.calls, /pkill -x apt-get/);
-  assert.doesNotMatch(r.mirrors, /azure/, 'the second try leaves Azure\'s mirror');
+  assert.equal(r.mirrors, 'http://mirrors.edge.kernel.org/ubuntu/\nhttp://archive.ubuntu.com/ubuntu/\n', 'the second try goes to kernel.org\'s mirror, then Ubuntu\'s archive');
   assert.deepEqual(r.debs, ['libbar_1_amd64.deb', 'libfoo_1_amd64.deb']);
   assert.match(r.ghOutput, /^save=true$/m);
 });

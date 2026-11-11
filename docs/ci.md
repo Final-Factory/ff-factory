@@ -34,7 +34,7 @@ Known causes, so a future failure can be named at once:
   2026-11-11 archive.ubuntu.com hung too (run 43057579193), so since w3942 the browsers and their `.debs` come from a
   cache with no apt call (`scripts/playwright-browsers.sh`; `playwright-cache.yml` fills main's every day, keyed on the
   runner image). A hang there now means a cache miss: a new runner image before the day's fill, or a new Playwright
-  version; the log's "came from the cache" notice is missing.
+  version; the log's "came from the cache" notice is missing. A miss's second try goes to kernel.org's Ubuntu mirror first.
 - **A job shown "in progress" after it finished**: GitHub never marked it completed (5 times in 14 days, all "Commit
   identities are noreply"; on #294 the run sat 89 minutes until it was re-run). Re-run the run. On 2026-10-22 it held two
   pull requests' runs (CI of #532, 14 minutes; "Worker update end to end" of #533, 40) with every job completed green,

@@ -10,9 +10,11 @@
 #
 # HIT=true: install the cached .debs with dpkg and check the browsers with `playwright install` (both offline). If either
 # fails, fall through to the network path below. HIT anything else: the network path, `playwright install --with-deps`,
-# in tries of TRY_SECONDS; a try cut off has its apt-get ended (it holds dpkg's lock) and the second skips Azure's mirror
-# for Ubuntu's own archive (the runner's mirror list). After a network install the fetched .debs are kept in DEBS and
-# `save=true` goes to GITHUB_OUTPUT, so the job saves the cache.
+# in tries of TRY_SECONDS; a try cut off has its apt-get ended (it holds dpkg's lock) and the second goes to kernel.org's
+# Ubuntu mirror, then Ubuntu's own archive (the runner's mirror list). On 2026-11-11 the runners reached neither Azure's
+# mirror nor archive.ubuntu.com for 20 minutes and more (runs 43057579193 and 43060498565: each file "Ign" after 20 s)
+# while both answered from elsewhere, so a miss needs a mirror on other hosts to fill the cache at all. After a network install
+# the fetched .debs are kept in DEBS and `save=true` goes to GITHUB_OUTPUT, so the job saves the cache.
 #
 # Env: BROWSERS (e.g. "chromium" or "chromium webkit"), HIT (the cache restore's cache-hit).
 # Overridable for scripts/playwright-browsers.test.ts: TRY_SECONDS, DEBS, APT_ARCHIVES, APT_CONF, APT_MIRRORS.
@@ -25,6 +27,7 @@ DEBS=${DEBS:-$HOME/.cache/playwright-debs}
 APT_ARCHIVES=${APT_ARCHIVES:-/var/cache/apt/archives}
 APT_CONF=${APT_CONF:-/etc/apt/apt.conf.d/99-ff-keep-debs}
 APT_MIRRORS=${APT_MIRRORS:-/etc/apt/apt-mirrors.txt}
+FALLBACK_MIRROR=http://mirrors.edge.kernel.org/ubuntu/
 OUT=${GITHUB_OUTPUT:-/dev/null}
 
 # `playwright-browsers.sh key`: the cache key and the browsers, as GITHUB_OUTPUT lines. ImageOS and ImageVersion are GitHub's
@@ -79,6 +82,8 @@ for try in 1 2; do
   sudo pkill -x apt-get || true
   for _ in $(seq 30); do sudo fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock >/dev/null 2>&1 || break; sleep 2; done
   sudo dpkg --configure -a || true
-  sudo sed -i '/azure\.archive\.ubuntu\.com/d' "$APT_MIRRORS" || true
+  # kernel.org's mirror first, off Canonical's and Azure's hosts, then Ubuntu's own archive: apt moves to the next mirror
+  # in this list when a file fails on one.
+  printf '%s\n' "$FALLBACK_MIRROR" http://archive.ubuntu.com/ubuntu/ | sudo tee "$APT_MIRRORS" >/dev/null || true
 done
 exit 1
