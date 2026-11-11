@@ -162,6 +162,8 @@ export const TOOL_MANIFEST = {
   publish_review: { group: 'review', kinds: [W] },
   publish_attachment: { group: 'review', kinds: [W] },
   fetch_attachment: { group: 'review', kinds: [W] },
+  // w3939: a nightly lab fixture by SHA-256, from the computer that holds the lab's or the portal's copy.
+  fetch_lab_fixture: { group: 'review', kinds: [W] },
   // chat
   ask_orchestrator: { group: 'chat', kinds: [R] },
   orchestrator_transcript: { group: 'chat', kinds: [R] },

@@ -124,7 +124,10 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // field by field and drops it (a full decode, only slower), and an older portal never sends it.
 // w3715 (no bump): `bench_revoke`, the portal taking back a bench ticket an idle worker's work holds; an older daemon drops it
 // (no default case), so the ticket is held as before until the leftovers or its owner end it; an older portal never sends it.
-const DECIDED = { protocol: 9, fingerprint: '4a1cd0d389e76a53' };
+// w3939 (no bump): `labFixtures` in the hello, `lab_fixture`/`lab_fixture_upload`, sent only to a daemon that offered it, and their
+// answers `lab_fixture_result`/`lab_fixture_sent`; an older portal ignores the hello field and drops the answers (no default case),
+// and an older daemon is never sent either.
+const DECIDED = { protocol: 9, fingerprint: 'a2b88e6d457af89f' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

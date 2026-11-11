@@ -52,7 +52,7 @@ const START_MS = 60_000;
 /**
  * How long a host waits for its daemon to answer a tool call before the call fails (w799): a daemon that dropped the
  * session never answers, and the agent hung on it. The longest a daemon's own handler may take is 15 min (a release's
- * symbol file: fetch_ffbox_symbols, w1542; a Discord thread's files take 10: fetch_discord_thread_files) plus the
+ * symbol file: fetch_ffbox_symbols, w1542; a lab fixture, 15 plus a minute to look: fetch_lab_fixture, w3939; a Discord thread's files take 10: fetch_discord_thread_files) plus the
  * downloads; 20 min is a guess with margin over that. A call that can take longer answers before it and goes on in the
  * background (timed_run's sending, w2928: machine/timedRunPack.ts ANSWER_WITHIN_MS).
  */

@@ -347,6 +347,11 @@ export const CATALOG = {
     app: z.string().max(16).optional().describe('main or demo, when the name is in both.'),
     id: z.string().max(48).optional().describe('The debug id or code id, as list_ffbox_files lists it, when the name is in more than one build.'),
   },
+  /** docs/intake.md, "Nightly e2e regressions" (w3939). The portal finds the fixture on the computer that holds the lab's, or in its store; the daemon puts it in the Inbox. */
+  fetch_lab_fixture: {
+    sha256: z.string().max(64).describe("The fixture's SHA-256, 64 hex digits, as the scenario's `source` gives it (scripts/nightly/scenarios/*.json)."),
+    name: z.string().max(128).optional().describe("The file name the scenario names after lab: (e.g. w1440-lifesave-0.50.0.105.zip), checked against the fixture's."),
+  },
   /** docs/ffbox.md, "Symbols of an urgent-lane build" (w1639). The portal sends the published archives to FFBox; nothing on the machine is read. */
   file_ffbox_symbols: {
     version: z.string().max(32).describe('The release, e.g. "1.0.0.3".'),

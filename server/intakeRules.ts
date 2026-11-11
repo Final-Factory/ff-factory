@@ -951,6 +951,8 @@ export function workerRules(w: Pick<WorkItem, 'id' | 'source' | 'brief' | 'triag
         ? [`- Failing scenarios (${s.nightly.scenarios.length}, every one): ${s.nightly.scenarios.join(', ')}. \`read_work ${w.id}\` has each one's step and reason at the top of its brief; a section the brief left out for length is whole in the report on its Reports line (read_report, from any computer). Never wait on a person or the lab for a scenario's facts.`]
         : []),
       '- Reproduce it first: `python3 scripts/nightly/ffnightly.py run --scenario <id> --no-retry` on a player built from the commit tested (specs/075-nightly-e2e-regression/quickstart.md; players launch from the slot pool, never a new exe path). Say in your report whether it reproduced.',
+      // w3939: beast's worker waited 3 h for a fixture only lothdesktop held
+      '- A scenario whose world names `lab:<file>` needs that lab fixture: if `$FF_WORKER_ROOT/nightly-history/fixtures/<file>` is missing, call `fetch_lab_fixture` with the sha256 its `source` gives and copy it there. Never wait on a person or the orchestrator for it.',
       "- Then fix the game bug, or, when the scenario is what is wrong, fix the scenario with the evidence for why. Never loosen an oracle, add an allowlist line or quarantine a scenario to hide a real regression; a quarantine is Ben's call.",
       '- It is determinism-critical: follow CLAUDE.md (fp math, the crown-jewel surfaces, save compatibility) and verify a multiplayer fix with the determinism audit. Show the scenario red before and green after.',
       "- A regression the nightly missed until now gets its entry in scripts/nightly/ledger.json by that file's rule.",
