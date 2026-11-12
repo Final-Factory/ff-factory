@@ -4,7 +4,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { LEFTOVER, LeftoverReaper, waitLoop, callerPids, envFrom, installLeftoversShim, kindOf, macEnvLine, orphanVerdict, ownLeftovers, personGames, readEnvs, readLeases, realInspect, sameRoot, sessionVerdict, slotOf, tempSessionInArgs, tempSessionOf, type LeftoverDeps, type PlayerLease, type ProcEnv } from '../machine/leftovers.ts';
+import { LEFTOVER, LeftoverReaper, waitLoop, callerPids, envFrom, installLeftoversShim, kindOf, macEnvLine, orphanVerdict, ownLeftovers, personGames, readEnvs, readLeases, realInspect, sameRoot, sessionVerdict, sessionTempRoot, msysParents, slotOf, tempSessionInArgs, tempSessionOf, type LeftoverDeps, type PlayerLease, type ProcEnv } from '../machine/leftovers.ts';
 import { realDeps as realUnityDeps, type Proc, type UnityPlatform } from '../machine/unity.ts';
 import { playerText, unitySlotsLine } from '../shared/fleet.ts';
 
@@ -783,8 +783,55 @@ test('ff-leftovers on Windows (w3637): a native program a Git Bash script left r
   const env = new Map<number, ProcEnv>([4584, 35268, 55384, 43776, 52636, 52700].map((pid) => [pid, { session: 'me', machine: 'beast' }]));
   const born = (pid: number) => (pid === 52636 ? 1_000_015 : 1_000_000);
   const mine = ownLeftovers('me', procs, env, 43776, 'win32', { callers: callerPids('55384 32460'), born }).map((p) => p.pid);
+  // The script's bash names the session's temp folder, so it is listed too (w4000); without the temp root it is not.
   assert.deepEqual(mine, [52636, 52700]);
-  assert.ok(!mine.includes(4584), 'claude, whose parent is its agent host, is still never a leftover');
+  const named = ownLeftovers('me', procs, env, 43776, 'win32', { callers: callerPids('55384 32460'), born, tempRoot: 'F:\\ff\\tmp' }).map((p) => p.pid);
+  assert.deepEqual(named, [48876, 52636, 52700]);
+  assert.ok(!mine.includes(4584) && !named.includes(4584), 'claude, whose parent is its agent host, is still never a leftover');
+});
+
+test('ff-leftovers on Windows (w4000): a background `bash $TMPDIR/x.sh` sleep loop stopped with TaskStop is listed with its sleep, another worker\'s loop never', () => {
+  // lothdesktop, 2026-11-12, as Win32_Process and Git Bash's /proc showed it: after TaskStop the task's shells are gone; the
+  // script's bash (3916) has a Windows parent that exited (30688) and its `sleep` another (28824), and neither shows the
+  // reader an environment, so `ff-leftovers list` said "Nothing your session started is still running" (w3998, w3980: a
+  // `checks.sh` loop and its `cargo run` ran on after "None is left"). Beside it another worker's identical loop.
+  const W = (pid: number, ppid: number, name: string, cmd: string) => ({ pid, ppid, name, cmd });
+  const launcher = (pid: number, ppid: number, git: string) => W(pid, ppid, 'bash.exe', `"C:\\Program Files\\Git\\${git}\\bash.exe" -c "source /c/Users/u/.claude/shell-snapshots/s.sh 2>/dev/null || true && export TEMP='V:\\ffw\\tmp\\ffa-me' TMP='V:\\ffw\\tmp\\ffa-me' && eval 'ff-leftovers end' < /dev/null"`);
+  const procs: Proc[] = [
+    W(21376, 31748, 'node.exe', '"C:\\nvm4w\\nodejs\\node.exe" D:\\work\\ffw\\daemon\\app\\machine\\agentHost.ts D:\\work\\ffw\\daemon\\hosts\\me'),
+    W(25844, 21376, 'claude.exe', 'C:\\Users\\u\\.local\\bin\\claude.exe --output-format stream-json --verbose'),
+    W(54960, 25844, 'uvx.exe', 'C:/Users/u/uvx.exe --offline --from mcpforunityserver==10.0.0 mcp-for-unity'),
+    // This Bash tool call (its launcher names the temp folder too) and the shim.
+    launcher(11080, 25844, 'bin'),
+    launcher(32168, 11080, 'usr'),
+    W(55384, 44516, 'sh.exe', 'C:\\Program Files\\Git\\usr\\bin\\sh.exe /c/Users/u/.ff-factory/unity-slots/bin/ff-leftovers end'),
+    W(43776, 55384, 'node.exe', '"V:\\ffw\\tools\\node\\node.exe" D:/work/ffw/daemon/app/machine/leftovers.ts end'),
+    // The stopped task's loop, a `cargo run` it started and that cargo's child, and the loop's sleep.
+    W(3916, 30688, 'bash.exe', '"C:\\Program Files\\Git\\usr\\bin\\bash.exe" /v/ffw/tmp/ffa-me/x.sh'),
+    W(31896, 3916, 'cargo.exe', 'cargo run -p ffu-headless -- crosscheck'),
+    W(31900, 31896, 'ffu-headless.exe', 'target\\debug\\ffu-headless.exe crosscheck'),
+    W(29288, 28824, 'sleep.exe', '"C:\\Program Files\\Git\\usr\\bin\\sleep.exe" 5'),
+    // Another worker's loop and its sleep, and a CI runner's MSYS bash.
+    W(26916, 26000, 'bash.exe', '"C:\\Program Files\\Git\\usr\\bin\\bash.exe" /v/ffw/tmp/ffa-other/cost.sh'),
+    W(15944, 15000, 'sleep.exe', '"C:\\Program Files\\Git\\usr\\bin\\sleep.exe" 5'),
+    W(13376, 13000, 'bash.exe', '/usr/bin/bash --noprofile --norc -e -o pipefail V:\\ffw\\ffu-runners\\ffu\\_temp\\a.sh'),
+  ];
+  // Native programs show the session; MSYS ones show nothing (w1575). The shim's FF_LEFTOVERS_MSYS: each MSYS program's
+  // parent by Windows pid, as /proc gave it (the loop's own parent had exited: no entry).
+  const env = new Map<number, ProcEnv>([25844, 54960, 11080, 55384, 43776, 31896, 31900].map((pid) => [pid, { session: 'me' }]));
+  const msys = msysParents(' 32168:11080 55384:32168 29288:3916 15944:26916 bad 7:7');
+  assert.equal(msys.size, 4);
+  const o = { callers: callerPids('55384 32168 11080'), tempRoot: sessionTempRoot('me', { TEMP: 'V:\\ffw\\tmp\\ffa-me' }), msys };
+  assert.equal(o.tempRoot, 'V:\\ffw\\tmp');
+  assert.deepEqual(ownLeftovers('me', procs, env, 43776, 'win32', o).map((p) => p.pid), [3916, 31896, 31900, 29288]);
+  // The other worker's loop is its own, by either rule, and an older shim's call (no MSYS map) still finds the loop.
+  assert.deepEqual(ownLeftovers('other', procs, new Map(), 1, 'win32', { tempRoot: 'V:\\ffw\\tmp', msys }).map((p) => p.pid), [26916, 15944]);
+  assert.deepEqual(ownLeftovers('me', procs, env, 43776, 'win32', { ...o, msys: undefined }).map((p) => p.pid), [3916, 31896, 31900]);
+  // Before this, neither rule existed: the loop was missed, while cargo's environment kept it (and its child) listed.
+  assert.deepEqual(ownLeftovers('me', procs, env, 43776, 'win32', { callers: o.callers }).map((p) => p.pid), [31896, 31900]);
+  // Elsewhere every process shows its environment, so neither rule is used.
+  assert.deepEqual(ownLeftovers('me', procs, env, 43776, 'linux', o).map((p) => p.pid).includes(3916), false);
+  assert.equal(sessionTempRoot('me', { TEMP: 'C:\\Users\\u\\AppData\\Local\\Temp' }), undefined);
 });
 
 // ---------------------------------------------------------------- w3673: a wait loop an earlier agent host left

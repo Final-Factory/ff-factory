@@ -864,8 +864,20 @@ const SHELL = /^(bash|sh|zsh|dash|fish|cmd|powershell|pwsh)$/i;
  * parent (its agent host) does not. `callers`: more pids the chain is walked up from (the shim's MSYS parents, by their
  * Windows pids); `born`: start times, so a parent pid Windows reused for a newer process is no parent.
  */
-export function ownLeftovers(session: string, procs: Proc[], env: Map<number, ProcEnv>, selfPid: number, platform: UnityPlatform, o: { callers?: number[]; born?: (pid: number) => number | undefined } = {}): Proc[] {
+export function ownLeftovers(session: string, procs: Proc[], env: Map<number, ProcEnv>, selfPid: number, platform: UnityPlatform, o: { callers?: number[]; born?: (pid: number) => number | undefined; tempRoot?: string; msys?: Map<number, number> } = {}): Proc[] {
   const byPid = new Map(procs.map((p) => [p.pid, p]));
+  // A process's children: by its Windows parent, and on Windows also by its MSYS parent (the shim's map), since a Git Bash
+  // program's Windows parent is a fork that has exited. A child older than its parent is a reused pid's, no child.
+  const kids = new Map<number, number[]>();
+  const link = (parent: number, child: number) => {
+    if (parent === child) return;
+    const b = o.born?.(child);
+    const pb = o.born?.(parent);
+    if (b !== undefined && pb !== undefined && pb > b + 2_000) return;
+    kids.set(parent, [...(kids.get(parent) ?? []), child]);
+  };
+  for (const p of procs) link(p.ppid, p.pid);
+  for (const [child, parent] of o.msys ?? []) if (byPid.has(child) && byPid.get(child)!.ppid !== parent) link(parent, child);
   const chain = new Set<number>();
   for (const from of [selfPid, ...(o.callers ?? [])]) {
     for (let x = byPid.get(from); x && !chain.has(x.pid); x = byPid.get(x.ppid)) chain.add(x.pid);
@@ -894,7 +906,7 @@ export function ownLeftovers(session: string, procs: Proc[], env: Map<number, Pr
       const x = q.pop()!;
       if (into.has(x) || chain.has(x)) continue;
       into.add(x);
-      for (const c of procs) if (c.ppid === x && c.pid !== x) q.push(c.pid);
+      q.push(...(kids.get(x) ?? []));
     }
   };
   // What the worker's own chain (claude, its host: the members carrying its session, not init or a terminal) runs that is
@@ -910,9 +922,25 @@ export function ownLeftovers(session: string, procs: Proc[], env: Map<number, Pr
     command.add(from);
     for (let x = byPid.get(byPid.get(from)?.ppid ?? -1); x && !command.has(x.pid) && SHELL.test(programOf(x, platform)); x = byPid.get(x.ppid)) command.add(x.pid);
   }
-  for (const p of procs) if (command.has(p.ppid) && !chain.has(p.pid)) sub(p.pid, skip);
+  for (const c of command) for (const k of kids.get(c) ?? []) if (!chain.has(k)) sub(k, skip);
   for (const u of unityProcesses(procs, platform)) if (u.kind === 'interactive') sub(u.pid, skip);
   for (const p of procs) if (!chain.has(p.pid) && !skip.has(p.pid) && ours(p.pid)) out.add(p.pid);
+  // On Windows a Git Bash program shows no environment, and a background task stopped with TaskStop leaves its script's
+  // bash and what that runs with parents that have exited (w4000: lothdesktop, 2026-11-12, `bash $TMPDIR/checks.sh` and its
+  // `cargo run` kept running after "None is left", w3998 and w3980). So there a process whose command line names this
+  // session's temp folder (and no other's) is the session's, and so is everything under one of the session's processes,
+  // by Windows or MSYS parent, that carries no other session.
+  if (platform === 'win32') {
+    const theirs = (pid: number) => env.get(pid)?.session !== undefined && !ours(pid);
+    const named = (p: Proc) => (tempSessionOf(p.cmd, o.tempRoot, platform) ?? tempSessionInArgs(p.cmd, o.tempRoot, platform)) === session;
+    const q = procs.filter((p) => !chain.has(p.pid) && !skip.has(p.pid) && !theirs(p.pid) && named(p)).map((p) => p.pid);
+    q.push(...out);
+    while (q.length) {
+      const x = q.pop()!;
+      out.add(x);
+      for (const c of kids.get(x) ?? []) if (!out.has(c) && !chain.has(c) && !skip.has(c) && !theirs(c) && byPid.has(c)) q.push(c);
+    }
+  }
   return procs.filter((p) => out.has(p.pid));
 }
 
@@ -1127,13 +1155,22 @@ export async function leftoversMain(argv: string[], e: NodeJS.ProcessEnv = proce
   }
   const { realDeps } = await import('./unity.ts');
   const hands = realDeps(platform);
-  const procs = await hands.procs();
-  const env = await readEnvs(platform, procs.map((p) => p.pid));
-  // The session's processes and their parents: start times, so a reused parent pid is told from the agent's host.
-  const sessionPids = procs.filter((p) => env.get(p.pid)?.session === session).flatMap((p) => [p.pid, p.ppid]);
-  const facts = new Map((await realInspect(platform)(sessionPids).catch(() => [] as ProcFacts[])).map((f) => [f.pid, f]));
-  const mine = ownLeftovers(session, procs, env, process.pid, platform, { callers: callerPids(e.FF_LEFTOVERS_CALLERS), born: (pid) => facts.get(pid)?.startedAt });
-  const topBatch = new Set(unityProcesses(procs, platform).filter((u) => u.kind === 'batch').map((u) => u.pid));
+  const tempRoot = sessionTempRoot(session, e);
+  const msys = msysParents(e.FF_LEFTOVERS_MSYS);
+  const facts = new Map<number, ProcFacts>();
+  let topBatch = new Set<number>();
+  const scan = async () => {
+    const procs = await hands.procs();
+    const env = await readEnvs(platform, procs.map((p) => p.pid));
+    // The session's processes and their parents, and what names its temp folder: start times, so a reused parent pid is
+    // told from the agent's host.
+    const named = procs.filter((p) => tempSessionInArgs(p.cmd, tempRoot, platform) === session || tempSessionOf(p.cmd, tempRoot, platform) === session);
+    const sessionPids = [...procs.filter((p) => env.get(p.pid)?.session === session), ...named].flatMap((p) => [p.pid, p.ppid, ...(msys.has(p.pid) ? [msys.get(p.pid)!] : [])]);
+    for (const f of await realInspect(platform)(sessionPids.filter((p) => !facts.has(p))).catch(() => [] as ProcFacts[])) facts.set(f.pid, f);
+    topBatch = new Set(unityProcesses(procs, platform).filter((u) => u.kind === 'batch').map((u) => u.pid));
+    return ownLeftovers(session, procs, env, process.pid, platform, { callers: callerPids(e.FF_LEFTOVERS_CALLERS), born: (pid) => facts.get(pid)?.startedAt, tempRoot, msys });
+  };
+  const mine = await scan();
   const line = (p: Proc) => {
     const born = facts.get(p.pid)?.startedAt;
     const age = born === undefined ? '' : ` up ${ago(Date.now() - born)}`;
@@ -1147,22 +1184,50 @@ export async function leftoversMain(argv: string[], e: NodeJS.ProcessEnv = proce
     process.stdout.write(`Still running from your session (${session}): ${mine.length}\n${mine.map(line).join('\n')}\n\`ff-leftovers end\` ends them; FF Factory ends them anyway a few minutes after your process stops.\n`);
     return 0;
   }
-  for (const p of mine) hands.kill(p.pid, 'SIGTERM');
-  await new Promise((r) => setTimeout(r, LEFTOVER.TERM_WAIT_MS));
-  const after = await hands.procs();
-  const left = mine.filter((p) => after.some((x) => x.pid === p.pid && x.cmd === p.cmd));
-  for (const p of left) hands.kill(p.pid, 'SIGKILL');
-  await new Promise((r) => setTimeout(r, 500));
-  const still = (await hands.procs()).filter((x) => left.some((p) => p.pid === x.pid && p.cmd === x.cmd));
-  process.stdout.write(`Ended ${mine.length - still.length} of ${mine.length} process(es) your session (${session}) started${left.length ? ` (${left.length} needed SIGKILL)` : ''}:\n${mine.map(line).join('\n')}\n${still.length ? `Still running: ${still.map((p) => p.pid).join(', ')}\n` : 'None is left.\n'}`);
-  return still.length ? 1 : 0;
+  // Ended, then looked for again: a loop can start its next child between the list and the kill, so "None is left" is said
+  // only when a fresh scan finds nothing (w4000).
+  const ended: Proc[] = [];
+  let killed = 0;
+  let todo = mine;
+  for (let round = 0; todo.length && round < 3; round++) {
+    for (const p of todo) hands.kill(p.pid, 'SIGTERM');
+    await new Promise((r) => setTimeout(r, LEFTOVER.TERM_WAIT_MS));
+    const after = await hands.procs();
+    const left = todo.filter((p) => after.some((x) => x.pid === p.pid && x.cmd === p.cmd));
+    for (const p of left) hands.kill(p.pid, 'SIGKILL');
+    killed += left.length;
+    await new Promise((r) => setTimeout(r, 500));
+    for (const p of todo) if (!ended.some((x) => x.pid === p.pid && x.cmd === p.cmd)) ended.push(p);
+    todo = await scan();
+  }
+  const done = ended.filter((p) => !todo.some((x) => x.pid === p.pid && x.cmd === p.cmd));
+  process.stdout.write(`Ended ${done.length} of ${ended.length} process(es) your session (${session}) started${killed ? ` (${killed} needed SIGKILL)` : ''}:\n${ended.map(line).join('\n')}\n${todo.length ? `Still running:\n${todo.map(line).join('\n')}\n` : 'None is left.\n'}`);
+  return todo.length ? 1 : 0;
+}
+
+/** The session's own temp folder's parent (TEMP or TMP is <root>/ffa-<session> in a worker), for the command-line rule. */
+export function sessionTempRoot(session: string, e: NodeJS.ProcessEnv): string | undefined {
+  for (const t of [e.TEMP, e.TMP]) if (t && path.win32.basename(t.replace(/[/\\]+$/, '')).toLowerCase() === `ffa-${session}`.toLowerCase()) return path.win32.dirname(t.replace(/[/\\]+$/, ''));
+  return undefined;
+}
+
+/** The shim's MSYS parents (FF_LEFTOVERS_MSYS, "<winpid>:<parent winpid>" pairs): child -> parent, by Windows pids. */
+export function msysParents(v: string | undefined): Map<number, number> {
+  const m = new Map<number, number>();
+  for (const pair of (v ?? '').split(/\s+/)) {
+    const [c, p] = pair.split(':').map(Number);
+    if (Number.isInteger(c) && Number.isInteger(p) && c! > 0 && p! > 0 && c !== p) m.set(c!, p!);
+  }
+  return m;
 }
 
 /**
  * The shim's part for Git Bash on Windows (w1219): MSYS's fork+exec leaves each MSYS program a Windows parent that has
  * exited, so the Windows chain of this command stops at the shim. Its MSYS parents (/proc/<pid>/ppid) are still known, and
  * their Windows pids (/proc/<pid>/winpid) go to node in FF_LEFTOVERS_CALLERS, so the shell that runs ff-leftovers, and
- * through it claude, is never taken for a leftover. Elsewhere /proc/<pid>/winpid does not exist and nothing is set.
+ * through it claude, is never taken for a leftover. FF_LEFTOVERS_MSYS carries every MSYS program's parent the same way
+ * (w4000: the `sleep` of a stopped task's loop has only its MSYS parent left), so what such a script runs is found under it.
+ * Elsewhere /proc/<pid>/winpid does not exist and nothing is set.
  */
 const MSYS_CALLERS = `if [ -r "/proc/$$/winpid" ]; then
   p=$$ n=0 w=
@@ -1172,7 +1237,12 @@ const MSYS_CALLERS = `if [ -r "/proc/$$/winpid" ]; then
     n=$((n + 1))
   done
   FF_LEFTOVERS_CALLERS=$w
-  export FF_LEFTOVERS_CALLERS
+  m= n=0
+  for d in /proc/[0-9]*; do
+    [ "$n" -lt 4000 ] && read -r x < "$d/winpid" && read -r p < "$d/ppid" && [ "$p" -gt 1 ] && read -r y < "/proc/$p/winpid" && m="$m $x:$y" && n=$((n + 1))
+  done 2>/dev/null
+  FF_LEFTOVERS_MSYS=$m
+  export FF_LEFTOVERS_CALLERS FF_LEFTOVERS_MSYS
 fi
 `;
 
