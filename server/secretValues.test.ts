@@ -128,5 +128,8 @@ test('w1688: the CliScrubber masks what is already on disk once a value is learn
     if (Date.now() > end - 5_000) await s.sweep();
   }
   assert.ok(!fs.readFileSync(sub, 'utf8').includes(v));
+  // the scrub writes the mask before its pass logs (scrubInPlace is async since w3855), so the poll above can see the
+  // file masked while the pass is still running: wait for it (sweep joins a running pass) before reading the log (w4038)
+  await s.sweep();
   assert.ok(lines.length >= 2 && lines.every((l) => !l.includes(v)), 'the log names files and counts, never the value');
 });

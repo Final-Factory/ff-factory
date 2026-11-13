@@ -65,3 +65,13 @@ What standing up Ben's Light Tree portal on BEAST, m5, m3 and biscuit beside the
   read fault (`ciUnmeasured`, server/ciReadHealth.ts), so a new instance's dashboard opens without false banners once config `vault.githubRepos` names its own
   repositories (`["bryding/light-tree"]`); left unset it falls back to Final Factory's (`GITHUB_REQUIRED_REPOS`,
   server/index.ts), and the token reads as lacking the organization's Self-hosted runners.
+- **Register BEAST's logon tasks as the plain user name over ssh** (w4038, 2026-11-13, measured): a `Register-ScheduledTask`
+  run over ssh reads `$env:USERDOMAIN` as `WORKGROUP`, and `WORKGROUP\rydin` fails with "No mapping between account names
+  and security IDs"; use `$env:USERNAME` alone, as the `fflighttree-*` tasks do.
+- **`Stop-ScheduledTask` leaves the portal's or daemon's `node` running** (w4038, measured): the task ends its shell
+  wrapper, not the node it started, so a restart that starts the task again gets a second daemon beside the orphan. End
+  that instance's `start-*.sh` and `node` by command line (its own folder in the path) before `Start-ScheduledTask`.
+- **Copy the installer from the instance that runs, not from a transcript** (w4038): Light Tree's macOS daemon installer
+  was edited four times after its first draft, and a copy rebuilt from the first draft failed on m5 and m3. Take the
+  scripts from the running instance's folder (`F:/ffw/lens-factory/` holds `register-tasks.ps1`, `start-portal.sh`,
+  `start-daemon.sh` and `daemon.json` for the third, Lens Scout's, on port 8892).
