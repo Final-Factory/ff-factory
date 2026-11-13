@@ -40,6 +40,14 @@ test('w1870: turnTroubleOf tells an interrupt from an error, and an error a pers
   // w1733's worker ended on the API's own error line: an errored turn, resumed, not asked whether it is done.
   const w1733 = turnTroubleOf(s({ lastResult: "API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)" }), []) as Extract<TurnTrouble, { kind: 'error' }>;
   assert.deepEqual([w1733.kind, w1733.cause, w1733.reason], ['error', 'error', "its last turn ended in an API error: API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)"]);
+  // w4058: BEAST's and the m5's workers ended on Cloudflare's challenge page behind "Failed to authenticate.", and the
+  // ledger took it for their report. It is an errored turn the cleanup resumes, not a login only a person can give.
+  const cf = 'Failed to authenticate. API Error: 403 Attention Required! | Cloudflare';
+  const w4058 = turnTroubleOf(s({ lastResult: cf }), [cf]) as Extract<TurnTrouble, { kind: 'error' }>;
+  assert.deepEqual([w4058.kind, w4058.cause, w4058.reason, w4058.needs], ['error', 'error', `its last turn ended in an API error: ${cf}`, undefined]);
+  // A refused credential behind the same words still needs a login.
+  const refused401 = 'Failed to authenticate. API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"Invalid bearer token"}}';
+  assert.equal((turnTroubleOf(s({ lastResult: refused401 }), [refused401]) as Extract<TurnTrouble, { kind: 'error' }>).needs, 'a login');
 });
 
 test('w1870: troubleDecision resumes an error, escalates the same error after a resume, a refusal or a person-only error, and re-places an interrupt', () => {
