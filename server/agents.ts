@@ -1,6 +1,6 @@
 import { crashHoldMark } from './crashHolds.ts';
 import { untimedText } from '../shared/benchGlance.ts';
-import { workerModelChoice } from './workerModel.ts';
+import { modelChoices, workerModelChoice } from './workerModel.ts';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -5843,7 +5843,7 @@ When a person asked for a design or an analysis (a profile, an investigation, a 
                   ? `Required. What the job is, in a few plain words (the request id goes in front by itself: "w513: LothDesktop fresh install, sandboxes slot1..6"), at most ${TITLE_MAX} characters with it. Not the request title cut short.`
                   : 'A short, specific name the user will recognise on the dashboard, e.g. "Belt splitter fix (spec 098)". Always give one; its request id goes in front.',
               ),
-            model: z.string().optional().describe(`One of ${this.cfg.models.join(', ')}. Default ${this.cfg.defaultModel}.`),
+            model: z.string().optional().describe(modelChoices(this.cfg)),
             model_reason: z.string().max(300).optional().describe('Why another model.'),
             permission_mode: z.enum(PERMISSION_MODES).optional().describe(`Default ${this.cfg.worker.permissionMode}.`),
             effort: z.enum(EFFORT_LEVELS as [EffortLevel, ...EffortLevel[]]).optional().describe(`Default ${this.cfg.worker.effort}.`),
@@ -6917,7 +6917,7 @@ ${w.repo ?? ''}
   private standingToolSpecs(tool: ToolMaker, actor: Actor, ctx: BeltCtx): ToolSpec[] {
     const st = this.standing;
     const fields = {
-      model: z.string().optional().describe(`One of ${this.cfg.models.join(', ')}. Default ${this.cfg.defaultModel}.`),
+      model: z.string().optional().describe(modelChoices(this.cfg)),
       every_minutes: z.number().int().min(5).optional().describe('Run every N minutes (at least 5).'),
       cron: z.string().optional().describe('Or a 5-field cron expression in the host\'s local time, e.g. "0 9 * * 1-5".'),
       manual_only: z.boolean().optional().describe('Or true: never on a schedule, only when run by hand.'),

@@ -1,5 +1,6 @@
 // Pure scheduling and budget rules for standing agents (docs/standing-agents.md). No I/O here, so
 // the tests can drive every rule with a fixed clock.
+import { modelAllowed } from './workerModel.ts';
 import { EFFORT_LEVELS, type AutoApprove, type StandingAgent, type StandingTrigger } from '../shared/types.ts';
 
 // ---- cron (5 fields, host local time) ----
@@ -261,7 +262,7 @@ export function normalizeAutoApprove(input: Partial<AutoApprove>, prev: AutoAppr
     if (!Number.isInteger(n) || n < min || n > max) throw new Error(`${name} must be a whole number from ${min} to ${max}`);
     return n;
   };
-  if (!models.includes(out.model)) throw new Error(`auto-approve model must be one of ${models.join(', ')}`);
+  if (!modelAllowed(models, out.model)) throw new Error(`auto-approve model must be one of ${models.join(', ')} or a full id of one of those families`);
   if (!EFFORT_LEVELS.includes(out.effort)) throw new Error(`auto-approve effort must be one of ${EFFORT_LEVELS.join(', ')}`);
   const perDay = int(out.maxPerDay, 'max auto-approved per day', 1, 20);
   // targets, expiryHours and exclude from before w527 are dropped: the dispatcher places the work, and nothing expires.
