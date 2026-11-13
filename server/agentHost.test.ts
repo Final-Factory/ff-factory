@@ -327,3 +327,20 @@ test("w1688: a worker that prints vault secrets, whatever they are called, leave
   for (const line of cli.split('\n').filter((l) => l.trim())) JSON.parse(line);
   await until('the daemon logged it', () => /masked \d+ secret value\(s\) in place/.test(logs()), 10_000, logs);
 });
+
+test('w4067: a brief sent to a worker mid-turn, whose Claude Code then crashes, is sent again through its daemon and host and answered', { timeout: 180_000 }, async (t) => {
+  const { sessions, mm, daemon, cleanup, logs, said } = await setup();
+  t.after(cleanup);
+  const ends: string[] = [];
+  sessions.events.on('turnEnd', (_s: SessionHandle, text: string) => ends.push(text));
+  daemon();
+  await until('online', () => mm.isOnline('mx') && mm.protocolOf('mx') !== undefined, 60_000, logs);
+  const s = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'w', permissionMode: 'default' });
+  // w4048: the worker is mid-turn on w4036 when the dispatcher sends the next brief; then its Claude Code exits 0xC0000409.
+  sessions.send(s.info.id, '#crashlater 1500 the w4036 work');
+  await until('mid-turn', () => s.info.status === 'running', 60_000, logs);
+  sessions.send(s.info.id, 'w4048: the brief', 'orchestrator');
+  await until('the brief answered', () => ends.some((e) => /w4048: the brief/.test(e)) && s.info.status === 'idle', 60_000, logs);
+  const users = said(s.info.id, 'user');
+  assert.equal(users.filter((u) => /w4048: the brief/.test(u) && /sent again \(w4067\)/.test(u)).length, 1, users.join('\n---\n'));
+});

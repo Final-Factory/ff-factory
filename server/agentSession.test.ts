@@ -494,3 +494,44 @@ test('the model a session shows is the one its last reply came from, not the con
   store.flush();
   assert.equal(new Store(dir).sessions.get(s.info.id)?.activeModel, 'claude-sonnet-5-5', 'saved with the session, so a restart keeps it');
 });
+
+test('w4067: a message sent while a turn runs, which the crash of that turn left unread, goes again in a new process and is answered', async (t) => {
+  const { store, sessions, worker } = setup(t);
+  const s = worker();
+  // The turn on the earlier request runs; the dispatcher's brief for the next one arrives mid-turn, then the process crashes.
+  sessions.send(s.info.id, '#crashlater 150 the w4036 work');
+  await until(() => s.info.status === 'running', 'running');
+  const brief = sessions.send(s.info.id, 'w4048: the brief', 'orchestrator');
+  await until(() => s.info.status === 'idle', 'the brief answered in a new process');
+  const evs = store.readTranscript(s.info.id);
+  assert.ok(evs.some((e) => e.kind === 'error' && /3221226505/.test(e.text)), 'the crash is in the transcript');
+  const again = evs.find((e) => e.kind === 'user' && /w4048: the brief/.test(e.text) && /sent again \(w4067\)/.test(e.text));
+  assert.ok(again, 'the brief went again');
+  assert.notEqual(again.kind === 'user' && again.uuid, brief);
+  const answered = evs.filter((e) => e.kind === 'result').flatMap((e) => (e.kind === 'result' ? (e.answers ?? []) : []));
+  assert.ok(again.kind === 'user' && answered.includes(again.uuid!), 'the new process answered it');
+  // The turn that crashed is not run again: only its sender decides that.
+  assert.equal(evs.filter((e) => e.kind === 'user' && /the w4036 work/.test(e.text)).length, 1);
+});
+
+test('w4067: a message that opened the turn that crashed is not sent again, and one sent again is not sent a second time', async (t) => {
+  const { store, sessions, worker } = setup(t);
+  const s = worker();
+  sessions.send(s.info.id, '#die');
+  await until(() => s.info.status === 'error', 'the process to end');
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(s.info.status, 'error');
+  assert.equal(store.readTranscript(s.info.id).filter((e) => e.kind === 'user').length, 1);
+
+  // A message behind a crash goes again once; when it crashes the new process too, it is not sent a third time.
+  const b = worker();
+  sessions.send(b.info.id, '#crashlater 150 first');
+  await until(() => b.info.status === 'running', 'running');
+  sessions.send(b.info.id, '#crashlater 50 second');
+  sessions.send(b.info.id, 'third');
+  await until(() => store.readTranscript(b.info.id).filter((e) => e.kind === 'error').length >= 2 && b.info.status !== 'running' && b.info.status !== 'starting', 'both crashes', 5000);
+  await new Promise((r) => setTimeout(r, 100));
+  const users = store.readTranscript(b.info.id).filter((e) => e.kind === 'user').map((e) => e.text);
+  assert.equal(users.filter((x) => /second/.test(x)).length, 2, 'the second message went once more');
+  assert.equal(users.filter((x) => /^third/.test(x)).length, 2, 'the third too, after the first crash');
+});
