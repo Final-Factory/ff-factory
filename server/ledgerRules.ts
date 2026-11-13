@@ -344,8 +344,14 @@ export function cutOffOf(s: Pick<SessionInfo, 'status' | 'statusDetail' | 'turnO
 
 /** A turn the CLI ended with an error subtype instead of a report: its result reads "stopped: error_during_execution". */
 const STOPPED_RESULT = /^stopped: (error_[a-z_]+)/;
-/** A turn the API ended: its whole result is Claude Code's error line (w1733: "API Error: Can't reach the API server …"). */
-const API_ERROR_RESULT = /^API Error\b/i;
+/**
+ * A turn the API ended: its whole result is Claude Code's error line (w1733: "API Error: Can't reach the API server …"),
+ * or that line behind "Failed to authenticate." (w4058: "Failed to authenticate. API Error: 403 Attention Required! |
+ * Cloudflare", Cloudflare's challenge page for the machine's address, which Claude Code does not retry for an OAuth token).
+ * Read as a report it resumed nothing; as an errored turn the cleanup resumes it after ERROR_SETTLE_MS. A refused
+ * credential (401 authentication_error) still escalates through NEEDS_PERSON.
+ */
+const API_ERROR_RESULT = /^(?:Failed to authenticate\.\s*)?API Error\b/i;
 /**
  * A tool the harness or a person refused, in the words Claude Code and the hooks use. Narrower than REFUSED: a failed
  * tool's own output ("connection refused") is no refusal, and a refusal is escalated at once (it would be refused again).
