@@ -6,7 +6,7 @@ import path from 'node:path';
 import { Store } from './store.ts';
 import { SessionManager, setQueryForTesting } from './sessions.ts';
 import { MachineManager } from './machines.ts';
-import { Agents, BRIEF_NOW_ONLY, EVIDENCE_RULES, MERGE_RULES, NEWER_THAN_TRAINING, REPORT_LABELS } from './agents.ts';
+import { Agents, BRIEF_NOW_ONLY, EVIDENCE_RULES, MERGE_RULES, NEWER_THAN_TRAINING, NEWER_THAN_TRAINING_BRIEF, REPORT_LABELS } from './agents.ts';
 import { Identity } from './identity.ts';
 import type { Config } from './config.ts';
 import type { Requester, SessionInfo, UserInfo } from '../shared/types.ts';
@@ -400,6 +400,7 @@ test("Lens Scout w4: nobody calls a thing a person named non-existent from train
   assert.ok(NEWER_THAN_TRAINING.includes(`lessons/research-the-route-before-you-say-cant.md, "Check the web before you say it doesn't exist"`));
   assert.ok(EVIDENCE_RULES.includes(NEWER_THAN_TRAINING), 'every worker, through the evidence rule');
   const brief = (info: SessionInfo) => (agents.orchestratorOptions(info) as { systemPrompt: { append: string } }).systemPrompt.append;
-  assert.ok(brief(agents.orchestrators.personalFor(BEN).info).includes(`- ${NEWER_THAN_TRAINING}`), "a person's orchestrator");
-  assert.ok(brief(sessions.get(agents.dispatcherId!).info).includes(`- ${NEWER_THAN_TRAINING}`), 'the dispatcher');
+  assert.ok(brief(agents.orchestrators.personalFor(BEN).info).includes(`- ${NEWER_THAN_TRAINING_BRIEF}`), "a person's orchestrator");
+  assert.match(NEWER_THAN_TRAINING_BRIEF, /pass the person's name for it on unchanged and brief the worker to look it up and use it/);
+  assert.ok(brief(sessions.get(agents.dispatcherId!).info).includes(`- ${NEWER_THAN_TRAINING_BRIEF}`), 'the dispatcher');
 });
