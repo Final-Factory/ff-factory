@@ -6270,17 +6270,21 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    * request, the latest word it had before this report (`before`, read before workerTurnEnded overwrote it).
    *
    * w4067: a request it was sent and has never named in any report counts as not started too (`named`: the ones its earlier
-   * reports named). w4048's brief went to 055030a2 as its Claude Code crashed; its next turn ended on a report of w4036
-   * alone, nothing asked about w4048, and it sat Stalled for 3 h with a worker that had never read the brief.
+   * reports named), when this report names another of its requests: it reported, and left this one out. w4048's brief went
+   * to 055030a2 as its Claude Code crashed; its next turn ended on a report of w4036 alone, nothing asked about w4048, and it
+   * sat Stalled for 3 h with a worker that had never read the brief. A turn that names none (an answer to its person) is no
+   * report, and asks nothing.
    */
   private resumeNotStarted(s: SessionInfo, text: string, before: ReadonlyMap<string, string | undefined>, named: ReadonlySet<string> = new Set()): Set<string> {
     const open = stillOpenIn(text);
     const idle = new Set<string>();
+    // Among the requests it held before this report: a DONE in it has already closed one.
+    const reported = [...before.keys()].some((id) => open.has(id) || new RegExp(`\\b${id}\\b`, 'i').test(text));
     for (const w of this.itemsOf(s.id)) {
       const said = open.has(w.id) || new RegExp(`\\b${w.id}\\b`, 'i').test(text);
       const line = open.get(w.id) ?? (said ? undefined : before.get(w.id));
       if (line && NOT_STARTED.test(line)) idle.add(w.id);
-      else if (!said && !named.has(w.id) && w.links?.[s.id]) idle.add(w.id);
+      else if (reported && !said && !named.has(w.id) && w.links?.[s.id]) idle.add(w.id);
     }
     if (!idle.size) return idle;
     const t = setTimeout(() => {

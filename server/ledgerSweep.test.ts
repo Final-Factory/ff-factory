@@ -2087,3 +2087,15 @@ test('w4067: a worker sent a request it never names in a report (its brief lost 
   assert.match(told[0], /NOT STARTED \(w3281\): w4048 /);
   assert.equal(sent.length, 1);
 });
+
+test('w4067: a turn that names none of its requests (an answer to its person) is no report, and resumes nothing', async (t) => {
+  const { request, worker, o, sessions } = setup(t);
+  o.statusAskDelayMs = 0;
+  const sent: string[] = [];
+  (sessions as unknown as { send: (id: string, text: string) => void }).send = (id, text) => void (id === 'e2e0001' && sent.push(text));
+  request('w16', { title: 'Live view', sessionIds: ['e2e0001'], links: { e2e0001: { at: ago(1), how: 'sent' } } });
+  // As in e2e/live.spec.ts: the worker's first turn ends "Echo: Hello"; a resume would take the live view's note meant for its person.
+  o.workerTurnEnded(worker('e2e0001'), 'Echo: Hello');
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(sent.filter((x) => /You still hold/.test(x)).length, 0);
+});
