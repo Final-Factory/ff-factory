@@ -11,6 +11,7 @@
  *   "#slow"        streams for a few seconds (for the running state and interrupts)
  *   "#fail"        ends the turn with an error result
  *   "#die"         the agent process ends mid-turn (as when the server's process tree is stopped)
+ *   "#crashlater <ms>"  stays mid-turn that long, then the process ends (w4067: a message sent meanwhile is never read)
  *   "#tools"       says the worker tools its in-process MCP servers serve: "Tools: <name>, <name>" (w2625)
  *   "#wait <s>"    stays mid-turn that many seconds, then says "Waited <s> s." (w605: a turn across a daemon restart)
  *   "#bg"          starts a background task (a background command, a watcher) and ends the turn
@@ -222,6 +223,11 @@ export function fakeQuery(fake: FakeOptions = {}) {
           yield toolResult(toolId, [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: RED_PNG } }]);
           yield text('Here is the screenshot.');
           yield result(uuid, true, 'screenshot shown');
+        } else if (/#crashlater\s+\d+/i.test(words)) {
+          // w4067: mid-turn for that many ms (a message sent meanwhile waits behind it), then the process ends
+          yield text('Working on it...');
+          await sleep(Number(/#crashlater\s+(\d+)/i.exec(words)![1]));
+          throw new Error('Claude Code process exited with code 3221226505');
         } else if (/#die\b/i.test(words)) {
           yield text('Working on it...');
           throw new Error('Claude Code process exited with code 1');

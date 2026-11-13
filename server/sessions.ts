@@ -472,7 +472,7 @@ export class AgentSession implements SessionHandle {
   private lastTurnText = '';
   private firstResult = true;
   /** Messages sent but not yet answered by a finished turn, by uuid: what a restart would cut off. */
-  private readonly outstanding = new Map<string, Unanswered>();
+  private readonly outstanding = new Map<string, Unanswered & { attachments?: DeliveredAttachment[] }>();
   /** The message the current turn answers first (w607): its sender is turnFrom. Cleared when the turn ends. */
   private turnStarter?: { uuid: string; from: 'human' | 'orchestrator' | 'system' };
   /** Stopped or interrupted by a person or the orchestrator since its last message: a restart leaves it alone. */
@@ -567,7 +567,7 @@ export class AgentSession implements SessionHandle {
     this.lastUuid = uuid;
     this.stoppedOnPurpose = false;
     clearTimeout(this.graceTimer);
-    this.outstanding.set(uuid, { text, from, ...(requestedBy ? { requestedBy } : {}) });
+    this.outstanding.set(uuid, { text, from, ...(requestedBy ? { requestedBy } : {}), ...(attachments.length ? { attachments } : {}) });
     // Images arrive stored already (with an id) or are kept here, so the transcript can show them.
     const refs = images.map((i) => ({ id: i.id ?? this.store.saveImage(this.info.id, i.mediaType, i.data), mediaType: i.mediaType }));
     this.store.append(this.info.id, { kind: 'user', text, from, uuid, ...(refs.length ? { images: refs } : {}), ...(attachments.length ? { attachments } : {}), ...(requestedBy ? { requestedBy } : {}) });
@@ -713,6 +713,7 @@ export class AgentSession implements SessionHandle {
 
   /** `abort` is this query's own: a stop and a quick restart (a fresh job) replace this.abort before this one ends. */
   private async consume(q: Query, abort: AbortController) {
+    let crashed: string | undefined;
     try {
       for await (const m of q) {
         // After stop() this query is no longer the session's: a buffered state event must not mark a stopped session idle.
@@ -726,8 +727,11 @@ export class AgentSession implements SessionHandle {
       const aborted = abort.signal.aborted;
       if (!aborted) this.store.append(this.info.id, { kind: 'error', text: msg });
       if (this.q === q) this.update({ status: aborted ? 'stopped' : 'error', statusDetail: aborted ? undefined : clip(msg, 300) });
+      if (!aborted) crashed = msg;
     } finally {
       if (this.q === q) {
+        // w4067: the messages it took behind the turn it crashed in were never read; they go again in a new process.
+        const unread = crashed === undefined ? [] : this.unreadBehindCrash();
         // what came after its last call (tool results it had read) is in the conversation the next process resumes
         this.saveMeter();
         this.q = undefined;
@@ -736,8 +740,43 @@ export class AgentSession implements SessionHandle {
         this.compactFailed('the agent process ended first');
         this.keepMarksBriefly();
         this.events.emit('ended', this);
+        if (unread.length) this.sendAgainAfterCrash(unread, crashed!);
       }
     }
+  }
+
+  /**
+   * w4067: the messages a crashed process had taken but never answered, other than the one that opened its turn (that one
+   * it was working on: the crash is reported, and its sender decides), each once. A message sent mid-turn waits inside
+   * the CLI until the turn ends, so a crash loses it: w4048's brief, sent to worker 055030a2 the minute its Claude Code
+   * exited with 0xC0000409, never reached the model, and the request showed active, then Stalled, for 3 h.
+   */
+  private unreadBehindCrash(): [string, Unanswered & { attachments?: DeliveredAttachment[] }][] {
+    const starter = this.turnStarter?.uuid;
+    const out = [...this.outstanding].filter(([uuid]) => uuid !== starter && !this.sentAgain.has(uuid));
+    for (const [uuid] of out) this.outstanding.delete(uuid);
+    return out;
+  }
+
+  /** Messages sent again after a crash (w4067), by their new uuid: sent again once, never twice. */
+  private readonly sentAgain = new Set<string>();
+
+  private sendAgainAfterCrash(unread: [string, Unanswered & { attachments?: DeliveredAttachment[] }][], why: string) {
+    const note = `\n\n[FF Factory] This message reached you once before, just as your agent process ended (${clip(why, 160)}), and you never read it: it is sent again (w4067).`;
+    // The crashed turn is over: the first message sent again opens a turn of its own (its sender, its budget, its cost).
+    this.turnStarter = undefined;
+    this.info.turnOpenSince = undefined;
+    for (const [, m] of unread) {
+      const uuid = randomUUID();
+      this.sentAgain.add(uuid);
+      try {
+        this.send(`${m.text}${note}`, m.from, uuid, [], m.requestedBy, m.attachments ?? []);
+      } catch (e) {
+        this.store.append(this.info.id, { kind: 'error', text: `A message this agent had not read when its process ended could not be sent again: ${(e as Error).message}` });
+        return;
+      }
+    }
+    this.store.append(this.info.id, { kind: 'system', text: `${unread.length === 1 ? 'A message' : `${unread.length} messages`} sent while the turn that crashed was running ${unread.length === 1 ? 'was' : 'were'} never read: sent again in a new process (w4067).` });
   }
 
   private handle(m: SDKMessage) {

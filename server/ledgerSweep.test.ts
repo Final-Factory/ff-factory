@@ -2061,3 +2061,29 @@ test('w2566: a new worker started over the pause wait of one stopped on its paus
   o.workerTurnEnded(worker('c59d84ed', { machineId: 'lothdesktop' }), 'Done.\nDONE: w1\nLearned: nothing new');
   assert.equal(get('w1').status, 'done');
 });
+
+test('w4067: a worker sent a request it never names in a report (its brief lost in a crash) is resumed on it; still never named, the dispatcher hears', async (t) => {
+  const { request, worker, o, get, sessions } = setup(t);
+  o.statusAskDelayMs = 0;
+  const sent: string[] = [];
+  (sessions as unknown as { send: (id: string, text: string) => void }).send = (id, text) => void (id === '055030a2' && sent.push(text));
+  const told: string[] = [];
+  t.mock.method(o, 'toDispatcher', (text: string) => void told.push(text));
+  // As on 2026-11-13: 055030a2 was on w4036; the dispatcher sent it w4048 at 08:18, the minute its Claude Code crashed.
+  request('w4036', { title: 'FFU M1.54b', sessionIds: ['055030a2'], links: { '055030a2': { at: ago(3), how: 'sent' } } });
+  request('w4048', { title: 'FFU M1.54c', sessionIds: ['055030a2'], links: { '055030a2': { at: ago(1), how: 'sent' } } });
+  // A request it named in an earlier report is one it started: never resumed for a report that leaves it out.
+  request('w4001', { title: 'Started earlier', sessionIds: ['055030a2'], links: { '055030a2': { at: ago(4), how: 'sent' } }, findings: [{ at: ago(2), by: '055030a2', text: 'w4001: still open: the bench run' }] });
+  const s = worker('055030a2');
+  // 08:22: its turn ends on a report of w4036 alone.
+  o.workerTurnEnded(s, 'TL;DR: w4036 (M1.54b) is merged as ffu #727 on green CI.\nDONE: w4036\nLearned: nothing new');
+  await until('the worker is resumed on w4048', () => sent.length === 1);
+  assert.match(sent[0], /You still hold w4048 "FFU M1.54c"/);
+  assert.doesNotMatch(sent[0], /w4001/);
+  assert.match(get('w4048').log.at(-1)!, /resumed worker 055030a2 on w4048/);
+  // Its next turn still leaves it out: the dispatcher is told, and it is not resumed twice.
+  o.workerTurnEnded(s, 'Tidied the bench notes.\nw4001: still open: the bench run');
+  await until('the dispatcher is told', () => told.length === 1);
+  assert.match(told[0], /NOT STARTED \(w3281\): w4048 /);
+  assert.equal(sent.length, 1);
+});
