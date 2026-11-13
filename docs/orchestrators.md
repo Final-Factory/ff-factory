@@ -2289,6 +2289,13 @@ one rule, and it is the agent's own to enforce (`server/evidenceRules.test.ts` p
   or for a fork research could not settle. Its briefs for consequential work list the decisions the work must settle.
 - **The dispatcher** carries that list into the worker's brief, and uses `decide_work ask` only for what the requester
   alone can answer. For both orchestrators done means merged: no brief ends at an open PR waiting for a person.
+- **Everyone** (`NEWER_THAN_TRAINING`, in the worker's evidence rule and in both orchestrators' briefs; Lens Scout's w4, 2026-11-13):
+  a model, version, product, release, API or feature a person names that the agent does not recognise is assumed newer
+  than its training, looked up and used. It is reported missing only with evidence (the URLs checked, or the exact
+  error text). An orchestrator that cannot check the web does not relay its doubt as fact: it briefs the worker to look
+  it up, with the person's name for it unchanged. (An orchestrator, the dispatcher and a worker each called a model Ben
+  named non-existent from training knowledge and ran another; ff-agents evidence-gate,
+  `lessons/research-the-route-before-you-say-cant.md#check-the-web-before-you-say-it-doesnt-exist-w4-2026-11-13`.)
 
 A task a standing agent delegated follows the same rule with one narrowing (w694; the owner, 2026-10-08: "as long as they
 were obvious bugs merging is fine from sentry investigations"). Its request's constraints (`delegationConstraints` in

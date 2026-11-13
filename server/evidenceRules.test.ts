@@ -6,7 +6,7 @@ import path from 'node:path';
 import { Store } from './store.ts';
 import { SessionManager, setQueryForTesting } from './sessions.ts';
 import { MachineManager } from './machines.ts';
-import { Agents, BRIEF_NOW_ONLY, EVIDENCE_RULES, MERGE_RULES, REPORT_LABELS } from './agents.ts';
+import { Agents, BRIEF_NOW_ONLY, EVIDENCE_RULES, MERGE_RULES, NEWER_THAN_TRAINING, REPORT_LABELS } from './agents.ts';
 import { Identity } from './identity.ts';
 import type { Config } from './config.ts';
 import type { Requester, SessionInfo, UserInfo } from '../shared/types.ts';
@@ -390,4 +390,16 @@ test('w3740: crash-repro briefs state their budget (stop after one crash), and e
   assert.match(CRASH_BUDGET, /clear_crash_hold/);
   assert.match(PROCESS_HYGIENE, /One crash of a person's machine ends your runs there \(evidence-gate `checklists\/crash-repro\.md`\)/);
   assert.match(PROCESS_HYGIENE, /A guard that killed the player or a cool-down that ran out is not a yes/);
+});
+
+test("Lens Scout w4: nobody calls a thing a person named non-existent from training knowledge: worker, dispatcher and orchestrator", (t) => {
+  const { agents, sessions } = world(t);
+  assert.match(NEWER_THAN_TRAINING, /assume it came out after your training cutoff: look it up/);
+  assert.match(NEWER_THAN_TRAINING, /only with evidence \(the URLs you checked, or the exact error text\)/);
+  assert.match(NEWER_THAN_TRAINING, /do not relay your doubt as fact: brief the worker to look it up and use it, with the person's name for it unchanged/);
+  assert.ok(NEWER_THAN_TRAINING.includes(`lessons/research-the-route-before-you-say-cant.md, "Check the web before you say it doesn't exist"`));
+  assert.ok(EVIDENCE_RULES.includes(NEWER_THAN_TRAINING), 'every worker, through the evidence rule');
+  const brief = (info: SessionInfo) => (agents.orchestratorOptions(info) as { systemPrompt: { append: string } }).systemPrompt.append;
+  assert.ok(brief(agents.orchestrators.personalFor(BEN).info).includes(`- ${NEWER_THAN_TRAINING}`), "a person's orchestrator");
+  assert.ok(brief(sessions.get(agents.dispatcherId!).info).includes(`- ${NEWER_THAN_TRAINING}`), 'the dispatcher');
 });
