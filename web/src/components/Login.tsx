@@ -9,7 +9,7 @@ export function Login() {
   const [busy, setBusy] = useState(false);
   // Device approval (docs/identity.md): the password was right, but an owner must approve this browser first. The page
   // asks again every 10 seconds, for up to 30 minutes, and signs in once they have.
-  const [pending, setPending] = useState<{ text: string; since: number } | null>(null);
+  const [pending, setPending] = useState<{ text: string; since: number; asks: number } | null>(null);
 
   const attempt = async (quiet: boolean) => {
     if (!quiet) {
@@ -18,7 +18,8 @@ export function Login() {
     }
     try {
       const r = await login(username.trim(), password);
-      setPending(r.pending ? (p) => p ?? { text: r.pending!, since: Date.now() } : null);
+      // A new object each answer: the same one would skip the render that sets the next try.
+      setPending(r.pending ? (p) => ({ text: r.pending!, since: p?.since ?? Date.now(), asks: (p?.asks ?? 0) + 1 }) : null);
     } catch (ex) {
       setPending(null);
       setErr(ex instanceof UnauthorizedError ? 'Wrong username or password.' : ex instanceof Error ? ex.message : String(ex));
