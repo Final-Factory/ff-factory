@@ -452,7 +452,8 @@ setInterval(() => {
   void machines.watchOffline().catch((e) => console.warn('machine watchdog:', (e as Error).message));
   machines.checkOutdated();
 }, 30_000);
-const auth = new Auth(cfg.dataDir, { trustProxy: cfg.trustProxy });
+// trustProxy and deviceApproval are read live: set_app_config changes them without a restart.
+const auth = new Auth(cfg.dataDir, { trustProxy: () => cfg.trustProxy, deviceApproval: () => cfg.deviceApproval ?? 'off' });
 // Who is who (docs/identity.md): the logins in data/users.json, and who automatic work is billed to.
 const identity = new Identity(cfg, () => auth.userInfos());
 const agents = new Agents(cfg, store, sessions, machines, identity);
@@ -641,6 +642,8 @@ function mayDrive(req: http.IncomingMessage, s: SessionInfo) {
 }
 const notifier = new Notifier(cfg.dataDir, store, sessions);
 notifier.orchestratorId = () => store.orchestratorId;
+// Device approval (docs/identity.md): a member's login from a new browser waits; the owners are told.
+auth.onDevicePending = (d) => notifier.device(auth.userInfo(d.username)?.displayName ?? d.username, d.label, identity.list().filter((u) => u.role === 'owner').map((u) => u.userId));
 // The data folder's disk guard (w859, server/dataGuard.ts, docs/spend.md "Data guard"): idle transcripts are compressed from
 // half a disk used, those past their retention (7 days after their request closed) deleted from three quarters, and a disk the
 // guard cannot get below 90% says so, once a day at most. The cost record in spend.json is never touched.
@@ -1076,7 +1079,7 @@ class HttpError extends Error {
   }
 }
 
-function send(res: http.ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}) {
+function send(res: http.ServerResponse, status: number, body: unknown, headers: Record<string, string | string[]> = {}) {
   const json = JSON.stringify(body ?? {});
   // Gzipped when big (server/compress.ts): /api/state at thousands of sessions is megabytes.
   void endMaybeGzip(res.req, res, status, { 'content-type': 'application/json', 'cache-control': 'no-store', ...headers }, json);
@@ -1252,6 +1255,27 @@ route('POST', '/api/github/recheck', async () => {
   const ran = await github.recheck();
   refreshTokenWarnings();
   return { ran };
+});
+// ---- device approval (docs/identity.md, "Device approval"): the owners see every browser that asked to sign in as a
+// member and approve, deny or revoke it, from their own logged-in session only (no API key reaches /api/*).
+const requireDeviceOwner = (req: http.IncomingMessage) => {
+  const me = auth.userInfo(auth.user(req));
+  if (me?.role !== 'owner') throw new HttpError(403, 'only an owner approves devices');
+  return me;
+};
+const deviceViews = () => auth.deviceList().map((d) => ({ ...d, displayName: auth.userInfo(d.username)?.displayName ?? d.username }));
+route('GET', '/api/devices', async (req) => {
+  requireDeviceOwner(req);
+  return { deviceApproval: cfg.deviceApproval ?? 'off', devices: deviceViews() };
+});
+route('POST', '/api/devices/(d[A-Za-z0-9_-]{8})/(approve|deny|revoke)', async (req, [id, action]) => {
+  const me = requireDeviceOwner(req);
+  try {
+    const device = auth.decideDevice(id, action as 'approve' | 'deny' | 'revoke', me.userId);
+    return { device, devices: deviceViews() };
+  } catch (e) {
+    throw new HttpError(404, e instanceof Error ? e.message : String(e));
+  }
 });
 route('GET', '/api/vault', async (req) => {
   requireOwner(req);
@@ -2342,7 +2366,10 @@ const server = http.createServer(async (req, res) => {
       const { username, password } = await readJson<{ username?: string; password?: string }>(req);
       if (typeof username !== 'string' || typeof password !== 'string') return send(res, 400, { error: 'username and password required' });
       const r = await auth.login(req, username.trim(), password);
-      return r.ok ? send(res, 200, { username: username.trim() }, { 'set-cookie': r.cookie }) : send(res, r.status, { error: r.error });
+      // Device approval: 202 with no session while an owner has not approved this browser (it gets its device cookie).
+      const dev = r.deviceCookie ? [r.deviceCookie] : [];
+      if (!r.ok) return send(res, r.status, { error: r.error, ...(r.pending ? { pending: true } : {}) }, dev.length ? { 'set-cookie': dev } : {});
+      return send(res, 200, { username: username.trim() }, { 'set-cookie': [r.cookie, ...dev] });
     }
     // A one-time set-password link (w3714, `node server/user.ts <name> --link`): the page, then the token and the new password.
     if (url.pathname === '/set-password' && req.method === 'GET') {
@@ -2354,7 +2381,7 @@ const server = http.createServer(async (req, res) => {
       const { token, password } = await readJson<{ token?: string; password?: string }>(req);
       if (typeof token !== 'string' || typeof password !== 'string') return send(res, 400, { error: 'token and password required' });
       const r = await auth.usePasswordLink(req, token.trim(), password);
-      return r.ok ? send(res, 200, { username: r.username }, { 'set-cookie': r.cookie }) : send(res, r.status, { error: r.error });
+      return r.ok ? send(res, 200, { username: r.username }, { 'set-cookie': [r.cookie, ...(r.deviceCookie ? [r.deviceCookie] : [])] }) : send(res, r.status, { error: r.error });
     }
     if (url.pathname === '/api/logout' && req.method === 'POST') {
       return send(res, 200, {}, { 'set-cookie': auth.logout(req) });

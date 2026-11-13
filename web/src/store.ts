@@ -439,10 +439,13 @@ export async function logout() {
   }
 }
 
-export async function login(username: string, password: string) {
-  await api.login(username, password);
+/** Sign in; { pending } when this browser waits for an owner's approval (device approval) and no session was opened. */
+export async function login(username: string, password: string): Promise<{ pending?: string }> {
+  const r = await api.login(username, password);
+  if (r.pending) return { pending: r.error ?? 'This device waits for an owner to approve it.' };
   set({ auth: 'unknown', transcripts: {}, loaded: {}, streaming: {} });
   await boot();
+  return {};
 }
 
 // ---------- ui helpers ----------

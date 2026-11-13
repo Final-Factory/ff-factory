@@ -24,7 +24,7 @@ export function acceptsGzip(header: string | string[] | undefined): boolean {
 }
 
 /** Ends `res` with this body: gzipped when it is big enough and the client takes gzip. */
-export async function endMaybeGzip(req: http.IncomingMessage | undefined, res: http.ServerResponse, status: number, headers: Record<string, string | number>, body: string | Buffer) {
+export async function endMaybeGzip(req: http.IncomingMessage | undefined, res: http.ServerResponse, status: number, headers: Record<string, string | number | string[]>, body: string | Buffer) {
   const buf = typeof body === 'string' ? Buffer.from(body) : body;
   if (buf.length >= GZIP_MIN_BYTES && acceptsGzip(req?.headers['accept-encoding'])) {
     try {

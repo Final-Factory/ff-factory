@@ -5207,6 +5207,14 @@ button.react-chip:hover {
   font-size: var(--fs-md);
 }
 
+.login-pending {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-2);
+  color: var(--amber);
+  font-size: var(--fs-md);
+}
+
 .toasts {
   position: fixed;
   right: var(--s-4);

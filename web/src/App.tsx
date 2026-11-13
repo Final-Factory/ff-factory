@@ -3,6 +3,7 @@ import { dismissedUserKey, undismissed, unitEventKey } from '../../shared/dismis
 import type { AppState, HostStatus } from '../../shared/types';
 import { useAttention } from './attention';
 import { Login } from './components/Login';
+import { DeviceRequests } from './components/DeviceRequests';
 import { NewSandboxModal } from './components/Modals';
 import { OrchestratorView } from './components/OrchestratorView';
 import { DispatcherPanel } from './components/DispatcherPanel';
@@ -81,6 +82,7 @@ function Shell({ app }: { app: AppState }) {
           <ConnectionBanner />
           <NewVersionBanner />
           <HostBanner host={app.host} app={app} />
+          <DeviceRequests app={app} />
         </div>
         <main className={`main main-${content.layout}`}>{content.node ?? <OrchestratorView session={orch} />}</main>
       </div>

@@ -108,8 +108,26 @@ export interface JoinAnswer {
   installer?: { name: string; text: string };
 }
 
+/** A browser that asked to sign in as a member, or was approved for one (device approval, docs/identity.md). */
+export interface DeviceInfo {
+  id: string;
+  username: string;
+  displayName: string;
+  status: 'pending' | 'approved' | 'denied';
+  label: string;
+  userAgent: string;
+  ip: string;
+  createdAt: string;
+  decidedAt?: string;
+  decidedBy?: string;
+  lastSeenAt?: string;
+}
+
 export const api = {
-  login: (username: string, password: string) => request<{ username: string }>('POST', '/api/login', { username, password }),
+  /** pending: the password was right, but this browser waits for an owner's approval (HTTP 202, no session). */
+  login: (username: string, password: string) => request<{ username?: string; pending?: boolean; error?: string }>('POST', '/api/login', { username, password }),
+  devices: () => request<{ deviceApproval: 'off' | 'members'; devices: DeviceInfo[] }>('GET', '/api/devices'),
+  decideDevice: (id: string, action: 'approve' | 'deny' | 'revoke') => request<{ devices: DeviceInfo[] }>('POST', `/api/devices/${encodeURIComponent(id)}/${action}`),
   logout: () => request<unknown>('POST', '/api/logout'),
   state: () => request<AppState>('GET', '/api/state'),
   // What work costs (w859, docs/spend.md): each request's cost, one request in full, and the analysis.

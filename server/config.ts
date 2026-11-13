@@ -264,6 +264,11 @@ export interface Config {
    */
   trustProxy: boolean;
   /**
+   * Device approval (docs/identity.md, "Device approval"): "members", a member's login from a browser no owner approved for
+   * them waits for an owner's approval in the portal; "off" (the default), a right password is enough.
+   */
+  deviceApproval?: 'off' | 'members';
+  /**
    * The address machines (docs/machines.md) reach this portal at, e.g. the Tailscale Funnel URL
    * "https://<host>.<tailnet>.ts.net". Optional: add_machine can be given it instead.
    */
