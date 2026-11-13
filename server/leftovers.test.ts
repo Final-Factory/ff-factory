@@ -4,7 +4,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { LEFTOVER, LeftoverReaper, waitLoop, callerPids, envFrom, installLeftoversShim, kindOf, macEnvLine, orphanVerdict, ownLeftovers, personGames, readEnvs, readLeases, realInspect, sameRoot, sessionVerdict, sessionTempRoot, msysParents, slotOf, tempSessionInArgs, tempSessionOf, type LeftoverDeps, type PlayerLease, type ProcEnv } from '../machine/leftovers.ts';
+import { LEFTOVER, LeftoverReaper, forPerson, launchForPerson, personEnv, waitLoop, callerPids, envFrom, installLeftoversShim, kindOf, macEnvLine, orphanVerdict, ownLeftovers, personGames, readEnvs, readLeases, realInspect, sameRoot, sessionVerdict, sessionTempRoot, msysParents, slotOf, tempSessionInArgs, tempSessionOf, type LeftoverDeps, type PlayerLease, type ProcEnv } from '../machine/leftovers.ts';
 import { realDeps as realUnityDeps, type Proc, type UnityPlatform } from '../machine/unity.ts';
 import { playerText, unitySlotsLine } from '../shared/fleet.ts';
 
@@ -870,4 +870,129 @@ test('w3673: waitLoop is a sleeping until/while shell whose children are what a 
   assert.equal(waitLoop(p, [p, { pid: 2, ppid: 1, cmd: 'python build.py' }], 'linux'), false, 'a shell running a build is no wait loop');
   assert.equal(waitLoop({ pid: 1, ppid: 0, cmd: 'bash -c ./build.sh' }, [], 'linux'), false);
   assert.equal(waitLoop({ pid: 1, ppid: 0, cmd: 'C:/Program Files/Git/usr/bin/bash.exe -c "until grep -q x f; do sleep 30; done"', name: 'bash.exe' }, [], 'win32'), true);
+});
+
+// ---------------------------------------------------------------- w4047: a program started for a person
+
+test('w4047, the m5: a launcher a worker started for a person (FF_FOR_PERSON, no session) is never swept, nor what it runs, nor an installer in the temp folder; the worker\'s other leftovers still are', async () => {
+  // Ben's m5, w4046: the Epic Games Launcher opened with `open -a` carried the worker's FF_SESSION_ID and was ended 2 min after
+  // the worker's turn. Started through `ff-leftovers launch` it carries FF_FOR_PERSON instead.
+  const person: ProcEnv = { person: 'a33e1437' };
+  const m = machine([
+    SYSTEMD,
+    DAEMON,
+    { pid: 201, ppid: 9212, cmd: '/usr/bin/ffmpeg -i x', env: env('a33e1437') },
+    { pid: 202, ppid: 9212, cmd: '/opt/Epic Games Launcher/EpicGamesLauncher', env: person },
+    { pid: 203, ppid: 202, cmd: '/opt/Epic Games Launcher/EpicWebHelper --type=renderer', env: person },
+    // Its tree is the person's even where a child shows no environment (Windows' Git Bash programs, a setuid helper).
+    { pid: 204, ppid: 202, cmd: `${TMP}/ffa-a33e1437/epic/updater` },
+    // An installer's window run from the worker's own temp folder: the path rule alone would make it the worker's.
+    { pid: 205, ppid: 9212, cmd: `${TMP}/ffa-a33e1437/Setup/installer --ui`, env: person },
+    // The marker is honoured only without a session: an FF_FOR_PERSON exported in a worker's shell spares nothing.
+    { pid: 206, ppid: 9212, cmd: '/usr/bin/python3 soak.py', env: { ...env('a33e1437'), person: 'a33e1437' } },
+  ], { sessions: { a33e1437: {} } });
+  for (let i = 0; i < 40; i++) await m.look();
+  assert.deepEqual([201, 206].filter(m.alive), [], "the worker's own leftovers end as before");
+  assert.ok([202, 203, 204, 205].every(m.alive), 'what was started for the person runs on after 40 min');
+  assert.ok(!m.st.signals.some((s) => /\s20[2-5]$/.test(s)), 'and was never signalled');
+  assert.equal(m.st.logs.filter((l) => /spared pid 202, started for a person by worker a33e1437/.test(l)).length, 1, 'said once in the log');
+});
+
+test('w4047: ff-leftovers never lists what the worker started for a person, nor its tree; its background job still is (Linux, Windows)', () => {
+  const procs: Proc[] = [
+    SYSTEMD,
+    { pid: 10, ppid: 9212, cmd: `/usr/bin/node ${ROOT}/daemon/app/machine/agentHost.ts ${ROOT}/daemon/hosts/me` },
+    { pid: 11, ppid: 10, cmd: '/home/u/.local/bin/claude --output-format stream-json' },
+    { pid: 14, ppid: 11, cmd: '/bin/bash -c ff-leftovers end' },
+    { pid: 15, ppid: 14, cmd: `/usr/bin/node ${ROOT}/daemon/app/machine/leftovers.ts end` },
+    { pid: 16, ppid: 11, cmd: '/bin/bash -c python3 soak.py' },
+    { pid: 17, ppid: 16, cmd: 'python3 soak.py' },
+    { pid: 30, ppid: 9212, cmd: '/opt/Epic Games Launcher/EpicGamesLauncher' },
+    { pid: 31, ppid: 30, cmd: `${TMP}/ffa-me/epic/updater --log ${TMP}/ffa-me/epic/u.log` },
+  ];
+  const env = new Map<number, ProcEnv>([10, 11, 14, 15, 16, 17].map((pid) => [pid, { session: 'me' }]));
+  env.set(30, { person: 'me' });
+  assert.deepEqual(ownLeftovers('me', procs, env, 15, 'linux').map((p) => p.pid), [16, 17]);
+  // On Windows a process that names the session's temp folder is the session's (w4000), unless it is in the person's tree.
+  assert.deepEqual(ownLeftovers('me', procs, env, 15, 'win32', { tempRoot: TMP }).map((p) => p.pid), [16, 17]);
+  assert.equal(forPerson({ person: 'me' }), true);
+  assert.equal(forPerson({ person: 'me', session: 'me' }), false);
+  assert.equal(forPerson(undefined), false);
+  assert.deepEqual(envFrom(['FF_FOR_PERSON=me', 'PATH=/bin']), { person: 'me' });
+  assert.deepEqual(macEnvLine('  77 /Applications/Epic Games Launcher.app/Contents/MacOS/EpicGamesLauncher HOME=/Users/b FF_FOR_PERSON=cf018e8d'), { pid: 77, env: { person: 'cf018e8d' } });
+});
+
+test('w4047: personEnv drops the worker\'s ownership variables and credentials, marks the session, and leaves the worker\'s temp folder', () => {
+  const e = { PATH: '/bin', HOME: '/Users/b', FF_SESSION_ID: 'cf018e8d', FF_SANDBOX_ID: 'slot1', FF_MACHINE_ID: 'm5', FF_WORKER_ROOT: '/Users/b/ffw', FF_LEFTOVERS_CALLERS: '1 2', FF_CLEANUP_FACTS: '/x', GH_TOKEN: 'ghs_x', CLAUDE_CODE_OAUTH_TOKEN: 'sk', ANTHROPIC_API_KEY: 'k', CLAUDECODE: '1', TMPDIR: '/Users/b/ffw/tmp/ffa-cf018e8d/', FF_SKILLS: '/s' };
+  assert.deepEqual(personEnv(e, 'cf018e8d', 'darwin'), { PATH: '/bin', HOME: '/Users/b', FF_SKILLS: '/s', FF_FOR_PERSON: 'cf018e8d' });
+  const w = personEnv({ Path: 'C:\\Windows', TEMP: 'V:\\ffw\\tmp\\ffa-cf018e8d', TMP: 'C:\\Users\\b\\AppData\\Local\\Temp', LOCALAPPDATA: 'C:\\Users\\b\\AppData\\Local', Ff_Session_Id: 'cf018e8d' }, 'cf018e8d', 'win32');
+  assert.deepEqual(w, { Path: 'C:\\Windows', TEMP: 'C:\\Users\\b\\AppData\\Local\\Temp', TMP: 'C:\\Users\\b\\AppData\\Local\\Temp', LOCALAPPDATA: 'C:\\Users\\b\\AppData\\Local', FF_FOR_PERSON: 'cf018e8d' });
+});
+
+test('on this machine (w4047): a program started with `ff-leftovers launch` survives a sweep of its stopped worker, whose ordinary leftover is ended', async () => {
+  const session = `w4047t${process.pid}`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffperson-'));
+  const out = path.join(dir, 'env.json');
+  const ownEnv = { FF_SESSION_ID: session, FF_SANDBOX_ID: 'slot9', FF_MACHINE_ID: 'testbox', FF_WORKER_ROOT: dir };
+  const e = { ...process.env, ...ownEnv, GH_TOKEN: 'ghs_test', TMPDIR: path.join(dir, `ffa-${session}`), TEMP: path.join(dir, `ffa-${session}`) };
+  const said: string[] = [];
+  const script = `require('fs').writeFileSync(${JSON.stringify(out)}, JSON.stringify({ env: process.env, cwd: process.cwd() })); setTimeout(() => {}, 120000)`;
+  const launched = await launchForPerson([process.execPath, '-e', script], session, e, platform, (s) => void said.push(s));
+  assert.equal(launched.code, 0, said.join(''));
+  const app = launched.pid!;
+  const leftover = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], { env: { ...process.env, ...ownEnv }, stdio: 'ignore' });
+  const alive = (pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  try {
+    for (let i = 0; i < 100 && !fs.existsSync(out); i++) await new Promise((r) => setTimeout(r, 100));
+    const seen = JSON.parse(fs.readFileSync(out, 'utf8')) as { env: Record<string, string>; cwd: string };
+    assert.equal(seen.env.FF_FOR_PERSON, session);
+    for (const k of [...Object.keys(ownEnv), 'GH_TOKEN']) assert.equal(seen.env[k], undefined, k);
+    assert.ok(!Object.entries(seen.env).some(([k, v]) => /^(TEMP|TMP|TMPDIR)$/i.test(k) && v.includes(`ffa-${session}`)), "not the worker's temp folder");
+    assert.equal(fs.realpathSync(seen.cwd).toLowerCase(), fs.realpathSync(os.homedir()).toLowerCase());
+    const envs = await readEnvs(platform, [app, leftover.pid!]);
+    assert.deepEqual(envs.get(app), { person: session });
+    assert.equal(envs.get(leftover.pid!)?.session, session);
+    // The daemon's sweep, reading this machine's environments and sending real signals; the session stopped, nothing waits for it.
+    const fake = machine([], { sessions: { [session]: {} } });
+    const procs = () => [app, leftover.pid!].filter(alive).map((pid) => ({ pid, ppid: 9212, cmd: `node sleeper ${pid}` }));
+    const reaper = new LeftoverReaper({
+      ...fake.reaper['d'],
+      machineId: 'testbox',
+      root: dir,
+      procs: async () => procs(),
+      envOf: (pids) => readEnvs(platform, pids),
+      kill: (pid, sig) => {
+        try {
+          process.kill(pid, sig);
+        } catch {
+          // gone
+        }
+        return undefined;
+      },
+      inspect: async (pids) => pids.map((pid) => ({ pid, startedAt: fake.st.now - HOUR, cpuMs: 0 })),
+      sleep: (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 500))),
+    });
+    for (let i = 0; i < 6; i++) {
+      fake.st.now += 2 * MIN;
+      await reaper.look();
+    }
+    for (let i = 0; i < 50 && alive(leftover.pid!); i++) await new Promise((r) => setTimeout(r, 100));
+    assert.equal(alive(leftover.pid!), false, 'the ordinary leftover was ended');
+    assert.equal(alive(app), true, 'the program started for a person runs on');
+  } finally {
+    leftover.kill('SIGKILL');
+    try {
+      process.kill(app, 'SIGKILL');
+    } catch {
+      // gone
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
