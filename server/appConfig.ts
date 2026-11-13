@@ -51,6 +51,10 @@ export const SETTABLE_KEYS = [
   'usagePollMinutes',
   // The address machines and the outside watchdog reach this portal at (the Tailscale Funnel URL).
   'publicUrl',
+  // The front door (docs/identity.md), the owner's only: believe a local proxy's X-Forwarded-For/-Proto (Tailscale Funnel),
+  // and whether a member's login from a new browser waits for an owner's approval ("off" or "members").
+  'trustProxy',
+  'deviceApproval',
   // The one vault token the dispatcher runs on (w996), "vault:<entry name>"; unset, the system payer's pool. The owner's only.
   // Every other Claude process runs on its person's pool: nothing else to set (w1078).
   'claudeAccounts.dispatcher',
@@ -186,7 +190,7 @@ export type SettableKey = (typeof SETTABLE_KEYS)[number];
 const NO_HOST = '; "this host" is no place for work any more (w510): name this host\'s own daemon (e.g. "beast")';
 
 /** Keys only an owner may set (docs/identity.md roles): what the intake files and starts by itself. */
-export const OWNER_ONLY_KEYS: ReadonlySet<SettableKey> = new Set(['live.enabled', 'live.idleCloseMinutes', 'intake.ffbox', 'intake.reviewers', 'providers.ffbox.devRequests', 'claudeAccounts.dispatcher', 'machines.githubFromVault', 'vault.unattributed.intake', 'vault.unattributed.ffbox', 'vault.unattributed.nightly', 'orchestrator.timerFilingsPerMessage']);
+export const OWNER_ONLY_KEYS: ReadonlySet<SettableKey> = new Set(['live.enabled', 'live.idleCloseMinutes', 'intake.ffbox', 'intake.reviewers', 'providers.ffbox.devRequests', 'claudeAccounts.dispatcher', 'machines.githubFromVault', 'vault.unattributed.intake', 'vault.unattributed.ffbox', 'vault.unattributed.nightly', 'orchestrator.timerFilingsPerMessage', 'trustProxy', 'deviceApproval']);
 
 const FFBOX_INTAKE_FLAGS = ['enabled', 'branches', 'diagnoses', 'requests', 'boardCheck', 'escalations'] as const;
 const FFBOX_INTAKE_KEYS = [...FFBOX_INTAKE_FLAGS, 'repo', 'dailyCap', 'match', 'autoApprove', 'desync', 'crash'];
@@ -555,6 +559,16 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
     case 'publicUrl': {
       if (typeof value !== 'string' || !/^https?:\/\/[^/\s]+\/?$/.test(value.trim())) throw new Error("publicUrl is the portal's base URL, e.g. https://<host>.<tailnet>.ts.net");
       return value.trim().replace(/\/+$/, '');
+    }
+    case 'trustProxy': {
+      if (value === true || value === 'true') return true;
+      if (value === false || value === 'false') return false;
+      throw new Error("trustProxy is true (believe X-Forwarded-For/-Proto from a proxy on this machine, such as Tailscale Funnel) or false");
+    }
+    case 'deviceApproval': {
+      if (value === undefined || value === null || value === 'off') return value === 'off' ? 'off' : undefined;
+      if (value === 'members') return 'members';
+      throw new Error(`deviceApproval is "members" (a member's login from a new browser waits for an owner's approval in the portal) or "off"`);
     }
     case 'usagePollMinutes': {
       const n = Number(value);
@@ -1011,6 +1025,8 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   else if (key === 'voice.ttsVoice') cfg.voice.ttsVoice = (v as string | undefined) ?? VOICE_DEFAULTS.ttsVoice;
   else if (key === 'hostGuard.devDriveVhdx') cfg.hostGuard.devDriveVhdx = (v as string | undefined) ?? '';
   else if (key === 'publicUrl') cfg.publicUrl = v as string | undefined;
+  else if (key === 'trustProxy') cfg.trustProxy = v as boolean;
+  else if (key === 'deviceApproval') cfg.deviceApproval = v as 'off' | 'members' | undefined;
   else if (key === 'attachments.maxMB' || key === 'attachments.retentionDays' || key === 'attachments.maxPerMessage') {
     const field = key === 'attachments.maxMB' ? 'maxMB' : key === 'attachments.retentionDays' ? 'retentionDays' : 'maxPerMessage';
     const a = { ...cfg.attachments };

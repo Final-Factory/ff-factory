@@ -4,6 +4,7 @@ import type http from 'node:http';
 import { createHash, randomBytes, scrypt, timingSafeEqual, type ScryptOptions } from 'node:crypto';
 import type { UserInfo, UserRole } from '../shared/types.ts';
 import { checkArray, checkObject, isObject, readJsonDurable, writeJsonDurable, type Check } from './durable.ts';
+import { Devices, deviceCookie, deviceId, newDeviceId, type DeviceApproval, type DeviceRecord, type DeviceView } from './devices.ts';
 
 /**
  * Username/password login. This page can drive agents that run shell commands on the host, so it
@@ -19,7 +20,10 @@ import { checkArray, checkObject, isObject, readJsonDurable, writeJsonDurable, t
  *     is never throttled;
  *   - a one-time set-password link (w3714, `node server/user.ts <name> --link`) is a random 256-bit token whose
  *     SHA-256 alone is kept (data/password-links.json); it sets that login's password once, within its hours, and its
- *     wrong guesses count as failed logins.
+ *     wrong guesses count as failed logins;
+ *   - device approval (config deviceApproval, server/devices.ts): with "members", a member's right password on a browser no
+ *     owner approved for them opens no session but a request an owner answers in the portal; the browser that redeems a
+ *     set-password link is approved by it.
  */
 
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
@@ -50,7 +54,13 @@ const cleanName = (s: string) => s.replace(/\s+/g, ' ').trim();
 interface SessionRecord {
   username: string;
   expires: number;
+  /** SHA-256 of the browser's device cookie, when it sent one: revoking that device ends the session. */
+  device?: string;
 }
+
+export type LoginResult =
+  | { ok: true; cookie: string; deviceCookie?: string }
+  | { ok: false; status: number; error: string; pending?: boolean; deviceCookie?: string };
 
 function scryptAsync(password: string, salt: Buffer, opts: ScryptOptions): Promise<Buffer> {
   return new Promise((resolve, reject) => scrypt(password, salt, KEYLEN, opts, (e, k) => (e ? reject(e) : resolve(k))));
@@ -111,13 +121,20 @@ export class Auth {
   private hashing = 0;
   /** A hash to verify against when the username does not exist, so timing does not reveal valid names. */
   private readonly dummyHash: Promise<string>;
-  private readonly trustProxy: boolean;
+  private readonly trustProxyOpt: boolean | (() => boolean);
+  private readonly deviceApproval: () => DeviceApproval;
+  readonly devices: Devices;
+  /** Told when a member's login from a new browser starts waiting for an owner (index.ts: a push to the owners). */
+  onDevicePending?: (d: DeviceView) => void;
 
-  constructor(dataDir: string, opts: { trustProxy: boolean }) {
+  /** opts: trustProxy and deviceApproval as config has them now (a function reads it live). */
+  constructor(dataDir: string, opts: { trustProxy: boolean | (() => boolean); deviceApproval?: () => DeviceApproval }) {
     this.usersFile = path.join(dataDir, 'users.json');
     this.sessionsFile = path.join(dataDir, 'auth-sessions.json');
     this.linksFile = path.join(dataDir, 'password-links.json');
-    this.trustProxy = opts.trustProxy;
+    this.trustProxyOpt = opts.trustProxy;
+    this.deviceApproval = opts.deviceApproval ?? (() => 'off');
+    this.devices = new Devices(dataDir);
     const raw = readJsonDurable<Record<string, SessionRecord>>(this.sessionsFile, { check: checkObject });
     const now = Date.now();
     for (const [id, s] of Object.entries(raw ?? {})) if (s.expires > now) this.sessions.set(id, s);
@@ -254,6 +271,10 @@ export class Auth {
     return { ok: false, status: 401 };
   }
 
+  private get trustProxy() {
+    return typeof this.trustProxyOpt === 'function' ? this.trustProxyOpt() : this.trustProxyOpt;
+  }
+
   /** The client address, taking X-Forwarded-For only from a local reverse proxy (Tailscale serve/funnel). */
   clientIp(req: http.IncomingMessage) {
     const direct = req.socket.remoteAddress ?? '?';
@@ -278,7 +299,7 @@ export class Auth {
     return recent.length >= 5 || this.globalFailures.length >= 20;
   }
 
-  async login(req: http.IncomingMessage, username: string, password: string): Promise<{ ok: true; cookie: string } | { ok: false; status: number; error: string }> {
+  async login(req: http.IncomingMessage, username: string, password: string): Promise<LoginResult> {
     const ip = this.clientIp(req);
     if (this.throttled(ip)) return { ok: false, status: 429, error: 'Too many failed attempts. Try again in 15 minutes.' };
     if (this.hashing >= 2) return { ok: false, status: 429, error: 'Busy, try again in a moment.' };
@@ -301,13 +322,59 @@ export class Auth {
     }
     this.failures.delete(ip);
     this.globalFailures = this.globalFailures.filter((t) => t !== stamp);
+    if (this.needsApproval(user)) {
+      const given = deviceId(req);
+      const dev = given ?? newDeviceId();
+      const setDevice = given ? undefined : deviceCookie(dev, this.isHttps(req));
+      const known = this.devices.find(username, sha(dev));
+      if (known?.status !== 'approved') {
+        if (known?.status === 'denied') {
+          console.warn(`login for "${username}" from ${ip}: device ${known.id} was refused`);
+          return { ok: false, status: 403, error: 'An owner refused this device. Ask them to approve it in FF Factory.' };
+        }
+        const d = this.devices.upsert(username, sha(dev), req, ip, 'pending');
+        console.log(`login for "${username}" from ${ip} waits for an owner to approve device ${d.id} (${d.label})`);
+        if (!known) this.onDevicePending?.(this.view(d));
+        return { ok: false, status: 202, pending: true, error: 'This device is new: an owner must approve it in FF Factory. This page signs you in once they do.', ...(setDevice ? { deviceCookie: setDevice } : {}) };
+      }
+      this.devices.upsert(username, sha(dev), req, ip, 'approved');
+      console.log(`login ok for "${username}" from ${ip} on approved device ${known.id}`);
+      return { ok: true, cookie: this.newSession(req, username, sha(dev)) };
+    }
     console.log(`login ok for "${username}" from ${ip}`);
-    return { ok: true, cookie: this.newSession(req, username) };
+    const dev = deviceId(req);
+    return { ok: true, cookie: this.newSession(req, username, dev && sha(dev)) };
   }
 
-  private newSession(req: http.IncomingMessage, username: string): string {
+  /** Whether `user`'s logins need an owner's approval for each new browser: config deviceApproval "members", and a member. */
+  private needsApproval(user: UserRecord) {
+    return this.deviceApproval() === 'members' && (user.role ?? 'owner') === 'member';
+  }
+
+  private view({ sha256: _, ...v }: DeviceRecord): DeviceView {
+    return v;
+  }
+
+  /** Every device request and approval, for the owners' page (no cookie hashes). */
+  deviceList(): DeviceView[] {
+    return this.devices.list();
+  }
+
+  /** An owner approves, denies or revokes a device; denying or revoking ends that browser's sessions of that login. */
+  decideDevice(id: string, action: 'approve' | 'deny' | 'revoke', by: string): DeviceView {
+    const d = this.devices.decide(id, action, by);
+    if (action !== 'approve') {
+      let n = 0;
+      for (const [k, s] of this.sessions) if (s.username === d.username && s.device === d.sha256 && this.sessions.delete(k)) n++;
+      if (n) this.persistSessions();
+    }
+    console.log(`device ${d.id} of "${d.username}" (${d.label}): ${action} by ${by}`);
+    return this.view(d);
+  }
+
+  private newSession(req: http.IncomingMessage, username: string, device?: string): string {
     const id = randomBytes(32).toString('hex');
-    this.sessions.set(sha(id), { username, expires: Date.now() + SESSION_TTL_MS });
+    this.sessions.set(sha(id), { username, expires: Date.now() + SESSION_TTL_MS, ...(device ? { device } : {}) });
     this.persistSessions();
     const secure = this.isHttps(req) ? '; Secure' : '';
     return `${COOKIE}=${id}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_TTL_MS / 1000}${secure}`;
@@ -330,7 +397,7 @@ export class Auth {
   }
 
   /** Set the password a link names, once, and log that browser in (every other session of the login ends). */
-  async usePasswordLink(req: http.IncomingMessage, token: string, password: string): Promise<{ ok: true; username: string; cookie: string } | { ok: false; status: number; error: string }> {
+  async usePasswordLink(req: http.IncomingMessage, token: string, password: string): Promise<{ ok: true; username: string; cookie: string; deviceCookie?: string } | { ok: false; status: number; error: string }> {
     const ip = this.clientIp(req);
     if (this.throttled(ip)) return { ok: false, status: 429, error: 'Too many failed attempts. Try again in 15 minutes.' };
     const all = this.links();
@@ -345,8 +412,12 @@ export class Auth {
     if (password.length < 12) return { ok: false, status: 400, error: 'The password must be at least 12 characters.' };
     writeJsonDurable(this.linksFile, all.filter((l) => l !== hit));
     await this.setUser(hit.username, password);
-    console.log(`password set by link for "${hit.username}" from ${ip}`);
-    return { ok: true, username: hit.username, cookie: this.newSession(req, hit.username) };
+    // The owner minted the link for this person: the browser that redeems it is approved for them (device approval).
+    const given = deviceId(req);
+    const dev = given ?? newDeviceId();
+    const d = this.devices.upsert(hit.username, sha(dev), req, ip, 'approved', 'set-password link');
+    console.log(`password set by link for "${hit.username}" from ${ip}; device ${d.id} (${d.label}) approved by the link`);
+    return { ok: true, username: hit.username, cookie: this.newSession(req, hit.username, sha(dev)), ...(given ? {} : { deviceCookie: deviceCookie(dev, this.isHttps(req)) }) };
   }
 
   logout(req: http.IncomingMessage) {

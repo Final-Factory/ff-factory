@@ -128,6 +128,11 @@ export class Notifier {
     this.fire({ kind: 'error', title: `${this.name(s)} was stopped: over the per-turn budget`, body: clip(body, 240), url: this.route(s), tag: `budget-${s.id}` }, users);
   }
 
+  /** A member's login from a new browser waits for an owner's approval (device approval, docs/identity.md). */
+  device(who: string, label: string, owners: string[]) {
+    this.fire({ kind: 'permission', title: `${who} asks to sign in from a new device`, body: `${label}: approve or deny it in FF Factory.`, url: '#/', tag: `device-${who}` }, owners);
+  }
+
   /** A host-health step (disk guard, sandbox drive recovery): server/hostHealth.ts. */
   host(title: string, body: string) {
     this.fire({ kind: 'host', title, body: clip(body, 240), url: '#/', tag: `host-${title.slice(0, 40)}` });

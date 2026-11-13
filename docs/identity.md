@@ -32,6 +32,23 @@ worker then runs on that person's Claude account when FF Factory holds one for t
   token's SHA-256 is kept (`data/password-links.json`), a newer link replaces the older one, and a wrong token counts as a
   failed login (server/auth.ts `usePasswordLink`).
 
+- **Device approval** (Lens Scout factory's w7; config `deviceApproval`, off by default). With `"members"`, a member's
+  right password on a browser no owner approved for them opens no session: the login answers 202 and waits as a request,
+  the owners get a push notice ("Cassidy asks to sign in from a new device"), and every owner's page shows a bar with
+  the browser ("Safari on iPhone"), its address and **Approve** / **Deny**. The member's login page asks again every 10
+  seconds for up to 30 minutes and signs in once an owner approves. Owners are never held.
+  - A browser is known by a random 256-bit id in its own cookie (`ffsb_device`, HttpOnly, SameSite=Strict, 400 days);
+    only its SHA-256 is kept, per login, in `data/devices.json` (`server/devices.ts`). Clearing the cookies, a private
+    window or another browser is a new device.
+  - The browser that redeems a set-password link is approved by it: the owner minted the link for that person.
+  - Deny keeps that browser refused (no new notice) until an owner approves it; an unanswered request is dropped after a
+    week, a refusal after 30 days. `POST /api/devices/<id>/revoke` forgets an approved browser and ends its sessions.
+  - The routes: `GET /api/devices`, `POST /api/devices/<id>/approve|deny|revoke`, an owner's logged-in session only
+    (API keys never reach `/api/*`). Sessions a member opened before approval was turned on stay valid.
+  - Turn it on with set_app_config `deviceApproval` `"members"` (an owner's setting). A portal behind Tailscale Funnel
+    wants `trustProxy` true (also an owner's setting now) so the bar shows the member's real address and the cookies
+    are `Secure`.
+
 - `/mcp` API keys can be bound to a login: `node server/apikey.ts loth-laptop --user lothsahn`. Everything
   that key's tools start is requested by that person, and its `for_user` cannot name anyone else. A key
   minted before this change, or without `--user`, acts for the owner. A key for a member login, written straight into a

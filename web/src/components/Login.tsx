@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { UnauthorizedError } from '../api';
 import { login } from '../store';
 
@@ -7,6 +7,37 @@ export function Login() {
   const [password, setPassword] = useState('');
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Device approval (docs/identity.md): the password was right, but an owner must approve this browser first. The page
+  // asks again every 10 seconds, for up to 30 minutes, and signs in once they have.
+  const [pending, setPending] = useState<{ text: string; since: number; asks: number } | null>(null);
+
+  const attempt = async (quiet: boolean) => {
+    if (!quiet) {
+      setBusy(true);
+      setErr(null);
+    }
+    try {
+      const r = await login(username.trim(), password);
+      // A new object each answer: the same one would skip the render that sets the next try.
+      setPending(r.pending ? (p) => ({ text: r.pending!, since: p?.since ?? Date.now(), asks: (p?.asks ?? 0) + 1 }) : null);
+    } catch (ex) {
+      setPending(null);
+      setErr(ex instanceof UnauthorizedError ? 'Wrong username or password.' : ex instanceof Error ? ex.message : String(ex));
+    } finally {
+      if (!quiet) setBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!pending) return;
+    if (Date.now() - pending.since > 30 * 60_000) {
+      setPending(null);
+      setErr('Nobody approved this device yet. Sign in again once an owner has.');
+      return;
+    }
+    const t = setTimeout(() => void attempt(true), 10_000);
+    return () => clearTimeout(t);
+  });
 
   return (
     <div className="login">
@@ -15,15 +46,7 @@ export function Login() {
         onSubmit={async (e) => {
           e.preventDefault();
           if (!username.trim() || !password) return;
-          setBusy(true);
-          setErr(null);
-          try {
-            await login(username.trim(), password);
-          } catch (ex) {
-            setErr(ex instanceof UnauthorizedError ? 'Wrong username or password.' : ex instanceof Error ? ex.message : String(ex));
-          } finally {
-            setBusy(false);
-          }
+          await attempt(false);
         }}
       >
         <svg viewBox="0 0 32 32" width="44" height="44" aria-hidden>
@@ -57,8 +80,13 @@ export function Login() {
           />
         </label>
         {err && <div className="login-err">{err}</div>}
-        <button className="btn btn-primary btn-block" disabled={busy || !username.trim() || !password}>
-          {busy ? 'Checking…' : 'Sign in'}
+        {pending && (
+          <div className="login-pending" role="status">
+            <span className="spinner spinner-sm" /> {pending.text}
+          </div>
+        )}
+        <button className="btn btn-primary btn-block" disabled={busy || !!pending || !username.trim() || !password}>
+          {busy ? 'Checking…' : pending ? 'Waiting for approval…' : 'Sign in'}
         </button>
       </form>
     </div>
