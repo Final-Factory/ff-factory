@@ -30,7 +30,9 @@
 // slot nobody else holds and whose sandbox has no live worker, is an orphan: it ends ORPHAN_GRACE_MS after it was first
 // seen so.
 //
-// Never touched: anything while its worker's process runs (between turns too); an interactive Unity editor, and what it
+// Never touched: a program a worker started for a person with `ff-leftovers launch` and what it starts (FF_FOR_PERSON in its
+// environment and no FF_SESSION_ID: a launcher Ben used was ended on his m5, w4046/w4047); anything while its worker's
+// process runs (between turns too); an interactive Unity editor, and what it
 // started (the sandbox pool stops idle editors; a person's editor is never ours); a process that names the machine's main
 // clone or the daemon's own folder (the agent hosts, which hostWatch.ts owns; not a worker's own `unity-slot`, w2410); a
 // process carrying another machine's id or a session this machine never ran (the portal's own orchestrators where a daemon shares its host),
@@ -39,6 +41,7 @@
 // (VBCSCompiler, MSBuild nodes, bee) while it still uses CPU, since another worker's build may be using it; anything
 // before the portal's welcome since the daemon started (until then who is live or waited for is not known). Every end is
 // logged with what, why and whose, and told to the portal.
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -92,7 +95,12 @@ export interface ProcEnv {
   machine?: string;
   /** FF_WORKER_ROOT: the worker install folder of the daemon whose worker started it (w3714). */
   root?: string;
+  /** FF_FOR_PERSON: the session that started it for a person with `ff-leftovers launch` (w4047); never a leftover. */
+  person?: string;
 }
+
+/** w4047: a program a worker started for a person (`ff-leftovers launch`): the marker, and no session of its own. */
+export const forPerson = (e: ProcEnv | undefined): boolean => !!e?.person && !e.session;
 
 /** One lease file of a player slot (scripts/nightly/player_slots.py `_lease`), with the slot it is in. */
 export interface PlayerLease {
@@ -437,6 +445,8 @@ export class LeftoverReaper {
   private readonly looks = new Map<string, { n: number; orphanSince?: number; cpuMs?: number }>();
   /** w1983: processes (by pid and command line) SIGKILL did not end, and when: not tried again before LEFTOVER.STUCK_RETRY_MS. */
   private readonly stuck = new Map<string, number>();
+  /** w4047: the programs started for a person already logged as spared (by pid and command line). */
+  private readonly forPersonSeen = new Set<string>();
   private busy?: Promise<Ended[]>;
   private lastLook = 0;
   private players: PlayerLine[] = [];
@@ -512,6 +522,16 @@ export class LeftoverReaper {
       if (!INIT.test(c) && !WORKER_CLI.test(c) && prot.some((re) => re.test(c))) spare(p.pid);
     }
     const env = await d.envOf(procs.map((p) => p.pid).filter((pid) => pid > 0 && !spared.has(pid)));
+    // w4047: a program a worker started for a person (`ff-leftovers launch`) is the person's, and so is what it runs, whatever
+    // its path or arguments name (an installer in the worker's temp folder): said once in the log, never ended.
+    for (const p of procs) {
+      const e = env.get(p.pid);
+      if (!forPerson(e) || spared.has(p.pid)) continue;
+      spare(p.pid);
+      const id = `${p.pid}|${p.cmd}`;
+      if (!this.forPersonSeen.has(id)) d.log(`leftovers: spared pid ${p.pid}, started for a person by worker ${e!.person} (ff-leftovers launch): ${p.cmd.slice(0, 160)}`);
+      this.forPersonSeen.add(id);
+    }
     const leases = d.leases();
     const now = d.now();
     const personOn = !!d.personPlay?.();
@@ -613,6 +633,7 @@ export class LeftoverReaper {
     }
     for (const id of [...this.looks.keys()]) if (!seen.has(id)) this.looks.delete(id);
     for (const id of [...this.stuck.keys()]) if (!seen.has(id)) this.stuck.delete(id);
+    for (const id of [...this.forPersonSeen]) if (!procs.some((p) => `${p.pid}|${p.cmd}` === id)) this.forPersonSeen.delete(id);
     for (const s of [...this.stopped.keys()]) if (!sessions.has(s)) this.stopped.delete(s);
     this.players = players;
     this.others = others;
@@ -689,7 +710,7 @@ export class LeftoverReaper {
 
 // ---------------------------------------------------------------- the real machine
 
-const WANT = /^(FF_SESSION_ID|FF_SANDBOX_ID|FF_MACHINE_ID|FF_WORKER_ROOT)=(.*)$/;
+const WANT = /^(FF_SESSION_ID|FF_SANDBOX_ID|FF_MACHINE_ID|FF_WORKER_ROOT|FF_FOR_PERSON)=(.*)$/;
 
 /**
  * w3714: whether a process's FF_WORKER_ROOT is this daemon's root. Either unknown (a process of a worker from before
@@ -713,7 +734,9 @@ export function envFrom(entries: Iterable<string>): ProcEnv {
     if (m[1] === 'FF_SESSION_ID') o.session = m[2];
     else if (m[1] === 'FF_SANDBOX_ID') o.sandbox = m[2];
     else if (m[1] === 'FF_MACHINE_ID') o.machine = m[2];
-    else if (m[2]) o.root = m[2];
+    else if (m[1] === 'FF_FOR_PERSON') {
+      if (m[2]) o.person = m[2];
+    } else if (m[2]) o.root = m[2];
   }
   return o;
 }
@@ -727,7 +750,7 @@ export function macEnvLine(line: string): { pid: number; env: ProcEnv } | undefi
   const m = /^\s*(\d+)\s+(.*)$/.exec(line);
   if (!m) return undefined;
   const env: ProcEnv = {};
-  for (const x of m[2].matchAll(/(?:^|\s)(FF_SESSION_ID|FF_SANDBOX_ID|FF_MACHINE_ID|FF_WORKER_ROOT)=(\S+)/g)) Object.assign(env, envFrom([`${x[1]}=${x[2]}`]));
+  for (const x of m[2].matchAll(/(?:^|\s)(FF_SESSION_ID|FF_SANDBOX_ID|FF_MACHINE_ID|FF_WORKER_ROOT|FF_FOR_PERSON)=(\S+)/g)) Object.assign(env, envFrom([`${x[1]}=${x[2]}`]));
   return { pid: Number(m[1]), env };
 }
 
@@ -777,7 +800,7 @@ export function winEnvScript(pids: number[]): string {
   const list = pids.filter((p) => Number.isInteger(p) && p > 4).join(',');
   return [
     `Add-Type -TypeDefinition @'\n${WIN_ENV_CS}\n'@`,
-    `$out = foreach ($id in @(${list || '0'})) { $b = $null; try { $b = [FFProcEnv]::Block([int]$id) } catch { }; if ($b -and $b.Contains('FF_SESSION_ID=')) { $m = @{}; foreach ($kv in $b.Split([char]0)) { if ($kv -match '^(FF_SESSION_ID|FF_SANDBOX_ID|FF_MACHINE_ID|FF_WORKER_ROOT)=(.*)$') { $m[$matches[1]] = $matches[2] } }; [pscustomobject]@{ pid = [int]$id; session = $m['FF_SESSION_ID']; sandbox = $m['FF_SANDBOX_ID']; machine = $m['FF_MACHINE_ID']; root = $m['FF_WORKER_ROOT'] } } }`,
+    `$out = foreach ($id in @(${list || '0'})) { $b = $null; try { $b = [FFProcEnv]::Block([int]$id) } catch { }; if ($b -and ($b.Contains('FF_SESSION_ID=') -or $b.Contains('FF_FOR_PERSON='))) { $m = @{}; foreach ($kv in $b.Split([char]0)) { if ($kv -match '^(FF_SESSION_ID|FF_SANDBOX_ID|FF_MACHINE_ID|FF_WORKER_ROOT|FF_FOR_PERSON)=(.*)$') { $m[$matches[1]] = $matches[2] } }; [pscustomobject]@{ pid = [int]$id; session = $m['FF_SESSION_ID']; sandbox = $m['FF_SANDBOX_ID']; machine = $m['FF_MACHINE_ID']; root = $m['FF_WORKER_ROOT']; person = $m['FF_FOR_PERSON'] } } }`,
     `@($out) | ConvertTo-Json -Compress`,
   ].join('\n');
 }
@@ -790,7 +813,7 @@ export async function readEnvs(platform: UnityPlatform, pids: number[]): Promise
     for (const pid of pids) {
       try {
         const e = envFrom(fs.readFileSync(`/proc/${pid}/environ`, 'latin1').split('\0'));
-        if (e.session) out.set(pid, e);
+        if (e.session || e.person) out.set(pid, e);
       } catch {
         // gone, or another user's
       }
@@ -802,14 +825,14 @@ export async function readEnvs(platform: UnityPlatform, pids: number[]): Promise
     const r = await run('ps', ['-x', '-E', '-ww', '-o', 'pid=,command='], { timeoutMs: 30_000 });
     for (const line of r.stdout.split('\n')) {
       const x = macEnvLine(line);
-      if (x && want.has(x.pid) && x.env.session) out.set(x.pid, x.env);
+      if (x && want.has(x.pid) && (x.env.session || x.env.person)) out.set(x.pid, x.env);
     }
     return out;
   }
   const r = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', winEnvScript(pids)], { timeoutMs: 120_000 });
   if (r.code !== 0) throw new Error(`reading process environments failed (${r.code}): ${r.stderr.trim().slice(0, 200)}`);
-  for (const x of parsePsJson<{ pid: number; session?: string; sandbox?: string; machine?: string; root?: string }>(r.stdout, 'the Windows process environments')) {
-    if (x.session) out.set(Number(x.pid), { session: x.session, ...(x.sandbox ? { sandbox: x.sandbox } : {}), ...(x.machine ? { machine: x.machine } : {}), ...(x.root ? { root: x.root } : {}) });
+  for (const x of parsePsJson<{ pid: number; session?: string; sandbox?: string; machine?: string; root?: string; person?: string }>(r.stdout, 'the Windows process environments')) {
+    if (x.session || x.person) out.set(Number(x.pid), { ...(x.session ? { session: x.session } : {}), ...(x.sandbox ? { sandbox: x.sandbox } : {}), ...(x.machine ? { machine: x.machine } : {}), ...(x.root ? { root: x.root } : {}), ...(x.person ? { person: x.person } : {}) });
   }
   return out;
 }
@@ -924,6 +947,8 @@ export function ownLeftovers(session: string, procs: Proc[], env: Map<number, Pr
   }
   for (const c of command) for (const k of kids.get(c) ?? []) if (!chain.has(k)) sub(k, skip);
   for (const u of unityProcesses(procs, platform)) if (u.kind === 'interactive') sub(u.pid, skip);
+  // w4047: what the worker started for a person (`ff-leftovers launch`) and what that runs.
+  for (const p of procs) if (forPerson(env.get(p.pid))) sub(p.pid, skip);
   for (const p of procs) if (!chain.has(p.pid) && !skip.has(p.pid) && ours(p.pid)) out.add(p.pid);
   // On Windows a Git Bash program shows no environment, and a background task stopped with TaskStop leaves its script's
   // bash and what that runs with parents that have exited (w4000: lothdesktop, 2026-11-12, `bash $TMPDIR/checks.sh` and its
@@ -1149,8 +1174,9 @@ export async function leftoversMain(argv: string[], e: NodeJS.ProcessEnv = proce
   if (cmd === 'folders' || cmd === 'check' || cmd === 'remove-slot') return foldersMain(cmd, argv.slice(1), e);
   const session = e.FF_SESSION_ID;
   const platform: UnityPlatform = process.platform === 'win32' ? 'win32' : process.platform === 'linux' ? 'linux' : 'darwin';
+  if (session && cmd === 'launch' && argv.length > 1) return (await launchForPerson(argv.slice(1), session, e, platform)).code;
   if (!session || !['list', 'end'].includes(cmd)) {
-    process.stdout.write(`usage: ff-leftovers [list|end|folders|check <path>...|remove-slot <slot>...]\n  list: what this worker's session (FF_SESSION_ID) started that still runs: players, Xvfb, builds, servers, background jobs\n  end: end them (SIGTERM, then SIGKILL after 5 s), before DONE or a stop\n  folders: a clean-up's candidates under the install folder, each KEEP or DELETE by the ledger (a request not closed keeps its worker's folders)\n  check <path>...: the same verdict for paths you mean to delete; exit 1 if any is to be kept. Only paths in the install folder: on Windows never one on C: or another drive, apart from the game's AppData Never Games folders, which are always KEEP (w1755)\n  remove-slot <slot>...: empty idle player slots (<install>/players/slot<K>-<P>); refused while a lease lives, a fill runs or a process plays from it (w3204)\n${session ? '' : 'FF_SESSION_ID is not set: run it from a worker of FF Factory.\n'}`);
+    process.stdout.write(`usage: ff-leftovers [list|end|launch <program> [args]...|folders|check <path>...|remove-slot <slot>...]\n  list: what this worker's session (FF_SESSION_ID) started that still runs: players, Xvfb, builds, servers, background jobs\n  end: end them (SIGTERM, then SIGKILL after 5 s), before DONE or a stop\n  launch <program> [args]...: start a program a person goes on using (a launcher, an installer's window, a desktop app) so that neither \`end\` nor FF Factory's sweep ever ends it or what it starts (w4047): without your session's FF_* variables and credentials, marked FF_FOR_PERSON, detached, from your home folder. A Mac: \`ff-leftovers launch open -a "<app>"\`; Windows: a Windows path to an .exe, or \`cmd /c start "" "<file>"\`. Never for a game player or a run of your own\n  folders: a clean-up's candidates under the install folder, each KEEP or DELETE by the ledger (a request not closed keeps its worker's folders)\n  check <path>...: the same verdict for paths you mean to delete; exit 1 if any is to be kept. Only paths in the install folder: on Windows never one on C: or another drive, apart from the game's AppData Never Games folders, which are always KEEP (w1755)\n  remove-slot <slot>...: empty idle player slots (<install>/players/slot<K>-<P>); refused while a lease lives, a fill runs or a process plays from it (w3204)\n${session ? '' : 'FF_SESSION_ID is not set: run it from a worker of FF Factory.\n'}`);
     return session ? 2 : 1;
   }
   const { realDeps } = await import('./unity.ts');
@@ -1181,7 +1207,7 @@ export async function leftoversMain(argv: string[], e: NodeJS.ProcessEnv = proce
     return 0;
   }
   if (cmd === 'list') {
-    process.stdout.write(`Still running from your session (${session}): ${mine.length}\n${mine.map(line).join('\n')}\n\`ff-leftovers end\` ends them; FF Factory ends them anyway a few minutes after your process stops.\n`);
+    process.stdout.write(`Still running from your session (${session}): ${mine.length}\n${mine.map(line).join('\n')}\n\`ff-leftovers end\` ends them; FF Factory ends them anyway a few minutes after your process stops. A program a person goes on using: start it again with \`ff-leftovers launch\`.\n`);
     return 0;
   }
   // Ended, then looked for again: a loop can start its next child between the list and the kill, so "None is left" is said
@@ -1203,6 +1229,53 @@ export async function leftoversMain(argv: string[], e: NodeJS.ProcessEnv = proce
   const done = ended.filter((p) => !todo.some((x) => x.pid === p.pid && x.cmd === p.cmd));
   process.stdout.write(`Ended ${done.length} of ${ended.length} process(es) your session (${session}) started${killed ? ` (${killed} needed SIGKILL)` : ''}:\n${ended.map(line).join('\n')}\n${todo.length ? `Still running:\n${todo.map(line).join('\n')}\n` : 'None is left.\n'}`);
   return todo.length ? 1 : 0;
+}
+
+/** A worker's variables that say it owns a process, or hold its credentials: never handed to a person's program (w4047). */
+const NOT_FOR_PERSON = /^(FF_SESSION_ID|FF_SANDBOX_ID|FF_MACHINE_ID|FF_WORKER_ROOT|FF_LEFTOVERS_\w+|FF_CLEANUP_FACTS|CLAUDECODE|(CLAUDE|ANTHROPIC)_\w+|GH_TOKEN|GITHUB_TOKEN)$/i;
+
+/**
+ * w4047: the environment of a program a worker starts for a person. On Ben's m5 (w4046) the Epic Games Launcher a worker
+ * opened with `open -a` carried the worker's FF_SESSION_ID (the app gets the caller's environment), so the sweep ended it
+ * 2 min after the worker's turn while Ben used it. Here: none of the worker's ownership variables or credentials,
+ * FF_FOR_PERSON=<session> instead (what it starts inherits that too, so it is kept as well, and the log says who started
+ * it), and the machine's temp folder rather than the worker's own, which is deleted after the worker.
+ */
+export function personEnv(e: NodeJS.ProcessEnv, session: string, platform: UnityPlatform): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  const own = `ffa-${session}`.toLowerCase();
+  const inOwnTemp = (v: string) => v.replace(/\\/g, '/').toLowerCase().split('/').includes(own);
+  for (const [k, v] of Object.entries(e)) {
+    if (v === undefined || NOT_FOR_PERSON.test(k)) continue;
+    if (/^(TEMP|TMP|TMPDIR)$/i.test(k) && inOwnTemp(v)) {
+      if (platform === 'win32' && e.LOCALAPPDATA) out[k] = path.win32.join(e.LOCALAPPDATA, 'Temp');
+      continue;
+    }
+    out[k] = v;
+  }
+  out.FF_FOR_PERSON = session;
+  return out;
+}
+
+/** `ff-leftovers launch <program> [args]...` (w4047): start it detached with personEnv, and say its pid. */
+export async function launchForPerson(args: string[], session: string, e: NodeJS.ProcessEnv, platform: UnityPlatform, out: (s: string) => void = (s) => void process.stdout.write(s)): Promise<{ code: number; pid?: number }> {
+  const [prog, ...rest] = args[0] === '--' ? args.slice(1) : args;
+  if (!prog) {
+    out('ff-leftovers launch: name the program to start\n');
+    return { code: 2 };
+  }
+  const child = spawn(prog, rest, { detached: true, stdio: 'ignore', env: personEnv(e, session, platform), cwd: os.homedir() });
+  const failed = await new Promise<Error | undefined>((r) => {
+    child.once('spawn', () => r(undefined));
+    child.once('error', r);
+  });
+  if (failed) {
+    out(`ff-leftovers launch: could not start ${prog}: ${failed.message}\n`);
+    return { code: 1 };
+  }
+  child.unref();
+  out(`Started ${prog} (pid ${child.pid}) for a person: FF Factory's sweep and \`ff-leftovers end\` never end it or what it starts.\n`);
+  return { code: 0, pid: child.pid };
 }
 
 /** The session's own temp folder's parent (TEMP or TMP is <root>/ffa-<session> in a worker), for the command-line rule. */

@@ -760,6 +760,18 @@ shell carrying the session, and on a loaded CI runner `end` ended it, losing its
 process tree cannot tell a pipeline's reader from a job started with `&` in that same command line, so such a job is spared
 too: run `ff-leftovers end` as a command of its own, after the one that started the job.
 
+**A program started for a person** (w4047). `ff-leftovers launch <program> [args]...` starts a program a person goes on
+using (a launcher, an installer's window, a desktop app; on a Mac `ff-leftovers launch open -a "<app>"`) detached, from the
+home folder, with an environment that has none of the worker's ownership variables (`FF_SESSION_ID`, `FF_SANDBOX_ID`,
+`FF_MACHINE_ID`, `FF_WORKER_ROOT`) or credentials (`GH_TOKEN`, `CLAUDE_*`, `ANTHROPIC_*`), the machine's temp folder rather
+than the worker's, and `FF_FOR_PERSON=<session>` (`personEnv`). The sweep spares a process with that marker and no
+`FF_SESSION_ID`, with its whole tree, whatever its path or arguments name (an installer run from the worker's temp folder),
+and logs it once ("spared pid N, started for a person by worker S"); `ff-leftovers list`/`end` skip the same tree. A marker
+beside a session (one exported in a worker's shell) spares nothing. The cause it fixes: on Ben's m5 (w4046) the Epic Games
+Launcher a worker opened with plain `open -a` carried the worker's `FF_SESSION_ID`, so the sweep ended it 2 min after the
+worker's turn while Ben used it ("Engine exit requested (reason: Mac GracefulTerminationHandler)"). Every worker's brief
+(`PROCESS_HYGIENE`) names the route.
+
 Tests: `server/leftovers.test.ts` (biscuit's two players and their Xvfb end; a waited-for worker's, a gnome session's and a
 batch build's leftovers end; the orphan ends; a live worker's player, a check-in's run, an interactive editor, the main
 clone, another machine's process and anything before the welcome stay; a busy compiler server stays; real processes on

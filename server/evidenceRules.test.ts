@@ -224,6 +224,8 @@ test('w1196, w1197: every worker hears to end what it started before DONE, how (
   assert.match(PROCESS_HYGIENE, /Nothing you start may outlive your work: a game player left running holds a machine's cores and fans for days/);
   assert.match(PROCESS_HYGIENE, /-ffSoloQuitAfterSeconds <n>/);
   assert.match(PROCESS_HYGIENE, /run `ff-leftovers list`, then `ff-leftovers end`/);
+  // w4047: a program a person goes on using has its own route, or the sweep ends it (the Epic Games Launcher on Ben's m5).
+  assert.match(PROCESS_HYGIENE, /you start with `ff-leftovers launch <program> \[args\]` \(on a Mac `ff-leftovers launch open -a "<app>"`\): the sweep and `ff-leftovers end` never end it/);
   assert.match(PROCESS_HYGIENE, /say in your report what it ended, or that nothing was left/);
   assert.match(PROCESS_HYGIENE, /2 minutes after your process stops once no request waits for you, 10 minutes after it stops while one still does, and never before a pending check-in is due plus 10 minutes/);
 });
