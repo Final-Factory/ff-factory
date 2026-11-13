@@ -7,6 +7,21 @@
 export const MODEL_REASON_HELP =
   'model_reason is required with a model other than the default: "small: <why you are sure the task is small>" (one or two named files, a mechanical or contained change with done-criteria in the brief, no simulation, determinism, netcode or save state, no design question, no investigation), or "asked: <the person\'s words naming the model>". Otherwise leave model out: workers start on the default.';
 
+/**
+ * Whether config models admit a model (w5): an entry of the list, or a full Claude id ("claude-fable-5-2",
+ * "claude-opus-5-5[1m]") of a family the list names by its alias, so a model Anthropic releases can be picked by its id
+ * as soon as the bundled Claude Code knows it, without a config edit.
+ */
+export function modelAllowed(models: string[], model: string): boolean {
+  if (models.includes(model)) return true;
+  const family = /^claude-(opus|sonnet|haiku|fable|mythos)-\d{1,2}(?:-\d{1,2})?(?:\[1m\])?$/.exec(model)?.[1];
+  return !!family && models.includes(family);
+}
+
+/** What a model parameter's description says it takes. */
+export const modelChoices = (cfg: { models: string[]; defaultModel: string }) =>
+  `One of ${cfg.models.join(', ')} or their full ids. Default ${cfg.defaultModel}.`;
+
 /** At most this many characters of a reason are kept in the log. */
 export const MODEL_REASON_MAX = 200;
 
@@ -22,7 +37,7 @@ export function workerModelChoice(
 ): { model?: string; note: string } {
   const model = a.model?.trim().toLowerCase() || undefined;
   if (!model || model === cfg.defaultModel) return { model, note: '' };
-  if (!cfg.models.includes(model)) throw new Error(`model must be one of ${cfg.models.join(', ')} (default ${cfg.defaultModel})`);
+  if (!modelAllowed(cfg.models, model)) throw new Error(`model must be one of ${cfg.models.join(', ')} or a full id of one of those families (default ${cfg.defaultModel})`);
   const reason = a.model_reason?.replace(/\s+/g, ' ').trim().slice(0, MODEL_REASON_MAX);
   if (from === 'orchestrator' && !reason) throw new Error(MODEL_REASON_HELP);
   return { model, note: ` on ${model}${reason ? ` (${reason})` : ''}` };

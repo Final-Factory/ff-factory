@@ -778,6 +778,9 @@ export const DEFAULT_WORKER_EFFORT: Config['worker']['effort'] = 'medium';
 /** The model workers start on when start_agent names none (config defaultModel; w2010). */
 export const DEFAULT_WORKER_MODEL = 'opus';
 
+/** The models config offers when it names none (config models). */
+export const DEFAULT_CONFIG_MODELS: readonly string[] = ['opus', 'sonnet', 'haiku', 'fable', 'claude-fable-5-2'];
+
 const DEFAULTS: Omit<Config, 'sandboxRoot' | 'standingRoot' | 'repo' | 'unity' | 'voice' | 'hostGuard'> = {
   port: 8790,
   usagePollMinutes: DEFAULT_USAGE_POLL_MINUTES,
@@ -788,7 +791,9 @@ const DEFAULTS: Omit<Config, 'sandboxRoot' | 'standingRoot' | 'repo' | 'unity' |
   protectedPaths: [],
   limits: { minFreeRamGB: 10 },
   hostDiskPaths: [],
-  models: ['opus', 'sonnet', 'haiku', 'fable'],
+  // claude-fable-5-2 by its id for the pickers (w5, Ben: the Lens Scout weighing on Fable 5.2); start_agent also takes
+  // any full id of a listed family (server/workerModel.ts modelAllowed).
+  models: [...DEFAULT_CONFIG_MODELS],
   // Workers start on Opus at medium effort (lothsahn, 2026-10-24, w2010: "workers should be opus medium thinking"); the
   // dispatcher may name sonnet for a task it is sure is small, with a model_reason (server/workerModel.ts).
   defaultModel: DEFAULT_WORKER_MODEL,

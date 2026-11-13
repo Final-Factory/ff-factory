@@ -5,6 +5,7 @@ import { NIGHTLY_SENTRY, unattributedPerson } from './vault.ts';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
+import { modelAllowed } from './workerModel.ts';
 import { connectorEnv, ownerLine, publicIdentityOf, type Config } from './config.ts';
 import { workerGitIdentity } from './publicGit.ts';
 import { dryRun, refuseInDryRun } from './dryRun.ts';
@@ -781,7 +782,7 @@ export class StandingAgents {
 
   private model(m: string | undefined) {
     const model = m?.trim() || this.cfg.defaultModel;
-    if (!this.cfg.models.includes(model)) throw new Error(`model must be one of ${this.cfg.models.join(', ')}`);
+    if (!modelAllowed(this.cfg.models, model)) throw new Error(`model must be one of ${this.cfg.models.join(', ')} or a full id of one of those families`);
     return model;
   }
 
