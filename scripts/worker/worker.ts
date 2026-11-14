@@ -118,6 +118,8 @@ export interface Manifest {
   repoUrl: string;
   /** A test install's firewall group suffix (firewall.ps1 -GroupSuffix). */
   firewallSuffix?: string;
+  /** A second instance's install beside the computer's main one (install --instance, w14, docs/instances.md). */
+  instance?: string;
   createdAt: string;
   updatedAt: string;
   outside: OutsideItem[];
@@ -205,6 +207,10 @@ export interface InstallOptions {
   owner?: string;
   /** A test install beside a live one: its own firewall rule groups and no slot config. */
   firewallSuffix?: string;
+  /** A second instance beside the computer's main install (w14): `instanceOptions` fills in the rest from its name. */
+  instance?: string;
+  /** daemon.json `env`: what the daemon sets on itself at start (an instance's own CLAUDE_CONFIG_DIR). */
+  env?: Record<string, string>;
   /** A local clone of the game repo to seed the root's clone from (a migration's old clone, or install --seed-from): no download, no credential. */
   seedFrom?: string;
   /** daemon.json settings the old daemon had (a migration: its host guard, protected paths, MCP server, limits). */
@@ -687,6 +693,7 @@ export function daemonJson(o: InstallOptions, l: Layout, id: string, claude: str
     // A test install beside a computer's real one (--no-cleanup, w1596): it cleans nothing, ends no process (the leftover
     // reaper reads every process here and the shared player slots) and starts no tray.
     ...(o.noCleanup ? { cleanup: { everyMinutes: 0, softFreeGB: 0 }, leftovers: false, tray: false } : {}),
+    ...(o.env ? { env: { ...(carried.env && typeof carried.env === 'object' ? (carried.env as Record<string, string>) : {}), ...o.env } } : {}),
     sandboxes,
   };
 }
@@ -1590,7 +1597,7 @@ async function registerPortalSsh(o: InstallOptions) {
  * The root.json an install or update writes: what is new from the options, and what the root already had (its id, creation time,
  * the list of things outside it, its Dev Drive: w1038). Exported for tests.
  */
-export function manifestFor(prev: Manifest | undefined, o: Pick<InstallOptions, 'portalUrl' | 'service' | 'maxSandboxes' | 'repoUrl' | 'firewallSuffix' | 'playOnly'>, machineId: string, root: string, now: string, platform: NodeJS.Platform = process.platform): Manifest {
+export function manifestFor(prev: Manifest | undefined, o: Pick<InstallOptions, 'portalUrl' | 'service' | 'maxSandboxes' | 'repoUrl' | 'firewallSuffix' | 'playOnly' | 'instance'>, machineId: string, root: string, now: string, platform: NodeJS.Platform = process.platform): Manifest {
   const drive = carryDevDrive(prev, root);
   return {
     installId: prev?.installId ?? crypto.randomUUID(),
@@ -1602,6 +1609,7 @@ export function manifestFor(prev: Manifest | undefined, o: Pick<InstallOptions, 
     slots: o.maxSandboxes,
     repoUrl: o.repoUrl,
     ...(o.firewallSuffix ? { firewallSuffix: o.firewallSuffix } : {}),
+    ...((o.instance ?? prev?.instance) ? { instance: o.instance ?? prev?.instance } : {}),
     createdAt: prev?.createdAt ?? now,
     updatedAt: now,
     outside: prev?.outside ?? [],
@@ -2206,16 +2214,19 @@ export async function tools(root: string, ownerFlag?: string): Promise<number> {
   if (!m) throw new Error(`no worker install at ${moved ?? given} (no root.json): install it first (docs/worker-install.md, "Install")`);
   const l = layoutOf(moved ?? given, anchorOf(m));
   let claude: string | undefined;
+  // An instance's own Claude Code folder (daemon.json env, w14): its plugins go where its agents look.
+  let env: NodeJS.ProcessEnv = process.env;
   try {
-    const c = (JSON.parse(fs.readFileSync(path.join(l.daemon, 'daemon.json'), 'utf8')) as { claude?: unknown }).claude;
-    if (typeof c === 'string') claude = c;
+    const j = JSON.parse(fs.readFileSync(path.join(l.daemon, 'daemon.json'), 'utf8')) as { claude?: unknown; env?: unknown };
+    if (typeof j.claude === 'string') claude = j.claude;
+    if (j.env && typeof j.env === 'object') env = { ...process.env, ...(j.env as Record<string, string>) };
   } catch {
     // no daemon.json: Claude Code from PATH
   }
   let owner = ownerFlag;
   if (isWin && elevated() && !owner) owner = (await taskUser(m.service))?.owner;
   say(`FF Factory agent tools on ${m.machineId} (${l.root})`);
-  const code = await publishAgentTools(l.root, { exec, say, env: process.env, home: os.homedir(), platform: process.platform, ...(owner ? { giveTo: (paths: string[]) => giveTo(owner, paths) } : {}) }, { claude });
+  const code = await publishAgentTools(l.root, { exec, say, env, home: os.homedir(), platform: process.platform, ...(owner ? { giveTo: (paths: string[]) => giveTo(owner, paths) } : {}) }, { claude });
   // The agents' node at one fixed path (w1742): a WARNING when it cannot be placed, never a failed publish of the plugins.
   if ((await ensureAgentNode(l.root, { exec, say, platform: process.platform })) === 'installed' && owner) {
     await giveTo(owner, [agentNodeDir(l.root)]).catch((e) => say(`WARNING: could not give ${agentNodeDir(l.root)} to ${owner}: ${(e as Error).message}`));
@@ -2664,6 +2675,7 @@ async function readCredential(): Promise<string> {
 const USAGE = `node scripts/worker/worker.ts <install|update|reinstall|uninstall|check|tools> --root <folder> [options]
   install   --portal-url <url> --credential-stdin [--max-sandboxes 3] [--max-agents-per-sandbox 2] [--max-unity 2]
             [--repo-url ${DEFAULT_REPO}] [--service <task or label>] [--no-firewall] [--no-cleanup] [--absolute-worktrees] [--unity-slots-dir <dir> (a test install)]
+            [--instance <name> [--claude-config-dir <dir>] (a second instance's daemon beside the main one: docs/instances.md)]
             [--owner <user> (Windows: run elevated, e.g. over ssh, and give what it makes to that user)]
             [--seed-from <a local clone of the game repo> (its origin branches seed the root's clone: no download, and no
              GitHub credential, which an ssh session does not have)]
@@ -2713,6 +2725,26 @@ export function devDriveFlags(opts: Record<string, string>, flags: Set<string>):
   };
 }
 
+/**
+ * `--instance <name>` (w14, docs/instances.md): a second FF Factory instance's daemon beside the computer's main one, for
+ * another portal. It takes its own service, firewall groups and Unity slots mailbox, cleans nothing outside itself (no
+ * clean-up passes, leftover reaper or tray: the main install's), leaves ssh to the main install, and gives its agents their
+ * own Claude Code folder. Only what the command line leaves unset is filled in. Exported for tests.
+ */
+export function instanceOptions(name: string, root: string, opts: Record<string, string>, platform: NodeJS.Platform = process.platform): Pick<InstallOptions, 'instance' | 'service' | 'firewallSuffix' | 'unitySlotsDir' | 'noCleanup' | 'ssh' | 'env'> {
+  if (!/^[a-z0-9][a-z0-9-]{0,30}$/.test(name)) throw new Error(`--instance is a short name: lower case letters, digits and - (got "${name}")`);
+  const p = platform === 'win32' ? path.win32 : path.posix;
+  return {
+    instance: name,
+    service: opts.service ?? (platform === 'win32' ? `${win.TASK_NAME}-${name}` : `${LABEL}.${name}`),
+    firewallSuffix: opts['firewall-suffix'] ?? name,
+    unitySlotsDir: opts['unity-slots-dir'] ?? p.join(root, 'unity-slots'),
+    noCleanup: true,
+    ssh: false,
+    env: { CLAUDE_CONFIG_DIR: opts['claude-config-dir'] ?? p.join(root, 'claude') },
+  };
+}
+
 export async function main(argv = process.argv.slice(2)) {
   // An ssh session's PATH may lack where git, git-lfs and node live (w629); this process's PATH only.
   process.env.PATH = withStandardPaths(process.env.PATH ?? '');
@@ -2744,6 +2776,7 @@ export async function main(argv = process.argv.slice(2)) {
       ...(opts['voice-whisper'] !== undefined ? { voiceWhisper: opts['voice-whisper'] } : {}),
       ...devDriveFlags(opts, flags),
       ...(flags.has('play-only') ? { playOnly: true } : {}),
+      ...(opts.instance ? instanceOptions(opts.instance, path.resolve(opts.root), opts) : {}),
     });
   } else if (cmd === 'update') {
     if (!opts.root) throw new Error(USAGE);

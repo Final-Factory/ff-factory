@@ -97,6 +97,12 @@ import { machinePlatformOf, type AttachmentRef, type BenchPriority, type Compact
 
 export interface DaemonConfig {
   /**
+   * Environment the daemon sets on itself at start, before anything reads it, so its agents inherit it (w14): a second
+   * instance's own Claude Code folder (`CLAUDE_CONFIG_DIR`), written by `worker.ts install --instance`. The service that
+   * starts the daemon sets only PATH and HOME.
+   */
+  env?: Record<string, string>;
+  /**
    * Folders that belong to the worker install though they are not inside its root (w900: the Dev Drive's `<letter>:\\sandboxes`
    * and `<letter>:\\seed`, which the installer writes). The clean-up's fence to the install folder (w896) counts them as inside it.
    */
@@ -3201,6 +3207,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
   // configFile: where a relocate keeps the portal's new URL (w466). A BOM (an editor's) is not JSON.
   const cfg: DaemonConfig = withRootDefaults({ ...JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text), configFile: file });
   cfg.token = readToken(cfg);
+  for (const [k, v] of Object.entries(cfg.env ?? {})) if (typeof v === 'string') process.env[k] = v;
   // A worker root (w513): agents and the scripts they run find the player slots (and the nightly history) in it.
   if (cfg.root) for (const [k, v] of Object.entries(rootEnv(cfg.root))) process.env[k] ??= v;
   // server/launch.ts keeps the public identity's gitconfig in the daemon's folder.

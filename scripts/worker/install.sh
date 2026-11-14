@@ -21,7 +21,7 @@
 # changes nothing else (w1476, docs/worker-install.md "The agent tools"); the portal runs it after every verified deploy.
 set -euo pipefail
 
-ROOT="" PORTAL="" MAXSB="" MAXAG="" MAXU="" SLOTS=8 SERVICE=com.fffactory.daemon SOURCE="" REF=main CREDFILE="" EXTRA="" REPO=https://github.com/Final-Factory/FinalFactory.git UPDATE=0 TOOLS=0 DREF=""
+ROOT="" PORTAL="" MAXSB="" MAXAG="" MAXU="" SLOTS=8 SERVICE="" INSTANCE="" SOURCE="" REF=main CREDFILE="" EXTRA="" REPO=https://github.com/Final-Factory/FinalFactory.git UPDATE=0 TOOLS=0 DREF=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --root) ROOT=$2; shift 2 ;;
@@ -31,6 +31,10 @@ while [ $# -gt 0 ]; do
     --max-unity) MAXU=$2; shift 2 ;;
     --slots) SLOTS=$2; shift 2 ;;
     --service) SERVICE=$2; shift 2 ;;
+    --instance) INSTANCE=$2; EXTRA="$EXTRA --instance $2"; shift 2 ;;
+    --claude-config-dir) EXTRA="$EXTRA --claude-config-dir $2"; shift 2 ;;
+    --unity-slots-dir) EXTRA="$EXTRA --unity-slots-dir $2"; shift 2 ;;
+    --firewall-suffix) EXTRA="$EXTRA --firewall-suffix $2"; shift 2 ;;
     --source) SOURCE=$2; shift 2 ;;
     --ref) REF=$2; shift 2 ;;
     --repo-url) REPO=$2; shift 2 ;;
@@ -131,5 +135,8 @@ if [ "$UPDATE" = 1 ]; then
   "$NODE" "${FLAGS[@]}" "$SOURCE/scripts/worker/worker.ts" "${UARGS[@]}" </dev/null
   exit $?
 fi
+# --instance (w14, docs/instances.md): a second instance's daemon names its own LaunchAgent unless --service does.
+SVC=()
+if [ -n "$SERVICE" ]; then SVC=(--service "$SERVICE"); elif [ -z "$INSTANCE" ]; then SVC=(--service com.fffactory.daemon); fi
 printf '%s\n' "$CRED" | "$NODE" "${FLAGS[@]}" "$SOURCE/scripts/worker/worker.ts" install --root "$ROOT" --portal-url "$PORTAL" \
-  --max-sandboxes "$MAXSB" --max-agents-per-sandbox "$MAXAG" --max-unity "$MAXU" --slots "$SLOTS" --service "$SERVICE" --repo-url "$REPO" --credential-stdin $EXTRA
+  --max-sandboxes "$MAXSB" --max-agents-per-sandbox "$MAXAG" --max-unity "$MAXU" --slots "$SLOTS" ${SVC[@]+"${SVC[@]}"} --repo-url "$REPO" --credential-stdin $EXTRA
