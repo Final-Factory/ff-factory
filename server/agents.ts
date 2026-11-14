@@ -41,7 +41,7 @@ import { cliTranscriptPath } from './cliTranscript.ts';
 
 /** A live state as list_work takes it (shared/workState.ts). */
 const LIVE_STATE = z.enum(WORK_LIVE_STATES as unknown as [WorkLiveState, ...WorkLiveState[]]);
-import { ROOT, branded, claudeAiConnectorsFor, configPath, projectBrief, projectOf, connectorEnv, ownerLine, pinnedVaultEntry, publicIdentityLine, publicIdentityOf, type Config, hostSoftFreeGB, type HostGuardConfig } from './config.ts';
+import { ROOT, branded, claudeAiConnectorsFor, configPath, privacyGuardsOn, projectBrief, projectOf, connectorEnv, ownerLine, pinnedVaultEntry, publicIdentityLine, publicIdentityOf, type Config, hostSoftFreeGB, type HostGuardConfig } from './config.ts';
 import { dryRun, refuseInDryRun } from './dryRun.ts';
 import { MachineRollout, timedRunText } from './machineRollout.ts';
 import { OWNER_ONLY_KEYS, SETTABLE_KEYS, setAppConfig } from './appConfig.ts';
@@ -4827,6 +4827,8 @@ When a person asked for a design or an analysis (a profile, an investigation, a 
         daemonReads: { dir: appDirOf(m), ...(m.root ? { root: m.root } : {}) },
         // w936: a request of this worker's was granted work in the machine's main clone (an older daemon ignores it).
         ...(clone ? { mainClone: { path: clone.path, requests: clone.requests } } : {}),
+        // w17: no whole-desktop capture, personal files, remote access or open servers (server/privacyGuard.ts).
+        ...(privacyGuardsOn(this.cfg) ? { privacy: true } : {}),
       },
       publicGit: this.publicGit(),
       env: {

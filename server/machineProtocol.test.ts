@@ -127,7 +127,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // w3939 (no bump): `labFixtures` in the hello, `lab_fixture`/`lab_fixture_upload`, sent only to a daemon that offered it, and their
 // answers `lab_fixture_result`/`lab_fixture_sent`; an older portal ignores the hello field and drops the answers (no default case),
 // and an older daemon is never sent either.
-const DECIDED = { protocol: 9, fingerprint: 'a2b88e6d457af89f' };
+// w17 (no bump): `guard.privacy` in the launch spec, the worker privacy guard; an older daemon ignores the field and its
+// workers run without the guard until it is updated.
+const DECIDED = { protocol: 9, fingerprint: 'd644fa99310c7af9' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {
