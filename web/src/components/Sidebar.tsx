@@ -27,6 +27,7 @@ import { SettingsModal } from './Settings';
 import { SystemFooter } from './SystemMeters';
 import { ExternalStrip } from './External';
 import { FleetGroups, fleetFor, type FleetSelection } from './Fleet';
+import { brandOf, productOf } from '../brand';
 
 export function Sidebar({
   app,
@@ -82,9 +83,10 @@ export function Sidebar({
             <circle cx="24" cy="22" r="3" fill="var(--accent)" />
           </svg>
         </div>
-        <div className="brand-text">
-          <span className="brand-name">FF Factory</span>
-          {app.config?.project?.custom ? <span className="brand-host">{app.config.project.name}</span> : app.system?.hostname && <span className="brand-host">{app.system.hostname}</span>}
+        {/* w15: another job's install reads "Ryding Factory" over "for <project>"; Final Factory's keeps its host name beside. */}
+        <div className={`brand-text${app.config?.project?.custom ? ' brand-stacked' : ''}`} title={brandOf(app.config?.project)}>
+          <span className="brand-name">{productOf(app.config?.project)}</span>
+          {app.config?.project?.custom ? <span className="brand-host">{app.config.project.product ? `for ${app.config.project.name}` : app.config.project.name}</span> : app.system?.hostname && <span className="brand-host">{app.system.hostname}</span>}
         </div>
         <button className="btn btn-ghost btn-icon side-icon" title="Search every conversation" aria-label="Search" onClick={() => go({ view: 'search' })}>
           <Icon name="search" size={17} />
@@ -222,7 +224,7 @@ export function Sidebar({
       <ExternalStrip app={app} route={route} onNavigate={onNavigate} />
       <SystemFooter app={app} />
       {app.app && (
-        <div className="side-foot" data-testid="app-version" title="FF Factory version and git commit">
+        <div className="side-foot" data-testid="app-version" title={`${productOf(app.config?.project)} version and git commit`}>
           {versionLabel(app.app)}
         </div>
       )}

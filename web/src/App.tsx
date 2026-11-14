@@ -26,6 +26,7 @@ import { reloadNow, useNewVersion } from './freshness';
 import { setDrawer, toast, toastError, useStore } from './store';
 import { sessionRoute } from './attention';
 import { displayName, fmtBytes, fmtClock, href, navigate, useMediaQuery, useRoute, type Route } from './util';
+import { brandOf, productOf, useProduct } from './brand';
 
 export function App() {
   const auth = useStore((s) => s.auth);
@@ -52,7 +53,7 @@ function Shell({ app }: { app: AppState }) {
   const [newStanding, setNewStanding] = useState(false);
   const [newMachine, setNewMachine] = useState(false);
   const waiting = useAttention(app).length;
-  const brand = app.config?.project?.custom ? app.config.project.name : 'FF Factory';
+  const brand = brandOf(app.config?.project);
 
   useEffect(() => {
     document.title = waiting ? `(${waiting}) ${brand}` : brand;
@@ -155,10 +156,11 @@ function ConnectionBanner() {
 
 /** The server serves a newer web UI than this page runs, and reloading by itself now would lose something (web/src/freshness.ts). */
 function NewVersionBanner() {
+  const product = useProduct();
   if (!useNewVersion()) return null;
   return (
-    <Bar kind="warn" text="A new version of FF Factory is ready. This page reloads by itself once nothing here would be lost: pictures and files not yet sent, an open dialog, text in a box that keeps no draft. Reload now to use it at once." action={{ label: 'Reload', onClick: reloadNow }}>
-      <b>A new version of FF Factory is ready.</b> This page reloads by itself once nothing here would be lost: pictures and files not yet sent, an open dialog, text in a box that keeps no draft. Reload now to use it at once.
+    <Bar kind="warn" text={`A new version of ${product} is ready. This page reloads by itself once nothing here would be lost: pictures and files not yet sent, an open dialog, text in a box that keeps no draft. Reload now to use it at once.`} action={{ label: 'Reload', onClick: reloadNow }}>
+      <b>A new version of {product} is ready.</b> This page reloads by itself once nothing here would be lost: pictures and files not yet sent, an open dialog, text in a box that keeps no draft. Reload now to use it at once.
     </Bar>
   );
 }
@@ -194,12 +196,12 @@ function HostBanner({ host, app }: { host?: HostStatus; app: AppState }) {
     bars.push({
       key: 'elevated',
       kind: 'error',
-      lead: 'FF Factory is running with administrator rights.',
+      lead: `${productOf(app.config?.project)} is running with administrator rights.`,
       rest: `Every orchestrator shell has admin rights. Run scripts\\restart.cmd to bring it back non-elevated.${host.elevatedWhy ? ` (${host.elevatedWhy})` : ''}`,
     });
   }
   if (drive) {
-    bars.push({ key: 'drive', kind: 'error', lead: 'The sandbox drive is offline', rest: `(${h.sandboxRoot}${h.detail ? `: ${h.detail}` : ''}). FF Factory is reattaching it by itself; the editors and agents that were working there come back afterwards.` });
+    bars.push({ key: 'drive', kind: 'error', lead: 'The sandbox drive is offline', rest: `(${h.sandboxRoot}${h.detail ? `: ${h.detail}` : ''}). ${productOf(app.config?.project)} is reattaching it by itself; the editors and agents that were working there come back afterwards.` });
   }
   if (disk && !drive) {
     bars.push({
@@ -273,7 +275,7 @@ function HostBanner({ host, app }: { host?: HostStatus; app: AppState }) {
       bars.push({ key: `token-${w.id}`, kind: 'warn', lead: 'GitHub is rate limiting us.', rest: w.text, action: { label: 'Re-check now', onClick: () => void recheckGithub() } });
       continue;
     }
-    bars.push({ key: `token-${w.id}`, kind: w.kind === 'exhausted' ? 'error' : 'warn', lead: w.kind === 'ci-read' ? 'FF Factory cannot read CI on pull requests.' : w.kind === 'reserve' ? 'The dispatcher\'s Claude token buffer is in use.' : w.kind === 'exhausted' ? 'All your Claude tokens are used up.' : 'All your Claude tokens are at a limit.', rest: w.text });
+    bars.push({ key: `token-${w.id}`, kind: w.kind === 'exhausted' ? 'error' : 'warn', lead: w.kind === 'ci-read' ? `${productOf(app.config?.project)} cannot read CI on pull requests.` : w.kind === 'reserve' ? 'The dispatcher\'s Claude token buffer is in use.' : w.kind === 'exhausted' ? 'All your Claude tokens are used up.' : 'All your Claude tokens are at a limit.', rest: w.text });
   }
   if (host.drain) {
     const d = host.drain;

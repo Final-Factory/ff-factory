@@ -9,10 +9,12 @@ import type { VoiceEnginePref } from '../../../shared/voice';
 import { Modal } from './ui';
 import { versionLabel } from '../util';
 import { VaultSettings } from './Vault';
+import { useProduct } from '../brand';
 
 /** This device's settings: notifications and voice input. */
 export function SettingsModal({ app, onClose }: { app?: AppVersion; onClose: () => void }) {
   const p = usePush();
+  const product = useProduct();
   const [testing, setTesting] = useState(false);
   const mode = pushMode(p);
   const on = mode === 'push';
@@ -20,11 +22,11 @@ export function SettingsModal({ app, onClose }: { app?: AppVersion; onClose: () 
   const inTabCapable = !p.supported && !p.needsHomeScreen && p.permission !== 'unsupported' && p.permission !== 'denied';
 
   const status = p.needsHomeScreen
-    ? 'On iPhone and iPad, add FF Factory to the Home Screen first (Share → Add to Home Screen), open it from there, then turn notifications on here.'
+    ? `On iPhone and iPad, add ${product} to the Home Screen first (Share → Add to Home Screen), open it from there, then turn notifications on here.`
     : p.permission === 'denied'
       ? 'Notifications are blocked for this site. Allow them in the browser’s site settings, then come back.'
       : on
-        ? 'On: this device gets notifications even when FF Factory is closed.'
+        ? `On: this device gets notifications even when ${product} is closed.`
         : inTab
           ? 'On in this tab only: this browser cannot receive push notifications, so this tab shows them while it is in the background, and you get none once it is closed.'
           : !p.supported
@@ -93,7 +95,7 @@ export function SettingsModal({ app, onClose }: { app?: AppVersion; onClose: () 
           <div className="field about" data-testid="about-version">
             <span>About</span>
             <p className="small dim">
-              FF Factory <span className="mono">{versionLabel(app)}</span> ·{' '}
+              {product} <span className="mono">{versionLabel(app)}</span> ·{' '}
               <a href="https://github.com/Final-Factory/ff-factory/blob/main/CHANGELOG.md" target="_blank" rel="noreferrer">
                 changelog
               </a>
