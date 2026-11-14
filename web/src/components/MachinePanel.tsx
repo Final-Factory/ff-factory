@@ -9,6 +9,7 @@ import { BenchStopButtons } from './BenchStop';
 import { GitFacts } from './Git';
 import { DetailsSection, DetailsSheet, PanelHeader, useDetailsOpen } from './PanelChrome';
 import { Chip, Confirm, CopyButton, Icon, Modal, StateText } from './ui';
+import { currentProduct } from '../brand';
 
 const midTurn = (status: string) => status === 'running' || status === 'starting' || status === 'waiting_permission';
 
@@ -549,7 +550,7 @@ function SshMachineModal({ onClose, onJoin }: { onClose: () => void; onJoin: () 
         }}
       >
         <p className="dim small">
-          Installs the FF Factory daemon on a Mac or Windows PC over ssh from this host (a LaunchAgent on a Mac, a scheduled task at logon on Windows) that runs agents
+          Installs the {currentProduct()} daemon on a Mac or Windows PC over ssh from this host (a LaunchAgent on a Mac, a scheduled task at logon on Windows) that runs agents
           there and connects back. The OS is found over ssh. Needs ssh key access, Node 22.6+ and git there; see docs/machines.md for a Windows PC's setup.{' '}
           <button type="button" className="link-btn" onClick={onJoin}>
             Add it with an installer run on the PC instead

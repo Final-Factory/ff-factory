@@ -590,6 +590,18 @@ select.input {
   gap: var(--s-2);
 }
 
+.brand-text.brand-stacked {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0;
+  line-height: 1.2;
+}
+
+.brand-stacked .brand-host {
+  max-width: 100%;
+  white-space: nowrap;
+}
+
 .brand-name {
   font-weight: 680;
   font-size: var(--fs-lg);

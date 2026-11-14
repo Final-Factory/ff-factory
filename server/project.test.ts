@@ -8,7 +8,7 @@ import { SessionManager, setQueryForTesting } from './sessions.ts';
 import { MachineManager } from './machines.ts';
 import { Agents, DISCORD_RULES, MERGE_RULES } from './agents.ts';
 import { Identity } from './identity.ts';
-import { PROJECT_DEFAULTS, checkProjectConfig, projectBrief, projectOf, projectView, type Config, type ProjectConfig } from './config.ts';
+import { PROJECT_DEFAULTS, brandName, branded, checkProjectConfig, productName, projectBrief, projectOf, projectView, type Config, type ProjectConfig } from './config.ts';
 import type { Requester, UserInfo } from '../shared/types.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { useFakeVault } from './testVault.ts';
@@ -64,7 +64,7 @@ function world(t: { after: (fn: () => void | Promise<void>) => void }, project?:
     fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
   });
   const append = () => (agents.orchestratorOptions(agents.orchestrators.personalFor(BEN).info) as { systemPrompt: { append: string } }).systemPrompt.append;
-  return { briefs: agents as unknown as Briefs, append, dir };
+  return { briefs: agents as unknown as Briefs, append, dir, agents };
 }
 
 test('unset, the project is Final Factory and every brief keeps its game parts', (t) => {
@@ -133,12 +133,37 @@ test('config project is checked at load', () => {
 });
 
 test('the web app sees the project: Final Factory unchanged, another job by name with its own chips', () => {
-  assert.deepEqual(projectView({}), { name: 'Final Factory', custom: false, community: true });
+  assert.deepEqual(projectView({}), { name: 'Final Factory', custom: false, product: 'FF Factory', community: true });
   assert.deepEqual(projectView({ project: { name: 'Ken Martin Audiology', community: false, heading: 'What should the office work on?', suggestions: ["Check tomorrow's benefits"] } }), {
     name: 'Ken Martin Audiology',
     custom: true,
+    product: 'Ryding Factory',
     community: false,
     heading: 'What should the office work on?',
     suggestions: ["Check tomorrow's benefits"],
   });
+});
+
+// w15 (Ben, 2026-11-14): the shared product is "Ryding Factory"; Final Factory's install keeps "FF Factory" for itself.
+test("the product's name: Final Factory's install keeps FF Factory, another reads Ryding Factory for its project", () => {
+  assert.equal(productName({}), 'FF Factory');
+  assert.equal(brandName({}), 'FF Factory');
+  assert.equal(branded('FF Factory ends the rest by itself; FF Factory\'s tools.', {}), 'FF Factory ends the rest by itself; FF Factory\'s tools.');
+  const lens = { project: { name: 'Lens Scout' } as ProjectConfig };
+  assert.equal(productName(lens), 'Ryding Factory');
+  assert.equal(brandName(lens), 'Ryding Factory for Lens Scout');
+  assert.equal(branded('FF Factory ends the rest by itself; FF Factory\'s tools. Final-Factory/ff-factory stays.', lens), "Ryding Factory ends the rest by itself; Ryding Factory's tools. Final-Factory/ff-factory stays.");
+});
+
+test("the briefs and tool texts name the product of their install", (t) => {
+  const ff = world(t);
+  const ffInfo = ff.agents.orchestrators.personalFor(BEN).info;
+  assert.ok(ff.append().includes('FF Factory'), "Final Factory's briefs unchanged");
+  assert.ok(!ff.append().includes('Ryding Factory'));
+  assert.ok(ff.agents.orchestratorBelt(ffInfo).some((tl) => tl.description.includes('FF Factory')));
+  const lens = world(t, { name: 'Lens Scout', unity: false, community: false });
+  const lensInfo = lens.agents.orchestrators.personalFor(BEN).info;
+  assert.ok(lens.append().includes('Ryding Factory'));
+  assert.ok(!lens.append().includes('FF Factory'), 'no FF Factory left in its orchestrator brief');
+  assert.ok(lens.agents.orchestratorBelt(lensInfo).every((tl) => !tl.description.includes('FF Factory')), 'nor in its tool texts');
 });

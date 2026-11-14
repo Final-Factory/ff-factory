@@ -21,7 +21,7 @@ front office. Leave it unset and every brief is Final Factory's, byte for byte (
 
 | Key | Default | What it changes |
 |---|---|---|
-| `name`, `description` | Final Factory, "a Unity 6 DOTS space automation game …" | The first line of the dispatcher's and each personal orchestrator's brief, and "an isolated sandbox of the `<name>` repo" in the worker's. A name other than Final Factory also names the portal page: the sidebar, in place of the host name, and the tab title. |
+| `name`, `description` | Final Factory, "a Unity 6 DOTS space automation game …" | The first line of the dispatcher's and each personal orchestrator's brief, and "an isolated sandbox of the `<name>` repo" in the worker's. A name other than Final Factory also names the portal page: the sidebar, in place of the host name, and the tab title. It also names the product "Ryding Factory" on that portal (below). |
 | `unity` | true | false drops the worker brief's "Unity" section. |
 | `community` | true | false drops the worker brief's Discord rules (FFBox, Max, #bug-reports) and the page's Max and FFBox strip. |
 | `heading`, `suggestions` | "What should the factory work on?", Final Factory's chips | The orchestrator page's empty state: its heading and up to 6 suggestion chips. |
@@ -78,3 +78,22 @@ What standing up Ben's Light Tree portal on BEAST, m5, m3 and biscuit beside the
   was edited four times after its first draft, and a copy rebuilt from the first draft failed on m5 and m3. Take the
   scripts from the running instance's folder (`F:/ffw/lens-factory/` holds `register-tasks.ps1`, `start-portal.sh`,
   `start-daemon.sh` and `daemon.json` for the third, Lens Scout's, on port 8892).
+
+## The product's name: Ryding Factory, and FF Factory on Final Factory's install
+
+The shared product is called **Ryding Factory** (Ben, 2026-11-14, Lens Scout's request w15: "Ryding Factory"). Final
+Factory's own install, the one with `project` unset, keeps calling it **FF Factory**, unchanged. Every other install
+reads "Ryding Factory for `<name>`" (server/config.ts `productName`, `brandName`, `branded`):
+
+- **The page:** the sidebar's name ("Ryding Factory" over the project's name), the tab title, the login page, the About
+  line, the banners and tooltips that name the product (web/src/brand.ts, from `AppState.config.project.product`).
+- **The installed app:** index.html's `<title>` and Home Screen title and the PWA manifest's `name` and `short_name`
+  are rewritten as they are served (server/webStatic.ts `withBrand`, `brandedManifest`): the name "Ryding Factory for
+  `<name>`", the Home Screen label the project's name alone.
+- **The agents:** each worker's, orchestrator's and the ops worker's brief and their machine tools' texts say "Ryding
+  Factory" where they said "FF Factory" (`branded`, applied once to the finished text).
+
+Not renamed: identifiers and markers code matches ("[FF Factory] PAUSE:", the `FFFactoryDaemon` task,
+`com.fffactory.daemon`, `~/.ff-factory`, `ffsb-*`, `fff-*`, the `FF_*` and `FFSB_*` variables, the `ff-agents` plugin, the
+repo `Final-Factory/ff-factory`), the commit identity, the messages the portal sends agents at run time, and these docs,
+which still say FF Factory.

@@ -3227,12 +3227,14 @@ export interface BuildHold {
 
 /**
  * The project as the web app shows it (config `project`, docs/project.md; w2932): `custom` when it is not Final Factory,
- * so the sidebar names it; `community` false hides the Max and FFBox strip; `heading` and `suggestions` replace the
+ * so the sidebar names it; `product` is the product's name there (w15); `community` false hides the Max and FFBox strip; `heading` and `suggestions` replace the
  * orchestrator page's empty state. Absent from a server older than the field.
  */
 export interface ProjectView {
   name: string;
   custom: boolean;
+  /** The product's name on this install (w15): "FF Factory" on Final Factory's, "Ryding Factory" on others. Absent from an older server. */
+  product?: string;
   community: boolean;
   heading?: string;
   suggestions?: string[];
