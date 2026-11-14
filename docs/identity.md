@@ -18,13 +18,13 @@ worker then runs on that person's Claude account when FF Factory holds one for t
   owner's workers and add notes to another owner's requests (w677), and have their answers to other people's workers' permission requests recorded and told (w891; docs/orchestrators.md,
   "Owners across each other's work"; members answer them as they always did). The other per-role limits (no M5 for a member, no `add_machine`,
   and so on) are phase 6 of the FFBox design, section 7.
-- **What a member reads** (w17, server/readAccess.ts; config `privacyGuards`, on for every factory but Final Factory unless
-  set). An owner reads everything. A member's page carries, and the routes give them, only their own orchestrator, the
-  workers and standing agent runs they asked for, and the workers, reports, attachments and review media of the requests
-  they are on (filer, requesters, whom it runs for, whom its question waits on), plus the files they uploaded. Not the
-  dispatcher, the ops worker, another person's orchestrator, a machine's own files or every sandbox's. Changing a session
-  (message, rename, delete, interrupt, permission, mode) takes the same check. Transcript search and the live updates
-  over the websocket are filtered the same way. With `privacyGuards` false, every login reads everything, as before.
+- **What a member acts on** (w17, shared/actAccess.ts; every factory, Final Factory included). Ben: "you can see the
+  other persons transcripts you just cant interact with it". Everyone signed in reads every session, transcript, request,
+  report, attachment and review file. A member changes (message, react, answer, compact, reply, rename, interrupt,
+  permission, mode, delete) only their own orchestrator, the workers and standing agent runs they asked for, and the
+  workers of the requests they are on (filer, requesters, whom it runs for, whom its question waits on). Anything else
+  answers 403: "this is another person's work: you can read it, but only the people on its request (and the owners) act
+  on it". An owner acts on every session, under the orchestrator rules above.
 - Manage logins on the host:
 
   ```

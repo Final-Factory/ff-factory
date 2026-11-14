@@ -579,8 +579,9 @@ export interface Config {
    */
   project?: Partial<ProjectConfig>;
   /**
-   * w17: the privacy guards (server/readAccess.ts: a member reads only their own chats and requests). Absent: on for every
-   * factory but Final Factory, whose owners decide (Ben and Lothsahn). privacyGuardsOn reads it.
+   * w17: the worker privacy guard (server/privacyGuard.ts: no whole-desktop capture, no person's own files, no remote
+   * access). Absent: on for every factory but Final Factory, whose owners decide (Ben and Lothsahn). privacyGuardsOn reads
+   * it. The member rule (shared/actAccess.ts) is on everywhere and does not read it.
    */
   privacyGuards?: boolean;
   /** Folders (relative to a sandbox or a machine's clone; `*` = any one folder) the Screenshots gallery lists. See server/images.ts. */
