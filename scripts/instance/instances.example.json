@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "leader": { "url": "https://fff.example.ts.net", "stableMinutes": 5 },
+  "branch": "main",
+  "nodeDir": "F:/ffw/tools/node",
+  "drainMinutes": 30,
+  "healthMinutes": 6,
+  "instances": [
+    {
+      "name": "demo",
+      "dir": "F:/ffw/demos/demo",
+      "portalTask": "ffdemo-portal",
+      "machines": ["beast"],
+      "expect": { "trustProxy": false }
+    },
+    {
+      "name": "project-a",
+      "dir": "F:/ffw/project-a-factory",
+      "portalTask": "ffprojecta-portal",
+      "daemonTask": "ffprojecta-daemon",
+      "daemonInApp": true,
+      "machines": ["beast", "m3", "m5"],
+      "expect": { "deviceApproval": "members", "trustProxy": true, "machines.keepAgentsOnRestart": true }
+    }
+  ]
+}
