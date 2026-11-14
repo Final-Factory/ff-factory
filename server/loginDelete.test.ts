@@ -69,10 +69,17 @@ test('delete: the login, its keys, sessions, pool entry, settings, push subscrip
   assert.equal(auth.user(req(cookie)), 'w1021-test');
   const benLogin = await auth.login(req(''), 'ben', 'ben-password-1234');
   assert.ok(benLogin.ok);
+  // Device approval (w10): a pending and an approved browser of the login, and carol's, which stays.
+  const browser = (ua: string) => ({ headers: { 'user-agent': ua }, socket: { remoteAddress: '198.51.100.9' } }) as unknown as http.IncomingMessage;
+  auth.devices.upsert('w1021-test', 'a'.repeat(64), browser('Mozilla/5.0 (iPhone) Safari/604.1'), '198.51.100.9', 'pending');
+  auth.devices.upsert('w1021-test', 'b'.repeat(64), browser('Mozilla/5.0 (Windows NT 10.0) Chrome/140.0 Safari/537.36'), '198.51.100.9', 'approved', 'set-password link');
+  auth.devices.upsert('carol', 'c'.repeat(64), browser('Mozilla/5.0 (Macintosh) Safari/605.1.15'), '198.51.100.9', 'approved', 'ben');
 
   const r = deleteLogin(deps, { user: 'w1021-test', by: 'lothsahn' });
   assert.deepEqual(r.keys, ['w1021-m3']);
   assert.equal(r.sessions, 1);
+  assert.equal(r.devices, 2);
+  assert.deepEqual(auth.deviceList().map((d) => d.username), ['carol'], "its device records are gone, no other login's");
   assert.equal(r.pool, 'ben');
   assert.deepEqual(r.settings, ['heartbeat', 'dismissedEvents']);
   assert.equal(r.pushSubscriptions, 1);
@@ -96,7 +103,7 @@ test('delete: the login, its keys, sessions, pool entry, settings, push subscrip
   assert.deepEqual(fs.readdirSync(trash).sort(), ['20261023T153000Z-deleted-login-MEMORY.md', '20261023T153000Z-deleted-login-notes__a.md']);
 
   const lines = describeLoginDeleted(r).join('\n');
-  assert.match(lines, /^deleted the login w1021-test \("w1021 test", member\)\nAPI keys: w1021-m3\nsessions ended: 1\npool entry: removed \(its work ran on ben's pool\)/);
+  assert.match(lines, /^deleted the login w1021-test \("w1021 test", member\)\nAPI keys: w1021-m3\nsessions ended: 1\ndevice approvals: 2\npool entry: removed \(its work ran on ben's pool\)/);
   assert.match(lines, /orchestrator: session o-test removed, its process stopped \(was idle\)\norchestrator memory: 2 files moved to /);
   assert.ok(!lines.includes(key.slice(5, 30)) && !lines.includes('throwaway-password'), 'no key or password');
 });
