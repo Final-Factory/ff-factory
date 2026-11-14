@@ -1,0 +1,1 @@
+- The instance updater (w14) follows the lead portal forward only: a lead on an older commit no longer moves the updater's own checkout back to a commit without it. `scripts/instance/register-updater.ps1` registers its 5-minute task.

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { type Deps, type InstanceList, listProblem, readState, settingsDiff, stableTarget, tick } from './instance/update-all.ts';
+import { type Deps, type InstanceList, followSelf, listProblem, readState, settingsDiff, stableTarget, tick } from './instance/update-all.ts';
 
 const A = 'a'.repeat(40);
 const B = 'b'.repeat(40);
@@ -201,4 +201,44 @@ test('roll: a dry run says what it would do and does nothing', async () => {
   await tick(w.list, s, w.d, { dryRun: true });
   assert.ok(w.log.some((l) => /would roll/.test(l)));
   assert.ok(!w.calls.some((c) => c.includes('stop')));
+});
+
+test('w14: the updater follows the lead forward only, and only to a commit that carries it', () => {
+  // main: OLD (before the updater) <- MINE (the updater's own checkout) <- NEW; BARE is on main but lacks the script.
+  const [OLD, MINE, NEW, BARE] = ['1', '2', '3', '4'].map((c) => c.repeat(40));
+  const order = [OLD, MINE, NEW, BARE];
+  const fresh = () => {
+    let head = MINE;
+    const d = {
+      git(_cwd: string, args: string[]) {
+        const [verb, a, b] = args[0] === '-c' ? args.slice(2) : args;
+        if (verb === 'rev-parse' && a === 'HEAD') return { code: 0, out: head };
+        if (verb === 'fetch') return { code: 0, out: '' };
+        if (verb === 'rev-parse') return { code: 0, out: order.find((s) => s.startsWith(args[3].replace('^{commit}', ''))) ?? '' };
+        if (verb === 'merge-base') {
+          const x = order.indexOf(args[2]);
+          const y = args[3] === 'origin/main' ? order.length : order.indexOf(args[3]);
+          return { code: x >= 0 && x <= y ? 0 : 1, out: '' };
+        }
+        if (verb === 'cat-file') return { code: b.startsWith(BARE) ? 1 : 0, out: '' };
+        if (verb === 'checkout') {
+          head = args[args.length - 1];
+          return { code: 0, out: '' };
+        }
+        return { code: 1, out: '' };
+      },
+      log() {},
+    } as unknown as Deps;
+    return { d, head: () => head };
+  };
+  for (const [lead, moves] of [
+    [OLD, false],
+    [MINE, false],
+    [NEW, true],
+    [BARE, false],
+  ] as const) {
+    const w = fresh();
+    assert.equal(followSelf('/updater', lead.slice(0, 7), w.d, 'main'), moves, `lead on ${lead[0]}`);
+    assert.equal(w.head(), moves ? lead : MINE);
+  }
 });
