@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import type { PermissionMode, SessionInfo } from '../../../shared/types';
+import type { AppState, PermissionMode, SessionInfo } from '../../../shared/types';
+import { ActScope } from '../../../shared/actAccess';
 import { api } from '../api';
 import { attempt, openSession, useStore } from '../store';
 import { agentView, fmtCost, fmtRelative, navigate, PERMISSION_MODES, useNow } from '../util';
@@ -34,6 +35,11 @@ export function SessionView({
 }) {
   useEffect(() => openSession(session.id), [session.id]);
   const [details, setDetails] = useDetailsOpen('session');
+  const notMine = useStore((s) => (s.app ? !mayAct(s.app, session) : false));
+  if (notMine) {
+    readOnly ??= NOT_YOURS_NOTE;
+    answeredBy ??= 'the people on its request';
+  }
 
   return (
     <section className={`session-view${fullWidth ? ' session-full' : ''}`}>
@@ -76,6 +82,16 @@ export function SessionView({
     </section>
   );
 }
+
+/**
+ * w17 (shared/actAccess.ts): whether the signed-in person may change this session. Everyone reads every transcript; a
+ * member acts on their own orchestrator and the workers of the requests they are on, and the server refuses the rest.
+ */
+export function mayAct(app: AppState, s: SessionInfo): boolean {
+  const me = app.me;
+  return new ActScope({ roleOf: (u) => (me && u.toLowerCase() === me.userId.toLowerCase() ? me.role : undefined), work: () => app.work ?? [] }, me?.userId).session(s);
+}
+const NOT_YOURS_NOTE = "This is another person's work: you can read it, but only the people on its request (and the owners) message, rename or stop it. Ask your own orchestrator.";
 
 /** One agent's controls, for a details sheet: name (rename), id, status and cost, permission mode, open full width, end. */
 export function SessionDetails({ session, fullWidth }: { session: SessionInfo; fullWidth?: boolean }) {
