@@ -334,7 +334,7 @@ const NO_VAULT = 'the token vault is not loaded on this portal, and every Claude
 function noTokenWhy(person: string | undefined, s: { poolSize?: number; problems: string[] }, what: string): string {
   if (!person) return `${what} is for nobody, so it has no vault pool to run on (config vault.unattributed names whose tokens work nobody asked for runs on, docs/vault.md)`;
   if ((s.poolSize ?? 0) > 0) return `${person}'s Claude token pool cannot serve ${what}: ${s.problems.join('; ') || 'none of their tokens opens'}. It never runs on another credential; fix the vault (docs/vault.md) and it starts`;
-  return `${person} has no Claude token in the vault, so ${what} cannot start: add one with \`sudo fffctl vault add-claude ${person}\` (docs/vault.md, section 4). It never runs on another credential (w1078)`;
+  return `${person} has no Claude token in the vault, so ${what} cannot start: add one with \`sudo fffctl vault add-claude ${person}\` (docs/vault.md, section 4), or bill ${person}'s work to another person's pool (their Settings, "Claude pool", or an owner's orchestrator: set_pool with person "${person}", w13). It never runs on another credential (w1078)`;
 }
 
 /** "vault token ben-max …abcd" for a run's account line, safe to show; `forWhom` when the pool is not the run's person's own (w1717). */
