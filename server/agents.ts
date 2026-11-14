@@ -3032,12 +3032,14 @@ export class Agents {
    * Search every transcript (server/search.ts). `agent` is a session id, a standing agent id, or part
    * of a session title; `sandbox` / `machine` narrow to their sessions.
    */
-  async search(req: { query: string; sandbox?: string; machine?: string; agent?: string; since?: string; until?: string; limit?: number }) {
+  /** `visible` (w17): only the sessions the person searching may read (server/readAccess.ts). */
+  async search(req: { query: string; sandbox?: string; machine?: string; agent?: string; since?: string; until?: string; limit?: number; visible?: (s: SessionInfo) => boolean }) {
     let ids: Set<string> | undefined;
     const narrow = (keep: (s: SessionInfo) => boolean) => {
       const next = new Set([...this.store.sessions.values()].filter(keep).map((s) => s.id));
       ids = ids ? new Set([...ids].filter((x) => next.has(x))) : next;
     };
+    if (req.visible) narrow(req.visible);
     if (req.sandbox) {
       // A machine's sandbox; or, by its old name, one the portal held itself before w510 (its history is still searchable).
       let t: { machine: string; machineSandbox?: string } | undefined;
