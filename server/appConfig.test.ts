@@ -9,7 +9,7 @@ import { FFBOX_HASH_FILE, ffboxTokenHash } from './configMigration.ts';
 import { tokenSha256 } from './providerProtocol.ts';
 import { autoCompactSettings } from './autoCompact.ts';
 import { attachmentSettings } from './attachments.ts';
-import { machineActivityPause, type Config } from './config.ts';
+import { machineActivityPause, privacyGuardsOn, type Config } from './config.ts';
 import { FILINGS_PER_MESSAGE, timerFilings } from './orchestrators.ts';
 
 const setup = (t: { after: (fn: () => void) => void }) => {
@@ -576,4 +576,19 @@ test('set_app_config (w2000): worker.effort takes low, medium, high or max, live
   setAppConfig(file, cfg, 'worker.effort', null);
   assert.equal(cfg.worker.effort, 'medium');
   assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).worker?.effort, undefined);
+});
+
+test('set_app_config (w17): privacyGuards is an owner-only switch, applied live, and null puts back the default', (t) => {
+  const { file, cfg } = setup(t);
+  assert.ok(OWNER_ONLY_KEYS.has('privacyGuards'));
+  const finalFactory = Object.assign(cfg, { project: { name: 'Final Factory' } });
+  assert.equal(privacyGuardsOn(finalFactory), false);
+  assert.deepEqual(setAppConfig(file, cfg, 'privacyGuards', true), { before: undefined, after: true });
+  assert.equal(privacyGuardsOn(finalFactory), true);
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).privacyGuards, true);
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).port, 8790);
+  setAppConfig(file, cfg, 'privacyGuards', null);
+  assert.equal(cfg.privacyGuards, undefined);
+  assert.equal(privacyGuardsOn(finalFactory), false);
+  assert.throws(() => setAppConfig(file, cfg, 'privacyGuards', 'yes'), /privacyGuards is true/);
 });

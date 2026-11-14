@@ -13,6 +13,10 @@ answer to anyone else's answers 403. This is on in every factory, Final Factory 
 `config.privacyGuards` turns the worker guard below on or off. Unset, it is on for every factory but Final Factory, whose
 owners decide (`privacyGuardsOn`, server/config.ts).
 
+An owner's orchestrator changes it on a running portal with set_app_config `privacyGuards` (true, false, or null for the
+default). The old config.json is kept as config.json.prev, and the change applies at once: new workers take it from their
+next launch.
+
 ## What a worker may do on a computer
 
 server/privacyGuard.ts, called from the worker guard (server/guard.ts) when the portal sends `guard.privacy`. A daemon older
