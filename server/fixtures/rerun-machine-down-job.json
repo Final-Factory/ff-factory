@@ -1,0 +1,84 @@
+{
+  "annotations": [],
+  "completed_at": "2026-11-14T10:14:14Z",
+  "conclusion": "failure",
+  "id": 132412690815,
+  "name": "test (ffu-windows)",
+  "run_attempt": 1,
+  "runner_name": "ffu-beast-2",
+  "started_at": "2026-11-14T10:02:55Z",
+  "status": "completed",
+  "steps": [
+    {
+      "conclusion": "success",
+      "name": "Set up job",
+      "status": "completed"
+    },
+    {
+      "conclusion": "success",
+      "name": "Set up runner",
+      "status": "completed"
+    },
+    {
+      "conclusion": "success",
+      "name": "Git Bash, cargo and cmake on PATH (Windows; a bare bash resolves to WSL's in System32)",
+      "status": "completed"
+    },
+    {
+      "conclusion": "skipped",
+      "name": "cargo on PATH (Mac and Linux; a runner started by systemd or launchd has no login shell)",
+      "status": "completed"
+    },
+    {
+      "conclusion": "skipped",
+      "name": "temp files in the runner's own temp folder, which the runner empties at every job (w3118)",
+      "status": "completed"
+    },
+    {
+      "conclusion": "success",
+      "name": "temp files in the runner's own temp folder (Windows; TMP and TEMP for Windows programs, TMPDIR for Git Bash)",
+      "status": "completed"
+    },
+    {
+      "conclusion": "success",
+      "name": "Run actions/checkout@v4",
+      "status": "completed"
+    },
+    {
+      "conclusion": "success",
+      "name": "toolchain",
+      "status": "completed"
+    },
+    {
+      "conclusion": "success",
+      "name": "what target/ holds before the build (w3271)",
+      "status": "completed"
+    },
+    {
+      "conclusion": "success",
+      "name": "Run tools/ci-runners/build_gate.sh cargo test --workspace --all-features --locked --no-run",
+      "status": "completed"
+    },
+    {
+      "conclusion": null,
+      "name": "Run ./tools/check_temp_leaks.sh cargo test --workspace --all-features --locked --no-fail-fast",
+      "status": "in_progress"
+    },
+    {
+      "conclusion": null,
+      "name": "keep target/ under 20 GB, the cheap profiles first, and leave a mark (the runner keeps its workspace; w3271)",
+      "status": "pending"
+    },
+    {
+      "conclusion": null,
+      "name": "runner health (w3202; warns on a lost job hand-off, a full RAM tmpfs or full swap; never fails)",
+      "status": "pending"
+    },
+    {
+      "conclusion": null,
+      "name": "Post Run actions/checkout@v4",
+      "status": "pending"
+    }
+  ],
+  "run_id": 43583298384
+}
