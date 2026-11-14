@@ -10,7 +10,7 @@ const B = 'b'.repeat(40);
 const LEAD = 'https://lead.test';
 
 /** A computer with instances: each portal answers its commit on its port; git moves HEAD; the portal drains on request. */
-function world(names: string[], o: { headOf?: Record<string, string>; failBuild?: (sha: string) => boolean; noHealth?: Set<string>; onMain?: boolean; ahead?: Set<string> } = {}) {
+function world(names: string[], o: { headOf?: Record<string, string>; failBuild?: (sha: string) => boolean; noHealth?: Set<string>; onMain?: boolean; ahead?: Set<string>; noControl?: Set<string> } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'w14-'));
   const port: Record<string, number> = {};
   const head: Record<string, string> = {};
@@ -64,6 +64,10 @@ function world(names: string[], o: { headOf?: Record<string, string>; failBuild?
     start(i) {
       calls.push(`${i.name}: start`);
       up[i.name] = true;
+    },
+    control(i) {
+      calls.push(`${i.name}: control`);
+      return o.noControl?.has(i.name) ? `this user cannot disable its task ${i.portalTask} (Access is denied.)` : undefined;
     },
     async sleep(ms) {
       now += ms;
@@ -123,6 +127,7 @@ test('roll: each instance in turn is drained, stopped, updated, started, verifie
   assert.equal(w.head.demo, B);
   assert.deepEqual(w.calls.filter((c) => c.startsWith('demo') && !c.includes('git rev-parse') && !c.includes('merge-base') && !c.includes('status')), [
     'demo: git fetch origin',
+    'demo: control',
     'demo: stop',
     `demo: git checkout ${B}`,
     'demo: build b',
@@ -259,4 +264,27 @@ test('w14: the updater follows the lead forward only, and only to a commit that 
     assert.equal(followSelf('/updater', lead.slice(0, 7), w.d, 'main'), moves, `lead on ${lead[0]}`);
     assert.equal(w.head(), moves ? lead : MINE);
   }
+});
+
+test('roll: an instance whose task this user cannot disable is not drained or stopped, and is rolled once it can be (w4218)', async () => {
+  const noControl = new Set(['lens']);
+  const w = world(['lens', 'demo'], { noControl });
+  const s = readState(path.join(w.root, 'none.json'));
+  await tick(w.list, s, w.d);
+  w.advance(6);
+  let r = await tick(w.list, s, w.d);
+  assert.deepEqual(r.skipped, ['lens']);
+  assert.deepEqual(r.rolled, ['demo'], 'the instances after it still roll');
+  assert.equal(fs.existsSync(path.join(w.data('lens'), 'restart.request')), false, 'no drain asked of it');
+  assert.ok(!w.calls.some((c) => c.startsWith('lens: stop') || c.startsWith('lens: git checkout')));
+  assert.equal(w.head.lens, A);
+  assert.equal(s.failed[B], undefined, 'not recorded as a failed commit');
+  assert.equal(w.log.filter((l) => l.includes('lens: not touched: this user cannot disable')).length, 1);
+  await tick(w.list, s, w.d);
+  assert.equal(w.log.filter((l) => l.includes('lens: not touched: this user cannot disable')).length, 1, 'said once');
+  noControl.clear();
+  r = await tick(w.list, s, w.d);
+  assert.deepEqual(r.rolled, ['lens']);
+  assert.equal(w.head.lens, B);
+  assert.equal(s.blocked?.lens, undefined);
 });

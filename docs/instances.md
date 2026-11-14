@@ -24,7 +24,10 @@ node scripts/instance/update-all.ts --list F:/ffw/instances/instances.json
    away the script the next pass runs.
 3. **Then one instance at a time,** in the list's order (put the one you lean on most last), each whose `/api/health` reports
    another commit. Forward only here too: an instance someone updated ahead of the lead by hand (its commit is not in the
-   lead's history) is left on its newer commit, said once in the log, and followed again once the lead passes it.
+   lead's history) is left on its newer commit, said once in the log, and followed again once the lead passes it. Control
+   first (w4218): this user must be able to disable and enable its task(s), so the pass disables and enables each again at
+   once. One it cannot control (a task registered from an elevated shell: Administrators own it) is not drained, said once
+   in the log, and rolled once the task is registered again from a normal shell.
    - **Drain:** `data/restart.request` with drain `auto`, as fff-update writes it on the VM: busy workers are asked to wrap up
      and the portal's own coordinators are waited for, for at most `drainMinutes` (30); after that it goes ahead and the
      sessions still busy are resumed after the restart (`resume.json`). Then a plain `restart.request`: stop now.
