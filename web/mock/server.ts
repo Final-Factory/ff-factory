@@ -8,6 +8,7 @@
 // Sign in with any username and the password "mock" (MOCK_NOAUTH=1 skips the login).
 // MOCK_SCENARIO=fresh starts empty (first run); MOCK_FROZEN=1 stops the meters moving (screenshots);
 // MOCK_DIST serves another build (e.g. an old one, to compare).
+// MOCK_PROJECT names another job's install (w15): "Ryding Factory for <project>".
 // In any chat: a message containing "perm" asks for a permission, "slow" streams slowly, "fail" errors.
 import http from 'node:http';
 import fs from 'node:fs';
@@ -18,6 +19,7 @@ import type { AppState, LiveKnob, LiveViewInfo, Machine, MachineSandbox, SearchH
 import { buildWorld, localMachine, type ImageKey, type Scenario } from './scenario.ts';
 import { phoneShot, spaceScene } from './png.ts';
 import { scaleWorld, startLiveTraffic } from './scale.ts';
+import { brandedManifest, withBrand, type WebBrand } from '../../server/webStatic.ts';
 
 const PORT = Number(process.env.PORT ?? 8790);
 const NOAUTH = process.env.MOCK_NOAUTH === '1';
@@ -39,6 +41,10 @@ if (process.env.MOCK_EXTRA) {
   if (x.live) state.live = [...(state.live ?? []), ...x.live];
   if (x.machineStats) state.machineStats = { ...state.machineStats, ...x.machineStats };
 }
+// MOCK_PROJECT="Lens Scout": the page of an install that is not Final Factory's (w15), named as the real server names it.
+const PROJECT = process.env.MOCK_PROJECT;
+const BRAND: WebBrand | undefined = PROJECT ? { title: `Ryding Factory for ${PROJECT}`, short: PROJECT } : undefined;
+if (PROJECT) state.config.project = { name: PROJECT, custom: true, product: 'Ryding Factory', community: false };
 const transcripts = world.transcripts;
 const seqs: Record<string, number> = {};
 for (const [id, evs] of Object.entries(transcripts)) seqs[id] = evs.at(-1)?.seq ?? 0;
@@ -293,6 +299,8 @@ function serveStatic(pathname: string, res: http.ServerResponse) {
     return;
   }
   res.writeHead(200, { 'Content-Type': TYPES[path.extname(f)] ?? 'application/octet-stream', 'Cache-Control': 'no-cache' });
+  if (BRAND && path.extname(f) === '.html') return res.end(withBrand(fs.readFileSync(f, 'utf8'), BRAND));
+  if (BRAND && path.extname(f) === '.webmanifest') return res.end(brandedManifest(fs.readFileSync(f, 'utf8'), BRAND));
   fs.createReadStream(f).pipe(res);
 }
 

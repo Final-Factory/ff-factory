@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { IMMUTABLE, REVALIDATE, serveStatic, webBuild, withBuildMeta } from './webStatic.ts';
+import { IMMUTABLE, REVALIDATE, brandedManifest, serveStatic, webBuild, withBrand, withBuildMeta } from './webStatic.ts';
 import { BUILD_META } from '../shared/freshness.ts';
 
 const INDEX_V1 = '<!doctype html><html><head><script type="module" src="/assets/index-aaaa.js"></script></head><body></body></html>';
@@ -104,4 +104,18 @@ test('no web UI built: no build id', async () => {
 
 test('the build meta goes first in <head>', () => {
   assert.equal(withBuildMeta('<html><head><title>x</title></head></html>', 'abc'), `<html><head>\n    <meta name="${BUILD_META}" content="abc" /><title>x</title></head></html>`);
+});
+
+// w15: an install that is not Final Factory's names the page and the installed app after itself.
+test("the page's and the PWA's name: Final Factory's build as it is, another install's own", () => {
+  const html = '<head><meta name="apple-mobile-web-app-title" content="FF Factory" />\n<title>FF Factory</title></head>';
+  assert.equal(withBrand(html, undefined), html);
+  const brand = { title: 'Ryding Factory for Lens Scout', short: 'Lens Scout' };
+  assert.equal(withBrand(html, brand), '<head><meta name="apple-mobile-web-app-title" content="Lens Scout" />\n<title>Ryding Factory for Lens Scout</title></head>');
+  assert.equal(withBrand('<title>x</title>', { title: 'A & <B>', short: 'A' }), '<title>A &amp; &lt;B&gt;</title>');
+  const m = JSON.parse(brandedManifest(JSON.stringify({ name: 'FF Factory', short_name: 'FF Factory', description: 'x', start_url: '/' }), brand)) as Record<string, string>;
+  assert.equal(m.name, 'Ryding Factory for Lens Scout');
+  assert.equal(m.short_name, 'Lens Scout');
+  assert.equal(m.start_url, '/');
+  assert.match(m.description, /Lens Scout's agents/);
 });

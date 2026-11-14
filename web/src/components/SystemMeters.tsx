@@ -8,6 +8,7 @@ import { fmtBytes, fmtClock, fmtCost, fmtRelative, lsGet, lsSet, useNow } from '
 import { Icon } from './ui';
 import { api } from '../api';
 import { attempt, sessionIndex } from '../store';
+import { currentProduct } from '../brand';
 
 // The sidebar's footer: the load of every computer and the plan usage of every Claude account, in two
 // quiet lines; a tap opens the meters. With machines connected each computer is a name and three mini
@@ -653,7 +654,7 @@ function PlanMeters({ usage: u }: { usage?: PlanUsage }) {
         </div>
         {u.why && <div className="plan-asof">{u.why}</div>}
         {u.spendWeekUsd !== undefined && (
-          <div className="meter-row" title="What FF Factory's own agents cost over the last 7 days, from their reported cost. This is spend, not the plan's usage limit.">
+          <div className="meter-row" title={`What ${currentProduct()}'s own agents cost over the last 7 days, from their reported cost. This is spend, not the plan's usage limit.`}>
             <span className="meter-label">Portal spend, 7 days</span>
             <span className="meter-value">{fmtCost(u.spendWeekUsd)}</span>
           </div>
