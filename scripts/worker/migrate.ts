@@ -18,12 +18,19 @@
 //                                 removes the old ad-hoc tasks (FF-Build-*, FF-LiveMP-*, ff-worker-leg, ff-detach-test).
 //
 // The machine keeps its credential (the old daemon.json's token moves to <root>/secrets/machine-token, never printed).
+//
+//   migrate --config C --root R --instance N --from-service S --claude-config-dir D
+//                                 in place (w14, docs/worker-install.md): a hand-made second instance's daemon, whose
+//                                 daemon.json C names R as its root, becomes the installer's --instance N install in R.
+//                                 Its sandboxes stay in R's sandboxes folder (only their git is re-pointed), the old clone
+//                                 and folders stay, its old task or LaunchAgent S is disabled (not deleted). No cleanup.
 
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { readToken } from '../../machine/daemon.ts';
 import { armScriptReimport } from '../../machine/scriptReimport.ts';
 import * as win from '../../server/machineDeployWin.ts';
 import { LABEL, macControlScript } from '../../server/machineDeploy.ts';
@@ -57,6 +64,15 @@ export interface OldLayout {
   sandboxes: OldSandbox[];
   slotRoot?: string;
   nightlyRoots: string[];
+  /** In place (--config): the hand-made daemon's own daemon.json, outside its folder; its root is the new one. */
+  configFile?: string;
+  inPlace?: boolean;
+}
+
+/** Whether two paths name the same place (Windows: case and slashes aside). Exported for tests. */
+export function samePlace(a: string, b: string, platform: NodeJS.Platform = process.platform): boolean {
+  if (platform !== 'win32') return path.posix.resolve(a) === path.posix.resolve(b);
+  return path.win32.resolve(a).toLowerCase() === path.win32.resolve(b).toLowerCase();
 }
 
 /**
@@ -64,13 +80,19 @@ export interface OldLayout {
  * The player slots and the nightly lab are only what the runbook names for the machine (--old-slots, --nightly): never
  * guessed, so a run can never take a folder that belongs to something else.
  */
-export function discoverOld(fromAppDir?: string, o: { slots?: string; nightly?: string[] } = {}, home = os.homedir()): OldLayout {
-  const appDir = path.resolve(fromAppDir ?? path.join(home, '.ff-factory'));
-  const file = path.join(appDir, 'daemon.json');
-  if (!fs.existsSync(file)) throw new Error(`no daemon.json in ${appDir}: pass --from <the old daemon folder>`);
+export function discoverOld(fromAppDir?: string, o: { slots?: string; nightly?: string[]; config?: string; root?: string } = {}, home = os.homedir()): OldLayout {
+  // In place (--config): a hand-made daemon's daemon.json is wherever its task names it, and names its folder (appDir).
+  let appDir = path.resolve(fromAppDir ?? path.join(home, '.ff-factory'));
+  const file = o.config ? path.resolve(o.config) : path.join(appDir, 'daemon.json');
+  if (!fs.existsSync(file)) throw new Error(o.config ? `no daemon.json at ${file}` : `no daemon.json in ${appDir}: pass --from <the old daemon folder>`);
   const text = fs.readFileSync(file, 'utf8');
   const config = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text) as Record<string, unknown>;
-  if (config.root) throw new Error(`${appDir} already belongs to the worker root ${config.root}`);
+  if (o.config) {
+    // Without appDir the daemon's folder is ~/.ff-factory, the main install's: never taken for an instance's.
+    if (typeof config.appDir !== 'string' || !config.appDir) throw new Error(`${file} names no appDir: the in-place move needs the daemon's own folder`);
+    appDir = path.resolve(config.appDir);
+    if (config.root && !(o.root && samePlace(String(config.root), o.root))) throw new Error(`${file} names the root ${config.root}, not ${o.root}: an in-place move keeps its own root`);
+  } else if (config.root) throw new Error(`${appDir} already belongs to the worker root ${config.root}`);
   const pool = (config.sandboxes ?? {}) as { root?: string; librarySeed?: string };
   let sandboxes: OldSandbox[] = [];
   try {
@@ -83,13 +105,15 @@ export function discoverOld(fromAppDir?: string, o: { slots?: string; nightly?: 
   return {
     appDir,
     config,
-    token: String(config.token ?? ''),
+    // A hand-made daemon keeps its credential in a token file (machine/daemon.ts readToken).
+    token: o.config && (config.token || config.tokenFile) ? readToken(config as { token: string; tokenFile?: string }) : String(config.token ?? ''),
     repoPath: String(config.repoPath ?? ''),
     sandboxRoot: pool.root,
     librarySeed: pool.librarySeed,
     sandboxes,
     slotRoot,
     nightlyRoots: [...new Set(nightly)],
+    ...(o.config ? { configFile: file, inPlace: true } : {}),
   };
 }
 
@@ -137,22 +161,29 @@ export function treeBytes(dir: string): number {
 }
 
 /** What moves where. Pure but for the volume and size probes. Exported for tests. */
-export function plan(old: OldLayout, l: Layout, o: { claudeDir?: string; measure?: boolean } = {}): Item[] {
+export function plan(old: OldLayout, l: Layout, o: { claudeDir?: string; measure?: boolean; claudeConfigDir?: string; fromService?: string } = {}): Item[] {
   const items: Item[] = [];
   const how = (from: string, to: string): Method => (sameVolume(from, to) ? 'rename' : 'copy');
   const sized = (from: string, m: Method) => (m === 'copy' && o.measure !== false ? treeBytes(from) : undefined);
-  for (const f of ['sandboxes.json', 'cleanup.json', 'cleanup-state.json', 'cleanup-log.jsonl', 'outside-watch.json']) {
+  // In place, the daemon keeps what it published, its GitHub App and Unity MCP files (a moved machine starts these afresh).
+  const more = old.inPlace ? { files: ['published.jsonl', 'cleanup-facts.json', 'pause.json', 'person-play.json'], dirs: ['gh-app', 'unity-mcp', 'meters'] } : { files: [], dirs: [] };
+  for (const f of ['sandboxes.json', 'cleanup.json', 'cleanup-state.json', 'cleanup-log.jsonl', 'outside-watch.json', ...more.files]) {
     const from = path.join(old.appDir, f);
-    if (fs.existsSync(from)) items.push({ what: `daemon state ${f}`, from, to: path.join(l.daemon, f), method: 'copy', bytes: fs.statSync(from).size, note: f === 'sandboxes.json' ? 'paths rewritten to the root' : undefined });
+    if (fs.existsSync(from)) items.push({ what: `daemon state ${f}`, from, to: path.join(l.daemon, f), method: 'copy', bytes: fs.statSync(from).size, note: f === 'sandboxes.json' ? (old.inPlace ? 'its paths kept (the sandboxes stay)' : 'paths rewritten to the root') : undefined });
   }
-  for (const d of ['agents', 'logs']) {
+  for (const d of ['agents', 'logs', ...more.dirs]) {
     const from = path.join(old.appDir, d);
     if (fs.existsSync(from)) items.push({ what: `daemon ${d}/`, from, to: path.join(l.daemon, d === 'logs' ? path.join('logs', 'before-migration') : d), method: 'copy', bytes: o.measure === false ? undefined : treeBytes(from) });
   }
-  items.push({ what: 'the machine credential (old daemon.json token)', from: path.join(old.appDir, 'daemon.json'), to: l.token, method: 'copy', note: 'never printed' });
+  items.push({ what: 'the machine credential (old daemon.json token)', from: old.configFile ?? path.join(old.appDir, 'daemon.json'), to: l.token, method: 'copy', note: 'never printed' });
   const claude = o.claudeDir ?? path.join(os.homedir(), '.claude', 'projects');
   for (const sb of old.sandboxes) {
     const to = path.join(l.sandboxes, sb.id);
+    // In place the sandbox is in the root's sandboxes folder already: no move, no conversations to copy.
+    if (old.inPlace && samePlace(sb.path, to)) {
+      items.push({ what: `sandbox ${sb.id} (${sb.branch})`, from: sb.path, to, method: 'rehome', note: 'stays where it is; its git re-pointed at the root clone (the old .git kept as .git.pre-ffw)' });
+      continue;
+    }
     const m = how(sb.path, to);
     items.push({ what: `sandbox ${sb.id} (${sb.branch})`, from: sb.path, to, method: m === 'rename' ? 'rehome' : 'copy', bytes: sized(sb.path, m), note: m === 'rename' ? 'renamed in place; its git re-pointed at the root clone' : 'another volume: copied whole (Library included), then re-pointed' });
     const cFrom = path.join(claude, claudeSlug(sb.path));
@@ -168,6 +199,14 @@ export function plan(old: OldLayout, l: Layout, o: { claudeDir?: string; measure
     items.push({ what: 'nightly lab', from: n, to: l.nightly, method: m, bytes: sized(n, m), note: 'FF_NIGHTLY_ROOT points here for agents and scripts the daemon starts' });
   }
   if (old.slotRoot) items.push({ what: 'player slots', from: old.slotRoot, method: 'leave', note: `rebuilt empty in ${l.players} (builds are mirrored in on demand); the old ones and their firewall rules go at cleanup` });
+  if (old.inPlace) {
+    items.push({ what: 'the old clone', from: old.repoPath, method: 'leave', note: 'untouched and never deleted (an in-place move has no cleanup)' });
+    items.push({ what: 'the old daemon folder', from: old.appDir, method: 'leave', note: `its state copied into ${l.daemon}; kept` });
+    if (typeof old.config.tempDir === 'string') items.push({ what: 'the old temp folder', from: old.config.tempDir, method: 'leave', note: `kept; the root's daemon gives agents ${l.tmp}` });
+    if (o.claudeConfigDir) items.push({ what: 'the Claude Code folder', from: o.claudeConfigDir, method: 'leave', note: "the root's daemon sets CLAUDE_CONFIG_DIR to it; the sandboxes keep their paths, so conversations resume" });
+    if (o.fromService) items.push({ what: 'the old service', from: o.fromService, method: 'leave', note: 'stopped for the switch, then disabled (not deleted)' });
+    return items;
+  }
   items.push({ what: 'the old clone', from: old.repoPath, method: 'leave', note: 'a person\'s own clone: untouched; its worktree entries for the moved sandboxes are pruned at cleanup' });
   return items;
 }
@@ -251,6 +290,8 @@ export interface Journal {
   moved: { id: string; from: string; to: string; method: 'rename' | 'copy'; armedReimport?: boolean }[];
   renamed: { from: string; to: string }[];
   oldService?: { kind: 'task' | 'launchagent'; name: string; saved: string };
+  /** In place (--config): the old daemon's daemon.json. Its root is this one, so there is no cleanup (cleanup refuses). */
+  config?: string;
 }
 
 const journalFile = (l: Layout) => path.join(l.root, 'migration.json');
@@ -366,19 +407,37 @@ async function saveOldService(l: Layout, task: string): Promise<Journal['oldServ
   return { kind: 'launchagent', name: task, saved };
 }
 
-async function restoreOldService(s: NonNullable<Journal['oldService']>, appDir: string) {
+async function restoreOldService(s: NonNullable<Journal['oldService']>, appDir: string, config?: string) {
   if (s.kind === 'task') {
     // Whatever of the old daemon runs now goes first: re-registering a running task ends its supervisor but not the
     // daemon under it, and that daemon ran on beside the restored one (LothDesktop 2026-10-06, w513: two daemons on one
     // credential and one Unity slots mailbox).
-    await stopOld(appDir, s.name);
+    await stopOld(appDir, s.name, config);
     const r = await win.psScript(win.LOCAL, `$x = Get-Content -Raw -LiteralPath ${win.psq(s.saved)}\nRegister-ScheduledTask -TaskName ${win.psq(s.name)} -Xml $x -Force | Out-Null\nStart-ScheduledTask -TaskName ${win.psq(s.name)}\n'ok'\n`, { timeoutMs: 60_000 });
     if (!/ok/.test(r.stdout)) throw new Error(`restoring the ${s.name} task failed: ${win.failureDetail(r)}; register it from ${s.saved} by hand`);
     return;
   }
   const plistFile = path.join(os.homedir(), 'Library', 'LaunchAgents', `${s.name}.plist`);
   fs.copyFileSync(s.saved, plistFile);
-  await exec('bash', ['-c', `launchctl bootout gui/$(id -u)/${s.name} 2>/dev/null; launchctl bootstrap gui/$(id -u) "${plistFile}"`]);
+  // In place the switch disabled it (disableOldService): enabled again first, or the bootstrap is refused.
+  await exec('bash', ['-c', `${config ? `launchctl enable gui/$(id -u)/${s.name}; ` : ''}launchctl bootout gui/$(id -u)/${s.name} 2>/dev/null; launchctl bootstrap gui/$(id -u) "${plistFile}"`]);
+}
+
+/**
+ * In place, after the switch: the old task or LaunchAgent disabled, not deleted, so nothing starts it beside the root's
+ * daemon (a log-on, a reboot). Prints what it did and the undo; a failure is told, not thrown (the root's daemon runs).
+ */
+async function disableOldService(s: NonNullable<Journal['oldService']>, root: string) {
+  const r = s.kind === 'task'
+    ? await win.psScript(win.LOCAL, `$t = Get-ScheduledTask -TaskName ${win.psq(s.name)} -ErrorAction Stop\n$null = $t | Disable-ScheduledTask -ErrorAction Stop\n'state=' + (Get-ScheduledTask -TaskName ${win.psq(s.name)}).State\n`, { timeoutMs: 60_000 })
+    : await exec('bash', ['-c', `launchctl disable gui/$(id -u)/${s.name} && echo state=Disabled`]);
+  const undo = s.kind === 'task'
+    ? `Enable-ScheduledTask -TaskName '${s.name}'; Start-ScheduledTask -TaskName '${s.name}'`
+    : `launchctl enable gui/$(id -u)/${s.name} && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/${s.name}.plist`;
+  const noun = s.kind === 'task' ? 'task' : 'LaunchAgent';
+  if (/state=Disabled/.test(r.stdout)) say(`Disabled the old ${noun} ${s.name} (kept, not deleted; saved in ${s.saved}).`);
+  else say(`Could not disable the old ${noun} ${s.name} (${(r.stderr || r.stdout).trim().slice(-200)}): disable it by hand, or it may start beside the root's daemon.`);
+  say(`Undo: migrate --root "${root}" --rollback (the root's daemon stopped, the old one back). By hand, after stopping the root's daemon: ${undo}`);
 }
 
 /** The Windows stop of the old daemon, then `left=<n>`: its processes still running (none, or the moves wait). Exported for tests. */
@@ -396,14 +455,120 @@ $left = @(Get-CimInstance Win32_Process -Property ProcessId, CommandLine | Where
 }
 
 /** Whether the old daemon runs now (Windows: anything from its folder; Mac: its LaunchAgent is loaded). */
-async function oldDaemonRuns(appDir: string, service: string): Promise<boolean> {
+async function oldDaemonRuns(appDir: string, service: string, config?: string): Promise<boolean> {
+  if (config) {
+    const d = daemonProcs(await listProcs(), config, appDir);
+    return d.ours.length + d.unknown.length > 0;
+  }
   if (!isWin) return (await exec('bash', ['-c', `launchctl print gui/$(id -u)/${service} >/dev/null 2>&1`])).code === 0;
   const r = await win.psScript(win.LOCAL, leftScript(appDir), { timeoutMs: 60_000 });
   return /left=(\d+)/.exec(r.stdout)?.[1] !== '0';
 }
 
+/** A process: its id, its parent's and its command line. */
+export interface Proc {
+  pid: number;
+  ppid: number;
+  cmd: string;
+}
+
+/** Whether a command line names `p` as a whole argument (not a prefix of a longer path). */
+function names(cmd: string, p: string): boolean {
+  for (let i = cmd.indexOf(p); i >= 0; i = cmd.indexOf(p, i + 1)) if (i + p.length === cmd.length || /["'\s]/.test(cmd[i + p.length])) return true;
+  return false;
+}
+
+/**
+ * In place (--config), a hand-made daemon runs from no folder of the installer's: it is found by its daemon.json on the
+ * command line. `ours`: a node daemon.ts naming that daemon.json (either slash on Windows, any case there), and an
+ * agent host of its folder. `unknown`: a node daemon.ts given no absolute config path, so whose it is cannot be told; the
+ * stop refuses while one runs (fail closed). Exported for tests.
+ */
+export function daemonProcs(procs: Proc[], configFile: string, appDir: string, platform: NodeJS.Platform = process.platform): { ours: Proc[]; unknown: Proc[] } {
+  const w = platform === 'win32';
+  const p = w ? path.win32 : path.posix;
+  const norm = (s: string) => (w ? s.replace(/\\/g, '/').toLowerCase() : s);
+  const cfg = norm(p.resolve(configFile));
+  const hosts = norm(p.join(p.resolve(appDir), 'hosts')) + '/';
+  const ours: Proc[] = [];
+  const unknown: Proc[] = [];
+  for (const x of procs) {
+    const c = norm(x.cmd);
+    if (!/(^|[\s"'/])node(\.exe)?["']?(\s|$)/i.test(c)) continue;
+    const d = /(^|[\s"'/])daemon\.ts(["'\s]|$)/i.exec(c);
+    if (d) {
+      if (names(c, cfg)) ours.push(x);
+      // Its config is the argument after daemon.ts: none, or a relative one, and whose daemon it is cannot be told.
+      else if (!/(^|[\s"'=])(\/|[a-z]:\/)/i.test(c.slice(d.index + d[0].length - 1))) unknown.push(x);
+    } else if (/(^|[\s"'/])agenthost\.ts(["'\s]|$)/i.test(c) && c.includes(hosts)) ours.push(x);
+  }
+  return { ours, unknown };
+}
+
+/** The processes running now, with their command lines (Windows: base64, so any character survives). Throws if it cannot tell. */
+async function listProcs(): Promise<Proc[]> {
+  if (isWin) {
+    const r = await win.psScript(win.LOCAL, `$all = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, CommandLine)
+foreach ($p in $all) { 'p=' + $p.ProcessId + ',' + $p.ParentProcessId + ',' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$p.CommandLine)) }
+'listed=' + $all.Count
+`, { timeoutMs: 60_000 });
+    if (!/listed=\d+/.test(r.stdout)) throw new Error(`listing the processes failed: ${win.failureDetail(r)}`);
+    return [...r.stdout.matchAll(/^p=(\d+),(\d+),(\S*)\s*$/gm)].map((m) => ({ pid: Number(m[1]), ppid: Number(m[2]), cmd: Buffer.from(m[3], 'base64').toString('utf8') }));
+  }
+  const r = await exec('ps', ['-axww', '-o', 'pid=,ppid=,command=']);
+  if (r.code !== 0) throw new Error(`listing the processes failed: ${(r.stderr || r.stdout).trim().slice(-200)}`);
+  return [...r.stdout.matchAll(/^\s*(\d+)\s+(\d+)\s(.*)$/gm)].map((m) => ({ pid: Number(m[1]), ppid: Number(m[2]), cmd: m[3] }));
+}
+
+/**
+ * In place: stop the hand-made daemon found by its daemon.json (daemonProcs), its service first (the task disabled and
+ * stopped, left disabled; the LaunchAgent booted out), then it and everything under it. Throws, naming them, if any
+ * still runs, if a daemon whose owner cannot be told runs, or if the processes cannot be listed.
+ */
+async function stopByConfig(config: string, appDir: string, service: string) {
+  const found = daemonProcs(await listProcs(), config, appDir);
+  if (found.unknown.length) throw new Error(`a daemon runs whose command line names no daemon.json, so whose it is cannot be told: ${found.unknown.map((x) => `pid ${x.pid} (${x.cmd.slice(0, 160)})`).join('; ')}. Stop it, then run this again`);
+  if (isWin) {
+    const r = await win.psScript(win.LOCAL, `${win.KILL_SET}
+$task = Get-ScheduledTask -TaskName ${win.psq(service)} -ErrorAction SilentlyContinue
+if ($task) { $null = $task | Disable-ScheduledTask -ErrorAction SilentlyContinue; $task | Stop-ScheduledTask -ErrorAction SilentlyContinue }
+$marks = @(${found.ours.map((x) => win.psq(x.cmd)).join(', ')})
+$all = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name, CommandLine, CreationDate)
+$kill = @(Get-FFKillSet $all $marks @() $true)
+foreach ($id in $kill) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }
+for ($i = 0; $i -lt 30; $i++) { if (-not @($kill | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue }).Count) { break }; Start-Sleep -Milliseconds 500 }
+'killed=' + $kill.Count
+`, { timeoutMs: 3 * 60_000 });
+    if (!/killed=\d+/.test(r.stdout)) throw new Error(`stopping the old daemon failed: ${win.failureDetail(r)}`);
+  } else {
+    await exec('bash', ['-c', `launchctl bootout gui/$(id -u)/${service} 2>/dev/null || true`]);
+    // It and everything under it (its agents), never this process.
+    const all = await listProcs();
+    const kill = new Set(found.ours.map((x) => x.pid));
+    for (let n = 0; n !== kill.size; ) {
+      n = kill.size;
+      for (const x of all) if (kill.has(x.ppid) && x.pid !== process.pid) kill.add(x.pid);
+    }
+    const signal = (pid: number, sig: NodeJS.Signals | 0) => {
+      try {
+        return process.kill(pid, sig);
+      } catch {
+        return false; // gone
+      }
+    };
+    const alive = (pid: number) => signal(pid, 0);
+    for (const sig of ['SIGTERM', 'SIGKILL'] as const) {
+      for (const pid of kill) signal(pid, sig);
+      for (let i = 0; i < 20 && [...kill].some(alive); i++) await new Promise((r) => setTimeout(r, 500));
+    }
+  }
+  const left = daemonProcs(await listProcs(), config, appDir).ours;
+  if (left.length) throw new Error(`the old daemon still runs after its stop: pid(s) ${left.map((x) => x.pid).join(', ')}`);
+}
+
 /** Stop the old daemon (its task or LaunchAgent, and only what runs from its own folder); throws if any of it still runs. */
-async function stopOld(appDir: string, service: string) {
+async function stopOld(appDir: string, service: string, config?: string) {
+  if (config) return stopByConfig(config, appDir, service);
   if (!isWin) return void (await exec('bash', ['-c', `launchctl bootout gui/$(id -u)/${service} 2>/dev/null || true`]));
   const r = await win.psScript(win.LOCAL, stopOldScript(appDir, service), { timeoutMs: 3 * 60_000 });
   const left = /left=(\d+)/.exec(r.stdout);
@@ -419,14 +584,51 @@ export interface MigrateOptions {
   fromService?: string;
   oldSlots?: string;
   nightly?: string[];
+  /** In place (w14): a hand-made instance's daemon.json, whose root is install.root; with install.instance and fromService. */
+  config?: string;
+  /** In place: the Claude Code folder its agents use (default: the old daemon.json's env CLAUDE_CONFIG_DIR). */
+  claudeConfigDir?: string;
   dryRun: boolean;
   /** The installer's options for the new root (worker.ts install); the credential and the old settings come from the old daemon.json. */
   install: Omit<InstallOptions, 'token' | 'carry' | 'replacesService' | 'portalUrl'> & { portalUrl?: string };
 }
 
+/**
+ * In place (--config): what it needs, checked before the plan is shown, and the install options it changes. The
+ * instance's settings are the old daemon.json's (its pool limits), its agents keep their Claude Code folder, the
+ * project repo is the old clone's origin unless --repo-url names it, and the root's service must be another than the
+ * old one (which is disabled after the switch) and than the main install's.
+ */
+async function inPlaceOptions(o: MigrateOptions, old: OldLayout, l: Layout, io: InstallOptions, fromService: string) {
+  if (!o.install.instance) throw new Error('--config moves a hand-made instance in place: pass --instance <name> as well');
+  if (!o.fromService) throw new Error("--config: pass --from-service <the old daemon's task or LaunchAgent label> (it is disabled after the switch)");
+  if (fromService === (isWin ? win.TASK_NAME : LABEL)) throw new Error(`--from-service ${fromService} is the main install's service, not a hand-made instance's`);
+  if (fromService === io.service) throw new Error(`the root's service ${io.service} has the old one's name: pass --service <another>`);
+  if (samePlace(old.appDir, l.daemon)) throw new Error(`the old daemon folder ${old.appDir} is the root's daemon folder: move it aside first`);
+  const env = (old.config.env ?? {}) as Record<string, unknown>;
+  const claudeConfigDir = o.claudeConfigDir ?? (typeof env.CLAUDE_CONFIG_DIR === 'string' ? env.CLAUDE_CONFIG_DIR : undefined);
+  if (!claudeConfigDir) throw new Error("--config: pass --claude-config-dir <the Claude Code folder its agents use> (the old daemon.json's env names none)");
+  const away = old.sandboxes.filter((sb) => !samePlace(sb.path, path.join(l.sandboxes, sb.id)));
+  if (away.length) throw new Error(`an in-place move keeps the sandboxes where they are, but these are not in ${l.sandboxes}: ${away.map((sb) => `${sb.id} (${sb.path})`).join(', ')}`);
+  // A daemon whose owner cannot be told would make the stop refuse later: refused now, before anything changes.
+  const unknown = daemonProcs(await listProcs(), old.configFile!, old.appDir).unknown;
+  if (unknown.length) throw new Error(`a daemon runs whose command line names no daemon.json, so whose it is cannot be told: ${unknown.map((x) => `pid ${x.pid}`).join(', ')}. Stop it, then run this again`);
+  const pool = (old.config.sandboxes ?? {}) as Record<string, unknown>;
+  const lim = (k: string, d: number) => (typeof pool[k] === 'number' ? (pool[k] as number) : d);
+  io.maxSandboxes = lim('maxSandboxes', io.maxSandboxes);
+  io.maxAgentsPerSandbox = lim('maxAgentsPerSandbox', io.maxAgentsPerSandbox);
+  io.maxUnity = lim('maxUnity', io.maxUnity);
+  io.env = { ...io.env, CLAUDE_CONFIG_DIR: path.resolve(claudeConfigDir) };
+  // The old service has another name: the check that no other daemon has the root's service name stays.
+  io.replacesService = false;
+  if (!io.repoUrl && old.repoPath) io.repoUrl = (await exec('git', ['-C', old.repoPath, 'config', '--get', 'remote.origin.url'])).stdout.trim();
+  if (!io.repoUrl) throw new Error(`--config: pass --repo-url <the project's repo> (${old.repoPath || 'the old clone'} has no origin)`);
+  return { claudeConfigDir: path.resolve(claudeConfigDir) };
+}
+
 export async function migrate(o: MigrateOptions) {
   const l = layoutOf(path.resolve(o.install.root));
-  const old = discoverOld(o.from, { slots: o.oldSlots, nightly: o.nightly });
+  const old = discoverOld(o.from, { slots: o.oldSlots, nightly: o.nightly, ...(o.config ? { config: o.config, root: l.root } : {}) });
   const fromService = o.fromService ?? (isWin ? win.TASK_NAME : LABEL);
   if (!old.token) throw new Error(`the old daemon.json in ${old.appDir} has no token: this tool moves a working daemon`);
   const portalUrl = (o.install.portalUrl ?? String(old.config.portalUrl ?? '')).replace(/\/+$/, '');
@@ -434,16 +636,19 @@ export async function migrate(o: MigrateOptions) {
   // ssh session on Windows does not have.
   const seedFrom = old.repoPath && fs.existsSync(path.join(old.repoPath, '.git')) ? old.repoPath : undefined;
   const io: InstallOptions = { ...o.install, portalUrl, token: old.token, carry: old.config, replacesService: true, ...(seedFrom ? { seedFrom } : {}) };
-  const items = plan(old, l);
+  const inPlace = old.inPlace ? await inPlaceOptions(o, old, l, io, fromService) : undefined;
+  const items = inPlace ? plan(old, l, { claudeConfigDir: inPlace.claudeConfigDir, fromService }) : plan(old, l);
   printPlan(items, l);
   if (o.dryRun) return say('\nDry run: nothing changed.');
 
   // 1. Before anything stops: the root installed beside the old layout (it refuses here if a prerequisite is missing).
   if (readJournal(l)?.state === 'switched') throw new Error(`${l.root} was migrated already (migration.json); --rollback or --cleanup`);
-  const j: Journal = { from: old.appDir, oldRepo: old.repoPath, oldSlotRoot: old.slotRoot, startedAt: new Date().toISOString(), state: 'prepared', moved: [], renamed: [] };
+  const j: Journal = { from: old.appDir, oldRepo: old.repoPath, oldSlotRoot: old.slotRoot, startedAt: new Date().toISOString(), state: 'prepared', moved: [], renamed: [], ...(old.configFile ? { config: old.configFile } : {}) };
   const busy = old.sandboxes.filter((sb) => fs.existsSync(path.join(sb.path, 'Temp', 'UnityLockfile')));
   if (busy.length) throw new Error(`stop these sandboxes' Unity editors first (unity stop): ${busy.map((b) => b.id).join(', ')}`);
   j.oldService = await saveOldService(l, fromService).catch(() => undefined);
+  // In place the old service is disabled after the switch and restored by a rollback: without it, nothing is touched.
+  if (inPlace && !j.oldService) throw new Error(`no ${isWin ? 'task' : 'LaunchAgent'} named ${fromService} (--from-service): name the one that starts the old daemon; nothing changed`);
   fs.mkdirSync(l.root, { recursive: true });
   writeJournal(l, j);
   // The root's clone and the installer's checkout while the old daemon still runs (every prerequisite checked first).
@@ -477,27 +682,28 @@ export async function migrate(o: MigrateOptions) {
   // stop). Told first, it leaves the machine alone until a daemon says hello: the root's, or the old one after a rollback.
   const held = await holdRedeploys(portalUrl, old.token);
   // An older portal: fine once its daemon was stopped with machine_daemon stop, which holds them the same way.
-  if (!held.ok && (!held.tooOld || (await oldDaemonRuns(old.appDir, fromService)))) {
+  if (!held.ok && (!held.tooOld || (await oldDaemonRuns(old.appDir, fromService, old.configFile)))) {
     throw new Error(`${held.error}; nothing moved yet. Stop its daemon from the portal (machine_daemon stop), then run this again`);
   }
   say('Stopping the old daemon...');
   try {
     // Inside the try: if the stop fails, the rollback starts the old daemon again.
-    await stopOld(old.appDir, fromService);
+    await stopOld(old.appDir, fromService, old.configFile);
     for (const sb of old.sandboxes) {
       if (!fs.existsSync(sb.path)) continue;
       const to = path.join(l.sandboxes, sb.id);
       const before = await snapshot(sb.path);
       fs.mkdirSync(l.sandboxes, { recursive: true });
       const item = items.find((i) => i.from === sb.path)!;
-      if (item.method === 'rehome') fs.renameSync(sb.path, to);
+      // In place the sandbox is where it goes already: only its git moves.
+      if (item.method === 'rehome') samePlace(sb.path, to) || fs.renameSync(sb.path, to);
       else await copyTree(sb.path, to, `sandbox ${sb.id}`, p);
       j.moved.push({ id: sb.id, from: sb.path, to, method: item.method === 'rehome' ? 'rename' : 'copy' });
       writeJournal(l, j);
       j.moved[j.moved.length - 1].armedReimport = await rehome(to, sb.id, l, before, path.join(to, '.git'));
       if (io.owner) await giveTo(io.owner, [path.join(to, '.git'), path.join(to, '.git.pre-ffw'), path.join(to, 'Assets', '__FFFactoryReimport')]);
       writeJournal(l, j);
-      say(`Sandbox ${sb.id}: moved, git now in the root's clone (${before.status.length} changed file(s) kept).`);
+      say(`Sandbox ${sb.id}: ${samePlace(sb.path, to) ? 'in place' : 'moved'}, git now in the root's clone (${before.status.length} changed file(s) kept).`);
     }
     for (const i of items.filter((x) => (x.what === 'Library seed' || x.what === 'nightly lab') && x.to)) {
       if (fs.existsSync(i.to!) && fs.readdirSync(i.to!).length) throw new Error(`${i.to} is not empty`);
@@ -518,13 +724,17 @@ export async function migrate(o: MigrateOptions) {
       } else fs.copyFileSync(i.from, i.to!);
     }
     // The pool's own record, with the new paths.
-    const recs = old.sandboxes.map((sb) => ({ ...sb, path: path.join(l.sandboxes, sb.id), ...(sb.logPath ? { logPath: path.join(l.sandboxes, sb.id, path.relative(sb.path, sb.logPath)) } : {}) }));
+    // In place the records keep their paths as written (they are the sandboxes' own).
+    const recs = old.sandboxes.map((sb) => (inPlace ? sb : { ...sb, path: path.join(l.sandboxes, sb.id), ...(sb.logPath ? { logPath: path.join(l.sandboxes, sb.id, path.relative(sb.path, sb.logPath)) } : {}) }));
     fs.writeFileSync(path.join(l.daemon, 'sandboxes.json'), JSON.stringify(recs, null, 2));
     // 4. The daemon from the root, with the machine's own credential and its old settings (worker.ts install).
     if (!(await install(io, undefined, 'finish'))) throw new Error('the daemon from the root did not come up');
     j.state = 'switched';
     writeJournal(l, j);
-    say(`\nMigrated. The old layout stays until: migrate --root "${l.root}" --cleanup (after the new install has run well). Undo: --rollback.`);
+    if (inPlace) {
+      say(`\nMigrated in place: the daemon runs from ${l.root} as the ${io.service} service; the sandboxes, the old clone and ${old.appDir} stay. There is no --cleanup for an in-place move.`);
+      await disableOldService(j.oldService!, l.root);
+    } else say(`\nMigrated. The old layout stays until: migrate --root "${l.root}" --cleanup (after the new install has run well). Undo: --rollback.`);
   } catch (e) {
     say(`\nThe migration stopped: ${(e as Error).message}\nRolling back...`);
     await rollback(l.root);
@@ -539,6 +749,8 @@ export async function rollback(root: string) {
   if (j.state === 'cleaned') throw new Error('the old layout was cleaned up already: a rollback is no longer possible');
   const m = readManifest(l.root);
   if (m && isWin) await win.psScript(win.LOCAL, win.uninstallScript(l.daemon, { task: m.service, only: true }), { timeoutMs: 3 * 60_000 });
+  // In place on a Mac the root's LaunchAgent has its own label: it goes too, or it runs beside the old one.
+  else if (m && j.config) await exec('bash', ['-c', macControlScript('uninstall', m.service, l.daemon)]);
   for (const mv of [...j.moved].reverse()) {
     // The one-time script reimport the move armed is not the old place's: it goes (the old clone does not exclude it).
     if (mv.armedReimport) fs.rmSync(path.join(mv.to, 'Assets', '__FFFactoryReimport'), { recursive: true, force: true });
@@ -548,15 +760,18 @@ export async function rollback(root: string) {
       fs.renameSync(pre, path.join(mv.to, '.git'));
     }
     if (mv.method === 'rename' && fs.existsSync(mv.to) && !fs.existsSync(mv.from)) fs.renameSync(mv.to, mv.from);
+    // In place it never moved, so prune would keep the root clone's entry for it (its .git file is there): it goes.
+    if (j.config && samePlace(mv.from, mv.to)) fs.rmSync(path.join(l.repo, 'worktrees', mv.id), { recursive: true, force: true });
     say(`Sandbox ${mv.id}: back at ${mv.from}.`);
   }
   for (const r of [...j.renamed].reverse()) if (fs.existsSync(r.to) && !fs.existsSync(r.from)) fs.renameSync(r.to, r.from);
   // The root's clone forgets the worktrees that went back.
   if (fs.existsSync(path.join(l.repo, 'HEAD'))) await exec('git', ['-C', l.repo, 'worktree', 'prune']);
-  if (j.oldService) await restoreOldService(j.oldService, j.from);
+  if (j.oldService) await restoreOldService(j.oldService, j.from, j.config);
   j.state = 'rolled-back';
   writeJournal(l, j);
-  say(`Rolled back: the old daemon runs from ${j.from} again. The root ${l.root} can be uninstalled (--keep-registration: the machine's record is the old daemon's).`);
+  if (j.config) say(`Rolled back: the old daemon runs from ${j.config} again. Do NOT uninstall the root ${l.root}: it is the old daemon's folder too (its clone, sandboxes and state).`);
+  else say(`Rolled back: the old daemon runs from ${j.from} again. The root ${l.root} can be uninstalled (--keep-registration: the machine's record is the old daemon's).`);
 }
 
 export interface CleanupOptions {
@@ -570,6 +785,8 @@ export const LEGACY_TASKS = /^(FF-Build-.*|FF-LiveMP-.*|ff-worker-leg|ff-detach-
 export async function cleanup(o: CleanupOptions) {
   const l = layoutOf(path.resolve(o.root));
   const j = readJournal(l);
+  // In place the old daemon's folder, clone and sandboxes are the root's own: nothing of it is the old layout's to delete.
+  if (j?.config) throw new Error(`${l.root} was migrated in place (from ${j.config}): there is nothing to clean up, and its old folders hold the root's sandboxes and clone. --rollback undoes it`);
   if (!j || j.state !== 'switched') throw new Error(`${l.root} has no finished migration to clean up after (migration.json state: ${j?.state ?? 'none'})`);
   const old = { repoPath: j.oldRepo, slotRoot: j.oldSlotRoot };
   // The new install must be up: its daemon connected with its root.
