@@ -31,6 +31,10 @@ worker then runs on that person's Claude account when FF Factory holds one for t
   password once, before its hours run out, logs that browser in and signs the login out everywhere else. Only the
   token's SHA-256 is kept (`data/password-links.json`), a newer link replaces the older one, and a wrong token counts as a
   failed login (server/auth.ts `usePasswordLink`).
+  The file keeps the `publicUrl` of when the link was made, while the token works at any address that reaches the
+  portal: when the address changes (Lens Scout's w7 moved `:8443` to the no-port Funnel address), hand on the link with
+  the new address in front of `/set-password`, or set `publicUrl` before minting. A portal behind Tailscale Funnel also
+  checks `tailscale funnel status` first: an old entry can hold port 443 for a portal that is gone (w7 found one).
 
 - **Device approval** (Lens Scout factory's w7; config `deviceApproval`, off by default). With `"members"`, a member's
   right password on a browser no owner approved for them opens no session: the login answers 202 and waits as a request,
