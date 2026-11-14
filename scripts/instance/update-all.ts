@@ -465,12 +465,17 @@ export function realDeps(l: InstanceList, logFile: string): Deps {
 }
 
 /** The updater's own checkout follows the target first, then runs again from it (--no-self). */
-function followSelf(selfDir: string, short: string, d: Deps, branch: string): boolean {
+// The updater follows the lead forward only: a lead still on a commit older than the updater's own (one from before
+// the updater existed, or a roll-back) leaves the updater where it is, since moving back could take away the script the
+// next 5-minute pass runs and stop all updates on this computer for good.
+export function followSelf(selfDir: string, short: string, d: Deps, branch: string): boolean {
   const head = d.git(selfDir, ['rev-parse', 'HEAD']).out.trim();
   if (sameCommit(head, short)) return false;
   if (d.git(selfDir, ['fetch', '--quiet', 'origin']).code !== 0) return false;
   const full = d.git(selfDir, ['rev-parse', '--verify', '--quiet', `${short}^{commit}`]).out.trim();
   if (!/^[0-9a-f]{40}$/.test(full) || d.git(selfDir, ['merge-base', '--is-ancestor', full, `origin/${branch}`]).code !== 0) return false;
+  if (d.git(selfDir, ['merge-base', '--is-ancestor', head, full]).code !== 0) return false;
+  if (d.git(selfDir, ['cat-file', '-e', `${full}:scripts/instance/update-all.ts`]).code !== 0) return false;
   if (d.git(selfDir, ['-c', 'advice.detachedHead=false', 'checkout', '--quiet', '--force', '--detach', full]).code !== 0) return false;
   d.log(`updater: its own checkout moved ${head.slice(0, 9)} -> ${full.slice(0, 9)}; running again from it`);
   return true;

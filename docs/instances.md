@@ -8,7 +8,9 @@ last checked out: on 2026-11-14 BEAST's three were 6, 84 and 392 commits behind 
 ## How
 
 One list per computer, `instances.json` (example: `scripts/instance/instances.example.json`), kept beside the updater's own
-checkout, not in this repository (it names a person's folders). One scheduled task, `ff-instances-update`, runs every 5 minutes:
+checkout, not in this repository (it names a person's folders). One scheduled task, `ff-instances-update`, runs every 5 minutes
+(`powershell -NoProfile -File scripts/instance/register-updater.ps1 -List <list> -Node <node.exe>` registers it, as you and not
+elevated):
 
 ```
 node scripts/instance/update-all.ts --list F:/ffw/instances/instances.json
@@ -17,7 +19,9 @@ node scripts/instance/update-all.ts --list F:/ffw/instances/instances.json
 1. **Target:** the commit the lead portal's `/api/health` reports (`leader.url`, Final Factory's), once it has reported it for
    `leader.stableMinutes` (5) and it is on `origin/main`. The VM's portal reports a new commit only after `fff-update` has
    verified it, and a rollback there shows the old commit again, so a deploy that fails on the VM never reaches an instance.
-2. **The updater first:** its own checkout moves to the target and it runs again from there.
+2. **The updater first:** its own checkout moves to the target and it runs again from there. Forward only: a lead still on
+   an older commit (one from before the updater existed, or a rollback) leaves the updater where it is, so a pass never takes
+   away the script the next pass runs.
 3. **Then one instance at a time,** in the list's order (put the one you lean on most last), each whose `/api/health` reports
    another commit:
    - **Drain:** `data/restart.request` with drain `auto`, as fff-update writes it on the VM: busy workers are asked to wrap up
