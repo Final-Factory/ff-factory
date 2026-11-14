@@ -5,6 +5,7 @@ import { WAIT_LINE_CHARS } from '../shared/waitSummary.ts';
 import os from 'node:os';
 import path from 'node:path';
 import { sandboxGuard } from './guard.ts';
+import { factoryInstalls, type PrivacyContext } from './privacyGuard.ts';
 import { portalDropReader } from './rerunGuard.ts';
 import { localPluginEnv } from './pluginPaths.ts';
 import { editorBenchGateFor, GATE_HOOK_TIMEOUT_S } from '../machine/editorBenchGate.ts';
@@ -135,6 +136,8 @@ export interface LaunchSpec {
     mainClone?: { path: string; requests: string[] };
     /** w3670: the daemon's folder a worker reads its diagnostic files in (server/daemonReads.ts). An older daemon ignores it. */
     daemonReads?: { dir: string; root?: string };
+    /** w17: the privacy guards (server/privacyGuard.ts), worked out where it runs. An older daemon ignores it. */
+    privacy?: boolean;
   };
   env?: Record<string, string>;
   /**
@@ -443,6 +446,17 @@ export type CatalogTool = keyof typeof CATALOG;
 export type ToolHandler = (args: Record<string, unknown>) => Promise<string>;
 
 /** The spec's commit identity as git env, for every clone the agent makes or touches (w3093). */
+/**
+ * w17: the privacy guard's view of this machine for a worker (server/privacyGuard.ts): its home folder, the folders it may
+ * always name (its sandbox, temp folder, worker install, skills, Claude config, protected and granted folders) and the
+ * other factories' installs beside it.
+ */
+function privacyContext(g: LaunchSpec['guard'], env: Record<string, string | undefined>): Omit<PrivacyContext, 'cwd'> {
+  const home = os.homedir();
+  const allow = [g.ownPath, env.TMPDIR, env.TEMP, env.TMP, g.workerRoot, env.FF_SKILLS, env.CLAUDE_CONFIG_DIR, ...g.protectedPaths, g.mainClone?.path, g.daemonReads?.dir];
+  return { win: process.platform === 'win32', home, allow: allow.filter((x): x is string => !!x), installs: factoryInstalls({ home, ...(g.workerRoot ? { workerRoot: g.workerRoot } : {}) }) };
+}
+
 function publicGitEnvFor(spec: LaunchSpec, baseEnv: NodeJS.ProcessEnv): Record<string, string> {
   return spec.publicGit ? gitIdentityEnv(spec.publicGit, baseEnv) : {};
 }
@@ -501,6 +515,7 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
       workerRoot: g.workerRoot,
       ...(g.daemonReads ? { daemonReads: g.daemonReads } : {}),
       mainClone: g.mainClone,
+      ...(g.privacy ? { privacy: privacyContext(g, agentEnv) } : {}),
       editorRunning,
       // w4136: a rerun of a job whose runner's machine dropped from the portal at the job's end passes (server/rerunGuard.ts).
       ...(handlers.portal_logs ? { machineDrops: portalDropReader(handlers.portal_logs) } : {}),

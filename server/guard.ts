@@ -16,6 +16,7 @@ import { checkDetachedBench } from './benchDetachGuard.ts';
 import { checkChecksRead, checkTimedSleep } from './waitGuard.ts';
 import { checkFlakyRerun, type MachineDropReader, type RerunReader } from './rerunGuard.ts';
 import { checkSearchTool, checkWholeDiskSearch, type WholeDiskContext } from './wholeDiskSearch.ts';
+import { checkPrivacyRead, checkPrivacyShell, type PrivacyContext } from './privacyGuard.ts';
 import os from 'node:os';
 import path from 'node:path';
 import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
@@ -145,6 +146,12 @@ export function sandboxGuard(opts: {
    */
   personBusy?: () => string | undefined;
   /**
+   * w17: the privacy guards (server/privacyGuard.ts): no whole-desktop capture, camera, microphone or clipboard, no read of a
+   * person's own files, another user's or another factory's folder, no ssh or remote desktop to another computer, no server
+   * on every network interface. Absent: not checked (config privacyGuards off).
+   */
+  privacy?: Omit<PrivacyContext, 'cwd'>;
+  /**
    * w3740: while this worker's request is held off game players here after the machine dropped under its player or timed
    * leg, the hold (machine/benchLock.ts readCrashHold), else undefined. A game player started by any route is refused then
    * (checkCrashHoldLaunch). Absent: not checked.
@@ -211,6 +218,10 @@ export function sandboxGuard(opts: {
       const closedRead = daemonToolProblem(readTargets(tool, args), { ...daemon, cwd: input.cwd || opts.sandboxPath });
       if (closedRead) return deny(closedRead);
     }
+    if (opts.privacy) {
+      const personal = checkPrivacyRead(tool, args, { ...opts.privacy, cwd: input.cwd || opts.sandboxPath });
+      if (personal) return deny(personal);
+    }
 
     if (tool === 'Bash' || tool === 'PowerShell') {
       const cmd = String(args.command ?? '');
@@ -219,6 +230,7 @@ export function sandboxGuard(opts: {
       const flakyRerun = await checkFlakyRerun(cmd, { cwd: input.cwd || opts.sandboxPath, env: opts.env, reader: opts.rerunJobs, drops: opts.machineDrops });
       const reason =
         checkShell(cmd, { cwd: input.cwd || opts.sandboxPath, gameRepos: opts.gameRepos ?? [], remotes: opts.remotes ?? gitRemotes, branch: opts.branch ?? ((d) => (fs.existsSync(d) ? repoBranch(d) : undefined)), prBase: opts.prBase ?? ghPrBase, evidence: opts.evidence ?? ghEvidence, publicIdentity: opts.publicIdentity, env: opts.env }) ??
+        (opts.privacy ? checkPrivacyShell(withoutTextArgs(cmd), { ...opts.privacy, cwd: input.cwd || opts.sandboxPath }) : undefined) ??
         (opts.editorRunning?.() ? checkEditorSwitch(cmd, input.cwd || opts.sandboxPath, opts.sandboxPath, opts.env) : undefined) ??
         checkReleaseBranchCommit(cmd, input.cwd || opts.sandboxPath, opts.sandboxPath, repoBranch, opts.env) ??
         checkPlayerLaunch(cmd, opts.sandboxId) ??
