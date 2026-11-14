@@ -67,6 +67,25 @@ Add it to the list. Its folder holds `config.json`; `app` (its checkout, a full 
 is `<dir>/app` unless `app` says otherwise; `portalTask` is its logon task. Portals are on Windows only so far. The updater
 must run as the same user as the instances' tasks, not elevated.
 
+## Tasks the updater can change
+
+The stop disables the instance's tasks for the roll, so the updater's account must be able to change them. A task
+registered from an administrator shell belongs to the Administrators group and that account may only read it ("Access is
+denied"). Before it drains an instance the updater checks it can disable and enable its task (w4218), and when it cannot it
+leaves the instance running and says so once in its log; it rolls it once the task is fixed. (Draining first had stopped
+the Lens portal on BEAST from 22:34 to about 22:46 UTC on 2026-11-14.)
+
+The fix is one administrator step: give the task to its user, as `register-tasks.ps1` and `scripts/instance/new.ts` make
+them (owner the user, the user full control). From an administrator PowerShell:
+
+```
+$s = New-Object -ComObject Schedule.Service; $s.Connect()
+$t = $s.GetFolder('\').GetTask('<task>'); $u = (New-Object Security.Principal.NTAccount $env:USERNAME).Translate([Security.Principal.SecurityIdentifier]).Value
+$t.SetSecurityDescriptor("O:$($u)G:$($u)D:(A;;0x1f019f;;;BA)(A;;0x1f019f;;;SY)(A;;FA;;;$u)", 0)
+```
+
+The running task is not touched.
+
 ## A new instance
 
 `node scripts/instance/new.ts` makes one, adds it to the list and prints what is left for the owner (docs/project.md,
