@@ -1,0 +1,2 @@
+- The instance updater (w14) never rolls an instance back: one updated ahead of the lead portal by hand keeps its newer commit until the lead passes it.
+- `migrate --config` (w14) adds no firewall rules, so it asks no administrator prompt that would hold an unattended move, and its rollback puts the old daemon's task back even when that daemon was already stopped.

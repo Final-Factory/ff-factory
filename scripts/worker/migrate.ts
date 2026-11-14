@@ -205,6 +205,10 @@ export function plan(old: OldLayout, l: Layout, o: { claudeDir?: string; measure
     if (typeof old.config.tempDir === 'string') items.push({ what: 'the old temp folder', from: old.config.tempDir, method: 'leave', note: `kept; the root's daemon gives agents ${l.tmp}` });
     if (o.claudeConfigDir) items.push({ what: 'the Claude Code folder', from: o.claudeConfigDir, method: 'leave', note: "the root's daemon sets CLAUDE_CONFIG_DIR to it; the sandboxes keep their paths, so conversations resume" });
     if (o.fromService) items.push({ what: 'the old service', from: o.fromService, method: 'leave', note: 'stopped for the switch, then disabled (not deleted)' });
+    // An in-place move runs unattended: an administrator prompt nobody answers holds it (and the old daemon stopped) forever
+    // (BEAST 2026-11-14, w14). The hand-made daemon had no firewall rules; an instance with players adds them later from an
+    // interactive shell (install --update).
+    items.push({ what: 'the firewall rules', from: 'none', method: 'leave', note: 'none added (it asks no administrator prompt; the hand-made daemon had none)' });
     return items;
   }
   items.push({ what: 'the old clone', from: old.repoPath, method: 'leave', note: 'a person\'s own clone: untouched; its worktree entries for the moved sandboxes are pruned at cleanup' });
@@ -521,6 +525,27 @@ foreach ($p in $all) { 'p=' + $p.ProcessId + ',' + $p.ParentProcessId + ',' + [C
 }
 
 /**
+ * The Windows half of stopByConfig: the old task disabled and stopped, then the daemon processes (their command lines,
+ * `marks`) and everything under them. With no daemon running (a rollback after the root's install failed: the old one
+ * was stopped already) there is nothing to kill: the kill set was handed an empty array and the script failed ("Cannot
+ * bind argument to parameter 'Id' because it is an empty array", BEAST 2026-11-14, w14), which left the old task disabled.
+ */
+export function stopByConfigScript(service: string, marks: string[]): string {
+  const task = `$task = Get-ScheduledTask -TaskName ${win.psq(service)} -ErrorAction SilentlyContinue
+if ($task) { $null = $task | Disable-ScheduledTask -ErrorAction SilentlyContinue; $task | Stop-ScheduledTask -ErrorAction SilentlyContinue }
+`;
+  if (!marks.length) return `${task}'killed=0'\n`;
+  return `${win.KILL_SET}
+${task}$marks = @(${marks.map((x) => win.psq(x)).join(', ')})
+$all = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name, CommandLine, CreationDate)
+$kill = @(Get-FFKillSet $all $marks @() $true)
+foreach ($id in $kill) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }
+for ($i = 0; $i -lt 30; $i++) { if (-not @($kill | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue }).Count) { break }; Start-Sleep -Milliseconds 500 }
+'killed=' + $kill.Count
+`;
+}
+
+/**
  * In place: stop the hand-made daemon found by its daemon.json (daemonProcs), its service first (the task disabled and
  * stopped, left disabled; the LaunchAgent booted out), then it and everything under it. Throws, naming them, if any
  * still runs, if a daemon whose owner cannot be told runs, or if the processes cannot be listed.
@@ -529,16 +554,7 @@ async function stopByConfig(config: string, appDir: string, service: string) {
   const found = daemonProcs(await listProcs(), config, appDir);
   if (found.unknown.length) throw new Error(`a daemon runs whose command line names no daemon.json, so whose it is cannot be told: ${found.unknown.map((x) => `pid ${x.pid} (${x.cmd.slice(0, 160)})`).join('; ')}. Stop it, then run this again`);
   if (isWin) {
-    const r = await win.psScript(win.LOCAL, `${win.KILL_SET}
-$task = Get-ScheduledTask -TaskName ${win.psq(service)} -ErrorAction SilentlyContinue
-if ($task) { $null = $task | Disable-ScheduledTask -ErrorAction SilentlyContinue; $task | Stop-ScheduledTask -ErrorAction SilentlyContinue }
-$marks = @(${found.ours.map((x) => win.psq(x.cmd)).join(', ')})
-$all = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name, CommandLine, CreationDate)
-$kill = @(Get-FFKillSet $all $marks @() $true)
-foreach ($id in $kill) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }
-for ($i = 0; $i -lt 30; $i++) { if (-not @($kill | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue }).Count) { break }; Start-Sleep -Milliseconds 500 }
-'killed=' + $kill.Count
-`, { timeoutMs: 3 * 60_000 });
+    const r = await win.psScript(win.LOCAL, stopByConfigScript(service, found.ours.map((x) => x.cmd)), { timeoutMs: 3 * 60_000 });
     if (!/killed=\d+/.test(r.stdout)) throw new Error(`stopping the old daemon failed: ${win.failureDetail(r)}`);
   } else {
     await exec('bash', ['-c', `launchctl bootout gui/$(id -u)/${service} 2>/dev/null || true`]);
@@ -619,6 +635,8 @@ async function inPlaceOptions(o: MigrateOptions, old: OldLayout, l: Layout, io: 
   io.maxAgentsPerSandbox = lim('maxAgentsPerSandbox', io.maxAgentsPerSandbox);
   io.maxUnity = lim('maxUnity', io.maxUnity);
   io.env = { ...io.env, CLAUDE_CONFIG_DIR: path.resolve(claudeConfigDir) };
+  // No administrator prompt (the plan says why).
+  io.firewall = false;
   // The old service has another name: the check that no other daemon has the root's service name stays.
   io.replacesService = false;
   if (!io.repoUrl && old.repoPath) io.repoUrl = (await exec('git', ['-C', old.repoPath, 'config', '--get', 'remote.origin.url'])).stdout.trim();

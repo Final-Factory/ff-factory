@@ -80,6 +80,8 @@ export interface State {
   /** The last roll of each instance. */
   last: Record<string, { at: string; from?: string; to: string; ok: boolean; note: string }>;
   settings: Record<string, string[]>;
+  /** Instances that run a commit the lead's does not contain (updated ahead by hand): `<theirs>><lead's>`, said once. */
+  ahead?: Record<string, string>;
 }
 
 /** What the updater does to the world: injected, so the tests drive it with fakes. */
@@ -225,6 +227,16 @@ export async function tick(l: InstanceList, state: State, d: Deps, o: { dryRun?:
       return res;
     }
     const prev = d.git(i.app, ['rev-parse', 'HEAD']).out.trim();
+    // Forward only (w14): an instance updated ahead of the lead by hand (the Lens portal to 65a3333 on 2026-11-14 while
+    // the lead ran 6d30071) is not rolled back to the lead's older commit; it is followed again once the lead passes it.
+    if (d.git(i.app, ['merge-base', '--is-ancestor', prev, full]).code !== 0) {
+      const key = `${prev}>${full}`;
+      if (state.ahead?.[i.name] !== key) d.log(`${i.name}: it runs ${prev.slice(0, 9)}, which the lead's ${full.slice(0, 9)} does not contain (updated ahead of the lead); not rolled back`);
+      (state.ahead ??= {})[i.name] = key;
+      res.skipped.push(i.name);
+      continue;
+    }
+    if (state.ahead?.[i.name]) delete state.ahead[i.name];
     if (d.git(i.app, ['status', '--porcelain', '--untracked-files=no']).out.trim()) {
       d.log(`${i.name}: ${i.app} has modified tracked files; not touched (commit or discard them)`);
       res.skipped.push(i.name);
@@ -333,7 +345,7 @@ async function waitHealth(i: Resolved, sha: string, ms: number, d: Deps): Promis
 export function readState(file: string): State {
   try {
     const s = JSON.parse(stripBom(fs.readFileSync(file, 'utf8'))) as Partial<State>;
-    return { failed: s.failed ?? {}, last: s.last ?? {}, settings: s.settings ?? {}, ...(s.leader ? { leader: s.leader } : {}) };
+    return { failed: s.failed ?? {}, last: s.last ?? {}, settings: s.settings ?? {}, ...(s.leader ? { leader: s.leader } : {}), ...(s.ahead ? { ahead: s.ahead } : {}) };
   } catch {
     return { failed: {}, last: {}, settings: {} };
   }

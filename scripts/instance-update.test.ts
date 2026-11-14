@@ -10,7 +10,7 @@ const B = 'b'.repeat(40);
 const LEAD = 'https://lead.test';
 
 /** A computer with instances: each portal answers its commit on its port; git moves HEAD; the portal drains on request. */
-function world(names: string[], o: { headOf?: Record<string, string>; failBuild?: (sha: string) => boolean; noHealth?: Set<string>; onMain?: boolean } = {}) {
+function world(names: string[], o: { headOf?: Record<string, string>; failBuild?: (sha: string) => boolean; noHealth?: Set<string>; onMain?: boolean; ahead?: Set<string> } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'w14-'));
   const port: Record<string, number> = {};
   const head: Record<string, string> = {};
@@ -44,6 +44,8 @@ function world(names: string[], o: { headOf?: Record<string, string>; failBuild?
       calls.push(`${n}: git ${args.filter((a) => !a.startsWith('-') && a !== 'advice.detachedHead=false').join(' ')}`);
       if (args[0] === 'rev-parse' && args[1] === 'HEAD') return { code: 0, out: head[n] + '\n' };
       if (args[0] === 'rev-parse') return { code: 0, out: (args[3].startsWith('b') ? B : A) + '\n' };
+      // An instance updated ahead of the lead: its HEAD is not an ancestor of the lead's commit.
+      if (args[0] === 'merge-base' && o.ahead?.has(n) && args[2] === head[n]) return { code: 1, out: '' };
       if (args[0] === 'merge-base') return { code: o.onMain === false ? 1 : 0, out: '' };
       if (args[0] === 'status') return { code: 0, out: '' };
       if (args.includes('checkout')) head[n] = args[args.length - 1];
@@ -191,6 +193,22 @@ test('roll: no lead, a portal that does not answer, or a commit off main: nothin
     assert.ok(!w.calls.some((c) => c.includes('stop')), what);
     assert.equal(w.head.demo, A, what);
   }
+});
+
+test('w14: an instance updated ahead of the lead by hand is not rolled back, and that is said once', async () => {
+  const C = 'c'.repeat(40);
+  const w = world(['demo', 'lens'], { headOf: { lens: C }, ahead: new Set(['lens']) });
+  const s = readState(path.join(w.root, 'none.json'));
+  await tick(w.list, s, w.d);
+  w.advance(6);
+  const r = await tick(w.list, s, w.d);
+  assert.deepEqual(r.rolled, ['demo']);
+  assert.equal(w.head.demo, B);
+  assert.equal(w.head.lens, C, 'lens keeps its newer commit');
+  assert.ok(!w.calls.some((c) => c.startsWith('lens: stop') || c.startsWith('lens: build')));
+  w.advance(5);
+  await tick(w.list, s, w.d);
+  assert.equal(w.log.filter((l) => l.includes('lens: it runs ccccccccc') && l.includes('not rolled back')).length, 1, w.log.join(' | '));
 });
 
 test('roll: a dry run says what it would do and does nothing', async () => {
