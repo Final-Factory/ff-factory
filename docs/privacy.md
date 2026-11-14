@@ -6,6 +6,10 @@ privacy. this should apply to all factories".
 `config.privacyGuards` turns both guards below on or off. Unset, they are on for every factory but Final Factory, whose
 owners decide (`privacyGuardsOn`, server/config.ts).
 
+An owner's orchestrator changes it on a running portal with set_app_config `privacyGuards` (true, false, or null for the
+default). The old config.json is kept as config.json.prev, and the change applies at once: the portal's reads at once, and
+new workers from their next launch.
+
 ## What a member reads on the portal
 
 server/readAccess.ts, docs/identity.md "What a member reads". An owner reads everything. A member reads their own
