@@ -24,7 +24,10 @@ node scripts/instance/update-all.ts --list F:/ffw/instances/instances.json
    away the script the next pass runs.
 3. **Then one instance at a time,** in the list's order (put the one you lean on most last), each whose `/api/health` reports
    another commit. Forward only here too: an instance someone updated ahead of the lead by hand (its commit is not in the
-   lead's history) is left on its newer commit, said once in the log, and followed again once the lead passes it.
+   lead's history) is left on its newer commit, said once in the log, and followed again once the lead passes it. Control
+   first (w4218): this user must be able to disable and enable its task(s), so the pass disables and enables each again at
+   once. One it cannot control (a task registered from an elevated shell: Administrators own it) is not drained, said once
+   in the log, and rolled once the task is registered again from a normal shell.
    - **Drain:** `data/restart.request` with drain `auto`, as fff-update writes it on the VM: busy workers are asked to wrap up
      and the portal's own coordinators are waited for, for at most `drainMinutes` (30); after that it goes ahead and the
      sessions still busy are resumed after the restart (`resume.json`). Then a plain `restart.request`: stop now.
@@ -68,10 +71,9 @@ must run as the same user as the instances' tasks, not elevated.
 
 The stop disables the instance's tasks for the roll, so the updater's account must be able to change them. A task
 registered from an administrator shell belongs to the Administrators group and that account may only read it ("Access is
-denied"). Before it drains an instance, the updater enables each enabled task again (no change, the same write), and when
-that is refused it leaves the instance alone, says so once in its log, and rolls it once the task is fixed. Draining first
-had stopped the portal: the drain's plain restart.request ends it by itself (the Lens portal on BEAST, down from 22:34 to
-about 22:46 UTC on 2026-11-14, w14).
+denied"). Before it drains an instance the updater checks it can disable and enable its task (w4218), and when it cannot it
+leaves the instance running and says so once in its log; it rolls it once the task is fixed. (Draining first had stopped
+the Lens portal on BEAST from 22:34 to about 22:46 UTC on 2026-11-14.)
 
 The fix is one administrator step: give the task to its user, as `register-tasks.ps1` and `scripts/instance/new.ts` make
 them (owner the user, the user full control). From an administrator PowerShell:

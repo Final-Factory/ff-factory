@@ -82,8 +82,8 @@ export interface State {
   settings: Record<string, string[]>;
   /** Instances that run a commit the lead's does not contain (updated ahead by hand): `<theirs>><lead's>`, said once. */
   ahead?: Record<string, string>;
-  /** Instances whose tasks this account cannot change: why, said once. */
-  locked?: Record<string, string>;
+  /** Instances whose tasks this user cannot control (Resolved.control), with the reason: said once, retried each pass. */
+  blocked?: Record<string, string>;
 }
 
 /** What the updater does to the world: injected, so the tests drive it with fakes. */
@@ -98,8 +98,9 @@ export interface Deps {
   stop(i: Resolved): Promise<void>;
   /** Start the portal's task, and the daemon's with daemonInApp. */
   start(i: Resolved): void;
-  /** Why this account cannot change the instance's tasks (stop needs it), or undefined: asked before the drain. */
-  cannotChange?(i: Resolved): string | undefined;
+  /** Why this user cannot disable and enable the instance's task(s), or undefined when it can. Checked before the drain
+   *  (w4218): a portal told to stop whose task the roll then cannot disable stays stopped. */
+  control(i: Resolved): string | undefined;
   sleep(ms: number): Promise<void>;
   log(line: string): void;
 }
@@ -246,17 +247,16 @@ export async function tick(l: InstanceList, state: State, d: Deps, o: { dryRun?:
       res.skipped.push(i.name);
       continue;
     }
-    // Before the drain (w14): the drain's plain restart.request stops the portal by itself, so a task the stop then cannot
-    // disable left the portal down (the Lens portal on BEAST, 22:34 to about 22:46 UTC on 2026-11-14: its tasks were
-    // registered from an administrator shell, and this account may only read them).
-    const locked = d.cannotChange?.(i);
-    if (locked) {
-      if (state.locked?.[i.name] !== locked) d.log(`${i.name}: not touched: ${locked}`);
-      (state.locked ??= {})[i.name] = locked;
+    // Before the drain (w4218): on 2026-11-14 the Lens portal drained and stopped, then Disable-ScheduledTask was refused
+    // (its tasks were registered from an elevated shell: Administrators own them, the user may only read) and it stayed down.
+    const blocked = d.control(i);
+    if (blocked) {
+      if (state.blocked?.[i.name] !== blocked) d.log(`${i.name}: not touched: ${blocked}`);
+      (state.blocked ??= {})[i.name] = blocked;
       res.skipped.push(i.name);
       continue;
     }
-    if (state.locked?.[i.name]) delete state.locked[i.name];
+    if (state.blocked?.[i.name]) delete state.blocked[i.name];
     if (o.dryRun) {
       d.log(`${i.name}: would roll ${prev.slice(0, 9)} -> ${full.slice(0, 9)} (dry run)`);
       continue;
@@ -360,7 +360,7 @@ async function waitHealth(i: Resolved, sha: string, ms: number, d: Deps): Promis
 export function readState(file: string): State {
   try {
     const s = JSON.parse(stripBom(fs.readFileSync(file, 'utf8'))) as Partial<State>;
-    return { failed: s.failed ?? {}, last: s.last ?? {}, settings: s.settings ?? {}, ...(s.leader ? { leader: s.leader } : {}), ...(s.ahead ? { ahead: s.ahead } : {}), ...(s.locked ? { locked: s.locked } : {}) };
+    return { failed: s.failed ?? {}, last: s.last ?? {}, settings: s.settings ?? {}, ...(s.leader ? { leader: s.leader } : {}), ...(s.ahead ? { ahead: s.ahead } : {}), ...(s.blocked ? { blocked: s.blocked } : {}) };
   } catch {
     return { failed: {}, last: {}, settings: {} };
   }
@@ -431,24 +431,6 @@ function kill(pid: number) {
 // The instances' tasks restart a task that fails within a minute (register-tasks.ps1: RestartCount 999): a portal or
 // daemon this script ends would come back in the middle of npm ci. So their tasks are disabled for the roll and enabled
 // again to start. Portals are on Windows only so far (docs/instances.md); a Mac instance's LaunchAgent would need its own.
-/**
- * Why this account cannot change these tasks, or undefined. An enabled task is enabled again (no change, but the same
- * write the stop needs); a disabled one is left alone. A task registered from an administrator shell belongs to the
- * Administrators group and this account may only read it ("Access is denied").
- */
-function tasksLocked(names: string[]): string | undefined {
-  if (!isWin) return undefined;
-  for (const name of names) {
-    const q = name.replace(/'/g, "''");
-    const r = ps(`$t = Get-ScheduledTask -TaskName '${q}' -ErrorAction Stop; if ($t.State -ne 'Disabled') { $t | Enable-ScheduledTask -ErrorAction Stop | Out-Null }`);
-    if (r.code !== 0) {
-      const why = r.out.trim().split(/\r?\n/)[0] ?? '';
-      return `this account cannot change its task ${name} (${why}); a task registered from an administrator shell is the Administrators' (docs/instances.md, "Tasks the updater can change")`;
-    }
-  }
-  return undefined;
-}
-
 function task(name: string, verb: 'Disable' | 'Enable' | 'Start') {
   if (!isWin) throw new Error(`update-all runs instance portals on Windows only so far (${verb} ${name})`);
   const r = ps(`${verb}-ScheduledTask -TaskName '${name.replace(/'/g, "''")}' | Out-Null`);
@@ -486,7 +468,6 @@ export function realDeps(l: InstanceList, logFile: string): Deps {
         if (r.code !== 0) throw new Error(`${what} failed: ${r.out.trim().split('\n').slice(-3).join(' | ')}`);
       }
     },
-    cannotChange: (i) => tasksLocked([i.portalTask, ...(i.daemonInApp && i.daemonTask ? [i.daemonTask] : [])]),
     async stop(i) {
       const tasks = [i.portalTask, ...(i.daemonInApp && i.daemonTask ? [i.daemonTask] : [])];
       for (const t of tasks) task(t, 'Disable');
@@ -504,8 +485,34 @@ export function realDeps(l: InstanceList, logFile: string): Deps {
     },
     start(i) {
       const tasks = [i.portalTask, ...(i.daemonInApp && i.daemonTask ? [i.daemonTask] : [])];
-      for (const t of tasks) task(t, 'Enable');
-      for (const t of tasks) task(t, 'Start');
+      // Start even when Enable is refused: a task the roll could not disable is still enabled, and only Start brings the
+      // stopped portal back (w4218). A task that really is disabled fails its Start, which then names both.
+      for (const t of tasks) {
+        let enable = '';
+        try {
+          task(t, 'Enable');
+        } catch (e) {
+          enable = (e as Error).message;
+        }
+        try {
+          task(t, 'Start');
+        } catch (e) {
+          throw new Error(enable ? `${enable}; ${(e as Error).message}` : (e as Error).message);
+        }
+      }
+    },
+    control(i) {
+      if (!isWin) return `update-all runs instance portals on Windows only so far`;
+      for (const t of [i.portalTask, ...(i.daemonInApp && i.daemonTask ? [i.daemonTask] : [])]) {
+        // Disable and enable again at once: it stops nothing that runs, and it is the very call the roll needs.
+        const n = t.replace(/'/g, "''");
+        const r = ps(`$k = Get-ScheduledTask -TaskName '${n}' -ErrorAction Stop; if ($k.State -eq 'Disabled') { 'disabled'; exit 0 }; Disable-ScheduledTask -TaskName '${n}' -ErrorAction Stop | Out-Null; Enable-ScheduledTask -TaskName '${n}' -ErrorAction Stop | Out-Null`);
+        if (r.code !== 0) {
+          return `this user cannot disable its task ${t} (${r.out.trim().split(/\r?\n/)[0].trim()}); a task registered from an elevated shell is owned by Administrators: unregister it as administrator and register it again from a normal shell`;
+        }
+        if (r.out.trim() === 'disabled') return `its task ${t} is disabled; enable it to let it be rolled`;
+      }
+      return undefined;
     },
     sleep,
     log,
