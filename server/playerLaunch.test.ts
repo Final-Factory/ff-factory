@@ -1,7 +1,7 @@
 // w513: built players start only from a player slot (server/guard.ts checkPlayerLaunch).
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { checkPlayerLaunch } from './guard.ts';
+import { checkPlayerLaunch, checkScriptPlayerLaunch } from './guard.ts';
 
 test('a player started from a build, sandbox or temp folder is refused, with the slot launcher named', () => {
   for (const cmd of [
@@ -56,4 +56,49 @@ test("w1099: the nightly lab's old pair, slotnightly-0 and -1, is no slot any mo
   assert.match(checkPlayerLaunch('V:/ffw/players/slotnightly-1/player/finalfactory.exe -x') ?? '', /outside a player slot/);
   assert.match(checkPlayerLaunch('V:/ffw/players/slotnightly-0/player/finalfactory.exe', 'slot2') ?? '', /outside a player slot/);
   assert.equal(checkPlayerLaunch('V:/ffw/players/slot2-1/player/finalfactory.exe', 'slot2'), undefined);
+});
+
+test('w4167: a script handed a player outside a slot is refused unless it starts players through the slot pool', () => {
+  const files: Record<string, string> = {
+    'V:/ffw/tmp/ffa-1/run_legs.sh': '#!/bin/bash\n"$1" -ffSoloNewGame w1 -screen-width 1920 &\n',
+    'V:/ffw/sandboxes/slot2/specs/w4155-x/run_legs.sh': 'python scripts/nightly/player_slots.py launch --detach "$APP" -- -x\n',
+    'V:/ffw/sandboxes/slot2/specs/w1/leg.sh': 'source scripts/nightly/player_launch.sh\n"${FF_LAUNCH[@]}" "$1" -- -x\n',
+    'V:/ffw/tmp/ffa-1/tour.py': 'import subprocess, sys\nsubprocess.Popen([sys.argv[1], "-x"])\n',
+    'V:/ffw/tmp/ffa-1/tour.ps1': '& $args[0] -x\n',
+    // run_w2183_suture_clips.py starts players through a helper it imports, which goes through the slots.
+    'V:/ffw/sandboxes/slot2/scripts/feel/clips.py': 'import os\nfrom ship_clips import start\nstart(a.player)\n',
+    'V:/ffw/sandboxes/slot2/scripts/feel/ship_clips.py': 'import player_slots\n',
+  };
+  const read = (p: string) => files[p.replace(/\\/g, '/')];
+  const env = { TMPDIR: 'V:/ffw/tmp/ffa-1' };
+  const cwd = 'V:/ffw/sandboxes/slot2';
+  const exe = 'V:/ffw/tmp/ffa-1/builds/abc-win/player/finalfactory.exe';
+  for (const cmd of [
+    `bash "$TMPDIR/run_legs.sh" ${exe}`,
+    `bash $TMPDIR/run_legs.sh "$TMPDIR/builds/abc-win/player/finalfactory.exe" 1920`,
+    `cd x && sh V:/ffw/tmp/ffa-1/run_legs.sh V:\\ffw\\tmp\\ffa-1\\builds\\abc-win\\player\\finalfactory.exe`,
+    `python3 $TMPDIR/tour.py --player=${exe}`,
+    `timeout 600 python $TMPDIR/tour.py V:/ffw/tmp/ffa-1/builds/abc-win/player`,
+    `powershell -NoProfile -ExecutionPolicy Bypass -File $TMPDIR/tour.ps1 ${exe}`,
+    `FOO=1 bash "$TMPDIR/run_legs.sh" V:/ffw/tmp/ffa-1/builds/abc-win`,
+  ]) {
+    const why = checkScriptPlayerLaunch(cmd, cwd, env, read);
+    assert.match(why ?? '', /outside a player slot.*player_slots\.py launch/s, cmd);
+  }
+  for (const cmd of [
+    // Scripts that start players through the slot pool: handing them a build is the normal path.
+    `bash specs/w4155-x/run_legs.sh ${exe} V:/ffw/tmp/ffa-1/builds/def-win/player/finalfactory.exe`,
+    `bash specs/w1/leg.sh ${exe}`,
+    `python scripts/feel/clips.py --player ${exe}`,
+    // A slot's own player, no player at all, a script that cannot be read, or no script file.
+    `bash $TMPDIR/run_legs.sh V:/ffw/players/slot2-0/player/finalfactory.exe`,
+    'bash $TMPDIR/run_legs.sh 1920',
+    `bash $TMPDIR/missing.sh ${exe}`,
+    `bash $(make_path) ${exe}`,
+    `python -c "print(1)" ${exe}`,
+    `cp -r V:/ffw/tmp/ffa-1/builds/abc-win/player V:/ffw/tmp/ffa-1/keep`,
+    `ls ${exe}`,
+  ]) {
+    assert.equal(checkScriptPlayerLaunch(cmd, cwd, env, read), undefined, cmd);
+  }
 });
