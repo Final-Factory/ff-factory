@@ -102,3 +102,38 @@ test('w4167: a script handed a player outside a slot is refused unless it starts
     assert.equal(checkScriptPlayerLaunch(cmd, cwd, env, read), undefined, cmd);
   }
 });
+
+test('w4169: timeout, a subshell, cmd //c, a variable and inline code do not hide a player outside a slot', () => {
+  // The paths LothDesktop's firewall log named on 2026-11-13 (two prompts, both answered Block).
+  const exe = 'V:/ffw/tmp/ffa-b770969a/builds/07b0492f06-win/player/finalfactory.exe';
+  const dir = 'V:/ffw/tmp/ffa-b770969a/builds/07b0492f06-win/player';
+  for (const cmd of [
+    `timeout -s TERM 600 "${exe}" -ffDeckTour t.json`,
+    `timeout --kill-after=10 300 ${exe} -x`,
+    `timeout 600 ${exe}`,
+    `(cd ${dir} && ./finalfactory -x)`,
+    `cd "${dir}" && ./finalfactory -screen-width 1280 &`,
+    `cmd //c start "" "${exe}" -x`,
+    `P="${exe}"; "$P" -x`,
+    `export EXE=${exe} && timeout -s TERM 60 $EXE -x`,
+    `$p = "${exe}"; & $p -x`,
+    `python -c "import subprocess; subprocess.Popen(['${exe}'])"`,
+    `python - <<'PY'\nimport subprocess\nsubprocess.Popen([r"${exe.replace(/\//g, '\\')}", "-x"])\nPY`,
+    `powershell -NoProfile -Command "Start-Process '${exe}'"`,
+  ]) {
+    assert.match(checkPlayerLaunch(cmd) ?? '', /outside a player slot.*player_slots\.py launch/s, cmd);
+  }
+  for (const cmd of [
+    `timeout -s TERM 600 V:/ffw/players/slot2-0/player/finalfactory.exe -x`,
+    `(cd V:/ffw/players/slot2-1/player && ./finalfactory -x)`,
+    `timeout 900 python scripts/nightly/player_slots.py launch ${exe} -- -x`,
+    `P=${exe}; cp "$P" ${'$'}TMPDIR/keep/`,
+    `python -c "print('${exe}')"`,
+    `python - <<'PY'\nimport subprocess\nsubprocess.run(['python', 'scripts/nightly/player_slots.py', 'launch', '${exe}'])\nPY`,
+    `git commit -m "$(cat <<'EOF'\nsubprocess.Popen used to start ${exe}\nEOF\n)"`,
+    `grep -n subprocess scripts/x.py && ls ${dir}/finalfactory.exe`,
+    `timeout 5 ls ${dir}`,
+  ]) {
+    assert.equal(checkPlayerLaunch(cmd, 'slot2'), undefined, cmd);
+  }
+});
