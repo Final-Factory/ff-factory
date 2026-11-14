@@ -3,18 +3,19 @@
 Ben, 2026-11-14: "add some security measures to prevent people from snooping in people's computers or invading anyone
 privacy. this should apply to all factories".
 
-`config.privacyGuards` turns both guards below on or off. Unset, they are on for every factory but Final Factory, whose
+## What a member does on the portal
+
+shared/actAccess.ts, docs/identity.md "What a member acts on". Ben, 2026-11-14: "you can see the other persons transcripts
+you just cant interact with it". Everyone signed in reads every session, transcript, request and file. A member changes
+only their own orchestrator and the workers of the requests they are on: a message, a rename, a delete, a stop or an
+answer to anyone else's answers 403. This is on in every factory, Final Factory included, and no setting turns it off.
+
+`config.privacyGuards` turns the worker guard below on or off. Unset, it is on for every factory but Final Factory, whose
 owners decide (`privacyGuardsOn`, server/config.ts).
 
 An owner's orchestrator changes it on a running portal with set_app_config `privacyGuards` (true, false, or null for the
-default). The old config.json is kept as config.json.prev, and the change applies at once: the portal's reads at once, and
-new workers from their next launch.
-
-## What a member reads on the portal
-
-server/readAccess.ts, docs/identity.md "What a member reads". An owner reads everything. A member reads their own
-orchestrator and the workers, reports, attachments and review media of the requests they are on. The routes that change a
-session take the same check.
+default). The old config.json is kept as config.json.prev, and the change applies at once: new workers take it from their
+next launch.
 
 ## What a worker may do on a computer
 

@@ -577,7 +577,7 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       if (value === undefined || value === null) return undefined;
       if (value === true || value === 'true') return true;
       if (value === false || value === 'false') return false;
-      throw new Error("privacyGuards is true (members read only their own work, workers get the privacy guard: docs/privacy.md), false, or null for the default (on for every factory but Final Factory)");
+      throw new Error("privacyGuards is true (workers get the privacy guard: no whole-desktop capture, no person's own files, no remote access; docs/privacy.md), false, or null for the default (on for every factory but Final Factory)");
     }
     case 'usagePollMinutes': {
       const n = Number(value);

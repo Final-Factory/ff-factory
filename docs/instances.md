@@ -23,7 +23,8 @@ node scripts/instance/update-all.ts --list F:/ffw/instances/instances.json
    an older commit (one from before the updater existed, or a rollback) leaves the updater where it is, so a pass never takes
    away the script the next pass runs.
 3. **Then one instance at a time,** in the list's order (put the one you lean on most last), each whose `/api/health` reports
-   another commit:
+   another commit. Forward only here too: an instance someone updated ahead of the lead by hand (its commit is not in the
+   lead's history) is left on its newer commit, said once in the log, and followed again once the lead passes it.
    - **Drain:** `data/restart.request` with drain `auto`, as fff-update writes it on the VM: busy workers are asked to wrap up
      and the portal's own coordinators are waited for, for at most `drainMinutes` (30); after that it goes ahead and the
      sessions still busy are resumed after the restart (`resume.json`). Then a plain `restart.request`: stop now.

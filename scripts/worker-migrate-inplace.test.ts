@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { cleanup, daemonProcs, discoverOld, plan, rehome, rollback, samePlace, type Proc } from './worker/migrate.ts';
+import { cleanup, daemonProcs, discoverOld, plan, rehome, rollback, samePlace, setAsideInstallRecord, stopByConfigScript, type Proc } from './worker/migrate.ts';
 import { layoutOf, preflightProblems, rootState, type Facts } from './worker/worker.ts';
 
 const TOKEN = `ffm_beast_${'A'.repeat(43)}`;
@@ -74,11 +74,32 @@ test('w14 in place: the plan renames and copies no sandbox, only rehomes it, and
     assert.ok(i && i.method === 'copy' && i.to!.startsWith(l.daemon), `${what} copied into the root's daemon folder`);
   }
   assert.equal(items.find((i) => i.what.startsWith('the machine credential'))!.from, path.resolve(h.config));
-  for (const what of ['the old clone', 'the old daemon folder', 'the old temp folder', 'the Claude Code folder', 'the old service']) assert.equal(items.find((i) => i.what === what)?.method, 'leave', what);
+  for (const what of ['the old clone', 'the old daemon folder', 'the old temp folder', 'the Claude Code folder', 'the old service', 'the firewall rules']) assert.equal(items.find((i) => i.what === what)?.method, 'leave', what);
   // A normal migration's plan is as it was: none of the in-place items.
   const normal = plan({ ...old, inPlace: undefined, configFile: undefined }, layoutOf(path.join(base, 'other-root')), { claudeDir: path.join(base, 'c'), measure: false });
   assert.ok(!normal.some((i) => i.what === 'daemon state published.jsonl' || i.what === 'the old service'));
 }));
+
+test('w14 in place: a rollback sets root.json aside, so the old daemon offers no updates for the removed install', withBase((base) => {
+  const root = path.join(base, 'worker');
+  fs.mkdirSync(root, { recursive: true });
+  assert.equal(setAsideInstallRecord(root), false, 'nothing there: nothing done');
+  fs.writeFileSync(path.join(root, 'root.json'), '{"service":"FFFactoryDaemon-light-tree"}');
+  assert.equal(setAsideInstallRecord(root), true);
+  assert.ok(!fs.existsSync(path.join(root, 'root.json')));
+  assert.equal(fs.readFileSync(path.join(root, 'root.json.rolled-back'), 'utf8'), '{"service":"FFFactoryDaemon-light-tree"}', 'kept, not deleted');
+}));
+
+test('w14 in place: the Windows stop with no old daemon running only disables its task (a rollback after a failed install)', () => {
+  const none = stopByConfigScript('fflighttree-daemon', []);
+  assert.match(none, /Disable-ScheduledTask/);
+  assert.match(none, /'killed=0'/);
+  assert.doesNotMatch(none, /Stop-Process|Get-FFKillSet|\$marks/, 'no kill set from an empty array');
+  const one = stopByConfigScript('fflighttree-daemon', ['node machine/daemon.ts F:/ffw/ben-factory/daemon.json']);
+  assert.match(one, /Get-FFKillSet \$all \$marks/);
+  assert.match(one, /\$marks = @\('node machine\/daemon\.ts F:\/ffw\/ben-factory\/daemon\.json'\)/);
+  assert.match(one, /'killed=' \+ \$kill\.Count/);
+});
 
 test('w14 in place: samePlace follows each platform\'s rules', () => {
   assert.equal(samePlace(path.win32.join('F:', 'ffw', 'lens', 'worker', 'sandboxes', 'slot1'), 'f:/FFW/lens/worker/sandboxes/slot1/', 'win32'), true);
