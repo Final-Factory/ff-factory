@@ -181,6 +181,12 @@ my default pool for another operator (ben) and then all my billing goes there, o
   a message of their own. The server refuses, nothing written, an unknown login or a person with no Claude pool (`withPool`,
   `Vault.hasClaudeFor`); each change is logged (`pool setting (w1717): lothsahn's work now runs on ben's pool (was their own),
   set by …`). No person is a special case: lothsahn may pick Ben's pool and Ben lothsahn's.
+- **A member with no Claude token of their own** (Lens Scout factory's w13, 2026-11-14): their orchestrator cannot start
+  (`noTokenWhy`, w1078: the first message is refused, "Not sent", and put back in the box) until their work bills to
+  someone's pool. They can pick it themselves in Settings, but a person on their first sign-in does not know to, so an
+  owner's orchestrator sets it for them in advance: `set_pool` with `person` (`{ person: "cassidy", pool: "ben" }`), in a
+  turn the owner started, checked by the same `withPool`. A member's orchestrator naming another person is refused. The
+  refusal's text names both routes.
 - **What it moves: all of the person's Claude billing.** Their orchestrator and the ops worker's jobs for them
   (`poolRunEnv`, `server/secrets.ts`), and the dispatcher when it is pinned to no token of its own and runs on the system payer's
   pool (it follows the payer's setting; a dispatcher pinned with `claudeAccounts.dispatcher` stays on its pinned token). And every
