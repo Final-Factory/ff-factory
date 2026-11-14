@@ -535,6 +535,34 @@ test("the pool setting is checked on the server (w1717): a login that exists, a 
   assert.deepEqual(store.settings.pool, {});
 });
 
+test("an owner's orchestrator sets a member's pool (w13): a member with no Claude token gets an orchestrator only once their work bills to a pool", async (t) => {
+  const CASS: Requester = { userId: 'cassidy', displayName: 'Cassidy' };
+  PEOPLE.push({ ...CASS, role: 'member' });
+  t.after(() => void PEOPLE.splice(PEOPLE.findIndex((p) => p.userId === CASS.userId), 1));
+  const { call, human, agents, store } = setup(t);
+  agents.hasPool = (u) => u === 'ben';
+  // Ben's orchestrator, in his own turn, bills Cassidy's work to Ben's pool; Ben's own stays his.
+  const set = await call(human(BEN).info, 'set_pool', { pool: 'ben', person: 'Cassidy' });
+  assert.equal(set.isError, false, set.text);
+  assert.match(set.text, /^cassidy's work runs on ben's Claude pool/);
+  assert.equal(agents.poolOf('cassidy'), 'ben');
+  assert.equal(agents.poolOf('ben'), 'ben');
+  // only in a turn Ben started
+  const quiet = await call(human(BEN, 'system').info, 'set_pool', { pool: 'self', person: 'cassidy' });
+  assert.equal(quiet.isError, true);
+  assert.equal(agents.poolOf('cassidy'), 'ben');
+  // a member's orchestrator sets only its own person's
+  const other = await call(human(CASS).info, 'set_pool', { pool: 'ben', person: 'lothsahn' });
+  assert.equal(other.isError, true);
+  assert.match(other.text, /only an owner's orchestrator sets another person's pool/);
+  assert.equal(agents.poolOf('lothsahn'), 'lothsahn');
+  assert.equal((await call(human(CASS).info, 'set_pool', { pool: 'ben', person: 'cassidy' })).isError, false, 'naming themselves is their own');
+  // a login that does not exist, or a pool nobody can bill to, is refused as before
+  assert.equal((await call(human(BEN).info, 'set_pool', { pool: 'ben', person: 'sam' })).isError, true);
+  assert.equal((await call(human(BEN).info, 'set_pool', { pool: 'lothsahn', person: 'cassidy' })).isError, true);
+  assert.deepEqual(store.settings.pool, { cassidy: 'ben' });
+});
+
 test("a picked pool reaches the process (w1717): its Claude token, the person's own GitHub token, and the picked pool's own limits", (t) => {
   const { v } = vaultOf(t);
   v.add({ name: 'vault-lothsahn-github', kind: 'github', value: `github_pat_${'l'.repeat(60)}`, owner: 'lothsahn', share: 'owner' });

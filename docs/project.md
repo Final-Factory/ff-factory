@@ -40,6 +40,9 @@ places ("a game player left running", "a Steam branch"), and `read_rules` topics
 
 ## A second portal on machines that already run one (w3714)
 
+Once it runs, add it to its computer's instance list: every merge Final Factory's portal verifies then reaches it and its
+daemons with no hand step (docs/instances.md, w14).
+
 What standing up Ben's Light Tree portal on BEAST, m5, m3 and biscuit beside the live one took (2026-11-08, measured):
 
 - **Its own everything.** Its own port, `dataDir`, base clone, vault key, scheduled tasks or LaunchAgents with their own

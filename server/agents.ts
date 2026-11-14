@@ -6327,15 +6327,24 @@ ${w.repo ?? ''}
         tool(
           'set_pool',
           "Choose whose Claude token pool all of your person's work runs on (w1717, docs/vault.md section 4, \"Picking another person's pool\"): `self` (the default, their own) or another operator's user id (e.g. \"ben\"); the same as their Settings, \"Claude pool\". It moves all of their Claude billing: their workers and standing agents (new requests, and those they take over by acting on them), you, their orchestrator, and the ops worker's jobs for you. The picked pool keeps its own limits: workers wait while it is held, never on their own pool; you and the ops worker use it past its caps as on their own. Their GitHub token stays their own. A live idle worker, and you, restart on the new pool at the next message. Only when your person asks for it, in their own words.",
-          { pool: z.string().describe('"self", or the user id whose pool to use (an operator with a Claude token in the vault).') },
-          wrap(async ({ pool }) => {
+          {
+            pool: z.string().describe('"self", or the user id whose pool to use (an operator with a Claude token in the vault).'),
+            person: z.string().optional().describe("An owner's orchestrator only (w13): another login whose pool to set, e.g. a member with no Claude token of their own, whose orchestrator cannot start until their work bills to someone's pool. Default: your person."),
+          },
+          wrap(async ({ pool, person }) => {
             if (ctx.role === 'personal') {
               const caller = ctx.sessionId ? this.store.sessions.get(ctx.sessionId) : undefined;
               if (caller && !this.personTurn(caller.id)) throw new Error(`the pool setting changes only in a turn ${ctx.owner?.displayName ?? 'your person'} started with a message of their own; ask them`);
             }
             const by = ctx.owner ?? actor();
-            const now = this.setPool(by.userId, pool, `${by.displayName}'s orchestrator`);
-            return `${by.userId}'s work runs on ${isSamePerson(now, by.userId) ? 'their own Claude pool (self)' : `${now}'s Claude pool`} from each process's next start (this orchestrator's at the next message after this turn).`;
+            // An owner may set another login's (w13): a member with no Claude token of their own gets no orchestrator until an
+            // owner bills their work to a pool, and the Settings row sets only the signed-in person's own.
+            const other = person?.trim() && !isSamePerson(person.trim(), by.userId) ? person.trim() : undefined;
+            if (other && this.identity.get(by.userId)?.role !== 'owner') throw new Error(`only an owner's orchestrator sets another person's pool; ${other} sets their own in Settings, "Claude pool"`);
+            const who = other ?? by.userId;
+            const now = this.setPool(who, pool, `${by.displayName}'s orchestrator`);
+            const whose = this.identity.list().find((u) => isSamePerson(u.userId, who))?.userId ?? who;
+            return `${whose}'s work runs on ${isSamePerson(now, whose) ? 'their own Claude pool (self)' : `${now}'s Claude pool`} from each process's next start (${other ? 'their orchestrator' : 'this orchestrator'}'s at the next message after this turn).`;
           }),
         ),
         tool(
