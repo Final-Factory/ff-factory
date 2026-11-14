@@ -74,10 +74,14 @@ What standing up Ben's Light Tree portal on BEAST, m5, m3 and biscuit beside the
 - **`Stop-ScheduledTask` leaves the portal's or daemon's `node` running** (w4038, measured): the task ends its shell
   wrapper, not the node it started, so a restart that starts the task again gets a second daemon beside the orphan. End
   that instance's `start-*.sh` and `node` by command line (its own folder in the path) before `Start-ScheduledTask`.
-- **Copy the installer from the instance that runs, not from a transcript** (w4038): Light Tree's macOS daemon installer
-  was edited four times after its first draft, and a copy rebuilt from the first draft failed on m5 and m3. Take the
-  scripts from the running instance's folder (`F:/ffw/lens-factory/` holds `register-tasks.ps1`, `start-portal.sh`,
-  `start-daemon.sh` and `daemon.json` for the third, Lens Scout's, on port 8892).
+- **A new instance is one command, `scripts/instance/new.ts`** (w14): `node scripts/instance/new.ts --name <slug>
+  --project "<Project Name>" --repo <git url> --port <n> --dir <folder> [--machines a,b] [--owner] [--payer]
+  [--public-url] [--dry-run]` refuses a taken name, port or folder, clones and builds ff-factory into `<dir>/app`, writes
+  the vault key, `config.json` (checked by the portal's own `loadConfig`) and placeholder briefs, writes and registers the
+  logon task (Windows) or LaunchAgent (macOS), waits for `/api/health`, adds the instance to the list
+  (docs/instances.md), and prints what needs the owner: the first login (`server/user.ts`), the vault tokens, and per
+  machine its record, credential and `--instance` install line. `--dry-run` prints it all and changes nothing. The
+  script is the one source now: copies rebuilt from Light Tree's first-draft scripts failed on m5 and m3 (w4038).
 
 ## The product's name: Ryding Factory, and FF Factory on Final Factory's install
 

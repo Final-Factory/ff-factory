@@ -62,3 +62,8 @@ public `/api/health`. The VM's machines' daemons are updated by the VM's portal 
 Add it to the list. Its folder holds `config.json`; `app` (its checkout, a full clone: the machine rollout bundles from it)
 is `<dir>/app` unless `app` says otherwise; `portalTask` is its logon task. Portals are on Windows only so far. The updater
 must run as the same user as the instances' tasks, not elevated.
+
+## A new instance
+
+`node scripts/instance/new.ts` makes one, adds it to the list and prints what is left for the owner (docs/project.md,
+"A new instance is one command"). Try it with `--dry-run` first.

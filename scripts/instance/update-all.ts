@@ -108,6 +108,8 @@ export interface Resolved extends Instance {
 
 export const DEFAULTS = { stableMinutes: 5, drainMinutes: 30, healthMinutes: 6, branch: 'main' };
 const SHA = /^[0-9a-f]{7,40}$/;
+/** An instance name: lower case letters, digits and -, as the list takes it (scripts/instance/new.ts makes them). */
+export const INSTANCE_NAME = /^[a-z0-9][a-z0-9-]{0,40}$/;
 
 export function readList(file: string): InstanceList {
   const l = JSON.parse(stripBom(fs.readFileSync(file, 'utf8'))) as InstanceList;
@@ -122,7 +124,7 @@ export function listProblem(l: InstanceList): string | undefined {
   if (!Array.isArray(l.instances)) return 'instances must be a list';
   const names = new Set<string>();
   for (const i of l.instances) {
-    if (!/^[a-z0-9][a-z0-9-]{0,40}$/.test(i?.name ?? '')) return `instance name ${JSON.stringify(i?.name)}: lower case letters, digits and -`;
+    if (!INSTANCE_NAME.test(i?.name ?? '')) return `instance name ${JSON.stringify(i?.name)}: lower case letters, digits and -`;
     if (names.has(i.name)) return `instance ${i.name} is listed twice`;
     names.add(i.name);
     if (!i.dir) return `instance ${i.name}: dir is missing`;
