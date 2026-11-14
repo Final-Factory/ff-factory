@@ -1092,7 +1092,8 @@ refuses in place. Settings the old start script set (e.g. `FF_CLI_SCRUB`) carry 
 It adds no firewall rules and so asks no administrator prompt: it runs unattended, and a prompt nobody answers held the
 first run on BEAST with the old daemon stopped (2026-11-14). The hand-made daemon had none; an instance whose players need
 them adds them with an update from an interactive PowerShell.
-**Undo:** `migrate --root <inst>/worker --rollback` stops and removes the new service, restores each `.git`, and
+**Undo:** `migrate --root <inst>/worker --rollback` stops and removes the new service, restores each `.git`, sets
+`root.json` aside as `root.json.rolled-back` (else the old daemon offers updates for the removed install), and
 re-registers and starts the old service. Never `uninstall` that root: it holds the old daemon's clone and sandboxes.
 
 ## Uninstall

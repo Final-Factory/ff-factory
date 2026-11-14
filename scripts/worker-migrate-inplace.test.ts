@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { cleanup, daemonProcs, discoverOld, plan, rehome, rollback, samePlace, stopByConfigScript, type Proc } from './worker/migrate.ts';
+import { cleanup, daemonProcs, discoverOld, plan, rehome, rollback, samePlace, setAsideInstallRecord, stopByConfigScript, type Proc } from './worker/migrate.ts';
 import { layoutOf, preflightProblems, rootState, type Facts } from './worker/worker.ts';
 
 const TOKEN = `ffm_beast_${'A'.repeat(43)}`;
@@ -78,6 +78,16 @@ test('w14 in place: the plan renames and copies no sandbox, only rehomes it, and
   // A normal migration's plan is as it was: none of the in-place items.
   const normal = plan({ ...old, inPlace: undefined, configFile: undefined }, layoutOf(path.join(base, 'other-root')), { claudeDir: path.join(base, 'c'), measure: false });
   assert.ok(!normal.some((i) => i.what === 'daemon state published.jsonl' || i.what === 'the old service'));
+}));
+
+test('w14 in place: a rollback sets root.json aside, so the old daemon offers no updates for the removed install', withBase((base) => {
+  const root = path.join(base, 'worker');
+  fs.mkdirSync(root, { recursive: true });
+  assert.equal(setAsideInstallRecord(root), false, 'nothing there: nothing done');
+  fs.writeFileSync(path.join(root, 'root.json'), '{"service":"FFFactoryDaemon-light-tree"}');
+  assert.equal(setAsideInstallRecord(root), true);
+  assert.ok(!fs.existsSync(path.join(root, 'root.json')));
+  assert.equal(fs.readFileSync(path.join(root, 'root.json.rolled-back'), 'utf8'), '{"service":"FFFactoryDaemon-light-tree"}', 'kept, not deleted');
 }));
 
 test('w14 in place: the Windows stop with no old daemon running only disables its task (a rollback after a failed install)', () => {

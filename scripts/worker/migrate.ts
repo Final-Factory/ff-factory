@@ -760,6 +760,14 @@ export async function migrate(o: MigrateOptions) {
   }
 }
 
+/** An in-place rollback's root.json goes aside as root.json.rolled-back (kept, not deleted); returns whether one was there. */
+export function setAsideInstallRecord(root: string): boolean {
+  const file = path.join(root, 'root.json');
+  if (!fs.existsSync(file)) return false;
+  fs.renameSync(file, `${file}.rolled-back`);
+  return true;
+}
+
 export async function rollback(root: string) {
   const l = layoutOf(path.resolve(root));
   const j = readJournal(l);
@@ -769,6 +777,9 @@ export async function rollback(root: string) {
   if (m && isWin) await win.psScript(win.LOCAL, win.uninstallScript(l.daemon, { task: m.service, only: true }), { timeoutMs: 3 * 60_000 });
   // In place on a Mac the root's LaunchAgent has its own label: it goes too, or it runs beside the old one.
   else if (m && j.config) await exec('bash', ['-c', macControlScript('uninstall', m.service, l.daemon)]);
+  // In place the old daemon reads this root's root.json too: left there, it offers updates over its link, and the portal's
+  // next rollout would run the installer's update for the removed service (BEAST 2026-11-14, w14). It goes aside, kept.
+  if (j.config) setAsideInstallRecord(l.root);
   for (const mv of [...j.moved].reverse()) {
     // The one-time script reimport the move armed is not the old place's: it goes (the old clone does not exclude it).
     if (mv.armedReimport) fs.rmSync(path.join(mv.to, 'Assets', '__FFFactoryReimport'), { recursive: true, force: true });
