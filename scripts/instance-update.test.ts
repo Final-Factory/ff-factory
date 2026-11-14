@@ -10,7 +10,7 @@ const B = 'b'.repeat(40);
 const LEAD = 'https://lead.test';
 
 /** A computer with instances: each portal answers its commit on its port; git moves HEAD; the portal drains on request. */
-function world(names: string[], o: { headOf?: Record<string, string>; failBuild?: (sha: string) => boolean; noHealth?: Set<string>; onMain?: boolean; ahead?: Set<string> } = {}) {
+function world(names: string[], o: { headOf?: Record<string, string>; failBuild?: (sha: string) => boolean; noHealth?: Set<string>; onMain?: boolean; ahead?: Set<string>; locked?: Record<string, string> } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'w14-'));
   const port: Record<string, number> = {};
   const head: Record<string, string> = {};
@@ -65,6 +65,7 @@ function world(names: string[], o: { headOf?: Record<string, string>; failBuild?
       calls.push(`${i.name}: start`);
       up[i.name] = true;
     },
+    cannotChange: (i) => o.locked?.[i.name],
     async sleep(ms) {
       now += ms;
       // The portal: a drain request is answered by drain.done.
@@ -209,6 +210,22 @@ test('w14: an instance updated ahead of the lead by hand is not rolled back, and
   w.advance(5);
   await tick(w.list, s, w.d);
   assert.equal(w.log.filter((l) => l.includes('lens: it runs ccccccccc') && l.includes('not rolled back')).length, 1, w.log.join(' | '));
+});
+
+test('w14: an instance whose tasks this account cannot change is not drained (that stopped its portal), and that is said once', async () => {
+  const w = world(['demo', 'lens'], { locked: { lens: 'this account cannot change its task lens-portal (Access is denied.)' } });
+  const s = readState(path.join(w.root, 'none.json'));
+  await tick(w.list, s, w.d);
+  w.advance(6);
+  const r = await tick(w.list, s, w.d);
+  assert.deepEqual(r.rolled, ['demo']);
+  assert.deepEqual(r.skipped, ['lens']);
+  assert.equal(r.failed, undefined, 'not a failed commit: it is rolled once the task is fixed');
+  assert.ok(!fs.existsSync(path.join(w.root, 'lens', 'data', 'restart.request')), 'no drain asked of it');
+  assert.ok(!w.calls.some((c) => /^lens: (stop|start|build|git checkout)/.test(c)), w.calls.join(' | '));
+  w.advance(5);
+  await tick(w.list, s, w.d);
+  assert.equal(w.log.filter((l) => l.includes('lens: not touched') && l.includes('Access is denied')).length, 1, w.log.join(' | '));
 });
 
 test('roll: a dry run says what it would do and does nothing', async () => {

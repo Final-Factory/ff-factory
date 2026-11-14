@@ -1,0 +1,1 @@
+- The instance updater checks it can change an instance's tasks before it drains it: a task registered from an administrator shell had left the Lens portal on BEAST stopped for about 12 minutes; such an instance is now left running and named once in the log (w14).
