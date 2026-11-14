@@ -1034,6 +1034,37 @@ them, and the slot config is `~/.config/finalfactory/player-slots.json`, as on a
 old Unity editors leaves Linux editors alone. `add_machine` without `worker_install` refuses a Linux PC (the portal
 never deploys one over ssh), and `migrate` refuses on Linux: there is no older layout to move.
 
+## A second instance's daemon (w14)
+
+A computer that works for two portals (Final Factory's and a project's own, docs/project.md) runs one daemon per portal.
+The second is a real install into its own root, so that it takes updates over its link from its own portal like any
+other (`self_update`, "Updates over the daemon's link" above) and its workers run in agent hosts that outlive a daemon
+update. Before w14 such daemons were started by hand from the portal's own checkout and stayed on that commit.
+
+```
+# Windows (as the user, not elevated)
+powershell -File scripts/worker/install.ps1 -Root F:/ffw/lens-factory/root -PortalUrl http://127.0.0.1:8892 -Instance lens `
+  -RepoUrl https://github.com/<owner>/<repo>.git -MaxUnity 0 -NoFirewall -CredentialFile <file with the machine credential>
+# macOS
+bash scripts/worker/install.sh --root ~/lens-factory/root --portal-url http://<portal>:8892 --instance lens \
+  --repo-url https://github.com/<owner>/<repo>.git --max-unity 0 --credential-file <file>
+```
+
+`--instance <name>` (`-Instance`) fills in what the command line leaves unset (`instanceOptions`, scripts/worker/worker.ts):
+
+- **Its own service:** `FFFactoryDaemon-<name>` or `com.fffactory.daemon.<name>`, so the main install's check
+  (`serviceElsewhere`) does not refuse it and an update restarts this daemon, not the main one. `--service` names another.
+- **Its own firewall groups** (`--firewall-suffix`, default the name) and **Unity slots mailbox** (`<root>/unity-slots`).
+- **Cleans nothing outside itself:** no clean-up passes, no leftover reaper and no tray (as `--no-cleanup`). The
+  computer's main install does those, and its reaper spares this root's workers (`sameRoot`, machine/leftovers.ts).
+- **No ssh set-up** (`--no-ssh`): the main install already set ssh up, and the portal reaches this daemon over its link.
+- **Its own Claude Code folder** for its agents: daemon.json `env` sets `CLAUDE_CONFIG_DIR` (default `<root>/claude`,
+  `--claude-config-dir` names another, e.g. the folder a hand-made daemon used, to keep its transcripts). The daemon sets
+  `env` on itself at start; `tools` publishes the plugins there.
+
+root.json records `instance`; an update keeps it, the service, the suffix and daemon.json's `env`. The machine needs a
+record on that portal first (`POST /api/machines/join`, docs/project.md); its credential is that record's.
+
 ## Uninstall
 
 ```powershell
