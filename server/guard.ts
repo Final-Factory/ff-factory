@@ -222,6 +222,7 @@ export function sandboxGuard(opts: {
         (opts.editorRunning?.() ? checkEditorSwitch(cmd, input.cwd || opts.sandboxPath, opts.sandboxPath, opts.env) : undefined) ??
         checkReleaseBranchCommit(cmd, input.cwd || opts.sandboxPath, opts.sandboxPath, repoBranch, opts.env) ??
         checkPlayerLaunch(cmd, opts.sandboxId) ??
+        checkScriptPlayerLaunch(cmd, input.cwd || opts.sandboxPath, opts.env) ??
         // w2015: no CI check read the vault token cannot make, no wait that only sleeps (server/waitGuard.ts).
         checkChecksRead(cmd) ??
         flakyRerun ??
@@ -326,9 +327,28 @@ const PLAYER_BINARY = /(?:^|[\\/])finalfactory(?:\.exe|\.x86_64|\.app(?:[\\/]con
  * pool, <slot root>/slotK-P/player/... on a worker root install, where sandbox slotK owns slotK-0 and slotK-1 (w576).
  * The nightly lab's slotnightly-0 and -1 are gone (w1099: the nightly run plays from its sandbox's pair).
  */
-const SLOT_PLAYER = /[\\/]slot(\d+)(?:-([01]))?[\\/]player[\\/]finalfactory(?:\.exe|\.x86_64|\.app)(?:[\\/]|$)/i;
+const SLOT_PLAYER = /[\\/]slot(\d+)(?:-([01]))?[\\/]player[\\/]finalfactory(?:\.exe|\.x86_64|\.app)?(?:[\\/]|$)/i;
 /** Words that start the next word as a program: a call operator, a launcher, or an environment prefix. */
-const LAUNCHERS = new Set(['&', '.', 'exec', 'nohup', 'time', 'env', 'start', 'start-process', 'saps', 'open', 'invoke-item', 'ii', 'cmd', 'cmd.exe', '/c', '/k']);
+const LAUNCHERS = new Set(['&', '.', 'exec', 'nohup', 'time', 'env', 'start', 'start-process', 'saps', 'open', 'invoke-item', 'ii', 'cmd', 'cmd.exe', '/c', '/k', '//c', '//k', 'nice', 'setsid', 'stdbuf']);
+/** w4169: Git Bash runs finalfactory.exe as `<dir>/finalfactory`, with no extension. */
+const PLAYER_NO_EXT = /[\\/]finalfactory$/i;
+/** w4169: `timeout` options that take their value as the next word (`timeout -s TERM 600 <player>`). */
+const TIMEOUT_VALUE_FLAG = /^(?:-s|-k|--signal|--kill-after)$/;
+/** A shell variable as a whole word: $P, ${P}, PowerShell's $env:P. */
+const VAR_WORD = /^\$(?:env:)?\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/;
+/** A segment that only sets a variable: P=x, export P=x, PowerShell $P = "x". */
+const ASSIGNMENT = /^(?:export\s+)?\$?(?:env:)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*("[^"]*"|'[^']*'|\S+)$/;
+/** Code an interpreter runs from the command line itself: python -c, node -e, a heredoc, powershell -Command. */
+const INLINE_CODE = /\b(?:python[0-9.]*|py|node)(?:\.exe)?\s+(?:-\S+\s+)*-[ce]\b|\b(?:python[0-9.]*|py|node|bash|sh|pwsh|powershell)(?:\.exe)?\b[^\n]*<<-?\s*['"]?\w+|\b(?:pwsh|powershell)(?:\.exe)?\b[^\n]*\s-(?:Command|EncodedCommand)\b/i;
+/** A call in such code that starts a program. */
+const INLINE_START = /Popen|subprocess|os\.(?:system|startfile|spawn|exec)|Start-Process|child_process|execFile|spawn\(/i;
+
+const playerRefusal = (w: string) =>
+  `Refused: ${w} would start a built player outside a player slot. Players run only from the fixed slot paths ` +
+  '(<slot root>/slotK/player/), which Windows Firewall allows once per machine; any other path raises the firewall ' +
+  'prompt and stalls the run. Start it with `python scripts/nightly/player_slots.py launch <exe or build folder> -- <args>` ' +
+  '(`--detach` returns at once), `"${FF_LAUNCH[@]}" <exe> -- <args>` in bash after sourcing scripts/nightly/player_launch.sh, ' +
+  'or slot_path() in Python.';
 
 /**
  * w513 (lothsahn): a built player runs only from a player slot, never from a build, sandbox, branch, session or temp
@@ -337,17 +357,55 @@ const LAUNCHERS = new Set(['&', '.', 'exec', 'nohup', 'time', 'env', 'start', 's
  * finalfactory.exe (or a finalfactory .app) by a path outside a slot is refused, with the slot launcher to use
  * instead. Only the program position of a simple command counts (after a call operator, `start`, `Start-Process`,
  * `open`, `nohup`, `env` and VAR=value prefixes): copying, listing or hashing a build is fine. Exported for tests.
+ *
+ * w4169 (lothsahn, LothDesktop, 2026-11-14): LothDesktop's firewall log shows the prompts of 2026-11-13 came from two
+ * players run from a worker's $TMPDIR/builds/<sha>-win/player/ while this guard was live, so the launch took a shape it
+ * did not see. The program position now also sees through `timeout [-s SIG] [-k T] <n>` (the wrapper the harness tells
+ * workers to put around every player), a `(` subshell or `{` group, Git Bash's `cmd //c`, `<dir>/finalfactory` with no
+ * extension, a variable set earlier in the same command (`P=<player>; "$P"`), and inline code (`python -c`, a heredoc,
+ * `powershell -Command`) that starts a player path outside a slot.
  */
 export function checkPlayerLaunch(cmd: string, sandbox?: string): string | undefined {
   const own = /^slot(\d+)$/i.exec(sandbox ?? '')?.[1];
+  const vars = new Map<string, string>();
+  let cdDir: string | undefined;
   for (const seg of cmd.split(/&&|\|\||[;|\n]|&(?=\s|$)/)) {
+    const assign = ASSIGNMENT.exec(seg.trim().replace(/^[({]\s*/, ''));
+    if (assign) {
+      vars.set(assign[1].toLowerCase(), assign[2].replace(/^["']|["']$/g, ''));
+      continue;
+    }
     const words = seg.trim().match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
-    for (const word of words) {
-      const w = word.replace(/^["']|["']$/g, '');
+    let timeout = false;
+    for (let i = 0; i < words.length; i++) {
+      let w = words[i].replace(/^[({]+/, '').replace(/[)}]+$/, '').replace(/^["']|["']$/g, '');
+      const v = VAR_WORD.exec(w);
+      if (v && vars.has(v[1].toLowerCase())) w = vars.get(v[1].toLowerCase())!;
       const lower = w.toLowerCase();
+      if (lower === 'timeout' || lower === 'timeout.exe') {
+        timeout = true;
+        continue;
+      }
+      if (timeout) {
+        if (TIMEOUT_VALUE_FLAG.test(w)) {
+          i++;
+          continue;
+        }
+        if (/^-/.test(w)) continue;
+        timeout = false;
+        if (/^\d+(?:\.\d+)?[smhd]?$/i.test(w)) continue;
+      }
       if (LAUNCHERS.has(lower) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(w) || /^-/.test(w) || w === '""' || w === '') continue;
+      // `cd <dir>` earlier in the command: a later ./finalfactory runs from <dir>.
+      if (/^(?:cd|pushd|set-location|sl)$/.test(lower)) {
+        const to = words[i + 1]?.replace(/[)}]+$/, '').replace(/^["']|["']$/g, '');
+        if (to && !/^-/.test(to)) cdDir = to.replace(/[\\/]+$/, '');
+        break;
+      }
+      if (cdDir && /^\.[\\/]/.test(w)) w = `${cdDir}/${w.slice(2)}`;
       // The program word: a player outside a slot is refused; anything else ends this simple command.
-      const isPlayer = PLAYER_BINARY.test(w.replace(/[\\/]+$/, ''));
+      const bare = w.replace(/[\\/]+$/, '');
+      const isPlayer = PLAYER_BINARY.test(bare) || PLAYER_NO_EXT.test(bare);
       const slot = SLOT_PLAYER.exec(w + '/');
       // A sandbox's pair is its own (w576): sandbox slotK starts players only from slotK-0 and slotK-1.
       if (isPlayer && slot?.[2] !== undefined && own !== undefined && slot[1] !== own) {
@@ -357,19 +415,122 @@ export function checkPlayerLaunch(cmd: string, sandbox?: string): string | undef
           "which picks this sandbox's pair (`--peer 1` for the second peer)."
         );
       }
-      if (isPlayer && !slot) {
-        return (
-          `Refused: ${w} would start a built player outside a player slot. Players run only from the fixed slot paths ` +
-          '(<slot root>/slotK/player/), which Windows Firewall allows once per machine; any other path raises the firewall ' +
-          'prompt and stalls the run. Start it with `python scripts/nightly/player_slots.py launch <exe or build folder> -- <args>` ' +
-          '(`--detach` returns at once), `"${FF_LAUNCH[@]}" <exe> -- <args>` in bash after sourcing scripts/nightly/player_launch.sh, ' +
-          'or slot_path() in Python.'
-        );
-      }
+      if (isPlayer && !slot) return playerRefusal(w);
       break;
     }
   }
+  // Inline code that starts a player path outside a slot: python -c "subprocess.Popen([...])", a heredoc.
+  if (INLINE_CODE.test(cmd) && INLINE_START.test(cmd) && !SLOT_ROUTE.test(cmd)) {
+    for (const tok of cmd.match(/[^\s"'`()[\],;=]+/g) ?? []) {
+      if (PLAYER_BINARY.test(tok.replace(/[\\/]+$/, '')) && !SLOT_PLAYER.test(tok + '/')) return playerRefusal(tok);
+    }
+  }
   return undefined;
+}
+
+/** Interpreters whose first non-flag word is the script they run. */
+const SCRIPT_RUNNERS = /^(?:bash|sh|zsh|python[0-9.]*|py|pwsh|powershell)(?:\.exe)?$/i;
+/** A build_player.sh cache entry, or its player/ folder: <...>/builds/<sha>-win|mac|linux[/player]. */
+const BUILD_CACHE_PLAYER = /[\\/]builds[\\/][^\\/]+-(?:win|mac|linux)(?:[\\/]player)?$/i;
+/** A script that starts players through the slot pool, or says it does: player_slots.py, FF_LAUNCH from player_launch.sh, slot_path(), lab.py (its Peer refuses a path outside a slot), run_fleet_motion.launch, a docstring naming the player slots or the slot pool. */
+const SLOT_ROUTE = /player[ _-]?slots?\b|slot pool|FF_LAUNCH|player_launch\.sh|slot_path\s*\(|run_fleet_motion|\blab\.py\b|import lab\b/i;
+
+/**
+ * w4167 (lothsahn, 2026-11-14: "Why are workers on LothDesktop trying to start FinalFactory.exe from within the tmp
+ * directory?"): checkPlayerLaunch sees only a player named as a command's program, so a worker's tour script
+ * (specs/<w>/run_legs.sh, a leg.sh in $TMPDIR) handed $TMPDIR/builds/<sha>-win/player/finalfactory.exe could start it
+ * from there unseen. A script run with a built player outside a slot among its arguments is refused unless its text
+ * starts players through the slot pool (SLOT_ROUTE: it copies the build into a leased slot first). A script that cannot
+ * be read here (a path the shell builds at run time) passes: this guard never blocks what it cannot see. Exported for tests.
+ */
+export function checkScriptPlayerLaunch(cmd: string, cwd: string | undefined, env: ShellEnv | undefined, read: (p: string) => string | undefined = readText): string | undefined {
+  for (const seg of cmd.split(/&&|\|\||[;|\n]|&(?=\s|$)/)) {
+    const words = (seg.trim().match(/"[^"]*"|'[^']*'|\S+/g) ?? []).map((w) => w.replace(/^["']|["']$/g, ''));
+    let i = 0;
+    for (;;) {
+      while (i < words.length && (LAUNCHERS.has(words[i].toLowerCase()) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i]))) i++;
+      // timeout [-s SIG] [-k T] <duration> <program>: the program comes after the duration.
+      if (words[i]?.toLowerCase() !== 'timeout') break;
+      i++;
+      while (i < words.length && /^-/.test(words[i])) i += /^-[sk]$/.test(words[i]) ? 2 : 1;
+      i++;
+    }
+    if (i >= words.length) continue;
+    let script: string | undefined;
+    if (SCRIPT_RUNNERS.test(words[i].replace(/^.*[\\/]/, ''))) {
+      let j = i + 1;
+      while (j < words.length && /^-/.test(words[j])) {
+        // python -c / -m, bash -c, powershell -Command: no script file to read; -File names it.
+        if (/^-(?:c|m|command|encodedcommand)$/i.test(words[j])) { j = words.length; break; }
+        if (/^-file$/i.test(words[j])) { j++; break; }
+        // PowerShell switches that take a value (-ExecutionPolicy Bypass, -WindowStyle Hidden).
+        j += /^-(?:executionpolicy|ep|windowstyle|w)$/i.test(words[j]) ? 2 : 1;
+      }
+      script = words[j];
+    } else if (/\.(?:sh|py|ps1)$/i.test(words[i])) {
+      script = words[i];
+    }
+    if (!script || !/\.(?:sh|py|ps1)$/i.test(script)) continue;
+    const player = words.slice(i + 1).find((w) => {
+      const p = w.replace(/^--?[A-Za-z][\w-]*=/, '').replace(/[\\/]+$/, '');
+      return (PLAYER_BINARY.test(p) || BUILD_CACHE_PLAYER.test(p)) && !SLOT_PLAYER.test(p + '/');
+    });
+    if (!player) continue;
+    const expanded = expandVars(script, env);
+    if (!expanded) continue;
+    const route = routesThroughSlots(path.isAbsolute(expanded) || /^[A-Za-z]:[\\/]/.test(expanded) || !cwd ? expanded : path.join(cwd, expanded), read);
+    if (route !== false) continue;
+    return (
+      `Refused: ${script} is handed ${player}, a built player outside a player slot, and never starts players through the ` +
+      'slot pool, so it would run that exe from its build or temp folder, and Windows Firewall prompts for every new exe path ' +
+      '(w4167). Have the script start each player with `python scripts/nightly/player_slots.py launch <exe or build folder> -- <args>` ' +
+      '(`--detach` returns at once; `--peer 1` for a second build), or `"${FF_LAUNCH[@]}"` after sourcing scripts/nightly/player_launch.sh: ' +
+      'it copies the build into this sandbox\'s slot folder, which the firewall already allows.'
+    );
+  }
+  return undefined;
+}
+
+/**
+ * Whether the script at `file`, or a file it pulls in beside it (a Python `import x`/`from x import` of x.py in its
+ * folder, a shell `source`/`.` of a path relative to it, three levels deep), starts players through the slot pool:
+ * true, false, or undefined when the script itself cannot be read.
+ */
+function routesThroughSlots(file: string, read: (p: string) => string | undefined): boolean | undefined {
+  const seen = new Set<string>();
+  const visit = (f: string, depth: number): boolean | undefined => {
+    const key = f.replace(/\\/g, '/').toLowerCase();
+    // At most 300 files looked at per command: a guard never stalls a shell call.
+    if (seen.has(key) || seen.size >= 300) return false;
+    seen.add(key);
+    const text = read(f);
+    if (text === undefined) return undefined;
+    if (SLOT_ROUTE.test(text)) return true;
+    if (depth >= 3) return false;
+    const dir = path.dirname(f);
+    const pulled: string[] = [];
+    if (/\.py$/i.test(f)) {
+      for (const m of text.matchAll(/^\s*(?:from\s+([A-Za-z_]\w*)\s+import|import\s+([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*))/gm)) {
+        for (const name of (m[1] ?? m[2]).split(/\s*,\s*/)) pulled.push(path.join(dir, `${name}.py`));
+      }
+    }
+    // Any script it names (source, bash, python ...): "$REPO/scripts/x.sh", "$HERE/y.py", z.sh, against its folder and
+    // the folders above it (a repo-relative path from a script four levels down).
+    for (const m of text.matchAll(/(?:\$\{?\w+\}?[\\/])?((?:[\w.-]+[\\/])*[\w.-]+\.(?:sh|py|ps1))\b/g)) {
+      if (/^\.\.?$/.test(m[1])) continue;
+      for (let d = dir, up = 0; up < 5; up++, d = path.dirname(d)) pulled.push(path.join(d, m[1]));
+    }
+    return pulled.some((p) => visit(p, depth + 1) === true);
+  };
+  return visit(file, 0);
+}
+
+function readText(p: string): string | undefined {
+  try {
+    return fs.statSync(p).size <= 2_000_000 ? fs.readFileSync(p, 'utf8') : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** ffmpeg's screen and window grabbers (Windows gdigrab, ddagrab, gfxcapture; Linux x11grab; macOS avfoundation). */

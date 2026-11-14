@@ -14,6 +14,7 @@ import { LocalImages, Markdown } from './Markdown';
 import { DetailLine, Previews, QuestionCard, type CardSummary } from './QuestionCard';
 import { PermissionCard } from './Transcript';
 import { Icon } from './ui';
+import { currentProduct } from '../brand';
 
 const AGE_TONE = { fresh: 'grey', old: 'amber', stale: 'red' } as const;
 
@@ -161,7 +162,7 @@ function CardDetails({ app, item, now }: { app: AppState; item: WaitingItem; now
       </DetailLine>
       {!item.mine && <DetailLine label="Waits on">{item.on.join(', ') || 'someone else'}</DetailLine>}
       {ask === 'approve' && <DetailLine label="Why it waits">{item.text}</DetailLine>}
-      {item.recommendation && <DetailLine label="FF Factory recommends">{item.recommendation}</DetailLine>}
+      {item.recommendation && <DetailLine label={`${currentProduct()} recommends`}>{item.recommendation}</DetailLine>}
       {r && r.kind !== 'question' && (
         <div className="small" data-testid={`wait-question-${w.id}`}>
           <span className="dim">Its worker’s words:</span> <Markdown text={namesForPaths(r.question)} />

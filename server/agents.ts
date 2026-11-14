@@ -41,7 +41,7 @@ import { cliTranscriptPath } from './cliTranscript.ts';
 
 /** A live state as list_work takes it (shared/workState.ts). */
 const LIVE_STATE = z.enum(WORK_LIVE_STATES as unknown as [WorkLiveState, ...WorkLiveState[]]);
-import { ROOT, claudeAiConnectorsFor, configPath, projectBrief, projectOf, connectorEnv, ownerLine, pinnedVaultEntry, publicIdentityLine, publicIdentityOf, type Config, hostSoftFreeGB, type HostGuardConfig } from './config.ts';
+import { ROOT, branded, claudeAiConnectorsFor, configPath, projectBrief, projectOf, connectorEnv, ownerLine, pinnedVaultEntry, publicIdentityLine, publicIdentityOf, type Config, hostSoftFreeGB, type HostGuardConfig } from './config.ts';
 import { dryRun, refuseInDryRun } from './dryRun.ts';
 import { MachineRollout, timedRunText } from './machineRollout.ts';
 import { OWNER_ONLY_KEYS, SETTABLE_KEYS, setAppConfig } from './appConfig.ts';
@@ -4741,7 +4741,7 @@ When a person asked for a design or an analysis (a profile, an investigation, a 
     return toolsOf('worker').map((name) => {
       const description = texts[name];
       if (description === undefined) throw new Error(`no description for the worker tool ${name}`);
-      return { name: name as CatalogTool, description, ...sdkExtras('worker', name) };
+      return { name: name as CatalogTool, description: branded(description, this.cfg), ...sdkExtras('worker', name) };
     });
   }
 
@@ -4770,7 +4770,8 @@ When a person asked for a design or an analysis (a profile, an investigation, a 
       // w1480: a share of workers also get the terse-prose rule (server/terseProse.ts).
       // w2002: and a share compacts earlier, marked in the prompt (server/autoCompact.ts withEarlyCompactMark).
       // w2014: and a share gets the read-chain nudge, marked in the prompt (server/readChain.ts).
-      append: withReadChainMark(withEarlyCompactMark(withTerseProse(this.machineSandboxBrief(m, sb, run.account, run.github, clone, this.workflowMachines()), info.id, this.cfg), info.id, this.cfg), info.id, this.cfg),
+      // w15: "Ryding Factory" in place of "FF Factory" on an install that is not Final Factory's (config.ts branded).
+      append: branded(withReadChainMark(withEarlyCompactMark(withTerseProse(this.machineSandboxBrief(m, sb, run.account, run.github, clone, this.workflowMachines()), info.id, this.cfg), info.id, this.cfg), info.id, this.cfg), this.cfg),
       ...(inReadChainPilot(info.id, this.cfg) ? { readChainNudge: true } : {}),
       strictMcp: false,
       // The Unity bridge of this sandbox's editor only (machine/unityMcp.ts): Claude Code has none registered for a new worktree.
@@ -6329,15 +6330,24 @@ ${w.repo ?? ''}
         tool(
           'set_pool',
           "Choose whose Claude token pool all of your person's work runs on (w1717, docs/vault.md section 4, \"Picking another person's pool\"): `self` (the default, their own) or another operator's user id (e.g. \"ben\"); the same as their Settings, \"Claude pool\". It moves all of their Claude billing: their workers and standing agents (new requests, and those they take over by acting on them), you, their orchestrator, and the ops worker's jobs for you. The picked pool keeps its own limits: workers wait while it is held, never on their own pool; you and the ops worker use it past its caps as on their own. Their GitHub token stays their own. A live idle worker, and you, restart on the new pool at the next message. Only when your person asks for it, in their own words.",
-          { pool: z.string().describe('"self", or the user id whose pool to use (an operator with a Claude token in the vault).') },
-          wrap(async ({ pool }) => {
+          {
+            pool: z.string().describe('"self", or the user id whose pool to use (an operator with a Claude token in the vault).'),
+            person: z.string().optional().describe("An owner's orchestrator only (w13): another login whose pool to set, e.g. a member with no Claude token of their own, whose orchestrator cannot start until their work bills to someone's pool. Default: your person."),
+          },
+          wrap(async ({ pool, person }) => {
             if (ctx.role === 'personal') {
               const caller = ctx.sessionId ? this.store.sessions.get(ctx.sessionId) : undefined;
               if (caller && !this.personTurn(caller.id)) throw new Error(`the pool setting changes only in a turn ${ctx.owner?.displayName ?? 'your person'} started with a message of their own; ask them`);
             }
             const by = ctx.owner ?? actor();
-            const now = this.setPool(by.userId, pool, `${by.displayName}'s orchestrator`);
-            return `${by.userId}'s work runs on ${isSamePerson(now, by.userId) ? 'their own Claude pool (self)' : `${now}'s Claude pool`} from each process's next start (this orchestrator's at the next message after this turn).`;
+            // An owner may set another login's (w13): a member with no Claude token of their own gets no orchestrator until an
+            // owner bills their work to a pool, and the Settings row sets only the signed-in person's own.
+            const other = person?.trim() && !isSamePerson(person.trim(), by.userId) ? person.trim() : undefined;
+            if (other && this.identity.get(by.userId)?.role !== 'owner') throw new Error(`only an owner's orchestrator sets another person's pool; ${other} sets their own in Settings, "Claude pool"`);
+            const who = other ?? by.userId;
+            const now = this.setPool(who, pool, `${by.displayName}'s orchestrator`);
+            const whose = this.identity.list().find((u) => isSamePerson(u.userId, who))?.userId ?? who;
+            return `${whose}'s work runs on ${isSamePerson(now, whose) ? 'their own Claude pool (self)' : `${now}'s Claude pool`} from each process's next start (${other ? 'their orchestrator' : 'this orchestrator'}'s at the next message after this turn).`;
           }),
         ),
         tool(
@@ -7234,7 +7244,7 @@ ${w.repo ?? ''}
     const owner = this.orchestrators.ownerOf(info);
     const ctx: BeltCtx = owner ? { role: 'personal', sessionId: info.id, owner } : { role: 'dispatcher', sessionId: info.id };
     const specs = this.toolSpecs('orchestrator', owner ? this.fixedActor(owner) : this.dispatcherActor, ctx);
-    return beltFor(ctx.role, specs, (tool, workId) => this.userAskedProblem(tool, workId));
+    return beltFor(ctx.role, specs, (tool, workId) => this.userAskedProblem(tool, workId)).map((t) => ({ ...t, description: branded(t.description, this.cfg) }));
   }
 
   /**
@@ -8134,14 +8144,14 @@ The rule for every agent: the ff-agents evidence-gate skill's lessons/whats-in-a
       allowedTools: ['Bash', 'Read', 'Glob', 'Grep', 'Write', 'Edit', 'mcp__portal'],
       disallowedTools: ['WebFetch', 'WebSearch', 'Task', 'Agent', 'Skill', 'NotebookEdit'],
       // No ToolSearch in its tools, so all of its few tools load in every call; the manifest marks them always (w1163).
-      mcpServers: { portal: createSdkMcpServer({ name: 'portal', version: '1.0.0', tools: belt.map((t) => sdkTool(t.name, t.description, t.schema, t.handler, sdkExtras('ops', t.name))) }) },
+      mcpServers: { portal: createSdkMcpServer({ name: 'portal', version: '1.0.0', tools: belt.map((t) => sdkTool(t.name, branded(t.description, this.cfg), t.schema, t.handler, sdkExtras('ops', t.name))) }) },
       settings: { autoMemoryEnabled: false, disableClaudeAiConnectors: true },
       hooks: { PreToolUse: [{ hooks: [opsGuard()] }] },
       maxBudgetUsd: OPS_LIMITS.budgetUsd,
       // The worker runs on the pool of the person whose orchestrator gave it this job (w738, w1078: nothing else), picked at each
       // process start; OpsWorker.send starts a fresh process for every new job and every change of caller.
       env: poolRunEnv({ role: 'ops', personId: info.requestedBy?.userId, sessionId: info.id }).env,
-      systemPrompt: { type: 'preset', preset: 'claude_code', append: opsBrief(this.cfg.ownerName) },
+      systemPrompt: { type: 'preset', preset: 'claude_code', append: branded(opsBrief(this.cfg.ownerName), this.cfg) },
       spawnClaudeCodeProcess: opsSpawner(),
     };
   };
@@ -8175,7 +8185,7 @@ The rule for every agent: the ff-agents evidence-gate skill's lessons/whats-in-a
       // Who pays (docs/orchestrators.md, docs/accounts.md): a person's own orchestrator runs on their own vault pool; the
       // dispatcher on the vault token config claudeAccounts.dispatcher pins (w996), else on the system payer's pool (w1078).
       env: this.orchestratorEnv(owner, info.id),
-      systemPrompt: { type: 'preset', preset: 'claude_code', append: `${owner ? this.personalBrief(owner) : this.dispatcherBrief()}${orchestratorDeployment(this.cfg)}\n\n${memoryBrief(memory, owner?.displayName)}${opsAllowedOrchestrator(info) ? `\n\n${dataBrief(this.cfg.dataDir)}` : ''}${mayReadConfig(info) ? `\n\n${configBrief(configPath(), owner?.displayName)}` : ''}` },
+      systemPrompt: { type: 'preset', preset: 'claude_code', append: branded(`${owner ? this.personalBrief(owner) : this.dispatcherBrief()}${orchestratorDeployment(this.cfg)}\n\n${memoryBrief(memory, owner?.displayName)}${opsAllowedOrchestrator(info) ? `\n\n${dataBrief(this.cfg.dataDir)}` : ''}${mayReadConfig(info) ? `\n\n${configBrief(configPath(), owner?.displayName)}` : ''}`, this.cfg) },
       ...(this.cfg.claudeExecutable ? { pathToClaudeCodeExecutable: this.cfg.claudeExecutable } : {}),
     };
   };

@@ -69,7 +69,10 @@ param(
     [int]$MaxAgentsPerSandbox = 0,
     [int]$MaxUnity = 0,
     [int]$Slots = 8,
-    [string]$Service = 'FFFactoryDaemon',
+    [string]$Service = '',
+    [string]$Instance = '',
+    [string]$ClaudeConfigDir = '',
+    [string]$FirewallSuffix = '',
     [string]$Source = '',
     [string]$Ref = 'main',
     [string]$RepoUrl = 'https://github.com/Final-Factory/FinalFactory.git',
@@ -245,7 +248,12 @@ if ($Update) {
 }
 $argv = $flags + @((Join-Path $Source 'scripts\worker\worker.ts'), 'install', '--root', $Root, '--portal-url', $PortalUrl,
     '--max-sandboxes', $MaxSandboxes, '--max-agents-per-sandbox', $MaxAgentsPerSandbox, '--max-unity', $MaxUnity,
-    '--slots', $Slots, '--service', $Service, '--repo-url', $RepoUrl, '--credential-stdin')
+    '--slots', $Slots, '--repo-url', $RepoUrl, '--credential-stdin')
+# -Instance (w14, docs/instances.md): a second instance's daemon names its own task unless -Service does.
+if ($Service) { $argv += @('--service', $Service) } elseif (-not $Instance) { $argv += @('--service', 'FFFactoryDaemon') }
+if ($Instance) { $argv += @('--instance', $Instance) }
+if ($ClaudeConfigDir) { $argv += @('--claude-config-dir', $ClaudeConfigDir) }
+if ($FirewallSuffix) { $argv += @('--firewall-suffix', $FirewallSuffix) }
 if ($NoFirewall) { $argv += '--no-firewall' }
 if ($NoCleanup) { $argv += '--no-cleanup' }
 if ($AbsoluteWorktrees) { $argv += '--absolute-worktrees' }

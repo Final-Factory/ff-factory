@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { HOST_ROLES, configPath, loadConfig, privacyGuardsOn, projectView, machineActivityPause, machinePersonPlay, machineCleanupSettings, pruneRetiredConfig, publicIdentityOf, retiredKeysLine, ROOT } from './config.ts';
+import { HOST_ROLES, FINAL_FACTORY_PRODUCT_NAME, brandName, configPath, loadConfig, privacyGuardsOn, productName, projectOf, projectView, machineActivityPause, machinePersonPlay, machineCleanupSettings, pruneRetiredConfig, publicIdentityOf, retiredKeysLine, ROOT } from './config.ts';
 import { migrateConfig, retireOldTokenFile, secretsDirOf } from './configMigration.ts';
 import { Store, bus, emit } from './store.ts';
 import { SessionManager, compactCommand, isMidTurn, seedSdkCost, snapshotOf } from './sessions.ts';
@@ -81,7 +81,7 @@ import { CiReadWatch, ciReadBanner, ciReadLine, repoSlug } from './ciReadHealth.
 import { GITHUB_REQUIRED_REPOS } from '../shared/githubRequirements.ts';
 import { collectNetwork, loadOutsideWatchState, outsideWatchConfig, saveOutsideWatchState, watchedPortalUrl, watcherOf } from './outsideWatch.ts';
 import { endMaybeGzip } from './compress.ts';
-import { serveStatic, webBuild } from './webStatic.ts';
+import { serveStatic, webBuild, type WebBrand } from './webStatic.ts';
 import { placeholderSvg, removedMedia, removedText, runMediaRetention, withMedia } from './mediaRetention.ts';
 import { appendCleanupLog, staleAtFile, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, sessionTempDir, staleUnityLibraries, tempFolderSession, volumeStat } from './cleanup.ts';
 import { cleanupPass, defaultNightlyRoots, planStaleOutput, staleContextOf, staleOutputSettings, type StalePlace } from './staleOutput.ts';
@@ -130,6 +130,8 @@ if (!dryRun()) {
   }
 }
 const cfg = loadConfig();
+/** The page's and the PWA's name on an install that is not Final Factory's (w15); Final Factory's serves the build's. */
+const webBrand: WebBrand | undefined = productName(cfg) === FINAL_FACTORY_PRODUCT_NAME ? undefined : { title: brandName(cfg), short: projectOf(cfg).name };
 // Keys the portal's own sandbox pool, editors and standing agents had (w510), which nothing reads: taken out of config.json
 // at start (w852, Lothsahn: "Yes, remove unused config keys"; config.json.prev keeps the file as it was). A dry run's
 // config is not its own to change, and one that cannot be written keeps them: named once, here and in system_status.
@@ -2463,7 +2465,7 @@ const server = http.createServer(async (req, res) => {
       }
       return send(res, 404, { error: 'no such endpoint' });
     }
-    await serveStatic(WEB, req, url, res);
+    await serveStatic(WEB, req, url, res, webBrand);
   } catch (e) {
     const status = e instanceof HttpError || e instanceof AttachmentError || e instanceof DispatcherChatRefused ? e.status : /^no (sandbox|session|standing agent|delegation|machine)/.test((e as Error).message) ? 404 : 400;
     // An upload that must resume elsewhere says where (docs/attachments.md).

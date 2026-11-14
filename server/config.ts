@@ -214,12 +214,42 @@ export function privacyGuardsOn(cfg: Partial<Pick<Config, 'project' | 'privacyGu
   return cfg.privacyGuards ?? projectOf(cfg).name !== PROJECT_DEFAULTS.name;
 }
 
+/**
+ * The shared product's name (w15, Ben, 2026-11-14: "Ryding Factory"). Final Factory's own install keeps "FF Factory"
+ * for itself; every other install shows "Ryding Factory", e.g. "Ryding Factory for Lens Scout" (docs/project.md).
+ */
+export const PRODUCT_NAME = 'Ryding Factory';
+/** What Final Factory's install calls the product: its name before w15, kept for it. */
+export const FINAL_FACTORY_PRODUCT_NAME = 'FF Factory';
+
+/** The product's name on this install: "FF Factory" on Final Factory's, "Ryding Factory" on any other. */
+export function productName(cfg: Partial<Pick<Config, 'project'>>): string {
+  return projectOf(cfg).name === PROJECT_DEFAULTS.name ? FINAL_FACTORY_PRODUCT_NAME : PRODUCT_NAME;
+}
+
+/** The install's name as a title: "FF Factory" on Final Factory's, else "Ryding Factory for <project>". */
+export function brandName(cfg: Partial<Pick<Config, 'project'>>): string {
+  const product = productName(cfg);
+  return product === FINAL_FACTORY_PRODUCT_NAME ? product : `${product} for ${projectOf(cfg).name}`;
+}
+
+/**
+ * Text for people and agents with the product's name of this install (w15): Final Factory's unchanged, any other's with
+ * "FF Factory" read as "Ryding Factory". Only for text an agent or a person reads, never for a marker code matches
+ * (the "[FF Factory] PAUSE:" notice, machinePause.ts) or an identifier.
+ */
+export function branded(text: string, cfg: Partial<Pick<Config, 'project'>>): string {
+  const product = productName(cfg);
+  return product === FINAL_FACTORY_PRODUCT_NAME ? text : text.replaceAll(FINAL_FACTORY_PRODUCT_NAME, product);
+}
+
 /** What the web app shows of the project (AppState.config.project). */
 export function projectView(cfg: Partial<Pick<Config, 'project'>>): ProjectView {
   const p = projectOf(cfg);
   return {
     name: p.name,
     custom: p.name !== PROJECT_DEFAULTS.name,
+    product: productName(cfg),
     community: p.community,
     ...(p.heading ? { heading: p.heading } : {}),
     ...(p.suggestions?.length ? { suggestions: p.suggestions } : {}),

@@ -6,6 +6,7 @@ import type { NotifyKind, NotifyPrefs } from '../../shared/types';
 import { notifyMode, pageShows, type NotifyMode } from '../../shared/notifyDevice';
 import { api } from './api';
 import { lsGet, lsSet, navigate, parseRoute } from './util';
+import { currentProduct } from './brand';
 
 export const DEFAULT_PREFS: NotifyPrefs = { permission: true, person: true, turnEnd: true, error: true, standing: true, delegation: true, unity: true, host: true };
 
@@ -184,7 +185,7 @@ export async function testNotification(): Promise<string> {
     const r = await api.pushTest(state.endpoint);
     return r.delivered ? 'Sent. It should appear in a moment (even with this tab in front).' : 'The push service did not take it; try turning notifications off and on.';
   }
-  await show({ title: 'FF Factory', body: 'Test notification: this tab will tell you while it is in the background.', url: '#/', tag: 'test' });
+  await show({ title: currentProduct(), body: 'Test notification: this tab will tell you while it is in the background.', url: '#/', tag: 'test' });
   return 'Shown.';
 }
 
