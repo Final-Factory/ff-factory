@@ -18,10 +18,21 @@ import { simpleCommands } from './waitGuard.ts';
  * requested service. (os error 1453)" while the same code passed clippy on macOS and the Windows test job beside it. The
  * job's log is read (`gh api .../actions/jobs/<id>/logs`): an out-of-resource error (RESOURCE_FAULT) with no real failure
  * beside it (REAL_FAILURE: a rustc error[E....], a failed test) passes; a second attempt, or a log that cannot be read, does not.
+ *
+ * w4136 (ben): a runner whose machine went down leaves a third shape. ffu run 43583298384's "test (ffu-windows)" (job
+ * 132412690815, ffu-beast-2, attempt 1) died with BEAST: its cargo test step still reads status in_progress, conclusion null,
+ * its log blob answers 404 BlobNotFound, it has no lost-communication annotation, and the portal journal has "machine beast
+ * disconnected" at 10:14:14Z, its completed_at. So a failed job with no failed step also passes when a step never finished
+ * (status not completed, or no conclusion), when its log is missing (404), or when its runner's machine disconnected within
+ * a minute of its completed_at by the portal's own journal (machineDrop, read through portal_logs). A job that has a step
+ * that concluded failure is still refused, whatever else it shows. A timed-out job passes only on the annotation or the drop:
+ * a hung test leaves its step unfinished too.
  */
 
 export interface RerunStep {
   name: string;
+  /** queued, in_progress, completed, pending (w4136: a step not completed when its job ended died with its runner). */
+  status?: string;
   conclusion: string | null;
 }
 
@@ -32,7 +43,16 @@ export interface RerunJob {
   steps: RerunStep[];
   /** The run attempt the job belongs to (1 before any rerun). Absent: unknown, so no resource-fault rerun. */
   run_attempt?: number;
+  /** w4136: the runner it ran on ("ffu-beast-2") and when it ended, for the portal's machine drop records. */
+  runner_name?: string | null;
+  completed_at?: string | null;
 }
+
+/**
+ * w4136: the portal's record of the machine a runner runs on disconnecting near a time: a line saying so, undefined when
+ * none, `{ error }` when the records cannot be read.
+ */
+export type MachineDropReader = (runner: string, at: string) => Promise<string | undefined | { error: string }>;
 
 /** What a rerun names: the run, or one job; `repo` is gh's OWNER/REPO, absent for the cwd's own repository. */
 export interface RerunTarget {
@@ -55,7 +75,8 @@ export const RULE = '"a flaky test gets its cause fixed. Never rerun it to get g
 const ROUTE =
   'Fix the flake\'s cause instead; or, when that fix already has its own request, merge past the unrelated red and name that ' +
   'request (wNNN) in the PR. Only a job whose runner died may be rerun: zero steps, or the annotation "The self-hosted runner ' +
-  'lost communication with the server"; or, once (attempt 1), a step that failed because the runner ran out of memory, disk, ' +
+  'lost communication with the server", or (with no step that failed) a step that never finished, a missing log (404), or its ' +
+  'runner\'s machine disconnecting from the portal within a minute of the job\'s end; or, once (attempt 1), a step that failed because the runner ran out of memory, disk, ' +
   'page file or commit quota (os error 1453, 1455, 112, 28).';
 const LOST = /self-hosted runner lost communication with the server/i;
 
@@ -97,9 +118,9 @@ export const ghRerunReader: RerunReader = {
     try {
       if (t.job) {
         const j = JSON.parse(gh(['api', `repos/${repo}/actions/jobs/${t.job}`], cwd, env)) as RerunJob;
-        return [{ id: j.id, name: j.name, conclusion: j.conclusion, steps: j.steps ?? [], run_attempt: j.run_attempt }];
+        return [{ id: j.id, name: j.name, conclusion: j.conclusion, steps: (j.steps ?? []).map((s) => ({ name: s.name, status: s.status, conclusion: s.conclusion })), run_attempt: j.run_attempt, runner_name: j.runner_name, completed_at: j.completed_at }];
       }
-      const out = gh(['api', '--paginate', `repos/${repo}/actions/runs/${t.run}/jobs?per_page=100`, '--jq', '.jobs[] | {id, name, conclusion, run_attempt, steps: [(.steps // [])[] | {name, conclusion}]}'], cwd, env);
+      const out = gh(['api', '--paginate', `repos/${repo}/actions/runs/${t.run}/jobs?per_page=100`, '--jq', '.jobs[] | {id, name, conclusion, run_attempt, runner_name, completed_at, steps: [(.steps // [])[] | {name, status, conclusion}]}'], cwd, env);
       return out.split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l) as RerunJob);
     } catch (e) {
       return { error: why(e) };
@@ -121,6 +142,38 @@ export const ghRerunReader: RerunReader = {
     }
   },
 };
+
+/** w4136: how near a job's end its machine's disconnect counts as the runner dying with it. */
+export const DROP_WINDOW_MS = 60_000;
+
+/**
+ * w4136: MachineDropReader over the portal_logs tool (source portal, the window around the time): a line
+ * "machine <id> disconnected" whose id is one dash-separated part of the runner's name ("beast" of "ffu-beast-2").
+ */
+export function portalDropReader(portalLogs: (args: Record<string, unknown>) => Promise<string>): MachineDropReader {
+  return async (runner, at) => {
+    const t = Date.parse(at);
+    if (!Number.isFinite(t)) return { error: `no end time (${at})` };
+    const parts = new Set(runner.toLowerCase().split(/[-_\s]+/).filter(Boolean));
+    let text: string;
+    try {
+      text = await portalLogs({ source: 'portal', regex: 'machine [a-z0-9_.-]+ disconnected', since: new Date(t - DROP_WINDOW_MS).toISOString(), until: new Date(t + DROP_WINDOW_MS).toISOString(), limit: 50 });
+    } catch (e) {
+      return { error: why(e) };
+    }
+    for (const line of text.split('\n')) {
+      const m = /^(\S+)\s.*\bmachine (\S+) disconnected\b/.exec(line.trim());
+      if (!m || !parts.has(m[2].toLowerCase())) continue;
+      const when = Date.parse(m[1]);
+      if (Number.isFinite(when) && Math.abs(when - t) <= DROP_WINDOW_MS) return `machine ${m[2]} disconnected at ${new Date(when).toISOString()}`;
+    }
+    return undefined;
+  };
+}
+
+/** w4136: the step that never finished (not completed, or no conclusion) of a job with steps. */
+const unfinished = (j: RerunJob) => j.steps.find((s) => (s.status !== undefined && s.status !== 'completed') || s.conclusion === null || s.conclusion === undefined);
+const LOG_MISSING = /\b404\b|BlobNotFound|Not Found/i;
 
 const REPO_FLAG = /^(?:--repo|-R)$/;
 
@@ -167,7 +220,7 @@ export function rerunTargets(cmd: string): RerunTarget[] {
 /**
  * The reason a shell command reruns a CI job whose steps really failed, or undefined. Exported for tests.
  */
-export function checkFlakyRerun(cmd: string, ctx: { cwd?: string; env?: Record<string, string | undefined>; reader?: RerunReader } = {}): string | undefined {
+export async function checkFlakyRerun(cmd: string, ctx: { cwd?: string; env?: Record<string, string | undefined>; reader?: RerunReader; drops?: MachineDropReader } = {}): Promise<string | undefined> {
   const targets = rerunTargets(cmd);
   if (!targets.length) return undefined;
   const read = ctx.reader ?? ghRerunReader;
@@ -195,11 +248,22 @@ export function checkFlakyRerun(cmd: string, ctx: { cwd?: string; env?: Record<s
     for (const j of failed) {
       // Zero steps: the runner died. A failed step was settled above (w3836: a resource fault at attempt 1 passes).
       if (!j.steps.length || j.steps.some((s) => s.conclusion === 'failure')) continue;
+      const of = `"${j.name}" (job ${j.id})${t.job ? '' : ` of run ${t.run}`}${where}`;
+      // w4136: a failed (not timed-out) job whose step never finished, or whose log is gone, died with its runner.
+      if (j.conclusion === 'failure' && unfinished(j)) continue;
       const notes = read.annotations(t.repo, j.id, ctx.cwd, ctx.env);
+      if (Array.isArray(notes) && notes.some((n) => LOST.test(n))) continue;
+      if (j.conclusion === 'failure') {
+        const log = read.log(t.repo, j.id, ctx.cwd, ctx.env);
+        if (typeof log !== 'string' && LOG_MISSING.test(log.error)) continue;
+      }
+      let drop: string | undefined | { error: string } = undefined;
+      if (ctx.drops && j.runner_name && j.completed_at) drop = await ctx.drops(j.runner_name, j.completed_at);
+      if (typeof drop === 'string') continue;
+      const dropNote = !ctx.drops || !j.runner_name || !j.completed_at ? '' : drop ? ` (the portal's machine records could not be read: ${drop.error})` : `, and no machine of runner ${j.runner_name} disconnected within a minute of its end (${j.completed_at})`;
       if (!Array.isArray(notes))
-        return `Refused (w3784): "${j.name}" (job ${j.id})${t.job ? "" : ` of run ${t.run}`}${where} ran steps, and its annotations could not be read (${notes.error}) to show its runner died. Ben's rule: ${RULE} ${ROUTE}`;
-      if (!notes.some((n) => LOST.test(n)))
-        return `Refused (w3784): "${j.name}" (job ${j.id})${t.job ? "" : ` of run ${t.run}`}${where} ${j.conclusion === 'timed_out' ? 'timed out' : 'failed'} with steps and no runner-loss annotation. Ben's rule: ${RULE} ${ROUTE}`;
+        return `Refused (w3784): ${of} ran steps, and its annotations could not be read (${notes.error}) to show its runner died${dropNote}. Ben's rule: ${RULE} ${ROUTE}`;
+      return `Refused (w3784): ${of} ${j.conclusion === 'timed_out' ? 'timed out' : 'failed'} with steps and no runner-loss annotation${dropNote}. Ben's rule: ${RULE} ${ROUTE}`;
     }
   }
   return undefined;

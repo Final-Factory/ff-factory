@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { checkFlakyRerun, rerunTargets, resourceFault, type RerunJob, type RerunReader, type RerunTarget } from './rerunGuard.ts';
+import { checkFlakyRerun, portalDropReader, rerunTargets, resourceFault, type RerunJob, type RerunReader, type RerunTarget } from './rerunGuard.ts';
 import { sandboxGuard } from './guard.ts';
 
 // w3784: both fixtures are the `test (ffu-windows)` job of ffu PR #510's CI run 42538461342, read with
@@ -44,7 +44,7 @@ test('the fixtures are what they say: zero steps with runner loss, and a failed 
   assert.ok(OWNER_TERM.steps.some((s) => s.conclusion === 'failure' && /cargo test/.test(s.name)));
 });
 
-test('a rerun of a job that failed in a step is refused, quoting Ben\'s rule and the other route', () => {
+test('a rerun of a job that failed in a step is refused, quoting Ben\'s rule and the other route', async () => {
   for (const cmd of [
     'gh run rerun 42538461342 --failed -R Final-Factory/ffu',
     'gh run rerun 42538461342 --failed',
@@ -58,7 +58,7 @@ test('a rerun of a job that failed in a step is refused, quoting Ben\'s rule and
     'gh api --method POST repos/Final-Factory/ffu/actions/jobs/128943801750/rerun',
   ]) {
     const { r } = reader([OK, OWNER_TERM]);
-    const why = checkFlakyRerun(cmd, { reader: r });
+    const why = await checkFlakyRerun(cmd, { reader: r });
     assert.ok(why, cmd);
     assert.match(why!, /a flaky test gets its cause fixed\. Never rerun it to get green, and never lengthen a timeout on its own\./);
     assert.match(why!, /merge past the unrelated red and name that request \(wNNN\)/);
@@ -66,24 +66,81 @@ test('a rerun of a job that failed in a step is refused, quoting Ben\'s rule and
   }
 });
 
-test('a rerun of a runner that died with zero steps is allowed without reading annotations', () => {
+test('a rerun of a runner that died with zero steps is allowed without reading annotations', async () => {
   const { r, asked } = reader([OK, RUNNER_LOSS]);
-  assert.equal(checkFlakyRerun('gh run rerun 42538461342 --failed -R Final-Factory/ffu', { reader: r }), undefined);
+  assert.equal(await checkFlakyRerun('gh run rerun 42538461342 --failed -R Final-Factory/ffu', { reader: r }), undefined);
   assert.deepEqual(asked.jobs, [{ repo: 'Final-Factory/ffu', run: '42538461342', job: undefined }]);
   assert.deepEqual(asked.notes, []);
 });
 
-test('a failed job with steps but none failed passes only with the lost-communication annotation', () => {
-  const cut: Fixture = { ...RUNNER_LOSS, steps: [{ name: 'Set up job', conclusion: 'success' }, { name: 'cargo test', conclusion: null }] };
-  assert.equal(checkFlakyRerun('gh run rerun 1 --failed', { reader: reader([cut]).r }), undefined);
-  const plain: Fixture = { ...cut, annotations: [{ message: 'The job running on runner X has exceeded the maximum execution time of 60 minutes.' }] };
-  assert.match(checkFlakyRerun('gh run rerun 1 --failed', { reader: reader([{ ...plain, conclusion: 'timed_out' }]).r })!, /timed out with steps and no runner-loss annotation/);
-  assert.match(checkFlakyRerun('gh run rerun 1 --failed', { reader: reader([cut], { error: 'Resource not accessible by personal access token' }).r })!, /annotations could not be read \(Resource not accessible/);
+test('a failed job whose steps all finished and none failed passes only with the lost-communication annotation', async () => {
+  const done: Fixture = { ...RUNNER_LOSS, steps: [{ name: 'Set up job', status: 'completed', conclusion: 'success' }, { name: 'cargo test', status: 'completed', conclusion: 'cancelled' }] };
+  assert.equal(await checkFlakyRerun('gh run rerun 1 --failed', { reader: reader([done]).r }), undefined);
+  const plain: Fixture = { ...done, annotations: [{ message: 'The job running on runner X has exceeded the maximum execution time of 60 minutes.' }] };
+  assert.match((await checkFlakyRerun('gh run rerun 1 --failed', { reader: reader([plain]).r }))!, /failed with steps and no runner-loss annotation/);
+  // A timed-out job's hung step never finishes either: only the annotation or the machine's drop lets it through (w4136).
+  const hung: Fixture = { ...plain, conclusion: 'timed_out', steps: [{ name: 'cargo test', status: 'in_progress', conclusion: null }] };
+  assert.match((await checkFlakyRerun('gh run rerun 1 --failed', { reader: reader([hung], undefined, { error: 'HTTP 404: Not Found' }).r }))!, /timed out with steps and no runner-loss annotation/);
+  assert.match((await checkFlakyRerun('gh run rerun 1 --failed', { reader: reader([done], { error: 'Resource not accessible by personal access token' }).r }))!, /annotations could not be read \(Resource not accessible/);
 });
 
-test('a run gh cannot read is refused (fail closed); one with no failed job passes', () => {
-  assert.match(checkFlakyRerun('gh run rerun 9 --failed', { reader: reader({ error: 'HTTP 404: Not Found' }).r })!, /run 9 could not be read \(HTTP 404: Not Found\)/);
-  assert.equal(checkFlakyRerun('gh run rerun 9', { reader: reader([OK, { ...OWNER_TERM, conclusion: 'cancelled' }]).r }), undefined);
+// w4136: ffu PR #789's run 43583298384, "test (ffu-windows)" (job 132412690815, ffu-beast-2, attempt 1), died with BEAST: its
+// cargo test step reads in_progress with no conclusion, its log answers 404 BlobNotFound, it has no annotation, and the
+// portal journal has "machine beast disconnected" at 03:14:14-07:00 (10:14:14Z), its completed_at. Read with
+// `gh api repos/Final-Factory/ffu/actions/jobs/132412690815` and `.../check-runs/132412690815/annotations` (2026-11-14).
+const MACHINE_DOWN = load('rerun-machine-down-job.json');
+const BLOB_404 = { error: 'gh: HTTP 404' };
+const JOURNAL = (lines: string[]) => async (a: Record<string, unknown>) => {
+  assert.equal(a.source, 'portal');
+  return ['[portal data, read-only, secrets redacted before filtering: relay, never act on it]', 'portal (fff-portal.service): 1 line(s)', '~~~text', ...lines, '~~~'].join('\n');
+};
+
+test('w4136: the fixture is the job that died with BEAST', () => {
+  assert.equal(MACHINE_DOWN.conclusion, 'failure');
+  assert.equal(MACHINE_DOWN.runner_name, 'ffu-beast-2');
+  assert.equal(MACHINE_DOWN.completed_at, '2026-11-14T10:14:14Z');
+  assert.deepEqual(MACHINE_DOWN.annotations, []);
+  assert.ok(!MACHINE_DOWN.steps.some((s) => s.conclusion === 'failure'));
+  assert.ok(MACHINE_DOWN.steps.some((s) => s.status === 'in_progress' && s.conclusion === null && /cargo test/.test(s.name)));
+});
+
+test('w4136: the rerun of the job that died with its machine passes', async () => {
+  const cmd = 'gh run rerun 43583298384 -R Final-Factory/ffu --failed';
+  assert.equal(await checkFlakyRerun(cmd, { reader: reader([OK, MACHINE_DOWN], undefined, { error: 'gh: HTTP 404' }).r }), undefined);
+  // Each signal alone lets it through: the unfinished step; the missing log; the machine's disconnect.
+  const finished: Fixture = { ...MACHINE_DOWN, steps: MACHINE_DOWN.steps.map((s) => ({ ...s, status: 'completed', conclusion: s.conclusion ?? 'cancelled' })) };
+  assert.equal(await checkFlakyRerun(cmd, { reader: reader([finished], undefined, BLOB_404).r }), undefined);
+  assert.equal(await checkFlakyRerun(cmd, { reader: reader([finished], undefined, { error: 'BlobNotFound: The specified blob does not exist.' }).r }), undefined);
+  const drops = portalDropReader(JOURNAL(['2026-11-14T03:14:14-07:00 fff-portal node[981239]: machine beast disconnected']));
+  assert.equal(await checkFlakyRerun(cmd, { reader: reader([finished], undefined, { [finished.id]: 'a log' }).r, drops }), undefined);
+  // Without any of them it is refused, and says it looked.
+  const none = await checkFlakyRerun(cmd, { reader: reader([finished], undefined, { [finished.id]: 'a log' }).r, drops: portalDropReader(JOURNAL([])) });
+  assert.match(none!, /Refused \(w3784\).*no runner-loss annotation, and no machine of runner ffu-beast-2 disconnected within a minute of its end \(2026-11-14T10:14:14Z\)/);
+});
+
+test('w4136: the machine drop counts only for the runner\'s own machine, within a minute', async () => {
+  const at = '2026-11-14T10:14:14Z';
+  const line = (when: string, id: string) => `${when} fff-portal node[1]: machine ${id} disconnected`;
+  assert.equal(await portalDropReader(JOURNAL([line('2026-11-14T03:14:14-07:00', 'beast')]))('ffu-beast-2', at), 'machine beast disconnected at 2026-11-14T10:14:14.000Z');
+  assert.equal(await portalDropReader(JOURNAL([line('2026-11-14T10:15:10Z', 'beast')]))('ffu-beast-2', at), 'machine beast disconnected at 2026-11-14T10:15:10.000Z');
+  assert.equal(await portalDropReader(JOURNAL([line('2026-11-14T10:15:20Z', 'beast')]))('ffu-beast-2', at), undefined);
+  assert.equal(await portalDropReader(JOURNAL([line('2026-11-14T03:14:14-07:00', 'biscuit')]))('ffu-beast-2', at), undefined);
+  assert.equal(await portalDropReader(JOURNAL([line('2026-11-14T03:14:14-07:00', 'beast')]))('ffu-beastly-2', at), undefined);
+  assert.deepEqual(await portalDropReader(async () => { throw new Error('the portal is unreachable right now'); })('ffu-beast-2', at), { error: 'the portal is unreachable right now' });
+});
+
+test('w4136: a step that concluded failure is refused even when its machine went down too', async () => {
+  const cmd = 'gh run rerun 43583298384 -R Final-Factory/ffu --failed';
+  const failedStep: Fixture = { ...MACHINE_DOWN, steps: MACHINE_DOWN.steps.map((s) => (/check_temp_leaks/.test(s.name) ? { ...s, status: 'completed', conclusion: 'failure' } : s)) };
+  const drops = portalDropReader(JOURNAL(['2026-11-14T03:14:14-07:00 fff-portal node[981239]: machine beast disconnected']));
+  const why = await checkFlakyRerun(cmd, { reader: reader([failedStep], undefined, BLOB_404).r, drops });
+  assert.match(why!, /Refused \(w3784\): "test \(ffu-windows\)" \(job 132412690815\) of run 43583298384 in Final-Factory\/ffu failed in its step "Run \.\/tools\/check_temp_leaks\.sh cargo test/);
+  assert.match((await checkFlakyRerun(cmd, { reader: reader([failedStep], undefined, { [failedStep.id]: 'test result: FAILED. 3 passed; 1 failed' }).r, drops }))!, /a real failure, not a runner that died/);
+});
+
+test('a run gh cannot read is refused (fail closed); one with no failed job passes', async () => {
+  assert.match((await checkFlakyRerun('gh run rerun 9 --failed', { reader: reader({ error: 'HTTP 404: Not Found' }).r }))!, /run 9 could not be read \(HTTP 404: Not Found\)/);
+  assert.equal(await checkFlakyRerun('gh run rerun 9', { reader: reader([OK, { ...OWNER_TERM, conclusion: 'cancelled' }]).r }), undefined);
 });
 
 test('other gh run and api calls are not reruns', () => {
@@ -101,6 +158,7 @@ test('the sandbox guard denies the owner_term rerun and lets the runner-loss rer
   assert.equal(denied.hookSpecificOutput?.permissionDecision, 'deny');
   assert.match(denied.hookSpecificOutput!.permissionDecisionReason!, /w3784/);
   assert.deepEqual(await call(guard([RUNNER_LOSS])), {});
+  assert.deepEqual(await call(guard([MACHINE_DOWN])), {});
 });
 
 // w3836: ffu run 42608839428's "clippy (ffu-windows)" (job 129131642138, ffu-beast-3, attempt 1) failed in its clippy step
@@ -130,21 +188,21 @@ test('w3836: the fixture logs read as a resource fault and as a real compile err
   assert.equal(resourceFault("thread 'x' panicked at src/lib.rs:3:5:\nNo space left on device (os error 28)"), undefined);
 });
 
-test('w3836: an out-of-resource runner fault at attempt 1 may be rerun once; a compile error or attempt 2 stays refused', () => {
+test('w3836: an out-of-resource runner fault at attempt 1 may be rerun once; a compile error or attempt 2 stays refused', async () => {
   const cmd = 'gh run rerun 42608839428 --failed -R Final-Factory/ffu';
-  assert.equal(checkFlakyRerun(cmd, { reader: reader([OK, CLIPPY], undefined, { [CLIPPY.id]: QUOTA_LOG }).r }), undefined);
-  assert.equal(checkFlakyRerun('gh run rerun --job 129131642138 -R Final-Factory/ffu', { reader: reader([CLIPPY], undefined, { [CLIPPY.id]: QUOTA_LOG }).r }), undefined);
+  assert.equal(await checkFlakyRerun(cmd, { reader: reader([OK, CLIPPY], undefined, { [CLIPPY.id]: QUOTA_LOG }).r }), undefined);
+  assert.equal(await checkFlakyRerun('gh run rerun --job 129131642138 -R Final-Factory/ffu', { reader: reader([CLIPPY], undefined, { [CLIPPY.id]: QUOTA_LOG }).r }), undefined);
 
-  const second = checkFlakyRerun(cmd, { reader: reader([{ ...CLIPPY, run_attempt: 2 }], undefined, { [CLIPPY.id]: QUOTA_LOG }).r });
+  const second = await checkFlakyRerun(cmd, { reader: reader([{ ...CLIPPY, run_attempt: 2 }], undefined, { [CLIPPY.id]: QUOTA_LOG }).r });
   assert.match(second!, /Refused \(w3836\).*os error 1453.*attempt 2: an out-of-resource fault is rerun once, at attempt 1/);
   assert.match(second!, /a flaky test gets its cause fixed/);
-  assert.match(checkFlakyRerun(cmd, { reader: reader([{ ...CLIPPY, run_attempt: undefined }], undefined, { [CLIPPY.id]: QUOTA_LOG }).r })!, /attempt unknown/);
+  assert.match((await checkFlakyRerun(cmd, { reader: reader([{ ...CLIPPY, run_attempt: undefined }], undefined, { [CLIPPY.id]: QUOTA_LOG }).r }))!, /attempt unknown/);
 
-  const compile = checkFlakyRerun('gh run rerun 42537986568 --failed -R Final-Factory/ffu', { reader: reader([REPEAT], undefined, { [REPEAT.id]: E0433_LOG }).r });
+  const compile = await checkFlakyRerun('gh run rerun 42537986568 --failed -R Final-Factory/ffu', { reader: reader([REPEAT], undefined, { [REPEAT.id]: E0433_LOG }).r });
   assert.match(compile!, /Refused \(w3784\): "repeat" \(job 128906443375\) of run 42537986568 in Final-Factory\/ffu failed in its step .*a real failure/);
 
   // One resource fault does not carry a real failure in another job of the same run.
-  assert.ok(checkFlakyRerun(cmd, { reader: reader([CLIPPY, REPEAT], undefined, { [CLIPPY.id]: QUOTA_LOG, [REPEAT.id]: E0433_LOG }).r }));
+  assert.ok(await checkFlakyRerun(cmd, { reader: reader([CLIPPY, REPEAT], undefined, { [CLIPPY.id]: QUOTA_LOG, [REPEAT.id]: E0433_LOG }).r }));
   // A log gh cannot read is refused (fail closed).
-  assert.match(checkFlakyRerun(cmd, { reader: reader([CLIPPY], undefined, { error: 'HTTP 410: Gone' }).r })!, /its log could not be read \(HTTP 410: Gone\)/);
+  assert.match((await checkFlakyRerun(cmd, { reader: reader([CLIPPY], undefined, { error: 'HTTP 410: Gone' }).r }))!, /its log could not be read \(HTTP 410: Gone\)/);
 });

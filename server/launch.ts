@@ -5,6 +5,7 @@ import { WAIT_LINE_CHARS } from '../shared/waitSummary.ts';
 import os from 'node:os';
 import path from 'node:path';
 import { sandboxGuard } from './guard.ts';
+import { portalDropReader } from './rerunGuard.ts';
 import { localPluginEnv } from './pluginPaths.ts';
 import { editorBenchGateFor, GATE_HOOK_TIMEOUT_S } from '../machine/editorBenchGate.ts';
 import { foreignTimedHold, ownTimedHold, readCrashHold, readTimedAsk } from '../machine/benchLock.ts';
@@ -501,6 +502,8 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
       ...(g.daemonReads ? { daemonReads: g.daemonReads } : {}),
       mainClone: g.mainClone,
       editorRunning,
+      // w4136: a rerun of a job whose runner's machine dropped from the portal at the job's end passes (server/rerunGuard.ts).
+      ...(handlers.portal_logs ? { machineDrops: portalDropReader(handlers.portal_logs) } : {}),
       // The shell's own variables, so `cd $TMPDIR/ffbox && git push origin HEAD:master` is read where it goes (w1132).
       env: agentEnv,
       // w1750: no player or screen grab beside another worker's timed run; the worker's own session passes.
