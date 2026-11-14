@@ -1065,6 +1065,33 @@ bash scripts/worker/install.sh --root ~/lens-factory/root --portal-url http://<p
 root.json records `instance`; an update keeps it, the service, the suffix and daemon.json's `env`. The machine needs a
 record on that portal first (`POST /api/machines/join`, docs/project.md); its credential is that record's.
 
+### Moving a hand-made one onto it
+
+A hand-made instance whose daemon.json names a worker root as its own (`root`, with `appDir` and the sandboxes in it)
+becomes this install in place, with the same machine record and credential (its `tokenFile`). Run worker.ts directly
+from a checkout (not migrate.ps1/migrate.sh, which take today's layout), from a shell that is not one of its agents':
+
+```
+node scripts/worker/worker.ts migrate --config <inst>/daemon.json --root <inst>/worker --instance lens \
+  --from-service <its task or LaunchAgent label> --claude-config-dir <inst>/claude-worker \
+  [--repo-url <the project's repo>] --dry-run
+```
+
+First run it with `--dry-run`: it prints the plan and changes nothing. Then run it without that flag. **Before:** no
+agent there is mid-turn (it refuses otherwise) and no Unity editor runs in its sandboxes. **What it does:** it installs
+`root.json`, `<root>/repo` (seeded from the old clone; `--repo-url` defaults to that clone's origin), `<root>/daemon` and
+the `FFFactoryDaemon-<name>` service. It copies the daemon's state (sandboxes.json, published.jsonl, cleanup files,
+`gh-app/`, `unity-mcp/`) into `<root>/daemon`. Then it stops the old daemon, which it finds by its daemon.json on the
+command line; it refuses while a daemon runs that it cannot tell apart. It points each sandbox's git at the root's clone,
+keeping the old link as `.git.pre-ffw`, starts the new daemon, and **disables** (does not delete) the old task, or boots
+out and disables the old LaunchAgent. The pool limits (`maxUnity 0` included: an instance may run no editor) and the
+other settings come from the old daemon.json. `CLAUDE_CONFIG_DIR` comes from `--claude-config-dir`, or else from the old
+`env`. **What stays:** the sandboxes in their folders, with sandboxes.json's paths, so the conversations resume. The old
+clone, the old daemon folder, its temp folder and the old daemon.json also stay. Nothing is ever deleted, and `--cleanup`
+refuses in place. Settings the old start script set (e.g. `FF_CLI_SCRUB`) carry only if they are in daemon.json `env`.
+**Undo:** `migrate --root <inst>/worker --rollback` stops and removes the new service, restores each `.git`, and
+re-registers and starts the old service. Never `uninstall` that root: it holds the old daemon's clone and sandboxes.
+
 ## Uninstall
 
 ```powershell

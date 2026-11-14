@@ -475,7 +475,7 @@ export interface Facts {
 }
 
 /** Every reason the install cannot go ahead, from facts gathered without changing anything. Exported for tests. */
-export function preflightProblems(f: Facts, o: Pick<InstallOptions, 'root' | 'portalUrl' | 'maxSandboxes' | 'maxAgentsPerSandbox' | 'maxUnity'> & { owner?: string; devDrive?: 'on' | 'off'; devDriveMaxGB?: number; moveToDevDrive?: boolean }): string[] {
+export function preflightProblems(f: Facts, o: Pick<InstallOptions, 'root' | 'portalUrl' | 'maxSandboxes' | 'maxAgentsPerSandbox' | 'maxUnity'> & { instance?: string; owner?: string; devDrive?: 'on' | 'off'; devDriveMaxGB?: number; moveToDevDrive?: boolean }): string[] {
   const p: string[] = [];
   // The Dev Drive (w900): its flags must make sense, and a move starts only when nothing works in the sandboxes.
   if (o.devDrive === 'on' && f.platform !== 'win32') p.push('--dev-drive: a Dev Drive is a Windows feature (this is not Windows)');
@@ -514,22 +514,41 @@ export function preflightProblems(f: Facts, o: Pick<InstallOptions, 'root' | 'po
   for (const [k, v, lo, hi] of [
     ['max-sandboxes', o.maxSandboxes, 1, 20],
     ['max-agents-per-sandbox', o.maxAgentsPerSandbox, 1, 6],
-    ['max-unity', o.maxUnity, 1, 8],
+    // An instance may run no Unity editor at all (w14: a second portal's daemon beside the main one's editors).
+    ['max-unity', o.maxUnity, o.instance ? 0 : 1, 8],
   ] as const) {
     if (!Number.isInteger(v) || v < lo || v > hi) p.push(`--${k} must be a whole number from ${lo} to ${hi} (got ${v})`);
   }
   return p;
 }
 
-/** What is in the root folder now. */
-function rootState(root: string, machineId?: string): Facts['rootState'] {
+/** What is in the root folder now. Exported for tests. */
+export function rootState(root: string, machineId?: string): Facts['rootState'] {
   if (!fs.existsSync(root)) return 'missing';
   const entries = fs.readdirSync(root);
   if (!entries.length) return 'empty';
   const m = readManifest(root);
   if (m) return !machineId || m.machineId === machineId ? 'ours' : 'other';
+  if (inPlaceRoot(root)) return 'ours';
   // A migration in progress made the root before the install (scripts/worker/migrate.ts).
   return entries.every((e) => ['migration.json', 'migration', 'daemon', 'sandboxes', 'seed', 'nightly', 'scratch'].includes(e)) && entries.includes('migration.json') ? 'ours' : 'other';
+}
+
+/**
+ * Whether an in-place migration (migrate --config, w14) is under way in the root: a hand-made instance's own folder,
+ * which holds its clone and sandboxes. Only its journal marks it, naming that daemon's daemon.json, which names this root.
+ */
+function inPlaceRoot(root: string): boolean {
+  try {
+    const j = JSON.parse(fs.readFileSync(path.join(root, 'migration.json'), 'utf8')) as { config?: string; state?: string };
+    if (!j.config || j.state === 'rolled-back') return false;
+    const text = fs.readFileSync(j.config, 'utf8');
+    const cfg = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text) as { root?: string };
+    const same = (a: string) => (isWin ? a.toLowerCase() : a);
+    return typeof cfg.root === 'string' && same(path.resolve(cfg.root)) === same(path.resolve(root));
+  } catch {
+    return false;
+  }
 }
 
 function freeGB(dir: string): number | undefined {
@@ -1921,6 +1940,7 @@ export function planUpdate(root: string, m: Manifest, config: Record<string, unk
     firewall: f.firewall ?? m.outside.some((x) => x.kind === 'firewall-group'),
     ssh: f.ssh ?? m.outside.some((x) => x.kind === 'authorized-key'),
     ...(m.firewallSuffix ? { firewallSuffix: m.firewallSuffix } : {}),
+    ...(m.instance ? { instance: m.instance } : {}),
     ...(typeof config.unitySlotsDir === 'string' ? { unitySlotsDir: config.unitySlotsDir } : {}),
     ...(f.absoluteWorktrees ? { absoluteWorktrees: true } : {}),
     ...(f.owner ? { owner: f.owner } : {}),
@@ -2708,6 +2728,8 @@ const USAGE = `node scripts/worker/worker.ts <install|update|reinstall|uninstall
   migrate   [--from <old daemon folder>] [--from-service <its task or label>] [--old-slots <dir>]
             [--nightly <dir;dir>] [--dry-run] | --rollback | --cleanup [--legacy]
             (today's layout into the root; the credential comes from the old daemon.json)
+            --config <daemon.json> --instance <name> --from-service <old> [--claude-config-dir <dir>]
+            (in place: a hand-made instance whose daemon.json names the root as its own; docs/worker-install.md)
 The OS wrappers (scripts/worker/install.ps1, install.sh) ask for these and pipe the credential.`;
 
 /** --dev-drive / --no-dev-drive, --dev-drive-max-gb N, --dev-drive-skip U,T and --move-to-dev-drive, from the command line (w900). Exported for tests. */
@@ -2825,6 +2847,8 @@ export async function main(argv = process.argv.slice(2)) {
       await mig.migrate({
         from: opts.from,
         fromService: opts['from-service'],
+        config: opts.config,
+        claudeConfigDir: opts['claude-config-dir'],
         oldSlots: opts['old-slots'],
         nightly: opts.nightly ? opts.nightly.split(';').filter(Boolean) : [],
         dryRun: flags.has('dry-run'),
@@ -2834,7 +2858,7 @@ export async function main(argv = process.argv.slice(2)) {
           maxSandboxes: num('max-sandboxes', 3),
           maxAgentsPerSandbox: num('max-agents-per-sandbox', 2),
           maxUnity: num('max-unity', 2),
-              repoUrl: opts['repo-url'] ?? DEFAULT_REPO,
+              repoUrl: opts['repo-url'] ?? (opts.config ? '' : DEFAULT_REPO),
           service: opts.service ?? (isWin ? win.TASK_NAME : LABEL),
           firewall: !flags.has('no-firewall'),
           noCleanup: flags.has('no-cleanup'),
@@ -2847,6 +2871,7 @@ export async function main(argv = process.argv.slice(2)) {
           sshUser: opts['ssh-user'],
           // A migration moves what a machine already has into a root; a Dev Drive is a separate, later step (--dev-drive on an update).
           devDrive: 'off',
+          ...(opts.instance ? instanceOptions(opts.instance, path.resolve(opts.root), opts) : {}),
         },
       });
   } else if (cmd === 'tools') {
