@@ -21,7 +21,7 @@ const refuse = (msg: string): never => {
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
 export interface LoginDeleteDeps {
-  auth: { userInfos(): UserInfo[]; deleteUser(username: string): { keys: string[]; sessions: number } };
+  auth: { userInfos(): UserInfo[]; deleteUser(username: string): { keys: string[]; sessions: number; devices: number } };
   settings(): AppSettings;
   putSettings(patch: Partial<AppSettings>): void;
   /** The person's own orchestrator session, if they have one (Orchestrators.personalOf). */
@@ -53,6 +53,8 @@ export interface LoginDeleted {
   /** Names of the API keys removed (never a key: only hashes are kept). */
   keys: string[];
   sessions: number;
+  /** Its device-approval records removed (data/devices.json: pending, approved and denied browsers). */
+  devices: number;
   /** The pool entry removed: whose pool the login's work ran on, or undefined when it was "self". */
   pool?: string;
   /** Other per-login settings removed: heartbeat, dismissedEvents. */
@@ -95,7 +97,7 @@ export function deleteLogin(d: LoginDeleteDeps, r: LoginDeleteRequest): LoginDel
   // The orchestrator first: its process stops before the login it runs for goes.
   const orch = d.personalOf(r.user);
   if (orch) d.removeSession(orch.id);
-  const { keys, sessions } = d.auth.deleteUser(r.user);
+  const { keys, sessions, devices } = d.auth.deleteUser(r.user);
 
   const s = d.settings();
   const patch: Partial<AppSettings> = {};
@@ -121,6 +123,7 @@ export function deleteLogin(d: LoginDeleteDeps, r: LoginDeleteRequest): LoginDel
     role: info.role,
     keys,
     sessions,
+    devices,
     ...(poolKey ? { pool: s.pool![poolKey] } : {}),
     settings,
     pushSubscriptions: push.length,
@@ -167,6 +170,7 @@ export function describeLoginDeleted(r: LoginDeleted): string[] {
     `deleted the login ${r.user} ("${r.displayName}", ${r.role})`,
     `API keys: ${r.keys.length ? r.keys.join(', ') : 'none'}`,
     `sessions ended: ${r.sessions}`,
+    `device approvals: ${r.devices}`,
     `pool entry: ${r.pool ? `removed (its work ran on ${r.pool}'s pool)` : 'none (self)'}`,
     `other settings: ${r.settings.length ? r.settings.join(', ') : 'none'}`,
     `push subscriptions: ${r.pushSubscriptions}`,

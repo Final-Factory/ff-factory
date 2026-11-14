@@ -3,11 +3,12 @@ import type { AppState } from '../../../shared/types';
 import { api, type DeviceInfo } from '../api';
 import { toast } from '../store';
 import { fmtRelative } from '../util';
+import { startDevicePoll } from '../../../shared/devicePoll';
 
 /**
  * Device approval (docs/identity.md): a member's login from a browser no owner approved for them waits. The owners see one
  * bar per waiting browser, above every page, and approve or deny it here. Polled: every 20 seconds while approval is on,
- * every 5 minutes while it is off (an owner may turn it on meanwhile).
+ * every 5 minutes while it is off (an owner may turn it on meanwhile), and at once when the tab comes back into view (w10).
  */
 export function DeviceRequests({ app }: { app: AppState }) {
   const owner = app.me?.role === 'owner';
@@ -18,26 +19,20 @@ export function DeviceRequests({ app }: { app: AppState }) {
   useEffect(() => {
     if (!owner) return;
     let stop = false;
-    let t: ReturnType<typeof setTimeout> | undefined;
-    const poll = async () => {
-      let next = 5 * 60_000;
-      try {
-        if (document.visibilityState !== 'hidden') {
-          const r = await api.devices();
-          if (stop) return;
-          setDevices(r.devices);
-          setOn(r.deviceApproval === 'members');
-          if (r.deviceApproval === 'members' || r.devices.some((d) => d.status === 'pending')) next = 20_000;
-        } else next = 20_000;
-      } catch {
-        next = 60_000;
-      }
-      if (!stop) t = setTimeout(poll, next);
-    };
-    void poll();
+    const end = startDevicePoll(
+      async () => {
+        const r = await api.devices();
+        if (stop) return 5 * 60_000;
+        setDevices(r.devices);
+        setOn(r.deviceApproval === 'members');
+        return r.deviceApproval === 'members' || r.devices.some((d) => d.status === 'pending') ? 20_000 : 5 * 60_000;
+      },
+      document,
+      window,
+    );
     return () => {
       stop = true;
-      clearTimeout(t);
+      end();
     };
   }, [owner]);
 

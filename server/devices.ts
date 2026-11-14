@@ -101,6 +101,14 @@ export class Devices {
     return rec;
   }
 
+  /** Forget every device of a login, pending, approved or denied (a deleted login, w10): how many there were. */
+  removeUser(username: string): number {
+    const list = this.all();
+    const keep = list.filter((d) => d.username !== username);
+    if (keep.length !== list.length) this.write(keep);
+    return list.length - keep.length;
+  }
+
   /** Approve or deny a request (either way round, so a refusal can be undone), or forget a device altogether (revoke). */
   decide(id: string, action: 'approve' | 'deny' | 'revoke', by: string): DeviceRecord {
     const list = this.all();

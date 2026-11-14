@@ -265,7 +265,8 @@ fffctl user delete w1021-test --by lothsahn    # --by: the person whose job this
   `data/login-delete/` and waits up to 30 s for the running portal's answer; a portal that does not answer leaves nothing
   deleted (the request is taken back). The portal does the delete itself (`server/loginDelete.ts`), because it holds the
   login's sessions, settings and orchestrator in memory.
-- In one step: the login (`users.json`), its API keys, its sessions, its pool entry (w1717) and its own `heartbeat` and
+- In one step: the login (`users.json`), its API keys, its sessions, its device-approval records (`devices.json`, w10:
+  pending, approved and denied, so no deleted member's request stays in the owners' bar), its pool entry (w1717) and its own `heartbeat` and
   `dismissedEvents` settings, its push subscriptions, its own orchestrator (the session, its process stopped) and that
   orchestrator's memory folder (moved to the memory trash, kept 30 days). Everything is checked first.
 - Refused, nothing touched: a missing login (or one that differs only in case), the login it is run as or for (`--by`), the

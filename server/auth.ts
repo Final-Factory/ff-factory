@@ -189,7 +189,7 @@ export class Auth {
    * orchestrator, is server/userDelete.ts's). Refused for a missing login and for the last owner. Returns the names of the
    * keys it removed (never a key: only their hashes are kept) and how many sessions it ended.
    */
-  deleteUser(username: string): { keys: string[]; sessions: number } {
+  deleteUser(username: string): { keys: string[]; sessions: number; devices: number } {
     const all = this.users();
     const old = all.find((u) => u.username === username);
     if (!old) throw new Error(`no login "${username}"`);
@@ -201,7 +201,9 @@ export class Auth {
     let sessions = 0;
     for (const [id, s] of this.sessions) if (s.username === username && this.sessions.delete(id)) sessions++;
     if (sessions) this.persistSessions();
-    return { keys: theirs, sessions };
+    // Its device records too, or a deleted member's pending request would stay in the owners' bar (w10).
+    const devices = this.devices.removeUser(username);
+    return { keys: theirs, sessions, devices };
   }
 
   private writeUsers(users: UserRecord[]) {
