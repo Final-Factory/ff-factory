@@ -80,7 +80,7 @@ them (owner the user, the user full control). From an administrator PowerShell:
 
 ```
 $s = New-Object -ComObject Schedule.Service; $s.Connect()
-$t = $s.GetFolder('').GetTask('<task>'); $u = (New-Object Security.Principal.NTAccount $env:USERNAME).Translate([Security.Principal.SecurityIdentifier]).Value
+$t = $s.GetFolder('\').GetTask('<task>'); $u = (New-Object Security.Principal.NTAccount $env:USERNAME).Translate([Security.Principal.SecurityIdentifier]).Value
 $t.SetSecurityDescriptor("O:$($u)G:$($u)D:(A;;0x1f019f;;;BA)(A;;0x1f019f;;;SY)(A;;FA;;;$u)", 0)
 ```
 
