@@ -209,6 +209,11 @@ export function projectOf(cfg: Partial<Pick<Config, 'project'>>): ProjectConfig 
   return { ...PROJECT_DEFAULTS, ...cfg.project };
 }
 
+/** w17: whether this portal's privacy guards are on (config privacyGuards; by default every factory but Final Factory). */
+export function privacyGuardsOn(cfg: Partial<Pick<Config, 'project' | 'privacyGuards'>>): boolean {
+  return cfg.privacyGuards ?? projectOf(cfg).name !== PROJECT_DEFAULTS.name;
+}
+
 /** What the web app shows of the project (AppState.config.project). */
 export function projectView(cfg: Partial<Pick<Config, 'project'>>): ProjectView {
   const p = projectOf(cfg);
@@ -543,6 +548,11 @@ export interface Config {
    * parts of the agents' briefs. Unset keys keep Final Factory's briefs exactly.
    */
   project?: Partial<ProjectConfig>;
+  /**
+   * w17: the privacy guards (server/readAccess.ts: a member reads only their own chats and requests). Absent: on for every
+   * factory but Final Factory, whose owners decide (Ben and Lothsahn). privacyGuardsOn reads it.
+   */
+  privacyGuards?: boolean;
   /** Folders (relative to a sandbox or a machine's clone; `*` = any one folder) the Screenshots gallery lists. See server/images.ts. */
   screenshotDirs?: string[];
   /**

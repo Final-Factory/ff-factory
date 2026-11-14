@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { HOST_ROLES, configPath, loadConfig, projectView, machineActivityPause, machinePersonPlay, machineCleanupSettings, pruneRetiredConfig, publicIdentityOf, retiredKeysLine, ROOT } from './config.ts';
+import { HOST_ROLES, configPath, loadConfig, privacyGuardsOn, projectView, machineActivityPause, machinePersonPlay, machineCleanupSettings, pruneRetiredConfig, publicIdentityOf, retiredKeysLine, ROOT } from './config.ts';
 import { migrateConfig, retireOldTokenFile, secretsDirOf } from './configMigration.ts';
 import { Store, bus, emit } from './store.ts';
 import { SessionManager, compactCommand, isMidTurn, seedSdkCost, snapshotOf } from './sessions.ts';
@@ -47,7 +47,7 @@ import { listImages, MEDIA_TYPE, openVideo, parseRange, readImage, VIDEO_FILE } 
 import { VideoPreviews } from './videoPreview.ts';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { keepMessageImages } from './inlineImages.ts';
-import { AttachmentError, AttachmentStore, downloadDisposition, machineAttachment, machineUploadHttp, publicRef } from './attachments.ts';
+import { AttachmentError, AttachmentStore, type AttachmentRecord, downloadDisposition, machineAttachment, machineUploadHttp, publicRef } from './attachments.ts';
 import { TimedRuns } from './timedRuns.ts';
 import { LabFixtures } from './labFixtures.ts';
 import { BenchHoursStore } from './benchHoursStore.ts';
@@ -61,6 +61,7 @@ import { UNIT_WATCHDOG_FILE, UnitWatchdogMonitor, fileUnitWatchdog } from './uni
 import { dataRecoveries, describeRecovery } from './durable.ts';
 import { DispatcherChatRefused, PermissionAnswerRefused } from './orchestrators.ts';
 import { OPS_LIMITS, OPS_PEOPLE, OPS_REFUSED } from './opsWorker.ts';
+import { NOT_YOURS, ReadScope, type ReadPolicy } from './readAccess.ts';
 import { backupMemory, healMemory, MEMORY_TRASH_DAYS, memoryDirFor, memoryRootOf, pruneMemoryTrash } from './orchestratorMemory.ts';
 import { deleteLogin, serveLoginDeletes } from './loginDelete.ts';
 import { describeMemoryGit, versionMemory } from './memoryGit.ts';
@@ -621,11 +622,37 @@ function requesterOf(req: http.IncomingMessage) {
 }
 
 /**
+ * w17 (server/readAccess.ts): what a person reads. An owner reads everything; a member their own orchestrator and the
+ * workers, reports and files of the requests they are on. Off for a portal whose privacy guards are off (privacyGuardsOn).
+ * A page or a broadcast asks often, so each person's scope is kept a second.
+ */
+const readPolicy: ReadPolicy = { get on() { return privacyGuardsOn(cfg); }, roleOf: (u) => identity.get(u)?.role, work: () => store.work.values() };
+const scopes = new Map<string, { at: number; scope: ReadScope }>();
+/** `undefined`: the portal itself, or a page with sign-in off, which reads everything. */
+function scopeOf(user: string | undefined): ReadScope {
+  if (!user) return new ReadScope({ ...readPolicy, on: false }, undefined);
+  const id = user;
+  const now = Date.now();
+  const hit = scopes.get(id);
+  if (hit && now - hit.at < 1_000) return hit.scope;
+  const scope = new ReadScope(readPolicy, id);
+  scopes.set(id, { at: now, scope });
+  return scope;
+}
+const scopeFor = (req: http.IncomingMessage) => scopeOf(auth.user(req));
+const sessionInfo = (id: string) => store.sessions.get(id);
+/** Refuse a session the person may not read: its transcript, its files, and every change to it. */
+function mayRead(req: http.IncomingMessage, s: SessionInfo | undefined) {
+  if (!scopeFor(req).session(s)) throw new HttpError(403, NOT_YOURS);
+}
+
+/**
  * Who may drive an orchestrator (docs/orchestrators.md): a person's own only by that person, the dispatcher's controls
  * (permissions, mode, interrupt) only by an owner. Nobody writes the dispatcher a message (the message route refuses it).
  * So one person's chat never gets the other's messages, and nobody spends someone else's Claude account.
  */
 function mayDrive(req: http.IncomingMessage, s: SessionInfo) {
+  mayRead(req, s);
   // The orchestration worker (w597): only Lothsahn and Ben interrupt it from the page; nobody writes to it there.
   if (s.kind === 'ops') {
     if (!OPS_PEOPLE.includes(requesterOf(req).userId.toLowerCase())) throw new HttpError(403, OPS_REFUSED);
@@ -1039,11 +1066,13 @@ function appState(user: string | undefined): AppState {
   const u = auth.userInfo(user);
   const me = u ?? { ...identity.owner(), role: 'owner' as const };
   const mine = agents.orchestrators.personalFor(me);
+  // w17: a member's page carries only what they may read (server/readAccess.ts).
+  const scope = scopeOf(u?.userId);
   return {
     app: appNow(),
-    sessions: [...store.sessions.values()],
+    sessions: [...store.sessions.values()].filter((s) => scope.session(s)),
     standingAgents: agents.standing.list(),
-    delegations: [...store.delegations.values()],
+    delegations: [...store.delegations.values()].filter((d) => scope.delegation(d)),
     machines: machines.list().map(machineView),
     providers: providers.enabled || providers.summary().tokenSet ? [providers.summary()] : [],
     ffbox: providers.summary(),
@@ -1056,8 +1085,8 @@ function appState(user: string | undefined): AppState {
     orchestratorId: mine.info.id,
     dispatcherId: agents.dispatcherId,
     me,
-    work: agents.orchestrators.forPage(),
-    reports: reports.all(),
+    work: agents.orchestrators.forPage().filter((w) => scope.workItem(w)),
+    reports: reports.all().filter((r) => scope.report(r, sessionInfo)),
     room: agents.roomNow(),
     ...agents.roomExtras(),
     intake: intake.summary(),
@@ -1376,8 +1405,8 @@ route('GET', '/api/spend/report', async (_r, _m, url) => {
 });
 route('POST', '/api/usage/refresh', async () => ({ started: usage.refreshNow(), machines: machines.requestUsage() }));
 
-route('GET', '/api/sessions/([\\w-]+)/events', async (_r, [id], url) => {
-  sessions.get(id);
+route('GET', '/api/sessions/([\\w-]+)/events', async (req, [id], url) => {
+  mayRead(req, sessions.get(id).info);
   // from=<seq>: everything from there on (a search hit older than the usual last 500).
   const from = Number(url.searchParams.get('from'));
   if (from > 0) return store.readTranscriptFrom(id, from);
@@ -1386,9 +1415,11 @@ route('GET', '/api/sessions/([\\w-]+)/events', async (_r, [id], url) => {
 
 // ---- transcript search (server/search.ts)
 
-route('GET', '/api/search', async (_r, _p, url) => {
+route('GET', '/api/search', async (req, _p, url) => {
   const q = url.searchParams;
+  const scope = scopeFor(req);
   return agents.search({
+    ...(scope.all ? {} : { visible: (s: SessionInfo) => scope.session(s) }),
     query: need(q.get('q'), 'q'),
     sandbox: q.get('sandbox') || undefined,
     machine: q.get('machine') || undefined,
@@ -1407,6 +1438,7 @@ const SENDS_KEPT_MS = 10 * 60_000;
 const takenSends = new Map<string, number>();
 
 route('POST', '/api/sessions/([\\w-]+)/message', async (req, [id]) => {
+  mayRead(req, sessions.get(id).info);
   // The page has no input here; a direct POST gets this error.
   agents.orchestrators.refuseHumanChat(sessions.get(id).info);
   // Images come base64 in the JSON (the UI shrinks them first), so this body may be large.
@@ -1629,17 +1661,24 @@ route('DELETE', '/api/attachments/uploads/([a-f0-9]{32})', async (_r, [uploadId]
   attachments.cancel(uploadId);
   return {};
 });
-route('GET', '/api/attachments/(att_[a-z0-9]{12})', async (_r, [id]) => {
+/** w17: a member reads the files they uploaded and those of the sessions, requests and reports they read. */
+function mayReadAttachment(req: http.IncomingMessage, a: AttachmentRecord) {
+  if (!scopeFor(req).attachment(a, sessionInfo, () => reports.all())) throw new HttpError(403, NOT_YOURS);
+}
+route('GET', '/api/attachments/(att_[a-z0-9]{12})', async (req, [id]) => {
   const [a] = attachments.resolve([id]);
+  mayReadAttachment(req, a);
   return { ...publicRef(a), createdAt: a.createdAt, lastUsedAt: a.lastUsedAt, ...(a.uploadedBy ? { uploadedBy: a.uploadedBy } : {}) };
 });
 // Always a download, as bytes: never shown in the page (an HTML or SVG file must not run here).
-route('GET', '/api/attachments/(att_[a-z0-9]{12})/download', async (_r, [id]) => {
+route('GET', '/api/attachments/(att_[a-z0-9]{12})/download', async (req, [id]) => {
   const [a] = attachments.resolve([id]);
+  mayReadAttachment(req, a);
   return new StreamReply('application/octet-stream', attachments.pathOf(a), a.size, downloadDisposition(a.name));
 });
 
-route('GET', '/api/uploads/([\\w-]+)/([\\w-]+)', async (_r, [sessionId, imageId]) => {
+route('GET', '/api/uploads/([\\w-]+)/([\\w-]+)', async (req, [sessionId, imageId]) => {
+  mayRead(req, sessionInfo(sessionId));
   const f = store.imagePath(sessionId, imageId);
   if (!f) {
     // Removed by the media retention (w2268): its words where the picture was, never a broken image.
@@ -1655,14 +1694,21 @@ route('GET', '/api/uploads/([\\w-]+)/([\\w-]+)', async (_r, [sessionId, imageId]
  * (`session`: for that session, whose own temp folder it adds).
  */
 type ImageRoots = { machine?: string; session?: string; roots: string[] };
-function imageRoots(url: URL, file?: string): ImageRoots {
+function imageRoots(url: URL, file: string | undefined, scope: ReadScope): ImageRoots {
   // Review media (docs/review.md) is on this computer whoever published it, a worker on a machine included.
-  if (file && review.contains(file)) return { roots: [review.root] };
+  // w17: a member sees the topics their requests published to (WorkItem.reviewTopics).
+  if (file && review.contains(file)) {
+    if (!scope.reviewTopic(path.relative(review.root, path.resolve(file)).split(path.sep)[0])) throw new HttpError(403, NOT_YOURS);
+    return { roots: [review.root] };
+  }
   const sessionId = url.searchParams.get('session');
   const machineId = url.searchParams.get('machine');
-  if (machineId) return { machine: machines.require(machineId).id, roots: [] };
+  if (machineId) {
+    if (!scope.all) throw new HttpError(403, "a machine's own files are for the owners; a member sees their workers' and their requests' review media");
+    return { machine: machines.require(machineId).id, roots: [] };
+  }
   if (!sessionId) throw new HttpError(400, 'give session or machine');
-  return sessionImageRoots(sessionId, file);
+  return sessionImageRoots(sessionId, file, scope);
 }
 
 /**
@@ -1670,15 +1716,20 @@ function imageRoots(url: URL, file?: string): ImageRoots {
  * everything: the base clone, every sandbox and standing agent folder, and (for a path under a machine's clone or
  * home) that machine's own folders, which its daemon checks.
  */
-function sessionImageRoots(sessionId: string, file?: string): ImageRoots {
+function sessionImageRoots(sessionId: string, file: string | undefined, scope: ReadScope): ImageRoots {
   const s = sessions.get(sessionId).info;
+  if (!scope.session(s)) throw new HttpError(403, NOT_YOURS);
   if (s.machineId) return { machine: s.machineId, session: s.id, roots: [] };
   const temp = sessionTempDir(os.tmpdir(), s.id);
   if (s.standingId) return { roots: [agents.standing.require(s.standingId).folder, temp] };
   if (s.kind === 'orchestrator') {
     // A worker's still in its own temp folder on a machine (w2576): read as that worker, whose folder its daemon allows.
     const owner = file ? sessions.sessions.get(tempFolderSession(file) ?? '')?.info : undefined;
+    if (owner && !scope.session(owner)) throw new HttpError(403, NOT_YOURS);
     if (owner?.machineId) return { machine: owner.machineId, session: owner.id, roots: [] };
+    // w17: the base clone, every sandbox and every machine are the owners'; a member's orchestrator shows its workers' own
+    // temp folders (above) and review media.
+    if (!scope.all) throw new HttpError(403, "a member's orchestrator shows its workers' files and review media, not every sandbox's");
     const onMachine = file ? machineForPath(file, machines.list()) : undefined;
     if (onMachine) return { machine: onMachine.id, roots: [] };
     return { roots: [cfg.repo.basePath, cfg.sandboxRoot, cfg.standingRoot] };
@@ -1691,11 +1742,11 @@ const PREVIEW_WAIT_MS = 30_000;
 
 const readImageIn = (where: ImageRoots, file: string) => (where.machine ? machines.readImage(where.machine, file, where.session) : Promise.resolve(readImage(file, where.roots)));
 
-route('GET', '/api/image', async (_r, _p, url) => {
+route('GET', '/api/image', async (req, _p, url) => {
   const file = need(url.searchParams.get('path'), 'path');
   let where: ImageRoots;
   try {
-    where = imageRoots(url, file);
+    where = imageRoots(url, file, scopeFor(req));
   } catch (e) {
     console.log(`[image] refused ${file} (session ${url.searchParams.get('session') ?? 'none'}): ${(e as Error).message}`);
     throw e;
@@ -1754,17 +1805,26 @@ const reportCall = <T>(f: () => T): T => {
     throw e;
   }
 };
-route('GET', '/api/reports/search', async (_r, _p, url) => {
+/** w17: a member reads the reports of the requests they are on. */
+function mayReadReport(req: http.IncomingMessage, id: string) {
+  const r = reports.all().find((x) => x.id === id);
+  if (r && !scopeFor(req).report(r, sessionInfo)) throw new HttpError(403, NOT_YOURS);
+}
+route('GET', '/api/reports/search', async (req, _p, url) => {
   const q = (k: string) => url.searchParams.get(k)?.trim() || undefined;
   const kind = q('kind');
   if (kind && !isReportKind(kind)) throw new HttpError(400, `kind: unknown report kind ${kind}`);
-  return reportCall(() => reports.search({ query: q('q'), kind, request: q('request'), person: q('person'), since: q('since'), until: q('until') }));
+  const scope = scopeFor(req);
+  const hits = reportCall(() => reports.search({ query: q('q'), kind, request: q('request'), person: q('person'), since: q('since'), until: q('until') }));
+  return scope.all ? hits : hits.filter((h) => scope.report(h.report, sessionInfo));
 });
-route('GET', '/api/reports/(r[0-9]+)', async (_r, [id], url) => {
+route('GET', '/api/reports/(r[0-9]+)', async (req, [id], url) => {
+  mayReadReport(req, id);
   const rev = url.searchParams.get('rev');
   return reportCall(() => reports.get(id, rev ? Number(rev) : undefined));
 });
-route('GET', '/api/reports/(r[0-9]+)/media/([^/]+)', async (_r, [id, name]) => {
+route('GET', '/api/reports/(r[0-9]+)/media/([^/]+)', async (req, [id, name]) => {
+  mayReadReport(req, id);
   const file = reports.mediaFile(id, decodeURIComponent(name));
   if (!file) throw new HttpError(404, `${id} keeps no file ${name}`);
   try {
@@ -1779,8 +1839,8 @@ route('GET', '/api/reports/(r[0-9]+)/media/([^/]+)', async (_r, [id, name]) => {
   }
 });
 
-route('GET', '/api/screenshots', async (_r, _p, url) => {
-  const where = imageRoots(url);
+route('GET', '/api/screenshots', async (req, _p, url) => {
+  const where = imageRoots(url, undefined, scopeFor(req));
   if (where.machine) return machines.listImages(where.machine, cfg.screenshotDirs);
   return listImages(where.roots[0], cfg.screenshotDirs, 120, { videos: true });
 });
@@ -1788,6 +1848,7 @@ route('GET', '/api/screenshots', async (_r, _p, url) => {
 route('POST', '/api/sessions/([\\w-]+)/title', async (req, [id]) => {
   const { title } = await readJson<{ title?: string }>(req);
   const s = sessions.get(id);
+  mayRead(req, s.info);
   if (s.info.kind === 'standing') throw new HttpError(400, "a standing agent's conversation carries the agent's name; rename the agent instead");
   if (s.info.kind === 'orchestrator') throw new HttpError(400, "an orchestrator's name is its person's (or Dispatcher)");
   if (s.info.kind === 'ops') throw new HttpError(400, 'the orchestration worker keeps its name');
@@ -1854,8 +1915,9 @@ route('POST', '/api/sessions', async (req) => {
   return s.info;
 });
 
-route('DELETE', '/api/sessions/([\\w-]+)', async (_r, [id]) => {
+route('DELETE', '/api/sessions/([\\w-]+)', async (req, [id]) => {
   const s = sessions.get(id);
+  mayRead(req, s.info);
   if (s.info.kind === 'orchestrator') throw new HttpError(400, 'reset the orchestrator instead');
   if (s.info.kind === 'standing') throw new HttpError(400, "this is a standing agent's conversation; delete the agent instead");
   if (s.info.kind === 'ops') throw new HttpError(400, 'the orchestration worker is fixed: stop it instead (its conversation stays)');
@@ -2554,6 +2616,25 @@ const freeKey = (v: Machine) => (v.sandboxes ?? []).map((sb) => `${sb.id}:${sb.f
 setInterval(() => {
   for (const m of machines.list()) if (freeSent.get(m.id) !== freeKey(machineView(m))) emit({ type: 'machine', machine: m });
 }, 5_000).unref();
+/** w17: whether a page whose person has `scope` gets this event: a member's page only what they may read. */
+function mayReadEvent(scope: ReadScope, e: ServerEvent): boolean {
+  if (scope.all) return true;
+  switch (e.type) {
+    case 'session':
+      return scope.session(e.session);
+    case 'transcript':
+    case 'delta':
+      return scope.session(sessionInfo(e.sessionId));
+    case 'report':
+      return scope.report(e.report, sessionInfo);
+    case 'work':
+      return scope.workItem(e.item);
+    case 'delegation':
+      return scope.delegation(e.request);
+    default:
+      return true;
+  }
+}
 function broadcast(e: ServerEvent) {
   if (e.type === 'machine') {
     const machine = machineView(e.machine);
@@ -2567,7 +2648,9 @@ function broadcast(e: ServerEvent) {
   const data = JSON.stringify(e);
   // A notice for some people only reaches their pages (docs/orchestrators.md: no interruptions).
   const only = e.type === 'notify' && e.users ? new Set(e.users.map((u) => u.toLowerCase())) : undefined;
-  for (const [c, user] of clients) if (c.readyState === c.OPEN && (!only || only.has(user.toLowerCase()))) c.send(data);
+  // w17: a request's people or its workers changed, so who reads what may have too.
+  if (e.type === 'work' || e.type === 'session') scopes.clear();
+  for (const [c, user] of clients) if (c.readyState === c.OPEN && (!only || only.has(user.toLowerCase())) && mayReadEvent(scopeOf(user), e)) c.send(data);
 }
 bus.on('event', broadcast);
 // A removed session's own temp folder goes with it (docs/self-recovery.md "Per-agent hygiene").
@@ -2579,7 +2662,7 @@ bus.on('event', (e: ServerEvent) => {
 bus.on('event', (e: ServerEvent) => {
   if (e.type !== 'transcript' || e.event.kind !== 'assistant' || e.event.images) return;
   const { sessionId, event } = e;
-  void keepMessageImages(store, sessionId, event, (file) => readImageIn(sessionImageRoots(sessionId, file), file)).catch(() => undefined);
+  void keepMessageImages(store, sessionId, event, (file) => readImageIn(sessionImageRoots(sessionId, file, scopeOf(undefined)), file)).catch(() => undefined);
 });
 
 setInterval(() => {

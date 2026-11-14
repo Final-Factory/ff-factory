@@ -158,6 +158,8 @@ fs.writeFileSync(
       dataDir,
       sandboxRoot,
       review: { root: reviewRoot },
+      // w17: E2E_PRIVACY=1 turns the privacy guards on (server/readAccess.ts); off here as for Final Factory otherwise.
+      ...(process.env.E2E_PRIVACY === '1' ? { privacyGuards: true } : {}),
       // The token vault (docs/vault.md, e2e/vault.spec.ts): its key outside data/, readable by its owner only.
       // Work nobody asked for by name (intake, FFBox, the nightly run) runs on the tester's tokens: the vault holds nobody else's here.
       vault: { keyFile: path.join(base, 'vault.key'), unattributed: { intake: USER, ffbox: USER, nightly: USER } },
