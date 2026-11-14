@@ -27,7 +27,7 @@
 //
 // Its state and log are beside the list: update-all.json, update-all.log. No npm package: it runs before npm ci.
 //
-//   node scripts/instance/update-all.ts --list <instances.json> [--dry-run] [--no-self]
+//   node scripts/instance/update-all.ts --list <instances.json> [--only a,b] [--dry-run] [--no-self]
 
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -481,10 +481,17 @@ async function main() {
   const opt = (k: string) => (args.includes(k) ? args[args.indexOf(k) + 1] : undefined);
   const listFile = opt('--list');
   if (!listFile) {
-    console.error('usage: node scripts/instance/update-all.ts --list <instances.json> [--dry-run] [--no-self]');
+    console.error('usage: node scripts/instance/update-all.ts --list <instances.json> [--only a,b] [--dry-run] [--no-self]');
     process.exit(2);
   }
   const l = readList(listFile);
+  // --only a,b: roll just these (a first roll by hand, instance by instance, each when its workers are between turns).
+  const only = opt('--only')?.split(',').filter(Boolean);
+  if (only) {
+    const unknown = only.filter((n) => !l.instances.some((i) => i.name === n));
+    if (unknown.length) throw new Error(`--only: not in the list: ${unknown.join(', ')}`);
+    l.instances = l.instances.filter((i) => only.includes(i.name));
+  }
   const dir = path.dirname(path.resolve(listFile));
   const stateFile = path.join(dir, 'update-all.json');
   const lock = path.join(dir, 'update-all.lock');

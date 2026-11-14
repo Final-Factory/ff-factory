@@ -38,7 +38,7 @@ node scripts/instance/update-all.ts --list F:/ffw/instances/instances.json
    change. The updater never edits a config.
 
 State and log: `update-all.json` and `update-all.log` beside the list; a lock file there keeps two passes from overlapping.
-`--dry-run` says what it would roll and changes nothing.
+`--dry-run` says what it would roll and changes nothing; `--only a,b` rolls just those instances (a roll by hand).
 
 ## What it does not change
 
