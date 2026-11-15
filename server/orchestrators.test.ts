@@ -18,7 +18,7 @@ import { handoverNote, isOpen, requestAsFiled, requestNotice } from './work.ts';
 import { BlockerWatch, ghMerge, notMergeableRefusal, remergeJob, REPORTED_WAIT_MS } from './blockerWatch.ts';
 import { noteBudget, resetBudgets } from './ghBudget.ts';
 import { poolForRef, type GatePoolToken } from './usageGate.ts';
-import { personForWork, sessionPerson, setVaultContext } from './vault.ts';
+import { inheritedPayer, personForWork, sessionPerson, setVaultContext } from './vault.ts';
 import { fakeToken, useFakeVault } from './testVault.ts';
 import { parseNotice } from '../shared/notices.ts';
 import { diskWaitIn, holdsOf, portalWaitIn, requestWaitOf, siblingWaitOf } from '../shared/workState.ts';
@@ -10413,4 +10413,43 @@ test('w3740: the portal notes each worker\'s last game player or exclusive ticke
   assert.deepEqual(recentPlayers(seen, ['7d906e95-full-id', 'eeee'], drop), { '7d906e95-full-id': 'its "running player pid 57328 slot 0" ticket there, last seen 21:33Z' });
   assert.deepEqual(recentPlayers(seen, ['7d906e95'], t0 + CRASH_HOLD_WINDOW_MS + 1), {}, 'past the half hour: no hold');
   assert.equal(riskyTicket({ mode: 'shared', what: 'running player pid 2', session: 'editor:slot1' }), false);
+});
+
+test("w4306: the nightly schedule's run, a pair run and a timed leg filed from it all run on the pool vault.unattributed.nightly names, though the run names lothsahn (systemPayer)", async (t) => {
+  const { cfg, store, agents, o, dispatcher, call } = await setupOnMachine(t);
+  agentsRoom(agents, ['pc']);
+  (cfg as unknown as Config).vault = { unattributed: { nightly: 'ben' } };
+  // w1 stands for w4303 (Nightly e2e run 2026-11-15): filed for intake.nightly.run.person, lothsahn, so not unattributed.
+  putRequests(store, [{ id: 'w1', title: 'Nightly e2e run 2026-11-15 on pc', status: 'active', humanAsked: false }]);
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Run the nightly lab', title: 'w1: nightly', work_id: 'w1' });
+  assert.equal(started.isError, false, started.text);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  await until('its first turn', () => store.sessions.get(id)!.status === 'idle');
+  // Its source set after the echo worker's first turn, whose echo of the nightly intake rules would close it.
+  store.putWork({ ...store.work.get('w1')!, source: { kind: 'nightly-run', untrusted: false, channel: 'nightly e2e', nightlyRun: { date: '2026-11-15', machine: 'pc' } } });
+  assert.equal(personForWork(cfg as unknown as Config, store.work.get('w1')!), 'ben', 'the run itself');
+  o.filePair(id, { what: 'MP desync pair', brief: 'Run the MP desync pair on master.' });
+  const pair = [...store.work.values()].find((w) => w.pair?.for === 'w1')!;
+  assert.equal(pair.requestedBy.userId, 'lothsahn', 'the ledger still shows whom the night is for');
+  assert.equal(personForWork(cfg as unknown as Config, pair), 'ben', 'its pair run');
+  const leg = store.work.get(o.fileTimedLeg(id, { what: 'frametime A/B', brief: 'Time master and the fix.', from: 'pc', needs: ['biscuit'], why: 'pc is big' }).id)!;
+  assert.equal(leg.timedLeg?.for, 'w1');
+  assert.equal(personForWork(cfg as unknown as Config, leg), 'ben', 'its timed leg');
+  // Without the mapping, the default (lothsahn, w1031) applies to all three.
+  (cfg as unknown as Config).vault = {};
+  assert.deepEqual([store.work.get('w1')!, pair, leg].map((w) => personForWork(cfg as unknown as Config, w)), ['lothsahn', 'lothsahn', 'lothsahn']);
+});
+
+test('w4306: a pair run or timed leg of other nobody\'s work keeps its kind (intake, ffbox), and one of a request a person took over runs for them', () => {
+  const cfg = { vault: { unattributed: { intake: 'ben', ffbox: 'ben' } } };
+  const base = { requestedBy: LOTH, unattributed: true };
+  const intake: Partial<WorkItem> = { ...base, source: { kind: 'discord-bug', untrusted: true } };
+  const ffbox: Partial<WorkItem> = { ...base, source: { kind: 'ffbox-request', untrusted: true } };
+  for (const parent of [intake, ffbox]) {
+    const child = { requestedBy: LOTH, ...inheritedPayer(parent as WorkItem) };
+    assert.equal(personForWork(cfg, child), 'ben', `a child of ${parent.source!.kind}`);
+  }
+  const taken = { ...intake, runsFor: { userId: 'maya', displayName: 'Maya', at: T0, why: 'answered its question' } };
+  assert.equal(personForWork(cfg, { requestedBy: LOTH, ...inheritedPayer(taken as WorkItem) }), 'maya');
+  assert.deepEqual(inheritedPayer({ requestedBy: BEN } as WorkItem), {}, "a person's own request: its children are theirs by requestedBy");
 });

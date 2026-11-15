@@ -81,7 +81,7 @@ import { holdsItsPlace, stoppedOffline } from '../shared/agentState.ts';
 import { displayName } from '../shared/labels.ts';
 import { permissionAccess, permissionWhat, type PermissionAccess } from '../shared/permissionAccess.ts';
 import { OPS_ID, OPS_PEOPLE } from './opsWorker.ts';
-import { isSamePerson, personForWork, sessionPerson, tokenPersonForWork } from './vault.ts';
+import { inheritedPayer, isSamePerson, personForWork, sessionPerson, tokenPersonForWork } from './vault.ts';
 import { MERGE_ON_GREEN_MARK } from './mergeOnGreen.ts';
 import { handoffQuote, handoffReport, isHandoff } from './handoffReport.ts';
 import { commitsIn, normPr, pairCommitsOf, pairPrOf, pairRanCommit, prIn, resultFor, sameCommit, samePr } from './pairRuns.ts';
@@ -5023,6 +5023,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       relatedIds: [w.id],
       keys: textKeys(title, this.knownBranches()),
       requestedBy: w.requestedBy,
+      ...inheritedPayer(w),
       requesters: [...w.requesters],
       humanAsked: false,
       status: 'queued',
@@ -5287,6 +5288,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       relatedIds: [w.id],
       keys: textKeys(title, this.knownBranches()),
       requestedBy: w.requestedBy,
+      ...inheritedPayer(w),
       requesters: [...w.requesters],
       humanAsked: false,
       status: 'new',

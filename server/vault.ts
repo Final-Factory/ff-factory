@@ -126,11 +126,26 @@ export const UNATTRIBUTED_DEFAULTS: Readonly<Record<UnattributedKind, string>> =
 export const NIGHTLY_SENTRY = 'nightly-regression-sentry';
 
 /** Which kind of nobody's work a request is, or undefined when a person asked for it. */
-export function unattributedKind(w: Pick<WorkItem, 'source' | 'delegation' | 'unattributed'>): UnattributedKind | undefined {
+export function unattributedKind(w: Pick<WorkItem, 'source' | 'delegation' | 'unattributed' | 'unattributedAs'>): UnattributedKind | undefined {
   if (w.delegation?.agentId === NIGHTLY_SENTRY) return 'nightly';
-  if (!w.unattributed || !w.source) return undefined;
-  const k = w.source.kind;
-  return k === 'nightly-run' || k === 'nightly-review' ? 'nightly' : k.startsWith('ffbox-') ? 'ffbox' : 'intake';
+  const k = w.source?.kind;
+  // w4306: the nightly schedule's run and review are nightly work even when config intake.nightly.run.person (or .review's)
+  // names whom they are for: that person hears a missing night; the pool is the one vault.unattributed.nightly names.
+  if (k === 'nightly-run' || k === 'nightly-review') return 'nightly';
+  if (w.unattributed && w.unattributedAs) return w.unattributedAs;
+  if (!w.unattributed || !k) return undefined;
+  return k.startsWith('ffbox-') ? 'ffbox' : 'intake';
+}
+
+/**
+ * Whose pool a request filed from `w` for its own worker (its pair run, its timed leg) runs on (w4306): w's. A person who
+ * took w over carries over (runsFor); nobody's work keeps its kind, so vault.unattributed still names the pool. Before,
+ * such a child copied only w's requestedBy, the system payer for nobody's work.
+ */
+export function inheritedPayer(w: Pick<WorkItem, 'source' | 'delegation' | 'unattributed' | 'unattributedAs' | 'runsFor'>): Pick<WorkItem, 'runsFor' | 'unattributed' | 'unattributedAs'> {
+  if (w.runsFor) return { runsFor: { ...w.runsFor } };
+  const kind = unattributedKind(w);
+  return kind ? { unattributed: true, unattributedAs: kind } : {};
 }
 
 /** The user id whose vault tokens a kind of nobody's work runs on: config vault.unattributed, else the defaults. */
@@ -142,7 +157,7 @@ export const unattributedPerson = (cfg: { vault?: { unattributed?: Partial<Recor
  * answered, approved, declined, noted, reopened or reprioritised it, or joined it), else the configured person for work
  * nobody asked for by name, else undefined (the run's own person: its requester, which for a request is whoever filed it).
  */
-export function tokenPersonForWork(cfg: { vault?: { unattributed?: Partial<Record<UnattributedKind, string>> } }, w: Pick<WorkItem, 'source' | 'delegation' | 'unattributed' | 'runsFor'> | undefined): string | undefined {
+export function tokenPersonForWork(cfg: { vault?: { unattributed?: Partial<Record<UnattributedKind, string>> } }, w: Pick<WorkItem, 'source' | 'delegation' | 'unattributed' | 'unattributedAs' | 'runsFor'> | undefined): string | undefined {
   if (w?.runsFor) return w.runsFor.userId;
   const kind = w ? unattributedKind(w) : undefined;
   return kind ? unattributedPerson(cfg, kind) : undefined;
@@ -151,7 +166,7 @@ export function tokenPersonForWork(cfg: { vault?: { unattributed?: Partial<Recor
 type UnattributedCfg = { vault?: { unattributed?: Partial<Record<UnattributedKind, string>> } };
 
 /** The person whose Claude pool and GitHub token every turn on `w` runs on (w1076): tokenPersonForWork, else its requester. */
-export const personForWork = (cfg: UnattributedCfg, w: Pick<WorkItem, 'source' | 'delegation' | 'unattributed' | 'runsFor' | 'requestedBy'>): string =>
+export const personForWork = (cfg: UnattributedCfg, w: Pick<WorkItem, 'source' | 'delegation' | 'unattributed' | 'unattributedAs' | 'runsFor' | 'requestedBy'>): string =>
   tokenPersonForWork(cfg, w) ?? w.requestedBy.userId;
 
 /**
