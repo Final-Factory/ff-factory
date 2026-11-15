@@ -25,11 +25,11 @@ import { idleClosedPart } from './liveIdle.ts';
 import { topPriority, type Pressure } from './priorityReclaim.ts';
 import { HOLD_PLACE_MS, LIVE_HOLD_MS, PlaceAgain, RELEASE_AFTER_MS, RELEASE_WAKE_NOTE, handOverBranch, occupies, releasedOn, type PairWant } from './placeAgain.ts';
 import { agentQueueAll, agentQueueFacts, editorSlotRefusal, queueWaitsAll } from '../shared/queueWaits.ts';
-import { pairWaitLine, pairWaitNotice } from './pairRuns.ts';
+import { otherComputerOf, pairStepLine, pairWaitLine, pairWaitNotice } from './pairRuns.ts';
 import { WORK_LIVE_LABEL, WORK_LIVE_STATES, asksAPerson, benchWaitOf, lastOpenLine, liveCounts, otherWorkWait, outsideDeclared, outsideWaitOf, ownWorkWait, noTimedWaitOf, orchestratorAskIn, restartWait, personWaitIn, reportWaitKey, holdsOf, servedBy, workLiveAll, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
 import { prsIn, reportTail, whoOf, type NeedsYouWait } from './needsYou.ts';
 import { addedLines, asksLookOk, decidedRefusal, notesSettle, personNotes, quoteCovered, quotedPhrases, relatedRequests, settledRefusal } from './priorDecisions.ts';
-import { stillOpenIn } from './ledgerRules.ts';
+import { statusLinesIn, stillOpenIn } from './ledgerRules.ts';
 import { inlineReviewMedia, MEDIA_FILE, outsideReview, publishedCopy, reviewRootOf } from './reviewMedia.ts';
 import { visualAskCheck } from './visualAsk.ts';
 import { BLOCKER_KIND_HELP, conflictText, FULL_SHA, gateSetter, gatesName, gatesOf, isWith, latestWorker, newestFirst, prLabel, prRefOf, type PrHealth } from '../shared/blockers.ts';
@@ -2881,6 +2881,8 @@ export class Agents {
     // w2625: one that waits for someone to restart its agent host or tools is told none is needed, on new code at once.
     this.restartWaitNudge(s.info, text);
     this.pairWaitNudge(s.info, text);
+    // w4225: a leg it says needs another computer ("ready for stills, needs a non-m3 computer") is queued for one.
+    this.readyLegQueue(s.info, text);
     this.ownWorkNudge(s.info, text);
     // w1996: a turn that ends waiting on a computer that takes no timed runs (m5) for timed work is re-placed at once.
     this.noTimedWaitNudge(s.info, text);
@@ -2910,19 +2912,53 @@ export class Agents {
    * report line would put two computers' workers on a guess. Its own-work nudge (w1841) is then not sent for the same line.
    */
   private pairWaitNudge(info: SessionInfo, text: string) {
-    for (const [id, line] of stillOpenIn(text)) {
+    // w4225: its "ready for" lines too, and a still-open line that names a pair run with no wait word ("pair run, stills and
+    // CI on PR #3628 before the merge"): w4207 sat Stalled 2 h on those, as only a wait on a pair run was read.
+    for (const [id, lines] of statusLinesIn(text)) {
       // A wait on the orchestrator to run it is the own-work nudge's (w1841), which names request_pair too.
-      if (!pairWaitLine(line) || ownWorkWait(line) || restartWait(line)) continue;
-      const key = `${info.id}:${id}`;
-      if (this.ownWorkTold.has(key)) continue;
-      if (this.orchestrators.pairFiledFor(id)) continue;
+      const line = lines.find((l) => (pairWaitLine(l) || pairStepLine(l)) && !ownWorkWait(l) && !restartWait(l));
+      if (!line) continue;
       if (!this.store.work.get(id)) continue;
+      if (this.orchestrators.pairFiledFor(id)) continue;
+      const key = `${info.id}:${id}`;
+      if (this.ownWorkTold.has(key)) {
+        // w4225: told once and stopped again with none filed: the dispatcher files it, once per request.
+        if (this.pairNudged.has(key) && !this.pairEscalated.has(id)) {
+          this.pairEscalated.add(id);
+          this.orchestrators.pairStepToDispatcher(id, info.id, line);
+        }
+        continue;
+      }
       this.ownWorkTold.add(key);
+      this.pairNudged.add(key);
       try {
         this.sessions.send(info.id, pairWaitNotice(id, line), 'system');
         this.orchestrators.ledgerEdit(id, `worker ${info.id} ended its turn waiting on a pair run with none filed ("${line.slice(0, 120)}"): told to file it with request_pair (w2057)`, () => undefined);
       } catch (e) {
         console.warn(`pair-wait nudge: could not tell ${info.id}: ${(e as Error).message}`);
+      }
+    }
+  }
+
+  /** w4225: the pair-run nudges sent ("<session>:<request>"), and the requests whose unfiled pair run went to the dispatcher. */
+  private readonly pairNudged = new Set<string>();
+  private readonly pairEscalated = new Set<string>();
+
+  /**
+   * w4225 (w4207: e14a483b ended its turn "w4207: ready for stills, needs a non-m3 computer" and its m3 sandbox went to other
+   * work, with nothing queued for 2 h): a status line whose next leg needs a computer other than named ones, while the worker
+   * set no check-in, is queued as a leg on the others (Orchestrators.queueReadyLeg), so the request reads Queued and starts by
+   * itself when one has room. A worker that set a check-in (wake_me) or waits on a person is left alone.
+   */
+  private readyLegQueue(info: SessionInfo, text: string) {
+    if (info.waitingOn || info.wakeAt) return;
+    let machines: string[] | undefined;
+    for (const [id, lines] of statusLinesIn(text)) {
+      machines ??= this.orchestrators.gameMachineIds();
+      for (const line of lines) {
+        if (pairStepLine(line)) continue;
+        const not = otherComputerOf(line, machines);
+        if (not) this.orchestrators.queueReadyLeg(id, info.id, line, not);
       }
     }
   }

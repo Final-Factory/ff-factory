@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { afterMergeReason, pairDelivers, cleanupSettings, cutOffOf, deployStep, doneProblem, isRelease, mergedMentionsIn, mergePrs, pausedIn, ownerAt, partOfIdsIn, partOfReason, postDeployStep, prsOf, prUrlsIn, reportDelivers, reportVerdict, reportWaitsOn, requestIdsIn, stallCandidate, stillOpenIn, supersededBy, supersededIn, titleIdsIn, type PrRecord } from './ledgerRules.ts';
+import { afterMergeReason, pairDelivers, cleanupSettings, cutOffOf, deployStep, doneProblem, isRelease, mergedMentionsIn, mergePrs, pausedIn, ownerAt, partOfIdsIn, partOfReason, postDeployStep, prsOf, prUrlsIn, readyForIn, reportDelivers, reportVerdict, reportWaitsOn, requestIdsIn, stallCandidate, statusLinesIn, stillOpenIn, supersededBy, supersededIn, titleIdsIn, type PrRecord } from './ledgerRules.ts';
 import { reportClip } from './sessions.ts';
 import type { WorkItem } from '../shared/types.ts';
 import { requestWaitOf } from '../shared/workState.ts';
@@ -387,4 +387,13 @@ test("w3294: a leg's still-open line that names its waiter as whom the work is f
   // A wait on the waiter itself still breaks the w2357 cycle, "for" or not.
   assert.equal(reportDelivers("w3252: still open: waiting for w3241's worker to push the fix commit", 'w3252', 'w3241'), true);
   assert.equal(reportDelivers('w3252: still open: waiting on w3241, then the timed run for w3241', 'w3252', 'w3241'), true);
+});
+
+test('w4225: "ready for" lines are read beside the still-open line, one list per request', () => {
+  const report = 'Pushed.\n\nw4207: still open: pair run, stills and CI on PR #3628 before the merge\n- **w4207: ready for stills, needs a non-m3 computer**\nw4207 — ready to merge after CI\nI was ready for w9: nothing\nw8: still open: notes';
+  assert.deepEqual([...readyForIn(report)], [['w4207', ['w4207: ready for stills, needs a non-m3 computer', 'w4207 — ready to merge after CI']]]);
+  const all = statusLinesIn(report);
+  assert.equal(all.get('w4207')![0], 'w4207: still open: pair run, stills and CI on PR #3628 before the merge');
+  assert.equal(all.get('w4207')!.length, 3);
+  assert.deepEqual(all.get('w8'), ['w8: still open: notes']);
 });

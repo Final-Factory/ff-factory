@@ -1808,6 +1808,13 @@ LothDesktop and Beast, not just when BEAST is full").
       done, every open request it serves and was not gated on it (filed for, named in `relatedIds`, or with an open PR the
       run checks: `pairServes`) has its newest worker resumed with "[ledger] Pair run wNNN ... has finished ... Its result:
       ...", or the dispatcher is told to start one. `pair.told` keeps each request told once.
+    - **A pair run named without a wait word is caught too** (w4225, lothsahn, 2026-11-14). w4207's worker e14a483b ended
+      its turn with "w4207: still open: pair run, stills and CI on PR #3628 before the merge" and "w4207: ready for the pair
+      run", filed nothing, and the request sat Stalled 2 h: `pairWaitLine` needs a wait word. `Agents.pairWaitNudge` now
+      reads every status line (`statusLinesIn`: still-open and "ready for" lines) with `pairStepLine`; a worker told once that
+      stops again with none filed goes to the dispatcher (`Orchestrators.pairStepToDispatcher`, "PAIR RUN NOT FILED").
+      `Agents.readyLegQueue` queues a "ready for stills, needs a non-m3 computer" leg on the other game computers
+      (`otherComputerOf`, `queueReadyLeg`). Test: `orchestrators.test.ts` "w4225: w4207 as it happened".
     - **The dispatcher drops a repeat.** `decide_work queue` with `pair_legs` is refused on a request that repeats a finished
       run of the same PR and commit (and notes a finished run of the PR on another commit). `pair_legs 0` clears the mark of
       a pair run whose legs never started (with `queue` on a Queued one it stays Queued as single work). `done` on a pair run

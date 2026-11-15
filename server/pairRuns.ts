@@ -78,6 +78,29 @@ const PAIR = /\bpair(?:ed)?[- ](?:run|worker|leg|check|test|machine|computer|sce
  */
 export const pairWaitLine = (line: string) => WAIT.test(line) && PAIR.test(line);
 
+/**
+ * A status line that leaves a pair run to start (w4225): a still-open or "ready for" line that names one, with a wait word
+ * or without ("w4207: still open: pair run, stills and CI on PR #3628 before the merge", "w4207: ready for the pair run").
+ * pairWaitLine took only the first kind, so w4207's worker was never told to file it and the request sat Stalled for 2 h.
+ */
+export const pairStepLine = (line: string) => PAIR.test(line);
+
+/**
+ * The computers a status line says its next leg must NOT run on (w4225: "ready for stills, needs a non-m3 computer",
+ * "needs a computer other than beast"), of the known `machines`, lower case; undefined when it names none. Only a line that
+ * says it needs a computer (or machine) counts.
+ */
+export function otherComputerOf(line: string, machines: readonly string[]): string[] | undefined {
+  if (!/\b(?:needs?|requires?|wants?)\b/i.test(line) || !/\b(?:computer|machine|pc)s?\b/i.test(line)) return undefined;
+  const known = new Set(machines.map((m) => m.toLowerCase()));
+  const out = new Set<string>();
+  for (const m of line.matchAll(/(?:\bnon-|\bother than (?:the )?|\bnot (?:on )?(?:the )?)([a-z][\w]*)/gi)) {
+    const id = m[1].toLowerCase();
+    if (known.has(id)) out.add(id);
+  }
+  return out.size ? [...out] : undefined;
+}
+
 /** What the worker is told who ends a turn waiting on a pair run its request has none of (w2057, Agents.pairWaitNudge). */
 export const pairWaitNotice = (id: string, line: string) =>
   `[FF Factory] Your report says ${id} waits on a pair run: "${line.slice(0, 200)}". No pair run is filed for ${id}, so nothing will run it and nobody will resume you: an ask in your report reaches no one (w2057; w665 waited 17 h this way). Call request_pair now (what, brief, pr and commit: the pull request and the head commit the legs run, cross_os only for w1692's reasons), then end your turn with a "${id}: still open: blocked on <the pair run>" line. When a pair run of that pull request and commit has already finished, request_pair answers with its result and files nothing; when one is open, you wait on it.`;

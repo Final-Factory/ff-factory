@@ -1015,7 +1015,11 @@ without one means it is off or failing, worth a person's look.
     computer that yielded, and no leg of a run under way is ever moved alone (w2304, "A run that loses a leg mid-run is
     re-queued whole"); one for a PR whose run is open joins it, one for a PR and
     commit whose run finished is answered with its result, and a finished run resumes every request it serves with its
-    result; a report waiting on a pair run with none filed is told to file it (w2057, "One pair run per pull request");
+    result; a report waiting on a pair run with none filed is told to file it (w2057, "One pair run per pull request"), and so is one
+    whose still-open or "wNNN: ready for ..." line names a pair run with no wait word; told once and stopped again with none
+    filed, the dispatcher is told to file it, once per request (w4225: w4207 sat Stalled 2 h on "ready for the pair run");
+    a "wNNN: ready for <leg>, needs a non-<computer> computer" line from a worker with no check-in queues that leg on the
+    other game computers (`Orchestrators.queueReadyLeg`), so the request reads Queued, not Stalled (w4225);
   - a worker that waits on the orchestrator for its own work stays Stalled and the line says so, adding "that is its own
     work" for a pair or two-machine check, a build, a test run or its CI (w1685). Such a worker is told at its turn's end,
     once per request (`Agents.ownWorkNudge`), and every worker's prompt says these are its own work.
