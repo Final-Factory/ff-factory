@@ -9,7 +9,7 @@ import { execFile } from 'node:child_process';
 import { benchQueueDir } from '../machine/benchQueue.ts';
 import { benchLockDir, pidAlive } from '../machine/benchLock.ts';
 import { holdsJob, listenerLog, readListenerLog, runnerCensus } from '../machine/benchRunners.ts';
-import { FFU_SLOTS_DIR, readSlotState } from '../machine/ffuSlots.ts';
+import { FFU_SLOT_TARGET_CAP_GB, FFU_SLOTS_DIR, readSlotState } from '../machine/ffuSlots.ts';
 
 /**
  * Leftovers inside the install folder (w899, docs/self-recovery.md "Install-folder leftovers"): what w876 had to remove
@@ -121,7 +121,7 @@ export const INSTALL_LEFTOVER_DEFAULTS: InstallLeftoverSettings = {
   libraryCopyCapGB: 40,
   timingBuildHours: 24,
   runnerWorkDays: 14,
-  ffuSlotTargetCapGB: 16,
+  ffuSlotTargetCapGB: FFU_SLOT_TARGET_CAP_GB,
   ffuSlotIdleDays: 7,
 };
 

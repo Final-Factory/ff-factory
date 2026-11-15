@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { ffuSlotMain, readSlotState, realFfuSlotDeps, slotCheckout, slotTarget, takeSlot, releaseSlot, type FfuSlotDeps } from '../machine/ffuSlots.ts';
+import { readsMoveAtime } from '../machine/cargoSweep.ts';
 import type { CleanupGuard } from './cleanup.ts';
 import { installLeftoverSettings, planInstallLeftovers, type ProcLite } from './installLeftovers.ts';
 
@@ -195,4 +196,49 @@ test('w3764: a low pass takes an unheld slot whole and only the incremental cach
   fs.writeFileSync(path.join(root, 'ffu-sandboxes', 'slots.json'), JSON.stringify({ slots: [{ id: 'slot2', holder: 'live0002' }] }));
   const p = await plan(root, { low: true, inUse: [path.join(root, 'tmp', 'ffa-live0002')] });
   assert.deepEqual(ffuItems(root, p), ['ffu-sandboxes/slot1/target', 'ffu-sandboxes/slot2/target/debug/incremental']);
+});
+
+/** A cargo unit in a slot's target, its files last read and its dirs last written `ageH` hours ago. */
+function unitIn(root: string, slot: string, name: string, hash: string, ageH: number) {
+  const p = path.join(slotTarget(root, slot), 'debug');
+  const at = new Date(NOW - ageH * HOUR);
+  const files = [path.join(p, 'deps', `lib${name}-${hash}.rlib`), path.join(p, '.fingerprint', `${name}-${hash}`, `lib-${name}`)];
+  for (const f of files) {
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(f, 'x');
+    fs.utimesSync(f, at, at);
+  }
+  return files[0];
+}
+
+function ageUnitDirs(root: string, slot: string, ageH: number) {
+  const at = new Date(NOW - ageH * HOUR);
+  for (const k of ['deps', '.fingerprint']) fs.utimesSync(path.join(slotTarget(root, slot), 'debug', k), at, at);
+}
+
+test("w4255: a new worker's take trims the slot's target of units no build read for days; a target written just now is left", (t) => {
+  const { root, remote } = world(t);
+  const a = deps(root, 'aaaa1111');
+  takeSlot(a, { branch: 'feat', remote });
+  fs.mkdirSync(slotTarget(root, 'slot1'), { recursive: true });
+  if (!readsMoveAtime(slotTarget(root, 'slot1'))) return t.skip('a re-read does not move access times on this drive (APFS): the trim skips here');
+  const old = unitIn(root, 'slot1', 'oldcrate', '00000000000000aa', 5 * 24);
+  const used = unitIn(root, 'slot1', 'usedcrate', '00000000000000bb', 1);
+  ageUnitDirs(root, 'slot1', 1);
+  assert.equal(takeSlot(a, { remote }), 'slot1');
+  assert.ok(fs.existsSync(old), 'the holder taking its own slot again trims nothing');
+  releaseSlot(a);
+
+  const b = deps(root, 'bbbb2222', { live: ['bbbb2222'] });
+  assert.equal(takeSlot(b, { remote }), 'slot1');
+  assert.ok(!fs.existsSync(old), 'a unit unread for five days goes');
+  assert.ok(fs.existsSync(used), 'a unit read an hour ago stays warm');
+  assert.match(b.said.join(''), /trimmed slot1's target .* 1 cargo units/);
+
+  const late = unitIn(root, 'slot1', 'latecrate', '00000000000000cc', 5 * 24);
+  releaseSlot(b);
+  const c = deps(root, 'cccc3333', { live: ['cccc3333'] });
+  assert.equal(takeSlot(c, { remote }), 'slot1');
+  assert.ok(fs.existsSync(late), 'a target written within 15 minutes may still be building: left whole');
+  assert.match(c.said.join(''), /written in the last 15 min/);
 });

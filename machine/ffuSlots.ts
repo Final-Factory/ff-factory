@@ -20,6 +20,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import type { CleanupFacts } from '../server/cleanupFolders.ts';
+import { newestUnitDirWrite, sweepCargoTarget } from './cargoSweep.ts';
 
 export const FFU_REMOTE = 'https://github.com/Final-Factory/ffu.git';
 export const FFU_SLOTS_DIR = 'ffu-sandboxes';
@@ -29,6 +30,16 @@ export const FFU_SLOTS_DEFAULT_MAX = 4;
 export const FFU_NEW_SLOT_MIN_FREE_GB = 40;
 /** The facts file is trusted for other holders' liveness only while this fresh; older, every other holder counts as live. */
 const FACTS_FRESH_MS = 15 * 60_000;
+/**
+ * A slot's cargo target passes to its next worker trimmed under this many GB (w4255, `trimTarget`), and the clean-up's
+ * ffu-slot-target rule holds an idle one to it (server/installLeftovers.ts ffuSlotTargetCapGB). On BEAST (w3764, measured)
+ * a fresh target was 6.8 GB and the same target after three branch switches 21.4 GB; 16 GB keeps about two branches warm.
+ */
+export const FFU_SLOT_TARGET_CAP_GB = 16;
+/** A unit of a slot's target no build read for this many days goes on the next take, whatever the target's size (w4255). */
+export const FFU_SLOT_STALE_DAYS = 3;
+/** A target written this recently is left alone on a take: a leftover build of the last holder may still run. */
+const TARGET_SETTLE_MS = 15 * 60_000;
 const LOCK_STALE_MS = 15 * 60_000;
 const LOCK_WAIT_MS = 10 * 60_000;
 
@@ -253,6 +264,7 @@ export function takeSlot(d: FfuSlotDeps, o: TakeOptions = {}): string {
       prepare(d, pick.id, o.branch, base);
       pick.branch = o.branch;
     }
+    if (pick !== mine) trimTarget(d, pick.id);
     const at = new Date(d.now()).toISOString();
     if (pick.holder !== d.session) pick.takenAt = at;
     pick.holder = d.session;
@@ -260,6 +272,29 @@ export function takeSlot(d: FfuSlotDeps, o: TakeOptions = {}): string {
     writeSlotState(d.root, st);
     return pick.id;
   });
+}
+
+/**
+ * On a take by a new worker (the last holder released it or stopped with its work pushed, slotFree), trim the slot's
+ * target: units no build read for FFU_SLOT_STALE_DAYS, then the least recently read until it is under
+ * FFU_SLOT_TARGET_CAP_GB (machine/cargoSweep.ts). This is the one moment no worker builds there: the clean-up cannot trim a
+ * held slot (biscuit's held slots reached 26.6 and 27.1 GB, w4255). A target written within TARGET_SETTLE_MS is left.
+ */
+function trimTarget(d: FfuSlotDeps, id: string): void {
+  const target = slotTarget(d.root, id);
+  if (!fs.existsSync(target)) return;
+  const gb = (b: number) => `${(b / 1024 ** 3).toFixed(1)} GB`;
+  if (d.now() - newestUnitDirWrite(target) < TARGET_SETTLE_MS) {
+    d.say(`ffu-slot: ${id}'s target was written in the last ${TARGET_SETTLE_MS / 60_000} min, so it is not trimmed now\n`);
+    return;
+  }
+  try {
+    const r = sweepCargoTarget(target, { capBytes: FFU_SLOT_TARGET_CAP_GB * 1024 ** 3, staleDays: FFU_SLOT_STALE_DAYS, now: d.now() });
+    if (r.removed) d.say(`ffu-slot: trimmed ${id}'s target from ${gb(r.beforeBytes)} to ${gb(r.afterBytes)}: ${r.removed} cargo units unread for ${FFU_SLOT_STALE_DAYS} days or least recently read (cap ${FFU_SLOT_TARGET_CAP_GB} GB); your next build rebuilds any it needs\n`);
+    else if (r.skipped && r.beforeBytes > FFU_SLOT_TARGET_CAP_GB * 1024 ** 3) d.say(`ffu-slot: ${id}'s target is ${gb(r.beforeBytes)}, over the ${FFU_SLOT_TARGET_CAP_GB} GB cap, and not trimmed: ${r.skipped}\n`);
+  } catch (e) {
+    d.say(`ffu-slot: ${id}'s target was not trimmed: ${(e as Error).message}\n`);
+  }
 }
 
 export function releaseSlot(d: FfuSlotDeps): string | undefined {

@@ -66,6 +66,22 @@ something in its top three levels was written within the settle time (15 min). O
 | The target is over `ffuSlotTargetCapGB` (16 GB), on every pass | `debug/incremental` when that brings it under the cap, else the whole target |
 | A low pass (the drive under its soft threshold) | the whole target of a slot no running or resumable worker holds; only `debug/incremental` of a held one |
 
+The clean-up almost never sees a slot idle: on biscuit, 2026-11-15, slot3's 27.1 GB and slot1's 26.6 GB targets were
+kept as busy on every pass because their workers were building there (the clean-up log). So **`ffu-slot take` trims the
+target when a new worker takes the slot** (w4255, `trimTarget` in `machine/ffuSlots.ts`, `machine/cargoSweep.ts`). That
+is the one moment nobody builds there. The trim:
+
+- removes, whole, the cargo units (the files of one hash across `deps`, `build`, `.fingerprint`, `examples`, and each
+  `incremental` entry) that no build read for `FFU_SLOT_STALE_DAYS` (3);
+- then removes the least recently read units until the target is under `FFU_SLOT_TARGET_CAP_GB` (16);
+- leaves a target written within 15 min alone, and does nothing on a take of your own slot;
+- runs only where a read days after the last one moves an access time (a probe). Linux relatime does this. APFS does not:
+  it moves an access time only when it is older than the file's write (measured on m3, 2026-11-14), so on a Mac the trim
+  skips and the cap rule below stays.
+
+The next build rebuilds any unit it needs, so the trim costs a partial rebuild where a whole target makes the next build
+cold. The ffu runners' targets get the same sweep at the end of every CI job (ffu `tools/ci-runners/sweep_target.sh`).
+
 The per-worker `cargoTargetCapGB` (8 GB, w3426) still applies to targets in temp folders. Slot targets are kept warm on
 purpose, so they get their own, larger cap.
 
