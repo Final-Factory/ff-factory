@@ -66,8 +66,10 @@ so 4 × the 16 GB cap is 64 GB at most.
 
 The clean-up only ever deletes in a slot's `target`. It never touches the checkout, which may hold work, or the shared
 clone. Nothing goes while cargo builds in the target, as `cargoTargetBusy` judges it: a cargo, rustc or linker process
-names the target or runs in the checkout's process tree, or something in its top three levels was written within the
-settle time (15 min). A program that only runs from the target (a long test binary from `debug/deps`, with the
+names the target or runs in the checkout's process tree. A write within the settle time (15 min) in its top three levels
+stops only the incremental trim and the whole removals: the stale-unit sweep still runs and spares every unit written
+within the settle time (w4258: four slots in steady use, 71 GB on LothDesktop, were each written every few minutes, and a
+pass on 2026-11-15 freed nothing). A target kept whole over the cap is named in every pass's kept list. A program that only runs from the target (a long test binary from `debug/deps`, with the
 `cargo test` and the shell that started it) no longer keeps it whole (w4258): `cargoTargetRunners` finds those, and the
 sweep spares the units they run. Otherwise:
 

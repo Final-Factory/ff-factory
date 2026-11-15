@@ -10,3 +10,7 @@
   folder, and the clean-up takes such a worker's temp-folder targets once cargo is done with them. Applies at the daemon's
   next update. Docs: ffu-sandboxes.md, self-recovery.md. Tests: `cargoGraphSweep.test.ts`, `ffuTargetGuard.test.ts`,
   `ffuSlots.test.ts`.
+- **A slot target in steady use is swept too** (w4258 follow-up): LothDesktop's first pass on the sweep (2026-11-15 03:29,
+  26.3 GB free) freed nothing from 71 GB of slot targets and logged none of them, because a write within 15 min kept a
+  target from the sweep and a busy target was named only on a low pass. Now only a running build stops the sweep; a recent
+  write stops the trims and whole removals only, and a target kept over the cap is named on every pass.
