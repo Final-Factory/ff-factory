@@ -748,7 +748,7 @@ shouldn't assume silence means a successful (or failed) run." The Windows tasks 
 - **The schedule** (`IntakeManager.checkNightlyRun`, every minute; `intake.nightly.run`). At `time` in `tz` (default
   03:00 America/New_York, so daylight saving moves with it: `nextDaily` in `server/timers.ts`) it files one request per
   night, `Nightly e2e run <date> on <machine>`, source `nightly-run` (key `nightly-run:<date>`), for `person` (else the
-  system payer), approved by the schedule itself, with `constraints` that name the machine, at **high priority** (w1099,
+  system payer; its workers, pair runs and timed legs run on the pool `vault.unattributed.nightly` names either way, w4306), approved by the schedule itself, with `constraints` that name the machine, at **high priority** (w1099,
   lothsahn, 2026-10-12: "Please also change the job so it runs at high priority. That will help it get queued. Don't ask
   the dispatcher to keep LothDesktop underutilized"). The dispatcher places it like any request, in a sandbox of that
   machine, ahead of normal requests; nothing is held free for it. LothDesktop is Lothsahn's chosen exception to his rule for this job. No

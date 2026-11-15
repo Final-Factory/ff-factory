@@ -2235,6 +2235,11 @@ export interface WorkItem {
    */
   unattributed?: boolean;
   /**
+   * The kind of nobody's work it was filed from (w4306): a pair run or timed leg of an unattributed request has no `source`
+   * of its own, so this keeps it on the pool config vault.unattributed names for its parent (server/vault.ts inheritedPayer).
+   */
+  unattributedAs?: 'intake' | 'ffbox' | 'nightly';
+  /**
    * Whose Claude pool and GitHub token its workers run on from now on (w1031): the person who last acted on it in FF Factory
    * (answered its question, approved, declined, added a note, reopened, changed its priority, or joined it from Discord or
    * FFBox). Wins over `unattributed` and `requestedBy` (server/vault.ts tokenPersonForWork). Absent: nobody has acted since
