@@ -131,7 +131,22 @@ export function cardQuestions(w: Pick<WorkItem, 'needsYou' | 'question' | 'flag'
  */
 export function answersText(asks: readonly Ask[], answers: readonly string[]): string {
   if (asks.length <= 1) return (answers[0] ?? '').trim();
-  return asks.map((a, i) => `${i + 1}. ${splitMedia(a.question).text}\n   ${(answers[i] ?? '').trim()}`).join('\n');
+  // w4238: answered in part (the rest left to the owner it waits on), only the questions answered are listed.
+  return asks.flatMap((a, i) => (i < answers.length ? [`${i + 1}. ${splitMedia(a.question).text}\n   ${(answers[i] ?? '').trim()}`] : [])).join('\n');
+}
+
+/**
+ * w4238: the message that carries an owner's answer to another owner's waiting question, to the answering owner's own
+ * orchestrator, as their own words. Its update_work note takes w3606's owner path: the question is answered, its worker
+ * resumes, the owner it waited on hears who answered and what. Answered in part, it says which questions stay with that
+ * owner, and asks for the answers quoted as written (server/orchestrators.ts answerNeedsYou matches a note to the questions
+ * by their answers' words, so the rest stay open on the card).
+ */
+export function ownerAnswerMessage(w: Pick<WorkItem, 'id' | 'title' | 'question' | 'flag' | 'needsYou'>, text: string, forWhom: readonly string[], left: readonly number[] = []): string {
+  const whom = forWhom.join(' and ') || 'the other owner';
+  const head = answerMessage(w, text).replace(/\n\nPlease put this on [^\n]*$/, '');
+  const rest = left.length ? ` I leave question${left.length > 1 ? 's' : ''} ${left.join(' and ')} to ${whom}: quote my answers as written, so those stay open for ${whom}.` : '';
+  return `${head}\n\nThis is ${whom}'s question; I answer it for ${whom} as an owner (w3606), from the Waiting on input tab.${rest} Please put this on ${w.id} as my answer (update_work note).`;
 }
 
 /**

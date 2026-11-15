@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { Ask } from '../../../shared/ask';
-import { answerMessage, answersText, cardMedia, cardQuestions, legacySteps, namesForPaths, plainQuestion } from '../../../shared/questionCard';
+import { answerMessage, answersText, cardMedia, ownerAnswerMessage, cardQuestions, legacySteps, namesForPaths, plainQuestion } from '../../../shared/questionCard';
 import { FLAG_LABEL, type AppState, type WorkDigest, type WorkItem } from '../../../shared/types';
-import { holdsWorker, intakeRecommendation, waitAge, waitOrder, type AskItem, type WaitingItem } from '../../../shared/waiting';
+import { holdsWorker, intakeRecommendation, ownerAnswersFor, waitAge, waitOrder, type AskItem, type WaitingItem } from '../../../shared/waiting';
 import { APPROVE_LABEL, DECLINE_LABEL, approveAsk, waitSummary, waitedFor, whatOf, type WaitSummary } from '../../../shared/waitSummary';
 import { digestCaption, digestHeading, digestMissing, digestRows } from '../../../shared/intakeDigest';
 import { namesReporter, sourceLabel, untrustedLabel } from '../../../shared/workLabels';
@@ -27,7 +27,11 @@ const AGE_TONE = { fresh: 'grey', old: 'amber', stale: 'red' } as const;
  */
 export function WaitingTab({ app, items, asks = [], now }: { app: AppState; items: WaitingItem[]; asks?: AskItem[]; now: number }) {
   const mine = items.filter((i) => i.mine);
-  const others = items.filter((i) => !i.mine);
+  // w4238: another owner's waiting questions an owner may answer for them, by the owner(s) they wait on ("Waiting on Ben").
+  const forOwner = (i: WaitingItem) => (i.mine ? undefined : ownerAnswersFor(i.w, i.live, app.me, app.owners));
+  const owned = items.filter((i) => !!forOwner(i));
+  const others = items.filter((i) => !i.mine && !forOwner(i));
+  const ownerGroups = [...new Set(owned.map((i) => forOwner(i)!.join(' and ')))].map((who) => ({ who, items: owned.filter((i) => forOwner(i)!.join(' and ') === who) }));
   // w2856: the questions that hold up a worker first (one answer and it goes on), then the rest, oldest first within each.
   // The viewer's own orchestrator's open questions (w1868) sit among their own requests' cards.
   const holds = (w: AskItem['w']) => holdsWorker(w, app.sessions);
@@ -35,6 +39,7 @@ export function WaitingTab({ app, items, asks = [], now }: { app: AppState; item
     ...mine.map((i) => ({ at: i.since, holds: holds(i.w), key: `w:${i.w.id}`, el: <WaitCard key={`w:${i.w.id}`} app={app} item={i} now={now} holds={holds(i.w)} /> })),
     ...asks.map((a) => ({ at: a.a.at, holds: holds(a.w), key: `a:${a.sessionId}:${a.a.seq}`, el: <AskWaitCard key={`a:${a.sessionId}:${a.a.seq}`} app={app} item={a} now={now} holds={holds(a.w)} /> })),
   ]);
+  const ownerCards = ownerGroups.map((g) => ({ who: g.who, cards: waitOrder(g.items.map((i) => ({ at: i.since, holds: holds(i.w), key: `o:${i.w.id}`, el: <WaitCard key={`o:${i.w.id}`} app={app} item={i} now={now} holds={holds(i.w)} forOwner={forOwner(i)} /> }))) }));
   const otherCards = waitOrder(others.map((i) => ({ at: i.since, holds: holds(i.w), key: i.w.id, el: <WaitCard key={i.w.id} app={app} item={i} now={now} holds={holds(i.w)} /> })));
   const holding = ownCards.filter((c) => c.holds).length;
   const onYou = mine.length + asks.length;
@@ -55,7 +60,7 @@ export function WaitingTab({ app, items, asks = [], now }: { app: AppState; item
     <div className="sa-scroll waiting-tab" data-testid="waiting-tab" ref={root}>
       <p className="dim small ledger-none" data-testid="waiting-summary">
         {items.length || asks.length
-          ? `${items.length} ${items.length === 1 ? 'request waits' : 'requests wait'} on input: ${mine.length} on you, ${others.length} on someone else.${asks.length ? ` Your orchestrator asks you ${asks.length} more question${asks.length > 1 ? 's' : ''}.` : ''} ${holding ? `First the ${holding === 1 ? 'one' : holding} that ${holding === 1 ? 'holds' : 'hold'} up a worker, then the rest; oldest first.` : 'The oldest waits first.'}`
+          ? `${items.length} ${items.length === 1 ? 'request waits' : 'requests wait'} on input: ${mine.length} on you, ${owned.length ? `${owned.length} on another owner that you may answer, ` : ''}${others.length} on someone else.${asks.length ? ` Your orchestrator asks you ${asks.length} more question${asks.length > 1 ? 's' : ''}.` : ''} ${holding ? `First the ${holding === 1 ? 'one' : holding} that ${holding === 1 ? 'holds' : 'hold'} up a worker, then the rest; oldest first.` : 'The oldest waits first.'}`
           : 'Nothing waits on input.'}
       </p>
       <h3 className="intake-h">Waiting on you · {onYou}</h3>
@@ -66,6 +71,15 @@ export function WaitingTab({ app, items, asks = [], now }: { app: AppState; item
       ) : (
         <p className="dim small ledger-none">Nothing waits on you.</p>
       )}
+      {ownerCards.map((g) => (
+        <section key={g.who} data-testid="waiting-owner">
+          <h3 className="intake-h">
+            Waiting on {g.who} · {g.cards.length}
+          </h3>
+          <p className="dim small ledger-none">You may answer these as {g.who} would: you are both owners. Your answer goes on the request as yours, and {g.who} is told who answered and what.</p>
+          <div className="wait-list">{g.cards.map((c) => c.el)}</div>
+        </section>
+      ))}
       {others.length > 0 && (
         <>
           <h3 className="intake-h">Waiting on someone else · {others.length}</h3>
@@ -302,7 +316,7 @@ export function ApproveCard({ app, w, mine, reviewers, details, testId, summary 
   );
 }
 
-function WaitCard({ app, item, now, holds }: { app: AppState; item: WaitingItem; now: number; holds?: boolean }) {
+function WaitCard({ app, item, now, holds, forOwner }: { app: AppState; item: WaitingItem; now: number; holds?: boolean; forOwner?: string[] }) {
   const { w, ask, mine } = item;
   const [sent, setSent] = useState(false);
   const workers = sessionsByIds(app.sessions, w.sessionIds);
@@ -321,14 +335,19 @@ function WaitCard({ app, item, now, holds }: { app: AppState; item: WaitingItem;
   const question = cq.asks.length ? '' : cq.text || sum.question || plainQuestion(item.text);
   // A free-text list of decisions is asked one at a time, each answered in words.
   const asks = cq.asks.length ? cq.asks : (legacySteps(question) ?? []);
-  const answerable = mine && (ask === 'answer' || (ask === 'check' && !!r && !r.answered));
+  // w4238: or another owner's question, answered for them (shared/waiting.ts ownerAnswersFor gave `forOwner`).
+  const answerable = (mine || !!forOwner?.length) && (ask === 'answer' || (ask === 'check' && !!r && !r.answered));
+  const whom = forOwner?.join(' and ');
   // A click on an answer and a typed answer send the same message (w1597; shared/questionCard.ts answerMessage).
   // Files attached to the answer ride along as attachments of the message, so the orchestrator can hand them to the worker by id (w1912).
   const onAnswer = async (_text: string, answers: string[], files: string[]) => {
     if (!app.orchestratorId) return false;
-    const ok = await attempt(api.sendMessage(app.orchestratorId, answerMessage(w, answersText(asks, answers)), undefined, files));
+    const words = answersText(asks, answers);
+    const left = asks.length > 1 && answers.length < asks.length ? asks.map((_, i) => i + 1).slice(answers.length) : [];
+    const message = whom ? ownerAnswerMessage(w, words, forOwner!, left) : answerMessage(w, words);
+    const ok = await attempt(api.sendMessage(app.orchestratorId, message, undefined, files));
     if (ok === undefined) return false;
-    toast(`Sent to your orchestrator: it records the answer on ${w.id}.`);
+    toast(whom ? `Sent to your orchestrator: it records your answer on ${w.id} for ${whom}, who is told.` : `Sent to your orchestrator: it records the answer on ${w.id}.`);
     setSent(true);
     return true;
   };
@@ -349,7 +368,7 @@ function WaitCard({ app, item, now, holds }: { app: AppState; item: WaitingItem;
   );
   const done = sent ? (
     <p className="small tone-green" data-testid={`wait-sent-${w.id}`}>
-      Sent to your orchestrator. The card goes when it has recorded the answer.
+      {whom ? `Sent to your orchestrator as your answer for ${whom}. The card goes when it has recorded it.` : 'Sent to your orchestrator. The card goes when it has recorded the answer.'}
     </p>
   ) : r?.answered ? (
     <p className="small dim">
@@ -368,6 +387,7 @@ function WaitCard({ app, item, now, holds }: { app: AppState; item: WaitingItem;
       mine={answerable}
       attachable
       answeredBy={item.on.join(', ') || undefined}
+      {...(whom && answerable ? { onBehalfOf: whom, leaveRest: whom } : {})}
       {...(answerable ? { onAnswer } : {})}
       {...(done ? { done } : {})}
       look={look}

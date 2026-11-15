@@ -9857,12 +9857,14 @@ test('w3328: disk_cleanup marks a request a disk clean-up of a machine, from req
 });
 
 test('w3338: a worker that paused for low disk is Blocked on disk space on its machine and resumed only once that disk is back above its warning line plus the margin; blocked_on disk does the same; a clean-up request is never gated on it', async (t) => {
-  const { store, agents, o, dispatcher, call } = await setupOnMachine(t);
+  const { store, agents, o, dispatcher, call, machines } = await setupOnMachine(t);
   agentsRoom(agents, ['pc']);
   putRequests(store, [{ id: 'w1' }]);
   let clock = Date.now();
   let freeGB = 11;
   const GB = 1024 ** 3;
+  // w4257: blocked_on disk reads the same reading the gate does (Machines.diskRoom).
+  machines.diskRoom = (m) => (m.toLowerCase() === 'pc' ? { freeBytes: freeGB * GB, warnGB: 15 } : undefined);
   const watch = new BlockerWatch({ store, orchestrators: o, now: () => clock, online: (m) => (m === 'pc' ? true : undefined), disk: (m) => (m === 'pc' ? { freeBytes: freeGB * GB, warnGB: 15 } : undefined), checkInPending: (id) => agents.waker.pending(id) !== undefined });
   const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Fix it', title: 'w1: comet catcher', work_id: 'w1' });
   assert.equal(started.isError, false, started.text);
@@ -9899,6 +9901,18 @@ test('w3338: a worker that paused for low disk is Blocked on disk space on its m
   freeGB = 40;
   assert.match((await watch.tick()).get('w1') ?? '', /^clear: /);
   assert.equal(w.status, 'active');
+  // w4257: a late [disk critical] notice (w4241 on biscuit, 40 GB free) is refused by the same test that clears the gate,
+  // and so is one just above the margin; inside the margin (19.9 GB) the wait still goes on.
+  for (const gb of [40, 20]) {
+    freeGB = gb;
+    assert.throws(() => o.workerBlocked(id, { disk: true, what: 'disk space back' }), new RegExp(`disk: \\S+ has ${gb} GB free \\(its warning line 15 GB \\+ 5\\), above the line a disk wait clears at.*carry on with your work`));
+    assert.equal(w.status, 'active', `no wait at ${gb} GB`);
+  }
+  freeGB = 19.9;
+  o.workerBlocked(id, { disk: true, what: 'disk space back' });
+  assert.deepEqual([w.status, w.blocked?.kind], ['blocked', 'disk']);
+  freeGB = 40;
+  assert.match((await watch.tick()).get('w1') ?? '', /^clear: /);
   // A disk clean-up request (w3328) saying the disk is low is doing the freeing, not waiting on it.
   agents.waker.cancel(id);
   freeGB = 9;
@@ -10111,6 +10125,8 @@ test("w3606: an owner answers the other owner's question in their own words: it 
   assert.deepEqual([w().status, w().question, w().requestedBy.userId], ['new', undefined, 'ben']);
   assert.deepEqual([tab(BEN), tab(LOTH)], [[], []]);
   assert.match(w().log.join('\n'), /Lothsahn \(an owner, on Ben's request, in their own words: "Yes, keep it open and schedule it when the other higher priority work is done\. I have answered for Ben\."\): note: Keep it open/);
+  // w4238: the note says whom it answered for, so a wait on Ben reads as settled at once (shared/workState.ts personWaitSettled).
+  assert.deepEqual(w().notes?.at(-1)?.for, ['Ben']);
   assert.equal(o.personalOf('ben')!.info.openAsks, undefined, "Ben's card left his tab");
   await until('Ben is told who answered and what', () => heard(ben.info.id, '[from another owner]').some((e) => e.text.startsWith('[from another owner] Lothsahn answered the question on it: Keep it open; schedule it after the higher priority work., on your w1 "FFU owner_term flakes"') && e.text.includes('"Yes, keep it open')));
   await until('the dispatcher resumes with the answer', () => heard(dispatcher().info.id, '[work update]').some((e) => e.text.includes('w1') && e.text.includes('Keep it open; schedule it after the higher priority work.')));

@@ -686,11 +686,14 @@ export function personWaitSettled(w: Pick<WorkItem, 'notes' | 'needsYou' | 'prs'
   // not) answered that worker, not this one (w1782: Ben's notes on item 2 went to 8ef702f6; ac694f80 still waited on his pick).
   // w1868: a note that answered some of several questions leaves the rest waiting (needsYou.answeredAsks): only the record's answer settles it.
   const partial = !!w.needsYou && !w.needsYou.answered && !!w.needsYou.answeredAsks?.length;
-  const note = partial ? undefined : [...(w.notes ?? [])].reverse().find((n) => after(n.at) && people.has(personKey(n.by)) && !by?.elsewhere(Date.parse(n.at) || 0));
+  // w4238: an owner's answer for the owner it waited on (w3606) settles it as theirs would (`for`): before, w4196, w4216
+  // and w4125 kept showing "Waiting on input on Ben" after lothsahn answered, until the worker reported again.
+  const answers = (x: { by: string; for?: string[] }) => people.has(personKey(x.by)) || (x.for ?? []).some((p) => people.has(personKey(p)));
+  const note = partial ? undefined : [...(w.notes ?? [])].reverse().find((n) => after(n.at) && answers(n) && !by?.elsewhere(Date.parse(n.at) || 0));
   if (note) return `${note.by} answered it with a note at ${minute(note.at)}`;
   const a = w.needsYou?.answered;
   const theirs = !by || !w.needsYou?.worker || w.needsYou.worker === by.id;
-  if (a && theirs && after(a.at) && people.has(personKey(a.by))) return `${a.by} answered it at ${minute(a.at)}`;
+  if (a && theirs && after(a.at) && answers(a)) return `${a.by} answered it at ${minute(a.at)}`;
   const named = prsNamedIn(line);
   const pr = (w.prs ?? []).find((p) => p.state === 'merged' && named.has(p.number) && after(p.at));
   if (pr) return `PR #${pr.number}, which it names, merged at ${minute(pr.at!)}`;

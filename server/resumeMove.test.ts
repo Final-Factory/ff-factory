@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { MOVE_AFTER_MS, ROOM_WAIT, STAY_MARK, briefOf, moveDecision, movedPrompt, stayLine, type MoveFacts, type MoveRequest } from './resumeMove.ts';
+import { HOLD_WAIT, MOVE_AFTER_MS, ROOM_WAIT, STAY_MARK, briefOf, holdMoves, moveDecision, movedPrompt, stayLine, type MoveFacts, type MoveRequest } from './resumeMove.ts';
 import type { Computer } from './placement.ts';
 
 // The fleet at 14:05Z on 2026-10-24 (w2046): BEAST full (6 of 6 agents mid-turn), the others idle.
@@ -152,4 +152,22 @@ test('w2304: a leg of a pair run under way never moves alone: it stays on its ow
   assert.deepEqual(gone.requeuePair, { id: 'w2271', why: "leg 2's sandbox on lothdesktop went to other work mid-run, and a leg moved alone cuts the run (w2046 move refused)" });
   // Once a leg reported (the run is over, not live), a leg left waiting moves as before.
   assert.ok('move' in moveDecision(facts({ machine: 'lothdesktop', requests: [req({ id: 'w2271', pair: { leg: 2, others: ['beast'] } })] })));
+});
+
+test("w4238: a resume held by its computer's hold moves to a computer with an agent seat once its sandbox there was released", () => {
+  // 20:02Z on 2026-11-14: w4125's worker fb20b1ad (FFU, headless Rust) had released beast/slot2; lothsahn's answer resumed
+  // it, and the message sat behind BEAST's crash hold for 5 hours.
+  const hold = 'beast is on hold (Ben: crash hold, no Unity or game player on BEAST, 2026-11-14; except w4148, w4153): nothing resumes there until the hold is lifted (placement.hold)';
+  assert.ok(HOLD_WAIT.test(hold));
+  assert.equal(holdMoves(hold, true), true);
+  assert.equal(holdMoves(hold, false), false, 'still in its sandbox there: it waits out the hold');
+  assert.equal(holdMoves('beast is offline', true), false);
+  assert.equal(holdMoves('no sandbox on beast is free', true), false, 'a room wait moves by ROOM_WAIT, not this');
+  const fleet = FLEET.map((p) => (p.id === 'beast' ? { ...p, live: 1, midTurn: 0 } : p));
+  const d = moveDecision(facts({ places: fleet, requests: [req({ id: 'w4125', kind: 'agent' })], prefs: { prefer: ['beast', 'lothdesktop'], hold: { beast: 'Ben: crash hold' } } }));
+  assert.ok('move' in d, JSON.stringify(d));
+  assert.notEqual(d.move.to, 'beast');
+  // Pinned to BEAST, or a timed leg there, it stays and says why.
+  const pinned = moveDecision(facts({ places: fleet, requests: [req({ id: 'w4125', kind: 'agent', pinned: ['beast'] })], prefs: { hold: { beast: 'Ben: crash hold' } } }));
+  assert.ok('stay' in pinned && /pinned to beast/.test(pinned.stay), JSON.stringify(pinned));
 });

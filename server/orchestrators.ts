@@ -8,7 +8,7 @@ import path from 'node:path';
 import { band, concepts, DEFAULT_THRESHOLDS, entryMatch, indexOf, type MatchThresholds } from './boardMatch.ts';
 import { LOOP_GUARD_RANGE, type Config } from './config.ts';
 import type { Store } from './store.ts';
-import { blockerName, blockerProblem, blockerVerdict, gateSetter, latestWorker, newestFirst, RESUME_SWEEP_MS, DISK_RESUME_MARGIN_GB, gatesName, gatesOf, MAX_GATES, othersGates, prRefOf, sameGate, type BlockerFacts } from '../shared/blockers.ts';
+import { blockerName, blockerProblem, blockerVerdict, gateSetter, latestWorker, newestFirst, RESUME_SWEEP_MS, DISK_RESUME_MARGIN_GB, diskAboveLine, gatesName, gatesOf, MAX_GATES, othersGates, prRefOf, sameGate, type BlockerFacts } from '../shared/blockers.ts';
 import { COORD_TURN_MAX_CALLS, COORD_TURN_MAX_TOKENS_READ, type OptionsFactory, type SessionHandle, type SessionManager, type TurnBudgetHit } from './sessions.ts';
 import { actingFor, asRequester, type Identity } from './identity.ts';
 import {
@@ -373,6 +373,8 @@ export interface OrchestratorsDeps {
   heldFor?: (machine: string, w: WorkItem) => string | undefined;
   /** Whether a machine is online; undefined for a machine this portal does not have (w643: blockers). */
   machineOnline?: (id: string) => boolean | undefined;
+  /** w4257: a machine's sandbox volume as a disk gate reads it (Machines.diskRoom); undefined when unknown. */
+  machineDisk?: (id: string) => { freeBytes: number; warnGB: number } | undefined;
   /** w2304: who plays Final Factory on a machine now, or in the grace after (w1894, MachineManager.personPlayOf), as a phrase. */
   personPlaying?: (id: string) => string | undefined;
   /** w2443: why a machine is paused from its tray (pauseWhy), or undefined while it runs. */
@@ -1307,11 +1309,11 @@ export class Orchestrators {
    * told whose question it would settle and names the worker (a note to every worker would leave the question open and
    * reach workers it is not for, the very misreading w2895 showed). With one worker it answers that worker, as before.
    */
-  private routeNote(w: WorkItem, by: Requester, note: string): string {
+  private routeNote(w: WorkItem, by: Requester, note: string, forWho?: string[]): string {
     const r = w.needsYou!;
     const on = this.stillOn(w);
     const others = on.filter((id) => id !== r.worker);
-    if (!others.length) return this.answerNeedsYou(w, by, note);
+    if (!others.length) return this.answerNeedsYou(w, by, note, forWho);
     const words = (id: string) => {
       const s = this.store.sessions.get(id);
       return [s?.title, s?.lastResult, s?.waitingOn?.what, ...(s?.waitingOn?.asks ?? []).map((a) => a.question), ...(id === r.worker ? [r.question, r.report] : [])];
@@ -1322,7 +1324,7 @@ export class Orchestrators {
       return `names none of the ${ids.length} workers on ${w.id} (${ids.join(', ')}), so it was sent to none of them and answers nothing yet (w3117): it would settle worker ${r.worker ?? '?'}'s [needs you] question "${clip(r.question.replace(/\s+/g, ' '), 160)}". If it answers that, call update_work again naming ${r.worker ?? 'that worker'} (its session id or its PR); if it is for another worker, name that one`;
     }
     const out: string[] = [];
-    if (r.worker && named.includes(r.worker)) out.push(this.answerNeedsYou(w, by, note));
+    if (r.worker && named.includes(r.worker)) out.push(this.answerNeedsYou(w, by, note, forWho));
     else out.push(`not an answer to worker ${r.worker ?? '?'}'s [needs you] question, which still waits: the note names ${named.join(', ')} (w3117)`);
     for (const sid of named.filter((id) => id !== r.worker)) out.push(this.noteToWorker(w, by, note, sid));
     return out.join('; ');
@@ -1351,7 +1353,7 @@ It is for your part of the work, not an answer to another worker's question.`;
    * Its declaration ends with that message, and the alert clears. A dispatcher question with no worker goes to the
    * dispatcher as before. Returns the line for the request's log and the dispatcher's [work update].
    */
-  private answerNeedsYou(w: WorkItem, by: Requester, note: string): string {
+  private answerNeedsYou(w: WorkItem, by: Requester, note: string, forWho?: string[]): string {
     const r = w.needsYou!;
     // w1868 (w1821): of several questions, a note that answers some of them (it quotes their answers) leaves the others on
     // the card, each with its own answered state; the worker resumes once all are answered, with every answer.
@@ -1368,12 +1370,14 @@ It is for your part of the work, not an answer to another worker's question.`;
       if (before.length) {
         // The last of them: the worker hears every answer given since it asked, not only this one.
         const raised = Date.parse(r.raisedAt ?? r.at) || 0;
-        const words = (w.notes ?? []).filter((n) => (Date.parse(n.at) || 0) > raised && same(n.by, by.displayName)).map((n) => n.text);
+        // w4238: an owner who answered some of them for the other (`for`) counts as that owner's answers too.
+        const askedOf = new Set([by.displayName, ...(forWho ?? []), ...(r.who ?? [])].map((x) => x.toLowerCase()));
+        const words = (w.notes ?? []).filter((n) => (Date.parse(n.at) || 0) > raised && (same(n.by, by.displayName) || (n.for ?? []).some((p) => askedOf.has(p.toLowerCase())) || (!!forWho?.length && askedOf.has(n.by.toLowerCase())))).map((n) => n.text);
         if (words.length > 1) note = words.join('\n\n');
       }
     }
     // w2433: with the Latest line it answers, which shows as answered until the request's next report.
-    r.answered = { by: by.displayName, at: this.now().toISOString(), ...(w.outcome ? { outcome: w.outcome } : {}) };
+    r.answered = { by: by.displayName, at: this.now().toISOString(), ...(w.outcome ? { outcome: w.outcome } : {}), ...(forWho?.length ? { for: forWho } : {}) };
     const sid = r.worker;
     // w1812: the same question from the same worker on other requests is answered by this too: none of them waits on input
     // any more, and none is asked again (Ben, w1768: "i already answered this why are you asking me ... still").
@@ -2682,7 +2686,7 @@ It is for your part of the work, not an answer to another worker's question.`;
     if (note) {
       what.push(`note: ${note}`);
       // Kept whole for the workers' briefs (w496); the log line is clipped.
-      w.notes = [...(w.notes ?? []), { at: this.now().toISOString(), by: owner.displayName, text: note.slice(0, 2000) }].slice(-20);
+      w.notes = [...(w.notes ?? []), { at: this.now().toISOString(), by: owner.displayName, text: note.slice(0, 2000), ...(forOwner && answering && w.humanAsked ? { for: asked.map((r) => r.displayName) } : {}) }].slice(-20);
       if (keeps) what.push(`the question stays with ${names(keeps.for!)} (handed by ${keeps.by ?? 'the dispatcher'}): it waits on their answer, nothing to decide meanwhile`);
       // w3161: only the person's own words answer the question (ACTING above). A note outside their turn (their orchestrator's
       // "Hold w3155 until Ben says he's ready", relayed on a [needs you]) adds to it: before, it put the request back to `new`
@@ -2710,7 +2714,7 @@ It is for your part of the work, not an answer to another worker's question.`;
         w.flag = undefined;
       }
       // w1378: a person's own answer to a [needs you] question goes to the worker that waits on it.
-      if (w.humanAsked && w.needsYou && !w.needsYou.answered && !keeps) what.push(this.routeNote(w, owner, note));
+      if (w.humanAsked && w.needsYou && !w.needsYou.answered && !keeps) what.push(this.routeNote(w, owner, note, forOwner ? asked.map((r) => r.displayName) : undefined));
       // w1868: and the open question cards about it that the note answers leave the person's Waiting on input tab.
       if (w.humanAsked) this.closeAsksAnsweredBy(owner, w, note);
       // w3606: answered for another owner, the asked owners' own cards about it leave their tabs too.
@@ -5495,6 +5499,9 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     if (a.disk) {
       const m = this.store.sessions.get(sessionId)?.machineId?.trim().toLowerCase();
       if (!m) throw new Error('disk: you run on no machine FF Factory knows, so no disk can be waited on');
+      // w4257: the same test and reading that clear a disk gate; a wait set above it is cleared at once, a stop for nothing.
+      const above = diskAboveLine(m, this.d.machineDisk?.(m));
+      if (above) throw new Error(`disk: ${above}, above the line a disk wait clears at, so the disk is not low now: carry on with your work and do not end your turn for it (a [disk critical] notice that reached you after the clean-up freed the disk is over)`);
       asked.push({ kind: 'disk', ref: m, what: `free disk space on ${m}` });
     }
     if (!asked.length) throw new Error('name what it waits for: requests (ids), reports (ids of requests whose worker must report first), prs (owner/repo#123 or a github.com link), deploys ("portal" or a machine id) and/or disk (true: free disk space on your machine). A person is waiting_on_person; a time is wake_me');

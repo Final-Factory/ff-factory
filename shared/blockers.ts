@@ -42,6 +42,27 @@ export const BLOCKER_STUCK_MS: Record<WorkBlockerKind, number | undefined> = {
 export const DISK_RESUME_MARGIN_GB = 5;
 
 /**
+ * w4257: whether a machine's sandbox volume is at or above the line a disk gate clears at (warning line plus the margin),
+ * as the gate's verdict below reads it, with a line saying so; undefined while the reading is unknown or under that line.
+ */
+export function diskAboveLine(machine: string, d: { freeBytes: number; warnGB: number } | undefined): string | undefined {
+  if (!d) return undefined;
+  const free = d.freeBytes / 1024 ** 3;
+  const need = d.warnGB + DISK_RESUME_MARGIN_GB;
+  return free >= need ? `${machine} has ${free.toFixed(0)} GB free (its warning line ${d.warnGB} GB + ${DISK_RESUME_MARGIN_GB})` : undefined;
+}
+
+/**
+ * w4257: the notice a critical disk sends the agents mid-turn on that machine. It reaches a worker only at its next tool
+ * round, which can be minutes after the clean-up has already freed the disk (biscuit 2026-11-15: critical at 8 GB at
+ * 02:00:53Z, 24 GB at 02:01:20Z, and w4242's and w4241's workers stopped at 02:07 and 02:09 with 41 and 40 GB free), so it
+ * carries its own time and reading, and blocked_on disk refuses a wait the disk has already cleared.
+ */
+export function diskCriticalNotice(at: Date, reading?: string): string {
+  return `[disk critical] At ${at.toISOString().slice(11, 19)}Z free disk space on this machine was critically low${reading ? ` (${reading})` : ''}. Commit and push your work now (a WIP commit is fine), then call blocked_on with disk: true and end your turn; new work waits until space is freed. If blocked_on answers that the disk is back above its warning line, the clean-up has already freed it: carry on with your work and do not end your turn for it. You are resumed when the disk of this machine is back above its warning line.`;
+}
+
+/**
  * How long a CI blocker may go without FF Factory being able to read the checks before it gives up and lets the worker
  * look for itself (w829: the portal's fine-grained GitHub token could not read statusCheckRollup, every read failed in
  * silence, and w814, w818 and w808 sat Blocked for hours after their CI finished). Several failed reads in a row.
@@ -356,7 +377,8 @@ export function blockerVerdict(b: WorkBlocker, f: BlockerFacts, waiter?: string)
       if (!d) return late(`${b.ref ?? 'its machine'}'s free disk space is not known yet`);
       const free = d.freeBytes / 1024 ** 3;
       const need = d.warnGB + DISK_RESUME_MARGIN_GB;
-      if (free >= need) return { state: 'clear', why: `${b.ref} has ${free.toFixed(0)} GB free (its warning line ${d.warnGB} GB + ${DISK_RESUME_MARGIN_GB})` };
+      const above = diskAboveLine(b.ref ?? 'its machine', d);
+      if (above) return { state: 'clear', why: above };
       return late(`${b.ref} has ${free.toFixed(0)} GB free, under ${need} GB (its warning line ${d.warnGB} GB + ${DISK_RESUME_MARGIN_GB})`);
     }
     case 'usage': {

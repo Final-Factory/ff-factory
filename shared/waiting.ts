@@ -201,3 +201,37 @@ export function holdsWorker(w: Pick<WorkItem, 'sessionIds' | 'needsYou'> | undef
 export function waitOrder<T extends { at: string; holds: boolean }>(cards: readonly T[]): T[] {
   return [...cards].sort((x, y) => Number(y.holds) - Number(x.holds) || x.at.localeCompare(y.at));
 }
+
+/**
+ * w4238 (lothsahn: "Alter ff portal so that I can click answers for Ben's questions"): the owners a request's waiting
+ * question waits on, when the viewer, another owner, may answer it for them with one click; undefined when not. The click
+ * sends the same answer message to the viewer's own orchestrator as their own question's click does, and its update_work
+ * note takes w3606's owner path (server/orchestrators.ts ownerActsForOwner), which is the gate that counts: this mirrors it so
+ * the buttons show only where that path answers. Only between owners: the viewer is one, the request's people are all
+ * owners, and whoever its question waits on is an owner other than the viewer. Left out on purpose: an intake approval
+ * (the reviewers' own, w1597), a wait with no open question (a worker's permission prompt or a report: nothing a note
+ * answers), an orchestrator's ask_person question (its person's own chat, answered there only), and any wait that also
+ * names a non-owner.
+ */
+export function ownerAnswersFor(
+  w: WorkItem,
+  live: Pick<WorkLive, 'waitsOn'> | undefined,
+  me: { userId: string; role?: string } | undefined,
+  owners: readonly { userId: string; displayName: string }[] | undefined,
+): string[] | undefined {
+  if (!me || me.role !== 'owner' || !owners?.length || !OPEN.has(w.status)) return undefined;
+  const isOwner = (id: string | undefined) => owners.some((o) => same(o.userId, id));
+  const ownerNamed = (n: string) => owners.some((o) => same(o.displayName, n) || same(o.userId, n));
+  if (!isOwner(me.userId) || w.approval?.state === 'pending') return undefined;
+  if (!w.requesters.length || !w.requesters.every((r) => isOwner(r.userId)) || !isOwner(w.requestedBy.userId)) return undefined;
+  const open = !!w.question || !!w.flag || (!!w.needsYou && !w.needsYou.answered);
+  if (!open) return undefined;
+  // The server's gate reads questionFor; a design question's own people must be owners too (w3606: never a non-owner's).
+  const asked = [...questionFor(w), ...(w.flag?.for ?? [])].filter((r, i, all) => all.findIndex((x) => same(x.userId, r.userId)) === i);
+  if (!asked.length || !asked.every((r) => isOwner(r.userId)) || asked.some((r) => same(r.userId, me.userId))) return undefined;
+  const on = live?.waitsOn ?? [];
+  if (on.some((n) => !ownerNamed(n))) return undefined;
+  const meName = owners.find((o) => same(o.userId, me.userId))?.displayName;
+  if (on.some((n) => same(n, meName) || same(n, me.userId))) return undefined;
+  return asked.map((r) => r.displayName);
+}

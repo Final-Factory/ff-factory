@@ -86,6 +86,13 @@ export interface QuestionCardProps {
   /** Who answers it, when it is not the viewer. */
   answeredBy?: string;
   /**
+   * w4238: the owner(s) the viewer answers it for, another owner: the card says so above its answers, and with several
+   * questions offers to send those answered and leave the rest to them.
+   */
+  onBehalfOf?: string;
+  /** With several questions, whom the unanswered ones are left to when the viewer sends only some (w4238). */
+  leaveRest?: string;
+  /**
    * Answer it: the label picked or the words typed (several questions: each one's answer, in order), and the ids of the files
    * attached to it (w1912; none unless `attachable`). False when it failed.
    */
@@ -199,6 +206,19 @@ export function QuestionCard(p: QuestionCardProps) {
     } else if (n > 1) setKept(JSON.stringify(next.slice(0, -1)));
   };
   const back = () => setKept(JSON.stringify(answers.slice(0, Math.max(step - 1, 0))));
+  // w4238: an owner answering for another sends the questions answered so far and leaves the rest to that owner.
+  const sendPart = async () => {
+    if (!live || step === 0 || waitingForFiles) return;
+    const given = answers.slice(0, step);
+    setSending(true);
+    const ok = await p.onAnswer!(given[given.length - 1] ?? '', given, attachments.flatMap((f) => (f.ref ? [f.ref.id] : [])));
+    setSending(false);
+    if (ok) {
+      clearPending(filesKey, attachments);
+      setKept('[]');
+      setTyped('');
+    }
+  };
   const q = ask ? splitMedia(ask.question).text : p.question;
   // The recommended answer first, whatever order it came in (shared/ask.ts checkAsk puts it there too).
   const options = [...(ask?.options ?? [])].sort((a, b) => Number(!!b.recommended) - Number(!!a.recommended));
@@ -216,6 +236,11 @@ export function QuestionCard(p: QuestionCardProps) {
       {step > 0 && !p.done && (
         <button type="button" className="link-btn small" onClick={back} data-testid="qc-back">
           Back
+        </button>
+      )}
+      {step > 0 && p.leaveRest && live && (
+        <button type="button" className="link-btn small" onClick={() => void sendPart()} data-testid="qc-send-part">
+          Send {step === 1 ? 'this answer' : `these ${step} answers`}, leave the rest to {p.leaveRest}
         </button>
       )}
     </div>
@@ -376,6 +401,11 @@ export function QuestionCard(p: QuestionCardProps) {
       {p.look}
       {p.done ?? (
         <>
+          {p.onBehalfOf && p.mine && (
+            <p className="small qc-behalf" data-testid="qc-behalf">
+              <span className="chip chip-blue">For {p.onBehalfOf}</span> You may answer it as {p.onBehalfOf} would (you are both owners). {p.onBehalfOf} is told who answered and what.
+            </p>
+          )}
           {optionButtons}
           {optionMedia.map((x) => (
             <div key={x.label} className="qc-opt-media" data-testid="qc-opt-media">
