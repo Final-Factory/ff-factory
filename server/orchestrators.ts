@@ -5385,6 +5385,48 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     return out;
   }
 
+  /** The computers that take game work (w4225): those with sandboxes, or room for some. */
+  gameMachineIds(): string[] {
+    return [...this.store.machines.values()].filter((m) => (m.sandboxes?.length ?? 0) > 0 || (m.maxSandboxes ?? 0) > 0).map((m) => m.id.toLowerCase());
+  }
+
+  /**
+   * w4225: a worker ended its turn with a leg it cannot run where it is ("w4207: ready for stills, needs a non-m3 computer")
+   * and set no wait. Workers have no tool to place one leg on another computer, so FF Factory queues it as a leg (w1863,
+   * WorkItem.legs) on every computer that takes game work but those it named: the request reads Queued, the capacity ping
+   * names it when one of them has room, and the dispatcher starts a worker for it there. Once per request and set of computers
+   * (a leg already queued for them stays as it is). Returns the computers it was queued for, or undefined when nothing was.
+   */
+  queueReadyLeg(id: string, sessionId: string, line: string, not: readonly string[]): string[] | undefined {
+    const w = this.store.work.get(id.toLowerCase());
+    if (!w || !isOpen(w) || w.status === 'queued') return undefined;
+    const avoid = new Set(not.map((n) => n.toLowerCase()));
+    const needs = this.gameMachineIds().filter((m) => !avoid.has(m)).sort();
+    if (!needs.length) {
+      const by = w.requestedBy;
+      this.ledgerEdit(w.id, `worker ${sessionId} ended its turn with a leg for a computer other than ${[...avoid].join(', ')} ("${clip(line, 120)}"), and no other computer takes game work: the dispatcher is told (w4225)`, () => undefined);
+      this.toDispatcher(`[ledger] LEG WITH NOWHERE TO GO (w4225): ${w.id} "${clip(w.title, 80)}": worker ${sessionId} ended its turn with "${clip(line, 200)}", and no computer but ${[...avoid].join(', ')} takes game work. Decide where it runs (decide_work queue with needs, or block with what it waits for).`, by);
+      return undefined;
+    }
+    if ((w.legs ?? []).some((l) => sameNeeds(l.needs, needs))) return undefined;
+    const at = this.now().toISOString();
+    this.ledgerEdit(w.id, `a leg queued for capacity on ${needs.join(' or ')} from worker ${sessionId}'s report "${clip(line, 160)}" (w4225: it set no wait and has no tool to place a leg on another computer; the leg stays Queued until a worker starts for it there)`, (x) => {
+      x.legs = [...(x.legs ?? []), { at, needs, what: clip(`from ${sessionId}'s report: ${line}`, 200) }].slice(-MAX_LEGS);
+    });
+    return needs;
+  }
+
+  /**
+   * w4225: a worker told to file its pair run with request_pair (w2057) ended its turn again with the pair run still to start
+   * and none filed. The dispatcher is told once per request to file it (decide_work queue with pair_legs) or resume the worker.
+   */
+  pairStepToDispatcher(id: string, sessionId: string, line: string): void {
+    const w = this.store.work.get(id.toLowerCase());
+    if (!w || !isOpen(w)) return;
+    this.ledgerEdit(w.id, `worker ${sessionId} ended its turn again with its pair run unfiled ("${clip(line, 120)}") after it was told to file it: the dispatcher is told to file it (w4225)`, () => undefined);
+    this.toDispatcher(`[ledger] PAIR RUN NOT FILED (w4225): ${w.id} "${clip(w.title, 80)}": worker ${sessionId} was told to file its pair run with request_pair (w2057) and ended its turn again without one: "${clip(line, 200)}". File it now: decide_work queue on ${w.id} with pair_legs (its report names the pull request, the commit and the scenario), or send the worker to file it; until then nothing runs it.`, w.requestedBy);
+  }
+
   /** Whether request `id` has a pair run filed that serves it (w2057, the turn-end pair-wait check): open, or finished. */
   pairFiledFor(id: string): boolean {
     const w = this.store.work.get(id.toLowerCase());

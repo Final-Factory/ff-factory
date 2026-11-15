@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { commitsIn, normPr, pairCommitsOf, pairPrOf, pairRanCommit, pairWaitLine, prIn, resultFor, sameCommit } from './pairRuns.ts';
+import { commitsIn, normPr, pairCommitsOf, pairPrOf, pairRanCommit, otherComputerOf, pairStepLine, pairWaitLine, prIn, resultFor, sameCommit } from './pairRuns.ts';
 
 test('w2057: a pair run’s pull request, from request_pair or its title and brief', () => {
   assert.equal(prIn('MP-lowore-pin-pair on PR #2340'), 'Final-Factory/FinalFactory#2340');
@@ -45,4 +45,21 @@ test('w2057: a still-open line that waits on a pair run, as d558ba14 wrote it; n
   assert.ok(!pairWaitLine('waiting on the repair of the belt saves'));
   assert.ok(!pairWaitLine('waiting on Ben to pick a pair of colours'));
   assert.ok(!pairWaitLine('ran MP-lowore-pin-pair: passed'), 'no wait');
+});
+
+test('w4225: a status line that names a pair run without a wait word, and the computers a leg must not run on', () => {
+  // w4207's lines (e14a483b, 2026-11-14 22:03Z): the first has no wait word, so pairWaitLine missed it.
+  const still = 'w4207: still open: pair run, stills and CI on PR #3628 before the merge';
+  assert.equal(pairWaitLine(still), false);
+  assert.equal(pairStepLine(still), true);
+  assert.equal(pairStepLine('w4207: ready for the pair run'), true);
+  assert.equal(pairStepLine('w4207: ready for stills, needs a non-m3 computer'), false);
+  assert.equal(pairStepLine('w12: still open: the repair of the belt'), false);
+  const ms = ['m3', 'beast', 'lothdesktop', 'm5'];
+  assert.deepEqual(otherComputerOf('w4207: ready for stills, needs a non-m3 computer', ms), ['m3']);
+  assert.deepEqual(otherComputerOf('w1: ready for a clip, needs a computer other than BEAST', ms), ['beast']);
+  assert.deepEqual(otherComputerOf('w1: ready for stills, needs a machine not on m5 or m3', ms), ['m5']);
+  assert.equal(otherComputerOf('w1: ready for stills on a non-m3 computer', ms), undefined, 'no "needs"');
+  assert.equal(otherComputerOf('w1: ready for stills, needs a non-mac computer', ms), undefined, 'not a known computer');
+  assert.equal(otherComputerOf('w1: needs a non-m3 review', ms), undefined, 'not a computer');
 });

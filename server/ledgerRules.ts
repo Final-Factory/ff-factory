@@ -567,6 +567,30 @@ export function stillOpenIn(text: string): Map<string, string> {
 }
 
 /**
+ * A worker's "ready for" lines (w4225): `w4207: ready for the pair run`, `w4207: ready for stills, needs a non-m3 computer`
+ * (markdown around it allowed), by request id, every such line as written. They say the next step is ready to start and,
+ * unlike a still-open line, more than one may stand per request. e14a483b ended its turn on w4207 at 22:03Z on 2026-11-14
+ * with these two and "still open: pair run, stills and CI", filed nothing, and the request sat Stalled for 2 h
+ * (Agents.pairWaitNudge and Agents.readyLegQueue now read them).
+ */
+export function readyForIn(text: string): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const m of (text ?? '').matchAll(/^[\s*_>`-]*(w\d+)[*_`]*\s*[:—–-]\s*[*_`]*\s*ready (?:for|to)\b.*$/gim)) {
+    const id = m[1].toLowerCase();
+    out.set(id, [...(out.get(id) ?? []), m[0].replace(/^[\s*_>`-]+/, '').replace(/[\s*_`]+$/, '').trim()]);
+  }
+  return out;
+}
+
+/** A worker's status lines by request (w4225): its still-open line first, then its "ready for" lines. */
+export function statusLinesIn(text: string): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const [id, line] of stillOpenIn(text)) out.set(id, [line]);
+  for (const [id, lines] of readyForIn(text)) out.set(id, [...(out.get(id) ?? []), ...lines]);
+  return out;
+}
+
+/**
  * A worker's lines setting a request aside while it does other work first (w915): `w342: paused: waiting for w414's PR`,
  * also `w342: set aside …` (markdown around it allowed), by request id, the line as written. The request shows Paused
  * ("worker on w414 first") instead of Stalled; `<id>: still open: …` takes it up again.

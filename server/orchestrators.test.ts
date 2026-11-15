@@ -7883,6 +7883,53 @@ test('w2057: a worker that ends its turn waiting on a pair run with none filed i
   assert.equal(told(b.id), 0);
 });
 
+test('w4225: w4207 as it happened: a worker that stops with "ready for the pair run" and "ready for stills, needs a non-pc computer" is told to file the pair run and its stills leg is Queued off pc, never Stalled; filed, it is Blocked on the run; told twice in vain, the dispatcher files it', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, sessions, dispatcher } = env;
+  const other = await startTestMachine(env.machines, { id: 'lothdesktop', sandboxes: ['slot2'] });
+  env.closers.push(() => other.stop());
+  agentsRoom(agents, []);
+  const PR3628 = { repo: 'Final-Factory/FinalFactory', number: 3628, state: 'open' as const };
+  putRequests(store, [{ id: 'w4207', by: LOTH, title: 'Some filter options should not be mutually exclusive', prs: [PR3628] }]);
+  const a = await startedFor(env, 'w4207');
+  await until('the worker is idle', () => a.info.status === 'idle');
+  // e14a483b's 22:03Z report on 2026-11-14, its status lines word for word (m3 is pc here).
+  const report = [
+    'Nothing changed for w4207: it still needs the pair run, stills from a computer other than the pc, and CI.',
+    '',
+    'w4207: still open: pair run, stills and CI on PR #3628 before the merge',
+    'w4207: ready for stills, needs a non-pc computer',
+    'w4207: ready for the pair run',
+  ].join('\n');
+  const told = () => store.readTranscript(a.id).filter((e) => e.kind === 'user' && /No pair run is filed for w4207/.test((e as { text: string }).text)).length;
+  a.info.lastResult = report;
+  sessions.events.emit('turnEnd', sessions.get(a.id), report);
+  await until('the pair-run notice reaches it', () => told() === 1);
+  const w = () => store.work.get('w4207')!;
+  assert.match(w().log.join('\n'), /ended its turn waiting on a pair run with none filed \("w4207: still open: pair run, stills and CI/);
+  assert.deepEqual(w().legs?.map((l) => l.needs), [['lothdesktop']], 'the stills leg is queued off pc');
+  assert.match(w().log.join('\n'), /a leg queued for capacity on lothdesktop from worker \w+'s report "w4207: ready for stills, needs a non-pc computer" \(w4225/);
+  await until('the nudged turn ends', () => a.info.status === 'idle');
+  a.info.lastResult = report;
+  const live = agents.workLive().get('w4207')!;
+  assert.equal(live.state, 'queued', `${live.state}: ${live.why}`);
+  assert.match(live.why, /its leg .* queued/);
+  // The same report again, nothing filed: the dispatcher is told to file it, once; the worker is not told again.
+  const dispatched = () => store.readTranscript(agents.dispatcherId!).filter((e) => e.kind === 'user' && /PAIR RUN NOT FILED \(w4225\): w4207/.test((e as { text: string }).text)).length;
+  sessions.events.emit('turnEnd', sessions.get(a.id), report);
+  await until('the dispatcher hears it', () => dispatched() === 1);
+  sessions.events.emit('turnEnd', sessions.get(a.id), report);
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(dispatched(), 1, 'once per request');
+  assert.equal(told(), 1, 'the worker is told once');
+  assert.equal(w().legs?.length, 1, 'one leg for the same computers');
+  // The worker files it: Blocked on the pair run, not Stalled.
+  await until('idle again', () => a.info.status === 'idle');
+  await a.h.request_pair!({ what: 'MP-W4207-multi-category', brief: 'Run MP-W4207-multi-category on two computers; pass: 0 diverged.', commit: '1a2b3c4d5e' });
+  const filed = agents.workLive().get('w4207')!;
+  assert.equal(filed.state, 'blocked', `${filed.state}: ${filed.why}`);
+});
+
 test('w2085: the replay of w1958 at 16:32: a look OK for PR #2395 is refused with Ben\'s 04:59 note; past it, the card shows the note as possibly deciding', async (t) => {
   const env = await setupOnMachine(t);
   const { store, machines, dispatcher, chat, call, heard, agents, sessions } = env;
