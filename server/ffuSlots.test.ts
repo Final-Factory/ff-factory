@@ -7,6 +7,7 @@ import { spawnSync } from 'node:child_process';
 import { ffuSlotMain, readSlotState, realFfuSlotDeps, slotCheckout, slotTarget, takeSlot, releaseSlot, type FfuSlotDeps } from '../machine/ffuSlots.ts';
 import type { CleanupGuard } from './cleanup.ts';
 import { installLeftoverSettings, planInstallLeftovers, type ProcLite } from './installLeftovers.ts';
+import { writeCargoUnit, type FakeUnit } from './cargoGraphFixture.ts';
 
 /**
  * w3764: ffu slots, per-machine ffu worktrees with warm cargo targets (machine/ffuSlots.ts), and the clean-up rule for their
@@ -70,6 +71,10 @@ test('w3764: a worker takes a slot on its branch, keeps it, and the next worker 
   assert.ok(fs.existsSync(path.join(slotCheckout(root, id), 'feat.rs')), 'the checkout is on origin/feat');
   assert.equal(git(['rev-parse', '--abbrev-ref', 'HEAD'], slotCheckout(root, id)), 'feat');
   assert.equal(takeSlot(a, { remote }), 'slot1', 'a worker keeps the slot it holds');
+  // w4258: a cargo run in the checkout without CARGO_TARGET_DIR still builds in the slot's target.
+  const cfg = fs.readFileSync(path.join(root, 'ffu-sandboxes', 'slot1', '.cargo', 'config.toml'), 'utf8');
+  assert.match(cfg, /^\[build\]$/m);
+  assert.ok(cfg.includes(`target-dir = ${JSON.stringify(slotTarget(root, id).split(path.sep).join('/'))}`), cfg);
   fs.mkdirSync(path.join(slotTarget(root, id), 'debug'), { recursive: true });
   fs.writeFileSync(path.join(slotTarget(root, id), 'debug', 'warm.rlib'), 'x');
 
@@ -195,4 +200,68 @@ test('w3764: a low pass takes an unheld slot whole and only the incremental cach
   fs.writeFileSync(path.join(root, 'ffu-sandboxes', 'slots.json'), JSON.stringify({ slots: [{ id: 'slot2', holder: 'live0002' }] }));
   const p = await plan(root, { low: true, inUse: [path.join(root, 'tmp', 'ffa-live0002')] });
   assert.deepEqual(ffuItems(root, p), ['ffu-sandboxes/slot1/target', 'ffu-sandboxes/slot2/target/debug/incremental']);
+});
+
+/** A slot target with a current build (ffu_sim and its test, an hour old) and one from four days ago that nothing current uses. */
+function unitTarget(root: string, slot: string) {
+  const t = path.join(root, 'ffu-sandboxes', slot, 'target');
+  fs.mkdirSync(path.join(root, 'ffu-sandboxes', slot, 'ffu'), { recursive: true });
+  const serde: FakeUnit = { name: 'serde', hash: '1111111111111111', fp: 18_000_000_000_000_000_001n, ageH: 24 * 6 };
+  const glam: FakeUnit = { name: 'glam', hash: '2222222222222222', fp: 17_000_000_000_000_000_003n, ageH: 24 * 4, bytes: 4000 };
+  const simNow: FakeUnit = { name: 'ffu_sim', hash: '3333333333333333', fp: 16_000_000_000_000_000_005n, deps: [serde], workspace: true, ageH: 1 };
+  const simOld: FakeUnit = { name: 'ffu_sim', hash: '4444444444444444', fp: 15_000_000_000_000_000_007n, deps: [glam, serde], workspace: true, ageH: 24 * 4, bytes: 4000 };
+  const testNow: FakeUnit = { name: 'golden', hash: '5555555555555555', fp: 14_000_000_000_000_000_009n, deps: [simNow], workspace: true, ageH: 1 };
+  for (const u of [serde, glam, simNow, simOld, testNow]) writeCargoUnit(t, u, NOW);
+  for (const d of [path.join(t, 'CACHEDIR.TAG'), t, path.join(t, 'debug'), ...['deps', '.fingerprint'].map((x) => path.join(t, 'debug', x))]) fs.utimesSync(d, (NOW - HOUR) / 1000, (NOW - HOUR) / 1000);
+  return t;
+}
+
+test('w4258: a test binary running from a slot target no longer keeps it whole: units nothing current uses go, its own stay', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-w4258c-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
+  const tg = unitTarget(root, 'slot1');
+  fs.writeFileSync(path.join(root, 'ffu-sandboxes', 'slots.json'), JSON.stringify({ slots: [{ id: 'slot1', holder: 'live0004' }] }));
+  const checkout = path.join(root, 'ffu-sandboxes', 'slot1', 'ffu');
+  // LothDesktop, 2026-11-15: `cargo test` in the checkout, past its build, running a long test binary from deps/.
+  const procs: ProcLite[] = [
+    { pid: 10, ppid: 1, cmd: `bash -c "cd ${checkout} && cargo test -p ffu-sim"` },
+    { pid: 11, ppid: 10, cmd: 'cargo test -p ffu-sim' },
+    { pid: 12, ppid: 11, cmd: `${tg}/debug/deps/golden-5555555555555555 --nocapture` },
+  ];
+  const p = await plan(root, { procs, inUse: [path.join(root, 'tmp', 'ffa-live0004')] });
+  const it = p.items.find((i) => i.rule === 'ffu-slot-target');
+  assert.ok(it, `the sweep runs beside the test binary: ${JSON.stringify(p.items.map((i) => i.rule))} ${JSON.stringify((p as { held?: unknown }).held)}`);
+  assert.equal(rel(root, it.path), 'ffu-sandboxes/slot1/target', 'one item for the target...');
+  const gone = [...new Set((it.members ?? []).map((m) => /-([0-9a-f]{16})/.exec(path.basename(m))![1]))].sort();
+  assert.deepEqual(gone, ['2222222222222222', '4444444444444444'], '...whose members are the old sim and the dependency only it used');
+  assert.match(it.why, /stale build output/);
+
+  // With a rustc running, the target is still building: nothing goes.
+  const building = await plan(root, { procs: [...procs, { pid: 13, ppid: 11, cmd: `rustc --crate-name ffu_sim --out-dir ${tg}/debug/deps` }], inUse: [path.join(root, 'tmp', 'ffa-live0004')] });
+  assert.deepEqual(ffuItems(root, building), []);
+
+  // A held target over the cap even after the sweep and its incremental cache stays whole while the test runs.
+  const over = await plan(root, { procs, inUse: [path.join(root, 'tmp', 'ffa-live0004')], settings: { ffuSlotTargetCapGB: 1000 / 1024 ** 3 } });
+  assert.ok(!over.items.some((i) => i.rule === 'ffu-slot-target' && !i.members && rel(root, i.path) === 'ffu-sandboxes/slot1/target'), 'never whole while held or running');
+});
+
+test("w4258: a slot holder's private cargo target in its temp folder goes once cargo is done with it; another worker's small one stays", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-w4258p-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
+  const priv = (session: string) => {
+    const tg = path.join(root, 'tmp', `ffa-${session}`, 'ffu-target');
+    fs.mkdirSync(path.join(tg, 'debug', 'deps'), { recursive: true });
+    fs.writeFileSync(path.join(tg, 'CACHEDIR.TAG'), TAG);
+    fs.writeFileSync(path.join(tg, 'debug', 'deps', 'libx-1111111111111111.rlib'), Buffer.alloc(1000));
+    const at = (NOW - 2 * HOUR) / 1000;
+    for (const p of [path.join(tg, 'debug', 'deps', 'libx-1111111111111111.rlib'), path.join(tg, 'debug', 'deps'), path.join(tg, 'debug'), path.join(tg, 'CACHEDIR.TAG'), tg]) fs.utimesSync(p, at, at);
+    return tg;
+  };
+  const held = priv('live0005');
+  priv('live0006');
+  fs.mkdirSync(path.join(root, 'ffu-sandboxes'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'ffu-sandboxes', 'slots.json'), JSON.stringify({ slots: [{ id: 'slot1', holder: 'live0005' }] }));
+  const p = await plan(root, { inUse: [path.join(root, 'tmp', 'ffa-live0005'), path.join(root, 'tmp', 'ffa-live0006')] });
+  const cargo = p.items.filter((i) => i.rule === 'cargo-target-cap').map((i) => i.path);
+  assert.deepEqual(cargo, [held]);
 });

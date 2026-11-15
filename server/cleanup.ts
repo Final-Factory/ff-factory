@@ -109,6 +109,11 @@ export interface CleanupItem {
    * resumable entries for that folder cover the folder itself and what holds it, not this item inside it.
    */
   inSession?: string;
+  /**
+   * Remove these entries inside `path` instead of `path` itself (w4258: a cargo target's stale units, server/cargoGraphSweep.ts):
+   * one item and one log line for thousands of files, each removed on its own, and one in use skipped alone.
+   */
+  members?: string[];
 }
 
 export interface CleanupRun {
@@ -872,6 +877,7 @@ export async function runCleanup(items: CleanupItem[], guard: CleanupGuard): Pro
  * fails on Windows while a file inside is open, so an entry in use is skipped whole. Returns whether it went.
  */
 export async function removeRenamed(it: CleanupItem, out: CleanupRun): Promise<boolean> {
+  if (it.members) return removeMembers(it, out);
   const bytes = await sizeOf(it.path);
   const doomed = it.rule === 'leftover' ? it.path : `${it.path}.ffclean-${Date.now()}`;
   try {
@@ -889,6 +895,36 @@ export async function removeRenamed(it: CleanupItem, out: CleanupRun): Promise<b
     out.failed.push({ path: it.path, why: `partly removed (${(e as NodeJS.ErrnoException).code ?? (e as Error).message}); the rest next pass` });
     return false;
   }
+}
+
+/** removeRenamed for an item with members: each member inside `it.path` goes on its own; one entry for the lot. */
+async function removeMembers(it: CleanupItem, out: CleanupRun): Promise<boolean> {
+  let bytes = 0;
+  let skipped = 0;
+  let first = '';
+  for (const m of it.members ?? []) {
+    if (!within(m, it.path) || norm(m) === norm(it.path)) continue;
+    const st = await fs.promises.lstat(m).catch(() => undefined);
+    if (!st) continue;
+    const size = st.isDirectory() ? await sizeOf(m) : st.size;
+    try {
+      if (st.isDirectory()) {
+        const doomed = `${m}.ffclean-${Date.now()}`;
+        await fs.promises.rename(m, doomed);
+        await fs.promises.rm(doomed, { recursive: true, force: true, maxRetries: 2 });
+      } else await fs.promises.unlink(m);
+      bytes += size;
+    } catch (e) {
+      skipped++;
+      first ||= `${m}: ${(e as NodeJS.ErrnoException).code ?? (e as Error).message}`;
+    }
+  }
+  if (bytes) {
+    out.removed.push({ path: it.path, bytes, rule: it.rule, why: it.why });
+    out.bytes += bytes;
+  }
+  if (skipped) out.failed.push({ path: it.path, why: `${skipped} of ${it.members!.length} entries in use or not removable (first: ${first}); the next pass tries again` });
+  return bytes > 0;
 }
 
 /**
@@ -939,7 +975,12 @@ export async function biggestConsumers(env: CleanupEnv, extra: string[] = [], op
 /** What a plan would remove, measured, removing nothing: a dry run's answer. */
 export async function sizePlan(items: CleanupItem[]): Promise<{ path: string; bytes: number; rule: string; why: string }[]> {
   const out: { path: string; bytes: number; rule: string; why: string }[] = [];
-  for (const it of items) out.push({ path: it.path, bytes: await sizeOf(it.path), rule: it.rule, why: it.why });
+  for (const it of items) {
+    let bytes = 0;
+    if (it.members) for (const m of it.members) bytes += await sizeOf(m);
+    else bytes = await sizeOf(it.path);
+    out.push({ path: it.members ? `${it.path} (${it.members.length} entries inside)` : it.path, bytes, rule: it.rule, why: it.why });
+  }
   return out.sort((a, b) => b.bytes - a.bytes);
 }
 

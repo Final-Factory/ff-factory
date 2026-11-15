@@ -16,6 +16,7 @@ Under the worker install folder (`FF_WORKER_ROOT`: `F:\ffw` on BEAST, `V:\ffw` o
 | `ffu-sandboxes/repo` | one bare clone of ffu per machine, fetched under the lock on every `take` |
 | `ffu-sandboxes/slot<N>/ffu` | a git worktree of it: the worker's checkout |
 | `ffu-sandboxes/slot<N>/target` | the slot's `CARGO_TARGET_DIR`, kept between workers. It sits outside the checkout, so a reset or a `git clean` never touches it |
+| `ffu-sandboxes/slot<N>/.cargo/config.toml` | `[build] target-dir` naming the slot's target (w4258), written on every `take`: cargo reads config from the folders above where it runs, so a build in the checkout lands in the slot's target even in a shell without `CARGO_TARGET_DIR` |
 | `ffu-sandboxes/slots.json` | each slot's holder (the session id), branch and last use |
 | `ffu-sandboxes/.lock` | a folder made atomically around every change; another worker takes it over after 15 min |
 
@@ -37,6 +38,13 @@ one used most recently (the warmest target). It makes a new slot (a cold target)
 means no slot can be had: all `FF_FFU_SLOTS_MAX` slots are held, or the drive has under 40 GB free. In that case,
 build in `$TMPDIR` as before.
 
+A worker that holds a slot builds only in the slot's target (w4258, lothsahn: "A worker that holds an ffu slot builds in
+that slot's target and never in a private $TMPDIR/ffu-target"). The guard (`server/ffuTargetGuard.ts`) refuses a command
+that points `CARGO_TARGET_DIR` or `--target-dir` into the worker's temp folder while its session holds a slot, and the
+clean-up gives such a worker's temp-folder targets a cap of 0, so one goes once cargo is done with it. A baseline of
+another commit (a RED run on main) is built in the slot too: check that commit out there, build, and switch back; both
+builds stay warm in the one target, and the sweep below keeps both while either is recent.
+
 Your branch is checked out from `origin/<branch>`, or from a new branch made from `origin/main`. A local branch that
 holds commits origin lacks is kept as it is. If another slot already has your branch checked out, you get a detached
 checkout at its tip, because git allows a branch in one worktree only; push it with `git push origin HEAD:<branch>`.
@@ -56,18 +64,41 @@ so 4 × the 16 GB cap is 64 GB at most.
 
 ## Clean-up (`server/installLeftovers.ts`, rule `ffu-slot-target`)
 
-The clean-up only ever deletes a slot's `target`. It never touches the checkout, which may hold work, or the shared
-clone. A target in use always stays, as `cargoTargetBusy` judges it: a process names the target or the checkout, or
-something in its top three levels was written within the settle time (15 min). Otherwise:
+The clean-up only ever deletes in a slot's `target`. It never touches the checkout, which may hold work, or the shared
+clone. Nothing goes while cargo builds in the target, as `cargoTargetBusy` judges it: a cargo, rustc or linker process
+names the target or runs in the checkout's process tree, or something in its top three levels was written within the
+settle time (15 min). A program that only runs from the target (a long test binary from `debug/deps`, with the
+`cargo test` and the shell that started it) no longer keeps it whole (w4258): `cargoTargetRunners` finds those, and the
+sweep spares the units they run. Otherwise:
 
 | When | What goes |
 |---|---|
-| No running or resumable worker holds the slot and nothing was written for `ffuSlotIdleDays` (7) | the whole target |
-| The target is over `ffuSlotTargetCapGB` (16 GB), on every pass | `debug/incremental` when that brings it under the cap, else the whole target |
+| No running or resumable worker holds the slot, nothing runs from it, and nothing was written for `ffuSlotIdleDays` (7) | the whole target |
+| Every pass | the stale units (below): what no workspace unit built within `ffuSlotKeepHours` (48) of the newest one uses, and superseded object files |
+| Over `ffuSlotTargetCapGB` (16 GB), or a low pass | the sweep's window narrows to 24, 6, then 1 h until the target fits |
+| Still over the cap | `debug/incremental`; the whole target only when no worker holds the slot and nothing runs from it (a held one is kept and listed) |
 | A low pass (the drive under its soft threshold) | the whole target of a slot no running or resumable worker holds; only `debug/incremental` of a held one |
 
-The per-worker `cargoTargetCapGB` (8 GB, w3426) still applies to targets in temp folders. Slot targets are kept warm on
-purpose, so they get their own, larger cap.
+### The stale-unit sweep (`server/cargoGraphSweep.ts`, w4258)
+
+Cargo never deletes what an older build left: every feature set, profile and dependency change makes a new unit
+(`<crate>-<16 hex>` in `deps/`, `build/`, `incremental/` and `.fingerprint/`) and the old one stays. The sweep is a mark
+and sweep over cargo's own records. Each unit's `.fingerprint/<pkg>-<hash>/<kind>.json` lists the fingerprints of the
+units it was built from (`deps: [[id, name, public, fingerprint]]`, a bare u64 past a double's precision, so the parser
+quotes it first), and its `<kind>` file holds its own fingerprint (the u64's little-endian bytes in hex). The roots are the
+workspace's units (`local` holds a `CheckDepInfo`) built within the window of the newest one, plus any unit a running
+program names. Everything they reach stays however old; the rest goes, except anything written within the settle time.
+On macOS rustc also keeps each unit's codegen objects (`*.rcgu.o`) in `deps/`, and every rebuild leaves new ones beside
+the old: an object goes when it has one link (incremental hard-links the objects it reuses) and is over 10 minutes older
+than its unit's newest other artifact. One clean-up item lists every entry (`members`), so the log has one line per
+target, and an entry in use is skipped alone.
+
+Why 48 h and 16 GB (measured, m5, 2026-11-14, a dry run of the sweep): ffu slot2's target, 8.7 GB with one day of work,
+was all live (1308 of 1308 units). Slot3's, 13.3 GB after a week, had every unit live at 48 h and 24 h, but 2.86 GB of
+superseded object files; at 6 h 3.68 GB would go, at 1 h 5.25 GB. A fresh target is 5.5 to 6.8 GB (BEAST), and a live
+debug profile 4 to 11.5 GB on m5, so 16 GB keeps about two configurations warm and the narrowing windows reach it before
+the incremental cache or the whole target is touched. The sweep of an 11.5 GB profile read 2193 fingerprints in about
+1 s. The per-worker `cargoTargetCapGB` (8 GB, w3426) still applies to targets in temp folders.
 
 ## Measurements behind it (BEAST, 2026-11-09, ffu 9e10964, 32 cores, a shared bench ticket)
 
