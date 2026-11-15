@@ -57,6 +57,7 @@ import { ReportError, ReportStore, isReportKind } from './reports.ts';
 import { HostHealthMonitor } from './hostHealth.ts';
 import { PATH_HEALTH_FILE, PathHealthMonitor, filePathHealth } from './pathHealth.ts';
 import { withDismissed } from '../shared/dismissals.ts';
+import { diskCriticalNotice } from '../shared/blockers.ts';
 import { UNIT_WATCHDOG_FILE, UnitWatchdogMonitor, fileUnitWatchdog } from './unitWatchdog.ts';
 import { ActScope, NOT_YOURS, type ActPolicy } from '../shared/actAccess.ts';
 import { dataRecoveries, describeRecovery } from './durable.ts';
@@ -337,10 +338,11 @@ machines.sandboxEvent = (machineId, text, e) => {
   }
   if (!e.checkpoint) return;
   // The machine's disk guard: its sandbox agents mid-turn commit, push and stop (as the host's guard asks its own).
+  const notice = diskCriticalNotice(new Date(), /^disk space critical: ([^;]*)/.exec(text)?.[1]);
   for (const s of store.sessions.values()) {
     if (s.machineId !== machineId || !s.machineSandbox || !['running', 'starting', 'waiting_permission'].includes(s.status)) continue;
     try {
-      sessions.send(s.id, '[disk critical] Free disk space on this machine is critically low. Commit and push your work now (a WIP commit is fine), call blocked_on with disk: true and end your turn; new work waits until space is freed. You are resumed when the disk of this machine is back above its warning line.', 'system');
+      sessions.send(s.id, notice, 'system');
     } catch {
       // it sees the refusal on its next start
     }

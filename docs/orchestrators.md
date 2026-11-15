@@ -1132,7 +1132,11 @@ without one means it is off or failing, worth a person's look.
      plus `DISK_RESUME_MARGIN_GB` (5 GB, the daemon guard's hysteresis), so a disk hovering at the line does not flap. It
      reads the portal's pool setting, not the daemon's own level, which can use daemon.json's stale `disk_warn_gb` for
      the seconds after a daemon restart. On 2026-11-07 five lothdesktop workers paused at 07:07Z sat Stalled with no
-     gate and were resumed only by hand after V: had 28 GB free at 07:58Z. **A line that waits on a person is never read so** (w2495, `personWaitOn`, with
+     gate and were resumed only by hand after V: had 28 GB free at 07:58Z. `blocked_on` with `disk: true` is refused
+     while that same reading is at or above the line (w4257, `diskAboveLine`): the `[disk critical]` notice
+     (`diskCriticalNotice`, with its time and reading) reaches a worker only at its next tool round, and on 2026-11-15
+     biscuit was critical at 8 GB at 02:00:53Z and back to 24 GB at 02:01:20Z, but w4242's and w4241's workers stopped
+     at 02:07 and 02:09Z with 41 and 40 GB free, each gate cleared within a minute. **A line that waits on a person is never read so** (w2495, `personWaitOn`, with
      the request's people): it is the person's wait (Waiting on input, below), whatever product it names. w2443's worker wrote
      "waiting on lothsahn to click Pause in FF Factory's tray on LothLaptop for the live test", the ledger made a portal
      deploy gate of it, and lothsahn's answer was held for a deploy that never came. `portalWaitIn` also refuses a "<who> to
