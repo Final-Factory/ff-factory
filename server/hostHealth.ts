@@ -4,6 +4,7 @@ import { hostSoftFreeGB, type Config, type HostGuardConfig } from './config.ts';
 import { CleanupRunner, describeCleanupItems, type CleanupRun, type PassOptions, type VolumeStat } from './cleanup.ts';
 import { staleOutputSettings } from './staleOutput.ts';
 import type { HelperAction, HelperResult } from './privileged.ts';
+import { diskCriticalNotice } from '../shared/blockers.ts';
 import { DISK_CLEANUP_FLOOR_GB, type DiskLevel, type HostHealth, type Sandbox, type SessionInfo } from '../shared/types.ts';
 
 /**
@@ -407,9 +408,10 @@ export class HostHealthMonitor {
     if (first) this.criticalSince = this.now();
     if (this.now() - this.lastCleanupAt > 10 * 60_000) void this.cleanup('critical');
     if (first) {
+      const notice = diskCriticalNotice(new Date(this.now()), this.health.disks.filter((x) => x.level === 'critical').map(diskWords).join(', '));
       for (const s of this.d.sessions().filter((x) => x.kind !== 'orchestrator' && !x.machineId && BUSY.has(x.status))) {
         try {
-          this.d.tell(s.id, '[disk critical] Free disk space on this machine is critically low. Commit and push your work now (a WIP commit is fine), call blocked_on with disk: true and end your turn; new work waits until space is freed. You are resumed when the disk of this machine is back above its warning line.');
+          this.d.tell(s.id, notice);
         } catch {
           // it will see the gate on its next action
         }

@@ -8,7 +8,7 @@ import path from 'node:path';
 import { band, concepts, DEFAULT_THRESHOLDS, entryMatch, indexOf, type MatchThresholds } from './boardMatch.ts';
 import { LOOP_GUARD_RANGE, type Config } from './config.ts';
 import type { Store } from './store.ts';
-import { blockerName, blockerProblem, blockerVerdict, gateSetter, latestWorker, newestFirst, RESUME_SWEEP_MS, DISK_RESUME_MARGIN_GB, gatesName, gatesOf, MAX_GATES, othersGates, prRefOf, sameGate, type BlockerFacts } from '../shared/blockers.ts';
+import { blockerName, blockerProblem, blockerVerdict, gateSetter, latestWorker, newestFirst, RESUME_SWEEP_MS, DISK_RESUME_MARGIN_GB, diskAboveLine, gatesName, gatesOf, MAX_GATES, othersGates, prRefOf, sameGate, type BlockerFacts } from '../shared/blockers.ts';
 import { COORD_TURN_MAX_CALLS, COORD_TURN_MAX_TOKENS_READ, type OptionsFactory, type SessionHandle, type SessionManager, type TurnBudgetHit } from './sessions.ts';
 import { actingFor, asRequester, type Identity } from './identity.ts';
 import {
@@ -373,6 +373,8 @@ export interface OrchestratorsDeps {
   heldFor?: (machine: string, w: WorkItem) => string | undefined;
   /** Whether a machine is online; undefined for a machine this portal does not have (w643: blockers). */
   machineOnline?: (id: string) => boolean | undefined;
+  /** w4257: a machine's sandbox volume as a disk gate reads it (Machines.diskRoom); undefined when unknown. */
+  machineDisk?: (id: string) => { freeBytes: number; warnGB: number } | undefined;
   /** w2304: who plays Final Factory on a machine now, or in the grace after (w1894, MachineManager.personPlayOf), as a phrase. */
   personPlaying?: (id: string) => string | undefined;
   /** w2443: why a machine is paused from its tray (pauseWhy), or undefined while it runs. */
@@ -5495,6 +5497,9 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     if (a.disk) {
       const m = this.store.sessions.get(sessionId)?.machineId?.trim().toLowerCase();
       if (!m) throw new Error('disk: you run on no machine FF Factory knows, so no disk can be waited on');
+      // w4257: the same test and reading that clear a disk gate; a wait set above it is cleared at once, a stop for nothing.
+      const above = diskAboveLine(m, this.d.machineDisk?.(m));
+      if (above) throw new Error(`disk: ${above}, above the line a disk wait clears at, so the disk is not low now: carry on with your work and do not end your turn for it (a [disk critical] notice that reached you after the clean-up freed the disk is over)`);
       asked.push({ kind: 'disk', ref: m, what: `free disk space on ${m}` });
     }
     if (!asked.length) throw new Error('name what it waits for: requests (ids), reports (ids of requests whose worker must report first), prs (owner/repo#123 or a github.com link), deploys ("portal" or a machine id) and/or disk (true: free disk space on your machine). A person is waiting_on_person; a time is wake_me');

@@ -48,6 +48,7 @@ function harness(over: Partial<{ helper: (n: number) => HelperResult; driveThere
     sessions: [sess('w1', 'blackhole', 'running'), sess('w2', 'agent-mcp', 'idle'), { ...sess('orch', undefined, 'running'), kind: 'orchestrator' } as SessionInfo],
   };
   const log: string[] = [];
+  const told: string[] = [];
   /** Each clean-up pass: "low" (below the soft threshold, or asked/critical) or "regular". */
   const cleaned: string[] = [];
   let helperCalls = 0;
@@ -70,7 +71,10 @@ function harness(over: Partial<{ helper: (n: number) => HelperResult; driveThere
     startEditor: async (id) => void log.push(`start ${id}`),
     stopEditor: async (id) => void log.push(`stop ${id}`),
     interrupt: async (id) => void log.push(`interrupt ${id}`),
-    tell: (id, text) => void log.push(`tell ${id}: ${text.slice(0, 40)}`),
+    tell: (id, text) => {
+      told.push(`${id}: ${text}`);
+      log.push(`tell ${id}: ${text.slice(0, 40)}`);
+    },
     report: (title) => void log.push(`report ${title}`),
     runHelper: async (a) => {
       helperCalls++;
@@ -88,7 +92,7 @@ function harness(over: Partial<{ helper: (n: number) => HelperResult; driveThere
     changed: () => undefined,
     now: () => world.now,
   };
-  return { world, log, cleaned, m: new HostHealthMonitor(deps) };
+  return { world, log, told, cleaned, m: new HostHealthMonitor(deps) };
 }
 
 test('sandbox drive lost: turns stopped, remounted by the helper (retrying), editors restarted, agents resumed', async () => {
@@ -158,7 +162,7 @@ test('sandbox drive lost with the host volume nearly full: clean up and wait bef
 });
 
 test('disk critical: busy agents asked to checkpoint once, idle editors stopped, junk cleaned', async () => {
-  const { world, log, cleaned, m } = harness();
+  const { world, log, told: heard, cleaned, m } = harness();
   world.freeC = 30 * GB;
   await m.tick();
   await settle();
@@ -166,6 +170,10 @@ test('disk critical: busy agents asked to checkpoint once, idle editors stopped,
   assert.ok(log.includes('report Disk space critical'));
   assert.ok(cleaned.includes('low'));
   assert.ok(log.some((l) => l.startsWith('tell w1: [disk critical]')));
+  // w4257: the notice carries its time and reading, and says what to do when blocked_on finds the disk already freed.
+  const notice = heard.find((l) => l.startsWith('w1: [disk critical]')) ?? '';
+  assert.match(notice, /At \d\d:\d\d:\d\dZ free disk space on this machine was critically low \(.*30 GB free/);
+  assert.match(notice, /If blocked_on answers that the disk is back above its warning line.*carry on with your work and do not end your turn/);
   assert.ok(!log.some((l) => l.startsWith('tell orch')), 'the orchestrator is not told to stop');
   assert.ok(log.includes('stop agent-mcp') && !log.includes('stop blackhole'), 'only the editor nobody is working in');
   const told = log.filter((l) => l.startsWith('tell w1')).length;
