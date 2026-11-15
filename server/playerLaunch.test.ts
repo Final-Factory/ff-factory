@@ -137,3 +137,31 @@ test('w4169: timeout, a subshell, cmd //c, a variable and inline code do not hid
     assert.equal(checkPlayerLaunch(cmd, 'slot2'), undefined, cmd);
   }
 });
+
+test('w4286: a player on a continuation line of an ffnightly run is its --player argument, not a launch', () => {
+  // The command w4214's host leg was refused (2026-11-15, m5/slot3): it only wrote run.sh, whose ffnightly.py run takes
+  // the build with --player on a backslash-continued line and copies it into a leased slot itself (lab.py's PlayerSlots).
+  const app = '$TMPDIR/pcache/230ede4a19add92e250f608afcec65654cdac63c-mac/player/finalfactory.app';
+  const run =
+    'FF_PAIR_RELAY_KEY="$(cat $TMPDIR/relay.key)" python3 scripts/nightly/ffnightly.py run --lab "$TMPDIR/lab.json" \\\n' +
+    `  --player "${app}" --player-win-root relay \\\n` +
+    '  --sha 230ede4a --scenario "$1" --out "$OUT" 2>&1 | tail -60';
+  const written = `cd /Users/x/ffw/sandboxes/slot3; cat > $TMPDIR/run.sh <<'EOF'\n#!/bin/bash\n${run}\nEOF\necho ok`;
+  const read = (p: string) =>
+    p.replace(/\\/g, '/').endsWith('scripts/nightly/ffnightly.py') ? 'from lab import (Peer, PlayerSlots)\n' :
+    p.replace(/\\/g, '/').endsWith('scripts/nightly/lab.py') ? 'class PlayerSlots: pass\n' : undefined;
+  for (const cmd of [written, run, `cd /Users/x/ffw/sandboxes/slot3 && ${run}`]) {
+    assert.equal(checkPlayerLaunch(cmd, 'slot3'), undefined, cmd);
+    assert.equal(checkScriptPlayerLaunch(cmd, '/Users/x/ffw/sandboxes/slot3', undefined, read), undefined, cmd);
+  }
+  // A player that is the program after a continuation is still refused, and so is a script that never uses the pool.
+  for (const cmd of [
+    `timeout -s TERM 600 \\\n  "${app}/Contents/MacOS/finalfactory" -x`,
+    `nohup \\\n "${app}" -x &`,
+    `open -a \\\n "${app}" --args -x`,
+  ]) {
+    assert.match(checkPlayerLaunch(cmd, 'slot3') ?? '', /outside a player slot/, cmd);
+  }
+  const tour = `bash /x/leg.sh \\\n  --player "${app}"`;
+  assert.match(checkScriptPlayerLaunch(tour, '/x', undefined, () => 'exec "$2" -x\n') ?? '', /outside a player slot/, tour);
+});

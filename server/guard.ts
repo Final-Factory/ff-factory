@@ -380,11 +380,20 @@ const playerRefusal = (w: string) =>
  * extension, a variable set earlier in the same command (`P=<player>; "$P"`), and inline code (`python -c`, a heredoc,
  * `powershell -Command`) that starts a player path outside a slot.
  */
+/**
+ * w4286: a backslash at a line's end continues the command on the next line, so `ffnightly.py run ... \` newline
+ * `--player "$TMPDIR/.../finalfactory.app" \` is one command whose program is python, not the player. Split on raw
+ * newlines, the continuation line read as a command of its own whose first non-flag word, the player, was its program
+ * (w4214's host leg was refused writing such a run.sh). Joined first, a player that really is the program after a
+ * continuation (`timeout 600 \` newline `<player>`) is still refused.
+ */
+const joinContinuations = (cmd: string) => cmd.replace(/\\\r?\n/g, ' ');
+
 export function checkPlayerLaunch(cmd: string, sandbox?: string): string | undefined {
   const own = /^slot(\d+)$/i.exec(sandbox ?? '')?.[1];
   const vars = new Map<string, string>();
   let cdDir: string | undefined;
-  for (const seg of cmd.split(/&&|\|\||[;|\n]|&(?=\s|$)/)) {
+  for (const seg of joinContinuations(cmd).split(/&&|\|\||[;|\n]|&(?=\s|$)/)) {
     const assign = ASSIGNMENT.exec(seg.trim().replace(/^[({]\s*/, ''));
     if (assign) {
       vars.set(assign[1].toLowerCase(), assign[2].replace(/^["']|["']$/g, ''));
@@ -459,7 +468,7 @@ const SLOT_ROUTE = /player[ _-]?slots?\b|slot pool|FF_LAUNCH|player_launch\.sh|s
  * be read here (a path the shell builds at run time) passes: this guard never blocks what it cannot see. Exported for tests.
  */
 export function checkScriptPlayerLaunch(cmd: string, cwd: string | undefined, env: ShellEnv | undefined, read: (p: string) => string | undefined = readText): string | undefined {
-  for (const seg of cmd.split(/&&|\|\||[;|\n]|&(?=\s|$)/)) {
+  for (const seg of joinContinuations(cmd).split(/&&|\|\||[;|\n]|&(?=\s|$)/)) {
     const words = (seg.trim().match(/"[^"]*"|'[^']*'|\S+/g) ?? []).map((w) => w.replace(/^["']|["']$/g, ''));
     let i = 0;
     for (;;) {
