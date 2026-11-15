@@ -389,11 +389,66 @@ const playerRefusal = (w: string) =>
  */
 const joinContinuations = (cmd: string) => cmd.replace(/\\\r?\n/g, ' ');
 
+/**
+ * w4290: a command's simple commands, split on &&, ||, ;, |, & and newlines outside single and double quotes. Split
+ * without regard to quotes, a read-only `grep -n 'x\|<player name>" \\' notes.md` gave the text after the quoted `|` as
+ * a command whose program was the player, and was refused (m5/slot2, w4286). A newline always splits (after
+ * continuations are joined), so a heredoc's text stays line by line; a line that ends inside an unbalanced quote (an
+ * apostrophe in `echo don't; ./finalfactory`) is split as before, quotes ignored, so it hides no launch.
+ */
+const RAW_SEPARATORS = /&&|\|\||[;|]|&(?=\s|$)/;
+function splitCommands(cmd: string): string[] {
+  const out: string[] = [];
+  for (const line of joinContinuations(cmd).split('\n')) {
+    const segs: string[] = [];
+    let cur = '';
+    let quote = '';
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (quote) {
+        // Inside double quotes a backslash escapes the next character (\" does not close them); single quotes have no escapes.
+        if (c === '\\' && quote === '"' && i + 1 < line.length) {
+          cur += c + line[++i];
+          continue;
+        }
+        if (c === quote) quote = '';
+        cur += c;
+        continue;
+      }
+      if (c === '\\' && i + 1 < line.length) {
+        cur += c + line[++i];
+        continue;
+      }
+      if (c === "'" || c === '"') {
+        quote = c;
+        cur += c;
+        continue;
+      }
+      const two = line.slice(i, i + 2);
+      if (two === '&&' || two === '||') {
+        segs.push(cur);
+        cur = '';
+        i++;
+        continue;
+      }
+      if (c === ';' || c === '|' || (c === '&' && (i + 1 === line.length || /\s/.test(line[i + 1])))) {
+        segs.push(cur);
+        cur = '';
+        continue;
+      }
+      cur += c;
+    }
+    segs.push(cur);
+    out.push(...(quote ? line.split(RAW_SEPARATORS) : segs));
+  }
+  return out;
+}
+
 export function checkPlayerLaunch(cmd: string, sandbox?: string): string | undefined {
   const own = /^slot(\d+)$/i.exec(sandbox ?? '')?.[1];
   const vars = new Map<string, string>();
   let cdDir: string | undefined;
-  for (const seg of joinContinuations(cmd).split(/&&|\|\||[;|\n]|&(?=\s|$)/)) {
+  for (const seg of splitCommands(cmd)) {
     const assign = ASSIGNMENT.exec(seg.trim().replace(/^[({]\s*/, ''));
     if (assign) {
       vars.set(assign[1].toLowerCase(), assign[2].replace(/^["']|["']$/g, ''));
@@ -468,7 +523,7 @@ const SLOT_ROUTE = /player[ _-]?slots?\b|slot pool|FF_LAUNCH|player_launch\.sh|s
  * be read here (a path the shell builds at run time) passes: this guard never blocks what it cannot see. Exported for tests.
  */
 export function checkScriptPlayerLaunch(cmd: string, cwd: string | undefined, env: ShellEnv | undefined, read: (p: string) => string | undefined = readText): string | undefined {
-  for (const seg of joinContinuations(cmd).split(/&&|\|\||[;|\n]|&(?=\s|$)/)) {
+  for (const seg of splitCommands(cmd)) {
     const words = (seg.trim().match(/"[^"]*"|'[^']*'|\S+/g) ?? []).map((w) => w.replace(/^["']|["']$/g, ''));
     let i = 0;
     for (;;) {

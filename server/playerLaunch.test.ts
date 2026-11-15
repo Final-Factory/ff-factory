@@ -165,3 +165,31 @@ test('w4286: a player on a continuation line of an ffnightly run is its --player
   const tour = `bash /x/leg.sh \\\n  --player "${app}"`;
   assert.match(checkScriptPlayerLaunch(tour, '/x', undefined, () => 'exec "$2" -x\n') ?? '', /outside a player slot/, tour);
 });
+
+test('w4290: a | or ; inside quotes is text, not a separator', () => {
+  // The read-only search refused on m5/slot2 (w4286, 2026-11-15): the quoted pattern's `\|` split the command, and
+  // finalfactory.app" became the program of the text after it. This very test, appended by a heredoc, was refused too.
+  const grep = `grep -n 'run ... \\\\\\|finalfactory.app" \\\\' Documentation/Determinism-Test-Strategy.md`;
+  const heredoc = `cat >> server/playerLaunch.test.ts <<'TS'\n  for (const cmd of [\n    \`echo 'a | finalfactory.exe'\`,\n  ]) {}\nTS`;
+  for (const cmd of [
+    grep,
+    `echo 'a | finalfactory.exe'`,
+    `echo "a; finalfactory.exe"`,
+    `echo "it's | finalfactory.exe" && ls`,
+    `grep -c 'x\\|./finalfactory' notes.md | head -3`,
+    heredoc,
+  ]) {
+    assert.equal(checkPlayerLaunch(cmd, 'slot2'), undefined, cmd);
+    assert.equal(checkScriptPlayerLaunch(cmd, '/x', undefined, () => undefined), undefined, cmd);
+  }
+  // A real separator outside quotes still starts a command of its own, and an unbalanced quote hides nothing.
+  for (const cmd of [
+    `ls | ./finalfactory`,
+    `echo 'a' | ./finalfactory -x`,
+    `echo "a | b"; ./finalfactory`,
+    `echo don't; ./finalfactory`,
+    `ls\n./finalfactory`,
+  ]) {
+    assert.match(checkPlayerLaunch(cmd, 'slot2') ?? '', /outside a player slot/, cmd);
+  }
+});
