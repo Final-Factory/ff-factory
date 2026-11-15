@@ -4,7 +4,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { LEFTOVER, LeftoverReaper, forPerson, launchForPerson, personEnv, waitLoop, callerPids, envFrom, installLeftoversShim, kindOf, macEnvLine, orphanVerdict, ownLeftovers, personGames, readEnvs, readLeases, realInspect, sameRoot, sessionVerdict, sessionTempRoot, msysParents, slotOf, tempSessionInArgs, tempSessionOf, type LeftoverDeps, type PlayerLease, type ProcEnv } from '../machine/leftovers.ts';
+import { LEFTOVER, LeftoverReaper, forPerson, personStarted, launchForPerson, personEnv, waitLoop, callerPids, envFrom, installLeftoversShim, kindOf, macEnvLine, orphanVerdict, ownLeftovers, personGames, readEnvs, readLeases, realInspect, sameRoot, sessionVerdict, sessionTempRoot, msysParents, slotOf, tempSessionInArgs, tempSessionOf, type LeftoverDeps, type PlayerLease, type ProcEnv } from '../machine/leftovers.ts';
 import { realDeps as realUnityDeps, type Proc, type UnityPlatform } from '../machine/unity.ts';
 import { playerText, unitySlotsLine } from '../shared/fleet.ts';
 
@@ -995,4 +995,104 @@ test('on this machine (w4047): a program started with `ff-leftovers launch` surv
     }
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------- w4336: a person's Firefox tabs are never a session's
+
+// BEAST, 2026-11-15: worker 126aafa6 (w4335) ran `ff-leftovers list` and `end`; both took four
+// `firefox.exe -contentproc -isForBrowser` tab processes of Ben's own Firefox (pids 79408 74448 75376 76696, up 4-20 min)
+// for the session's and ended them; their parent, his main firefox.exe, was not listed. The worker started no browser.
+// Nothing went by start time alone: the Windows walk down from the session's processes followed the shim's MSYS map
+// (`<winpid>:<MSYS parent winpid>` as Git Bash's /proc remembers it) onto whatever now held a Windows pid an exited MSYS
+// program once had, and any Windows parent link, with no start time to tell (only the session's own processes were timed).
+test('w4336, BEAST: a firefox.exe -contentproc whose parent is a firefox.exe the session did not start is never listed, by a stale MSYS pid, a reused parent pid or a temp-folder argument', () => {
+  const T = 1_000 * HOUR;
+  const W = (pid: number, ppid: number, name: string, cmd: string, born: number) => ({ pid, ppid, name, cmd, born });
+  const FF = '"C:\\Program Files\\Mozilla Firefox\\firefox.exe"';
+  const tab = (pid: number, n: number) => `${FF} -contentproc -isForBrowser -prefsHandle 2512 -prefMapHandle 2516 -prefsLen 31215 -prefMapSize 244658 -parentBuildID 20261101000000 -appDir "C:\\Program Files\\Mozilla Firefox\\browser" - {0b1c2d3e-${pid}} 7000 ${n} tab`;
+  const rows = [
+    W(4, 0, 'System', 'System', T - 90 * HOUR),
+    // Ben's desktop and his Firefox, started from the taskbar; the launcher process that started the browser has exited.
+    W(6000, 5900, 'explorer.exe', 'C:\\Windows\\Explorer.EXE', T - 80 * HOUR),
+    W(7000, 6900, 'firefox.exe', FF, T - 3 * HOUR),
+    W(79408, 7000, 'firefox.exe', tab(79408, 31), T - 20 * MIN),
+    W(74448, 7000, 'firefox.exe', tab(74448, 32), T - 12 * MIN),
+    W(75376, 7000, 'firefox.exe', tab(75376, 33), T - 8 * MIN),
+    W(76696, 7000, 'firefox.exe', tab(76696, 34), T - 4 * MIN),
+    // Notepad, opened by Ben from Explorer on the worker's log: it names the session's temp folder, and is his.
+    W(8100, 6000, 'notepad.exe', 'notepad.exe V:\\ffw\\tmp\\ffa-me\\run.log', T - 2 * MIN),
+    // The worker: its agent host, claude, this call's shim and node.
+    W(21376, 31748, 'node.exe', '"C:\\nvm4w\\nodejs\\node.exe" D:\\ff\\d\\app\\machine\\agentHost.ts D:\\ff\\d\\hosts\\me', T - 2 * HOUR),
+    W(25844, 21376, 'claude.exe', 'C:\\Users\\u\\.local\\bin\\claude.exe --output-format stream-json --verbose', T - 2 * HOUR),
+    W(55384, 44516, 'sh.exe', 'C:\\Program Files\\Git\\usr\\bin\\sh.exe /c/Users/u/.ff-factory/unity-slots/bin/ff-leftovers end', T - 1000),
+    W(43776, 55384, 'node.exe', '"V:\\ffw\\tools\\node\\node.exe" D:/ff/d/app/machine/leftovers.ts end', T - 900),
+    // Its real leftovers: a background script's bash (its Windows parent exited), the python it runs and the bash's sleep.
+    W(3916, 30688, 'bash.exe', '"C:\\Program Files\\Git\\usr\\bin\\bash.exe" /v/ffw/tmp/ffa-me/x.sh', T - 30 * MIN),
+    W(3920, 3916, 'python.exe', 'python bench_queue.py timed --what x --minutes 20', T - 30 * MIN),
+    W(29288, 28824, 'sleep.exe', '"C:\\Program Files\\Git\\usr\\bin\\sleep.exe" 20', T - 5_000),
+    // A session process that now holds the pid Ben's Firefox launcher once had (6900), younger than his firefox.exe.
+    W(6900, 3916, 'cat.exe', '"C:\\Program Files\\Git\\usr\\bin\\cat.exe"', T - 10 * MIN),
+  ];
+  const procs = rows.map(({ pid, ppid, name, cmd }) => ({ pid, ppid, name, cmd }));
+  const startedAt = new Map(rows.map((r) => [r.pid, r.born]));
+  const env = new Map<number, ProcEnv>([25844, 43776, 3920].map((pid) => [pid, { session: 'me' }]));
+  // The shim's MSYS map: the sleep's parent is the script's bash (real), and five stale /proc entries whose Windows pids
+  // Firefox's tabs and the Notepad now hold, each naming the bash as parent.
+  const msys = msysParents('29288:3916 79408:3916 74448:3916 75376:3916 76696:3916 8100:3916');
+  const o = { callers: callerPids('55384'), tempRoot: 'V:\\ffw\\tmp', msys, born: (pid: number) => startedAt.get(pid) };
+  const mine = ownLeftovers('me', procs, env, 43776, 'win32', o).map((p) => p.pid).sort((a, b) => a - b);
+  assert.deepEqual(mine, [3916, 3920, 6900, 29288], "the worker's own script, its python, its cat and its sleep, and nothing of Ben's");
+  // Without start times (an older caller; the command always reads them, and there one missing is no link), the stale
+  // MSYS claims still lose to the tabs' live parent, and the desktop barrier keeps Notepad. (A reused parent pid needs the
+  // times, so the cat that holds 6900 is left out here.)
+  const loose = ownLeftovers('me', procs.filter((p) => p.pid !== 6900), env, 43776, 'win32', { ...o, born: undefined }).map((p) => p.pid);
+  for (const pid of [79408, 74448, 75376, 76696, 8100]) assert.ok(!loose.includes(pid), `pid ${pid} is Ben's (no start times)`);
+  // The same tabs on a Mac or Linux: only the environment counts there, so a person's are never listed.
+  const posixProcs = rows.map(({ pid, ppid, name }) => ({ pid, ppid, cmd: name === 'firefox.exe' ? `/usr/lib/firefox/firefox${pid === 7000 ? '' : ' -contentproc -isForBrowser 7000 tab'}` : `/usr/bin/${name.replace(/\.exe$/i, '')} ${pid}` }));
+  for (const platform of ['linux', 'darwin'] as const) {
+    const got = ownLeftovers('me', posixProcs, env, 43776, platform, o).map((p) => p.pid);
+    for (const pid of [7000, 79408, 74448, 75376, 76696, 8100]) assert.ok(!got.includes(pid), `${platform}: pid ${pid} is Ben's`);
+    assert.ok(got.includes(3920), `${platform}: the worker's python is still listed`);
+  }
+  // A Mac's `ps -E` line for a person's Firefox tab names no session.
+  assert.equal(macEnvLine('79408 /Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container -isForBrowser 7000 tab HOME=/Users/b PATH=/usr/bin')?.env.session, undefined);
+});
+
+test('w4336: personStarted is a live ancestry reaching explorer.exe or a program started for a person before any worker process', () => {
+  const procs = [
+    { pid: 6000, ppid: 5900, name: 'explorer.exe', cmd: 'C:\\Windows\\Explorer.EXE' },
+    { pid: 7000, ppid: 6000, name: 'firefox.exe', cmd: 'firefox.exe' },
+    { pid: 7001, ppid: 7000, name: 'firefox.exe', cmd: 'firefox.exe -contentproc' },
+    { pid: 8000, ppid: 6000, name: 'node.exe', cmd: 'node daemon.ts' },
+    { pid: 8001, ppid: 8000, name: 'claude.exe', cmd: 'claude.exe' },
+    { pid: 8002, ppid: 8001, name: 'python.exe', cmd: 'python x.py' },
+    { pid: 8003, ppid: 8001, name: 'Launcher.exe', cmd: 'Launcher.exe' },
+    { pid: 8004, ppid: 8003, name: 'game.exe', cmd: 'game.exe' },
+  ];
+  const env = new Map<number, ProcEnv>([
+    [8001, { session: 'me' }],
+    [8003, { person: 'me' }],
+  ]);
+  const byPid = new Map(procs.map((p) => [p.pid, p]));
+  const parentOf = (pid: number) => byPid.get(byPid.get(pid)!.ppid);
+  assert.equal(personStarted(7001, procs, env, parentOf), true, "a tab of the person's Firefox");
+  assert.equal(personStarted(8002, procs, env, parentOf), false, "the worker's python, though its daemon runs under Explorer");
+  assert.equal(personStarted(8004, procs, env, parentOf), true, 'what a launcher started for a person runs');
+});
+
+test("w4336, the daemon: Notepad a person opened on a worker's log is never swept; the worker's own tail of it is", async () => {
+  const m = machine(
+    [
+      { pid: 6000, ppid: 5900, cmd: 'C:\\Windows\\Explorer.EXE', name: 'explorer.exe' },
+      { pid: 8100, ppid: 6000, cmd: `notepad.exe ${TMP}/ffa-824be148/run.log`, name: 'notepad.exe' },
+      { pid: 90, ppid: 49932, cmd: `"C:\\Program Files\\Git\\usr\\bin\\tail.exe" -f ${TMP}/ffa-824be148/run.log`, name: 'tail.exe' },
+    ],
+    { platform: 'win32', sessions: { '824be148': {} } },
+  );
+  await m.look(0);
+  const ended = [];
+  for (let i = 0; i < 12; i++) ended.push(...(await m.look(1)));
+  assert.deepEqual(ended.flatMap((e) => e.pids), [90]);
+  assert.ok(m.alive(8100), "the person's Notepad stays");
+  assert.match(m.st.logs.join('\n'), /spared pid 8100, started by a person/);
 });
