@@ -728,7 +728,7 @@ test.describe("w4238", () => {
               state: {
                 ...s,
                 owners: [me, BEN],
-                work: [...s.work, w],
+                work: [...(s.work ?? []), w],
                 sessions: [...s.sessions, worker],
               },
             } satisfies ServerEvent),

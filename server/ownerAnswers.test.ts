@@ -14,8 +14,8 @@ const OWNERS = [BEN, LOTH];
 const ME = { userId: 'lothsahn', role: 'owner' };
 const AT = '2026-11-14T20:00:00.000Z';
 const asks = [
-  { question: 'Which Station card layout?', options: [{ label: 'Compact', recommended: true }, { label: 'Wide' }] },
-  { question: 'Show the power bar?', options: [{ label: 'Yes', recommended: true }, { label: 'No' }] },
+  { question: 'Which Station card layout?', options: [{ label: 'Compact', description: 'One line.', recommended: true }, { label: 'Wide', description: 'Two lines.' }] },
+  { question: 'Show the power bar?', options: [{ label: 'Yes', description: 'Shown.', recommended: true }, { label: 'No', description: 'Hidden.' }] },
 ];
 const needsYou = { key: 'declared:abc', kind: 'declared' as const, question: 'Pick', who: ['Ben'], to: ['ben'], at: AT, previews: [], prs: [], worker: 'abcd1234', asks };
 function item(o: Partial<WorkItem> = {}): WorkItem {
