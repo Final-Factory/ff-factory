@@ -10125,6 +10125,8 @@ test("w3606: an owner answers the other owner's question in their own words: it 
   assert.deepEqual([w().status, w().question, w().requestedBy.userId], ['new', undefined, 'ben']);
   assert.deepEqual([tab(BEN), tab(LOTH)], [[], []]);
   assert.match(w().log.join('\n'), /Lothsahn \(an owner, on Ben's request, in their own words: "Yes, keep it open and schedule it when the other higher priority work is done\. I have answered for Ben\."\): note: Keep it open/);
+  // w4238: the note says whom it answered for, so a wait on Ben reads as settled at once (shared/workState.ts personWaitSettled).
+  assert.deepEqual(w().notes?.at(-1)?.for, ['Ben']);
   assert.equal(o.personalOf('ben')!.info.openAsks, undefined, "Ben's card left his tab");
   await until('Ben is told who answered and what', () => heard(ben.info.id, '[from another owner]').some((e) => e.text.startsWith('[from another owner] Lothsahn answered the question on it: Keep it open; schedule it after the higher priority work., on your w1 "FFU owner_term flakes"') && e.text.includes('"Yes, keep it open')));
   await until('the dispatcher resumes with the answer', () => heard(dispatcher().info.id, '[work update]').some((e) => e.text.includes('w1') && e.text.includes('Keep it open; schedule it after the higher priority work.')));

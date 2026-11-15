@@ -505,6 +505,25 @@ test('w1812: one declaration on two requests: Ben\'s note on one settles both; a
   assert.ok(both({ needsYou }).every((s) => s !== 'waiting'));
 });
 
+test('w4238: an owner answering for the owner a wait names settles it at once, typed or clicked; a note by a third person or not for them does not', () => {
+  // 2026-11-14: lothsahn answered Ben's questions on w4196, w4216 and w4125; each kept "Waiting on input on Ben" until its
+  // worker reported again, because only a note BY the person waited on settled the wait.
+  const one1 = (o: Partial<WorkItem>) => {
+    const [a, b] = circuits(o);
+    return one(a, [C28({ request: 'w1767' })], [b])?.state;
+  };
+  const LOTHS = { at: ago(1), by: 'Lothsahn', text: 'Go with B.' };
+  assert.equal(one1({ notes: [LOTHS] }), 'waiting', 'a note by another person, not given for Ben, answers nothing');
+  assert.notEqual(one1({ notes: [{ ...LOTHS, for: ['Ben'] }] }), 'waiting', 'given for Ben (w3606), it settles his wait');
+  assert.equal(one1({ notes: [{ ...LOTHS, for: ['Ben'], at: ago(8) }] }), 'waiting', 'an answer older than the question settles nothing');
+  assert.equal(one1({ notes: [{ ...LOTHS, for: ['Someone'] }] }), 'waiting', 'given for another person, it is not his');
+  // The [needs you] record answered for him settles it too.
+  const needsYou = { key: 'declared:c28c5061:' + ago(6), kind: 'declared' as const, question: 'Pick', who: ['Ben'], to: ['ben'], at: ago(6), previews: [], prs: [], worker: 'c28c5061', answered: { by: 'Lothsahn', at: ago(1), for: ['Ben'] } };
+  assert.notEqual(one1({ needsYou }), 'waiting');
+  assert.equal(personWaitSettled({ needsYou }, Date.parse(ago(6)), ['Ben'], 'x'), `Lothsahn answered it at ${ago(1).slice(0, 16).replace('T', ' ')}`);
+  assert.equal(personWaitSettled({ needsYou: { ...needsYou, answered: { by: 'Lothsahn', at: ago(1) } } }, Date.parse(ago(6)), ['Ben'], 'x'), undefined);
+});
+
 test('w1812: different questions on different requests stay apart: a declaration for one request, or another "still open" line, is not answered by a note on the other', () => {
   // The declaration names w1768 only: Ben's note on w1767 is about w1767, and w1768 still waits.
   const s = C28({ request: 'w1768' });

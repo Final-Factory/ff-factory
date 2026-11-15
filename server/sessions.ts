@@ -1738,20 +1738,26 @@ export class SessionManager {
       }
       // w2046: a resume that waits only for room on its own computer moves to one with room, or says why it stays.
       // w2544: an offline hold goes too: roomMove moves it once the computer has been away past the grace, else leaves it.
-      if (hold && !onHold && !restart && this.roomMove) {
+      // w4238: a hold on its computer goes too (roomMove moves it once its sandbox there was released); kept, it is Queued
+      // with the hold and why it did not move, not Blocked on that computer.
+      let kept = false;
+      if (hold && !restart && this.roomMove) {
         const r = this.roomMove(s, q, hold, now);
         if (r === true) {
           drop();
           continue;
         }
-        if (r) hold = r;
+        if (r) {
+          hold = r;
+          kept = !!onHold;
+        }
       }
       if (hold) {
         // w1135: what holds it NOW, not what held it when it was queued ("lothdesktop is offline" stayed on dd8193f8's line
         // after the daemon was back and it had been placed again): the session's line and the reply read this.
-        if (q.why !== hold) {
+        if (q.why !== hold || (kept && q.on === 'machine')) {
           q.why = hold;
-          q.on = onHold || OFFLINE.test(hold) ? 'machine' : 'capacity';
+          q.on = (onHold && !kept) || OFFLINE.test(hold) ? 'machine' : 'capacity';
           this.saveQueue();
         }
         held.add(q.id);
