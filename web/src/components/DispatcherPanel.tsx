@@ -12,7 +12,7 @@ import { gatesName, gatesOf } from '../../../shared/blockers';
 import { namesReporter, namesRequesters, sourceLabel, untrustedLabel } from '../../../shared/workLabels';
 import { FFBOX_LAN_LABEL, ffboxConversationHref, isFfboxConversationId } from '../../../shared/ffboxLinks';
 import { sessionRoute } from '../attention';
-import { attempt, reloadTranscript, sessionsByIds, toast } from '../store';
+import { attempt, focusWait, reloadTranscript, sessionsByIds, toast } from '../store';
 import { CostChip, RequestSpendBlock, SpendTab, useSpendSummary } from './Spend';
 import { contextGlance, dispatcherGlance, useWorkLive, fmtCost, fmtRelative, href, isBusy, isOpenWork, lsGet, lsSet, navigate, useNow, workLabel, workTone, type Tone } from '../util';
 import { Markdown } from './Markdown';
@@ -22,7 +22,7 @@ import { accountOf } from './SystemMeters';
 import { Chip, Confirm, Dot, Icon, Menu, ModelChip, ToggleChip } from './ui';
 import { TimersButton } from './Timers';
 import { IntakeApproveCard, WaitingTab } from './WaitingTab';
-import { orchestratorAsks, waitingItems } from '../../../shared/waiting';
+import { orchestratorAsks, ownerAnswersFor, waitingItems } from '../../../shared/waiting';
 import { useKeepScroll } from '../scrollKeep';
 import { ReportPage, ReportsTab, WorkReports } from './Reports';
 
@@ -584,6 +584,8 @@ function WorkRow({ app, w, live, open, onToggle, now }: { app: AppState; w: Work
   const tone = live ? LIVE_TONE[live.state] : w.approval?.state === 'pending' && isOpenWork(w) ? 'amber' : workTone(w.status);
   const s = w.source;
   const delivery = deliveryLine(w);
+  // w4238: another owner's waiting question this owner may answer for them; its card is on the Waiting on input tab.
+  const forOwner = live?.state === 'waiting' || w.question || w.flag ? ownerAnswersFor(w, live, app.me, app.owners)?.join(' and ') : undefined;
   return (
     <div id={`work-${w.id}`} className={`run-row work-row${open ? ' open' : ''}`} data-testid={`work-${w.id}`}>
       <button className="run-row-top" onClick={onToggle} aria-expanded={open}>
@@ -625,6 +627,7 @@ function WorkRow({ app, w, live, open, onToggle, now }: { app: AppState; w: Work
             {w.triage && w.triage.class !== 'needs-human' ? <span> · {triageLabel[w.triage.class]}</span> : null}
             {w.priority === 'urgent' || w.priority === 'high' ? <span className="tone-amber"> · {w.priority}</span> : w.priority === 'low' ? <span className="dim" data-testid={`work-low-${w.id}`}> · low</span> : null}
             {w.flag ? <span className="tone-amber"> · {FLAG_LABEL[w.flag.kind].toLowerCase()}</span> : null}
+            {forOwner ? <span className="tone-blue" data-testid={`work-for-owner-${w.id}`}> · you may answer for {forOwner}</span> : null}
             <CostChip id={w.id} summary={spend} />
           </span>
         </span>
@@ -676,6 +679,22 @@ function WorkRow({ app, w, live, open, onToggle, now }: { app: AppState; w: Work
             <p className={`small tone-${tone}`} data-testid={`live-why-${w.id}`}>
               {WORK_LIVE_LABEL[live.state]}
               {live.waitsOn?.length ? ` on ${live.waitsOn.join(', ')}` : ''}: {live.why}
+            </p>
+          )}
+          {forOwner && (
+            <p className="small">
+              <button
+                type="button"
+                className="btn btn-sm"
+                data-testid={`work-answer-for-owner-${w.id}`}
+                onClick={() => {
+                  navigate({ view: 'dispatcher', tab: 'waiting' });
+                  focusWait(w.id);
+                }}
+              >
+                Answer it for {forOwner}
+              </button>{' '}
+              <span className="dim">Its question, stills and buttons, on the Waiting on input tab. {forOwner} is told who answered and what.</span>
             </p>
           )}
           {isOpenWork(w) && (isMine(w, app.me?.userId) || app.me?.role === 'owner') && (

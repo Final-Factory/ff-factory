@@ -37,6 +37,20 @@ export const NONE_MARK = 'no other computer can take it now (w2046)';
 /** The waits a move answers: room on the worker's own computer, not its machine (offline, outdated) nor a move under way. */
 export const ROOM_WAIT = /^(no sandbox on |its branch .* is checked out in |no agent seat is free on |\d+ agents mid-turn )/;
 
+/**
+ * w4238: a placement.hold on the worker's computer ("beast is on hold (Ben: crash hold, ...)"), as holdReason words it.
+ * At 20:02Z on 2026-11-14 lothsahn answered w4125 (FFU rate mode) for Ben; its worker fb20b1ad had released beast/slot2 at
+ * 03:59Z and its resume sat queued behind BEAST's crash hold for 5 hours while other computers had agent seats.
+ */
+export const HOLD_WAIT = /^\S+ is on hold \(/;
+
+/**
+ * Whether a resume held by its computer's hold moves like one held for room (w4238): only once its sandbox there went to
+ * other work (`released`), so nothing of its work is only on that computer; a worker still in its sandbox waits out the hold
+ * (often minutes: "quiet BEAST ~15 min"). moveDecision still keeps it there when it must stay (pinned, a timed leg, a bench lock).
+ */
+export const holdMoves = (hold: string, released: boolean) => released && HOLD_WAIT.test(hold);
+
 /** One request the worker serves, as the decision reads it. */
 export interface MoveRequest {
   id: string;

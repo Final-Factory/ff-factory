@@ -1089,6 +1089,8 @@ function appState(user: string | undefined): AppState {
     settings: store.settings,
     poolPeople: poolPeople(),
     live: liveHub.viewsFor(me.userId),
+    // w4238: an owner's page offers the buttons of another owner's waiting question; a member's page never needs the list.
+    ...(me.role === 'owner' ? { owners: identity.list().filter((x) => x.role === 'owner').map((x) => ({ userId: x.userId, displayName: x.displayName })) } : {}),
   };
 }
 

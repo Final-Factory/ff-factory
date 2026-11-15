@@ -63,7 +63,7 @@ import { activityLine, Waker } from './wake.ts';
 import { TIMER_LIMITS, Timers, scheduleText, type TimerView } from './timers.ts';
 import { EVEN_MARGIN, RAM_BUSY_PCT, benchText, buildOf, busyReasons, capacityLines, classRank, forPriority, hasRoom, holdReason, liveOf, loadText, lowestPriority, minOf, pairCanFinish, pickComputer, placeId, pinnedWork, placementHint, reservedReason, roomEnough, roomForWork, roomNow, timedFacts, timedKindOf, timedPinRefusal, voiceVram, type Computer, type FirstKind, type NeedKind, type PlacementPrefs, type RoomNow, type TimedKind } from './placement.ts';
 import { MachinePauses, PAUSE_TICK_MS, pauseHolds, pauseWhy, type HandBack } from './machinePause.ts';
-import { MOVE_AFTER_MS, NONE_MARK, ROOM_WAIT, briefOf, moveDecision, movedPrompt, stayLine, type MoveFacts } from './resumeMove.ts';
+import { MOVE_AFTER_MS, NONE_MARK, ROOM_WAIT, briefOf, holdMoves, moveDecision, movedPrompt, stayLine, type MoveFacts } from './resumeMove.ts';
 import { playHolds, playLine } from '../shared/personPlay.ts';
 import { sandboxUseText, unitySlotsLine } from '../shared/fleet.ts';
 import { isMidTurn, midTurnRefusal, othersMidTurn, snapshotOf, type OptionsFactory, type QueuedSend, type SessionHandle, type SessionManager, type TurnEndMeta } from './sessions.ts';
@@ -3377,7 +3377,8 @@ export class Agents {
     if (info.kind !== 'worker' || !info.machineId || !info.machineSandbox) return undefined;
     // w2544: a message held only because its computer is offline moves once that computer has been away past the grace.
     const away = OFFLINE_HOLD.test(hold) ? this.longAwayOf(info.machineId, now) : undefined;
-    if (!away && !ROOM_WAIT.test(hold)) return undefined;
+    // w4238: a hold on its computer moves it too once its sandbox there went to other work (resumeMove.ts holdMoves).
+    if (!away && !ROOM_WAIT.test(hold) && !holdMoves(hold, !!info.placeReleased)) return undefined;
     if (away) {
       const moving = this.roomMoving.get(info.id);
       if (moving) {

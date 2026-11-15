@@ -2217,7 +2217,8 @@ export interface WorkItem {
   /** Ids the requester named: a spec, a PR, a session, a sandbox, a delegation, another work item. */
   relatedIds?: string[];
   /** Its people's update_work notes, oldest first (w496: every worker started for it gets them with the brief). */
-  notes?: { at: string; by: string; text: string }[];
+  /** `for`: w4238, an owner's answer given for the other owners it waited on (w3606); it settles their wait as their own would. */
+  notes?: { at: string; by: string; text: string; for?: string[] }[];
   /** What overlaps are matched on: "spec:098", "pr:412", "branch:098-belts", "session:ab12cd34". */
   keys: string[];
   /**
@@ -2646,7 +2647,7 @@ export interface WorkNeedsYou {
    * `outcome` (w2433): the request's Latest line when it was answered; while it is still that line, the Latest shows the
    * answer instead (shared/latestLine.ts), since the line is the question.
    */
-  answered?: { by: string; at: string; on?: string; outcome?: string };
+  answered?: { by: string; at: string; on?: string; outcome?: string; for?: string[] };
   /**
    * Of several questions, the ones a person's note answered so far, by index into `asks` (w1868, w1821: the frame look was
    * answered and the Station strip question still waited). The record is answered, and its worker resumes, once all are.
@@ -3296,6 +3297,11 @@ export interface AppState {
   poolPeople?: PoolPerson[];
   /** The live views this person may watch (w1398, docs/live-view.md); absent from a server older than the field. */
   live?: LiveViewInfo[];
+  /**
+   * The people with the owner role, sent to an owner only (w4238): the Waiting on input tab offers an owner the buttons of
+   * another owner's waiting question (shared/waiting.ts ownerAnswersFor). Absent for a member and from an older server.
+   */
+  owners?: Requester[];
 }
 
 /**

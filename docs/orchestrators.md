@@ -522,6 +522,25 @@ Between owners (the `owner` role, `Orchestrators.isOwnerRole`; non-owners keep t
   request, in their own words: "…")`), and the request's people get `[from another owner] Lothsahn answered the question
   on it: <note>, on your w1 "…"` with those words. A non-owner's request, and a question that waits on a non-owner,
   stay theirs. Tests: `w3606:` in `server/orchestrators.test.ts`.
+- **One click on the other owner's question** (w4238, lothsahn: "Alter ff portal so that I can click answers for Ben's
+  questions"). An owner's Waiting tab lists the other owners' open questions under "Waiting on <owner>"
+  (`shared/waiting.ts` `ownerAnswersFor`; `owners` in the app state, sent to owners only), and the request's row in the
+  Work list has an "Answer for <owner>" link to that card. The card is the same one (`QuestionCard` `onBehalfOf`): its
+  buttons, stills, clips and Chat more; a click sends `ownerAnswerMessage` to the clicking owner's own orchestrator, whose
+  `update_work` note takes the w3606 path above. "Send these, leave the rest" (`qc-send-part`) answers some of several
+  questions and leaves the rest with the owner asked. Not offered: intake approvals (a reviewer's own act), a wait with
+  no open question (a permission prompt, a report-only wait), an orchestrator's ask_person card (it belongs to the other
+  person's chat; `/api/sessions/<id>/message` refuses it), a wait naming a non-owner, a release-branch ask, a standing
+  agent's delegation. The note and the `[needs you]` answer carry `for: [the asked owners]`, so the live state
+  (`personWaitSettled`) counts the answer as theirs and the card leaves the Waiting tab for both owners at once.
+  Tests: `server/ownerAnswers.test.ts`, `w4238:` in `server/workState.test.ts` and `server/orchestrators.test.ts`,
+  `e2e/waitingCards.spec.ts`.
+- **A resume held by its computer's hold moves** (w4238, w4125: worker fb20b1ad was answered at 20:02 UTC and released
+  from BEAST, then its resume queued for 5 h behind BEAST's crash hold, shown Waiting on input). A queued resume whose
+  only hold is "<machine> is on hold (…)" and whose sandbox was released goes to `roomMove` (`server/resumeMove.ts`
+  `holdMoves`) like one that waits for room: a worker that needs no particular computer resumes on any computer with a
+  seat, and one pinned there stays Queued, its reason shown (`q.on = 'capacity'`). Tests: `w4238:` in
+  `server/resumeMove.test.ts`.
 - **Limits stay per sender.** The follow-up count is per sender orchestrator and worker (`followUps`, keyed by the
   sender's chat): Lothsahn's three to Ben's worker use none of Ben's, and only Lothsahn writing starts his again.
 - **An owner answers any worker's permission request, and it is recorded** (w891, Lothsahn: "I should be able to
