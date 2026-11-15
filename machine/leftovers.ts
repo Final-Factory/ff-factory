@@ -576,6 +576,26 @@ export class LeftoverReaper {
     }
     for (const s of [...this.stopped.keys()]) if (!sessions.has(s) && d.sessionLive(s)) this.stopped.delete(s);
     const facts = new Map((await d.inspect(cands.map((c) => c.p.pid).concat(cands.map((c) => c.p.ppid))).catch(() => [] as ProcFacts[])).map((f) => [f.pid, f]));
+    // w4336: a process that only names a worker's temp folder (its program or an argument) is a person's when a person
+    // started it: Notepad opened on a worker's log from Explorer. Sparing errs safe, so a parent of unknown age is trusted.
+    if (d.platform === 'win32') {
+      const byPid = new Map(procs.map((p) => [p.pid, p]));
+      const parentOf = (pid: number) => {
+        const c = byPid.get(pid);
+        const parent = c && c.ppid !== c.pid ? byPid.get(c.ppid) : undefined;
+        const b = facts.get(pid)?.startedAt;
+        const pb = parent && facts.get(parent.pid)?.startedAt;
+        return parent && (b === undefined || pb === undefined || pb <= b + 2_000) ? parent : undefined;
+      };
+      for (let i = cands.length - 1; i >= 0; i--) {
+        const c = cands[i]!;
+        if ((c.via !== 'path' && c.via !== 'arg') || !personStarted(c.p.pid, procs, env, parentOf)) continue;
+        cands.splice(i, 1);
+        const id = `${c.p.pid}|${c.p.cmd}`;
+        if (!this.forPersonSeen.has(id)) d.log(`leftovers: spared pid ${c.p.pid}, started by a person (its starter is the desktop or a program launched for one), though it names worker ${c.session}'s temp folder: ${c.p.cmd.slice(0, 160)}`);
+        this.forPersonSeen.add(id);
+      }
+    }
     const ready = d.ready();
     const liveSb = d.liveSandboxes();
     const toEnd = new Map<string, { c: Candidate; why: string }[]>();
@@ -900,7 +920,32 @@ export function ownLeftovers(session: string, procs: Proc[], env: Map<number, Pr
     kids.set(parent, [...(kids.get(parent) ?? []), child]);
   };
   for (const p of procs) link(p.ppid, p.pid);
-  for (const [child, parent] of o.msys ?? []) if (byPid.has(child) && byPid.get(child)!.ppid !== parent) link(parent, child);
+  // The links what this session started is found by (the Windows block below), which must be real ancestry (w4336): by
+  // Windows parent only when the parent is no younger than the child, and by MSYS parent only when the child has no live
+  // Windows parent of its own. The shim's MSYS map gives each MSYS program's Windows pid as Git Bash's /proc remembers
+  // it; a program that has exited (or a stale /proc entry) leaves a pid Windows may give to anything since, and with no
+  // start time to tell (only the session's own processes were timed) that link took a person's process for the session's
+  // child: on BEAST, 2026-11-15, four `firefox.exe -contentproc` tabs of Ben's own Firefox were listed and ended this way,
+  // while their live parent, his main firefox.exe, was not.
+  const realKids = new Map<number, number[]>();
+  const older = (parent: number, child: number) => {
+    const b = o.born?.(child);
+    const pb = o.born?.(parent);
+    // Where start times were read (the command reads them for every process), one missing is no proof of a link.
+    if (o.born && (b === undefined || pb === undefined)) return false;
+    return b === undefined || pb === undefined || pb <= b + 2_000;
+  };
+  const liveParent = (child: number) => {
+    const c = byPid.get(child);
+    const parent = c && c.ppid !== c.pid ? byPid.get(c.ppid) : undefined;
+    return parent && older(parent.pid, child) ? parent : undefined;
+  };
+  const realLink = (parent: number, child: number) => {
+    if (parent === child || !byPid.has(parent) || !older(parent, child)) return;
+    realKids.set(parent, [...(realKids.get(parent) ?? []), child]);
+  };
+  for (const p of procs) realLink(p.ppid, p.pid);
+  for (const [child, parent] of o.msys ?? []) if (byPid.has(child) && byPid.get(child)!.ppid !== parent && !liveParent(child)) realLink(parent, child);
   const chain = new Set<number>();
   for (const from of [selfPid, ...(o.callers ?? [])]) {
     for (let x = byPid.get(from); x && !chain.has(x.pid); x = byPid.get(x.ppid)) chain.add(x.pid);
@@ -963,10 +1008,35 @@ export function ownLeftovers(session: string, procs: Proc[], env: Map<number, Pr
     while (q.length) {
       const x = q.pop()!;
       out.add(x);
-      for (const c of kids.get(x) ?? []) if (!out.has(c) && !chain.has(c) && !skip.has(c) && !theirs(c) && byPid.has(c)) q.push(c);
+      for (const c of realKids.get(x) ?? []) if (!out.has(c) && !chain.has(c) && !skip.has(c) && !theirs(c) && byPid.has(c)) q.push(c);
     }
+    // w4336: never a process a person started, nor what it runs: one whose live ancestry reaches the desktop shell
+    // (explorer.exe: the taskbar, the Start menu, a double-click) or a program started for a person (FF_FOR_PERSON)
+    // before it reaches any worker's process (FF_SESSION_ID). A file of the worker's opened by hand (Notepad on a log in
+    // its temp folder) names the folder but is the person's; so is a tab of a browser they started.
+    for (const pid of [...out]) if (personStarted(pid, procs, env, liveParent)) out.delete(pid);
   }
   return procs.filter((p) => out.has(p.pid));
+}
+
+/** The desktop shell, which starts what a person starts by hand (w4336). */
+const DESKTOP_SHELL = /^explorer(\.exe)?$/i;
+
+/**
+ * w4336: whether a Windows process is a person's: its live ancestry (each parent no younger than its child) reaches
+ * explorer.exe or a program started for a person (`ff-leftovers launch`) before any process carrying FF_SESSION_ID.
+ */
+export function personStarted(pid: number, procs: Proc[], env: Map<number, ProcEnv>, parentOf: (pid: number) => Proc | undefined): boolean {
+  const byPid = new Map(procs.map((p) => [p.pid, p]));
+  const seen = new Set<number>();
+  for (let x = byPid.get(pid); x && !seen.has(x.pid) && seen.size < 64; x = parentOf(x.pid)) {
+    seen.add(x.pid);
+    const e = env.get(x.pid);
+    if (forPerson(e)) return true;
+    if (e?.session) return false;
+    if (DESKTOP_SHELL.test(programOf(x, 'win32'))) return true;
+  }
+  return false;
 }
 
 /** The Windows pids the shim found for its MSYS parents (FF_LEFTOVERS_CALLERS, space-separated). */
@@ -1192,7 +1262,11 @@ export async function leftoversMain(argv: string[], e: NodeJS.ProcessEnv = proce
     // told from the agent's host.
     const named = procs.filter((p) => tempSessionInArgs(p.cmd, tempRoot, platform) === session || tempSessionOf(p.cmd, tempRoot, platform) === session);
     const sessionPids = [...procs.filter((p) => env.get(p.pid)?.session === session), ...named].flatMap((p) => [p.pid, p.ppid, ...(msys.has(p.pid) ? [msys.get(p.pid)!] : [])]);
-    for (const f of await realInspect(platform)(sessionPids.filter((p) => !facts.has(p))).catch(() => [] as ProcFacts[])) facts.set(f.pid, f);
+    // On Windows every process is timed, afresh each scan (w4336): a link from the session to a process is real only when
+    // the parent is no younger, and a pid Windows reused since names an unrelated process.
+    if (platform === 'win32') facts.clear();
+    const timed = platform === 'win32' ? procs.map((p) => p.pid) : sessionPids;
+    for (const f of await realInspect(platform)(timed.filter((p) => !facts.has(p))).catch(() => [] as ProcFacts[])) facts.set(f.pid, f);
     topBatch = new Set(unityProcesses(procs, platform).filter((u) => u.kind === 'batch').map((u) => u.pid));
     return ownLeftovers(session, procs, env, process.pid, platform, { callers: callerPids(e.FF_LEFTOVERS_CALLERS), born: (pid) => facts.get(pid)?.startedAt, tempRoot, msys });
   };

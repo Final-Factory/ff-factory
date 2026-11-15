@@ -412,11 +412,16 @@ export class UnityReaper {
 export async function inspectProcs(platform: UnityPlatform, pids: number[], now = Date.now()): Promise<ProcFacts[]> {
   if (!pids.length) return [];
   if (platform === 'win32') {
-    const filter = pids.map((p) => `ProcessId=${Math.trunc(p)}`).join(' OR ');
-    const script = `@(Get-CimInstance Win32_Process -Filter "${filter}" | ForEach-Object { [pscustomobject]@{ pid = $_.ProcessId; startedAt = [DateTimeOffset]::new($_.CreationDate).ToUnixTimeMilliseconds(); cpuMs = [long](([decimal]$_.KernelModeTime + [decimal]$_.UserModeTime) / 10000) } }) | ConvertTo-Json -Compress`;
+    // Many pids (ff-leftovers times every process, w4336): one unfiltered query, kept to the pids asked for, not a WQL
+    // filter of hundreds of ORs.
+    const want = new Set(pids.map((p) => Math.trunc(p)));
+    const filter = want.size > 64 ? '' : ` -Filter "${[...want].map((p) => `ProcessId=${p}`).join(' OR ')}"`;
+    const script = `@(Get-CimInstance Win32_Process${filter} | ForEach-Object { [pscustomobject]@{ pid = $_.ProcessId; startedAt = $(if ($_.CreationDate) { [DateTimeOffset]::new($_.CreationDate).ToUnixTimeMilliseconds() } else { $null }); cpuMs = [long](([decimal]$_.KernelModeTime + [decimal]$_.UserModeTime) / 10000) } }) | ConvertTo-Json -Compress`;
     const r = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { timeoutMs: 60_000 });
     if (r.code !== 0) throw new Error(`inspecting processes failed (${r.code}): ${r.stderr.trim().slice(0, 200)}`);
-    return parsePsJson<{ pid: number; startedAt?: number; cpuMs?: number }>(r.stdout, 'the Windows process facts').map((x) => ({ pid: Number(x.pid), startedAt: x.startedAt, cpuMs: x.cpuMs }));
+    return parsePsJson<{ pid: number; startedAt?: number; cpuMs?: number }>(r.stdout, 'the Windows process facts')
+      .map((x) => ({ pid: Number(x.pid), startedAt: x.startedAt, cpuMs: x.cpuMs }))
+      .filter((x) => want.has(x.pid));
   }
   const r = await run('ps', ['-o', 'pid=,etime=,time=', '-p', pids.map((p) => Math.trunc(p)).join(',')], { timeoutMs: 15_000 });
   // ps exits 1 when some pid is gone and prints the rest.
