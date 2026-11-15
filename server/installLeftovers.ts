@@ -1287,21 +1287,32 @@ export async function planInstallLeftovers(o: {
     if (items.has(target) || !isCargoTarget(target)) continue;
     const gbs = (b: number) => `${(b / GB).toFixed(1)} GB`;
     const runners = cargoTargetRunners(target, o.procs);
-    const busy = await cargoTargetBusy(target, path.join(slot, 'ffu'), o.procs, now - settleMs, now, runners);
+    const cap = s.ffuSlotTargetCapGB * GB;
+    // Kept whole: said on every pass once over the cap, not only on a low one (w4258: LothDesktop's 03:29 pass on 2026-11-15
+    // kept all four slot targets, 71 GB, without a line saying why).
+    const keptSlot = async (why: string) => {
+      if (!o.low && !cap) return;
+      const b = await sizeOf(target, 300_000);
+      if (o.low ? b >= (o.heldMinBytes ?? 256 * 1024 ** 2) : b > cap) held.push({ path: target, bytes: b, why: `an ffu slot's cargo target kept: ${why}` });
+    };
+    // Only a build in it stops the sweep (since: Infinity reads processes only). A recent write does not: a slot in steady use
+    // is written every few minutes, which kept the sweep off every used slot (w4258); the sweep spares units written within
+    // the settle time, and the trims and whole removals below still wait for it.
+    const busy = await cargoTargetBusy(target, path.join(slot, 'ffu'), o.procs, Infinity, now, runners);
     const no = busy ?? neverDelete(target, o.guard);
     if (no) {
-      await keptBig(target, `an ffu slot's cargo target kept: ${no}`);
+      await keptSlot(no);
       continue;
     }
     const holder = ffuState.slots.find((x) => x.id === e.name)?.holder;
     const holding = holderUp(holder) ? `held by running or resumable worker ${holder}` : undefined;
     const running = runners.length ? `${runners.length === 1 ? 'a program runs' : `${runners.length} programs run`} from it (pid ${runners[0].pid}: ${runners[0].cmd.slice(0, 120)})` : undefined;
-    const kept = holding ?? running;
     const newest = await newestTopWrite(target);
+    const recent = newest > now - settleMs ? `written ${agoText(now - newest)} ago, within the settle time` : undefined;
+    const kept = holding ?? running ?? recent;
     const bytes = await sizeOf(target);
     const incremental = path.join(target, 'debug', 'incremental');
     const inc = await sizeOf(incremental);
-    const cap = s.ffuSlotTargetCapGB * GB;
     const whole = (why: string) => items.set(target, { path: target, rule: 'ffu-slot-target', why: `ffu ${e.name}'s cargo target (${gbs(bytes)}), ${why}; the next build in the slot rebuilds it`, base: slot });
     const trim = (why: string) => inc > 0 && items.set(incremental, { path: incremental, rule: 'ffu-slot-target', why: `the incremental cache of ffu ${e.name}'s cargo target (${gbs(inc)} of ${gbs(bytes)}), ${why} (rebuildable)`, base: slot });
     const idleFor = now - newest;
@@ -1333,7 +1344,9 @@ export async function planInstallLeftovers(o: {
     }
     const left = bytes - swept.bytes;
     const incLeft = Math.max(0, inc - swept.incrementalBytes);
-    if (cap && left > cap) {
+    if (recent) {
+      if (cap && left > cap) await keptSlot(`over the ${s.ffuSlotTargetCapGB} GB cap after its stale units, ${recent}`);
+    } else if (cap && left > cap) {
       if (left - incLeft <= cap || kept) trim(`over the ${s.ffuSlotTargetCapGB} GB slot cap after its stale units, with no cargo process and no write for ${settleMs / 60_000} min${kept ? ` (${kept})` : ''}`);
       else whole(`over the ${s.ffuSlotTargetCapGB} GB slot cap even without its stale units and incremental cache, no worker holds the slot, and nothing was written for ${settleMs / 60_000} min`);
       if (kept && left - incLeft > cap) await keptBig(target, `an ffu slot's cargo target over the ${s.ffuSlotTargetCapGB} GB cap kept whole: ${kept}`);

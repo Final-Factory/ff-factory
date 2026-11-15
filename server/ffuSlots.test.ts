@@ -265,3 +265,25 @@ test("w4258: a slot holder's private cargo target in its temp folder goes once c
   const cargo = p.items.filter((i) => i.rule === 'cargo-target-cap').map((i) => i.path);
   assert.deepEqual(cargo, [held]);
 });
+
+test('w4258: a slot written minutes ago with no build running still loses its stale units; trims wait; a kept one says why', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-w4258r-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
+  const tg = unitTarget(root, 'slot1');
+  // LothDesktop, 2026-11-15 03:29: four slots in steady use (71 GB), each written within 15 min, and the pass freed nothing.
+  const fresh = (NOW - 5 * 60_000) / 1000;
+  fs.utimesSync(path.join(tg, 'debug'), fresh, fresh);
+  const p = await plan(root, { settings: { ffuSlotTargetCapGB: 1000 / 1024 ** 3 } });
+  const it = p.items.find((i) => i.rule === 'ffu-slot-target');
+  assert.ok(it?.members, `the stale units go though the target was written 5 min ago: ${JSON.stringify(p.items.map((i) => rel(root, i.path)))}`);
+  const gone = [...new Set(it.members.map((m) => /-([0-9a-f]{16})/.exec(path.basename(m))![1]))].sort();
+  assert.deepEqual(gone, ['2222222222222222', '4444444444444444']);
+  assert.deepEqual(ffuItems(root, p), ['ffu-sandboxes/slot1/target'], 'no incremental trim and no whole removal within the settle time');
+
+  // A build running in it: nothing goes, and an hourly pass says so once it is over the cap.
+  const procs: ProcLite[] = [{ pid: 42, ppid: 1, cmd: `rustc --out-dir ${tg}/debug/deps` } as ProcLite];
+  const b = await plan(root, { procs, settings: { ffuSlotTargetCapGB: 1000 / 1024 ** 3 } });
+  assert.deepEqual(ffuItems(root, b), []);
+  const held = (b as { held?: { path: string; why: string }[] }).held ?? [];
+  assert.ok(held.some((h) => rel(root, h.path) === 'ffu-sandboxes/slot1/target' && /a running process uses it/.test(h.why)), JSON.stringify(held));
+});
