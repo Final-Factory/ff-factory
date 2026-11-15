@@ -10,6 +10,7 @@ import { benchQueueDir } from '../machine/benchQueue.ts';
 import { benchLockDir, pidAlive } from '../machine/benchLock.ts';
 import { holdsJob, listenerLog, readListenerLog, runnerCensus } from '../machine/benchRunners.ts';
 import { FFU_SLOTS_DIR, readSlotState } from '../machine/ffuSlots.ts';
+import { planCargoSweep, type CargoSweep } from './cargoGraphSweep.ts';
 
 /**
  * Leftovers inside the install folder (w899, docs/self-recovery.md "Install-folder leftovers"): what w876 had to remove
@@ -102,6 +103,12 @@ export interface InstallLeftoverSettings {
   ffuSlotTargetCapGB: number;
   /** An ffu slot's cargo target goes whole once untouched this many days while no running or resumable worker holds the slot (w3764). */
   ffuSlotIdleDays: number;
+  /**
+   * An ffu slot's cargo target keeps what its workspace built within this many hours of its newest build, and everything
+   * that build used (server/cargoGraphSweep.ts, w4258); older units nothing current uses go on every pass. Over the cap, the
+   * window narrows to 24, 6 and 1 h. 0: no sweep (the w3764 rule: incremental cache, then the whole target).
+   */
+  ffuSlotKeepHours: number;
 }
 
 export const INSTALL_LEFTOVER_DEFAULTS: InstallLeftoverSettings = {
@@ -123,6 +130,7 @@ export const INSTALL_LEFTOVER_DEFAULTS: InstallLeftoverSettings = {
   runnerWorkDays: 14,
   ffuSlotTargetCapGB: 16,
   ffuSlotIdleDays: 7,
+  ffuSlotKeepHours: 48,
 };
 
 /** The settings in force: the defaults under whatever config gave (unknown or ill-typed values ignored). */
@@ -149,6 +157,7 @@ export function installLeftoverSettings(raw: unknown): InstallLeftoverSettings {
     runnerWorkDays: n('runnerWorkDays', 1, 365),
     ffuSlotTargetCapGB: n('ffuSlotTargetCapGB', 0, 10_000),
     ffuSlotIdleDays: n('ffuSlotIdleDays', 1, 365),
+    ffuSlotKeepHours: n('ffuSlotKeepHours', 0, 24 * 365),
   };
 }
 
@@ -309,13 +318,18 @@ const CARGO_PROC = /(^|[\\/\s"'])(cargo|rustc|rustdoc|clippy-driver|rust-lld|lld
  * or something in the target was written after `since` (a build adds files to deps/, .fingerprint/ and incremental/, which
  * moves those folders' times: the top three levels are read, not the tens of thousands of artifacts). No process list: kept.
  */
-export async function cargoTargetBusy(target: string, session: string, procs: ProcLite[] | undefined, since: number, now = Date.now()): Promise<string | undefined> {
+export async function cargoTargetBusy(target: string, session: string, procs: ProcLite[] | undefined, since: number, now = Date.now(), runners: ProcLite[] = []): Promise<string | undefined> {
   if (!procs) return 'the process list could not be read, so a build in it cannot be ruled out';
-  const user = procs.find((p) => mentions(p.cmd, target));
+  const ran = new Set(runners.map((r) => r.pid));
+  // A runner's ancestors (the `cargo test` that started it, the shell that ran that) are past their build: cargo builds
+  // every test binary before it runs the first.
+  const above = new Set<number>();
+  for (const r of runners) for (let p = procs.find((x) => x.pid === r.ppid); p && !above.has(p.pid); p = procs.find((x) => x.pid === p!.ppid)) above.add(p.pid);
+  const user = procs.find((p) => !ran.has(p.pid) && mentions(p.cmd, target));
   if (user) return `a running process uses it (pid ${user.pid}: ${user.cmd.slice(0, 160)})`;
   const tree = new Map<number, ProcLite>();
   for (const p of procs) if (mentions(p.cmd, session)) for (const d of [p, ...descendants(procs, p.pid)]) tree.set(d.pid, d);
-  const builder = [...tree.values()].find((p) => CARGO_PROC.test(p.cmd));
+  const builder = [...tree.values()].find((p) => !ran.has(p.pid) && !above.has(p.pid) && CARGO_PROC.test(p.cmd));
   if (builder) return `its worker runs a build (pid ${builder.pid}: ${builder.cmd.slice(0, 160)})`;
   const stack: { p: string; depth: number }[] = [{ p: target, depth: 0 }];
   while (stack.length) {
@@ -327,6 +341,15 @@ export async function cargoTargetBusy(target: string, session: string, procs: Pr
     for (const e of await children(p)) if (e.isDirectory() || depth < 2) stack.push({ p: path.join(p, e.name), depth: depth + 1 });
   }
   return undefined;
+}
+
+/**
+ * The processes that run a program built in `target` without building in it (w4258): a test binary or a tool started from
+ * its deps/ or a profile folder. A long test run kept LothDesktop's ffu slot targets whole for hours (29.8 and 29.3 GB,
+ * 2026-11-15) though cargo was done with them; the stale-unit sweep runs beside them, sparing the units they run.
+ */
+export function cargoTargetRunners(target: string, procs: ProcLite[] | undefined): ProcLite[] {
+  return (procs ?? []).filter((p) => mentions(p.cmd, target) && !CARGO_PROC.test(p.cmd) && !/(^|[\\/\s"'])(cargo|rustc)[\w-]*(\.exe)?(["'\s]|$)/i.test(p.cmd));
 }
 
 /** The newest write in a cargo target's top three levels (cargoTargetBusy reads the same): what a build touches, without its artifacts. */
@@ -925,9 +948,17 @@ export async function planInstallLeftovers(o: {
    * nothing written in its top three levels within the settle time. Running, blocked and stopped workers alike; the worker's
    * next build rebuilds it.
    */
+  const slotHolders = () =>
+    (slotHeld ??= new Set(fs.existsSync(path.join(root, FFU_SLOTS_DIR)) ? readSlotState(root).slots.flatMap((x) => (x.holder ? [`ffa-${x.holder}`.toLowerCase()] : [])) : []));
+  let slotHeld: Set<string> | undefined;
   const capCargo = async (session: string, t: string) => {
-    if (!s.cargoTargetCapGB || !o.procs) return;
-    const capBytes = s.cargoTargetCapGB * 1024 ** 3;
+    if (!o.procs) return;
+    // A worker that holds an ffu slot builds in the slot's warm target (w4258, lothsahn: "A worker that holds an ffu slot
+    // builds in that slot's target and never in a private $TMPDIR/ffu-target"): its temp folder's targets have a cap of 0,
+    // so each goes once cargo is done with it (LothDesktop, 2026-11-15: a 4.9 GB ffu-target beside a held slot).
+    const holdsSlot = slotHolders().has(path.basename(session).toLowerCase());
+    if (!s.cargoTargetCapGB && !holdsSlot) return;
+    const capBytes = holdsSlot ? 0 : s.cargoTargetCapGB * 1024 ** 3;
     const gb = (b: number) => `${(b / 1024 ** 3).toFixed(1)} GB`;
     const projectOpen = (d: string) => o.procs!.some((p) => mentions(p.cmd, d));
     const settle = s.lowCacheSettleMinutes || 15;
@@ -938,8 +969,11 @@ export async function planInstallLeftovers(o: {
     }
     let total = targets.reduce((a, c) => a + c.bytes, 0);
     if (total <= capBytes) return;
-    const over =
-      targets.length > 1 ? `${gb(total)} in this worker's ${targets.length} cargo targets, over the ${s.cargoTargetCapGB} GB cap` : `over the ${s.cargoTargetCapGB} GB cap`;
+    const over = holdsSlot
+      ? `a private target of a worker that holds an ffu slot, whose builds belong in the slot's target`
+      : targets.length > 1
+        ? `${gb(total)} in this worker's ${targets.length} cargo targets, over the ${s.cargoTargetCapGB} GB cap`
+        : `over the ${s.cargoTargetCapGB} GB cap`;
     const sizeOfTarget = (c: { bytes: number }) => `${gb(c.bytes)}, ${over}`;
     targets.sort((a, b) => a.newest - b.newest || a.path.localeCompare(b.path));
     const why = `with no cargo process and no write for ${settle} min (rebuildable)`;
@@ -1232,12 +1266,16 @@ export async function planInstallLeftovers(o: {
 
   // ---- ffu slots' cargo targets (w3764, machine/ffuSlots.ts): <install>/ffu-sandboxes/slot<N>/target, kept warm between
   // workers on purpose (a cold workspace test build costs minutes, a warm one seconds: docs/ffu-sandboxes.md). Only the target
-  // is ever taken, never a slot's checkout (it may hold a worker's work) nor the shared clone. Nothing goes while cargo uses it
-  // (cargoTargetBusy: a process names it or the checkout, or a write within the settle time). Then, oldest first by nature:
-  // - a slot no running or resumable worker holds, untouched ffuSlotIdleDays: the whole target;
-  // - a target over ffuSlotTargetCapGB: its debug/incremental (a rebuild after an edit: 30 s whole, 52 s without it, w3426),
-  //   and the whole target only when that does not bring it under the cap (cargo never deletes stale artifacts);
-  // - a low pass: every idle target's debug/incremental, and the whole target of a slot no running or resumable worker holds.
+  // is ever taken, never a slot's checkout (it may hold a worker's work) nor the shared clone. Nothing goes while cargo builds
+  // in it (cargoTargetBusy: a cargo process, or a write within the settle time); a program merely running from it (a long test
+  // binary, cargoTargetRunners) leaves it open to the sweep, sparing the units it runs (w4258). Then:
+  // - a slot no running or resumable worker holds, nothing running from it, untouched ffuSlotIdleDays: the whole target;
+  // - on every pass, the stale units: what no workspace unit built within ffuSlotKeepHours of the newest one uses, and
+  //   superseded object files (server/cargoGraphSweep.ts, w4258); over ffuSlotTargetCapGB or on a low pass the window narrows to
+  //   24, 6 and 1 h;
+  // - still over the cap: its debug/incremental (a rebuild after an edit: 30 s whole, 52 s without it, w3426), and the whole
+  //   target only when no worker holds the slot and nothing runs from it;
+  // - a low pass: debug/incremental of a held target, the whole target of one no running or resumable worker holds.
   const ffuBase = path.join(root, FFU_SLOTS_DIR);
   const ffuState = fs.existsSync(ffuBase) ? readSlotState(root) : { slots: [] };
   const holderUp = (holder: string | undefined) =>
@@ -1248,7 +1286,8 @@ export async function planInstallLeftovers(o: {
     const target = path.join(slot, 'target');
     if (items.has(target) || !isCargoTarget(target)) continue;
     const gbs = (b: number) => `${(b / GB).toFixed(1)} GB`;
-    const busy = await cargoTargetBusy(target, path.join(slot, 'ffu'), o.procs, now - settleMs, now);
+    const runners = cargoTargetRunners(target, o.procs);
+    const busy = await cargoTargetBusy(target, path.join(slot, 'ffu'), o.procs, now - settleMs, now, runners);
     const no = busy ?? neverDelete(target, o.guard);
     if (no) {
       await keptBig(target, `an ffu slot's cargo target kept: ${no}`);
@@ -1256,20 +1295,51 @@ export async function planInstallLeftovers(o: {
     }
     const holder = ffuState.slots.find((x) => x.id === e.name)?.holder;
     const holding = holderUp(holder) ? `held by running or resumable worker ${holder}` : undefined;
+    const running = runners.length ? `${runners.length === 1 ? 'a program runs' : `${runners.length} programs run`} from it (pid ${runners[0].pid}: ${runners[0].cmd.slice(0, 120)})` : undefined;
+    const kept = holding ?? running;
     const newest = await newestTopWrite(target);
     const bytes = await sizeOf(target);
     const incremental = path.join(target, 'debug', 'incremental');
     const inc = await sizeOf(incremental);
+    const cap = s.ffuSlotTargetCapGB * GB;
     const whole = (why: string) => items.set(target, { path: target, rule: 'ffu-slot-target', why: `ffu ${e.name}'s cargo target (${gbs(bytes)}), ${why}; the next build in the slot rebuilds it`, base: slot });
     const trim = (why: string) => inc > 0 && items.set(incremental, { path: incremental, rule: 'ffu-slot-target', why: `the incremental cache of ffu ${e.name}'s cargo target (${gbs(inc)} of ${gbs(bytes)}), ${why} (rebuildable)`, base: slot });
     const idleFor = now - newest;
-    if (!holding && idleFor > s.ffuSlotIdleDays * DAY) whole(`no running or resumable worker holds the slot and nothing in it was written for ${s.ffuSlotIdleDays} days`);
-    else if (s.ffuSlotTargetCapGB && bytes > s.ffuSlotTargetCapGB * GB) {
-      if (bytes - inc <= s.ffuSlotTargetCapGB * GB) trim(`over the ${s.ffuSlotTargetCapGB} GB slot cap, with no cargo process and no write for ${settleMs / 60_000} min`);
-      else whole(`over the ${s.ffuSlotTargetCapGB} GB slot cap even without its incremental cache, with no cargo process and no write for ${settleMs / 60_000} min`);
+    if (!kept && idleFor > s.ffuSlotIdleDays * DAY) {
+      whole(`no running or resumable worker holds the slot and nothing in it was written for ${s.ffuSlotIdleDays} days`);
+      continue;
+    }
+    let swept = { bytes: 0, incrementalBytes: 0 };
+    if (s.ffuSlotKeepHours > 0) {
+      const windows = [...new Set([s.ffuSlotKeepHours, 24, 6, 1].filter((h) => h <= s.ffuSlotKeepHours))];
+      let plan: CargoSweep | undefined;
+      let hours = windows[0];
+      for (const h of windows) {
+        plan = await planCargoSweep(target, { keepHours: h, pinned: runners.map((r) => r.cmd), settleMs, now });
+        hours = h;
+        if (!o.low && !(cap && bytes - plan.bytes > cap)) break;
+      }
+      if (plan && plan.paths.length) {
+        swept = plan;
+        const units = plan.paths.length - plan.objects;
+        items.set(target, {
+          path: target,
+          rule: 'ffu-slot-target',
+          why: `stale build output in ffu ${e.name}'s cargo target (${gbs(plan.bytes)} of ${gbs(bytes)}): ${units} entries of units no workspace build of the last ${hours} h uses${plan.objects ? `, ${plan.objects} superseded object files` : ''}; ${plan.live} of ${plan.units} units stay${kept ? ` (${kept})` : ''}`,
+          base: slot,
+          members: plan.paths,
+        });
+      }
+    }
+    const left = bytes - swept.bytes;
+    const incLeft = Math.max(0, inc - swept.incrementalBytes);
+    if (cap && left > cap) {
+      if (left - incLeft <= cap || kept) trim(`over the ${s.ffuSlotTargetCapGB} GB slot cap after its stale units, with no cargo process and no write for ${settleMs / 60_000} min${kept ? ` (${kept})` : ''}`);
+      else whole(`over the ${s.ffuSlotTargetCapGB} GB slot cap even without its stale units and incremental cache, no worker holds the slot, and nothing was written for ${settleMs / 60_000} min`);
+      if (kept && left - incLeft > cap) await keptBig(target, `an ffu slot's cargo target over the ${s.ffuSlotTargetCapGB} GB cap kept whole: ${kept}`);
     } else if (o.low) {
-      if (!holding) whole(`the disk is low, no running or resumable worker holds the slot, and nothing in it was written for ${settleMs / 60_000} min`);
-      else trim(`the disk is low and nothing in it was written for ${settleMs / 60_000} min (${holding})`);
+      if (!kept) whole(`the disk is low, no running or resumable worker holds the slot, and nothing in it was written for ${settleMs / 60_000} min`);
+      else trim(`the disk is low and nothing in it was written for ${settleMs / 60_000} min (${kept})`);
     }
   }
 

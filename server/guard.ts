@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import { checkMainCloneShell, flatten, normPath, pathSpellings, spellingsRegex, type MainCloneGrant } from './mainCloneGuard.ts';
 import { checkTiming } from './timingGuard.ts';
 import { checkGameRepoClone } from './cloneGuard.ts';
+import { checkPrivateFfuTarget } from './ffuTargetGuard.ts';
 import { checkTimedAsk, type TimedAskState } from './timedAsk.ts';
 import { checkDetachedBench } from './benchDetachGuard.ts';
 import { checkChecksRead, checkTimedSleep } from './waitGuard.ts';
@@ -245,6 +246,8 @@ export function sandboxGuard(opts: {
         checkRawUnityBatch(cmd, cloneSpellings) ??
         // w3703: no full clone of the game repo (its LFS files and Library copies filled V: and F:); players build in the sandbox.
         checkGameRepoClone(cmd, { cwd: input.cwd || opts.sandboxPath, env: opts.env, gameRepos: opts.gameRepos ?? [], sandboxPath: opts.sandboxPath }) ??
+        // w4258: a worker holding an ffu slot builds in its warm target, not a private one in $TMPDIR (server/ffuTargetGuard.ts).
+        checkPrivateFfuTarget(withoutTextArgs(cmd), { env: opts.env, root: opts.workerRoot, session: opts.session }) ??
         timing(tool, args, input.cwd || opts.sandboxPath) ??
         (opts.timedAsk ? checkTimedAsk(cmd, opts.timedAsk()) : undefined) ??
         // w3731: no bench ticket under nohup, setsid, disown or & (server/benchDetachGuard.ts): run_in_background instead.

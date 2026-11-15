@@ -165,11 +165,29 @@ function ensureRepo(d: FfuSlotDeps, remote: string): void {
   d.git(['worktree', 'prune'], repo);
 }
 
+/**
+ * `slot<N>/.cargo/config.toml` naming the slot's target (w4258): cargo reads config from every folder above where it runs,
+ * so a build in the checkout lands in the slot's target even without CARGO_TARGET_DIR (a new shell, a script that resets
+ * its environment), never in a second `ffu/target` beside it. The environment variable still wins when it is set.
+ */
+export function writeSlotCargoConfig(root: string, id: string): void {
+  const file = path.join(slotDir(root, id), '.cargo', 'config.toml');
+  const text = `# Written by FF Factory's ffu-slot (w4258): this slot's builds go in its own warm target.\n[build]\ntarget-dir = ${JSON.stringify(fwd(slotTarget(root, id)))}\n`;
+  try {
+    if (fs.existsSync(file) && fs.readFileSync(file, 'utf8') === text) return;
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, text);
+  } catch {
+    // best effort: CARGO_TARGET_DIR from envLines still points the build there
+  }
+}
+
 /** Put a slot's checkout on `branch` (or detached at origin/main), discarding what a stopped holder left only when it held no work. */
 function prepare(d: FfuSlotDeps, id: string, branch: string | undefined, base: string): void {
   const repo = repoDir(d.root);
   const wt = slotCheckout(d.root, id);
   fs.mkdirSync(slotDir(d.root, id), { recursive: true });
+  writeSlotCargoConfig(d.root, id);
   if (!fs.existsSync(path.join(wt, '.git'))) {
     fs.rmSync(wt, { recursive: true, force: true });
     must(d.git(['worktree', 'add', '--detach', '--quiet', wt, `origin/${base}`], repo), 'git worktree add');
