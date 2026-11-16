@@ -4,7 +4,8 @@ import { execFile } from 'node:child_process';
 import { localWorkWhy, norm, unpushedWorkWhy, OUTSIDE_ROOT_WHY, sizeOf, within } from './cleanup.ts';
 import { requestIdsIn, CONTEXT_MAX_AGE_HOURS } from './staleOutput.ts';
 import type { SessionOwner } from './resumable.ts';
-import { finishedBulkIn, INSTALL_LEFTOVER_DEFAULTS, newestWrite } from './installLeftovers.ts';
+import { finishedBulkIn, INSTALL_LEFTOVER_DEFAULTS, isCargoTarget, newestTopWrite, newestWrite } from './installLeftovers.ts';
+import { FFU_SLOTS_DIR, readSlotState } from '../machine/ffuSlots.ts';
 import type { PublishedRecord } from './published.ts';
 import { leaseLive, mentions, OWN_LEFTOVER_DEFAULTS, type SlotLease } from './ownLeftovers.ts';
 
@@ -58,7 +59,7 @@ export interface CleanupFacts {
 
 export interface FolderRow {
   path: string;
-  kind: 'session-temp' | 'session-bulk' | 'scratch' | 'sandbox-output' | 'player-slot' | 'named' | 'other';
+  kind: 'session-temp' | 'session-bulk' | 'scratch' | 'sandbox-output' | 'player-slot' | 'ffu-slot-target' | 'named' | 'other';
   verdict: 'keep' | 'delete';
   why: string;
   bytes?: number;
@@ -212,6 +213,46 @@ export function judgePlayerSlot(slot: string, ctx: SlotContext | undefined, now 
 
 const isSlotDir = (name: string) => /^slot[\w-]*$/i.test(name);
 
+const agoMin = (ms: number) => `${Math.max(0, Math.round(ms / 60_000))} min`;
+
+/**
+ * An ffu slot's build output (<root>/ffu-sandboxes/slot<N>/target, machine/ffuSlots.ts), judged as the daemon's clean-up
+ * judges the whole target (installLeftovers.ts, rule ffu-slot-target; docs/ffu-sandboxes.md), or undefined for a path
+ * outside the ffu slots. Before w4422 `check` called a released slot's target and its debug/incremental "not a place with
+ * an owner in the ledger" (biscuit, w4283), and a 25 GB target inside slot1's checkout (ffu/target, where builds landed
+ * before the w4258 .cargo/config.toml routing) was something the daemon's sweep never looks at. Kept: a slot a running or
+ * resumable worker holds (slots.json, what `ffu-slot list` reads), one a running process names (cargo, rustc, a test binary
+ * from it, a shell in its checkout), one written within the settle time, and anything that is not cargo's own output
+ * (CACHEDIR.TAG). In the checkout only ffu/target is ever a candidate; the rest may hold a worker's work.
+ */
+export async function judgeFfuSlotPath(p: string, f: CleanupFacts, now: number, ctx?: SlotContext): Promise<FolderRow | undefined> {
+  if (factsProblem(f, now) || !f.root) return undefined;
+  const base = path.join(f.root, FFU_SLOTS_DIR);
+  if (!within(p, base)) return undefined;
+  const row = (verdict: FolderRow['verdict'], why: string): FolderRow => ({ path: p, kind: 'ffu-slot-target', verdict, why });
+  const rel = norm(p) === norm(base) ? [] : norm(p).slice(norm(base).length + 1).split('/');
+  if (!rel.length || !/^slot\d+$/.test(rel[0]!)) return row('keep', 'the ffu slots\' folder or its shared clone: only a slot\'s target/ (and a stray ffu/target/ cargo made) is a candidate');
+  const id = rel[0]!;
+  const slot = path.join(base, id);
+  const stray = rel[1] === 'ffu' && rel[2] === 'target';
+  if (rel[1] !== 'target' && !stray) return row('keep', `ffu ${id}'s checkout or own files: never deleted (it may hold a worker's work); only its target/ and a stray ffu/target/ cargo made are candidates`);
+  const target = stray ? path.join(slot, 'ffu', 'target') : path.join(slot, 'target');
+  const what = stray ? `the cargo target left inside ffu ${id}'s checkout (ffu/target, where builds landed before the w4258 .cargo/config.toml routing)` : `ffu ${id}'s cargo target`;
+  if (!isCargoTarget(target)) return row('keep', `${what} has no CACHEDIR.TAG written by cargo: not provably build output`);
+  const holder = readSlotState(f.root).slots.find((x) => x.id === id)?.holder;
+  const up = holder && [...f.live, ...f.resumable, ...Object.keys(f.owners ?? {}), ...(ctx?.hosts ?? []), ...(ctx?.self ? [ctx.self] : [])].some((s) => s.toLowerCase() === holder.toLowerCase());
+  if (up) return row('keep', `${what}: the slot is held by worker ${holder}, which runs or has a request not closed (ffu-slot list); its warm target saves the next build minutes`);
+  if (!ctx?.procs) return row('keep', `${what}: the running processes could not be read to see that nothing builds in or runs from the slot`);
+  const user = ctx.procs.find((c) => mentions(c, slot));
+  if (user) return row('keep', `${what}: a running process names the slot (${user.slice(0, 160)})`);
+  const settle = INSTALL_LEFTOVER_DEFAULTS.lowCacheSettleMinutes;
+  const newest = await newestTopWrite(target);
+  if (newest > now - settle * 60_000) return row('keep', `${what}: written ${agoMin(now - newest)} ago, within the ${settle} min settle time (a build may be running)`);
+  const held = holder ? `held by worker ${holder}, which neither runs nor has a request not closed` : 'released (ffu-slot list)';
+  const inside = norm(p) === norm(target) ? '' : `inside ${what}: `;
+  return row('delete', `${inside}${what}, a slot ${held}, no running process names the slot and nothing in it was written for ${settle} min; the next build in the slot rebuilds it (rule ffu-slot-target)`);
+}
+
 /** The verdict for one path, wherever it is. */
 export function judgePath(p: string, f: CleanupFacts, now = Date.now(), slots?: SlotContext): FolderRow {
   const row = (kind: FolderRow['kind'], r: Pick<FolderRow, 'verdict' | 'why'>): FolderRow => ({ path: p, kind, ...r });
@@ -322,7 +363,7 @@ export async function withGitCheck(r: FolderRow, root: string | undefined, local
  * "its git state could not be read" and KEEP while the pass judged it DELETE (ffa-f1beecb0 on LothDesktop, 2026-11-08).
  */
 export async function judgeWithGit(p: string, f: CleanupFacts, now: number, slots?: SlotContext, o: { localWork?: (dir: string) => Promise<string | undefined>; unpushedWork?: (dir: string) => Promise<string | undefined> } = {}): Promise<FolderRow> {
-  const judged = judgePath(p, f, now, slots);
+  const judged = (await judgeFfuSlotPath(p, f, now, slots)) ?? judgePath(p, f, now, slots);
   const closed = judged.kind === 'session-temp' && judged.verdict === 'delete';
   return withGitCheck(judged, f.root, closed ? (o.unpushedWork ?? ((d: string) => unpushedWorkWhy(d, 60_000))) : o.localWork);
 }
@@ -364,6 +405,11 @@ export async function planFolders(f: CleanupFacts, o: { now?: number; sizes?: 'a
   if (f.tempRoot) for (const e of entries(f.tempRoot)) if (e.isDirectory() && sessionOfDir(e.name)) paths.push(path.join(f.tempRoot, e.name));
   for (const e of entries(path.join(f.root!, 'scratch'))) paths.push(path.join(f.root!, 'scratch', e.name));
   for (const e of entries(path.join(f.root!, 'players'))) if (e.isDirectory() && isSlotDir(e.name)) paths.push(path.join(f.root!, 'players', e.name));
+  const ffu = path.join(f.root!, FFU_SLOTS_DIR);
+  for (const e of entries(ffu)) {
+    if (!e.isDirectory() || !/^slot\d+$/.test(e.name)) continue;
+    for (const t of [path.join(ffu, e.name, 'target'), path.join(ffu, e.name, 'ffu', 'target')]) if (fs.existsSync(t)) paths.push(t);
+  }
   for (const sb of f.sandboxes) {
     for (const top of ['Builds', '.nightly-builds']) for (const e of entries(path.join(sb.path, top))) paths.push(path.join(sb.path, top, e.name));
   }
