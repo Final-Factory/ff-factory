@@ -279,7 +279,8 @@ const DELETE_WORD = /(?:^|[\s;&|(){}`'"=/\\])(?:rm|rmdir|unlink|shred|del|erase|
 /** What a command must not hold for its deletes to be judged one by one: each could change what a judged delete removes. */
 const COMPOUND_REFUSED: [RegExp, string][] = [
   // A name, not its expansion: `TMPDIR=/`, `export TMP`, `for TEMP in`, `$env:TMP = …`; `"$TMPDIR/x"` and `${TMPDIR}` are reads.
-  [/(?<![$\w{:])(?:TMPDIR|TMP|TEMP|PATH|BASH_ENV|ENV|CDPATH)\s*\+?=|\b(?:export|unset|declare|typeset|local|readonly|read|for)\b[^;&|\n]*(?<![$\w{:])(?:TMPDIR|TMP|TEMP|PATH)\b|\$env:(?:TMP|TEMP|TMPDIR|PATH)\s*=/i, 'it changes the temp folder variable or PATH'],
+  // IFS (w4338): `IFS=/` splits an unquoted `$TMPDIR/x` into relative names (`V:`, `ffw`, ...) that rm would remove.
+  [/(?<![$\w{:])(?:TMPDIR|TMP|TEMP|PATH|BASH_ENV|ENV|CDPATH|IFS)\s*\+?=|\b(?:export|unset|declare|typeset|local|readonly|read|for)\b[^;&|\n]*(?<![$\w{:])(?:TMPDIR|TMP|TEMP|PATH|IFS)\b|\$env:(?:TMP|TEMP|TMPDIR|PATH)\s*=/i, 'it changes the temp folder variable, PATH or IFS'],
   [/\b(?:eval|xargs|source|alias|enable|exec)\b|(?:^|[;&|\n]\s*)\.\s+\S/i, 'eval, xargs, source, alias or exec'],
   [/\b(?:ln|mklink|subst|mount|junction)\b|-itemtype\s+['"]?(?:symboliclink|junction|hardlink)/i, 'it makes a link'],
   [/(?:^|[\s;&|])-(?:delete|exec|execdir|ok)\b/i, 'find -delete or -exec'],
@@ -335,6 +336,68 @@ function allStatements(cmd: string): string[] | undefined {
   return out.map((s) => s.trim()).filter(Boolean);
 }
 
+/**
+ * The folders a command names once at its very start and then deletes in (w4338: w4222's worker waited 17 hours on a
+ * person for `K=$(cygpath -m "$TMPDIR/keep"); ...; rm -f "$K"/*strip.png`). A name counts as a folder inside the temp
+ * folder only when all of this holds: it is assigned in the command's leading run of plain assignments, each ended by `;`
+ * or a newline at the top level (not inside `$(...)`, a group, a loop or after `&&`, so the assignment always runs before
+ * anything else); its value is `"$TMPDIR/x"`, `$TMPDIR/x` or `$(cygpath -m|-w|-u "$TMPDIR/x")` with no space, glob,
+ * quote or other variable, strictly inside the temp folder and not through a link out of it; and the name appears nowhere
+ * else in the text except as `$NAME` or `${NAME}` (no second assignment, `for NAME`, `read NAME`, `unset NAME`, `NAME+=`).
+ */
+function tempFolderNames(text: string, ctx: TempDeleteContext): Map<string, string> {
+  const named = new Map<string, string>();
+  let i = 0;
+  for (;;) {
+    while (i < text.length && (text[i] === ' ' || text[i] === '\t')) i++;
+    const m = /^([A-Za-z_]\w*)=/.exec(text.slice(i));
+    if (!m) break;
+    // The statement's end at the top level: `;` or a newline outside quotes, `$(...)` and backquotes.
+    // A stack of what the scanner is inside: `'` single quotes, `"` double quotes, `` ` `` backquotes, `(` a `$(...)` or `(...)`.
+    const stack: string[] = [];
+    let end = -1;
+    let bad = false;
+    for (let j = i + m[0].length; j < text.length && end < 0 && !bad; j++) {
+      const c = text[j];
+      const top = stack[stack.length - 1];
+      if (top === "'") {
+        if (c === "'") stack.pop();
+      } else if (top === '"' || top === '`') {
+        if (c === '\\') j++;
+        else if (c === top) stack.pop();
+        else if (top === '"' && c === '`') stack.push('`');
+        else if (top === '"' && c === '$' && text[j + 1] === '(') {
+          stack.push('(');
+          j++;
+        }
+      } else if (c === "'" || c === '"' || c === '`') stack.push(c);
+      else if (c === '$' && text[j + 1] === '(') {
+        stack.push('(');
+        j++;
+      } else if (c === '(') stack.push('(');
+      else if (c === ')') {
+        if (top === '(') stack.pop();
+        else bad = true;
+      } else if (top === '(') {
+        if (c === '\\') j++;
+      } else if (c === ';' || c === '\n') end = j;
+      else if (/[&|<>\\{}\s]/.test(c)) bad = true; // `&&`, a pipe, a redirect, a heredoc, a continuation, a second word
+    }
+    if (end < 0 || bad) break;
+    const value = text.slice(i + m[0].length, end).trim();
+    const v = /^(?:"([^"]*)"|\$\(cygpath\s+-[mwu]\s+(?:"([^"]*)"|([^\s"'()]+))\)|([^\s"'()]+))$/.exec(value);
+    const target = v ? (v[1] ?? v[2] ?? v[3] ?? v[4]) : undefined;
+    if (target !== undefined && /^[^\s"'`*?[\]{}()]+$/.test(target) && tempOnlyDelete(`rm -rf "${target}"`, ctx).ok) named.set(m[1], target);
+    else named.delete(m[1]);
+    i = end + 1;
+  }
+  for (const name of [...named.keys()]) {
+    const bare = [...text.matchAll(new RegExp(`(?<![$\\w{])${name}(?!\\w)`, 'g'))].length;
+    if (bare !== 1) named.delete(name);
+  }
+  return named;
+}
+
 /** The shell keywords, openers and function headers a statement may start with before its command (`then rm …`, `run() { rm …`). */
 const LEADING = /^(?:(?:do|then|else|elif|if|while|until|time|!|\{|\()\s+|(?:function\s+)?[\w-]+\s*\(\s*\)\s*\{?\s*|function\s+[\w-]+\s*\{?\s+)+/;
 
@@ -355,12 +418,15 @@ export function tempDeletesWithin(cmd: string, ctx: TempDeleteContext): TempDele
   const stmts = allStatements(text);
   if (!stmts) return no('an unbalanced quote');
   const mentions = [...text.matchAll(DELETE_WORD)].length;
+  const named = tempFolderNames(text, ctx);
   let judged = 0;
   for (const raw of stmts) {
-    const stmt = raw.replace(LEADING, '');
+    let stmt = raw.replace(LEADING, '');
     const verb = path.posix.basename(slash(stmt.split(/\s+/)[0] ?? '')).replace(/\.exe$/i, '').toLowerCase();
     if (!RM_VERBS.has(verb) && !PS_VERBS.has(verb)) continue;
     if (/[(){}]/.test(stmt.replace(/\{[^{}/]*\}/g, ''))) return no(`${stmt} has a parenthesis or a brace`);
+    // A folder named at the start of the command (tempFolderNames) is judged as the path it holds.
+    for (const [name, target] of named) stmt = stmt.replace(new RegExp(`\\$\\{${name}\\}|\\$${name}(?!\\w)`, 'g'), target);
     const r = tempOnlyDelete(stmt, ctx);
     if (!r.ok) return no(`${stmt}: ${r.why}`);
     judged++;
