@@ -450,6 +450,32 @@ export function pairCanFinish(places: readonly Computer[], prefs: PlacementPrefs
   return !pairRoom(w, up.map((p) => p.id).filter((id) => !unfitWhy(one, id, fit, needs)), fit).short;
 }
 
+/**
+ * Why Queued pair run `w` has no placement at all now (w4468), or undefined when one exists: pairRoom over every computer that
+ * is online, not held (a hold that lets `w` through, placement.holdExcept, does not count) and that unfitWhy lets a leg on,
+ * busy or not, with each other computer's reason. w4441, w4334, w4460 and w4207 showed Queued for hours while no placement
+ * was possible (their avoid lists, the Mac rule, BEAST held, LothLaptop paused or offline), so nobody saw that only a person
+ * or a fix could move them. A Steam pair is left to its Steam gate (w2459), which already says so.
+ */
+export function pairNoPlacement(places: readonly Computer[], prefs: PlacementPrefs, w: Pick<WorkItem, 'id' | 'needs' | 'title' | 'brief' | 'notes' | 'pair'>): string | undefined {
+  if (!w.pair || w.pair.started || w.pair.steam) return undefined;
+  const hold = holdOnly(prefs);
+  const fit = Object.fromEntries(places.map((p) => [p.id, fitOf(p)]));
+  const one = { ...w, pair: { ...w.pair, legs: 1 } };
+  const ok: string[] = [];
+  const out: string[] = [];
+  for (const p of places) {
+    const held = hold.get(p.id);
+    const why = !p.online ? 'offline' : held !== undefined && !exceptOf(prefs, p.id).includes(w.id.toLowerCase()) ? `held (${held})` : unfitWhy(one, p.id, fit, undefined);
+    if (why) out.push(`${p.id}: ${why}`);
+    else ok.push(p.id);
+  }
+  const short = pairRoom(w, ok, fit).short;
+  // A fleet too small with nothing excluded for a reason stays Queued: a computer may still join.
+  if (!short || !out.length) return undefined;
+  return `no placement possible: ${w.pair.legs} legs need ${w.pair.legs} computers it may run on, and ${ok.length ? `only ${ok.join(', ')} ${ok.length > 1 ? 'qualify' : 'qualifies'}` : 'none qualifies'}; ${out.join('; ')}`;
+}
+
 export function roomNow(places: readonly Computer[], prefs: PlacementPrefs = {}): RoomNow {
   const hold = holdOnly(prefs);
   const min = minOf(prefs);

@@ -8304,7 +8304,7 @@ async function livePairFor(env: Awaited<ReturnType<typeof setupOnMachine>>) {
   return { a, id, p };
 }
 
-test('w2304: w2276 as it happened: the w1894 player-yield stops the client leg on lothdesktop mid-run, so the pair is re-queued whole: both legs stopped, Queued (never Stalled), off lothdesktop', async (t) => {
+test('w2304: w2276 as it happened: the w1894 player-yield stops the client leg on lothdesktop mid-run, so the pair is re-queued whole: both legs stopped, Queued (never Stalled), and lothdesktop is not avoided for good (w4468)', async (t) => {
   const env = await setupOnMachine(t);
   const { store, machines, o, agents } = env;
   const { id, p } = await livePairFor(env);
@@ -8318,12 +8318,13 @@ test('w2304: w2276 as it happened: the w1894 player-yield stops the client leg o
   assert.equal(p.status, 'queued');
   assert.equal(p.pair!.started, undefined, 'its legs start again, fresh');
   assert.deepEqual(p.sessionIds, [], 'neither old leg carries over');
-  assert.deepEqual(p.pair!.avoid, ['lothdesktop']);
-  assert.match(unfitWhy(p, 'lothdesktop', undefined) ?? '', /^lothdesktop is where an earlier leg of this pair run failed/);
+  // w4468: the play hold keeps lothdesktop out while lothsahn plays; a permanent avoid kept w4460 and w4207 off it for hours after.
+  assert.equal(p.pair!.avoid, undefined);
+  assert.equal(unfitWhy(p, 'lothdesktop', undefined), undefined);
   assert.equal(p.pair!.requeued?.count, 1);
   const log = p.log.join('\n');
-  assert.match(log, /re-queued as a pair run \(w2304, 1 of 3; its 2 legs start fresh together, not on lothdesktop\): lothsahn is playing Final Factory since 09:24Z on lothdesktop \(the w1894 player-yield\), where leg 2 \(client 0de45d46\) runs\. Old legs stopped: 39c87651 \(pc\/alpha\), 0de45d46 \(lothdesktop\/slot6\)$/m);
-  assert.equal(agents.workLive().get(id)?.state, 'queued', 'Queued for capacity, not Stalled');
+  assert.match(log, /re-queued as a pair run \(w2304, 1 of 3; its 2 legs start fresh together\): lothsahn is playing Final Factory since 09:24Z on lothdesktop \(the w1894 player-yield\), where leg 2 \(client 0de45d46\) runs\. Old legs stopped: 39c87651 \(pc\/alpha\), 0de45d46 \(lothdesktop\/slot6\)$/m);
+  assert.equal(agents.workLive().get(id)?.state, 'queued', `Queued for capacity, not Stalled: ${agents.workLive().get(id)?.why}`);
   const w = store.work.get('w2263')!;
   assert.deepEqual([w.status, w.blocked?.ref, w.blocked?.on], ['blocked', id, 'report'], 'its asker still waits on the same run');
   // The next look finds nothing more to do: the run is not under way any more.
@@ -10512,4 +10513,47 @@ test('w4352: unfiled handed-up follow-ups are sent again at 2 h, then filed by F
   await until('Ben’s orchestrator is told', () => heard(ben.id, '[follow-ups filed]').length === 1);
   assert.ok(heard(ben.id, '[follow-ups filed]')[0].text.includes(`filed ${filed.id} at low priority; dropped "Compose the boss music loop" (covered by ${coverId}`));
   assert.equal(o.handUpStep(w()), undefined, 'filed once');
+});
+
+test('w4468: request_pair split lets a Mac host with no w3697 sentence in the brief; decide_work pair_allow and pair_split widen a queued pair and re-place it; a pair\'s named needs never hide room; a person\'s game ending pings capacity', async (t) => {
+  const env = await twoComputers(t);
+  const { store, agents, dispatcher, call } = env;
+  const o = agents.orchestrators;
+  agentsRoom(agents, []);
+  putRequests(store, [{ id: 'w4300', by: BEN, status: 'active' }]);
+  const a = await startedFor(env, 'w4300');
+  const out = String(await a.h.request_pair!({ what: 'MP-W4440-belt-split on two computers', brief: 'Run MP-W4440-belt-split with ffnightly.py, leg 1 the host.', split: 'lab.pair-m5-beast.json spreads its peers' }));
+  const filed = store.work.get(/^Filed (w\d+)/.exec(out)![1])!;
+  assert.equal(filed.pair!.split, 'lab.pair-m5-beast.json spreads its peers', out);
+  assert.doesNotMatch(filed.brief, /\(w3697\)/, 'a split pair takes no "No leg goes on a Mac" sentence');
+  assert.doesNotMatch(out, /no leg on a Mac/);
+
+  // w4334 as it stood: avoid [beast] from filing; lothsahn's note "drop the avoid" and "A Mac may host leg 1".
+  putRequests(store, [{ id: 'w4334', by: BEN, status: 'queued', title: 'Pair run for w4300: MP-W4440-belt-split', brief: 'Run MP-W4440-belt-split with ffnightly.py.', pair: { legs: 2, for: 'w4300', avoid: ['beast'] }, constraints: pairText({ legs: 2, for: 'w4300', avoid: ['beast'] }) }]);
+  const pings: string[] = [];
+  const ping = o.capacityMayHaveFreed.bind(o);
+  o.capacityMayHaveFreed = (why: string) => { pings.push(why); ping(why); };
+  const r = await call(dispatcher().info, 'decide_work', { id: 'w4334', action: 'queue', pair_allow: ['beast'], pair_split: 'Lothsahn: "A Mac may host leg 1"', note: 'Lothsahn, 2026-11-16: "drop the avoid"' });
+  assert.equal(r.isError, false, r.text);
+  const w = store.work.get('w4334')!;
+  assert.equal(w.pair!.avoid, undefined);
+  assert.equal(w.pair!.split, 'Lothsahn: "A Mac may host leg 1"');
+  assert.equal(w.constraints, pairText(w.pair!));
+  assert.match(pings.join('\n'), /w4334's pair marks changed/);
+  assert.equal((await call(dispatcher().info, 'decide_work', { id: 'w4300', action: 'queue', pair_allow: ['beast'], note: 'x' })).isError, true, 'not a pair run');
+
+  // w4462: queued naming [lothdesktop]; pc and beast have room for both legs: flagged, its named needs ignored.
+  putRequests(store, [{ id: 'w4462', by: BEN, status: 'queued', title: 'Pair run for w4300: join check', brief: 'Host on leg 1, join from leg 2.', pair: { legs: 2, for: 'w4300' } }]);
+  store.putWork({ ...store.work.get('w4462')!, queuedFor: { at: T0, needs: ['lothdesktop'] } });
+  for (const id of ['w4334']) store.putWork({ ...store.work.get(id)!, status: 'done' });
+  agentsRoom(agents, ['pc', 'beast']);
+  await call(dispatcher().info, 'list_work', { id: 'w4462' });
+  const later = Date.now() + 11 * 60_000;
+  (o as unknown as { now: () => Date }).now = () => new Date(later);
+  assert.deepEqual(o.flagQueuedWithRoom(['pc', 'beast']), ['w4462']);
+
+  // A person's game ending on a computer re-places the queue (the machines' stats handler calls onPlayEnded).
+  pings.length = 0;
+  env.machines.onPlayEnded!('pc');
+  assert.match(pings.join('\n'), /a person's game on pc ended/);
 });

@@ -2174,6 +2174,12 @@ export interface WorkPair {
    * decide_work pair_steam "none"): its words are then never read for Steam again, and it is never Blocked on Steam.
    */
   noSteam?: string;
+  /**
+   * Why its peers are spread over its computers, leg 1 the host and the others its clients (w4468: a pair lab, the pair
+   * relay, or a person's "a Mac may host leg 1"; request_pair split, decide_work pair_split, "none" clears it): its host leg
+   * starts no client, so the Mac rule (w3697, shared/capacity.ts macRefusedScenario) lets a Mac take leg 1.
+   */
+  split?: string;
   /** A leg takes timing measurements (exclusive bench tickets): never on a computer that takes no timed runs (m5, w1861). */
   timed?: boolean;
   /** When its legs started together, and where: leg 1 (the host) first. */

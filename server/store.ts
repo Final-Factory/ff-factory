@@ -9,7 +9,7 @@ import { pipeline } from 'node:stream/promises';
 import type { AppSettings, DelegationRequest, Machine, Sandbox, ServerEvent, SessionInfo, StandingAgent, TranscriptEvent, WorkItem } from '../shared/types.ts';
 import { meterStates, type MeterStates } from './meterStates.ts';
 import { removedUpload } from './mediaRetention.ts';
-import { repairText } from '../shared/capacity.ts';
+import { pairText, repairText, transientPairAvoids } from '../shared/capacity.ts';
 import { settleOutcome } from './findings.ts';
 
 /** Everything the UI hears about goes through here and out the WebSocket. */
@@ -230,6 +230,15 @@ export class Store {
           const was = item.pair.for && item.queuedFor?.needs?.length ? item.queuedFor.needs : undefined;
           if (was) item.queuedFor = { at: item.queuedFor!.at };
           item.log = [...(item.log ?? []), `${new Date().toISOString().slice(11, 16)} FF Factory: its pair text now says a Mac may host (w2282)${was ? `; no longer queued only for ${was.join(' or ')}` : ''}`].slice(-40);
+        }
+        // w4468: a pair re-queued before it avoided a computer for good where a person played, that was paused or offline.
+        const transient = ['queued', 'blocked', 'stalled', 'new'].includes(item.status) ? transientPairAvoids(item) : [];
+        if (transient.length && item.pair) {
+          const left = (item.pair.avoid ?? []).filter((m) => !transient.includes(m));
+          const { avoid: _avoid, ...rest } = item.pair;
+          item.pair = { ...rest, ...(left.length ? { avoid: left } : {}) };
+          item.constraints = pairText(item.pair);
+          item.log = [...(item.log ?? []), `${new Date().toISOString().slice(11, 16)} FF Factory: no longer avoids ${transient.join(' or ')}: a person's game, a pause or an offline spell keeps a computer out only while it lasts (w4468)`].slice(-40);
         }
         this.work.set(item.id, item);
       }

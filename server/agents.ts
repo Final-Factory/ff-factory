@@ -26,7 +26,7 @@ import { topPriority, type Pressure } from './priorityReclaim.ts';
 import { HOLD_PLACE_MS, LIVE_HOLD_MS, PlaceAgain, RELEASE_AFTER_MS, RELEASE_WAKE_NOTE, handOverBranch, occupies, releasedOn, type PairWant } from './placeAgain.ts';
 import { agentQueueAll, agentQueueFacts, editorSlotRefusal, queueWaitsAll } from '../shared/queueWaits.ts';
 import { otherComputerOf, pairStepLine, pairWaitLine, pairWaitNotice } from './pairRuns.ts';
-import { WORK_LIVE_LABEL, WORK_LIVE_STATES, asksAPerson, benchWaitOf, lastOpenLine, liveCounts, otherWorkWait, outsideDeclared, outsideWaitOf, ownWorkWait, noTimedWaitOf, orchestratorAskIn, restartWait, personWaitIn, reportWaitKey, holdsOf, servedBy, workLiveAll, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
+import { WORK_LIVE_LABEL, queuedNeeds, WORK_LIVE_STATES, asksAPerson, benchWaitOf, lastOpenLine, liveCounts, otherWorkWait, outsideDeclared, outsideWaitOf, ownWorkWait, noTimedWaitOf, orchestratorAskIn, restartWait, personWaitIn, reportWaitKey, holdsOf, servedBy, workLiveAll, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
 import { prsIn, reportTail, whoOf, type NeedsYouWait } from './needsYou.ts';
 import { addedLines, asksLookOk, decidedRefusal, notesSettle, personNotes, quoteCovered, quotedPhrases, relatedRequests, settledRefusal } from './priorDecisions.ts';
 import { statusLinesIn, stillOpenIn } from './ledgerRules.ts';
@@ -61,7 +61,7 @@ import { withTerseProse } from './terseProse.ts';
 import { WORKER_READ_RULES_TOOL, workerRuleText } from './workerRules.ts';
 import { activityLine, Waker } from './wake.ts';
 import { TIMER_LIMITS, Timers, scheduleText, type TimerView } from './timers.ts';
-import { EVEN_MARGIN, RAM_BUSY_PCT, benchText, buildOf, busyReasons, capacityLines, classRank, forPriority, hasRoom, holdReason, liveOf, loadText, lowestPriority, minOf, pairCanFinish, pickComputer, placeId, pinnedWork, placementHint, reservedReason, roomEnough, roomForWork, roomNow, timedFacts, timedKindOf, timedPinRefusal, voiceVram, type Computer, type FirstKind, type NeedKind, type PlacementPrefs, type RoomNow, type TimedKind } from './placement.ts';
+import { EVEN_MARGIN, RAM_BUSY_PCT, benchText, buildOf, busyReasons, capacityLines, classRank, forPriority, hasRoom, holdReason, liveOf, loadText, lowestPriority, minOf, pairCanFinish, pairNoPlacement, pickComputer, placeId, pinnedWork, placementHint, reservedReason, roomEnough, roomForWork, roomNow, timedFacts, timedKindOf, timedPinRefusal, voiceVram, type Computer, type FirstKind, type NeedKind, type PlacementPrefs, type RoomNow, type TimedKind } from './placement.ts';
 import { MachinePauses, PAUSE_TICK_MS, pauseHolds, pauseWhy, type HandBack } from './machinePause.ts';
 import { MOVE_AFTER_MS, NONE_MARK, ROOM_WAIT, briefOf, holdMoves, moveDecision, movedPrompt, stayLine, type MoveFacts } from './resumeMove.ts';
 import { playHolds, playLine } from '../shared/personPlay.ts';
@@ -367,7 +367,7 @@ CLAUDE.md's "Discord: FFBox owns #bug-reports" binds you: read and download ther
  * carry it verbatim (worldBrief). The longer version is docs/ffbox.md.
  */
 /** The dispatcher's rule for pair runs (w1945), in read_rules machines: placing, queueing and holding for them. */
-const PAIR_RULES = `**Pair runs** (w1945, lothsahn: "Can we make the dispatcher smart enough so it queues work properly that requires running together across multiple machines and doesn't waste slots?"): a request marked "a pair run of N legs" (a worker's request_pair, or one you file or see that needs two computers at once, such as a two-machine determinism check: queue that one with decide_work pair_legs, so it is marked) starts ALL its legs together: start_agent with its work_id, sandbox for leg 1 (the host) and pair_sandboxes for the others, each a FREE sandbox on another computer. Never start one leg alone, and never leave a worker holding its sandbox while it waits for a partner leg: a worker that asks you for a second machine's worker is told to use request_pair. With fewer computers that fit having room than it has legs, queue it: a pair is room, and WRONG, only where that many computers have room at once. While an older pair run of at least the same priority is Queued, each computer's last free sandbox it fits is held for it: start other work elsewhere (start_agent refuses it, naming the pair; work of higher priority goes first). Legs go on any free computers, any OS (w2282, lothsahn: "Not windows by default, any OS. Being particular about a machine or OS limits the fleet we can use."): a Mac may be the host (leg 1), never a client (a Mac refuses a multiplayer client, w665); a cross-OS pair (only for w1692's reasons) also needs two operating systems; timed legs never on the m5. A pair run is timed only when request_pair said timed or decide_work timed true (w3720): its words, notes or the timed runs they quote never make it timed; decide_work timed false clears a request whose words read as timed though it times nothing (a determinism check, a playtest). A pair run that repeats one that finished on the same pull request and commit (w2057) is not marked: decide_work queue with pair_legs refuses it; pair_legs 0 clears the mark of one whose legs never started; on one whose legs never started, pair_legs (2 and up), pair_menus (what its legs click in the game's menus, or "none") and pair_steam ("none" when a person cleared it to run without Steam, with their words in note: it drops a Steam mark and its Steam gate at once, w3455) set its marks with any action (w2648: "no menus" in a brief clicks none, and so does a run its worker filed with menus "none"); done closes a never-started repeat with the finished run's result, which reaches whoever waits on it.`;
+const PAIR_RULES = `**Pair runs** (w1945, lothsahn: "Can we make the dispatcher smart enough so it queues work properly that requires running together across multiple machines and doesn't waste slots?"): a request marked "a pair run of N legs" (a worker's request_pair, or one you file or see that needs two computers at once, such as a two-machine determinism check: queue that one with decide_work pair_legs, so it is marked) starts ALL its legs together: start_agent with its work_id, sandbox for leg 1 (the host) and pair_sandboxes for the others, each a FREE sandbox on another computer. Never start one leg alone, and never leave a worker holding its sandbox while it waits for a partner leg: a worker that asks you for a second machine's worker is told to use request_pair. With fewer computers that fit having room than it has legs, queue it: a pair is room, and WRONG, only where that many computers have room at once. While an older pair run of at least the same priority is Queued, each computer's last free sandbox it fits is held for it: start other work elsewhere (start_agent refuses it, naming the pair; work of higher priority goes first). Legs go on any free computers, any OS (w2282, lothsahn: "Not windows by default, any OS. Being particular about a machine or OS limits the fleet we can use."): a Mac may be the host (leg 1), never a client (a Mac refuses a multiplayer client, w665); a cross-OS pair (only for w1692's reasons) also needs two operating systems; timed legs never on the m5. A pair run is timed only when request_pair said timed or decide_work timed true (w3720): its words, notes or the timed runs they quote never make it timed; decide_work timed false clears a request whose words read as timed though it times nothing (a determinism check, a playtest). A pair run that repeats one that finished on the same pull request and commit (w2057) is not marked: decide_work queue with pair_legs refuses it; pair_legs 0 clears the mark of one whose legs never started; on one whose legs never started, pair_legs (2 and up), pair_menus (what its legs click in the game's menus, or "none") and pair_steam ("none" when a person cleared it to run without Steam, with their words in note: it drops a Steam mark and its Steam gate at once, w3455) set its marks with any action (w2648: "no menus" in a brief clicks none, and so does a run its worker filed with menus "none"); done closes a never-started repeat with the finished run's result, which reaches whoever waits on it. A person's note that widens where a never-started pair may run takes effect only through its marks (w4468, lothsahn's notes on w4334 changed nothing for a day): pair_allow takes the computers they name off its avoid list, and pair_split (why its peers are spread: a pair lab, the relay, "a Mac may host leg 1") lets a Mac host it; say their words in note. A pair is queued for the computers its marks let on, never for those you name (needs is ignored for a pair). One no computers could take together shows Stalled with each computer's reason: it is no capacity wait, so move it only by a person's word or let it return to Queued when a hold lifts.`;
 
 /** The dispatcher's rule for computers away past the grace and a person's named computer (w2544), in read_rules machines. */
 const AWAY_RULES = `**A computer away past the grace takes nothing and keeps nothing** (w2544, lothsahn, 2026-10-29: "the dispatcher should not be scheduling work on offline computers--at least ones that have been offline for a few minutes or more. Make sure those get moved somewhere else"): offline or paused for 5 min (timing.unavailableIdleMinutes) or more (every drop the portal journal showed came back within about 2 min), start_agent and stop_agent move_to refuse it, and FF Factory moves what waits on it by itself: a worker Blocked on it or stopped there with a message held, onto the computer placement picks, from its pushed branch with a hand-off that says what may be lost; a Queued request's needs naming only it are dropped. Each move is on the request's log and its list_work line ("moved from lothlaptop (offline 6 min) to lothdesktop/slot2"). A shorter blip moves nothing. A request whose brief names that computer ("must run on X", or a pin) stays, and you get one \`[ledger] KEPT (w2544)\` notice: tell its requester's orchestrator, do nothing else. **A person names a computer for a request** ("w2542 should move to LothDesktop"): pass their words in \`pin_words\` with start_agent (its work_id and a sandbox there) or stop_agent move_to; the request is pinned there, so the timing order lets it go and nothing moves it off. Only a person's words, never your own pick.`;
@@ -980,6 +980,9 @@ export class Agents {
     sessions.placementChanged = () => this.placementChanged();
     // w1944: a daemon that connects (every one after a portal restart, which drops a capacity ping still waiting) is room news.
     machines.onOnline = (id) => this.orchestrators.capacityMayHaveFreed(`${id}'s daemon connected`);
+    // w4468: the play hold lifting frees that computer as surely as a stopped worker: w4460 and w4207 waited on no ping when
+    // lothsahn's game on LothDesktop ended.
+    machines.onPlayEnded = (id) => this.orchestrators.capacityMayHaveFreed(`a person's game on ${id} ended (its play hold lifted)`);
     // w2433: a worker its machine's going offline stopped mid-turn: its requests are Blocked on that machine.
     machines.workersCutOff = (id, sids, players) => this.orchestrators.workersCutOff(id, sids, players);
     // w2474: ...and one whose process ran on through the drop is not Blocked on it once its daemon says so.
@@ -2070,6 +2073,7 @@ export class Agents {
       ...(typeof a.legs === 'number' ? { legs: a.legs } : {}),
       ...(typeof a.cross_os === 'string' ? { cross_os: a.cross_os } : {}),
       ...(a.timed === true ? { timed: true } : {}),
+      ...(typeof a.split === 'string' ? { split: a.split } : {}),
       ...(typeof a.steam === 'string' && a.steam.trim() ? { steam: a.steam } : {}),
       ...(typeof a.menus === 'string' && a.menus.trim() ? { menus: a.menus } : {}),
       ...(typeof a.request === 'string' && a.request.trim() ? { request: a.request } : {}),
@@ -3842,7 +3846,7 @@ export class Agents {
       return m;
     };
     return items.map((w) => {
-      const needs = w.queuedFor?.needs;
+      const needs = queuedNeeds(w); // w4468: a pair run reads its pair mark, not the computers named
       const has = roomForWork(now, w, needs).ids;
       const room = has.length > 0;
       if (room) return { work: w.id, title: w.title, priority: w.priority, room, machines: has, preemptOn: [] };
@@ -5140,14 +5144,14 @@ When a person asked for a design or an analysis (a profile, an investigation, a 
     const since = (x: WorkItem) => Date.parse(x.queuedFor?.at ?? x.createdAt) || 0;
     const pairs = [...this.store.work.values()].filter((p) => p.pair && !p.pair.started && p.status === 'queued').sort((x, y) => rank(y.priority) - rank(x.priority) || since(x) - since(y) || x.id.localeCompare(y.id));
     const plan: PairPlan = new Map();
-    const fits = (p: WorkItem) => roomForWork(facts, { ...p, pair: { ...p.pair!, legs: 1 } }, p.queuedFor?.needs).ids.filter((id) => !plan.has(id));
+    const fits = (p: WorkItem) => roomForWork(facts, { ...p, pair: { ...p.pair!, legs: 1 } }, queuedNeeds(p)).ids.filter((id) => !plan.has(id));
     for (const p of pairs) for (const id of pairRoom(p, fits(p), facts.fit).pick ?? []) plan.set(id, { pair: p });
     const started = new Set([...plan.values()].map((x) => x.pair.id));
     for (const p of pairs) {
       if (started.has(p.id)) continue;
       const ids = fits(p);
       // w3530: a pair the computers that are up could never complete holds nothing; the next one waits holding instead.
-      if (!ids.length || !pairCanFinish(this.places(), this.placement(), p, p.queuedFor?.needs)) continue;
+      if (!ids.length || !pairCanFinish(this.places(), this.placement(), p, queuedNeeds(p))) continue;
       const macs = ids.filter((id) => facts.fit?.[id]?.platform === 'darwin');
       const short = pairRoom(p, ids, facts.fit).short;
       for (const id of [...macs.slice(0, 1), ...ids.filter((id) => !macs.includes(id))].slice(0, p.pair!.legs - 1)) plan.set(id, { pair: p, short });
@@ -6545,6 +6549,8 @@ ${w.repo ?? ''}
             if (key.startsWith('machines.cleanup.')) this.machines.pushCleanupConfig();
             if (key.startsWith('machines.activityPause.')) this.machines.pushActivityConfig(machine);
             if (key === 'usagePollMinutes') this.usagePollChanged?.();
+            // w4468: a hold lifted or a reservation changed (placement.hold, holdExcept, minPriority) re-places Queued work now.
+            if (key.startsWith('placement.')) this.orchestrators?.capacityMayHaveFreed(`config ${key} changed`);
             if (key === 'live.enabled') await this.liveHub?.switched(after === true);
             if (key.startsWith('providers.') || key.startsWith('intake.')) this.providers?.configChanged();
             if (key.startsWith('intake.')) {
@@ -7587,6 +7593,8 @@ ${w.repo ?? ''}
           pair_legs: z.number().optional(),
           pair_menus: z.string().max(300).optional().describe('unstarted pair run: menus its legs click, or "none"'),
           pair_steam: z.string().max(300).optional().describe('Steam need or "none"'),
+          pair_split: z.string().max(300).optional().describe('w4468, unstarted pair run: why its peers are spread (a pair lab, the relay, a person\'s "a Mac may host leg 1"): a Mac may then host; "none" clears it'),
+          pair_allow: z.array(z.string()).max(12).optional().describe("w4468, unstarted pair run: machine ids taken off its avoid list, when a person's note widens where it may run"),
           report: z.union([z.enum(REPORT_KINDS), z.literal(false)]).optional().describe('w2541, with any action: its result is a report of this kind (file_report; DONE waits for one); false takes it back.'),
           timed: z.boolean().optional().describe('w3720: false: times nothing (a determinism pair); true: measures timing. Beats its words.'),
           blockers: z.array(BLOCKER_SHAPE).max(6).optional().describe(`block: SEVERAL things it waits on (a request waiting for w727's PR and w752's fix has two). It starts only when ALL have cleared. Replaces what it waited on. Same shape as blocker.`),
@@ -7763,6 +7771,8 @@ ${w.repo ?? ''}
       roomFit: extras.roomFit,
       // w2358: room start_agent refuses single game work for (a pair run's or timed work's hold) is not its room.
       roomHeld: (id, w) => (w.pair || needsOf(w) !== 'game' ? undefined : this.heldFor(id, w)),
+      // A person's game and a coming build are short holds (placement(false) leaves them out): a pair waiting out one is Queued.
+      pairStuck: (w) => pairNoPlacement(this.places(), this.placement(false), w),
       ...(extras.roomSince ? { roomSince: extras.roomSince } : {}),
       ...(extras.roomSlots ? { roomSlots: extras.roomSlots } : {}),
       // w1841: a worker an urgent release's build paused shows Blocked on it; a report waiting on a held bench lock, on that.
