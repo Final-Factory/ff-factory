@@ -239,7 +239,7 @@ test("w913: workers are told to leave their temp files, not to clean up; the one
   assert.match(DISK_HYGIENE, /The harness removes it: your temp folder a few minutes after no request waits for you any more \(it closed, or moved to another worker; a wait for CI or a person, a stop or a pause keeps it whole\), your git clones six hours after that \(unless one holds work nothing else has\)/);
   assert.match(DISK_HYGIENE, /Never `player_slots\.py prune`/);
   assert.match(DISK_HYGIENE, /publish the proofs your report links .* before you end/);
-  assert.match(DISK_HYGIENE, /a delete whose every path is written out under \$TMPDIR is answered by the session itself with no approval, alone or inside a longer command; anything else .* still asks a person/);
+  assert.match(DISK_HYGIENE, /a delete whose every path is written out under \$TMPDIR is answered by the session itself with no approval, alone or inside a longer command, and so is a path through a folder you named once at the start of the command .*; anything else .* still asks a person/);
   // w1482: a clean-up request's rules are read when one comes (read_rules cleanup), not on every call.
   assert.match(DISK_HYGIENE, /A request of yours to clear space or measure the disk: `read_rules cleanup` before you delete anything/);
   const cleanup = workerRuleText('cleanup');

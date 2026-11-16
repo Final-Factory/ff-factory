@@ -950,6 +950,41 @@ default mode asks, and the card and transcript carry the reason), `scripts/clean
 `server/evidenceRules.test.ts` (the brief). **Measuring**: `node scripts/cleanup-approvals.ts <dataDir> --since <7 days
 back> --split <deploy date>` ends with every prompt by kind, before and after.
 
+### A folder named at the start of the command (w4338)
+
+Lothsahn (2026-11-16, w4338): "Please analyze the last few bash requests and find a way for agents to do what was needed
+without bash. Enhance the harness to give agents the ability to do what they need."
+
+**Measured** (lothdesktop, every worker transcript in `~/.claude/projects/V--ffw-sandboxes-slot*/` from the last 8 days,
+read by each tool result's `permissionDecision`): 11,341 Bash calls passed in bypass mode; 3 went to `canUseTool`; no
+person refused one; 63 were guard hook refusals (22 `gh pr checks` on a fine-grained token, 16 commands aimed at the
+daemon's folder, the rest one to four each). Of the 3 asks, one was a probe of this request (answered by the session
+itself), one a `for` loop of `git merge-base`/`git diff` with no delete (slot6, 2026-11-15T00:44Z; Claude Code's reason was
+not kept in the transcript), and one cost a person: w4222's worker b61cef96 (lothdesktop/slot4) waited about 17 hours on
+
+```sh
+T=$(cygpath -m "$(ls -d "$TMPDIR"/tours-*)"); K=$(cygpath -m "$TMPDIR/keep"); for B in ...; do ... cp "$T/..." "$K/..."; done; ...; rm -f "$K"/*strip.png ...; du -sh "$K"
+```
+
+Claude Code's dangerous-rm check flagged `rm -f "$K"/*strip.png` (a variable path with a glob), and `tempDeletesWithin`
+refused it because `$K` "is a variable that is not the temp folder".
+
+**The rule** (`server/tempDelete.ts` `tempFolderNames`): in a longer command a name counts as the folder it holds when it is
+assigned in the command's leading run of plain assignments, each ended by `;` or a newline at the top level (not inside
+`$(...)`, a group, a branch, a loop, after `&&` or with a heredoc or a line continuation), to `"$TMPDIR/x"`, `$TMPDIR/x` or
+`$(cygpath -m|-w|-u "$TMPDIR/x")` with no space, glob, quote or other variable in it, strictly inside the temp folder and
+not through a link out of it, and the name appears nowhere else except as `$NAME`/`${NAME}`. Each delete is then judged
+as the path it holds, with every w913/w1097 check. Also new: a command that sets `IFS` is refused (`IFS=/` splits an
+unquoted `$TMPDIR/x` into relative names; that gap predates w4338).
+
+**Not covered here**: the m3 denials named in the brief (w4308, w4322, w4269, w4282, w4306, w4279, w4205). A worker cannot
+read another machine's transcripts or the portal's permission events (`search_transcripts` is orchestrator-only), and the
+journal keeps no permission lines; `node scripts/cleanup-approvals.ts <dataDir> --since ...` on the portal reads them.
+
+**Tests**: `server/tempDelete.test.ts` (the w4222 command verbatim, Windows and POSIX; 23 refusals: outside, the folder
+itself, `..`, a glob, a space, another variable, a reassignment, `for`/`read`/`unset`/`+=`, a subshell, `&&`, a branch, a
+group, a continuation, a heredoc, single quotes, a longer name, `${K:-/}`, IFS; and a real junction out of the folder).
+
 ### Where clean-up may delete (w896)
 
 **The rule** (lothsahn, 2026-10-10: "Why are you clearing C: on LothDesktop?  How much space are the unity caches using?  In

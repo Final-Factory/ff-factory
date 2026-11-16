@@ -177,7 +177,7 @@ test('w1097: a longer command with a delete it cannot judge still asks a person'
   notWithin(leg('rm -rf $TMPDIR'), /not strictly inside/);
   notWithin('run() { rm -rf "$TMPDIR/f$1"; }; run 1920', /variable/); // $1 could be anything
   notWithin('for d in a b; do rm -rf $TMPDIR/$d; done', /variable/);
-  notWithin('O=$TMPDIR/x; rm -rf $O', /variable/);
+  notWithin('O=$TMPDIR/x && rm -rf $O', /variable/); // after `&&` (w4338 accepts `O=$TMPDIR/x; rm -rf $O`)
   // Something in the command could change what the delete removes.
   notWithin('TMPDIR=/; rm -rf $TMPDIR/x', /temp folder variable/);
   notWithin('export TMP=/c/Users; rm -rf $TMP/x', /temp folder variable/);
@@ -214,4 +214,72 @@ test("w1097: Claude Code's dangerous-rm reasons, as 2.1.284 words them, are reco
   assert.match('Dangerous rm operation on critical path: /ffa-probe-nonexistent-q1', DANGEROUS_REMOVAL);
   assert.doesNotMatch('This command uses shell operators that require approval for safety', DANGEROUS_REMOVAL);
   assert.doesNotMatch('Shell expansion syntax in paths requires manual approval', DANGEROUS_REMOVAL);
+});
+
+/** w4338: the command w4222's worker waited 17 hours on a person for (lothdesktop/slot4, 2026-11-16T03:46:56Z). */
+const w4222 = `T=$(cygpath -m "$(ls -d "$TMPDIR"/tours-*)"); K=$(cygpath -m "$TMPDIR/keep"); for B in after before; do for S in a-bot-parented-150 b-zone-parented-155 c-bot-too-far1-hover d-zone-too-far1-hover; do cp "$T/$B-1920x1080-classic/$S.png" "$K/$B-1920-$S.png"; done; cp "$T/$B-1280x800-classic/c-bot-too-far1-hover.png" "$K/$B-1280-c-bot-too-far1-hover.png"; cp "$T/$B-1280x800-classic/d-zone-too-far1-hover.png" "$K/$B-1280-d-zone-too-far1-hover.png"; done; cp "$TMPDIR/critic/critic.md" "$K/critic.md"; rm -f "$K"/*strip.png "$K"/*late.png "$K"/*early.png "$K"/after-18s.png; ls "$K" | tr '\n' ' '; du -sh "$K"`;
+
+test('w4338: a folder named once at the start of the command, inside the temp folder, may be deleted in', () => {
+  within(w4222);
+  within(w4222, posix);
+  within('O=$TMPDIR/x; rm -rf $O');
+  within('O="$TMPDIR/x"\nrm -rf "$O"/*.png "${O}/b"');
+  within('A=1; K=$(cygpath -w "$TMPDIR/keep"); rm -f "$K/a.png"');
+  within('K=$(cygpath -m $TMPDIR/keep); rm -f "$K"/a.png');
+  // A later name that holds something else does not spoil the folder name.
+  within('K="$TMPDIR/keep"; N=$(date +%s); cp a "$K/$N.png"; rm -f "$K"/old.png');
+});
+
+test('w4338: a named folder that could hold anything else still asks a person', () => {
+  // Outside the temp folder, the folder itself, a .., a glob or a space in the value.
+  notWithin('K=/c/Users/rydin; rm -rf "$K"/x', /variable/);
+  notWithin('K="$TMPDIR"; rm -rf "$K"/x', /variable/);
+  notWithin('K=$(cygpath -m "$TMPDIR"); rm -rf "$K"/x', /variable/);
+  notWithin('K="$TMPDIR/a/../.."; rm -rf "$K"/x', /variable/);
+  notWithin('K="$TMPDIR/*"; rm -rf "$K"', /variable/);
+  notWithin('K="$TMPDIR/a b"; rm -rf "$K"', /variable/);
+  notWithin('K="$TMPDIR/$S"; rm -rf "$K"', /variable/);
+  notWithin('K=$(ls -d "$TMPDIR"/tours-*); rm -rf "$K"/x', /variable/);
+  notWithin('K=$(cygpath -m "/c/Users"); rm -rf "$K"/x', /variable/);
+  // Assigned again, or in a way that may not run first: in a subshell, after `&&`, in a branch, as an env prefix.
+  notWithin('K="$TMPDIR/keep"; K=/; rm -rf "$K"/x', /variable/);
+  notWithin('K="$TMPDIR/keep"; for K in / /c; do rm -rf "$K"/x; done', /variable/);
+  notWithin('K="$TMPDIR/keep"; read K; rm -rf "$K"/x', /variable/);
+  notWithin('K="$TMPDIR/keep"; unset K; rm -rf "$K"/x', /variable/);
+  notWithin('K="$TMPDIR/keep"; K+=/..; rm -rf "$K"/x', /variable/);
+  notWithin('X=$(false; K="$TMPDIR/keep"); rm -rf "$K"/x', /variable/);
+  notWithin('false && K="$TMPDIR/keep"; rm -rf "$K"/x', /variable/);
+  notWithin('X=$(false) && K="$TMPDIR/keep"; rm -rf "$K"/x', /variable/);
+  notWithin('if false; then K="$TMPDIR/keep"; fi; rm -rf "$K"/x', /variable/);
+  notWithin('{ K="$TMPDIR/keep"; }; rm -rf "$K"/x', /variable/);
+  notWithin('A=1 \\nK="$TMPDIR/keep"; rm -rf "$K"/x', /variable/);
+  notWithin(': <<X\nK="$TMPDIR/keep"\nX\nrm -rf "$K"/x', /variable/);
+  // Single quotes do not expand; a longer name is another name; a computed expansion is not judged.
+  notWithin(`K='$TMPDIR/keep'; rm -rf "$K"/x`, /variable|single-quoted/);
+  notWithin('K="$TMPDIR/keep"; rm -rf "$KEEP"/x', /variable/);
+  notWithin('K="$TMPDIR/keep"; rm -rf "${K:-/}"/x', /computed|variable|brace/);
+});
+
+test('w4338: IFS changes are refused, since IFS=/ splits an unquoted $TMPDIR/x into relative names', () => {
+  notWithin('IFS=/; rm -rf $TMPDIR/x', /IFS/);
+  notWithin('export IFS=/; rm -rf $TMPDIR/x', /IFS/);
+});
+
+test('w4338: a named folder that leads out of the temp folder through a link is refused', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffa-w4338-'));
+  const tmp = path.join(dir, 'ffa-link');
+  const outside = path.join(dir, 'outside');
+  fs.mkdirSync(tmp);
+  fs.mkdirSync(outside);
+  fs.mkdirSync(path.join(tmp, 'real'));
+  try {
+    fs.symlinkSync(outside, path.join(tmp, 'out'), 'junction');
+    const ctx = { tmp };
+    assert.deepEqual(tempDeletesWithin('K="$TMPDIR/real"; rm -rf "$K"/x', ctx), { ok: true });
+    const r = tempDeletesWithin('K="$TMPDIR/out"; rm -rf "$K"/x', ctx);
+    assert.equal(r.ok, false);
+    if (!r.ok) assert.match(r.why, /link|variable/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
