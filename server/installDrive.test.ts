@@ -259,3 +259,8 @@ test("the daemon's clean-up plan on Windows reads only the install drive: no rul
   assert.equal(rulesOnInstallDrive(mac, ['/Users/Shared/ffw'], '/Users/loth').length, mac.length);
   assert.equal(rulesOnInstallDrive(all, undefined, env.home).length, all.length);
 });
+
+test('w4394: ff-leftovers remove of a path on C: is refused as a scan off the install drive, as check is', () => {
+  refused('ff-leftovers remove C:/Users/loth/AppData/Local/Temp/x');
+  fine('ff-leftovers remove V:/ffw/tmp/ffa-0fed07fc');
+});
