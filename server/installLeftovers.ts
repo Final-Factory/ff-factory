@@ -299,7 +299,7 @@ function isPlayerBuild(p: string, name: string): boolean {
  * of what it holds takes minutes (ffu-build-test: ffu-client release 1 min 40 s, ffu-headless 31 s, measured).
  */
 const CARGO_TAG = 'Signature: 8a477f597d28d172789f06886806bc55';
-function isCargoTarget(p: string): boolean {
+export function isCargoTarget(p: string): boolean {
   try {
     const tag = fs.readFileSync(path.join(p, 'CACHEDIR.TAG'), 'utf8');
     return tag.startsWith(CARGO_TAG) && /created by cargo/i.test(tag);
@@ -353,7 +353,7 @@ export function cargoTargetRunners(target: string, procs: ProcLite[] | undefined
 }
 
 /** The newest write in a cargo target's top three levels (cargoTargetBusy reads the same): what a build touches, without its artifacts. */
-async function newestTopWrite(target: string): Promise<number> {
+export async function newestTopWrite(target: string): Promise<number> {
   let newest = 0;
   const stack: { p: string; depth: number }[] = [{ p: target, depth: 0 }];
   while (stack.length) {

@@ -102,6 +102,20 @@ debug profile 4 to 11.5 GB on m5, so 16 GB keeps about two configurations warm a
 the incremental cache or the whole target is touched. The sweep of an 11.5 GB profile read 2193 fingerprints in about
 1 s. The per-worker `cargoTargetCapGB` (8 GB, w3426) still applies to targets in temp folders.
 
+### What `ff-leftovers check` and `folders` say (`server/cleanupFolders.ts` `judgeFfuSlotPath`, w4422)
+
+A clean-up worker's `ff-leftovers check <path>`, `folders` and `remove` judge a slot's build output as the rule above
+judges the whole target. Before w4422 they called a released slot's `target` and its `debug/incremental` "not a place with
+an owner in the ledger" (biscuit, w4283). DELETE: `slot<N>/target`, or a path inside it, of a slot no running or resumable
+worker holds (`slots.json`, what `ffu-slot list` reads; a holder that neither runs nor has a request not closed holds
+nothing, as the daemon's `holderUp` judges it), with cargo's `CACHEDIR.TAG`, no running process naming the slot (cargo,
+rustc, a test binary from the target, a shell in the checkout) and nothing in its top three levels written within the
+settle time (15 min). The same goes for a stray `slot<N>/ffu/target` inside the checkout, where builds landed before the
+w4258 `.cargo/config.toml` routing (25 GB in biscuit's slot1), which the daemon's sweep never looks at: only with cargo's
+`CACHEDIR.TAG`. Everything else is KEEP with the reason: a held or busy slot, the checkout and anything else in it, the
+slot folder, the shared clone. A clean-up worker takes a target sooner than the daemon's 7 idle days; the next build in the
+slot rebuilds it cold (minutes, not seconds). Tests: `ffuSlotCheck.test.ts`.
+
 ## Measurements behind it (BEAST, 2026-11-09, ffu 9e10964, 32 cores, a shared bench ticket)
 
 Every number in this table was measured once, on a machine where other work was also running (the CPU load column is
