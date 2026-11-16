@@ -7,6 +7,7 @@ import { SAFE_ROOT, SAFE_TARGET, workerToolsRemote, workerUpdateRemote } from '.
 import { AGENT_PLUGINS, EXIT, LINE, parseVersions, type Versions } from './agentTools.ts';
 import type { LinkUpdateReport } from './machineProtocol.ts';
 import { UpdateNotReached } from './machineLink.ts';
+import { diskAboveLine } from '../shared/blockers.ts';
 
 /**
  * The machine rollout (w887, lothsahn 2026-10-10: "Update FFFactory so that after updating the portal and validating, it
@@ -56,7 +57,12 @@ export const ROLLOUT_LIMITS = {
   /** w1861: a timed run holds a machine's update and tools back this long at the most (an exclusive turn is 30 minutes while
    * anyone waits behind it, and goes on past them while nobody does). */
   benchWaitMs: 45 * 60_000,
+  /** w4421: times one rollout sends an update again that a full disk refused, each once the disk is back over its line. */
+  diskFullRetries: 3,
 };
+
+/** w4421: an update that failed because the machine's disk was full (ENOSPC on Linux and macOS, Windows' own words). */
+export const DISK_FULL = /ENOSPC|no space left on (the )?device|not enough space on the disk|disk (is )?full/i;
 
 export interface RolloutMachine {
   id: string;
@@ -97,6 +103,8 @@ export interface RolloutHost {
   /** w1861: the timed run that holds its bench queue exclusively now, for people ("a timed run on m5/slot2 (w1780)"), from
    * its daemon's last stats; undefined when none does (or its daemon does not say). */
   timedRun?(id: string): string | undefined;
+  /** w4421: its sandbox volume's free bytes and its pool's warning line, as its daemon last reported them (server/machines.ts diskRoom). */
+  diskRoom?(id: string): { freeBytes: number; warnGB: number } | undefined;
 }
 
 /** The agent tools publish on one machine (w1476). */
@@ -140,6 +148,8 @@ export interface MachineOutcome {
   tools?: ToolsOutcome;
   /** w1861: its update or tools publish waits for a timed run on it (`note` says which); not settled meanwhile. */
   held?: boolean;
+  /** w4421: the update failed on a full disk: sent again by itself once the disk is back over its line, up to diskFullRetries. */
+  diskFull?: { at: string; retries: number };
 }
 
 export interface RolloutState {
@@ -312,6 +322,7 @@ export class MachineRollout {
       for (const id of Object.keys(this.state.machines)) if (!known.has(id)) delete this.state.machines[id];
       for (const m of this.d.host.machines()) {
         const o = (this.state.machines[m.id] ??= { status: 'pending' });
+        this.retryDiskFull(m.id, o);
         if (o.status !== 'pending') {
           if (this.toolsDue(m, o)) await this.publishTools(m, o);
           this.save();
@@ -356,6 +367,22 @@ export class MachineRollout {
     } finally {
       this.busy = false;
     }
+  }
+
+  /**
+   * w4421: an update a full disk refused is sent again once the disk has room, not left for the next deploy. On 2026-11-15
+   * biscuit refused 3acff0c at 04:08:20Z, "could not write .../update/<sha>.bundle.part: ENOSPC", and still ran 5f9da46
+   * after w4283 freed 102 GB, until bb017920's deploy a day later. Room is the line a disk gate clears at (shared/blockers.ts
+   * diskAboveLine: the pool's warning line plus the margin), as the daemon last reported it while online.
+   */
+  private retryDiskFull(id: string, o: MachineOutcome): void {
+    if (o.status !== 'failed' || !o.diskFull || o.diskFull.retries >= this.lim.diskFullRetries || !this.d.host.online(id)) return;
+    const room = diskAboveLine(id, this.d.host.diskRoom?.(id));
+    if (!room) return;
+    o.diskFull.retries++;
+    Object.assign(o, { status: 'pending', note: `its disk is back (${room}): the update its full disk refused is sent again (try ${o.diskFull.retries} of ${this.lim.diskFullRetries})` });
+    delete o.told;
+    console.log(`machine rollout: ${id}: ${o.note}`);
   }
 
   /** A commit that is not known counts as outdated (w970), unlike the nag in machines.ts that leaves it alone: the update fixes it. */
@@ -439,6 +466,10 @@ export class MachineRollout {
     if (this.viaLink(m.id)) await this.updateOverLink(m, o, sha, before);
     else await this.updateOverSsh(m, o, sha, before);
     o.at = new Date(this.now()).toISOString();
+    if (o.status === 'failed' && DISK_FULL.test([o.note, ...(o.summary ?? [])].join('\n'))) {
+      o.diskFull = { at: o.at, retries: o.diskFull?.retries ?? 0 };
+      if (o.diskFull.retries < this.lim.diskFullRetries) o.note = `${o.note}; its disk was full: sent again by itself once the disk is back over its warning line`;
+    } else if (o.status !== 'failed') delete o.diskFull;
     // Were the agents taken back by the new daemon? Its hello after the update says what it runs.
     if (agentsBefore.length && o.status !== 'pending') await this.checkAdoption(m.id, o, agentsBefore, startedAt);
     console.log(`machine rollout: ${m.id}: ${o.status}${o.note ? ` (${o.note})` : ''}`);
