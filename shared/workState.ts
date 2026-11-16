@@ -134,6 +134,11 @@ export interface WorkLiveFacts {
    * timed work: Agents.pairHoldProblem, timedHoldProblem, as start_agent refuses it), or undefined.
    */
   roomHeld?: (id: string, w: WorkItem) => string | undefined;
+  /**
+   * Why a Queued pair run has no placement at all now (w4468, server/placement.ts pairNoPlacement), or undefined: it is then
+   * Stalled with that reason, not Queued, since no freed sandbox can start it.
+   */
+  pairStuck?: (w: WorkItem) => string | undefined;
   /** Who each computer's room goes to first (w1944, roomShares), set by workLiveAll from `items` and roomSlots. */
   shares?: ReadonlyMap<string, RoomShare>;
   /** The urgent release build that paused this worker (w1841, server/buildPlans.ts pausedFor); undefined when none did. */
@@ -816,6 +821,17 @@ function queueLive(s: SessionInfo, q: QueueWait): WorkLive {
 /** The computers with room for `w` (of `wanted`, when named): those it can run on (`fits`), and those it cannot, with why. */
 type RoomFacts = Pick<WorkLiveFacts, 'room' | 'agentRoom' | 'reservedRoom' | 'roomFit' | 'roomSlots' | 'roomHeld'>;
 
+/**
+ * The computers a Queued request waits for: its queuedFor.needs, except for a pair run not yet started (w4468), whose room is
+ * its pair mark alone (legs, avoid, Steam, the Mac rule; shared/capacity.ts pairRoom). The dispatcher names the computers
+ * that had room as it queued one, not where it may run: w4462 was queued for lothdesktop or beast while lothsahn played on
+ * LothDesktop and BEAST was held, so neither its WRONG flag, the capacity ping nor the pair plan counted biscuit, and it sat
+ * Queued until the dispatcher tried lothdesktop and biscuit by hand (it started at once).
+ */
+export function queuedNeeds(w: Pick<WorkItem, 'pair' | 'queuedFor'>): string[] | undefined {
+  return w.pair && !w.pair.started ? undefined : w.queuedFor?.needs;
+}
+
 function roomFor(w: WorkItem, f: RoomFacts, wanted: readonly string[] | undefined) {
   const needs = wanted?.map((n) => n.toLowerCase());
   const kind = needsOf(w);
@@ -856,7 +872,7 @@ export function roomShares(items: readonly WorkItem[], f: RoomFacts, extra?: { w
   if (!f.roomSlots) return undefined;
   const queue: { key: string; w: WorkItem; wanted?: readonly string[] }[] = items
     .filter((w) => live(w) && w.id !== extra?.w.id && (w.status === 'queued' || w.legs?.length))
-    .map((w) => (w.status === 'queued' ? { key: w.id, w, wanted: w.queuedFor?.needs } : { key: `${w.id}:leg`, w, wanted: w.legs!.flatMap((l) => l.needs) }));
+    .map((w) => (w.status === 'queued' ? { key: w.id, w, wanted: queuedNeeds(w) } : { key: `${w.id}:leg`, w, wanted: w.legs!.flatMap((l) => l.needs) }));
   if (extra) queue.push({ key: extra.w.id, w: extra.w, wanted: extra.wanted });
   queue.sort((a, b) => PRIORITY_RANK[a.w.priority] - PRIORITY_RANK[b.w.priority] || a.w.createdAt.localeCompare(b.w.createdAt) || a.key.localeCompare(b.key));
   const left = new Map(Object.entries(f.roomSlots));
@@ -1168,7 +1184,12 @@ function workLiveOf(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: string
   }
 
   // Queued: capacity only. With a computer that could take it free, that is wrong, and says so (w643).
-  if (w.status === 'queued') return queuedLive(w, f, w.queuedFor?.needs, 'queued');
+  if (w.status === 'queued') {
+    // w4468: a pair run no computers could take together is Stalled with why, not Queued for hours (w4441, w4334).
+    const stuck = w.pair && !w.pair.started ? f.pairStuck?.(w) : undefined;
+    if (stuck) return { state: 'stalled', why: `queued, but ${stuck}. It returns to Queued by itself when a hold lifts or a computer comes back; a person's note that widens where it may run is decide_work pair_allow (its avoid list) or pair_split (a Mac may host)` };
+    return queuedLive(w, f, queuedNeeds(w), 'queued');
+  }
 
   // Paused (w915): its worker wrote `<id>: paused: …`, set it aside for the request it is on first. Not Stalled: someone
   // decided to wait, and said on what.

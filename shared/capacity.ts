@@ -261,10 +261,22 @@ export const MAC_CLIENT_OK_WORDS = /\bFF_MAC_GPU_HANG_OK=w\d+/i;
  * (scripts/nightly/lab.pair-m5-beast.json) or the pair relay (scripts/nightly/pair_relay.py; the game repo's
  * Determinism-Test-Strategy.md, "A pair with no ssh"). Its host leg starts no client, so a Mac may take it.
  */
-export const SPLIT_PEER_WORDS = /\blab\.pair-[\w.-]+|\bpair_relay\b/;
+export const SPLIT_PEER_WORDS =
+  /\blab\.pair-[\w.-]+|\bpair[_ ]relay\b|\b(?:pair|relay|two-computer pair) lab\b|\ba Mac(?: \([^)\n]{0,60}\))? (?:may|can) host\b/i;
 /** Why a Mac takes no leg of a pair run whose legs each start an MP scenario's host and client (w3697). */
 export const MAC_REFUSES_SCENARIO =
   "a Mac refuses a multiplayer client (the game repo's scripts/nightly/player_slots.py require_mac_client_ok, w665; w3697). A pair lab or the relay (leg 1 hosts, the others join), a cross-OS pair or FF_MAC_GPU_HANG_OK=<request> in its words lets a Mac host";
+/**
+ * The words the Mac rule reads (w3697): title, brief and notes, without FF Factory's own w3697 sentence. request_pair wrote
+ * "No leg goes on a Mac (w3697): ... A pair lab or the relay ... lets a Mac host" into every MP-scenario pair's brief, which
+ * names a pair lab itself, so it is cut before SPLIT_PEER_WORDS reads them (w4468).
+ */
+export function macRuleWords(w: Pick<WorkItem, 'title' | 'brief' | 'notes'>): string {
+  return `${w.title}\n${w.brief}\n${(w.notes ?? []).map((n) => n.text).join('\n')}`
+    .split(MAC_REFUSES_SCENARIO)
+    .join('')
+    .replace(/No leg goes on a Mac \(w3697\):[^\n]*?its own computer, and \.?/g, '');
+}
 
 /**
  * The MP scenario a Mac would have to start a client of (w3697), or undefined when a Mac may take the work. ffnightly.py
@@ -275,12 +287,14 @@ export const MAC_REFUSES_SCENARIO =
  * A pair's host leg starts no client only when its peers are spread: a cross-OS pair (its client is on the other OS) or one
  * whose words name a pair lab or the relay. Unsure is a refusal: a Windows or Linux leg costs nothing, a Mac leg that hits
  * the guard costs a build and a worker. FF_MAC_GPU_HANG_OK=<request> in its words lifts it, as it lifts the guard.
+ * A pair marked split (request_pair split, decide_work pair_split; w4468) spreads its peers by its own word: w4460 ("a
+ * two-computer pair lab") and w4334 (lothsahn: "A Mac may host leg 1") sat Queued for hours because the words were missed.
  */
 export function macRefusedScenario(w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes'> & { pair?: WorkPair }): string | undefined {
   if (!needsMpPeers(w)) return undefined;
-  const words = `${w.title}\n${w.brief}\n${(w.notes ?? []).map((n) => n.text).join('\n')}`;
+  const words = macRuleWords(w);
   if (MAC_CLIENT_OK_WORDS.test(words)) return undefined;
-  if (w.pair && (w.pair.crossOs || SPLIT_PEER_WORDS.test(words))) return undefined;
+  if (w.pair && (w.pair.crossOs || w.pair.split || SPLIT_PEER_WORDS.test(words))) return undefined;
   return MP_SCENARIO_WORDS.exec(words)?.[0];
 }
 
@@ -483,6 +497,24 @@ export const steamShortIn = (machines: Iterable<Parameters<typeof steamFleetOf>[
 
 /** Where a pair run that needs no cross-OS pair goes (w2282): any computers, a Mac only as the host. */
 export const PAIR_ANY_OS = 'on any computers, any OS (a Mac only as the host, leg 1)';
+/**
+ * The computers a not-yet-started pair run avoids only because a w2304 re-queue put them there before w4468: a leg's computer
+ * where a person played (w1894), that was paused (w2443) or offline. Each keeps its computer out only while it lasts (the play
+ * hold, placement.hold, offline), so the avoid is dropped (server/store.ts, at load). Read from its log's re-queue lines
+ * ("re-queued as a pair run (w2304, ...; its N legs start fresh together, not on X or Y): why"): such a computer ran a leg,
+ * so no filing's avoid named it then. w4460 and w4207 kept lothdesktop out for hours after lothsahn's game there ended.
+ */
+export function transientPairAvoids(w: Pick<WorkItem, 'log'> & { pair?: WorkPair }): string[] {
+  const avoid = w.pair?.avoid ?? [];
+  if (!w.pair || w.pair.started || !avoid.length) return [];
+  const named = new Set<string>();
+  for (const line of w.log ?? []) {
+    const m = /re-queued as a pair run \(w2304, [^;]*; its \d+ legs start fresh together, not on ([^)]*)\)/.exec(line);
+    for (const id of m?.[1].split(' or ') ?? []) named.add(id.trim().toLowerCase());
+  }
+  return avoid.filter((id) => named.has(id.toLowerCase()));
+}
+
 /** What pairText said of one before w2282, still in the constraints and brief of pair runs filed then (repairText). */
 const PAIR_NOT_MACS = 'on computers that are not Macs';
 
@@ -502,4 +534,4 @@ export function repairText(w: Pick<WorkItem, 'constraints' | 'brief'> & { pair?:
 }
 
 /** "a pair run of 2 legs, cross-OS: <why>, timed" (w1945): what a pair needs, as lines about it say it. */
-export const pairText = (p: WorkPair): string => `a pair run of ${p.legs} legs${p.crossOs ? `, cross-OS (${p.crossOs})` : `, ${PAIR_ANY_OS}`}${p.steam ? `, ${PAIR_STEAM} (${p.steam})` : ''}${p.menus && !p.steam ? `, only on computers whose screen is unlocked (it clicks the game's menus: ${p.menus})` : ''}${p.timed ? ', timed (exclusive tickets: not on a computer that takes no timed runs)' : ''}${p.avoid?.length ? `, not on ${p.avoid.join(' or ')}` : ''}`;
+export const pairText = (p: WorkPair): string => `a pair run of ${p.legs} legs${p.crossOs ? `, cross-OS (${p.crossOs})` : `, ${PAIR_ANY_OS}`}${p.steam ? `, ${PAIR_STEAM} (${p.steam})` : ''}${p.menus && !p.steam ? `, only on computers whose screen is unlocked (it clicks the game's menus: ${p.menus})` : ''}${p.timed ? ', timed (exclusive tickets: not on a computer that takes no timed runs)' : ''}${p.split ? `, its peers spread (a Mac may host: ${p.split})` : ''}${p.avoid?.length ? `, not on ${p.avoid.join(' or ')}` : ''}`;

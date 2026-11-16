@@ -2013,6 +2013,8 @@ export class MachineManager {
   onLiveHello?: (machineId: string, running: DaemonLiveView[] | undefined) => void;
   /** A daemon's hello has been handled (its resumes started, w1944): the capacity ping hears its room. */
   onOnline?: (machineId: string) => void;
+  /** w4468: a person's game there ended, so its play hold lifted: Queued work may be placed there again. */
+  onPlayEnded?: (machineId: string) => void;
   private readonly liveWss = new WebSocketServer({ noServer: true, maxPayload: 8 * 1024 * 1024, perMessageDeflate: false });
 
   /** The token check of an upgrade from a daemon (lockout, dry run); the socket is answered when it fails. */
@@ -2614,6 +2616,7 @@ export class MachineManager {
         const was = this.stats.get(id)?.personPlay;
         if (!!was !== !!msg.personPlay) console.log(`machine ${id}: ${msg.personPlay ? `${msg.personPlay.who} is playing Final Factory there (pid ${(msg.personPlay.pids ?? []).join(', ')}): held, its agents yield (w1894)` : `the person's game there ended and its grace passed: it takes work again (w1894)`}`);
         this.stats.set(id, stats);
+        if (was && !msg.personPlay) this.onPlayEnded?.(id);
         if (msg.bench) noteBench(this.playerSeen.get(id) ?? this.playerSeen.set(id, new Map()).get(id)!, msg.bench, Date.now());
         this.noteCpu(id, msg.stats.loadPct);
         emit({ type: 'machine_stats', id, stats });
