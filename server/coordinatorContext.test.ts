@@ -191,7 +191,10 @@ test('w1158: what a coordinator carries in every call stays within its budget', 
   // w3720 (lothsahn: "we need to make sure we're not doing time runs when we shouldn't be") gave decide_work timed, a request
   // said outright to be timed work or not, which beats its words (trimmed from 315 characters to 90; the rule is in read_rules
   // machines and docs/orchestrators.md): the dispatcher's measured 26,154, so the cap moved to 26,175.
-  const ALWAYS_LOADED_MAX = 26_175;
+  // w4468 (lothsahn: "How did those pair runs get stuck? Please find and fix how that happened.") gave decide_work pair_split and
+  // pair_allow, a person's note that widens where a queued pair run may go (trimmed from 260 characters of text to 65; the rule
+  // is in read_rules machines): the dispatcher's measured 26,388, so the cap moved to 26,400.
+  const ALWAYS_LOADED_MAX = 26_400;
   await withCoordinators((agents, kinds) => {
     for (const [kind, info] of kinds) {
       const prompt = asOnLinuxCi(promptOf(agents, info)).length;
