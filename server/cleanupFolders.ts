@@ -394,7 +394,7 @@ export function renderFolders(rows: FolderRow[], f: CleanupFacts | undefined, no
     ...keep.map(line),
     ...del.map(line),
     'Delete only the DELETE rows, and only inside the install folder. A KEEP row belongs to a request that has not closed (open, stalled or paused), holds a git repo with work on no remote or evidence published nowhere else, or could not be attributed: report it, never remove it. A DELETE row inside a kept folder (a finished worker\'s bulk, w2223) goes alone; its folder stays. A player slot is judged by its lease files (w2796); empty a DELETE one with `ff-leftovers remove-slot <slot>`, which refuses one a live lease or a running process holds (w3204).',
-    '`ff-leftovers check <path>...` judges any other path before you delete it.',
+    'Delete a DELETE row with `ff-leftovers remove <path>...` (w4394), never rm: it judges the path again just before it deletes, refuses a KEEP path, a link and anything outside the install folder, and logs each removal with its size. `ff-leftovers check <path>...` judges any other path before you delete it.',
     '',
   ].join('\n');
 }

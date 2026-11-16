@@ -1202,11 +1202,138 @@ export async function removeSlots(args: string[], facts: CleanupFacts | undefine
   return refused ? 1 : 0;
 }
 
-export async function foldersMain(cmd: 'folders' | 'check' | 'remove-slot', args: string[], e: NodeJS.ProcessEnv = process.env, now = Date.now(), out: (s: string) => void = (s) => void process.stdout.write(s), slots: () => Promise<SlotContext> = slotContext): Promise<number> {
+/**
+ * `ff-leftovers remove <path>...` (w4394): delete a folder (or file) that `check` judges DELETE, the supported way. On the m3,
+ * 2026-11-16, w4391's clean-up found tmp/ffa-0fed07fc (18 GB) and tmp/ffa-5a411a7b (18 MB) both DELETE and had no route to
+ * delete them: ff-leftovers had only remove-slot, and the harness denied a plain `rm -rf`, as it should (a raw rm judges no
+ * ledger). Each path is judged exactly as `check` judges it (checkPath), and refused whatever the verdict when it is:
+ * - off this computer's install drive (C: on Windows, w1755) or in the game's AppData folders;
+ * - outside the worker install folder (w896), the folder itself, a top folder of it (REMOVE_TOP), the main clone (`repo`),
+ *   `seed`, `secrets`, or the daemon's folder;
+ * - a symbolic link or junction, or a path through one: the real place must be the name the verdict judged;
+ * - a player slot (remove-slot empties those and keeps the folder and its firewall rule), or the folder the command runs in.
+ * The verdict is taken twice, the second time just before the delete, so a worker that starts or resumes meanwhile keeps
+ * it. Each removal is printed and appended with its size to <root>/logs/ff-leftovers-removed.jsonl (FF_LEFTOVERS_REMOVE_LOG
+ * overrides it, for tests).
+ */
+export const REMOVE_TOP = new Set(['repo', 'seed', 'secrets', 'backups', 'tools', 'steam', 'logs', 'sandboxes', 'players', 'tmp', 'scratch', 'timing', 'nightly', 'nightly-history', 'ffu-runners', 'ffu-sandboxes', 'daemon']);
+
+/** Why `p` (resolved) may never go through `remove`, before any verdict; undefined when it may be judged. */
+export function removeFenceProblem(p: string, root: string, o: { home: string; daemonDir?: string; cwd?: string }): string | undefined {
+  if (!onInstallDrive(p, root) || inNeverGames(p, o.home)) return `off this computer's install drive ${driveLabel(root)}, or the game's AppData folder: disk work never touches C: (w1755)`;
+  if (!within(p, root) || norm(p) === norm(root)) return 'outside the worker install folder: a clean-up deletes only inside it (w896)';
+  const rel = norm(p).slice(norm(root).length + 1).split('/');
+  if (rel[0] === 'repo') return "the machine's main clone, a person's own project folder: never removed";
+  if (rel[0] === 'seed' || rel[0] === 'secrets') return `the install's ${rel[0]} folder: never removed by a clean-up`;
+  if (o.daemonDir && norm(o.daemonDir) !== norm(root) && (within(p, o.daemonDir) || within(o.daemonDir, p))) return "the FF Factory daemon's folder: never removed";
+  if (rel.length === 1 && REMOVE_TOP.has(rel[0]!)) return `a top folder of the install folder (${rel[0]}): never removed whole; remove the DELETE rows inside it`;
+  if (o.cwd && within(o.cwd, p)) return 'the folder this command runs in, or one holding it: cd out of it first';
+  let st: fs.Stats;
+  try {
+    st = fs.lstatSync(p);
+  } catch {
+    return 'no such file or folder';
+  }
+  if (st.isSymbolicLink()) return 'a symbolic link or junction: remove deletes real folders only, never a link (its target could be anywhere)';
+  let real: string;
+  try {
+    real = fs.realpathSync.native(p);
+  } catch (e) {
+    return `its real place could not be read (${(e as NodeJS.ErrnoException).code ?? (e as Error).message})`;
+  }
+  let realRoot = root;
+  try {
+    realRoot = fs.realpathSync.native(root);
+  } catch {
+    /* judged by name */
+  }
+  if (!within(real, realRoot) || norm(real) === norm(realRoot)) return `a path through a link to ${real}, outside the worker install folder: never removed (w896)`;
+  // A link part-way down (<root>/tmp/x -> <root>/repo): the verdict judged the name, so the real place must be the name.
+  if (norm(real).slice(norm(realRoot).length) !== norm(p).slice(norm(root).length)) return `a path through a link: its real place is ${real}; judge and remove that path itself`;
+  return undefined;
+}
+
+export async function removeFolders(
+  args: string[],
+  facts: CleanupFacts | undefined,
+  now: number,
+  out: (s: string) => void,
+  slots: () => Promise<SlotContext>,
+  published: ReturnType<typeof readPublished>,
+  o: { home?: string; daemonDir?: string; log?: string; cwd?: string } = {},
+): Promise<number> {
+  if (!args.length) {
+    out('usage: ff-leftovers remove <path>...\n');
+    return 2;
+  }
+  const bad = factsProblem(facts, now);
+  let refused = 0;
+  const no = (a: string, why: string) => {
+    refused++;
+    out(`KEEP    ${a}\n        not removed: ${why}\n`);
+  };
+  const home = o.home ?? (process.env.USERPROFILE || os.homedir());
+  const cwd = o.cwd ?? process.cwd();
+  for (const a of args) {
+    if (bad) {
+      no(a, bad);
+      continue;
+    }
+    const root = facts!.root!;
+    // w1755: the argument as given is judged first, so a C: path never reaches path.resolve or the disk.
+    if (!onInstallDrive(a, root) || inNeverGames(a, home)) {
+      no(a, `off this computer's install drive ${driveLabel(root)}, or the game's AppData folder: disk work never touches C: (w1755)`);
+      continue;
+    }
+    const p = path.resolve(a.trim());
+    const fence = removeFenceProblem(p, root, { home, daemonDir: o.daemonDir, cwd });
+    if (fence) {
+      no(a, fence);
+      continue;
+    }
+    if (judgePath(p, facts!, now).kind === 'player-slot') {
+      no(a, 'a player slot: empty it with `ff-leftovers remove-slot <slot>`, which keeps the folder and its firewall rule (w3204)');
+      continue;
+    }
+    const first = await checkPath(p, facts!, now, published, await slots());
+    if (first.verdict !== 'delete') {
+      no(a, first.why);
+      continue;
+    }
+    const size = await sizeOf(p).catch(() => 0);
+    const again = await checkPath(p, facts!, now, published, await slots());
+    const fenceAgain = removeFenceProblem(p, root, { home, daemonDir: o.daemonDir, cwd });
+    if (again.verdict !== 'delete' || fenceAgain) {
+      no(a, `${fenceAgain ?? again.why} (seen on the second look, just before the delete)`);
+      continue;
+    }
+    try {
+      fs.rmSync(p, { recursive: true, force: true, maxRetries: 3 });
+    } catch (e) {
+      no(a, `the delete failed part-way (${(e as NodeJS.ErrnoException).code ?? (e as Error).message})${fs.existsSync(p) ? '; what is left stays: run it again, or report it' : ''}`);
+      continue;
+    }
+    out(`REMOVED ${a}\n        ${Math.round(size / 1_048_576)} MB; ${first.why}\n`);
+    const log = o.log ?? path.join(root, 'logs', 'ff-leftovers-removed.jsonl');
+    try {
+      fs.mkdirSync(path.dirname(log), { recursive: true });
+      fs.appendFileSync(log, JSON.stringify({ at: new Date(now).toISOString(), path: p, bytes: size, why: first.why, session: process.env.FF_SESSION_ID ?? null }) + '\n');
+    } catch (e) {
+      out(`        (its log line could not be written to ${log}: ${(e as Error).message})\n`);
+    }
+  }
+  return refused ? 1 : 0;
+}
+
+export async function foldersMain(cmd: 'folders' | 'check' | 'remove-slot' | 'remove', args: string[], e: NodeJS.ProcessEnv = process.env, now = Date.now(), out: (s: string) => void = (s) => void process.stdout.write(s), slots: () => Promise<SlotContext> = slotContext): Promise<number> {
   const facts = readCleanupFacts(e.FF_CLEANUP_FACTS);
   // What this machine's workers published, beside the facts in the daemon's folder (w2223): a finished worker's evidence published there may go.
   const published = readPublished(e.FF_CLEANUP_FACTS ? publishedFile(path.dirname(e.FF_CLEANUP_FACTS)) : undefined);
   if (cmd === 'remove-slot') return removeSlots(args, facts, now, out, slots);
+  if (cmd === 'remove') {
+    const daemonDir = e.FF_CLEANUP_FACTS ? path.dirname(e.FF_CLEANUP_FACTS) : undefined;
+    return removeFolders(args, facts, now, out, slots, published, { daemonDir, ...(e.USERPROFILE ? { home: e.USERPROFILE } : {}), ...(e.FF_LEFTOVERS_REMOVE_LOG ? { log: e.FF_LEFTOVERS_REMOVE_LOG } : {}) });
+  }
   if (cmd === 'check') {
     if (!args.length) {
       out('usage: ff-leftovers check <path>...\n');
@@ -1241,12 +1368,12 @@ export async function foldersMain(cmd: 'folders' | 'check' | 'remove-slot', args
 /** `ff-leftovers [list|end]`: what this worker's session started that still runs, and ending it. */
 export async function leftoversMain(argv: string[], e: NodeJS.ProcessEnv = process.env): Promise<number> {
   const cmd = argv[0] ?? 'list';
-  if (cmd === 'folders' || cmd === 'check' || cmd === 'remove-slot') return foldersMain(cmd, argv.slice(1), e);
+  if (cmd === 'folders' || cmd === 'check' || cmd === 'remove-slot' || cmd === 'remove') return foldersMain(cmd, argv.slice(1), e);
   const session = e.FF_SESSION_ID;
   const platform: UnityPlatform = process.platform === 'win32' ? 'win32' : process.platform === 'linux' ? 'linux' : 'darwin';
   if (session && cmd === 'launch' && argv.length > 1) return (await launchForPerson(argv.slice(1), session, e, platform)).code;
   if (!session || !['list', 'end'].includes(cmd)) {
-    process.stdout.write(`usage: ff-leftovers [list|end|launch <program> [args]...|folders|check <path>...|remove-slot <slot>...]\n  list: what this worker's session (FF_SESSION_ID) started that still runs: players, Xvfb, builds, servers, background jobs\n  end: end them (SIGTERM, then SIGKILL after 5 s), before DONE or a stop\n  launch <program> [args]...: start a program a person goes on using (a launcher, an installer's window, a desktop app) so that neither \`end\` nor FF Factory's sweep ever ends it or what it starts (w4047): without your session's FF_* variables and credentials, marked FF_FOR_PERSON, detached, from your home folder. A Mac: \`ff-leftovers launch open -a "<app>"\`; Windows: a Windows path to an .exe, or \`cmd /c start "" "<file>"\`. Never for a game player or a run of your own\n  folders: a clean-up's candidates under the install folder, each KEEP or DELETE by the ledger (a request not closed keeps its worker's folders)\n  check <path>...: the same verdict for paths you mean to delete; exit 1 if any is to be kept. Only paths in the install folder: on Windows never one on C: or another drive, apart from the game's AppData Never Games folders, which are always KEEP (w1755)\n  remove-slot <slot>...: empty idle player slots (<install>/players/slot<K>-<P>); refused while a lease lives, a fill runs or a process plays from it (w3204)\n${session ? '' : 'FF_SESSION_ID is not set: run it from a worker of FF Factory.\n'}`);
+    process.stdout.write(`usage: ff-leftovers [list|end|launch <program> [args]...|folders|check <path>...|remove <path>...|remove-slot <slot>...]\n  list: what this worker's session (FF_SESSION_ID) started that still runs: players, Xvfb, builds, servers, background jobs\n  end: end them (SIGTERM, then SIGKILL after 5 s), before DONE or a stop\n  launch <program> [args]...: start a program a person goes on using (a launcher, an installer's window, a desktop app) so that neither \`end\` nor FF Factory's sweep ever ends it or what it starts (w4047): without your session's FF_* variables and credentials, marked FF_FOR_PERSON, detached, from your home folder. A Mac: \`ff-leftovers launch open -a "<app>"\`; Windows: a Windows path to an .exe, or \`cmd /c start "" "<file>"\`. Never for a game player or a run of your own\n  folders: a clean-up's candidates under the install folder, each KEEP or DELETE by the ledger (a request not closed keeps its worker's folders)\n  check <path>...: the same verdict for paths you mean to delete; exit 1 if any is to be kept. Only paths in the install folder: on Windows never one on C: or another drive, apart from the game's AppData Never Games folders, which are always KEEP (w1755)\n  remove <path>...: delete what check judges DELETE, only inside the install folder: judged again just before the delete; refuses a link, the main clone and a running or resumable worker's folder; logs each removal and its size (w4394)\n  remove-slot <slot>...: empty idle player slots (<install>/players/slot<K>-<P>); refused while a lease lives, a fill runs or a process plays from it (w3204)\n${session ? '' : 'FF_SESSION_ID is not set: run it from a worker of FF Factory.\n'}`);
     return session ? 2 : 1;
   }
   const { realDeps } = await import('./unity.ts');

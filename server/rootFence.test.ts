@@ -196,3 +196,14 @@ test('the sandbox guard applies it when the spec carries a worker root, and not 
   assert.equal((await run(tagged, save('ffa-deadbeef-w1487-life.zip')))?.permissionDecision, 'deny');
   assert.equal((await run(withRoot, save('ffa-c1687d63-w1487-life.zip')))?.permissionDecision, 'deny');
 });
+
+test('w4394: ff-leftovers remove is a delete the fence reads: inside the install folder it passes, outside it is refused', () => {
+  fine('ff-leftovers remove D:/work/ffw/tmp/ffa-0fed07fc D:/work/ffw/tmp/ffa-5a411a7b');
+  fine('ff-leftovers remove /Users/Shared/ffw/tmp/ffa-0fed07fc', MAC);
+  no('ff-leftovers remove C:/Users/loth/AppData/Local/Temp');
+  no('ff-leftovers remove /Users/loth/Library/Caches', MAC);
+  no('ff-leftovers remove /Users/Shared/ffw/tmp/ffa-0fed07fc /Users/loth/Documents', MAC);
+  // The other subcommands name no path to delete.
+  fine('ff-leftovers check /Users/loth/Documents', MAC);
+  fine('ff-leftovers remove-slot slot3-0');
+});

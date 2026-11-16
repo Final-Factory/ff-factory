@@ -322,6 +322,9 @@ export function checkOutsideRootDelete(cmd: string, ctx: RootFenceContext): stri
           const starts = args.slice(0, expr < 0 ? args.length : expr).map(unquote);
           if (isDelete) targets = starts;
           prevPaths = starts;
+        } else if (verb === 'ff-leftovers' && unquote(args[0] ?? '').toLowerCase() === 'remove') {
+          // w4394: the supported delete judges the ledger itself, and still never takes a path outside the install folder.
+          targets = pathsOf('rm', args.slice(1));
         } else if (verb === 'xargs' && DELETE_VERBS.has(verbOf(args.find((a) => !unquote(a).startsWith('-')) ?? ''))) {
           targets = prevPaths;
         } else if (si > 0 && /(?:^|[\s{;(])(?:remove-item|rm|del|erase|ri)(?=[\s}]|$)/i.test(stage) && !LISTERS.has(verb)) {
@@ -524,8 +527,8 @@ export function checkOffDriveScan(cmd: string, ctx: RootFenceContext): string | 
           if (r) return r;
           continue;
         }
-        // ff-leftovers list, end and folders read the daemon's own facts; only `check <path>` names a path.
-        if (verb === 'ff-leftovers' && unquote(args[0] ?? '').toLowerCase() !== 'check') continue;
+        // ff-leftovers list, end and folders read the daemon's own facts; only `check <path>` and `remove <path>` (w4394) name a path.
+        if (verb === 'ff-leftovers' && !['check', 'remove'].includes(unquote(args[0] ?? '').toLowerCase())) continue;
         const scans =
           ALWAYS_SCAN.has(verb) ||
           (RECURSIVE_LISTERS.has(verb) && args.some((a) => isRecursiveFlag(unquote(a)))) ||

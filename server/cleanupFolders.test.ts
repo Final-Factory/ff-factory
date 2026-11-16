@@ -745,3 +745,103 @@ test('w3707: ff-leftovers check frees a closed worker folder whose .git has no H
   assert.equal(await foldersMain('check', [closed], env, Date.now(), (s) => void out.push(s)), 1);
   assert.match(out.join(''), /ff: 1 commit on no remote/);
 });
+
+/**
+ * w4394: `ff-leftovers remove <path>` deletes only what `check` judges DELETE, inside the install folder. On the m3,
+ * 2026-11-16, w4391's clean-up found tmp/ffa-0fed07fc (18 GB) and tmp/ffa-5a411a7b both DELETE and could remove neither:
+ * there was only remove-slot, and the harness rightly denies a raw `rm -rf`. Fixtures only: no real folder or process.
+ */
+function removeWorld(t: { after: (fn: () => void) => void }) {
+  const w = world(t);
+  const daemon = path.join(w.root, 'daemon');
+  fs.mkdirSync(daemon);
+  const file = path.join(daemon, 'cleanup-facts.json');
+  fs.writeFileSync(file, JSON.stringify(w.facts));
+  const log = path.join(w.root, 'logs', 'removed.jsonl');
+  const env = { FF_CLEANUP_FACTS: file, FF_LEFTOVERS_REMOVE_LOG: log } as NodeJS.ProcessEnv;
+  const out: string[] = [];
+  const idle = async () => ({ host: 'lothdesktop', alive: () => false, procs: [] as string[] });
+  const remove = (...paths: string[]) => foldersMain('remove', paths, env, Date.now(), (s) => void out.push(s), idle);
+  return { ...w, daemon, log, out, remove };
+}
+
+test('w4394: remove deletes a DELETE folder, measures it and logs it', async (t) => {
+  const { tempRoot, log, out, remove } = removeWorld(t);
+  const closed = path.join(tempRoot, 'ffa-b0b0b0b0');
+  assert.equal(await remove(closed), 0, out.join(''));
+  assert.equal(fs.existsSync(closed), false);
+  assert.match(out.join(''), /^REMOVED .*ffa-b0b0b0b0\n\s+0 MB; .*requests are closed/m);
+  const line = JSON.parse(fs.readFileSync(log, 'utf8').trim());
+  assert.equal(norm(line.path), norm(closed));
+  assert.equal(line.bytes, 100);
+});
+
+test('w4394: remove refuses a KEEP folder: a stopped worker on an open request, and a running one', async (t) => {
+  const { tempRoot, log, out, remove } = removeWorld(t);
+  const stalled = path.join(tempRoot, 'ffa-a735f37c');
+  const live = path.join(tempRoot, 'ffa-d2d2d2d2');
+  assert.equal(await remove(stalled, live), 1);
+  assert.match(out.join(''), /KEEP .*ffa-a735f37c\n\s+not removed: .*w1332 \(stalled\)/);
+  assert.match(out.join(''), /KEEP .*ffa-d2d2d2d2\n\s+not removed:/);
+  assert.ok(fs.existsSync(path.join(stalled, 'builds', 'player.bin')));
+  assert.ok(fs.existsSync(path.join(live, 'builds', 'player.bin')));
+  assert.equal(fs.existsSync(log), false, 'nothing removed, nothing logged');
+});
+
+test('w4394: remove refuses outside the install folder, the folder itself, its top folders, the main clone, the daemon and a slot', async (t) => {
+  const { root, tempRoot, daemon, out, remove } = removeWorld(t);
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'ffw-w4394-outside-'));
+  t.after(() => fs.rmSync(outside, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(outside, 'keep.txt'), 'x');
+  // A folder of the main clone named for a closed request: `check` judges such names by the ledger, remove never takes the clone.
+  const clone = path.join(root, 'repo', 'specs', 'w900-old');
+  fs.mkdirSync(clone, { recursive: true });
+  const slot = path.join(root, 'players', 'slot2-0');
+  fs.mkdirSync(slot, { recursive: true });
+  assert.equal(await remove(outside, root, tempRoot, clone, daemon, slot), 1);
+  const text = out.join('');
+  assert.equal(text.match(/^KEEP /gm)?.length, 6, text);
+  assert.doesNotMatch(text, /REMOVED/);
+  assert.match(text, /outside the worker install folder/);
+  assert.match(text, /a top folder of the install folder \(tmp\)/);
+  assert.match(text, /main clone/);
+  assert.match(text, /daemon's folder/);
+  assert.match(text, /remove-slot/);
+  for (const p of [outside, clone, daemon, slot, tempRoot]) assert.ok(fs.existsSync(p), p);
+  assert.ok(fs.existsSync(path.join(outside, 'keep.txt')));
+});
+
+test('w4394: remove refuses a link and a path through a link that escapes, and a delete never follows a link inside', async (t) => {
+  const { tempRoot, out, remove } = removeWorld(t);
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'ffw-w4394-escape-'));
+  t.after(() => fs.rmSync(outside, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(outside, 'inner'));
+  fs.writeFileSync(path.join(outside, 'inner', 'precious.txt'), 'x');
+  const orphan = path.join(tempRoot, 'ffa-c1c1c1c1');
+  const link = path.join(orphan, 'escape');
+  fs.symlinkSync(outside, link, process.platform === 'win32' ? 'junction' : 'dir');
+  assert.equal(await remove(link, path.join(link, 'inner')), 1);
+  assert.match(out.join(''), /KEEP .*escape\n\s+not removed: a symbolic link or junction/);
+  assert.match(out.join(''), /KEEP .*inner\n\s+not removed: a path through a link to .*outside the worker install folder/);
+  assert.ok(fs.existsSync(path.join(outside, 'inner', 'precious.txt')));
+  // The orphan's folder is DELETE: removing it unlinks the link and leaves its target whole.
+  out.length = 0;
+  assert.equal(await remove(orphan), 0, out.join(''));
+  assert.equal(fs.existsSync(orphan), false);
+  assert.ok(fs.existsSync(path.join(outside, 'inner', 'precious.txt')), 'the target outside survives');
+});
+
+test('w4394: on a Windows install, remove refuses a C: path without looking at it', async () => {
+  const facts = { at: new Date().toISOString(), connected: true, root: 'V:/ffw', tempRoot: 'V:/ffw/tmp', sandboxes: [], live: [], resumable: [], owners: {}, open: [], closed: [], contextAt: new Date().toISOString() } as CleanupFacts;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffw-w4394-win-'));
+  try {
+    const file = path.join(dir, 'cleanup-facts.json');
+    fs.writeFileSync(file, JSON.stringify(facts));
+    const out: string[] = [];
+    const idle = async () => ({ host: 'lothdesktop', alive: () => false, procs: [] as string[] });
+    assert.equal(await foldersMain('remove', ['C:/Users/someone/AppData/Local/Temp/x'], { FF_CLEANUP_FACTS: file } as NodeJS.ProcessEnv, Date.now(), (s) => void out.push(s), idle), 1);
+    assert.match(out.join(''), /install drive V:.*w1755/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

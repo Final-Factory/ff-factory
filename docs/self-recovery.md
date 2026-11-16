@@ -805,6 +805,16 @@ every worker's PATH read it (`machine/leftovers.ts`, beside `ff-leftovers list/e
 - `ff-leftovers remove-slot <slot>...`: empties idle player slots (`<install>/players/slot<K>-<P>`) as `player_slots.py prune`
   does: refused while a lease lives, a fill runs or a process plays from the slot; the folder and `leases/` stay (w3204). It takes
   the slot's name as `check` prints it (`slot3-0`), `players/slot3-0`, or a full path with either slash (w3217).
+- `ff-leftovers remove <path>...` (w4394): deletes what `check` judges DELETE, the supported delete for every other row. It
+  refuses, whatever the verdict, a path off the install drive (C: on Windows) or in the game's AppData folders, outside the
+  install folder, the folder itself or a top folder of it, the main clone (`repo`), `seed`, `secrets`, the daemon's folder, a
+  symbolic link or junction or a path through one (the real place must be the name judged), a player slot (`remove-slot`) and
+  the folder it runs in. It judges again just before the delete, never follows a link inside the folder it deletes, prints
+  `REMOVED <path>` with its size and appends a line to `<install>/logs/ff-leftovers-removed.jsonl`; exit 1 if any path was
+  kept. Before it a clean-up had no allowed route: on the m3, 2026-11-16, w4391's worker found `tmp/ffa-0fed07fc` (18 GB)
+  and `tmp/ffa-5a411a7b` both DELETE, and the harness denied its `rm -rf` of each, as it still does (a raw rm judges no
+  ledger). The worker guard reads it as a delete (`server/rootFence.ts`): a path outside the install folder, or on C:, is
+  refused before it runs. Tests: `server/cleanupFolders.test.ts`, `server/rootFence.test.ts`, `server/installDrive.test.ts`.
 - A session's `tmp/ffa-<session>` is KEEP whatever the facts say while it is the asking worker's own (`FF_SESSION_ID`), its agent
   host process runs (`agentHost.ts .../hosts/<session>` on a command line), or it was made or written after the facts: w3213's
   clean-up deleted its own folder on facts written before its session started (w3217). The daemon's facts count every session
@@ -832,8 +842,8 @@ own verdict beside it. A stash counts in the sweeps too since w1387; a linked wo
 keep the main clone only. Tests: `server/cleanupFolders.test.ts` (w1387).
 
 **The rule for people writing briefs**: a clean-up brief never carries a list of live or "will resume" workers; it says to run
-`ff-leftovers folders` and delete only the DELETE rows (`server/agents.ts`: `DISK_HYGIENE`, the dispatcher's and the orchestrators'
-low-disk rules). The ff-agents lesson `clean-up-after-yourself` and the delete checklist say the same.
+`ff-leftovers folders` and delete only the DELETE rows, each with `ff-leftovers remove <path>` (w4394) or, for a player slot,
+`ff-leftovers remove-slot <slot>` (`server/agents.ts`: `DISK_HYGIENE`, the dispatcher's and the orchestrators' low-disk rules). The ff-agents lesson `clean-up-after-yourself` and the delete checklist say the same.
 
 **The daemon's own sweeps wait for the welcome too.** `resumable` is empty until the portal's welcome has come since the daemon
 started, so a stopped worker a request waits for looked finished: a daemon restarted while the portal was down could sweep its
