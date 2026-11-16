@@ -3,7 +3,7 @@
 // server/ledgerRules.ts handUpProblem).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { handUpsPending, unfiledFollowUpsIn } from '../shared/workState.ts';
+import { handUpLive, handUpsPending, unfiledFollowUpsIn } from '../shared/workState.ts';
 import { doneProblem, handUpProblem } from './ledgerRules.ts';
 import { handUpText } from './orchestrators.ts';
 import type { WorkHandedUp } from '../shared/types.ts';
@@ -88,4 +88,19 @@ test('w2969: the [follow-ups to file] message carries the line, the report and t
   assert.match(text, /Ben's newest note on w2194 \(2026-10-28 09:50 UTC\): "Build it in the five stages as designed/);
   assert.match(text, /request_work, related_ids \["w2194"\]/);
   assert.match(text, /If they are not wanted, close w2194 with update_work/);
+});
+
+test('w4352: an unfiled hand-up is its orchestrator’s backlog until FF Factory files it, and nothing is pending once it has', () => {
+  const h: WorkHandedUp = { worker: 'c68864ef', at: '2026-11-15T00:00:00.000Z', count: 2, items: [], to: ['ben'], filed: [] };
+  const ben = { userId: 'ben', displayName: 'Ben' };
+  const w = { handedUp: h, requestedBy: ben, requesters: [ben] };
+  const live = handUpLive(w as never, Date.parse('2026-11-15T03:00:00.000Z'))!;
+  assert.equal(live.state, 'waiting');
+  assert.deepEqual(live.waitsOn, ["Ben's orchestrator"]);
+  assert.equal(live.backlog, true);
+  assert.equal(live.orchestrator, true);
+  assert.match(live.why, /FF Factory files them itself at low priority at 12:00 UTC/);
+  h.autoFiled = { at: '2026-11-15T12:00:00.000Z', filed: ['w9'], dropped: [{ title: 'x', by: 'w3', why: 'similar' }] };
+  assert.equal(handUpsPending(w), 0);
+  assert.equal(handUpLive(w as never, Date.parse('2026-11-15T13:00:00.000Z')), undefined);
 });

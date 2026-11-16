@@ -30,7 +30,9 @@ export function WaitingTab({ app, items, asks = [], now }: { app: AppState; item
   // w4238: another owner's waiting questions an owner may answer for them, by the owner(s) they wait on ("Waiting on Ben").
   const forOwner = (i: WaitingItem) => (i.mine ? undefined : ownerAnswersFor(i.w, i.live, app.me, app.owners));
   const owned = items.filter((i) => !!forOwner(i));
-  const others = items.filter((i) => !i.mine && !forOwner(i));
+  // w4352: handed-up follow-ups an orchestrator has yet to file are its backlog, not a wait on a person.
+  const backlog = items.filter((i) => !i.mine && !forOwner(i) && !!i.live.backlog);
+  const others = items.filter((i) => !i.mine && !forOwner(i) && !i.live.backlog);
   const ownerGroups = [...new Set(owned.map((i) => forOwner(i)!.join(' and ')))].map((who) => ({ who, items: owned.filter((i) => forOwner(i)!.join(' and ') === who) }));
   // w2856: the questions that hold up a worker first (one answer and it goes on), then the rest, oldest first within each.
   // The viewer's own orchestrator's open questions (w1868) sit among their own requests' cards.
@@ -41,6 +43,7 @@ export function WaitingTab({ app, items, asks = [], now }: { app: AppState; item
   ]);
   const ownerCards = ownerGroups.map((g) => ({ who: g.who, cards: waitOrder(g.items.map((i) => ({ at: i.since, holds: holds(i.w), key: `o:${i.w.id}`, el: <WaitCard key={`o:${i.w.id}`} app={app} item={i} now={now} holds={holds(i.w)} forOwner={forOwner(i)} /> }))) }));
   const otherCards = waitOrder(others.map((i) => ({ at: i.since, holds: holds(i.w), key: i.w.id, el: <WaitCard key={i.w.id} app={app} item={i} now={now} holds={holds(i.w)} /> })));
+  const backlogCards = waitOrder(backlog.map((i) => ({ at: i.since, holds: false, key: `b:${i.w.id}`, el: <WaitCard key={`b:${i.w.id}`} app={app} item={i} now={now} holds={false} /> })));
   const holding = ownCards.filter((c) => c.holds).length;
   const onYou = mine.length + asks.length;
   // A "Needs you" item names the request it is about (w1356): put its card at the top, with its buttons in view, and flash it.
@@ -60,7 +63,7 @@ export function WaitingTab({ app, items, asks = [], now }: { app: AppState; item
     <div className="sa-scroll waiting-tab" data-testid="waiting-tab" ref={root}>
       <p className="dim small ledger-none" data-testid="waiting-summary">
         {items.length || asks.length
-          ? `${items.length} ${items.length === 1 ? 'request waits' : 'requests wait'} on input: ${mine.length} on you, ${owned.length ? `${owned.length} on another owner that you may answer, ` : ''}${others.length} on someone else.${asks.length ? ` Your orchestrator asks you ${asks.length} more question${asks.length > 1 ? 's' : ''}.` : ''} ${holding ? `First the ${holding === 1 ? 'one' : holding} that ${holding === 1 ? 'holds' : 'hold'} up a worker, then the rest; oldest first.` : 'The oldest waits first.'}`
+          ? `${items.length} ${items.length === 1 ? 'request waits' : 'requests wait'} on input: ${mine.length} on you, ${owned.length ? `${owned.length} on another owner that you may answer, ` : ''}${others.length} on someone else${backlog.length ? `, ${backlog.length} in an orchestrator's backlog` : ''}.${asks.length ? ` Your orchestrator asks you ${asks.length} more question${asks.length > 1 ? 's' : ''}.` : ''} ${holding ? `First the ${holding === 1 ? 'one' : holding} that ${holding === 1 ? 'holds' : 'hold'} up a worker, then the rest; oldest first.` : 'The oldest waits first.'}`
           : 'Nothing waits on input.'}
       </p>
       <h3 className="intake-h">Waiting on you · {onYou}</h3>
@@ -85,6 +88,15 @@ export function WaitingTab({ app, items, asks = [], now }: { app: AppState; item
           <h3 className="intake-h">Waiting on someone else · {others.length}</h3>
           <div className="wait-list" data-testid="waiting-others">
             {otherCards.map((c) => c.el)}
+          </div>
+        </>
+      )}
+      {backlog.length > 0 && (
+        <>
+          <h3 className="intake-h">Orchestrators' backlog · {backlog.length}</h3>
+          <p className="dim small ledger-none">Follow-up requests a worker handed up for its requester's orchestrator to file. Nobody needs to answer them: FF Factory files any still unfiled 12 h after the hand-up at low priority, drops those that other work covers, and closes the request.</p>
+          <div className="wait-list" data-testid="waiting-backlog">
+            {backlogCards.map((c) => c.el)}
           </div>
         </>
       )}

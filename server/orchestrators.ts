@@ -53,7 +53,7 @@ import { autoApproveProblem, cleanBlock, cleanLine, crashFacts, crashKinship, cr
 import { readDiscordConfig } from './discordConfig.ts';
 import { LIMIT_END, doneIdsIn, doneProblem, legDoneIdsIn, learnedProblem, supersededIn, reportProblem, mergedMentionsIn, notDoneReason, pausedIn, reportVerdict, stillOpenIn, toolErrors, turnEvidence, turnTroubleOf, type TurnTrouble } from './ledgerRules.ts';
 import { findingTargets, recordFinding } from './findings.ts';
-import { aheadText, answerAfter, asksAPerson, dispatcherAskIn, handUpsPending, holdsOf, orchestratorAskIn, standingTargetOf, personWaitIn, questionShareKey, reportWaitKey, roomShares, servedBy, UNDECIDED_BOUND_MS, unfiledFollowUpsIn } from '../shared/workState.ts';
+import { aheadText, answerAfter, asksAPerson, dispatcherAskIn, HAND_UP_AUTOFILE_MS, HAND_UP_RESEND_MS, handUpsPending, holdsOf, orchestratorAskIn, standingTargetOf, personWaitIn, questionShareKey, reportWaitKey, roomShares, servedBy, UNDECIDED_BOUND_MS, unfiledFollowUpsIn } from '../shared/workState.ts';
 import { capacityBlockProblem, capacityWaitIn, macRefusedScenario, MAC_REFUSES_SCENARIO, needsOf, needsTimed, pairRoom, pairText, PAIR_MAX_LEGS, resolveNeeds, steamShortIn } from '../shared/capacity.ts';
 import { mentionsSteam, saysNoSteam, STEAM_NONE, STEAM_READ } from '../shared/steam.ts';
 import { mentionsMenus, MENUS_NONE, MENUS_READ, saysNone } from '../shared/desktop.ts';
@@ -1561,19 +1561,123 @@ It is for your part of the work, not an answer to another worker's question.`;
   }
 
   /**
-   * w2969: the ledger cleanup, instead of asking "is it done?" of a request whose follow-ups are not filed: tells its
-   * person's orchestrator again, once, 6 h after the hand-up. Returns whether it sent.
+   * w4352: the ledger cleanup's step for a request whose handed-up follow-ups are not filed (w2969). About 20 requests, most
+   * of them Ben's, sat 5 h to 8 days with their PRs merged, waiting on an orchestrator that had been told once and reminded
+   * once at 6 h; a stalled request was never reminded at all. Now its requester's orchestrator is sent them again 2 h after
+   * the hand-up (once), and 12 h after it FF Factory files them itself (autoFileHandUps) and closes the request on its kept DONE.
    */
-  handUpReminder(w: WorkItem): boolean {
+  handUpStep(w: WorkItem): 'resent' | 'filed' | undefined {
     const h = w.handedUp;
-    if (!h || !handUpsPending(w) || h.remindedAt || this.now().getTime() - (Date.parse(h.at) || 0) < 6 * 3_600_000) return false;
+    if (!h || !handUpsPending(w)) return undefined;
+    const age = this.now().getTime() - (Date.parse(h.at) || 0);
+    if (age >= HAND_UP_AUTOFILE_MS) {
+      this.autoFileHandUps(w);
+      return 'filed';
+    }
+    if (age < HAND_UP_RESEND_MS || h.remindedAt) return undefined;
     const to = [w.requestedBy, ...w.requesters].filter((r) => h.to.includes(r.userId)).slice(0, 1);
     h.remindedAt = this.now().toISOString();
-    this.stamp(w, `${HAND_UP_TAG} reminded ${to[0]?.displayName ?? 'nobody'}'s orchestrator: ${handUpsPending(w)} still not filed (w2969)`);
+    const hours = Math.round(age / 3_600_000);
+    this.stamp(w, `${HAND_UP_TAG} sent again to ${to[0]?.displayName ?? 'nobody'}'s orchestrator: ${handUpsPending(w)} still not filed ${hours} h after the hand-up; FF Factory files them itself at 12 h (w4352)`);
     this.store.putWork(w);
-    if (!to.length) return false;
-    this.toPeople(to, `${handUpText(w, h.worker, to[0].displayName, { count: h.count, items: h.items, line: h.line }, '')}\n\nReminder: ${handUpsPending(w)} of them are still not filed, 6 h after the hand-up.`);
-    return true;
+    if (!to.length) return undefined;
+    this.toPeople(
+      to,
+      `${handUpText(w, h.worker, to[0].displayName, { count: h.count, items: h.items, line: h.line }, '')}\n\n` +
+        `Sent again: ${handUpsPending(w)} of them are still not filed, ${hours} h after the hand-up. File or drop them now. ` +
+        `Left unfiled 12 h after the hand-up, FF Factory files them itself as ${to[0].displayName}'s low-priority requests, drops any that open or recently done work already covers, and closes ${w.id} (w4352).`,
+    );
+    return 'resent';
+  }
+
+  /**
+   * w4352: files the handed-up follow-ups a requester's orchestrator left unfiled 12 h: each as that person's request at low
+   * priority, related to the source request, unless open or recently done work covers it. The duplicate check is the FFBox
+   * dev request's (rankBoard over its title, and over its title with its brief, within intake.lookbackDays: a high-band open,
+   * stalled or done request covers it); the source request itself never counts. A covered one is dropped, with a note on
+   * both requests naming what covers it. Then the source request closes on its kept DONE (recheckDone); with no DONE kept,
+   * the ledger cleanup goes on with it as with any merged request.
+   */
+  private autoFileHandUps(w: WorkItem) {
+    const h = w.handedUp!;
+    const owner = [w.requestedBy, ...w.requesters].find((r) => h.to.includes(r.userId)) ?? w.requestedBy;
+    const hours = Math.round((this.now().getTime() - (Date.parse(h.at) || 0)) / 3_600_000);
+    // A hand-up read from a report has no briefs, only its line: one request that points at the report.
+    const items = h.items.length
+      ? h.items
+      : [
+          {
+            title: `Follow-ups of ${w.id}: ${clip(w.title, 90)}`,
+            brief: `Worker ${h.worker} on ${w.id} "${clip(w.title, 100)}" wrote ${h.count} follow-up request${h.count === 1 ? '' : 's'} it could not file, in its report: "${clip(h.line ?? '', 600)}". Read ${w.id}'s findings (read_work) for the briefs, and do each.`,
+          },
+        ];
+    const lookback = this.d.cfg.intake?.lookbackDays ?? 14;
+    const filed: string[] = [];
+    const dropped: { title: string; by: string; why: string }[] = [];
+    for (const i of items) {
+      const title = clip(i.title.replace(/\s+/g, ' ').trim(), 120);
+      const ranked = [...this.rankBoard({ keys: [], title }, lookback, DEFAULT_THRESHOLDS), ...this.rankBoard({ keys: [], title, summary: clip(i.brief, 1500) }, lookback, DEFAULT_THRESHOLDS)];
+      const cover = ranked
+        .filter((x) => x.band === 'high' && x.w.id !== w.id && (isOpen(x.w) || x.w.status === 'stalled' || x.w.status === 'done'))
+        .sort((a, b) => b.score - a.score || a.w.id.localeCompare(b.w.id))[0];
+      if (cover) {
+        dropped.push({ title, by: cover.w.id, why: cover.why });
+        this.stamp(cover.w, `covers follow-up "${clip(title, 80)}" handed up on ${w.id}, so FF Factory did not file it again (${cover.why}; w4352)`);
+        this.store.putWork(cover.w);
+        continue;
+      }
+      const now = this.now().toISOString();
+      const brief = clip(
+        `${i.brief}\n\nHanded up by worker ${h.worker} on ${w.id} "${clip(w.title, 100)}" (w2969) and filed by FF Factory at low priority: ${owner.displayName}'s orchestrator had not filed it ${hours} h after the hand-up (w4352). The brief is the worker's words. Raise its priority, or close it if it is not wanted.`,
+        8000,
+      );
+      const placed = resolveNeeds({ ...(w.repo ? { repo: w.repo } : {}), title, brief }, repoSlug(this.d.cfg.repo.url));
+      const f: WorkItem = {
+        id: `w${++this.store.workSeq}`,
+        title,
+        brief,
+        priority: 'low',
+        relatedIds: [w.id],
+        keys: textKeys(title, this.knownBranches()),
+        requestedBy: owner,
+        requesters: [owner],
+        humanAsked: false,
+        status: 'new',
+        createdAt: now,
+        updatedAt: now,
+        sessionIds: [],
+        needs: placed.needs,
+        ...(w.repo ? { repo: w.repo } : {}),
+        overlaps: [],
+        asks: 0,
+        log: [],
+      };
+      f.overlaps = findOverlaps({ keys: f.keys, title: f.title }, this.pool(f.id)).filter((o) => o.ref !== w.id);
+      this.stamp(f, `filed by FF Factory for ${owner.displayName} at low priority: a follow-up worker ${h.worker} handed up on ${w.id}, unfiled ${hours} h (w4352); needs ${placed.needs === 'agent' ? 'an agent slot only' : 'a game sandbox'} (${placed.how})`);
+      this.store.putWork(f);
+      this.gatherForDispatcher(owner, requestNotice(f));
+      filed.push(f.id);
+    }
+    this.store.dropWork(pruneIds(this.store.work.values(), undefined, this.now().getTime()));
+    h.filed.push(...filed);
+    h.autoFiled = { at: this.now().toISOString(), filed, dropped };
+    const what = [
+      filed.length ? `filed ${filed.join(', ')} at low priority` : '',
+      dropped.length ? `dropped ${dropped.map((d) => `"${clip(d.title, 60)}" (covered by ${d.by}: ${d.why})`).join('; ')}` : '',
+    ]
+      .filter(Boolean)
+      .join('; ');
+    this.stamp(w, `${HAND_UP_TAG} not filed by ${owner.displayName}'s orchestrator ${hours} h after the hand-up: FF Factory ${what} (w4352)`);
+    this.store.putWork(w);
+    console.log(`ledger: ${HAND_UP_TAG} ${w.id}: auto-filed ${filed.join(', ') || 'none'}, dropped ${dropped.length} (w4352)`);
+    if (h.to.length) {
+      this.toPeople(
+        [owner],
+        `[follow-ups filed] ${w.id} "${clip(w.title, 120)}": the follow-ups its worker ${h.worker} handed up were not filed ${hours} h after the hand-up, so FF Factory ${what}. ` +
+          `Nothing to do unless ${owner.displayName} wants them otherwise: raise one's priority or close it with update_work. Don't file them again (w4352).`,
+      );
+    }
+    this.recheckDone(w.id, 'FF Factory filed its handed-up follow-ups itself (w4352)');
   }
 
   /** w2969: a request filed with related_ids naming one that handed up follow-ups counts as one of them. */
