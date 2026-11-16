@@ -1111,6 +1111,8 @@ export class Agents {
         requesterOf: (at) => this.ops.deployRequester(at),
         // w1861: a machine's update and tools publish wait while a timed run holds its bench queue (machine/benchState.ts).
         timedRun: (id) => timedRunText(machines.statsOf(id)?.bench, Date.parse(machines.statsOf(id)?.at ?? '')),
+        // w4421: an update its full disk refused is sent again once the disk is back over its warning line.
+        diskRoom: (id) => machines.diskRoom(id),
       },
     });
     this.standing = new StandingAgents({

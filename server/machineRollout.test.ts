@@ -23,6 +23,8 @@ interface FakeMachine extends RolloutMachine {
   agents: { id: string; title: string }[];
   /** w1861: the timed run its daemon says holds its bench queue now, if any. */
   timed?: string;
+  /** w4421: its disk as the portal last read it (machines.diskRoom). */
+  disk?: { freeBytes: number; warnGB: number };
   /** What a run of the installer does: its exit code and output, and what the machine looks like afterwards. */
   run: (remote: string) => { code: number; out?: string; after?: { online: boolean; daemon?: string }; adopt?: string[] };
   /** What a run of the installer's tools form does (w1476); default: published, ff-agents 1.29.19 -> 1.29.20. */
@@ -100,6 +102,7 @@ function world(machines: FakeMachine[], o: { requester?: Requester; enabled?: bo
     tell: (to, text) => told.push({ to, text }),
     requesterOf: () => o.requester,
     timedRun: (id) => find(id).timed,
+    diskRoom: (id) => find(id).disk,
   };
   const make = () =>
     new MachineRollout({ host, dataDir: dir, enabled: () => o.enabled !== false, tools: () => o.tools !== false, now: () => clock, sleep: async (ms) => void (clock += ms), limits: { settleMs: 10_000, graceMs: 10 * 60_000 } });
@@ -552,6 +555,67 @@ test("w1596: over the link, a new daemon that did not come back is put back by i
   assert.equal(w3.calls.length, 1, 'offline after the job went quiet: the installer put it back over ssh, where the portal can reach it');
   assert.match(w3.calls[0].remote, /--daemon-ref 1111111$/);
   assert.match(w3.told[0].text, /Rollback: ok\./);
+});
+
+test('w4421: an update a full disk refused is sent again by itself once the disk is back over its warning line, at most 3 times; another refusal never', async () => {
+  const GiB = 1024 ** 3;
+  // biscuit 2026-11-16 04:08:20Z: the daemon could not write the bundle (machine/selfUpdate.ts downloadBundle).
+  const full = "biscuit refused it: could not write /Users/Shared/ffw/daemon/update/bundle.part: ENOSPC: no space left on device, write";
+  let tries = 0;
+  const m = mac('biscuit', {
+    disk: { freeBytes: 3 * GiB, warnGB: 30 },
+    linkRun: () => (++tries <= 4 ? { throws: full } : { report: { ok: true }, after: { online: true, daemon: NEW.slice(0, 7) } }),
+  });
+  const w = world([m], { tools: false });
+  w.verify();
+  const r = w.make();
+  await r.tick();
+  assert.equal(w.linkCalls.length, 1);
+  assert.match(w.told[0].text, /- biscuit: FAILED: .*ENOSPC.*its disk was full: sent again by itself once the disk is back over its warning line/);
+
+  // Under the line (34 < 30 + 5 GB): not sent again, however many ticks.
+  m.disk = { freeBytes: 34 * GiB, warnGB: 30 };
+  for (let i = 0; i < 3; i++) await r.tick();
+  assert.equal(w.linkCalls.length, 1, 'the disk is still under its warning line + 5 GB');
+  // Offline with room: not sent either.
+  m.disk = { freeBytes: 40 * GiB, warnGB: 30 };
+  m.online = false;
+  await r.tick();
+  assert.equal(w.linkCalls.length, 1, 'offline');
+  m.online = true;
+
+  // Back over the line: sent again, once per refusal, up to the cap of 3 retries.
+  await r.tick();
+  assert.equal(w.linkCalls.length, 2);
+  assert.match(w.told.at(-1)!.text, /biscuit: FAILED: .*ENOSPC/);
+  await r.tick();
+  await r.tick();
+  assert.equal(w.linkCalls.length, 4, 'retries 2 and 3');
+  assert.doesNotMatch(w.told.at(-1)!.text, /sent again by itself/, 'the last try says no more retry is coming');
+  await r.tick();
+  await r.tick();
+  assert.equal(w.linkCalls.length, 4, 'no retry past the cap in one rollout');
+
+  // A fresh rollout whose retry succeeds comes back ok and is reported so.
+  tries = 3;
+  const w2 = world([mac('biscuit', { disk: { freeBytes: 3 * GiB, warnGB: 30 }, linkRun: m.linkRun })], { tools: false });
+  w2.verify();
+  const r2 = w2.make();
+  await r2.tick();
+  w2.find('biscuit').disk = { freeBytes: 60 * GiB, warnGB: 30 };
+  await r2.tick();
+  assert.equal(w2.linkCalls.length, 2);
+  assert.match(w2.told.at(-1)!.text, /biscuit: .*(ok|updated)/i);
+  assert.equal(w2.find('biscuit').daemon, NEW.slice(0, 7));
+
+  // A refusal that is not a full disk is never sent again, whatever the disk.
+  const other = mac('m3', { disk: { freeBytes: 500 * GiB, warnGB: 30 }, linkRun: () => ({ throws: 'm3 refused it: the bundle does not match what the portal said on the link' }) });
+  const w3 = world([other], { tools: false });
+  w3.verify();
+  const r3 = w3.make();
+  for (let i = 0; i < 4; i++) await r3.tick();
+  assert.equal(w3.linkCalls.length, 1);
+  assert.doesNotMatch(w3.told[0].text, /disk was full/);
 });
 
 test('w2005: a machine that went offline before its update reached it is not called failed, nothing is put back over ssh, and it is updated when it comes back', async () => {

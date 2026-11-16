@@ -787,7 +787,11 @@ job, no worker.
   (w1596) the machine's own update job does that put-back itself, and the report says "Rollback: ok" or that it needs a
   person; a job that never reports and leaves the machine offline is handled as a failed ssh run (put back over ssh where
   the portal reaches the machine). A link update the daemon refuses (a bundle that does not match, a job still running)
-  changed nothing and is reported FAILED with the daemon's reason. A link update that gets no answer from a machine that
+  changed nothing and is reported FAILED with the daemon's reason. One refused for a full disk (ENOSPC, "no space left on
+  device": w4421, biscuit refused 3acff0c at 04:08:20Z on 2026-11-16 when it could not write the bundle) is sent again by
+  itself once that machine is online with its disk back over the line the disk gate uses (its warning line + 5 GB,
+  `diskAboveLine` in `shared/blockers.ts`), at most 3 times per rollout (`ROLLOUT_LIMITS.diskFullRetries`), instead of
+  waiting for the next deploy; each try is reported, and the report says when no further one is coming. A link update that gets no answer from a machine that
   went offline **without fetching its bundle** (w2005: m3 went dark 17 s before its update was sent, on 2026-10-24) never
   reached it, since the daemon fetches the bundle before it changes anything: it stays pending ("offline before the update
   reached it"), nothing is put back over ssh, and it is updated after its next hello like any machine offline at the deploy.
