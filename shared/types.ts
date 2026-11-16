@@ -2604,8 +2604,14 @@ export interface WorkHandedUp {
   to: string[];
   /** The requests filed for it since (their ids). */
   filed: string[];
-  /** When the requester's orchestrator was reminded (once, Orchestrators.handUpReminder). */
+  /** When the requester's orchestrator was sent them again (once, 2 h after the hand-up: Orchestrators.handUpStep, w4352). */
   remindedAt?: string;
+  /**
+   * w4352: still unfiled 12 h after the hand-up, FF Factory filed them itself as the requester's low-priority requests
+   * (`filed`, also in `filed` above), each de-duplicated against open and recently done work like an FFBox dev request
+   * (`dropped`: what covers it). Nothing is pending after it (handUpsPending).
+   */
+  autoFiled?: { at: string; filed: string[]; dropped: { title: string; by: string; why: string }[] };
 }
 
 /** One pull request linked to a request: where it is, and what it did. */

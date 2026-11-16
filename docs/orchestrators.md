@@ -1091,10 +1091,25 @@ without one means it is off or failing, worth a person's look.
       dragon worker's sentence, and was read as a hand-up. Either way its requester's orchestrator is sent
       `[follow-ups to file]` once (`Orchestrators.handUpTo`) with the briefs or the report and its person's newest note,
       and the request records `WorkItem.handedUp`. Its DONE is kept but refused while any is unfiled
-      (`ledgerRules.ts` `handUpProblem`); the cleanup neither asks "is it done?" nor auto-closes it, and reminds the
-      orchestrator once after 6 h (`handUpReminder`). Each request filed with `related_ids` naming it counts as one
-      (`countFiledFollowUp`); the last one closes it on that DONE; not wanted, its person closes it by hand. Tests:
-      `w2969HandUp.test.ts`, and "w2969: the w2194 dragon case" in `orchestrators.test.ts`.
+      (`ledgerRules.ts` `handUpProblem`); the cleanup neither asks "is it done?" nor stalls it. Each request filed with
+      `related_ids` naming it counts as one (`countFiledFollowUp`); the last one closes it on that DONE; not wanted, its
+      person closes it by hand. Tests: `w2969HandUp.test.ts`, and "w2969: the w2194 dragon case" in `orchestrators.test.ts`.
+    - **Handed-up follow-ups never leave a merged request waiting for days** (w4352, lothsahn). On 2026-11-15 about 20
+      requests, most of them Ben's, sat 5 h to 8 days with their PRs merged, waiting on an orchestrator: the one reminder
+      came at 6 h, and a stalled request was never reminded at all (`followUpStep` skips it). Now the ledger cleanup's
+      `Orchestrators.handUpStep` (each full pass, open or stalled, with no busy worker on it) sends `[follow-ups to file]`
+      again once 2 h after the hand-up (`HAND_UP_RESEND_MS`), saying what happens at 12 h. At 12 h
+      (`HAND_UP_AUTOFILE_MS`) FF Factory files each still unfiled follow-up itself (`autoFileHandUps`): the requester's
+      request at priority low, `relatedIds` the source request, the worker's brief plus a line saying how it was filed. It
+      checks each against the board first, as an FFBox dev request is (`rankBoard` over the title, and over the title with
+      the brief, within `intake.lookbackDays`): a high-band open, stalled or recently done request covers it, so it is
+      dropped, with a note on both naming what covers it and why. A hand-up read from a report, with no briefs, becomes one
+      request pointing at the report. `handedUp.autoFiled` records what was filed and dropped, the requester's
+      orchestrator gets `[follow-ups filed]` (don't file them again), and the request closes on its kept DONE
+      (`recheckDone`). Until then the request's live state (`handUpLive` in `shared/workState.ts`) is Waiting on input on
+      "<Name>'s orchestrator" with `backlog` set, and the Waiting tab lists it under "Orchestrators' backlog", not as a
+      wait on a person. Tests: "w4352: unfiled handed-up follow-ups ..." in `orchestrators.test.ts`, and the w4352 test
+      in `w2969HandUp.test.ts`.
 - **If the blocker fails, it is flagged.** What it waited on stalled, or did not clear in its time: the request stalls
   (`stalled.kind` `blocked`) with the reason, for its people to close or reopen. What it waited on was declined or
   cancelled without delivering: a person must decide now, so it becomes a question to its requester (Waiting on input).
@@ -2800,7 +2815,8 @@ but the question it labelled ("brighten the lamps after w478?") was kept.
 | `[ledger]` | the dispatcher: after a restart or a fresh conversation, the requests still waiting (what it had not answered died with its process); and when requests are queued and a worker ends a turn, after 30 s of quiet, at least 2 minutes apart and at most 20 an hour (a wake that comes too soon waits) |
 | a failed worker of an open request | the dispatcher, as a `[work update]` |
 | a worker's still-open line handing the dispatcher legs to start ("the dispatcher starts the ten rows above"), with its report; a request running fewer legs than its people's standing "keep N running" (w2956) | the dispatcher, as a `[work update]` |
-| `[follow-ups to file]`: a worker's `hand_up_requests`, or a report saying it could not file the follow-up requests it wrote (w2969) | the orchestrator of the request's requester, once per hand-up, and once more after 6 h while they are unfiled |
+| `[follow-ups to file]`: a worker's `hand_up_requests`, or a report saying it could not file the follow-up requests it wrote (w2969) | the orchestrator of the request's requester, once per hand-up, and once more 2 h after it while they are unfiled (w4352) |
+| `[follow-ups filed]`: follow-ups still unfiled 12 h after their hand-up, filed by FF Factory at low priority or dropped as covered (w4352) | the orchestrator of the request's requester, once |
 | `[standing agent]`, `[auto-delegation]` | the orchestrator of the agent's owner (the system payer when it has none): a request waiting for a click, or one its auto-approve rules filed (w527) |
 | `[unity blocked]` | the dispatcher, and the people whose workers are in that sandbox |
 | `[app restarted]`, `[machines]`, `[unity]`, `[host]`, the orchestrator inbox | the dispatcher. A person's orchestrator cut off mid-turn by a restart is told to pick its turn up again |

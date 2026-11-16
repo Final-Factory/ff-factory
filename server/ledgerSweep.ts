@@ -259,6 +259,13 @@ export class LedgerSweep {
         // A Waiting worker (w475: a running job, a queued message or a check-in ahead) will come back, and so will a stopped
         // one its check-in or a queued message resumes (w509): as good as busy here.
         const busy = workers.filter((s) => BUSY.has(s.status) || holdsItsPlace(s, this.now()));
+        // w4352: follow-ups its worker handed up and nobody filed are sent again at 2 h and filed by FF Factory at 12 h, which
+        // closes the request on its kept DONE; a stalled one too (followUpStep never reaches a stalled request).
+        if (full && !busy.length && handUpsPending(live)) {
+          this.d.orchestrators.handUpStep(live);
+          const after = this.d.store.work.get(live.id);
+          if (!after || !(isOpen(after) || after.status === 'stalled')) continue;
+        }
         if (busy.length) {
           // Nothing touches a request a busy worker holds (w915: w909 showed Stalled while its worker, sent w911 after it, was
           // mid-turn on its PR): the worker it was sent, has not said DONE for or let go of, and that paused it. A worker busy
@@ -279,6 +286,9 @@ export class LedgerSweep {
           const trouble = this.troubleStep(live, workers, acts);
           if (trouble === 'acted') continue;
           if (!trouble && this.deliveredStep(live, workers, acts)) continue;
+          // w4352: what is left is its requester's orchestrator filing its follow-ups, which handUpStep chases: it is neither
+          // asked "Is it done?" nor stalled meanwhile.
+          if (handUpsPending(live)) continue;
           if (this.followUpStep(live, workers, acts)) continue;
           this.stallStep(live, workers, acts);
         } catch (e) {
@@ -980,9 +990,9 @@ export class LedgerSweep {
   private followUpStep(w: WorkItem, workers: readonly SessionInfo[], acts: Action[]): boolean {
     // A blocked request waits on its blocker (w643): the blocker watch unblocks, stalls or asks, not "Is it done?".
     if (!isOpen(w) || w.question || w.flag || w.status === 'blocked') return false;
-    // w2969: what is left is filing the follow-ups its worker handed up, which no worker can do: its person's orchestrator
-    // is reminded once, instead of asking the worker "Is it done?" (w2194 closed on that answer with five stages unfiled).
-    if (handUpsPending(w)) return this.d.orchestrators.handUpReminder(w);
+    // w2969: what is left is filing the follow-ups its worker handed up, which no worker can do: handUpStep (w4352) sends them
+    // again and then files them, instead of asking the worker "Is it done?" (w2194 closed on that answer with five stages unfiled).
+    if (handUpsPending(w)) return false;
     const prs = w.prs ?? [];
     if (!prs.some((p) => p.state === 'merged') || prs.some((p) => p.state === 'open')) return false;
     const reason = partOfReason(w.id, prs) ?? afterMergeReason(w, workers.map((s) => s.lastResult ?? '')) ?? notDoneReason(w, workers);

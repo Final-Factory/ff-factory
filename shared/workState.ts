@@ -86,6 +86,12 @@ export interface WorkLive {
    * to that orchestrator once as `[orchestrator step]` (Orchestrators.orchestratorStep), never as a person's [needs you].
    */
   orchestrator?: boolean;
+  /**
+   * w4352: what it waits on is follow-up requests its worker handed up, for its requester's orchestrator to file: that
+   * orchestrator's backlog, shown apart from waits on a person on the Waiting on input tab. FF Factory re-sends them at
+   * 2 h and files them itself at 12 h (Orchestrators.handUpStep).
+   */
+  backlog?: boolean;
 }
 
 /**
@@ -494,10 +500,15 @@ export function unfiledFollowUpsIn(report: string | undefined): { line: string; 
   return { line: line.slice(0, 600), count: Math.min(Math.max(count || 1, 1), 12) };
 }
 
+/** w4352: unfiled handed-up follow-ups are sent again to the requester's orchestrator this long after the hand-up (once). */
+export const HAND_UP_RESEND_MS = 2 * 3_600_000;
+/** w4352: and this long after it FF Factory files them itself at low priority and closes the request on its kept DONE. */
+export const HAND_UP_AUTOFILE_MS = 12 * 3_600_000;
+
 /** w2969: how many of a request's handed-up follow-ups are still to file (0 when none, all filed, or dropped). */
 export function handUpsPending(w: Pick<WorkItem, 'handedUp'>): number {
   const h = w.handedUp;
-  if (!h) return 0;
+  if (!h || h.autoFiled) return 0;
   return Math.max(0, h.count - h.filed.length);
 }
 
@@ -723,6 +734,24 @@ const orchestratorLive = (w: Pick<WorkItem, 'requestedBy'>, worker: string, line
   orchestrator: true,
   line,
 });
+
+/** w4352: the hand-up's wait (WorkItem.handedUp), on the orchestrator of the person it was sent to; undefined when none is pending. */
+export function handUpLive(w: Pick<WorkItem, 'handedUp' | 'requestedBy' | 'requesters'>, now: number): WorkLive | undefined {
+  const left = handUpsPending(w);
+  const h = w.handedUp;
+  if (!left || !h) return undefined;
+  const to = [w.requestedBy, ...w.requesters].find((r) => h.to.some((u) => u.toLowerCase() === r.userId.toLowerCase())) ?? w.requestedBy;
+  const at = Date.parse(h.at) || now;
+  const fileAt = new Date(at + HAND_UP_AUTOFILE_MS).toISOString();
+  return {
+    state: 'waiting',
+    why: `${left} follow-up request${left === 1 ? '' : 's'} its worker ${h.worker} handed up ${ago(h.at, now)} wait${left === 1 ? 's' : ''} for ${to.displayName}'s orchestrator to file ${left === 1 ? 'it' : 'them'}; FF Factory files ${left === 1 ? 'it' : 'them'} itself at low priority at ${fileAt.slice(11, 16)} UTC${fileAt.slice(0, 10) !== new Date(now).toISOString().slice(0, 10) ? ` on ${fileAt.slice(0, 10)}` : ''} (w4352)`,
+    waitsOn: [`${to.displayName}'s orchestrator`],
+    worker: h.worker,
+    orchestrator: true,
+    backlog: true,
+  };
+}
 
 const outsideLive = (worker: string, who: string, line: string): WorkLive => ({
   state: 'waiting',
@@ -972,6 +1001,11 @@ function workLiveOf(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: string
     const p = asking.pendingPermissions[0];
     return { state: 'waiting', why: `${asking.id} waits for permission${p ? ` to use ${p.toolName}` : ''}`, waitsOn: names(asking.requestedBy ? [asking.requestedBy] : w.requesters), worker: asking.id };
   }
+
+  // w4352: follow-up requests its worker handed up wait for the requester's orchestrator to file them (w2969): Waiting, on
+  // that orchestrator, as its backlog, not on a person; FF Factory files them itself 12 h after the hand-up.
+  const handUp = handUpLive(w, f.now);
+  if (handUp) return handUp;
 
   // Blocked on its machine (w691): a worker's message found no agent host to run in. Nothing runs for it, whatever its
   // status says; it unblocks when a host starts (its first event), and the dispatcher is told it failed.
