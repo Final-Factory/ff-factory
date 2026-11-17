@@ -156,3 +156,11 @@ test("w3581: orchestrator_transcript shows a person's message without FF Factory
   assert.match(r.content[0].text, /> human: Please continue$/m);
   assert.doesNotMatch(r.content[0].text, /held from earlier turns/);
 });
+
+// w4499: portal_logs refuses a regex over 100 characters (its schema's max); its description must say so.
+test('w4499: portal_logs says in its description that regex is at most 100 characters, as its schema enforces', () => {
+  const agents = fs.readFileSync(new URL('./agents.ts', import.meta.url), 'utf8');
+  const launch = fs.readFileSync(new URL('./launch.ts', import.meta.url), 'utf8');
+  assert.match(launch, /regex: z\.string\(\)\.max\(100\)/);
+  assert.match(agents, /const PORTAL_LOGS_TOOL = .*regex \(any case; at most 100 characters/);
+});
