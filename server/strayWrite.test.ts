@@ -56,3 +56,41 @@ test('w3257: the sandbox guard refuses the stray Write for a worker, and leaves 
   assert.equal(await decide(worker, '/nonexistent-w3257/ffw/tmp/ffa-1/pr-body.md'), 'allow');
   assert.equal(await decide(sandboxGuard({ ...base, env }), '/nonexistent-w3257/ffw/sandboxes/tmp-pr-body.md'), 'allow');
 });
+
+test('w4537: a new file in the ffu slot this session holds passes; a slot of another session or of none is refused', async () => {
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'w4537-'));
+  try {
+    fs.mkdirSync(path.join(root, 'ffu-sandboxes'), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, 'ffu-sandboxes', 'slots.json'),
+      JSON.stringify({ slots: [{ id: 'slot1', holder: 'mine1111' }, { id: 'slot2', holder: 'other222' }, { id: 'slot3' }] }),
+    );
+    const decide = async (g: ReturnType<typeof sandboxGuard>, file_path: string) => {
+      const input = { hook_event_name: 'PreToolUse', tool_name: 'Write', tool_input: { file_path, content: 'x' }, tool_use_id: 'x', session_id: 's', transcript_path: '', cwd: '' };
+      const r = (await g(input as never, 'x', { signal: new AbortController().signal })) as { hookSpecificOutput?: { permissionDecision?: string } };
+      return r.hookSpecificOutput?.permissionDecision ?? 'allow';
+    };
+    const base = { sandboxId: 'slot1', sandboxPath: path.join(root, 'sandboxes', 'slot1'), protectedPaths: [], prBase: () => undefined, evidence: () => undefined, home: path.join(root, 'home') };
+    const env = { TMPDIR: path.join(root, 'tmp', 'ffa-1') };
+    const slot = (id: string) => path.join(root, 'ffu-sandboxes', id, 'ffu', 'crates', 'new_test.rs');
+    const mine = sandboxGuard({ ...base, workerRoot: root, env, session: 'mine1111' });
+    assert.equal(await decide(mine, slot('slot1')), 'allow', 'the slot this session holds');
+    assert.equal(await decide(mine, slot('slot2')), 'deny', 'a slot another session holds');
+    assert.equal(await decide(mine, slot('slot3')), 'deny', 'a slot nobody holds');
+    assert.equal(await decide(mine, path.join(root, 'ffu-sandboxes', 'slot10', 'x.rs')), 'deny', 'a sibling whose name starts with the held one');
+    const none = sandboxGuard({ ...base, workerRoot: root, env, session: 'nobody99' });
+    assert.equal(await decide(none, slot('slot1')), 'deny', 'a session that holds no slot');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('w4537: checkStrayWrite opens the held slot folder it is given', () => {
+  const held = { ...mac, heldFfuSlot: () => '/Users/benryding/ffw/ffu-sandboxes/slot2' };
+  assert.equal(checkStrayWrite('/Users/benryding/ffw/ffu-sandboxes/slot2/ffu/src/new.rs', held), undefined);
+  assert.ok(checkStrayWrite('/Users/benryding/ffw/ffu-sandboxes/slot1/ffu/src/new.rs', held));
+  assert.ok(checkStrayWrite('/Users/benryding/ffw/ffu-sandboxes/slot2/ffu/src/new.rs', mac));
+});

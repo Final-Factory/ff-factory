@@ -83,3 +83,24 @@ test('the sandbox guard refuses both in Bash and passes the rest', async () => {
   assert.notEqual((await ask('until [ $SECONDS -ge $t ]; do sleep 30; done'))?.permissionDecision, 'deny');
   assert.notEqual((await ask('gh run list --commit abc'))?.permissionDecision, 'deny');
 });
+
+test('w4538: gh pr checks inside a heredoc body or a quoted echo argument is text, not a command', () => {
+  // w4501's false refusal (session 358398f2, seq 267): the words appeared only in a quoted heredoc written to a file.
+  for (const cmd of [
+    "cat > \"$TMPDIR/notes.md\" <<'EOF'\nWorkers ran `gh pr checks 123` and gh pr view 1 --json statusCheckRollup.\ngh pr checks 9\nEOF",
+    'cat > "$TMPDIR/notes.md" <<EOF\ngh pr checks 9\nEOF\necho written',
+    "python - <<'PY'\nprint('gh pr checks 1')\nPY",
+    "git commit -F - <<'MSG'\nstop gh pr checks\n\ngh pr view 1 --json statusCheckRollup\nMSG",
+    'echo "gh pr checks 123"',
+    "printf '%s\n' 'gh pr view 1 --json statusCheckRollup'",
+  ])
+    assert.equal(checkChecksRead(cmd), undefined, cmd);
+  // The real commands are still refused, a heredoc a shell runs included.
+  for (const cmd of [
+    'gh pr checks 123',
+    "cat > \"$TMPDIR/n.md\" <<'EOF'\ntext\nEOF\ngh pr checks 123",
+    "bash <<'EOF'\ngh pr checks 123\nEOF",
+    "cat <<'EOF' | bash\ngh pr checks 123\nEOF",
+  ])
+    assert.ok(checkChecksRead(cmd), cmd);
+});
