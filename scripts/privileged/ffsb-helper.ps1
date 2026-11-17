@@ -176,14 +176,35 @@ try {
       Done $true 'reboot in 2 minutes (shutdown /a cancels it)'
     }
     'dedup' {
+      # Start-ReFSDedupJob returns as soon as the job starts and the job runs on in the background (w4509: the first
+      # pass on LothDesktop wrote "0 min, 49.4 -> 49.4 GB" while it really ran 43 min and saved 161 GB). So poll
+      # Get-ReFSDedupStatus every 30 s until the job is no longer running, bounded by the job's own 5 h Duration plus
+      # 15 min (630 polls; the task's 6 h ExecutionTimeLimit is the outer bound), then report what it did.
       if (-not (Drive)) { Done $false "$($Letter): is not mounted" }
       $vol = "$($Letter):"
       $free0 = (Get-Volume -DriveLetter $Letter).SizeRemaining
       $t0 = Get-Date
       Start-ReFSDedupJob -Volume $vol -FullRun -Duration (New-TimeSpan -Hours 5) -CpuPercentage 50 -MinimumLastModifiedTimeHours 1 | Out-Null
+      $st = $null; $seen = $false; $errs = 0; $polls = 0; $maxPolls = 630
+      while ($true) {
+        Start-Sleep -Seconds 30
+        $polls++
+        try { $st = Get-ReFSDedupStatus -Volume $vol; $errs = 0 } catch {
+          if (++$errs -ge 10) { Done $false "dedup status unreadable 10 times in a row after $polls polls: $($_.Exception.Message)" }
+          continue
+        }
+        if ($st.Running) { $seen = $true }
+        # Done once it has stopped and this run is the one the status describes (it was seen running, or its LastRunTime
+        # is ours), so a poll that lands before the job registers is not read as the end.
+        elseif ($seen -or ($st.LastRunTime -and ([datetime]$st.LastRunTime) -ge $t0.AddMinutes(-1))) { break }
+        elseif ($polls -ge 20) { Done $false "full dedup job on $vol was never seen running in $polls polls, and the last run the status shows ($($st.LastRunTime)) is older than this start" }
+        if ($polls -ge $maxPolls) {
+          Done $false ("full dedup job on $vol still running after {0:N0} min ({1} polls); free {2:N1} -> {3:N1} GB so far" -f ((Get-Date) - $t0).TotalMinutes, $polls, ($free0 / 1GB), ((Get-Volume -DriveLetter $Letter).SizeRemaining / 1GB))
+        }
+      }
       $free1 = (Get-Volume -DriveLetter $Letter).SizeRemaining
-      $st = try { (Get-ReFSDedupStatus -Volume $vol | Select-Object * | ConvertTo-Json -Compress -Depth 3) } catch { "status unreadable: $($_.Exception.Message)" }
-      Done $true ("full dedup job on $vol (5 h cap, 50% CPU) started at {0:s}, returned after {1:N0} min; free {2:N1} -> {3:N1} GB; status {4}" -f $t0, ((Get-Date) - $t0).TotalMinutes, ($free0 / 1GB), ($free1 / 1GB), $st)
+      $ok = ([string]$st.LastRunStatus -eq '0')
+      Done $ok ("full dedup job on $vol (5 h cap, 50% CPU) started at {0:s}, ran {1:N0} min ({2} polls); free {3:N1} -> {4:N1} GB; job duration {5}, saved {6:N1} GB on this run, processed {7:N1} GB, LastRunStatus {8}" -f $t0, ((Get-Date) - $t0).TotalMinutes, $polls, ($free0 / 1GB), ($free1 / 1GB), $st.LastRunDuration, ($st.SavingsOnLastRun / 1GB), ($st.ProcessedOnLastRun / 1GB), $st.LastRunStatus)
     }
     'pagefile' {
       if ($PagefileGB -lt 4) { Done $false 'no fixed pagefile size was configured at install' }

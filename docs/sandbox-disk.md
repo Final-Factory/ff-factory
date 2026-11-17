@@ -173,7 +173,11 @@ of byte-identical files written before its last run were still unshared across t
 BurstCache, PackageCache; measured with a cluster-map duplicate scan). The privileged helper's `dedup` action runs one full
 pass (5 h cap, 50 % CPU, files changed in the last hour skipped); `install-privileged-helpers.ps1 -Actions dedup` registers it
 as `ffsb-helper-dedup`, every Sunday at 04:00 with a 6 h task limit, and the worker user may start it
-(`schtasks /run /tn ffsb-helper-dedup`). Its result is `results\dedup.json`.
+(`schtasks /run /tn ffsb-helper-dedup`). Its result is `results\dedup.json`. `Start-ReFSDedupJob` returns as soon as the job
+starts and the job runs on in the background, so the helper polls `Get-ReFSDedupStatus` every 30 s until it stops (at most
+630 polls, the 5 h cap plus 15 min) and only then writes free space before and after, the job's duration, its savings and
+`LastRunStatus` (w4509; before that the first pass on LothDesktop, 2026-11-17, wrote "0 min, 49.4 -> 49.4 GB" while it ran
+43 min and saved 161 GB, which `dedup-status.json` showed).
 
 The first job, measured:
 

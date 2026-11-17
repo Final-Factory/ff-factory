@@ -36,8 +36,19 @@ function global:Get-Volume { [CmdletBinding()] param($DriveLetter) [pscustomobje
 $global:FreeGB = [int]$(if ($sc.freeGB) { $sc.freeGB } else { 60 })
 function global:Start-ReFSDedupJob { [CmdletBinding()] param([string]$Volume, $Duration, [switch]$FullRun, $CpuPercentage, $MinimumLastModifiedTimeHours)
   if ($global:Sc.dedupFails) { throw 'The device is not ready.' }
-  [void]$global:Calls.Add("Start-ReFSDedupJob $Volume full=$([bool]$FullRun) $([int]$Duration.TotalHours)h cpu=$CpuPercentage minAge=$MinimumLastModifiedTimeHours"); $global:FreeGB += [int]$global:Sc.dedupGainGB }
-function global:Get-ReFSDedupStatus { [CmdletBinding()] param([string]$Volume) [pscustomobject]@{ Volume = $Volume; State = 'Idle' } }
+  [void]$global:Calls.Add("Start-ReFSDedupJob $Volume full=$([bool]$FullRun) $([int]$Duration.TotalHours)h cpu=$CpuPercentage minAge=$MinimumLastModifiedTimeHours")
+  $global:DedupLeft = [int]$(if ($null -ne $global:Sc.dedupRunningPolls) { $global:Sc.dedupRunningPolls } else { 3 }) }
+# w4509: the real job returns at once and runs on in the background, so the status reports Running for "dedupRunningPolls"
+# polls (default 3; -1 never ends), and only then is the space given back. "dedupNeverStarts": it never shows this run.
+$global:DedupLeft = 0; $global:DedupPolls = 0; $global:DedupEnd = $null
+function global:Get-ReFSDedupStatus { [CmdletBinding()] param([string]$Volume)
+  $global:DedupPolls++
+  $running = $global:DedupLeft -ne 0 -and -not $global:Sc.dedupNeverStarts
+  if ($running) { if ($global:DedupLeft -gt 0) { $global:DedupLeft-- } }
+  elseif (-not $global:DedupEnd -and -not $global:Sc.dedupNeverStarts) { $global:DedupEnd = Get-Date; $global:FreeGB += [int]$global:Sc.dedupGainGB }
+  $last = $(if ($global:DedupEnd) { $global:DedupEnd } else { (Get-Date).AddDays(-1) })
+  [pscustomobject]@{ Volume = $Volume; Running = $running; State = $(if ($running) { 'Running' } else { 'Idle' }); LastRunTime = $last
+    LastRunStatus = 0; LastRunDuration = (New-TimeSpan -Minutes 43); SavingsOnLastRun = [int64]$global:Sc.dedupGainGB * 1GB; ProcessedOnLastRun = [int64]300 * 1GB } }
 function global:Get-PartitionSupportedSize { [CmdletBinding()] param($DriveLetter) [pscustomobject]@{ SizeMin = 1GB; SizeMax = [int64]$global:SizeGB * 1GB } }
 function global:Resize-Partition { [CmdletBinding()] param($DriveLetter, $Size) [void]$global:Calls.Add("Resize-Partition $DriveLetter $([int]($Size / 1GB))"); $global:PartGB = [int]($Size / 1GB) }
 function global:Mount-DiskImage { [CmdletBinding()] param([string]$ImagePath) [void]$global:Calls.Add('Mount-DiskImage'); $global:Attached = $true; $global:Held = [string]$global:Sc.autoLetter }
@@ -81,6 +92,7 @@ $res = Join-Path $Work "results/$Action.json"
 $out = [ordered]@{
   calls  = @($global:Calls)
   held   = $global:Held
+  polls  = $global:DedupPolls
   result = $(if (Test-Path -LiteralPath $res) { Get-Content -Raw -LiteralPath $res | ConvertFrom-Json } else { $null })
   thrown = $global:Thrown
   cmds   = @('Set-Partition', 'Get-Partition', 'Get-Disk', 'Get-DiskImage', 'Mount-DiskImage' | ForEach-Object { "$_=$((Get-Command $_ | Select-Object -First 1).CommandType)" })
