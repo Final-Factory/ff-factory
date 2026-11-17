@@ -2225,6 +2225,7 @@ export class MachineManager {
     const expected = this.dropWhy.get(id);
     const why = expected ?? 'lost its connection to the portal';
     this.dropWhy.delete(id);
+    this.failCallsOf(id, why || 'was stopped on purpose');
     const midTurn = [...this.sessions.sessions.values()]
       .filter((s) => s.info.machineId === id && s instanceof RemoteSession && cutOffMidTurn(s.info, s.seenLive, Date.now()))
       .map((s) => s.info.id);
@@ -2954,7 +2955,27 @@ export class MachineManager {
     return `${m.id} took ${url} and is dialling it now; its agents run on. It falls back to this portal's URL too if ${url} has not answered after ${RELOCATE_FALLBACK_MINUTES} minutes.`;
   }
 
-  private readonly switchCalls = new Map<string, { resolve: (r: { from: string; to: string; notes: string[] }) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
+  /**
+   * w4619: a switch or a save waits for its daemon's answer, and a daemon whose link drops cannot give it: its send() drops what
+   * it says while the link is down (machine/daemon.ts send), and a restarted daemon (an update over its link) has forgotten
+   * the call. On 2026-11-17 the dispatcher's switch_branch of m5/slot2 went out at 11:09:20 MST, m5's daemon was updated at
+   * 11:09:28, and the call sat to its 10-minute timeout: the dispatcher's turn, and with it the capacity ping that named the
+   * urgent w4609 as fitting biscuit/slot3 at 11:15, waited until 11:19. So the drop answers them at once, as unknown.
+   */
+  private failCallsOf(machineId: string, why: string) {
+    const calls = [
+      ...[...this.switchCalls].map(([cid, c]) => ({ cid, c, map: this.switchCalls as Map<string, unknown>, what: 'branch switch' })),
+      ...[...this.saveCalls].map(([cid, c]) => ({ cid, c, map: this.saveCalls as Map<string, unknown>, what: 'save of uncommitted work' })),
+    ].filter((x) => x.c.machine === machineId);
+    for (const { cid, c, map, what } of calls) {
+      clearTimeout(c.timer);
+      map.delete(cid);
+      console.warn(`machine ${machineId}: ${why} with a ${what} of ${c.sandbox} unanswered: answered it as unknown (w4619)`);
+      c.reject(new Error(`machine ${machineId} ${why} before it answered the ${what} of ${c.sandbox}, so whether it ran is unknown: list_sandboxes shows its branch now; call it again if it did not (w4619).`));
+    }
+  }
+
+  private readonly switchCalls = new Map<string, { machine: string; sandbox: string; resolve: (r: { from: string; to: string; notes: string[] }) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
 
   /** Switch the branch of a machine sandbox, on the machine (server/switchBranch.ts). callerSessionId: the agent asking, which its daemon does not count as busy. */
   switchBranch(machineId: string, branch: string, createFrom?: string, sandbox?: string, callerSessionId?: string, githubToken?: string, seatSessionIds?: string[]) {
@@ -2966,7 +2987,7 @@ export class MachineManager {
         this.switchCalls.delete(id);
         reject(new Error(`machine ${machineId} did not finish the switch in 10 minutes`));
       }, 10 * 60_000);
-      this.switchCalls.set(id, { resolve, reject, timer });
+      this.switchCalls.set(id, { machine: machineId, sandbox: sb, resolve, reject, timer });
       try {
         this.post(machineId, { type: 'switch', id, branch, createFrom, sandbox: sb, ...(callerSessionId ? { callerSessionId } : {}), ...(githubToken ? { githubToken } : {}), ...(seatSessionIds?.length ? { seatSessionIds } : {}) });
       } catch (e) {
@@ -3019,7 +3040,7 @@ export class MachineManager {
     });
   }
 
-  private readonly saveCalls = new Map<string, { resolve: (r: SaveResult) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
+  private readonly saveCalls = new Map<string, { machine: string; sandbox: string; resolve: (r: SaveResult) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
   /** Updates over the daemons' links (w1596, server/machineLink.ts): the portal's code as bundles, and the calls waiting. */
   bundles: UpdateBundles;
   private readonly linkAcks = new PendingCalls<true>();
@@ -3052,7 +3073,7 @@ export class MachineManager {
         this.saveCalls.delete(id);
         reject(new Error(`machine ${machineId} did not finish the save in 10 minutes`));
       }, 10 * 60_000);
-      this.saveCalls.set(id, { resolve, reject, timer });
+      this.saveCalls.set(id, { machine: machineId, sandbox, resolve, reject, timer });
       try {
         this.post(machineId, { type: 'save_work', id, sandbox, branch, message, ...(githubToken ? { githubToken } : {}) });
       } catch (e) {
