@@ -1151,6 +1151,12 @@ export interface Machine {
    */
   noTimedRuns?: string;
   /**
+   * Why it runs no game players (w4621, add_machine no_players; server/machines.ts noPlayersOf): placement sends no timed leg
+   * and no pair-run leg there (both run built players or FFU clients); its Unity editor, play mode included, still takes work.
+   * Unset: the default (NO_PLAYERS: m3, Ben's w3740 hold); "" clears it.
+   */
+  noPlayers?: string;
+  /**
    * Why it is play-only (w1946, add_machine play_only; docs/machines.md "A play-only timing machine"): it takes no workers,
    * no standing agents and no sandbox, and runs the timed A/B legs other computers build (timed_run, server/timedRuns.ts)
    * under its own exclusive bench ticket. Unset or "": an ordinary computer.
@@ -3352,7 +3358,7 @@ export interface AppState {
   /** Computers with room that placement.minPriority reserves for higher work (w1643), with their lowest priority: a request at that level may use them. */
   reservedRoom?: { id: string; min: 'normal' | 'high' | 'urgent'; for: readonly ('game' | 'agent')[] }[];
   /** Each computer with room, id to its platform and no-timed-runs reason (w1944): work it cannot run is not Queued wrongly beside it. */
-  roomFit?: Record<string, { platform?: string; noTimedRuns?: string }>;
+  roomFit?: Record<string, { platform?: string; noTimedRuns?: string; noPlayers?: string }>;
   /** Since when each computer has had room, `${kind}:${id}` to epoch ms (w1944): room younger than ROOM_STAND_MS is not yet WRONG. */
   roomSince?: Record<string, number>;
   /** How many more workers each computer with room takes, `${kind}:${id}` (w1944): its room goes to that many queued requests, in queue order. */

@@ -1028,6 +1028,17 @@ Capacity line says "no timed runs"), and a start pinned to it for such work is r
 `writeBenchPriorities`), and the game repo's `scripts/bench/bench_queue.py` then refuses every exclusive ticket there,
 naming the computers that take them. Builds, editors, coding and tests go there as before (shared tickets).
 
+**A computer that runs no game players** (w4621; `Machine.noPlayers`, add_machine `no_players "<why>"`, `""` clears it;
+`server/machines.ts` `NO_PLAYERS` makes m3 one by default, with Ben's hold from w3740: "m3 crashed again. you really need to
+stop crashin git", carried since as "no game players and no crash tests on the m3 without Ben's yes"). No built player and
+no FFU client runs there; its Unity editor, play mode included, still takes work. Placement folds it into the computer's
+no-timed-runs reason (`timedPlacementRefusalOf`), so timed_place, the timing order (w2055) and a pinned timed start skip it,
+and a timed leg filed for it (w4584, filed for m3 before the portal knew) moves to the next small computer that takes timed
+runs, or times on the big computer it is on when none can (w2048), never back to it (`server/timedAsk.ts` `ownLegTargets`).
+No pair-run leg goes there either (`shared/capacity.ts` `unfitWhy`, used by pair placement, the room counts and the WRONG
+STATE flag). Its daemon's bench queue is unchanged (it follows `no_timed_runs` alone), so a worker already there may still
+time its editor.
+
 **Where a timed leg runs: the worker asks first** (w1969; lothsahn, 2026-10-24: "Why are these on the big machines and not
 scheduled for m3 or even biscuit? The scheduler should favor running exclusive locks on machines with a small number of
 slots", then "Maybe every time a worker needs an exclusive lock it should ask the dispatcher?"). An exclusive bench turn idles
@@ -1868,7 +1879,8 @@ LothDesktop and Beast, not just when BEAST is full").
     particular about a machine or OS limits the fleet we can use."). A Mac may be the host (leg 1), never a client (a Mac
     refuses a multiplayer client, w665: the game's `player_slots.py` refuses it), and a Mac with room hosts first, which
     leaves the other computers for work a Mac cannot take. A cross-OS pair also needs its legs on two operating systems.
-    A pair is not timed unless request_pair says `timed`; only then do its legs stay off where no timed runs go (the m5).
+    A pair is not timed unless request_pair says `timed`; only then do its legs stay off where no timed runs go (the m5). No leg of any pair goes to a computer that runs no game
+    players (the m3, w4621).
     Pair runs filed before w2282 say "on computers that are not Macs": the store rewrites that text when it loads the
     ledger, and drops the computers the dispatcher queued a request_pair one for (`server/store.ts`, `repairText`). `placement.prefer`, holds, reservations and exclusive bench tickets are as for any work: each leg
     is a game worker in its own sandbox, and a timed leg takes its ticket as every timing run does. Code: `shared/capacity.ts`

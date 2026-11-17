@@ -48,7 +48,7 @@ import { MachineRollout, timedRunText } from './machineRollout.ts';
 import { OWNER_ONLY_KEYS, SETTABLE_KEYS, setAppConfig } from './appConfig.ts';
 import { bus, type Store } from './store.ts';
 import { branchProblem, slugify, withBaseRepoLock } from './sandboxes.ts';
-import { MAIN_CLONE_NO_AGENTS, agentCap, machineDir, noTimedRunsOf, parseSandboxRef, poolSettingsOf, sameCommit } from './machines.ts';
+import { MAIN_CLONE_NO_AGENTS, agentCap, machineDir, noPlayersOf, parseSandboxRef, poolSettingsOf, sameCommit, timedPlacementRefusalOf } from './machines.ts';
 import { JOIN_TTL_MINUTES } from './machineJoin.ts';
 import { searchTranscripts } from './search.ts';
 import { CATALOG, questionsShape } from './launch.ts';
@@ -5774,8 +5774,10 @@ When a person asked for a design or an analysis (a profile, an investigation, a 
         // Its CPU use over the last minute (w2054): placement spills past it at placement.spillAtPercent.
         ...(this.machines.cpuOf(m.id) !== undefined ? { cpuPct: this.machines.cpuOf(m.id) } : {}),
         ...(legsHere.length ? { legs: legsHere } : {}),
-        // It takes no timed runs (w1861): timed work goes elsewhere.
-        ...(noTimedRunsOf(m) ? { noTimedRuns: noTimedRunsOf(m) } : {}),
+        // It takes no timed runs (w1861), or runs no game players, which a timed leg runs (w4621): timed work goes elsewhere.
+        ...(timedPlacementRefusalOf(m) ? { noTimedRuns: timedPlacementRefusalOf(m) } : {}),
+        // It runs no game players (w4621): no pair-run leg goes there either.
+        ...(noPlayersOf(m) ? { noPlayers: noPlayersOf(m) } : {}),
         // When it dropped, while offline (w2048): a timed leg waits out a blip, not an outage.
         ...(!this.machines.isOnline(m.id) && m.lastSeen ? { offlineSince: m.lastSeen } : {}),
       });
@@ -7065,6 +7067,7 @@ ${w.repo ?? ''}
           library_seed_copy: z.enum(['robocopy', 'clone']).optional().describe('How a Windows machine copies the seed: "clone" block-clones on a ReFS Dev Drive (seed and sandboxes on one volume), "robocopy" copies. Omitted: kept.'),
           unity_below_normal: z.boolean().optional().describe('Start its sandbox editors at below-normal priority, so a game played on that computer wins. Omitted: kept.'),
           play_only: z.string().max(300).optional().describe('Why this computer is play-only (w1946), quoting who asked: no workers, no standing agents, no sandbox; it only plays the game, running the timed A/B legs other computers build (timed_run) under its own exclusive bench ticket. With join_code it joins with the smallest limits (one player-slot pair). "" makes it an ordinary computer again. Omitted: kept.'),
+          no_players: z.string().max(300).optional().describe('Why this computer runs no game players (w4621: no built player, no FFU client), quoting who asked: placement sends it no timed leg and no pair-run leg; its Unity editor, play mode included, still takes work. "" clears it (m3 has one by default: Ben\'s w3740 hold). Omitted: kept.'),
           no_timed_runs: z.string().max(300).optional().describe('Why this computer takes no timed runs (w1861: benchmarks, perf A/Bs, probes), quoting who asked: its bench queue refuses a timing ticket and placement sends timed work elsewhere. "" clears it (m5 has one by default). Omitted: kept.'),
           local: z
             .boolean()
@@ -7135,6 +7138,7 @@ ${w.repo ?? ''}
             librarySeedCopy: a.library_seed_copy,
             unityBelowNormal: a.unity_below_normal,
             noTimedRuns: a.no_timed_runs,
+            noPlayers: a.no_players,
             playOnly: a.play_only,
             local: a.local,
             force: a.force,
