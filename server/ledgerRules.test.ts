@@ -397,3 +397,23 @@ test('w4225: "ready for" lines are read beside the still-open line, one list per
   assert.equal(all.get('w4207')!.length, 3);
   assert.deepEqual(all.get('w8'), ['w8: still open: notes']);
 });
+
+test('w4565: a fix whose title cuts by a count ("Net row cut 11 px") and whose report ships in the next Steam build is not a release', () => {
+  // w4487 as filed, and the "Ships in" line of its worker's first DONE, refused twice on 2026-11-17.
+  const w4487 = {
+    title: 'w4438 follow-up: French Station Grid Net row cut 11 px at 1280x720 classic',
+    brief: 'Found by the w4438 regression check (Station Grid PRs #3665/#3676/#3690), measured in built Windows players on lothdesktop. Done when: an EditMode test with wrapped (two-line) row names fails first on the fitted height, then passes.',
+    prs: [{ repo: 'Final-Factory/FinalFactory', number: 3771, state: 'merged' as const, head: 'sandbox/slot5-w4487' }],
+  };
+  const report = 'DONE: w4487 (French Station Grid Net row cut at 1280x720 classic)\n\nMerged as PR #3771 on green CI.\n\nShips in: master; the next development Steam build cut from master after PR #3771 (the build number is not known yet).\npre-1.0: no cherry-pick needed.\n\nLearned: final-factory-agents PR #925';
+  assert.ok(!isRelease(w4487));
+  assert.equal(doneProblem(w4487, report), undefined);
+  assert.equal(afterMergeReason(w4487, [report]), undefined);
+  // A release still is one: by version, by build number, by its brief, or by its bump PR, and its DONE needs live + notes.
+  for (const title of ['Cut 0.50.0.75 now', 'Ship build 81 to development', 'Tag v1.0.0.24'])
+    assert.ok(isRelease({ title, brief: 'Fix it.' }), title);
+  const release = { title: 'Release 1.0.0.31 to development', brief: 'Use /ff-agents:ci-release and post the patch notes.', prs: [{ repo: 'Final-Factory/FinalFactory', number: 3800, state: 'merged' as const, head: 'release/1.0.0.31' }] };
+  assert.match(doneProblem(release, report)!, /live and its patch notes are posted/);
+  assert.match(doneProblem({ ...w4487, prs: release.prs }, report)!, /live and its patch notes are posted/, 'a version bump PR makes it a release whatever its title');
+  assert.equal(doneProblem(release, 'DONE: 1.0.0.31 is live on development; notes https://discord.com/channels/1/2/3'), undefined);
+});
