@@ -204,6 +204,7 @@ function facts(w: WorkItem): string[] {
     w.sessionIds.length ? `Workers: ${w.sessionIds.join(', ')}` : 'Workers: none yet',
     w.relatedIds?.length ? `Related: ${w.relatedIds.map((r) => cleanLine(r, 60)).join(', ')}` : '',
     w.ledgerRead ? `Grants ledger reading to its workers (set by ${w.ledgerRead.by} ${w.ledgerRead.at.slice(0, 16).replace('T', ' ')}).` : '',
+    w.transcriptRead ? `Grants transcript reading to its workers (search_transcripts, agent_transcript; set by ${w.transcriptRead.by} ${w.transcriptRead.at.slice(0, 16).replace('T', ' ')}).` : '',
     w.report ? `Its result is a ${w.report.kind} report (marked by ${w.report.by}): file it with file_report.` : '',
     w.reports?.length ? `Reports: ${w.reports.map((r) => `${r.id} "${r.title}"`).join(', ')} (read_report).` : '',
     w.mainCloneAccess ? `Grants its workers on ${cleanLine(w.mainCloneAccess.machine, 60)} work in that machine's main clone (set by ${w.mainCloneAccess.by} ${w.mainCloneAccess.at.slice(0, 16).replace('T', ' ')}).` : '',

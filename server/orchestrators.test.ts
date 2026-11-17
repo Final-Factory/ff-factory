@@ -2340,6 +2340,59 @@ test('w2653: a worker exports the spend record only once its person grants it, a
   assert.match((await call(ben, 'update_work', { id: 'w9', spend_read: true })).text, /^ERROR: w9 came from the intake/);
 });
 
+test('w4497: a worker reads every transcript only once its person grants transcript reading, read-only, secrets masked; an intake request never gets it', async (t) => {
+  const { store, machines, dispatcher, chat, call } = await setupOnMachine(t);
+  const ben = chat(BEN).info;
+  const loth = chat(LOTH).info;
+  const token = `github_pat_${'q'.repeat(60)}`;
+  // Two other agents' transcripts: Ben's and Lothsahn's orchestrators, neither the worker's own.
+  store.append(ben.id, { kind: 'assistant', text: 'InputValidationError on wake_me: minutes missing' });
+  store.append(loth.id, { kind: 'tool_result', toolUseId: 'x1', isError: true, text: `InputValidationError in unity: action required ${token}` });
+  await call(ben, 'request_work', { title: 'Tool-call failures of the last 8 hours', brief: 'Count them by cause.' });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Audit the failures', title: 'Failures', work_id: 'w1' });
+  assert.equal(started.isError, false, started.text);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const info = store.sessions.get(id)!;
+  const m = store.machines.get('pc')!;
+  const tools = machines.hooks!.specFor(info, m).mcp?.tools.map((x) => x.name) ?? [];
+  assert.ok(tools.includes('search_transcripts') && tools.includes('agent_transcript'), 'a worker has both tools, deferred');
+  assert.doesNotMatch(machines.hooks!.specFor(info, m).append ?? '', /Transcript reading is granted/, 'no grant, no line in its brief');
+  const h = machines.hooks!.handlersFor(info, m);
+  const since = new Date(Date.now() - 8 * 3600_000).toISOString();
+  // Refused without the grant.
+  await assert.rejects(h.search_transcripts!({ query: 'InputValidationError', since }), /search_transcripts needs a transcript-read grant on one of your open requests \(w1\)/);
+  await assert.rejects(h.agent_transcript!({ session_id: loth.id }), /agent_transcript needs a transcript-read grant on one of your open requests \(w1\)/);
+  // Only the request's own person grants it.
+  assert.match((await call(loth, 'update_work', { id: 'w1', transcript_read: true })).text, /^ERROR: w1 is not Lothsahn's request/);
+  const granted = await call(ben, 'update_work', { id: 'w1', transcript_read: true });
+  assert.match(granted.text, /w1: its workers may now read every transcript/);
+  assert.equal(store.work.get('w1')!.transcriptRead?.by, 'Ben');
+  assert.match((await call(ben, 'list_work', { id: 'w1' })).text, /Its workers may read every transcript \(search_transcripts, agent_transcript; granted by Ben\)/);
+  assert.match(machines.hooks!.specFor(info, m).append ?? '', /Transcript reading is granted \(w1, granted by Ben\)/, 'its brief says so');
+  // Every agent, in a time window; read-only (the ledger and the transcripts are unchanged), secrets masked.
+  // The fake worker's own echo turn lands its report first: that is its own, not these reads.
+  await until('the worker reported', () => !!store.work.get('w1')!.outcome);
+  const before = structuredClone([...store.work.values()]);
+  const lothBefore = store.readTranscript(loth.id, 400).length;
+  const hits = await h.search_transcripts!({ query: 'InputValidationError', since, until: new Date(Date.now() + 60_000).toISOString() });
+  assert.ok(hits.includes(ben.id) && hits.includes(loth.id), `hits in both orchestrators' transcripts: ${hits}`);
+  assert.ok(!hits.includes(token), 'no token in a snippet');
+  assert.match(await h.search_transcripts!({ query: 'InputValidationError', until: '2020-01-01' }), /^No matches in/, 'the window holds');
+  const read = await h.agent_transcript!({ session_id: loth.id, last: 5 });
+  assert.match(read, /InputValidationError in unity/);
+  assert.ok(!read.includes(token), 'no token in a transcript read');
+  assert.deepEqual([...store.work.values()], before, 'the ledger is unchanged');
+  assert.equal(store.readTranscript(loth.id, 400).length, lothBefore, 'the transcript is unchanged');
+  // Taken back: refused again. Filed with the grant, a request has it from the start; an intake request never.
+  assert.equal((await call(ben, 'update_work', { id: 'w1', transcript_read: false })).isError, false);
+  await assert.rejects(h.agent_transcript!({ session_id: ben.id }), /needs a transcript-read grant/);
+  await call(ben, 'request_work', { title: 'Hook refusals by skill', brief: 'From the transcripts.', transcript_read: true });
+  assert.equal(store.work.get('w2')!.transcriptRead?.by, 'Ben');
+  const intake = { ...store.work.get('w2')!, id: 'w9', transcriptRead: undefined, source: { kind: 'discord-bug', untrusted: true, channel: '#bugs' } } as WorkItem;
+  store.putWork(intake);
+  assert.match((await call(ben, 'update_work', { id: 'w9', transcript_read: true })).text, /^ERROR: w9 came from the intake/);
+});
+
 // ---------------------------------------------------------------- w643: Waiting on input, Queued, Blocked
 
 test('w643: decide_work block records a structured blocker; the request reads Blocked on it; when the blocker clears it unblocks by itself and the dispatcher is told to start it', async (t) => {
