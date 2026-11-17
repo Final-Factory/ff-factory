@@ -32,7 +32,7 @@ import { answersText } from '../shared/questionCard.ts';
 import { cargoShortOf, isCargoRepo, needsTimed, PAIR_HOLD_MS, TIMED_HOLD_MS, pairText, unfitWhy } from '../shared/capacity.ts';
 import { pickReclaim, type Pressure } from './priorityReclaim.ts';
 import { STEAM_READ } from '../shared/steam.ts';
-import { benchLockIn, type BenchState, type Machine, type Requester, type SessionInfo, type TranscriptEvent, type UserInfo, type WorkBlocker, type WorkItem } from '../shared/types.ts';
+import { benchLockIn, type BenchState, type BusyJob, type Machine, type MachineStats, type Requester, type SessionInfo, type TranscriptEvent, type UserInfo, type WorkBlocker, type WorkItem } from '../shared/types.ts';
 import { LIVE_HOLD_MS, releaseWhy } from './placeAgain.ts';
 import { ReportStore } from './reports.ts';
 import { reportProblem } from './ledgerRules.ts';
@@ -1613,6 +1613,42 @@ test('w384: the reaper stops idle workers whose request closed, moved on, or tha
   assert.ok(agents.reapIdle(now).includes(dirty.info.id));
   assert.equal(dirty.info.releaseDue?.why, 'stopped while idle: its request is closed (w6 done)');
   assert.equal(done.info.releaseDue, undefined, 'not in a machine sandbox: nothing to release');
+});
+
+
+test('w4589: a worker whose own background job is at work is not stopped as idle and keeps its sandbox; once the job goes quiet, or its request closes, it is', async (t) => {
+  const { store, sessions, machines, agents } = await setupOnMachine(t);
+  const now = Date.now();
+  const request = (id: string, status: WorkItem['status'], sessionIds: string[]) =>
+    store.putWork({ id, title: id, brief: 'x', priority: 'normal', keys: [], requestedBy: BEN, requesters: [BEN], humanAsked: true, status, createdAt: T0, updatedAt: T0, sessionIds, overlaps: [], asks: 0, log: [] });
+  // biscuit, 2026-11-17: w4568's worker 202bc503 sat 61 min between turns while its scenario batches ran.
+  const lab = machines.createSession('pc', { kind: 'worker', title: 'lab', permissionMode: 'bypassPermissions', sandbox: 'alpha' });
+  sessions.send(lab.info.id, 'hello');
+  await until('lab idle', () => lab.live && lab.info.status === 'idle');
+  request('w4568', 'active', [lab.info.id]);
+  lab.info.lastActivityAt = new Date(now - 61 * 60_000).toISOString();
+  const stats = (machines as unknown as { stats: Map<string, MachineStats> }).stats;
+  const report = (busyJobs: BusyJob[], at = now) => stats.set('pc', { ...(stats.get('pc') ?? ({} as MachineStats)), unity: { used: 0, interactive: 0, batch: 0, outside: 0, players: 0, overLimit: false, ramLimitPct: 90, waiting: [], granted: [], at: new Date(at).toISOString(), busyJobs }, at: new Date(at).toISOString() });
+  report([{ session: lab.info.id, pids: [4242], cpuSec: 41, what: 'python3, FinalFactory' }]);
+  assert.deepEqual(agents.reapIdle(now), [], 'kept: its job is at work');
+  assert.equal(lab.live, true);
+  assert.equal(lab.info.releaseDue, undefined, 'its sandbox is not released');
+  assert.match(agents.keepIdle(lab, true, true) ?? '', /its own background job is still at work on pc \(1 process\(es\), 41 s of CPU in the last minute: python3, FinalFactory\)/);
+  // Another worker's job, or a report from a daemon gone quiet, keeps nothing.
+  report([{ session: 'someone-else', pids: [1], cpuSec: 60, what: 'python3' }]);
+  assert.equal(agents.keepIdle(lab, true, true), undefined);
+  report([{ session: lab.info.id, pids: [4242], cpuSec: 41, what: 'python3' }], now - 6 * 60_000);
+  assert.equal(agents.keepIdle(lab, true, true), undefined, 'stats 6 min old');
+  // Its request closed: a busy job is no reason to keep it.
+  report([{ session: lab.info.id, pids: [4242], cpuSec: 41, what: 'python3' }]);
+  store.putWork({ ...store.work.get('w4568')!, status: 'done' });
+  assert.equal(agents.keepIdle(lab, true, true), undefined);
+  store.putWork({ ...store.work.get('w4568')!, status: 'active' });
+  // The job went quiet (a hung process uses no CPU, so the daemon lists none): stopped as idle, its sandbox due for release.
+  report([]);
+  assert.deepEqual(agents.reapIdle(now), [lab.info.id]);
+  await until('lab stopped', () => !lab.live);
+  assert.match((lab.info as SessionInfo).releaseDue?.why ?? '', /stopped while idle: idle for 61 min/);
 });
 
 

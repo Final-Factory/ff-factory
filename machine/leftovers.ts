@@ -54,6 +54,7 @@ import { norm, sizeOf, within } from '../server/cleanup.ts';
 import { publishedFile, readPublished } from '../server/published.ts';
 import { parsePsJson } from '../server/watchdog.ts';
 import { driveLabel, inNeverGames, installDrive, onInstallDrive } from '../server/rootFence.ts';
+import type { BusyJob } from '../shared/types.ts';
 import type { Proc, UnityPlatform } from './unity.ts';
 import { gamePlayers, isUnityBinary, splitArgs, unityProcesses } from './unitySlots.ts';
 import { inspectProcs, type ProcFacts } from './unityReaper.ts';
@@ -71,6 +72,8 @@ const MIN = 60_000;
  * - ORPHAN_GRACE_MS: a guess, as STOPPED_GRACE_MS: an orphan has no owner to come back for it.
  * - LOOKS: a process ends only once two looks (a minute apart) have seen it, so one odd listing never ends it.
  * - SERVER_IDLE_CPU_MS: as unityReaper.ts did with its 2 s CPU_ADVANCE_MS (now CPU_BUSY_SHARE): a compiler server serving a build uses seconds of CPU a minute.
+ * - BUSY_CPU_MS: as SERVER_IDLE_CPU_MS (w4589): a worker's own job using 2 s of CPU a minute (3% of a core) is at work; a hung
+ *   one, or a wait loop that only sleeps, uses a few ms. A scenario batch's player or a build uses tens of seconds a minute.
  * - TERM_WAIT_MS: a guess: a player or an Xvfb ends within a second of SIGTERM; what still runs 5 s later is killed.
  * - STUCK_RETRY_MS: a guess (w1983): a process SIGKILL did not end (taskkill /F failed: LothDesktop's gh pid 24280 of worker
  *   5322f111 was "ended" again every minute from 04:44Z on 2026-10-24) is tried once an hour, not at every look.
@@ -82,6 +85,7 @@ export const LEFTOVER = {
   ORPHAN_GRACE_MS: 10 * MIN,
   LOOKS: 2,
   SERVER_IDLE_CPU_MS: 2_000,
+  BUSY_CPU_MS: 2_000,
   TERM_WAIT_MS: 5_000,
   STUCK_RETRY_MS: 60 * MIN,
   LOOK_EVERY_MS: MIN,
@@ -347,6 +351,8 @@ export interface SessionFacts {
   wakeAt?: number;
   /** w3715: it holds a granted bench ticket of its own (not an editor boot's or a timed run's). */
   holdsTicket?: boolean;
+  /** w4589: it or what it runs is one of its worker's own jobs still at work ("2 process(es), 41 s of CPU in the last minute: python3"). */
+  busy?: string;
   /** When this daemon first saw the session not live (its first sight of it, when it never saw it live). */
   stoppedSince: number;
   now: number;
@@ -375,6 +381,10 @@ export function sessionVerdict(s: SessionFacts): { end: boolean; until?: number;
   const wake = s.wakeAt !== undefined && !holds ? s.wakeAt + LEFTOVER.WAKE_GRACE_MS : 0;
   const until = Math.max(after, wake);
   const state = `its worker stopped ${ago(s.now - s.stoppedSince)} ago`;
+  // w4589: a job of its own still at work while its request waits is the work, not a leftover (biscuit, 2026-11-17: w4568's
+  // worker 202bc503 was stopped as "idle for 61 min" and the sweep then ended its scenario batches; 58 scenarios were lost).
+  // A hung one uses no CPU and ends as before, and so does a busy one once no request waits for it.
+  if (s.busy && waited && !holds) return { end: false, why: `${state}; ${waits}, and its own job is still at work (${s.busy}): kept while it works (w4589)` };
   if (s.now < until) {
     const why = wake > after ? `its check-in comes due at ${clock(s.wakeAt!)}` : holds ? 'it holds bench ticket(s), so its check-in does not keep them' : waited ? waits : 'its work is over';
     return { end: false, until, why: `${state}; ${why}: kept until ${clock(until)}` };
@@ -477,6 +487,9 @@ export class LeftoverReaper {
   private persons: number[] = [];
   private others = 0;
   private lastAt?: number;
+  /** w4589: the CPU time of each worker's own job at the last look (by pid and command line), and the busy ones of the last look. */
+  private jobCpu = new Map<string, { cpuMs: number; at: number }>();
+  private busyJobs: BusyJob[] = [];
 
   constructor(d: LeftoverDeps) {
     this.d = d;
@@ -509,8 +522,83 @@ export class LeftoverReaper {
   }
 
   /** The game players of the last look, with their owner and age (list_sandboxes, the dashboard). */
-  report(): { players: PlayerLine[]; others: number; persons: number[]; at?: string } {
-    return { players: this.players, others: this.others, persons: this.persons, ...(this.lastAt ? { at: new Date(this.lastAt).toISOString() } : {}) };
+  report(): { players: PlayerLine[]; others: number; persons: number[]; busyJobs: BusyJob[]; at?: string } {
+    return { players: this.players, others: this.others, persons: this.persons, busyJobs: this.busyJobs, ...(this.lastAt ? { at: new Date(this.lastAt).toISOString() } : {}) };
+  }
+
+  /**
+   * w4589: each worker's own jobs that used at least LEFTOVER.BUSY_CPU_MS of CPU a minute since the last look, and the
+   * processes at work (those, and the ones of the same worker that started them: a batch script waiting on its busy player).
+   * A worker's job is what it started outside its agent host's tree (detached, or left when its worker stopped: its
+   * FF_SESSION_ID), or inside it through a shell (a Bash call, run_in_background); never the claude process itself or an
+   * MCP server it runs, and never a timed run's, a person's, a shared build server, a display or an editor.
+   */
+  private async jobsOf(procs: Proc[], env: Map<number, ProcEnv>, self: Set<number>, topBatch: Set<number>, now: number): Promise<{ jobs: BusyJob[]; atWork: Map<number, string> }> {
+    const d = this.d;
+    const byPid = new Map(procs.map((p) => [p.pid, p]));
+    const prog = (p: Proc) => programOf(p, d.platform);
+    const cli = procs.filter((p) => p.pid > 0 && !self.has(p.pid) && prog(p) === 'claude');
+    const unread = cli.map((p) => p.pid).filter((pid) => !env.has(pid));
+    const cliEnv = unread.length ? await d.envOf(unread).catch(() => new Map<number, ProcEnv>()) : new Map<number, ProcEnv>();
+    const owner = new Map<number, string>();
+    for (const p of procs) {
+      if (p.pid <= 0 || self.has(p.pid) || prog(p) === 'claude') continue;
+      const e = env.get(p.pid);
+      if (e?.run || forPerson(e)) continue;
+      const kind = kindOf(p, d.platform, topBatch);
+      if (kind === 'server' || kind === 'display' || kind === 'editor') continue;
+      let shell = SHELL.test(prog(p));
+      let host: Proc | undefined;
+      const seen = new Set<number>([p.pid]);
+      for (let x = byPid.get(p.ppid); x && !seen.has(x.pid); x = byPid.get(x.ppid)) {
+        seen.add(x.pid);
+        if (prog(x) === 'claude') {
+          host = x;
+          break;
+        }
+        if (SHELL.test(prog(x))) shell = true;
+      }
+      const session = host ? (shell ? (env.get(host.pid) ?? cliEnv.get(host.pid))?.session : undefined) : e?.session;
+      if (session) owner.set(p.pid, session);
+    }
+    const next = new Map<string, { cpuMs: number; at: number }>();
+    const busy = new Map<number, number>();
+    const facts = owner.size ? await d.inspect([...owner.keys()]).catch(() => [] as ProcFacts[]) : [];
+    for (const f of facts) {
+      const p = byPid.get(f.pid);
+      if (!p || f.cpuMs === undefined) continue;
+      const id = `${p.pid}|${p.cmd}`;
+      const was = this.jobCpu.get(id);
+      next.set(id, { cpuMs: f.cpuMs, at: now });
+      if (!was || now <= was.at) continue;
+      const perMin = ((f.cpuMs - was.cpuMs) * MIN) / (now - was.at);
+      if (perMin >= LEFTOVER.BUSY_CPU_MS) busy.set(p.pid, perMin);
+    }
+    this.jobCpu = next;
+    const bySession = new Map<string, number[]>();
+    for (const pid of busy.keys()) {
+      const s = owner.get(pid)!;
+      if (!bySession.has(s)) bySession.set(s, []);
+      bySession.get(s)!.push(pid);
+    }
+    const jobs: BusyJob[] = [];
+    const atWork = new Map<number, string>();
+    for (const [session, pids] of [...bySession].sort(([a], [b]) => a.localeCompare(b))) {
+      pids.sort((a, b) => a - b);
+      const cpuSec = Math.round(pids.reduce((n, pid) => n + busy.get(pid)!, 0) / 1000);
+      const what = [...new Set(pids.map((pid) => prog(byPid.get(pid)!) || 'process'))].join(', ');
+      jobs.push({ session, pids, cpuSec, what });
+      const line = `${pids.length} process(es), ${cpuSec} s of CPU in the last minute: ${what}`;
+      // The busy ones and the ones of the same worker above them, so the script that drives a busy player is not ended under it.
+      for (const pid of pids) {
+        const seen = new Set<number>();
+        for (let x = byPid.get(pid); x && !seen.has(x.pid) && (x.pid === pid || owner.get(x.pid) === session || env.get(x.pid)?.session === session); x = byPid.get(x.ppid)) {
+          seen.add(x.pid);
+          atWork.set(x.pid, line);
+        }
+      }
+    }
+    return { jobs, atWork };
   }
 
   private async run(): Promise<Ended[]> {
@@ -569,6 +657,8 @@ export class LeftoverReaper {
     }
     const leases = d.leases();
     const now = d.now();
+    const { jobs, atWork } = await this.jobsOf(procs, env, self, topBatch, now);
+    this.busyJobs = jobs;
     const personOn = !!d.personPlay?.();
     const cands: Candidate[] = [];
     for (const p of procs) {
@@ -649,7 +739,7 @@ export class LeftoverReaper {
       let v: { end: boolean; until?: number; why: string };
       let owner: PlayerLine['owner'];
       if (c.session) {
-        v = sessionVerdict({ live: d.sessionLive(c.session), resumable: d.resumable(c.session), moved: d.movedRequests?.(c.session), wakeAt: d.wakeAt(c.session), holdsTicket: d.holdsTicket?.(c.session), stoppedSince: this.stopped.get(c.session) ?? now, now });
+        v = sessionVerdict({ live: d.sessionLive(c.session), resumable: d.resumable(c.session), moved: d.movedRequests?.(c.session), wakeAt: d.wakeAt(c.session), holdsTicket: d.holdsTicket?.(c.session), busy: atWork.get(c.p.pid), stoppedSince: this.stopped.get(c.session) ?? now, now });
         owner = d.sessionLive(c.session) ? 'live' : 'stopped';
         // Named by an argument only: another worker's shell may be reading that folder, so it ends once its starter is gone too.
         const starter = c.via === 'arg' && v.end ? liveParent(c.p, procs, facts, d.platform) : undefined;

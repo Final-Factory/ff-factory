@@ -31,7 +31,7 @@ import { sanitizeSteamClient, steamLabel } from '../shared/steam.ts';
 import { desktopLabel, sanitizeDesktop } from '../shared/desktop.ts';
 import { HOST_LOGIN, machineLogin, type AccountIdentity } from './usage.ts';
 import type { AttachmentStore } from './attachments.ts';
-import type { BenchPriority, BenchWarning, NoTimedRuns, TimedAskMark, DeliveredAttachment, EffortLevel, ImageInput, Machine, MachineGuardSettings, MachinePause, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PersonPlayReport, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, CleanupSummary } from '../shared/types.ts';
+import type { BenchPriority, BenchWarning, BusyJob, NoTimedRuns, TimedAskMark, DeliveredAttachment, EffortLevel, ImageInput, Machine, MachineGuardSettings, MachinePause, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PersonPlayReport, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, CleanupSummary } from '../shared/types.ts';
 import { DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT, WORK_OPEN } from '../shared/types.ts';
 import type { StaleContext } from './staleOutput.ts';
 import { checkStringMap, readJsonDurable, writeJsonDurable } from './durable.ts';
@@ -52,7 +52,9 @@ const ATTACH_SLICE = 200;
  */
 const ATTACH_SLICE_MS = 25;
 /** w1894: a daemon's person-play report older than this holds nothing (its stats come every 15 s). */
-export const PERSON_PLAY_STALE_MS = 3 * 60_000;
+export /** w4589: a guess with a margin: a daemon sends stats every few seconds and the sweep looks once a minute; older is a daemon gone quiet. */
+const BUSY_JOB_STALE_MS = 5 * 60_000;
+const PERSON_PLAY_STALE_MS = 3 * 60_000;
 /**
  * A clip goes to a machine's GPU Whisper with a ping ahead of it (w615): no pong or message within this long and the
  * link is taken for dead, so the clip falls back at once instead of waiting out its timeout, and later clips skip that
@@ -579,6 +581,16 @@ export class MachineManager {
    * A person playing Final Factory on machine `id` now, or its grace after (w1894, machine/personPlay.ts), as its daemon's
    * stats said within PERSON_PLAY_STALE_MS while it is online; undefined otherwise (a daemon gone holds nothing).
    */
+  /**
+   * w4589: worker `session`'s own background jobs at work on machine `id`, as its daemon's last stats said (the leftover
+   * sweep's busyJobs), or undefined: none, the machine offline, or stats older than BUSY_JOB_STALE_MS.
+   */
+  busyJobOf(id: string, session: string, now = Date.now()): BusyJob | undefined {
+    const s = this.stats.get(id.toLowerCase()) ?? this.stats.get(id);
+    if (!s?.unity?.busyJobs || !this.isOnline(id) || now - Date.parse(s.at) > BUSY_JOB_STALE_MS) return undefined;
+    return s.unity.busyJobs.find((j) => j.session === session);
+  }
+
   personPlayOf(id: string, now = Date.now()): PersonPlayReport | undefined {
     const s = this.stats.get(id);
     if (!s?.personPlay || !this.isOnline(id) || now - Date.parse(s.at) > PERSON_PLAY_STALE_MS) return undefined;

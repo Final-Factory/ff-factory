@@ -947,6 +947,10 @@ portal (`unity` and `switch_branch` with a machine alone are refused, and the da
   - When an idle holder's last ticket goes, its pending wake_me fires then (`Waker.fireEarly`), not at its fixed time.
   - A stopped worker's processes that hold a ticket end 2 minutes after it stopped, whatever its check-in
     (`sessionVerdict` `holdsTicket`, machine/leftovers.ts).
+  - A stopped worker's own job still at work (2 s of CPU a minute or more, `LEFTOVER.BUSY_CPU_MS`) is kept while a
+    request waits for it (`sessionVerdict` `busy`, w4589), and so are the processes of its own that started it (a batch
+    script waiting on its busy player). A hung or idle one ends after the grace as before; a busy one too once no request
+    waits for it.
   A busy holder is still pre-empted by the queue's own turn limit when an equal or higher-priority waiter waits (w1832),
   and keeps the lock while only lower-priority work waits (w1860).
 

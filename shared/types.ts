@@ -622,6 +622,11 @@ export interface UnitySlotsReport {
   playerList?: PlayerSeen[];
   /** Other processes of stopped workers still here, ending within their grace (w1197). */
   leftoverProcesses?: number;
+  /**
+   * w4589: workers whose own background jobs used CPU over the last look (machine/leftovers.ts busyJobs): the portal counts
+   * them as activity, so it neither stops such a worker as idle nor releases its sandbox. Absent: none, or a daemon before w4589.
+   */
+  busyJobs?: BusyJob[];
   overLimit: boolean;
   ramPct?: number;
   /** New launches wait at or above this RAM use. */
@@ -630,6 +635,17 @@ export interface UnitySlotsReport {
   waiting: { label: string; count: number; holder: string; since: string; why: string; session?: string; position?: number }[];
   granted: { label: string; count: number; holder: string; since: string }[];
   at: string;
+}
+
+/** w4589: a worker's own background jobs at work, as its machine's daemon saw them (UnitySlotsReport.busyJobs). */
+export interface BusyJob {
+  session: string;
+  /** The busy processes. */
+  pids: number[];
+  /** CPU seconds they used in the last minute, together. */
+  cpuSec: number;
+  /** Their programs, for the log ("python3, FinalFactory"). */
+  what: string;
 }
 
 /** One game player as its machine's daemon saw it (UnitySlotsReport.playerList, w1196). */

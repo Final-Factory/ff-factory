@@ -1741,7 +1741,7 @@ export class Daemon {
       const unity = this.slots.report();
       // Each game player with its owner and age (w1196): list_sandboxes and the dashboard flag the orphans.
       const left = this.leftovers.report();
-      if (unity && left.at) Object.assign(unity, { playerList: left.players, leftoverProcesses: left.others });
+      if (unity && left.at) Object.assign(unity, { playerList: left.players, leftoverProcesses: left.others, ...(left.busyJobs.length ? { busyJobs: left.busyJobs } : {}) });
       // A timed run's bench lock (w1600): the portal keeps Live view editors from starting beside it.
       const benchLock = readBenchLock(this.cfg.root);
       // Its timed legs, running or waiting (w1628): a release build goes to another build computer meanwhile.
