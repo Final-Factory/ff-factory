@@ -2157,7 +2157,7 @@ export interface QueuedLeg {
  * others join. It counts as room only where that many computers that fit have room at once (shared/capacity.ts pairRoom).
  */
 export interface WorkPair {
-  /** Computers at once, one worker on each (2 to PAIR_MAX_LEGS). */
+  /** Computers at once, one worker on each (1 to PAIR_MAX_LEGS; 1: one computer runs host and client side by side). */
   legs: number;
   /** The request whose worker asked for it with request_pair, and that worker: Blocked on this one's report meanwhile. */
   for?: string;
