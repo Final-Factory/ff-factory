@@ -165,6 +165,28 @@ machines.
 A daemon deployed before this has no `publish_attachment` in its catalog, so its agents do not see the tool until it is
 redeployed (outdated daemons are redeployed once idle, as after any update). The protocol number is unchanged.
 
+### A built game player (w4613)
+
+`publish_attachment {player: <commit>}` (instead of `file`) packs the ready entry `<sha>-<os>` of this computer's shared
+player cache (`playerCacheRoot`, the game repo's `scripts/nightly/player_cache.py` layout) for its own OS: `tar -czf` of
+`build-manifest.json` and `player/` into the session's temp folder, published as `player-<sha>-<os>.tar.gz` and deleted
+after (`machine/playerCache.ts` `packPlayer`). It refuses an entry whose manifest is not `status: ok` for that commit and
+OS, a short commit two entries match, and a commit the cache does not hold. A Windows player of 1963 MB packed to 748 MB
+in 27 s (measured, lothdesktop, 2026-11-17).
+
+`fetch_attachment` of such a name downloads into `<cache>/.fetch-<id>-<name>` and unpacks it into a work folder in the
+cache, checks the manifest says ok for the commit and OS in the name, and renames it to the entry with a `last-used`
+file and a `fetched` line in `cache.log` (`installPlayer`), so `build_player.sh` finds it and skips the build. Another
+OS's player and an entry already there that is not ready are refused; an entry already ready is kept (a `hit`). The
+tarball goes either way. Eviction is `player_cache.py evict`'s, as for a built entry.
+
+`request_pair {player: <att id>}` stores it on the pair (`WorkPair.player`); a leg on a computer of that OS that does not
+hold the commit (where w4601's line does not apply) gets "Fetch the requester's player instead of building it" in its
+first message (`shared/capacity.ts` `fetchPlayerNote`). A player of another commit than the run's is refused.
+
+A packed player uploaded by a machine has its own cap, 3 GiB (`PLAYER_MAX_BYTES`, `shared/attachments.ts`), not
+`attachments.maxMB`; the same name from the page keeps the normal cap. It is kept 2 days (`PLAYER_RETENTION_DAYS`).
+
 ## Untrusted content
 
 An attachment is data from a person, possibly forwarded from a player. Every agent is told so in its brief and in the

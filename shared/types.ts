@@ -2190,6 +2190,17 @@ export interface QueuedLeg {
  * started together (start_agent with pair_sandboxes), such as a two-machine multiplayer determinism check: leg 1 hosts, the
  * others join. It counts as room only where that many computers that fit have room at once (shared/capacity.ts pairRoom).
  */
+/** w4613: a game player the requester published from its player cache (publish_attachment player) for a pair run's legs. */
+export interface PairPlayer {
+  /** The attachment, "att_..." (a player-<sha>-<os>.tar.gz). */
+  id: string;
+  /** Its cache entry, `<40 hex sha>-<os>`. */
+  key: string;
+  os: 'win' | 'mac' | 'linux';
+  /** Packed, in bytes. */
+  size: number;
+}
+
 export interface WorkPair {
   /** Computers at once, one worker on each (1 to PAIR_MAX_LEGS; 1: one computer runs host and client side by side). */
   legs: number;
@@ -2253,6 +2264,11 @@ export interface WorkPair {
    */
   pr?: string;
   commit?: string;
+  /**
+   * w4613 (request_pair player): the player the requester built and published; a leg on a computer of its OS that does not
+   * hold it fetches it into its own player cache with fetch_attachment instead of building (shared/capacity.ts fetchPlayerNote).
+   */
+  player?: PairPlayer;
   /** The requests its finished result was sent to (w2057, Orchestrators.pairFinished): each told once. */
   told?: string[];
   /**

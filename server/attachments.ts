@@ -5,7 +5,7 @@ import { redactFileText } from './scrubSecrets.ts';
 import { pipeline } from 'node:stream/promises';
 import { Transform } from 'node:stream';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { ATTACHMENT_ID, CHUNK_BYTES, INBOX_DIR, MAX_ATTACHMENTS, MAX_CHUNK_BYTES, attachmentKind, attachmentName, fmtBytes, inboxName } from '../shared/attachments.ts';
+import { ATTACHMENT_ID, CHUNK_BYTES, INBOX_DIR, MAX_ATTACHMENTS, MAX_CHUNK_BYTES, attachmentKind, attachmentName, fmtBytes, inboxName, PLAYER_MAX_BYTES, PLAYER_RETENTION_DAYS, playerAttachmentOf } from '../shared/attachments.ts';
 import type { AttachmentRef, AttachmentSettings, DeliveredAttachment } from '../shared/types.ts';
 import { isObject, readJsonDurable, writeJsonDurable, type Check } from './durable.ts';
 
@@ -136,11 +136,13 @@ export class AttachmentStore {
   begin(input: { name: unknown; size: unknown } & UploadOrigin): { uploadId: string; name: string; size: number; received: number; chunkBytes: number } {
     const size = Number(input.size);
     if (!Number.isSafeInteger(size) || size <= 0) throw new AttachmentError(400, 'size: the file is empty, or its size is not a whole number of bytes');
-    const max = this.settings.maxBytes;
-    if (size > max) throw new AttachmentError(413, `the file is ${fmtBytes(size)}; the limit is ${fmtBytes(max)} (config attachments.maxMB)`);
     const sha256 = input.sha256 === undefined ? undefined : String(input.sha256).toLowerCase();
     if (sha256 !== undefined && !SHA256.test(sha256)) throw new AttachmentError(400, 'sha256: 64 hex digits');
     const name = attachmentName(input.name);
+    // w4613: a game player a machine's daemon packed from its player cache has its own cap; a person's file never does.
+    const player = !!input.machineId && !!playerAttachmentOf(name);
+    const max = player ? PLAYER_MAX_BYTES : this.settings.maxBytes;
+    if (size > max) throw new AttachmentError(413, `the file is ${fmtBytes(size)}; the limit is ${fmtBytes(max)} (${player ? 'a packed game player, PLAYER_MAX_BYTES' : 'config attachments.maxMB'})`);
     const uploadId = randomBytes(16).toString('hex');
     const meta: PartialMeta = {
       uploadId,
@@ -392,7 +394,9 @@ export class AttachmentStore {
     if (days > 0) {
       const kept = new Set(this.keep());
       for (const r of [...this.records.values()]) {
-        if (!kept.has(r.id) && now - Date.parse(r.lastUsedAt) > days * 86_400_000) {
+        // w4613: a packed game player keeps for PLAYER_RETENTION_DAYS at most.
+        const keepDays = playerAttachmentOf(r.name) ? Math.min(days, PLAYER_RETENTION_DAYS) : days;
+        if (!kept.has(r.id) && now - Date.parse(r.lastUsedAt) > keepDays * 86_400_000) {
           this.records.delete(r.id);
           records++;
         }

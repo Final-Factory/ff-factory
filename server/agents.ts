@@ -78,7 +78,7 @@ import { REVIEW_DEFAULTS, type ReviewStore } from './review.ts';
 import { ReportError, type ReportStore } from './reports.ts';
 import { REPORT_FILTER } from './launch.ts';
 import { REPORT_KINDS, questionFor, type ReportSummary } from '../shared/types.ts';
-import { INBOX_DIR, MAX_ATTACHMENTS, attachmentLine, fmtBytes, publishedAttachmentText } from '../shared/attachments.ts';
+import { INBOX_DIR, MAX_ATTACHMENTS, attachmentLine, fmtBytes, playerAttachmentOf, publishedAttachmentText } from '../shared/attachments.ts';
 import { MACHINE_ACCOUNT, SECRET_KEYS, dispatcherOwnAccount, machineRunEnv, maskSecret, pinnedDispatcherEnv, poolRunEnv, redactSecrets } from './secrets.ts';
 import { Identity, forLine } from './identity.ts';
 import { crossOwnerLine, INVESTIGATE_AT, loopGuards, Orchestrators, OWNER_LOOP_MESSAGES_PER_HOUR, PERSON_MESSAGE_CHARS, timerFilings, unpushedText } from './orchestrators.ts';
@@ -105,7 +105,7 @@ import { WAIT_LINE_CHARS, summaryBrief, summaryText, waitSummary } from '../shar
 import { isMyMove, waitingItemOf } from '../shared/waiting.ts';
 import { checkAsks } from '../shared/questionCard.ts';
 import { DECISIONS, attachmentsNote, describeItem, doneOf, handoverNote, isFor, isOpen, livePair, pairLegOf, ledgerOrder, names, overlapLine, priorityThenAge, replacedLeg, requestAsFiled, requestLineRule, startProblem } from './work.ts';
-import { cachedPlayerNote, macRefusedScenario, MAC_REFUSES_SCENARIO, minPriorityText, needsBuild, needsLive, needsOf, needsTimed, pairRoom, pairText, cargoShortOf, isCargoRepo, PAIR_HOLD_MS, PAIR_MAX_LEGS, TIMED_HOLD_MS } from '../shared/capacity.ts';
+import { cachedPlayerNote, fetchPlayerNote, macRefusedScenario, MAC_REFUSES_SCENARIO, minPriorityText, needsBuild, needsLive, needsOf, needsTimed, pairRoom, pairText, cargoShortOf, isCargoRepo, PAIR_HOLD_MS, PAIR_MAX_LEGS, TIMED_HOLD_MS } from '../shared/capacity.ts';
 import { BUILD_PLAN_DOC, BuildPlans, NOT_RELEASE, type BuildPlan, type SeatResult } from './buildPlans.ts';
 import { SEAT_GRACE_MS, seatAction, seatNotice } from './releaseSeat.ts';
 import { RELEASE_RULES } from './releaseLanes.ts';
@@ -120,7 +120,7 @@ import { statsLine, systemStats } from './system.ts';
 import { commandLine, launchIndependent, run } from './proc.ts';
 import { type HostHealthMonitor } from './hostHealth.ts';
 import { describeCleanup, describeCleanupItems, describeCleanupLog } from './cleanup.ts';
-import type { BenchTicketGlance, BuildHold, HostHealth, TimedVerdict } from '../shared/types.ts';
+import type { BenchTicketGlance, PairPlayer, BuildHold, HostHealth, TimedVerdict } from '../shared/types.ts';
 import { workerTickets } from './benchHolders.ts';
 import { BenchStops } from './benchStop.ts';
 import { PLAYERS_IN_SANDBOX } from './cloneGuard.ts';
@@ -1717,7 +1717,7 @@ export class Agents {
 
   /** What a publish_attachment tool says about itself (the cap from config attachments). */
   private publishAttachmentText(): string {
-    return `Hand a file to another worker, on any computer: it goes up to FF Factory's attachment store on ${reviewHost()} over FF Factory's own link and comes back as an attachment id (att_…). Put the id in your report; your orchestrator or the dispatcher passes it on with attachments: [id], and that worker gets its own copy in ${INBOX_DIR}/. file: one file in your working folder or your own temp folder (TMP), up to ${fmtBytes(this.attachments?.settings.maxBytes ?? 0)} (config attachments.maxMB); any type. SHA-256 checked on arrival. Never copy files between machines yourself (ssh, scp, shares). For stills and clips people should look at, use publish_review instead.`;
+    return `Hand a file to another worker, on any computer: it goes up to FF Factory's attachment store on ${reviewHost()} over FF Factory's own link and comes back as an attachment id (att_…). Put the id in your report; your orchestrator or the dispatcher passes it on with attachments: [id], and that worker gets its own copy in ${INBOX_DIR}/. file: one file in your working folder or your own temp folder (TMP), up to ${fmtBytes(this.attachments?.settings.maxBytes ?? 0)} (config attachments.maxMB); any type. SHA-256 checked on arrival. Never copy files between machines yourself (ssh, scp, shares). player (instead of file, w4613): a commit whose game player this computer's shared player cache holds ready for its own OS; it is packed (about 750 MB for Windows, up to 3 GiB, kept 2 days) and a computer of the same OS installs it into its own player cache with fetch_attachment, so it skips the build; give the id to request_pair's player. For stills and clips people should look at, use publish_review instead.`;
   }
 
   /** Who published an attachment (docs/attachments.md, "Agents' files"): the person the agent works for, and the agent. */
@@ -2143,9 +2143,20 @@ export class Agents {
       ...(Array.isArray(a.avoid) ? { avoid: a.avoid.filter((x): x is string => typeof x === 'string').slice(0, 6) } : {}),
       ...(typeof a.pr === 'string' && a.pr.trim() ? { pr: a.pr } : {}),
       ...(typeof a.commit === 'string' && a.commit.trim() ? { commit: a.commit } : {}),
+      ...(typeof a.player === 'string' && a.player.trim() ? { player: this.pairPlayer(a.player) } : {}),
     });
     this.blockerWatch?.kick();
     return out;
+  }
+
+  /** w4613: request_pair's player, an attachment publish_attachment made from a player cache entry, as the pair keeps it. */
+  private pairPlayer(id: string): PairPlayer {
+    if (!this.attachments) throw new Error('attachments are not wired into this server');
+    const rec = this.attachments.get(id);
+    if (!rec) throw new Error(`player: no attachment "${clip(id, 40)}" (publish_attachment with player: <commit> answers one)`);
+    const p = playerAttachmentOf(rec.name);
+    if (!p) throw new Error(`player: ${rec.id} is ${rec.name}, not a packed game player; publish one with publish_attachment player: <commit>`);
+    return { id: rec.id, key: p.key, os: p.os, size: rec.size };
   }
 
   /** Reads a pull request for a ci: wait (w907); set by the server (ghPrHealth), absent in tests that do not read GitHub. */
@@ -5205,6 +5216,12 @@ When a person asked for a design or an analysis (a profile, an investigation, a 
     return cachedPlayerNote(w.pair?.commit, { ...(platform ? { platform } : {}), ...(st?.playerCache ? { playerCache: st.playerCache } : {}) });
   }
 
+  /** w4613: the leg's line telling it to fetch the requester's published player of its OS (request_pair player), or ''. */
+  private fetchPlayerLine(w: WorkItem, machine: string): string {
+    const platform = this.store.machines.get(machine)?.platform ?? this.machines.statsOf(machine)?.platform;
+    return fetchPlayerNote(w.pair?.commit, w.pair?.player, platform ? { platform } : undefined);
+  }
+
   private async startPairLegs(
     w: WorkItem,
     a: { sandbox?: string; machine?: string; pair_sandboxes?: string[]; prompt: string; title?: string; model?: string; model_reason?: string; effort?: EffortLevel; permission_mode?: PermissionMode; attachments?: string[]; extra_agent?: boolean; override_gate?: string },
@@ -5286,7 +5303,7 @@ When a person asked for a design or an analysis (a profile, an investigation, a 
     for (const [i, l] of legs.entries()) {
       const handed = await this.prepareForNewWork(l.ref, undefined, legs.length > 1 ? `${w.id}-leg${i + 1}` : w.id, w.source, false);
       const others = legs.map((x, k) => `leg ${k + 1}${k ? '' : ' (host)'} ${x.label}`).join(', ');
-      const role = `\n\n## Your leg of this pair run (w1945)\n${legs.length === 1 ? `You are the only leg of this pair run, in ${l.label}: run the host and the client on this computer, side by side (an ffnightly.py MP scenario on the default lab starts both), the host held at 20 fps with --slow-host 20 (w4596). No other leg or worker is waiting for you, so there is nobody to message_pair.` : `You are leg ${i + 1} of ${legs.length}${i ? ', a client: join the host once it says it listens' : ', the host: start the run and say where it listens'}, in ${l.label}. The legs, all started together just now: ${others}. Talk to the other legs with \`mcp__machine__message_pair\` (each message reaches every other leg's worker; theirs come back to you as messages, and a message resumes a leg that ended its turn): the host says its address and port once it listens, a client says when it has joined. Wait for each other in one call (an until loop) or end your turn; never poll with short check-ins. Build and run the same commit on every leg.`} ${PLAYERS_IN_SANDBOX}${w.pair?.for ? `. The host leg ends with the result in a line "For ${w.pair.for}:" (what ran, the commit every leg ran, what the check compared and found, any desync report files), which resumes ${w.pair.for}'s worker` : ''}. ${legs.length > 1 ? 'A leg that fails says so to the others with message_pair before it ends. ' : ''}Every leg ends with DONE: ${w.id} once the run is over (Learned: as the request rules say).${this.cachedPlayerLine(w, l.machine)}`;
+      const role = `\n\n## Your leg of this pair run (w1945)\n${legs.length === 1 ? `You are the only leg of this pair run, in ${l.label}: run the host and the client on this computer, side by side (an ffnightly.py MP scenario on the default lab starts both), the host held at 20 fps with --slow-host 20 (w4596). No other leg or worker is waiting for you, so there is nobody to message_pair.` : `You are leg ${i + 1} of ${legs.length}${i ? ', a client: join the host once it says it listens' : ', the host: start the run and say where it listens'}, in ${l.label}. The legs, all started together just now: ${others}. Talk to the other legs with \`mcp__machine__message_pair\` (each message reaches every other leg's worker; theirs come back to you as messages, and a message resumes a leg that ended its turn): the host says its address and port once it listens, a client says when it has joined. Wait for each other in one call (an until loop) or end your turn; never poll with short check-ins. Build and run the same commit on every leg.`} ${PLAYERS_IN_SANDBOX}${w.pair?.for ? `. The host leg ends with the result in a line "For ${w.pair.for}:" (what ran, the commit every leg ran, what the check compared and found, any desync report files), which resumes ${w.pair.for}'s worker` : ''}. ${legs.length > 1 ? 'A leg that fails says so to the others with message_pair before it ends. ' : ''}Every leg ends with DONE: ${w.id} once the run is over (Learned: as the request rules say).${this.cachedPlayerLine(w, l.machine) || this.fetchPlayerLine(w, l.machine)}`;
       const prompt = `${a.prompt}${role}${requestAsFiled(w, a.prompt)}${this.handoverFor(w, this.target(l.ref), handed.branch)}${w.source ? workerRules(w, handed.branch ?? this.sandboxBranchOf(this.target(l.ref))) : ''}${requestLineRule(w)}`;
       const s = this.startWorker({ sandbox: l.ref, prompt, title: jobTitle(w.id, `${a.title} (leg ${i + 1}/${legs.length})`, { clip: true }), model: picked.model, effort: a.effort, permissionMode: a.permission_mode, from, requestedBy, attachments: files, workId: w.id });
       if (s.info.status === 'error') {
