@@ -13,7 +13,7 @@ import path from 'node:path';
 import type { AttachmentStore } from './attachments.ts';
 import { publicRef } from './attachments.ts';
 import { readJsonDurable, writeJsonDurable } from './durable.ts';
-import type { AttachmentRef, Machine } from '../shared/types.ts';
+import { WORK_PRIORITIES, type AttachmentRef, type Machine, type WorkPriority } from '../shared/types.ts';
 import { legOrder, legPlanS, MAX_VARIANTS, PIECE_MAX_BYTES, runBoundMinutes, runPlanMinutes, runTurns, timedArgsProblem, timedPlanProblem, timedSettingsOf, TURN_PLAN_MS, variantNameProblem, type LegSummary, type Piece, type TimedRunOrder, type TimedSettings, type TimedVariant } from '../shared/timedRun.ts';
 import { SMALL_TIMED_MAX_AGENTS } from './timedAsk.ts';
 
@@ -64,6 +64,18 @@ export interface TimedRunRecord {
   behind?: { id: string; since: string };
   /** w3405: since when it waits for its machine's exclusive bench ticket (its daemon's "waiting" reports); gone once granted. */
   waitingSince?: string;
+  /** w4620: when the portal last handed it to its daemon: the order its daemon plays its runs in. */
+  sentAt?: string;
+  /** w4620: the portal's count of runs sent, at its send: orders two sent in one millisecond. */
+  sentSeq?: number;
+  /**
+   * w4620: the portal told its daemon to drop it, so that a higher-priority run it was ahead of goes first (strict
+   * priority); its daemon's answer (a timed_run_done) sends it again, behind that run. Only a run that never held an
+   * exclusive turn is moved.
+   */
+  bumping?: { by: string; at: string };
+  /** w4620: the logs of its dropped try are still coming back; their result message is not this run's end. */
+  bumpLogs?: string;
 }
 
 /**
@@ -111,7 +123,15 @@ export interface TimedRunDeps {
    * scaled by the fleet's load). Default: never moves.
    */
   unavailableWait?: () => { ms: number; why: string };
+  /**
+   * w4620: a run's priority, read live: its open requests' highest (release > urgent > high > normal > low), low when none
+   * is open. lothsahn, 2026-11-17: "The factory should be using strict priority queues". Absent: no reordering.
+   */
+  priorityOf?: (r: TimedRunRecord) => WorkPriority;
 }
+
+/** w4620: how long a run told to step back waits for its daemon's answer before the portal sends it again anyway. */
+export const BUMP_ANSWER_MS = 10 * 60_000;
 
 /** What kind of timing computer a target is (w1996): one that only plays the game, or a small worker computer. */
 export type TimedTargetKind = 'play-only' | 'small';
@@ -196,12 +216,15 @@ export class TimedRuns {
   private readonly d: TimedRunDeps;
   private readonly runs = new Map<string, TimedRunRecord>();
   private pieces: Saved['pieces'] = {};
+  /** w4620: the last sentSeq given. */
+  private sentSeq = 0;
 
   constructor(d: TimedRunDeps) {
     this.d = d;
     this.file = path.join(d.dataDir, 'timed-runs.json');
     const saved = readJsonDurable<Saved>(this.file);
     for (const r of saved?.runs ?? []) this.runs.set(r.id, r);
+    this.sentSeq = Math.max(0, ...[...this.runs.values()].map((r) => r.sentSeq ?? 0));
     this.pieces = saved?.pieces ?? {};
   }
 
@@ -405,7 +428,87 @@ export class TimedRuns {
     this.grantPieces(r);
     // w2446: its machine's bench queue reads the run's "here" (Agents.benchPriorities) when the runner asks for the ticket
     this.d.beforeSend?.(r.machine);
-    if (this.d.post(r.machine, { type: 'timed_run', order: r.order })) this.set(r, 'sent', `sent to ${r.machine}`);
+    if (this.d.post(r.machine, { type: 'timed_run', order: r.order })) {
+      r.sentAt = this.iso();
+      r.sentSeq = ++this.sentSeq;
+      this.set(r, 'sent', `sent to ${r.machine}`);
+      this.reorder(r.machine);
+    }
+  }
+
+  /** w4620: a run's priority now, and its rank (higher goes first). */
+  private priorityOf(r: TimedRunRecord): WorkPriority {
+    return this.d.priorityOf?.(r) ?? 'normal';
+  }
+
+  private rankOf(r: TimedRunRecord): number {
+    return WORK_PRIORITIES.indexOf(this.priorityOf(r));
+  }
+
+  /**
+   * w4620: send `machineId`'s queued runs, the highest priority first, the oldest first within one (its daemon queues
+   * them in the order they arrive).
+   */
+  private dispatchMachine(machineId: string) {
+    // a run still stepping back is sent again first, by its priority among these, once its daemon answers
+    if ([...this.runs.values()].some((r) => r.machine === machineId && r.bumping && (r.state === 'sent' || r.state === 'running'))) return;
+    const queued = [...this.runs.values()].filter((r) => r.machine === machineId && r.state === 'queued');
+    queued.sort((a, b) => this.rankOf(b) - this.rankOf(a) || (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0));
+    for (const r of queued) this.dispatch(r);
+  }
+
+  /**
+   * w4620: the runs `machineId`'s daemon holds, in the order it plays them: the one whose turn plays now, then the rest in
+   * the order they were sent (its queue is first come, first served; a run sent again goes to its back).
+   */
+  daemonLine(machineId: string): TimedRunRecord[] {
+    const at = (r: TimedRunRecord) => r.sentAt ?? r.createdAt;
+    return this.runsOn(machineId)
+      .filter((r) => r.state === 'sent' || r.state === 'running')
+      .sort((a, b) => (a.state === 'running' ? 0 : 1) - (b.state === 'running' ? 0 : 1) || (at(a) < at(b) ? -1 : at(a) > at(b) ? 1 : 0) || (a.sentSeq ?? 0) - (b.sentSeq ?? 0));
+  }
+
+  /**
+   * w4620: strict priority on a computer's daemon, which plays one run at a time in the order the runs arrived
+   * (machine/timedRunner.ts). A run ahead of a higher-priority one that never held an exclusive turn (its state is still
+   * 'sent': fetching, building or waiting for the ticket) is told to step back (timed_run_cancel) and sent again at once,
+   * so it queues behind. A run that held a turn is never moved: its turn finishes (at most 30 minutes, w1832) and its
+   * legs are kept. On 2026-11-17 tr_903bab15aa (w4591, urgent, the 1.0.0.50 release's last check) waited on LothDesktop's
+   * daemon behind tr_97b11ed6a4 (w4587, normal), which itself waited 40 minutes for the exclusive ticket.
+   */
+  private reorder(machineId: string) {
+    if (!this.d.priorityOf || !this.d.isOnline(machineId)) return;
+    const line = this.daemonLine(machineId).filter((r) => !r.bumping);
+    for (let i = 0; i < line.length; i++) {
+      const x = line[i];
+      if (x.state === 'running') continue;
+      const mine = this.rankOf(x);
+      const u = line
+        .slice(i + 1)
+        .filter((y) => this.rankOf(y) > mine)
+        .sort((a, b) => this.rankOf(b) - this.rankOf(a))[0];
+      if (!u) continue;
+      x.bumping = { by: u.id, at: this.iso() };
+      this.save();
+      const text = `timed run ${x.id} (${this.whose(x)}, ${this.priorityOf(x)}) moved behind ${u.id} (${this.whose(u)}, ${this.priorityOf(u)}) on ${machineId}'s daemon: strict priority (w4620); it had held no exclusive turn, and is sent again at once`;
+      this.d.log?.(text);
+      this.d.note?.([...new Set([...x.requests, ...u.requests])], text);
+      this.cancelOn(machineId, x.id, `moved behind ${u.id} (${this.priorityOf(u)}) by strict priority (w4620): the portal sends it again at once`);
+    }
+  }
+
+  /** w4620: reorder every computer's runs by their priorities now (a request raised meanwhile moves its runs up). */
+  reprioritize() {
+    for (const m of new Set(this.list().filter((r) => r.state === 'sent' || r.state === 'running').map((r) => r.machine))) this.reorder(m);
+  }
+
+  /** w4620: a run told to step back is sent again, now behind the run it stepped back for. */
+  private bumped(r: TimedRunRecord, why: string) {
+    const by = r.bumping?.by;
+    delete r.bumping;
+    this.d.log?.(`timed run ${r.id}: ${why}; sent again behind ${by}`);
+    this.set(r, 'queued', `moved behind ${by} by strict priority (w4620): sent again`);
+    this.dispatchMachine(r.machine);
   }
 
   /**
@@ -438,9 +541,14 @@ export class TimedRuns {
       if (r.machine !== machineId) continue;
       // w2414: a run its daemon still holds (queued there behind others) fetches its pieces later: its grant may be gone
       if (r.state === 'sent' || r.state === 'running') this.grantPieces(r);
-      if ((r.state === 'sent' || r.state === 'running') && !(active ?? []).includes(r.id)) this.set(r, 'queued', `${machineId}'s daemon restarted: sent again`);
-      if (r.state === 'queued') this.dispatch(r);
+      if ((r.state === 'sent' || r.state === 'running') && !(active ?? []).includes(r.id)) {
+        delete r.bumping;
+        this.set(r, 'queued', `${machineId}'s daemon restarted: sent again`);
+      }
     }
+    // w4620: the highest priority first
+    this.dispatchMachine(machineId);
+    this.reorder(machineId);
   }
 
   /** What a timing machine's daemon reports of a run. */
@@ -467,7 +575,35 @@ export class TimedRuns {
         r.behind = behind;
         this.save();
       }
+      this.reorder(machineId);
       return;
+    }
+    if (m.type === 'timed_run_done' && r.bumping) {
+      // w4620: its daemon dropped it as told; the logs of that try come back under another name and are not its result
+      const res = m.result;
+      if (res && SHA.test(String(res.sha256)) && Number.isSafeInteger(res.size) && Number(res.size) > 0) {
+        r.bumpLogs = this.iso();
+        try {
+          const u = this.d.store.begin({ name: `timed-${r.id}-moved.tar.gz`, size: res.size, sha256: res.sha256, machineId, source: `timed run ${r.id} on ${machineId}, moved behind ${r.bumping.by} (w4620)` });
+          this.d.post(machineId, { type: 'timed_run_upload', id: r.id, uploadId: u.uploadId, chunkBytes: u.chunkBytes });
+        } catch {
+          // its daemon gives up on the upload in 10 minutes and says so; bumpLogs answers that message
+        }
+      }
+      this.bumped(r, `${machineId} dropped it (${String(m.error ?? '').slice(0, 160)})`);
+      return;
+    }
+    if (m.type === 'timed_run_result' && r.bumpLogs) {
+      // w4620: the end of its dropped try's logs, not of this run
+      delete r.bumpLogs;
+      const rec = m.attachmentId ? this.d.store.get(String(m.attachmentId)) : undefined;
+      if (rec?.name === `timed-${r.id}.tar.gz`) {
+        // this run's own logs after all (its dropped try's never came back): read as its result below
+      } else {
+        if (rec) this.d.store.forget([rec.id]);
+        this.save();
+        return;
+      }
     }
     if (m.type === 'timed_run_done') {
       // w2414: its daemon was refused its pieces (a grant the portal lost) while the portal still has them: send it once
@@ -716,6 +852,9 @@ export class TimedRuns {
   tick() {
     this.retarget();
     const now = this.now();
+    // w4620: a daemon that never answered a step-back (it no longer held the run, or the answer was lost) gets it again
+    for (const r of this.runs.values()) if (r.bumping && (r.state === 'sent' || r.state === 'running') && now - Date.parse(r.bumping.at) > BUMP_ANSWER_MS) this.bumped(r, `${r.machine} did not answer its step-back in ${BUMP_ANSWER_MS / 60_000} min`);
+    this.reprioritize();
     for (const r of this.runs.values()) {
       if (r.state === 'done' || r.state === 'failed') continue;
       const s: TimedSettings | undefined = r.order?.settings;
