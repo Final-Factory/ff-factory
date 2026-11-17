@@ -67,6 +67,7 @@ import { MachinePauses, PAUSE_TICK_MS, pauseHolds, pauseWhy, type HandBack } fro
 import { MOVE_AFTER_MS, NONE_MARK, ROOM_WAIT, briefOf, holdMoves, moveDecision, movedPrompt, stayLine, type MoveFacts } from './resumeMove.ts';
 import { playHolds, playLine } from '../shared/personPlay.ts';
 import { sandboxUseText, unitySlotsLine } from '../shared/fleet.ts';
+import { resumeWhereLine, stopWhereLine, type BeforeSend } from './resumeWhere.ts';
 import { isMidTurn, midTurnRefusal, othersMidTurn, snapshotOf, type OptionsFactory, type QueuedSend, type SessionHandle, type SessionManager, type TurnEndMeta } from './sessions.ts';
 import { FLAG_LABEL, SET_BLOCKER_KINDS, WORK_BLOCKER_KINDS, WORK_OPEN, WORK_PRIORITIES, type WorkBlockerKind, type WorkSource, type BenchPriority, type BenchGrant, type BenchAway, type AttachmentRef, type DeliveredAttachment, type ImageInput, type PermissionMode, type Requester, type Sandbox, type SessionInfo, type TranscriptEvent, type WorkItem, type WorkPriority, type WorkStatus } from '../shared/types.ts';
 import { attachmentForMachine, publicRef, publishableFile, publishedFilesBlock, uploadForMachine, type AttachmentStore } from './attachments.ts';
@@ -1319,6 +1320,19 @@ export class Agents {
     const git = i.machineId && i.machineSandbox ? this.store.machines.get(i.machineId)?.sandboxes?.find((x) => x.id === i.machineSandbox)?.git : undefined;
     if (git && git.dirty > 0 && !ignoreDirty) return `its sandbox has ${git.dirty} uncommitted change(s)`;
     return undefined;
+  }
+
+  /** w4608: message_agent's line on where a worker messaged between turns resumes (server/resumeWhere.ts). */
+  private resumeWhere(id: string, before: BeforeSend): string {
+    const info = this.store.sessions.get(id);
+    if (!info?.machineId) return '';
+    const m = this.store.machines.get(info.machineId);
+    return resumeWhereLine(before, { machine: info.machineId, sandbox: info.machineSandbox, pathOf: (sb) => m?.sandboxes?.find((x) => x.id === sb)?.path, released: !!info.placeReleased, placing: this.placeAgain.placingOf(id) });
+  }
+
+  /** w4608: stop_agent's word on where the stopped worker resumes (server/resumeWhere.ts). */
+  private stopWhere(info: SessionInfo): string {
+    return stopWhereLine(info.machineId, info.machineSandbox, !!info.placeReleased, this.placeAgain.stayWhy(info));
   }
 
   /** " Queued: …" when a message to this session waits for a free running slot (w384), else "". */
@@ -3299,10 +3313,14 @@ export class Agents {
     const problem = branchProblem(req.branch);
     if (problem) throw new Error(problem);
     const where = `${m.id}/${sb.id}`;
-    const b = busy(sb.sessionIds);
+    // w4608: an agent there on an agent seat (its open work is all not the game's, w1098) works in its own clone, never in
+    // this tree, so its turn holds no switch up: w4591's timed leg waited 30 min in lothdesktop/slot2 behind w4397's FFU
+    // agent, seated there beside it.
+    const seats = sb.sessionIds.filter((id) => id !== req.callerSessionId && this.onAgentSeat(id));
+    const b = busy(sb.sessionIds.filter((id) => !seats.includes(id)));
     if (b.length) throw new Error(midTurnRefusal(b, where));
-    // The daemon checks again with what it runs, and must not count the caller either.
-    const r = await this.machines.switchBranch(m.id, req.branch, req.createFrom, sb.id, req.callerSessionId, req.callerSessionId ? this.githubTokenFor(m.id, req.callerSessionId, `${req.callerSessionId}'s switch_branch`) : undefined);
+    // The daemon checks again with what it runs, and must not count the caller or the seated agents either.
+    const r = await this.machines.switchBranch(m.id, req.branch, req.createFrom, sb.id, req.callerSessionId, req.callerSessionId ? this.githubTokenFor(m.id, req.callerSessionId, `${req.callerSessionId}'s switch_branch`) : undefined, seats);
     // w1856: a release build's switch onto urgent/<v> or release/<v> remembers the branch it left, for build_plan done.
     const caller = req.callerSessionId ? this.store.sessions.get(req.callerSessionId) : undefined;
     if (caller) {
@@ -4735,6 +4753,14 @@ export class Agents {
     const out = new Map<string, WorkItem[]>();
     for (const w of this.store.work.values()) for (const id of w.sessionIds) (out.get(id) ?? out.set(id, []).get(id)!).push(w);
     return out;
+  }
+
+  /** w4608: whether a session's open work is all not the game's (w1098), so it sits on an agent seat, never in the game tree. */
+  private onAgentSeat(id: string): boolean {
+    const info = this.store.sessions.get(id);
+    if (!info || info.kind !== 'worker') return false;
+    const open = this.openWorkOf(info);
+    return open.length > 0 && open.every((w) => needsOf(w) === 'agent');
   }
 
   private openWorkOf(info: SessionInfo, bySession?: Map<string, WorkItem[]>): WorkItem[] {
@@ -6360,13 +6386,15 @@ ${w.repo ?? ''}
             const wrap = work_id ? this.orchestrators.wrapUpBefore(w.info.id, work_id) : '';
             // Handed a request for the first time, it gets it as filed (w496), its intake rules and the PR line.
             const fresh = item && unsent;
+            // w4608: where a worker between turns was, and why its sandbox stays its, read before the send places it.
+            const before = w.live ? undefined : { sandbox: w.info.machineSandbox, released: !!w.info.placeReleased, stay: this.placeAgain.stayWhy(w.info) };
             await this.sendWithAttachments(session_id, `${wrap}${text}${why ? `
 
 [session] ${item!.id} came to this session, not a new one: ${why}` : ''}${fresh ? requestAsFiled(item, text) : ''}${fresh && item.source ? workerRules(item, this.sandboxBranchOf({ machine: w.info.machineId, machineSandbox: w.info.machineSandbox })) : ''}${fresh ? requestLineRule(item) : ''}`, from, { requestedBy, attachments: files });
             // w2231: a message parked on its Claude pool has just Blocked the request on that pool; the link waits for its resume.
             if (work_id && !this.sessions.parked(session_id).length) this.orchestrators.linkWorker(work_id, w.info, `sent to ${this.orchestrators.workerLine(w.info.id)}, already on it`, { overrideGate: override_gate });
             if (newTitle) this.sessions.setTitle(session_id, newTitle);
-            return `Sent, for ${requestedBy.displayName}${work_id ? ` (${work_id})` : ''}${sent(files.length)}.${why ? ` Same session (${why}).` : ''}${newTitle ? ` It is now "${newTitle}".` : ''}${Agents.goneLine(files)}${this.queuedLine(session_id)}`;
+            return `Sent, for ${requestedBy.displayName}${work_id ? ` (${work_id})` : ''}${sent(files.length)}.${why ? ` Same session (${why}).` : ''}${newTitle ? ` It is now "${newTitle}".` : ''}${Agents.goneLine(files)}${this.queuedLine(session_id)}${before ? this.resumeWhere(session_id, before) : ''}`;
           }),
         ),
         tool(
@@ -6407,8 +6435,9 @@ ${w.repo ?? ''}
           wrap(async ({ session_id, move_to, why, pin_words }) => {
             if (pin_words?.trim() && !move_to?.trim()) throw new Error('pin_words goes with move_to: the computer the person named');
             if (move_to?.trim()) return this.moveWorker(session_id, move_to, why ?? '', pin_words);
-            worker(session_id).stop();
-            return 'Stopped.';
+            const stopped = worker(session_id);
+            stopped.stop();
+            return `Stopped.${this.stopWhere(stopped.info)}`;
           }),
         ),
         tool(

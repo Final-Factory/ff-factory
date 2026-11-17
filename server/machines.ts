@@ -2957,7 +2957,7 @@ export class MachineManager {
   private readonly switchCalls = new Map<string, { resolve: (r: { from: string; to: string; notes: string[] }) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
 
   /** Switch the branch of a machine sandbox, on the machine (server/switchBranch.ts). callerSessionId: the agent asking, which its daemon does not count as busy. */
-  switchBranch(machineId: string, branch: string, createFrom?: string, sandbox?: string, callerSessionId?: string, githubToken?: string) {
+  switchBranch(machineId: string, branch: string, createFrom?: string, sandbox?: string, callerSessionId?: string, githubToken?: string, seatSessionIds?: string[]) {
     if (!sandbox) return Promise.reject(new Error(MAIN_CLONE_NO_AGENTS));
     const sb = (this.requireSandboxDaemon(machineId), this.requireSandbox(machineId, sandbox).id);
     return new Promise<{ from: string; to: string; notes: string[] }>((resolve, reject) => {
@@ -2968,7 +2968,7 @@ export class MachineManager {
       }, 10 * 60_000);
       this.switchCalls.set(id, { resolve, reject, timer });
       try {
-        this.post(machineId, { type: 'switch', id, branch, createFrom, sandbox: sb, ...(callerSessionId ? { callerSessionId } : {}), ...(githubToken ? { githubToken } : {}) });
+        this.post(machineId, { type: 'switch', id, branch, createFrom, sandbox: sb, ...(callerSessionId ? { callerSessionId } : {}), ...(githubToken ? { githubToken } : {}), ...(seatSessionIds?.length ? { seatSessionIds } : {}) });
       } catch (e) {
         clearTimeout(timer);
         this.switchCalls.delete(id);

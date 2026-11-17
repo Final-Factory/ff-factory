@@ -131,7 +131,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // workers run without the guard until it is updated.
 // w4601 (no bump): `playerCache` on `stats`, the ready players of the daemon's shared player cache; an older portal copies only the
 // fields it knows and drops it, and an older daemon never sends it (its pair legs are placed as before, without the cache).
-const DECIDED = { protocol: 9, fingerprint: 'ca709a9b9e9e9562' };
+// w4608 (no bump): `seatSessionIds` on `switch`, the agents on an agent seat in that sandbox, whose turns do not hold a switch; an older
+// daemon ignores the field and waits on them as before, and an older portal never sends it.
+const DECIDED = { protocol: 9, fingerprint: 'c1a1d00d90158b93' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {
