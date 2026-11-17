@@ -2340,6 +2340,59 @@ test('w2653: a worker exports the spend record only once its person grants it, a
   assert.match((await call(ben, 'update_work', { id: 'w9', spend_read: true })).text, /^ERROR: w9 came from the intake/);
 });
 
+test('w4497: a worker reads every transcript only once its person grants transcript reading, read-only, secrets masked; an intake request never gets it', async (t) => {
+  const { store, machines, dispatcher, chat, call } = await setupOnMachine(t);
+  const ben = chat(BEN).info;
+  const loth = chat(LOTH).info;
+  const token = `github_pat_${'q'.repeat(60)}`;
+  // Two other agents' transcripts: Ben's and Lothsahn's orchestrators, neither the worker's own.
+  store.append(ben.id, { kind: 'assistant', text: 'InputValidationError on wake_me: minutes missing' });
+  store.append(loth.id, { kind: 'tool_result', toolUseId: 'x1', isError: true, text: `InputValidationError in unity: action required ${token}` });
+  await call(ben, 'request_work', { title: 'Tool-call failures of the last 8 hours', brief: 'Count them by cause.' });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Audit the failures', title: 'Failures', work_id: 'w1' });
+  assert.equal(started.isError, false, started.text);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const info = store.sessions.get(id)!;
+  const m = store.machines.get('pc')!;
+  const tools = machines.hooks!.specFor(info, m).mcp?.tools.map((x) => x.name) ?? [];
+  assert.ok(tools.includes('search_transcripts') && tools.includes('agent_transcript'), 'a worker has both tools, deferred');
+  assert.doesNotMatch(machines.hooks!.specFor(info, m).append ?? '', /Transcript reading is granted/, 'no grant, no line in its brief');
+  const h = machines.hooks!.handlersFor(info, m);
+  const since = new Date(Date.now() - 8 * 3600_000).toISOString();
+  // Refused without the grant.
+  await assert.rejects(h.search_transcripts!({ query: 'InputValidationError', since }), /search_transcripts needs a transcript-read grant on one of your open requests \(w1\)/);
+  await assert.rejects(h.agent_transcript!({ session_id: loth.id }), /agent_transcript needs a transcript-read grant on one of your open requests \(w1\)/);
+  // Only the request's own person grants it.
+  assert.match((await call(loth, 'update_work', { id: 'w1', transcript_read: true })).text, /^ERROR: w1 is not Lothsahn's request/);
+  const granted = await call(ben, 'update_work', { id: 'w1', transcript_read: true });
+  assert.match(granted.text, /w1: its workers may now read every transcript/);
+  assert.equal(store.work.get('w1')!.transcriptRead?.by, 'Ben');
+  assert.match((await call(ben, 'list_work', { id: 'w1' })).text, /Its workers may read every transcript \(search_transcripts, agent_transcript; granted by Ben\)/);
+  assert.match(machines.hooks!.specFor(info, m).append ?? '', /Transcript reading is granted \(w1, granted by Ben\)/, 'its brief says so');
+  // Every agent, in a time window; read-only (the ledger and the transcripts are unchanged), secrets masked.
+  // The fake worker's own echo turn lands its report first: that is its own, not these reads.
+  await until('the worker reported', () => !!store.work.get('w1')!.outcome);
+  const before = structuredClone([...store.work.values()]);
+  const lothBefore = store.readTranscript(loth.id, 400).length;
+  const hits = await h.search_transcripts!({ query: 'InputValidationError', since, until: new Date(Date.now() + 60_000).toISOString() });
+  assert.ok(hits.includes(ben.id) && hits.includes(loth.id), `hits in both orchestrators' transcripts: ${hits}`);
+  assert.ok(!hits.includes(token), 'no token in a snippet');
+  assert.match(await h.search_transcripts!({ query: 'InputValidationError', until: '2020-01-01' }), /^No matches in/, 'the window holds');
+  const read = await h.agent_transcript!({ session_id: loth.id, last: 5 });
+  assert.match(read, /InputValidationError in unity/);
+  assert.ok(!read.includes(token), 'no token in a transcript read');
+  assert.deepEqual([...store.work.values()], before, 'the ledger is unchanged');
+  assert.equal(store.readTranscript(loth.id, 400).length, lothBefore, 'the transcript is unchanged');
+  // Taken back: refused again. Filed with the grant, a request has it from the start; an intake request never.
+  assert.equal((await call(ben, 'update_work', { id: 'w1', transcript_read: false })).isError, false);
+  await assert.rejects(h.agent_transcript!({ session_id: ben.id }), /needs a transcript-read grant/);
+  await call(ben, 'request_work', { title: 'Hook refusals by skill', brief: 'From the transcripts.', transcript_read: true });
+  assert.equal(store.work.get('w2')!.transcriptRead?.by, 'Ben');
+  const intake = { ...store.work.get('w2')!, id: 'w9', transcriptRead: undefined, source: { kind: 'discord-bug', untrusted: true, channel: '#bugs' } } as WorkItem;
+  store.putWork(intake);
+  assert.match((await call(ben, 'update_work', { id: 'w9', transcript_read: true })).text, /^ERROR: w9 came from the intake/);
+});
+
 // ---------------------------------------------------------------- w643: Waiting on input, Queued, Blocked
 
 test('w643: decide_work block records a structured blocker; the request reads Blocked on it; when the blocker clears it unblocks by itself and the dispatcher is told to start it', async (t) => {
@@ -4463,6 +4516,12 @@ test("w936: main_clone grants a machine's main clone to a request's workers: its
   // No grant: the clone is protected, as before.
   assert.equal(specNow().guard.mainClone, undefined);
   assert.match(specNow().append, /Protected: the machine's main clone/);
+  // w4499: the prompt states what the daemon-read guard (server/daemonReads.ts) allows, so a worker's first command passes it.
+  const promptNow = specNow().append;
+  assert.match(promptNow, /each daemon read is its own command with a full path/);
+  assert.match(promptNow, /no cd into the folder, no `VAR=value` prefix/);
+  assert.match(promptNow, /pipe it only into head, tail, grep, sort, wc, uniq, cut or jq/);
+  assert.match(promptNow, /copy first .* and work on the copy in \$TMPDIR/);
 
   // Another person, an unknown machine: refused, nothing set.
   turn(loth, 'human');
@@ -4939,6 +4998,56 @@ test('w2045: merge on green: a worker in the arm is told it may leave its report
   assert.equal(w.status, 'done', w.log.slice(-3).join(' | '));
   assert.ok(w.log.some((l) => l.includes(`merge-on-green pilot (w2045): FF Factory merged ${pr} at abc1234def56 on green CI with no model turn`)));
   assert.equal(agents.waker.pending(a.id), undefined, 'the worker is not resumed');
+});
+
+test('w4498: arming merge on green checks the PR at once: a draft is refused with gh pr ready, a failing Evidence check with the section to add; a passing PR still arms', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }]);
+  mergeOnGreenArm(o, () => true);
+  const pr = 'Final-Factory/FinalFactory#3741';
+  const head = 'abc1234def5678';
+  const report = 'TL;DR: in.\n\nDONE: w1\nLearned: nothing new';
+  let health: PrHealth = { state: 'open', head, headRef: 'w4461', draft: true };
+  let evidence: string | undefined;
+  const asked: string[] = [];
+  agents.prHealth = async () => health;
+  agents.prEvidence = async (ref) => (asked.push(ref), evidence);
+  const a = await startedFor(env, 'w1');
+  // #3741 as it happened: still a draft. Refused now, with the command that fixes it; nothing recorded.
+  await assert.rejects(
+    async () => a.h.blocked_on!({ request: 'w1', prs: [`ci:${pr}`], head, what: 'CI on #3741', merge_on_green: report }),
+    /merge_on_green refused: PR #3741 is still a draft, and GitHub will not merge a draft\. Run gh pr ready 3741 -R Final-Factory\/FinalFactory, then call blocked_on again with merge_on_green\. Nothing was recorded\./,
+  );
+  assert.equal(store.work.get('w1')!.status, 'active');
+  // #3748 and #3760 as they happened: no Evidence section. Refused now, with the check's lines and the section to add.
+  health = { state: 'open', head, headRef: 'w4470' };
+  evidence = 'the Evidence check refused it (pr_evidence.py --repo Final-Factory/FinalFactory --pr 3741, exit 1):\n  - no "## Evidence" section';
+  await assert.rejects(
+    async () => a.h.blocked_on!({ request: 'w1', prs: [`ci:${pr}`], head, what: 'CI on #3741', merge_on_green: report }),
+    (e: Error) => {
+      assert.match(e.message, /^merge_on_green refused: PR #3741 would not merge on green, because the Evidence check refused it .*\n {2}- no "## Evidence" section\n/);
+      assert.match(e.message, /gh pr edit 3741 --body-file <f>\): a "## Evidence" section with a "Kind:" line \(Kind: other/);
+      assert.match(e.message, /a claims table .* and a "Not verified:" line/);
+      assert.match(e.message, /Nothing was recorded\.$/);
+      return true;
+    },
+  );
+  assert.equal(store.work.get('w1')!.status, 'active');
+  assert.equal(store.work.get('w1')!.blocked, undefined);
+  // A wait without merge_on_green is not checked for evidence, and a draft may wait on CI.
+  health = { state: 'open', head, headRef: 'w4461', draft: true };
+  asked.length = 0;
+  assert.match(String(await a.h.blocked_on!({ request: 'w1', prs: [`ci:${pr}`], head, what: 'CI on #3741' })), /Recorded: w1 is Blocked on CI on/);
+  assert.deepEqual(asked, []);
+  // Ready, and the Evidence check passes: it arms.
+  health = { state: 'open', head, headRef: 'w4461' };
+  evidence = undefined;
+  const set = String(await a.h.blocked_on!({ request: 'w1', prs: [`ci:${pr}`], head, what: 'CI on #3741', merge_on_green: report }));
+  assert.match(set, /^Recorded: w1 is Blocked on CI on .*, merge on green \(w2045\)/);
+  assert.deepEqual(asked, [pr]);
+  assert.deepEqual(store.work.get('w1')!.blocked!.mergeOnGreen, { head, report, session: a.id });
 });
 
 test('w3021: merge on green with a short head: blocked_on records the PR head whole, and a head recorded short still merges at the full sha and files the report', async (t) => {

@@ -186,7 +186,7 @@ export const CATALOG = {
     deploys: z.array(z.string().max(40)).max(2).optional().describe('Deploys that must happen first (w890): "portal" for a portal deploy, or a machine id for that machine\'s daemon update. It clears when a different commit runs there; you are resumed then, in any free sandbox, for the check that comes after it.'),
     what: z.string().min(1).max(200).describe('What you wait for, in a line ("w727 PR #1291 and w752 fix merged into master").'),
     request: z.string().max(16).optional().describe('The request ("w750") that waits, when you serve several; default: the one you are on.'),
-    merge_on_green: z.string().max(12000).optional().describe('Only when FF Factory told you your request is in the merge-on-green pilot (w2045), with one ci: pull request and head: the report you would write after the merge, whole (its DONE line, Learned: and the rest). On green CI FF Factory merges at head and files it, and you are not resumed; on red you are resumed as usual. If GitHub refuses the merge as not mergeable (a conflict with main), FF Factory keeps it and resumes you to merge main in and push: then call blocked_on with the new head and no merge_on_green, and it is re-armed with the kept report (w3906).'),
+    merge_on_green: z.string().max(12000).optional().describe('Only when FF Factory told you your request is in the merge-on-green pilot (w2045), with one ci: pull request and head: the report you would write after the merge, whole (its DONE line, Learned: and the rest). On green CI FF Factory merges at head and files it, and you are not resumed (a draft pull request, or one whose Evidence check fails, is refused at once with the fix, w4498); on red you are resumed as usual. If GitHub refuses the merge as not mergeable (a conflict with main), FF Factory keeps it and resumes you to merge main in and push: then call blocked_on with the new head and no merge_on_green, and it is re-armed with the kept report (w3906).'),
   },
   /** w1945 (docs/machines.md, "Pair runs"): a check that needs several computers at once, filed as one request; the worker waits on its report. */
   request_pair: {
@@ -404,6 +404,22 @@ export const CATALOG = {
     person: z.string().max(64).optional().describe('Only the requests of this person (user id or display name).'),
     offset: rangedNumber(0, undefined, 'Skip this many matching requests (the next page).').optional(),
     limit: rangedNumber(1, 50, 'Requests per page, default 20; a page also stops at 40,000 characters.').optional(),
+  },
+  /** w4497 (docs/orchestrators.md "Workers read the ledger"): any session's transcript, read-only, with a transcript-read grant. */
+  agent_transcript: {
+    session_id: z.string().max(80).describe('The session id (from search_transcripts).'),
+    last: rangedNumber(5, 400, 'How many events (default 40).').optional(),
+    full_text: z.boolean().optional().describe('Longer cuts of each message and tool call (default: assistant text 600 characters, tool input 120).'),
+  },
+  /** w4497: full-text search over every agent's transcript, read-only, with a transcript-read grant. */
+  search_transcripts: {
+    query: z.string().min(1).max(400).describe('All words must match; "quoted phrases" stay together.'),
+    sandbox: z.string().max(80).optional().describe('Only this sandbox ("beast/slot3").'),
+    machine: z.string().max(40).optional().describe('Only this machine.'),
+    agent: z.string().max(120).optional().describe('A session id, standing agent id or part of a title.'),
+    since: z.string().max(40).optional().describe('From this ISO time or date (a time window with until).'),
+    until: z.string().max(40).optional().describe('Up to this ISO time or date.'),
+    limit: rangedNumber(1, 100, 'Default 30.').optional(),
   },
   /** docs/spend.md "The export" (w2653): the spend record as CSV, read-only, with a spend-read grant. */
   spend_export: {

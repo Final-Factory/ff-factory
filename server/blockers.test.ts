@@ -380,10 +380,13 @@ test("w3572: a pr gate on another request's PR stays open while that PR conflict
 
 test('w907: gh pr view is read for the head, the base and GitHub\'s mergeability; UNKNOWN is no conflict', async () => {
   const ref = 'Final-Factory/ff-factory#283';
-  const view = (out: unknown) => fakeGh([{ match: /--json state,mergeable,baseRefName,headRefOid,headRefName,body$/, out }]);
+  const view = (out: unknown) => fakeGh([{ match: /--json state,mergeable,baseRefName,headRefOid,headRefName,body,isDraft$/, out }]);
   assert.deepEqual(await ghPrHealth(ref, view({ state: 'OPEN', mergeable: 'CONFLICTING', baseRefName: 'main', headRefOid: 'abc', headRefName: 'w890' }).run), { state: 'open', conflict: { base: 'main' }, head: 'abc', headRef: 'w890' });
   assert.deepEqual(await ghPrHealth(ref, view({ state: 'OPEN', mergeable: 'UNKNOWN', baseRefName: 'main', headRefOid: 'abc' }).run), { state: 'open', head: 'abc' });
   assert.deepEqual(await ghPrHealth(ref, view({ state: 'OPEN', mergeable: 'MERGEABLE', baseRefName: 'main', headRefOid: 'abc' }).run), { state: 'open', head: 'abc' });
+  // w4498: a draft says so (merge on green is refused on one); a ready PR carries no draft field.
+  assert.deepEqual(await ghPrHealth(ref, view({ state: 'OPEN', mergeable: 'MERGEABLE', baseRefName: 'main', headRefOid: 'abc', isDraft: true }).run), { state: 'open', head: 'abc', draft: true });
+  assert.equal(prHealthOf({ state: 'OPEN', isDraft: false }).draft, undefined);
   assert.equal(prHealthOf({ state: 'MERGED' }).state, 'merged');
   assert.equal(prHealthOf({ state: 'CLOSED' }).state, 'closed');
   await assert.rejects(ghPrHealth(ref, fakeGh([{ match: /./, err: 'HTTP 401: Bad credentials' }]).run), /gh pr view Final-Factory\/ff-factory#283: HTTP 401: Bad credentials/);

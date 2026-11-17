@@ -1477,6 +1477,12 @@ from the other pilots, server/mergeOnGreen.ts) is in the arm:
   `merge-on-green pilot (w2045)` on the request, which marks the arm. A worker out of the arm hears nothing of it; one that
   passes `merge_on_green` anyway, or without head, or with a report that has no DONE line for the request, gets the wait set
   as usual and a line saying why it was ignored (Orchestrators.mergeOnGreenAsk).
+- w4498: a `blocked_on` that passes `merge_on_green` is checked against what the merge itself would refuse, before anything
+  is recorded (Agents.declareBlocked): a draft pull request (`isDraft`, read with the w907 health read) is refused with
+  `gh pr ready <n>`, and the merge's own Evidence check (`ghEvidenceRefusal`, the pr_evidence.py run ghMerge makes; only
+  in a gated repository) is run, and a failure refused with its lines and the section to add (Kind:, a claims table, Not
+  verified:). Before, FinalFactory #3741 (a draft), #3748 and #3760 (no Evidence section) were each refused only after
+  green CI, a worker turn each. `ff-pr push` runs the same check after its push and prints a WARNING when it fails.
 - With the report left, the gate keeps it (`WorkBlocker.mergeOnGreen`: head, report, session) and the worker ends its turn with
   only its still-open line. A DONE in that turn is held: it is the report's (doneMarkers).
 - When the checks finish all green (`CiState.green`: every check or workflow run passed or skipped, or GitHub's merge state
@@ -1569,6 +1575,18 @@ to its own and named ones.
 `update_work {id, spend_read: true|false}` (`Orchestrators.setSpendRead`) sets `spendRead {by, at}` on the person's own
 request, never on one from the intake; while that request is open or stalled its workers may call `spend_export`
 (docs/spend.md, "The export"). It reads, never writes, and carries no account, key or token.
+
+**Transcript reading** (w4497) is granted the same way and on the same terms: `request_work transcript_read: true` or
+`update_work {id, transcript_read: true|false}` (`Orchestrators.setTranscriptRead`) sets `transcriptRead {by, at}` on the
+person's own request, never on one from the intake; while that request is open or stalled its workers may call
+`search_transcripts` (every agent's transcript, `since`/`until` for a time window) and `agent_transcript` (any session),
+for a transcript analysis such as w4495's tool-call failure audit. Every worker carries both names (group `workers`,
+deferred); without the grant a call is refused with what to ask for (`Agents.transcriptGrantOf`). They are the
+orchestrators' own handlers (`Agents.searchTranscriptsText`, `Agents.agentTranscriptText`): read-only, and each answer is
+masked again as it is read (`redactSecrets`, docs/vault.md). The worker never gets a path to the transcript files: it
+reads only through the tools, on the portal. `list_work {id}` and `read_work` show the grant, and the worker's brief says
+it in "The ledger and the portal's logs" (so do the ledger-read and spend-export grants, `Agents.readGrantLines`). Tested in
+`server/orchestrators.test.ts` ("w4497").
 
 **Read-only.** The tool has no argument that changes anything, and its handler builds its answer from the store
 without writing (tested by comparing the ledger before and after calls that pass `close`, `note`, `reopen` and
