@@ -54,7 +54,7 @@ import { readDiscordConfig } from './discordConfig.ts';
 import { LIMIT_END, doneIdsIn, doneProblem, legDoneIdsIn, learnedProblem, supersededIn, reportProblem, mergedMentionsIn, notDoneReason, pausedIn, reportVerdict, stillOpenIn, toolErrors, turnEvidence, turnTroubleOf, type TurnTrouble } from './ledgerRules.ts';
 import { findingTargets, recordFinding } from './findings.ts';
 import { aheadText, queuedNeeds, answerAfter, asksAPerson, dispatcherAskIn, HAND_UP_AUTOFILE_MS, HAND_UP_RESEND_MS, handUpsPending, holdsOf, orchestratorAskIn, standingTargetOf, personWaitIn, questionShareKey, reportWaitKey, roomShares, servedBy, UNDECIDED_BOUND_MS, unfiledFollowUpsIn } from '../shared/workState.ts';
-import { capacityBlockProblem, capacityWaitIn, macRefusedScenario, MAC_REFUSES_SCENARIO, needsOf, needsTimed, pairRoom, pairText, PAIR_MAX_LEGS, resolveNeeds, steamShortIn } from '../shared/capacity.ts';
+import { capacityBlockProblem, capacityWaitIn, macRefusedScenario, MAC_REFUSES_SCENARIO, needsOf, needsTimed, pairComputersReason, pairRoom, pairText, PAIR_MAX_LEGS, resolveNeeds, steamShortIn } from '../shared/capacity.ts';
 import { mentionsSteam, saysNoSteam, STEAM_NONE, STEAM_READ } from '../shared/steam.ts';
 import { mentionsMenus, MENUS_NONE, MENUS_READ, saysNone } from '../shared/desktop.ts';
 import type { HandBack } from './machinePause.ts';
@@ -3998,6 +3998,8 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       if (!w.pair && (input.pair_menus !== undefined || input.pair_steam !== undefined || input.pair_split !== undefined || input.pair_allow?.length)) throw new Error(`${w.id} is not a pair run: ${input.pair_steam !== undefined ? 'pair_steam' : input.pair_split !== undefined ? 'pair_split' : input.pair_allow?.length ? 'pair_allow' : 'pair_menus'} marks one (queue it with pair_legs to mark it a pair run)`);
       if (w.pair) {
         const r = remarkPair(w.pair, { legs: input.pair_legs, menus: input.pair_menus, steam: input.pair_steam, split: input.pair_split, allow: input.pair_allow });
+        // w4618: a leg count the dispatcher set is said outright: the queue never cuts it to one leg.
+        if (input.pair_legs !== undefined && !r.pair.legsSaid) r.pair.legsSaid = true;
         if (r.changed) {
           // A request filed by hand keeps its person's constraints; request_pair's say the marks (newPair).
           if (w.constraints === r.was) w.constraints = pairText(r.pair);
@@ -4108,7 +4110,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       // w1945: a two-machine run filed by hand (w1936, Ben's sync run for PR #2340) is marked a pair as it is queued, so its room,
       // its WRONG flag and the hold read all its legs; a worker's request_pair marks its own.
       if (input.pair_legs !== undefined && !(Number.isInteger(input.pair_legs) && input.pair_legs >= 1 && input.pair_legs <= PAIR_MAX_LEGS)) throw new Error(`pair_legs is the number of legs of a pair run, 1 to ${PAIR_MAX_LEGS}, not ${input.pair_legs}`);
-      const marked = input.pair_legs && !w.pair?.started ? { ...(w.pair ?? {}), legs: input.pair_legs } : w.pair;
+      const marked = input.pair_legs && !w.pair?.started ? { ...(w.pair ?? {}), legs: input.pair_legs, legsSaid: true as const } : w.pair;
       // w2459: a pair run filed by hand whose words say it needs Steam (a lobby, a Steam join) gets the Steam mark too.
       const steamed = marked && !marked.steam && !marked.noSteam && !marked.started && input.pair_legs && mentionsSteam(w.title, w.brief) ? { ...marked, steam: STEAM_READ } : marked;
       const pair = steamed && !steamed.menus && !steamed.noMenus && !steamed.steam && !steamed.started && input.pair_legs && mentionsMenus(w.title, w.brief) ? { ...steamed, menus: MENUS_READ } : steamed;
@@ -4772,10 +4774,9 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const what = clip(String(a.what ?? '').replace(/\s+/g, ' ').trim(), 100);
     const brief = String(a.brief ?? '').trim();
     if (!what || !brief) throw new Error('give what (one line: "MP-lowore-pin-pair on PR #2340") and brief (what the legs run: the branch or commit, the scenario or steps, what passes, where the result goes)');
-    const legs = a.legs ?? 2;
-    if (!Number.isInteger(legs) || legs < 1 || legs > PAIR_MAX_LEGS) throw new Error(`legs is 1 to ${PAIR_MAX_LEGS}: the computers it needs at once (1: one computer runs host and client side by side, ffnightly.py's default lab)`);
+    if (a.legs !== undefined && (!Number.isInteger(a.legs) || a.legs < 1 || a.legs > PAIR_MAX_LEGS)) throw new Error(`legs is 1 to ${PAIR_MAX_LEGS}: the computers it needs at once (1: one computer runs host and client side by side, ffnightly.py's default lab)`);
     const crossOs = String(a.cross_os ?? '').replace(/\s+/g, ' ').trim().slice(0, 300) || undefined;
-    if (crossOs && legs < 2) throw new Error('cross_os needs legs of 2 or more: a cross-OS check puts its legs on two operating systems, and one leg is one computer (w4596)');
+    if (crossOs && a.legs !== undefined && a.legs < 2) throw new Error('cross_os needs legs of 2 or more: a cross-OS check puts its legs on two operating systems, and one leg is one computer (w4596)');
     // w2459: a run that needs Steam (lobbies, a Steam host or join) goes only on computers signed in to it, a different
     // account on each leg: said by the worker, or read from its words; "none" says it needs none.
     const steamSaid = String(a.steam ?? '').replace(/\s+/g, ' ').trim().slice(0, 300);
@@ -4787,6 +4788,9 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     // w2648: its own menus field rules; its words are read only without one, and "none" is kept (noMenus) so nothing reads them later.
     const menusNone = !steam && saysNone(menusSaid);
     const menus = steam || menusNone ? undefined : menusSaid || (mentionsMenus(what, brief) ? MENUS_READ : undefined);
+    // w4618: 1 leg unless it names a reason to need computers at once; a leg count asked for outright stands (legsSaid).
+    const splitSaid = String(a.split ?? '').replace(/\s+/g, ' ').trim().slice(0, 300);
+    const legs = a.legs ?? (pairComputersReason({ title: what, brief, pair: { crossOs, steam, timed: a.timed === true, split: splitSaid && !saysNone(splitSaid) ? splitSaid : undefined } }) ? 2 : 1);
     const named = [...new Set((a.avoid ?? []).map((m) => String(m).trim().toLowerCase()).filter(Boolean))];
     const commit = String(a.commit ?? '').trim().toLowerCase() || undefined;
     if (commit && !/^[0-9a-f]{7,40}$/.test(commit)) throw new Error(`commit is the head commit the legs run (git rev-parse HEAD, 7 to 40 hex), not "${clip(commit, 60)}"`);
@@ -4831,6 +4835,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       }
       // w2648: asked again with legs or menus, a run whose legs never started takes them (w2631 was marked from misread words).
       const remark = !open.pair?.started && (a.legs !== undefined || menusSaid || a.split?.trim()) ? remarkPair(open.pair!, { legs: a.legs, menus: menusSaid, split: a.split }) : undefined;
+      if (remark && a.legs !== undefined && !remark.pair.legsSaid) remark.pair.legsSaid = true;
       if (remark?.changed) {
         p.pair = remark.pair;
         if (p.constraints === remark.was) p.constraints = pairText(p.pair);
@@ -4842,7 +4847,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     } else {
       const avoid = [...new Set([...(open ? this.pairFailedOn(open) : []), ...named])];
       const split = a.split?.replace(/\s+/g, ' ').trim().slice(0, 300);
-      p = this.newPair(w, sessionId, { what, brief, legs, crossOs, timed: a.timed === true, ...(split && !saysNone(split) ? { split } : {}), ...(steam ? { steam } : {}), ...(menus ? { menus } : {}), ...(menusNone ? { noMenus: MENUS_NONE } : {}), ...(steamNone ? { noSteam: STEAM_NONE } : {}), ...(open ? { retryOf: open.id } : {}), avoid, ...(pr ? { pr } : {}), ...(commit ? { commit } : {}) });
+      p = this.newPair(w, sessionId, { what, brief, legs, ...(a.legs !== undefined ? { legsSaid: true as const } : {}), crossOs, timed: a.timed === true, ...(split && !saysNone(split) ? { split } : {}), ...(steam ? { steam } : {}), ...(menus ? { menus } : {}), ...(menusNone ? { noMenus: MENUS_NONE } : {}), ...(steamNone ? { noSteam: STEAM_NONE } : {}), ...(open ? { retryOf: open.id } : {}), avoid, ...(pr ? { pr } : {}), ...(commit ? { commit } : {}) });
       if (open) this.supersedePair(open, p, spent!);
       head = open
         ? `${open.id} (${spent}) is cancelled, and its legs no longer count for ${w.id}: filed ${p.id}, a retry, ${pairText(p.pair!)}, with fresh legs. Only ${p.id}'s report resumes you, never one from ${open.id}'s legs. The dispatcher starts its legs together, one new worker on each computer, as soon as that many computers have room at once.`
@@ -5369,10 +5374,11 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   }
 
   /** The pair request request_pair files (w1945): the asking request's people and priority, a game sandbox per leg. */
-  private newPair(w: WorkItem, sessionId: string, x: { what: string; brief: string; legs: number; crossOs?: string; split?: string; timed: boolean; steam?: string; menus?: string; noMenus?: string; noSteam?: string; retryOf?: string; avoid?: string[]; pr?: string; commit?: string }): WorkItem {
+  private newPair(w: WorkItem, sessionId: string, x: { what: string; brief: string; legs: number; legsSaid?: true; crossOs?: string; split?: string; timed: boolean; steam?: string; menus?: string; noMenus?: string; noSteam?: string; retryOf?: string; avoid?: string[]; pr?: string; commit?: string }): WorkItem {
     const now = this.now().toISOString();
     const pair: WorkPair = {
       legs: x.legs,
+      ...(x.legsSaid ? { legsSaid: true as const } : {}),
       for: w.id,
       forSession: sessionId,
       ...(x.crossOs ? { crossOs: x.crossOs } : {}),
@@ -8982,6 +8988,32 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       out.push(w.id);
     }
     return out;
+  }
+
+  /**
+   * w4618: a Queued pair run of two or more legs whose legs never started, whose leg count nobody asked for (legsSaid), and
+   * that names no reason to need computers at once (pairComputersReason: cross_os, steam, timed, split, a pair lab or the
+   * relay in its words) is cut to one leg, once, and its log says so. One computer runs an ffnightly.py MP scenario's host and
+   * client on the default lab, so its second leg only waited for a second free computer: w4595 had not started 2 h 14 min
+   * after it was filed, while one leg of the same commit (w4609) was done in 51 min (r287, w4596). Returns the ids cut.
+   */
+  cutDefaultPairs(): string[] {
+    const cut: string[] = [];
+    for (const w of this.store.work.values()) {
+      const p = w.pair;
+      if (w.status !== 'queued' || !p || p.started || p.legs < 2 || p.legsSaid) continue;
+      if (pairComputersReason(w)) continue;
+      const r = remarkPair(p, { legs: 1 });
+      if (w.constraints === r.was) w.constraints = pairText(r.pair);
+      w.pair = r.pair;
+      w.brief = clip(`${w.brief}\n\nFF Factory cut this to one leg (w4618): it was ${r.was}, and it names no reason to need computers at once (cross_os, steam, timed, split, a pair lab or the relay). Its one leg runs the host and the client on its own computer (ffnightly.py's default lab), started with sandbox alone.`, 8000);
+      this.roomFlags.delete(w.id);
+      this.stamp(w, `cut to one leg (w4618): it was ${r.was}, and it names no reason to need computers at once (cross_os, steam, timed, split, a pair lab or the relay in its words); one computer runs an ffnightly.py MP scenario's host and client on the default lab. decide_work pair_legs sets its legs again if it needs more`);
+      this.store.putWork(w);
+      cut.push(w.id);
+    }
+    if (cut.length) this.capacityMayHaveFreed(`${cut.join(', ')} cut to one leg (w4618)`);
+    return cut;
   }
 
   /**

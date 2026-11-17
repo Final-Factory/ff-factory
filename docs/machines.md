@@ -1696,7 +1696,7 @@ LothDesktop and Beast, not just when BEAST is full").
   start together.
   - **Asking for one: `request_pair`** (a worker tool, `CATALOG.request_pair` in `server/launch.ts`; `Orchestrators.filePair`).
     `what` (a line), `brief` (what the legs run: branch or commit, scenario, what passes, where the result goes; each leg is
-    a new worker), `legs` (2 to `PAIR_MAX_LEGS`, 4; default 2), `cross_os` (why, only for the reasons the game repo's
+    a new worker), `legs` (1 to `PAIR_MAX_LEGS`, 4; default 1, or 2 when it names a reason to need computers at once: w4618, below), `cross_os` (why, only for the reasons the game repo's
     Determinism-Test-Strategy.md "Which machines" lists, w1692) and `timed` (a leg takes timing measurements; the only
     thing that makes a pair run timed, w3720: its words, notes and the timed runs they quote are never read for timing,
     `needsTimed` in `shared/capacity.ts`; decide_work `timed` sets or clears it while its legs have not started). It files a
@@ -1707,6 +1707,17 @@ LothDesktop and Beast, not just when BEAST is full").
     the worker waits on the one there is, unless that run is spent (below). The worker's brief says to use it, and never to hold a sandbox for a second
     machine's worker; a daemon older than the tool does not offer it (the portal sends a worker only the tools its daemon's
     catalog names).
+  - **One leg by default** (w4618, lothsahn: from w4596's findings, r287). ffnightly.py's default lab (`lab.win.json`,
+    `lab.linux.json`) runs an MP scenario's host and client on the one computer it runs on, so a second leg only repeats the
+    first and waits for a second free computer: w4595 (the pair run for w4571, two legs of ffnightly MP scenarios on the
+    default lab) had not started 2 h 14 min after it was filed, while w4609, one leg of the same commit, was done in 51 min.
+    `request_pair` without `legs` now files 1 leg, or 2 when the request names a reason to need computers at once
+    (`pairComputersReason` in `shared/capacity.ts`: `cross_os`, `steam`, `timed`, `split`, or `lab.pair-...`, `pair_relay`
+    or a pair lab in its words, read without FF Factory's own w3697 sentence). A leg count passed outright (`legs`,
+    `decide_work pair_legs`) is kept as `WorkPair.legsSaid` and stands. Each blocker-watch pass,
+    `Orchestrators.cutDefaultPairs` cuts a Queued pair run of two or more legs whose legs never started, with no reason and
+    no `legsSaid` (every run filed before w4618 included), to one leg, once: its log says "cut to one leg (w4618)" with
+    what it was, and a line is added to its brief.
   - **A retry starts fresh legs** (w2041, Ben: "A retry of a pair run starts fresh legs on online machines"). w1976, the
     pair run for w1904's PR #2364, put its client leg on lothlaptop, whose Tailscale was stuck, then offline; the host leg
     said DONE with the check not run. w1904's worker asked again ("retry", "retry 2"), each ask joined w1976, and each was
