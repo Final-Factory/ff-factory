@@ -1576,20 +1576,25 @@ to its own and named ones.
 request, never on one from the intake; while that request is open or stalled its workers may call `spend_export`
 (docs/spend.md, "The export"). It reads, never writes, and carries no account, key or token.
 
-**Transcript reading** (w4497) is granted the same way and on the same terms: `request_work transcript_read: true` or
-`update_work {id, transcript_read: true|false}` (`Orchestrators.setTranscriptRead`) sets `transcriptRead {by, at}` on the
-person's own request, never on one from the intake; while that request is open or stalled its workers may call
-`search_transcripts` (every agent's transcript, `since`/`until` for a time window) and `agent_transcript` (any session),
-for a transcript analysis such as w4495's tool-call failure audit. Every worker carries both names (group `workers`,
-deferred); without the grant a call is refused with what to ask for (`Agents.transcriptGrantOf`). They are the
-orchestrators' own handlers (`Agents.searchTranscriptsText`, `Agents.agentTranscriptText`): read-only, and each answer is
-masked again as it is read (`redactSecrets`, docs/vault.md). The worker never gets a path to the transcript files: it
-reads only through the tools, on the portal. `list_work {id}` and `read_work` show the grant, and the worker's brief says
-it in "The ledger and the portal's logs" (so do the ledger-read and spend-export grants, `Agents.readGrantLines`). Tested in
-`server/orchestrators.test.ts` ("w4497").
+**Transcript reading** is every worker's, with no grant (w4528, lothsahn: "Workers should be able to read each other's
+transcripts automatically"; w4497 had made it a per-request `transcript_read` grant, which cost w4501 a round trip to a
+person, and w4528 retired the flag from `request_work` and `update_work` and the `transcriptRead` field). A worker may
+call `search_transcripts` (every agent's transcript, `since`/`until` for a time window) and `agent_transcript` (any
+session); both are in group `workers`, deferred. They are the orchestrators' own handlers (`Agents.searchTranscriptsText`,
+`Agents.agentTranscriptText`): read-only, and each answer is masked again as it is read (`redactSecrets`, docs/vault.md).
+The worker never gets a path to the transcript files: it reads only through the tools, on the portal. Its brief says so
+in "The ledger and the portal's logs" (`Agents.readGrantLines`, with the ledger-read and spend-export grants).
 
-**Where a request's wall time went** (w4531). A worker whose open request carries both the ledger-read and the
-transcript-read grant may call `work_timing` (group `ledger`): it measures the last finished (`done`) requests, newest
+One worker is refused: one whose session serves, or served, a request quoting players' text (`source.untrusted`: a
+Discord bug or request thread, FFBox work that read players' words), whatever that request's status
+(`Agents.transcriptAccessOf`). Such a worker holds a player's words, the transcripts would give it private data (other
+people's sessions, unreleased work, team discussion, a secret `redactSecrets` does not recognise), and it can post out:
+as Max in its thread, in a public PR. That is the combination a prompt injection needs to exfiltrate, so the tools stay
+closed to it, and its brief and the refusal say why. A trusted intake source (a nightly run, a release, a master batch:
+`untrusted: false`) is no bar. Tested in `server/orchestrators.test.ts` ("w4528").
+
+**Where a request's wall time went** (w4531). A worker whose open request carries the ledger-read grant (transcripts
+are every worker's since w4528, so no second grant) may call `work_timing` (group `ledger`): it measures the last finished (`done`) requests, newest
 first by their last DONE (`last`, default 50, at most 300; `until` for an earlier window to compare with), in two parts
 (`server/workTiming.ts`):
 

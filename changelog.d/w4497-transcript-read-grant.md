@@ -6,3 +6,4 @@
   read-only, with secrets masked as now. Without it a worker's call is refused with what to ask for. The worker's brief
   says which grants it has. Applies to workers on a machine after its daemon updates. Docs: orchestrators.md ("Workers read
   the ledger"). Tests: `orchestrators.test.ts` ("w4497").
+  Superseded by w4528: every worker reads the transcripts with no grant, and the flag is retired.
