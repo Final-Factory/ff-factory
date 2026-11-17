@@ -610,7 +610,7 @@ test('the dispatcher acts for the request it serves, and runs destructive tools 
   assert.deepEqual(o.dispatcherActor('ben'), BEN);
   assert.throws(() => o.dispatcherActor('mallory'), /has not asked for anything/);
   assert.deepEqual(o.dispatcherActor(undefined, 'w1'), BEN);
-  o.decide({ id: 'w1', action: 'done', note: 'nothing to approve' });
+  o.decide({ id: 'w1', action: 'done', note: 'nothing to approve: no work is needed, Ben withdrew it' });
   assert.throws(() => o.dispatcherActor(undefined, 'w1'), /w1 is done/);
 });
 
@@ -10573,7 +10573,7 @@ test('w3615: every decide_work action but ask settles a pending question, and so
     await decide('w2', { action: 'queue' }),
     await decide('w3', { action: 'merge', into: 'w9' }),
     await decide('w4', { action: 'reject' }),
-    await decide('w5', { action: 'done' }),
+    await decide('w5', { action: 'done', note: 'decided: it repeats w9, which covers it' }),
   ];
   for (const r of results) assert.equal(r.isError, false, r.text);
   // start_agent (and message_agent with work_id) on it: a new worker linked.
@@ -10945,4 +10945,47 @@ test('w4613: request_pair with a published player: a leg on a computer of its OS
   assert.equal(fetchPlayerNote(sha, player, { platform: 'darwin' }), '');
   assert.match(fetchPlayerNote(sha, player, { platform: 'win32' }), /attachment att_\w+, 0 MB packed/);
   assert.match(fetchPlayerNote('1234567', player, { platform: 'win32' }), /the run's commit is 1234567: if it is not 670a034960, build instead/);
+});
+
+test('w4634: decide_work with no action sets only timed, report or pair marks; done refuses w4592\'s placeholder close', async (t) => {
+  const env = setup(t);
+  const { store, agents, dispatcher, call } = env;
+  agentsRoom(agents, []);
+  putRequests(store, [
+    { id: 'w1', by: LOTH, status: 'new', title: 'Release the next 1.0 build (1.0.0.50)', brief: 'Run a timed bench before the release.' },
+    { id: 'w2', by: LOTH, status: 'new', title: 'Why did the build slow down?' },
+  ]);
+  // w4592's own call, as it happened: refused, and the flag stays as it was.
+  const was = needsTimed(store.work.get('w1')!);
+  const bad = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'done', timed: false, note: 'placeholder' });
+  assert.equal(bad.isError, true, bad.text);
+  assert.match(bad.text, /placeholder note/);
+  assert.equal(store.work.get('w1')!.status, 'new');
+  assert.equal(needsTimed(store.work.get('w1')!), was);
+  // A real-looking note on a request no worker reported on: refused too.
+  const unworked = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'done', note: 'the release has gone out to players' });
+  assert.equal(unworked.isError, true, unworked.text);
+  assert.match(unworked.text, /no worker ever reported on w1/);
+  assert.equal(store.work.get('w1')!.status, 'new');
+  // No action: only the flag changes.
+  const flag = await call(dispatcher().info, 'decide_work', { id: 'w1', timed: false, note: 'a release, it times nothing' });
+  assert.equal(flag.isError, false, flag.text);
+  assert.match(flag.text, /w1 is not timed work now/);
+  assert.equal(store.work.get('w1')!.status, 'new');
+  assert.equal(needsTimed(store.work.get('w1')!), false);
+  const report = await call(dispatcher().info, 'decide_work', { id: 'w2', report: 'analysis', note: 'a person asked why' });
+  assert.equal(report.isError, false, report.text);
+  assert.equal(store.work.get('w2')!.report?.kind, 'analysis');
+  assert.equal(store.work.get('w2')!.status, 'new');
+  // No action and no flag, or an action's own field without its action: refused.
+  const empty = await call(dispatcher().info, 'decide_work', { id: 'w2', note: 'hm' });
+  assert.equal(empty.isError, true);
+  assert.match(empty.text, /needs an action/);
+  const stray = await call(dispatcher().info, 'decide_work', { id: 'w2', into: 'w1', timed: false, note: 'merge it' });
+  assert.equal(stray.isError, true);
+  assert.match(stray.text, /into belongs to an action/);
+  // Done with a reason still closes it.
+  const ok = await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'done', note: 'it repeats w1, which covers the same question' });
+  assert.equal(ok.isError, false, ok.text);
+  assert.equal(store.work.get('w2')!.status, 'done');
 });

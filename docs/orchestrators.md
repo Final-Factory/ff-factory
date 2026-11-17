@@ -415,8 +415,8 @@ fewest timed legs queued, then `placement.prefer`. A one-worker computer ranks f
   So, in `needsTimed`: a request said outright to be timed or not (decide_work `timed`, `WorkItem.timedMark`) is that
   and nothing else; a pair run (`WorkItem.pair`) is timed only by its own `timed` flag (request_pair `timed`), never by its
   words; and a note or brief that denies timing ("not a timing run", "needs no bench lock", `TIMED_DENIAL`) wins over the
-  older words that named it, newest first. A request whose words read as timed though it times nothing: decide_work any
-  action with `timed: false` (the request's log is stamped). Tests: `server/w3720PairNotTimed.test.ts` (w3705's real text)
+  older words that named it, newest first. A request whose words read as timed though it times nothing: decide_work with
+  `timed: false` and no action (w4634: an action is never picked just to carry the flag; the request's log is stamped). Tests: `server/w3720PairNotTimed.test.ts` (w3705's real text)
   and the w3720 case in `server/orchestrators.test.ts`.
 - **The ranking is the default, unless a machine is named** (lothsahn: "If a worker requests a specific machine for a
   reason, it does need to follow the workers request or the orchestrator's request for that placement. In absence of any
