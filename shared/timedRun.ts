@@ -6,6 +6,7 @@
 // scoped commands for the functionality needed"), the run is data, never a command: the player is the build's own
 // finalfactory.exe, started from the machine's player slot with the fixed arguments below; a variant adds only -ff
 // switches. This file is what the portal, the worker's daemon and the timing machine's daemon share.
+import type { WorkPriority } from './types.ts';
 
 /** One stretch of one file inside a piece. */
 export interface PiecePart {
@@ -59,6 +60,11 @@ export interface TimedRunOrder {
   /** Each piece's attachment id, by SHA-256. */
   pieceIds: Record<string, string>;
   settings: TimedSettings;
+  /**
+   * w4620: its request's priority when the portal sent it (release, urgent, high, normal, low). The daemon's queue starts the
+   * highest first, oldest first within one; none (an older portal) counts as low. A raise later is the portal's step-back.
+   */
+  priority?: WorkPriority;
 }
 
 /** What the timing machine's daemon tells the portal of a run (protocol FromDaemon). */

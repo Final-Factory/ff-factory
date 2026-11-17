@@ -22,6 +22,7 @@ import {
   isOpen,
   ledgerOrder,
   capacityOrder,
+  priorityJumps,
   startedPinned,
   limitProblem,
   limitsFor,
@@ -86,7 +87,7 @@ import { MERGE_ON_GREEN_MARK } from './mergeOnGreen.ts';
 import { handoffQuote, handoffReport, isHandoff } from './handoffReport.ts';
 import { commitsIn, normPr, pairCommitsOf, pairPrOf, pairRanCommit, prIn, resultFor, sameCommit, samePr } from './pairRuns.ts';
 import type { AttachmentRef, PairPlayer, BenchGrant, ConditionalDecision, CrashHold, ForYouMark, OpenAsk, WorkNeedsYou, GateResume, GitStatus, Machine, WorkAutoClosed, WorkBlocker, WorkDigest, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPair, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
-import { DISK_CLEANUP_FLOOR_GB, REPORT_KINDS, WORK_PRIORITIES, questionFor, type ReportKind, type ReportSummary } from '../shared/types.ts';
+import { DISK_CLEANUP_FLOOR_GB, REPORT_KINDS, WORK_PRIORITIES, atLeast, questionFor, type ReportKind, type ReportSummary } from '../shared/types.ts';
 import { FOR_YOU_CHARS, FOR_YOU_KEPT, forYouId, splitForYou } from '../shared/forYou.ts';
 
 /** w2045: the most of a worker's after-merge report a merge-on-green gate keeps (a DONE report is rarely longer). */
@@ -749,6 +750,8 @@ export class Orchestrators {
   /** When the first event of the capacity ping now waiting happened (w1944): a steady stream of events never holds it past CAPACITY.maxQuietMs. */
   private capacityFirstAt?: number;
   private readonly capacityWakes: number[] = [];
+  /** w4620: the priority jumps in the capacity order already logged, so each is logged once. */
+  private capacityJumps = new Set<string>();
 
   constructor(d: OrchestratorsDeps) {
     this.d = d;
@@ -7242,8 +7245,9 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const w = this.requireWork(id);
     if (!isOpen(w)) throw new Error(`${w.id} is ${w.status}: nothing to start`);
     const was = w.priority;
-    w.priority = 'urgent';
-    this.stamp(w, `${by.displayName} asked to start it now${was !== 'urgent' ? ` (priority ${was} → urgent)` : ''}`);
+    // w4620: never down from release
+    if (!atLeast(was, 'urgent')) w.priority = 'urgent';
+    this.stamp(w, `${by.displayName} asked to start it now${w.priority !== was ? ` (priority ${was} → urgent)` : ''}`);
     this.takeOver(w, by, `${by.displayName} pressed "Start now"`);
     this.store.putWork(w);
     this.gatherForDispatcher(w.requestedBy, updateNotice(w, by, `start it now: ${by.displayName} pressed "Start now" on the dashboard. Start it ahead of other queued work if any place fits (start_agent with its work_id); if nothing fits, keep it queued first in line and say why.`));
@@ -7297,7 +7301,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     if (!w.keys.includes(a.key)) w.keys = [...w.keys, a.key];
     if (w.source?.nightly) w.source.nightly.nights = [...w.source.nightly.nights, `${a.night} ${a.scenario}`].slice(-60);
     this.stamp(w, a.line);
-    if (a.urgent && w.priority !== 'urgent') {
+    if (a.urgent && !atLeast(w.priority, 'urgent')) {
       w.priority = 'urgent';
       this.stamp(w, 'priority urgent: the failing code shipped in a release');
     }
@@ -9101,6 +9105,10 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       // By priority, then started work that runs only on named computers (w2049), then oldest (capacityOrder): the order the
       // dispatcher should start them in (w1099: a high nightly run first). Low comes after normal, and still starts when it fits.
       const queued = [...this.store.work.values()].filter(waitsForRoom).sort(capacityOrder);
+      // w4620: a higher-priority request ahead of an older lower one is logged once, naming both (strict priority)
+      const jumps = priorityJumps(queued);
+      for (const j of jumps) if (!this.capacityJumps.has(j)) console.log(`ledger: capacity order: ${j}: strict priority (w4620)`);
+      this.capacityJumps = new Set(jumps);
       // The room now, not the room when the event happened: only a queued request that a computer with room could take is worth
       // a ping; w1944: one it can run on (no Mac for an MP scenario, no m5 for timed work).
       const facts = this.roomNow();
@@ -9113,7 +9121,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       const usable = queued.filter((w) => fit(w).ids.length);
       // Too soon after the last wake, or too many this hour: wait until one is allowed rather than dropping it. w1944: urgent
       // work that fits is not held by the hourly cap, only by the gap.
-      const hourly = this.capacityWakes.length >= CAPACITY.perHour && !usable.some((w) => w.priority === 'urgent') ? this.capacityWakes[0] + 3_600_000 - now : 0;
+      const hourly = this.capacityWakes.length >= CAPACITY.perHour && !usable.some((w) => atLeast(w.priority, 'urgent')) ? this.capacityWakes[0] + 3_600_000 - now : 0;
       const wait = Math.max((this.capacityWakes.at(-1) ?? 0) + CAPACITY.gapMs - now, hourly);
       if (wait > 0 && usable.length) {
         if (hourly > 0) console.log(`ledger: capacity ping waits ${Math.round(wait / 1000)} s: ${this.capacityWakes.length} this hour (at most ${CAPACITY.perHour}); fitting ${usable.map((w) => w.id).join(', ')}`);

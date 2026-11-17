@@ -39,12 +39,12 @@ test('w1643: work below the level never overflows onto the reserved computer (li
   const both = [idle('beast', 10), idle('lothdesktop', 5)];
   const normal = pickComputer(both, undefined, forPriority(prefs, 'normal'))!;
   assert.equal(normal.pick.id, 'lothdesktop');
-  assert.match(normal.why, /only avoided computers have room .*; beast is held \(reserved for urgent work only \(placement\.minPriority urgent; this work is normal\)\)/);
+  assert.match(normal.why, /only avoided computers have room .*; beast is held \(reserved for urgent and release work only \(placement\.minPriority urgent; this work is normal\)\)/);
   assert.equal(pick(both, prefs, 'urgent'), 'beast', 'urgent work takes the most room, BEAST');
   // Nothing else has room: normal work waits; the line says why.
   const only = [idle('beast', 10), full('lothdesktop')];
   assert.equal(pick(only, prefs, 'normal'), undefined);
-  assert.equal(preferLine(only, undefined, prefs), 'No computer has room for new work now (beast has room but takes urgent work only (placement.minPriority; this is normal)).');
+  assert.equal(preferLine(only, undefined, prefs), 'No computer has room for new work now (beast has room but takes urgent and release work only (placement.minPriority; this is normal)).');
   // placement.prefer does not get past it either.
   assert.equal(pick(both, { ...prefs, prefer: ['beast'] }, 'high'), 'lothdesktop');
 });
@@ -57,7 +57,7 @@ test('w1643: a request\'s priority is the one it has now: raised to the level, t
   assert.deepEqual([r.game, r.agent], [[], []], 'not room for low and normal work');
   assert.deepEqual(r.reserved, [{ id: 'beast', min: 'high', for: ['game', 'agent'] }]);
   assert.deepEqual(roomIds(r, 'game', w.priority), []);
-  assert.equal(unusableText(r, 'game', w.priority), 'beast has room but takes high and urgent work only (placement.minPriority; this is normal)');
+  assert.equal(unusableText(r, 'game', w.priority), 'beast has room but takes high, urgent and release work only (placement.minPriority; this is normal)');
   assert.equal(pick(cs, prefs, w.priority), undefined);
   w.priority = 'high';
   assert.deepEqual(roomIds(r, 'game', w.priority), ['beast']);
@@ -73,7 +73,7 @@ test('w1643: the workers already on a reserved computer go on: resumes read hold
   const prefs: PlacementPrefs = { minPriority: { beast: 'urgent' } };
   assert.equal(holdReason('beast', prefs), undefined);
   assert.match(holdReason('beast', { ...prefs, hold: { beast: 'Ben testing' } })!, /beast is on hold \(Ben testing\)/);
-  assert.equal(reservedReason('beast', prefs, 'high'), 'reserved for urgent work only (placement.minPriority urgent; this work is high)');
+  assert.equal(reservedReason('beast', prefs, 'high'), 'reserved for urgent and release work only (placement.minPriority urgent; this work is high)');
   assert.equal(reservedReason('beast', prefs, 'urgent'), undefined);
   assert.equal(reservedReason('lothdesktop', prefs, 'low'), undefined);
   // A move must let in every request the worker serves: the lowest of them.
@@ -86,18 +86,18 @@ test('w1643: the Capacity block says which computer is reserved and at what leve
   const lines = capacityLines(cs, undefined, { minPriority: { beast: 'urgent' } });
   assert.match(lines[0], /^## Capacity \(placement\.prefer first, avoided last, reserved only for the work they take, the rest spread by room;/);
   const beast = lines.find((l) => l.startsWith('- beast'))!;
-  assert.match(beast, /^- beast \[reserved: urgent work only\]: ROOM \d+% but RESERVED for urgent work only \(placement\.minPriority urgent\): low, normal and high work does not go there: /);
-  assert.match(beast, /agent slot: free \(0 of 10 mid-turn\), urgent work only$/);
+  assert.match(beast, /^- beast \[reserved: urgent and release work only\]: ROOM \d+% but RESERVED for urgent and release work only \(placement\.minPriority urgent\): low, normal and high work does not go there: /);
+  assert.match(beast, /agent slot: free \(0 of 10 mid-turn\), urgent and release work only$/);
   assert.match(lines.find((l) => l.startsWith('- lothdesktop'))!, /^- lothdesktop: ROOM \d+%: /);
-  assert.match(lines.find((l) => l.startsWith('Next new game-repo work'))!, /^Next new game-repo work: lothdesktop \(the only one with room; beast is held \(reserved for urgent work only/);
+  assert.match(lines.find((l) => l.startsWith('Next new game-repo work'))!, /^Next new game-repo work: lothdesktop \(the only one with room; beast is held \(reserved for urgent and release work only/);
   assert.match(lines.find((l) => l.startsWith('Next non-game work'))!, /: lothdesktop \(/);
   const reserved = lines.at(-1)!;
-  assert.match(reserved, /^Reserved by priority \(placement\.minPriority, w1643\): beast urgent work only\. The Next lines above are for low and normal work;/);
+  assert.match(reserved, /^Reserved by priority \(placement\.minPriority, w1643\): beast urgent and release work only\. The Next lines above are for low and normal work;/);
   assert.match(reserved, /Next urgent work: game beast \(.*\); non-game beast \(/);
   assert.doesNotMatch(reserved, /Next high work/, 'no computer is reserved for high work, so high work goes as normal work does');
   // high: both levels named.
   const high = capacityLines(cs, undefined, { minPriority: { beast: 'high' } }).at(-1)!;
-  assert.match(high, /beast high and urgent work only\. .*Next high work: game beast .*Next urgent work: game beast/);
+  assert.match(high, /beast high, urgent and release work only\. .*Next high work: game beast .*Next urgent work: game beast/);
   // Nothing reserved: no such line, and the block reads as before.
   assert.doesNotMatch(capacityLines(cs).join('\n'), /Reserved|RESERVED/);
 });
@@ -105,9 +105,9 @@ test('w1643: the Capacity block says which computer is reserved and at what leve
 test('w1643: start_agent\'s note for new work on a reserved computer names the reservation and where it goes instead; release builds count as urgent', () => {
   const cs = [idle('beast', 10), idle('lothdesktop', 5)];
   const prefs: PlacementPrefs = { minPriority: { beast: 'urgent' } };
-  assert.match(placementHint('beast', cs, undefined, forPriority(prefs, 'normal'))!, /^ Note: beast is held \(reserved for urgent work only \(placement\.minPriority urgent; this work is normal\)\); the next new game-repo work goes to lothdesktop/);
+  assert.match(placementHint('beast', cs, undefined, forPriority(prefs, 'normal'))!, /^ Note: beast is held \(reserved for urgent and release work only \(placement\.minPriority urgent; this work is normal\)\); the next new game-repo work goes to lothdesktop/);
   assert.equal(placementHint('beast', cs, undefined, forPriority(prefs, 'urgent')), undefined, 'urgent work: BEAST is next');
   // Live view and release build work keep their first lists among the computers the work may use (placement.live: beast).
-  assert.match(pickComputer(cs, undefined, forPriority(prefs, 'normal'), 'game', false, 'live')!.why, /beast is held \(reserved for urgent work only/);
+  assert.match(pickComputer(cs, undefined, forPriority(prefs, 'normal'), 'game', false, 'live')!.why, /beast is held \(reserved for urgent and release work only/);
   assert.equal(pickComputer(cs, undefined, forPriority(prefs, 'urgent'), 'game', false, 'build')!.pick.id, 'beast');
 });

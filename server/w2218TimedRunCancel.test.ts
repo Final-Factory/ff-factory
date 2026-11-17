@@ -78,6 +78,7 @@ async function rig(t: { after(fn: () => void): void }, o: { rounds?: number; gra
     return { id, what: `w2184 run ${id}`, requests: ['w2184'], session: 'sess-ba1849fa', variants: [{ name: 'base', args: [], files, pieces: ps }], save: { id: `att_save_${id}`, name: 'bench.zip', size: save.length, sha256: createHash('sha256').update(save).digest('hex') }, pieceIds, settings: { ...TIMED_DEFAULTS, rounds: o.rounds ?? 1, sampleS: 5, settleS: 5 } };
   };
   const reports: TimedRunReport[] = [];
+  const logs: string[] = [];
   const owners = { ended: 0 };
   Ticket.taken = 0;
   Ticket.released = [];
@@ -86,7 +87,7 @@ async function rig(t: { after(fn: () => void): void }, o: { rounds?: number; gra
     portalUrl: 'http://127.0.0.1:1',
     token: 'x',
     send: (m) => void reports.push(m),
-    log: () => {},
+    log: (l) => void logs.push(l),
     personBusy: o.personBusy ?? (() => undefined),
     savesDir: path.join(d, 'saves'),
     pollMs: 5,
@@ -115,7 +116,7 @@ async function rig(t: { after(fn: () => void): void }, o: { rounds?: number; gra
       const look = () => (ok() ? resolve() : Date.now() > end ? reject(new Error(`never: ${what}`)) : setTimeout(look, 10));
       look();
     });
-  return { d, runner, order, reports, owners, ended, until };
+  return { d, runner, order, reports, logs, owners, ended, until };
 }
 
 const node = (code: string, args: string[] = []) => spawn(process.execPath, ['-e', code, '--', ...args], { stdio: 'ignore' });
@@ -310,4 +311,25 @@ test('w3662: the portal keeps the words and logs of a run it had already ended',
   assert.equal(tr.get('tr_ab680eca38')?.result, 'att_logs');
   assert.equal(tr.get('tr_ab680eca38')?.state, 'failed');
   assert.match(tr.statusText('tr_ab680eca38'), /behind t00006001.*Its logs: attachment att_logs\./);
+});
+
+test('w4620: the daemon\'s queue starts the highest priority first, oldest first within one; the run playing is never cut short', async (t) => {
+  // lothsahn, 2026-11-17: "Why is urgent work in a queue behind non urgent work?" (tr_903bab15aa, urgent, queued first come behind normal runs)
+  const r = await rig(t, { grant: false, player: () => node('') });
+  const mk = async (id: string, priority?: TimedRunOrder['priority']) => ({ ...(await r.order(id)), ...(priority ? { priority } : {}) });
+  const playing = await mk('tr_00000000e1', 'normal');
+  const n1 = await mk('tr_00000000e2', 'normal');
+  const l1 = await mk('tr_00000000e3', 'low');
+  const old = await mk('tr_00000000e4'); // an older portal sends no priority: low
+  const urgent = await mk('tr_00000000e5', 'urgent');
+  const release = await mk('tr_00000000e6', 'release');
+  r.runner.enqueue(playing);
+  await r.until('the first run queued for its ticket', () => Ticket.taken === 1);
+  for (const o of [n1, l1, old, urgent]) r.runner.enqueue(o);
+  assert.deepEqual(r.runner.active(), [playing.id, urgent.id, n1.id, l1.id, old.id], 'urgent behind 3 normal and low ones goes next; the one playing stays');
+  assert.ok(r.logs.some((l) => l === `timed run ${urgent.id} (w2184, urgent) goes ahead of queued ${n1.id} (w2184, normal): strict priority (w4620)`), 'the jump is logged, naming both');
+  r.runner.enqueue(release);
+  assert.deepEqual(r.runner.active(), [playing.id, release.id, urgent.id, n1.id, l1.id, old.id], 'release goes ahead of urgent');
+  for (const id of [release.id, urgent.id, n1.id, l1.id, old.id, playing.id]) r.runner.cancel(id, 'test over');
+  await r.ended(playing.id);
 });

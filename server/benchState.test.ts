@@ -84,7 +84,7 @@ test('w1835: the mode shown is the queue\'s: Free, Shared while only shared tick
   assert.equal(wl.times, 'the group ends in 55m');
   assert.equal(wl.warned, false);
   assert.match(wg.hint, /^Bench queue: Shared\n/);
-  assert.match(wg.hint, /next: exclusive t00000003 · w1243 · worker cccc2222 · "probe A round 2" · waiting 30m/);
+  assert.match(wg.hint, /next: exclusive t00000003 · low · w1243 · worker cccc2222 · "probe A round 2" · waiting 30m/);
 
   // The builds end and the timed leg is granted: Exclusive, with its request, worker and times.
   for (const n of ['t00000001', 't00000002']) fs.rmSync(path.join(benchQueueDir(benchLockDir(root)), n), { recursive: true });
@@ -187,35 +187,34 @@ test('w1835 after w1832: a warned turn, an urgent release holding, the nightly i
   assert.equal(gone.times, 'held 26m, 4m left of its 30m turn');
   assert.equal(gone.warned, false);
 
-  // An urgent release waits behind it: its notice ends the turn in 5 minutes, and it goes first.
-  prios(warned, { v: 2, single_worker: false, sessions: { rrrr9999: { priority: 'urgent', requests: ['w1900'], exempt: 'release' } } });
-  ticket(warned, 't00000002', { mode: 'exclusive', what: 'probe B', session: 'bbbb2222', requests: ['w1785'] });
-  ticket(warned, 't00000009', { mode: 'exclusive', what: 'urgent release 1.0.0.4', session: 'rrrr9999', requests: ['w1900'], preempt: true, turn_min: 30 });
+  // A release waits behind it (w4620: no lane of its own, the priority release, sent as urgent with level release): it goes
+  // first by the queue's order, and its notice ends the turn in 5 minutes.
+  prios(warned, { v: 2, single_worker: false, sessions: { rrrr9999: { priority: 'urgent', level: 'release', requests: ['w1900'] }, uuuu8888: { priority: 'urgent', requests: ['w1786'] } } });
+  ticket(warned, 't00000002', { mode: 'exclusive', what: 'probe B', session: 'uuuu8888', requests: ['w1786'] });
+  ticket(warned, 't00000009', { mode: 'exclusive', what: 'urgent release 1.0.0.4', session: 'rrrr9999', requests: ['w1900'], turn_min: 30 });
   limit(warned, 't00000001', { deadline: sec(-5), warned: sec(0), by: 't00000009', release: 't00000009', why: 'an urgent release takes the machine: urgent release 1.0.0.4' });
   const notice = readBenchState(warned, NOW, alive)!;
-  assert.equal(notice.nextExclusive?.ticket, 't00000009', 'a waiting urgent release goes ahead of every waiter');
+  assert.equal(notice.nextExclusive?.ticket, 't00000009', 'the release goes ahead of an urgent leg taken before it');
   assert.equal(notice.nextExclusive?.ahead, 0);
+  assert.equal(notice.nextExclusive?.preempt, undefined, 'no pre-empt lane any more');
   const ng0 = benchGlance(notice, NOW)!;
   assert.equal(ng0.times, 'held 26m, warned: ends in 5m for an urgent release');
-  assert.equal(ng0.next, 'next timed: urgent release w1900 within 5m');
-  // A pre-empt ticket from a session the daemon did not mark release waits like any other (bench_queue.py is_urgent_release).
-  prios(warned, { v: 2, single_worker: false, sessions: {} });
+  assert.equal(ng0.next, 'next timed: w1900 within 5m');
+  // A pre-empt ticket is nothing special: without the release level it waits in its place.
+  prios(warned, { v: 2, single_worker: false, sessions: { rrrr9999: { priority: 'urgent', requests: ['w1900'] }, uuuu8888: { priority: 'urgent', requests: ['w1786'] } } });
   assert.equal(readBenchState(warned, NOW, alive)!.nextExclusive?.preempt, undefined);
-  assert.equal(readBenchState(warned, NOW, alive)!.nextExclusive?.ticket, 't00000002');
+  assert.equal(readBenchState(warned, NOW, alive)!.nextExclusive?.ticket, 't00000002', 'same priority: first come first served');
 
-  // The urgent release holds the machine: its pre-empt ticket, its builder marked release (priorities.json v 2).
+  // A release holds the machine: its turn is limited like any other (w4620: "not have special handling for releases").
   const rel = tmp(t);
-  prios(rel, { v: 2, single_worker: false, sessions: { rrrr9999: { priority: 'urgent', requests: ['w1900'], exempt: 'release' } } });
-  ticket(rel, 't00000001', { mode: 'exclusive', what: 'urgent release 1.0.0.4', session: 'rrrr9999', requests: ['w1900'], preempt: true, turn_min: 30 }, sec(2));
+  prios(rel, { v: 2, single_worker: false, sessions: { rrrr9999: { priority: 'urgent', level: 'release', requests: ['w1900'] } } });
+  ticket(rel, 't00000001', { mode: 'exclusive', what: 'urgent release 1.0.0.4', session: 'rrrr9999', requests: ['w1900'], turn_min: 30 }, sec(2));
   ticket(rel, 't00000002', { mode: 'exclusive', what: 'probe B', session: 'bbbb2222', requests: ['w1785'] });
   const r = readBenchState(rel, NOW, alive)!;
-  assert.equal(r.running[0].preempt, true);
-  assert.equal(r.running[0].exempt, 'release');
-  assert.equal(r.running[0].until, undefined, 'no turn limit ends it');
-  const rg = benchGlance(r, NOW)!;
-  assert.equal(rg.detail, 'urgent release · w1900 · worker rrrr9999');
-  assert.equal(rg.times, 'held 2m, no turn limit');
-  assert.equal(rg.next, 'next timed: w1785 after the urgent release');
+  assert.equal(r.running[0].preempt, undefined);
+  assert.equal(r.running[0].exempt, undefined);
+  assert.equal(r.running[0].until, new Date(sec(2) * 1000 + 30 * 60_000).toISOString(), 'its 30-minute turn applies');
+  assert.equal(benchGlance(r, NOW)!.next, 'next timed: w1785 after the running group');
 
   // The nightly's shared ticket: exempt, so a timed leg waits for it; an older daemon's file (no v 2) marks nothing.
   const night = tmp(t);
@@ -225,7 +224,7 @@ test('w1835 after w1832: a warned turn, an urgent release holding, the nightly i
   const ng = benchGlance(readBenchState(night, NOW, alive), NOW)!;
   assert.equal(ng.detail, '1 ticket running: the nightly');
   assert.equal(ng.next, 'next timed: w1785 after the nightly');
-  assert.match(ng.hint, /shared t00000001 · nightly · worker nnnn7777/);
+  assert.match(ng.hint, /shared t00000001 · nightly · normal · worker nnnn7777/);
   ticket(night, 't00000003', { mode: 'shared', what: 'unity: build slot1' }, sec(5));
   assert.equal(benchGlance(readBenchState(night, NOW, alive), NOW)!.detail, '2 tickets running, the nightly among them');
   prios(night, { sessions: { nnnn7777: { priority: 'normal', exempt: 'nightly' } } });
@@ -381,6 +380,29 @@ test('w2049: in the bench queue a low worker\'s timed leg waits behind a normal 
   // The normal one gone: low is next (it never waits behind nothing).
   fs.rmSync(path.join(benchQueueDir(benchLockDir(root)), 't00000003'), { recursive: true, force: true });
   assert.equal(readBenchState(root, NOW, alive)!.nextExclusive?.what, 'low leg');
+});
+
+test('w4620: the queue\'s order is release, urgent, high, normal, low; a session priorities.json does not name counts as low', (t) => {
+  const root = tmp(t);
+  ticket(root, 't00000001', { mode: 'exclusive', what: 'held', max_min: 60 }, sec(1));
+  const order: [string, string | undefined, object?][] = [
+    ['t00000002', 'unnamed', undefined],
+    ['t00000003', 'low-s', { priority: 'low', requests: [] }],
+    ['t00000004', 'normal-s', { priority: 'normal', requests: [] }],
+    ['t00000005', 'high-s', { priority: 'high', requests: [] }],
+    ['t00000006', 'urgent-s', { priority: 'urgent', requests: [] }],
+    ['t00000007', 'release-s', { priority: 'urgent', level: 'release', requests: [] }],
+  ];
+  const sessions = Object.fromEntries(order.filter((o) => o[2]).map(([, s, p]) => [s, p]));
+  prios(root, { v: 2, single_worker: false, sessions });
+  for (const [n, s] of order) ticket(root, n, { mode: 'exclusive', what: `leg ${s}`, session: s });
+  const names = () => readBenchState(root, NOW, alive)!.waiters!.map((w) => w.what);
+  assert.deepEqual(names(), ['leg release-s', 'leg urgent-s', 'leg high-s', 'leg normal-s', 'leg unnamed', 'leg low-s'], 'unnamed is low and, queued before the low one, goes first of the two');
+  assert.equal(readBenchState(root, NOW, alive)!.nextExclusive?.what, 'leg release-s');
+  // a shared ticket goes after an exclusive one of its priority queued before it, and ahead of every lower priority
+  ticket(root, 't00000008', { mode: 'shared', what: 'shared high', session: 'high-s' });
+  const w = readBenchState(root, NOW, alive)!.waiters!.map((x) => x.what);
+  assert.deepEqual(w.slice(0, 4), ['leg release-s', 'leg urgent-s', 'leg high-s', 'shared high'], 'within one priority first come first served, whatever the mode');
 });
 
 test('w3186: an approved ticket shows its approved turn, from the end of the CI drain; without the daemon mark it is a 30-minute one', (t) => {

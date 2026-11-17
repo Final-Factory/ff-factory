@@ -147,19 +147,17 @@ test('w1656: a release build goes at once, waiting neither for workers finishing
   ]);
   t.plans.declare({ machine: 'beast', minutes: 0, what: 'the 0.50.0.112 player', builder: 'builder', requests: ['w1588'], by: 'worker builder' });
   await t.plans.tick();
-  // w1656, lothsahn: a release build does not wait for other workers to pause; it starts at once and takes the bench first
+  // w1656, lothsahn: a release build does not wait for other workers to pause; it starts at once
   // (1.0.0.3 waited 20 minutes for one worker, then behind that worker's test run).
   const first = await t.plans.start('builder', 'beast');
   assert.match(first, /^Go \(w1606\): beast is cleared for the 0\.50\.0\.112 player \(0 moved: none; 2 paused\)/);
-  assert.match(first, /busy still finishing their step \(asked at 05:00Z to start no new one\): the release does not wait for them \(w1656\); your bench tickets count as urgent/);
-  assert.equal(t.plans.releaseBuilder('beast', 'builder'), true, 'its tickets count as urgent');
+  assert.match(first, /busy still finishing their step \(asked at 05:00Z to start no new one\): the release does not wait for them \(w1656\); your bench tickets go at its request's priority/);
   // w1656: the editors of the workers it paused or asked to pause stop at the start (their compile or test run ends,
   // to run again after done); never the builder's.
   assert.deepEqual(t.stopped.sort(), ['busy', 'idle']);
   assert.match(first, /Stopped the editors of (busy, idle|idle, busy) \(w1656/);
   assert.match(t.told.find((x) => x.id === 'busy' && /stopped your sandbox's Unity editor/.test(x.text))!.text, /start your editor again \(mcp__machine__unity start\) and run that step again/);
-  assert.equal(t.plans.releaseBuilder('beast', 'busy'), false);
-  assert.match(t.told.find((x) => x.id === 'busy')!.text, /start no new one: no compile, refresh, test run, player build or batch Unity run\. The release starts now and takes the bench first \(w1656\)/);
+  assert.match(t.told.find((x) => x.id === 'busy')!.text, /start no new one: no compile, refresh, test run, player build or batch Unity run\. The release starts now \(w1656\)/);
   assert.match(await t.plans.start('idle', 'beast'), /^Not yours/);
   // Its turn ends: it is paused, and the build may go.
   t.ws.find((w) => w.id === 'busy')!.midTurn = false;
@@ -179,7 +177,6 @@ test('w1656: a release build goes at once, waiting neither for workers finishing
   t.at(62);
   const done = await t.plans.done('beast', 'worker builder said it is done');
   assert.match(done, /^Done \(w1606\): beast takes work again; the build took 62 min\. 1 paused worker\(s\) told to carry on; 1 paused between turns/);
-  assert.equal(t.plans.releaseBuilder('beast', 'builder'), false, 'no plan: back to its request\'s priority');
   assert.deepEqual(t.plans.holds(), {});
   assert.equal(t.plans.resumeHold({ id: 'idle', machineId: 'beast' }), undefined);
   assert.equal(t.kicks(), 1);

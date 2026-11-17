@@ -162,7 +162,10 @@ test('w1158: what a coordinator carries in every call stays within its budget', 
   // w3253 (lothsahn: "When you have a message or question from me it often gets lost in a wall of text") gave the personal brief one
   // line on starting a message that needs the person with [for you] (trimmed from 418 characters to 240; the rest is in
   // close_question and docs/orchestrators.md): the owner's measured 29,286, so the cap moved to 29,300.
-  const PROMPT_MAX = 29_300;
+  // w4620 (lothsahn: "The factory should be using strict priority queues", and a release priority above urgent) gave the
+  // dispatcher's priority line release and "in every queue (strict, w4620)" (trimmed from 150 characters added to 40; the rule
+  // is in docs/orchestrators.md): the dispatcher's measured 29,329, so the cap moved to 29,350.
+  const PROMPT_MAX = 29_350;
   // w1163: the always-loaded sets now follow measured use (docs/tool-manifest.md); the dispatcher's is 23,436 characters
   // since w1159 gave list_work, list_sandboxes, list_machines and agent_transcript their output options. w1597 gave decide_work
   // its questions (one plain question per decision with its answers, as the person's card asks them; Ben, 2026-10-19: "just ask

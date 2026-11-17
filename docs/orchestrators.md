@@ -313,7 +313,7 @@ urgent release (beast, if offline, LothDesktop)"). Both orchestrators and the di
   first online one), with the game repo's `scripts/release/urgent_release.py`. Its bump (`trigger-ci-release.sh --urgent
   <machine>`) carries `cicd/release-lane.json`, which FFBox's release lane reads and declines (ffbox `release_claim.py`), so
   FFBox builds nothing for that version. The build clears the computer as below; the release's Unity runs take **exclusive**
-  bench tickets at the request's urgent priority, so they wait only for the timed leg running now.
+  bench tickets at the request's priority (a release is filed at `release`, above urgent, w4620), so they wait only for the timed leg running now and anything queued at the same or a higher rank.
 
 **Builds clear BEAST** (w1606; Ben, 2026-10-20: "when you know builds are coming up, we also prioritize using beast for
 builds because its faster. so when it's coming time, move work off beast, or when apropriate, pause work and finish the
@@ -358,10 +358,12 @@ Then:
    - **no wait for workers asked to pause**: they finish their step beside it, and the `Go` names them. At the start FF
      Factory stops the editor of every worker it paused or asked to pause (`stopEditor`), so an editor compile or test
      run ends now and is run again after `done`; never a Live view's editor, nor the builder's;
-   - **the bench queue is pre-empted**: the builder's tickets count as urgent (`Agents.benchPriorities`,
-     `BuildPlans.releaseBuilder`), and the release lane's own Unity runs take a pre-empting ticket (the game repo's
-     `bench_queue.py`, `Documentation/Bench-Lock.md` "An urgent release pre-empts"): every holder's batch run or timed
-     leg stops cleanly (exit 75, to be run again), and the release is granted at once.
+   - **no queue shortcut** (w4620; lothsahn, 2026-11-17: "Let's add a new priority called release that's above urgent and
+     not have special handling for releases... Let it go through the priority process being built"; it replaced w1656's
+     "count as urgent and pre-empt the bench queue"): the builder's bench tickets go at the request's priority, so a
+     release (filed at `release`) goes first after the turn running now, ahead of every lower priority, and a running
+     turn is never cut short. Order is release, urgent, high, normal, low, strict in every queue, first come first served
+     only within one priority, no aging.
    - **in slot1** (w1668; lothsahn: "Let's make sure that urgent builds always get scheduled in slot1 on whatever machine
      they run in so that it uses caches as warm as possible"): `urgent_release.py` builds the checkout it runs from, and a
      Library that never built Mac or Linux compiles every shader for it (1.0.0.3 in LothDesktop's slot3: Mac 2485 s,
@@ -452,7 +454,7 @@ A timed A/B compares its legs on one computer, so a slower one gives as good an 
 
 **The bench queue's order** (w1628, the game repo's `scripts/bench/bench_queue.py`, `Documentation/Bench-Lock.md`): first
 by the priority of the worker's open requests (lothsahn: "Yes, the queue should first sort by priority, using the logic the
-worker is working on within each priority group"; urgent, high, normal, low), which FF Factory sends each machine's daemon
+worker is working on within each priority group"; release, urgent, high, normal, low), which FF Factory sends each machine's daemon
 at connect and every minute (`bench_priorities`, written to `bench.queue/priorities.json`, keyed by the worker's session);
 a ticket of no request (an editor boot, a nightly) counts as normal, and a changed priority moves a waiting ticket within
 the minute (a running one is never stopped). Within a priority, one timed leg, then the waiting group of shared tickets
@@ -672,7 +674,7 @@ had room, which read as "LothDesktop can take more work but the queue isn't movi
      a Blocked request whose every gate is a capacity wait (none the cleanup's, none naming a thing as well) is Queued,
      keeping its priority, order, notes and log (the request's log says what was done). A thing it also waits on keeps it Blocked.
    - **The order queued work takes room in** (w1099, w2049; `capacityOrder`, `server/work.ts`): the capacity ping lists
-     what fits by priority, urgent, high, normal, low (lothsahn, w2049: "a new priority "low" that is below normal/medium
+     what fits by priority, release, urgent, high, normal, low (lothsahn, w2049: "a new priority "low" that is below normal/medium
      priority"), then, within one priority, **started work that can run only on the computers it names** (`startedPinned`:
      a leg held while its request's worker carries on elsewhere, a timed leg a running worker handed off, a Queued request
      that already had a worker and names its computers; lothsahn, w2049: "Work that has started and requires a specific

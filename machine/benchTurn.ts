@@ -137,8 +137,12 @@ export interface BenchTurnDeps {
   notePlayer?(session: string, text: string): void;
   /** w1860: the batch Unity runs of the daemon's sandboxes in a listing. Absent: builds are not looked at. */
   builds?(procs: Proc[]): TurnBuild[];
-  /** w1860: whether a sandbox's worker is exempt work (the urgent release builder, the nightly): its builds are left. */
-  exemptSandbox?(id: string): boolean;
+  /**
+   * w1860: whether a sandbox's builds are left beside the exclusive turn of `holderSession`: the nightly's worker's, and
+   * since w4620 those of a worker whose request outranks the holder's (lothsahn: "The factory should be using strict
+   * priority queues"): a lower-priority timed turn never stops a higher-priority build.
+   */
+  exemptSandbox?(id: string, holderSession?: string): boolean;
   /** w1860: end a batch Unity and what it started (it has no window to ask), answering what happened. */
   stopBuild?(pid: number, sandbox: string, why: string): Promise<string>;
   /** w1860: the note for every worker in a sandbox, given at its next message. */
@@ -341,7 +345,7 @@ export class BenchTurn {
     if (lookBuilds) {
       this.buildsAt = now;
       for (const b of this.d.builds!(procs)) {
-        if (holdsSandbox(h, b.sandbox) || holderOwns(b.pid) || this.stopping.has(b.pid) || this.d.exemptSandbox?.(b.sandbox)) continue;
+        if (holdsSandbox(h, b.sandbox) || holderOwns(b.pid) || this.stopping.has(b.pid) || this.d.exemptSandbox?.(b.sandbox, h.session)) continue;
         if (h.person) {
           // w1894: idle priority, again at each look for what it started since; never ended (it holds its shared ticket)
           const text = this.d.lowerBuild!(b.pid, procs);

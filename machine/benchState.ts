@@ -4,7 +4,7 @@
 // Since w1829 and w1832 also each turn's deadline and warning, the release and nightly marks, and what a turn closed.
 import fs from 'node:fs';
 import path from 'node:path';
-import type { BenchState, BenchTicketGlance, UntimedTiming } from '../shared/types.ts';
+import type { BenchState, BenchTicketGlance, UntimedTiming, WorkPriority } from '../shared/types.ts';
 import { APPROVED_MAX_MIN, benchLockDir, pidAlive, readBenchLock } from './benchLock.ts';
 import { benchQueueDir, queueTickets, type QueueTicket } from './benchQueue.ts';
 import { closedFile } from './benchTurn.ts';
@@ -19,8 +19,9 @@ export const BENCH_STATE_MAX_WAITERS = 12;
 const TURN_MIN = 30;
 const OLD_TURN_MIN = 60;
 
-/** bench_queue.py PRIORITIES: the queue sorts by these first (w1628). */
-const PRIORITIES = ['urgent', 'high', 'normal', 'low'];
+/** bench_queue.py PRIORITIES, highest first: the queue sorts by these first (w1628; release on top since w4620, lothsahn:
+ * "The factory should be using strict priority queues"). */
+const PRIORITIES = ['release', 'urgent', 'high', 'normal', 'low'];
 
 const readJson = (f: string): Record<string, unknown> | undefined => {
   try {
@@ -31,9 +32,9 @@ const readJson = (f: string): Record<string, unknown> | undefined => {
 };
 
 interface Marks {
-  sessions: Record<string, { priority: string; exempt?: 'release' | 'nightly' | 'approved'; approvedMin?: number }>;
+  sessions: Record<string, { priority: string; level?: string; exempt?: 'release' | 'nightly' | 'approved'; approvedMin?: number }>;
   singleWorker: boolean;
-  /** The file is v 2 (the marks are this daemon's); before it, any pre-empt ticket counts as the urgent release. */
+  /** The file is v 2 (the marks are this daemon's). */
   v2: boolean;
 }
 
@@ -42,13 +43,13 @@ interface Marks {
 function marks(qdir: string): Marks {
   const f = readJson(path.join(qdir, 'priorities.json'));
   const v2 = typeof f?.v === 'number' && f.v >= 2;
-  const raw = (f?.sessions ?? {}) as Record<string, { priority?: string; exempt?: string; approved?: { turn_min?: unknown } }>;
+  const raw = (f?.sessions ?? {}) as Record<string, { priority?: string; level?: string; exempt?: string; approved?: { turn_min?: unknown } }>;
   const sessions = Object.fromEntries(
     Object.entries(raw).map(([k, v]) => {
       // w3186 (bench_queue.py approved_mark): an approved turn's minutes, capped as the queue caps them
       const am = v2 && v?.exempt === 'approved' && typeof v.approved?.turn_min === 'number' && v.approved.turn_min > 0 ? Math.min(v.approved.turn_min, APPROVED_MAX_MIN) : undefined;
       const exempt: Marks['sessions'][string]['exempt'] = v2 && (v?.exempt === 'release' || v?.exempt === 'nightly') ? v.exempt : am ? 'approved' : undefined;
-      return [k, { priority: String(v?.priority ?? ''), ...(exempt ? { exempt } : {}), ...(am ? { approvedMin: am } : {}) }];
+      return [k, { priority: String(v?.priority ?? ''), ...(v?.level === 'release' ? { level: 'release' } : {}), ...(exempt ? { exempt } : {}), ...(am ? { approvedMin: am } : {}) }];
     }),
   );
   return { sessions, singleWorker: v2 && f?.single_worker === true, v2 };
@@ -56,22 +57,18 @@ function marks(qdir: string): Marks {
 
 const num = (ticket: string) => Number(ticket.slice(1)) || 0;
 
-/** The queue's own order (bench_queue.py order_key): priority, then its place (`pos`, a shared group's), then its number. */
+/** The queue's own order (bench_queue.py order_key): priority (`level ?? priority`; a session priorities.json does not name
+ * counts as low, w4620), then its place (`pos`, a shared group's), then its number. */
 function orderKey(t: QueueTicket, info: Record<string, unknown> | undefined, m: Marks): [number, number, number] {
-  const p = PRIORITIES.indexOf(m.sessions[t.session ?? '']?.priority ?? '');
+  const s = m.sessions[t.session ?? ''];
+  const p = PRIORITIES.indexOf(s?.level ?? s?.priority ?? '');
   const pos = info?.pos;
-  return [p < 0 ? PRIORITIES.indexOf('normal') : p, typeof pos === 'number' ? pos : num(t.ticket), num(t.ticket)];
+  return [p < 0 ? PRIORITIES.indexOf('low') : p, typeof pos === 'number' ? pos : num(t.ticket), num(t.ticket)];
 }
 
 const cmp = (a: number[], b: number[]) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
 
 const iso = (ms: number) => (Number.isFinite(ms) ? new Date(ms).toISOString() : undefined);
-
-/** bench_queue.py is_urgent_release: a pre-empt ticket counts as the urgent release lane's only from the session the
- * daemon marks release (or with a file from before the marks); any other waits like an exclusive ticket. */
-function urgentRelease(t: QueueTicket, info: Record<string, unknown> | undefined, m: Marks): boolean {
-  return info?.preempt === true && t.mode === 'exclusive' && (m.sessions[t.session ?? '']?.exempt === 'release' || !m.v2);
-}
 
 /**
  * A holder's deadline counts while one of the waiters that set it still waits (`live`): the queue drops a deadline only
@@ -82,7 +79,7 @@ function limitHolds(lim: Record<string, unknown>, live: Set<string>): boolean {
   return !names.length || names.some((n) => live.has(n));
 }
 
-function glance(t: QueueTicket, info: Record<string, unknown> | undefined, m: Marks, live: Set<string>): BenchTicketGlance {
+function glance(t: QueueTicket, m: Marks, live: Set<string>): BenchTicketGlance {
   const mark = m.sessions[t.session ?? ''];
   // w3186: an approved ticket's turn runs from its turn.json start (after the CI drain), at the approved minutes
   const approved = t.mode === 'exclusive' && t.approved && mark?.approvedMin ? mark.approvedMin : undefined;
@@ -90,15 +87,14 @@ function glance(t: QueueTicket, info: Record<string, unknown> | undefined, m: Ma
   const granted = t.granted ? (t.turnStart ? t.turnStart * 1000 : approved || t.ciWait ? NaN : t.granted.ts * 1000) : NaN;
   const since = t.granted ? t.granted.ts * 1000 : t.created ? Date.parse(t.created) : NaN;
   const exempt = mark?.exempt;
-  const preempt = urgentRelease(t, info, m);
   const raw = (t.limit ?? {}) as Record<string, unknown>;
   const lim = (limitHolds(raw, live) ? raw : {}) as { deadline?: unknown; warned?: unknown; why?: unknown; release?: unknown };
   const deadline = typeof lim.deadline === 'number' ? lim.deadline * 1000 : NaN;
   const warned = typeof lim.warned === 'number' ? lim.warned * 1000 : NaN;
   const turnMin = t.mode === 'exclusive' ? (t.turnMin ? Math.min(t.turnMin, approved ?? TURN_MIN) : (t.maxMin ?? OLD_TURN_MIN)) : undefined;
-  // bench_queue.py never_limited: an exempt ticket, the urgent release lane's or one on a single-worker machine has no turn
-  // (an approved one has: a longer one, w3186)
-  const limited = (!exempt || exempt === 'approved') && !preempt && !m.singleWorker;
+  // bench_queue.py never_limited: an exempt ticket or one on a single-worker machine has no turn (an approved one has: a
+  // longer one, w3186)
+  const limited = (!exempt || exempt === 'approved') && !m.singleWorker;
   // w1860: a holder that outranks every waiter keeps the lock (keep.json), while one of those waiters still waits; no
   // deadline and no turn's end apply then, so no countdown is shown that would not fire
   const keep = t.granted && limited && !Number.isFinite(deadline) && t.keep && Array.isArray(t.keep.waiters) && t.keep.waiters.some((n) => live.has(n)) ? t.keep : undefined;
@@ -108,6 +104,7 @@ function glance(t: QueueTicket, info: Record<string, unknown> | undefined, m: Ma
     mode: t.mode,
     what: t.what.slice(0, 120),
     ...(t.session ? { session: t.session } : {}),
+    priority: (PRIORITIES as readonly string[]).includes(mark?.level ?? mark?.priority ?? '') ? ((mark?.level ?? mark?.priority) as WorkPriority) : 'low',
     ...(t.requests?.length ? { requests: t.requests.slice(0, 4) } : {}),
     ...(t.host ? { host: t.host } : {}),
     ...(t.sandbox ? { sandbox: t.sandbox } : {}),
@@ -132,7 +129,6 @@ function glance(t: QueueTicket, info: Record<string, unknown> | undefined, m: Ma
     if (ts) out.turnStart = ts;
   }
   if (t.granted && t.ciWait && !approved) out.ciWait = true;
-  if (preempt) out.preempt = true;
   if (!t.granted && t.parked) out.parked = String(t.parked.why ?? 'its worker is away').slice(0, 160);
   const ks = keep ? iso(typeof keep.since === 'number' ? keep.since * 1000 : since) : undefined;
   if (keep && ks) out.keeps = { since: ks, ...(keep.why ? { why: String(keep.why).slice(0, 160) } : {}), ...(keep.priority ? { priority: String(keep.priority) } : {}) };
@@ -215,26 +211,23 @@ export function readBenchState(root: string | undefined, now: number = Date.now(
   // w2410: a parked waiter (its worker away, w1984) waits last and is nobody's turn, as bench_queue.py orders them.
   const parked = (t: QueueTicket) => !t.granted && !!t.parked;
   const waiting = [...sorted.filter((t) => !t.granted && !parked(t)), ...sorted.filter(parked)];
-  // A waiting urgent release goes ahead of every waiter, and nobody else starts meanwhile (bench_queue.py evaluate).
-  const urgent = waiting.findIndex((t) => !parked(t) && urgentRelease(t, infos.get(t.ticket), m));
-  const next = urgent >= 0 ? urgent : waiting.findIndex((t) => !parked(t) && t.mode === 'exclusive');
+  const next = waiting.findIndex((t) => !parked(t) && t.mode === 'exclusive');
   const waiters = new Set(waiting.map((t) => t.ticket));
   const old = readBenchLock(root, now, alive);
   const legacy = old && !/\[t\d{8}\]/.test(old.owner) ? { owner: old.owner, since: old.since } : undefined;
   const mode: BenchState['mode'] = legacy || running.some((t) => t.mode === 'exclusive') ? 'exclusive' : running.length ? 'shared' : 'free';
   const editors = mode === 'exclusive' ? closedEditors(root) : [];
   const players = mode === 'exclusive' ? playersClosed : 0;
-  const g = (t: QueueTicket) => glance(t, infos.get(t.ticket), m, waiters);
+  const g = (t: QueueTicket) => glance(t, m, waiters);
   const untimed = readUntimed(qdir, now);
   // w1949: every waiter with its place, so the ledger can show a request Blocked on the lock while its worker's ticket waits.
-  const inLine = urgent >= 0 ? [waiting[urgent], ...waiting.filter((_, i) => i !== urgent)] : waiting;
-  const inQueue = inLine.slice(0, BENCH_STATE_MAX_WAITERS).map((t, ahead) => ({ ...g(t), ahead }));
+  const inQueue = waiting.slice(0, BENCH_STATE_MAX_WAITERS).map((t, ahead) => ({ ...g(t), ahead }));
   return {
     mode,
     running: running.slice(0, BENCH_STATE_MAX_RUNNING).map(g),
     runningCount: running.length,
     waiting: waiting.length,
-    ...(next >= 0 ? { nextExclusive: { ...g(waiting[next]), ahead: urgent >= 0 ? 0 : next } } : {}),
+    ...(next >= 0 ? { nextExclusive: { ...g(waiting[next]), ahead: next } } : {}),
     ...(inQueue.length ? { waiters: inQueue } : {}),
     ...(legacy ? { legacy } : {}),
     ...(m.singleWorker ? { singleWorker: true } : {}),

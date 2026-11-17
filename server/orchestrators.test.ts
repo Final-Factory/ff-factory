@@ -6103,20 +6103,16 @@ test('w1628: each worker\'s bench priority is the highest of its open requests, 
   assert.deepEqual(agents.benchPriorities('pc'), { [a.id]: { priority: 'high', requests: ['w1'] }, [b.id]: { priority: 'low', requests: ['w2'] } });
   store.putWork({ ...store.work.get('w2')!, priority: 'urgent' });
   assert.equal(agents.benchPriorities('pc')[b.id].priority, 'urgent', 'a changed priority is what the next push sends');
-  // w1656: the builder of the release planned on the computer takes the bench first, whatever its request's priority.
-  const real = agents.builds.releaseBuilder.bind(agents.builds);
-  agents.builds.releaseBuilder = (m: string, id: string) => m === 'pc' && id === a.id;
-  assert.equal(agents.benchPriorities('pc')[a.id].priority, 'urgent', 'the release builder\'s tickets count as urgent');
-  assert.equal(agents.benchPriorities('pc')[a.id].exempt, 'release', 'w1832: the urgent release lane is never pre-empted');
-  assert.equal(agents.benchPriorities('pc')[b.id].exempt, undefined, 'any other worker is');
+  // w4620 (lothsahn: "add a new priority called release that's above urgent and not have special handling for releases"):
+  // a release request's worker goes at release, sent as urgent with level release for old bench_queue.py copies, and no
+  // build plan or exempt mark lifts anyone else.
+  store.putWork({ ...store.work.get('w1')!, priority: 'release' });
+  assert.deepEqual(agents.benchPriorities('pc')[a.id], { priority: 'urgent', level: 'release', requests: ['w1'] }, 'release rides as urgent + level');
+  assert.equal(agents.benchPriorities('pc')[a.id].exempt, undefined, 'w4620: no release exemption is left');
+  store.putWork({ ...store.work.get('w1')!, priority: 'high' });
+  assert.deepEqual(agents.benchPriorities('pc')[a.id], { priority: 'high', requests: ['w1'] });
   store.putWork({ ...store.work.get('w1')!, status: 'done' });
-  assert.deepEqual(agents.benchPriorities('pc')[a.id], { priority: 'urgent', requests: [], exempt: 'release' }, 'w1832: a builder with no open request keeps its mark');
-  store.putWork({ ...store.work.get('w1')!, status: 'active' });
-  agents.builds.releaseBuilder = real;
-  assert.equal(agents.benchPriorities('pc')[a.id].exempt, undefined);
-  assert.equal(agents.benchPriorities('pc')[a.id].priority, 'high');
-  store.putWork({ ...store.work.get('w1')!, status: 'done' });
-  assert.equal(agents.benchPriorities('pc')[a.id], undefined, 'no open request: its tickets count as normal');
+  assert.equal(agents.benchPriorities('pc')[a.id], undefined, 'no open request: no mark, so its tickets count as low (w4620)');
   assert.deepEqual(agents.benchPriorities('elsewhere'), {});
   // w1832: the worker of the scheduled nightly run (the portal's nightly schedule files it as source kind nightly-run).
   store.putWork({ ...store.work.get('w2')!, source: { kind: 'nightly-run', untrusted: false, channel: 'nightly e2e', nightlyRun: { date: '2026-10-23', machine: 'pc' } } });
@@ -6348,11 +6344,11 @@ test('w1643: placement.minPriority: start_agent refuses a request below the comp
   cfg.placement = { minPriority: { pc: 'urgent' } };
   putRequests(store, [{ id: 'w1' }, { id: 'w2', priority: 'high' }]);
   // The dispatcher's brief names the reservation in force and where its rule is (the brief's budget, w1158); read_rules machines has it.
-  assert.match((agents.orchestratorOptions(dispatcher().info) as { systemPrompt: { append: string } }).systemPrompt.append, /\(now: pc RESERVED for urgent work only \(minPriority urgent, w1643: `read_rules machines` before you place, queue or move work there\)\)/);
+  assert.match((agents.orchestratorOptions(dispatcher().info) as { systemPrompt: { append: string } }).systemPrompt.append, /\(now: pc RESERVED for urgent and release work only \(minPriority urgent, w1643: `read_rules machines` before you place, queue or move work there\)\)/);
   assert.match(agents.rulesText('machines'), /never goes there, not even when nothing else has room: it waits Queued, since a reservation that overflowed would reserve nothing/);
   const refused = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Do it', title: 'w1: do it', work_id: 'w1' });
   assert.equal(refused.isError, true);
-  assert.match(refused.text, /pc is reserved for urgent work only \(placement\.minPriority urgent; this work is normal\): w1 is normal, so it does not go there\. Start it on another computer .*or queue it \(decide_work queue\)/);
+  assert.match(refused.text, /pc is reserved for urgent and release work only \(placement\.minPriority urgent; this work is normal\): w1 is normal, so it does not go there\. Start it on another computer .*or queue it \(decide_work queue\)/);
   assert.deepEqual(store.work.get('w1')!.sessionIds, [], 'nothing started');
   // Its person raises it: eligible at once.
   assert.equal((await call(chat(LOTH).info, 'update_work', { id: 'w1', priority: 'urgent' })).isError, false);
@@ -6363,7 +6359,7 @@ test('w1643: placement.minPriority: start_agent refuses a request below the comp
   // w2 (high) is new work on pc: refused, whichever session it would go to.
   const sent = await call(dispatcher().info, 'message_agent', { session_id: id, text: 'also this', work_id: 'w2', title: 'w2: also this' });
   assert.equal(sent.isError, true);
-  assert.match(sent.text, /pc is reserved for urgent work only \(placement\.minPriority urgent; this work is high\): w2 is high/);
+  assert.match(sent.text, /pc is reserved for urgent and release work only \(placement\.minPriority urgent; this work is high\): w2 is high/);
   // w1 lowered again: its worker goes on, and a follow-up on it still reaches it.
   await call(chat(LOTH).info, 'update_work', { id: 'w1', priority: 'normal' });
   const follow = await call(dispatcher().info, 'message_agent', { session_id: id, text: 'go on', work_id: 'w1' });
@@ -6379,7 +6375,7 @@ test('w1643: a request below a reserved computer\'s level waits Queued with the 
   (o as unknown as { now: () => Date }).now = () => new Date(T0);
   const queued = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'queue', note: 'only beast has room' });
   assert.equal(queued.isError, false, queued.text);
-  assert.match(store.work.get('w1')!.log.join('\n'), /queued for capacity; beast has room but takes high and urgent work only \(placement\.minPriority; this is normal\)/);
+  assert.match(store.work.get('w1')!.log.join('\n'), /queued for capacity; beast has room but takes high, urgent and release work only \(placement\.minPriority; this is normal\)/);
   const urgent = await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'queue', note: 'only beast has room' });
   assert.equal(urgent.isError, true);
   assert.match(urgent.text, /queue is for capacity only, and beast has room for w2 now/);
@@ -6387,7 +6383,7 @@ test('w1643: a request below a reserved computer\'s level waits Queued with the 
   (o as unknown as { now: () => Date }).now = () => new Date(Date.parse(T0) + 11 * 60_000);
   const line = (await call(dispatcher().info, 'list_work', { id: 'w1' })).text;
   assert.doesNotMatch(line, /WRONG/);
-  assert.match(line, /Queued \(queued for capacity: no computer that could take it has room; beast has room but takes high and urgent work only \(placement\.minPriority; this is normal\)\)/);
+  assert.match(line, /Queued \(queued for capacity: no computer that could take it has room; beast has room but takes high, urgent and release work only \(placement\.minPriority; this is normal\)\)/);
   assert.deepEqual(o.flagQueuedWithRoom(agents.roomFacts()), []);
   // Its person raises it to high: it fits BEAST now.
   await call(chat(LOTH).info, 'update_work', { id: 'w1', priority: 'high' });

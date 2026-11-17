@@ -217,13 +217,13 @@ export type MinPriority = 'normal' | 'high' | 'urgent';
 export const MIN_PRIORITIES: readonly MinPriority[] = ['normal', 'high', 'urgent'];
 
 /** low and normal are one level here: a computer at normal takes all work, low included. */
-const LEVEL: Record<string, number> = { low: 0, normal: 0, high: 1, urgent: 2 };
+const LEVEL: Record<string, number> = { low: 0, normal: 0, high: 1, urgent: 2, release: 3 };
 
 /** Whether a computer whose lowest priority is `min` takes work of `priority` (a request's priority now; unknown is normal). */
 export const admitsPriority = (min: MinPriority | undefined, priority: string | undefined): boolean => (LEVEL[priority ?? 'normal'] ?? 0) >= (LEVEL[min ?? 'normal'] ?? 0);
 
 /** "high and urgent work only", "urgent work only": what a reserved computer takes. */
-export const minPriorityText = (min: MinPriority): string => (min === 'urgent' ? 'urgent work only' : min === 'high' ? 'high and urgent work only' : 'all work');
+export const minPriorityText = (min: MinPriority): string => (min === 'urgent' ? 'urgent and release work only' : min === 'high' ? 'high, urgent and release work only' : 'all work');
 
 /** A computer with room reserved for higher work (RoomNow.reserved, AppState.reservedRoom): its lowest priority and the kinds it has room for. */
 export interface ReservedRoom {

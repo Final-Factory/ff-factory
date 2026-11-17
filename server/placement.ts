@@ -1,4 +1,4 @@
-import type { BenchLock, BenchQueueReport, PlayerCacheReport, WorkItem, WorkPriority } from '../shared/types.ts';
+import { WORK_PRIORITIES, type BenchLock, type BenchQueueReport, type PlayerCacheReport, type WorkItem, type WorkPriority } from '../shared/types.ts';
 import type { SteamClient } from '../shared/steam.ts';
 import type { DesktopSession } from '../shared/desktop.ts';
 import { admitsPriority, minPriorityText, MIN_PRIORITIES, reservedText, pairRoom, ROOM_STAND_MS, unfitWhy, type MinPriority, type ReservedRoom, type RoomFit } from '../shared/capacity.ts';
@@ -160,7 +160,7 @@ export interface PlacementPrefs {
   spillAtPercent?: number;
 }
 
-const ORDER: readonly WorkPriority[] = ['low', 'normal', 'high', 'urgent'];
+const ORDER: readonly WorkPriority[] = WORK_PRIORITIES;
 
 /** The lowest priority among `work` (what a move must let in, w1643), or undefined for none. */
 export const lowestPriority = (work: readonly { priority: WorkPriority }[]): WorkPriority | undefined =>

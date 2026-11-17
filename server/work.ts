@@ -3,7 +3,7 @@
 // items live in the Store (data/work.json); server/orchestrators.ts does the wiring.
 import { WORK_LIVE_LABEL, type WorkLive } from '../shared/workState.ts';
 import { sourceTag } from './intakeRules.ts';
-import { WORK_OPEN, type AttachmentRef, type Requester, type WorkItem, type WorkOverlap, type WorkPriority, type WorkStatus } from '../shared/types.ts';
+import { WORK_OPEN, priorityRank, type AttachmentRef, type Requester, type WorkItem, type WorkOverlap, type WorkPriority, type WorkStatus } from '../shared/types.ts';
 import { fmtBytes } from '../shared/attachments.ts';
 import { latestLine } from '../shared/latestLine.ts';
 import { needsBuild, needsLive, needsTimed } from '../shared/capacity.ts';
@@ -477,10 +477,9 @@ export function ledgerOrder(a: WorkItem, b: WorkItem): number {
   return b.updatedAt.localeCompare(a.updatedAt);
 }
 
-/** Urgent, high, normal, low; within one priority the oldest request first (w1099: the order work goes in). */
+/** Release, urgent, high, normal, low (w4620); within one priority the oldest request first (w1099: the order work goes in). */
 export function priorityThenAge(a: Pick<WorkItem, 'priority' | 'createdAt'>, b: Pick<WorkItem, 'priority' | 'createdAt'>): number {
-  const prio: Record<WorkPriority, number> = { urgent: 0, high: 1, normal: 2, low: 3 };
-  return prio[a.priority] - prio[b.priority] || a.createdAt.localeCompare(b.createdAt);
+  return priorityRank(b.priority) - priorityRank(a.priority) || a.createdAt.localeCompare(b.createdAt);
 }
 
 /**
@@ -497,13 +496,29 @@ export function startedPinned(w: Pick<WorkItem, 'status' | 'legs' | 'queuedFor' 
 }
 
 /**
- * The order queued work takes free room in (the capacity ping, w1099, w2049): urgent, high, normal, low; within one
+ * The order queued work takes free room in (the capacity ping, w1099, w2049): release, urgent, high, normal, low; within one
  * priority, started work that can run only on named computers first; then the oldest. Never across priorities: a
  * person's priority is their word, and higher work that fits another computer with room goes there (the ping's room).
  */
 export function capacityOrder(a: WorkItem, b: WorkItem): number {
-  const prio: Record<WorkPriority, number> = { urgent: 0, high: 1, normal: 2, low: 3 };
-  return prio[a.priority] - prio[b.priority] || Number(startedPinned(b)) - Number(startedPinned(a)) || a.createdAt.localeCompare(b.createdAt);
+  return priorityRank(b.priority) - priorityRank(a.priority) || Number(startedPinned(b)) - Number(startedPinned(a)) || a.createdAt.localeCompare(b.createdAt);
+}
+
+/**
+ * w4620: the pairs in a queue already in its order where a higher-priority item goes ahead of an older lower one, as
+ * "wA (urgent) goes ahead of wB (normal, queued earlier)": each queue logs these (lothsahn, 2026-11-17: "The factory should
+ * be using strict priority queues"). Each item is named once, beside the oldest lower one it passed.
+ */
+export function priorityJumps(sorted: readonly Pick<WorkItem, 'id' | 'priority' | 'createdAt'>[]): string[] {
+  const out: string[] = [];
+  sorted.forEach((a, i) => {
+    const passed = sorted
+      .slice(i + 1)
+      .filter((b) => priorityRank(b.priority) < priorityRank(a.priority) && b.createdAt < a.createdAt)
+      .sort((x, y) => x.createdAt.localeCompare(y.createdAt))[0];
+    if (passed) out.push(`${a.id} (${a.priority}) goes ahead of ${passed.id} (${passed.priority}, queued earlier)`);
+  });
+  return out;
 }
 
 /**

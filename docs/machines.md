@@ -1378,8 +1378,10 @@ fewest agent slots. On a worker computer the daemon (`machine/timedRunner.ts` `w
   than one exclusive turn (30 minutes), the answer also names the free computers that take timed runs, so the worker can
   cancel and run again there. Before, tr_97da01f124 (w3252) sat `sent` for 1.4 hours behind tr_d039d7bdc5 (w3335), whose
   tickets were never granted, and its worker cancelled it as stuck.
-- **Strict priority on a daemon** (w4620, lothsahn: "The factory should be using strict priority queues"): the daemon
-  still plays first come, first served, so the portal keeps its line in priority order (`TimedRuns.reorder`). A run's
+- **Strict priority on a daemon** (w4620, lothsahn: "The factory should be using strict priority queues"): the daemon's
+  queue starts the highest priority first, oldest first within one (each order carries its `priority`; `TimedRunner.enqueue`
+  logs "timed run tr_B (w2, urgent) goes ahead of queued tr_A (w1, normal): strict priority (w4620)"), and the portal keeps
+  its line in priority order (`TimedRuns.reorder`) for the run the daemon already started. A run's
   priority is its open requests' highest, read live (none open: low; `priorityOf` in `server/index.ts`). A run ahead of a
   higher-priority one that never held an exclusive turn (still `sent`: fetching, building or waiting for the ticket) is told
   to step back (`timed_run_cancel`) and is sent again at once, so it queues behind; within one priority the order they were
@@ -1680,7 +1682,7 @@ LothDesktop and Beast, not just when BEAST is full").
     with room on the platform it names, BEAST last, never a computer that takes no timed runs (m5; `timedRank`, `pickTimed`, w1628, w1861, w1872; docs/orchestrators.md "Timed and exclusive-lock work").
   - A build declared coming holds its computer for new work at once (`Agents.placement()` adds `BuildPlans.holds()`),
     and when due moves its workers between turns elsewhere, pauses the ones that cannot move and asks the ones mid-turn
-    to pause at a safe point; `build_plan start` goes at once (w1656: the paused workers' editors are stopped and the release pre-empts the bench queue, docs/orchestrators.md); `done`
+    to pause at a safe point; `build_plan start` goes at once (w1656: the paused workers' editors are stopped; the release's bench tickets go at its request's priority, `release` first after the turn running now, w4620, docs/orchestrators.md); `done`
     resumes them. The paused workers' resumes are held by `machineHold` (`BuildPlans.resumeHold`), not by the computer's
     hold, so the builder and a running Live view go on. Details: [orchestrators.md](orchestrators.md), "Builds clear BEAST".
   - Tests: `server/buildPlans.test.ts`, the w1606 cases in `server/placement.test.ts` and `server/orchestrators.test.ts`,

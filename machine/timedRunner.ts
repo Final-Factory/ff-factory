@@ -17,7 +17,7 @@ import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { createGzip } from 'node:zlib';
 import { Readable } from 'node:stream';
-import type { AttachmentRef } from '../shared/types.ts';
+import { priorityRank, type AttachmentRef } from '../shared/types.ts';
 import { legArgs, legOrder, legTimeoutS, perfSummaryOf, summaryTable, timedArgsProblem, timedSettingsOf, variantNameProblem, TIMED_SLOTS, TURN_PLAN_MS, type LegSummary, type Piece, type TimedRunOrder, type TimedRunReport, type TimedVariant } from '../shared/timedRun.ts';
 import { fetchAttachment } from './attachments.ts';
 import { benchLockDir, pidAlive } from './benchLock.ts';
@@ -429,7 +429,13 @@ export class TimedRunner {
 
   enqueue(o: TimedRunOrder) {
     if (this.active().includes(o.id)) return;
-    this.queue.push(o);
+    // w4620 (lothsahn: "The factory should be using strict priority queues"): a run goes ahead of every queued one of lower
+    // priority, behind those of its own or higher; the one playing now is never cut short (the portal steps back a run
+    // that waits for its first ticket, server/timedRuns.ts reprioritize).
+    const at = this.queue.findIndex((q) => priorityRank(q.priority) < priorityRank(o.priority));
+    const passed = at >= 0 ? this.queue[at] : undefined;
+    if (passed) this.d.log(`timed run ${o.id} (${o.requests.join(', ') || 'no request'}, ${o.priority ?? 'low'}) goes ahead of queued ${passed.id} (${passed.requests.join(', ') || 'no request'}, ${passed.priority ?? 'low'}): strict priority (w4620)`);
+    this.queue.splice(at >= 0 ? at : this.queue.length, 0, o);
     this.d.send({ type: 'timed_run_status', id: o.id, state: 'queued', line: this.current ? `queued behind ${this.current}` : 'starting' });
     void this.next();
   }

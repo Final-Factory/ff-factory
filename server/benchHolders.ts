@@ -110,8 +110,8 @@ export class BenchHolderWatch {
       }
       for (const t of bench.running) {
         if (harnessTicket(t) || !t.session) continue;
-        // The urgent release lane's builder and the nightly run their own long legs (w1832 exempts them from turn limits).
-        if (t.exempt === 'release' || t.exempt === 'nightly') continue;
+        // The nightly runs its own long legs (w1832 exempts it from turn limits); since w4620 a release builder is a worker like any.
+        if (t.exempt === 'nightly') continue;
         const info = this.d.session(t.session);
         if (!info || info.kind !== 'worker') continue;
         const key = `${machineId}:${t.ticket}`;

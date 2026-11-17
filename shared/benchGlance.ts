@@ -97,6 +97,7 @@ function hintLine(t: BenchTicketGlance, now: number, singleWorker: boolean, wait
     `${t.mode} ${t.ticket}`,
     kind(t),
     approvedTag(t),
+    t.priority ?? '',
     t.requests?.length ? t.requests.join(', ') : '',
     t.session ? `worker ${t.session.slice(0, 8)}` : '',
     where,
