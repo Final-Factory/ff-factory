@@ -212,7 +212,8 @@ const LOTH_LOG = [
 
 test("w2459: a running Steam whose connection log says it is not connected (w2461: BEAST, 'Logged In Elsewhere') counts as not signed in", async () => {
   assert.equal(steamConnection(LOTH_LOG), undefined);
-  assert.equal(steamConnection(BEAST_LOG), "logged off at 2026-10-25 14:03:15 (Logged In Elsewhere); 2 sign-ins failed since, the last at 2026-10-28 02:59:11 ('Try another CM')");
+  // w4638: a kick by another sign-in says so, in UTC (BEAST's stamps here read as UTC), not a count of 'Try another CM'.
+  assert.equal(steamConnection(BEAST_LOG, { utc: (t) => `${t}Z` }), 'kicked by another sign-in at 2026-10-25 14:03:15Z; needs a person to reconnect');
   assert.equal(steamConnection(''), undefined, 'no log: unknown, the registry decides');
   assert.equal(steamConnection(`${BEAST_LOG}\n${LOTH_LOG}`), undefined, 'a later OK clears it');
   const beast = fake({
@@ -221,9 +222,9 @@ test("w2459: a running Steam whose connection log says it is not connected (w246
     files: { 'c:/games/steam/steam.exe': '', 'c:/games/steam/logs/connection_log.txt': BEAST_LOG },
     procs: '"steam.exe","9796","Console","1","120,000 K"\r\n',
   });
-  const s = await readSteamClient(beast);  assert.match(s.notConnected ?? '', /Logged In Elsewhere/);
+  const s = await readSteamClient(beast);  assert.match(s.notConnected ?? '', /^kicked by another sign-in at /);
   assert.equal(steamSignedIn(s), false);
-  assert.match(steamLacks('beast', s) ?? '', /^beast's Steam client is not connected to Steam: logged off at 2026-10-25 14:03:15/);
+  assert.match(steamLacks('beast', s) ?? '', /^beast's Steam client is not connected to Steam: kicked by another sign-in at /);
   assert.match(unfitWhy(work(), 'beast', { beast: { platform: 'win32', steam: s } }) ?? '', /not connected to Steam/);
   assert.deepEqual(sanitizeSteamClient(s), s);
 });
