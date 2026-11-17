@@ -988,7 +988,8 @@ as the path it holds, with every w913/w1097 check. Also new: a command that sets
 unquoted `$TMPDIR/x` into relative names; that gap predates w4338).
 
 **Not covered here**: the m3 denials named in the brief (w4308, w4322, w4269, w4282, w4306, w4279, w4205). A worker cannot
-read another machine's transcripts or the portal's permission events (`search_transcripts` is orchestrator-only), and the
+read another machine's transcripts or the portal's permission events (`search_transcripts` was orchestrator-only then; since
+w4497 a worker reads them with a `transcript_read` grant on its request), and the
 journal keeps no permission lines; `node scripts/cleanup-approvals.ts <dataDir> --since ...` on the portal reads them.
 
 **Tests**: `server/tempDelete.test.ts` (the w4222 command verbatim, Windows and POSIX; 23 refusals: outside, the folder

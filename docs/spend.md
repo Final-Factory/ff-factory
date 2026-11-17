@@ -66,7 +66,8 @@ recorded; else the role's default when it started, inferred (`inferredEffort`, s
 
 `spend_export` is a worker tool (group `ledger`, server/spendExport.ts), read-only and granted per request the way ledger
 reading is: the person's orchestrator sets `spend_read` on its own request (`request_work spend_read: true`, or
-`update_work {id, spend_read: true}`; never on an intake request; docs/orchestrators.md, "Workers read the ledger"). A worker
+`update_work {id, spend_read: true}`; never on an intake request; docs/orchestrators.md, "Workers read the ledger", which also
+has `transcript_read`, w4497). A worker
 who needs it says so in its report; its orchestrator grants it. The answer is CSV with `#` header lines, paged at 40,000
 characters (`offset`, `limit` up to 2,000 rows). `since` and `until` take any ISO time with a zone, or a UTC date (default: the
 last 7 days); `role` filters sessions and turns.

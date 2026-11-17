@@ -1570,6 +1570,18 @@ to its own and named ones.
 request, never on one from the intake; while that request is open or stalled its workers may call `spend_export`
 (docs/spend.md, "The export"). It reads, never writes, and carries no account, key or token.
 
+**Transcript reading** (w4497) is granted the same way and on the same terms: `request_work transcript_read: true` or
+`update_work {id, transcript_read: true|false}` (`Orchestrators.setTranscriptRead`) sets `transcriptRead {by, at}` on the
+person's own request, never on one from the intake; while that request is open or stalled its workers may call
+`search_transcripts` (every agent's transcript, `since`/`until` for a time window) and `agent_transcript` (any session),
+for a transcript analysis such as w4495's tool-call failure audit. Every worker carries both names (group `workers`,
+deferred); without the grant a call is refused with what to ask for (`Agents.transcriptGrantOf`). They are the
+orchestrators' own handlers (`Agents.searchTranscriptsText`, `Agents.agentTranscriptText`): read-only, and each answer is
+masked again as it is read (`redactSecrets`, docs/vault.md). The worker never gets a path to the transcript files: it
+reads only through the tools, on the portal. `list_work {id}` and `read_work` show the grant, and the worker's brief says
+it in "The ledger and the portal's logs" (so do the ledger-read and spend-export grants, `Agents.readGrantLines`). Tested in
+`server/orchestrators.test.ts` ("w4497").
+
 **Read-only.** The tool has no argument that changes anything, and its handler builds its answer from the store
 without writing (tested by comparing the ledger before and after calls that pass `close`, `note`, `reopen` and
 `ledger_read`). A worker still has no `update_work`, `request_work`, `decide_work` or `list_work`.
