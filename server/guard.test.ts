@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
-import { checkEditorSwitch, checkShell, sandboxGuard, withoutTextArgs } from './guard.ts';
+import { checkEditorSwitch, checkShell, gitPushAt, sandboxGuard, withoutTextArgs } from './guard.ts';
 
 const decide = async (g: ReturnType<typeof sandboxGuard>, tool_name: string, tool_input: unknown, cwd = '') => {
   const input = { hook_event_name: 'PreToolUse', tool_name, tool_input, tool_use_id: 'x', session_id: 's', transcript_path: '', cwd };
@@ -510,4 +510,39 @@ test('w3111: no push to the ff-agents plugin or FF Factory master/main from any 
   // The refusal names the repo and the fix.
   const ctx = { cwd: `${tmp}/ffa`, gameRepos: ['https://github.com/example-org/example-game.git'], remotes, branch };
   assert.match(checkShell('git push origin HEAD', ctx) ?? '', /Pushing to master of github\.com\/final-factory\/final-factory-agents is blocked.*only through a pull request \(w3111\).*git push origin HEAD:refs\/heads\/<branch>.*gh pr create --head <branch>/);
+});
+
+test('w4533: only `git push` is a push: `git stash push` in a $TMPDIR clone is never judged as one, git\'s global options still are', async () => {
+  // During w4528 a worker ran this in its $TMPDIR clone of ff-factory; the guard read `stash push -m w4528` as a push to
+  // remote "w4528" and refused it as the game repo's master/main.
+  const tmp = '/Users/x/ffw/tmp/ffa-2c08ba20';
+  const remotes = (dir: string) => {
+    const d = dir.replace(/\\/g, '/').toLowerCase();
+    if (d === '/ffsb/sb1') return new Map([['origin', 'git@github.com:example-org/example-game.git']]);
+    if (d === `${tmp}/ffx`.toLowerCase()) return new Map([['origin', 'https://github.com/Final-Factory/ff-factory.git']]);
+    return undefined;
+  };
+  const branch = (dir: string) => (dir.toLowerCase().endsWith('/ffx') ? 'main' : 'sandbox/sb1');
+  const g = sandboxGuard({ sandboxId: 'sb1', sandboxPath: '/ffsb/sb1', protectedPaths: [], gameRepos: ['https://github.com/example-org/example-game.git'], remotes, branch, prBase: () => 'master', evidence: () => undefined, env: { TMPDIR: tmp } });
+  const sb = '/ffsb/sb1';
+  const w4528 = 'cd "$TMPDIR/ffx" && git stash push -u -q -m w4528 && node --import ./scripts/testEnv.ts --test $F 2>&1 | grep -E "^# (pass|fail)"; git stash pop -q && git status --short | head -20';
+  const cases: [string, string, 'allow' | 'deny'][] = [
+    [sb, w4528, 'allow'],
+    [`${tmp}/ffx`, 'git stash push -m w4528', 'allow'],
+    [`${tmp}/ffx`, 'git stash push -m origin HEAD:main', 'allow'],
+    [`${tmp}/ffx`, 'git -c core.quotepath=off stash push -u', 'allow'],
+    // A real push from that clone is judged as before (w3111: FF Factory's main takes changes only through a PR).
+    [sb, 'cd "$TMPDIR/ffx" && git push origin HEAD:main', 'deny'],
+    [`${tmp}/ffx`, 'git push origin HEAD:main', 'deny'],
+    [`${tmp}/ffx`, 'git --no-pager push origin HEAD:main', 'deny'],
+    [`${tmp}/ffx`, 'git -c push.default=current push origin HEAD:main', 'deny'],
+    [sb, `git -C ${tmp}/ffx -c user.name=x push origin HEAD:main`, 'deny'],
+    [`${tmp}/ffx`, 'git push origin HEAD:refs/heads/w4533-guard', 'allow'],
+    [sb, 'git stash push -f', 'allow'],
+    [sb, 'git push -f origin HEAD', 'deny'],
+  ];
+  for (const [cwd, command, want] of cases) assert.equal(await decide(g, 'Bash', { command }, cwd), want, `${cwd}: ${command}`);
+  assert.equal(gitPushAt(['git', 'stash', 'push', '-m', 'w4528']), -1);
+  assert.equal(gitPushAt(['git', '-c', 'core.x=1', '--git-dir', '/r/.git', 'push', 'origin']), 5);
+  assert.equal(gitPushAt(['/usr/bin/git', '--no-pager', 'push']), 2);
 });
