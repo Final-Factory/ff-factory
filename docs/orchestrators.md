@@ -1606,7 +1606,10 @@ first by their last DONE (`last`, default 50, at most 300; `until` for an earlie
   (`toolCauseOf`: refresh_unity, the editor, tests, builds, bench, pair runs, CI polls, merges, critics, failed calls,
   shell waits; the rest of a turn is implementation and thinking), and each gap between turns by what the turn ended on
   (`gapCauseOf`: blocked_on `ci:` or merge_on_green, a person, a pair or hand-off report, a check-in, a pause, else no
-  marker). Workers that overlap count once, under the busiest label (`sweep`).
+  marker). Workers that overlap count once, under the busiest label (`sweep`). A shell `until`/`sleep` loop counts as
+  what it polls (a build log is build, a pair or lab lock is pair, test results are tests, `gh run`/`gh pr` is CI, else
+  a wait), and the gap after the last turn keeps its label for `TAIL_MS` (2 minutes) only: the rest, until the close was
+  recorded, is `tail` (w4277 and w4296 closed 46 h after ffu #824 merged, which read as CI time).
 
 It reads closed requests, which `read_work` does not, so it needs both grants; it reads the transcripts on the portal
 (`Store.scanTranscript`, cut down by `slimEvent`) and the answer is masked (`redactSecrets`). Run it again over the next

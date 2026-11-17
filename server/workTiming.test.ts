@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { datedLog, gapCauseOf, pickFinished, sessionSpans, sweep, timeRequest, toolCauseOf, waitBreakdown, waitCauseOf, workTiming } from './workTiming.ts';
+import { datedLog, gapCauseOf, pickFinished, sessionSpans, sweep, TAIL_MS, timeRequest, toolCauseOf, waitBreakdown, waitCauseOf, workTiming } from './workTiming.ts';
 import type { Requester, SessionInfo, TranscriptEvent, WorkItem } from '../shared/types.ts';
 
 /** work_timing (w4531, server/workTiming.ts): where a finished request's wall time went, in two parts. */
@@ -144,4 +144,13 @@ test('the report gives both parts, skips a request with no worker, and reads eac
   assert.match(text, /Part 2: first worker turn to the close/);
   assert.match(text, /Skipped \(no worker turn found\): w3/);
   assert.match(text, /\| w2 \|/);
+});
+
+test('a shell wait loop takes what it polls; the gap after the last turn keeps its label for TAIL_MS only', () => {
+  assert.equal(toolCauseOf('Bash', { command: 'until grep -q "^EXIT" "$TMPDIR/build.log"; do sleep 20; done' }, false), 'build');
+  assert.equal(toolCauseOf('Bash', { command: 'until test -f "$OUT/ffnightly.done"; do sleep 20; done' }, false), 'pair');
+  assert.equal(toolCauseOf('Bash', { command: 'until test -s x.txt; do sleep 20; done' }, false), 'wait');
+  const evs = [user(0, 'w1'), use(1, 'a', 'mcp__machine__blocked_on', { prs: ['ci:o/r#1'] }), res(1, 'a'), result(2)];
+  const out = sweep(sessionSpans(evs, T0, T0 + 600 * MIN), T0, T0 + 600 * MIN);
+  assert.deepEqual(out, { think: 2 * MIN, gap_ci: TAIL_MS, tail: 598 * MIN - TAIL_MS });
 });
