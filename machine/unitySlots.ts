@@ -8,7 +8,7 @@
 // client (this file's CLI, `unity-slot`, or the game repo's scripts/unity_slot.py) writes req-<id>.json and touches it
 // while it waits or holds; the daemon answers grant-<id>.json or deny-<id>.json. A request takes all its slots at once
 // or none. Waiting requests from holders (a sandbox whose editor runs, a run that already holds slots) go first, then
-// new requesters, oldest first. Process counting is the backstop: Unity started outside the gate counts all the same,
+// new requesters by priority (release, urgent, high, normal, low; w4620), oldest first within one priority. Process counting is the backstop: Unity started outside the gate counts all the same,
 // so nothing more is granted while the machine is over its limit. Nothing here kills a Unity process; the orphaned and hung
 // batch builds that would hold a slot for hours are ended by machine/unityReaper.ts (w791).
 import fs from 'node:fs';
@@ -18,9 +18,10 @@ import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import type { Proc, UnityPlatform } from './unity.ts';
 import { heldNotStarted, unitySlotsLine } from '../shared/fleet.ts';
-import { benchLockPath, benchTicketFor, heldTicket, HELD_WAIT_CAP_MS, type BenchMode, type BenchTicket } from './benchQueue.ts';
-import type { UnitySlotsReport } from '../shared/types.ts';
-import { foreignTimedHold } from './benchLock.ts';
+import { benchLockPath, benchQueueDir, benchTicketFor, heldTicket, HELD_WAIT_CAP_MS, type BenchMode, type BenchTicket } from './benchQueue.ts';
+import { priorityRank, WORK_PRIORITIES, type UnitySlotsReport, type WorkPriority } from '../shared/types.ts';
+import { benchLockDir, foreignTimedHold } from './benchLock.ts';
+import { editorBenchSession } from './benchRaise.ts';
 import { personHoldReason } from './personPlay.ts';
 
 /**
@@ -230,6 +231,11 @@ export interface AssessInput {
   ramPct?: number;
   ramLimitPct?: number;
   holderWaitMs?: number;
+  /**
+   * A waiting request's priority by its session (w4620; lothsahn: "The factory should be using strict priority queues"),
+   * read live each look (readSlotPriorities). Absent: everyone counts as low, so the order stays first come first served.
+   */
+  priorityOf?(session?: string): WorkPriority;
 }
 
 export interface Assessment {
@@ -252,6 +258,25 @@ export interface Assessment {
   grant: string[];
   deny: { id: string; why: string }[];
   waiting: { id: string; position: number; why: string }[];
+  /** w4620: the priority each request waiting at this look was ordered by (granted ones included). */
+  priorities: Map<string, WorkPriority>;
+  /** w4620: a request granted or at the head ahead of an older waiting one of a lower priority (`id` ahead of `over`). */
+  jumps: { id: string; priority: WorkPriority; over: string; overPriority: WorkPriority }[];
+}
+
+/**
+ * Each worker session's priority as the daemon's priorities.json says (machine/benchLock.ts writeBenchPriorities), read
+ * now: `level` (release) over `priority`, since the portal sends a release session as urgent with level release for old
+ * readers. A session with no mark, and a missing or unreadable file, count as low (w4620: runs filed without a request
+ * priority count as low); `root` is the worker root.
+ */
+export function readSlotPriorities(root: string | undefined): (session?: string) => WorkPriority {
+  const sessions = root ? readJson<{ sessions?: Record<string, { priority?: unknown; level?: unknown }> }>(path.join(benchQueueDir(benchLockDir(root)), 'priorities.json'))?.sessions : undefined;
+  return (session) => {
+    const m = session && sessions && typeof sessions === 'object' ? sessions[session] : undefined;
+    const p = m?.level ?? m?.priority;
+    return WORK_PRIORITIES.find((w) => w === p) ?? 'low';
+  };
 }
 
 /** The nearest ancestor of `pid` (itself excluded) that is in `wanted`, through the parent chain. */
@@ -349,8 +374,13 @@ export function assess(input: AssessInput): Assessment {
   });
   const priority = new Set(input.places.filter((pl) => pl.priority).map((pl) => pl.holder));
   const first = (r: SlotRequest) => Number(holding(r.holder) > 0 || priority.has(r.holder));
-  const order = (a: SlotRequest, b: SlotRequest) => first(b) - first(a) || a.createdAt - b.createdAt || a.id.localeCompare(b.id);
+  // w4620: holders first, then strict priority, then first come first served within one priority.
+  const prios = new Map(waiting.map((r) => [r.id, (input.priorityOf?.(r.session) ?? 'low') as WorkPriority]));
+  const rank = (r: SlotRequest) => priorityRank(prios.get(r.id));
+  const order = (a: SlotRequest, b: SlotRequest) => first(b) - first(a) || rank(b) - rank(a) || a.createdAt - b.createdAt || a.id.localeCompare(b.id);
   waiting.sort(order);
+  const queue = [...waiting];
+  const firsts = new Map(queue.map((r) => [r.id, first(r)]));
   const take = (r: SlotRequest) => {
     grant.push(r.id);
     free -= r.count;
@@ -381,6 +411,15 @@ export function assess(input: AssessInput): Assessment {
     }
   }
   const head = rest[0];
+  // w4620: whom priority put ahead of an older waiter (the oldest such one per request), for the log.
+  const jumps: Assessment['jumps'] = [];
+  for (const c of queue) {
+    if (!grant.includes(c.id) && c !== head) continue;
+    const over = queue
+      .filter((o) => o !== c && !grant.includes(o.id) && !deny.some((x) => x.id === o.id) && o.createdAt < c.createdAt && rank(o) < rank(c) && firsts.get(o.id) === firsts.get(c.id))
+      .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id))[0];
+    if (over) jumps.push({ id: c.id, priority: prios.get(c.id)!, over: over.id, overPriority: prios.get(over.id)! });
+  }
   const waitingOut = rest.map((r, i) => ({
     id: r.id,
     position: i + 1,
@@ -409,6 +448,8 @@ export function assess(input: AssessInput): Assessment {
     grant,
     deny,
     waiting: waitingOut,
+    priorities: prios,
+    jumps,
   };
 }
 
@@ -473,7 +514,7 @@ export interface ArbiterFile {
   limit?: number;
   used: number;
   line: string;
-  waiting: { id: string; label: string; count: number; holder: string; position: number; why: string }[];
+  waiting: { id: string; label: string; count: number; holder: string; position: number; why: string; priority?: WorkPriority }[];
   granted: { id: string; label: string; count: number; holder: string }[];
 }
 
@@ -525,6 +566,13 @@ export interface ArbiterDeps {
   ramLimitPct?: number;
   holderWaitMs?: number;
   staleMs?: number;
+  /**
+   * The worker root (the daemon's cfg.root): its tmp/bench.queue/priorities.json says each session's priority, which
+   * orders the queue (w4620). Absent: everyone counts as low.
+   */
+  root?: string;
+  /** A session's priority; tests give it, else it is read from priorities.json at each look (readSlotPriorities). */
+  priorityOf?(session?: string): WorkPriority;
   machine?: string;
   /** When this process started (default: from process.uptime()); tests give it. */
   startedAt?: number;
@@ -546,6 +594,8 @@ export class UnitySlots {
   /** Other arbiters already reported, by instance. */
   private readonly foreign = new Set<string>();
   private last?: { a: Assessment; reqs: SlotRequest[]; ramPct?: number; at: number };
+  /** w4620: the priority jumps already logged ("<winner id>><overtaken id>"), so a poll does not repeat one. */
+  private readonly jumpsLogged = new Set<string>();
   private overSince = 0;
   private ramSince = 0;
   private busy?: Promise<Assessment>;
@@ -645,9 +695,10 @@ export class UnitySlots {
     const procs = await this.d.procs();
     const now = this.d.now();
     const ramPct = this.d.ramPct();
-    const a = assess({ platform: this.d.platform, procs, requests: reqs, places: this.d.places(), limit: this.d.limit(), now, ramPct, ramLimitPct: this.d.ramLimitPct, holderWaitMs: this.d.holderWaitMs });
+    const a = assess({ platform: this.d.platform, procs, requests: reqs, places: this.d.places(), limit: this.d.limit(), now, ramPct, ramLimitPct: this.d.ramLimitPct, holderWaitMs: this.d.holderWaitMs, priorityOf: this.d.priorityOf ?? readSlotPriorities(this.d.root) });
     if (this.closed) return a;
     const byId = new Map(reqs.map((r) => [r.id, r]));
+    this.logJumps(a, byId);
     for (const id of a.grant) {
       writeAtomic(grantFile(this.d.dir, id), JSON.stringify({ id, grantedAt: new Date(now).toISOString() }));
       const r = byId.get(id)!;
@@ -687,6 +738,19 @@ export class UnitySlots {
       this.d.log?.(`unity slots: could not write ${arbiterFile(this.d.dir)}: ${(e as Error).message}`);
     }
     return a;
+  }
+
+  /** w4620: one line per pair when priority puts a request ahead of an older waiting one (lothsahn: "Why is urgent work in a queue behind non urgent work?"). */
+  private logJumps(a: Assessment, byId: Map<string, SlotRequest>) {
+    const tag = (r: SlotRequest, p: WorkPriority) => `${r.label} (${(r.session ?? 'no session').slice(0, 8)}, ${p})`;
+    for (const j of a.jumps) {
+      const key = `${j.id}>${j.over}`;
+      const [c, o] = [byId.get(j.id), byId.get(j.over)];
+      if (this.jumpsLogged.has(key) || !c || !o) continue;
+      this.jumpsLogged.add(key);
+      this.d.log?.(`unity slot: ${tag(c, j.priority)} goes ahead of ${tag(o, j.overPriority)}, queued since ${new Date(o.createdAt).toISOString()}: strict priority (w4620)`);
+    }
+    for (const key of this.jumpsLogged) if (key.split('>').some((id) => !byId.has(id))) this.jumpsLogged.delete(key);
   }
 
   /** Tell the orchestrator once when the machine goes over its limit, and when it is back; and of a long wait on RAM. */
@@ -730,7 +794,7 @@ export class UnitySlots {
       line: this.line() ?? '',
       waiting: l.a.waiting.map((w) => {
         const r = byId.get(w.id)!;
-        return { id: w.id, label: r.label, count: r.count, holder: r.holder, position: w.position, why: w.why };
+        return { id: w.id, label: r.label, count: r.count, holder: r.holder, position: w.position, why: w.why, priority: l.a.priorities.get(w.id) };
       }),
       granted: l.reqs.filter((r) => r.grantedAt !== undefined && !r.denied).map((r) => ({ id: r.id, label: r.label, count: r.count, holder: r.holder })),
     };
@@ -744,11 +808,15 @@ export class UnitySlots {
     const a0 = await this.tick();
     if (this.d.limit() === undefined) return undefined;
     const reqs = this.last?.reqs ?? [];
-    const probe: SlotRequest = { id: '~editor', holder, count: 1, pid: -1, label: `editor of ${holder}`, createdAt: this.d.now() + 1 };
-    const a = assess({ platform: this.d.platform, procs: await this.d.procs(), requests: [...reqs, probe], places: this.d.places(), limit: this.d.limit(), now: this.d.now(), ramPct: this.d.ramPct(), ramLimitPct: this.d.ramLimitPct, holderWaitMs: this.d.holderWaitMs });
+    // w4620: the start carries the editor's own bench session (editor:<sandbox>), so it queues at that sandbox's priority.
+    const session = holder.startsWith('sandbox:') ? editorBenchSession(holder.slice('sandbox:'.length)) : undefined;
+    const probe: SlotRequest = { id: '~editor', holder, count: 1, pid: -1, label: `editor of ${holder}`, ...(session ? { session } : {}), createdAt: this.d.now() + 1 };
+    const a = assess({ platform: this.d.platform, procs: await this.d.procs(), requests: [...reqs, probe], places: this.d.places(), limit: this.d.limit(), now: this.d.now(), ramPct: this.d.ramPct(), ramLimitPct: this.d.ramLimitPct, holderWaitMs: this.d.holderWaitMs, priorityOf: this.d.priorityOf ?? readSlotPriorities(this.d.root) });
     if (a.grant.includes(probe.id)) return undefined;
     const why = a.deny.find((x) => x.id === probe.id)?.why ?? a.waiting.find((x) => x.id === probe.id)?.why ?? 'no free slot';
-    const ahead = a.waiting.filter((x) => x.id !== probe.id).length;
+    // Those that wait ahead of it: by position, as priority may put it before some that were queued earlier.
+    const mine = a.waiting.find((x) => x.id === probe.id);
+    const ahead = mine ? mine.position - 1 : a.waiting.length;
     return `not started: ${why}; ${countsLine(a0)}${ahead ? `; ${ahead} launch(es) wait ahead of it` : ''}${this.holdersPart()}. Try again once one ends (wake_me), or stop an editor you no longer need`;
   }
 
@@ -791,7 +859,7 @@ export class UnitySlots {
       ramLimitPct: this.d.ramLimitPct ?? UNITY_RAM_PCT,
       waiting: l.a.waiting.map((w) => {
         const r = byId.get(w.id)!;
-        return { label: r.label, count: r.count, holder: r.holder, since: iso(r.createdAt), why: w.why, position: w.position, ...(r.session ? { session: r.session } : {}) };
+        return { label: r.label, count: r.count, holder: r.holder, since: iso(r.createdAt), why: `${w.why}; priority ${l.a.priorities.get(w.id) ?? 'low'}`, position: w.position, ...(r.session ? { session: r.session } : {}) };
       }),
       granted: l.reqs.filter((r) => r.grantedAt !== undefined && !r.denied).map((r) => ({ label: r.label, count: r.count, holder: r.holder, since: iso(r.grantedAt!) })),
       at: iso(l.at),

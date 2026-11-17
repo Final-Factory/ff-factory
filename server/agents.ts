@@ -69,7 +69,7 @@ import { playHolds, playLine } from '../shared/personPlay.ts';
 import { sandboxUseText, unitySlotsLine } from '../shared/fleet.ts';
 import { resumeWhereLine, stopWhereLine, type BeforeSend } from './resumeWhere.ts';
 import { isMidTurn, midTurnRefusal, othersMidTurn, snapshotOf, type OptionsFactory, type QueuedSend, type SessionHandle, type SessionManager, type TurnEndMeta } from './sessions.ts';
-import { FLAG_LABEL, SET_BLOCKER_KINDS, WORK_BLOCKER_KINDS, WORK_OPEN, WORK_PRIORITIES, type WorkBlockerKind, type WorkSource, type BenchPriority, type BenchGrant, type BenchAway, type AttachmentRef, type DeliveredAttachment, type ImageInput, type PermissionMode, type Requester, type Sandbox, type SessionInfo, type TranscriptEvent, type WorkItem, type WorkPriority, type WorkStatus } from '../shared/types.ts';
+import { FLAG_LABEL, SET_BLOCKER_KINDS, WORK_BLOCKER_KINDS, WORK_OPEN, WORK_PRIORITIES, atLeast, benchRank, type WorkBlockerKind, type WorkSource, type BenchPriority, type BenchGrant, type BenchAway, type AttachmentRef, type DeliveredAttachment, type ImageInput, type PermissionMode, type Requester, type Sandbox, type SessionInfo, type TranscriptEvent, type WorkItem, type WorkPriority, type WorkStatus } from '../shared/types.ts';
 import { attachmentForMachine, publicRef, publishableFile, publishedFilesBlock, uploadForMachine, type AttachmentStore } from './attachments.ts';
 import type { TimedDelivery, TimedRuns } from './timedRuns.ts';
 import type { LabFixtures } from './labFixtures.ts';
@@ -4047,7 +4047,7 @@ export class Agents {
         return !held.get(id);
       });
       const machines = free(roomForWork(plus, w, needs).ids);
-      const preemptOn = w.priority !== 'urgent' ? [] : free(roomForWork(plusMid, w, needs).ids);
+      const preemptOn = !atLeast(w.priority, 'urgent') ? [] : free(roomForWork(plusMid, w, needs).ids);
       const heldWhy = [...held].filter(([, why]) => why).map(([id, why]) => `${id}: ${why.startsWith(`${id}'s `) ? why.slice(id.length + 3) : why}`);
       return { work: w.id, title: w.title, priority: w.priority, room, machines, preemptOn, ...(heldWhy.length ? { held: heldWhy } : {}) };
     });
@@ -4088,8 +4088,7 @@ export class Agents {
     const special = this.openWorkOf(info).find((w) => w.timedLeg || w.pair);
     if (special) return `${special.id} is ${special.timedLeg ? 'a timed leg' : 'a pair run'}`;
     const ex = this.benchPriorities(info.machineId!)[info.id]?.exempt;
-    if (ex) return ex === 'approved' ? `${info.id} has a person-approved bench turn` : `${info.id} is the urgent release lane or the nightly`;
-    if (this.builds.releaseBuilder(info.machineId!, info.id)) return `${info.id} builds a release`;
+    if (ex) return ex === 'approved' ? `${info.id} has a person-approved bench turn` : `${info.id} is the nightly`;
     if (this.liveHub?.running(info.id)) return `${info.id}'s Live view is up`;
     const st = this.machines.statsOf(info.machineId!);
     if (sb.path && benchLockIn(st?.benchLock, sb.path)) return 'a timed run from it holds the bench lock';
@@ -4601,20 +4600,19 @@ export class Agents {
         out[info.id] = { priority: 'low', requests: [], away: moved };
         continue;
       }
-      // w1656: the builder of the release planned here takes the bench first, whatever its request's priority; a builder
-      // with no open request (build_plan takes `requests: []`) still gets its mark (w1832: else the queue caps its build)
-      const release = !!this.builds?.releaseBuilder(machineId, info.id);
-      if (!open.length && !release) continue;
+      // w4620 (lothsahn: "not have special handling for releases... Let it go through the priority process being built"): a
+      // release builder's tickets go at its request's priority (release, above urgent), like anyone's; w1656's override is gone.
+      if (!open.length) continue;
       const top = open.reduce((a, w) => (WORK_PRIORITIES.indexOf(w.priority) > WORK_PRIORITIES.indexOf(a) ? w.priority : a), 'low' as WorkPriority);
-      // w1832: the urgent release lane's builder and the scheduled nightly's worker are never pre-empted by the turn limits.
-      const exempt = release ? 'release' : open.some((w) => w.source?.kind === 'nightly-run') ? 'nightly' : undefined;
+      // w1832: the scheduled nightly's worker is never cut short by the turn limits (it still waits at its own priority).
+      const exempt = open.some((w) => w.source?.kind === 'nightly-run') ? 'nightly' : undefined;
       // w1969: its timed_place verdict while it holds, for this machine's guard
       const v = info.timedVerdict;
       const timed = v && Date.parse(v.until) > Date.now() && !this.timedLegFinished(v) ? v : undefined;
-      const away = release ? undefined : this.benchAway(info, machineId, timed);
+      const away = this.benchAway(info, machineId, timed);
       // w3740: a request held off game players here after this machine dropped under its player or timed leg
       const crashHold = crashHoldMark(open, machineId);
-      out[info.id] = { priority: release ? 'urgent' : top, requests: open.map((w) => w.id), ...(exempt ? { exempt } : {}), ...(timed ? { timed } : {}), ...(away ? { away } : {}), ...(crashHold ? { crashHold } : {}) };
+      out[info.id] = { ...benchRank(top), requests: open.map((w) => w.id), ...(exempt ? { exempt } : {}), ...(timed ? { timed } : {}), ...(away ? { away } : {}), ...(crashHold ? { crashHold } : {}) };
       if (!exempt) grantOf(info.id, open);
     }
     // w1996: a timed_run sent to this computer queues here for its worker elsewhere, at that worker's request priority
@@ -4635,8 +4633,9 @@ export class Agents {
       // w2411: a worker moved off the run's request serves it no more; the run keeps its request's priority
       const mine = info ? this.openWorkOf(info, bySession) : [];
       const open = mine.length ? mine : r.requests.map((id) => this.store.work.get(id)).filter((w): w is WorkItem => !!w && isOpen(w));
-      const top = open.length ? open.reduce((a, w) => (WORK_PRIORITIES.indexOf(w.priority) > WORK_PRIORITIES.indexOf(a) ? w.priority : a), 'low' as WorkPriority) : 'normal';
-      out[r.session] = { priority: top, requests: open.length ? open.map((w) => w.id) : r.requests, timed: here };
+      const top = open.length ? open.reduce((a, w) => (WORK_PRIORITIES.indexOf(w.priority) > WORK_PRIORITIES.indexOf(a) ? w.priority : a), 'low' as WorkPriority) : 'low';
+      // w4620: a run with no open request counts as low, like every ticket filed without a request priority
+      out[r.session] = { ...benchRank(top), requests: open.length ? open.map((w) => w.id) : r.requests, timed: here };
       grantOf(r.session, open);
     }
     this.markBenchGrants(machineId, grants, out, now);
@@ -7571,7 +7570,7 @@ ${w.repo ?? ''}
         {
           title: z.string().min(1).max(120).describe('What it is, in one line: "Fix the belt splitter desync (spec 098)".'),
           brief: z.string().min(1).max(8000).describe('The full brief: goal, done-criteria, constraints, the skill to use, what your person said.'),
-          priority: priority.optional().describe('Default normal. urgent: broken for players, or blocking someone. low: whenever nothing above it fits a free slot (it waits behind normal work, and starts when only it fits).'),
+          priority: priority.optional().describe('Default normal. release: a release and what it waits on (w4620). urgent: broken for players, or blocking someone. low: whenever nothing above it fits a free slot (it waits behind normal work, and starts when only it fits).'),
           constraints: z.string().max(2000).optional().describe('Where it must or must not run, deadlines, what not to touch.'),
           report: z.enum(REPORT_KINDS).optional().describe('w2541: a design or an analysis your person asked for: its worker files the result as a report of this kind (file_report); its DONE waits for one.'),
           spend_read: z.literal(true).optional().describe('A spend analysis: its workers may use spend_export.'),
@@ -8228,7 +8227,7 @@ ${this.worldBrief(true)}
 - Done means merged: a worker merges its own PR once its verification is done and CI is green (in the game repo, its required \`Test in editmode\` check; a PR that breaks the master batch comes back as an urgent revert request), and holds one only for exceptional risk or a concrete timing reason (it reports which, and when it will merge). Do not write a brief that ends at an open PR waiting for a person.
 - Game tests that assert on timing are their own \`[Category("Performance")]\` tests, and functional tests never carry the tag. They run in no CI (locally against a same-machine baseline, later on dedicated perf hardware). A worker fixes a wrong or mixed tag where it meets one; no brief asks to loosen a timing threshold (ff-agents evidence-gate).
 - Same spec, PR, branch or bug means the same work, unless the verbs differ (implement vs playtest vs review). A PR already being merged is not work to redo. A request other work fully covers is closed (w3248): reject it "superseded by <what>" or merge it. When the server found a strong overlap still in flight, start_agent refuses unless you pass override_duplicate saying what makes the request different.
-- Priority: urgent, high, normal, low, then the oldest first. Do not stop a running worker for a new request unless a person asks.
+- Priority: release, urgent, high, normal, low, then the oldest first, in every queue (strict, w4620). Do not stop a running worker for a new request unless a person asks.
 - Your decide_work note is what the requester's orchestrator reads: one or two plain lines. Starting or messaging with work_id tells them by itself.
 - Reports (w2541, docs/reports.md): a person who asked for a design or an analysis gets its result as a report; when its list_work entry names none, decide_work report <kind>, and its DONE waits for one.
 - Pass work_id whenever you act for a request: the worker then runs for its requester, on their Claude account. for_user is for someone this conversation shows asking; work nobody asked for (after a restart, a stuck editor) is for the system payer, ${payer.displayName} (user id ${payer.userId}).

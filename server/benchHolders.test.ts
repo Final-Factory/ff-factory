@@ -110,8 +110,8 @@ test('w3715: a holder with no process at all (its ticket held by a detached scri
   assert.equal(s.sent.length, 1);
 });
 
-test('w3715: harness tickets, the release lane and the nightly are left alone', () => {
-  for (const t of [ticket({ what: 'timed run tr-9: fps' }), ticket({ exempt: 'release' }), ticket({ exempt: 'nightly' })]) {
+test('w3715: harness tickets and the nightly are left alone (a release builder is a worker like any since w4620)', () => {
+  for (const t of [ticket({ what: 'timed run tr-9: fps' }), ticket({ exempt: 'nightly' })]) {
     const s = setup();
     s.setBench(state([t]));
     for (let m = 0; m <= 30; m++) s.at(m * 60_000);

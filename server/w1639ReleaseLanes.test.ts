@@ -31,7 +31,7 @@ test('w1639: read_rules release routes both lanes: FFBox by default, the urgent 
   assert.match(r, /No FF Factory computer builds it: no build_plan, no BEAST, no editor/);
   assert.match(r, /wake_me 40 minutes .* so no sandbox waits on FFBox/);
   assert.match(r, /URGENT, only when Ben or lothsahn says "quick" or "urgent" release/);
-  assert.match(r, /priority urgent/);
+  assert.match(r, /priority release \(w4620: above urgent/);
   assert.match(r, /BEAST, else LothDesktop when BEAST is offline/);
   assert.match(r, /trigger-ci-release\.sh --urgent <beast\|lothdesktop>/);
   assert.match(r, /FFBox declines that bump's Release jobs and builds nothing/);
@@ -102,7 +102,8 @@ test('w1656: an urgent release asks A or B on one card first, and its build wait
   assert.match(r, /scripts\/release\/last_green\.py/);
   assert.match(r, /--from green/);
   assert.match(r, /A RELEASE BUILD WAITS FOR NO ONE/);
-  assert.match(r, /pre-empt every holder/);
+  assert.doesNotMatch(r, /pre-empt every holder/, 'w4620: no release shortcut; its tickets go at its priority');
+  assert.match(r, /a release first after the turn running now \(w4620: a running turn is never cut short\)/);
   assert.doesNotMatch(r, /at most 20 minutes/);
   assert.match(r, /follow it every 2 to 3 minutes with `urgent_release\.py wait --out <run> --minutes 3`/);
 });

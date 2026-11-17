@@ -95,7 +95,7 @@ const order = (a: SandboxHolders, b: SandboxHolders) => rankOf(a.priority) - ran
 /**
  * Which sandbox queued work `p` takes, or why none: the lowest-priority holder first, then the longest idle, then one whose
  * editor is stopped (cheapest to restore); only strictly lower priority, never blocked or protected ones. A mid-turn holder
- * only for urgent work, only low or normal, only where nothing is reclaimable, and only on a computer in `preemptOn`.
+ * only for urgent or release work (w4620), only low or normal, only where nothing is reclaimable, and only on a computer in `preemptOn`.
  */
 export function pickReclaim(p: Pick<Pressure, 'priority' | 'machines' | 'preemptOn' | 'held'>, sbs: readonly SandboxHolders[]): ReclaimPick {
   const mine = sbs.filter((x) => p.machines.includes(x.machine) || p.preemptOn.includes(x.machine));
@@ -111,11 +111,11 @@ export function pickReclaim(p: Pick<Pressure, 'priority' | 'machines' | 'preempt
   }
   const idle = ok.filter((x) => !x.midTurn && p.machines.includes(x.machine)).sort(order)[0];
   if (idle) return { reclaim: idle };
-  if (p.priority === 'urgent') {
+  if (rankOf(p.priority) >= rankOf('urgent')) {
     const mid = ok.filter((x) => x.midTurn && rankOf(x.priority) <= rankOf('normal') && (p.preemptOn.includes(x.machine) || p.machines.includes(x.machine))).sort(order)[0];
     if (mid) return { preempt: mid };
   }
-  for (const x of ok) if (x.midTurn) why.set(`${x.machine}/${x.sandbox}`, p.priority === 'urgent' ? `mid-turn on ${x.priority} work, which only urgent work pre-empts, and only low or normal` : `mid-turn (only urgent work pre-empts a turn)`);
+  for (const x of ok) if (x.midTurn) why.set(`${x.machine}/${x.sandbox}`, rankOf(p.priority) >= rankOf('urgent') ? `mid-turn on ${x.priority} work, which only urgent or release work pre-empts, and only low or normal` : `mid-turn (only urgent or release work pre-empts a turn)`);
   const lines = [...why].map(([k, v]) => `${k}: ${v}`);
   return { none: (lines.length ? `no sandbox it may take: ${lines.slice(0, 4).join('; ')}${lines.length > 4 ? `; and ${lines.length - 4} more` : ''}` : `no occupied sandbox on ${[...new Set([...p.machines, ...p.preemptOn])].join(', ')}`) + held };
 }

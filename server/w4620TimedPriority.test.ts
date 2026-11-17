@@ -149,3 +149,18 @@ test('w4620: the logs of a dropped try are not its result, and a daemon that nev
   assert.equal(tr.get('tr_ddddddddd1')?.state, 'sent');
   assert.equal(tr.get('tr_ddddddddd2')?.state, 'sent');
 });
+
+test('w4620: a release run goes ahead of an urgent one; equal priorities stay first come', (t) => {
+  const { tr, posted } = setup(
+    t,
+    [
+      { id: 'tr_ccccccccc1', request: 'w1', state: 'sent', sentAt: ago(10) },
+      { id: 'tr_ccccccccc2', request: 'w2', state: 'sent', sentAt: ago(9) },
+      { id: 'tr_ccccccccc3', request: 'w3', state: 'sent', sentAt: ago(8) },
+    ],
+    { w1: 'urgent', w2: 'urgent', w3: 'release' },
+  );
+  tr.reprioritize();
+  assert.deepEqual(posted.filter((p) => p.type === 'timed_run_cancel').map((p) => p.id).sort(), ['tr_ccccccccc1', 'tr_ccccccccc2']);
+});
+

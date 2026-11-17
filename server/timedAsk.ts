@@ -195,7 +195,7 @@ export interface TimedPlaceInput {
   platform?: string;
   /** Why the numbers must come from this computer (a side of the A/B already ran here, the brief names it). */
   sameMachine?: string;
-  /** The urgent release lane's builder or the nightly's worker (BenchPriority.exempt): its machine is chosen for it. */
+  /** The nightly's worker or a person's approved turn (BenchPriority.exempt): its machine is chosen for it. A release builder is not exempt since w4620. */
   exempt?: string;
   /**
    * 'timed_run': a Windows player A/B (w1946), timed by a computer that takes timed runs; 'leg': anything else timed (a snippet
@@ -240,7 +240,7 @@ export function decideTimedPlace(a: TimedPlaceInput): TimedPlaceDecision {
   const here = a.here;
   const os = a.platform === 'win32' ? ' on Windows' : a.platform === 'darwin' ? ' on macOS' : '';
   if (a.exempt === 'approved') return { verdict: 'here', why: `a person approved this worker a longer exclusive turn on ${here?.id ?? 'this computer'} (w3186)` };
-  if (a.exempt) return { verdict: 'here', why: `the ${a.exempt === 'release' ? 'urgent release lane' : 'nightly'} times on its own computer (w1832)` };
+  if (a.exempt) return { verdict: 'here', why: 'the nightly times on its own computer (w1832)' };
   if (a.pinned) {
     // w2521: before every other rule, w2055's idle computer and same_machine included: a pin is a hardware need, not a cost.
     const id = a.pinned.id;

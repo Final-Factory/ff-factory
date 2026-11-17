@@ -720,14 +720,21 @@ export interface BenchPriority {
   priority: WorkPriority;
   requests: string[];
   /**
-   * The work the bench queue never pre-empts (w1832; lothsahn: "Let's avoid preempting urgent release builds and the
-   * nightly"): `release`, the urgent release lane's builder (BuildPlans.releaseBuilder); `nightly`, the worker of the
+   * The work the bench queue never cuts short (w1832; lothsahn: "Let's avoid preempting urgent release builds and the
+   * nightly"; the release builder's mark went in w4620, lothsahn: "not have special handling for releases... Let it go
+   * through the priority process being built": a release goes at the release priority instead); `nightly`, the worker of the
    * scheduled nightly run (a request filed by the portal's nightly schedule, source kind nightly-run). Set by the portal
    * only: the game repo's bench_queue.py reads it from priorities.json, keyed by the session a ticket carries
    * (FF_SESSION_ID, or FF_BENCH_SESSION for the nightly), so a worker has no flag to mark its own job; only a ticket
    * taken under another session's id would carry that session's mark.
    */
-  exempt?: 'release' | 'nightly' | 'approved';
+  exempt?: 'nightly' | 'approved';
+  /**
+   * w4620: the session's rank for readers that know the release priority (machine/benchState.ts, benchRaise.ts, unitySlots.ts
+   * and bench_queue.py from w4620). `priority` then says urgent, the top that older copies of bench_queue.py know, so a
+   * release still sorts first under them. Read `level ?? priority`.
+   */
+  level?: 'release';
   /**
    * w3186: with `exempt: 'approved'`, the longer exclusive turn a person approved for this worker's request on this machine
    * (server/benchGrants.ts; ben on w3159: "Give each overload run a one-off 60-minute exclusive turn on biscuit, with the
@@ -885,6 +892,8 @@ export interface BenchTicketGlance {
   mode: 'shared' | 'exclusive';
   what: string;
   session?: string;
+  /** w4620: the priority the queue serves it at (its session's `level ?? priority` in priorities.json; unmarked: low). */
+  priority?: WorkPriority;
   requests?: string[];
   host?: string;
   sandbox?: string;
@@ -2131,8 +2140,20 @@ export interface PoolPerson {
 export type WorkStatus = 'new' | 'question' | 'queued' | 'blocked' | 'active' | 'stalled' | 'merged' | 'done' | 'rejected' | 'cancelled';
 export const WORK_OPEN: readonly WorkStatus[] = ['new', 'question', 'queued', 'blocked', 'active'];
 
-export type WorkPriority = 'low' | 'normal' | 'high' | 'urgent';
-export const WORK_PRIORITIES: readonly WorkPriority[] = ['low', 'normal', 'high', 'urgent'];
+/**
+ * A request's priority, lowest first. Every queue serves the highest first, first come first served only within one
+ * (w4620, lothsahn, 2026-11-17: "The factory should be using strict priority queues"). release sits above urgent and is
+ * the only way a release goes ahead (lothsahn, w4620: "Let's add a new priority called release that's above urgent and
+ * not have special handling for releases... Let it go through the priority process being built").
+ */
+export type WorkPriority = 'low' | 'normal' | 'high' | 'urgent' | 'release';
+export const WORK_PRIORITIES: readonly WorkPriority[] = ['low', 'normal', 'high', 'urgent', 'release'];
+/** A priority's rank, higher served first (0 for low; an unknown priority counts as low). */
+export const priorityRank = (p: string | undefined): number => Math.max(0, WORK_PRIORITIES.indexOf(p as WorkPriority));
+/** A priority as a bench queue mark (w4620): release goes as urgent with `level: 'release'`, the top older bench_queue.py copies know. */
+export const benchRank = (p: WorkPriority): { priority: WorkPriority; level?: 'release' } => (p === 'release' ? { priority: 'urgent', level: 'release' } : { priority: p });
+/** Whether `p` is at least `floor` (urgent work: urgent or release). */
+export const atLeast = (p: string | undefined, floor: WorkPriority): boolean => priorityRank(p) >= priorityRank(floor);
 
 /** Work in flight or recently done that a new request may repeat, as the server found it when the request was filed. */
 /** w3706 (server/findings.ts): one worker report kept in a request's Findings / outcome record, its head when cut. */

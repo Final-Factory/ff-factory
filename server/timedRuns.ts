@@ -428,7 +428,7 @@ export class TimedRuns {
     this.grantPieces(r);
     // w2446: its machine's bench queue reads the run's "here" (Agents.benchPriorities) when the runner asks for the ticket
     this.d.beforeSend?.(r.machine);
-    if (this.d.post(r.machine, { type: 'timed_run', order: r.order })) {
+    if (this.d.post(r.machine, { type: 'timed_run', order: { ...r.order, priority: this.priorityOf(r) } })) {
       r.sentAt = this.iso();
       r.sentSeq = ++this.sentSeq;
       this.set(r, 'sent', `sent to ${r.machine}`);

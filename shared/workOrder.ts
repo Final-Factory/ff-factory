@@ -3,7 +3,7 @@ import type { WorkItem } from './types.ts';
 
 /** The status groups, top to bottom: questions, new, queued, blocked, active, then the stalled ones, then every closed one together. */
 export const STATUS_RANK: Record<WorkItem['status'], number> = { question: 0, new: 1, queued: 2, blocked: 2.5, active: 3, stalled: 3.5, done: 4, merged: 4, rejected: 4, cancelled: 4 };
-const PRIORITY: Record<WorkItem['priority'], number> = { urgent: 0, high: 1, normal: 2, low: 3 };
+const PRIORITY: Record<WorkItem['priority'], number> = { release: 0, urgent: 1, high: 2, normal: 3, low: 4 };
 
 /** Whether `viewerId` (a login) is one of the item's people. */
 export function isMine(w: Pick<WorkItem, 'requesters'>, viewerId: string | undefined): boolean {

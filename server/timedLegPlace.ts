@@ -20,7 +20,7 @@
  * every daemon drop the journal showed on 2026-10-24 was under 30 s) still counts as up; one gone longer does not, so its
  * class is skipped until it comes back, re-checked every pass.
  */
-import type { WorkPriority } from '../shared/types.ts';
+import { atLeast, type WorkPriority } from '../shared/types.ts';
 import { avoidOf, busyReasons, classOf, classRank, classText, holdOf, SIZE_CLASSES, type Computer, type PlacementPrefs, type SizeClass } from './placement.ts';
 
 /** A worker that holds a sandbox on a computer, and whether it can leave it for a timed leg (Agents.preemptFacts). */
@@ -156,8 +156,8 @@ export function timedLegStep(a: LegInput): LegStep {
     };
   }
   const freed = why.length ? `; none can be freed: ${why.join('; ')}` : '';
-  // 3. High or urgent: the big computers' fallback at once (w2048); normal or low: wait on the base class.
-  if (a.priority === 'high' || a.priority === 'urgent') {
+  // 3. High, urgent or release: the big computers' fallback at once (w2048); normal or low: wait on the base class.
+  if (atLeast(a.priority, 'high')) {
     const all = ok.filter((c) => upNow(c, a.now, a.blipMs)).map((c) => c.id);
     return { widen: all, why: `it is ${a.priority} priority and no computer${os} that takes timed runs is idle or can be freed${freed}${skipped}: it may go to any computer that takes timed runs, big ones included (w2048 fallback): ${all.join(' > ')}` };
   }

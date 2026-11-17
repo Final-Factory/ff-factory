@@ -857,7 +857,7 @@ export interface RoomShare {
   ahead: string[];
 }
 
-const PRIORITY_RANK: Record<WorkItem['priority'], number> = { urgent: 0, high: 1, normal: 2, low: 3 };
+const PRIORITY_RANK: Record<WorkItem['priority'], number> = { release: 0, urgent: 1, high: 2, normal: 3, low: 4 };
 
 /**
  * Who each computer's room goes to first (w1944, lothsahn, 2026-10-24: "Why does the dispatcher say biscuit has room when

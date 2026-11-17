@@ -17,7 +17,8 @@ export function benchStopRefusal(t: Pick<BenchTicketGlance, 'ticket' | 'session'
   if (!BENCH_TICKET_RE.test(t.ticket)) return `"${t.ticket}" is not a bench ticket name (t and 8 digits)`;
   if (!t.session || t.session.startsWith('editor:')) return `${t.ticket} is an editor's ticket (a harness ticket): it ends with the editor; stop the editor instead`;
   if (/^timed run /.test(t.what)) return `${t.ticket} is a timed run's leg (a harness ticket): the timed run ends it; cancel the run instead (timed_place cancel)`;
-  if (t.preempt || t.exempt === 'release') return `${t.ticket} is the urgent release lane's (FF Factory's own lane), not a worker's own ticket`;
+  // w4620: no release lane any more; a pre-empt ticket is an old branch's urgent_release.py's
+  if (t.preempt) return `${t.ticket} is an old urgent release lane's pre-empt ticket (FF Factory's own), not a worker's own ticket`;
   if (t.exempt === 'nightly') return `${t.ticket} is the nightly's (FF Factory's own lane), not a worker's own ticket`;
   return undefined;
 }

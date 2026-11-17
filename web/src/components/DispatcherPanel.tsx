@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { FLAG_LABEL, type AppState, type IntakeSummary, type WorkItem, type WorkPriority } from '../../../shared/types';
 
 /** The priorities the dashboard sets (w2049), highest first. */
-const PRIORITY_CHOICES: readonly WorkPriority[] = ['urgent', 'high', 'normal', 'low'];
+const PRIORITY_CHOICES: readonly WorkPriority[] = ['release', 'urgent', 'high', 'normal', 'low'];
 import { decisionOf } from '../../../shared/decision';
 import { latestLine } from '../../../shared/latestLine';
 import { api } from '../api';
@@ -625,7 +625,7 @@ function WorkRow({ app, w, live, open, onToggle, now }: { app: AppState; w: Work
             ) : null}
             {isMine(w, app.me?.userId) ? <span className="tone-blue" data-testid="work-yours"> · yours</span> : null}
             {w.triage && w.triage.class !== 'needs-human' ? <span> · {triageLabel[w.triage.class]}</span> : null}
-            {w.priority === 'urgent' || w.priority === 'high' ? <span className="tone-amber"> · {w.priority}</span> : w.priority === 'low' ? <span className="dim" data-testid={`work-low-${w.id}`}> · low</span> : null}
+            {w.priority === 'release' || w.priority === 'urgent' || w.priority === 'high' ? <span className="tone-amber"> · {w.priority}</span> : w.priority === 'low' ? <span className="dim" data-testid={`work-low-${w.id}`}> · low</span> : null}
             {w.flag ? <span className="tone-amber"> · {FLAG_LABEL[w.flag.kind].toLowerCase()}</span> : null}
             {forOwner ? <span className="tone-blue" data-testid={`work-for-owner-${w.id}`}> · you may answer for {forOwner}</span> : null}
             <CostChip id={w.id} summary={spend} />
@@ -713,7 +713,7 @@ function WorkRow({ app, w, live, open, onToggle, now }: { app: AppState; w: Work
                 ))}
               </select>
               <br />
-              <span className="dim">A free slot takes urgent, then high, normal and low, oldest first; low still starts whenever nothing above it fits.</span>
+              <span className="dim">Every queue takes release, then urgent, high, normal and low, oldest first within one; low still starts whenever nothing above it fits.</span>
             </p>
           )}
           {w.triage && (

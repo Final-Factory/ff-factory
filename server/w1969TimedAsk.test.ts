@@ -49,7 +49,7 @@ test('w1969: the leg stays here on a small computer, with a same-machine reason,
   const same = decideTimedPlace({ here: at('beast'), places: fleet(), sameMachine: 'the base side ran here at 01:10Z' });
   assert.equal(same.verdict, 'here');
   assert.match(same.why, /its numbers must come from beast: "the base side ran here at 01:10Z" \(both sides of an A\/B stay on one machine\)/);
-  assert.equal(decideTimedPlace({ here: at('beast'), places: fleet(), exempt: 'release' }).verdict, 'here');
+  assert.equal(decideTimedPlace({ here: at('beast'), places: fleet(), exempt: 'nightly' }).verdict, 'here');
   const none = decideTimedPlace({ here: at('beast'), places: fleet().filter((c) => c.maxAgents > 4 || c.noTimedRuns), platform: 'win32' });
   assert.equal(none.verdict, 'here');
   assert.match(none.why, /but no small computer on Windows that takes timed runs can take it; never m5: time here on beast, a big computer \(w2048\)\. Every number of this comparison comes from beast/);
@@ -113,7 +113,7 @@ test('w1969: the guard refuses an exclusive timing ticket on a big computer unti
   assert.match(checkTimedAsk(cmd, { mark, verdict: { verdict: 'here', why: 'x', until: new Date(now - 1).toISOString() } }, now)!, /Call timed_place/, 'an old verdict asks again');
   const gone = checkTimedAsk(cmd, { mark, verdict: { verdict: 'elsewhere', why: 'beast has 6 agent slots', until: later, leg: 'w2001' } }, now)!;
   assert.match(gone, /the dispatcher sent this timed leg to w2001, the timed leg FF Factory filed for it, which runs on a small computer and reports to you \(beast has 6 agent slots\), so bench_queue\.py timed takes no exclusive ticket here\. If its numbers must come from this computer .* same_machine/);
-  assert.equal(checkTimedAsk(cmd, { mark, exempt: 'release' }, now), undefined, 'the urgent release lane');
+  assert.equal(checkTimedAsk(cmd, { mark, exempt: 'nightly' }, now), undefined, 'the nightly');
   assert.equal(checkTimedAsk('python scripts/bench/bench_queue.py timed --release', { mark }, now), undefined, 'letting go is never refused');
   assert.equal(checkTimedAsk('npm test', { mark }, now), undefined);
 });
@@ -121,11 +121,11 @@ test('w1969: the guard refuses an exclusive timing ticket on a big computer unti
 test('w1969: the mark and each session\'s verdict go through priorities.json to the guard', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'w1969-'));
   const until = new Date(Date.now() + 3_600_000).toISOString();
-  writeBenchPriorities(root, { s1: { priority: 'normal', requests: ['w1891'], timed: { verdict: 'here', why: 'same machine', until } }, s2: { priority: 'urgent', requests: ['w1901'], exempt: 'release' } }, new Date(), false, undefined, timedAskMark(at('beast')));
+  writeBenchPriorities(root, { s1: { priority: 'normal', requests: ['w1891'], timed: { verdict: 'here', why: 'same machine', until } }, s2: { priority: 'urgent', requests: ['w1901'], exempt: 'nightly' } }, new Date(), false, undefined, timedAskMark(at('beast')));
   const s1 = readTimedAsk(root, 's1')!;
   assert.equal(s1.mark?.required, true);
   assert.equal(s1.verdict?.verdict, 'here');
-  assert.equal(readTimedAsk(root, 's2')?.exempt, 'release');
+  assert.equal(readTimedAsk(root, 's2')?.exempt, 'nightly');
   assert.equal(readTimedAsk(root, 'nobody')?.verdict, undefined);
   assert.equal(readTimedAsk(path.join(root, 'missing'), 's1'), undefined);
   // An older portal writes no mark: nothing is asked.

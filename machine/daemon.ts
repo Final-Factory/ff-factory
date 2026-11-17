@@ -94,7 +94,7 @@ import { TrayHost, trayInstance } from './tray.ts';
 import { FirefoxCloser, closeFirefox, firefoxFile, winFirefoxDeps } from './firefox.ts';
 import { GhLoginWatch, LOOK_EVERY_MS as GH_LOOK_EVERY_MS, lookHostsFile, type GhLoginDeps } from './ghLogin.ts';
 import { READ_EVERY_MS as STEAM_READ_EVERY_MS, SteamClientWatch, realSteamDeps, type SteamClientDeps } from './steamClient.ts';
-import { machinePlatformOf, type AttachmentRef, type BenchPriority, type CompactionTrigger, type HostHealth, type HostStats, type NoTimedRuns, type TimedAskMark, type PersonPlayReport, type SandboxPoolSettings, type SessionInfo, type TranscriptEvent } from '../shared/types.ts';
+import { machinePlatformOf, priorityRank, type AttachmentRef, type BenchPriority, type CompactionTrigger, type HostHealth, type HostStats, type NoTimedRuns, type TimedAskMark, type PersonPlayReport, type SandboxPoolSettings, type SessionInfo, type TranscriptEvent } from '../shared/types.ts';
 
 export interface DaemonConfig {
   /**
@@ -565,6 +565,8 @@ export class Daemon {
       places: () => this.pool.list().map((sb) => ({ holder: `sandbox:${sb.id}`, path: sb.path, editorUp: this.pool.editorUp(sb.id), priority: this.pool.stoppedWithin(sb.id, 5 * 60_000) })),
       ramPct: () => this.ramPct(),
       machine: cfg.id,
+      // w4620: the queue goes in strict priority order, read live from the bench queue's priorities.json under this root
+      root: cfg.root,
       log: (line) => log(line),
       onEvent: (text) => {
         log(`unity slots: ${text}`);
@@ -674,7 +676,10 @@ export class Daemon {
       notePlayer: (session, text) => this.benchPlayerNotes.set(session, text),
       // w1860: the other sandboxes' builds, test runs and batch compiles stop too (the reaper's way of ending one)
       builds: (procs) => this.reaper.batches(procs).map((c) => ({ pid: c.u.pid, sandbox: c.place.id })),
-      exemptSandbox: (id) => [...this.entries].some(([sid, e]) => e.spec?.sandbox === id && (this.benchMarks[sid]?.exempt === 'release' || this.benchMarks[sid]?.exempt === 'nightly')),
+      exemptSandbox: (id, holder) => {
+        const rank = (s: string | undefined) => priorityRank((s && (this.benchMarks[s]?.level ?? this.benchMarks[s]?.priority)) || 'low');
+        return [...this.entries].some(([sid, e]) => e.spec?.sandbox === id && (this.benchMarks[sid]?.exempt === 'nightly' || rank(sid) > rank(holder)));
+      },
       stopBuild: (pid, _sandbox, why) => this.reaper.endBatch(pid, why),
       lowerBuild: (pid, procs) => {
         const tree = treeOf(pid, procs);
@@ -1269,7 +1274,7 @@ export class Daemon {
     this.timers.push(setInterval(() => void this.benchTurn.tick(), 5_000));
     this.timers.push(setInterval(() => void this.benchRunners.tick(), 5_000));
     this.timers.push(setInterval(() => void this.loadGate.tick(), 5_000));
-    // w1962: a shared ticket an exclusive turn has passed is raised in priorities.json while it waits (machine/benchRaise.ts)
+    // priorities.json: the portal's marks plus each editor start's session (w1962; w4620: nothing is raised, strict priority)
     this.timers.push(setInterval(() => this.benchPriorities(), 5_000));
     void this.slotTick();
     // Orphaned and hung batch builds (w791): looked at once a minute, and when a worker asks (unity clear_batch).
@@ -1787,9 +1792,9 @@ export class Daemon {
 
   /**
    * priorities.json (w1628) as the portal's priorities plus the daemon's own (w1962): each editor start's session at its
-   * sandbox's worker's priority, and the session of every shared ticket an exclusive turn has passed raised to the top
-   * while it waits (machine/benchRaise.ts), so every copy of bench_queue.py, an old branch's too, grants it before the
-   * next timed leg and ends the holder's turn at its limit. Written when it changes; nothing before the portal's first.
+   * sandbox's worker's priority, and the passed marks (machine/benchRaise.ts), kept for the display. w4620 (lothsahn,
+   * 2026-11-17: "The factory should be using strict priority queues") ended w1962's raise of a passed shared ticket to
+   * urgent: every ticket waits at its own priority. Written when it changes; nothing before the portal's first.
    */
   private benchPriorities(): void {
     const root = this.cfg.root;
@@ -1807,7 +1812,7 @@ export class Daemon {
       const now = raised.join(',');
       if (now !== this.benchRaised) {
         this.benchRaised = now;
-        if (raised.length) log(`bench queue: raised to the top while they wait, an exclusive turn having passed them or a later exclusive ticket outranking them (w1962): ${raised.map((t) => `${t} (passed by ${this.benchPassed![t]?.by})`).join(', ')}`);
+        if (raised.length) log(`bench queue: raised while they wait: ${raised.join(', ')}`);
       }
     } catch (e) {
       log(`bench queue: priorities: ${(e as Error).message}`);

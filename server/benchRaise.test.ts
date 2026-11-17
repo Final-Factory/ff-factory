@@ -10,9 +10,10 @@ import type { BenchPriority } from '../shared/types.ts';
 
 /**
  * w1962 (lothsahn: "a shared bench-queue ticket (an editor start, a build) must not wait for hours behind one exclusive
- * timed ticket after another"): the daemon raises a shared ticket an exclusive turn has passed in priorities.json, which
- * every copy of the game repo's bench_queue.py reads, an old branch's too. With FF_GAME_REPO set to a checkout with the
- * script, the last test runs the real queue (an old copy: the one in a branch from before w1962).
+ * timed ticket after another"): the daemon marked a shared ticket an exclusive turn had passed, and raised its session in
+ * priorities.json. w4620 (lothsahn: "The factory should be using strict priority queues"): nothing is raised across
+ * priorities any more; a ticket counts as passed only by a holder of its own priority or lower, a mark that is a display.
+ * With FF_GAME_REPO set to a checkout with the script, the real-queue tests run it (an old copy: one from before w4620).
  */
 
 const GAME = process.env.FF_GAME_REPO;
@@ -38,32 +39,45 @@ const portal: Record<string, BenchPriority> = {
   s1941: { priority: 'urgent', requests: ['w1941'] },
 };
 
-test('w1962: on LothDesktop\'s queue every waiting shared ticket is passed by the urgent timed turn and raised to the top; the timed legs are not', () => {
+test('w4620: on LothDesktop\'s queue only the waiting ticket of the urgent timed turn\'s own priority is passed, and nothing is raised', () => {
   const q = lothdesktop();
-  const passed = passedShared(q, {}, NOW);
-  assert.deepEqual(Object.keys(passed), ['t00000934', 't00000935', 't00000937']);
-  assert.deepEqual(passed.t00000934, { by: 't00000936', since: NOW.toISOString() });
   const editors = editorSessions([{ session: 's1937', sandbox: 'slot1' }, { session: 's1941', sandbox: 'slot4' }], portal);
-  const { sessions, raised } = raisedSessions({ ...editors, ...portal }, q, passed);
-  assert.deepEqual(raised, ['t00000934', 't00000937'], 'slot4\'s start is urgent already (w1941\'s priority)');
-  assert.deepEqual(sessions['editor:slot1'], { priority: 'urgent', requests: ['w1937'], raisedFrom: 'normal', raisedFor: 't00000934' });
-  assert.deepEqual(sessions['editor:slot4'], { priority: 'urgent', requests: ['w1941'] });
-  assert.equal(sessions.s1905.priority, 'urgent');
-  assert.equal(sessions.s1905.raisedFrom, 'normal');
-  assert.deepEqual(sessions.s1789, portal.s1789, 'a timed leg is never raised');
-  assert.deepEqual(sessions.s1853, portal.s1853);
+  const sessions = { ...editors, ...portal };
+  // the urgent holder (w1853) is higher than slot1's normal start and w1905's normal build: strict priority, no mark
+  const passed = passedShared(q, {}, NOW, sessions);
+  assert.deepEqual(Object.keys(passed), ['t00000935'], 'slot4\'s start is urgent too (w1941): the same priority, so it waited behind the holder');
+  assert.deepEqual(passed.t00000935, { by: 't00000936', since: NOW.toISOString() });
+  const r = raisedSessions(sessions, q, passed);
+  assert.deepEqual(r.raised, []);
+  assert.deepEqual(r.sessions, sessions, 'priorities.json carries the portal\'s priorities unchanged');
+  assert.deepEqual(r.sessions['editor:slot1'], { priority: 'normal', requests: ['w1937'] });
+  assert.equal(r.sessions.s1905.priority, 'normal');
+});
+
+test('w4620: an exclusive holder of the same priority passes a normal shared ticket, which is marked and raised to nothing', () => {
+  const q = [tk('t1', 'exclusive', 'normal leg', { session: 'sA', granted }), tk('t2', 'shared', 'unity: build', { session: 'sB' }), tk('t3', 'shared', 'unity: compile', { session: 'sC' })];
+  const sessions: Record<string, BenchPriority> = { sA: { priority: 'normal', requests: [] }, sB: { priority: 'normal', requests: ['w2'] }, sC: { priority: 'low', requests: ['w3'] } };
+  const passed = passedShared(q, {}, NOW, sessions);
+  assert.deepEqual(passed, { t2: { by: 't1', since: NOW.toISOString() } }, 'the low ticket is below the holder: not passed');
+  const r = raisedSessions(sessions, q, passed);
+  assert.deepEqual(r.raised, []);
+  assert.deepEqual(r.sessions, sessions);
+  // a lower-priority holder passes both; a release holder passes none; sessions priorities.json does not name are all low
+  assert.deepEqual(Object.keys(passedShared(q, {}, NOW, { ...sessions, sA: { priority: 'low', requests: [] } })), ['t2', 't3']);
+  assert.deepEqual(passedShared(q, {}, NOW, { ...sessions, sA: { priority: 'urgent', level: 'release', requests: [] } }), {}, 'level release outranks every shared ticket');
+  assert.deepEqual(Object.keys(passedShared(q, {}, NOW, {})), ['t2', 't3'], 'nothing named: all low, one priority');
 });
 
 test('w1962: a mark lasts while its ticket waits, between timed turns too, and goes when it is granted or gone', () => {
   const q = lothdesktop();
-  const first = passedShared(q, {}, NOW);
+  const first = passedShared(q, {}, NOW); // no session named: all low, one priority
   // t936's turn ends and w1853's next leg has not been granted yet: the marks stay, so the raise stays
   const between = q.filter((t) => t.ticket !== 't00000936');
   const kept = passedShared(between, first, new Date(NOW.getTime() + 60_000));
   assert.deepEqual(kept, first);
   const after = between.map((t) => (t.ticket === 't00000934' ? { ...t, granted } : t)).filter((t) => t.ticket !== 't00000937');
   assert.deepEqual(Object.keys(passedShared(after, kept, NOW)), ['t00000935']);
-  assert.deepEqual(raisedSessions(portal, after, passedShared(after, kept, NOW)).raised, ['t00000935'], 'a session the portal does not name counts as normal, and is raised');
+  assert.deepEqual(raisedSessions(portal, after, passedShared(after, kept, NOW)).raised, [], 'w4620: nothing is raised');
 });
 
 test('w1962: nothing waiting while no timed leg holds the lock is passed; an editor start in the holder\'s own sandbox rides along', () => {
@@ -72,7 +86,7 @@ test('w1962: nothing waiting while no timed leg holds the lock is passed; an edi
   assert.deepEqual(passedShared(own, {}, NOW), {});
 });
 
-test('w1962: a session with a live timed leg of its own is not raised, nor a ticket with no session', () => {
+test('w4620: a session with a live timed leg of its own and a ticket with no session are passed and raised to nothing', () => {
   const q = [
     tk('t1', 'exclusive', 'leg', { session: 'sA', granted }),
     tk('t2', 'shared', 'unity: build', { session: 'sB' }),
@@ -81,7 +95,8 @@ test('w1962: a session with a live timed leg of its own is not raised, nor a tic
   ];
   const passed = passedShared(q, {}, NOW);
   assert.deepEqual(Object.keys(passed), ['t2', 't4']);
-  assert.deepEqual(raisedSessions({ sB: { priority: 'normal', requests: [] } }, q, passed).raised, []);
+  const sB: Record<string, BenchPriority> = { sB: { priority: 'normal', requests: [] } };
+  assert.deepEqual(raisedSessions(sB, q, passed), { sessions: sB, raised: [] });
 });
 
 /** LothDesktop at 04:04Z on 2026-10-24 (measured): no timed leg holds the lock; a shared group runs (w1977's repro,
@@ -94,16 +109,13 @@ const lothdesktop0404 = (): QueueTicket[] => [
   tk('t00000988', 'shared', 'running editor slot1', { session: editorBenchSession('slot1'), sandbox: 'slot1', granted }),
 ];
 
-test('w1962: a shared ticket that an exclusive ticket taken after it outranks is raised, with no timed leg holding the lock', () => {
+test('w4620: a shared ticket that a later exclusive ticket outranks is not marked, nor raised, with no timed leg holding the lock', () => {
   const q = lothdesktop0404();
   const prios = { ...portal, s1977: { priority: 'high', requests: ['w1977'] }, s1782: { priority: 'urgent', requests: ['w1782'] } } as Record<string, BenchPriority>;
-  assert.deepEqual(passedShared(q, {}, NOW), {}, 'all normal: nothing outranks the build');
-  const passed = passedShared(q, {}, NOW, prios);
-  assert.deepEqual(passed, { t00000937: { by: 't00000982', since: NOW.toISOString() } });
-  assert.equal(raisedSessions(prios, q, passed).sessions.s1905.priority, 'urgent');
-  // an exclusive taken before it, or one it outranks, passes nothing
-  assert.deepEqual(passedShared(q.map((t) => (t.ticket === 't00000982' ? { ...t, ticket: 't00000930' } : t)), {}, NOW, prios), {});
-  assert.deepEqual(passedShared(q, {}, NOW, { ...prios, s1789: { priority: 'normal', requests: [] } }), {});
+  // w1789's high leg, taken after w1905's normal build, goes first: lothsahn's "strict priority queues", the order working
+  assert.deepEqual(passedShared(q, {}, NOW), {});
+  assert.deepEqual(passedShared(q, {}, NOW, prios), {});
+  assert.deepEqual(raisedSessions(prios, q, {}), { sessions: prios, raised: [] });
 });
 
 test('w1962: an editor start waits at the highest priority of the workers in its sandbox', () => {
@@ -113,6 +125,13 @@ test('w1962: an editor start waits at the highest priority of the workers in its
     c: { priority: 'urgent', requests: ['w3'] },
   });
   assert.deepEqual(e, { 'editor:slot1': { priority: 'high', requests: ['w2', 'w1'] } });
+  // w4620: a release worker in the sandbox outranks an urgent one, and its start carries the level
+  const r = editorSessions([{ session: 'a', sandbox: 'slot1' }, { session: 'b', sandbox: 'slot1' }, { session: 'c', sandbox: 'slot1' }], {
+    a: { priority: 'urgent', requests: ['w1'] },
+    b: { priority: 'urgent', level: 'release', requests: ['w2'] },
+    c: { priority: 'urgent', requests: ['w3'] },
+  });
+  assert.deepEqual(r, { 'editor:slot1': { priority: 'urgent', level: 'release', requests: ['w2', 'w1', 'w3'] } });
 });
 
 test('w1962: the passed marks are written into priorities.json and read back after a restart', (t) => {
@@ -147,7 +166,7 @@ const waitFor = async (ok: () => boolean, ms: number) => {
   return ok();
 };
 
-test('w1962: against the real bench_queue.py, a raised build ends an urgent holder\'s turn where the priority hold kept the lock', { skip: !GAME || !findBenchQueueScript([GAME]) ? 'FF_GAME_REPO not set to a checkout with scripts/bench/bench_queue.py' : false }, async (t) => {
+test('w4620: against the real bench_queue.py, the daemon marks nothing and raises nothing for a normal build behind an urgent holder', { skip: !GAME || !findBenchQueueScript([GAME]) ? 'FF_GAME_REPO not set to a checkout with scripts/bench/bench_queue.py' : false }, async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'w1962-'));
   const helpers: BenchTicket[] = [];
   t.after(async () => {
@@ -179,23 +198,19 @@ test('w1962: against the real bench_queue.py, a raised build ends an urgent hold
     assert.ok(await waitFor(() => has('keep.json'), 10_000), 'this copy holds the lock against the build');
     assert.equal(has('limit.json'), false, 'no deadline: the build waits for as long as the leg runs');
   }
-  // The daemon's look: the build is passed by the leg's turn and its session raised to the top.
+  // The daemon's look (w4620): the build is lower than the urgent leg, so the leg passes nothing and nothing is raised.
   const q = queueTickets(lock, pidAlive);
-  const passed = passedShared(q, {}, new Date());
-  const build = q.find((x) => x.mode === 'shared')!.ticket;
-  assert.deepEqual(Object.keys(passed), [build]);
+  const passed = passedShared(q, {}, new Date(), sessions);
+  assert.deepEqual(passed, {});
   const r = raisedSessions(sessions, q, passed);
-  assert.deepEqual(r.raised, [build]);
+  assert.deepEqual(r.raised, []);
   writeBenchPriorities(root, r.sessions, new Date(), false, undefined, undefined, passed);
-  assert.ok(await waitFor(() => has('limit.json') && !has('keep.json'), 10_000), 'the raised build ends the turn at its limit: a deadline, no hold');
-  const lim = JSON.parse(fs.readFileSync(path.join(holder, 'limit.json'), 'utf8'));
-  assert.ok((lim.waiters ?? [lim.by]).includes(build), `the deadline is the build's: ${JSON.stringify(lim)}`);
-  assert.equal((await sh.wait(1000)).kind, 'waiting', 'the exclusive leg keeps the machine to itself until its turn ends');
+  assert.equal((await sh.wait(1500)).kind, 'waiting', 'the exclusive leg keeps the machine to itself until its turn ends');
   ex.release();
   assert.equal((await sh.wait(15_000)).kind, 'granted');
 });
 
-test('w1962: against the real bench_queue.py, a raised build joins a running urgent shared group instead of waiting behind a later high timed leg', { skip: !GAME || !findBenchQueueScript([GAME]) ? 'FF_GAME_REPO not set to a checkout with scripts/bench/bench_queue.py' : false }, async (t) => {
+test('w4620: against the real bench_queue.py, a normal build waits behind a later high timed leg and the daemon raises nothing', { skip: !GAME || !findBenchQueueScript([GAME]) ? 'FF_GAME_REPO not set to a checkout with scripts/bench/bench_queue.py' : false }, async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'w1962-'));
   const helpers: BenchTicket[] = [];
   t.after(async () => {
@@ -225,16 +240,17 @@ test('w1962: against the real bench_queue.py, a raised build joins a running urg
   const leg = take('exclusive', 'w1789 A/B UI fixes', 'sH');
   assert.equal((await leg.wait(1000)).kind, 'waiting');
   first.release();
-  // Before: the leg, taken later, outranks the build and waits behind the urgent group; the build waits behind the leg
+  // The leg, taken later, outranks the build and waits behind the urgent group; the build waits behind the leg
   assert.equal((await build.wait(2000)).kind, 'waiting', 'the build waits behind the later, higher leg');
   assert.equal((await leg.wait(500)).kind, 'waiting');
+  // The daemon's look (w4620): strict priority, so the build is neither marked nor raised
   const q = queueTickets(lock, pidAlive);
   const passed = passedShared(q, {}, new Date(), sessions);
-  const bt = q.find((x) => x.what === 'unity: build_player')!.ticket;
-  assert.deepEqual(Object.keys(passed), [bt]);
+  assert.deepEqual(passed, {});
   const r = raisedSessions(sessions, q, passed);
+  assert.deepEqual(r.raised, []);
   writeBenchPriorities(root, r.sessions, new Date(), false, undefined, undefined, passed);
-  assert.equal((await build.wait(10_000)).kind, 'granted', 'raised, the build joins the running shared group');
+  assert.equal((await build.wait(2000)).kind, 'waiting', 'the build still waits behind the higher leg');
   assert.equal((await leg.wait(500)).kind, 'waiting', 'the timed leg still never runs beside shared work');
 });
 
