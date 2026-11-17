@@ -134,6 +134,9 @@ interface Scenario {
   freeGB?: number;
   dedupGainGB?: number;
   dedupFails?: boolean;
+  /** w4509: polls the status reports Running before the job ends (-1 never), and a job that never shows as started. */
+  dedupRunningPolls?: number;
+  dedupNeverStarts?: boolean;
 }
 
 /** Run the real ffsb-helper.ps1 mount against a faked PC; returns what it called and wrote. */
@@ -179,11 +182,19 @@ test('grow (w1918): never smaller, never past the host volume, never under an ed
   assert.equal((bad.state as Record<string, unknown>).wantGB, 112, 'the want stays for the next try');
 });
 
-test('dedup (w4502): one full ReFS dedup pass on the drive, capped at 5 h and half the CPU, skipping files changed in the last hour; it reports the free space before and after', { skip: needFake }, () => {
-  const d = boot({ attached: true, autoLetter: 'V', state: { letter: 'V' }, freeGB: 60, dedupGainGB: 50 }, { action: 'dedup' });
+test('dedup (w4502, w4509): one full ReFS dedup pass on the drive, capped at 5 h and half the CPU, skipping files changed in the last hour; it waits for the background job and reports the free space before and after', { skip: needFake }, () => {
+  const d = boot({ attached: true, autoLetter: 'V', state: { letter: 'V' }, freeGB: 60, dedupGainGB: 50, dedupRunningPolls: 3 }, { action: 'dedup' });
   assert.equal(d.result?.ok, true, JSON.stringify(d));
   assert.deepEqual(d.calls, ['Start-ReFSDedupJob V: full=True 5h cpu=50 minAge=1'], 'a full run: the daily incremental job never pairs copies made on different days');
-  assert.match(d.result!.detail, /full dedup job on V: .* free 60\.0 -> 110\.0 GB; status .*Idle/);
+  // w4509: the job runs on in the background after Start-ReFSDedupJob returns; the result is written once it has stopped.
+  assert.equal((d as any).polls, 4, 'three polls while it runs, the fourth sees it stopped');
+  assert.match(d.result!.detail, /full dedup job on V: .*\(4 polls\); free 60\.0 -> 110\.0 GB; job duration 00:43:00, saved 50\.0 GB on this run, processed 300\.0 GB, LastRunStatus 0/);
+  const hung = boot({ attached: true, autoLetter: 'V', state: { letter: 'V' }, dedupRunningPolls: -1 }, { action: 'dedup' });
+  assert.equal(hung.result?.ok, false, 'a job still running past its 5 h Duration plus 15 min is reported, not waited on for ever');
+  assert.match(hung.result!.detail, /still running after .*\(630 polls\)/);
+  const never = boot({ attached: true, autoLetter: 'V', state: { letter: 'V' }, dedupNeverStarts: true }, { action: 'dedup' });
+  assert.equal(never.result?.ok, false);
+  assert.match(never.result!.detail, /never seen running in 20 polls/);
   const off = boot({ attached: false, autoLetter: '', state: { letter: 'V' } }, { action: 'dedup' });
   assert.equal(off.result?.ok, false);
   assert.match(off.result!.detail, /V: is not mounted/);
