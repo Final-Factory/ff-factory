@@ -7239,6 +7239,12 @@ test('w4596: request_pair legs 1 files a pair run of 1 leg that no Mac takes, an
   const said = JSON.stringify(store.readTranscript(leg.id));
   assert.match(said, /You are the only leg of this pair run, in beast\/slot1: run the host and the client on this computer/);
   assert.doesNotMatch(said, /the others are on|You are leg 1 of 1/);
+  // w4614 (w4609's leg): the leg builds with the real script into the shared player cache and leaves it there (w4601 places
+  // later legs by it), and runs ffnightly.py from its checkout, not a copy in $TMPDIR.
+  assert.match(said, /unity-slot run -- scripts\/nightly\/build_player\.sh <your sandbox> <40-hex sha> <win\|mac\|linux>/);
+  assert.match(said, /shared player cache \(<worker root>\/player-cache\/<sha>-<os>, outside the tree\).*leave the player there/);
+  assert.match(said, /Run ffnightly\.py from your sandbox's checkout, never a copy in \$TMPDIR/);
+  assert.doesNotMatch(said, /move the player out of the tree|[^/]scripts\/build_player\.sh/);
 });
 
 
