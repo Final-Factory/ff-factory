@@ -47,6 +47,21 @@ test('w1945: pairRoom picks one computer per leg, at most one Mac (the host); fe
   assert.deepEqual(pairRoom(item('w2', { pair: undefined }), ['m3'], FIT), { pick: ['m3'] });
 });
 
+test('w4596: a pair run of 1 leg reads "1 leg", and a Mac stays off a 1-leg run whose leg starts an MP scenario\'s host and client', () => {
+  const brief = 'Run MP-lowore-pin-pair on branch w665-lowore-pin-no-collider with scripts/nightly/ffnightly.py on the default lab.';
+  const one = item('w4', { brief, title: 'Pair run for w665: MP-lowore-pin-pair on PR #2340', pair: { legs: 1, for: 'w665' } });
+  assert.match(pairText(one.pair!), /^a pair run of 1 leg, on any computers, any OS/);
+  assert.match(pairText({ legs: 2 }), /^a pair run of 2 legs, /);
+  assert.match(unfitWhy(one, 'm3', FIT) ?? '', /Mac/, 'the one leg runs host and client on its own computer: no Mac');
+  assert.equal(unfitWhy(one, 'beast', FIT), undefined);
+  assert.deepEqual(pairRoom(one, ['beast', 'biscuit'], FIT), { pick: ['beast'] });
+  assert.equal(pairRoom(one, [], FIT).short, 'a pair run of 1 leg needs 1 computer with room, and no computer it fits has room');
+  // Room: one computer is enough, and a Mac alone is none.
+  const r: RoomNow = { game: ['beast'], agent: [], held: [], fit: FIT };
+  assert.deepEqual(roomForWork(r, one).ids, ['beast']);
+  assert.deepEqual(roomForWork({ ...r, game: ['m3'] }, one).ids, []);
+});
+
 test('w1945: a cross-OS pair takes at most one Mac, as the host, and its legs on two operating systems', () => {
   const cross = item('w3', { pair: { legs: 2, crossOs: 'the desync hash differs between arm64 and x86_64' } });
   assert.deepEqual(pairRoom(cross, ['beast', 'm3', 'lothdesktop'], FIT).pick, ['m3', 'beast'], 'the Mac hosts');

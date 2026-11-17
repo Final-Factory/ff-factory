@@ -255,7 +255,7 @@ const REMOTE_VERBS = new Set(['ssh', 'scp', 'sftp', 'mosh', 'telnet', 'rsh', 'rl
 const GITHUB_SSH = /^(?:[\w.-]+@)?(?:ssh\.)?github\.com$/i;
 
 function remoteRefusal(what: string): string {
-  return `${REFUSED} ${what} opens another computer. A worker works on its own machine only: a step on another computer goes through FF Factory (request_pair for a two-machine check, publish_attachment to hand over a file, or your orchestrator for the ops worker), never through ssh, remoting or a remote desktop.`;
+  return `${REFUSED} ${what} opens another computer. A worker works on its own machine only: a step on another computer goes through FF Factory (request_pair for a two-machine check (legs: 1 when one computer runs both sides), publish_attachment to hand over a file, or your orchestrator for the ops worker), never through ssh, remoting or a remote desktop.`;
 }
 
 function checkRemoteStatement(verb: string, args: string[]): string | undefined {

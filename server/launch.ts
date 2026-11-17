@@ -192,7 +192,7 @@ export const CATALOG = {
   request_pair: {
     what: z.string().min(1).max(100).describe('The run in one line: "MP-lowore-pin-pair on PR #2340".'),
     brief: z.string().min(1).max(6000).describe('What the legs run, as a worker needs it: the branch or commit, the scenario or steps for the host and the clients, what passes (counts, ranges), and where the result goes (a PR comment). Each leg is a new worker that knows nothing else.'),
-    legs: z.number().int().min(2).max(4).optional().describe('Computers it needs at once, one worker on each (default 2: a host and a client).'),
+    legs: z.number().int().min(1).max(4).optional().describe('Computers it needs at once, one worker on each (default 2: a host and a client; 1 when one computer runs the host and client side by side (an ffnightly.py MP scenario on the default lab) and you cannot run it in your own sandbox (a Mac)).'),
     cross_os: z.string().max(300).optional().describe('Only when the change can behave differently across OSes (w1692: float or math-library use in the simulation, Burst or IL2CPP codegen, platform APIs or paths, the desync hash, a desync seen only across OSes): why. Without it the legs go on any free computers, any OS; with it they go on two operating systems. Either way a Mac may host (leg 1), never a client.'),
     timed: z.boolean().optional().describe('A leg takes timing measurements (exclusive bench tickets): no leg goes on a computer that takes no timed runs (m5).'),
     steam: z.string().max(300).optional().describe('Why the legs need Steam (a lobby, a Steam host or join): legs then go only on computers signed in to Steam, each on a different account. Default: read from what and brief. "none": they need none.'),

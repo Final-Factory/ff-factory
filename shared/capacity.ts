@@ -468,7 +468,7 @@ export function pairRoom(w: { pair?: WorkPair }, ids: readonly string[], fit: Re
   const have = ids.length ? `only ${ids.join(', ')} ${ids.length > 1 ? 'have' : 'has'} room it fits` : 'no computer it fits has room';
   if (!p.crossOs) {
     const pick = [...macs.slice(0, 1), ...rest].slice(0, p.legs);
-    if (pick.length < p.legs) return { short: `a pair run of ${p.legs} legs needs ${p.legs} computers with room at once, at most one of them a Mac (the host), and ${have}` };
+    if (pick.length < p.legs) return { short: p.legs === 1 ? `a pair run of 1 leg needs 1 computer with room, and ${have}` : `a pair run of ${p.legs} legs needs ${p.legs} computers with room at once, at most one of them a Mac (the host), and ${have}` };
     return { pick };
   }
   // Cross-OS: a Mac host when one has room, else one computer of each operating system first.
@@ -569,5 +569,5 @@ export function repairText(w: Pick<WorkItem, 'constraints' | 'brief'> & { pair?:
   return true;
 }
 
-/** "a pair run of 2 legs, cross-OS: <why>, timed" (w1945): what a pair needs, as lines about it say it. */
-export const pairText = (p: WorkPair): string => `a pair run of ${p.legs} legs${p.crossOs ? `, cross-OS (${p.crossOs})` : `, ${PAIR_ANY_OS}`}${p.steam ? `, ${PAIR_STEAM} (${p.steam})` : ''}${p.menus && !p.steam ? `, only on computers whose screen is unlocked (it clicks the game's menus: ${p.menus})` : ''}${p.timed ? ', timed (exclusive tickets: not on a computer that takes no timed runs)' : ''}${p.split ? `, its peers spread (a Mac may host: ${p.split})` : ''}${p.avoid?.length ? `, not on ${p.avoid.join(' or ')}` : ''}`;
+/** "a pair run of 2 legs (1 leg: one computer runs host and client side by side), cross-OS: <why>, timed" (w1945): what a pair needs, as lines about it say it. */
+export const pairText = (p: WorkPair): string => `a pair run of ${p.legs} ${p.legs === 1 ? 'leg' : 'legs'}${p.crossOs ? `, cross-OS (${p.crossOs})` : `, ${PAIR_ANY_OS}`}${p.steam ? `, ${PAIR_STEAM} (${p.steam})` : ''}${p.menus && !p.steam ? `, only on computers whose screen is unlocked (it clicks the game's menus: ${p.menus})` : ''}${p.timed ? ', timed (exclusive tickets: not on a computer that takes no timed runs)' : ''}${p.split ? `, its peers spread (a Mac may host: ${p.split})` : ''}${p.avoid?.length ? `, not on ${p.avoid.join(' or ')}` : ''}`;
