@@ -583,4 +583,23 @@ export function repairText(w: Pick<WorkItem, 'constraints' | 'brief'> & { pair?:
 }
 
 /** "a pair run of 2 legs (1 leg: one computer runs host and client side by side), cross-OS: <why>, timed" (w1945): what a pair needs, as lines about it say it. */
+/**
+ * Why a pair run needs two or more computers at once (w4618), or undefined when one computer runs it: then its legs default
+ * to 1 (request_pair) and a Queued run of more legs whose count was never asked for is cut to 1 (Orchestrators.cutDefaultPairs).
+ * The reasons: cross_os, steam, timed, split, or words that name a pair lab or the relay (SPLIT_PEER_WORDS: lab.pair-...,
+ * pair_relay), read without FF Factory's own w3697 sentence (macRuleWords). ffnightly.py's default lab (lab.win.json,
+ * lab.linux.json) runs an MP scenario's host and client on the one computer it runs on, so a second leg only repeats the first:
+ * w4595 (the pair run for w4571, two legs of ffnightly MP scenarios on the default lab) had not started 2 h 14 min after it was
+ * filed, while w4609, one leg of the same commit, was done in 51 min (r287, w4596).
+ */
+export function pairComputersReason(w: Pick<WorkItem, 'title' | 'brief'> & { notes?: WorkItem['notes']; pair?: Pick<WorkPair, 'crossOs' | 'steam' | 'timed' | 'split'> }): string | undefined {
+  const p = w.pair;
+  if (p?.crossOs) return `cross_os (${p.crossOs})`;
+  if (p?.steam) return `steam (${p.steam})`;
+  if (p?.timed) return 'timed';
+  if (p?.split) return `split (${p.split})`;
+  const named = SPLIT_PEER_WORDS.exec(macRuleWords({ title: w.title, brief: w.brief, notes: w.notes }))?.[0];
+  return named ? `its words name ${named}` : undefined;
+}
+
 export const pairText = (p: WorkPair): string => `a pair run of ${p.legs} ${p.legs === 1 ? 'leg' : 'legs'}${p.crossOs ? `, cross-OS (${p.crossOs})` : `, ${PAIR_ANY_OS}`}${p.steam ? `, ${PAIR_STEAM} (${p.steam})` : ''}${p.menus && !p.steam ? `, only on computers whose screen is unlocked (it clicks the game's menus: ${p.menus})` : ''}${p.timed ? ', timed (exclusive tickets: not on a computer that takes no timed runs)' : ''}${p.split ? `, its peers spread (a Mac may host: ${p.split})` : ''}${p.avoid?.length ? `, not on ${p.avoid.join(' or ')}` : ''}`;

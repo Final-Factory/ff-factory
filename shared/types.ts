@@ -2220,6 +2220,11 @@ export interface WorkPair {
    * starts no client, so the Mac rule (w3697, shared/capacity.ts macRefusedScenario) lets a Mac take leg 1.
    */
   split?: string;
+  /**
+   * Its leg count was asked for outright (w4618: request_pair legs, decide_work pair_legs), so the queue never cuts it to one
+   * leg (Orchestrators.cutDefaultPairs). Absent on a run whose legs were the default, and on every run filed before w4618.
+   */
+  legsSaid?: true;
   /** A leg takes timing measurements (exclusive bench tickets): never on a computer that takes no timed runs (m5, w1861). */
   timed?: boolean;
   /** When its legs started together, and where: leg 1 (the host) first. */
