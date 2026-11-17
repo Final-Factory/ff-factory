@@ -130,7 +130,8 @@ test('w2782 save: a material the editor only re-serialized in play mode is resto
   assert.equal(res.files, 3);
   assert.deepEqual(r.git(r.work, 'show', '--name-only', '--format=', 'HEAD').split('\n').sort(), ['Both.mat', 'Real.mat', 'a.cs']);
   assert.equal(r.git(r.work, 'status', '--porcelain'), '', 'clean: the sandbox may be released');
-  assert.equal(fs.readFileSync(path.join(r.work, 'Noise.mat'), 'utf8'), base, 'the noise is gone, not left uncommitted');
+  // Restored from HEAD, so a Windows runner's core.autocrlf checks it out with CRLF.
+  assert.equal(fs.readFileSync(path.join(r.work, 'Noise.mat'), 'utf8').replaceAll('\r\n', '\n'), base, 'the noise is gone, not left uncommitted');
   assert.match(fs.readFileSync(path.join(r.work, 'Both.mat'), 'utf8'), /m_ObjectHideFlags: 32[\s\S]*r: 1, g: 0/, 'noise beside a real change is saved with it');
   assert.match(res.notes[0], /^restored 2 material\(s\) the Unity editor only re-serialized to HEAD instead of saving them \(w2782\): (Noise|Staged)\.mat, (Noise|Staged)\.mat$/);
   // Only the editor's noise left: nothing is committed, and the worktree is clean.
