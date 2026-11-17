@@ -405,6 +405,22 @@ export const CATALOG = {
     offset: rangedNumber(0, undefined, 'Skip this many matching requests (the next page).').optional(),
     limit: rangedNumber(1, 50, 'Requests per page, default 20; a page also stops at 40,000 characters.').optional(),
   },
+  /** w4497 (docs/orchestrators.md "Workers read the ledger"): any session's transcript, read-only, with a transcript-read grant. */
+  agent_transcript: {
+    session_id: z.string().max(80).describe('The session id (from search_transcripts).'),
+    last: rangedNumber(5, 400, 'How many events (default 40).').optional(),
+    full_text: z.boolean().optional().describe('Longer cuts of each message and tool call (default: assistant text 600 characters, tool input 120).'),
+  },
+  /** w4497: full-text search over every agent's transcript, read-only, with a transcript-read grant. */
+  search_transcripts: {
+    query: z.string().min(1).max(400).describe('All words must match; "quoted phrases" stay together.'),
+    sandbox: z.string().max(80).optional().describe('Only this sandbox ("beast/slot3").'),
+    machine: z.string().max(40).optional().describe('Only this machine.'),
+    agent: z.string().max(120).optional().describe('A session id, standing agent id or part of a title.'),
+    since: z.string().max(40).optional().describe('From this ISO time or date (a time window with until).'),
+    until: z.string().max(40).optional().describe('Up to this ISO time or date.'),
+    limit: rangedNumber(1, 100, 'Default 30.').optional(),
+  },
   /** docs/spend.md "The export" (w2653): the spend record as CSV, read-only, with a spend-read grant. */
   spend_export: {
     view: z.enum(EXPORT_VIEWS).optional().describe('summary (default), requests, sessions or turns.'),

@@ -2323,6 +2323,11 @@ export interface WorkItem {
    */
   spendRead?: { by: string; at: string };
   /**
+   * Its workers may read every agent's transcript (search_transcripts, agent_transcript, w4497), read-only and with secrets
+   * masked, for a transcript analysis: set by its person's orchestrator (request_work or update_work transcript_read), never by its text.
+   */
+  transcriptRead?: { by: string; at: string };
+  /**
    * Its workers on `machine` may work in that machine's main clone: quit the editor open there, back up, git fetch and
    * checkout, reopen Unity (w936, docs/orchestrators.md "Work in a machine's main clone"). Set by its person's orchestrator
    * in a turn of theirs (request_work or update_work main_clone), never by its text; the guard reads it

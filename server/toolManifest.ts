@@ -76,8 +76,9 @@ export const TOOL_MANIFEST = {
   set_agent_title: { group: 'workers', kinds: [D, R] },
   interrupt_agent: { group: 'workers', kinds: [D, R], always: [D] },
   stop_agent: { group: 'workers', kinds: [D, R], always: [D] },
-  agent_transcript: { group: 'workers', kinds: [D, P, R], always: [D, P] },
-  search_transcripts: { group: 'workers', kinds: [D, P, R], always: [D, P] },
+  // w4497: a worker has them too, refused without a transcript-read grant on its request (Agents.transcriptGrantOf).
+  agent_transcript: { group: 'workers', kinds: [D, P, R, W], always: [D, P] },
+  search_transcripts: { group: 'workers', kinds: [D, P, R, W], always: [D, P] },
   // sandboxes
   list_sandboxes: { group: 'sandboxes', kinds: [D, P, R, O], always: [D, O] },
   create_sandbox: { group: 'sandboxes', kinds: [D, R] },
