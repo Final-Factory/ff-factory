@@ -1768,3 +1768,40 @@ test('w3663: a daemon report does not put back the timed_place verdict its turn 
   assert.equal(store.sessions.get(h.info.id)!.timedVerdict?.verdict, 'here', 'nor does a report without one clear it');
   assert.equal(store.sessions.get(h.info.id)!.status, 'idle', 'its run state is still the daemon\'s');
 });
+
+test('w4619: a daemon whose link drops mid-switch (its update over the link) answers no switch or save: both fail at once as unknown, not after 10 minutes, and the next daemon takes a switch again', async (t) => {
+  fastReconnect(t);
+  const { mm, daemon, cleanup } = await setup();
+  t.after(cleanup);
+  const d1 = daemon();
+  await until('online with hello', () => mm.isOnline('mx') && mm.protocolOf('mx') !== undefined);
+  // 2026-11-17 11:09 MST: the dispatcher's switch_branch of m5/slot2 went out as m5's daemon took its update; the old
+  // process never answered and the new one never heard it, so the call sat to its 10-minute timeout (11:19) and the capacity
+  // ping that named the urgent w4609 at 11:15 waited behind it. Here the daemon swallows the switch and the save, as the
+  // old process did, and is then updated.
+  const link = (mm as unknown as { links: Map<string, { ws: { send: (s: string) => void } }> }).links.get('mx')!;
+  const send = link.ws.send.bind(link.ws);
+  link.ws.send = (s: string) => (['switch', 'save_work'].includes(JSON.parse(s).type) ? undefined : send(s));
+  const logs: string[] = [];
+  const warn = console.warn;
+  console.warn = (...a: unknown[]) => logs.push(a.join(' '));
+  t.after(() => (console.warn = warn));
+  const settled = <T>(p: Promise<T>) => p.then((v) => ({ ok: true as const, v }), (e: Error) => ({ ok: false as const, e }));
+  const sw = settled(mm.switchBranch('mx', 'feature/z', undefined, 'sb'));
+  const save = settled(mm.saveWork('mx', 'sb', 'sandbox/sb', 'wip'));
+  const started = Date.now();
+  mm.expectDrop('mx', 'was updated over its link');
+  d1.shutdown();
+  const [a, b] = await Promise.race([Promise.all([sw, save]), new Promise<never>((_, rej) => setTimeout(() => rej(new Error('still waiting 5 s after the drop: the 10-minute timeout holds it (w4619)')), 5000))]);
+  assert.ok(Date.now() - started < 5000);
+  assert.equal(a.ok, false);
+  assert.match(!a.ok ? a.e.message : '', /^machine mx was updated over its link before it answered the branch switch of sb, so whether it ran is unknown: list_sandboxes shows its branch now/);
+  assert.equal(b.ok, false);
+  assert.match(!b.ok ? b.e.message : '', /before it answered the save of uncommitted work of sb/);
+  assert.ok(logs.some((l) => /^machine mx: was updated over its link with a branch switch of sb unanswered: answered it as unknown \(w4619\)$/.test(l)), logs.join('\n'));
+  // The new daemon is asked again and answers (here: no pool, so a refusal of its own, not a timeout).
+  daemon();
+  await until('back with hello', () => mm.isOnline('mx') && mm.protocolOf('mx') !== undefined);
+  const again = await settled(mm.switchBranch('mx', 'feature/z', undefined, 'sb'));
+  assert.doesNotMatch(again.ok ? '' : again.e.message, /w4619|10 minutes/);
+});
