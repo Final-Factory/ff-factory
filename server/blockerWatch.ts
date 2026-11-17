@@ -810,7 +810,7 @@ export function prState(pr: { state?: string; mergeCommit?: { oid?: string } | n
 }
 
 /** What `gh pr view` says for a pull request's health (w907): its state, GitHub's mergeability, base branch and head commit. */
-export function prHealthOf(pr: { state?: string; mergeable?: string; baseRefName?: string; headRefOid?: string; headRefName?: string; body?: string }): PrHealth {
+export function prHealthOf(pr: { state?: string; mergeable?: string; baseRefName?: string; headRefOid?: string; headRefName?: string; body?: string; isDraft?: boolean }): PrHealth {
   const requests = requestIdsIn(pr.body ?? '');
   const state = pr.state === 'MERGED' ? 'merged' : pr.state === 'CLOSED' ? 'closed' : 'open';
   return {
@@ -819,6 +819,7 @@ export function prHealthOf(pr: { state?: string; mergeable?: string; baseRefName
     ...(pr.headRefOid ? { head: pr.headRefOid } : {}),
     ...(pr.headRefName ? { headRef: pr.headRefName } : {}),
     ...(requests.length ? { requests } : {}),
+    ...(pr.isDraft === true ? { draft: true as const } : {}),
   };
 }
 
@@ -829,7 +830,7 @@ export function prHealthOf(pr: { state?: string; mergeable?: string; baseRefName
 export async function ghPrHealth(ref: string, run: Runner = runProc): Promise<PrHealth> {
   const m = CI_REF.exec(ref);
   if (!m) throw new Error(`"${ref}" is not a pull request (owner/repo#123)`);
-  const r = await run('gh', ['pr', 'view', m[2], '-R', m[1], '--json', 'state,mergeable,baseRefName,headRefOid,headRefName,body'], { timeoutMs: 30_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
+  const r = await run('gh', ['pr', 'view', m[2], '-R', m[1], '--json', 'state,mergeable,baseRefName,headRefOid,headRefName,body,isDraft'], { timeoutMs: 30_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
   if (r.code !== 0) throw new Error(`gh pr view ${ref}: ${ghSaid(r)}`);
   return prHealthOf(JSON.parse(r.stdout) as Parameters<typeof prHealthOf>[0]);
 }
@@ -882,6 +883,28 @@ export function remergeJob(ref: string, head?: string): string {
 }
 
 /**
+ * w3088: the Evidence check a merge in a gated repository needs, as ff-pr merge runs it (machine/prFlow.ts evidencePasses):
+ * pr_evidence.py through the same runner, so the script's own gh calls carry the person's token. Undefined when it passes or
+ * the repository is not gated; else why not (no script, no python, a FAIL or a usage error), with the failing lines.
+ * w4498: also run when a worker arms merge on green, so a missing Evidence section is refused then, not after green CI.
+ */
+export async function ghEvidenceRefusal(ref: string, run: Runner = runProc, evidenceScript: () => string | undefined | Promise<string | undefined> = findLocalPrEvidence): Promise<string | undefined> {
+  const m = CI_REF.exec(ref);
+  if (!m) return `"${ref}" is not a pull request (owner/repo#123)`;
+  if (!evidenceGated(m[1])) return undefined;
+  const opts = { timeoutMs: 60_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } };
+  const script = await evidenceScript();
+  if (!script) return noScriptRefusal(m[1], m[2]);
+  // w3190: the game repo's HUD pins, which the script reads from a game checkout; the portal has none (machine/evidenceGate.ts fetchHudData).
+  const hud = await fetchHudData(m[1], m[2], run, opts);
+  if (hud && 'error' in hud) return `the Evidence check could not run for ${m[1]}#${m[2]}: ${hud.error}`;
+  const env = hud ? { ...opts.env, FF_HUD_DATA: hud.dir } : opts.env;
+  const e = await run(evidencePython(), evidenceArgs(script, m[1], m[2]), { ...opts, env, timeoutMs: 5 * 60_000 });
+  const v = evidenceVerdict(e.code, e.stdout, e.stderr);
+  return v.ok ? undefined : evidenceRefusal(m[1], m[2], e.code, v);
+}
+
+/**
  * w2045: `gh pr merge` at exactly `head` (a newer push, or one GitHub's rules refuse, is not merged). Throws with what gh said.
  * w3021: GitHub refuses a short sha there ("Could not coerce value "3e14de3aa516" to GitObjectID", ffu#200), so a short head
  * is first resolved to the pull request's own head commit, and only when that commit starts with it: a head that moved
@@ -903,17 +926,8 @@ export async function ghMerge(ref: string, head: string, run: Runner = runProc, 
   // w3088: in a gated repository the pilot merges only what pr_evidence.py passes, as ff-pr merge does (machine/evidenceGate.ts):
   // #3180 merged on green with its Evidence section failing. Through the same runner, so the script's own gh calls carry the
   // person's token. No script, no python, a FAIL or a usage error: not merged, and the worker hears the failing lines.
-  if (evidenceGated(m[1])) {
-    const script = await evidenceScript();
-    if (!script) throw new Error(`not merged: ${noScriptRefusal(m[1], m[2])}`);
-    // w3190: the game repo's HUD pins, which the script reads from a game checkout; the portal has none (machine/evidenceGate.ts fetchHudData).
-    const hud = await fetchHudData(m[1], m[2], run, opts);
-    if (hud && 'error' in hud) throw new Error(`not merged: the Evidence check could not run for ${m[1]}#${m[2]}: ${hud.error}`);
-    const env = hud ? { ...opts.env, FF_HUD_DATA: hud.dir } : opts.env;
-    const e = await run(evidencePython(), evidenceArgs(script, m[1], m[2]), { ...opts, env, timeoutMs: 5 * 60_000 });
-    const v = evidenceVerdict(e.code, e.stdout, e.stderr);
-    if (!v.ok) throw new Error(`not merged: ${evidenceRefusal(m[1], m[2], e.code, v)}`);
-  }
+  const refused = await ghEvidenceRefusal(ref, run, evidenceScript);
+  if (refused) throw new Error(`not merged: ${refused}`);
   const r = await run('gh', ['pr', 'merge', m[2], '-R', m[1], '--merge', '--match-head-commit', full], opts);
   if (r.code !== 0) throw new Error(`gh pr merge ${ref}: ${ghSaid(r)}`);
 }

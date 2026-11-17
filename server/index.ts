@@ -28,7 +28,7 @@ import { LedgerSweep, slugOf } from './ledgerSweep.ts';
 import { AutoDeploy, ghAutoDeploy, heldLine } from './autoDeploy.ts';
 import { run as runProc } from './proc.ts';
 import { portalPrEvidence } from '../machine/evidenceGate.ts';
-import { BlockerWatch, ghPrHealth } from './blockerWatch.ts';
+import { BlockerWatch, ghEvidenceRefusal, ghPrHealth } from './blockerWatch.ts';
 import { MasterBatchWatch } from './masterBatch.ts';
 import { runWaitsMigration } from './waitsMigration.ts';
 import { parseNightlyReport } from './nightlyRules.ts';
@@ -977,6 +977,8 @@ agents.blockerWatch = blockerWatch;
 agents.usageRef = (ref) => usageRefOf(ref);
 // A ci: wait is checked against its pull request when set (w907): a conflict or a push that did not land is refused.
 agents.prHealth = (ref) => ghPrHealth(ref, ghRunner(undefined, `the head of ${ref}`));
+// w4498: merge on green runs the merge's Evidence check when it is armed, so a PR that would be refused is refused then.
+agents.prEvidence = (ref) => ghEvidenceRefusal(ref, ghRunner(undefined, `the Evidence check of ${ref}`), () => portalPrEvidence({ dataDir: cfg.dataDir, run: runProc }));
 // Whether the blocker watch can read CI at all (w889): measured at start and every half hour, said loudly when it cannot.
 const ciRead = new CiReadWatch({
   repo: () => repoSlug(cfg.repo.url),
