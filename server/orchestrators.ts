@@ -15,6 +15,7 @@ import {
   subjectKeys,
   STRONG,
   decisionProblem,
+  doneNoteProblem,
   dispatchNotice,
   findOverlaps,
   firstLine,
@@ -3956,7 +3957,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   }
 
   /** The dispatcher decides about a request (decide_work); the requesters' orchestrators get the reply. */
-  decide(input: { id: string; action: Decision; note: string; into?: string; session_ids?: string[]; needs?: string[]; blocker?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>; blockers?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>[]; add_blocker?: boolean; drop_leg?: boolean; override_gate?: string; asks?: Ask[]; for?: string; pair_legs?: number; pair_menus?: string; pair_steam?: string; pair_split?: string; pair_allow?: string[]; report?: ReportKind | false; timed?: boolean }): string {
+  decide(input: { id: string; action?: Decision; note: string; into?: string; session_ids?: string[]; needs?: string[]; blocker?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>; blockers?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>[]; add_blocker?: boolean; drop_leg?: boolean; override_gate?: string; asks?: Ask[]; for?: string; pair_legs?: number; pair_menus?: string; pair_steam?: string; pair_split?: string; pair_allow?: string[]; report?: ReportKind | false; timed?: boolean }): string {
     let keptBefore: WorkBlocker[] = [];
     const w = this.requireWork(input.id);
     if (w.approval?.state === 'pending') throw new Error(`${w.id} waits for a person to approve it (intake); it is not yours to decide yet`);
@@ -3964,12 +3965,13 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     // The decision first: a refused one leaves the mark as it was.
     if (input.report !== undefined) {
       const decided = this.decide({ ...input, report: undefined });
-      return `${this.setReport(this.requireWork(input.id), input.report, 'the dispatcher')} ${decided}`;
+      return `${this.setReport(this.requireWork(input.id), input.report, 'the dispatcher')} ${decided}`.trim();
     }
     // w3720: timing said outright, with any action: needsTimed reads no words for it after this.
     if (input.timed !== undefined) {
+      // w4634: a refused decision leaves the mark as it was (w4592 was closed as done to clear this flag).
       const decided = this.decide({ ...input, timed: undefined });
-      return `${this.setTimedMark(this.requireWork(input.id), input.timed, 'dispatcher', input.note)} ${decided}`;
+      return `${this.setTimedMark(this.requireWork(input.id), input.timed, 'dispatcher', input.note)} ${decided}`.trim();
     }
     const into = input.into ? this.requireWork(input.into) : undefined;
     // w3455: a Steam mark stored before #866 (w3431's "none: a direct (non-Steam) host ...", w3392's read from FF Factory's
@@ -4021,11 +4023,16 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
         }
       }
     }
+    // w4634: no action changes only the marks above (timed, report, pair_*): the request's state stays as it is.
+    if (!input.action) return input.pair_legs !== undefined || input.pair_menus !== undefined || input.pair_steam !== undefined || input.pair_split !== undefined || input.pair_allow?.length ? `${w.id} stays ${w.status}${w.pair ? `, ${pairText(w.pair)}` : ', no longer a pair run'}.` : '';
     const problem = decisionProblem(w, input.action, into);
     if (problem) throw new Error(problem);
     // w1870 (lothsahn: "doesn't close out jobs with errors"): not on a worker's errored or interrupted turn, nor without its DONE.
     const hold = input.action === 'done' && !twin ? this.closeHold(w) : undefined;
     if (hold) throw new Error(`${w.id} is not closed as done: ${hold} (w1870: no automatic close on an errored turn, or without its worker's DONE). Resume its worker (message_agent) with the error and what is left, so it finishes and says DONE: ${w.id}; place it again if it was stopped on purpose. A person who says it is done closes it through their own orchestrator (update_work close: done).`);
+    // w4634: never on an empty or placeholder note, nor unworked without a reason (a repeat names what it repeats).
+    const noteProblem = input.action === 'done' && !twin ? doneNoteProblem(w.id, input.note, this.workersOf(w).some((s) => !!s.lastResult?.trim()) || Object.keys(requestDonesOf(w)).length > 0) : undefined;
+    if (noteProblem) throw new Error(noteProblem);
     const note = input.note.trim();
     let what = '';
     let legOnly = false;
