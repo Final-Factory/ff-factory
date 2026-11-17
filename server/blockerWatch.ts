@@ -129,6 +129,8 @@ export class BlockerWatch {
   /** w3572: the conflicting pull request heads (`ref@head`) whose owner was told, or found to have none: once each. */
   private readonly conflictTold = new Set<string>();
   private readonly prSeen = new Map<string, { at: number; state?: PrState }>();
+  /** w4531: failed merge-on-green tries per request and pull request, while GitHub's error is a transient one. */
+  private readonly mergeTries = new Map<string, number>();
   private readonly healthFailing = new Map<string, Failing>();
   private readonly prFailing = new Map<string, Failing>();
   /** w3758: pull requests whose reads GitHub's rate limit refuses now (their gates' logs say so once). */
@@ -446,12 +448,36 @@ export class BlockerWatch {
       await (this.d.merge ? this.d.merge(g.ref!, g.mergeOnGreen!.head, this.d.githubPerson?.(w)) : ghMerge(g.ref!, g.mergeOnGreen!.head, ghRunner(this.d.githubPerson?.(w), `the merge of ${g.ref}`), this.d.evidenceScript));
     } catch (e) {
       const said = clipLine((e as Error).message, 1200);
+      if (this.retryMerge(w, g.ref!, said)) return;
       console.warn(`blocker watch: ${w.id}: merge on green of ${g.ref} failed: ${said}`);
       return this.d.orchestrators.unblock(w.id, `${why}; FF Factory tried to merge it: ${said}. ${this.afterRefusal(w, g as WorkBlocker, said)}`);
     }
     // Merged: the PR's state is read fresh next time.
+    this.mergeTries.delete(`${w.id} ${g.ref}`);
     this.prSeen.delete(g.ref!);
     this.d.orchestrators.mergedOnGreen(w.id, why);
+  }
+
+  /**
+   * w4531: GitHub failed the merge on green with a transient error (a 502, "GraphQL: Something went wrong", a timeout):
+   * the gate stays and the next tick tries again, up to MERGE_TRIES tries, before the worker is resumed to merge it by
+   * hand. Between 2026-11-16 03:27Z and 09:40Z four merges (ffu#852, #856, #860, #862) failed so, and each resumed its
+   * worker for a merge GitHub would have taken a minute later. True: wait for the next tick.
+   */
+  private retryMerge(w: WorkItem, ref: string, said: string): boolean {
+    const key = `${w.id} ${ref}`;
+    if (!transientMergeError(said)) {
+      this.mergeTries.delete(key);
+      return false;
+    }
+    const n = (this.mergeTries.get(key) ?? 0) + 1;
+    if (n >= MERGE_TRIES) {
+      this.mergeTries.delete(key);
+      return false;
+    }
+    this.mergeTries.set(key, n);
+    console.warn(`blocker watch: ${w.id}: merge on green of ${ref} failed (try ${n} of ${MERGE_TRIES}, transient; trying again next tick): ${said}`);
+    return true;
   }
 
   /**
@@ -484,10 +510,12 @@ export class BlockerWatch {
         await (this.d.merge ? this.d.merge(g.ref!, g.mergeOnGreen!.head, this.d.githubPerson?.(w)) : ghMerge(g.ref!, g.mergeOnGreen!.head, ghRunner(this.d.githubPerson?.(w), `the merge of ${g.ref}`), this.d.evidenceScript));
       } catch (e) {
         const said = clipLine((e as Error).message, 1200);
+        if (this.retryMerge(w, g.ref!, said)) continue;
         console.warn(`blocker watch: ${w.id}: merge on green of ${g.ref} failed: ${said}`);
         rest.push({ g, v: { why: `${x.v.why}; FF Factory tried to merge it: ${said}. ${this.afterRefusal(w, g, said)}` } });
         continue;
       }
+      this.mergeTries.delete(`${w.id} ${g.ref}`);
       this.prSeen.delete(g.ref!);
       this.d.orchestrators.mergedOnGreen!(w.id, x.v.why, g);
     }
@@ -865,6 +893,19 @@ let rollupRefusedLogged = false;
  */
 export function notMergeableRefusal(said: string): boolean {
   return /is not mergeable|cannot be cleanly created|merge conflict|head branch is not up to date|out of date with the base/i.test(said);
+}
+
+/** w4531: tries of one merge on green while GitHub's error is transient (BlockerWatch.retryMerge), a tick (EVERY_MS) apart. */
+export const MERGE_TRIES = 4;
+
+/**
+ * w4531: a merge GitHub failed for a reason of its own that passes (BlockerWatch.retryMerge): a 5xx ("non-200 OK status
+ * code: 502 Bad Gateway", ffu#856 2026-11-16), "GraphQL: Something went wrong while executing your query" (ffu#852), a
+ * timeout or a dropped connection. Never a refusal of the pull request itself (a conflict, a moved head, a draft, Evidence).
+ */
+export function transientMergeError(said: string): boolean {
+  if (notMergeableRefusal(said) || /head branch was modified|draft|evidence check/i.test(said)) return false;
+  return /\b50[0234]\b|bad gateway|service unavailable|gateway time-?out|something went wrong while executing|timed? ?out|ETIMEDOUT|ECONNRESET|EAI_AGAIN|socket hang up/i.test(said);
 }
 
 /**
