@@ -6425,7 +6425,7 @@ ${w.repo ?? ''}
         ),
         tool(
           'stop_agent',
-          'Stop a worker. It keeps its history and resumes when messaged. In a machine sandbox its uncommitted work is saved on its branch and the sandbox released (w656); it is placed again when it resumes. Released only by the release pass, and not while something keeps it (the reply says): a message before that resumes it in the same sandbox, and message_agent replies with where it runs (w4608). move_to (w1600): a worker between turns stops, its work is saved, its requests are Queued there; the reply says how to place them.',
+          'Stop a worker. It keeps its history and resumes when messaged. In a machine sandbox its uncommitted work is saved on its branch and the sandbox released (w656); it is placed again when it resumes. move_to (w1600): a worker between turns stops, its work is saved, its requests are Queued there; the reply says how to place them.',
           {
             session_id: z.string(),
             move_to: z.string().optional().describe('Computer to move its requests to ("beast"): refused mid-turn, held, full, away (w2544), or reserved above its priority (w1643).'),
