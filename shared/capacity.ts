@@ -10,7 +10,7 @@
 // the game's needs only an agent slot, not a free game sandbox, an editor or RAM for Unity. needsOf says which a request is.
 import { desktopLacks, pairDrivesMenus, type DesktopSession } from './desktop.ts';
 import { steamAccountText, steamLacks, steamSignedIn, type SteamClient } from './steam.ts';
-import type { PlayerCacheReport, WorkItem, WorkPair } from './types.ts';
+import type { PairPlayer, PlayerCacheReport, WorkItem, WorkPair } from './types.ts';
 
 /**
  * Words that say a request waits for room: "a free sandbox", "all in use", "no free slot", "waiting for an editor",
@@ -365,6 +365,19 @@ export function cachedPlayerNote(commit: string | undefined, fit: RoomFit | unde
   if (!hit) return '';
   const target = CACHE_TARGET[fit!.platform!];
   return `\n\n## A player of this commit is already built here (w4601)\nThis computer's shared player cache holds a ${target} player of ${commit!.slice(0, 10)}: \`${hit.player}\` (cache entry \`${hit.entry}\`). Use it and skip the sandbox build: pass \`--player ${hit.player}\` to \`ffnightly.py run\` (or run \`build_player.sh\` for that commit and ${target} as usual: it finds the entry, prints "cached: ... build skipped" and logs the hit, with no checkout of the commit needed). Check first that the commit you run is ${commit!.slice(0, 10)}; build only if it is not, or if the entry is gone. Never start the player where it lies: \`player_slots.py launch\` (or ffnightly.py) runs it from a slot.`;
+}
+
+/**
+ * w4613: the line a pair leg's first message carries when its pair has a published player (request_pair player) of the OS
+ * of the leg's computer, which does not hold that commit's player yet (cachedPlayerNote is '' there), or ''. A leg on another
+ * OS gets nothing and builds as before.
+ */
+export function fetchPlayerNote(commit: string | undefined, player: PairPlayer | undefined, fit: RoomFit | undefined): string {
+  const target = fit?.platform ? CACHE_TARGET[fit.platform] : undefined;
+  if (!player || !target || player.os !== target) return '';
+  const sha = player.key.slice(0, 40);
+  const mb = Math.round(player.size / (1024 * 1024));
+  return `\n\n## Fetch the requester's player instead of building it (w4613)\nThe worker that asked for this run published its ${target} player of ${sha.slice(0, 10)}${commit && !sha.startsWith(commit) ? ` (the run's commit is ${commit.slice(0, 10)}: if it is not ${sha.slice(0, 10)}, build instead)` : ''}: attachment ${player.id}, ${mb} MB packed. Call fetch_attachment with id ${player.id} before anything else: it downloads it, unpacks it into this computer's shared player cache (checking its build-manifest.json says ok for that commit) and answers the player's path and how long it took. Then pass \`--player <that path>\` to \`ffnightly.py run\` (or run \`build_player.sh\` for that commit as usual: it finds the entry and skips the build) and skip the sandbox build. Build as usual only if the fetch fails, and say why in your report. Put the fetch time it answers in your report. Never start the player where it lies: \`player_slots.py launch\` (or ffnightly.py) runs it from a slot.`;
 }
 
 /**

@@ -30,6 +30,24 @@ export const MAX_CHUNK_BYTES = 16 * 1024 * 1024;
 export const inboxName = (a: { id: string; name: string }) => `${a.id}-${a.name}`;
 
 /**
+ * w4613: a game player a worker published from its computer's shared player cache (publish_attachment with player): the
+ * cache entry `<40 hex sha>-<win|mac|linux>` packed as `player-<sha>-<os>.tar.gz` (its player/ folder and build-manifest.json).
+ * fetch_attachment installs one into the fetching computer's player cache instead of its Inbox, so a pair leg of the same
+ * OS skips its build (a Windows player: 1963 MB, 748 MB packed, built in 229 s; measured on lothdesktop, 2026-11-17).
+ */
+export const PLAYER_ATTACHMENT = /^player-([0-9a-f]{40})-(win|mac|linux)\.tar\.gz$/;
+/** w4613: the largest packed player the store takes (players are 2 to 3 GB unpacked; the Windows one packs to 748 MB). */
+export const PLAYER_MAX_BYTES = 3 * 1024 * 1024 * 1024;
+/** w4613: a packed player unused this many days goes (it serves the pair run it was published for, then only fills the disk). */
+export const PLAYER_RETENTION_DAYS = 2;
+
+/** The cache entry a player attachment's name packs (w4613), or undefined for any other name. */
+export function playerAttachmentOf(name: string): { sha: string; os: 'win' | 'mac' | 'linux'; key: string } | undefined {
+  const m = PLAYER_ATTACHMENT.exec(name);
+  return m ? { sha: m[1], os: m[2] as 'win' | 'mac' | 'linux', key: `${m[1]}-${m[2]}` } : undefined;
+}
+
+/**
  * A file name as uploaded, made safe on Windows, macOS and Linux: the last path segment only, no control characters or
  * characters Windows refuses, no leading dots (hidden files), no trailing dots or spaces, no reserved device names, at
  * most 120 characters (the extension kept). Never empty.
@@ -55,6 +73,7 @@ export function attachmentName(raw: unknown): string {
 export function attachmentKind(name: string): { kind: string; mediaType: string } {
   const n = name.toLowerCase();
   const ext = n.includes('.') ? n.slice(n.lastIndexOf('.') + 1) : '';
+  if (PLAYER_ATTACHMENT.test(name)) return { kind: 'Final Factory game player (w4613: fetch_attachment installs it in the player cache)', mediaType: 'application/gzip' };
   if (/^bugreport_.*\.zip$/.test(n)) return { kind: 'Final Factory bug report (zip)', mediaType: 'application/zip' };
   if (/desync_.*\.player\.log$/.test(n)) return { kind: "Final Factory desync report's Player.log", mediaType: 'text/plain' };
   if (/desync_.*\.txt$/.test(n)) return { kind: 'Final Factory desync report', mediaType: 'text/plain' };
