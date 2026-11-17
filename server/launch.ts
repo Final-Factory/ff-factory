@@ -298,7 +298,7 @@ export const CATALOG = {
     reason: z.string().max(300).optional().describe('Only for more than 2 rounds, or more legs than one exclusive lock plays: why (a sentence: a strong reason to suspect a result). Its legs then play in turns of at most 30 minutes, each queued again at the back.'),
     settle_s: z.number().int().min(5).max(300).optional().describe('Seconds after the save is ready before the sample (default 25).'),
     res: z.enum(['1920x1080', '1280x720', '1280x800', '2560x1440']).optional().describe('Window size (default 1920x1080).'),
-    machine: z.string().max(40).optional().describe('A computer that takes timed runs, by id (a play-only one, or a small worker computer such as lothlaptop; w1996); default: play-only first, then the small ones, the fewest runs ahead.'),
+    machine: z.string().max(40).optional().describe('A computer that takes timed runs, by id (a play-only one, or a worker computer of at most 4 agent slots or listed in BIG_TIMED_RUNS; w1996, w2442, w4627); default: play-only first, then the worker computers of at most 4 agent slots, the fewest runs ahead.'),
   },
   switch_branch: {
     branch: z.string().describe('The branch to switch to, e.g. "spec-098-belts".'),
