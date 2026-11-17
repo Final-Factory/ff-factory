@@ -172,4 +172,12 @@ for f in "$out"/*.service; do
   fail "$name is neither a critical unit nor triggered by a timer, path or socket: nothing starts it"
 done
 ok "every other service is triggered by a timer, a path or a socket"
+
+# ---------------------------------------------------------------- credentials (w4500)
+# SetCredential=ID: with an empty value is not valid systemd syntax: systemd logs "Invalid syntax, ignoring" on every
+# daemon-reload and drops the line (fff-portal.service:40, 2026-11-16). lint.sh --units also fails on any such warning
+# from systemd-analyze; this rule needs no systemd.
+bad=$(grep -HnE '^[[:space:]]*SetCredential(Encrypted)?=[^:]*:[[:space:]]*$' "$out"/* "$U"/*.conf 2>/dev/null || true)
+[ -z "$bad" ] || fail "an empty SetCredential= value, which systemd ignores as invalid syntax: $bad"
+ok "no unit sets a credential to an empty value"
 echo "all unit checks pass"

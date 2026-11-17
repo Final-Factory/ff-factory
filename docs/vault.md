@@ -54,11 +54,12 @@ so a removed value leaves no copy) under a lock file, and re-read when its modif
 
 - **In the VM:** `/etc/fff/vault.key`, `root:root 0600`, made by the guest installer (or `fffctl vault init`).
   `fff-portal.service` hands it to the portal with `LoadCredential=fff-vault-key:/etc/fff/vault.key`, so the `fff` user
-  reads it only through `$CREDENTIALS_DIRECTORY` while the service runs. An empty `SetCredential=` is the default, so
-  the portal still starts while there is no key yet. *(Sourced: systemd.exec(5), "Credentials": "SetCredential= will
-  act as default if no credentials are found by any of the former"; the data sits "at a read-only location that (if
-  possible and permitted) is backed by non-swappable memory".)* The portal reads the variable once at start and removes
-  it from the environment its agents inherit.
+  reads it only through `$CREDENTIALS_DIRECTORY` while the service runs. The guest installer makes the key before it
+  installs the unit, so it is there when the portal first starts; without it the portal does not start (systemd fails
+  the unit with 243/CREDENTIALS). There is no empty `SetCredential=fff-vault-key:` default: systemd rejects an empty
+  value ("Invalid syntax, ignoring", in the portal journal on every reload until w4500), so it never applied. *(Sourced: systemd.exec(5), "Credentials": the
+  data sits "at a read-only location that (if possible and permitted) is backed by non-swappable memory".)*
+  The portal reads the variable once at start and removes it from the environment its agents inherit.
   **The credential's mode (w736).** The portal's `fff` account is not root, so systemd writes the credential 0400,
   root-owned, and gives `fff` read access with a POSIX ACL entry (`user:fff:r--`) on the file and on its folder
   `/run/credentials/fff-portal.service`; where the file system has no ACLs it chowns the file to `fff` instead

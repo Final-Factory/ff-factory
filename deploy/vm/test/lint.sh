@@ -75,7 +75,19 @@ if [ "$units" = 1 ]; then
   # The guest's units as install.sh writes them (the templates rendered), then the host's.
   FFF_UNITS_OUT=$tmp deploy/vm/test/fff-units.test.sh >/dev/null
   cp deploy/vm/host/units/* "$tmp/"
-  systemd-analyze verify --man=no "$tmp"/*.service "$tmp"/*.socket "$tmp"/*.timer "$tmp"/*.path
+  # verify exits 0 on a line it ignores, so read what it says (w4500: "fff-portal.service:40: Invalid syntax, ignoring"
+  # sat in the portal's journal for weeks), and fail on any. A systemd can accept what the VM's rejects: the CI runner's
+  # did not report an empty SetCredential= (PR #986), so fff-units.test.sh checks that one by rule. The probe below only
+  # says, in the log, what this systemd makes of it.
+  probe=$(mktemp -d)
+  printf '[Service]\nType=oneshot\nExecStart=/bin/true\nSetCredential=probe-key:\n' >"$probe/fff-lint-probe.service"
+  echo "MEASURE $(systemctl --version | head -1): empty SetCredential= probe says: $(systemd-analyze verify --man=no "$probe/fff-lint-probe.service" 2>&1 | tr '\n' ' ' || true)"
+  rm -rf "$probe"
+  verify_out=$(systemd-analyze verify --man=no "$tmp"/*.service "$tmp"/*.socket "$tmp"/*.timer "$tmp"/*.path 2>&1) || { echo "$verify_out"; exit 1; }
+  [ -z "$verify_out" ] || echo "$verify_out"
+  if printf '%s\n' "$verify_out" | grep -iE 'invalid syntax|unknown key|unknown section|failed to parse|ignoring'; then
+    echo "FAIL: systemd-analyze verify ignored a line of a unit (above)"; exit 1
+  fi
   rm -rf "$tmp"
   echo "systemd-analyze verify: clean"
 fi
