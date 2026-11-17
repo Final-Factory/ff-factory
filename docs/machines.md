@@ -1378,6 +1378,15 @@ fewest agent slots. On a worker computer the daemon (`machine/timedRunner.ts` `w
   than one exclusive turn (30 minutes), the answer also names the free computers that take timed runs, so the worker can
   cancel and run again there. Before, tr_97da01f124 (w3252) sat `sent` for 1.4 hours behind tr_d039d7bdc5 (w3335), whose
   tickets were never granted, and its worker cancelled it as stuck.
+- **Strict priority on a daemon** (w4620, lothsahn: "The factory should be using strict priority queues"): the daemon
+  still plays first come, first served, so the portal keeps its line in priority order (`TimedRuns.reorder`). A run's
+  priority is its open requests' highest, read live (none open: low; `priorityOf` in `server/index.ts`). A run ahead of a
+  higher-priority one that never held an exclusive turn (still `sent`: fetching, building or waiting for the ticket) is told
+  to step back (`timed_run_cancel`) and is sent again at once, so it queues behind; within one priority the order they were
+  sent holds (`sentAt`, `sentSeq`). A run whose turn is playing (`running`) is never moved: its turn finishes (at most 30
+  minutes, w1832) and its legs are kept. Each move is logged and noted on both runs' requests ("timed run tr_A (w1, normal)
+  moved behind tr_B (w2, urgent) on lothdesktop's daemon: strict priority (w4620)"). A raise reaches the line within a
+  minute (`reprioritize`, every 60 s); a daemon that does not answer a step-back in 10 minutes gets the run again.
 - **Borrowed player slots**: the builds are laid out under `<root>/timing/builds/b0|b1`, and during the turn hard-linked into
   the player-slot pair of a sandbox that no live lease holds (`borrowPair`, `slotFree`: the game repo's
   `scripts/nightly/player_slots.py` lease rules), the only folders whose firewall rules exist. The run leases them for its
