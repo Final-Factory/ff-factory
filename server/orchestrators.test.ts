@@ -4463,6 +4463,12 @@ test("w936: main_clone grants a machine's main clone to a request's workers: its
   // No grant: the clone is protected, as before.
   assert.equal(specNow().guard.mainClone, undefined);
   assert.match(specNow().append, /Protected: the machine's main clone/);
+  // w4499: the prompt states what the daemon-read guard (server/daemonReads.ts) allows, so a worker's first command passes it.
+  const promptNow = specNow().append;
+  assert.match(promptNow, /each daemon read is its own command with a full path/);
+  assert.match(promptNow, /no cd into the folder, no `VAR=value` prefix/);
+  assert.match(promptNow, /pipe it only into head, tail, grep, sort, wc, uniq, cut or jq/);
+  assert.match(promptNow, /copy first .* and work on the copy in \$TMPDIR/);
 
   // Another person, an unknown machine: refused, nothing set.
   turn(loth, 'human');
