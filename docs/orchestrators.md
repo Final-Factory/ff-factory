@@ -209,6 +209,33 @@ overrides the session level for that subagent. Orchestrators use `orchestrator.e
 restarts. Check it on a new worker: its claude process's command line carries `--effort <level>`, and `CLAUDE_EFFORT` in
 its shell says the level the session applies.
 
+## Splitting work across agents (w4599)
+
+Ben, 2026-11-17: "can you ingest this for the ryding harness generally?", on Anthropic's "Building agents: When to fold
+subagents into your main agent loop" (claude.com/resources/articles, read 2026-11-17). Its rule, sourced: a split pays only
+when "a single agent loop hits measurable performance degradation from context bloat", when "multiple tasks need to be
+tackled in parallel with fresh context windows that can be discarded", or when one agent "struggles to select appropriate
+tools or there are conflicting instructions". Otherwise "divide by context": give a subagent "a piece of work that needs
+little from the rest of the system" and have it "hand back a compact result"; split by problem type and each handoff is a
+"telephone game". Where a subagent stays, the main agent calls it as a tool, keeps the conversation, and verifies "the
+conclusion against real data". Judge a change by which tasks flipped, not the average, and run each task more than once.
+
+How each split here measures against it (w4599's report has the evidence):
+
+| Split | Why it is split | Verdict |
+|---|---|---|
+| A worker's search subagent (Explore, scout) | context you would throw away | keep; the w2014 nudge tripled hand-offs with cost per merged PR flat (-1%, ±20%; docs/spend.md, "Read chains") |
+| Parallel analysts, one per suspect or slice | independent legs, parallel | keep; the parent re-checks what it acts on |
+| A fresh critic of the worker's own output | a check that must not see the author's reasoning ("black-box verification") | keep |
+| An implementer subagent the worker briefs | cheaper model for a specified piece | keep for pieces with clear done-criteria; the plan and the review stay with the worker, who can change the plan mid-turn |
+| Orchestrator → dispatcher → worker | a person's thread, a placement, a sandbox | keep; the worker gets the request as filed beside the dispatcher's brief (`requestAsFiled`), which removes the lossy hop |
+| A timed or pair leg as its own request | an exclusive bench ticket or a second machine | keep the split; where the leg needs no judgment, a tool run (`timed_run`) hands its table back with no model worker in the middle |
+| Standing agents | one session for life, its notes as memory | keep: a single loop |
+
+The worker brief's "Fewer model calls" carries the working rule: hand a subagent only work whose context you would throw
+away, keep steps that chain on each other's output in your own loop, and re-open or re-run what a hand-back's claim rests
+on before acting on it (server/agents.ts `FEWER_CALLS`, tested in server/evidenceRules.test.ts).
+
 ## Requests and the ledger
 
 `request_work {title, brief, priority, constraints, related_ids, attachments}` files a request (`w12`). `attachments`
