@@ -1633,7 +1633,7 @@ test('w4589: a worker whose own background job is at work is not stopped as idle
   assert.deepEqual(agents.reapIdle(now), [], 'kept: its job is at work');
   assert.equal(lab.live, true);
   assert.equal(lab.info.releaseDue, undefined, 'its sandbox is not released');
-  assert.match(agents.keepIdle(lab, true, true) ?? '', /its own background job is still at work on pc \(1 process\(es\), 41 s of CPU in the last minute: python3, FinalFactory\)/);
+  assert.match(agents.keepIdle(lab, true, true) ?? '', /its own background job is still at work on pc \(1 process\(es\), 41 s of CPU a minute: python3, FinalFactory\)/);
   // Another worker's job, or a report from a daemon gone quiet, keeps nothing.
   report([{ session: 'someone-else', pids: [1], cpuSec: 60, what: 'python3' }]);
   assert.equal(agents.keepIdle(lab, true, true), undefined);

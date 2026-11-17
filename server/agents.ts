@@ -1311,7 +1311,7 @@ export class Agents {
     // w4589: its own background job still at work while its request is open is activity (biscuit, 2026-11-17: w4568's worker
     // 202bc503 was stopped as "idle for 61 min", its sandbox released and its scenario batches ended; 58 scenarios were lost).
     const job = i.machineId && !this.workOver(i) ? this.machines.busyJobOf(i.machineId, i.id) : undefined;
-    if (job) return `its own background job is still at work on ${i.machineId} (${job.pids.length} process(es), ${job.cpuSec} s of CPU in the last minute: ${job.what})`;
+    if (job) return `its own background job is still at work on ${i.machineId} (${job.pids.length} process(es), ${job.cpuSec} s of CPU a minute: ${job.what})`;
     if (this.sessions.queued().some((q) => q.id === i.id)) return 'a message to it is queued';
     const git = i.machineId && i.machineSandbox ? this.store.machines.get(i.machineId)?.sandboxes?.find((x) => x.id === i.machineSandbox)?.git : undefined;
     if (git && git.dirty > 0 && !ignoreDirty) return `its sandbox has ${git.dirty} uncommitted change(s)`;

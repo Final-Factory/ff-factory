@@ -642,7 +642,7 @@ export interface BusyJob {
   session: string;
   /** The busy processes. */
   pids: number[];
-  /** CPU seconds they used in the last minute, together. */
+  /** CPU seconds a minute they used, together, at their last busy look (within the sweep's LEFTOVER.BUSY_HOLD_MS). */
   cpuSec: number;
   /** Their programs, for the log ("python3, FinalFactory"). */
   what: string;

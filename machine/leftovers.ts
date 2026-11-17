@@ -74,6 +74,9 @@ const MIN = 60_000;
  * - SERVER_IDLE_CPU_MS: as unityReaper.ts did with its 2 s CPU_ADVANCE_MS (now CPU_BUSY_SHARE): a compiler server serving a build uses seconds of CPU a minute.
  * - BUSY_CPU_MS: as SERVER_IDLE_CPU_MS (w4589): a worker's own job using 2 s of CPU a minute (3% of a core) is at work; a hung
  *   one, or a wait loop that only sleeps, uses a few ms. A scenario batch's player or a build uses tens of seconds a minute.
+ * - BUSY_HOLD_MS: a guess (w4589): a job stays at work this long after its last busy look, so one low reading ends nothing
+ *   (Linux `ps time=` counts whole seconds, so a job's CPU between two looks reads a second off; GitHub's Linux runner
+ *   read a spinning fixture as 0 s at some looks). A hung job is never busy, so this keeps none.
  * - TERM_WAIT_MS: a guess: a player or an Xvfb ends within a second of SIGTERM; what still runs 5 s later is killed.
  * - STUCK_RETRY_MS: a guess (w1983): a process SIGKILL did not end (taskkill /F failed: LothDesktop's gh pid 24280 of worker
  *   5322f111 was "ended" again every minute from 04:44Z on 2026-10-24) is tried once an hour, not at every look.
@@ -86,6 +89,7 @@ export const LEFTOVER = {
   LOOKS: 2,
   SERVER_IDLE_CPU_MS: 2_000,
   BUSY_CPU_MS: 2_000,
+  BUSY_HOLD_MS: 5 * MIN,
   TERM_WAIT_MS: 5_000,
   STUCK_RETRY_MS: 60 * MIN,
   LOOK_EVERY_MS: MIN,
@@ -351,7 +355,7 @@ export interface SessionFacts {
   wakeAt?: number;
   /** w3715: it holds a granted bench ticket of its own (not an editor boot's or a timed run's). */
   holdsTicket?: boolean;
-  /** w4589: it or what it runs is one of its worker's own jobs still at work ("2 process(es), 41 s of CPU in the last minute: python3"). */
+  /** w4589: it or what it runs is one of its worker's own jobs still at work ("2 process(es), 41 s of CPU a minute: python3"). */
   busy?: string;
   /** When this daemon first saw the session not live (its first sight of it, when it never saw it live). */
   stoppedSince: number;
@@ -488,7 +492,7 @@ export class LeftoverReaper {
   private others = 0;
   private lastAt?: number;
   /** w4589: the CPU time of each worker's own job at the last look (by pid and command line), and the busy ones of the last look. */
-  private jobCpu = new Map<string, { cpuMs: number; at: number }>();
+  private jobCpu = new Map<string, { cpuMs: number; at: number; busyAt?: number; perMin?: number }>();
   private busyJobs: BusyJob[] = [];
 
   constructor(d: LeftoverDeps) {
@@ -527,7 +531,8 @@ export class LeftoverReaper {
   }
 
   /**
-   * w4589: each worker's own jobs that used at least LEFTOVER.BUSY_CPU_MS of CPU a minute since the last look, and the
+   * w4589: each worker's own jobs that used at least LEFTOVER.BUSY_CPU_MS of CPU a minute at a look within the last
+   * LEFTOVER.BUSY_HOLD_MS (with that look's rate), and the
    * processes at work (those, and the ones of the same worker that started them: a batch script waiting on its busy player).
    * A worker's job is what it started outside its agent host's tree (detached, or left when its worker stopped: its
    * FF_SESSION_ID), or inside it through a shell (a Bash call, run_in_background); never the claude process itself or an
@@ -561,7 +566,7 @@ export class LeftoverReaper {
       const session = host ? (shell ? (env.get(host.pid) ?? cliEnv.get(host.pid))?.session : undefined) : e?.session;
       if (session) owner.set(p.pid, session);
     }
-    const next = new Map<string, { cpuMs: number; at: number }>();
+    const next = new Map<string, { cpuMs: number; at: number; busyAt?: number; perMin?: number }>();
     const busy = new Map<number, number>();
     const facts = owner.size ? await d.inspect([...owner.keys()]).catch(() => [] as ProcFacts[]) : [];
     for (const f of facts) {
@@ -569,10 +574,13 @@ export class LeftoverReaper {
       if (!p || f.cpuMs === undefined) continue;
       const id = `${p.pid}|${p.cmd}`;
       const was = this.jobCpu.get(id);
-      next.set(id, { cpuMs: f.cpuMs, at: now });
-      if (!was || now <= was.at) continue;
-      const perMin = ((f.cpuMs - was.cpuMs) * MIN) / (now - was.at);
-      if (perMin >= LEFTOVER.BUSY_CPU_MS) busy.set(p.pid, perMin);
+      const entry: { cpuMs: number; at: number; busyAt?: number; perMin?: number } = { cpuMs: f.cpuMs, at: now, busyAt: was?.busyAt, perMin: was?.perMin };
+      next.set(id, entry);
+      if (was && now > was.at) {
+        const perMin = ((f.cpuMs - was.cpuMs) * MIN) / (now - was.at);
+        if (perMin >= LEFTOVER.BUSY_CPU_MS) Object.assign(entry, { busyAt: now, perMin });
+      }
+      if (entry.busyAt !== undefined && now - entry.busyAt < LEFTOVER.BUSY_HOLD_MS) busy.set(p.pid, entry.perMin!);
     }
     this.jobCpu = next;
     const bySession = new Map<string, number[]>();
@@ -588,7 +596,7 @@ export class LeftoverReaper {
       const cpuSec = Math.round(pids.reduce((n, pid) => n + busy.get(pid)!, 0) / 1000);
       const what = [...new Set(pids.map((pid) => prog(byPid.get(pid)!) || 'process'))].join(', ');
       jobs.push({ session, pids, cpuSec, what });
-      const line = `${pids.length} process(es), ${cpuSec} s of CPU in the last minute: ${what}`;
+      const line = `${pids.length} process(es), ${cpuSec} s of CPU a minute: ${what}`;
       // The busy ones and the ones of the same worker above them, so the script that drives a busy player is not ended under it.
       for (const pid of pids) {
         const seen = new Set<number>();

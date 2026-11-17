@@ -16,7 +16,8 @@ import { inspectProcs, type ProcFacts } from '../machine/unityReaper.ts';
  * The sweep half runs real child processes (fixture scripts, never a real worker's process): one spins the CPU as a
  * scenario batch does, one hangs idle. Their environments are read by this platform's real reader and their CPU by its
  * real inspector. The sweep's clock runs 60 times real time (a look a "minute" apart is a real second apart), so their CPU
- * time is scaled by 60 to match. The only processes it can signal are those children.
+ * time is scaled by 60 to match, after cutting it to whole seconds as Linux `ps time=` reads it on every platform (CI's
+ * Linux runner read the spinning one as 0 s at some looks). The only processes it can signal are those children.
  */
 
 const MIN = 60_000;
@@ -48,7 +49,7 @@ async function scenario(o: { requestOpen: boolean }) {
     root: dir,
     procs: async () => kids.filter(alive).map((c) => ({ pid: c.pid!, ppid: process.pid, cmd: `${process.execPath} ${c.spawnargs[1]}` })),
     envOf: (pids) => readEnvs(platform, pids.filter((p) => kids.some((c) => c.pid === p))),
-    inspect: async (pids) => (await inspectProcs(platform, pids.filter((p) => kids.some((c) => c.pid === p)))).map((f): ProcFacts => ({ pid: f.pid, startedAt: now - 70 * MIN, ...(f.cpuMs !== undefined ? { cpuMs: f.cpuMs * SPEED } : {}) })),
+    inspect: async (pids) => (await inspectProcs(platform, pids.filter((p) => kids.some((c) => c.pid === p)))).map((f): ProcFacts => ({ pid: f.pid, startedAt: now - 70 * MIN, ...(f.cpuMs !== undefined ? { cpuMs: Math.floor(f.cpuMs / 1000) * 1000 * SPEED } : {}) })),
     sessionLive: () => false,
     sessionKnown: () => true,
     resumable: () => o.requestOpen,
@@ -175,18 +176,23 @@ test('under a running claude, only what it ran through a shell is its job: never
   await reaper.look();
   assert.deepEqual(reaper.report().busyJobs, [{ session: WORKER, pids: [103], cpuSec: 40, what: 'FinalFactory' }]);
   now += MIN;
+  // Gone quiet (0.1 s a minute): still held for LEFTOVER.BUSY_HOLD_MS after its last busy look, so one low reading ends nothing.
   Object.assign(cpu, { 100: 31_000, 103: 40_100, 104: 9_100, 105: 9_100, 106: 10 });
   await reaper.look();
-  assert.deepEqual(reaper.report().busyJobs, [], 'a job gone quiet (0.1 s a minute) is not at work');
+  assert.deepEqual(reaper.report().busyJobs.map((j) => j.pids), [[103]], 'held after one quiet look');
+  now += LEFTOVER.BUSY_HOLD_MS;
+  cpu[103] = 40_200;
+  await reaper.look();
+  assert.deepEqual(reaper.report().busyJobs, [], 'quiet for BUSY_HOLD_MS: not at work');
 });
 
 test('sessionVerdict: a busy job keeps its leftovers only while a request waits, and never for a ticket holder', () => {
   const t0 = 1_000 * MIN;
   const late = t0 + 3 * 60 * MIN;
-  const busy = '1 process(es), 41 s of CPU in the last minute: python3';
+  const busy = '1 process(es), 41 s of CPU a minute: python3';
   const kept = sessionVerdict({ live: false, resumable: true, busy, stoppedSince: t0, now: late });
   assert.equal(kept.end, false);
-  assert.match(kept.why, /a request still waits for it, and its own job is still at work \(1 process\(es\), 41 s of CPU in the last minute: python3\): kept while it works \(w4589\)/);
+  assert.match(kept.why, /a request still waits for it, and its own job is still at work \(1 process\(es\), 41 s of CPU a minute: python3\): kept while it works \(w4589\)/);
   assert.equal(sessionVerdict({ live: false, resumable: false, moved: ['w4568'], busy, stoppedSince: t0, now: late }).end, false, 'a moved request still waits');
   assert.equal(sessionVerdict({ live: false, resumable: false, busy, stoppedSince: t0, now: late }).end, true, 'no request waits');
   assert.equal(sessionVerdict({ live: false, resumable: true, busy, holdsTicket: true, stoppedSince: t0, now: late }).end, true, 'w3715: a ticket holder');
