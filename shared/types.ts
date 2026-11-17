@@ -2541,6 +2541,11 @@ export interface WorkItem {
    */
   repo?: string;
   /**
+   * w4553: the files an ffu row is expected to edit, the paths its start_agent prompt named. With the paths its
+   * title and brief name, they are checked before another ffu row starts (server/ffuOverlap.ts).
+   */
+  ffuFiles?: string[];
+  /**
    * What the work needs of a computer (w1098, lothsahn: "FFBox and FF Factory updates don't need unity editors"): `game`,
    * a game sandbox with an editor's worth of RAM (the game repo, or unknown: the safe default), or `agent`, only an
    * agent slot (FF Factory, FFBox, the ff-agents plugin, any non-Unity repo). Absent on requests filed before it: game.

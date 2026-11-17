@@ -32,9 +32,10 @@ import { addedLines, asksLookOk, decidedRefusal, notesSettle, personNotes, quote
 import { statusLinesIn, stillOpenIn } from './ledgerRules.ts';
 import { inlineReviewMedia, MEDIA_FILE, outsideReview, publishedCopy, reviewRootOf } from './reviewMedia.ts';
 import { visualAskCheck } from './visualAsk.ts';
-import { BLOCKER_KIND_HELP, conflictText, FULL_SHA, gateSetter, gatesName, gatesOf, isWith, latestWorker, newestFirst, prLabel, prRefOf, type PrHealth } from '../shared/blockers.ts';
-import { isSamePerson, personForWork, poolOwnerOf, withPool } from './vault.ts';
-import { githubFromVault, githubTokens } from './githubTokens.ts';
+import { BLOCKER_KIND_HELP, conflictText, FULL_SHA, gateSetter, gatesName, gatesOf, isWith, latestWorker, MAX_GATES, newestFirst, prLabel, prRefOf, type PrHealth } from '../shared/blockers.ts';
+import { isSamePerson, personForWork, poolOwnerOf, tokenPersonForWork, withPool } from './vault.ts';
+import { ghRunner, githubFromVault, githubPersonOf, githubTokens } from './githubTokens.ts';
+import { clashGates, clashLine, expectedFiles, ffuStartClashes, FfuPrReads } from './ffuOverlap.ts';
 import { namedIds, READ_LIST_MAX, READ_MAX_CHARS, readWork, type ReadWorkArgs } from './workRead.ts';
 import { readPortalLogs, realJournal, type PortalLogsInput } from './portalLogs.ts';
 import { cliTranscriptPath } from './cliTranscript.ts';
@@ -2860,6 +2861,31 @@ export class Agents {
    * Start a worker in one of a machine's sandboxes (docs/machines.md), never in its main clone (w536); the portal runs
    * none of its own (w510). `requestedBy`: the person it works for (docs/identity.md); it runs on a token of their vault pool.
    */
+  private readonly ffuReads = new FfuPrReads();
+
+  /**
+   * w4553: hold ffu row `w` Blocked when its expected files collide with another ffu row in flight or a fresh open ffu pull
+   * request (server/ffuOverlap.ts); what start_agent answers then, or undefined to start it. A gh read that fails starts it
+   * (logged): the check saves a conflict, it must never stop ffu work.
+   */
+  private async ffuOverlapHold(w: WorkItem, prompt: string): Promise<string | undefined> {
+    let found: ReturnType<typeof ffuStartClashes>;
+    try {
+      const run = ghRunner(githubPersonOf(tokenPersonForWork(this.cfg, w), w, this.identity.systemPayer().userId), `the ffu overlap check of ${w.id}`);
+      const [prs, hubs] = await Promise.all([this.ffuReads.openPrs(run), this.ffuReads.hubs(run)]);
+      found = ffuStartClashes({ w, prompt, work: this.store.work.values(), prs, hubs, now: Date.now() });
+    } catch (e) {
+      console.warn(`ffu overlap check: ${w.id}: ${(e as Error).message}; started without it (w4553)`);
+      return undefined;
+    }
+    if (!found.clashes.length) return undefined;
+    const lines = found.clashes.map(clashLine);
+    const gates = clashGates(found.clashes).slice(0, MAX_GATES);
+    this.orchestrators.decide({ id: w.id, action: 'block', blockers: gates, note: `ffu overlap check (w4553): ${lines.join('; ')}` });
+    console.log(`ffu overlap check: held ${w.id}: ${lines.join('; ')}`);
+    return `${w.id} was not started: it is ffu work that would edit what other ffu work in flight edits (w4553), and two rows on the same code conflict at merge. ${lines.join('; ')}. It is held Blocked on ${gates.map((g) => g.ref).join(', ')} and comes back to you when ${gates.length > 1 ? 'they clear' : 'that clears'}. If they edit different parts of those files, start it anyway with override_duplicate saying so. Name the files a row will edit in its brief or start prompt: the check reads them.`;
+  }
+
   startWorker(req: { sandbox?: string; machine?: string; prompt: string; title?: string; model?: string; effort?: EffortLevel; permissionMode?: PermissionMode; from: 'human' | 'orchestrator'; requestedBy?: Requester; attachments?: AttachmentRef[]; workId?: string }) {
     const files = (req.attachments ?? []).map(publicRef);
     const t = this.target(req.sandbox, req.machine);
@@ -6135,6 +6161,17 @@ When a person asked for a design or an analysis (a profile, an investigation, a 
             const cargoOn = ctx.role === 'dispatcher' && w && isCargoRepo(w.repo) && !a.disk_cleanup ? this.newWorkOn(a.sandbox, a.machine) : undefined;
             const cargoNo = cargoOn ? cargoShortOf(this.machines.diskRoom(cargoOn)?.freeBytes) : undefined;
             if (cargoNo) throw new Error(`${w!.id} is FFU (Rust) work and ${cargoOn}: ${cargoNo}. Leave it Queued: it starts there, or on a computer with room, once the clean-up frees the drive.`);
+            // w4553: an ffu row that would edit the files another ffu row in flight edits is held Blocked on it, not started.
+            if (ctx.role === 'dispatcher' && w && isCargoRepo(w.repo) && !a.disk_cleanup) {
+              const held = override ? undefined : await this.ffuOverlapHold(w, a.prompt);
+              if (held) return held;
+              // The paths its start prompt names count for the rows started after it (its brief is read again each time).
+              const named = expectedFiles(undefined, a.prompt, []);
+              if (named.length) {
+                w.ffuFiles = [...new Set([...(w.ffuFiles ?? []), ...named])].slice(0, 40);
+                this.store.putWork(w);
+              }
+            }
             // A computer reserved for higher work (w1643, placement.minPriority) takes no new work below its level.
             const reserved = this.reservedProblem(this.machineOf(a.sandbox, a.machine), w);
             if (reserved) throw new Error(reserved);

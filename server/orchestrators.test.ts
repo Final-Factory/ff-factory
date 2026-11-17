@@ -10704,3 +10704,47 @@ test('w4468: request_pair split lets a Mac host with no w3697 sentence in the br
   env.machines.onPlayEnded!('pc');
   assert.match(pings.join('\n'), /a person's game on pc ended/);
 });
+
+// w4553 (lothsahn, 2026-11-17): two ffu rows on the same code ran at once and conflicted at merge (7 of 8 not-mergeable
+// failures from 2026-11-15 12:00Z to 11-17 11:00Z were ffu). start_agent holds the later one Blocked on the PR it overlaps.
+test('w4553: start_agent holds an ffu row whose files an open ffu PR edits, Blocked on that PR; override_overlap starts it; game work is never checked', async (t) => {
+  const { store, agents, dispatcher, call } = await setupOnMachine(t);
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [
+    { id: 'w4370', status: 'active', repo: 'Final-Factory/ffu', sessionIds: ['s-4370'], prs: [{ repo: 'Final-Factory/ffu', number: 852, state: 'open' }] } as Partial<WorkItem> & { id: string },
+    { id: 'w4418', repo: 'Final-Factory/ffu', brief: 'Add pad bindings for Frenzy, Guardian and Obliterator Disk in crates/ffu-platform/src/lib.rs.' },
+    { id: 'w4419', repo: 'Final-Factory/ffu', brief: 'Tech rewards in sector/rewards.rs.' },
+    { id: 'w4420', brief: 'Fix crates/ffu-platform/src/lib.rs in the game repo (not ffu).' },
+  ]);
+  let reads = 0;
+  (agents as unknown as { ffuReads: unknown }).ffuReads = {
+    openPrs: async () => (reads++, [{ number: 852, body: 'Request: w4370', updatedAt: new Date().toISOString(), files: ['crates/ffu-platform/src/lib.rs', 'docs/play.md'] }]),
+    hubs: async () => [],
+  };
+  const held = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Go.', title: 'Pad abilities', work_id: 'w4418' });
+  assert.equal(held.isError, false, held.text);
+  assert.match(held.text, /^w4418 was not started: it is ffu work .*Final-Factory\/ffu#852 \(w4370\): crates\/ffu-platform\/src\/lib\.rs\. It is held Blocked on Final-Factory\/ffu#852 .*override_duplicate/);
+  const w = store.work.get('w4418')!;
+  assert.equal(w.status, 'blocked');
+  assert.deepEqual(w.sessionIds, []);
+  assert.deepEqual([w.blocked?.kind, w.blocked?.ref, w.alsoBlocked], ['pr', 'Final-Factory/ffu#852', undefined]);
+  // A row on other files starts, and records the files its prompt names for the next check.
+  const other = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', title: 'Rewards', work_id: 'w4419', prompt: 'Edit crates/ffu-sim/src/sector/rewards.rs.' });
+  assert.doesNotMatch(other.text, /was not started/, other.text);
+  assert.deepEqual(store.work.get('w4419')!.ffuFiles, ['crates/ffu-sim/src/sector/rewards.rs']);
+  // Game work is not read at all.
+  const before = reads;
+  await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Go.', title: 'Game', work_id: 'w4420', extra_agent: true });
+  assert.equal(reads, before);
+  // A gh failure starts the row (logged): the check never stops ffu work.
+  (agents as unknown as { ffuReads: unknown }).ffuReads = { openPrs: async () => { throw new Error('HTTP 401'); }, hubs: async () => [] };
+  putRequests(store, [{ id: 'w4421', repo: 'Final-Factory/ffu', brief: 'crates/ffu-platform/src/lib.rs' }]);
+  const open = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Go.', title: 'Fails open', work_id: 'w4421', extra_agent: true });
+  assert.doesNotMatch(open.text, /was not started/, open.text);
+  // override_duplicate with a reason starts an overlapping row without reading GitHub.
+  (agents as unknown as { ffuReads: unknown }).ffuReads = { openPrs: async () => { throw new Error('not read'); }, hubs: async () => [] };
+  putRequests(store, [{ id: 'w4422', repo: 'Final-Factory/ffu', brief: 'crates/ffu-platform/src/lib.rs' }]);
+  const over = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Go.', title: 'Override', work_id: 'w4422', extra_agent: true, override_duplicate: 'it edits the gamepad table, w4370 the keyboard one' });
+  assert.doesNotMatch(over.text, /was not started/, over.text);
+  assert.notEqual(store.work.get('w4422')!.status, 'blocked');
+});
