@@ -2340,7 +2340,7 @@ test('w2653: a worker exports the spend record only once its person grants it, a
   assert.match((await call(ben, 'update_work', { id: 'w9', spend_read: true })).text, /^ERROR: w9 came from the intake/);
 });
 
-test('w4497: a worker reads every transcript only once its person grants transcript reading, read-only, secrets masked; an intake request never gets it', async (t) => {
+test('w4528: every worker reads every transcript with no grant, read-only, secrets masked; a worker on a request quoting players\' text never does', async (t) => {
   const { store, machines, dispatcher, chat, call } = await setupOnMachine(t);
   const ben = chat(BEN).info;
   const loth = chat(LOTH).info;
@@ -2349,6 +2349,7 @@ test('w4497: a worker reads every transcript only once its person grants transcr
   store.append(ben.id, { kind: 'assistant', text: 'InputValidationError on wake_me: minutes missing' });
   store.append(loth.id, { kind: 'tool_result', toolUseId: 'x1', isError: true, text: `InputValidationError in unity: action required ${token}` });
   await call(ben, 'request_work', { title: 'Tool-call failures of the last 8 hours', brief: 'Count them by cause.' });
+  assert.equal(Object.keys(store.work.get('w1')!).includes('transcriptRead'), false, 'an ordinary request carries no grant');
   const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Audit the failures', title: 'Failures', work_id: 'w1' });
   assert.equal(started.isError, false, started.text);
   const id = /Started agent (\w+)/.exec(started.text)![1];
@@ -2356,20 +2357,12 @@ test('w4497: a worker reads every transcript only once its person grants transcr
   const m = store.machines.get('pc')!;
   const tools = machines.hooks!.specFor(info, m).mcp?.tools.map((x) => x.name) ?? [];
   assert.ok(tools.includes('search_transcripts') && tools.includes('agent_transcript'), 'a worker has both tools, deferred');
-  assert.doesNotMatch(machines.hooks!.specFor(info, m).append ?? '', /Transcript reading is granted/, 'no grant, no line in its brief');
+  const brief = machines.hooks!.specFor(info, m).append ?? '';
+  assert.match(brief, /Transcripts are yours to read, no grant needed/, 'its brief says it may read them');
+  assert.doesNotMatch(brief, /transcript-read grant|transcript_read/, 'no word of a grant left in its brief');
   const h = machines.hooks!.handlersFor(info, m);
   const since = new Date(Date.now() - 8 * 3600_000).toISOString();
-  // Refused without the grant.
-  await assert.rejects(h.search_transcripts!({ query: 'InputValidationError', since }), /search_transcripts needs a transcript-read grant on one of your open requests \(w1\)/);
-  await assert.rejects(h.agent_transcript!({ session_id: loth.id }), /agent_transcript needs a transcript-read grant on one of your open requests \(w1\)/);
-  // Only the request's own person grants it.
-  assert.match((await call(loth, 'update_work', { id: 'w1', transcript_read: true })).text, /^ERROR: w1 is not Lothsahn's request/);
-  const granted = await call(ben, 'update_work', { id: 'w1', transcript_read: true });
-  assert.match(granted.text, /w1: its workers may now read every transcript/);
-  assert.equal(store.work.get('w1')!.transcriptRead?.by, 'Ben');
-  assert.match((await call(ben, 'list_work', { id: 'w1' })).text, /Its workers may read every transcript \(search_transcripts, agent_transcript; granted by Ben\)/);
-  assert.match(machines.hooks!.specFor(info, m).append ?? '', /Transcript reading is granted \(w1, granted by Ben\)/, 'its brief says so');
-  // Every agent, in a time window; read-only (the ledger and the transcripts are unchanged), secrets masked.
+  // Every agent, in a time window, with no grant; read-only (the ledger and the transcripts are unchanged), secrets masked.
   // The fake worker's own echo turn lands its report first: that is its own, not these reads.
   await until('the worker reported', () => !!store.work.get('w1')!.outcome);
   const before = structuredClone([...store.work.values()]);
@@ -2383,14 +2376,19 @@ test('w4497: a worker reads every transcript only once its person grants transcr
   assert.ok(!read.includes(token), 'no token in a transcript read');
   assert.deepEqual([...store.work.values()], before, 'the ledger is unchanged');
   assert.equal(store.readTranscript(loth.id, 400).length, lothBefore, 'the transcript is unchanged');
-  // Taken back: refused again. Filed with the grant, a request has it from the start; an intake request never.
-  assert.equal((await call(ben, 'update_work', { id: 'w1', transcript_read: false })).isError, false);
-  await assert.rejects(h.agent_transcript!({ session_id: ben.id }), /needs a transcript-read grant/);
-  await call(ben, 'request_work', { title: 'Hook refusals by skill', brief: 'From the transcripts.', transcript_read: true });
-  assert.equal(store.work.get('w2')!.transcriptRead?.by, 'Ben');
-  const intake = { ...store.work.get('w2')!, id: 'w9', transcriptRead: undefined, source: { kind: 'discord-bug', untrusted: true, channel: '#bugs' } } as WorkItem;
-  store.putWork(intake);
-  assert.match((await call(ben, 'update_work', { id: 'w9', transcript_read: true })).text, /^ERROR: w9 came from the intake/);
+  // The retired transcript_read flag is gone from request_work and update_work: nothing on the request says it is granted.
+  assert.doesNotMatch((await call(ben, 'list_work', { id: 'w1' })).text, /transcript/i, 'list_work shows no grant');
+  // A trusted intake request (a nightly run's) keeps the tools.
+  const w1 = store.work.get('w1')!;
+  store.putWork({ ...w1, source: { kind: 'nightly', untrusted: false } });
+  assert.match(await h.agent_transcript!({ session_id: loth.id, last: 5 }), /InputValidationError in unity/, 'a trusted source is no bar');
+  // A worker that serves a request quoting players' text is refused both, even once it closed, and its brief says why.
+  store.putWork({ ...w1, id: 'w9', status: 'done', source: { kind: 'discord-bug', untrusted: true, channel: '#bugs' } });
+  await assert.rejects(h.search_transcripts!({ query: 'InputValidationError', since }), /search_transcripts is closed to a worker on a request filed from players' text \(w9\)/);
+  await assert.rejects(h.agent_transcript!({ session_id: loth.id }), /agent_transcript is closed to a worker on a request filed from players' text \(w9\)/);
+  const closed = machines.hooks!.specFor(info, m).append ?? '';
+  assert.match(closed, /Other agents' transcripts are closed to you: you serve a request filed from players' text \(w9\)/);
+  assert.doesNotMatch(closed, /Transcripts are yours to read/);
 });
 
 // ---------------------------------------------------------------- w643: Waiting on input, Queued, Blocked
