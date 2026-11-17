@@ -62,13 +62,61 @@ export interface RunTicket {
   wait(ms?: number, onLine?: (line: string) => void): Promise<TicketState>;
   state(): TicketState;
   release(): void;
+  /** The earlier place the helper was asked to keep (w4624), when it was. */
+  readonly keptPlace?: number;
+}
+
+/**
+ * w4624: where a waiting timed run's ticket stands, kept beside the run (<root>/timing/runs/<run>/queue-place.json) so a
+ * restarted daemon takes the ticket again at the same place. ben, 2026-11-17: tr_97b11ed6a4 "went back to the end of
+ * the queue at every daemon restart" (t00007465, t00007637, t00007672) and played no leg in 4+ hours. Written once the
+ * helper names its ticket, removed once a ticket is granted (a turn the queue ended by its limit is a re-request at the
+ * back, w1832) and when the run ends; a daemon that dies leaves it for the next one.
+ */
+export const QUEUE_PLACE_FILE = 'queue-place.json';
+/** A kept place older than this is not reused (a run the portal sent again a day later starts afresh). */
+export const QUEUE_PLACE_MAX_AGE_MS = 24 * 3600_000;
+
+export interface QueuePlace {
+  place: number;
+  ticket: string;
+  at: string;
+}
+
+/** The place kept in `runDir`, when there is a fresh, well-formed one. */
+export function readQueuePlace(runDir: string, now = Date.now()): QueuePlace | undefined {
+  try {
+    const q = JSON.parse(fs.readFileSync(path.join(runDir, QUEUE_PLACE_FILE), 'utf8')) as Partial<QueuePlace>;
+    const at = Date.parse(String(q.at ?? ''));
+    if (typeof q.place !== 'number' || !(q.place > 0) || !/^t\d{8}$/.test(String(q.ticket)) || !(now - at < QUEUE_PLACE_MAX_AGE_MS)) return undefined;
+    return { place: q.place, ticket: q.ticket!, at: q.at! };
+  } catch {
+    return undefined;
+  }
+}
+
+export function writeQueuePlace(runDir: string, q: QueuePlace): void {
+  const f = path.join(runDir, QUEUE_PLACE_FILE);
+  fs.writeFileSync(`${f}.tmp`, JSON.stringify(q));
+  fs.renameSync(`${f}.tmp`, f);
+}
+
+export function clearQueuePlace(runDir: string): void {
+  fs.rmSync(path.join(runDir, QUEUE_PLACE_FILE), { force: true });
+}
+
+/** The place number of a waiting ticket named in a helper's line: the ticket kept (`kept`), else its own number. */
+export function placeOf(line: string, kept?: number): { place: number; ticket: string } | undefined {
+  const m = /\b(t\d{8})\b/.exec(line);
+  return m ? { place: kept ?? Number(m[1].slice(1)), ticket: m[1] } : undefined;
 }
 
 export interface TimedWorkerDeps {
   /** The sandbox ids whose player-slot pairs (slotK-0, slotK-1) are this computer's (the pool's sandboxes). */
   sandboxIds: () => string[];
   /** Take the exclusive timing ticket for the run, owned by `ownerPid`; undefined with why when the queue cannot be used. */
-  ticket: (o: { what: string; session: string; maxMin: number; ownerPid: number; run: string }) => { ticket?: RunTicket; why?: string };
+  /** `place` (w4624): the place the run's ticket stood at before this daemon restarted (bench_queue.py hold --place). */
+  ticket: (o: { what: string; session: string; maxMin: number; ownerPid: number; run: string; place?: number }) => { ticket?: RunTicket; why?: string };
   /** The process the ticket and the slot leases follow; ended after the run (default: a small node child of this daemon). */
   owner?: () => { pid: number; end: () => void };
   /** The slot pool's root (default <root>/players: the folders the firewall step allows). */
@@ -681,14 +729,30 @@ export class TimedRunner {
     try {
       for (let turn = 1; next < order.length; turn++) {
         await this.personWait(o, 'before its turn', x.poll);
-        const t = w.ticket({ what: `timed run ${o.id}: ${o.what}`, session: o.session, maxMin: 30, ownerPid: owner.pid, run: o.id });
+        // w4624: a ticket this run waited on before the daemon restarted keeps its place
+        const kept = readQueuePlace(x.runDir);
+        const t = w.ticket({ what: `timed run ${o.id}: ${o.what}`, session: o.session, maxMin: 30, ownerPid: owner.pid, run: o.id, ...(kept ? { place: kept.place } : {}) });
         if (!t.ticket) throw new Error(`no bench queue ticket here: ${t.why ?? 'unknown'}`);
         const ticket = t.ticket;
         let pair: BorrowedPair | undefined;
         try {
-          this.status(o.id, 'waiting', `turn ${turn}: queued for this computer's exclusive bench ticket (${order.length - next} legs left)`);
-          const s = await this.until(o.id, ticket.wait(Infinity, (line) => this.status(o.id, 'waiting', `turn ${turn}: ${line}`.slice(0, 280))));
+          const again = kept && ticket.keptPlace !== undefined ? `, at the place its ticket ${kept.ticket} held before this daemon restarted (w4624)` : kept ? ` (its place before this daemon restarted could not be kept: ${t.why ?? 'the queue script here is older'})` : '';
+          this.status(o.id, 'waiting', `turn ${turn}: queued for this computer's exclusive bench ticket (${order.length - next} legs left)${again}`);
+          let noted = '';
+          const s = await this.until(o.id, ticket.wait(Infinity, (line) => {
+            const p = placeOf(line, ticket.keptPlace);
+            if (p && p.ticket !== noted) {
+              noted = p.ticket;
+              try {
+                writeQueuePlace(x.runDir, { ...p, at: new Date().toISOString() });
+              } catch (e) {
+                this.d.log(`timed run ${o.id}: could not keep its queue place: ${(e as Error).message}`);
+              }
+            }
+            this.status(o.id, 'waiting', `turn ${turn}: ${line}`.slice(0, 280));
+          }));
           if (s.kind !== 'granted') throw new Error(`the bench queue did not grant the ticket: ${s.line}`);
+          clearQueuePlace(x.runDir);
           // The turn's quiet machine (BenchTurn) asks the other players to quit; their leases end with them.
           // A pair whose player folder cannot be replaced (a player still runs from it, which Windows refuses) is given
           // back and skipped for this turn; the others are tried, then the busy ones again, for 5 minutes.
@@ -750,6 +814,7 @@ export class TimedRunner {
       }
     } finally {
       owner.end();
+      clearQueuePlace(x.runDir);
     }
   }
 
