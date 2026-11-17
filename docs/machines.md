@@ -1786,6 +1786,15 @@ LothDesktop and Beast, not just when BEAST is full").
     `shared/steam.ts`): a log-off or a failed sign-in after the last `'OK'` sets `SteamClient.notConnected`, and such a
     computer counts as not signed in (`steamSignedIn`, `steamLacks`: "beast's Steam client (slims) is not connected to
     Steam: logged off at ..."). No log, or no state line in it: the registry decides.
+  - **A kick by another sign-in says so, in UTC** (w4638, from r294: LothDesktop's Steam was kicked off by
+    `RecvMsgClientLoggedOff('Logged In Elsewhere')` at 2026-11-16 21:36:55 EST and never came back by itself; its status
+    showed local stamps as UTC and counted 21 failed sign-ins where Steam's log said attempt 89). Steam writes its log
+    stamps in the computer's local time; `steamStampUtc` turns them into UTC ("2026-11-17 02:36:55Z"). A client another
+    sign-in kicked off opens connections but sends no sign-in, so every retry ends in `'Try another CM'`: it waits for a
+    person. The daemon reads the tail of `<Steam>/logs/steamui_login.txt` too (`steamKickedAt`): a last
+    `SetLoginState: WaitingForCredentials - Logged In Elsewhere`, or that log-off in the connection log with no `'OK'`
+    since, reports "kicked by another sign-in at <UTC>; needs a person to reconnect". Other failures count Steam's own
+    `(attempt N)`, since the 64 KB tail holds only the latest ones.
   - **A run whose legs click the game's menus goes only where the screen is unlocked** (w2459, lothsahn, 2026-10-28:
     w2460's rerun 2 put its host leg on m5, signed in to Steam, but m5's screen was locked, and the game's menus take no
     clicks on a Mac with a locked screen, so neither check ran). Every Steam pair clicks menus (its lobby); any other pair

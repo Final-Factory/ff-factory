@@ -99,7 +99,9 @@ export async function readSteamClient(d: SteamClientDeps): Promise<SteamClient> 
     const users = d.read(path.join(root, 'config', 'loginusers.vdf'));
     // w2461: signed in is not connected; its connection log's tail says whether it is (the file grows to megabytes).
     const log = d.read(path.join(root, 'logs', 'connection_log.txt'));
-    const notConnected = log ? steamConnection(log.slice(-64_000)) : undefined;
+    // w4638: and its login log's tail whether another sign-in kicked it off and it waits for a person.
+    const login = d.read(path.join(root, 'logs', 'steamui_login.txt'));
+    const notConnected = log ? steamConnection(log.slice(-64_000), login ? { login: login.slice(-16_000) } : {}) : undefined;
     return { ...base, accountId, ...(users ? loginUserOf(users, accountId) : {}), ...(notConnected ? { notConnected } : {}) };
   } catch (e) {
     return { checkedAt, installed: false, running: false, error: `read failed: ${(e as Error).message}`.slice(0, 120) };

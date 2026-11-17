@@ -156,28 +156,77 @@ const STEAM_WORDS: readonly RegExp[] = [
 export const mentionsSteam = (...texts: (string | undefined)[]): boolean => texts.some((t) => !!t && STEAM_WORDS.some((re) => affirmedMention(t, re)));
 
 /**
- * Whether the client is connected to Steam's servers, from the tail of its logs/connection_log.txt (w2461): undefined when
- * its last state is Logged On after its last log-off, else why not ("logged off at 2026-10-25 14:03:15 (Logged In
- * Elsewhere); 9 sign-ins failed since, the last at 2026-10-28 02:59:11 ('Try another CM')"). No log or no state line: undefined.
+ * A Steam log stamp ("2026-11-16 21:36:55"), which Steam writes in the computer's own local time, as UTC
+ * ("2026-11-17 02:36:55Z", w4638: LothDesktop runs on EST and its status showed local times as if they were UTC). Read on
+ * the computer that wrote it, so the process's own time zone is Steam's; anything unreadable stays as it was.
  */
-export function steamConnection(tail: string): string | undefined {
+export function steamStampUtc(stamp: string): string {
+  const m = /^(\d{4})-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)$/.exec(stamp);
+  if (!m) return stamp;
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6]));
+  return Number.isNaN(d.getTime()) ? stamp : `${d.toISOString().slice(0, 19).replace('T', ' ')}Z`;
+}
+
+/**
+ * When another sign-in to the account kicked this client off and it still waits for a person, from the tail of its
+ * logs/steamui_login.txt (w4638): the local stamp of its last `SetLoginState: WaitingForCredentials - Logged In Elsewhere`
+ * when no later SetLoginState moved it on, else undefined. Its retries after that are only "UI Request: connect" and
+ * "Received logon failure response" lines, which leave the state where it is.
+ */
+export function steamKickedAt(loginTail: string): string | undefined {
+  let at: string | undefined;
+  for (const line of loginTail.split(/\r?\n/)) {
+    const m = /^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\] \[[^\]]*\] SetLoginState: (.*)$/.exec(line);
+    if (!m) continue;
+    at = /^WaitingForCredentials - Logged In Elsewhere/.test(m[2]) ? m[1] : undefined;
+  }
+  return at;
+}
+
+/** What steamConnection says of a client another sign-in kicked off: Steam does not sign back in by itself (w4638). */
+export const steamKickedText = (utc: string): string => `kicked by another sign-in at ${utc}; needs a person to reconnect`;
+
+/**
+ * Whether the client is connected to Steam's servers, from the tail of its logs/connection_log.txt (w2461) and of its
+ * logs/steamui_login.txt (w4638): undefined when its last state is Logged On after its last log-off, else why not, its
+ * times in UTC. A client another sign-in kicked off ('Logged In Elsewhere', w2461 BEAST and w4637 LothDesktop) never signs
+ * back in by itself: it opens a connection and sends no sign-in, so the server drops it with 'Try another CM' a minute
+ * later, again and again (r294); that says "kicked by another sign-in at 2026-11-17 02:36:55Z; needs a person to reconnect".
+ * Anything else: "logged off at ... (<reason>); 89 sign-ins failed since, the last at ... ('Try another CM')", the count
+ * being Steam's own "(attempt N)" when it is higher than the failures the tail still holds (w4637: the 64 KB tail held 21
+ * of 89). No log or no state line: undefined. `utc` turns a local stamp into UTC (steamStampUtc; tests pass a fixed zone).
+ */
+export function steamConnection(tail: string, opts: { login?: string; utc?: (stamp: string) => string } = {}): string | undefined {
+  const utc = opts.utc ?? steamStampUtc;
   let state: string | undefined;
   let off: string | undefined;
+  let offReason: string | undefined;
+  let offAt: string | undefined;
   let fails = 0;
+  let attempt = 0;
   let lastFail: string | undefined;
+  let signedIn = false;
   for (const line of tail.split(/\r?\n/)) {
     const m = /^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\] \[([A-Za-z ]+), \d+, \d+\]/.exec(line);
     if (!m) continue;
     state = m[2];
     const r = /RecvMsgClientLogOnResponse\(\) : (?:\[[^\]]*\] )?'([^']+)'/.exec(line);
-    if (r && r[1] === 'OK') { off = undefined; fails = 0; lastFail = undefined; continue; }
-    if (r) { fails++; lastFail = `${m[1]} ('${r[1]}')`; continue; }
+    if (r && r[1] === 'OK') { off = undefined; offReason = undefined; offAt = undefined; fails = 0; attempt = 0; lastFail = undefined; signedIn = true; continue; }
+    if (r) { fails++; lastFail = `${utc(m[1])} ('${r[1]}')`; continue; }
+    const a = /StartAutoReconnect\(\).*\(attempt (\d+)\)/.exec(line);
+    if (a) { attempt = Math.max(attempt, Number(a[1])); continue; }
     const lo = /RecvMsgClientLoggedOff\('([^']+)'\)/.exec(line);
-    if (lo) { off = `logged off at ${m[1]} (${lo[1]})`; fails = 0; lastFail = undefined; }
+    if (lo) { offAt = utc(m[1]); off = `logged off at ${offAt} (${lo[1]})`; offReason = lo[1]; fails = 0; attempt = 0; lastFail = undefined; signedIn = false; }
   }
+  const kicked = opts.login ? steamKickedAt(opts.login) : undefined;
+  // The login log says it waits for a person: that holds even when the log-off has scrolled out of the connection log's
+  // tail (w4637), unless the connection log signed in after it.
+  if (kicked && !(state === 'Logged On' && signedIn && !off)) return steamKickedText(utc(kicked));
   if (!state) return undefined;
   if (state === 'Logged On' && !off && !fails) return undefined;
-  const failed = fails ? `${fails} sign-in${fails > 1 ? 's' : ''} failed${off ? ' since' : ''}, the last at ${lastFail}` : '';
+  if (offReason === 'Logged In Elsewhere' && offAt) return steamKickedText(offAt);
+  const n = Math.max(fails, attempt);
+  const failed = n ? `${n} sign-in${n > 1 ? 's' : ''} failed${off ? ' since' : ''}, the last at ${lastFail ?? 'an unlogged time'}` : '';
   return [off, failed].filter(Boolean).join('; ') || `its connection is ${state}`;
 }
 
