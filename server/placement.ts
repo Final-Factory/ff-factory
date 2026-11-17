@@ -1,4 +1,4 @@
-import type { BenchLock, BenchQueueReport, WorkItem, WorkPriority } from '../shared/types.ts';
+import type { BenchLock, BenchQueueReport, PlayerCacheReport, WorkItem, WorkPriority } from '../shared/types.ts';
 import type { SteamClient } from '../shared/steam.ts';
 import type { DesktopSession } from '../shared/desktop.ts';
 import { admitsPriority, minPriorityText, MIN_PRIORITIES, reservedText, pairRoom, ROOM_STAND_MS, unfitWhy, type MinPriority, type ReservedRoom, type RoomFit } from '../shared/capacity.ts';
@@ -67,6 +67,8 @@ export interface Computer {
   steam?: SteamClient;
   /** Its desktop session (w2459, Machine.desktop): a pair run that clicks the game's menus goes only where it is unlocked. */
   desktop?: DesktopSession;
+  /** The ready players its shared player cache holds (w4601, MachineStats.playerCache): a pair leg goes where its commit's is. */
+  playerCache?: PlayerCacheReport;
   /** w3396 (shared/capacity.ts cargoShortOf): its sandbox drive is under the free space a new FFU (cargo) worker needs. */
   cargoShort?: string;
   /**
@@ -432,7 +434,7 @@ export function slotsOf(p: Computer, kind: NeedKind): number {
 }
 
 /** What decides which work can run on `p` (RoomNow.fit, shared/capacity.ts unfitWhy). */
-const fitOf = (p: Computer): RoomFit => ({ ...(p.platform ? { platform: p.platform } : {}), ...(p.noTimedRuns ? { noTimedRuns: p.noTimedRuns } : {}), ...(p.steam ? { steam: p.steam } : {}), ...(p.desktop ? { desktop: p.desktop } : {}), ...(p.cargoShort ? { cargoShort: p.cargoShort } : {}) });
+const fitOf = (p: Computer): RoomFit => ({ ...(p.platform ? { platform: p.platform } : {}), ...(p.noTimedRuns ? { noTimedRuns: p.noTimedRuns } : {}), ...(p.steam ? { steam: p.steam } : {}), ...(p.desktop ? { desktop: p.desktop } : {}), ...(p.cargoShort ? { cargoShort: p.cargoShort } : {}), ...(p.playerCache?.entries.length ? { playerCache: p.playerCache } : {}) });
 
 /**
  * Whether pair run `w` could ever get all its legs at once (w3530): pairRoom over every computer that is online and not held

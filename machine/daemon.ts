@@ -71,6 +71,7 @@ import { fetchAttachment, fetchAttachments, publishAttachmentFromMachine } from 
 import { prepareInbox } from '../server/attachments.ts';
 import { postImagesFromFiles, postTextFromFile } from '../server/ffboxPostFile.ts';
 import { DaemonVoice, type DaemonVoiceSettings } from './voice.ts';
+import { playerCacheRoot, readPlayerCache } from './playerCache.ts';
 import { benchLockDir, readBenchLock, readBenchQueue, readPassedMarks, timedHolder, writeBenchPriorities } from './benchLock.ts';
 import { editorBenchSession, editorSessions, passedShared, raisedSessions, type PassedMark } from './benchRaise.ts';
 import { readBenchWarnings } from './benchWarnings.ts';
@@ -1752,7 +1753,9 @@ export class Daemon {
       const bench = readBenchState(this.cfg.root, undefined, undefined, this.benchTurn.playersAsked());
       // A person playing here (w1894): the portal holds the machine and says why.
       const personPlay = this.personPlayReport();
-      this.send({ type: 'stats', stats, ...(unity ? { unity } : {}), ...(benchLock ? { benchLock } : {}), ...(benchQueue ? { benchQueue } : {}), ...(benchWarnings.length ? { benchWarnings } : {}), ...(bench ? { bench } : {}), ...(personPlay ? { personPlay } : {}) });
+      // The players its shared player cache holds (w4601): a pair leg goes where its commit's player already is.
+      const playerCache = readPlayerCache(playerCacheRoot(this.cfg.root));
+      this.send({ type: 'stats', stats, ...(playerCache?.entries.length ? { playerCache } : {}), ...(unity ? { unity } : {}), ...(benchLock ? { benchLock } : {}), ...(benchQueue ? { benchQueue } : {}), ...(benchWarnings.length ? { benchWarnings } : {}), ...(bench ? { bench } : {}), ...(personPlay ? { personPlay } : {}) });
     } catch (e) {
       log('stats:', (e as Error).message);
     }

@@ -12,7 +12,7 @@ import type { DesktopSession } from '../shared/desktop.ts';
 import type { GhAppToken } from '../shared/githubAppRoute.ts';
 import type { TimedRunOrder, TimedRunReport } from '../shared/timedRun.ts';
 import type { BenchHourRow } from '../shared/benchHours.ts';
-import type { AttachmentRef, BenchLock, BenchPriority, BenchQueueReport, NoTimedRuns, TimedAskMark, BenchState, BenchWarning, CompactionTrigger, CleanupSummary, HostHealth, HostStats, ImageFile, ImageInput, Machine, MachinePause, LiveStageStep, MachineSandbox, PermissionMode, PersonPlayReport, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, TranscriptEvent, UnitySlotsReport } from '../shared/types.ts';
+import type { AttachmentRef, BenchLock, BenchPriority, BenchQueueReport, NoTimedRuns, TimedAskMark, BenchState, BenchWarning, CompactionTrigger, CleanupSummary, HostHealth, HostStats, ImageFile, ImageInput, Machine, MachinePause, LiveStageStep, MachineSandbox, PermissionMode, PersonPlayReport, PlayerCacheReport, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, TranscriptEvent, UnitySlotsReport } from '../shared/types.ts';
 
 /**
  * Bumped when what the portal and a daemon send each other changes (machineProtocol.test.ts fails until someone
@@ -422,7 +422,7 @@ export type FromDaemon =
    * `benchLock` (w1600): its bench lock while a timed run holds it (machine/benchLock.ts). `bench` (w1835): its bench
    * queue's mode, holders and waiters (machine/benchState.ts), for the machine view.
    */
-  | { type: 'stats'; stats: HostStats; unity?: UnitySlotsReport; benchLock?: BenchLock; benchQueue?: BenchQueueReport; benchWarnings?: BenchWarning[]; bench?: BenchState; personPlay?: PersonPlayReport }
+  | { type: 'stats'; stats: HostStats; unity?: UnitySlotsReport; benchLock?: BenchLock; benchQueue?: BenchQueueReport; benchWarnings?: BenchWarning[]; bench?: BenchState; personPlay?: PersonPlayReport; playerCache?: PlayerCacheReport }
   /** The plan usage of the Mac's own Claude login (not the host token), every config usagePollMinutes and on usage_now (protocol 4+). */
   | { type: 'usage'; account: AccountIdentity; usage: PlanUsage }
   /** A clean-up pass finished; `notice` only when it could not get above the soft threshold (then the orchestrator is told). */

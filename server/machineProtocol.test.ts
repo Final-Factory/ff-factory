@@ -129,7 +129,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // and an older daemon is never sent either.
 // w17 (no bump): `guard.privacy` in the launch spec, the worker privacy guard; an older daemon ignores the field and its
 // workers run without the guard until it is updated.
-const DECIDED = { protocol: 9, fingerprint: 'd644fa99310c7af9' };
+// w4601 (no bump): `playerCache` on `stats`, the ready players of the daemon's shared player cache; an older portal copies only the
+// fields it knows and drops it, and an older daemon never sends it (its pair legs are placed as before, without the cache).
+const DECIDED = { protocol: 9, fingerprint: 'ca709a9b9e9e9562' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {
