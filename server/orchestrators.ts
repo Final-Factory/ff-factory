@@ -3975,7 +3975,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     this.restateSteam(w, 'dispatcher');
     if (input.pair_steam === undefined && input.override_gate && w.pair?.steam && !w.pair.started && saysNoSteam(input.override_gate)) input = { ...input, pair_steam: 'none' };
     // w2057: a pair run that repeats one that already finished (w665's second run of PR #2340, queued at 15:58 after w1936
-    // passed) could not be dropped: start_agent refuses one leg, and a queued request cannot be queued again. pair_legs 0
+    // passed) could not be dropped: start_agent refuses a pair run of two or more legs started one at a time, and a queued request cannot be queued again. pair_legs 0
     // clears the mark of a pair run whose legs never started; done closes one that never had a worker as a repeat of the run
     // that finished (finishedTwinOf), with that run's result as its outcome, so whoever waited on it is resumed with it.
     const twin = input.action === 'done' && w.pair && !w.pair.started && !w.sessionIds.length ? this.finishedTwinOf(w) : undefined;
@@ -3990,10 +3990,10 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       if (input.action === 'queue' && w.status === 'queued') return `${w.id} is no longer a pair run (it was ${was}) and stays Queued as single work. To drop it as a repeat of a finished run, decide_work reject (or done) saying which run.`;
     }
     // w2648: w2631 (a pair run whose legs never started) was marked 3 legs that click menus from misread words, and no way
-    // re-marked it: queue is refused for a Queued request, start_agent starts it as marked. pair_menus, or pair_legs 2 and up
+    // re-marked it: queue is refused for a Queued request, start_agent starts it as marked. pair_menus, or pair_legs 1 and up
     // with any action, sets its marks first; queue on a Queued one then only re-marks it.
     if ((input.pair_legs !== undefined && input.pair_legs !== 0) || input.pair_menus !== undefined || input.pair_steam !== undefined || input.pair_split !== undefined || input.pair_allow?.length) {
-      if (input.pair_legs !== undefined && !(Number.isInteger(input.pair_legs) && input.pair_legs >= 2 && input.pair_legs <= PAIR_MAX_LEGS)) throw new Error(`pair_legs is the number of legs of a pair run, 2 to ${PAIR_MAX_LEGS} (0 clears the mark), not ${input.pair_legs}`);
+      if (input.pair_legs !== undefined && !(Number.isInteger(input.pair_legs) && input.pair_legs >= 1 && input.pair_legs <= PAIR_MAX_LEGS)) throw new Error(`pair_legs is the number of legs of a pair run, 1 to ${PAIR_MAX_LEGS} (0 clears the mark), not ${input.pair_legs}`);
       if (w.pair?.started) throw new Error(`${w.id}'s legs started together at ${w.pair.started.at.slice(11, 16)} UTC: its marks stay as they are until they end`);
       if (!w.pair && (input.pair_menus !== undefined || input.pair_steam !== undefined || input.pair_split !== undefined || input.pair_allow?.length)) throw new Error(`${w.id} is not a pair run: ${input.pair_steam !== undefined ? 'pair_steam' : input.pair_split !== undefined ? 'pair_split' : input.pair_allow?.length ? 'pair_allow' : 'pair_menus'} marks one (queue it with pair_legs to mark it a pair run)`);
       if (w.pair) {
@@ -4012,7 +4012,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
         }
         if (input.action === 'queue' && w.status === 'queued') {
           const fit = roomForWork(this.roomNow(), w, []).ids;
-          return `${w.id} is ${r.changed ? `now ${pairText(w.pair)} (it was ${r.was})` : `already ${pairText(w.pair)}`} and stays Queued.${fit.length >= w.pair.legs ? ` ${fit.length} computers fit it now (${fit.join(', ')}): start its legs together (start_agent with pair_sandboxes).` : ''}`;
+          return `${w.id} is ${r.changed ? `now ${pairText(w.pair)} (it was ${r.was})` : `already ${pairText(w.pair)}`} and stays Queued.${fit.length >= w.pair.legs ? ` ${fit.length} computers fit it now (${fit.join(', ')}): ${w.pair.legs === 1 ? 'start its one leg (start_agent with sandbox alone: it takes no pair_sandboxes).' : 'start its legs together (start_agent with pair_sandboxes).'}` : ''}`;
         }
       }
     }
@@ -4107,7 +4107,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       const facts = this.roomNow();
       // w1945: a two-machine run filed by hand (w1936, Ben's sync run for PR #2340) is marked a pair as it is queued, so its room,
       // its WRONG flag and the hold read all its legs; a worker's request_pair marks its own.
-      if (input.pair_legs !== undefined && !(Number.isInteger(input.pair_legs) && input.pair_legs >= 2 && input.pair_legs <= PAIR_MAX_LEGS)) throw new Error(`pair_legs is the number of legs of a pair run, 2 to ${PAIR_MAX_LEGS}, not ${input.pair_legs}`);
+      if (input.pair_legs !== undefined && !(Number.isInteger(input.pair_legs) && input.pair_legs >= 1 && input.pair_legs <= PAIR_MAX_LEGS)) throw new Error(`pair_legs is the number of legs of a pair run, 1 to ${PAIR_MAX_LEGS}, not ${input.pair_legs}`);
       const marked = input.pair_legs && !w.pair?.started ? { ...(w.pair ?? {}), legs: input.pair_legs } : w.pair;
       // w2459: a pair run filed by hand whose words say it needs Steam (a lobby, a Steam join) gets the Steam mark too.
       const steamed = marked && !marked.steam && !marked.noSteam && !marked.started && input.pair_legs && mentionsSteam(w.title, w.brief) ? { ...marked, steam: STEAM_READ } : marked;
@@ -4135,7 +4135,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       const room = ahead.length ? [] : fitting.ids.filter((id) => !holds.some((h) => h.id === id));
       if (room.length) {
         throw new Error(
-          `queue is for capacity only, and ${room.join(', ')} ${room.length > 1 ? 'have' : 'has'} ${kind === 'agent' ? 'an agent slot (it needs no editor and no game sandbox, w1098)' : 'room'} for ${w.id} now: ${pair ? `start its ${pair.legs} legs together (start_agent with work_id "${w.id}", sandbox for leg 1, the host, and pair_sandboxes for the others, each a FREE sandbox on another computer)` : `start it there (start_agent with work_id "${w.id}")`}, or, if it waits for something else, decide_work block with what it waits for${needs.length ? '' : ' (or queue with needs: the computers that can take it, when only busy ones can)'}`,
+          `queue is for capacity only, and ${room.join(', ')} ${room.length > 1 ? 'have' : 'has'} ${kind === 'agent' ? 'an agent slot (it needs no editor and no game sandbox, w1098)' : 'room'} for ${w.id} now: ${pair ? (pair.legs === 1 ? `start its one leg (start_agent with work_id "${w.id}" and sandbox alone, no pair_sandboxes: one computer runs the host and the client)` : `start its ${pair.legs} legs together (start_agent with work_id "${w.id}", sandbox for leg 1, the host, and pair_sandboxes for the others, each a FREE sandbox on another computer)`) : `start it there (start_agent with work_id "${w.id}")`}, or, if it waits for something else, decide_work block with what it waits for${needs.length ? '' : ' (or queue with needs: the computers that can take it, when only busy ones can)'}`,
         );
       }
       // Held computers, and those placement.minPriority reserves above its priority (w1643), with room it may not use.
@@ -4773,8 +4773,9 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const brief = String(a.brief ?? '').trim();
     if (!what || !brief) throw new Error('give what (one line: "MP-lowore-pin-pair on PR #2340") and brief (what the legs run: the branch or commit, the scenario or steps, what passes, where the result goes)');
     const legs = a.legs ?? 2;
-    if (!Number.isInteger(legs) || legs < 2 || legs > PAIR_MAX_LEGS) throw new Error(`legs is 2 to ${PAIR_MAX_LEGS}: the computers it needs at once`);
+    if (!Number.isInteger(legs) || legs < 1 || legs > PAIR_MAX_LEGS) throw new Error(`legs is 1 to ${PAIR_MAX_LEGS}: the computers it needs at once (1: one computer runs host and client side by side, ffnightly.py's default lab)`);
     const crossOs = String(a.cross_os ?? '').replace(/\s+/g, ' ').trim().slice(0, 300) || undefined;
+    if (crossOs && legs < 2) throw new Error('cross_os needs legs of 2 or more: a cross-OS check puts its legs on two operating systems, and one leg is one computer (w4596)');
     // w2459: a run that needs Steam (lobbies, a Steam host or join) goes only on computers signed in to it, a different
     // account on each leg: said by the worker, or read from its words; "none" says it needs none.
     const steamSaid = String(a.steam ?? '').replace(/\s+/g, ' ').trim().slice(0, 300);
@@ -4845,7 +4846,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       if (open) this.supersedePair(open, p, spent!);
       head = open
         ? `${open.id} (${spent}) is cancelled, and its legs no longer count for ${w.id}: filed ${p.id}, a retry, ${pairText(p.pair!)}, with fresh legs. Only ${p.id}'s report resumes you, never one from ${open.id}'s legs. The dispatcher starts its legs together, one new worker on each computer, as soon as that many computers have room at once.`
-        : `Filed ${p.id}, ${pairText(p.pair!)}${macRefusedScenario(p) ? `, no leg on a Mac (each leg starts ${macRefusedScenario(p)}'s host and client on its own computer; w3697)` : ''}, for ${w.id}. The dispatcher starts its legs together, one new worker on each computer, as soon as that many computers have room at once; each leg's first message says which leg it is and where the others are.`;
+        : `Filed ${p.id}, ${pairText(p.pair!)}${macRefusedScenario(p) ? `, no leg on a Mac (each leg starts ${macRefusedScenario(p)}'s host and client on its own computer; w3697)` : ''}, for ${w.id}. ${p.pair!.legs === 1 ? 'The dispatcher starts its one leg, a new worker that runs the host and the client on its own computer, as soon as one computer has room.' : "The dispatcher starts its legs together, one new worker on each computer, as soon as that many computers have room at once; each leg's first message says which leg it is and where the others are."}`;
     }
     // w2459: too few computers signed in to different Steam accounts for it: the pair run is Blocked on that, not Queued.
     const steamShort = !p.pair?.started && p.status !== 'blocked' ? this.steamShortOf(p.pair) : undefined;
@@ -5391,7 +5392,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       [
         x.brief,
         '',
-        `FF Factory filed this for worker ${sessionId} on ${w.id} (w1945, request_pair): ${pairText(pair)}. Its legs start together, one worker in a game sandbox on each computer (start_agent with pair_sandboxes); ${PLAYERS_IN_SANDBOX} each leg's first message says which leg it is and where the others are, and message_pair reaches them. ${w.id}'s worker is Blocked on this request's report: the host leg (leg 1) reports the result with a line "For ${w.id}:" (what ran, the commit every leg ran, what the check compared and found, any desync report files), and every leg ends with DONE once the run is over. Do not merge ${w.id}'s pull request: its own worker does.${x.retryOf ? ` This is a retry of ${x.retryOf}, whose legs did not deliver the result (w2041)${x.avoid?.length ? `: no leg goes on ${x.avoid.join(' or ')}, where one failed` : ''}; start it fresh, nothing of ${x.retryOf}'s legs carries over.` : ''}`,
+        `FF Factory filed this for worker ${sessionId} on ${w.id} (w1945, request_pair): ${pairText(pair)}. ${pair.legs === 1 ? 'Its one leg starts alone, a worker in a game sandbox that runs the host and the client on its own computer (start_agent with sandbox alone);' : 'Its legs start together, one worker in a game sandbox on each computer (start_agent with pair_sandboxes);'} ${PLAYERS_IN_SANDBOX} each leg's first message says which leg it is and where the others are, and message_pair reaches them. ${w.id}'s worker is Blocked on this request's report: the host leg (leg 1) reports the result with a line "For ${w.id}:" (what ran, the commit every leg ran, what the check compared and found, any desync report files), and every leg ends with DONE once the run is over. Do not merge ${w.id}'s pull request: its own worker does.${x.retryOf ? ` This is a retry of ${x.retryOf}, whose legs did not deliver the result (w2041)${x.avoid?.length ? `: no leg goes on ${x.avoid.join(' or ')}, where one failed` : ''}; start it fresh, nothing of ${x.retryOf}'s legs carries over.` : ''}`,
       ].join('\n'),
       8000,
     );
@@ -9158,7 +9159,7 @@ export function personMessage(from: Requester, to: Requester, text: string, id?:
 }
 
 /**
- * A not-yet-started pair run's marks set again (w2648): legs (2 to PAIR_MAX_LEGS), and menus, what its legs click in the
+ * A not-yet-started pair run's marks set again (w2648): legs (1 to PAIR_MAX_LEGS), and menus, what its legs click in the
  * game's menus ("none" clears a mark read from its words and keeps them from being read again, WorkPair.noMenus). A Steam
  * pair clicks its lobby whatever menus says. `was` is pairText of the marks before; `changed` whether any moved.
  * w4468: split, why its peers are spread (a pair lab, the relay, a person's "a Mac may host leg 1"; "none" clears it), lets

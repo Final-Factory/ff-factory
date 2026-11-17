@@ -7025,7 +7025,8 @@ test('w1945: request_pair files one pair request and blocks the asking worker on
   agentsRoom(agents, []);
   putRequests(store, [{ id: 'w665', by: BEN }]);
   const a = await startedFor(env, 'w665');
-  await assert.rejects(async () => a.h.request_pair!({ what: 'x', brief: 'y', legs: 1 }), /legs is 2 to 4/);
+  await assert.rejects(async () => a.h.request_pair!({ what: 'x', brief: 'y', legs: 0 }), /legs is 1 to 4: the computers it needs at once \(1: one computer runs host and client side by side, ffnightly\.py's default lab\)/);
+  await assert.rejects(async () => a.h.request_pair!({ what: 'x', brief: 'y', legs: 1, cross_os: 'Burst codegen' }), /cross_os needs legs of 2 or more/);
   const out = String(await a.h.request_pair!({ what: 'MP-lowore-pin-pair on PR #2340', brief: 'Run MP-lowore-pin-pair on branch w665-lowore-pin-no-collider; pass: 400 heartbeats compared, none diverged.' }));
   // w3697: its legs each run MP-lowore-pin-pair alone (no pair lab named), so no leg goes on a Mac, and the answer and brief say so.
   assert.match(out, /^Filed (w\d+), a pair run of 2 legs, on any computers, any OS \(a Mac only as the host, leg 1\), no leg on a Mac \(each leg starts MP-lowore-pin-pair's host and client on its own computer; w3697\), for w665\. The dispatcher starts its legs together/);
@@ -7194,6 +7195,34 @@ test('w1945: a pair request starts both legs together, each on its own computer,
   await assert.rejects(async () => machines.hooks!.handlersFor(o, store.machines.get('pc')!).message_pair!({ text: 'hi' }), /you are no leg of an open pair run/);
 });
 
+
+test('w4596: request_pair legs 1 files a pair run of 1 leg that no Mac takes, and start_agent starts it with sandbox alone: one worker runs host and client', async (t) => {
+  const env = await twoComputers(t);
+  const { store, machines, dispatcher, call } = env;
+  putRequests(store, [{ id: 'w665', by: BEN, status: 'active' }]);
+  const a = await startedFor(env, 'w665');
+  const out = String(await a.h.request_pair!({ what: 'MP-lowore-pin-pair on PR #2340', brief: 'Run MP-lowore-pin-pair on branch w665-lowore-pin-no-collider with ffnightly.py on the default lab; pass: 400 heartbeats compared, none diverged.', legs: 1 }));
+  assert.match(out, /^Filed (w\d+), a pair run of 1 leg, on any computers, any OS \(a Mac only as the host, leg 1\), no leg on a Mac \(each leg starts MP-lowore-pin-pair's host and client on its own computer; w3697\), for w665\. The dispatcher starts its one leg, a new worker that runs the host and the client on its own computer, as soon as one computer has room\./);
+  const id = /^Filed (w\d+)/.exec(out)![1];
+  assert.equal(store.work.get(id)!.pair!.legs, 1);
+  const start = (extra: Record<string, unknown>) => call(dispatcher().info, 'start_agent', { work_id: id, prompt: 'Run MP-lowore-pin-pair.', title: 'MP-lowore-pin-pair', sandbox: 'beast/slot1', ...extra });
+  assert.match((await start({ pair_sandboxes: ['pc/alpha'] })).text, new RegExp(`${id} is a pair run of 1 leg, .*: give 1 sandboxes \\(sandbox and 0 in pair_sandboxes\\), not 2`));
+  store.putMachine({ ...store.machines.get('beast')!, platform: 'darwin' });
+  assert.match((await start({})).text, /beast is a Mac, and each leg of w\d+ starts MP-lowore-pin-pair's host and its client on its own computer.*Nothing was started\./);
+  assert.deepEqual(store.work.get(id)!.sessionIds, [], 'a Mac took no leg');
+  store.putMachine({ ...store.machines.get('beast')!, platform: 'win32' });
+  const ok = await start({});
+  assert.equal(ok.isError, false, ok.text);
+  assert.match(ok.text, /^Started w\d+'s one leg, requested by Ben: leg 1 \(host\): agent \w+ in beast\/slot1/);
+  const w = store.work.get(id)!;
+  assert.equal(w.sessionIds.length, 1);
+  assert.deepEqual(w.pair!.started!.legs.map((l) => l.sandbox), ['beast/slot1']);
+  const leg = store.sessions.get(w.pair!.started!.legs[0].session)!;
+  await until('the leg ends its first turn', () => leg.status === 'idle');
+  const said = JSON.stringify(store.readTranscript(leg.id));
+  assert.match(said, /You are the only leg of this pair run, in beast\/slot1: run the host and the client on this computer/);
+  assert.doesNotMatch(said, /the others are on|You are leg 1 of 1/);
+});
 
 test('w3720: w3705 as it happened: a determinism pair run whose notes quote another computer\'s timed run starts with its host on a computer that takes no timed runs; decide_work timed marks a request outright', async (t) => {
   const env = await twoComputers(t);

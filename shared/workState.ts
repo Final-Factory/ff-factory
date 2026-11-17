@@ -922,7 +922,7 @@ function queuedLive(w: WorkItem, f: WorkLiveFacts, wanted: readonly string[] | u
   const share = f.shares?.get(key);
   if (fits.length && share && !share.gets) return { state: 'queued', why: `${head} ${what}; ${have(fits)}, but ${aheadText(share)}: it starts when more frees` };
   if (stood.length && !(w.pair && pairRoom(w, stood, f.roomFit).short)) {
-    return { state: 'queued', why: `${head} ${what}, but ${have(stood)}: the dispatcher should ${w.pair ? `start its ${w.pair.legs} legs together (start_agent with pair_sandboxes)` : start}`, roomOn: stood };
+    return { state: 'queued', why: `${head} ${what}, but ${have(stood)}: the dispatcher should ${w.pair ? (w.pair.legs === 1 ? 'start its one leg (start_agent with sandbox alone)' : `start its ${w.pair.legs} legs together (start_agent with pair_sandboxes)`) : start}`, roomOn: stood };
   }
   if (fits.length) {
     // w1945: a pair has room for all its legs only since the last of them freed.
