@@ -17,15 +17,32 @@ import { expandVars, repoKey } from './guard.ts';
 
 type ShellEnv = Record<string, string | undefined>;
 
-/** For the briefs: where a pair-run leg or an A/B side builds its players (the pair leg role, timed legs, timed_place). */
+/**
+ * For the briefs: where a pair-run leg or an A/B side builds its players (the pair leg role, timed legs, timed_place).
+ * w4614 (w4609's leg on biscuit): the game repo's scripts/nightly/build_player.sh writes the player to the machine's shared
+ * player cache, outside the tree, and w4601 places later legs by that cache, so a player moved into $TMPDIR is built again
+ * by the next leg. A copy of ffnightly.py in $TMPDIR finds the repo two folders above itself, so a newer copy goes over the
+ * sandbox's own after the build.
+ */
+export const BUILD_PLAYER_TO_CACHE =
+  'build it with `unity-slot run -- scripts/nightly/build_player.sh <your sandbox> <40-hex sha> <win|mac|linux>`, which writes the player to ' +
+  'this computer\'s shared player cache (<worker root>/player-cache/<sha>-<os>, outside the tree), prints "player: <path>" for ffnightly.py ' +
+  '--player, and skips the build when that commit is already there; leave the player there, since the next leg on this computer reuses it (w4614)';
+
+export const NIGHTLY_FROM_SANDBOX =
+  'Run ffnightly.py from your sandbox\'s checkout, never a copy in $TMPDIR (a copy finds the repo two folders above itself): when the ' +
+  'commit\'s copy lacks a flag you need, write master\'s over it after the build (`git show origin/master:scripts/nightly/ffnightly.py > ' +
+  'scripts/nightly/ffnightly.py`) and put it back with `git checkout -- scripts/nightly/ffnightly.py` when the run is over.';
+
 export const PLAYERS_IN_SANDBOX =
-  'Build every commit\'s player in your own sandbox, one commit at a time: check the commit out, build it, move the player out of the tree (into $TMPDIR), then check out the next; ' +
-  'never clone the game repo into your temp folder : the harness refuses a full clone and scratch_clone.sh (one such clone reached 43 GB).';
+  `Build every commit's player in your own sandbox, one commit at a time: check the commit out, ${BUILD_PLAYER_TO_CACHE}, then check out the next. ` +
+  `${NIGHTLY_FROM_SANDBOX} ` +
+  'Never clone the game repo into your temp folder: the harness refuses a full clone and scratch_clone.sh (one such clone reached 43 GB).';
 
 export const BUILD_IN_SANDBOX =
   'Build in your sandbox, one commit at a time (w3703): commit or set aside your work, check the commit out in your sandbox ' +
-  '(mcp__machine__switch_branch to a branch; with the editor stopped, `git checkout --detach <sha>` for a bare commit), build it ' +
-  'with `unity-slot run -- scripts/nightly/build_player.sh` there, move the player out of the tree (into $TMPDIR/<leg>), then ' +
+  '(mcp__machine__switch_branch to a branch; with the editor stopped, `git checkout --detach <sha>` for a bare commit), ' +
+  `${BUILD_PLAYER_TO_CACHE}, then ` +
   'check out the next commit and build again, and switch back to your branch at the end. To only read or edit scripts of the ' +
   'game repo elsewhere, clone it sparse and without LFS files: `GIT_LFS_SKIP_SMUDGE=1 git clone --sparse --filter=blob:none ' +
   '--depth 50 <url> $TMPDIR/<dir>`, then `git sparse-checkout set scripts`.';
