@@ -202,6 +202,7 @@ export const CATALOG = {
     retry: z.boolean().optional().describe('w2041: your open pair run is running but cannot deliver (a leg is stuck): cancel it and file a fresh one. A run one of whose legs already reported, or whose computer is offline, is retried without it.'),
     avoid: z.array(z.string().max(40)).max(6).optional().describe('w2041: computers (ids such as lothlaptop) no leg may go on, where you saw a leg fail for a machine reason (Tailscale stuck, offline, a broken player).'),
     pr: z.string().max(200).optional().describe('w2057: the pull request the legs check ("#2340", "Final-Factory/FinalFactory#2340" or its link). Default: the one what or brief names, else the one open pull request of your request. An open pair run of it is joined, not run twice.'),
+    player: z.string().max(20).optional().describe("w4613: the attachment id publish_attachment answered for your built player of the head commit (publish_attachment player: <commit>). A leg on a computer of the same OS that lacks it fetches it into its own player cache instead of building (a Windows build took 229 s; its pack is about 750 MB); a leg on another OS builds as before. Without commit, the player's commit is the run's."),
     commit: z.string().max(40).optional().describe('w2057: the head commit the legs run (git rev-parse HEAD). A pair run of the same pull request that finished on it answers with its result, and nothing is filed. w4601: a leg goes first on a computer whose player cache already holds a player of it, and is told its path, so pass it whenever you know it.'),
   },
   /** w2969 (docs/orchestrators.md, "Follow-up requests"): briefs a worker wrote for new requests, which only an orchestrator can file. */
@@ -318,7 +319,8 @@ export const CATALOG = {
    * opens an upload bound to that machine, the daemon sends the bytes, the portal checks the SHA-256 and makes the id.
    */
   publish_attachment: {
-    file: z.string().describe('The file to hand on (a save, a log, a zip, any file): its path on this computer, absolute or relative to your working folder. It must be in your working folder or your own temp folder (TMP).'),
+    file: z.string().optional().describe('The file to hand on (a save, a log, a zip, any file): its path on this computer, absolute or relative to your working folder. It must be in your working folder or your own temp folder (TMP).'),
+    player: z.string().max(40).optional().describe("Instead of file (w4613): a commit (7 to 40 hex digits) whose game player this computer's shared player cache holds ready for its own OS. It is packed (player/ and build-manifest.json, about 750 MB for Windows) and comes back as an attachment that a computer of the same OS installs into its own player cache with fetch_attachment; give its id to request_pair's player."),
   },
   /** docs/ffbox.md, "Players' reports". On a machine the portal fetches the report from FFBox and the daemon the files. */
   fetch_ffbox_report: {

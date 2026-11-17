@@ -29,7 +29,7 @@ import { ANSWER_EXCERPT_CHARS, answeredText, answerExcerpt, splitReply, splitSen
 import { forYouId, splitForYou } from '../shared/forYou.ts';
 import { blockerName, gatesOf, type PrHealth } from '../shared/blockers.ts';
 import { answersText } from '../shared/questionCard.ts';
-import { cargoShortOf, isCargoRepo, needsTimed, PAIR_HOLD_MS, TIMED_HOLD_MS, pairText, unfitWhy } from '../shared/capacity.ts';
+import { cargoShortOf, fetchPlayerNote, isCargoRepo, needsTimed, PAIR_HOLD_MS, TIMED_HOLD_MS, pairText, unfitWhy } from '../shared/capacity.ts';
 import { pickReclaim, type Pressure } from './priorityReclaim.ts';
 import { STEAM_READ } from '../shared/steam.ts';
 import { benchLockIn, type BenchState, type BusyJob, type Machine, type MachineStats, type Requester, type SessionInfo, type TranscriptEvent, type UserInfo, type WorkBlocker, type WorkItem } from '../shared/types.ts';
@@ -10829,4 +10829,41 @@ test('w4553: start_agent holds an ffu row whose files an open ffu PR edits, Bloc
   const over = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Go.', title: 'Override', work_id: 'w4422', extra_agent: true, override_duplicate: 'it edits the gamepad table, w4370 the keyboard one' });
   assert.doesNotMatch(over.text, /was not started/, over.text);
   assert.notEqual(store.work.get('w4422')!.status, 'blocked');
+});
+
+test('w4613: request_pair with a published player: a leg on a computer of its OS is told to fetch it with fetch_attachment and skip the build; a leg on another OS gets no such line; a player of another commit is refused', async (t) => {
+  const env = await twoComputers(t);
+  const { dir, store, agents, dispatcher, call } = env;
+  const files = new AttachmentStore(path.join(dir, 'att'));
+  agents.attachments = files;
+  const sha = '670a034960aa11bb22cc33dd44ee55ff66778899';
+  const packed = path.join(dir, `player-${sha}-win.tar.gz`);
+  fs.writeFileSync(packed, 'a packed player');
+  const att = await files.addFile(packed, { source: 'worker "w665" on pc', session: 'x' });
+  const note = path.join(dir, 'notes.txt');
+  fs.writeFileSync(note, 'not a player');
+  const plain = await files.addFile(note, { source: 'worker "w665" on pc', session: 'x' });
+  putRequests(store, [{ id: 'w665', by: BEN, status: 'active' }]);
+  const a = await startedFor(env, 'w665');
+  const ask = (extra: Record<string, unknown>) => a.h.request_pair!({ what: 'MP determinism pair on PR #2340', brief: 'Run the MP determinism pair on the branch; pass: none diverged.', legs: 1, ...extra });
+  await assert.rejects(async () => ask({ player: plain.id }), /player: att_\w+ is notes\.txt, not a packed game player/);
+  await assert.rejects(async () => ask({ player: 'att_zzzzzzzzzzzz' }), /player: no attachment "att_zzzzzzzzzzzz"/);
+  await assert.rejects(async () => ask({ player: att.id, commit: 'abcdef1234' }), new RegExp(`player ${att.id} is a player of 670a034960, not of commit abcdef1234`));
+  const out = String(await ask({ player: att.id }));
+  const id = /^Filed (w\d+)/.exec(out)![1];
+  assert.deepEqual(store.work.get(id)!.pair!.player, { id: att.id, key: `${sha}-win`, os: 'win', size: fs.statSync(packed).size });
+  assert.equal(store.work.get(id)!.pair!.commit, sha, "without commit, the player's commit is the run's");
+  const ok = await call(dispatcher().info, 'start_agent', { work_id: id, prompt: 'Run the MP determinism pair.', title: 'MP pair', sandbox: 'beast/slot1' });
+  assert.equal(ok.isError, false, ok.text);
+  const leg = store.sessions.get(store.work.get(id)!.pair!.started!.legs[0].session)!;
+  await until('the leg ends its first turn', () => leg.status === 'idle');
+  const said = JSON.stringify(store.readTranscript(leg.id));
+  assert.match(said, /Fetch the requester's player instead of building it \(w4613\)/);
+  assert.ok(said.includes(`Call fetch_attachment with id ${att.id} before anything else`), 'the leg on beast (Windows) fetches the Windows player');
+  // Another OS gets nothing (it builds as before); a computer that already holds the commit gets w4601's line instead.
+  const player = store.work.get(id)!.pair!.player!;
+  assert.equal(fetchPlayerNote(sha, player, { platform: 'linux' }), '');
+  assert.equal(fetchPlayerNote(sha, player, { platform: 'darwin' }), '');
+  assert.match(fetchPlayerNote(sha, player, { platform: 'win32' }), /attachment att_\w+, 0 MB packed/);
+  assert.match(fetchPlayerNote('1234567', player, { platform: 'win32' }), /the run's commit is 1234567: if it is not 670a034960, build instead/);
 });

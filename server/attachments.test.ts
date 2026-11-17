@@ -342,3 +342,22 @@ test('w2417: publishedBy lists what these sessions published, oldest first, from
   assert.equal(publishedFilesBlock([], 'w1'), '');
   assert.match(publishedFilesBlock(store.publishedBy(['sess-1']), "w1's workers"), new RegExp(`^Published files of w1's workers .*: a\\.zip \\(\\d+ B\\) ${a}\\.$`));
 });
+
+test('w4613: a packed game player from a machine has its own cap (3 GiB) and is kept 2 days; the same name from the page keeps the normal cap', async (t) => {
+  const { store, clock } = setup(t, { retentionDays: 30 });
+  const sha40 = '670a034960aa11bb22cc33dd44ee55ff66778899';
+  const name = `player-${sha40}-win.tar.gz`;
+  const h = 'a'.repeat(64);
+  const big = 800 * 1024 * 1024;
+  assert.match(uploadForMachine(store, 'lothdesktop', { name, size: big, sha256: h }, { source: 'w' }), /uploadId/);
+  assert.throws(() => uploadForMachine(store, 'lothdesktop', { name: 'notes.tar.gz', size: big, sha256: h }, {}), (e: AttachmentError) => e.status === 413 && /attachments\.maxMB/.test(e.message));
+  assert.throws(() => store.begin({ name, size: big }), (e: AttachmentError) => e.status === 413, 'a person cannot use the player cap');
+  assert.throws(() => uploadForMachine(store, 'lothdesktop', { name, size: 4 * 1024 * 1024 * 1024, sha256: h }, {}), (e: AttachmentError) => e.status === 413 && /PLAYER_MAX_BYTES/.test(e.message));
+  assert.equal(attachmentKind(name).mediaType, 'application/gzip');
+  const player = await upload(store, name, randomBytes(100));
+  const log = await upload(store, 'b.log', randomBytes(100));
+  clock.now += 3 * DAY;
+  store.prune();
+  assert.equal(store.get(player.id), undefined, 'a player is kept 2 days');
+  assert.ok(store.get(log.id), 'everything else keeps retentionDays');
+});
