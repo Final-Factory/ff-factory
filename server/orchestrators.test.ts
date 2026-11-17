@@ -7027,14 +7027,14 @@ test('w1945: request_pair files one pair request and blocks the asking worker on
   const a = await startedFor(env, 'w665');
   await assert.rejects(async () => a.h.request_pair!({ what: 'x', brief: 'y', legs: 0 }), /legs is 1 to 4: the computers it needs at once \(1: one computer runs host and client side by side, ffnightly\.py's default lab\)/);
   await assert.rejects(async () => a.h.request_pair!({ what: 'x', brief: 'y', legs: 1, cross_os: 'Burst codegen' }), /cross_os needs legs of 2 or more/);
-  const out = String(await a.h.request_pair!({ what: 'MP-lowore-pin-pair on PR #2340', brief: 'Run MP-lowore-pin-pair on branch w665-lowore-pin-no-collider; pass: 400 heartbeats compared, none diverged.' }));
+  const out = String(await a.h.request_pair!({ what: 'MP-lowore-pin-pair on PR #2340', brief: 'Run MP-lowore-pin-pair on branch w665-lowore-pin-no-collider; pass: 400 heartbeats compared, none diverged.', legs: 2 }));
   // w3697: its legs each run MP-lowore-pin-pair alone (no pair lab named), so no leg goes on a Mac, and the answer and brief say so.
   assert.match(out, /^Filed (w\d+), a pair run of 2 legs, on any computers, any OS \(a Mac only as the host, leg 1\), no leg on a Mac \(each leg starts MP-lowore-pin-pair's host and client on its own computer; w3697\), for w665\. The dispatcher starts its legs together/);
   assert.match(out, /Recorded: w665 is Blocked on /);
   assert.match(out, /your sandbox is then released at once for other work/);
   const id = /^Filed (w\d+)/.exec(out)![1];
   const p = store.work.get(id)!;
-  assert.deepEqual(p.pair, { legs: 2, for: 'w665', forSession: a.id, pr: 'Final-Factory/FinalFactory#2340' });
+  assert.deepEqual(p.pair, { legs: 2, legsSaid: true, for: 'w665', forSession: a.id, pr: 'Final-Factory/FinalFactory#2340' });
   assert.equal(p.needs, 'game');
   assert.equal(p.priority, 'normal');
   assert.deepEqual(p.requesters, [BEN]);
@@ -7122,7 +7122,7 @@ test('w2041: retry: true replaces a running pair run that cannot deliver; avoid 
   const { store, dispatcher, call } = env;
   putRequests(store, [{ id: 'w665', by: BEN, status: 'active' }]);
   const a = await startedFor(env, 'w665');
-  const ask = async (extra: Record<string, unknown> = {}) => String(await a.h.request_pair!({ what: 'MP-lowore-pin-pair on PR #2340', brief: 'Run it.', ...extra }));
+  const ask = async (extra: Record<string, unknown> = {}) => String(await a.h.request_pair!({ what: 'MP-lowore-pin-pair on PR #2340', brief: 'Run it.', legs: 2, ...extra }));
   const first = /^Filed (w\d+)/.exec(await ask())![1];
   const p = store.work.get(first)!;
   p.status = 'active';
@@ -7239,6 +7239,83 @@ test('w4596: request_pair legs 1 files a pair run of 1 leg that no Mac takes, an
   const said = JSON.stringify(store.readTranscript(leg.id));
   assert.match(said, /You are the only leg of this pair run, in beast\/slot1: run the host and the client on this computer/);
   assert.doesNotMatch(said, /the others are on|You are leg 1 of 1/);
+});
+
+
+// w4618: w4595's brief as FF Factory filed it (the pair run for w4571: two legs of ffnightly MP scenarios on the default lab),
+// trimmed to what the rule reads, FF Factory's own w3697 sentence included (it names "a pair lab or the relay").
+const W4595_BRIEF = `Determinism check for two simulation PRs of request w4571 at once (performance only, both claim no change in behaviour).
+Run commit f20e095502af58a31d983ac0b19f990776eea6d4 (branch w4571-pair-check). Build that commit's player on each computer the usual way (player slot pool) and play these MP scenarios host + client, with \`ffnightly.py run --scenarios-from f20e095502af58a31d983ac0b19f990776eea6d4\`:
+1. MP-station-drive-join
+2. MP-W1859-host-drives-remote-client (host drives, remote client watches)
+3. MP-new-grid-unpowered-join
+Passes: every scenario passes, no desync report, and the per-heartbeat state hashes of host and client match.
+
+FF Factory filed this for worker cfc16074 on w4571 (w1945, request_pair): a pair run of 2 legs, on any computers, any OS (a Mac only as the host, leg 1). No leg goes on a Mac (w3697): each leg starts MP-station-drive-join's host and its client on its own computer, and a Mac refuses a multiplayer client (the game repo's scripts/nightly/player_slots.py require_mac_client_ok, w665; w3697). A pair lab or the relay (leg 1 hosts, the others join), a cross-OS pair or FF_MAC_GPU_HANG_OK=<request> in its words lets a Mac host.`;
+
+test('w4618: request_pair without legs files one leg on the default lab, and two when it names a reason to need computers at once (cross_os, steam, timed, split, a pair lab, pair_relay); a count passed outright stands', async (t) => {
+  const env = await twoComputers(t);
+  const { store } = env;
+  const ids = ['w4571', 'w4701', 'w4702', 'w4703', 'w4704', 'w4705', 'w4706', 'w4707', 'w4708'];
+  putRequests(store, ids.map((id) => ({ id, by: BEN, status: 'active' as const })));
+  const file = async (id: string, extra: Record<string, unknown>) => {
+    const a = await startedFor(env, id);
+    const out = String(await a.h.request_pair!({ what: `MP scenarios for ${id}`, brief: 'Play MP-station-drive-join host + client with ffnightly.py run on the default lab; pass: 0 diverged.', ...extra }));
+    const p = /^Filed (w\d+)/.exec(out);
+    assert.ok(p, out);
+    return store.work.get(p![1])!.pair!;
+  };
+  // w4595's shape: ffnightly MP scenarios on the default lab, no legs passed.
+  const one = await file('w4571', { what: 'w4571 determinism pair: #3814 + #3823 combined at f20e095502', brief: W4595_BRIEF.split('\n\nFF Factory filed')[0] });
+  assert.equal(one.legs, 1, 'one computer runs host and client side by side');
+  assert.equal(one.legsSaid, undefined);
+  assert.equal((await file('w4701', { cross_os: 'Burst codegen differs by platform' })).legs, 2, 'cross_os');
+  assert.equal((await file('w4702', { steam: 'a Steam lobby join' })).legs, 2, 'steam');
+  assert.equal((await file('w4703', { timed: true })).legs, 2, 'timed');
+  assert.equal((await file('w4704', { split: 'a Mac may host leg 1' })).legs, 2, 'split');
+  assert.equal((await file('w4705', { brief: 'Run MP-station-drive-join on lab.pair-m5-beast.json, leg 1 hosts; pass: 0 diverged.' })).legs, 2, 'a pair lab in the brief');
+  assert.equal((await file('w4706', { brief: 'Run MP-station-drive-join through pair_relay.py, a Linux relay client; pass: 0 diverged.' })).legs, 2, 'pair_relay in the brief');
+  const said = await file('w4707', { legs: 2 });
+  assert.deepEqual([said.legs, said.legsSaid], [2, true], 'a count passed outright stands, and is never cut');
+  const three = await file('w4708', { legs: 3, cross_os: 'the desync hash' });
+  assert.deepEqual([three.legs, three.legsSaid], [3, true]);
+});
+
+test('w4618: a Queued pair run shaped like w4595 (two legs of ffnightly MP scenarios on the default lab, filed before w4618) is cut to one leg once, and its log says so; runs with a reason, a count asked for, or legs started are not', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, o } = env;
+  const run = (id: string, pair: Record<string, unknown>, extra: Record<string, unknown> = {}) => ({ id, by: LOTH, status: 'queued' as const, title: `Pair run for w4571: w4571 determinism pair (${id})`, brief: W4595_BRIEF, constraints: 'a pair run of 2 legs, on any computers, any OS (a Mac only as the host, leg 1)', pair: { legs: 2, for: 'w4571', ...pair } as WorkItem['pair'], ...extra });
+  putRequests(store, [
+    { id: 'w4571', by: LOTH, status: 'blocked' },
+    run('w4595', {}),
+    run('w4801', { legsSaid: true }),
+    run('w4802', { crossOs: 'Burst codegen' }),
+    run('w4803', { timed: true }),
+    run('w4804', { steam: 'a Steam lobby' }),
+    run('w4805', { split: 'a Mac may host leg 1' }),
+    run('w4806', {}, { brief: `${W4595_BRIEF}\nRun it on lab.pair-m5-beast.json.` }),
+    run('w4807', {}, { brief: `${W4595_BRIEF}\nThe client runs through pair_relay.py.` }),
+    run('w4808', { started: { at: T0, legs: [{ session: 's1', sandbox: 'pc/alpha' }, { session: 's2', sandbox: 'beast/slot1' }] } }),
+    run('w4809', {}, { status: 'active' }),
+  ]);
+  assert.deepEqual(o.cutDefaultPairs(), ['w4595']);
+  const w = store.work.get('w4595')!;
+  assert.equal(w.pair!.legs, 1);
+  assert.equal(w.status, 'queued', 'still Queued, now for one computer');
+  assert.equal(w.constraints, 'a pair run of 1 leg, on any computers, any OS (a Mac only as the host, leg 1)');
+  assert.match(w.log.join('\n'), /cut to one leg \(w4618\): it was a pair run of 2 legs, on any computers, any OS \(a Mac only as the host, leg 1\), and it names no reason to need computers at once/);
+  assert.match(w.brief, /FF Factory cut this to one leg \(w4618\)/);
+  for (const id of ['w4801', 'w4802', 'w4803', 'w4804', 'w4805', 'w4806', 'w4807', 'w4808', 'w4809']) {
+    assert.equal(store.work.get(id)!.pair!.legs, 2, `${id} keeps its two legs`);
+  }
+  // Once: the next pass finds nothing to cut, and the log has one line.
+  assert.deepEqual(o.cutDefaultPairs(), []);
+  assert.equal(w.log.filter((l) => /cut to one leg \(w4618\)/.test(l)).length, 1);
+  // The blocker watch runs it on each pass.
+  putRequests(store, [run('w4810', {})]);
+  const did = await new BlockerWatch({ store, orchestrators: o }).tick();
+  assert.equal(did.get('w4810'), 'cut to one leg: a pair run with no reason to need computers at once (w4618)');
+  assert.equal(store.work.get('w4810')!.pair!.legs, 1);
 });
 
 test('w3720: w3705 as it happened: a determinism pair run whose notes quote another computer\'s timed run starts with its host on a computer that takes no timed runs; decide_work timed marks a request outright', async (t) => {
@@ -7566,7 +7643,7 @@ test('w1945: a two-machine run filed by hand is marked a pair as the dispatcher 
   facts(one);
   const q = await call(dispatcher().info, 'decide_work', { id: 'w3', action: 'queue', note: 'one computer has room', pair_legs: 2 });
   assert.equal(q.isError, false, q.text);
-  assert.deepEqual(store.work.get('w3')!.pair, { legs: 2 });
+  assert.deepEqual(store.work.get('w3')!.pair, { legs: 2, legsSaid: true });
   assert.match(store.work.get('w3')!.log.join('\n'), /queued for capacity \(marked a pair run of 2 legs, on any computers, any OS \(a Mac only as the host, leg 1\)\); a pair run of 2 legs needs 2 computers with room at once, at most one of them a Mac \(the host\), and only pc has room it fits/);
   store.work.get('w3')!.queuedFor = { at: '2026-01-01T00:00:00.000Z' };
   assert.deepEqual(o.flagQueuedWithRoom(one), [], 'one free computer is no room for two legs');
@@ -7916,10 +7993,10 @@ test('w2057: request_pair records the pull request and commit; for a pull reques
   assert.match(store.work.get('w1936')!.log.join('\n'), /asked for a pair run of Final-Factory\/FinalFactory#2340 \(request_pair\) and waits on this one/);
   // Its own filing, for another pull request: recorded with it.
   const b = await startedFor(env, 'w700');
-  const own = String(await b.h.request_pair!({ what: 'MP-W700-2p', brief: 'Run MP-W700-2p.', pr: '#2400', commit: 'ABC1234DEF' }));
+  const own = String(await b.h.request_pair!({ what: 'MP-W700-2p', brief: 'Run MP-W700-2p.', pr: '#2400', commit: 'ABC1234DEF', legs: 2 }));
   const id = /^Filed (w\d+)/.exec(own)?.[1];
   assert.ok(id, own);
-  assert.deepEqual(store.work.get(id!)!.pair, { legs: 2, for: 'w700', forSession: b.id, pr: 'Final-Factory/FinalFactory#2400', commit: 'abc1234def' });
+  assert.deepEqual(store.work.get(id!)!.pair, { legs: 2, legsSaid: true, for: 'w700', forSession: b.id, pr: 'Final-Factory/FinalFactory#2400', commit: 'abc1234def' });
 });
 
 test('w2057: a filing for a pull request whose pair run already finished on that commit is answered with its result and files nothing; without a commit it asks for one; another commit files a fresh run', async (t) => {
@@ -8520,7 +8597,7 @@ async function livePairFor(env: Awaited<ReturnType<typeof setupOnMachine>>) {
   agentsRoom(agents, []);
   putRequests(store, [{ id: 'w2263', by: LOTH, status: 'active' }]);
   const a = await startedFor(env, 'w2263');
-  const id = /^Filed (w\d+)/.exec(String(await a.h.request_pair!({ what: 'Singularity fuel reserve on PR #2607', brief: 'Host from the save, client joins, 2000 heartbeats.' })))![1];
+  const id = /^Filed (w\d+)/.exec(String(await a.h.request_pair!({ what: 'Singularity fuel reserve on PR #2607', brief: 'Host from the save, client joins, 2000 heartbeats.', legs: 2 })))![1];
   const leg = (sid: string, machineId: string, machineSandbox: string) =>
     store.putSession({ id: sid, kind: 'worker', title: `leg ${sid}`, status: 'idle', permissionMode: 'bypassPermissions', createdAt: T0, lastActivityAt: T0, turns: 1, costUsd: 0, pendingPermissions: [], requestedBy: LOTH, machineId, machineSandbox } as SessionInfo);
   leg('39c87651', 'pc', 'alpha');
