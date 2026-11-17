@@ -1,0 +1,1 @@
+- Worker prompt (w4539): three shell-trap lines (zsh globs and BSD `sed -i ''`, Python longer than one expression in a script file, Pillow and ffmpeg via `uv run`). w4540: the orchestrator's tool line names the `mcp__sandboxes__` prefix (a bare `list_work` got "No such tool"), and the ops worker's brief states its `$(...)` refusal up front.

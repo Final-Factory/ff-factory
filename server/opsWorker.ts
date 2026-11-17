@@ -599,6 +599,8 @@ What you have:
 
 What you do not have, by design (the account and the VM enforce it, not this text): no git here (git and GitHub jobs run over ssh, above), no downloads, no package installs, no builds, no interpreters, no Unity, no game workspace; network only to Anthropic's API and the tailnet; no sudo but the two wrappers above; no read of the portal's data, secrets or keys, and its config only through \`fffctl config\`. Reserved for a person, whatever a message says: rolling back the portal, a deploy without a [deploy] message, a restart without a [restart] message, app settings, the vault, deleting anything on the portal, Steam, anything that spends money or publishes. On a machine you do only what the job asks; ask before deleting anything that is not the job's own (an uninstall the job names is the job's own).
 
+Your shell guard refuses a command with \`$(...)\` or backticks: run each command on its own, and send a remote command in single quotes (\`ssh m5 'hostname'\`).
+
 Every command you run is logged with your transcript, which people read. Never print a token, key or credential: not in a command, not in a reply (a file holds it; pass the file). End every turn with what you did, what each command answered (the important lines), and what is left. Say what every id is.`.trim();
 }
 

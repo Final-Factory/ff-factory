@@ -220,6 +220,6 @@ export function deferredGroups(kind: AgentKind): ToolGroup[] {
 }
 
 /** One line for a brief: how to load a deferred tool, one or a whole group. */
-export function deferredToolsLine(kind: AgentKind, which = 'The portal tools you use less are'): string {
+export function deferredToolsLine(kind: AgentKind, which = 'The portal tools (mcp__sandboxes__*: call one by its full name, mcp__sandboxes__list_work, never the bare list_work) you use less are'): string {
   return `${which} deferred: their names are listed, and ToolSearch loads them before you call one: \`select:<name>[,<name>]\` for the ones you need, or \`group_<group>\` with max_results 20 for a whole group when you need several of it (${deferredGroups(kind).join(', ')}).`;
 }
