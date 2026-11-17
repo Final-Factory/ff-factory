@@ -101,7 +101,7 @@ import { ASK_TOOL, CHAT_MORE_LABEL, DESCRIPTION_CHARS, LABEL_CHARS, LABEL_INPUT_
 import { WAIT_LINE_CHARS, summaryBrief, summaryText, waitSummary } from '../shared/waitSummary.ts';
 import { isMyMove, waitingItemOf } from '../shared/waiting.ts';
 import { checkAsks } from '../shared/questionCard.ts';
-import { DECISIONS, attachmentsNote, describeItem, handoverNote, isFor, isOpen, livePair, pairLegOf, ledgerOrder, names, overlapLine, priorityThenAge, requestAsFiled, requestLineRule, startProblem } from './work.ts';
+import { DECISIONS, attachmentsNote, describeItem, doneOf, handoverNote, isFor, isOpen, livePair, pairLegOf, ledgerOrder, names, overlapLine, priorityThenAge, replacedLeg, requestAsFiled, requestLineRule, startProblem } from './work.ts';
 import { macRefusedScenario, MAC_REFUSES_SCENARIO, minPriorityText, needsBuild, needsLive, needsOf, needsTimed, pairRoom, pairText, cargoShortOf, isCargoRepo, PAIR_HOLD_MS, PAIR_MAX_LEGS, TIMED_HOLD_MS } from '../shared/capacity.ts';
 import { BUILD_PLAN_DOC, BuildPlans, NOT_RELEASE, type BuildPlan, type SeatResult } from './buildPlans.ts';
 import { SEAT_GRACE_MS, seatAction, seatNotice } from './releaseSeat.ts';
@@ -1447,13 +1447,28 @@ export class Agents {
    * Another worker of `w` at work on it in another sandbox (w1983), as "its worker aa20f433 works on it in m3/slot1", or
    * undefined. lothsahn moved w1853's timing A/B to m3 at 03:58Z on 2026-10-24 ("Move another timed run by m3"): its
    * LothDesktop worker 33bc6316 then sat idle in lothdesktop/slot3 waiting for that run, holding the sandbox from the queue.
+   * w4496: with `workLeft` (the w2079 move decision), only a worker with work left on `w` counts (stillWorkingOn), never one
+   * that said DONE for its part.
    */
-  private otherWorkerOn(w: WorkItem, i: SessionInfo): string | undefined {
+  private otherWorkerOn(w: WorkItem, i: SessionInfo, workLeft = false): string | undefined {
     const o = w.sessionIds
       .filter((id) => id !== i.id)
       .map((id) => this.store.sessions.get(id))
-      .find((x) => !!x && x.kind === 'worker' && (isMidTurn(x) || !!this.sessions.sessions.get(x.id)?.live) && !(x.machineId === i.machineId && x.machineSandbox === i.machineSandbox));
+      .find((x) => !!x && x.kind === 'worker' && (isMidTurn(x) || !!this.sessions.sessions.get(x.id)?.live) && !(x.machineId === i.machineId && x.machineSandbox === i.machineSandbox) && (!workLeft || this.stillWorkingOn(w, x)));
     return o ? `its worker ${o.id} works on it in ${o.machineId}/${o.machineSandbox ?? '?'}` : undefined;
+  }
+
+  /**
+   * Whether worker `x` still has work left on `w` (w4496): not done with its part (doneOf, the record behind "said DONE for its
+   * part; still on it: ..."), not a leg an earlier pair attempt left behind (replacedLeg), and not a leg of a pair run that is
+   * over (a leg said DONE), unless that leg took on what is left: it is mid-turn on it, or it holds a wait of its own on `w`.
+   * At 23:57Z on 2026-11-16 w4207's fix author e14a483b was taken off as "its worker 63f3e34b works on it", though leg 2
+   * 63f3e34b had said DONE at 23:37 and host leg b4d752a9 was stopped: no moved copy started, and the request went Stalled.
+   */
+  private stillWorkingOn(w: WorkItem, x: SessionInfo): boolean {
+    if (doneOf(w)[x.id] || replacedLeg(w, x)) return false;
+    if (!w.pair?.started?.legs.some((l) => l.session === x.id) || livePair(w)) return true;
+    return isMidTurn(x) || gatesOf(w).some((g) => gateSetter(g) === x.id);
   }
 
   /**
@@ -3571,7 +3586,7 @@ export class Agents {
     const out = { reqs: [] as WorkItem[], owned: [] as WorkItem[], gone: [] as WorkItem[] };
     for (const w of this.openWorkOf(info)) {
       if (!w.sessionIds.includes(info.id) && w.movedOff?.[info.id]) out.gone.push(w);
-      else if (!w.pair?.started?.legs.some((l) => l.session === info.id) && this.otherWorkerOn(w, info)) out.owned.push(w);
+      else if (!w.pair?.started?.legs.some((l) => l.session === info.id) && this.otherWorkerOn(w, info, true)) out.owned.push(w);
       else out.reqs.push(w);
     }
     return out;
@@ -3583,10 +3598,10 @@ export class Agents {
    */
   private leaveToOwners(info: SessionInfo, owned: WorkItem[], gone: WorkItem[], hold: string, all: boolean) {
     const at = `${info.machineId}/${info.machineSandbox}`;
-    for (const w of owned) this.orchestrators.moveOff(w, info.id, `not moved (w2079): ${this.otherWorkerOn(w, info)}, so no moved copy starts (${hold})`);
+    for (const w of owned) this.orchestrators.moveOff(w, info.id, `not moved (w2079): ${this.otherWorkerOn(w, info, true)}, so no moved copy starts (${hold})`);
     for (const w of gone) this.orchestrators.noteMove(w.id, `a message for its old worker ${info.id} on ${at} did not move it again (w2079): it was moved off ${w.movedOff![info.id]}`);
     const ids = [...owned, ...gone].map((w) => w.id).join(', ');
-    console.log(`room move: worker ${info.id} on ${at} (${ids}) not moved (w2079): ${[...owned.map((w) => `${w.id}: ${this.otherWorkerOn(w, info)}`), ...gone.map((w) => `${w.id}: moved off it already`)].join('; ')}`);
+    console.log(`room move: worker ${info.id} on ${at} (${ids}) not moved (w2079): ${[...owned.map((w) => `${w.id}: ${this.otherWorkerOn(w, info, true)}`), ...gone.map((w) => `${w.id}: moved off it already`)].join('; ')}`);
     if (!all) return;
     this.store.append(info.id, { kind: 'system', text: `Not moved (w2079): its requests (${ids}) are with other workers now, so the message that waited for it was not delivered and nothing starts for it elsewhere.` });
     this.waker.cancel(info.id);

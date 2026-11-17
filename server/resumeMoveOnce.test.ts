@@ -157,6 +157,50 @@ test('w2079: a request another live worker carries gets no moved copy, and that 
   assert.deepEqual(starts, []);
 });
 
+/**
+ * w4496: the w4207 sequence. At 23:37Z on 2026-11-16 pair leg 2 63f3e34b said DONE for its part (host leg b4d752a9 and fix
+ * author e14a483b still on it); at 23:57Z e14a483b's resume waited for room and was taken off as "not moved (w2079): its
+ * worker 63f3e34b works on it", and the host leg was stopped too: nobody owned the conflict, the stills and the merge.
+ */
+async function w4207(t: Parameters<typeof setup>[0]) {
+  const x = await setup(t);
+  const released = { at: OLD, sandbox: 'slot1', branch: 'w4207-multiselect-filter', why: 'idle for 31 min with no check-in' };
+  const author = x.worker('e14a483b', { machineId: 'm3', machineSandbox: 'slot1', placeReleased: released });
+  x.worker('b4d752a9', { machineId: 'biscuit', machineSandbox: 'slot1' });
+  // Still mid-turn after its DONE: the worst case, a process the old check counted as at work.
+  x.worker('63f3e34b', { status: 'running', machineId: 'lothdesktop', machineSandbox: 'slot6' });
+  const w = x.request(['e14a483b', 'b4d752a9', '63f3e34b']);
+  w.pair = { legs: 2, started: { at: OLD, legs: [{ session: 'b4d752a9', sandbox: 'biscuit/slot1' }, { session: '63f3e34b', sandbox: 'lothdesktop/slot6' }] } };
+  w.done = { '63f3e34b': { at: new Date(Date.now() - 20 * 60_000).toISOString(), report: 'The pair run passed.', told: 'e14a483b, b4d752a9' } };
+  x.store.putWork(w);
+  const moved = async () => {
+    for (let n = 0; n < 200 && x.agents.isMoving('e14a483b'); n++) await new Promise((r) => setTimeout(r, 10));
+    assert.equal(x.agents.isMoving('e14a483b'), false, 'the move finished');
+  };
+  return { ...x, author, moved };
+}
+
+test('w4496: a pair leg that said DONE does not own the request: the author taken off after it gets a moved copy', async (t) => {
+  const { store, starts, queued, roomMove, moved, author } = await w4207(t);
+  assert.equal(roomMove(author, queued('e14a483b', 'lothsahn: follow-up')), true, 'it moves');
+  await moved();
+  assert.equal(starts.length, 1, 'one moved copy starts for the rest of the work');
+  assert.match(starts[0], /^(m5|biscuit):new1$/);
+  const after = store.work.get('w1903')!;
+  assert.doesNotMatch(after.log.join('\n'), /not moved \(w2079\)/, `not left to a finished leg: ${after.log.join(' | ')}`);
+  assert.equal(latestWorker(after), 'new1', 'the moved copy carries it');
+});
+
+test('w4496: a leg of a finished pair run that took on what is left (mid-turn, not done) still owns it', async (t) => {
+  const { store, starts, queued, roomMove, moved, author } = await w4207(t);
+  // The host leg, not done, at work on the merge after the run.
+  store.putSession({ ...store.sessions.get('b4d752a9')!, status: 'running' });
+  assert.equal(roomMove(author, queued('e14a483b', 'lothsahn: follow-up')), true);
+  await moved();
+  assert.deepEqual(starts, [], 'no moved copy starts');
+  assert.match(store.work.get('w1903')!.log.join('\n'), /taken off worker e14a483b: not moved \(w2079\): its worker b4d752a9 works on it in biscuit\/slot1/);
+});
+
 test('w3601: a room move does not take the last free sandbox a waiting pair run needs: the pair gets it, and the move waits', async (t) => {
   const { store, agents, starts, worker, request, queued, roomMove, settled } = await setup(t);
   const x = agents as unknown as Internals;
