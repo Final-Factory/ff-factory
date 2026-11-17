@@ -700,8 +700,12 @@ test('w3217: remove-slot takes the slot names check prints and both path styles'
   assert.deepEqual(fs.readdirSync(c), ['leases']);
   // What a shell left of one ("V:\ffw\players\$s" became V:\ffw\players$s): refused, and the answer says what reached it.
   out.length = 0;
-  // On Windows the mangled path keeps the install's own drive: another drive is refused first, as off the install drive (w1755).
+  // On Windows the mangled path keeps the install's own drive and resolves from a folder inside the install, as a worker's
+  // shell does: another drive, or C: outside the install, is refused first as off the install drive (w1755).
   const eaten = process.platform === 'win32' ? `${path.parse(root).root.slice(0, 2)}ffwplayersslot3-0` : 'V:ffwplayersslot3-0';
+  const was = process.cwd();
+  if (process.platform === 'win32') process.chdir(root);
+  t.after(() => process.chdir(was));
   assert.equal(await foldersMain('remove-slot', [`${path.join(root, 'players')}$s`, eaten], env, Date.now(), (s) => void out.push(s), idle), 1);
   assert.equal(out.join('').match(/a shell ate its backslashes/g)?.length, 2, out.join(''));
 });
