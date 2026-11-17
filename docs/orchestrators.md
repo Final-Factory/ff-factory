@@ -3324,6 +3324,15 @@ or not, takes no slot. Orchestrators never count. The Unity editor limits are un
 - **What keeps an idle worker's process** (`Agents.keepIdle`): mid-turn, unanswered messages or background
   tasks, a pending permission, a pending `wake_me`, a queued message, or a machine sandbox with uncommitted
   tracked changes. Standing agents and orchestrators are never stopped this way.
+  - **Its own background job at work** (w4589): while its request is open, a job of its own that used 2 s of CPU or more
+    a minute at a look within the last 5 minutes (`LEFTOVER.BUSY_CPU_MS`, `BUSY_HOLD_MS`) keeps it, and keeps its
+    sandbox from release. Its machine's leftover sweep
+    finds such jobs (`LeftoverReaper.jobsOf`, machine/leftovers.ts): what it started through a shell under its claude
+    (a Bash call, `run_in_background`) or outside its agent host (detached, its `FF_SESSION_ID`), never claude itself,
+    an MCP server, a timed run's or a person's process. The daemon sends them in its stats (`UnitySlotsReport.busyJobs`),
+    and `Machines.busyJobOf` reads them while they are under 5 minutes old. A hung job uses no CPU and keeps nothing. On
+    biscuit, 2026-11-17, w4568's worker 202bc503 was stopped as "idle for 61 min" while its scenario batches ran, and 58
+    scenarios were lost.
 - **Stopped is not lost.** The session keeps its history (`sdkSessionId`); `message_agent` resumes it. Its transcript says
   why it was stopped.
 
