@@ -34,10 +34,10 @@ KillMode=mixed
 TimeoutStopSec=75
 LimitNOFILE=65536
 # The token vault's key (docs/vault.md, w512): root's file, handed to this service alone while it runs
-# ($CREDENTIALS_DIRECTORY/fff-vault-key). The empty SetCredential= is the default while there is no key yet, so the
-# portal still starts (systemd.exec(5): "SetCredential= will act as default if no credentials are found").
+# ($CREDENTIALS_DIRECTORY/fff-vault-key). install.sh makes the key before it installs this unit. No empty
+# SetCredential=fff-vault-key: default: systemd (255) rejects an empty value ("Invalid syntax, ignoring", w4500), so it
+# never applied; without the key the portal does not start (243/CREDENTIALS), as it always did.
 LoadCredential=fff-vault-key:/etc/fff/vault.key
-SetCredential=fff-vault-key:
 NoNewPrivileges=yes
 ProtectSystem=full
 ProtectKernelTunables=yes

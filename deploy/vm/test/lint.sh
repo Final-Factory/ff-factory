@@ -75,7 +75,19 @@ if [ "$units" = 1 ]; then
   # The guest's units as install.sh writes them (the templates rendered), then the host's.
   FFF_UNITS_OUT=$tmp deploy/vm/test/fff-units.test.sh >/dev/null
   cp deploy/vm/host/units/* "$tmp/"
-  systemd-analyze verify --man=no "$tmp"/*.service "$tmp"/*.socket "$tmp"/*.timer "$tmp"/*.path
+  # verify exits 0 on a line it ignores, so read what it says (w4500: "fff-portal.service:40: Invalid syntax, ignoring"
+  # sat in the portal's journal for weeks). First prove it reports such a line on this systemd, then fail on any.
+  probe=$(mktemp -d)
+  printf '[Service]\nType=oneshot\nExecStart=/bin/true\nSetCredential=probe-key:\n' >"$probe/fff-lint-probe.service"
+  if ! systemd-analyze verify --man=no "$probe/fff-lint-probe.service" 2>&1 | grep -qiE 'invalid syntax|ignoring'; then
+    echo "FAIL: systemd-analyze verify did not report the empty SetCredential= probe; the parse check would see nothing"; exit 1
+  fi
+  rm -rf "$probe"
+  verify_out=$(systemd-analyze verify --man=no "$tmp"/*.service "$tmp"/*.socket "$tmp"/*.timer "$tmp"/*.path 2>&1) || { echo "$verify_out"; exit 1; }
+  [ -z "$verify_out" ] || echo "$verify_out"
+  if printf '%s\n' "$verify_out" | grep -iE 'invalid syntax|unknown key|unknown section|failed to parse|ignoring'; then
+    echo "FAIL: systemd-analyze verify ignored a line of a unit (above)"; exit 1
+  fi
   rm -rf "$tmp"
   echo "systemd-analyze verify: clean"
 fi
