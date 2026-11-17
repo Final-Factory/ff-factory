@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { inMergeOnGreenPilot, mergeOnGreenPercent } from './mergeOnGreen.ts';
 import { inPilot } from './autoCompact.ts';
 import { normalizeSetting } from './appConfig.ts';
-import { checksState, ghMerge, runsState } from './blockerWatch.ts';
+import { checksState, ghMerge, runsState, transientMergeError } from './blockerWatch.ts';
 import { evidencePython } from '../machine/evidenceGate.ts';
 import type { Config } from './config.ts';
 
@@ -111,4 +111,19 @@ test('w3021: ghMerge never merges when a short head is not the pull request head
   await assert.rejects(ghMerge('Final-Factory/ffu#200', 'main', fakeGh(FULL, junk)), /not merged: "main" is not a commit sha/);
   await assert.rejects(ghMerge('Final-Factory/ffu#200', '3e14de', fakeGh(FULL, junk)), /not a commit sha/, 'under 7 characters is too short to trust');
   assert.deepEqual(junk, [], 'nothing is asked of GitHub for a head that is no sha');
+});
+
+test('w4531: transientMergeError: GitHub errors that pass, never a refusal of the pull request itself', () => {
+  for (const said of [
+    'gh pr merge Final-Factory/ffu#856: non-200 OK status code: 502 Bad Gateway body: "<html>"',
+    'gh pr merge Final-Factory/ffu#852: GraphQL: Something went wrong while executing your query on 2026-11-16T10:27:02Z.',
+    'gh pr merge o/r#1: Post "https://api.github.com/graphql": read tcp: i/o timeout',
+    'gh pr merge o/r#1: 503 Service Unavailable',
+  ]) assert.equal(transientMergeError(said), true, said);
+  for (const said of [
+    'gh pr merge Final-Factory/ffu#869: X Pull request Final-Factory/ffu#869 is not mergeable: the merge commit cannot be cleanly created.',
+    'gh pr merge o/r#2: Head branch was modified. Review and try the merge again.',
+    'gh pr merge o/r#3: GraphQL: Pull Request is still a draft (mergePullRequest)',
+    'not merged: the Evidence check refused it (pr_evidence.py --repo o/r --pr 3760, exit 1): - no \'Kind:\' line',
+  ]) assert.equal(transientMergeError(said), false, said);
 });

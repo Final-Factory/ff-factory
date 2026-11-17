@@ -173,9 +173,10 @@ export function mergePrs(stored: readonly WorkPr[], found: readonly (PrRecord & 
 /**
  * A release request's title (w515): it cuts, ships or tags a release, names the build it releases ("Release 0.50.0.74",
  * "Release Build 79", "Hotfix release 0.50.0.55"), or posts its notes. A title that merely says "release" ("the release
- * pipeline", "Release-readiness check", "until the new release is verified") is not one.
+ * pipeline", "Release-readiness check", "until the new release is verified") is not one, nor is a cut by a count ("Net row
+ * cut 11 px", w4565): a build cut or shipped by number is a version ("cut 0.50.0.75") or says "build"/"v".
  */
-const RELEASE_TITLE = /\bci-release\b|\bbundleVersion\b|^\W*((hotfix|develop|master|beta) )?release (\(?\d|build \d|v\d)|\b(cut|ship|tag)\b[^.;:\n]{0,24}\brelease\b(?!-)|\b(cut|ship|tag) (build |v)?\d+(\.\d+)*\b|\b(post|publish|write)\b[^;:\n]{0,30}\b(patch|release) notes\b/i;
+const RELEASE_TITLE = /\bci-release\b|\bbundleVersion\b|^\W*((hotfix|develop|master|beta) )?release (\(?\d|build \d|v\d)|\b(cut|ship|tag)\b[^.;:\n]{0,24}\brelease\b(?!-)|\b(cut|ship|tag) (build \d+|v\d+(\.\d+)*|\d+(\.\d+)+)\b|\b(post|publish|write)\b[^;:\n]{0,30}\b(patch|release) notes\b/i;
 /** A release request's brief: it runs ci-release, or asks for the patch notes to be posted. "Add a patch notes line" is not one (w487). */
 const RELEASE_BRIEF = /\/ff-agents:ci-release\b|\b(post|publish)\b[^.\n]{0,30}\bpatch notes\b|\bpatch notes (are |get )?(posted|published)\b/i;
 /**

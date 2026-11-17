@@ -79,7 +79,8 @@ test("factoryInstalls finds the other factories' installs, not the worker's own"
     '/Users/pat/factory': ['/Users/pat/factory/worker', '/Users/pat/factory/claude-worker'],
   };
   const installs = new Set(['/Users/pat/factory/worker', '/Users/pat/other-factory']);
-  const exists = (p: string) => [...installs].some((i) => p.startsWith(i + '/'));
+  // factoryInstalls joins with path.join, so on Windows the probe arrives with backslashes.
+  const exists = (p: string) => [...installs].some((i) => p.replace(/\\/g, '/').startsWith(i + '/'));
   const found = factoryInstalls({ home: '/Users/pat', workerRoot: '/Users/pat/factory/worker', list: (d) => dirs[d] ?? [], exists });
   assert.deepEqual(found, ['/Users/pat/other-factory']);
 });

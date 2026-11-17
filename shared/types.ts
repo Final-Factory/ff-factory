@@ -2323,11 +2323,6 @@ export interface WorkItem {
    */
   spendRead?: { by: string; at: string };
   /**
-   * Its workers may read every agent's transcript (search_transcripts, agent_transcript, w4497), read-only and with secrets
-   * masked, for a transcript analysis: set by its person's orchestrator (request_work or update_work transcript_read), never by its text.
-   */
-  transcriptRead?: { by: string; at: string };
-  /**
    * Its workers on `machine` may work in that machine's main clone: quit the editor open there, back up, git fetch and
    * checkout, reopen Unity (w936, docs/orchestrators.md "Work in a machine's main clone"). Set by its person's orchestrator
    * in a turn of theirs (request_work or update_work main_clone), never by its text; the guard reads it
@@ -2545,6 +2540,11 @@ export interface WorkItem {
    * from it when the request is filed, never guessed later from the brief.
    */
   repo?: string;
+  /**
+   * w4553: the files an ffu row is expected to edit, the paths its start_agent prompt named. With the paths its
+   * title and brief name, they are checked before another ffu row starts (server/ffuOverlap.ts).
+   */
+  ffuFiles?: string[];
   /**
    * What the work needs of a computer (w1098, lothsahn: "FFBox and FF Factory updates don't need unity editors"): `game`,
    * a game sandbox with an editor's worth of RAM (the game repo, or unknown: the safe default), or `agent`, only an

@@ -54,9 +54,28 @@ export function simpleCommands(cmd: string): { verb: string; args: string[]; raw
   return out;
 }
 
+/** Any heredoc (quoted delimiter or not), the text before it on its line, its body and its closing line. */
+const HEREDOC = /(^|\n)([^\n]*?)<<(-?)\s*(['"]?)(\w+)\4([^\n]*)\n[\s\S]*?\n[ \t]*\5[ \t]*(?=\n|$)/g;
+/** Programs that run a heredoc as shell commands. */
+const SHELLS = /^(?:bash|sh|zsh|dash|ksh|powershell|pwsh|ssh)$/;
+
+/**
+ * `cmd` with each heredoc's body taken out, unless a shell runs it (w4538, lothsahn: "match only the command words"). w4501
+ * measured one false refusal (session 358398f2, seq 267): `gh pr checks` appeared only in a quoted heredoc written to a file.
+ * The bodies of `cat > f <<'EOF'`, `python - <<EOF` or `git commit -F - <<EOF` are text or another language, never gh.
+ */
+export function withoutHeredocBodies(cmd: string): string {
+  return cmd.replace(HEREDOC, (m, lead: string, before: string, dash: string, q: string, delim: string, after: string) => {
+    const seg = before.split(/&&|\|\||[;|]/).pop()?.trim() ?? '';
+    const first = (seg.split(/\s+/)[0] ?? '').replace(/^.*[\\/]/, '').toLowerCase().replace(/\.exe$/, '');
+    const piped = /\|\s*(?:bash|sh|zsh|dash|ksh|pwsh|powershell)\b/.test(after);
+    return SHELLS.test(first) || piped ? m : `${lead}${before}<<${dash}${q}${delim}${q}${after}\n${delim}`;
+  });
+}
+
 /** The reason a shell command reads CI checks the vault token cannot read, or undefined. Exported for tests. */
 export function checkChecksRead(cmd: string): string | undefined {
-  for (const c of simpleCommands(cmd)) {
+  for (const c of simpleCommands(withoutHeredocBodies(cmd))) {
     if (c.verb !== 'gh') continue;
     const a = c.args.filter((x, k) => !/^(?:--repo|-R)(?:=|$)/.test(x) && !/^(?:--repo|-R)$/.test(c.args[k - 1] ?? ''));
     if (a[0] === 'pr' && a[1] === 'checks') return CHECKS_REFUSAL;

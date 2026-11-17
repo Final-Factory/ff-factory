@@ -405,13 +405,13 @@ export const CATALOG = {
     offset: rangedNumber(0, undefined, 'Skip this many matching requests (the next page).').optional(),
     limit: rangedNumber(1, 50, 'Requests per page, default 20; a page also stops at 40,000 characters.').optional(),
   },
-  /** w4497 (docs/orchestrators.md "Workers read the ledger"): any session's transcript, read-only, with a transcript-read grant. */
+  /** w4497 (docs/orchestrators.md "Workers read the ledger"): any session's transcript, read-only; every worker's since w4528. */
   agent_transcript: {
     session_id: z.string().max(80).describe('The session id (from search_transcripts).'),
     last: rangedNumber(5, 400, 'How many events (default 40).').optional(),
     full_text: z.boolean().optional().describe('Longer cuts of each message and tool call (default: assistant text 600 characters, tool input 120).'),
   },
-  /** w4497: full-text search over every agent's transcript, read-only, with a transcript-read grant. */
+  /** w4497: full-text search over every agent's transcript, read-only; every worker's since w4528. */
   search_transcripts: {
     query: z.string().min(1).max(400).describe('All words must match; "quoted phrases" stay together.'),
     sandbox: z.string().max(80).optional().describe('Only this sandbox ("beast/slot3").'),
@@ -420,6 +420,12 @@ export const CATALOG = {
     since: z.string().max(40).optional().describe('From this ISO time or date (a time window with until).'),
     until: z.string().max(40).optional().describe('Up to this ISO time or date.'),
     limit: rangedNumber(1, 100, 'Default 30.').optional(),
+  },
+  /** w4531 (docs/orchestrators.md "Where a request's wall time went"): wall time of the last finished requests, with ledger and transcript grants. */
+  work_timing: {
+    last: rangedNumber(1, 300, 'How many finished requests, newest first by close time; default 50.').optional(),
+    until: z.string().max(40).optional().describe('Only requests closed before this ISO time (an earlier window to compare with).'),
+    rows: z.boolean().optional().describe('Also one line per request: its wait, its work and its top causes.'),
   },
   /** docs/spend.md "The export" (w2653): the spend record as CSV, read-only, with a spend-read grant. */
   spend_export: {

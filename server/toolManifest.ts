@@ -66,6 +66,8 @@ export const TOOL_MANIFEST = {
   stop_bench_ticket: { group: 'machines', kinds: [P] },
   read_work: { group: 'ledger', kinds: [W] },
   spend_export: { group: 'ledger', kinds: [W] },
+  // w4531: wall time of the last finished requests (ledger and transcript grants)
+  work_timing: { group: 'ledger', kinds: [W] },
   // reports (w2541, docs/reports.md)
   file_report: { group: 'ledger', kinds: [W] },
   list_reports: { group: 'ledger', kinds: [D, P, R, W] },
@@ -76,7 +78,7 @@ export const TOOL_MANIFEST = {
   set_agent_title: { group: 'workers', kinds: [D, R] },
   interrupt_agent: { group: 'workers', kinds: [D, R], always: [D] },
   stop_agent: { group: 'workers', kinds: [D, R], always: [D] },
-  // w4497: a worker has them too, refused without a transcript-read grant on its request (Agents.transcriptGrantOf).
+  // w4497, w4528: every worker has them too, refused only on a request quoting players' text (Agents.transcriptAccessOf).
   agent_transcript: { group: 'workers', kinds: [D, P, R, W], always: [D, P] },
   search_transcripts: { group: 'workers', kinds: [D, P, R, W], always: [D, P] },
   // sandboxes
