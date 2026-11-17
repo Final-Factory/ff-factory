@@ -81,6 +81,8 @@ export interface Computer {
    * even when no other computer has room, and its bench queue refuses every exclusive ticket.
    */
   noTimedRuns?: string;
+  /** Why it runs no game players (w4621, server/machines.ts noPlayersOf; m3 by default): no pair-run leg goes there (its noTimedRuns says so for timed work). */
+  noPlayers?: string;
   /** When its daemon dropped, while it is offline (Machine.lastSeen, w2048): a short drop is a blip, a long one an outage. */
   offlineSince?: string;
   /**
@@ -434,7 +436,7 @@ export function slotsOf(p: Computer, kind: NeedKind): number {
 }
 
 /** What decides which work can run on `p` (RoomNow.fit, shared/capacity.ts unfitWhy). */
-const fitOf = (p: Computer): RoomFit => ({ ...(p.platform ? { platform: p.platform } : {}), ...(p.noTimedRuns ? { noTimedRuns: p.noTimedRuns } : {}), ...(p.steam ? { steam: p.steam } : {}), ...(p.desktop ? { desktop: p.desktop } : {}), ...(p.cargoShort ? { cargoShort: p.cargoShort } : {}), ...(p.playerCache?.entries.length ? { playerCache: p.playerCache } : {}) });
+const fitOf = (p: Computer): RoomFit => ({ ...(p.platform ? { platform: p.platform } : {}), ...(p.noTimedRuns ? { noTimedRuns: p.noTimedRuns } : {}), ...(p.noPlayers ? { noPlayers: p.noPlayers } : {}), ...(p.steam ? { steam: p.steam } : {}), ...(p.desktop ? { desktop: p.desktop } : {}), ...(p.cargoShort ? { cargoShort: p.cargoShort } : {}), ...(p.playerCache?.entries.length ? { playerCache: p.playerCache } : {}) });
 
 /**
  * Whether pair run `w` could ever get all its legs at once (w3530): pairRoom over every computer that is online and not held

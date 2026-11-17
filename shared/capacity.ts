@@ -326,6 +326,8 @@ export const TIMED_HOLD_MS = 20 * 60_000;
 export interface RoomFit {
   platform?: string;
   noTimedRuns?: string;
+  /** Why it runs no game players (w4621, Machine.noPlayers; m3 by default): a pair run, whose every leg runs one, never goes there. */
+  noPlayers?: string;
   /** Its Steam client as its daemon reported it (w2459); absent: not reported, which no pair that needs Steam fits. */
   steam?: SteamClient;
   /** Its desktop session (w2459, shared/desktop.ts): a pair run that clicks the game's menus goes only where it is unlocked. */
@@ -399,6 +401,8 @@ export function unfitWhy(w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes'
   if (w.pair?.avoid?.includes(id)) return `${id} is where an earlier leg of this pair run failed (${w.pair.retryOf ?? 'its first run'}): a retry goes on other computers (w2041)`;
   const f = fit?.[id];
   if (!f) return undefined;
+  // w4621: every leg of a pair run runs a game player (or an FFU client), which a no-players computer (the m3) never runs.
+  if (w.pair && f.noPlayers) return `${id} runs no game players (${f.noPlayers}), and every leg of a pair run runs one`;
   // w3396: an FFU worker's cargo target grows to many GB; a drive under the line takes none until the clean-up frees it.
   if (f.cargoShort && isCargoRepo(w.repo)) return `${id}: ${f.cargoShort}`;
   // w2459: a pair run that needs Steam (lobbies, a Steam host or join) goes only where Steam is signed in.

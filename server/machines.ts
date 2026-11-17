@@ -137,7 +137,7 @@ export interface SandboxLimits {
 }
 
 /** A machine's pool extras (docs/beast-machine.md): the Library seed, editor priority and the folders never to touch. */
-export type PoolExtras = Pick<Machine, 'librarySeed' | 'librarySeedCopy' | 'librarySeedGB' | 'unityBelowNormal' | 'protectedPaths' | 'noTimedRuns' | 'playOnly'>;
+export type PoolExtras = Pick<Machine, 'librarySeed' | 'librarySeedCopy' | 'librarySeedGB' | 'unityBelowNormal' | 'protectedPaths' | 'noTimedRuns' | 'noPlayers' | 'playOnly'>;
 
 /**
  * The machines that take no timed runs unless their record says otherwise (w1861). lothsahn, 2026-10-23, after Ben's
@@ -151,6 +151,34 @@ export const NO_TIMED_RUNS: Readonly<Record<string, string>> = {
 /** Why a machine takes no timed runs (w1861): its record's reason, else NO_TIMED_RUNS's; undefined when it takes them. */
 export function noTimedRunsOf(m: Pick<Machine, 'id' | 'noTimedRuns'>): string | undefined {
   return m.noTimedRuns !== undefined ? m.noTimedRuns.trim() || undefined : NO_TIMED_RUNS[m.id];
+}
+
+/**
+ * The machines that run no game players unless their record says otherwise (w4621): no built player and no FFU client, so
+ * no timed leg and no pair-run leg goes there; the Unity editor, play mode included, still runs. The m3: Ben's hold after
+ * w3704's crash tests took it down twice on 2026-11-08 (w3740, Ben: "m3 crashed again. you really need to stop crashin
+ * git. just got it back up again"), carried since in every brief as "no game players and no crash tests on the m3 without
+ * Ben's yes" and enforced only by hand until w4621. add_machine no_players "" clears one; any other text replaces its reason.
+ */
+export const NO_PLAYERS: Readonly<Record<string, string>> = {
+  m3: 'Ben\'s hold (w3740, 2026-11-08, "m3 crashed again. you really need to stop crashin git"): no game players and no crash tests on the m3 without Ben\'s yes; the Unity editor, play mode included, is fine',
+};
+
+/** Why a machine runs no game players (w4621): its record's reason, else NO_PLAYERS's; undefined when it runs them. */
+export function noPlayersOf(m: Pick<Machine, 'id' | 'noPlayers'>): string | undefined {
+  return m.noPlayers !== undefined ? m.noPlayers.trim() || undefined : NO_PLAYERS[m.id];
+}
+
+/**
+ * Why placement sends no timed work to a machine (w1861, w4621): its own no-timed-runs reason, else its no-players one, since
+ * a timed leg runs built players (an A/B of two builds) and timed_place cannot tell an editor-only one apart. Placement only:
+ * the machine's own bench queue still follows noTimedRunsOf alone, so a worker already there may time its editor.
+ */
+export function timedPlacementRefusalOf(m: Pick<Machine, 'id' | 'noTimedRuns' | 'noPlayers'>): string | undefined {
+  const no = noTimedRunsOf(m);
+  if (no) return no;
+  const np = noPlayersOf(m);
+  return np ? `it runs no game players, and a timed leg runs them: ${np}; w4621` : undefined;
 }
 
 /** The pool settings of a machine (its sandbox_root and limits, with defaults), or null when it has no sandbox_root. Exported for tests. */
@@ -1555,6 +1583,7 @@ export class MachineManager {
       librarySeedGB: opts.librarySeedGB ?? prev?.librarySeedGB,
       unityBelowNormal: opts.unityBelowNormal ?? prev?.unityBelowNormal,
       noTimedRuns: opts.noTimedRuns ?? prev?.noTimedRuns,
+      noPlayers: opts.noPlayers ?? prev?.noPlayers,
       playOnly: opts.playOnly ?? prev?.playOnly,
     };
     const { machine, token } = this.register({
@@ -1608,6 +1637,7 @@ export class MachineManager {
       ...(opts.librarySeedGB !== undefined ? { librarySeedGB: opts.librarySeedGB } : {}),
       ...(opts.unityBelowNormal !== undefined ? { unityBelowNormal: opts.unityBelowNormal } : {}),
       ...(opts.noTimedRuns !== undefined ? { noTimedRuns: opts.noTimedRuns } : {}),
+      ...(opts.noPlayers !== undefined ? { noPlayers: opts.noPlayers } : {}),
       ...(opts.playOnly !== undefined ? { playOnly: opts.playOnly } : {}),
     });
     this.store.putMachine(m);
@@ -1651,6 +1681,7 @@ export class MachineManager {
       ...(opts.librarySeedCopy !== undefined ? { librarySeedCopy: opts.librarySeedCopy } : {}),
       ...(opts.unityBelowNormal !== undefined ? { unityBelowNormal: opts.unityBelowNormal } : {}),
       ...(opts.noTimedRuns !== undefined ? { noTimedRuns: opts.noTimedRuns } : {}),
+      ...(opts.noPlayers !== undefined ? { noPlayers: opts.noPlayers } : {}),
       ...(opts.playOnly !== undefined ? { playOnly: opts.playOnly } : {}),
     };
     m.online = this.isOnline(id);
