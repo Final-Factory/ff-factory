@@ -1102,18 +1102,25 @@ async function hasDesktop(): Promise<boolean> {
  * prompt on the PC's desktop, waited for 5 minutes; a session without a desktop (ssh) says so instead. The want is written after
  * that step, which writes the state file again.
  */
-async function wantDevDriveGrow(host: string, wantGB: number, haveGB: number, ensureArgs: string[]) {
-  if ((await exec('schtasks', ['/query', '/tn', 'ffsb-helper-grow'], { timeoutMs: 30_000 })).code !== 0) {
-    if (!elevated() && !(await hasDesktop())) say('Dev Drive: the grow task (ffsb-helper-grow) is not installed, and this session has no desktop for the administrator prompt that installs it: the grow waits until an update from the PC or the installer installs it.');
-    else {
-      say('Dev Drive: installing the grow task (ffsb-helper-grow): one administrator prompt on this PC (waited for 5 minutes)...');
-      try {
-        await devDriveEnsure(host, ensureArgs, 'ensure', 'devdrive', 5 * 60_000);
-      } catch (e) {
-        say(`Dev Drive: the grow task was not installed (${(e as Error).message}); the grow waits for it.`);
-      }
-    }
+/**
+ * A helper task a drive made before it existed lacks (ffsb-helper-grow, w1918; ffsb-helper-dedup, w4517) comes from the one
+ * administrator step (devdrive.ps1 ensure registers every helper task again and copies the current helper script): a prompt on
+ * the PC's desktop, waited for 5 minutes; a session without a desktop (ssh) says so instead. An elevated update ran that step
+ * already, so the task is there and this does nothing.
+ */
+async function ensureHelperTask(task: string, what: string, host: string, ensureArgs: string[]) {
+  if ((await exec('schtasks', ['/query', '/tn', task], { timeoutMs: 30_000 })).code === 0) return;
+  if (!elevated() && !(await hasDesktop())) return void say(`Dev Drive: ${what} (${task}) is not installed, and this session has no desktop for the administrator prompt that installs it: it waits until an update from the PC, an administrator's ssh session or the installer installs it.`);
+  say(`Dev Drive: installing ${what} (${task}): one administrator prompt on this PC (waited for 5 minutes)...`);
+  try {
+    await devDriveEnsure(host, ensureArgs, 'ensure', 'devdrive', 5 * 60_000);
+  } catch (e) {
+    say(`Dev Drive: ${what} was not installed (${(e as Error).message}).`);
   }
+}
+
+async function wantDevDriveGrow(host: string, wantGB: number, haveGB: number, ensureArgs: string[]) {
+  await ensureHelperTask('ffsb-helper-grow', 'the grow task', host, ensureArgs);
   const file = devDriveFile(host);
   const st = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')) as Record<string, unknown>;
   // maxGB too: the update's own reading of the VHDX (haveGB), where the file could say more (LothLaptop's said 1024 for an 80 GB
@@ -1201,6 +1208,8 @@ async function setupDevDrive(o: InstallOptions, l: Layout, f: Facts & { probe: {
   }
   if (had && o.devDriveMaxGB !== undefined && o.devDriveMaxGB > state.maxGB) await wantDevDriveGrow(host, o.devDriveMaxGB, state.maxGB, ensureArgs(state.maxGB));
   else if (had && o.devDriveMaxGB !== undefined) cancelDevDriveGrow(host, o.devDriveMaxGB, state.maxGB);
+  // The weekly full ReFS dedup pass (w4517): a drive made before it gets it here; on a volume without ReFS dedup it runs nothing.
+  if (had) await ensureHelperTask('ffsb-helper-dedup', 'the weekly full dedup task', host, ensureArgs(state.maxGB));
   say(`Dev Drive: ${state.created ? 'created' : 'reused'} ${state.vhdx} as ${state.letter}: (${state.fileSystem || 'ReFS'}${state.devDrive ? ', Dev Drive' : ', not a Dev Drive format'}, block clone ${state.blockClone ? 'yes' : 'not reported'}, up to ${state.maxGB} GB).`);
   if (state.letterChangedFrom) say(`Dev Drive: its letter was ${state.letterChangedFrom}: and is taken, so it is ${state.letter}: now.`);
   const room = { vhdx: state.vhdx || path.join(host, 'devdrive.vhdx'), maxGB: state.maxGB || had?.maxGB || 0 };
@@ -1239,7 +1248,7 @@ async function setupDevDrive(o: InstallOptions, l: Layout, f: Facts & { probe: {
     use = true;
   }
   m.devDrive = { vhdx: state.vhdx, letter: state.letter, maxGB: state.maxGB, inUse: use };
-  if (!m.outside.some((x) => x.kind === 'dev-drive')) noteOutside(m, { kind: 'dev-drive', name: state.vhdx, note: 'the Dev Drive: a VHDX in the root, mounted at a drive letter, and the SYSTEM tasks ffsb-helper-mount, -trim, -compact and -grow' });
+  if (!m.outside.some((x) => x.kind === 'dev-drive')) noteOutside(m, { kind: 'dev-drive', name: state.vhdx, note: 'the Dev Drive: a VHDX in the root, mounted at a drive letter, and the SYSTEM tasks ffsb-helper-mount, -trim, -compact, -grow and -dedup' });
   writeManifest(l.root, m);
   if (!use) {
     return void say(`Dev Drive: ready as ${state.letter}:, but ${l.sandboxes} still holds this install's sandboxes, so they stay where they are and daemon.json keeps its paths. Move them with --move-to-dev-drive (-MoveToDevDrive) when no worker is in them.`);
@@ -1643,7 +1652,7 @@ function notePinnedDrive(m: Manifest, rec: DevDriveRecord) {
   m.devDrive = rec;
   const host = rec.host!;
   m.outside = m.outside.filter((x) => x.kind !== 'dev-drive');
-  noteOutside(m, { kind: 'dev-drive', name: rec.vhdx, note: `the Dev Drive that holds this root: a VHDX in ${host}, mounted at ${rec.letter}:, and the SYSTEM tasks ffsb-helper-mount, -trim, -compact and -grow` });
+  noteOutside(m, { kind: 'dev-drive', name: rec.vhdx, note: `the Dev Drive that holds this root: a VHDX in ${host}, mounted at ${rec.letter}:, and the SYSTEM tasks ffsb-helper-mount, -trim, -compact, -grow and -dedup` });
   noteOutside(m, { kind: 'file', name: path.join(host, 'daemon'), note: 'the daemon\'s folder, off the drive it remounts (w1070, as BEAST\'s C:\\ffw-anchor)' });
   noteOutside(m, { kind: 'file', name: path.join(host, 'secrets'), note: 'the machine credential, with the daemon' });
   noteOutside(m, { kind: 'file', name: path.join(host, 'moved.json'), note: 'where the root is, for anyone given the folder it was installed into' });

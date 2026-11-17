@@ -137,6 +137,9 @@ interface Scenario {
   /** w4509: polls the status reports Running before the job ends (-1 never), and a job that never shows as started. */
   dedupRunningPolls?: number;
   dedupNeverStarts?: boolean;
+  /** w4517: ReFS dedup never turned on for the volume; this Windows has no ReFS dedup cmdlets. */
+  dedupDisabled?: boolean;
+  dedupUnavailable?: boolean;
 }
 
 /** Run the real ffsb-helper.ps1 mount against a faked PC; returns what it called and wrote. */
@@ -195,6 +198,15 @@ test('dedup (w4502, w4509): one full ReFS dedup pass on the drive, capped at 5 h
   const never = boot({ attached: true, autoLetter: 'V', state: { letter: 'V' }, dedupNeverStarts: true }, { action: 'dedup' });
   assert.equal(never.result?.ok, false);
   assert.match(never.result!.detail, /never seen running in 20 polls/);
+  // w4517: every Dev Drive install registers the task; where dedup is off or missing it runs nothing and says why.
+  const offd = boot({ attached: true, autoLetter: 'V', state: { letter: 'V' }, dedupDisabled: true }, { action: 'dedup' });
+  assert.equal(offd.result?.ok, true, JSON.stringify(offd));
+  assert.deepEqual(offd.calls, [], 'no job on a volume without dedup');
+  assert.match(offd.result!.detail, /ReFS dedup is not enabled on V:.*nothing to run/);
+  const none = boot({ attached: true, autoLetter: 'V', state: { letter: 'V' }, dedupUnavailable: true }, { action: 'dedup' });
+  assert.equal(none.result?.ok, true);
+  assert.deepEqual(none.calls, []);
+  assert.match(none.result!.detail, /ReFS dedup is not available on V: .*not recognized.*nothing to run/);
   const off = boot({ attached: false, autoLetter: '', state: { letter: 'V' } }, { action: 'dedup' });
   assert.equal(off.result?.ok, false);
   assert.match(off.result!.detail, /V: is not mounted/);

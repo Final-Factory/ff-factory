@@ -143,7 +143,7 @@ function Format-DataPartition([int]$n, [int]$part, [string]$l) {
 function Register-Tasks([string]$l) {
   if ($NoTasks) { return }
   $helpers = Join-Path $PSScriptRoot '..\install-privileged-helpers.ps1'
-  $a = @{ Vhdx = $Vhdx; Letter = $l; Flex = $true; StateFile = $StateFile; DaemonConfig = $DaemonConfig; WorkerRoot = $WorkerRoot; Actions = @('mount', 'trim', 'compact', 'grow') }
+  $a = @{ Vhdx = $Vhdx; Letter = $l; Flex = $true; StateFile = $StateFile; DaemonConfig = $DaemonConfig; WorkerRoot = $WorkerRoot; Actions = @('mount', 'trim', 'compact', 'grow', 'dedup') }
   if ($User) { $a.User = $User }
   if ($Skip) { $a.Skip = $Skip }
   & $helpers @a | ForEach-Object { Say "helpers: $_" }
