@@ -1,0 +1,6 @@
+{
+  "about": "LothDesktop, 2026-11-17 (w4624): timed run tr_97b11ed6a4 waits for the exclusive bench ticket just before a daemon restart. `status` is the line its bench_queue.py hold helper wrote then (daemon.log 18:53Z); `place` is the queue-place.json the daemon kept beside the run.",
+  "run": "tr_97b11ed6a4",
+  "status": "waiting t00007465: exclusive ticket, place 6, waiting for t00007447 exclusive probe multisel round 1 (slot2 w4591 urgent); t00007451 shared player build slot3; t00007452 shared ffnightly players; t00007458 shared running editor slot6; t00007460 exclusive probe A round 2",
+  "place": { "place": 7465, "ticket": "t00007465", "at": "2026-11-17T18:53:22.000Z" }
+}

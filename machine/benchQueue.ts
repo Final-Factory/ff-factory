@@ -123,6 +123,39 @@ export interface BenchTicketOptions {
   reason?: 'timing' | 'machine';
   /** The process the ticket follows (default this one); w1996: a timed run's own owner child, so BenchTurn spares only it. */
   ownerPid?: number;
+  /**
+   * w4624: an exclusive ticket taken again for the same waiting work after a daemon restart keeps this earlier place
+   * (the lost ticket's number, `bench_queue.py hold --place`). Passed only to a copy that knows the flag (supportsPlace).
+   */
+  place?: number;
+}
+
+/** Whether a copy of the queue script takes `hold --place` (w4624); a copy from before it would refuse the flag. */
+export function supportsPlace(script: string): boolean {
+  try {
+    return fs.readFileSync(script, 'utf8').includes('"--place"');
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * w4624: the copy a ticket that keeps its place runs under: `script` when it takes --place, else another copy here of the
+ * same rules version or newer that does (a sandbox whose branch merged master first), else undefined (the ticket then
+ * queues without its place, as before).
+ */
+export function placeScript(script: string, checkouts: (string | undefined)[], root: string | undefined): string | undefined {
+  if (supportsPlace(script)) return script;
+  const v = rulesVersion(script);
+  const dir = root ? path.join(root, 'sandboxes') : undefined;
+  let names: string[] = [];
+  try {
+    names = dir ? fs.readdirSync(dir).sort() : [];
+  } catch {
+    // no sandboxes here
+  }
+  const copies = [findBenchQueueScript(checkouts), ...names.map((n) => benchQueueScript(path.join(dir!, n)))];
+  return copies.find((s): s is string => !!s && rulesVersion(s) >= v && supportsPlace(s));
 }
 
 export type TicketState =
@@ -143,11 +176,17 @@ export class BenchTicket {
     this.status = path.join(o.tempDir ?? os.tmpdir(), `ff-bench-${process.pid}-${randomBytes(4).toString('hex')}`);
   }
 
+  /** The earlier place this ticket was taken at (w4624), when the helper was asked to keep one. */
+  get keptPlace(): number | undefined {
+    return this.o.mode === 'exclusive' ? this.o.place : undefined;
+  }
+
   /** Start the helper: it numbers the ticket and starts waiting. */
   take(): this {
     const args = [this.o.script, '--lock', this.o.lock, 'hold', '--mode', this.o.mode, '--what', this.o.what, '--owner-pid', String(this.o.ownerPid ?? process.pid), '--status', this.status];
     if (this.o.maxMin) args.push('--max-min', String(this.o.maxMin));
     if (this.o.reason) args.push('--reason', this.o.reason);
+    if (this.o.place !== undefined && this.o.mode === 'exclusive') args.push('--place', String(this.o.place));
     try {
       this.child = spawn(this.o.python ?? pythonExe(this.o.env), args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true, env: { ...(this.o.env ?? process.env) } });
     } catch (e) {
@@ -219,6 +258,11 @@ export function benchTicketFor(o: Omit<BenchTicketOptions, 'script' | 'lock'> & 
   if (!script) return { why: 'no scripts/bench/bench_queue.py in this checkout (a branch from before w1615) or in any sandbox here' };
   const lock = benchLockPath(o.root, env);
   if (!lock) return { why: 'no worker root to keep the bench queue under' };
+  if (o.place !== undefined) {
+    const s = placeScript(script, o.checkouts, o.root);
+    if (!s) return { ticket: new BenchTicket({ ...o, place: undefined, script, lock }).take(), why: 'no queue script here takes --place yet (w4624): queued without its earlier place' };
+    return { ticket: new BenchTicket({ ...o, script: s, lock }).take() };
+  }
   return { ticket: new BenchTicket({ ...o, script, lock }).take() };
 }
 

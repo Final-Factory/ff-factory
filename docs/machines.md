@@ -1221,6 +1221,16 @@ and w1891 waited behind it there, and w1789 waited on LothDesktop behind shared 
   run its daemon was refused its pieces for anyway is sent again once while the portal still has them, and a second
   refusal fails it with "call timed_run again to redo it". A message that moves with its request (`movedText` in
   `Agents.roomMove`) names its attachments by id, since they were copied into the old sandbox's Inbox only.
+- **A waiting run keeps its bench-queue place across a daemon restart** (w4624; ben, 2026-11-17: timed run tr_97b11ed6a4
+  on LothDesktop got a new ticket at every restart, t00007465 then t00007637 then t00007672, and played no leg in 4+
+  hours). The run's exclusive ticket lives in a `bench_queue.py hold` helper that ends with the daemon, so a restart
+  dropped it and the run's next ticket queued behind everything taken since. While its ticket waits, the daemon keeps
+  `timing/runs/<run>/queue-place.json` (`{place, ticket, at}`: the ticket's own number, or the place it was already
+  keeping); the restarted daemon reads it (`readQueuePlace`, under 24 h old) and takes the ticket again with
+  `hold --place <n>` (`BenchTicket`, `placeScript` picks a queue script that knows the flag; one that does not queues it
+  at the back and the run's status says so). The file is removed once the ticket is granted or the run ends, so a later
+  turn queues at the back as before (w1832). Game-repo side: `Documentation/Bench-Lock.md`, "A timed run keeps its place
+  across a daemon restart". Test: `server/w4624QueuePlace.test.ts` (fixture `server/fixtures/w4624-queue-before-restart.json`).
 - **A slow send answers in time** (w2928; found by lothsahn's 4-hourly unjam rule). The agent host waits 20 min for its
   daemon's answer (`machine/agentHost.ts RPC_ANSWER_MS`), and `timed_run` used to hold the call until every piece was sent
   and the run handed over. On 2026-11-03 m3's four builds for LothDesktop took 40 min 47 s (tr_affa494c34: planned
