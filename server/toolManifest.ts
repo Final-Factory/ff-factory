@@ -66,6 +66,8 @@ export const TOOL_MANIFEST = {
   stop_bench_ticket: { group: 'machines', kinds: [P] },
   read_work: { group: 'ledger', kinds: [W] },
   spend_export: { group: 'ledger', kinds: [W] },
+  // w4531: wall time of the last finished requests (ledger and transcript grants)
+  work_timing: { group: 'ledger', kinds: [W] },
   // reports (w2541, docs/reports.md)
   file_report: { group: 'ledger', kinds: [W] },
   list_reports: { group: 'ledger', kinds: [D, P, R, W] },
