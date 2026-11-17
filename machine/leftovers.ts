@@ -31,7 +31,9 @@
 // seen so.
 //
 // Never touched: a program a worker started for a person with `ff-leftovers launch` and what it starts (FF_FOR_PERSON in its
-// environment and no FF_SESSION_ID: a launcher Ben used was ended on his m5, w4046/w4047); anything while its worker's
+// environment and no FF_SESSION_ID: a launcher Ben used was ended on his m5, w4046/w4047); what serves a timed run the
+// daemon still runs (FF_TIMED_RUN in its environment: the run's bench_queue.py helper, its legs' players; w4588), whoever
+// asked for the run; anything while its worker's
 // process runs (between turns too); an interactive Unity editor, and what it
 // started (the sandbox pool stops idle editors; a person's editor is never ours); a process that names the machine's main
 // clone or the daemon's own folder (the agent hosts, which hostWatch.ts owns; not a worker's own `unity-slot`, w2410); a
@@ -97,6 +99,12 @@ export interface ProcEnv {
   root?: string;
   /** FF_FOR_PERSON: the session that started it for a person with `ff-leftovers launch` (w4047); never a leftover. */
   person?: string;
+  /**
+   * FF_TIMED_RUN: the daemon's timed run it serves (w4588): the run's bench_queue.py helper (and the conhost Windows gives
+   * it) and its legs' players. The daemon owns them, not the worker that asked for the run, so they are kept while the run
+   * is live (queued, waiting for its ticket or running), whatever became of that worker or its request.
+   */
+  run?: string;
 }
 
 /** w4047: a program a worker started for a person (`ff-leftovers launch`): the marker, and no session of its own. */
@@ -135,6 +143,14 @@ export interface LeftoverDeps {
   sessionKnown(id: string): boolean;
   /** A request still waits for the session (the portal's `resumable`, w1097). */
   resumable(id: string): boolean;
+  /**
+   * w4588: the open requests the session was on that are now with another worker (a w2046 room move, a resume elsewhere):
+   * server/resumable.ts ownersOf's requests with `with` false. Such a request still waits for what the old worker left
+   * that serves it, so its leftovers get the grace of a waited-for worker, not the 2 min of one whose work is over.
+   */
+  movedRequests?(id: string): string[];
+  /** w4588: the daemon's timed run `id` is live here (queued or current, machine/timedRunner.ts active()). */
+  timedRunLive?(id: string): boolean;
   /** When the session's pending wake_me check-in comes due (ms), as the portal last said. */
   wakeAt(id: string): number | undefined;
   /** w3715: the session holds a granted bench ticket of its own (a harness ticket is not its own). */
@@ -326,6 +342,8 @@ export function leaseHeld(l: PlayerLease, o: { host: string; now: number; alive:
 export interface SessionFacts {
   live: boolean;
   resumable: boolean;
+  /** w4588: open requests of its that moved to another worker (LeftoverDeps.movedRequests). */
+  moved?: string[];
   wakeAt?: number;
   /** w3715: it holds a granted bench ticket of its own (not an editor boot's or a timed run's). */
   holdsTicket?: boolean;
@@ -347,17 +365,22 @@ export function sessionVerdict(s: SessionFacts): { end: boolean; until?: number;
   // w3715: a stopped worker's detached bench script holds the machine's one bench lock for as long as we keep it; its
   // far check-in or waiting request is no reason to make every other worker wait, so neither grace applies.
   const holds = s.holdsTicket === true;
-  const grace = holds ? LEFTOVER.DONE_GRACE_MS : s.resumable ? LEFTOVER.STOPPED_GRACE_MS : LEFTOVER.DONE_GRACE_MS;
+  // w4588: a request that moved on to another worker still waits (lothdesktop, 2026-11-17: w4554 moved to biscuit at
+  // 15:41:31Z and the sweep said "no request waits for it" of worker 974429a3 at 15:42:26Z).
+  const moved = !s.resumable && s.moved?.length ? s.moved : undefined;
+  const waited = s.resumable || !!moved;
+  const waits = moved ? `its request ${moved.join(', ')} moved to another worker and still waits` : 'a request still waits for it';
+  const grace = holds ? LEFTOVER.DONE_GRACE_MS : waited ? LEFTOVER.STOPPED_GRACE_MS : LEFTOVER.DONE_GRACE_MS;
   const after = s.stoppedSince + grace;
   const wake = s.wakeAt !== undefined && !holds ? s.wakeAt + LEFTOVER.WAKE_GRACE_MS : 0;
   const until = Math.max(after, wake);
   const state = `its worker stopped ${ago(s.now - s.stoppedSince)} ago`;
   if (s.now < until) {
-    const why = wake > after ? `its check-in comes due at ${clock(s.wakeAt!)}` : holds ? 'it holds bench ticket(s), so its check-in does not keep them' : s.resumable ? 'a request still waits for it' : 'its work is over';
+    const why = wake > after ? `its check-in comes due at ${clock(s.wakeAt!)}` : holds ? 'it holds bench ticket(s), so its check-in does not keep them' : waited ? waits : 'its work is over';
     return { end: false, until, why: `${state}; ${why}: kept until ${clock(until)}` };
   }
   if (holds) return { end: true, why: `${state} and holds bench ticket(s), which its check-in or request does not keep` };
-  return { end: true, why: `${state}${s.resumable ? ' (a request still waits for it, with no check-in pending)' : ' and no request waits for it'}` };
+  return { end: true, why: `${state}${waited ? ` (${waits}, with no check-in pending)` : ' and no request waits for it'}` };
 }
 
 export interface OrphanFacts {
@@ -532,6 +555,18 @@ export class LeftoverReaper {
       if (!this.forPersonSeen.has(id)) d.log(`leftovers: spared pid ${p.pid}, started for a person by worker ${e!.person} (ff-leftovers launch): ${p.cmd.slice(0, 160)}`);
       this.forPersonSeen.add(id);
     }
+    // w4588: what serves a live timed run of the daemon's (its bench_queue.py helper and that one's conhost, its legs'
+    // players) is the run's, trees and all, whoever asked for the run: on lothdesktop, 2026-11-17 15:42:26Z, this sweep
+    // ended tr_6b6935944b's helper (python pid 26508, conhost 28400) as worker 974429a3's while the run waited for its
+    // ticket, and the run failed. Once the run is over (or the daemon that ran it restarted) they are judged as before.
+    for (const p of procs) {
+      const e = env.get(p.pid);
+      if (!e?.run || spared.has(p.pid) || !d.timedRunLive?.(e.run)) continue;
+      spare(p.pid);
+      const id = `${p.pid}|${p.cmd}`;
+      if (!this.forPersonSeen.has(id)) d.log(`leftovers: spared pid ${p.pid}, serving the live timed run ${e.run}${e.session ? ` (asked for by worker ${e.session})` : ''}: ${p.cmd.slice(0, 160)}`);
+      this.forPersonSeen.add(id);
+    }
     const leases = d.leases();
     const now = d.now();
     const personOn = !!d.personPlay?.();
@@ -614,7 +649,7 @@ export class LeftoverReaper {
       let v: { end: boolean; until?: number; why: string };
       let owner: PlayerLine['owner'];
       if (c.session) {
-        v = sessionVerdict({ live: d.sessionLive(c.session), resumable: d.resumable(c.session), wakeAt: d.wakeAt(c.session), holdsTicket: d.holdsTicket?.(c.session), stoppedSince: this.stopped.get(c.session) ?? now, now });
+        v = sessionVerdict({ live: d.sessionLive(c.session), resumable: d.resumable(c.session), moved: d.movedRequests?.(c.session), wakeAt: d.wakeAt(c.session), holdsTicket: d.holdsTicket?.(c.session), stoppedSince: this.stopped.get(c.session) ?? now, now });
         owner = d.sessionLive(c.session) ? 'live' : 'stopped';
         // Named by an argument only: another worker's shell may be reading that folder, so it ends once its starter is gone too.
         const starter = c.via === 'arg' && v.end ? liveParent(c.p, procs, facts, d.platform) : undefined;
@@ -730,7 +765,7 @@ export class LeftoverReaper {
 
 // ---------------------------------------------------------------- the real machine
 
-const WANT = /^(FF_SESSION_ID|FF_SANDBOX_ID|FF_MACHINE_ID|FF_WORKER_ROOT|FF_FOR_PERSON)=(.*)$/;
+const WANT = /^(FF_SESSION_ID|FF_SANDBOX_ID|FF_MACHINE_ID|FF_WORKER_ROOT|FF_FOR_PERSON|FF_TIMED_RUN)=(.*)$/;
 
 /**
  * w3714: whether a process's FF_WORKER_ROOT is this daemon's root. Either unknown (a process of a worker from before
@@ -756,6 +791,8 @@ export function envFrom(entries: Iterable<string>): ProcEnv {
     else if (m[1] === 'FF_MACHINE_ID') o.machine = m[2];
     else if (m[1] === 'FF_FOR_PERSON') {
       if (m[2]) o.person = m[2];
+    } else if (m[1] === 'FF_TIMED_RUN') {
+      if (m[2]) o.run = m[2];
     } else if (m[2]) o.root = m[2];
   }
   return o;
@@ -770,7 +807,7 @@ export function macEnvLine(line: string): { pid: number; env: ProcEnv } | undefi
   const m = /^\s*(\d+)\s+(.*)$/.exec(line);
   if (!m) return undefined;
   const env: ProcEnv = {};
-  for (const x of m[2].matchAll(/(?:^|\s)(FF_SESSION_ID|FF_SANDBOX_ID|FF_MACHINE_ID|FF_WORKER_ROOT|FF_FOR_PERSON)=(\S+)/g)) Object.assign(env, envFrom([`${x[1]}=${x[2]}`]));
+  for (const x of m[2].matchAll(/(?:^|\s)(FF_SESSION_ID|FF_SANDBOX_ID|FF_MACHINE_ID|FF_WORKER_ROOT|FF_FOR_PERSON|FF_TIMED_RUN)=(\S+)/g)) Object.assign(env, envFrom([`${x[1]}=${x[2]}`]));
   return { pid: Number(m[1]), env };
 }
 
@@ -820,7 +857,7 @@ export function winEnvScript(pids: number[]): string {
   const list = pids.filter((p) => Number.isInteger(p) && p > 4).join(',');
   return [
     `Add-Type -TypeDefinition @'\n${WIN_ENV_CS}\n'@`,
-    `$out = foreach ($id in @(${list || '0'})) { $b = $null; try { $b = [FFProcEnv]::Block([int]$id) } catch { }; if ($b -and ($b.Contains('FF_SESSION_ID=') -or $b.Contains('FF_FOR_PERSON='))) { $m = @{}; foreach ($kv in $b.Split([char]0)) { if ($kv -match '^(FF_SESSION_ID|FF_SANDBOX_ID|FF_MACHINE_ID|FF_WORKER_ROOT|FF_FOR_PERSON)=(.*)$') { $m[$matches[1]] = $matches[2] } }; [pscustomobject]@{ pid = [int]$id; session = $m['FF_SESSION_ID']; sandbox = $m['FF_SANDBOX_ID']; machine = $m['FF_MACHINE_ID']; root = $m['FF_WORKER_ROOT']; person = $m['FF_FOR_PERSON'] } } }`,
+    `$out = foreach ($id in @(${list || '0'})) { $b = $null; try { $b = [FFProcEnv]::Block([int]$id) } catch { }; if ($b -and ($b.Contains('FF_SESSION_ID=') -or $b.Contains('FF_FOR_PERSON='))) { $m = @{}; foreach ($kv in $b.Split([char]0)) { if ($kv -match '^(FF_SESSION_ID|FF_SANDBOX_ID|FF_MACHINE_ID|FF_WORKER_ROOT|FF_FOR_PERSON|FF_TIMED_RUN)=(.*)$') { $m[$matches[1]] = $matches[2] } }; [pscustomobject]@{ pid = [int]$id; session = $m['FF_SESSION_ID']; sandbox = $m['FF_SANDBOX_ID']; machine = $m['FF_MACHINE_ID']; root = $m['FF_WORKER_ROOT']; person = $m['FF_FOR_PERSON']; run = $m['FF_TIMED_RUN'] } } }`,
     `@($out) | ConvertTo-Json -Compress`,
   ].join('\n');
 }
@@ -851,8 +888,8 @@ export async function readEnvs(platform: UnityPlatform, pids: number[]): Promise
   }
   const r = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', winEnvScript(pids)], { timeoutMs: 120_000 });
   if (r.code !== 0) throw new Error(`reading process environments failed (${r.code}): ${r.stderr.trim().slice(0, 200)}`);
-  for (const x of parsePsJson<{ pid: number; session?: string; sandbox?: string; machine?: string; root?: string; person?: string }>(r.stdout, 'the Windows process environments')) {
-    if (x.session || x.person) out.set(Number(x.pid), { ...(x.session ? { session: x.session } : {}), ...(x.sandbox ? { sandbox: x.sandbox } : {}), ...(x.machine ? { machine: x.machine } : {}), ...(x.root ? { root: x.root } : {}), ...(x.person ? { person: x.person } : {}) });
+  for (const x of parsePsJson<{ pid: number; session?: string; sandbox?: string; machine?: string; root?: string; person?: string; run?: string }>(r.stdout, 'the Windows process environments')) {
+    if (x.session || x.person) out.set(Number(x.pid), { ...(x.session ? { session: x.session } : {}), ...(x.sandbox ? { sandbox: x.sandbox } : {}), ...(x.machine ? { machine: x.machine } : {}), ...(x.root ? { root: x.root } : {}), ...(x.person ? { person: x.person } : {}), ...(x.run ? { run: x.run } : {}) });
   }
   return out;
 }

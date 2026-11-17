@@ -68,7 +68,7 @@ export interface TimedWorkerDeps {
   /** The sandbox ids whose player-slot pairs (slotK-0, slotK-1) are this computer's (the pool's sandboxes). */
   sandboxIds: () => string[];
   /** Take the exclusive timing ticket for the run, owned by `ownerPid`; undefined with why when the queue cannot be used. */
-  ticket: (o: { what: string; session: string; maxMin: number; ownerPid: number }) => { ticket?: RunTicket; why?: string };
+  ticket: (o: { what: string; session: string; maxMin: number; ownerPid: number; run: string }) => { ticket?: RunTicket; why?: string };
   /** The process the ticket and the slot leases follow; ended after the run (default: a small node child of this daemon). */
   owner?: () => { pid: number; end: () => void };
   /** The slot pool's root (default <root>/players: the folders the firewall step allows). */
@@ -81,6 +81,15 @@ export interface TimedWorkerDeps {
 export { TURN_PLAN_MS };
 
 /** The node child that owns a run's ticket and leases: it ends when this daemon does (w1996, so BenchTurn spares only it). */
+/**
+ * The environment of a process that serves timed run `run` (its bench_queue.py helper, its legs' players). FF_SESSION_ID
+ * stays the asking worker's (w1996: the queue's order and turn limits and BenchTurn's quiet machine go by it), and
+ * FF_TIMED_RUN marks it the run's (w4588): the leftover sweep keeps it while the run is live, though that worker stopped or
+ * its request moved to another (machine/leftovers.ts; lothdesktop, 2026-11-17: tr_6b6935944b's helper was ended as worker
+ * 974429a3's leftover while it waited for ticket t00007358).
+ */
+export const timedRunEnv = (base: NodeJS.ProcessEnv, session: string, run: string): NodeJS.ProcessEnv => ({ ...base, FF_SESSION_ID: session, FF_TIMED_RUN: run });
+
 export function spawnOwner(): { pid: number; end: () => void } {
   const parent = process.pid;
   const c = spawn(process.execPath, ['-e', `setInterval(()=>{try{process.kill(${parent},0)}catch{process.exit(0)}},2000)`], { stdio: 'ignore', windowsHide: true });
@@ -672,7 +681,7 @@ export class TimedRunner {
     try {
       for (let turn = 1; next < order.length; turn++) {
         await this.personWait(o, 'before its turn', x.poll);
-        const t = w.ticket({ what: `timed run ${o.id}: ${o.what}`, session: o.session, maxMin: 30, ownerPid: owner.pid });
+        const t = w.ticket({ what: `timed run ${o.id}: ${o.what}`, session: o.session, maxMin: 30, ownerPid: owner.pid, run: o.id });
         if (!t.ticket) throw new Error(`no bench queue ticket here: ${t.why ?? 'unknown'}`);
         const ticket = t.ticket;
         let pair: BorrowedPair | undefined;
@@ -766,7 +775,7 @@ export class TimedRunner {
       }
     })();
     // w1996: the asking worker's session, so a worker computer's bench turn (machine/benchTurn.ts) spares the run's own player
-    const env = { ...process.env, FF_SESSION_ID: o.session };
+    const env = timedRunEnv(process.env, o.session, o.id);
     this.checkStop(o.id);
     const child = (this.d.spawnPlayer ?? ((e, a, cwd) => spawn(e, a, { cwd, env, stdio: 'ignore', windowsHide: false })))(exe, args, path.dirname(exe));
     this.child = child;

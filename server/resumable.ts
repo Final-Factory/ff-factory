@@ -85,3 +85,15 @@ export function ownersOf(sessions: Iterable<{ id: string; machineSandbox?: strin
   }
   return out;
 }
+
+/**
+ * w4588: the open (or stalled) requests a session was on that are now with another worker, from its ownersOf entry: a
+ * w2046 room move or a resume elsewhere took them on. They still wait for what the old worker left that serves them, so
+ * the machine's leftover sweep gives those processes a waited-for worker's grace (machine/leftovers.ts sessionVerdict),
+ * not the 2 min of a worker whose work is over: on lothdesktop, 2026-11-17, w4554 moved from worker 974429a3 to biscuit at
+ * 15:41:31Z, and the sweep said "no request waits for it" of 974429a3's processes 55 s later.
+ */
+export function movedRequestsOf(owner: SessionOwner | undefined): string[] {
+  if (!owner) return [];
+  return owner.requests.filter((r) => !r.with && r.status !== 'merged' && (WORK_OPEN.includes(r.status as WorkItem['status']) || r.status === 'stalled')).map((r) => r.id);
+}
