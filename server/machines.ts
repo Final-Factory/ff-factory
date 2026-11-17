@@ -2623,7 +2623,7 @@ export class MachineManager {
         return;
       }
       case 'stats': {
-        const stats: MachineStats = { ...msg.stats, ...(msg.unity ? { unity: msg.unity } : {}), ...(msg.benchLock ? { benchLock: msg.benchLock } : {}), ...(msg.benchQueue ? { benchQueue: msg.benchQueue } : {}), ...(msg.bench ? { bench: msg.bench } : {}), ...(msg.personPlay ? { personPlay: msg.personPlay } : {}), at: new Date().toISOString() };
+        const stats: MachineStats = { ...msg.stats, ...(msg.unity ? { unity: msg.unity } : {}), ...(msg.benchLock ? { benchLock: msg.benchLock } : {}), ...(msg.benchQueue ? { benchQueue: msg.benchQueue } : {}), ...(msg.bench ? { bench: msg.bench } : {}), ...(msg.personPlay ? { personPlay: msg.personPlay } : {}), ...(msg.playerCache ? { playerCache: msg.playerCache } : {}), at: new Date().toISOString() };
         // w1894: a person's game starting or ending there is logged once (portal_logs shows it)
         const was = this.stats.get(id)?.personPlay;
         if (!!was !== !!msg.personPlay) console.log(`machine ${id}: ${msg.personPlay ? `${msg.personPlay.who} is playing Final Factory there (pid ${(msg.personPlay.pids ?? []).join(', ')}): held, its agents yield (w1894)` : `the person's game there ended and its grace passed: it takes work again (w1894)`}`);
