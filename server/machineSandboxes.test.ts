@@ -1099,6 +1099,21 @@ test('switch_branch on a machine sandbox: the calling worker alone switches, thr
   a2.info.status = 'running';
   await assert.rejects(agents.switchBranch({ sandbox: 'pc/sb1', branch: 'feature/w' }), /"pr-fix-a2", "other worker" are mid-turn/);
 
+  // w4608: an agent there on an agent seat (its open work is all not the game's, w1098: it works in its own clone) holds no
+  // switch up, on the portal or on the daemon: w4591's timed leg waited 30 min in lothdesktop/slot2 behind w4397's FFU agent.
+  const seated = store.sessions.get(a2.info.id)!;
+  const oldTitle = seated.title;
+  seated.title = 'w9001: FFU route window design';
+  const ffu = { id: 'w9001', title: 'FFU route window design', status: 'active', needs: 'agent', requesters: [], log: [], sessionIds: [], prs: [], related: [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() } as unknown as WorkItem;
+  store.putWork(ffu);
+  assert.match(await agents.switchBranch({ sandbox: 'pc/sb1', branch: 'feature/seat', callerSessionId: a1.info.id }), /→ feature\/seat/);
+  // Game work there still holds it up, by its title.
+  store.putWork({ ...ffu, needs: 'game' });
+  await assert.rejects(agents.switchBranch({ sandbox: 'pc/sb1', branch: 'feature/w', callerSessionId: a1.info.id }), /is mid-turn in pc\/sb1/);
+  // Put back for what follows.
+  store.putWork({ ...ffu, status: 'done' });
+  seated.title = oldTitle;
+
   // A stopped agent left "running" on the portal (no process behind it) does not block, and is cleared.
   a2.stop();
   await until('a2 stopped', () => !a2.live && a2.info.status === 'stopped');

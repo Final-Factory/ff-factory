@@ -177,7 +177,10 @@ export function keptWhy(s: SessionInfo, sb: MachineSandbox, f: PlaceFacts): stri
   // the commit stays in the worktree's HEAD reflog, and the release names it.
   if (g && g.branch === 'detached HEAD' && !(over && !dirtyOf(sb))) return 'it is not on a branch';
   if (g && g.branch === '?') return 'it is not on a branch';
-  const other = inSandbox(f, sb.id).find((o) => o.id !== s.id && occupies(o, f.live(o.id), f.now) && !releasable(o, f));
+  // w4608: an agent there on an agent seat (its open work is all not the game's, w1098) works in its own clone and keeps
+  // nothing: w4591's stopped timed leg 5d876a0b stayed in lothdesktop/slot2 behind w4397's seated FFU agent, so the
+  // message meant to move it resumed it there.
+  const other = inSandbox(f, sb.id).find((o) => o.id !== s.id && occupies(o, f.live(o.id), f.now) && !releasable(o, f) && !f.agentOnly?.(o));
   // w2358: for a worker whose work is over, another agent there keeps the sandbox by itself (free() counts it), and a
   // Unity batch run of that sandbox is that agent's (the holder is per sandbox, not per worker: beast/slot2's bfa0f5c7,
   // w2311 and w2325 done, was held by "a Unity batch run of that sandbox is in flight" beside w2337's worker).
@@ -652,6 +655,22 @@ export class PlaceAgain {
   waiting(machineId: string): string[] {
     const claimed = new Set(this.claims(machineId).values());
     return this.facts(machineId).sessions.filter((s) => s.placeReleased && !this.d.isLive(s.id) && this.d.queued(s.id) && !claimed.has(s.id) && !this.agentOnly(s)).map((s) => s.id);
+  }
+
+  /**
+   * w4608: why a worker's sandbox is not released (yet), so a message resumes it there and in no other sandbox: a pair
+   * or Live hold, or what keeps it (keptWhy). Undefined when it released it, or nothing keeps it once its release is due.
+   */
+  stayWhy(s: SessionInfo): string | undefined {
+    if (s.kind !== 'worker' || !s.machineId || !s.machineSandbox || s.placeReleased) return undefined;
+    const sb = this.d.machine(s.machineId)?.sandboxes?.find((x) => x.id === s.machineSandbox);
+    if (!sb) return undefined;
+    return this.d.pairHold?.(s) ?? this.d.liveHold?.(s) ?? keptWhy(s, sb, this.facts(s.machineId));
+  }
+
+  /** w4608: the sandbox a released worker is being moved into right now (its editor stopped, its branch switched), if any. */
+  placingOf(id: string): { machine: string; sandbox: string } | undefined {
+    return this.placing.get(id);
   }
 
   /**

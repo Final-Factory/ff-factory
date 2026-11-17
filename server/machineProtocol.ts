@@ -190,8 +190,10 @@ export type ToDaemon =
    * switch_branch, mid-turn by definition, so not counted as busy (w422; older daemons ignore it and refuse their caller).
    * githubToken (w868, no bump): the GitHub token of the person the work is for, from the vault, for the switch's push and
    * fetch (as on save_work); absent, the machine's own login. An older daemon ignores it and uses its own login.
+   * seatSessionIds (w4608, no bump): agents there on an agent seat (their open work is all not the game's, w1098: they work
+   * in their own clone), which hold no switch up either; an older daemon ignores it and counts them.
    */
-  | { type: 'switch'; id: string; branch: string; createFrom?: string; sandbox?: string; callerSessionId?: string; githubToken?: string }
+  | { type: 'switch'; id: string; branch: string; createFrom?: string; sandbox?: string; callerSessionId?: string; githubToken?: string; seatSessionIds?: string[] }
   /**
    * A sandbox (protocol 5, machine/sandboxes.ts), answered by sandbox_result: create (returns once recorded; progress
    * comes in `sandboxes` snapshots), delete (returns when it is gone), log (the tail of its editor log).

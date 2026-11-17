@@ -2017,6 +2017,13 @@ LothDesktop and Beast, not just when BEAST is full").
     - **several stopped workers in one sandbox**, each with its own release due, no longer keep it for each other
       ("agent … works there too"): they release it together, and when they resume each is placed back on the shared
       branch, the second joining the first.
+    - **an agent on a seat beside it** (w4608, lothsahn's: a stopped w4591 timed leg was announced as moving to a free
+      sandbox, yet resumed in lothdesktop/slot2 because w4397's FFU agent sat there on a seat). A seated agent works in its
+      own clone, so it keeps nothing (`keptWhy` skips `agentOnly`), and `switch_branch` never waits on its turn, on the
+      portal (`Agents.switchBranch`) nor the daemon (`seatSessionIds` on the `switch` message). `stop_agent` now says
+      whether the sandbox is released or what keeps it, and `message_agent` to a worker between turns says where it
+      resumes (`resumeWhere.ts`): "NOT another" while its sandbox was never released, "Not moved yet" while a move is
+      under way, and "now runs in" only once it is recorded in the new sandbox.
 
     A worker with its release due keeps its sandbox until the pass releases it (`holdsSandbox`), also past its hold,
     so new work never starts on its branch or over its files; a released one is placed again when it resumes. Every

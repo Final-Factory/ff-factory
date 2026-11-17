@@ -2977,8 +2977,9 @@ export class Daemon {
           return;
         }
         // Agents of that sandbox only. The agent that called switch_branch is mid-turn in it by definition and never
-        // holds itself up (w422).
-        const here = [...this.entries.values()].filter((e) => e.spec?.sandbox === msg.sandbox).map((e) => e.s);
+        // holds itself up (w422). Nor does an agent there on an agent seat, which works in its own clone (w4608).
+        const seats = new Set(msg.seatSessionIds ?? []);
+        const here = [...this.entries.values()].filter((e) => e.spec?.sandbox === msg.sandbox && !seats.has(e.s.info.id)).map((e) => e.s);
         const { busy } = othersMidTurn(here, msg.callerSessionId);
         if (busy.length) {
           this.send({ type: 'switch_result', id: msg.id, ok: false, error: midTurnRefusal(busy, `sandbox ${msg.sandbox}`) });
