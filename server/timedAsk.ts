@@ -252,9 +252,13 @@ export function decideTimedPlace(a: TimedPlaceInput): TimedPlaceDecision {
   if (!here) return { verdict: 'here', why: 'the portal does not know this computer: time here as before' };
   const small = smallTimedRank(a.places, a.prefs, a.platform, here.id, a.now, a.waitMs);
   const smallText = small.map(sizeText).join(' > ');
+  // w4621: the computers a leg was filed for that take no timed runs now (the m3, which runs no game players: w4584 was filed
+  // for it before the portal knew) drop out, so the leg never moves toward a computer that cannot run it.
+  const filed = a.ownLeg ? ownLegTargets(a.ownLeg.small, a.places) : undefined;
   if (here.noTimedRuns && a.ownLeg) {
-    const need = a.ownLeg.small.filter((id) => id !== here.id);
-    return { verdict: 'elsewhere', ownLeg: a.ownLeg.id, needs: need, why: `${here.id} takes no timed runs (${here.noTimedRuns}; w1861), and ${a.ownLeg.id} is itself the timed leg: it moves${need.length ? ` to ${need.join(' > ')}` : ''}, and no new leg is filed (w2610)` };
+    const need = filed!.ok.filter((id) => id !== here.id);
+    const to = need.length ? need : small.map((c) => c.id);
+    return { verdict: 'elsewhere', ownLeg: a.ownLeg.id, needs: to, why: `${here.id} takes no timed runs (${here.noTimedRuns}; w1861), and ${a.ownLeg.id} is itself the timed leg: it moves${to.length ? ` to ${to.join(' > ')}` : ''}, and no new leg is filed (w2610)${filed!.dropped.length ? `; not ${filed!.dropped.join('; ')} (w4621)` : ''}` };
   }
   if (here.noTimedRuns) {
     if (!small.length) {
@@ -285,6 +289,15 @@ export function decideTimedPlace(a: TimedPlaceInput): TimedPlaceDecision {
       return { verdict: 'here', ownLeg: o.id, bigFallback: why, why: `${why}: time here. ${bigFallbackRules(here.id)}` };
     }
     if (o.small.includes(here.id)) return { verdict: 'here', ownLeg: o.id, why: `${o.id} is itself the timed leg, filed for ${o.small.join(' or ')}, and this is ${here.id}` };
+    const f = filed!;
+    if (!f.ok.length && f.dropped.length) {
+      // w4621 (w4584: filed for m3, moved back to m3 from LothDesktop after its players were built there): none of the computers
+      // it was filed for can run it, so it goes to the next small computer that can, else it times here (w2048's fallback).
+      const not = `${o.id} is itself the timed leg, filed for ${o.small.join(' or ')}, and none of them can take it (${f.dropped.join('; ')}; w4621)`;
+      if (small.length) return { verdict: 'elsewhere', ownLeg: o.id, needs: small.map((c) => c.id), why: `${not}: it moves to the next small computer${os} that takes timed runs, ${smallText}, and no new leg is filed (w2610)` };
+      return { verdict: 'here', ownLeg: o.id, bigFallback: not, why: `${not}, and no small computer${os} that takes timed runs can: time here on ${here.id} (w2048). ${bigFallbackRules(here.id)}` };
+    }
+    if (f.dropped.length) return { verdict: 'elsewhere', ownLeg: o.id, needs: f.ok, why: `${o.id} is itself the timed leg, filed for ${f.ok.join(' or ')} (not ${f.dropped.join('; ')}: w4621), not ${here.id} (${here.maxAgents} agent slots: an exclusive turn here idles the others): it moves there, and no new leg is filed (w2610)` };
     return { verdict: 'elsewhere', ownLeg: o.id, needs: [...o.small], why: `${o.id} is itself the timed leg, filed for ${o.small.join(' or ') || 'a small computer'}, not ${here.id} (${here.maxAgents} agent slots: an exclusive turn here idles the others): it moves there, and no new leg is filed (w2610)` };
   }
   const idles = `${here.id} has ${here.maxAgents} agent slots (${here.live} live now): an exclusive turn there idles all the others`;
@@ -306,6 +319,21 @@ export function decideTimedPlace(a: TimedPlaceInput): TimedPlaceDecision {
     return { verdict: 'here', bigFallback: why, why: `${idles}, but ${why}: time here on ${here.id}, a big computer (w2048). ${bigFallbackRules(here.id)}` };
   }
   return { verdict: 'elsewhere', needs: small.map((c) => c.id), why: `${idles}; small computers${os} take it: ${smallText}${small.some(hasRoom) ? '' : `; none has room now, so it queues there and waits while one is online (a big one only if none can take it, w2048)`}` };
+}
+
+/**
+ * The computers a timed leg was filed for, split (w4621): `ok` may still take it (unknown to the portal now counts as ok, as
+ * before); `dropped` takes no timed runs now, each with why (its noTimedRuns: the m5, or the m3, which runs no game players).
+ */
+export function ownLegTargets(ids: readonly string[], places: readonly Computer[]): { ok: string[]; dropped: string[] } {
+  const ok: string[] = [];
+  const dropped: string[] = [];
+  for (const id of ids) {
+    const c = places.find((p) => p.id === id);
+    if (c?.noTimedRuns) dropped.push(`${id} takes no timed runs (${c.noTimedRuns})`);
+    else ok.push(id);
+  }
+  return { ok, dropped };
 }
 
 /** The mark for computer `c` (w1969): a big computer that takes timed runs asks; a small one, or one that takes none, does not. */
