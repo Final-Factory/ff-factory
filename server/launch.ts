@@ -202,7 +202,7 @@ export const CATALOG = {
     retry: z.boolean().optional().describe('w2041: your open pair run is running but cannot deliver (a leg is stuck): cancel it and file a fresh one. A run one of whose legs already reported, or whose computer is offline, is retried without it.'),
     avoid: z.array(z.string().max(40)).max(6).optional().describe('w2041: computers (ids such as lothlaptop) no leg may go on, where you saw a leg fail for a machine reason (Tailscale stuck, offline, a broken player).'),
     pr: z.string().max(200).optional().describe('w2057: the pull request the legs check ("#2340", "Final-Factory/FinalFactory#2340" or its link). Default: the one what or brief names, else the one open pull request of your request. An open pair run of it is joined, not run twice.'),
-    commit: z.string().max(40).optional().describe('w2057: the head commit the legs run (git rev-parse HEAD). A pair run of the same pull request that finished on it answers with its result, and nothing is filed.'),
+    commit: z.string().max(40).optional().describe('w2057: the head commit the legs run (git rev-parse HEAD). A pair run of the same pull request that finished on it answers with its result, and nothing is filed. w4601: a leg goes first on a computer whose player cache already holds a player of it, and is told its path, so pass it whenever you know it.'),
   },
   /** w2969 (docs/orchestrators.md, "Follow-up requests"): briefs a worker wrote for new requests, which only an orchestrator can file. */
   hand_up_requests: {

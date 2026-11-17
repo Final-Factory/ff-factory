@@ -675,6 +675,19 @@ export interface MachineStats extends HostStats {
   bench?: BenchState;
   /** A person plays Final Factory there now, or its grace after runs (w1894, machine/personPlay.ts); absent: nobody. */
   personPlay?: PersonPlayReport;
+  /** The ready players its shared player cache holds (w4601, machine/playerCache.ts); absent: an older daemon, or no cache. */
+  playerCache?: PlayerCacheReport;
+}
+
+/**
+ * A machine's shared player cache (w4601): the game repo's scripts/nightly/player_cache.py folder and its ready entries, each
+ * `<40 hex sha>-<mac|win|linux>[-burstN]` holding `player/`. A pair leg placed there reuses the player instead of building it.
+ */
+export interface PlayerCacheReport {
+  /** The cache folder, as the machine writes paths (FF_PLAYER_CACHE, else <worker root>/player-cache). */
+  root: string;
+  /** Ready entries (build-manifest.json status ok), newest build first; `at` is the manifest's finished time. */
+  entries: { key: string; at?: string }[];
 }
 
 /**

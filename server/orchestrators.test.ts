@@ -7195,6 +7195,23 @@ test('w1945: a pair request starts both legs together, each on its own computer,
 });
 
 
+test('w4601: a pair leg started on a computer whose player cache holds the pair\'s commit is told the player\'s path and to skip the build; the other leg is not', async (t) => {
+  const env = await twoComputers(t);
+  const { store, machines, dispatcher, call } = env;
+  const sha = '670a034960aa11bb22cc33dd44ee55ff66778899';
+  putRequests(store, [{ id: 'w2', by: BEN, status: 'queued', queuedFor: { at: T0 }, pair: { legs: 2, commit: sha } }]);
+  const stats = (machines as unknown as { stats: Map<string, MachineStats> }).stats;
+  stats.set('beast', { ...(stats.get('beast') ?? ({} as MachineStats)), playerCache: { root: 'D:\\work\\ffw\\player-cache', entries: [{ key: `${sha}-win`, at: '2026-11-17T16:00:00Z' }] }, at: new Date().toISOString() });
+  const ok = await call(dispatcher().info, 'start_agent', { work_id: 'w2', prompt: 'Run the MP determinism pair.', title: 'MP pair', sandbox: 'beast/slot1', pair_sandboxes: ['pc/alpha'] });
+  assert.equal(ok.isError, false, ok.text);
+  const [l1, l2] = store.work.get('w2')!.pair!.started!.legs.map((l) => store.sessions.get(l.session)!);
+  await until('both legs end their first turn', () => l1.status === 'idle' && l2.status === 'idle');
+  const said = (id: string) => JSON.stringify(store.readTranscript(id));
+  assert.ok(said(l1.id).includes(`--player D:\\\\work\\\\ffw\\\\player-cache\\\\${sha}-win\\\\player`), 'leg 1 on beast names the cached player (JSON-escaped)');
+  assert.match(said(l1.id), /A player of this commit is already built here \(w4601\)/);
+  assert.doesNotMatch(said(l2.id), /already built here/, 'pc holds no player of it');
+});
+
 test('w3720: w3705 as it happened: a determinism pair run whose notes quote another computer\'s timed run starts with its host on a computer that takes no timed runs; decide_work timed marks a request outright', async (t) => {
   const env = await twoComputers(t);
   const { store, dispatcher, call } = env;

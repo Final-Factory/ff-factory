@@ -10,7 +10,7 @@
 // the game's needs only an agent slot, not a free game sandbox, an editor or RAM for Unity. needsOf says which a request is.
 import { desktopLacks, pairDrivesMenus, type DesktopSession } from './desktop.ts';
 import { steamAccountText, steamLacks, steamSignedIn, type SteamClient } from './steam.ts';
-import type { WorkItem, WorkPair } from './types.ts';
+import type { PlayerCacheReport, WorkItem, WorkPair } from './types.ts';
 
 /**
  * Words that say a request waits for room: "a free sandbox", "all in use", "no free slot", "waiting for an editor",
@@ -332,6 +332,39 @@ export interface RoomFit {
   desktop?: DesktopSession;
   /** w3396: why its sandbox drive is too low for a new Rust (cargo) worker, under CARGO_MIN_FREE_GB free; absent when it has room or nobody knows. */
   cargoShort?: string;
+  /** w4601: the ready players its shared player cache holds (machine/playerCache.ts); a pair leg prefers the computer with its commit's. */
+  playerCache?: PlayerCacheReport;
+}
+
+/** The player cache's build target for a platform (scripts/nightly/player_cache.py TARGETS), or undefined. */
+const CACHE_TARGET: Record<string, string> = { win32: 'win', darwin: 'mac', linux: 'linux' };
+
+/**
+ * The cached player of `commit` that the computer with `fit` holds for its own OS (w4601): the cache entry and the player
+ * folder ffnightly.py --player takes, or undefined. `commit` may be short (7 to 40 hex, as request_pair takes it); a narrowed
+ * Burst build (-burstN, the nightly's) never counts, since build_player.sh's default key for that commit is the plain one.
+ */
+export function cachedPlayerOf(commit: string | undefined, fit: RoomFit | undefined): { entry: string; player: string } | undefined {
+  const c = commit?.trim().toLowerCase();
+  const target = fit?.platform ? CACHE_TARGET[fit.platform] : undefined;
+  if (!c || !/^[0-9a-f]{7,40}$/.test(c) || !target || !fit?.playerCache) return undefined;
+  const hit = fit.playerCache.entries.find((e) => e.key.endsWith(`-${target}`) && e.key.split('-')[0].startsWith(c));
+  if (!hit) return undefined;
+  const root = fit.playerCache.root.replace(/[\\/]+$/, '');
+  const sep = fit.platform === 'win32' ? '\\' : '/';
+  const entry = `${root}${sep}${hit.key}`;
+  return { entry, player: `${entry}${sep}player` };
+}
+
+/**
+ * The line a pair leg's first message carries when its computer's player cache already holds the pair's commit (w4601,
+ * server/agents.ts startPairLegs), or ''. It names the player's path and tells the leg to skip the sandbox build.
+ */
+export function cachedPlayerNote(commit: string | undefined, fit: RoomFit | undefined): string {
+  const hit = cachedPlayerOf(commit, fit);
+  if (!hit) return '';
+  const target = CACHE_TARGET[fit!.platform!];
+  return `\n\n## A player of this commit is already built here (w4601)\nThis computer's shared player cache holds a ${target} player of ${commit!.slice(0, 10)}: \`${hit.player}\` (cache entry \`${hit.entry}\`). Use it and skip the sandbox build: pass \`--player ${hit.player}\` to \`ffnightly.py run\` (or run \`build_player.sh\` for that commit and ${target} as usual: it finds the entry, prints "cached: ... build skipped" and logs the hit, with no checkout of the commit needed). Check first that the commit you run is ${commit!.slice(0, 10)}; build only if it is not, or if the entry is gone. Never start the player where it lies: \`player_slots.py launch\` (or ffnightly.py) runs it from a slot.`;
 }
 
 /**
@@ -426,6 +459,9 @@ export function pairRoom(w: { pair?: WorkPair }, ids: readonly string[], fit: Re
       return { short: `a pair run of ${p.legs} legs that needs Steam needs ${p.legs} computers signed in to ${p.legs} different Steam accounts with room at once, and ${ids.length ? `only ${ids.map((id) => `${id} (${steamAccountText(fit![id]!.steam as SteamClient & { accountId: number })})`).join(', ')} ${ids.length > 1 ? 'have' : 'has'} room it fits` : 'no computer it fits has room'}${twins.length ? `; ${twins.join(', ')} ${twins.length > 1 ? 'are' : 'is'} signed in to an account another leg takes` : ''}` };
     }
   }
+  // w4601: computers whose player cache holds the pair's commit for their OS come first (a stable sort, so placement's own
+  // order rules among the rest): a leg there skips its 3 to 23 min build (w4596's timelines of 12 pair runs).
+  if (p.commit) ids = [...ids].sort((a, b) => Number(!cachedPlayerOf(p.commit, fit?.[a])) - Number(!cachedPlayerOf(p.commit, fit?.[b])));
   const os = (id: string) => fit?.[id]?.platform;
   const macs = ids.filter((id) => os(id) === 'darwin');
   const rest = ids.filter((id) => os(id) !== 'darwin');

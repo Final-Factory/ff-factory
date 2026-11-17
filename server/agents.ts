@@ -104,7 +104,7 @@ import { WAIT_LINE_CHARS, summaryBrief, summaryText, waitSummary } from '../shar
 import { isMyMove, waitingItemOf } from '../shared/waiting.ts';
 import { checkAsks } from '../shared/questionCard.ts';
 import { DECISIONS, attachmentsNote, describeItem, doneOf, handoverNote, isFor, isOpen, livePair, pairLegOf, ledgerOrder, names, overlapLine, priorityThenAge, replacedLeg, requestAsFiled, requestLineRule, startProblem } from './work.ts';
-import { macRefusedScenario, MAC_REFUSES_SCENARIO, minPriorityText, needsBuild, needsLive, needsOf, needsTimed, pairRoom, pairText, cargoShortOf, isCargoRepo, PAIR_HOLD_MS, PAIR_MAX_LEGS, TIMED_HOLD_MS } from '../shared/capacity.ts';
+import { cachedPlayerNote, macRefusedScenario, MAC_REFUSES_SCENARIO, minPriorityText, needsBuild, needsLive, needsOf, needsTimed, pairRoom, pairText, cargoShortOf, isCargoRepo, PAIR_HOLD_MS, PAIR_MAX_LEGS, TIMED_HOLD_MS } from '../shared/capacity.ts';
 import { BUILD_PLAN_DOC, BuildPlans, NOT_RELEASE, type BuildPlan, type SeatResult } from './buildPlans.ts';
 import { SEAT_GRACE_MS, seatAction, seatNotice } from './releaseSeat.ts';
 import { RELEASE_RULES } from './releaseLanes.ts';
@@ -5170,6 +5170,13 @@ When a person asked for a design or an analysis (a profile, an investigation, a 
    * any starts; a leg that fails to start stops the ones started before it, so no sandbox is held for a pair that is not
    * running. Each worker gets the same prompt and a section saying its leg and where the others are; message_pair reaches them.
    */
+  /** w4601: the leg's line naming the player of its pair's commit that `machine`'s player cache already holds, or ''. */
+  private cachedPlayerLine(w: WorkItem, machine: string): string {
+    const st = this.machines.statsOf(machine);
+    const platform = this.store.machines.get(machine)?.platform ?? st?.platform;
+    return cachedPlayerNote(w.pair?.commit, { ...(platform ? { platform } : {}), ...(st?.playerCache ? { playerCache: st.playerCache } : {}) });
+  }
+
   private async startPairLegs(
     w: WorkItem,
     a: { sandbox?: string; machine?: string; pair_sandboxes?: string[]; prompt: string; title?: string; model?: string; model_reason?: string; effort?: EffortLevel; permission_mode?: PermissionMode; attachments?: string[]; extra_agent?: boolean; override_gate?: string },
@@ -5251,7 +5258,7 @@ When a person asked for a design or an analysis (a profile, an investigation, a 
     for (const [i, l] of legs.entries()) {
       const handed = await this.prepareForNewWork(l.ref, undefined, legs.length > 1 ? `${w.id}-leg${i + 1}` : w.id, w.source, false);
       const others = legs.map((x, k) => `leg ${k + 1}${k ? '' : ' (host)'} ${x.label}`).join(', ');
-      const role = `\n\n## Your leg of this pair run (w1945)\nYou are leg ${i + 1} of ${legs.length}${i ? ', a client: join the host once it says it listens' : ', the host: start the run and say where it listens'}, in ${l.label}. The legs, all started together just now: ${others}. Talk to the other legs with \`mcp__machine__message_pair\` (each message reaches every other leg's worker; theirs come back to you as messages, and a message resumes a leg that ended its turn): the host says its address and port once it listens, a client says when it has joined. Wait for each other in one call (an until loop) or end your turn; never poll with short check-ins. Build and run the same commit on every leg. ${PLAYERS_IN_SANDBOX}${w.pair?.for ? `. The host leg ends with the result in a line "For ${w.pair.for}:" (what ran, the commit every leg ran, what the check compared and found, any desync report files), which resumes ${w.pair.for}'s worker` : ''}. A leg that fails says so to the others with message_pair before it ends. Every leg ends with DONE: ${w.id} once the run is over (Learned: as the request rules say).`;
+      const role = `\n\n## Your leg of this pair run (w1945)\nYou are leg ${i + 1} of ${legs.length}${i ? ', a client: join the host once it says it listens' : ', the host: start the run and say where it listens'}, in ${l.label}. The legs, all started together just now: ${others}. Talk to the other legs with \`mcp__machine__message_pair\` (each message reaches every other leg's worker; theirs come back to you as messages, and a message resumes a leg that ended its turn): the host says its address and port once it listens, a client says when it has joined. Wait for each other in one call (an until loop) or end your turn; never poll with short check-ins. Build and run the same commit on every leg. ${PLAYERS_IN_SANDBOX}${w.pair?.for ? `. The host leg ends with the result in a line "For ${w.pair.for}:" (what ran, the commit every leg ran, what the check compared and found, any desync report files), which resumes ${w.pair.for}'s worker` : ''}. A leg that fails says so to the others with message_pair before it ends. Every leg ends with DONE: ${w.id} once the run is over (Learned: as the request rules say).${this.cachedPlayerLine(w, l.machine)}`;
       const prompt = `${a.prompt}${role}${requestAsFiled(w, a.prompt)}${this.handoverFor(w, this.target(l.ref), handed.branch)}${w.source ? workerRules(w, handed.branch ?? this.sandboxBranchOf(this.target(l.ref))) : ''}${requestLineRule(w)}`;
       const s = this.startWorker({ sandbox: l.ref, prompt, title: jobTitle(w.id, `${a.title} (leg ${i + 1}/${legs.length})`, { clip: true }), model: picked.model, effort: a.effort, permissionMode: a.permission_mode, from, requestedBy, attachments: files, workId: w.id });
       if (s.info.status === 'error') {
@@ -5714,6 +5721,8 @@ When a person asked for a design or an analysis (a profile, an investigation, a 
         ...(m.steam ? { steam: m.steam } : {}),
         // Its desktop session (w2459): a pair run that clicks the game's menus goes only where it is unlocked.
         ...(m.desktop ? { desktop: m.desktop } : {}),
+        // The players its shared player cache holds (w4601): a pair leg goes where its commit's player already is.
+        ...(st?.playerCache?.entries.length ? { playerCache: st.playerCache } : {}),
         // w3396: a sandbox drive under 30 GB free takes no new FFU (cargo) worker.
         ...(cargoShortOf(this.machines.diskRoom(m.id)?.freeBytes) ? { cargoShort: cargoShortOf(this.machines.diskRoom(m.id)?.freeBytes) } : {}),
         // Its CPU use over the last minute (w2054): placement spills past it at placement.spillAtPercent.
