@@ -182,6 +182,11 @@ try {
       # 15 min (630 polls; the task's 6 h ExecutionTimeLimit is the outer bound), then report what it did.
       if (-not (Drive)) { Done $false "$($Letter): is not mounted" }
       $vol = "$($Letter):"
+      # Every Dev Drive install registers this task (w4517), but ReFS dedup runs only where it was turned on for the volume
+      # (Enable-ReFSDedup; LothDesktop's V: since w1576). Elsewhere there is nothing to run: say so, and succeed.
+      $en = try { Get-ReFSDedupStatus -Volume $vol } catch { $null; $why = $_.Exception.Message }
+      if (-not $en) { Done $true "ReFS dedup is not available on $vol ($why); nothing to run" }
+      if (-not $en.Enabled) { Done $true "ReFS dedup is not enabled on $vol (Enable-ReFSDedup was never run for it); nothing to run" }
       $free0 = (Get-Volume -DriveLetter $Letter).SizeRemaining
       $t0 = Get-Date
       Start-ReFSDedupJob -Volume $vol -FullRun -Duration (New-TimeSpan -Hours 5) -CpuPercentage 50 -MinimumLastModifiedTimeHours 1 | Out-Null

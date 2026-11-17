@@ -135,7 +135,7 @@ try {
   fs.writeFileSync(`${letter}:\\sandboxes\\slot1\\marker.txt`, 'kept');
   const created0 = fs.statSync(vhdx).birthtimeMs;
   const tasks = ps(`@(Get-ScheduledTask -TaskName 'ffsb-helper-*' | ForEach-Object { $_.TaskName }) -join ','`).stdout.trim();
-  check(/ffsb-helper-mount/.test(tasks) && /ffsb-helper-trim/.test(tasks) && /ffsb-helper-compact/.test(tasks) && /ffsb-helper-grow/.test(tasks), 'the helper tasks are registered', tasks);
+  check(/ffsb-helper-mount/.test(tasks) && /ffsb-helper-trim/.test(tasks) && /ffsb-helper-compact/.test(tasks) && /ffsb-helper-grow/.test(tasks) && /ffsb-helper-dedup/.test(tasks), 'the helper tasks are registered', tasks);
   const boot = ps(`(Get-ScheduledTask -TaskName ffsb-helper-mount).Triggers | ForEach-Object { $_.CimClass.CimClassName }`).stdout.trim();
   check(/BootTrigger/.test(boot), 'the mount task also runs at boot', boot);
 

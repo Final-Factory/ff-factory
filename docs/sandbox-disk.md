@@ -179,6 +179,13 @@ starts and the job runs on in the background, so the helper polls `Get-ReFSDedup
 `LastRunStatus` (w4509; before that the first pass on LothDesktop, 2026-11-17, wrote "0 min, 49.4 -> 49.4 GB" while it ran
 43 min and saved 161 GB, which `dedup-status.json` showed).
 
+**Every Dev Drive install and update registers it (w4517).** `scripts/worker/devdrive.ps1` `Register-Tasks` installs
+`ffsb-helper-dedup` with the other helper tasks (mount, trim, compact, grow), so the installer and an elevated update
+(`devdrive.ps1 ensure`) register it and copy the current helper. An update that is not elevated, on a drive made before the
+task existed, asks for the one administrator prompt on the PC's desktop (or says it waits, over ssh without one:
+`ensureHelperTask` in `scripts/worker/worker.ts`), as it does for the grow task. On a volume where ReFS dedup was never turned
+on (`Enable-ReFSDedup`), or a Windows without the ReFS dedup cmdlets, the task runs nothing and its result says so.
+
 The first job, measured:
 
 | | Before (19:28 local) | After (21:30 local) |
