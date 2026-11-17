@@ -295,8 +295,27 @@ export function push(d: PrDeps, o: Opts): number {
     d.write(`ff-pr: ${pr.url} conflicts with ${pr.baseRefName}: merge origin/${pr.baseRefName} in, resolve, and run ff-pr push again\n`);
     return 1;
   }
+  evidenceWarning(d, pr);
   d.write(`ff-pr: ${pr.url} head ${sha} (${pr.mergeable.toLowerCase()}), base ${pr.baseRefName}\n${waitLine(pr, sha)}\n`);
   return 0;
+}
+
+/**
+ * w4498: after a push, the Evidence check the merge will run, as a warning only: a description that fails it is fixed now,
+ * not found after green CI (FinalFactory #3748 and #3760 had no Evidence section, each refused only at the merge).
+ */
+function evidenceWarning(d: PrDeps, pr: Pr): void {
+  const repo = repoOf(pr.url);
+  if (!evidenceGated(repo)) return;
+  const script = d.evidenceScript?.();
+  if (!script) return;
+  const r = d.run(d.python ?? evidencePython(), evidenceArgs(script, repo, pr.number));
+  const v = evidenceVerdict(r.code, r.out, r.err);
+  if (v.ok) return;
+  d.write(
+    `ff-pr: WARNING: ${evidenceRefusal(repo, pr.number, r.code, v)}\n` +
+      `ff-pr merge and merge on green refuse it until it passes: give its description a "## Evidence" section (a "Kind:" line, Kind: other for tooling, tests or automation code; a claims table, | Claim | Basis |, each row MEASURED or SOURCED; a "Not verified:" line) with gh pr edit ${pr.number} --body-file <f>.\n`,
+  );
 }
 
 function prAndCi(d: PrDeps, o: Opts): { pr: Pr; v: CiVerdict } | number {

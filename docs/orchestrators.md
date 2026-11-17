@@ -1477,6 +1477,12 @@ from the other pilots, server/mergeOnGreen.ts) is in the arm:
   `merge-on-green pilot (w2045)` on the request, which marks the arm. A worker out of the arm hears nothing of it; one that
   passes `merge_on_green` anyway, or without head, or with a report that has no DONE line for the request, gets the wait set
   as usual and a line saying why it was ignored (Orchestrators.mergeOnGreenAsk).
+- w4498: a `blocked_on` that passes `merge_on_green` is checked against what the merge itself would refuse, before anything
+  is recorded (Agents.declareBlocked): a draft pull request (`isDraft`, read with the w907 health read) is refused with
+  `gh pr ready <n>`, and the merge's own Evidence check (`ghEvidenceRefusal`, the pr_evidence.py run ghMerge makes; only
+  in a gated repository) is run, and a failure refused with its lines and the section to add (Kind:, a claims table, Not
+  verified:). Before, FinalFactory #3741 (a draft), #3748 and #3760 (no Evidence section) were each refused only after
+  green CI, a worker turn each. `ff-pr push` runs the same check after its push and prints a WARNING when it fails.
 - With the report left, the gate keeps it (`WorkBlocker.mergeOnGreen`: head, report, session) and the worker ends its turn with
   only its still-open line. A DONE in that turn is held: it is the report's (doneMarkers).
 - When the checks finish all green (`CiState.green`: every check or workflow run passed or skipped, or GitHub's merge state

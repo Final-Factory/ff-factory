@@ -331,3 +331,19 @@ test("w3190: the portal's merge-on-green hands pr_evidence.py the game repo's HU
   assert.equal(calls.some((c) => c[0] === 'gh' && c[1] === 'api'), false);
   assert.equal(await fetchHudData('Final-Factory/ffu', 222, run), undefined);
 });
+
+test('w4498: ff-pr push warns when the PR would fail the Evidence check at the merge, and stays quiet when it passes', () => {
+  const head = <T extends { run: PrDeps['run'] }>(d: T): T => {
+    const run = d.run;
+    d.run = (cmd, args) => ([cmd, ...args].join(' ').startsWith('git rev-parse HEAD') ? { code: 0, out: `${SHA}\n`, err: '' } : [cmd, ...args].join(' ').startsWith('git branch --show-current') ? { code: 0, out: 'w4498-x\n', err: '' } : run(cmd, args));
+    return d;
+  };
+  const failing = head(fake(GAME, { code: 1, out: 'evidence-gate: FAIL\n- no "## Evidence" section\n', err: '' }));
+  assert.equal(prMain(['push'], failing), 0, 'a warning, not a refusal');
+  assert.ok(failing.ran.includes('py pe.py --repo Final-Factory/FinalFactory --pr 3180'));
+  assert.match(failing.said, /ff-pr: WARNING: the Evidence check refused it \(pr_evidence\.py --repo Final-Factory\/FinalFactory --pr 3180, exit 1\):\n {2}- no "## Evidence" section\n/);
+  assert.match(failing.said, /"## Evidence" section \(a "Kind:" line, Kind: other .*"Not verified:" line\) with gh pr edit 3180 --body-file <f>/);
+  const passing = head(fake(GAME, { code: 0, out: PASS, err: '' }));
+  assert.equal(prMain(['push'], passing), 0);
+  assert.doesNotMatch(passing.said, /WARNING/);
+});

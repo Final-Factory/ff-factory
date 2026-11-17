@@ -5000,6 +5000,56 @@ test('w2045: merge on green: a worker in the arm is told it may leave its report
   assert.equal(agents.waker.pending(a.id), undefined, 'the worker is not resumed');
 });
 
+test('w4498: arming merge on green checks the PR at once: a draft is refused with gh pr ready, a failing Evidence check with the section to add; a passing PR still arms', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }]);
+  mergeOnGreenArm(o, () => true);
+  const pr = 'Final-Factory/FinalFactory#3741';
+  const head = 'abc1234def5678';
+  const report = 'TL;DR: in.\n\nDONE: w1\nLearned: nothing new';
+  let health: PrHealth = { state: 'open', head, headRef: 'w4461', draft: true };
+  let evidence: string | undefined;
+  const asked: string[] = [];
+  agents.prHealth = async () => health;
+  agents.prEvidence = async (ref) => (asked.push(ref), evidence);
+  const a = await startedFor(env, 'w1');
+  // #3741 as it happened: still a draft. Refused now, with the command that fixes it; nothing recorded.
+  await assert.rejects(
+    async () => a.h.blocked_on!({ request: 'w1', prs: [`ci:${pr}`], head, what: 'CI on #3741', merge_on_green: report }),
+    /merge_on_green refused: PR #3741 is still a draft, and GitHub will not merge a draft\. Run gh pr ready 3741 -R Final-Factory\/FinalFactory, then call blocked_on again with merge_on_green\. Nothing was recorded\./,
+  );
+  assert.equal(store.work.get('w1')!.status, 'active');
+  // #3748 and #3760 as they happened: no Evidence section. Refused now, with the check's lines and the section to add.
+  health = { state: 'open', head, headRef: 'w4470' };
+  evidence = 'the Evidence check refused it (pr_evidence.py --repo Final-Factory/FinalFactory --pr 3741, exit 1):\n  - no "## Evidence" section';
+  await assert.rejects(
+    async () => a.h.blocked_on!({ request: 'w1', prs: [`ci:${pr}`], head, what: 'CI on #3741', merge_on_green: report }),
+    (e: Error) => {
+      assert.match(e.message, /^merge_on_green refused: PR #3741 would not merge on green, because the Evidence check refused it .*\n {2}- no "## Evidence" section\n/);
+      assert.match(e.message, /gh pr edit 3741 --body-file <f>\): a "## Evidence" section with a "Kind:" line \(Kind: other/);
+      assert.match(e.message, /a claims table .* and a "Not verified:" line/);
+      assert.match(e.message, /Nothing was recorded\.$/);
+      return true;
+    },
+  );
+  assert.equal(store.work.get('w1')!.status, 'active');
+  assert.equal(store.work.get('w1')!.blocked, undefined);
+  // A wait without merge_on_green is not checked for evidence, and a draft may wait on CI.
+  health = { state: 'open', head, headRef: 'w4461', draft: true };
+  asked.length = 0;
+  assert.match(String(await a.h.blocked_on!({ request: 'w1', prs: [`ci:${pr}`], head, what: 'CI on #3741' })), /Recorded: w1 is Blocked on CI on/);
+  assert.deepEqual(asked, []);
+  // Ready, and the Evidence check passes: it arms.
+  health = { state: 'open', head, headRef: 'w4461' };
+  evidence = undefined;
+  const set = String(await a.h.blocked_on!({ request: 'w1', prs: [`ci:${pr}`], head, what: 'CI on #3741', merge_on_green: report }));
+  assert.match(set, /^Recorded: w1 is Blocked on CI on .*, merge on green \(w2045\)/);
+  assert.deepEqual(asked, [pr]);
+  assert.deepEqual(store.work.get('w1')!.blocked!.mergeOnGreen, { head, report, session: a.id });
+});
+
 test('w3021: merge on green with a short head: blocked_on records the PR head whole, and a head recorded short still merges at the full sha and files the report', async (t) => {
   const env = await setupOnMachine(t);
   const { store, agents, o } = env;

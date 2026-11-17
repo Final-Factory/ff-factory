@@ -2062,15 +2062,21 @@ export class Agents {
     const prs = list(a.prs);
     let head = typeof a.head === 'string' ? a.head.trim().toLowerCase() : '';
     const warnings: string[] = [];
+    // w4498: merge on green armed: a draft or a failing Evidence check is refused now, not found after green CI.
+    const arming = typeof a.merge_on_green === 'string' && a.merge_on_green.trim() !== '';
     for (const raw of prs) {
       const m = /^\s*ci:\s*/i.exec(raw);
       const ref = m ? prRefOf(raw.slice(m[0].length)) : undefined;
       if (!ref) continue;
-      const problem = await this.ciWaitProblem(ref, head);
+      const problem = await this.ciWaitProblem(ref, head, arming);
       if (problem?.refuse) throw new Error(problem.refuse);
       if (problem?.warn) warnings.push(problem.warn);
       // w3021: a short head the pull request's own head starts with is recorded whole, as merge on green passes it to GitHub.
       if (problem?.head) head = problem.head;
+      if (arming) {
+        const refused = await this.mergeEvidenceProblem(ref);
+        if (refused) throw new Error(refused);
+      }
     }
     const out = this.orchestrators.workerBlocked(sessionId, {
       ...(typeof a.request === 'string' && a.request.trim() ? { request: a.request } : {}),
@@ -2112,8 +2118,33 @@ export class Agents {
   /** Reads a pull request for a ci: wait (w907); set by the server (ghPrHealth), absent in tests that do not read GitHub. */
   prHealth?: (ref: string) => Promise<PrHealth | undefined>;
 
+  /**
+   * w4498: the Evidence check a merge on green runs at the merge (server/blockerWatch.ts ghEvidenceRefusal), run when a worker
+   * arms it: why it would refuse, or undefined. Set by the server; absent in tests that do not read GitHub.
+   */
+  prEvidence?: (ref: string) => Promise<string | undefined>;
+
+  /** w4498: why merge on green should not be armed on `ref` for want of evidence: the check's own words and the fix. */
+  private async mergeEvidenceProblem(ref: string): Promise<string | undefined> {
+    if (!this.prEvidence) return undefined;
+    let said: string | undefined;
+    try {
+      said = await this.prEvidence(ref);
+    } catch (e) {
+      said = `the Evidence check could not run: ${e instanceof Error ? e.message : String(e)}`;
+    }
+    if (!said) return undefined;
+    const n = ref.split('#')[1];
+    return (
+      `merge_on_green refused: ${prLabel(ref)} would not merge on green, because ${said}\n` +
+      `Fix its description now (gh pr edit ${n} --body-file <f>): a "## Evidence" section with a "Kind:" line (Kind: other for tooling, tests or automation code), ` +
+      `a claims table (| Claim | Basis |, each row MEASURED or SOURCED with what you ran or read), and a "Not verified:" line (or "Not verified: nothing"); ` +
+      `check it with pr_evidence.py --repo ${ref.split('#')[0]} --pr ${n}. Then call blocked_on again with merge_on_green. Nothing was recorded.`
+    );
+  }
+
   /** Why a ci: wait on `ref` should not be set: its pull request conflicts, or its head is not the pushed `head`; or a warning. */
-  private async ciWaitProblem(ref: string, head: string): Promise<{ refuse?: string; warn?: string; head?: string } | undefined> {
+  private async ciWaitProblem(ref: string, head: string, arming = false): Promise<{ refuse?: string; warn?: string; head?: string } | undefined> {
     if (!this.prHealth) return undefined;
     let h: PrHealth | undefined;
     try {
@@ -2124,6 +2155,8 @@ export class Agents {
     if (!h) return { warn: `FF Factory could not read ${prLabel(ref)}, so it did not check that your push landed or that it can merge: check yourself (gh pr view ${ref.split('#')[1]} --json headRefOid,mergeable).` };
     if (h.state !== 'open') return undefined;
     if (h.conflict) return { refuse: `${conflictText(ref, h.conflict.base).replace(/, and wait again$/, '')}; then call blocked_on again. Nothing was recorded.` };
+    // w4498: GitHub refuses to merge a draft ("Pull Request is still a draft", #3741), so merge on green is not armed on one.
+    if (arming && h.draft) return { refuse: `merge_on_green refused: ${prLabel(ref)} is still a draft, and GitHub will not merge a draft. Run gh pr ready ${ref.split('#')[1]} -R ${ref.split('#')[0]}, then call blocked_on again with merge_on_green. Nothing was recorded.` };
     if (head) {
       const mine = head.length >= 7 && (h.head ?? '').toLowerCase().startsWith(head);
       if (!mine) return { refuse: `${prLabel(ref)}'s head is ${(h.head ?? 'unknown').slice(0, 12)}, not ${head.slice(0, 12)}, the commit you say you pushed: your push did not land (check git push's output and git ls-remote origin ${h.headRef ?? '<branch>'}). Push it, then call blocked_on again. Nothing was recorded, so you are not waiting on checks that cannot start.` };

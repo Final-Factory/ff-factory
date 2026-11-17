@@ -96,6 +96,8 @@ export interface PrHealth {
   headSeenAt?: number;
   /** w3572: the requests its description names with a `Request:` or `Part of:` line (lower case). */
   requests?: string[];
+  /** w4498: GitHub marks it a draft, which `gh pr merge` refuses ("Pull Request is still a draft"). */
+  draft?: true;
 }
 
 /**
