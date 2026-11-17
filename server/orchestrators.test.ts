@@ -15,7 +15,7 @@ import { crossOwnerLine, delegationConstraints, DispatcherChatRefused, DISPATCHE
 import { configPath, type Config } from './config.ts';
 import { memoryDirFor } from './orchestratorMemory.ts';
 import { handoverNote, isOpen, requestAsFiled, requestNotice } from './work.ts';
-import { BlockerWatch, ghMerge, notMergeableRefusal, remergeJob, REPORTED_WAIT_MS } from './blockerWatch.ts';
+import { BlockerWatch, ghMerge, MERGE_TRIES, notMergeableRefusal, remergeJob, REPORTED_WAIT_MS } from './blockerWatch.ts';
 import { noteBudget, resetBudgets } from './ghBudget.ts';
 import { poolForRef, type GatePoolToken } from './usageGate.ts';
 import { inheritedPayer, personForWork, sessionPerson, setVaultContext } from './vault.ts';
@@ -5128,6 +5128,46 @@ test('w2045: merge on green: red CI, or a merge GitHub refuses, resumes the work
   assert.equal(store.work.get('w2')!.status, 'active');
   assert.match(agents.waker.pending(b.id)!.note, /FF Factory tried to merge it: gh pr merge Final-Factory\/FinalFactory#2: Head branch was modified\. .*Merge it yourself \(ff-pr merge\)/);
   agents.waker.cancel(a.id);
+  agents.waker.cancel(b.id);
+});
+
+test('w4531: merge on green, a transient GitHub error (502, GraphQL) is tried again next tick, not handed to the worker; it resumes only after MERGE_TRIES', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }, { id: 'w2' }]);
+  mergeOnGreenArm(o, () => true);
+  const head = 'abc1234def5678';
+  const checks = new Map<string, { done: boolean; text: string; green?: true }>();
+  const merges: string[] = [];
+  const passes = 'Final-Factory/ffu#1';
+  const down = 'Final-Factory/ffu#2';
+  const watch = new BlockerWatch({
+    store,
+    orchestrators: o,
+    ci: async (ref) => checks.get(ref),
+    merge: async (ref) => {
+      merges.push(ref);
+      if (ref === down || merges.filter((r) => r === ref).length < 3) {
+        throw new Error(ref === down ? `gh pr merge ${ref}: non-200 OK status code: 502 Bad Gateway body: "<html>"` : `gh pr merge ${ref}: GraphQL: Something went wrong while executing your query on 2026-11-16T10:27:02Z.`);
+      }
+    },
+  });
+  const a = await startedFor(env, 'w1');
+  const b = await startedFor(env, 'w2');
+  await a.h.blocked_on!({ request: 'w1', prs: [`ci:${passes}`], head, what: 'CI', merge_on_green: 'DONE: w1\nLearned: nothing new' });
+  await b.h.blocked_on!({ request: 'w2', prs: [`ci:${down}`], head, what: 'CI', merge_on_green: 'DONE: w2\nLearned: nothing new' });
+  for (const ref of [passes, down]) checks.set(ref, { done: true, green: true, text: `CI on ${ref} finished: all 1 checks passed or skipped` });
+  await watch.tick();
+  await watch.tick();
+  assert.equal(store.work.get('w1')!.status, 'blocked', 'two transient failures: still waiting, nobody resumed');
+  assert.equal(agents.waker.pending(a.id), undefined);
+  await watch.tick();
+  assert.equal(store.work.get('w1')!.status, 'done', 'merged on the third try and its report filed');
+  for (let i = 3; i < MERGE_TRIES; i++) await watch.tick();
+  assert.equal(merges.filter((r) => r === down).length, MERGE_TRIES);
+  assert.equal(store.work.get('w2')!.status, 'active', 'still failing after MERGE_TRIES: the worker is resumed to merge it');
+  assert.match(agents.waker.pending(b.id)!.note, /FF Factory tried to merge it: gh pr merge Final-Factory\/ffu#2: non-200 OK status code: 502 Bad Gateway.*Merge it yourself \(ff-pr merge\)/);
   agents.waker.cancel(b.id);
 });
 

@@ -1510,6 +1510,10 @@ from the other pilots, server/mergeOnGreen.ts) is in the arm:
   refuse the merge.
 - Red checks, a reading that is not green (unreadable checks, a PR merged or closed by hand), a refused Evidence check, or a
   merge GitHub refuses (a newer push, a rule) unblock the request as without the pilot: the worker is resumed with why and told the report was not filed.
+- A merge GitHub fails with an error of its own that passes (a 5xx such as "502 Bad Gateway", "GraphQL: Something went
+  wrong while executing your query", a timeout; blockerWatch.ts transientMergeError) keeps the gate, and the next tick, a
+  minute later, tries the merge again, up to `MERGE_TRIES` (4) tries, before the worker is resumed as above (w4531:
+  ffu #852, #856, #860 and #862 each resumed their worker so on 2026-11-16).
 - A merge GitHub refuses as not mergeable on green CI (main moved under the pull request and conflicts with it: "is not
   mergeable: the merge commit cannot be cleanly created"; blockerWatch.ts notMergeableRefusal) keeps the report (w3906:
   ffu #588, #593 three times and #606 lost theirs between 21:59 and 00:42 UTC on 2026-11-09). It moves to
