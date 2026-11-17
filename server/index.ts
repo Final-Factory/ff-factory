@@ -43,6 +43,7 @@ import { setPasswordPage } from './setPasswordPage.ts';
 import { Identity, asRequester } from './identity.ts';
 import { routeMcp } from './mcp.ts';
 import { IMAGE_TYPES, SOCKET_PING_MS, WORK_PRIORITIES, type WorkPriority, type ImageInput, type NotifyPrefs, type AnswerRequest, type ReactRequest, type SendMessageRequest } from '../shared/types.ts';
+import { isOpen } from './work.ts';
 import { listImages, MEDIA_TYPE, openVideo, parseRange, readImage, VIDEO_FILE } from './images.ts';
 import { VideoPreviews } from './videoPreview.ts';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -101,7 +102,7 @@ import { bundleServedLine, updateBundleFor } from './machineLink.ts';
 import { issueMachineToken } from './machineTokens.ts';
 import { clientAddress, originOf, tailnetOnly } from './remoteChat.ts';
 import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, type LiveStats, type SpeakRequest, type TranscribeRequest, type VocabularySource } from '../shared/voice.ts';
-import type { AccountUsage, AppState, CreateSandboxRequest, HostStatus, Machine, TokenWarning, PermissionDecisionRequest, Requester, ServerEvent, SessionInfo, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats, LiveKnobRequest, PoolPerson, TranscriptEvent } from '../shared/types.ts';
+import type { AccountUsage, AppState, CreateSandboxRequest, HostStatus, Machine, TokenWarning, PermissionDecisionRequest, Requester, ServerEvent, SessionInfo, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats, LiveKnobRequest, PoolPerson, TranscriptEvent, WorkItem } from '../shared/types.ts';
 import { slugify } from './sandboxes.ts';
 import { SpendStore, buildReport } from './spend.ts';
 import { backfillSpend, repairSpend } from './spendJobs.ts';
@@ -570,8 +571,22 @@ const timedRuns = new TimedRuns({
   held: (id) => holdReason(id, agents.placement(false)),
   // w2048: a run whose computer stays unavailable past this wait (scaled by the fleet's load) plays every side elsewhere
   unavailableWait: () => agents.timedWait(),
+  // w4620: strict priority on a computer's daemon: a run's open requests' highest priority, read live; none open: low
+  priorityOf: (r) =>
+    r.requests
+      .map((id) => store.work.get(id))
+      .filter((w): w is WorkItem => !!w && isOpen(w))
+      .reduce((a, w) => (WORK_PRIORITIES.indexOf(w.priority) > WORK_PRIORITIES.indexOf(a) ? w.priority : a), 'low' as WorkPriority),
 });
 agents.timedRuns = timedRuns;
+// w4620: a request raised while its run waits on a daemon moves that run up within a minute
+setInterval(() => {
+  try {
+    timedRuns.reprioritize();
+  } catch (e) {
+    console.warn(`timed runs: ${(e as Error).message}`);
+  }
+}, 60_000).unref();
 // w1996: a computer timing another worker's run hosts more than its own worker, so its bench queue keeps the turn limits
 machines.timedRunsOn = (id) => timedRuns.runsOn(id).length;
 machines.timedHello = (id, active) => timedRuns.onHello(id, active);
