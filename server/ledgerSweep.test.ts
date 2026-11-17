@@ -1689,13 +1689,14 @@ test('w1870: the full pass and "worker reported delivered" on an errored turn, a
   assert.throws(() => o.decide({ id: 'w1', action: 'done', note: 'looks finished' }), /w1 is not closed as done: its latest worker s1's last turn ended in an error: its last turn ended in error_max_turns/);
   request('w2', { sessionIds: ['s2'] });
   worker('s2', { lastResult: 'All done, the PR merged.' });
-  assert.throws(() => o.decide({ id: 'w2', action: 'done', note: 'merged' }), /its latest worker s2's last report is not a DONE for w2/);
+  assert.throws(() => o.decide({ id: 'w2', action: 'done', note: 'its PR merged on green CI' }), /its latest worker s2's last report is not a DONE for w2/);
   worker('s2', { lastResult: 'All done, the PR merged.\nDONE: w2' });
-  o.decide({ id: 'w2', action: 'done', note: 'merged' });
+  o.decide({ id: 'w2', action: 'done', note: 'its PR merged on green CI' });
   assert.equal(get('w2').status, 'done');
-  // A request no worker worked on still closes on the dispatcher's word.
+  // A request no worker worked on closes on the dispatcher's word only with a reason (w4634).
   request('w3');
-  o.decide({ id: 'w3', action: 'done', note: 'nothing to do' });
+  assert.throws(() => o.decide({ id: 'w3', action: 'done', note: 'nothing to do' }), /no worker ever reported on w3/);
+  o.decide({ id: 'w3', action: 'done', note: 'nothing to do: it repeats w1, which already merged' });
   assert.equal(get('w3').status, 'done');
 });
 

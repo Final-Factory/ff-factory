@@ -7836,10 +7836,10 @@ ${w.repo ?? ''}
       ),
       tool(
         'decide_work',
-        "Decide about a work request; its requester's orchestrator gets your note as the answer. Your brief's Dispatching rules say which: merge (it repeats an open request, into; its people join it), link (workers already doing it, session_ids; refused for an unrelated request while a worker has another in hand, w740), queue (CAPACITY only, needs naming the computers when only some can take it; refused while one of them has room), block (a THING: blocker, or blockers that must ALL clear; it starts by itself and you are told; its gates survive a hold and a person's go-ahead, w754: blocking again with no blocker keeps them, and starting it while one is open needs override_gate with a person's own words), ask (what only a person can answer or decide, at most 3 per request), reject (say why), done (it needs nothing more; say what came of it). To start it: start_agent with its work_id, or message_agent with work_id for a worker whose earlier work it continues; that marks it active and tells its people.",
+        "Decide about a work request; its requester's orchestrator gets your note as the answer. Your brief's Dispatching rules say which: merge (it repeats an open request, into; its people join it), link (workers already doing it, session_ids; refused for an unrelated request while a worker has another in hand, w740), queue (CAPACITY only, needs naming the computers when only some can take it; refused while one of them has room), block (a THING: blocker, or blockers that must ALL clear; it starts by itself and you are told; its gates survive a hold and a person's go-ahead, w754: blocking again with no blocker keeps them, and starting it while one is open needs override_gate with a person's own words), ask (what only a person can answer or decide, at most 3 per request), reject (say why), done (nothing more to do; say what came of it). No action: flags only. To start it: start_agent with its work_id, or message_agent with work_id for a worker whose earlier work it continues; that marks it active and tells its people.",
         {
           id: z.string(),
-          action: z.enum(DECISIONS as unknown as [string, ...string[]]),
+          action: z.enum(DECISIONS as unknown as [string, ...string[]]).optional(),
           note: z.string().min(1).max(1000).describe("What the requester's orchestrator reads: one or two plain lines."),
           questions: questionsShape(true).optional().describe('ask: required. A plain question per decision, 2-4 answers, one recommended. A design pick: each answer its own still (w2664).'),
           for: z.string().optional().describe("ask: who it is for (user id or name) when not the requester (\"Ask ben\"); required once the question was handed on (w2867)."),
@@ -7870,6 +7870,15 @@ ${w.repo ?? ''}
             .describe(`link: required. What the job is, in a few plain words; the linked workers are retitled "<id>: <title>" (at most ${TITLE_MAX} characters with it).`),
         },
         wrap(async ({ title, questions, ...a }) => {
+          // w4634: without an action only the flags change; the action's own fields need one.
+          if (!a.action) {
+            const flags = a.timed !== undefined || a.report !== undefined || a.pair_legs !== undefined || a.pair_menus !== undefined || a.pair_steam !== undefined || a.pair_split !== undefined || !!a.pair_allow?.length;
+            const actionOnly = (['into', 'session_ids', 'needs', 'drop_leg', 'blocker', 'blockers', 'add_blocker', 'override_gate', 'for', 'no_previews'] as const).filter((k) => a[k] !== undefined);
+            if (questions !== undefined) actionOnly.push('questions' as never);
+            if (title !== undefined) actionOnly.push('title' as never);
+            if (actionOnly.length) throw new Error(`decide_work: ${actionOnly.join(', ')} belong${actionOnly.length === 1 ? 's' : ''} to an action; give the action (${DECISIONS.join(', ')}).`);
+            if (!flags) throw new Error(`decide_work needs an action (${DECISIONS.join(', ')}), or, to change only a flag, that flag alone (timed, report, pair_legs, pair_menus, pair_steam, pair_split, pair_allow) with no action (w4634).`);
+          }
           // Workers given a request are titled for it (w575): link names the job. (A merge moves no worker: only a request
           // nobody works on yet can be merged.)
           const linkTitle = a.action === 'link' ? jobTitle(a.id, title ?? '') : undefined;
@@ -7893,7 +7902,7 @@ ${w.repo ?? ''}
             if (!v.ok) throw new Error(v.problem);
             if ('optedOut' in v && w) o.noteOnRequest(w.id, `decide_work ask without previews, though ${w.id} has review media (no_previews, w2478): "${v.optedOut}"`);
           }
-          const out = o.decide({ ...a, action: a.action as (typeof DECISIONS)[number], ...(checked && 'asks' in checked ? { asks: checked.asks } : {}) });
+          const out = o.decide({ ...a, action: a.action as (typeof DECISIONS)[number] | undefined, ...(checked && 'asks' in checked ? { asks: checked.asks } : {}) });
           if (a.action === 'block') this.blockerWatch?.kick();
           if (linkTitle) for (const sid of a.session_ids ?? []) this.sessions.setTitle(sid.trim(), linkTitle);
           return withWarnings(out, checked && 'warnings' in checked ? checked.warnings : []);
