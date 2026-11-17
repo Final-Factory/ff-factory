@@ -1588,6 +1588,25 @@ reads only through the tools, on the portal. `list_work {id}` and `read_work` sh
 it in "The ledger and the portal's logs" (so do the ledger-read and spend-export grants, `Agents.readGrantLines`). Tested in
 `server/orchestrators.test.ts` ("w4497").
 
+**Where a request's wall time went** (w4531). A worker whose open request carries both the ledger-read and the
+transcript-read grant may call `work_timing` (group `ledger`): it measures the last finished (`done`) requests, newest
+first by their last DONE (`last`, default 50, at most 300; `until` for an earlier window to compare with), in two parts
+(`server/workTiming.ts`):
+
+- Part 1, filing to the first worker turn (the first message to one of its worker sessions that names it), split by what
+  the ledger log lines in between said (`waitCauseOf`: capacity, a held or offline machine, a pair, a usage hold,
+  pre-emption, a gate, a person; the time before any of them is the dispatcher's). Log lines are `HH:MM` and a log keeps
+  its last 40, so this part is to the minute and a long-lived request's early waits may be gone.
+- Part 2, first turn to the close, split by its worker sessions' transcript events: each tool call by what it does
+  (`toolCauseOf`: refresh_unity, the editor, tests, builds, bench, pair runs, CI polls, merges, critics, failed calls,
+  shell waits; the rest of a turn is implementation and thinking), and each gap between turns by what the turn ended on
+  (`gapCauseOf`: blocked_on `ci:` or merge_on_green, a person, a pair or hand-off report, a check-in, a pause, else no
+  marker). Workers that overlap count once, under the busiest label (`sweep`).
+
+It reads closed requests, which `read_work` does not, so it needs both grants; it reads the transcripts on the portal
+(`Store.scanTranscript`, cut down by `slimEvent`) and the answer is masked (`redactSecrets`). Run it again over the next
+requests after a change to compare. Tested in `server/workTiming.test.ts`.
+
 **Read-only.** The tool has no argument that changes anything, and its handler builds its answer from the store
 without writing (tested by comparing the ledger before and after calls that pass `close`, `note`, `reopen` and
 `ledger_read`). A worker still has no `update_work`, `request_work`, `decide_work` or `list_work`.

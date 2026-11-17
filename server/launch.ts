@@ -421,6 +421,12 @@ export const CATALOG = {
     until: z.string().max(40).optional().describe('Up to this ISO time or date.'),
     limit: rangedNumber(1, 100, 'Default 30.').optional(),
   },
+  /** w4531 (docs/orchestrators.md "Where a request's wall time went"): wall time of the last finished requests, with ledger and transcript grants. */
+  work_timing: {
+    last: rangedNumber(1, 300, 'How many finished requests, newest first by close time; default 50.').optional(),
+    until: z.string().max(40).optional().describe('Only requests closed before this ISO time (an earlier window to compare with).'),
+    rows: z.boolean().optional().describe('Also one line per request: its wait, its work and its top causes.'),
+  },
   /** docs/spend.md "The export" (w2653): the spend record as CSV, read-only, with a spend-read grant. */
   spend_export: {
     view: z.enum(EXPORT_VIEWS).optional().describe('summary (default), requests, sessions or turns.'),
