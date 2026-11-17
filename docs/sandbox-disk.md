@@ -167,6 +167,14 @@ script turned dedup on for V:, with these settings:
 The full log is `C:\ProgramData\ffsb-helpers\results\refs-dedup-trial.log`. To undo:
 `Clear-ReFSDedupSchedule -Volume V:` then `Disable-ReFSDedup -Volume V:`. Data already shared stays shared (sourced).
 
+**The daily job is incremental, so a weekly full pass runs too (w4502).** `Start-ReFSDedupJob` without `-FullRun` processes
+"only new or changed files" (Microsoft's docs). On 2026-11-16 the nightly job reported success (29 min, result 0) while 54 GB
+of byte-identical files written before its last run were still unshared across the sandboxes (Library ContentArchives,
+BurstCache, PackageCache; measured with a cluster-map duplicate scan). The privileged helper's `dedup` action runs one full
+pass (5 h cap, 50 % CPU, files changed in the last hour skipped); `install-privileged-helpers.ps1 -Actions dedup` registers it
+as `ffsb-helper-dedup`, every Sunday at 04:00 with a 6 h task limit, and the worker user may start it
+(`schtasks /run /tn ffsb-helper-dedup`). Its result is `results\dedup.json`.
+
 The first job, measured:
 
 | | Before (19:28 local) | After (21:30 local) |
