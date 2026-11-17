@@ -61,7 +61,7 @@ import { hubEditorDirs, hubListedEditors, listWinDialogs, realDeps as realUnityD
 import { listMacDialogs } from './macDialogs.ts';
 import { UnityReaper, inspectProcs, realReaperDeps, type ReaperDeps } from './unityReaper.ts';
 import type { CleanupFacts } from '../server/cleanupFolders.ts';
-import type { SessionOwner } from '../server/resumable.ts';
+import { movedRequestsOf, type SessionOwner } from '../server/resumable.ts';
 import { LeftoverReaper, installLeftoversShim, readEnvs, readLeases, realInspect, type LeftoverDeps } from './leftovers.ts';
 import { installPrShim } from './prFlow.ts';
 import { FFU_SLOTS_DEFAULT_MAX, installFfuSlotShim } from './ffuSlots.ts';
@@ -81,7 +81,7 @@ import { GRACE_MIN, PersonPlay, personEnds, personHolderText, personHoldText, pe
 import { benchTicketFor, queueTickets, type QueueTicket } from './benchQueue.ts';
 import { holdsOwnTicket, resumeRevokes, revokeTicket } from './benchRevoke.ts';
 import { readBenchHours } from './benchHours.ts';
-import { TimedRunner } from './timedRunner.ts';
+import { TimedRunner, timedRunEnv } from './timedRunner.ts';
 import { findFixtures, listFixtures, offeredDir, sendFixture } from './labFixtures.ts';
 import { timedRunFromMachine } from './timedRunPack.ts';
 import { readBenchState } from './benchState.ts';
@@ -614,7 +614,7 @@ export class Daemon {
         worker: {
           sandboxIds: () => (this.pool ? this.pool.list().map((sb) => sb.id) : []),
           ticket: (o) =>
-            benchTicketFor({ mode: 'exclusive', reason: 'timing', what: o.what, maxMin: o.maxMin, ownerPid: o.ownerPid, checkouts: this.pool ? this.pool.list().map((sb) => sb.path) : [], root: cfg.root, env: { ...process.env, FF_SESSION_ID: o.session, FF_SANDBOX_ID: '' } }),
+            benchTicketFor({ mode: 'exclusive', reason: 'timing', what: o.what, maxMin: o.maxMin, ownerPid: o.ownerPid, checkouts: this.pool ? this.pool.list().map((sb) => sb.path) : [], root: cfg.root, env: { ...timedRunEnv(process.env, o.session, o.run), FF_SANDBOX_ID: '' } }),
         },
       });
     }
@@ -628,6 +628,9 @@ export class Daemon {
       sessionLive: (id) => this.sessionLive(id),
       sessionKnown: (id) => this.entries.has(id) || this.portalSessions.has(id) || this.hostSessions.has(id),
       resumable: (id) => this.resumable.has(id),
+      // w4588: an open request this session was on that moved to another worker still waits for what it left
+      movedRequests: (id) => movedRequestsOf(this.owners?.[id]),
+      timedRunLive: (id) => !!this.timed?.active().includes(id),
       wakeAt: (id) => this.wakes.get(id),
       // w3715: a stopped worker's detached bench script keeps the machine's bench lock; its far check-in must not keep it
       holdsTicket: (id) => cfg.root !== undefined && holdsOwnTicket(this.sweepTickets(cfg.root), id),
