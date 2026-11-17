@@ -20,6 +20,8 @@ export const HELPERS = {
   reboot: 'ffsb-helper-reboot',
   /** Grow the Dev Drive's maximum to devdrive.json's wantGB (detach, expand, reattach, extend); never smaller (w1918). */
   grow: 'ffsb-helper-grow',
+  /** One full ReFS dedup pass on the Dev Drive (w4502); also runs weekly by itself where installed (-Actions dedup). */
+  dedup: 'ffsb-helper-dedup',
 } as const;
 export type HelperAction = keyof typeof HELPERS;
 

@@ -55,7 +55,7 @@ $results = Join-Path $dir 'results'
 $actions = if ($Actions.Count) { @($Actions | ForEach-Object { $_ -split ',' } | Where-Object { $_ }) } else { @('mount', 'trim', 'compact', 'detach', 'reboot') + $(if ($PagefileGB -ge 4) { 'pagefile' } else { @() }) }
 
 if ($Uninstall) {
-  foreach ($a in 'mount', 'trim', 'compact', 'detach', 'reboot', 'pagefile') { Unregister-ScheduledTask -TaskName "ffsb-helper-$a" -Confirm:$false -ErrorAction SilentlyContinue }
+  foreach ($a in 'mount', 'trim', 'compact', 'detach', 'reboot', 'pagefile', 'grow', 'dedup') { Unregister-ScheduledTask -TaskName "ffsb-helper-$a" -Confirm:$false -ErrorAction SilentlyContinue }
   "removed the ffsb-helper-* tasks (left $dir for its results)"
   return
 }
@@ -86,11 +86,15 @@ foreach ($a in $actions) {
     if ($Skip) { $taskArgs += " -Skip `"$Skip`"" }
   }
   $extra = @{}
+  $limit = New-TimeSpan -Hours 2
   if ($a -eq 'mount') { $boot = New-ScheduledTaskTrigger -AtStartup; $boot.Delay = 'PT30S'; $extra.Trigger = $boot }
+  # dedup (w4502): a full pass every Sunday at 04:00, after the daily incremental job (02:00, about 30 min); the job caps
+  # itself at 5 h, the task at 6 h. Only on a drive with ReFS dedup enabled: install it with -Actions dedup.
+  if ($a -eq 'dedup') { $extra.Trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At '04:00'; $limit = New-TimeSpan -Hours 6 }
   $task = New-ScheduledTask @extra `
     -Action (New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $taskArgs) `
     -Principal (New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest) `
-    -Settings (New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 2) -MultipleInstances IgnoreNew)
+    -Settings (New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit $limit -MultipleInstances IgnoreNew)
   Register-ScheduledTask -TaskName $name -InputObject $task -Force | Out-Null
   # 3. Let the app's user read and run this task (GR GX), nothing more.
   $t = $svc.GetFolder('\').GetTask($name)

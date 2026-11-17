@@ -16,8 +16,14 @@
 # most the size of the volume that holds the VHDX, never while an editor uses the drive. The daemon starts it only when no
 # agent or editor is in a sandbox; the drive is detached for it (diskpart expand vdisk needs that), then reattached and its
 # partition extended (ReFS grows online).
+#
+# dedup (w4502) runs one FULL ReFS deduplication pass on the drive, where dedup is enabled (LothDesktop since w1576). The
+# daily scheduled job is incremental ("only new or changed files will be processed", Microsoft's Start-ReFSDedupJob docs),
+# and on 2026-11-16 it left 54 GB of byte-identical files that predated its last run unshared, so the installer runs this
+# action weekly. Dedup runs on live files (the nightly job has done so since 2026-10-19); it skips files changed in the last
+# hour, as the schedule does, and takes at most half the CPU.
 param(
-  [Parameter(Mandatory)][ValidateSet('mount', 'trim', 'compact', 'detach', 'reboot', 'pagefile', 'grow')][string]$Action,
+  [Parameter(Mandatory)][ValidateSet('mount', 'trim', 'compact', 'detach', 'reboot', 'pagefile', 'grow', 'dedup')][string]$Action,
   [Parameter(Mandatory)][string]$Vhdx,
   [Parameter(Mandatory)][ValidatePattern('^[A-Za-z]$')][string]$Letter,
   [Parameter(Mandatory)][string]$ResultDir,
@@ -168,6 +174,16 @@ try {
       }
       shutdown.exe /r /t 120 /d p:4:1 /c 'FF Factory: controlled reboot to recover the sandbox drive (cancel with shutdown /a)'
       Done $true 'reboot in 2 minutes (shutdown /a cancels it)'
+    }
+    'dedup' {
+      if (-not (Drive)) { Done $false "$($Letter): is not mounted" }
+      $vol = "$($Letter):"
+      $free0 = (Get-Volume -DriveLetter $Letter).SizeRemaining
+      $t0 = Get-Date
+      Start-ReFSDedupJob -Volume $vol -FullRun -Duration (New-TimeSpan -Hours 5) -CpuPercentage 50 -MinimumLastModifiedTimeHours 1 | Out-Null
+      $free1 = (Get-Volume -DriveLetter $Letter).SizeRemaining
+      $st = try { (Get-ReFSDedupStatus -Volume $vol | Select-Object * | ConvertTo-Json -Compress -Depth 3) } catch { "status unreadable: $($_.Exception.Message)" }
+      Done $true ("full dedup job on $vol (5 h cap, 50% CPU) started at {0:s}, returned after {1:N0} min; free {2:N1} -> {3:N1} GB; status {4}" -f $t0, ((Get-Date) - $t0).TotalMinutes, ($free0 / 1GB), ($free1 / 1GB), $st)
     }
     'pagefile' {
       if ($PagefileGB -lt 4) { Done $false 'no fixed pagefile size was configured at install' }

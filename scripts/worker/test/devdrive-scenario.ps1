@@ -31,7 +31,13 @@ function global:Write-VolumeCache { [CmdletBinding()] param($DriveLetter) }
 function global:diskpart { $lines = Get-Content $args[1]; $e = $lines | Where-Object { $_ -match '^expand vdisk maximum=(\d+)' }
   if ($e) { [void]$global:Calls.Add("expand $($Matches[1])"); if ($global:Attached) { return 'Virtual Disk Service error: The virtual disk is already attached.' }; if ($global:Sc.expandFails) { return 'DiskPart has encountered an error' }; $global:SizeGB = [int]($Matches[1] / 1024); return 'DiskPart successfully expanded the virtual disk file.' }
   return 'DiskPart succeeded' }
-function global:Get-Volume { [CmdletBinding()] param($DriveLetter) [pscustomobject]@{ Size = [int64]$(if ($global:Sc.hostGB) { $global:Sc.hostGB } else { 1000 }) * 1GB } }
+function global:Get-Volume { [CmdletBinding()] param($DriveLetter) [pscustomobject]@{ Size = [int64]$(if ($global:Sc.hostGB) { $global:Sc.hostGB } else { 1000 }) * 1GB; SizeRemaining = [int64]$global:FreeGB * 1GB } }
+# dedup (w4502): "freeGB" the drive's free space, "dedupGainGB" what the job gives back, "dedupFails".
+$global:FreeGB = [int]$(if ($sc.freeGB) { $sc.freeGB } else { 60 })
+function global:Start-ReFSDedupJob { [CmdletBinding()] param([string]$Volume, $Duration, [switch]$FullRun, $CpuPercentage, $MinimumLastModifiedTimeHours)
+  if ($global:Sc.dedupFails) { throw 'The device is not ready.' }
+  [void]$global:Calls.Add("Start-ReFSDedupJob $Volume full=$([bool]$FullRun) $([int]$Duration.TotalHours)h cpu=$CpuPercentage minAge=$MinimumLastModifiedTimeHours"); $global:FreeGB += [int]$global:Sc.dedupGainGB }
+function global:Get-ReFSDedupStatus { [CmdletBinding()] param([string]$Volume) [pscustomobject]@{ Volume = $Volume; State = 'Idle' } }
 function global:Get-PartitionSupportedSize { [CmdletBinding()] param($DriveLetter) [pscustomobject]@{ SizeMin = 1GB; SizeMax = [int64]$global:SizeGB * 1GB } }
 function global:Resize-Partition { [CmdletBinding()] param($DriveLetter, $Size) [void]$global:Calls.Add("Resize-Partition $DriveLetter $([int]($Size / 1GB))"); $global:PartGB = [int]($Size / 1GB) }
 function global:Mount-DiskImage { [CmdletBinding()] param([string]$ImagePath) [void]$global:Calls.Add('Mount-DiskImage'); $global:Attached = $true; $global:Held = [string]$global:Sc.autoLetter }

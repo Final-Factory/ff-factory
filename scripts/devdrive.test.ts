@@ -130,6 +130,10 @@ interface Scenario {
   hostGB?: number;
   unity?: string[];
   expandFails?: boolean;
+  /** dedup (w4502): the drive's free space, what the job gives back, the job failing. */
+  freeGB?: number;
+  dedupGainGB?: number;
+  dedupFails?: boolean;
 }
 
 /** Run the real ffsb-helper.ps1 mount against a faked PC; returns what it called and wrote. */
@@ -173,6 +177,20 @@ test('grow (w1918): never smaller, never past the host volume, never under an ed
   assert.match(bad.result!.detail, /still 80 GB after diskpart expand vdisk/);
   assert.deepEqual(bad.calls, ['Dismount-DiskImage', 'expand 114688', 'Mount-DiskImage'], 'reattached all the same');
   assert.equal((bad.state as Record<string, unknown>).wantGB, 112, 'the want stays for the next try');
+});
+
+test('dedup (w4502): one full ReFS dedup pass on the drive, capped at 5 h and half the CPU, skipping files changed in the last hour; it reports the free space before and after', { skip: needFake }, () => {
+  const d = boot({ attached: true, autoLetter: 'V', state: { letter: 'V' }, freeGB: 60, dedupGainGB: 50 }, { action: 'dedup' });
+  assert.equal(d.result?.ok, true, JSON.stringify(d));
+  assert.deepEqual(d.calls, ['Start-ReFSDedupJob V: full=True 5h cpu=50 minAge=1'], 'a full run: the daily incremental job never pairs copies made on different days');
+  assert.match(d.result!.detail, /full dedup job on V: .* free 60\.0 -> 110\.0 GB; status .*Idle/);
+  const off = boot({ attached: false, autoLetter: '', state: { letter: 'V' } }, { action: 'dedup' });
+  assert.equal(off.result?.ok, false);
+  assert.match(off.result!.detail, /V: is not mounted/);
+  assert.deepEqual(off.calls, []);
+  const bad = boot({ attached: true, autoLetter: 'V', state: { letter: 'V' }, dedupFails: true }, { action: 'dedup' });
+  assert.equal(bad.result?.ok, false);
+  assert.match(bad.result!.detail, /not ready/);
 });
 
 test('boot mount: a detached drive is attached and gets its letter back; an attached one is left alone', { skip: needFake }, () => {
