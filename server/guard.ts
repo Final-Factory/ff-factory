@@ -1049,6 +1049,22 @@ function pushTarget(ctx: ShellContext | undefined, remote: string | undefined, d
   return { game: game.has(key), known: true, saw: `remote ${remote} of ${dir} is ${key}`, key };
 }
 
+/** Git's global options that take their value as the next word, lowercased like the words they are matched against (`git -C <dir> push`, `git -c k=v push`). */
+const GIT_GLOBAL_WITH_VALUE = new Set(['-c', '--git-dir', '--work-tree', '--namespace', '--super-prefix', '--config-env']);
+
+/**
+ * w4533: the index of `push` when the git subcommand is push (`git push`, `git -C x -c k=v push`), else -1. Only git's own
+ * global options may stand between `git` and `push`: `git stash push -m w4528` is a stash, not a push, and its message
+ * was once read as the push's remote.
+ */
+export function gitPushAt(lower: readonly string[]): number {
+  const g = lower.findIndex((x) => x === 'git' || x.endsWith('/git') || x.endsWith('git.exe') || x.endsWith('\\git'));
+  if (g < 0) return -1;
+  let i = g + 1;
+  while (i < lower.length && lower[i].startsWith('-')) i += GIT_GLOBAL_WITH_VALUE.has(lower[i]) ? 2 : 1;
+  return lower[i] === 'push' ? i : -1;
+}
+
 const PUSH_AIM = 'The shell returns to your sandbox after every command: to push another repo (Final-Factory/ffbox master is pushed straight, docs/ffbox.md), name its clone in the same command, `cd <clone> && git push origin HEAD:master` (a path, or one under $TMPDIR), or push to its URL.';
 
 /** Why a push of branch `dst` to `remote` is refused: the game repo's master/main or develop, or a PR-only repo's master/main (w3111). */
@@ -1182,7 +1198,7 @@ export function checkShell(command: string, ctx?: ShellContext): string | undefi
       else env[assign[1]] = v;
     }
 
-    const pushAt = lower.findIndex((w, i) => w === 'push' && lower.slice(0, i).some((x) => x === 'git' || x.endsWith('/git') || x.endsWith('git.exe')));
+    const pushAt = gitPushAt(lower);
     if (pushAt >= 0) {
       // The repo this push goes to: `git -C <dir>` or the tracked cwd, and the remote when a refspec follows it.
       let pushDir = dir;
