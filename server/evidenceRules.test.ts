@@ -342,6 +342,9 @@ test("w1478: a sandbox worker's brief names its Unity instance and carries the f
   assert.match(FEWER_CALLS, /parallel tool calls/);
   // The built-in Explore is hidden from workers (w1482): the plugin's own does broad sweeps.
   assert.match(FEWER_CALLS, /five or more reads .* `ff-agents:Explore` or `ff-agents:scout` subagent/);
+  // w4599: split by context, and a subagent's reply is checked before the worker acts on it.
+  assert.match(FEWER_CALLS, /steps that chain on each other's output stay in your loop/);
+  assert.match(FEWER_CALLS, /re-open or re-run what your result rests on before you act or report on it/);
   assert.match(FEWER_CALLS, /until <done>; do sleep 20; done/);
   assert.match(FEWER_CALLS, /`get_test_job` with `wait_timeout`/);
   // The section must stay short: it is re-read on every call of every worker (w1469's base trim).

@@ -649,6 +649,10 @@ pre-compaction days from 10-17 to 10-19.
 How to read a pilot against it: run the same command over a week that starts after the change, on the same machine, and read
 spend_report's "By phase" for the fleet. A cut in after-push dollars that does not raise the dollars per merged PR is a win.
 A smaller after-push share that only comes from more research or implementing is not.
+Read the flips too, not only the mean (w4599, after Anthropic's "When to fold subagents into your main agent loop": "don't
+just examine the final score, take a look at which tasks flipped", and run each task more than once, since a break there
+"only showed up in one run out of two"): list the requests of each arm that were reopened, failed CI more than once or
+needed a second fix, and read those transcripts before calling a flat mean a win.
 
 ### Read chains handed to a subagent, a pilot (w2014)
 

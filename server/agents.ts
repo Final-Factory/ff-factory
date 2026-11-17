@@ -452,12 +452,15 @@ You run in bypass mode: a Bash or PowerShell command asks nobody, except when Cl
  * Fewer model calls (w1478; lothsahn, 2026-10-18: "why are there 200 calls at all?"). Measured with
  * scripts/worker-calls.ts on 81 beast worker sessions of 2026-10-15..18 (docs/spend.md, "Model calls per session"): 249
  * main-thread calls a session at 345k context each, 9.9% of them with more than one tool, 11.8% in runs of five or more
- * read-only calls, 7.7% waits or polls that came back in under 30 s, 83 sleeps Claude Code refused.
+ * read-only calls, 7.7% waits or polls that came back in under 30 s, 83 sleeps Claude Code refused. The subagent line is
+ * w4599's (Anthropic, "When to fold subagents into your main agent loop": split by context, verify the hand-back;
+ * docs/orchestrators.md, "Splitting work across agents").
  */
 export const FEWER_CALLS = `## Fewer model calls
 Every tool step is a model call that re-reads your whole context (about 345k tokens each, measured), so each call saved is spend saved:
 - Independent reads, searches and commands go in one turn as parallel tool calls; a grep and the \`sed -n\` of the lines it finds are one shell command.
 - A search you expect to take five or more reads (where X is, how Y flows across files) goes to one \`ff-agents:Explore\` or \`ff-agents:scout\` subagent that answers with the conclusion (its calls carry about 105k context, not yours). Read yourself what you will change or must judge.
+- Hand a subagent only work whose context you would throw away (independent legs in parallel, a search, a fresh check of your own work); steps that chain on each other's output stay in your loop. Its reply is a summary: re-open or re-run what your result rests on before you act or report on it.
 - Wait in one call: \`until <done>; do sleep 20; done\` with a Bash timeout of up to 600000, or \`run_in_background\` and its notice; never a sleep-then-look call repeated, and never a leading \`sleep N; ...\`, which Claude Code refuses. Longer than 10 minutes: wake_me; CI: ff-pr and blocked_on.
 - \`get_test_job\` with \`wait_timeout\` 60, \`refresh_unity\` with \`compile: "request"\` (it waits for the editor by itself).`;
 
