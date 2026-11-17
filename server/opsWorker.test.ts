@@ -1087,6 +1087,8 @@ test('w1106: a timer is set within a job and keeps it; a fire reopens that job (
 
 test('w1869: a git or GitHub job works the first time: the brief gives the route (a signed-in machine over ssh, with the PATH a Mac needs), and the refusal repeats it', () => {
   const brief = opsBrief('Lothsahn');
+  // w4540: the shell guard's refusal of $(...) is stated up front, not only when it refuses
+  assert.match(brief, /Your shell guard refuses a command with `\$\(\.\.\.\)` or backticks: run each command on its own/);
   assert.match(brief, /Git and GitHub jobs \(w1869: delete a remote branch.*\) run over ssh on a machine whose gh is signed in: m3 first \(its own login\), else beast/);
   assert.match(brief, /export PATH=\/opt\/homebrew\/bin:\/usr\/local\/bin:\$PATH; gh auth status 2>&1 \| grep -v Token/);
   assert.match(brief, /A branch delete needs no clone: .*repos\/OWNER\/REPO\/git\/refs\/heads\/BRANCH.*git ls-remote --heads/);

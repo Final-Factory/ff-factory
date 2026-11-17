@@ -443,6 +443,8 @@ export const SHELL_STEPS = `## Shell steps that never wait for a person
 You run in bypass mode: a Bash or PowerShell command asks nobody, except when Claude Code's own dangerous-rm check flags a delete in it (an \`rm\` of a \`$VAR\` path with a glob or a brace list, \`$TMPDIR/*.log\` or \`$TMPDIR/{a,b}\`, or of a critical path); then a person must approve it and your work stops. A function, a loop, several lines, \`&&\`, a copy into the game's data folder and a script run never ask (measured). So:
 - Put multi-step test logic (a function, a retry loop, several legs) in a script file in $TMPDIR, written with the Write tool, and run it: \`bash "$TMPDIR/leg.sh" 1920\`. It never asks, and you can run it again.
 - Keep what a command prints small: every later call reads it again, and tool output is nearly half of a worker's history (measured). Find the lines first (\`grep -n\`), then read the range you need, not the whole file; cap a search (\`| head -40\`, \`grep -l\`, \`grep -c\`); print a build's, a test run's or a CI log's summary and its failures (\`| tail -40\`, \`gh run view <id> --log-failed | tail -80\`), not the whole log.
+- On a Mac the Bash tool is zsh: quote globs (\`--include='*.cs'\`; an unquoted one that matches nothing is an error) and use BSD \`sed -i ''\`.
+- Python longer than one expression goes in a script file in $TMPDIR, not \`python -c\` or a heredoc. For Pillow or ffmpeg: \`uv run -q --no-project --with pillow --with imageio-ffmpeg python3 <script>\`.
 - The game's settings and saves around a test: \`read_rules saves\` (the game repo's \`python scripts/game_data.py\`, not a \`cp\` loop into its data folder).
 - Deletes in $TMPDIR: Disk space above (a new folder per leg, every path written out).`;
 

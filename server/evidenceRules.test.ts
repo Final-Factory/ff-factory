@@ -269,6 +269,10 @@ test("w1097: every worker's brief says which shell step still waits for a person
   assert.match(SHELL_STEPS, /^## Shell steps that never wait for a person\n/);
   assert.match(SHELL_STEPS, /except when Claude Code's own dangerous-rm check flags a delete in it/);
   assert.match(SHELL_STEPS, /in a script file in \$TMPDIR, written with the Write tool, and run it: `bash "\$TMPDIR\/leg\.sh" 1920`/);
+  // w4539: the shell traps the w4501 analysis measured (about 30 of 49 unintended Bash exits)
+  assert.match(SHELL_STEPS, /On a Mac the Bash tool is zsh: quote globs .*BSD `sed -i ''`/);
+  assert.match(SHELL_STEPS, /Python longer than one expression goes in a script file in \$TMPDIR/);
+  assert.match(SHELL_STEPS, /uv run -q --no-project --with pillow --with imageio-ffmpeg python3 <script>/);
   assert.match(SHELL_STEPS, /The game's settings and saves around a test: `read_rules saves`/);
   const saves = workerRuleText('saves');
   assert.match(saves, /`python scripts\/game_data\.py` \(`snapshot`, `restore`, `run --name <leg> -- <command>`/);
