@@ -293,6 +293,32 @@ export function decisionProblem(w: WorkItem, d: Decision, into?: WorkItem): stri
 
 export const statusAfter = (d: Decision): WorkStatus => TO[d];
 
+/**
+ * w4634 (lothsahn: "the dispatcher can never close a request as done with placeholder or empty text, or when no worker ever
+ * reported on it"): on 2026-11-16 at 22:21Z the dispatcher wanted only to clear w4592's timed flag, called decide_work done
+ * with timed false and the note "placeholder", and closed the urgent 1.0.0.50 release that no worker had run on.
+ * Why decide_work done must not take `note` for request `id`: an empty or placeholder note (everywhere), or, when no worker
+ * ever reported on it nor sent a DONE for it (`reported` false), a note that gives no reason to close it unworked (the
+ * request it repeats, a PR that did it, or nothing needed and why). Undefined when the note may close it.
+ */
+export function doneNoteProblem(id: string, note: string, reported: boolean): string | undefined {
+  const text = note.replace(/\s+/g, ' ').trim();
+  const bare = text.replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  const words = bare ? bare.split(' ').length : 0;
+  const instead = `To change only a flag (timed, report, pair_*), call decide_work with that flag and no action; it changes nothing else. If ${id} repeats another request, decide_work merge into it; if it should not be done, reject saying why; if it needs work, start_agent with its work_id.`;
+  if (PLACEHOLDER_WORD.test(text) || PLACEHOLDER_NOTE.test(bare) || words < 3 || bare.length < 12)
+    return `decide_work done refused (w4634): "${clip(text, 60)}" is an empty or placeholder note, and it would become ${id}'s outcome. Say in a full sentence what came of it. ${instead}`;
+  if (reported) return undefined;
+  const others = [...text.matchAll(/\bw(\d+)\b/gi)].map((m) => `w${m[1]}`).filter((x) => x !== id.toLowerCase());
+  if (others.length || /(?:^|\s)#\d+\b|\/pull\/\d+/.test(text)) return undefined;
+  if (UNWORKED_REASON.test(text) && words >= 6) return undefined;
+  return `decide_work done refused (w4634): no worker ever reported on ${id} or sent a DONE for it, and the note gives no reason it needs nothing. Close an unworked request as done only with the reason: the request or PR that already did it (name it, e.g. "repeats w123", "done by PR #45"), or what makes it unneeded and why. ${instead}`;
+}
+
+const PLACEHOLDER_WORD = /\b(?:placeholder|lorem ipsum)\b/i;
+const PLACEHOLDER_NOTE = /^(?:todo|tbd|tba|x+|n a|na|none|null|undefined|nil|test|testing|foo|bar|ok|okay|done|closed|close|yes|no|fixed|merged|finished|complete|completed|nothing|same|see above|as above|n\/a)$/i;
+const UNWORKED_REASON = /\b(?:duplicates?|duplicated|repeats|same as|already (?:done|fixed|merged|shipped|released|landed|covered|in|on)|covered by|superseded|fixed by|done by|did it|handled (?:by|in)|nothing (?:is |was )?(?:left|needed|to do)|no (?:work|change|action|fix) (?:is |was )?needed|not needed|no longer needed|unneeded|obsolete|withdrawn|asked (?:to|us to) (?:close|drop)|cancel(?:l)?ed by)\b/i;
+
 /** Requests that may start (or be messaged) for: open, not merged. */
 export function startProblem(w: WorkItem): string | undefined {
   if (w.approval?.state === 'pending') return `${w.id} came in through the intake and waits for a person to approve it (the Intake tab), or for an auto-approve rule`;
