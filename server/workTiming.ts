@@ -18,7 +18,7 @@ export type WaitCause = (typeof WAIT_CAUSES)[number];
 /** In-turn labels first (busiest first), then the between-turn ones; the order is the priority when workers overlap. */
 export const WORK_CAUSES = [
   'failure', 'compile', 'editor', 'tests', 'build', 'bench', 'pair', 'ci', 'merge', 'review', 'wait', 'think',
-  'gap_ci', 'gap_pair', 'gap_bench', 'gap_build', 'person', 'blocked', 'checkin', 'usage', 'preempt', 'idle', 'none',
+  'gap_ci', 'gap_pair', 'gap_bench', 'gap_build', 'person', 'blocked', 'checkin', 'usage', 'preempt', 'idle', 'tail', 'none',
 ] as const;
 export type WorkCause = (typeof WORK_CAUSES)[number];
 
@@ -56,6 +56,7 @@ export const WORK_LABEL: Record<WorkCause, string> = {
   usage: 'between turns: usage limit stop',
   preempt: 'between turns: paused, pre-empted or interrupted',
   idle: 'between turns: no marker (hand-off to the orchestrator or dispatcher)',
+  tail: 'after a worker\'s last turn, past TAIL_MS, until the close was recorded',
   none: 'no worker transcript covers it (before or after the workers)',
 };
 
@@ -64,6 +65,12 @@ const PRI = new Map<WorkCause, number>(WORK_CAUSES.map((c, i) => [c, WORK_CAUSES
 const MIN = 60_000;
 /** An open turn with no event for this long is a process that stopped, not a long thought. */
 const STOPPED_MS = 45 * MIN;
+/**
+ * w4531: the gap after a worker's last turn keeps that turn's hand-off label (CI, a person...) for at most this long; the
+ * rest is `tail`. w4277 and w4296's worker ended on blocked_on CI at ffu #824, merged 2026-11-15 11:52Z, and their DONE
+ * was recorded 46 h later: that was not CI (ffu's PR CI took 17.6 min median, measured 2026-11-17).
+ */
+export const TAIL_MS = 2 * 60 * MIN;
 
 /** A ledger log line ("HH:MM text") with its date put back, walking forward from the filing day. */
 export function datedLog(lines: readonly string[], createdAt: string): { t: number; text: string }[] {
@@ -186,7 +193,14 @@ export function toolCauseOf(name: string, input: unknown, isError: boolean): Wor
   if (/\bcargo build\b|BuildPlayer|build_player|-buildTarget|\bmsbuild\b|xcodebuild/.test(c)) return 'build';
   if (/gh run (watch|view)|gh pr checks|ff-pr (status|merge)/.test(c)) return 'ci';
   if (/\bgit (merge|rebase|pull)\b|ff-pr push/.test(c)) return 'merge';
-  if (/\buntil\b[\s\S]*\bsleep\b|^\s*sleep \d/.test(c)) return 'wait';
+  if (/\buntil\b[\s\S]*\bsleep\b|^\s*sleep \d/.test(c)) {
+    // w4531: a loop waits on what it polls (w4529's pair leg: `until grep -q "^EXIT" "$TMPDIR/build.log"`, its player build)
+    if (/build|pcache|\.app\b|\.exe\b/i.test(c)) return 'build';
+    if (/ffnightly|relay|pair|lab\.lock|determinism/i.test(c)) return 'pair';
+    if (/TestResults|test_job|test-results|\btests\b/i.test(c)) return 'tests';
+    if (/gh (run|pr)\b/.test(c)) return 'ci';
+    return 'wait';
+  }
   return 'think';
 }
 
@@ -268,7 +282,10 @@ export function sessionSpans(events: readonly TranscriptEvent[], from: number, t
     last = t;
   }
   if (turnStart !== undefined) push(turnStart, Math.min(last, to), 'think');
-  else if (gapFrom !== undefined) push(gapFrom, to, gapCause);
+  else if (gapFrom !== undefined) {
+    push(gapFrom, Math.min(to, gapFrom + TAIL_MS), gapCause);
+    push(gapFrom + TAIL_MS, to, 'tail');
+  }
   return spans;
 }
 
