@@ -705,8 +705,9 @@ test('w3217: remove-slot takes the slot names check prints and both path styles'
   const eaten = process.platform === 'win32' ? `${path.parse(root).root.slice(0, 2)}ffwplayersslot3-0` : 'V:ffwplayersslot3-0';
   const was = process.cwd();
   if (process.platform === 'win32') process.chdir(root);
-  t.after(() => process.chdir(was));
-  assert.equal(await foldersMain('remove-slot', [`${path.join(root, 'players')}$s`, eaten], env, Date.now(), (s) => void out.push(s), idle), 1);
+  // Back out before world()'s clean-up removes the folder: Windows will not delete a process's working directory.
+  const code = await foldersMain('remove-slot', [`${path.join(root, 'players')}$s`, eaten], env, Date.now(), (s) => void out.push(s), idle).finally(() => process.chdir(was));
+  assert.equal(code, 1);
   assert.equal(out.join('').match(/a shell ate its backslashes/g)?.length, 2, out.join(''));
 });
 
