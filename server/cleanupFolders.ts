@@ -90,7 +90,7 @@ export function judgeSession(sid: string, f: CleanupFacts): Pick<FolderRow, 'ver
     const withIt = open.filter((r) => r.with);
     const list = (rs: typeof open) => rs.map((r) => `${r.id} (${r.status})`).join(', ');
     if (withIt.length) return { verdict: 'keep', why: `stopped worker ${sid} is still on ${list(withIt)}, which has not closed: it resumes there and needs its files` };
-    return { verdict: 'keep', why: `worker ${sid} was on ${list(open)}, which has not closed (it moved on to another worker; the daemon sweeps these itself, w1097)` };
+    return { verdict: 'keep', why: `worker ${sid} was on ${list(open)}, which has not closed (it moved on to another worker, and may be resumed on it: the folder stays until it closes, w4671)` };
   }
   if (f.resumable.includes(sid)) return { verdict: 'keep', why: `a request still waits for worker ${sid}, or a check-in of its own is pending: the folder stays, its rebuildable bulk is listed below it once idle (w2223)` };
   return { verdict: 'delete', why: `no open, stalled or paused request names worker ${sid}: its requests are closed, or it belongs to no request (an orphan); only a clone with commits on no remote or a stash keeps it (w3656)` };

@@ -138,9 +138,9 @@ test('w2026: the per-pass index of requests by worker holds every request workOv
   const items = work.filter((w) => w.status !== 'merged' && (WORK_OPEN.includes(w.status) || w.status === 'stalled'));
   // w2987: a worker with a gate of its own on an open request counts as with it, in sessionIds or not
   const ownGate = (w: (typeof work)[number], sid: string) => (WORK_OPEN.includes(w.status) || w.status === 'stalled') && gatesOf(w).some((g) => gateSetter(g) === sid);
-  assert.deepEqual(resumableSessions(sessions, work, NOW), sessions.filter((sid) => items.some((w) => (w.sessionIds.includes(sid) && isWith(w, sid)) || ownGate(w, sid))).sort());
+  assert.deepEqual(resumableSessions(sessions, work, NOW), sessions.filter((sid) => items.some((w) => w.sessionIds.includes(sid) || !!w.movedOff?.[sid] || ownGate(w, sid))).sort());
   const owners = ownersOf(sessions.map((id) => ({ id })), work);
-  for (const sid of Object.keys(owners)) assert.deepEqual(owners[sid].requests.map((r) => r.id), work.filter((w) => w.sessionIds.includes(sid) || ownGate(w, sid)).map((w) => w.id.toLowerCase()).sort((a, b) => a.localeCompare(b)), sid);
+  for (const sid of Object.keys(owners)) assert.deepEqual(owners[sid].requests.map((r) => r.id), work.filter((w) => w.sessionIds.includes(sid) || !!w.movedOff?.[sid] || ownGate(w, sid)).map((w) => w.id.toLowerCase()).sort((a, b) => a.localeCompare(b)), sid);
 });
 
 test('w2026: connects after a start unzip one compressed transcript at a time, by a stream, and a big one gets a tail file that is not whole', async () => {

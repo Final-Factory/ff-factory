@@ -15,16 +15,31 @@ import { WORK_OPEN, type WorkItem } from '../shared/types.ts';
  * it was reopened, and the folder with it: LothDesktop's tmp reached 166 GB, a closed request's 27 GB clone among it. Its
  * folder now goes once nothing wrote in it for closedSessionMinutes (installLeftovers.ts closedSessions); a reopen within
  * that time still finds it, a later one clones again.
+ *
+ * A request handed to another worker no longer ends the hold either (w4671, lothsahn, 2026-11-18: "the cleanup never deletes
+ * the temp folder of a worker whose request is open, stalled or blocked, including a worker that's stopped and waiting to
+ * resume"): every worker an open or stalled request is or was on counts (workersOf), its newest or not, until it closes.
  */
 export function resumableSessions(sessionIds: Iterable<string>, work: Iterable<WorkItem>, _now = Date.now(), wakes: Iterable<string> = []): string[] {
   const items = [...work].filter((w) => w.status !== 'merged' && (WORK_OPEN.includes(w.status) || w.status === 'stalled'));
   // w2026: one pass over the requests (the stall profiles of 2026-10-24 had a scan of every request per session here)
   const withThem = new Set<string>(wakes);
-  for (const w of items) {
-    for (const sid of w.sessionIds) if (!withThem.has(sid) && isWith(w, sid)) withThem.add(sid);
-    for (const sid of ownGates(w)) withThem.add(sid);
-  }
+  for (const w of items) for (const sid of workersOf(w)) withThem.add(sid);
   return [...sessionIds].filter((sid) => withThem.has(sid)).sort();
+}
+
+/**
+ * Every worker request `w` is or was on (w4671): its sessionIds, the workers moved off it (WorkItem.movedOff) and those with
+ * a gate of their own on it (ownGates). While `w` is open or stalled each of them keeps its temp folder, not only the one it
+ * is with now (isWith): the rule keys on the request being open, not on which worker holds it. A move (stop_agent move_to,
+ * a hand-back) takes the request off its worker (Orchestrators.moveOff: out of sessionIds, into movedOff) before any other is
+ * placed, and that worker can be the one resumed: on lothdesktop, 2026-11-18, w4643 was moved off b063d65c at 03:18:45Z to go
+ * to m5 ("moved off it, not placed yet"), the session sweep emptied ffa-b063d65c at 03:28:52Z (step 1, three finished timed
+ * legs: player logs, tour output, runs.txt, the leg scripts), and b063d65c was resumed on w4643 at 06:53Z. The folder goes
+ * once the request closes (installLeftovers.ts closedSessions, w3656).
+ */
+function workersOf(w: WorkItem): Set<string> {
+  return new Set([...w.sessionIds, ...Object.keys(w.movedOff ?? {}), ...ownGates(w)]);
 }
 
 /**
@@ -68,7 +83,7 @@ export function ownersOf(sessions: Iterable<{ id: string; machineSandbox?: strin
   for (const w of work) {
     const own = new Set(ownGates(w));
     gated.set(w, own);
-    for (const sid of new Set([...w.sessionIds, ...own])) {
+    for (const sid of workersOf(w)) {
       const list = bySession.get(sid);
       if (list) list.push(w);
       else bySession.set(sid, [w]);
