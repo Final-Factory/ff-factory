@@ -200,6 +200,12 @@ export interface DaemonConfig {
 export const RELOCATE_FALLBACK_MS = { value: RELOCATE_FALLBACK_MINUTES * 60_000 };
 
 /**
+ * How often a daemon whose hello offered no update over its link looks again (w4672; read at start, tests shorten it). Up here,
+ * not beside RECONNECT_MS: the daemon run as a script starts before the end of this module is evaluated.
+ */
+export const REOFFER_MS = { value: 30_000 };
+
+/**
  * The portal URL to dial on attempt `n` (from 0, since the last connection): the configured one; once a relocation
  * (w466) has gone unanswered for `fallbackMs`, every other attempt the URL before it, so a cut-over that never comes up,
  * or is rolled back, does not strand the daemon. Exported for tests.
@@ -1251,6 +1257,9 @@ export class Daemon {
     // A first look at once: until it, the portal shows every sandbox's git as "not read yet" (and its editor stopped).
     this.timers.push(setInterval(() => void this.pool.tick(), 30_000));
     void this.pool.tick();
+    // w4672: a hello that offered no update over the link (root.json unreadable then: its Dev Drive not yet attached) is
+    // offered again once the install record is back, without waiting for the next reconnect.
+    this.timers.push(setInterval(() => this.offerSelfUpdate(), REOFFER_MS.value));
     // Unity slots (w469): the counts every 15 s, and every 5 s while a launch waits or holds one.
     try {
       this.slotBin = installShims(this.slots.dir);
@@ -1599,6 +1608,25 @@ export class Daemon {
     if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(msg));
   }
 
+  /** Whether this link's hello (or a later self_update_offer) offered updates over the link (w4672). */
+  private selfUpdateOffered = false;
+
+  /**
+   * Offer updates over the link when this link's hello could not (w4672). LothLaptop's daemon connected at 04:31Z on
+   * 2026-11-18 while its V: was not yet attached: root.json could not be read or put back (keepRootJson), the hello offered
+   * nothing, the drive came back the same minute, and the portal refused every update over the link until the next
+   * reconnect. offered() runs keepRootJson again, so the record is put back first; the portal merges the offer into what
+   * the hello said (server/machines.ts, self_update_offer). Called every REOFFER_MS while connected; tests call it.
+   */
+  offerSelfUpdate(): boolean {
+    if (this.selfUpdateOffered || !this.connected || !this.cfg.root) return false;
+    if (!this.selfUpdate.offered()) return false;
+    this.selfUpdateOffered = true;
+    log('worker install record readable again: offering updates over the link (w4672)');
+    this.send({ type: 'self_update_offer', selfUpdate: SELF_UPDATE_VERSION });
+    return true;
+  }
+
   /**
    * The portal's questions about the nightly lab's fixtures (w3939, machine/labFixtures.ts): their names, sizes and hashes,
    * and one file sent by hash over an upload the portal opened. Read-only; answered even with no fixtures folder (a refusal).
@@ -1653,6 +1681,8 @@ export class Daemon {
       probed = { at: Date.now(), osv, claude };
     }
     const { osv, claude } = probed!;
+    const selfUpdate = this.selfUpdate.offered();
+    this.selfUpdateOffered = selfUpdate;
     this.send({
       type: 'hello',
       protocol: PROTOCOL_VERSION,
@@ -1684,7 +1714,7 @@ export class Daemon {
       // Its owner's pause (w1532): a paused machine is held and its workers hand their requests back.
       pause: this.pause.current(),
       // It updates, restarts and unloads itself on the portal's word over this link (w1596): a worker root install.
-      ...(this.selfUpdate.offered() ? { selfUpdate: SELF_UPDATE_VERSION } : {}),
+      ...(selfUpdate ? { selfUpdate: SELF_UPDATE_VERSION } : {}),
       // A worker root install (w513): its folders, for a record the portal never deployed.
       ...(this.cfg.root
         ? { layout: { root: this.cfg.root, appDir: appDirOfConfig(this.cfg), repoPath: this.cfg.repoPath, tempDir: this.cfg.tempDir, sandboxes: this.cfg.sandboxes ?? null, ...installSshOf(this.cfg.root) } }

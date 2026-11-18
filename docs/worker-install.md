@@ -306,7 +306,9 @@ outbound (its WebSocket to the portal, `machine/daemon.ts`), so a PC on a tailne
 reach its port 22 (desktop-coosego) can now be updated, restarted and unloaded all the same:
 
 1. **The portal sends `self_update`** (`server/machines.ts` `linkUpdate`) only to a daemon whose hello offers `selfUpdate`: a
-   worker root install whose `root.json` names its service (`machine/selfUpdate.ts`). The message carries the commit, the
+   worker root install whose `root.json` names its service (`machine/selfUpdate.ts`). A daemon whose hello could not offer
+   it (`root.json` unreadable then, its Dev Drive not yet attached) looks again every 30 s and sends `self_update_offer`
+   once the record is back, put back from its spare copy if need be, with no reconnect (w4672). The message carries the commit, the
    form (`update`, or `tools` for the agent tools), the settings named, and the SHA-256 and size of a **git bundle of the
    portal's own checkout** at its HEAD (`server/machineLink.ts` `UpdateBundles`: a release is a worktree of a full clone,
    deploy/vm/guest/fff-update; a shallow checkout is refused, since its bundle cannot be fetched). The bundle is made once per
