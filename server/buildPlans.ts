@@ -10,7 +10,7 @@
 // A worker (or the dispatcher, for a request) declares a build coming on a build computer (placement.build, DEFAULT_BUILD:
 // beast, then lothdesktop; an OFFLINE one is refused, naming the next online one) with a rough lead time, through the
 // build_plan tool. A timed leg in that computer's bench queue no longer sends it elsewhere (w1628 did, for release builds
-// in general): the release's own Unity runs take EXCLUSIVE tickets at its request's priority (a release is filed at `release`, above every other priority, w4620), so they
+// in general): the release's own Unity runs take EXCLUSIVE tickets at its request's priority (a release is filed at `frantic`, above every other priority, w4620), so they
 // wait only for the leg running now and the ones of the same or a higher priority queued before. Then:
 // - From the declaration, the computer is held for new work (Agents.placement() adds holds()): nothing new is placed there,
 //   no released worker resumes there, nothing is moved there. Its workers go on as they are until the build is due.
@@ -29,7 +29,7 @@
 //   turns and asks the ones mid-turn to finish their step and start no new Unity work; the build does not wait for them
 //   (1.0.0.3 waited 20 minutes for one, then behind that worker's test run). Its builder's bench tickets go at its request's
 //   priority (w4620 replaced w1656's "count as urgent and PRE-EMPT the bench queue" with strict priority: a release, filed at
-//   `release`, goes ahead of every lower one after the turn running now, which is never cut short). At the start FF
+//   `frantic`, goes ahead of every lower one after the turn running now, which is never cut short). At the start FF
 //   Factory also stops the editor of every worker it paused or asked to pause (stopEditor), so an editor compile or test
 //   run ends at once and its Unity slot is free; never a Live view's editor (left alone above) nor the builder's.
 //   lothsahn (w1656), after 1.0.0.3 waited 12 minutes here and 15 more behind a worker's compile and test run: "Why did it
@@ -247,7 +247,7 @@ export class BuildPlans {
     const old = this.plans.get(machine);
     // w1639, lothsahn: "a quick or urgent release (beast, if offline, LothDesktop)": an offline build computer is refused,
     // naming the next online one. A timed leg in the bench queue no longer sends the build elsewhere (w1628 did): the
-    // release's exclusive tickets, at its request's priority (`release`), wait only for the leg running now and any queued ahead at a higher or equal rank.
+    // release's exclusive tickets, at its request's priority (`frantic`), wait only for the leg running now and any queued ahead at a higher or equal rank.
     if (!old && this.d.machineOnline && !this.d.machineOnline(machine)) {
       const next = first.find((id) => id !== machine && this.d.machineOnline!(id));
       return `Not on ${machine} (w1639): it is offline. ${next ? `An urgent release builds on ${next} then: ${a.builder ? `ask the dispatcher to move this work there (stop_agent move_to ${next})` : `build_plan coming with machine ${next}, and place its request there`}.` : `No build computer (${first.join(', ')}) is online: say so to the requester; a normal release (FFBox) needs none.`}`;
@@ -256,7 +256,7 @@ export class BuildPlans {
     if (old && !(a.builder && this.isBuilder(old, a.builder)) && !(a.by === 'the dispatcher' && old.by === 'the dispatcher')) {
       return `Not now: ${machine} is ${this.holdWhy(old).replace(/: no new work until it is done$/, '')}. One build at a time there: declare yours once that one is done (build_plan status), or build where you are.`;
     }
-    const queuedNote = timed ? ` ${machine} ${timedText(timed)}: the release's exclusive tickets, at its request's priority (release, w4620), go first after the leg running now, never beside one.` : '';
+    const queuedNote = timed ? ` ${machine} ${timedText(timed)}: the release's exclusive tickets, at its request's priority (frantic, w4620), go first after the leg running now, never beside one.` : '';
     const plan: BuildPlan = old
       ? { ...old, what: a.what || old.what, dueAt: old.clearedAt ? old.dueAt : now + minutes * 60_000, requests: [...new Set([...old.requests, ...a.requests])] }
       : { machine, what: (a.what || 'a player build').slice(0, 160), ...(a.builder ? { builder: a.builder } : {}), requests: a.requests, by: a.by, declaredAt: now, dueAt: now + minutes * 60_000, told: {}, paused: [], moved: [], kept: [] };
@@ -300,7 +300,7 @@ export class BuildPlans {
     const lock = this.d.benchLock(p.machine);
     const queued = lock ? ` On ${p.machine}, ${benchText(lock)}: your build takes a shared ticket in its bench queue and starts as soon as that leg (and any queued before your build) ends, never beside one; \`python scripts/bench/bench_queue.py status\` shows its place (w1628).` : '';
     // w1656: no wait for the workers asked to pause. They finish their step beside the build and start no new Unity work
-    // (pauseNotice); the build's exclusive tickets, at its request's priority (`release`: first, w4620), go ahead of lower ones in the bench queue after the leg running now.
+    // (pauseNotice); the build's exclusive tickets, at its request's priority (`frantic`: first, w4620), go ahead of lower ones in the bench queue after the leg running now.
     const busy = this.stillMidTurn(p);
     let stopped: string[] = [];
     if (!p.startedAt) {
@@ -546,4 +546,4 @@ export const NOT_RELEASE = 'Nothing to plan (w1628): build_plan is for release b
 
 /** The build_plan tool's description, the worker's and the dispatcher's (w1606). */
 export const BUILD_PLAN_DOC =
-  'The urgent release lane\'s build only (w1639; release builds only since w1628; lothsahn, 2026-10-20: "Ben\'s guidance was only supposed to be for release builds of the software, not all builds that workers do when making fixes"): a normal release is FFBox\'s and plans nothing here, and a worker\'s own player build (a fix, a clip, a playtest or MP check) needs no plan and clears nothing: build where you are through unity-slot run. A quick or urgent release builds on BEAST, else LothDesktop when BEAST is offline (w1639, placement.build), whatever timed legs wait in the bench queue (its exclusive tickets, at its request\'s priority release, go first after the leg running now, w4620): say it is coming (release: true), so FF Factory clears that computer for it; a Live view there stays open, and its worker is asked to start no compile, test or build meanwhile. action coming (release: true, minutes: lead time, what) holds it for new work at once, and when due moves the workers there between turns to other computers and pauses the rest at a safe point (never mid-edit); start (release: true) says go, or what it still waits for (workers finishing their step); done ends it, puts the release\'s sandbox back on the branch it left for urgent/<v> (w1856) and resumes the paused work; status. A worker declares its own release build (it runs where the worker is); the dispatcher one for a request (work_id).';
+  'The urgent release lane\'s build only (w1639; release builds only since w1628; lothsahn, 2026-10-20: "Ben\'s guidance was only supposed to be for release builds of the software, not all builds that workers do when making fixes"): a normal release is FFBox\'s and plans nothing here, and a worker\'s own player build (a fix, a clip, a playtest or MP check) needs no plan and clears nothing: build where you are through unity-slot run. A quick or urgent release builds on BEAST, else LothDesktop when BEAST is offline (w1639, placement.build), whatever timed legs wait in the bench queue (its exclusive tickets, at its request\'s priority frantic, go first after the leg running now, w4620): say it is coming (release: true), so FF Factory clears that computer for it; a Live view there stays open, and its worker is asked to start no compile, test or build meanwhile. action coming (release: true, minutes: lead time, what) holds it for new work at once, and when due moves the workers there between turns to other computers and pauses the rest at a safe point (never mid-edit); start (release: true) says go, or what it still waits for (workers finishing their step); done ends it, puts the release\'s sandbox back on the branch it left for urgent/<v> (w1856) and resumes the paused work; status. A worker declares its own release build (it runs where the worker is); the dispatcher one for a request (work_id).';

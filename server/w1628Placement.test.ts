@@ -95,7 +95,7 @@ function plans(queue: Record<string, BenchQueueReport | undefined>, target: stri
 test('w1639 (was w1628): an urgent release declared on BEAST with a timed leg there stays there; an offline BEAST names LothDesktop', () => {
   const p = plans({ beast: timed(1, 'w1440 probe B round 2') }, 'lothdesktop');
   const out = p.declare({ machine: 'beast', minutes: 10, what: '1.0.0.12 urgent release', builder: 's1', requests: ['w1639'], by: 'worker s1' });
-  assert.match(out, /^Declared \(w1606\): 1\.0\.0\.12 urgent release on beast at 18:10Z\. beast has 1 timed run in its bench queue, running or waiting \(the first: w1440 probe B round 2\): the release's exclusive tickets, at its request's priority \(release, w4620\), go first after the leg running now, never beside one\./);
+  assert.match(out, /^Declared \(w1606\): 1\.0\.0\.12 urgent release on beast at 18:10Z\. beast has 1 timed run in its bench queue, running or waiting \(the first: w1440 probe B round 2\): the release's exclusive tickets, at its request's priority \(frantic, w4620\), go first after the leg running now, never beside one\./);
   assert.ok(p.plan('beast'), 'beast is held for it');
   // BEAST offline: refused, naming LothDesktop, for a worker and for the dispatcher.
   const off = plans({}, 'lothdesktop', ['beast']);

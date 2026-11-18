@@ -156,7 +156,7 @@ export function timedLegStep(a: LegInput): LegStep {
     };
   }
   const freed = why.length ? `; none can be freed: ${why.join('; ')}` : '';
-  // 3. High, urgent or release: the big computers' fallback at once (w2048); normal or low: wait on the base class.
+  // 3. High, urgent or frantic: the big computers' fallback at once (w2048); normal or low: wait on the base class.
   if (atLeast(a.priority, 'high')) {
     const all = ok.filter((c) => upNow(c, a.now, a.blipMs)).map((c) => c.id);
     return { widen: all, why: `it is ${a.priority} priority and no computer${os} that takes timed runs is idle or can be freed${freed}${skipped}: it may go to any computer that takes timed runs, big ones included (w2048 fallback): ${all.join(' > ')}` };

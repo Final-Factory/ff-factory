@@ -174,7 +174,7 @@ test('a low request says low beside its id, and its detail sets the priority (w2
   await panel.getByTestId('work-w1097').getByRole('button', { name: /Someday: tidy the dashboard/ }).click();
   const select = panel.getByTestId('work-priority-w1097').getByRole('combobox', { name: 'Priority of w1097' });
   await expect(select).toHaveValue('low');
-  await expect(select.locator('option')).toHaveText(['release', 'urgent', 'high', 'normal', 'low']);
+  await expect(select.locator('option')).toHaveText(['frantic', 'urgent', 'high', 'normal', 'low']);
   // The row here is the page's own (rowsState), not the server's: the server's answer proves the change reached its route.
   await select.selectOption('normal');
   await expect(page.getByText('no work request "w1097"; list_work shows them')).toBeVisible();

@@ -40,7 +40,7 @@
 // person counts whichever worker of the request said it, also one that went on to other work since (its last report on
 // the request, read from the log). A worker that waits on another request's worker (its files, its results) is Blocked on
 // that request. And a worker that says it waits on the orchestrator for its own work says so in the Stalled line.
-import { questionFor, type BenchLock, type BuildHold, type SessionInfo, type WorkItem } from './types.ts';
+import { asWorkPriority, questionFor, type BenchLock, type BuildHold, type SessionInfo, type WorkItem } from './types.ts';
 import { agentState, holdsSandbox, hostFailureText } from './agentState.ts';
 import { gatesName, gatesOf } from './blockers.ts';
 import { admitsPriority, needsOf, pairRoom, pairText, reservedText, ROOM_STAND_MS, unfitWhy, type ReservedRoom, type RoomFit } from './capacity.ts';
@@ -857,7 +857,7 @@ export interface RoomShare {
   ahead: string[];
 }
 
-const PRIORITY_RANK: Record<WorkItem['priority'], number> = { release: 0, urgent: 1, high: 2, normal: 3, low: 4 };
+const PRIORITY_RANK: Record<WorkItem['priority'], number> = { frantic: 0, urgent: 1, high: 2, normal: 3, low: 4 };
 
 /**
  * Who each computer's room goes to first (w1944, lothsahn, 2026-10-24: "Why does the dispatcher say biscuit has room when
@@ -874,7 +874,7 @@ export function roomShares(items: readonly WorkItem[], f: RoomFacts, extra?: { w
     .filter((w) => live(w) && w.id !== extra?.w.id && (w.status === 'queued' || w.legs?.length))
     .map((w) => (w.status === 'queued' ? { key: w.id, w, wanted: queuedNeeds(w) } : { key: `${w.id}:leg`, w, wanted: w.legs!.flatMap((l) => l.needs) }));
   if (extra) queue.push({ key: extra.w.id, w: extra.w, wanted: extra.wanted });
-  queue.sort((a, b) => PRIORITY_RANK[a.w.priority] - PRIORITY_RANK[b.w.priority] || a.w.createdAt.localeCompare(b.w.createdAt) || a.key.localeCompare(b.key));
+  queue.sort((a, b) => PRIORITY_RANK[asWorkPriority(a.w.priority) ?? 'normal'] - PRIORITY_RANK[asWorkPriority(b.w.priority) ?? 'normal'] || a.w.createdAt.localeCompare(b.w.createdAt) || a.key.localeCompare(b.key));
   const left = new Map(Object.entries(f.roomSlots));
   const takers = new Map<string, string[]>();
   const out = new Map<string, RoomShare>();

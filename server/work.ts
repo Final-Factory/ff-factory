@@ -522,7 +522,7 @@ export function startedPinned(w: Pick<WorkItem, 'status' | 'legs' | 'queuedFor' 
 }
 
 /**
- * The order queued work takes free room in (the capacity ping, w1099, w2049): release, urgent, high, normal, low; within one
+ * The order queued work takes free room in (the capacity ping, w1099, w2049): frantic, urgent, high, normal, low; within one
  * priority, started work that can run only on named computers first; then the oldest. Never across priorities: a
  * person's priority is their word, and higher work that fits another computer with room goes there (the ping's room).
  */

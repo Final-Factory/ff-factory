@@ -1699,7 +1699,7 @@ LothDesktop and Beast, not just when BEAST is full").
     with room on the platform it names, BEAST last, never a computer that takes no timed runs (m5; `timedRank`, `pickTimed`, w1628, w1861, w1872; docs/orchestrators.md "Timed and exclusive-lock work").
   - A build declared coming holds its computer for new work at once (`Agents.placement()` adds `BuildPlans.holds()`),
     and when due moves its workers between turns elsewhere, pauses the ones that cannot move and asks the ones mid-turn
-    to pause at a safe point; `build_plan start` goes at once (w1656: the paused workers' editors are stopped; the release's bench tickets go at its request's priority, `release` first after the turn running now, w4620, docs/orchestrators.md); `done`
+    to pause at a safe point; `build_plan start` goes at once (w1656: the paused workers' editors are stopped; the release's bench tickets go at its request's priority, `frantic` first after the turn running now, w4620, docs/orchestrators.md); `done`
     resumes them. The paused workers' resumes are held by `machineHold` (`BuildPlans.resumeHold`), not by the computer's
     hold, so the builder and a running Live view go on. Details: [orchestrators.md](orchestrators.md), "Builds clear BEAST".
   - Tests: `server/buildPlans.test.ts`, the w1606 cases in `server/placement.test.ts` and `server/orchestrators.test.ts`,

@@ -51,7 +51,7 @@ test('w4620: raising a waiting request reorders it ahead at the next look (prior
 
 test('w4620: release goes ahead of urgent', () => {
   const queued = [waiter('u1', 1), waiter('u2', 2), waiter('r3', 3), waiter('h4', 4)];
-  const priorityOf = marks({ u1: 'urgent', u2: 'urgent', r3: 'release', h4: 'high' });
+  const priorityOf = marks({ u1: 'urgent', u2: 'urgent', r3: 'frantic', h4: 'high' });
   assert.deepEqual(look([holder('h'), ...queued], priorityOf).waiting.map((w) => w.id), ['r3', 'u1', 'u2', 'h4']);
   assert.deepEqual(look(queued, priorityOf).grant, ['r3']);
 });
@@ -89,7 +89,7 @@ test('w4620: the priorities.json reader takes level (release) over priority, and
     const sessions = { rel: { priority: 'urgent', level: 'release', requests: [] }, urg: { priority: 'urgent', requests: [] }, nrm: { priority: 'normal', requests: [] }, odd: { priority: 'bogus', requests: [] } };
     fs.writeFileSync(path.join(dir, 'priorities.json'), JSON.stringify({ sessions }));
     const of = readSlotPriorities(root);
-    assert.deepEqual(['rel', 'urg', 'nrm', 'odd', 'none', undefined].map((s) => of(s)), ['release', 'urgent', 'normal', 'low', 'low', 'low']);
+    assert.deepEqual(['rel', 'urg', 'nrm', 'odd', 'none', undefined].map((s) => of(s)), ['frantic', 'urgent', 'normal', 'low', 'low', 'low']);
   } finally {
     fs.rmSync(root, { recursive: true, force: true, maxRetries: 3 });
   }
@@ -165,5 +165,5 @@ test('w4620: the arbiter reads priorities.json at each look, so raising a waitin
   write({ 's-second': { priority: 'urgent', level: 'release', requests: [] } });
   await m.slots.tick();
   assert.deepEqual(m.slots.report()!.waiting.map((w) => w.label), ['build second', 'build first']);
-  assert.match(m.slots.report()!.waiting[0].why, /priority release$/);
+  assert.match(m.slots.report()!.waiting[0].why, /priority frantic$/);
 });

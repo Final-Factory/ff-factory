@@ -314,7 +314,7 @@ function Delegations({ list, now, app }: { list: DelegationRequest[]; now: numbe
               </button>
             </div>
           )}
-          {d.status === 'approved' && d.workId && !d.repeat && OPEN.includes(workOf(d)?.status ?? '') && workOf(d)?.priority !== 'urgent' && workOf(d)?.priority !== 'release' && (
+          {d.status === 'approved' && d.workId && !d.repeat && OPEN.includes(workOf(d)?.status ?? '') && workOf(d)?.priority !== 'urgent' && workOf(d)?.priority !== 'frantic' && (
             <div className="deleg-actions">
               <button className="btn btn-sm btn-outline" disabled={busy === d.id} data-testid="deleg-bump" title="Make its request urgent and ask the dispatcher to start it now" onClick={() => bump(d)}>
                 Start now

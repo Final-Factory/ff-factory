@@ -4,7 +4,7 @@
 // Since w1829 and w1832 also each turn's deadline and warning, the release and nightly marks, and what a turn closed.
 import fs from 'node:fs';
 import path from 'node:path';
-import type { BenchState, BenchTicketGlance, UntimedTiming, WorkPriority } from '../shared/types.ts';
+import { asWorkPriority, type BenchState, type BenchTicketGlance, type UntimedTiming, type WorkPriority } from '../shared/types.ts';
 import { APPROVED_MAX_MIN, benchLockDir, pidAlive, readBenchLock } from './benchLock.ts';
 import { benchQueueDir, queueTickets, type QueueTicket } from './benchQueue.ts';
 import { closedFile } from './benchTurn.ts';
@@ -19,9 +19,11 @@ export const BENCH_STATE_MAX_WAITERS = 12;
 const TURN_MIN = 30;
 const OLD_TURN_MIN = 60;
 
-/** bench_queue.py PRIORITIES, highest first: the queue sorts by these first (w1628; release on top since w4620, lothsahn:
- * "The factory should be using strict priority queues"). */
-const PRIORITIES = ['release', 'urgent', 'high', 'normal', 'low'];
+/** bench_queue.py PRIORITIES, highest first: the queue sorts by these first (w1628; the top one on top since w4620, lothsahn:
+ * "The factory should be using strict priority queues"; frantic here, `release` on the wire and before w4710, read as frantic). */
+const PRIORITIES: readonly WorkPriority[] = ['frantic', 'urgent', 'high', 'normal', 'low'];
+/** A mark's level or priority as a WorkPriority (w4710: the wire's `release` is frantic), undefined when unknown. */
+const markPriority = (s: { level?: string; priority?: string } | undefined): WorkPriority | undefined => asWorkPriority(s?.level) ?? asWorkPriority(s?.priority);
 
 const readJson = (f: string): Record<string, unknown> | undefined => {
   try {
@@ -61,7 +63,8 @@ const num = (ticket: string) => Number(ticket.slice(1)) || 0;
  * counts as low, w4620), then its place (`pos`, a shared group's), then its number. */
 function orderKey(t: QueueTicket, info: Record<string, unknown> | undefined, m: Marks): [number, number, number] {
   const s = m.sessions[t.session ?? ''];
-  const p = PRIORITIES.indexOf(s?.level ?? s?.priority ?? '');
+  const mp = markPriority(s);
+  const p = mp ? PRIORITIES.indexOf(mp) : -1;
   const pos = info?.pos;
   return [p < 0 ? PRIORITIES.indexOf('low') : p, typeof pos === 'number' ? pos : num(t.ticket), num(t.ticket)];
 }
@@ -104,7 +107,7 @@ function glance(t: QueueTicket, m: Marks, live: Set<string>): BenchTicketGlance 
     mode: t.mode,
     what: t.what.slice(0, 120),
     ...(t.session ? { session: t.session } : {}),
-    priority: (PRIORITIES as readonly string[]).includes(mark?.level ?? mark?.priority ?? '') ? ((mark?.level ?? mark?.priority) as WorkPriority) : 'low',
+    priority: markPriority(mark) ?? 'low',
     ...(t.requests?.length ? { requests: t.requests.slice(0, 4) } : {}),
     ...(t.host ? { host: t.host } : {}),
     ...(t.sandbox ? { sandbox: t.sandbox } : {}),

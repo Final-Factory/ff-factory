@@ -33,16 +33,16 @@ test('w4620: raising a queued request reorders it at once, and lowering it puts 
 });
 
 test('w4620: release goes ahead of urgent everywhere a priority ranks, with no shortcut of its own', () => {
-  assert.deepEqual(WORK_PRIORITIES, ['low', 'normal', 'high', 'urgent', 'release']);
-  const q = [w('urgentOld', 1, 'urgent'), w('normal', 2, 'normal'), w('release', 3, 'release')];
+  assert.deepEqual(WORK_PRIORITIES, ['low', 'normal', 'high', 'urgent', 'frantic']);
+  const q = [w('urgentOld', 1, 'urgent'), w('normal', 2, 'normal'), w('release', 3, 'frantic')];
   assert.deepEqual([...q].sort(capacityOrder).map((x) => x.id), ['release', 'urgentOld', 'normal']);
   assert.deepEqual([...q].sort(priorityThenAge).map((x) => x.id), ['release', 'urgentOld', 'normal']);
-  assert.ok(priorityRank('release') > priorityRank('urgent'));
+  assert.ok(priorityRank('frantic') > priorityRank('urgent'));
   assert.equal(priorityRank('nonsense'), 0, 'an unknown priority ranks as low');
   assert.equal(priorityRank(undefined), 0, 'no priority ranks as low');
-  assert.ok(atLeast('release', 'urgent') && !atLeast('high', 'urgent'));
+  assert.ok(atLeast('frantic', 'urgent') && !atLeast('high', 'urgent'));
   // old bench_queue.py copies know only urgent..low: a release session reads as urgent there, with level release for new ones
-  assert.deepEqual(benchRank('release'), { priority: 'urgent', level: 'release' });
+  assert.deepEqual(benchRank('frantic'), { priority: 'urgent', level: 'release' });
   assert.deepEqual(benchRank('urgent'), { priority: 'urgent' });
-  assert.match(minPriorityText('urgent'), /release/, 'a computer reserved for urgent work takes release work too');
+  assert.match(minPriorityText('urgent'), /frantic/, 'a computer reserved for urgent work takes frantic work too');
 });
