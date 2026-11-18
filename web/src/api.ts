@@ -317,14 +317,26 @@ export function connectSocket(h: SocketHandlers): () => void {
   let timer: ReturnType<typeof setTimeout> | undefined;
   /** When the open socket last delivered anything. */
   let heard = 0;
+  // Why the next socket opens, told to the server in its URL so its log can explain a drop (w4723, server/pageSockets.ts):
+  // first, closed (the socket closed; code is the close code this page saw), error (an attempt never opened), stale (the
+  // watchdog heard nothing for SOCKET_STALE_MS), visible (a tab coming back found its socket silent), online (the network came back).
+  let why = 'first';
+  let lastCode: number | undefined;
+  let lostAt = 0;
 
-  const url = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`;
+  const base = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`;
+  const url = () => {
+    const q = new URLSearchParams({ why });
+    if (lastCode !== undefined) q.set('code', String(lastCode));
+    if (lostAt) q.set('gap', String(Date.now() - lostAt));
+    return `${base}?${q}`;
+  };
 
   const open = () => {
     if (stopped) return;
     h.onStatus('connecting');
     let opened = false;
-    const sock = new WebSocket(url);
+    const sock = new WebSocket(url());
     ws = sock;
     sock.onopen = () => {
       opened = true;
@@ -344,10 +356,13 @@ export function connectSocket(h: SocketHandlers): () => void {
       }
       if (ev.type !== 'ping') h.onEvent(ev);
     };
-    sock.onclose = async () => {
+    sock.onclose = async (e) => {
       if (ws !== sock) return;
       ws = null;
       if (stopped) return;
+      why = opened ? 'closed' : 'error';
+      lastCode = e.code;
+      if (opened) lostAt = Date.now();
       h.onStatus('closed');
       if (!opened) {
         const keepGoing = await h.onFailure().catch(() => true);
@@ -362,17 +377,22 @@ export function connectSocket(h: SocketHandlers): () => void {
   // A socket that died without a close (a laptop asleep, a phone that suspended the tab, a dropped
   // connection) still reads open and just goes quiet: everything sent meanwhile, such as a message
   // typed on another device, would never show here. Replace it; the reconnect refetches the gap.
-  const dropIfStale = () => {
+  const dropIfStale = (reason: 'stale' | 'visible') => {
     if (!ws || stopped || ws.readyState !== WebSocket.OPEN || Date.now() - heard < SOCKET_STALE_MS) return false;
     const dead = ws;
     ws = null; // its onclose, if it ever comes, is then ignored
-    dead.close();
+    // 4000: if this reaches the server, the path was up and only the server had gone quiet (its log says "code 4000").
+    dead.close(4000, reason === 'stale' ? 'page heard nothing for 45 s' : 'tab came back to a silent socket');
+    why = reason;
+    lastCode = undefined;
+    lostAt = heard;
     return true;
   };
 
   // Reconnect promptly when a phone wakes up / the tab comes back.
-  const wake = () => {
-    if (document.visibilityState === 'visible' && !stopped && (!ws || dropIfStale())) {
+  const wake = (e: Event) => {
+    if (document.visibilityState === 'visible' && !stopped && (!ws || dropIfStale(e.type === 'online' ? 'stale' : 'visible'))) {
+      if (e.type === 'online' && !ws) why = 'online';
       clearTimeout(timer);
       attempt = 0;
       open();
@@ -381,7 +401,7 @@ export function connectSocket(h: SocketHandlers): () => void {
   document.addEventListener('visibilitychange', wake);
   window.addEventListener('online', wake);
   const watchdog = setInterval(() => {
-    if (dropIfStale()) {
+    if (dropIfStale('stale')) {
       clearTimeout(timer);
       attempt = 0;
       open();

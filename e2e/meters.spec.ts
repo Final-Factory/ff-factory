@@ -85,7 +85,7 @@ type Shape = 'machines' | 'host-only' | 'old-server';
 
 /** Serve the page a fixed world: the orchestrator only, no sandboxes, and the machines and accounts of `shape`. */
 async function fixedWorld(page: Page, shape: Shape, extra: AccountUsage[] = [], m5Cleanup?: CleanupSummary) {
-  await page.routeWebSocket('**/ws', (ws) => {
+  await page.routeWebSocket(/\/ws(\?|$)/, (ws) => {
     const server = ws.connectToServer();
     let orchId = '';
     server.onMessage((raw) => {

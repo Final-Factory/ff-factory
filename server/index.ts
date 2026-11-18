@@ -110,6 +110,7 @@ import type { SpendSummaryReply } from '../shared/spend.ts';
 import { dataGuardSettings, footprint, gzipRatioCached, runDataGuard } from './dataGuard.ts';
 import { cleanMediaTrouble, mediaTroubleLine } from '../shared/mediaTrouble.ts';
 import { LoopWatch } from './loopWatch.ts';
+import { PageSockets, fromThisMachine } from './pageSockets.ts';
 import { StallProfiler } from './stallProfile.ts';
 
 const WEB = path.join(ROOT, 'web', 'dist');
@@ -2410,7 +2411,7 @@ const server = http.createServer(async (req, res) => {
     }
     // Liveness and version, for scripts, monitors and the E2E harness. No login needed: the
     // version of an open-source app is public anyway. loopLagMs: the event loop's worst lag of the last minute (w1377).
-    if (url.pathname === '/api/health' && req.method === 'GET') return send(res, 200, { ok: true, ...appNow(), loopLagMs: loopWatch.lagMs(), ...(isDryRun ? { dryRun: true } : {}) });
+    if (url.pathname === '/api/health' && req.method === 'GET') return send(res, 200, { ok: true, ...appNow(), loopLagMs: loopWatch.lagMs(), pageSockets: pageSockets.health(fromThisMachine(req)), ...(isDryRun ? { dryRun: true } : {}) });
     if (url.pathname === '/api/login' && req.method === 'POST') {
       const { username, password } = await readJson<{ username?: string; password?: string }>(req);
       if (typeof username !== 'string' || typeof password !== 'string') return send(res, 400, { error: 'username and password required' });
@@ -2463,6 +2464,8 @@ const server = http.createServer(async (req, res) => {
 const wss = new WebSocketServer({ noServer: true, perMessageDeflate: { threshold: 16 * 1024, serverNoContextTakeover: true, clientNoContextTakeover: true } });
 /** Every page's socket, with the login it signed in as (notices meant for one person go to their pages only). */
 const clients = new Map<WebSocket, string>();
+/** One log line per page socket opening and closing, and each person's drops for /api/health (w4723, server/pageSockets.ts). */
+const pageSockets = new PageSockets<WebSocket>();
 /** Pages watching a live view (w1398): binary JPEG frames, never compressed (they do not compress). */
 const liveWss = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: 64 * 1024 });
 
@@ -2526,13 +2529,19 @@ server.on('upgrade', (req, socket, head) => {
     clients.set(ws, user);
     alive.add(ws);
     ws.on('pong', () => alive.add(ws));
-    ws.on('close', () => clients.delete(ws));
+    ws.on('close', (code, reason) => {
+      clients.delete(ws);
+      pageSockets.closed(ws, code, reason.toString());
+    });
     // A malformed frame (e.g. unmasked) emits 'error'; unhandled, that would kill the process.
     ws.on('error', (e) => {
       console.warn('websocket error:', e.message);
       clients.delete(ws);
     });
-    ws.send(JSON.stringify({ type: 'state', state: appState(user) } satisfies ServerEvent));
+    const t0 = performance.now();
+    const first = JSON.stringify({ type: 'state', state: appState(user) } satisfies ServerEvent);
+    ws.send(first);
+    pageSockets.opened(ws, user, req, { ms: performance.now() - t0, bytes: first.length });
   });
 });
 
@@ -2569,6 +2578,7 @@ setInterval(() => {
   for (const c of clients.keys()) {
     if (!alive.has(c)) {
       clients.delete(c);
+      pageSockets.serverClosing(c, 'ping-timeout');
       c.terminate();
       continue;
     }

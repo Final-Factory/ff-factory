@@ -90,7 +90,7 @@ test('orchestrator: a window whose socket died silently catches up on messages s
   // phone suspends the tab: no close event ever comes. Later sockets are healthy.
   let socketsOpened = 0;
   let firstDead = false;
-  await page.routeWebSocket('/ws', (ws) => {
+  await page.routeWebSocket(/\/ws(\?|$)/, (ws) => {
     const n = ++socketsOpened;
     const server = ws.connectToServer();
     server.onMessage((m) => {
