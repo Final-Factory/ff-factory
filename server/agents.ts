@@ -63,7 +63,7 @@ import { WORKER_READ_RULES_TOOL, workerRuleText } from './workerRules.ts';
 import { activityLine, Waker } from './wake.ts';
 import { TIMER_LIMITS, Timers, scheduleText, type TimerView } from './timers.ts';
 import { EVEN_MARGIN, RAM_BUSY_PCT, benchText, buildOf, busyReasons, capacityLines, classRank, forPriority, hasRoom, holdReason, liveOf, loadText, lowestPriority, minOf, pairCanFinish, pairNoPlacement, pickComputer, placeId, pinnedWork, placementHint, reservedReason, roomEnough, roomForWork, roomNow, timedFacts, timedKindOf, timedPinRefusal, voiceVram, type Computer, type FirstKind, type NeedKind, type PlacementPrefs, type RoomNow, type TimedKind } from './placement.ts';
-import { MachinePauses, PAUSE_TICK_MS, pauseHolds, pauseWhy, type HandBack } from './machinePause.ts';
+import { MachinePauses, PAUSE_TICK_MS, pauseHold, pauseHolds, type HandBack } from './machinePause.ts';
 import { MOVE_AFTER_MS, NONE_MARK, ROOM_WAIT, briefOf, holdMoves, moveDecision, movedPrompt, stayLine, type MoveFacts } from './resumeMove.ts';
 import { playHolds, playLine } from '../shared/personPlay.ts';
 import { sandboxUseText, unitySlotsLine } from '../shared/fleet.ts';
@@ -1054,7 +1054,7 @@ export class Agents {
       machineOfflineLong: (id) => this.longAwayOf(id)?.away.kind === 'offline',
       machinePaused: (id) => {
         const p = store.machines.get(id.toLowerCase())?.pause;
-        return p?.paused ? pauseWhy(p) : undefined;
+        return p?.paused ? pauseHold(p, Date.now()) : undefined;
       },
       personPlaying: (id) => {
         const p = machines.personPlayOf(id.toLowerCase());

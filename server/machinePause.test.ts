@@ -16,12 +16,12 @@ const PAUSED: MachinePause = { paused: true, reason: 'activity', detail: 'someon
 
 test('w1532: a paused machine is held: never picked for new work, named in the room, and nothing resumes there', () => {
   const holds = pauseHolds([{ id: 'beast', pause: PAUSED }, { id: 'lothdesktop', pause: { paused: false, detail: 'running: no schedule set' } }, { id: 'm5' }]);
-  assert.deepEqual(holds, { beast: 'paused from its tray app: someone is using it (w1532)' });
+  assert.deepEqual(holds, { beast: "paused from its tray app: someone is using it (w1532); it runs again after 90 minutes without a person's input or on its tray's Unpause" });
   const pc = (id: string): Computer => ({ id, live: 0, midTurn: 0, maxAgents: 10, freeSandboxes: 3, sandboxes: 3, maxSandboxes: 6, memTotalBytes: 64e9, memUsedBytes: 8e9, online: true }) as unknown as Computer;
   const places = [pc('beast'), pc('lothdesktop')];
   for (let i = 0; i < 4; i++) assert.equal(pickComputer(places, i % 2 ? 'lothdesktop' : 'beast', { hold: holds })?.pick.id, 'lothdesktop', 'beast has the room and is never picked while paused');
   const room = roomNow(places, { hold: holds });
-  assert.deepEqual(room.held.map((h) => [h.id, h.why]), [['beast', 'paused from its tray app: someone is using it (w1532)']]);
+  assert.deepEqual(room.held.map((h) => [h.id, h.why]), [['beast', holds.beast]]);
   assert.match(holdReason('beast', { hold: holds })!, /^beast is paused from its tray app: someone is using it \(w1532\): nothing resumes there until it runs again/);
   assert.match(holdReason('m5', { hold: { m5: 'Ben testing' } })!, /m5 is on hold \(Ben testing\): nothing resumes there until the hold is lifted \(placement\.hold\)/, 'a config hold reads as before');
   assert.equal(pauseWhy({ reason: 'schedule', detail: '' }), 'paused from its tray app: outside its work schedule (w1532)');
