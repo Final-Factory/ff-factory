@@ -1068,6 +1068,36 @@ export const EXIT_NO_TICKET = 69;
 export const EXIT_NO_TIMED_RUNS = 77;
 
 /**
+ * w4669: how `unity-slot run -- <command>` starts its command. Windows' CreateProcess runs only executables: a `.sh` given as
+ * the command (the pair-run brief's `scripts/nightly/build_player.sh ...`, w4663 on LothDesktop) failed with `spawn EFTYPE`,
+ * so on Windows a `.sh` (or a bare `bash`) goes through Git for Windows' bash, never WSL's System32\bash.exe (another Linux, without the
+ * worker's Git, Unity or paths); a `.cmd` or `.bat` through cmd.exe as before. macOS and Linux start it as given (its shebang).
+ */
+export function commandToSpawn(rest: string[], platform: NodeJS.Platform, env: NodeJS.ProcessEnv, exists: (p: string) => boolean = fs.existsSync): { cmd: string; args: string[]; shell: boolean } {
+  const [cmd, ...args] = rest;
+  if (platform !== 'win32') return { cmd, args, shell: false };
+  if (/\.sh$/i.test(cmd)) return { cmd: gitBash(env, exists), args: [cmd, ...args], shell: false };
+  // `bash <script>` as the brief writes it: PATH may find WSL's bash before Git's, so name Git's.
+  if (/^bash(\.exe)?$/i.test(cmd)) return { cmd: gitBash(env, exists), args, shell: false };
+  return { cmd, args, shell: /\.(cmd|bat)$/i.test(cmd) };
+}
+
+/** Git for Windows' bash.exe: the one Claude Code uses, the Git on PATH, the default install; else `bash` from PATH. */
+export function gitBash(env: NodeJS.ProcessEnv, exists: (p: string) => boolean = fs.existsSync): string {
+  const W = path.win32;
+  const out: string[] = [];
+  if (env.CLAUDE_CODE_GIT_BASH_PATH) out.push(env.CLAUDE_CODE_GIT_BASH_PATH);
+  for (const d of (env.PATH ?? env.Path ?? '').split(';').filter(Boolean)) {
+    const base = W.basename(d).toLowerCase();
+    if (base === 'cmd' || base === 'mingw64') out.push(W.join(d, '..', 'bin', 'bash.exe'));
+    if (/\\(system32|windowsapps)$/i.test(W.normalize(d).replace(/\\+$/, ''))) continue; // WSL's launcher, not Git's
+    out.push(W.join(d, 'bash.exe'));
+  }
+  for (const pf of [env.ProgramFiles, env.ProgramW6432, 'C:\\Program Files']) if (pf) out.push(W.join(pf, 'Git', 'bin', 'bash.exe'));
+  return out.find((p) => exists(p)) ?? 'bash';
+}
+
+/**
  * End a process and everything it started (w1860): SIGTERM to the tree, then a hard stop of what is left after `graceMs`
  * (the timer keeps this process up until then). The tree is listed before the signal, so a child its dying parent leaves
  * behind is still found. Windows: taskkill /T /F at once; a batch Unity has no window to ask, and a soft taskkill of a
@@ -1198,9 +1228,10 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env)
         await d.sleep(15_000);
       }
     }
-    const child = spawn(o.rest[0], o.rest.slice(1), {
+    const run = commandToSpawn(o.rest, process.platform, env);
+    const child = spawn(run.cmd, run.args, {
       stdio: 'inherit',
-      shell: process.platform === 'win32' && /\.(cmd|bat)$/i.test(o.rest[0]),
+      shell: run.shell,
       env: { ...env, FF_UNITY_SLOT_HELD: String(Math.max(held, o.count)), ...(h?.id ? { FF_UNITY_SLOT_ID: h.id } : {}), ...(ticketName ? { FF_BENCH_TICKET: ticketName } : {}) },
     });
     process.on('SIGINT', () => child.kill('SIGINT'));
