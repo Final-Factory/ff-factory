@@ -102,7 +102,7 @@ test('w3507: pickReclaim takes the lowest, longest-idle strictly lower holder; e
   const onlyHigh = pickReclaim(pressure('wU', 'urgent'), [midHigh]);
   assert.ok('none' in onlyHigh && /only low or normal/.test(onlyHigh.none), JSON.stringify(onlyHigh));
   const highOnNormal = pickReclaim(pressure('wH', 'high'), [midNormal]);
-  assert.ok('none' in highOnNormal && /only urgent or release work pre-empts/.test(highOnNormal.none), JSON.stringify(highOnNormal));
+  assert.ok('none' in highOnNormal && /only urgent or frantic work pre-empts/.test(highOnNormal.none), JSON.stringify(highOnNormal));
   // An idle one is always taken before a turn is pre-empted.
   assert.deepEqual(pickReclaim(pressure('wU', 'urgent'), [midNormal, normalIdle]), { reclaim: normalIdle });
   // Blocked holders and computers the work may not use are never taken.
@@ -203,7 +203,7 @@ test('w3507: no reclaim while a pair run, a bench lock or a Unity batch run hold
     { name: 'bench', o: { hold: () => 'a timed run from it holds the bench lock' }, want: /bench lock/ },
     { name: 'release lane', o: { hold: () => 'a is the urgent release lane or the nightly' }, want: /release lane/ },
     { name: 'batch', o: { unityHolders: ['sandbox:slot1'] }, want: /Unity batch run/ },
-    { name: 'merge mid-turn, high work', o: {}, status: 'running', want: /only urgent or release work pre-empts a turn/ },
+    { name: 'merge mid-turn, high work', o: {}, status: 'running', want: /only urgent or frantic work pre-empts a turn/ },
   ];
   for (const c of cases) {
     const a = worker('a', 'slot1', { status: c.status ?? 'idle' });

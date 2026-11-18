@@ -61,7 +61,7 @@ export interface TimedRunOrder {
   pieceIds: Record<string, string>;
   settings: TimedSettings;
   /**
-   * w4620: its request's priority when the portal sent it (release, urgent, high, normal, low). The daemon's queue starts the
+   * w4620: its request's priority when the portal sent it (frantic, urgent, high, normal, low). The daemon's queue starts the
    * highest first, oldest first within one; none (an older portal) counts as low. A raise later is the portal's step-back.
    */
   priority?: WorkPriority;

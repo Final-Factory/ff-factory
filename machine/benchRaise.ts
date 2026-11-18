@@ -1,24 +1,25 @@
 // w4620 (lothsahn, 2026-11-17: "Why is urgent work in a queue behind non urgent work? ... The factory should be using
-// strict priority queues"): every queue serves release > urgent > high > normal > low, first come first served only within
+// strict priority queues"): every queue serves frantic > urgent > high > normal > low, first come first served only within
 // one priority, shared and exclusive tickets alike. w1962 here raised the session of a shared ticket that an exclusive turn
 // had passed to urgent in priorities.json (lothsahn: "a shared bench-queue ticket (an editor start, a build) must not wait
 // for hours behind one exclusive timed ticket after another"); that jumped the ticket across priorities and is gone. What
 // stays: the passed marks, now only a display of who waited behind whom at one priority, the editor starts' sessions
-// (`editor:<sandbox>`, w1962) and the sandbox helpers. A release is the priority `release`, with no handling of its own
+// (`editor:<sandbox>`, w1962) and the sandbox helpers. A release is filed at the top priority (`release` in w4620, `frantic` since w4710), with no handling of its own
 // (lothsahn, w4620: "not have special handling for releases"): the portal sends it as `{ priority: 'urgent', level:
 // 'release' }`, so a copy of bench_queue.py from before w4620 still sorts it first; read `level ?? priority`.
-import type { BenchPriority, WorkPriority } from '../shared/types.ts';
+import { asWorkPriority, type BenchPriority, type WorkPriority } from '../shared/types.ts';
 import type { QueueTicket } from './benchQueue.ts';
 
 /** The queue's order, highest first (bench_queue.py PRIORITIES from w4620). */
-const RANKS: WorkPriority[] = ['release', 'urgent', 'high', 'normal', 'low'];
+const RANKS: WorkPriority[] = ['frantic', 'urgent', 'high', 'normal', 'low'];
 
-/** A session's effective priority: `level` (release) when the portal sent one, else `priority`. */
+/** A session's effective priority: `level` (frantic, sent as `release`: BENCH_TOP_LEVEL) when the portal sent one, else `priority`. */
 const effective = (p: BenchPriority | undefined): string => p?.level ?? p?.priority ?? 'low';
 
 /** Position in RANKS, 0 the highest; a priority the queue does not know counts as low. */
 const rankOf = (p: string): number => {
-  const i = RANKS.indexOf(p as WorkPriority);
+  const w = asWorkPriority(p); // w4710: `release` (the wire's level, and the name before w4710) is frantic
+  const i = w ? RANKS.indexOf(w) : -1;
   return i < 0 ? RANKS.length - 1 : i;
 };
 

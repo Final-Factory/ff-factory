@@ -42,7 +42,7 @@ import { Auth } from './auth.ts';
 import { setPasswordPage } from './setPasswordPage.ts';
 import { Identity, asRequester } from './identity.ts';
 import { routeMcp } from './mcp.ts';
-import { IMAGE_TYPES, SOCKET_PING_MS, WORK_PRIORITIES, type WorkPriority, type ImageInput, type NotifyPrefs, type AnswerRequest, type ReactRequest, type SendMessageRequest } from '../shared/types.ts';
+import { IMAGE_TYPES, SOCKET_PING_MS, WORK_PRIORITIES, asWorkPriority, priorityIndex, type WorkPriority, type ImageInput, type NotifyPrefs, type AnswerRequest, type ReactRequest, type SendMessageRequest } from '../shared/types.ts';
 import { isOpen } from './work.ts';
 import { listImages, MEDIA_TYPE, openVideo, parseRange, readImage, VIDEO_FILE } from './images.ts';
 import { VideoPreviews } from './videoPreview.ts';
@@ -576,7 +576,7 @@ const timedRuns = new TimedRuns({
     r.requests
       .map((id) => store.work.get(id))
       .filter((w): w is WorkItem => !!w && isOpen(w))
-      .reduce((a, w) => (WORK_PRIORITIES.indexOf(w.priority) > WORK_PRIORITIES.indexOf(a) ? w.priority : a), 'low' as WorkPriority),
+      .reduce((a, w) => (priorityIndex(w.priority) > priorityIndex(a) ? w.priority : a), 'low' as WorkPriority),
 });
 agents.timedRuns = timedRuns;
 // w4620: a request raised while its run waits on a daemon moves that run up within a minute
@@ -1253,10 +1253,12 @@ route('POST', '/api/work/(w[0-9]+)/approve', async (req, [id]) => {
 // A request's priority from the dashboard (w2049): one of its people, an intake reviewer or an owner.
 route('POST', '/api/work/(w[0-9]+)/priority', async (req, [id]) => {
   const b = await readJson<{ priority?: string }>(req);
-  if (!WORK_PRIORITIES.includes(b.priority as WorkPriority)) throw new HttpError(400, `priority is one of ${WORK_PRIORITIES.join(', ')}`);
+  // w4710: `release` (frantic's name before w4710) is accepted as frantic
+  const priority = asWorkPriority(b.priority);
+  if (!priority) throw new HttpError(400, `priority is one of ${WORK_PRIORITIES.join(', ')}`);
   try {
     const me = requesterOf(req);
-    const w = agents.orchestrators.setPriority(id, me, b.priority as WorkPriority, identity.get(me.userId)?.role === 'owner');
+    const w = agents.orchestrators.setPriority(id, me, priority, identity.get(me.userId)?.role === 'owner');
     return { id: w.id, priority: w.priority };
   } catch (e) {
     throw new HttpError(400, (e as Error).message);

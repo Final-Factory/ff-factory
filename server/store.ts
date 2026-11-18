@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import zlib from 'node:zlib';
 import { pipeline } from 'node:stream/promises';
 import type { AppSettings, DelegationRequest, Machine, Sandbox, ServerEvent, SessionInfo, StandingAgent, TranscriptEvent, WorkItem } from '../shared/types.ts';
+import { LEGACY_FRANTIC } from '../shared/types.ts';
 import { meterStates, type MeterStates } from './meterStates.ts';
 import { removedUpload } from './mediaRetention.ts';
 import { pairText, repairText, transientPairAvoids } from '../shared/capacity.ts';
@@ -224,6 +225,9 @@ export class Store {
     const w = readJsonDurable<{ seq?: number; items?: WorkItem[] }>(workFile, { check: checkWork });
     if (w) {
       for (const item of w.items ?? []) {
+        // w4710 (lothsahn: "Rename the "release" priority to frantic"): a request stored at w4620's `release` is frantic now,
+        // the same top place in every queue.
+        if ((item.priority as string) === LEGACY_FRANTIC) item.priority = 'frantic';
         // w2282: a pair run filed before it says "on computers that are not Macs"; say the rule placement now follows. The
         // computers the dispatcher queued a request_pair one for (which names none) were its list of those not Macs: dropped.
         if (item.pair && !item.pair.started && repairText(item)) {

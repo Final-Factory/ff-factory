@@ -322,7 +322,7 @@ test('w4620: the daemon\'s queue starts the highest priority first, oldest first
   const l1 = await mk('tr_00000000e3', 'low');
   const old = await mk('tr_00000000e4'); // an older portal sends no priority: low
   const urgent = await mk('tr_00000000e5', 'urgent');
-  const release = await mk('tr_00000000e6', 'release');
+  const release = await mk('tr_00000000e6', 'frantic');
   r.runner.enqueue(playing);
   await r.until('the first run queued for its ticket', () => Ticket.taken === 1);
   for (const o of [n1, l1, old, urgent]) r.runner.enqueue(o);

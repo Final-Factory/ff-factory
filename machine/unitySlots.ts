@@ -8,7 +8,7 @@
 // client (this file's CLI, `unity-slot`, or the game repo's scripts/unity_slot.py) writes req-<id>.json and touches it
 // while it waits or holds; the daemon answers grant-<id>.json or deny-<id>.json. A request takes all its slots at once
 // or none. Waiting requests from holders (a sandbox whose editor runs, a run that already holds slots) go first, then
-// new requesters by priority (release, urgent, high, normal, low; w4620), oldest first within one priority. Process counting is the backstop: Unity started outside the gate counts all the same,
+// new requesters by priority (frantic, urgent, high, normal, low; w4620, renamed from release in w4710), oldest first within one priority. Process counting is the backstop: Unity started outside the gate counts all the same,
 // so nothing more is granted while the machine is over its limit. Nothing here kills a Unity process; the orphaned and hung
 // batch builds that would hold a slot for hours are ended by machine/unityReaper.ts (w791).
 import fs from 'node:fs';
@@ -19,7 +19,7 @@ import { randomBytes } from 'node:crypto';
 import type { Proc, UnityPlatform } from './unity.ts';
 import { heldNotStarted, unitySlotsLine } from '../shared/fleet.ts';
 import { benchLockPath, benchQueueDir, benchTicketFor, heldTicket, HELD_WAIT_CAP_MS, type BenchMode, type BenchTicket } from './benchQueue.ts';
-import { priorityRank, WORK_PRIORITIES, type UnitySlotsReport, type WorkPriority } from '../shared/types.ts';
+import { asWorkPriority, priorityRank, type UnitySlotsReport, type WorkPriority } from '../shared/types.ts';
 import { benchLockDir, foreignTimedHold } from './benchLock.ts';
 import { editorBenchSession } from './benchRaise.ts';
 import { personHoldReason } from './personPlay.ts';
@@ -266,8 +266,8 @@ export interface Assessment {
 
 /**
  * Each worker session's priority as the daemon's priorities.json says (machine/benchLock.ts writeBenchPriorities), read
- * now: `level` (release) over `priority`, since the portal sends a release session as urgent with level release for old
- * readers. A session with no mark, and a missing or unreadable file, count as low (w4620: runs filed without a request
+ * now: `level` (frantic, which the portal sends as `release`) over `priority`, since the portal sends a frantic session as
+ * urgent with level release for old readers. A session with no mark, and a missing or unreadable file, count as low (w4620: runs filed without a request
  * priority count as low); `root` is the worker root.
  */
 export function readSlotPriorities(root: string | undefined): (session?: string) => WorkPriority {
@@ -275,7 +275,7 @@ export function readSlotPriorities(root: string | undefined): (session?: string)
   return (session) => {
     const m = session && sessions && typeof sessions === 'object' ? sessions[session] : undefined;
     const p = m?.level ?? m?.priority;
-    return WORK_PRIORITIES.find((w) => w === p) ?? 'low';
+    return asWorkPriority(p) ?? 'low'; // w4710: the wire's `release` level is frantic
   };
 }
 

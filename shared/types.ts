@@ -722,7 +722,7 @@ export interface BenchPriority {
   /**
    * The work the bench queue never cuts short (w1832; lothsahn: "Let's avoid preempting urgent release builds and the
    * nightly"; the release builder's mark went in w4620, lothsahn: "not have special handling for releases... Let it go
-   * through the priority process being built": a release goes at the release priority instead); `nightly`, the worker of the
+   * through the priority process being built": a release goes at the frantic priority instead); `nightly`, the worker of the
    * scheduled nightly run (a request filed by the portal's nightly schedule, source kind nightly-run). Set by the portal
    * only: the game repo's bench_queue.py reads it from priorities.json, keyed by the session a ticket carries
    * (FF_SESSION_ID, or FF_BENCH_SESSION for the nightly), so a worker has no flag to mark its own job; only a ticket
@@ -730,11 +730,13 @@ export interface BenchPriority {
    */
   exempt?: 'nightly' | 'approved';
   /**
-   * w4620: the session's rank for readers that know the release priority (machine/benchState.ts, benchRaise.ts, unitySlots.ts
-   * and bench_queue.py from w4620). `priority` then says urgent, the top that older copies of bench_queue.py know, so a
-   * release still sorts first under them. Read `level ?? priority`.
+   * w4620: the session's rank for readers that know the top priority (machine/benchState.ts, benchRaise.ts, unitySlots.ts
+   * and bench_queue.py from w4620). `priority` then says urgent, the top that older copies of bench_queue.py know, so
+   * frantic work still sorts first under them. Read `level ?? priority`. w4710: the ledger's `frantic` (w4620's `release`,
+   * renamed) still goes on this wire as `level: 'release'`, the name the game repo's bench_queue.py PRIORITIES knows;
+   * readers here take either (BENCH_TOP_LEVEL, asWorkPriority).
    */
-  level?: 'release';
+  level?: typeof BENCH_TOP_LEVEL;
   /**
    * w3186: with `exempt: 'approved'`, the longer exclusive turn a person approved for this worker's request on this machine
    * (server/benchGrants.ts; ben on w3159: "Give each overload run a one-off 60-minute exclusive turn on biscuit, with the
@@ -2154,17 +2156,28 @@ export const WORK_OPEN: readonly WorkStatus[] = ['new', 'question', 'queued', 'b
 
 /**
  * A request's priority, lowest first. Every queue serves the highest first, first come first served only within one
- * (w4620, lothsahn, 2026-11-17: "The factory should be using strict priority queues"). release sits above urgent and is
+ * (w4620, lothsahn, 2026-11-17: "The factory should be using strict priority queues"). frantic sits above urgent and is
  * the only way a release goes ahead (lothsahn, w4620: "Let's add a new priority called release that's above urgent and
- * not have special handling for releases... Let it go through the priority process being built").
+ * not have special handling for releases... Let it go through the priority process being built"). w4710 renamed it from
+ * `release` to `frantic` (lothsahn: "Rename the "release" priority to frantic. Don't change any underlying logic, it should
+ * still be higher priority than any other task"): `release` is still read and accepted as frantic (asWorkPriority).
  */
-export type WorkPriority = 'low' | 'normal' | 'high' | 'urgent' | 'release';
-export const WORK_PRIORITIES: readonly WorkPriority[] = ['low', 'normal', 'high', 'urgent', 'release'];
+export type WorkPriority = 'low' | 'normal' | 'high' | 'urgent' | 'frantic';
+export const WORK_PRIORITIES: readonly WorkPriority[] = ['low', 'normal', 'high', 'urgent', 'frantic'];
+/** w4710: the top priority's name before w4710 (w4620's `release`), read and accepted as frantic. */
+export const LEGACY_FRANTIC = 'release';
+/** w4710: the bench queue's name for frantic on its priorities.json wire (BenchPriority.level): the game repo's bench_queue.py knows only this one. */
+export const BENCH_TOP_LEVEL = 'release';
+/** A priority as given (a caller, a stored request, a mark), as a WorkPriority: `release` (before w4710) is frantic; anything else unknown is undefined. */
+export const asWorkPriority = (p: unknown): WorkPriority | undefined =>
+  p === LEGACY_FRANTIC ? 'frantic' : WORK_PRIORITIES.includes(p as WorkPriority) ? (p as WorkPriority) : undefined;
+/** A priority's index in WORK_PRIORITIES (`release` read as frantic), -1 when unknown. */
+export const priorityIndex = (p: unknown): number => { const w = asWorkPriority(p); return w ? WORK_PRIORITIES.indexOf(w) : -1; };
 /** A priority's rank, higher served first (0 for low; an unknown priority counts as low). */
-export const priorityRank = (p: string | undefined): number => Math.max(0, WORK_PRIORITIES.indexOf(p as WorkPriority));
-/** A priority as a bench queue mark (w4620): release goes as urgent with `level: 'release'`, the top older bench_queue.py copies know. */
-export const benchRank = (p: WorkPriority): { priority: WorkPriority; level?: 'release' } => (p === 'release' ? { priority: 'urgent', level: 'release' } : { priority: p });
-/** Whether `p` is at least `floor` (urgent work: urgent or release). */
+export const priorityRank = (p: string | undefined): number => Math.max(0, priorityIndex(p));
+/** A priority as a bench queue mark (w4620): frantic goes as urgent with `level: 'release'` (BENCH_TOP_LEVEL), the top older bench_queue.py copies know. */
+export const benchRank = (p: WorkPriority): { priority: WorkPriority; level?: typeof BENCH_TOP_LEVEL } => (asWorkPriority(p) === 'frantic' ? { priority: 'urgent', level: BENCH_TOP_LEVEL } : { priority: p });
+/** Whether `p` is at least `floor` (urgent work: urgent or frantic). */
 export const atLeast = (p: string | undefined, floor: WorkPriority): boolean => priorityRank(p) >= priorityRank(floor);
 
 /** Work in flight or recently done that a new request may repeat, as the server found it when the request was filed. */

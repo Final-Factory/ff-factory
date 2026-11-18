@@ -20,7 +20,7 @@
  * person-approved bench turn, a bench lock or a Unity batch run or player of its sandbox, a Live view, a check-in with its
  * editor up, a background job, a worker starting or being moved. docs/machines.md, "Placing work".
  */
-import { WORK_PRIORITIES, type SessionInfo, type WorkPriority } from '../shared/types.ts';
+import { priorityIndex, type SessionInfo, type WorkPriority } from '../shared/types.ts';
 
 /**
  * How long a worker that was reclaimed or pre-empted is not taken from again, counted from when it was placed again. A move
@@ -40,7 +40,7 @@ export const RECLAIM_STANDS_MS = 15 * 60_000;
 export const PREEMPT_STANDS_MS = 30 * 60_000;
 
 /** urgent 3, high 2, normal 1, low 0; a worker with no open request -1. */
-export const rankOf = (p: WorkPriority | undefined): number => (p ? WORK_PRIORITIES.indexOf(p) : -1);
+export const rankOf = (p: WorkPriority | undefined): number => (p ? priorityIndex(p) : -1);
 
 /** The highest priority of `ps`, or undefined for none. */
 export const topPriority = (ps: readonly (WorkPriority | undefined)[]): WorkPriority | undefined => ps.reduce<WorkPriority | undefined>((a, p) => (rankOf(p) > rankOf(a) ? p : a), undefined);
@@ -95,7 +95,7 @@ const order = (a: SandboxHolders, b: SandboxHolders) => rankOf(a.priority) - ran
 /**
  * Which sandbox queued work `p` takes, or why none: the lowest-priority holder first, then the longest idle, then one whose
  * editor is stopped (cheapest to restore); only strictly lower priority, never blocked or protected ones. A mid-turn holder
- * only for urgent or release work (w4620), only low or normal, only where nothing is reclaimable, and only on a computer in `preemptOn`.
+ * only for urgent or frantic work (w4620), only low or normal, only where nothing is reclaimable, and only on a computer in `preemptOn`.
  */
 export function pickReclaim(p: Pick<Pressure, 'priority' | 'machines' | 'preemptOn' | 'held'>, sbs: readonly SandboxHolders[]): ReclaimPick {
   const mine = sbs.filter((x) => p.machines.includes(x.machine) || p.preemptOn.includes(x.machine));
@@ -115,7 +115,7 @@ export function pickReclaim(p: Pick<Pressure, 'priority' | 'machines' | 'preempt
     const mid = ok.filter((x) => x.midTurn && rankOf(x.priority) <= rankOf('normal') && (p.preemptOn.includes(x.machine) || p.machines.includes(x.machine))).sort(order)[0];
     if (mid) return { preempt: mid };
   }
-  for (const x of ok) if (x.midTurn) why.set(`${x.machine}/${x.sandbox}`, rankOf(p.priority) >= rankOf('urgent') ? `mid-turn on ${x.priority} work, which only urgent or release work pre-empts, and only low or normal` : `mid-turn (only urgent or release work pre-empts a turn)`);
+  for (const x of ok) if (x.midTurn) why.set(`${x.machine}/${x.sandbox}`, rankOf(p.priority) >= rankOf('urgent') ? `mid-turn on ${x.priority} work, which only urgent or frantic work pre-empts, and only low or normal` : `mid-turn (only urgent or frantic work pre-empts a turn)`);
   const lines = [...why].map(([k, v]) => `${k}: ${v}`);
   return { none: (lines.length ? `no sandbox it may take: ${lines.slice(0, 4).join('; ')}${lines.length > 4 ? `; and ${lines.length - 4} more` : ''}` : `no occupied sandbox on ${[...new Set([...p.machines, ...p.preemptOn])].join(', ')}`) + held };
 }

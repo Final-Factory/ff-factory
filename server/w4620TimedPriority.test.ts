@@ -158,7 +158,7 @@ test('w4620: a release run goes ahead of an urgent one; equal priorities stay fi
       { id: 'tr_ccccccccc2', request: 'w2', state: 'sent', sentAt: ago(9) },
       { id: 'tr_ccccccccc3', request: 'w3', state: 'sent', sentAt: ago(8) },
     ],
-    { w1: 'urgent', w2: 'urgent', w3: 'release' },
+    { w1: 'urgent', w2: 'urgent', w3: 'frantic' },
   );
   tr.reprioritize();
   assert.deepEqual(posted.filter((p) => p.type === 'timed_run_cancel').map((p) => p.id).sort(), ['tr_ccccccccc1', 'tr_ccccccccc2']);

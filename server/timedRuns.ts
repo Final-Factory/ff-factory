@@ -13,7 +13,7 @@ import path from 'node:path';
 import type { AttachmentStore } from './attachments.ts';
 import { publicRef } from './attachments.ts';
 import { readJsonDurable, writeJsonDurable } from './durable.ts';
-import { WORK_PRIORITIES, type AttachmentRef, type Machine, type WorkPriority } from '../shared/types.ts';
+import { priorityIndex, type AttachmentRef, type Machine, type WorkPriority } from '../shared/types.ts';
 import { legOrder, legPlanS, MAX_VARIANTS, PIECE_MAX_BYTES, runBoundMinutes, runPlanMinutes, runTurns, timedArgsProblem, timedPlanProblem, timedSettingsOf, TURN_PLAN_MS, variantNameProblem, type LegSummary, type Piece, type TimedRunOrder, type TimedSettings, type TimedVariant } from '../shared/timedRun.ts';
 import { SMALL_TIMED_MAX_AGENTS } from './timedAsk.ts';
 
@@ -124,7 +124,7 @@ export interface TimedRunDeps {
    */
   unavailableWait?: () => { ms: number; why: string };
   /**
-   * w4620: a run's priority, read live: its open requests' highest (release > urgent > high > normal > low), low when none
+   * w4620: a run's priority, read live: its open requests' highest (frantic > urgent > high > normal > low), low when none
    * is open. lothsahn, 2026-11-17: "The factory should be using strict priority queues". Absent: no reordering.
    */
   priorityOf?: (r: TimedRunRecord) => WorkPriority;
@@ -442,7 +442,7 @@ export class TimedRuns {
   }
 
   private rankOf(r: TimedRunRecord): number {
-    return WORK_PRIORITIES.indexOf(this.priorityOf(r));
+    return priorityIndex(this.priorityOf(r));
   }
 
   /**

@@ -238,7 +238,7 @@ last shared lock work started... And if that was a long time ago, all workers sh
   "If a machine has only one worker it always runs in exclusive mode and never gets preempted", "I mean a machine that
   only hosts a single worker") gets `single_worker` and no limits at all. The file carries `v: 2`; a queue reading an
   older daemon's file honours a pre-empt ticket as before.
-- (History, w1656; replaced by w4620's strict priority, release above urgent, no pre-empt: a running turn is never cut
+- (History, w1656; replaced by w4620's strict priority, frantic (named release until w4710) above urgent, no pre-empt: a running turn is never cut
   short.) An urgent release warned every holder, the nightly included (lothsahn: "Yes, an urgent release kicks the nightly off
   too; it reruns later"), took them off 5 minutes later, went ahead of the whole queue and had no cap.
 - Exclusive only for exact timings or the whole machine (lothsahn: "request an exclusive lock if and only if they need
@@ -309,7 +309,7 @@ node cannot take the OS file locks the queue lives on):
   else through the game repo's launchers, each with its ticket: `unity-slot run` / `ff_unity_slot` / `unity_slot.py run`
   / `build_player.sh` (shared; exclusive for a timed run), `player_slots.py launch` (shared, the player's life),
   `quiet_gate.sh bench_lock` (exclusive), the nightly (`ffnightly.py --lock-night`, one shared ticket for the night) and
-  `urgent_release.py` (exclusive, at its request's priority: release since w4620, no pre-empt).
+  `urgent_release.py` (exclusive, at its request's priority: frantic since w4620 (named release until w4710), no pre-empt).
 
 A checkout without `bench_queue.py` (a branch from before w1615) takes its ticket with another sandbox's copy of the
 script (`sandboxBenchQueueScript`, w1628: the queue is its files, not its code); with none on the machine, or without

@@ -88,7 +88,7 @@ import { MERGE_ON_GREEN_MARK } from './mergeOnGreen.ts';
 import { handoffQuote, handoffReport, isHandoff } from './handoffReport.ts';
 import { commitsIn, normPr, pairCommitsOf, pairPrOf, pairRanCommit, prIn, resultFor, sameCommit, samePr } from './pairRuns.ts';
 import type { AttachmentRef, PairPlayer, BenchGrant, ConditionalDecision, CrashHold, ForYouMark, OpenAsk, WorkNeedsYou, GateResume, GitStatus, Machine, WorkAutoClosed, WorkBlocker, WorkDigest, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPair, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
-import { DISK_CLEANUP_FLOOR_GB, REPORT_KINDS, WORK_PRIORITIES, atLeast, questionFor, type ReportKind, type ReportSummary } from '../shared/types.ts';
+import { DISK_CLEANUP_FLOOR_GB, REPORT_KINDS, WORK_PRIORITIES, asWorkPriority, atLeast, questionFor, type ReportKind, type ReportSummary } from '../shared/types.ts';
 import { FOR_YOU_CHARS, FOR_YOU_KEPT, forYouId, splitForYou } from '../shared/forYou.ts';
 
 /** w2045: the most of a worker's after-merge report a merge-on-green gate keeps (a DONE report is rarely longer). */
@@ -697,6 +697,18 @@ export function devKeys(keys: readonly string[]): string[] {
 
 /** Why a human-authored message to the dispatcher is refused (a 403 over HTTP). */
 export const DISPATCHER_CHAT_REFUSED = 'nobody chats with the dispatcher, the owner included: write to your own orchestrator, which files work with it (request_work)';
+
+/**
+ * w4710: a request_work or update_work input with its priority as WorkPriority: `release` (frantic's name before w4710,
+ * lothsahn: "Rename the "release" priority to frantic") is frantic. The tool schema does this too; this covers every other
+ * caller. An unknown priority is refused.
+ */
+function withPriority<T extends { priority?: WorkPriority }>(input: T): T {
+  if (input.priority === undefined) return input;
+  const priority = asWorkPriority(input.priority);
+  if (!priority) throw new Error(`priority is one of ${WORK_PRIORITIES.join(', ')}`);
+  return priority === input.priority ? input : { ...input, priority };
+}
 
 export class DispatcherChatRefused extends Error {
   readonly status = 403;
@@ -2283,6 +2295,7 @@ It is for your part of the work, not an answer to another worker's question.`;
    */
   file(chat: SessionHandle, input: WorkInput): string {
     try {
+      input = withPriority(input);
       return this.withBugNote(chat, this.withOpenCards(chat, this.fileNow(chat, input)));
     } catch (e) {
       throw this.refusedCall(chat, 'request_work', { title: input.title, brief: input.brief }, e);
@@ -2657,6 +2670,7 @@ It is for your part of the work, not an answer to another worker's question.`;
   /** A requester's update (update_work): a note (an answer to a question reopens it), a priority, closing or reopening. */
   update(chat: SessionHandle, input: UpdateInput): string {
     try {
+      input = withPriority(input);
       return this.withBugNote(chat, this.withOpenCards(chat, this.updateNow(chat, input)));
     } catch (e) {
       throw this.refusedCall(chat, 'update_work', { ...input }, e);
@@ -7252,7 +7266,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const w = this.requireWork(id);
     if (!isOpen(w)) throw new Error(`${w.id} is ${w.status}: nothing to start`);
     const was = w.priority;
-    // w4620: never down from release
+    // w4620: never down from frantic
     if (!atLeast(was, 'urgent')) w.priority = 'urgent';
     this.stamp(w, `${by.displayName} asked to start it now${w.priority !== was ? ` (priority ${was} → urgent)` : ''}`);
     this.takeOver(w, by, `${by.displayName} pressed "Start now"`);
@@ -7509,7 +7523,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       id: `w${++this.store.workSeq}`,
       title,
       brief: clip(f.brief, 8000),
-      priority: f.priority ?? 'normal',
+      priority: asWorkPriority(f.priority) ?? 'normal',
       keys,
       requestedBy: asRequester(f.requestedBy),
       requesters: [asRequester(f.requestedBy)],
@@ -7684,9 +7698,10 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    * A person sets an open request's priority from the dashboard (w2049, lothsahn: "Please introduce a new priority "low"
    * that is below normal/medium priority"): one of its people, an intake reviewer or an owner.
    */
-  setPriority(id: string, by: Requester, priority: WorkPriority, owner = false): WorkItem {
+  setPriority(id: string, by: Requester, asked: WorkPriority, owner = false): WorkItem {
     const w = this.requireWork(id);
-    if (!WORK_PRIORITIES.includes(priority)) throw new Error(`priority is one of ${WORK_PRIORITIES.join(', ')}`);
+    const priority = asWorkPriority(asked); // w4710: `release` is frantic
+    if (!priority) throw new Error(`priority is one of ${WORK_PRIORITIES.join(', ')}`);
     if (!owner && !isFor(w, by.userId) && !this.reviewers().some((r) => same(r.userId, by.userId))) throw new Error(`${w.id} is not ${by.displayName}'s request`);
     if (!isOpen(w)) throw new Error(`${w.id} is ${w.status}: only an open request's priority changes`);
     if (w.priority === priority) return w;
