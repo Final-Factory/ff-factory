@@ -94,6 +94,8 @@ export interface RolloutHost {
   link?(id: string): boolean;
   /** Why its connected daemon does not update over its link (server/machines.ts linkProblem, w1918): then no ssh either. */
   linkProblem?(id: string): string | undefined;
+  /** Its install has no portal ssh (w4674, server/machines.ts noSshProblem): nothing is run on it over ssh. */
+  noSsh?(id: string): boolean;
   /** The installer's form over the daemon's link, to the deployed commit: its update job's report (server/machines.ts linkUpdate). */
   linkUpdate?(id: string, form: 'update' | 'tools', commit: string): Promise<LinkUpdateReport>;
   /** Send the report to a person's orchestrator, or (no person) the dispatcher. */
@@ -565,7 +567,7 @@ export class MachineRollout {
         // node's rule never reached lothdesktop or BEAST). The portal's ssh to an administrator's Windows account is
         // elevated (administrators_authorized_keys, w568), and the same tools run there makes the rules.
         const warned = t.warnings ?? [];
-        if (m.platform === 'win32' && SAFE_TARGET.test(m.target) && t.status === 'ok' && warned.some((w) => w.includes('Windows Firewall'))) {
+        if (m.platform === 'win32' && SAFE_TARGET.test(m.target) && !this.d.host.noSsh?.(m.id) && t.status === 'ok' && warned.some((w) => w.includes('Windows Firewall'))) {
           console.log(`machine rollout: ${m.id}: a firewall rule is missing; the tools run again over ssh, elevated`);
           try {
             const s = await this.d.host.ssh(m.target, workerToolsRemote({ root: m.root!, platform: m.platform }), this.lim.toolsMs);

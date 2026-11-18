@@ -339,12 +339,63 @@ export function pollProblem(cmd: string, background: boolean, script: (abs: stri
   const detached = background || /(^|[^&|>])&\s*($|[;)\n])/.test(cmd) || /(^|[\s;&|(])(nohup|setsid|disown)\b/.test(cmd);
   if (!detached) return undefined;
   if (POLL_WORDS.test(cmd)) return POLL_REFUSED;
+  for (const { word, text } of scriptsRun(cmd, script)) if (POLL_WORDS.test(text)) return `${POLL_REFUSED} (${word} loops or sleeps)`;
+  return undefined;
+}
+
+/** The scratch scripts a command names (.sh, .bash, .ps1), with their text. */
+function scriptsRun(cmd: string, script: (abs: string) => string | undefined): { word: string; text: string }[] {
+  const out: { word: string; text: string }[] = [];
   for (const word of cmd.split(/[\s;&|()'"]+/)) {
     if (!/\.(sh|bash|ps1)$/i.test(word)) continue;
     const abs = path.posix.resolve(OPS_PATHS.scratch, word);
-    if (!inScratch(abs)) continue;
-    const text = script(abs);
-    if (text && POLL_WORDS.test(text)) return `${POLL_REFUSED} (${word} loops or sleeps)`;
+    const text = inScratch(abs) ? script(abs) : undefined;
+    if (text) out.push({ word, text });
+  }
+  return out;
+}
+
+/** ssh's options that take a value (OpenSSH's getopt string). */
+const SSH_VALUE_OPTS = 'BbcDEeFIiJLlmOopQRSWw';
+
+/**
+ * The machines a shell text reaches over ssh, scp or sftp (w4674): ssh's destination, an scp operand's host (m5:path,
+ * user@host:path) and sftp's destination. A remote command's own words are looked at too: an ssh hop through m3 to a
+ * machine with no sshd fails the same way.
+ */
+export function sshTargetsOf(text: string): string[] {
+  const out: string[] = [];
+  for (const part of text.split(/[\n;&|()]+/)) {
+    const words = part.split(/[\s'"]+/).filter(Boolean);
+    for (let i = 0; i < words.length; i++) {
+      const name = path.posix.basename(words[i]);
+      if (name !== 'ssh' && name !== 'scp' && name !== 'sftp') continue;
+      const valued = name === 'ssh' ? SSH_VALUE_OPTS : COPY_VALUE_OPTS[name];
+      const operands: string[] = [];
+      let k = i + 1;
+      for (; k < words.length && !(name !== 'scp' && operands.length); k++) {
+        const w = words[k];
+        if (w.startsWith('-') && !operands.length) {
+          if (w.length === 2 && valued.includes(w[1])) k++;
+          continue;
+        }
+        operands.push(w);
+      }
+      if (name === 'scp') out.push(...operands.map((o) => /^((?:[^@/\s]+@)?[A-Za-z0-9._-]+):/.exec(o)?.[1]).filter((h): h is string => !!h));
+      else if (operands[0]) out.push(operands[0].replace(/:.*$/, ''));
+      i = k - 1;
+    }
+  }
+  return out;
+}
+
+/** Why a command, or a scratch script it runs, would ssh to a machine whose install has no ssh (w4674), or undefined. */
+export function noSshTargetProblem(cmd: string, script: (abs: string) => string | undefined, problem: (target: string) => string | undefined): string | undefined {
+  for (const text of [cmd, ...scriptsRun(cmd, script).map((x) => x.text)]) {
+    for (const target of sshTargetsOf(text)) {
+      const why = problem(target);
+      if (why) return why;
+    }
   }
   return undefined;
 }
@@ -358,6 +409,8 @@ export function opsGuard(
   log: (line: string) => void = (l) => console.log(l),
   read: ReadCtx = { platform: 'linux', home: OPS_PATHS.home, cwd: OPS_PATHS.scratch, fsx: realReadFs },
   script: (abs: string) => string | undefined = scratchScript,
+  /** Why the portal's ssh must not reach this target (server/machines.ts sshTargetProblem, w4674); unset: none is refused. */
+  sshProblem?: (target: string) => string | undefined,
 ): HookCallback {
   const deny = (reason: string) => ({ hookSpecificOutput: { hookEventName: 'PreToolUse' as const, permissionDecision: 'deny' as const, permissionDecisionReason: reason } });
   const rules = opsSecretRules();
@@ -380,7 +433,8 @@ export function opsGuard(
       if (why) return refuse(`${target}: not yours to read (FF Factory's config, secrets, keys or data)`);
     }
     if (tool === 'Bash') {
-      const why = checkOpsShell(String(args.command ?? ''), read, rules) ?? pollProblem(String(args.command ?? ''), args.run_in_background === true, script);
+      const cmd = String(args.command ?? '');
+      const why = checkOpsShell(cmd, read, rules) ?? pollProblem(cmd, args.run_in_background === true, script) ?? (sshProblem ? noSshTargetProblem(cmd, script, sshProblem) : undefined);
       if (why) return refuse(why);
     }
     log(`ops-worker: ${tool}: ${redactSecrets(shown).replace(/\s+/g, ' ').slice(0, 600)}`);
@@ -578,7 +632,7 @@ export function opsBrief(ownerName: string | undefined): string {
 You run inside the FF Factory portal's VM (fff, on Loth2400) as the Linux account fff-ops, with a real shell. You take jobs only from Lothsahn's and Ben's own orchestrators; each message says whose it is. ${ownerName ? `The portal's owner is ${ownerName}.` : ''} Your job is orchestration: reaching the machines (beast, lothdesktop, m3, m5, biscuit and new ones) over ssh and copying files to and from them with scp, reading the portal's state, pinning a new machine's host key, and issuing machine credentials and member logins' API keys. Anything heavy runs on the target machine over ssh, never here.
 
 What you have:
-- \`ssh <machine> '<command>'\`: as the portal's account with its key. Machines by their aliases (m3, m5, beast, Loth2800: deploy/vm/guest/machines.ssh) or the user@host list_machines shows for a machine its installer registered. Only pinned host keys connect. Send the remote command in single quotes; pipe a script with \`ssh m5 'bash -s' < script.sh\` (Windows: \`ssh beast 'powershell -NoProfile -Command -' < script.ps1\`). The worker installer is run there (docs/worker-install.md). To update a machine's install, run its update there and nothing else (docs/worker-install.md, "Updating"; it asks nothing, keeps every setting, the machine's own credential and the PATH, restarts the daemon and says what the portal sees): on a Mac \`ssh m5 'bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.sh)" -- --update --root <root>'\`, on Windows \`ssh beast 'powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.ps1))) -Update -Root <root>"'\`. An update needs no new credential: never issue one for it. An update never needs a drain or a wait (w605): it stops only the daemon, agents mid-turn run on in their own agent hosts and the new daemon adopts them, so run it at once. After a portal deploy you do not update the machines: FF Factory does that itself once the deploy has verified (w887).
+- \`ssh <machine> '<command>'\`: as the portal's account with its key. Machines by their aliases (m3, m5, beast, Loth2800: deploy/vm/guest/machines.ssh) or the user@host list_machines shows for a machine its installer registered. Only pinned host keys connect. A machine whose worker install has no ssh (list_machines says "no ssh": it joined with -NoSsh, w1596, like LothLaptop) has no sshd, and port 22 there times out by design: your guard refuses ssh, scp and sftp to it with the reason (w4674). Its routes are an update over its daemon's link (the orchestrator's ops_worker machine_update, or the rollout after a deploy) and a local worker in one of its sandboxes; tell your requester that, and never set or keep a timer that tries ssh there again. Send the remote command in single quotes; pipe a script with \`ssh m5 'bash -s' < script.sh\` (Windows: \`ssh beast 'powershell -NoProfile -Command -' < script.ps1\`). The worker installer is run there (docs/worker-install.md). To update a machine's install, run its update there and nothing else (docs/worker-install.md, "Updating"; it asks nothing, keeps every setting, the machine's own credential and the PATH, restarts the daemon and says what the portal sees): on a Mac \`ssh m5 'bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.sh)" -- --update --root <root>'\`, on Windows \`ssh beast 'powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.ps1))) -Update -Root <root>"'\`. An update needs no new credential: never issue one for it. An update never needs a drain or a wait (w605): it stops only the daemon, agents mid-turn run on in their own agent hosts and the new daemon adopts them, so run it at once. After a portal deploy you do not update the machines: FF Factory does that itself once the deploy has verified (w887).
 - An installer rerun is yours, never a person's (w855, lothsahn: "don't ask ben to run installers"): the same update command with \`--max-sandboxes N\`, \`--max-agents-per-sandbox N\` or \`--max-unity N\` (Windows \`-MaxSandboxes\`, …) changes only what it names, and a sandbox count on a worker-root install changes in no other way. You run it when the job's message says an owner's open request asks for it (a \`[machine update for wNNN, approved by <name> …]\` message from ops_worker machine_update, or a job in which Lothsahn or Ben asked for the change themselves); the settings are the ones the message names, not more. A change nobody asked for, or one the message does not name, is not yours to make: report it instead. After it, check that list_machines shows the machine online with the new limits.
 - \`scp\` and \`sftp\` (w612): files between your scratch folder and a machine, both ways, over the same ssh (the portal's key, pinned host keys, port 22): \`scp ./check.sh m5:/tmp/\`, \`scp m5:/tmp/install.log ./\`, \`sftp -b cmds m5\` (a batch file: there is no terminal). They run as you, so they copy only what you may read and write: never the portal's files. No ssh options (-o, -i, -F, -J, -S): the machine is all they take.
 - \`fffctl restart\` (w974): a plain, soft portal restart with no new code (only the portal process restarts; the machines' workers keep running), only after a [restart] message (Lothsahn or Ben asked for it in their own words: the portal leaves a grant good once for 15 minutes; without it the command is refused). It takes no option. Run it, end your turn at once, and report after the portal is back as that message says, with the before-and-after list of the live worker sessions. Follow that message's steps.
