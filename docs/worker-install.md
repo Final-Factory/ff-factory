@@ -987,7 +987,9 @@ portal's host or in its VM:
    - A key is never accepted on first use.
 
 No sshd running here (the Windows OpenSSH Server service, a Mac's Remote Login) is said, not fatal: the daemon works,
-only those four actions cannot reach it. `--no-ssh` / `-NoSsh` skips both steps.
+only those four actions cannot reach it. `--no-ssh` / `-NoSsh` skips both steps. Such an install's daemon tells the portal
+(w4674: the hello's `ssh`, read from root.json's `authorized-key` entry), and the portal, the rollout and the ops worker plan
+no ssh to it: they name the link update, or a local worker in one of its sandboxes, instead.
 
 **Where each key lives, and why:**
 

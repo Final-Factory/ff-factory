@@ -620,6 +620,13 @@ hand their jobs back to the dispatcher to be scheduled on other computers."). Wi
   `placement.hold` with "paused from its tray app: someone is using it (w1532)", so no new work is placed there, the Capacity
   block reads `ROOM n% but HELD (…)`, nothing resumes there (w1376), and it is no capacity ping's room. The machines view
   shows it amber, "Paused", with why and until when.
+- **The hold says how old the pause is and only what releases it** (w4673, `pauseHold` in `server/machinePause.ts`, tested
+  in `server/w4673PauseText.test.ts`): "paused from its tray app: paused by hand 7 days ago (w1532); it runs again only on its
+  tray's Unpause". A pause set by hand ends on the tray's Unpause or, with a schedule, its next edge; the schedule's pause on
+  its next start or the Unpause; a person's input pause after its idle minutes or the Unpause. The age comes from the
+  daemon's `pause.since`. Before, every pause read "its tray's Unpause, its schedule, or 90 minutes without input", and
+  LothLaptop, paused by hand since 2026-11-11 with the activity pause off, read as if its pause had ended. The Capacity
+  block, `holdReason` (resumes, `stop_agent` move_to), the timed-run "waits on" line and a standing run's refusal all carry it.
 - **A pause stops what runs there within two minutes** (w2443, lothsahn, 2026-10-27: "Pausing a machine should stop
   existing runs on that machine. They should terminate in a minute or two. Please make this fix so that pausing the machine
   gets workers to stop, upload, and quit quickly", and "The worker harness should be authoritative and if the worker is

@@ -517,7 +517,8 @@ export function holdReason(id: string, prefs: PlacementPrefs = {}, requests: rea
   const except = exceptOf(prefs, id);
   if (except.length && requests.some((r) => except.includes(r.toLowerCase()))) return undefined;
   // A machine paused from its tray app (w1532, server/machinePause.ts) is held the same way until it runs again.
-  if (why.startsWith('paused from its tray app')) return `${id} is ${why}: nothing resumes there until it runs again (its tray's Unpause, its schedule, or 90 minutes without input)`;
+  // w4673: the hold names only the routes that release it (machinePause.ts pauseHold), never a blanket "90 minutes without input".
+  if (why.startsWith('paused from its tray app')) return `${id} is ${why.includes('; it runs again ') ? why.replace('; it runs again ', ': nothing resumes there until it runs again, ') : `${why}: nothing resumes there until it runs again`}`;
   return `${id} is on hold (${why}): nothing resumes there until the hold is lifted (placement.hold)`;
 }
 
