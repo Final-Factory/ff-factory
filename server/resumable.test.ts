@@ -22,13 +22,13 @@ test('w1097: a worker is resumable while a request it is on still waits for it',
   const work = [
     item('w1', 'blocked', ['aaaa0001']), // waiting on CI: comes back
     item('w2', 'done', ['bbbb0002']), // closed
-    item('w3', 'active', ['cccc0003', 'dddd0004']), // handed on to dddd0004
+    item('w3', 'active', ['cccc0003', 'dddd0004']), // handed on to dddd0004: cccc0003 keeps its folder while w3 is open (w4671)
     item('w4', 'stalled', ['eeee0005']), // the ledger's follow-ups resume it
     item('w5', 'merged', ['ffff0006']),
     item('w6', 'waiting' as WorkItem['status'], ['gggg0007']), // not a status: not open
     item('w7', 'blocked', ['hhhh0008', 'iiii0009'], { blocked: { kind: 'pr', ref: 'x#1', what: 'its PR', at: 'x', by: 'worker hhhh0008' } }),
   ];
-  assert.deepEqual(resumableSessions(['aaaa0001', 'bbbb0002', 'cccc0003', 'dddd0004', 'eeee0005', 'ffff0006', 'gggg0007', 'zzzz9999'], work), ['aaaa0001', 'dddd0004', 'eeee0005']);
+  assert.deepEqual(resumableSessions(['aaaa0001', 'bbbb0002', 'cccc0003', 'dddd0004', 'eeee0005', 'ffff0006', 'gggg0007', 'zzzz9999'], work), ['aaaa0001', 'cccc0003', 'dddd0004', 'eeee0005']);
   // A worker that set its request's gate is still with it although a newer worker was linked (shared/blockers.ts isWith).
   assert.deepEqual(resumableSessions(['hhhh0008', 'iiii0009'], work), ['hhhh0008', 'iiii0009']);
 });
@@ -220,4 +220,62 @@ test('w2987: a temp folder survives a declared CI wait: the session sweep and th
   assert.ok(fs.existsSync(path.join(dir, 'rust.sh')), 'rust.sh kept');
   assert.ok(fs.existsSync(path.join(dir, 'ffu', 'Cargo.toml')), 'the ffu clone kept');
   assert.deepEqual(sw.pending(), []);
+});
+
+// w4671: on lothdesktop, 2026-11-18, w4643 (a timed before/after run) was moved off worker b063d65c at 03:18:45Z to go to m5
+// (stop_agent move_to; Orchestrators.moveOff took b063d65c out of sessionIds into movedOff, "moved off it, not placed yet").
+// The portal no longer named b063d65c resumable, so the session sweep emptied ffa-b063d65c at 03:28:52Z ("step 1, process gone
+// 10 min": three finished timed legs), and b063d65c was resumed on w4643 at 06:53Z. The rule keys on the request being open.
+const moved = (status: WorkItem['status'] = 'queued') => item('w4643', status, [], { movedOff: { b063d65c: '2026-11-18T03:18:45Z' } });
+
+test('w4671: a stopped worker moved off a request that is still open keeps its folder until the request closes', async (t) => {
+  // every open state keeps it, the newest worker or not; a closed one does not
+  for (const s of ['queued', 'active', 'blocked', 'stalled'] as WorkItem['status'][]) assert.deepEqual(resumableSessions(['b063d65c'], [moved(s)]), ['b063d65c'], s);
+  assert.deepEqual(resumableSessions(['b063d65c', 'c0ffee01'], [item('w4643', 'active', ['b063d65c', 'c0ffee01'], { links: { c0ffee01: { at: '2026-11-18T03:20:00Z', how: 'sent' } } as WorkItem['links'] })]), ['b063d65c', 'c0ffee01']);
+  for (const s of ['done', 'cancelled', 'rejected', 'merged'] as WorkItem['status'][]) assert.deepEqual(resumableSessions(['b063d65c'], [moved(s)]), [], s);
+  // ff-leftovers folders and the daemon's closed-session pass see it as on an open request, not finished
+  const owners = ownersOf([{ id: 'b063d65c' }], [moved()]);
+  assert.deepEqual(owners.b063d65c?.requests, [{ id: 'w4643', status: 'queued', with: false }]);
+  const facts = { at: '2026-11-18T03:28:00Z', connected: true, sandboxes: [], live: [], resumable: resumableSessions(['b063d65c'], [moved()]), owners, open: ['w4643'], closed: [] };
+  assert.equal(judgeSession('b063d65c', facts).verdict, 'keep');
+
+  // The sweep and a nightly pass over four hours stopped (03:18 to 07:00), then the request closes and the folder goes.
+  const { root, temp, guard } = world(t);
+  const dir = sessionTempDir(temp, 'b063d65c');
+  const old = Date.now() / 1000 - 5 * 3600;
+  const legs = ['A-round1', 'B-round1', 'B-round2'].map((l) => path.join(dir, 'w4643', l));
+  for (const l of legs) {
+    fs.mkdirSync(l, { recursive: true });
+    fs.writeFileSync(path.join(l, 'Player.log'), 'leg');
+    fs.writeFileSync(path.join(l, 'done.txt'), 'done');
+  }
+  fs.writeFileSync(path.join(dir, 'w4643', 'runs.txt'), 'A 1\nB 1\nB 2\n');
+  const walk = (p: string): string[] => [p, ...(fs.statSync(p).isDirectory() ? fs.readdirSync(p).flatMap((n) => walk(path.join(p, n))) : [])];
+  for (const p of walk(dir).reverse()) fs.utimesSync(p, old, old);
+  const work = [moved()];
+  let now = Date.now();
+  const res = () => resumableSessions(['b063d65c'], work, now);
+  const g = () => ({ ...guard, resumable: res().map((id) => sessionTempDir(temp, id)) });
+  const sw = new SessionSweeper({
+    root,
+    tempRoot: () => temp,
+    sessions: () => [{ id: 'b063d65c', live: false, resumable: res().includes('b063d65c') }],
+    dirOf: (id) => sessionTempDir(temp, id),
+    guard: g,
+    localWork: async () => false,
+    now: () => now,
+  });
+  for (let m = 0; m < 4 * 60; m += 5) {
+    now += 5 * 60_000;
+    await sw.tick();
+    if (m === 120) await runCleanup((await planInstallLeftovers({ root, sandboxes: [], tempRoots: [temp], guard: g(), now })).items, g());
+  }
+  for (const l of legs) assert.ok(fs.existsSync(path.join(l, 'Player.log')), `${path.basename(l)} kept while w4643 is open`);
+  assert.ok(fs.existsSync(path.join(dir, 'w4643', 'runs.txt')), 'runs.txt kept');
+  assert.deepEqual(sw.pending(), []);
+  work[0] = moved('done'); // w4643 closes: the hold ends, and the sweep's grace runs from here
+  await sw.tick();
+  now += 11 * 60_000;
+  await sw.tick();
+  assert.ok(!fs.existsSync(path.join(dir, 'w4643')), 'swept once the request closed');
 });
