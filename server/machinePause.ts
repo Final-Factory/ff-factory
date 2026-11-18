@@ -37,13 +37,55 @@ export const PAUSE_TICK_MS = 5_000;
  */
 export const PAUSE_DAEMON_KILL_MS = 90_000;
 
-/** "beast is paused (someone is using this PC)": why a paused machine is held, as placement.hold names it. */
-export const pauseWhy = (p: Pick<MachinePause, 'reason' | 'detail'>) => `paused from its tray app: ${p.reason === 'activity' ? 'someone is using it' : p.reason === 'schedule' ? 'outside its work schedule' : p.reason === 'manual' ? 'paused by hand' : 'paused'} (w1532)`;
+/** "7 days ago", "3 hours ago", "12 min ago": how old a pause is (w4673), from the `since` its daemon reports. */
+export function pauseAge(since: string | undefined, now: number): string | undefined {
+  const t = since ? Date.parse(since) : NaN;
+  if (!Number.isFinite(t)) return undefined;
+  const min = Math.max(0, Math.floor((now - t) / 60_000));
+  if (min < 1) return 'just now';
+  if (min < 60) return `${min} min ago`;
+  const h = Math.floor(min / 60);
+  if (h < 48) return `${h} hour${h === 1 ? '' : 's'} ago`;
+  return `${Math.floor(h / 24)} days ago`;
+}
+
+const utc = (iso: string | undefined) => (iso && Number.isFinite(Date.parse(iso)) ? `${iso.slice(11, 16)} UTC` : undefined);
+
+/**
+ * "beast is paused (someone is using this PC)": why a paused machine is held, as placement.hold names it, with its age when
+ * `now` is given and the daemon reported `since` ("paused by hand 7 days ago", w4673).
+ */
+export const pauseWhy = (p: Pick<MachinePause, 'reason' | 'detail' | 'since'>, now?: number) => {
+  const age = now === undefined ? undefined : pauseAge(p.since, now);
+  const what =
+    p.reason === 'activity' ? `someone is using it${age ? ` (last input ${age})` : ''}`
+    : p.reason === 'schedule' ? `outside its work schedule${age ? ` (paused ${age})` : ''}`
+    : p.reason === 'manual' ? `paused by hand${age ? ` ${age}` : ''}`
+    : 'paused';
+  return `paused from its tray app: ${what} (w1532)`;
+};
+
+/**
+ * What lets a paused machine run again, only the routes that apply (w4673; machine/pauseRules.ts pauseState): a pause set by
+ * hand holds until the tray's Unpause or the schedule's next edge, never an idle spell (the activity pause only pauses a
+ * machine that runs, and is off by default, w1574); the schedule's pause ends at its next start or the tray's Unpause; a
+ * person's input pause ends after its idle minutes or the tray's Unpause. LothLaptop, paused by hand from 2026-11-11, read
+ * "or 90 minutes without input" and people thought its pause had ended.
+ */
+export function pauseRelease(p: Pick<MachinePause, 'reason' | 'until' | 'settings'>): string {
+  const at = utc(p.until);
+  if (p.reason === 'activity') return `after ${p.settings?.activity.idleMinutes ?? 90} minutes without a person's input${at ? ` (at ${at} if nobody touches it)` : ''} or on its tray's Unpause`;
+  if (p.reason === 'schedule') return `on its schedule${at ? ` at ${at}` : "'s next start"} or its tray's Unpause`;
+  return at ? `on its tray's Unpause or its schedule at ${at}` : "only on its tray's Unpause";
+}
+
+/** The hold text of a paused machine: why, how old, and what releases it (w4673). */
+export const pauseHold = (p: Pick<MachinePause, 'reason' | 'detail' | 'since' | 'until' | 'settings'>, now: number) => `${pauseWhy(p, now)}; it runs again ${pauseRelease(p)}`;
 
 /** The hold entries of the paused machines, to merge into config placement.hold. */
-export function pauseHolds(machines: Iterable<Pick<Machine, 'id' | 'pause'>>): Record<string, string> {
+export function pauseHolds(machines: Iterable<Pick<Machine, 'id' | 'pause'>>, now = Date.now()): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const m of machines) if (m.pause?.paused) out[m.id] = pauseWhy(m.pause);
+  for (const m of machines) if (m.pause?.paused) out[m.id] = pauseHold(m.pause, now);
   return out;
 }
 
@@ -194,7 +236,7 @@ export class MachinePauses {
       // Told, and its turn is over with no turn end seen (its process died: the daemon's own deadline, a crash, a kill): the
       // requests it was working on are Blocked on the pause all the same.
       if (t && !this.blocked.has(s.id) && !this.handing.has(s.id)) {
-        if (live) this.d.stop(s.id, `Stopped by FF Factory: ${s.machineId} is ${pauseWhy(p)}.`);
+        if (live) this.d.stop(s.id, `Stopped by FF Factory: ${s.machineId} is ${pauseWhy(p, this.now())}.`);
         this.d.log(`pause: worker ${s.id} on ${s.machineId} is no longer mid-turn and gave no turn end: its requests are Blocked on the pause`);
         void this.blockAll(s, 'its process ended before it wrote its line', t.interruptedAt ? 'forced (its process ended after the interrupt)' : 'its process ended', this.workingOn(s.id));
         return;
@@ -203,7 +245,7 @@ export class MachinePauses {
       // With none pending (no person, check-in or queued message), the requests it was working on are Blocked on the pause.
       if (live && !this.handing.has(s.id)) {
         const picks = s.waitingOn || s.wakeAt || s.queuedSend ? [] : this.workingOn(s.id);
-        this.d.stop(s.id, `Stopped by FF Factory: ${s.machineId} is ${pauseWhy(p)}. ${picks.length ? `${picks.map((w) => w.id).join(', ')} wait${picks.length === 1 ? 's' : ''} Blocked on its pause, and you are resumed here when it runs again.` : 'A message that would resume you waits until it runs again.'}`);
+        this.d.stop(s.id, `Stopped by FF Factory: ${s.machineId} is ${pauseWhy(p, this.now())}. ${picks.length ? `${picks.map((w) => w.id).join(', ')} wait${picks.length === 1 ? 's' : ''} Blocked on its pause, and you are resumed here when it runs again.` : 'A message that would resume you waits until it runs again.'}`);
         if (picks.length) void this.blockAll(s, 'it was between turns when the machine was paused', 'stopped between turns', picks);
       }
       return;
@@ -223,7 +265,7 @@ export class MachinePauses {
     }
     if (t.interruptedAt && now - t.interruptedAt >= PAUSE_STOP_AFTER_MS.value) {
       this.d.log(`pause: worker ${s.id} did not end its turn ${Math.round((now - t.interruptedAt) / 1000)} s after the interrupt: stopped with every process under it`);
-      this.d.stop(s.id, `Stopped by FF Factory: ${s.machineId} is ${pauseWhy(p)} and the turn did not end when interrupted.`);
+      this.d.stop(s.id, `Stopped by FF Factory: ${s.machineId} is ${pauseWhy(p, this.now())} and the turn did not end when interrupted.`);
       void this.blockAll(s, `its turn did not end ${Math.round((now - t.at) / 1000)} s after the pause notice, so FF Factory stopped it`, 'forced (stopped)', this.workingOn(s.id));
     }
   }
@@ -240,7 +282,7 @@ export class MachinePauses {
     const lines = handedBackIn(text);
     const how = lines.size ? 'by its worker' : t?.interruptedAt ? `forced: interrupted ${Math.round(PAUSE_GRACE_MS.value / 1000)} s after the pause notice` : t ? 'its worker ended its turn without its line' : 'its turn ended after the pause';
     const picks = this.workingOn(s.id, lines);
-    this.d.stop(s.id, `Stopped by FF Factory: ${s.machineId} is ${pauseWhy(p)}.${picks.length ? ` ${picks.map((w) => w.id).join(', ')} wait${picks.length === 1 ? 's' : ''} Blocked on its pause, and you are resumed here when it runs again.` : ''}`);
+    this.d.stop(s.id, `Stopped by FF Factory: ${s.machineId} is ${pauseWhy(p, this.now())}.${picks.length ? ` ${picks.map((w) => w.id).join(', ')} wait${picks.length === 1 ? 's' : ''} Blocked on its pause, and you are resumed here when it runs again.` : ''}`);
     void this.blockAll(s, '', how, picks, lines);
     return true;
   }
@@ -266,7 +308,7 @@ export class MachinePauses {
     if (s.machineId) this.blocked.set(s.id, s.machineId);
     this.handing.add(s.id);
     const p = this.paused(s.machineId);
-    const why = p ? pauseWhy(p) : 'paused';
+    const why = p ? pauseWhy(p, this.now()) : 'paused';
     try {
       const sbBranch = this.d.branchOf(s);
       let saved: string | undefined;
