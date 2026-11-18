@@ -25,9 +25,17 @@ type ShellEnv = Record<string, string | undefined>;
  * sandbox's own after the build.
  */
 export const BUILD_PLAYER_TO_CACHE =
-  'build it with `unity-slot run -- scripts/nightly/build_player.sh <your sandbox> <40-hex sha> <win|mac|linux>`, which writes the player to ' +
+  'build it from your sandbox\'s root with `unity-slot run -- bash scripts/nightly/build_player.sh "$PWD" <40-hex sha> <win|mac|linux>` ' +
+  '(w4669: `bash` in front, since Windows cannot start a .sh file by itself (`spawn EFTYPE`), and the first argument is the project ' +
+  'folder, your sandbox\'s path, not its name), which writes the player to ' +
   'this computer\'s shared player cache (<worker root>/player-cache/<sha>-<os>, outside the tree), prints "player: <path>" for ffnightly.py ' +
   '--player, and skips the build when that commit is already there; leave the player there, since the next leg on this computer reuses it (w4614)';
+
+/** w4669: ffnightly.py run's required flags are --sha and --out (scripts/nightly/ffnightly.py, the run parser); a leg left out --out. */
+export const NIGHTLY_RUN =
+  'Play it from your sandbox\'s root with `python3 scripts/nightly/ffnightly.py run --player <the printed path> --sha <40-hex sha> ' +
+  '--scenario <id> --out "$TMPDIR/<leg>-$(date +%H%M%S)"` (on Windows `python`, since its python3 is the Store stub; --sha and --out ' +
+  'are required, w4669), adding the flags your brief names (--scenarios-from, --slow-host, --lab).';
 
 export const NIGHTLY_FROM_SANDBOX =
   'Run ffnightly.py from your sandbox\'s checkout, never a copy in $TMPDIR (a copy finds the repo two folders above itself): when the ' +
@@ -36,7 +44,7 @@ export const NIGHTLY_FROM_SANDBOX =
 
 export const PLAYERS_IN_SANDBOX =
   `Build every commit's player in your own sandbox, one commit at a time: check the commit out, ${BUILD_PLAYER_TO_CACHE}, then check out the next. ` +
-  `${NIGHTLY_FROM_SANDBOX} ` +
+  `${NIGHTLY_RUN} ${NIGHTLY_FROM_SANDBOX} ` +
   'Never clone the game repo into your temp folder: the harness refuses a full clone and scratch_clone.sh (one such clone reached 43 GB).';
 
 export const BUILD_IN_SANDBOX =
