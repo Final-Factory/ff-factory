@@ -32,6 +32,8 @@ interface FakeMachine extends RolloutMachine {
   /** w1596: its daemon updates over its own link: what its update job reports (or throws), and the machine afterwards. */
   /** w1918: why its connected daemon does not update over its link (server/machines.ts linkProblem). */
   linkProblem?: string;
+  /** w4674: its install joined with -NoSsh (server/machines.ts noSshProblem). */
+  noSsh?: boolean;
   linkRun?: (form: 'update' | 'tools', commit: string) => { report?: Partial<LinkUpdateReport>; throws?: string; notReached?: boolean; after?: { online: boolean; daemon?: string } };
 }
 
@@ -92,6 +94,7 @@ function world(machines: FakeMachine[], o: { requester?: Requester; enabled?: bo
     },
     link: (id) => find(id).online && !!find(id).linkRun,
     linkProblem: (id) => (find(id).online && !find(id).linkRun ? find(id).linkProblem : undefined),
+    noSsh: (id) => !!find(id).noSsh,
     linkUpdate: async (id, form, commit) => {
       linkCalls.push({ id, form, commit });
       const r = find(id).linkRun!(form, commit);
@@ -527,11 +530,13 @@ test('w1742: a tools run over the link that finds a firewall rule missing runs a
   // Not an administrator's account (the ssh run warns too), and a Mac or a PC with no ssh target: the warning stays.
   const plain = mac('pc', { platform: 'win32', root: 'D:\\ffw', target: 'ben@pc', linkRun: linkTools, tools: () => ({ code: 0, out: `${toolsOut()}\n${missing}` }) });
   const noSsh = mac('coosego', { platform: 'win32', root: 'D:\\ffw', target: 'not an ssh target', linkRun: linkTools });
-  const w2 = world([plain, noSsh], { requester: LOTH });
+  // w4674: a PC that joined with -NoSsh has a target that looks fine, and no sshd behind it.
+  const joined = mac('lothlaptop', { platform: 'win32', root: 'V:\\ffw', target: 'lothsahn@lothlaptop', noSsh: true, linkRun: linkTools });
+  const w2 = world([plain, noSsh, joined], { requester: LOTH });
   w2.verify();
   await w2.make().tick();
-  assert.deepEqual(w2.toolCalls.map((c) => c.target), ['ben@pc'], 'no ssh where there is no target');
-  assert.equal(w2.told[0].text.split('Windows Firewall: no allow rule').length - 1, 2, 'both still warn');
+  assert.deepEqual(w2.toolCalls.map((c) => c.target), ['ben@pc'], 'no ssh where there is no target, nor to a -NoSsh install');
+  assert.equal(w2.told[0].text.split('Windows Firewall: no allow rule').length - 1, 3, 'all still warn');
 });
 
 test("w1596: over the link, a new daemon that did not come back is put back by its job; a refusal changes nothing; a job that never reports is handled as an ssh run that failed", async () => {

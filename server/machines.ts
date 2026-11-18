@@ -1178,6 +1178,38 @@ export class MachineManager {
   }
 
   /**
+   * Why the portal's ssh must not be planned for this machine (w4674), or undefined: its worker install has none. LothLaptop
+   * joined with -NoSsh (the worker join, w1596), so port 22 there times out by design, yet the ops worker's hourly timer for
+   * w4517 ran "ssh lothlaptop" and failed every hour. Names the route that does apply.
+   */
+  noSshProblem(id: string): string | undefined {
+    const rec = this.store.machines.get(id);
+    if (!rec?.noSsh) return undefined;
+    const link = this.canLink(id)
+      ? 'its daemon is connected and updates over its link now'
+      : this.isOnline(id)
+        ? 'its daemon is connected but does not update over its link yet'
+        : 'its daemon is offline now; it updates over its link once it connects again';
+    return `${id} has no portal ssh: its worker install joined with -NoSsh (w1596), so no sshd answers on its port 22, by design. Use the route that applies: an update over its daemon's link (ops_worker machine_update, or the rollout after a deploy; ${link}), or a local worker in one of ${id}'s sandboxes (a request placed on ${id}) for anything run on the machine itself. Not sent over ssh`;
+  }
+
+  /** Why no ssh is planned for this machine (w1918, w4674): a connected daemon that does not link (linkProblem), or an install with no ssh. */
+  sshProblem(id: string): string | undefined {
+    return this.linkProblem(id) ?? this.noSshProblem(id);
+  }
+
+  /**
+   * noSshProblem for an ssh target as the ops worker types it (w4674): a machine id or name, its host alias, or the user@host
+   * its record names. Undefined for any other target (deploy/vm/guest/machines.ssh aliases the record does not know).
+   */
+  sshTargetProblem(target: string): string | undefined {
+    const bare = (h: string) => h.replace(/^[^@]*@/, '').toLowerCase();
+    const host = bare(target);
+    const m = [...this.store.machines.values()].find((x) => x.noSsh && [x.id, x.name, x.host, x.ssh?.host].some((h) => h && bare(h) === host));
+    return m ? this.noSshProblem(m.id) : undefined;
+  }
+
+  /**
    * Update a worker root machine over its daemon's link (w1596, server/machineLink.ts): the portal's own code, as a bundle the
    * daemon checks, run by its update job, which puts the old code back when the new daemon does not come back. Resolves with
    * the job's report (sent by the daemon that runs afterwards); rejects when the daemon refuses or nothing comes in time.
@@ -3243,6 +3275,9 @@ export function adoptLayout(m: Machine, layout: NonNullable<Extract<FromDaemon, 
   // Moving from today's layout into a root (a migration): keep where it was, for a rollback.
   if (moved && !m.root) m.preRoot = { appDir: m.appDir, repoPath: m.repoPath, tempDir: m.tempDir, sandboxRoot: m.sandboxRoot, librarySeed: m.librarySeed };
   m.root = layout.root;
+  // Whether its install has the portal's ssh (w4674): a daemon that does not say leaves what the record knew.
+  if (layout.ssh === false) m.noSsh = true;
+  else if (layout.ssh === true) delete m.noSsh;
   if (moved || !m.appDir) m.appDir = layout.appDir;
   if (moved || !m.repoPath) m.repoPath = layout.repoPath;
   if ((moved || !m.tempDir) && layout.tempDir) m.tempDir = layout.tempDir;
@@ -3293,6 +3328,7 @@ export function leaveRoot(m: Machine): boolean {
   const p = m.preRoot;
   delete m.root;
   delete m.preRoot;
+  delete m.noSsh;
   if (p) Object.assign(m, { appDir: p.appDir, repoPath: p.repoPath, tempDir: p.tempDir, sandboxRoot: p.sandboxRoot, librarySeed: p.librarySeed });
   return m.sandboxRoot !== before;
 }

@@ -45,7 +45,7 @@ function portalRepo(dir: string, text = 'one'): { root: string; commit: string }
   return { root: dir, commit: git(dir, 'rev-parse', 'HEAD') };
 }
 
-async function setup(t: { after: (fn: () => unknown) => void }, o: { root?: boolean; record?: 'file' | 'spare' | 'none'; detached?: boolean } = {}) {
+async function setup(t: { after: (fn: () => unknown) => void }, o: { root?: boolean; record?: 'file' | 'spare' | 'none'; outside?: { kind: string; name: string }[]; detached?: boolean } = {}) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-link-'));
   const cfg = { dataDir: path.join(tmp, 'data'), limits: { maxSessions: 6 }, repo: { url: 'x' }, worker: { effort: 'high' } } as unknown as Config;
   fs.mkdirSync(cfg.dataDir);
@@ -72,7 +72,7 @@ async function setup(t: { after: (fn: () => unknown) => void }, o: { root?: bool
   // the daemon's folder is on the host volume, as on LothLaptop (D:\work\ffw\daemon beside V:\ffw).
   const appDir = o.detached ? path.join(tmp, 'host-daemon') : path.join(root, 'daemon');
   // w1918: 'spare' is a root on its Dev Drive whose drive came back empty: only the daemon folder's spare copy is left.
-  const record = JSON.stringify({ machineId: 'mx', service: 'com.fffactory.linktest', platform: process.platform, devDrive: { vhdx: 'x.vhdx', letter: 'V', maxGB: 80, inUse: true, rootOnDrive: true, host: tmp } });
+  const record = JSON.stringify({ machineId: 'mx', service: 'com.fffactory.linktest', platform: process.platform, devDrive: { vhdx: 'x.vhdx', letter: 'V', maxGB: 80, inUse: true, rootOnDrive: true, host: tmp }, ...(o.outside ? { outside: o.outside } : {}) });
   if (o.root !== false && (o.record ?? 'file') === 'file') fs.writeFileSync(path.join(root, 'root.json'), record);
   if (o.record === 'spare') {
     fs.mkdirSync(appDir, { recursive: true });
@@ -267,6 +267,22 @@ test('w4672: a daemon that connected with its Dev Drive detached offers updates 
   assert.equal((s.d as unknown as { ws: unknown }).ws, link, 'the same link: no reconnect was needed');
   // Offered once: a later look sends nothing more.
   assert.equal(s.d.offerSelfUpdate(), false);
+});
+
+test("w4674: a daemon whose install joined with -NoSsh says so in its hello: the record keeps it, and no ssh is planned once it is offline", async (t) => {
+  const s = await setup(t, { outside: [{ kind: 'task', name: 'FF Factory daemon' }] });
+  await until('online, its hello read', () => s.mm.hasHello('mx'));
+  assert.equal(s.mm.list().find((m) => m.id === 'mx')?.noSsh, true);
+  assert.ok(s.mm.canLink('mx'), 'connected: updated over its link');
+  assert.match(s.mm.sshProblem('mx') ?? '', /its daemon is connected and updates over its link now/, 'and never over ssh');
+  s.d.shutdown();
+  await until('offline', () => !s.mm.isOnline('mx'), 5000);
+  assert.match(s.mm.sshProblem('mx') ?? '', /mx has no portal ssh: .*-NoSsh .*an update over its daemon's link .*its daemon is offline now.*a local worker in one of mx's sandboxes .*Not sent over ssh/);
+
+  const ssh = await setup(t, { outside: [{ kind: 'authorized-key', name: '/home/x/.ssh/authorized_keys' }] });
+  await until('online, its hello read', () => ssh.mm.hasHello('mx'));
+  assert.equal(ssh.mm.list().find((m) => m.id === 'mx')?.noSsh, undefined);
+  assert.equal(ssh.mm.noSshProblem('mx'), undefined);
 });
 
 test('w1918: keepRootJson keeps the spare copy fresh and puts root.json back only for a root on its Dev Drive, never throwing', () => {

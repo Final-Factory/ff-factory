@@ -108,6 +108,11 @@ job outside itself, which puts the old code back if the new daemon does not come
 ([worker-install.md](worker-install.md#updates-over-the-daemons-link-w1596)). The orchestrator gets the job's report as a
 `[machine update for wNNN]` message (`linkUpdateMessage`) and closes the request with `update_work` once the person has what
 they asked for. The ssh command below is for a daemon from before w1596 or one that is not connected.
+A machine whose install joined with `-NoSsh` (w4674: its daemon's hello says `ssh: false` from root.json, the record
+carries `noSsh`, and `list_machines` shows "no ssh") never gets that ssh job: while its daemon is offline `machine_update`
+throws, naming the link update and a local worker in that machine's sandboxes, and runs nothing. This worker's guard
+(`opsGuard`, `noSshTargetProblem`) refuses an ssh, scp or sftp to it, in a command or a scratch script it runs, with the
+same reason, and the rollout's elevated firewall rerun (w1742) skips it.
 
 **The gate** (`OpsWorker.machineInstall`, `server/opsWorker.ts`; tested in `server/opsWorker.test.ts`):
 

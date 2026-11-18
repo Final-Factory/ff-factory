@@ -1070,6 +1070,12 @@ export interface Machine {
    * portal reaches it by, and its sshd's host keys, pinned in the portal's known_hosts2.
    */
   ssh?: { user: string; host: string; hostKeys: string[]; at: string };
+  /**
+   * Its worker install has no portal ssh (w4674): it joined with -NoSsh (the worker join, w1596), so no sshd answers on
+   * port 22 there by design. Its daemon's hello says so (root.json); the portal and the ops worker then plan no ssh to it
+   * (server/machines.ts sshProblem): an update goes over its daemon's link, work on it to a local worker in its sandboxes.
+   */
+  noSsh?: true;
   /** The label, like a sandbox's purpose line. */
   purpose: string;
   /** Deployment state; `online` says whether the daemon is connected right now. */

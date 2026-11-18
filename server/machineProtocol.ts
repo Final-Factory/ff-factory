@@ -378,7 +378,8 @@ export type FromDaemon =
       /** It updates, restarts and unloads itself on the portal's word over this link (w1596, `self_update`, `daemon_control`): the version. An older portal ignores it. */
       selfUpdate?: number;
       /** A worker root install (w513): its folders, so a record made without a deploy learns them. */
-      layout?: { root: string; appDir: string; repoPath: string; tempDir?: string; sandboxes?: SandboxPoolSettings | null };
+      /** `ssh` (w4674): whether its installer set up the portal's ssh (root.json); absent from an older daemon or an unreadable root.json. */
+      layout?: { root: string; appDir: string; repoPath: string; tempDir?: string; sandboxes?: SandboxPoolSettings | null; ssh?: boolean };
     }
   /** Its host guard has news for people (protocol 8, w466): the drive gone or back, disk space, a reaped browser. Relayed like the portal's own guard's. */
   | { type: 'host_report'; title: string; body: string }
