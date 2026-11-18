@@ -199,6 +199,12 @@ export interface DaemonConfig {
 export const RELOCATE_FALLBACK_MS = { value: RELOCATE_FALLBACK_MINUTES * 60_000 };
 
 /**
+ * How often a daemon whose hello offered no update over its link looks again (w4672; read at start, tests shorten it). Up here,
+ * not beside RECONNECT_MS: the daemon run as a script starts before the end of this module is evaluated.
+ */
+export const REOFFER_MS = { value: 30_000 };
+
+/**
  * The portal URL to dial on attempt `n` (from 0, since the last connection): the configured one; once a relocation
  * (w466) has gone unanswered for `fallbackMs`, every other attempt the URL before it, so a cut-over that never comes up,
  * or is rolled back, does not strand the daemon. Exported for tests.
@@ -3297,9 +3303,6 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
 
 /** The reconnect pace for the first two minutes down (tests shorten it). */
 export const RECONNECT_MS = { value: 2000 };
-
-/** How often a daemon whose hello offered no update over its link looks again (w4672; read at start, tests shorten it). */
-export const REOFFER_MS = { value: 30_000 };
 
 /** How long to wait before the next connection attempt: ~2 s for the first two minutes down, then 1-30 s backoff. */
 export function reconnectDelayMs(downForMs: number, attempt: number, rand = Math.random()): number {

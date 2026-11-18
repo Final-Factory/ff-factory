@@ -133,7 +133,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // fields it knows and drops it, and an older daemon never sends it (its pair legs are placed as before, without the cache).
 // w4608 (no bump): `seatSessionIds` on `switch`, the agents on an agent seat in that sandbox, whose turns do not hold a switch; an older
 // daemon ignores the field and waits on them as before, and an older portal never sends it.
-const DECIDED = { protocol: 9, fingerprint: 'c1a1d00d90158b93' };
+// w4672 (no bump): `self_update_offer`, the hello's `selfUpdate` sent later by a daemon whose install record was unreadable at
+// its hello (its Dev Drive not yet attached); an older portal drops it (no default case), and an older daemon never sends it.
+const DECIDED = { protocol: 9, fingerprint: '19fe50e604251ab7' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {
