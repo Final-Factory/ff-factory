@@ -179,7 +179,7 @@ test('w1912: a request card sends the answer to your orchestrator with the files
   const now = Date.now();
   const cases = waitingCases(now);
   const TESTER = { userId: 'tester', displayName: 'tester' };
-  await page.routeWebSocket('**/ws', (ws) => {
+  await page.routeWebSocket(/\/ws(\?|$)/, (ws) => {
     const server = ws.connectToServer();
     server.onMessage((raw) => {
       const e = JSON.parse(String(raw)) as ServerEvent;

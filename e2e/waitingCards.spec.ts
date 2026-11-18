@@ -149,7 +149,7 @@ test("w1868: every card of today’s real cases says what it is, who acts, the q
 }) => {
   const now = Date.now();
   const media = reviewFiles();
-  await page.routeWebSocket("**/ws", (ws) => {
+  await page.routeWebSocket(/\/ws(\?|$)/, (ws) => {
     const server = ws.connectToServer();
     server.onMessage((raw) => {
       const e = JSON.parse(String(raw)) as ServerEvent;
@@ -422,7 +422,7 @@ test("w2576: a still in the Details text at a path of the worker that waits show
     },
   } as WorkItem;
   delete (w.needsYou as { asks?: unknown }).asks;
-  await page.routeWebSocket("**/ws", (ws) => {
+  await page.routeWebSocket(/\/ws(\?|$)/, (ws) => {
     const server = ws.connectToServer();
     server.onMessage((raw) => {
       const e = JSON.parse(String(raw)) as ServerEvent;
@@ -482,7 +482,7 @@ test("w2856: every card leads with its question, its answers right under it; wha
 }) => {
   const now = Date.now();
   const media = reviewFiles();
-  await page.routeWebSocket("**/ws", (ws) => {
+  await page.routeWebSocket(/\/ws(\?|$)/, (ws) => {
     const server = ws.connectToServer();
     server.onMessage((raw) => {
       const e = JSON.parse(String(raw)) as ServerEvent;
@@ -715,7 +715,7 @@ test.describe("w4238", () => {
         asks,
       },
     } as unknown as SessionInfo;
-    await page.routeWebSocket("**/ws", (ws) => {
+    await page.routeWebSocket(/\/ws(\?|$)/, (ws) => {
       const server = ws.connectToServer();
       server.onMessage((raw) => {
         const e = JSON.parse(String(raw)) as ServerEvent;

@@ -332,7 +332,7 @@ test('the Waiting on input tab clears a request each way: approve, decline with 
 });
 
 test('the Waiting on input tab with seven requests: the screenshot of the flow (w1228, test data)', async ({ page }) => {
-  await page.routeWebSocket('**/ws', (ws) => {
+  await page.routeWebSocket(/\/ws(\?|$)/, (ws) => {
     const server = ws.connectToServer();
     server.onMessage((raw) => {
       const e = JSON.parse(String(raw)) as ServerEvent;
@@ -404,7 +404,7 @@ test('each kind of Needs you item opens the panel with its Allow, Approve, Decli
   const shot = async (name: string) => {
     if (process.env.NEEDS_YOU_SHOTS) await page.screenshot({ path: `${process.env.NEEDS_YOU_SHOTS}/${name}-${isMobile(page) ? 'phone' : 'desktop'}.png` });
   };
-  await page.routeWebSocket('**/ws', (ws) => {
+  await page.routeWebSocket(/\/ws(\?|$)/, (ws) => {
     const server = ws.connectToServer();
     server.onMessage((raw) => {
       const e = JSON.parse(String(raw)) as ServerEvent;
@@ -495,7 +495,7 @@ function needsYouState(s: AppState, tag: string): AppState {
 // phone ... Also, the intake is showing things that auto approved. Why show it if approved?") ----
 
 test('the Intake tab shows every request number on a phone and keeps auto-approved requests out of the waiting list (w2143, test data)', async ({ page }) => {
-  await page.routeWebSocket('**/ws', (ws) => {
+  await page.routeWebSocket(/\/ws(\?|$)/, (ws) => {
     const server = ws.connectToServer();
     server.onMessage((raw) => {
       const e = JSON.parse(String(raw)) as ServerEvent;

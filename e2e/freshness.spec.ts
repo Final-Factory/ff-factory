@@ -46,7 +46,7 @@ async function deployable(page: Page): Promise<Deploy> {
     await route.fulfill({ response: res, body: html });
   });
   const sockets: WebSocketRoute[] = [];
-  await page.routeWebSocket(/\/ws$/, (ws) => {
+  await page.routeWebSocket(/\/ws(\?|$)/, (ws) => {
     sockets.push(ws);
     const server = ws.connectToServer();
     ws.onMessage((m) => server.send(m));

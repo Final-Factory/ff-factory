@@ -124,7 +124,7 @@ function rowsState(s: AppState): AppState {
 }
 
 async function rowsPage(page: Page) {
-  await page.routeWebSocket('**/ws', (ws) => {
+  await page.routeWebSocket(/\/ws(\?|$)/, (ws) => {
     const server = ws.connectToServer();
     server.onMessage((raw) => {
       const e = JSON.parse(String(raw)) as ServerEvent;

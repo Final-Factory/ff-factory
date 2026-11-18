@@ -187,7 +187,7 @@ function onBeastsDaemon(online = true) {
 const fleet = onBeastsDaemon();
 
 async function fixedFleet(page: Page, hash = '#/', shape: (s: AppState) => AppState = fleet) {
-  await page.routeWebSocket('**/ws', (ws) => {
+  await page.routeWebSocket(/\/ws(\?|$)/, (ws) => {
     const server = ws.connectToServer();
     let orchId = '';
     server.onMessage((raw) => {
