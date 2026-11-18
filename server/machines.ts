@@ -2575,6 +2575,14 @@ export class MachineManager {
       case 'host_health':
         if (msg.health && typeof msg.health === 'object') this.update(id, { guard: msg.health });
         return;
+      case 'self_update_offer': {
+        // w4672: the hello offered no update over the link (its root.json unreadable then); the daemon offers it now.
+        const h = this.hellos.get(id);
+        if (!h || typeof msg.selfUpdate !== 'number') return;
+        h.selfUpdate = msg.selfUpdate;
+        console.log(`machine ${id}: its daemon offers updates over its link now (protocol ${msg.selfUpdate}): its install record is readable again`);
+        return;
+      }
       case 'live_result': {
         const p = this.liveCalls.get(msg.id);
         if (!p) return;

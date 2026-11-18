@@ -15,7 +15,7 @@ import { SessionManager } from './sessions.ts';
 import { MachineManager } from './machines.ts';
 import { PendingCalls, UpdateBundles, bundleServedLine, unwaitedAnswer, updateBundleFor } from './machineLink.ts';
 import type { LinkUpdateReport } from './machineProtocol.ts';
-import { Daemon, RECONNECT_MS, type DaemonConfig, type Probes } from '../machine/daemon.ts';
+import { Daemon, RECONNECT_MS, REOFFER_MS, type DaemonConfig, type Probes } from '../machine/daemon.ts';
 import { ANSWERS, SelfUpdater, checkoutFromBundle, downloadBundle, fetchError, keepRootJson, readJson, rootBackupOf, selfUpdateProblem, updateFiles, writeJson, type UpdateJob } from '../machine/selfUpdate.ts';
 import type { JobSpec } from '../machine/osJob.ts';
 import type { Config } from './config.ts';
@@ -45,7 +45,7 @@ function portalRepo(dir: string, text = 'one'): { root: string; commit: string }
   return { root: dir, commit: git(dir, 'rev-parse', 'HEAD') };
 }
 
-async function setup(t: { after: (fn: () => unknown) => void }, o: { root?: boolean; record?: 'file' | 'spare' | 'none' } = {}) {
+async function setup(t: { after: (fn: () => unknown) => void }, o: { root?: boolean; record?: 'file' | 'spare' | 'none'; detached?: boolean } = {}) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-link-'));
   const cfg = { dataDir: path.join(tmp, 'data'), limits: { maxSessions: 6 }, repo: { url: 'x' }, worker: { effort: 'high' } } as unknown as Config;
   fs.mkdirSync(cfg.dataDir);
@@ -68,7 +68,9 @@ async function setup(t: { after: (fn: () => unknown) => void }, o: { root?: bool
   const { token } = mm.register({ id: 'mx', host: 'mx', purpose: 'unused', status: 'ready', repoPath: tmp, home: tmp, portalUrl: url });
   const root = path.join(tmp, 'root');
   fs.mkdirSync(root);
-  const appDir = path.join(root, 'daemon');
+  // w4672: 'detached' is a Dev Drive not attached at the daemon's start: the root cannot be made (a file holds its path), and
+  // the daemon's folder is on the host volume, as on LothLaptop (D:\work\ffw\daemon beside V:\ffw).
+  const appDir = o.detached ? path.join(tmp, 'host-daemon') : path.join(root, 'daemon');
   // w1918: 'spare' is a root on its Dev Drive whose drive came back empty: only the daemon folder's spare copy is left.
   const record = JSON.stringify({ machineId: 'mx', service: 'com.fffactory.linktest', platform: process.platform, devDrive: { vhdx: 'x.vhdx', letter: 'V', maxGB: 80, inUse: true, rootOnDrive: true, host: tmp } });
   if (o.root !== false && (o.record ?? 'file') === 'file') fs.writeFileSync(path.join(root, 'root.json'), record);
@@ -76,8 +78,13 @@ async function setup(t: { after: (fn: () => unknown) => void }, o: { root?: bool
     fs.mkdirSync(appDir, { recursive: true });
     fs.writeFileSync(rootBackupOf(appDir), record);
   }
+  if (o.detached) {
+    fs.rmSync(root, { recursive: true });
+    fs.writeFileSync(root, 'not a drive');
+  }
   const config: DaemonConfig = { portalUrl: url, id: 'mx', token, repoPath: tmp, ...(o.root !== false ? { root } : {}), appDir, claude: 'no-such-claude', maxEventsFile: null, cleanup: { everyMinutes: 0 } } as DaemonConfig;
   RECONNECT_MS.value = 200;
+  REOFFER_MS.value = 200;
   const d = new Daemon(config, undefined, PROBES);
   const launched: JobSpec[] = [];
   const exits: number[] = [];
@@ -85,6 +92,7 @@ async function setup(t: { after: (fn: () => unknown) => void }, o: { root?: bool
   d.start();
   t.after(async () => {
     RECONNECT_MS.value = 2000;
+    REOFFER_MS.value = 30_000;
     d.shutdown();
     server.close();
     await until('the daemon gone', () => !mm.isOnline('mx'), 5000).catch(() => undefined);
@@ -240,6 +248,25 @@ test('w1918: root.json gone with a reset drive: the daemon puts it back from its
   await until('online, its hello read', () => n.mm.hasHello('mx'));
   assert.equal(n.mm.canLink('mx'), false);
   assert.match(n.mm.linkProblem('mx') ?? '', /mx's daemon .*is connected but did not offer updates over its link .*root\.json was missing or unreadable .*Not sent over ssh/);
+});
+
+test('w4672: a daemon that connected with its Dev Drive detached offers updates over its link once the drive is back, without a reconnect', async (t) => {
+  const s = await setup(t, { record: 'spare', detached: true });
+  await until('online, its hello read', () => s.mm.hasHello('mx'));
+  assert.equal(s.mm.canLink('mx'), false, 'root.json could not be put back at the hello: no offer');
+  assert.match(s.mm.linkProblem('mx') ?? '', /did not offer updates over its link/);
+  const link = (s.d as unknown as { ws: unknown }).ws;
+  // Still detached: the daemon's look finds nothing to offer, and sends nothing.
+  assert.equal(s.d.offerSelfUpdate(), false);
+  // The host guard reattaches the drive: its root is a folder again, empty (root.json is put back from the spare copy).
+  fs.rmSync(s.root);
+  fs.mkdirSync(s.root);
+  await until('the offer arrives on the same link', () => s.mm.canLink('mx'), 5000);
+  assert.equal(readJson<{ service: string }>(path.join(s.root, 'root.json'))?.service, 'com.fffactory.linktest', 'put back from its spare copy');
+  assert.equal(s.mm.linkProblem('mx'), undefined);
+  assert.equal((s.d as unknown as { ws: unknown }).ws, link, 'the same link: no reconnect was needed');
+  // Offered once: a later look sends nothing more.
+  assert.equal(s.d.offerSelfUpdate(), false);
 });
 
 test('w1918: keepRootJson keeps the spare copy fresh and puts root.json back only for a root on its Dev Drive, never throwing', () => {

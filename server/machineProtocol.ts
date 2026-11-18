@@ -46,6 +46,8 @@ import type { AttachmentRef, BenchLock, BenchPriority, BenchQueueReport, NoTimed
  * Also (w1596, no bump): `selfUpdate` in the hello, and `self_update` and `daemon_control`, sent only to a daemon that offered
  * it, answered by `self_update_ack`, `self_update_report` and `daemon_control_result`, which an older portal never asks for.
  * Also (w1996, no bump): `bench_hours`, the machine's exclusive-bench cost per UTC hour, which an older portal drops.
+ * Also (w4672, no bump): `self_update_offer`, the hello's `selfUpdate` sent later, when the install record could not be read
+ * at the hello (its Dev Drive not yet attached); an older portal drops it.
  */
 export const PROTOCOL_VERSION = 9;
 
@@ -467,6 +469,8 @@ export type FromDaemon =
   | { type: 'live_state'; liveId: string; state: 'starting' | 'live' | 'holding' | 'stopped'; detail: string; frames: number }
   /** A live view set up again from its recipe (w1839): whether it worked, why not, how long, and how long each leg took (ms). An older portal drops it. */
   | { type: 'live_staged'; liveId: string; ok: boolean; detail: string; ms: number; legs: Record<string, number> }
+  /** The hello's `selfUpdate`, sent later (w4672): its install record is readable again. An older portal drops it. */
+  | { type: 'self_update_offer'; selfUpdate: number }
   /** The update's bundle checked and its job started, or why not (w1596): nothing was changed then. */
   | { type: 'self_update_ack'; id: string; ok: boolean; error?: string }
   /** An update job ended (w1596): sent by the daemon that runs afterwards, on its link, until the portal has it. */
