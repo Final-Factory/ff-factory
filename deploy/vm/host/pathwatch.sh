@@ -234,8 +234,8 @@ pl_repair_start() {
 }
 pl_repair_end() { # ID COMMAND fixed|"not fixed" EVIDENCE
   local ev
-  ev=$(pl_clean "$4" 300)
-  state_set "L$1_repair" "$(iso "$(now)") $2: $3: $ev; before: $(sget "L$1_repair_before")"
+  ev=$(pl_clean "$4")
+  state_set "L$1_repair" "$(iso "$(now)") $2: $3: ${ev:0:300}; before: $(sget "L$1_repair_before")"
   log "path L$1 repair: after: $3: $ev"
   if [ "$3" != fixed ]; then
     pl_alert "$1" "fff-vm: repair did not fix: $(pl_name "$1")" "$2 ran, $(pl_name "$1") still fails: $ev. $(pl_who "$1")"
