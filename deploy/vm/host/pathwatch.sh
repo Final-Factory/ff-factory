@@ -31,6 +31,8 @@
 : "${PW_CHECKS:=on}" "${PW_EXPECT_FUNNEL:=1}" "${PW_EXPECT_TAG:=tag:fff-portal}" "${PW_FAILS_BEFORE_ALERT:=2}"
 : "${PW_TS_RESTART_MIN:=30}" "${PW_FUNNEL_STALE_MIN:=30}" "${PW_DISK_WARN_MB:=2048}" "${PW_DISK_FAIL_MB:=512}"
 : "${PW_CLOCK_SKEW_SEC:=60}" "${PW_HEALTH_FILE:=/run/fff/path-health.json}"
+# What install.sh installed this watch from (install_host_scripts in lib.sh writes it beside the scripts; w4777).
+: "${PW_INSTALLED_FILE:=${FFF_VM_LIB:-/usr/local/lib/fff-vm}/installed.json}"
 : "${PW_FUNNEL_REPUBLISH_AFTER:=3}" "${PW_FUNNEL_RESTART_AFTER:=10}"
 
 PL_IDS="ssh 1 2 3 4 5 6 7 8 9 disk clock loop units ntfy"
@@ -958,6 +960,13 @@ path_summary() {
   done
 }
 
+# path_installed: {commit, at} of the install this watch runs from (PW_INSTALLED_FILE), "unknown" in both when an install
+# before w4777 left no record or it does not read.
+path_installed() {
+  jq -ce '{commit: (.commit // "unknown" | tostring), at: (.at // "unknown" | tostring)}' "$PW_INSTALLED_FILE" 2>/dev/null ||
+    echo '{"commit":"unknown: no readable installed.json (an install before w4777 left none)","at":"unknown"}'
+}
+
 # path_json: the state for the portal's banner; no secrets (pl_clean ran on every line).
 path_json() {
   local id rows="" v who
@@ -968,10 +977,10 @@ path_json() {
     rows+=$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$(pl_name "$id")" "$v" "$(iso "$(sget "L${id}_since" "$(now)")")" "$(iso "$(sget "L${id}_at" "$(now)")")" "$(sget "L${id}_line")" "$who" "$(sget "L${id}_repair")")
     rows+=$'\n'
   done
-  jq -n --arg rows "$rows" --arg problems "$PATH_PROBLEMS" --arg now "$(iso "$(now)")" --arg host "$(hostname -s)" --arg dns "$(sget path_dns)" '
+  jq -n --arg rows "$rows" --arg problems "$PATH_PROBLEMS" --arg now "$(iso "$(now)")" --arg host "$(hostname -s)" --arg dns "$(sget path_dns)" --argjson installed "$(path_installed)" '
     ($rows | split("\n") | map(select(length > 0) | split("\t") | {id: .[0], name: .[1], verdict: .[2], since: .[3], checkedAt: .[4], line: .[5], who: .[6], repair: .[7]})) as $layers
     | ($problems | split(" ") | map(select(length > 0))) as $p
-    | {schema: 1, updatedAt: $now, host: $host, dns: $dns, ok: ($p | length == 0),
+    | {schema: 1, updatedAt: $now, host: $host, dns: $dns, installed: $installed, ok: ($p | length == 0),
        problems: [$layers[] | select(.id as $i | $p | index($i) != null)],
        warnings: [$layers[] | select(.verdict == "warn" or (.verdict == "fail" and (.id as $i | $p | index($i) == null)))],
        layers: $layers}'

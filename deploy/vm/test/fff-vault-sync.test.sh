@@ -474,4 +474,23 @@ out=$(install_host_scripts "$H" "$LIBD" "$SBIN" 2>&1)
 awk '/^fi # HOST$/ {host_end = NR} /^if \[ "\$HOST" = 0 \]; then$/ && host_end && !seen {seen = 1; guest_only = NR} /^if \[ "\$GUEST" = 1 \]; then$/ && host_end {if (guest_only && guest_only < NR) ok = 1; exit} END {exit ok ? 0 : 1}' "$H/install.sh" ||
   fail "install.sh's --guest-only call is not between the host part and the guest part"
 ok "install_host_scripts replaces an older vault.sh and fff-vm, changes nothing the second time, and install.sh calls it for --guest-only"
+
+# ---------------------------------------------------------------- w4777: which install the watch runs
+# install_host_scripts leaves installed.json beside the scripts: the checkout's commit, the install time (UTC) and the
+# installed pathwatch.sh's hash; fff-vm watch copies commit and time into every status file (fff-vm-path.test.sh).
+rec=$LIBD/installed.json
+[ -f "$rec" ] || fail "install_host_scripts left no installed.json"
+jq -e . "$rec" >/dev/null || fail "installed.json is not JSON: $(cat "$rec")"
+jq -r .at "$rec" | grep -Eqx '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z' || fail "installed.json's at is not a UTC time: $(cat "$rec")"
+[ "$(jq -r .pathwatchSha256 "$rec")" = "$(sha256sum "$H/pathwatch.sh" | cut -d' ' -f1)" ] || fail "installed.json's pathwatchSha256 is not pathwatch.sh's: $(cat "$rec")"
+if head=$(git -c safe.directory='*' -C "$ROOT" rev-parse HEAD 2>/dev/null); then
+  jq -r .commit "$rec" | grep -Eqx "$head(-dirty)?" || fail "installed.json's commit is not the checkout's $head: $(cat "$rec")"
+else
+  jq -r .commit "$rec" | grep -q '^unknown' || fail "installed.json's commit outside git: $(cat "$rec")"
+fi
+mkdir -p "$T/nogit"
+cp "$H/pathwatch.sh" "$T/nogit/"
+[ "$(GIT_CEILING_DIRECTORIES=$T installed_record "$T/nogit" | jq -r .commit)" = "unknown: not a git checkout" ] || fail "installed_record outside a checkout: $(installed_record "$T/nogit")"
+[ "$(PATH=$T/nogit installed_record "$T/nogit" 2>/dev/null | "$(command -v jq)" -r .commit)" = "unknown: no git" ] || fail "installed_record without git: $(PATH=$T/nogit installed_record "$T/nogit" 2>&1)"
+ok "install_host_scripts records the commit, the install time and pathwatch.sh's hash in installed.json, and says unknown without git"
 echo "all fff-vault-sync scenarios pass"

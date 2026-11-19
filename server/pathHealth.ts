@@ -56,6 +56,7 @@ export function parsePathHealth(text: string, now: number): PathHealth | undefin
   const list = (v: unknown): PathLayer[] => (Array.isArray(v) ? v.map(layerOf).filter((l): l is PathLayer => !!l) : []);
   const problems = list(o.problems);
   const updated = Date.parse(o.updatedAt);
+  const inst = o.installed && typeof o.installed === 'object' ? (o.installed as Record<string, unknown>) : undefined;
   const silent = Number.isFinite(updated) && now - updated > SILENT_AFTER_MS ? Math.round((now - updated) / 60_000) : undefined;
   return {
     updatedAt: o.updatedAt,
@@ -66,7 +67,14 @@ export function parsePathHealth(text: string, now: number): PathHealth | undefin
     problems: silent === undefined ? problems : [],
     warnings: list(o.warnings),
     ...(silent !== undefined ? { silentMinutes: silent } : {}),
+    ...(inst ? { installed: { commit: str(inst.commit), at: str(inst.at) } } : {}),
   };
+}
+
+/** One line on which install the watch runs (w4777): the ff-factory commit (12 characters of an id) and when. */
+export function describeInstalled(i: { commit: string; at: string }): string {
+  const commit = /^[0-9a-f]{40}/.test(i.commit) ? i.commit.slice(0, 12) + i.commit.slice(40) : i.commit || 'unknown';
+  return `the watch runs ff-factory ${commit}, installed ${i.at || 'at an unknown time'}`;
 }
 
 /** What a banner says about one problem: the layer, since when, the evidence, and who must act. */
@@ -170,6 +178,7 @@ export class PathHealthMonitor {
       for (const p of h.problems) out.push(`  - ${describeProblem(p)}`);
     }
     for (const w of h.warnings) out.push(`  warning: ${w.name} (layer ${w.id}): ${w.line}`);
+    if (h.installed) out.push(`  ${describeInstalled(h.installed)}`);
     return out;
   }
 }

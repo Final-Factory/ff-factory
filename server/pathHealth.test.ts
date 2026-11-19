@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PathHealthMonitor, describeProblem, filePathHealth, parsePathHealth, SILENT_AFTER_MS } from './pathHealth.ts';
+import { PathHealthMonitor, describeInstalled, describeProblem, filePathHealth, parsePathHealth, SILENT_AFTER_MS } from './pathHealth.ts';
 import type { PathHealth } from '../shared/types.ts';
 
 // The status files fff-vm watch (deploy/vm/host/pathwatch.sh) wrote in deploy/vm/test/fff-vm-path.test.sh, with their times
@@ -30,6 +30,18 @@ test('the watchdog\'s file for a tailnet policy that drops Funnel: the layer, th
   assert.match(p.line, /^the tailnet policy drops Funnel traffic: a tailnet admin must grant tag:ingress \(or \*\) → tag:fff-portal\. 3 line\(s\) in 15 min, last: .*Drop: TCP\{100\.100\.3\.13:50112 > 100\.64\.0\.5:59917\} 60 no rules matched$/);
   assert.equal(p.who, 'tailnet admin: grant tag:ingress → tag:fff-portal in the tailnet policy');
   assert.match(describeProblem(p), /^tailnet policy \(layer 7\) has failed since 2026-10-07 18:30Z: the tailnet policy drops Funnel traffic.* Who must act: tailnet admin: grant tag:ingress → tag:fff-portal in the tailnet policy\.$/);
+});
+
+test('w4777: the status file says which ff-factory commit the watch was installed from and when', () => {
+  for (const name of ['status-file.healthy.json', 'status-file.policy.json']) {
+    assert.deepEqual(parsePathHealth(read(name), AT + 60_000)!.installed, { commit: '0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c', at: '2026-10-07T18:30:00Z' }, name);
+  }
+  // a watch installed before w4777 writes none, and nothing is made up
+  const old = JSON.parse(read('status-file.healthy.json'));
+  delete old.installed;
+  assert.equal(parsePathHealth(JSON.stringify(old), AT)!.installed, undefined);
+  assert.equal(describeInstalled({ commit: '0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c-dirty', at: '2026-11-19T10:00:00Z' }), 'the watch runs ff-factory 0f1e2d3c4b5a-dirty, installed 2026-11-19T10:00:00Z');
+  assert.equal(describeInstalled({ commit: 'unknown: no git', at: '' }), 'the watch runs ff-factory unknown: no git, installed at an unknown time');
 });
 
 test('a file that is not the watchdog\'s, or half written, shows nothing', () => {
@@ -133,7 +145,7 @@ test('system_status lines: a problem in full for the orchestrator to relay, a he
   assert.match(lines[2], /^ {2}- end to end \(layer 9\) has failed since/);
   f.text = read('status-file.healthy.json');
   m.tick();
-  assert.deepEqual(m.statusLines(), ['Portal path (internet → Funnel → https://fff.example-tailnet.ts.net → portal): every layer passes (fff-vm watch on ffbox, 2026-10-07T18:30:00Z).']);
+  assert.deepEqual(m.statusLines(), ['Portal path (internet → Funnel → https://fff.example-tailnet.ts.net → portal): every layer passes (fff-vm watch on ffbox, 2026-10-07T18:30:00Z).', '  the watch runs ff-factory 0f1e2d3c4b5a, installed 2026-10-07T18:30:00Z']);
   clock.t += SILENT_AFTER_MS + 60_000;
   m.tick();
   assert.match(m.statusLines()[0], /^WARNING: Portal path watchdog \(fff-vm watch on ffbox\) has been silent for 32 min/);
