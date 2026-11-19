@@ -2035,3 +2035,63 @@ test('crash-fix policy: look-alike crash requests are never held by their title;
   assert.match(c.log.join('\n'), /the same stack signature: the same crash/);
   assert.equal(store.sessions.get(aWorker)?.kind, 'worker');
 });
+
+// w4810 (lothsahn: "Desyncs and crashes and hangs should be urgent. Update the rules").
+test('w4810: the intake files every desync, crash and hang urgent (Discord bug threads, FFBox diagnoses and branches, the nightly lab); a hitch is not; urgent approves nothing', async (t) => {
+  const { intake, work } = await setupOnMachine(
+    t,
+    { discord: { enabled: true, dailyCap: 50, perReporterPerDay: 50 }, ffbox: { enabled: true, escalations: true, dailyCap: 50 }, nightly: { enabled: true } },
+    { workLimits: { intake: { perHour: 50, perDay: 100 } } },
+  );
+  const newest = () => work().at(-1)!;
+  // Discord bug threads from the in-game reporter: no category field, so the conservative word check decides.
+  const bug = (n: number, title: string, text: string) =>
+    parseBugThread(
+      { id: flake(n), parent_id: BUGS, name: title },
+      { id: flake(n), webhook_id: '9', author: { id: '9', bot: true }, embeds: [{ title, description: `${text}, on 0.50.0.46.`, fields: [{ name: 'Game Version', value: '0.50.0.46' }] }] },
+      { guildId: GUILD, channel: '#beta-bugs' },
+    );
+  const filed = (n: number, title: string, text: string) => {
+    assert.equal(intake.fileBug(bug(n, title, text)), 'filed', title);
+    return newest();
+  };
+  const crash = filed(1, 'Crash when docking at a station', 'The game crashes to desktop each time I dock');
+  const hang = filed(2, 'Game freezes on the loading screen', 'It stops responding and I have to kill it from the task manager');
+  const desync = filed(3, 'Desync after my friend joins', 'The client desyncs a minute after joining a multiplayer game');
+  const hitch = filed(4, 'Hitch every few seconds in a big base', 'The game stutters and the frame rate drops in my big base');
+  assert.deepEqual([crash, hang, desync].map((w) => w.priority), ['urgent', 'urgent', 'urgent'], 'a crash, a hang and a desync report are urgent');
+  assert.equal(hitch.priority, 'normal', 'a hitch or stutter is a performance report, not a hang');
+  for (const w of [crash, hang, desync]) {
+    assert.equal(w.approval?.state, 'pending', `${w.title}: urgent approves nothing; it still waits for a person`);
+    assert.match(w.log.join('\n'), /priority normal → urgent: a (crash|hang|desync) .*Urgent approves nothing/);
+  }
+
+  // FFBox: its crash and hang diagnoses (the report kind), its desync diagnosis (the report id) and desync branch (the board key).
+  assert.equal(filedItem(work, intake.onDiagnosis(crashDiag(41))).priority, 'urgent', 'an FFBox crash diagnosis');
+  assert.equal(filedItem(work, intake.onDiagnosis(crashDiag(42, {}, 'hang'))).priority, 'urgent', 'an FFBox hang diagnosis');
+  assert.equal(filedItem(work, intake.onDiagnosis(diag(43, { rootCause: 'not_found', verdict: 'NEEDS-INFO' }))).priority, 'urgent', 'an FFBox desync diagnosis');
+  intake.onConversation(desyncDiag(1));
+  assert.deepEqual([newest().source?.kind, newest().priority], ['ffbox-diagnosis', 'urgent'], 'an FFBox desync fix branch');
+  intake.onConversation(conv({ id: 'p44', title: 'Stutter when the camera pans across a big base', branch: 'ffbox/stutter-44' }));
+  assert.deepEqual([newest().source?.kind, newest().priority], ['ffbox-branch', 'normal'], 'an FFBox branch for a hitch stays normal');
+
+  // The nightly lab: a desync (its desync reports) or a hang or crash on the lab's own oracle line is urgent; a slow frame is high.
+  const nightly = (date: string, r: NightlyResult) => {
+    intake.onNightly(night(date, NSHA(date.slice(-1)), [r]));
+    return work().find((w) => w.source?.nightly?.scenarios.includes(r.scenario))!;
+  };
+  assert.equal(nightly('2026-11-01', fail('MP-desync-check', { desyncReports: ['20261101T030000Z-desync-0a1b2c3d4e'] })).priority, 'urgent');
+  assert.equal(nightly('2026-11-02', fail('S7-load-big', { reason: 'S7-load-big: the player stopped responding for 120 s' })).priority, 'urgent');
+  assert.equal(nightly('2026-11-03', fail('S8-dock', { reason: 'S8-dock: the player crashed (exit code -1073741819)' })).priority, 'urgent');
+  assert.equal(nightly('2026-11-04', fail('S9-big-base-perf', { reason: 'S9-big-base-perf: frame time p95 180 ms over the 50 ms bound (hitch)' })).priority, 'high', 'a performance regression stays high');
+});
+
+test('w4810: an open request the intake sees a desync, crash or hang report of again is raised again', async (t) => {
+  const { intake, work, o } = await setupOnMachine(t, { ffbox: { enabled: true, escalations: true, dailyCap: 50 } }, { workLimits: { intake: { perHour: 50, perDay: 100 } } });
+  const first = filedItem(work, intake.onDiagnosis(crashDiag(51)));
+  assert.equal(first.priority, 'urgent');
+  // Lowered by hand (say, a person decided it can wait): a resend of the same diagnosis raises it again, once, logged.
+  first.priority = 'normal';
+  intake.onDiagnosis(crashDiag(51, { ref: 'intake-1251-turn-2' }));
+  assert.equal(o.requireWork(first.id).priority, 'urgent');
+});

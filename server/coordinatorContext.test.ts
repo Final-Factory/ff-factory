@@ -165,7 +165,10 @@ test('w1158: what a coordinator carries in every call stays within its budget', 
   // w4620 (lothsahn: "The factory should be using strict priority queues", and a release priority above urgent) gave the
   // dispatcher's priority line release and "in every queue (strict, w4620)" (trimmed from 150 characters added to 40; the rule
   // is in docs/orchestrators.md): the dispatcher's measured 29,329, so the cap moved to 29,350.
-  const PROMPT_MAX = 29_350;
+  // w4810 (lothsahn: "Desyncs and crashes and hangs should be urgent. Update the rules") gave the dispatcher one line on
+  // raising an open desync, crash or hang request (trimmed from 477 characters to 152; the rule is in docs/intake.md): the
+  // dispatcher's measured 29,481, so the cap moved to 29,500.
+  const PROMPT_MAX = 29_500;
   // w1163: the always-loaded sets now follow measured use (docs/tool-manifest.md); the dispatcher's is 23,436 characters
   // since w1159 gave list_work, list_sandboxes, list_machines and agent_transcript their output options. w1597 gave decide_work
   // its questions (one plain question per decision with its answers, as the person's card asks them; Ben, 2026-10-19: "just ask

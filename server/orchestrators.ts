@@ -89,6 +89,7 @@ import { handoffQuote, handoffReport, isHandoff } from './handoffReport.ts';
 import { commitsIn, normPr, pairCommitsOf, pairPrOf, pairRanCommit, prIn, resultFor, sameCommit, samePr } from './pairRuns.ts';
 import type { AttachmentRef, PairPlayer, BenchGrant, ConditionalDecision, CrashHold, ForYouMark, OpenAsk, WorkNeedsYou, GateResume, GitStatus, Machine, WorkAutoClosed, WorkBlocker, WorkDigest, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPair, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
 import { designGoAsk } from './designGo.ts';
+import { failureLine, failureOf, failurePriority, kindOfKey, structuredFailure, wordFailure, type Failure } from './failurePriority.ts';
 import { openQuestionsOf } from './reports.ts';
 import { DISK_CLEANUP_FLOOR_GB, REPORT_KINDS, WORK_PRIORITIES, asWorkPriority, atLeast, questionFor, type ReportKind, type ReportSummary } from '../shared/types.ts';
 import { FOR_YOU_CHARS, FOR_YOU_KEPT, forYouId, splitForYou } from '../shared/forYou.ts';
@@ -705,6 +706,20 @@ export const DISPATCHER_CHAT_REFUSED = 'nobody chats with the dispatcher, the ow
  * lothsahn: "Rename the "release" priority to frantic") is frantic. The tool schema does this too; this covers every other
  * caller. An unknown priority is refused.
  */
+/** An intake filing's desync, crash or hang (w4810, server/failurePriority.ts): its source's structured signal, else the word check where its source has none. */
+export function intakeFailure(f: Pick<IntakeFiling, 'title' | 'brief' | 'source' | 'triage'>): Failure | undefined {
+  return failureOf(f);
+}
+
+/** A person's or an operator's request (request_work, an FFBox dev request): a report key it carries, else its own words (w4810). */
+export function requestFailure(title: string, brief: string, keys: readonly string[]): Failure | undefined {
+  for (const k of keys) {
+    const kind = kindOfKey(k);
+    if (kind) return { kind, why: `it names ${kind} report ${k.replace(/^(?:report|intake):/i, '')}` };
+  }
+  return wordFailure(title, brief);
+}
+
 function withPriority<T extends { priority?: WorkPriority }>(input: T): T {
   if (input.priority === undefined) return input;
   const priority = asWorkPriority(input.priority);
@@ -2353,12 +2368,15 @@ It is for your part of the work, not an answer to another worker's question.`;
     const placed = resolveNeeds({ needs: input.needs, repo: input.repo, title, brief }, repoSlug(this.d.cfg.repo.url));
     // The threads it is the work for are its scope: a dev request from one of them joins it (docs/ffbox.md, "Dev requests").
     const scope = scopeOf(input.scope, [...keys].filter((k) => k.startsWith('discord:')).map((k) => k.slice('discord:'.length)));
+    // Desyncs, crashes and hangs are urgent (lothsahn, w4810): a game request whose title or brief's opening names one.
+    const failure = this.gameRepo(input.repo) ? requestFailure(title, brief, [...keys]) : undefined;
+    const priority = failurePriority(input.priority, failure);
     const w: WorkItem = {
       id,
       title: clip(title, 120),
       brief: clip(brief, 8000),
       ...(input.constraints?.trim() ? { constraints: clip(input.constraints.trim(), 2000) } : {}),
-      priority: input.priority ?? 'normal',
+      priority,
       ...(related.length ? { relatedIds: related } : {}),
       keys: [...keys],
       ...(own.subjects.length ? { subjects: own.subjects } : {}),
@@ -2383,13 +2401,15 @@ It is for your part of the work, not an answer to another worker's question.`;
       log: [],
     };
     w.overlaps = findOverlaps({ keys: w.keys, title: w.title }, this.pool(id));
+    if (failure && priority !== (input.priority ?? 'normal')) this.stamp(w, failureLine(failure, input.priority ?? 'normal'));
     this.stamp(w, `filed by ${owner.displayName}${w.humanAsked ? '' : ' (not in a turn of theirs)'}; needs ${placed.needs === 'agent' ? 'an agent slot only (no editor, no game sandbox)' : 'a game sandbox'} (${placed.how})${w.ledgerRead ? '; its workers may read the ledger' : ''}${w.spendRead ? '; its workers may export the spend record' : ''}${w.report ? `; its result is a report (${w.report.kind})` : ''}${cloneMachine ? `; its workers may work in ${cloneMachine}'s main clone` : ''}`);
     this.store.putWork(w);
     this.store.dropWork(pruneIds(this.store.work.values(), undefined, this.now().getTime()));
     this.countFiledFollowUp(w, related);
     this.gatherForDispatcher(owner, requestNotice(w));
     const overlap = w.overlaps.length ? ` Possible overlap: ${w.overlaps.slice(0, 3).map(overlapLine).join('; ')}. Tell ${owner.displayName}; the dispatcher decides.` : '';
-    return `Filed ${id} with the dispatcher${w.report ? `; its result is a report (${w.report.kind}), which its worker files with file_report` : ''}.${overlap} You get a [dispatch] message with its decision.`;
+    const urgent = failure && priority !== (input.priority ?? 'normal') ? ` Filed urgent: it is a ${failure.kind} (${failure.why}); desyncs, crashes and hangs are urgent (w4810). Lower it with update_work only if it is not one.` : '';
+    return `Filed ${id} with the dispatcher${w.report ? `; its result is a report (${w.report.kind}), which its worker files with file_report` : ''}.${overlap} You get a [dispatch] message with its decision.${urgent}`;
   }
 
   /**
@@ -7291,6 +7311,26 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    * "Start now" (w527, the dashboard's button on a delegation): the request goes urgent and the dispatcher is told to
    * start it now if anything fits, before other queued work. `by` is the person who pressed it.
    */
+  /**
+   * Raise an open request to urgent for a desync, crash or hang (w4810), logged with what showed it; a higher one keeps its
+   * priority, a finished one is left alone. A queued one may now fit capacity ahead of others. Not saved here.
+   */
+  private raiseForFailure(w: WorkItem, failure: Failure | undefined): boolean {
+    if (!failure || !isOpen(w) || atLeast(w.priority, 'urgent')) return false;
+    this.stamp(w, failureLine(failure, w.priority));
+    w.priority = 'urgent';
+    if (w.status === 'queued') this.capacityMayHaveFreed(`${w.id} is urgent: a ${failure.kind}`);
+    return true;
+  }
+
+  /** Whether a request_work repo is the game's (none given is the game's): only a game request is a game desync, crash or hang. */
+  private gameRepo(repo: string | undefined): boolean {
+    const r = repo?.trim().toLowerCase().replace(/\.git$/, '').replace(/\/+$/, '');
+    if (!r) return true;
+    const game = (repoSlug(this.d.cfg.repo.url) ?? 'Final-Factory/FinalFactory').toLowerCase();
+    return (r === game || r.endsWith(`/${game}`) || r.endsWith(`:${game}`) || game.endsWith(`/${r}`));
+  }
+
   bumpWork(id: string, by: Requester): WorkItem {
     const w = this.requireWork(id);
     if (!isOpen(w)) throw new Error(`${w.id} is ${w.status}: nothing to start`);
@@ -7344,7 +7384,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    * names the scenario): one log line per night and scenario, the scenario's key added so later nights find it at once,
    * urgent once the failing code shipped, and a worker on it told. False when that night was already added.
    */
-  attachNightly(id: string, a: { key: string; line: string; night: string; scenario: string; urgent: boolean }): boolean {
+  attachNightly(id: string, a: { key: string; line: string; night: string; scenario: string; urgent: boolean; failure?: Failure }): boolean {
     const w = this.requireWork(id);
     const mark = `nightly ${a.night}: ${a.scenario} `;
     if (w.log.some((l) => l.includes(mark)) || w.source?.nightly?.nights.includes(`${a.night} ${a.scenario}`)) return false;
@@ -7352,8 +7392,8 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     if (w.source?.nightly) w.source.nightly.nights = [...w.source.nightly.nights, `${a.night} ${a.scenario}`].slice(-60);
     this.stamp(w, a.line);
     if (a.urgent && !atLeast(w.priority, 'urgent')) {
+      this.stamp(w, a.failure ? failureLine(a.failure, w.priority) : 'priority urgent: the failing code shipped in a release');
       w.priority = 'urgent';
-      this.stamp(w, 'priority urgent: the failing code shipped in a release');
     }
     this.store.putWork(w);
     for (const sid of w.sessionIds) {
@@ -7447,6 +7487,8 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       if (!s.digest && a.source.digest) s.digest = a.source.digest;
     }
     this.stamp(w, a.line);
+    // An open request a desync, crash or hang diagnosis joins is urgent (w4810): the diagnosis's report ids decide.
+    this.raiseForFailure(w, structuredFailure(a.source));
     this.store.putWork(w);
   }
 
@@ -7537,6 +7579,8 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     if (repeat) {
       if (f.source.pr && repeat.source && repeat.source.pr !== f.source.pr) repeat.source.pr = f.source.pr;
       this.stamp(repeat, `seen again by the intake: ${clip(f.title, 120)}`);
+      // An open request a desync, crash or hang report reaches again is urgent too (w4810); a finished one stays finished.
+      this.raiseForFailure(repeat, intakeFailure(f));
       // A known person's own input joining it (a trusted request to Max, an FFBox operator) is their acting on it (w1031).
       if (f.person) this.takeOver(repeat, f.requestedBy, `${f.requestedBy.displayName} joined it${f.source.channel ? ` from ${f.source.channel}` : ''}`);
       this.store.putWork(repeat);
@@ -7548,11 +7592,13 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const fromText = (f.source.untrusted ? textKeys(title) : textKeys(`${title}\n${f.brief}`, this.knownBranches())).filter((k) => !/^(work|session|delegation|pr|branch|discord|ffbox|release|nightly):/.test(k));
     const keys = [...new Set([...idKeys, ...fromText])];
     const overlaps = findOverlaps({ keys, title }, this.pool(undefined, lookbackMs));
+    const asked = asWorkPriority(f.priority) ?? 'normal';
+    const failure = intakeFailure(f);
     const w: WorkItem = {
       id: `w${++this.store.workSeq}`,
       title,
       brief: clip(f.brief, 8000),
-      priority: asWorkPriority(f.priority) ?? 'normal',
+      priority: failurePriority(asked, failure),
       keys,
       requestedBy: asRequester(f.requestedBy),
       requesters: [asRequester(f.requestedBy)],
@@ -7583,6 +7629,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
         target.source.alsoThreads = [...(target.source.alsoThreads ?? []), { threadId: f.source.threadId, ...(f.source.url ? { url: f.source.url } : {}), ...(f.source.reporter ? { reporter: f.source.reporter } : {}) }].slice(-20);
       }
       this.stamp(target, `the intake merged ${w.id} into it: the same bug reported again (${twin.why})${f.source.url ? `, ${f.source.url}` : ''}`);
+      this.raiseForFailure(target, failure);
       this.store.putWork(target);
       Object.assign(w, { status: 'merged', mergedInto: target.id });
       this.stamp(w, `filed by the intake and merged into ${target.id} (${twin.why})`);
@@ -7617,6 +7664,8 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
             (x) => ownApprovalCount(x.triage?.class) === ownApprovalCount(f.triage.class),
           );
     w.approval = why ? { state: 'pending', why } : { state: 'approved', by: f.approved && f.approvedBy ? asRequester(f.approvedBy) : 'auto', at: now.toISOString() };
+    // Urgent approves nothing (w4810): the approval above is decided as for any other request.
+    if (failure && w.priority !== asked) this.stamp(w, failureLine(failure, asked));
     this.stamp(w, `filed by the intake (${sourceTag(w)})${why ? `; waits for a person: ${why}` : ''}`);
     this.store.putWork(w);
     this.store.dropWork(pruneIds(this.store.work.values(), undefined, this.now().getTime()));
@@ -8119,6 +8168,8 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     if (target) {
       const why = highOpen ? highOpen.why : `inside its scope (${scopeLine(target.scope!)})`;
       this.stamp(target, `FFBox dev request ${f.ref} from ${f.operator} (${person.displayName}) joins it (${why}): ${where}, "${clip(title, 100)}"${files}`);
+      // The same work as a desync, crash or hang dev request is urgent (w4810); a broad request it only falls inside is not raised.
+      if (highOpen) this.raiseForFailure(target, requestFailure(title, f.brief, f.keys));
       if (c.threadId) {
         if (target.source && target.source.threadId !== c.threadId && !target.source.alsoThreads?.some((x) => x.threadId === c.threadId)) {
           target.source.alsoThreads = [...(target.source.alsoThreads ?? []), { threadId: c.threadId, ...(c.url ? { url: c.url } : {}), reporter: f.operator }].slice(-20);
@@ -8190,11 +8241,13 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       ...(f.transcript?.trim() ? ['', 'The conversation so far, as FFBox recorded it (newest last):', quoteUntrusted(f.transcript, 2500)] : []),
     ].join('\n');
     const id = `w${++this.store.workSeq}`;
+    // Desyncs, crashes and hangs are urgent (w4810): a report key FFBox sent, else the operator's own title and text.
+    const failure = requestFailure(title, f.brief, f.keys);
     const w: WorkItem = {
       id,
       title,
       brief: clip(brief, 8000),
-      priority: 'normal',
+      priority: failurePriority('normal', failure),
       keys,
       requestedBy: person,
       requesters: [person],
@@ -8216,6 +8269,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     // A finished request it may repeat is related work (w2844): the worker reads what it found or triaged.
     const related = candidates.filter((x) => x.w.status === 'done').map((x) => x.w.id);
     if (related.length) w.relatedIds = related;
+    if (failure) this.stamp(w, failureLine(failure, 'normal'));
     this.stamp(w, `filed from FFBox dev request ${f.ref} for ${person.displayName} (operator ${f.operator}${f.force ? ', filed anyway at their word' : ''}): ${where}`);
     if (candidates.length) {
       this.stamp(w, `Possibly the same as ${candidates.map((x) => `${x.w.id} (${x.score}, ${x.why})`).join(', ')}: the dev request's ledger check found them. Merge it into one of them if so.`);

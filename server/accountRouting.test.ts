@@ -669,3 +669,40 @@ test("a live idle orchestrator moves to its person's picked pool at its next mes
   agents.setPool(payer, other, 'Ben');
   assert.match(move(dispatcher) ?? '', new RegExp(`${payer}'s pool setting names ${other}'s now`));
 });
+
+// w4810 (lothsahn: "Desyncs and crashes and hangs should be urgent. Update the rules").
+test('w4810: FFBox dev requests are urgent for a desync, crash or hang (a report key, else the operator\'s words); a stutter is not', (t) => {
+  const { o, store } = setup(t);
+  const conv = (id: string) => ({ id, source: 'discord', title: 'x', createdAt: new Date().toISOString(), threadId: `t${id}` });
+  const dev = (ref: string, title: string, brief: string, keys: string[] = []) => {
+    const r = o.fileDevRequest({ ref, person: BEN, operator: 'ben', conversation: conv(ref), title, brief, keys, attachments: [], lookbackDays: 14 });
+    assert.equal(r.outcome, 'filed', title);
+    return store.work.get(r.workId)!;
+  };
+  assert.equal(dev('d1', 'Game crashes when a drone docks', 'Since 1.0.0.9.').priority, 'urgent');
+  assert.equal(dev('d2', 'Loading screen never ends', 'The game hangs and stops responding after the load bar fills.').priority, 'urgent');
+  assert.equal(dev('d3', 'Clients fork in big co-op games', 'The client desyncs after twenty minutes.').priority, 'urgent');
+  assert.equal(dev('d4', 'Look at this report', 'See the attached report.', ['report:20261105T101010Z-hang-0abc123def']).priority, 'urgent', 'a hang report key FFBox sent');
+  const stutter = dev('d5', 'Stutter when panning over big bases', 'Frame drops every few seconds.');
+  assert.equal(stutter.priority, 'normal', 'a performance hitch is not a hang');
+  assert.match(store.work.get('w1')!.log.join('\n'), /priority normal → urgent: a crash/);
+});
+
+test('w4810: request_work files a game desync, crash or hang urgent unless asked higher; a hitch, another repo or a plain task keeps what was asked', async (t) => {
+  const { call, human, store } = setup(t);
+  const ben = human(BEN).info;
+  const file = async (args: Record<string, unknown>) => {
+    const r = await call(ben, 'request_work', args);
+    assert.ok(!r.isError, r.text);
+    return [...store.work.values()].at(-1)!;
+  };
+  const crash = await file({ title: 'Fix the crash when a ship docks', brief: 'Player.log attached.' });
+  assert.equal(crash.priority, 'urgent');
+  assert.match(crash.log.join('\n'), /priority normal → urgent: a crash/);
+  assert.equal((await file({ title: 'Investigate the hang on loading big saves', brief: 'x' })).priority, 'urgent');
+  assert.equal((await file({ title: 'Two-player check', brief: 'The client desyncs after a rejoin; find why.' })).priority, 'urgent', 'the brief\'s opening counts');
+  assert.equal((await file({ title: 'Crash on dock, again', brief: 'x', priority: 'frantic' })).priority, 'frantic', 'a higher priority is kept');
+  assert.equal((await file({ title: 'Hitch when autosaving a big base', brief: 'The game hangs for half a second.' })).priority, 'normal', 'a hitch is not a hang');
+  assert.equal((await file({ title: 'Portal crashes on a bad config', brief: 'x', repo: 'Final-Factory/ff-factory' })).priority, 'normal', 'not a game request');
+  assert.equal((await file({ title: 'Tidy the research panel', brief: 'x', priority: 'low' })).priority, 'low');
+});

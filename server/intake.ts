@@ -65,7 +65,7 @@ import {
   type DiscordMessage,
   type IntakeSettings,
 } from './intakeRules.ts';
-import { brokenNightDraft, mentionsScenario, NIGHT_BROKEN, NIGHT_REPORT_REF, nightlyReportBody, nightlyAgainLine, nightlyDraft, nightlyKey, nightlyReviewDraft, nightlyRunDraft, nightlySkip, nightStatus, parseNightlyJobs, type NightlyReport, type NightlyResult } from './nightlyRules.ts';
+import { brokenNightDraft, mentionsScenario, NIGHT_BROKEN, NIGHT_REPORT_REF, nightlyReportBody, nightlyAgainLine, nightlyDraft, nightlyFailure, nightlyKey, nightlyReviewDraft, nightlyRunDraft, nightlySkip, nightStatus, parseNightlyJobs, type NightlyReport, type NightlyResult } from './nightlyRules.ts';
 import { NIGHTLY_SENTRY, unattributedPerson } from './vault.ts';
 import { nextDaily } from './timers.ts';
 import type { NightlyReviewSettings, NightlyRunSettings } from './intakeRules.ts';
@@ -1308,7 +1308,8 @@ export class IntakeManager {
       const open = work().filter((w) => isOpen(w) && !w.mergedInto);
       const target = open.find((w) => w.keys.includes(key)) ?? open.find((w) => w.source?.kind !== 'nightly' && mentionsScenario(`${w.title}\n${w.brief}`, r.scenario));
       if (target) {
-        const added = this.d.orchestrators.attachNightly(target.id, { key, line: nightlyAgainLine(rep, r), night: rep.date, scenario: r.scenario, urgent: r.release?.shipped === 'yes' });
+        const failure = nightlyFailure(r);
+        const added = this.d.orchestrators.attachNightly(target.id, { key, line: nightlyAgainLine(rep, r), night: rep.date, scenario: r.scenario, urgent: r.release?.shipped === 'yes' || !!failure, ...(failure ? { failure } : {}) });
         if (added) this.record({ source: 'nightly', action: 'repeat', title: `${r.scenario} failed again (${rep.date})`, workId: target.id, why: `added to ${target.id}, open on it` });
         out.push({ scenario: r.scenario, action: 'attached', workId: target.id, why: added ? `added to ${target.id}, open on it` : `already on ${target.id} for ${rep.date}` });
         continue;
