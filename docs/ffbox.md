@@ -240,6 +240,30 @@ connector reported (`ProviderManager.conversations`), so an older conversation s
 FFBox-redacted, cleaned again here and headed as untrusted players' data; a link that is not a Discord thread link is never
 passed on. The conversations view now also names each conversation's Discord thread id (`thread <id>`).
 
+### Every open thread and its opening post, read from FF Factory (w4776)
+
+lothsahn, 2026-11-19: "Yes, file the FFBox change so workers can see every open thread and its opening post". The thread
+audits (w4532, w4662, w4664) stalled on three gaps: `open_bug_threads` cut FFBox's `open_threads` answer at 58 KB (117
+threads), `what: "threads"` reads `bug_threads`, which holds `bug_report` conversations only (nothing of
+#feedback_and_suggestions), and neither carries the player's words. **A worker lists every open thread itself**:
+
+- `list_ffbox_files {what: "open_threads"}` answers page one (20 threads, newest first) of every unarchived thread of
+  #bug_reports, dev_bug_reports (when FFBox watches it) and #feedback_and_suggestions, with the open count per channel and
+  in all. Each thread: created time, channel, jump URL, title, tags by name, message count, FFBox conversation id, state,
+  verdict and PR, then its **opening post**: author's display name, time, attached file names and text (2000 characters).
+- `offset` and `limit` (up to 50) page it: the answer ends `More: offset N gives the next page.` until the last one.
+  `channel` keeps one channel (its alias as the list shows it). `thread` with a thread id gives that thread alone with up
+  to 4000 characters of its post (archived too, if it is in one of those channels).
+- A post FFBox has not fetched yet says so (`not fetched yet`): a page fetches its own for 6 s, then FFBox fetches the
+  rest in the background, so asking again a minute later has them. Later messages and files:
+  `fetch_discord_thread_files` with the thread's URL.
+
+It reads FFBox's read-only `open_thread_posts` query (`docs/ffbox-connector-contract.md`; FFBox's `scripts/ffwatch.py`
+`fff_query_open_thread_posts`), which reads Discord with GETs only (`ffdiscord threads`, `channel`, `read`) and caches what
+it read (posts 6 hours, the open list a minute, tag names an hour), so paging through every thread costs Discord about two
+calls per thread once in 6 hours (`server/ffboxOpenThreads.ts`). Titles and posts are redacted on FFBox, cleaned again
+here and headed as untrusted players' data; a link that is not a Discord thread link is never passed on.
+
 ### Release symbols and diagnosis files, read from FF Factory (w1542)
 
 lothsahn, 2026-10-19: "Please make it so that you can request PDB's and diagnostic information from ffbox over the ffbox
