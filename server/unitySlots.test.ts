@@ -11,6 +11,10 @@ import {
   arbiterFile,
   assess,
   callerGone,
+  CALLER_WATCH_MS,
+  JOB_ID,
+  jobExitFile,
+  jobFile,
   countsLine,
   denyFile,
   gamePlayers,
@@ -617,6 +621,68 @@ test('w1874: a run whose caller is killed ends its command (the biscuit wrapper 
     if (fs.existsSync(jobPid)) {
       const job = Number(fs.readFileSync(jobPid, 'utf8'));
       if (job && alive(job)) process.kill(job, 'SIGKILL');
+    }
+  }
+});
+
+test('w4740: run --detach survives its task being killed while it queues; wait gives the output and exit code (real processes)', { timeout: 60_000, skip: process.platform === 'win32' ? 'process groups: the Linux and Mac case' : false }, async (t) => {
+  const { dir, slots } = arbiter(t);
+  await slots.tick();
+  const script = path.join(import.meta.dirname, '..', 'machine', 'unitySlots.ts');
+  const log = path.join(dir, 'run.log');
+  const env: NodeJS.ProcessEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('FF_')));
+  env.FF_BENCH_TICKETS = 'off';
+  const cli = (args: string[]) =>
+    new Promise<{ code: number | null; out: string }>((resolve) => {
+      const c = spawn(process.execPath, [script, ...args], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+      let out = '';
+      c.stdout.on('data', (b) => (out += b));
+      c.stderr.on('data', (b) => (out += b));
+      c.on('exit', (code) => resolve({ code, out }));
+    });
+  // The machine's one slot is held (the queue the build waited in on LothDesktop), and freed later in the test.
+  const holder = await acquire(client(dir, process.pid), { count: 1, label: 'an editor', holder: 'sandbox:other', pollMs: 10 });
+  assert.ok(holder.id);
+  const alive = (pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  // The background task: a shell in a process group of its own (Claude Code's task), which starts the detached run.
+  const body = `console.log('built');process.exit(3)`;
+  const taskCmd = `"${process.execPath}" "${script}" run --detach --log "${log}" --dir "${dir}" --label w4740 -- "${process.execPath}" -e "${body}" > "${dir}/id.txt"; sleep 60`;
+  const task = spawn('sh', ['-c', taskCmd], { env, stdio: 'ignore', detached: true });
+  try {
+    const end = Date.now() + 20_000;
+    while (!(fs.existsSync(path.join(dir, 'id.txt')) && fs.readFileSync(path.join(dir, 'id.txt'), 'utf8').trim())) {
+      if (Date.now() > end) assert.fail('run --detach printed no job id');
+      await settle(50);
+    }
+    const id = fs.readFileSync(path.join(dir, 'id.txt'), 'utf8').trim();
+    assert.match(id, JOB_ID);
+    const job = JSON.parse(fs.readFileSync(jobFile(dir, id), 'utf8'));
+    await settle(500);
+    assert.ok(alive(job.pid), 'the job waits in the queue');
+    process.kill(-task.pid!, 'SIGKILL'); // the 2 h limit: the task's whole group, hard
+    await settle(2 * CALLER_WATCH_MS + 500);
+    assert.ok(alive(job.pid), 'the queued run outlives its task');
+    assert.ok(!fs.existsSync(jobExitFile(dir, id)), 'and has not run yet');
+    holder.stop(); // the slot frees: the run goes
+    const first = await cli(['wait', id, '--dir', dir]);
+    assert.equal(first.code, 3, first.out);
+    assert.match(first.out, /built/);
+    // A wait run again (its own task cut off) gives the same answer.
+    assert.equal((await cli(['wait', id, '--dir', dir])).code, 3);
+    assert.equal((await cli(['wait', 'zzzzzzzz-j-000000', '--dir', dir])).code !== 0, true, 'an unknown job is an error');
+  } finally {
+    holder.stop();
+    try {
+      process.kill(-task.pid!, 'SIGKILL');
+    } catch {
+      /* gone */
     }
   }
 });

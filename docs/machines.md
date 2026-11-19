@@ -1295,6 +1295,11 @@ and w1891 waited behind it there, and w1789 waited on LothDesktop behind shared 
   NVIDIA GeForce RTX 4070 Laptop GPU (the default) and index **1** the integrated AMD Radeon(TM) 610M, the Steam Deck-class
   GPU: `args: ["-force-device-index", "1"]`. Each leg's player.log `Direct3D:` block, `Renderer:` line, names the GPU it ran on.
   Windows can reorder adapters (a per-app graphics preference), so a report checks that line rather than trusting the index.
+- **A switch's value, and files the player reads** (w4740, after w4591's refused call): a switch may carry its value joined
+  by `=` (`-ffFeatures=station-multiselect`) or as the next argument. A value is a word, a number, or a path to a file in
+  the build folder, given from that folder (`-ffDeckTour tour.json`). The player runs from a copy of the build folder on the
+  timing machine (`timedRunner.ts`, spawn's cwd), so an absolute path, a drive or a `..` step is refused and the answer says
+  how to put the file there.
 - **Not yet**: the game repo's bench_queue.py does not read the verdict itself (the guard sees only commands it can parse).
 
 **A play-only timing machine** (w1946, lothsahn, 2026-10-23: "I have a desktop with 16GB ram. Windows takes 12G so there's

@@ -123,6 +123,8 @@ hung editor always comes back). Every other launch takes a slot through a mailbo
 
 ```sh
 unity-slot run [--count N] [--label "<what>"] [--project <path>]... [--timeout <min>] -- <command> [args...]
+unity-slot run --detach [--log <file>] ... -- <command> [args...]   # prints a job id, returns at once
+unity-slot wait <id>                                                # follows a detached run, exits with its code
 unity-slot acquire [--count N] [--label ...] [--ttl <min>]   # hold in the background, prints the id
 unity-slot release <id>
 unity-slot status
@@ -142,6 +144,19 @@ So `nohup unity-slot run … &` from a shell that then exits is not a way to kee
 caller. A run also records its agent's session (`FF_SESSION_ID`) in its request file, which tells the reaper whose build
 it is (below). Tests: `server/unitySlots.test.ts` (`callerGone`, a real wrapper whose caller is SIGKILLed ends its command,
 `runsIn`).
+
+**A long queue: `run --detach`** (w4740). A worker's background task runs at most 2 h (Claude Code's ceiling for
+`run_in_background`), and a run's time in the slot queue counts toward it: on LothDesktop, 2026-11-17, w4488's player
+build queued 1 h 50 min and its task was killed 10 min into the build (r290). `run --detach` starts the same `run` as a
+process of its own (`detached`: its own session and process group, so a kill of the task's group misses it, and no caller
+watch), its output appended to `--log` (default `$TMPDIR/unity-slot-<id>.log`), and returns at once with the job id.
+The job writes `jobs/job-<id>.json` (pid, label, log, session) and, when it ends, `jobs/job-<id>.exit.json` (the
+command's exit code) in the slot mailbox. `unity-slot wait <id>` shows the end of the log, follows it, and exits with
+that code (1 when the job is gone without one); it is run again, in a new background task, if its own was cut off.
+The job keeps the worker's environment (`FF_SESSION_ID`), so `ff-leftovers end` and the session sweep end it like any
+process of the worker's; a bench ticket it holds still wants the worker busy (a background `wait`, or a turn: w3715).
+Test: `server/unitySlots.test.ts` ("w4740: run --detach survives its task being killed while it queues": a real queue,
+the task's process group SIGKILLed, then `wait` returns the command's output and exit code twice).
 
 **The queue** (`assess`):
 

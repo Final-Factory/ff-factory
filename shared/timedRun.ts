@@ -149,14 +149,24 @@ const PLACEMENT_SWITCH = /^-ffBenchStartTile$/i;
 /** A number or a comma list of them, negatives included (a tile "-1,-228"), as the value after a switch. */
 const NUMBERS = /^-?\d+(\.\d+)?(,-?\d+(\.\d+)?){0,3}$/;
 /**
+ * w4740: a file of the build folder, by its path from that folder (`tour.json`, `tours/a.json`): the player starts in its
+ * own folder on the timing machine (timedRunner.ts, spawn's cwd), so only such a path reaches the same file there.
+ */
+const RELATIVE_PATH = /^(?![\\/])(?![A-Za-z]:)[A-Za-z0-9_.+-]+([\\/][A-Za-z0-9_.+-]+){0,7}$/;
+/** w4740: a path that names a file outside the build folder: absolute, a drive, or a `..` step. */
+const OUTSIDE_PATH = /^([\\/]|[A-Za-z]:)|(^|[\\/])\.\.([\\/]|$)/;
+const valueOk = (v: string) => !OUTSIDE_PATH.test(v) && ((VALUE.test(v) && !v.startsWith('-')) || NUMBERS.test(v) || RELATIVE_PATH.test(v));
+const PATH_HELP = 'a timed run plays a copy of the build folder on the timing machine, from that folder: put the file in the build folder and pass its path from there (e.g. -ffDeckTour tour.json)';
+/**
  * Unity's own player switches a variant may pass, each with the value it takes (w2456): -force-device-index picks the GPU
  * (Unity's adapter index, 0 = the first; w2320 times LothLaptop's integrated Radeon, Steam Deck class, beside its RTX 4070).
  */
 const UNITY_SWITCHES: Record<string, RegExp> = { '-force-device-index': /^\d{1,2}$/ };
 
 /**
- * Why a variant's own arguments are refused, or undefined: -ff switches, each optionally followed by one plain value, and
- * the Unity switches of UNITY_SWITCHES with their value.
+ * Why a variant's own arguments are refused, or undefined: -ff switches, each optionally followed by one plain value (or
+ * joined to it by `=`), a value being a word, a number or a path inside the build folder, and the Unity switches of
+ * UNITY_SWITCHES with their value.
  */
 export function timedArgsProblem(args: unknown): string | undefined {
   if (args === undefined) return undefined;
@@ -171,11 +181,21 @@ export function timedArgsProblem(args: unknown): string | undefined {
       i++;
       continue;
     }
-    if (SWITCH.test(a)) {
-      if (OWN_SWITCH.test(a) && !PLACEMENT_SWITCH.test(a)) return `args: ${a} is set by the run itself (the save, the commands, the quit); only other -ff switches`;
+    // w4740 (w4591): -ffFeatures=station-multiselect, the switch and its value in one argument, as the game also reads it.
+    const eq = a.indexOf('=');
+    const name = eq > 0 ? a.slice(0, eq) : a;
+    if (SWITCH.test(name)) {
+      if (OWN_SWITCH.test(name) && !PLACEMENT_SWITCH.test(name)) return `args: ${name} is set by the run itself (the save, the commands, the quit); only other -ff switches`;
+      if (eq > 0) {
+        const v = a.slice(eq + 1);
+        if (OUTSIDE_PATH.test(v)) return `args: "${a.slice(0, 40)}" names a file outside the build folder; ${PATH_HELP}`;
+        if (!valueOk(v)) return `args: "${a.slice(0, 40)}": its value is not a plain value, a number or a path in the build folder`;
+      }
       continue;
     }
-    if (i > 0 && SWITCH.test(String(args[i - 1])) && ((VALUE.test(a) && !a.startsWith('-')) || NUMBERS.test(a))) continue;
+    const after = i > 0 && SWITCH.test(String(args[i - 1]));
+    if (after && valueOk(a)) continue;
+    if (after && OUTSIDE_PATH.test(a)) return `args: "${a.slice(0, 40)}" names a file outside the build folder; ${PATH_HELP}`;
     return `args: "${a.slice(0, 40)}" is not a -ff switch or a plain value after one (a timed run takes the game's own -ff switches, w1946, and -force-device-index N, w2456)`;
   }
   return undefined;
