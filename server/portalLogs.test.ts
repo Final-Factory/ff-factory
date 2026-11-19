@@ -330,3 +330,12 @@ test('w4729: path_health shows the host watch status file whole, the last repair
   assert.match(await readPortalLogs(deps(dataDir), { source: 'path_health' }), /is not there/);
   assert.match(await readPortalLogs(d, {}), /- path_health: /);
 });
+
+test('w4777: path_health shows which ff-factory commit the host watch was installed from and when', async (t) => {
+  const dataDir = tmpData(t);
+  const file = JSON.stringify({ schema: 1, updatedAt: '2026-11-19T10:01:00Z', installed: { commit: '0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c', at: '2026-11-19T10:00:00Z' }, layers: [] });
+  const r = await readPortalLogs({ ...deps(dataDir), pathHealth: () => file }, { source: 'path_health' });
+  assert.match(body(r), /"commit": "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"/);
+  assert.match(body(r), /"at": "2026-11-19T10:00:00Z"/);
+  assert.match(await readPortalLogs({ ...deps(dataDir), pathHealth: () => file }, {}), /- path_health: .*installed: commit, at/);
+});

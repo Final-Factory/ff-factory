@@ -1,6 +1,10 @@
 {
   "dns": "fff.example-tailnet.ts.net",
   "host": "ffbox",
+  "installed": {
+    "at": "2026-10-07T18:30:00Z",
+    "commit": "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+  },
   "layers": [
     {
       "checkedAt": "2026-10-07T18:30:00Z",

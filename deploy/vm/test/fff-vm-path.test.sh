@@ -243,6 +243,8 @@ export FAKE_DIR=$T/fake FIX FFF_VM_LIB=$ROOT/deploy/vm/host FFF_VM_CONF=$T/fff-v
 export PL_DRYRUN_MARKER=$T/guest-dry-run.json
 export PATH=$T/bin:$PATH
 HEALTH=$T/guest/run/fff/path-health.json
+INSTALLED=$T/installed.json
+INSTALLED_COMMIT=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c
 FAKE_REPAIR_FIXES=0
 export FAKE_REPAIR_FIXES
 echo "https://ntfy.example.test/topic-secret-3f9a" >"$T/ntfy-url"
@@ -257,7 +259,9 @@ scen() {
   for s in "$@"; do cp "$FIX/$s"/* "$FAKE_DIR/live/"; done
   : >"$FAKE_DIR/calls"
   : >"$FAKE_DIR/alerts"
-  printf 'VM_DISK_MODE=qcow2\nVM_IMAGE_DIR=%s/images\nNTFY_URL_FILE=%s/ntfy-url\nPW_HEALTH_FILE=%s\n' "$T" "$T" "$HEALTH" >"$FFF_VM_CONF"
+  printf 'VM_DISK_MODE=qcow2\nVM_IMAGE_DIR=%s/images\nNTFY_URL_FILE=%s/ntfy-url\nPW_HEALTH_FILE=%s\nPW_INSTALLED_FILE=%s\n' "$T" "$T" "$HEALTH" "$INSTALLED" >"$FFF_VM_CONF"
+  # what install_host_scripts (lib.sh) leaves beside the installed scripts (w4777)
+  printf '{"commit": "%s", "at": "2026-10-07T18:00:00Z", "pathwatchSha256": "%s"}\n' "$INSTALLED_COMMIT" "$(printf 'x' | sha256sum | cut -d' ' -f1)" >"$INSTALLED"
   FAKE_REPAIR_FIXES=0
   export FAKE_REPAIR_FIXES
   : >"$T/out"
@@ -305,6 +309,24 @@ said "path L9 end to end: ok: https://fff.example-tailnet.ts.net/api/health answ
 no_vm_reset
 check_recording status-file.healthy.json
 ok "healthy: every layer passes, one journal line each, the status file says ok, no alert, no repair"
+
+# ---------------------------------------------------------------- which install runs (w4777)
+# Every status file carries the ff-factory commit the watch was installed from and when, from installed.json, so the version
+# shows right after an install; an install from before w4777 left none, and the file says so instead of leaving them out.
+[ "$(banner .installed.commit)" = "$INSTALLED_COMMIT" ] || fail "installed: the status file's commit is '$(banner .installed.commit)', want $INSTALLED_COMMIT"
+[ "$(banner .installed.at)" = 2026-10-07T18:00:00Z ] || fail "installed: the status file's install time is '$(banner .installed.at)'"
+[ "$(banner '.installed | keys | join(",")')" = at,commit ] || fail "installed: the status file's installed is $(jq -c .installed "$HEALTH")"
+cp "$INSTALLED" "$T/installed.keep"
+rm -f "$INSTALLED"
+pass
+banner .installed.commit | matches '^unknown: no readable installed.json' || fail "installed: no installed.json gives commit '$(banner .installed.commit)'"
+[ "$(banner .installed.at)" = unknown ] || fail "installed: no installed.json gives at '$(banner .installed.at)'"
+printf 'not json' >"$INSTALLED"
+pass
+banner .installed.commit | matches '^unknown' || fail "installed: an unreadable installed.json gives commit '$(banner .installed.commit)'"
+[ "$(banner .ok)" = true ] || fail "installed: a missing or broken installed.json changed the verdict"
+mv -f "$T/installed.keep" "$INSTALLED"
+ok "installed: every status file carries the commit and install time from installed.json, and says unknown without one"
 
 # ---------------------------------------------------------------- one login per pass (w2311)
 # A healthy pass logs in twice: once for every read (one sudo), once to hand the portal its status. Each read runs once.

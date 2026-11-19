@@ -62,7 +62,8 @@ write_file() {
 # installer's own vault sync runs vault.sh from the checkout, and `sudo fff-vm vault-sync` runs the installed copy, so a copy
 # left behind by --guest-only read the pool files (people/<id>/claude-tokens/) as gone and removed their entries (w744,
 # after w739). The files belong to HOST_SCRIPTS_OWNER (default root:root; the tests set their own). Prints the names it
-# changed, one line.
+# changed, one line. It also writes LIBDIR/installed.json (installed_record), which fff-vm watch copies into every status file
+# it hands the portal, so anyone can tell which version runs right after an install (w4777).
 install_host_scripts() {
   local src=$1 lib=${2:-/usr/local/lib/fff-vm} sbin=${3:-/usr/local/sbin} owner=${HOST_SCRIPTS_OWNER:-root:root} f changed=""
   run_cmd install -d -m 0755 "$lib" "$sbin"
@@ -70,8 +71,27 @@ install_host_scripts() {
     [ -z "$(write_file "$lib/$f" 0644 "$owner" <"$src/$f")" ] || changed+=" $f"
   done
   [ -z "$(write_file "$sbin/fff-vm" 0755 "$owner" <"$src/fff-vm")" ] || changed+=" fff-vm"
+  installed_record "$src" | write_file "$lib/installed.json" 0644 "$owner" >/dev/null
   [ -z "$changed" ] || log "host scripts updated:$changed (in $lib and $sbin)"
   return 0
+}
+
+# installed_record SRC: the JSON of installed.json for the checkout folder SRC: commit (the ff-factory commit, git rev-parse
+# HEAD, "-dirty" after it when deploy/vm/host has local changes; "unknown: no git" or "unknown: not a git checkout" when it
+# cannot be read), at (the install time, UTC) and pathwatchSha256 (the installed pathwatch.sh's sha256, which tells two
+# versions apart even without a commit). safe.directory: install.sh runs as root in a checkout a person owns, and git refuses
+# such a folder without it. No secrets: a commit id, a time and a hash.
+installed_record() {
+  local src=$1 commit sha
+  if ! command -v git >/dev/null 2>&1; then
+    commit="unknown: no git"
+  elif commit=$(git -c safe.directory='*' -C "$src" rev-parse HEAD 2>/dev/null) && [ -n "$commit" ]; then
+    [ -z "$(git -c safe.directory='*' -C "$src" status --porcelain -- . 2>/dev/null)" ] || commit+="-dirty"
+  else
+    commit="unknown: not a git checkout"
+  fi
+  sha=$(sha256sum "$src/pathwatch.sh" 2>/dev/null | cut -d' ' -f1) || sha=""
+  printf '{"commit": "%s", "at": "%s", "pathwatchSha256": "%s"}\n' "$commit" "$(date -u +%FT%TZ)" "$sha"
 }
 
 # load_conf FILE: the operator's settings over the defaults in fff-vm.conf.example.

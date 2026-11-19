@@ -1855,6 +1855,12 @@ export interface PathHealth {
   warnings: PathLayer[];
   /** Set by the portal when the watchdog has not reported for this many minutes: what is shown may be old. */
   silentMinutes?: number;
+  /**
+   * What the running watch was installed from (install.sh's installed.json, w4777): the ff-factory commit ("-dirty" after a
+   * checkout with local changes, "unknown: ..." when it could not be read) and the install time (UTC). Absent from a watch
+   * installed before w4777.
+   */
+  installed?: { commit: string; at: string };
 }
 
 /** One critical systemd unit the VM's watchdog keeps up (fff-health, every 30 s). */
