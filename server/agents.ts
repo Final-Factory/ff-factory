@@ -1063,7 +1063,8 @@ export class Agents {
       },
       // w2045: the merge-on-green pilot's arm, by request (server/mergeOnGreen.ts); the setting is read live.
       mergeOnGreenPilot: (id) => inMergeOnGreenPilot(id, this.cfg),
-      deploySha: (id) => (id ? this.daemonSha?.(id) : appVersion().sha),
+      // w4672: an offline machine's gate starts from the commit its daemon ran when last connected.
+      deploySha: (id) => (id ? (this.daemonSha?.(id) ?? this.lastDaemonSha?.(id)) : appVersion().sha),
       cancelWake: (id) => this.cancelWake(id),
       pendingWake: (id) => this.waker.pending(id),
       restoreWake: (id, note, resumeOf) => {
@@ -8109,6 +8110,8 @@ ${w.repo ?? ''}
   blockerWatch?: { kick(): void };
   /** The commit a machine's daemon runs, for a deploy blocker on its update (set by the server). */
   daemonSha?: (machineId: string) => string | undefined;
+  /** The commit a machine's daemon ran when last connected, offline too (w4672; set by the server). */
+  lastDaemonSha?: (machineId: string) => string | undefined;
 
   /** A session's transcript in the portal, as a link a person can open (the portal's public address when it has one). */
   sessionLink(sessionId: string): string {

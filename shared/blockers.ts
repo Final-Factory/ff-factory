@@ -359,9 +359,13 @@ export function blockerVerdict(b: WorkBlocker, f: BlockerFacts, waiter?: string)
       return { state: 'open', why: `${name} is ${t.status === 'blocked' ? 'itself blocked' : t.status}` };
     }
     case 'deploy': {
+      const sameCommit = (a: string, c: string) => { const n = Math.min(a.length, c.length); return n >= 7 && a.slice(0, n).toLowerCase() === c.slice(0, n).toLowerCase(); };
       const now = b.ref ? f.daemonSha?.(b.ref) : f.portalSha;
       const where = b.ref ? `${b.ref}'s daemon` : 'the portal';
       if (now && b.sha && now !== b.sha) return { state: 'clear', why: `${where} runs ${now.slice(0, 12)} now (${b.sha.slice(0, 12)} when it was blocked)` };
+      // w4672: a machine's gate set with no commit to start from (it was offline, before the portal kept the last one) clears
+      // once its daemon runs the portal's own commit: w4672's gate on LothLaptop stayed Blocked after it updated twice.
+      if (now && !b.sha && b.ref && f.portalSha && sameCommit(now, f.portalSha)) return { state: 'clear', why: `${where} runs ${now.slice(0, 12)} now, the portal's own commit` };
       return late(`${where} still runs ${(now ?? b.sha ?? 'an unknown commit').slice(0, 12)}`);
     }
     case 'machine': {

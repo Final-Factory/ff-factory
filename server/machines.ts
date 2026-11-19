@@ -1266,6 +1266,16 @@ export class MachineManager {
     return h && this.isOnline(id) ? protocolProblem(h) : undefined;
   }
 
+  /**
+   * The commit a machine's daemon runs, or ran when last connected (its record's info.daemon): what a deploy gate on its
+   * update starts from when it is set while the machine is offline (w4672: the hello is dropped at a disconnect, so a gate
+   * set then had no commit to compare with and never cleared).
+   */
+  lastDaemonCommit(id: string): string | undefined {
+    const d = (this.daemonCommit(id) ?? this.store.machines.get(id)?.info?.daemon)?.trim().toLowerCase();
+    return d && /^[0-9a-f]{7,40}$/.test(d) ? d : undefined;
+  }
+
   /** The FF Factory commit a connected daemon runs (its hello), or undefined when it is offline or did not say (w1166). */
   daemonCommit(id: string): string | undefined {
     const d = this.hellos.get(id)?.daemon?.trim().toLowerCase();
