@@ -69,7 +69,7 @@ test('w2626: sdkToolsNow gives every catalog tool exactly as a client of the ser
   const real = await listed(server(names.map((n) => [n, SHAPES[n], `${n}: what it does.`])));
   assert.equal(now.size, names.length);
   for (const [name, t] of real) assert.deepEqual(now.get(name), t, name);
-  assert.deepEqual(whatEnum(now.get('mcp__machine__list_ffbox_files')), ['symbols', 'reports', 'diagnosis', 'threads']);
+  assert.deepEqual(whatEnum(now.get('mcp__machine__list_ffbox_files')), ['symbols', 'reports', 'diagnosis', 'threads', 'open_threads']);
   // what is not an in-process server, or cannot be read, adds nothing
   assert.equal(sdkToolsNow({ unity: { type: 'stdio', command: 'x' }, odd: { type: 'sdk', name: 'odd' } as never }).size, 0);
   assert.equal(sdkToolsNow(undefined).size, 0);
@@ -111,7 +111,7 @@ test('w2626: a record of a changed schema or description is dropped in place at 
     assert.match(out[1], /^\{.*\}$/, 'the padding sits inside the JSON');
 
     // the next ToolSearch resolves against the tool as it is now
-    assert.deepEqual(whatEnum(toolSearch(file, 'mcp__machine__list_ffbox_files', now)), ['symbols', 'reports', 'diagnosis', 'threads']);
+    assert.deepEqual(whatEnum(toolSearch(file, 'mcp__machine__list_ffbox_files', now)), ['symbols', 'reports', 'diagnosis', 'threads', 'open_threads']);
     assert.equal(toolSearch(file, 'mcp__machine__wake_me', now)?.description, DESC);
     // a second pass finds nothing to do and leaves the file as it is
     assert.deepEqual(refreshKeptTools(file, now), []);
@@ -205,7 +205,7 @@ test("w2626: a worker's resumed conversation, in a new process with a tool that 
   s.send('list the threads');
   for (let i = 0; i < 100 && seen === undefined; i++) await new Promise((r) => setTimeout(r, 20));
   assert.ok(started, 'the process started');
-  assert.deepEqual(seen, ['symbols', 'reports', 'diagnosis', 'threads']);
+  assert.deepEqual(seen, ['symbols', 'reports', 'diagnosis', 'threads', 'open_threads']);
   const note = store.readTranscript('sess-2626').find((e) => e.kind === 'system' && /w2626/.test(e.text));
   assert.ok(note, 'the session says which schemas it refreshed');
 });
