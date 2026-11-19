@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_BUILD, DEFAULT_LIVE, EVEN_MARGIN, SPILL_AT_PCT, loadOf, loadText, spillOf, buildLine, RAM_BUSY_PCT, busyReasons, capacityLines, hasRoom, liveLine, pickComputer, placementHint, preferLine, roomOf, type Computer, type PlacementPrefs } from './placement.ts';
+import { DEFAULT_BUILD, DEFAULT_LIVE, EVEN_MARGIN, SPILL_AT_PCT, loadOf, loadText, spillOf, buildLine, RAM_BUSY_PCT, busyReasons, capacityLines, editorsFull, hasAgentRoom, hasRoom, liveLine, pickComputer, pickTimed, placementHint, preferLine, roomNow, roomOf, type Computer, type PlacementPrefs } from './placement.ts';
 
 /**
  * Where new work goes (w416): spread by room between the computers with sandboxes ("Game work should be spread between
@@ -42,7 +42,8 @@ test('w416: with both idle, placements spread evenly: one each in turn', () => {
 });
 
 test('w416: with different limits (BEAST 6 agents, LothDesktop 5), six placements still split three and three', () => {
-  let cs = [idle('beast', 6), idle('lothdesktop', 5)];
+  // Three editors each (w4775: a computer at its editor limit has no room for game work).
+  let cs: Computer[] = [{ ...idle('beast', 6), maxEditors: 3 }, { ...idle('lothdesktop', 5), maxEditors: 3 }];
   let last: string | undefined;
   const n: Record<string, number> = { beast: 0, lothdesktop: 0 };
   for (let i = 0; i < 6; i++) {
@@ -55,7 +56,7 @@ test('w416: with different limits (BEAST 6 agents, LothDesktop 5), six placement
 });
 
 test('w416: with one busier, the other is picked, and placing on the busier one says so', () => {
-  const beast: Computer = { ...idle('beast', 6), live: 4, midTurn: 3, freeSandboxes: 0, sandboxes: 4, memUsedBytes: 44 * GB, editors: 2 };
+  const beast: Computer = { ...idle('beast', 6), live: 4, midTurn: 3, freeSandboxes: 0, sandboxes: 4, memUsedBytes: 44 * GB, editors: 2, maxEditors: 3 };
   const loth = idle('lothdesktop', 5);
   assert.equal(hasRoom(beast), true, 'busier, not busy');
   assert.ok(roomOf(loth) - roomOf(beast) >= EVEN_MARGIN);
@@ -317,4 +318,41 @@ test('w2054: placement.spillAtPercent moves the threshold; 100 turns the tiers o
   assert.match(lines[0], /^## Capacity \(placement\.prefer first, spilling to the next under 50% load \(placement\.spillAtPercent, w2054\), avoided last/);
   assert.match(lines[1], /^- beast \[preferred #1\]: ROOM \d+%: load 60% \(CPU 60% over the last minute; w2054\); 2 live agents of 6/);
   assert.match(preferLine(cs, undefined, SPILL_PREFS) ?? '', /^Next new game-repo work: lothdesktop \(spilled past beast/);
+});
+
+/**
+ * w4775: a computer at or over its Unity editor limit has no room for game work (lothdesktop at 11:30Z on 2026-11-19:
+ * "Unity editors 4 of 3: OVER LIMIT", RAM 97%, yet w4773 and w4774 were placed there and their editor starts refused at
+ * 11:41Z, while m3 had 0 of 1 editors in use). Agent-only work still goes there; an editor up in a free sandbox is one a
+ * new worker takes without a new slot.
+ */
+const LOTH_FULL: Computer = { id: 'lothdesktop', online: true, live: 4, midTurn: 2, maxAgents: 6, sandboxes: 6, maxSandboxes: 8, freeSandboxes: 2, memUsedBytes: 40 * GB, memTotalBytes: 64 * GB, editors: 4, maxEditors: 3, platform: 'win32' };
+const M3: Computer = { id: 'm3', online: true, live: 0, midTurn: 0, maxAgents: 3, sandboxes: 1, maxSandboxes: 3, freeSandboxes: 1, memUsedBytes: 10 * GB, memTotalBytes: 36 * GB, editors: 0, maxEditors: 1, platform: 'darwin', noTimedRuns: 'no timed runs on m3' };
+
+test('w4775: a computer at or over its editor limit has no room for game work, and still has room for agent-only work', () => {
+  assert.equal(editorsFull(LOTH_FULL), 'Unity editors 4 of 3, over its limit: no editor for new game work');
+  assert.equal(editorsFull({ ...LOTH_FULL, editors: 3 }), 'Unity editors 3 of 3: no editor for new game work');
+  assert.equal(editorsFull({ ...LOTH_FULL, editors: 2 }), undefined);
+  assert.equal(editorsFull({ ...LOTH_FULL, idleEditors: 1 }), undefined, 'an editor up in a free sandbox is taken over, no new slot');
+  assert.equal(editorsFull({ ...LOTH_FULL, maxEditors: undefined }), undefined, 'no limit reported: not judged');
+  assert.ok(busyReasons(LOTH_FULL).includes('Unity editors 4 of 3, over its limit: no editor for new game work'));
+  assert.equal(hasRoom(LOTH_FULL), false);
+  assert.equal(hasAgentRoom(LOTH_FULL), true);
+  const room = roomNow([LOTH_FULL, M3]);
+  assert.deepEqual(room.game, ['m3']);
+  assert.deepEqual(room.agent.sort(), ['lothdesktop', 'm3']);
+});
+
+test('w4775: new game work goes to the computer with a free editor, the next-work line and the capacity block say so', () => {
+  const p = pickComputer([LOTH_FULL, M3], undefined)!;
+  assert.equal(p.pick.id, 'm3');
+  assert.match(preferLine([LOTH_FULL, M3])!, /^Next new game-repo work: m3 /);
+  assert.equal(pickComputer([LOTH_FULL, M3], undefined, {}, 'agent') !== undefined, true);
+  const cap = capacityLines([LOTH_FULL, M3]).join('\n');
+  assert.match(cap, /lothdesktop[^\n]*Unity editors 4 of 3, over its limit/);
+});
+
+test('w4775: timed work waits while the only computer that takes it is at its editor limit (never m3)', () => {
+  assert.equal(pickTimed([LOTH_FULL, M3], {}, 'timed'), undefined);
+  assert.equal(pickTimed([{ ...LOTH_FULL, editors: 2 }, M3], {}, 'timed')!.pick.id, 'lothdesktop');
 });

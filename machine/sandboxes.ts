@@ -365,6 +365,14 @@ export class SandboxPool {
   private disk: { level: DiskLevel; freeBytes?: number } = { level: 'ok' };
   /** When each sandbox's editor was last stopped with the tool (its launches keep a holder's priority a while, w469). */
   private readonly stoppedAt = new Map<string, number>();
+  /**
+   * w4775: editor starts take their Unity slot one at a time, and a slot taken counts as an editor up until the start sets
+   * 'starting' or fails. Before, the check and the 'starting' mark were seconds apart (a boot ticket's answer, a git look):
+   * at 11:50Z on 2026-11-19 three workers on lothdesktop started editors in the same minute with two slots free and all
+   * three went through ("Unity editors 4 of 3: 4 interactive").
+   */
+  private slotLock: Promise<void> = Promise.resolve();
+  private readonly slotTaken = new Set<string>();
   /** The pids of each editor closed idle (w1746): a look that still lists one is not a new start. */
   private readonly idleClosedPids = new Map<string, number[]>();
   private lastGitAt = 0;
@@ -611,7 +619,7 @@ export class SandboxPool {
 
   editorUp(id: string): boolean {
     const s = this.unityState.get(id)?.state;
-    return s === 'starting' || s === 'running';
+    return s === 'starting' || s === 'running' || this.slotTaken.has(id);
   }
 
   private require(id: string): Rec {
@@ -1122,7 +1130,18 @@ export class SandboxPool {
     const current = this.editorFor(r);
     if (current.unity.editors(await this.d.procs()).length) return [...out, `Already running (${await current.unity.status()}).`].join(' ');
     if (this.queuedBoots.has(id)) return [...out, `Already queued in the bench queue (w1615): ${this.unityState.get(id)?.detail ?? 'waiting'}.`].join(' ');
-    if (!hadEditor) await this.checkSlot(id);
+    if (!hadEditor) await this.takeSlot(id);
+    try {
+      return await this.startWithSlot(r, out);
+    } finally {
+      this.slotTaken.delete(id);
+      this.changed();
+    }
+  }
+
+  /** After the slot (w4775): the bench ticket, then the launch; the lines to say. */
+  private async startWithSlot(r: Rec, out: string[]): Promise<string> {
+    const id = r.id;
     // w1615: the Unity slot first (above), then a shared ticket in the bench queue, never the other way round.
     const boot = this.o.bootTicket?.(r);
     if (boot?.why) this.o.log?.(`sandbox ${id}: editor start without a bench ticket: ${boot.why}`);
@@ -1145,6 +1164,16 @@ export class SandboxPool {
       throw e;
     }
     return out.join(' ');
+  }
+
+  /** w4775: checkSlot under slotLock, the slot then held (editorUp) until the start marks 'starting' or ends. */
+  private async takeSlot(id: string): Promise<void> {
+    const run = this.slotLock.then(async () => {
+      await this.checkSlot(id);
+      this.slotTaken.add(id);
+    });
+    this.slotLock = run.catch(() => undefined);
+    await run;
   }
 
   /** Whether the machine's Unity slots let this sandbox's editor start now; throws why not. */

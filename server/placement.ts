@@ -340,7 +340,21 @@ export function busyReasons(p: Computer): string[] {
   const pct = memPct(p);
   if (pct !== undefined && pct >= RAM_BUSY_PCT) out.push(`RAM ${pct}% used`);
   if (!p.freeSandboxes && p.sandboxes >= p.maxSandboxes) out.push(`no free sandbox (${p.sandboxes} of ${p.maxSandboxes} made, all in use)`);
+  const editors = editorsFull(p);
+  if (editors) out.push(editors);
   return out;
+}
+
+/**
+ * Why a computer has no Unity editor for new game work (w4775), or undefined: its editors (every Unity process its daemon
+ * counts, slots granted but not started included) at or over its limit, and no free sandbox with an editor already up for
+ * the new worker to take. Its daemon grants no more there until one stops, so a worker placed there cannot compile or test
+ * (2026-11-19 11:30Z: w4773 started on lothdesktop at "Unity editors 4 of 3" and its editor start was refused at 11:41Z).
+ * A worker that already holds its sandbox's editor resumes there as before: resumes and messages do not read room.
+ */
+export function editorsFull(p: Pick<Computer, 'editors' | 'maxEditors' | 'idleEditors'>): string | undefined {
+  if (!p.maxEditors || (p.editors ?? 0) < p.maxEditors || (p.idleEditors ?? 0) > 0) return undefined;
+  return `Unity editors ${p.editors} of ${p.maxEditors}${p.editors! > p.maxEditors ? ', over its limit' : ''}: no editor for new game work`;
 }
 
 /** Room for one more worker: online, under its agent limit and the RAM line, with a free sandbox or room to make one. */

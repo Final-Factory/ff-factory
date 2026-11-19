@@ -686,3 +686,26 @@ test('w4740: run --detach survives its task being killed while it queues; wait g
     }
   }
 });
+
+test('w4775: a sandbox run whose Unity lost its parent chain is counted once, not as its grant and its place both (lothdesktop, 2026-11-19 11:29:55Z: "editors 4 of 3: 1 interactive, 2 batch, 1 granted not started yet")', () => {
+  const places: Place[] = [
+    { holder: 'sandbox:slot1', path: 'V:\\ffw\\sandboxes\\slot1' },
+    { holder: 'sandbox:slot2', path: 'V:\\ffw\\sandboxes\\slot2' },
+    { holder: 'sandbox:slot3', path: 'V:\\ffw\\sandboxes\\slot3', editorUp: true },
+  ];
+  const player = req('p1', { holder: 'sandbox:slot1', pid: 900, label: 'w4764 HEAD player', grantedAt: T0 });
+  const build = req('p2', { holder: 'sandbox:slot2', pid: 901, label: 'build_player win 2aaac183', grantedAt: T0 });
+  const procs: Proc[] = [
+    editorProc(10, 'V:\\ffw\\sandboxes\\slot3'),
+    { ...editorProc(11, 'V:\\ffw\\sandboxes\\slot2', true), ppid: 901 },
+    // slot1's build Unity under `env`: its parent is not the run's process, so only its project ties it to slot1.
+    { ...editorProc(12, 'V:\\ffw\\sandboxes\\slot1', true), ppid: 4321 },
+  ];
+  const a = assess({ platform: 'win32', procs, requests: [player, build], places, limit: 3, now: T0 + 60_000 });
+  assert.equal(a.used, 3);
+  assert.equal(countsLine(a), 'editors 3 of 3: 1 interactive, 2 batch');
+  assert.deepEqual([...a.holders.entries()].sort(), [['sandbox:slot1', 1], ['sandbox:slot2', 1], ['sandbox:slot3', 1]]);
+  // An interactive editor on the place is the place's, as before: a grant with no Unity yet still holds its slot.
+  const own = assess({ platform: 'win32', procs: [editorProc(10, 'V:\\ffw\\sandboxes\\slot3'), editorProc(13, 'V:\\ffw\\sandboxes\\slot1')], requests: [player], places, limit: 3, now: T0 + 60_000 });
+  assert.equal(own.used, 3, 'slot1 interactive editor, its grant not started yet, slot3');
+});
