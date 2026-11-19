@@ -9802,6 +9802,64 @@ test('w2541: a request marked for a report refuses DONE until its worker files o
   assert.match((await call(ben, 'read_report', { id: 'r1', rev: 1 })).text, /revision 1 of 2[\s\S]*BeltRenderSystem: 62 ms/);
 });
 
+
+// w4739 (r290 fix 5): the w3031 replay. r87, the multi-select design, reached revision 4 with no open questions on
+// 2026-11-08 01:43; the go to build was offered in chat ("say 'file the w3031 implementation'") and came 9 d 1 h later.
+// Now its close sends Lothsahn's orchestrator a [design closed] message: ask the go on an ask_person card, recommended.
+test('w4739: the w3031 replay: a design request closing with no open questions has its person asked the go to build on a card', async (t) => {
+  const { store, agents, machines, sessions, dispatcher, chat, call, heard, cfg } = await setupOnMachine(t);
+  agents.reports = new ReportStore(cfg.dataDir, () => []);
+  const loth = chat(LOTH).info;
+  await call(loth, 'request_work', { title: 'Design: multi-select mobile stations and move them together', brief: 'Design multi-select for mobile stations.', report: 'design' });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Design it', title: 'w1: multi-select design', work_id: 'w1' });
+  assert.equal(started.isError, false, started.text);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const info = store.sessions.get(id)!;
+  await firstTurn(info);
+  const h = machines.hooks!.handlersFor(info, store.machines.get('pc')!);
+  assert.match(machines.hooks!.specFor(info, store.machines.get('pc')!).append, /ask them all together on one card \(one `waiting_on_person` call with every one in `questions`\)/);
+  // Revisions 1 to 3 left questions open; the link keeps them.
+  await h.file_report!({ title: 'Multi-selecting mobile stations to move them: options and recommendation', kind: 'design', body: '## Open questions\n1. **Q4:** control groups in v1?\n2. **Q5:** cap the selection?\n' });
+  assert.deepEqual(store.work.get('w1')!.reports![0].openQuestions, ['Q4: control groups in v1?', 'Q5: cap the selection?']);
+  // Revision 4, as filed: none left.
+  await h.file_report!({ id: 'r1', title: 'Multi-selecting mobile stations to move them: options and recommendation', kind: 'design', body: '**TL;DR:** Every question is answered; the design is ready to build.\n\n## Open questions\nNone. All six are answered by lothsahn.\n' });
+  assert.deepEqual(store.work.get('w1')!.reports![0].openQuestions, []);
+  assert.equal(heard(loth.id, '[design closed]').length, 0, 'nothing before it closes');
+  sessions.events.emit('turnEnd', sessions.get(id), 'r1 revised: every question answered, ready to build.\n\nDONE: w1\nLearned: nothing new');
+  await until('w1 closes', () => store.work.get('w1')!.status === 'done');
+  await until('Lothsahn’s orchestrator hears it', () => heard(loth.id, '[design closed]').length === 1);
+  const msg = heard(loth.id, '[design closed]')[0].text;
+  assert.match(msg, /^\[design closed\] w1 "Design: multi-select mobile stations and move them together" closed, and its result is a design \(r1 /);
+  assert.match(msg, /Ask Lothsahn the go now: ask_person, request w1: "File the build of multi-select mobile stations and move them together now\?", options "Yes, file the build now" \(recommended\)/);
+  assert.match(store.work.get('w1')!.log.at(-1)!, /a design closed: Lothsahn's orchestrator told to ask the go to build on a card \(w4739\)/);
+  // The card it asks is one ask_person accepts as written.
+  const card = await call(loth, 'ask_person', { question: 'File the build of multi-select mobile stations and move them together now?', options: [{ label: 'Yes, file the build now', recommended: true }, { label: "Not yet, I'll say when" }, { label: 'Change the design first' }], request: 'w1' });
+  assert.equal(card.isError, false, card.text);
+  assert.match(card.text, /Shown to Lothsahn as 3 buttons, Yes, file the build now recommended/);
+});
+
+test('w4739: no go card when a build already names the design, nor for a request whose result is not a design', async (t) => {
+  const { store, agents, machines, sessions, dispatcher, chat, call, heard, cfg } = await setupOnMachine(t);
+  agents.reports = new ReportStore(cfg.dataDir, () => []);
+  const ben = chat(BEN).info;
+  await call(ben, 'request_work', { title: 'Design: splitter modes', brief: 'Design it.', report: 'design' });
+  await call(ben, 'request_work', { title: 'Build: splitter modes', brief: 'Build r1.', related_ids: ['w1'] });
+  await call(ben, 'request_work', { title: 'Profile the belts', brief: 'Where do frames go?', report: 'profile' });
+  for (const [wid, kind, sb] of [['w1', 'design', 'pc/alpha'], ['w3', 'profile', 'pc/alpha']] as const) {
+    const started = await call(dispatcher().info, 'start_agent', { sandbox: sb, prompt: 'Go', title: `${wid}: go`, work_id: wid, extra_agent: wid === 'w3' });
+    assert.equal(started.isError, false, started.text);
+    const id = /Started agent (\w+)/.exec(started.text)![1];
+    const info = store.sessions.get(id)!;
+    await firstTurn(info);
+    await machines.hooks!.handlersFor(info, store.machines.get('pc')!).file_report!({ title: `${wid} result`, kind, body: '## Open questions\nNone.' });
+    sessions.events.emit('turnEnd', sessions.get(id), `Filed.\n\nDONE: ${wid}\nLearned: nothing new`);
+    await until(`${wid} closes`, () => store.work.get(wid)!.status === 'done');
+  }
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(heard(ben.id, '[design closed]').length, 0);
+  assert.match(store.work.get('w1')!.log.at(-1)!, /no go-to-build card: w2 already names it \(w4739\)/);
+});
+
 // w2741: d17c8672 was sent w2709 (an investigation with report r36), then w2722; its title named w2722, so file_report
 // (workIdsOf: servedBy and the title) refused its revision of r36, though the ledger showed it on w2709 still (holdsOf).
 test("w2741: a worker whose title names one request and which holds another files and revises the other request's report", async (t) => {

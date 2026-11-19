@@ -88,6 +88,62 @@ const safeName = (raw: string) =>
     .replace(/^[.-]+/, '')
     .slice(0, 100) || 'file';
 
+/** The words of an open questions section that say none is left ("None.", "No open questions", "Nothing left open"). */
+const NONE_OPEN = /^(?:none|no (?:open )?questions|no questions (?:are )?(?:left )?open|nothing(?: is)?(?: left)? open)\b/i;
+
+/**
+ * A design report's open questions (w4739, r290 fix 5), read from its `Open questions` section (a heading, or a bold line
+ * "**Open questions:**"): [] when it says none is left ("None. All six are answered", r87 revision 4), each top-level
+ * list item or sub-heading under it otherwise (its first paragraph when it has neither), and undefined when the report
+ * has no such section. Read when the report is filed or revised, and kept on the request's link (WorkItem.reports).
+ */
+export function openQuestionsOf(body: string): string[] | undefined {
+  const lines = body.replace(/\r\n?/g, '\n').split('\n');
+  const head = /^\s*(#{1,6})\s+(?:\d+[.)]\s*)?open questions\b.*$/i;
+  const bold = /^\s*\*\*open questions:?\*\*:?\s*(.*)$/i;
+  let start = -1;
+  let level = 7;
+  let rest = '';
+  for (const [i, l] of lines.entries()) {
+    const h = head.exec(l);
+    if (h) {
+      start = i + 1;
+      level = h[1].length;
+      break;
+    }
+    const b = bold.exec(l);
+    if (b) {
+      start = i + 1;
+      level = 0;
+      rest = b[1].trim();
+      break;
+    }
+  }
+  if (start < 0) return undefined;
+  const section: string[] = rest ? [rest] : [];
+  for (const l of lines.slice(start)) {
+    const h = /^\s*(#{1,6})\s/.exec(l);
+    if (h && (level === 0 || h[1].length <= level)) break;
+    if (level === 0 && /^\s*\*\*[^*]+\*\*:?\s*$/.test(l)) break;
+    section.push(l);
+  }
+  const clean = (s: string) => s.replace(/[*_`]/g, '').replace(/\s+/g, ' ').trim();
+  const first = section.map(clean).find(Boolean) ?? '';
+  if (!first || NONE_OPEN.test(first)) return [];
+  const items = section
+    .map((l) => /^ ?(?:[-*+]|\d+[.)])\s+(.+)$/.exec(l)?.[1] ?? /^\s*#{1,6}\s+(.+)$/.exec(l)?.[1])
+    .filter((x): x is string => !!x)
+    .map((x) => clean(x).slice(0, 300))
+    .filter(Boolean);
+  if (items.length) return items;
+  const para: string[] = [];
+  for (const l of section) {
+    if (l.trim()) para.push(l);
+    else if (para.length) break;
+  }
+  return [clean(para.join(' ')).slice(0, 300)];
+}
+
 /** Plain text from Markdown, roughly: for the excerpt and the snippets, never shown as Markdown. */
 export function plainText(md: string): string {
   return md

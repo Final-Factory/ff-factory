@@ -88,6 +88,8 @@ import { MERGE_ON_GREEN_MARK } from './mergeOnGreen.ts';
 import { handoffQuote, handoffReport, isHandoff } from './handoffReport.ts';
 import { commitsIn, normPr, pairCommitsOf, pairPrOf, pairRanCommit, prIn, resultFor, sameCommit, samePr } from './pairRuns.ts';
 import type { AttachmentRef, PairPlayer, BenchGrant, ConditionalDecision, CrashHold, ForYouMark, OpenAsk, WorkNeedsYou, GateResume, GitStatus, Machine, WorkAutoClosed, WorkBlocker, WorkDigest, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPair, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
+import { designGoAsk } from './designGo.ts';
+import { openQuestionsOf } from './reports.ts';
 import { DISK_CLEANUP_FLOOR_GB, REPORT_KINDS, WORK_PRIORITIES, asWorkPriority, atLeast, questionFor, type ReportKind, type ReportSummary } from '../shared/types.ts';
 import { FOR_YOU_CHARS, FOR_YOU_KEPT, forYouId, splitForYou } from '../shared/forYou.ts';
 
@@ -3648,11 +3650,15 @@ It is for your part of the work, not an answer to another worker's question.`;
     return kind === false ? `${w.id}: no report needed any more.` : `${w.id}: its result is a ${kind} report; its worker files it with file_report, and DONE waits for it${w.reports?.length ? ` (${w.reports.map((r) => r.id).join(', ')} filed already)` : ''}.`;
   }
 
-  /** A report was filed or revised for `workId` (w2541): the request links to it. */
-  reportFiled(workId: string, r: ReportSummary, created: boolean) {
+  /**
+   * A report was filed or revised for `workId` (w2541): the request links to it. A design's link also keeps its open
+   * questions as its latest text lists them (w4739, openQuestionsOf), for the go-to-build card when the request closes.
+   */
+  reportFiled(workId: string, r: ReportSummary, created: boolean, body?: string) {
     const w = this.store.work.get(workId);
     if (!w) return;
-    const link = { id: r.id, title: r.title, kind: r.kind };
+    const open = r.kind === 'design' && body !== undefined ? openQuestionsOf(body) : undefined;
+    const link = { id: r.id, title: r.title, kind: r.kind, ...(open ? { openQuestions: open } : {}) };
     const i = (w.reports ?? []).findIndex((x) => x.id === r.id);
     w.reports = i < 0 ? [...(w.reports ?? []), link] : (w.reports ?? []).map((x, k) => (k === i ? link : x));
     this.stamp(w, `${created ? 'report filed' : `report revised (revision ${r.revisions})`}: ${r.id} "${r.title}"`);
@@ -6749,7 +6755,30 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     this.store.putWork(w);
     const audience = [...w.requesters, ...also.filter((r) => !isFor(w, r.userId))];
     this.toPeople(audience, `[ledger] ${w.id} "${clip(w.title, 100)}" (${names(w.requesters)}'s) closed as done: ${how}. Its report: "${clip(report, 200)}"`);
+    this.designClosed(w);
     if (w.pair) this.pairFinished(w);
+  }
+
+  /**
+   * A request whose result is a design closed on its DONE (w4739, r290 fix 5): its people's orchestrators are told to ask the
+   * go to build on an ask_person card, "File the build of <design> now?" with that answer recommended, or the design's
+   * open questions first when its report still lists some. r290 measured 9 d 1 h between the finished multi-select design
+   * (r87, w3031) and the go, offered in chat ("say 'file the w3031 implementation'") instead of on a card. Nothing is sent
+   * when a request already names it in its related ids (its build is filed, as a hand-up's stages are, w2969).
+   */
+  private designClosed(w: WorkItem) {
+    const designs = (w.reports ?? []).filter((r) => r.kind === 'design');
+    if (!designs.length) return;
+    const built = [...this.store.work.values()].filter((x) => x.id !== w.id && (x.relatedIds ?? []).some((r) => same(r, w.id)));
+    if (built.length) {
+      this.stamp(w, `a design closed; no go-to-build card: ${built.map((x) => x.id).join(', ')} already names it (w4739)`);
+      this.store.putWork(w);
+      return;
+    }
+    const text = designGoAsk(w, designs);
+    this.toPeople(w.requesters, text);
+    this.stamp(w, `a design closed: ${names(w.requesters)}'s orchestrator told to ask ${designs.some((d) => d.openQuestions?.length) ? 'its open questions' : 'the go to build'} on a card (w4739)`);
+    this.store.putWork(w);
   }
 
   /**

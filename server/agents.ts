@@ -1657,7 +1657,7 @@ export class Agents {
       if (e instanceof ReportError) throw new Error(e.message);
       throw e;
     }
-    this.orchestrators.reportFiled(w.id, r.report, r.created);
+    this.orchestrators.reportFiled(w.id, r.report, r.created, String(a.body ?? ''));
     this.onReport?.(r.report);
     console.log(`reports: ${info.id.slice(0, 8)} ${r.created ? 'filed' : 'revised'} ${r.report.id} (revision ${r.rev}) for ${w.id}`);
     const who = r.report.requesters.map((p) => p.displayName).join(', ');
@@ -5007,7 +5007,7 @@ ${deployment ? `## This deployment\n${deployment}\n\n` : ''}## Reporting
 End every turn with a short plain-language summary: what you did, what is left, and anything you need from the user. If you are blocked, say so plainly instead of guessing. ${REPORT_LABELS}
 To show the user an image, save it as PNG, JPG or SVG in your worktree (e.g. \`Assets/Screenshots/\`) or your temp folder, then put \`![what it shows](<absolute path>)\` in your message: the dashboard shows it inline and keeps a copy. A \`\`\`mermaid code block renders as a diagram.
 Stills, clips and notes for a review (the visual checklist, a playtest, a before/after) go through \`mcp__machine__publish_review\`, which answers the paths to put in your report; never copy them across machines yourself.
-When a person asked for a design or an analysis (a profile, an investigation, a root-cause write-up, a design, research), its result is a report: file it with \`mcp__machine__file_report\` (the whole result as Markdown, with its evidence labels and its published stills), revise it with its id when the result changes, and name it (r<N>) in your turn's report. It is kept on the portal's Reports tab, tagged with the person who asked; \`mcp__machine__list_reports\` finds earlier ones (docs/reports.md).
+When a person asked for a design or an analysis (a profile, an investigation, a root-cause write-up, a design, research), its result is a report: file it with \`mcp__machine__file_report\` (the whole result as Markdown, with its evidence labels and its published stills), revise it with its id when the result changes, and name it (r<N>) in your turn's report. A design's report ends with an \`## Open questions\` section: \`None.\` once every one is answered, else each question as a list item; ask them all together on one card (one \`waiting_on_person\` call with every one in \`questions\`), never one at a time or in chat, and never offer the go to build in chat ("say 'file the build'"): when the design's request closes, FF Factory has your person's orchestrator ask the go on a card. It is kept on the portal's Reports tab, tagged with the person who asked; \`mcp__machine__list_reports\` finds earlier ones (docs/reports.md).
 `.trim();
   }
 
