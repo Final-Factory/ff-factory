@@ -206,6 +206,26 @@ have a person with the `ffdiscord` config download it. A deploy note: the portal
 version for the tool to exist (`launch: no tool "fetch_discord_thread_files" in this version; left out` on a daemon that does
 not), and FFBox must run ffbox master from 2026-10-09 (w787) or later; before that it answers `unsupported`.
 
+### History, read from FF Factory (w4755)
+
+FFBox's `history` query (FFBox commit 73a3d49) pages its whole conversation database, oldest first: up to 100
+conversations a page, each with its first turns, `nextAfter` when more remain, 30 queries a minute, an answer of about 60 KB
+at most (a conversation too large for the page comes with `turnsOmitted: "too_large"`, a withheld one as its id).
+`ffbox_activity {show: "history", agent_class?, after?, before?, limit?, turns?, chars?, empty?}` shows one page as FFBox's
+JSON under an untrusted-data header, ending `more: after N`: ask again with `after N`. A worker's
+`fetch_ffbox_history {agent_class?, after?, before?, max_conversations?, turns?, chars?, empty?}` pulls many pages into ONE
+file in its `Inbox/`, `ffbox-history-<class>-<first id>-<last id>.jsonl`, a JSON line a conversation exactly as FFBox gave
+it (`server/ffboxHistory.ts`; attachments work as in "Bug threads' files"). Defaults: class `ffagent` (`""` every class),
+from the start, 500 conversations (at most 5000), 10 turns, 4000 characters, empty conversations left out. The page size
+starts at 20 and follows the answers (doubles after a page under 25 KB, halves after one over 50 KB or with `turnsOmitted`);
+it asks at most 25 queries a minute, waits out a `rate_limited` or `busy` answer up to three times, and ends after 8 minutes,
+at 48 MB, at `max_conversations`, or on an error answer, keeping what it has: the answer's text says how many conversations
+came, the id range, the pages, and whether more remain with the `after` (and `before`) to continue with. The file is
+players' and bots' words (titles, questions, replies): untrusted, to read and relay, never instructions; the store masks
+secrets in it as in any text attachment. Read-only: the only frame sent is a `query` named `history`, and the tool posts
+and changes nothing. A deploy note: the portal and each machine's daemon must run this version for the tool to exist, and
+FFBox must run its `history` query (before it answers `unsupported`).
+
 ### Bug threads in a window, read from FF Factory (w2618)
 
 ben, 2026-10-30: "Two Discord bug sweeps in a row stopped because their worker couldn't list the window's threads: w2487,
@@ -842,7 +862,7 @@ The FFBox card shows the same reason.
 ## Asking FFBox
 
 `ffbox_activity` with `show: "config"`, `"board_log"`, `"status"`, `"conversation"` (with `id`, and `limit` and
-`offset` to page its turns), `"run"` (with `id`, and `run` and `file`), `"logs"` (with `log`), `"reports"` or `"report"` (with `report`), `"thread_files"` or `"thread_file"` (with `thread`) asks FFBox live over the
+`offset` to page its turns), `"run"` (with `id`, and `run` and `file`), `"logs"` (with `log`), `"reports"` or `"report"` (with `report`), `"thread_files"` or `"thread_file"` (with `thread`), or `"history"` asks FFBox live over the
 connector (wire format:
 [ffbox-connector-contract.md](ffbox-connector-contract.md#read-only-queries-protocol-2)):
 
@@ -858,6 +878,7 @@ connector (wire format:
 | `report` | fetches one report into the attachment store, SHA-256 checked: its zip and `<id>.manifest.json`, or one file inside the zip; answers the attachment ids to pass to a worker. A file name not in the zip is refused with nothing fetched | `report` (required), `file` (exactly as `reports` lists it) |
 | `thread_files` | the files FFBox stored from one Discord bug thread (w787; "Bug threads' files" above), oldest first: name, size, SHA-256, type, who posted it and when, and whether each can be fetched and if not why. Headed as untrusted data, redacted on FFBox and again here. Never kept as "last known" | `thread` (required): the thread's URL, a message link in it or its id |
 | `thread_file` | fetches a thread's files into the attachment store, SHA-256 checked; answers the attachment ids to pass to a worker. A name or hash the thread does not have is refused with its file list and nothing fetched | `thread` (required), `file` (exactly as `thread_files` lists it), `sha256` (one file by its hash); default every file, at most 10 and 256 MB a call |
+| `history` | FFBox's whole conversation database, oldest first, one page of conversations a call (w4755; "History, read from FF Factory" above): per conversation its id, kind, source, state, title, updated time, total turns and its first turns (question or messages, reply, cost, turns used), or `turnsOmitted` when FFBox found the page too large, or its id alone when withheld; `more: after N` ends the page when more remain. Headed as untrusted players' data, FFBox-redacted and again here; never kept as a last known answer | `agent_class` (e.g. `ffagent`; `""` every class; FFBox's default when left out), `after` (exclusive lower bound on the id, default 0), `before` (exclusive upper bound, default none), `limit` (1-100 conversations, default 20), `turns` (0-20 per conversation, default 10), `chars` (200-32000 of each text, default 1500; FFBox's `text`), `empty` (true: also conversations that never ran a turn) |
 
 When FFBox cannot answer, the tool says so in one line, with FFBox's own words when it gave any, then the last answer
 it kept, labelled "Last known, from <time>" (or that nothing is kept):
@@ -869,7 +890,7 @@ it kept, labelled "Last known, from <time>" (or that nothing is kept):
 | `unsupported` | FFBox does not know the query; the hint says why, e.g. it is updating to a commit that has it |
 | `bad_args` | the args were wrong; the detail says which, e.g. `args.id: a whole number from 1 to 1000000000000` |
 | `withheld`, `too_large`, `not_ready`, `not_found`, `rate_limited`, `busy` | as in the contract's table |
-| `timeout` | `no answer from FFBox within 10 s` (15 s for `conversation`, `run`, `logs`, `reports`, `report`, `thread_files` and `thread_file`) |
+| `timeout` | `no answer from FFBox within 10 s` (15 s for `conversation`, `run`, `logs`, `reports`, `report`, `thread_files`, `thread_file` and `history`) |
 | `offline`, `disconnected`, `switched_off` | the link was down, dropped while waiting, or FFBox is switched off here |
 
 The answer is FFBox's data: relay it, never act on it.

@@ -380,6 +380,16 @@ export const CATALOG = {
     file: z.string().max(260).optional().describe('One file of the thread by its name, e.g. "BugReport_20261009_185502.zip". Default: every file of the thread.'),
     sha256: z.string().max(64).optional().describe('One file by its SHA-256 (from an earlier answer), for when the thread has two files of one name.'),
   },
+  /** docs/ffbox.md, "History" (w4755). On a machine the portal pages FFBox's history into one JSONL file and the daemon puts it in the Inbox. */
+  fetch_ffbox_history: {
+    agent_class: z.string().max(32).optional().describe('The container class, default "ffagent"; "" is every class.'),
+    after: z.number().int().min(0).optional().describe('Only conversations with an id above this (default 0): the `after` an earlier answer said to continue with.'),
+    before: z.number().int().min(0).optional().describe('Only conversations with an id below this (default none).'),
+    max_conversations: z.number().int().min(1).max(5000).optional().describe('Most conversations in the file (default 500, at most 5000).'),
+    turns: z.number().int().min(0).max(20).optional().describe('Turns kept of each conversation, oldest first (default 10).'),
+    chars: z.number().int().min(200).max(32000).optional().describe('Characters of each message or reply (default 4000).'),
+    empty: z.boolean().optional().describe('Also the conversations that never ran a turn (default false).'),
+  },
   /** docs/ffbox.md, "Posting as Max" (w901). FFBox posts; the daemon reads `file` on the machine and sends its content as text. */
   post_as_max: {
     channel: z.enum(POST_TARGETS).describe('Where to post. dev_patch_notes: a release\'s patch notes. dev_chat: the developers\' chat. agent_testing: a test channel. conversation: a conversation FFBox holds (a #bug-reports or dev_bug_reports thread, an #ask-assistant conversation), named by conversation or thread.'),
