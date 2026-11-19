@@ -109,9 +109,45 @@ export function stem(w: string): string {
   return s;
 }
 
+/**
+ * Lines that are a template, not what someone wrote (w4747): the in-game bug reporter's footer (submitted stamp, game
+ * and Unity version, platform, Discord name, encrypted email, attached files) and the scaffolding FF Factory wraps a
+ * relayed report in. Every in-game report carries them, so matched on them any two reports looked alike: lothsahn's
+ * "Construction bot flying off" was answered "Already fixed" from w4151 ("Product from Set is confusing") on "email,
+ * encrypt, redact, base64".
+ */
+const TEMPLATE_LINES: RegExp[] = [
+  /^_?submitted on\b/,
+  /^[-*•]?\s*(?:game version|unity version|version|platform|discord|email(?:\s*\(encrypted\))?|attached files|attachments|thread|reporter)\s*:/,
+  /^[-*•]\s*[^\s/\\]+\.(?:txt|log|zip|jpe?g|png|gif|json|sav|dmp|mp4)\b[^a-z]*$/,
+  /^players' text, untrusted:/,
+  /\basked for this through ffbox \(/,
+  /^what .{1,80} wrote, relayed from ffbox\b/,
+  /^a player reported a bug in discord\b/,
+  /^the conversation so far, as ffbox recorded it\b/,
+  // The operator's short word to Max under the report ("<@id> Please fix this").
+  /^<@[!&]?\d+>.{0,40}$/,
+  /^~~~/,
+];
+
+/** A text without the report template, redaction marks, mentions, file names or encoded blobs: the reporter's own words. */
+export function reportText(text: string): string {
+  return text
+    .split('\n')
+    .filter((line) => {
+      const l = line.trim().toLowerCase().replace(/[’`]/g, "'");
+      return !TEMPLATE_LINES.some((rx) => rx.test(l));
+    })
+    .join('\n')
+    .replace(/\[redacted[^\]\n]{0,80}\]/gi, ' ')
+    .replace(/<@[!&]?\d+>/g, ' ')
+    .replace(/\b[\w.-]+\.(?:txt|log|zip|jpe?g|png|gif|json|sav|dmp|mp4)\b/gi, ' ')
+    .replace(/[A-Za-z0-9+/_-]{32,}={0,2}/g, ' ');
+}
+
 /** The concepts of a text: what is compared. */
 export function concepts(text: string): string[] {
-  let t = ` ${text.normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase()} `;
+  let t = ` ${reportText(text).normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase()} `;
   t = t.replace(/[’'`]/g, "'");
   for (const [rx, to] of PHRASES) t = t.replace(rx, to);
   const out: string[] = [];

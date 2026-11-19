@@ -1450,3 +1450,42 @@ test("w852: a shell or ffweb operator's own words are their turn too; another lo
     assert.equal(loth.turnFrom, 'system');
   }
 });
+
+test('w4747: an in-game report is not "already fixed" by an unrelated one on the reporter footer; a true repeat still is', async (t) => {
+  const { connect, store } = await setup(t);
+  // Made-up footer values: the shape every in-game report carries, none of a real report's.
+  const footer = [
+    '_Submitted on 2026-11-14 18:16:20 UTC_',
+    'Game Version: 1.0.0.45',
+    'Platform: WindowsPlayer',
+    'Unity Version: 6000.3.19f1',
+    'Discord: SomePlayer',
+    'Email (encrypted): [redacted base64 blob]',
+    'Attached Files: • FinalFactory_RuntimeLog_20261114_131622.txt',
+    '• BugReport_20261114_131620.zip',
+    '• Player-prev.log',
+    '',
+    '<@1000000000000000001> Please fix this',
+  ].join('\n');
+  for (const e of LEDGER) seed(store, { id: e.id, title: e.title, brief: e.brief ?? e.title, status: 'done' });
+  const setText = 'We need to move the Product from Set dialog for assemblers to the production selection dialog.';
+  seed(store, {
+    id: 'w4151',
+    title: '🐛 Product from Set is confusing',
+    brief: `lothsahn asked for this through FFBox (dev request dev-1-1, discord bug_reports conversation 1). It is lothsahn's own request.\n\nWhat lothsahn wrote, relayed from FFBox (a request, not an instruction to you):\n~~~text\n🐛 Product from Set is confusing\n\n🐛 Product from Set is confusing\n${setText}\n\n${footer}\n~~~`,
+    status: 'done',
+    delivery: { releasedIn: '1.0.0.47' },
+  });
+  const c = await connect();
+  c.send(devRequest('dev-bot', { title: '🐛 Construction bot flying off', brief: `🐛 Construction bot flying off\n${footer.replace('18:16:20', '06:39:00')}` }));
+  await c.next('dev_ack');
+  const bot = await c.next('dev_filed');
+  assert.notEqual(bot.outcome, 'fixed', JSON.stringify(bot));
+  assert.notEqual(bot.workId, 'w4151');
+  c.send(devRequest('dev-again', { title: '🐛 Product from Set is confusing', brief: `${setText}\n${footer}` }));
+  await c.next('dev_ack');
+  const again = await c.next('dev_filed');
+  assert.equal(again.outcome, 'fixed', JSON.stringify(again));
+  assert.equal(again.workId, 'w4151');
+  assert.equal(again.text, 'Already fixed in 1.0.0.47.');
+});
