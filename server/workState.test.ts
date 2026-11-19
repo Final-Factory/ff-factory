@@ -125,6 +125,8 @@ test('w2046: a resume waiting for room on its full computer is WRONG beside room
   // It stays on purpose (unpushed commits), or no other computer can take it (the other pair leg's): right to wait.
   assert.equal(live(`${hold}; it stays on its computer (w2046): 2 commit(s) on w1891-roundrobin-belt-output are not pushed: only beast has them`, ['lothdesktop'])?.roomOn, undefined);
   assert.equal(live(`${hold}; no other computer can take it now (w2046): no other computer that could take it has room now; lothdesktop: w2013's other leg runs there`, ['lothdesktop'])?.roomOn, undefined);
+  // w4738: released while it waited, it waits a while for its own computer first: right too.
+  assert.equal(live(`${hold}; it waits for a sandbox on its own computer (w4738): its sandbox went to other work while it waited, and one there frees within minutes; it moves to a computer with room at 14:20Z if none has`, ['lothdesktop'])?.roomOn, undefined);
   // A placement under way is no wait on room.
   assert.equal(live('being placed again in beast/slot3', ['lothdesktop'])?.roomOn, undefined);
 });

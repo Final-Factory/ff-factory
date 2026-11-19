@@ -206,7 +206,7 @@ const dirtyOf = (sb: MachineSandbox) => (sb.git?.dirty ?? 0) > 0 || (sb.git?.unt
  * until released), take its sandbox back (its check-in is near again and the sandbox is still free and on its branch),
  * or nothing.
  */
-export type ReleaseStep = { do: 'release'; why: string; branch: string; save?: boolean } | { do: 'stop'; why: string; due?: boolean } | { do: 'reclaim' } | undefined;
+export type ReleaseStep = { do: 'release'; why: string; branch: string; save?: boolean; wait?: boolean } | { do: 'stop'; why: string; due?: boolean } | { do: 'reclaim' } | undefined;
 
 /**
  * Why a worker waiting on CI (w846) may give up its sandbox now, or undefined: its requests wait on a CI gate (`ciWait`,
@@ -284,14 +284,17 @@ export function releaseStep(s: SessionInfo, sb: MachineSandbox | undefined, f: P
   // Waiting on CI, a deploy or a person (w846, w890): released whatever its check-in, which places it again when it comes.
   // w3507: or higher queued work takes it (priorityReclaim.ts): its unpushed commits stay in the machine's repository, and the
   // switch that hands the sandbox over pushes them first (switchBranch), so they need not be pushed before.
-  const why = (s.queuedSend ? undefined : ci) ?? releaseWhy(s, f.now, f.workOver) ?? (s.queuedSend ? undefined : f.reclaim);
+  const waits = s.queuedSend ? undefined : ci;
+  const why = waits ?? releaseWhy(s, f.now, f.workOver) ?? (s.queuedSend ? undefined : f.reclaim);
   if (!why) return undefined;
+  // w4738: released while it waits, its resume waits a while for its own computer before a room move (resumeMove.ts homeWait).
+  const wait = waits ? { wait: true } : {};
   // w2358: a worker on an agent seat (w1098: dafd0fe0's w2191 beside d54d715f in biscuit/slot2) has no work in the game
   // tree: what is there (its branch, uncommitted files, a batch run) is the sandbox's other agents', never its to keep.
-  if (f.agentOnly?.(s)) return { do: 'release', why, branch: sb.git?.branch ?? sb.branch };
+  if (f.agentOnly?.(s)) return { do: 'release', why, branch: sb.git?.branch ?? sb.branch, ...wait };
   if (keptWhy(s, sb, f)) return undefined;
   // w1983: with its git state unread, the save reads it (keptWhy): on the sandbox's own branch.
-  return { do: 'release', why, branch: sb.git?.branch ?? sb.branch, ...(dirtyOf(sb) || !sb.git ? { save: true } : {}) };
+  return { do: 'release', why, branch: sb.git?.branch ?? sb.branch, ...(dirtyOf(sb) || !sb.git ? { save: true } : {}), ...wait };
 }
 
 /** Whether `sb` is on `branch`: an agent there works on that branch, as the released worker did with it (w656). */
@@ -776,7 +779,7 @@ export class PlaceAgain {
         this.pending.add(p);
         did.push(`saving the uncommitted work in ${key} of ${s.id} before releasing it (${step.why})`);
       } else if (step.do === 'release') {
-        s.placeReleased = { at: new Date(this.now()).toISOString(), sandbox: sb.id, branch: step.branch, why: step.why };
+        s.placeReleased = { at: new Date(this.now()).toISOString(), sandbox: sb.id, branch: step.branch, why: step.why, ...(step.wait ? { wait: true } : {}) };
         delete s.releaseDue;
         delete s.heldSince;
         this.reclaimDone(s, targets.get(s.id));
@@ -1010,7 +1013,7 @@ export class PlaceAgain {
    * it and for every other stopped worker there whose release is due, each told what was saved. A save that fails
    * keeps the sandbox held: list_sandboxes says why, and it is tried again after RETRY_FAILED_MS.
    */
-  private async saveThenRelease(s: SessionInfo, m: Machine, sb: MachineSandbox, step: { why: string; branch: string }) {
+  private async saveThenRelease(s: SessionInfo, m: Machine, sb: MachineSandbox, step: { why: string; branch: string; wait?: boolean }) {
     const key = `${m.id}/${sb.id}`;
     try {
       const res = await this.d.saveWork!(m.id, sb.id, step.branch, `FF Factory: saved ${s.id}'s uncommitted work before releasing ${key} (w656)\n\nIts sandbox was released because ${step.why}. \`git reset HEAD~1\` gives the work back uncommitted.`, s.id);
@@ -1021,7 +1024,7 @@ export class PlaceAgain {
       for (const o of group) {
         if (f.live(o.id) || o.placeReleased || o.queuedSend) continue;
         const why = releaseWhy(o, f.now, f.over?.(o)) ?? step.why;
-        o.placeReleased = { at, sandbox: sb.id, branch: step.branch, why };
+        o.placeReleased = { at, sandbox: sb.id, branch: step.branch, why, ...(step.wait && o.id === s.id ? { wait: true } : {}) };
         if (res.sha) o.savedWork = { sha: res.sha, files: res.files, pushed: res.pushed, branch: step.branch, at };
         delete o.releaseDue;
         delete o.heldSince;
