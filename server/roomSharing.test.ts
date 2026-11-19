@@ -24,8 +24,8 @@ const roomLines = (cs: Computer[], prefs: PlacementPrefs = {}) =>
     .map((l) => l.slice(2).split(/[ :]/)[0]);
 
 test('w1089: one room test: the Capacity block and roomNow (decide_work queue, the WRONG flag, the page) never disagree; BUSY never meets "has room"', () => {
-  // The 04:47 numbers: BUSY by RAM and by no sandbox, whatever the editors say; no game room anywhere.
-  assert.deepEqual(busyReasons(LOTH_0447), ['RAM 91% used', 'no free sandbox (6 of 6 made, all in use)']);
+  // The 04:47 numbers: BUSY by RAM, by no sandbox and (w4775) by its editors at their limit; no game room anywhere.
+  assert.deepEqual(busyReasons(LOTH_0447), ['RAM 91% used', 'no free sandbox (6 of 6 made, all in use)', 'Unity editors 4 of 4: no editor for new game work']);
   const alone = roomNow([LOTH_0447]);
   assert.deepEqual([alone.game, alone.agent, alone.held], [[], ['lothdesktop'], []], 'game work has no room; an agent slot is another matter (w1098)');
   const mixes: Computer[][] = [

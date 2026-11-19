@@ -1217,6 +1217,28 @@ test('machine sandboxes: an editor start takes a Unity slot: batch builds starte
   assert.match(await p.unity('a', 'status'), /\nUnity on this machine: editors 3 of 2: 0 interactive, 2 batch, 1 editor start queued or booting; OVER LIMIT: nothing more starts until it drops/);
 });
 
+test('w4775: editor starts at the same moment take the free Unity slots one at a time: with one free, one starts and the rest are refused (lothdesktop, 2026-11-19 11:50Z: three starts with two free, "Unity editors 4 of 3")', async (t) => {
+  const r = repos();
+  t.after(r.cleanup);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-msb-slots-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const HUB = 'C:\\Program Files\\Unity\\Hub\\Editor\\6000.3.19f1\\Editor\\Unity.exe';
+  const procs = [{ pid: 501, ppid: 77, name: 'Unity.exe', cmd: `"${HUB}" -batchmode -quit -projectPath D:\\work\\ffsb\\pr-fix -executeMethod BuildScript.Build` }];
+  let slots: UnitySlots | undefined;
+  const { p } = pool(r, { settings: { maxUnity: 2, maxSandboxes: 3 }, slots: () => slots! });
+  slots = new UnitySlots({ dir, platform: 'win32', procs: async () => procs, alive: () => true, now: () => Date.now(), limit: () => 2, places: () => p.list().map((s) => ({ holder: `sandbox:${s.id}`, path: s.path, editorUp: p.editorUp(s.id) })), ramPct: () => undefined });
+  for (const id of ['a', 'b', 'c']) await p.create({ id, branch: `sandbox/${id}`, base: 'origin/master', seedLibrary: false, startUnity: false });
+  for (const id of ['a', 'b', 'c']) await ready(p, id);
+  const out = await Promise.allSettled(['a', 'b', 'c'].map((id) => p.unity(id, 'start')));
+  assert.equal(out.filter((x) => x.status === 'fulfilled').length, 1, JSON.stringify(out.map((x) => (x.status === 'fulfilled' ? x.value : String(x.reason)))));
+  for (const x of out.filter((y) => y.status === 'rejected')) assert.match(String((x as PromiseRejectedResult).reason), /not started: needs 1, 0 free \(2 of 2 in use\)/);
+  assert.equal(['a', 'b', 'c'].filter((id) => p.editorUp(id)).length, 1, 'only the one that started holds a slot');
+  // A refused start leaves no slot behind: the next one, after the build ends, starts.
+  procs.length = 0;
+  const next = ['a', 'b', 'c'].find((id) => !p.editorUp(id))!;
+  assert.match(await p.unity(next, 'start'), /Started \(fake\)/);
+});
+
 test('w1962: queued editor starts that fill the Unity slots each start at their turn, never refused for the slot they hold (LothDesktop, 2026-10-23: "needs 1, 0 free (3 of 3 in use) ... 3 granted not started yet")', async (t) => {
   const r = repos();
   t.after(r.cleanup);

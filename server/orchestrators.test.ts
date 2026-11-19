@@ -7930,7 +7930,7 @@ test('w2055: a timed leg pre-empts a small computer whose worker is between turn
   const fleet = (o2: { big?: Partial<Computer> } = {}): Computer[] => {
     const box = (bid: string, maxAgents: number, x: Partial<Computer> = {}): Computer => ({ id: bid, online: true, live: 0, midTurn: 0, maxAgents, sandboxes: 1, maxSandboxes: 3, freeSandboxes: 1, memUsedBytes: 16 * 1024 ** 3, memTotalBytes: 64 * 1024 ** 3, editors: 0, maxEditors: 2, platform: 'win32', ...x });
     // pc: a small computer (1 agent slot) running w1's worker; big: xlarge, an empty slot but three agents at work.
-    return [box('pc', 1, { live: 1, freeSandboxes: 0, sandboxes: 1, maxSandboxes: 1 }), box('big', 10, { live: 3, editors: 2, ...o2.big })];
+    return [box('pc', 1, { live: 1, freeSandboxes: 0, sandboxes: 1, maxSandboxes: 1 }), box('big', 10, { live: 3, editors: 2, maxEditors: 4, ...o2.big })];
   };
   agents.places = () => fleet();
   const sb = store.machines.get('pc')!.sandboxes!.find((x) => x.id === info.machineSandbox)!;

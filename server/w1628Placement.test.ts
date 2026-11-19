@@ -53,7 +53,7 @@ test('w1639 (was w1628): an urgent release stays on BEAST with a timed leg queue
 
 test('w1628: timed work goes to the smallest computer with room and no timed leg queued, BEAST last, on the platform it names', () => {
   const beast = box('beast', 8, 'win32', { live: 0, editors: 0 });
-  const loth = box('lothdesktop', 4, 'win32', { live: 3, editors: 2 });
+  const loth = box('lothdesktop', 4, 'win32', { live: 3, editors: 2, maxEditors: 3 });
   const m3 = box('m3', 2, 'darwin');
   assert.equal(pickTimed([beast, loth, m3], {}, 'timed')!.pick.id, 'm3', 'smallest first, whatever its live agents');
   assert.equal(pickTimed([beast, loth, m3], {}, 'timed:win32')!.pick.id, 'lothdesktop', 'a Windows run stays on Windows');

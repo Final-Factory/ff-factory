@@ -335,7 +335,12 @@ export function assess(input: AssessInput): Assessment {
       continue;
     }
     const pl = key ? buckets.get(`e:${key}`) : undefined;
-    if (pl) pl.procs++;
+    // w4775: a batch Unity in a sandbox's project while that sandbox's granted run has none counted yet is that run's (its
+    // parent chain broke, as a build's second Unity under `env` can on Windows): counted on the place too, one process read
+    // as two ("editors 4 of 3: 1 interactive, 2 batch, 1 granted not started yet" on lothdesktop at 11:29:55Z, 2026-11-19).
+    const own = pl && u.kind === 'batch' ? reqs.find((r) => r.holder === pl.holder && r.grantedAt !== undefined && !r.denied && buckets.get(`p:${r.pid}`)!.procs < r.count) : undefined;
+    if (own) buckets.get(`p:${own.pid}`)!.procs++;
+    else if (pl) pl.procs++;
     else outside.push(u);
   }
   const holders = new Map<string, number>();

@@ -1436,7 +1436,9 @@ LothDesktop and Beast, not just when BEAST is full").
   its own) with its live agents against its limit (and how many are mid-turn), free sandboxes and how many
   more can be made, RAM used and its Unity editors against `max_unity` (every Unity process there, "editors 4 of 3: 1
   interactive, 3 batch", w469). Each is **BUSY** (offline; as many agents mid-turn
-  as its limit, `max_sandbox_agents` / `max_sandboxes` × `max_agents_per_sandbox`; `RAM_BUSY_PCT` (85%) of its RAM or more; or no free sandbox and no room to make one) or **ROOM n%**: the
+  as its limit, `max_sandbox_agents` / `max_sandboxes` × `max_agents_per_sandbox`; `RAM_BUSY_PCT` (85%) of its RAM or more; no free sandbox and no room to make one; or its Unity editors at or over
+  `max_unity` with no editor up in a free sandbox, `editorsFull`, w4775: lothdesktop at "editors 4 of 3" still took w4773
+  and w4774 on 2026-11-19 and refused their editor starts, while m3 had 0 of 1; agent-only work is not held by it) or **ROOM n%**: the
   mean of its free shares of agent slots, sandboxes (free plus those it may still make), RAM and editors, each
   against its own limits (`roomOf`). The last line names where the next piece of new game-repo work goes
   (`pickComputer`): the computer with the most room; when the best two are within `EVEN_MARGIN` (10 points), the one

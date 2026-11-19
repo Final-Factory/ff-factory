@@ -184,6 +184,13 @@ the portal; `server/hostHealth.ts` `blockReason`).
 - **The backstop.** Unity started outside the gate counts all the same. When the machine is over its limit the
   orchestrator is told once ("over its limit... Started outside the slot gate: batch FinalFactory"), and again when it is
   back. The backstop itself stops nothing; the reaper below ends a sandbox's orphaned or hung batch build.
+- **One process, one slot; one start at a time** (w4775, LothDesktop on 2026-11-19). A batch Unity in a sandbox's
+  project whose parent chain no longer reaches its granted run (a build's second Unity under `env`) is counted on that
+  run's grant, not on the sandbox's place as well (`assess` in `machine/unitySlots.ts`): at 11:29:55Z one build read as
+  two, "editors 4 of 3: 1 interactive, 2 batch, 1 granted not started yet", and refused editor starts for 15 minutes.
+  `unity start` takes its slot under one lock per daemon and counts as an editor up from then until its launch is done
+  or fails (`takeSlot` in `machine/sandboxes.ts`): at 11:50Z three starts in one minute with two slots free each passed
+  the check before any was counted, and the machine ran 4 interactive editors against 3.
 
 **The mailbox** (`FF_UNITY_SLOTS`, which the daemon sets for its agents; else the folder a pointer
 `~/.config/finalfactory/unity-slots.json` names, if a person wrote one (a worker-root install writes none: w513 keeps the
