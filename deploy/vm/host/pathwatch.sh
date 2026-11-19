@@ -226,11 +226,16 @@ pl_alert() {
   state_set "L${id}_alert" "$(now)"
 }
 # Repairs are logged before and after, and the last one is kept for the status and the banner.
-pl_repair_start() { log "path L$1 repair: before: $(pl_clean "$3"); running: $2"; }
+# The kept one says what the layer saw before it too (w4729: four tailscaled restarts on 2026-11-18 were seen in the VM as a
+# bare SIGTERM; the why was only in this host's journal).
+pl_repair_start() {
+  state_set "L$1_repair_before" "$(pl_clean "$3" 260)"
+  log "path L$1 repair: before: $(pl_clean "$3"); running: $2"
+}
 pl_repair_end() { # ID COMMAND fixed|"not fixed" EVIDENCE
   local ev
   ev=$(pl_clean "$4")
-  state_set "L$1_repair" "$(iso "$(now)") $2: $3: $ev"
+  state_set "L$1_repair" "$(iso "$(now)") $2: $3: ${ev:0:300}; before: $(sget "L$1_repair_before")"
   log "path L$1 repair: after: $3: $ev"
   if [ "$3" != fixed ]; then
     pl_alert "$1" "fff-vm: repair did not fix: $(pl_name "$1")" "$2 ran, $(pl_name "$1") still fails: $ev. $(pl_who "$1")"
@@ -611,7 +616,7 @@ path_l8() {
     state_set L8_restart_at "$(now)"
     state_set L8_restarted 1
     gx 'systemctl restart tailscaled 2>&1' >/dev/null || true
-    state_set "L8_repair" "$(iso "$(now)") systemctl restart tailscaled: restarted, checking again after 5 min"
+    state_set "L8_repair" "$(iso "$(now)") systemctl restart tailscaled: restarted, checking again after 5 min; before: $(sget L8_repair_before)"
     log "path L8 repair: after: restarted tailscaled once; checking again after 5 min"
     pl_set 8 warn "$ev; restarted tailscaled once, checking again after 5 min"
     return 0

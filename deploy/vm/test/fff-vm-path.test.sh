@@ -367,6 +367,9 @@ FAKE_REPAIR_FIXES=1
 pass 2
 is 2 ok
 said "path L2 repair: after: fixed: BackendState=Running Online=true Health=none"
+# w4729: the portal's path_health shows why the restart ran, not only that it fixed things
+banner '.layers[] | select(.id == "2") | .repair' | grep -q 'restart tailscaled: fixed: BackendState=Running Online=true Health=none.*; before: BackendState=Running' ||
+  fail "L2: the kept repair lacks what the layer saw before it: $(banner '.layers[] | select(.id == "2") | .repair')"
 is 4 ok
 ok "tailscaled: a restart that fixes it is recorded as fixed and the later layers run in the same pass"
 

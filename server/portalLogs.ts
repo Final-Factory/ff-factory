@@ -51,7 +51,8 @@ type SourceDef =
   | { kind: 'cleanup'; what: string }
   | { kind: 'doc'; file: string; what: string }
   | { kind: 'context'; what: string }
-  | { kind: 'bench_hours'; what: string };
+  | { kind: 'bench_hours'; what: string }
+  | { kind: 'path_health'; what: string };
 
 /** Everything portal_logs can read. A name outside this list is refused; nothing else in data/ or the VM is reachable. */
 export const LOG_SOURCES: Record<string, SourceDef> = {
@@ -69,6 +70,8 @@ export const LOG_SOURCES: Record<string, SourceDef> = {
   auto_deploy: { kind: 'doc', file: 'auto-deploy.json', what: "data/auto-deploy.json: the automatic portal deploy (w1634): what it waits for now, the deploy asked for, and the last 50 with their commit, pull requests, outcome and who was told" },
   machine_rollout: { kind: 'doc', file: 'machine-rollout.json', what: "data/machine-rollout.json: the update of every machine's daemon after a portal update, machine by machine" },
   unit_watchdog: { kind: 'doc', file: 'unit-watchdog.json', what: "data/unit-watchdog.json: every critical unit's state and the last 50 things the watchdog did (a restart and why)" },
+  // w4729: tailscaled was restarted four times on 2026-11-18 and only the FFBox host's journal said by whom.
+  path_health: { kind: 'path_health', what: "/run/fff/path-health.json: the FFBox host's path watch (deploy/vm/host/pathwatch.sh) as of its last pass, every layer ok or not, with each layer's last repair and when (a tailscaled restart by layer 2, 8 or 9 shows here even after it fixed things)" },
   // w1866: Lothsahn's orchestrator compacted every few messages and nobody could see what filled it.
   coordinator_context: { kind: 'context', what: "how the coordinators' conversations (the dispatcher's and each person's orchestrator's) grow between compactions (w1866): per cycle the start size and what it held, then the tokens each tool, kind of harness message and the coordinator's own output added, and which kinds of turn added them; counts only, computed from Claude Code's own transcripts, never their text (since and until pick cycles; grep a coordinator's name)" },
   // w1996: lothsahn, "We're wasting system resources like crazy locking beast down to a single timing job": before and after numbers.
@@ -102,6 +105,8 @@ export interface PortalLogsDeps {
   now(): number;
   /** coordinator_context: each coordinator's label and its Claude Code transcript, as the server finds it (never a worker's text). */
   coordinators?(): { label: string; file?: string }[];
+  /** path_health: the FFBox host watch's last status file in the VM as text (server/pathHealth.ts filePathHealth), undefined when there is none. */
+  pathHealth?(): string | undefined;
 }
 
 // ---------------------------------------------------------------- redaction
@@ -314,6 +319,19 @@ function readCleanup(d: PortalLogsDeps, p: Parsed): Raw {
   };
 }
 
+function readPathHealth(d: PortalLogsDeps, p: Parsed): Raw {
+  const text = d.pathHealth?.();
+  if (text === undefined) return { lines: [], order: 'in order', label: 'path-health.json', note: "path-health.json is not there: the FFBox host's path watch writes it on every pass (fff-vm-watch); none means the watch is not running or cannot reach the VM" };
+  if (text.length > DOC_MAX) throw new Error(`path-health.json is over ${DOC_MAX / 1024} KB: refused`);
+  let out = text;
+  try {
+    out = JSON.stringify(JSON.parse(text), null, 1);
+  } catch {
+    // not JSON: the lines as they are
+  }
+  return { lines: out.split('\n'), order: 'in order', label: 'path-health.json', window: p.sinceMs !== undefined || p.untilMs !== undefined ? 'since and until do not apply to a document: shown whole' : undefined };
+}
+
 function readDoc(d: PortalLogsDeps, p: Parsed & { def: Extract<SourceDef, { kind: 'doc' }> }): Raw {
   const r = readInData(d, path.join(d.dataDir, p.def.file), DOC_MAX);
   if (!r) return { lines: [], order: 'in order', label: p.def.file, note: `${p.def.file} is not there: it is written when ${p.name === 'unit_watchdog' ? 'the watchdog has something to report' : 'an update runs'}, and removed when it is done with` };
@@ -447,7 +465,7 @@ export async function readPortalLogs(d: PortalLogsDeps, input: PortalLogsInput):
   const p = parse(d, input);
   if (p.machine && p.def.kind !== 'cleanup' && p.def.kind !== 'bench_hours') throw new Error(`machine: only the cleanup and bench_hours sources take one (${p.name} is the portal's own).`);
   const raw =
-    p.def.kind === 'journal' ? await readJournal(d, p as never) : p.def.kind === 'cleanup' ? readCleanup(d, p) : p.def.kind === 'context' ? readContext(d, p) : p.def.kind === 'bench_hours' ? readBenchHours(d, p) : readDoc(d, p as never);
+    p.def.kind === 'journal' ? await readJournal(d, p as never) : p.def.kind === 'cleanup' ? readCleanup(d, p) : p.def.kind === 'context' ? readContext(d, p) : p.def.kind === 'bench_hours' ? readBenchHours(d, p) : p.def.kind === 'path_health' ? readPathHealth(d, p) : readDoc(d, p as never);
 
   // Redact the whole text first (a private key spans lines), then filter: a pattern never sees a secret.
   const clean = redactLogText(raw.lines.join('\n')).split('\n');

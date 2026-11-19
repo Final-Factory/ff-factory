@@ -318,3 +318,15 @@ test('w920: the real journal reader runs journalctl with fixed arguments, and sa
   }
   assert.match((await journalReader('win32')(q)).note ?? '', /does not run under systemd/);
 });
+
+test('w4729: path_health shows the host watch status file whole, the last repair of each layer included', async (t) => {
+  const dataDir = tmpData(t);
+  const file = JSON.stringify({ at: '2026-11-18T22:38:00Z', layers: [{ id: 2, name: 'tailscaled', verdict: 'ok', repair: '2026-11-18T22:37:31Z systemctl restart tailscaled: fixed: BackendState=Running' }] });
+  const d = { ...deps(dataDir), pathHealth: () => file };
+  const r = await readPortalLogs(d, { source: 'path_health', grep: 'restart' });
+  assert.match(r, /path-health\.json/);
+  assert.match(body(r), /"repair": "2026-11-18T22:37:31Z systemctl restart tailscaled: fixed/);
+  assert.match(await readPortalLogs({ ...deps(dataDir), pathHealth: () => undefined }, { source: 'path_health' }), /path-health\.json is not there/);
+  assert.match(await readPortalLogs(deps(dataDir), { source: 'path_health' }), /is not there/);
+  assert.match(await readPortalLogs(d, {}), /- path_health: /);
+});

@@ -38,6 +38,7 @@ import { ghRunner, githubFromVault, githubPersonOf, githubTokens } from './githu
 import { clashGates, clashLine, expectedFiles, ffuStartClashes, FfuPrReads } from './ffuOverlap.ts';
 import { namedIds, READ_LIST_MAX, READ_MAX_CHARS, readWork, type ReadWorkArgs } from './workRead.ts';
 import { readPortalLogs, realJournal, type PortalLogsInput } from './portalLogs.ts';
+import { PATH_HEALTH_FILE, filePathHealth } from './pathHealth.ts';
 import { cliTranscriptPath } from './cliTranscript.ts';
 
 /** A live state as list_work takes it (shared/workState.ts). */
@@ -2227,6 +2228,7 @@ export class Agents {
         },
         machineIds: () => ms.list().map((m) => m.id),
         now: () => Date.now(),
+        pathHealth: filePathHealth(process.env.FFF_PATH_HEALTH_FILE || PATH_HEALTH_FILE),
         // w1866: the coordinators' own transcripts, found here; the worker's text never names a file
         coordinators: () =>
           [...this.sessions.sessions.values()]
