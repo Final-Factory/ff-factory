@@ -217,6 +217,15 @@ A drop is a close `by ping-timeout` or `by network`, or an open with `why=stale`
 To explain a person's drops: `regex: "page socket .*<login>"` around the time, with `grep: "event loop: blocked"` for
 the same minutes.
 
+
+When every socket closes `by network` in the same second, alongside `machine <id> disconnected` for each machine and
+`provider ffbox: ... closed 1006`, the portal did not drop them: tailscaled restarted underneath. Read source `tailscaled`
+with `regex: "got signal|Program starting: v"`. On 2026-11-18 (w4723, measured) tailscaled got a clean SIGTERM at 14:55Z,
+18:19Z and 22:37Z with no health warning before it. Each restart cut every page and machine link, then Funnel failed for
+about 4 minutes (curl 35 from outside; `invalid-packet-filter ... rejecting all packets` once tailscaled was back), and
+lothsahn's Funnel page could not reconnect for 297 s. Two more Funnel-only drops followed in the next 8 minutes. What sent
+the SIGTERM is not in these logs (no agent transcript, and the host's pathwatch repairs a failing layer, not a healthy one).
+The steady `Drop: TCP{... > ...:59343} no rules matched` line, about one a minute all day, is background noise and not a drop.
 ## What it can and cannot reach
 
 - **A fixed list.** `LOG_SOURCES` in `server/portalLogs.ts`. The worker's text picks an entry of it; it never becomes a path
