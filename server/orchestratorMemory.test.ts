@@ -251,7 +251,7 @@ test('orchestrator options: each its own memory folder, Write and Edit behind th
     assert.ok(!x.systemPrompt.append.includes('read-only for now') && !rules.includes('read-only for now'));
     // The views it can ask FFBox live for (w218), named where it reads about FFBox, so a stale schema copy in a resumed
     // chat is not taken as the truth (w224).
-    for (const v of ['show config', 'board_log', 'status', 'conversation with id', 'Last known, from <time>', 'it is out of date: the tool takes all nine', 'show dev_requests']) {
+    for (const v of ['show config', 'board_log', 'status', 'conversation with id', 'Last known, from <time>', 'it is out of date: the tool takes all seventeen', 'show dev_requests']) {
       assert.ok(rules.includes(v), `the FFBox rules name ${v}`);
     }
   }

@@ -192,7 +192,7 @@ export class StoreSink implements TransferSink {
 }
 
 /** A JSON text stored whole as an attachment (the manifest beside a report). */
-async function storeText(store: AttachmentStore, name: string, text: string, uploadedBy?: string): Promise<AttachmentRecord> {
+export async function storeText(store: AttachmentStore, name: string, text: string, uploadedBy?: string): Promise<AttachmentRecord> {
   const buf = Buffer.from(text, 'utf8');
   const u = store.begin({ name, size: buf.length, ...(uploadedBy ? { uploadedBy } : {}) });
   let rec: AttachmentRecord | undefined;
