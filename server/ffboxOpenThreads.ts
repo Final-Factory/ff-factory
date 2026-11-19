@@ -69,7 +69,7 @@ export function threadLines(t: OpenThread, textMax = LIST_TEXT): string[] {
     ? `conversation ${str(c.id, 20)}${c.state ? ` ${str(c.state, 20)}` : ''}${c.verdict ? ` verdict ${str(c.verdict, 30)}` : ''}${c.github_pr ? ` PR ${str(c.github_pr, 120)}` : ''}`
     : 'no FFBox conversation';
   const head =
-    `- ${str(t.created, 30) || '?'} #${str(t.channel, 64)} ${link} "${oneLine(str(t.title, 200)).replace(/"/g, "'")}"` +
+    `- ${str(t.created, 40) || '?'} #${str(t.channel, 64)} ${link} "${oneLine(str(t.title, 200)).replace(/"/g, "'")}"` +
     `${tags.length ? ` [${tags.join(', ')}]` : ''}${typeof t.messages === 'number' ? ` ${t.messages} msgs` : ''}` +
     `${t.archived ? ' (archived)' : ''}; ${conv}`;
   const out = [head];
@@ -80,8 +80,8 @@ export function threadLines(t: OpenThread, textMax = LIST_TEXT): string[] {
     const raw = typeof p.text === 'string' ? p.text.slice(0, textMax) : '';
     const text = raw.split(/\r?\n/).map((l) => clean(l, textMax)).join('\n').trim();
     out.push(
-      `  opening post by ${oneLine(str(p.author, 64)) || '?'}${p.bot ? ' (bot)' : ''} at ${str(p.created, 30) || '?'}` +
-        `${p.edited ? ` (edited ${str(p.edited, 30)})` : ''}${files.length ? `; files: ${files.join(', ')}` : ''}` +
+      `  opening post by ${oneLine(str(p.author, 64)) || '?'}${p.bot ? ' (bot)' : ''} at ${str(p.created, 40) || '?'}` +
+        `${p.edited ? ` (edited ${str(p.edited, 40)})` : ''}${files.length ? `; files: ${files.join(', ')}` : ''}` +
         `${typeof p.embeds === 'number' && p.embeds ? `; ${p.embeds} embeds` : ''}${p.from ? ` (from ${str(p.from, 60)})` : ''}:`,
     );
     out.push(...(text ? text.split(/\r?\n/).map((l) => `    ${l}`) : ['    (no text)']));
