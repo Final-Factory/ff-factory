@@ -65,7 +65,7 @@ import { activityLine, Waker } from './wake.ts';
 import { TIMER_LIMITS, Timers, scheduleText, type TimerView } from './timers.ts';
 import { EVEN_MARGIN, RAM_BUSY_PCT, benchText, buildOf, busyReasons, capacityLines, classRank, forPriority, hasRoom, holdReason, liveOf, loadText, lowestPriority, minOf, pairCanFinish, pairNoPlacement, pickComputer, placeId, pinnedWork, placementHint, reservedReason, roomEnough, roomForWork, roomNow, timedFacts, timedKindOf, timedPinRefusal, voiceVram, type Computer, type FirstKind, type NeedKind, type PlacementPrefs, type RoomNow, type TimedKind } from './placement.ts';
 import { MachinePauses, PAUSE_TICK_MS, pauseHold, pauseHolds, type HandBack } from './machinePause.ts';
-import { MOVE_AFTER_MS, NONE_MARK, ROOM_WAIT, briefOf, holdMoves, moveDecision, movedPrompt, stayLine, type MoveFacts } from './resumeMove.ts';
+import { MOVE_AFTER_MS, NONE_MARK, ROOM_WAIT, briefOf, holdMoves, homeWait, moveDecision, movedPrompt, stayLine, type MoveFacts } from './resumeMove.ts';
 import { playHolds, playLine } from '../shared/personPlay.ts';
 import { sandboxUseText, unitySlotsLine } from '../shared/fleet.ts';
 import { resumeWhereLine, stopWhereLine, type BeforeSend } from './resumeWhere.ts';
@@ -106,7 +106,7 @@ import { WAIT_LINE_CHARS, summaryBrief, summaryText, waitSummary } from '../shar
 import { isMyMove, waitingItemOf } from '../shared/waiting.ts';
 import { checkAsks } from '../shared/questionCard.ts';
 import { DECISIONS, attachmentsNote, describeItem, doneOf, handoverNote, isFor, isOpen, livePair, pairLegOf, ledgerOrder, names, overlapLine, priorityThenAge, replacedLeg, requestAsFiled, requestLineRule, startProblem } from './work.ts';
-import { cachedPlayerNote, fetchPlayerNote, macRefusedScenario, MAC_REFUSES_SCENARIO, minPriorityText, needsBuild, needsLive, needsOf, needsTimed, pairRoom, pairText, cargoShortOf, isCargoRepo, PAIR_HOLD_MS, PAIR_MAX_LEGS, TIMED_HOLD_MS } from '../shared/capacity.ts';
+import { cachedPlayerNote, fetchPlayerNote, macRefusedScenario, MAC_REFUSES_SCENARIO, minPriorityText, needsBuild, needsLive, needsOf, needsUi, needsTimed, pairRoom, pairText, cargoShortOf, isCargoRepo, PAIR_HOLD_MS, PAIR_MAX_LEGS, TIMED_HOLD_MS } from '../shared/capacity.ts';
 import { BUILD_PLAN_DOC, BuildPlans, NOT_RELEASE, type BuildPlan, type SeatResult } from './buildPlans.ts';
 import { SEAT_GRACE_MS, seatAction, seatNotice } from './releaseSeat.ts';
 import { RELEASE_RULES } from './releaseLanes.ts';
@@ -3603,6 +3603,14 @@ export class Agents {
       return true;
     }
     if (now - (Date.parse(q.at) || now) < MOVE_AFTER_MS || info.pendingPermissions.length || isMidTurn(info)) return undefined;
+    // w4738: released while it waited (on CI, a pair run, a person), it waits a while for a sandbox on its own computer first.
+    const home = ROOM_WAIT.test(hold) ? homeWait(info.placeReleased, Date.parse(q.at) || now, now) : undefined;
+    if (home) {
+      const why = `waits for its own computer: ${home}`;
+      if (this.roomKept.get(info.id) !== why) console.log(`room move: worker ${info.id} on ${info.machineId}/${info.machineSandbox} ${why}`);
+      this.roomKept.set(info.id, why);
+      return `${hold}; ${home}`;
+    }
     const { reqs, owned, gone } = this.movableWorkOf(info);
     if (owned.length || gone.length) this.unmemoized(() => this.leaveToOwners(info, owned, gone, hold, !reqs.length));
     if (!reqs.length && (owned.length || gone.length)) {
@@ -3829,6 +3837,7 @@ export class Agents {
           priority: w.priority,
           kind: needsOf(w),
           ...(first ? { first } : {}),
+          ...(needsUi(w) ? { ui: true } : {}),
           // w2521: its constraints' "must run on X" pins it too (w2499 went to m3 by this move at 02:48Z on 2026-10-29).
           ...(w.queuedFor?.needs?.length ? { pinned: w.queuedFor.needs } : this.pinOf(w) ? { pinned: this.pinOf(w)!.ids } : {}),
           ...(w.timedLeg ? { timedLeg: true } : {}),

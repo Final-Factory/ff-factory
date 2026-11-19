@@ -2253,7 +2253,26 @@ LothDesktop and Beast, not just when BEAST is full").
     could take it it waits as before ("no other computer can take it now (w2046)").
   - **WRONG.** Any other resume waiting for room on its computer while another computer it fits has had room for
     `ROOM_STAND_MS` reads Queued "… it should move there (w2046)" with `roomOn`, the ledger's WRONG flag
-    (`shared/workState.ts`).
+    (`shared/workState.ts`). The home wait and the one-Unity-slot rule below are not WRONG either.
+  - **A worker released while it waited waits for its own computer first** (w4738, r290 fix 4; lothsahn: "File all six
+    fixes from r290"). On 2026-11-17 w4488's next step moved twice, lothdesktop to the m5 at 14:11:46Z (released on a pair
+    run's wait) and the m5 to biscuit at 15:34:27Z (released on CI), each 31 to 43 s after its message, and each a fresh
+    session that re-read its work (about 14 min, r290). A sandbox freed on the computer a move left 1 to 12.1 min after each
+    of that day's five moves (measured, the portal journal). So a worker released on a wait (CI, w846; a deploy, a person, a
+    pair run's partner or another request, w890; `placeReleased.wait`, set by `releaseStep` and `saveThenRelease`) waits up
+    to `HOME_WAIT_MS` (15 min, from its message) for a sandbox on its own computer, its Queued line marked "it waits for a
+    sandbox on its own computer (w4738)" with the time it moves (`resumeMove.ts homeWait`; journal `room move: worker <id>
+    ... waits for its own computer` once). Its sandbox is still released at once (w846, w890 stand), and released workers
+    still take the next free sandbox there ahead of new work of their priority or lower, while higher-priority queued work
+    takes it first (w3507, w4620: strict priority holds; the wait is capped, so it never holds work back past 15 min). A
+    worker released idle or with a far check-in, a hold on its computer (w4238) and an away computer (w2544) move as before.
+  - **UI-heavy work does not move to a computer with one Unity slot while another fits** (w4738: w4488's stills leg went to
+    biscuit, `pool.maxUnity` 1). UI-heavy is game work that needs a Live view (`needsLive`) or whose title, brief or notes
+    name stills, screenshots, clips, play mode, a playtest, the HUD, the UI gate's tools (ui_look, ui_layout, ui-critic,
+    unity-ui) or "UI" in capitals (`shared/capacity.ts needsUi`, `UI_HEAVY_WORDS`; a guess from words, as Live view and
+    build work are known). `moveDecision` then leaves out computers whose `maxEditors` is 1; when only such a computer has
+    room it waits ("no other computer can take it now (w2046)", naming "one Unity slot ... (w4738)"), except off an away
+    computer, where it may go there when nothing else fits. It governs moves; new work's first placement is unchanged.
 - **Higher-priority work frees a sandbox** (w3507, lothsahn, 2026-11-07: "Can you please make sure sandbox availability is
   considered based on priority by the dispatcher?"). Before it, priority only ordered the queue: w3496 (a strut fix, high
   then urgent) sat Queued over an hour while m5 had 3 sandboxes held, 1 of 3 agents mid-turn and no editor open
