@@ -254,6 +254,19 @@ joins the waiting group or goes right after the next exclusive one. The daemon r
 or waiting (`readBenchQueue`, `MachineStats.benchQueue`): a release build goes to another computer meanwhile. Editor-gate
 tickets carry the worker's `FF_SESSION_ID`, so they queue at its priority.
 
+**A build joins the running nightly** (w4736, r290's fix 2; game repo `RULES_VERSION` 8). A shared ticket is not held
+back by a waiting exclusive ticket of its own or lower priority that the nightly's shared ticket (the daemon's
+`"exempt": "nightly"` mark) holds back: that exclusive cannot start before the nightly ends anyway. On LothDesktop on
+2026-11-17 (measured, `history.jsonl`) w4536's `build_player` waited 5954 s and w4535's build 5976 s behind w4530's timed
+leg, which itself waited for the nightly; under the rule both start at once. Strict priority stays (a higher-priority
+exclusive still holds a build back), an ordinary shared group still holds new work back behind a same-priority exclusive,
+and once the nightly ends the joined builds are an ordinary group bounded by its hour. A build still waits behind a
+*running* timed turn (at most 30 minutes). Chosen over a build lane per machine (it would still run beside a timed run,
+and costs RAM and Unity slots) and over CI-built players per PR head (FFBox "is typically CPU bound if all the runners are
+busy", lothsahn). The same change makes a player-slot lease record its holder's process start, so a pid Windows has
+handed to another process no longer holds the slot. Game repo: `Documentation/Bench-Lock.md`, "A build joins the running
+nightly (w4736)".
+
 **A shared ticket waits for one exclusive turn at most** (w1962, lothsahn: "a shared bench-queue ticket (an editor start,
 a build) must not wait for hours behind one exclusive timed ticket after another"). The game repo's `bench_queue.py`
 does it since its `RULES_VERSION` 1, but each ticket's helper decides under its own branch's copy, and a branch from before
