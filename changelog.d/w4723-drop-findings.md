@@ -1,0 +1,1 @@
+- w4723: docs/portal-logs.md says how to tell a tailscaled restart from a portal-side page drop.
