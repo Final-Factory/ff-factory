@@ -594,6 +594,11 @@ Factory is unreachable or refuses, and that fallback does the work itself (below
 [Dev requests](ffbox-connector-contract.md#dev-requests-an-operators-ffdev-turn-handed-to-ff-factory); FF Factory's
 side is `server/devRequests.ts` and `Orchestrators.fileDevRequest` (`server/orchestrators.ts`).
 
+A dev request about a desync, a crash or a hang (a report id or board key it names, else its words; a stutter or
+hitch is not a hang) is filed **urgent**, and an open request it joins is raised to urgent (w4810; [intake.md, "Desyncs,
+crashes and hangs are urgent"](intake.md#desyncs-crashes-and-hangs-are-urgent)). FFBox's crash and desync diagnoses and
+fix branches are filed urgent the same way, by their report kind or board key.
+
 ### Who may hand work to FF Factory (w2887)
 
 Lothsahn, 2026-11-02: "Ffbox should never hand off untrusted requests like ffagent. For ffdev it can", "ffdiagnose can

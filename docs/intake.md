@@ -191,6 +191,32 @@ at most, a worker that investigates a defect under rules that forbid design, bal
 stop with a design question. The classification and its reason are on the request (`WorkItem.triage`), in
 `list_work`, in the dispatcher's notice and on the page.
 
+## Desyncs, crashes and hangs are urgent
+
+lothsahn, 2026-11-19, w4810: "Desyncs and crashes and hangs should be urgent. Update the rules". Every request whose
+work is a desync, a crash or a hang is filed **urgent** by itself (`server/failurePriority.ts`):
+
+| Source | What decides | Where |
+|---|---|---|
+| FFBox crash, hang and desync diagnoses, fix branches, desync events | the structured signal only: a report id's kind (`…Z-crash-…`, `-hang-`, `-desync-`), the board key (`crash:`, `hang:`, `desync:`), a desync group, the `ffbox-crash` / `ffbox-desync` triage | `Orchestrators.fileIntake`, `attachDiagnosis` |
+| Discord bug threads and requests, FFBox requests | no structured field (the game's bug-report embed carries no category), so a conservative word check on the title and the brief's first 400 characters | `Orchestrators.fileIntake` |
+| The nightly lab's regressions | the result's desync reports, else the oracle's own reason line naming a crash or a hang; still urgent once the failing code shipped, high otherwise | `nightlyRules.ts` `nightlyPriority` |
+| FFBox dev requests | a report key the operator's message names, else the word check | `Orchestrators.fileDevRequest` |
+| `request_work` on the game repo | a report key, else the word check (another repo's request keeps what was asked) | `Orchestrators.file` |
+
+- **A hitch is not a hang.** A hang word (hangs, freezes, stops responding) with a hitch, stutter, lag, frame-time
+  spike, fps, slowness or performance word in the title or the brief's opening files nothing urgent. "Hangar" is not a
+  hang, and a request about this rule itself ("urgent by default") is not one either.
+- **Never lowers.** A request asked for at frantic stays frantic; one below urgent is raised.
+- **Urgent approves nothing.** An intake request that needs a person's approval is still filed `approval: pending` and
+  waits for a reviewer; only its place in the queue moves.
+- **Already open.** When the intake sees the same report again (a repeat, a merged twin, a re-sent diagnosis), an open
+  request below urgent is raised and its log says why. Any other open desync, crash or hang request below urgent:
+  an orchestrator raises its person's with `update_work` priority urgent, and the dispatcher, which sets no priority
+  itself, asks the requester's orchestrator to in its `decide_work` note (both prompts say so, `server/agents.ts`).
+- Every raise writes one line to the request's log: `priority normal → urgent: a crash (its report … is a crash
+  report); desyncs, crashes and hangs are urgent (lothsahn, w4810). Urgent approves nothing.`
+
 ## Approval, caps and auto-approve
 
 - A request that **needs a human** is filed with `approval: pending`. The dispatcher does not hear of it, `start_agent`
@@ -654,8 +680,8 @@ ledger request, or a line on the request already fixing it.
   `read_report` reads it from any computer; the brief names it by id. read_work's facts and the nightly worker rules
   also list every scenario from the request's `source.nightly.scenarios`, whatever a brief kept.
 - **The request.** Title `Nightly e2e: <scenario> fails on master <sha9>` (`… (shipped in 0.50.0.53)` when it did);
-  priority **urgent when the failing code is in a release, high otherwise**; triage `regression`; billed to the system
-  payer. The brief carries the commit tested, the scenario and its file, the oracle's verdict, the last green and first
+  priority **urgent when the failing code is in a release or the night saw a desync, crash or hang (w4810), high
+  otherwise**; triage `regression`; billed to the system payer. The brief carries the commit tested, the scenario and its file, the oracle's verdict, the last green and first
   red nights and the compare link, the release line, the regression-ledger entries, the evidence folder on the lab, the
   report's paths on the lab and on BEAST, the repro command, "reproduce first, then fix the bug or fix the test", and
   "determinism-critical: start its worker on Opus". The worker rules (`workerRules`) repeat the method, forbid hiding a

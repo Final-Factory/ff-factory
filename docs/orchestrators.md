@@ -238,7 +238,9 @@ on before acting on it (server/agents.ts `FEWER_CALLS`, tested in server/evidenc
 
 ## Requests and the ledger
 
-`request_work {title, brief, priority, constraints, related_ids, attachments}` files a request (`w12`). `attachments`
+`request_work {title, brief, priority, constraints, related_ids, attachments}` files a request (`w12`). A game-repo
+request about a desync, a crash or a hang is filed **urgent** whatever priority was asked, unless higher (w4810,
+[intake.md](intake.md#desyncs-crashes-and-hangs-are-urgent)); an orchestrator raises one already open with `update_work`. `attachments`
 are ids of files the person attached to their message (saves, bug-report zips, logs): the request keeps them, and every
 worker started for it gets a copy in its `Inbox/` ([attachments.md](attachments.md)). Before the dispatcher sees it,
 the server (`server/work.ts`) does three things:

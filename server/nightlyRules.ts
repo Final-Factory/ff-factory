@@ -3,6 +3,7 @@
 // against the ledger and files them. The lab is the team's own (FinalFactory scripts/nightly/ffnightly.py) and posts
 // with a scoped API key, but its text is still cleaned and cut before it reaches a brief.
 import { cleanLine, type IntakeDraft, type IntakeSettings } from './intakeRules.ts';
+import { wordFailure, type Failure } from './failurePriority.ts';
 import type { NightlyNight, NightlyRelease, WorkPriority, WorkTriage } from '../shared/types.ts';
 
 export const NIGHTLY_REPORT_VERSION = 1;
@@ -201,9 +202,22 @@ export function nightlySkip(r: NightlyResult, s: IntakeSettings['nightly']): str
   return n >= s.flakyNights ? undefined : `flaky ${n} night(s) running, under the ${s.flakyNights} that file it`;
 }
 
-/** Urgent when the failing code shipped to players; high otherwise (Ben, 2026-09-30). */
+/**
+ * A nightly regression that is a desync, a crash or a hang (w4810): the desync reports the lab attached, else the lab's own
+ * oracle line (its reason, or the first attempt's) naming one. A hitch or a slow frame is not a hang (failurePriority.ts).
+ */
+export function nightlyFailure(r: NightlyResult): Failure | undefined {
+  if (r.desyncReports?.length) return { kind: 'desync', why: `the lab attached desync report ${r.desyncReports[0]}` };
+  const f = wordFailure(r.reason ?? '') ?? wordFailure(r.firstTry ?? '');
+  return f ? { ...f, why: `the lab's oracle line says "${f.why.replace(/^its \w+ says "|"$/g, '')}"` } : undefined;
+}
+
+/**
+ * Urgent when the failing code shipped to players (Ben, 2026-09-30) or a scenario failed on a desync, a crash or a hang
+ * (lothsahn, w4810: "Desyncs and crashes and hangs should be urgent"); high otherwise.
+ */
 export function nightlyPriority(results: readonly NightlyResult[]): WorkPriority {
-  return results.some((r) => r.release?.shipped === 'yes') ? 'urgent' : 'high';
+  return results.some((r) => r.release?.shipped === 'yes' || nightlyFailure(r)) ? 'urgent' : 'high';
 }
 
 const short = (sha: string) => sha.slice(0, 9);
