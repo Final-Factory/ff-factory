@@ -316,8 +316,10 @@ pl_check_ssh() {
 
 # pl_read_status: tailscale status --json into TS, the evidence into EV; fails unless it is Running, online and healthy.
 # Not run in a $(...): it sets the globals the other layers read.
-# HARD=1: tailscaled does not answer, is not Running or is offline (a restart is the cure); 0: it runs and reports a health
-# warning (a restart would only cut its connections for a warning that may be harmless).
+# HARD=1: tailscaled is not running (systemd says so) or its backend is not Running (a restart is the cure); 2: it runs, but
+# its status could not be read or it says Online=false (a CLI read that hung or a control long-poll between reconnects; w4729:
+# three such restarts on 2026-11-18 cut every page and machine link and Funnel for minutes while the portal answered from
+# outside); 0: it runs and reports a health warning (a restart would only cut its connections for a warning that may be harmless).
 TS="" EV="" HARD=0
 SELF4="" SELF6="" DNS="" PEERAPI_PORTS=""
 pl_read_status() {
@@ -326,6 +328,7 @@ pl_read_status() {
   out=$(gx "$PL_CMD_TS") && rc=0 || rc=$?
   if [ "$rc" -ne 0 ] || ! jq -e 'type == "object"' >/dev/null 2>&1 <<<"$out"; then
     active=$(gx 'systemctl is-active tailscaled 2>&1' || true)
+    [ "$active" != active ] || HARD=2
     TS=""
     EV="tailscale status failed (exit $rc; systemd says tailscaled is ${active:-unknown}): ${out:0:240}"
     return 1
@@ -345,7 +348,7 @@ pl_read_status() {
   on=$(jq -r '.Self.Online // false' <<<"$TS")
   health=$(jq -r '(.Health // []) | join(" | ")' <<<"$TS")
   ver=$(jq -r '(.Version // "?") | split("-")[0]' <<<"$TS")
-  if [ "$st" = Running ] && [ "$on" = true ]; then HARD=0; fi
+  if [ "$st" = Running ] && [ "$on" = true ]; then HARD=0; elif [ "$st" = Running ]; then HARD=2; fi
   if [ "$st" = Running ] && [ "$on" = true ] && [ -z "$health" ]; then
     EV="BackendState=Running Online=true Health=none (tailscale $ver)"
     return 0
@@ -358,8 +361,18 @@ path_l2() {
   local fails n why fixed=0 want=0
   if pl_read_status; then state_set L2_restarted ""; pl_set 2 ok "$EV"; return 0; fi
   fails=$(($(sget L2_fails 0) + 1))
-  # A health warning alone is restarted for once, and only while the outside probe fails too.
-  if [ "$HARD" = 1 ]; then want=1; elif [ -z "$(sget L2_restarted)" ] && [ "$(sget L9_verdict)" = fail ]; then want=1; fi
+  # A health warning alone is restarted for once, and only while the outside probe fails too. A running tailscaled whose
+  # status read failed or that says Online=false is not restarted while the outside probe (layer 9, the last pass) answers:
+  # the path works, and a restart would break it for minutes (w4729).
+  if [ "$HARD" = 1 ]; then
+    want=1
+  elif [ "$HARD" = 2 ] && [ "$(sget L9_verdict)" != ok ]; then
+    want=1
+  elif [ "$HARD" = 2 ]; then
+    EV="$EV; tailscaled runs and the portal answers from outside, so it is not restarted"
+  elif [ -z "$(sget L2_restarted)" ] && [ "$(sget L9_verdict)" = fail ]; then
+    want=1
+  fi
   if [ "$want" = 1 ] && [ "$fails" -ge "$PW_FAILS_BEFORE_ALERT" ] && pl_ts_restart_ok; then
     state_set L2_restarted 1
     why=$EV
