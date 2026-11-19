@@ -13,7 +13,7 @@ const MIN = 60_000;
 test('a worker released while it waited waits up to HOME_WAIT_MS for its own computer, then moves as before', () => {
   const queued = NOW - 31_000;
   const line = homeWait({ wait: true }, queued, NOW);
-  assert.ok(line?.startsWith(HOME_MARK), line);
+  assert.ok(line?.startsWith(HOME_MARK), line ?? 'no line');
   assert.match(line!, /\(w4738\)/, 'the ledger reads the mark: not WRONG');
   assert.match(line!, /at 15:48Z/, 'it names when it moves');
   assert.equal(homeWait({ wait: true }, queued, queued + HOME_WAIT_MS), undefined, 'past the wait it moves');
@@ -72,7 +72,7 @@ test('needsUi: stills, the UI gate\'s tools, play mode, a Live view or "UI" in c
   assert.equal(needsUi(item({ title: 'w4488: research panel', brief: 'take stills with ui_look/ui_layout and run a fresh ui-critic' })), true);
   assert.equal(needsUi(item({ brief: 'verify it in play mode' })), true);
   assert.equal(needsUi(item({ brief: 'the build menu UI overlaps' })), true);
-  assert.equal(needsUi(item({ liveView: true })), true);
+  assert.equal(needsUi(item({ liveView: { at: '2026-11-17T15:00:00Z', session: 'c1da3cb0', machine: 'lothdesktop' } })), true);
   assert.equal(needsUi(item({ brief: 'fix the save upgrade step' })), false);
   assert.equal(needsUi(item({ brief: 'edit server/guide.ts and its build' })), false);
   assert.equal(needsUi(item({ needs: 'agent', brief: 'take stills of the portal' })), false);
