@@ -999,6 +999,11 @@ const USAGE = `unity-slot: take Unity slots on this machine before launching Uni
       under it ends the command and exits 75 (run it again). A ticket it cannot take stops it before the command: exit 77
       when the machine takes no exclusive tickets (w1861: hand the timed run back), 69 when the queue's helper fails
       (w1860). FF_BENCH_TICKETS=off runs without one, and then it waits out another worker's timed run
+      --detach [--log FILE]: the wait and the run go on in a process of their own, apart from this call, which prints
+      the job id and returns (w4740: a background task killed at its 2 h limit while the run still queued for a slot).
+      Output goes to FILE (default $TMPDIR/unity-slot-<id>.log)
+  unity-slot wait <id>
+      follow a detached run's log and exit with its command's exit code; run it again if it was cut off
   unity-slot acquire [--count N] [--label TEXT] [--project PATH]... [--ttl MIN] [--timeout MIN]
       wait for N slots and hold them in the background (prints the slot id) until release or the ttl (default 120)
   unity-slot release <id>
@@ -1019,6 +1024,8 @@ interface CliOpts {
   dir?: string;
   forMs?: number;
   bench?: BenchMode;
+  detach?: boolean;
+  log?: string;
   rest: string[];
 }
 
@@ -1048,6 +1055,8 @@ export function parseCli(argv: string[]): { cmd: string; o: CliOpts } {
     else if (a === '--limit') o.limit = num(val());
     else if (a === '--dir') o.dir = val();
     else if (a === '--for') o.forMs = num(val()) * 60_000;
+    else if (a === '--detach') o.detach = true;
+    else if (a === '--log') o.log = path.resolve(val());
     else if (a === '--bench') {
       const v = val();
       if (v !== 'shared' && v !== 'exclusive') throw new Error(`--bench takes shared or exclusive, not "${v}"`);
@@ -1163,8 +1172,19 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env)
   const d = realClientDeps(dir);
   const holder = env.FF_UNITY_HOLDER || undefined;
   const held = Number(env.FF_UNITY_SLOT_HELD) || 0;
+  const job = env.FF_UNITY_SLOT_JOB && JOB_ID.test(env.FF_UNITY_SLOT_JOB) ? env.FF_UNITY_SLOT_JOB : undefined;
+  if (cmd === 'run' && o.detach && !job) {
+    if (!o.rest.length) throw new Error('run needs a command after --');
+    return startDetached(argv, o, dir, env, d.say);
+  }
+  if (cmd === 'wait') return waitJob(dir, o.rest[0], d.sleep);
   if (cmd === 'run') {
     if (!o.rest.length) throw new Error('run needs a command after --');
+    // w4740: a detached run (run --detach) says how it ended in its job's exit file, which `unity-slot wait` reads.
+    const ended = (code: number) => {
+      if (job) writeAtomic(jobExitFile(dir, job), JSON.stringify({ code, ended: new Date().toISOString() }));
+      return code;
+    };
     let h: Held | undefined;
     // w1615: no long wait under the bench lock. A run made by a process that holds it waits for a slot at most
     // HELD_WAIT_CAP_MS: an editor holding the last slot may belong to a worker that waits for that very lock.
@@ -1216,7 +1236,7 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env)
               ? 'Hand the timed work back to your orchestrator for another machine.'
               : 'Run it again once the queue works here (`python scripts/bench/bench_queue.py status`); FF_BENCH_TICKETS=off runs it without a ticket, for a run outside FF Factory only.'),
         );
-        return noTimed ? EXIT_NO_TIMED_RUNS : EXIT_NO_TICKET;
+        return ended(noTimed ? EXIT_NO_TIMED_RUNS : EXIT_NO_TICKET);
       }
     }
     // w1860: a run with no ticket of its own (FF_BENCH_TICKETS=off; one that cannot be taken stops above) still never starts beside
@@ -1229,10 +1249,11 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env)
       }
     }
     const run = commandToSpawn(o.rest, process.platform, env);
+    const { FF_UNITY_SLOT_JOB: _job, ...childEnv } = env;
     const child = spawn(run.cmd, run.args, {
       stdio: 'inherit',
       shell: run.shell,
-      env: { ...env, FF_UNITY_SLOT_HELD: String(Math.max(held, o.count)), ...(h?.id ? { FF_UNITY_SLOT_ID: h.id } : {}), ...(ticketName ? { FF_BENCH_TICKET: ticketName } : {}) },
+      env: { ...childEnv, FF_UNITY_SLOT_HELD: String(Math.max(held, o.count)), ...(h?.id ? { FF_UNITY_SLOT_ID: h.id } : {}), ...(ticketName ? { FF_BENCH_TICKET: ticketName } : {}) },
     });
     process.on('SIGINT', () => child.kill('SIGINT'));
     // w1874: the run dies with whatever started it. SIGTERM or SIGHUP (a task or terminal ended) ends the whole tree, hard
@@ -1250,7 +1271,8 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env)
     for (const out of [process.stdout, process.stderr]) out.on('error', () => undefined);
     process.on('SIGTERM', () => stopRun('stopped (SIGTERM): ending the run and what it started (w1874)'));
     process.on('SIGHUP', () => stopRun('stopped (SIGHUP: its terminal or task ended): ending the run and what it started (w1874)'));
-    const caller = process.ppid;
+    // A detached run (w4740) left its caller on purpose: the session's leftovers sweep and SIGTERM end it instead.
+    const caller = job ? 0 : process.ppid;
     const callerWatch = setInterval(() => {
       if (callerGone(caller, process.platform)) stopRun(`its caller (pid ${caller}) is gone, so nobody will use the result: ending the run and what it started (w1874)`);
     }, CALLER_WATCH_MS);
@@ -1275,14 +1297,14 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env)
         d.say(`could not start ${o.rest[0]}: ${e.message}`);
         h?.stop();
         ticket?.release();
-        resolve(127);
+        resolve(ended(127));
       });
       child.on('exit', (code, sig) => {
         clearInterval(callerWatch);
         if (watch) clearInterval(watch);
         h?.stop();
         ticket?.release();
-        resolve(revoked ? EXIT_REVOKED : (code ?? (sig ? 128 : 1)));
+        resolve(ended(revoked ? EXIT_REVOKED : (code ?? (sig ? 128 : 1))));
       });
     });
   }
@@ -1374,6 +1396,106 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env)
   }
   process.stdout.write(`${USAGE}\n`);
   return cmd === 'help' || cmd === '--help' ? 0 : 2;
+}
+
+/** A detached run's job id (w4740). */
+export const JOB_ID = /^[0-9a-z]{6,12}-j-[0-9a-f]{6}$/;
+const jobsDir = (dir: string) => path.join(dir, 'jobs');
+export const jobFile = (dir: string, id: string) => path.join(jobsDir(dir), `job-${id}.json`);
+export const jobExitFile = (dir: string, id: string) => path.join(jobsDir(dir), `job-${id}.exit.json`);
+
+interface JobFile {
+  id: string;
+  pid: number;
+  label: string;
+  log: string;
+  session?: string;
+  started: string;
+}
+
+/**
+ * w4740 (r290, w4488 on LothDesktop, 2026-11-17): a build started as `unity-slot run` in a background task queued 1 h 50 min
+ * for a slot and was killed with its task at Claude Code's 2 h limit, 10 min into the build: the queue's time counts
+ * toward the task's. `run --detach` runs the same `run` in a process of its own (its own session or process group, not the
+ * task's), its output in a log, and returns at once with the job id; `unity-slot wait <id>`, in a background task, follows
+ * the log and exits with the command's code, and is simply run again if that task is cut off. The job keeps the worker's
+ * environment (FF_SESSION_ID), so the session's leftovers sweep still ends it when the worker is done (machine/leftovers.ts).
+ */
+function startDetached(argv: string[], o: CliOpts, dir: string, env: NodeJS.ProcessEnv, say: (l: string) => void): number {
+  const id = `${Date.now().toString(36)}-j-${randomBytes(3).toString('hex')}`;
+  const log = o.log ?? path.join(env.TMPDIR || env.TEMP || os.tmpdir(), `unity-slot-${id}.log`);
+  fs.mkdirSync(jobsDir(dir), { recursive: true });
+  fs.mkdirSync(path.dirname(log), { recursive: true });
+  // The same arguments without --detach (only before the command's --: the command's own are its own).
+  const sep = argv.indexOf('--');
+  const args = argv.filter((a, i) => !(a === '--detach' && (sep < 0 || i < sep)));
+  const fd = fs.openSync(log, 'a');
+  let pid: number | undefined;
+  try {
+    const child = spawn(process.execPath, [...process.execArgv.filter((a) => /strip-types|transform-types/.test(a)), import.meta.filename, ...args], {
+      detached: true,
+      stdio: ['ignore', fd, fd],
+      windowsHide: true,
+      env: { ...env, FF_UNITY_SLOT_JOB: id, FF_UNITY_SLOTS: dir },
+    });
+    child.unref();
+    pid = child.pid;
+  } finally {
+    fs.closeSync(fd);
+  }
+  if (!pid) throw new Error('run --detach: the job did not start');
+  const f: JobFile = { id, pid, label: labelOf(o), log, ...(env.FF_SESSION_ID ? { session: env.FF_SESSION_ID } : {}), started: new Date().toISOString() };
+  writeAtomic(jobFile(dir, id), JSON.stringify(f));
+  process.stdout.write(`${id}\n`);
+  say(`started as job ${id} (pid ${pid}), apart from this call: it waits for its slot and runs on its own, output in ${log}. Wait for it with \`unity-slot wait ${id}\` (a background task; run it again if that is cut off).`);
+  return 0;
+}
+
+/** How much of a long log `unity-slot wait` shows first: the end of it, not a whole build log again on every re-run. */
+const WAIT_TAIL_BYTES = 16 * 1024;
+
+/** w4740: follow a detached run's log and return its command's exit code (1 when its job ended without one). */
+async function waitJob(dir: string, id: string | undefined, sleep: (ms: number) => Promise<void>): Promise<number> {
+  if (!id || !JOB_ID.test(id)) throw new Error('wait needs the job id run --detach printed');
+  const f = readJson<JobFile>(jobFile(dir, id));
+  if (!f) throw new Error(`no detached run ${id} here (${jobsDir(dir)})`);
+  let pos = 0;
+  try {
+    const size = fs.statSync(f.log).size;
+    if (size > WAIT_TAIL_BYTES) {
+      pos = size - WAIT_TAIL_BYTES;
+      process.stdout.write(`[unity-slot wait: the log's last ${WAIT_TAIL_BYTES / 1024} KB; all of it is in ${f.log}]\n`);
+    }
+  } catch {
+    /* not written yet */
+  }
+  const follow = () => {
+    let fd: number | undefined;
+    try {
+      fd = fs.openSync(f.log, 'r');
+      const buf = Buffer.alloc(64 * 1024);
+      for (let n; (n = fs.readSync(fd, buf, 0, buf.length, pos)) > 0; pos += n) process.stdout.write(buf.subarray(0, n));
+    } catch {
+      /* not written yet */
+    } finally {
+      if (fd !== undefined) fs.closeSync(fd);
+    }
+  };
+  for (let gone = 0; ; ) {
+    follow();
+    const exit = readJson<{ code: number }>(jobExitFile(dir, id));
+    if (exit) {
+      follow();
+      process.stderr.write(`[unity-slot] job ${id} (${f.label}) ended: exit ${exit.code}\n`);
+      return exit.code;
+    }
+    // Ended with no word (killed hard, the machine restarted): a second look first, the exit file may be on its way.
+    if (!isAlive(f.pid) && ++gone >= 2) {
+      process.stderr.write(`[unity-slot] job ${id} (${f.label}, pid ${f.pid}) is gone without an exit code: it was killed (the session's leftovers sweep, a restart). The end of its log is above.\n`);
+      return 1;
+    }
+    await sleep(2000);
+  }
 }
 
 /** Whether a process is alive (EPERM: it is, someone else's). */

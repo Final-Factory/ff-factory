@@ -71,6 +71,27 @@ test('a variant takes -ff switches only, never the run\'s own or a command', () 
   assert.match(timedArgsProblem(['-toString']) ?? '', /not a -ff switch/);
 });
 
+test('w4740: a switch joined to its value by = and a file of the build folder pass; a path outside it is refused with the way', () => {
+  // w4591's refused call (transcript 25db2adf, 2026-11-17 18:13): both forms, and the absolute temp-folder path.
+  assert.equal(timedArgsProblem(['-ffFeatures=station-multiselect', '-ffDeckTour', 'tour.json', '-ffDeckTourOut', 'out/tour', '-ffDeckTourSize', 'none']), undefined);
+  assert.equal(timedArgsProblem(['-ffDeckTour', 'tours\\a.json']), undefined);
+  assert.equal(timedArgsProblem(['-ffBenchStartTile=-1,-228']), undefined);
+  for (const outside of ['V:/ffw/tmp/ffa-25db2adf/w4591/tour.json', '/tmp/tour.json', '\\\\host\\share\\t.json', '../tour.json', 'a/../../t.json', 'C:tour.json']) {
+    assert.match(timedArgsProblem(['-ffDeckTour', outside]) ?? '', /outside the build folder.*-ffDeckTour tour\.json/, outside);
+    assert.match(timedArgsProblem([`-ffDeckTour=${outside}`]) ?? '', /outside the build folder/, outside);
+  }
+  // The run's own switches stay refused in the joined form, and a joined value keeps the plain-value rule.
+  assert.match(timedArgsProblem(['-ffAutomationSave=other']) ?? '', /set by the run itself/);
+  assert.match(timedArgsProblem(['-ffSoloQuitAfterSeconds=5']) ?? '', /set by the run itself/);
+  assert.match(timedArgsProblem(['-ffX=']) ?? '', /not a plain value/);
+  assert.match(timedArgsProblem(['-ffX=a b']) ?? '', /not a plain value/);
+  assert.match(timedArgsProblem(['-ffX=&calc']) ?? '', /not a plain value/);
+  assert.match(timedArgsProblem(['=x']) ?? '', /not a -ff switch/);
+  assert.match(timedArgsProblem(['-logFile=C:/x']) ?? '', /not a -ff switch/);
+  // A path is a value after a switch only, never an argument of its own.
+  assert.match(timedArgsProblem(['tour.json']) ?? '', /not a -ff switch/);
+});
+
 test('the legs are probe_ab_win.sh\'s: its arguments, and the order flipped on even rounds', () => {
   const a = legArgs(TIMED_DEFAULTS, { name: 'fix', args: ['-ffX'] }, 2, 'ffa-timed-tr_1', 'V:/out/player.log');
   const at = (k: string) => a[a.indexOf(k) + 1];
