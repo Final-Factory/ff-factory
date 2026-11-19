@@ -688,6 +688,21 @@ replaced whole, over the same ssh the checks use). The portal reads it every 15 
 
 Both need the new portal (a deploy); the file is written whether or not the portal reads it yet.
 
+**Which version runs (w4777).** Every install (`install.sh`, `--host-only` included) writes
+`/usr/local/lib/fff-vm/installed.json` beside the scripts it copies (`install_host_scripts`, `installed_record` in
+`deploy/vm/host/lib.sh`): `commit` (the ff-factory commit of the checkout it ran from, `git rev-parse HEAD`, with
+`-dirty` when `deploy/vm/host` had local changes, or `unknown: no git` / `unknown: not a git checkout`), `at` (the
+install time, UTC) and `pathwatchSha256` (the installed `pathwatch.sh`'s hash). The watch copies `commit` and `at` into
+every status file as `"installed": {"commit", "at"}`, so after an install, within a minute (the next pass):
+
+- `portal_logs` source `path_health` shows `"installed"` with the commit and time: the commit should be the one the
+  install ran from (`git rev-parse HEAD` in that checkout), and the time a minute or so before the file's `updatedAt`;
+- `system_status` adds the line "the watch runs ff-factory <12 characters of the commit>, installed <time>".
+
+No `installed` in the file means a watch from before w4777 still runs (the install has not happened, or failed before
+it copied the scripts); `"commit": "unknown: no readable installed.json ..."` means the new scripts run but their record
+is missing or does not parse.
+
 Alerts go to ntfy, to the topic FF Factory's outside watch already uses (`data/outside-watch.json`; `system_status`
 names it). The host reads the whole URL from `/etc/fff-vm/ntfy-url` (root, `0600`) and never prints it. Alerts cover
 each reset, a watchdog event, a crash, an unexpected stop, an I/O error, a missing firewall table, a long portal
