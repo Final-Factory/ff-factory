@@ -72,6 +72,18 @@ test('w643: a deploy blocker clears when a different commit runs (the portal, or
   assert.match(blockerVerdict(daemon, facts([], { daemonSha: (id) => (id === 'lothdesktop' ? 'ddd4444' : undefined) })).why, /^lothdesktop's daemon runs ddd4444 now/);
 });
 
+test("w4672: a machine's deploy gate set while it was offline (no commit recorded) clears once its daemon runs the portal's commit", () => {
+  // LothLaptop on 2026-11-18: offline when w4672 blocked on its update, so the gate had no sha; it updated twice over its
+  // link to the portal's 549682bb3 and the gate stayed Blocked.
+  const gate = block({ kind: 'deploy', ref: 'lothlaptop', what: "lothlaptop's daemon update" });
+  const portalSha = '549682bb3941ec3fbc38d59ef29c8b8d32a199df';
+  assert.equal(blockerVerdict(gate, facts([], { portalSha, daemonSha: () => undefined })).state, 'open', 'still offline');
+  assert.equal(blockerVerdict(gate, facts([], { portalSha, daemonSha: () => 'e3ca993078' })).state, 'open', 'online, still the old daemon');
+  assert.deepEqual(blockerVerdict(gate, facts([], { portalSha, daemonSha: () => '549682bb39' })), { state: 'clear', why: "lothlaptop's daemon runs 549682bb39 now, the portal's own commit" });
+  // The portal's own gate (no ref) with no sha is not this case.
+  assert.equal(blockerVerdict(block({ kind: 'deploy', what: 'a portal deploy' }), facts([], { portalSha })).state, 'open');
+});
+
 test('w643: machine, usage, lock, time and CI blockers: clear, open, and stuck past their time', () => {
   const m = block({ kind: 'machine', ref: 'm5', what: 'the M5 asleep' });
   assert.equal(blockerVerdict(m, facts([], { online: () => false })).state, 'open');
