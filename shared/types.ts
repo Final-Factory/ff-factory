@@ -2479,7 +2479,7 @@ export interface WorkItem {
    */
   report?: { kind: ReportKind; at: string; by: string };
   /** w2541: the reports filed for it, oldest first (the link from the request to its reports). */
-  reports?: { id: string; title: string; kind: ReportKind }[];
+  reports?: { id: string; title: string; kind: ReportKind; openQuestions?: string[] }[];
   /** What happened, oldest first: "10:02 filed by Lothsahn", "10:03 merged into w11: same fix". */
   log: string[];
   /**
