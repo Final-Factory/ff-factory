@@ -887,6 +887,12 @@ FFBox's `fff.board_check` switch; submitting work (phase 3) is not built there y
   steer the answer, and it costs nothing and answers in milliseconds. Every decision is logged
   (`intake: board_check <ref>: <verdict>, confidence <n>; <id> <score> (<why>)`). The fixtures
   (`server/boardMatch.fixtures.ts`) are real duplicate reports quoted in FFBox's PRs and near-misses in the same system.
+  Before any of that, `reportText` drops the template (w4747): the in-game reporter's footer (submitted stamp, game and
+  Unity version, platform, Discord name, encrypted email, attached files), FF Factory's relay lines and fences, the
+  `[redacted …]` marks, mentions, file names and encoded blobs. Every in-game report carries the footer, so matched on
+  it a title-only report ("Construction bot flying off") was answered "Already fixed" from an unrelated request on
+  "email, encrypt, redact, base64". The dev-request check, FFBox's `board_check`, the bug-thread check and handed-up
+  follow-ups all go through it.
 - **Each new `ffbox/*` PR is filed as a review request** with its Discord thread's key (`conversation.threadId`), and
   closes when FFBox reports the PR merged or closed.
 - **Ledger → FFBox.** The dispatcher's `send_to_ffbox {work_id, class}` sends a phase 3 `submit` (fenced by default,
