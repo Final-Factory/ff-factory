@@ -406,6 +406,25 @@ said "BackendState=NeedsLogin"
 ! grep -r "login.tailscale.com/a/" "$T/state" "$T/out" "$HEALTH" >/dev/null || fail "NeedsLogin: the auth link leaked into the journal, state or status file"
 ok "tailscaled: not running and NeedsLogin fail with their evidence (the login link is never logged)"
 
+# w4729: a running tailscaled whose status read fails, or that says Online=false, is not restarted while the portal answers
+# from outside (three such restarts on 2026-11-18 cut every page and machine link, and Funnel for minutes)
+for sc in ts-status-unread ts-offline; do
+  scen $sc
+  pass 4
+  is 2 fail
+  is 9 ok
+  [ "$(calls 'systemctl restart tailscaled')" = 0 ] || fail "$sc: restarted a running tailscaled while the outside probe passes"
+  said "tailscaled runs and the portal answers from outside, so it is not restarted"
+  scen $sc e2e-timeout
+  pass
+  [ "$(calls 'systemctl restart tailscaled')" = 0 ] || fail "$sc: restarted at the first failing pass"
+  pass
+  [ "$(calls 'systemctl restart tailscaled')" = 1 ] || fail "$sc: no restart at the second failing pass, with the outside probe failing"
+  no_vm_reset
+done
+said "context deadline exceeded"
+ok "tailscaled: a running one whose status read fails or that says Online=false is restarted only while the outside probe fails too"
+
 # ---------------------------------------------------------------- 3. node identity
 scen identity-untagged
 pass 2
