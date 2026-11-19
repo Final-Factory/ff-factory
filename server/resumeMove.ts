@@ -34,6 +34,34 @@ export const STAY_MARK = 'it stays on its computer (w2046)';
 /** The mark a Queued line carries when no other computer that could take it has room: no WRONG either. */
 export const NONE_MARK = 'no other computer can take it now (w2046)';
 
+/**
+ * w4738: how long a worker released while it waited (on CI, a pair run's partner, a person or a deploy: placeReleased.wait)
+ * waits for a sandbox on its own computer before its resume moves (r290 fix 4). w4488's next step moved twice on 2026-11-17
+ * (lothdesktop to m5 at 14:11Z, m5 to biscuit at 15:34Z), each move a fresh session that re-read its work (about 14 min, r290)
+ * on a computer with one Unity slot. That day a sandbox freed on the computer a move left 1 to 12.1 min after each of five
+ * moves (the portal journal), so 15 min covers what was measured; past it the move goes as before (w2046).
+ */
+export const HOME_WAIT_MS = 15 * 60_000;
+
+/** The mark a Queued line carries while a released waiting worker waits for its own computer: the ledger does not flag it WRONG. */
+export const HOME_MARK = 'it waits for a sandbox on its own computer (w4738)';
+
+/**
+ * The Queued line's addition while a resume waits for room on its own computer instead of moving (w4738), or undefined when
+ * it may move: its sandbox was released while it waited (`released.wait`), its message has waited less than HOME_WAIT_MS, and
+ * its computer is up (an away computer is w2544's, not this wait's). Strict priority still holds there: higher queued work
+ * takes the next free sandbox first (w3507), and the wait ends at HOME_WAIT_MS whatever came first.
+ */
+export function homeWait(released: { wait?: boolean } | undefined, queuedAt: number, now: number): string | undefined {
+  if (!released?.wait) return undefined;
+  const until = queuedAt + HOME_WAIT_MS;
+  if (now >= until) return undefined;
+  return `${HOME_MARK}: its sandbox went to other work while it waited, and one there frees within minutes; it moves to a computer with room at ${new Date(until).toISOString().slice(11, 16)}Z if none has`;
+}
+
+/** w4738: why a computer with one Unity slot (pool.maxUnity 1, biscuit) is no move for UI-heavy work while another fits. */
+export const ONE_EDITOR = 'one Unity slot: UI-heavy work moves to a computer with more (w4738)';
+
 /** The waits a move answers: room on the worker's own computer, not its machine (offline, outdated) nor a move under way. */
 export const ROOM_WAIT = /^(no sandbox on |its branch .* is checked out in |no agent seat is free on |\d+ agents mid-turn )/;
 
@@ -64,6 +92,8 @@ export interface MoveRequest {
   timedLeg?: boolean;
   /** A pair run's leg (WorkItem.pair.started): this worker's leg number (1 = host), the other legs' computers, cross-OS or not. */
   pair?: { leg: number; others: readonly string[]; crossOs?: boolean; avoid?: readonly string[]; live?: boolean };
+  /** w4738: UI-heavy game work (stills, play mode, a Live view: shared/capacity.ts needsUi): no move to a one-editor computer while another fits. */
+  ui?: boolean;
 }
 
 export interface MoveFacts {
@@ -148,7 +178,14 @@ export function moveDecision(f: MoveFacts): MoveDecision {
   }
   const candidates = f.places.filter((p) => p.id !== here && !unfit.has(p.id));
   const first = f.requests.map((r) => r.first).find(Boolean) ?? false;
-  const pick = pickComputer(candidates, f.last, forPriority(f.prefs, priority), kind, false, first);
+  const prefs = forPriority(f.prefs, priority);
+  // w4738: UI-heavy work does not move to a computer with one Unity slot (biscuit) while another fits: w4488's stills leg went
+  // there at 15:34Z on 2026-11-17. Off an away computer (w2544) it may, when nothing else has room.
+  const ui = kind === 'game' && f.requests.some((r) => r.ui);
+  const one = (p: Computer) => ui && p.maxEditors !== undefined && p.maxEditors <= 1;
+  let pick = pickComputer(candidates.filter((p) => !one(p)), f.last, prefs, kind, false, first);
+  if (!pick && f.away) pick = pickComputer(candidates, f.last, prefs, kind, false, first);
+  if (!pick) for (const p of candidates) if (one(p)) unfit.set(p.id, ONE_EDITOR);
   if (!pick) {
     const why = unfit.size ? `; ${[...unfit].map(([id, w]) => `${id}: ${w}`).join('; ')}` : '';
     return { none: `no other computer that could take it has ${kind === 'game' ? 'room' : 'an agent slot'} now${why}` };

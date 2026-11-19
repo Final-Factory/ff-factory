@@ -86,6 +86,27 @@ export function needsLive(w: Pick<WorkItem, 'needs' | 'liveView' | 'title' | 'br
 }
 
 /**
+ * UI-heavy work named in words (w4738): stills, screenshots, clips, play mode, a playtest, the UI gate's tools (ui_look,
+ * ui_layout, the ui-critic, unity-ui), the HUD, "UI" in capitals. w4488's brief named stills, ui_look/ui_layout and the
+ * ui-critic. A bare "ui" or "panel" is not (the portal's own work says them).
+ */
+export const UI_HEAVY_WORDS = /\b(?:stills?|screenshots?|clips?|play[- ]?mode|playtests?|ui[-_ ]?critic|ui_look|ui_layout|unity-ui|hud)\b/i;
+/** "UI" in capitals (w4738): case matters, so a path or word with "ui" in it is not UI-heavy. */
+const UI_CAPS = /\bUI\b/;
+
+/**
+ * Whether a request is UI-heavy (w4738): game work (never agent-slot work) that needs a Live view (needsLive), or whose title,
+ * brief or people's notes name UI-heavy work (UI_HEAVY_WORDS), or `text` does. A room move does not take it to a computer with
+ * one Unity slot while another fits (server/resumeMove.ts): its editor and a player build or a second editor share that slot.
+ */
+export function needsUi(w: Pick<WorkItem, 'needs' | 'liveView' | 'title' | 'brief' | 'notes'> | undefined, text = ''): boolean {
+  if (w && needsOf(w) === 'agent') return false;
+  if (needsLive(w, text)) return true;
+  const words = `${w ? `${w.title}\n${w.brief}\n${(w.notes ?? []).map((n) => n.text).join('\n')}\n` : ''}${text}`;
+  return UI_HEAVY_WORDS.test(words) || UI_CAPS.test(words);
+}
+
+/**
  * An URGENT release named in words (w1639): "quick release", "urgent release", "urgent build", the urgent release lane or
  * its script. lothsahn, 2026-10-20: "Release builds should be handed by ffbox. We should update the version and just let
  * ffbox build it ... If we need an urgent build, we should be able to ask beast or Lothdesktop to build it for us ...
