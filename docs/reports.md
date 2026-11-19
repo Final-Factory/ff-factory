@@ -43,6 +43,27 @@ refusal names `file_report`. Filing one links it on the request (`WorkItem.repor
 report, filed with `file_report` and revised with its id when the result changes. The dispatcher's and each personal
 orchestrator's brief carry one line each on marking such a request.
 
+## A design's go to build (w4739)
+
+r290 (fix 5) measured 9 d 1 h between the finished multi-select design (r87, w3031) and the go to build it, offered in chat
+("say 'file the w3031 implementation'") with no card. So:
+
+- **Open questions are read from the report.** A design's report ends with an `## Open questions` section: `None.` once
+  every one is answered, else each question as a list item (a bold `**Open questions:**` line works too).
+  `openQuestionsOf` (`server/reports.ts`) reads it on every filing and revision of a design report and keeps the list on the
+  request's link (`WorkItem.reports[].openQuestions`: `[]` none left, absent when the report has no such section).
+- **The close asks the go.** When a request with a design report closes on its DONE (`Orchestrators.closeOnDone`,
+  `designClosed`), its people's orchestrators get `[design closed] wNNN …` (`server/designGo.ts`, `designGoAsk`): ask the go
+  with ask_person, "File the build of <design> now?", "Yes, file the build now" recommended; on yes, file the build with
+  request_work naming the design in `related_ids`. Open questions still listed are asked first; a report with no section is
+  read first. Nothing is sent when another request already names the design in its related ids (its build is filed, as a
+  hand-up's stages are, w2969); the request's log says which.
+- **Questions together.** The worker brief tells a design's worker to ask all of its open questions on one card (one
+  `waiting_on_person` call with every one in `questions`), never one at a time or in chat, and never to offer the go in chat.
+
+Tests: `server/designGo.test.ts` (the section reader on r87 revision 4's own text, the message), `server/orchestrators.test.ts`
+("w4739: the w3031 replay", and no card when a build already names the design or the report is not a design).
+
 ## Tools
 
 | Tool | Who | What |

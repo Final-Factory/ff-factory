@@ -65,7 +65,7 @@ import { activityLine, Waker } from './wake.ts';
 import { TIMER_LIMITS, Timers, scheduleText, type TimerView } from './timers.ts';
 import { EVEN_MARGIN, RAM_BUSY_PCT, benchText, buildOf, busyReasons, capacityLines, classRank, forPriority, hasRoom, holdReason, liveOf, loadText, lowestPriority, minOf, pairCanFinish, pairNoPlacement, pickComputer, placeId, pinnedWork, placementHint, reservedReason, roomEnough, roomForWork, roomNow, timedFacts, timedKindOf, timedPinRefusal, voiceVram, type Computer, type FirstKind, type NeedKind, type PlacementPrefs, type RoomNow, type TimedKind } from './placement.ts';
 import { MachinePauses, PAUSE_TICK_MS, pauseHold, pauseHolds, type HandBack } from './machinePause.ts';
-import { MOVE_AFTER_MS, NONE_MARK, ROOM_WAIT, briefOf, holdMoves, moveDecision, movedPrompt, stayLine, type MoveFacts } from './resumeMove.ts';
+import { MOVE_AFTER_MS, NONE_MARK, ROOM_WAIT, briefOf, holdMoves, homeWait, moveDecision, movedPrompt, stayLine, type MoveFacts } from './resumeMove.ts';
 import { playHolds, playLine } from '../shared/personPlay.ts';
 import { sandboxUseText, unitySlotsLine } from '../shared/fleet.ts';
 import { resumeWhereLine, stopWhereLine, type BeforeSend } from './resumeWhere.ts';
@@ -106,7 +106,7 @@ import { WAIT_LINE_CHARS, summaryBrief, summaryText, waitSummary } from '../shar
 import { isMyMove, waitingItemOf } from '../shared/waiting.ts';
 import { checkAsks } from '../shared/questionCard.ts';
 import { DECISIONS, attachmentsNote, describeItem, doneOf, handoverNote, isFor, isOpen, livePair, pairLegOf, ledgerOrder, names, overlapLine, priorityThenAge, replacedLeg, requestAsFiled, requestLineRule, startProblem } from './work.ts';
-import { cachedPlayerNote, fetchPlayerNote, macRefusedScenario, MAC_REFUSES_SCENARIO, minPriorityText, needsBuild, needsLive, needsOf, needsTimed, pairRoom, pairText, cargoShortOf, isCargoRepo, PAIR_HOLD_MS, PAIR_MAX_LEGS, TIMED_HOLD_MS } from '../shared/capacity.ts';
+import { cachedPlayerNote, fetchPlayerNote, macRefusedScenario, MAC_REFUSES_SCENARIO, minPriorityText, needsBuild, needsLive, needsOf, needsUi, needsTimed, pairRoom, pairText, cargoShortOf, isCargoRepo, PAIR_HOLD_MS, PAIR_MAX_LEGS, TIMED_HOLD_MS } from '../shared/capacity.ts';
 import { BUILD_PLAN_DOC, BuildPlans, NOT_RELEASE, type BuildPlan, type SeatResult } from './buildPlans.ts';
 import { SEAT_GRACE_MS, seatAction, seatNotice } from './releaseSeat.ts';
 import { RELEASE_RULES } from './releaseLanes.ts';
@@ -1657,7 +1657,7 @@ export class Agents {
       if (e instanceof ReportError) throw new Error(e.message);
       throw e;
     }
-    this.orchestrators.reportFiled(w.id, r.report, r.created);
+    this.orchestrators.reportFiled(w.id, r.report, r.created, String(a.body ?? ''));
     this.onReport?.(r.report);
     console.log(`reports: ${info.id.slice(0, 8)} ${r.created ? 'filed' : 'revised'} ${r.report.id} (revision ${r.rev}) for ${w.id}`);
     const who = r.report.requesters.map((p) => p.displayName).join(', ');
@@ -3603,6 +3603,14 @@ export class Agents {
       return true;
     }
     if (now - (Date.parse(q.at) || now) < MOVE_AFTER_MS || info.pendingPermissions.length || isMidTurn(info)) return undefined;
+    // w4738: released while it waited (on CI, a pair run, a person), it waits a while for a sandbox on its own computer first.
+    const home = ROOM_WAIT.test(hold) ? homeWait(info.placeReleased, Date.parse(q.at) || now, now) : undefined;
+    if (home) {
+      const why = `waits for its own computer: ${home}`;
+      if (this.roomKept.get(info.id) !== why) console.log(`room move: worker ${info.id} on ${info.machineId}/${info.machineSandbox} ${why}`);
+      this.roomKept.set(info.id, why);
+      return `${hold}; ${home}`;
+    }
     const { reqs, owned, gone } = this.movableWorkOf(info);
     if (owned.length || gone.length) this.unmemoized(() => this.leaveToOwners(info, owned, gone, hold, !reqs.length));
     if (!reqs.length && (owned.length || gone.length)) {
@@ -3829,6 +3837,7 @@ export class Agents {
           priority: w.priority,
           kind: needsOf(w),
           ...(first ? { first } : {}),
+          ...(needsUi(w) ? { ui: true } : {}),
           // w2521: its constraints' "must run on X" pins it too (w2499 went to m3 by this move at 02:48Z on 2026-10-29).
           ...(w.queuedFor?.needs?.length ? { pinned: w.queuedFor.needs } : this.pinOf(w) ? { pinned: this.pinOf(w)!.ids } : {}),
           ...(w.timedLeg ? { timedLeg: true } : {}),
@@ -5007,7 +5016,7 @@ ${deployment ? `## This deployment\n${deployment}\n\n` : ''}## Reporting
 End every turn with a short plain-language summary: what you did, what is left, and anything you need from the user. If you are blocked, say so plainly instead of guessing. ${REPORT_LABELS}
 To show the user an image, save it as PNG, JPG or SVG in your worktree (e.g. \`Assets/Screenshots/\`) or your temp folder, then put \`![what it shows](<absolute path>)\` in your message: the dashboard shows it inline and keeps a copy. A \`\`\`mermaid code block renders as a diagram.
 Stills, clips and notes for a review (the visual checklist, a playtest, a before/after) go through \`mcp__machine__publish_review\`, which answers the paths to put in your report; never copy them across machines yourself.
-When a person asked for a design or an analysis (a profile, an investigation, a root-cause write-up, a design, research), its result is a report: file it with \`mcp__machine__file_report\` (the whole result as Markdown, with its evidence labels and its published stills), revise it with its id when the result changes, and name it (r<N>) in your turn's report. It is kept on the portal's Reports tab, tagged with the person who asked; \`mcp__machine__list_reports\` finds earlier ones (docs/reports.md).
+When a person asked for a design or an analysis (a profile, an investigation, a root-cause write-up, a design, research), its result is a report: file it with \`mcp__machine__file_report\` (the whole result as Markdown, with its evidence labels and its published stills), revise it with its id when the result changes, and name it (r<N>) in your turn's report. A design's report ends with an \`## Open questions\` section: \`None.\` once every one is answered, else each question as a list item; ask them all together on one card (one \`waiting_on_person\` call with every one in \`questions\`), never one at a time or in chat, and never offer the go to build in chat ("say 'file the build'"): when the design's request closes, FF Factory has your person's orchestrator ask the go on a card. It is kept on the portal's Reports tab, tagged with the person who asked; \`mcp__machine__list_reports\` finds earlier ones (docs/reports.md).
 `.trim();
   }
 

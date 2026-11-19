@@ -377,7 +377,17 @@ export interface SessionInfo {
    * over, its w613 hold past, or stopped while idle (releaseDue), its worktree clean, so its sandbox no longer counts as its (holdsSandbox, shared/agentState.ts) and may take
    * other work. The branch it was on is kept here: when it resumes it is placed again on it (server/placeAgain.ts).
    */
-  placeReleased?: { at: string; sandbox: string; branch: string; why: string };
+  placeReleased?: {
+    at: string;
+    sandbox: string;
+    branch: string;
+    why: string;
+    /**
+     * w4738: released while it waited (on CI, w846; a deploy, a person, a pair run's partner or another request, w890), not idle
+     * or far: its resume waits for a sandbox on its own computer for HOME_WAIT_MS before a room move (server/resumeMove.ts).
+     */
+    wait?: boolean;
+  };
   /**
    * Machine sandbox workers (w3507, server/priorityReclaim.ts): its sandbox was last taken for higher-priority queued work
    * `for` at `at` (`preempted`: asked mid-turn to yield, urgent work only); `count` such takes in all, the bounce count;
@@ -2479,7 +2489,7 @@ export interface WorkItem {
    */
   report?: { kind: ReportKind; at: string; by: string };
   /** w2541: the reports filed for it, oldest first (the link from the request to its reports). */
-  reports?: { id: string; title: string; kind: ReportKind }[];
+  reports?: { id: string; title: string; kind: ReportKind; openQuestions?: string[] }[];
   /** What happened, oldest first: "10:02 filed by Lothsahn", "10:03 merged into w11: same fix". */
   log: string[];
   /**

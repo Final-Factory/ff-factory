@@ -430,7 +430,7 @@ test("w846: a worker waiting on CI with its editor stopped gives up its sandbox 
   // Stopped, its check-in cancelled by the block (w829 holds it): released now, not after 30 minutes, on its branch.
   const w = worker('w1');
   assert.equal(releaseStep(w, sb, facts([w])), undefined, 'without the CI gate it holds nothing to release');
-  assert.deepEqual(releaseStep(w, sb, withCi(facts([w]))), { do: 'release', why: ci, branch: 'feature/slot1' });
+  assert.deepEqual(releaseStep(w, sb, withCi(facts([w]))), { do: 'release', why: ci, branch: 'feature/slot1', wait: true });
   // A near check-in of its own (a poll it set anyway) does not keep it: the check-in places it again when it comes.
   const polling = worker('w1', { wakeAt: iso(NOW + 8 * MIN) });
   assert.equal(releaseStep(polling, sb, facts([polling])), undefined, 'today: an 8-minute poll holds the sandbox');
@@ -440,7 +440,7 @@ test("w846: a worker waiting on CI with its editor stopped gives up its sandbox 
   assert.equal(releaseStep(w, sb, withCi(facts([w], { unityHolders: ['sandbox:slot1'] }))), undefined, 'batch run');
   assert.equal(releaseStep(w, sandbox('slot1', {}, { ahead: 2 }), withCi(facts([w]))), undefined, '2 commits its remote lacks');
   // Uncommitted work: its daemon commits and pushes it first (w656), or it stays held.
-  assert.deepEqual(releaseStep(w, sandbox('slot1', {}, { dirty: 1 }), { ...withCi(facts([w])), canSave: true }), { do: 'release', why: ci, branch: 'feature/slot1', save: true });
+  assert.deepEqual(releaseStep(w, sandbox('slot1', {}, { dirty: 1 }), { ...withCi(facts([w])), canSave: true }), { do: 'release', why: ci, branch: 'feature/slot1', save: true, wait: true });
   assert.equal(releaseStep(w, sandbox('slot1', {}, { dirty: 1 }), withCi(facts([w]))), undefined);
   // A message queued for it resumes it now: kept.
   assert.equal(releaseStep(worker('w1', { queuedSend: 'x' }), sb, withCi(facts([w]))), undefined);
@@ -482,7 +482,7 @@ for (const [kind, wait] of Object.entries(WAITS)) {
     // Stopped: released now, not after 30 minutes, on its branch; a near poll of its own does not keep it.
     const w = worker('w1');
     assert.equal(releaseStep(w, sb, facts([w])), undefined, 'without the wait it holds nothing to release');
-    assert.deepEqual(releaseStep(w, sb, withWait(facts([w]))), { do: 'release', why: wait, branch: 'feature/slot1' });
+    assert.deepEqual(releaseStep(w, sb, withWait(facts([w]))), { do: 'release', why: wait, branch: 'feature/slot1', wait: true });
     const polling = worker('w1', { wakeAt: iso(NOW + 8 * MIN) });
     assert.equal(releaseStep(polling, sb, withWait(facts([polling])))?.do, 'release');
     // An editor left running does not keep it (nothing is about to be fixed in it; the next placement stops it, w656).
@@ -506,8 +506,8 @@ test('w890: never released: unsaved work, commits no remote has, a batch run, a 
   const w = worker('w1');
   const sb = sandbox('slot1');
   // Unsaved work: its daemon commits and pushes it first (w656), or the sandbox stays held and says why.
-  assert.deepEqual(releaseStep(w, sandbox('slot1', {}, { dirty: 1 }), { ...withWait(facts([w])), canSave: true }), { do: 'release', why: wait, branch: 'feature/slot1', save: true });
-  assert.deepEqual(releaseStep(w, sandbox('slot1', {}, { untracked: 2 }), { ...withWait(facts([w])), canSave: true }), { do: 'release', why: wait, branch: 'feature/slot1', save: true });
+  assert.deepEqual(releaseStep(w, sandbox('slot1', {}, { dirty: 1 }), { ...withWait(facts([w])), canSave: true }), { do: 'release', why: wait, branch: 'feature/slot1', save: true, wait: true });
+  assert.deepEqual(releaseStep(w, sandbox('slot1', {}, { untracked: 2 }), { ...withWait(facts([w])), canSave: true }), { do: 'release', why: wait, branch: 'feature/slot1', save: true, wait: true });
   assert.equal(releaseStep(w, sandbox('slot1', {}, { dirty: 1 }), withWait(facts([w]))), undefined, 'its daemon cannot save: held');
   assert.equal(releaseStep(w, sandbox('slot1', {}, { dirty: 1 }), { ...withWait(facts([w])), canSave: true, saveRefused: () => '41491 untracked files' }), undefined, 'its last save failed: held');
   assert.match(new PlaceAgain(deps([w], sandbox('slot1', {}, { dirty: 1 }), { waitOn: () => wait })).keptLine(w) ?? '', /^its sandbox stays held although it waits on w889: a portal deploy, after the merge: 1 uncommitted change\(s\) there/);
@@ -615,7 +615,7 @@ test("w890 (measured live): the stop's own transcript line does not make the git
   const stoppedAt = iso(NOW - 5_000);
   const git = { at: iso(NOW - MIN) };
   const w = worker('w1', { lastActivityAt: stoppedAt, releaseDue: { at: iso(NOW - 10_000), why: wait, workedAt: worked } });
-  assert.deepEqual(releaseStep(w, sandbox('slot1', {}, git), { ...facts([w]), waitOn: wait }), { do: 'release', why: wait, branch: 'feature/slot1' });
+  assert.deepEqual(releaseStep(w, sandbox('slot1', {}, git), { ...facts([w]), waitOn: wait }), { do: 'release', why: wait, branch: 'feature/slot1', wait: true }, 'w4738: a release while it waits says so');
   // Without the record (an older release due, or work after it) the old rule holds.
   const plain = worker('w1', { lastActivityAt: stoppedAt, releaseDue: { at: iso(NOW - 10_000), why: wait } });
   assert.equal(releaseStep(plain, sandbox('slot1', {}, git), { ...facts([plain]), waitOn: wait }), undefined);
@@ -768,7 +768,7 @@ test('w1582: a worker whose Live view is up while it waits on Ben is neither sto
   assert.deepEqual(releaseStep(idle, sb, { ...facts([idle], { liveIds: ['w1'] }), waitOn: wait }), { do: 'stop', why: wait, due: true }, 'before w1582: stopped');
   assert.equal(releaseStep(idle, sb, { ...facts([idle], { liveIds: ['w1'] }), waitOn: wait, liveHold: hold }), undefined, 'held: not stopped');
   const stopped = worker('w1');
-  assert.deepEqual(releaseStep(stopped, sb, { ...facts([stopped]), waitOn: wait }), { do: 'release', why: wait, branch: 'feature/slot1' });
+  assert.deepEqual(releaseStep(stopped, sb, { ...facts([stopped]), waitOn: wait }), { do: 'release', why: wait, branch: 'feature/slot1', wait: true });
   assert.equal(releaseStep(stopped, sb, { ...facts([stopped]), waitOn: wait, liveHold: hold }), undefined, 'held: not released');
   // keptLine says why, for list_sandboxes.
   assert.equal(new PlaceAgain(deps([stopped], sb, { waitOn: () => wait, liveHold: () => hold })).keptLine(stopped), `its sandbox stays held although ${wait}: ${hold}`);
