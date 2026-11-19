@@ -1,0 +1,1 @@
+- `open_threads` shows an opening post's whole time: FFBox sends it with microseconds and a zone (`2026-11-19T13:12:23.613000+00:00`), which the 30-character cut left as `...613000+00:` (w4776).
