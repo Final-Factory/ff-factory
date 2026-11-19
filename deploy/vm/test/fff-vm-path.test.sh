@@ -418,7 +418,7 @@ for sc in ts-status-unread ts-offline; do
   is 9 ok
   [ "$(calls 'systemctl restart tailscaled')" = 0 ] || fail "$sc: restarted a running tailscaled while the outside probe passes"
   said "tailscaled runs and the portal answers from outside, so it is not restarted"
-  [ "$sc" = ts-offline ] && said "Online=false" || said "context deadline exceeded"
+  if [ "$sc" = ts-offline ]; then said "Online=false"; else said "context deadline exceeded"; fi
   scen
   pass
   cp "$FIX/$sc"/* "$FIX/e2e-timeout"/* "$FAKE_DIR/live/"
