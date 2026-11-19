@@ -1,0 +1,1 @@
+- w4729: portal_logs source `path_health` reads the FFBox host path watch's status file, and the watch's kept repair record now says what it saw before a repair, so a tailscaled restart by the watch can be traced from any machine.
