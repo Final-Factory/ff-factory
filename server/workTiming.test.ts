@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { datedLog, gapCauseOf, stillOpenCauseOf, pickFinished, sessionSpans, sweep, TAIL_MS, timeRequest, toolCauseOf, waitBreakdown, waitCauseOf, workTiming } from './workTiming.ts';
+import { datedLog, gapCauseOf, movedOffCut, sessionsOf, stillOpenCauseOf, pickFinished, sessionSpans, sweep, TAIL_MS, timeRequest, toolCauseOf, waitBreakdown, waitCauseOf, workTiming } from './workTiming.ts';
 import type { Requester, SessionInfo, TranscriptEvent, WorkItem } from '../shared/types.ts';
 
 /** work_timing (w4531, server/workTiming.ts): where a finished request's wall time went, in two parts. */
@@ -306,4 +306,29 @@ test('a turn opened without a user event closes the gap; a transcript that ends 
   assert.deepEqual(sweep(a, T0, end), { think: 20 * MIN, idle: 30 * MIN + TAIL_MS, tail: 550 * MIN - TAIL_MS });
   const b = sessionSpans([user(0, 'go'), use(5, 'x', 'Read'), res(6, 'x')], T0, end);
   assert.deepEqual(sweep(b, T0, end), { think: 6 * MIN, preempt: TAIL_MS, tail: 594 * MIN - TAIL_MS });
+});
+
+test("w4712: a person's wait that names CI in what they decide is a person wait; a CI wait still is CI", () => {
+  assert.equal(stillOpenCauseOf('waiting on lothsahn to decide whether to drop both CI savings, do only the main.yml push filter'), 'person');
+  assert.equal(stillOpenCauseOf('waiting on CI on #1051'), 'gap_ci');
+  assert.equal(stillOpenCauseOf('blocked on CI on Final-Factory/ff-factory#1051'), 'gap_ci');
+  assert.equal(stillOpenCauseOf('the PR merges by itself on green'), 'gap_ci');
+  assert.equal(stillOpenCauseOf('waiting on w4259 to report'), 'blocked');
+});
+
+test('w4423: a worker the request was moved off is read up to its move, so its turns are not filing-to-first-turn', async () => {
+  const w = item('w1', {
+    createdAt: at(0),
+    updatedAt: at(300),
+    sessionIds: ['s2'],
+    movedOff: { s1: at(100) },
+    done: { s2: { at: at(300), report: 'DONE: w1' } },
+  });
+  assert.deepEqual(sessionsOf(w), ['s1', 's2']);
+  const s1 = [user(5, 'w1 go'), result(20, 'w1: still open: waiting on Ben to pick'), user(150, 'w9 other work'), result(160)];
+  assert.deepEqual(movedOffCut(w, 's1', s1).map((e) => e.t), [at(5), at(20)]);
+  const sessions = new Map<string, SessionInfo>();
+  const text = await workTiming([w], sessions, async (id) => (id === 's1' ? s1 : id === 's2' ? [user(200, 'w1 resume'), result(300, 'DONE: w1')] : undefined), { rows: true });
+  // the first turn is s1's at 5 min, not s2's at 200
+  assert.match(text, /\| w1 \| [^|]+\| 5m /);
 });
