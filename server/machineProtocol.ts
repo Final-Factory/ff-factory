@@ -457,6 +457,8 @@ export type FromDaemon =
    * history (server/testHistory.ts) and answers `test_history_ack`; the daemon then deletes the file.
    */
   | { type: 'test_history'; sandbox: string; file: string; record: string }
+  /** w4922: a test run's running file, at first sight, so the portal tags it with the workers in its sandbox then. No answer. */
+  | { type: 'test_history_started'; sandbox: string; file: string }
   /** A line the ffdiscord CLI appended to the Mac's Max events file (docs/max.md), forwarded as is; the portal validates it. */
   | { type: 'max_event'; line: string }
   /** Its GPU Whisper's state, when it changes (w615): loaded, unloaded for the editors' VRAM, installing. An older portal drops it. */

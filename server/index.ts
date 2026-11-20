@@ -31,7 +31,7 @@ import { portalPrEvidence } from '../machine/evidenceGate.ts';
 import { BlockerWatch, ghCompileVerdict, ghEvidenceRefusal, ghPrHealth } from './blockerWatch.ts';
 import { MasterBatchWatch } from './masterBatch.ts';
 import { FfuPostMergeWatch } from './ffuPostMerge.ts';
-import { TestHistory, localRunTags, parseLocalRecord, queryTestHistory, type QueryArgs } from './testHistory.ts';
+import { TestHistory, localRunKey, localRunTags, parseLocalRecord, queryTestHistory, type QueryArgs } from './testHistory.ts';
 import { TestHistoryCi, testHistorySettings } from './testHistoryCi.ts';
 import { runWaitsMigration } from './waitsMigration.ts';
 import { parseNightlyReport } from './nightlyRules.ts';
@@ -624,13 +624,18 @@ machines.testHistory = (id, sandbox, file, record) => {
   if (!r) return { ok: false, error: 'not a test history record (version 1)' };
   // A finished run with no test ran nothing; a run that never finished is kept even empty: it was started.
   if (!r.tests.length && !r.running) return { ok: true };
-  const tags = localRunTags(agents, id, sandbox, r.session);
+  const key = localRunKey(id, sandbox, file);
+  const tags = localRunTags(agents, id, sandbox, r.session, testHistory.startTags(key));
   testHistory.addRun(
-    // One key for a run's running and finished files, so a run is recorded once.
-    { ...r.info, source: 'local', key: `local:${id}/${sandbox}/${file.replace(/\.running\.json$/, '.json')}`, repo: testHistorySettings(cfg).repo, machine: id, sandbox: sandbox || undefined, ...tags },
+    { ...r.info, source: 'local', key, repo: testHistorySettings(cfg).repo, machine: id, sandbox: sandbox || undefined, ...tags },
     r.tests,
   );
   return { ok: true };
+};
+// A run's workers as it starts: the daemon sends its finished file later, maybe after the worker has left the sandbox.
+machines.testHistoryStarted = (id, sandbox, file) => {
+  const tags = localRunTags(agents, id, sandbox);
+  if (tags.tagged !== 'none') testHistory.noteStart(localRunKey(id, sandbox, file), tags);
 };
 setInterval(() => {
   try {

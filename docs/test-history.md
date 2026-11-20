@@ -36,8 +36,13 @@ label by hand, recorded as theirs. The game repo's side is `Documentation/Test-H
 - **Every local run carries its request, or says it has none** (`runs.tagged`, `localRunTags`):
   - `session`: the record names the worker session that started it (`FF_SESSION_ID` of a worker's shell, or its temp
     folder `ffa-<session>`), a batch run's case; tagged with that session's requests;
-  - `sandbox`: an editor run in a sandbox with one live worker: that worker and its requests;
+  - `sandbox`: an editor run in a sandbox with one live worker as the run started: that worker and its requests;
   - `shared`: several live workers in that sandbox: all of them and all their requests;
+  - "as the run started": the daemon announces a running file at first sight (`test_history_started`, within a minute
+    of the run's start) and the portal keeps the sandbox's workers then (`run_starts`, `noteStart`); the finished
+    record uses them, so a run whose record comes after its worker left the sandbox (stopped on a wait for CI, moved to
+    other work, an incomplete run sent two hours later) keeps its request. Without a start (an older daemon, a run
+    shorter than the daemon's minute) the workers when the record comes count;
   - `none`: no worker known (a person's own run, a project outside any sandbox with no session). `{query: "local_runs",
     untagged: true}` lists them.
 
