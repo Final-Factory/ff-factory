@@ -37,7 +37,7 @@ export const REPORT_FILTER = {
 };
 /** test_history's arguments (w4922, server/testHistory.ts QueryArgs), for workers and orchestrators alike. */
 export const TEST_HISTORY_ARGS = {
-  query: z.enum(TEST_HISTORY_QUERIES).describe('summary, slowest, false_positives, detections, never_caught, failures, test or sql.'),
+  query: z.enum(TEST_HISTORY_QUERIES).describe('summary, slowest, false_positives, detections, never_caught, failures, test, local_runs, sql, or set_label (a hand label).'),
   days: z.number().int().min(1).max(3650).optional().describe('The window in days; default 30.'),
   limit: z.number().int().min(1).max(200).optional().describe('At most this many rows; default 20 (sql: 200).'),
   sources: z.array(z.enum(TEST_HISTORY_SOURCES)).max(5).optional().describe('Only runs of these sources; default all.'),
@@ -45,8 +45,12 @@ export const TEST_HISTORY_ARGS = {
   byRate: z.boolean().optional().describe('false_positives: rank by fp / runs instead of count.'),
   minRuns: z.number().int().min(1).max(100000).optional().describe('false_positives with byRate: at least this many runs; default 5.'),
   performance: z.boolean().optional().describe('Include Performance-tagged tests (left out by default).'),
-  label: z.enum(['fp', 'detect', 'unknown', 'pending']).optional().describe('failures: only this label.'),
+  label: z.enum(['fp', 'detect', 'unknown', 'pending']).optional().describe('failures: only this label. set_label: the label to set (fp, detect or unknown).'),
   sql: z.string().max(4000).optional().describe('query sql: one read-only SELECT (or WITH ... SELECT).'),
+  untagged: z.boolean().optional().describe('local_runs: only runs no worker could be named for.'),
+  request: z.string().regex(/^w\d+$/).optional().describe('local_runs: only this request\'s runs ("w4922").'),
+  failureId: z.number().int().min(1).optional().describe('set_label: the failure (failure_id in query failures).'),
+  reason: z.string().max(500).optional().describe('set_label: what shows it (a re-run, the commit that fixed it).'),
 };
 import { DESCRIPTION_CHARS, LABEL_INPUT_CHARS, MAX_OPTIONS, MEDIA_CHARS, MIN_OPTIONS } from '../shared/ask.ts';
 import { CARD_QUESTION_CHARS, MAX_ASKS } from '../shared/questionCard.ts';

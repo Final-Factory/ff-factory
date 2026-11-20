@@ -30,7 +30,7 @@ import { run as runProc } from './proc.ts';
 import { portalPrEvidence } from '../machine/evidenceGate.ts';
 import { BlockerWatch, ghEvidenceRefusal, ghPrHealth } from './blockerWatch.ts';
 import { MasterBatchWatch } from './masterBatch.ts';
-import { TestHistory, parseLocalRecord, queryTestHistory, type QueryArgs } from './testHistory.ts';
+import { TestHistory, localRunTags, parseLocalRecord, queryTestHistory, type QueryArgs } from './testHistory.ts';
 import { TestHistoryCi, testHistorySettings } from './testHistoryCi.ts';
 import { runWaitsMigration } from './waitsMigration.ts';
 import { parseNightlyReport } from './nightlyRules.ts';
@@ -617,14 +617,16 @@ machines.benchHours = (id, rows) => {
 // The per-test history (w4922, docs/test-history.md): every worker's local test run, sent by its daemon, and CI's runs
 // (server/testHistoryCi.ts); the test_history tool reads it.
 const testHistory = new TestHistory({ dataDir: cfg.dataDir });
-agents.testHistoryQuery = (a) => queryTestHistory(testHistory, a as unknown as QueryArgs);
+agents.testHistoryQuery = (a, by) => queryTestHistory(testHistory, a as unknown as QueryArgs, Date.now(), by);
 machines.testHistory = (id, sandbox, file, record) => {
   const r = parseLocalRecord(record);
   if (!r) return { ok: false, error: 'not a test history record (version 1)' };
-  if (!r.tests.length) return { ok: true };
-  const tags = agents.workInSandbox(id, sandbox);
+  // A finished run with no test ran nothing; a run that never finished is kept even empty: it was started.
+  if (!r.tests.length && !r.running) return { ok: true };
+  const tags = localRunTags(agents, id, sandbox, r.session);
   testHistory.addRun(
-    { ...r.info, source: 'local', key: `local:${id}/${sandbox}/${file}`, repo: testHistorySettings(cfg).repo, machine: id, sandbox, sessions: tags.sessions, requests: tags.requests },
+    // One key for a run's running and finished files, so a run is recorded once.
+    { ...r.info, source: 'local', key: `local:${id}/${sandbox}/${file.replace(/\.running\.json$/, '.json')}`, repo: testHistorySettings(cfg).repo, machine: id, sandbox: sandbox || undefined, ...tags },
     r.tests,
   );
   return { ok: true };
