@@ -10,7 +10,8 @@ import { capacityHint, capacityLine, fleetOf, slotCall, type FleetComputer, type
 import { liveReady } from '../../../shared/liveReady';
 import { useAttention } from '../attention';
 import { sessionIndex } from '../store';
-import { agentView, fmtBytes, fmtRelative, lsGet, lsSet, machineSandboxGlance, navigate, pauseGlance, unityLabel, unityTone, useNow, type Glance, type Route, type Tone } from '../util';
+import { agentView, fmtBytes, fmtRelative, lsGet, lsSet, machineSandboxGlance, navigate, unityLabel, unityTone, useNow, type Glance, type Route, type Tone } from '../util';
+import { PAUSED_STATE } from '../../../shared/availability.ts';
 import { AttentionButton, DrawerButton } from './ShellButtons';
 import { describe, gpuPct, level, ramLvl, ramPct, type Lvl } from './SystemMeters';
 import { Dot, Icon } from './ui';
@@ -150,7 +151,7 @@ function Head({ c, health, now, fold, bench = true }: { c: FleetComputer; health
       : d?.status === 'deploying'
         ? 'blue'
         : 'green';
-  const state = c.machine?.status === 'deploying' ? 'setting up' : c.machine?.status === 'error' ? 'error' : c.online ? 'online' : 'offline';
+  const state = c.machine?.status === 'deploying' ? 'setting up' : c.machine?.status === 'error' ? 'error' : c.online ? (c.machine?.pause?.paused ? PAUSED_STATE : 'online') : 'offline';
   const daemonState = d ? (d.status === 'deploying' ? 'daemon setting up' : !d.online ? 'daemon offline' : d.status === 'error' ? 'daemon error' : '') : '';
   return (
     <>
@@ -158,7 +159,7 @@ function Head({ c, health, now, fold, bench = true }: { c: FleetComputer; health
         <Dot tone={tone} pulse={tone === 'blue'} title={c.host ? daemonState || (d ? 'host and its daemon online' : 'host') : state} />
         <span className="fl-name">{c.name}</span>
         <span className="fl-os" data-testid="fl-os" title={c.machine?.pause?.paused ? c.machine.pause.detail : undefined}>
-          {[osName(c.platform), c.host ? 'host' : state === 'online' ? '' : state, daemonState, c.online ? pauseGlance(c.machine) : ''].filter(Boolean).join(' · ')}
+          {[osName(c.platform), c.host ? 'host' : state === 'online' ? '' : state, daemonState, ].filter(Boolean).join(' · ')}
         </span>
         {c.live > 0 && (
           <span className="fl-agents-sum" data-testid="fl-agents-sum">

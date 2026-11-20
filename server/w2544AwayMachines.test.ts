@@ -25,7 +25,7 @@ const MIN = 60_000;
 const NOW = Date.parse('2026-10-29T16:00:00Z');
 const ago = (ms: number) => new Date(NOW - ms).toISOString();
 
-test('w2544: away past the grace is long; a blip, a pause that ends within it, or a running computer is not', () => {
+test('w2544: away past the grace is long; a blip or a running computer is not; a pause is (w4870)', () => {
   const grace = 5 * MIN;
   const off6 = awayOf({ online: false, offlineSince: ago(6 * MIN) }, NOW);
   assert.deepEqual(off6 && [off6.kind, off6.ms], ['offline', 6 * MIN]);
@@ -38,7 +38,7 @@ test('w2544: away past the grace is long; a blip, a pause that ends within it, o
   assert.equal(awayLine('lothlaptop', awayOf({ online: true, pause: paused }, NOW)!), 'lothlaptop (paused 7 min)');
   assert.equal(longAway(awayOf({ online: true, pause: paused }, NOW), { pause: paused }, grace, NOW), true);
   const ending = { ...paused, until: new Date(NOW + 2 * MIN).toISOString() };
-  assert.equal(longAway(awayOf({ online: true, pause: ending }, NOW), { pause: ending }, grace, NOW), false, 'a pause ending in 2 min is a short wait');
+  assert.equal(longAway(awayOf({ online: true, pause: ending }, NOW), { pause: ending }, grace, NOW), true, 'w4870: a pause counts at once, even one said to end in 2 min');
   assert.equal(awayOf({ online: true }, NOW), undefined);
   assert.equal(awayOf({ online: true, pause: { paused: false } }, NOW), undefined);
   // A pause from before MachinePause.since counts from its earliest wait.

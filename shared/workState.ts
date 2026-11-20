@@ -40,6 +40,7 @@
 // person counts whichever worker of the request said it, also one that went on to other work since (its last report on
 // the request, read from the log). A worker that waits on another request's worker (its files, its results) is Blocked on
 // that request. And a worker that says it waits on the orchestrator for its own work says so in the Stalled line.
+import { needsAwayText } from './availability.ts';
 import { asWorkPriority, questionFor, type BenchLock, type BuildHold, type SessionInfo, type WorkItem } from './types.ts';
 import { agentState, holdsSandbox, hostFailureText } from './agentState.ts';
 import { gatesName, gatesOf } from './blockers.ts';
@@ -119,6 +120,8 @@ export interface WorkLiveFacts {
   room?: readonly string[];
   /** The computers with an agent slot for work that needs no editor and no game sandbox (w1098); undefined when unknown. */
   agentRoom?: readonly string[];
+  /** Computers that take no work now (shared/availability.ts): offline past the blip grace, or paused. */
+  away?: Readonly<Record<string, 'offline' | 'paused'>>;
   /** Computers with room that a placement hold keeps work off (w1089), with who and why: a Queued request says so. */
   heldRoom?: readonly { id: string; why: string; for: readonly ('game' | 'agent')[] }[];
   /** Computers with room that placement.minPriority reserves for higher work (w1643): room only for a request at that level now. */
@@ -897,6 +900,14 @@ export function roomShares(items: readonly WorkItem[], f: RoomFacts, extra?: { w
   return out;
 }
 
+/** "needs lothlaptop, which is paused", one per pinned computer, when every computer `w` is pinned to is away; else undefined. */
+export function pinnedAway(w: Pick<WorkItem, 'machinePin'>, f: Pick<WorkLiveFacts, 'away'>): string[] | undefined {
+  const ids = w.machinePin?.ids ?? [];
+  if (!ids.length || !f.away) return undefined;
+  const away = ids.map((id) => [id, f.away![id.toLowerCase()]] as const);
+  return away.every(([, a]) => a) ? away.map(([id, a]) => needsAwayText(id, a!)) : undefined;
+}
+
 /** "it goes first to w1917, ahead in the queue": why room a request fits is not its (w1944, roomShares). */
 export const aheadText = (s: RoomShare) => `it goes first to ${s.ahead.length ? s.ahead.join(', ') : 'other work'}, ahead in the queue (urgent first, then the oldest)`;
 
@@ -1186,6 +1197,9 @@ function workLiveOf(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: string
 
   // Queued: capacity only. With a computer that could take it free, that is wrong, and says so (w643).
   if (w.status === 'queued') {
+    // Work pinned to computers that are all offline or paused waits for one of them: Blocked on it, not Queued for capacity.
+    const pinAway = pinnedAway(w, f);
+    if (pinAway) return { state: 'blocked', why: `${pinAway.join('; ')}: it is pinned there (${w.machinePin!.why}) and starts by itself when one is back`, waitsOn: pinAway };
     // w4468: a pair run no computers could take together is Stalled with why, not Queued for hours (w4441, w4334).
     const stuck = w.pair && !w.pair.started ? f.pairStuck?.(w) : undefined;
     if (stuck) return { state: 'stalled', why: `queued, but ${stuck}. It returns to Queued by itself when a hold lifts or a computer comes back; a person's note that widens where it may run is decide_work pair_allow (its avoid list) or pair_split (a Mac may host)` };

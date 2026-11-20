@@ -1,6 +1,6 @@
 import { WORK_PRIORITIES, type BenchLock, type BenchQueueReport, type PlayerCacheReport, type WorkItem, type WorkPriority } from '../shared/types.ts';
 import type { SteamClient } from '../shared/steam.ts';
-import type { DesktopSession } from '../shared/desktop.ts';
+import { windowLacks, type DesktopSession } from '../shared/desktop.ts';
 import { admitsPriority, minPriorityText, MIN_PRIORITIES, reservedText, pairRoom, ROOM_STAND_MS, unfitWhy, type MinPriority, type ReservedRoom, type RoomFit } from '../shared/capacity.ts';
 
 /**
@@ -817,6 +817,19 @@ export function workflowLine(places: readonly Computer[], last?: string, prefs: 
   return `Next work that changes .github/workflows (its push needs a gh token with the workflow scope, w1463): ${p ? `${p.pick.id} (${p.why})` : 'no computer has an agent slot now'}. Each computer's gh login may push it: ${each}. A person's vault GitHub token, where machines.githubFromVault is on, takes the login's place for their work.`;
 }
 
+/**
+ * Where the next work that draws a window goes (w4868: a capture, a screenshot, play mode, the FFU client's window), only
+ * while some computer reports a locked screen: such work goes only where the screen is unlocked, and headless work still goes
+ * to the locked one. Undefined when no screen is locked.
+ */
+export function windowLine(places: readonly Computer[], last?: string, prefs: PlacementPrefs = {}): string | undefined {
+  const locked = places.filter((p) => p.online && windowLacks(p.id, p.desktop));
+  if (!locked.length) return undefined;
+  const p = pickComputer(places.filter((x) => !windowLacks(x.id, x.desktop)), last, prefs);
+  const why = locked.map((x) => windowLacks(x.id, x.desktop)).join(', ');
+  return `Next work that draws a window (a capture, a screenshot, play mode, the FFU client's window; decide_work window true or false says it outright): ${p ? `${p.pick.id} (${p.why})` : 'no computer with an unlocked screen has room now: it waits Queued'}. Never on ${locked.map((x) => x.id).join(', ')} (${why}): a window there draws no frames. Headless work (batchmode, EditMode tests, code) still goes there, and a locked screen is never a person's ask.`;
+}
+
 /** The capacity block list_sandboxes and system_status start with: one line per computer, then where the next goes. */
 export function capacityLines(places: readonly Computer[], last?: string, prefs: PlacementPrefs = {}): string[] {
   if (!places.length) return [];
@@ -844,7 +857,8 @@ export function capacityLines(places: readonly Computer[], last?: string, prefs:
   const build = buildLine(places, last, base);
   const timed = timedLine(places, last, base);
   const reserved = reservedLine(places, last, base);
-  return [`## Capacity (${how}; docs/machines.md, "Placing work")`, ...lines, ...(next ? [next] : []), ...(live ? [live] : []), ...(build ? [build] : []), ...(timed ? [timed] : []), nonGameLine(places, last, base), ...(wf ? [wf] : []), ...(reserved ? [reserved] : [])];
+  const window = windowLine(places, last, base);
+  return [`## Capacity (${how}; docs/machines.md, "Placing work")`, ...lines, ...(next ? [next] : []), ...(live ? [live] : []), ...(build ? [build] : []), ...(timed ? [timed] : []), nonGameLine(places, last, base), ...(window ? [window] : []), ...(wf ? [wf] : []), ...(reserved ? [reserved] : [])];
 }
 
 /**

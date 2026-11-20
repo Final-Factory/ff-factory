@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import { agentState, type AgentState, type WaitKind } from '../../shared/agentState.ts';
+import { PAUSED_STATE, unavailableAs } from '../../shared/availability.ts';
 import { ledgerGlance, workLiveAll, type WorkLive } from '../../shared/workState.ts';
 import { agentQueueAll, agentQueueFacts, queueWaitsAll, type AgentQueue, type QueueWait } from '../../shared/queueWaits.ts';
 import type { AppState, BenchLock, AppVersion, CompactionTrigger, ImageInput, Machine, MachineSandbox, MaxSummary, PermissionMode, PersonPlayReport, Provider, Sandbox, SessionInfo, WorkItem, WorkStatus, SessionStatus, UnityState, SandboxStatus, StandingAgent, StandingRunOutcome, StandingTrigger } from '../../shared/types';
@@ -149,7 +150,7 @@ export function machineTone(m: Machine): Tone {
 export function machineLabel(m: Machine): string {
   if (m.status === 'deploying') return 'Setting up';
   if (m.status === 'error') return 'Error';
-  if (m.online && m.pause?.paused) return 'Paused';
+  if (m.online && m.pause?.paused) return PAUSED_STATE;
   return m.online ? 'Online' : 'Offline';
 }
 
@@ -352,11 +353,12 @@ export function useWorkLive(app: AppState, work: readonly WorkItem[], now: numbe
       ...(app.roomSince ? { roomSince: app.roomSince } : {}),
       ...(app.roomSlots ? { roomSlots: app.roomSlots } : {}),
       ...(holds ? { buildHold: (id: string) => holds[id] } : {}),
+      away: Object.fromEntries(app.machines.flatMap((m) => { const a = unavailableAs(m); return a ? [[m.id, a] as const] : []; })),
       benchLock: (id: string) => locks.get(id),
       queueWaits: waits,
       now,
     });
-  }, [app.sessions, app.room, app.agentRoom, app.heldRoom, app.reservedRoom, app.roomFit, app.roomSince, app.roomSlots, app.buildHolds, locks, waits, work, now]);
+  }, [app.sessions, app.room, app.agentRoom, app.heldRoom, app.reservedRoom, app.roomFit, app.roomSince, app.roomSlots, app.buildHolds, app.machines, locks, waits, work, now]);
 }
 
 /**
@@ -449,7 +451,7 @@ export function machineGlance(m: Machine, sessions: SessionInfo[], now: number, 
   if (m.status === 'error') return { tone: 'red', label: 'Error', detail: firstLine(m.statusDetail), attention };
   if (!m.online) return { tone: 'grey', label: 'Offline', detail: m.lastSeen ? `seen ${fmtRelative(m.lastSeen, now)}` : 'never connected', attention };
   // Paused from its tray app (w1532): it takes no work until it runs again; the detail says why and until when.
-  if (m.pause?.paused) return { tone: 'amber', label: 'Paused', detail: m.pause.detail, attention };
+  if (m.pause?.paused) return { tone: 'amber', label: PAUSED_STATE, detail: m.pause.detail, attention };
   // A person plays Final Factory there (w1894): its agents yield and it takes no new work until the grace after the game.
   if (play) return { tone: 'amber', label: 'Playing', detail: playGlance(play), attention };
   const g = agentsGlance(displayName(m), sessions, attention, undefined, false);

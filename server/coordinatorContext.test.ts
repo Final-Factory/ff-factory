@@ -168,7 +168,10 @@ test('w1158: what a coordinator carries in every call stays within its budget', 
   // w4810 (lothsahn: "Desyncs and crashes and hangs should be urgent. Update the rules") gave the dispatcher one line on
   // raising an open desync, crash or hang request (trimmed from 477 characters to 152; the rule is in docs/intake.md): the
   // dispatcher's measured 29,481, so the cap moved to 29,500.
-  const PROMPT_MAX = 29_500;
+  // w4870 (lothsahn: "Paused machines should be treated as offline") gave the dispatcher's machines line the paused state
+  // and decide_work pin (trimmed from 300 characters to 80; the rule is in docs/machines.md and the tools refuse the rest):
+  // the dispatcher's measured 29,561, so the cap moved to 29,575.
+  const PROMPT_MAX = 29_575;
   // w1163: the always-loaded sets now follow measured use (docs/tool-manifest.md); the dispatcher's is 23,436 characters
   // since w1159 gave list_work, list_sandboxes, list_machines and agent_transcript their output options. w1597 gave decide_work
   // its questions (one plain question per decision with its answers, as the person's card asks them; Ben, 2026-10-19: "just ask
@@ -200,7 +203,11 @@ test('w1158: what a coordinator carries in every call stays within its budget', 
   // w4468 (lothsahn: "How did those pair runs get stuck? Please find and fix how that happened.") gave decide_work pair_split and
   // pair_allow, a person's note that widens where a queued pair run may go (trimmed from 260 characters of text to 65; the rule
   // is in read_rules machines): the dispatcher's measured 26,388, so the cap moved to 26,400.
-  const ALWAYS_LOADED_MAX = 26_400;
+  // w4868 and w4870 (lothsahn: "Don't just make those verbal rules, put it in the harness so it doesn't get forgotten") gave
+  // decide_work window and pin, the explicit fields placement checks for work that draws a window and work only one
+  // computer can run (trimmed from 480 characters of text to 120; the rules are in docs/machines.md): the dispatcher's
+  // measured 26,623, so the cap moved to 26,650.
+  const ALWAYS_LOADED_MAX = 26_650;
   await withCoordinators((agents, kinds) => {
     for (const [kind, info] of kinds) {
       const prompt = asOnLinuxCi(promptOf(agents, info)).length;
