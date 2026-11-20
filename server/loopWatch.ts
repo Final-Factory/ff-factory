@@ -30,6 +30,17 @@ export function beatWasLate(now: number, lastBeat: number, everyMs: number, slac
   return now - lastBeat > everyMs + slackMs;
 }
 
+/**
+ * One beat of a link heartbeat (the portal's in server/machines.ts, the daemon's in machine/daemon.ts): 'late' when the beat
+ * itself came late (the loop was blocked, so the pong may sit unread: ping and judge on the next beat), 'dead' when nothing
+ * has come from the other side for more than `deadMs`, else 'ping'. w4926: the daemon had no late check, so its own stall
+ * read as the portal's silence and it dropped a live link (BEAST, 2026-11-20 05:25-07:01Z, eight drops in 96 minutes).
+ */
+export function linkBeat(now: number, lastBeat: number, lastHeard: number, everyMs: number, deadMs: number): 'ping' | 'late' | 'dead' {
+  if (lastBeat && beatWasLate(now, lastBeat, everyMs)) return 'late';
+  return now - lastHeard > deadMs ? 'dead' : 'ping';
+}
+
 export class LoopWatch {
   private last: number;
   private timer?: NodeJS.Timeout;
@@ -43,10 +54,16 @@ export class LoopWatch {
   private summaryStalls = 0;
   private readonly now: () => number;
   private readonly log: (line: string) => void;
+  /** Who stopped answering during a block, for the stall line: "the portal" (default) or "the daemon" (w4926). */
+  private readonly who: string;
+  /** A beat at least this late gets a stall line (default LOOP_STALL_LOG_MS). */
+  private readonly stallLogMs: number;
 
-  constructor(o: { now?: () => number; log?: (line: string) => void } = {}) {
+  constructor(o: { now?: () => number; log?: (line: string) => void; who?: string; stallLogMs?: number } = {}) {
     this.now = o.now ?? Date.now;
     this.log = o.log ?? ((l) => console.warn(l));
+    this.who = o.who ?? 'the portal';
+    this.stallLogMs = o.stallLogMs ?? LOOP_STALL_LOG_MS;
     this.last = this.now();
     this.summaryFrom = this.last;
   }
@@ -81,19 +98,19 @@ export class LoopWatch {
     this.last = now;
     if (lag > 0) this.lags.push([now, lag]);
     while (this.lags.length && now - this.lags[0][0] > LAG_WINDOW_MS) this.lags.shift();
-    if (lag >= LOOP_STALL_LOG_MS) this.unlogged = Math.max(this.unlogged, lag);
+    if (lag >= this.stallLogMs) this.unlogged = Math.max(this.unlogged, lag);
     this.summaryWorst = Math.max(this.summaryWorst, lag);
-    if (lag >= LOOP_STALL_LOG_MS) this.summaryStalls++;
+    if (lag >= this.stallLogMs) this.summaryStalls++;
     if (now - this.summaryFrom >= LOOP_SUMMARY_MS) {
       const min = Math.round((now - this.summaryFrom) / 60_000);
-      this.log(`event loop: worst block ${(this.summaryWorst / 1000).toFixed(1)} s in the last ${min} min; ${this.summaryStalls} of ${(LOOP_STALL_LOG_MS / 1000).toFixed(0)} s or more`);
+      this.log(`event loop: worst block ${(this.summaryWorst / 1000).toFixed(1)} s in the last ${min} min; ${this.summaryStalls} of ${(this.stallLogMs / 1000).toFixed(0)} s or more`);
       this.summaryFrom = now;
       this.summaryWorst = 0;
       this.summaryStalls = 0;
     }
     if (!this.unlogged || now - this.loggedAt < LOG_EVERY_MS) return;
     this.loggedAt = now;
-    this.log(`event loop: blocked for ${(this.unlogged / 1000).toFixed(1)} s (the longest since the last such line): the portal answered nothing meanwhile`);
+    this.log(`event loop: blocked for ${(this.unlogged / 1000).toFixed(1)} s (the longest since the last such line): ${this.who} answered nothing meanwhile`);
     this.unlogged = 0;
   }
 

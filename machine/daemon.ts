@@ -16,6 +16,7 @@ import { bus, type DistributiveOmit } from '../server/store.ts';
 import { CATALOG, buildOptions, githubCredentialEnv, type CatalogTool, type LaunchSpec, type ToolHandler } from '../server/launch.ts';
 import { MAIN_CLONE_NO_AGENTS, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION, RELOCATE_FALLBACK_MINUTES, SELF_UPDATE_VERSION, relocateProblem, type DaemonLiveView, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
 import { writeFileDurable } from '../server/durable.ts';
+import { LoopWatch, linkBeat } from '../server/loopWatch.ts';
 import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, pidAlive, readHostState } from './agentHost.ts';
 import { SelfUpdater } from './selfUpdate.ts';
 import { installSshOf } from './installSsh.ts';
@@ -83,6 +84,7 @@ import { GRACE_MIN, PersonPlay, personEnds, personHolderText, personHoldText, pe
 import { benchTicketFor, queueTickets, type QueueTicket } from './benchQueue.ts';
 import { holdsOwnTicket, resumeRevokes, revokeTicket } from './benchRevoke.ts';
 import { readBenchHours } from './benchHours.ts';
+import { TestHistorySpool } from './testHistorySpool.ts';
 import { TimedRunner, timedRunEnv } from './timedRunner.ts';
 import { findFixtures, listFixtures, offeredDir, sendFixture } from './labFixtures.ts';
 import { timedRunFromMachine } from './timedRunPack.ts';
@@ -342,8 +344,15 @@ const HOME = os.homedir();
 /** A knob's later moves within this long amend its line in the conversation instead of adding one (a drag is one line). */
 const LIVE_LINE_MERGE_MS = 5000;
 const STATS_MS = 15_000;
+/** The link heartbeat (w4926): a ping every LINK_BEAT_MS; the portal is called silent after LINK_DEAD_MS with nothing from it. */
+const LINK_BEAT_MS = 20_000;
+const LINK_DEAD_MS = 45_000;
+/** A daemon block this long gets a line in daemon.log (w4926); shorter ones count only in the 10-minute summary. */
+const DAEMON_STALL_LOG_MS = 5_000;
 /** w1996: how often the bench queue's cost per hour goes to the portal (it also goes after each welcome). */
 const BENCH_HOURS_MS = 60 * 60_000;
+/** How often the sandboxes' local test-run records go to the portal's per-test history (w4922). */
+const TEST_HISTORY_MS = 60_000;
 /** How often this Mac's own login's usage is polled until the portal says (usage_config: config usagePollMinutes). */
 const USAGE_DEFAULT_MINUTES = 15;
 // Never a Claude OAuth token in the daemon log (the launch spec carries the host's, server/secrets.ts).
@@ -388,6 +397,10 @@ export class Daemon {
   private readonly sending = new Map<string, Promise<void>>();
   private attempt = 0;
   private lastPong = 0;
+  /** When the link heartbeat last ran: a beat that comes late was a stall here, not the portal's silence (w4926). */
+  private lastBeat = 0;
+  /** The daemon's own event-loop watch (w4926): a block is a line in daemon.log, beside what ran around it. */
+  private loopWatch?: LoopWatch;
   private stopped = false;
   /** What keeps the machine awake while agents run: caffeinate on a Mac, a PowerShell holding SetThreadExecutionState on Windows. */
   private caffeinate?: ChildProcess;
@@ -401,6 +414,8 @@ export class Daemon {
   private maxTail?: FileTail;
   /** The machine's sandboxes (machine/sandboxes.ts): worktrees of the clone with their own editors. */
   readonly pool: SandboxPool;
+  /** Each sandbox's local test runs, sent to the portal's per-test history (w4922, machine/testHistorySpool.ts). */
+  private readonly testHistory: TestHistorySpool;
   /** Every Unity editor on the machine against max_unity, and the queue for launches (machine/unitySlots.ts, w469). */
   readonly slots: UnitySlots;
   /** Ends a sandbox's orphaned or hung batch build, which would hold its Unity slot for hours (machine/unityReaper.ts, w791). */
@@ -768,6 +783,15 @@ export class Daemon {
       },
       pd,
     );
+    this.testHistory = new TestHistorySpool({
+      places: () => this.pool.list().map((sb) => ({ id: sb.id, path: sb.path })),
+      send: (msg) => {
+        if (this.ws?.readyState !== WebSocket.OPEN) return false;
+        this.send(msg);
+        return true;
+      },
+      log,
+    });
     this.makeSession = makeSession ?? ((info, sink, options, events) => new AgentSession(info, sink, options, events));
     this.hosted = cfg.agentHosts ?? !makeSession;
     if (cfg.voice?.enabled) {
@@ -1326,11 +1350,22 @@ export class Daemon {
     const watch = readOutsideWatch(outsideWatchFile(appDirOfConfig(this.cfg)));
     if (watch) this.outsideWatch = new OutsideWatch(watch);
     this.timers.push(setInterval(() => void this.outsideWatch?.tick(), 60_000));
-    this.timers.push(setInterval(() => this.heartbeat(), 20_000));
+    this.timers.push(setInterval(() => this.heartbeat(), LINK_BEAT_MS));
+    this.loopWatch = new LoopWatch({ log: (l) => log(l), who: 'the daemon', stallLogMs: DAEMON_STALL_LOG_MS }).start();
     // An update job's result (w1596): sent once the link is up, then the job's task or LaunchAgent removed.
     this.timers.push(setInterval(() => void this.selfUpdate.tick().catch((e) => log(`update job report: ${(e as Error).message}`)), 10_000));
     this.timers.push(setInterval(() => void this.reportStats(), STATS_MS));
     this.timers.push(setInterval(() => void this.reportBenchHours(), BENCH_HOURS_MS));
+    this.timers.push(
+      setInterval(() => {
+        if (this.ws?.readyState !== WebSocket.OPEN) return;
+        try {
+          this.testHistory.tick();
+        } catch (e) {
+          log(`test history: ${(e as Error).message}`);
+        }
+      }, TEST_HISTORY_MS),
+    );
     // A stopped worker's temp folder (w913): swept a few minutes after its process ended, its clones after six hours.
     this.timers.push(setInterval(() => void this.sweeper.tick().catch((e) => log(`session sweep failed: ${(e as Error).message}`)), 30_000));
     // Clean-up: every minute it looks whether a pass is due (every everyMinutes, sooner below softFreeGB).
@@ -1396,6 +1431,7 @@ export class Daemon {
     this.cliScrub?.stop();
     clearTimeout(this.usageTimer);
     for (const t of this.timers) clearInterval(t);
+    this.loopWatch?.stop();
     this.slots.close();
     // Not on purpose (a redeploy, a restart, logging off): each agent keeps its restart marks (turnOpenSince), so the
     // portal knows which ones were mid-turn and resumes them when the daemon is back (MachineManager.resumeCutOff).
@@ -1595,9 +1631,16 @@ export class Daemon {
 
   private heartbeat() {
     const ws = this.ws;
+    const now = Date.now();
+    const last = this.lastBeat;
+    this.lastBeat = now;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    if (Date.now() - this.lastPong > 45_000) {
-      log('portal silent for 45 s; reconnecting');
+    const beat = linkBeat(now, last, this.lastPong, LINK_BEAT_MS, LINK_DEAD_MS);
+    if (beat === 'late') {
+      // The pong may be waiting unread behind the block (Node runs due timers before it polls sockets): judge next beat.
+      log(`link heartbeat ran ${((now - last) / 1000).toFixed(1)} s after the last (due every ${LINK_BEAT_MS / 1000} s): this daemon was blocked; not judging the portal on this beat`);
+    } else if (beat === 'dead') {
+      log(`portal silent for ${((now - this.lastPong) / 1000).toFixed(0)} s; reconnecting`);
       ws.terminate();
       return;
     }
@@ -2949,6 +2992,9 @@ export class Daemon {
             log(`person play: could not keep its settings: ${(e as Error).message}`);
           }
         }
+        return;
+      case 'test_history_ack':
+        this.testHistory.ack(msg.sandbox, msg.file, msg.ok, msg.error);
         return;
       case 'cleanup_now':
         void this.cleaner.run('asked', { dryRun: !!msg.dryRun }).then(

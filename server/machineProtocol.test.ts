@@ -137,7 +137,10 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // drops the field, and an older daemon never sends it, so the portal keeps what the record knew.
 // w4672 (no bump): `self_update_offer`, the hello's `selfUpdate` sent later by a daemon whose install record was unreadable at
 // its hello (its Dev Drive not yet attached); an older portal drops it (no default case), and an older daemon never sends it.
-const DECIDED = { protocol: 9, fingerprint: '6a8696ae781c77c4' };
+// w4922 (no bump): `test_history`, a local test run's record from a sandbox's Library/FFTestHistory spool, and its answer
+// `test_history_ack`; an older portal drops the record (no default case), so the daemon keeps the file and sends it again every 30
+// minutes until a newer portal acks it, and an older daemon never sends one, so it is never acked.
+const DECIDED = { protocol: 9, fingerprint: 'a37e479f05ae1f90' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

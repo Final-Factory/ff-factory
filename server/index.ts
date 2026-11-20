@@ -30,6 +30,8 @@ import { run as runProc } from './proc.ts';
 import { portalPrEvidence } from '../machine/evidenceGate.ts';
 import { BlockerWatch, ghCompileVerdict, ghEvidenceRefusal, ghPrHealth } from './blockerWatch.ts';
 import { MasterBatchWatch } from './masterBatch.ts';
+import { TestHistory, parseLocalRecord, queryTestHistory, type QueryArgs } from './testHistory.ts';
+import { TestHistoryCi, testHistorySettings } from './testHistoryCi.ts';
 import { runWaitsMigration } from './waitsMigration.ts';
 import { parseNightlyReport } from './nightlyRules.ts';
 import { parseEscalation } from './escalationRules.ts';
@@ -612,6 +614,21 @@ machines.benchHours = (id, rows) => {
     console.warn(`bench hours of ${id}: ${(e as Error).message}`);
   }
 };
+// The per-test history (w4922, docs/test-history.md): every worker's local test run, sent by its daemon, and CI's runs
+// (server/testHistoryCi.ts); the test_history tool reads it.
+const testHistory = new TestHistory({ dataDir: cfg.dataDir });
+agents.testHistoryQuery = (a) => queryTestHistory(testHistory, a as unknown as QueryArgs);
+machines.testHistory = (id, sandbox, file, record) => {
+  const r = parseLocalRecord(record);
+  if (!r) return { ok: false, error: 'not a test history record (version 1)' };
+  if (!r.tests.length) return { ok: true };
+  const tags = agents.workInSandbox(id, sandbox);
+  testHistory.addRun(
+    { ...r.info, source: 'local', key: `local:${id}/${sandbox}/${file}`, repo: testHistorySettings(cfg).repo, machine: id, sandbox, sessions: tags.sessions, requests: tags.requests },
+    r.tests,
+  );
+  return { ok: true };
+};
 setInterval(() => {
   try {
     timedRuns.tick();
@@ -1072,6 +1089,7 @@ runWaitsMigration({
 blockerWatch.start();
 // A red master batch of the game repo goes back to the culprit PR's request as an urgent revert request (w1180, docs/intake.md).
 const masterBatch = new MasterBatchWatch({ cfg, store, identity, orchestrators: agents.orchestrators }).start();
+const testHistoryCi = new TestHistoryCi({ cfg, history: testHistory, identity, log: (line) => console.log(line) }).start();
 
 let lastSystem: SystemStats | undefined;
 
@@ -2722,6 +2740,7 @@ function stopServer(req: RestartRequest, drained: ReadonlySet<string> = new Set(
   ledgerSweep.close();
   blockerWatch.close();
   masterBatch.close();
+  testHistoryCi.close();
   agents.rollout.close();
   store.flush();
   spend.flush();

@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { evidenceArgs, evidenceGated, evidencePython, evidenceRefusal, evidenceVerdict, findPrEvidence, noScriptRefusal } from '../machine/evidenceGate.ts';
+import { STALE_EVIDENCE, evidenceArgs, evidenceGated, evidencePython, evidenceRefusal, evidenceVerdict, findPrEvidence, noScriptRefusal, updateLocalPlugin } from '../machine/evidenceGate.ts';
 import { repoIsPublic } from './publicGit.ts';
 import { checkStrayWrite } from './strayWrite.ts';
 import { checkGitBashPathInPowerShell } from './gitBashPath.ts';
@@ -939,10 +939,15 @@ export const ghEvidence: EvidenceResolver = (pr, repo, dir, env) => {
   const script = findPrEvidence({ env: all, home: os.homedir() });
   const why = (s: string) => `Not merged: ${s}. Fix the evidence or the claim (gh pr edit ${m[2]} --body-file <f>), then merge with ff-pr merge.`;
   if (!script) return why(noScriptRefusal(m[1], m[2]));
-  const r = spawnSync(evidencePython(all), evidenceArgs(script, m[1], m[2]), { cwd: dir, encoding: 'utf8', timeout: 120_000, windowsHide: true, env: all });
-  const code = r.status ?? (r.error ? 127 : 1);
-  const v = evidenceVerdict(code, r.stdout ?? '', r.stderr ?? (r.error ? r.error.message : ''));
-  return v.ok ? undefined : why(evidenceRefusal(m[1], m[2], code, v));
+  const check = (s: string) => {
+    const r = spawnSync(evidencePython(all), evidenceArgs(s, m[1], m[2]), { cwd: dir, encoding: 'utf8', timeout: 120_000, windowsHide: true, env: all });
+    const code = r.status ?? (r.error ? 127 : 1);
+    return { code, text: `${r.stdout ?? ''}\n${r.stderr ?? ''}`, v: evidenceVerdict(code, r.stdout ?? '', r.stderr ?? (r.error ? r.error.message : '')) };
+  };
+  let c = check(script);
+  // w4926: a copy one release behind refuses for a reason no PR edit fixes: update the plugin and check once more.
+  if (!c.v.ok && STALE_EVIDENCE.test(c.text) && !updateLocalPlugin(all)) c = check(findPrEvidence({ env: all, home: os.homedir() }) ?? script);
+  return c.v.ok ? undefined : why(evidenceRefusal(m[1], m[2], c.code, c.v));
 };
 
 export interface ShellContext {
