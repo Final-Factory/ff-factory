@@ -302,11 +302,17 @@ export function stillOpenOf(text: string, id?: string): string | undefined {
   return re.exec(text)?.[1]?.trim();
 }
 
-/** What the gap after a turn waited on: the turn's last hand-off tool, else the result's words. */
-export function gapCauseOf(turnTools: readonly { name: string; input: unknown }[], resultText: string, id?: string): WorkCause {
+/**
+ * What the gap after a turn waited on: the turn's last hand-off tool, else the result's words. Undefined: given an id, the
+ * turn handed off only other requests, so this one keeps the cause its own last hand-off gave it (w4927: w4298's worker
+ * 53abc3d5 also held w4278 and w4274; its last turn ended on "w4274: still open: blocked on CI", which faded w4298's
+ * "blocked on PR ffu#819 merging" into 46 h of past TAIL).
+ */
+export function gapCauseOf(turnTools: readonly { name: string; input: unknown }[], resultText: string, id?: string): WorkCause | undefined {
   for (let i = turnTools.length - 1; i >= 0; i--) {
     const { name, input } = turnTools[i];
     const o = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
+    if (id && typeof o.request === 'string' && o.request.toLowerCase() !== id.toLowerCase()) continue;
     if (/blocked_on$/.test(name)) {
       const prs = Array.isArray(o.prs) ? o.prs.map(String) : [];
       if (prs.some((p) => p.startsWith('ci:')) || o.merge_on_green) return 'gap_ci';
@@ -328,6 +334,7 @@ export function gapCauseOf(turnTools: readonly { name: string; input: unknown }[
   if (/usage limit|rate limit|hit your limit|limit reached/i.test(resultText)) return 'usage';
   if (/: paused:|interrupted|pre-?empt/i.test(resultText)) return 'preempt';
   const still = stillOpenOf(resultText, id);
+  if (still === undefined && id && !idWord(id).test(resultText) && /\bw\d+\b[^\n]*still open:|\bDONE: w\d+/i.test(resultText)) return undefined;
   return (still !== undefined && stillOpenCauseOf(still)) || 'idle';
 }
 
@@ -406,7 +413,7 @@ export function sessionSpans(events: readonly TranscriptEvent[], from: number, t
     if (turnStart !== undefined) push(turnStart, t, 'think');
     else if (gapFrom !== undefined) push(gapFrom, t, gapCause);
     gapFrom = t;
-    gapCause = gapCauseOf(turnTools, resultText, id);
+    gapCause = gapCauseOf(turnTools, resultText, id) ?? gapCause;
     turnStart = undefined;
     turnTools = [];
     open.clear();
