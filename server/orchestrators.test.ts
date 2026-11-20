@@ -16,7 +16,7 @@ import { crossOwnerLine, delegationConstraints, DispatcherChatRefused, DISPATCHE
 import { configPath, type Config } from './config.ts';
 import { memoryDirFor } from './orchestratorMemory.ts';
 import { handoverNote, isOpen, requestAsFiled, requestNotice } from './work.ts';
-import { BlockerWatch, ghMerge, MERGE_TRIES, notMergeableRefusal, remergeJob, REPORTED_WAIT_MS } from './blockerWatch.ts';
+import { BlockerWatch, compileErrorsIn, COMPILE_READ_MS, ghCompileVerdict, ghMerge, MERGE_TRIES, notMergeableRefusal, remergeJob, REPORTED_WAIT_MS } from './blockerWatch.ts';
 import { noteBudget, resetBudgets } from './ghBudget.ts';
 import { poolForRef, type GatePoolToken } from './usageGate.ts';
 import { inheritedPayer, personForWork, sessionPerson, setVaultContext } from './vault.ts';
@@ -11075,4 +11075,94 @@ test('w4634: decide_work with no action sets only timed, report or pair marks; d
   const ok = await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'done', note: 'it repeats w1, which covers the same question' });
   assert.equal(ok.isError, false, ok.text);
   assert.equal(store.work.get('w2')!.status, 'done');
+});
+
+test('w4925: a pair run that has not started is not blocked on a named computer or an hour while another computer has room, unless a person asked; one blocked so beside room is flagged', async (t) => {
+  const { store, agents, o, dispatcher, chat, call, heard } = setup(t);
+  agentsRoom(agents, []);
+  await call(chat(BEN).info, 'request_work', { title: 'MP pair check', brief: 'Run the pair.' });
+  await call(chat(BEN).info, 'request_work', { title: 'Second MP pair check', brief: 'Run the pair.' });
+  for (const id of ['w1', 'w2']) {
+    const q = await call(dispatcher().info, 'decide_work', { id, action: 'queue', note: 'every computer is busy', pair_legs: 1 });
+    assert.equal(q.isError, false, q.text);
+  }
+  const until6 = new Date(Date.now() + 6 * 3_600_000).toISOString();
+  // w2 is blocked on an hour while nothing has room: allowed.
+  const ok = await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'block', note: 'wait for the morning', blocker: { kind: 'time', until: until6, what: 'the morning' } });
+  assert.equal(ok.isError, false, ok.text);
+  // w4622: biscuit frees, and the dispatcher would park w1 on an hour (or lothlaptop) anyway: refused, naming the room.
+  agentsRoom(agents, ['biscuit']);
+  const refused = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'block', note: 'only a Windows computer will do', blocker: { kind: 'time', until: until6, what: 'lothlaptop free' } });
+  assert.equal(refused.isError, true);
+  assert.match(refused.text, /w1 is a pair run of 1 leg.*biscuit has room for it now: a pair run waits for no named computer or time \(w4925/);
+  assert.equal(store.work.get('w1')!.status, 'queued');
+  // A person's words let it wait, and are kept so the ledger does not flag it.
+  const asked = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'block', note: 'lothsahn asked', blocker: { kind: 'time', until: until6, what: 'the morning' }, override_gate: 'lothsahn: keep it waiting until morning' });
+  assert.equal(asked.isError, false, asked.text);
+  assert.equal(store.work.get('w1')!.pair?.waitAsked, 'lothsahn: keep it waiting until morning');
+  // w2, blocked by the dispatcher alone, is flagged once biscuit's room has stood past the grace; w1 is not.
+  await call(dispatcher().info, 'list_work', { id: 'w2' });
+  const later = Date.now() + 11 * 60_000;
+  (o as unknown as { now: () => Date }).now = () => new Date(later);
+  assert.deepEqual(o.flagQueuedWithRoom(['biscuit']), ['w2']);
+  assert.deepEqual(o.flagQueuedWithRoom(['biscuit']), [], 'once an hour at most');
+  await until('the dispatcher hears it', () => heard(dispatcher().info.id, '[ledger] WRONG STATE: a pair run').length > 0);
+  assert.match(heard(dispatcher().info.id, '[ledger] WRONG STATE: a pair run')[0].text, /w2 "Second MP pair check" .*room on biscuit\)/);
+  assert.match(store.work.get('w2')!.log.join('\n'), /flagged: blocked on .* while biscuit has room for this pair run/);
+});
+
+test('w4925: a pair run whose commit CI failed to compile ends with the error lines before its legs run, and its asker is cleared with them', async (t) => {
+  const { store, o, dispatcher, chat, call } = setup(t);
+  await call(chat(BEN).info, 'request_work', { title: 'Black hole station fix', brief: 'Fix it.' });
+  await call(chat(BEN).info, 'request_work', { title: 'MP pair check of the fix', brief: 'Run the pair.' });
+  const sha = '9cc67303f5c74aa88ffd7cf53369a1ec77bfe68b';
+  store.putWork({ ...store.work.get('w2')!, status: 'queued', queuedFor: { at: new Date().toISOString() }, pair: { legs: 1, for: 'w1', commit: sha.slice(0, 12) } });
+  const b = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'block', note: 'waits on its pair run', blocker: { kind: 'request', ref: 'w2', what: 'its pair run' } });
+  assert.equal(b.isError, false, b.text);
+  const reads: string[] = [];
+  let verdict: { done: boolean; lines?: string[]; run?: string } = { done: false };
+  let clock = Date.now();
+  const watch = new BlockerWatch({ store, orchestrators: o, now: () => clock, compile: async (repo, s) => (reads.push(`${repo}@${s}`), verdict) });
+  // CI still running: nothing happens, and the commit is read again only after COMPILE_READ_MS.
+  await watch.tick();
+  await watch.tick();
+  assert.deepEqual(reads, [`Final-Factory/FinalFactory@${sha.slice(0, 12)}`]);
+  assert.equal(store.work.get('w2')!.status, 'queued');
+  // w4880's case: CI went red on CS0103 five minutes after request_pair.
+  verdict = { done: true, lines: ["Assets/Tests/BlackHoleStationSwallowTest.cs(41,13): error CS0103: The name 'FpExtensions' does not exist in the current context"], run: 'https://github.com/Final-Factory/FinalFactory/actions/runs/44694929723' };
+  clock += COMPILE_READ_MS;
+  const did = await watch.tick();
+  assert.match(did.get('w2')!, /^closed: did not compile at 9cc67303f5: CI \(https:\/\/github.com\/Final-Factory\/FinalFactory\/actions\/runs\/44694929723\) failed with Assets\/Tests\/BlackHoleStationSwallowTest.cs\(41,13\): error CS0103/);
+  const p = store.work.get('w2')!;
+  assert.equal(p.status, 'done');
+  assert.match(p.outcome!, /^FAIL: did not compile at 9cc67303f5.*No player was run: fix the build, push, and request_pair again/);
+  // Its asker, blocked on it, is cleared with the errors on the next look; a finished commit is never read again.
+  await watch.tick();
+  assert.notEqual(store.work.get('w1')!.status, 'blocked');
+  assert.equal(reads.length, 2);
+});
+
+test('w4925: compileErrorsIn and ghCompileVerdict read the C# errors of a failed run at a commit, once each', async () => {
+  const log = [
+    'Test in editmode\tUNKNOWN STEP\t2026-11-20T07:30:01.1Z Assets/Tests/A.cs(41,13): error CS0103: The name \'X\' does not exist in the current context',
+    'Test in editmode\tUNKNOWN STEP\t2026-11-20T07:30:02.1Z Assets/Tests/A.cs(41,13): error CS0103: The name \'X\' does not exist in the current context',
+    'Test in editmode\tUNKNOWN STEP\t2026-11-20T07:30:03.1Z error CS1002: ; expected',
+    'Test in editmode\tUNKNOWN STEP\t2026-11-20T07:30:04.1Z ##[error]Process completed with exit code 1.',
+  ].join('\n');
+  assert.deepEqual(compileErrorsIn(log), ["Assets/Tests/A.cs(41,13): error CS0103: The name 'X' does not exist in the current context", 'error CS1002: ; expected']);
+  const full = 'a'.repeat(40);
+  const calls: string[] = [];
+  const run = async (cmd: string, args: string[]) => {
+    calls.push(args.join(' '));
+    if (args[1]?.startsWith('repos/o/r/commits/')) return { code: 0, stdout: `${full}\n`, stderr: '' };
+    if (args[1]?.startsWith('repos/o/r/actions/runs')) return { code: 0, stdout: JSON.stringify({ workflow_runs: [{ id: 7, name: 'Test Runner', status: 'completed', conclusion: 'failure', head_sha: full, html_url: 'https://x/runs/7' }, { id: 8, name: 'Lint', status: 'in_progress', head_sha: full }] }), stderr: '' };
+    if (args[0] === 'run') return { code: 0, stdout: log, stderr: '' };
+    return { code: 1, stdout: '', stderr: `unexpected ${cmd} ${args.join(' ')}` };
+  };
+  const v = await ghCompileVerdict('o/r', 'aaaaaaa', run);
+  assert.deepEqual(v, { done: true, lines: compileErrorsIn(log), run: 'https://x/runs/7' });
+  assert.deepEqual(calls, ['api repos/o/r/commits/aaaaaaa --jq .sha', `api repos/o/r/actions/runs?head_sha=${full}&per_page=50`, 'run view 7 -R o/r --log-failed']);
+  // A failure that is no compile error (a test failed): no lines, done only once every run finished.
+  const green = await ghCompileVerdict('o/r', full, async (_c, args) => (args[0] === 'run' ? { code: 0, stdout: 'Test in editmode\tx\t1 Expected 3 but was 4', stderr: '' } : { code: 0, stdout: JSON.stringify({ workflow_runs: [{ id: 7, status: 'completed', conclusion: 'failure', head_sha: full }] }), stderr: '' }));
+  assert.deepEqual(green, { done: true });
 });

@@ -2299,6 +2299,11 @@ export interface WorkPair {
   retryOf?: string;
   avoid?: string[];
   /**
+   * w4925: a person's words (decide_work block's override_gate) asking this unstarted pair run to wait on a computer or an
+   * hour while others have room; without them such a block is refused, and the ledger flags one that stands beside room.
+   */
+  waitAsked?: string;
+  /**
    * The pull request ("owner/repo#N") and the commit its legs run (w2057, request_pair pr and commit): a filing for the same
    * pull request joins this run while it is open, and is answered with its result once it finished on the same commit.
    * Absent on a run filed by hand: server/pairRuns.ts reads them from its title and brief.

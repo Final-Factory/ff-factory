@@ -4273,6 +4273,16 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
         const problem = blockerProblem(b, w.id, facts);
         if (problem) throw new Error(problem);
       }
+      // w4925: a pair run that has not started waits for no named computer or hour while computers it may run on have room
+      // now (a pair run takes any OS; its mark's own constraints are in roomForWork). w4622 was blocked on "lothlaptop coming
+      // back online" for 34 hours at 11-17 20:24Z ("the only Windows computer ... that isn't held") while biscuit and m5
+      // had room, and later on "06:00 UTC". A person's hold is ask; a gate the person named passes with override_gate.
+      const parked = asked.filter((b) => b.kind === 'machine' || b.kind === 'time');
+      if (parked.length && w.pair && !w.pair.started && input.override_gate?.trim()) w.pair = { ...w.pair, waitAsked: clip(input.override_gate.trim(), 300) };
+      else if (parked.length && w.pair && !w.pair.started) {
+        const room = this.pairRoomNow(w);
+        if (room.length) throw new Error(`${w.id} is ${pairText(w.pair)}, and ${room.join(', ')} ${room.length > 1 ? 'have' : 'has'} room for it now: a pair run waits for no named computer or time (w4925; strict priority, any OS). Start ${w.pair.legs === 1 ? `its one leg (start_agent with work_id "${w.id}" and sandbox alone)` : `its ${w.pair.legs} legs together (start_agent with work_id "${w.id}", sandbox for leg 1 and pair_sandboxes for the others)`} on ${room.join(' or ')}. Only if a person asked it to wait for ${parked.map((b) => b.ref ?? b.until ?? b.what).join(', ')}, block again with override_gate quoting their words.`);
+      }
       const strangers = (input.session_ids ?? []).map((x) => x.trim().toLowerCase()).filter((x) => x && !w.sessionIds.some((sid) => sid.startsWith(x)));
       if (strangers.length) throw new Error(`block's session_ids name the workers the blocker is about, and ${strangers.join(', ')} ${strangers.length > 1 ? 'are not workers' : 'is not a worker'} of ${w.id} (its workers: ${w.sessionIds.map((x) => x.slice(0, 8)).join(', ') || 'none'})`);
       const fresh = asked.map((b) => this.makeGate(this.usageGateOf(b), now.toISOString(), 'dispatcher'));
@@ -5104,6 +5114,41 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       if (s.placeReleased) return { why: `${leg}'s sandbox went to other work (${clip(s.placeReleased.why, 80)}), which ended what it ran there`, avoid: [] };
     }
     return undefined;
+  }
+
+  /**
+   * w4925: CI on the commit pair run `id` runs failed to compile (blockerWatch.compileFailedPairs, its `error CS` lines): the
+   * run ends now, as done with the compile errors for its result, so its asker fixes the build instead of waiting for a leg to
+   * build a player and fail on the same error. w4880's CI on 9cc67303 was red at 07:31Z, five minutes after request_pair;
+   * its leg reached the same CS0103 in its player build at 07:48Z. Its legs are told to stop. Returns what was done, or
+   * undefined when the run is closed already or ran another commit.
+   */
+  pairDidNotCompile(id: string, sha: string, lines: readonly string[], run?: string): string | undefined {
+    const p = this.store.work.get(id.toLowerCase());
+    if (!p?.pair || !isOpen(p) || !p.pair.commit || !sameCommit(p.pair.commit, sha)) return undefined;
+    const errors = lines.slice(0, 5).map((l) => clip(l, 240)).join('; ');
+    const why = `did not compile at ${sha.slice(0, 10)}: CI${run ? ` (${run})` : ''} failed with ${errors}`;
+    settleByHand(p);
+    p.status = 'done';
+    p.stalled = undefined;
+    p.queuedFor = undefined;
+    p.blocked = undefined;
+    p.alsoBlocked = undefined;
+    p.outcome = `FAIL: ${why}. No player was run: fix the build, push, and request_pair again with the new commit (w4925).`;
+    this.stamp(p, `closed as done: ${why} (w4925: a pair run of a commit that does not compile stops before its players run)`);
+    this.store.putWork(p);
+    for (const sid of p.sessionIds) {
+      const s = this.store.sessions.get(sid);
+      if (!s || s.kind !== 'worker' || s.status === 'stopped' || s.status === 'error' || doneOf(p)[sid]) continue;
+      try {
+        this.sessions.send(sid, `[ledger] ${p.id} "${clip(p.title, 80)}" is over: its commit ${why}. Stop your leg now (end any player or build of yours for it); nothing more is needed from you on it.`, 'system');
+      } catch {
+        // gone or at a limit: placeAgain stops it once its request is closed
+      }
+    }
+    this.pairFinished(p);
+    console.log(`ledger: ${p.id} ${why}`);
+    return `closed: ${why}`;
   }
 
   /** A spent pair run replaced by its retry (w2041): cancelled, so its legs' reports no longer reach the asker and placeAgain frees them. */
@@ -9192,6 +9237,22 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    * is a bug, flagged loudly: logged on it and in the server log, and the dispatcher is told to start it or block it.
    * Returns the ids flagged.
    */
+  /**
+   * w4925: the computers an unstarted pair run could start on now, by the queue's own test (decide_work queue): room it may
+   * run on (roomForWork), that work ahead of it does not take (roomShares), not held for another (heldOn), and enough for
+   * all its legs at once (roomEnough). Empty for a started run or one that is not a pair run.
+   */
+  private pairRoomNow(w: WorkItem, facts: RoomNow = this.roomNow()): string[] {
+    if (!w.pair || w.pair.started) return [];
+    const fitting = roomForWork(facts, w, []);
+    if (!fitting.ids.length) return [];
+    const share = roomShares([...this.store.work.values()], this.liveRoom(facts), { w, wanted: [] })?.get(w.id);
+    if (share && !share.gets) return [];
+    const held = this.heldOn(w, w.pair, fitting.ids);
+    const on = fitting.ids.filter((id) => !held.some((h) => h.id === id));
+    return roomEnough(facts, w, on) ? on : [];
+  }
+
   flagQueuedWithRoom(room: readonly string[] | RoomNow): string[] {
     // The room the page and decide_work queue read (this.roomNow()); a bare list is the game room, nothing held.
     const facts: RoomNow = Array.isArray(room) ? { game: [...room], agent: [], held: [] } : (room as RoomNow);
@@ -9229,13 +9290,36 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       this.store.putWork(w);
       flagged.push({ w, on, leg: late.map((l) => l.what).join('; ') });
     }
-    if (!flagged.length) return [];
+    // w4925: an unstarted pair run the dispatcher blocked only on a computer or an hour, beside room it could start on now
+    // (w4622 waited 34 h on "lothlaptop coming back online" while biscuit and m5 had room; flagged only when queued).
+    const parked: { w: WorkItem; on: string[] }[] = [];
+    for (const w of this.store.work.values()) {
+      if (w.status !== 'blocked' || !w.pair || w.pair.started || w.pair.waitAsked) continue;
+      const gates = gatesOf(w);
+      if (!gates.length || !gates.every((g) => g.by === 'dispatcher' && (g.kind === 'machine' || g.kind === 'time'))) continue;
+      const since = Math.max(...gates.map((g) => Date.parse(g.at) || now));
+      if (now - since < ROOM_GRACE_MS || now - (this.roomFlags.get(`${w.id}:parked`) ?? 0) < 3_600_000) continue;
+      const on = roomStood(facts, needsOf(w), this.pairRoomNow(w, facts), now);
+      if (!on.length || !roomEnough(facts, w, on)) continue;
+      this.roomFlags.set(`${w.id}:parked`, now);
+      this.stamp(w, `flagged: blocked on ${gatesName(gates, now)} while ${on.join(', ')} ${on.length > 1 ? 'have' : 'has'} room for this pair run (${nums(on)} at this time)`);
+      this.store.putWork(w);
+      parked.push({ w, on });
+    }
+    if (parked.length) {
+      parked.sort((a, b) => ledgerOrder(a.w, b.w));
+      console.warn(`ledger: pair run blocked on a computer or time while room stands: ${parked.map((f) => `${f.w.id} (${f.on.join(', ')})`).join('; ')}`);
+      this.toDispatcher(
+        `[ledger] WRONG STATE: a pair run waits on a named computer or hour while computers it can run on have room (w4925: strict priority, any OS): ${parked.map((f) => `${f.w.id} "${clip(f.w.title, 80)}" (${names(f.w.requesters)}, ${f.w.priority}; ${pairText(f.w.pair!)}; room on ${f.on.join(', ')})`).join('; ')}. Start each now (start_agent with its work_id, sandbox alone for one leg, pair_sandboxes for more), unless a person asked it to wait: then say so with decide_work block and override_gate quoting their words.`,
+      );
+    }
+    if (!flagged.length) return parked.map((f) => f.w.id);
     flagged.sort((a, b) => ledgerOrder(a.w, b.w)); // by priority, then oldest (w1099)
     console.warn(`ledger: queued while a computer has room: ${flagged.map((f) => `${f.w.id} (${f.on.join(', ')})`).join('; ')}`);
     this.toDispatcher(
       `[ledger] WRONG STATE: queued for capacity while a computer that could take it has room: ${flagged.map((f) => `${f.w.id} "${clip(f.w.title, 80)}" (${names(f.w.requesters)}, ${f.w.priority}; ${needsOf(f.w) === 'agent' ? 'an agent slot (it needs no editor)' : 'room'} on ${f.on.join(', ')}${f.leg ? `; its leg there: ${clip(f.leg, 160)}` : ''})`).join('; ')}. Queued means no free place. Start each now (start_agent with its work_id${flagged.some((f) => f.leg) ? '; for a leg, in a FREE sandbox on the computer named, while its own worker carries on' : ''}), or decide_work block it on what it really waits for (another request, a deploy, a machine, a lock, a time, CI), or queue it again with needs naming the only computers that can take it${flagged.some((f) => f.leg) ? ' (a leg nobody needs: decide_work queue with drop_leg and its needs)' : ''}.`,
     );
-    return flagged.map((f) => f.w.id);
+    return [...flagged.map((f) => f.w.id), ...parked.map((f) => f.w.id)];
   }
 
   // ---------------------------------------------------------------- capacity
