@@ -18,7 +18,8 @@ export type WaitCause = (typeof WAIT_CAUSES)[number];
 /** In-turn labels first (busiest first), then the between-turn ones; the order is the priority when workers overlap. */
 export const WORK_CAUSES = [
   'failure', 'compile', 'editor', 'tests', 'build', 'bench', 'pair', 'ci', 'merge', 'review', 'wait', 'think',
-  'gap_ci', 'gap_pair', 'gap_bench', 'gap_build', 'person', 'blocked', 'checkin', 'usage', 'preempt', 'idle', 'tail', 'none',
+  'gap_ci', 'gap_pair', 'gap_bench', 'gap_build', 'person', 'blocked', 'checkin', 'usage', 'preempt', 'queued', 'stalled',
+  'idle', 'tail', 'none',
 ] as const;
 export type WorkCause = (typeof WORK_CAUSES)[number];
 
@@ -55,6 +56,8 @@ export const WORK_LABEL: Record<WorkCause, string> = {
   checkin: 'between turns: other check-ins (wake_me)',
   usage: 'between turns: usage limit stop',
   preempt: 'between turns: paused, pre-empted or interrupted',
+  queued: 'between turns: queued for capacity, or moved to another computer',
+  stalled: 'between turns: stalled by the ledger cleanup, nothing pending',
   idle: 'between turns: no marker (hand-off to the orchestrator or dispatcher)',
   tail: 'after a worker\'s last turn, past TAIL_MS, until the close was recorded',
   none: 'no worker transcript covers it (before or after the workers)',
@@ -72,22 +75,94 @@ const STOPPED_MS = 45 * MIN;
  */
 export const TAIL_MS = 2 * 60 * MIN;
 
-/** A ledger log line ("HH:MM text") with its date put back, walking forward from the filing day. */
-export function datedLog(lines: readonly string[], createdAt: string): { t: number; text: string }[] {
+/**
+ * A ledger log line ("HH:MM text") with its date put back. The log keeps only times, so a forward walk misdates every line
+ * after a silent day (w4927: w4285's 2026-11-20 lines read as 11-16, after four silent days). The request's own timestamps
+ * (its notes, worker reports, DONEs, links, PRs, close) pin the lines that name them; between two pinned lines the rest
+ * walk forward from the first and backward from the second, split at the widest gap.
+ */
+export function datedLog(lines: readonly string[], createdAt: string, anchors: readonly number[] = []): { t: number; text: string }[] {
   const filed = Date.parse(createdAt);
-  let day = Date.UTC(new Date(filed).getUTCFullYear(), new Date(filed).getUTCMonth(), new Date(filed).getUTCDate());
-  let prev = -1;
-  const out: { t: number; text: string }[] = [];
+  const dayOf = (t: number) => Date.UTC(new Date(t).getUTCFullYear(), new Date(t).getUTCMonth(), new Date(t).getUTCDate());
+  const DAY = 86_400_000;
+  const parsed: { mins: number; text: string }[] = [];
   for (const line of lines) {
     const m = /^(\d\d):(\d\d) (.*)$/s.exec(line);
-    if (!m) continue;
-    const mins = Number(m[1]) * 60 + Number(m[2]);
-    if (prev >= 0 && mins < prev) day += 86_400_000;
-    prev = mins;
-    out.push({ t: day + mins * MIN, text: m[3] });
+    if (m) parsed.push({ mins: Number(m[1]) * 60 + Number(m[2]), text: m[3] });
   }
-  // The log keeps its last 40 lines: when the first kept one reads earlier than the filing, it came days later.
-  return out;
+  const pins = [...new Set(anchors.filter(Number.isFinite))].sort((a, b) => a - b);
+  // the earliest time at this minute of day, at or after `after`
+  const fwd = (after: number, mins: number) => {
+    let t = dayOf(after) + mins * MIN;
+    if (t < Math.floor(after / MIN) * MIN) t += DAY;
+    return t;
+  };
+  // the latest time at this minute of day, at or before `before`
+  const back = (before: number, mins: number) => {
+    let t = dayOf(before) + mins * MIN;
+    if (t > before) t -= DAY;
+    return t;
+  };
+  const ts: (number | undefined)[] = parsed.map(() => undefined);
+  let prev = Math.floor(filed / MIN) * MIN;
+  for (let i = 0; i < parsed.length; i++) {
+    if (!PINNED.test(parsed[i].text)) continue;
+    const at = pins.find((p) => p >= prev && Math.floor(p / MIN) % 1440 === parsed[i].mins);
+    if (at === undefined) continue;
+    ts[i] = Math.floor(at / MIN) * MIN;
+    prev = ts[i]!;
+  }
+  // the unpinned runs between pins
+  let i = 0;
+  let before = Math.floor(filed / MIN) * MIN;
+  while (i < parsed.length) {
+    if (ts[i] !== undefined) {
+      before = ts[i]!;
+      i++;
+      continue;
+    }
+    let j = i;
+    while (j < parsed.length && ts[j] === undefined) j++;
+    const f: number[] = [];
+    let a = before;
+    for (let k = i; k < j; k++) a = f[k - i] = fwd(a, parsed[k].mins);
+    if (j < parsed.length) {
+      const b: number[] = [];
+      let z = ts[j]!;
+      for (let k = j - 1; k >= i; k--) z = b[k - i] = back(z, parsed[k].mins);
+      let best = j - i;
+      let gap = -1;
+      for (let s = 0; s <= j - i; s++) {
+        const lo = s ? f[s - 1] : before;
+        const hi = s < j - i ? b[s] : ts[j]!;
+        if (hi >= lo && hi - lo > gap) {
+          gap = hi - lo;
+          best = s;
+        }
+      }
+      for (let k = i; k < j; k++) ts[k] = k - i < best ? f[k - i] : b[k - i];
+    } else for (let k = i; k < j; k++) ts[k] = f[k - i];
+    before = ts[j - 1]!;
+    i = j;
+  }
+  return parsed.map((l, k) => ({ t: ts[k]!, text: l.text }));
+}
+
+/** The log lines a timestamp of the request itself can pin: notes, worker reports, DONEs and closes, dispatches, PRs. */
+const PINNED = /^[\w.-]+: (note:|revived)|^(the orchestration worker|worker [0-9a-f]{8}|worker ops-worker)\b|said DONE|^closed as|(started|sent to|resumed) worker|linked PR|^filed\b/i;
+
+/** The request's own timestamps, for datedLog. */
+export function anchorsOf(w: WorkItem): number[] {
+  const at = (s: string | undefined) => (s ? Date.parse(s) : NaN);
+  return [
+    at(w.createdAt),
+    at(w.finalOutcome?.at),
+    ...(w.notes ?? []).map((n) => at(n.at)),
+    ...(w.findings ?? []).map((f) => at(f.at)),
+    ...Object.values(w.done ?? {}).map((d) => at(d.at)),
+    ...Object.values(w.links ?? {}).map((l) => at(l.at)),
+    ...(w.prs ?? []).map((p) => at(p.at)),
+  ].filter(Number.isFinite);
 }
 
 /** What a ledger log line says the request waits for, if anything (first match wins). */
@@ -121,7 +196,7 @@ export function firstStartOf(w: WorkItem, events: ReadonlyMap<string, readonly T
     }
   }
   if (first !== undefined) return first;
-  const start = datedLog(w.log, w.createdAt).find((l) => waitCauseOf(l.text) === 'start');
+  const start = datedLog(w.log, w.createdAt, anchorsOf(w)).find((l) => waitCauseOf(l.text) === 'start');
   if (start) return start.t;
   const links = Object.values(w.links ?? {}).map((l) => Date.parse(l.at)).filter((t) => t >= filed - MIN);
   return links.length ? Math.min(...links) : undefined;
@@ -143,7 +218,7 @@ export function waitBreakdown(w: WorkItem, firstStart: number): Partial<Record<W
     if (ms > 0) out[c] = (out[c] ?? 0) + ms;
   };
   const marks: { t: number; c: WaitCause }[] = [];
-  for (const l of datedLog(w.log, w.createdAt)) {
+  for (const l of datedLog(w.log, w.createdAt, anchorsOf(w))) {
     if (l.t < filed - MIN || l.t >= firstStart) continue;
     const c = waitCauseOf(l.text);
     if (c && c !== 'start') marks.push({ t: Math.max(l.t, filed), c });
@@ -204,8 +279,28 @@ export function toolCauseOf(name: string, input: unknown, isError: boolean): Wor
   return 'think';
 }
 
+/**
+ * What a "still open: ..." line says the request waits for (w4927: w4698's and w4712's workers ended on "still open: waiting
+ * on Ben to decide" with no waiting_on_person call, which read as no marker). Undefined: work in progress, nothing named.
+ */
+export function stillOpenCauseOf(text: string): WorkCause | undefined {
+  if (/\bCI\b|merge_on_green|merges? by itself|\bon green\b|\bchecks\b/i.test(text)) return 'gap_ci';
+  if (/\bqueued\b|\bcapacity\b/i.test(text)) return 'queued';
+  if (/\bblocked on\b|waiting (on|for) (w\d|PR|#|the merge|a deploy|the deploy|another)|\bafter w\d|\bdeploy/i.test(text)) return 'blocked';
+  if (/offline|asleep|unreachable|can'?t be reached|cannot be reached|times? out|timed out|\bis held\b|back online|tray pause/i.test(text)) return 'blocked';
+  if (/waiting (on|for) [A-Z][\w-]* to\b|waiting (on|for) (a person|input|you|an? (answer|approval|decision))|\b(decide|decision|approv\w*|answer|pick|sign-?off|confirm)\b/i.test(text)) return 'person';
+  if (/check-?in|\bwake\b|\btimer\b/i.test(text)) return 'checkin';
+  return undefined;
+}
+
+/** The "<id>...still open: <what>" line of a report, if it has one. */
+export function stillOpenOf(text: string, id?: string): string | undefined {
+  const re = id ? new RegExp(`\\b${id}\\b[^\\n]*?still open:([^\\n]*)`, 'i') : /still open:([^\n]*)/i;
+  return re.exec(text)?.[1]?.trim();
+}
+
 /** What the gap after a turn waited on: the turn's last hand-off tool, else the result's words. */
-export function gapCauseOf(turnTools: readonly { name: string; input: unknown }[], resultText: string): WorkCause {
+export function gapCauseOf(turnTools: readonly { name: string; input: unknown }[], resultText: string, id?: string): WorkCause {
   for (let i = turnTools.length - 1; i >= 0; i--) {
     const { name, input } = turnTools[i];
     const o = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
@@ -229,11 +324,69 @@ export function gapCauseOf(turnTools: readonly { name: string; input: unknown }[
   }
   if (/usage limit|rate limit|hit your limit|limit reached/i.test(resultText)) return 'usage';
   if (/: paused:|interrupted|pre-?empt/i.test(resultText)) return 'preempt';
-  return 'idle';
+  const still = stillOpenOf(resultText, id);
+  return (still !== undefined && stillOpenCauseOf(still)) || 'idle';
 }
 
-/** The labelled spans of one session inside [from, to]. */
-export function sessionSpans(events: readonly TranscriptEvent[], from: number, to: number): Span[] {
+/** What one ledger log line does to the request's state between turns (ledgerSpans). */
+export function ledgerStateOf(text: string, id?: string): WorkCause | 'clear' | 'stall' | 'revive' | undefined {
+  if (/^closed as\b|^reopened\b/i.test(text)) return 'clear';
+  if (/revived from stalled/i.test(text)) return 'revive';
+  if (/stalled by the ledger/i.test(text)) return 'stall';
+  if (/^unblocked\b/i.test(text)) return 'clear';
+  const still = stillOpenOf(text, id) ?? stillOpenOf(text);
+  if (still !== undefined) return stillOpenCauseOf(still) ?? 'clear';
+  if (/\[needs you\] sent|waiting_on_person|waiting on input|ask_person to \S+ (let through|sent|shown)/i.test(text)) return 'person';
+  if (/^(dispatcher: |worker [0-9a-f]{8}: )?blocked on\b/i.test(text)) return stillOpenCauseOf(text) ?? 'blocked';
+  if (/queued for capacity|^taken off worker|^moved from .*queued/i.test(text)) return 'queued';
+  if (/(started|sent to|resumed) worker/i.test(text)) return 'clear';
+  if (/^worker [0-9a-f]{8}: /i.test(text)) return 'clear';
+  return undefined;
+}
+
+/**
+ * w4927: what the ledger says the request waited on between turns, from its first turn to its close: a [needs you], a
+ * still-open line (its workers' and the orchestration worker's, on the log and in its findings), a gate, a queue, a stall.
+ * These outrank only idle, tail and none: a worker's own turn or hand-off says more. A note never ends a wait (w4698's
+ * "already on Ben's Waiting tab" note was its orchestrator's, not the answer); a worker's line, a dispatch or the close does.
+ */
+export function ledgerSpans(w: WorkItem, from: number, to: number): Span[] {
+  const lines = datedLog(w.log, w.createdAt, anchorsOf(w)).map((l) => ({ t: l.t, text: l.text }));
+  // the full reports keep the still-open lines the 40-line log has dropped
+  for (const f of w.findings ?? []) {
+    const still = stillOpenOf(f.text, w.id);
+    if (still !== undefined) lines.push({ t: Date.parse(f.at), text: `worker ${f.by}: ${w.id}: still open: ${still}` });
+  }
+  lines.sort((a, b) => a.t - b.t);
+  const spans: Span[] = [];
+  let cur: WorkCause | undefined;
+  let since = 0;
+  let beforeStall: WorkCause | undefined;
+  const set = (t: number, c: WorkCause | undefined) => {
+    if (cur && t > since) spans.push({ from: Math.max(since, from), to: Math.min(t, to), cause: cur });
+    cur = c;
+    since = t;
+  };
+  for (const l of lines) {
+    if (!Number.isFinite(l.t) || l.t > to) continue;
+    const s = ledgerStateOf(l.text, w.id);
+    if (s === undefined) continue;
+    if (s === 'stall') {
+      beforeStall = cur;
+      if (!cur) set(l.t, 'stalled');
+    } else if (s === 'revive') set(l.t, beforeStall && beforeStall !== 'stalled' ? beforeStall : undefined);
+    else set(l.t, s === 'clear' ? undefined : s);
+  }
+  set(to, undefined);
+  return spans.filter((s) => s.to > s.from);
+}
+
+/**
+ * The labelled spans of one session inside [from, to]. w4927: a user, assistant, thinking or tool event outside a turn
+ * starts one (a turn a background task's notice opened has no user event), a result outside a turn still closes the gap
+ * before it, and a transcript that ends mid-turn was a process that stopped: `preempt` for TAIL_MS, then `tail`, not uncovered time.
+ */
+export function sessionSpans(events: readonly TranscriptEvent[], from: number, to: number, id?: string): Span[] {
   const spans: Span[] = [];
   const push = (a: number, b: number, cause: WorkCause) => {
     const x = Math.max(a, from);
@@ -248,8 +401,9 @@ export function sessionSpans(events: readonly TranscriptEvent[], from: number, t
   let gapCause: WorkCause = 'idle';
   const endTurn = (t: number, resultText: string) => {
     if (turnStart !== undefined) push(turnStart, t, 'think');
+    else if (gapFrom !== undefined) push(gapFrom, t, gapCause);
     gapFrom = t;
-    gapCause = gapCauseOf(turnTools, resultText);
+    gapCause = gapCauseOf(turnTools, resultText, id);
     turnStart = undefined;
     turnTools = [];
     open.clear();
@@ -262,12 +416,12 @@ export function sessionSpans(events: readonly TranscriptEvent[], from: number, t
       endTurn(last, '');
       gapCause = 'preempt';
     }
-    if (e.kind === 'user' && turnStart === undefined) {
+    if (turnStart === undefined && (e.kind === 'user' || e.kind === 'assistant' || e.kind === 'thinking' || e.kind === 'tool_use')) {
       if (gapFrom !== undefined) push(gapFrom, t, gapCause);
       gapFrom = undefined;
       turnStart = t;
-    } else if (e.kind === 'tool_use') {
-      if (turnStart === undefined) turnStart = t;
+    }
+    if (e.kind === 'tool_use') {
       open.set(e.toolUseId, { t, name: e.name, input: e.input });
       if (!e.parentToolUseId) turnTools.push({ name: e.name, input: e.input });
     } else if (e.kind === 'tool_result') {
@@ -281,8 +435,11 @@ export function sessionSpans(events: readonly TranscriptEvent[], from: number, t
     }
     last = t;
   }
-  if (turnStart !== undefined) push(turnStart, Math.min(last, to), 'think');
-  else if (gapFrom !== undefined) {
+  if (turnStart !== undefined) {
+    push(turnStart, last, 'think');
+    push(last, last + TAIL_MS, 'preempt');
+    push(last + TAIL_MS, to, 'tail');
+  } else if (gapFrom !== undefined) {
     push(gapFrom, Math.min(to, gapFrom + TAIL_MS), gapCause);
     push(gapFrom + TAIL_MS, to, 'tail');
   }
@@ -350,7 +507,7 @@ export function timeRequest(w: WorkItem, events: ReadonlyMap<string, readonly Tr
   if (start === undefined) return undefined;
   const filed = Date.parse(w.createdAt);
   const closed = Math.max(closeOf(w), start);
-  const spans = [...events.values()].flatMap((evs) => sessionSpans(evs, start, closed));
+  const spans = [...[...events.values()].flatMap((evs) => sessionSpans(evs, start, closed, w.id)), ...ledgerSpans(w, start, closed)];
   return {
     id: w.id,
     title: w.title,
@@ -408,7 +565,7 @@ export function timingReport(rows: readonly RequestTiming[], skipped: readonly s
     ...causeTable(rows, (r) => r.wait, WAIT_CAUSES, WAIT_LABEL),
     '',
     `## Part 2: first worker turn to the close (last DONE)`,
-    `Total ${dur(sum(works))}, mean ${dur(sum(works) / rows.length)}, median ${dur(quantile(works, 0.5))}, p90 ${dur(quantile(works, 0.9))}, max ${dur(Math.max(...works))}. Source: its worker sessions' transcript events; overlapping workers count once, under the busiest label.`,
+    `Total ${dur(sum(works))}, mean ${dur(sum(works) / rows.length)}, median ${dur(quantile(works, 0.5))}, p90 ${dur(quantile(works, 0.9))}, max ${dur(Math.max(...works))}. Source: its worker sessions' transcript events, and between turns the ledger's own waits (a person, a gate, a queue, a stall: log lines and reports); overlapping workers count once, under the busiest label.`,
     ...causeTable(rows, (r) => r.work, WORK_CAUSES, WORK_LABEL),
   ];
   if (a.rows) {

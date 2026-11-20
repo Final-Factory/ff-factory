@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { LOOP_BEAT_MS, LOOP_SUMMARY_MS, LoopWatch, beatWasLate } from './loopWatch.ts';
+import { LOOP_BEAT_MS, LOOP_SUMMARY_MS, LoopWatch, beatWasLate, linkBeat } from './loopWatch.ts';
 
 test('w1377: beatWasLate tells a timer the event loop held up from one on time', () => {
   assert.equal(beatWasLate(20_000, 0, 20_000), false, 'on time');
@@ -73,4 +73,26 @@ test('w3855: the start before the portal listens gets its own line, not "blocked
   t += LOOP_BEAT_MS + 1200;
   w.beat();
   assert.match(lines[1], /^event loop: blocked for 1\.2 s/);
+});
+
+test('w4926: the daemon judges the portal only on a beat that came on time, so its own stall is not the portal\'s silence', () => {
+  // BEAST 2026-11-20 05:25Z: a daemon blocked 50 s runs its 20 s beat late, before the pong it holds unread.
+  assert.equal(linkBeat(70_000, 20_000, 15_000, 20_000, 45_000), 'late', 'a 50 s gap since the last beat: no drop');
+  assert.equal(linkBeat(90_000, 70_000, 89_000, 20_000, 45_000), 'ping', 'the pong read after the block keeps the link');
+  assert.equal(linkBeat(90_000, 70_000, 40_000, 20_000, 45_000), 'dead', 'an on-time beat with 50 s of silence drops it');
+  assert.equal(linkBeat(90_000, 0, 40_000, 20_000, 45_000), 'dead', 'the first beat has no last beat to be late after');
+  assert.equal(linkBeat(40_000, 20_000, 39_000, 20_000, 45_000), 'ping');
+});
+
+test('w4926: the daemon\'s loop watch names the daemon and logs only blocks of its own threshold', () => {
+  let t = 0;
+  const lines: string[] = [];
+  const w = new LoopWatch({ now: () => t, log: (l) => lines.push(l), who: 'the daemon', stallLogMs: 5000 });
+  t += LOOP_BEAT_MS + 3000;
+  w.beat();
+  assert.deepEqual(lines, [], 'a 3 s block is under the 5 s line');
+  t += LOOP_BEAT_MS + 50_000;
+  w.beat();
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /^event loop: blocked for 50\.0 s .*: the daemon answered nothing meanwhile$/);
 });
