@@ -46,7 +46,11 @@ LaunchAgent runs in the logged-in session (keychain, the user's `claude` and plu
 login, restarts if it dies, and reconnects by itself: every ~2 s for the first two minutes after a drop
 (a portal restart takes 20-60 s; a refused attempt, such as the proxy's 502 while the portal is down,
 ends at once), then backing off to 30 s; a ping every 20 s, and a dead connection is dropped after 45 s
-without a pong. If a daemon still has not come back 2 minutes after the portal started or after it
+without a pong. Either side judges the other only on a heartbeat that ran on time: a beat that comes more than 10 s late
+means its own event loop was blocked, so it pings and judges on the next beat (`linkBeat`, `server/loopWatch.ts`; the
+portal since w1377, the daemon since w4926, after BEAST dropped eight times in 96 minutes on 2026-11-20). The daemon's own
+loop watch writes `event loop: blocked for N s ...: the daemon answered nothing meanwhile` to daemon.log for any block of
+5 s or more, and a 10-minute summary line. If a daemon still has not come back 2 minutes after the portal started or after it
 dropped, and its Mac answers ssh, the portal redeploys it by itself (as `add_machine` does), at most
 every 30 minutes and never while its agents are running. So after a restart, give daemons a minute
 before redeploying by hand.
