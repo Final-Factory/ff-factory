@@ -23,6 +23,7 @@ import type { SecretRules } from './secretGuard.ts';
 import { WORKER_RULE_TOPICS } from './workerRules.ts';
 import { REPORT_KINDS } from '../shared/types.ts';
 import { MAX_REPORT_BODY } from './reports.ts';
+import { QUERIES as TEST_HISTORY_QUERIES, SOURCES as TEST_HISTORY_SOURCES } from './testHistory.ts';
 
 /** list_reports' filters (w2541), for workers and orchestrators alike. */
 export const REPORT_FILTER = {
@@ -33,6 +34,19 @@ export const REPORT_FILTER = {
   since: z.string().max(40).optional().describe('Updated at or after this ISO date or time.'),
   until: z.string().max(40).optional().describe('Updated at or before this ISO date or time (a bare date takes in its day).'),
   limit: z.number().int().min(1).max(100).optional().describe('At most this many, newest first; default 30.'),
+};
+/** test_history's arguments (w4922, server/testHistory.ts QueryArgs), for workers and orchestrators alike. */
+export const TEST_HISTORY_ARGS = {
+  query: z.enum(TEST_HISTORY_QUERIES).describe('summary, slowest, false_positives, detections, never_caught, failures, test or sql.'),
+  days: z.number().int().min(1).max(3650).optional().describe('The window in days; default 30.'),
+  limit: z.number().int().min(1).max(200).optional().describe('At most this many rows; default 20 (sql: 200).'),
+  sources: z.array(z.enum(TEST_HISTORY_SOURCES)).max(5).optional().describe('Only runs of these sources; default all.'),
+  test: z.string().max(300).optional().describe("A part of the test's full name (query test needs it)."),
+  byRate: z.boolean().optional().describe('false_positives: rank by fp / runs instead of count.'),
+  minRuns: z.number().int().min(1).max(100000).optional().describe('false_positives with byRate: at least this many runs; default 5.'),
+  performance: z.boolean().optional().describe('Include Performance-tagged tests (left out by default).'),
+  label: z.enum(['fp', 'detect', 'unknown', 'pending']).optional().describe('failures: only this label.'),
+  sql: z.string().max(4000).optional().describe('query sql: one read-only SELECT (or WITH ... SELECT).'),
 };
 import { DESCRIPTION_CHARS, LABEL_INPUT_CHARS, MAX_OPTIONS, MEDIA_CHARS, MIN_OPTIONS } from '../shared/ask.ts';
 import { CARD_QUESTION_CHARS, MAX_ASKS } from '../shared/questionCard.ts';
@@ -465,6 +479,7 @@ export const CATALOG = {
     rev: z.number().int().min(1).optional().describe('An older revision (1 is the first); default the latest.'),
   },
   list_reports: REPORT_FILTER,
+  test_history: TEST_HISTORY_ARGS,
   /** docs/portal-logs.md (w920). Read-only: the portal answers from a fixed list of sources (server/portalLogs.ts). */
   portal_logs: {
     source: z.string().max(40).optional().describe('What to read (journal, portal, updater, health, cleanup, update_result, update_verified, update_prepared, update_verifying, machine_rollout, auto_deploy, unit_watchdog, coordinator_context, bench_hours). Absent: the list of sources and what is there now.'),
