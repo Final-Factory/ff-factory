@@ -632,14 +632,16 @@ export function slimEvent(e: TranscriptEvent): TranscriptEvent {
       const o = (e.input && typeof e.input === 'object' ? e.input : {}) as Record<string, unknown>;
       const input: Record<string, unknown> = {};
       if (typeof o.command === 'string') input.command = o.command.slice(0, 600);
-      for (const k of ['subagent_type', 'prs', 'reports', 'note'] as const) if (o[k] !== undefined) input[k] = o[k];
+      // w4927: `request` too, or gapCauseOf cannot tell another request's hand-off (w4298 read w4274's CI wait as its own)
+      for (const k of ['subagent_type', 'prs', 'reports', 'note', 'request'] as const) if (o[k] !== undefined) input[k] = o[k];
       if (o.merge_on_green) input.merge_on_green = true;
       return { seq: e.seq, t: e.t, kind: 'tool_use', toolUseId: e.toolUseId, name: e.name, input, parentToolUseId: e.parentToolUseId };
     }
     case 'tool_result':
       return { seq: e.seq, t: e.t, kind: 'tool_result', toolUseId: e.toolUseId, isError: e.isError, text: '' };
     case 'result':
-      return { seq: e.seq, t: e.t, kind: 'result', ok: e.ok, text: e.text.slice(0, 2000), costUsd: e.costUsd, turns: e.turns, durationMs: e.durationMs };
+      // its head and its end: a long report's still-open and DONE lines come last
+      return { seq: e.seq, t: e.t, kind: 'result', ok: e.ok, text: e.text.length > 4000 ? `${e.text.slice(0, 2000)}\n${e.text.slice(-2000)}` : e.text, costUsd: e.costUsd, turns: e.turns, durationMs: e.durationMs };
     default:
       return e;
   }

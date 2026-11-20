@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { datedLog, gapCauseOf, movedOffCut, sessionsOf, stillOpenCauseOf, stillOpenOf, pickFinished, sessionSpans, sweep, TAIL_MS, timeRequest, toolCauseOf, waitBreakdown, waitCauseOf, workTiming } from './workTiming.ts';
+import { datedLog, gapCauseOf, movedOffCut, sessionsOf, stillOpenCauseOf, stillOpenOf, pickFinished, sessionSpans, slimEvent, sweep, TAIL_MS, timeRequest, toolCauseOf, waitBreakdown, waitCauseOf, workTiming } from './workTiming.ts';
 import type { Requester, SessionInfo, TranscriptEvent, WorkItem } from '../shared/types.ts';
 
 /** work_timing (w4531, server/workTiming.ts): where a finished request's wall time went, in two parts. */
@@ -385,4 +385,25 @@ test('w4298: a result that says this request is paused for a handed-up request h
   const s = sweep(sessionSpans(evs, T0, T0 + 600 * MIN, 'w4298'), T0, T0 + 600 * MIN);
   assert.equal(s.tail ?? 0, 0);
   assert.equal(s.blocked, 580 * MIN);
+});
+
+test('w4298: the slimmed events workTimingFor reads keep each tool request and the end of a long result', () => {
+  // production reads slimEvent(e), which dropped `request`: 53abc3d5's blocked_on for w4274 read as w4298's CI wait, 2 h then tail
+  const long = `w4298 (counting fleet panel opens toward step 78) is paused, because FFU has no fleet panel; I handed up a request to build one.\n${'detail. '.repeat(700)}\nw4274: still open: blocked on CI on Final-Factory/ffu#826`;
+  const evs = [
+    user(0, 'w4298 go'),
+    use(5, 'b1', 'mcp__machine__blocked_on', { request: 'w4274', head: 'ce14', prs: ['ci:Final-Factory/ffu#826'], what: 'CI on ffu #826' }),
+    res(6, 'b1'),
+    result(10, long),
+    user(20, 'w4274 go'),
+    use(25, 'b2', 'mcp__machine__blocked_on', { request: 'w4274', prs: ['ci:Final-Factory/ffu#826'] }),
+    res(26, 'b2'),
+    result(30, 'w4274: still open: blocked on CI on Final-Factory/ffu#826'),
+  ].map(slimEvent);
+  const s = sweep(sessionSpans(evs, T0, T0 + 600 * MIN, 'w4298'), T0, T0 + 600 * MIN);
+  assert.equal(s.tail ?? 0, 0);
+  assert.equal(s.gap_ci ?? 0, 0);
+  assert.equal(s.blocked, 580 * MIN);
+  const r = slimEvent(result(0, long));
+  assert.ok(r.kind === 'result' && r.text.endsWith('blocked on CI on Final-Factory/ffu#826') && r.text.startsWith('w4298 (counting'));
 });
