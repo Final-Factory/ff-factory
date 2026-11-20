@@ -7553,6 +7553,43 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   }
 
   /**
+   * ffu's post-merge checks reverted a pull request of this request on main (w4930, server/ffuPostMerge.ts): its fix must
+   * land again. Once per `mark`. A done request is reopened (its reverted PR no longer counts, w731) and the dispatcher told,
+   * so a worker re-lands it; an open one keeps its state and a worker busy on it is told. `text` goes into its notes, for
+   * the next worker's brief, and to its people. Answers what was done ('already' when the mark is on it), or false when it
+   * is missing or closed another way (cancelled, rejected): then nobody re-lands it here, and the caller tells the ops people.
+   */
+  tellPostMergeRevert(id: string, a: { mark: string; line: string; text: string }): 'reopened' | 'told' | 'already' | false {
+    const w = this.store.work.get(id);
+    if (!w) return false;
+    if (w.log.some((l) => l.includes(a.mark))) return 'already';
+    if (!isOpen(w) && w.status !== 'done') return false;
+    const reopen = w.status === 'done';
+    w.notes = [...(w.notes ?? []), { at: this.now().toISOString(), by: 'FF Factory (ffu post-merge checks)', text: a.text.slice(0, 2000) }].slice(-20);
+    if (reopen) {
+      const words = this.reopened(w);
+      w.status = 'new';
+      w.stalled = undefined;
+      this.stamp(w, `${a.line}; ${words}`);
+    } else this.stamp(w, a.line);
+    this.store.putWork(w);
+    if (reopen) this.gatherForDispatcher(w.requestedBy, updateNotice(w, w.requestedBy, `reopened by FF Factory: ${a.text}`));
+    else {
+      for (const sid of w.sessionIds) {
+        const s = this.store.sessions.get(sid);
+        if (!s || !BUSY.includes(s.status)) continue;
+        try {
+          this.sessions.send(sid, `[post-merge revert] ${a.text} (${w.id})`, 'system', undefined, { requestedBy: w.requestedBy });
+        } catch {
+          // it is at a limit; the request's log and notes have it
+        }
+      }
+    }
+    if (!w.unattributed) this.toPeople(w.requesters, `${a.text}${reopen ? ` ${w.id} is reopened for it.` : ''}`);
+    return reopen ? 'reopened' : 'told';
+  }
+
+  /**
    * w3572: a pull request this request owns conflicts with its base while other requests wait for it to merge
    * (BlockerWatch.tellPrConflicts). One log line that carries `mark` (once per mark: one head commit), a worker busy on
    * it (or idle, or asleep on its check-in while the request is active) told, as tellReportWaited does. A request Blocked
