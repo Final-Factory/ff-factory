@@ -8,3 +8,7 @@
   lines, the pair run closes as done with `FAIL: did not compile ...` and the lines, its legs are told to stop, and its asker
   is cleared with them. w4880's CI was red on CS0103 at 07:31Z, five minutes after request_pair; its leg hit the same error
   in its player build at 07:48Z. Tests: `orchestrators.test.ts` (w4925).
+  A repeat pair run for the same request records the sandboxes its last run used (`pair.warm`). The run's brief and the
+  dispatcher's capacity ping name them ("start there when FREE ... never wait"), and `pairRoom` ranks their computers next
+  after a cached or published player. On lothdesktop, a sandbox's next player build by the same worker took 490 s median
+  (n=34), against 793 to 809 s otherwise (n=46; measured from player-cache/cache.log, 80 builds, 11-17 to 11-20).

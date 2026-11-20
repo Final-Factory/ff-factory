@@ -56,7 +56,7 @@ import { readDiscordConfig } from './discordConfig.ts';
 import { LIMIT_END, doneIdsIn, doneProblem, legDoneIdsIn, learnedProblem, supersededIn, reportProblem, mergedMentionsIn, notDoneReason, pausedIn, reportVerdict, stillOpenIn, toolErrors, turnEvidence, turnTroubleOf, type TurnTrouble } from './ledgerRules.ts';
 import { findingTargets, recordFinding } from './findings.ts';
 import { aheadText, queuedNeeds, answerAfter, asksAPerson, dispatcherAskIn, HAND_UP_AUTOFILE_MS, HAND_UP_RESEND_MS, handUpsPending, holdsOf, orchestratorAskIn, standingTargetOf, personWaitIn, questionShareKey, reportWaitKey, roomShares, servedBy, UNDECIDED_BOUND_MS, unfiledFollowUpsIn } from '../shared/workState.ts';
-import { capacityBlockProblem, capacityWaitIn, macRefusedScenario, MAC_REFUSES_SCENARIO, needsOf, needsTimed, pairComputersReason, pairRoom, pairText, PAIR_MAX_LEGS, resolveNeeds, steamShortIn } from '../shared/capacity.ts';
+import { capacityBlockProblem, capacityWaitIn, macRefusedScenario, MAC_REFUSES_SCENARIO, needsOf, needsTimed, pairComputersReason, pairRoom, pairText, PAIR_MAX_LEGS, resolveNeeds, steamShortIn, warmText } from '../shared/capacity.ts';
 import { mentionsSteam, saysNoSteam, STEAM_NONE, STEAM_READ } from '../shared/steam.ts';
 import { mentionsMenus, MENUS_NONE, MENUS_READ, needsWindow, saysNone } from '../shared/desktop.ts';
 import type { HandBack } from './machinePause.ts';
@@ -5528,6 +5528,21 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   }
 
   /** The pair request request_pair files (w1945): the asking request's people and priority, a game sandbox per leg. */
+  /**
+   * w4925: the sandboxes where the last earlier pair run for request `forId` started its legs (WorkPair.started), less those on
+   * a computer a retry avoids, or undefined when it had none. A repeat run prefers them (WorkPair.warm, pairRoom).
+   */
+  private warmLegsFor(forId: string, avoid: readonly string[] | undefined): WorkPair['warm'] {
+    let last: { from: string; at: string; legs: string[] } | undefined;
+    for (const x of this.store.work.values()) {
+      const st = x.pair?.for === forId ? x.pair.started : undefined;
+      if (!st?.legs.length || (last && last.at >= st.at)) continue;
+      last = { from: x.id, at: st.at, legs: st.legs.map((l) => l.sandbox) };
+    }
+    const legs = last?.legs.filter((ref) => !avoid?.includes(ref.split('/')[0]));
+    return last && legs?.length ? { from: last.from, legs } : undefined;
+  }
+
   private newPair(w: WorkItem, sessionId: string, x: { what: string; brief: string; legs: number; legsSaid?: true; crossOs?: string; split?: string; timed: boolean; steam?: string; menus?: string; noMenus?: string; noSteam?: string; retryOf?: string; avoid?: string[]; pr?: string; commit?: string; player?: PairPlayer }): WorkItem {
     const now = this.now().toISOString();
     const pair: WorkPair = {
@@ -5548,12 +5563,14 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       ...(x.commit ? { commit: x.commit } : {}),
       ...(x.player ? { player: x.player } : {}),
     };
+    const warm = this.warmLegsFor(w.id, x.avoid);
+    if (warm) pair.warm = warm;
     const title = clip(`Pair run for ${w.id}: ${x.what}`, 120);
     const brief = clip(
       [
         x.brief,
         '',
-        `FF Factory filed this for worker ${sessionId} on ${w.id} (w1945, request_pair): ${pairText(pair)}. ${pair.legs === 1 ? 'Its one leg starts alone, a worker in a game sandbox that runs the host and the client on its own computer (start_agent with sandbox alone);' : 'Its legs start together, one worker in a game sandbox on each computer (start_agent with pair_sandboxes);'} ${PLAYERS_IN_SANDBOX} each leg's first message says which leg it is and where the others are, and message_pair reaches them. ${w.id}'s worker is Blocked on this request's report: the host leg (leg 1) reports the result with a line "For ${w.id}:" (what ran, the commit every leg ran, what the check compared and found, any desync report files), and every leg ends with DONE once the run is over. Do not merge ${w.id}'s pull request: its own worker does.${x.retryOf ? ` This is a retry of ${x.retryOf}, whose legs did not deliver the result (w2041)${x.avoid?.length ? `: no leg goes on ${x.avoid.join(' or ')}, where one failed` : ''}; start it fresh, nothing of ${x.retryOf}'s legs carries over.` : ''}`,
+        `FF Factory filed this for worker ${sessionId} on ${w.id} (w1945, request_pair): ${pairText(pair)}. ${pair.legs === 1 ? 'Its one leg starts alone, a worker in a game sandbox that runs the host and the client on its own computer (start_agent with sandbox alone);' : 'Its legs start together, one worker in a game sandbox on each computer (start_agent with pair_sandboxes);'} ${PLAYERS_IN_SANDBOX} each leg's first message says which leg it is and where the others are, and message_pair reaches them. ${w.id}'s worker is Blocked on this request's report: the host leg (leg 1) reports the result with a line "For ${w.id}:" (what ran, the commit every leg ran, what the check compared and found, any desync report files), and every leg ends with DONE once the run is over. Do not merge ${w.id}'s pull request: its own worker does.${x.retryOf ? ` This is a retry of ${x.retryOf}, whose legs did not deliver the result (w2041)${x.avoid?.length ? `: no leg goes on ${x.avoid.join(' or ')}, where one failed` : ''}; start it fresh, nothing of ${x.retryOf}'s legs carries over.` : ''}${warm ? ` ${warmText(warm)}` : ''}`,
       ].join('\n'),
       8000,
     );
@@ -9388,7 +9405,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       this.capacityWakes.push(now);
       console.log(`ledger: capacity ping: ${events.map((e) => e.what).join('; ')}; fitting ${usable.map((w) => w.id).join(', ')}`);
       const old = (e: { what: string; at: number }) => `${e.what}, ${Math.max(0, Math.round((now - e.at) / 60_000))} min ago`;
-      const line = (w: WorkItem) => `${w.id} "${clip(w.title, 80)}" (${names(w.requesters)}, ${w.priority}${roomNeeds(w)?.length ? `; needs ${roomNeeds(w)!.join(' or ')}` : ''}${needsOf(w) === 'agent' ? '; needs only an agent slot' : ''}${startedPinned(w) ? '; started, runs only there' : ''}${w.status !== 'queued' ? `; a leg, its own worker elsewhere: ${clip(w.legs!.map((l) => l.what).join('; '), 120)}` : ''}${w.pair ? `; ${pairText(w.pair)}: start its legs together, e.g. on ${pairRoom(w, fit(w).ids, facts.fit).pick?.join(' + ')} (start_agent with pair_sandboxes)` : ''})`;
+      const line = (w: WorkItem) => `${w.id} "${clip(w.title, 80)}" (${names(w.requesters)}, ${w.priority}${roomNeeds(w)?.length ? `; needs ${roomNeeds(w)!.join(' or ')}` : ''}${needsOf(w) === 'agent' ? '; needs only an agent slot' : ''}${startedPinned(w) ? '; started, runs only there' : ''}${w.status !== 'queued' ? `; a leg, its own worker elsewhere: ${clip(w.legs!.map((l) => l.what).join('; '), 120)}` : ''}${w.pair ? `; ${pairText(w.pair)}: start its legs together, e.g. on ${pairRoom(w, fit(w).ids, facts.fit).pick?.join(' + ')} (start_agent with pair_sandboxes)${w.pair.warm ? `; ${warmText(w.pair.warm)}` : ''}` : ''})`;
       const room = [facts.game.length ? `game work: ${facts.game.join(', ')}` : '', facts.agent.length ? `agent-slot work: ${facts.agent.join(', ')}` : '', facts.held.length ? heldText(facts.held) : '', ...(facts.reserved ?? []).map((r) => `${r.id} has room for ${minPriorityText(r.min)} (placement.minPriority)`)].filter(Boolean).join('; ');
       const rest = queued.filter((w) => !usable.includes(w));
       // w1944: why the room now is no room for one, when that is it ("w1941: m5 is a Mac, which refuses ...").
