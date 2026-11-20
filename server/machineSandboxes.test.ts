@@ -24,6 +24,7 @@ import { readGitStatus } from './gitStatus.ts';
 import { testRepos } from './testMachine.ts';
 import type { Config } from './config.ts';
 import type { GitStatus, ImageInput, PermissionMode, SandboxPoolSettings, SessionInfo, WorkItem } from '../shared/types.ts';
+import { pairRoom, warmText } from '../shared/capacity.ts';
 
 // Daemons started here keep their Unity slots mailbox in a folder of their own, not the real one in the home folder.
 process.env.FF_UNITY_SLOTS = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-slots-'));
@@ -1838,4 +1839,34 @@ test("w3518: a welcome that lands while the pool looks at its sandboxes: the dis
   assert.equal(welcomed, true, 'the welcome landed inside the look');
   assert.deepEqual(events.filter((e) => /disk space (low|critical|is fine again)/.test(e.text)).map((e) => e.text), []);
   assert.equal(p.diskState().level, 'ok');
+});
+
+test('w4925: a repeat pair run for the same request carries the sandboxes its last run used, says so to the dispatcher, and prefers their computers', async (t) => {
+  const { store, sessions, mm, agents } = await twoSandboxes(t);
+  const w = mm.createSession('pc', { kind: 'worker', title: 'w4880 work', permissionMode: 'default', sandbox: 'sb1' });
+  sessions.send(w.info.id, 'go');
+  await until('w live and idle', () => w.live && w.info.status === 'idle');
+  const by = { userId: 'lothsahn', displayName: 'Lothsahn' };
+  const now = new Date().toISOString();
+  const item: WorkItem = { id: 'w4880', title: 'Black hole station fix', brief: 'Do it.', priority: 'urgent', keys: [], requestedBy: by, requesters: [], humanAsked: true, status: 'active', createdAt: now, updatedAt: now, sessionIds: [w.info.id], overlaps: [], asks: 0, log: [] };
+  store.putWork(item);
+  store.workSeq = Math.max(store.workSeq, 4880);
+  const o = agents.orchestrators;
+  const first = /^Filed (w\d+)/.exec(o.filePair(w.info.id, { what: 'MP pair on PR #3990', brief: 'Run the MP pair on the branch.', commit: '9cc67303f5c7' }))![1];
+  assert.equal(store.work.get(first)!.pair?.warm, undefined, 'a first run has no earlier one');
+  o.pairStarted(first, [{ session: 's-leg1', sandbox: 'biscuit/slot2' }]);
+  // It ran and reported (here: closed by hand); the fix is pushed and its worker asks again.
+  store.putWork({ ...store.work.get(first)!, status: 'done', outcome: 'FAIL: did not compile' });
+  store.putWork({ ...store.work.get('w4880')!, status: 'active', blocked: undefined });
+  const again = /^Filed (w\d+)/.exec(o.filePair(w.info.id, { what: 'MP pair on PR #3990', brief: 'Run the MP pair on the fixed branch.', commit: 'd56c9f7ec6' }))![1];
+  const p = store.work.get(again)!;
+  assert.deepEqual(p.pair?.warm, { from: first, legs: ['biscuit/slot2'] });
+  assert.ok(p.brief.includes(warmText(p.pair!.warm!)), p.brief);
+  assert.match(warmText(p.pair!.warm!), new RegExp(`^Its request's last pair run, ${first}, ran in biscuit/slot2: start its leg there when it is FREE .*never wait for it\.$`));
+  // pairRoom: the warm computer first among those with room; a cached player of the commit still wins.
+  const fit = { m5: { platform: 'darwin' }, pc: { platform: 'win32' }, biscuit: { platform: 'win32' } };
+  assert.deepEqual(pairRoom(p, ['pc', 'biscuit'], fit).pick, ['biscuit']);
+  assert.deepEqual(pairRoom({ pair: { ...p.pair!, warm: undefined } }, ['pc', 'biscuit'], fit).pick, ['pc'], 'without it, placement\'s own order');
+  w.stop();
+  await until('w stopped', () => !w.live);
 });

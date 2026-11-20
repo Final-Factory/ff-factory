@@ -2299,6 +2299,18 @@ export interface WorkPair {
   retryOf?: string;
   avoid?: string[];
   /**
+   * w4925: a person's words (decide_work block's override_gate) asking this unstarted pair run to wait on a computer or an
+   * hour while others have room; without them such a block is refused, and the ledger flags one that stands beside room.
+   */
+  waitAsked?: string;
+  /**
+   * w4925: the sandboxes ("machine/slotN") where the last earlier pair run for the same request started its legs, and that
+   * run's id. A repeat run prefers them: one still on that run's branch has a warm Library, so its next player build is
+   * shorter (lothdesktop's player cache, 80 builds: 490 s median for a sandbox's next build by the same worker, against
+   * about 800 s otherwise). It is a preference only: a pair run never waits for one.
+   */
+  warm?: { from: string; legs: string[] };
+  /**
    * The pull request ("owner/repo#N") and the commit its legs run (w2057, request_pair pr and commit): a filing for the same
    * pull request joins this run while it is open, and is answered with its result once it finished on the same commit.
    * Absent on a run filed by hand: server/pairRuns.ts reads them from its title and brief.

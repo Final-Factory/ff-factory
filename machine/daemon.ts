@@ -785,6 +785,7 @@ export class Daemon {
     );
     this.testHistory = new TestHistorySpool({
       places: () => this.pool.list().map((sb) => ({ id: sb.id, path: sb.path })),
+      root: cfg.root,
       send: (msg) => {
         if (this.ws?.readyState !== WebSocket.OPEN) return false;
         this.send(msg);
@@ -2516,6 +2517,19 @@ export class Daemon {
         lines.push(attachmentLine({ ...ref, path: dest }));
       }
       return [r.text, ...(lines.length ? ['In your Inbox (a lab fixture):', ...lines] : [])].join('\n');
+    };
+    // fetch_review (w4926, docs/review.md "Getting review files back"): review files from the portal's computer, the same way.
+    all.fetch_review = async (args) => {
+      const r = JSON.parse(await call('fetch_review', 600_000)(args)) as { text: string; refs: AttachmentRef[] };
+      const folder = this.entries.get(sessionId)?.spec?.cwd;
+      if (!folder) throw new Error('this session has no working folder on this machine yet');
+      const lines: string[] = [];
+      for (const ref of r.refs) {
+        const dest = await prepareInbox(folder, ref);
+        await fetchAttachment(this.cfg.portalUrl, this.cfg.token, ref, dest);
+        lines.push(attachmentLine({ ...ref, path: dest }));
+      }
+      return [r.text, ...lines].join('\n');
     };
     // fetch_discord_thread_files (docs/ffbox.md, "Bug threads' files"): the same for the files of a Discord bug thread
     // (up to ten files, a query to FFBox each: a few minutes at most).

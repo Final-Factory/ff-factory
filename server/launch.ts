@@ -37,7 +37,7 @@ export const REPORT_FILTER = {
 };
 /** test_history's arguments (w4922, server/testHistory.ts QueryArgs), for workers and orchestrators alike. */
 export const TEST_HISTORY_ARGS = {
-  query: z.enum(TEST_HISTORY_QUERIES).describe('summary, slowest, false_positives, detections, never_caught, failures, test or sql.'),
+  query: z.enum(TEST_HISTORY_QUERIES).describe('summary, slowest, false_positives, detections, never_caught, failures, test, local_runs, sql, or set_label (a hand label).'),
   days: z.number().int().min(1).max(3650).optional().describe('The window in days; default 30.'),
   limit: z.number().int().min(1).max(200).optional().describe('At most this many rows; default 20 (sql: 200).'),
   sources: z.array(z.enum(TEST_HISTORY_SOURCES)).max(5).optional().describe('Only runs of these sources; default all.'),
@@ -45,8 +45,12 @@ export const TEST_HISTORY_ARGS = {
   byRate: z.boolean().optional().describe('false_positives: rank by fp / runs instead of count.'),
   minRuns: z.number().int().min(1).max(100000).optional().describe('false_positives with byRate: at least this many runs; default 5.'),
   performance: z.boolean().optional().describe('Include Performance-tagged tests (left out by default).'),
-  label: z.enum(['fp', 'detect', 'unknown', 'pending']).optional().describe('failures: only this label.'),
+  label: z.enum(['fp', 'detect', 'unknown', 'pending']).optional().describe('failures: only this label. set_label: the label to set (fp, detect or unknown).'),
   sql: z.string().max(4000).optional().describe('query sql: one read-only SELECT (or WITH ... SELECT).'),
+  untagged: z.boolean().optional().describe('local_runs: only runs no worker could be named for.'),
+  request: z.string().regex(/^w\d+$/).optional().describe('local_runs: only this request\'s runs ("w4922").'),
+  failureId: z.number().int().min(1).optional().describe('set_label: the failure (failure_id in query failures).'),
+  reason: z.string().max(500).optional().describe('set_label: what shows it (a re-run, the commit that fixed it).'),
 };
 import { DESCRIPTION_CHARS, LABEL_INPUT_CHARS, MAX_OPTIONS, MEDIA_CHARS, MIN_OPTIONS } from '../shared/ask.ts';
 import { CARD_QUESTION_CHARS, MAX_ASKS } from '../shared/questionCard.ts';
@@ -217,7 +221,7 @@ export const CATALOG = {
     avoid: z.array(z.string().max(40)).max(6).optional().describe('w2041: computers (ids such as lothlaptop) no leg may go on, where you saw a leg fail for a machine reason (Tailscale stuck, offline, a broken player).'),
     pr: z.string().max(200).optional().describe('w2057: the pull request the legs check ("#2340", "Final-Factory/FinalFactory#2340" or its link). Default: the one what or brief names, else the one open pull request of your request. An open pair run of it is joined, not run twice.'),
     player: z.string().max(20).optional().describe("w4613: the attachment id publish_attachment answered for your built player of the head commit (publish_attachment player: <commit>). A leg on a computer of the same OS that lacks it fetches it into its own player cache instead of building (a Windows build took 229 s; its pack is about 750 MB); a leg on another OS builds as before. Without commit, the player's commit is the run's."),
-    commit: z.string().max(40).optional().describe('w2057: the head commit the legs run (git rev-parse HEAD). A pair run of the same pull request that finished on it answers with its result, and nothing is filed. w4601: a leg goes first on a computer whose player cache already holds a player of it, and is told its path, so pass it whenever you know it.'),
+    commit: z.string().max(40).optional().describe('w2057: the head commit the legs run (git rev-parse HEAD). A pair run of the same pull request that finished on it answers with its result, and nothing is filed. w4601: a leg goes first on a computer whose player cache already holds a player of it, and is told its path, so pass it whenever you know it. w4925: a run whose commit CI fails to compile (error CS) ends with those errors before any leg builds or runs a player.'),
   },
   /** w2969 (docs/orchestrators.md, "Follow-up requests"): briefs a worker wrote for new requests, which only an orchestrator can file. */
   hand_up_requests: {
@@ -323,6 +327,11 @@ export const CATALOG = {
     topic: z.string().describe('A short folder name for what is reviewed, e.g. "w283-enemy-attacks".'),
     files: z.array(z.string()).min(1).describe('Paths of the stills, clips and notes on this computer (absolute, or relative to your working folder).'),
     note: z.string().optional().describe('A few lines for the reviewer: what each file shows. Saved beside them as note.md.'),
+  },
+  /** docs/review.md, "Getting review files back" (w4926). The portal makes each an attachment for this machine; the daemon fetches them. */
+  fetch_review: {
+    files: z.array(z.string().max(1000)).max(40).optional().describe('Review files by the paths publish_review answered (on the portal\'s computer), or relative to the review folder, e.g. "w4877-clips/swallow.mp4".'),
+    topic: z.string().max(200).optional().describe('Instead of files: every file of this review topic, e.g. "w4877-black-hole-swallow-pr4011".'),
   },
   /** docs/attachments.md. On a machine the daemon answers it itself: the portal gives the record, the daemon fetches the file. */
   fetch_attachment: {

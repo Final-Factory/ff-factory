@@ -28,10 +28,10 @@ import { LedgerSweep, slugOf } from './ledgerSweep.ts';
 import { AutoDeploy, ghAutoDeploy, heldLine } from './autoDeploy.ts';
 import { run as runProc } from './proc.ts';
 import { portalPrEvidence } from '../machine/evidenceGate.ts';
-import { BlockerWatch, ghEvidenceRefusal, ghPrHealth } from './blockerWatch.ts';
+import { BlockerWatch, ghCompileVerdict, ghEvidenceRefusal, ghPrHealth } from './blockerWatch.ts';
 import { MasterBatchWatch } from './masterBatch.ts';
 import { FfuPostMergeWatch } from './ffuPostMerge.ts';
-import { TestHistory, parseLocalRecord, queryTestHistory, type QueryArgs } from './testHistory.ts';
+import { TestHistory, localRunTags, parseLocalRecord, queryTestHistory, type QueryArgs } from './testHistory.ts';
 import { TestHistoryCi, testHistorySettings } from './testHistoryCi.ts';
 import { runWaitsMigration } from './waitsMigration.ts';
 import { parseNightlyReport } from './nightlyRules.ts';
@@ -618,14 +618,16 @@ machines.benchHours = (id, rows) => {
 // The per-test history (w4922, docs/test-history.md): every worker's local test run, sent by its daemon, and CI's runs
 // (server/testHistoryCi.ts); the test_history tool reads it.
 const testHistory = new TestHistory({ dataDir: cfg.dataDir });
-agents.testHistoryQuery = (a) => queryTestHistory(testHistory, a as unknown as QueryArgs);
+agents.testHistoryQuery = (a, by) => queryTestHistory(testHistory, a as unknown as QueryArgs, Date.now(), by);
 machines.testHistory = (id, sandbox, file, record) => {
   const r = parseLocalRecord(record);
   if (!r) return { ok: false, error: 'not a test history record (version 1)' };
-  if (!r.tests.length) return { ok: true };
-  const tags = agents.workInSandbox(id, sandbox);
+  // A finished run with no test ran nothing; a run that never finished is kept even empty: it was started.
+  if (!r.tests.length && !r.running) return { ok: true };
+  const tags = localRunTags(agents, id, sandbox, r.session);
   testHistory.addRun(
-    { ...r.info, source: 'local', key: `local:${id}/${sandbox}/${file}`, repo: testHistorySettings(cfg).repo, machine: id, sandbox, sessions: tags.sessions, requests: tags.requests },
+    // One key for a run's running and finished files, so a run is recorded once.
+    { ...r.info, source: 'local', key: `local:${id}/${sandbox}/${file.replace(/\.running\.json$/, '.json')}`, repo: testHistorySettings(cfg).repo, machine: id, sandbox: sandbox || undefined, ...tags },
     r.tests,
   );
   return { ok: true };
@@ -1006,6 +1008,8 @@ const blockerWatch = new BlockerWatch({
   githubPerson: (w) => githubPersonOf(tokenPersonForWork(cfg, w), w, identity.systemPayer().userId),
   // w3110: the merge-on-green pilot's Evidence check runs here, on the portal: its own checkout of the plugin repo.
   evidenceScript: () => portalPrEvidence({ dataDir: cfg.dataDir, run: runProc }),
+  // w4925: a pair run of a commit whose CI failed to compile ends with the errors before its legs run players.
+  compile: (repo, sha, person) => ghCompileVerdict(repo, sha, ghRunner(person, `the compile of ${sha.slice(0, 10)}`)),
 });
 agents.blockerWatch = blockerWatch;
 // A usage gate keeps the pool's own name for its ref and the hold's end (w1126: "vault-lothsahn-1" never matched and never cleared).

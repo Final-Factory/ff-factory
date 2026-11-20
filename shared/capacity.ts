@@ -506,8 +506,11 @@ export function pairRoom(w: { pair?: WorkPair }, ids: readonly string[], fit: Re
   // w4601: computers whose player cache holds the pair's commit for their OS come first (a stable sort, so placement's own
   // order rules among the rest): a leg there skips its 3 to 23 min build (w4596's timelines of 12 pair runs).
   // w4613: next come computers of the published player's OS (request_pair player): a leg there fetches it instead of building.
-  if (p.commit || p.player) {
-    const rank = (id: string) => (cachedPlayerOf(p.commit, fit?.[id]) ? 0 : p.player && fit?.[id]?.platform && CACHE_TARGET[fit[id]!.platform!] === p.player.os ? 1 : 2);
+  // w4925: next the computers where its request's last pair run ran (WorkPair.warm): a sandbox there may still hold that run's
+  // branch, whose Library builds the next commit faster.
+  if (p.commit || p.player || p.warm?.legs.length) {
+    const warmOn = new Set((p.warm?.legs ?? []).map(refMachine));
+    const rank = (id: string) => (cachedPlayerOf(p.commit, fit?.[id]) ? 0 : p.player && fit?.[id]?.platform && CACHE_TARGET[fit[id]!.platform!] === p.player.os ? 1 : warmOn.has(id) ? 2 : 3);
     ids = [...ids].sort((a, b) => rank(a) - rank(b));
   }
   const os = (id: string) => fit?.[id]?.platform;
@@ -636,5 +639,15 @@ export function pairComputersReason(w: Pick<WorkItem, 'title' | 'brief'> & { not
   const named = SPLIT_PEER_WORDS.exec(macRuleWords({ title: w.title, brief: w.brief, notes: w.notes }))?.[0];
   return named ? `its words name ${named}` : undefined;
 }
+
+/**
+ * w4925: what a repeat pair run says of the sandboxes its request's last pair run used (WorkPair.warm): start there when
+ * free, since one still on that run's branch builds the next commit's player faster. A preference only.
+ */
+export const warmText = (warm: NonNullable<WorkPair['warm']>): string =>
+  `Its request's last pair run, ${warm.from}, ran in ${warm.legs.join(' and ')}: start ${warm.legs.length > 1 ? 'these legs there' : 'its leg there'} when ${warm.legs.length > 1 ? 'they are' : 'it is'} FREE (w4925: a sandbox still on that run's branch has a warm Library, and its next player build took 490 s median against about 800 s elsewhere, measured on lothdesktop), and never wait for ${warm.legs.length > 1 ? 'them' : 'it'}.`;
+
+/** The computer of a sandbox ref ("machine/slotN"). */
+const refMachine = (ref: string): string => ref.split('/')[0];
 
 export const pairText = (p: WorkPair): string => `a pair run of ${p.legs} ${p.legs === 1 ? 'leg' : 'legs'}${p.crossOs ? `, cross-OS (${p.crossOs})` : `, ${PAIR_ANY_OS}`}${p.steam ? `, ${PAIR_STEAM} (${p.steam})` : ''}${p.menus && !p.steam ? `, only on computers whose screen is unlocked (it clicks the game's menus: ${p.menus})` : ''}${p.timed ? ', timed (exclusive tickets: not on a computer that takes no timed runs)' : ''}${p.split ? `, its peers spread (a Mac may host: ${p.split})` : ''}${p.avoid?.length ? `, not on ${p.avoid.join(' or ')}` : ''}`;

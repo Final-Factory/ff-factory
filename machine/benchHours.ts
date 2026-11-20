@@ -5,8 +5,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
 import { BENCH_HOURS_MAX_REQUESTS, BENCH_HOURS_MAX_ROWS, HOUR_MS, hourStartIso, type BenchHourRow } from '../shared/benchHours.ts';
-import { benchLockDir } from './benchLock.ts';
-import { benchQueueDir } from './benchQueue.ts';
+import { benchLockDir, pidAlive } from './benchLock.ts';
+import { benchQueueDir, queueTickets } from './benchQueue.ts';
 
 /** The events that end a ticket; keep, limit, limit-cancel, warn and legacy-free say nothing about who held what. */
 const END_EVS = new Set(['release', 'gone', 'revoke', 'job-stopped', 'leave']);
@@ -83,11 +83,29 @@ function union(spans: Span[]): Span[] {
  * The hours of [sinceMs, nowMs] in which a machine's bench queue had activity, oldest first (shared/benchHours.ts for the
  * fields). A ticket with a grant and no end is still held, counted up to nowMs; a hold is clipped to the window and split
  * across the UTC hours it spans. A sandbox is the ticket's `sandbox`, else its `what`.
+ *
+ * w4924: `live` names the tickets whose helper still runs (machine/benchQueue.ts queueTickets). An open ticket outside it
+ * died without an end line (its machine went offline, slept or rebooted, so no scan wrote "gone"): it ends at the first
+ * grant of an exclusive ticket after its own start, else at the history's last event, never at nowMs. Without that,
+ * lothlaptop's w3881 ticket counted 60 exclusive minutes an hour from 2026-11-10 to 11-20 ("22.3 h" in r341).
  */
-export function benchHours(lines: Iterable<string>, o: { sinceMs: number; nowMs: number }): BenchHourRow[] {
-  const { sinceMs, nowMs } = o;
+export function benchHours(lines: Iterable<string>, o: { sinceMs: number; nowMs: number; live?: ReadonlySet<string> }): BenchHourRow[] {
+  const { sinceMs, nowMs, live } = o;
   if (!(nowMs > sinceMs)) return [];
-  const all = [...tickets(lines).values()];
+  const byId = tickets(lines);
+  const all = [...byId.values()];
+  if (live) {
+    let last = -Infinity;
+    for (const t of all) for (const v of [t.take, t.grant, t.end]) if (v !== undefined && v > last) last = v;
+    const exclusiveGrants = all.filter((t) => t.mode === 'exclusive' && t.grant !== undefined).map((t) => t.grant!).sort((a, b) => a - b);
+    for (const [id, t] of byId) {
+      if (t.end !== undefined || live.has(id)) continue;
+      const start = t.grant ?? t.take;
+      if (start === undefined) continue;
+      const next = exclusiveGrants.find((g) => g > start);
+      t.end = Math.max(start, next ?? last);
+    }
+  }
   // a ticket never seen to start is taken to have waited as long as its grant said (waited_s), else to have waited not at all
   const take = (t: Ticket) => t.take ?? (t.grant !== undefined ? t.grant - (t.waitedS ?? 0) * 1000 : undefined);
   const end = (t: Ticket) => t.end ?? nowMs;
@@ -178,7 +196,7 @@ export function benchHistoryFiles(root: string): string[] {
  * of one) of a root's bench history, or undefined when there is no history. Streams each file; keeps only the lines that
  * name a ticket's take, grant or end.
  */
-export async function readBenchHours(root: string | undefined, nowMs = Date.now()): Promise<BenchHourRow[] | undefined> {
+export async function readBenchHours(root: string | undefined, nowMs = Date.now(), alive: (pid: number) => boolean = pidAlive): Promise<BenchHourRow[] | undefined> {
   if (!root) return undefined;
   const kept: string[] = [];
   let found = false;
@@ -201,5 +219,6 @@ export async function readBenchHours(root: string | undefined, nowMs = Date.now(
   }
   if (!found) return undefined;
   const sinceMs = Math.floor((nowMs - BENCH_HOURS_MAX_ROWS * HOUR_MS) / HOUR_MS) * HOUR_MS;
-  return capBenchRows(benchHours(kept, { sinceMs, nowMs }));
+  const live = new Set(queueTickets(benchLockDir(root), alive).map((t) => t.ticket));
+  return capBenchRows(benchHours(kept, { sinceMs, nowMs, live }));
 }
