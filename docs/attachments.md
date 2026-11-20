@@ -183,9 +183,13 @@ tarball goes either way. Eviction is `player_cache.py evict`'s, as for a built e
 `request_pair {player: <att id>}` stores it on the pair (`WorkPair.player`); a leg on a computer of that OS that does not
 hold the commit (where w4601's line does not apply) gets "Fetch the requester's player instead of building it" in its
 first message (`shared/capacity.ts` `fetchPlayerNote`). A player of another commit than the run's is refused.
+Placement (`pairRoom`) puts a computer whose cache holds the commit first, then one of the player's OS (it fetches),
+then the rest in placement's order; a Mac with room still hosts first.
 
 A packed player uploaded by a machine has its own cap, 3 GiB (`PLAYER_MAX_BYTES`, `shared/attachments.ts`), not
-`attachments.maxMB`; the same name from the page keeps the normal cap. It is kept 2 days (`PLAYER_RETENTION_DAYS`).
+`attachments.maxMB`; the same name from the page keeps the normal cap. It is kept 2 days (`PLAYER_RETENTION_DAYS`)
+after its last use, except while an open pair run names it (`pairPlayerIds`, `server/index.ts` `attachments.keep`):
+w4622, the first real check, waited 58 h for a Windows computer and its leg found att_9l7wtia4s4kf already pruned.
 
 ## Untrusted content
 

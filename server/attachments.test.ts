@@ -6,7 +6,7 @@ import path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { Readable } from 'node:stream';
-import { AttachmentError, AttachmentStore, attachmentForMachine, downloadDisposition, machineAttachment, prepareInbox, publicRef, publishableFile, publishedFilesBlock, uploadForMachine } from './attachments.ts';
+import { AttachmentError, AttachmentStore, attachmentForMachine, downloadDisposition, machineAttachment, prepareInbox, publicRef, publishableFile, publishedFilesBlock, uploadForMachine, pairPlayerIds } from './attachments.ts';
 import { attachmentBlock, attachmentKind, attachmentName, fmtBytes, inboxName } from '../shared/attachments.ts';
 
 /**
@@ -360,4 +360,27 @@ test('w4613: a packed game player from a machine has its own cap (3 GiB) and is 
   store.prune();
   assert.equal(store.get(player.id), undefined, 'a player is kept 2 days');
   assert.ok(store.get(log.id), 'everything else keeps retentionDays');
+});
+
+test('w4613 (w4622): a packed player an open pair run names is kept however long the run waits; once it closes, retention takes it', async (t) => {
+  const { store, clock } = setup(t, { retentionDays: 30 });
+  const name = `player-${'b'.repeat(40)}-win.tar.gz`;
+  const held = await upload(store, name, randomBytes(100));
+  const loose = await upload(store, `player-${'c'.repeat(40)}-win.tar.gz`, randomBytes(100));
+  const work = [
+    { status: 'queued', pair: { player: { id: held.id } } },
+    { status: 'done', pair: { player: { id: loose.id } } },
+    { status: 'queued', pair: {} },
+  ];
+  const open = (w: { status: string }) => w.status !== 'done';
+  assert.deepEqual(pairPlayerIds(work, open), [held.id], 'only an open run\'s player');
+  store.keep = () => pairPlayerIds(work, open);
+  clock.now += 58 * 3_600_000; // w4622 waited 58 h for a computer
+  store.prune();
+  assert.ok(store.get(held.id), 'the queued run\'s player is still there');
+  assert.equal(store.get(loose.id), undefined, 'a closed run\'s player goes after 2 days');
+  work[0].status = 'done';
+  store.prune();
+  assert.equal(store.get(held.id), undefined, 'once its run closes');
+  assert.throws(() => store.resolve(['att_k2m9x0q7p3a1']), /a packed game player once no open pair run names it/);
 });

@@ -314,7 +314,7 @@ export class AttachmentStore {
     if (want.length > max) throw new AttachmentError(400, `attachments: at most ${max} at once (${want.length} given); pass the rest in another call`);
     return want.map((id) => {
       const r = ATTACHMENT_ID.test(id) ? this.records.get(id) : undefined;
-      if (!r) throw new AttachmentError(404, `no attachment "${id}" (ids look like att_k2m9x0q7p3a1; one unused for ${this.settings.retentionDays} days is deleted)`);
+      if (!r) throw new AttachmentError(404, `no attachment "${id}" (ids look like att_k2m9x0q7p3a1; one unused for ${this.settings.retentionDays} days is deleted, a packed game player once no open pair run names it and it is unused for ${PLAYER_RETENTION_DAYS} days)`);
       return r;
     });
   }
@@ -632,4 +632,14 @@ function safeList(dir: string): string[] {
   } catch {
     return [];
   }
+}
+
+/**
+ * w4613: the packed players open pair runs name (WorkItem.pair.player), which retention keeps however long the run waits for
+ * room: w4622 sat queued 58 h behind a paused computer and its leg found att_9l7wtia4s4kf pruned after its 2 days.
+ */
+export function pairPlayerIds<W extends { pair?: { player?: { id: string } } }>(work: Iterable<W>, open: (w: W) => boolean): string[] {
+  const out: string[] = [];
+  for (const w of work) if (w.pair?.player?.id && open(w)) out.push(w.pair.player.id);
+  return out;
 }
