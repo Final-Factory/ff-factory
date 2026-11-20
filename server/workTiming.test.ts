@@ -193,7 +193,10 @@ test('a still-open line names what the request waits for', () => {
   assert.equal(stillOpenCauseOf('a check-in at 05:00 reads the build'), 'checkin');
   assert.equal(stillOpenCauseOf('the second half of the panel is next'), undefined);
   assert.equal(gapCauseOf([], 'Done with w4284.\n\nw4285 (pick a name): still open: waiting on Ben to pick one of the three', 'w4285'), 'person');
-  assert.equal(gapCauseOf([], 'w4285: still open: waiting on Ben to pick', 'w4284'), 'idle', "another request's line is not this one's");
+  assert.equal(gapCauseOf([], 'w4285: still open: waiting on Ben to pick', 'w4284'), undefined, "another request's line is not this one's: w4284 keeps its own cause");
+  assert.equal(gapCauseOf([{ name: 'mcp__machine__blocked_on', input: { request: 'w4274', prs: ['ci:Final-Factory/ffu#826'] } }], 'w4274: still open: blocked on CI on Final-Factory/ffu#826', 'w4298'), undefined);
+  assert.equal(gapCauseOf([{ name: 'mcp__machine__blocked_on', input: { request: 'w4298', prs: ['Final-Factory/ffu#819'] } }], 'w4298: still open: blocked on PR Final-Factory/ffu#819 merging', 'w4298'), 'blocked');
+  assert.equal(gapCauseOf([], 'all done', 'w4298'), 'idle', 'a turn that names no request is still this one');
 });
 
 test('w4698: a worker that ended on "still open: waiting on Ben" with no tool is waiting on a person, not idle', () => {
@@ -349,4 +352,19 @@ test('w4423/w4298: a last turn that waits on a person holds until the next worke
   // an idle last turn still decays to tail after TAIL_MS
   const idle = sweep(sessionSpans([user(0, 'w1'), result(2)], T0, T0 + 600 * MIN), T0, T0 + 600 * MIN);
   assert.equal(idle.tail, 598 * MIN - TAIL_MS);
+});
+
+test('w4298: a later turn of a shared worker that hands off another request keeps this one\'s hold', () => {
+  const evs = [
+    user(0, 'w4298 go'),
+    result(10, 'w4298: still open: blocked on PR Final-Factory/ffu#819 merging'),
+    user(20, 'w4274 go'),
+    result(30, 'w4274: still open: blocked on CI on Final-Factory/ffu#826'),
+  ];
+  const s = sweep(sessionSpans(evs, T0, T0 + 600 * MIN, 'w4298'), T0, T0 + 600 * MIN);
+  assert.equal(s.tail ?? 0, 0);
+  assert.equal(s.blocked, 590 * MIN - 10 * MIN);
+  // the other request itself still reads its own CI wait
+  const o = sweep(sessionSpans(evs, T0, T0 + 600 * MIN, 'w4274'), T0, T0 + 600 * MIN);
+  assert.equal(o.gap_ci, TAIL_MS);
 });

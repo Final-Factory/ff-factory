@@ -1685,7 +1685,10 @@ first by their last DONE (`last`, default 50, at most 300; `until` for an earlie
   wait even when what they decide names CI (w4712). A last turn that hands the request to a person or a gate (`person`,
   `blocked`: `HOLDS`) keeps that label until the next turn or the close, not `TAIL_MS` then `tail`, and a moved-off
   worker's spans end at the next worker's first event after the move (`endOf`): with moved-off workers read, w4298 and
-  w4423 showed 46h31 and 31h13 of `tail` that was a wait on Ben.
+  w4423 showed 46h31 and 31h13 of `tail` that was a wait on Ben. A turn of a shared worker that hands off only other
+  requests (a hand-off tool whose `request` is another id, or a result whose still-open or DONE lines name only others)
+  leaves this request's last cause unchanged (`gapCauseOf` answers undefined): w4298's worker 53abc3d5 ended on
+  "w4274: still open: blocked on CI", which faded w4298's own "blocked on PR ffu#819" into `tail`.
   Known limit: a session that held several requests counts its turns for the others as thinking time on each.
 
 It reads closed requests, which `read_work` does not, so it needs both grants; it reads the transcripts on the portal
