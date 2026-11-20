@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { datedLog, gapCauseOf, movedOffCut, sessionsOf, stillOpenCauseOf, pickFinished, sessionSpans, sweep, TAIL_MS, timeRequest, toolCauseOf, waitBreakdown, waitCauseOf, workTiming } from './workTiming.ts';
+import { datedLog, gapCauseOf, movedOffCut, sessionsOf, stillOpenCauseOf, stillOpenOf, pickFinished, sessionSpans, sweep, TAIL_MS, timeRequest, toolCauseOf, waitBreakdown, waitCauseOf, workTiming } from './workTiming.ts';
 import type { Requester, SessionInfo, TranscriptEvent, WorkItem } from '../shared/types.ts';
 
 /** work_timing (w4531, server/workTiming.ts): where a finished request's wall time went, in two parts. */
@@ -375,6 +375,12 @@ test('w4298: a result that says this request is paused for a handed-up request h
   assert.equal(gapCauseOf([{ name: 'mcp__machine__blocked_on', input: { request: 'w4274', prs: ['ci:Final-Factory/ffu#826'] } }], text, 'w4298'), 'blocked');
   assert.equal(gapCauseOf([], text, 'w4274'), 'gap_ci', 'the other request keeps its own line');
   assert.equal(gapCauseOf([], 'w4298 merged as PR #900. Nothing is paused.', 'w4298'), 'idle', 'paused in another sentence is not this one');
+  // the same result on one line: w4274's still-open line is not w4298's
+  const oneLine = text.replace('\n', ' ');
+  assert.equal(stillOpenOf(oneLine, 'w4298'), undefined);
+  assert.equal(stillOpenOf(oneLine, 'w4274'), 'blocked on CI on Final-Factory/ffu#826');
+  assert.equal(stillOpenOf('w4298 and the panel: still open: waiting on Ben to pick', 'w4298'), 'waiting on Ben to pick');
+  assert.equal(gapCauseOf([], oneLine, 'w4298'), 'blocked');
   const evs = [user(0, 'w4298 go'), result(10, text), user(20, 'w4274 go'), result(30, 'w4274: still open: blocked on CI on Final-Factory/ffu#826')];
   const s = sweep(sessionSpans(evs, T0, T0 + 600 * MIN, 'w4298'), T0, T0 + 600 * MIN);
   assert.equal(s.tail ?? 0, 0);

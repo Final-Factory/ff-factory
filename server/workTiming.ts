@@ -296,9 +296,13 @@ export function stillOpenCauseOf(text: string): WorkCause | undefined {
   return undefined;
 }
 
-/** The "<id>...still open: <what>" line of a report, if it has one. */
+/**
+ * The "<id>...still open: <what>" line of a report, if it has one. Another request's id between this one and "still open:"
+ * makes it that request's line (w4927: "w4298 (...) is paused ...; I handed up a request. w4274: still open: blocked on CI"
+ * on one line read as w4298's CI wait, then 46 h of past TAIL).
+ */
 export function stillOpenOf(text: string, id?: string): string | undefined {
-  const re = id ? new RegExp(`\\b${id}\\b[^\\n]*?still open:([^\\n]*)`, 'i') : /still open:([^\n]*)/i;
+  const re = id ? new RegExp(`\\b${id}\\b(?:(?!\\bw\\d+\\b)[^\\n])*?still open:([^\\n]*)`, 'i') : /still open:([^\n]*)/i;
   return re.exec(text)?.[1]?.trim();
 }
 
