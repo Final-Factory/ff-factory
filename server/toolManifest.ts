@@ -72,6 +72,8 @@ export const TOOL_MANIFEST = {
   file_report: { group: 'ledger', kinds: [W] },
   list_reports: { group: 'ledger', kinds: [D, P, R, W] },
   read_report: { group: 'ledger', kinds: [D, P, R, W] },
+  // w4922: the per-test history (docs/test-history.md), read-only
+  test_history: { group: 'ledger', kinds: [D, P, R, W] },
   // workers
   start_agent: { group: 'workers', kinds: [D, R], always: [D] },
   message_agent: { group: 'workers', kinds: [D, P, R], always: [D, P] },

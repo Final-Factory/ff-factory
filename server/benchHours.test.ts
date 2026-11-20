@@ -165,8 +165,49 @@ test('w1996: readBenchHours reads history.1.jsonl then history.jsonl from the wo
   fs.writeFileSync(old, HISTORY.slice(0, split).join('\n') + '\n');
   fs.writeFileSync(cur, HISTORY.slice(split).join('\r\n') + '\n');
   const rows = (await readBenchHours(root, NOW))!;
-  assert.deepEqual(rows, capBenchRows(benchHours(HISTORY, { sinceMs: T('07:00') - BENCH_HOURS_MAX_ROWS * 3_600_000, nowMs: NOW })));
-  assert.equal(rows.find((r) => r.hour.startsWith('2026-10-24T06'))!.exclusiveS, 1800);
+  // w4924: no ticket folder holds X2, so its open hold ends at the history's last event (S6's take, 06:50), not at NOW
+  assert.deepEqual(rows, capBenchRows(benchHours(HISTORY, { sinceMs: T('07:00') - BENCH_HOURS_MAX_ROWS * 3_600_000, nowMs: NOW, live: new Set() })));
+  assert.equal(rows.find((r) => r.hour.startsWith('2026-10-24T06'))!.exclusiveS, 600 + 600, 'X1 06:00-06:10, X2 06:40-06:50');
+});
+
+test('w4924: an open ticket whose helper is gone ends at the next exclusive grant, else at the last event, never at now', () => {
+  // lothlaptop, 2026-11-10: w3881's ticket was granted, the machine went offline, and no scan wrote "gone"; counted to now it
+  // showed 60 exclusive minutes every hour for ten days ("22.3 h" in r341)
+  const lines = [
+    ev('04:00', 'take', 'P1', 'exclusive', { session: 'A', requests: ['w3881'] }),
+    ev('04:00', 'grant', 'P1', 'exclusive', { session: 'A', requests: ['w3881'], waited_s: 0 }),
+    ev('04:20', 'take', 'S1', 'shared', { session: 'B', sandbox: 'slot2' }),
+  ];
+  const now = T('06:00', '2026-11-20');
+  const since = T('00:00', '2026-11-17');
+  const day = (l: string) => {
+    const d = JSON.parse(l);
+    const ms = Date.parse(String(d.at).replace('2026-10-24', '2026-11-17'));
+    return JSON.stringify({ ...d, at: new Date(ms).toISOString(), ts: ms / 1000 });
+  };
+  const moved = lines.map(day);
+  assert.ok(benchHours(moved, { sinceMs: since, nowMs: now }).length > 48, 'without `live` an open ticket is still counted to now (the old reading)');
+  const dead = benchHours(moved, { sinceMs: since, nowMs: now, live: new Set() });
+  assert.deepEqual(dead.map((r) => [r.hour.slice(11, 13), r.exclusiveS]), [['04', 20 * 60]], 'P1 ends at 04:20, the last event');
+  const alive = benchHours(moved, { sinceMs: since, nowMs: now, live: new Set(['P1']) });
+  assert.ok(alive.length > 48, 'a live ticket is still held, counted to now');
+  // a later exclusive grant ends it there: the queue gave the lock to someone else
+  const next = benchHours([...lines, ev('04:10', 'take', 'X9', 'exclusive'), ev('04:12', 'grant', 'X9', 'exclusive'), ev('04:30', 'release', 'X9', 'exclusive'), ev('05:00', 'take', 'S7', 'shared')], { sinceMs: T('00:00'), nowMs: T('06:00'), live: new Set() });
+  assert.deepEqual(next.map((r) => [r.hour.slice(11, 13), r.exclusiveS, r.holds]), [['04', 12 * 60 + 18 * 60, 2]]);
+});
+
+test('w4924: readBenchHours keeps counting a ticket whose helper lives, and ends one whose helper is gone', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'w4924-root-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const [, cur] = benchHistoryFiles(root);
+  const q = path.dirname(cur);
+  fs.mkdirSync(path.join(q, 't00000001'), { recursive: true });
+  fs.writeFileSync(path.join(q, 't00000001', 'info.json'), JSON.stringify({ pid: 4242, mode: 'exclusive', what: 'x' }));
+  fs.writeFileSync(cur, [ev('06:00', 'take', 't00000001', 'exclusive'), ev('06:00', 'grant', 't00000001', 'exclusive'), ev('06:10', 'take', 'S1', 'shared')].join('\n') + '\n');
+  const held = (await readBenchHours(root, NOW, (pid) => pid === 4242))!;
+  assert.equal(held.find((r) => r.hour.startsWith('2026-10-24T06'))!.exclusiveS, 3600, 'its helper lives: held to now');
+  const gone = (await readBenchHours(root, NOW, () => false))!;
+  assert.equal(gone.find((r) => r.hour.startsWith('2026-10-24T06'))!.exclusiveS, 600, 'its helper is gone: ends at 06:10');
 });
 
 test('w1996: sanitizeBenchRows drops a bad row and shapes the rest', () => {

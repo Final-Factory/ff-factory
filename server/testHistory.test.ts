@@ -1,0 +1,247 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {
+  TestHistory,
+  classOf,
+  labelFailures,
+  labelFromChange,
+  parseLocalRecord,
+  parseNunit,
+  queryTestHistory,
+  readyQuery,
+  runSql,
+  sqlProblem,
+  type TestCase,
+} from './testHistory.ts';
+import { BATCH_ARTIFACT, EDITMODE_ARTIFACT, TestHistoryCi, prDiffFrom, sourceOf, type ArtifactRef, type TestHistoryGh } from './testHistoryCi.ts';
+import { TestHistorySpool, SPOOL_DIR } from '../machine/testHistorySpool.ts';
+
+// The per-test history (w4922, docs/test-history.md): what goes in, how failures are labelled, the queries.
+
+const T0 = Date.parse('2026-11-20T12:00:00Z');
+const iso = (minutes: number) => new Date(T0 + minutes * 60_000).toISOString();
+const tmp = (what: string) => fs.mkdtempSync(path.join(os.tmpdir(), `test-history-${what}-`));
+const history = (now = T0 + 3 * 86_400_000) => new TestHistory({ dataDir: tmp('db'), now: () => now });
+const tc = (name: string, outcome: TestCase['outcome'], ms = 10, extra: Partial<TestCase> = {}): TestCase => ({ name, outcome, ms, ...extra });
+const labelOf = (h: TestHistory, test: string) => h.all('SELECT f.label, f.reason FROM failures f JOIN tests t ON t.id = f.test_id WHERE t.name = ? ORDER BY f.id', test);
+
+const NUNIT = `<?xml version="1.0"?>
+<test-run>
+ <test-suite type="TestFixture" fullname="FF.Tests.BeltTest">
+  <test-case id="1" name="Moves" fullname="FF.Tests.BeltTest.Moves" result="Passed" duration="0.25" />
+  <test-case id="2" name="Stops(1,&quot;a&quot;)" fullname="FF.Tests.BeltTest.Stops(1,&quot;a&quot;)" result="Failed" duration="1.5">
+   <properties><property name="Category" value="Performance" /></properties>
+   <failure><message><![CDATA[Expected 3 but was 4]]></message></failure>
+  </test-case>
+  <test-case id="3" name="Later" fullname="FF.Tests.BeltTest.Later" result="Skipped" duration="0" />
+ </test-suite>
+</test-run>`;
+
+test('parseNunit reads each case, its time, its categories and the failure message', () => {
+  const cases = parseNunit(NUNIT);
+  assert.equal(cases.length, 3);
+  assert.deepEqual(cases[0], { name: 'FF.Tests.BeltTest.Moves', outcome: 'pass', ms: 250 });
+  assert.equal(cases[1]!.name, 'FF.Tests.BeltTest.Stops(1,"a")');
+  assert.equal(cases[1]!.outcome, 'fail');
+  assert.equal(cases[1]!.ms, 1500);
+  assert.deepEqual(cases[1]!.categories, ['Performance']);
+  assert.match(cases[1]!.message ?? '', /Expected 3 but was 4/);
+  assert.equal(cases[2]!.outcome, 'skip');
+  assert.equal(classOf('FF.Tests.BeltTest.Stops(1,"a.b")'), 'FF.Tests.BeltTest');
+});
+
+test('labelFromChange: nothing or only tests changed is fp, only game code is detect, both is unknown', () => {
+  assert.equal(labelFromChange([], 'x').label, 'fp');
+  assert.equal(labelFromChange(['Assets/Tests/BeltTest.cs'], 'x').label, 'fp');
+  assert.equal(labelFromChange(['scripts/test_select.py', 'docs/a.md'], 'x').label, 'fp');
+  assert.equal(labelFromChange(['Assets/Scripts/FFSystems/Belt.cs'], 'x').label, 'detect');
+  assert.equal(labelFromChange(['Assets/Scripts/FFSystems/Belt.cs', 'Assets/Tests/BeltTest.cs'], 'x').label, 'unknown');
+  assert.equal(labelFromChange(undefined, 'x').label, 'unknown');
+});
+
+test('a re-run at the same commit that passes makes a gate failure fp; a later head with only game code changed makes it detect', async () => {
+  const h = history();
+  const base = { repo: 'o/r', branch: 'feature', pr: 7 };
+  h.addRun({ ...base, source: 'pr-gate', key: 'a1', sha: 'aaa', finished: iso(0) }, [tc('A.T.flaky', 'fail'), tc('A.T.real', 'fail')]);
+  h.addRun({ ...base, source: 'pr-gate', key: 'a2', sha: 'aaa', finished: iso(10) }, [tc('A.T.flaky', 'pass')]);
+  h.addRun({ ...base, source: 'pr-gate', key: 'b1', sha: 'bbb', finished: iso(20) }, [tc('A.T.real', 'pass')]);
+  const asked: string[] = [];
+  const n = await labelFailures(h, async (_repo, a, b) => (asked.push(`${a}..${b}`), ['Assets/Scripts/FFSystems/Belt.cs']), T0 + 3600_000);
+  assert.equal(n, 2);
+  assert.equal(labelOf(h, 'A.T.flaky')[0]!.label, 'fp');
+  assert.equal(labelOf(h, 'A.T.real')[0]!.label, 'detect');
+  assert.deepEqual(asked, ['aaa..bbb']);
+});
+
+test('a failure that never passes again waits, then is unknown after the window; a person\'s label is never overwritten', async () => {
+  const h = history(T0 + 3600_000);
+  h.addRun({ source: 'pr-gate', key: 'x', repo: 'o/r', branch: 'b', sha: 's', finished: iso(0) }, [tc('A.T.one', 'fail'), tc('A.T.two', 'fail')]);
+  assert.equal(await labelFailures(h, async () => [], T0 + 3600_000), 0);
+  const id = h.failureId(1, 'A.T.two')!;
+  assert.ok(h.label(id, 'detect', 'I fixed the bug it found', 'lothsahn'));
+  assert.equal(await labelFailures(h, async () => [], T0 + 8 * 86_400_000), 1);
+  assert.equal(labelOf(h, 'A.T.one')[0]!.label, 'unknown');
+  assert.equal(labelOf(h, 'A.T.two')[0]!.label, 'detect');
+  assert.equal(h.label(id, 'fp', 'auto try', 'auto'), false);
+});
+
+test('local runs: a pass in the same sandbox after only the test changed is fp; after the base moved it is unknown', async () => {
+  const h = history();
+  const run = (key: string, at: number, changes: Record<string, string>, outcome: TestCase['outcome'], baseSha = 'm1', sandbox = 'slot4') =>
+    h.addRun({ source: 'local', key, machine: 'beast', sandbox, branch: 'w1', sha: `h${at}`, base: baseSha, finished: iso(at), changes }, [tc('A.T.loc', outcome)]);
+  run('l1', 0, { 'Assets/Tests/X.cs': '1', 'Assets/Scripts/Y.cs': '1' }, 'fail');
+  run('other', 1, { 'Assets/Tests/X.cs': '1' }, 'pass', 'm1', 'slot5');
+  run('l2', 5, { 'Assets/Tests/X.cs': '2', 'Assets/Scripts/Y.cs': '1' }, 'pass');
+  run('l3', 6, { 'Assets/Tests/X.cs': '2' }, 'fail', 'm1');
+  run('l4', 7, { 'Assets/Tests/X.cs': '2' }, 'pass', 'm2');
+  await labelFailures(h, async () => undefined, T0 + 3600_000);
+  const labels = labelOf(h, 'A.T.loc');
+  assert.equal(labels[0]!.label, 'fp');
+  assert.equal(labels[1]!.label, 'unknown');
+  assert.match(String(labels[1]!.reason), /base moved/);
+});
+
+test("the master batch's verdict labels its failures, and it keeps only failures per run (its passes are in the day rollup)", async () => {
+  const h = history();
+  const { runId } = h.addRun({ source: 'master-batch', key: 'mb', sha: 'tip', branch: 'master', finished: iso(0) }, [
+    tc('A.T.ok', 'pass'), tc('A.T.flaky', 'fail'), tc('A.T.broken', 'fail'), tc('A.T.lost', 'fail'), tc('A.T.cut', 'fail'),
+  ]);
+  h.applyBatchVerdict(runId, { flaky: ['A.T.flaky'], culprits: [{ sha: 'abcdef1234', pr: 99, tests: ['A.T.broken'] }], unresolved: ['A.T.lost'] });
+  assert.equal(labelOf(h, 'A.T.flaky')[0]!.label, 'fp');
+  assert.equal(labelOf(h, 'A.T.broken')[0]!.label, 'detect');
+  assert.match(String(labelOf(h, 'A.T.broken')[0]!.reason), /PR #99/);
+  assert.equal(labelOf(h, 'A.T.lost')[0]!.label, 'unknown');
+  await labelFailures(h, async () => [], T0 + 2 * 86_400_000);
+  assert.equal(labelOf(h, 'A.T.cut')[0]!.label, 'unknown');
+  assert.equal(h.all('SELECT count(*) AS n FROM results')[0]!.n, 4);
+  assert.equal(h.all('SELECT sum(runs) AS n FROM test_days')[0]!.n, 5);
+  assert.equal(h.addRun({ source: 'master-batch', key: 'mb', finished: iso(0) }, []).added, false);
+});
+
+test('the ready-made queries: slowest, false positives, detections and never_caught, Performance tests left out', async () => {
+  const h = history(T0 + 86_400_000);
+  for (let i = 0; i < 6; i++)
+    h.addRun({ source: 'master-batch', key: `mb${i}`, sha: `t${i}`, branch: 'master', finished: iso(i) }, [
+      tc('A.Slow.big', 'pass', 5000), tc('A.Fast.small', i === 0 ? 'fail' : 'pass', 5), tc('A.Catch.it', i === 1 ? 'fail' : 'pass', 20),
+      tc('A.Perf.timed', 'pass', 9000, { categories: ['Performance'] }),
+    ]);
+  h.applyBatchVerdict(1, { flaky: ['A.Fast.small'] });
+  h.applyBatchVerdict(2, { culprits: [{ sha: 'c', pr: 5, tests: ['A.Catch.it'] }] });
+  h.setCoverage('t5', { 'A.Slow': ['Belt', 'Splitter'] });
+  const now = T0 + 86_400_000;
+  assert.equal(readyQuery(h, { query: 'slowest', limit: 1 }, now).rows[0]!.test, 'A.Slow.big');
+  assert.equal(readyQuery(h, { query: 'slowest', limit: 1, performance: true }, now).rows[0]!.test, 'A.Perf.timed');
+  const fp = readyQuery(h, { query: 'false_positives', byRate: true, minRuns: 5 }, now).rows;
+  assert.equal(fp[0]!.test, 'A.Fast.small');
+  assert.equal(fp[0]!.runs, 6);
+  assert.equal(readyQuery(h, { query: 'detections' }, now).rows[0]!.test, 'A.Catch.it');
+  const never = readyQuery(h, { query: 'never_caught' }, now).rows;
+  assert.deepEqual(never.map((r) => r.test), ['A.Slow.big', 'A.Fast.small']);
+  assert.equal(never[0]!.covers, 'Belt Splitter');
+  assert.match(await queryTestHistory(h, { query: 'summary' }, now), /master-batch \| 6/);
+  assert.match(await queryTestHistory(h, { query: 'test', test: 'Catch' }, now), /A\.Catch\.it/);
+});
+
+test('ad-hoc sql: one read-only SELECT, refused otherwise, rows capped', async () => {
+  assert.equal(sqlProblem('SELECT 1'), undefined);
+  assert.equal(sqlProblem('with x as (select 1) select * from x;'), undefined);
+  assert.ok(sqlProblem('DELETE FROM tests'));
+  assert.ok(sqlProblem('SELECT 1; DROP TABLE tests'));
+  assert.ok(sqlProblem("SELECT 1 FROM x WHERE 1 = (ATTACH 'y' AS z)"));
+  assert.equal(sqlProblem("SELECT 'delete me' AS x"), undefined);
+  const h = history();
+  h.addRun({ source: 'local', key: 'k', finished: iso(0) }, [tc('A.B.c', 'pass'), tc('A.B.d', 'pass')]);
+  const r = await runSql(h.file, 'SELECT name FROM tests ORDER BY name', 1);
+  assert.deepEqual(r.rows, [{ name: 'A.B.c' }]);
+  assert.equal(r.more, true);
+  await assert.rejects(runSql(h.file, 'UPDATE tests SET name = 1'), /refused/);
+  await assert.rejects(runSql(h.file, 'SELECT nope FROM tests'), /no such column/);
+});
+
+test('parseLocalRecord reads what TestHistoryRecorder.cs writes', () => {
+  const rec = {
+    version: 1, recorder: 'unity-editor', machine: 'BEAST', mode: 'EditMode', started: iso(0), finished: iso(1), head: 'h', branch: 'w1', base: 'm',
+    changes: { 'Assets/Tests/X.cs': 'abc' },
+    tests: [{ name: 'A.B.c', outcome: 'pass', ms: 12 }, { name: 'A.B.d', outcome: 'fail', ms: 3, message: 'boom', categories: ['Performance'] }, { name: '', outcome: 'pass' }],
+  };
+  const r = parseLocalRecord(JSON.stringify(rec))!;
+  assert.equal(r.tests.length, 2);
+  assert.equal(r.info.sha, 'h');
+  assert.deepEqual(r.info.changes, { 'Assets/Tests/X.cs': 'abc' });
+  assert.equal(parseLocalRecord('{"version":2,"tests":[]}'), undefined);
+  assert.equal(parseLocalRecord('not json'), undefined);
+});
+
+test("the CI collector reads new gate and batch artifacts once, labels by a PR's diff, and keeps the newest coverage", async () => {
+  const h = history(T0 + 3600_000);
+  const art = (id: number, name: string, runId: number, sha: string, branch: string, minutes: number): ArtifactRef => ({ id, name, created: iso(minutes), expired: false, runId, sha, branch });
+  const lists: Record<string, ArtifactRef[]> = {
+    [EDITMODE_ARTIFACT]: [art(3, EDITMODE_ARTIFACT, 30, 'bbb', 'feat', 20), art(1, EDITMODE_ARTIFACT, 10, 'aaa', 'feat', 0)],
+    [BATCH_ARTIFACT]: [art(2, BATCH_ARTIFACT, 20, 'tip', 'master', 5)],
+  };
+  const files: Record<number, Record<string, string>> = {
+    10: { 'editmode-results.xml': `<test-case fullname="A.T.x" result="Failed" duration="0.1"><failure><message>no</message></failure></test-case>` },
+    30: { 'editmode-results.xml': `<test-case fullname="A.T.x" result="Passed" duration="0.1" />` },
+    20: {
+      '00-full.xml': `<test-case fullname="A.T.y" result="Failed" duration="2" /><test-case fullname="A.T.x" result="Passed" duration="0.1" />`,
+      'verdict.json': JSON.stringify({ verdict: 'red', tip: 'tip', flaky: ['A.T.y'] }),
+      'coverage.json': JSON.stringify({ sha: 'tip', classes: { 'A.T': ['Belt'] } }),
+    },
+  };
+  let downloads = 0;
+  const gh: TestHistoryGh = {
+    artifacts: async (_repo, name, page) => (page === 1 ? (lists[name] ?? []) : []),
+    run: async (_repo, runId) => ({ event: runId === 20 ? 'workflow_run' : 'pull_request', attempt: 1, prs: runId === 20 ? [] : [7], url: `u${runId}`, status: 'completed' }),
+    download: async (_repo, runId, _name, dir) => {
+      downloads++;
+      for (const [f, text] of Object.entries(files[runId] ?? {})) fs.writeFileSync(path.join(dir, f), text);
+    },
+    diff: async (_repo, sha) => new Map(sha === 'aaa' ? [['Assets/Scripts/A.cs', '1']] : [['Assets/Scripts/A.cs', '2']]),
+  };
+  const ci = new TestHistoryCi({ cfg: { dataDir: tmp('ci') }, history: h, gh, now: () => T0 + 3600_000 });
+  const first = await ci.look();
+  assert.deepEqual(first, { ingested: 3, tests: 4, labelled: 1 });
+  assert.equal(labelOf(h, 'A.T.x')[0]!.label, 'detect');
+  assert.equal(labelOf(h, 'A.T.y')[0]!.label, 'fp');
+  assert.equal(h.all("SELECT count(*) AS n FROM runs WHERE source = 'pr-gate' AND pr = 7")[0]!.n, 2);
+  assert.equal(h.all('SELECT type FROM coverage')[0]!.type, 'Belt');
+  assert.deepEqual(await ci.look(), { ingested: 0, tests: 0, labelled: 0 });
+  assert.equal(downloads, 3);
+  assert.equal(sourceOf('push', 'master'), 'release');
+  assert.equal(sourceOf('workflow_dispatch', 'x'), 'ci-other');
+});
+
+test('prDiffFrom: the files whose blob differs between two heads of a pull request', async () => {
+  const diff = prDiffFrom({
+    diff: async (_r, sha) =>
+      sha === 'a' ? new Map([['x', '1'], ['y', '1'], ['gone', '1']]) : sha === 'b' ? new Map([['x', '1'], ['y', '2'], ['new', '1']]) : undefined,
+  });
+  assert.deepEqual(await diff('o/r', 'a', 'b'), ['gone', 'new', 'y']);
+  assert.equal(await diff('o/r', 'a', 'huge'), undefined);
+});
+
+test("the daemon's spool sends each sandbox's records a few at a time and deletes one once the portal answers", () => {
+  const root = tmp('spool');
+  const dir = path.join(root, SPOOL_DIR);
+  fs.mkdirSync(dir, { recursive: true });
+  const names = ['20261120T120000000-0000000a.json', '20261120T120001000-0000000b.json', '20261120T120002000-0000000c.json', '20261120T120003000-0000000d.json', '20261120T120004000-0000000e.json'];
+  for (const n of names) fs.writeFileSync(path.join(dir, n), '{}');
+  fs.writeFileSync(path.join(dir, '20261120T120005000-0000000f.json.tmp'), 'half');
+  const sent: string[] = [];
+  let now = T0;
+  const spool = new TestHistorySpool({ places: () => [{ id: 'slot4', path: root }], send: (m) => (sent.push(m.file), true), now: () => now });
+  assert.equal(spool.tick(), 4);
+  assert.deepEqual(sent, names.slice(0, 4));
+  assert.equal(spool.tick(), 1);
+  assert.equal(spool.tick(), 0);
+  spool.ack('slot4', names[0]!, true);
+  spool.ack('slot4', '../../etc/passwd', true);
+  assert.equal(fs.existsSync(path.join(dir, names[0]!)), false);
+  now += 31 * 60_000;
+  sent.length = 0;
+  assert.equal(spool.tick(), 4);
+  assert.deepEqual(sent, names.slice(1));
+});

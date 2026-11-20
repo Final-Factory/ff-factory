@@ -48,6 +48,8 @@ import type { AttachmentRef, BenchLock, BenchPriority, BenchQueueReport, NoTimed
  * Also (w1996, no bump): `bench_hours`, the machine's exclusive-bench cost per UTC hour, which an older portal drops.
  * Also (w4672, no bump): `self_update_offer`, the hello's `selfUpdate` sent later, when the install record could not be read
  * at the hello (its Dev Drive not yet attached); an older portal drops it.
+ * Also (w4922, no bump): `test_history`, a sandbox's local test run for the portal's per-test history, which an older portal
+ * drops (the daemon sends it again later), answered by `test_history_ack`, which an older daemon drops.
  */
 export const PROTOCOL_VERSION = 9;
 
@@ -235,6 +237,8 @@ export type ToDaemon =
    * carrying the pass's summary; `dryRun`: plan only, nothing removed (older daemons ignore both and run a real pass).
    */
   | { type: 'cleanup_now'; id?: string; dryRun?: boolean }
+  /** w4922: the portal kept (ok) or refused for good a `test_history` file; either way the daemon deletes it. */
+  | { type: 'test_history_ack'; sandbox: string; file: string; ok: boolean; error?: string }
   /**
    * A timed run for a play-only machine (w1946, server/timedRuns.ts, machine/timedRunner.ts): data only (pieces by hash, a
    * save, -ff switches, bounded settings); the daemon plays the fixed legs under its exclusive ticket. Sent only to a daemon
@@ -447,6 +451,12 @@ export type FromDaemon =
    * connect and every hour. The portal merges the hours (server/benchHoursStore.ts). An older portal drops it.
    */
   | { type: 'bench_hours'; rows: BenchHourRow[] }
+  /**
+   * One local test run a sandbox's editor recorded (w4922, machine/testHistorySpool.ts, the game repo's
+   * Assets/Editor/TestHistoryRecorder.cs): the file's name and its JSON as written. The portal keeps it in the per-test
+   * history (server/testHistory.ts) and answers `test_history_ack`; the daemon then deletes the file.
+   */
+  | { type: 'test_history'; sandbox: string; file: string; record: string }
   /** A line the ffdiscord CLI appended to the Mac's Max events file (docs/max.md), forwarded as is; the portal validates it. */
   | { type: 'max_event'; line: string }
   /** Its GPU Whisper's state, when it changes (w615): loaded, unloaded for the editors' VRAM, installing. An older portal drops it. */

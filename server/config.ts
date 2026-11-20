@@ -342,6 +342,11 @@ export interface Config {
   timing?: { unavailableIdleMinutes?: number; unavailableBusyMinutes?: number };
   masterBatch?: { enabled?: boolean; autoApprove?: { enabled?: boolean; maxPerDay?: number }; repo?: string; workflow?: string };
   /**
+   * The per-test history (w4922, server/testHistory.ts, docs/test-history.md): CI's test artifacts of repo
+   * (Final-Factory/FinalFactory) are read every 5 minutes, back to backfillDays (21, at most 90). On unless enabled is false.
+   */
+  testHistory?: { enabled?: boolean; repo?: string; backfillDays?: number };
+  /**
    * The automatic portal deploy (w1634, server/autoDeploy.ts, docs/ops-worker.md "Automatic deploys"): a new commit on this
    * app's main with green CI is deployed by itself once main has been quiet for quietMinutes (15) or the first undeployed
    * commit has waited maxWaitMinutes (60). On unless enabled is false (set_app_config autoDeploy.enabled); only on the

@@ -84,6 +84,7 @@ import { GRACE_MIN, PersonPlay, personEnds, personHolderText, personHoldText, pe
 import { benchTicketFor, queueTickets, type QueueTicket } from './benchQueue.ts';
 import { holdsOwnTicket, resumeRevokes, revokeTicket } from './benchRevoke.ts';
 import { readBenchHours } from './benchHours.ts';
+import { TestHistorySpool } from './testHistorySpool.ts';
 import { TimedRunner, timedRunEnv } from './timedRunner.ts';
 import { findFixtures, listFixtures, offeredDir, sendFixture } from './labFixtures.ts';
 import { timedRunFromMachine } from './timedRunPack.ts';
@@ -350,6 +351,8 @@ const LINK_DEAD_MS = 45_000;
 const DAEMON_STALL_LOG_MS = 5_000;
 /** w1996: how often the bench queue's cost per hour goes to the portal (it also goes after each welcome). */
 const BENCH_HOURS_MS = 60 * 60_000;
+/** How often the sandboxes' local test-run records go to the portal's per-test history (w4922). */
+const TEST_HISTORY_MS = 60_000;
 /** How often this Mac's own login's usage is polled until the portal says (usage_config: config usagePollMinutes). */
 const USAGE_DEFAULT_MINUTES = 15;
 // Never a Claude OAuth token in the daemon log (the launch spec carries the host's, server/secrets.ts).
@@ -411,6 +414,8 @@ export class Daemon {
   private maxTail?: FileTail;
   /** The machine's sandboxes (machine/sandboxes.ts): worktrees of the clone with their own editors. */
   readonly pool: SandboxPool;
+  /** Each sandbox's local test runs, sent to the portal's per-test history (w4922, machine/testHistorySpool.ts). */
+  private readonly testHistory: TestHistorySpool;
   /** Every Unity editor on the machine against max_unity, and the queue for launches (machine/unitySlots.ts, w469). */
   readonly slots: UnitySlots;
   /** Ends a sandbox's orphaned or hung batch build, which would hold its Unity slot for hours (machine/unityReaper.ts, w791). */
@@ -778,6 +783,15 @@ export class Daemon {
       },
       pd,
     );
+    this.testHistory = new TestHistorySpool({
+      places: () => this.pool.list().map((sb) => ({ id: sb.id, path: sb.path })),
+      send: (msg) => {
+        if (this.ws?.readyState !== WebSocket.OPEN) return false;
+        this.send(msg);
+        return true;
+      },
+      log,
+    });
     this.makeSession = makeSession ?? ((info, sink, options, events) => new AgentSession(info, sink, options, events));
     this.hosted = cfg.agentHosts ?? !makeSession;
     if (cfg.voice?.enabled) {
@@ -1342,6 +1356,16 @@ export class Daemon {
     this.timers.push(setInterval(() => void this.selfUpdate.tick().catch((e) => log(`update job report: ${(e as Error).message}`)), 10_000));
     this.timers.push(setInterval(() => void this.reportStats(), STATS_MS));
     this.timers.push(setInterval(() => void this.reportBenchHours(), BENCH_HOURS_MS));
+    this.timers.push(
+      setInterval(() => {
+        if (this.ws?.readyState !== WebSocket.OPEN) return;
+        try {
+          this.testHistory.tick();
+        } catch (e) {
+          log(`test history: ${(e as Error).message}`);
+        }
+      }, TEST_HISTORY_MS),
+    );
     // A stopped worker's temp folder (w913): swept a few minutes after its process ended, its clones after six hours.
     this.timers.push(setInterval(() => void this.sweeper.tick().catch((e) => log(`session sweep failed: ${(e as Error).message}`)), 30_000));
     // Clean-up: every minute it looks whether a pass is due (every everyMinutes, sooner below softFreeGB).
@@ -2981,6 +3005,9 @@ export class Daemon {
             log(`person play: could not keep its settings: ${(e as Error).message}`);
           }
         }
+        return;
+      case 'test_history_ack':
+        this.testHistory.ack(msg.sandbox, msg.file, msg.ok, msg.error);
         return;
       case 'cleanup_now':
         void this.cleaner.run('asked', { dryRun: !!msg.dryRun }).then(
