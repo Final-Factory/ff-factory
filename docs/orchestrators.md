@@ -1655,8 +1655,20 @@ first by their last DONE (`last`, default 50, at most 300; `until` for an earlie
   (`gapCauseOf`: blocked_on `ci:` or merge_on_green, a person, a pair or hand-off report, a check-in, a pause, else no
   marker). Workers that overlap count once, under the busiest label (`sweep`). A shell `until`/`sleep` loop counts as
   what it polls (a build log is build, a pair or lab lock is pair, test results are tests, `gh run`/`gh pr` is CI, else
-  a wait), and the gap after the last turn keeps its label for `TAIL_MS` (2 minutes) only: the rest, until the close was
+  a wait), and the gap after the last turn keeps its label for `TAIL_MS` (2 hours) only: the rest, until the close was
   recorded, is `tail` (w4277 and w4296 closed 46 h after ffu #824 merged, which read as CI time).
+- w4927: a hand-off with no tool still has a cause. A gap whose turn ended on the request's own `wNNN: still open: ...`
+  line takes what that line names (`stillOpenCauseOf`: CI, a queue, a gate or an offline machine, a person, a check-in).
+  Over the transcripts lies the ledger's own state between turns (`ledgerSpans`): a `[needs you]` or an `ask_person`
+  let through is a person; its workers' and the orchestration worker's still-open lines (on the log, and in its findings
+  when the 40-line log has dropped them) name theirs; a dispatcher `blocked on` is blocked; `queued for capacity` and
+  `taken off worker` are `queued`; a `stalled by the ledger cleanup` with nothing pending is `stalled` and keeps a pending
+  wait; a worker's report, a dispatch, an `unblocked` or the close ends it, a note does not (w4698's "already on Ben's
+  Waiting tab" note was its orchestrator's). The ledger outranks only no marker, `tail` and uncovered time. Log lines are
+  dated by the request's own timestamps (`datedLog` with `anchorsOf`: notes, reports, DONEs, links, PRs, the close), not
+  by a forward walk alone, which put w4285's 2026-11-20 lines on 11-16. A turn a background notice opened (no user event)
+  closes the gap before it, and a transcript that ends mid-turn is `preempt` for `TAIL_MS`, then `tail`.
+  Known limit: a session that held several requests counts its turns for the others as thinking time on each.
 
 It reads closed requests, which `read_work` does not, so it needs both grants; it reads the transcripts on the portal
 (`Store.scanTranscript`, cut down by `slimEvent`) and the answer is masked (`redactSecrets`). Run it again over the next

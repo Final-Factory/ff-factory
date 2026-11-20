@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { datedLog, gapCauseOf, pickFinished, sessionSpans, sweep, TAIL_MS, timeRequest, toolCauseOf, waitBreakdown, waitCauseOf, workTiming } from './workTiming.ts';
+import { datedLog, gapCauseOf, stillOpenCauseOf, pickFinished, sessionSpans, sweep, TAIL_MS, timeRequest, toolCauseOf, waitBreakdown, waitCauseOf, workTiming } from './workTiming.ts';
 import type { Requester, SessionInfo, TranscriptEvent, WorkItem } from '../shared/types.ts';
 
 /** work_timing (w4531, server/workTiming.ts): where a finished request's wall time went, in two parts. */
@@ -153,4 +153,157 @@ test('a shell wait loop takes what it polls; the gap after the last turn keeps i
   const evs = [user(0, 'w1'), use(1, 'a', 'mcp__machine__blocked_on', { prs: ['ci:o/r#1'] }), res(1, 'a'), result(2)];
   const out = sweep(sessionSpans(evs, T0, T0 + 600 * MIN), T0, T0 + 600 * MIN);
   assert.deepEqual(out, { think: 2 * MIN, gap_ci: TAIL_MS, tail: 598 * MIN - TAIL_MS });
+});
+
+// w4927: the spans r341 (w4921) found with no cause, rebuilt from the ledger and the transcripts of w4698, w4285 and w4517.
+const iso = (s: string) => `${s}:00.000Z`;
+const evAt = (t: string, e: Record<string, unknown>) => ({ seq: seq++, t: iso(t), ...e }) as TranscriptEvent;
+const done = (t: string, text: string) => evAt(t, { kind: 'result', ok: true, text, costUsd: 0, turns: 1, durationMs: 0 });
+const ask = (t: string, text: string) => evAt(t, { kind: 'user', text, from: 'orchestrator' });
+const H = 60 * MIN;
+const ymdhm = (t: number) => new Date(t).toISOString().slice(0, 16);
+
+test("log lines after silent days take their dates from the request's own timestamps", () => {
+  const lines = [
+    '11:24 filed by FF Factory for ben at low priority',
+    '12:22 worker 22f57c94: w4698: still open: waiting on Ben to decide how ships at y 40 should treat the gate',
+    '04:13 ben: note: Ben answered (2026-11-20): leave it',
+    '04:15 closed as done: worker 22f57c94 said DONE: w4698',
+  ];
+  // the forward walk alone puts the 11-20 lines on 11-19
+  assert.deepEqual(datedLog(lines, iso('2026-11-18T11:24')).map((l) => ymdhm(l.t)).slice(2), ['2026-11-19T04:13', '2026-11-19T04:15']);
+  const anchors = ['2026-11-18T11:24', '2026-11-18T12:22', '2026-11-20T04:13', '2026-11-20T04:15'].map((s) => Date.parse(iso(s)));
+  assert.deepEqual(datedLog(lines, iso('2026-11-18T11:24'), anchors).map((l) => ymdhm(l.t)), ['2026-11-18T11:24', '2026-11-18T12:22', '2026-11-20T04:13', '2026-11-20T04:15']);
+  // an unpinned line between two pins days apart sits beside the nearer one: the widest gap is the silent one
+  const two = datedLog(
+    ['16:03 the orchestration worker: w4517: still open: offline', '04:17 ask_person to lothsahn let through', '06:11 lothsahn: note: move it'],
+    iso('2026-11-17T07:30'),
+    [iso('2026-11-18T16:03'), iso('2026-11-20T06:11')].map(Date.parse),
+  );
+  assert.deepEqual(two.map((l) => ymdhm(l.t)), ['2026-11-18T16:03', '2026-11-20T04:17', '2026-11-20T06:11']);
+});
+
+test('a still-open line names what the request waits for', () => {
+  assert.equal(stillOpenCauseOf('waiting on Ben to decide how fleet ships at y 40 should treat the pillars'), 'person');
+  assert.equal(stillOpenCauseOf('waiting on lothsahn to pick a layout'), 'person');
+  assert.equal(stillOpenCauseOf('blocked on CI on #3889'), 'gap_ci');
+  assert.equal(stillOpenCauseOf('LothLaptop is offline; its update waits on timer t-f5fd52b4'), 'blocked');
+  assert.equal(stillOpenCauseOf('blocked on w4622 reporting'), 'blocked');
+  assert.equal(stillOpenCauseOf('queued for capacity on m5'), 'queued');
+  assert.equal(stillOpenCauseOf('a check-in at 05:00 reads the build'), 'checkin');
+  assert.equal(stillOpenCauseOf('the second half of the panel is next'), undefined);
+  assert.equal(gapCauseOf([], 'Done with w4284.\n\nw4285 (pick a name): still open: waiting on Ben to pick one of the three', 'w4285'), 'person');
+  assert.equal(gapCauseOf([], 'w4285: still open: waiting on Ben to pick', 'w4284'), 'idle', "another request's line is not this one's");
+});
+
+test('w4698: a worker that ended on "still open: waiting on Ben" with no tool is waiting on a person, not idle', () => {
+  const w = item('w4698', {
+    createdAt: iso('2026-11-18T11:24'),
+    updatedAt: iso('2026-11-20T04:15'),
+    sessionIds: ['s1'],
+    done: { s1: { at: iso('2026-11-20T04:15'), report: 'DONE: w4698' } },
+    notes: [
+      { at: iso('2026-11-18T12:22'), by: 'ben', text: "Already on Ben's Waiting tab. His answer will come on that card." },
+      { at: iso('2026-11-20T04:13'), by: 'ben', text: "Ben's answer: leave it" },
+    ],
+    findings: [{ at: iso('2026-11-18T12:22'), by: 's1', text: 'Nothing left to release.\n\nw4698: still open: waiting on Ben to decide how ships should treat the pillars' }],
+    log: [
+      '11:24 filed by FF Factory for ben at low priority',
+      '11:44 dispatcher: started worker s1 "w4698: ..." in m5/slot3',
+      '12:22 worker s1: w4698: still open: waiting on Ben to decide how ships at y 40 should treat the pillars',
+      "12:22 [needs you] sent to ben's orchestrator: w4698: still open: waiting on Ben to decide",
+      "12:22 ben: note: Already on Ben's Waiting tab. (not in a turn of theirs)",
+      "04:13 ben: note: Ben's answer (2026-11-20): leave it",
+      '04:15 worker s1: w4698 is finished.',
+      '04:15 closed as done: worker s1 said DONE: w4698',
+    ],
+  });
+  const events = new Map([['s1', [
+    ask('2026-11-18T11:44', 'w4698: fleet vs gate'),
+    done('2026-11-18T12:22', 'w4698: still open: waiting on Ben to decide'),
+    ask('2026-11-20T04:13', 'Ben answered: leave it'),
+    done('2026-11-20T04:15', 'DONE: w4698'),
+  ]]]);
+  const r = timeRequest(w, events, 0)!;
+  assert.equal(r.work.person, Date.parse(iso('2026-11-20T04:13')) - Date.parse(iso('2026-11-18T12:22')));
+  assert.equal((r.work.idle ?? 0) + (r.work.tail ?? 0) + (r.work.none ?? 0), 0);
+});
+
+test("w4285: a shared worker's still-open line, a [needs you] and a stall keep a person wait across four silent days", () => {
+  const w = item('w4285', {
+    createdAt: iso('2026-11-15T04:30'),
+    updatedAt: iso('2026-11-20T04:00'),
+    sessionIds: ['ce5e021a'],
+    done: { ce5e021a: { at: iso('2026-11-20T04:00'), report: 'DONE: w4285' } },
+    notes: [{ at: iso('2026-11-20T03:47'), by: 'lothsahn', text: 'the second one' }],
+    log: [
+      '04:30 filed for lothsahn',
+      '04:31 dispatcher: sent to worker ce5e021a "w4285: ..." in lothdesktop/slot2',
+      "05:10 [needs you] sent to lothsahn's orchestrator: w4285: pick one of the three names",
+      '11:42 stalled by the ledger cleanup: no worker turn for 3 h',
+      '03:42 ask_person to lothsahn let through: which name?',
+      '03:47 lothsahn: note: the second one',
+      '03:47 dispatcher: sent to worker ce5e021a "w4285: ..."',
+      '04:00 closed as done: worker ce5e021a said DONE: w4285',
+    ],
+  });
+  const events = new Map([['ce5e021a', [
+    ask('2026-11-15T04:31', 'w4285: name it'),
+    evAt('2026-11-15T05:10', { kind: 'tool_use', toolUseId: 'p', name: 'mcp__machine__waiting_on_person', input: {} }),
+    evAt('2026-11-15T05:10', { kind: 'tool_result', toolUseId: 'p', isError: false, text: '' }),
+    done('2026-11-15T05:11', 'w4285: still open: waiting on Lothsahn to pick'),
+    // its turns for w4284, the request it also held, end on w4285's line with no hand-off tool
+    ask('2026-11-15T07:30', 'w4284: next leg'),
+    done('2026-11-15T08:02', 'DONE: w4284\n\nw4285 (names): still open: waiting on Lothsahn to pick one'),
+    ask('2026-11-20T03:47', 'Lothsahn answered w4285'),
+    done('2026-11-20T04:00', 'DONE: w4285'),
+  ]]]);
+  const r = timeRequest(w, events, 0)!;
+  const total = r.closed - r.start;
+  assert.ok((r.work.person ?? 0) > total - 2 * H, `person ${(r.work.person ?? 0) / H} h of ${total / H} h`);
+  assert.equal((r.work.idle ?? 0) + (r.work.tail ?? 0) + (r.work.stalled ?? 0) + (r.work.none ?? 0), 0);
+});
+
+test('w4517: an offline machine, a move and a queue between turns are blocked and queued, from the log and the reports', () => {
+  const w = item('w4517', {
+    createdAt: iso('2026-11-17T07:30'),
+    updatedAt: iso('2026-11-20T06:14'),
+    sessionIds: ['b451589a'],
+    done: { b451589a: { at: iso('2026-11-20T06:14'), report: 'DONE: w4517' } },
+    notes: [{ at: iso('2026-11-20T06:11'), by: 'lothsahn', text: 'move it somewhere else' }],
+    findings: [
+      { at: iso('2026-11-17T07:35'), by: 'b451589a', text: 'PR #994 is up.\n\nw4517: still open: LothLaptop is offline; its step waits for it to come back online' },
+      { at: iso('2026-11-18T16:03'), by: 'ops-worker', text: 'LothLaptop is still offline.' },
+    ],
+    log: [
+      '03:18 taken off worker b451589a: moved: it moves to m5',
+      '03:19 dispatcher: blocked on lothlaptop coming back online',
+      '04:31 unblocked: lothlaptop coming back online cleared',
+      '06:05 dispatcher: queued for capacity on lothlaptop',
+      '16:03 the orchestration worker: w4517: still open: LothLaptop is offline; the rollout waits until it is back online.',
+      '06:11 lothsahn: note: move it somewhere else',
+      '06:11 dispatcher: sent to worker b451589a "w4517: ..." in lothdesktop/slot2',
+      '06:14 closed as done: worker b451589a said DONE: w4517',
+    ],
+  });
+  const events = new Map([['b451589a', [
+    ask('2026-11-17T07:31', 'w4517: roll it out'),
+    done('2026-11-17T07:35', 'PR #994 is up.'),
+    ask('2026-11-20T06:11', 'w4517: lothsahn says move it'),
+    done('2026-11-20T06:14', 'DONE: w4517'),
+  ]]]);
+  const r = timeRequest(w, events, 0)!;
+  const d = (a: string, b: string) => Date.parse(iso(b)) - Date.parse(iso(a));
+  assert.equal(r.work.blocked, d('2026-11-17T07:35', '2026-11-18T03:18') + d('2026-11-18T03:19', '2026-11-18T04:31') + d('2026-11-18T16:03', '2026-11-20T06:11'));
+  assert.equal(r.work.queued, MIN + d('2026-11-18T06:05', '2026-11-18T16:03'));
+  // between the unblock and the queue nothing was pending: the worker's gap with no marker
+  assert.equal(r.work.idle, d('2026-11-18T04:31', '2026-11-18T06:05'));
+});
+
+test('a turn opened without a user event closes the gap; a transcript that ends mid-turn is a stopped process, not uncovered', () => {
+  const end = T0 + 600 * MIN;
+  const a = sessionSpans([user(0, 'go'), result(10, 'still working'), ev(40, { kind: 'assistant', text: 'the background build finished' }), result(50)], T0, end);
+  assert.deepEqual(sweep(a, T0, end), { think: 20 * MIN, idle: 30 * MIN + TAIL_MS, tail: 550 * MIN - TAIL_MS });
+  const b = sessionSpans([user(0, 'go'), use(5, 'x', 'Read'), res(6, 'x')], T0, end);
+  assert.deepEqual(sweep(b, T0, end), { think: 6 * MIN, preempt: TAIL_MS, tail: 594 * MIN - TAIL_MS });
 });
