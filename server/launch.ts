@@ -310,6 +310,11 @@ export const CATALOG = {
     files: z.array(z.string()).min(1).describe('Paths of the stills, clips and notes on this computer (absolute, or relative to your working folder).'),
     note: z.string().optional().describe('A few lines for the reviewer: what each file shows. Saved beside them as note.md.'),
   },
+  /** docs/review.md, "Getting review files back" (w4926). The portal makes each an attachment for this machine; the daemon fetches them. */
+  fetch_review: {
+    files: z.array(z.string().max(1000)).max(40).optional().describe('Review files by the paths publish_review answered (on the portal\'s computer), or relative to the review folder, e.g. "w4877-clips/swallow.mp4".'),
+    topic: z.string().max(200).optional().describe('Instead of files: every file of this review topic, e.g. "w4877-black-hole-swallow-pr4011".'),
+  },
   /** docs/attachments.md. On a machine the daemon answers it itself: the portal gives the record, the daemon fetches the file. */
   fetch_attachment: {
     id: z.string().describe('The attachment id, e.g. "att_k2m9x0q7p3a1" (from an [attachments] list).'),

@@ -63,6 +63,17 @@ A file in the review folder can go on to a worker as an attachment: an orchestra
 `attach_review_file` with its path and passes the id it answers with `attachments: [id]`
 ([attachments.md](attachments.md#agents-files)).
 
+## Getting review files back
+
+publish_review answers paths on the portal's computer, which do not exist on a worker's machine (w4877: a worker on
+biscuit could not open its own clips under the review root). `fetch_review` (w4926, `server/reviewFetch.ts`) gets that
+worker a copy: `files` (the paths as publish_review answered them, or relative to the review folder, either separator)
+or `topic` (every published file of it, not dot files), at most 40 a call. The portal refuses anything outside the root
+and the root's `.uploads`, makes each file an attachment (`AttachmentStore.addFile`) granted to that machine only, and
+the daemon (`machine/daemon.ts`, `all.fetch_review`) fetches each with `fetchAttachment` into the session's `Inbox/`,
+SHA-256 checked, the same link `fetch_attachment` uses. No share, ssh or new route. A worker's report still names the
+review-folder paths, not its copies.
+
 ## Web previews of videos
 
 **TL;DR:** the chat plays a small copy of each review video, and a **Full quality** link opens the original (w1248, Ben:
