@@ -335,7 +335,15 @@ export function gapCauseOf(turnTools: readonly { name: string; input: unknown }[
   if (/: paused:|interrupted|pre-?empt/i.test(resultText)) return 'preempt';
   const still = stillOpenOf(resultText, id);
   if (still === undefined && id && !idWord(id).test(resultText) && /\bw\d+\b[^\n]*still open:|\bDONE: w\d+/i.test(resultText)) return undefined;
+  // w4927: w4298's worker ended on "w4298 (...) is paused, because FFU has no fleet panel ...; I handed up a request to build
+  // one" with no still-open line for it, which read as idle and then 46 h of past TAIL: it waits on that other request
+  if (still === undefined && id && pausedFor(resultText, id)) return 'blocked';
   return (still !== undefined && stillOpenCauseOf(still)) || 'idle';
+}
+
+/** A sentence of the result that names the request and says it is paused, set aside or handed up to another request. */
+export function pausedFor(text: string, id: string): boolean {
+  return text.split(/(?<=[.!?])\s+|\n/).some((s) => idWord(id).test(s) && /\b(is|stays|left|set) (paused|aside|on hold)\b|\bhanded (it |that |this )?up\b|\bhand(ed)?[- ]up (a |the )?(request|follow-?up)/i.test(s));
 }
 
 /** What one ledger log line does to the request's state between turns (ledgerSpans). */

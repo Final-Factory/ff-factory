@@ -1688,7 +1688,10 @@ first by their last DONE (`last`, default 50, at most 300; `until` for an earlie
   w4423 showed 46h31 and 31h13 of `tail` that was a wait on Ben. A turn of a shared worker that hands off only other
   requests (a hand-off tool whose `request` is another id, or a result whose still-open or DONE lines name only others)
   leaves this request's last cause unchanged (`gapCauseOf` answers undefined): w4298's worker 53abc3d5 ended on
-  "w4274: still open: blocked on CI", which faded w4298's own "blocked on PR ffu#819" into `tail`.
+  "w4274: still open: blocked on CI", which faded w4298's own "blocked on PR ffu#819" into `tail`. A result sentence
+  that names the request as paused, set aside or handed up, with no still-open line for it, reads as `blocked`
+  (`pausedFor`): the 46h31 itself came from 53abc3d5's "w4298 (...) is paused, because FFU has no fleet panel ...; I
+  handed up a request to build one", which read as `idle`.
   Known limit: a session that held several requests counts its turns for the others as thinking time on each.
 
 It reads closed requests, which `read_work` does not, so it needs both grants; it reads the transcripts on the portal
