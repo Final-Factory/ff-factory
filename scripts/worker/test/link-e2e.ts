@@ -162,7 +162,9 @@ try {
   const c0 = connects();
   const rs = await link('restart');
   check(rs.ok, 'a restart over the link is answered', rs.error ?? '');
-  check(await waitFor('a new connection', async () => connects() > c0 && (await linkState()).online), 'the supervisor started the daemon again and it is back online');
+  // canLink, not only online (w4926): an unload sent between the reconnect and the daemon's hello was refused ("does not
+  // take a uninstall over its link") on a slow macOS runner, run 44784287853.
+  check(await waitFor('a new connection', async () => connects() > c0 && (await linkState()).canLink), 'the supervisor started the daemon again and it is back online, offering updates over its link');
 
   // 5. An unload over the link.
   const un = await link('uninstall');

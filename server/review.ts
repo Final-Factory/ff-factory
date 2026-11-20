@@ -328,6 +328,6 @@ export function publishedText(host: string, files: { path: string; size: number;
     `Published ${files.length} file(s) on ${host}:`,
     ...lines,
     ...(note ? [`- ${note} (the note)`] : []),
-    `Put these paths in your report as they are${image ? `; an image shows inline as ![what it shows](${image.path})` : ''}. They are on ${host}, not on this computer.`,
+    `Put these paths in your report as they are${image ? `; an image shows inline as ![what it shows](${image.path})` : ''}. They are on ${host}, not on this computer: fetch_review gets you a copy here (w4926).`,
   ].join('\n');
 }
