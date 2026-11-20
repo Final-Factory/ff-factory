@@ -48,7 +48,7 @@ import { listImages, MEDIA_TYPE, openVideo, parseRange, readImage, VIDEO_FILE } 
 import { VideoPreviews } from './videoPreview.ts';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { keepMessageImages } from './inlineImages.ts';
-import { AttachmentError, AttachmentStore, downloadDisposition, machineAttachment, machineUploadHttp, publicRef } from './attachments.ts';
+import { AttachmentError, AttachmentStore, downloadDisposition, machineAttachment, machineUploadHttp, pairPlayerIds, publicRef } from './attachments.ts';
 import { TimedRuns } from './timedRuns.ts';
 import { LabFixtures } from './labFixtures.ts';
 import { BenchHoursStore } from './benchHoursStore.ts';
@@ -633,7 +633,8 @@ agents.review = review;
 const reports = new ReportStore(cfg.dataDir, () => [review.root]);
 agents.reports = reports;
 agents.onReport = (report) => broadcast({ type: 'report', report });
-attachments.keep = () => reports.attachmentIds();
+// w4613: and the packed players open pair runs name, kept while the run waits for room (w4622).
+attachments.keep = () => [...reports.attachmentIds(), ...pairPlayerIds(store.work.values(), isOpen)];
 
 /** The signed-in person making this request, as work records them (a route only runs for a signed-in user). */
 function requesterOf(req: http.IncomingMessage) {

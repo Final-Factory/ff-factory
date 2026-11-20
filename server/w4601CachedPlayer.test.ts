@@ -62,6 +62,16 @@ test('w4601: a pair leg goes on the computer whose player cache holds the commit
   assert.deepEqual(pairRoom(item({ legs: 2, commit: SHA }), ['m3', 'beast', 'lothdesktop'], FIT).pick, ['m3', 'lothdesktop']);
 });
 
+test('w4613 (w4622): with a published player, a computer of its OS comes after a cache hit, so the leg fetches instead of building', () => {
+  const player = { id: 'att_9l7wtia4s4kf', key: `${OTHER}-win`, os: 'win' as const, size: 721_897_932 };
+  // w4622: one leg, biscuit (Linux) first in placement's order, and a Windows player: beast takes it.
+  assert.deepEqual(pairRoom(item({ legs: 1, commit: OTHER, player }), ['biscuit', 'beast'], { ...FIT, biscuit: { platform: 'linux' } }).pick, ['beast']);
+  // A cache hit still comes first, then the player's OS, then the rest in order.
+  assert.deepEqual(pairRoom(item({ legs: 2, commit: OTHER, player }), ['biscuit', 'linux2', 'beast'], { ...FIT, linux2: { platform: 'linux' } }).pick, ['biscuit', 'beast']);
+  // Without a Windows computer with room, it still runs (that leg builds).
+  assert.deepEqual(pairRoom(item({ legs: 1, commit: OTHER, player }), ['m3'], { m3: { platform: 'darwin' } }).pick, ['m3']);
+});
+
 test('w4601: cachedPlayerOf names the entry and the player folder on the computer\'s own OS; a narrowed Burst build is no hit', () => {
   assert.deepEqual(cachedPlayerOf(SHA, FIT.lothdesktop), { entry: `V:\\ffw\\player-cache\\${SHA}-win`, player: `V:\\ffw\\player-cache\\${SHA}-win\\player` });
   assert.deepEqual(cachedPlayerOf(OTHER.slice(0, 7), FIT.biscuit), { entry: `/home/ff/ffw/player-cache/${OTHER}-linux`, player: `/home/ff/ffw/player-cache/${OTHER}-linux/player` });

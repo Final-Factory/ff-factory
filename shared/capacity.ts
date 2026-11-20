@@ -505,7 +505,11 @@ export function pairRoom(w: { pair?: WorkPair }, ids: readonly string[], fit: Re
   }
   // w4601: computers whose player cache holds the pair's commit for their OS come first (a stable sort, so placement's own
   // order rules among the rest): a leg there skips its 3 to 23 min build (w4596's timelines of 12 pair runs).
-  if (p.commit) ids = [...ids].sort((a, b) => Number(!cachedPlayerOf(p.commit, fit?.[a])) - Number(!cachedPlayerOf(p.commit, fit?.[b])));
+  // w4613: next come computers of the published player's OS (request_pair player): a leg there fetches it instead of building.
+  if (p.commit || p.player) {
+    const rank = (id: string) => (cachedPlayerOf(p.commit, fit?.[id]) ? 0 : p.player && fit?.[id]?.platform && CACHE_TARGET[fit[id]!.platform!] === p.player.os ? 1 : 2);
+    ids = [...ids].sort((a, b) => rank(a) - rank(b));
+  }
   const os = (id: string) => fit?.[id]?.platform;
   const macs = ids.filter((id) => os(id) === 'darwin');
   const rest = ids.filter((id) => os(id) !== 'darwin');
