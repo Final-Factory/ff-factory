@@ -2637,6 +2637,12 @@ export interface WorkItem {
    */
   timedMark?: { timed: boolean; at: string; by: string; note: string };
   /**
+   * w4868: whether its work draws a window, said outright (decide_work window true or false): needsWindow then reads no words
+   * for it. true: it goes only on a computer whose screen is unlocked (a capture, a screenshot, play mode, the FFU client's
+   * window); false: it runs headless (batchmode, EditMode tests, an offscreen render), so a locked screen takes it.
+   */
+  windowMark?: { window: boolean; at: string; by: string; note: string };
+  /**
    * Its last hand-back (w1532, server/machinePause.ts): its worker's machine was paused, so it was taken off that worker and
    * Queued for another computer, whose worker picks it up from `branch` with `note` (the worker's own line, or where it
    * stopped) and the `message` that would have resumed it, in its handover.

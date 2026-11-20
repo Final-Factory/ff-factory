@@ -10,6 +10,7 @@ import { GitFacts } from './Git';
 import { DetailsSection, DetailsSheet, PanelHeader, useDetailsOpen } from './PanelChrome';
 import { Chip, Confirm, CopyButton, Icon, Modal, StateText } from './ui';
 import { currentProduct } from '../brand';
+import { PAUSED_STATE } from '../../../shared/availability.ts';
 
 const midTurn = (status: string) => status === 'running' || status === 'starting' || status === 'waiting_permission';
 
@@ -174,7 +175,7 @@ export function MachinePanel({ app, machine: m, onClose }: { app: AppState; mach
           {/* Its owner's pause (w1532): from its tray app, its schedule or a person's input; a paused machine takes no work. */}
           {m.pause && (
             <div className="unity-bar" data-testid="machine-pause">
-              <Chip tone={m.pause.paused ? 'amber' : 'green'}>{m.pause.paused ? 'Paused' : 'Taking work'}</Chip>
+              <Chip tone={m.pause.paused ? 'amber' : 'green'}>{m.pause.paused ? PAUSED_STATE : 'Taking work'}</Chip>
               <span className="dim small ellipsis" title={m.pause.tray ? `tray app: ${m.pause.tray}` : undefined}>
                 {m.pause.detail}
                 {m.pause.paused ? ': no new work goes there, and its workers hand their requests back' : ''}

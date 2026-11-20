@@ -54,3 +54,68 @@ export const MENUS_NONE = 'none: its legs click no menus, as its filer said (req
 
 /** Whether a pair run's legs click the game's menus: every pair that needs Steam (its lobby is a menu), or one marked so. */
 export const pairDrivesMenus = (p: Pick<WorkPair, 'steam' | 'menus'> | undefined): boolean => !!(p?.steam || p?.menus);
+
+/**
+ * Work that needs a drawn window (w4868, lothsahn, 2026-11-20: "There's no way to unlock the m3's screen, as Ben is out on
+ * vacation. Only run work on m3 it can do with the screen locked"). w4847, an FFU capture check, was started on the locked m3
+ * and its worker asked Ben to log in. Measured on the locked m3 (macOS 26.6.2, 2026-11-20): an MTKView window got 0 draw
+ * callbacks in 6 s and was never visible, `screencapture -l` of it failed and a full-screen `screencapture` was all black,
+ * and the FFU client's window "presented 0 frames in 30 s and 1546 were refused" (w4847); an offscreen Metal render and a
+ * batchmode EditMode test run there work. Windows, sourced: a locked session's screen capture fails or is black and
+ * injected input goes nowhere (docs/machines.md, "Work that draws a window").
+ */
+const WINDOW_WORDS = [
+  /\bscreen\s?shots?\b/i,
+  /\bscreen\s?captures?\b/i,
+  /\bcapture\s+(?:checks?|legs?|runs?)\b/i,
+  /\bmetal\s+(?:captures?|window|legs?)\b/i,
+  /\bplay\s?mode\b(?!\s*tests?)/i,
+  /\bgame\s+view\b/i,
+  /\blive\s+view\b/i,
+  /\bplay\s?test(?:s|ing)?\b/i,
+  /\b(?:record(?:s|ing)?|60\s?fps)\s+(?:an?\s+|the\s+)?(?:clips?|videos?)\b/i,
+  /\b(?:draws?|drawn|drawing|present(?:s|ed|ing)?)\s+(?:an?\s+|the\s+|its\s+)?(?:window|frames?)\b/i,
+  /\bwindowed\s+(?:player|run|app|client)\b/i,
+  /\bui_(?:look|check)\b/i,
+];
+
+/** Whether words name work that draws a window, other than to rule it out ("headless, no screenshots"). */
+export const mentionsWindow = (...texts: (string | undefined)[]): boolean => texts.some((t) => !!t && WINDOW_WORDS.some((re) => affirmedMention(t, re)));
+
+/**
+ * Whether request `w` draws a window (w4868): decide_work window says it outright (WorkItem.windowMark), else its title,
+ * brief and people's notes (and `text`, a start prompt) name a capture, a screenshot, play mode, the Game view or a Live
+ * view, a playtest, a recorded clip or a drawn window. A pair run goes by its menus mark instead (pairDrivesMenus).
+ */
+export function needsWindow(w: { title?: string; brief?: string; notes?: readonly { text: string }[]; windowMark?: { window: boolean }; pair?: unknown } | undefined, text = ''): boolean {
+  if (w?.windowMark) return w.windowMark.window;
+  if (w?.pair) return false;
+  return mentionsWindow(w?.title, w?.brief, ...(w?.notes ?? []).map((n) => n.text), text);
+}
+
+/** "screen locked on m3": why work that draws a window does not go on computer `id` now, or undefined (desktopLacks). */
+export function windowLacks(id: string, d: DesktopSession | undefined): string | undefined {
+  if (d?.locked) return `screen locked on ${id}`;
+  if (d?.away) return `${id}'s console is another user's session`;
+  return undefined;
+}
+
+/** What a locked screen means, for refusals (w4868). */
+export const LOCKED_SCREEN_RULE = `lothsahn, 2026-11-20 (w4868): "Only run work on m3 it can do with the screen locked". A locked screen is never a person's ask: nothing draws there (a window gets no frames, a capture is black), and work that needs a window waits Queued for a computer whose screen is unlocked (list_machines: "screen")`;
+
+const LOCKED_SCREEN_WORDS = /\bscreens?\s+(?:is\s+|are\s+|stays?\s+|still\s+)*locked\b|\blocked\s+screens?\b|\block\s?screen\b|\bscreen\s+lock\b|CGSSessionScreenIsLocked|LogonUI|\bunlock(?:s|ed|ing)?\s+(?:the\s+|its\s+|their\s+|his\s+|her\s+)?(?:screen|display|desktop|session|console|mac|computer|pc|laptop)\b/i;
+
+/**
+ * Why a person's card asks them to unlock a screen or log in so a window can draw (w4868), or undefined. A FileVault
+ * unlock after a reboot (the computer is offline until then) still goes through.
+ */
+export function screenUnlockAskProblem(what: string | undefined, questions: readonly string[], who: 'worker' | 'dispatcher'): string | undefined {
+  const units = [what, ...questions].filter((u): u is string => !!u?.trim());
+  // An ask to unlock or log in at a computer counts too when the card names a window step ("unlock the m3 for the Metal leg").
+  const asksUnlock = units.some((u) => LOCKED_SCREEN_WORDS.test(u)) || (units.some((u) => /\bunlock(?:s|ed|ing)?\b|\blog\s?(?:in|on)\b/i.test(u)) && mentionsWindow(...units));
+  if (!asksUnlock || units.some((u) => /\bfilevault\b/i.test(u))) return undefined;
+  const head = `Nothing was recorded (${LOCKED_SCREEN_RULE}).`;
+  return who === 'worker'
+    ? `${head} Finish here what needs no window (batchmode builds and EditMode tests, an offscreen render, code). Hand the step that draws a window to a computer whose screen is unlocked: timed_place with machine naming one (list_machines shows each screen), request_pair, or hand_up_requests saying it draws a window. Then end your turn with your report and a line "wNNN: still open: screen locked on <computer>", or blocked_on the leg you filed.`
+    : `${head} Mark it decide_work window true and queue it (decide_work queue, needs naming computers whose screen is unlocked): it starts by itself on the first that frees; work that needs no window still goes to the locked computer.`;
+}

@@ -58,9 +58,10 @@ import { findingTargets, recordFinding } from './findings.ts';
 import { aheadText, queuedNeeds, answerAfter, asksAPerson, dispatcherAskIn, HAND_UP_AUTOFILE_MS, HAND_UP_RESEND_MS, handUpsPending, holdsOf, orchestratorAskIn, standingTargetOf, personWaitIn, questionShareKey, reportWaitKey, roomShares, servedBy, UNDECIDED_BOUND_MS, unfiledFollowUpsIn } from '../shared/workState.ts';
 import { capacityBlockProblem, capacityWaitIn, macRefusedScenario, MAC_REFUSES_SCENARIO, needsOf, needsTimed, pairComputersReason, pairRoom, pairText, PAIR_MAX_LEGS, resolveNeeds, steamShortIn } from '../shared/capacity.ts';
 import { mentionsSteam, saysNoSteam, STEAM_NONE, STEAM_READ } from '../shared/steam.ts';
-import { mentionsMenus, MENUS_NONE, MENUS_READ, saysNone } from '../shared/desktop.ts';
+import { mentionsMenus, MENUS_NONE, MENUS_READ, needsWindow, saysNone } from '../shared/desktop.ts';
 import type { HandBack } from './machinePause.ts';
 import { machinePinOf } from './machinePin.ts';
+import { needsAwayText } from '../shared/availability.ts';
 import { heldText, placeId, roomEnough, roomForWork, roomIds, roomStood, timedKindOf, unusableText, type RoomNow, type TimedFacts, type TimedKind } from './placement.ts';
 import { PLAYERS_IN_SANDBOX } from './cloneGuard.ts';
 import { TIMED_LEG_WAIT_MS, unavailableText, bigFallbackRules, type SmallState } from './timedAsk.ts';
@@ -384,6 +385,8 @@ export interface OrchestratorsDeps {
   personPlaying?: (id: string) => string | undefined;
   /** w2443: why a machine is paused from its tray (pauseWhy), or undefined while it runs. */
   machinePaused?: (id: string) => string | undefined;
+  /** Whether a computer takes no work now (shared/availability.ts): offline past the blip grace, or paused. Absent: all do. */
+  machineAway?: (id: string) => 'offline' | 'paused' | undefined;
   /**
    * w2959: whether a machine has been offline past FF Factory's blip grace (Agents.longAwayOf, timing.unavailableIdleMinutes),
    * not only for the seconds a daemon update or a reconnect takes. Undefined: offline counts at once (machineOnline).
@@ -3655,6 +3658,45 @@ It is for your part of the work, not an answer to another worker's question.`;
     return timed ? `${w.id} is timed work now (w3720): it goes by "Next timed work", never on a computer that takes no timed runs.` : `${w.id} is not timed work now (w3720), whatever its words say: it goes on any computer with room${was ? `, the m5 included (it read as timed${was === 'any' ? '' : ` on ${was}`} before)` : ''}.`;
   }
 
+  /**
+   * w4868: mark a request as drawing a window or running headless outright (decide_work window): needsWindow then reads no
+   * words for it. Work that draws one never goes on a computer whose screen is locked (unfitWhy, start_agent).
+   */
+  setWindowMark(w: WorkItem, window: boolean, by: string, note: string): string {
+    const was = needsWindow(w);
+    w.windowMark = { window, at: this.now().toISOString(), by, note: clip(note.trim(), 300) };
+    this.roomFlags.delete(w.id);
+    this.stamp(w, `${by}: ${window ? 'draws a window' : 'runs headless'}, said outright (w4868; it read as ${was ? 'drawing a window' : 'headless'}): ${clip(note.trim(), 200)}`);
+    this.store.putWork(w);
+    return window ? `${w.id} draws a window now (w4868): it never goes on a computer whose screen is locked, and waits Queued for one whose screen is unlocked.` : `${w.id} runs headless now (w4868), whatever its words say: a computer whose screen is locked takes it.`;
+  }
+
+  /**
+   * Pin `w` to the one computer it needs (decide_work pin): its setup, repair, update or clean-up, or the only computer with
+   * what it names (an OS, a GPU, a screen). Pinned work goes there or waits for it, Blocked while that computer is offline or
+   * paused; nothing else waits on an unavailable computer. "none" lifts the pin.
+   */
+  setPin(w: WorkItem, machine: string, note: string): string {
+    const m = placeId(machine);
+    if (m === 'none' || m === '') {
+      if (!w.machinePin) return `${w.id} was pinned nowhere.`;
+      w.machinePin = undefined;
+      w.awayKept = undefined;
+      this.stamp(w, `dispatcher: pin lifted: ${clip(note.trim(), 200)}`);
+      this.store.putWork(w);
+      return `${w.id} is pinned nowhere now: it goes on any computer that fits.`;
+    }
+    if (!this.machineIds().map(placeId).includes(m)) throw new Error(`pin: ${machine} is no computer FF Factory knows (${this.machineIds().join(', ')})`);
+    if (!note.trim()) throw new Error('pin needs a note: why the work needs exactly that computer');
+    w.machinePin = { ids: [m], why: `the dispatcher: ${clip(note.trim(), 280)}` };
+    w.awayKept = undefined;
+    this.roomFlags.delete(w.id);
+    this.stamp(w, `pinned to ${m} by the dispatcher: ${clip(note.trim(), 200)}`);
+    this.store.putWork(w);
+    const away = this.d.machineAway?.(m);
+    return `${w.id} is pinned to ${m}: it runs there and nowhere else${away ? `, and waits Blocked (${needsAwayText(m, away)}) until it is back` : ''}.`;
+  }
+
   setReport(w: WorkItem, kind: ReportKind | false, by: string): string {
     if (kind !== false && !(REPORT_KINDS as readonly string[]).includes(kind)) throw new Error(`report: one of ${REPORT_KINDS.join(', ')}, or false`);
     if (kind === false) {
@@ -3997,7 +4039,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   }
 
   /** The dispatcher decides about a request (decide_work); the requesters' orchestrators get the reply. */
-  decide(input: { id: string; action?: Decision; note: string; into?: string; session_ids?: string[]; needs?: string[]; blocker?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>; blockers?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>[]; add_blocker?: boolean; drop_leg?: boolean; override_gate?: string; asks?: Ask[]; for?: string; pair_legs?: number; pair_menus?: string; pair_steam?: string; pair_split?: string; pair_allow?: string[]; report?: ReportKind | false; timed?: boolean }): string {
+  decide(input: { id: string; action?: Decision; note: string; into?: string; session_ids?: string[]; needs?: string[]; blocker?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>; blockers?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>[]; add_blocker?: boolean; drop_leg?: boolean; override_gate?: string; asks?: Ask[]; for?: string; pair_legs?: number; pair_menus?: string; pair_steam?: string; pair_split?: string; pair_allow?: string[]; report?: ReportKind | false; timed?: boolean; window?: boolean; pin?: string }): string {
     let keptBefore: WorkBlocker[] = [];
     const w = this.requireWork(input.id);
     if (w.approval?.state === 'pending') throw new Error(`${w.id} waits for a person to approve it (intake); it is not yours to decide yet`);
@@ -4012,6 +4054,17 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       // w4634: a refused decision leaves the mark as it was (w4592 was closed as done to clear this flag).
       const decided = this.decide({ ...input, timed: undefined });
       return `${this.setTimedMark(this.requireWork(input.id), input.timed, 'dispatcher', input.note)} ${decided}`.trim();
+    }
+    // w4868: whether it draws a window, said outright: needsWindow reads no words for it after this.
+    if (input.window !== undefined) {
+      const decided = this.decide({ ...input, window: undefined });
+      return `${this.setWindowMark(this.requireWork(input.id), input.window, 'dispatcher', input.note)} ${decided}`.trim();
+    }
+    // The one exception to "nothing on an unavailable computer": work that needs exactly that computer, said outright.
+    if (input.pin !== undefined) {
+      const pinned = this.setPin(this.requireWork(input.id), input.pin, input.note);
+      const decided = input.action ? this.decide({ ...input, pin: undefined }) : '';
+      return `${pinned} ${decided}`.trim();
     }
     const into = input.into ? this.requireWork(input.into) : undefined;
     // w3455: a Steam mark stored before #866 (w3431's "none: a direct (non-Steam) host ...", w3392's read from FF Factory's
@@ -4152,6 +4205,9 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
         if (off.length) throw new Error(`${w.id} must run on ${pin.ids.join(' or ')} only (w2521: ${pin.why}): queue it for ${pin.ids.join(' or ')}, not ${off.join(', ')}`);
         if (!needs.length) needs.push(...pin.ids);
       }
+      // Nothing is queued or planned on a computer that is offline or paused, except work pinned there.
+      const awayNeeds = needs.filter((n) => !pin?.ids.includes(n) && this.d.machineAway?.(n));
+      if (awayNeeds.length) throw new Error(`${awayNeeds.map((n) => `${n} is ${this.d.machineAway!(n) === 'paused' ? 'paused; unavailable' : 'offline'}`).join('; ')}: nothing is queued or planned on a computer that is offline or paused. Queue ${w.id} for computers that run${needs.length > awayNeeds.length ? ` (${needs.filter((n) => !awayNeeds.includes(n)).join(', ')})` : ', or with no needs'}. Only when it needs exactly ${awayNeeds.join(' or ')} (its setup, repair, update or clean-up, or the only computer with what it names), pin it there with decide_work pin and why in note: it then waits Blocked until that computer is back.`);
       // w1872: timed work never waits on a computer that takes no timed runs (m5), even when its worker asked for it by name.
       const noTimed = this.noTimedIn(w, needs);
       if (noTimed) throw new Error(noTimed);
@@ -6016,6 +6072,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   awayKeptNotice(w: WorkItem, m: string, line: string, pinWhy: string, worker?: string): boolean {
     if (w.awayKept?.machine === m) return false;
     w.awayKept = { machine: m, at: this.now().toISOString() };
+    if (!w.machinePin?.ids.includes(m)) w.machinePin = { ids: [m], why: pinWhy };
     this.stamp(w, `stays waiting for ${line}: it names ${m} (${clip(pinWhy, 160)}), so it is not moved (w2544); its orchestrator was told`);
     this.store.putWork(w);
     const move = worker ? `stop_agent its worker ${worker} with move_to (and pin_words with the person's words if they asked for the new computer)` : "start it elsewhere with start_agent (pin_words with the person's words naming the new computer)";
@@ -9023,7 +9080,8 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
 
   /** RoomNow as the live states read it (shared/workState.ts WorkLiveFacts), for roomShares (w1944). */
   private liveRoom(r: RoomNow) {
-    return { ...(this.d.heldFor ? { roomHeld: this.d.heldFor } : {}), room: r.game, agentRoom: r.agent, heldRoom: r.held, ...(r.reserved ? { reservedRoom: r.reserved } : {}), ...(r.fit ? { roomFit: r.fit } : {}), ...(r.slots ? { roomSlots: r.slots } : {}), now: this.now().getTime() };
+    const away = Object.fromEntries(this.machineIds().flatMap((id) => { const a = this.d.machineAway?.(placeId(id)); return a ? [[placeId(id), a] as const] : []; }));
+    return { ...(this.d.heldFor ? { roomHeld: this.d.heldFor } : {}), ...(Object.keys(away).length ? { away } : {}), room: r.game, agentRoom: r.agent, heldRoom: r.held, ...(r.reserved ? { reservedRoom: r.reserved } : {}), ...(r.fit ? { roomFit: r.fit } : {}), ...(r.slots ? { roomSlots: r.slots } : {}), now: this.now().getTime() };
   }
 
   /** When each request was last flagged Queued while a computer had room (at most once an hour each). */

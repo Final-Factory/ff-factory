@@ -1442,6 +1442,13 @@ orchestrator asks a person to bring a computer online, wake or unpause one, say 
 computer that is allowed. Work that no online computer fits now waits Queued and starts by itself on the first that comes
 online or frees up.
 
+- **Offline and paused computers**: nothing is placed, queued or planned on one, and what waits on one moves; only work
+  pinned there (`decide_work pin`) waits, Blocked "needs <computer>, which is offline/paused". A paused computer reads
+  `paused; unavailable` and counts as offline at once. The tools enforce it: [machines.md](machines.md), "Offline and
+  paused computers take no work".
+- **A locked screen** takes headless work only; work that draws a window goes where the screen is unlocked, and nobody is
+  asked to unlock one: [machines.md](machines.md), "Work that draws a window".
+
 - **Timed work**: `timed_place` always files the leg (`server/timedAsk.ts` `decideTimedPlace`): even from a computer that
   takes no timed runs (m5) with no small computer up, it is Queued for every computer that takes timed runs, smallest
   first, and `Orchestrators.timedLegBound` (w2055 `timedLegStep`) re-places it each pass: an idle computer first, then

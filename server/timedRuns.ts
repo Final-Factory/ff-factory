@@ -415,7 +415,7 @@ export class TimedRuns {
 
   /** Send a queued run to its machine when it is online and runs timed runs. */
   private dispatch(r: TimedRunRecord) {
-    if (r.state !== 'queued' || !r.order || !this.d.isOnline(r.machine) || !this.d.offers(r.machine)) return;
+    if (r.state !== 'queued' || !r.order || !this.d.isOnline(r.machine) || !this.d.offers(r.machine) || this.d.held?.(r.machine)) return;
     // w2411: a queued run waits for its computer whoever holds its request; it ends only when what it plays is gone
     const gone = this.goneFrom(r.order);
     if (gone) {
@@ -813,7 +813,7 @@ export class TimedRuns {
     const now = this.now();
     const all = this.windowsTargets();
     for (const t of all) {
-      if (t.online && t.offers) this.unavailableSince.delete(t.id);
+      if (t.online && t.offers && !t.held) this.unavailableSince.delete(t.id);
       else if (!this.unavailableSince.has(t.id)) {
         const seen = Date.parse(this.d.machines().find((m) => m.id === t.id)?.lastSeen ?? '');
         this.unavailableSince.set(t.id, !t.online && Number.isFinite(seen) ? seen : now);
@@ -824,10 +824,12 @@ export class TimedRuns {
     for (const r of this.runs.values()) {
       if (r.state !== 'queued' || !r.order) continue;
       const since = this.unavailableSince.get(r.machine);
-      if (since === undefined || now - since < wait.ms) continue;
+      // A paused (held) computer is as one offline whose return nobody knows: its runs move at once.
+      const held = all.find((t) => t.id === r.machine)?.held;
+      if (since === undefined || (!held && now - since < wait.ms)) continue;
       const to = all.find((t) => t.id !== r.machine && t.online && t.offers && !t.held);
       const from = r.machine;
-      const why = `${from} ${this.d.isOnline(from) ? 'connected but not running timed runs' : 'offline'} for ${Math.round((now - since) / 60_000)} min, past the wait of ${wait.why}`;
+      const why = held ? `${from} is paused; unavailable (${held})` : `${from} ${this.d.isOnline(from) ? 'connected but not running timed runs' : 'offline'} for ${Math.round((now - since) / 60_000)} min, past the wait of ${wait.why}`;
       if (!to) {
         // No other computer takes it: the worker may time it itself, on its big computer if need be (timed_place, w2048).
         if (r.toldStuck) continue;

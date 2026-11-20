@@ -36,24 +36,22 @@ export function awayOf(f: AwayFacts, now: number): Away | undefined {
     return since === undefined ? undefined : { kind: 'offline', since, ms: Math.max(0, now - since) };
   }
   if (f.pause?.paused) {
-    const since = Date.parse(f.pause.since ?? '') || f.fallbackSince;
-    return since === undefined ? undefined : { kind: 'paused', since, ms: Math.max(0, now - since) };
+    const since = Date.parse(f.pause.since ?? '') || f.fallbackSince || now;
+    return { kind: 'paused', since, ms: Math.max(0, now - since) };
   }
   return undefined;
 }
 
 /**
- * Whether it has been away past the grace: work waiting on it moves, and nothing new is placed there. A pause that ends by
- * itself within the grace (MachinePause.until) is a short wait, not an outage.
+ * Whether it is away for good: work waiting on it moves, and nothing new is placed there. A paused computer counts at once,
+ * as an offline one past the grace does: nobody knows when it comes back (its pause's own "until" included). An offline one
+ * counts once it has been gone past the grace, a daemon's blip.
  */
-export function longAway(a: Away | undefined, f: Pick<AwayFacts, 'pause'>, graceMs: number, now: number): a is Away {
-  if (!a || a.ms < graceMs) return false;
-  if (a.kind === 'paused' && f.pause?.until) {
-    const until = Date.parse(f.pause.until);
-    if (Number.isFinite(until) && until - now < graceMs) return false;
-  }
-  return true;
+export function longAway(a: Away | undefined, _f: Pick<AwayFacts, 'pause'>, graceMs: number, _now: number): a is Away {
+  if (!a) return false;
+  return a.kind === 'paused' || a.ms >= graceMs;
 }
+
 
 /** "lothlaptop (offline 6 min)", as the request's log and its moved worker read it. */
 export function awayLine(id: string, a: Away): string {

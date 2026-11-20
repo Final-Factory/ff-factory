@@ -8,7 +8,7 @@
 //
 // w1098 (lothsahn, 2026-10-12: "FFBox and FF Factory updates don't need unity editors"): work on a repository that is not
 // the game's needs only an agent slot, not a free game sandbox, an editor or RAM for Unity. needsOf says which a request is.
-import { desktopLacks, pairDrivesMenus, type DesktopSession } from './desktop.ts';
+import { desktopLacks, needsWindow, pairDrivesMenus, windowLacks, type DesktopSession } from './desktop.ts';
 import { steamAccountText, steamLacks, steamSignedIn, type SteamClient } from './steam.ts';
 import type { PairPlayer, PlayerCacheReport, WorkItem, WorkPair } from './types.ts';
 
@@ -430,7 +430,7 @@ export function cargoShortOf(freeBytes: number | undefined): string | undefined 
  * [WRONG: biscuit, m5 have room]" while the m5, a Mac that takes no timed runs, could never run them, and the capacity ping
  * listed them as fitting its room. Unknown facts fit: a computer whose platform nobody reported is not ruled out.
  */
-export function unfitWhy(w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes'> & Partial<Pick<WorkItem, 'timedBrief' | 'timedLeg' | 'repo'>> & { pair?: WorkPair }, id: string, fit: Readonly<Record<string, RoomFit>> | undefined, named?: readonly string[]): string | undefined {
+export function unfitWhy(w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes'> & Partial<Pick<WorkItem, 'timedBrief' | 'timedLeg' | 'repo' | 'windowMark'>> & { pair?: WorkPair }, id: string, fit: Readonly<Record<string, RoomFit>> | undefined, named?: readonly string[]): string | undefined {
   // w2041: a retry of a pair run never goes back to a computer an earlier leg failed on.
   if (w.pair?.avoid?.includes(id)) return `${id} is where an earlier leg of this pair run failed (${w.pair.retryOf ?? 'its first run'}): a retry goes on other computers (w2041)`;
   const f = fit?.[id];
@@ -449,6 +449,12 @@ export function unfitWhy(w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes'
   if (pairDrivesMenus(w.pair)) {
     const lacks = desktopLacks(id, f.desktop);
     if (lacks) return `${lacks}, and its pair run clicks the game's menus (${w.pair!.steam ? 'its Steam lobby' : w.pair!.menus}), which take no clicks there`;
+  }
+  // w4868: work that draws a window (a capture, a screenshot, play mode, the FFU client's window) never goes where the
+  // screen is locked: a window there draws no frames and a capture is black. Headless work still goes.
+  if (needsWindow(w)) {
+    const lacks = windowLacks(id, f.desktop);
+    if (lacks) return `${lacks}: its work draws a window, which gets no frames there (w4868); it goes on a computer whose screen is unlocked`;
   }
   // w2358: a timed leg (w1969) is timed work whatever its title says, as start_agent's timed hold reads it.
   const timed = needsTimed(w) || (w.pair?.timed || w.timedLeg ? (w.timedLeg?.platform === 'win32' || w.timedLeg?.platform === 'darwin' ? w.timedLeg.platform : 'any') : false);

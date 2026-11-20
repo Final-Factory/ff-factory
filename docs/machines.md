@@ -695,6 +695,51 @@ keep their requests and their shells run on.
   and `machines.personPlay.who` (a name), each with an optional `machine`; sent to the daemon with the bench priorities each
   minute. Tests: `server/personPlay.test.ts`.
 
+## Offline and paused computers take no work
+
+One rule, in `shared/availability.ts` and `server/machineAway.ts`, holds on every path that picks or plans a computer:
+dispatcher placement and `start_agent`, the `decide_work` queue, timed runs, pair legs, build plans, resumes and the
+Capacity block's "Next ..." lines.
+
+- **Unavailable** is a computer offline past the 5 min blip grace (`longAway`), or **paused**: its tray pause, its
+  activity pause, its schedule, or a person's `placement.hold`. A pause counts at once, whatever end it names: nobody
+  knows when a paused computer comes back. `list_machines` and the dashboard show a paused computer as
+  `paused; unavailable`, never online.
+- **Nothing is placed, queued or planned there.** `start_agent` refuses it (`awayProblem`), `decide_work queue` refuses
+  needs that name it, `startPairLegs` refuses a leg on it, `build_plan` passes over it for the next build computer, and
+  the timed-run queue sends nothing to it (`TimedRuns.dispatch`).
+- **What waits on it moves.** A Queued request's needs that name it are dropped (`unpinAwayNeeds`), a worker Blocked on
+  it and a message held for a worker there move to a computer with room (`moveAwayWork`, `roomMove`), and a timed run
+  queued for a paused computer goes at once to another that takes timed runs (`TimedRuns.retarget`; an offline one
+  waits out `timing.unavailable*Minutes` first).
+- **The one exception is work pinned there**: `WorkItem.machinePin`, set by `decide_work pin <computer>` with why in
+  note, by a person's words (`pin_words`) or by the request's own "must run on X". It is for work that needs exactly that
+  computer: its setup, repair, update or clean-up, or the only computer with what the work names. Pinned work runs
+  there and nowhere else, and while every computer it is pinned to is unavailable its state is **Blocked**, "needs
+  lothlaptop, which is paused: it is pinned there (...) and starts by itself when one is back" (`pinnedAway`,
+  `shared/workState.ts`). That wait is never a question to a person; `decide_work pin none` lifts the pin.
+
+Tests: `server/w4870AwayMachines.test.ts`, `server/w2544AwayMachines.test.ts`.
+
+## Work that draws a window
+
+A computer whose daemon reports its screen locked (`Machine.desktop.locked`) runs headless work and nothing that draws
+a window. On a locked Mac a window draws no frames and a capture is black, while batchmode Unity, EditMode tests and
+offscreen Metal renders run; on a locked Windows session GDI capture fails or is black and injected input goes nowhere.
+
+- **Which work draws a window** is `needsWindow` (`shared/desktop.ts`): a capture, a screenshot, a recording, play mode,
+  a built player's window, the FFU client's window, read from the request's words; `WorkItem.windowMark`, set by
+  `decide_work window true|false`, beats the words. A pair run's legs are placed by the pair rules, not by this.
+- **Placement keeps it off a locked screen**: `unfitWhy` (`shared/capacity.ts`) answers "screen locked on <computer>"
+  for windowed work there, so it waits Queued or goes elsewhere, and `start_agent` refuses it. Headless work still goes
+  to the locked computer. The Capacity block names the next computer for windowed work when one is locked
+  (`windowLine`, `server/placement.ts`).
+- **Nobody is asked to unlock a screen**: `decide_work ask` and `waiting_on_person` refuse an ask to unlock a screen or
+  log in for a window (`screenUnlockAskProblem`); the worker hands the windowed step to a computer whose screen is
+  unlocked.
+
+Tests: `server/w4868LockedScreen.test.ts`.
+
 ## Closing Firefox to free RAM
 
 A Windows PC's tray can close Firefox gracefully so its memory goes to agents and Unity editors (w1593, lothsahn,
