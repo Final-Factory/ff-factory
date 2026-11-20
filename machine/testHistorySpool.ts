@@ -8,7 +8,9 @@
 //
 // A run writes <name>.running.json when it starts and replaces it with <name>.json when it ends. A running file whose
 // recorder stopped writing STALE_MS ago (the editor crashed, was killed, or a batch run died) is sent as it is, and the
-// portal records the run as incomplete with the results it had.
+// portal records the run as incomplete with the results it had. A running file is also announced once at first sight
+// (`test_history_started`), so the portal tags the run with the workers in its sandbox as it starts: its record may come
+// after they have left.
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -30,7 +32,7 @@ export interface SpoolPlace {
 }
 
 export interface SpoolSend {
-  (msg: { type: 'test_history'; sandbox: string; file: string; record: string }): boolean;
+  (msg: { type: 'test_history'; sandbox: string; file: string; record: string } | { type: 'test_history_started'; sandbox: string; file: string }): boolean;
 }
 
 /** Path for comparing: forward slashes, no trailing slash, lower case on Windows. */
@@ -53,6 +55,8 @@ export function sandboxOfProject(project: string | undefined, places: readonly S
 export class TestHistorySpool {
   /** Sent and not yet answered: "<sandbox>/<file>" → when, and the file's full path. */
   private readonly sent = new Map<string, { at: number; full: string }>();
+  /** Running files announced to the portal, by full path. */
+  private readonly announced = new Set<string>();
   private readonly places: () => SpoolPlace[];
   private readonly root: string | undefined;
   private readonly send: SpoolSend;
@@ -94,7 +98,10 @@ export class TestHistorySpool {
         const full = path.join(d.dir, file);
         try {
           const st = fs.statSync(full);
-          if (file.endsWith('.running.json') && now - st.mtimeMs < STALE_MS) continue;
+          if (file.endsWith('.running.json') && now - st.mtimeMs < STALE_MS) {
+            if (!this.announced.has(full) && this.send({ type: 'test_history_started', sandbox: d.sandbox ?? this.sandboxOf(full, places), file })) this.announced.add(full);
+            continue;
+          }
           if (st.size > MAX_RECORD_BYTES) {
             this.log(`test history: ${full} is ${st.size} bytes, past ${MAX_RECORD_BYTES}: deleted unsent`);
             fs.rmSync(full, { force: true });
@@ -122,8 +129,19 @@ export class TestHistorySpool {
         }
       }
     }
+    if (this.announced.size > 2000) this.announced.clear();
     if (this.sent.size > 2000) for (const [k, s] of this.sent) if (now - s.at > RESEND_MS) this.sent.delete(k);
     return PER_LOOK - budget;
+  }
+
+  /** The sandbox a machine-spool file's project is in, from its record ('' when unreadable). */
+  private sandboxOf(full: string, places: readonly SpoolPlace[]): string {
+    try {
+      const project = (JSON.parse(fs.readFileSync(full, 'utf8')) as { project?: unknown }).project;
+      return sandboxOfProject(typeof project === 'string' ? project : undefined, places);
+    } catch {
+      return '';
+    }
   }
 
   /** The portal's answer: kept (or refused for good), so the file goes. */

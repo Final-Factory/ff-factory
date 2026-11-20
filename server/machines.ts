@@ -2764,6 +2764,14 @@ export class MachineManager {
         this.post(id, { type: 'test_history_ack', sandbox, file, ...ack }, false);
         return;
       }
+      case 'test_history_started':
+        // w4922: a test run began; its tags are taken now, while the worker that started it is in its sandbox.
+        try {
+          this.testHistoryStarted?.(id, String(msg.sandbox ?? '').slice(0, 80), String(msg.file ?? '').slice(0, 80));
+        } catch (e) {
+          console.warn(`test history start of ${id}: ${(e as Error).message}`);
+        }
+        return;
       case 'max_event':
         if (typeof msg.line === 'string' && msg.line.length <= 8192) this.maxEvent?.(id, msg.line);
         return;
@@ -2943,6 +2951,7 @@ export class MachineManager {
   benchHours?: (machineId: string, rows: unknown) => void;
   /** w4922: a sandbox's local test run (server/testHistory.ts); answers what to tell the daemon (ok: keep no more). */
   testHistory?: (machineId: string, sandbox: string, file: string, record: string) => { ok: boolean; error?: string };
+  testHistoryStarted?: (machineId: string, sandbox: string, file: string) => void;
   timedReport?: (machineId: string, msg: Extract<FromDaemon, { type: 'timed_run_status' | 'timed_run_done' | 'timed_run_result' }>) => void;
 
   /** w3939: a daemon that holds the nightly lab's fixtures said hello, and what it answers of one (server/labFixtures.ts). */

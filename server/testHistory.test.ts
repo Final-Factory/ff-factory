@@ -8,6 +8,7 @@ import {
   classOf,
   labelFailures,
   labelFromChange,
+  localRunKey,
   localRunTags,
   parseLocalRecord,
   parseNunit,
@@ -324,6 +325,24 @@ test("a local run is tagged by the session in its record, else by its sandbox's 
   );
 });
 
+test('an editor run is tagged with the workers in its sandbox when it started, though they left before its record came', () => {
+  let inSlot4 = ['aaaa1111'];
+  const src = { workInSandbox: () => ({ sessions: inSlot4, requests: inSlot4.length ? ['w4922'] : [] }), sessionWork: () => undefined };
+  const h = history(T0 + 86_400_000);
+  const key = localRunKey('beast', 'slot4', '20261120T174741612-cc994a6e.running.json');
+  assert.equal(key, 'local:beast/slot4/20261120T174741612-cc994a6e.json');
+  h.noteStart(key, localRunTags(src, 'beast', 'slot4'));
+  inSlot4 = ['bbbb2222'];
+  h.noteStart(key, localRunTags(src, 'beast', 'slot4'));
+  inSlot4 = [];
+  assert.deepEqual(localRunTags(src, 'beast', 'slot4', undefined, h.startTags(key)), { sessions: ['aaaa1111'], requests: ['w4922'], tagged: 'sandbox' });
+  // Without a start the record's own time decides, as before.
+  assert.deepEqual(localRunTags(src, 'beast', 'slot4', undefined, h.startTags('local:beast/slot4/other.json')), { sessions: [], requests: [], tagged: 'none' });
+  // A batch run's own session still wins.
+  const own = { ...src, sessionWork: (id: string) => (id === 'c9560245' ? ['w1'] : undefined) };
+  assert.equal(localRunTags(own, 'beast', 'slot4', 'c9560245', h.startTags(key)).tagged, 'session');
+});
+
 test('a database made before runs.tagged gains the column when the portal opens it', () => {
   const dir = tmp('old');
   new TestHistory({ dataDir: dir }).close();
@@ -349,8 +368,18 @@ test("the daemon's spool reads the machine's spool too, names a record's sandbox
   fs.writeFileSync(path.join(dir, live), JSON.stringify({ project: sbPath }));
   let now = Date.now();
   const sent: [string, string][] = [];
-  const spool = new TestHistorySpool({ places: () => [{ id: 'slot4', path: sbPath }], root, send: (m) => (sent.push([m.sandbox, m.file]), true), now: () => now });
+  const started: [string, string][] = [];
+  const spool = new TestHistorySpool({
+    places: () => [{ id: 'slot4', path: sbPath }],
+    root,
+    send: (m) => ((m.type === 'test_history_started' ? started : sent).push([m.sandbox, m.file]), true),
+    now: () => now,
+  });
   assert.equal(spool.tick(), 2);
+  // The running file is announced once, by its project's sandbox, so the portal tags the run as it starts.
+  assert.deepEqual(started, [['slot4', live]]);
+  spool.tick();
+  assert.equal(started.length, 1);
   assert.deepEqual(sent, [
     ['slot4', inSandbox],
     ['', outside],
@@ -359,7 +388,7 @@ test("the daemon's spool reads the machine's spool too, names a record's sandbox
   now += STALE_MS + 60_000;
   // The two unanswered ones go again (RESEND_MS), and the running file, stale now, with them.
   assert.equal(spool.tick(), 3);
-  assert.deepEqual(sent[4], ['slot4', live]);
+  assert.deepEqual(sent[sent.length - 1], ['slot4', live]);
   spool.ack('', outside, true);
   spool.ack('slot4', live, true);
   assert.deepEqual(fs.readdirSync(dir), [inSandbox]);

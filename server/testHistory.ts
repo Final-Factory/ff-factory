@@ -262,6 +262,7 @@ CREATE INDEX IF NOT EXISTS failures_test ON failures(test_id);
 CREATE INDEX IF NOT EXISTS failures_pending ON failures(label);
 CREATE TABLE IF NOT EXISTS coverage(class TEXT NOT NULL, type TEXT NOT NULL, PRIMARY KEY(class, type)) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS coverage_type ON coverage(type);
+CREATE TABLE IF NOT EXISTS run_starts(key TEXT PRIMARY KEY, sessions TEXT, requests TEXT, tagged TEXT NOT NULL, at TEXT NOT NULL) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS ci_seen(artifact_id INTEGER PRIMARY KEY, status TEXT, tries INTEGER NOT NULL DEFAULT 0, at TEXT NOT NULL);
 `;
 
@@ -500,12 +501,28 @@ export class TestHistory {
     });
   }
 
+  /** A local run's tags when it started (the daemon saw its running file), kept until its record comes; the first one stays. */
+  noteStart(key: string, tags: Pick<RunInfo, 'sessions' | 'requests' | 'tagged'>) {
+    this.db
+      .prepare('INSERT OR IGNORE INTO run_starts(key, sessions, requests, tagged, at) VALUES(?,?,?,?,?)')
+      .run(key, tags.sessions?.join(',') ?? '', tags.requests?.join(',') ?? '', tags.tagged ?? 'none', new Date(this.now()).toISOString());
+  }
+
+  startTags(key: string): Pick<RunInfo, 'sessions' | 'requests' | 'tagged'> | undefined {
+    const r = this.db.prepare('SELECT sessions, requests, tagged FROM run_starts WHERE key = ?').get(key) as Row | undefined;
+    if (!r) return undefined;
+    const list = (v: unknown) => (typeof v === 'string' && v ? v.split(',') : []);
+    return { sessions: list(r.sessions), requests: list(r.requests), tagged: r.tagged as RunInfo['tagged'] };
+  }
+
   /** Drop per-test results older than KEEP_RESULTS_DAYS of runs whose failures are all labelled; the rollup and failures stay. */
   prune(keepDays = KEEP_RESULTS_DAYS): number {
     const cutoff = new Date(this.now() - keepDays * DAY).toISOString();
     const r = this.db.prepare('DELETE FROM results WHERE run_id IN (SELECT id FROM runs WHERE finished < ? AND id NOT IN (SELECT run_id FROM failures WHERE label IS NULL))').run(cutoff);
     // The day rollup (about 22,000 rows a day for each source that runs the whole suite) is kept KEEP_DAYS_DAYS.
     this.db.prepare('DELETE FROM test_days WHERE day < ?').run(new Date(this.now() - KEEP_DAYS_DAYS * DAY).toISOString().slice(0, 10));
+    // A start whose record never came within a week (its file was lost): a running file is sent within STALE_MS of its end.
+    this.db.prepare('DELETE FROM run_starts WHERE at < ?').run(new Date(this.now() - 7 * DAY).toISOString());
     return Number(r.changes);
   }
 
@@ -514,6 +531,9 @@ export class TestHistory {
     return this.db.prepare(sql).all(...args) as Row[];
   }
 }
+
+/** One key for a local run's running and finished files, so a run is recorded once. */
+export const localRunKey = (machineId: string, sandbox: string, file: string) => `local:${machineId}/${sandbox}/${file.replace(/\.running\.json$/, '.json')}`;
 
 // ---------------------------------------------------------------- labelling
 
@@ -809,12 +829,15 @@ export interface RunTagSource {
 
 /**
  * A local run's tags: the worker session named in its record (a run its shell started) with that session's requests; else
- * the live workers in its sandbox (the editor's runs: one worker "sandbox", several "shared"); else "none", untagged, so
- * query local_runs untagged finds it.
+ * the live workers in its sandbox when the run started (`atStart`, TestHistory.noteStart: the daemon sees a running file
+ * within a minute), or, without that, when its record came (the editor's runs: one worker "sandbox", several "shared");
+ * else "none", untagged, so query local_runs untagged finds it. w4922: an editor run whose record came after its worker
+ * had left the sandbox (stopped on a wait for CI, moved to other work) was untagged when only the record's time counted.
  */
-export function localRunTags(src: RunTagSource, machineId: string, sandbox: string, session?: string): Pick<RunInfo, 'sessions' | 'requests' | 'tagged'> {
+export function localRunTags(src: RunTagSource, machineId: string, sandbox: string, session?: string, atStart?: Pick<RunInfo, 'sessions' | 'requests' | 'tagged'>): Pick<RunInfo, 'sessions' | 'requests' | 'tagged'> {
   const own = session ? src.sessionWork(session) : undefined;
   if (session && own) return { sessions: [session], requests: [...new Set(own)].sort(), tagged: 'session' };
+  if (atStart && atStart.tagged !== 'none' && atStart.sessions?.length) return atStart;
   const here = sandbox ? src.workInSandbox(machineId, sandbox) : { sessions: [], requests: [] };
   if (here.sessions.length) return { sessions: here.sessions, requests: here.requests, tagged: here.sessions.length === 1 ? 'sandbox' : 'shared' };
   return { sessions: session ? [session] : [], requests: [], tagged: 'none' };
