@@ -2750,6 +2750,20 @@ export class MachineManager {
       case 'bench_hours':
         this.benchHours?.(id, msg.rows);
         return;
+      case 'test_history': {
+        // w4922: a sandbox's local test run for the per-test history; answered so the daemon deletes the file.
+        const file = String(msg.file ?? '').slice(0, 80);
+        const sandbox = String(msg.sandbox ?? '').slice(0, 80);
+        if (!this.testHistory) return;
+        let ack: { ok: boolean; error?: string };
+        try {
+          ack = this.testHistory(id, sandbox, file, String(msg.record ?? ''));
+        } catch (e) {
+          ack = { ok: false, error: (e as Error).message.slice(0, 200) };
+        }
+        this.post(id, { type: 'test_history_ack', sandbox, file, ...ack }, false);
+        return;
+      }
       case 'max_event':
         if (typeof msg.line === 'string' && msg.line.length <= 8192) this.maxEvent?.(id, msg.line);
         return;
@@ -2927,6 +2941,8 @@ export class MachineManager {
   timedHello?: (machineId: string, active: string[]) => void;
   /** w1996: a daemon's exclusive-bench hours (server/benchHoursStore.ts validates them). */
   benchHours?: (machineId: string, rows: unknown) => void;
+  /** w4922: a sandbox's local test run (server/testHistory.ts); answers what to tell the daemon (ok: keep no more). */
+  testHistory?: (machineId: string, sandbox: string, file: string, record: string) => { ok: boolean; error?: string };
   timedReport?: (machineId: string, msg: Extract<FromDaemon, { type: 'timed_run_status' | 'timed_run_done' | 'timed_run_result' }>) => void;
 
   /** w3939: a daemon that holds the nightly lab's fixtures said hello, and what it answers of one (server/labFixtures.ts). */
