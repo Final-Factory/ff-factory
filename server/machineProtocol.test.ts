@@ -140,7 +140,10 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // w4922 (no bump): `test_history`, a local test run's record from a sandbox's Library/FFTestHistory spool, and its answer
 // `test_history_ack`; an older portal drops the record (no default case), so the daemon keeps the file and sends it again every 30
 // minutes until a newer portal acks it, and an older daemon never sends one, so it is never acked.
-const DECIDED = { protocol: 9, fingerprint: 'a37e479f05ae1f90' };
+// w4922 (no bump): `test_history_started`, a running file's first sight, so the portal tags the run with its sandbox's
+// workers then; it has no answer, an older portal drops it (no default case) and tags by the record as before, and an older
+// daemon never sends one.
+const DECIDED = { protocol: 9, fingerprint: '7fdc745346d3e54c' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {
