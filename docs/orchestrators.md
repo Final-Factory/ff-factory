@@ -1679,6 +1679,10 @@ first by their last DONE (`last`, default 50, at most 300; `until` for an earlie
   dated by the request's own timestamps (`datedLog` with `anchorsOf`: notes, reports, DONEs, links, PRs, the close), not
   by a forward walk alone, which put w4285's 2026-11-20 lines on 11-16. A turn a background notice opened (no user event)
   closes the gap before it, and a transcript that ends mid-turn is `preempt` for `TAIL_MS`, then `tail`.
+  A request's workers are its `sessionIds` and the ones it was moved off (`sessionsOf`: `moveOff` keeps them only in
+  `movedOff`), each read up to its move (`movedOffCut`); without them w4423's first worker, on m5 from 11-16, was missed
+  and its 33 h showed as filing-to-first-turn. A still-open line that leads with `waiting on <Name> to ...` is a person
+  wait even when what they decide names CI (w4712).
   Known limit: a session that held several requests counts its turns for the others as thinking time on each.
 
 It reads closed requests, which `read_work` does not, so it needs both grants; it reads the transcripts on the portal

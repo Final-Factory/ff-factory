@@ -284,7 +284,10 @@ export function toolCauseOf(name: string, input: unknown, isError: boolean): Wor
  * on Ben to decide" with no waiting_on_person call, which read as no marker). Undefined: work in progress, nothing named.
  */
 export function stillOpenCauseOf(text: string): WorkCause | undefined {
-  if (/\bCI\b|merge_on_green|merges? by itself|\bon green\b|\bchecks\b/i.test(text)) return 'gap_ci';
+  // w4927: a line that leads with a person's wait is theirs, whatever they are to decide (w4712: "waiting on lothsahn to
+  // decide whether to drop both CI savings" is not a CI wait)
+  if (/^\W*waiting (on|for) (?!CI\b|w\d|PR\b|the\b|an?\b)[A-Z][\w-]* to\b/i.test(text)) return 'person';
+  if (/\b(blocked on|waiting (on|for)|for|on) (the )?CI\b|\bCI (on|for|run|runs|to (finish|pass|go green))\b|\bci:|merge_on_green|merges? by itself|\bon green\b|\bchecks\b/i.test(text)) return 'gap_ci';
   if (/\bqueued\b|\bcapacity\b/i.test(text)) return 'queued';
   if (/\bblocked on\b|waiting (on|for) (w\d|PR|#|the merge|a deploy|the deploy|another)|\bafter w\d|\bdeploy/i.test(text)) return 'blocked';
   if (/offline|asleep|unreachable|can'?t be reached|cannot be reached|times? out|timed out|\bis held\b|back online|tray pause/i.test(text)) return 'blocked';
@@ -602,6 +605,23 @@ export function slimEvent(e: TranscriptEvent): TranscriptEvent {
 }
 
 /**
+ * Every worker session that served the request: its sessions now, and those it was moved off (w4927: `moveOff` drops a
+ * session from sessionIds and keeps it in movedOff, so w4423's first worker, 74e73623 on m5/slot3, which held it from
+ * 11-16, was never read, and its 33 h of turns and waiting showed as filing-to-first-turn).
+ */
+export function sessionsOf(w: Pick<WorkItem, 'sessionIds' | 'movedOff'>): string[] {
+  return [...new Set([...Object.keys(w.movedOff ?? {}), ...w.sessionIds])];
+}
+
+/** A moved-off session's events up to its move: after it, its turns are for other requests. */
+export function movedOffCut(w: Pick<WorkItem, 'sessionIds' | 'movedOff'>, id: string, evs: readonly TranscriptEvent[]): readonly TranscriptEvent[] {
+  const at = w.movedOff?.[id];
+  if (!at || w.sessionIds.includes(id)) return evs;
+  const t = Date.parse(at);
+  return Number.isFinite(t) ? evs.filter((e) => Date.parse(e.t) <= t) : evs;
+}
+
+/**
  * Measure the last finished requests. `readEvents` gives one session's events (undefined when it has none or it is too
  * large), and is called once per session.
  */
@@ -617,12 +637,12 @@ export async function workTiming(
   for (const w of pickFinished(items, a)) {
     const events = new Map<string, readonly TranscriptEvent[]>();
     let missing = 0;
-    for (const id of w.sessionIds) {
+    for (const id of sessionsOf(w)) {
       const kind = sessions.get(id)?.kind;
       if (kind && kind !== 'worker') continue;
       if (!cache.has(id)) cache.set(id, await readEvents(id));
       const evs = cache.get(id);
-      if (evs?.length) events.set(id, evs);
+      if (evs?.length) events.set(id, movedOffCut(w, id, evs));
       else missing++;
     }
     const r = timeRequest(w, events, missing);
