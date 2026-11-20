@@ -212,18 +212,24 @@ export function parseRuns(body: unknown): BatchRun[] {
 
 const said = (r: RunResult) => cleanLine(r.stderr || r.stdout || `exit ${r.code}`, 200);
 
-/** The reads through gh; `runnerFor(what)` is the gh runner of the person whose token reads (githubTokens.ts ghRunner). */
-export function ghMasterBatch(runnerFor: (what: string) => Runner): MasterBatchGh {
+/**
+ * The reads through gh; `runnerFor(what)` is the gh runner of the person whose token reads (githubTokens.ts ghRunner). `o`
+ * points them at another branch, job and page size: ffu's post-merge culprit job on main (server/ffuPostMerge.ts, w4930).
+ */
+export function ghMasterBatch(runnerFor: (what: string) => Runner, o: { branch?: string; job?: string; perPage?: number } = {}): MasterBatchGh {
+  const branch = o.branch ?? BRANCH;
+  const jobName = o.job ?? JOB_NAME;
+  const perPage = o.perPage ?? 10;
   const call = async (what: string, args: string[], timeoutMs = 30_000) => {
     const r = await runnerFor(what)('gh', ['api', ...args], { timeoutMs });
     if (r.code !== 0) throw new Error(`gh api ${args[0]}: ${said(r)}`);
     return r.stdout;
   };
   return {
-    runs: async (repo, workflow) => parseRuns(JSON.parse(await call(`the ${workflow} runs of ${repo}`, [`repos/${repo}/actions/workflows/${workflow}/runs?branch=${BRANCH}&per_page=10`]))),
+    runs: async (repo, workflow) => parseRuns(JSON.parse(await call(`the ${workflow} runs of ${repo}`, [`repos/${repo}/actions/workflows/${workflow}/runs?branch=${branch}&per_page=${perPage}`]))),
     jobLog: async (repo, runId) => {
       const jobs = obj(JSON.parse(await call(`the jobs of run ${runId} of ${repo}`, [`repos/${repo}/actions/runs/${runId}/jobs?per_page=100`])))?.jobs;
-      const job = (Array.isArray(jobs) ? jobs : []).map(obj).find((j) => j?.name === JOB_NAME);
+      const job = (Array.isArray(jobs) ? jobs : []).map(obj).find((j) => j?.name === jobName);
       if (!job || typeof job.id !== 'number' || !Number.isInteger(job.id) || job.id <= 0) return undefined;
       if (job.conclusion === 'skipped') return JOB_SKIPPED;
       // A Unity job log carries terminal escape sequences, and gh 2.102 refuses to print such a response unless asked

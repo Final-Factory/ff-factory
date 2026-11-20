@@ -30,6 +30,7 @@ import { run as runProc } from './proc.ts';
 import { portalPrEvidence } from '../machine/evidenceGate.ts';
 import { BlockerWatch, ghEvidenceRefusal, ghPrHealth } from './blockerWatch.ts';
 import { MasterBatchWatch } from './masterBatch.ts';
+import { FfuPostMergeWatch } from './ffuPostMerge.ts';
 import { TestHistory, parseLocalRecord, queryTestHistory, type QueryArgs } from './testHistory.ts';
 import { TestHistoryCi, testHistorySettings } from './testHistoryCi.ts';
 import { runWaitsMigration } from './waitsMigration.ts';
@@ -1087,6 +1088,8 @@ runWaitsMigration({
 blockerWatch.start();
 // A red master batch of the game repo goes back to the culprit PR's request as an urgent revert request (w1180, docs/intake.md).
 const masterBatch = new MasterBatchWatch({ cfg, store, identity, orchestrators: agents.orchestrators }).start();
+// ffu's post-merge revert verdicts to the reverted PR's request (w4930).
+const ffuPostMerge = new FfuPostMergeWatch({ cfg, store, identity, orchestrators: agents.orchestrators }).start();
 const testHistoryCi = new TestHistoryCi({ cfg, history: testHistory, identity, log: (line) => console.log(line) }).start();
 
 let lastSystem: SystemStats | undefined;
@@ -2738,6 +2741,7 @@ function stopServer(req: RestartRequest, drained: ReadonlySet<string> = new Set(
   ledgerSweep.close();
   blockerWatch.close();
   masterBatch.close();
+  ffuPostMerge.close();
   testHistoryCi.close();
   agents.rollout.close();
   store.flush();
