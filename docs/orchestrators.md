@@ -454,6 +454,17 @@ fewest timed legs queued, then `placement.prefer`. A one-worker computer ranks f
 
 A timed A/B compares its legs on one computer, so a slower one gives as good an answer.
 
+**A timed A/B gates done only for a performance goal** (lothsahn, w4924: "Timed tests gate only perf-goal requests; others
+merge and time after"). When a request's goal is a performance number (a frame time, a CPU budget, a speed-up), its timed
+leg is part of done. Any other change that may move performance merges on green CI, and its worker hands up the timing as
+a follow-up (`hand_up_requests`: "time <change> after its merge on <machine>; revert it if it regresses"). The request then
+closes, and the follow-up carries the after-merge timing and any revert as its own tracked request. No ledger, dispatcher
+or DONE check holds a request open on a timed leg (`server/timedRuns.ts` only posts its table; `doneNoteProblem` in
+`server/work.ts` has no timed check), so do not brief one as a done-gate for a change whose goal is not performance.
+An A/B's legs share one exclusive ticket (the game repo's `quiet_gate.sh` `bench_leg_done`, one `bench_queue.py timed`
+held across tool calls); a new ticket per leg queues at the back each time (r341: w4787 took 18 tickets, held 44 min,
+waited 314).
+
 **The bench queue's order** (w1628, the game repo's `scripts/bench/bench_queue.py`, `Documentation/Bench-Lock.md`): first
 by the priority of the worker's open requests (lothsahn: "Yes, the queue should first sort by priority, using the logic the
 worker is working on within each priority group"; frantic, urgent, high, normal, low), which FF Factory sends each machine's daemon
