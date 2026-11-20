@@ -27,6 +27,12 @@ export const DECIDE_WITHIN_DAYS = 7;
 const DAY = 86_400_000;
 const MAX_MESSAGE = 600;
 
+/** Who set a label, ranked: 0 the labeller ("auto"), 1 a worker ("worker:<session>"), 2 a person ("person:<name>"). */
+export function labelRank(by: string | null | undefined): number {
+  if (!by || by === 'auto') return 0;
+  return by.startsWith('worker:') ? 1 : 2;
+}
+
 export type Source = 'pr-gate' | 'master-batch' | 'release' | 'ci-other' | 'local';
 export const SOURCES = ['pr-gate', 'master-batch', 'release', 'ci-other', 'local'] as const satisfies readonly Source[];
 export type Outcome = 'pass' | 'fail' | 'skip' | 'inconclusive';
@@ -55,6 +61,12 @@ export interface RunInfo {
   sandbox?: string;
   requests?: string[];
   sessions?: string[];
+  /**
+   * A local run's tagging (tagFor in index.ts): "session" (the worker session that ran it, from its own environment),
+   * "sandbox" (the one worker in the editor's sandbox), "shared" (several workers there: all named), "none" (no worker
+   * known: untagged). Unset for CI.
+   */
+  tagged?: 'session' | 'sandbox' | 'shared' | 'none';
   started?: string;
   finished: string;
   mode?: string;
@@ -151,7 +163,26 @@ const OUTCOMES = new Set<Outcome>(['pass', 'fail', 'skip', 'inconclusive']);
 const str = (v: unknown, max = 300) => (typeof v === 'string' ? v.slice(0, max) : undefined);
 
 /** A local record as TestHistoryRecorder.cs writes it; undefined when it is not one. */
-export function parseLocalRecord(text: string): { info: Omit<RunInfo, 'source' | 'key'>; tests: TestCase[]; machineName?: string; project?: string } | undefined {
+export interface LocalRecord {
+  info: Omit<RunInfo, 'source' | 'key'>;
+  tests: TestCase[];
+  machineName?: string;
+  project?: string;
+  /** The worker session whose shell started the run (FF_SESSION_ID; a batch run), or its temp folder's ffa-<id>. */
+  session?: string;
+  /** The run never finished: its recorder's running file, sent once it went stale (the editor crashed or was killed). */
+  running: boolean;
+  /** How many tests the run set out to run (0: not known). */
+  planned: number;
+}
+
+/** The session id in a worker temp folder's name (`.../ffa-<id>`, server/cleanup.ts sessionTempDir). */
+export function sessionOfTemp(tmp: string | undefined): string | undefined {
+  const m = tmp ? /(?:^|[\\/])ffa-([\w-]{4,40})[\\/]*$/.exec(tmp) : null;
+  return m?.[1];
+}
+
+export function parseLocalRecord(text: string): LocalRecord | undefined {
   let j: Record<string, unknown>;
   try {
     j = JSON.parse(text);
@@ -177,11 +208,26 @@ export function parseLocalRecord(text: string): { info: Omit<RunInfo, 'source' |
     changes = {};
     for (const [p, h] of Object.entries(j.changes as Record<string, unknown>)) if (typeof h === 'string') changes[p.slice(0, 400)] = h.slice(0, 64);
   }
+  const running = j.status === 'running';
+  const planned = typeof j.planned === 'number' && Number.isFinite(j.planned) ? Math.max(0, Math.round(j.planned)) : 0;
+  const session = (str(j.session, 40) || undefined) ?? sessionOfTemp(str(j.tmp, 400));
   return {
-    info: { finished: new Date(finished).toISOString(), started: str(j.started, 40), sha: str(j.head, 40), base: str(j.base, 40), branch: str(j.branch, 200), mode: str(j.mode, 20), changes },
+    info: {
+      finished: new Date(finished).toISOString(),
+      started: str(j.started, 40),
+      sha: str(j.head, 40),
+      base: str(j.base, 40),
+      branch: str(j.branch, 200),
+      mode: str(j.mode, 20),
+      changes,
+      ...(running ? { verdict: `incomplete: ${tests.length} of ${planned || '?'} tests finished before the run stopped` } : {}),
+    },
     tests,
     machineName: str(j.machine, 100),
     project: str(j.project, 400),
+    ...(session && /^[\w-]+$/.test(session) ? { session } : {}),
+    running,
+    planned,
   };
 }
 
@@ -195,7 +241,7 @@ CREATE TABLE IF NOT EXISTS tests(
 CREATE INDEX IF NOT EXISTS tests_class ON tests(class);
 CREATE TABLE IF NOT EXISTS runs(
   id INTEGER PRIMARY KEY, source TEXT NOT NULL, key TEXT NOT NULL UNIQUE, repo TEXT, ci_run INTEGER, attempt INTEGER,
-  sha TEXT, base TEXT, pr INTEGER, branch TEXT, machine TEXT, sandbox TEXT, requests TEXT, sessions TEXT,
+  sha TEXT, base TEXT, pr INTEGER, branch TEXT, machine TEXT, sandbox TEXT, requests TEXT, sessions TEXT, tagged TEXT,
   started TEXT, finished TEXT NOT NULL, mode TEXT, tests INTEGER NOT NULL, passed INTEGER NOT NULL, failed INTEGER NOT NULL,
   skipped INTEGER NOT NULL, total_ms INTEGER NOT NULL, verdict TEXT, changes TEXT, url TEXT, recorded TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS runs_line ON runs(source, branch, finished);
@@ -259,6 +305,8 @@ export class TestHistory {
     this.db = new DatabaseSync(this.file);
     this.db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA busy_timeout = 5000;');
     this.db.exec(SCHEMA);
+    // A database made before runs.tagged (#1050's first deploy).
+    if (!(this.db.prepare('PRAGMA table_info(runs)').all() as Row[]).some((c) => c.name === 'tagged')) this.db.exec('ALTER TABLE runs ADD COLUMN tagged TEXT');
     if (!this.meta('recorded_since')) this.setMeta('recorded_since', new Date(this.now()).toISOString());
   }
 
@@ -325,13 +373,13 @@ export class TestHistory {
       const recorded = new Date(this.now()).toISOString();
       const res = this.db
         .prepare(
-          `INSERT INTO runs(source, key, repo, ci_run, attempt, sha, base, pr, branch, machine, sandbox, requests, sessions, started, finished, mode,
-            tests, passed, failed, skipped, total_ms, verdict, changes, url, recorded) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          `INSERT INTO runs(source, key, repo, ci_run, attempt, sha, base, pr, branch, machine, sandbox, requests, sessions, tagged, started, finished, mode,
+            tests, passed, failed, skipped, total_ms, verdict, changes, url, recorded) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         )
         .run(
           run.source, run.key, run.repo ?? null, run.ciRun ?? null, run.attempt ?? null, run.sha ?? null, run.base ?? null, run.pr ?? null,
           run.branch ?? null, run.machine ?? null, run.sandbox ?? null, run.requests?.length ? run.requests.join(',') : null,
-          run.sessions?.length ? run.sessions.join(',') : null, run.started ?? null, run.finished, run.mode ?? null, tests.length,
+          run.sessions?.length ? run.sessions.join(',') : null, run.tagged ?? null, run.started ?? null, run.finished, run.mode ?? null, tests.length,
           passed, failed, skipped, totalMs, run.verdict ?? null, run.changes ? JSON.stringify(run.changes) : null, run.url ?? null, recorded,
         );
       const runId = Number(res.lastInsertRowid);
@@ -362,15 +410,23 @@ export class TestHistory {
   }
 
   /**
-   * Label one failure. An automatic label never replaces a person's or a worker's; theirs replaces any. Answers whether it
-   * was written.
+   * Label one failure. `by` says who: "auto" (the labeller), "worker:<session>" (a worker, through test_history set_label),
+   * or "person:<name>" (an orchestrator for its person, or the dispatcher as "person:dispatcher"). A label replaces only one
+   * of the same or a lower rank: auto < worker < person. Answers whether it was written.
    */
   label(failureId: number, label: Label, reason: string, by: string): boolean {
-    const auto = by === 'auto';
+    const rank = labelRank(by);
+    const guard = rank === 0 ? " AND (labelled_by IS NULL OR labelled_by = 'auto')" : rank === 1 ? " AND (labelled_by IS NULL OR labelled_by = 'auto' OR labelled_by LIKE 'worker:%')" : '';
     const r = this.db
-      .prepare(`UPDATE failures SET label = ?, reason = ?, labelled_by = ?, labelled_at = ? WHERE id = ?${auto ? " AND (labelled_by IS NULL OR labelled_by = 'auto')" : ''}`)
+      .prepare(`UPDATE failures SET label = ?, reason = ?, labelled_by = ?, labelled_at = ? WHERE id = ?${guard}`)
       .run(label, reason.slice(0, 500), by.slice(0, 80), new Date(this.now()).toISOString(), failureId);
     return Number(r.changes) > 0;
+  }
+
+  /** One failure's label and who set it, or undefined when there is no such failure. */
+  failure(failureId: number): { label: string | null; labelledBy: string | null; test: string } | undefined {
+    const r = this.db.prepare('SELECT f.label, f.labelled_by, t.name FROM failures f JOIN tests t ON t.id = f.test_id WHERE f.id = ?').get(failureId) as Row | undefined;
+    return r ? { label: (r.label as string | null) ?? null, labelledBy: (r.labelled_by as string | null) ?? null, test: String(r.name) } : undefined;
   }
 
   /** The failure of a test in a run, by the test's full name. */
@@ -502,7 +558,7 @@ export async function labelFailures(h: TestHistory, prDiff: PrDiff, now = Date.n
 
 // ---------------------------------------------------------------- the queries
 
-export const QUERIES = ['summary', 'slowest', 'false_positives', 'detections', 'never_caught', 'failures', 'test', 'sql'] as const;
+export const QUERIES = ['summary', 'slowest', 'false_positives', 'detections', 'never_caught', 'failures', 'test', 'local_runs', 'sql', 'set_label'] as const;
 export type QueryName = (typeof QUERIES)[number];
 
 export interface QueryArgs {
@@ -522,6 +578,13 @@ export interface QueryArgs {
   /** failures: only this label ('pending' for none yet). */
   label?: Label | 'pending';
   sql?: string;
+  /** local_runs: only the runs no worker could be named for (tagged "none"). */
+  untagged?: boolean;
+  /** local_runs: only a request's runs ("w4922"). */
+  request?: string;
+  /** set_label: the failure (failures' failure_id) and why. */
+  failureId?: number;
+  reason?: string;
 }
 
 const esc = (s: string) => s.replace(/[\\%_]/g, (c) => `\\${c}`);
@@ -545,7 +608,8 @@ export function readyQuery(h: TestHistory, a: QueryArgs, now = Date.now()): { ti
   const like = a.test ? `AND t.name LIKE '%' || ? || '%' ESCAPE '\\'` : '';
   const likeArg = a.test ? [esc(a.test)] : [];
   const scope = `last ${days} days, sources ${sources.join(', ')}${a.performance ? ', Performance tests included' : ''}`;
-  const fpCounts = `SELECT f.test_id, sum(f.label = 'fp') AS fp, sum(f.label = 'detect') AS detect, sum(f.label = 'unknown') AS unknown, sum(f.label IS NULL) AS pending, count(*) AS failures
+  const fpCounts = `SELECT f.test_id, sum(f.label = 'fp') AS fp, sum(f.label = 'detect') AS detect, sum(f.label = 'unknown') AS unknown, sum(f.label IS NULL) AS pending, count(*) AS failures,
+      sum(f.labelled_by LIKE 'worker:%') AS by_worker, sum(f.labelled_by LIKE 'person:%') AS by_person
     FROM failures f JOIN runs r ON r.id = f.run_id WHERE r.finished >= ? AND r.source IN ${inSources} GROUP BY f.test_id`;
   const runCounts = `SELECT test_id, sum(runs) AS runs, sum(total_ms) AS total_ms, max(max_ms) AS max_ms FROM test_days WHERE day >= ? AND source IN ${inSources} GROUP BY test_id`;
   switch (a.query) {
@@ -574,7 +638,7 @@ export function readyQuery(h: TestHistory, a: QueryArgs, now = Date.now()): { ti
       return {
         title: `Most false positives ${a.byRate ? `by rate (at least ${minRuns} runs)` : 'by count'} (${scope}); fp_rate = fp / runs`,
         rows: h.all(
-          `SELECT t.name AS test, f.fp, coalesce(c.runs, 0) AS runs, round(100.0 * f.fp / max(coalesce(c.runs, 0), 1), 2) AS fp_rate_pct, f.detect, f.unknown, f.pending
+          `SELECT t.name AS test, f.fp, coalesce(c.runs, 0) AS runs, round(100.0 * f.fp / max(coalesce(c.runs, 0), 1), 2) AS fp_rate_pct, f.detect, f.unknown, f.pending, f.by_worker, f.by_person
            FROM (${fpCounts}) f JOIN tests t ON t.id = f.test_id LEFT JOIN (${runCounts}) c ON c.test_id = f.test_id
            WHERE f.fp > 0 ${perf} ${like} ${a.byRate ? 'AND coalesce(c.runs, 0) >= ?' : ''} ORDER BY ${a.byRate ? 'fp_rate_pct DESC, f.fp DESC' : 'f.fp DESC, fp_rate_pct DESC'} LIMIT ?`,
           since, since, ...likeArg, ...(a.byRate ? [minRuns] : []), limit,
@@ -585,7 +649,7 @@ export function readyQuery(h: TestHistory, a: QueryArgs, now = Date.now()): { ti
       return {
         title: `Most correct failure detections (${scope})`,
         rows: h.all(
-          `SELECT t.name AS test, f.detect, f.fp, f.unknown, coalesce(c.runs, 0) AS runs,
+          `SELECT t.name AS test, f.detect, f.fp, f.unknown, coalesce(c.runs, 0) AS runs, f.by_worker, f.by_person,
              (SELECT x.reason FROM failures x JOIN runs r ON r.id = x.run_id WHERE x.test_id = t.id AND x.label = 'detect' ORDER BY r.finished DESC LIMIT 1) AS last_detection
            FROM (${fpCounts}) f JOIN tests t ON t.id = f.test_id LEFT JOIN (${runCounts}) c ON c.test_id = f.test_id
            WHERE f.detect > 0 ${perf} ${like} ORDER BY f.detect DESC, runs DESC LIMIT ?`,
@@ -625,6 +689,18 @@ export function readyQuery(h: TestHistory, a: QueryArgs, now = Date.now()): { ti
           `SELECT t.name AS test, d.day, d.source, d.runs, d.passes, d.fails, round(1.0 * d.total_ms / d.runs) AS avg_ms, d.max_ms
            FROM test_days d JOIN tests t ON t.id = d.test_id WHERE d.day >= ? AND d.source IN ${inSources} ${like} ORDER BY d.day DESC, t.name LIMIT ?`,
           since, ...likeArg, limit,
+        ),
+      };
+    }
+    case 'local_runs': {
+      const req = a.request ? `AND ',' || r.requests || ',' LIKE '%,' || ? || ',%' ESCAPE '\\'` : '';
+      return {
+        title: `Local runs, newest first (last ${days} days${a.untagged ? ', untagged only' : ''}${a.request ? `, request ${a.request}` : ''}); tagged: session (the worker that ran it), sandbox (the one worker in that sandbox), shared (several there), none (untagged)`,
+        rows: h.all(
+          `SELECT r.finished, r.machine, r.sandbox, r.tagged, r.requests, r.sessions, r.branch, substr(r.sha, 1, 9) AS sha, r.mode, r.tests, r.passed, r.failed,
+             round(r.total_ms / 1000.0) AS total_s, r.verdict
+           FROM runs r WHERE r.source = 'local' AND r.finished >= ? ${a.untagged ? "AND r.tagged = 'none'" : ''} ${req} ORDER BY r.finished DESC LIMIT ?`,
+          since, ...(a.request ? [esc(a.request)] : []), limit,
         ),
       };
     }
@@ -695,7 +771,8 @@ export function runSql(file: string, sql: string, max = SQL_MAX_ROWS, timeoutMs 
 }
 
 /** The answer of the test_history tool: a ready-made query or ad-hoc SQL, as text. */
-export async function queryTestHistory(h: TestHistory, a: QueryArgs, now = Date.now()): Promise<string> {
+export async function queryTestHistory(h: TestHistory, a: QueryArgs, now = Date.now(), by?: string): Promise<string> {
+  if (a.query === 'set_label') return setLabelByHand(h, a, by);
   if (a.query === 'sql') {
     if (!a.sql) throw new Error('query "sql" needs sql: one SELECT (tables: docs/test-history.md)');
     const r = await runSql(h.file, a.sql, a.limit ?? SQL_MAX_ROWS);
@@ -703,4 +780,42 @@ export async function queryTestHistory(h: TestHistory, a: QueryArgs, now = Date.
   }
   const r = readyQuery(h, a, now);
   return `${r.title}\n${table(r.rows)}`;
+}
+
+/**
+ * test_history set_label: a worker's or a person's label on one failure, recorded as theirs (`by`, which the portal sets from
+ * the caller, never from the arguments). It replaces the labeller's, and a person's replaces a worker's; a worker's never
+ * replaces a person's.
+ */
+export function setLabelByHand(h: TestHistory, a: QueryArgs, by: string | undefined): string {
+  if (!by || labelRank(by) === 0) throw new Error('set_label: the caller is not known');
+  if (a.failureId === undefined) throw new Error('set_label needs failureId (the failure_id column of query failures)');
+  if (a.label !== 'fp' && a.label !== 'detect' && a.label !== 'unknown') throw new Error('set_label needs label: fp, detect or unknown');
+  const reason = a.reason?.trim();
+  if (!reason) throw new Error('set_label needs reason: what shows it (a re-run, the commit that fixed it)');
+  const f = h.failure(a.failureId);
+  if (!f) throw new Error(`set_label: no failure ${a.failureId}`);
+  if (!h.label(a.failureId, a.label, reason, by)) return `Not changed: failure ${a.failureId} (${f.test}) is labelled ${f.label} by ${f.labelledBy}, which a worker's label does not replace.`;
+  return `Failure ${a.failureId} (${f.test}) is now ${a.label}, set by ${by}${f.label ? ` (was ${f.label} by ${f.labelledBy})` : ''}.`;
+}
+
+/** Where a local run's workers and requests come from (Agents in index.ts). */
+export interface RunTagSource {
+  /** The live workers in a machine's sandbox and their requests. */
+  workInSandbox(machineId: string, sandbox: string): { sessions: string[]; requests: string[] };
+  /** A worker session's requests, or undefined when there is no such worker session. */
+  sessionWork(sessionId: string): string[] | undefined;
+}
+
+/**
+ * A local run's tags: the worker session named in its record (a run its shell started) with that session's requests; else
+ * the live workers in its sandbox (the editor's runs: one worker "sandbox", several "shared"); else "none", untagged, so
+ * query local_runs untagged finds it.
+ */
+export function localRunTags(src: RunTagSource, machineId: string, sandbox: string, session?: string): Pick<RunInfo, 'sessions' | 'requests' | 'tagged'> {
+  const own = session ? src.sessionWork(session) : undefined;
+  if (session && own) return { sessions: [session], requests: [...new Set(own)].sort(), tagged: 'session' };
+  const here = sandbox ? src.workInSandbox(machineId, sandbox) : { sessions: [], requests: [] };
+  if (here.sessions.length) return { sessions: here.sessions, requests: here.requests, tagged: here.sessions.length === 1 ? 'sandbox' : 'shared' };
+  return { sessions: session ? [session] : [], requests: [], tagged: 'none' };
 }

@@ -7,8 +7,10 @@ built it into the harness so it's not just a rule that workers may forget to do.
 
 The portal keeps every run of the game repo's tests in one SQLite database, `<dataDir>/test-history.db`
 (`server/testHistory.ts`). For each run it records which tests passed and failed, how long they took, and what each
-failure turned out to be. Nobody records anything by hand. Orchestrators and workers query it with the `test_history`
-tool. The game repo's side is `Documentation/Test-History.md` there.
+failure turned out to be. No agent records a run: every run gets in by code alone (lothsahn, w4922: "I don't want ai
+agents having to remember or do work to ensure the runs appear" and "the actual test executions should be ingested
+deterministically with every work order"). Orchestrators and workers query it with the `test_history` tool, and may add a
+label by hand, recorded as theirs. The game repo's side is `Documentation/Test-History.md` there.
 
 ## Where the runs come from
 
@@ -18,7 +20,7 @@ tool. The game repo's side is `Documentation/Test-History.md` there.
 | `release` | the same job on a push to master (a version bump): the whole EditMode suite | the same artifact, on a `push` run |
 | `ci-other` | that job on any other event (a dispatch) | the same |
 | `master-batch` | `master-batch.yml`: the whole suite at the batch tip, and the PlayMode smoke test | the "Master batch results" artifact: `00-full.xml`, `00-full-smoke.xml`, `verdict.json`, `coverage.json` |
-| `local` | a worker's run in its sandbox's editor (MCP `run_tests`, the Test Runner, a batch `-runTests`) | the game repo's `Assets/Editor/TestHistoryRecorder.cs` writes `Library/FFTestHistory/*.json`; the daemon (`machine/testHistorySpool.ts`) sends each file as `test_history`, and the portal tags it with the machine, sandbox, live workers and their requests, answers `test_history_ack`, and the daemon deletes the file |
+| `local` | any run of the Unity test runner on a worker machine (MCP `run_tests`, the Test Runner window, a batch `-runTests`, `MergeGateTestRunner`), in a sandbox or any other project | the game repo's `Assets/Editor/TestHistoryRecorder.cs` writes `$FF_WORKER_ROOT/test-history/*.json` (else the project's `Library/FFTestHistory/`); the daemon (`machine/testHistorySpool.ts`) sends each file as `test_history`, the portal tags it with its request (below), answers `test_history_ack`, and the daemon deletes the file |
 
 - **The CI collector** reads every 5 minutes, with the system payer's GitHub token, as the master batch watch does.
   - Each look downloads at most 12 artifacts, newest first.
@@ -26,12 +28,43 @@ tool. The game repo's side is `Documentation/Test-History.md` there.
   - It never reads an artifact twice (`ci_seen`) and gives one up after 3 failed tries.
   - It changes nothing in CI and needs no new credential or FFBox setting.
   - The only CI cost is `coverage.json` in the master batch, 1.2 to 5.3 s per batch (measured).
+- **A local run is on disk from its start.** The recorder writes `<name>.running.json` when the run starts and rewrites
+  it at most once a minute as tests finish; the finished run replaces it with `<name>.json`. A running file untouched for
+  2 hours (`STALE_MS`: the editor crashed, was killed, or a batch run died) is sent as it is, and the run is recorded with
+  `verdict` "incomplete: N of M tests finished", even with no test finished. A run's two files share one key, so it is
+  recorded once.
+- **Every local run carries its request, or says it has none** (`runs.tagged`, `localRunTags`):
+  - `session`: the record names the worker session that started it (`FF_SESSION_ID` of a worker's shell, or its temp
+    folder `ffa-<session>`), a batch run's case; tagged with that session's requests;
+  - `sandbox`: an editor run in a sandbox with one live worker: that worker and its requests;
+  - `shared`: several live workers in that sandbox: all of them and all their requests;
+  - `none`: no worker known (a person's own run, a project outside any sandbox with no session). `{query: "local_runs",
+    untagged: true}` lists them.
+
+  The daemon names a record's sandbox from its `project` path when the file came from the machine's spool, and leaves it
+  empty for a project outside every sandbox (a temp worktree).
 - **A master batch keeps only its failures in `results`.** At about 22,000 cases, some 30 times a day, its passes live in
   `test_days` only.
-- **Not included:**
-  - **Nightly e2e:** its intake keeps only the failing and flaky scenarios of a night (`server/nightlyRules.ts`
-    `NightlyReport`), with no passes or times.
-  - **ffu's cargo tests:** another repo, with its own runners.
+- **Not included:** the routes below marked no.
+
+### Every route a test can be run by
+
+| Route | Recorded | How, and the tag |
+|---|---|---|
+| MCP `run_tests` in a sandbox's editor | yes | recorder, machine spool; tagged `sandbox` (or `shared`) |
+| The Test Runner window in a sandbox's editor | yes | the same |
+| A batch `-runTests` under `unity-slot run`, with or without `-testResults` | yes | recorder (TestRunnerApi callbacks fire in batch mode); tagged `session` from the worker shell's `FF_SESSION_ID` |
+| `MergeGateTestRunner` (the gate's list, locally) | yes | the same, as an editor or batch run |
+| An editor or batch run in a temp worktree or clone in `$TMPDIR` | yes | machine spool (`FF_WORKER_ROOT`), no sandbox; tagged `session` when a worker's shell started it, else `none` |
+| A run cut short (crash, kill, a hung editor restarted) | yes, as incomplete | the running file, after 2 hours |
+| The PR gate's `Test in editmode` | yes | its artifact (`pr-gate`) |
+| The master batch, full suite and PlayMode smoke | yes | its artifact (`master-batch`) |
+| A release push's EditMode run | yes | its artifact (`release`) |
+| A person's own editor outside FF Factory (no `FF_WORKER_ROOT`, not in a sandbox) | no | its file stays in that project's `Library/FFTestHistory/`, which no daemon reads |
+| The game repo's `scripts/tests` (Python unittest), locally or in CI | no | not a Unity run; a recorder is separate work |
+| FF Factory's own `npm test` | no | separate work |
+| ffu's `cargo test` | no | another repo, its own runners; separate work |
+| The nightly e2e | no | its intake keeps only a night's failing and flaky scenarios (`server/nightlyRules.ts` `NightlyReport`), with no passes or times |
 
 ## Labels
 
@@ -70,20 +103,23 @@ label never replaces one a person or worker set.
 
 - `tests(id, name, class, categories, performance, first_seen, last_seen)`: `performance` = tagged
   `[Category("Performance")]`. The ready-made queries leave these tests out unless `performance: true`.
-- `runs(id, source, key, repo, ci_run, attempt, sha, base, pr, branch, machine, sandbox, requests, sessions, started,
-  finished, mode, tests, passed, failed, skipped, total_ms, verdict, changes, url, recorded)`: `requests` and `sessions`
-  are comma lists.
+- `runs(id, source, key, repo, ci_run, attempt, sha, base, pr, branch, machine, sandbox, requests, sessions, tagged,
+  started, finished, mode, tests, passed, failed, skipped, total_ms, verdict, changes, url, recorded)`: `requests` and
+  `sessions` are comma lists; `tagged` is how a local run's request was found (above); `verdict` starts "incomplete" for
+  a run that never finished.
 - `results(run_id, test_id, outcome, ms)`: kept 60 days, longer for a run with pending failures; a master batch's
   failures only.
 - `test_days(day, source, test_id, runs, passes, fails, total_ms, max_ms)`: the rollup the queries count, kept 365 days.
-- `failures(id, run_id, test_id, message, label, reason, labelled_by, labelled_at)`: kept for good.
+- `failures(id, run_id, test_id, message, label, reason, labelled_by, labelled_at)`: kept for good. `labelled_by` is
+  `auto`, `worker:<session>` or `person:<name> (<role> <session>)`.
 - `coverage(class, type)`: each test class and the production types its file names, from the newest master batch's
   `coverage.json` (`scripts/test_select.py`).
 - `meta(k, v)`: `recorded_since`, `ci_oldest`, `coverage_sha`.
 
 ## Querying
 
-The `test_history` tool is read-only. Orchestrators (dispatcher, personal, remote) and workers have it (group `ledger`).
+Orchestrators (dispatcher, personal, remote) and workers have the `test_history` tool (group `ledger`). Every query reads
+only; `set_label` is its one write.
 
 | Call | Answers |
 |---|---|
@@ -94,6 +130,8 @@ The `test_history` tool is read-only. Orchestrators (dispatcher, personal, remot
 | `{query: "never_caught", days: 30, limit: 20}` | tests with no `detect` in the window, ranked by total run time, with run count, first seen and the types their class covers |
 | `{query: "failures", label: "pending"}` | failures, newest first, with machine, sandbox and request |
 | `{query: "test", test: "BeltTest"}` | one test's runs per day and source |
+| `{query: "local_runs", request: "w4922"}` | one request's local runs, with how each was tagged and any incomplete verdict; `untagged: true` for the runs with no request |
+| `{query: "set_label", failureId: 123, label: "fp", reason: "passed on a re-run at the same commit"}` | a hand label (below) |
 | `{query: "sql", sql: "SELECT ..."}` | one read-only SELECT (or WITH), at most 200 rows, stopped after 10 s |
 
 `sources` limits any query to some sources (`["pr-gate", "master-batch"]`), and `days` sets the window (30).
@@ -118,5 +156,16 @@ SELECT finished, sandbox, tests, passed, failed, total_ms FROM runs WHERE source
 SELECT pr, count(*) AS runs, round(sum(total_ms) / 60000.0, 1) AS minutes FROM runs WHERE source = 'pr-gate' GROUP BY pr ORDER BY minutes DESC LIMIT 10
 ```
 
-**Setting a label by hand:** nothing writes through the tool. A person's correction goes to an orchestrator, which asks
-the ops worker to call `TestHistory.label(id, label, reason, by)` on the portal. An automatic label never overwrites it.
+## Labels by hand
+
+lothsahn, w4922: "I realize some notes and classifications may come workers." A worker or an orchestrator may label a
+failure with `set_label` (`failureId` from `{query: "failures"}`, `label` fp, detect or unknown, and a `reason`). The
+portal records who set it in `labelled_by`, from the caller, never from the arguments (`Agents.testHistoryText`):
+
+- a worker: `worker:<session>`;
+- an orchestrator: `person:<its person> (<role> <session>)`; the dispatcher, which has no one person, `person:unconfirmed
+  (dispatcher <session>)`.
+
+Ranks: the labeller (`auto`) < a worker < a person. A label replaces one of the same or a lower rank, so the labeller never
+replaces a hand label and a worker never replaces a person's. `false_positives` and `detections` show `by_worker` and
+`by_person`, the counts set by hand; `labelled_by = 'auto'` in SQL keeps only the labeller's.

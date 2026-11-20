@@ -785,6 +785,7 @@ export class Daemon {
     );
     this.testHistory = new TestHistorySpool({
       places: () => this.pool.list().map((sb) => ({ id: sb.id, path: sb.path })),
+      root: cfg.root,
       send: (msg) => {
         if (this.ws?.readyState !== WebSocket.OPEN) return false;
         this.send(msg);

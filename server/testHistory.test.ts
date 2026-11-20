@@ -8,16 +8,19 @@ import {
   classOf,
   labelFailures,
   labelFromChange,
+  localRunTags,
   parseLocalRecord,
   parseNunit,
   queryTestHistory,
   readyQuery,
   runSql,
+  sessionOfTemp,
   sqlProblem,
   type TestCase,
 } from './testHistory.ts';
 import { BATCH_ARTIFACT, EDITMODE_ARTIFACT, TestHistoryCi, prDiffFrom, sourceOf, type ArtifactRef, type TestHistoryGh } from './testHistoryCi.ts';
-import { TestHistorySpool, SPOOL_DIR } from '../machine/testHistorySpool.ts';
+import { DatabaseSync } from 'node:sqlite';
+import { ROOT_SPOOL_DIR, STALE_MS, TestHistorySpool, SPOOL_DIR, sandboxOfProject } from '../machine/testHistorySpool.ts';
 
 // The per-test history (w4922, docs/test-history.md): what goes in, how failures are labelled, the queries.
 
@@ -244,4 +247,120 @@ test("the daemon's spool sends each sandbox's records a few at a time and delete
   sent.length = 0;
   assert.equal(spool.tick(), 4);
   assert.deepEqual(sent, names.slice(1));
+});
+
+test('hand labels are recorded as whose they are: a worker replaces the labeller, a person replaces a worker, never the other way', async () => {
+  const h = history();
+  h.addRun({ source: 'pr-gate', key: 'k', repo: 'o/r', branch: 'b', sha: 's', finished: iso(0) }, [tc('A.T.one', 'fail'), tc('A.T.two', 'fail')]);
+  const one = h.failureId(1, 'A.T.one')!;
+  const two = h.failureId(1, 'A.T.two')!;
+  assert.ok(h.label(one, 'unknown', 'auto said so', 'auto'));
+  const set = (a: Record<string, unknown>, by?: string) => queryTestHistory(h, { query: 'set_label', ...a } as never, T0, by);
+  assert.match(await set({ failureId: one, label: 'fp', reason: 'passed on a re-run at the same commit' }, 'worker:c9560245'), /now fp, set by worker:c9560245 \(was unknown by auto\)/);
+  await assert.rejects(set({ failureId: one, label: 'fp', reason: 'x' }), /caller is not known/);
+  await assert.rejects(set({ failureId: one, label: 'fp', reason: 'x' }, 'auto'), /caller is not known/);
+  await assert.rejects(set({ failureId: one, label: 'fp' }, 'worker:a'), /needs reason/);
+  await assert.rejects(set({ failureId: 999, label: 'fp', reason: 'x' }, 'worker:a'), /no failure 999/);
+  assert.match(await set({ failureId: two, label: 'detect', reason: 'the fix in #12 made it pass' }, 'person:lothsahn (personal 1234abcd)'), /now detect/);
+  assert.match(await set({ failureId: two, label: 'fp', reason: 'I think it flaked' }, 'worker:c9560245'), /^Not changed/);
+  assert.equal(h.label(one, 'detect', 'auto again', 'auto'), false);
+  assert.ok(h.label(one, 'detect', 'person overrides worker', 'person:lothsahn'));
+  const rows = h.all('SELECT t.name, f.label, f.labelled_by FROM failures f JOIN tests t ON t.id = f.test_id ORDER BY t.name');
+  assert.deepEqual(
+    rows.map((r) => [r.name, r.label, r.labelled_by]),
+    [
+      ['A.T.one', 'detect', 'person:lothsahn'],
+      ['A.T.two', 'detect', 'person:lothsahn (personal 1234abcd)'],
+    ],
+  );
+  const det = readyQuery(h, { query: 'detections' }, T0 + 86_400_000).rows;
+  assert.deepEqual(
+    det.map((r) => [r.test, r.by_worker, r.by_person]),
+    [
+      ['A.T.one', 0, 1],
+      ['A.T.two', 0, 1],
+    ],
+  );
+});
+
+test("a local run is tagged by the session in its record, else by its sandbox's workers, else untagged; a run that never finished is kept", async () => {
+  const src = {
+    workInSandbox: (_m: string, sb: string) =>
+      sb === 'slot4' ? { sessions: ['aaaa1111'], requests: ['w1'] } : sb === 'slot5' ? { sessions: ['b1', 'b2'], requests: ['w2', 'w3'] } : { sessions: [], requests: [] },
+    sessionWork: (id: string) => (id === 'c9560245' ? ['w4922'] : undefined),
+  };
+  assert.deepEqual(localRunTags(src, 'beast', 'slot4', 'c9560245'), { sessions: ['c9560245'], requests: ['w4922'], tagged: 'session' });
+  assert.deepEqual(localRunTags(src, 'beast', 'slot4'), { sessions: ['aaaa1111'], requests: ['w1'], tagged: 'sandbox' });
+  assert.deepEqual(localRunTags(src, 'beast', 'slot5', 'gone0000'), { sessions: ['b1', 'b2'], requests: ['w2', 'w3'], tagged: 'shared' });
+  assert.deepEqual(localRunTags(src, 'beast', '', 'gone0000'), { sessions: ['gone0000'], requests: [], tagged: 'none' });
+  assert.equal(sessionOfTemp('F:/ffw/tmp/ffa-c9560245'), 'c9560245');
+  assert.equal(sessionOfTemp('C:\\Users\\x\\AppData\\Local\\Temp'), undefined);
+
+  const running = parseLocalRecord(
+    JSON.stringify({ version: 1, status: 'running', planned: 300, tmp: 'F:/ffw/tmp/ffa-c9560245/', finished: iso(5), tests: [{ name: 'A.B.c', outcome: 'pass', ms: 4 }] }),
+  )!;
+  assert.equal(running.running, true);
+  assert.equal(running.session, 'c9560245');
+  assert.match(running.info.verdict!, /^incomplete: 1 of 300 tests finished/);
+  const ended = parseLocalRecord(JSON.stringify({ version: 1, status: 'finished', session: 'dddd0000', tmp: 'F:/ffw/tmp/ffa-c9560245', finished: iso(5), tests: [] }))!;
+  assert.equal(ended.running, false);
+  assert.equal(ended.session, 'dddd0000');
+
+  const h = history(T0 + 86_400_000);
+  h.addRun({ ...running.info, source: 'local', key: 'local:beast/slot4/a.json', machine: 'beast', sandbox: 'slot4', ...localRunTags(src, 'beast', 'slot4', running.session) }, running.tests);
+  h.addRun({ source: 'local', key: 'local:beast//b.json', machine: 'beast', finished: iso(6), ...localRunTags(src, 'beast', '') }, []);
+  const all = readyQuery(h, { query: 'local_runs' }, T0 + 86_400_000).rows;
+  assert.deepEqual(
+    all.map((r) => [r.tagged, r.requests, r.tests]),
+    [
+      ['none', null, 0],
+      ['session', 'w4922', 1],
+    ],
+  );
+  assert.equal(readyQuery(h, { query: 'local_runs', untagged: true }, T0 + 86_400_000).rows.length, 1);
+  assert.deepEqual(
+    readyQuery(h, { query: 'local_runs', request: 'w4922' }, T0 + 86_400_000).rows.map((r) => r.verdict),
+    [running.info.verdict],
+  );
+});
+
+test('a database made before runs.tagged gains the column when the portal opens it', () => {
+  const dir = tmp('old');
+  new TestHistory({ dataDir: dir }).close();
+  const old = new DatabaseSync(path.join(dir, 'test-history.db'));
+  old.exec('ALTER TABLE runs DROP COLUMN tagged');
+  assert.ok(!old.prepare('PRAGMA table_info(runs)').all().some((c) => c.name === 'tagged'));
+  old.close();
+  const h = new TestHistory({ dataDir: dir });
+  assert.ok(h.all('PRAGMA table_info(runs)').some((c) => c.name === 'tagged'));
+  h.close();
+});
+
+test("the daemon's spool reads the machine's spool too, names a record's sandbox by its project, and sends a running file only once it is stale", () => {
+  const root = tmp('root');
+  const sbPath = path.join(root, 'sandboxes', 'slot4');
+  const dir = path.join(root, ROOT_SPOOL_DIR);
+  fs.mkdirSync(dir, { recursive: true });
+  const inSandbox = '20261120T120000000-0000000a.json';
+  const outside = '20261120T120001000-0000000b.json';
+  const live = '20261120T120002000-0000000c.running.json';
+  fs.writeFileSync(path.join(dir, inSandbox), JSON.stringify({ project: sbPath.replace(/\\/g, '/') }));
+  fs.writeFileSync(path.join(dir, outside), JSON.stringify({ project: path.join(root, 'tmp', 'ffa-x', 'clone') }));
+  fs.writeFileSync(path.join(dir, live), JSON.stringify({ project: sbPath }));
+  let now = Date.now();
+  const sent: [string, string][] = [];
+  const spool = new TestHistorySpool({ places: () => [{ id: 'slot4', path: sbPath }], root, send: (m) => (sent.push([m.sandbox, m.file]), true), now: () => now });
+  assert.equal(spool.tick(), 2);
+  assert.deepEqual(sent, [
+    ['slot4', inSandbox],
+    ['', outside],
+  ]);
+  assert.equal(sandboxOfProject(`${sbPath}/sub`, [{ id: 'slot4', path: sbPath }]), 'slot4');
+  now += STALE_MS + 60_000;
+  // The two unanswered ones go again (RESEND_MS), and the running file, stale now, with them.
+  assert.equal(spool.tick(), 3);
+  assert.deepEqual(sent[4], ['slot4', live]);
+  spool.ack('', outside, true);
+  spool.ack('slot4', live, true);
+  assert.deepEqual(fs.readdirSync(dir), [inSandbox]);
 });
