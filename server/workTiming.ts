@@ -442,12 +442,18 @@ export function sessionSpans(events: readonly TranscriptEvent[], from: number, t
     push(turnStart, last, 'think');
     push(last, last + TAIL_MS, 'preempt');
     push(last + TAIL_MS, to, 'tail');
+  } else if (gapFrom !== undefined && HOLDS.has(gapCause)) {
+    // w4927: a last turn that handed the request to a person or a gate waits on them until another turn or the close
+    push(gapFrom, to, gapCause);
   } else if (gapFrom !== undefined) {
     push(gapFrom, Math.min(to, gapFrom + TAIL_MS), gapCause);
     push(gapFrom + TAIL_MS, to, 'tail');
   }
   return spans;
 }
+
+/** Hand-offs that last until someone acts, not TAIL_MS: a person's answer, a gate clearing. */
+const HOLDS: ReadonlySet<WorkCause> = new Set(['person', 'blocked']);
 
 /** Every moment of [from, to] once, under the busiest label any span has there; uncovered time is `none`. */
 export function sweep(spans: readonly Span[], from: number, to: number): Partial<Record<WorkCause, number>> {
@@ -505,12 +511,28 @@ export function pickFinished(items: readonly WorkItem[], a: TimingArgs): WorkIte
 }
 
 /** One request measured from its worker sessions' events. */
+/**
+ * Where a session's spans end: the close, or for a session the request was moved off (w4927), the first event of
+ * another session after the move, so its last hand-off covers the wait until the next worker and not that worker's time.
+ */
+export function endOf(w: Pick<WorkItem, 'sessionIds' | 'movedOff'>, id: string, events: ReadonlyMap<string, readonly TranscriptEvent[]>, closed: number): number {
+  const at = Date.parse(w.movedOff?.[id] ?? '');
+  if (!Number.isFinite(at) || w.sessionIds.includes(id)) return closed;
+  let next = closed;
+  for (const [other, evs] of events) {
+    if (other === id) continue;
+    const e = evs.find((x) => Date.parse(x.t) > at);
+    if (e) next = Math.min(next, Date.parse(e.t));
+  }
+  return next;
+}
+
 export function timeRequest(w: WorkItem, events: ReadonlyMap<string, readonly TranscriptEvent[]>, missing: number): RequestTiming | undefined {
   const start = firstStartOf(w, events);
   if (start === undefined) return undefined;
   const filed = Date.parse(w.createdAt);
   const closed = Math.max(closeOf(w), start);
-  const spans = [...[...events.values()].flatMap((evs) => sessionSpans(evs, start, closed, w.id)), ...ledgerSpans(w, start, closed)];
+  const spans = [...[...events].flatMap(([id, evs]) => sessionSpans(evs, start, endOf(w, id, events, closed), w.id)), ...ledgerSpans(w, start, closed)];
   return {
     id: w.id,
     title: w.title,

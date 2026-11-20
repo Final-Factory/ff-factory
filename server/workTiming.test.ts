@@ -332,3 +332,21 @@ test('w4423: a worker the request was moved off is read up to its move, so its t
   // the first turn is s1's at 5 min, not s2's at 200
   assert.match(text, /\| w1 \| [^|]+\| 5m /);
 });
+
+test('w4423/w4298: a last turn that waits on a person holds until the next worker, not TAIL_MS then tail', () => {
+  const w = item('w1', {
+    createdAt: at(0),
+    updatedAt: at(600),
+    sessionIds: ['s2'],
+    movedOff: { s1: at(100) },
+    done: { s2: { at: at(600), report: 'DONE: w1' } },
+  });
+  const s1 = [user(5, 'w1 go'), result(20, 'w1: still open: waiting on Ben to pick')];
+  const s2 = [user(500, 'w1 resume'), result(600, 'DONE: w1')];
+  const r = timeRequest(w, new Map([['s1', s1], ['s2', s2]]), 0)!;
+  assert.equal(r.work.person, 480 * MIN);
+  assert.equal((r.work.tail ?? 0) + (r.work.idle ?? 0) + (r.work.none ?? 0), 0);
+  // an idle last turn still decays to tail after TAIL_MS
+  const idle = sweep(sessionSpans([user(0, 'w1'), result(2)], T0, T0 + 600 * MIN), T0, T0 + 600 * MIN);
+  assert.equal(idle.tail, 598 * MIN - TAIL_MS);
+});

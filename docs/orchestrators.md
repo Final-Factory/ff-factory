@@ -1682,7 +1682,10 @@ first by their last DONE (`last`, default 50, at most 300; `until` for an earlie
   A request's workers are its `sessionIds` and the ones it was moved off (`sessionsOf`: `moveOff` keeps them only in
   `movedOff`), each read up to its move (`movedOffCut`); without them w4423's first worker, on m5 from 11-16, was missed
   and its 33 h showed as filing-to-first-turn. A still-open line that leads with `waiting on <Name> to ...` is a person
-  wait even when what they decide names CI (w4712).
+  wait even when what they decide names CI (w4712). A last turn that hands the request to a person or a gate (`person`,
+  `blocked`: `HOLDS`) keeps that label until the next turn or the close, not `TAIL_MS` then `tail`, and a moved-off
+  worker's spans end at the next worker's first event after the move (`endOf`): with moved-off workers read, w4298 and
+  w4423 showed 46h31 and 31h13 of `tail` that was a wait on Ben.
   Known limit: a session that held several requests counts its turns for the others as thinking time on each.
 
 It reads closed requests, which `read_work` does not, so it needs both grants; it reads the transcripts on the portal
