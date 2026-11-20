@@ -26,6 +26,7 @@ import { budgetOf, ghGet, GH_LOW_EVERY_MS, GH_LOW_REMAINING } from './ghBudget.t
 import { evidenceArgs, evidenceGated, evidencePython, evidenceRefusal, evidenceVerdict, fetchHudData, findLocalPrEvidence, noScriptRefusal } from '../machine/evidenceGate.ts';
 import { pairDelivers, reportDelivers, requestIdsIn, stillOpenIn } from './ledgerRules.ts';
 import { isOpen } from './work.ts';
+import { GAME_REPO } from './pairRuns.ts';
 import { diskWaitIn, lastOpenLine, personWaitOn, portalWaitIn, reportAt, requestWaitOf, siblingWaitOf } from '../shared/workState.ts';
 import type { SessionInfo, WorkBlocker, WorkItem } from '../shared/types.ts';
 import type { RoomNow } from './placement.ts';
@@ -56,7 +57,7 @@ export type PrState = { state: 'open' | 'merged' | 'closed'; text: string; sha?:
 export interface BlockerWatchDeps {
   store: Store;
   orchestrators: Pick<Orchestrators, 'unblock' | 'blockerStuck' | 'blockerDecide' | 'gatesCleared' | 'flagQueuedWithRoom' | 'carryOutConditional' | 'dropConditional'> &
-    Partial<Pick<Orchestrators, 'cutDefaultPairs' | 'tellPrConflict' | 'recordReportedWait' | 'retellReportWaits' | 'noticeLongOffline' | 'noteCiRead' | 'noteReadPaused' | 'sweepResumes' | 'requeueCapacityBlocks' | 'requeueBrokenPairs' | 'replaceNoTimedWaits' | 'timedLegBound' | 'mergedOnGreen' | 'keepMergeReport' | 'undecidedBound' | 'holdSteamPairs' | 'flagDeadWait'>>;
+    Partial<Pick<Orchestrators, 'cutDefaultPairs' | 'tellPrConflict' | 'recordReportedWait' | 'retellReportWaits' | 'noticeLongOffline' | 'noteCiRead' | 'noteReadPaused' | 'sweepResumes' | 'requeueCapacityBlocks' | 'requeueBrokenPairs' | 'pairDidNotCompile' | 'replaceNoTimedWaits' | 'timedLegBound' | 'mergedOnGreen' | 'keepMergeReport' | 'undecidedBound' | 'holdSteamPairs' | 'flagDeadWait'>>;
   /** w1841: tell the workers waiting on a bench lock that is free now (Agents.resumeBenchWaits): request id to what it did. */
   benchResume?: () => [string, string][];
   /** w2544: work waiting on a computer away (offline or paused) past the grace moves elsewhere (Agents.moveAwayWork). */
@@ -97,6 +98,11 @@ export interface BlockerWatchDeps {
   evidenceScript?: () => string | undefined | Promise<string | undefined>;
   /** Whose GitHub token a request's reads use (w868); undefined: the portal's own gh login. */
   githubPerson?: (w: WorkItem) => string | undefined;
+  /**
+   * w4925: what CI says of a commit's compile (ghCompileVerdict): its `error CS` lines once a run failed on them. Set by the
+   * server; absent in tests that do not read GitHub, where no pair run is checked.
+   */
+  compile?: (repo: string, sha: string, person?: string) => Promise<CompileVerdict | undefined>;
   /** The computers with room for one more game worker now. */
   room?: () => string[];
   /** Room for each kind of work and the held computers (w1089, w1098); preferred over `room`. */
@@ -137,6 +143,8 @@ export class BlockerWatch {
   private readonly paused = new Set<string>();
   /** w3758: refusals that do not change, remembered between reads (ghChecks CheckReads). */
   private readonly refused = new Map<string, number>();
+  /** w4925: the compile verdict of each pair run's commit, by "<repo>@<sha>", and when it was read. */
+  private readonly compileSeen = new Map<string, { at: number; done: boolean; lines?: string[]; run?: string }>();
   private readonly d: BlockerWatchDeps;
 
   constructor(d: BlockerWatchDeps) {
@@ -289,6 +297,8 @@ export class BlockerWatch {
       for (const id of this.d.orchestrators.requeueCapacityBlocks?.() ?? []) did.set(id, 'requeued: a block that waited only for capacity');
       // w2304: a pair run that lost a leg mid-run starts again whole, Queued, never Stalled.
       for (const id of this.d.orchestrators.requeueBrokenPairs?.() ?? []) did.set(id, 'requeued: a pair run that lost a leg mid-run');
+      // w4925: a pair run whose commit CI failed to compile ends with the errors, before its legs build and run players.
+      for (const [id, why] of await this.compileFailedPairs()) did.set(id, why);
       // w2422: a wait a stopped worker's report names with no blocked_on recorded becomes its gate first, so the look below
       // clears it and resumes that worker like any other.
       for (const [id, why] of this.recordReportedWaits()) did.set(id, why);
@@ -434,6 +444,38 @@ export class BlockerWatch {
       this.kick();
     }
     return did;
+  }
+
+  /**
+   * w4925: open pair runs whose recorded commit CI failed to compile, each ended by Orchestrators.pairDidNotCompile with
+   * the `error CS` lines. A commit is read at most every COMPILE_READ_MS until its runs finish, then never again.
+   */
+  private async compileFailedPairs(): Promise<[string, string][]> {
+    const out: [string, string][] = [];
+    if (!this.d.compile || !this.d.orchestrators.pairDidNotCompile) return out;
+    const now = this.now();
+    for (const w of [...this.d.store.work.values()]) {
+      const sha = w.pair?.commit;
+      if (!sha || !isOpen(w)) continue;
+      const repo = w.pair!.pr?.split('#')[0] || GAME_REPO;
+      const key = `${repo.toLowerCase()}@${sha.toLowerCase()}`;
+      let seen = this.compileSeen.get(key);
+      if (!seen || (!seen.done && now - seen.at >= COMPILE_READ_MS)) {
+        let v: CompileVerdict | undefined;
+        try {
+          v = await this.d.compile(repo, sha, this.d.githubPerson?.(w));
+        } catch (e) {
+          console.warn(`blocker watch: ${w.id}: CI of ${sha.slice(0, 10)} unread: ${clipLine((e as Error).message, 200)}`);
+        }
+        seen = { at: now, done: !!v?.done || !!v?.lines?.length, ...(v?.lines?.length ? { lines: v.lines } : {}), ...(v?.run ? { run: v.run } : {}) };
+        this.compileSeen.set(key, seen);
+      }
+      if (!seen.lines?.length) continue;
+      const why = this.d.orchestrators.pairDidNotCompile(w.id, sha, seen.lines, seen.run);
+      if (why) out.push([w.id, why]);
+    }
+    for (const [k, v] of this.compileSeen) if (now - v.at > 24 * 3600_000) this.compileSeen.delete(k);
+    return out;
   }
 
   /**
@@ -808,6 +850,57 @@ interface GhRun {
   status?: string;
   conclusion?: string | null;
   head_sha?: string;
+}
+
+/** w4925: how often an open pair run's commit is read for a compile failure while its CI runs. */
+export const COMPILE_READ_MS = 2 * 60_000;
+
+/** w4925: what CI says of a commit's compile: done once no run is still going; `lines` the `error CS` lines of a failed run. */
+export interface CompileVerdict {
+  done: boolean;
+  lines?: string[];
+  /** The failed run's link. */
+  run?: string;
+}
+
+const CS_ERROR = /(?:[^\s'"]+\.cs\(\d+,\d+\): )?error CS\d{4}: [^\r\n]*/g;
+
+/**
+ * w4925: the distinct C# compile errors in a CI log (`gh run view --log-failed`: "<job>, <step>, <time> <line>"), at most
+ * `max`, each "<file>(<line>,<col>): error CSnnnn: <message>". Unity prints each error more than once; a repeat is dropped.
+ */
+export function compileErrorsIn(log: string, max = 5): string[] {
+  const out: string[] = [];
+  for (const m of log.matchAll(CS_ERROR)) {
+    const line = m[0].replace(/\s+$/, '');
+    if (!out.includes(line)) out.push(line);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+/**
+ * w4925: whether CI on `sha` of `repo` failed to compile, read from its Actions runs (a fine-grained token reads them, w829)
+ * and the failed log of each failed run (at most two). A short sha is resolved first (the runs filter takes a full one).
+ */
+export async function ghCompileVerdict(repo: string, sha: string, run: Runner = runProc): Promise<CompileVerdict> {
+  const opts: RunOptions = { timeoutMs: 60_000 };
+  let full = sha.toLowerCase();
+  if (full.length < 40) {
+    const r = await run('gh', ['api', `repos/${repo}/commits/${full}`, '--jq', '.sha'], opts);
+    if (r.code !== 0) throw new Error(`gh could not resolve ${full} in ${repo}: ${clipLine(r.stderr || r.stdout, 200)}`);
+    full = r.stdout.trim().toLowerCase();
+  }
+  const r = await run('gh', ['api', `repos/${repo}/actions/runs?head_sha=${full}&per_page=50`], opts);
+  if (r.code !== 0) throw new Error(`gh could not read the runs of ${full.slice(0, 10)} in ${repo}: ${clipLine(r.stderr || r.stdout, 200)}`);
+  const runs = ((JSON.parse(r.stdout) as { workflow_runs?: (GhRun & { id?: number; html_url?: string })[] }).workflow_runs ?? []).filter((x) => !x.head_sha || sameCommit(x.head_sha, full));
+  const failed = runs.filter((x) => (x.status ?? '').toLowerCase() === 'completed' && (x.conclusion ?? '').toLowerCase() === 'failure' && x.id);
+  for (const f of failed.slice(0, 2)) {
+    const log = await run('gh', ['run', 'view', String(f.id), '-R', repo, '--log-failed'], { ...opts, timeoutMs: 120_000 });
+    const lines = log.code === 0 ? compileErrorsIn(log.stdout) : [];
+    if (lines.length) return { done: true, lines, ...(f.html_url ? { run: f.html_url } : {}) };
+  }
+  return { done: runs.length > 0 && runs.every((x) => (x.status ?? '').toLowerCase() === 'completed') };
 }
 
 /**

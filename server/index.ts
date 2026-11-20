@@ -28,7 +28,7 @@ import { LedgerSweep, slugOf } from './ledgerSweep.ts';
 import { AutoDeploy, ghAutoDeploy, heldLine } from './autoDeploy.ts';
 import { run as runProc } from './proc.ts';
 import { portalPrEvidence } from '../machine/evidenceGate.ts';
-import { BlockerWatch, ghEvidenceRefusal, ghPrHealth } from './blockerWatch.ts';
+import { BlockerWatch, ghCompileVerdict, ghEvidenceRefusal, ghPrHealth } from './blockerWatch.ts';
 import { MasterBatchWatch } from './masterBatch.ts';
 import { TestHistory, parseLocalRecord, queryTestHistory, type QueryArgs } from './testHistory.ts';
 import { TestHistoryCi, testHistorySettings } from './testHistoryCi.ts';
@@ -1005,6 +1005,8 @@ const blockerWatch = new BlockerWatch({
   githubPerson: (w) => githubPersonOf(tokenPersonForWork(cfg, w), w, identity.systemPayer().userId),
   // w3110: the merge-on-green pilot's Evidence check runs here, on the portal: its own checkout of the plugin repo.
   evidenceScript: () => portalPrEvidence({ dataDir: cfg.dataDir, run: runProc }),
+  // w4925: a pair run of a commit whose CI failed to compile ends with the errors before its legs run players.
+  compile: (repo, sha, person) => ghCompileVerdict(repo, sha, ghRunner(person, `the compile of ${sha.slice(0, 10)}`)),
 });
 agents.blockerWatch = blockerWatch;
 // A usage gate keeps the pool's own name for its ref and the hold's end (w1126: "vault-lothsahn-1" never matched and never cleared).
