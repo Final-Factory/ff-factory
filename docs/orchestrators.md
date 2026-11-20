@@ -1537,6 +1537,11 @@ from the other pilots, server/mergeOnGreen.ts) is in the arm:
   exit 0: a FAIL, a usage error, a gh failure, or no script to run (w3088, after #3180 merged on green with a failing
   Evidence section). `ff-pr merge` (machine/prFlow.ts evidencePasses) and a raw `gh pr merge` or API merge in a worker's
   shell (server/guard.ts ghEvidence) run the same check. A pull request with no game code or assets passes it.
+  On a worker's machine, a refusal that says only that the copy is older than the released ff-agents ("this
+  pr_evidence.py is ff-agents X, but Y is released") updates the plugin (`claude plugin marketplace update` and `claude plugin
+  update`, machine/evidenceGate.ts updateLocalPlugin) and checks once more with the newest copy, in both of those paths
+  (w4926: w4873's version bump was refused at 1.34.382 against 1.34.383, since plugins otherwise move only with a deploy).
+  Any other refusal, a failed update or the second verdict stands.
   Final-Factory/ffu is checked the same way since w3098 (EVIDENCE_GATED): an ffu pull request that touches `art/` or the
   code that draws the image (`crates/ffu-bake/src`, `crates/ffu-render/src` and `effects/`, `crates/ffu-client/src/fx.rs`,
   any `.wgsl`; w3097) is not merged without its `Reference capture:` and `Art language:` lines, and any other ffu pull
