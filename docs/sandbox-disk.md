@@ -164,6 +164,15 @@ script turned dedup on for V:, with these settings:
 - A SYSTEM task, `ffsb-helper-dedupstatus`, that the worker user may start. It writes `Get-ReFSDedupStatus` to
   `C:\ProgramData\ffsb-helpers\results\dedup-status.json`.
 
+**Checking dedup without admin (w4872).** `Get-ReFSDedupStatus` and `Get-ReFSDedupSchedule` answer "Access is denied"
+to a worker, but the event log is readable:
+`Get-WinEvent -LogName 'Microsoft-Windows-ReFsDedupSvc/Operational' -MaxEvents 20`. Event 3 is a job's start, and
+its JSON gives `SizeOnDisk`, `TotalDedupSavings` and the run's parameters (`FullDedup`). Event 4 is its stop, and its
+JSON gives `RunStatus`, `StatusCode`, `Duration`, `ScannedOnLastRun` and `DedupedOnLastRun`. On LothDesktop the daily
+job starts at 08:00Z, which is 03:00 local, even though the task's trigger and `NextTime` read 07:00Z (measured, events
+from 2026-11-12 to 11-19). Total savings fell from 238 GB to 203 GB between 11-17 and 11-19 while every run
+succeeded. That is the decay described below, not a fault.
+
 The full log is `C:\ProgramData\ffsb-helpers\results\refs-dedup-trial.log`. To undo:
 `Clear-ReFSDedupSchedule -Volume V:` then `Disable-ReFSDedup -Volume V:`. Data already shared stays shared (sourced).
 
