@@ -347,3 +347,67 @@ test('w4498: ff-pr push warns when the PR would fail the Evidence check at the m
   assert.equal(prMain(['push'], passing), 0);
   assert.doesNotMatch(passing.said, /WARNING/);
 });
+
+/**
+ * w4926: what pr_evidence.py printed for w4873's version bump on LothDesktop, 2026-11-20: the machine's ff-agents was one
+ * release behind, so ff-pr merge refused a PR whose Evidence was fine, until a hand-run plugin update. ff-pr now updates the
+ * plugin, finds the script again and checks once more.
+ */
+const STALE_4873 = `evidence-gate: FAIL (pr_evidence.py, ff-agents 1.34.382, the evidence-gate skill)
+- this pr_evidence.py is ff-agents 1.34.382, but 1.34.383 is released: its rules are older than the team's. Update it (\`claude plugin marketplace update final-factory-agents && claude plugin update ff-agents@final-factory-agents\`, or registerAgents.sh in your checkout) and run the newest copy, found with \`sort -V\` (checklists/merge.md)
+`;
+
+function staleFake(after: Ran, update: string | undefined = undefined) {
+  const answers: Ran[] = [{ code: 1, out: STALE_4873, err: '' }, after];
+  const d = fake(GAME, undefined);
+  let script = 'pe.py';
+  const updates: number[] = [];
+  const run = d.run;
+  d.run = (cmd, args) => (cmd === 'py' ? (d.ran.push([cmd, ...args].join(' ')), answers.length > 1 ? answers.shift()! : answers[0]) : run(cmd, args));
+  d.evidenceScript = () => script;
+  d.updatePlugin = () => {
+    updates.push(1);
+    if (!update) script = 'pe-new.py';
+    return update;
+  };
+  return { d, updates };
+}
+
+test('w4926: a stale pr_evidence.py is updated and run again, and the merge goes on when the new copy passes', () => {
+  const { d, updates } = staleFake({ code: 0, out: PASS, err: '' });
+  assert.equal(prMain(['merge', '--pr', '3180'], d), 0);
+  assert.equal(updates.length, 1, 'one plugin update');
+  assert.ok(d.ran.includes('py pe.py --repo Final-Factory/FinalFactory --pr 3180'));
+  assert.ok(d.ran.includes('py pe-new.py --repo Final-Factory/FinalFactory --pr 3180'), 'the newest copy, found again after the update');
+  assert.ok(merged(d));
+  assert.match(d.said, /ff-agents 1\.34\.382, but 1\.34\.383 is released: updating the plugin and checking again/);
+  assert.match(d.said, /Evidence: .*PASS/);
+});
+
+test('w4926: after the update the new verdict stands: a real FAIL still refuses, and the retry happens once', () => {
+  const real = staleFake({ code: 1, out: FAIL_3180, err: '' });
+  assert.equal(prMain(['merge', '--pr', '3180'], real.d), 1);
+  assert.equal(merged(real.d), false);
+  assert.match(real.d.said, /no 'Not verified:' line/);
+  const still = staleFake({ code: 1, out: STALE_4873, err: '' });
+  assert.equal(prMain(['merge', '--pr', '3180'], still.d), 1);
+  assert.equal(still.updates.length, 1, 'no loop');
+  assert.equal(still.d.ran.filter((l) => l.startsWith('py ')).length, 2);
+});
+
+test('w4926: a failed plugin update refuses with the stale reason and says what the update said', () => {
+  const { d } = staleFake({ code: 0, out: PASS, err: '' }, 'claude plugin update ff-agents@final-factory-agents: network unreachable');
+  assert.equal(prMain(['merge', '--pr', '3180'], d), 1);
+  assert.equal(merged(d), false);
+  assert.match(d.said, /the plugin update failed: claude plugin update .*network unreachable/);
+  assert.match(d.said, /but 1\.34\.383 is released/);
+  assert.equal(d.ran.filter((l) => l.startsWith('py ')).length, 1);
+});
+
+test('w4926: other refusals never update the plugin', () => {
+  const d = fake(GAME, { code: 1, out: FAIL_3180, err: '' });
+  let updates = 0;
+  d.updatePlugin = () => { updates++; return undefined; };
+  assert.equal(prMain(['merge', '--pr', '3180'], d), 1);
+  assert.equal(updates, 0);
+});

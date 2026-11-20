@@ -17,7 +17,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { ghEnvFor, readGhAppTokens, remotesOf } from './ghApp.ts';
 import { awayLabelsOf, awayNote, failedNote, offlineLabels, settleJobs, type Leg } from './awayRunners.ts';
-import { evidenceArgs, evidenceGated, evidencePython, evidenceRefusal, evidenceVerdict, findLocalPrEvidence, noScriptRefusal } from './evidenceGate.ts';
+import { STALE_EVIDENCE, evidenceArgs, evidenceGated, evidencePython, evidenceRefusal, evidenceVerdict, findLocalPrEvidence, noScriptRefusal, updateLocalPlugin } from './evidenceGate.ts';
 
 export interface Ran {
   code: number;
@@ -32,6 +32,12 @@ export interface PrDeps {
   /** w3088: the pr_evidence.py `merge` runs on a gated repository's pull request first (machine/evidenceGate.ts); none refuses. */
   evidenceScript?: () => string | undefined;
   python?: string;
+  /**
+   * w4926: brings this machine's ff-agents plugin up to the released version (claude plugin marketplace update, then
+   * claude plugin update), for a refusal that says only that the local pr_evidence.py is older than the released one.
+   * Answers what went wrong, or undefined when it worked. None: such a refusal stands.
+   */
+  updatePlugin?: () => string | undefined;
 }
 
 /** One workflow run on the PR's head, as `gh run list --json` answers it. */
@@ -301,6 +307,29 @@ export function push(d: PrDeps, o: Opts): number {
 }
 
 /**
+ * One Evidence check. w4926: when what is wrong is that this machine's ff-agents is a release behind (w4873's version bump
+ * was refused at 1.34.382 against 1.34.383, and passed after a hand-run plugin update), ff-pr updates the plugin, finds the
+ * newest pr_evidence.py again and runs it once more, instead of refusing for a reason no PR edit fixes. Any other refusal,
+ * a failed update, or a second run's verdict stands as it is.
+ */
+function runEvidence(d: PrDeps, script: string, repo: string, pr: number): { r: Ran; v: ReturnType<typeof evidenceVerdict> } {
+  const once = (s: string) => {
+    const r = d.run(d.python ?? evidencePython(), evidenceArgs(s, repo, pr));
+    return { r, v: evidenceVerdict(r.code, r.out, r.err) };
+  };
+  const first = once(script);
+  const stale = first.v.ok ? null : STALE_EVIDENCE.exec(`${first.r.out}\n${first.r.err}`);
+  if (!stale || !d.updatePlugin) return first;
+  d.write(`ff-pr: this machine's pr_evidence.py is ff-agents ${stale[1]}, but ${stale[2]} is released: updating the plugin and checking again\n`);
+  const failed = d.updatePlugin();
+  if (failed) {
+    d.write(`ff-pr: the plugin update failed: ${failed}\n`);
+    return first;
+  }
+  return once(d.evidenceScript?.() ?? script);
+}
+
+/**
  * w4498: after a push, the Evidence check the merge will run, as a warning only: a description that fails it is fixed now,
  * not found after green CI (FinalFactory #3748 and #3760 had no Evidence section, each refused only at the merge).
  */
@@ -309,8 +338,7 @@ function evidenceWarning(d: PrDeps, pr: Pr): void {
   if (!evidenceGated(repo)) return;
   const script = d.evidenceScript?.();
   if (!script) return;
-  const r = d.run(d.python ?? evidencePython(), evidenceArgs(script, repo, pr.number));
-  const v = evidenceVerdict(r.code, r.out, r.err);
+  const { r, v } = runEvidence(d, script, repo, pr.number);
   if (v.ok) return;
   d.write(
     `ff-pr: WARNING: ${evidenceRefusal(repo, pr.number, r.code, v)}\n` +
@@ -353,8 +381,7 @@ function evidencePasses(d: PrDeps, pr: Pr): boolean {
     d.write(`ff-pr: not merged: ${noScriptRefusal(repo, pr.number)}\n`);
     return false;
   }
-  const r = d.run(d.python ?? evidencePython(), evidenceArgs(script, repo, pr.number));
-  const v = evidenceVerdict(r.code, r.out, r.err);
+  const { r, v } = runEvidence(d, script, repo, pr.number);
   if (v.ok) {
     d.write(`ff-pr: Evidence: ${v.lines[0]}\n`);
     return true;
@@ -419,6 +446,7 @@ export const realPrDeps: PrDeps = {
   write: (s) => void process.stdout.write(s),
   sleep: (ms) => void Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms),
   evidenceScript: () => findLocalPrEvidence(),
+  updatePlugin: () => updateLocalPlugin(),
 };
 
 /** Write the ff-pr shims (sh for Git Bash and macOS/Linux, .cmd for PowerShell) into the agents' bin folder. */

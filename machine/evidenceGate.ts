@@ -9,6 +9,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 
 type PlatformPath = typeof path.posix;
 
@@ -78,6 +79,26 @@ export function findPrEvidence(d: FindDeps): string | undefined {
     if (!best || newer(v, best.v)) best = { script, v };
   }
   return best?.script;
+}
+
+/** pr_evidence.py's refusal of itself (its stale_problem): this copy is older than the released ff-agents. */
+export const STALE_EVIDENCE = /this pr_evidence\.py is ff-agents (\S+), but (\S+) is released/;
+
+/**
+ * w4926: brings this machine's ff-agents plugin up to the released version, the update pr_evidence.py's stale refusal names
+ * (`claude plugin marketplace update final-factory-agents`, then `claude plugin update ff-agents@final-factory-agents`).
+ * Plugins otherwise move only when a portal deploy runs registerAgents.sh, so a release made between two deploys refused
+ * every gated merge on a machine (w4873, 1.34.382 against 1.34.383). Answers what went wrong, or undefined when it worked.
+ * 2.9 to 3.3 s on LothDesktop (measured, 2026-11-20).
+ */
+export function updateLocalPlugin(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string | undefined {
+  const opts = { encoding: 'utf8', windowsHide: true, timeout: 5 * 60_000, env } as const;
+  for (const args of [['plugin', 'marketplace', 'update', 'final-factory-agents'], ['plugin', 'update', 'ff-agents@final-factory-agents']]) {
+    // claude is an npm shim (claude.cmd) on Windows, which spawnSync runs only through a shell; the words are fixed.
+    const r = platform === 'win32' ? spawnSync(`claude ${args.join(' ')}`, { ...opts, shell: true }) : spawnSync('claude', args, opts);
+    if (r.status !== 0) return `claude ${args.join(' ')}: ${(r.stderr || r.stdout || r.error?.message || `exit ${r.status}`).replace(/\s+/g, ' ').trim().slice(0, 300)}`;
+  }
+  return undefined;
 }
 
 export const findLocalPrEvidence = (env: NodeJS.ProcessEnv = process.env) => findPrEvidence({ env, home: os.homedir() });

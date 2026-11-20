@@ -16,6 +16,7 @@ import { bus, type DistributiveOmit } from '../server/store.ts';
 import { CATALOG, buildOptions, githubCredentialEnv, type CatalogTool, type LaunchSpec, type ToolHandler } from '../server/launch.ts';
 import { MAIN_CLONE_NO_AGENTS, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION, RELOCATE_FALLBACK_MINUTES, SELF_UPDATE_VERSION, relocateProblem, type DaemonLiveView, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
 import { writeFileDurable } from '../server/durable.ts';
+import { LoopWatch, linkBeat } from '../server/loopWatch.ts';
 import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, pidAlive, readHostState } from './agentHost.ts';
 import { SelfUpdater } from './selfUpdate.ts';
 import { installSshOf } from './installSsh.ts';
@@ -342,6 +343,11 @@ const HOME = os.homedir();
 /** A knob's later moves within this long amend its line in the conversation instead of adding one (a drag is one line). */
 const LIVE_LINE_MERGE_MS = 5000;
 const STATS_MS = 15_000;
+/** The link heartbeat (w4926): a ping every LINK_BEAT_MS; the portal is called silent after LINK_DEAD_MS with nothing from it. */
+const LINK_BEAT_MS = 20_000;
+const LINK_DEAD_MS = 45_000;
+/** A daemon block this long gets a line in daemon.log (w4926); shorter ones count only in the 10-minute summary. */
+const DAEMON_STALL_LOG_MS = 5_000;
 /** w1996: how often the bench queue's cost per hour goes to the portal (it also goes after each welcome). */
 const BENCH_HOURS_MS = 60 * 60_000;
 /** How often this Mac's own login's usage is polled until the portal says (usage_config: config usagePollMinutes). */
@@ -388,6 +394,10 @@ export class Daemon {
   private readonly sending = new Map<string, Promise<void>>();
   private attempt = 0;
   private lastPong = 0;
+  /** When the link heartbeat last ran: a beat that comes late was a stall here, not the portal's silence (w4926). */
+  private lastBeat = 0;
+  /** The daemon's own event-loop watch (w4926): a block is a line in daemon.log, beside what ran around it. */
+  private loopWatch?: LoopWatch;
   private stopped = false;
   /** What keeps the machine awake while agents run: caffeinate on a Mac, a PowerShell holding SetThreadExecutionState on Windows. */
   private caffeinate?: ChildProcess;
@@ -1326,7 +1336,8 @@ export class Daemon {
     const watch = readOutsideWatch(outsideWatchFile(appDirOfConfig(this.cfg)));
     if (watch) this.outsideWatch = new OutsideWatch(watch);
     this.timers.push(setInterval(() => void this.outsideWatch?.tick(), 60_000));
-    this.timers.push(setInterval(() => this.heartbeat(), 20_000));
+    this.timers.push(setInterval(() => this.heartbeat(), LINK_BEAT_MS));
+    this.loopWatch = new LoopWatch({ log: (l) => log(l), who: 'the daemon', stallLogMs: DAEMON_STALL_LOG_MS }).start();
     // An update job's result (w1596): sent once the link is up, then the job's task or LaunchAgent removed.
     this.timers.push(setInterval(() => void this.selfUpdate.tick().catch((e) => log(`update job report: ${(e as Error).message}`)), 10_000));
     this.timers.push(setInterval(() => void this.reportStats(), STATS_MS));
@@ -1396,6 +1407,7 @@ export class Daemon {
     this.cliScrub?.stop();
     clearTimeout(this.usageTimer);
     for (const t of this.timers) clearInterval(t);
+    this.loopWatch?.stop();
     this.slots.close();
     // Not on purpose (a redeploy, a restart, logging off): each agent keeps its restart marks (turnOpenSince), so the
     // portal knows which ones were mid-turn and resumes them when the daemon is back (MachineManager.resumeCutOff).
@@ -1595,9 +1607,16 @@ export class Daemon {
 
   private heartbeat() {
     const ws = this.ws;
+    const now = Date.now();
+    const last = this.lastBeat;
+    this.lastBeat = now;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    if (Date.now() - this.lastPong > 45_000) {
-      log('portal silent for 45 s; reconnecting');
+    const beat = linkBeat(now, last, this.lastPong, LINK_BEAT_MS, LINK_DEAD_MS);
+    if (beat === 'late') {
+      // The pong may be waiting unread behind the block (Node runs due timers before it polls sockets): judge next beat.
+      log(`link heartbeat ran ${((now - last) / 1000).toFixed(1)} s after the last (due every ${LINK_BEAT_MS / 1000} s): this daemon was blocked; not judging the portal on this beat`);
+    } else if (beat === 'dead') {
+      log(`portal silent for ${((now - this.lastPong) / 1000).toFixed(0)} s; reconnecting`);
       ws.terminate();
       return;
     }
