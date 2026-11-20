@@ -341,6 +341,8 @@ export interface Config {
    */
   timing?: { unavailableIdleMinutes?: number; unavailableBusyMinutes?: number };
   masterBatch?: { enabled?: boolean; autoApprove?: { enabled?: boolean; maxPerDay?: number }; repo?: string; workflow?: string };
+  /** ffu's post-merge revert verdicts, handed to the reverted PR's request (w4930, server/ffuPostMerge.ts): on, Final-Factory/ffu, ci.yml by default. */
+  ffuPostMerge?: { enabled?: boolean; repo?: string; workflow?: string };
   /**
    * The per-test history (w4922, server/testHistory.ts, docs/test-history.md): CI's test artifacts of repo
    * (Final-Factory/FinalFactory) are read every 5 minutes, back to backfillDays (21, at most 90). On unless enabled is false.

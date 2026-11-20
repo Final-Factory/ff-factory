@@ -762,6 +762,36 @@ back to its request.
   config.json only. A dry run polls nothing. The read failing (no token, the workflow absent) is logged at the start and every
   30 minutes.
 
+## ffu post-merge reverts
+
+lothsahn, 2026-11-20 (w4923): "Run crosscompare and the mac-only checks after merge, reverting on red". ffu's `ci.yml`
+(ffu PR #921) runs its macOS checks and crosscompare on every push to `main`, after the merge. On red its `culprit` job
+(`tools/ci-runners/postmerge_culprit.py` in ffu) bisects to the merge that broke them, reverts it on `main` itself, comments on
+its pull request and prints one line, `POSTMERGE_VERDICT {json}` (tip, branch, culprit, pr, revert, verdict, why). Unlike the
+master batch, the revert is done already: what is left is landing the fix again. This watch (`server/ffuPostMerge.ts`,
+`FfuPostMergeWatch`, w4930) hands that back, on masterBatch.ts's GitHub reads (`ghMasterBatch` with branch `main`, job
+`culprit`) and its PR-to-request lookup (`requestsForPr`, then the PR's `Request:` / `Part of:` lines).
+
+- **The source.** Every 3 minutes the newest 30 runs of ffu's `ci.yml` on `main`, on the system payer's GitHub token. For
+  each finished run attempt not seen before, the `culprit` job's log; a run without that job, or with it skipped (the checks
+  were green), is only recorded. The **last** `POSTMERGE_VERDICT` line is read (`parsePostMergeVerdict`): the tip must be a
+  full sha, a bad culprit, revert or PR number becomes null, texts are cleaned and cut. The log is data.
+- **reverted.** The reverted PR's request: one log line and a note (its next worker's brief) saying to land the fix again
+  (a new branch from `origin/main`, `git revert <revert sha>` to start from the change, fix what the run's check shows, a
+  new PR). A **done** request is **reopened** (its earlier DONEs and the reverted PR no longer count, w731) and the dispatcher
+  told; an open one keeps its state and a worker busy on it is told; its people hear it (`Orchestrators.tellPostMergeRevert`,
+  once per run and culprit). A PR read that fails is tried again at the next look.
+- **A person must look.** `not reverted`, `no culprit`, a verdict this does not know, a culprit job with no verdict line
+  (failed, timed out, cancelled), and a revert whose PR leads to no request that can take it (none named, no PR number, or
+  only a cancelled or rejected request): the ops people's orchestrators (`OPS_PEOPLE`, Lothsahn and Ben; else the system
+  payer) get `[ffu post-merge] A person must look: …` with the run, and the portal log a warning.
+- **Logged only.** `not reproduced` (the red was the runner's), `already reverted` (another run's culprit job reverted it,
+  and that run was routed) and `would revert` (a dry run of the script).
+- **Once.** Each run attempt is handled once, kept in `<dataDir>/ffu-postmerge.json`, and the mark on the request's log
+  stops a second tell. No baseline on a first start (the culprit job is new); a run finished more than 48 hours ago is never
+  acted on. `ffuPostMerge.enabled` (default true), `ffuPostMerge.repo` (`Final-Factory/ffu`) and `ffuPostMerge.workflow`
+  (`ci.yml`) in config.json; a dry run polls nothing. The verdict format is ffu's: a change there (w4923) needs one here.
+
 ## The nightly run
 
 Lothsahn, 2026-10-10 (w864): "Let's restructure the nightly desync run. It shouldn't be a scheduled windows task. Let's
@@ -1000,9 +1030,10 @@ setting under the same guard as `intake.ffbox`, and it applies at once, with no 
 },
 "providers": { "ffbox": { "enabled": false, "sendWork": false, "devRequests": { "enabled": true, "perHour": 20, "maxFiles": 10, "maxRequestMB": 500 } } },
 "masterBatch": { "enabled": true, "autoApprove": { "enabled": true, "maxPerDay": 10 }, "repo": "Final-Factory/FinalFactory", "workflow": "master-batch.yml" }
+"ffuPostMerge": { "enabled": true, "repo": "Final-Factory/ffu", "workflow": "ci.yml" }
 ```
 
-`masterBatch` (w1180, [Master batch reds](#master-batch-reds)) is the one block that is **on** by default.
+`masterBatch` (w1180, [Master batch reds](#master-batch-reds)) and `ffuPostMerge` (w4930, [ffu post-merge reverts](#ffu-post-merge-reverts)) are the blocks that are **on** by default.
 
 Channel names are the ffbox config's `discord.channels` aliases (or channel ids). Discord ids in `trusted` are
 snowflakes; an entry that is not one trusts nobody.
