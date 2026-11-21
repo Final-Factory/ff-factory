@@ -349,6 +349,12 @@ export interface Config {
    */
   testHistory?: { enabled?: boolean; repo?: string; backfillDays?: number };
   /**
+   * The daily merge-gate tuning (w4928, server/gateTuning.ts, docs/gate-tuning.md), from the per-test history: on unless
+   * enabled is false, due from hourUtc (9) each day; its one request a day for the tests the gate missed is auto-approved
+   * unless autoApprove.enabled is false (maxPerDay 1, at most 10).
+   */
+  gateTuning?: { enabled?: boolean; hourUtc?: number; autoApprove?: { enabled?: boolean; maxPerDay?: number } };
+  /**
    * The automatic portal deploy (w1634, server/autoDeploy.ts, docs/ops-worker.md "Automatic deploys"): a new commit on this
    * app's main with green CI is deployed by itself once main has been quiet for quietMinutes (15) or the first undeployed
    * commit has waited maxWaitMinutes (60). On unless enabled is false (set_app_config autoDeploy.enabled); only on the

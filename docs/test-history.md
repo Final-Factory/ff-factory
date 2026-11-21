@@ -119,7 +119,9 @@ label never replaces one a person or worker set.
   `auto`, `worker:<session>` or `person:<name> (<role> <session>)`.
 - `coverage(class, type)`: each test class and the production types its file names, from the newest master batch's
   `coverage.json` (`scripts/test_select.py`).
-- `meta(k, v)`: `recorded_since`, `ci_oldest`, `coverage_sha`.
+- `meta(k, v)`: `recorded_since`, `ci_oldest`, `coverage_sha`, and the gate tuning's `gate_tuning_baseline` and
+  `gate_tuning_handled`.
+- `gate_tuning(day, at, summary, json)`: the daily merge-gate tuning's result, one row a day ([gate-tuning.md](gate-tuning.md)).
 
 ## Querying
 
@@ -137,6 +139,7 @@ only; `set_label` is its one write.
 | `{query: "test", test: "BeltTest"}` | one test's runs per day and source |
 | `{query: "local_runs", request: "w4922"}` | one request's local runs, with how each was tagged and any incomplete verdict; `untagged: true` for the runs with no request |
 | `{query: "set_label", failureId: 123, label: "fp", reason: "passed on a re-run at the same commit"}` | a hand label (below) |
+| `{query: "gate_tuning"}` | the daily merge-gate tuning's newest summary: tests the gate missed and what was filed to pull them in, and the always-run checks proposed to move out, with runs, span, time and the crown-jewel flag ([gate-tuning.md](gate-tuning.md)) |
 | `{query: "sql", sql: "SELECT ..."}` | one read-only SELECT (or WITH), at most 200 rows, stopped after 10 s |
 
 `sources` limits any query to some sources (`["pr-gate", "master-batch"]`), and `days` sets the window (30).

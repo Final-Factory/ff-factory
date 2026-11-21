@@ -26,6 +26,7 @@ export function sourceLabel(s: WorkSource): string {
     case 'nightly-review':
       return `Nightly merge review${s.nightlyReview?.date ? ` ${s.nightlyReview.date}` : ''}`;
     case 'master-batch':
+      if (s.masterBatch?.kind === 'gate-miss') return `Merge-gate tuning ${s.masterBatch.tip}`;
       return `Master batch red${s.masterBatch?.pr ? ` (#${s.masterBatch.pr})` : ''}`;
   }
 }

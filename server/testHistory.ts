@@ -16,6 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Worker } from 'node:worker_threads';
 import { DatabaseSync } from 'node:sqlite';
+import type { GateTuning } from './gateTuning.ts';
 
 export const TEST_HISTORY_FILE = 'test-history.db';
 /** Per-test results are kept this long (a failing run's until its failures are labelled); the failures and their labels for good. */
@@ -264,6 +265,7 @@ CREATE TABLE IF NOT EXISTS coverage(class TEXT NOT NULL, type TEXT NOT NULL, PRI
 CREATE INDEX IF NOT EXISTS coverage_type ON coverage(type);
 CREATE TABLE IF NOT EXISTS run_starts(key TEXT PRIMARY KEY, sessions TEXT, requests TEXT, tagged TEXT NOT NULL, at TEXT NOT NULL) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS ci_seen(artifact_id INTEGER PRIMARY KEY, status TEXT, tries INTEGER NOT NULL DEFAULT 0, at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS gate_tuning(day TEXT PRIMARY KEY, at TEXT NOT NULL, summary TEXT NOT NULL, json TEXT NOT NULL) WITHOUT ROWID;
 `;
 
 type Row = Record<string, string | number | null>;
@@ -530,6 +532,11 @@ export class TestHistory {
   all(sql: string, ...args: (string | number | null)[]): Row[] {
     return this.db.prepare(sql).all(...args) as Row[];
   }
+
+  /** The daily merge-gate tuning's own row (server/gateTuning.ts, w4928): one per day, the newest replacing that day's. */
+  saveGateTuning(day: string, at: string, summary: string, json: string) {
+    this.db.prepare('INSERT INTO gate_tuning(day, at, summary, json) VALUES(?,?,?,?) ON CONFLICT(day) DO UPDATE SET at = excluded.at, summary = excluded.summary, json = excluded.json').run(day, at, summary, json);
+  }
 }
 
 /** One key for a local run's running and finished files, so a run is recorded once. */
@@ -578,7 +585,7 @@ export async function labelFailures(h: TestHistory, prDiff: PrDiff, now = Date.n
 
 // ---------------------------------------------------------------- the queries
 
-export const QUERIES = ['summary', 'slowest', 'false_positives', 'detections', 'never_caught', 'failures', 'test', 'local_runs', 'sql', 'set_label'] as const;
+export const QUERIES = ['summary', 'slowest', 'false_positives', 'detections', 'never_caught', 'failures', 'test', 'local_runs', 'gate_tuning', 'sql', 'set_label'] as const;
 export type QueryName = (typeof QUERIES)[number];
 
 export interface QueryArgs {
@@ -722,6 +729,17 @@ export function readyQuery(h: TestHistory, a: QueryArgs, now = Date.now()): { ti
            FROM runs r WHERE r.source = 'local' AND r.finished >= ? ${a.untagged ? "AND r.tagged = 'none'" : ''} ${req} ORDER BY r.finished DESC LIMIT ?`,
           since, ...(a.request ? [esc(a.request)] : []), limit,
         ),
+      };
+    }
+    case 'gate_tuning': {
+      // The daily merge-gate tuning (w4928, server/gateTuning.ts, docs/gate-tuning.md): the newest day's summary, its
+      // move-out proposals as rows.
+      const r = h.all('SELECT summary, json FROM gate_tuning ORDER BY day DESC LIMIT 1')[0];
+      if (!r) return { title: 'Merge-gate tuning (w4928): no run yet; it runs once a day (docs/gate-tuning.md).', rows: [] };
+      const t = JSON.parse(String(r.json)) as GateTuning;
+      return {
+        title: `${r.summary}\nProposed to move out of the gate, most gate time first (crown_jewel: a determinism or save guard, never moved without a person's explicit yes):`,
+        rows: t.proposals.slice(0, limit).map((p) => ({ test: p.test, gate_runs: p.gateRuns, share_pct: p.sharePct, since: p.firstDay, span_days: p.spanDays, per_run_s: p.perRunS, total_s: p.totalS, bound_95_pct: p.boundPct, crown_jewel: p.crownJewel ? 'yes' : '' })),
       };
     }
     default:

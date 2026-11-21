@@ -131,6 +131,7 @@ export function intakeWhat(w: Pick<WorkItem, 'title' | 'source'>): string | unde
     case 'nightly-review':
       return 'The nightly review of what merged into master.';
     case 'master-batch':
+      if (s.masterBatch?.kind === 'gate-miss') return `The daily merge-gate tuning of ${s.masterBatch.tip}: tests the master batch caught that the merge gate missed.`;
       return `A red test batch on master${s.masterBatch?.pr ? `, blamed on pull request #${s.masterBatch.pr}` : ''}.`;
   }
   return undefined;
