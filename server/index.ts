@@ -33,6 +33,7 @@ import { MasterBatchWatch } from './masterBatch.ts';
 import { FfuPostMergeWatch } from './ffuPostMerge.ts';
 import { TestHistory, localRunKey, localRunTags, parseLocalRecord, queryTestHistory, type QueryArgs } from './testHistory.ts';
 import { TestHistoryCi, testHistorySettings } from './testHistoryCi.ts';
+import { GateTuningJob } from './gateTuning.ts';
 import { runWaitsMigration } from './waitsMigration.ts';
 import { parseNightlyReport } from './nightlyRules.ts';
 import { parseEscalation } from './escalationRules.ts';
@@ -1100,6 +1101,7 @@ const masterBatch = new MasterBatchWatch({ cfg, store, identity, orchestrators: 
 // ffu's post-merge revert verdicts to the reverted PR's request (w4930).
 const ffuPostMerge = new FfuPostMergeWatch({ cfg, store, identity, orchestrators: agents.orchestrators }).start();
 const testHistoryCi = new TestHistoryCi({ cfg, history: testHistory, identity, log: (line) => console.log(line) }).start();
+const gateTuning = new GateTuningJob({ cfg, history: testHistory, store, identity, orchestrators: agents.orchestrators, log: (line) => console.log(line) }).start();
 
 let lastSystem: SystemStats | undefined;
 
@@ -2752,6 +2754,7 @@ function stopServer(req: RestartRequest, drained: ReadonlySet<string> = new Set(
   masterBatch.close();
   ffuPostMerge.close();
   testHistoryCi.close();
+  gateTuning.close();
   agents.rollout.close();
   store.flush();
   spend.flush();
