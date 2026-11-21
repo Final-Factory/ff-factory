@@ -157,16 +157,20 @@ export function findProposals(h: TestHistory, now: number): { gateRuns: number; 
   if (!gateRuns) return { gateRuns, days, proposals: [] };
   const detectSince = new Date(now - OUT_RULE.detectDays * DAY).toISOString();
   const rows = h.all(
-    `WITH c AS (SELECT t.class, d.test_id, sum(d.runs) AS runs, sum(d.fails) AS fails, sum(d.total_ms) AS ms, min(d.day) AS first_day
-                FROM test_days d JOIN tests t ON t.id = d.test_id WHERE d.source = 'pr-gate' AND d.day >= ? GROUP BY t.class, d.test_id),
-          k AS (SELECT class, max(runs) AS runs, sum(fails) AS fails, sum(ms) AS ms, min(first_day) AS first_day FROM c GROUP BY class)
+    // Runs are the distinct gate runs that ran the class (results has one row per run and test): test_days counts a
+    // parameterized case once per repeat of its name, which made a class run in 105 of 873 gate runs read 3224 (w4928).
+    `WITH r AS (SELECT t.class, count(DISTINCT x.run_id) AS runs FROM results x JOIN tests t ON t.id = x.test_id
+                JOIN runs u ON u.id = x.run_id WHERE u.source = 'pr-gate' AND u.finished >= ? GROUP BY t.class),
+          c AS (SELECT t.class, sum(d.fails) AS fails, sum(d.total_ms) AS ms, min(d.day) AS first_day
+                FROM test_days d JOIN tests t ON t.id = d.test_id WHERE d.source = 'pr-gate' AND d.day >= ? GROUP BY t.class),
+          k AS (SELECT c.class, r.runs, c.fails, c.ms, c.first_day FROM c JOIN r ON r.class = c.class)
      SELECT k.* FROM k
      WHERE k.fails = 0 AND k.runs >= ? AND k.runs >= ? * ?
        AND NOT EXISTS (SELECT 1 FROM tests p WHERE p.class = k.class AND p.performance = 1)
        AND NOT EXISTS (SELECT 1 FROM failures f JOIN tests t ON t.id = f.test_id JOIN runs r ON r.id = f.run_id
                        WHERE t.class = k.class AND (r.source = 'pr-gate' OR (f.label = 'detect' AND r.finished >= ?)))
      ORDER BY k.ms DESC`,
-    since.slice(0, 10), OUT_RULE.minRuns, OUT_RULE.minShare, gateRuns, detectSince,
+    since, since.slice(0, 10), OUT_RULE.minRuns, OUT_RULE.minShare, gateRuns, detectSince,
   );
   const proposals: Proposal[] = [];
   for (const r of rows) {

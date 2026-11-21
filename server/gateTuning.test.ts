@@ -92,6 +92,8 @@ test('findProposals: only an always-run class with enough runs, days, no gate fa
     const at = now - 20 * DAY + Math.floor((i * 19 * DAY) / runs);
     const cases = [tc('Tests.G.Quiet.a', 'pass', 2000), tc('Tests.G.SaveLayoutGuard.a', 'pass'), tc('Tests.G.Perf.a', 'pass'), tc('Tests.G.Broke.a', i === 5 ? 'fail' : 'pass')];
     if (i % 2 === 0) cases.push(tc('Tests.G.Half.a', 'pass'));
+    // A parameterized case repeats its name in one run: run in half the gate runs, it must not read as always-run.
+    if (i % 2 === 0) cases.push(tc('Tests.G.Param.a(1)', 'pass'), tc('Tests.G.Param.a(1)', 'pass'), tc('Tests.G.Param.a(1)', 'pass'));
     h.addRun({ source: 'pr-gate', key: `g${i}`, repo: 'o/r', branch: `b${i}`, sha: `s${i}`, finished: iso(at) }, cases);
   }
   h.addRun({ source: 'local', key: 'perf', finished: iso(now - DAY) }, [{ name: 'Tests.G.Perf.a', outcome: 'pass', ms: 5, categories: ['Performance'] }]);

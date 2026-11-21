@@ -1,0 +1,1 @@
+- Merge-gate tuning (w4928): a class's gate runs are now its distinct gate runs, so a parameterized test no longer reads as always-run (the first run proposed two such classes).
