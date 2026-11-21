@@ -518,12 +518,13 @@ export function heldOpenReason(w: Pick<WorkItem, 'id' | 'status' | 'blocked' | '
 /**
  * The requests a worker's report says are finished: lines that are only `DONE: w342` (markdown around it allowed), one
  * request per line, several lines allowed. The id may be followed by a parenthesised title, a dash or colon, or bold text
- * (w2614: `DONE: w2555 (make it obvious …) **TL;DR:** …` is one). A mention inside a sentence ("reply DONE: w342") or
- * prose straight after the id ("DONE: w342 and more text") is not one.
+ * (w2614: `DONE: w2555 (make it obvious …) **TL;DR:** …` is one), or by a full stop or semicolon and then prose (w4968:
+ * cf9dfb2f's `DONE: w4964. ffu PR #924 merged as ad75b93d, …` was read as no DONE at all, and w4964 sat Stalled for 1.5 h).
+ * A mention inside a sentence ("reply DONE: w342") or prose straight after the id ("DONE: w342 and more text") is not one.
  */
 export function doneIdsIn(text: string): string[] {
   const out = new Set<string>();
-  for (const m of (text ?? '').matchAll(/^[\s*_>`-]*DONE:?\s+(w\d+)(?!\w)(?:[\s.`*_]*$|[`*_]*\s*(?:[(—–:]|-\s|\*\*|__).*$)/gim)) out.add(m[1].toLowerCase());
+  for (const m of (text ?? '').matchAll(/^[\s*_>`-]*DONE:?\s+(w\d+)(?!\w)(?:[\s.`*_]*$|[`*_]*\s*(?:[(—–:]|-\s|\*\*|__|[.;]\s).*$)/gim)) out.add(m[1].toLowerCase());
   return [...out];
 }
 
@@ -705,10 +706,12 @@ export function doneProblem(w: Pick<WorkItem, 'title' | 'brief' | 'constraints' 
 
 /**
  * The `Learned:` line of a DONE report (w741), its text after the colon: the file or PR where the worker wrote down
- * what the request taught it, or "nothing new". A line of its own, markdown around it allowed.
+ * what the request taught it, or "nothing new". A line of its own, markdown around it allowed, or (w4968) a sentence of
+ * its own inside a line, after a full stop or semicolon, with a capital L: cf9dfb2f's `DONE: w4964. … pre-1.0: no.
+ * Learned: nothing new; …`.
  */
 export function learnedIn(text: string): string | undefined {
-  const m = (text ?? '').match(/^[\s*_>`-]*Learned[*_`]*:[*_`]*[ \t]*(\S.*)$/im);
+  const m = (text ?? '').match(/^[\s*_>`-]*Learned[*_`]*:[*_`]*[ \t]*(\S.*)$/im) ?? (text ?? '').match(/[.;][ \t]+[*_`]*Learned[*_`]*:[*_`]*[ \t]*(\S.*)$/m);
   return m ? m[1].trim() : undefined;
 }
 

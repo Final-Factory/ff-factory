@@ -646,6 +646,34 @@ test('w419: DONE: wNNN from its own worker closes the request with the report as
   assert.equal(get('w2').status, 'active', 'the other request of the same worker stays open');
 });
 
+test('w4968: one final message with "DONE: wA. <prose>" and "wB: still open: ..." closes wA and keeps wB open; two DONEs close both; DONE plus paused', async (t) => {
+  const { request, worker, o, get } = setup(t);
+  // cf9dfb2f's report at 06:33Z on 2026-11-21, as it ended (w4964 and w4963): the DONE line goes on in prose after a period,
+  // with its Learned: in the same line. w4964 was never closed and sat Stalled until a sweep closed it by hand.
+  request('w4964', { sessionIds: ['s1'], prs: [] });
+  request('w4963', { sessionIds: ['s1'], prs: [] });
+  const s1 = worker('s1');
+  o.workerTurnEnded(
+    s1,
+    '**w4964 is done:** I merged ffu PR #924 (rows W1e to W1j) at 06:32Z, as merge commit ad75b93d.\n\n' +
+      '**w4963 is still waiting:** CI run 44874955881 on ffu PR #923 was in progress at 14 min when I checked.\n\n' +
+      'Nothing of mine is running and nothing is needed from you.\n\n' +
+      'DONE: w4964. ffu PR #924 merged as ad75b93d, docs only, with no CI because ffu\'s CI skips docs-only pull requests. Ships in: nothing players run (FFU docs). pre-1.0: no. Learned: nothing new; the skip is already written down beside the code in ffu `.github/workflows/ci.yml:17-20`.\n' +
+      'w4963: still open: blocked on CI on Final-Factory/ffu#923',
+  );
+  assert.equal(get('w4964').status, 'done', 'the DONE line closes its own request');
+  assert.match(get('w4964').log.join('\n'), /closed as done: worker s1 said DONE: w4964/);
+  assert.notEqual(get('w4963').status, 'done', 'the still-open line keeps the other request open');
+  // Two DONEs in one message close both.
+  request('w10', { sessionIds: ['s2'], prs: [] });
+  request('w11', { sessionIds: ['s2'], prs: [] });
+  request('w12', { sessionIds: ['s2'], prs: [] });
+  const s2 = worker('s2');
+  o.workerTurnEnded(s2, 'Both merged.\n\nDONE: w10. The first one.\nDONE: w11 (the second)\nw12: paused: waiting for w10\nLearned: nothing new');
+  assert.deepEqual([get('w10').status, get('w11').status], ['done', 'done']);
+  assert.notEqual(get('w12').status, 'done', 'a paused line keeps its request open');
+});
+
 test('w419: a DONE is refused back to the worker while a PR is open, a step after the merge is not covered, or it is not its worker; a hand close stays', async (t) => {
   const { request, worker, o, get } = setup(t);
   request('w1', { sessionIds: ['s1'], prs: [{ repo: REPO, number: 11, state: 'merged', at: ago(5), via: 'line' }, { repo: REPO, number: 12, state: 'open', via: 'line' }] });
