@@ -171,3 +171,19 @@ test('w1860: unity-slot run with no bench queue to take a ticket from does not r
   assert.equal(await main(['run', '--label', 'build', '--', ...q.cmd], { ...q.env, FF_SANDBOX_PATH: path.join(q.root, 'nowhere'), FF_BENCH_TICKETS: 'off' }), 0);
   assert.equal(fs.existsSync(q.ran), true, 'FF_BENCH_TICKETS=off is the way to run without one');
 });
+
+test('w5026: unity-slot run in a checkout with no bench_queue.py (a pre-1.0 branch) takes its ticket from another sandbox\'s copy under the worker root', { timeout: 30_000 }, async (t) => {
+  // A stand-in for bench_queue.py's `hold` in slot1 only: granted at once, let go when its caller writes <status>.release.
+  const q = fakeQueue(
+    t,
+    `const fs = require('fs'); const a = process.argv; const st = a[a.indexOf('--status') + 1];
+     fs.writeFileSync(st, 'granted t00000009 shared pid ' + process.pid + '\\n');
+     const end = Date.now() + 20000;
+     const look = setInterval(() => { if (fs.existsSync(st + '.release') || Date.now() > end) { clearInterval(look); fs.writeFileSync(st, 'released t00000009\\n'); } }, 100);`,
+  );
+  const pre10 = path.join(q.root, 'sandboxes', 'slot2');
+  fs.mkdirSync(path.join(pre10, 'Assets'), { recursive: true });
+  const code = await main(['run', '--label', 'pre-1.0 build', '--', ...q.cmd], { ...q.env, FF_SANDBOX_PATH: pre10 });
+  assert.equal(code, 0, 'slot1\'s bench_queue.py keeps the queue for slot2, which has none (it exited 69, no shared bench ticket, before w5026)');
+  assert.equal(fs.existsSync(q.ran), true, 'the build ran under the ticket');
+});
