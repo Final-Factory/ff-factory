@@ -254,12 +254,15 @@ export function benchTicketFor(o: Omit<BenchTicketOptions, 'script' | 'lock'> & 
   // w1628: a checkout from before w1615 has no queue script; any sandbox's copy on this machine keeps the same queue
   // (the queue is its files, not its code), so the run still waits its turn instead of going ahead without a ticket.
   // w1962: and of the copies here, the one with the newest rules.
-  const script = newestBenchQueueScript(o.checkouts, o.root);
+  // w5026: the root defaults to FF_WORKER_ROOT, as benchLockPath's does: unity-slot run passed none, so a checkout with
+  // no copy (pre-1.0 on beast) never looked in the other sandboxes and exited 69 with no shared bench ticket.
+  const root = o.root ?? (env.FF_WORKER_ROOT || undefined);
+  const script = newestBenchQueueScript(o.checkouts, root);
   if (!script) return { why: 'no scripts/bench/bench_queue.py in this checkout (a branch from before w1615) or in any sandbox here' };
-  const lock = benchLockPath(o.root, env);
+  const lock = benchLockPath(root, env);
   if (!lock) return { why: 'no worker root to keep the bench queue under' };
   if (o.place !== undefined) {
-    const s = placeScript(script, o.checkouts, o.root);
+    const s = placeScript(script, o.checkouts, root);
     if (!s) return { ticket: new BenchTicket({ ...o, place: undefined, script, lock }).take(), why: 'no queue script here takes --place yet (w4624): queued without its earlier place' };
     return { ticket: new BenchTicket({ ...o, script: s, lock }).take() };
   }

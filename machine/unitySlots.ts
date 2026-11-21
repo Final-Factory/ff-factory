@@ -1217,7 +1217,7 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env)
     if (!inside && held < o.count && env.FF_BENCH_TICKETS !== 'off') {
       const projectArg = o.rest.findIndex((a) => /^-projectpath$/i.test(a));
       const mode = o.bench ?? (env.FF_UNITY_SLOT_BENCH === 'exclusive' ? 'exclusive' : 'shared');
-      const t = benchTicketFor({ mode, what: `unity: ${labelOf(o)}`, checkouts: [...o.projects, projectArg >= 0 ? o.rest[projectArg + 1] : undefined, env.FF_SANDBOX_PATH, process.cwd()], env });
+      const t = benchTicketFor({ mode, what: `unity: ${labelOf(o)}`, checkouts: [...o.projects, projectArg >= 0 ? o.rest[projectArg + 1] : undefined, env.FF_SANDBOX_PATH, process.cwd()], root: env.FF_WORKER_ROOT, env });
       let refused = t.why;
       if (!refused) {
         ticket = t.ticket;

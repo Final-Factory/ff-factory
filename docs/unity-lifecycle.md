@@ -347,7 +347,9 @@ node cannot take the OS file locks the queue lives on):
   `urgent_release.py` (exclusive, at its request's priority: frantic since w4620 (named release until w4710), no pre-empt).
 
 A checkout without `bench_queue.py` (a branch from before w1615) takes its ticket with another sandbox's copy of the
-script (`sandboxBenchQueueScript`, w1628: the queue is its files, not its code); with none on the machine, or without
+script (`newestBenchQueueScript` over `<worker root>/sandboxes/*`, w1628: the queue is its files, not its code;
+`benchTicketFor` takes the root from `FF_WORKER_ROOT` when its caller names none, w5026: `unity-slot run` named none, so
+a pre-1.0 checkout exited 69 although other sandboxes had the script); with none on the machine, or without
 python, a sandbox editor goes ahead without a ticket and logs why (it takes one within a minute once it can), while
 `unity-slot run` does not start: a run whose helper fails or whose ticket the queue refuses exits 69, or 77 for an
 exclusive ticket on a machine that takes no timed runs (w1861), with the reason, and never runs without a ticket
