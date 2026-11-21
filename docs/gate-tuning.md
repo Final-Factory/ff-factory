@@ -70,6 +70,8 @@ the last 90 days:
 | `detect` in any source | 0 in 90 days | it has caught nothing, gate or batch |
 | Performance-tagged | never | they run in no CI |
 
+A class's runs are the distinct gate runs that ran it (`results`), not the `test_days` count: a parameterized case repeats its name in one run, and the first run (2026-11-21) proposed `NarrationClipsTest` at "3224 runs" when it ran in 105 of 873.
+
 Each proposal carries its gate runs, share, first day, span, time per run and total, the 95% bound, and `crown_jewel`. That
 flag is set for a class name matching `Serializ|Save|Determinis|Desync|Lockstep|Heartbeat|Multiplayer|Netcode|Network|PerFrame|LocalToWorld|UpgradeStep|Golden|Fingerprint`:
 a determinism or save guard, never moved without a person's explicit yes. The job moves nothing: removing a test from the
