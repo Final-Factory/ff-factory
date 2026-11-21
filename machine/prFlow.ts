@@ -17,6 +17,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { ghEnvFor, readGhAppTokens, remotesOf } from './ghApp.ts';
 import { awayLabelsOf, awayNote, failedNote, offlineLabels, settleJobs, type Leg } from './awayRunners.ts';
+import { noPrCi } from './ciPaths.ts';
 import { STALE_EVIDENCE, evidenceArgs, evidenceGated, evidencePython, evidenceRefusal, evidenceVerdict, findLocalPrEvidence, noScriptRefusal, updateLocalPlugin } from './evidenceGate.ts';
 
 export interface Ran {
@@ -84,6 +85,7 @@ interface Pr {
   mergeable: string;
   state: string;
   baseRefName: string;
+  baseRefOid?: string;
 }
 
 interface Opts {
@@ -133,7 +135,7 @@ export const USAGE = `usage: ff-pr push [--base <branch>] [--title <t> --body-fi
 Exit: 0 done, 1 you must act (conflict, red, push not landed, Evidence check failed), 2 usage, 3 CI still running.
 `;
 
-const PR_FIELDS = 'number,url,headRefOid,mergeable,state,baseRefName';
+const PR_FIELDS = 'number,url,headRefOid,mergeable,state,baseRefName,baseRefOid';
 
 function prView(d: PrDeps, pr?: string): Pr | undefined {
   const r = d.run('gh', ['pr', 'view', ...(pr ? [pr] : []), '--json', PR_FIELDS]);
@@ -206,6 +208,33 @@ function ciLine(v: CiVerdict): string {
   if (v.state === 'none') return 'CI: no workflow run on this head yet (GitHub may not have started it; a branch gets CI only through a PR)';
   if (v.state === 'green') return 'CI: green';
   return `CI: ${v.state}${v.red.length ? `; red: ${v.red.join(', ')}` : ''}${v.pending.length ? `; running: ${v.pending.join(', ')}` : ''}`;
+}
+
+/**
+ * w5017 (machine/ciPaths.ts): whether no workflow runs on this PR because its workflows' pull_request path filters, read
+ * at the PR's base, leave out every file it changes (ffu's ci.yml ignores docs/**). Anything it cannot read says no.
+ */
+export function prSkipsCi(d: Pick<PrDeps, 'run'>, pr: Pr): { skips: boolean; why: string } {
+  const repo = repoOf(pr.url);
+  const ref = pr.baseRefOid || pr.baseRefName;
+  const f = d.run('gh', ['api', `repos/${repo}/pulls/${pr.number}/files`, '--paginate', '--jq', '.[] | .filename, (.previous_filename // empty)']);
+  if (f.code !== 0) return { skips: false, why: `its changed files could not be read: ${(f.err || f.out).trim().split('\n').pop()}` };
+  const files = [...new Set(f.out.split('\n').map((l) => l.trim()).filter(Boolean))];
+  const l = d.run('gh', ['api', `repos/${repo}/contents/.github/workflows?ref=${ref}`, '--jq', '.[] | select(.type == "file") | .name']);
+  if (l.code !== 0) return { skips: false, why: `the base's workflows could not be listed: ${(l.err || l.out).trim().split('\n').pop()}` };
+  const names = l.out
+    .split('\n')
+    .map((n) => n.trim())
+    .filter((n) => /\.ya?ml$/.test(n));
+  const load = (name: string) => {
+    const r = d.run('gh', ['api', '-H', 'Accept: application/vnd.github.raw', `repos/${repo}/contents/.github/workflows/${name}?ref=${ref}`]);
+    return r.code === 0 ? r.out : undefined;
+  };
+  return noPrCi(names, load, files);
+}
+
+function noCiLine(pr: Pr, why: string): string {
+  return `CI: none will run: ${why} (workflows at ${pr.baseRefName} ${(pr.baseRefOid || '').slice(0, 10)})`.replace(/ \)$/, ')');
 }
 
 function waitLine(pr: Pr, sha: string): string {
@@ -302,7 +331,9 @@ export function push(d: PrDeps, o: Opts): number {
     return 1;
   }
   evidenceWarning(d, pr);
-  d.write(`ff-pr: ${pr.url} head ${sha} (${pr.mergeable.toLowerCase()}), base ${pr.baseRefName}\n${waitLine(pr, sha)}\n`);
+  const skip = prSkipsCi(d, pr);
+  const next = skip.skips ? `${noCiLine(pr, skip.why)}\nnext: ff-pr merge (no CI to wait for)` : waitLine(pr, sha);
+  d.write(`ff-pr: ${pr.url} head ${sha} (${pr.mergeable.toLowerCase()}), base ${pr.baseRefName}\n${next}\n`);
   return 0;
 }
 
@@ -364,8 +395,9 @@ export function status(d: PrDeps, o: Opts): number {
   const got = prAndCi(d, o);
   if (typeof got === 'number') return got;
   const { pr, v } = got;
-  d.write(`ff-pr: ${pr.url} ${pr.state.toLowerCase()}, head ${pr.headRefOid.slice(0, 10)}, ${pr.mergeable.toLowerCase()}, base ${pr.baseRefName}\n${ciLine(v)}\n`);
-  return v.state === 'green' ? 0 : v.state === 'red' ? 1 : 3;
+  const skip = v.state === 'none' ? prSkipsCi(d, pr) : undefined;
+  d.write(`ff-pr: ${pr.url} ${pr.state.toLowerCase()}, head ${pr.headRefOid.slice(0, 10)}, ${pr.mergeable.toLowerCase()}, base ${pr.baseRefName}\n${skip?.skips ? noCiLine(pr, skip.why) : ciLine(v)}\n`);
+  return v.state === 'green' || skip?.skips ? 0 : v.state === 'red' ? 1 : 3;
 }
 
 /**
@@ -402,8 +434,13 @@ export function merge(d: PrDeps, o: Opts): number {
     d.write(`ff-pr: ${pr.url} is ${pr.state.toLowerCase()}\n`);
     return 1;
   }
-  if (v.state !== 'green') {
-    d.write(`ff-pr: not merged: ${pr.url} ${ciLine(v)}\n${v.state === 'red' ? 'Read a red run with gh run view <run> --log-failed, fix, and ff-pr push.\n' : `${waitLine(pr, pr.headRefOid)}\n`}`);
+  // w5017: no workflow run at all, and none will come because every changed file is under the workflows' path filters
+  // (an ffu docs/ PR): the head check below (--match-head-commit) is the gate. A run that exists, red or running, never
+  // takes this way.
+  const skip = v.state === 'none' ? prSkipsCi(d, pr) : undefined;
+  if (skip?.skips) d.write(`ff-pr: ${noCiLine(pr, skip.why)}; merging on the head check\n`);
+  else if (v.state !== 'green') {
+    d.write(`ff-pr: not merged: ${pr.url} ${ciLine(v)}${skip ? ` (CI is expected: ${skip.why})` : ''}\n${v.state === 'red' ? 'Read a red run with gh run view <run> --log-failed, fix, and ff-pr push.\n' : `${waitLine(pr, pr.headRefOid)}\n`}`);
     return v.state === 'red' ? 1 : 3;
   }
   if (!evidencePasses(d, pr)) return 1;

@@ -140,6 +140,50 @@ test('merge: an error from gh pr merge on a merge GitHub made anyway (a 502, w18
   assert.match(refused.said, /^ff-pr: gh pr merge refused:\nnon-200 OK status code: 502/);
 });
 
+test('merge: a PR with no run whose files are all under the base workflows\' paths-ignore merges on the head check (w5017); a mixed one, a red one, a repo with no filter do not', () => {
+  const FFU = 'repos/Final-Factory/ffu';
+  const ffuPr = (o: object = {}) => JSON.stringify({ number: 938, url: 'https://github.com/Final-Factory/ffu/pull/938', headRefOid: SHA, mergeable: 'MERGEABLE', state: 'OPEN', baseRefName: 'main', baseRefOid: OLD, ...o });
+  const ci = "name: ci\non:\n  pull_request:\n    paths-ignore: ['docs/**']\n  push:\n    branches: [main]\njobs: {}\n";
+  const world = 'on:\n  push:\n    paths: [crates/ffu-sim/**]\n';
+  const repo = (files: string[], ciYaml = ci) => ({
+    [`gh api ${FFU}/pulls/938/files`]: ok(files.join('\n') + '\n'),
+    [`gh api ${FFU}/contents/.github/workflows?ref=${OLD}`]: ok('ci.yml\nworld.yml\n'),
+    [`gh api -H Accept: application/vnd.github.raw ${FFU}/contents/.github/workflows/ci.yml?ref=${OLD}`]: ok(ciYaml),
+    [`gh api -H Accept: application/vnd.github.raw ${FFU}/contents/.github/workflows/world.yml?ref=${OLD}`]: ok(world),
+  });
+  const noRuns = { 'gh run list': ok('[]') };
+
+  // ffu is Evidence-gated (machine/evidenceGate.ts): a script that passes, as pr_evidence.py does a docs-only PR.
+  const gated = <T extends PrDeps>(d: T): T => Object.assign(d, { evidenceScript: () => 'pr_evidence.py', python: 'py' });
+  const docs = gated(fake({ 'gh pr view': [ok(ffuPr()), ok(ffuPr({ state: 'MERGED' }))], ...noRuns, ...repo(['docs/PLAN.md']) }));
+  assert.equal(prMain(['merge'], docs), 0, docs.said);
+  assert.ok(docs.ran.includes(`gh pr merge 938 --merge --match-head-commit ${SHA}`), docs.ran.join('\n'));
+  assert.match(docs.said, /CI: none will run: every changed file \(1\) is filtered out: ci\.yml pull_request paths-ignore \[docs\/\*\*\] \(workflows at main b{10}\); merging on the head check/);
+
+  const status = fake({ 'gh pr view': ok(ffuPr()), ...noRuns, ...repo(['docs/PLAN.md']) });
+  assert.equal(prMain(['status'], status), 0);
+
+  const mixed = fake({ 'gh pr view': ok(ffuPr()), ...noRuns, ...repo(['docs/PLAN.md', 'crates/ffu-sim/src/lib.rs']) });
+  assert.equal(prMain(['merge'], mixed), 3);
+  assert.ok(!mixed.ran.some((l) => l.startsWith('gh pr merge')));
+  assert.match(mixed.said, /CI is expected: ci\.yml runs: crates\/ffu-sim\/src\/lib\.rs is outside pull_request paths-ignore/);
+
+  const unfiltered = fake({ 'gh pr view': ok(ffuPr()), ...noRuns, ...repo(['docs/PLAN.md'], 'on:\n  pull_request:\njobs: {}\n') });
+  assert.equal(prMain(['merge'], unfiltered), 3);
+  assert.ok(!unfiltered.ran.some((l) => l.startsWith('gh pr merge')));
+
+  // Checks that ran and failed are red, whatever the files: the filter is never read.
+  const red = fake({ 'gh pr view': ok(ffuPr()), 'gh run list': ok(JSON.stringify([{ databaseId: 9, workflowName: 'ci', status: 'completed', conclusion: 'failure' }])), ...repo(['docs/PLAN.md']) });
+  assert.equal(prMain(['merge'], red), 1);
+  assert.ok(!red.ran.some((l) => l.startsWith('gh pr merge') || l.includes('/files')));
+
+  // ff-pr push says there is nothing to wait for, instead of the blocked_on line.
+  const pushed = gated(fake({ ...base, 'gh pr view': ok(ffuPr()), ...repo(['docs/PLAN.md']) }));
+  assert.equal(prMain(['push'], pushed), 0);
+  assert.match(pushed.said, /CI: none will run: .*\nnext: ff-pr merge \(no CI to wait for\)/);
+  assert.doesNotMatch(pushed.said, /blocked_on/);
+});
+
 test('installPrShim writes ff-pr for sh and cmd, pointing at the script', () => {
   const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'ffpr-bin-'));
   installPrShim(bin, '/usr/bin/node', ['--experimental-strip-types'], '/app/machine/prFlow.ts');
