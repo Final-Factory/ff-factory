@@ -144,6 +144,8 @@ test('w419: DONE lines, what a DONE still misses, and when the follow-up is due'
   assert.deepEqual(doneIdsIn('**DONE: w12** (title)\nDONE: w7 — merged\nDONE: w8: merged\nDONE: w9 - merged'), ['w12', 'w7', 'w8', 'w9']);
   assert.deepEqual(doneIdsIn('DONE: w12 (the other one is w13)\nDONE: w130 and w131\nDONE: w14x'), ['w12'], 'only the line\'s first id; prose after it is no DONE');
   assert.deepEqual(doneIdsIn('Reply DONE: w342 when sure.\nDONE: w342 and more text\nDONE: wNNN'), [], 'only a line of its own counts');
+  // w4968: a full stop or semicolon, then prose (cf9dfb2f's w4964 line); "w4.5" is no sentence end.
+  assert.deepEqual(doneIdsIn('DONE: w4964. ffu PR #924 merged as ad75b93d.\nDONE: w20; merged\nDONE: w4.5 x\nw4963: still open: CI'), ['w4964', 'w20']);
   const base = { title: 'Fix it', brief: 'Make it work.', prs: [{ repo: 'r/r', number: 1, state: 'merged' as const }] };
   assert.equal(doneProblem(base, 'Done.'), undefined);
   assert.match(doneProblem({ ...base, prs: [...base.prs, { repo: 'r/r', number: 2, state: 'open' as const }] }, 'Done.')!, /PR #2 is still open/);
@@ -257,6 +259,8 @@ test('w741: the Learned: line of a DONE report', async () => {
   assert.equal(learnedIn('Merged.\nDONE: w1\nLearned: nothing new'), 'nothing new');
   assert.equal(learnedIn('- **Learned:** `unity-ui/ugui-pitfalls.md` (a layout rect is not what is drawn)'), '`unity-ui/ugui-pitfalls.md` (a layout rect is not what is drawn)');
   assert.equal(learnedIn('What I learned: a lot.\nDONE: w1'), undefined, 'only a line that starts with it');
+  assert.equal(learnedIn('Done. And I learned: a lot.\nDONE: w1'), undefined, 'mid-line only as its own sentence, capital L');
+  assert.equal(learnedIn('DONE: w4964. pre-1.0: no. Learned: nothing new; the skip is in ci.yml.'), 'nothing new; the skip is in ci.yml.', 'w4968');
   assert.equal(learnedIn('Learned:'), undefined, 'and says something');
   assert.match(learnedProblem({}, 'DONE: w1')!, /add a line `Learned:/);
   assert.equal(learnedProblem({}, 'DONE: w1\nLearned: nothing new'), undefined);
