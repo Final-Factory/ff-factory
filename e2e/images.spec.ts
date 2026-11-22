@@ -473,7 +473,7 @@ test("a message's pictures page through in the lightbox: arrows, arrow keys, the
   const pos = box.getByTestId('lightbox-pos');
   const prev = box.getByRole('button', { name: 'Previous' });
   const next = box.getByRole('button', { name: 'Next' });
-  const shown = box.locator('.lightbox-bar .mono');
+  const shown = box.locator('.lightbox-bar .ellipsis');
 
   // The second picture opens on itself, with the others either side.
   await openLightbox(page, reply.locator('.md-img').nth(1));

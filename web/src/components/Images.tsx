@@ -157,7 +157,7 @@ export function Lightbox() {
       <div className="lightbox-bar">
         <span className="ellipsis mono small">{it.name}</span>
         {many && (
-          <span className="dim small lightbox-pos" data-testid="lightbox-pos">
+          <span className="dim small mono lightbox-pos" data-testid="lightbox-pos">
             {i + 1} / {lb.items.length}
           </span>
         )}
