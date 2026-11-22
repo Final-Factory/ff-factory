@@ -1,4 +1,3 @@
-import path from 'node:path';
 import { readOnlyShell } from './readOnlyShell.ts';
 import { DANGEROUS_REMOVAL, tempDeletesWithin, tempOnlyDelete, type TempDeleteContext } from './tempDelete.ts';
 
@@ -57,7 +56,8 @@ export const PROTECTED_READ =
 export function selfAnswer(a: SelfAnswerInput): SelfAnswer {
   const cmd = a.input.command;
   if ((a.toolName !== 'Bash' && a.toolName !== 'PowerShell') || typeof cmd !== 'string') return { ok: false, why: 'not a shell command' };
-  if (!a.tempDir || !/^ffa-/i.test(path.basename(a.tempDir))) return { ok: false, why: 'no temp folder of its own' };
+  // The last part of either spelling (a Windows path read on Linux too, as the tests do).
+  if (!a.tempDir || !/^ffa-/i.test(a.tempDir.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? '')) return { ok: false, why: 'no temp folder of its own' };
   const ctx: TempDeleteContext = { tmp: a.tempDir, ...(a.real ? { real: a.real } : {}), ...(a.read ? { read: a.read } : {}) };
   if (tempOnlyDelete(cmd, ctx).ok) return { ok: true, route: 'temp-delete' };
   if (a.permissionMode !== 'bypassPermissions' || !a.why) return { ok: false, why: 'not bypass mode, or no reason' };
