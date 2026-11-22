@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { run } from './proc.ts';
 import { parseStatus } from './gitStatus.ts';
-import { noiseFiles } from './editorNoise.ts';
+import { fontAtlasNoise, mayBeDynamicFont, noiseFiles } from './editorNoise.ts';
 
 /**
  * Save a released worker's uncommitted work before its sandbox goes to other work (w656, run by its machine's daemon):
@@ -64,6 +64,11 @@ export interface SaveResult {
   files: number;
   /** Whether origin has it; when not, `notes` says why (the commit is in the machine's repository either way). */
   pushed: boolean;
+  /**
+   * The side branch origin has it on instead of the worker's branch, when the save was told to hold the branch's push
+   * (`holdPush`, w5067: its pull request's CI runs, and a push there would cancel the run).
+   */
+  sideRef?: string;
   notes: string[];
 }
 
@@ -138,17 +143,40 @@ export async function untrackedProblem(dir: string, limits = SAVE_LIMITS, skip: 
 }
 
 /**
- * Restore to HEAD the modified .mat files whose every change is the editor's own (editorNoise.ts, w2782), and name them.
+ * Restore to HEAD the modified files whose every change is the Unity editor's own, and name them: .mat files the editor
+ * re-serialized (editorNoise.ts, w2782) and dynamic TMP font assets that only grew their atlas (fontAtlasNoise, w5067).
  * The diff is against HEAD, so a staged change counts like an unstaged one; the restore resets both.
  */
 export async function restoreEditorNoise(dir: string): Promise<string[]> {
   const diff = await must(dir, ['diff', 'HEAD', '-U0', '--no-color', '--no-ext-diff', '--no-renames', '--no-textconv', '--', '*.mat'], 'reading the material changes');
   const files = noiseFiles(diff);
+  const assets = (await must(dir, ['diff', 'HEAD', '--name-only', '-z', '--diff-filter=M', '--no-renames', '--', '*.asset'], 'listing the changed assets')).split('\0').filter(Boolean);
+  for (const f of assets) {
+    let now: string;
+    try {
+      now = fs.readFileSync(path.join(dir, f), 'utf8');
+    } catch {
+      continue;
+    }
+    if (!mayBeDynamicFont(f, now)) continue;
+    const head = await git(dir, ['show', `HEAD:${f}`]);
+    if (head.code === 0 && fontAtlasNoise(head.stdout, now)) files.push(f);
+  }
   if (files.length) await must(dir, ['checkout', 'HEAD', '--', ...files.map((f) => `:(literal)${f}`)], 'restoring editor noise');
   return files;
 }
 
-export async function saveWork(opts: { dir: string; branch: string; message: string; limits?: typeof SAVE_LIMITS; env?: NodeJS.ProcessEnv }): Promise<SaveResult> {
+/** The side branch a held save goes to on origin (w5067), one per save, like switchBranch's backups: nothing force-pushes it. */
+export const savedBranch = (branch: string, sha: string) => `ff-saved/${branch}-${sha}`;
+
+/**
+ * `holdPush`: why the worker's branch must not move on origin now (w5067: a worker on it waits on its pull request's
+ * CI, and a push would cancel the run; de2893f4's PR #4137 lost a run so on 2026-11-22). The commit is then made on the
+ * branch here as always, and pushed to its own side branch (savedBranch) instead: origin keeps it, the push updates the
+ * remote-tracking ref, so the next switch away finds nothing unpushed and does not push the branch either, and the PR's
+ * head stays where CI runs it. The worker pushes it with its next push, or drops it.
+ */
+export async function saveWork(opts: { dir: string; branch: string; message: string; limits?: typeof SAVE_LIMITS; env?: NodeJS.ProcessEnv; holdPush?: string }): Promise<SaveResult> {
   const { dir, branch } = opts;
   const st = parseStatus(await must(dir, ['status', '--porcelain=v2', '--branch'], 'git status'));
   if (st.branch !== branch) throw new Error(`the sandbox is on ${st.branch}, not the worker's branch ${branch}: nothing was saved`);
@@ -158,7 +186,7 @@ export async function saveWork(opts: { dir: string; branch: string; message: str
   const problem = st.untracked ? await untrackedProblem(dir, opts.limits, foreign) : undefined;
   if (problem) throw new Error(problem);
   const restored = st.dirty ? await restoreEditorNoise(dir) : [];
-  const noise = restored.length ? [`restored ${restored.length} material(s) the Unity editor only re-serialized to HEAD instead of saving them (w2782): ${restored.join(', ')}`] : [];
+  const noise = restored.length ? [`restored ${restored.length} file(s) the Unity editor only rewrote by itself (re-serialized materials, w2782; a dynamic font atlas that grew, w5067) to HEAD instead of saving them: ${restored.join(', ')}`] : [];
   const left = foreign.size ? (await untrackedFiles(dir)).filter((f) => foreign.has(f)) : [];
   if (left.length) noise.push(`left ${left.length} untracked file(s) uncommitted that were already in the sandbox when it was switched to ${branch}, so not this worker's (w2988): ${someFiles(left)}`);
   const specs = ['.', ...(await skipSpecs(dir)), ...left.map((f) => `:(exclude,literal)${f}`)];
@@ -171,6 +199,18 @@ export async function saveWork(opts: { dir: string; branch: string; message: str
   await must(dir, ['commit', '-q', '--no-verify', '-m', opts.message], 'git commit');
   const sha = (await must(dir, ['rev-parse', '--short', 'HEAD'], 'reading the commit')).trim();
   const notes = [...noise, `committed ${files} file(s) on ${branch} as ${sha}`];
+  if (opts.holdPush) {
+    const side = savedBranch(branch, sha);
+    const held = await git(dir, ['push', 'origin', `HEAD:refs/heads/${side}`], 5 * 60_000, opts.env);
+    if (held.code !== 0) {
+      // Left unpushed, the switch that hands the sandbox over would push the branch (switchBranch): put the work back
+      // uncommitted and refuse, so the sandbox stays held and the save is tried again.
+      await must(dir, ['reset', '-q', 'HEAD~1'], 'putting the work back uncommitted');
+      throw new Error(`pushing the save to the side branch ${side} failed (${(held.stderr || held.stdout).trim().split('\n').slice(-1)[0]}), and ${branch} is not pushed while ${opts.holdPush} (w5067): nothing was changed there`);
+    }
+    notes.push(`not pushed to ${branch} (${opts.holdPush}: a push there would cancel the run, w5067); pushed to the side branch ${side} instead, and ${branch} here is a commit ahead of origin`);
+    return { sha, files, pushed: true, sideRef: side, notes };
+  }
   const push = await git(dir, ['push', '-u', 'origin', `${branch}:${branch}`], 5 * 60_000, opts.env);
   if (push.code === 0) notes.push(`pushed ${branch}`);
   else notes.push(`not pushed (${(push.stderr || push.stdout).trim().split('\n').slice(-1)[0]}): the commit is in this machine's repository, and the next switch away pushes it`);

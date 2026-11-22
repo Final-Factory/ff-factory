@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { noiseFiles } from './editorNoise.ts';
+import { fontAtlasNoise, noiseFiles } from './editorNoise.ts';
+import { tmpFont } from './tmpFontFixture.ts';
 
 /** A `git diff -U0` of one modified file, its hunks given as [removed lines, added lines]. */
 function diff(file: string, ...hunks: [string[], string[]][]): string {
@@ -58,4 +59,25 @@ test('w2782 editor noise: a change a person made is kept, alone or beside the no
   assert.deepEqual(noiseFiles(diff('A.mat', FLIP).replace('index ', 'deleted file mode 100644\nindex ')), []);
   // Mode changed only (no hunk).
   assert.deepEqual(noiseFiles('diff --git a/A.mat b/A.mat\nold mode 100644\nnew mode 100755\n'), []);
+});
+
+test('w5067 font atlas: a dynamic TMP font asset whose atlas only grew is editor noise', () => {
+  const head = tmpFont({ pairs: 2 });
+  // As 6d6488f046 committed LiberationSans SDF - Fallback.asset onto PR #4137: kerning pairs added, nothing else.
+  assert.equal(fontAtlasNoise(head, tmpFont({ pairs: 40 })), true, 'kerning records added');
+  // As NotoSansJP's saves (b15f321abe): glyphs, characters, glyph rects and atlas pixels.
+  assert.equal(fontAtlasNoise(head, tmpFont({ pairs: 2, glyphs: 5, pixels: 'ff00ff00' })), true, 'glyphs and pixels added');
+  // CRLF on a Windows checkout reads the same.
+  assert.equal(fontAtlasNoise(head, tmpFont({ pairs: 40 }).replaceAll('\n', '\r\n')), true, 'line endings do not matter');
+});
+
+test('w5067 font atlas: any other change, a static font, or no change is not noise', () => {
+  const head = tmpFont({ pairs: 2 });
+  assert.equal(fontAtlasNoise(head, head), false, 'no change');
+  assert.equal(fontAtlasNoise(head, tmpFont({ pairs: 40, face: 72 })), false, 'the face changed beside the atlas');
+  assert.equal(fontAtlasNoise(head, tmpFont({ pairs: 2, mode: 0 })), false, 'the population mode changed');
+  assert.equal(fontAtlasNoise(tmpFont({ mode: 0 }), tmpFont({ mode: 0, glyphs: 3 })), false, 'a static font asset: its glyphs are a person\'s');
+  assert.equal(fontAtlasNoise(head, head.replace('_TextureHeight: 512', '_TextureHeight: 1024')), false, 'a material property');
+  assert.equal(fontAtlasNoise(head, `${head}--- !u!28 &99\nTexture2D:\n  m_Name: Atlas 2\n`), false, 'a second atlas texture added');
+  assert.equal(fontAtlasNoise('%YAML 1.1\n--- !u!21 &1\nMaterial:\n  m_Name: M\n', '%YAML 1.1\n--- !u!21 &1\nMaterial:\n  m_Name: N\n'), false, 'not a font asset');
 });

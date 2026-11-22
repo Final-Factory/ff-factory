@@ -3128,7 +3128,7 @@ export class Daemon {
           return;
         }
         // w3626: nor under a night or a batch build in that tree (machine/switchHolds.ts).
-        void this.switchHold(msg.sandbox!).then((held) => (held ? Promise.reject(new Error(held)) : this.pool.switch(msg.sandbox!, msg.branch, msg.createFrom, githubNetEnv(msg.githubToken)))).then(
+        void this.switchHold(msg.sandbox!).then((held) => (held ? Promise.reject(new Error(held)) : this.pool.switch(msg.sandbox!, msg.branch, msg.createFrom, githubNetEnv(msg.githubToken), msg.holdPush))).then(
           (r) => this.send({ type: 'switch_result', id: msg.id, ok: true, ...r }),
           (err) => this.send({ type: 'switch_result', id: msg.id, ok: false, error: (err as Error).message }),
         );
@@ -3152,7 +3152,7 @@ export class Daemon {
           this.send({ type: 'save_result', id: msg.id, ok: false, error: `agent ${up.join(', ')} runs in sandbox ${msg.sandbox}` });
           return;
         }
-        void this.pool.saveWork(msg.sandbox, msg.branch, msg.message, githubNetEnv(msg.githubToken)).then(
+        void this.pool.saveWork(msg.sandbox, msg.branch, msg.message, githubNetEnv(msg.githubToken), msg.holdPush).then(
           (r) => this.send({ type: 'save_result', id: msg.id, ok: true, ...r }),
           (err) => this.send({ type: 'save_result', id: msg.id, ok: false, error: (err as Error).message }),
         );

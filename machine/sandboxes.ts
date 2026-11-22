@@ -1290,7 +1290,7 @@ export class SandboxPool {
   }
 
   /** Switch a sandbox's worktree to another branch (server/switchBranch.ts); refused while its editor runs. */
-  async switch(id: string, branch: string, createFrom?: string, env?: NodeJS.ProcessEnv): Promise<{ from: string; to: string; notes: string[] }> {
+  async switch(id: string, branch: string, createFrom?: string, env?: NodeJS.ProcessEnv, holdPush?: string): Promise<{ from: string; to: string; notes: string[] }> {
     const r = this.require(id);
     if (r.status !== 'ready') throw new Error(`sandbox ${id} is ${r.status}`);
     const problem = await sandboxBranchProblem(branch, this.d.git);
@@ -1302,6 +1302,7 @@ export class SandboxPool {
       createFrom,
       lock: withBaseRepoLock,
       env,
+      holdPush,
       nameOf: (p) => [...this.recs.values()].find((x) => path.resolve(x.path).toLowerCase() === path.resolve(p).toLowerCase())?.id ?? (path.resolve(p).toLowerCase() === path.resolve(this.o.repoPath).toLowerCase() ? 'the main clone' : undefined),
     });
     // What was untracked before this branch's worker came is not its work: a save of this branch leaves it (w2988).
@@ -1318,10 +1319,10 @@ export class SandboxPool {
    * Commit and push a sandbox's uncommitted work on `branch` before the portal releases it (w656, server/saveWork.ts).
    * The editor may run: git reads the files, it does not rewrite them.
    */
-  async saveWork(id: string, branch: string, message: string, env?: NodeJS.ProcessEnv): Promise<SaveResult> {
+  async saveWork(id: string, branch: string, message: string, env?: NodeJS.ProcessEnv, holdPush?: string): Promise<SaveResult> {
     const r = this.require(id);
     if (r.status !== 'ready') throw new Error(`sandbox ${id} is ${r.status}`);
-    const res = await saveWork({ dir: r.path, branch, message, env });
+    const res = await saveWork({ dir: r.path, branch, message, env, holdPush });
     this.git.set(id, await this.d.gitStatus(r.path));
     this.changed(r);
     return res;

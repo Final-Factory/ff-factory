@@ -34,6 +34,7 @@ import { addedLines, asksLookOk, decidedRefusal, notesSettle, personNotes, quote
 import { statusLinesIn, stillOpenIn } from './ledgerRules.ts';
 import { inlineReviewMedia, MEDIA_FILE, outsideReview, publishedCopy, reviewRootOf } from './reviewMedia.ts';
 import { visualAskCheck } from './visualAsk.ts';
+import { ciPushHold } from './savePushHold.ts';
 import { BLOCKER_KIND_HELP, conflictText, FULL_SHA, gateSetter, gatesName, gatesOf, isWith, latestWorker, MAX_GATES, newestFirst, prLabel, prRefOf, type PrHealth } from '../shared/blockers.ts';
 import { isSamePerson, personForWork, poolOwnerOf, tokenPersonForWork, withPool } from './vault.ts';
 import { ghRunner, githubFromVault, githubPersonOf, githubTokens } from './githubTokens.ts';
@@ -774,6 +775,7 @@ export class Agents {
     this.store = store;
     this.sessions = sessions;
     this.machines = machines;
+    machines.pushHoldFor = (m, branch) => this.pushHold(m, branch);
     this.identity = identity;
     this.waker = new Waker(sessions, store, path.join(cfg.dataDir, 'wakes.json'));
     this.benchStops = new BenchStops({
@@ -983,7 +985,7 @@ export class Agents {
       report: (text) => machines.report?.(text),
       freed: (what) => this.orchestrators.capacityMayHaveFreed(what),
       canSave: (m) => machines.canSaveWork(m),
-      saveWork: (m, sb, branch, message, sessionId) => machines.saveWork(m, sb, branch, message, sessionId ? this.githubTokenFor(m, sessionId, `saving ${sessionId}'s work`) : undefined),
+      saveWork: (m, sb, branch, message, sessionId) => machines.saveWork(m, sb, branch, message, sessionId ? this.githubTokenFor(m, sessionId, `saving ${sessionId}'s work`) : undefined, this.pushHold(m, branch)),
       // w3507: game sandboxes go out by priority (server/priorityReclaim.ts).
       pressure: () => this.reclaimPressure(),
       pairWants: () => this.pairWants(),
@@ -3648,10 +3650,15 @@ export class Agents {
     return b || undefined;
   }
 
+  /** Why a save must not push `branch` on `machineId` now: a worker on it waits on CI (server/savePushHold.ts, w5067). */
+  private pushHold(machineId: string, branch: string): string | undefined {
+    return ciPushHold(machineId, branch, this.store.sessions.values(), (id) => this.workOf(id), (s) => this.branchNow(s));
+  }
+
   /** Commit and push a sandbox worker's uncommitted work on `branch` through its daemon (w656), or a rejection saying why not. */
   private saveSandboxWork(i: SessionInfo, branch: string, message: string, when: string) {
     return i.machineId && i.machineSandbox && this.machines.canSaveWork(i.machineId)
-      ? this.machines.saveWork(i.machineId, i.machineSandbox, branch, message, this.githubTokenFor(i.machineId, i.id, `saving ${i.id}'s work ${when}`))
+      ? this.machines.saveWork(i.machineId, i.machineSandbox, branch, message, this.githubTokenFor(i.machineId, i.id, `saving ${i.id}'s work ${when}`), this.pushHold(i.machineId, branch))
       : Promise.reject(new Error(`${i.machineId ?? 'its machine'}'s daemon cannot save work now (offline, or before w656)`));
   }
 
@@ -4579,9 +4586,9 @@ export class Agents {
         } else {
           let note = 'its worktree was clean';
           if (step.save && !saved.has(step.branch)) {
-            const r = await this.machines.saveWork(m.id, seat.sandbox, step.branch, `FF Factory: saved ${o.id}'s uncommitted work before ${m.id}/${seat.sandbox} went to the urgent release build (w1668)\n\n${p.what}. \`git reset HEAD~1\` gives the work back uncommitted.`, this.githubTokenFor(m.id, o.id, `saving ${o.id}'s work`));
+            const r = await this.machines.saveWork(m.id, seat.sandbox, step.branch, `FF Factory: saved ${o.id}'s uncommitted work before ${m.id}/${seat.sandbox} went to the urgent release build (w1668)\n\n${p.what}. \`git reset HEAD~1\` gives the work back uncommitted.`, this.githubTokenFor(m.id, o.id, `saving ${o.id}'s work`), this.pushHold(m.id, step.branch));
             saved.add(step.branch);
-            if (r.sha) o.savedWork = { sha: r.sha, files: r.files, pushed: r.pushed, branch: step.branch, at: new Date().toISOString() };
+            if (r.sha) o.savedWork = { sha: r.sha, files: r.files, pushed: r.pushed, branch: step.branch, at: new Date().toISOString(), ...(r.sideRef ? { sideRef: r.sideRef } : {}) };
             note = r.notes.join('; ') || 'its uncommitted work was saved';
           }
           const why = `${m.id}/${seat.sandbox} builds the urgent release ${p.what} (w1668: urgent builds run in slot1)`;
@@ -4606,7 +4613,7 @@ export class Agents {
     if (!from || !sb || !branch || branch === 'detached HEAD' || branch === '?') return { gaveUp: `the builder's sandbox or branch is not known (${b.machineSandbox ?? 'none'})` };
     try {
       if ((from.git?.dirty ?? 0) > 0 || (from.git?.untracked ?? 0) > 0) {
-        await this.machines.saveWork(m.id, from.id, branch, `FF Factory: saved ${b.id}'s uncommitted work before its move to ${m.id}/${sb.id} for the urgent release build (w1668)\n\n\`git reset HEAD~1\` gives the work back uncommitted.`, this.githubTokenFor(m.id, b.id, `saving ${b.id}'s work`));
+        await this.machines.saveWork(m.id, from.id, branch, `FF Factory: saved ${b.id}'s uncommitted work before its move to ${m.id}/${sb.id} for the urgent release build (w1668)\n\n\`git reset HEAD~1\` gives the work back uncommitted.`, this.githubTokenFor(m.id, b.id, `saving ${b.id}'s work`), this.pushHold(m.id, branch));
       }
       for (const x of [from, sb]) if (x.unity.state !== 'stopped') await this.machines.unity(m.id, 'stop', false, x.id);
       // One branch in one worktree (git): the builder's own sandbox lets go of its branch first.

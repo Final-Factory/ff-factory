@@ -197,7 +197,7 @@ export type ToDaemon =
    * seatSessionIds (w4608, no bump): agents there on an agent seat (their open work is all not the game's, w1098: they work
    * in their own clone), which hold no switch up either; an older daemon ignores it and counts them.
    */
-  | { type: 'switch'; id: string; branch: string; createFrom?: string; sandbox?: string; callerSessionId?: string; githubToken?: string; seatSessionIds?: string[] }
+  | { type: 'switch'; id: string; branch: string; createFrom?: string; sandbox?: string; callerSessionId?: string; githubToken?: string; seatSessionIds?: string[]; /** w5068: the sandbox's branch is pushed to a side branch, not itself (switchBranch holdPush); an older daemon ignores it. */ holdPush?: string }
   /**
    * A sandbox (protocol 5, machine/sandboxes.ts), answered by sandbox_result: create (returns once recorded; progress
    * comes in `sandboxes` snapshots), delete (returns when it is gone), log (the tail of its editor log).
@@ -283,9 +283,10 @@ export type ToDaemon =
   /**
    * Commit and push a sandbox's uncommitted work on `branch` before the portal releases it (w656, server/saveWork.ts),
    * answered by save_result. Refused while an agent there has a process. Sent only to a daemon whose hello offered
-   * `saveWork`, so an older daemon never gets one.
+   * `saveWork`, so an older daemon never gets one. `holdPush` (w5067, no bump: an older daemon ignores it and pushes the
+   * branch as before): why the branch must not move on origin now (its PR's CI runs), so the save goes to a side branch.
    */
-  | { type: 'save_work'; id: string; sandbox: string; branch: string; message: string; githubToken?: string }
+  | { type: 'save_work'; id: string; sandbox: string; branch: string; message: string; githubToken?: string; holdPush?: string }
   /** GitHub App installation tokens for this machine's runs (w1519, docs/github-apps.md): the whole set, each time it changes. */
   | { type: 'gh_app_tokens'; tokens: GhAppToken[] }
   /**

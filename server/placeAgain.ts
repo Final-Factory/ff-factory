@@ -355,7 +355,10 @@ export function seatFor(s: SessionInfo, m: Pick<Machine, 'id' | 'sandboxes'>, f:
 
 /** The line that tells a worker its uncommitted work was committed for it before its sandbox was released (w656). */
 export function savedNote(w: NonNullable<SessionInfo['savedWork']>): string {
-  return `[saved] While you were stopped, FF Factory committed your uncommitted work (${w.files} file(s), new ones included) on your branch \`${w.branch}\` as ${w.sha}, ${w.pushed ? 'and pushed it' : 'not pushed yet (the next switch away pushes it)'}, so your sandbox could take other work. \`git reset HEAD~1\` gives it back uncommitted if that commit is still on top; or keep it and go on.`;
+  const pushed = w.sideRef
+    ? `not pushed to \`${w.branch}\`, because your pull request's CI ran and a push there would have cancelled the run (w5067): origin has it on the side branch \`${w.sideRef}\`, and your branch here is a commit ahead of origin until you push`
+    : w.pushed ? 'and pushed it' : 'not pushed yet (the next switch away pushes it)';
+  return `[saved] While you were stopped, FF Factory committed your uncommitted work (${w.files} file(s), new ones included) on your branch \`${w.branch}\` as ${w.sha}, ${pushed}, so your sandbox could take other work. \`git reset HEAD~1\` gives it back uncommitted if that commit is still on top; or keep it and go on.`;
 }
 
 /**
@@ -995,7 +998,7 @@ export class PlaceAgain {
       const at = new Date(this.now()).toISOString();
       for (const o of this.d.sessions()) {
         if (o.machineId !== m.id || (o.placeReleased ? o.placeReleased.branch !== branch : o.machineSandbox !== sb.id)) continue;
-        if (res.sha) o.savedWork = { sha: res.sha, files: res.files, pushed: res.pushed, branch, at };
+        if (res.sha) o.savedWork = { sha: res.sha, files: res.files, pushed: res.pushed, branch, at, ...(res.sideRef ? { sideRef: res.sideRef } : {}) };
         this.d.save(o);
         this.d.note(o.id, `Uncommitted work left on its branch ${branch} in ${key} after its release was saved there (${res.notes.join('; ')}): it is yours when you resume.`);
       }
@@ -1025,7 +1028,7 @@ export class PlaceAgain {
         if (f.live(o.id) || o.placeReleased || o.queuedSend) continue;
         const why = releaseWhy(o, f.now, f.over?.(o)) ?? step.why;
         o.placeReleased = { at, sandbox: sb.id, branch: step.branch, why, ...(step.wait && o.id === s.id ? { wait: true } : {}) };
-        if (res.sha) o.savedWork = { sha: res.sha, files: res.files, pushed: res.pushed, branch: step.branch, at };
+        if (res.sha) o.savedWork = { sha: res.sha, files: res.files, pushed: res.pushed, branch: step.branch, at, ...(res.sideRef ? { sideRef: res.sideRef } : {}) };
         delete o.releaseDue;
         delete o.heldSince;
         this.reclaimDone(o, this.reclaimOf(o.id));

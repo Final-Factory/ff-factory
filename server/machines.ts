@@ -3081,12 +3081,19 @@ export class MachineManager {
     }
   }
 
+  /** Why a sandbox branch on a machine must not be pushed now (Agents sets it: ciPushHold, w5068), or undefined. */
+  pushHoldFor?: (machineId: string, branch: string) => string | undefined;
+
   private readonly switchCalls = new Map<string, { machine: string; sandbox: string; resolve: (r: { from: string; to: string; notes: string[] }) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
 
   /** Switch the branch of a machine sandbox, on the machine (server/switchBranch.ts). callerSessionId: the agent asking, which its daemon does not count as busy. */
   switchBranch(machineId: string, branch: string, createFrom?: string, sandbox?: string, callerSessionId?: string, githubToken?: string, seatSessionIds?: string[]) {
     if (!sandbox) return Promise.reject(new Error(MAIN_CLONE_NO_AGENTS));
-    const sb = (this.requireSandboxDaemon(machineId), this.requireSandbox(machineId, sandbox).id);
+    const rec = (this.requireSandboxDaemon(machineId), this.requireSandbox(machineId, sandbox));
+    const sb = rec.id;
+    // w5068: the branch it leaves is not pushed while a worker on it waits on its pull request's CI (server/savePushHold.ts).
+    const from = rec.git?.branch;
+    const holdPush = from && from !== branch ? this.pushHoldFor?.(machineId, from) : undefined;
     return new Promise<{ from: string; to: string; notes: string[] }>((resolve, reject) => {
       const id = randomUUID();
       const timer = setTimeout(() => {
@@ -3095,7 +3102,7 @@ export class MachineManager {
       }, 10 * 60_000);
       this.switchCalls.set(id, { machine: machineId, sandbox: sb, resolve, reject, timer });
       try {
-        this.post(machineId, { type: 'switch', id, branch, createFrom, sandbox: sb, ...(callerSessionId ? { callerSessionId } : {}), ...(githubToken ? { githubToken } : {}), ...(seatSessionIds?.length ? { seatSessionIds } : {}) });
+        this.post(machineId, { type: 'switch', id, branch, createFrom, sandbox: sb, ...(callerSessionId ? { callerSessionId } : {}), ...(githubToken ? { githubToken } : {}), ...(seatSessionIds?.length ? { seatSessionIds } : {}), ...(holdPush ? { holdPush } : {}) });
       } catch (e) {
         clearTimeout(timer);
         this.switchCalls.delete(id);
@@ -3171,7 +3178,7 @@ export class MachineManager {
   }
 
   /** Commit and push a sandbox's uncommitted work on `branch`, on the machine (w656, server/saveWork.ts). */
-  saveWork(machineId: string, sandbox: string, branch: string, message: string, githubToken?: string): Promise<SaveResult> {
+  saveWork(machineId: string, sandbox: string, branch: string, message: string, githubToken?: string, holdPush?: string): Promise<SaveResult> {
     if (!this.canSaveWork(machineId)) return Promise.reject(new Error(`${machineId}'s daemon does not save uncommitted work yet (it needs a daemon update)`));
     return new Promise<SaveResult>((resolve, reject) => {
       const id = randomUUID();
@@ -3181,7 +3188,7 @@ export class MachineManager {
       }, 10 * 60_000);
       this.saveCalls.set(id, { machine: machineId, sandbox, resolve, reject, timer });
       try {
-        this.post(machineId, { type: 'save_work', id, sandbox, branch, message, ...(githubToken ? { githubToken } : {}) });
+        this.post(machineId, { type: 'save_work', id, sandbox, branch, message, ...(githubToken ? { githubToken } : {}), ...(holdPush ? { holdPush } : {}) });
       } catch (e) {
         clearTimeout(timer);
         this.saveCalls.delete(id);
