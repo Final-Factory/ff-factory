@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { saveWork, savedBranch } from './saveWork.ts';
-import { tmpFont } from './editorNoise.test.ts';
+import { tmpFont } from './tmpFontFixture.ts';
 
 function repos() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-save-'));
