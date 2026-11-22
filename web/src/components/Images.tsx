@@ -147,6 +147,7 @@ export function Lightbox() {
   }, [lb]);
   if (!lb) return null;
   const it = lb.items[Math.min(i, lb.items.length - 1)];
+  const many = lb.items.length > 1;
   const copy = async () => {
     const ok = await copyImage(it.src).catch((e) => (toast((e as Error).message, 'error'), false));
     if (ok) toast('Image copied');
@@ -155,8 +156,8 @@ export function Lightbox() {
     <div className="overlay lightbox" onMouseDown={(e) => e.target === e.currentTarget && closeLightbox()}>
       <div className="lightbox-bar">
         <span className="ellipsis mono small">{it.name}</span>
-        {lb.items.length > 1 && (
-          <span className="dim small">
+        {many && (
+          <span className="dim small mono lightbox-pos" data-testid="lightbox-pos">
             {i + 1} / {lb.items.length}
           </span>
         )}
@@ -179,8 +180,9 @@ export function Lightbox() {
         </button>
       </div>
       <div className={`lightbox-stage${zoomed ? ' zoomed' : ''}`} onMouseDown={(e) => e.target === e.currentTarget && closeLightbox()}>
-        {i > 0 && (
-          <button className="lightbox-nav prev" onClick={() => setI(i - 1)} aria-label="Previous">
+        {/* Both arrows whenever there is more than one picture; at an end its arrow is disabled, no wrap (w5151). */}
+        {many && (
+          <button className="lightbox-nav prev" onClick={() => setI(i - 1)} disabled={i === 0} aria-label="Previous" title="Previous (←)">
             <Icon name="back" size={22} />
           </button>
         )}
@@ -189,8 +191,8 @@ export function Lightbox() {
         ) : (
           <img src={it.src} alt={it.name} title={zoomed ? 'Fit to the screen' : 'Actual size'} onClick={() => setZoomed(!zoomed)} />
         )}
-        {i < lb.items.length - 1 && (
-          <button className="lightbox-nav next" onClick={() => setI(i + 1)} aria-label="Next">
+        {many && (
+          <button className="lightbox-nav next" onClick={() => setI(i + 1)} disabled={i === lb.items.length - 1} aria-label="Next" title="Next (→)">
             <Icon name="chevron" size={22} />
           </button>
         )}
