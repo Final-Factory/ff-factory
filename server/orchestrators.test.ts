@@ -2280,13 +2280,16 @@ test('w920: a worker has portal_logs on the machine tool belt and in its brief, 
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, 'cleanup-log.jsonl'), JSON.stringify({ at: '2026-10-10T09:00:00Z', trigger: 'hourly', removed: 1, softFreeGB: 20, top: [{ path: '/work/ffa-x', bytes: 2 * 1024 ** 3, rule: 'agent-temp', why: 'session ended' }] }) + '\n');
   fs.writeFileSync(path.join(cfg.dataDir, 'state.json'), '{"secret":"not for workers"}');
-  const before = fs.readdirSync(cfg.dataDir).sort();
+  // The store's own background save (start_agent's) may still be in flight as a `.async.tmp` (server/durable.ts): that is
+  // not the read writing. Since w5072 the list of sources runs a journal check, long enough to catch one mid-write.
+  const listing = () => fs.readdirSync(cfg.dataDir).filter((f) => !f.endsWith('.async.tmp')).sort();
+  const before = listing();
 
   assert.match(await h.portal_logs!({}), /- cleanup: .*\n[\s\S]*Clean-up logs kept for: pc/);
   const out = await h.portal_logs!({ source: 'cleanup', machine: 'pc' });
   assert.match(out, /\[2026-10-10T09:00:00Z\] removed: \/work\/ffa-x {2}2\.0 GB {2}\(session ended\)/);
   await assert.rejects(h.portal_logs!({ source: 'state.json' }), /is not one portal_logs reads/);
-  assert.deepEqual(fs.readdirSync(cfg.dataDir).sort(), before, 'reading wrote nothing');
+  assert.deepEqual(listing(), before, 'reading wrote nothing');
   // Through the wire the daemon uses: a call by name that is not a tool is not available to the session.
   assert.equal('write_portal_logs' in h, false);
 });
