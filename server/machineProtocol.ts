@@ -197,7 +197,7 @@ export type ToDaemon =
    * seatSessionIds (w4608, no bump): agents there on an agent seat (their open work is all not the game's, w1098: they work
    * in their own clone), which hold no switch up either; an older daemon ignores it and counts them.
    */
-  | { type: 'switch'; id: string; branch: string; createFrom?: string; sandbox?: string; callerSessionId?: string; githubToken?: string; seatSessionIds?: string[] }
+  | { type: 'switch'; id: string; branch: string; createFrom?: string; sandbox?: string; callerSessionId?: string; githubToken?: string; seatSessionIds?: string[]; /** w5068: the sandbox's branch is pushed to a side branch, not itself (switchBranch holdPush); an older daemon ignores it. */ holdPush?: string }
   /**
    * A sandbox (protocol 5, machine/sandboxes.ts), answered by sandbox_result: create (returns once recorded; progress
    * comes in `sandboxes` snapshots), delete (returns when it is gone), log (the tail of its editor log).

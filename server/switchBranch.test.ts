@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { explainCheckoutError, switchBranch } from './switchBranch.ts';
+import { savedBranch } from './saveWork.ts';
 
 function repos() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-switch-'));
@@ -94,4 +95,20 @@ test('switch: master with unpushed commits is left for a person; a branch in ano
   await assert.rejects(switchBranch({ dir: r.work, branch: 'sandbox/a', nameOf: () => 'sandbox sb2' }), /Branch sandbox\/a is checked out in another worktree \(sandbox sb2\)/);
   assert.equal(explainCheckoutError("fatal: 'x' is already used by worktree at 'C:/ffsb/sb2'", 'x'), "Branch x is checked out in another worktree at C:/ffsb/sb2. Switch that one to another branch first; git does not allow one branch in two worktrees.");
   await assert.rejects(switchBranch({ dir: r.work, branch: '-f' }), /not a valid branch name/);
+});
+
+test("w5068: while the branch's pull request CI runs, its unpushed commits go to a side branch and origin's branch tip is unchanged", async (t) => {
+  const r = repos();
+  t.after(r.cleanup);
+  r.git(r.work, 'commit', '-q', '--allow-empty', '-m', 'the head CI runs on');
+  r.git(r.work, 'push', '-q', '-u', 'origin', 'sandbox/a');
+  const head = r.git(r.origin, 'rev-parse', 'sandbox/a');
+  r.git(r.work, 'commit', '-q', '--allow-empty', '-m', 'made after the CI wait began');
+  const tip = r.git(r.work, 'rev-parse', '--short=10', 'HEAD');
+  const res = await switchBranch({ dir: r.work, branch: '098-belts', holdPush: 'CI runs on Final-Factory/FinalFactory#4137' });
+  assert.equal(r.git(r.origin, 'rev-parse', 'sandbox/a'), head, 'no push to the PR branch: its CI run is not cancelled');
+  assert.equal(r.git(r.origin, 'log', '-1', '--format=%s', savedBranch('sandbox/a', tip)), 'made after the CI wait began', 'the commit is safe on origin');
+  assert.match(res.notes.join('; '), /1 unpushed commit\(s\) of sandbox\/a were pushed to the side branch ff-saved\/sandbox\/a-\w+, not to sandbox\/a \(CI runs on Final-Factory\/FinalFactory#4137/);
+  assert.equal(res.to, '098-belts', 'the switch goes on');
+  assert.equal(r.git(r.work, 'log', '-1', '--format=%s', 'sandbox/a'), 'made after the CI wait began', 'the local branch keeps it');
 });

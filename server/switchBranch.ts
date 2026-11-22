@@ -1,6 +1,7 @@
 import { run } from './proc.ts';
 import { parseStatus } from './gitStatus.ts';
 import { restoreCommittedBytes } from './committedBytes.ts';
+import { savedBranch } from './saveWork.ts';
 
 const ENV = { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' };
 const SHARED = /^(master|main|develop)$/;
@@ -53,6 +54,11 @@ export async function switchBranch(opts: {
   nameOf?: (path: string) => string | undefined;
   /** The push's and fetch's environment: the caller's person's GitHub token (w868); absent, the machine's own login. */
   env?: NodeJS.ProcessEnv;
+  /**
+   * Why the current branch must not be pushed now ("CI runs on owner/repo#n", server/savePushHold.ts ciPushHold, w5068):
+   * its unpushed commits then go to the side branch ff-saved/<branch>-<sha> (savedBranch), so the run is not cancelled.
+   */
+  holdPush?: string;
 }): Promise<SwitchResult> {
   const { dir, branch } = opts;
   const lock = opts.lock ?? (<T>(fn: () => Promise<T>) => fn());
@@ -74,17 +80,25 @@ export async function switchBranch(opts: {
     const unpushed = Number((await must(dir, ['rev-list', '--count', 'HEAD', '--not', '--remotes'], 'counting unpushed commits')).trim()) || 0;
     if (unpushed > 0) {
       if (SHARED.test(from)) throw new Error(`${from} has ${unpushed} commit(s) that are on no remote. Pushing ${from} is a decision for a person; push or move them yourself, then switch.`);
-      const pushed = await git(dir, ['push', '-u', 'origin', `${from}:${from}`], 5 * 60_000, opts.env);
-      if (pushed.code === 0) notes.push(`pushed ${unpushed} unpushed commit(s) of ${from} first`);
-      else if (REJECTED.test(pushed.stderr)) {
-        // w2079: another worker pushed the branch meanwhile (m5/slot3 kept 41 commits of a duplicate of w1903's worker on
-        // w1903-station-stop-circuits, and every switch there was refused). The commits go to a backup branch of their own:
-        // kept on origin, never merged into the owner's branch, and the switch goes on.
-        const sha = (await must(dir, ['rev-parse', '--short=10', 'HEAD'], 'reading HEAD')).trim();
-        const backup = backupBranch(from, sha);
-        await must(dir, ['push', 'origin', `HEAD:refs/heads/${backup}`], `pushing ${from}'s commits to ${backup}`, 5 * 60_000, opts.env);
-        notes.push(`${from} on origin has commits this one lacks (another worker pushed it), so its ${unpushed} unpushed commit(s) were pushed to the backup branch ${backup}, not to ${from}`);
-      } else throw new Error(`pushing ${from} failed: ${(pushed.stderr || pushed.stdout).trim().split('\n').slice(-3).join(' ')}`);
+      if (opts.holdPush) {
+        // w5068: a push to the branch cancels its pull request's CI run in progress (w5067: 6d6488f046 cancelled PR #4137's).
+        // The commits go to a side branch: kept on origin, and the branch itself is pushed by its worker when CI is done.
+        const side = savedBranch(from, (await must(dir, ['rev-parse', '--short=10', 'HEAD'], 'reading HEAD')).trim());
+        await must(dir, ['push', 'origin', `HEAD:refs/heads/${side}`], `pushing ${from}'s commits to ${side} (${from} is not pushed while ${opts.holdPush})`, 5 * 60_000, opts.env);
+        notes.push(`${unpushed} unpushed commit(s) of ${from} were pushed to the side branch ${side}, not to ${from} (${opts.holdPush}: a push there would cancel the run, w5068); ${from} here is still ahead of origin`);
+      } else {
+        const pushed = await git(dir, ['push', '-u', 'origin', `${from}:${from}`], 5 * 60_000, opts.env);
+        if (pushed.code === 0) notes.push(`pushed ${unpushed} unpushed commit(s) of ${from} first`);
+        else if (REJECTED.test(pushed.stderr)) {
+          // w2079: another worker pushed the branch meanwhile (m5/slot3 kept 41 commits of a duplicate of w1903's worker on
+          // w1903-station-stop-circuits, and every switch there was refused). The commits go to a backup branch of their own:
+          // kept on origin, never merged into the owner's branch, and the switch goes on.
+          const sha = (await must(dir, ['rev-parse', '--short=10', 'HEAD'], 'reading HEAD')).trim();
+          const backup = backupBranch(from, sha);
+          await must(dir, ['push', 'origin', `HEAD:refs/heads/${backup}`], `pushing ${from}'s commits to ${backup}`, 5 * 60_000, opts.env);
+          notes.push(`${from} on origin has commits this one lacks (another worker pushed it), so its ${unpushed} unpushed commit(s) were pushed to the backup branch ${backup}, not to ${from}`);
+        } else throw new Error(`pushing ${from} failed: ${(pushed.stderr || pushed.stdout).trim().split('\n').slice(-3).join(' ')}`);
+      }
     }
   }
 
