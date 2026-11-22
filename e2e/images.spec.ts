@@ -456,3 +456,58 @@ test('w1419: a full-size review still (1920x1080, about 6 MB) in an orchestrator
     await expect.poll(() => imgs.nth(i).evaluate((e: HTMLImageElement) => e.complete && e.naturalWidth === 1920), { timeout: 20_000 }).toBe(true);
   }
 });
+
+/** A labelled 800×450 picture as a data URI, so a test can tell which one the lightbox shows. */
+const picture = (fill: string, label: string) =>
+  `data:image/svg+xml;base64,${Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="800" height="450"><rect width="800" height="450" fill="${fill}"/><text x="400" y="250" font-size="96" font-family="sans-serif" fill="#fff" text-anchor="middle">${label}</text></svg>`).toString('base64')}`;
+
+test("a message's pictures page through in the lightbox: arrows, arrow keys, the position, Esc (w5151)", async ({ authed: page }) => {
+  const tag = uniq('pager');
+  const app = await appState(page.request);
+  await sendMessage(page.request, app.orchestratorId!, `Three windows ${tag}: ![before](${picture('#7a2a2a', 'Before')}) ![after](${picture('#2a5a7a', 'After')}) ![detail](${picture('#2a6a3a', 'Detail')})`);
+  const reply = page.locator('.orch .msg-assistant', { hasText: tag });
+  await onScreen(reply);
+  await expectLoaded(reply.locator('.md .md-img img'));
+  await expect(reply.locator('.md .md-img img')).toHaveCount(3);
+  const box = page.locator('.lightbox');
+  const pos = box.getByTestId('lightbox-pos');
+  const prev = box.getByRole('button', { name: 'Previous' });
+  const next = box.getByRole('button', { name: 'Next' });
+  const shown = box.locator('.lightbox-bar .ellipsis');
+
+  // The second picture opens on itself, with the others either side.
+  await openLightbox(page, reply.locator('.md-img').nth(1));
+  await expect(pos).toHaveText('2 / 3');
+  await expect(shown).toHaveText('after');
+  // Click: next, then at the end the arrow stays but is disabled (no wrap).
+  await next.click();
+  await expect(pos).toHaveText('3 / 3');
+  await expect(shown).toHaveText('detail');
+  await expect(next).toBeDisabled();
+  await expect(prev).toBeEnabled();
+  // Keys: Left twice to the first, where Previous is disabled and a further Left stays.
+  await page.keyboard.press('ArrowLeft');
+  await page.keyboard.press('ArrowLeft');
+  await expect(pos).toHaveText('1 / 3');
+  await expect(shown).toHaveText('before');
+  await expect(prev).toBeDisabled();
+  await page.keyboard.press('ArrowLeft');
+  await expect(pos).toHaveText('1 / 3');
+  await page.keyboard.press('ArrowRight');
+  await expect(pos).toHaveText('2 / 3');
+  await prev.click();
+  await expect(pos).toHaveText('1 / 3');
+  await page.keyboard.press('Escape');
+  await expect(box).toHaveCount(0);
+
+  // A one-picture message has no arrows and no position.
+  await sendMessage(page.request, app.orchestratorId!, `One window ${tag}-one: ![alone](${picture('#555', 'Alone')})`);
+  const one = page.locator('.orch .msg-assistant', { hasText: `${tag}-one` });
+  await onScreen(one);
+  await openLightbox(page, one.locator('.md-img').first());
+  await expect(shown).toHaveText('alone');
+  await expect(box.locator('.lightbox-nav')).toHaveCount(0);
+  await expect(pos).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await expect(box).toHaveCount(0);
+});

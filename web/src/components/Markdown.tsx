@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm';
 import { DATA_IMAGE_URI, isVideoPath, localPath, MAX_DATA_URI } from '../../../shared/imagePaths';
 import { sanitizeSvg } from '../../../shared/svg';
 import { reportStill, watchStill } from '../mediaTrouble';
-import { openLightbox } from '../store';
+import { openLightbox, type LightboxItem } from '../store';
 import { baseName, FullQualityLink, PreviewVideo } from './Images';
 import { CopyButton, Icon } from './ui';
 
@@ -56,12 +56,25 @@ export function safeDataImage(uri: string): string | undefined {
   }
 }
 
+/**
+ * The pictures of one message (w5151): every still and clip in the same rendered markdown, in reading order, and the
+ * index of the one clicked, so the lightbox pages through them with its arrows and the arrow keys. Read from the page at
+ * the click, so a picture that failed to load (shown as its name) is left out and the order is the one on screen.
+ */
+export function messageMedia(from: Element, self: LightboxItem): [LightboxItem[], number] {
+  const root = from.closest('.md');
+  const marks = root ? Array.from(root.querySelectorAll<HTMLElement>('[data-lb-src]')) : [];
+  const items = marks.map((m) => ({ src: m.dataset.lbSrc ?? '', name: m.dataset.lbName ?? '', ...(m.dataset.lbVideo ? { video: true } : {}) }));
+  const at = marks.findIndex((m) => m === from || m.contains(from));
+  return at < 0 ? [[self], 0] : [items, at];
+}
+
 /** An image in the text, at its own size up to the column's width; a click opens it full size. */
 function InlineImage({ src, name, alt }: { src: string; name: string; alt?: string }) {
   const [broken, setBroken] = useState(false);
   if (broken) return <code title="This image is not available">{alt || name}</code>;
   return (
-    <button type="button" className="md-img" title={alt || name} onClick={() => openLightbox([{ src, name }], 0)}>
+    <button type="button" className="md-img" title={alt || name} data-lb-src={src} data-lb-name={name} onClick={(e) => openLightbox(...messageMedia(e.currentTarget, { src, name }))}>
       <img ref={watchStill('text')} src={src} alt={alt || name} loading="lazy" onError={(e) => (reportStill(e.currentTarget, 'text', 'error'), setBroken(true))} />
     </button>
   );
@@ -75,12 +88,12 @@ function InlineVideo({ src, name, alt }: { src: string; name: string; alt?: stri
   const [broken, setBroken] = useState(false);
   if (broken) return <code title="This video is not available">{alt || name}</code>;
   return (
-    <span className="md-video">
+    <span className="md-video" data-lb-src={src} data-lb-name={name} data-lb-video="1">
       <PreviewVideo src={src} onBroken={() => setBroken(true)} />
       <span className="md-video-cap dim small">
         <span className="ellipsis mono">{alt || name}</span>
         <FullQualityLink src={src} />
-        <button type="button" className="btn btn-ghost btn-sm" onClick={() => openLightbox([{ src, name, video: true }], 0)} title="Open large">
+        <button type="button" className="btn btn-ghost btn-sm" onClick={(e) => openLightbox(...messageMedia(e.currentTarget, { src, name, video: true }))} title="Open large">
           <Icon name="expand" size={12} />
         </button>
       </span>
