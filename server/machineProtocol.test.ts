@@ -143,7 +143,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // w4922 (no bump): `test_history_started`, a running file's first sight, so the portal tags the run with its sandbox's
 // workers then; it has no answer, an older portal drops it (no default case) and tags by the record as before, and an older
 // daemon never sends one.
-const DECIDED = { protocol: 9, fingerprint: '7fdc745346d3e54c' };
+// w5067 (no bump): `save_work.holdPush`, the side branch a release save pushes to while the branch's PR CI runs; an older
+// daemon ignores the field and pushes to the branch as before.
+const DECIDED = { protocol: 9, fingerprint: '266f88c82ce298b4' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

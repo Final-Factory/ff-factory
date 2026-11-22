@@ -419,6 +419,10 @@ test('w656: a dirty sandbox is saved by its daemon first, then released for ever
   // It hears so when it resumes.
   assert.match(savedNote(a.savedWork!), /^\[saved\] While you were stopped, FF Factory committed your uncommitted work \(3 file\(s\), new ones included\) on your branch `feature\/slot1` as abc1234, and pushed it/);
   assert.match(savedNote(a.savedWork!), /`git reset HEAD~1` gives it back uncommitted/);
+  // w5067: saved while its PR's CI ran, so to a side branch; its own branch is a commit ahead of origin.
+  const side = savedNote({ ...a.savedWork!, sideRef: 'ff-saved/feature/slot1-abc1234' });
+  assert.match(side, /not pushed to `feature\/slot1`, because your pull request's CI ran .*side branch `ff-saved\/feature\/slot1-abc1234`/);
+  assert.doesNotMatch(side, /and pushed it/);
 });
 
 // ---------------------------------------------------------------- w846: a worker waiting on CI gives up its sandbox

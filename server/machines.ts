@@ -3171,7 +3171,7 @@ export class MachineManager {
   }
 
   /** Commit and push a sandbox's uncommitted work on `branch`, on the machine (w656, server/saveWork.ts). */
-  saveWork(machineId: string, sandbox: string, branch: string, message: string, githubToken?: string): Promise<SaveResult> {
+  saveWork(machineId: string, sandbox: string, branch: string, message: string, githubToken?: string, holdPush?: string): Promise<SaveResult> {
     if (!this.canSaveWork(machineId)) return Promise.reject(new Error(`${machineId}'s daemon does not save uncommitted work yet (it needs a daemon update)`));
     return new Promise<SaveResult>((resolve, reject) => {
       const id = randomUUID();
@@ -3181,7 +3181,7 @@ export class MachineManager {
       }, 10 * 60_000);
       this.saveCalls.set(id, { machine: machineId, sandbox, resolve, reject, timer });
       try {
-        this.post(machineId, { type: 'save_work', id, sandbox, branch, message, ...(githubToken ? { githubToken } : {}) });
+        this.post(machineId, { type: 'save_work', id, sandbox, branch, message, ...(githubToken ? { githubToken } : {}), ...(holdPush ? { holdPush } : {}) });
       } catch (e) {
         clearTimeout(timer);
         this.saveCalls.delete(id);

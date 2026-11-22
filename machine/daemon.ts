@@ -3152,7 +3152,7 @@ export class Daemon {
           this.send({ type: 'save_result', id: msg.id, ok: false, error: `agent ${up.join(', ')} runs in sandbox ${msg.sandbox}` });
           return;
         }
-        void this.pool.saveWork(msg.sandbox, msg.branch, msg.message, githubNetEnv(msg.githubToken)).then(
+        void this.pool.saveWork(msg.sandbox, msg.branch, msg.message, githubNetEnv(msg.githubToken), msg.holdPush).then(
           (r) => this.send({ type: 'save_result', id: msg.id, ok: true, ...r }),
           (err) => this.send({ type: 'save_result', id: msg.id, ok: false, error: (err as Error).message }),
         );

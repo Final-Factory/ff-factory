@@ -128,3 +128,71 @@ export function noiseFiles(diff: string): string[] {
   }
   return out;
 }
+
+/**
+ * TextMesh Pro dynamic font assets (w5067): a font asset whose Atlas Population Mode is Dynamic (1) or Dynamic OS (2)
+ * adds glyphs, characters, kerning pairs and atlas pixels as the game draws text in the editor, and the editor writes them
+ * into the .asset. FF Factory's save of de2893f4's sandbox committed and pushed such a rewrite of
+ * `LiberationSans SDF - Fallback.asset` (6d6488f046, 4,245 added kerning lines) onto PR #4137's branch while its CI ran,
+ * and the push cancelled the run. Across all 27 font assets in the game repo's 227 "FF Factory: saved" commits on
+ * 2026-11-22 (20 LiberationSans Fallback, 5 NotoSansJP, 2 NotoSansKR; measured, every top-level field of each YAML
+ * document compared), every change was in one of these fields and nothing else.
+ *
+ * The rule is per file, like the materials': the asset is dynamic both at HEAD and now, has the same documents, and
+ * every field that differs is one of these. A change to any other field (the face, the atlas size, the mode, a fallback
+ * list, a material property a person set) and the whole file is saved as it is.
+ */
+const FONT_DYNAMIC: Record<string, Set<string>> = {
+  // MonoBehaviour: the TMP_FontAsset itself.
+  '114': new Set(['m_GlyphTable', 'm_CharacterTable', 'm_UsedGlyphRects', 'm_FreeGlyphRects', 'm_FontFeatureTable']),
+  // Texture2D: the atlas texture's pixels.
+  '28': new Set(['_typelessdata']),
+};
+
+/** A Unity YAML file's top-level fields, by document (`<class>&<file id>`) and field name: each field's whole text. */
+function yamlFields(text: string): Map<string, { cls: string; field: string; text: string }> {
+  const out = new Map<string, { cls: string; field: string; text: string }>();
+  let doc = '';
+  let cls = '';
+  let cur: { cls: string; field: string; text: string } | undefined;
+  for (const line of text.replace(/\r\n/g, '\n').split('\n')) {
+    const d = /^--- !u!(\d+) &(-?\d+)/.exec(line);
+    if (d) {
+      cls = d[1];
+      doc = `${d[1]}&${d[2]}`;
+      cur = undefined;
+      out.set(`${doc}`, { cls, field: '', text: line });
+      continue;
+    }
+    const f = /^ {2}([^\s:-][^:]*):/.exec(line);
+    if (f && doc) {
+      cur = { cls, field: f[1], text: `${line}\n` };
+      out.set(`${doc} ${f[1]}`, cur);
+    } else if (cur) cur.text += `${line}\n`;
+  }
+  return out;
+}
+
+const DYNAMIC_MODE = /^ {2}m_AtlasPopulationMode: [12]\s*$/m;
+
+/**
+ * Whether `now` is `head` with only a dynamic TMP font asset's runtime data changed (FONT_DYNAMIC). Both must be dynamic
+ * TMP font assets; a file with no change is not noise.
+ */
+export function fontAtlasNoise(head: string, now: string): boolean {
+  if (!DYNAMIC_MODE.test(head) || !DYNAMIC_MODE.test(now) || !/^ {2}m_FaceInfo:/m.test(head)) return false;
+  const a = yamlFields(head);
+  const b = yamlFields(now);
+  let changed = 0;
+  for (const k of new Set([...a.keys(), ...b.keys()])) {
+    const x = a.get(k), y = b.get(k);
+    if (x?.text === y?.text) continue;
+    // A document or a field added or removed is not the atlas growing.
+    if (!x || !y || !x.field || !FONT_DYNAMIC[x.cls]?.has(x.field)) return false;
+    changed++;
+  }
+  return changed > 0;
+}
+
+/** Whether a modified file's working copy may be a dynamic TMP font asset, worth reading HEAD's copy for. */
+export const mayBeDynamicFont = (path: string, text: string) => path.endsWith('.asset') && DYNAMIC_MODE.test(text) && /^ {2}m_FaceInfo:/m.test(text);
