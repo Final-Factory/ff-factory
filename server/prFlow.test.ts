@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { ciVerdict, installPrShim, parseArgs, prMain, type PrDeps, type Ran } from '../machine/prFlow.ts';
+import { atlasWarning, ciVerdict, installPrShim, parseArgs, prMain, type PrDeps, type Ran } from '../machine/prFlow.ts';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { tmpFont } from './tmpFontFixture.ts';
 
 /**
  * ff-pr (w1478, machine/prFlow.ts): a worker's push, PR, landed check (w907) and merge on green, one command each. The
@@ -189,4 +191,53 @@ test('installPrShim writes ff-pr for sh and cmd, pointing at the script', () => 
   installPrShim(bin, '/usr/bin/node', ['--experimental-strip-types'], '/app/machine/prFlow.ts');
   assert.match(fs.readFileSync(path.join(bin, 'ff-pr'), 'utf8'), /exec "\/usr\/bin\/node" "--experimental-strip-types" "\/app\/machine\/prFlow\.ts" "\$@"/);
   assert.match(fs.readFileSync(path.join(bin, 'ff-pr.cmd'), 'utf8'), /"\/app\/machine\/prFlow\.ts" %\*/);
+});
+
+test('w5069 push: warns, never refuses, for a dynamic TMP font atlas the editor only grew, and names the command that drops it', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ffpr-atlas-'));
+  try {
+    const g = (...a: string[]) => execFileSync('git', ['-C', root, '-c', 'user.email=t@t', '-c', 'user.name=t', ...a], { stdio: 'pipe' }).toString();
+    const put = (f: string, s: string) => (fs.mkdirSync(path.dirname(path.join(root, f)), { recursive: true }), fs.writeFileSync(path.join(root, f), s));
+    const FONT = 'Assets/TextMesh Pro/Resources/Fonts & Materials/LiberationSans SDF - Fallback.asset';
+    execFileSync('git', ['init', '-q', '-b', 'main', root]);
+    put(FONT, tmpFont({ pairs: 2 }));
+    put('Assets/Fonts/Real SDF.asset', tmpFont());
+    put('a.cs', 'a');
+    g('add', '-A');
+    g('commit', '-q', '-m', 'base');
+    g('update-ref', 'refs/remotes/origin/main', 'HEAD');
+    g('switch', '-q', '-c', 'w1-x');
+    // As 6d6488f046: only kerning records added to the Fallback atlas; a face change to another font is a person's edit.
+    put(FONT, tmpFont({ pairs: 60 }));
+    put('Assets/Fonts/Real SDF.asset', tmpFont({ face: 72, glyphs: 3 }));
+    put('a.cs', 'changed');
+    g('commit', '-q', '-am', 'work');
+    const said: string[] = [];
+    const d = {
+      run: (cmd: string, args: string[]): Ran => {
+        const r = spawnSync(cmd, args, { cwd: root, encoding: 'utf8' });
+        return { code: r.status ?? 1, out: r.stdout, err: r.stderr };
+      },
+      write: (s: string) => void said.push(s),
+      sleep: () => {},
+    };
+    assert.deepEqual(atlasWarning(d, 'main'), [FONT]);
+    assert.match(said.join(''), /warning: 1 dynamic TMP font atlas\(es\) changed only by the Unity editor/);
+    assert.ok(said.join('').includes(`git checkout origin/main -- "${FONT}"`), said.join(''));
+    // The command it names drops it.
+    g('checkout', 'origin/main', '--', FONT);
+    g('commit', '-q', '-m', 'drop');
+    said.length = 0;
+    assert.deepEqual(atlasWarning(d, 'main'), []);
+    assert.equal(said.join(''), '', 'nothing to warn of');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('w5069 push: the atlas warning does not stop the push', () => {
+  const d = fake({ ...base, 'gh pr view': ok(pr()), 'git merge-base': ok('c'.repeat(40) + '\n'), 'git diff --name-only -z': ok('F SDF.asset\0'), 'git show HEAD:': ok(tmpFont({ pairs: 9 })), 'git show c': ok(tmpFont({ pairs: 1 })) });
+  assert.equal(prMain(['push'], d), 0);
+  assert.match(d.said, /warning: 1 dynamic TMP font atlas/);
+  assert.ok(d.ran.includes('git push -u origin HEAD:refs/heads/w1478-x'));
 });

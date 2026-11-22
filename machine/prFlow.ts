@@ -18,6 +18,7 @@ import path from 'node:path';
 import { ghEnvFor, readGhAppTokens, remotesOf } from './ghApp.ts';
 import { awayLabelsOf, awayNote, failedNote, offlineLabels, settleJobs, type Leg } from './awayRunners.ts';
 import { noPrCi } from './ciPaths.ts';
+import { fontAtlasNoise, mayBeDynamicFont } from '../server/editorNoise.ts';
 import { STALE_EVIDENCE, evidenceArgs, evidenceGated, evidencePython, evidenceRefusal, evidenceVerdict, findLocalPrEvidence, noScriptRefusal, updateLocalPlugin } from './evidenceGate.ts';
 
 export interface Ran {
@@ -245,6 +246,35 @@ function git(d: PrDeps, args: string[]): Ran {
   return d.run('git', args);
 }
 
+/**
+ * w5069: a warning, never a refusal, for each dynamic TextMesh Pro font asset the branch changes where the Unity editor's
+ * runtime atlas growth is the only change (server/editorNoise.ts fontAtlasNoise: glyph, character, glyph-rect and
+ * kerning tables, and the atlas texture's pixels). A worker's `git add -A` commits them: 27 of the game repo's 227 FF
+ * Factory saves did, and 6d6488f046 cancelled PR #4137's CI (w5067). A person may change a font on purpose, so it only
+ * names them, with the command that drops them. Compared against the merge base: what this branch adds, not the base's.
+ */
+export function atlasWarning(d: PrDeps, base: string): string[] {
+  const mb = git(d, ['merge-base', 'HEAD', `origin/${base}`]).out.trim();
+  if (!mb) return [];
+  const changed = git(d, ['diff', '--name-only', '-z', '--no-renames', '--diff-filter=M', mb, 'HEAD', '--', '*.asset']).out.split('\0').filter(Boolean);
+  const noise: string[] = [];
+  for (const f of changed) {
+    const now = git(d, ['show', `HEAD:${f}`]);
+    if (now.code !== 0 || !mayBeDynamicFont(f, now.out)) continue;
+    const was = git(d, ['show', `${mb}:${f}`]);
+    if (was.code === 0 && fontAtlasNoise(was.out, now.out)) noise.push(f);
+  }
+  if (noise.length) {
+    const q = (f: string) => `"${f.replace(/(["$`\\])/g, '\\$1')}"`;
+    d.write(
+      `ff-pr: warning: ${noise.length} dynamic TMP font atlas(es) changed only by the Unity editor growing them at runtime (w5069), probably not yours to commit:\n` +
+        noise.map((f) => `  ${f}\n`).join('') +
+        `  to drop them: git checkout origin/${base} -- ${noise.map(q).join(' ')} && git commit -m "drop editor font atlas noise", then ff-pr push again\n`,
+    );
+  }
+  return noise;
+}
+
 function defaultBase(d: PrDeps): string {
   const r = git(d, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
   return r.code === 0 && r.out.trim() ? r.out.trim().replace(/^origin\//, '') : 'main';
@@ -285,6 +315,7 @@ export function push(d: PrDeps, o: Opts): number {
     const said = m.out.trim().split('\n').pop() ?? '';
     d.write(`ff-pr: merged origin/${base}: ${said || 'done'}\n`);
   }
+  atlasWarning(d, base);
   const p = git(d, ['push', '-u', 'origin', `HEAD:refs/heads/${branch}`]);
   if (p.code !== 0) {
     d.write(`ff-pr: git push failed:\n${(p.err || p.out).trim()}\n`);
