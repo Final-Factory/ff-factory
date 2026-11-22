@@ -775,6 +775,7 @@ export class Agents {
     this.store = store;
     this.sessions = sessions;
     this.machines = machines;
+    machines.pushHoldFor = (m, branch) => this.pushHold(m, branch);
     this.identity = identity;
     this.waker = new Waker(sessions, store, path.join(cfg.dataDir, 'wakes.json'));
     this.benchStops = new BenchStops({
