@@ -111,6 +111,7 @@ import { slugify } from './sandboxes.ts';
 import { SpendStore, buildReport } from './spend.ts';
 import { backfillSpend, repairSpend } from './spendJobs.ts';
 import type { SpendSummaryReply } from '../shared/spend.ts';
+import { warmSearchIndex } from './search.ts';
 import { dataGuardSettings, footprint, gzipRatioCached, runDataGuard } from './dataGuard.ts';
 import { cleanMediaTrouble, mediaTroubleLine } from '../shared/mediaTrouble.ts';
 import { LoopWatch } from './loopWatch.ts';
@@ -734,6 +735,9 @@ const guardData = async () => {
 };
 setTimeout(() => void guardData(), 3 * 60_000).unref();
 setInterval(() => void guardData(), dataGuardSettings(cfg).everyMinutes * 60_000).unref();
+// The transcript search index (w5111, server/searchIndex.ts) is built in its own thread a little after the start, so the first
+// search_transcripts does not wait for it.
+setTimeout(() => void warmSearchIndex(store.transcriptsDir).catch((e) => console.warn(`transcript search: index build failed: ${(e as Error).message}`)), 30_000).unref();
 // Sessions that ran before the spend record existed are read from their transcripts once, then the record's repairs run once per
 // session (w859, w1209, w1160, w2007; docs/spend.md "Backfill", "Corrections to history"). server/spendJobs.ts: read off the main
 // thread and parsed in slices with a pause after each session, so a start never holds the loop (w2026).

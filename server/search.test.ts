@@ -85,7 +85,7 @@ test('search: terms and snippets', () => {
   assert.ok(s.startsWith('…') && s.endsWith('…') && s.includes('needle') && s.length < 200);
 });
 
-test('w2044: a search reads asynchronously and gives the event loop back while it scans', async (t) => {
+test('w2044, w5111: a search runs in the index thread: no file call and no unzip on the main thread', async (t) => {
   const { dir, sessions } = setup(t);
   // A big transcript and a compressed one: the 16-18 s blocks of 2026-10-24 were one scan of every transcript.
   const lines = Array.from({ length: 3000 }, (_, i) => JSON.stringify({ seq: i + 1, t: '2026-09-21T10:00:00Z', kind: 'assistant', text: i % 1000 === 0 ? 'belt jam here' : `line ${i}` }));
@@ -96,7 +96,7 @@ test('w2044: a search reads asynchronously and gives the event loop back while i
   const gz = t.mock.method(zlib, 'gunzipSync');
   let other = false;
   setImmediate(() => (other = true));
-  const r = await searchTranscripts(dir, sessions, { q: 'belt jam', since: '2026-09-01', sliceMs: 0 });
+  const r = await searchTranscripts(dir, sessions, { q: 'belt jam', since: '2026-09-01' });
   assert.deepEqual(
     sync.filter((_, i) => mocks[i].mock.callCount()),
     [],
@@ -104,7 +104,6 @@ test('w2044: a search reads asynchronously and gives the event loop back while i
   );
   assert.equal(gz.mock.callCount(), 0, 'no synchronous unzip');
   assert.ok(other, 'another callback ran while the search was going');
-  assert.ok(r.slices > 3000 / 256, `the scan of 3000 lines gave the loop back every 256 lines (${r.slices} stretches)`);
   assert.deepEqual(r.hits.map((h) => [h.sessionId, h.seq]), [['big', 1], ['big', 1001], ['big', 2001], ['old', 1]]);
 });
 
