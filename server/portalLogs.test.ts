@@ -319,6 +319,68 @@ test('w920: the real journal reader runs journalctl with fixed arguments, and sa
   assert.match((await journalReader('win32')(q)).note ?? '', /does not run under systemd/);
 });
 
+test('w5072: a killed journal read says what killed it and after how long, and is tried once more', { skip: process.platform === 'win32' }, async (t) => {
+  const bin = tmpData(t);
+  const runs = path.join(bin, 'runs.txt');
+  const write = (script: string) => fs.writeFileSync(path.join(bin, 'journalctl'), `#!/bin/sh\necho x >> '${runs}'\n${script}\n`, { mode: 0o755 });
+  const count = () => fs.readFileSync(runs, 'utf8').trim().split('\n').length;
+  const q = { units: ['fff-portal.service'], sinceMs: Date.parse('2026-11-22T04:10:00Z'), untilMs: Date.parse('2026-11-22T05:10:00Z'), max: 50 };
+  const oldPath = process.env.PATH;
+  const oldWarn = console.warn;
+  const warned: string[] = [];
+  console.warn = (m: string) => warned.push(m);
+  t.after(() => {
+    process.env.PATH = oldPath;
+    console.warn = oldWarn;
+  });
+  process.env.PATH = `${bin}${path.delimiter}${oldPath}`;
+
+  // The portal's limit: the bare "journalctl failed (exit -1): Command failed: ..." the tool gave before w5072.
+  fs.rmSync(runs, { force: true });
+  write('exec sleep 5');
+  const slow = await journalReader('linux', 300, 5_000)(q);
+  assert.deepEqual(slow.lines, []);
+  assert.match(slow.note ?? '', /^journalctl was stopped after 0\.\d s: it ran past the portal's 0.3 s limit on one read; then journalctl was stopped/);
+  assert.equal(count(), 2, 'tried once more');
+  assert.equal(warned.length, 2);
+  assert.match(warned[0], /^portal_logs: journalctl was stopped .*\(fff-portal\.service, try 1\)$/);
+
+  // A signal from outside the portal is named as one.
+  fs.rmSync(runs, { force: true });
+  write('kill -BUS $$');
+  assert.match((await journalReader('linux', 5_000, 10_000)(q)).note ?? '', /^journalctl was killed by SIGBUS after \d+\.\d s, not by the portal's limit.*; then journalctl was killed by SIGBUS/);
+
+  // A first read killed and the second fine gives the lines and says so.
+  fs.rmSync(runs, { force: true });
+  write(`[ "$(wc -l < '${runs}')" -ge 2 ] || kill -TERM $$\nprintf 'line two\\nline one\\n'`);
+  const second = await journalReader('linux', 5_000, 10_000)(q);
+  assert.deepEqual(second.lines, ['line two', 'line one']);
+  assert.match(second.note ?? '', /^read on try 2; before it, journalctl was killed by SIGTERM/);
+
+  // An exit status of journalctl's own is not tried again; the budget is never passed.
+  fs.rmSync(runs, { force: true });
+  write("echo 'Failed to parse timestamp' >&2\nexit 1");
+  assert.match((await journalReader('linux')(q)).note ?? '', /^journalctl failed \(exit 1\) after \d+\.\d s: Failed to parse timestamp$/);
+  assert.equal(count(), 1);
+  fs.rmSync(runs, { force: true });
+  write('exec sleep 5');
+  const t0 = Date.now();
+  await journalReader('linux', 400, 600)(q);
+  assert.ok(Date.now() - t0 < 2_000, 'one read and no retry once the budget is spent');
+  assert.equal(count(), 1);
+});
+
+test('w5072: the list of sources carries a journal check, so a broken journal read shows on the first call', async (t) => {
+  const dataDir = tmpData(t);
+  const asked: { units: string[]; max: number }[] = [];
+  const ok = await readPortalLogs(deps(dataDir, async (q) => (asked.push(q), { lines: ['2026-11-22T05:11:10Z fff-portal systemd[1]: Finished fff-health.service'] })), {});
+  assert.match(ok, /Journal check: readable now \(1 line\(s\) of fff-health\.service in the last 10 minutes, read in \d+\.\d s\)\./);
+  assert.deepEqual(asked.map((q) => q.units), [['fff-health.service']]);
+  const bad = await readPortalLogs(deps(dataDir, journalOf([], "journalctl was stopped after 25.0 s: it ran past the portal's 25 s limit on one read")), {});
+  assert.match(bad, /Journal check: FAILING now .*: journalctl was stopped after 25\.0 s.* The journal sources will fail the same way/);
+  assert.match(await readPortalLogs(deps(dataDir), {}), /Journal check: FAILING now .*journalctl gave nothing/);
+});
+
 test('w4729: path_health shows the host watch status file whole, the last repair of each layer included', async (t) => {
   const dataDir = tmpData(t);
   const file = JSON.stringify({ at: '2026-11-18T22:38:00Z', layers: [{ id: 2, name: 'tailscaled', verdict: 'ok', repair: '2026-11-18T22:37:31Z systemctl restart tailscaled: fixed: BackendState=Running' }] });

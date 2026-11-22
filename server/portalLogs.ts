@@ -38,7 +38,13 @@ const CONTEXT_CYCLES = 8;
 const CONTEXT_CYCLES_MAX = 30;
 /** A document (update.result.json …) larger than this is refused: none is, they are a few KB. */
 export const DOC_MAX = 512 * 1024;
-export const JOURNAL_TIMEOUT_MS = 20_000;
+/**
+ * One journalctl read may take JOURNAL_TIMEOUT_MS; a killed read is tried once more within JOURNAL_BUDGET_MS, under
+ * the daemon's 60 s wait for the answer (machine/portalCalls.ts). w5072: on 2026-11-22 reads that take 1 to 2 s were
+ * killed now and then ("journalctl failed (exit -1): Command failed: ..."), and the answer did not say by what.
+ */
+export const JOURNAL_TIMEOUT_MS = 25_000;
+export const JOURNAL_BUDGET_MS = 50_000;
 const DEFAULT_LIMIT = 200;
 const LIMIT_MAX = 2000;
 const WINDOW_DEFAULT_MS = 60 * 60_000;
@@ -461,7 +467,8 @@ const tidy = (l: string) => l.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]
  * reason for a bad argument; the tool shows it as the error.
  */
 export async function readPortalLogs(d: PortalLogsDeps, input: PortalLogsInput): Promise<string> {
-  if (input.source === undefined || input.source === '') return describeSources(d);
+  if (input.source === undefined || input.source === '') return `${describeSources(d)}
+${await journalHealth(d)}`;
   const p = parse(d, input);
   if (p.machine && p.def.kind !== 'cleanup' && p.def.kind !== 'bench_hours') throw new Error(`machine: only the cleanup and bench_hours sources take one (${p.name} is the portal's own).`);
   const raw =
@@ -508,6 +515,20 @@ export async function readPortalLogs(d: PortalLogsDeps, input: PortalLogsInput):
   ].join('\n');
 }
 
+/**
+ * The journal's health, shown with the list of sources (w5072): a read of the health check's last 10 minutes, which
+ * always holds lines (fff-health.timer runs every 30 s), so a broken journal read shows up on the first call.
+ */
+export async function journalHealth(d: PortalLogsDeps): Promise<string> {
+  const untilMs = d.now();
+  const t0 = Date.now();
+  const r = await d.journal({ units: [JOURNAL_UNITS.health], sinceMs: untilMs - 10 * 60_000, untilMs, max: 50 });
+  const s = ((Date.now() - t0) / 1000).toFixed(1);
+  if (r.lines.length && !r.note) return `Journal check: readable now (${r.lines.length} line(s) of fff-health.service in the last 10 minutes, read in ${s} s).`;
+  if (r.lines.length) return `Journal check: readable now, with trouble (${r.lines.length} line(s) in ${s} s): ${r.note}.`;
+  return `Journal check: FAILING now (no line of fff-health.service in the last 10 minutes, which runs every 30 s; ${s} s): ${r.note ?? 'journalctl gave nothing'}. The journal sources will fail the same way: say so in your report.`;
+}
+
 /** portal_logs with no source: what can be read, and what is there now. */
 function describeSources(d: PortalLogsDeps): string {
   const rows = Object.entries(LOG_SOURCES).map(([name, s]) => {
@@ -552,17 +573,38 @@ const journalTime = (ms: number) => `${new Date(ms).toISOString().slice(0, 19).r
 /** `journalctl` for the units, newest first, with arguments built here only. No shell; read-only by nature. */
 export const realJournal: JournalReader = (q) => journalReader()(q);
 
-/** The journal reader for `platform` (a test passes linux and a fake journalctl on PATH). */
-export function journalReader(platform: NodeJS.Platform = process.platform): JournalReader {
+/** What a failed read says, from what run() saw (w5072): the portal's limit, a signal from outside, or an exit status. */
+export function journalFailure(r: { code: number; stderr: string; signal?: string; timedOut?: boolean }, ms: number, limitMs: number): string {
+  const after = `after ${(ms / 1000).toFixed(1)} s`;
+  if (r.timedOut) return `journalctl was stopped ${after}: it ran past the portal's ${+(limitMs / 1000).toFixed(1)} s limit on one read`;
+  if (r.signal) return `journalctl was killed by ${r.signal} ${after}, not by the portal's limit: something outside the portal ended it`;
+  return `journalctl failed (exit ${r.code}) ${after}: ${redactLogText(r.stderr.trim().split('\n').pop() ?? '').slice(0, 200)}`;
+}
+
+/** The journal reader for `platform` (a test passes linux, a fake journalctl on PATH and short limits). */
+export function journalReader(platform: NodeJS.Platform = process.platform, timeoutMs = JOURNAL_TIMEOUT_MS, budgetMs = JOURNAL_BUDGET_MS): JournalReader {
   return async ({ units, sinceMs, untilMs, max }) => {
   if (platform !== 'linux') return { lines: [], note: "this portal does not run under systemd, so it has no journal (its console log is not kept in a file)" };
   const args = ['--no-pager', '-r', '-o', 'short-iso', '-n', String(max), ...units.flatMap((u) => ['-u', u]), '--since', journalTime(sinceMs), '--until', journalTime(untilMs)];
-  const r = await run('journalctl', args, { timeoutMs: JOURNAL_TIMEOUT_MS, env: { ...process.env, LC_ALL: 'C', SYSTEMD_PAGER: '' } });
-  const err = r.stderr.trim();
-  if (r.code === -1 && /ENOENT/.test(err)) return { lines: [], note: 'journalctl is not installed here' };
-  const lines = r.stdout.split('\n').filter((l) => l && !l.startsWith('-- '));
-  if (/insufficient permissions|not seeing messages from other users/i.test(err) && !lines.length) return { lines: [], note: "the portal's account cannot read the journal: the guest install (deploy/vm/guest/install.sh) gives fff-portal.service the systemd-journal group at the next portal deploy" };
-  if (r.code !== 0 && !lines.length) return { lines: [], note: `journalctl failed (exit ${r.code}): ${redactLogText(err.split('\n').pop() ?? '').slice(0, 200)}` };
-  return { lines };
+  const started = Date.now();
+  const failed: string[] = [];
+  for (let attempt = 1; ; attempt++) {
+    const t0 = Date.now();
+    const limitMs = Math.min(timeoutMs, budgetMs - (t0 - started));
+    const r = await run('journalctl', args, { timeoutMs: limitMs, env: { ...process.env, LC_ALL: 'C', SYSTEMD_PAGER: '' } });
+    const err = r.stderr.trim();
+    if (r.code === -1 && /ENOENT/.test(err)) return { lines: [], note: 'journalctl is not installed here' };
+    const lines = r.stdout.split('\n').filter((l) => l && !l.startsWith('-- '));
+    if (/insufficient permissions|not seeing messages from other users/i.test(err) && !lines.length) return { lines: [], note: "the portal's account cannot read the journal: the guest install (deploy/vm/guest/install.sh) gives fff-portal.service the systemd-journal group at the next portal deploy" };
+    const before = failed.length ? `; before it, ${failed.join('; then ')}` : '';
+    if (r.code === 0) return before ? { lines, note: `read on try ${attempt}${before}` } : { lines };
+    const why = journalFailure(r, Date.now() - t0, limitMs);
+    // Every failed read goes in the portal's own journal too, so fffctl logs and a later portal_logs show it (w5072).
+    console.warn(`portal_logs: ${why} (${units.join(', ')}, try ${attempt})`);
+    if (lines.length) return { lines, note: `the read was cut short, so the window may hold older lines than these: ${why}${before}` };
+    failed.push(why);
+    // A killed read (code -1: the limit or a signal) is tried once more within the budget; an exit status would repeat.
+    if (attempt >= 2 || r.code !== -1 || budgetMs - (Date.now() - started) < 2_000) return { lines: [], note: failed.join('; then ') };
+  }
   };
 }
