@@ -263,6 +263,24 @@ the journal sources say so.
 This gives the server's account (not a worker) read access to the whole system journal. The tool's answers are redacted;
 the journal's own contents are what `fffctl logs` shows to the orchestration worker (which redacts the same families).
 
+## A journal read that fails says why, and the list of sources checks it (w5072)
+
+Before w5072 a read ended by a signal answered only `journalctl failed (exit -1): Command failed: journalctl ...`: Node's
+`execFile` gives no exit code and no stderr for a child ended by a signal, so the note could not tell the portal's own
+limit from a kill from outside. On 2026-11-22 it came and went (04:16 to 04:17 for w5069's worker, 05:10 for w5072's),
+while the same reads took 1 to 2 s minutes later. Now (`server/portalLogs.ts` `journalReader`, `journalFailure`;
+`server/proc.ts` `run` returns `signal` and `timedOut`):
+
+- one read may take `JOURNAL_TIMEOUT_MS` (25 s); a killed read is tried once more within `JOURNAL_BUDGET_MS` (50 s), under
+  the daemon's 60 s wait for the answer. An exit status of journalctl's own is not tried again;
+- the note says which: `journalctl was stopped after 25.0 s: it ran past the portal's 25 s limit on one read`, `journalctl
+  was killed by SIGBUS after 0.4 s, not by the portal's limit`, or `journalctl failed (exit 1) after 0.1 s: <its last
+  stderr line>`, and `read on try 2; before it, ...` when the second read worked;
+- every failed read also goes in the portal's journal as a `portal_logs: ...` line, so `fffctl logs` and later reads show
+  how often and how;
+- `portal_logs {}` (the list of sources) ends with `Journal check: readable now (...)` or `Journal check: FAILING now
+  (...)`: a read of `fff-health.service`'s last 10 minutes, which always holds lines (its timer runs every 30 s).
+
 ## Where it is wired
 
 - `server/portalLogs.ts`: sources, redaction, paging, `journalReader`.

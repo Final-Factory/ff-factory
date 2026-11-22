@@ -9,6 +9,10 @@ export interface RunResult {
   code: number;
   stdout: string;
   stderr: string;
+  /** The signal that ended the program (code is then -1): SIGTERM from timeoutMs, or one sent from outside (w5072). */
+  signal?: string;
+  /** timeoutMs ran out and run() killed the program (w5072). */
+  timedOut?: boolean;
 }
 
 /** Run a program (no shell) and collect its output. Never throws on a non-zero exit. */
@@ -30,7 +34,8 @@ export function run(cmd: string, args: string[], opts: RunOptions = {}): Promise
         // err.code is the exit status for a program that ran, or a string like ENOENT when it could not start.
         const raw = (err as { code?: unknown } | null)?.code;
         const code = !err ? 0 : typeof raw === 'number' ? raw : -1;
-        resolve({ code, stdout: String(stdout), stderr: String(stderr) || (err ? err.message : '') });
+        const e = err as { signal?: string | null; killed?: boolean } | null;
+        resolve({ code, stdout: String(stdout), stderr: String(stderr) || (err ? err.message : ''), ...(e?.signal ? { signal: e.signal } : {}), ...(e?.killed && raw == null && opts.timeoutMs && !opts.signal?.aborted ? { timedOut: true } : {}) });
       },
     );
   });
