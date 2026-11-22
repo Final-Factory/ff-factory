@@ -4,7 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { saveWork } from './saveWork.ts';
+import { saveWork, savedBranch } from './saveWork.ts';
+import { tmpFont } from './editorNoise.test.ts';
 
 function repos() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-save-'));
@@ -133,11 +134,85 @@ test('w2782 save: a material the editor only re-serialized in play mode is resto
   // Restored from HEAD, so a Windows runner's core.autocrlf checks it out with CRLF.
   assert.equal(fs.readFileSync(path.join(r.work, 'Noise.mat'), 'utf8').replaceAll('\r\n', '\n'), base, 'the noise is gone, not left uncommitted');
   assert.match(fs.readFileSync(path.join(r.work, 'Both.mat'), 'utf8'), /m_ObjectHideFlags: 32[\s\S]*r: 1, g: 0/, 'noise beside a real change is saved with it');
-  assert.match(res.notes[0], /^restored 2 material\(s\) the Unity editor only re-serialized to HEAD instead of saving them \(w2782\): (Noise|Staged)\.mat, (Noise|Staged)\.mat$/);
+  assert.match(res.notes[0], /^restored 2 file\(s\) the Unity editor only rewrote by itself .* to HEAD instead of saving them: (Noise|Staged)\.mat, (Noise|Staged)\.mat$/);
   // Only the editor's noise left: nothing is committed, and the worktree is clean.
   fs.writeFileSync(path.join(r.work, 'Noise.mat'), noise);
   const none = await saveWork({ dir: r.work, branch: 'w1-feature', message: MSG });
   assert.equal(none.sha, undefined);
-  assert.deepEqual(none.notes, ['restored 1 material(s) the Unity editor only re-serialized to HEAD instead of saving them (w2782): Noise.mat', 'nothing else to save']);
+  assert.equal(none.notes.length, 2);
+  assert.match(none.notes[0], /^restored 1 file\(s\) the Unity editor only rewrote by itself .* instead of saving them: Noise\.mat$/);
+  assert.equal(none.notes[1], 'nothing else to save');
   assert.equal(r.git(r.work, 'status', '--porcelain'), '');
+});
+
+const FONT = 'Assets/TextMesh Pro/Resources/Fonts & Materials/LiberationSans SDF - Fallback.asset';
+
+test('w5067 save: a dynamic TMP font atlas the editor grew is restored to HEAD, not committed beside the real work', async (t) => {
+  const r = repos();
+  t.after(r.cleanup);
+  const font = path.join(r.work, ...FONT.split('/'));
+  const other = path.join(r.work, 'Assets', 'Fonts', 'NotoSansJP SDF.asset');
+  const stat = path.join(r.work, 'Assets', 'Fonts', 'Static SDF.asset');
+  fs.mkdirSync(path.dirname(font), { recursive: true });
+  fs.mkdirSync(path.dirname(other), { recursive: true });
+  fs.writeFileSync(font, tmpFont({ pairs: 2 }));
+  fs.writeFileSync(other, tmpFont());
+  fs.writeFileSync(stat, tmpFont({ mode: 0 }));
+  r.git(r.work, 'add', '-A');
+  r.git(r.work, 'commit', '-q', '-m', 'fonts');
+  // As 6d6488f046 on PR #4137's branch: 4,245 lines of kerning records the editor added to the Fallback atlas.
+  fs.writeFileSync(font, tmpFont({ pairs: 60 }));
+  fs.writeFileSync(other, tmpFont({ glyphs: 4, pixels: 'ffffffff' }));
+  fs.writeFileSync(stat, tmpFont({ mode: 0, glyphs: 2 })); // a static font's glyphs are someone's edit: saved
+  fs.writeFileSync(path.join(r.work, 'a.cs'), 'changed');
+  const res = await saveWork({ dir: r.work, branch: 'w1-feature', message: MSG });
+  assert.deepEqual(r.git(r.work, 'show', '--name-only', '--format=', 'HEAD').split('\n').sort(), ['Assets/Fonts/Static SDF.asset', 'a.cs']);
+  assert.equal(res.files, 2);
+  assert.equal(r.git(r.work, 'status', '--porcelain'), '', 'clean: the sandbox may be released');
+  assert.equal(fs.readFileSync(font, 'utf8').replaceAll('\r\n', '\n'), tmpFont({ pairs: 2 }), 'the atlas is back at HEAD');
+  assert.match(res.notes[0], /^restored 2 file\(s\) .*dynamic font atlas.*: .*(LiberationSans SDF - Fallback|NotoSansJP SDF)\.asset/);
+  assert.equal(r.git(r.origin, 'log', '-1', '--format=%s', 'w1-feature'), MSG);
+  // Only the atlas left: nothing is committed or pushed.
+  fs.writeFileSync(font, tmpFont({ pairs: 61 }));
+  const none = await saveWork({ dir: r.work, branch: 'w1-feature', message: MSG });
+  assert.equal(none.sha, undefined);
+  assert.equal(none.pushed, false);
+  assert.equal(r.git(r.work, 'status', '--porcelain'), '');
+});
+
+test('w5067 save: while the pull request\'s CI runs, the save goes to a side branch and the PR branch on origin is untouched', async (t) => {
+  const r = repos();
+  t.after(r.cleanup);
+  fs.writeFileSync(path.join(r.work, 'b.cs'), 'worker commit');
+  r.git(r.work, 'add', '-A');
+  r.git(r.work, 'commit', '-q', '-m', 'the head CI runs on');
+  r.git(r.work, 'push', '-q', '-u', 'origin', 'w1-feature');
+  const head = r.git(r.work, 'rev-parse', 'HEAD');
+  fs.writeFileSync(path.join(r.work, 'a.cs'), 'changed');
+  const hold = 'CI runs on Final-Factory/FinalFactory#4137';
+  const res = await saveWork({ dir: r.work, branch: 'w1-feature', message: MSG, holdPush: hold });
+  assert.equal(r.git(r.origin, 'rev-parse', 'w1-feature'), head, 'no push to the PR branch: its CI run is not cancelled');
+  assert.equal(res.sideRef, savedBranch('w1-feature', res.sha!));
+  assert.equal(r.git(r.origin, 'log', '-1', '--format=%s', res.sideRef!), MSG, 'the save is safe on origin');
+  assert.equal(r.git(r.work, 'status', '--porcelain'), '');
+  assert.equal(r.git(r.work, 'log', '-1', '--format=%s'), MSG, 'the branch here holds the save');
+  // Nothing unpushed by `--not --remotes`, so switchBranch's pre-switch push leaves the PR branch alone too.
+  assert.equal(r.git(r.work, 'rev-list', '--count', 'HEAD', '--not', '--remotes'), '0');
+  assert.match(res.notes.join(' '), /not pushed to w1-feature \(CI runs on Final-Factory\/FinalFactory#4137/);
+});
+
+test('w5067 save: a side-branch push that fails hands the work back uncommitted, and the PR branch is untouched', async (t) => {
+  const r = repos();
+  t.after(r.cleanup);
+  r.git(r.work, 'push', '-q', '-u', 'origin', 'w1-feature');
+  const head = r.git(r.work, 'rev-parse', 'HEAD');
+  // A hook on origin refuses any ff-saved/ ref.
+  const hook = path.join(r.origin, 'hooks', 'pre-receive');
+  fs.writeFileSync(hook, '#!/bin/sh\nwhile read o n ref; do case "$ref" in refs/heads/ff-saved/*) exit 1;; esac; done\n');
+  fs.chmodSync(hook, 0o755);
+  fs.writeFileSync(path.join(r.work, 'a.cs'), 'changed');
+  await assert.rejects(saveWork({ dir: r.work, branch: 'w1-feature', message: MSG, holdPush: 'CI runs on x#1' }), /side branch .* failed/);
+  assert.equal(r.git(r.work, 'rev-parse', 'HEAD'), head, 'the save commit is undone');
+  assert.match(r.git(r.work, 'status', '--porcelain'), /M a\.cs/, 'the work is back, uncommitted');
+  assert.equal(r.git(r.origin, 'rev-parse', 'w1-feature'), head);
 });

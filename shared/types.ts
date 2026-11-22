@@ -408,7 +408,7 @@ export interface SessionInfo {
    * Its uncommitted work was committed on its branch before its sandbox was released (w656, server/saveWork.ts): its
    * next message says so, then this goes.
    */
-  savedWork?: { sha: string; files: number; pushed: boolean; branch: string; at: string };
+  savedWork?: { sha: string; files: number; pushed: boolean; branch: string; at: string; sideRef?: string };
   /** Placed again in another sandbox than the one it stopped in (w640): its next message says where, then this goes. */
   /** `shared` (w1135): work that is not the game's, resumed on an agent seat beside another agent; its game tree is that agent's. */
   movedFrom?: { sandbox: string; path: string; at: string; why: string; branch: string; shared?: true };
