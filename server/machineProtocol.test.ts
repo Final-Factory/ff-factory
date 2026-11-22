@@ -145,7 +145,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // daemon never sends one.
 // w5067 (no bump): `save_work.holdPush`, the side branch a release save pushes to while the branch's PR CI runs; an older
 // daemon ignores the field and pushes to the branch as before.
-const DECIDED = { protocol: 9, fingerprint: '266f88c82ce298b4' };
+// w5068 (no bump): `switch.holdPush`, the same hold for the push of unpushed commits before a switch; an older daemon
+// ignores it and pushes to the branch as before.
+const DECIDED = { protocol: 9, fingerprint: '4e7e08d752fa3113' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {
