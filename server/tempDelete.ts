@@ -25,6 +25,15 @@ export interface TempDeleteContext {
   real?: (p: string) => string | undefined;
   /** The user's home, for `~`-less forms (`$USERPROFILE`, `$HOME`) of the saves folder. Default: any. */
   home?: string;
+  /**
+   * The session's own sandbox (its worktree, `<install>/sandboxes/<name>`), set only when the session's folder is one (w5148):
+   * a path strictly inside it, not in its `.git` and not a wildcard at its top, may go too.
+   */
+  sandbox?: string;
+  /** The folder relative paths are read against: the command's own leading `cd` (tempDeletesWithin). None: a relative path is a no. */
+  base?: string;
+  /** Reads a small file, injected for tests (w5148: `rm -rf "$(cat $TMPDIR/x.path)"`). `undefined` when it cannot be read. */
+  read?: (p: string) => string | undefined;
 }
 
 export type TempDeleteVerdict = { ok: true } | { ok: false; why: string };
@@ -136,6 +145,11 @@ function norm(p: string, drive: boolean): string {
   return s.toLowerCase();
 }
 
+/** A sandbox's folder: `<install>/sandboxes/<name>`, never the main clone (`<install>/repo`). */
+const SANDBOX_DIR = /\/sandboxes\/[^/]+$/i;
+/** Not absolute and not a variable: read against the current folder. */
+const isRelative = (p: string) => !/^(?:[\\/]|[a-zA-Z]:|[$%~])/.test(p);
+
 /** The glob characters a shell expands in a word. */
 const GLOB = /[*?[\]{}]/;
 
@@ -160,9 +174,11 @@ export function tempOnlyDelete(cmd: string, ctx: TempDeleteContext): TempDeleteV
   let deletes = 0;
 
   /** Whether `raw` names something strictly inside the temp folder; the glob part is what follows the literal prefix. */
+  /** A relative path read against the command's own leading `cd` (w5148), or left as it is (and then outside both folders). */
+  const resolve = (raw: string): string => (ctx.base && isRelative(raw) ? `${slash(ctx.base).replace(/\/+$/, '')}/${raw}` : raw);
   const insideTmp = (raw: string, literal: boolean): string | undefined => {
     if (literal && /[$%]/.test(raw)) return `${raw} is single-quoted, so its variable is not expanded`;
-    let p = raw;
+    let p = resolve(raw);
     const v = TMP_VAR.exec(p);
     if (v) p = tmpRaw + p.slice(v[0].length);
     // A variable after the folder (`$TMPDIR/$S`) could be empty (the folder itself) or `../..` (w1097).
@@ -190,6 +206,38 @@ export function tempOnlyDelete(cmd: string, ctx: TempDeleteContext): TempDeleteV
       cur = next;
     }
     return undefined;
+  };
+
+  /**
+   * Strictly inside the session's own sandbox (w5148: w3802's `cd <sandbox>; rm -f dev_loadsave.trigger` waited 9.5 h on Ben):
+   * a literal path, or one relative to the command's leading `cd`, with no `..`, no `.git` part, no wildcard at the sandbox's
+   * top (`rm -rf *` there would empty the worktree), and no link out of the sandbox on the way.
+   */
+  const inSandbox = (raw: string, literal: boolean): boolean => {
+    if (!ctx.sandbox || !SANDBOX_DIR.test(slash(ctx.sandbox).replace(/\/+$/, ''))) return false;
+    if (literal && /[$%]/.test(raw)) return false;
+    let p = resolve(raw);
+    const v = TMP_VAR.exec(p);
+    if (v) return false;
+    if (/[$%`]/.test(p) || p.startsWith('~')) return false;
+    const sbRaw = slash(ctx.sandbox).replace(/\/+$/, '');
+    const sd = /^[a-zA-Z]:\//.test(sbRaw);
+    const sb = norm(sbRaw, sd);
+    if (slash(p).split('/').includes('..')) return false;
+    const n = norm(p, sd);
+    if (!n.startsWith(sb + '/')) return false;
+    const segs = n.slice(sb.length).split('/').filter(Boolean);
+    if (!segs.length || GLOB.test(segs[0]) || segs.some((x) => x === '.git' || x === '..')) return false;
+    let cur = sbRaw;
+    const base = real(sbRaw);
+    for (const [i, seg] of segs.entries()) {
+      if (GLOB.test(seg) || i === segs.length - 1) break;
+      cur = `${cur}/${seg}`;
+      const r = real(cur);
+      if (r === undefined) break;
+      if (base !== undefined && !norm(r, sd).startsWith(norm(base, sd) + '/')) return false;
+    }
+    return true;
   };
 
   /** A save copy of this session: `.../AppData/LocalLow/Never Games/finalfactory/saves/<tag>-<name>`. */
@@ -226,7 +274,7 @@ export function tempOnlyDelete(cmd: string, ctx: TempDeleteContext): TempDeleteV
         }
         n++;
         const why = insideTmp(a.text, a.literal);
-        if (why !== undefined && !ownSave(a.text)) return no(why);
+        if (why !== undefined && !ownSave(a.text) && !inSandbox(a.text, a.literal)) return no(why);
       }
       if (!n) return no('rm with no path');
       deletes += n;
@@ -250,7 +298,7 @@ export function tempOnlyDelete(cmd: string, ctx: TempDeleteContext): TempDeleteV
             if (!val) return no('Remove-Item -Path with no path');
             n++;
             const why = insideTmp(val, false);
-            if (why !== undefined && !ownSave(val)) return no(why);
+            if (why !== undefined && !ownSave(val) && !inSandbox(val, false)) return no(why);
             continue;
           }
           return no(`Remove-Item parameter ${a}`);
@@ -258,7 +306,7 @@ export function tempOnlyDelete(cmd: string, ctx: TempDeleteContext): TempDeleteV
         if (a.includes(',')) return no('Remove-Item with a list of paths');
         n++;
         const why = insideTmp(a, args[i].literal);
-        if (why !== undefined && !ownSave(a)) return no(why);
+        if (why !== undefined && !ownSave(a) && !inSandbox(a, args[i].literal)) return no(why);
       }
       if (!n) return no('Remove-Item with no path');
       deletes += n;
@@ -413,27 +461,173 @@ const LEADING = /^(?:(?:do|then|else|elif|if|while|until|time|!|\{|\()\s+|(?:fun
  */
 export function tempDeletesWithin(cmd: string, ctx: TempDeleteContext): TempDeleteVerdict {
   if (cmd.length > 8000) return no('a long command');
-  const text = stripComments(cmd);
+  const orig = stripComments(cmd);
+  // A link or a find -delete inside a nested shell's body still counts (literalShells replaces the body below).
+  for (const [re, why] of COMPOUND_REFUSED.slice(2, 4)) if (re.test(orig)) return no(why);
+  const text = ffuSlotAsCd(literalShells(orig));
   for (const [re, why] of COMPOUND_REFUSED) if (re.test(text)) return no(why);
   const stmts = allStatements(text);
   if (!stmts) return no('an unbalanced quote');
   const mentions = [...text.matchAll(DELETE_WORD)].length;
   const named = tempFolderNames(text, ctx);
+  const loops = loopNames(text);
+  const judgeCtx: TempDeleteContext = { ...ctx, base: leadingCd(text, ctx) };
   let judged = 0;
-  for (const raw of stmts) {
+  for (const [index, raw] of stmts.entries()) {
     let stmt = raw.replace(LEADING, '');
     const verb = path.posix.basename(slash(stmt.split(/\s+/)[0] ?? '')).replace(/\.exe$/i, '').toLowerCase();
     if (!RM_VERBS.has(verb) && !PS_VERBS.has(verb)) continue;
+    // `rm -rf "$(cat $TMPDIR/x.path)"`: the path that file holds now, when nothing before it could have changed the file.
+    if (CAT_PATH.test(stmt)) {
+      const r = catPaths(stmt, stmts.slice(0, index), judgeCtx);
+      if (typeof r !== 'string') return no(`${stmt}: ${r.why}`);
+      stmt = r;
+    }
     if (/[(){}]/.test(stmt.replace(/\{[^{}/]*\}/g, ''))) return no(`${stmt} has a parenthesis or a brace`);
     // A folder named at the start of the command (tempFolderNames) is judged as the path it holds.
     for (const [name, target] of named) stmt = stmt.replace(new RegExp(`\\$\\{${name}\\}|\\$${name}(?!\\w)`, 'g'), target);
-    const r = tempOnlyDelete(stmt, ctx);
-    if (!r.ok) return no(`${stmt}: ${r.why}`);
+    // A `for d in leg-*` name (loopNames) is judged once for each word it takes.
+    const loop = [...loops].find(([name]) => new RegExp(`\\$\\{?${name}(?!\\w)`).test(stmt));
+    const variants = loop ? loop[1].map((w) => stmt.replace(new RegExp(`\\$\\{${loop[0]}\\}|\\$${loop[0]}(?!\\w)`, 'g'), w)) : [stmt];
+    for (const v of variants) {
+      const r = tempOnlyDelete(v, judgeCtx);
+      if (!r.ok) return no(`${v}: ${r.why}`);
+    }
     judged++;
   }
   if (!judged && !mentions) return no('no delete in it');
   if (judged !== mentions) return no('a delete it cannot judge (inside quotes, a substitution, xargs, git rm, a path named rm)');
   return { ok: true };
+}
+
+/**
+ * `bash -c '<script>'` whose script is single-quoted (the outer shell expands nothing in it) and names no delete (w5148: w2210's
+ * worker waited on lothsahn for a `bash -c` that ran awk, beside a plain `rm -f` in its temp folder): it runs in a child shell
+ * and deletes nothing, so it is judged as `true`. A script with a delete word, or quoted any other way, keeps the
+ * nested-shell no.
+ */
+function literalShells(text: string): string {
+  return text.replace(/(^|[\s;&|(])(?:ba|z|da)?sh(?:\.exe)?\s+-c\s+'([^']*)'(?=$|[\s;&|)])/g, (m, pre: string, body: string) =>
+    new RegExp(DELETE_WORD.source, 'i').test(body) ? m : `${pre}true`,
+  );
+}
+
+/**
+ * `eval "$(ffu-slot where)"` and `eval "$(ffu-slot take --branch b)"` (w5148: w3966's worker waited 6 and 10 hours on a
+ * clean-up that started with one): our own tool's output, `export FFU_SLOT=… FFU_DIR=… CARGO_TARGET_DIR=…` and a `cd` into the
+ * slot (machine/ffuSlots.ts envLines), never the temp folder variable. It is judged as a `cd` the command does not know, so a
+ * relative delete after it is still a no.
+ */
+function ffuSlotAsCd(text: string): string {
+  return text.replace(/\beval\s+"\$\(ffu-slot\s+(?:where|take)(?:\s+[\w./=-]+)*\s*\)"/g, 'cd ffu-slot');
+}
+
+/** Words that change the shell's folder. */
+const DIR_CHANGE = /(?:^|[\s;&|(){}])(?:cd|pushd|popd|chdir|set-location|sl|push-location|pop-location)(?=$|[\s;&|()])/gi;
+
+/**
+ * The folder the command's relative paths are read against (w5148: w1815's worker waited on Ben six times for `cd
+ * $TMPDIR/…/critic && …; rm -f g1/*`): the command starts with `cd <dir>`, the only folder change in it, where `<dir>` is the
+ * temp folder or inside it, or the session's sandbox or inside it, with no other variable, `..` or wildcard, and not a link
+ * out of them. After `;` (the next statement runs even when cd fails) the folder must exist now. Anything else: none, and a
+ * relative delete is a no.
+ */
+function leadingCd(text: string, ctx: TempDeleteContext): string | undefined {
+  if ([...text.matchAll(DIR_CHANGE)].length !== 1) return undefined;
+  const m = /^\s*cd\s+(?:"([^"]+)"|'([^']+)'|([^\s"';&|()<>`]+))\s*(&&|;|\n)/.exec(text);
+  if (!m) return undefined;
+  const raw = m[1] ?? m[2] ?? m[3];
+  if (m[2] !== undefined && /[$%]/.test(raw)) return undefined;
+  const tmpRaw = slash(ctx.tmp).replace(/\/+$/, '');
+  let p = slash(raw);
+  const v = TMP_VAR.exec(p);
+  if (v) p = tmpRaw + p.slice(v[0].length);
+  if (/[$%`~*?[\]{}]/.test(p) || p.split('/').includes('..') || isRelative(p)) return undefined;
+  const d = /^[a-zA-Z]:\//.test(tmpRaw) || /^[a-zA-Z]:/.test(slash(ctx.sandbox ?? ''));
+  const within = (x: string, root: string) => norm(x, d) === norm(root, d) || norm(x, d).startsWith(norm(root, d) + '/');
+  const sandbox = ctx.sandbox && SANDBOX_DIR.test(slash(ctx.sandbox).replace(/\/+$/, '')) ? slash(ctx.sandbox).replace(/\/+$/, '') : undefined;
+  if (!within(p, tmpRaw) && !(sandbox && within(p, sandbox))) return undefined;
+  const real = ctx.real ?? ((x: string) => { try { return fs.realpathSync(x); } catch { return undefined; } });
+  const r = real(p);
+  if (m[4] !== '&&' && r === undefined) return undefined;
+  if (r !== undefined) {
+    const roots = [real(tmpRaw), sandbox && real(sandbox)].filter((x): x is string => !!x);
+    if (roots.length && !roots.some((x) => within(r, x))) return undefined;
+  }
+  return p;
+}
+
+/**
+ * The names a `for NAME in WORDS; do … done` loop sets, with its words (w5148: w3999's `for d in leg-*; do rm -rf
+ * "$TMPDIR/$d/shard"; done`). Each word is a plain name or a wildcard (no `/`, quote, variable or leading dot, so a wildcard
+ * never matches `.` or `..`); the name is set nowhere else; and every `$NAME` is in double quotes between that `do` and the
+ * next `done`, so it always holds one of those words (or a name they match), never empty and never split.
+ */
+function loopNames(text: string): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const m of text.matchAll(/(?:^|[\s;&|(])for\s+([A-Za-z_]\w*)\s+in\s+([^;\n]*?)\s*(?:;|\n)\s*do\b/g)) {
+    const name = m[1];
+    const words = m[2].split(/\s+/).filter(Boolean);
+    if (!words.length || !words.every((w) => /^[A-Za-z0-9_*?][\w.*?+@,=-]*$/.test(w))) continue;
+    if ([...text.matchAll(new RegExp(`(?<![$\\w{])${name}(?!\\w)`, 'g'))].length !== 1) continue;
+    const body = m.index! + m[0].length;
+    const done = /(?:^|[\s;&|])done(?=$|[\s;&|)])/g;
+    done.lastIndex = body;
+    const end = done.exec(text)?.index ?? -1;
+    if (end < 0) continue;
+    const uses = [...text.matchAll(new RegExp(`\\$\\{${name}\\}|\\$${name}(?!\\w)`, 'g'))].map((u) => u.index!);
+    if (uses.every((u) => u > body && u < end && inDoubleQuotes(text, u))) out.set(name, words);
+  }
+  return out;
+}
+
+/** Whether `index` lies inside double quotes at the top level of the text. */
+function inDoubleQuotes(text: string, index: number): boolean {
+  let q = '';
+  for (let i = 0; i < index; i++) {
+    const c = text[i];
+    if (q === "'") {
+      if (c === "'") q = '';
+    } else if (q === '"') {
+      if (c === '\\') i++;
+      else if (c === '"') q = '';
+    } else if (c === '\\') i++;
+    else if (c === '"' || c === "'") q = c;
+  }
+  return q === '"';
+}
+
+/** `"$(cat FILE)"` where FILE is one plain word. */
+const CAT_PATH = /"\$\(cat\s+("?)([^\s"'()`;&|<>*?]+)\1\)"/;
+/** What may come before such a delete: a cd, an export or an assignment whose only substitution is another `$(cat FILE)`. */
+const CAT_BEFORE = /^(?:cd\s+\S+|(?:export\s+)?[A-Za-z_]\w*=(?:[^$`()<>|&;]|\$\{?[A-Za-z_]\w*\}?|\$\(cat\s+[^\s"'()`;&|<>]+\))*)$/;
+
+/**
+ * The delete with each `"$(cat FILE)"` replaced by the one path FILE holds (w5148: w4768's and w4143's workers each waited
+ * about 4 hours on `rm -rf "$(cat $TMPDIR/w/clips-head.path)"`). FILE must be inside the temp folder; it is read now and must
+ * hold one line, a path with no quote, variable, wildcard or space; and the statements before the delete may only change
+ * folder, export or assign (so nothing in the command rewrites FILE before the delete runs). The path is then judged like
+ * any other.
+ */
+function catPaths(stmt: string, before: string[], ctx: TempDeleteContext): string | { why: string } {
+  if (!before.every((s) => CAT_BEFORE.test(s.trim()))) return { why: 'something runs before it that could change the file it reads' };
+  const read = ctx.read ?? ((p: string) => { try { return fs.statSync(p).size <= 4096 ? fs.readFileSync(p, 'utf8') : undefined; } catch { return undefined; } });
+  const tmpRaw = slash(ctx.tmp).replace(/\/+$/, '');
+  let out = stmt;
+  for (;;) {
+    const m = CAT_PATH.exec(out);
+    if (!m) return out;
+    let f = slash(m[2]);
+    const v = TMP_VAR.exec(f);
+    if (v) f = tmpRaw + f.slice(v[0].length);
+    else if (ctx.base && isRelative(f)) f = `${slash(ctx.base).replace(/\/+$/, '')}/${f}`;
+    if (!tempOnlyDelete(`rm -f "${f}"`, { ...ctx, base: undefined, sandbox: undefined }).ok) return { why: `${m[2]} is not a file inside your temp folder` };
+    const body = read(f);
+    if (body === undefined) return { why: `${m[2]} could not be read` };
+    const line = body.replace(/\r?\n$/, '');
+    if (!/^[^\s"'`$*?[\]{}()<>|&;~%]+$/.test(line)) return { why: `${m[2]} does not hold one plain path` };
+    out = out.slice(0, m.index) + `"${line}"` + out.slice(m.index + m[0].length);
+  }
 }
 
 /** Claude Code's reason when its dangerous-removal check asks, in every mode (`Dangerous rm operation …`). */

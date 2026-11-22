@@ -11,7 +11,7 @@ import { accountKeyOf } from './usage.ts';
 import { senderOf, type SessionSnapshot, type Unanswered } from './restart.ts';
 import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
 import { dryRun, dryRunStartRefusal } from './dryRun.ts';
-import { DANGEROUS_REMOVAL, tempDeletesWithin, tempOnlyDelete } from './tempDelete.ts';
+import { selfAnswer, type SelfAnswer } from './selfAnswer.ts';
 import { isRealModelId } from '../shared/models.ts';
 import { ContextMeter, IMAGE_CHARS, MIN_BASE, carriedTotals, type Cumulative, type MeterState, type TurnUsage } from '../shared/spend.ts';
 import type { MeterStates } from './meterStates.ts';
@@ -688,6 +688,7 @@ export class AgentSession implements SessionHandle {
       env: { ...(base.env ?? process.env), CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: '1', GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' },
     };
     this.tempDir = typeof options.env?.TMPDIR === 'string' ? options.env.TMPDIR : undefined;
+    this.cwd = typeof options.cwd === 'string' ? options.cwd : undefined;
     // w3686: a worker watches its own temp folder (server/tempSizeHook.ts), beside the PostToolUse hooks the options already carry
     // (the read-chain nudge). Its 'tempSize' signal reaches the portal's ledger the way 'rateLimit' does (machine/agentHost.ts SIGNALS).
     if (this.info.kind === 'worker' && this.tempDir && /^ffa-/i.test(path.basename(this.tempDir))) {
@@ -1134,6 +1135,8 @@ export class AgentSession implements SessionHandle {
 
   /** This session's own temp folder (TMPDIR of its process), when it is one of ours (`ffa-<session>`). */
   private tempDir?: string;
+  /** The folder its process runs in: a worker's sandbox (w5148: a delete inside it, after its own `cd`, is answered). */
+  private cwd?: string;
 
   /**
    * A worker's clean-up of its own temp folder is answered here, not by a person (w913, lothsahn: "Random clean up commands
@@ -1145,17 +1148,23 @@ export class AgentSession implements SessionHandle {
    * it gives, the delete is the whole question (the rest of the command runs unasked in bypass mode), so the session answers
    * it when every delete in the command is one of those (tempDeletesWithin). In any other mode, or for any other reason, a
    * person is asked.
+   *
+   * w5148 (lothsahn: "I just got a bash request. Figure out why I get those and how to cut them down 90%") adds deletes inside
+   * the session's sandbox after its own `cd`, commands that only read when Claude Code's check could not finish, and a refusal
+   * of a command bash cannot parse: server/selfAnswer.ts, replayed against the 21 counted questions in its test.
    */
-  private ownTempDelete(toolName: string, input: Record<string, unknown>, why?: string): boolean {
-    if ((toolName !== 'Bash' && toolName !== 'PowerShell') || typeof input.command !== 'string' || !this.tempDir) return false;
-    if (!/^ffa-/i.test(path.basename(this.tempDir))) return false;
-    const ctx = { tmp: this.tempDir };
-    if (tempOnlyDelete(input.command, ctx).ok) return true;
-    return this.info.permissionMode === 'bypassPermissions' && !!why && DANGEROUS_REMOVAL.test(why) && tempDeletesWithin(input.command, ctx).ok;
+  private ownAnswer(toolName: string, input: Record<string, unknown>, why?: string): SelfAnswer {
+    return selfAnswer({ toolName, input, why, permissionMode: this.info.permissionMode, tempDir: this.tempDir, cwd: this.cwd });
   }
 
   private askPermission(toolName: string, input: Record<string, unknown>, signal: AbortSignal, blockedPath?: string, decisionReason?: string): Promise<PermissionResult> {
-    if (this.ownTempDelete(toolName, input, decisionReason)) return Promise.resolve({ behavior: 'allow', updatedInput: input });
+    const own = this.ownAnswer(toolName, input, decisionReason);
+    if (own.ok) {
+      // A line in the transcript, so a count of the questions sees what the session answered and why (w5148).
+      if (own.route !== 'temp-delete') this.store.append(this.info.id, { kind: 'system', text: `Answered Claude Code's question about ${toolName} itself (${own.route}; w5148): ${(decisionReason ?? '').slice(0, 200)}` });
+      if (own.route === 'refuse-unparsed') return Promise.resolve({ behavior: 'deny', message: own.deny });
+      return Promise.resolve({ behavior: 'allow', updatedInput: input });
+    }
     const requestId = randomUUID();
     // Claude Code's own reason for asking (w1097): what a person sees on the card, and what the prompt count groups by.
     const reason = decisionReason ? decisionReason.slice(0, 600) : blockedPath ? `touches ${blockedPath}` : undefined;

@@ -3322,13 +3322,15 @@ export class Agents {
     for (const w of open) this.orchestrators.ledgerEdit(w.id, line, () => undefined, true);
   }
 
-  private onWorkerPermission(s: SessionHandle, arg: { toolName: string; input: unknown } | undefined) {
+  private onWorkerPermission(s: SessionHandle, arg: { toolName: string; input: unknown; reason?: string } | undefined) {
     if (s.info.kind !== 'worker' || s.lastFrom !== 'orchestrator') return;
     // A machine's daemon sends the signal without the request (machine/daemon.ts): it is the session's newest pending one.
     const p = arg ?? s.info.pendingPermissions.at(-1) ?? { toolName: 'a tool', input: undefined };
     this.notifyPeople(
       this.orchestrators.audienceOf(s.info),
-      `[worker update] ${this.label(s)} is waiting for permission to use ${p.toolName} with ${JSON.stringify(p.input ?? null).slice(0, 600)}. ` +
+      `[worker update] ${this.label(s)} is waiting for permission to use ${p.toolName} with ${JSON.stringify(p.input ?? null).slice(0, 600)}` +
+        // Claude Code's reason (w5148): why it asked, which says what would have answered it.
+        `${'reason' in p && p.reason ? ` (Claude Code's reason: ${String(p.reason).slice(0, 300)})` : ''}. ` +
         `You cannot approve it; tell the user it needs them (the approval card is in that sandbox's panel).`,
     );
   }
