@@ -95,12 +95,13 @@ test('w4620: the priorities.json reader takes level (release) over priority, and
   }
 });
 
-test('w4620: a holder already granted keeps its place ahead of a higher priority, and the head blocks lower waiters it cannot fit behind', () => {
-  // The waiter of a sandbox whose editor runs goes first whatever the priority (unchanged: holders first).
+test('w4620: priority goes ahead of a holder whose editor runs (w5324), and the head blocks lower waiters it cannot fit behind', () => {
+  // w5324 reversed w4620's holders first: a low sandbox whose editor runs no longer goes ahead of an urgent newcomer
+  // (w5291, frantic, waited about 2 h on LothDesktop behind lower holders). Within one priority holders still go first.
   const places = [{ holder: 'sandbox:a', path: 'D:\\work\\ffsb\\a', editorUp: true }];
   const queued = [waiter('own', 9, { holder: 'sandbox:a' }), waiter('u', 1)];
   const a = assess({ platform: 'win32', procs: [], requests: [holder('h'), holder('h2'), ...queued], places, limit: 3, now: T0 + 60_000, priorityOf: marks({ own: 'low', u: 'urgent' }) });
-  assert.deepEqual(a.waiting.map((w) => w.id), ['own', 'u'], 'the sandbox with an editor first, then priority');
+  assert.deepEqual(a.waiting.map((w) => w.id), ['u', 'own'], 'priority first, then the sandbox with an editor');
   // A big urgent request that does not fit holds the line: the smaller low one behind it does not slip past.
   const big = [waiter('big', 5, { count: 2 }), waiter('small', 1)];
   const blocked = look([holder('h'), ...big], marks({ big: 'urgent' }), 2);
