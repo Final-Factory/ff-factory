@@ -98,6 +98,7 @@ import { TrayHost, trayInstance } from './tray.ts';
 import { FirefoxCloser, closeFirefox, firefoxFile, winFirefoxDeps } from './firefox.ts';
 import { GhLoginWatch, LOOK_EVERY_MS as GH_LOOK_EVERY_MS, lookHostsFile, type GhLoginDeps } from './ghLogin.ts';
 import { READ_EVERY_MS as STEAM_READ_EVERY_MS, SteamClientWatch, realSteamDeps, type SteamClientDeps } from './steamClient.ts';
+import { UvCachePruner, findUv, runQuiet, workerDeterminismAuditDir, workerUvCacheDir } from './sharedCaches.ts';
 import { DISK_CRITICAL_GB_DEFAULT, machinePlatformOf, priorityRank, type AttachmentRef, type BenchPriority, type CompactionTrigger, type HostHealth, type HostStats, type NoTimedRuns, type TimedAskMark, type PersonPlayReport, type SandboxPoolSettings, type SessionInfo, type TranscriptEvent } from '../shared/types.ts';
 
 export interface DaemonConfig {
@@ -254,9 +255,13 @@ export function withRootDefaults(cfg: DaemonConfig): DaemonConfig {
   };
 }
 
-/** The environment a worker root gives every agent and script (w513): the root and its player slots. Exported for tests. */
+/**
+ * The environment a worker root gives every agent and script (w513): the root and its player slots, and (w5281) the shared
+ * uv cache and the determinism audits' folder inside it, so `uv run --with ...` and the game's audits stop filling the
+ * user's own folders. The daemon sets each only where its own environment lacks it (`??=`). Exported for tests.
+ */
 export function rootEnv(root: string): Record<string, string> {
-  return { FF_WORKER_ROOT: root, FF_PLAYER_SLOT_ROOT: path.join(root, 'players') };
+  return { FF_WORKER_ROOT: root, FF_PLAYER_SLOT_ROOT: path.join(root, 'players'), UV_CACHE_DIR: workerUvCacheDir(root), FF_DETERMINISM_AUDIT_DIR: workerDeterminismAuditDir(root) };
 }
 
 /** The machine credential: daemon.json's, else the token file's first line (w513). Exported for tests. */
@@ -468,6 +473,8 @@ export class Daemon {
   private lastStats?: { stats: HostStats; at: number };
   /** The machine's continuous clean-up (server/cleanup.ts), with the settings the portal sent. */
   readonly cleaner: CleanupRunner;
+  /** The shared uv cache's daily `uv cache prune` (w5281); only with a worker root. */
+  private uvPruner?: UvCachePruner;
   /** Sweeps a stopped worker's temp folder (server/sessionSweep.ts, w913). */
   private readonly sweeper: SessionSweeper;
   /**
@@ -862,6 +869,7 @@ export class Daemon {
       settings: () => sweepSettings(cfg.sessionSweep),
       log,
     });
+    if (cfg.root) this.uvPruner = new UvCachePruner({ dir: workerUvCacheDir(cfg.root), uv: () => findUv(), run: runQuiet, log });
     this.cleaner = new CleanupRunner({
       // Below the pool's disk_critical_gb a pass may take a live Unity cache, the last resort (w2752).
       settings: () => ({ everyMinutes: this.cleanupSettings.everyMinutes, softFreeGB: this.cleanupSettings.softFreeGB, criticalFreeGB: this.currentPool()?.diskCriticalGB, staleOutput: staleOutputSettings(this.cleanupSettings.staleOutput) }),
@@ -884,7 +892,10 @@ export class Daemon {
         // A sandbox's Builds/ is the stale-output rules' (attributed, or listed): the old 7-day age rule only when they are off.
         // w1755: on Windows the plan reads only the install drive (and the Dev Drive's folders): no rule on C:, none in Never Games.
         const roots = this.cfg.root ? [this.cfg.root, ...(this.cfg.extraRoots ?? [])] : undefined;
+        // w5281: old runs in the shared determinism audit folder (<root>/cache/determinism-audit) age out.
         const rules = rulesOnInstallDrive(cleanupRules({ ...env, sandboxRoots: root && settings.mode === 'off' ? [root] : [], cacheRoots: root ? [root] : [] }, DEFAULT_CLEANUP), roots, HOME);
+        // w5281: the shared uv cache (<root>/cache/uv) gets `uv cache prune`, daily (hourly while space is low), in the background.
+        if (!opts.dryRun) void this.uvPruner?.maybe(low);
         return cleanupPass({
           opts,
           guard,

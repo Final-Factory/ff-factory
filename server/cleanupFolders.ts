@@ -506,6 +506,8 @@ export function judgePath(p: string, f: CleanupFacts, now = Date.now(), slots?: 
   if (rel[0] === 'scratch' && rel.length >= 2) return row('scratch', judgeNamed(rel[1]!, f, now));
   if (rel[0] === 'players' && rel.length >= 2 && isSlotDir(rel[1]!)) return row('player-slot', judgePlayerSlot(path.join(root, 'players', rel[1]!), slots, now));
   if (rel[0] === 'timing') return row('other', { verdict: 'keep', why: judgeTiming(f) });
+  // w5281: the machine's shared caches (the uv cache, the determinism audits): the daemon prunes them itself.
+  if (rel[0] === 'cache') return row('other', { verdict: 'keep', why: "the machine's shared caches (uv, determinism audits): the daemon prunes uv's daily (uv cache prune), the game keeps its audits to 40 runs and 10 GB" });
   const named = rel.find((seg) => requestIdsIn(seg).length);
   if (named) return row('named', judgeNamed(named, f, now));
   return row('other', { verdict: 'keep', why: 'not a place with an owner in the ledger' });

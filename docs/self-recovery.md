@@ -1173,9 +1173,13 @@ Unity Hub's editors and installers; `%LOCALAPPDATA%\Unity` (logs, package cache,
 `~/.claude` (transcripts, plugins); dotnet workload temp; the system temp; the npm, NuGet, pip, uv and Playwright caches;
 Windows crash dumps. For each: which setting or script makes FF Factory write there, and whether a variable could move it
 inside the root (candidates, not verified here: `NUGET_PACKAGES`, `npm_config_cache`, `PLAYWRIGHT_BROWSERS_PATH`,
-`DOTNET_CLI_HOME`, `UV_CACHE_DIR`, `PIP_CACHE_DIR`, `CLAUDE_CONFIG_DIR`; Unity's own folders have none and the game's data
-folder has no override, [worker-root.md](worker-root.md) section 2). Moving one is a request for lothsahn to decide, not
-clean-up work.
+`DOTNET_CLI_HOME`, `PIP_CACHE_DIR`, `CLAUDE_CONFIG_DIR`; Unity's own folders have none, [worker-root.md](worker-root.md)
+section 2). Moving one is a request for lothsahn to decide, not clean-up work. Moved since (w5281, lothsahn): uv's cache
+(`UV_CACHE_DIR=<root>/cache/uv`, pruned daily by the daemon with `uv cache prune`, hourly below the soft threshold;
+`machine/sharedCaches.ts`) and the game's determinism audits (`FF_DETERMINISM_AUDIT_DIR=<root>/cache/determinism-audit`,
+kept to 40 runs and 10 GB by the game's own `NetworkDeterminismAuditRetention`; no clean-up pass deletes a path with `audit`
+in it). Both are set in the daemon's `rootEnv`, so every agent, editor, player and batch run it starts gets them; what
+already sits at the old places (`~/.cache/uv`, the game data folder's `DeterminismAudit`) stays until a person says it goes.
 
 ### Sandbox Library caches: trim on release (w898)
 
