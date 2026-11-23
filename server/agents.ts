@@ -4841,8 +4841,10 @@ export class Agents {
    * queue. A worker with no open request is left out: its tickets count as normal.
    */
   benchPriorities(machineId: string): Record<string, BenchPriority> {
+    // w2044: one read of the ledger for the whole look (w5341's pair marks reuse it).
+    const ledger = [...this.store.work.values()];
     const out: Record<string, BenchPriority> = {};
-    const bySession = this.workBySession();
+    const bySession = this.workBySession(ledger);
     // w3186: the turns a person approved on this machine, and the worker sessions each one marks
     const now = Date.now();
     const grants = new Map<BenchGrant, { w: WorkItem; sessions: Set<string> }>();
@@ -4905,7 +4907,7 @@ export class Agents {
       grantOf(r.session, open);
     }
     this.markBenchGrants(machineId, grants, out, now);
-    this.markPairRaises(out);
+    this.markPairRaises(out, ledger);
     return out;
   }
 
@@ -4915,10 +4917,10 @@ export class Agents {
    * no Unity slot while a leg on another machine holds one goes one level up (server/pairRaise.ts), and a leg here that
    * holds its side while another waits is marked held. A leg's own priority is its pair run's (the request it serves).
    */
-  private markPairRaises(out: Record<string, BenchPriority>) {
+  private markPairRaises(out: Record<string, BenchPriority>, ledger: WorkItem[]) {
     const legs = new Set(Object.keys(out));
     const pairs: PairState[] = [];
-    for (const w of this.store.work.values()) {
+    for (const w of ledger) {
       if (!livePair(w)) continue;
       const started = w.pair!.started!;
       if (started.legs.length < 2 || !started.legs.some((l) => legs.has(l.session))) continue;
@@ -5049,9 +5051,9 @@ export class Agents {
    * that name the session, so one index replaces a scan of the whole ledger per worker. benchPriorities ran that scan for
    * every worker a machine ever had, for each machine each minute: 1.3 to 1.7 s blocks on 2026-10-24 (15:38 and 15:47Z).
    */
-  private workBySession(): Map<string, WorkItem[]> {
+  private workBySession(items: Iterable<WorkItem> = this.store.work.values()): Map<string, WorkItem[]> {
     const out = new Map<string, WorkItem[]>();
-    for (const w of this.store.work.values()) for (const id of w.sessionIds) (out.get(id) ?? out.set(id, []).get(id)!).push(w);
+    for (const w of items) for (const id of w.sessionIds) (out.get(id) ?? out.set(id, []).get(id)!).push(w);
     return out;
   }
 
