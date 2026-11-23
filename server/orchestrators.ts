@@ -2149,7 +2149,7 @@ It is for your part of the work, not an answer to another worker's question.`;
     const on = h.to ? `on ${h.to}` : 'on another computer';
     const how = agent
       ? `start_agent with work_id "${w.id}" in a FREE sandbox ${on}${h.branch ? `, and say in your text that it continues from the pushed branch ${h.branch} of its repository (in its own clone)` : ''}`
-      : `${h.branch ? `switch_branch a FREE sandbox ${on} to "${h.branch}" (it fetches the pushed branch), then ` : ''}start_agent with work_id "${w.id}" in that sandbox`;
+      : `start_agent with work_id "${w.id}"${h.branch ? ` and branch "${h.branch}"` : ''} in a FREE sandbox ${on}${h.branch ? ' (it switches the sandbox to the pushed branch while you go on, w5278)' : ''}`;
     const head = h.to ? `[ledger] MOVED (w1600): ${w.id}` : `[ledger] HANDED BACK (w1532): ${w.id}`;
     const place = h.to ? `Place it on ${h.to}` : 'Place it on a computer that is not paused';
     this.toDispatcher(

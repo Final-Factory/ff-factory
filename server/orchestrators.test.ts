@@ -6054,7 +6054,7 @@ test('w1600: a Live view marks its request; a bench lock holds its editor; stop_
   const moved = await move();
   assert.equal(moved.isError, false, moved.text);
   assert.match(moved.text, /^Moved w1 off \w+ on pc\/alpha, for beast: its process stopped, its Live view ended, its sandbox (had no uncommitted work|'s uncommitted work)/);
-  assert.match(moved.text, /switch_branch a FREE beast sandbox to "sandbox\/alpha", then start_agent with its work_id in that sandbox/);
+  assert.match(moved.text, /start_agent with its work_id and branch "sandbox\/alpha" in a FREE beast sandbox \(it switches the sandbox while you go on, w5278\)/);
   assert.deepEqual(ended, [a.id]);
   const w = store.work.get('w1')!;
   assert.equal(w.status, 'queued');
@@ -6065,7 +6065,7 @@ test('w1600: a Live view marks its request; a bench lock holds its editor; stop_
   assert.match(w.handedBack!.note, /^Its Live view ran on pc\/alpha \(materials \["Ballista"\], fps 15, width 960\): stage it again/);
   assert.match(w.log.join('\n'), /moved from pc\/alpha: queued for beast, from branch sandbox\/alpha/);
   await until('the dispatcher is told', () => heard(dispatcher().info.id, '[ledger] MOVED (w1600)').length > 0);
-  assert.match(heard(dispatcher().info.id, '[ledger] MOVED (w1600)')[0].text, /w1 "Request w1" .*because it moves to beast: its Live view streams faster on beast \(w1600\) \(moved by stop_agent move_to \(w1600\)\)\. .*Place it on beast: switch_branch a FREE sandbox on beast to "sandbox\/alpha"/);
+  assert.match(heard(dispatcher().info.id, '[ledger] MOVED (w1600)')[0].text, /w1 "Request w1" .*because it moves to beast: its Live view streams faster on beast \(w1600\) \(moved by stop_agent move_to \(w1600\)\)\. .*Place it on beast: start_agent with work_id "w1" and branch "sandbox\/alpha" in a FREE sandbox on beast/);
   // The new worker's handover says where it came from and what to stage.
   const note = handoverNote(w, { related: [], handedBack: w.handedBack });
   assert.match(note, /Moved \(w1600\): w1 was taken off worker \w+ on pc\/alpha at .* UTC, because it moves to beast: its Live view streams faster on beast \(w1600\) \(moved by stop_agent move_to \(w1600\)\)\. Continue from its branch sandbox\/alpha/);
