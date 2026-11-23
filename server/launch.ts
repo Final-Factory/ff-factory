@@ -57,6 +57,13 @@ import { CARD_QUESTION_CHARS, MAX_ASKS } from '../shared/questionCard.ts';
 import { rangedNumber } from './forgiving.ts';
 import { EXPORT_GROUPS, EXPORT_ROLES, EXPORT_VIEWS } from './spendExport.ts';
 
+/** w5222: agent_transcript's time window and turn timing (server/turnTiming.ts, Store.readTranscriptBetween), for every role that has it. */
+export const TRANSCRIPT_WINDOW_SCHEMA = {
+  since: z.string().max(40).optional().describe('From this ISO time with a zone (a window with until; timing: an hour before until by default).'),
+  until: z.string().max(40).optional().describe('Up to this ISO time with a zone (default: now). At most 24 h after since.'),
+  timing: z.boolean().optional().describe('Answer where each whole turn in the window spent its wall time: model steps, each tool, a person waiting mid-turn (w5222).'),
+};
+
 /**
  * Questions for a person as their card asks them (w1597, Ben: "just ask the question clearly, give me the option selections
  * and thats it"): waiting_on_person's and decide_work ask's. Checked again by shared/questionCard.ts checkAsks. `bare`: no
@@ -446,6 +453,7 @@ export const CATALOG = {
     session_id: z.string().max(80).describe('The session id (from search_transcripts).'),
     last: rangedNumber(5, 400, 'How many events (default 40).').optional(),
     full_text: z.boolean().optional().describe('Longer cuts of each message and tool call (default: assistant text 600 characters, tool input 120).'),
+    ...TRANSCRIPT_WINDOW_SCHEMA,
   },
   /** w4497: full-text search over every agent's transcript, read-only; every worker's since w4528. */
   search_transcripts: {
