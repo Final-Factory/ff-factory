@@ -5,6 +5,7 @@ import path from 'node:path';
 import { run } from '../server/proc.ts';
 import { DEFAULT_HANG, bridgeInfo, bridgePing, editorVerdict, restartAllowed, type HangThresholds } from '../server/unityHang.ts';
 import { closeWindow, decide, decideClose, describeDialog, findClosable, findDialogs, listWindows, mainWindow, parsePsJson, pressButton, sceneFilesUnchanged, type Dialog } from '../server/watchdog.ts';
+import { ensureBurstPrefOn, realBurstPrefDeps } from './burstPref.ts';
 import { scoped } from './linuxScope.ts';
 import { accessibilityStep, axPrompt, axTrusted, closeMacWindow, listMacDialogs, macPermissionProblem, nodeBinary, pressMacButton, sessionAway, sessionState, tccAccessibility, type SessionState } from './macDialogs.ts';
 
@@ -46,6 +47,8 @@ export interface UnityDeps {
   sceneFilesClean?(dir: string): Promise<boolean>;
   /** Move a folder (w2255: Unity's scene backups, set aside before a launch). */
   move?(from: string, to: string): void;
+  /** w5270: turn Unity's user-wide Burst EditorPref back on when it is off; a note when it was (machine/burstPref.ts). */
+  burstPrefOn?(): Promise<string | undefined>;
 }
 
 const norm = (p: string) => p.replace(/[\\/]+$/, '');
@@ -276,6 +279,8 @@ export class MacUnity {
   readonly logFile?: string;
   private readonly d: UnityDeps;
   private readonly bin: () => string;
+  /** w5270: what the last start() found of the Burst EditorPref when it was off (undefined: it was on). */
+  burstNote?: string;
 
   constructor(repo: string, deps?: UnityDeps, bin?: () => string, platform: UnityPlatform = 'darwin', where: UnityLocation = {}, opts: { logFile?: string } = {}) {
     this.repo = norm(repo);
@@ -369,6 +374,9 @@ export class MacUnity {
     const lock = this.lock;
     if (this.d.exists(lock)) this.d.remove(lock); // no editor has the project open, so the lock is stale
     const aside = await this.setSceneBackupsAside();
+    // w5270: an editor reads Burst's on/off from a user-wide EditorPref when it loads; one left at 0 by another editor
+    // would start this one with every job managed.
+    this.burstNote = await this.d.burstPrefOn?.().catch((e: Error) => `could not check Unity's Burst EditorPref: ${e.message}`);
     const bin = this.bin();
     await this.noAppNap(bin);
     const pid = await this.d.launch(bin, ['-projectPath', this.repo, ...(this.logFile ? ['-logFile', this.logFile] : [])], this.repo);
@@ -376,7 +384,7 @@ export class MacUnity {
       await this.d.sleep(1000);
       if (this.editors(await this.d.procs()).length) break;
     }
-    return `${aside ? `${aside}. ` : ''}Started ${bin} (pid ${pid}). The Unity MCP bridge comes up once the project has loaded (a minute or more); wait for it before Unity MCP calls.`;
+    return `${aside ? `${aside}. ` : ''}${this.burstNote ? `${this.burstNote}. ` : ''}Started ${bin} (pid ${pid}). The Unity MCP bridge comes up once the project has loaded (a minute or more); wait for it before Unity MCP calls.`;
   }
 
   /**
@@ -445,7 +453,7 @@ export function winLaunchScript(bin: string, args: string[], cwd: string): strin
 
 /** The real machine: ps, signals and a detached launch on a Mac (and Linux, without App Nap); CIM, taskkill and Start-Process on Windows. */
 export function realDeps(platform: UnityPlatform = 'darwin'): UnityDeps {
-  const base = realDepsMac();
+  const base: UnityDeps = { ...realDepsMac(), burstPrefOn: () => ensureBurstPrefOn(realBurstPrefDeps(platform)) };
   if (platform === 'linux') {
     const { noAppNap: _n, ...linux } = base;
     // Each editor in a systemd scope of its own, out of the daemon's cgroup (machine/linuxScope.ts, w2474).

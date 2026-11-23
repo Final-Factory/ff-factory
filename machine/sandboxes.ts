@@ -74,7 +74,7 @@ interface Rec {
 
 /** The editor side of one sandbox: its MacUnity and hang/crash watch (a fake in tests). */
 export interface SandboxEditor {
-  unity: Pick<MacUnity, 'start' | 'stop' | 'status' | 'editors' | 'logFile'>;
+  unity: Pick<MacUnity, 'start' | 'stop' | 'status' | 'editors' | 'logFile'> & Partial<Pick<MacUnity, 'burstNote'>>;
   watch?: Pick<MacUnityWatch, 'tick' | 'expectExit' | 'describe'>;
 }
 
@@ -1263,6 +1263,7 @@ export class SandboxPool {
     this.changed();
     try {
       out.push(await ed.unity.start());
+      if (ed.unity.burstNote) this.o.onEvent({ text: `sandbox ${id}: ${ed.unity.burstNote}`, sandbox: id });
     } catch (e) {
       this.launchedAt.delete(id);
       this.unityState.set(id, { state: 'stopped', detail: `start failed: ${(e as Error).message}`, logPath: logFile });
