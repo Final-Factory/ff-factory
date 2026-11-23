@@ -23,6 +23,7 @@ import { asWorkPriority, priorityRank, type UnitySlotsReport, type WorkPriority 
 import { benchLockDir, foreignTimedHold } from './benchLock.ts';
 import { editorBenchSession } from './benchRaise.ts';
 import { personHoldReason } from './personPlay.ts';
+import { batchUnityLogFile } from './sharedCaches.ts';
 
 /**
  * The pointer a worker-root install (w513, scripts/worker/worker.ts) leaves for scripts outside the daemon: its mailbox
@@ -1253,7 +1254,10 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env)
         await d.sleep(15_000);
       }
     }
-    const run = commandToSpawn(o.rest, process.platform, env);
+    // w5297: a batch Unity run that names no -logFile writes the person's own Editor.log; it gets one in the worker's temp folder.
+    const logFile = batchUnityLogFile(o.rest, env, o.label ?? 'batch');
+    if (logFile) d.say(`no -logFile given: Unity logs to ${logFile} (w5297: never the person's own Editor.log)`);
+    const run = commandToSpawn(logFile ? [...o.rest, '-logFile', logFile] : o.rest, process.platform, env);
     const { FF_UNITY_SLOT_JOB: _job, ...childEnv } = env;
     const child = spawn(run.cmd, run.args, {
       stdio: 'inherit',

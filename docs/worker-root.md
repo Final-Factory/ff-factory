@@ -268,13 +268,17 @@ the daemon's `process.env`). The editors the daemon starts inherit it too. So th
 
 | Variable | Points to | Moves | Basis |
 |---|---|---|---|
-| `CLAUDE_CONFIG_DIR` | `claude/` | settings, plugins (`registerAgents.sh` run with it set), `projects/` (transcripts, memory, resume); not the machine's own login, which stays in `~/.claude` | set by the daemon on itself at start since w5305 ([2.7](#27-claude-codes-folder-w5305)) |
+| `CLAUDE_CONFIG_DIR` | `claude/` | settings, plugins (`registerAgents.sh` run with it set), `projects/` (transcripts, memory, resume); not the machine's own login, which stays in `~/.claude` | set by the daemon on itself at start since w5305 ([2.8](#28-claude-codes-folder-w5305)) |
 | `TEMP`, `TMP`, `TMPDIR` | `tmp/` (the existing `temp_dir`) | agents' temp, Claude's task output | measured: today's mechanism, `machine/daemon.ts:58,126` |
 | `GIT_CONFIG_GLOBAL` | `home/.gitconfig` | identity, credential helper | sourced: git-config docs (git 2.32+) |
 | `GH_CONFIG_DIR` + `GH_TOKEN` | `home/.config/gh`, `secrets/gh-token` | gh's config; the token in place of the OS keyring, where BEAST's lives today (measured) | sourced: `gh help environment` |
 | `GIT_SSH_COMMAND` | `ssh -F <root>/home/.ssh/config -i <root>/secrets/ssh/id_ed25519` | git over ssh | sourced: git docs |
-| `UPM_CACHE_ROOT` | `cache/upm` | Unity's global package cache | sourced: Unity manual, "Customize the global cache location" |
-| `npm_config_cache`, `PIP_CACHE_DIR` | `cache/npm`, `cache/pip` | tool caches | sourced: npm and pip docs |
+| `UPM_CACHE_ROOT`, `ASSETSTORE_CACHE_PATH` | `cache/upm`, `cache/asset-store` | Unity's global package cache and Asset Store downloads | **in use** (w5297): `rootEnv`, `machine/sharedCaches.ts` `workerToolCacheEnv`; sourced: Unity manual, "Customize the global cache location" (the variable beats Preferences and the user config file) |
+| `npm_config_cache`, `PIP_CACHE_DIR`, `NUGET_PACKAGES`, `DOTNET_CLI_HOME`, `PLAYWRIGHT_BROWSERS_PATH` | `cache/npm`, `cache/pip`, `cache/nuget/packages`, `cache/dotnet`, `cache/ms-playwright` | tool caches | **in use** (w5297): `workerToolCacheEnv`; sourced: each tool's docs |
+| `XDG_CACHE_HOME` (macOS, Linux) | `cache/xdg` | every XDG-following tool's cache (gh, Mesa's shader cache, Unity's Linux editor cache). Not `XDG_CONFIG_HOME` or `XDG_DATA_HOME`: Unity's Linux licence and gh's login live there | **in use** (w5297); `server/outsideWrites.test.ts` fails if either is set |
+| `GH_NO_UPDATE_NOTIFIER=1` | — | gh's update check (`state.yml` in its config folder) | **in use** (w5297); sourced: `gh help environment` |
+| `TMP`, `TEMP` of a daemon-started editor (Windows) | `tmp/unity` | the sandbox editor's temp files (crash folders, Bee and shader-compiler scratch), not `%LOCALAPPDATA%\Temp` | **in use** (w5297): `machine/unity.ts` Windows `launch`, `editorTempEnv`. macOS and Linux unchanged: where Unity's licensing client keeps its socket there was not checked (guess: the system temp) |
+| `-logFile` of a batch run | `<TMPDIR>/unity-<label>-<time>.log` | `unity-slot run -- <Unity> -batchmode ...` without its own `-logFile` wrote the person's Editor.log | **in use** (w5297): `machine/unitySlots.ts` run, `batchUnityLogFile` |
 | `UV_CACHE_DIR` | `cache/uv` | uv's cache: every `uv run --with` environment the worker prompt prescribes (36.9 GB in `~/.cache/uv` on m5, 2026-11-23); the daemon runs `uv cache prune` on it daily (w5281) | **in use**: `machine/daemon.ts` `rootEnv`, `machine/sharedCaches.ts` |
 | `FF_DETERMINISM_AUDIT_DIR` | `cache/determinism-audit` | the game's determinism audits, in place of `<game data>/DeterminismAudit` (5.2 GB on m5); the game's retention bounds it (w5281) | **in use**: `rootEnv`; the game's `NetworkDeterminismAuditRetention.AuditRoot` |
 | `FF_PLAYER_SLOT_ROOT`, `FF_PLAYER_SLOT_COUNT` | `players/`, 8 | the slot pool; ends the drive-letter probing in `default_root()` (`player_slots.py:69-79`), which had left BEAST with firewall rules for two pools (gone since; `default_root()` now returns `<FF_WORKER_ROOT>/players` or refuses) | measured: `player_slots.py:83-87` |
@@ -360,7 +364,39 @@ fills from what it finds, and the uninstall reads.
 | `~/.unity-mcp` | the MCP-for-Unity editor plugin writes there (`machine/unityMcp.ts:75`) | the daemon's `unityMcpServer` / status-dir setting |
 | `%ProgramData%\FinalFactory\player-slots.json` | **can go**: with `FF_PLAYER_SLOT_ROOT` set by the daemon it is no longer read | — |
 
-### 2.7 Claude Code's folder (w5305)
+### 2.7 What still writes outside the root, per OS (w5297, 2026-11-23)
+
+lothsahn (w5297): "under no circumstances should workers write outside of ffw." This is the inventory from the code
+(this repo, the game repo's scripts and the ff-agents skills), not from a disk scan. `server/outsideWrites.test.ts` fails
+when a new place in the daemon names the home folder, AppData or the system temp, or a folder in `rootEnv` leaves the root.
+**Fixed** means moved into the root; **next** means a step handed up under w5297; **exception** stays outside, with why.
+
+| What | Windows | macOS | Linux | Status |
+|---|---|---|---|---|
+| uv cache, determinism audits | `~/.cache/uv`, `<game data>/DeterminismAudit` | same | same | **fixed** (w5281): `cache/uv`, `cache/determinism-audit` |
+| pip, npm, NuGet, dotnet, Playwright caches | `%LOCALAPPDATA%\pip`, `%LOCALAPPDATA%\npm-cache`, `~/.nuget`, `~/.dotnet`, `%LOCALAPPDATA%\ms-playwright` | `~/Library/Caches/...`, `~/.npm`, `~/.nuget` | `~/.cache/...`, `~/.npm`, `~/.nuget` | **fixed** (w5297): `cache/<tool>` |
+| Unity Package Manager and Asset Store caches | `%LOCALAPPDATA%\Unity\cache`, `%APPDATA%\Unity\Asset Store-5.x` | `~/Library/Unity/cache` | `~/.config/unity3d/cache` | **fixed** (w5297): `cache/upm`, `cache/asset-store` |
+| XDG caches (gh, Mesa, Unity's Linux cache) | — | `~/.cache` | `~/.cache` | **fixed** (w5297): `cache/xdg` |
+| gh's update check | `%APPDATA%\GitHub CLI\state.yml` | `~/.config/gh/state.yml` | same | **fixed** (w5297): `GH_NO_UPDATE_NOTIFIER` |
+| A batch Unity run's log with no `-logFile` | `%LOCALAPPDATA%\Unity\Editor\Editor.log` | `~/Library/Logs/Unity/Editor.log` | `~/.config/unity3d/Editor.log` | **fixed** (w5297): the worker's `TMPDIR` |
+| A sandbox editor's temp files | `%LOCALAPPDATA%\Temp` | `/var/folders/...` | `/tmp` | **fixed** on Windows (`tmp/unity`); **exception** on macOS and Linux until the licensing client's socket is checked there |
+| Agents' temp | — | — | — | already inside: `tmp/ffa-<session>` |
+| Claude Code's folder (transcripts, plugins, settings) | `%USERPROFILE%\.claude` | `~/.claude` | `~/.claude` | **fixed** (w5305): `claude/`, once the tools publish has installed the plugins there ([2.8](#28-claude-codes-folder-w5305)); the machine's own login and registerAgents.sh's marker stay (**exception**) |
+| The game's data folder (saves, AgentControl, TestResults, desync reports, timed runs' save copy) | `AppData\LocalLow\Never Games\finalfactory` | `~/Library/Application Support/Never Games/finalfactory` | `~/.config/unity3d/Never Games/finalfactory` | **next**: the game reads `FF_GAME_DATA_ROOT`; the daemon sets it once players and every branch carry that |
+| A slot player's `Player.log` | `LocalLow\...\Player.log` | `~/Library/Logs/Never Games/...` | `~/.config/unity3d/.../Player.log` | **next**: `player_slots.py launch` passes `-logFile` under the root |
+| watch_video's cache and spend file | `~/.cache/watch_video`, `~/.config/ff-watch-video` | same | same | **next**: follow `FF_WORKER_ROOT` |
+| Unity slots mailbox and shims | `~/.ff-factory/unity-slots` | same | same | **exception** (w469): scripts outside the daemon find it with no config |
+| `~/.unity-mcp` (status files, port registry) | yes | yes | yes | **exception**: the MCP-for-Unity package's port registry has no setting (`PortManager.cs`, v10.3.0) |
+| Unity's own logs and licence, Unity Hub | `%LOCALAPPDATA%\Unity`, `%APPDATA%\UnityHub` | `~/Library/Logs/Unity`, `~/Library/Unity` | `~/.config/unity3d`, `~/.local/share/unity3d` | **exception**: shared with the person's Unity; the licence is per OS user |
+| EditorPrefs (Burst) and the game's PlayerPrefs | registry `HKCU\Software\Unity Technologies` | `~/Library/Preferences/com.unity3d.*.plist` | `~/.local/share/unity3d/prefs` | **exception**: Unity's own stores, no setting |
+| App Nap off for Unity | — | `defaults write <Unity> NSAppSleepDisabled` | — | **exception**: a user default |
+| The daemon's OS job, firewall rules, ssh key, BEAST's Dev Drive and helper tasks | scheduled task, firewall | LaunchAgent plist | transient systemd unit; CI runner drop-ins | **exception**: OS stores |
+| git and gh logins | `~/.gitconfig`, `%APPDATA%\GitHub CLI` | `~/.gitconfig`, `~/.config/gh` | same | **exception**: the person's own logins; agents use `GH_TOKEN` and `GIT_CONFIG_*` and write neither |
+| Game test results, Backtrace's crash database | `<persistentDataPath>/TestResults.xml`, `/backtrace` | same | same | **exception** until the game's data folder moves (they follow it) |
+| Steam | the Steam client's own folders | same | same | **exception**: the person's Steam |
+| `ff-leftovers launch` (a program for a person) | its temp and home | same | same | **exception** (w4047): the person goes on using it |
+
+### 2.8 Claude Code's folder (w5305)
 
 lothsahn (w5297): "under no circumstances should workers write outside of ffw". Before w5305 a main install left
 `CLAUDE_CONFIG_DIR` unset, so every agent's transcripts, plugins and settings went to the person's `~/.claude` (8.6 GB on

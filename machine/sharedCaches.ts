@@ -19,6 +19,64 @@ export const workerUvCacheDir = (root: string) => path.join(sharedCacheDir(root)
  */
 export const workerDeterminismAuditDir = (root: string) => path.join(sharedCacheDir(root), 'determinism-audit');
 
+/**
+ * The other tools' caches, each by the variable its own docs give (w5297, lothsahn: "under no circumstances should workers
+ * write outside of ffw"). Without them a worker's `pip`, `npx`, Playwright, Unity's Package Manager and Asset Store
+ * downloads, `dotnet` and every XDG-following tool wrote into the person's home folder. Caches only: nothing here holds a
+ * login, a licence or a setting a person made, so a fresh folder costs one download. Basis, all sourced:
+ * - UPM_CACHE_ROOT, ASSETSTORE_CACHE_PATH: Unity manual, "upm config cache" and "Customize the asset package cache
+ *   location" (the variable beats the Preferences window and the user config file).
+ * - PIP_CACHE_DIR, npm_config_cache, NUGET_PACKAGES, DOTNET_CLI_HOME, PLAYWRIGHT_BROWSERS_PATH: each tool's own docs.
+ * - XDG_CACHE_HOME (macOS and Linux): the XDG base directory spec; uv, pip, gh, Mesa's shader cache and Unity's Linux
+ *   editor cache follow it. Not XDG_CONFIG_HOME or XDG_DATA_HOME: Unity's Linux licence and gh's login live there.
+ * - GH_NO_UPDATE_NOTIFIER: gh writes its update check's state.yml under the home folder; with a token in GH_TOKEN it writes
+ *   nothing else (gh help environment).
+ * Exported for tests (server/outsideWrites.test.ts lists every path variable and fails on one outside the root).
+ */
+export function workerToolCacheEnv(root: string, platform: NodeJS.Platform = process.platform): Record<string, string> {
+  const c = (...p: string[]) => path.join(sharedCacheDir(root), ...p);
+  return {
+    PIP_CACHE_DIR: c('pip'),
+    npm_config_cache: c('npm'),
+    UPM_CACHE_ROOT: c('upm'),
+    ASSETSTORE_CACHE_PATH: c('asset-store'),
+    NUGET_PACKAGES: c('nuget', 'packages'),
+    DOTNET_CLI_HOME: c('dotnet'),
+    PLAYWRIGHT_BROWSERS_PATH: c('ms-playwright'),
+    ...(platform === 'win32' ? {} : { XDG_CACHE_HOME: c('xdg') }),
+    GH_NO_UPDATE_NOTIFIER: '1',
+  };
+}
+
+/**
+ * Where a Unity editor the daemon starts keeps its temp files on Windows (w5297): `<root>/tmp/unity` in place of the
+ * person's `%LOCALAPPDATA%\Temp` (the editor's crash folders, Bee's and the shader compiler's scratch). Windows only:
+ * there Unity's licensing client talks over a named pipe, not a file in the temp folder; on macOS and Linux its socket's
+ * place was not checked, so their editors keep the system temp (an exception in docs/worker-root.md 2.6). Empty without a root.
+ */
+export function editorTempEnv(env: NodeJS.ProcessEnv, platform: NodeJS.Platform = process.platform): Record<string, string> {
+  if (platform !== 'win32' || !env.FF_WORKER_ROOT) return {};
+  const t = path.join(env.FF_WORKER_ROOT, 'tmp', 'unity');
+  return { TMP: t, TEMP: t };
+}
+
+/**
+ * A batch Unity run under `unity-slot run` that names no `-logFile` wrote the person's own Editor.log
+ * (`%LOCALAPPDATA%\Unity\Editor`, `~/Library/Logs/Unity`, `~/.config/unity3d`), over the one their own editor keeps (w5297).
+ * Such a run gets `-logFile <TMPDIR>/unity-<label>-<time>.log`, the worker's own temp folder; anything else is left as given.
+ * Undefined when nothing is added.
+ */
+export function batchUnityLogFile(rest: string[], env: NodeJS.ProcessEnv, label: string, now = new Date()): string | undefined {
+  const [cmd = '', ...args] = rest;
+  const base = cmd.replace(/\\/g, '/').split('/').pop() ?? '';
+  if (!/^unity(\.exe)?$/i.test(base)) return undefined;
+  if (!args.some((a) => /^-batchmode$/i.test(a)) || args.some((a) => /^-logfile$/i.test(a))) return undefined;
+  const dir = env.TMPDIR || env.TEMP || env.TMP || (env.FF_WORKER_ROOT ? path.join(env.FF_WORKER_ROOT, 'tmp') : undefined);
+  if (!dir) return undefined;
+  const slug = label.replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'run';
+  return path.join(dir, `unity-${slug}-${now.toISOString().replace(/[-:.]/g, '').slice(0, 15)}.log`);
+}
+
 /** A normal prune this often; below the soft threshold, this often instead. */
 export const UV_PRUNE_EVERY_HOURS = 24;
 export const UV_PRUNE_LOW_EVERY_HOURS = 1;
