@@ -1,0 +1,85 @@
+{
+  "id": 137627783371,
+  "name": "check",
+  "conclusion": "failure",
+  "run_attempt": 1,
+  "runner_name": "ffu-biscuit-4",
+  "completed_at": "2026-11-23T11:41:31Z",
+  "steps": [
+    {
+      "conclusion": "success",
+      "name": "Set up job",
+      "status": "completed"
+    },
+    {
+      "conclusion": "success",
+      "name": "Set up runner",
+      "status": "completed"
+    },
+    {
+      "conclusion": "success",
+      "name": "cargo on PATH (Mac and Linux; a runner started by systemd or launchd has no login shell)",
+      "status": "completed"
+    },
+    {
+      "conclusion": "success",
+      "name": "temp files in the runner's own temp folder, which the runner empties at every job (w3118)",
+      "status": "completed"
+    },
+    {
+      "conclusion": "skipped",
+      "name": "temp files in the runner's own temp folder (Windows; TMP and TEMP for Windows programs, TMPDIR for Git Bash)",
+      "status": "completed"
+    },
+    {
+      "conclusion": "success",
+      "name": "Run actions/checkout@v4",
+      "status": "completed"
+    },
+    {
+      "conclusion": "success",
+      "name": "toolchain",
+      "status": "completed"
+    },
+    {
+      "conclusion": "success",
+      "name": "Run tools/ci-runners/build_gate.sh cargo test --workspace --all-features --locked --no-run",
+      "status": "completed"
+    },
+    {
+      "conclusion": "success",
+      "name": "Run ./tools/check_temp_leaks.sh cargo test --workspace --all-features --locked --no-fail-fast",
+      "status": "completed"
+    },
+    {
+      "conclusion": "failure",
+      "name": "renderer golden images on lavapipe (M2.18; the client's packed crafters, M2.17; every pass window against headless, M2.31; the UI gate, M5.U7)",
+      "status": "completed"
+    },
+    {
+      "conclusion": "skipped",
+      "name": "Run actions/upload-artifact@v4",
+      "status": "completed"
+    },
+    {
+      "conclusion": "skipped",
+      "name": "keep target/ under 20 GB, the cheap profiles first, and leave a mark (the runner keeps its workspace; w3271)",
+      "status": "completed"
+    },
+    {
+      "conclusion": "skipped",
+      "name": "runner health (w3202; warns on a lost job hand-off, a full RAM tmpfs or full swap; never fails)",
+      "status": "completed"
+    },
+    {
+      "conclusion": "skipped",
+      "name": "Post Run actions/checkout@v4",
+      "status": "completed"
+    },
+    {
+      "conclusion": "success",
+      "name": "Complete job",
+      "status": "completed"
+    }
+  ]
+}
