@@ -697,7 +697,10 @@ had room, which read as "LothDesktop can take more work but the queue isn't movi
      own machine come before all of it (`PlaceAgain.claims`: their sandboxes are not free for new work), except Queued game
      work of higher priority than theirs that their computer could take: that goes first, and queued game work with no room
      at all frees a sandbox from strictly lower-priority work (w3507, [machines.md](machines.md), "Higher-priority work frees
-     a sandbox"). **Low never ages
+     a sandbox"). An urgent or frantic worker is never released between turns, and a released one's resume that finds no
+     sandbox frees one from idle lower work on its computer, else moves to one with room, else pre-empts at a safe point
+     (w5260, [machines.md](machines.md), "Urgent and frantic work keeps its sandbox"); `stop_agent move_to` hands a released
+     worker over on its own branch. **Low never ages
      up**: it waits behind normal work while normal work fits, and starts whenever a slot is free and nothing above it fits,
      so it never leaves a slot idle ("We should not have idle slots if there is queued work"); a person who wants it sooner
      raises it (`update_work priority`, or the Priority control in a request's detail on the Requests page, which its
@@ -1279,7 +1282,8 @@ without one means it is off or failing, worth a person's look.
   4. **Waiting on CI frees the sandbox and wakes the worker** (w846). A worker whose only wait is CI on its own pull
      request blocks on it (`blocked_on` with `prs: ["ci:owner/repo#123"]`, a `ci` gate: its checks finishing, green or
      red, not its merge) instead of polling with `wake_me`. With its editor stopped and its work pushed its sandbox
-     takes other work meanwhile ([machines.md](machines.md#placing-work), "it waits on CI"), and when the checks finish
+     takes other work meanwhile ([machines.md](machines.md#placing-work), "it waits on CI"; urgent and frantic work keeps
+     its sandbox, w5260, "Urgent and frantic work keeps its sandbox between turns"), and when the checks finish
      the worker that set the gate is resumed within a minute with why and what to do (`resumeGatedWorker`; its own
      cancelled check-in folded in), with no dispatcher round trip. See "How the portal learns that CI finished" below. Measured
      before (2026-10-10): PR #1354's editmode run finished at 04:17:08Z and its worker, polling every 10 minutes,

@@ -61,6 +61,11 @@ export interface Pressure {
    * older pair run, w1945, or timed work on a small computer, w1995), each as "<machine>: <why>", for the Queued line.
    */
   held?: string[];
+  /**
+   * w5260: the released urgent or frantic worker whose resume this is (PlaceAgain.resumePressure), not a Queued request: it
+   * has no room on its own computer, so a sandbox there is freed for it from lower work, as for queued work.
+   */
+  resume?: string;
 }
 
 /** One occupied sandbox as reclaim sees it. */

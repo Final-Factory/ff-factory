@@ -27,6 +27,13 @@ import { simpleCommands } from './waitGuard.ts';
  * a minute of its completed_at by the portal's own journal (machineDrop, read through portal_logs). A job that has a step
  * that concluded failure is still refused, whatever else it shows. A timed-out job passes only on the annotation or the drop:
  * a hung test leaves its step unfinished too.
+ *
+ * w5271 (lothsahn): a runner whose service was stopped mid-step leaves a fourth shape. ffu run 45155653650's "check" (job
+ * 137627783371, ffu-biscuit-4, attempt 1) has a step that concluded failure, and its log ends with "##[error]Process completed
+ * with exit code 143." and then "##[error]The runner has received a shutdown signal. ...": a global OOM kill on biscuit hit
+ * the test binary and systemd's OOMPolicy=stop stopped the runner's unit. A failed step passes when its log shows that pair
+ * (exit 143, SIGTERM, then the runner's own annotation within a few lines) and no real failure (REAL_FAILURE) anywhere in it.
+ * The annotation is read from the log, since a fine-grained token cannot read check-run annotations.
  */
 
 export interface RerunStep {
@@ -75,7 +82,8 @@ export const RULE = '"a flaky test gets its cause fixed. Never rerun it to get g
 const ROUTE =
   'Fix the flake\'s cause instead; or, when that fix already has its own request, merge past the unrelated red and name that ' +
   'request (wNNN) in the PR. Only a job whose runner died may be rerun: zero steps, or the annotation "The self-hosted runner ' +
-  'lost communication with the server", or (with no step that failed) a step that never finished, a missing log (404), or its ' +
+  'lost communication with the server", or a step that ended with exit code 143 and "The runner has received a shutdown signal" ' +
+  'and no failed test, or (with no step that failed) a step that never finished, a missing log (404), or its ' +
   'runner\'s machine disconnecting from the portal within a minute of the job\'s end; or, once (attempt 1), a step that failed because the runner ran out of memory, disk, ' +
   'page file or commit quota (os error 1453, 1455, 112, 28).';
 const LOST = /self-hosted runner lost communication with the server/i;
@@ -97,6 +105,19 @@ export function resourceFault(log: string): string | undefined {
   const lines = log.replace(ANSI, '').split(/\r?\n/);
   if (lines.some((l) => REAL_FAILURE.test(l))) return undefined;
   return lines.find((l) => RESOURCE_FAULT.test(l))?.replace(/^\S+Z\s+/, '').trim().slice(0, 240);
+}
+
+const EXIT_143 = /##\[error\]Process completed with exit code 143\./;
+const RUNNER_STOPPED = /##\[error\]The runner has received a shutdown signal/;
+
+/**
+ * w5271: the runner's service was stopped under the step: its log has an exit 143 line with the runner's stop annotation
+ * within the next three lines, and no real failure. Exported for tests.
+ */
+export function runnerStopped(log: string): boolean {
+  const lines = log.replace(ANSI, '').split(/\r?\n/);
+  if (lines.some((l) => REAL_FAILURE.test(l))) return false;
+  return lines.some((l, i) => EXIT_143.test(l) && lines.slice(i + 1, i + 4).some((n) => RUNNER_STOPPED.test(n)));
 }
 
 /** A job the rerun starts again because it failed (a cancelled or skipped job is not a red test). */
@@ -237,6 +258,8 @@ export async function checkFlakyRerun(cmd: string, ctx: { cwd?: string; env?: Re
       const of = `"${j.name}" (job ${j.id})${t.job ? '' : ` of run ${t.run}`}${where}`;
       // w3836: once, a runner that ran out of a resource; a second attempt means the fault is the job's, or the machine's.
       const log = read.log(t.repo, j.id, ctx.cwd, ctx.env);
+      // w5271: the runner's service was stopped under the step (exit 143 and its stop annotation): the runner died.
+      if (typeof log === 'string' && runnerStopped(log)) continue;
       const fault = typeof log === 'string' ? resourceFault(log) : undefined;
       if (fault && j.run_attempt === 1) continue;
       if (fault)
