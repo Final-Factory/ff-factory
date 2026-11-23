@@ -192,6 +192,53 @@ is the portal's for BEAST, since BEAST's daemon cleans nothing itself (`machines
 the other machines. Nor the idle-editor stop, which is its pool's. The portal's `host_recovery` reaches none of this: a
 daemon's guard that gave up (six failed mounts) starts again when the daemon restarts (`machine_daemon restart`).
 
+### CI runner units recover by themselves (w5263, w5264)
+
+On biscuit on 2026-11-23 the disk filled at about 08:36Z, and two of its Final-Factory/ffu runners took no job for four
+hours, until a worker restarted them by hand at 12:28Z (w5262). The journal and `_diag` logs gave the cause:
+
+- **ffu-biscuit** (user unit `ffu-runner.service`): its Runner.Listener aborted with "No space left on device" while
+  writing its `_diag` log. `run.sh` copies `run-helper.sh.template` over `run-helper.sh` on every start, and on the full
+  disk that copy came out empty, so each restart exited at once. With `Restart=always` and no `RestartSec`, systemd hit
+  `start-limit-hit` on restart 16 (08:37:08Z) and stopped trying, though the disk was free again an hour later.
+- **ffu-biscuit-2**: its Runner.Worker died with exit code 134 on the full disk (08:37:16Z). The listener's dispatch of
+  that job also faulted on ENOSPC, logged only when the unit stopped ("Worker Dispatch failed ... No space left on
+  device"). The listener never finished the job, so it kept polling GitHub with `status=Busy` and took nothing.
+- **ffu-biscuit-4**, the same day at 11:41:27Z: a global OOM kill hit one test binary of its `check` job. systemd's
+  default `OOMPolicy=stop` then ended the whole unit, and the job (ffu PR #998's `check`) ended as Canceled.
+
+So the daemon (`machine/runnerUnits.ts`, ticked once a minute from `machine/daemon.ts`, Linux only) finds each systemd
+user unit in `~/.config/systemd/user` that runs a registered runner: its `ExecStart` is `<dir>/run.sh` and `<dir>/.runner`
+exists. For each one:
+
+- **(c) The drop-in.** It writes `<unit>.d/ff-runner-recovery.conf` with `StartLimitIntervalSec=0`, `RestartSec=30s` and
+  `OOMPolicy=continue`, then runs one `systemctl --user daemon-reload`. Doing this on every tick is the installer and
+  update path: a unit that ffu's `tools/ci-runners/install-ffu-runner.sh` adds later gets the drop-in within a minute, and
+  so does a unit whose drop-in someone removed. The unit file and the runner's name, labels and count stay as they were.
+  With `OOMPolicy=continue`, an OOM kill ends only the process the kernel chose: the test fails that job, and the listener
+  lives on to take the next one.
+- **(a) A failed unit** (`ActiveState=failed`, whatever its `Result`) gets `reset-failed` and then `start`, but only while
+  its volume has more free space than the pool's disk floor (`diskCriticalGB`, default 10 GB). Below the floor it would
+  only fail again.
+- **(b) A stuck listener.** A listener counts as stuck when its `_diag` log has been busy since its last idle line, and
+  stays that way for 10 minutes (`STUCK_MS`), with no Runner.Worker under it in any look during that time. Busy lines are
+  a job handed to it, `Running job`, `Worker finished` and a poll with `status=Busy`. Idle lines are a job `completed`,
+  `Listening for Jobs` and `finish job request`. Such a listener gets `systemctl --user restart`. One look is never
+  enough: a job that ends well has no worker for the instant between "Worker finished" and its "completed" line.
+  The rule never fires while a worker runs, and never while a bench turn (`machine/benchRunners.ts`) or the load gate
+  (`machine/loadRunners.ts`) holds that listener paused. A look while it is paused also clears the count.
+
+A unit this recovery started or restarted is left alone for 15 minutes (`COOLDOWN_MS`). Every action goes into the
+daemon log as a `runner units:` line. The tests, built from ffu-biscuit-2's own log lines, are in
+`server/w5263RunnerUnits.test.ts`.
+
+**The bench pause and a stuck listener.** The bench pause stopped ffu-biscuit-2 at 08:37:25Z, 9 s after its dispatch
+fault, so the pause did not cause the stuck state. It cannot cause one either: it pauses only a listener with no worker
+whose log has no fresh job hand-off (`holdsJob`), and it continues any listener that is handed a job during the look. A
+paused listener is in SIGSTOP, so it does not poll at all. After SIGCONT it opens a new broker session, and it polls
+`status=Busy` only if it was already stuck before the pause. What the pause can do is hide a stuck listener for as long
+as a bench turn lasts. Rule (b) picks it up 10 minutes after the turn ends.
+
 ## 3. The VHDX policy
 
 A dynamically expanding VHDX grows as its volume is written and never shrinks by itself. On

@@ -7,7 +7,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import WebSocket from 'ws';
@@ -77,7 +77,8 @@ import { installPlayer, packPlayer, playerCacheRoot, readPlayerCache } from './p
 import { benchLockDir, readBenchLock, readBenchQueue, readPassedMarks, timedHolder, writeBenchPriorities } from './benchLock.ts';
 import { editorBenchSession, editorSessions, passedShared, raisedSessions, type PassedMark } from './benchRaise.ts';
 import { readBenchWarnings } from './benchWarnings.ts';
-import { BenchRunners, isOpsRunner, readListenerLog, readRunnersFile, sendSignal, writeRunnersFile } from './benchRunners.ts';
+import { BenchRunners, isOpsRunner, readListenerLog, readRunnersFile, runnerCensus, sendSignal, writeRunnersFile } from './benchRunners.ts';
+import { DROPIN_NAME, RunnerUnits, findRunnerUnits } from './runnerUnits.ts';
 import { cpuSampler, LOAD_GATES, LoadGate, readLoadGateFile, winSuspendScript, writeLoadGateFile } from './loadRunners.ts';
 import { askPlayerToQuit, BenchTurn, closedDetail, holderSandboxes, writeClosedFile, type Holder } from './benchTurn.ts';
 import { GRACE_MIN, PersonPlay, personEnds, personHolderText, personHoldText, personTicket, priorityOf, setPriorityOf, treeOf, type PersonPlaySettings } from './personPlay.ts';
@@ -97,7 +98,7 @@ import { TrayHost, trayInstance } from './tray.ts';
 import { FirefoxCloser, closeFirefox, firefoxFile, winFirefoxDeps } from './firefox.ts';
 import { GhLoginWatch, LOOK_EVERY_MS as GH_LOOK_EVERY_MS, lookHostsFile, type GhLoginDeps } from './ghLogin.ts';
 import { READ_EVERY_MS as STEAM_READ_EVERY_MS, SteamClientWatch, realSteamDeps, type SteamClientDeps } from './steamClient.ts';
-import { machinePlatformOf, priorityRank, type AttachmentRef, type BenchPriority, type CompactionTrigger, type HostHealth, type HostStats, type NoTimedRuns, type TimedAskMark, type PersonPlayReport, type SandboxPoolSettings, type SessionInfo, type TranscriptEvent } from '../shared/types.ts';
+import { DISK_CRITICAL_GB_DEFAULT, machinePlatformOf, priorityRank, type AttachmentRef, type BenchPriority, type CompactionTrigger, type HostHealth, type HostStats, type NoTimedRuns, type TimedAskMark, type PersonPlayReport, type SandboxPoolSettings, type SessionInfo, type TranscriptEvent } from '../shared/types.ts';
 
 export interface DaemonConfig {
   /**
@@ -427,6 +428,7 @@ export class Daemon {
   /** Pauses this machine's idle CI runners and ends CI leftovers while a timed run holds the bench lock (w3112). */
   readonly benchRunners: BenchRunners;
   readonly loadGate: LoadGate;
+  readonly runnerUnits: RunnerUnits;
   /** w1829: what a worker's next message hears about its player a timed run's turn asked to quit. */
   private readonly benchPlayerNotes = new Map<string, string>();
   /** w1894: a person playing Final Factory here (machine/personPlay.ts): fed by the leftovers' look, it holds a turn. */
@@ -747,6 +749,34 @@ export class Daemon {
       diag: (root) => (real ? readListenerLog(root) : undefined),
       read: () => (cfg.root ? readLoadGateFile(cfg.root) : undefined),
       write: (st) => cfg.root && writeLoadGateFile(cfg.root, st, log),
+      log: (line) => log(line),
+      now: () => Date.now(),
+    });
+    // w5263, w5264: a Linux machine's CI runner units start again after a full disk, a listener stuck busy after its job's
+    // worker died is restarted, and each unit outlives one job's OOM kill (machine/runnerUnits.ts)
+    const userUnits = path.join(os.homedir(), '.config', 'systemd', 'user');
+    this.runnerUnits = new RunnerUnits({
+      units: () => (real && process.platform === 'linux' ? findRunnerUnits(userUnits) : []),
+      readDropin: (unit) => {
+        try {
+          return fs.readFileSync(path.join(userUnits, `${unit}.d`, DROPIN_NAME), 'utf8');
+        } catch {
+          return undefined;
+        }
+      },
+      writeDropin: (unit, text) => {
+        fs.mkdirSync(path.join(userUnits, `${unit}.d`), { recursive: true });
+        fs.writeFileSync(path.join(userUnits, `${unit}.d`, DROPIN_NAME), text);
+      },
+      systemctl: (args) =>
+        new Promise((resolve, reject) =>
+          execFile('systemctl', ['--user', ...args], { timeout: 60_000 }, (err, stdout, stderr) => (err ? reject(new Error(`systemctl --user ${args.join(' ')}: ${(stderr || err.message).trim()}`)) : resolve(stdout))),
+        ),
+      freeBytes: async (p) => (await volumeStat(p))?.free,
+      floorGB: () => this.currentPool()?.diskCriticalGB ?? DISK_CRITICAL_GB_DEFAULT,
+      census: async () => runnerCensus(await pd.procs()),
+      diag: (root) => readListenerLog(root),
+      paused: () => new Set([...this.benchRunners.paused(), ...this.loadGate.state().suspended].map((p) => p.pid)),
       log: (line) => log(line),
       now: () => Date.now(),
     });
@@ -1309,6 +1339,7 @@ export class Daemon {
     this.timers.push(setInterval(() => void this.benchTurn.tick(), 5_000));
     this.timers.push(setInterval(() => void this.benchRunners.tick(), 5_000));
     this.timers.push(setInterval(() => void this.loadGate.tick(), 5_000));
+    this.timers.push(setInterval(() => void this.runnerUnits.tick(), 60_000));
     // priorities.json: the portal's marks plus each editor start's session (w1962; w4620: nothing is raised, strict priority)
     this.timers.push(setInterval(() => this.benchPriorities(), 5_000));
     void this.slotTick();
