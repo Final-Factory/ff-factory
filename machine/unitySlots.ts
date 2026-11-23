@@ -58,6 +58,16 @@ export const HOLDER_WAIT_MS = 30 * 60_000;
 
 /** The arbiter rewrites arbiter.json every few seconds; older than this, a client counts it as gone. */
 export const ARBITER_FRESH_MS = 60_000;
+/** w5324: how long the count must stay over the limit before the orchestrator is told. */
+export const OVER_NOTICE_MS = 15_000;
+/** w5324: how long a preemption the editor skipped (busy) waits before it is asked again. */
+export const PREEMPT_RETRY_MS = 60_000;
+
+/** w5324: the pid Unity wrote to a project's Library/EditorInstance.json at boot ({"process_id": n, ...}), or undefined. */
+export function editorInstancePid(projectPath: string): number | undefined {
+  const pid = readJson<{ process_id?: unknown }>(path.join(projectPath, 'Library', 'EditorInstance.json'))?.process_id;
+  return typeof pid === 'number' && Number.isInteger(pid) && pid > 0 ? pid : undefined;
+}
 
 // ---------------------------------------------------------------- which processes are Unity editors
 
@@ -70,6 +80,8 @@ export interface UnityProcess {
   kind: UnityKind;
   /** Its -projectPath, as written. */
   project?: string;
+  /** w5324: of a process counted outside the gate, the program that started it (its parent's name), for the notice. */
+  parent?: string;
 }
 
 /** The arguments of a Windows command line: quoted ("a b") or bare, with \" inside quotes. */
@@ -219,6 +231,17 @@ export interface Place {
    * a holder's priority for a while, though it holds no slot now.
    */
   priority?: boolean;
+  /**
+   * w5324: the session its editor's work runs as (`editor:<sandbox>`, machine/benchRaise.ts editorSessions): the highest
+   * priority of the workers placed there and their requests, by which a waiter of a higher priority may take its slot.
+   */
+  session?: string;
+  /**
+   * w5324: the pid in its project's Library/EditorInstance.json (Unity writes it at boot): a Unity process whose command
+   * line has no -projectPath readable (a Windows process listing can give an empty one) is still this place's editor,
+   * not one "started outside the slot gate" (LothDesktop, 2026-11-23 19:30Z: "4 of 3 ... interactive pid 47084").
+   */
+  editorPid?: number;
 }
 
 export interface AssessInput {
@@ -237,6 +260,19 @@ export interface AssessInput {
    * read live each look (readSlotPriorities). Absent: everyone counts as low, so the order stays first come first served.
    */
   priorityOf?(session?: string): WorkPriority;
+  /** w5324: the requests (wNNN) a session works for, to name who holds the slots a waiter needs. */
+  requestsOf?(session?: string): string[];
+}
+
+/** w5324: an idle editor of a strictly lower priority whose slot the head of the queue may take (closed cleanly first). */
+export interface Preempt {
+  /** The place: "sandbox:<id>". */
+  holder: string;
+  priority: WorkPriority;
+  requests: string[];
+  /** The waiting request it would be closed for, and that one's priority. */
+  for: string;
+  forPriority: WorkPriority;
 }
 
 export interface Assessment {
@@ -263,6 +299,15 @@ export interface Assessment {
   priorities: Map<string, WorkPriority>;
   /** w4620: a request granted or at the head ahead of an older waiting one of a lower priority (`id` ahead of `over`). */
   jumps: { id: string; priority: WorkPriority; over: string; overPriority: WorkPriority }[];
+  /**
+   * w5324 (lothsahn: "High priority work should also preempt lower priority work as well, cleanly, of course"): when the
+   * head of the queue does not fit, the running editors of strictly lower priority whose closing would let it in,
+   * lowest priority first, enough for its count (none when not enough such editors exist). Only an editor holding its
+   * slot alone (no granted run on its place) is named; a batch build or test run under a request is never one.
+   */
+  preempt: Preempt[];
+  /** w5324: who holds the slots in use, for the waiting reason: "sandbox:slot2 (w5293, normal)". */
+  heldBy: string[];
 }
 
 /**
@@ -277,6 +322,22 @@ export function readSlotPriorities(root: string | undefined): (session?: string)
     const m = session && sessions && typeof sessions === 'object' ? sessions[session] : undefined;
     const p = m?.level ?? m?.priority;
     return asWorkPriority(p) ?? 'low'; // w4710: the wire's `release` level is frantic
+  };
+}
+
+/** w5324: readSlotPriorities and each session's requests (wNNN), from one read of priorities.json. */
+export function readSlotWork(root: string | undefined): { priorityOf: (session?: string) => WorkPriority; requestsOf: (session?: string) => string[] } {
+  const sessions = root ? readJson<{ sessions?: Record<string, { priority?: unknown; level?: unknown; requests?: unknown }> }>(path.join(benchQueueDir(benchLockDir(root)), 'priorities.json'))?.sessions : undefined;
+  const mark = (session?: string) => (session && sessions && typeof sessions === 'object' ? sessions[session] : undefined);
+  return {
+    priorityOf: (session) => {
+      const m = mark(session);
+      return asWorkPriority(m?.level ?? m?.priority) ?? 'low';
+    },
+    requestsOf: (session) => {
+      const r = mark(session)?.requests;
+      return Array.isArray(r) ? r.filter((x): x is string => typeof x === 'string').slice(0, 6) : [];
+    },
   };
 }
 
@@ -326,6 +387,8 @@ export function assess(input: AssessInput): Assessment {
     if (pl.editorUp) b.reserved = Math.max(b.reserved, 1);
   }
   const reqPids = new Set(reqs.map((r) => r.pid));
+  const byEditorPid = new Map<number, ReturnType<typeof bucket>>();
+  for (const pl of input.places) if (pl.editorPid) byEditorPid.set(pl.editorPid, bucket(`e:${pathKey(pl.path, platform)}`, pl.holder));
   const outside: UnityProcess[] = [];
   for (const u of unity) {
     const anc = reqPids.has(u.pid) ? u.pid : ancestorIn(u.ppid, byPid, reqPids);
@@ -335,14 +398,18 @@ export function assess(input: AssessInput): Assessment {
       buckets.get(`p:${anc ?? named!.pid}`)!.procs++;
       continue;
     }
-    const pl = key ? buckets.get(`e:${key}`) : undefined;
+    const pl = (key ? buckets.get(`e:${key}`) : undefined) ?? (key ? undefined : byEditorPid.get(u.pid));
     // w4775: a batch Unity in a sandbox's project while that sandbox's granted run has none counted yet is that run's (its
     // parent chain broke, as a build's second Unity under `env` can on Windows): counted on the place too, one process read
     // as two ("editors 4 of 3: 1 interactive, 2 batch, 1 granted not started yet" on lothdesktop at 11:29:55Z, 2026-11-19).
     const own = pl && u.kind === 'batch' ? reqs.find((r) => r.holder === pl.holder && r.grantedAt !== undefined && !r.denied && buckets.get(`p:${r.pid}`)!.procs < r.count) : undefined;
     if (own) buckets.get(`p:${own.pid}`)!.procs++;
     else if (pl) pl.procs++;
-    else outside.push(u);
+    else {
+      const parent = byPid.get(u.ppid);
+      const name = parent ? parent.name || path.basename(splitArgs(parent.cmd)[0] ?? '') : '';
+      outside.push(name ? { ...u, parent: name.slice(0, 60) } : u);
+    }
   }
   const holders = new Map<string, number>();
   const usedOf = new Map<string, number>();
@@ -380,13 +447,15 @@ export function assess(input: AssessInput): Assessment {
   });
   const priority = new Set(input.places.filter((pl) => pl.priority).map((pl) => pl.holder));
   const first = (r: SlotRequest) => Number(holding(r.holder) > 0 || priority.has(r.holder));
-  // w4620: holders first, then strict priority, then first come first served within one priority.
+  // w5324: strict priority first (frantic > urgent > high > normal > low), then holders, then first come first served.
+  // Holders went first before (w4620), so a normal sandbox whose editor was up, or stopped a moment ago, went ahead of a
+  // frantic newcomer (w5291 waited about 2 h on LothDesktop, 2026-11-23; lothsahn: "If w5291 is frantic priority, how
+  // is it waiting for a slot?").
   const prios = new Map(waiting.map((r) => [r.id, (input.priorityOf?.(r.session) ?? 'low') as WorkPriority]));
   const rank = (r: SlotRequest) => priorityRank(prios.get(r.id));
-  const order = (a: SlotRequest, b: SlotRequest) => first(b) - first(a) || rank(b) - rank(a) || a.createdAt - b.createdAt || a.id.localeCompare(b.id);
+  const order = (a: SlotRequest, b: SlotRequest) => rank(b) - rank(a) || first(b) - first(a) || a.createdAt - b.createdAt || a.id.localeCompare(b.id);
   waiting.sort(order);
   const queue = [...waiting];
-  const firsts = new Map(queue.map((r) => [r.id, first(r)]));
   const take = (r: SlotRequest) => {
     grant.push(r.id);
     free -= r.count;
@@ -422,10 +491,39 @@ export function assess(input: AssessInput): Assessment {
   for (const c of queue) {
     if (!grant.includes(c.id) && c !== head) continue;
     const over = queue
-      .filter((o) => o !== c && !grant.includes(o.id) && !deny.some((x) => x.id === o.id) && o.createdAt < c.createdAt && rank(o) < rank(c) && firsts.get(o.id) === firsts.get(c.id))
+      .filter((o) => o !== c && !grant.includes(o.id) && !deny.some((x) => x.id === o.id) && o.createdAt < c.createdAt && rank(o) < rank(c))
       .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id))[0];
     if (over) jumps.push({ id: c.id, priority: prios.get(c.id)!, over: over.id, overPriority: prios.get(over.id)! });
   }
+  // w5324: who holds the slots in use, and the lower-priority idle editors whose slots the head may take.
+  const levelOf = (session?: string): WorkPriority => input.priorityOf?.(session) ?? 'low';
+  const placeOf = new Map(input.places.map((pl) => [`e:${pathKey(pl.path, platform)}`, pl]));
+  const heldBy: string[] = [];
+  for (const [key, b] of buckets) {
+    if (!usedOf.get(key)) continue;
+    if (key.startsWith('e:')) {
+      const pl = placeOf.get(key);
+      const work = input.requestsOf?.(pl?.session) ?? [];
+      heldBy.push(`${b.holder} (${[work.length ? work.join(', ') : 'no request', levelOf(pl?.session)].join(', ')})`);
+    } else {
+      const r = reqs.find((x) => `p:${x.pid}` === key && x.grantedAt !== undefined && !x.denied) ?? reqs.find((x) => `p:${x.pid}` === key);
+      if (r) heldBy.push(`"${r.label}" (${r.holder}, ${levelOf(r.session)})`);
+    }
+  }
+  for (const u of outside) heldBy.push(`${u.kind} pid ${u.pid} outside the gate`);
+  const preempt: Preempt[] = [];
+  if (head && limit !== undefined && !ramBlocked && head.count > free) {
+    const want = prios.get(head.id) ?? 'low';
+    const need = head.count - free;
+    const victims = input.places
+      .filter((pl) => pl.editorUp && pl.holder !== head.holder)
+      .map((pl) => ({ pl, key: `e:${pathKey(pl.path, platform)}`, level: levelOf(pl.session) }))
+      // Its editor runs (a process counted on it) and holds its slot alone: no granted run of its sandbox beside it.
+      .filter((v) => buckets.get(v.key)?.procs === 1 && usedOf.get(v.key) === 1 && holding(v.pl.holder) === 1 && priorityRank(v.level) < priorityRank(want))
+      .sort((a, b) => priorityRank(a.level) - priorityRank(b.level) || a.pl.holder.localeCompare(b.pl.holder));
+    if (victims.length >= need) for (const v of victims.slice(0, need)) preempt.push({ holder: v.pl.holder, priority: v.level, requests: input.requestsOf?.(v.pl.session) ?? [], for: head.id, forPriority: want });
+  }
+  const takes = preempt.length ? `; takes the slot of ${preempt.map((x) => `${x.holder}'s editor (${x.priority})`).join(', ')} once idle (w5324)` : '';
   const waitingOut = rest.map((r, i) => ({
     id: r.id,
     position: i + 1,
@@ -433,7 +531,7 @@ export function assess(input: AssessInput): Assessment {
       r === head
         ? ramBlocked && r.count <= free
           ? `RAM ${input.ramPct}% used; new Unity launches wait below ${input.ramLimitPct ?? UNITY_RAM_PCT}%`
-          : `needs ${r.count}, ${Math.max(0, free)} free (${limit === undefined ? used : `${limit - Math.max(0, free) - (free < 0 ? free : 0)} of ${limit}`} in use)`
+          : `needs ${r.count}, ${Math.max(0, free)} free (${limit === undefined ? used : `${limit - Math.max(0, free) - (free < 0 ? free : 0)} of ${limit}`} in use)${heldBy.length ? `; held by ${heldBy.join(', ')}` : ''}${takes}`
         : `behind ${i} earlier request${i === 1 ? '' : 's'}`,
   }));
   // In use once this look's grants start: what the line and the next look say.
@@ -456,6 +554,8 @@ export function assess(input: AssessInput): Assessment {
     waiting: waitingOut,
     priorities: prios,
     jumps,
+    preempt,
+    heldBy,
   };
 }
 
@@ -579,6 +679,20 @@ export interface ArbiterDeps {
   root?: string;
   /** A session's priority; tests give it, else it is read from priorities.json at each look (readSlotPriorities). */
   priorityOf?(session?: string): WorkPriority;
+  /** w5324: a session's requests (wNNN); tests give it, else read with the priorities (readSlotWork). */
+  requestsOf?(session?: string): string[];
+  /**
+   * w5324: the pid of the editor a project has open, from its Library/EditorInstance.json (default: that file read at
+   * each look); tests give it.
+   */
+  editorPid?(projectPath: string): number | undefined;
+  /**
+   * w5324: close a lower-priority sandbox's idle editor so a waiting request of a higher priority gets its slot: through
+   * the editor (save, then quit), never a kill; skipped while it plays, compiles, imports, runs tests or builds a player,
+   * or while its worker's Unity MCP calls hold the editor's ticket. The sandbox is marked so its editor starts again when
+   * the request it yielded to is done. Absent: nothing is preempted (counted and named only).
+   */
+  preempt?(p: Preempt, why: string): Promise<{ closed: boolean; text: string }>;
   machine?: string;
   /** When this process started (default: from process.uptime()); tests give it. */
   startedAt?: number;
@@ -603,9 +717,14 @@ export class UnitySlots {
   /** w4620: the priority jumps already logged ("<winner id>><overtaken id>"), so a poll does not repeat one. */
   private readonly jumpsLogged = new Set<string>();
   private overSince = 0;
+  /** w5324: since when the count is over the limit, before it is told (a quitting editor counted outside for a few seconds). */
+  private overSeen = 0;
   private ramSince = 0;
   private busy?: Promise<Assessment>;
   private closed = false;
+  /** w5324: preemptions under way, by place, and when a skipped one may be asked again. */
+  private readonly preempting = new Set<string>();
+  private readonly preemptRetry = new Map<string, number>();
 
   constructor(d: ArbiterDeps) {
     this.d = d;
@@ -701,8 +820,9 @@ export class UnitySlots {
     const procs = await this.d.procs();
     const now = this.d.now();
     const ramPct = this.d.ramPct();
-    const a = assess({ platform: this.d.platform, procs, requests: reqs, places: this.d.places(), limit: this.d.limit(), now, ramPct, ramLimitPct: this.d.ramLimitPct, holderWaitMs: this.d.holderWaitMs, priorityOf: this.d.priorityOf ?? readSlotPriorities(this.d.root) });
+    const a = assess({ platform: this.d.platform, procs, requests: reqs, places: this.places(), limit: this.d.limit(), now, ramPct, ramLimitPct: this.d.ramLimitPct, holderWaitMs: this.d.holderWaitMs, ...this.work() });
     if (this.closed) return a;
+    this.preempt(a, reqs, now);
     const byId = new Map(reqs.map((r) => [r.id, r]));
     this.logJumps(a, byId);
     for (const id of a.grant) {
@@ -746,6 +866,52 @@ export class UnitySlots {
     return a;
   }
 
+  /** The daemon's places, each with its editor's pid from its project's EditorInstance.json (w5324). */
+  private places(): Place[] {
+    const pidOf = this.d.editorPid ?? editorInstancePid;
+    return this.d.places().map((pl) => (pl.editorPid || !pl.path ? pl : { ...pl, editorPid: pidOf(pl.path) }));
+  }
+
+  /** Each session's priority and requests: the deps' (tests) or priorities.json read now. */
+  private work(): Pick<AssessInput, 'priorityOf' | 'requestsOf'> {
+    const read = this.d.priorityOf && this.d.requestsOf ? undefined : readSlotWork(this.d.root);
+    return { priorityOf: this.d.priorityOf ?? read!.priorityOf, requestsOf: this.d.requestsOf ?? read!.requestsOf };
+  }
+
+  /**
+   * w5324: ask the daemon to close each idle lower-priority editor this look names for the head of the queue, one close at
+   * a time per sandbox, a skipped one again after PREEMPT_RETRY_MS. Not awaited: a close takes up to minutes (the save and
+   * the quit); its sandbox's slot frees when its editor is gone, and the next look grants the waiter.
+   */
+  private preempt(a: Assessment, reqs: SlotRequest[], now: number) {
+    const go = this.d.preempt;
+    if (!go) return;
+    for (const p of a.preempt) {
+      if (this.preempting.has(p.holder) || (this.preemptRetry.get(p.holder) ?? 0) > now) continue;
+      const r = reqs.find((x) => x.id === p.for);
+      const work = r?.session ? (this.d.requestsOf ?? readSlotWork(this.d.root).requestsOf)(r.session) : [];
+      const why = `"${r?.label ?? p.for}"${work.length ? ` (${work.join(', ')})` : ''}, ${p.forPriority}, waits for a Unity slot, and its editor is ${p.priority}${p.requests.length ? ` (${p.requests.join(', ')})` : ''}`;
+      this.preempting.add(p.holder);
+      this.d.log?.(`unity slots: closing the idle editor of ${p.holder} for ${why} (w5324)`);
+      go(p, why)
+        .then((res) => {
+          this.d.log?.(`unity slots: ${p.holder}'s editor ${res.closed ? 'closed' : 'not closed'} for ${p.for}: ${res.text}`);
+          if (res.closed) {
+            this.preemptRetry.delete(p.holder);
+            this.d.onEvent?.(`Editor of ${p.holder} closed cleanly for ${why} (w5324); it starts again when that run is done.`);
+          } else this.preemptRetry.set(p.holder, this.d.now() + PREEMPT_RETRY_MS);
+        })
+        .catch((e) => {
+          this.preemptRetry.set(p.holder, this.d.now() + PREEMPT_RETRY_MS);
+          this.d.log?.(`unity slots: closing ${p.holder}'s editor for ${p.for} failed: ${(e as Error).message}`);
+        })
+        .finally(() => {
+          this.preempting.delete(p.holder);
+          if (!this.closed) void this.tick().catch(() => undefined);
+        });
+    }
+  }
+
   /** w4620: one line per pair when priority puts a request ahead of an older waiting one (lothsahn: "Why is urgent work in a queue behind non urgent work?"). */
   private logJumps(a: Assessment, byId: Map<string, SlotRequest>) {
     const tag = (r: SlotRequest, p: WorkPriority) => `${r.label} (${(r.session ?? 'no session').slice(0, 8)}, ${p})`;
@@ -762,11 +928,15 @@ export class UnitySlots {
   /** Tell the orchestrator once when the machine goes over its limit, and when it is back; and of a long wait on RAM. */
   private notices(a: Assessment, now: number) {
     const line = countsLine(a);
-    if (a.overLimit && !this.overSince) {
+    // w5324: told only once it lasts OVER_NOTICE_MS: an editor that quits is counted outside the gate for a few seconds
+    // (LothDesktop, 2026-11-23 17:52:48Z, "4 of 3", back within its limit 6 s later), which is no news.
+    if (!a.overLimit) this.overSeen = 0;
+    else this.overSeen ||= now;
+    if (a.overLimit && !this.overSince && now - this.overSeen >= OVER_NOTICE_MS) {
       this.overSince = now;
       // The machine's own path rules: a Windows project path read on any host.
       const base = (p: string) => (this.d.platform === 'win32' ? path.win32 : path.posix).basename(p.replace(/[\\/]+$/, ''));
-      const what = a.outside.map((u) => `${u.kind} ${u.project ? base(u.project) : `pid ${u.pid}`}`);
+      const what = a.outside.map((u) => `${u.kind} ${u.project ? base(u.project) : `pid ${u.pid}`}${u.parent ? ` (started by ${u.parent})` : ''}`);
       this.d.onEvent?.(`Unity ${line} on this machine: over its limit. Nothing more is granted (unity start and queued launches wait) until it drops; nothing is stopped.${what.length ? ` Started outside the slot gate: ${what.join(', ')}.` : ''}`);
     } else if (!a.overLimit && this.overSince) {
       this.overSince = 0;
@@ -813,17 +983,26 @@ export class UnitySlots {
   async startRefusal(holder: string): Promise<string | undefined> {
     const a0 = await this.tick();
     if (this.d.limit() === undefined) return undefined;
-    const reqs = this.last?.reqs ?? [];
+    const procs = await this.d.procs();
+    // w5324: the requests read now, after the process list: a look that granted a run while that list was read is seen
+    // (this.last was read before it, so the start and that run could both take the last slot). Nothing is awaited from
+    // here to the answer, and the pool marks the slot taken as soon as it hears yes (sandboxes.ts takeSlot).
+    const reqs = this.readRequests();
     // w4620: the start carries the editor's own bench session (editor:<sandbox>), so it queues at that sandbox's priority.
     const session = holder.startsWith('sandbox:') ? editorBenchSession(holder.slice('sandbox:'.length)) : undefined;
     const probe: SlotRequest = { id: '~editor', holder, count: 1, pid: -1, label: `editor of ${holder}`, ...(session ? { session } : {}), createdAt: this.d.now() + 1 };
-    const a = assess({ platform: this.d.platform, procs: await this.d.procs(), requests: [...reqs, probe], places: this.d.places(), limit: this.d.limit(), now: this.d.now(), ramPct: this.d.ramPct(), ramLimitPct: this.d.ramLimitPct, holderWaitMs: this.d.holderWaitMs, priorityOf: this.d.priorityOf ?? readSlotPriorities(this.d.root) });
+    const a = assess({ platform: this.d.platform, procs, requests: [...reqs, probe], places: this.places(), limit: this.d.limit(), now: this.d.now(), ramPct: this.d.ramPct(), ramLimitPct: this.d.ramLimitPct, holderWaitMs: this.d.holderWaitMs, ...this.work() });
     if (a.grant.includes(probe.id)) return undefined;
     const why = a.deny.find((x) => x.id === probe.id)?.why ?? a.waiting.find((x) => x.id === probe.id)?.why ?? 'no free slot';
     // Those that wait ahead of it: by position, as priority may put it before some that were queued earlier.
     const mine = a.waiting.find((x) => x.id === probe.id);
     const ahead = mine ? mine.position - 1 : a.waiting.length;
     return `not started: ${why}; ${countsLine(a0)}${ahead ? `; ${ahead} launch(es) wait ahead of it` : ''}${this.holdersPart()}. Try again once one ends (wake_me), or stop an editor you no longer need`;
+  }
+
+  /** w5324: whether a request is in the mailbox at the last look and not refused (waiting or granted). */
+  hasRequest(id: string): boolean {
+    return !!this.last?.reqs.some((r) => r.id === id && !r.denied);
   }
 
   private holdersPart(): string {

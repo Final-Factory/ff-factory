@@ -30,7 +30,7 @@ import { DEFAULT_BUILD } from '../server/placement.ts';
 import { RELEASE_SANDBOX } from '../server/releaseSeat.ts';
 import { SandboxPool, realPoolDeps, totalAgentsRefusal, type PoolDeps } from './sandboxes.ts';
 import { batchUnityIn, nightsIn, slotRunsFor, switchHoldRefusal } from './switchHolds.ts';
-import { UnitySlots, gamePlayers, installShims, isAlive, runsIn, slotsDir } from './unitySlots.ts';
+import { UnitySlots, gamePlayers, installShims, isAlive, runsIn, slotsDir, type Preempt } from './unitySlots.ts';
 import { McpScopes, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp, type StdioServer } from './unityMcp.ts';
 import { addSecretEnv, addSecretValues, redactSecrets, redactValue, skippedSecrets } from '../server/secrets.ts';
 import { CliScrubber, type CliScrubReport } from '../server/cliScrub.ts';
@@ -609,7 +609,10 @@ export class Daemon {
       now: () => Date.now(),
       limit: () => this.currentPool()?.maxUnity,
       // The sandboxes' editors; any other (a person's own) counts as outside the gate (w536: no main-clone place).
-      places: () => this.pool.list().map((sb) => ({ holder: `sandbox:${sb.id}`, path: sb.path, editorUp: this.pool.editorUp(sb.id), priority: this.pool.stoppedWithin(sb.id, 5 * 60_000) })),
+      // w5324: with each editor's own session (editor:<sandbox>), whose priority a higher waiter may take its slot over
+      places: () => this.pool.list().map((sb) => ({ holder: `sandbox:${sb.id}`, path: sb.path, editorUp: this.pool.editorUp(sb.id), priority: this.pool.stoppedWithin(sb.id, 5 * 60_000), session: editorBenchSession(sb.id) })),
+      // w5324: a lower-priority idle editor yields its slot to a waiting higher-priority run, closed through the editor
+      preempt: (p, why) => this.slotPreemptClose(p, why),
       ramPct: () => this.ramPct(),
       machine: cfg.id,
       // w4620: the queue goes in strict priority order, read live from the bench queue's priorities.json under this root
@@ -717,6 +720,8 @@ export class Daemon {
       procs: real ? () => pd.procs() : async () => [],
       isPlayer: (pid, procs) => gamePlayers(procs.filter((p) => p.pid === pid), platform).length > 0,
       closeEditor: (id, by, ticket) => this.benchCloseEditor(id, by, ticket),
+      // w5324: an editor closed for a higher-priority run's Unity slot stays closed while that run waits or runs
+      keptClosed: (ticket) => ticket.startsWith('slot:') && this.slots.hasRequest(ticket.slice('slot:'.length)),
       reopenEditor: (id) => this.pool.benchReopen(id),
       giveUp: (id, tries) => this.pool.benchGiveUp(id, tries),
       closePlayer: (pid) => askPlayerToQuit(pid, platform),
@@ -2201,6 +2206,44 @@ export class Daemon {
         ),
       );
       if (res.closed) this.send({ type: 'sandbox_event', sandbox: id, text: holder?.person ? `Editor closed while ${by} (w1894); it reopens when that ends, ${holder.person.ends} (${res.text})` : `Editor closed for ${by} (w1829); it reopens when that run ends (${res.text})` });
+      return res;
+    } finally {
+      this.idleClosing.delete(id);
+    }
+  }
+
+  /**
+   * w5324: close a sandbox's idle editor so a waiting Unity slot request of a higher priority can start (machine/unitySlots.ts
+   * assess `preempt`; lothsahn: "High priority work should also preempt lower priority work as well, cleanly, of course").
+   * Never a kill and never a job cut off: skipped while its worker's Unity MCP calls hold the editor's ticket (they compile
+   * or run tests: machine/editorBenchGate.ts), and inside the editor, in the same main-thread call as the save and the quit,
+   * while it plays, compiles, imports, runs tests or builds a player (machine/liveIdle.ts BUSY_LINES, keepPlay). No modal
+   * dialog rescue (that force-stops). Closed: the sandbox is marked `slot:<request>` (benchClose), and the bench turn starts
+   * it again once that request is gone (keptClosed), its worker told at its next message.
+   */
+  private async slotPreemptClose(p: Preempt, why: string): Promise<{ closed: boolean; text: string }> {
+    const id = p.holder.startsWith('sandbox:') ? p.holder.slice('sandbox:'.length) : undefined;
+    const sbPath = id ? this.pool.pathOf(id) : undefined;
+    if (!id || !sbPath || !this.cfg.root) return { closed: false, text: `skipped: ${p.holder} is not a sandbox here` };
+    const gate = `editor compile/tests ${id}`;
+    if (queueTickets(benchLockDir(this.cfg.root), isAlive).some((t) => t.mode === 'shared' && !t.revoked && t.what === gate)) return { closed: false, text: "skipped: its worker's Unity MCP calls hold the editor's ticket (a compile or a test run, or one within 5 min)" };
+    if (this.idleClosing.has(id)) return { closed: false, text: 'skipped: it is being closed already' };
+    this.idleClosing.add(id);
+    try {
+      const res = await this.pool.benchClose(id, why, `slot:${p.for}`, `closed for ${why}; starts again when that run is done (w5324)`, () =>
+        idleCloseEditor(
+          {
+            bridge: this.editorBridge(id, sbPath),
+            editorPids: () => this.pool.editorPids(id),
+            personInputAgoMs: () => undefined,
+            sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+            now: () => Date.now(),
+            keepPlay: true,
+          },
+          0,
+        ),
+      );
+      if (res.closed) this.send({ type: 'sandbox_event', sandbox: id, text: `Editor closed cleanly for ${why} (w5324); it starts again when that run is done (${res.text})` });
       return res;
     } finally {
       this.idleClosing.delete(id);

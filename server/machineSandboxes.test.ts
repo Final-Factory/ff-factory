@@ -1208,7 +1208,7 @@ test('machine sandboxes: an editor start takes a Unity slot: batch builds starte
   await ready(p, 'a');
   await ready(p, 'b');
   // Two command-line builds hold both slots (LothDesktop on 2026-10-05: its limit counted only the interactive editor).
-  await assert.rejects(p.unity('a', 'start'), /^Error: not started: needs 1, 0 free \(2 of 2 in use\); editors 2 of 2: 0 interactive, 2 batch\. Try again once one ends/);
+  await assert.rejects(p.unity('a', 'start'), /^Error: not started: needs 1, 0 free \(2 of 2 in use\); held by batch pid 501 outside the gate, batch pid 502 outside the gate; editors 2 of 2: 0 interactive, 2 batch\. Try again once one ends/);
   procs = [build(501, 'D:\\work\\ffsb\\pr-fix')];
   assert.match(await p.unity('a', 'start'), /Started \(fake\)/);
   await assert.rejects(p.unity('b', 'start'), /not started: needs 1, 0 free \(2 of 2 in use\)/, "a's editor holds its slot while it starts");
@@ -1259,7 +1259,7 @@ test('w1962: queued editor starts that fill the Unity slots each start at their 
   // A timed run holds the bench lock: both starts queue, each holding the slot it took first (w1615's order).
   assert.match(await p.unity('a', 'start'), /^Queued/);
   assert.match(await p.unity('b', 'start'), /^Queued/);
-  await assert.rejects(p.unity('c', 'start'), /not started: needs 1, 0 free \(2 of 2 in use\); editors 2 of 2: 0 interactive, 0 batch, 2 editor starts queued or booting\./, 'the slots read as queued starts, not grants');
+  await assert.rejects(p.unity('c', 'start'), /not started: needs 1, 0 free \(2 of 2 in use\); held by sandbox:a \(no request, low\), sandbox:b \(no request, low\); editors 2 of 2: 0 interactive, 0 batch, 2 editor starts queued or booting\./, 'the slots read as queued starts, not grants');
   // The timed run ends: the shared turn grants both tickets, and both editors start.
   tickets[0].kind = 'granted';
   tickets[1].kind = 'granted';
