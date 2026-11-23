@@ -523,6 +523,59 @@ console. Adopt B if both pass. The layout already allows it: the root sits outsi
 machine (the reason the Macs' root is `/Users/Shared/ffw`, not `~/ffw`), and switching is a change of the service's
 principal and the root's ACLs.
 
+### 4.1 Write lock (Linux, trial; w5333, 2026-11-23)
+
+lothsahn (w5333): "Run all three: Windows on LothDesktop, Linux on biscuit, Mac on m3 or m5". This is the Linux leg,
+tried on biscuit (Ubuntu, kernel 7.0.0-38). Off unless a Linux machine's daemon.json says `"writeLock": true`.
+
+**What it does.** `server/launch.ts` starts each agent's claude through `machine/ff-landlock.py`
+(`machine/writeLock.ts`, `writeLockSpawner`). The launcher sets up a Landlock ruleset and then runs claude. Landlock is
+a kernel LSM that needs no root, no namespace and no unit. Its rules hold for claude and for everything claude starts:
+Bash tools, git, gh, `unity-slot run`, batch Unity and slot players. The process cannot lift them. Reads and exec are
+not restricted. Writes are allowed only in (`writeLockArgs`):
+
+| Path | Why |
+|---|---|
+| every child folder of the root except `daemon` and `secrets` | the work; the daemon's folder (or `appDir` if it sits in the root under another name) and the secrets stay read-only. `repo` must stay writable: sandbox worktrees keep their git data in it |
+| `extraRoots` | folders of the install that live outside the root |
+| `<daemon>/max-events.jsonl` (this one file: write and truncate) | ffdiscord appends Max's events to it (`FF_MAX_EVENTS`) |
+| `~/.ff-factory/unity-slots` | the unity-slot mailbox (`FF_UNITY_SLOTS`) |
+| `$XDG_RUNTIME_DIR/cc-socks` (sockets only) | Claude Code binds its socket there |
+| `~/.config/unity3d`, `~/.local/share/unity3d` | Unity's editor and player prefs, `upm.log` and CoreBusinessMetrics. Moving them with XDG_CONFIG_HOME would also hide the licence from Unity |
+| `/tmp` | Unity ignores TMPDIR for its Package Manager socket (`/tmp/Unity-Upm-<pid>.sock`: without it the editor exits 1), its shader compiler's lock (`/tmp/Unity-ShaderCompilerIPC-*.lock`) and `/tmp/.dotnet/shm` (without them it aborts at shader compiler start). |
+| `/dev`, `/proc` | null, tty, shm and the GPU; Unity writes its own `oom_score_adj`. Ordinary file modes still apply |
+| `writeLockExtra` | anything else a machine needs, each with its reason |
+
+**Why not systemd.** w5297 picked `systemd-run --user` with ProtectSystem=strict, ProtectHome=read-only and
+ReadWritePaths. On biscuit that unit starts but **does nothing**: every write still succeeded (home, /tmp, a stand-in
+daemon folder). Ubuntu sets `kernel.apparmor_restrict_unprivileged_userns=1`. systemd-executor creates the user
+namespace, then the kernel logs AppArmor `DENIED capable sys_admin` (profile `unprivileged_userns`) for its mount
+namespace. The user manager runs the command anyway, without the protection. Two more problems: the daemon starts agents
+with `--scope`, and a scope takes no sandboxing properties at all. Making systemd work needs root: an AppArmor profile
+for systemd-executor, or turning the sysctl off for the whole machine.
+
+**Trial results** (measured on biscuit, w5333; output in that request's report):
+
+| Check | Result |
+|---|---|
+| A write outside the root (home, `~/.config`, `/tmp`, `/var/tmp`) | refused |
+| The daemon's folder and `secrets` (write, new file, rename of the folder) | refused, tested on stand-in folders |
+| git (fetch, status, clone, commit in the root) and gh by token (`gh api user`) | pass |
+| Claude Code's startup under the lock | passes once `cc-socks` is granted. A full turn was not run: a worker's shell has no Claude login |
+| Headless slot player (`player_slots.py launch ... -batchmode -nographics -ffSoloQuitAfterSeconds 60`) | pass, clean quit |
+| Unity licence seat | pass: the editor reached the running LicenseClient and resolved the entitlement |
+| Headless editor (`-batchmode -nographics -quit` on a sandbox project) and its batch player build (`build_player.sh ... linux`) | pass, once `/tmp` is writable: exit 0, licence resolved, no refused write left |
+
+**Limits.**
+- A new top-level folder in the root is refused, because rules name the folders that exist when claude starts. A
+  folder the daemon adds later is picked up at the next start.
+- The agent host and the sandbox editor the daemon starts stay outside the lock.
+- `/tmp` and `/dev/shm` are writable, and the worker runs as the person, so it can change or delete the person's own
+  files there (not other users'). A private `/tmp` needs a mount namespace, refused here like systemd's.
+- Refused writes leave no log on a machine without auditd. Find them with `strace -f -Z`.
+- Needs Landlock (on in Ubuntu since 22.04). Without it the launcher exits 125 and the agent does not start: leave the
+  setting off there.
+
 ## 5. Migration
 
 ### 5.1 Per machine

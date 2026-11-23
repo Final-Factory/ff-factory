@@ -13,6 +13,7 @@ import { editorBenchGateFor, GATE_HOOK_TIMEOUT_S } from '../machine/editorBenchG
 import { foreignTimedHold, ownTimedHold, readCrashHold, readTimedAsk } from '../machine/benchLock.ts';
 import { personHoldReason } from '../machine/personPlay.ts';
 import { closedRefusalFor } from '../machine/benchTurn.ts';
+import { writeLockSpawner } from '../machine/writeLock.ts';
 import { standingGuard } from './standingGuard.ts';
 import { ghSpendHooks, rateLimitReader } from './ghSpendHook.ts';
 import { readChainHook } from './readChainHook.ts';
@@ -181,6 +182,8 @@ export interface LaunchSpec {
   /** Commit as this identity in every clone (gitIdentityEnv on the machine, w3093); `repos` are the public ones the guard holds to it. */
   publicGit?: { name: string; email: string; repos: string[] };
   claudeExecutable?: string;
+  /** ff-landlock.py's arguments: claude starts under the Linux write lock (machine/writeLock.ts, w5333). */
+  writeLock?: string[];
   /** Created before the process starts: `cwd` itself, and these files (relative to cwd) when missing. */
   init?: { files?: Record<string, string> };
 }
@@ -653,5 +656,6 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
     },
     env: agentEnv,
     ...(spec.claudeExecutable ? { pathToClaudeCodeExecutable: spec.claudeExecutable } : {}),
+    ...(spec.writeLock && process.platform === 'linux' ? { spawnClaudeCodeProcess: writeLockSpawner(spec.writeLock) } : {}),
   };
 }
