@@ -808,6 +808,16 @@ shell carrying the session, and on a loaded CI runner `end` ended it, losing its
 process tree cannot tell a pipeline's reader from a job started with `&` in that same command line, so such a job is spared
 too: run `ff-leftovers end` as a command of its own, after the one that started the job.
 
+**Mounts in a worker's temp folder** (w5285). On biscuit, 2026-10-11, worker bd1baf7b (w994) ran a private GNOME Shell
+with `XDG_RUNTIME_DIR` at `<its temp>/w994/gs`. The session's gvfsd-fuse and document portal mounted FUSE file systems at
+`gs/gvfs` and `gs/doc`; the reaper ended their daemons (23 desktop helpers, 2026-10-13) and the dead mounts stayed, so
+clean-up failed on EBUSY for six weeks (w5276, fixed for the leftover by `server/deadMounts.ts`). Three things now keep a
+new one from happening: the shell guard refuses a command that sets `XDG_RUNTIME_DIR` to a temp folder (`runtimeDirInTemp`
+in `server/guard.ts`); `ff-leftovers list` names the mounts in the session's own temp folder and `ff-leftovers end`
+lazily unmounts the FUSE ones after it ends the processes (`unmountOwnFuse`; exit 1 while one stays; it deletes nothing);
+and the ff-agents launcher `editor-ops/scripts/private_desktop.sh` starts a private headless desktop with the real
+runtime folder, `GVFS_DISABLE_FUSE=1` and no document portal. Tests: `runtimeDirFuse.test.ts`.
+
 **A program started for a person** (w4047). `ff-leftovers launch <program> [args]...` starts a program a person goes on
 using (a launcher, an installer's window, a desktop app; on a Mac `ff-leftovers launch open -a "<app>"`) detached, from the
 home folder, with an environment that has none of the worker's ownership variables (`FF_SESSION_ID`, `FF_SANDBOX_ID`,

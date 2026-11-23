@@ -1263,6 +1263,23 @@ export function runsPowerOff(cmd: string, depth = 0): boolean {
  * Why a shell command is refused, or undefined. Exported for tests. Without a context, or with no
  * game repo configured, every master/main push or PR counts as the game repo's.
  */
+/**
+ * w5285: an XDG_RUNTIME_DIR set to a temp folder. On biscuit (2026-10-11) worker bd1baf7b ran a private GNOME Shell with
+ * its runtime folder at `<its temp>/w994/gs`; its session's gvfsd-fuse and document portal mounted FUSE file systems at
+ * `gs/gvfs` and `gs/doc`, the daemons died, and the dead mounts stopped clean-up from deleting the folder for six weeks
+ * (w5276). The value as written: `$TMPDIR`/`$TMP`/`$TEMP`, a worker's `ffa-<session>` folder, `/tmp`, `/var/tmp`, mktemp.
+ */
+export function runtimeDirInTemp(cmd: string): string | undefined {
+  for (const m of cmd.matchAll(/(?:^|[\s;&|(`"'])XDG_RUNTIME_DIR=("[^"]*"|'[^']*'|[^\s;&|`]*)/g)) {
+    const v = m[1].replace(/^["']|["']$/g, '');
+    if (/\$\{?(TMPDIR|TMP|TEMP|TEMPDIR)\b|\$env:(TMP|TEMP)\b|(^|[/\\])ffa-[\w.-]+([/\\]|$)|^\/(var\/)?tmp(\/|$)|\bmktemp\b/i.test(v)) return v;
+  }
+  return undefined;
+}
+
+export const RUNTIME_DIR_IN_TEMP = (v: string) =>
+  `Pointing XDG_RUNTIME_DIR at a temp folder (${v}) is blocked (w5285): a desktop session started there (dbus-run-session, gnome-shell, a GTK app) has gvfsd-fuse and the document portal mount FUSE file systems inside it (<dir>/gvfs, <dir>/doc), which outlive their daemons and stop clean-up from deleting the folder. Keep XDG_RUNTIME_DIR at /run/user/$(id -u). For a private headless desktop run the ff-agents editor-ops scripts/private_desktop.sh, which keeps the real runtime folder and turns those mounts off; \`ff-leftovers end\` ends it and unmounts what is left.`;
+
 export function checkShell(command: string, ctx?: ShellContext): string | undefined {
   // Judge the command that runs, not the words in its PR title, body or commit message (w2503).
   const cmd = withoutTextArgs(command);
@@ -1395,6 +1412,8 @@ export function checkShell(command: string, ctx?: ShellContext): string | undefi
     }
   }
   if (runsPowerOff(cmd)) return 'Shutting down or restarting the machine is blocked.';
+  const runtimeDir = runtimeDirInTemp(cmd);
+  if (runtimeDir) return RUNTIME_DIR_IN_TEMP(runtimeDir);
   // Process kills are judged on the whole command: `Get-Process Unity | Stop-Process` splits the
   // target and the kill across a pipe. Quotes, brackets and backticks split words too, so `"$(pkill -f node)"` is seen (w2503).
   const all = cmd.toLowerCase().split(/[\s|;&()`"']+/);
