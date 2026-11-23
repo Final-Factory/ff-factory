@@ -147,3 +147,34 @@ test('w5240: a stopped holder with a request not closed keeps its target but its
   const v = Object.fromEntries(rows.map((r) => [path.relative(base, r.path).replace(/\\/g, '/'), r.verdict]));
   assert.deepEqual(v, { 'slot1/target': 'keep', 'slot1/target/debug/incremental': 'delete', 'slot2/target': 'keep' });
 });
+
+test('w5240: an idle sandbox\'s superseded Burst player builds are DELETE, the newest stay, the cache never whole; a worker, an open editor or a process keeps all', async (t) => {
+  const { root, facts, ctx } = world(t, [{ id: 'slot9' }]);
+  const sb = path.join(root, 'sandboxes', 'slot1');
+  const dir = path.join(sb, 'Library', 'BurstCache', 'Windows-Intel');
+  fs.mkdirSync(dir, { recursive: true });
+  const hashes = ['a', 'b', 'c', 'd'].map((c) => c.repeat(32));
+  hashes.forEach((h, i) => {
+    for (const ext of ['dll', 'pdb']) {
+      const f = path.join(dir, `${h}.${ext}`);
+      fs.writeFileSync(f, 'x'.repeat(50));
+      const when = (Date.now() - (10 - i) * 24 * HOUR) / 1000;
+      fs.utimesSync(f, when, when);
+    }
+  });
+  const f = { ...facts, sandboxes: [{ id: 'slot1', path: sb }] };
+  const at = (rel: string, ff = f, procs?: string[]) => judgeWithGit(path.join(sb, rel), ff, Date.now(), ctx(procs));
+  const old = await at(`Library/BurstCache/Windows-Intel/${hashes[0]}.dll`);
+  assert.equal(old.kind, 'sandbox-library');
+  assert.equal(old.verdict, 'delete', old.why);
+  assert.equal((await at(`Library/BurstCache/Windows-Intel/${hashes[3]}.dll`)).verdict, 'keep');
+  assert.equal((await at('Library/BurstCache')).verdict, 'keep');
+  const rows = (await planFolders(f, { slots: ctx(), sizes: 'none' })).filter((r) => r.kind === 'sandbox-library');
+  assert.ok(rows.length >= 2 && rows.every((r) => r.verdict === 'delete'));
+  assert.ok(!rows.some((r) => r.path.includes(hashes[3]!)));
+  assert.equal((await at(`Library/BurstCache/Windows-Intel/${hashes[0]}.dll`, f, [`bash in ${sb}`])).verdict, 'keep');
+  assert.equal((await at(`Library/BurstCache/Windows-Intel/${hashes[0]}.dll`, { ...f, live: ['wk1'], owners: { wk1: { sandbox: 'slot1', requests: ['w1'] } } as never })).verdict, 'keep');
+  fs.mkdirSync(path.join(sb, 'Temp'));
+  fs.writeFileSync(path.join(sb, 'Temp', 'UnityLockfile'), '');
+  assert.equal((await at(`Library/BurstCache/Windows-Intel/${hashes[0]}.dll`)).verdict, 'keep');
+});
