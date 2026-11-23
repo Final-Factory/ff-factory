@@ -80,6 +80,7 @@ import { editorBenchSession, editorSessions, passedShared, raisedSessions, type 
 import { readBenchWarnings } from './benchWarnings.ts';
 import { BenchRunners, isOpsRunner, readListenerLog, readRunnersFile, runnerCensus, sendSignal, writeRunnersFile } from './benchRunners.ts';
 import { DROPIN_NAME, RunnerUnits, findRunnerUnits } from './runnerUnits.ts';
+import { CI_FIRST, CiFirst, linuxReads, parseScopeList, parseScopeShow } from './ciFirst.ts';
 import { cpuSampler, LOAD_GATES, LoadGate, readLoadGateFile, winSuspendScript, writeLoadGateFile } from './loadRunners.ts';
 import { askPlayerToQuit, BenchTurn, closedDetail, holderSandboxes, writeClosedFile, type Holder } from './benchTurn.ts';
 import { GRACE_MIN, PersonPlay, personEnds, personHolderText, personHoldText, personTicket, priorityOf, setPriorityOf, treeOf, type PersonPlaySettings } from './personPlay.ts';
@@ -439,6 +440,7 @@ export class Daemon {
   readonly benchRunners: BenchRunners;
   readonly loadGate: LoadGate;
   readonly runnerUnits: RunnerUnits;
+  readonly ciFirst: CiFirst;
   /** w1829: what a worker's next message hears about its player a timed run's turn asked to quit. */
   private readonly benchPlayerNotes = new Map<string, string>();
   /** w1894: a person playing Final Factory here (machine/personPlay.ts): fed by the leftovers' look, it holds a turn. */
@@ -791,6 +793,22 @@ export class Daemon {
       paused: () => new Set([...this.benchRunners.paused(), ...this.loadGate.state().suspended].map((p) => p.pid)),
       log: (line) => log(line),
       now: () => Date.now(),
+    });
+    // w5322: on a CI-first machine (CI_FIRST: biscuit) FF Factory's own scopes run below its CI runners (machine/ciFirst.ts)
+    const userctl = (args: string[]) =>
+      new Promise<string>((resolve, reject) =>
+        execFile('systemctl', ['--user', ...args], { timeout: 60_000 }, (err, stdout, stderr) => (err ? reject(new Error(`systemctl --user ${args.join(' ')}: ${(stderr || err.message).trim()}`)) : resolve(stdout))),
+      );
+    this.ciFirst = new CiFirst({
+      settings: real && process.platform === 'linux' ? CI_FIRST[cfg.id.toLowerCase()] : undefined,
+      scopes: async () => {
+        const units = parseScopeList(await userctl(['list-units', '--type=scope', '--plain', '--no-legend', '--no-pager', 'ffw-*']));
+        return units.length ? parseScopeShow(await userctl(['show', '-p', 'Id,ControlGroup,CPUWeight,IOWeight', ...units])) : [];
+      },
+      setWeights: async (unit, cpu, io) => void (await userctl(['set-property', '--runtime', unit, `CPUWeight=${cpu}`, `IOWeight=${io}`])),
+      ...linuxReads,
+      census: async () => runnerCensus(await pd.procs()),
+      log: (line) => log(line),
     });
     this.pool = new SandboxPool(
       {
@@ -1360,6 +1378,7 @@ export class Daemon {
     this.timers.push(setInterval(() => void this.benchRunners.tick(), 5_000));
     this.timers.push(setInterval(() => void this.loadGate.tick(), 5_000));
     this.timers.push(setInterval(() => void this.runnerUnits.tick(), 60_000));
+    if (this.ciFirst.enabled) this.timers.push(setInterval(() => void this.ciFirst.tick(), 60_000));
     // priorities.json: the portal's marks plus each editor start's session (w1962; w4620: nothing is raised, strict priority)
     this.timers.push(setInterval(() => this.benchPriorities(), 5_000));
     void this.slotTick();

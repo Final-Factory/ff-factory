@@ -239,6 +239,24 @@ paused listener is in SIGSTOP, so it does not poll at all. After SIGCONT it open
 `status=Busy` only if it was already stuck before the pause. What the pause can do is hide a stuck listener for as long
 as a bench turn lasts. Rule (b) picks it up 10 minutes after the turn ends.
 
+### CI jobs go first on biscuit (w5322)
+
+lothsahn, 2026-11-23: "Also make check runs urgent priority on biscuit by the framework so they go first." biscuit's ffu
+runner units were written in w2896 with `Nice=10` and `CPUWeight=50` so agents and editors got the CPU first, the opposite
+of what is wanted now. The runner units stay untouched (changing them is lothsahn's call). The daemon lowers its own work
+below them instead (`machine/ciFirst.ts`, `CI_FIRST`: biscuit only, ticked once a minute from `machine/daemon.ts`):
+
+- every `ffw-agent-*` and `ffw-unity-*` scope (machine/linuxScope.ts; a worker's cargo, unity-slot batches and players run
+  inside its agent's scope) gets `systemctl --user set-property --runtime CPUWeight=5 IOWeight=10`, user level, gone at
+  the next boot;
+- every thread in those scopes goes to nice 19, one thread at a time (Linux sets nice per thread).
+
+Nothing is raised back: an unprivileged process cannot lower a nice it raised, and a weight only matters while something
+else wants the CPU, so with no CI job running the agents still get the whole machine. The daemon itself keeps its own
+priority. When a CI job starts or ends the daemon logs a `ci first:` line with both sides: the job's worker nice and cgroup
+`cpu.weight`, and FF Factory's scopes' `cpu.weight` and highest thread priority (`-` means the cpu controller is off
+there, so nice decides). GPU and memory are not shared out by either. Tests: `server/w5322CiFirst.test.ts`.
+
 ## 3. The VHDX policy
 
 A dynamically expanding VHDX grows as its volume is written and never shrinks by itself. On
