@@ -18,6 +18,7 @@ import { CATALOG, buildOptions, githubCredentialEnv, type CatalogTool, type Laun
 import { MAIN_CLONE_NO_AGENTS, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION, RELOCATE_FALLBACK_MINUTES, SELF_UPDATE_VERSION, relocateProblem, type DaemonLiveView, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
 import { writeFileDurable } from '../server/durable.ts';
 import { LoopWatch, linkBeat } from '../server/loopWatch.ts';
+import { writeLockArgs } from './writeLock.ts';
 import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, pidAlive, readHostState } from './agentHost.ts';
 import { SelfUpdater } from './selfUpdate.ts';
 import { installSshOf } from './installSsh.ts';
@@ -167,6 +168,14 @@ export interface DaemonConfig {
   tempDir?: string;
   /** The Max events file agents here append to (docs/max.md); default ~/.config/ff-factory/max-events.jsonl, null: none. */
   maxEventsFile?: string | null;
+  /**
+   * w5333 trial, Linux only, off by default: start every agent's claude under machine/ff-landlock.py, so it and all it
+   * starts write only inside the root (not its daemon or secrets folders) and the few paths machine/writeLock.ts names.
+   * docs/worker-root.md, "Write lock (Linux, trial)".
+   */
+  writeLock?: boolean;
+  /** More folders a locked worker may write, each one a measured need (docs/worker-root.md lists them). */
+  writeLockExtra?: string[];
   /** The sandbox pool (add_machine sandbox_root and limits; docs/machines.md "Machine sandboxes"); the portal's welcome overrides it. */
   sandboxes?: SandboxPoolSettings;
   /** Stop a sandbox editor after this long without agent activity there (default 120; 0: never). */
@@ -2754,8 +2763,11 @@ export class Daemon {
     // GitHub Apps (w1519): the gh shim's folder goes before the unity-slot one, on the same PATH key.
     const pathKey = Object.keys(slot).find((k) => k.toUpperCase() === 'PATH') ?? Object.keys(process.env).find((k) => k.toUpperCase() === 'PATH') ?? 'PATH';
     const app = ghAppRunEnv(spec.env, this.ghApp, pathKey, slot[pathKey] ?? process.env[pathKey]);
+    const lock = spec.sandbox && this.cfg.writeLock && process.platform === 'linux' && this.cfg.root
+      ? { writeLock: writeLockArgs({ root: this.cfg.root, appDir: appDirOfConfig(this.cfg), extraRoots: this.cfg.extraRoots, maxEventsFile: maxFile, unitySlots: this.slots.dir, runtimeDir: process.env.XDG_RUNTIME_DIR, home: os.homedir(), extra: this.cfg.writeLockExtra }) }
+      : {};
     const fence = spec.sandbox ? this.workerFence : undefined;
-    return { ...spec, stdioMcp: this.stdioMcpFor(spec), claudeExecutable: spec.claudeExecutable ?? this.cfg.claude, ...(fence ? { fence } : {}), env: { ...spec.env, ...sessionTempEnv(agentTempRoot(this.cfg.tempDir), info.id), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...slot, ...app, ...(fence ? fenceEnv(fence) : {}) } };
+    return { ...spec, ...lock, stdioMcp: this.stdioMcpFor(spec), claudeExecutable: spec.claudeExecutable ?? this.cfg.claude, ...(fence ? { fence } : {}), env: { ...spec.env, ...sessionTempEnv(agentTempRoot(this.cfg.tempDir), info.id), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...slot, ...app, ...(fence ? fenceEnv(fence) : {}) } };
   }
 
   private fenceMemo?: { fence?: WorkerFence };
