@@ -8,6 +8,7 @@ import type { StaleOutputSettings } from './staleOutput.ts';
 import { inNeverGames, installDrive, onInstallDrive } from './rootFence.ts';
 import { LIBRARY_CACHES, staleCacheEntries } from './cacheTrim.ts';
 import { renameAway } from './renameAway.ts';
+import { clearDeadMounts } from './deadMounts.ts';
 
 export { DEFAULT_CLEANUP, type CleanupPolicy } from './config.ts';
 
@@ -940,6 +941,12 @@ export async function runCleanup(items: CleanupItem[], guard: CleanupGuard): Pro
  */
 export async function removeRenamed(it: CleanupItem, out: CleanupRun): Promise<boolean> {
   if (it.members) return removeMembers(it, out);
+  // A dead FUSE mount inside comes off first (EBUSY otherwise); a live one refuses the entry whole (w5276).
+  const mounts = await clearDeadMounts(it.path);
+  if (mounts.live) {
+    out.failed.push({ path: it.path, why: `refused: a live mount inside (${mounts.live}); clean-up never deletes through a mount` });
+    return false;
+  }
   const bytes = await sizeOf(it.path);
   let doomed = it.path;
   try {
@@ -972,6 +979,8 @@ async function removeMembers(it: CleanupItem, out: CleanupRun): Promise<boolean>
     const size = st.isDirectory() ? await sizeOf(m) : st.size;
     try {
       if (st.isDirectory()) {
+        const live = (await clearDeadMounts(m)).live;
+        if (live) throw new Error(`a live mount inside (${live})`);
         const doomed = await renameAway(m);
         await fs.promises.rm(doomed, { recursive: true, force: true, maxRetries: 2 });
       } else await fs.promises.unlink(m);
