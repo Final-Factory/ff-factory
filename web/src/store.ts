@@ -4,6 +4,7 @@ import { api, connectSocket, setUnauthorizedHandler, UnauthorizedError, type WsS
 import { noteServedBuild } from './freshness';
 import { initNotifications, onNotice } from './notify';
 import { noteMachineStats } from './util';
+import { SOCKET_FAILURE_CHECK_MS } from '../../shared/socketPolicy';
 
 export type AuthState = 'unknown' | 'needed' | 'ok';
 
@@ -394,7 +395,8 @@ function startSocket() {
     },
     onFailure: async () => {
       try {
-        const app = await api.state();
+        // Bounded: a path that hangs (w5318) must not hold the next attempt.
+        const app = await api.state(SOCKET_FAILURE_CHECK_MS);
         set({ app });
         return true;
       } catch (e) {

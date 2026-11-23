@@ -1,0 +1,1 @@
+- On biscuit, FFU CI jobs go first: the daemon puts its own agent and editor scopes at CPUWeight 5, IOWeight 10 and nice 19, below the runner units (Nice=10, CPUWeight=50), and logs each CI job with both sides' priorities (w5322, `machine/ciFirst.ts`).

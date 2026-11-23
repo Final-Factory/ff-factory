@@ -10,6 +10,7 @@ import { PLAYER_CACHE_ENTRY } from '../machine/playerCache.ts';
 import { FFU_SLOTS_DIR, readSlotState } from '../machine/ffuSlots.ts';
 import type { PublishedRecord } from './published.ts';
 import { leaseLive, mentions, OWN_LEFTOVER_DEFAULTS, type SlotLease } from './ownLeftovers.ts';
+import { apfsPrivateBytes } from './apfsPrivate.ts';
 
 /**
  * The folders a clean-up worker may delete, judged against the ledger (w1379). On 2026-10-15 w1374, LothDesktop's low-disk
@@ -70,7 +71,7 @@ export interface FolderRow {
   bytes?: number;
   /** Bytes in it that are hard links to files kept elsewhere: a delete frees none of them (w5168). */
   linked?: number;
-  /** A seed entry's bytes a sandbox Library also holds, same name and size, on macOS: APFS clones of one another, so a delete frees ~0 of them (w5310). */
+  /** On macOS, bytes in it that APFS clones share (its files' size less their private size, w5319; else a seed entry's files a sandbox Library holds at the same place, w5310): a delete frees none of them. */
   cloned?: number;
 }
 
@@ -718,7 +719,7 @@ export async function finishedRows(dir: string, f: CleanupFacts, o: { now?: numb
 }
 
 /** Every folder a clean-up could take, judged. Sizes are measured for the deletable ones only unless `sizes` asks for all. */
-export async function planFolders(f: CleanupFacts, o: { now?: number; sizes?: 'all' | 'delete' | 'none'; localWork?: (dir: string) => Promise<string | undefined>; unpushedWork?: (dir: string) => Promise<string | undefined>; published?: Map<string, PublishedRecord[]>; ignoredEvidence?: (repo: string) => Promise<string[] | undefined>; slots?: SlotContext; platform?: NodeJS.Platform } = {}): Promise<FolderPlan> {
+export async function planFolders(f: CleanupFacts, o: { now?: number; sizes?: 'all' | 'delete' | 'none'; localWork?: (dir: string) => Promise<string | undefined>; unpushedWork?: (dir: string) => Promise<string | undefined>; published?: Map<string, PublishedRecord[]>; ignoredEvidence?: (repo: string) => Promise<string[] | undefined>; slots?: SlotContext; platform?: NodeJS.Platform; privateBytes?: (paths: string[]) => Promise<(number | null)[] | undefined> } = {}): Promise<FolderPlan> {
   const now = o.now ?? Date.now();
   const bad = factsProblem(f, now);
   if (bad) return [{ path: f.root ?? '(no install folder)', kind: 'other', verdict: 'keep', why: bad }];
@@ -778,17 +779,21 @@ export async function planFolders(f: CleanupFacts, o: { now?: number; sizes?: 'a
     });
     rows.freed = together.freed;
     if (together.bytes > together.freed) rows.linked = together.bytes - together.freed;
-    // w5310: a seed entry a sandbox Library holds too (cloned from the seed with `cp -c` on macOS) frees ~0: count it apart.
-    const seed = seedLibrary(f);
-    if (seed && (o.platform ?? process.platform) === 'darwin') {
-      for (const r of measured) {
-        if (r.kind !== 'seed-library') continue;
-        const cloned = clonedInSandboxes(r.path, seed, f.sandboxes);
-        if (!cloned) continue;
-        r.cloned = Math.min(cloned, r.bytes ?? 0);
-        r.bytes = (r.bytes ?? 0) - r.cloned;
-        if (r.verdict === 'delete') rows.freed = Math.max(0, (rows.freed ?? 0) - r.cloned), (rows.cloned = (rows.cloned ?? 0) + r.cloned);
-      }
+    // w5319: on macOS a row frees only the bytes APFS says no clone shares (apfsPrivateBytes): the seed shares its blocks with
+    // copies no worker reads, so a same-path check of sandbox Libraries (w5310) saw 10 of 365 entries. Where that count cannot
+    // be read, a seed entry a sandbox Library holds too (cloned from the seed with `cp -c`) still counts apart (w5310).
+    // Two DELETE rows that are clones of each other each read 0 here though deleting both frees one copy: a low count, never a promise.
+    if ((o.platform ?? process.platform) === 'darwin' && measured.length) {
+      const priv = await (o.privateBytes ?? apfsPrivateBytes)(measured.map((r) => r.path));
+      const seed = seedLibrary(f);
+      measured.forEach((r, i) => {
+        const p = priv?.[i];
+        const shared = typeof p === 'number' ? Math.max(0, (r.bytes ?? 0) - p) : r.kind === 'seed-library' && seed ? Math.min(clonedInSandboxes(r.path, seed, f.sandboxes), r.bytes ?? 0) : 0;
+        if (!shared) return;
+        r.cloned = shared;
+        r.bytes = (r.bytes ?? 0) - shared;
+        if (r.verdict === 'delete') (rows.freed = Math.max(0, (rows.freed ?? 0) - shared)), (rows.cloned = (rows.cloned ?? 0) + shared);
+      });
     }
   }
   if (emptySlots) rows.emptySlots = emptySlots;
@@ -831,7 +836,7 @@ export function renderFolders(rows: FolderPlan, f: CleanupFacts | undefined, now
   if (bad) return `Nothing may be deleted on this machine's facts: ${bad}.\nReport that; do not guess which folders are free.\n`;
   // w5168: a size is what the delete frees; hard links to files kept elsewhere (a player slot's build) are shown apart.
   const linked = (n: number | undefined) => (n ? `, +${gb(n)} hard-linked to files kept elsewhere, not freed` : '');
-  const cloned = (n: number | undefined) => (n ? `, +${gb(n)} also in a sandbox's Library (APFS clones: frees ~0 until that copy goes, w5310)` : '');
+  const cloned = (n: number | undefined) => (n && n >= 5e5 ? `, +${gb(n)} shared with APFS clones, not freed (a clone elsewhere keeps those blocks until it goes too, w5310, w5319)` : '');
   const line = (r: FolderRow) => `${r.verdict === 'keep' ? 'KEEP  ' : 'DELETE'}  ${r.bytes === undefined ? '' : `${gb(r.bytes)}${linked(r.linked)}${cloned(r.cloned)}  `}${r.path}\n        ${r.why}`;
   const keep = rows.filter((r) => r.verdict === 'keep');
   const del = rows.filter((r) => r.verdict === 'delete');

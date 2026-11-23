@@ -445,6 +445,14 @@ What stays in `~/.claude`, on purpose:
   `registerAgents.sh:40-41`, `publish-skills/SKILL.md:22`), so `server/agentTools.ts` and `server/strayWrite.ts` keep
   reading them there. Moving them is a change in final-factory-agents first.
 
+**Checking the switch on a machine** (w5305's rollout). An agent that was already running when its daemon updated is
+adopted with its old environment, so it still writes to and reads skills from `~/.claude`. That proves nothing either
+way. Look at a session that resumed or started after the update instead: `search_transcripts` for `"to resume there
+(w5305)"` (the copy line, per machine), a new session whose tool-result paths sit under `<root>/claude/projects`, and a
+`Skill` call or `$FF_SKILLS` read in that session. On 2026-11-23 the evidence was: m5 for all three; on beast, the
+resume of session 18a727ef and new session 3a461250's `ff-agents:ffu-build-test`; on lothdesktop, the resumes of
+1f034014 and f4e700b8 and new session 175a86ee's `$FF_SKILLS` reads; on biscuit, the resume of 7b2e9b25.
+
 ## 3. Install, uninstall, upgrade
 
 **One installer per OS** (w513): `install-worker.ps1` (Windows; the parts that need an administrator say so and run

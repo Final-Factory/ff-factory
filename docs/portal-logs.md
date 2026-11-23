@@ -205,8 +205,16 @@ message:
   the page says in its URL (web/src/api.ts): `first` (the page loaded), `closed` (its last socket closed; `pageSawCode` is
   the code the browser saw, 1006 for a cut without a close frame), `error` (an attempt that never opened), `stale` (it
   heard nothing, not even the 15 s ping, for 45 s), `visible` (a tab coming back found its socket silent), `online` (the
-  browser's network came back); `why=?` is a page from before w4723. `gap` is how long the page was without a live
-  socket. `state` is what building the first full state took; the page's "open" waits on it.
+  browser's network came back), `timeout` (an attempt still connecting after 10 s was abandoned: the path took it and
+  passed nothing back, as a failing Funnel does; w5318); `why=?` is a page from before w4723. `gap` is how long the page
+  was without a live socket; `tries` (w5318) how many attempts failed since its last open socket, so a long `gap` with a
+  few `tries` is a page that waited on hung attempts or a sleeping tab, and many `tries` a path that kept refusing.
+  `state` is what building the first full state took; the page's "open" waits on it.
+- **"Unavailable" while the orchestrator answered** (w5318, lothsahn 2026-11-23: "You were just unavailable for a long
+  time"): read the person's `page socket` lines before the agent's timing. Their page had no open socket from 18:53:06 to
+  19:07:17Z (a close `by network` 3 s after their message, the next open `why=error gap=622.9s`), while the orchestrator
+  answered in 11 s and `path health` showed Funnel layer 9 failing. Before w5318 one hung attempt held a page dark
+  however long it hung.
 - `page socket closed: <login> from <address> via <via>, code <code> ["<reason>"], by page|ping-timeout|network, open <s>[; <login>'s drops: <n> in the last hour, <m> since start]`.
   `by ping-timeout`: the server ended it, the page had not answered the previous ping within 15 s (server/index.ts, the
   `SOCKET_PING_MS` interval). `by network`: 1006, no close frame from anyone. `by page` with `code 4000`: the page gave up

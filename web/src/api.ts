@@ -1,4 +1,5 @@
 import { SOCKET_PING_MS } from '../../shared/types';
+import { SOCKET_CONNECT_TIMEOUT_MS, socketBackoffMs, socketVerdict } from '../../shared/socketPolicy';
 import type {
   Report,
   ReportHit,
@@ -58,10 +59,11 @@ export function setUnauthorizedHandler(fn: () => void) {
 /** For requests made outside request() (the attachment uploader's XMLHttpRequest). */
 export const notifyUnauthorized = () => onUnauthorized();
 
-async function request<T>(method: string, path: string, body?: unknown, opts: { keepalive?: boolean } = {}): Promise<T> {
+async function request<T>(method: string, path: string, body?: unknown, opts: { keepalive?: boolean; timeoutMs?: number } = {}): Promise<T> {
   const res = await fetch(path, {
     method,
     keepalive: opts.keepalive,
+    signal: opts.timeoutMs ? AbortSignal.timeout(opts.timeoutMs) : undefined,
     credentials: 'same-origin',
     // Every write is JSON, even an empty one: the server refuses other content types (CSRF).
     headers: method === 'GET' ? undefined : { 'Content-Type': 'application/json' },
@@ -129,7 +131,8 @@ export const api = {
   devices: () => request<{ deviceApproval: 'off' | 'members'; devices: DeviceInfo[] }>('GET', '/api/devices'),
   decideDevice: (id: string, action: 'approve' | 'deny' | 'revoke') => request<{ devices: DeviceInfo[] }>('POST', `/api/devices/${encodeURIComponent(id)}/${action}`),
   logout: () => request<unknown>('POST', '/api/logout'),
-  state: () => request<AppState>('GET', '/api/state'),
+  /** `timeoutMs`: give up after it (the socket's failure check, w5318); absent, wait as long as the browser does. */
+  state: (timeoutMs?: number) => request<AppState>('GET', '/api/state', undefined, { timeoutMs }),
   // What work costs (w859, docs/spend.md): each request's cost, one request in full, and the analysis.
   spendSummary: () => request<SpendSummaryReply>('GET', '/api/spend/summary'),
   /** Reports (w2541, docs/reports.md): search them with every filter, and read one at a revision (the latest by default). */
@@ -317,36 +320,60 @@ export function connectSocket(h: SocketHandlers): () => void {
   let timer: ReturnType<typeof setTimeout> | undefined;
   /** When the open socket last delivered anything. */
   let heard = 0;
+  /** When the attempt in `ws` started, and whether it has opened. */
+  let startedAt = 0;
+  let opened = false;
   // Why the next socket opens, told to the server in its URL so its log can explain a drop (w4723, server/pageSockets.ts):
   // first, closed (the socket closed; code is the close code this page saw), error (an attempt never opened), stale (the
-  // watchdog heard nothing for SOCKET_STALE_MS), visible (a tab coming back found its socket silent), online (the network came back).
+  // watchdog heard nothing for SOCKET_STALE_MS), visible (a tab coming back found its socket silent), online (the network
+  // came back), timeout (an attempt hung, still connecting after SOCKET_CONNECT_TIMEOUT_MS, w5318).
   let why = 'first';
   let lastCode: number | undefined;
   let lostAt = 0;
+  /** Attempts that failed since the page last had an open socket (w5318: the log then says how hard it tried). */
+  let tries = 0;
 
   const base = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`;
   const url = () => {
     const q = new URLSearchParams({ why });
     if (lastCode !== undefined) q.set('code', String(lastCode));
     if (lostAt) q.set('gap', String(Date.now() - lostAt));
+    if (tries) q.set('tries', String(tries));
     return `${base}?${q}`;
+  };
+
+  const retryLater = () => {
+    clearTimeout(timer);
+    const delay = socketBackoffMs(attempt, Math.random());
+    attempt++;
+    timer = setTimeout(open, delay);
   };
 
   const open = () => {
     if (stopped) return;
+    clearTimeout(timer);
     h.onStatus('connecting');
-    let opened = false;
+    opened = false;
+    startedAt = Date.now();
     const sock = new WebSocket(url());
     ws = sock;
+    // A hung attempt (w5318: a failing Funnel takes the connection and never answers) fires no close for minutes.
+    const hung = setTimeout(() => {
+      if (ws === sock && sock.readyState === WebSocket.CONNECTING) abandon('timeout', false);
+    }, SOCKET_CONNECT_TIMEOUT_MS);
     sock.onopen = () => {
+      clearTimeout(hung);
+      if (ws !== sock) return;
       opened = true;
       attempt = 0;
+      tries = 0;
       heard = Date.now();
       h.onStatus('open');
       if (everOpened) h.onReconnect();
       everOpened = true;
     };
     sock.onmessage = (m) => {
+      if (ws !== sock) return;
       heard = Date.now();
       let ev: ServerEvent;
       try {
@@ -357,55 +384,80 @@ export function connectSocket(h: SocketHandlers): () => void {
       if (ev.type !== 'ping') h.onEvent(ev);
     };
     sock.onclose = async (e) => {
+      clearTimeout(hung);
       if (ws !== sock) return;
       ws = null;
       if (stopped) return;
-      why = opened ? 'closed' : 'error';
+      const wasOpen = opened;
+      why = wasOpen ? 'closed' : 'error';
       lastCode = e.code;
-      if (opened) lostAt = Date.now();
+      if (wasOpen) lostAt = Date.now();
+      else tries++;
       h.onStatus('closed');
-      if (!opened) {
+      if (!wasOpen) {
         const keepGoing = await h.onFailure().catch(() => true);
-        if (!keepGoing || stopped) return;
+        if (!keepGoing || stopped || ws) return;
       }
-      const delay = Math.min(15000, 500 * 2 ** attempt) * (0.75 + Math.random() * 0.5);
-      attempt++;
-      timer = setTimeout(open, delay);
+      retryLater();
     };
   };
+
+  // Replace the socket in `ws` now: an open one gone silent, or an attempt that hung. Its onclose, if it ever comes, is
+  // then ignored (ws no longer points at it). `now`: try again at once (a tab coming back), else after the backoff.
+  const abandon = (reason: 'stale' | 'visible' | 'timeout', now: boolean) => {
+    const dead = ws;
+    if (!dead || stopped) return;
+    ws = null;
+    lastCode = undefined;
+    if (opened) {
+      // 4000: if this reaches the server, the path was up and only the server had gone quiet (its log says "code 4000").
+      dead.close(4000, reason === 'visible' ? 'tab came back to a silent socket' : 'page heard nothing for 45 s');
+      why = reason === 'visible' ? 'visible' : 'stale';
+      lostAt = heard;
+      now = true;
+    } else {
+      dead.onclose = null;
+      dead.close();
+      why = 'timeout';
+      tries++;
+      h.onStatus('closed');
+    }
+    if (now) {
+      attempt = 0;
+      open();
+    } else retryLater();
+  };
+
+  const verdict = () =>
+    socketVerdict({
+      state: !ws ? 'none' : ws.readyState === WebSocket.OPEN ? 'open' : ws.readyState === WebSocket.CONNECTING ? 'connecting' : 'none',
+      startedAt,
+      heard,
+      now: Date.now(),
+      staleMs: SOCKET_STALE_MS,
+    });
 
   // A socket that died without a close (a laptop asleep, a phone that suspended the tab, a dropped
   // connection) still reads open and just goes quiet: everything sent meanwhile, such as a message
   // typed on another device, would never show here. Replace it; the reconnect refetches the gap.
-  const dropIfStale = (reason: 'stale' | 'visible') => {
-    if (!ws || stopped || ws.readyState !== WebSocket.OPEN || Date.now() - heard < SOCKET_STALE_MS) return false;
-    const dead = ws;
-    ws = null; // its onclose, if it ever comes, is then ignored
-    // 4000: if this reaches the server, the path was up and only the server had gone quiet (its log says "code 4000").
-    dead.close(4000, reason === 'stale' ? 'page heard nothing for 45 s' : 'tab came back to a silent socket');
-    why = reason;
-    lastCode = undefined;
-    lostAt = heard;
-    return true;
-  };
-
-  // Reconnect promptly when a phone wakes up / the tab comes back.
+  // Reconnect promptly when a phone wakes up / the tab comes back: no socket, a silent one, or an attempt that hung.
   const wake = (e: Event) => {
-    if (document.visibilityState === 'visible' && !stopped && (!ws || dropIfStale(e.type === 'online' ? 'stale' : 'visible'))) {
-      if (e.type === 'online' && !ws) why = 'online';
-      clearTimeout(timer);
+    if (document.visibilityState !== 'visible' || stopped) return;
+    if (!ws) {
+      if (e.type === 'online') why = 'online';
       attempt = 0;
       open();
+      return;
     }
+    const v = verdict();
+    if (v === 'stale') abandon(e.type === 'online' ? 'stale' : 'visible', true);
+    else if (v === 'timeout') abandon('timeout', true);
   };
   document.addEventListener('visibilitychange', wake);
   window.addEventListener('online', wake);
   const watchdog = setInterval(() => {
-    if (dropIfStale('stale')) {
-      clearTimeout(timer);
-      attempt = 0;
-      open();
-    }
+    const v = verdict();
+    if (v !== 'keep') abandon(v, false);
   }, SOCKET_PING_MS);
 
   open();
