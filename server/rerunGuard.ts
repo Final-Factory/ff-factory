@@ -98,7 +98,7 @@ export const RESOURCE_FAULT =
 /** w3836: a real failure in the same log keeps the rerun refused: a rustc error code, a failed test, a panic. */
 export const REAL_FAILURE = /error\[E\d{4}\]|test result: FAILED|^\s*failures:\s*$|panicked at/im;
 // eslint-disable-next-line no-control-regex
-const ANSI = /\x1b\[[0-9;]*m/g;
+const ANSI = /\x1b\[[0-9;?]*[A-Za-z]/g;
 
 /** w3836: the out-of-resource line of a job's log, when that and no real failure is why it failed. Exported for tests. */
 export function resourceFault(log: string): string | undefined {
@@ -156,13 +156,28 @@ export const ghRerunReader: RerunReader = {
     }
   },
   log(repo, job, cwd, env) {
-    try {
-      return execFileSync('gh', ['api', `repos/${repo ?? '{owner}/{repo}'}/actions/jobs/${job}/logs`], { cwd, encoding: 'utf8', timeout: 30_000, maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env: { ...process.env, ...env } as NodeJS.ProcessEnv });
-    } catch (e) {
-      return { error: why(e) };
-    }
+    return readJobLog(repo, job, (args) => execFileSync('gh', args, { cwd, encoding: 'utf8', timeout: 30_000, maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env: { ...process.env, ...env } as NodeJS.ProcessEnv }));
   },
 };
+
+/**
+ * w5271: a job's log through `gh api`. A newer gh (beast's, 2026-11-23) refuses a body with terminal escape sequences, as
+ * every cargo log has: "the response contains terminal escape sequences; pass --allow-escape-sequences to output it anyway".
+ * An older gh (biscuit's 2.46) has no such flag, so it is passed only when gh asks for it. Exported for tests.
+ */
+export function readJobLog(repo: string | undefined, job: number, run: (args: string[]) => string): string | { error: string } {
+  const url = `repos/${repo ?? '{owner}/{repo}'}/actions/jobs/${job}/logs`;
+  try {
+    return run(['api', url]);
+  } catch (e) {
+    if (!/allow-escape-sequences/.test(why(e))) return { error: why(e) };
+  }
+  try {
+    return run(['api', '--allow-escape-sequences', url]);
+  } catch (e) {
+    return { error: why(e) };
+  }
+}
 
 /** w4136: how near a job's end its machine's disconnect counts as the runner dying with it. */
 export const DROP_WINDOW_MS = 60_000;
