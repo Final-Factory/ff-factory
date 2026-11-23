@@ -331,6 +331,27 @@ export function noteWaitedOn(w: WorkItem, gates: readonly WorkBlocker[]) {
   w.waitedOn = [...new Set([...(w.waitedOn ?? []), ...refs])].slice(-40);
 }
 
+/**
+ * w5316: a reopened request that still has gates goes back to Blocked on them, not New. A close leaves its gates in place,
+ * and BlockerWatch only reads a Blocked request's: w5234 was closed and reopened at 14:10 on 2026-11-23 while its worker's
+ * ci: merge-on-green gate on ffu#998 waited, and it sat New, its gate unread, until the dispatcher blocked it again.
+ */
+export function reopenedStatus(w: Pick<WorkItem, 'blocked' | 'alsoBlocked'>): 'blocked' | 'new' {
+  return gatesOf(w).length ? 'blocked' : 'new';
+}
+
+/**
+ * w5316: the dispatcher's block keeps a worker's ci: merge-on-green gate (w2045) when a new gate waits on the same pull
+ * request merging: that merge is the one FF Factory makes on green, so the pr: gate only hid it. w5234's gate on ffu#998
+ * was replaced at 14:10 on 2026-11-23 by "PR ffu#998 merging", CI went green at 15:50, and nobody merged it until 18:24.
+ */
+export function keepMergeOnGreen(kept: readonly WorkBlocker[], fresh: readonly WorkBlocker[]): WorkBlocker[] {
+  return fresh.map((f) => {
+    const ref = f.kind === 'pr' && f.ref ? prRefOf(f.ref)?.toLowerCase() : undefined;
+    return (ref && kept.find((k) => k.kind === 'ci' && k.mergeOnGreen && k.ref && prRefOf(k.ref)?.toLowerCase() === ref)) || f;
+  });
+}
+
 export interface OrchestratorsDeps {
   cfg: Config;
   store: Store;
@@ -1956,6 +1977,8 @@ It is for your part of the work, not an answer to another worker's question.`;
     // A capacity note belongs to its status only (w643). Gates (w754) outlive a hold and a person's "go" (new, question):
     // they go when the request starts (active), stalls, closes or is queued for capacity, or the unblock drops them itself.
     if (w.blocked && !GATE_STATUSES.has(w.status)) {
+      // w5316: a close keeps them for a reopen to give back (reopenWork).
+      w.gatesAtClose = !isOpen(w) && w.status !== 'stalled' ? gatesOf(w) : undefined;
       w.blocked = undefined;
       w.gateEndedAt = this.now().getTime();
       w.alsoBlocked = undefined;
@@ -2848,7 +2871,7 @@ It is for your part of the work, not an answer to another worker's question.`;
       if (acted && (!forOwner || answering)) this.takeOver(w, owner, `${owner.displayName} ${acted}`);
     }
     if (input.reopen) {
-      w.status = 'new';
+      w.status = reopenedStatus(w);
       w.stalled = undefined;
       // A wrong automatic close, reopened by hand (w340: w50 and w128 on 2026-10-04): it no longer says it was closed.
       // And what was read as "finished" before the reopen no longer counts (w731).
@@ -3661,9 +3684,12 @@ It is for your part of the work, not an answer to another worker's question.`;
 
   /** A closed request is reopened (w731): its earlier DONEs and PR links no longer count (work.ts reopenWork). Returns the log's words. */
   private reopened(w: WorkItem): string {
+    const had = gatesOf(w).length;
     const dropped = reopenWork(w, this.now().toISOString());
     const prs = dropped.length ? `PR${dropped.length > 1 ? 's' : ''} ${dropped.map((n) => `#${n}`).join(', ')} and ` : '';
-    return `reopened (its earlier ${prs}DONEs no longer count: it closes again only on a DONE or a PR opened and merged after this)`;
+    const gates = gatesOf(w);
+    const back = gates.length && !had ? `; blocked again on ${gatesName(gates, this.now().getTime())}, the gate${gates.length > 1 ? 's' : ''} its close dropped (w5316)${gates.some((g) => g.mergeOnGreen) ? ', merge on green' : ''}` : '';
+    return `reopened (its earlier ${prs}DONEs no longer count: it closes again only on a DONE or a PR opened and merged after this)${back}`;
   }
 
   /**
@@ -3886,7 +3912,7 @@ It is for your part of the work, not an answer to another worker's question.`;
     // Like a person's own close or reopen, it is final: no automatic-close mark survives it (w370).
     if (input.reopen) {
       this.reopened(w);
-      w.status = 'new';
+      w.status = reopenedStatus(w);
       w.stalled = undefined;
       if (own) this.takeOver(w, by, `${by.displayName} reopened it`);
     } else {
@@ -4323,7 +4349,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       }
       const strangers = (input.session_ids ?? []).map((x) => x.trim().toLowerCase()).filter((x) => x && !w.sessionIds.some((sid) => sid.startsWith(x)));
       if (strangers.length) throw new Error(`block's session_ids name the workers the blocker is about, and ${strangers.join(', ')} ${strangers.length > 1 ? 'are not workers' : 'is not a worker'} of ${w.id} (its workers: ${w.sessionIds.map((x) => x.slice(0, 8)).join(', ') || 'none'})`);
-      const fresh = asked.map((b) => this.makeGate(this.usageGateOf(b), now.toISOString(), 'dispatcher'));
+      const fresh = keepMergeOnGreen(kept, asked.map((b) => this.makeGate(this.usageGateOf(b), now.toISOString(), 'dispatcher')));
       // Without a new gate, it blocks again on the ones it kept through a hold (w754). A single blocker replaces what it
       // waited on, unless add_blocker: then it joins the gates it has, and the request starts when all have cleared.
       const gates = !fresh.length ? kept : input.add_blocker && !input.blockers?.length ? [...kept.filter((k) => !fresh.some((f) => sameGate(f, k))), ...fresh] : fresh.filter((g, i) => fresh.findIndex((x) => sameGate(x, g)) === i);
@@ -7608,7 +7634,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     w.notes = [...(w.notes ?? []), { at: this.now().toISOString(), by: 'FF Factory (ffu post-merge checks)', text: a.text.slice(0, 2000) }].slice(-20);
     if (reopen) {
       const words = this.reopened(w);
-      w.status = 'new';
+      w.status = reopenedStatus(w);
       w.stalled = undefined;
       this.stamp(w, `${a.line}; ${words}`);
     } else this.stamp(w, a.line);

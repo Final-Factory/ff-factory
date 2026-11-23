@@ -52,9 +52,10 @@ const TMP_VAR = /^(?:\$env:(?:tmp|temp|tmpdir)|\$\{(?:tmp|temp|tmpdir)\}|\$(?:tm
 const HOME_VAR = /^(?:~|\$home|\$\{home\}|\$userprofile|\$\{userprofile\}|\$env:userprofile|\$env:home|%userprofile%)(?=$|[\\/])/i;
 /**
  * The game's saves folder: `UserData/saves` since the game's UserData layout (GameDataPaths.Saves), `saves` before it, on
- * Windows (AppData/LocalLow), Linux (~/.config/unity3d) and macOS (Library/Application Support) (w1505).
+ * Windows (AppData/LocalLow), Linux (~/.config/unity3d) and macOS (Library/Application Support) (w1505), and a worker
+ * install's own data root, `<install>/gamedata` (FF_GAME_DATA_DIR, w5306).
  */
-const SAVES_DIR = /\/(?:appdata\/locallow|\.config\/unity3d|library\/application support)\/never games\/finalfactory[^/]*\/(?:userdata\/)?saves\/([^/*?]+)$/i;
+const SAVES_DIR = /\/(?:(?:appdata\/locallow|\.config\/unity3d|library\/application support)\/never games\/finalfactory[^/]*|gamedata)\/(?:userdata\/)?saves\/([^/*?]+)$/i;
 
 interface Word {
   text: string;

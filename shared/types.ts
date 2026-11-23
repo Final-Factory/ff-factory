@@ -2599,6 +2599,12 @@ export interface WorkItem {
    */
   gateEndedAt?: number;
   /**
+   * w5316: the gates a close dropped (a person's, the dispatcher's or a DONE's), given back by a reopen (work.ts reopenWork):
+   * w5234's ci: merge-on-green gate on ffu#998 went with lothsahn's close at 14:10 on 2026-11-23, and the reopen a minute
+   * later had nothing to wait on, so the PR sat green and unmerged for 2.5 h.
+   */
+  gatesAtClose?: WorkBlocker[];
+  /**
    * w2417: every request this one has waited on (a request gate, set by blocked_on or the dispatcher), kept after the gate
    * clears: its workers may read those requests' reports and files with read_work (server/workRead.ts readScope).
    */

@@ -1612,6 +1612,13 @@ from the other pilots, server/mergeOnGreen.ts) is in the arm:
   protection on main and FinalFactory's required check is not strict, so a branch merely behind its base always merges; the
   only refusal is a real conflict, which GitHub's update-branch cannot resolve (it is also off, `allow_update_branch`
   false), and auto-merge (`allow_auto_merge` false) or a merge queue would reject a conflicting pull request the same way.
+- A close and a reopen keep the merge (w5316). A close drops every gate (Orchestrators.stamp), and BlockerWatch reads only a
+  Blocked request's; it now keeps them in `WorkItem.gatesAtClose`, and a reopen gives them back (work.ts reopenWork), so the
+  request is Blocked on them again (reopenedStatus) and the log says so ("blocked again on ..., the gate its close dropped").
+  A dispatcher's `decide_work block` on the same pull request merging keeps the ci: merge-on-green gate in place of the pr:
+  gate (keepMergeOnGreen), since that merge is the one FF Factory makes. w5234 lost its gate on ffu#998 so: lothsahn closed
+  it and reopened it at 14:10 UTC on 2026-11-23 while CI ran, the dispatcher blocked it on "PR ffu#998 merging", CI went
+  green at 15:50, and nothing merged it until a worker did by hand at 18:24.
 - `merge_on_green` is in the tool's schema from this version on, which a machine's daemon builds (machine/agentHost.ts reads
   server/launch.ts): a worker gets it once its daemon has updated and its process has started again. On an older one the
   field is dropped, and the worker is only told again that it may.
