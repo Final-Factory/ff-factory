@@ -2810,6 +2810,10 @@ test('w2969: the w2194 dragon case: a worker that could not file the approved st
   await new Promise((r) => setTimeout(r, 200));
   assert.equal(heard(ben.id, '[follow-ups to file]').length, 1, 'one message per hand-up');
 
+  // w5222: a hand-up read from a report has no briefs to file in one call: file_follow_ups says to file each with request_work
+  const none = await call(ben, 'file_follow_ups', { request: 'w1' });
+  assert.equal(none.isError, true);
+  assert.match(none.text, /named its follow-ups in its report only.*request_work, related_ids \["w1"\]/);
   // Ben's orchestrator files the five stages, related to w1: the last one closes w1 on its worker's DONE.
   for (let n = 1; n <= 5; n++) {
     const filed = await call(ben, 'request_work', { title: `Ancient Dragon stage ${n}`, brief: `Stage ${n} of specs/w2194-ancient-dragon/build-requests.md, as it stands.`, related_ids: ['w1'] });
@@ -2832,6 +2836,19 @@ test('w2969: the w2194 dragon case: a worker that could not file the approved st
   assert.match(String(said), new RegExp(`^Handed up 2 follow-up requests for ${id2} to Ben's orchestrator`));
   await until('Ben’s orchestrator hears the briefs', () => heard(ben.id, '[follow-ups to file]').length === 2);
   assert.match(heard(ben.id, '[follow-ups to file]')[1].text, /1\. Boss music stage 1\nCompose the intro\.\n\n2\. Boss music stage 2\nCompose the loop\./);
+  // w5222: with briefs, the message says to file them in one call, and to answer a waiting message from the person first
+  assert.match(heard(ben.id, '[follow-ups to file]')[1].text, new RegExp(`file them now in one call: file_follow_ups request "${id2}".*Answer a message from Ben waiting in this turn first`));
+  const wrong = await call(ben, 'file_follow_ups', { request: id2, items: [3] });
+  assert.equal(wrong.isError, true);
+  assert.match(wrong.text, /handed up items 1 to 2; there is no 3/);
+  assert.equal((await call(ben, 'file_follow_ups', { request: 'w999' })).isError, true, 'no hand-up there');
+  const one = await call(ben, 'file_follow_ups', { request: id2, items: [1] });
+  assert.equal(one.isError, false, one.text);
+  const filedId = /1\. "Boss music stage 1": Filed (w\d+)/.exec(one.text)![1];
+  const stage1 = store.work.get(filedId)!;
+  assert.deepEqual({ title: stage1.title, brief: stage1.brief, related: stage1.relatedIds, by: stage1.requestedBy.userId }, { title: 'Boss music stage 1', brief: 'Compose the intro.', related: [id2], by: 'ben' }, 'filed as the worker wrote it');
+  assert.deepEqual(store.work.get(id2)!.handedUp?.filed, [filedId]);
+  assert.match((await call(ben, 'file_follow_ups', { request: id2, items: [1] })).text, /Already filed as /, 'filing it again is a repeat, not a second request');
   sessions.events.emit('turnEnd', sessions.get(wid), `Design done.\n\nDONE: ${id2}\nLearned: nothing new`);
   await new Promise((r) => setTimeout(r, 200));
   assert.notEqual(store.work.get(id2)!.status, 'done');

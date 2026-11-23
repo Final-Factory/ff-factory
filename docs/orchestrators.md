@@ -1149,6 +1149,17 @@ without one means it is off or failing, worth a person's look.
       (`ledgerRules.ts` `handUpProblem`); the cleanup neither asks "is it done?" nor stalls it. Each request filed with
       `related_ids` naming it counts as one (`countFiledFollowUp`); the last one closes it on that DONE; not wanted, its
       person closes it by hand. Tests: `w2969HandUp.test.ts`, and "w2969: the w2194 dragon case" in `orchestrators.test.ts`.
+    - **Handed-up briefs are filed in one call, as written** (w5222, lothsahn: "It took you a while to answer a single
+      question from me"). Measured on lothsahn's orchestrator on 2026-11-23, 07:08 to 07:11 UTC (`agent_transcript
+      timing`): filing 21 follow-ups one `request_work` at a time took 125 s, of which 122 s was the model, in 24 steps that
+      retyped 34,201 characters of briefs (about 260 a second), and 2.9 s was the tool calls; "What is w5194?" waited 105 s
+      behind them. `file_follow_ups` (personal orchestrators, group `ledger`, deferred) takes the request and optionally
+      item numbers and a priority, and files each item's title and brief verbatim, related to the request, through
+      `Orchestrators.file` (`fileFollowUps`): the filing budget, the person's limits, the repeat check and a gate's held
+      call all still apply, and the first refusal stops the rest. It widens nothing: whether to file is the orchestrator's
+      call under the same rule as before (its person's words or a standing decision, else ask). The `[follow-ups to file]`
+      message names it when the hand-up carries briefs (a report-only hand-up still says request_work) and says to answer
+      a message from the person waiting in that turn first.
     - **Handed-up follow-ups never leave a merged request waiting for days** (w4352, lothsahn). On 2026-11-15 about 20
       requests, most of them Ben's, sat 5 h to 8 days with their PRs merged, waiting on an orchestrator: the one reminder
       came at 6 h, and a stalled request was never reminded at all (`followUpStep` skips it). Now the ledger cleanup's
