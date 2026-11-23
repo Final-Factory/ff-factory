@@ -34,6 +34,7 @@ export const REPORT_FILTER = {
   since: z.string().max(40).optional().describe('Updated at or after this ISO date or time.'),
   until: z.string().max(40).optional().describe('Updated at or before this ISO date or time (a bare date takes in its day).'),
   limit: z.number().int().min(1).max(100).optional().describe('At most this many, newest first; default 30.'),
+  all: z.boolean().optional().describe("w5223: workers' notes too (an orchestrator sees only the reports for people by default)."),
 };
 /** test_history's arguments (w4922, server/testHistory.ts QueryArgs), for workers and orchestrators alike. */
 export const TEST_HISTORY_ARGS = {
@@ -482,6 +483,7 @@ export const CATALOG = {
     note: z.string().max(500).optional().describe('With id: what changed ("added the BEAST numbers").'),
     request: z.string().max(16).optional().describe('The request it is the result of, when you are on more than one ("w2531").'),
     attachments: z.array(z.string().max(40)).max(20).optional().describe('Attachment ids from publish_attachment (a capture, a data file) to keep with it.'),
+    review: z.string().max(300).optional().describe('w5223: what a person must review in it, when that is more than a question ("approve the $412 rented scale run"). Without it and with no report asked for, it files as a worker note people do not see by default; a cost estimate always shows.'),
   },
   read_report: {
     id: z.string().max(12).describe('The report, e.g. "r12".'),

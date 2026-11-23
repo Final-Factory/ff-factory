@@ -58,7 +58,7 @@ import { LabFixtures } from './labFixtures.ts';
 import { BenchHoursStore } from './benchHoursStore.ts';
 import type { ToDaemon } from './machineProtocol.ts';
 import { REVIEW_DEFAULTS, ReviewStore, reviewHttp } from './review.ts';
-import { ReportError, ReportStore, isReportKind } from './reports.ts';
+import { ReportError, ReportStore, backfillAudienceOf, isReportKind } from './reports.ts';
 import { HostHealthMonitor } from './hostHealth.ts';
 import { PATH_HEALTH_FILE, PathHealthMonitor, filePathHealth } from './pathHealth.ts';
 import { withDismissed } from '../shared/dismissals.ts';
@@ -659,6 +659,11 @@ agents.review = review;
 // of the review media it shows, so it outlives the review folder's retention.
 const reports = new ReportStore(cfg.dataDir, () => [review.root]);
 agents.reports = reports;
+// w5223: every report filed before w5223 gets its audience once: people when asked or a cost, else a worker note.
+{
+  const n = reports.backfillAudience((r) => backfillAudienceOf(r, store.work.get(r.workId)));
+  if (n.people || n.workers) console.log(`reports: audience backfilled (w5223): ${n.people} for people, ${n.workers} worker notes`);
+}
 agents.onReport = (report) => broadcast({ type: 'report', report });
 // w4613: and the packed players open pair runs name, kept while the run waits for room (w4622).
 attachments.keep = () => [...reports.attachmentIds(), ...pairPlayerIds(store.work.values(), isOpen)];
@@ -1844,7 +1849,9 @@ route('GET', '/api/reports/search', async (_r, _p, url) => {
   const q = (k: string) => url.searchParams.get(k)?.trim() || undefined;
   const kind = q('kind');
   if (kind && !isReportKind(kind)) throw new HttpError(400, `kind: unknown report kind ${kind}`);
-  return reportCall(() => reports.search({ query: q('q'), kind, request: q('request'), person: q('person'), since: q('since'), until: q('until') }));
+  // w5223: the reports for people unless all=1 (the Reports tab's "worker notes" toggle).
+  const all = url.searchParams.get('all') === '1';
+  return reportCall(() => reports.search({ query: q('q'), kind, request: q('request'), person: q('person'), since: q('since'), until: q('until'), ...(all ? {} : { audience: 'people' as const }) }));
 });
 route('GET', '/api/reports/(r[0-9]+)', async (_r, [id], url) => {
   const rev = url.searchParams.get('rev');

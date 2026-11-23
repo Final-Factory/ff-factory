@@ -9777,15 +9777,17 @@ test('w2541: a request marked for a report refuses DONE until its worker files o
   const ben = chat(BEN).info;
   const filed = await call(ben, 'request_work', { title: 'Profile the belt renderer', brief: 'Where do the frames go?', report: 'profile' });
   assert.match(filed.text, /its result is a report \(profile\), which its worker files with file_report/);
-  assert.deepEqual({ ...store.work.get('w1')!.report, at: undefined }, { kind: 'profile', at: undefined, by: 'Ben' });
+  assert.deepEqual({ ...store.work.get('w1')!.report, at: undefined }, { kind: 'profile', at: undefined, by: 'Ben', asked: true });
   assert.match(reportProblem(store.work.get('w1')!)!, /file it first with mcp__machine__file_report/);
-  // The dispatcher marks one its person did not, and takes the mark back.
+  // The dispatcher marks one its person did not (w5223: no ask, so no DONE gate and a worker note), and takes the mark back.
   await call(ben, 'request_work', { title: 'Splitter designs', brief: 'Three ways a splitter could pick.' });
   // A refused decision leaves the mark as it was.
   assert.match((await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'queue', note: 'A design; no sandbox free.', report: 'design' })).text, /^ERROR: queue is for capacity only/);
   assert.equal(store.work.get('w2')!.report, undefined);
-  assert.match((await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'block', note: 'After the belt profile.', report: 'design', blocker: { kind: 'request', ref: 'w1', what: 'the belt profile' } })).text, /^w2: its result is a design report/);
+  assert.match((await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'block', note: 'After the belt profile.', report: 'design', blocker: { kind: 'request', ref: 'w1', what: 'the belt profile' } })).text, /^w2: marked design, but no person asked for it in this turn, so it is no report for people \(w5223\)/);
   assert.equal(store.work.get('w2')!.report?.by, 'the dispatcher');
+  assert.equal(store.work.get('w2')!.report?.asked, false);
+  assert.equal(reportProblem(store.work.get('w2')!), undefined, 'w5223: a mark no person asked for holds no DONE');
   assert.match((await call(ben, 'update_work', { id: 'w2', report: false })).text, /w2: no report needed any more/);
   assert.equal(store.work.get('w2')!.report, undefined);
 
@@ -9795,6 +9797,7 @@ test('w2541: a request marked for a report refuses DONE until its worker files o
   const h = machines.hooks!.handlersFor(store.sessions.get(id)!, store.machines.get('pc')!);
   const out = await h.file_report!({ title: 'Belt render profile', kind: 'profile', body: 'BeltRenderSystem: 62 ms a frame (measured).' });
   assert.match(out, /^r1 filed for w1, Ben's report/);
+  assert.equal(agents.reports.get('r1')!.audience, 'people', 'Ben asked for it');
   assert.deepEqual(store.work.get('w1')!.reports, [{ id: 'r1', title: 'Belt render profile', kind: 'profile' }]);
   assert.equal(reportProblem(store.work.get('w1')!), undefined, 'filed: DONE is no longer held');
   await h.file_report!({ id: 'r1', title: 'Belt render profile, two saves', kind: 'profile', body: 'Measured again.', note: 'second save' });
@@ -9803,6 +9806,49 @@ test('w2541: a request marked for a report refuses DONE until its worker files o
 
   assert.match((await call(ben, 'list_reports', { person: 'ben' })).text, /r1 · profile · w1 · for Ben · .* · 2 revisions · "Belt render profile, two saves"/);
   assert.match((await call(ben, 'read_report', { id: 'r1', rev: 1 })).text, /revision 1 of 2[\s\S]*BeltRenderSystem: 62 ms/);
+});
+
+// w5223 (lothsahn: "I really only want it when I ask for one"; "we need a dramatic reduction, not a tweak"; "Please make
+// sure the cost remains unhidden"): a mark outside a person's turn asks no report; a report nobody asked for is a worker
+// note the person's orchestrator does not list by default; a cost estimate always shows.
+test('w5223: reports only when a person asks: an unasked mark holds no DONE, an unasked report is a worker note, costs show', async (t) => {
+  const { store, agents, machines, dispatcher, chat, call, cfg } = await setupOnMachine(t);
+  agents.reports = new ReportStore(cfg.dataDir, () => []);
+  const loth = chat(LOTH);
+  // A hand-up turn, not Lothsahn's own words: the mark is kept but asks no report.
+  loth.lastFrom = 'system';
+  const filed = await call(loth.info, 'request_work', { title: 'Where did the Upgrade Planner go', brief: 'Find out.', report: 'investigation' });
+  assert.match(filed.text, /not asked by a person: a worker note/);
+  assert.equal(store.work.get('w1')!.report?.asked, false);
+  assert.equal(reportProblem(store.work.get('w1')!), undefined);
+  await call(loth.info, 'request_work', { title: 'FFU G3 rented scale run', brief: 'What would it cost?' });
+  loth.lastFrom = 'human';
+  // In Lothsahn's own turn, update_work marks it asked.
+  await call(loth.info, 'request_work', { title: 'Design the splitter modes', brief: 'Three options.' });
+  assert.match((await call(loth.info, 'update_work', { id: 'w3', report: 'design' })).text, /^w3: its result is a design report/);
+  assert.equal(store.work.get('w3')!.report?.asked, true);
+
+  const files: Record<string, string> = {};
+  for (const [wid, title, extra] of [
+    ['w1', 'Where the Upgrade Planner went', {}],
+    ['w2', 'FFU G3 rented scale-run cost estimate', {}],
+    ['w3', 'Splitter mode options', {}],
+  ] as const) {
+    const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Go', title: `${wid}: go`, work_id: wid, extra_agent: wid !== 'w1' });
+    assert.equal(started.isError, false, started.text);
+    const id = /Started agent (\w+)/.exec(started.text)![1];
+    const h = machines.hooks!.handlersFor(store.sessions.get(id)!, store.machines.get('pc')!);
+    files[wid] = await h.file_report!({ title, kind: 'analysis', body: 'Findings.', ...extra });
+  }
+  assert.match(files.w1, /^r1 filed for w1 as a worker note \(w5223\)[\s\S]*Your findings go in your final message/);
+  assert.match(files.w2, /^r2 filed for w2, Lothsahn's report/);
+  assert.match(files.w3, /^r3 filed for w3, Lothsahn's report/);
+  assert.deepEqual(['r1', 'r2', 'r3'].map((r) => agents.reports!.get(r)!.audience), ['workers', 'people', 'people']);
+  // Lothsahn's orchestrator lists the reports for people; all adds the worker notes.
+  const listed = (await call(loth.info, 'list_reports', {})).text;
+  assert.match(listed, /^2 reports \(1 worker note not shown: all true lists them\)/);
+  assert.doesNotMatch(listed, /Upgrade Planner/);
+  assert.match((await call(loth.info, 'list_reports', { all: true })).text, /^3 reports[\s\S]*r1 · analysis · worker note · w1/);
 });
 
 

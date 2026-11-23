@@ -133,7 +133,7 @@ export const api = {
   // What work costs (w859, docs/spend.md): each request's cost, one request in full, and the analysis.
   spendSummary: () => request<SpendSummaryReply>('GET', '/api/spend/summary'),
   /** Reports (w2541, docs/reports.md): search them with every filter, and read one at a revision (the latest by default). */
-  searchReports: (f: { q?: string; kind?: string; request?: string; person?: string; since?: string; until?: string }) =>
+  searchReports: (f: { q?: string; kind?: string; request?: string; person?: string; since?: string; until?: string; all?: string }) =>
     request<ReportHit[]>('GET', `/api/reports/search?${new URLSearchParams(Object.entries(f).filter((e): e is [string, string] => !!e[1]))}`),
   report: (id: string, rev?: number) => request<Report>('GET', `/api/reports/${encodeURIComponent(id)}${rev ? `?rev=${rev}` : ''}`),
   spendRequest: (id: string) => request<SpendRequestReply>('GET', `/api/spend/request/${encodeURIComponent(id)}`),

@@ -401,7 +401,8 @@ export const requestLineRule = (w: Pick<WorkItem, 'id'> & Partial<Pick<WorkItem,
  * its DONE, which the ledger refuses until one is filed (server/ledgerRules.ts reportProblem).
  */
 export const reportRule = (w: Partial<Pick<WorkItem, 'id' | 'report'>>) =>
-  w.report
+  // w5223: a mark no person asked for asks no report of its worker (it would file a worker note).
+  w.report && w.report.asked !== false
     ? ` ${w.id}'s result is a report (${w.report.kind}, asked by ${w.report.by}): file it with mcp__machine__file_report (a title, kind ${w.report.kind}, the whole result as Markdown: the findings, the numbers with their evidence labels, and the stills and clips from publish_review as ![what it shows](<path>)), and revise it with its id when the result changes; it keeps every older revision. Your report then names it (r<N>) instead of repeating it. The ledger refuses ${w.id}'s DONE until one is filed.`
     : '';
 

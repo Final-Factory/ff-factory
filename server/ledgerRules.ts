@@ -733,7 +733,8 @@ export function learnedProblem(w: Pick<WorkItem, 'reopenedAt'>, report: string):
  * (a design, an analysis, a profile, research) and none is filed for it yet.
  */
 export function reportProblem(w: Pick<WorkItem, 'report' | 'reports'>): string | undefined {
-  if (!w.report || w.reports?.length) return undefined;
+  // w5223: a mark no person asked for (the dispatcher's, or one made outside a person's turn) holds no DONE.
+  if (!w.report || w.report.asked === false || w.reports?.length) return undefined;
   return `its result is a report (${w.report.kind}, asked by ${w.report.by}): file it first with mcp__machine__file_report (title, kind ${w.report.kind}, the whole result as Markdown with its stills and evidence labels), then say DONE again`;
 }
 
