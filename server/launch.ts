@@ -13,6 +13,7 @@ import { editorBenchGateFor, GATE_HOOK_TIMEOUT_S } from '../machine/editorBenchG
 import { foreignTimedHold, ownTimedHold, readCrashHold, readTimedAsk } from '../machine/benchLock.ts';
 import { personHoldReason } from '../machine/personPlay.ts';
 import { closedRefusalFor } from '../machine/benchTurn.ts';
+import { writeLockSpawner } from '../machine/writeLock.ts';
 import { standingGuard } from './standingGuard.ts';
 import { ghSpendHooks, rateLimitReader } from './ghSpendHook.ts';
 import { readChainHook } from './readChainHook.ts';
@@ -184,6 +185,8 @@ export interface LaunchSpec {
   claudeExecutable?: string;
   /** Run claude inside the worker write fence (server/workerFence.ts, w5333; daemon.json `workerFence`, off by default). */
   fence?: WorkerFence;
+  /** ff-landlock.py's arguments: claude starts under the Linux write lock (machine/writeLock.ts, w5333). */
+  writeLock?: string[];
   /** Created before the process starts: `cwd` itself, and these files (relative to cwd) when missing. */
   init?: { files?: Record<string, string> };
 }
@@ -657,5 +660,6 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
     env: agentEnv,
     ...(spec.claudeExecutable ? { pathToClaudeCodeExecutable: spec.claudeExecutable } : {}),
     ...(spec.fence ? { spawnClaudeCodeProcess: fenceSpawner(spec.fence) } : {}),
+    ...(spec.writeLock && process.platform === 'linux' ? { spawnClaudeCodeProcess: writeLockSpawner(spec.writeLock) } : {}),
   };
 }
