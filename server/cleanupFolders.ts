@@ -314,7 +314,7 @@ export async function judgeFfuSlotPath(p: string, f: CleanupFacts, now: number, 
  * batchmode build open (Temp/UnityLockfile), one a running process names, and everything the trim keeps. Never the cache whole:
  * a cold Unity start is slow (lothsahn, 2026-11-01).
  */
-export async function judgeSandboxLibraryPath(p: string, f: CleanupFacts, ctx?: SlotContext): Promise<FolderRow | undefined> {
+export async function judgeSandboxLibraryPath(p: string, f: CleanupFacts, ctx?: SlotContext, now = Date.now()): Promise<FolderRow | undefined> {
   if (!f.root) return undefined;
   for (const sb of f.sandboxes) {
     if (!within(p, sb.path)) continue;
@@ -328,7 +328,8 @@ export async function judgeSandboxLibraryPath(p: string, f: CleanupFacts, ctx?: 
     const user = ctx.procs.find((c) => mentions(c, sb.path));
     if (user) return row('keep', `a running process names ${sb.id} (${user.slice(0, 160)})`);
     if (rel.length < 3) return row('keep', `${sb.id}'s Library/${rel[1]} as a whole: a cold Unity start is slow, only its stale entries are candidates`);
-    const hit = (await sandboxLibraryStale(sb.path)).find((e) => norm(p) === norm(e.path) || within(p, e.path));
+    const { hit, inside } = staleHit(p, await memoStale('sandbox', sb.path, now, () => sandboxLibraryStale(sb.path)));
+    if (inside) return row('keep', insideEntryWhy(inside));
     if (!hit) return row('keep', `not stale: the newest Burst player builds, JIT bundles loaded within ${JIT_IDLE_DAYS_TEXT}, the manifests and the newest BuildCache folders stay (cacheTrim.ts)`);
     return row('delete', `a stale entry of ${sb.id}'s Library/${rel[1]}: ${hit.why}; no worker is in the sandbox, no editor or build has it open (rebuildable, w5240)`);
   }
@@ -341,6 +342,44 @@ const JIT_IDLE_DAYS_TEXT = '14 days';
 async function sandboxLibraryStale(project: string): Promise<StaleEntry[]> {
   return [...(await staleCacheEntries(project)).stale, ...(await idleJitEntries(project))];
 }
+
+/**
+ * One scan of a project's Library caches per clock reading (w5309). planFolders judges every candidate row with its own `now`,
+ * and each row of a Library judged its cache again: on m5 the 90 GB seed was walked once per row, `folders` ran for minutes,
+ * and its later rows (all 451 BuildCache folders, listed after the Burst builds) outlived the facts. A `check` or `remove`
+ * reads the clock afresh, so it scans afresh.
+ */
+const staleMemo = new Map<string, Promise<StaleEntry[]>>();
+function memoStale(kind: string, project: string, now: number, scan: () => Promise<StaleEntry[]>): Promise<StaleEntry[]> {
+  const key = `${kind}|${norm(project)}|${now}`;
+  let hit = staleMemo.get(key);
+  if (!hit) {
+    if (staleMemo.size > 64) staleMemo.clear();
+    hit = scan();
+    staleMemo.set(key, hit);
+    hit.catch(() => staleMemo.delete(key));
+  }
+  return hit;
+}
+
+const isBuildCacheEntry = (p: string) => norm(p).includes('/library/buildcache/');
+
+/**
+ * The stale entry `p` is (hit), or the BuildCache entry it lies inside (inside). A BuildCache entry goes whole or not at all
+ * (w5309): its .info names its files, and one file of it gone fails the next build in ArchiveAndCompressBundles ("Could not
+ * find file '...\Library\BuildCache\...'", w1211). A file inside a stale Burst entry (a JIT bundle's dSYM) goes with it.
+ */
+function staleHit(p: string, stale: StaleEntry[]): { hit?: StaleEntry; inside?: StaleEntry } {
+  const exact = stale.find((e) => norm(p) === norm(e.path));
+  if (exact) return { hit: exact };
+  const outer = stale.find((e) => within(p, e.path));
+  if (!outer) return {};
+  return isBuildCacheEntry(outer.path) ? { inside: outer } : { hit: outer };
+}
+
+const seedStale = (seed: string) => async () => (await staleCacheEntries(path.dirname(seed))).stale;
+
+const insideEntryWhy = (e: StaleEntry) => `part of a stale BuildCache entry (${e.path}): only the whole entry goes, since a build fails on an entry missing one of its files (w1211, w5309)`;
 
 /** The pool's Library seed when ff-leftovers may judge it (w5280): inside the install folder, not a sandbox's, not a project's own Library. */
 export function seedLibrary(f: CleanupFacts): string | undefined {
@@ -364,9 +403,11 @@ export function seedLibrary(f: CleanupFacts): string | undefined {
  * (measured 2026-11-23). Kept while any process names the seed (a sandbox being cloned from it: copyTree runs `cp` or
  * robocopy with the seed's path), and the caches whole.
  */
-export async function judgeSeedLibraryPath(p: string, f: CleanupFacts, ctx?: SlotContext): Promise<FolderRow | undefined> {
+export async function judgeSeedLibraryPath(p: string, f: CleanupFacts, ctx?: SlotContext, now = Date.now()): Promise<FolderRow | undefined> {
   const seed = seedLibrary(f);
-  if (!seed || !within(p, seed) || factsProblem(f)) return undefined;
+  // `now`, not the wall clock (w5309): planFolders judges on its own clock; on the wall clock its later seed rows found the facts
+  // over 5 min old, fell through to judgePath (on planFolders' clock) and came out "not a place with an owner in the ledger".
+  if (!seed || !within(p, seed) || factsProblem(f, now)) return undefined;
   const rel = norm(p).slice(norm(seed).length + 1).split('/');
   if (!LIBRARY_CACHES.some((c) => c.toLowerCase() === rel[0])) return undefined;
   const row = (verdict: FolderRow['verdict'], why: string): FolderRow => ({ path: p, kind: 'seed-library', verdict, why });
@@ -375,8 +416,8 @@ export async function judgeSeedLibraryPath(p: string, f: CleanupFacts, ctx?: Slo
   if (user) return row('keep', `a running process names the Library seed (${user.slice(0, 160)}): a sandbox may be cloned from it now`);
   if (rel.length < 2) return row('keep', `the Library seed's ${rel[0]} as a whole: a sandbox cloned from a cold seed starts cold, only its stale entries are candidates`);
   if (rel[0] === 'burstcache' && rel[1] === 'jit') return row('keep', "the Library seed's JIT: nothing loads the seed, so its access times say nothing; every seed bundle was in use in a sandbox (w5280)");
-  const { stale } = await staleCacheEntries(path.dirname(seed));
-  const hit = stale.find((e) => norm(p) === norm(e.path) || within(p, e.path));
+  const { hit, inside } = staleHit(p, await memoStale('seed', seed, now, seedStale(seed)));
+  if (inside) return row('keep', insideEntryWhy(inside));
   if (!hit) return row('keep', 'not stale: the newest Burst player builds, the manifests and the newest BuildCache folders stay (cacheTrim.ts)');
   return row('delete', `a stale entry of the Library seed's ${path.relative(seed, p).split(/[\\/]/)[0]}: ${hit.why}; no process names the seed (rebuildable, w5280)`);
 }
@@ -638,7 +679,7 @@ export async function withGitCheck(r: FolderRow, root: string | undefined, local
  * "its git state could not be read" and KEEP while the pass judged it DELETE (ffa-f1beecb0 on LothDesktop, 2026-11-08).
  */
 export async function judgeWithGit(p: string, f: CleanupFacts, now: number, slots?: SlotContext, o: { localWork?: (dir: string) => Promise<string | undefined>; unpushedWork?: (dir: string) => Promise<string | undefined> } = {}): Promise<FolderRow> {
-  const judged = (await judgeFfuSlotPath(p, f, now, slots)) ?? (await judgeSandboxLibraryPath(p, f, slots)) ?? (await judgeSeedLibraryPath(p, f, slots)) ?? (await judgeRunnerWorkPath(p, f, now, slots)) ?? (await judgePlayerCachePath(p, f, now, slots)) ?? judgePath(p, f, now, slots);
+  const judged = (await judgeFfuSlotPath(p, f, now, slots)) ?? (await judgeSandboxLibraryPath(p, f, slots, now)) ?? (await judgeSeedLibraryPath(p, f, slots, now)) ?? (await judgeRunnerWorkPath(p, f, now, slots)) ?? (await judgePlayerCachePath(p, f, now, slots)) ?? judgePath(p, f, now, slots);
   // A runner's checkout is CI's own scratch (w5235): actions/checkout (clean: true, its default) runs git clean -ffdx and
   // git reset --hard before every job, so its uncommitted files are a build's leftovers that the next job wipes anyway.
   if (judged.kind === 'ffu-runner-work') return judged;
@@ -697,12 +738,12 @@ export async function planFolders(f: CleanupFacts, o: { now?: number; sizes?: 'a
   for (const e of entries(path.join(f.root!, 'player-cache'))) if (e.isDirectory() && PLAYER_CACHE_ENTRY.test(e.name)) paths.push(path.join(f.root!, 'player-cache', e.name));
   for (const sb of f.sandboxes) {
     // w5240: a sandbox's stale Library cache entries, only while it is idle and closed.
-    if (judgeSandbox(sb.id, f).verdict === 'delete' && !projectOpen(sb.path)) for (const e of await sandboxLibraryStale(sb.path)) paths.push(e.path);
+    if (judgeSandbox(sb.id, f).verdict === 'delete' && !projectOpen(sb.path)) for (const e of await memoStale('sandbox', sb.path, now, () => sandboxLibraryStale(sb.path))) paths.push(e.path);
     for (const top of ['Builds', '.nightly-builds']) for (const e of entries(path.join(sb.path, top))) paths.push(path.join(sb.path, top, e.name));
   }
   // w5280: the Library seed's stale entries, while no process names it (judgeSeedLibraryPath judges each again).
   const seed = seedLibrary(f);
-  if (seed && o.slots?.procs && !o.slots.procs.some((c) => mentions(c, seed))) for (const e of (await staleCacheEntries(path.dirname(seed))).stale) paths.push(e.path);
+  if (seed && o.slots?.procs && !o.slots.procs.some((c) => mentions(c, seed))) for (const e of await memoStale('seed', seed, now, seedStale(seed))) paths.push(e.path);
   const rows: FolderPlan = [];
   let emptySlots = 0;
   for (const p of paths) {
