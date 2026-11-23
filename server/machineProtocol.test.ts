@@ -147,7 +147,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // daemon ignores the field and pushes to the branch as before.
 // w5068 (no bump): `switch.holdPush`, the same hold for the push of unpushed commits before a switch; an older daemon
 // ignores it and pushes to the branch as before.
-const DECIDED = { protocol: 9, fingerprint: '4e7e08d752fa3113' };
+// w5333 (no bump): `LaunchSpec.writeLock`, the Linux write lock's launcher arguments; set only by a daemon whose
+// daemon.json has `writeLock` (off by default), and a launch that lacks it starts claude unlocked as before.
+const DECIDED = { protocol: 9, fingerprint: '5d5498709776a1ea' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {
