@@ -576,6 +576,13 @@ export function reopenWork(w: WorkItem, at: string): number[] {
   w.setAside = undefined;
   w.prs = w.prs ? [] : undefined;
   w.followUp = undefined;
+  // w5316: the gates its close dropped come back, so it is Blocked on them again (orchestrators.ts reopenedStatus).
+  const gates = w.gatesAtClose ?? [];
+  if (gates.length && !w.blocked) {
+    w.blocked = gates[0];
+    w.alsoBlocked = gates.length > 1 ? gates.slice(1) : undefined;
+  }
+  w.gatesAtClose = undefined;
   return dropped;
 }
 
