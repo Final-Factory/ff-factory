@@ -5738,7 +5738,11 @@ A report is for a person who asked for one, and people want very few. File one w
    */
   async prepareForNewWork(sandbox: string | undefined, machine: string | undefined, name?: string, source?: WorkSource, agentSeat = false): Promise<{ note: string; branch?: string }> {
     const p = this.planForNewWork(sandbox, machine, name, source, agentSeat);
-    return p.pending ? await p.pending : { note: p.note, branch: p.branch };
+    if (p.pending) return await p.pending;
+    // Nothing to switch: it settles after the same microtask as before w5278 (an async prepareSandbox awaited), which
+    // w2548's holds of a request under way are timed to.
+    await null;
+    return { note: p.note, branch: p.branch };
   }
 
   /**
@@ -6569,8 +6573,14 @@ ${w.repo ?? ''}
               return `Started agent ${s.info.id} "${s.info.title}" ${where}${picked.note || ` on ${this.cfg.defaultModel}`}, requested by ${requestedBy.displayName}${item}.${withFiles}${shared}${Agents.goneLine(files)}${this.queuedLine(s.info.id)}${handed.note}${hint}`;
             };
             if (!plan.pending) {
-              if (w) this.agentStarting.delete(w.id);
-              return finish(plan);
+              // Nothing to switch: held over the same microtasks as before w5278 (it awaited prepareForNewWork), so w2548's hold is seen.
+              try {
+                await null;
+                await null;
+                return finish(plan);
+              } finally {
+                if (w) this.agentStarting.delete(w.id);
+              }
             }
             if (ctx.role !== 'dispatcher') {
               try {

@@ -4315,9 +4315,13 @@ test('w754: a worker whose request waits only on a PR and another request calls 
 /** A worker started for request `wid` in pc/alpha, past its first turn. */
 async function startedFor(env: Awaited<ReturnType<typeof setupOnMachine>>, wid: string, extra: Record<string, unknown> = {}) {
   const { store, machines, dispatcher, call } = env;
+  const before = new Set(store.work.get(wid)?.sessionIds ?? []);
   const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Fix it', title: `${wid}: fix`, work_id: wid, extra_agent: true, ...extra });
   assert.equal(started.isError, false, started.text);
-  const id = /Started agent (\w+)/.exec(started.text)![1];
+  // w5278: a sandbox handed over first (a released worker's branch) answers at once; the worker starts once it is switched.
+  const fresh = () => (store.work.get(wid)?.sessionIds ?? []).find((x) => !before.has(x));
+  if (/^Starting /.test(started.text)) await until(`${wid}'s worker starts after the hand-over`, () => !!fresh());
+  const id = /Started agent (\w+)/.exec(started.text)?.[1] ?? fresh()!;
   const info = store.sessions.get(id)!;
   await firstTurn(info);
   return { id, info, h: machines.hooks!.handlersFor(info, store.machines.get('pc')!) };
