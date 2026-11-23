@@ -34,6 +34,7 @@ import { McpScopes, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp, type St
 import { addSecretEnv, addSecretValues, redactSecrets, redactValue, skippedSecrets } from '../server/secrets.ts';
 import { CliScrubber, type CliScrubReport } from '../server/cliScrub.ts';
 import { cliProjectsDir } from '../server/cliTranscript.ts';
+import { legacyProjectsDirs, loginClaudeEnv, moveClaudeHome } from '../server/claudeHome.ts';
 import { FileTail, defaultEventsFile } from '../server/maxEvents.ts';
 import { OutsideWatch, outsideWatchFile, readOutsideWatch } from './outsideWatch.ts';
 import { run } from '../server/proc.ts';
@@ -318,7 +319,8 @@ export interface Probes {
 
 const REAL_PROBES: Probes = {
   stats: hostStats,
-  usage: (claude) => fetchPlanUsage(usageEnv(process.env), { cwd: HOME, claudeExecutable: claude }),
+  // the machine's own login stays in the legacy folder (w5305: the Keychain entry's name follows CLAUDE_CONFIG_DIR on macOS)
+  usage: (claude) => fetchPlanUsage(usageEnv(loginClaudeEnv(process.env)), { cwd: HOME, claudeExecutable: claude }),
   bashTmp: () => ensureGitBashTmp(),
   gh: run,
   steam: realSteamDeps,
@@ -1276,7 +1278,8 @@ export class Daemon {
     if (process.env.FF_CLI_SCRUB !== 'off') {
       this.cliScrub = new CliScrubber({
         root: cliProjectsDir(),
-        extraRoots: () => cliTempFolders(agentTempRoot(this.cfg.tempDir)),
+        // w5305: the legacy ~/.claude's transcripts too, while agents started before the move (or on the stored login) write there
+        extraRoots: () => [...cliTempFolders(agentTempRoot(this.cfg.tempDir)), ...legacyProjectsDirs(process.env)],
         log: (line) => log(line),
         // the portal keeps it beside the clean-up passes (portal_logs cleanup, this machine): paths and counts only
         report: (r: CliScrubReport) => this.out({ type: 'cleanup_log', entry: { ...r } }),
@@ -3400,6 +3403,10 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
   for (const [k, v] of Object.entries(cfg.env ?? {})) if (typeof v === 'string') process.env[k] = v;
   // A worker root (w513): agents and the scripts they run find the player slots (and the nightly history) in it.
   if (cfg.root) for (const [k, v] of Object.entries(rootEnv(cfg.root))) process.env[k] ??= v;
+  // w5305: its agents' Claude Code folder is <root>/claude, not the person's ~/.claude (server/claudeHome.ts), unless daemon.json
+  // names one (an instance's own) or says FF_CLAUDE_HOME "legacy". Agents already running keep the folder they started with.
+  const movedClaude = cfg.root ? moveClaudeHome(process.env, cfg.root, HOME, (line) => log(line)) : undefined;
+  if (movedClaude) log(movedClaude);
   // server/launch.ts keeps the public identity's gitconfig in the daemon's folder.
   process.env.FF_APP_DIR = appDirOfConfig(cfg);
   // The real daemon answers the machine's own Unity slots mailbox, where scripts look (a worker root keeps its own).

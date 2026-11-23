@@ -18,6 +18,7 @@
 // The machine credential (the `ffm_<id>_…` token the portal issued for this machine) is read from stdin, kept only in
 // <root>/secrets/machine-token (owner-only) and never printed or put on a command line.
 
+import { carrySettings, movesClaudeHome, workerClaudeDir } from '../../server/claudeHome.ts';
 import { spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -2251,6 +2252,14 @@ export async function tools(root: string, ownerFlag?: string): Promise<number> {
     if (j.env && typeof j.env === 'object') env = { ...process.env, ...(j.env as Record<string, string>) };
   } catch {
     // no daemon.json: Claude Code from PATH
+  }
+  // w5305: a main install's agents use <root>/claude, as its daemon sets at start (server/claudeHome.ts): the plugins go there,
+  // after the legacy settings.json is carried across (once). The person's ~/.claude keeps its own plugins as they are.
+  if (movesClaudeHome(env)) {
+    const dir = workerClaudeDir(l.root);
+    fs.mkdirSync(dir, { recursive: true });
+    say(`Claude Code's folder for this install's agents: ${dir} (settings.json from ~/.claude: ${carrySettings(path.join(os.homedir(), '.claude'), dir)}).`);
+    env = { ...env, CLAUDE_CONFIG_DIR: dir };
   }
   let owner = ownerFlag;
   if (isWin && elevated() && !owner) owner = (await taskUser(m.service))?.owner;

@@ -268,7 +268,7 @@ the daemon's `process.env`). The editors the daemon starts inherit it too. So th
 
 | Variable | Points to | Moves | Basis |
 |---|---|---|---|
-| `CLAUDE_CONFIG_DIR` | `claude/` | settings, plugins (`registerAgents.sh` run with it set), `projects/` (transcripts, memory, resume), credentials on Windows | sourced: Claude Code settings docs; `server/usage.ts:195` already follows it |
+| `CLAUDE_CONFIG_DIR` | `claude/` | settings, plugins (`registerAgents.sh` run with it set), `projects/` (transcripts, memory, resume); not the machine's own login, which stays in `~/.claude` | set by the daemon on itself at start since w5305 ([2.7](#27-claude-codes-folder-w5305)) |
 | `TEMP`, `TMP`, `TMPDIR` | `tmp/` (the existing `temp_dir`) | agents' temp, Claude's task output | measured: today's mechanism, `machine/daemon.ts:58,126` |
 | `GIT_CONFIG_GLOBAL` | `home/.gitconfig` | identity, credential helper | sourced: git-config docs (git 2.32+) |
 | `GH_CONFIG_DIR` + `GH_TOKEN` | `home/.config/gh`, `secrets/gh-token` | gh's config; the token in place of the OS keyring, where BEAST's lives today (measured) | sourced: `gh help environment` |
@@ -359,6 +359,47 @@ fills from what it finds, and the uninstall reads.
 | The game's `persistentDataPath` on Windows (`LocalLow\Never Games\finalfactory`, 8.9 GB on BEAST) | Unity derives it from the profile's known folder, and the game has no override (searched `persistentDataPath\s*=` and data-root flags in `Assets/Scripts` and `scripts`; 48 uses in 34 files read `Application.persistentDataPath`) | `root.json.outside` for clean-up of saves the install made; decision 5 |
 | `~/.unity-mcp` | the MCP-for-Unity editor plugin writes there (`machine/unityMcp.ts:75`) | the daemon's `unityMcpServer` / status-dir setting |
 | `%ProgramData%\FinalFactory\player-slots.json` | **can go**: with `FF_PLAYER_SLOT_ROOT` set by the daemon it is no longer read | — |
+
+### 2.7 Claude Code's folder (w5305)
+
+lothsahn (w5297): "under no circumstances should workers write outside of ffw". Before w5305 a main install left
+`CLAUDE_CONFIG_DIR` unset, so every agent's transcripts, plugins and settings went to the person's `~/.claude` (8.6 GB on
+m5); only `worker.ts install --instance` set it, in `daemon.json` `env`. Now `server/claudeHome.ts` moves a worker root's
+agents to `<root>/claude`, in four parts that landed together:
+
+1. **The daemon's own environment.** At start (`machine/daemon.ts`, after `rootEnv`) `moveClaudeHome` sets
+   `CLAUDE_CONFIG_DIR=<root>/claude` on `process.env`, makes the folder and remembers the one it left in
+   `FF_CLAUDE_LEGACY_DIR` (and `FF_CLAUDE_WORKER_DIR`). Every reader that follows the variable looks there: the transcript
+   scrubber (which scans the legacy `projects/` too), `cliTranscriptPath`, plugin paths (`FF_SKILLS`), the evidence gate.
+   It does nothing when `daemon.json` `env` names a `CLAUDE_CONFIG_DIR` (an instance's own) or sets `FF_CLAUDE_HOME` to
+   `legacy` (the off switch).
+2. **Plugins before agents.** `worker.ts tools` (the rollout's tools publish after each verified portal deploy) runs
+   `registerAgents.sh` with `CLAUDE_CONFIG_DIR=<root>/claude`, so the plugins (the machine's remembered set, ff-discord
+   included where a person asked for it) install there. Until `<root>/claude/plugins/installed_plugins.json` lists
+   ff-agents with a skills folder, each agent launch runs with `CLAUDE_CONFIG_DIR` unset (`agentClaudeEnv` in
+   `server/launch.ts` `buildOptions`), on the legacy folder as before, so skills load either way. The person's own
+   `~/.claude` plugins are no longer updated by the publish: they are theirs.
+3. **Resume.** Before a conversation's process resumes (`server/sessions.ts` `launchResumed`), `carryTranscript` copies its
+   `<id>.jsonl` and `<id>/` folder (subagents, tool results) from the legacy `projects/<cwd>/` into the new one; it copies,
+   never moves, and the session's log says so. `cliTranscriptPath` looks in both folders. An agent already running in an
+   agent host keeps the folder it started with until its process ends.
+4. **Settings and config.** `settings.json` is carried once (marker `<root>/claude/.ff-settings-carried`) by the daemon's
+   start or the tools publish, whichever runs first: keys the new file lacks, never `enabledPlugins`,
+   `extraKnownMarketplaces`, credential helpers (`apiKeyHelper`, `awsAuthRefresh`, `awsCredentialExport`,
+   `otelHeadersHelper`) or an `env` entry whose name looks like a secret. The Unity MCP entry is read from
+   `<root>/claude/.claude.json` first, then the person's `~/.claude.json`, where MCP for Unity registers it
+   (`machine/unityMcp.ts`).
+
+What stays in `~/.claude`, on purpose:
+
+- **The machine's own claude.ai login.** macOS keeps it in the Keychain under a name that depends on `CLAUDE_CONFIG_DIR`,
+  Windows and Linux in `~/.claude/.credentials.json`; it is never moved or copied. The usage probe (`loginClaudeEnv`) and an
+  agent with no Claude credential of its own run with the variable unset. Every portal agent has a vault token
+  (`server/secrets.ts`), so in practice only the probe reads it.
+- **registerAgents.sh's checkout marker and plugin set** (`$HOME/.claude/final-factory-agents-checkout`, `-plugins`):
+  registerAgents.sh writes them and publish-skills reads the marker at that fixed path (final-factory-agents
+  `registerAgents.sh:40-41`, `publish-skills/SKILL.md:22`), so `server/agentTools.ts` and `server/strayWrite.ts` keep
+  reading them there. Moving them is a change in final-factory-agents first.
 
 ## 3. Install, uninstall, upgrade
 

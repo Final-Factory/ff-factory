@@ -246,7 +246,8 @@ export async function publishAgentTools(root: string, d: PublishDeps, o: { claud
   if (d.giveTo) {
     const plugins = path.join(claudeDir, 'plugins');
     try {
-      await d.giveTo([co, path.join(plugins, 'marketplaces', MARKETPLACE), path.join(plugins, 'cache', MARKETPLACE), installed, path.join(plugins, 'known_marketplaces.json'), marker]);
+      // w5305: <root>/claude itself and its settings.json too, when the run made them (an elevated run on Windows)
+      await d.giveTo([co, path.join(plugins, 'marketplaces', MARKETPLACE), path.join(plugins, 'cache', MARKETPLACE), installed, path.join(plugins, 'known_marketplaces.json'), marker, ...(path.resolve(claudeDir).startsWith(path.resolve(root)) ? [claudeDir] : [])]);
     } catch (e) {
       d.say(`WARNING: could not give what the run made to the daemon's user: ${(e as Error).message}`);
     }
