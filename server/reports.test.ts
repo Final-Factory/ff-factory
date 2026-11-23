@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { ReportError, ReportStore, plainText } from './reports.ts';
+import { ReportError, ReportStore, audienceOf, backfillAudienceOf, isCostReport, plainText } from './reports.ts';
 
 /** Reports (w2541, docs/reports.md): filing, revising without losing the older text, media kept, listing and search. */
 
@@ -164,4 +164,67 @@ test('plainText drops Markdown for the excerpt', () => {
   assert.equal(plainText('# T\n\n![x](a.png) see [the PR](https://x) `code`\n\n```\nblock\n```\n| a | b |'), 'T see the PR code a b');
   // A table's rule line goes, emphasis leaves no gap before its punctuation, and a snake_case name keeps its underscore.
   assert.equal(plainText('1. **Left first**, as _Factorio_ does.\n\n| a | b |\n|---|:-:|\n| 1 | 2 |\n\nsee belt_render_system'), '1. Left first, as Factorio does. a b 1 2 see belt_render_system');
+});
+
+// ---------------------------------------------------------------- w5223: reports only when a person asks
+
+test('w5223: a report is for people when asked, a review or a cost; anything else is a worker note', () => {
+  const asked = { kind: 'design', by: 'Lothsahn', asked: true };
+  assert.equal(audienceOf({ title: 'Belt UI options', mark: asked }).audience, 'people');
+  // A mark from before w5223 has no asked: it reads as asked.
+  assert.equal(audienceOf({ title: 'Belt UI options', mark: { kind: 'design', by: 'Ben' } }).audience, 'people');
+  // The dispatcher's mark, or one outside a person's turn, is no ask.
+  assert.equal(audienceOf({ title: 'Where the planner went', mark: { kind: 'investigation', by: 'the dispatcher', asked: false } }).audience, 'workers');
+  assert.equal(audienceOf({ title: 'Where the planner went' }).audience, 'workers');
+  // A review a person must make, and every cost estimate (lothsahn: "Please make sure the cost remains unhidden").
+  assert.equal(audienceOf({ title: 'Splitter options', review: 'pick one of three splitter rules' }).audience, 'people');
+  assert.equal(audienceOf({ title: 'FFU G3 rented scale-run cost estimate' }).audience, 'people');
+  assert.equal(audienceOf({ title: 'FFU M5 run-cost refresh', mark: { kind: 'analysis', by: 'the dispatcher', asked: false } }).audience, 'people');
+  assert.equal(audienceOf({ title: 'Scale run', review: 'approve the $412 rent' }).audience, 'people');
+  assert.ok(isCostReport('Spending on the nightly'));
+  assert.ok(!isCostReport('Costume shader pass'));
+  assert.ok(!isCostReport('Late-game frame time'));
+});
+
+test('w5223: search for people skips worker notes; a revision never hides a report people saw; backfill runs once', (t) => {
+  const { store, open } = setup(t);
+  store.file({ title: 'Late-game frame time', kind: 'profile', body: 'one', audience: 'workers', audienceWhy: 'worker note: no report asked' }, w2531, 'sess-1');
+  store.file({ title: 'Belt UI options', kind: 'design', body: 'two', audience: 'people' }, w2600, 'sess-2');
+  assert.deepEqual(store.list({ audience: 'people' }).map((r) => r.id), ['r2']);
+  assert.deepEqual(store.list().map((r) => r.id), ['r2', 'r1']);
+  // A worker note becomes a report for people when a revision is (the request was marked since); never the other way.
+  store.file({ id: 'r2', title: 'Belt UI options', kind: 'design', body: 'two, revised', audience: 'workers' }, w2600, 'sess-2');
+  assert.equal(store.get('r2')!.audience, 'people');
+  store.file({ id: 'r1', title: 'Late-game frame time', kind: 'profile', body: 'one, revised', audience: 'people', audienceWhy: 'asked' }, w2531, 'sess-1');
+  assert.equal(store.get('r1')!.audience, 'people');
+
+  // Reports from before w5223 carry no audience: the backfill gives each one, written down, and skips them next time.
+  const old = open();
+  const r3 = old.file({ title: 'Where the planner went', kind: 'investigation', body: 'x' }, w2531, 's');
+  const r4 = old.file({ title: 'FFU G3 rented scale-run cost estimate', kind: 'analysis', body: 'y' }, w2531, 's');
+  for (const id of [r3.report.id, r4.report.id]) {
+    const f = path.join(old.root, id, 'report.json');
+    const j = JSON.parse(fs.readFileSync(f, 'utf8'));
+    delete j.audience;
+    fs.writeFileSync(f, JSON.stringify(j));
+  }
+  const again = open();
+  const w = { report: { kind: 'investigation' as const, at: '', by: 'the dispatcher' }, humanAsked: true };
+  assert.deepEqual(again.backfillAudience((r) => backfillAudienceOf(r, w)), { people: 1, workers: 1 });
+  assert.equal(again.get('r3')!.audience, 'workers');
+  assert.match(again.get('r3')!.audienceWhy!, /dispatcher.*backfilled, w5223/);
+  assert.equal(again.get('r4')!.audience, 'people');
+  assert.deepEqual(open().backfillAudience(() => assert.fail('backfilled twice')), { people: 0, workers: 0 });
+});
+
+test('w5223: the backfill keeps people-asked and cost reports, and hides unmarked, dispatcher and hand-up ones', () => {
+  const t = (title: string, w?: Parameters<typeof backfillAudienceOf>[1]) => backfillAudienceOf({ title }, w).audience;
+  const mark = (by: string, asked?: boolean) => ({ kind: 'analysis' as const, at: '', by, ...(asked === undefined ? {} : { asked }) });
+  assert.equal(t('Profile', { report: mark('Lothsahn'), humanAsked: true }), 'people');
+  assert.equal(t('Profile', { report: mark('Lothsahn'), humanAsked: false }), 'workers');
+  assert.equal(t('Profile', { report: mark('Lothsahn', true), humanAsked: false }), 'people');
+  assert.equal(t('Profile', { report: mark('the dispatcher'), humanAsked: true }), 'workers');
+  assert.equal(t('Profile', { report: undefined, humanAsked: true }), 'workers');
+  assert.equal(t('FFU M5 run-cost refresh', { report: undefined, humanAsked: false }), 'people');
+  assert.equal(t('Profile', undefined), 'people');
 });

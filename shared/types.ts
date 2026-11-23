@@ -474,6 +474,13 @@ export interface ImageInput {
  */
 export const REPORT_KINDS = ['analysis', 'profile', 'investigation', 'root-cause', 'design', 'research', 'other'] as const;
 export type ReportKind = (typeof REPORT_KINDS)[number];
+/**
+ * w5223: who a report is for. `people`: shown on the Reports tab and in orchestrators' list_reports by default (its
+ * person asked for it, it is a cost estimate, or a review the person must make that is too big for a question).
+ * `workers`: a worker note another worker may read, hidden from people unless they ask to see every report.
+ */
+export const REPORT_AUDIENCES = ['people', 'workers'] as const;
+export type ReportAudience = (typeof REPORT_AUDIENCES)[number];
 
 /** One revision of a report: revision 1 is the first filing; each update adds one and keeps the older text. */
 export interface ReportRevision {
@@ -507,6 +514,10 @@ export interface ReportSummary {
   excerpt: string;
   /** Files filed with it (attachment ids, kept as long as the report). */
   attachments: AttachmentRef[];
+  /** w5223: people (shown by default) or workers (a worker note, hidden by default); absent reads as people. */
+  audience?: ReportAudience;
+  /** w5223: why it has that audience, in a few words ("asked by lothsahn", "a cost estimate", "no report asked"). */
+  audienceWhy?: string;
 }
 
 /** A report with its text: the latest revision's, or the one asked for (`rev`). */
@@ -2505,7 +2516,17 @@ export interface WorkItem {
    * orchestrator (request_work `report`) or later (update_work). Its worker files it with file_report, and DONE is
    * refused until it has.
    */
-  report?: { kind: ReportKind; at: string; by: string };
+  report?: {
+    kind: ReportKind;
+    at: string;
+    by: string;
+    /**
+     * w5223: false when nobody asked in their own turn: marked by the dispatcher, or by an orchestrator in a turn no person
+     * started (a hand-up, a standing agent). Its report is then a worker note, and DONE does not wait for one. Absent
+     * (marks before w5223) reads as asked.
+     */
+    asked?: boolean;
+  };
   /** w2541: the reports filed for it, oldest first (the link from the request to its reports). */
   reports?: { id: string; title: string; kind: ReportKind; openQuestions?: string[] }[];
   /** What happened, oldest first: "10:02 filed by Lothsahn", "10:03 merged into w11: same fix". */
