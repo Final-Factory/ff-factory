@@ -85,8 +85,10 @@ export class UvCachePruner {
   /** Starts a prune when one is due and returns it (the bytes freed, undefined when it did not run); the caller need not wait. */
   maybe(low: boolean): Promise<number | undefined> | undefined {
     if (!this.due(low)) return undefined;
-    this.lastAt = this.now();
+    // No cache folder yet is not a prune: the next pass looks again (w5281: m5's first pass after the deploy ran seconds
+    // before the first uv run made the folder, and the day's slot went with it).
     if (!fs.existsSync(this.d.dir)) return undefined;
+    this.lastAt = this.now();
     const uv = this.d.uv();
     if (!uv) {
       this.d.log(`uv cache prune: no uv found (PATH, ~/.local/bin, ~/.cargo/bin, Homebrew); ${this.d.dir} not pruned`);
