@@ -5,6 +5,7 @@ import { freeableBytes, localWorkWhy, norm, unpushedWorkWhy, OUTSIDE_ROOT_WHY, w
 import { requestIdsIn, CONTEXT_MAX_AGE_HOURS } from './staleOutput.ts';
 import type { SessionOwner } from './resumable.ts';
 import { finishedBulkIn, INSTALL_LEFTOVER_DEFAULTS, isCargoTarget, newestTopWrite, newestWrite, runnerJobWhy, RUNNER_KEPT, type ProcLite } from './installLeftovers.ts';
+import { LIBRARY_CACHES, projectOpen, staleCacheEntries } from './cacheTrim.ts';
 import { PLAYER_CACHE_ENTRY } from '../machine/playerCache.ts';
 import { FFU_SLOTS_DIR, readSlotState } from '../machine/ffuSlots.ts';
 import type { PublishedRecord } from './published.ts';
@@ -60,7 +61,7 @@ export interface CleanupFacts {
 
 export interface FolderRow {
   path: string;
-  kind: 'session-temp' | 'session-bulk' | 'scratch' | 'sandbox-output' | 'player-slot' | 'ffu-slot-target' | 'ffu-runner-work' | 'player-cache' | 'named' | 'other';
+  kind: 'session-temp' | 'session-bulk' | 'scratch' | 'sandbox-output' | 'player-slot' | 'ffu-slot-target' | 'ffu-runner-work' | 'player-cache' | 'sandbox-library' | 'named' | 'other';
   verdict: 'keep' | 'delete';
   why: string;
   /** What deleting it alone frees (w5168): files hard-linked to a place it does not hold (a build still kept) do not count. */
@@ -301,6 +302,36 @@ export async function judgeFfuSlotPath(p: string, f: CleanupFacts, now: number, 
   const held = holder ? `held by worker ${holder}, which neither runs nor has a request not closed` : 'released (ffu-slot list)';
   const inside = norm(p) === norm(target) ? '' : `inside ${what}: `;
   return row('delete', `${inside}${what}, a slot ${held}, no running process names the slot and nothing in it was written for ${settle} min; the next build in the slot rebuilds it (rule ffu-slot-target)`);
+}
+
+/**
+ * A stale entry of an idle sandbox's Unity Library caches (<sandbox>/Library/BurstCache, BuildCache), judged as the daemon's
+ * trim judges it (cacheTrim.ts staleCacheEntries: superseded Burst player builds and old BuildCache folders; the newest builds,
+ * JIT, Artifacts, Bee and the rest stay), or undefined for a path outside them (w5240: biscuit's slot1 and slot2 held 24 and
+ * 25 GB of BurstCache that no clean-up row reached). Kept: a sandbox a worker is in or waits on, one with an editor or a
+ * batchmode build open (Temp/UnityLockfile), one a running process names, and everything the trim keeps. Never the cache whole:
+ * a cold Unity start is slow (lothsahn, 2026-11-01).
+ */
+export async function judgeSandboxLibraryPath(p: string, f: CleanupFacts, ctx?: SlotContext): Promise<FolderRow | undefined> {
+  if (!f.root) return undefined;
+  for (const sb of f.sandboxes) {
+    if (!within(p, sb.path)) continue;
+    const rel = norm(p).slice(norm(sb.path).length + 1).split('/');
+    if (rel[0] !== 'library' || !LIBRARY_CACHES.some((c) => c.toLowerCase() === rel[1])) return undefined;
+    const row = (verdict: FolderRow['verdict'], why: string): FolderRow => ({ path: p, kind: 'sandbox-library', verdict, why });
+    const owner = judgeSandbox(sb.id, f);
+    if (owner.verdict === 'keep') return row('keep', owner.why);
+    if (projectOpen(sb.path)) return row('keep', `an editor or a batchmode build has ${sb.id}'s project open (Temp/UnityLockfile)`);
+    if (!ctx?.procs) return row('keep', 'the running processes could not be read to see that nothing builds in the sandbox');
+    const user = ctx.procs.find((c) => mentions(c, sb.path));
+    if (user) return row('keep', `a running process names ${sb.id} (${user.slice(0, 160)})`);
+    if (rel.length < 3) return row('keep', `${sb.id}'s Library/${rel[1]} as a whole: a cold Unity start is slow, only its stale entries are candidates`);
+    const { stale } = await staleCacheEntries(sb.path);
+    const hit = stale.find((e) => norm(p) === norm(e.path) || within(p, e.path));
+    if (!hit) return row('keep', `not stale: the newest Burst player builds, the manifests and the newest BuildCache folders stay (cacheTrim.ts)`);
+    return row('delete', `a stale entry of ${sb.id}'s Library/${rel[1]}: ${hit.why}; no worker is in the sandbox, no editor or build has it open (rebuildable, w5240)`);
+  }
+  return undefined;
 }
 
 /**
@@ -558,7 +589,7 @@ export async function withGitCheck(r: FolderRow, root: string | undefined, local
  * "its git state could not be read" and KEEP while the pass judged it DELETE (ffa-f1beecb0 on LothDesktop, 2026-11-08).
  */
 export async function judgeWithGit(p: string, f: CleanupFacts, now: number, slots?: SlotContext, o: { localWork?: (dir: string) => Promise<string | undefined>; unpushedWork?: (dir: string) => Promise<string | undefined> } = {}): Promise<FolderRow> {
-  const judged = (await judgeFfuSlotPath(p, f, now, slots)) ?? (await judgeRunnerWorkPath(p, f, now, slots)) ?? (await judgePlayerCachePath(p, f, now, slots)) ?? judgePath(p, f, now, slots);
+  const judged = (await judgeFfuSlotPath(p, f, now, slots)) ?? (await judgeSandboxLibraryPath(p, f, slots)) ?? (await judgeRunnerWorkPath(p, f, now, slots)) ?? (await judgePlayerCachePath(p, f, now, slots)) ?? judgePath(p, f, now, slots);
   // A runner's checkout is CI's own scratch (w5235): actions/checkout (clean: true, its default) runs git clean -ffdx and
   // git reset --hard before every job, so its uncommitted files are a build's leftovers that the next job wipes anyway.
   if (judged.kind === 'ffu-runner-work') return judged;
@@ -616,6 +647,8 @@ export async function planFolders(f: CleanupFacts, o: { now?: number; sizes?: 'a
   }
   for (const e of entries(path.join(f.root!, 'player-cache'))) if (e.isDirectory() && PLAYER_CACHE_ENTRY.test(e.name)) paths.push(path.join(f.root!, 'player-cache', e.name));
   for (const sb of f.sandboxes) {
+    // w5240: a sandbox's stale Library cache entries, only while it is idle and closed.
+    if (judgeSandbox(sb.id, f).verdict === 'delete' && !projectOpen(sb.path)) for (const e of (await staleCacheEntries(sb.path)).stale) paths.push(e.path);
     for (const top of ['Builds', '.nightly-builds']) for (const e of entries(path.join(sb.path, top))) paths.push(path.join(sb.path, top, e.name));
   }
   const rows: FolderPlan = [];
