@@ -261,7 +261,7 @@ export const BLOCKER_KIND_HELP: Record<WorkBlockerKind, string> = {
   pr: 'a pull request MERGING (ref: "owner/repo#123"): clears when it merges; one closed without merging asks the requester. Use it for "wait for #1291 to merge"; ci clears when the checks finish, merged or not',
   steam: 'a pair run that needs Steam (w2459; no ref): fewer computers than its legs are signed in to Steam with different accounts; clears when enough are (FF Factory sets it itself when such a pair is filed or queued)',
   worker: "another worker of the same request (w2476; ref: its session id): clears when it says DONE for its part or stops with a final report (no still-open line); FF Factory sets it from a stopped worker's report that waits on it",
-  disk: `free disk space (ref: a machine id; w3338): clears ${DISK_RESUME_MARGIN_GB} GB above its warning line. Only while the disk is under that line: one already above it is refused (w5167), and the request starts now`,
+  disk: `free disk space (ref: a machine id; w3338): clears ${DISK_RESUME_MARGIN_GB} GB above its warning line; refused if above it`,
 };
 
 export interface BlockerFacts {
