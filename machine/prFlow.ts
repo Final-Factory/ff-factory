@@ -112,10 +112,18 @@ export function parseArgs(argv: string[]): { cmd: string; o: Opts } | string {
       if (a === '--base') o.base = val();
       else if (a === '--title') o.title = val();
       else if (a === '--body-file') o.bodyFile = val();
-      else if (a === '--pr') o.pr = val();
+      else if (a === '--pr') {
+        const v = val();
+        if (o.pr !== undefined && o.pr !== v) return `--pr ${v} and ${o.pr} name different pull requests`;
+        o.pr = v;
+      }
       else if (a === '--draft') o.draft = true;
       else if (a === '--no-merge-base') o.mergeBase = false;
-      else return `unknown option ${a}`;
+      else if (!a.startsWith('-') && (cmd === 'status' || cmd === 'merge')) {
+        // the form the ci-release skill writes: ff-pr merge <n> (w5166)
+        if (o.pr !== undefined && o.pr !== a) return `${a} and ${o.pr} name different pull requests`;
+        o.pr = a;
+      } else return `unknown option ${a}`;
     } catch (e) {
       return (e as Error).message;
     }
@@ -126,8 +134,8 @@ export function parseArgs(argv: string[]): { cmd: string; o: Opts } | string {
 }
 
 export const USAGE = `usage: ff-pr push [--base <branch>] [--title <t> --body-file <f>] [--draft] [--no-merge-base]
-       ff-pr status [--pr <n>]
-       ff-pr merge [--pr <n>]
+       ff-pr status [<n> | --pr <n>]
+       ff-pr merge [<n> | --pr <n>]
   push: merge origin/<base> in (stops on a conflict), push the branch, open its PR when --title/--body-file are given
         and it has none, check that the PR's head is HEAD and it does not conflict (w907), and print the blocked_on to wait with
   status: the PR and its head's CI (workflow runs), nothing changed
