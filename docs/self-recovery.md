@@ -799,18 +799,29 @@ sessions, the sandboxes and the ledger's open and closed request ids, to `<daemo
 every worker's PATH read it (`machine/leftovers.ts`, beside `ff-leftovers list/end`; the shim sets `FF_CLEANUP_FACTS`):
 
 - `ff-leftovers folders`: every folder a clean-up could take under the install folder (`tmp/ffa-<session>`, `scratch/*`, each
-  sandbox's `Builds/*` and `.nightly-builds/*`), each `KEEP` or `DELETE` with its owner and why, deletable ones measured.
+  sandbox's `Builds/*` and `.nightly-builds/*`, the player slots), each `KEEP` or `DELETE` with its owner and why, deletable ones
+  measured. A size is what deleting the row frees (w5168, `freeableBytes` in `server/cleanup.ts`): a file with more than one
+  hard link counts only when every link is inside what is deleted, so a player slot whose files are links to a build still kept
+  reads `0 MB, +1.3 GB hard-linked to files kept elsewhere, not freed`; the total is what deleting every DELETE row together
+  frees. An empty player slot (only `leases/`, as `remove` leaves it) is no row: the header counts it as "empty player slot(s)
+  not listed", and `check` calls it KEEP. In w5165 (LothDesktop, 2026-11-23) the 12 slots read 1.3 GB each (15.7 GB) as
+  DELETE, `remove` refused them, emptying them with `remove-slot` freed almost nothing, and the emptied slots stayed DELETE
+  rows at 0 MB.
 - `ff-leftovers check <path>...`: the same verdict for paths about to be deleted; exit 1 if any is to be kept. The check's own
   process and the shells that ran it never count as "a running process plays from" a slot (w3204).
 - `ff-leftovers remove-slot <slot>...`: empties idle player slots (`<install>/players/slot<K>-<P>`) as `player_slots.py prune`
   does: refused while a lease lives, a fill runs or a process plays from the slot; the folder and `leases/` stay (w3204). It takes
-  the slot's name as `check` prints it (`slot3-0`), `players/slot3-0`, or a full path with either slash (w3217).
-- `ff-leftovers remove <path>...` (w4394): deletes what `check` judges DELETE, the supported delete for every other row. It
+  the slot's name as `check` prints it (`slot3-0`), `players/slot3-0`, or a full path with either slash (w3217). `remove`
+  hands a slot to it (w5168), so a worker needs only `remove`.
+- `ff-leftovers remove <path>...` (w4394): deletes what `check` judges DELETE, the supported delete for every row. A player
+  slot itself it empties through `remove-slot`'s code and keeps (its path and firewall rule stay), and logs like any other
+  removal; a path inside a slot it refuses, naming the slot (w5168: one command for every DELETE row, rather than a row that
+  names a second command, since the slot path is what `folders` prints and remove-slot's guards apply either way). It
   refuses, whatever the verdict, a path off the install drive (C: on Windows) or in the game's AppData folders, outside the
   install folder, the folder itself or a top folder of it, the main clone (`repo`), `seed`, `secrets`, the daemon's folder, a
-  symbolic link or junction or a path through one (the real place must be the name judged), a player slot (`remove-slot`) and
+  symbolic link or junction or a path through one (the real place must be the name judged), and
   the folder it runs in. It judges again just before the delete, never follows a link inside the folder it deletes, prints
-  `REMOVED <path>` with its size and appends a line to `<install>/logs/ff-leftovers-removed.jsonl`; exit 1 if any path was
+  `REMOVED <path>` with the bytes it freed (hard links to files kept elsewhere apart, w5168) and appends a line to `<install>/logs/ff-leftovers-removed.jsonl`; exit 1 if any path was
   kept. Before it a clean-up had no allowed route: on the m3, 2026-11-16, w4391's worker found `tmp/ffa-0fed07fc` (18 GB)
   and `tmp/ffa-5a411a7b` both DELETE, and the harness denied its `rm -rf` of each, as it still does (a raw rm judges no
   ledger). The worker guard reads it as a delete (`server/rootFence.ts`): a path outside the install folder, or on C:, is
@@ -842,8 +853,8 @@ own verdict beside it. A stash counts in the sweeps too since w1387; a linked wo
 keep the main clone only. Tests: `server/cleanupFolders.test.ts` (w1387).
 
 **The rule for people writing briefs**: a clean-up brief never carries a list of live or "will resume" workers; it says to run
-`ff-leftovers folders` and delete only the DELETE rows, each with `ff-leftovers remove <path>` (w4394) or, for a player slot,
-`ff-leftovers remove-slot <slot>` (`server/agents.ts`: `DISK_HYGIENE`, the dispatcher's and the orchestrators' low-disk rules). The ff-agents lesson `clean-up-after-yourself` and the delete checklist say the same.
+`ff-leftovers folders` and delete only the DELETE rows, each with `ff-leftovers remove <path>` (w4394), player slots
+included (w5168) (`server/agents.ts`: `DISK_HYGIENE`, the dispatcher's and the orchestrators' low-disk rules). The ff-agents lesson `clean-up-after-yourself` and the delete checklist say the same.
 
 **The daemon's own sweeps wait for the welcome too.** `resumable` is empty until the portal's welcome has come since the daemon
 started, so a stopped worker a request waits for looked finished: a daemon restarted while the portal was down could sweep its

@@ -634,6 +634,67 @@ export async function sizeOf(p: string, budget = 2_000_000): Promise<number> {
   return bytes;
 }
 
+/** What deleting a folder would free (w5168): `freed` counts only files with no hard link left outside what is deleted. */
+export interface Freeable {
+  /** Every file's size, as sizeOf counts it. */
+  bytes: number;
+  /** The bytes a delete frees: a file whose other hard links live outside (a player slot's links to a build still kept) frees nothing. */
+  freed: number;
+}
+
+/**
+ * What deleting each of `roots` alone would free, and what deleting all of them together would (w5168). On LothDesktop,
+ * 2026-11-23, w5165's clean-up saw 12 player slots at 1.3 GB each (15.7 GB) as DELETE rows, emptied them and freed almost
+ * nothing: every file was a hard link to a build that still exists (scripts/nightly/player_slots.py fills a slot with links).
+ * sizeOf counts each link's whole size. Here a file with more than one link frees its bytes only when every link (its nlink)
+ * is inside what is deleted; links are matched by device and inode (bigint: NTFS file ids pass 2^53), which Node reads on
+ * Windows, macOS and Linux. A file whose inode is unknown (0) and has more than one link counts as not freed.
+ */
+export async function freeableBytes(roots: string[], o: { inTotal?: boolean[]; budget?: number } = {}): Promise<{ each: Freeable[]; together: Freeable }> {
+  const budget = o.budget ?? 2_000_000;
+  const links = new Map<string, { size: number; nlink: number; per: number[] }>();
+  const each: Freeable[] = roots.map(() => ({ bytes: 0, freed: 0 }));
+  // `together` counts the roots inTotal marks (all by default); one inside another counted root is counted with that one, not twice.
+  const counted = roots.map((_, i) => o.inTotal?.[i] ?? true);
+  const nested = roots.map((r, i) => !counted[i] || roots.some((x, j) => j !== i && counted[j] && within(r, x) && (norm(r) !== norm(x) || j < i)));
+  const together: Freeable = { bytes: 0, freed: 0 };
+  for (let i = 0; i < roots.length; i++) {
+    const stack = [roots[i]!];
+    let seen = 0;
+    while (stack.length && seen++ < budget) {
+      const cur = stack.pop()!;
+      try {
+        const st = await fs.promises.lstat(cur, { bigint: true });
+        if (st.isDirectory()) {
+          for (const n of await fs.promises.readdir(cur)) stack.push(path.join(cur, n));
+          continue;
+        }
+        const size = Number(st.size);
+        each[i]!.bytes += size;
+        if (!nested[i]) together.bytes += size;
+        if (st.nlink <= 1n) {
+          each[i]!.freed += size;
+          if (!nested[i]) together.freed += size;
+        } else if (st.ino !== 0n) {
+          const key = `${st.dev}:${st.ino}`;
+          const l = links.get(key) ?? { size, nlink: Number(st.nlink), per: roots.map(() => 0) };
+          l.per[i]!++;
+          links.set(key, l);
+        }
+      } catch {
+        // gone or unreadable
+      }
+    }
+  }
+  for (const l of links.values()) {
+    l.per.forEach((n, i) => {
+      if (n >= l.nlink) each[i]!.freed += l.size;
+    });
+    if (l.per.reduce((s, n, i) => s + (nested[i] ? 0 : n), 0) >= l.nlink) together.freed += l.size;
+  }
+  return { each, together };
+}
+
 /** Entries of a `<family>-<number>` folder (Playwright: chromium-1181, chromium_headless_shell-1181) that a newer one replaced. */
 export function superseded(names: string[]): string[] {
   const newest = new Map<string, number>();

@@ -4,8 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { githubSlug, hasLocalWork, localRemotePath, localWorkWhy, norm, setGithubContains } from './cleanup.ts';
-import { FACTS_MAX_AGE_MS, factsProblem, gitKeeps, judgePath, judgeSession, judgeTiming, planFolders, renderFolders, type CleanupFacts } from './cleanupFolders.ts';
+import { freeableBytes, githubSlug, hasLocalWork, localRemotePath, localWorkWhy, norm, setGithubContains } from './cleanup.ts';
+import { EMPTY_SLOT_WHY, FACTS_MAX_AGE_MS, factsProblem, gitKeeps, judgePath, judgeSession, judgeTiming, planFolders, renderFolders, type CleanupFacts } from './cleanupFolders.ts';
 import { ownersOf } from './resumable.ts';
 import { foldersMain, hostSessionsIn, installLeftoversShim, slotContext, slotPathOf } from '../machine/leftovers.ts';
 import type { WorkItem } from '../shared/types.ts';
@@ -777,7 +777,7 @@ test('w4394: remove deletes a DELETE folder, measures it and logs it', async (t)
   const closed = path.join(tempRoot, 'ffa-b0b0b0b0');
   assert.equal(await remove(closed), 0, out.join(''));
   assert.equal(fs.existsSync(closed), false);
-  assert.match(out.join(''), /^REMOVED .*ffa-b0b0b0b0\n\s+0 MB; .*requests are closed/m);
+  assert.match(out.join(''), /^REMOVED .*ffa-b0b0b0b0\n\s+0 MB freed; .*requests are closed/m);
   const line = JSON.parse(fs.readFileSync(log, 'utf8').trim());
   assert.equal(norm(line.path), norm(closed));
   assert.equal(line.bytes, 100);
@@ -813,7 +813,8 @@ test('w4394: remove refuses outside the install folder, the folder itself, its t
   assert.match(text, /a top folder of the install folder \(tmp\)/);
   assert.match(text, /main clone/);
   assert.match(text, /daemon's folder/);
-  assert.match(text, /remove-slot/);
+  // An empty slot goes to remove-slot's judgement since w5168: nothing to free, kept.
+  assert.match(text, /an empty player slot/);
   for (const p of [outside, clone, daemon, slot, tempRoot]) assert.ok(fs.existsSync(p), p);
   assert.ok(fs.existsSync(path.join(outside, 'keep.txt')));
 });
@@ -851,4 +852,86 @@ test('w4394: on a Windows install, remove refuses a C: path without looking at i
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+/**
+ * w5168: in w5165 (LothDesktop, 2026-11-23) `folders` listed 12 player slots as DELETE at 1.3 GB each (15.7 GB), `remove`
+ * refused every one (only remove-slot took them), emptying them freed almost nothing (their files were hard links to a build
+ * that still exists), and the 12 emptied slots stayed DELETE rows at 0 MB. Fixtures with real hard links on a temp folder.
+ */
+const MB = 1_048_576;
+
+/** A kept build (outside every candidate) and a player slot whose exe is a hard link to it, plus `own` bytes of its own. */
+function linkedSlot(root: string, name: string, own = 0) {
+  const build = path.join(root, 'nightly', 'build-abc');
+  fs.mkdirSync(build, { recursive: true });
+  const exe = path.join(build, 'FinalFactory.exe');
+  if (!fs.existsSync(exe)) fs.writeFileSync(exe, Buffer.alloc(MB));
+  const d = path.join(root, 'players', name);
+  fs.mkdirSync(path.join(d, 'player'), { recursive: true });
+  fs.mkdirSync(path.join(d, 'leases'), { recursive: true });
+  fs.linkSync(exe, path.join(d, 'player', 'FinalFactory.exe'));
+  if (own) fs.writeFileSync(path.join(d, 'player', 'own.dat'), Buffer.alloc(own));
+  fs.writeFileSync(path.join(d, 'slot.json'), JSON.stringify({ state: 'ready', sha: 'abc', used: Date.now() / 1000 }));
+  return { d, exe };
+}
+
+const idleSlots = { host: 'lothdesktop', alive: () => false, procs: [] as string[] };
+
+test('w5168: freeableBytes counts a hard-linked file only when every link is deleted, alone and together', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffw-w5168-links-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  for (const d of ['a', 'b', 'a/inner']) fs.mkdirSync(path.join(dir, d), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'a', 'shared'), Buffer.alloc(3000));
+  fs.linkSync(path.join(dir, 'a', 'shared'), path.join(dir, 'b', 'shared'));
+  fs.writeFileSync(path.join(dir, 'a', 'inner', 'own'), Buffer.alloc(500));
+  const [a, b, inner] = ['a', 'b', 'a/inner'].map((d) => path.join(dir, d));
+  const all = await freeableBytes([a!, b!, inner!]);
+  assert.deepEqual(all.each, [{ bytes: 3500, freed: 500 }, { bytes: 3000, freed: 0 }, { bytes: 500, freed: 500 }], 'alone, neither folder frees the shared file');
+  assert.deepEqual(all.together, { bytes: 6500, freed: 3500 }, 'together both links go, so it is freed once; a/inner, inside a, is not counted twice');
+  const oneSide = await freeableBytes([a!, b!], { inTotal: [true, false] });
+  assert.deepEqual(oneSide.together, { bytes: 3500, freed: 500 }, 'b is kept: its link keeps the file');
+});
+
+test('w5168: folders sizes a slot by what removing it frees, shows its hard links apart, and the total too', async (t) => {
+  const { root, facts } = world(t);
+  const { d } = linkedSlot(root, 'slot1-0', 2000);
+  const rows = await planFolders(facts, { slots: idleSlots });
+  const slot = rows.find((r) => norm(r.path) === norm(d))!;
+  assert.equal(slot.verdict, 'delete', slot.why);
+  assert.equal(slot.bytes, 2000 + fs.statSync(path.join(d, 'slot.json')).size, 'only its own files free anything');
+  assert.equal(slot.linked, MB, 'the exe is a link to the kept build');
+  assert.match(slot.why, /`ff-leftovers remove <slot>`/, 'the row names the command that removes it');
+  const del = rows.filter((r) => r.verdict === 'delete');
+  assert.equal(rows.freed, del.reduce((n, r) => n + (r.bytes ?? 0), 0));
+  assert.equal(rows.linked, MB);
+  const text = renderFolders(rows, facts);
+  assert.match(text, /DELETE  0 MB, \+1 MB hard-linked to files kept elsewhere, not freed  .*slot1-0/);
+  assert.match(text, /deletable \(0 MB freed by deleting them all, \+1 MB hard-linked/);
+  assert.match(text, /Delete every DELETE row, player slots included, with `ff-leftovers remove <path>/);
+});
+
+test('w5168: remove empties a DELETE player slot as remove-slot does, reports what it freed, and the empty slot leaves folders', async (t) => {
+  const { root, facts, log, out, remove } = removeWorld(t);
+  const { d, exe } = linkedSlot(root, 'slot3-0', 4000);
+  assert.equal(await remove(path.join(d, 'player')), 1);
+  assert.match(out.join(''), /KEEP .*player\n\s+not removed: inside a player slot: remove the slot itself/);
+  out.length = 0;
+  assert.equal(await remove(d), 0, out.join(''));
+  assert.match(out.join(''), /^REMOVED .*slot3-0\n\s+0 MB freed \(1 MB more were hard links to files kept elsewhere, a build, so not freed\); the folder stays empty/m);
+  assert.deepEqual(fs.readdirSync(d), ['leases'], 'emptied, its folder and leases/ kept for its path and firewall rule');
+  assert.ok(fs.existsSync(exe), 'the build it linked to is untouched');
+  const line = JSON.parse(fs.readFileSync(log, 'utf8').trim());
+  assert.equal(norm(line.path), norm(d));
+  assert.equal(line.bytes, 4000, 'the log records the bytes freed, not the links');
+
+  // Emptied, the slot is no DELETE row any more: folders leaves it out and says so, check keeps it, remove refuses it.
+  const rows = await planFolders(facts, { slots: idleSlots });
+  assert.equal(rows.find((r) => norm(r.path) === norm(d)), undefined);
+  assert.equal(rows.emptySlots, 1);
+  assert.match(renderFolders(rows, facts), /1 empty player slot\(s\) not listed: nothing to free/);
+  assert.deepEqual(judgePath(d, facts, Date.now(), idleSlots), { path: d, kind: 'player-slot', verdict: 'keep', why: EMPTY_SLOT_WHY });
+  out.length = 0;
+  assert.equal(await remove(d), 1);
+  assert.match(out.join(''), /KEEP .*slot3-0\n\s+not removed: an empty player slot/);
 });
