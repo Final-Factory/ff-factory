@@ -56,7 +56,7 @@ test('outside writes: a batch Unity run without -logFile gets one in the worker\
 const KNOWN: Record<string, [number, string]> = {
   'machine/benchQueue.ts': [1, 'exception: the bench helper\'s status file with no root given (docs 2.6)'],
   'machine/burstPref.ts': [1, 'exception: Unity\'s Burst EditorPref (registry, plist, ~/.local/share/unity3d)'],
-  'machine/daemon.ts': [4, 'the no-root defaults; the Unity slots mailbox (w469); Git Bash /tmp kept from clean-up'],
+  'machine/daemon.ts': [5, 'the no-root defaults; the Unity slots mailbox (w469); Git Bash /tmp kept from clean-up; the write lock grants Unity its ~/.config/unity3d (w5333, writes nothing itself)'],
   'machine/evidenceGate.ts': [3, 'reads plugin and skill paths'],
   'machine/firefox.ts': [1, 'reads the Firefox profile path'],
   'machine/ghLogin.ts': [1, 'exception: gh\'s own login folder'],
