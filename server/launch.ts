@@ -1,3 +1,4 @@
+import { agentClaudeEnv } from './claudeHome.ts';
 import { createSdkMcpServer, tool, type Options } from '@anthropic-ai/claude-agent-sdk';
 import { POST_TARGETS } from '../shared/ffboxPost.ts';
 import { z } from 'zod';
@@ -560,7 +561,8 @@ export function githubCredentialEnv(prior: Record<string, string | undefined>): 
  * refused then).
  */
 export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogTool, ToolHandler>>, processEnv: NodeJS.ProcessEnv = process.env, editorRunning?: () => boolean): Options {
-  const baseEnv = spec.login ? usageEnv(processEnv) : processEnv;
+  // w5305: the worker root's own Claude Code folder once its plugins are in, else the legacy ~/.claude (server/claudeHome.ts).
+  const baseEnv = agentClaudeEnv(spec.login ? usageEnv(processEnv) : processEnv, spec.env);
   const g = spec.guard;
   // Git fails fast instead of waiting on a credential prompt nobody will answer.
   const agentEnv = (() => {

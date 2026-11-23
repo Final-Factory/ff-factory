@@ -1,5 +1,7 @@
+import { carryTranscript } from './claudeHome.ts';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
+import os from 'node:os';
 import path from 'node:path';
 import { query, type Options, type PermissionResult, type Query, type SDKMessage, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { Config } from './config.ts';
@@ -1052,6 +1054,13 @@ export class AgentSession implements SessionHandle {
     const launched = launchTurn(async () => {
       try {
         if (gone()) return undefined;
+        // w5305: a conversation that began in the legacy ~/.claude resumes in the worker root's folder from a copy of its transcript.
+        try {
+          const from = carryTranscript(cli.cwd, sid, cli.env, os.homedir());
+          if (from) this.store.append(this.info.id, { kind: 'system', text: `Its transcript was copied into ${cli.env.CLAUDE_CONFIG_DIR} from ${path.dirname(from)} to resume there (w5305).` });
+        } catch (e) {
+          this.store.append(this.info.id, { kind: 'error', text: `Could not copy its transcript into ${cli.env.CLAUDE_CONFIG_DIR}: ${(e as Error).message}; Claude Code starts it afresh (w5305).` });
+        }
         const file = cliTranscriptPath(cli.cwd, sid, cli.env);
         // w2626: ToolSearch shows this process's own tools as they are now, not as the conversation first loaded them.
         const fresh = await refreshKeptToolsAsync(file, sdkToolsNow(options.mcpServers), gone);

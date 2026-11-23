@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { ContextMeter, type MeterState } from '../shared/spend.ts';
+import { claudeDirs, findTranscript, projectSlug } from './claudeHome.ts';
 
 type D = Record<string, any>;
 
@@ -22,17 +23,12 @@ export function cliProjectsDir(env: NodeJS.ProcessEnv = process.env): string {
 /** Where Claude Code writes a conversation's transcript, or undefined when it is not there (another layout, another machine). */
 export function cliTranscriptPath(cwd: string, sessionId: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
   if (!/^[A-Za-z0-9_-]{8,80}$/.test(sessionId)) return undefined;
-  const root = cliProjectsDir(env);
-  const direct = path.join(root, cwd.replace(/[^a-zA-Z0-9]/g, '-'), `${sessionId}.jsonl`);
-  if (fs.existsSync(direct)) return direct;
-  // a long path is shortened with a hash, a moved sandbox keeps its old folder: look in each project folder once
-  try {
-    for (const d of fs.readdirSync(root)) {
-      const p = path.join(root, d, `${sessionId}.jsonl`);
-      if (fs.existsSync(p)) return p;
-    }
-  } catch {
-    // no projects folder
+  // a long path is shortened with a hash, a moved sandbox keeps its old folder: findTranscript looks in each project folder once.
+  // The environment's own Claude Code folder first, then the worker root's and the legacy ~/.claude (w5305, server/claudeHome.ts):
+  // a conversation that began before the move, or whose process still runs on the old folder, is found where it is.
+  for (const dir of claudeDirs(env, os.homedir())) {
+    const found = findTranscript(path.join(dir, 'projects'), projectSlug(cwd), sessionId);
+    if (found) return found;
   }
   return undefined;
 }
