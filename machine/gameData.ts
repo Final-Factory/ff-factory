@@ -82,3 +82,65 @@ export function savesDirsFor(buildDirs: string[], env: NodeJS.ProcessEnv = proce
   }
   return [...out];
 }
+
+/**
+ * w5344: Unity's own PlayerPrefs (the native "Screenmanager *" keys at every quit, Unity Services' ids on a Relay start,
+ * Backtrace's machine id: game repo Documentation/User-Data-Folder.md, "What still writes PlayerPrefs (w5343)") follow the
+ * player's home, not FF_GAME_DATA_DIR (lothsahn: "under no circumstances should workers write outside of ffw"). The daemon
+ * sets FF_PLAYER_HOME=<root>/gamedata-home (rootEnv), and every player a worker or the daemon starts gets a home of its own
+ * under it: the game repo's player_slots.player_home_env (slot launches, lab.py, pair legs), playerHomeEnv here (timed runs).
+ * Not HOME or XDG_CONFIG_HOME for the whole worker: gh, git and Unity's Linux licence read those (server/outsideWrites.test.ts).
+ */
+export const PLAYER_HOME_VARIABLE = 'FF_PLAYER_HOME';
+
+/** The players' own home under a worker install. */
+export const workerPlayerHomeDir = (root: string) => path.join(root, 'gamedata-home');
+
+/**
+ * The variables that move a player's PlayerPrefs into FF_PLAYER_HOME, the same rule as the game's player_home_env: Linux
+ * XDG_CONFIG_HOME=<it>/config (Unity's Linux prefs: $XDG_CONFIG_HOME/unity3d/<company>/<product>/prefs; HOME stays, Steam's
+ * client lib is found under ~/.steam), macOS CFFIXED_USER_HOME=<it> (CFPreferences follows it; HOME stays). None on Windows
+ * (nothing moves HKCU), without FF_PLAYER_HOME or FF_GAME_DATA_DIR, when the environment already sets that variable, or for a
+ * build that does not read FF_GAME_DATA_DIR (`reads` false or unknown): an older build keeps its data root under the home,
+ * where savesDirsFor and the live view look for it.
+ */
+export function playerHomeEnv(env: NodeJS.ProcessEnv, reads: boolean | undefined, platform: NodeJS.Platform = process.platform): Record<string, string> {
+  const home = env[PLAYER_HOME_VARIABLE]?.trim();
+  if (!home || !gameDataOverride(env) || reads !== true || platform === 'win32') return {};
+  const v = platform === 'darwin' ? 'CFFIXED_USER_HOME' : 'XDG_CONFIG_HOME';
+  if (env[v]?.trim()) return {};
+  return platform === 'darwin' ? { [v]: home } : { [v]: path.posix.join(home, 'config') };
+}
+
+/**
+ * Makes the folders playerHomeEnv names; on a Mac links the real `Library/Application Support/Steam` in, so a Steam lookup
+ * through NSHomeDirectory still finds the client (unchecked on a Mac player, w5344: game players are held on the Macs).
+ */
+export function preparePlayerHome(moved: Record<string, string>, realHome = os.homedir()): void {
+  if (moved.XDG_CONFIG_HOME) fs.mkdirSync(moved.XDG_CONFIG_HOME, { recursive: true });
+  const home = moved.CFFIXED_USER_HOME;
+  if (!home) return;
+  const support = path.join(home, 'Library', 'Application Support');
+  fs.mkdirSync(path.join(home, 'Library', 'Preferences'), { recursive: true });
+  fs.mkdirSync(support, { recursive: true });
+  const real = path.join(realHome, 'Library', 'Application Support', 'Steam');
+  const link = path.join(support, 'Steam');
+  try {
+    if (fs.statSync(real).isDirectory() && !fs.existsSync(link)) fs.symlinkSync(real, link);
+  } catch {
+    // no Steam here, or the link is there already
+  }
+}
+
+/** Whether the build `exe` is in reads FF_GAME_DATA_DIR: buildReadsGameDataDir of the first of its folders that holds the code. */
+export function exeReadsGameDataDir(exe: string, read: (p: string) => Buffer | undefined = readIfThere): boolean | undefined {
+  let d = path.dirname(exe);
+  for (let i = 0; i < 4; i++) {
+    const r = buildReadsGameDataDir(d, read);
+    if (r !== undefined) return r;
+    const up = path.dirname(d);
+    if (up === d) break;
+    d = up;
+  }
+  return undefined;
+}

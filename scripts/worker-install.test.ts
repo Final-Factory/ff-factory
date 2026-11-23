@@ -143,7 +143,7 @@ test('worker daemon: a root gives the folders, the agents\' environment and the 
   assert.equal(withRootDefaults({ portalUrl: 'p', id: 'x', token: 't', repoPath: 'r' }).appDir, undefined, 'no root: unchanged');
   // w1099: no FF_NIGHTLY_ROOT: the nightly lab root is gone (the night keeps its history in <root>/nightly-history).
   // w5281: the shared uv cache and the determinism audits' folder are inside the root.
-  assert.deepEqual(rootEnv('/r'), { FF_WORKER_ROOT: '/r', FF_PLAYER_SLOT_ROOT: path.join('/r', 'players'), UV_CACHE_DIR: path.join('/r', 'cache', 'uv'), FF_DETERMINISM_AUDIT_DIR: path.join('/r', 'cache', 'determinism-audit'), FF_GAME_DATA_DIR: path.join('/r', 'gamedata'), ...workerToolCacheEnv('/r') });
+  assert.deepEqual(rootEnv('/r'), { FF_WORKER_ROOT: '/r', FF_PLAYER_SLOT_ROOT: path.join('/r', 'players'), UV_CACHE_DIR: path.join('/r', 'cache', 'uv'), FF_DETERMINISM_AUDIT_DIR: path.join('/r', 'cache', 'determinism-audit'), FF_GAME_DATA_DIR: path.join('/r', 'gamedata'), FF_PLAYER_HOME: path.join('/r', 'gamedata-home'), ...workerToolCacheEnv('/r') });
   assert.equal(readToken({ token: 'in-json' }), 'in-json');
   assert.equal(readToken({ token: '', tokenFile: 'f' }, () => `${TOKEN}\r\n`), TOKEN);
   assert.throws(() => readToken({ token: '', tokenFile: 'f' }, () => '\n'), /is empty/);
