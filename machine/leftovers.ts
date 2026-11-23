@@ -1419,6 +1419,9 @@ export async function removeFolders(
   };
   const home = o.home ?? (process.env.USERPROFILE || os.homedir());
   const cwd = o.cwd ?? process.cwd();
+  // w5300: the first look of every path shares one read of the running processes (on Windows each read took seconds, and a
+  // call with five paths read them ten times); the second look, just before each delete, still reads them fresh.
+  let firstCtx: Promise<SlotContext> | undefined;
   for (const a of args) {
     if (bad) {
       no(a, bad);
@@ -1446,7 +1449,7 @@ export async function removeFolders(
       if ((await removeSlots([a], facts, now, out, slots, { home, log: o.log ?? path.join(root, 'logs', 'ff-leftovers-removed.jsonl') })) !== 0) refused++;
       continue;
     }
-    const first = await checkPath(p, facts!, now, published, await slots());
+    const first = await checkPath(p, facts!, now, published, await (firstCtx ??= slots()));
     if (first.verdict !== 'delete') {
       no(a, first.why);
       continue;

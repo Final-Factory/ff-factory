@@ -125,8 +125,22 @@ test('w5280: the Library seed\'s superseded player builds and old BuildCache fol
   const rows = (await planFolders(f, { slots: ctx(), sizes: 'none' })).filter((r) => r.kind === 'seed-library');
   assert.ok(rows.length === 5 && rows.every((r) => r.verdict === 'delete'), JSON.stringify(rows.map((r) => r.path)));
   assert.ok(!rows.some((r) => r.path.includes(hashes[3]!) || r.path.includes('JIT')));
-  // No seed in the facts (an older daemon): nothing in the seed is a candidate.
-  assert.equal((await at(`BurstCache/macOS-Arm/${hashes[0]}.dll`, [], facts)).verdict, 'keep');
+  // No seed in the facts (a pool that names none, as m5's on 2026-11-23): the install's own seed/Library is judged the same way.
+  assert.equal((await at(`BurstCache/macOS-Arm/${hashes[0]}.dll`, [], facts)).verdict, 'delete');
+  assert.equal((await at(`BurstCache/macOS-Arm/${hashes[3]}.dll`, [], facts)).verdict, 'keep');
+  // A seed configured elsewhere leaves <root>/seed alone.
+  const other = path.join(root, 'seed2', 'Library');
+  fs.mkdirSync(other, { recursive: true });
+  assert.equal((await at(`BurstCache/macOS-Arm/${hashes[0]}.dll`, [], { ...facts, librarySeed: other })).verdict, 'keep');
+});
+
+test('w5280: with no seed configured and no <root>/seed/Library, nothing is judged as the seed', async (t) => {
+  const { root, facts, ctx } = world(t);
+  const lib = path.join(root, 'seedless', 'Library');
+  const hashes = playerBuilds(path.join(lib, 'BurstCache', 'macOS-Arm'));
+  const r = await judgeWithGit(path.join(lib, 'BurstCache', 'macOS-Arm', `${hashes[0]}.dll`), facts, Date.now(), ctx());
+  assert.equal(r.verdict, 'keep');
+  assert.equal((await planFolders(facts, { slots: ctx(), sizes: 'none' })).filter((x) => x.kind === 'seed-library').length, 0);
 });
 
 test('w5280: a seed that is a project\'s own Library (the main clone\'s, a sandbox\'s) or outside the install folder is never judged as the seed', async (t) => {
