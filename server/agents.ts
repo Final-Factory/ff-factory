@@ -7927,6 +7927,16 @@ ${w.repo ?? ''}
         wrap(async (a) => o.askWithButtons(chat(), a)),
       ),
       tool(
+        'file_follow_ups',
+        'File the follow-ups a worker handed up on a request ([follow-ups to file], w2969) in one call, each with its title and brief as the worker wrote it and related to that request, through request_work and its limits. Only when your person asked for that next step or has a standing decision to file them; otherwise ask them first (w5222).',
+        {
+          request: z.string().min(2).max(16).describe('The request they were handed up on, e.g. "w5196".'),
+          items: z.array(z.number().int().min(1)).max(10).optional().describe('Which, by their number in the message (default: all).'),
+          priority: priority.optional().describe('For all of them; default normal.'),
+        },
+        wrap(async (a) => o.fileFollowUps(chat(), a)),
+      ),
+      tool(
         'close_question',
         'Take one of your open ask_person questions off your person’s Waiting on input tab (w1868), or a [for you] message off their list (w3253), when it no longer needs an answer: they answered it in words you recorded elsewhere, or events overtook it. With no seq: lists them. A click or a reply to it closes it by itself.',
         {

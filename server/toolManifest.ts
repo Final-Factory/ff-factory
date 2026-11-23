@@ -57,6 +57,7 @@ export const TOOL_MANIFEST = {
   // ledger
   list_work: { group: 'ledger', kinds: [D, P, R], always: [D, P] },
   request_work: { group: 'ledger', kinds: [P], always: [P] },
+  file_follow_ups: { group: 'ledger', kinds: [P] },
   update_work: { group: 'ledger', kinds: [P], always: [P] },
   decide_work: { group: 'ledger', kinds: [D], always: [D] },
   conditional_decisions: { group: 'ledger', kinds: [P] },
