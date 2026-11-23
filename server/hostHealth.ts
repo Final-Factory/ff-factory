@@ -126,8 +126,10 @@ export interface HostDeps {
    * The free-space levels of the sandbox drive's own volume, when they are not hostGuard's (w1581): a machine's daemon
    * judges its sandbox volume by its pool's disk_warn_gb / disk_critical_gb (the portal's welcome), so one number per
    * machine gates new sandboxes, editors and agents there. Other volumes keep warnFreeGB / criticalFreeGB.
+   * hysteresisGB (w5167): the margin a level lifts at there, the portal's disk gate's (DISK_RESUME_MARGIN_GB), so the gate
+   * and this guard agree on when new agents may start again.
    */
-  sandboxFloor?(): { warnFreeGB: number; criticalFreeGB: number } | undefined;
+  sandboxFloor?(): { warnFreeGB: number; criticalFreeGB: number; hysteresisGB?: number } | undefined;
   /**
    * Whether this guard owns a sandbox drive (cfg.sandboxRoot) to watch and reattach (default yes: a machine's daemon,
    * machine/hostGuard.ts). The portal's own guard says no (w510): it holds no sandboxes, and watches its data volume.

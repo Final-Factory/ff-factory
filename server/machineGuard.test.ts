@@ -17,6 +17,7 @@ import { Daemon, type Probes } from '../machine/daemon.ts';
 import type { DeployOptions } from './machineDeploy.ts';
 import type { Config } from './config.ts';
 import type { HelperResult } from './privileged.ts';
+import { diskAboveLine } from '../shared/blockers.ts';
 import type { Machine, MachineGuardSettings, Sandbox, SessionInfo } from '../shared/types.ts';
 
 const GB = 1024 ** 3;
@@ -301,6 +302,26 @@ test('machine guard: the sandbox volume is judged by the pool\'s disk_warn_gb, n
   const d = new MachineGuard({ ...SETTINGS, warnFreeGB: 50, criticalFreeGB: 20, hostDiskPaths: ['D:/'] }, 'V:\\ffw\\sandboxes', { ...fx, exists: () => true, statfs: async (p) => ({ free: p.startsWith('V') ? 100 * GB : 40 * GB, total: 1000 * GB }) }, { ...ports, poolFloor: () => ({ warnGB: 25, criticalGB: 20 }) });
   await d.tick();
   assert.equal(d.health.disks.find((x) => x.path.startsWith('D'))?.level, 'warn');
+});
+
+test('w5167: the sandbox volume\'s guard lifts its low-disk refusal of new agents at the reading that clears a disk gate (warning line + DISK_RESUME_MARGIN_GB), not at the Dev Drive install\'s hysteresisGB 10', async () => {
+  // lothdesktop, 2026-11-23: critical at 9 GB, then 24 GB free over its pool's 15 GB line. The disk gate cleared at 15 + 5 at
+  // 03:48Z and the resumed workers were refused at 03:49Z ("disk space is low (V:\ffw\sandboxes 24 GB free); new agent
+  // processes wait"): the daemon's guard lifted only at 15 + 10, daemon.json's hysteresisGB (scripts/worker/devdrive.ts).
+  const { fx, ports } = world();
+  let freeV = 9 * GB;
+  const floor = { warnGB: 15, criticalGB: 10 };
+  const g = new MachineGuard({ ...SETTINGS, warnFreeGB: 15, criticalFreeGB: 10, hysteresisGB: 10, hostDiskPaths: ['D:/'] }, 'V:\\ffw\\sandboxes', { ...fx, exists: () => true, statfs: async (p) => ({ free: p.startsWith('V') ? freeV : 199 * GB, total: 1000 * GB }) }, { ...ports, poolFloor: () => floor });
+  await g.tick();
+  assert.match(g.blockReason('agent') ?? '', /critically low \(V:\\ffw\\sandboxes 9 GB free\)/);
+  for (const gb of [12, 16, 19, 19.9, 20, 21, 24, 30]) {
+    freeV = gb * GB;
+    await g.tick();
+    const gate = diskAboveLine('lothdesktop', { freeBytes: freeV, warnGB: floor.warnGB });
+    const refusal = g.blockReason('agent');
+    assert.equal(refusal === undefined, gate !== undefined, `${gb} GB free: the gate says "${gate ?? 'still low'}", the guard "${refusal ?? 'starts agents'}"`);
+  }
+  assert.equal(g.blockReason('agent'), undefined);
 });
 
 test("w1918: a wanted Dev Drive maximum waits while an agent or editor is in a sandbox, says so once, then grows through ffsb-helper-grow with new work held; a failed grow is tried again after 30 min", async () => {

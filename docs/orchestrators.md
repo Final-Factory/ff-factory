@@ -1205,7 +1205,12 @@ without one means it is off or failing, worth a person's look.
      `reported` (the report it was read from). **Disk gates** (w3338, kind `disk`, ref the worker's machine; also
      `blocked_on` with `disk: true`, which the `[disk critical]` notice now asks for) show "Blocked on disk space on
      <machine>" and clear when that machine's reported free space (`Machines.diskRoom`) reaches its pool's `diskWarnGB`
-     plus `DISK_RESUME_MARGIN_GB` (5 GB, the daemon guard's hysteresis), so a disk hovering at the line does not flap. It
+     plus `DISK_RESUME_MARGIN_GB` (5 GB, the daemon guard's hysteresis), so a disk hovering at the line does not flap.
+     A disk gate filed while that reading is already at or above the line is refused and nothing is recorded (w5167:
+     the dispatcher's `decide_work` block, `blockerProblem`, and a report's "paused for low disk", `recordReportedDisk`),
+     so there is no blocked → unblocked flip; the daemon's guard lifts its own low level on the sandbox volume at the
+     same margin (machine/hostGuard.ts `sandboxFloor`, not daemon.json's `hysteresisGB` 10), so a resumed worker is not
+     refused with "disk space is low ... new agent processes wait" at 24 GB over a 15 GB line. It
      reads the portal's pool setting, not the daemon's own level, which can use daemon.json's stale `disk_warn_gb` for
      the seconds after a daemon restart. On 2026-11-07 five lothdesktop workers paused at 07:07Z sat Stalled with no
      gate and were resumed only by hand after V: had 28 GB free at 07:58Z. `blocked_on` with `disk: true` is refused

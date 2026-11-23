@@ -9,6 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { Config, HostGuardConfig } from '../server/config.ts';
 import { DEFAULT_CLEANUP } from '../server/config.ts';
+import { DISK_RESUME_MARGIN_GB } from '../shared/blockers.ts';
 import { HostHealthMonitor } from '../server/hostHealth.ts';
 import type { HelperAction, HelperResult } from '../server/privileged.ts';
 import { DISK_CRITICAL_GB_DEFAULT, type HostHealth, type MachineGuardSettings, type Sandbox, type SessionInfo } from '../shared/types.ts';
@@ -156,7 +157,10 @@ export class MachineGuard {
         ? {
             sandboxFloor: () => {
               const f = ports.poolFloor!();
-              return f && f.warnGB > 0 ? { warnFreeGB: f.warnGB, criticalFreeGB: Math.min(f.criticalGB > 0 ? f.criticalGB : DISK_CRITICAL_GB_DEFAULT, f.warnGB) } : undefined;
+              // w5167: and the portal's disk gate's margin, so a level lifts at the very reading that clears a disk gate
+              // (diskAboveLine): with the Dev Drive install's hysteresisGB 10, lothdesktop's guard still refused new agents
+              // at 24 GB free (2026-11-23 03:49Z) after the gate had resumed them at 15 + 5 GB.
+              return f && f.warnGB > 0 ? { warnFreeGB: f.warnGB, criticalFreeGB: Math.min(f.criticalGB > 0 ? f.criticalGB : DISK_CRITICAL_GB_DEFAULT, f.warnGB), hysteresisGB: DISK_RESUME_MARGIN_GB } : undefined;
             },
           }
         : {}),
