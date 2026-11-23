@@ -4268,7 +4268,8 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       keptBefore = kept;
       const asked = input.blockers?.length ? input.blockers : input.blocker ? [input.blocker] : [];
       if (!asked.length && !kept.length) throw new Error('block needs blocker (or blockers, for several): what it waits for (kind, ref, what; until for a time). A person it waits on is ask; capacity is queue.');
-      const facts = { now: now.getTime(), work: (id: string) => this.store.work.get(id.toLowerCase()), ...(this.d.machineOnline ? { online: this.d.machineOnline } : {}), ...(this.d.machinePaused ? { paused: (id: string) => !!this.d.machinePaused!(id) } : {}) };
+      // w5167: with each machine's disk reading, so a disk blocker over its line is refused, never recorded and cleared at once.
+      const facts = { now: now.getTime(), work: (id: string) => this.store.work.get(id.toLowerCase()), ...(this.d.machineOnline ? { online: this.d.machineOnline } : {}), ...(this.d.machinePaused ? { paused: (id: string) => !!this.d.machinePaused!(id) } : {}), ...(this.d.machineDisk ? { disk: this.d.machineDisk } : {}) };
       for (const b of asked) {
         const problem = blockerProblem(b, w.id, facts);
         if (problem) throw new Error(problem);
@@ -5898,6 +5899,8 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   private recordReportedDisk(w: WorkItem | undefined, sessionId: string, a: { disk: string; line: string; at: number; key: string }): boolean {
     const ref = a.disk.trim().toLowerCase();
     if (!w || (w.status !== 'active' && w.status !== 'stalled') || gatesOf(w).length || !ref || w.diskCleanup) return false;
+    // w5167: a disk already over the line its gate clears at is no wait: recording one would only flip it back at once.
+    if (diskAboveLine(ref, this.d.machineDisk?.(ref))) return false;
     const gate = this.makeGate({ kind: 'disk', ref, what: `free disk space on ${ref}` }, new Date(a.at).toISOString(), `worker ${sessionId}`);
     w.blocked = gate;
     w.alsoBlocked = undefined;

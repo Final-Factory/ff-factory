@@ -10322,6 +10322,33 @@ test('w3338: a worker that paused for low disk is Blocked on disk space on its m
   assert.equal(w.blocked, undefined, 'a clean-up is never gated on disk');
 });
 
+test('w5167: a disk block filed while the disk is already above its warning line plus the margin is refused, records nothing and flips nothing; under that line it is recorded as before', async (t) => {
+  const { store, o, dispatcher, call, machines } = await setupOnMachine(t);
+  putRequests(store, [{ id: 'w1' }]);
+  const GB = 1024 ** 3;
+  let freeGB = 24;
+  machines.diskRoom = (m) => (m.toLowerCase() === 'pc' ? { freeBytes: freeGB * GB, warnGB: 15 } : undefined);
+  const watch = new BlockerWatch({ store, orchestrators: o, now: () => Date.now(), online: (m) => (m === 'pc' ? true : undefined), disk: (m) => (m === 'pc' ? { freeBytes: freeGB * GB, warnGB: 15 } : undefined) });
+  const w = store.work.get('w1')!;
+  const before = { status: w.status, log: w.log.length };
+  // lothdesktop, 2026-11-23 03:52Z: the dispatcher's block of w5155 at 24 GB free over its 15 GB line, cleared the same minute.
+  for (const ref of ['pc', 'PC']) {
+    const r = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'block', note: "LothDesktop's V: back above its warning line", blocker: { kind: 'disk', ref, what: 'disk space on lothdesktop' } });
+    assert.equal(r.isError, true, r.text);
+    assert.match(r.text, /disk: pc has 24 GB free \(its warning line 15 GB \+ 5\), already above the line a disk gate clears at.*nothing is recorded: start it now/);
+  }
+  assert.deepEqual([w.status, w.blocked, w.log.length], [before.status, undefined, before.log], 'no gate, no state change, no log line');
+  assert.equal((await watch.tick()).has('w1'), false, 'nothing to clear, so no unblocked line and no notice');
+  // At the margin's edge it is refused too (the gate would clear at 20 GB); under it the block is recorded and holds.
+  freeGB = 20;
+  assert.equal((await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'block', note: 'x', blocker: { kind: 'disk', ref: 'pc', what: 'disk space' } })).isError, true);
+  freeGB = 19.9;
+  const held = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'block', note: 'x', blocker: { kind: 'disk', ref: 'pc', what: 'disk space' } });
+  assert.equal(held.isError, false, held.text);
+  assert.deepEqual([w.status, w.blocked?.kind, w.blocked?.ref], ['blocked', 'disk', 'pc']);
+  assert.equal((await watch.tick()).has('w1'), false, 'still under the line: it holds');
+});
+
 test('w3338: diskWaitIn reads the five low-disk pause lines of 2026-11-07 and not a clean-up, CI or a person', () => {
   for (const l of [
     'w3212: still open: paused for low disk on V: (11 GB free); the fix is committed and pushed',

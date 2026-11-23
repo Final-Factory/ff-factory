@@ -261,7 +261,7 @@ export const BLOCKER_KIND_HELP: Record<WorkBlockerKind, string> = {
   pr: 'a pull request MERGING (ref: "owner/repo#123"): clears when it merges; one closed without merging asks the requester. Use it for "wait for #1291 to merge"; ci clears when the checks finish, merged or not',
   steam: 'a pair run that needs Steam (w2459; no ref): fewer computers than its legs are signed in to Steam with different accounts; clears when enough are (FF Factory sets it itself when such a pair is filed or queued)',
   worker: "another worker of the same request (w2476; ref: its session id): clears when it says DONE for its part or stops with a final report (no still-open line); FF Factory sets it from a stopped worker's report that waits on it",
-  disk: `free disk space (ref: a machine id; w3338): clears ${DISK_RESUME_MARGIN_GB} GB above its warning line`,
+  disk: `free disk space (ref: a machine id; w3338): clears ${DISK_RESUME_MARGIN_GB} GB above its warning line; refused if above it`,
 };
 
 export interface BlockerFacts {
@@ -564,7 +564,7 @@ export function prRefOf(text: string): string | undefined {
 }
 
 /** Why a blocker cannot be set as given, or undefined (decide_work block). */
-export function blockerProblem(b: Pick<WorkBlocker, 'kind' | 'ref' | 'until' | 'on' | 'holder' | 'what'>, self: string, f: Pick<BlockerFacts, 'now' | 'work' | 'online'>): string | undefined {
+export function blockerProblem(b: Pick<WorkBlocker, 'kind' | 'ref' | 'until' | 'on' | 'holder' | 'what'>, self: string, f: Pick<BlockerFacts, 'now' | 'work' | 'online' | 'disk'>): string | undefined {
   if (!b.what.trim()) return 'say what it waits for (blocker.what), e.g. "w633\'s timing table"';
   // w1089: capacity is Queued, never Blocked on a time (w1084 to w1088 sat "blocked until 04:35" for a free sandbox).
   const capacity = capacityBlockProblem(b.what, 'dispatcher');
@@ -608,6 +608,13 @@ export function blockerProblem(b: Pick<WorkBlocker, 'kind' | 'ref' | 'until' | '
       return b.ref && f.work(self)?.sessionIds.includes(b.ref) ? undefined : `blocker.ref: a worker's session id on ${self} (w2476)`;
     case 'disk':
       if (!b.ref) return 'blocker.ref: the machine id';
-      return f.online && f.online(b.ref) === undefined ? `no machine "${b.ref}"` : undefined;
+      if (f.online && f.online(b.ref) === undefined) return `no machine "${b.ref}"`;
+      {
+        // w5167: a disk gate filed while the disk is already over the line it clears at would clear on the next sweep, a
+        // blocked → unblocked flip with its notifications for nothing (lothdesktop 2026-11-23 03:52Z, w5154/w5155/w5162/w5163
+        // at 24 GB free over a 15 + 5 GB line). It is refused instead, with the reading the gate's own verdict uses.
+        const above = f.disk ? diskAboveLine(b.ref.trim().toLowerCase(), f.disk(b.ref.trim().toLowerCase())) : undefined;
+        return above ? `disk: ${above}, already above the line a disk gate clears at, so the disk is not low now and nothing is recorded: start it now (a worker: carry on with your work)` : undefined;
+      }
   }
 }
