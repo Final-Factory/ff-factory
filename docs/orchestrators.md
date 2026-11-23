@@ -736,6 +736,19 @@ had room, which read as "LothDesktop can take more work but the queue isn't movi
      work, so the request reads "lothdesktop: its sandbox drive has 12.5 GB free, under the 30 GB a new FFU (cargo) worker
      needs (w3396)" and stays Queued. start_agent refuses the dispatcher the same (unless `disk_cleanup`). Unknown free
      space fits. Other work is not held by it: the host guard's 20 GB and 10 GB lines (hostHealth) still apply to all.
+   - **FFU rows on the same files run at once, each told of the other** (w5197, lothsahn, 2026-11-23: "Let FFU look requests
+     run at once; each merges main before pushing, and the later PR fixes conflicts"). w4553 had held an FFU request Blocked
+     while other FFU work in flight edited one of its files: five look requests on `crates/ffu-render/src/mesh.wgsl` (w5147,
+     w5164 and w5190 behind w5189 and w5191) ran one at a time. The check stays and only informs: when the dispatcher starts
+     an FFU request (start_agent with a work_id whose repo `isCargoRepo`), `ffuStartClashes` (`server/ffuOverlap.ts`)
+     compares its expected files (`ffuFiles`, and the paths its title, brief and start prompt name, hubs left out) with the
+     other FFU requests in flight and the open ffu pull requests updated in the last 72 h. On a match it starts all the same:
+     its start prompt carries `sharedFilesNote` ("[ffu files shared with work in flight (w5197)] ... merge origin/main into
+     your branch before every push ..."), the start_agent reply names the files and with whom, its log gets "ffu files shared
+     with work in flight (w5197), started anyway: ...", and each other open request it shares files with has its worker told
+     once (`Agents.tellFfuShared` through `tellPrConflict`, mark "ffu files shared with wNNN (w5197)"; a request whose worker
+     is stopped keeps the line in its log for its next turn). Nothing gates, queues or blocks on it, and override_duplicate
+     is not needed for it. A GitHub read that fails starts the row with no note (logged).
    - **Room that freed a moment ago is not yet WRONG** (w1944): the 21 flags came within seconds of the releases, before the
      ping (30 s quiet spell) had reached the dispatcher, which had started three by 22:15. `Agents.roomFacts` keeps since when
      each computer has had room (`RoomNow.since`, read each minute by the blocker watch and at every page or list_work read); a
@@ -1655,6 +1668,18 @@ people's sessions, unreleased work, team discussion, a secret `redactSecrets` do
 as Max in its thread, in a public PR. That is the combination a prompt injection needs to exfiltrate, so the tools stay
 closed to it, and its brief and the refusal say why. A trusted intake source (a nightly run, a release, a master batch:
 `untrusted: false`) is no bar. Tested in `server/orchestrators.test.ts` ("w4528").
+
+**Turn timing** (w5222, lothsahn: "Are the tool calls slow or your model calls slow?"). A worker's `agent_transcript`
+takes `since` and `until` (ISO times with a zone, at most 24 h apart) to read a window instead of the last events, each
+event with its time to the millisecond, and `timing: true` to answer how each whole turn in the window spent its wall
+time, an hour back by default (`server/turnTiming.ts`). Between two events the clock is the tools' while any tool call
+is open, else the model's (the API call and the SDK's step overhead together: streaming deltas are not persisted, so
+time to first token is not split out). Per turn it gives wall, model and tool shares, model steps with the characters
+each wrote, every tool's calls, and a person's mid-turn message timed to the turn's next assistant text with the tool
+calls started in between; then totals, medians, p90 and worst. The window is read by byte offset
+(`Store.readTranscriptBetween`: every line ends with its `"t"`, appended in time order), so an hour of a gigabyte
+coordinator transcript costs a few reads; a compressed transcript is scanned. The orchestrators' own `agent_transcript`
+keeps its old shape (their always-loaded tool budget, `coordinatorContext.test.ts`). Tested in `server/turnTiming.test.ts`.
 
 **Where a request's wall time went** (w4531). A worker whose open request carries the ledger-read grant (transcripts
 are every worker's since w4528, so no second grant) may call `work_timing` (group `ledger`): it measures the last finished (`done`) requests, newest

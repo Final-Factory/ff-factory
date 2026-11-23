@@ -7600,6 +7600,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    * (BlockerWatch.tellPrConflicts). One log line that carries `mark` (once per mark: one head commit), a worker busy on
    * it (or idle, or asleep on its check-in while the request is active) told, as tellReportWaited does. A request Blocked
    * on something else keeps the line in its log for its next turn. False when the mark is already on it or it is closed.
+   * w5197 tells the same way an ffu request whose files a newly started ffu row shares (Agents.tellFfuShared).
    */
   tellPrConflict(id: string, a: { mark: string; text: string }): boolean {
     const w = this.store.work.get(id);

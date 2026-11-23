@@ -35,10 +35,10 @@ import { statusLinesIn, stillOpenIn } from './ledgerRules.ts';
 import { inlineReviewMedia, MEDIA_FILE, outsideReview, publishedCopy, reviewRootOf } from './reviewMedia.ts';
 import { visualAskCheck } from './visualAsk.ts';
 import { ciPushHold } from './savePushHold.ts';
-import { BLOCKER_KIND_HELP, conflictText, FULL_SHA, gateSetter, gatesName, gatesOf, isWith, latestWorker, MAX_GATES, newestFirst, prLabel, prRefOf, type PrHealth } from '../shared/blockers.ts';
+import { BLOCKER_KIND_HELP, conflictText, FULL_SHA, gateSetter, gatesName, gatesOf, isWith, latestWorker, newestFirst, prLabel, prRefOf, type PrHealth } from '../shared/blockers.ts';
 import { isSamePerson, personForWork, poolOwnerOf, tokenPersonForWork, withPool } from './vault.ts';
 import { ghRunner, githubFromVault, githubPersonOf, githubTokens } from './githubTokens.ts';
-import { clashGates, clashLine, expectedFiles, ffuStartClashes, FfuPrReads } from './ffuOverlap.ts';
+import { clashLine, expectedFiles, type FfuClash, ffuStartClashes, FfuPrReads, peerFilesNote, sharedFilesNote } from './ffuOverlap.ts';
 import { namedIds, READ_LIST_MAX, READ_MAX_CHARS, readWork, type ReadWorkArgs } from './workRead.ts';
 import { readPortalLogs, realJournal, type PortalLogsInput } from './portalLogs.ts';
 import { PATH_HEALTH_FILE, filePathHealth } from './pathHealth.ts';
@@ -55,6 +55,7 @@ import { branchProblem, slugify, withBaseRepoLock } from './sandboxes.ts';
 import { MAIN_CLONE_NO_AGENTS, agentCap, machineDir, noPlayersOf, parseSandboxRef, poolSettingsOf, sameCommit, timedPlacementRefusalOf } from './machines.ts';
 import { JOIN_TTL_MINUTES } from './machineJoin.ts';
 import { searchTranscripts } from './search.ts';
+import { describeTurnTimings, turnTimings } from './turnTiming.ts';
 import { CATALOG, questionsShape } from './launch.ts';
 import { clampArgs, clamped, rangedNumber, withWarnings } from './forgiving.ts';
 import { FRESH_AFTER_MERGE_MARK, freshAfterMergeArm, freshAfterMergeDue, freshAfterMergePercent, freshAfterMergeText, mergedInSession } from './freshAfterMerge.ts';
@@ -310,7 +311,18 @@ const READ_WORK_TOOL = `Read the work ledger, read-only: the requests people and
  * A worker's agent_transcript and search_transcripts (w4497; every worker's by default since w4528, docs/orchestrators.md
  * "Workers read the ledger", "Transcript reading"): closed only to a worker that serves a request quoting players' text (Agents.transcriptAccessOf).
  */
-const WORKER_AGENT_TRANSCRIPT_TOOL = `Read the recent condensed transcript of any agent session (a worker, an orchestrator, a standing agent), read-only: yours by default, refused only to a worker on a request filed from players' text (Discord, FFBox). Its messages, tool calls, errors and turn results; secrets are masked as it is read. session_id from search_transcripts.`;
+/** w5222: agent_transcript's arguments; a window (since, until) or timing reads by time (Store.readTranscriptBetween). */
+export interface AgentTranscriptArgs {
+  session_id: string;
+  last?: number;
+  full_text?: boolean;
+  since?: string;
+  until?: string;
+  timing?: boolean;
+}
+const TRANSCRIPT_WINDOW_MAX_MS = 24 * 3600_000;
+
+const WORKER_AGENT_TRANSCRIPT_TOOL = `Read the recent condensed transcript of any agent session (a worker, an orchestrator, a standing agent), read-only: yours by default, refused only to a worker on a request filed from players' text (Discord, FFBox). Its messages, tool calls, errors and turn results; secrets are masked as it is read. session_id from search_transcripts. since and until (ISO times with a zone, at most 24 h apart) read that window instead of the last events, each event with its time; timing: true answers how each whole turn in the window spent its wall time (model steps, every tool call, a message from a person waiting mid-turn), an hour back by default (w5222).`;
 const WORKER_SEARCH_TRANSCRIPTS_TOOL = `Full-text search across every agent's transcript, read-only: yours by default, refused only to a worker on a request filed from players' text (Discord, FFBox). All words must match ("quoted phrases" stay together). Filters: sandbox, machine, agent (a session id, standing agent id or part of a title), since and until (ISO times or dates) for a time window. Each hit names its session (read it whole with agent_transcript); secrets are masked in the snippets.`;
 
 /** work_timing's description (w4531, docs/orchestrators.md "Where a request's wall time went"). */
@@ -2353,9 +2365,21 @@ export class Agents {
   }
 
   /** agent_transcript's answer, for an orchestrator or a worker: masked again as it is read (w1688). */
-  agentTranscriptText(a: { session_id: string; last?: number; full_text?: boolean }): string {
+  async agentTranscriptText(a: AgentTranscriptArgs): Promise<string> {
     const s = this.sessions.get(a.session_id);
     const head = `${s.info.title} [${s.info.status}${s.info.statusDetail ? `: ${s.info.statusDetail}` : ''}] turns=${s.info.turns} cost=$${s.info.costUsd.toFixed(2)}`;
+    if (a.since || a.until || a.timing) {
+      // w5222: a time window (an hour back by default for timing), read by offset so a gigabyte coordinator transcript costs a few reads
+      const until = a.until ? new Date(a.until) : new Date();
+      const since = a.since ? new Date(a.since) : new Date(until.getTime() - (a.timing ? 3600_000 : 600_000));
+      if (Number.isNaN(since.getTime()) || Number.isNaN(until.getTime())) throw new Error('since and until are ISO times, e.g. 2026-11-23T07:05:00Z');
+      if (until.getTime() - since.getTime() > TRANSCRIPT_WINDOW_MAX_MS) throw new Error(`a window is at most ${TRANSCRIPT_WINDOW_MAX_MS / 3600_000} h: narrow since and until`);
+      const { events, truncated } = await this.store.readTranscriptBetween(a.session_id, since.toISOString(), until.toISOString());
+      const note = `${since.toISOString().slice(0, 19)}Z–${until.toISOString().slice(0, 19)}Z${truncated ? ' (cut short: the window held too much; narrow it)' : ''}`;
+      if (a.timing) return redactSecrets(`${head}\n${describeTurnTimings(turnTimings(events), note)}`);
+      const shown = events.slice(-(a.last ?? 40));
+      return redactSecrets(`${head}\nwindow ${note}, ${shown.length} of ${events.length} event(s), each with its time:\n${this.condensed(shown, !!a.full_text, false, true)}`);
+    }
     // redacted again as it is read (w1688): a transcript written before a secret's value was known
     return redactSecrets(`${head}\n${this.condensed(this.store.readTranscript(a.session_id, a.last ?? 40), !!a.full_text)}`);
   }
@@ -2369,11 +2393,11 @@ export class Agents {
   }
 
   /** w4497, w4528: a worker's agent_transcript, any worker's but one on a request quoting players' text. */
-  agentTranscriptFor(sessionId: string, raw: Record<string, unknown>): string {
+  async agentTranscriptFor(sessionId: string, raw: Record<string, unknown>): Promise<string> {
     this.transcriptAccessOf(sessionId, 'agent_transcript');
     const { args: a, warnings } = clampArgs(raw, { last: [5, 400] });
     if (typeof a.session_id !== 'string' || !a.session_id) throw new Error('session_id is required');
-    return withWarnings(this.agentTranscriptText(a as { session_id: string; last?: number; full_text?: boolean }), warnings);
+    return withWarnings(await this.agentTranscriptText(a as unknown as AgentTranscriptArgs), warnings);
   }
 
   /** w4497, w4528: a worker's search_transcripts over every agent, any worker's but one on a request quoting players' text. */
@@ -2983,26 +3007,30 @@ export class Agents {
   private readonly ffuReads = new FfuPrReads();
 
   /**
-   * w4553: hold ffu row `w` Blocked when its expected files collide with another ffu row in flight or a fresh open ffu pull
-   * request (server/ffuOverlap.ts); what start_agent answers then, or undefined to start it. A gh read that fails starts it
-   * (logged): the check saves a conflict, it must never stop ffu work.
+   * w4553, w5197: where ffu row `w` shares expected files with another ffu row in flight or a fresh open ffu pull request
+   * (server/ffuOverlap.ts). It holds nothing: the row starts and both sides are told (tellFfuShared). A gh read that fails
+   * finds none (logged).
    */
-  private async ffuOverlapHold(w: WorkItem, prompt: string): Promise<string | undefined> {
-    let found: ReturnType<typeof ffuStartClashes>;
+  private async ffuShared(w: WorkItem, prompt: string): Promise<FfuClash[]> {
     try {
       const run = ghRunner(githubPersonOf(tokenPersonForWork(this.cfg, w), w, this.identity.systemPayer().userId), `the ffu overlap check of ${w.id}`);
       const [prs, hubs] = await Promise.all([this.ffuReads.openPrs(run), this.ffuReads.hubs(run)]);
-      found = ffuStartClashes({ w, prompt, work: this.store.work.values(), prs, hubs, now: Date.now() });
+      return ffuStartClashes({ w, prompt, work: this.store.work.values(), prs, hubs, now: Date.now() }).clashes;
     } catch (e) {
       console.warn(`ffu overlap check: ${w.id}: ${(e as Error).message}; started without it (w4553)`);
-      return undefined;
+      return [];
     }
-    if (!found.clashes.length) return undefined;
-    const lines = found.clashes.map(clashLine);
-    const gates = clashGates(found.clashes).slice(0, MAX_GATES);
-    this.orchestrators.decide({ id: w.id, action: 'block', blockers: gates, note: `ffu overlap check (w4553): ${lines.join('; ')}` });
-    console.log(`ffu overlap check: held ${w.id}: ${lines.join('; ')}`);
-    return `${w.id} was not started: it is ffu work that would edit what other ffu work in flight edits (w4553), and two rows on the same code conflict at merge. ${lines.join('; ')}. It is held Blocked on ${gates.map((g) => g.ref).join(', ')} and comes back to you when ${gates.length > 1 ? 'they clear' : 'that clears'}. If they edit different parts of those files, start it anyway with override_duplicate saying so. Name the files a row will edit in its brief or start prompt: the check reads them.`;
+  }
+
+  /** w5197: ffu row `w` started beside `clashes`: a line in its log, and each other open request's worker told once. */
+  private tellFfuShared(w: WorkItem, clashes: readonly FfuClash[]) {
+    const lines = clashes.map(clashLine);
+    this.orchestrators.noteOnRequest(w.id, `ffu files shared with work in flight (w5197), started anyway: ${lines.join('; ')}`);
+    console.log(`ffu overlap check: ${w.id} shares files: ${lines.join('; ')}`);
+    for (const c of clashes) {
+      const peer = c.id && c.id !== w.id ? this.store.work.get(c.id) : undefined;
+      if (peer) this.orchestrators.tellPrConflict(peer.id, { mark: `ffu files shared with ${w.id} (w5197)`, text: peerFilesNote(w.id, c.files) });
+    }
   }
 
   startWorker(req: { sandbox?: string; machine?: string; prompt: string; title?: string; model?: string; effort?: EffortLevel; permissionMode?: PermissionMode; from: 'human' | 'orchestrator'; requestedBy?: Requester; attachments?: AttachmentRef[]; workId?: string }) {
@@ -6133,31 +6161,37 @@ A report is for a person who asked for one, and they want few (lothsahn, w5223: 
     return [...cap, ...(cap.length ? [''] : []), ...parts, ...this.ops.groupLines()].join('\n').replace(/^\n+/, '');
   }
 
-  private condensed(events: TranscriptEvent[], full = false, forPerson = false) {
+  private condensed(events: TranscriptEvent[], full = false, forPerson = false, times = false) {
     return events
       .map((e) => {
-        switch (e.kind) {
-          case 'user':
-            // A person reading their own chat sees their words as the bubble does: FF Factory's notes after them are the orchestrator's (w3581).
-            return `> ${e.from}: ${(forPerson && e.from === 'human' ? personMessageView(e.text).words : e.text).slice(0, 400)}`;
-          case 'assistant':
-            return `assistant: ${e.text.slice(0, full ? 1200 : 600)}`;
-          case 'tool_use':
-            return `  [tool] ${e.name} ${JSON.stringify(e.input).slice(0, full ? 160 : 120)}`;
-          case 'tool_result':
-            return e.isError ? `  [tool error] ${e.text.slice(0, 200)}` : '';
-          case 'result':
-            return `-- turn ended (${e.ok ? 'ok' : 'error'}, ${e.turns} steps, $${e.costUsd.toFixed(2)})`;
-          case 'error':
-            return `ERROR: ${e.text.slice(0, 300)}`;
-          case 'permission':
-            return `  [permission] ${e.toolName} → ${e.decision ?? 'waiting'}`;
-          default:
-            return '';
-        }
+        const line = this.condensedLine(e, full, forPerson);
+        // w5222: with times, every event shows when it was persisted (a tool result too, so a call's length reads off)
+        return times ? `${e.t.slice(11, 23)} ${line || (e.kind === 'tool_result' ? '  [tool result]' : `[${e.kind}]`)}` : line;
       })
       .filter(Boolean)
       .join('\n');
+  }
+
+  private condensedLine(e: TranscriptEvent, full: boolean, forPerson: boolean): string {
+    switch (e.kind) {
+      case 'user':
+        // A person reading their own chat sees their words as the bubble does: FF Factory's notes after them are the orchestrator's (w3581).
+        return `> ${e.from}: ${(forPerson && e.from === 'human' ? personMessageView(e.text).words : e.text).slice(0, 400)}`;
+      case 'assistant':
+        return `assistant: ${e.text.slice(0, full ? 1200 : 600)}`;
+      case 'tool_use':
+        return `  [tool] ${e.name} ${JSON.stringify(e.input).slice(0, full ? 160 : 120)}`;
+      case 'tool_result':
+        return e.isError ? `  [tool error] ${e.text.slice(0, 200)}` : '';
+      case 'result':
+        return `-- turn ended (${e.ok ? 'ok' : 'error'}, ${e.turns} steps, $${e.costUsd.toFixed(2)})`;
+      case 'error':
+        return `ERROR: ${e.text.slice(0, 300)}`;
+      case 'permission':
+        return `  [permission] ${e.toolName} → ${e.decision ?? 'waiting'}`;
+      default:
+        return '';
+    }
   }
 
   /**
@@ -6348,10 +6382,10 @@ A report is for a person who asked for one, and they want few (lothsahn, w5223: 
             const cargoOn = ctx.role === 'dispatcher' && w && isCargoRepo(w.repo) && !a.disk_cleanup ? this.newWorkOn(a.sandbox, a.machine) : undefined;
             const cargoNo = cargoOn ? cargoShortOf(this.machines.diskRoom(cargoOn)?.freeBytes) : undefined;
             if (cargoNo) throw new Error(`${w!.id} is FFU (Rust) work and ${cargoOn}: ${cargoNo}. Leave it Queued: it starts there, or on a computer with room, once the clean-up frees the drive.`);
-            // w4553: an ffu row that would edit the files another ffu row in flight edits is held Blocked on it, not started.
+            // w4553, w5197: an ffu row that would edit files other ffu work in flight edits starts all the same, told so.
+            let ffuShared: FfuClash[] = [];
             if (ctx.role === 'dispatcher' && w && isCargoRepo(w.repo) && !a.disk_cleanup) {
-              const held = override ? undefined : await this.ffuOverlapHold(w, a.prompt);
-              if (held) return held;
+              ffuShared = await this.ffuShared(w, a.prompt);
               // The paths its start prompt names count for the rows started after it (its brief is read again each time).
               const named = expectedFiles(undefined, a.prompt, []);
               if (named.length) {
@@ -6409,7 +6443,7 @@ ${w.repo ?? ''}
             if (ctx.role === 'dispatcher') this.sharedSandboxProblem(a.sandbox, a.machine, a.work_id, a.extra_agent, needs);
             // An intake request always carries its rules (untrusted text, posting limits, the markers), whatever the brief says.
             // The request as filed goes with every brief (w496), then the intake rules and the PR line.
-            const prompt = `${a.prompt}${w ? requestAsFiled(w, a.prompt) : ''}${w ? this.handoverFor(w, this.target(a.sandbox, a.machine), handed.branch) : ''}${w?.source ? workerRules(w, handed.branch ?? this.sandboxBranchOf(this.target(a.sandbox, a.machine))) : ''}${w ? requestLineRule(w) : ''}`;
+            const prompt = `${a.prompt}${w && ffuShared.length ? sharedFilesNote(w.id, ffuShared) : ''}${w ? requestAsFiled(w, a.prompt) : ''}${w ? this.handoverFor(w, this.target(a.sandbox, a.machine), handed.branch) : ''}${w?.source ? workerRules(w, handed.branch ?? this.sandboxBranchOf(this.target(a.sandbox, a.machine))) : ''}${w ? requestLineRule(w) : ''}`;
             const s = this.startWorker({ sandbox: a.sandbox, machine: a.machine, prompt, title: w ? jobTitle(w.id, a.title!) : a.title, model: picked.model, effort: a.effort, permissionMode: a.permission_mode, from, requestedBy, attachments: files, workId: w?.id });
             const where = `in sandbox ${s.info.machineId}/${s.info.machineSandbox}`;
             if (s.info.status === 'error') return `Created agent ${s.info.id} ${where}, but it did not start: ${s.info.statusDetail}`;
@@ -6420,6 +6454,7 @@ ${w.repo ?? ''}
               const why = override ? ` (not a repeat: ${override})` : '';
               this.orchestrators.linkWorker(w.id, s.info, `started ${this.orchestrators.workerLine(s.info.id)}${picked.note}${why}`, { overrideGate: a.override_gate });
               item = ` for ${w.id}; ${names(w.requesters)}'s orchestrator is told`;
+              if (ffuShared.length) this.tellFfuShared(w, ffuShared);
             } else {
               const id =
                 ctx.role === 'dispatcher'
@@ -6429,7 +6464,8 @@ ${w.repo ?? ''}
               item = `; recorded in the ledger as ${id}`;
             }
             const withFiles = files.length ? ` It gets ${files.length === 1 ? 'the attachment' : `${files.length} attachments`} (${files.map((f) => f.id).join(', ')}) in ${INBOX_DIR}/.` : '';
-            return `Started agent ${s.info.id} "${s.info.title}" ${where}${picked.note || ` on ${this.cfg.defaultModel}`}, requested by ${requestedBy.displayName}${item}.${withFiles}${Agents.goneLine(files)}${this.queuedLine(s.info.id)}${handed.note}${hint}`;
+            const shared = ffuShared.length ? ` It may edit files other ffu work in flight edits (w5197): ${ffuShared.map(clashLine).join('; ')}; it was told, and so was each of those requests' worker: each merges origin/main before pushing and the later pull request resolves the conflicts.` : '';
+            return `Started agent ${s.info.id} "${s.info.title}" ${where}${picked.note || ` on ${this.cfg.defaultModel}`}, requested by ${requestedBy.displayName}${item}.${withFiles}${shared}${Agents.goneLine(files)}${this.queuedLine(s.info.id)}${handed.note}${hint}`;
           }),
         ),
         ...this.machineToolSpecs(tool, from, ctx),
@@ -6600,7 +6636,7 @@ ${w.repo ?? ''}
           'agent_transcript',
           'Read the recent condensed transcript of a worker agent: its messages, tool calls, errors and turn results.',
           { session_id: z.string(), last: rangedNumber(5, 400, 'How many events (default 40).').optional(), full_text: z.boolean().optional().describe('Longer cuts of each message and tool call (default: assistant text 600 characters, tool input 120).') },
-          wrap(clamped({ last: [5, 400] }, async (a: { session_id: string; last?: number; full_text?: boolean }) => this.agentTranscriptText(a))),
+          wrap(clamped({ last: [5, 400] }, async (a: AgentTranscriptArgs) => this.agentTranscriptText(a))),
         ),
         tool(
           'ops_worker',
@@ -8403,6 +8439,7 @@ ${this.worldBrief(true)}
 - Done means merged: a worker merges its own PR once its verification is done and CI is green (in the game repo, its required \`Test in editmode\` check; a PR that breaks the master batch comes back as an urgent revert request), and holds one only for exceptional risk or a concrete timing reason (it reports which, and when it will merge). Do not write a brief that ends at an open PR waiting for a person.
 - Game tests that assert on timing are their own \`[Category("Performance")]\` tests, and functional tests never carry the tag. They run in no CI (locally against a same-machine baseline, later on dedicated perf hardware). A worker fixes a wrong or mixed tag where it meets one; no brief asks to loosen a timing threshold (ff-agents evidence-gate).
 - Same spec, PR, branch or bug means the same work, unless the verbs differ (implement vs playtest vs review). A PR already being merged is not work to redo. A request other work fully covers is closed (w3248): reject it "superseded by <what>" or merge it. When the server found a strong overlap still in flight, start_agent refuses unless you pass override_duplicate saying what makes the request different.
+- FFU rows that share ffu files run at once (w5197, lothsahn): never hold one for another's files; the server tells both workers.
 - Priority: frantic, urgent, high, normal, low, then the oldest first, in every queue (strict, w4620). Do not stop a running worker for a new request unless a person asks.
 - Desyncs, crashes and hangs are urgent (w4810, docs/intake.md); for one still open below urgent, your decide_work note asks its requester to raise it.
 - Your decide_work note is what the requester's orchestrator reads: one or two plain lines. Starting or messaging with work_id tells them by itself.
