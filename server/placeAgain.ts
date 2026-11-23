@@ -509,6 +509,12 @@ export interface PlaceAgainDeps {
    * its resume may pre-empt a mid-turn low or normal worker on its own computer at a safe point, as urgent queued work does.
    */
   resumePreempt?: (s: SessionInfo) => boolean;
+  /**
+   * w5260: whether one of the worker's open requests waits on a pair run of its own (WorkItem.pair.for). Such a worker is
+   * released as before, urgent or not: the pair run needs room, and w665's worker once held m3's only sandbox while its
+   * pair run waited for one (w1945).
+   */
+  waitsOnPair?: (s: SessionInfo) => boolean;
   /** w3507: a worker's open request ids, for the line a pre-empted worker ends its turn with. */
   requestsOf?: (s: SessionInfo) => string[];
 }
@@ -706,6 +712,12 @@ export class PlaceAgain {
     return this.facts(machineId).sessions.filter((s) => s.placeReleased && !this.d.isLive(s.id) && this.d.queued(s.id) && !claimed.has(s.id) && !this.agentOnly(s)).map((s) => s.id);
   }
 
+  /** w5260: why `s` keeps its sandbox between turns for its priority (keepWhy), unless it waits on its own pair run (waitsOnPair). */
+  keepFor(s: SessionInfo): string | undefined {
+    const why = keepWhy(this.d.priorityOf?.(s));
+    return why && !this.d.waitsOnPair?.(s) ? why : undefined;
+  }
+
   /**
    * w4608: why a worker's sandbox is not released (yet), so a message resumes it there and in no other sandbox: a pair
    * or Live hold, or what keeps it (keptWhy). Undefined when it released it, or nothing keeps it once its release is due.
@@ -714,7 +726,7 @@ export class PlaceAgain {
     if (s.kind !== 'worker' || !s.machineId || !s.machineSandbox || s.placeReleased) return undefined;
     const sb = this.d.machine(s.machineId)?.sandboxes?.find((x) => x.id === s.machineSandbox);
     if (!sb) return undefined;
-    return this.d.pairHold?.(s) ?? this.d.liveHold?.(s) ?? keptWhy(s, sb, this.facts(s.machineId)) ?? (this.d.workOver(s) ? undefined : keepWhy(this.d.priorityOf?.(s)));
+    return this.d.pairHold?.(s) ?? this.d.liveHold?.(s) ?? keptWhy(s, sb, this.facts(s.machineId)) ?? (this.d.workOver(s) ? undefined : this.keepFor(s));
   }
 
   /** w4608: the sandbox a released worker is being moved into right now (its editor stopped, its branch switched), if any. */
@@ -731,7 +743,7 @@ export class PlaceAgain {
     if (s.kind !== 'worker' || !s.machineId || !s.machineSandbox || s.placeReleased || s.status !== 'stopped' || this.d.isLive(s.id)) return undefined;
     const sb = this.d.machine(s.machineId)?.sandboxes?.find((x) => x.id === s.machineSandbox);
     const why = sb && (ciReleaseWhy(sb, this.d.ciWait?.(s)) ?? waitReleaseWhy(sb, this.d.waitOn?.(s)) ?? releaseWhy(s, this.now(), this.d.workOver(s)));
-    const kept = why && (this.d.pairHold?.(s) ?? this.d.liveHold?.(s) ?? keptWhy(s, sb, this.facts(s.machineId)) ?? (this.d.workOver(s) ? undefined : keepWhy(this.d.priorityOf?.(s))));
+    const kept = why && (this.d.pairHold?.(s) ?? this.d.liveHold?.(s) ?? keptWhy(s, sb, this.facts(s.machineId)) ?? (this.d.workOver(s) ? undefined : this.keepFor(s)));
     return kept ? `its sandbox stays held although ${why}: ${kept}` : undefined;
   }
 
@@ -801,7 +813,7 @@ export class PlaceAgain {
       if (!live && s.placeReleased) this.d.liveLost?.(s, s.placeReleased.why);
       else if (!live && s.status === 'stopped' && !(this.now() - Date.parse(s.lastActivityAt) < LIVE_HOLD_MS)) this.d.liveLost?.(s, `nobody came back to it within ${LIVE_HOLD_MS / 3_600_000} h`);
       if (s.placeReleased && staysReleased(s, live, f.now)) continue;
-      const step = releaseStep(s, sb, { ...f, workOver: this.d.workOver(s), ciWait: this.d.ciWait?.(s), waitOn: this.d.waitOn?.(s), keepLive: live ? this.d.keepLive(s.id) : undefined, liveHold: this.d.liveHold?.(s), pairHold: this.d.pairHold?.(s), claimedBy: s.placeReleased ? this.claimedBy(m.id, sb.id) : undefined, reclaim: targets.get(s.id)?.why, keep: s.placeReleased ? undefined : keepWhy(this.d.priorityOf?.(s)) });
+      const step = releaseStep(s, sb, { ...f, workOver: this.d.workOver(s), ciWait: this.d.ciWait?.(s), waitOn: this.d.waitOn?.(s), keepLive: live ? this.d.keepLive(s.id) : undefined, liveHold: this.d.liveHold?.(s), pairHold: this.d.pairHold?.(s), claimedBy: s.placeReleased ? this.claimedBy(m.id, sb.id) : undefined, reclaim: targets.get(s.id)?.why, keep: s.placeReleased ? undefined : this.keepFor(s) });
       if (!step) continue;
       // Its sessions stay grouped (sessionsMemo): no step moves a worker to another machine or sandbox in the pass.
       this.claimsMemo?.delete(m.id);

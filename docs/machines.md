@@ -2339,7 +2339,7 @@ LothDesktop and Beast, not just when BEAST is full").
   dispatcher moved it with `stop_agent move_to`, which handed it over on the next worker's branch (the w5186 ledger log).
   - **Kept** (`placeAgain.ts keepWhy`): a worker whose highest open request is urgent or frantic is never released for a
     wait between turns: CI (w846), a deploy, a person, another request (w890), a far check-in, idle time or a daemon
-    restart. Its process may still stop (`releaseDue`), and a stopped worker due a release holds its sandbox
+    restart (a wait on its own pair run still releases it, `waitsOnPair`: the pair run needs room, w1945). Its process may still stop (`releaseDue`), and a stopped worker due a release holds its sandbox
     (`holdsSandbox`): not FREE, not claimed for a released worker, so start_agent's FREE test and the queue pass it by, and
     its resume lands in its own sandbox on the next drain. Only strictly higher queued work takes it (the reclaim below;
     equal never takes from equal), and its work being over releases it as for anyone. The trade-off: a sandbox stays
