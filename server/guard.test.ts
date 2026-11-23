@@ -447,6 +447,46 @@ test('w2503: a kill or shutdown word inside a PR title, body or commit message i
   for (const cmd of kills) assert.ok(checkShell(cmd), cmd);
 });
 
+test('w5272: the word shutdown as data is allowed, as the command it is refused', () => {
+  // w5271's worker had a grep of a CI log refused for "##[error]The runner has received a shutdown signal".
+  const data = [
+    'grep "received a shutdown signal" log.txt',
+    "grep -n 'The runner has received a shutdown signal' \"$TMPDIR/ci.log\"",
+    'gh run view 12 --log-failed | grep -i "shutdown signal" | tail -5',
+    'rg shutdown file',
+    'cat logs/shutdown.log',
+    'ls /var/log/reboot-notes',
+    'echo "do not run shutdown now; reboot later"',
+    'git log --grep=shutdown',
+  ];
+  for (const cmd of data) assert.equal(checkShell(cmd), undefined, cmd);
+  const refused = [
+    'shutdown /s /t 0',
+    'shutdown.exe /r',
+    'sudo shutdown -h now',
+    'sudo -u root shutdown -h now',
+    '/sbin/shutdown -r now',
+    'Stop-Computer',
+    'Restart-Computer -Force',
+    'reboot',
+    'poweroff',
+    'halt',
+    'systemctl poweroff',
+    'sudo systemctl reboot',
+    'echo x && shutdown -r now',
+    'echo x; reboot',
+    'ls | shutdown /s',
+    'echo "$(shutdown -r now)"',
+    'echo $(shutdown -r now)',
+    'powershell -c "Stop-Computer"',
+    'powershell -NoProfile -Command "Restart-Computer"',
+    'cmd /c shutdown /s /t 0',
+    "bash -c 'sudo shutdown -h now'",
+    'FOO=1 shutdown -h now',
+  ];
+  for (const cmd of refused) assert.match(checkShell(cmd) ?? '', /Shutting down or restarting/, cmd);
+});
+
 test('w2503: text arguments are blanked, everything else is left as written', () => {
   assert.equal(withoutTextArgs('ff-pr push --title "OOM kill" --body-file b.md'), 'ff-pr push --title "" --body-file b.md');
   assert.equal(withoutTextArgs("git commit -m 'kill node'"), 'git commit -m ""');

@@ -1,0 +1,1 @@
+- Workers' Bash guard: the word "shutdown" (or reboot, halt, poweroff) as data, such as a grep pattern for a CI log line, a quoted string or a file name, is no longer refused; it is refused only when run as a command in any command position, including after sudo, in `$(...)` and in `powershell -c` / `cmd /c` (w5272).

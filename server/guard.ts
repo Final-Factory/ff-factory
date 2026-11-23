@@ -1180,6 +1180,85 @@ export function withoutTextArgs(cmd: string): string {
   });
 }
 
+const POWER_OFF_COMMANDS = new Set(['shutdown', 'reboot', 'poweroff', 'halt', 'restart-computer', 'stop-computer']);
+const POWER_OFF_VERBS = new Set(['poweroff', 'reboot', 'halt', 'kexec']);
+// Words that run the next command: `sudo -u root shutdown`. Their own options (and the value of those that take one) are skipped.
+const COMMAND_PREFIXES = new Set(['sudo', 'doas', 'env', 'nohup', 'time', 'command', 'exec', 'nice', 'xargs', 'then', 'do', 'else', '!']);
+const PREFIX_OPTION_VALUES = new Set(['-u', '-g', '-h', '-p', '-c', '-d', '-r', '-t', '-n']);
+const SHELL_WRAPPERS = new Set(['powershell', 'pwsh', 'cmd', 'bash', 'sh', 'zsh', 'dash', 'eval']);
+
+/**
+ * w5272: whether the command runs a machine shutdown or reboot, as a command in any command position: after `sudo`, `;`, `&&`,
+ * `|`, `$(...)`, or inside `powershell -c` / `cmd /c` / `bash -c`. The word as data (a grep pattern, a quoted string, a
+ * file name or a log path) is not a command: `grep "received a shutdown signal" log.txt` passes.
+ */
+export function runsPowerOff(cmd: string, depth = 0): boolean {
+  if (depth > 4) return false;
+  // Split into simple commands of words. A quote keeps its text inside one word; a double-quoted `$(...)` or backtick is
+  // judged as a command of its own.
+  const commands: string[][] = [[]];
+  const nested: string[] = [];
+  let word = '';
+  let has = false;
+  let quote = '';
+  let quoted = '';
+  const endWord = () => {
+    if (has) commands[commands.length - 1].push(word);
+    word = '';
+    has = false;
+  };
+  const endCommand = () => {
+    endWord();
+    if (commands[commands.length - 1].length) commands.push([]);
+  };
+  const endQuote = () => {
+    if (quote === '"' && /\$\(|`/.test(quoted)) nested.push(quoted);
+    quote = '';
+    quoted = '';
+  };
+  for (const c of cmd) {
+    if (quote) {
+      if (c === quote) endQuote();
+      else {
+        word += c;
+        quoted += c;
+      }
+    } else if (c === '"' || c === "'") {
+      quote = c;
+      has = true;
+    } else if (c === ' ' || c === '\t' || c === '\r') endWord();
+    else if (';&|\n()`{}'.includes(c)) endCommand();
+    else {
+      word += c;
+      has = true;
+    }
+  }
+  endQuote();
+  endWord();
+  if (nested.some((n) => runsPowerOff(n, depth + 1))) return true;
+  for (const words of commands) {
+    let i = 0;
+    while (i < words.length) {
+      const w = words[i].toLowerCase();
+      if (/^\w+=/.test(w)) i++;
+      else if (COMMAND_PREFIXES.has(w)) {
+        i++;
+        // An option that takes a value (`sudo -u root`) skips the value too.
+        while (i < words.length && words[i].startsWith('-')) i += PREFIX_OPTION_VALUES.has(words[i].toLowerCase()) && w !== 'xargs' && w !== 'env' && w !== 'nice' ? 2 : 1;
+      } else break;
+    }
+    if (i >= words.length) continue;
+    const head = words[i].toLowerCase().replace(/^.*[\\/]/, '').replace(/\.(exe|cmd|bat|ps1)$/, '');
+    if (POWER_OFF_COMMANDS.has(head)) return true;
+    if (head === 'systemctl' && words.slice(i + 1).some((a) => POWER_OFF_VERBS.has(a.toLowerCase()))) return true;
+    if (SHELL_WRAPPERS.has(head)) {
+      const flag = words.findIndex((a, j) => j > i && /^(-c|-lc|-command|\/c|\/k)$/i.test(a));
+      if (flag >= 0 && runsPowerOff(words.slice(flag + 1).join(' '), depth + 1)) return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Why a shell command is refused, or undefined. Exported for tests. Without a context, or with no
  * game repo configured, every master/main push or PR counts as the game repo's.
@@ -1314,11 +1393,8 @@ export function checkShell(command: string, ctx?: ShellContext): string | undefi
         if (pvr && method && method !== 'GET' && ghIsGameRepo(ctx, pvr, dir)) return "Changing the game repo's security settings is the user's call, not an agent's.";
       }
     }
-
-    if (lower.some((w) => ['shutdown', 'shutdown.exe', 'restart-computer', 'stop-computer'].includes(w))) {
-      return 'Shutting down or restarting the machine is blocked.';
-    }
   }
+  if (runsPowerOff(cmd)) return 'Shutting down or restarting the machine is blocked.';
   // Process kills are judged on the whole command: `Get-Process Unity | Stop-Process` splits the
   // target and the kill across a pipe. Quotes, brackets and backticks split words too, so `"$(pkill -f node)"` is seen (w2503).
   const all = cmd.toLowerCase().split(/[\s|;&()`"']+/);
