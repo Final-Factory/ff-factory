@@ -32,8 +32,11 @@ The profile (`seatbeltProfile`): `(allow default)`, `(deny file-write*)`, then a
 | `~/Library/Logs/Unity`, `~/Library/Unity/licenses` | the licensing client's logs and entitlement cache |
 | `~/Library/Caches/com.unity3d.UnityEditor` | Unity's per-user GI cache, Bee cache and `CurlRequestCache.db`: a fenced player build logged "Failed to create GICache directory at the default location" 81,224 times |
 
-and then takes write back from `<root>/daemon`, `<root>/repo` (the main clone), `<root>/secrets` and `<root>/root.json`
-(later rules win). The agent's environment adds `CLAUDE_CODE_TMPDIR=<root>/tmp/claude-code` (Claude Code's task output
+and then takes write back from `<root>/daemon`, `<root>/secrets` and `<root>/root.json` (later rules win). The main clone
+`<root>/repo` stays writable: each sandbox is a git worktree of it, and git keeps the worktree's index, objects and refs
+there. With `repo` read-only (the first version of #1115), a fenced commit in a sandbox failed: "Unable to create
+'.../repo/.git/worktrees/s1/index.lock': Operation not permitted" (w5333, measured on a stand-in root; the live test
+in `server/workerFence.test.ts` now commits in a worktree). The harness's own guard still keeps agents' tools off it. The agent's environment adds `CLAUDE_CODE_TMPDIR=<root>/tmp/claude-code` (Claude Code's task output
 and its `/tmp/cc-socks` messaging socket move there) and `DISABLE_AUTOUPDATER=1` (the updater writes `~/.local/share/claude`).
 
 ## Trial results (m5, macOS 26.4, 2026-11-23)
@@ -41,7 +44,7 @@ and its `/tmp/cc-socks` messaging socket move there) and `DISABLE_AUTOUPDATER=1`
 Measured with the generated profile unless noted:
 
 - Refused (EPERM, "Operation not permitted"): writes in home, `~/Documents`, `~/Library/Logs`, `/Users/Shared`, `/tmp`,
-  mkdir in home, append to `~/.zshrc`, the daemon's folder and its log, the main clone, secrets, root.json, a rename into
+  mkdir in home, append to `~/.zshrc`, the daemon's folder and its log, the main clone (in the first version only: now writable, above), secrets, root.json, a rename into
   home, a write through a symlink out of the root, a hard link of a home file into the root.
 - Works: git commit, `gh api` by GH_TOKEN, `git ls-remote` through the credential helper, uv, npm, `unity-slot`.
 - A whole Claude Code turn (`claude -p`, mock API) ran its Bash tool inside: write in the root OK, home and /tmp refused.

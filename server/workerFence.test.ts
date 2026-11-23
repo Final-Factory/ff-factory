@@ -33,7 +33,8 @@ test('the profile refuses every write, then allows the root, then takes the daem
   assert.ok(at('(deny file-write*)') < at('(allow file-write* (subpath "/Users/p/ffw"))'));
   const back = p.lastIndexOf('(deny file-write*');
   assert.ok(back > at('(allow file-write* (subpath "/Users/p/ffw"))'), 'the read-only denies come after the root allow (later rules win)');
-  for (const s of ['(subpath "/Users/p/ffw/daemon")', '(subpath "/Users/p/ffw/repo")', '(subpath "/Users/p/ffw/secrets")', '(literal "/Users/p/ffw/root.json")']) assert.ok(at(s) > back, s);
+  assert.ok(!p.includes('/Users/p/ffw/repo"'), 'the main clone stays writable: worktree git writes its index and objects there');
+  for (const s of ['(subpath "/Users/p/ffw/daemon")', '(subpath "/Users/p/ffw/secrets")', '(literal "/Users/p/ffw/root.json")']) assert.ok(at(s) > back, s);
   // No blanket home or /tmp allowance: only named paths in them.
   assert.ok(!p.includes('(subpath "/Users/p")'));
   assert.ok(!p.includes('(subpath "/private/tmp")'));
@@ -83,6 +84,13 @@ test('live: a fenced shell writes in the root and is refused outside it and in t
     assert.notEqual(sh(`ln -s "${outside}" "${root}/l" && echo no > "${root}/l/x"`).status, 0, 'a symlink out of the root is still outside');
     assert.ok(!fs.existsSync(path.join(outside, 'x')));
     assert.equal(sh(`cat "${root}/in" > /dev/null`).status, 0, 'reads are unchanged');
+    // A sandbox is a worktree of <root>/repo, whose git data lives in the main clone: a fenced commit must work.
+    const git = (cwd: string, ...a: string[]) => spawnSync('git', a, { cwd, encoding: 'utf8' });
+    git(root, 'init', '-q', '-b', 'master', 'repo');
+    git(path.join(root, 'repo'), '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'init');
+    git(path.join(root, 'repo'), 'worktree', 'add', '-q', path.join(root, 'sandboxes', 's1'), '-b', 's1');
+    const c = sh(`cd "${root}/sandboxes/s1" && echo x > f && git add f && git -c user.name=t -c user.email=t@t commit -q -m t`);
+    assert.equal(c.status, 0, `a commit in a sandbox worktree: ${c.stderr}`);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
     fs.rmSync(outside, { recursive: true, force: true });
