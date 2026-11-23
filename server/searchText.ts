@@ -35,7 +35,8 @@ export function searchableText(e: TranscriptEvent): string {
     case 'tool_result':
       return e.text;
     case 'permission':
-      return `${e.toolName} ${JSON.stringify(e.input)}`;
+      // Claude Code's reason too (w5148: the count of questions groups by it).
+      return `${e.toolName} ${JSON.stringify(e.input)}${e.reason ? ` ${e.reason}` : ''}`;
   }
 }
 
