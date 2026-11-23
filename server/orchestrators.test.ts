@@ -9840,7 +9840,7 @@ test('w5223: reports only when a person asks: an unasked mark holds no DONE, an 
     const h = machines.hooks!.handlersFor(store.sessions.get(id)!, store.machines.get('pc')!);
     files[wid] = await h.file_report!({ title, kind: 'analysis', body: 'Findings.', ...extra });
   }
-  assert.match(files.w1, /^r1 filed for w1 as a worker note \(w5223\)[\s\S]*Your findings go in your final message/);
+  assert.match(files.w1, /^r1 filed for w1 as a worker note:[\s\S]*Your findings go in your final message/);
   assert.match(files.w2, /^r2 filed for w2, Lothsahn's report/);
   assert.match(files.w3, /^r3 filed for w3, Lothsahn's report/);
   assert.deepEqual(['r1', 'r2', 'r3'].map((r) => agents.reports!.get(r)!.audience), ['workers', 'people', 'people']);
