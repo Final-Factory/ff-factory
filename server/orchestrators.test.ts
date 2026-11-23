@@ -11309,3 +11309,23 @@ test('w4925: compileErrorsIn and ghCompileVerdict read the C# errors of a failed
   const green = await ghCompileVerdict('o/r', full, async (_c, args) => (args[0] === 'run' ? { code: 0, stdout: 'Test in editmode\tx\t1 Expected 3 but was 4', stderr: '' } : { code: 0, stdout: JSON.stringify({ workflow_runs: [{ id: 7, status: 'completed', conclusion: 'failure', head_sha: full }] }), stderr: '' }));
   assert.deepEqual(green, { done: true });
 });
+
+test('w5341: a pair leg here is sent one level up while its other leg holds a Unity slot on another machine, and no longer once it lets go', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents } = env;
+  putRequests(store, [{ id: 'w1', by: BEN, status: 'active', priority: 'normal' }]);
+  const a = await startedFor(env, 'w1');
+  const pc = store.machines.get('pc')!;
+  const beta = { ...pc.sandboxes![0], id: 'beta', unity: { ...pc.sandboxes![0].unity, state: 'running' as const } };
+  store.putMachine({ ...pc, id: 'other', sandboxes: [beta] });
+  store.sessions.set('leg2', { ...a.info, id: 'leg2', machineId: 'other', machineSandbox: 'beta' });
+  const at = new Date().toISOString();
+  store.putWork({ ...store.work.get('w1')!, pair: { legs: 2, started: { at, legs: [{ session: a.id, sandbox: 'pc/alpha' }, { session: 'leg2', sandbox: 'other/beta' }] } } });
+  const mark = agents.benchPriorities('pc')[a.id];
+  assert.equal(pc.sandboxes![0].unity.state === 'stopped' || pc.sandboxes![0].unity.state === 'crashed', true, 'this leg holds no slot here');
+  assert.equal(mark.priority, 'high', 'normal → high while leg2 holds its side on other');
+  assert.deepEqual({ half: mark.pair?.half, from: mark.pair?.from, work: mark.pair?.work, others: mark.pair?.others }, { half: 'waiting', from: 'normal', work: 'w1', others: ['other'] });
+  // leg2's editor stops: the raise goes with it.
+  store.putMachine({ ...store.machines.get('other')!, sandboxes: [{ ...beta, unity: { ...beta.unity, state: 'stopped' } }] });
+  assert.deepEqual(agents.benchPriorities('pc')[a.id], { priority: 'normal', requests: ['w1'] });
+});

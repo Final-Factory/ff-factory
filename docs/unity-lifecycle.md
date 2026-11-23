@@ -184,6 +184,23 @@ the task's process group SIGKILLed, then `wait` returns the command's output and
   close, `benchClosed`), kept closed while that request waits or runs (`keptClosed`), then the bench turn starts it
   again and its worker is told at its next message. The waiting reason says it: "held by sandbox:slot2 (w5293,
   normal), ...; takes the slot of sandbox:slot2's editor (normal) once idle (w5324)".
+- **A half-held pair goes one level up for its other side** (w5341; lothsahn: "When work needs a two machine run for any
+  reason and it's already got a slot on one machine, raise it a priority level for getting the other machine slot so that
+  the pair can get running"). A pair run's legs start together (`request_pair`), so what one leg can hold while another
+  waits is a Unity slot. While a leg's sandbox holds one on its machine (its editor is not stopped, or a granted
+  `unity-slot run` of it) and a leg on another machine holds none, the portal sends the waiting leg's session one level up
+  in that machine's priorities.json (low→normal, normal→high, high→urgent, urgent→frantic; frantic stays), with a `pair`
+  mark `{half: 'waiting', from, work, since, others}`, and marks the holding leg `half: 'held'` (`server/pairRaise.ts`,
+  `Agents.markPairRaises`). Its editor start (`editor:<sandbox>`, `editorSessions`) carries the same. The raised level is
+  the one every comparison uses, the queue and w5324's preemption alike. It ends at the next push (each minute) after the
+  held side lets go, or once the waiting side gets its slot. The waiting reason starts with it (the ledger clips a reason at 120 characters): "raised one level (normal →
+  high): pair half-held, w9000's other side holds a slot on lothdesktop (w5341)", and a held side is named "a pair's held
+  side" among the holders. **No loop and no deadlock:** as a preemption victim a held side counts one level up too
+  (`heldSideKept` in `machine/unitySlots.ts`), so a raised leg of the same level never takes it (two pairs that each hold
+  the side the other needs would otherwise take each other's sides, lose their raises and swap, over and over); only an
+  older pair's raised leg (its start, then its request id) may take a younger pair's idle held side, so of two crossed
+  pairs the older one runs first and the younger one waits at its own priority. A real higher priority (frantic over a
+  normal pair) still takes a held side.
 - **No deadlock.** A waiter that holds slots (its own process's, or its sandbox's open editor) and asks for more than the
   limit leaves it is refused at once ("ask for all N at once"). When every slot in use is held by waiters, nothing would
   ever free one: a later waiter that fits goes first (it can finish), and if none fits the newest waiting holder is

@@ -778,7 +778,35 @@ export interface BenchPriority {
   away?: BenchAway;
   /** w3740: this worker's request is held off game players here after one crashed or dropped the machine (CrashHold). */
   crashHold?: CrashHoldMark;
+  /** w5341: this worker is a leg of a pair run whose other side holds a Unity slot on another machine (PairRaise). */
+  pair?: PairRaise;
 }
+
+/**
+ * w5341 (lothsahn: "When work needs a two machine run for any reason and it's already got a slot on one machine, raise it
+ * a priority level for getting the other machine slot so that the pair can get running"): a pair run's leg while some legs
+ * hold a Unity slot (their sandbox's editor runs or a granted unity-slot run) on their machine and others hold none
+ * (server/pairRaise.ts). `waiting`: this leg holds none, so the portal sends it one level up (`from` is its own priority;
+ * priority and level are the raised one), for every comparison its machine's slot gate makes (the queue and w5324's
+ * preemption). `held`: this leg holds its side; its priority is its own, but as a preemption victim it counts one level up
+ * too against non-pair waiters and younger pairs, so two half-held pairs never take each other's held sides in turn
+ * (machine/unitySlots.ts assess). `since` (the pair's start) orders pairs: an older pair's waiting leg may take a younger
+ * pair's idle held side, never the reverse, so two pairs that each hold the side the other needs cannot deadlock.
+ */
+export interface PairRaise {
+  half: 'waiting' | 'held';
+  /** The leg's own priority. */
+  from: WorkPriority;
+  /** The pair run (wNNN). */
+  work: string;
+  /** When the pair's legs were started (WorkItem.pair.started.at). */
+  since: string;
+  /** The machines where the other legs hold their slot (`waiting`), or wait (`held`). */
+  others: string[];
+}
+
+/** w5341: one priority level up (low→normal ... urgent→frantic; frantic stays frantic). */
+export const raiseOne = (p: WorkPriority): WorkPriority => WORK_PRIORITIES[Math.min(WORK_PRIORITIES.length - 1, Math.max(0, priorityIndex(p)) + 1)];
 
 /** priorities.json's approved mark (w3186): the grant's id, who approved it (their name), for which request, and its turns. */
 export interface ApprovedBenchMark {

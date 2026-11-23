@@ -28,6 +28,7 @@ import { topPriority, type Pressure } from './priorityReclaim.ts';
 import { HOLD_PLACE_MS, LIVE_HOLD_MS, PlaceAgain, RELEASE_AFTER_MS, RELEASE_WAKE_NOTE, handOverBranch, keepWhy, moveBranchOf, occupies, releasedOn, workerBranch, type PairWant } from './placeAgain.ts';
 import { agentQueueAll, agentQueueFacts, editorSlotRefusal, queueWaitsAll } from '../shared/queueWaits.ts';
 import { otherComputerOf, pairStepLine, pairWaitLine, pairWaitNotice } from './pairRuns.ts';
+import { applyPairRaises, type PairState } from './pairRaise.ts';
 import { WORK_LIVE_LABEL, queuedNeeds, WORK_LIVE_STATES, asksAPerson, benchWaitOf, lastOpenLine, liveCounts, otherWorkWait, outsideDeclared, outsideWaitOf, ownWorkWait, noTimedWaitOf, orchestratorAskIn, restartWait, personWaitIn, reportWaitKey, holdsOf, servedBy, workLiveAll, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
 import { prsIn, reportTail, whoOf, type NeedsYouWait } from './needsYou.ts';
 import { addedLines, asksLookOk, decidedRefusal, notesSettle, personNotes, quoteCovered, quotedPhrases, relatedRequests, settledRefusal } from './priorDecisions.ts';
@@ -75,7 +76,7 @@ import { playHolds, playLine } from '../shared/personPlay.ts';
 import { sandboxUseText, unitySlotsLine } from '../shared/fleet.ts';
 import { resumeWhereLine, stopWhereLine, type BeforeSend } from './resumeWhere.ts';
 import { isMidTurn, midTurnRefusal, othersMidTurn, snapshotOf, type OptionsFactory, type QueuedSend, type SessionHandle, type SessionManager, type TurnEndMeta } from './sessions.ts';
-import { FLAG_LABEL, SET_BLOCKER_KINDS, WORK_BLOCKER_KINDS, WORK_OPEN, WORK_PRIORITIES, asWorkPriority, priorityIndex, atLeast, benchRank, type WorkBlockerKind, type WorkSource, type BenchPriority, type BenchGrant, type BenchAway, type AttachmentRef, type DeliveredAttachment, type ImageInput, type PermissionMode, type Requester, type Sandbox, type SessionInfo, type TranscriptEvent, type WorkItem, type WorkPriority, type WorkStatus } from '../shared/types.ts';
+import { FLAG_LABEL, SET_BLOCKER_KINDS, WORK_BLOCKER_KINDS, WORK_OPEN, WORK_PRIORITIES, asWorkPriority, priorityIndex, atLeast, benchRank, raiseOne, type WorkBlockerKind, type WorkSource, type BenchPriority, type BenchGrant, type BenchAway, type AttachmentRef, type DeliveredAttachment, type ImageInput, type PermissionMode, type Requester, type Sandbox, type SessionInfo, type TranscriptEvent, type WorkItem, type WorkPriority, type WorkStatus } from '../shared/types.ts';
 import { attachmentForMachine, publicRef, publishableFile, publishedFilesBlock, uploadForMachine, type AttachmentStore } from './attachments.ts';
 import type { TimedDelivery, TimedRuns } from './timedRuns.ts';
 import type { LabFixtures } from './labFixtures.ts';
@@ -4837,7 +4838,42 @@ export class Agents {
       grantOf(r.session, open);
     }
     this.markBenchGrants(machineId, grants, out, now);
+    this.markPairRaises(out);
     return out;
+  }
+
+  /**
+   * w5341 (lothsahn: "When work needs a two machine run for any reason and it's already got a slot on one machine, raise it
+   * a priority level for getting the other machine slot so that the pair can get running"): a pair run's leg here that holds
+   * no Unity slot while a leg on another machine holds one goes one level up (server/pairRaise.ts), and a leg here that
+   * holds its side while another waits is marked held. A leg's own priority is its pair run's (the request it serves).
+   */
+  private markPairRaises(out: Record<string, BenchPriority>) {
+    const legs = new Set(Object.keys(out));
+    const pairs: PairState[] = [];
+    for (const w of this.store.work.values()) {
+      if (!livePair(w)) continue;
+      const started = w.pair!.started!;
+      if (started.legs.length < 2 || !started.legs.some((l) => legs.has(l.session))) continue;
+      pairs.push({
+        work: w.id,
+        since: started.at,
+        priority: asWorkPriority(w.priority) ?? 'normal',
+        legs: started.legs.map((l) => {
+          const info = this.store.sessions.get(l.session);
+          return { session: l.session, machine: info?.machineId, holds: this.holdsUnitySlot(info?.machineId, info?.machineSandbox) };
+        }),
+      });
+    }
+    applyPairRaises(out, pairs);
+  }
+
+  /** w5341: whether a sandbox holds a Unity slot on its machine now: its editor is not stopped, or a unity-slot run it holds was granted. */
+  private holdsUnitySlot(machineId: string | undefined, sandbox: string | undefined): boolean {
+    if (!machineId || !sandbox) return false;
+    const sb = this.store.machines.get(machineId)?.sandboxes?.find((x) => x.id === sandbox);
+    if (sb?.unity && sb.unity.state !== 'stopped' && sb.unity.state !== 'crashed') return true;
+    return (this.machines.statsOf(machineId)?.unity?.granted ?? []).some((g) => g.holder === `sandbox:${sandbox}`);
   }
 
   /**

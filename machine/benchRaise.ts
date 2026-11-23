@@ -98,8 +98,9 @@ export function editorSessions(placed: { session: string; sandbox?: string }[], 
     if (!sandbox || !p) continue;
     const key = editorBenchSession(sandbox);
     const cur = out[key];
-    if (!cur || rankOf(effective(p)) < rankOf(effective(cur))) out[key] = { priority: p.priority, ...(p.level ? { level: p.level } : {}), requests: [...new Set([...(p.requests ?? []), ...(cur?.requests ?? [])])].slice(0, 6) };
-    else out[key] = { ...cur, requests: [...new Set([...cur.requests, ...(p.requests ?? [])])].slice(0, 6) };
+    // w5341: the editor's start and slot carry its top worker's pair mark (a raised waiting leg, or a held side).
+    if (!cur || rankOf(effective(p)) < rankOf(effective(cur))) out[key] = { priority: p.priority, ...(p.level ? { level: p.level } : {}), requests: [...new Set([...(p.requests ?? []), ...(cur?.requests ?? [])])].slice(0, 6), ...(p.pair ? { pair: p.pair } : cur?.pair ? { pair: cur.pair } : {}) };
+    else out[key] = { ...cur, requests: [...new Set([...cur.requests, ...(p.requests ?? [])])].slice(0, 6), ...(!cur.pair && p.pair ? { pair: p.pair } : {}) };
   }
   return out;
 }
