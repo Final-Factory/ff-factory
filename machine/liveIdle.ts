@@ -26,10 +26,27 @@ export const INSPECT_SNIPPET = [
 /** Leave play mode: the game's own session ends, and LiveLook puts every knob back (its materials are never saved). */
 export const LEAVE_PLAY_SNIPPET = 'UnityEditor.EditorApplication.isPlaying = false; return "leaving play mode";';
 
+/**
+ * w5324: a job the editor runs never ends by a close (lothsahn: "a running build or test is never killed"): a test run
+ * (Unity Test Framework's TestRunnerApi.IsRunActive, internal, and MCP for Unity's TestRunStatus.IsRunning, read by
+ * reflection; a type found without its member counts as busy, so a renamed API skips rather than kills) or a player
+ * build made inside the editor. Checked on the main thread in the same call as the save and the quit, so none can start
+ * between the check and the quit.
+ */
+export const BUSY_LINES = [
+  'var flags = System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;',
+  'var tra = System.Type.GetType("UnityEditor.TestTools.TestRunner.Api.TestRunnerApi, UnityEditor.TestRunner");',
+  'if (tra != null) { var m = tra.GetMethod("IsRunActive", flags, null, System.Type.EmptyTypes, null); if (m == null || (bool)m.Invoke(null, null)) return "skip: a test run is active"; }',
+  'var trs = System.Type.GetType("MCPForUnity.Editor.Services.TestRunStatus, MCPForUnity.Editor");',
+  'if (trs != null) { var pr = trs.GetProperty("IsRunning", flags); if (pr == null || (bool)pr.GetValue(null)) return "skip: a test run is active"; }',
+  'if (UnityEditor.BuildPipeline.isBuildingPlayer) return "skip: building a player";',
+];
+
 /** The checks and the save both quits run first, on the editor's main thread: a "skip: ..." answer, or `saved` filled. */
 const SAVE_LINES = [
   'if (UnityEditor.EditorApplication.isPlayingOrWillChangePlaymode) return "skip: in play mode";',
   'if (UnityEditor.EditorApplication.isCompiling || UnityEditor.EditorApplication.isUpdating) return "skip: compiling or importing";',
+  ...BUSY_LINES,
   'var saved = new System.Collections.Generic.List<string>();',
   'for (int i = 0; i < UnityEngine.SceneManagement.SceneManager.sceneCount; i++) {',
   '  var s = UnityEngine.SceneManagement.SceneManager.GetSceneAt(i);',
@@ -104,6 +121,11 @@ export interface IdleCloseDeps {
    * scenes' files), then force-stop the editor. Answers what it did. Without it a dialog is waited out, as before.
    */
   rescue?(dialog: string, dirty: string[]): Promise<string>;
+  /**
+   * w5324: play mode is a job (an agent's playtest): skip rather than leave it. A preemption for a higher-priority run sets
+   * it; an idle Live view or a timed run's turn leaves play mode as before.
+   */
+  keepPlay?: boolean;
 }
 
 export interface IdleCloseResult {
@@ -193,6 +215,7 @@ export async function idleCloseEditor(d: IdleCloseDeps, minutes: number): Promis
   if (!look) return skip(`its state could not be read over the MCP bridge (${text.slice(0, 160)})`);
   dirty = look.dirty;
   if (look.compiling || look.updating) return skip('it is compiling or importing');
+  if (look.playing && d.keepPlay) return skip('it is in play mode');
   if (look.playing) {
     const ago = d.personInputAgoMs();
     if (ago !== undefined && ago < minutes * 60_000) return skip(`it is in play mode and a person used this computer ${Math.round(ago / 60_000)} min ago`);

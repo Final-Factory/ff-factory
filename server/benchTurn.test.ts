@@ -21,7 +21,7 @@ function holder(over: Partial<Holder> = {}): Holder {
   return { ticket: 't00000042', mode: 'exclusive', what: 'justplay fps A', pid: 900, host: 'lothdesktop', sandbox: 'slot3', session: 'dec9a619', requests: ['w1785'], granted: { at: 'x', ts: T0 / 1000 }, maxMin: 60, ownerPid: 800, until: T0 + 60 * 60_000, ...over };
 }
 
-function harness(o: { editors: TurnEditor[]; players?: TurnPlayer[]; procs?: { pid: number; ppid: number }[] }) {
+function harness(o: { editors: TurnEditor[]; players?: TurnPlayer[]; procs?: { pid: number; ppid: number }[]; keptClosed?: (ticket: string) => boolean }) {
   const s = {
     holder: undefined as Holder | undefined,
     now: T0,
@@ -79,6 +79,7 @@ function harness(o: { editors: TurnEditor[]; players?: TurnPlayer[]; procs?: { p
     writeClosed: (m) => s.marks.push(m),
     log: (l) => s.log.push(l),
     now: () => s.now,
+    keptClosed: o.keptClosed,
   };
   return { s, turn: new BenchTurn(d) };
 }
@@ -331,4 +332,15 @@ test('w1829: descendsFrom follows the parent pids, and never loops', () => {
   assert.equal(descendsFrom(3, 5, procs), false);
   assert.equal(descendsFrom(9, 5, procs), false);
   assert.equal(descendsFrom(3, undefined, procs), false);
+});
+
+test('w5324: an editor closed for a higher-priority run\'s Unity slot stays closed while that run waits or runs, then starts again', async () => {
+  let waiting = true;
+  const { s, turn } = harness({ editors: [{ id: 'slot1', running: false }], keptClosed: (ticket) => ticket === 'slot:f' && waiting });
+  s.closed.set('slot1', { at: T0 - 60_000, ticket: 'slot:f' });
+  await turn.tick();
+  assert.deepEqual(s.calls, [], 'kept closed: the frantic run still has its slot request');
+  waiting = false;
+  await turn.tick();
+  assert.deepEqual(s.calls, ['reopen slot1']);
 });
