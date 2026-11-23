@@ -1,0 +1,141 @@
+2026-11-23T11:41:01.0012534Z [1m[92m   Doc-tests[0m ffu_testdir
+2026-11-23T11:41:01.0505847Z 
+2026-11-23T11:41:01.0506660Z running 0 tests
+2026-11-23T11:41:01.0507015Z 
+2026-11-23T11:41:01.0507455Z test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+2026-11-23T11:41:01.0514220Z 
+2026-11-23T11:41:01.0542531Z [1m[92m   Doc-tests[0m ffu_ui
+2026-11-23T11:41:01.5593165Z 
+2026-11-23T11:41:01.5594309Z running 0 tests
+2026-11-23T11:41:01.5594688Z 
+2026-11-23T11:41:01.5595052Z test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+2026-11-23T11:41:01.5595456Z 
+2026-11-23T11:41:01.9886615Z ##[group]Run mkdir -p lavapipe-captures && ./tools/check_temp_leaks.sh ./tools/run_built_tests.sh ffu-render -- --nocapture && ./tools/check_temp_leaks.sh ./tools/run_built_tests.sh ffu-client ffu -- --nocapture packs capture_check && ./tools/check_temp_leaks.sh ./tools/run_built_tests.sh ffu-ui gate
+2026-11-23T11:41:01.9889837Z [36;1mmkdir -p lavapipe-captures && ./tools/check_temp_leaks.sh ./tools/run_built_tests.sh ffu-render -- --nocapture && ./tools/check_temp_leaks.sh ./tools/run_built_tests.sh ffu-client ffu -- --nocapture packs capture_check && ./tools/check_temp_leaks.sh ./tools/run_built_tests.sh ffu-ui gate[0m
+2026-11-23T11:41:01.9935059Z shell: /usr/bin/bash -e {0}
+2026-11-23T11:41:01.9935352Z env:
+2026-11-23T11:41:01.9935576Z   CARGO_TERM_COLOR: always
+2026-11-23T11:41:01.9935810Z   CARGO_INCREMENTAL: 0
+2026-11-23T11:41:01.9936063Z   CARGO_PROFILE_DEV_DEBUG: line-tables-only
+2026-11-23T11:41:01.9938881Z   TMPDIR: /home/ben-ryding/ffw/ffu-runners/ffu-biscuit-4/_work/_temp
+2026-11-23T11:41:01.9939299Z   FFU_REQUIRE_GPU: 1
+2026-11-23T11:41:01.9939524Z   FFU_FALLBACK_ADAPTER: 1
+2026-11-23T11:41:01.9939924Z   FFU_CAPTURE_DIR: /home/ben-ryding/ffw/ffu-runners/ffu-biscuit-4/_work/ffu/ffu/lavapipe-captures
+2026-11-23T11:41:01.9940363Z ##[endgroup]
+2026-11-23T11:41:03.0215704Z      Running ffu_render (/home/ben-ryding/ffw/ffu-runners/ffu-biscuit-4/_work/ffu/ffu/target/debug/deps/ffu_render-37b06b895d7ce811) in /home/ben-ryding/ffw/ffu-runners/ffu-biscuit-4/_work/ffu/ffu/crates/ffu-render
+2026-11-23T11:41:03.0444430Z 
+2026-11-23T11:41:03.0445290Z running 70 tests
+2026-11-23T11:41:03.0458135Z test blast::tests::the_budget_matches_ff1 ... ok
+2026-11-23T11:41:03.0463901Z test effects::tests::a_burst_lives_its_life_and_the_play_ends ... ok
+2026-11-23T11:41:03.0465013Z test effects::tests::an_arcs_burst_draws_its_segments_and_ends ... ok
+2026-11-23T11:41:03.0465611Z test effects::tests::inherit_takes_the_plays_velocity ... ok
+2026-11-23T11:41:03.0466354Z test effects::tests::a_blast_lives_its_duration_and_the_play_ends ... ok
+2026-11-23T11:41:03.0481517Z test effects::tests::the_samples_parse_and_bad_text_is_refused ... ok
+2026-11-23T11:41:03.0483754Z test effects::tests::a_ring_starts_on_the_circle_and_moves_along_its_radius ... ok
+2026-11-23T11:41:03.0484350Z test effects::tests::a_trail_follows_its_play_and_fades_after_it_stops ... ok
+2026-11-23T11:41:03.0484860Z test effects::tests::at_and_line_place_the_start ... ok
+2026-11-23T11:41:03.0485271Z test effects::tests::the_art_effect_files_parse ... ok
+2026-11-23T11:41:03.0485721Z test effects::tests::every_art_effect_parses_under_its_file_name ... ok
+2026-11-23T11:41:03.0486216Z test effects::tests::a_blast_parses_and_bad_blast_fields_are_refused ... ok
+2026-11-23T11:41:03.0486706Z test marks::tests::marks_keep_ff1_sizes_on_screen ... ok
+2026-11-23T11:41:03.0492933Z test effects::tests::ff1s_effects_parse_and_end_when_ff1_removes_them ... ok
+2026-11-23T11:41:03.0533826Z test effects::tests::a_rate_emitter_keeps_rate_times_life_alive ... ok
+2026-11-23T11:41:03.7144614Z test effects::tests::no_effects_leave_the_frame_unchanged ... ok
+2026-11-23T11:41:03.9203470Z test effects::tests::a_blast_draws_a_warm_centre_and_leaves_nothing_after_its_life ... ok
+2026-11-23T11:41:03.9603060Z test mesh::tests::only_a_see_through_triangle_makes_glass ... ok
+2026-11-23T11:41:03.9638991Z test mesh::tests::only_a_tiny_texture_is_a_palette ... ok
+2026-11-23T11:41:04.2554443Z llvmpipe (LLVM 21.1.8, 256 bits) (Vulkan) effects against the golden: Diff { pixels: 24576, max: 6, mean: 0.013824462890625, over: 0 }
+2026-11-23T11:41:04.2954317Z test effects::tests::the_sample_effects_match_the_golden_image ... ok
+2026-11-23T11:41:04.4025741Z test marks::tests::the_landing_zone_pad_draws_ff1s_octagon_arrow_and_landed_look ... ok
+2026-11-23T11:41:04.5140821Z llvmpipe (LLVM 21.1.8, 256 bits) (Vulkan) against the golden: Diff { pixels: 55680, max: 1, mean: 0.009132543103448276, over: 0 }
+2026-11-23T11:41:04.5245507Z test marks::tests::the_marks_capture_matches_the_golden_image ... ok
+2026-11-23T11:41:04.5253256Z test mesh::tests::the_light_reaches_the_shader_as_a_unit_direction ... ok
+2026-11-23T11:41:04.5273268Z test mesh::tests::the_lod_coarsens_as_the_model_shrinks_on_screen ... ok
+2026-11-23T11:41:04.5273828Z test mesh::tests::the_reflection_pack_holds_ff1s_cube ... ok
+2026-11-23T11:41:04.6144805Z test marks::tests::each_mark_lights_its_accent ... ok
+2026-11-23T11:41:05.4785791Z test mesh::tests::a_baked_crafter_draws_with_its_mesh_instead_of_a_box ... ok
+2026-11-23T11:41:06.1244929Z test mesh::tests::a_metal_slot_mirrors_instead_of_lighting_its_paint ... ok
+2026-11-23T11:41:06.1246930Z test post::tests::the_bloom_chain_counts_its_levels_as_urp_does ... ok
+2026-11-23T11:41:06.3865270Z test mesh::tests::a_roof_throws_its_shadow_on_the_plate_below_it_away_from_the_sun ... ok
+2026-11-23T11:41:06.3913179Z test post::tests::the_default_settings_grade_nothing ... ok
+2026-11-23T11:41:06.3928572Z test post::tests::tone_maps_parse_by_name ... ok
+2026-11-23T11:41:06.3963581Z test shadow::tests::a_model_a_thousand_tiles_tall_deepens_the_map_but_never_widens_it ... ok
+2026-11-23T11:41:06.3993658Z test shadow::tests::a_sun_on_the_horizon_throws_no_map ... ok
+2026-11-23T11:41:06.4023620Z test shadow::tests::every_frame_point_and_the_casters_above_them_land_inside_the_map ... ok
+2026-11-23T11:41:06.4053784Z test shadow::tests::the_map_holds_still_to_the_texel_as_the_camera_pans_a_little ... ok
+2026-11-23T11:41:06.4058101Z test shadow::tests::the_map_is_as_coarse_as_urps_at_ff1s_camera_and_distance ... ok
+2026-11-23T11:41:06.4058710Z test shadow::tests::the_reach_follows_the_cameras_height_as_ff1s_does ... ok
+2026-11-23T11:41:06.7151840Z Camera { center: [7.3, 9.1], zoom: 40.0, tilt: None }: drew 48 of 576
+2026-11-23T11:41:06.7404245Z Camera { center: [23.9, 0.2], zoom: 23.0, tilt: None }: drew 30 of 576
+2026-11-23T11:41:06.9063402Z Camera { center: [12.0, 12.0], zoom: 8.0, tilt: None }: drew 576 of 576
+2026-11-23T11:41:07.0134336Z test mesh::tests::culled_captures_equal_unculled_ones ... ok
+2026-11-23T11:41:07.0138923Z test sky::tests::the_default_view_looks_straight_down_with_north_up ... ok
+2026-11-23T11:41:07.3837548Z test mesh::tests::each_building_takes_the_level_its_size_picks ... ok
+2026-11-23T11:41:07.6206022Z test mesh::tests::each_material_slot_draws_with_its_own_glow ... ok
+2026-11-23T11:41:07.8430542Z test mesh::tests::a_turned_crafter_turns_its_chimney ... ok
+2026-11-23T11:41:08.0452034Z test mesh::tests::a_works_slot_turns_its_rotor_and_lights_its_dial_from_the_state ... ok
+2026-11-23T11:41:08.4833549Z magenta pixels: plain 0, thick fog 32510 of 36864
+2026-11-23T11:41:08.5125041Z test mesh::tests::fog_hazes_the_models_past_its_start ... ok
+2026-11-23T11:41:09.0804566Z test mesh::tests::a_shaded_slot_drops_the_direct_sun ... ok
+2026-11-23T11:41:10.0554281Z lit on llvmpipe (LLVM 21.1.8, 256 bits) (Vulkan) (software true) against the golden: Diff { pixels: 36864, max: 9, mean: 0.11829291449652778, over: 1 }
+2026-11-23T11:41:10.1604309Z unlit on llvmpipe (LLVM 21.1.8, 256 bits) (Vulkan) (software true) against the golden: Diff { pixels: 36864, max: 2, mean: 0.1461249457465278, over: 0 }
+2026-11-23T11:41:10.2634246Z lit_low_east on llvmpipe (LLVM 21.1.8, 256 bits) (Vulkan) (software true) against the golden: Diff { pixels: 36864, max: 32, mean: 0.1742621527777778, over: 6 }
+2026-11-23T11:41:10.2814178Z test mesh::tests::lit_captures_match_their_golden_images ... ok
+2026-11-23T11:41:10.2823412Z test tests::a_ground_point_round_trips_through_its_pixel_at_any_turn ... ok
+2026-11-23T11:41:11.7034738Z asteroid_emissive on llvmpipe (LLVM 21.1.8, 256 bits) (Vulkan) (software true) against the golden: Diff { pixels: 65536, max: 15, mean: 0.2640419006347656, over: 32 }
+2026-11-23T11:41:11.7694176Z test mesh::tests::the_asteroid_glows_in_its_cracks_and_matches_its_golden ... ok
+2026-11-23T11:41:11.7723839Z test tests::a_tiles_screen_box_is_where_its_corners_draw ... ok
+2026-11-23T11:41:11.7743866Z test tests::a_turned_camera_pans_the_way_the_screen_points ... ok
+2026-11-23T11:41:12.6608631Z test mesh::tests::the_baked_asteroid_draws_at_each_level_of_detail ... ok
+2026-11-23T11:41:12.6684288Z test tests::diff_counts_the_pixels_past_the_threshold ... ok
+2026-11-23T11:41:13.0912598Z brightness: plain 12253382, hull 1.5 14312540, highlight 19854346
+2026-11-23T11:41:13.1384872Z test mesh::tests::the_hull_brightness_and_the_highlight_only_brighten ... ok
+2026-11-23T11:41:13.1424744Z test tests::straight_down_unturned_matches_the_flat_view ... ok
+2026-11-23T11:41:13.2654875Z test post::tests::aces_brings_white_under_full ... ok
+2026-11-23T11:41:14.1726765Z test post::tests::aces_keeps_a_dim_pure_blue ... ok
+2026-11-23T11:41:14.3264800Z test sky::tests::the_sector_draws_over_the_sky ... ok
+2026-11-23T11:41:14.4634775Z sky_pole_down on llvmpipe (LLVM 21.1.8, 256 bits) (Vulkan): worst pixel 1 levels off at (0, 0)
+2026-11-23T11:41:14.4660793Z sky_pole_up on llvmpipe (LLVM 21.1.8, 256 bits) (Vulkan): worst pixel 1 levels off at (0, 0)
+2026-11-23T11:41:14.4673727Z sky_edge_side on llvmpipe (LLVM 21.1.8, 256 bits) (Vulkan): worst pixel 2 levels off at (52, 41)
+2026-11-23T11:41:14.4715020Z sky_edge_top on llvmpipe (LLVM 21.1.8, 256 bits) (Vulkan): worst pixel 2 levels off at (41, 52)
+2026-11-23T11:41:14.4745873Z sky_corner on llvmpipe (LLVM 21.1.8, 256 bits) (Vulkan): worst pixel 2 levels off at (53, 21)
+2026-11-23T11:41:14.5774854Z test sky::tests::the_sky_is_its_cube_map_along_every_ray ... ok
+2026-11-23T11:41:14.7394708Z test sky::tests::the_sky_turns_at_ff1s_rate_about_its_up ... ok
+2026-11-23T11:41:15.1117862Z test sky::tests::the_tint_multiplies_the_sky ... ok
+2026-11-23T11:41:15.3258632Z test sky::tests::the_turned_sky_is_its_cube_map_along_every_turned_ray ... ok
+2026-11-23T11:41:15.4013407Z test sky::tests::with_no_sky_the_background_shows ... ok
+2026-11-23T11:41:15.5113902Z test tests::a_bgra_target_reads_back_as_the_rgba_one ... ok
+2026-11-23T11:41:15.5759684Z llvmpipe (LLVM 21.1.8, 256 bits) (Vulkan) against the golden: Diff { pixels: 15360, max: 31, mean: 0.20861002604166667, over: 1 }
+2026-11-23T11:41:15.7004797Z test tests::a_headless_capture_matches_the_golden_image ... ok
+2026-11-23T11:41:16.2265030Z test tests::an_instanced_quad_lands_where_the_camera_puts_it ... ok
+2026-11-23T11:41:16.5458317Z test tests::indirect_draws_give_the_image_direct_draws_give ... ok
+2026-11-23T11:41:16.8304144Z test post::tests::bloom_lights_the_dark_beside_a_bright_box ... ok
+2026-11-23T11:41:17.3084334Z test post::tests::the_default_post_pass_leaves_the_image_as_drawn ... ok
+2026-11-23T11:41:17.4624663Z sky_pole_down on llvmpipe (LLVM 21.1.8, 256 bits) (Vulkan) (software true) against the golden: Diff { pixels: 16384, max: 1, mean: 0.1286468505859375, over: 0 }
+2026-11-23T11:41:17.4731227Z sky_pole_up on llvmpipe (LLVM 21.1.8, 256 bits) (Vulkan) (software true) against the golden: Diff { pixels: 16384, max: 1, mean: 0.139984130859375, over: 0 }
+2026-11-23T11:41:17.4774158Z sky_edge_side on llvmpipe (LLVM 21.1.8, 256 bits) (Vulkan) (software true) against the golden: Diff { pixels: 16384, max: 1, mean: 0.160369873046875, over: 0 }
+2026-11-23T11:41:17.4814075Z sky_edge_top on llvmpipe (LLVM 21.1.8, 256 bits) (Vulkan) (software true) against the golden: Diff { pixels: 16384, max: 1, mean: 0.160491943359375, over: 0 }
+2026-11-23T11:41:17.4853884Z sky_corner on llvmpipe (LLVM 21.1.8, 256 bits) (Vulkan) (software true) against the golden: Diff { pixels: 16384, max: 1, mean: 0.18792724609375, over: 0 }
+2026-11-23T11:41:17.7481691Z test sky::tests::sky_captures_match_their_golden_images ... ok
+2026-11-23T11:41:17.7482312Z 
+2026-11-23T11:41:17.7482784Z test result: ok. 70 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.70s
+2026-11-23T11:41:17.7483235Z 
+2026-11-23T11:41:19.9399886Z      Running ffu (/home/ben-ryding/ffw/ffu-runners/ffu-biscuit-4/_work/ffu/ffu/target/debug/deps/ffu-7cd5e6fa26bb0013) in /home/ben-ryding/ffw/ffu-runners/ffu-biscuit-4/_work/ffu/ffu/crates/ffu-client
+2026-11-23T11:41:19.9509048Z 
+2026-11-23T11:41:19.9567966Z running 20 tests
+2026-11-23T11:41:20.0676723Z test capture_check::tests::a_solid_patch_counts_and_a_thin_line_does_not ... ok
+2026-11-23T11:41:20.2014683Z test packs::tests::every_kind_with_a_model_in_the_pack_draws_it ... ok
+2026-11-23T11:41:20.2655050Z test packs::tests::a_pack_folder_maps_crafters_to_the_crafter_model_and_nothing_else ... ok
+2026-11-23T11:41:20.2816805Z test packs::tests::the_tier_tables_follow_the_sims_tables ... ok
+2026-11-23T11:41:20.3024356Z test packs::tests::crafters_leave_the_quads_for_their_mesh_and_the_rest_stay_quads ... ok
+2026-11-23T11:41:20.3840428Z test packs::tests::the_watch_reads_a_rebaked_pack_once_it_holds_still_and_refuses_a_broken_one ... ok
+2026-11-23T11:41:20.9932190Z test packs::tests::a_tier_without_a_model_keeps_its_tile ... ok
+2026-11-23T11:41:21.8624403Z test packs::tests::the_client_draws_coarser_lods_as_it_zooms_out ... ok
+2026-11-23T11:41:22.1601269Z test packs::tests::the_gallery_sets_every_model_apart_inside_its_sector ... ok
+2026-11-23T11:41:23.0864214Z test packs::tests::the_built_in_packs_bound_each_model_to_what_it_draws ... ok
+2026-11-23T11:41:23.4127856Z test packs::tests::the_beam_model_is_ff1s_tube_along_the_connector ... ok
+2026-11-23T11:41:24.5543287Z test packs::tests::the_built_in_packs_draw_every_ff1_building_but_the_refused ... ok
+2026-11-23T11:41:27.9548718Z ##[error]Process completed with exit code 143.
+2026-11-23T11:41:27.9550447Z ##[error]The runner has received a shutdown signal. This can happen when the runner service is stopped, or a manually started runner is canceled.
+2026-11-23T11:41:28.4647012Z Cleaning up orphan processes
+2026-11-23T11:41:29.2863635Z ##[warning]Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/

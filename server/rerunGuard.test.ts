@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { checkFlakyRerun, portalDropReader, rerunTargets, resourceFault, runnerStopped, type RerunJob, type RerunReader, type RerunTarget } from './rerunGuard.ts';
+import { checkFlakyRerun, portalDropReader, rerunTargets, readJobLog, resourceFault, runnerStopped, type RerunJob, type RerunReader, type RerunTarget } from './rerunGuard.ts';
 import { sandboxGuard } from './guard.ts';
 
 // w3784: both fixtures are the `test (ffu-windows)` job of ffu PR #510's CI run 42538461342, read with
@@ -233,4 +233,36 @@ test('w5271: a step ended by exit 143 and the runner stop annotation is a runner
   assert.equal(runnerStopped(STOPPED_LOG.replace(/^(.*exit code 143\..*)$/m, '$1\na\nb\nc')), false);
   // A log gh cannot read is refused (fail closed).
   assert.match((await checkFlakyRerun(cmd, { reader: reader([STOPPED], [], { error: 'HTTP 410: Gone' }).r }))!, /its log could not be read/);
+});
+
+// w5271: the same job's log from 11:41:01Z on (its last 141 lines, cargo's colour codes kept), and how beast's newer gh
+// answered for it: it refuses a body with terminal escape sequences unless --allow-escape-sequences is passed (w5234's worker,
+// 2026-11-23 14:01Z). biscuit's gh 2.46 has no such flag, so it is passed only when gh asks.
+const STOPPED_ANSI_LOG = text('rerun-runner-stopped-ansi-job.txt');
+const ESCAPES = 'the response contains terminal escape sequences; pass --allow-escape-sequences to output it anyway';
+
+test('w5271: a log with escape sequences is read (with --allow-escape-sequences when gh asks) and still shows the runner stopped', async () => {
+  assert.ok(STOPPED_ANSI_LOG.includes('\x1b['));
+  assert.equal(runnerStopped(STOPPED_ANSI_LOG), true);
+  assert.equal(runnerStopped(`\x1b[31m\x1b[K${STOPPED_LOG}`.replace('##[error]The runner', '\x1b[2K##[error]The runner')), true);
+
+  const calls: string[][] = [];
+  const newGh = (args: string[]) => {
+    calls.push(args);
+    if (!args.includes('--allow-escape-sequences')) throw Object.assign(new Error('Command failed: gh api'), { stderr: ESCAPES });
+    return STOPPED_ANSI_LOG;
+  };
+  assert.equal(readJobLog('Final-Factory/ffu', STOPPED.id, newGh), STOPPED_ANSI_LOG);
+  assert.deepEqual(calls, [['api', 'repos/Final-Factory/ffu/actions/jobs/137627783371/logs'], ['api', '--allow-escape-sequences', 'repos/Final-Factory/ffu/actions/jobs/137627783371/logs']]);
+
+  // An older gh answers on the first call; any other error is not retried and stays a read failure (fail closed).
+  const oldCalls: string[][] = [];
+  assert.equal(readJobLog(undefined, 1, (a) => (oldCalls.push(a), 'log')), 'log');
+  assert.equal(oldCalls.length, 1);
+  let n = 0;
+  assert.deepEqual(readJobLog(undefined, 1, () => { n++; throw Object.assign(new Error('x'), { stderr: 'HTTP 404: Not Found' }); }), { error: 'HTTP 404: Not Found' });
+  assert.equal(n, 1);
+
+  const cmd = 'gh run rerun 45155653650 --failed -R Final-Factory/ffu';
+  assert.equal(await checkFlakyRerun(cmd, { reader: reader([STOPPED], [], { [STOPPED.id]: STOPPED_ANSI_LOG }).r }), undefined);
 });
