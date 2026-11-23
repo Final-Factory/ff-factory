@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { renameAway } from './renameAway.ts';
 
 /** The Library folders that grow without bound as code and content change (Library/BuildCache, Library/BurstCache). */
 export const LIBRARY_CACHES = ['BuildCache', 'BurstCache'];
@@ -182,8 +183,7 @@ export async function trimLibraryCaches(project: string, policy: TrimPolicy = TR
     try {
       const st = await fs.promises.lstat(e.path);
       if (st.isDirectory()) {
-        const away = `${e.path}.ffclean-${Date.now()}`;
-        await fs.promises.rename(e.path, away);
+        const away = await renameAway(e.path);
         await fs.promises.rm(away, { recursive: true, force: true });
       } else await fs.promises.unlink(e.path);
       res.files++;

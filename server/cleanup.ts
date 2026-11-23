@@ -7,6 +7,7 @@ import { CLEANUP_SOFT_GB_DEFAULT, type CleanupSummary, type MediaSummary } from 
 import type { StaleOutputSettings } from './staleOutput.ts';
 import { inNeverGames, installDrive, onInstallDrive } from './rootFence.ts';
 import { LIBRARY_CACHES, staleCacheEntries } from './cacheTrim.ts';
+import { renameAway } from './renameAway.ts';
 
 export { DEFAULT_CLEANUP, type CleanupPolicy } from './config.ts';
 
@@ -934,15 +935,16 @@ export async function runCleanup(items: CleanupItem[], guard: CleanupGuard): Pro
 }
 
 /**
- * Measure `it.path`, rename it to `<name>.ffclean-<n>` and delete that, adding the outcome to `out`. The rename
+ * Measure `it.path`, rename it to `<name>.ffclean-<n>` (renameAway: one suffix at most) and delete that, adding the outcome to `out`. The rename
  * fails on Windows while a file inside is open, so an entry in use is skipped whole. Returns whether it went.
  */
 export async function removeRenamed(it: CleanupItem, out: CleanupRun): Promise<boolean> {
   if (it.members) return removeMembers(it, out);
   const bytes = await sizeOf(it.path);
-  const doomed = it.rule === 'leftover' ? it.path : `${it.path}.ffclean-${Date.now()}`;
+  let doomed = it.path;
   try {
-    if (doomed !== it.path) await fs.promises.rename(it.path, doomed);
+    // One `.ffclean-<n>` suffix at most: a leftover, or a name that already carries one, goes where it is (w5268).
+    if (it.rule !== 'leftover') doomed = await renameAway(it.path);
   } catch (e) {
     out.failed.push({ path: it.path, why: `in use (${(e as NodeJS.ErrnoException).code ?? (e as Error).message})` });
     return false;
@@ -970,8 +972,7 @@ async function removeMembers(it: CleanupItem, out: CleanupRun): Promise<boolean>
     const size = st.isDirectory() ? await sizeOf(m) : st.size;
     try {
       if (st.isDirectory()) {
-        const doomed = `${m}.ffclean-${Date.now()}`;
-        await fs.promises.rename(m, doomed);
+        const doomed = await renameAway(m);
         await fs.promises.rm(doomed, { recursive: true, force: true, maxRetries: 2 });
       } else await fs.promises.unlink(m);
       bytes += size;
