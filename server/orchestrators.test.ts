@@ -4315,9 +4315,13 @@ test('w754: a worker whose request waits only on a PR and another request calls 
 /** A worker started for request `wid` in pc/alpha, past its first turn. */
 async function startedFor(env: Awaited<ReturnType<typeof setupOnMachine>>, wid: string, extra: Record<string, unknown> = {}) {
   const { store, machines, dispatcher, call } = env;
+  const before = new Set(store.work.get(wid)?.sessionIds ?? []);
   const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Fix it', title: `${wid}: fix`, work_id: wid, extra_agent: true, ...extra });
   assert.equal(started.isError, false, started.text);
-  const id = /Started agent (\w+)/.exec(started.text)![1];
+  // w5278: a sandbox handed over first (a released worker's branch) answers at once; the worker starts once it is switched.
+  const fresh = () => (store.work.get(wid)?.sessionIds ?? []).find((x) => !before.has(x));
+  if (/^Starting /.test(started.text)) await until(`${wid}'s worker starts after the hand-over`, () => !!fresh());
+  const id = /Started agent (\w+)/.exec(started.text)?.[1] ?? fresh()!;
   const info = store.sessions.get(id)!;
   await firstTurn(info);
   return { id, info, h: machines.hooks!.handlersFor(info, store.machines.get('pc')!) };
@@ -6054,7 +6058,7 @@ test('w1600: a Live view marks its request; a bench lock holds its editor; stop_
   const moved = await move();
   assert.equal(moved.isError, false, moved.text);
   assert.match(moved.text, /^Moved w1 off \w+ on pc\/alpha, for beast: its process stopped, its Live view ended, its sandbox (had no uncommitted work|'s uncommitted work)/);
-  assert.match(moved.text, /switch_branch a FREE beast sandbox to "sandbox\/alpha", then start_agent with its work_id in that sandbox/);
+  assert.match(moved.text, /start_agent with its work_id and branch "sandbox\/alpha" in a FREE beast sandbox \(it switches the sandbox while you go on, w5278\)/);
   assert.deepEqual(ended, [a.id]);
   const w = store.work.get('w1')!;
   assert.equal(w.status, 'queued');
@@ -6065,7 +6069,7 @@ test('w1600: a Live view marks its request; a bench lock holds its editor; stop_
   assert.match(w.handedBack!.note, /^Its Live view ran on pc\/alpha \(materials \["Ballista"\], fps 15, width 960\): stage it again/);
   assert.match(w.log.join('\n'), /moved from pc\/alpha: queued for beast, from branch sandbox\/alpha/);
   await until('the dispatcher is told', () => heard(dispatcher().info.id, '[ledger] MOVED (w1600)').length > 0);
-  assert.match(heard(dispatcher().info.id, '[ledger] MOVED (w1600)')[0].text, /w1 "Request w1" .*because it moves to beast: its Live view streams faster on beast \(w1600\) \(moved by stop_agent move_to \(w1600\)\)\. .*Place it on beast: switch_branch a FREE sandbox on beast to "sandbox\/alpha"/);
+  assert.match(heard(dispatcher().info.id, '[ledger] MOVED (w1600)')[0].text, /w1 "Request w1" .*because it moves to beast: its Live view streams faster on beast \(w1600\) \(moved by stop_agent move_to \(w1600\)\)\. .*Place it on beast: start_agent with work_id "w1" and branch "sandbox\/alpha" in a FREE sandbox on beast/);
   // The new worker's handover says where it came from and what to stage.
   const note = handoverNote(w, { related: [], handedBack: w.handedBack });
   assert.match(note, /Moved \(w1600\): w1 was taken off worker \w+ on pc\/alpha at .* UTC, because it moves to beast: its Live view streams faster on beast \(w1600\) \(moved by stop_agent move_to \(w1600\)\)\. Continue from its branch sandbox\/alpha/);

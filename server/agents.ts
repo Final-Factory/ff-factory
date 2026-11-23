@@ -674,6 +674,9 @@ export function movedText(q: Pick<QueuedSend, 'text' | 'attachments'>): string {
   return `${q.text}\n\n[attachments of this message, left in the Inbox of the computer it was queued on: fetch_attachment gets each here by id: ${a.map((x) => `${x.id} (${x.name})`).join(', ')}]`;
 }
 
+/** A sandbox made ready for new work (w5278): the note and branch known now, and the slow part, if any, to run. */
+type SandboxPlan = { note: string; branch?: string; run?: () => Promise<{ note: string; branch?: string }> };
+
 export class Agents {
   private readonly cfg: Config;
   private readonly store: Store;
@@ -3420,6 +3423,15 @@ export class Agents {
    * sandbox editor afterwards. Returns a summary.
    */
   async switchBranch(req: { sandbox?: string; machine?: string; branch: string; createFrom?: string; callerSessionId?: string; discardSceneEdits?: boolean }): Promise<string> {
+    return this.switchChecked(req)();
+  }
+
+  /**
+   * w5278: switch_branch's portal-side refusals (main clone, branch name, an agent there mid-turn), checked now and
+   * thrown, and the switch itself (its daemon's checks, the git work: 15 to 36 s on BEAST, measured), run when the
+   * returned function is called. start_agent's branch runs that part in the background.
+   */
+  switchChecked(req: { sandbox?: string; machine?: string; branch: string; createFrom?: string; callerSessionId?: string; discardSceneEdits?: boolean }): () => Promise<string> {
     const t = this.target(req.sandbox, req.machine);
     if (!t.machineSandbox) throw new Error(MAIN_CLONE_NO_AGENTS);
     // The worker calling its own switch_branch is mid-turn by definition; any OTHER busy agent refuses it (othersMidTurn).
@@ -3448,20 +3460,22 @@ export class Agents {
     const seats = sb.sessionIds.filter((id) => id !== req.callerSessionId && this.onAgentSeat(id));
     const b = busy(sb.sessionIds.filter((id) => !seats.includes(id)));
     if (b.length) throw new Error(midTurnRefusal(b, where));
-    // The daemon checks again with what it runs, and must not count the caller or the seated agents either.
-    const r = await this.machines.switchBranch(m.id, req.branch, req.createFrom, sb.id, req.callerSessionId, req.callerSessionId ? this.githubTokenFor(m.id, req.callerSessionId, `${req.callerSessionId}'s switch_branch`) : undefined, seats);
-    // w1856: a release build's switch onto urgent/<v> or release/<v> remembers the branch it left, for build_plan done.
-    const caller = req.callerSessionId ? this.store.sessions.get(req.callerSessionId) : undefined;
-    if (caller) {
-      const next = nextReleaseSwitch(caller.releaseSwitch, m.id, sb.id, r.from, r.to, new Date().toISOString());
-      if (JSON.stringify(next) !== JSON.stringify(caller.releaseSwitch)) {
-        if (next) caller.releaseSwitch = next;
-        else delete caller.releaseSwitch;
-        this.store.putSession(caller);
+    return async () => {
+      // The daemon checks again with what it runs, and must not count the caller or the seated agents either.
+      const r = await this.machines.switchBranch(m.id, req.branch, req.createFrom, sb.id, req.callerSessionId, req.callerSessionId ? this.githubTokenFor(m.id, req.callerSessionId, `${req.callerSessionId}'s switch_branch`) : undefined, seats);
+      // w1856: a release build's switch onto urgent/<v> or release/<v> remembers the branch it left, for build_plan done.
+      const caller = req.callerSessionId ? this.store.sessions.get(req.callerSessionId) : undefined;
+      if (caller) {
+        const next = nextReleaseSwitch(caller.releaseSwitch, m.id, sb.id, r.from, r.to, new Date().toISOString());
+        if (JSON.stringify(next) !== JSON.stringify(caller.releaseSwitch)) {
+          if (next) caller.releaseSwitch = next;
+          else delete caller.releaseSwitch;
+          this.store.putSession(caller);
+        }
       }
-    }
-    const back = isReleaseBranch(r.to) ? ` ${where} is on a release branch now: build_plan done puts it back on ${caller?.releaseSwitch?.from ?? 'a fresh branch'} (w1856); commit nothing on it.` : '';
-    return `${where}: ${r.from} → ${r.to}. ${r.notes.join('; ')}.${back}`;
+      const back = isReleaseBranch(r.to) ? ` ${where} is on a release branch now: build_plan done puts it back on ${caller?.releaseSwitch?.from ?? 'a fresh branch'} (w1856); commit nothing on it.` : '';
+      return `${where}: ${r.from} → ${r.to}. ${r.notes.join('; ')}.${back}`;
+    };
   }
 
   // ---------------------------------------------------------------- workers on machines (docs/machines.md)
@@ -4605,7 +4619,7 @@ export class Agents {
     info.movedAway = { machine: info.machineId, to: target, at: new Date().toISOString() };
     this.store.putSession(info);
     console.log(`move: ${reqs.map((w) => w.id).join(', ')} from worker ${info.id} on ${from} to ${target} (${reason}); branch ${branch ?? 'unknown'}${saved ? `; ${saved}` : ''}`);
-    return `Moved ${reqs.map((w) => w.id).join(', ')} off ${sessionId} on ${from}, for ${target}: its process stopped${view ? ', its Live view ended' : ''}${saved ? `, ${saved}` : ''}. Each is Queued for ${target} with its branch ${branch ?? '(unknown)'} and a note${view ? ' (the Live view settings to stage again)' : ''}. Now ${branch ? `switch_branch a FREE ${target} sandbox to "${branch}", then ` : ''}start_agent with its work_id in that sandbox; the new worker's handover carries the note.`;
+    return `Moved ${reqs.map((w) => w.id).join(', ')} off ${sessionId} on ${from}, for ${target}: its process stopped${view ? ', its Live view ended' : ''}${saved ? `, ${saved}` : ''}. Each is Queued for ${target} with its branch ${branch ?? '(unknown)'} and a note${view ? ' (the Live view settings to stage again)' : ''}. Now start_agent with its work_id${branch ? ` and branch "${branch}"` : ''} in a FREE ${target} sandbox${branch ? ' (it switches the sandbox while you go on, w5278)' : ''}; the new worker's handover carries the note.`;
   }
 
   /**
@@ -5723,6 +5737,23 @@ A report is for a person who asked for one, and people want very few. File one w
    * starts on, when it was switched.
    */
   async prepareForNewWork(sandbox: string | undefined, machine: string | undefined, name?: string, source?: WorkSource, agentSeat = false): Promise<{ note: string; branch?: string }> {
+    const p = this.planForNewWork(sandbox, machine, name, source, agentSeat);
+    if (p.pending) return await p.pending;
+    // Nothing to switch: it settles after the same microtask as before w5278 (an async prepareSandbox awaited), which
+    // w2548's holds of a request under way are timed to.
+    await null;
+    return { note: p.note, branch: p.branch };
+  }
+
+  /**
+   * prepareForNewWork in two parts (w5278): every refusal (being handed already, spoken for, and with switchTo
+   * switch_branch's own: main clone, branch name, an agent there mid-turn, its editor running) throws now; the slow part
+   * (the editor stopped, the branch switched on its daemon: 20 to 43 s on BEAST, measured) is `pending`, the sandbox held
+   * as being handed (not FREE to a second start, room or list_sandboxes) until it settles. switchTo: a branch the new
+   * worker starts on (start_agent's branch, a MOVED or HANDED BACK request's pushed branch) instead of a hand-over's fresh
+   * one. A caller that does not await `pending` must catch it.
+   */
+  planForNewWork(sandbox: string | undefined, machine: string | undefined, name?: string, source?: WorkSource, agentSeat = false, switchTo?: { branch: string; createFrom?: string }): { note: string; branch?: string; pending?: Promise<{ note: string; branch?: string }> } {
     let key: string | undefined;
     try {
       const t = this.target(sandbox, machine);
@@ -5730,16 +5761,37 @@ A report is for a person who asked for one, and people want very few. File one w
     } catch {
       // An unknown target: the inner call says nothing either.
     }
-    if (!key) return this.prepareSandbox(sandbox, machine, name, source, agentSeat);
-    const by = this.handing.get(key);
+    const by = key && this.handing.get(key);
     if (by) throw new Error(`sandbox ${key} is being handed to ${by} now (its editor stopped and its branch switched for it, before its worker starts): use another free sandbox.`);
+    const plan = switchTo ? this.planSwitchTo(sandbox, machine, switchTo) : this.planSandbox(sandbox, machine, name, source, agentSeat);
+    const run = plan.run;
+    if (!run || !key) return { note: plan.note, branch: plan.branch };
     // w1944: until the new worker exists the sandbox has no agent in it, yet it is taken: not free for room, list_sandboxes or another start.
-    this.handing.set(key, name ? `new work ${name}` : 'new work');
-    try {
-      return await this.prepareSandbox(sandbox, machine, name, source, agentSeat);
-    } finally {
-      this.handing.delete(key);
-    }
+    const k = key;
+    this.handing.set(k, name ? `new work ${name}` : 'new work');
+    const pending = (async () => {
+      try {
+        return await run();
+      } finally {
+        this.handing.delete(k);
+      }
+    })();
+    return { note: plan.note, branch: plan.branch, pending };
+  }
+
+  /** start_agent's branch (w5278): switch_branch's refusals now, the switch when run. */
+  private planSwitchTo(sandbox: string | undefined, machine: string | undefined, to: { branch: string; createFrom?: string }): SandboxPlan {
+    const t = this.target(sandbox, machine);
+    if (!t.machineSandbox) throw new Error(MAIN_CLONE_NO_AGENTS);
+    const m = this.machines.require(t.machine);
+    const sb = this.machines.requireSandbox(m.id, t.machineSandbox);
+    const claim = this.placeAgain.claimedBy(m.id, sb.id);
+    if (claim) throw new Error(`sandbox ${m.id}/${sb.id} is spoken for: worker ${claim} released it while it waited and resumes there, ahead of new work (docs/machines.md, "Placing work"). Use another free sandbox.`);
+    if (branchNow(sb) === to.branch) return { note: '', branch: to.branch };
+    // The daemon refuses a switch while the editor runs (switch_branch's rule): said now, not after the dispatcher moved on.
+    if (sb.unity.state !== 'stopped') throw new Error(`${m.id}/${sb.id}'s editor is ${sb.unity.state}, and its branch is not switched while it runs (switch_branch's rule): stop it with unity first, or use another free sandbox.`);
+    const go = this.switchChecked({ sandbox: `${m.id}/${sb.id}`, branch: to.branch, createFrom: to.createFrom });
+    return { note: '', branch: to.branch, run: async () => ({ branch: to.branch, note: ` Switched first: ${await go()}` }) };
   }
 
   /**
@@ -5749,7 +5801,8 @@ A report is for a person who asked for one, and people want very few. File one w
    */
   private readonly handing = new Map<string, string>();
 
-  private async prepareSandbox(sandbox: string | undefined, machine: string | undefined, name?: string, source?: WorkSource, agentSeat = false): Promise<{ note: string; branch?: string }> {
+  /** prepareForNewWork's checks now and its hand-over (the editor stopped, the branch switched) in `run` (w5278). */
+  private planSandbox(sandbox: string | undefined, machine: string | undefined, name?: string, source?: WorkSource, agentSeat = false): SandboxPlan {
     let t: ReturnType<Agents['target']>;
     try {
       t = this.target(sandbox, machine);
@@ -5774,15 +5827,21 @@ A report is for a person who asked for one, and people want very few. File one w
       }
       const tag = (name ?? new Date().toISOString().slice(0, 16).replace(/[-:]/g, '').replace('T', '-')).toLowerCase();
       const branch = handOverBranch(sb.id, tag, sandboxBranchFor(source, `${sb.id}-${tag}`));
-      try {
-        if (sb.unity.state !== 'stopped') await this.machines.unity(m.id, 'stop', false, sb.id);
-        const res = await this.machines.switchBranch(m.id, branch, undefined, sb.id);
-        console.log(`release hand-back: switched ${label} off the release branch ${onBranch} to ${branch} for new work (w1856)`);
-        return { branch, note: ` Handed over first: ${label} was on the release branch ${onBranch}, which a release build left it on (w1856); FF Factory stopped its editor if it ran and switched it (${res.notes.join('; ')}), so this worker starts on ${branch}.` };
-      } catch (e) {
-        console.log(`release hand-back: could not switch ${label} off ${onBranch}: ${(e as Error).message}`);
-        return { note: ` Not handed over: ${label} is on the release branch ${onBranch} (w1856), and switching it failed (${(e as Error).message});${left}` };
-      }
+      return {
+        note: '',
+        branch,
+        run: async () => {
+          try {
+            if (sb.unity.state !== 'stopped') await this.machines.unity(m.id, 'stop', false, sb.id);
+            const res = await this.machines.switchBranch(m.id, branch, undefined, sb.id);
+            console.log(`release hand-back: switched ${label} off the release branch ${onBranch} to ${branch} for new work (w1856)`);
+            return { branch, note: ` Handed over first: ${label} was on the release branch ${onBranch}, which a release build left it on (w1856); FF Factory stopped its editor if it ran and switched it (${res.notes.join('; ')}), so this worker starts on ${branch}.` };
+          } catch (e) {
+            console.log(`release hand-back: could not switch ${label} off ${onBranch}: ${(e as Error).message}`);
+            return { note: ` Not handed over: ${label} is on the release branch ${onBranch} (w1856), and switching it failed (${(e as Error).message});${left}` };
+          }
+        },
+      };
     }
     const r = releasedOn(sb, this.store.sessions.values(), (id) => !!this.sessions.sessions.get(id)?.live);
     if (!r?.placeReleased) return { note: '' };
@@ -5798,12 +5857,19 @@ A report is for a person who asked for one, and people want very few. File one w
     }
     const tag = (name ?? new Date().toISOString().slice(0, 16).replace(/[-:]/g, '').replace('T', '-')).toLowerCase();
     const branch = handOverBranch(sb.id, tag, sandboxBranchFor(source, `${sb.id}-${tag}`));
-    if (sb.unity.state !== 'stopped') await this.machines.unity(m.id, 'stop', false, sb.id);
-    const res = await this.machines.switchBranch(m.id, branch, undefined, sb.id);
-    console.log(`place again: handed ${m.id}/${sb.id} over from ${r.id}'s branch ${r.placeReleased.branch} to ${branch}`);
+    const rel = r.placeReleased;
     return {
+      note: '',
       branch,
-      note: ` Handed over first: ${m.id}/${sb.id} was still on the branch ${r.placeReleased.branch} of worker ${r.id}, which released it while it waits (${r.placeReleased.why}); FF Factory stopped its editor if it ran and switched it (${res.notes.join('; ')}), so this worker starts on ${branch}. ${r.id} is placed again on its own branch when it resumes.`,
+      run: async () => {
+        if (sb.unity.state !== 'stopped') await this.machines.unity(m.id, 'stop', false, sb.id);
+        const res = await this.machines.switchBranch(m.id, branch, undefined, sb.id);
+        console.log(`place again: handed ${m.id}/${sb.id} over from ${r.id}'s branch ${rel.branch} to ${branch}`);
+        return {
+          branch,
+          note: ` Handed over first: ${m.id}/${sb.id} was still on the branch ${rel.branch} of worker ${r.id}, which released it while it waits (${rel.why}); FF Factory stopped its editor if it ran and switched it (${res.notes.join('; ')}), so this worker starts on ${branch}. ${r.id} is placed again on its own branch when it resumes.`,
+        };
+      },
     };
   }
 
@@ -6314,17 +6380,17 @@ A report is for a person who asked for one, and people want very few. File one w
         ),
         tool(
           'start_agent',
-          'Start a Claude Code worker with a task prompt, in a sandbox on a machine ("lothdesktop/sb1": its own worktree and editor there; a bare name is this host\'s own daemon\'s; w536: never a machine alone). The worker has the full Final Factory harness (CLAUDE.md, the skills, its editor\'s Unity MCP bridge). Write the prompt as a complete brief: goal, done-criteria, constraints, and which skill to use if one fits; for work that spends, publishes, changes something live, releases or changes what players see, also the decisions it must settle. You will get a [worker update] message when it finishes a turn.',
+          'Start a Claude Code worker with a task prompt, in a sandbox on a machine ("lothdesktop/sb1": its own worktree and editor there; a bare name is this host\'s own daemon\'s). The worker has the full Final Factory harness (CLAUDE.md, the skills, its editor\'s Unity MCP bridge). Write the prompt as a complete brief: goal, done-criteria, constraints, and which skill to use if one fits; for work that spends, publishes, changes something live, releases or changes what players see, also the decisions it must settle. You will get a [worker update] message when it finishes a turn.',
           {
             sandbox: z.string().optional().describe(SANDBOX_ID),
-            machine: z.string().optional().describe('A machine id from list_machines: the machine of a bare sandbox name (machine alone is refused: workers run in sandboxes only).'),
+            machine: z.string().optional().describe('The machine (list_machines) of a bare sandbox name; never alone: workers run in sandboxes.'),
             prompt: z.string(),
             title: z
               .string()
               .optional()
               .describe(
                 ctx.role === 'dispatcher'
-                  ? `Required. What the job is, in a few plain words (the request id goes in front by itself: "w513: LothDesktop fresh install, sandboxes slot1..6"), at most ${TITLE_MAX} characters with it. Not the request title cut short.`
+                  ? `Required. What the job is, in a few plain words (the request id goes in front by itself: "w513: LothDesktop fresh install"), at most ${TITLE_MAX} characters with it. Not the request title cut short.`
                   : 'A short, specific name the user will recognise on the dashboard, e.g. "Belt splitter fix (spec 098)". Always give one; its request id goes in front.',
               ),
             model: z.string().optional().describe(modelChoices(this.cfg)),
@@ -6333,7 +6399,7 @@ A report is for a person who asked for one, and people want very few. File one w
             effort: z.enum(EFFORT_LEVELS as [EffortLevel, ...EffortLevel[]]).optional().describe(`Default ${this.cfg.worker.effort}.`),
             for_user: FOR_USER,
             work_id: WORK_ID,
-            attachments: attachmentIds(this.attachMax).describe("Files a person attached, by id (\"att_k2m9x0q7p3a1\", from an [attachments] list): the worker gets a copy of each in Inbox/ in its working folder. With work_id, the request's own attachments go too."),
+            attachments: attachmentIds(this.attachMax).describe("Files a person attached, by id (from an [attachments] list): the worker gets a copy of each in Inbox/ in its working folder. With work_id, the request's own attachments go too."),
             override_duplicate: z
               .string()
               .optional()
@@ -6343,9 +6409,15 @@ A report is for a person who asked for one, and people want very few. File one w
             pair_sandboxes: z.array(z.string()).max(PAIR_MAX_LEGS - 1).optional().describe('Pair run: its other legs\' FREE sandboxes, one per computer; sandbox is leg 1 (host).'),
             pin_words: PIN_WORDS,
             disk_cleanup: z.literal(true).optional().describe('With work_id: a disk clean-up here (w3328).'),
+            branch: z.string().optional().describe("Start on a MOVED request's pushed branch, switched while you go on."),
           },
           wrap(async (a) => {
             if (a.work_id && ctx.role !== 'dispatcher') throw new Error(WORK_ID_ONLY);
+            if (a.branch?.trim()) {
+              if (ctx.role !== 'dispatcher') throw new Error('branch is for the dispatcher: switch_branch the sandbox first');
+              if (a.extra_agent || ((a.work_id ? this.orchestrators.requireWork(a.work_id).needs : undefined) === 'agent')) throw new Error('branch is for game work in a FREE sandbox: a worker on an agent seat works in its own clone, and the sandbox is not switched for it');
+              if (a.pair_sandboxes?.length) throw new Error('branch is not for a pair run: switch_branch its legs first');
+            }
             const w = a.work_id ? this.orchestrators.requireWork(a.work_id) : undefined;
             const needs: NeedKind = w?.needs ?? 'game';
             const override = a.override_duplicate?.trim().slice(0, 300);
@@ -6453,48 +6525,99 @@ ${w.repo ?? ''}
             // w2054: what placement named for it and each computer's load at that moment, read before it is placed; portal_logs shows it.
             const placedLog = newOn ? this.placedLog(w?.id ?? nextId, newOn, needs, needsLive(w, a.prompt) ? 'live' : needsBuild(w, a.prompt) ? 'build' : timedKind(needsTimed(w, a.prompt)), w?.priority) : undefined;
             // A sandbox a waiting worker released on its own branch is switched to a fresh one first (w640), never for work
-            // that needs only an agent seat, nor under a worker there (w1607).
+            // that needs only an agent seat, nor under a worker there (w1607). branch (w5278): switched to that one instead.
             // w2548: the request is held from here until its worker is linked, and checked again after the wait in the same
             // run as the start, so FF Factory's timed leg start (or another start_agent) cannot start it alongside.
+            const agentSeat = !!a.extra_agent || needs === 'agent';
+            const switchTo = a.branch?.trim() ? { branch: a.branch.trim() } : undefined;
             if (w) this.agentStarting.set(w.id, newOn ?? a.sandbox ?? '?');
-            let handed: Awaited<ReturnType<Agents['prepareForNewWork']>>;
+            let plan: ReturnType<Agents['planForNewWork']>;
             try {
-              handed = await this.prepareForNewWork(a.sandbox, a.machine, w?.id ?? nextId, w?.source, !!a.extra_agent || needs === 'agent');
-            } finally {
+              plan = this.planForNewWork(a.sandbox, a.machine, w?.id ?? nextId, w?.source, agentSeat, switchTo);
+            } catch (e) {
               if (w) this.agentStarting.delete(w.id);
+              throw e;
             }
-            if (w) {
-              const underWay = this.startUnderWay(w.id, 'agent');
-              if (underWay) throw new Error(`${w.id} is being started already: ${underWay}. Do not start it again: its worker reports to its person's orchestrator once it runs.`);
-              const live = this.workersOn(this.store.work.get(w.id) ?? w);
-              if (live.length && !override) throw new Error(`${w.id} already has ${live.map((id) => this.orchestrators.workerLine(id)).join(', ')}, started while this start_agent waited: send it there (message_agent with work_id).`);
+            const finish = (handed: { note: string; branch?: string }): string => {
+              if (w) {
+                const underWay = this.startUnderWay(w.id, 'agent');
+                if (underWay) throw new Error(`${w.id} is being started already: ${underWay}. Do not start it again: its worker reports to its person's orchestrator once it runs.`);
+                const live = this.workersOn(this.store.work.get(w.id) ?? w);
+                if (live.length && !override) throw new Error(`${w.id} already has ${live.map((id) => this.orchestrators.workerLine(id)).join(', ')}, started while this start_agent waited for its sandbox: send it there (message_agent with work_id).`);
+              }
+              if (ctx.role === 'dispatcher') this.sharedSandboxProblem(a.sandbox, a.machine, a.work_id, a.extra_agent, needs);
+              // An intake request always carries its rules (untrusted text, posting limits, the markers), whatever the brief says.
+              // The request as filed goes with every brief (w496), then the intake rules and the PR line.
+              const prompt = `${a.prompt}${w && ffuShared.length ? sharedFilesNote(w.id, ffuShared) : ''}${w ? requestAsFiled(w, a.prompt) : ''}${w ? this.handoverFor(w, this.target(a.sandbox, a.machine), handed.branch) : ''}${w?.source ? workerRules(w, handed.branch ?? this.sandboxBranchOf(this.target(a.sandbox, a.machine))) : ''}${w ? requestLineRule(w) : ''}`;
+              const s = this.startWorker({ sandbox: a.sandbox, machine: a.machine, prompt, title: w ? jobTitle(w.id, a.title!) : a.title, model: picked.model, effort: a.effort, permissionMode: a.permission_mode, from, requestedBy, attachments: files, workId: w?.id });
+              const where = `in sandbox ${s.info.machineId}/${s.info.machineSandbox}`;
+              if (s.info.status === 'error') return `Created agent ${s.info.id} ${where}, but it did not start: ${s.info.statusDetail}`;
+              if (newOn) this.lastPlaced = newOn;
+              if (placedLog) console.log(placedLog);
+              let item = '';
+              if (w) {
+                const why = override ? ` (not a repeat: ${override})` : '';
+                this.orchestrators.linkWorker(w.id, s.info, `started ${this.orchestrators.workerLine(s.info.id)}${picked.note}${why}`, { overrideGate: a.override_gate });
+                item = ` for ${w.id}; ${names(w.requesters)}'s orchestrator is told`;
+                if (ffuShared.length) this.tellFfuShared(w, ffuShared);
+              } else {
+                const id =
+                  ctx.role === 'dispatcher'
+                    ? this.orchestrators.recordDirectStart(s.info, a.prompt, requestedBy, `${where}${picked.note}`)
+                    : this.orchestrators.recordStart(s.info, a.prompt, requestedBy, `started over /mcp for ${requestedBy.displayName}: worker ${s.info.id} ${where}`, from === 'human');
+                this.sessions.setTitle(s.info.id, jobTitle(id, a.title ?? s.info.title, { clip: true }));
+                item = `; recorded in the ledger as ${id}`;
+              }
+              const withFiles = files.length ? ` It gets ${files.length === 1 ? 'the attachment' : `${files.length} attachments`} (${files.map((f) => f.id).join(', ')}) in ${INBOX_DIR}/.` : '';
+              const shared = ffuShared.length ? ` It may edit files other ffu work in flight edits (w5197): ${ffuShared.map(clashLine).join('; ')}; it was told, and so was each of those requests' worker: each merges origin/main before pushing and the later pull request resolves the conflicts.` : '';
+              return `Started agent ${s.info.id} "${s.info.title}" ${where}${picked.note || ` on ${this.cfg.defaultModel}`}, requested by ${requestedBy.displayName}${item}.${withFiles}${shared}${Agents.goneLine(files)}${this.queuedLine(s.info.id)}${handed.note}${hint}`;
+            };
+            if (!plan.pending) {
+              // Nothing to switch: held over the same microtasks as before w5278 (it awaited prepareForNewWork), so w2548's hold is seen.
+              try {
+                await null;
+                await null;
+                return finish(plan);
+              } finally {
+                if (w) this.agentStarting.delete(w.id);
+              }
             }
-            if (ctx.role === 'dispatcher') this.sharedSandboxProblem(a.sandbox, a.machine, a.work_id, a.extra_agent, needs);
-            // An intake request always carries its rules (untrusted text, posting limits, the markers), whatever the brief says.
-            // The request as filed goes with every brief (w496), then the intake rules and the PR line.
-            const prompt = `${a.prompt}${w && ffuShared.length ? sharedFilesNote(w.id, ffuShared) : ''}${w ? requestAsFiled(w, a.prompt) : ''}${w ? this.handoverFor(w, this.target(a.sandbox, a.machine), handed.branch) : ''}${w?.source ? workerRules(w, handed.branch ?? this.sandboxBranchOf(this.target(a.sandbox, a.machine))) : ''}${w ? requestLineRule(w) : ''}`;
-            const s = this.startWorker({ sandbox: a.sandbox, machine: a.machine, prompt, title: w ? jobTitle(w.id, a.title!) : a.title, model: picked.model, effort: a.effort, permissionMode: a.permission_mode, from, requestedBy, attachments: files, workId: w?.id });
-            const where = `in sandbox ${s.info.machineId}/${s.info.machineSandbox}`;
-            if (s.info.status === 'error') return `Created agent ${s.info.id} ${where}, but it did not start: ${s.info.statusDetail}`;
-            if (newOn) this.lastPlaced = newOn;
-            if (placedLog) console.log(placedLog);
-            let item = '';
-            if (w) {
-              const why = override ? ` (not a repeat: ${override})` : '';
-              this.orchestrators.linkWorker(w.id, s.info, `started ${this.orchestrators.workerLine(s.info.id)}${picked.note}${why}`, { overrideGate: a.override_gate });
-              item = ` for ${w.id}; ${names(w.requesters)}'s orchestrator is told`;
-              if (ffuShared.length) this.tellFfuShared(w, ffuShared);
-            } else {
-              const id =
-                ctx.role === 'dispatcher'
-                  ? this.orchestrators.recordDirectStart(s.info, a.prompt, requestedBy, `${where}${picked.note}`)
-                  : this.orchestrators.recordStart(s.info, a.prompt, requestedBy, `started over /mcp for ${requestedBy.displayName}: worker ${s.info.id} ${where}`, from === 'human');
-              this.sessions.setTitle(s.info.id, jobTitle(id, a.title ?? s.info.title, { clip: true }));
-              item = `; recorded in the ledger as ${id}`;
+            if (ctx.role !== 'dispatcher') {
+              try {
+                return finish(await plan.pending);
+              } finally {
+                if (w) this.agentStarting.delete(w.id);
+              }
             }
-            const withFiles = files.length ? ` It gets ${files.length === 1 ? 'the attachment' : `${files.length} attachments`} (${files.map((f) => f.id).join(', ')}) in ${INBOX_DIR}/.` : '';
-            const shared = ffuShared.length ? ` It may edit files other ffu work in flight edits (w5197): ${ffuShared.map(clashLine).join('; ')}; it was told, and so was each of those requests' worker: each merges origin/main before pushing and the later pull request resolves the conflicts.` : '';
-            return `Started agent ${s.info.id} "${s.info.title}" ${where}${picked.note || ` on ${this.cfg.defaultModel}`}, requested by ${requestedBy.displayName}${item}.${withFiles}${shared}${Agents.goneLine(files)}${this.queuedLine(s.info.id)}${handed.note}${hint}`;
+            // w5278: the dispatcher does not wait for the switch (20 to 43 s on BEAST, measured in w5222): the worker starts
+            // when it is done, and a start that fails says so in a message. The request and the sandbox stay held meanwhile.
+            const label = w?.id ?? 'the agent';
+            const tgt = this.target(a.sandbox, a.machine);
+            const at = tgt.machineSandbox ? `${tgt.machine}/${tgt.machineSandbox}` : (a.sandbox ?? '?');
+            const failed = (e: unknown) => {
+              const why = (e as Error)?.message ?? String(e);
+              console.log(`start_agent (w5278): ${label} in ${at} did not start: ${why}`);
+              if (w) this.orchestrators.noteOnRequest(w.id, `its start_agent in ${at} did not start after the sandbox was prepared (w5278): ${why}`);
+              this.notifyDispatcher(`[start failed] ${label} did not start in ${at}: ${why}. Nothing was started for it: start_agent it again (another free sandbox if this one is the problem).`, requestedBy);
+            };
+            plan.pending.then(
+              (h) => {
+                if (w) this.agentStarting.delete(w.id);
+                try {
+                  const text = finish(h);
+                  console.log(`start_agent (w5278): ${text}`);
+                  if (text.startsWith('Created agent')) failed(new Error(text));
+                } catch (e) {
+                  failed(e);
+                }
+              },
+              (e) => {
+                if (w) this.agentStarting.delete(w.id);
+                failed(e);
+              },
+            );
+            const doing = switchTo ? `switched to ${switchTo.branch}` : 'handed over (its editor stopped and its branch switched)';
+            return `Starting ${label} in ${at}: the sandbox is being ${doing} first (20 to 45 s), and the worker starts with your brief once that is done; you need not wait for it (w5278). If the start fails, a [start failed] message says why; then start it again.${hint}`;
           }),
         ),
         ...this.machineToolSpecs(tool, from, ctx),
@@ -7403,7 +7526,17 @@ ${w.repo ?? ''}
           machine: z.string(),
           dry_run: z.boolean().optional().describe('List what the pass would remove and what it would keep for a person, with sizes and why, removing nothing.'),
         },
-        wrap(async ({ machine, dry_run }) => describeCleanupItems(await mm.cleanupNow(machine, { dryRun: !!dry_run }))),
+        wrap(async ({ machine, dry_run }) => {
+          if (ctx.role !== 'dispatcher') return describeCleanupItems(await mm.cleanupNow(machine, { dryRun: !!dry_run }));
+          // w5278: a pass walks the whole disk (153 s on m3, measured in w5222); the dispatcher goes on and gets its result as a message.
+          const m = mm.require(machine);
+          const what = dry_run ? 'dry-run clean-up pass' : 'clean-up pass';
+          mm.cleanupNow(m.id, { dryRun: !!dry_run }).then(
+            (r) => this.notifyDispatcher(`[clean-up] The ${what} you started on ${m.id} finished:\n${describeCleanupItems(r)}`),
+            (e) => this.notifyDispatcher(`[clean-up] The ${what} you started on ${m.id} failed: ${(e as Error)?.message ?? String(e)}`),
+          );
+          return `The ${what} on ${m.id} is running (it walks the whole disk: minutes); its result comes to you as a [clean-up] message, so go on meanwhile (w5278).`;
+        }),
       ),
       tool(
         'cleanup_log',

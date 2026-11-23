@@ -152,7 +152,8 @@ before redeploying by hand.
   off the install drive (C:) is read, measured, listed or named in a notice, and a worker's scan there is refused, apart from
   reading the game's AppData `Never Games` folders, which nothing modifies
   ([self-recovery.md](self-recovery.md#windows-the-install-drive-only-w1755), w1755).
-  `machine_cleanup` runs a pass now.
+  `machine_cleanup` runs a pass now; the dispatcher's call answers at once and its result comes as a `[clean-up]` message
+  (w5278: a pass walks the whole disk, 153 s on m3), other callers wait for it.
 - **Standing agents** run on a machine and need one ([standing-agents.md](standing-agents.md)): their folder is `agents/<id>` in the daemon's folder
   (`~/.ff-factory/agents/<id>` by default) on that Mac, runs wait (like a full slot) while the machine is offline, and budgets work unchanged.
 
@@ -1716,7 +1717,7 @@ LothDesktop and Beast, not just when BEAST is full").
     is saved and pushed on its branch (w656), and each open request it serves is handed back by the w1532 route
     (`Orchestrators.handBack` with `to`): taken off it, Queued for that computer (`queuedFor.needs`), with the branch and a
     note carrying the view's materials, fps and width. The dispatcher hears "[ledger] MOVED (w1600)" with the steps
-    (`switch_branch` a free sandbox there to the branch, then `start_agent` with the work_id), and the new worker's
+    (`start_agent` with the work_id and `branch` in a free sandbox there, w5278), and the new worker's
     handover says "Moved (w1600)" and what to stage. A conversation does not cross computers (Claude Code keeps its
     transcript on the old one's disk), so the request goes on in a new session; `PlaceAgain` still places a resumed worker
     only on its own machine.
@@ -2210,7 +2211,13 @@ LothDesktop and Beast, not just when BEAST is full").
     fresh branch, `sandbox/<slot>-<request id>` (`ffbox-f/…` for FFBox work) from origin/master, so the new worker
     never commits on the other's branch. That switch pushes any commits of the old branch no remote has first
     (`switch_branch`'s rule), and it frees the branch for checkout elsewhere (git allows a branch in one worktree only).
-    The tool's answer says it was handed over. **Never under another worker** (w1607, `Agents.prepareForNewWork`;
+    The tool's answer says it was handed over. For the dispatcher (w5278) the hand-over runs in the background: its
+    refusals come at once, the editor stop and the switch (20 to 43 s on BEAST, measured 2026-11-23) run while it goes on,
+    the request (`agentStarting`) and the sandbox (`handing`) stay held meanwhile, and the worker starts with its brief once
+    the switch is done; a start that fails then sends it a `[start failed]` message (`Agents.planForNewWork`). Its
+    `branch` does the same with a branch it names (a MOVED or HANDED BACK request's pushed branch) instead of a fresh one,
+    with `switch_branch`'s refusals (mid-turn agent there, branch name, its editor running) checked before it answers.
+    **Never under another worker** (w1607, `Agents.prepareForNewWork`;
     2026-10-20 04:35 UTC, beast/slot1: w1602's start switched the worktree under w1440's Unity batch build, because an
     earlier w1440 session had released that same branch): no switch while a worker that has not released the sandbox
     is there (the branch is its now), while the sandbox is busy (a worker there mid-turn, between turns with a
