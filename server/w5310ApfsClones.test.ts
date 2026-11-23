@@ -60,15 +60,15 @@ test('w5310: onVolume reports what the volume freed, clamped to the files\' byte
 
 test('w5310: folders counts a seed entry a sandbox Library also holds as APFS clones that free ~0 (macOS)', async (t) => {
   const { seed, target, hashes, facts, ctx } = world(t, (a, b) => fs.copyFileSync(a, b));
-  const rows = (await planFolders(facts, { slots: ctx, sizes: 'delete', platform: 'darwin' })).filter((r) => r.kind === 'seed-library');
+  const rows = (await planFolders(facts, { slots: ctx, sizes: 'delete', platform: 'darwin', privateBytes: async () => undefined })).filter((r) => r.kind === 'seed-library');
   const byName = Object.fromEntries(rows.map((r) => [path.basename(r.path), r]));
   assert.deepEqual(Object.keys(byName).sort(), [`${hashes[0]}.dll`, `${hashes[1]}.dll`]);
   assert.equal(byName[`${hashes[0]}.dll`]!.bytes, 0);
   assert.equal(byName[`${hashes[0]}.dll`]!.cloned, MB);
   assert.equal(byName[`${hashes[1]}.dll`]!.bytes, MB);
   assert.equal(byName[`${hashes[1]}.dll`]!.cloned, undefined);
-  const plan = await planFolders(facts, { slots: ctx, sizes: 'delete', platform: 'darwin' });
-  assert.match(renderFolders(plan, facts), /also in a sandbox's Library \(APFS clones: frees ~0/);
+  const plan = await planFolders(facts, { slots: ctx, sizes: 'delete', platform: 'darwin', privateBytes: async () => undefined });
+  assert.match(renderFolders(plan, facts), /shared with APFS clones, not freed/);
   // Elsewhere (robocopy on Windows copies, it does not clone) the files' count stands.
   const win = (await planFolders(facts, { slots: ctx, sizes: 'delete', platform: 'win32' })).find((r) => r.path.endsWith(`${hashes[0]}.dll`));
   assert.equal(win!.bytes, MB);
