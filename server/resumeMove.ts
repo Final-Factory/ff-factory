@@ -184,7 +184,8 @@ export function moveDecision(f: MoveFacts): MoveDecision {
   const ui = kind === 'game' && f.requests.some((r) => r.ui);
   const one = (p: Computer) => ui && p.maxEditors !== undefined && p.maxEditors <= 1;
   let pick = pickComputer(candidates.filter((p) => !one(p)), f.last, prefs, kind, false, first);
-  if (!pick && f.away) pick = pickComputer(candidates, f.last, prefs, kind, false, first);
+  // w5328: pinned work has no other computer to prefer, so a one-Unity-slot pin (biscuit) is no reason to wait.
+  if (!pick && (f.away || f.requests.some((r) => r.pinned?.length))) pick = pickComputer(candidates, f.last, prefs, kind, false, first);
   if (!pick) for (const p of candidates) if (one(p)) unfit.set(p.id, ONE_EDITOR);
   if (!pick) {
     const why = unfit.size ? `; ${[...unfit].map(([id, w]) => `${id}: ${w}`).join('; ')}` : '';

@@ -1,3 +1,4 @@
+import { deployLead, deployStayNote, deployWaitLine } from './deployResume.ts';
 import { crashHoldMark } from './crashHolds.ts';
 import { untimedText } from '../shared/benchGlance.ts';
 import { modelChoices, workerModelChoice } from './workerModel.ts';
@@ -845,6 +846,7 @@ export class Agents {
     });
     sessions.pauseHeld = (s, text) => this.pauses.heldResume(s.info, text);
     sessions.roomMove = (s, q, hold, now) => this.roomMove(s, q, hold, now);
+    sessions.deployMove = (s, q, now) => this.deployMove(s, q, now);
     // w2043: a pilot worker whose pull request merged goes on in a fresh session at its next message (server/freshAfterMerge.ts).
     sessions.freshStart = (s, m) => this.freshStart(s, m);
     machines.onPause = (id, p) => {
@@ -3812,6 +3814,71 @@ export class Agents {
     console.log(`room move: worker ${info.id} on ${info.machineId}/${info.machineSandbox} (${reqs.map((w) => w.id).join(', ')}) moves to ${d.move.to} ${waited} s after its message was queued: ${hold}; ${d.move.why}`);
     this.unmemoized(() => void this.moveForRoom(info, reqs, d.move.to, d.move.why, hold, entry, q).finally(() => this.roomMoving.delete(info.id)));
     return true;
+  }
+
+  /**
+   * SessionManager.deployMove (w5328, server/deployResume.ts): the gate resume of a request whose worker waited for another
+   * computer's daemon update (WorkItem.resumeOn) moves to that computer with the w2046 move, pinned there: `true` once the move
+   * started (the message goes with it), the Queued line while no room or the machine there is not up (it never falls back
+   * elsewhere), undefined when it does not apply or must stay (the message is then told the check is on that machine).
+   */
+  private deployMove(h: SessionHandle, q: QueuedSend, now: number): true | string | undefined {
+    const info = h.info;
+    if (info.kind !== 'worker' || !info.machineId || !q.resumeOf) return undefined;
+    const w = this.store.work.get(q.resumeOf.work.toLowerCase());
+    const on = w?.resumeOn;
+    if (!w || !on || on.session !== info.id || !on.machines.length) return undefined;
+    const here = placeId(info.machineId);
+    if (on.machines.includes(here)) return undefined;
+    const moving = this.roomMoving.get(info.id);
+    if (moving) {
+      moving.texts.push(movedText(q));
+      return true;
+    }
+    const forget = () => {
+      w.resumeOn = undefined;
+      this.store.putWork(w);
+    };
+    if (info.pendingPermissions.length || isMidTurn(info)) return deployWaitLine(on.machines, `its worker ${info.id} is mid-turn on ${here}; it moves once that turn ends`);
+    const { reqs, owned, gone } = this.movableWorkOf(info);
+    if (!reqs.some((r) => r.id === w.id)) {
+      // Another worker carries it now (w2079): the message is not this move's to make.
+      if (owned.length || gone.length) forget();
+      return undefined;
+    }
+    const facts = this.moveFacts(info, reqs);
+    const d = moveDecision({ ...facts, requests: facts.requests.map((r) => (r.id === w.id ? { ...r, pinned: on.machines } : r)) });
+    const from = `${info.machineId}/${info.machineSandbox ?? '?'}`;
+    if ('move' in d) {
+      forget();
+      this.roomKept.delete(info.id);
+      const entry = {
+        to: d.move.to,
+        texts: [movedText(q)],
+        lead: deployLead({ id: w.id, worker: info.id, from, machines: on.machines, to: d.move.to, why: on.why }),
+        how: `moved by FF Factory: it waited for ${on.machines.join(' or ')}'s update, and its check runs there (w5328)`,
+        reason: `${on.why}, and the check after it runs on ${d.move.to} (w5328)`,
+      };
+      this.roomMoving.set(info.id, entry);
+      const hold = `its check after ${on.machines.join(' or ')}'s update runs on ${d.move.to}`;
+      console.log(`deploy move: worker ${info.id} on ${from} (${w.id}) moves to ${d.move.to}: ${on.why} (w5328); ${d.move.why}`);
+      this.unmemoized(() => void this.moveForRoom(info, reqs, d.move.to, d.move.why, hold, entry, q).finally(() => this.roomMoving.delete(info.id)));
+      return true;
+    }
+    if ('none' in d) {
+      const down = on.machines.filter((m) => !this.machines.isOnline(m));
+      const why = down.length === on.machines.length ? `${down.join(', ')} ${down.length > 1 ? 'are' : 'is'} offline; it goes when one is back` : d.none;
+      const line = deployWaitLine(on.machines, why);
+      if (this.roomKept.get(info.id) !== line) console.log(`deploy move: worker ${info.id} on ${from} (${w.id}) waits: ${line}`);
+      this.roomKept.set(info.id, line);
+      return line;
+    }
+    // It must stay (its work only on this computer, a bench lock, a pair run): it resumes here, told where the check runs.
+    const why = 'stay' in d ? d.stay : d.requeuePair.why;
+    console.log(`deploy move: worker ${info.id} on ${from} (${w.id}) resumes where it is: ${why} (w5328)`);
+    q.text += deployStayNote(on.machines, here, why);
+    forget();
+    return undefined;
   }
 
   /** Whether worker `id`'s work is being moved to another computer now (w2046): the resume sweep does not resume it then (w2079). */

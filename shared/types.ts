@@ -2616,6 +2616,13 @@ export interface WorkItem {
    */
   gateResumes?: GateResume[];
   /**
+   * w5328: the computers a gate resume must run on, set when a worker's blocked_on deploys:[<machine>] cleared and none of the
+   * named machines is the worker's own (w5319 waited on m5's update from lothdesktop, and its check after it is m5's). The
+   * send queue moves that resume (`session`'s message for this request) to one of them, or holds it until one has room
+   * (server/deployResume.ts); it never resumes elsewhere. Each gate resume sets or clears it.
+   */
+  resumeOn?: { machines: string[]; session: string; why: string; at: string };
+  /**
    * w2422: the worker report ("<session>@<report ms>") whose "still open: blocked on wNNN" the ledger made a gate of
    * itself, since no blocked_on was recorded with it (server/blockerWatch.ts recordReportedWaits); kept so it does so once.
    */

@@ -1278,7 +1278,11 @@ without one means it is off or failing, worth a person's look.
      clearing resumes it within a minute with a note to do its check after the deploy (`resumeGatedWorker`, for a `deploy`
      gate whoever set it), in any free sandbox on its machine. The ledger cleanup's own deploy block resumes the worker the
      same way when its last report puts a check of its own after the deploy (`postDeployStep`); without one it closes the
-     request on the deploy, as before.
+     request on the deploy, as before. A deploy gate naming another computer than the worker's own resumes it on that
+     computer (w5328, lothsahn: "resume it on that machine (a seat there)"): the gate clearing records `resumeOn` and the
+     send queue moves the resume there with the w2046 move (`Agents.deployMove`, [`server/deployResume.ts`](../server/deployResume.ts)),
+     waiting Queued while that machine has no room, is held or offline, never falling back elsewhere; work that exists only
+     where the worker is resumes in place with a note.
   4. **Waiting on CI frees the sandbox and wakes the worker** (w846). A worker whose only wait is CI on its own pull
      request blocks on it (`blocked_on` with `prs: ["ci:owner/repo#123"]`, a `ci` gate: its checks finishing, green or
      red, not its merge) instead of polling with `wake_me`. With its editor stopped and its work pushed its sandbox
