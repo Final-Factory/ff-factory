@@ -569,6 +569,34 @@ workers at Low: they write inside the root and nowhere else. Measured at Low int
 process (it touches C:, and breaks any other app that sandboxes itself at Low there; none was found on LothDesktop, a
 guess).
 
+**The shared compiler server (w5347): a Low Unity broke every editor's compile, and the fix that held.** Unity's Bee
+compiles with `<Editor>\Data\NetCoreRuntime\dotnet.exe exec <Editor>/Data/DotNetSdkRoslyn/csc.dll /shared`, and the
+first compile starts a Roslyn server (`VBCSCompiler.dll`) that every later compile reaches by a named pipe. Roslyn names
+the pipe from the user, elevation and the compiler's folder only, not the integrity level, and `csc.dll` has no
+environment switch to turn the server off or rename the pipe (its strings name only `DOTNET_HOST_PATH` and
+`RoslynCommandLineLogFile`; Bee passes `/shared` itself, so `UseSharedCompilation=false`, an MSBuild property, does not
+reach it). So the trial's Low batch build started a Low server on the default pipe of `C:\Program Files\Unity\Editor\
+6000.3.19f1`, and every Medium editor and batch build on the machine then handed it their compiles, which it wrote with
+its Low token: `error CS2012: Cannot open 'V:\ffw\sandboxes\slot1\Library\Bee\artifacts\...dll' for writing -- 'Access to
+the path ... is denied.'` (w5342: slot1's player builds and slot6's editor, until the server, dotnet pid 46552, ended).
+
+- *Reproduced (measured, LothDesktop, 2026-11-23):* two junctions on V: to the install's `Data` folder give two pipes. A
+  Low client through junction A started server pid 10324 at **Low (RID 0x1000)**; a Medium client through A then failed
+  with the same CS2012 on its Medium output folder; a Medium client through junction B compiled and started its own
+  Medium server. The default-path server of the real install (Medium, another worker's) was untouched throughout.
+- *Fix (measured):* launch a Low Unity through a junction in the root to its `Editor` folder (`mklink /J
+  <root>\...\unity-low\6000.3.19f1 "C:\Program Files\Unity\Editor\6000.3.19f1\Editor"`, made by the Medium launcher;
+  the junction lives on V:, nothing is written on C:). The compiler's path string then differs, so the Low run gets its
+  own pipe and server. A Low batch Unity started this way compiled a new project (Tundra build success) with a Low server
+  (pid 42996, `...\w5347\ueE\Data\DotNetSdkRoslyn\VBCSCompiler.dll`, pipe `mg88s83E...`, not the default `SmFTvM7t...`),
+  and no Medium compile could reach it.
+- *Also:* the run's own server must end with the run (Roslyn keeps an idle server for its keep-alive, 10 minutes by
+  default per Roslyn's source; a guess, not measured here), so the launcher ends the Low servers whose `VBCSCompiler.dll`
+  lies under its junction once Unity exits, and the leftovers sweep sees them (item 4 below).
+- *Tooling:* a failed `unity-slot run` on Windows now reads its log and the running servers' integrity levels
+  (`machine/compilerServer.ts`), and on CS2012 under `Library/Bee` or a Low server running says that a Low-integrity
+  compiler server is the likely cause, which pid it is, and that only its own session may end it.
+
 **Options against the target**
 
 | Option | Meets "only the root"? | Admin / C: | Cost and what breaks |
@@ -583,10 +611,14 @@ guess).
 1. The install labels the root Low, except `secrets/` and the daemon's own app folder where it sits inside the root, which stay Medium (a worker cannot
    rewrite the daemon's code or its tokens).
 2. `launchHost` (`machine/agentHost.ts`) spawns the agent host through a Low-labelled copy of `node.exe` in the root;
-   everything the agent starts inherits Low. Editors from `machine/unity.ts` go through the same launcher.
+   everything the agent starts inherits Low. Editors from `machine/unity.ts` go through the same launcher, and every Low
+   Unity (editor or `unity-slot run` batch) starts from a junction in the root to its install's `Editor` folder, never
+   the install path itself, so its Roslyn compiler server has its own pipe (w5347, above). Without the junction, one
+   Low compile breaks every Medium editor's compiles on the machine.
 3. `rootEnv` adds `APPDATA`, `LOCALAPPDATA`, `USERPROFILE` and `TEMP` under the root, `CLAUDE_CODE_GIT_BASH_PATH` to the
    root's own Git copy, and git auth by `extraheader` instead of the shell helper.
-4. `machine/leftovers.ts` and the process sweeps learn to see and end Low processes.
+4. `machine/leftovers.ts` and the process sweeps learn to see and end Low processes, the Low compiler servers under a
+   worker's junction included.
 5. Ask each machine's person once to close LocalLow.
 
 Then trial E on one machine as the stricter variant, if the holes or Low's quirks are not acceptable.

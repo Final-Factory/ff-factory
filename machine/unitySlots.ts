@@ -24,6 +24,7 @@ import { benchLockDir, foreignTimedHold } from './benchLock.ts';
 import { editorBenchSession } from './benchRaise.ts';
 import { personHoldReason } from './personPlay.ts';
 import { batchUnityLogFile } from './sharedCaches.ts';
+import { beeAccessDenied, compilerServerAdvice, compilerServers, logFileArg, logTail } from './compilerServer.ts';
 
 /**
  * The pointer a worker-root install (w513, scripts/worker/worker.ts) leaves for scripts outside the daemon: its mailbox
@@ -1533,6 +1534,11 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env)
         if (watch) clearInterval(watch);
         h?.stop();
         ticket?.release();
+        // w5347: a failed run on Windows names a Low-integrity compiler server, the known cause of CS2012 under Library/Bee.
+        if (code !== 0 && !revoked && process.platform === 'win32') {
+          const advice = compilerServerAdvice(beeAccessDenied(logTail(logFile ?? logFileArg(o.rest))), compilerServers());
+          if (advice) d.say(advice);
+        }
         resolve(ended(revoked ? EXIT_REVOKED : (code ?? (sig ? 128 : 1))));
       });
     });
