@@ -24,6 +24,7 @@ import { benchLockDir, pidAlive } from './benchLock.ts';
 import { benchQueueDir, queueTickets, type TicketState } from './benchQueue.ts';
 import { sendChunks } from './review.ts';
 import { PLAYER_EXE } from './timedRunPack.ts';
+import { savesDirsFor } from './gameData.ts';
 
 
 export interface TimedRunnerDeps {
@@ -36,7 +37,7 @@ export interface TimedRunnerDeps {
   personBusy: () => string | undefined;
   /** A person's last key or click here (epoch ms), when the tray reports it. */
   lastInputAt?: () => number | undefined;
-  /** The game's saves folder (default: the Windows player's, under LocalLow). */
+  /** The game's saves folder, for every build (default: each build's own, savesDirsFor). */
   savesDir?: string;
   /** Tests: fetch a piece into `dest`. */
   fetchPiece?: (ref: AttachmentRef, dest: string) => Promise<void>;
@@ -233,9 +234,6 @@ export function linkInto(src: string, slot: string, files: { path: string }[], k
   fs.writeFileSync(marker, JSON.stringify({ sha: '', fingerprint: fp, state: 'ready', source: `timed run ${run}`, filled: now, used: now }));
   return 'linked';
 }
-
-/** The Windows player's saves folder (GameDataPaths.Saves: persistentDataPath/UserData/saves). */
-export const windowsSavesDir = () => path.join(os.homedir(), 'AppData', 'LocalLow', 'Never Games', 'finalfactory', 'UserData', 'saves');
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -592,12 +590,16 @@ export class TimedRunner {
     }
     const buildFiles = new Map<number, TimedVariant['files']>();
     for (const v of o.variants) buildFiles.set(buildOf.get(v.name)!, v.files);
-    // 3. The save, under this run's name, beside the person's own saves (never one of theirs).
-    const savesDir = this.d.savesDir ?? windowsSavesDir();
-    fs.mkdirSync(savesDir, { recursive: true });
+    // 3. The save, under this run's name, in each saves folder these builds load from (never one of a person's saves): w5306,
+    // <root>/gamedata for a build that reads FF_GAME_DATA_DIR (game PR #4237), the old folder for an older build.
+    const savesDirs = this.d.savesDir ? [this.d.savesDir] : savesDirsFor(buildDirs);
     const saveName = `ffa-timed-${o.id}`;
-    const saveFile = path.join(savesDir, `${saveName}.zip`);
-    fs.copyFileSync(path.join(cache, o.save.sha256), saveFile);
+    const saveFiles = savesDirs.map((d) => path.join(d, `${saveName}.zip`));
+    for (const f of saveFiles) {
+      fs.mkdirSync(path.dirname(f), { recursive: true });
+      fs.copyFileSync(path.join(cache, o.save.sha256), f);
+    }
+    this.status(o.id, 'fetching', `the save is in ${savesDirs.join(' and ')}`);
     const poll = this.d.pollMs ?? 15_000;
     const order = legOrder(o.variants.map((v) => v.name), o.settings.rounds);
     try {
@@ -645,7 +647,7 @@ export class TimedRunner {
         await this.workerTurns(o, worker, order, { buildOf, buildDirs, buildFiles, saveName, runDir, contention, legs, poll });
       }
     } finally {
-      fs.rmSync(saveFile, { force: true });
+      for (const f of saveFiles) fs.rmSync(f, { force: true });
     }
     // 6. The logs back, in probe_ab_win.sh's layout.
     this.checkStop(o.id);

@@ -87,6 +87,7 @@ import { holdsOwnTicket, resumeRevokes, revokeTicket } from './benchRevoke.ts';
 import { readBenchHours } from './benchHours.ts';
 import { TestHistorySpool } from './testHistorySpool.ts';
 import { TimedRunner, timedRunEnv } from './timedRunner.ts';
+import { GAME_DATA_VARIABLE, workerGameDataDir } from './gameData.ts';
 import { findFixtures, listFixtures, offeredDir, sendFixture } from './labFixtures.ts';
 import { timedRunFromMachine } from './timedRunPack.ts';
 import { readBenchState } from './benchState.ts';
@@ -258,11 +259,12 @@ export function withRootDefaults(cfg: DaemonConfig): DaemonConfig {
 /**
  * The environment a worker root gives every agent and script (w513): the root and its player slots, and (w5281) the shared
  * uv cache and the determinism audits' folder inside it, so `uv run --with ...` and the game's audits stop filling the
- * user's own folders, and (w5297) the other tools' caches (workerToolCacheEnv). The daemon sets each only where its own
- * environment lacks it (`??=`). Exported for tests.
+ * user's own folders, (w5297) the other tools' caches (workerToolCacheEnv), and (w5306) the game's data root
+ * (FF_GAME_DATA_DIR=<root>/gamedata, machine/gameData.ts): saves, settings, logs and AgentControl of every editor and player
+ * from a commit with game PR #4237. The daemon sets each only where its own environment lacks it (`??=`). Exported for tests.
  */
 export function rootEnv(root: string, platform: NodeJS.Platform = process.platform): Record<string, string> {
-  return { FF_WORKER_ROOT: root, FF_PLAYER_SLOT_ROOT: path.join(root, 'players'), UV_CACHE_DIR: workerUvCacheDir(root), FF_DETERMINISM_AUDIT_DIR: workerDeterminismAuditDir(root), ...workerToolCacheEnv(root, platform) };
+  return { FF_WORKER_ROOT: root, FF_PLAYER_SLOT_ROOT: path.join(root, 'players'), UV_CACHE_DIR: workerUvCacheDir(root), FF_DETERMINISM_AUDIT_DIR: workerDeterminismAuditDir(root), [GAME_DATA_VARIABLE]: workerGameDataDir(root), ...workerToolCacheEnv(root, platform) };
 }
 
 /** The machine credential: daemon.json's, else the token file's first line (w513). Exported for tests. */
@@ -894,7 +896,8 @@ export class Daemon {
         // w1755: on Windows the plan reads only the install drive (and the Dev Drive's folders): no rule on C:, none in Never Games.
         const roots = this.cfg.root ? [this.cfg.root, ...(this.cfg.extraRoots ?? [])] : undefined;
         // w5281: old runs in the shared determinism audit folder (<root>/cache/determinism-audit) age out.
-        const rules = rulesOnInstallDrive(cleanupRules({ ...env, sandboxRoots: root && settings.mode === 'off' ? [root] : [], cacheRoots: root ? [root] : [] }, DEFAULT_CLEANUP), roots, HOME);
+        // w5306: playtest sessions in the worker's game data root (<root>/gamedata/PlaytestSessions) age out as in the old folder.
+        const rules = rulesOnInstallDrive(cleanupRules({ ...env, sandboxRoots: root && settings.mode === 'off' ? [root] : [], cacheRoots: root ? [root] : [], gameDataRoots: this.cfg.root ? [workerGameDataDir(this.cfg.root)] : [] }, DEFAULT_CLEANUP), roots, HOME);
         // w5281: the shared uv cache (<root>/cache/uv) gets `uv cache prune`, daily (hourly while space is low), in the background.
         if (!opts.dryRun) void this.uvPruner?.maybe(low);
         return cleanupPass({
