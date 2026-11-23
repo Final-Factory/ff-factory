@@ -19,6 +19,10 @@ test('w4723: the reconnect reason is read from the URL, and anything odd is not 
   assert.equal(reconnectOf('/ws?why=stale&gap=46000'), 'why=stale gap=46s');
   assert.equal(reconnectOf('/ws'), 'why=?', 'a page from before w4723');
   assert.equal(reconnectOf('/ws?why=%0Afake%20line&code=x&gap=-1'), 'why=other');
+  // w5318: an attempt that hung is abandoned and says so, with how many attempts failed before the one that opened.
+  assert.equal(reconnectOf('/ws?why=timeout&code=1006&gap=622900&tries=31'), 'why=timeout pageSawCode=1006 gap=622.9s tries=31');
+  assert.equal(reconnectOf('/ws?why=error&tries=0'), 'why=error');
+  assert.equal(reconnectOf('/ws?why=error&tries=1.5'), 'why=error');
 });
 
 test('w4723: one line per open and close, naming who closed it, and drops counted per person', () => {

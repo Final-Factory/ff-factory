@@ -11,7 +11,7 @@ export type ClosedBy = 'page' | 'ping-timeout' | 'network';
 export type Via = 'funnel' | 'tailnet' | 'local' | 'other';
 
 /** Why the page opened this socket; anything else it sends is logged as 'other'. Kept in step with web/src/api.ts. */
-export const RECONNECT_REASONS = ['first', 'stale', 'visible', 'online', 'closed', 'error'] as const;
+export const RECONNECT_REASONS = ['first', 'stale', 'visible', 'online', 'closed', 'error', 'timeout'] as const;
 
 interface Open {
   user: string;
@@ -37,7 +37,10 @@ export function fromThisMachine(req: Pick<http.IncomingMessage, 'headers' | 'soc
   return (direct === '::1' || /^127\./.test(direct)) && req.headers['x-forwarded-for'] === undefined && req.headers['tailscale-funnel-request'] === undefined;
 }
 
-/** What the page said in its URL: `why` (one of RECONNECT_REASONS), `code` (the close code its last socket saw), `gap` (ms since it closed). */
+/**
+ * What the page said in its URL: `why` (one of RECONNECT_REASONS), `code` (the close code its last socket saw), `gap` (ms since it
+ * closed), `tries` (attempts that failed or hung since then, w5318: a long gap with few tries is a page that waited, many a path that failed).
+ */
 export function reconnectOf(url: string | undefined): string {
   let q: URLSearchParams;
   try {
@@ -51,6 +54,8 @@ export function reconnectOf(url: string | undefined): string {
   if (q.has('code') && Number.isInteger(code) && code >= 0 && code < 5000) out.push(`pageSawCode=${code}`);
   const gap = Number(q.get('gap'));
   if (q.has('gap') && Number.isFinite(gap) && gap >= 0) out.push(`gap=${secs(gap)}`);
+  const tries = Number(q.get('tries'));
+  if (q.has('tries') && Number.isInteger(tries) && tries > 0 && tries < 1e6) out.push(`tries=${tries}`);
   return out.join(' ');
 }
 
