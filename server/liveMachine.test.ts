@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { FrameParser, LiveSession, ProcessBirths, agentControlDir, readGameChannel, type CommandReply, type GameChannel, type LiveState } from '../machine/live.ts';
+import { FrameParser, LiveSession, ProcessBirths, agentControlDir, agentControlDirs, readGameChannel, type CommandReply, type GameChannel, type LiveState } from '../machine/live.ts';
 
 const msg = (kind: string, payload: Buffer) => {
   const h = Buffer.alloc(5);
@@ -32,6 +32,20 @@ test('live: the game channel file and its folder per OS', () => {
   fs.writeFileSync(path.join(dir, 'session-42.json'), JSON.stringify({ port: 5123, token: 't', tier: 'all', pid: 42 }));
   assert.deepEqual(readGameChannel(42, dir), { port: 5123, token: 't', tier: 'all', pid: 42 });
   assert.equal(readGameChannel(43, dir), undefined);
+});
+
+test('w5306: the session file is read in FF_GAME_DATA_DIR first, then in the old folder (a branch from before game PR #4237)', () => {
+  const env = { FF_GAME_DATA_DIR: '/ffw/gamedata/ ' };
+  assert.deepEqual(agentControlDirs(env, 'linux', '/home/b'), [path.join('/ffw/gamedata', 'AgentControl'), path.join('/home/b', '.config', 'unity3d', 'Never Games', 'finalfactory', 'AgentControl')]);
+  assert.deepEqual(agentControlDirs({}, 'linux', '/home/b'), [agentControlDir('linux', '/home/b')]);
+  assert.deepEqual(agentControlDirs({ FF_GAME_DATA_DIR: '  ' }, 'win32', 'C:/Users/x'), [agentControlDir('win32', 'C:/Users/x')]);
+  const fresh = fs.mkdtempSync(path.join(os.tmpdir(), 'live-new-'));
+  const old = fs.mkdtempSync(path.join(os.tmpdir(), 'live-old-'));
+  fs.writeFileSync(path.join(old, 'session-7.json'), JSON.stringify({ port: 1, token: 'old', tier: 'all' }));
+  assert.equal(readGameChannel(7, [fresh, old])?.token, 'old', 'an older editor that ignores the variable is still found');
+  fs.writeFileSync(path.join(fresh, 'session-7.json'), JSON.stringify({ port: 2, token: 'new', tier: 'all' }));
+  assert.equal(readGameChannel(7, [fresh, old])?.token, 'new', 'the override folder wins');
+  assert.equal(readGameChannel(8, [fresh, old]), undefined);
 });
 
 /** A fake game: answers commands, and on live.frames|on dials the port and streams `frames` JPEG-shaped frames. */
