@@ -110,12 +110,19 @@ test('w5235 runners: a job checkout with uncommitted files still goes (actions/c
   const { root, facts } = world(t);
   runners(root);
   const repo = path.join(root, 'ffu-runners', 'ffu-biscuit-2', '_work', 'ffu', 'ffu');
-  const git = (...a: string[]) => execFileSync('git', ['-C', repo, ...a], { stdio: 'ignore', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } });
+  const git = (...a: string[]) => execFileSync('git', ['-C', repo, '-c', 'maintenance.auto=false', '-c', 'gc.auto=0', ...a], { stdio: 'ignore', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } });
   git('init', '-q');
   git('commit', '-q', '--allow-empty', '-m', 'x');
   put(root, 'ffu-runners/ffu-biscuit-2/_work/ffu/ffu/dirty.txt', 7);
   const aged = (NOW - 7 * HOUR) / 1000;
-  for (const f of fs.readdirSync(repo, { recursive: true }) as string[]) fs.utimesSync(path.join(repo, f), aged, aged);
+  // git commit may start auto maintenance in the background, whose lock file comes and goes while we walk (w5322's CI: ENOENT).
+  for (const f of fs.readdirSync(repo, { recursive: true }) as string[]) {
+    try {
+      fs.utimesSync(path.join(repo, f), aged, aged);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+    }
+  }
   for (let d = repo; d.length > root.length; d = path.dirname(d)) fs.utimesSync(d, aged, aged);
   const r = await judgeWithGit(path.join(root, 'ffu-runners', 'ffu-biscuit-2', '_work', 'ffu'), facts, NOW, ctx());
   assert.equal(r.verdict, 'delete', r.why);
