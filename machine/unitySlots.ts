@@ -19,7 +19,7 @@ import { randomBytes } from 'node:crypto';
 import type { Proc, UnityPlatform } from './unity.ts';
 import { heldNotStarted, unitySlotsLine } from '../shared/fleet.ts';
 import { benchLockPath, benchQueueDir, benchTicketFor, heldTicket, HELD_WAIT_CAP_MS, type BenchMode, type BenchTicket } from './benchQueue.ts';
-import { asWorkPriority, priorityRank, type UnitySlotsReport, type WorkPriority } from '../shared/types.ts';
+import { asWorkPriority, priorityRank, raiseOne, type PairRaise, type UnitySlotsReport, type WorkPriority } from '../shared/types.ts';
 import { benchLockDir, foreignTimedHold } from './benchLock.ts';
 import { editorBenchSession } from './benchRaise.ts';
 import { personHoldReason } from './personPlay.ts';
@@ -262,6 +262,8 @@ export interface AssessInput {
   priorityOf?(session?: string): WorkPriority;
   /** w5324: the requests (wNNN) a session works for, to name who holds the slots a waiter needs. */
   requestsOf?(session?: string): string[];
+  /** w5341: a session's pair-run mark (priorities.json `pair`, server/pairRaise.ts): a raised waiting leg, or a held side. */
+  pairOf?(session?: string): PairRaise | undefined;
 }
 
 /** w5324: an idle editor of a strictly lower priority whose slot the head of the queue may take (closed cleanly first). */
@@ -326,8 +328,8 @@ export function readSlotPriorities(root: string | undefined): (session?: string)
 }
 
 /** w5324: readSlotPriorities and each session's requests (wNNN), from one read of priorities.json. */
-export function readSlotWork(root: string | undefined): { priorityOf: (session?: string) => WorkPriority; requestsOf: (session?: string) => string[] } {
-  const sessions = root ? readJson<{ sessions?: Record<string, { priority?: unknown; level?: unknown; requests?: unknown }> }>(path.join(benchQueueDir(benchLockDir(root)), 'priorities.json'))?.sessions : undefined;
+export function readSlotWork(root: string | undefined): { priorityOf: (session?: string) => WorkPriority; requestsOf: (session?: string) => string[]; pairOf: (session?: string) => PairRaise | undefined } {
+  const sessions = root ? readJson<{ sessions?: Record<string, { priority?: unknown; level?: unknown; requests?: unknown; pair?: unknown }> }>(path.join(benchQueueDir(benchLockDir(root)), 'priorities.json'))?.sessions : undefined;
   const mark = (session?: string) => (session && sessions && typeof sessions === 'object' ? sessions[session] : undefined);
   return {
     priorityOf: (session) => {
@@ -338,7 +340,35 @@ export function readSlotWork(root: string | undefined): { priorityOf: (session?:
       const r = mark(session)?.requests;
       return Array.isArray(r) ? r.filter((x): x is string => typeof x === 'string').slice(0, 6) : [];
     },
+    pairOf: (session) => asPairRaise(mark(session)?.pair),
   };
+}
+
+/** w5341: a priorities.json `pair` mark, checked (an unreadable one is none). */
+export function asPairRaise(x: unknown): PairRaise | undefined {
+  const p = x as Partial<PairRaise> | undefined;
+  if (!p || typeof p !== 'object' || (p.half !== 'waiting' && p.half !== 'held')) return undefined;
+  const from = asWorkPriority(p.from);
+  if (!from || typeof p.work !== 'string' || typeof p.since !== 'string') return undefined;
+  return { half: p.half, from, work: p.work, since: p.since, others: Array.isArray(p.others) ? p.others.filter((m): m is string => typeof m === 'string').slice(0, 4) : [] };
+}
+
+/** w5341: the waiting reason's words for a raised pair leg. */
+export const pairRaiseText = (r: PairRaise, to: WorkPriority) =>
+  `raised one level (${r.from} → ${to}): pair half-held, ${r.work}'s other side holds a slot on ${r.others.join(', ') || 'another machine'} (w5341)`;
+
+/**
+ * w5341: whether a held pair side (`victim`) is kept from a waiter's preemption one level up: against every waiter but
+ * a raised leg of an older pair (its start first, then its request id). So two half-held pairs that each hold the side
+ * the other needs never take each other's sides in turn (each would lose its own held side, its raise with it, and swap),
+ * and never wait on each other for good: the older one takes the younger one's idle held side, and finishes first.
+ */
+export function heldSideKept(victim: PairRaise | undefined, waiter: PairRaise | undefined): boolean {
+  if (victim?.half !== 'held') return false;
+  if (waiter?.half !== 'waiting' || waiter.work === victim.work) return true;
+  const a = Date.parse(waiter.since), b = Date.parse(victim.since);
+  const older = a < b || (a === b && waiter.work.localeCompare(victim.work) < 0);
+  return !older;
 }
 
 /** The nearest ancestor of `pid` (itself excluded) that is in `wanted`, through the parent chain. */
@@ -504,7 +534,8 @@ export function assess(input: AssessInput): Assessment {
     if (key.startsWith('e:')) {
       const pl = placeOf.get(key);
       const work = input.requestsOf?.(pl?.session) ?? [];
-      heldBy.push(`${b.holder} (${[work.length ? work.join(', ') : 'no request', levelOf(pl?.session)].join(', ')})`);
+      const held = input.pairOf?.(pl?.session)?.half === 'held' ? ['a pair\'s held side'] : [];
+      heldBy.push(`${b.holder} (${[work.length ? work.join(', ') : 'no request', levelOf(pl?.session), ...held].join(', ')})`);
     } else {
       const r = reqs.find((x) => `p:${x.pid}` === key && x.grantedAt !== undefined && !x.denied) ?? reqs.find((x) => `p:${x.pid}` === key);
       if (r) heldBy.push(`"${r.label}" (${r.holder}, ${levelOf(r.session)})`);
@@ -515,24 +546,32 @@ export function assess(input: AssessInput): Assessment {
   if (head && limit !== undefined && !ramBlocked && head.count > free) {
     const want = prios.get(head.id) ?? 'low';
     const need = head.count - free;
+    const headPair = input.pairOf?.(head.session);
     const victims = input.places
       .filter((pl) => pl.editorUp && pl.holder !== head.holder)
-      .map((pl) => ({ pl, key: `e:${pathKey(pl.path, platform)}`, level: levelOf(pl.session) }))
+      // w5341: a held pair side counts one level up as a victim, but to an older pair's raised leg (heldSideKept)
+      .map((pl) => ({ pl, key: `e:${pathKey(pl.path, platform)}`, level: heldSideKept(input.pairOf?.(pl.session), headPair) ? raiseOne(levelOf(pl.session)) : levelOf(pl.session) }))
       // Its editor runs (a process counted on it) and holds its slot alone: no granted run of its sandbox beside it.
       .filter((v) => buckets.get(v.key)?.procs === 1 && usedOf.get(v.key) === 1 && holding(v.pl.holder) === 1 && priorityRank(v.level) < priorityRank(want))
       .sort((a, b) => priorityRank(a.level) - priorityRank(b.level) || a.pl.holder.localeCompare(b.pl.holder));
     if (victims.length >= need) for (const v of victims.slice(0, need)) preempt.push({ holder: v.pl.holder, priority: v.level, requests: input.requestsOf?.(v.pl.session) ?? [], for: head.id, forPriority: want });
   }
   const takes = preempt.length ? `; takes the slot of ${preempt.map((x) => `${x.holder}'s editor (${x.priority})`).join(', ')} once idle (w5324)` : '';
+  // w5341: a raised pair leg says so first in its reason (the ledger clips a reason at 120 characters), wherever it stands.
+  const raised = (r: SlotRequest) => {
+    const p = input.pairOf?.(r.session);
+    return p?.half === 'waiting' ? `${pairRaiseText(p, prios.get(r.id) ?? raiseOne(p.from))}; ` : '';
+  };
   const waitingOut = rest.map((r, i) => ({
     id: r.id,
     position: i + 1,
     why:
-      r === head
+      raised(r) +
+      (r === head
         ? ramBlocked && r.count <= free
           ? `RAM ${input.ramPct}% used; new Unity launches wait below ${input.ramLimitPct ?? UNITY_RAM_PCT}%`
           : `needs ${r.count}, ${Math.max(0, free)} free (${limit === undefined ? used : `${limit - Math.max(0, free) - (free < 0 ? free : 0)} of ${limit}`} in use)${heldBy.length ? `; held by ${heldBy.join(', ')}` : ''}${takes}`
-        : `behind ${i} earlier request${i === 1 ? '' : 's'}`,
+        : `behind ${i} earlier request${i === 1 ? '' : 's'}`),
   }));
   // In use once this look's grants start: what the line and the next look say.
   const granted = grant.reduce((n, id) => n + (reqs.find((r) => r.id === id)?.count ?? 0), 0);
@@ -681,6 +720,8 @@ export interface ArbiterDeps {
   priorityOf?(session?: string): WorkPriority;
   /** w5324: a session's requests (wNNN); tests give it, else read with the priorities (readSlotWork). */
   requestsOf?(session?: string): string[];
+  /** w5341: a session's pair-run mark; tests give it, else read with the priorities (readSlotWork). */
+  pairOf?(session?: string): PairRaise | undefined;
   /**
    * w5324: the pid of the editor a project has open, from its Library/EditorInstance.json (default: that file read at
    * each look); tests give it.
@@ -873,9 +914,9 @@ export class UnitySlots {
   }
 
   /** Each session's priority and requests: the deps' (tests) or priorities.json read now. */
-  private work(): Pick<AssessInput, 'priorityOf' | 'requestsOf'> {
-    const read = this.d.priorityOf && this.d.requestsOf ? undefined : readSlotWork(this.d.root);
-    return { priorityOf: this.d.priorityOf ?? read!.priorityOf, requestsOf: this.d.requestsOf ?? read!.requestsOf };
+  private work(): Pick<AssessInput, 'priorityOf' | 'requestsOf' | 'pairOf'> {
+    const read = this.d.priorityOf && this.d.requestsOf && this.d.pairOf ? undefined : readSlotWork(this.d.root);
+    return { priorityOf: this.d.priorityOf ?? read!.priorityOf, requestsOf: this.d.requestsOf ?? read!.requestsOf, pairOf: this.d.pairOf ?? read!.pairOf };
   }
 
   /**
