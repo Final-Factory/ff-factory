@@ -3,7 +3,7 @@ import path from 'node:path';
 import { readJsonDurable, writeFileDurable, writeJsonDurable, isObject } from './durable.ts';
 import { redactValue } from './secrets.ts';
 import { localPath, MD_IMAGE } from '../shared/imagePaths.ts';
-import { REPORT_KINDS, type AttachmentRef, type Report, type ReportHit, type ReportKind, type ReportRevision, type ReportSummary, type Requester } from '../shared/types.ts';
+import { REPORT_KINDS, type AttachmentRef, type Report, type ReportAudience, type ReportHit, type ReportKind, type ReportRevision, type ReportSummary, type Requester, type WorkItem } from '../shared/types.ts';
 
 /**
  * Reports (w2541, docs/reports.md): the written result of a design, an analysis, a profile, an investigation or research
@@ -52,6 +52,9 @@ export interface FileReportInput {
   body: string;
   note?: string;
   attachments?: AttachmentRef[];
+  /** w5223 (audienceOf): people or workers; absent files it for people. A revision never hides a report people saw. */
+  audience?: ReportAudience;
+  audienceWhy?: string;
 }
 
 /** The request a report is filed for, as the ledger has it. */
@@ -70,6 +73,8 @@ export interface ReportFilter {
   /** ISO dates or times: updated at or after `since`, at or before `until` (a bare date takes in its whole day). */
   since?: string;
   until?: string;
+  /** w5223: 'people' leaves out worker notes (what people see by default); absent or 'all': every report. */
+  audience?: 'people' | 'all';
 }
 
 /** The result of a filing: the report, and the media it could not keep (a path outside review media). */
@@ -173,6 +178,44 @@ function bound(v: string | undefined, end: boolean): number | undefined {
   return Number.isFinite(t) ? t : undefined;
 }
 
+/**
+ * w5223: a report whose subject is a cost estimate. lothsahn: "Please make sure the cost remains unhidden. I need to review
+ * the FFU costs." It is always for people, whoever asked.
+ */
+export const COST_SUBJECT = /\b(costs?|costed|spend|spending|budget|pricing|prices?)\b|\$\s?\d/i;
+export const isCostReport = (title: string, review?: string) => COST_SUBJECT.test(title) || (!!review && COST_SUBJECT.test(review));
+
+/**
+ * w5223: who a report filed now is for. lothsahn: "I really only want it when I ask for one" and "If the workers truly
+ * need me to review something, like the cost, and it's more than a question, a report is great". So it is for people
+ * when its request carries a report mark a person asked for (WorkItem.report, `asked` not false), when it is a cost
+ * estimate, or when its worker names the review the person must make (`review`); anything else is a worker note.
+ */
+export function audienceOf(o: { mark?: { kind: string; by: string; asked?: boolean }; review?: string; title: string }): { audience: ReportAudience; why: string } {
+  if (isCostReport(o.title, o.review)) return { audience: 'people', why: 'a cost estimate (always shown)' };
+  if (o.mark && o.mark.asked !== false) return { audience: 'people', why: `asked: ${o.mark.kind} report, marked by ${o.mark.by}` };
+  const review = o.review?.trim();
+  if (review) return { audience: 'people', why: `for review: ${review.slice(0, 160)}` };
+  return { audience: 'workers', why: o.mark ? `worker note: marked by ${o.mark.by} with no person asking` : 'worker note: no report asked' };
+}
+
+/**
+ * w5223: the audience of a report filed before w5223, from its request `w` (undefined: no longer in the ledger, so kept
+ * for people as it was). For people when a cost estimate, or when its request carries a report mark a person made in a
+ * turn of their own (not the dispatcher's, not a request filed outside a person's turn); every other one is a worker note.
+ */
+export function backfillAudienceOf(r: Pick<ReportSummary, 'title'>, w: Pick<WorkItem, 'report' | 'humanAsked'> | undefined): { audience: ReportAudience; why: string } {
+  if (isCostReport(r.title)) return { audience: 'people', why: 'a cost estimate (always shown)' };
+  if (!w) return { audience: 'people', why: 'its request is no longer in the ledger' };
+  if (!w.report) return { audience: 'workers', why: 'worker note: its request was not marked for a report' };
+  if (w.report.by === 'the dispatcher') return { audience: 'workers', why: 'worker note: marked by the dispatcher, no person asking' };
+  if (w.report.asked === false || (w.report.asked === undefined && w.humanAsked === false)) return { audience: 'workers', why: `worker note: marked by ${w.report.by} outside a turn of a person` };
+  return { audience: 'people', why: `asked: ${w.report.kind} report, marked by ${w.report.by}` };
+}
+
+/** w5223: whether a summary is shown to people by default (absent: filed before w5223 and not backfilled yet). */
+export const forPeople = (r: Pick<ReportSummary, 'audience'>) => r.audience !== 'workers';
+
 export const isReportKind = (k: string): k is ReportKind => (REPORT_KINDS as readonly string[]).includes(k);
 
 export class ReportStore {
@@ -275,6 +318,7 @@ export class ReportStore {
     const until = bound(filter.until, true);
     const out: ReportHit[] = [];
     for (const r of this.all()) {
+      if (filter.audience === 'people' && !forPeople(r)) continue;
       if (filter.kind && r.kind !== filter.kind) continue;
       if (filter.request && r.workId !== filter.request) continue;
       if (person && !r.requesters.some((p) => p.userId.toLowerCase() === person || p.displayName.toLowerCase() === person)) continue;
@@ -329,6 +373,11 @@ export class ReportStore {
     writeFileDurable(path.join(dir, `rev-${n}.md`), body, { generations: 0 });
     f.title = title;
     f.kind = kind;
+    // w5223: a revision may raise a worker note to people (its person asked since), never hide what people saw.
+    if (created || !forPeople(f)) {
+      f.audience = input.audience ?? 'people';
+      if (input.audienceWhy) f.audienceWhy = clipWhy(input.audienceWhy);
+    }
     f.updatedAt = at;
     f.sessionId = sessionId;
     f.workTitle = work.title;
@@ -340,6 +389,23 @@ export class ReportStore {
     this.files.set(f.id, f);
     this.bodies.set(f.id, body);
     return { report: this.summary(f), rev: n, notKept, created };
+  }
+
+  /**
+   * w5223: give every report filed before w5223 its audience, once (`decide` reads its request); written to its
+   * report.json. Answers how many were set, by audience.
+   */
+  backfillAudience(decide: (r: ReportSummary) => { audience: ReportAudience; why: string }): Record<ReportAudience, number> {
+    const n: Record<ReportAudience, number> = { people: 0, workers: 0 };
+    for (const f of this.files.values()) {
+      if (f.audience) continue;
+      const d = decide(this.summary(f));
+      f.audience = d.audience;
+      f.audienceWhy = clipWhy(`${d.why} (backfilled, w5223)`);
+      writeJsonDurable(path.join(this.dir(f.id), 'report.json'), f, { indent: 2 });
+      n[d.audience]++;
+    }
+    return n;
   }
 
   /**
@@ -389,6 +455,8 @@ export class ReportStore {
     return { body: out, notKept: [...notKept] };
   }
 }
+
+const clipWhy = (s: string) => redactValue(s.trim()).slice(0, 200);
 
 /** The words around the first match of any of `q` in `text`, with "…" where it is cut. */
 function snippet(text: string, q: string[]): string {

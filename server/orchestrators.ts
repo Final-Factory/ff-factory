@@ -2396,7 +2396,7 @@ It is for your part of the work, not an answer to another worker's question.`;
       ...(input.repo?.trim() ? { repo: clip(input.repo.trim(), 120) } : {}),
       ...(input.ledger_read ? { ledgerRead: { by: owner.displayName, at: now.toISOString() } } : {}),
       ...(input.spend_read ? { spendRead: { by: owner.displayName, at: now.toISOString() } } : {}),
-      ...(input.report && (REPORT_KINDS as readonly string[]).includes(input.report) ? { report: { kind: input.report, at: now.toISOString(), by: owner.displayName } } : {}),
+      ...(input.report && (REPORT_KINDS as readonly string[]).includes(input.report) ? { report: { kind: input.report, at: now.toISOString(), by: owner.displayName, asked: human } } : {}),
       ...(cloneMachine ? { mainCloneAccess: { machine: cloneMachine, by: owner.displayName, at: now.toISOString() } } : {}),
       ...(cleanupMachine ? { diskCleanup: { machine: cleanupMachine, by: owner.displayName, at: now.toISOString() } } : {}),
       overlaps: [],
@@ -2405,14 +2405,14 @@ It is for your part of the work, not an answer to another worker's question.`;
     };
     w.overlaps = findOverlaps({ keys: w.keys, title: w.title }, this.pool(id));
     if (failure && priority !== (input.priority ?? 'normal')) this.stamp(w, failureLine(failure, input.priority ?? 'normal'));
-    this.stamp(w, `filed by ${owner.displayName}${w.humanAsked ? '' : ' (not in a turn of theirs)'}; needs ${placed.needs === 'agent' ? 'an agent slot only (no editor, no game sandbox)' : 'a game sandbox'} (${placed.how})${w.ledgerRead ? '; its workers may read the ledger' : ''}${w.spendRead ? '; its workers may export the spend record' : ''}${w.report ? `; its result is a report (${w.report.kind})` : ''}${cloneMachine ? `; its workers may work in ${cloneMachine}'s main clone` : ''}`);
+    this.stamp(w, `filed by ${owner.displayName}${w.humanAsked ? '' : ' (not in a turn of theirs)'}; needs ${placed.needs === 'agent' ? 'an agent slot only (no editor, no game sandbox)' : 'a game sandbox'} (${placed.how})${w.ledgerRead ? '; its workers may read the ledger' : ''}${w.spendRead ? '; its workers may export the spend record' : ''}${w.report ? `; its result is a report (${w.report.kind}${w.report.asked === false ? ', not asked by a person: a worker note' : ''})` : ''}${cloneMachine ? `; its workers may work in ${cloneMachine}'s main clone` : ''}`);
     this.store.putWork(w);
     this.store.dropWork(pruneIds(this.store.work.values(), undefined, this.now().getTime()));
     this.countFiledFollowUp(w, related);
     this.gatherForDispatcher(owner, requestNotice(w));
     const overlap = w.overlaps.length ? ` Possible overlap: ${w.overlaps.slice(0, 3).map(overlapLine).join('; ')}. Tell ${owner.displayName}; the dispatcher decides.` : '';
     const urgent = failure && priority !== (input.priority ?? 'normal') ? ` Filed urgent: it is a ${failure.kind} (${failure.why}); desyncs, crashes and hangs are urgent (w4810). Lower it with update_work only if it is not one.` : '';
-    return `Filed ${id} with the dispatcher${w.report ? `; its result is a report (${w.report.kind}), which its worker files with file_report` : ''}.${overlap} You get a [dispatch] message with its decision.${urgent}`;
+    return `Filed ${id} with the dispatcher${w.report ? (w.report.asked === false ? `; marked ${w.report.kind}, but not asked by a person: a worker note, no report for people and no DONE gate (w5223; mark it from a turn of their own words)` : `; its result is a report (${w.report.kind}), which its worker files with file_report`) : ''}.${overlap} You get a [dispatch] message with its decision.${urgent}`;
   }
 
   /**
@@ -2727,7 +2727,7 @@ It is for your part of the work, not an answer to another worker's question.`;
     // A REPORT (w2541): mark the request as one whose result is a report, or take the mark back.
     if (input.report !== undefined) {
       if (!isFor(w, owner.userId) && !this.reviewers().some((r) => same(r.userId, owner.userId))) throw new Error(`${w.id} is not ${owner.displayName}'s request`);
-      const reportLine = this.setReport(w, input.report, owner.displayName);
+      const reportLine = this.setReport(w, input.report, owner.displayName, (chat.turnFrom ?? chat.lastFrom) === 'human');
       if (!input.note?.trim() && !input.priority && !input.close && !input.reopen && !input.subjects?.length && !input.approve && !input.decline && input.ledger_read === undefined && input.main_clone === undefined) return reportLine;
     }
     // MAIN-CLONE WORK (w936): grant or take back; with nothing else asked, that is the whole update.
@@ -3697,19 +3697,22 @@ It is for your part of the work, not an answer to another worker's question.`;
     return `${w.id} is pinned to ${m}: it runs there and nowhere else${away ? `, and waits Blocked (${needsAwayText(m, away)}) until it is back` : ''}.`;
   }
 
-  setReport(w: WorkItem, kind: ReportKind | false, by: string): string {
+  setReport(w: WorkItem, kind: ReportKind | false, by: string, asked: boolean): string {
     if (kind !== false && !(REPORT_KINDS as readonly string[]).includes(kind)) throw new Error(`report: one of ${REPORT_KINDS.join(', ')}, or false`);
     if (kind === false) {
       if (!w.report) return `${w.id} was not marked as needing a report.`;
       w.report = undefined;
       this.stamp(w, `${by}: no report needed any more`);
     } else {
-      if (w.report?.kind === kind) return `${w.id} is already marked: its result is a ${kind} report.`;
-      w.report = { kind, at: this.now().toISOString(), by };
-      this.stamp(w, `${by}: its result is a report (${kind})`);
+      if (w.report?.kind === kind && (w.report.asked !== false) === asked) return `${w.id} is already marked: its result is a ${kind} report.`;
+      w.report = { kind, at: this.now().toISOString(), by, asked };
+      this.stamp(w, `${by}: its result is a report (${kind})${asked ? '' : ', not in a turn of a person: a worker note, no DONE gate (w5223)'}`);
     }
     this.store.putWork(w);
-    return kind === false ? `${w.id}: no report needed any more.` : `${w.id}: its result is a ${kind} report; its worker files it with file_report, and DONE waits for it${w.reports?.length ? ` (${w.reports.map((r) => r.id).join(', ')} filed already)` : ''}.`;
+    if (kind === false) return `${w.id}: no report needed any more.`;
+    // w5223: lothsahn, "I really only want it when I ask for one". A mark no person asked for files a worker note only.
+    if (!asked) return `${w.id}: marked ${kind}, but no person asked for it in this turn, so it is no report for people (w5223): its worker may file a worker note, and DONE does not wait for one. Mark it from a turn of the person's own words when they ask for a report.`;
+    return `${w.id}: its result is a ${kind} report; its worker files it with file_report, and DONE waits for it${w.reports?.length ? ` (${w.reports.map((r) => r.id).join(', ')} filed already)` : ''}.`;
   }
 
   /**
@@ -4047,7 +4050,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     // The decision first: a refused one leaves the mark as it was.
     if (input.report !== undefined) {
       const decided = this.decide({ ...input, report: undefined });
-      return `${this.setReport(this.requireWork(input.id), input.report, 'the dispatcher')} ${decided}`.trim();
+      return `${this.setReport(this.requireWork(input.id), input.report, 'the dispatcher', false)} ${decided}`.trim();
     }
     // w3720: timing said outright, with any action: needsTimed reads no words for it after this.
     if (input.timed !== undefined) {

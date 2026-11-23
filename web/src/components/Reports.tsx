@@ -50,9 +50,15 @@ function useSaved(key: string): [string, (v: string) => void] {
  * The Reports tab (w2541, docs/reports.md): every report a worker filed (a design, an analysis, a profile), newest first,
  * as the request list shows requests, each with the operator who asked for it. Filters by kind, operator, request and
  * date run here on the summaries; words go to the server's full-text search, which also returns the matching lines.
+ * w5223: it shows the reports for people (asked for, a review, a cost); workers' notes only with the toggle (lothsahn:
+ * "a filter so I only see requested ones by default").
  */
 export function ReportsTab({ app, now }: { app: AppState; now: number }) {
-  const all = app.reports ?? [];
+  const every = app.reports ?? [];
+  const [notesOn, setNotesOn] = useSaved('notes');
+  const showNotes = notesOn === '1';
+  const noteCount = useMemo(() => every.filter((r) => r.audience === 'workers').length, [every]);
+  const all = useMemo(() => (showNotes ? every : every.filter((r) => r.audience !== 'workers')), [every, showNotes]);
   const [kind, setKind] = useSaved('kind');
   const [person, setPerson] = useSaved('person');
   const [request, setRequest] = useState('');
@@ -77,14 +83,14 @@ export function ReportsTab({ app, now }: { app: AppState; now: number }) {
     }
     let live = true;
     const t = setTimeout(async () => {
-      const found = await attempt(api.searchReports({ q: words, kind, person, request: req, since: sinceIso(days, Date.now()) }));
+      const found = await attempt(api.searchReports({ q: words, kind, person, request: req, since: sinceIso(days, Date.now()), all: showNotes ? '1' : undefined }));
       if (live && found) setHits(found);
     }, 250);
     return () => {
       live = false;
       clearTimeout(t);
     };
-  }, [words, kind, person, req, days, all]);
+  }, [words, kind, person, req, days, all, showNotes]);
 
   const from = sinceIso(days, now);
   const shown: ReportHit[] = hits
@@ -94,7 +100,7 @@ export function ReportsTab({ app, now }: { app: AppState; now: number }) {
         .map((report) => ({ report, snippet: '' }));
   const filtered = !!(kind || person || req || days || words);
 
-  if (!all.length) {
+  if (!every.length) {
     return (
       <div className="panel-empty" data-testid="reports-empty">
         <Icon name="inbox" size={28} />
@@ -133,6 +139,11 @@ export function ReportsTab({ app, now }: { app: AppState; now: number }) {
             {REPORT_KIND_LABEL[k]} <span className="mono">{counts.get(k) ?? 0}</span>
           </button>
         ))}
+        {noteCount > 0 && (
+          <button className={`ledger-state${showNotes ? ' on' : ''}`} aria-pressed={showNotes} onClick={() => setNotesOn(showNotes ? '' : '1')} title="Notes workers filed for each other: nobody asked for them as a report" data-testid="reports-worker-notes">
+            Worker notes <span className="mono">{noteCount}</span>
+          </button>
+        )}
         {filtered && (
           <button
             className="link-btn small"
@@ -168,7 +179,8 @@ function ReportRow({ r, snippet, now }: { r: ReportSummary; snippet: string; now
         <span className="work-main">
           <span className="work-title">{r.title}</span>
           <span className="work-sub">
-            <span className="tone-blue">{REPORT_KIND_LABEL[r.kind]}</span> · asked by <strong data-testid={`report-operator-${r.id}`}>{operators(r)}</strong> · {r.workId} {r.workTitle}
+            <span className="tone-blue">{REPORT_KIND_LABEL[r.kind]}</span>
+            {r.audience === 'workers' ? <span className="dim" title={r.audienceWhy}> · worker note</span> : null} · asked by <strong data-testid={`report-operator-${r.id}`}>{operators(r)}</strong> · {r.workId} {r.workTitle}
             {r.revisions > 1 ? <span className="dim"> · {r.revisions} revisions</span> : null}
           </span>
           {snippet ? <span className="work-sub report-snippet">{snippet}</span> : r.excerpt ? <span className="work-sub report-snippet dim">{r.excerpt}</span> : null}
