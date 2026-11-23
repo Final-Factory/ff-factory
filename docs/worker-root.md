@@ -523,6 +523,8 @@ console. Adopt B if both pass. The layout already allows it: the root sits outsi
 machine (the reason the Macs' root is `/Users/Shared/ffw`, not `~/ffw`), and switching is a change of the service's
 principal and the root's ACLs.
 
+**A write fence without a second user (macOS, w5333):** docs/worker-fence.md, off by default.
+
 ## 5. Migration
 
 ### 5.1 Per machine
