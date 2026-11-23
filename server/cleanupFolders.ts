@@ -344,7 +344,10 @@ async function sandboxLibraryStale(project: string): Promise<StaleEntry[]> {
 
 /** The pool's Library seed when ff-leftovers may judge it (w5280): inside the install folder, not a sandbox's, not a project's own Library. */
 export function seedLibrary(f: CleanupFacts): string | undefined {
-  const seed = f.librarySeed;
+  // The pool's setting, else the install's own seed/Library (w5280: m5's pool names no seed since the portal record lost it,
+  // yet <root>/seed/Library held 90 GB nobody seeds from; the same stale-entry rule is only safer on a copy nothing reads).
+  const fallback = f.root ? path.join(f.root, 'seed', 'Library') : undefined;
+  const seed = f.librarySeed || (fallback && fs.existsSync(fallback) ? fallback : undefined);
   if (!seed || !f.root || !within(seed, f.root) || path.basename(seed).toLowerCase() !== 'library') return undefined;
   if (f.sandboxes.some((sb) => within(seed, sb.path) || norm(seed) === norm(sb.path))) return undefined;
   const project = path.dirname(seed);
