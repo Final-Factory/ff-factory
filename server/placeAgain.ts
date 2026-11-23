@@ -25,7 +25,7 @@
 import { agentState, holdsSandbox, HOLD_PLACE_MS, OVERDUE_MS, utcTime } from '../shared/agentState.ts';
 
 export { HOLD_PLACE_MS };
-import type { Machine, MachineSandbox, SessionInfo } from '../shared/types.ts';
+import type { Machine, MachineSandbox, SessionInfo, WorkItem } from '../shared/types.ts';
 import type { SaveResult } from './saveWork.ts';
 import { unityInstanceName } from '../shared/unityInstance.ts';
 import type { WorkPriority } from '../shared/types.ts';
@@ -238,10 +238,42 @@ export function waitReleaseWhy(sb: MachineSandbox, waitOn: string | undefined): 
  * w3855: a released worker that takes no step whatever its waits, holds and work say (releaseStep): live, a message queued, or
  * no check-in still to come. The release pass skips reading those for it (every released worker the store keeps, most of them).
  */
+/**
+ * w5260 (lothsahn): why an urgent or frantic worker keeps its sandbox between turns, or undefined. w5186 (frantic, the Build 63
+ * release waited on it) ended its turn blocked on CI at 10:18Z, its beast/slot5 was released (w846), normal-priority w5252
+ * and w5253 took both free beast sandboxes at about 11:3x, and when CI cleared at 11:46Z its resume sat Queued until a
+ * person moved it at 11:57Z. Its process may still stop (releaseDue), but its sandbox stays its, not free and not claimed
+ * (shared/agentState.ts holdsSandbox), so the resume lands there in the next drain. Only strictly higher work takes it
+ * (w3507 reclaim), and its work being over releases it as for anyone.
+ */
+export const keepWhy = (p: WorkPriority | undefined): string | undefined => (rankOf(p) >= rankOf('urgent') ? `its work is ${p}: an urgent or frantic worker keeps its sandbox between turns (w5260)` : undefined);
+
+/**
+ * A sandbox worker's branch (Agents.branchNow): the one it was released on while released (w5260: its old sandbox may hold
+ * another worker's branch since; w5186's move_to at 11:57Z on 2026-11-23 named regress/2026-11-23-station-flight, the next
+ * worker's in beast/slot5), else its sandbox's (the daemon's last git read, else the sandbox's own).
+ */
+export function workerBranch(i: Pick<SessionInfo, 'placeReleased'>, sb: Pick<MachineSandbox, 'branch' | 'git'> | undefined): string | undefined {
+  if (i.placeReleased?.branch) return i.placeReleased.branch;
+  const b = sb?.git?.branch && sb.git.branch !== 'detached HEAD' ? sb.git.branch : sb?.branch;
+  return b || undefined;
+}
+
+/**
+ * The branch a moved request is handed over with (stop_agent move_to, w1600) and the line about its open pull request (w5260):
+ * its worker's branch (workerBranch), else its open pull request's head.
+ */
+export function moveBranchOf(branch: string | undefined, w: Pick<WorkItem, 'prs'>): { branch?: string; line: string } {
+  const pr = w.prs?.find((p) => p.state === 'open');
+  const line = pr ? `Its open pull request: ${pr.repo}#${pr.number}${pr.head ? ` (branch ${pr.head})` : ''}. ` : '';
+  const own = branch ?? pr?.head;
+  return { ...(own ? { branch: own } : {}), line };
+}
+
 export const staysReleased = (s: Pick<SessionInfo, 'wakeAt' | 'queuedSend'>, live: boolean, now: number) =>
   live || !s.wakeAt || !!s.queuedSend || Date.parse(s.wakeAt) <= now - OVERDUE_MS;
 
-export function releaseStep(s: SessionInfo, sb: MachineSandbox | undefined, f: PlaceFacts & { workOver?: string; keepLive?: string; claimedBy?: string; ciWait?: string; waitOn?: string; liveHold?: string; pairHold?: string; reclaim?: string }): ReleaseStep {
+export function releaseStep(s: SessionInfo, sb: MachineSandbox | undefined, f: PlaceFacts & { workOver?: string; keepLive?: string; claimedBy?: string; ciWait?: string; waitOn?: string; liveHold?: string; pairHold?: string; reclaim?: string; keep?: string }): ReleaseStep {
   if (s.kind !== 'worker' || !s.machineId || !s.machineSandbox || !sb) return undefined;
   // Its Live view is up while it waits on a person (w1582, LIVE_HOLD_MS): neither stopped nor released, so the person's
   // words reach it at once and the editor behind the view stays its. Its work being over ends the hold (Agents.liveHold).
@@ -275,6 +307,8 @@ export function releaseStep(s: SessionInfo, sb: MachineSandbox | undefined, f: P
       const why = f.workOver ? `its work is over: ${f.workOver}` : ci ?? (idle >= RELEASE_AFTER_MS ? `idle for ${span(idle)} with no check-in` : undefined);
       step = why ? { do: 'stop', why, due: true } : undefined;
     }
+    // w5260: an urgent or frantic worker's process may stop as for anyone (a stopped worker due a release holds its sandbox,
+    // holdsSandbox), but nothing stops it for its sandbox's sake: higher work's reclaim below still does.
     // w3507: higher queued work takes its sandbox (server/priorityReclaim.ts): whatever its check-in or idle time, but never
     // with a background job of its running (stopping its process would end it).
     if (!step && f.reclaim && !(st.state === 'between_turns' && st.kind === 'job')) step = { do: 'stop', why: f.reclaim, due: true };
@@ -284,8 +318,10 @@ export function releaseStep(s: SessionInfo, sb: MachineSandbox | undefined, f: P
   // Waiting on CI, a deploy or a person (w846, w890): released whatever its check-in, which places it again when it comes.
   // w3507: or higher queued work takes it (priorityReclaim.ts): its unpushed commits stay in the machine's repository, and the
   // switch that hands the sandbox over pushes them first (switchBranch), so they need not be pushed before.
-  const waits = s.queuedSend ? undefined : ci;
-  const why = waits ?? releaseWhy(s, f.now, f.workOver) ?? (s.queuedSend ? undefined : f.reclaim);
+  const waits = s.queuedSend || (f.keep && !f.workOver) ? undefined : ci;
+  // w5260: an urgent or frantic worker keeps its sandbox through every wait between turns (keepWhy); only higher work's
+  // reclaim (w3507) or its work being over releases it.
+  const why = waits ?? (f.keep && !f.workOver ? undefined : releaseWhy(s, f.now, f.workOver)) ?? (s.queuedSend ? undefined : f.reclaim);
   if (!why) return undefined;
   // w4738: released while it waits, its resume waits a while for its own computer before a room move (resumeMove.ts homeWait).
   const wait = waits ? { wait: true } : {};
@@ -468,6 +504,11 @@ export interface PlaceAgainDeps {
   reclaimNone?: (work: string, why: string | undefined) => void;
   /** w3507: a message to a worker (a mid-turn one reads it between tool calls; a released one's waits in the send queue). */
   tell?: (sessionId: string, text: string) => void;
+  /**
+   * w5260: whether a released urgent or frantic worker's resume found no other computer to move to (Agents.roomMove): then
+   * its resume may pre-empt a mid-turn low or normal worker on its own computer at a safe point, as urgent queued work does.
+   */
+  resumePreempt?: (s: SessionInfo) => boolean;
   /** w3507: a worker's open request ids, for the line a pre-empted worker ends its turn with. */
   requestsOf?: (s: SessionInfo) => string[];
 }
@@ -489,6 +530,8 @@ interface Reclaim {
   why: string;
   /** Its sandbox was released (the ledger heard it once). */
   released?: boolean;
+  /** w5260: it frees the sandbox for this released worker's resume (Pressure.resume). */
+  resume?: string;
 }
 
 /** w3588: a Queued pair run and the computers where one free sandbox lets it start (PlaceAgainDeps.pairWants). */
@@ -671,7 +714,7 @@ export class PlaceAgain {
     if (s.kind !== 'worker' || !s.machineId || !s.machineSandbox || s.placeReleased) return undefined;
     const sb = this.d.machine(s.machineId)?.sandboxes?.find((x) => x.id === s.machineSandbox);
     if (!sb) return undefined;
-    return this.d.pairHold?.(s) ?? this.d.liveHold?.(s) ?? keptWhy(s, sb, this.facts(s.machineId));
+    return this.d.pairHold?.(s) ?? this.d.liveHold?.(s) ?? keptWhy(s, sb, this.facts(s.machineId)) ?? (this.d.workOver(s) ? undefined : keepWhy(this.d.priorityOf?.(s)));
   }
 
   /** w4608: the sandbox a released worker is being moved into right now (its editor stopped, its branch switched), if any. */
@@ -688,7 +731,7 @@ export class PlaceAgain {
     if (s.kind !== 'worker' || !s.machineId || !s.machineSandbox || s.placeReleased || s.status !== 'stopped' || this.d.isLive(s.id)) return undefined;
     const sb = this.d.machine(s.machineId)?.sandboxes?.find((x) => x.id === s.machineSandbox);
     const why = sb && (ciReleaseWhy(sb, this.d.ciWait?.(s)) ?? waitReleaseWhy(sb, this.d.waitOn?.(s)) ?? releaseWhy(s, this.now(), this.d.workOver(s)));
-    const kept = why && (this.d.pairHold?.(s) ?? this.d.liveHold?.(s) ?? keptWhy(s, sb, this.facts(s.machineId)));
+    const kept = why && (this.d.pairHold?.(s) ?? this.d.liveHold?.(s) ?? keptWhy(s, sb, this.facts(s.machineId)) ?? (this.d.workOver(s) ? undefined : keepWhy(this.d.priorityOf?.(s))));
     return kept ? `its sandbox stays held although ${why}: ${kept}` : undefined;
   }
 
@@ -758,7 +801,7 @@ export class PlaceAgain {
       if (!live && s.placeReleased) this.d.liveLost?.(s, s.placeReleased.why);
       else if (!live && s.status === 'stopped' && !(this.now() - Date.parse(s.lastActivityAt) < LIVE_HOLD_MS)) this.d.liveLost?.(s, `nobody came back to it within ${LIVE_HOLD_MS / 3_600_000} h`);
       if (s.placeReleased && staysReleased(s, live, f.now)) continue;
-      const step = releaseStep(s, sb, { ...f, workOver: this.d.workOver(s), ciWait: this.d.ciWait?.(s), waitOn: this.d.waitOn?.(s), keepLive: live ? this.d.keepLive(s.id) : undefined, liveHold: this.d.liveHold?.(s), pairHold: this.d.pairHold?.(s), claimedBy: s.placeReleased ? this.claimedBy(m.id, sb.id) : undefined, reclaim: targets.get(s.id)?.why });
+      const step = releaseStep(s, sb, { ...f, workOver: this.d.workOver(s), ciWait: this.d.ciWait?.(s), waitOn: this.d.waitOn?.(s), keepLive: live ? this.d.keepLive(s.id) : undefined, liveHold: this.d.liveHold?.(s), pairHold: this.d.pairHold?.(s), claimedBy: s.placeReleased ? this.claimedBy(m.id, sb.id) : undefined, reclaim: targets.get(s.id)?.why, keep: s.placeReleased ? undefined : keepWhy(this.d.priorityOf?.(s)) });
       if (!step) continue;
       // Its sessions stay grouped (sessionsMemo): no step moves a worker to another machine or sandbox in the pass.
       this.claimsMemo?.delete(m.id);
@@ -810,6 +853,55 @@ export class PlaceAgain {
     return did;
   }
 
+  /**
+   * w5260: released urgent or frantic workers whose message waits and who find no sandbox on their own computer (placeFor),
+   * as pressure: reclaimPass frees one there from strictly lower work, idle first. Each presses with its first open request.
+   */
+  private resumePressure(): Pressure[] {
+    if (!this.d.priorityOf) return [];
+    const out: Pressure[] = [];
+    for (const s of this.d.sessions()) {
+      if (s.kind !== 'worker' || !s.placeReleased || !s.machineId || !s.machineSandbox) continue;
+      const p = this.resumeWant(s);
+      if (p) out.push(p);
+    }
+    return out;
+  }
+
+  /** w5260: the pressure of released worker `s`'s resume (resumePressure), or undefined when it has room, is not urgent or frantic, or does not wait. */
+  private resumeWant(s: SessionInfo): Pressure | undefined {
+    if (!s.placeReleased || !s.machineId || this.placing.has(s.id) || this.d.isLive(s.id) || !this.d.queued(s.id) || this.agentOnly(s)) return undefined;
+    const priority = this.d.priorityOf?.(s);
+    const m = this.d.machine(s.machineId);
+    if (!priority || !keepWhy(priority) || !m || !this.d.online(m.id)) return undefined;
+    if ('sandbox' in placeFor(s, m, this.facts(m.id), this.claims(m.id), this.failedIn(s.id))) return undefined;
+    const work = this.d.requestsOf?.(s)[0] ?? s.id;
+    return { work, title: s.title, priority, room: false, machines: [m.id], preemptOn: this.d.resumePreempt?.(s) ? [m.id] : [], resume: s.id };
+  }
+
+  /**
+   * w5260: why released urgent or frantic worker `s` should wait for its own computer rather than move (Agents.roomMove), or
+   * undefined: a sandbox there is being freed for its resume, or one held by idle lower work can be (the next pass frees it,
+   * run soon). Placed in its own computer it keeps its conversation's warm context; a move to another starts a fresh session.
+   */
+  resumeFreeing(s: SessionInfo): string | undefined {
+    for (const r of this.reclaims.values()) if (r.resume === s.id) return `${r.machine}/${r.sandbox} on its computer is being freed for it from lower-priority work (w5260)`;
+    return this.withClaimsMemo(() => {
+      const p = this.resumeWant(s);
+      if (!p) return undefined;
+      const taken = new Set([...this.reclaims.values()].map((r) => `${r.machine}/${r.sandbox}`));
+      const pick = pickReclaim({ ...p, preemptOn: [] }, this.holders(this.now(), p.machines).filter((h) => !taken.has(`${h.machine}/${h.sandbox}`)));
+      if (!('reclaim' in pick)) return undefined;
+      this.d.soon?.();
+      return `${pick.reclaim.machine}/${pick.reclaim.sandbox} on its computer, held by idle ${pick.reclaim.priority ?? 'unprioritised'} work, is freed for it next (w5260)`;
+    });
+  }
+
+  /** Runs the release pass soon (PlaceAgainDeps.soon), as after a stop: w5260's resume reclaim within a minute. */
+  soon(): void {
+    this.d.soon?.();
+  }
+
   /** w3507: the standing reclaim whose sandbox worker `id` is in, or undefined. */
   private reclaimOf(id: string): Reclaim | undefined {
     for (const r of this.reclaims.values()) if (r.sessions.includes(id)) return r;
@@ -833,8 +925,14 @@ export class PlaceAgain {
       this.pairsNow = this.d.pairWants?.() ?? [];
       this.claimsMemo?.clear();
     }
+    // w5260: a released urgent or frantic worker whose resume finds no sandbox on its computer presses like queued work.
+    const resumes = this.resumePressure();
+    if (resumes.length) {
+      this.pressureNow = [...this.pressureNow, ...resumes];
+      this.claimsMemo?.clear();
+    }
     const out = new Map<string, Reclaim>();
-    if (!this.d.pressure || !this.d.priorityOf) return out;
+    if (!this.d.priorityOf || !this.pressureNow.length) return out;
     const now = this.now();
     const queued = new Map(this.pressureNow.map((p) => [p.work, p]));
     const byId = new Map([...this.d.sessions()].map((s) => [s.id, s]));
@@ -873,7 +971,8 @@ export class PlaceAgain {
         continue;
       }
       holders ??= this.holders(now);
-      const pick = pickReclaim(p, holders.filter((h) => !taken.has(`${h.machine}/${h.sandbox}`)));
+      // w5260: a resume pre-empts a turn only once it has nowhere to move (preemptOn, Agents.roomMove): idle holders until then.
+      const pick = pickReclaim(p, holders.filter((h) => !taken.has(`${h.machine}/${h.sandbox}`) && !(p.resume && h.midTurn && !p.preemptOn.includes(h.machine))));
       if ('none' in pick) {
         this.d.reclaimNone?.(p.work, pick.none);
         continue;
@@ -883,8 +982,8 @@ export class PlaceAgain {
       const key = `${h.machine}/${h.sandbox}`;
       taken.add(key);
       const reqs = h.sessions.map((s) => `${s.id} (${h.priority ?? 'no open request'})`).join(', ');
-      const why = `${preempt ? 'pre-empted' : 'taken'} for ${p.priority} queued work ${p.work} (w3507)`;
-      const r: Reclaim = { work: p.work, priority: p.priority, machine: h.machine, sandbox: h.sandbox, sessions: h.sessions.map((s) => s.id), at: now, preempt, why };
+      const why = p.resume ? `${preempt ? 'pre-empted' : 'taken'} for the ${p.priority} resume of ${p.work} (w5260)` : `${preempt ? 'pre-empted' : 'taken'} for ${p.priority} queued work ${p.work} (w3507)`;
+      const r: Reclaim = { work: p.work, priority: p.priority, machine: h.machine, sandbox: h.sandbox, sessions: h.sessions.map((s) => s.id), at: now, preempt, why, ...(p.resume ? { resume: p.resume } : {}) };
       this.reclaims.set(p.work, r);
       if (preempt) {
         for (const s of h.sessions) {
@@ -904,9 +1003,9 @@ export class PlaceAgain {
    * priority, whether one is mid-turn, and what keeps them (Agents.reclaimHold, a Live view or pair run, a protection, a
    * move or Unity batch run under way, a reclaim of it that did not free it).
    */
-  private holders(now: number): SandboxHolders[] {
+  private holders(now: number, only?: readonly string[]): SandboxHolders[] {
     const out: SandboxHolders[] = [];
-    const machines = new Set(this.pressureNow.flatMap((p) => [...p.machines, ...p.preemptOn]));
+    const machines = new Set(only ?? this.pressureNow.flatMap((p) => [...p.machines, ...p.preemptOn]));
     for (const mid of machines) {
       const m = this.d.machine(mid);
       if (!m || !this.d.online(mid)) continue;

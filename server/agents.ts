@@ -25,7 +25,7 @@ import { describeAutoIntake } from './ffboxAutoIntake.ts';
 import { agentState, agentStateText, holdsItsPlace, holdsSandbox, sortAgents, sortPlaces } from '../shared/agentState.ts';
 import { idleClosedPart } from './liveIdle.ts';
 import { topPriority, type Pressure } from './priorityReclaim.ts';
-import { HOLD_PLACE_MS, LIVE_HOLD_MS, PlaceAgain, RELEASE_AFTER_MS, RELEASE_WAKE_NOTE, handOverBranch, occupies, releasedOn, type PairWant } from './placeAgain.ts';
+import { HOLD_PLACE_MS, LIVE_HOLD_MS, PlaceAgain, RELEASE_AFTER_MS, RELEASE_WAKE_NOTE, handOverBranch, keepWhy, moveBranchOf, occupies, releasedOn, workerBranch, type PairWant } from './placeAgain.ts';
 import { agentQueueAll, agentQueueFacts, editorSlotRefusal, queueWaitsAll } from '../shared/queueWaits.ts';
 import { otherComputerOf, pairStepLine, pairWaitLine, pairWaitNotice } from './pairRuns.ts';
 import { WORK_LIVE_LABEL, queuedNeeds, WORK_LIVE_STATES, asksAPerson, benchWaitOf, lastOpenLine, liveCounts, otherWorkWait, outsideDeclared, outsideWaitOf, ownWorkWait, noTimedWaitOf, orchestratorAskIn, restartWait, personWaitIn, reportWaitKey, holdsOf, servedBy, workLiveAll, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
@@ -1004,6 +1004,7 @@ export class Agents {
       priorityOf: (info) => topPriority(this.openWorkOf(info).map((w) => w.priority)),
       reclaimHold: (info, sb) => this.reclaimHold(info, sb),
       requestsOf: (info) => this.openWorkOf(info).map((w) => w.id),
+      resumePreempt: (info) => !!info.placeReleased && this.roomStuck.get(info.id) === info.placeReleased.at,
       reclaimed: (e) => this.reclaimed(e),
       reclaimNone: (work, why) => {
         const w = store.work.get(work);
@@ -3683,11 +3684,13 @@ export class Agents {
     return { ...p, hold: { ...paused, ...(p.hold ?? {}) }, holdExcept: Object.keys(except).length ? except : undefined };
   }
 
-  /** A sandbox worker's branch now (its daemon's last git read, else the sandbox's own), or undefined. */
+  /**
+   * A sandbox worker's branch now (its daemon's last git read, else the sandbox's own), or undefined. A released worker's is
+   * the branch it was released on (w5260): its old sandbox may hold another worker's branch since. w5186's move at 11:57Z on
+   * 2026-11-23 was handed over with regress/2026-11-23-station-flight, the next worker's branch in beast/slot5.
+   */
   private branchNow(i: SessionInfo): string | undefined {
-    const sb = i.machineId && i.machineSandbox ? this.store.machines.get(i.machineId)?.sandboxes?.find((x) => x.id === i.machineSandbox) : undefined;
-    const b = sb?.git?.branch && sb.git.branch !== 'detached HEAD' ? sb.git.branch : sb?.branch;
-    return b || undefined;
+    return workerBranch(i, i.machineId && i.machineSandbox ? this.store.machines.get(i.machineId)?.sandboxes?.find((x) => x.id === i.machineSandbox) : undefined);
   }
 
   /** Why a save must not push `branch` on `machineId` now: a worker on it waits on CI (server/savePushHold.ts, w5067). */
@@ -3706,6 +3709,8 @@ export class Agents {
   private readonly roomMoving = new Map<string, { to: string; texts: string[] }>();
   /** w2046: the last stay or wait reason journalled for a worker whose resume did not move, so each is logged once. */
   private readonly roomKept = new Map<string, string>();
+  /** w5260: released urgent or frantic workers whose resume found no computer to move to: their resume may pre-empt at a safe point (PlaceAgainDeps.resumePreempt). */
+  private readonly roomStuck = new Map<string, string>();
 
   /**
    * SessionManager.roomMove (w2046, server/resumeMove.ts): a message that waits only for room on its worker's own computer.
@@ -3734,8 +3739,21 @@ export class Agents {
       return true;
     }
     if (now - (Date.parse(q.at) || now) < MOVE_AFTER_MS || info.pendingPermissions.length || isMidTurn(info)) return undefined;
+    // w5260: an urgent or frantic resume never sits Queued for its own computer (w5186 waited 11:46Z-11:57Z on 2026-11-23 for
+    // beast while normal work held every sandbox there): a sandbox there held by idle lower work is freed for it (the next
+    // release pass, run soon; it keeps its warm conversation), else it moves at once to a computer with room (moveDecision),
+    // else its resume may pre-empt a mid-turn low or normal worker there at a safe point (w3507, resumePreempt).
+    const urgent = ROOM_WAIT.test(hold) && !!keepWhy(topPriority(this.openWorkOf(info).map((w) => w.priority)));
+    if (urgent) {
+      const freeing = this.placeAgain.resumeFreeing(info);
+      if (freeing) {
+        if (this.roomKept.get(info.id) !== freeing) console.log(`room move: worker ${info.id} on ${info.machineId}/${info.machineSandbox} stays: ${freeing}`);
+        this.roomKept.set(info.id, freeing);
+        return `${hold}; ${freeing}`;
+      }
+    }
     // w4738: released while it waited (on CI, a pair run, a person), it waits a while for a sandbox on its own computer first.
-    const home = ROOM_WAIT.test(hold) ? homeWait(info.placeReleased, Date.parse(q.at) || now, now) : undefined;
+    const home = ROOM_WAIT.test(hold) && !urgent ? homeWait(info.placeReleased, Date.parse(q.at) || now, now) : undefined;
     if (home) {
       const why = `waits for its own computer: ${home}`;
       if (this.roomKept.get(info.id) !== why) console.log(`room move: worker ${info.id} on ${info.machineId}/${info.machineSandbox} ${why}`);
@@ -3758,6 +3776,11 @@ export class Agents {
       return did ? true : stayLine(hold, d.requeuePair.why);
     }
     if (!('move' in d)) {
+      if (urgent && info.placeReleased && this.roomStuck.get(info.id) !== info.placeReleased.at) {
+        // Keyed by its release: a later release starts without it.
+        this.roomStuck.set(info.id, info.placeReleased.at);
+        this.placeAgain.soon();
+      }
       const [kept, why] = 'stay' in d ? [stayLine(hold, d.stay), `stays: ${d.stay}`] : [`${hold}; ${NONE_MARK}: ${d.none}`, `waits: ${d.none}`];
       // Journalled once per worker and reason, so a wait that did not move can be checked afterwards (this runs every drain).
       if (this.roomKept.get(info.id) !== why) console.log(`room move: worker ${info.id} on ${info.machineId}/${info.machineSandbox} (${reqs.map((w) => w.id).join(', ')}) ${why}`);
@@ -3765,6 +3788,7 @@ export class Agents {
       return kept;
     }
     this.roomKept.delete(info.id);
+    this.roomStuck.delete(info.id);
     const entry = { to: d.move.to, texts: [movedText(q)] };
     this.roomMoving.set(info.id, entry);
     const waited = Math.round((now - (Date.parse(q.at) || now)) / 1000);
@@ -4559,7 +4583,9 @@ export class Agents {
     const view = await this.liveHub?.endFor(info.id);
     const branch = this.branchNow(info);
     let saved: string | undefined;
-    if (branch) {
+    // w5260: released, its old sandbox is another worker's now: nothing there is its to save (its work was saved on its branch when it was released).
+    if (branch && info.placeReleased) saved = `its sandbox ${from} was released while it waited (${info.placeReleased.why}); its work is on ${branch}`;
+    else if (branch) {
       try {
         const r = await this.saveSandboxWork(info, branch, `FF Factory: WIP saved from ${info.id} before its move to ${target} (w1600)\n\n${reqs.map((w) => w.id).join(', ')} moved: ${reason}. \`git reset HEAD~1\` gives the work back uncommitted.`, `before its move to ${target}`);
         saved = r.sha ? `its sandbox's uncommitted work (${r.files} file(s)) was saved as WIP commit ${r.sha.slice(0, 10)} on ${branch}${r.pushed ? ' and pushed' : `, not pushed (${r.notes.join('; ')})`}` : `its sandbox had no uncommitted work on ${branch}`;
@@ -4569,8 +4595,9 @@ export class Agents {
     }
     const stage = view ? `Its Live view ran on ${from} (materials ${JSON.stringify(view.materials)}, fps ${view.fps}, width ${view.width}): stage it again in your sandbox's editor (the scene and the asset on screen in play mode, the HUD hidden, the camera where the person should look), live_view start with the same settings, and tell the person it streams again from ${target}. ` : '';
     for (const w of reqs) {
-      const note = `${stage}${w.outcome ? `Its last report: ${w.outcome}` : 'No report yet.'}`;
-      this.orchestrators?.handBack(w, info, { machine: info.machineId, sandbox: info.machineSandbox, ...(branch ? { branch } : {}), why: reason, note, how: 'moved by stop_agent move_to (w1600)', ...(saved ? { saved } : {}), to: target });
+      const { branch: own, line: prLine } = moveBranchOf(branch, w);
+      const note = `${stage}${prLine}${w.outcome ? `Its last report: ${w.outcome}` : 'No report yet.'}`;
+      this.orchestrators?.handBack(w, info, { machine: info.machineId, sandbox: info.machineSandbox, ...(own ? { branch: own } : {}), why: reason, note, how: 'moved by stop_agent move_to (w1600)', ...(saved ? { saved } : {}), to: target });
     }
     // w1984: its waiting bench tickets on the old machine hold nobody back from now on (benchPriorities marks them away)
     info.movedAway = { machine: info.machineId, to: target, at: new Date().toISOString() };
@@ -8465,7 +8492,7 @@ ${this.worldBrief(true)}
 - One session per request (w740, Lothsahn and Ben): related work stays in the session that did the earlier work, unrelated work gets a fresh one (workers have no auto-compaction; stale context costs on every turn). start_agent always starts a NEW session, into a FREE sandbox (w1089: refused for a sandbox another request's agent occupies, and past max_agents_per_sandbox; a \`[ledger] Capacity may have freed\` ping can be minutes old, so look again just before you start; work that needs no editor and no game tree may sit beside another agent on purpose with extra_agent: true, which never switches its branch, w1607). message_agent with a work_id for a worker not on that request: the server sends a RELATED request (it names one of the worker's requests in related_ids, is about its PR or branch, or the overlap check calls it a match: a fix for a regression it just shipped, its feature's next step, a correction to its PR) to that session, and starts a NEW session in the same sandbox for an unrelated one (the default when nothing ties them), whose first message carries the brief, the request as filed, the branch state and the related requests (read with read_work); the old session stops once it has nothing in hand, never mid-turn. When it is ambiguous, pass session "same" or "new" with session_reason (one plain line; recorded in the reply and the log). Updates to a request (notes, answers, follow-ups, resumes) go to the session already on it: message_agent with the same work_id, never a new session. decide_work merge is for a duplicate; link is for a direct follow-up of what a worker is on, refused for an unrelated request while it has another in hand. **One person per session** (w1076: lothsahn's w1072, sent into Ben's worker, ran on Ben's Claude pool and stopped on Ben's limit): a request never goes into a session holding another person's open request, because a session runs on its requests' person's tokens; message_agent then starts a new session there (even with session "same"), a request already in such a session moves out on its next message_agent, and link is refused. To restart a request somewhere fresh (its session stopped on a usage limit, say), message_agent with its work_id, session "new" and a session_reason.
 - Model (w2010): Opus, medium; a task you are sure is small (1-2 named files, mechanical or contained, done-criteria given; no sim, determinism, netcode, save state, design or hunt): "sonnet", model_reason "small: <why>".
 - Titles (w575): each time you hand a worker a request, give \`title\`: the job in a few plain words for a person scanning the dashboard ("LothDesktop fresh install, sandboxes slot1..6"), not the request's title cut short; the request id goes in front by itself. start_agent always takes one; message_agent with a work_id needs one when the worker is not on that request yet; decide_work link takes one for the workers it links. set_agent_title renames a worker otherwise.
-- Sandbox labels are their names (slot1..N on a worker root) and never change; nobody sets them. A sandbox is free when list_sandboxes marks it FREE; what it is doing is its agents' titles. A worker stopped with its check-in more than ${RELEASE_AFTER_MS / 60_000} min away, its request over, ${HOLD_PLACE_MS / 60_000} min after its daemon restarted under it, or by FF Factory after ${RELEASE_AFTER_MS / 60_000} min Idle with nothing pending releases a clean sandbox (w640, w656): it shows FREE and the worker's line says "its sandbox is released"; new work there is switched to a fresh branch first, and the worker is placed again when it resumes (its own sandbox if still free, else another free one on its machine, on its branch). A sandbox "spoken for" is a resuming worker's: never new work there.
+- Sandbox labels are their names (slot1..N on a worker root) and never change; nobody sets them. A sandbox is free when list_sandboxes marks it FREE; what it is doing is its agents' titles. A worker stopped with its check-in more than ${RELEASE_AFTER_MS / 60_000} min away, its request over, ${HOLD_PLACE_MS / 60_000} min after its daemon restarted under it, or by FF Factory after ${RELEASE_AFTER_MS / 60_000} min Idle with nothing pending releases a clean sandbox (w640, w656): it shows FREE and the worker's line says "its sandbox is released"; new work there is switched to a fresh branch first, and the worker is placed again when it resumes (its own sandbox if still free, else another free one on its machine, on its branch). A sandbox "spoken for" is a resuming worker's: never new work there. An urgent or frantic worker keeps its sandbox between turns (w5260), and FF Factory frees a sandbox or moves a released one's resume by itself: never move such a resume by hand while its Queued line says a sandbox is being freed for it.
 - Where new work runs (w416, w428): new game-repo work (code, tests, Unity, built players) goes where the Capacity block's last line (list_sandboxes, system_status) says, "Next new game-repo work: <computer> (why)", even when a sandbox elsewhere is free. That line follows config placement first${this.placementLine()}: the first computer in placement.prefer with room, then the others not avoided, spread by room (ROOM n%: the free share of agent slots, sandboxes, RAM and editors against each one's own limits; BUSY: at its agent limit, RAM at ${RAM_BUSY_PCT}% or more, no sandbox to use or make; within ${Math.round(EVEN_MARGIN * 100)} points, fewer live agents, then taking turns), and an avoided computer only when nothing else has room. Every worker runs in a sandbox (w536): start_agent with a machine alone is refused, and a machine without a sandbox_root takes no workers. Posting as Max does not pin a computer (post_as_max, w901). A computer that is avoided or not next keeps only what needs it: ${pinnedWork(this.review?.root)}. **Work that needs no Unity editor goes by agent slot alone** (w1098, lothsahn, 2026-10-12: "FFBox and FF Factory updates don't need unity editors"): a request on another repo than the game's (FF Factory, FFBox, the ff-agents plugin; its list_work line says "needs an agent slot only", set at filing from its repo) goes where the Capacity block's "Next non-game work: <computer> (why)" says, in any sandbox with an agent seat (a free one first, else beside another request's agent with start_agent extra_agent: true, never past max_agents_per_sandbox: it works in its own clone in its temp folder), whatever the editors or RAM. It still respects the computer's agent cap, the person's own Claude pool (a held pool queues the worker's first prompt) and holds and avoids, and one queued while an allowed computer has an agent slot is flagged WRONG like game work; check the guessed repo in the log of one whose repo was not set. A worker going on in its own sandbox stays there (message_agent), and a running worker is never moved. Live view, urgent release and timed work go by "Next Live view work" / "Next urgent release work" / "Next timed work" (w1600, w1606, w1628: a worker's own build gets no BEAST preference; timed or exclusive-lock work, w1872: that line's ranking is the default, unless a machine is named: smallest first, BEAST last, never a computer that takes no timed runs (m5), where a pin is refused back to you: pick another or queue it (w2147); w1996: a request whose timing is a Windows player A/B goes where its code work goes, since its worker builds there and timed_run times it on a small computer); stop_agent move_to moves a waiting one there; build_plan clears one for an urgent release. start_agent and create_sandbox add a note when new work goes elsewhere than the next one: follow it unless one of those reasons holds, and say which. People change the preference with set_app_config placement.prefer / avoid / live / build / minPriority (null clears).
 - Machines are fixed by the harness, never by a person: \`read_rules machines\` before you act on a request for work in a machine's main clone (w936: never handed back to a person, and the grant is a field, never brief text), on a machine change that needs its installer rerun or a daemon update (w855: never a question for a person; w605: never a drain or a wait; after a verified deploy FF Factory updates the daemons itself, w887), or on low disk (w626, w896: machine_cleanup, then a clean-up worker that deletes only inside the worker install folder; never ask anyone to free space).
 - Nobody reads this chat by default: do not write status reports for people. Act, and let the tools record it. When the owner writes here, answer with a one-line plain-language TL;DR, then detail only if useful, with request, sandbox and session ids. Your messages render as Markdown: \`![what it shows](<absolute path>)\` shows an image from a sandbox or a machine inline, and a \`\`\`mermaid block renders as a diagram.

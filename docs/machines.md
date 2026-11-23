@@ -2056,7 +2056,8 @@ LothDesktop and Beast, not just when BEAST is full").
       with `wake_me`), or the dispatcher's `decide_work block` on CI. While its CI runs it does not take the sandbox
       back. The blocker watch reads the checks every 2 minutes; when they finish, green or red, the gate clears and the
       worker is resumed within a minute, its own check-in handed back (w829) or, with none, a new one (w846,
-      `Orchestrators.resumeGatedWorker`). **A PR that cannot get CI** (w907, lothsahn: "Yes, file that and fix the CI merge clash"):
+      `Orchestrators.resumeGatedWorker`). **Urgent and frantic work keeps its sandbox** (w5260, below): none of these
+      waits releases it. **A PR that cannot get CI** (w907, lothsahn: "Yes, file that and fix the CI merge clash"):
       w890's PR #283 waited an hour behind a `ci:` gate because its push after merging main had silently failed, so the PR
       head stayed on a commit that conflicted with main in CHANGELOG.md, and GitHub runs no CI on a conflicted PR. Three
       guards, reading only what the portal's token can (Pull requests: read; no Checks, no Actions): (1) `blocked_on` with a
@@ -2322,6 +2323,7 @@ LothDesktop and Beast, not just when BEAST is full").
     still take the next free sandbox there ahead of new work of their priority or lower, while higher-priority queued work
     takes it first (w3507, w4620: strict priority holds; the wait is capped, so it never holds work back past 15 min). A
     worker released idle or with a far check-in, a hold on its computer (w4238) and an away computer (w2544) move as before.
+    An urgent or frantic resume does not wait (w5260, above): it frees a sandbox from idle lower work there, else moves.
   - **UI-heavy work does not move to a computer with one Unity slot while another fits** (w4738: w4488's stills leg went to
     biscuit, `pool.maxUnity` 1). UI-heavy is game work that needs a Live view (`needsLive`) or whose title, brief or notes
     name stills, screenshots, clips, play mode, a playtest, the HUD, the UI gate's tools (ui_look, ui_layout, ui-critic,
@@ -2329,6 +2331,37 @@ LothDesktop and Beast, not just when BEAST is full").
     build work are known). `moveDecision` then leaves out computers whose `maxEditors` is 1; when only such a computer has
     room it waits ("no other computer can take it now (w2046)", naming "one Unity slot ... (w4738)"), except off an away
     computer, where it may go there when nothing else fits. It governs moves; new work's first placement is unchanged.
+- **Urgent and frantic work keeps its sandbox between turns, and its resume never sits Queued** (w5260, lothsahn: "A
+  worker blocked on CI keeps its sandbox, or at least gets it back first. While a frantic or urgent worker is between turns,
+  its sandbox is not given to lower-priority work"). On 2026-11-23 w5186 (frantic, the Build 63 release waited on it) ended
+  its turn blocked on CI at 10:18Z and beast/slot5 was released (w846); normal w5252 and w5253 took both free beast sandboxes
+  at about 11:3x; CI cleared at 11:46Z and its resume sat Queued (the w4738 home wait) until a person asked at 11:57Z and the
+  dispatcher moved it with `stop_agent move_to`, which handed it over on the next worker's branch (the w5186 ledger log).
+  - **Kept** (`placeAgain.ts keepWhy`): a worker whose highest open request is urgent or frantic is never released for a
+    wait between turns: CI (w846), a deploy, a person, another request (w890), a far check-in, idle time or a daemon
+    restart. Its process may still stop (`releaseDue`), and a stopped worker due a release holds its sandbox
+    (`holdsSandbox`): not FREE, not claimed for a released worker, so start_agent's FREE test and the queue pass it by, and
+    its resume lands in its own sandbox on the next drain. Only strictly higher queued work takes it (the reclaim below;
+    equal never takes from equal), and its work being over releases it as for anyone. The trade-off: a sandbox stays
+    held through a long person wait of urgent work; urgent and frantic work is rare and short, and a release costs its
+    resume up to the whole wait we saw. `stayWhy` and `keptLine` name it ("an urgent or frantic worker keeps its sandbox
+    between turns (w5260)").
+  - **A released one's resume frees a sandbox or moves** (`PlaceAgain.resumePressure`, `resumeFreeing`; `Agents.roomMove`):
+    one released before this rule, or before its request became urgent, whose message finds no sandbox on its computer
+    (`placeFor` waits) presses like Queued work (`Pressure.resume`, keyed by its first open request): (1) a sandbox there
+    held by **idle** strictly lower work is freed for it (the reclaim below: stopped, released with its work on its branch,
+    the release pass run soon); its resume claims the freed sandbox ahead of anyone and the next drain places it, within a
+    minute of its message (the test). Placed on its own computer it keeps its conversation; a move starts a fresh session
+    that re-reads its work (about 14 min, r290). (2) Else, 20 s after its message (`MOVE_AFTER_MS`, no w4738 home wait for
+    it), it **moves** to a computer with room (`moveDecision`: holds, pins, locked screens, Mac and pair limits, game
+    against agent work, unpushed commits, as for any move). (3) With nowhere to move (`moveDecision` none or stay;
+    `resumePreempt`), it may **pre-empt** a mid-turn low or normal worker on its computer at a safe point (`preemptNotice`:
+    finish the step, commit and push, end the turn; never interrupted). Its Queued line says which: "… is freed for it next
+    (w5260)", "… is being freed for it from lower-priority work (w5260)", or the move's or pre-emption's.
+  - **stop_agent move_to hands it over on its own branch** (`placeAgain.ts workerBranch`, `moveBranchOf`): a released
+    worker's branch is the one it was released on, never what its old sandbox holds now, and nothing in that sandbox is
+    saved as its work; the handover names its open pull request too, whose head is the branch when its worker's is unknown.
+  - Tests: `server/w5260FranticKeepsSandbox.test.ts`.
 - **Higher-priority work frees a sandbox** (w3507, lothsahn, 2026-11-07: "Can you please make sure sandbox availability is
   considered based on priority by the dispatcher?"). Before it, priority only ordered the queue: w3496 (a strut fix, high
   then urgent) sat Queued over an hour while m5 had 3 sandboxes held, 1 of 3 agents mid-turn and no editor open
