@@ -84,3 +84,31 @@ export async function clearDeadMounts(dir: string): Promise<{ cleared: string[];
   }
   return { cleared };
 }
+
+/**
+ * w5285: the FUSE mounts in a worker's OWN temp folder, live or dead, taken off (deepest first) by `ff-leftovers end`.
+ * Only a desktop session the worker started there mounts anything in that folder (gvfsd-fuse at `<runtime>/gvfs`, the
+ * document portal at `<runtime>/doc`, when its XDG_RUNTIME_DIR pointed inside), so a lazy unmount takes nothing from
+ * anyone else, and it deletes nothing: what a mount shows is left where it really lives. A mount that is not FUSE is
+ * only reported (`left`).
+ */
+export async function unmountOwnFuse(dir: string | undefined): Promise<{ cleared: string[]; left: Mount[] }> {
+  if (!dir) return { cleared: [], left: [] };
+  const cleared: string[] = [];
+  for (const m of mountsUnder(dir, parseMountinfo(await mountOps.mountinfo()))) {
+    if (!m.fstype.startsWith('fuse')) continue;
+    try {
+      await mountOps.unmount(m.point);
+      cleared.push(m.point);
+    } catch {
+      // judged again below: still in the table means it stayed
+    }
+  }
+  const left = mountsUnder(dir, parseMountinfo(await mountOps.mountinfo()));
+  return { cleared: cleared.filter((p) => !left.some((m) => m.point === p)), left };
+}
+
+/** w5285: the mounts in a worker's own temp folder, as `ff-leftovers list` shows them. */
+export async function mountsIn(dir: string | undefined): Promise<Mount[]> {
+  return dir ? mountsUnder(dir, parseMountinfo(await mountOps.mountinfo())) : [];
+}

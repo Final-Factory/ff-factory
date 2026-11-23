@@ -56,6 +56,7 @@ import { parsePsJson } from '../server/watchdog.ts';
 import { driveLabel, inNeverGames, installDrive, onInstallDrive } from '../server/rootFence.ts';
 import type { BusyJob } from '../shared/types.ts';
 import type { Proc, UnityPlatform } from './unity.ts';
+import { mountsIn, unmountOwnFuse, type Mount } from '../server/deadMounts.ts';
 import { gamePlayers, isUnityBinary, splitArgs, unityProcesses } from './unitySlots.ts';
 import { inspectProcs, type ProcFacts } from './unityReaper.ts';
 
@@ -1563,12 +1564,17 @@ export async function leftoversMain(argv: string[], e: NodeJS.ProcessEnv = proce
     const age = born === undefined ? '' : ` up ${ago(Date.now() - born)}`;
     return `  pid ${p.pid} ${kindOf(p, platform, topBatch)}${age}: ${p.cmd.slice(0, 160)}`;
   };
+  // w5285: mounts a desktop session left in this session's own temp folder (Linux only; none elsewhere).
+  const tempDir = sessionTempDir(session, e);
+  const mounts = await mountsIn(tempDir);
   if (!mine.length) {
     process.stdout.write(`Nothing your session (${session}) started is still running.\n`);
+    if (cmd === 'end' && mounts.length) return unmountText(await unmountOwnFuse(tempDir));
+    process.stdout.write(mountsText(mounts));
     return 0;
   }
   if (cmd === 'list') {
-    process.stdout.write(`Still running from your session (${session}): ${mine.length}\n${mine.map(line).join('\n')}\n\`ff-leftovers end\` ends them; FF Factory ends them anyway a few minutes after your process stops. A program a person goes on using: start it again with \`ff-leftovers launch\`.\n`);
+    process.stdout.write(`Still running from your session (${session}): ${mine.length}\n${mine.map(line).join('\n')}\n\`ff-leftovers end\` ends them; FF Factory ends them anyway a few minutes after your process stops. A program a person goes on using: start it again with \`ff-leftovers launch\`.\n${mountsText(mounts)}`);
     return 0;
   }
   // Ended, then looked for again: a loop can start its next child between the list and the kill, so "None is left" is said
@@ -1589,7 +1595,23 @@ export async function leftoversMain(argv: string[], e: NodeJS.ProcessEnv = proce
   }
   const done = ended.filter((p) => !todo.some((x) => x.pid === p.pid && x.cmd === p.cmd));
   process.stdout.write(`Ended ${done.length} of ${ended.length} process(es) your session (${session}) started${killed ? ` (${killed} needed SIGKILL)` : ''}:\n${ended.map(line).join('\n')}\n${todo.length ? `Still running:\n${todo.map(line).join('\n')}\n` : 'None is left.\n'}`);
-  return todo.length ? 1 : 0;
+  // Once their daemons are gone the mounts answer "not connected": take them off, so clean-up can delete the folder.
+  const mountsLeft = (await mountsIn(tempDir)).length ? unmountText(await unmountOwnFuse(tempDir)) : 0;
+  return todo.length || mountsLeft ? 1 : 0;
+}
+
+/** w5285: what `list` says of the mounts in the session's own temp folder. */
+export function mountsText(ms: Mount[]): string {
+  if (!ms.length) return '';
+  const what = ms.map((m) => `${m.point} (${m.fstype})`).join(', ');
+  return `Mounted in your temp folder (${ms.length}): ${what}. A desktop session whose XDG_RUNTIME_DIR was inside it (gvfsd-fuse, the document portal) leaves these; \`ff-leftovers end\` unmounts the FUSE ones, and clean-up refuses the folder while one lives.\n`;
+}
+
+/** w5285: what `end` says of the unmount, and its exit code (1 while a mount stays). */
+export function unmountText(r: { cleared: string[]; left: Mount[] }, out: (s: string) => void = (s) => void process.stdout.write(s)): number {
+  if (r.cleared.length) out(`Unmounted ${r.cleared.length} FUSE mount(s) from your temp folder: ${r.cleared.join(', ')}\n`);
+  if (r.left.length) out(`Still mounted in your temp folder: ${r.left.map((m) => `${m.point} (${m.fstype})`).join(', ')}\n`);
+  return r.left.length ? 1 : 0;
 }
 
 /** A worker's variables that say it owns a process, or hold its credentials: never handed to a person's program (w4047). */
@@ -1637,6 +1659,15 @@ export async function launchForPerson(args: string[], session: string, e: NodeJS
   child.unref();
   out(`Started ${prog} (pid ${child.pid}) for a person: FF Factory's sweep and \`ff-leftovers end\` never end it or what it starts.\n`);
   return { code: 0, pid: child.pid };
+}
+
+/** w5285: the session's own temp folder (TMPDIR, TEMP or TMP named ffa-<session>), as the variable spells it. */
+export function sessionTempDir(session: string, e: NodeJS.ProcessEnv): string | undefined {
+  for (const t of [e.TMPDIR, e.TEMP, e.TMP]) {
+    const d = t?.replace(/[/\\]+$/, '');
+    if (d && path.win32.basename(d).toLowerCase() === `ffa-${session}`.toLowerCase()) return d;
+  }
+  return undefined;
 }
 
 /** The session's own temp folder's parent (TEMP or TMP is <root>/ffa-<session> in a worker), for the command-line rule. */
