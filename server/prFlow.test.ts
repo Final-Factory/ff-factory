@@ -65,6 +65,17 @@ test('parseArgs: commands, options and the pairs that go together', () => {
   assert.deepEqual(parseArgs(['push', '--base', 'master']), { cmd: 'push', o: { draft: false, mergeBase: true, base: 'master' } });
   assert.equal(parseArgs(['push', '--title', 'x']), '--title and --body-file go together');
   assert.equal(parseArgs(['push', '--base']), '--base needs a value');
+  // w5166: the PR number as the ci-release skill writes it, bare or with --pr, in either order
+  const pr4198 = { cmd: 'merge', o: { draft: false, mergeBase: true, pr: '4198' } };
+  assert.deepEqual(parseArgs(['merge', '4198']), pr4198);
+  assert.deepEqual(parseArgs(['merge', '--pr', '4198']), pr4198);
+  assert.deepEqual(parseArgs(['merge', '4198', '--pr', '4198']), pr4198);
+  assert.deepEqual(parseArgs(['merge', '--pr', '4198', '4198']), pr4198);
+  assert.deepEqual(parseArgs(['status', '4198']), { cmd: 'status', o: { draft: false, mergeBase: true, pr: '4198' } });
+  assert.match(String(parseArgs(['merge', '4198', '--pr', '4199'])), /name different pull requests/);
+  assert.match(String(parseArgs(['merge', '--pr', '4199', '4198'])), /name different pull requests/);
+  assert.match(String(parseArgs(['merge', '4198', '4199'])), /name different pull requests/);
+  assert.equal(parseArgs(['push', '4198']), 'unknown option 4198');
   assert.equal(parseArgs(['land']), 'unknown command land');
   assert.equal(prMain([], fake({})), 2);
 });
@@ -120,6 +131,15 @@ test('merge: merges on green with --match-head-commit; running waits (exit 3); r
   assert.equal(prMain(['merge'], green), 0);
   assert.ok(green.ran.includes(`gh pr merge 7 --merge --match-head-commit ${SHA}`));
   assert.match(green.said, /merged at head/);
+  // w5166: both written forms merge through the same gate
+  for (const argv of [['merge', '7'], ['merge', '--pr', '7']]) {
+    const g = fake({ 'gh pr view': [ok(pr()), ok(pr({ state: 'MERGED' }))], 'gh run list': runs([{ databaseId: 9, workflowName: 'ci', status: 'completed', conclusion: 'success' }]) });
+    assert.equal(prMain(argv, g), 0, argv.join(' '));
+    assert.ok(g.ran.includes(`gh pr merge 7 --merge --match-head-commit ${SHA}`));
+  }
+  const clash = fake({ 'gh pr view': ok(pr()) });
+  assert.equal(prMain(['merge', '7', '--pr', '8'], clash), 2);
+  assert.ok(!clash.ran.some((l) => l.startsWith('gh pr merge')));
   const running = fake({ 'gh pr view': ok(pr()), 'gh run list': runs([{ databaseId: 9, workflowName: 'ci', status: 'in_progress' }]) });
   assert.equal(prMain(['merge'], running), 3);
   assert.ok(!running.ran.some((l) => l.startsWith('gh pr merge')));
