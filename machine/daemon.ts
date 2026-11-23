@@ -1129,6 +1129,8 @@ export class Daemon {
       // The last pass's free space against the soft threshold: ff-leftovers folders gives a finished worker's bulk minutes, not a day (w2223).
       ...(this.cleaner.last ? { low: !!this.cleaner.last.belowSoft } : {}),
       ...(this.timed ? { timedRuns: this.timed.active() } : {}),
+      // w5280: the pool's Library seed, whose stale cache entries ff-leftovers lists (cleanupFolders.ts judgeSeedLibraryPath).
+      ...(this.currentPool()?.librarySeed ? { librarySeed: this.currentPool()!.librarySeed } : {}),
     };
   }
 

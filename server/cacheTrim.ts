@@ -24,7 +24,7 @@ export const LIBRARY_CACHES = ['BuildCache', 'BurstCache'];
  *   newest build wrote (within an hour of the newest write), then the newest folders up to `buildCacheGB`, like that prune's
  *   least-recently-used order (V: keeps no access times: a file's access time is its write time, measured 2026-11-01).
  * - Never: BurstCache/JIT (the editor's own Burst code; an entry of an unchanged package assembly is old and still in use,
- *   and nothing on disk tells which), PlayerDataCache and EntitySceneBundles (a build trusts them whole), Artifacts, Bee,
+ *   and nothing on disk tells which by its write time; `ff-leftovers` alone goes by access time, idleJitEntries, w5280), PlayerDataCache and EntitySceneBundles (a build trusts them whole), Artifacts, Bee,
  *   ScriptAssemblies, PackageCache. Those go only as a last resort (cleanup.ts, `sandbox-lib-cache-last-resort`).
  *
  * Never while an editor or a batchmode build has the project open (Temp/UnityLockfile).
@@ -146,6 +146,70 @@ export async function staleCacheEntries(project: string, policy: TrimPolicy = TR
     else (full = true), stale.push({ path: f.path, bytes: f.bytes, why: `a build-cache entry older than the newest build, past the newest ${policy.buildCacheGB} GB` });
   }
   return { stale, keptBytes: total - stale.reduce((n, e) => n + e.bytes, 0) };
+}
+
+/**
+ * JIT bundles idle this long are judged unused (w5280). Every `<hash>.bundle` the editor loads has its access time moved on
+ * load (APFS on m5: a bundle written 2026-10-05 read 2026-11-13; slot3's 1,660 bundles all read within 14 days, measured
+ * 2026-11-23), so one nobody read for 14 days is Burst code of an assembly that changed since. Fourteen days, not the three of
+ * a reseed: a sandbox in use can sit on one branch for a week, and a bundle of a branch switched back to is worth a week.
+ */
+export const JIT_IDLE_DAYS = 14;
+
+/** An access time an hour past the write time somewhere in the folder: the volume records reads (V: does not, w4394). */
+const READS_RECORDED_MS = 3_600_000;
+
+async function newestTouch(p: string): Promise<{ bytes: number; touched: number; read: boolean } | undefined> {
+  const st = await fs.promises.lstat(p).catch(() => undefined);
+  if (!st) return undefined;
+  if (!st.isDirectory()) return { bytes: st.size, touched: Math.max(st.atimeMs, st.mtimeMs), read: st.atimeMs > st.mtimeMs + READS_RECORDED_MS };
+  let bytes = 0;
+  let touched = st.mtimeMs;
+  let read = false;
+  for (const e of await fs.promises.readdir(p, { withFileTypes: true }).catch(() => [] as fs.Dirent[])) {
+    const t = await newestTouch(path.join(p, e.name));
+    if (!t) continue;
+    bytes += t.bytes;
+    touched = Math.max(touched, t.touched);
+    read ||= t.read;
+  }
+  return { bytes, touched, read };
+}
+
+/**
+ * The JIT bundles of `<project>/Library/BurstCache/JIT` nobody loaded for `days` (w5280): `<hash>.bundle` and its
+ * `<hash>.bundle.dSYM` go together, judged by the newest access or write time of either. The manifest
+ * (BurstCacheManifest.cm) and Hashes stay; Burst compiles a missing bundle again on its next load. Nothing where the volume
+ * keeps no access times (no entry read an hour after it was written: Windows' V:, a noatime mount), since there an old
+ * bundle in daily use looks idle. Never for the Library seed: nothing loads it, so its access times say nothing, and every one
+ * of m5's 1,589 seed bundles was in a sandbox read within 14 days (measured 2026-11-23). Reads only.
+ */
+export async function idleJitEntries(project: string, days = JIT_IDLE_DAYS, now = Date.now()): Promise<StaleEntry[]> {
+  const jit = path.join(project, 'Library', 'BurstCache', 'JIT');
+  const names = (await fs.promises.readdir(jit).catch(() => [] as string[])).filter((n) => /\.bundle$/i.test(n));
+  const seen: { bundle: string; parts: { path: string; bytes: number }[]; touched: number }[] = [];
+  let reads = false;
+  for (const n of names) {
+    const parts: { path: string; bytes: number }[] = [];
+    let touched = 0;
+    for (const p of [path.join(jit, n), path.join(jit, `${n}.dSYM`)]) {
+      const t = await newestTouch(p);
+      if (!t) continue;
+      parts.push({ path: p, bytes: t.bytes });
+      touched = Math.max(touched, t.touched);
+      reads ||= t.read;
+    }
+    seen.push({ bundle: n, parts, touched });
+  }
+  if (!reads) return [];
+  const cut = now - days * 86_400_000;
+  const stale: StaleEntry[] = [];
+  for (const s of seen) {
+    if (s.touched >= cut) continue;
+    const ago = Math.floor((now - s.touched) / 86_400_000);
+    for (const p of s.parts) stale.push({ path: p.path, bytes: p.bytes, why: `a Burst JIT bundle nobody loaded for ${ago} days (the newest access or write of ${s.bundle} and its dSYM; ${days} days idle go, w5280)` });
+  }
+  return stale;
 }
 
 /** Remove the empty folders under `dir` (not `dir` itself). */
