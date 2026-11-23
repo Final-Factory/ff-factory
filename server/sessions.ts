@@ -1340,6 +1340,12 @@ export class SessionManager {
    */
   roomMove?: (s: SessionHandle, q: QueuedSend, hold: string, now: number) => true | string | undefined;
   /**
+   * w5328 (server/deployResume.ts): a gate resume whose request waited for another computer's daemon update goes to that
+   * computer: `true` when its work moved there (dropped here), a string while it waits for room or the machine there (the
+   * Queued line), undefined when nothing of it applies (it is delivered or held as any message). Set by Agents.
+   */
+  deployMove?: (s: SessionHandle, q: QueuedSend, now: number) => true | string | undefined;
+  /**
    * w3843: runs a drain with places and claims computed once across its messages (Agents.withPlacesOnce and
    * PlaceAgain.withClaimsMemo). After the 2026-11-09 13:03Z restart each waiting message computed them again (fullFor's
    * placement, roomMove's moveFacts), 10-17 s portal blocks. What changes placement runs in placementFree; placementChanged
@@ -1738,6 +1744,21 @@ export class SessionManager {
       // w1749: an orchestrator's automatic compaction goes first; its messages go once it is done.
       const compacting = this.compactHold?.(s);
       if (compacting) {
+        held.add(q.id);
+        continue;
+      }
+      // w5328: a resume that waited for another computer's update goes there (or waits for it), whatever holds its own.
+      const there = q.resumeOf && this.deployMove ? this.deployMove(s, q, now) : undefined;
+      if (there === true) {
+        drop();
+        continue;
+      }
+      if (there) {
+        if (q.why !== there) {
+          q.why = there;
+          q.on = 'capacity';
+          this.saveQueue();
+        }
         held.add(q.id);
         continue;
       }
