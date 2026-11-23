@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
-import { localWorkWhy, norm, unpushedWorkWhy, OUTSIDE_ROOT_WHY, sizeOf, within } from './cleanup.ts';
+import { freeableBytes, localWorkWhy, norm, unpushedWorkWhy, OUTSIDE_ROOT_WHY, within } from './cleanup.ts';
 import { requestIdsIn, CONTEXT_MAX_AGE_HOURS } from './staleOutput.ts';
 import type { SessionOwner } from './resumable.ts';
 import { finishedBulkIn, INSTALL_LEFTOVER_DEFAULTS, isCargoTarget, newestTopWrite, newestWrite } from './installLeftovers.ts';
@@ -62,8 +62,14 @@ export interface FolderRow {
   kind: 'session-temp' | 'session-bulk' | 'scratch' | 'sandbox-output' | 'player-slot' | 'ffu-slot-target' | 'named' | 'other';
   verdict: 'keep' | 'delete';
   why: string;
+  /** What deleting it alone frees (w5168): files hard-linked to a place it does not hold (a build still kept) do not count. */
   bytes?: number;
+  /** Bytes in it that are hard links to files kept elsewhere: a delete frees none of them (w5168). */
+  linked?: number;
 }
+
+/** planFolders' rows, with what deleting every DELETE row together frees (w5168) and the empty player slots it left out. */
+export type FolderPlan = FolderRow[] & { freed?: number; linked?: number; emptySlots?: number };
 
 /** The daemon writes the facts every 30 s; older than this and it is not running or not writing. */
 export const FACTS_MAX_AGE_MS = 5 * 60_000;
@@ -205,10 +211,35 @@ export function judgePlayerSlot(slot: string, ctx: SlotContext | undefined, now 
   }
   const marker = readJson(path.join(slot, 'slot.json')) as { state?: string; filled?: number } | undefined;
   if (marker?.state === 'filling' && now - Number(marker.filled) * 1000 < maxAgeHours * 3_600_000) return { verdict: 'keep', why: 'a launch is filling this player slot now (slot.json "filling"; its lease comes after the copy)' };
+  if (slotEmpty(slot)) return { verdict: 'keep', why: EMPTY_SLOT_WHY };
   if (!ctx.procs) return { verdict: 'keep', why: 'a player slot with no live lease, but the running processes could not be read to see that nothing plays from it' };
   if (ctx.procs.some((c) => mentions(c, slot))) return { verdict: 'keep', why: "a player slot no lease holds, but a running process plays from it (a person's game, or a run whose lease went stale)" };
   const stale = leases.length ? ` (${leases.length} lease file(s), none live)` : '';
-  return { verdict: 'delete', why: `a player slot no live lease holds${stale}: the next launch fills it again from the build. Its files may be hard links to a build that still exists, so it can free less than its size` };
+  return { verdict: 'delete', why: `a player slot no live lease holds${stale}: \`ff-leftovers remove <slot>\` empties it and keeps the folder and its firewall rule; the next launch fills it again from the build. Its size counts only what that frees: files hard-linked to a build still kept free nothing (w5168)` };
+}
+
+export const EMPTY_SLOT_WHY = 'an empty player slot (nothing but its leases/ folder, as `ff-leftovers remove` leaves it): nothing to free; the folder stays for its path and firewall rule, and `folders` does not list it (w5168)';
+
+/**
+ * A slot emptied by `remove`/`remove-slot` or player_slots.py prune: only leases/ (no live lease, judged before), a stale
+ * slot.json or an empty player/ left (w5168). In w5165 the 12 slots a clean-up had emptied stayed DELETE rows at 0 MB.
+ */
+export function slotEmpty(slot: string): boolean {
+  let names: string[];
+  try {
+    names = fs.readdirSync(slot);
+  } catch {
+    return false;
+  }
+  return names.every((n) => {
+    if (n === 'leases' || n === 'slot.json') return true;
+    if (n !== 'player') return false;
+    try {
+      return fs.readdirSync(path.join(slot, n)).length === 0;
+    } catch {
+      return false;
+    }
+  });
 }
 
 const isSlotDir = (name: string) => /^slot[\w-]*$/i.test(name);
@@ -397,7 +428,7 @@ export async function finishedRows(dir: string, f: CleanupFacts, o: { now?: numb
 }
 
 /** Every folder a clean-up could take, judged. Sizes are measured for the deletable ones only unless `sizes` asks for all. */
-export async function planFolders(f: CleanupFacts, o: { now?: number; sizes?: 'all' | 'delete' | 'none'; localWork?: (dir: string) => Promise<string | undefined>; unpushedWork?: (dir: string) => Promise<string | undefined>; published?: Map<string, PublishedRecord[]>; ignoredEvidence?: (repo: string) => Promise<string[] | undefined>; slots?: SlotContext } = {}): Promise<FolderRow[]> {
+export async function planFolders(f: CleanupFacts, o: { now?: number; sizes?: 'all' | 'delete' | 'none'; localWork?: (dir: string) => Promise<string | undefined>; unpushedWork?: (dir: string) => Promise<string | undefined>; published?: Map<string, PublishedRecord[]>; ignoredEvidence?: (repo: string) => Promise<string[] | undefined>; slots?: SlotContext } = {}): Promise<FolderPlan> {
   const now = o.now ?? Date.now();
   const bad = factsProblem(f, now);
   if (bad) return [{ path: f.root ?? '(no install folder)', kind: 'other', verdict: 'keep', why: bad }];
@@ -413,34 +444,56 @@ export async function planFolders(f: CleanupFacts, o: { now?: number; sizes?: 'a
   for (const sb of f.sandboxes) {
     for (const top of ['Builds', '.nightly-builds']) for (const e of entries(path.join(sb.path, top))) paths.push(path.join(sb.path, top, e.name));
   }
-  const rows: FolderRow[] = [];
+  const rows: FolderPlan = [];
+  let emptySlots = 0;
   for (const p of paths) {
     const r = await judgeWithGit(p, f, now, o.slots, o);
+    // An emptied slot is no candidate (w5168): nothing to free, and its folder stays.
+    if (r.kind === 'player-slot' && r.why === EMPTY_SLOT_WHY) {
+      emptySlots++;
+      continue;
+    }
     rows.push(r);
     const sid = r.kind === 'session-temp' ? sessionOfDir(path.basename(p)) : undefined;
     if (r.verdict === 'keep' && sid && finishedSession(sid, f)) rows.push(...(await finishedRows(p, f, { now, published: o.published, localWork: o.localWork, ignoredEvidence: o.ignoredEvidence })));
   }
   const mode = o.sizes ?? 'delete';
-  if (mode !== 'none') for (const r of rows) if (mode === 'all' || r.verdict === 'delete') r.bytes = await sizeOf(r.path).catch(() => undefined);
-  return rows.sort((a, b) => (a.verdict === b.verdict ? 0 : a.verdict === 'keep' ? -1 : 1) || a.path.localeCompare(b.path));
+  if (mode !== 'none') {
+    // Measured together (w5168): each row's bytes are what deleting it alone frees, the plan's what deleting every DELETE row frees.
+    const measured = rows.filter((r) => mode === 'all' || r.verdict === 'delete');
+    const { each, together } = await freeableBytes(measured.map((r) => r.path), { inTotal: measured.map((r) => r.verdict === 'delete') });
+    measured.forEach((r, i) => {
+      r.bytes = each[i]!.freed;
+      if (each[i]!.bytes > each[i]!.freed) r.linked = each[i]!.bytes - each[i]!.freed;
+    });
+    rows.freed = together.freed;
+    if (together.bytes > together.freed) rows.linked = together.bytes - together.freed;
+  }
+  if (emptySlots) rows.emptySlots = emptySlots;
+  rows.sort((a, b) => (a.verdict === b.verdict ? 0 : a.verdict === 'keep' ? -1 : 1) || a.path.localeCompare(b.path));
+  return rows;
 }
 
 const gb = (n: number) => (n >= 1e9 ? `${(n / 1e9).toFixed(1)} GB` : `${Math.round(n / 1e6)} MB`);
 
 /** The listing a clean-up worker reads: what to keep and why, what it may delete. */
-export function renderFolders(rows: FolderRow[], f: CleanupFacts | undefined, now = Date.now()): string {
+export function renderFolders(rows: FolderPlan, f: CleanupFacts | undefined, now = Date.now()): string {
   const bad = factsProblem(f, now);
   if (bad) return `Nothing may be deleted on this machine's facts: ${bad}.\nReport that; do not guess which folders are free.\n`;
-  const line = (r: FolderRow) => `${r.verdict === 'keep' ? 'KEEP  ' : 'DELETE'}  ${r.bytes === undefined ? '' : `${gb(r.bytes)}  `}${r.path}\n        ${r.why}`;
+  // w5168: a size is what the delete frees; hard links to files kept elsewhere (a player slot's build) are shown apart.
+  const linked = (n: number | undefined) => (n ? `, +${gb(n)} hard-linked to files kept elsewhere, not freed` : '');
+  const line = (r: FolderRow) => `${r.verdict === 'keep' ? 'KEEP  ' : 'DELETE'}  ${r.bytes === undefined ? '' : `${gb(r.bytes)}${linked(r.linked)}  `}${r.path}\n        ${r.why}`;
   const keep = rows.filter((r) => r.verdict === 'keep');
   const del = rows.filter((r) => r.verdict === 'delete');
-  const total = del.reduce((n, r) => n + (r.bytes ?? 0), 0);
+  const total = rows.freed ?? del.reduce((n, r) => n + (r.bytes ?? 0), 0);
+  const measured = del.some((r) => r.bytes !== undefined);
+  const empty = rows.emptySlots ? ` ${rows.emptySlots} empty player slot(s) not listed: nothing to free.` : '';
   return [
-    `Folders under ${f!.root} judged against the ledger (facts ${Math.max(0, Math.round((now - Date.parse(f!.at)) / 1000))} s old): ${keep.length} to KEEP, ${del.length} deletable${total ? ` (${gb(total)})` : ''}.`,
+    `Folders under ${f!.root} judged against the ledger (facts ${Math.max(0, Math.round((now - Date.parse(f!.at)) / 1000))} s old): ${keep.length} to KEEP, ${del.length} deletable${measured ? ` (${gb(total)} freed by deleting them all${linked(rows.linked)})` : ''}.${empty}`,
     ...keep.map(line),
     ...del.map(line),
-    'Delete only the DELETE rows, and only inside the install folder. A KEEP row belongs to a request that has not closed (open, stalled or paused), holds a git repo with work on no remote or evidence published nowhere else, or could not be attributed: report it, never remove it. A DELETE row inside a kept folder (a finished worker\'s bulk, w2223) goes alone; its folder stays. A player slot is judged by its lease files (w2796); empty a DELETE one with `ff-leftovers remove-slot <slot>`, which refuses one a live lease or a running process holds (w3204).',
-    'Delete a DELETE row with `ff-leftovers remove <path>...` (w4394), never rm: it judges the path again just before it deletes, refuses a KEEP path, a link and anything outside the install folder, and logs each removal with its size. `ff-leftovers check <path>...` judges any other path before you delete it.',
+    'Delete only the DELETE rows, and only inside the install folder. A KEEP row belongs to a request that has not closed (open, stalled or paused), holds a git repo with work on no remote or evidence published nowhere else, or could not be attributed: report it, never remove it. A DELETE row inside a kept folder (a finished worker\'s bulk, w2223) goes alone; its folder stays. A player slot is judged by its lease files (w2796).',
+    'Delete every DELETE row, player slots included, with `ff-leftovers remove <path>...` (w4394, w5168), never rm: it judges the path again just before it deletes, refuses a KEEP path, a link and anything outside the install folder, and logs each removal with what it freed. A player slot it empties and keeps (its folder and firewall rule stay, as `remove-slot <slot>` does). `ff-leftovers check <path>...` judges any other path before you delete it.',
     '',
   ].join('\n');
 }

@@ -50,7 +50,7 @@ import path from 'node:path';
 import { run } from '../server/proc.ts';
 import { factsProblem, finishedRows, finishedSession, judgePath, judgeWithGit, planFolders, renderFolders, type CleanupFacts, type FolderRow, type SlotContext } from '../server/cleanupFolders.ts';
 import { isAlive } from '../server/proc.ts';
-import { norm, sizeOf, within } from '../server/cleanup.ts';
+import { freeableBytes, norm, within, type Freeable } from '../server/cleanup.ts';
 import { publishedFile, readPublished } from '../server/published.ts';
 import { parsePsJson } from '../server/watchdog.ts';
 import { driveLabel, inNeverGames, installDrive, onInstallDrive } from '../server/rootFence.ts';
@@ -1267,7 +1267,7 @@ export function slotPathOf(a: string, root: string | undefined): string {
   return path.resolve(a.trim());
 }
 
-export async function removeSlots(args: string[], facts: CleanupFacts | undefined, now: number, out: (s: string) => void, slots: () => Promise<SlotContext>, o: { home?: string } = {}): Promise<number> {
+export async function removeSlots(args: string[], facts: CleanupFacts | undefined, now: number, out: (s: string) => void, slots: () => Promise<SlotContext>, o: { home?: string; log?: string } = {}): Promise<number> {
   if (!args.length) {
     out('usage: ff-leftovers remove-slot <player slot folder>...\n');
     return 2;
@@ -1323,16 +1323,15 @@ export async function removeSlots(args: string[], facts: CleanupFacts | undefine
       no(a, `${again.why} (seen after its player/ was moved aside; put back)`);
       continue;
     }
-    let size = 0;
-    for (const n of fs.readdirSync(p)) {
-      if (!n.startsWith('trash-')) continue;
-      size += await sizeOf(path.join(p, n)).catch(() => 0);
-      fs.rmSync(path.join(p, n), { recursive: true, force: true });
-    }
+    const trashes = fs.readdirSync(p).filter((n) => n.startsWith('trash-')).map((n) => path.join(p, n));
+    // w5168: what the delete frees, not each link's size (a slot's files are hard links to a build that still exists).
+    const { together: size } = await freeableBytes(trashes).catch(() => ({ together: { bytes: 0, freed: 0 } }));
+    for (const t of trashes) fs.rmSync(t, { recursive: true, force: true });
     fs.rmSync(path.join(p, 'slot.json'), { force: true });
     const leases = path.join(p, 'leases');
     for (const n of fs.existsSync(leases) ? fs.readdirSync(leases).filter((x) => x.endsWith('.json')) : []) fs.rmSync(path.join(leases, n), { force: true });
-    out(`REMOVED ${a}\n        ${Math.round(size / 1_048_576)} MB (hard links to a build that still exists free less); the folder stays empty, the next launch fills it again\n`);
+    out(`REMOVED ${a}\n        ${freedText(size)}; the folder stays empty, the next launch fills it again\n`);
+    if (o.log) logRemoval(o.log, now, p, size.freed, first.why, out);
   }
   return refused ? 1 : 0;
 }
@@ -1346,7 +1345,9 @@ export async function removeSlots(args: string[], facts: CleanupFacts | undefine
  * - outside the worker install folder (w896), the folder itself, a top folder of it (REMOVE_TOP), the main clone (`repo`),
  *   `seed`, `secrets`, or the daemon's folder;
  * - a symbolic link or junction, or a path through one: the real place must be the name the verdict judged;
- * - a player slot (remove-slot empties those and keeps the folder and its firewall rule), or the folder the command runs in.
+ * - the folder the command runs in, or a path inside a player slot.
+ * A player slot itself goes to removeSlots (w5168): emptied and kept, its folder and firewall rule stay. Before w5168 remove
+ * refused every slot and pointed at remove-slot, while `folders` listed the slots as DELETE rows like any other (w5165).
  * The verdict is taken twice, the second time just before the delete, so a worker that starts or resumes meanwhile keeps
  * it. Each removal is printed and appended with its size to <root>/logs/ff-leftovers-removed.jsonl (FF_LEFTOVERS_REMOVE_LOG
  * overrides it, for tests).
@@ -1427,7 +1428,13 @@ export async function removeFolders(
       continue;
     }
     if (judgePath(p, facts!, now).kind === 'player-slot') {
-      no(a, 'a player slot: empty it with `ff-leftovers remove-slot <slot>`, which keeps the folder and its firewall rule (w3204)');
+      // w5168: a slot's DELETE row goes with the same command as every other row; it is emptied and kept, as remove-slot does.
+      const slotDir = path.join(root, 'players', path.basename(p));
+      if (norm(slotDir) !== norm(p)) {
+        no(a, `inside a player slot: remove the slot itself (\`ff-leftovers remove ${slotDir}\`), which empties it and keeps its folder and firewall rule (w3204)`);
+        continue;
+      }
+      if ((await removeSlots([a], facts, now, out, slots, { home, log: o.log ?? path.join(root, 'logs', 'ff-leftovers-removed.jsonl') })) !== 0) refused++;
       continue;
     }
     const first = await checkPath(p, facts!, now, published, await slots());
@@ -1435,7 +1442,7 @@ export async function removeFolders(
       no(a, first.why);
       continue;
     }
-    const size = await sizeOf(p).catch(() => 0);
+    const { together: size } = await freeableBytes([p]).catch(() => ({ together: { bytes: 0, freed: 0 } }));
     const again = await checkPath(p, facts!, now, published, await slots());
     const fenceAgain = removeFenceProblem(p, root, { home, daemonDir: o.daemonDir, cwd });
     if (again.verdict !== 'delete' || fenceAgain) {
@@ -1448,23 +1455,33 @@ export async function removeFolders(
       no(a, `the delete failed part-way (${(e as NodeJS.ErrnoException).code ?? (e as Error).message})${fs.existsSync(p) ? '; what is left stays: run it again, or report it' : ''}`);
       continue;
     }
-    out(`REMOVED ${a}\n        ${Math.round(size / 1_048_576)} MB; ${first.why}\n`);
-    const log = o.log ?? path.join(root, 'logs', 'ff-leftovers-removed.jsonl');
-    try {
-      fs.mkdirSync(path.dirname(log), { recursive: true });
-      fs.appendFileSync(log, JSON.stringify({ at: new Date(now).toISOString(), path: p, bytes: size, why: first.why, session: process.env.FF_SESSION_ID ?? null }) + '\n');
-    } catch (e) {
-      out(`        (its log line could not be written to ${log}: ${(e as Error).message})\n`);
-    }
+    out(`REMOVED ${a}\n        ${freedText(size)}; ${first.why}\n`);
+    logRemoval(o.log ?? path.join(root, 'logs', 'ff-leftovers-removed.jsonl'), now, p, size.freed, first.why, out);
   }
   return refused ? 1 : 0;
+}
+
+/** "N MB freed", with the bytes that were hard links to files kept elsewhere apart (w5168). */
+export function freedText(s: Freeable): string {
+  const mb = (n: number) => `${Math.round(n / 1_048_576)} MB`;
+  return s.bytes > s.freed ? `${mb(s.freed)} freed (${mb(s.bytes - s.freed)} more were hard links to files kept elsewhere, a build, so not freed)` : `${mb(s.freed)} freed`;
+}
+
+/** One line of <root>/logs/ff-leftovers-removed.jsonl (w4394); `bytes` is what the delete freed (w5168). */
+function logRemoval(log: string, now: number, p: string, bytes: number, why: string, out: (s: string) => void): void {
+  try {
+    fs.mkdirSync(path.dirname(log), { recursive: true });
+    fs.appendFileSync(log, JSON.stringify({ at: new Date(now).toISOString(), path: p, bytes, why, session: process.env.FF_SESSION_ID ?? null }) + '\n');
+  } catch (e) {
+    out(`        (its log line could not be written to ${log}: ${(e as Error).message})\n`);
+  }
 }
 
 export async function foldersMain(cmd: 'folders' | 'check' | 'remove-slot' | 'remove', args: string[], e: NodeJS.ProcessEnv = process.env, now = Date.now(), out: (s: string) => void = (s) => void process.stdout.write(s), slots: () => Promise<SlotContext> = slotContext): Promise<number> {
   const facts = readCleanupFacts(e.FF_CLEANUP_FACTS);
   // What this machine's workers published, beside the facts in the daemon's folder (w2223): a finished worker's evidence published there may go.
   const published = readPublished(e.FF_CLEANUP_FACTS ? publishedFile(path.dirname(e.FF_CLEANUP_FACTS)) : undefined);
-  if (cmd === 'remove-slot') return removeSlots(args, facts, now, out, slots);
+  if (cmd === 'remove-slot') return removeSlots(args, facts, now, out, slots, facts?.root ? { log: e.FF_LEFTOVERS_REMOVE_LOG ?? path.join(facts.root, 'logs', 'ff-leftovers-removed.jsonl') } : {});
   if (cmd === 'remove') {
     const daemonDir = e.FF_CLEANUP_FACTS ? path.dirname(e.FF_CLEANUP_FACTS) : undefined;
     return removeFolders(args, facts, now, out, slots, published, { daemonDir, ...(e.USERPROFILE ? { home: e.USERPROFILE } : {}), ...(e.FF_LEFTOVERS_REMOVE_LOG ? { log: e.FF_LEFTOVERS_REMOVE_LOG } : {}) });
@@ -1508,7 +1525,7 @@ export async function leftoversMain(argv: string[], e: NodeJS.ProcessEnv = proce
   const platform: UnityPlatform = process.platform === 'win32' ? 'win32' : process.platform === 'linux' ? 'linux' : 'darwin';
   if (session && cmd === 'launch' && argv.length > 1) return (await launchForPerson(argv.slice(1), session, e, platform)).code;
   if (!session || !['list', 'end'].includes(cmd)) {
-    process.stdout.write(`usage: ff-leftovers [list|end|launch <program> [args]...|folders|check <path>...|remove <path>...|remove-slot <slot>...]\n  list: what this worker's session (FF_SESSION_ID) started that still runs: players, Xvfb, builds, servers, background jobs\n  end: end them (SIGTERM, then SIGKILL after 5 s), before DONE or a stop\n  launch <program> [args]...: start a program a person goes on using (a launcher, an installer's window, a desktop app) so that neither \`end\` nor FF Factory's sweep ever ends it or what it starts (w4047): without your session's FF_* variables and credentials, marked FF_FOR_PERSON, detached, from your home folder. A Mac: \`ff-leftovers launch open -a "<app>"\`; Windows: a Windows path to an .exe, or \`cmd /c start "" "<file>"\`. Never for a game player or a run of your own\n  folders: a clean-up's candidates under the install folder, each KEEP or DELETE by the ledger (a request not closed keeps its worker's folders)\n  check <path>...: the same verdict for paths you mean to delete; exit 1 if any is to be kept. Only paths in the install folder: on Windows never one on C: or another drive, apart from the game's AppData Never Games folders, which are always KEEP (w1755)\n  remove <path>...: delete what check judges DELETE, only inside the install folder: judged again just before the delete; refuses a link, the main clone and a running or resumable worker's folder; logs each removal and its size (w4394)\n  remove-slot <slot>...: empty idle player slots (<install>/players/slot<K>-<P>); refused while a lease lives, a fill runs or a process plays from it (w3204)\n${session ? '' : 'FF_SESSION_ID is not set: run it from a worker of FF Factory.\n'}`);
+    process.stdout.write(`usage: ff-leftovers [list|end|launch <program> [args]...|folders|check <path>...|remove <path>...|remove-slot <slot>...]\n  list: what this worker's session (FF_SESSION_ID) started that still runs: players, Xvfb, builds, servers, background jobs\n  end: end them (SIGTERM, then SIGKILL after 5 s), before DONE or a stop\n  launch <program> [args]...: start a program a person goes on using (a launcher, an installer's window, a desktop app) so that neither \`end\` nor FF Factory's sweep ever ends it or what it starts (w4047): without your session's FF_* variables and credentials, marked FF_FOR_PERSON, detached, from your home folder. A Mac: \`ff-leftovers launch open -a "<app>"\`; Windows: a Windows path to an .exe, or \`cmd /c start "" "<file>"\`. Never for a game player or a run of your own\n  folders: a clean-up's candidates under the install folder, each KEEP or DELETE by the ledger (a request not closed keeps its worker's folders)\n  check <path>...: the same verdict for paths you mean to delete; exit 1 if any is to be kept. Only paths in the install folder: on Windows never one on C: or another drive, apart from the game's AppData Never Games folders, which are always KEEP (w1755)\n  remove <path>...: delete what check judges DELETE, only inside the install folder: judged again just before the delete; refuses a link, the main clone and a running or resumable worker's folder; a player slot it empties and keeps, as remove-slot does (w5168); logs each removal and the bytes it freed: hard links to files kept elsewhere (a slot's build) do not count (w4394)\n  remove-slot <slot>...: empty idle player slots (<install>/players/slot<K>-<P>); refused while a lease lives, a fill runs or a process plays from it (w3204)\n${session ? '' : 'FF_SESSION_ID is not set: run it from a worker of FF Factory.\n'}`);
     return session ? 2 : 1;
   }
   const { realDeps } = await import('./unity.ts');
