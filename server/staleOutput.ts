@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { OwnLeftoverPlan } from './ownLeftovers.ts';
 import { onInstallDrive } from './rootFence.ts';
-import { fenceToRoot, hasLocalWork, neverDelete, runCleanup, sizeOf, sizePlan, touchedSince, type CleanupGuard, type CleanupItem, type CleanupRun, type PassOptions } from './cleanup.ts';
+import { fenceToRoot, hasLocalWork, neverDelete, runCleanup, sizeOf, sizePlan, touchedSince, within, type CleanupGuard, type CleanupItem, type CleanupRun, type PassOptions } from './cleanup.ts';
 
 /**
  * Stale, rebuildable output in the places agents work (w459, docs/self-recovery.md "Stale build output"): player builds
@@ -278,6 +278,19 @@ export async function planStaleOutput(opts: {
  * stale plan when it is their turn. A dry run measures both and removes nothing; stale output in dry-run mode is
  * measured and reported while the regular rules still remove. What could not be attributed is listed with its size.
  */
+/**
+ * The regular rules and the own-leftover plan pick from the same folders (agent-temp and stopped-session-temp both take
+ * `tmp/ffa-*`). Run apart, the second found what the first had removed and logged every entry `in use (ENOENT)` (w5284,
+ * biscuit 2026-11-23 15:12Z: 130 of them). Own leftovers judge a session's folder more closely (unpushed work at any depth,
+ * live sessions), so where they split a folder or kept something inside it, the regular item for that folder is dropped;
+ * an own item at or inside a regular item that stays is dropped instead.
+ */
+export function withoutOverlap<A extends { path: string }, B extends { path: string }>(first: A[], own: { items: B[]; listed: { path: string }[] }): { first: A[]; own: B[] } {
+  const inner = [...own.items, ...own.listed].map((i) => i.path);
+  const kept = first.filter((r) => !inner.some((p) => norm(p) !== norm(r.path) && within(p, r.path)));
+  return { first: kept, own: own.items.filter((i) => !kept.some((r) => within(i.path, r.path))) };
+}
+
 export async function cleanupPass(o: {
   opts: PassOptions;
   guard: CleanupGuard;
@@ -328,7 +341,9 @@ export async function cleanupPass(o: {
   if (o.opts.dryRun) return { removed: [], failed: [], bytes: 0, planned: await sizePlan([...regular, ...plan.items, ...own.items]), listed, ...kept };
   const live = o.mode === 'on' ? plan.items : [];
   if (o.mode === 'on' && plan.strays?.length && o.endStrays) await o.endStrays(plan.strays).catch(() => undefined);
-  const r = await runCleanup([...regular, ...live], o.guard);
+  const { first, own: ownItems } = withoutOverlap([...regular, ...live], own);
+  own.items = ownItems;
+  const r = await runCleanup(first, o.guard);
   if (o.own && own.items.length) {
     const r2 = await o.own.run(own).catch((e) => ({ removed: [], failed: [{ path: '(own leftovers)', why: (e as Error).message }], bytes: 0 }) as CleanupRun);
     r.removed.push(...r2.removed);
