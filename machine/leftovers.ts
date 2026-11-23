@@ -1405,8 +1405,10 @@ export async function removeFolders(
   out: (s: string) => void,
   slots: () => Promise<SlotContext>,
   published: ReturnType<typeof readPublished>,
-  o: { home?: string; daemonDir?: string; log?: string; cwd?: string } = {},
+  o: { home?: string; daemonDir?: string; log?: string; cwd?: string; volumeFree?: (p: string) => Promise<number | undefined>; platform?: NodeJS.Platform } = {},
 ): Promise<number> {
+  const volume = o.volumeFree ?? volumeFree;
+  const apfs = (o.platform ?? process.platform) === 'darwin';
   if (!args.length) {
     out('usage: ff-leftovers remove <path>...\n');
     return 2;
@@ -1461,14 +1463,17 @@ export async function removeFolders(
       no(a, `${fenceAgain ?? again.why} (seen on the second look, just before the delete)`);
       continue;
     }
+    const freeBefore = apfs ? await volume(path.dirname(p)) : undefined;
     try {
       fs.rmSync(p, { recursive: true, force: true, maxRetries: 3 });
     } catch (e) {
       no(a, `the delete failed part-way (${(e as NodeJS.ErrnoException).code ?? (e as Error).message})${fs.existsSync(p) ? '; what is left stays: run it again, or report it' : ''}`);
       continue;
     }
-    out(`REMOVED ${a}\n        ${freedText(size)}; ${first.why}\n`);
-    logRemoval(o.log ?? path.join(root, 'logs', 'ff-leftovers-removed.jsonl'), now, p, size.freed, first.why, out);
+    const freeAfter = freeBefore === undefined ? undefined : await volume(path.dirname(p));
+    const v = onVolume(size, freeBefore, freeAfter);
+    out(`REMOVED ${a}\n        ${v.text}; ${first.why}\n`);
+    logRemoval(o.log ?? path.join(root, 'logs', 'ff-leftovers-removed.jsonl'), now, p, v.freed, first.why, out, v.fileBytes);
   }
   return refused ? 1 : 0;
 }
@@ -1479,11 +1484,34 @@ export function freedText(s: Freeable): string {
   return s.bytes > s.freed ? `${mb(s.freed)} freed (${mb(s.bytes - s.freed)} more were hard links to files kept elsewhere, a build, so not freed)` : `${mb(s.freed)} freed`;
 }
 
-/** One line of <root>/logs/ff-leftovers-removed.jsonl (w4394); `bytes` is what the delete freed (w5168). */
-function logRemoval(log: string, now: number, p: string, bytes: number, why: string, out: (s: string) => void): void {
+/** The volume's free bytes where `dir` lies (statfs), or undefined where it cannot be read. */
+export async function volumeFree(dir: string): Promise<number | undefined> {
+  const s = await fs.promises.statfs(dir).catch(() => undefined);
+  return s ? Number(s.bavail) * Number(s.bsize) : undefined;
+}
+
+/**
+ * What a delete freed on macOS, from the volume's free space before and after it (w5310). APFS clones share blocks and stat
+ * cannot see it: a sandbox Library cloned from the seed (`cp -c`) shares the seed's blocks, so deleting the seed's copy frees
+ * nothing while the files' sizes say it frees all (m5, 2026-11-23: 10,049 MB logged freed over 296 seed BurstCache entries,
+ * df free space 1 GB lower, 197 of them held in slot3's Library too). Measured on m5: deleting a 1 GB clone moved statfs's
+ * free space by 0 MB, deleting the last copy by 1,024 MB, at once. The figure is clamped to [0, the files' freeable bytes]:
+ * another writer meanwhile can only make it read lower, never higher than the files. Elsewhere, or where statfs fails: the
+ * files' count (freeableBytes) as before.
+ */
+export function onVolume(size: Freeable, before: number | undefined, after: number | undefined): { text: string; freed: number; fileBytes?: number } {
+  if (before === undefined || after === undefined) return { text: freedText(size), freed: size.freed };
+  const freed = Math.max(0, Math.min(size.freed, after - before));
+  const mb = (n: number) => `${Math.round(n / 1_048_576)} MB`;
+  if (size.freed - freed < 1_048_576) return { text: freedText(size), freed, fileBytes: size.freed };
+  return { text: `${mb(freed)} freed by the volume's free space, of ${mb(size.freed)} in its files: the rest is still held by an APFS clone (a sandbox Library cloned from the seed) or a snapshot, or another writer used it meanwhile (w5310)`, freed, fileBytes: size.freed };
+}
+
+/** One line of <root>/logs/ff-leftovers-removed.jsonl (w4394); `bytes` is what the delete freed (w5168), measured on the volume on macOS (w5310, `fileBytes` the files' count). */
+function logRemoval(log: string, now: number, p: string, bytes: number, why: string, out: (s: string) => void, fileBytes?: number): void {
   try {
     fs.mkdirSync(path.dirname(log), { recursive: true });
-    fs.appendFileSync(log, JSON.stringify({ at: new Date(now).toISOString(), path: p, bytes, why, session: process.env.FF_SESSION_ID ?? null }) + '\n');
+    fs.appendFileSync(log, JSON.stringify({ at: new Date(now).toISOString(), path: p, bytes, ...(fileBytes !== undefined && fileBytes !== bytes ? { fileBytes } : {}), why, session: process.env.FF_SESSION_ID ?? null }) + '\n');
   } catch (e) {
     out(`        (its log line could not be written to ${log}: ${(e as Error).message})\n`);
   }

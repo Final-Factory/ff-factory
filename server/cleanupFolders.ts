@@ -70,10 +70,12 @@ export interface FolderRow {
   bytes?: number;
   /** Bytes in it that are hard links to files kept elsewhere: a delete frees none of them (w5168). */
   linked?: number;
+  /** A seed entry's bytes a sandbox Library also holds, same name and size, on macOS: APFS clones of one another, so a delete frees ~0 of them (w5310). */
+  cloned?: number;
 }
 
 /** planFolders' rows, with what deleting every DELETE row together frees (w5168) and the empty player slots it left out. */
-export type FolderPlan = FolderRow[] & { freed?: number; linked?: number; emptySlots?: number };
+export type FolderPlan = FolderRow[] & { freed?: number; linked?: number; cloned?: number; emptySlots?: number };
 
 /** The daemon writes the facts every 30 s; older than this and it is not running or not writing. */
 export const FACTS_MAX_AGE_MS = 5 * 60_000;
@@ -675,7 +677,7 @@ export async function finishedRows(dir: string, f: CleanupFacts, o: { now?: numb
 }
 
 /** Every folder a clean-up could take, judged. Sizes are measured for the deletable ones only unless `sizes` asks for all. */
-export async function planFolders(f: CleanupFacts, o: { now?: number; sizes?: 'all' | 'delete' | 'none'; localWork?: (dir: string) => Promise<string | undefined>; unpushedWork?: (dir: string) => Promise<string | undefined>; published?: Map<string, PublishedRecord[]>; ignoredEvidence?: (repo: string) => Promise<string[] | undefined>; slots?: SlotContext } = {}): Promise<FolderPlan> {
+export async function planFolders(f: CleanupFacts, o: { now?: number; sizes?: 'all' | 'delete' | 'none'; localWork?: (dir: string) => Promise<string | undefined>; unpushedWork?: (dir: string) => Promise<string | undefined>; published?: Map<string, PublishedRecord[]>; ignoredEvidence?: (repo: string) => Promise<string[] | undefined>; slots?: SlotContext; platform?: NodeJS.Platform } = {}): Promise<FolderPlan> {
   const now = o.now ?? Date.now();
   const bad = factsProblem(f, now);
   if (bad) return [{ path: f.root ?? '(no install folder)', kind: 'other', verdict: 'keep', why: bad }];
@@ -735,10 +737,49 @@ export async function planFolders(f: CleanupFacts, o: { now?: number; sizes?: 'a
     });
     rows.freed = together.freed;
     if (together.bytes > together.freed) rows.linked = together.bytes - together.freed;
+    // w5310: a seed entry a sandbox Library holds too (cloned from the seed with `cp -c` on macOS) frees ~0: count it apart.
+    const seed = seedLibrary(f);
+    if (seed && (o.platform ?? process.platform) === 'darwin') {
+      for (const r of measured) {
+        if (r.kind !== 'seed-library') continue;
+        const cloned = clonedInSandboxes(r.path, seed, f.sandboxes);
+        if (!cloned) continue;
+        r.cloned = Math.min(cloned, r.bytes ?? 0);
+        r.bytes = (r.bytes ?? 0) - r.cloned;
+        if (r.verdict === 'delete') rows.freed = Math.max(0, (rows.freed ?? 0) - r.cloned), (rows.cloned = (rows.cloned ?? 0) + r.cloned);
+      }
+    }
   }
   if (emptySlots) rows.emptySlots = emptySlots;
   rows.sort((a, b) => (a.verdict === b.verdict ? 0 : a.verdict === 'keep' ? -1 : 1) || a.path.localeCompare(b.path));
   return rows;
+}
+
+/**
+ * The bytes of seed entry `entry` whose file a sandbox Library holds at the same place with the same size (w5310). Sandbox
+ * Libraries are cloned from the seed (machine/sandboxes.ts librarySource: `cp -c` on macOS), so such a file most likely
+ * shares its blocks with the sandbox's copy, and deleting the seed's frees nothing until that copy goes too (m5, 2026-11-23:
+ * 197 of 296 seed BurstCache entries removed were in slot3's Library, and df moved by -1 GB against 10 GB counted).
+ */
+export function clonedInSandboxes(entry: string, seed: string, sandboxes: CleanupFacts['sandboxes']): number {
+  let cloned = 0;
+  const walk = (p: string) => {
+    const st = fs.lstatSync(p, { throwIfNoEntry: false });
+    if (!st) return;
+    if (st.isDirectory()) {
+      for (const n of fs.readdirSync(p)) walk(path.join(p, n));
+      return;
+    }
+    if (!st.isFile()) return;
+    const rel = path.relative(seed, p);
+    if (sandboxes.some((sb) => fs.lstatSync(path.join(sb.path, 'Library', rel), { throwIfNoEntry: false })?.size === st.size)) cloned += st.size;
+  };
+  try {
+    walk(entry);
+  } catch {
+    // An entry that changes while it is read counts what was read.
+  }
+  return cloned;
 }
 
 const gb = (n: number) => (n >= 1e9 ? `${(n / 1e9).toFixed(1)} GB` : `${Math.round(n / 1e6)} MB`);
@@ -749,14 +790,15 @@ export function renderFolders(rows: FolderPlan, f: CleanupFacts | undefined, now
   if (bad) return `Nothing may be deleted on this machine's facts: ${bad}.\nReport that; do not guess which folders are free.\n`;
   // w5168: a size is what the delete frees; hard links to files kept elsewhere (a player slot's build) are shown apart.
   const linked = (n: number | undefined) => (n ? `, +${gb(n)} hard-linked to files kept elsewhere, not freed` : '');
-  const line = (r: FolderRow) => `${r.verdict === 'keep' ? 'KEEP  ' : 'DELETE'}  ${r.bytes === undefined ? '' : `${gb(r.bytes)}${linked(r.linked)}  `}${r.path}\n        ${r.why}`;
+  const cloned = (n: number | undefined) => (n ? `, +${gb(n)} also in a sandbox's Library (APFS clones: frees ~0 until that copy goes, w5310)` : '');
+  const line = (r: FolderRow) => `${r.verdict === 'keep' ? 'KEEP  ' : 'DELETE'}  ${r.bytes === undefined ? '' : `${gb(r.bytes)}${linked(r.linked)}${cloned(r.cloned)}  `}${r.path}\n        ${r.why}`;
   const keep = rows.filter((r) => r.verdict === 'keep');
   const del = rows.filter((r) => r.verdict === 'delete');
   const total = rows.freed ?? del.reduce((n, r) => n + (r.bytes ?? 0), 0);
   const measured = del.some((r) => r.bytes !== undefined);
   const empty = rows.emptySlots ? ` ${rows.emptySlots} empty player slot(s) not listed: nothing to free.` : '';
   return [
-    `Folders under ${f!.root} judged against the ledger (facts ${Math.max(0, Math.round((now - Date.parse(f!.at)) / 1000))} s old): ${keep.length} to KEEP, ${del.length} deletable${measured ? ` (${gb(total)} freed by deleting them all${linked(rows.linked)})` : ''}.${empty}`,
+    `Folders under ${f!.root} judged against the ledger (facts ${Math.max(0, Math.round((now - Date.parse(f!.at)) / 1000))} s old): ${keep.length} to KEEP, ${del.length} deletable${measured ? ` (${gb(total)} freed by deleting them all${linked(rows.linked)}${cloned(rows.cloned)})` : ''}.${empty}`,
     ...keep.map(line),
     ...del.map(line),
     'Delete only the DELETE rows, and only inside the install folder. A KEEP row belongs to a request that has not closed (open, stalled or paused), holds a git repo with work on no remote or evidence published nowhere else, or could not be attributed: report it, never remove it. A DELETE row inside a kept folder (a finished worker\'s bulk, w2223) goes alone; its folder stays. A player slot is judged by its lease files (w2796).',
