@@ -1,5 +1,5 @@
 /**
- * w4553: two ffu rows that edit the same code do not run at once.
+ * w4553: two ffu rows that edit the same code, found when the later one starts (w5197: both run, each told of the other).
  *
  * Over 2026-11-15 12:00Z to 2026-11-17 11:00Z, 7 of the 8 "not mergeable" refusals of merge on green were ffu pull requests,
  * and about half of those were two rows started together that edited the same file (w4548's `git merge-tree` re-runs:
@@ -11,12 +11,14 @@
  * - the changed files of the open ffu pull requests updated in the last few days, and
  * - the expected files of the other ffu rows in flight (started, still open, no pull request needed yet: the rows of a
  *   triage fan-out start minutes apart, before any of them has opened one).
- * On an overlap the row is held Blocked on that pull request merging, or on that request closing when it has none yet
- * (waiting on a thing is Blocked, not capacity), and the dispatcher is told which files. The dispatcher may start it
- * anyway with override_duplicate saying why (the rows touch different parts of the file).
+ * An overlap holds nothing since w5197 (lothsahn, 2026-11-23: "Let FFU look requests run at once; each merges main before
+ * pushing, and the later PR fixes conflicts"; five look requests on `crates/ffu-render/src/mesh.wgsl` had run one at a time).
+ * The row starts; its start prompt and the start_agent reply name the files it shares and with whom, both requests' logs
+ * get the line, and the worker of each other request it shares files with is told once, so both merge origin/main before
+ * they push and the later pull request resolves the conflicts.
  *
  * Files most ffu pull requests touch (the hubs: `sector.rs`, `snapshot.rs`, the client's `main.rs`, ...) are left out, read
- * from the last merged pull requests: holding on them would serialise nearly all ffu work, and their conflicts are the
+ * from the last merged pull requests: a note on them would come with nearly every ffu row, and their conflicts are the
  * sorted-list kind w4548 fixes in ffu itself (keep_sorted).
  */
 
@@ -141,16 +143,14 @@ export function clashLine(c: FfuClash): string {
   return `${who}: ${c.files.join(', ')}`;
 }
 
-/** The gates a held row waits on: each pull request to merge, else each request to close. */
-export function clashGates(clashes: readonly FfuClash[]): { kind: 'pr' | 'request'; ref: string; what: string }[] {
-  const out: { kind: 'pr' | 'request'; ref: string; what: string }[] = [];
-  for (const c of clashes) {
-    const g = c.pr
-      ? { kind: 'pr' as const, ref: `${FFU_REPO}#${c.pr}`, what: `${FFU_REPO}#${c.pr} to merge: it edits ${c.files.slice(0, 3).join(', ')} too (w4553)` }
-      : { kind: 'request' as const, ref: c.id!, what: `${c.id} to close: its row edits ${c.files.slice(0, 3).join(', ')} too (w4553)` };
-    if (!out.some((x) => x.kind === g.kind && x.ref === g.ref)) out.push(g);
-  }
-  return out;
+/** What the starting row's worker is told (w5197): the files it shares, with whom, and how to land beside them. */
+export function sharedFilesNote(id: string, clashes: readonly FfuClash[]): string {
+  return `\n\n[ffu files shared with work in flight (w5197)] ${id} may edit files other ffu work in flight edits: ${clashes.map(clashLine).join('; ')}. Nothing waits on it: merge origin/main into your branch before every push (\`ff-pr push\` does), and if the other pull request merges first, yours resolves the conflicts. Keep to the parts of those files your work needs.`;
+}
+
+/** What the worker of a request `starting` shares files with is told (w5197). */
+export function peerFilesNote(starting: string, files: readonly string[]): string {
+  return `[ffu files shared with work in flight (w5197)] ${starting} just started on ffu work that may edit files yours edits too: ${files.join(', ')}. Nothing waits on it: merge origin/main into your branch before every push (\`ff-pr push\` does), and if ${starting}'s pull request merges first, yours resolves the conflicts.`;
 }
 
 type Run = (cmd: string, args: string[], opts?: { timeoutMs?: number; env?: NodeJS.ProcessEnv }) => Promise<{ code: number | null; stdout: string; stderr: string }>;

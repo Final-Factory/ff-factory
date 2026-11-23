@@ -45,6 +45,13 @@ clean-up gives such a worker's temp-folder targets a cap of 0, so one goes once 
 another commit (a RED run on main) is built in the slot too: check that commit out there, build, and switch back; both
 builds stay warm in the one target, and the sweep below keeps both while either is recent.
 
+Two FFU requests may edit the same file at once (w5197, lothsahn: "Let FFU look requests run at once; each merges main
+before pushing, and the later PR fixes conflicts"). When yours shares files with other FFU work in flight, your start
+prompt says which and with whom, and a request started after yours on your files is announced to you in a message headed
+"[ffu files shared with work in flight (w5197)]". Merge `origin/main` into your branch before every push (`ff-pr push`
+does), and if the other pull request merged first, resolve the conflicts in yours. The dispatcher's side:
+docs/orchestrators.md, "FFU rows on the same files run at once".
+
 Your branch is checked out from `origin/<branch>`, or from a new branch made from `origin/main`. A local branch that
 holds commits origin lacks is kept as it is. If another slot already has your branch checked out, you get a detached
 checkout at its tip, because git allows a branch in one worktree only; push it with `git push origin HEAD:<branch>`.
