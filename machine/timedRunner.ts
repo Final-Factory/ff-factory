@@ -24,7 +24,7 @@ import { benchLockDir, pidAlive } from './benchLock.ts';
 import { benchQueueDir, queueTickets, type TicketState } from './benchQueue.ts';
 import { sendChunks } from './review.ts';
 import { PLAYER_EXE } from './timedRunPack.ts';
-import { savesDirsFor } from './gameData.ts';
+import { exeReadsGameDataDir, playerHomeEnv, preparePlayerHome, savesDirsFor } from './gameData.ts';
 
 
 export interface TimedRunnerDeps {
@@ -848,7 +848,10 @@ export class TimedRunner {
       }
     })();
     // w1996: the asking worker's session, so a worker computer's bench turn (machine/benchTurn.ts) spares the run's own player
-    const env = timedRunEnv(process.env, o.session, o.id);
+    // w5344: and a home of its own under FF_PLAYER_HOME, so Unity's own PlayerPrefs stay inside the install (Linux, macOS)
+    const home = playerHomeEnv(process.env, exeReadsGameDataDir(exe));
+    preparePlayerHome(home);
+    const env = { ...timedRunEnv(process.env, o.session, o.id), ...home };
     this.checkStop(o.id);
     const child = (this.d.spawnPlayer ?? ((e, a, cwd) => spawn(e, a, { cwd, env, stdio: 'ignore', windowsHide: false })))(exe, args, path.dirname(exe));
     this.child = child;

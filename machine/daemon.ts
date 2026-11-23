@@ -91,7 +91,7 @@ import { holdsOwnTicket, resumeRevokes, revokeTicket } from './benchRevoke.ts';
 import { readBenchHours } from './benchHours.ts';
 import { TestHistorySpool } from './testHistorySpool.ts';
 import { TimedRunner, timedRunEnv } from './timedRunner.ts';
-import { GAME_DATA_VARIABLE, workerGameDataDir } from './gameData.ts';
+import { GAME_DATA_VARIABLE, PLAYER_HOME_VARIABLE, workerGameDataDir, workerPlayerHomeDir } from './gameData.ts';
 import { findFixtures, listFixtures, offeredDir, sendFixture } from './labFixtures.ts';
 import { timedRunFromMachine } from './timedRunPack.ts';
 import { readBenchState } from './benchState.ts';
@@ -278,10 +278,11 @@ export function withRootDefaults(cfg: DaemonConfig): DaemonConfig {
  * uv cache and the determinism audits' folder inside it, so `uv run --with ...` and the game's audits stop filling the
  * user's own folders, (w5297) the other tools' caches (workerToolCacheEnv), and (w5306) the game's data root
  * (FF_GAME_DATA_DIR=<root>/gamedata, machine/gameData.ts): saves, settings, logs and AgentControl of every editor and player
- * from a commit with game PR #4237. The daemon sets each only where its own environment lacks it (`??=`). Exported for tests.
+ * from a commit with game PR #4237, and (w5344) the players' own home (FF_PLAYER_HOME=<root>/gamedata-home), which the game's
+ * player_slots.py and the timed runs turn into a player's XDG_CONFIG_HOME or CFFIXED_USER_HOME. The daemon sets each only where its own environment lacks it (`??=`). Exported for tests.
  */
 export function rootEnv(root: string, platform: NodeJS.Platform = process.platform): Record<string, string> {
-  return { FF_WORKER_ROOT: root, FF_PLAYER_SLOT_ROOT: path.join(root, 'players'), UV_CACHE_DIR: workerUvCacheDir(root), FF_DETERMINISM_AUDIT_DIR: workerDeterminismAuditDir(root), [GAME_DATA_VARIABLE]: workerGameDataDir(root), ...workerToolCacheEnv(root, platform) };
+  return { FF_WORKER_ROOT: root, FF_PLAYER_SLOT_ROOT: path.join(root, 'players'), UV_CACHE_DIR: workerUvCacheDir(root), FF_DETERMINISM_AUDIT_DIR: workerDeterminismAuditDir(root), [GAME_DATA_VARIABLE]: workerGameDataDir(root), [PLAYER_HOME_VARIABLE]: workerPlayerHomeDir(root), ...workerToolCacheEnv(root, platform) };
 }
 
 /** The machine credential: daemon.json's, else the token file's first line (w513). Exported for tests. */

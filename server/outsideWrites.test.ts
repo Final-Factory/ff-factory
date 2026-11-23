@@ -61,7 +61,7 @@ const KNOWN: Record<string, [number, string]> = {
   'machine/firefox.ts': [1, 'reads the Firefox profile path'],
   'machine/ghLogin.ts': [1, 'exception: gh\'s own login folder'],
   'machine/leftovers.ts': [6, 'reads; ff-leftovers launch starts a person\'s program in their home (w4047)'],
-  'machine/gameData.ts': [3, 'exception: the game\'s old data folder, for a branch or build from before game PR #4237: AgentControl read, a timed run\'s save copy written and deleted after (w5306, docs 2.7)'],
+  'machine/gameData.ts': [4, 'exception: the game\'s old data folder, for a branch or build from before game PR #4237: AgentControl read, a timed run\'s save copy written and deleted after (w5306, docs 2.7); reads where a Mac\'s Steam folder is, to link it into the players\' own home (w5344)'],
   'machine/live.ts': [3, 'reads: AgentControl in the game\'s old data folder after FF_GAME_DATA_DIR\'s (w5306, docs 2.7)'],
   'machine/osJob.ts': [1, 'exception: the OS job (LaunchAgent plist, scheduled task)'],
   'machine/sharedCaches.ts': [3, 'reads: where uv is installed'],

@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { buildReadsGameDataDir, gameDataRoots, legacyGameDataRoot, savesDirsFor, workerGameDataDir } from '../machine/gameData.ts';
+import { buildReadsGameDataDir, exeReadsGameDataDir, gameDataRoots, legacyGameDataRoot, playerHomeEnv, preparePlayerHome, savesDirsFor, workerGameDataDir, workerPlayerHomeDir } from '../machine/gameData.ts';
+import { rootEnv } from '../machine/daemon.ts';
 
 test('w5306: the game data roots, the override first; the old root per OS as GameDataPaths.ResolveRoot has it', () => {
   assert.equal(workerGameDataDir('/ffw'), path.join('/ffw', 'gamedata'));
@@ -40,4 +41,47 @@ test('w5306: a timed run puts its save where each build loads it: the override f
   assert.deepEqual(savesDirsFor(['b0', 'b1'], env, 'win32', home, reads({ b0: true, b1: false })), [fresh, old], 'an A/B of an old and a new build');
   assert.deepEqual(savesDirsFor(['b0'], env, 'win32', home, reads({})), [fresh, old], 'unknown: both');
   assert.deepEqual(savesDirsFor(['b0'], {}, 'win32', home, reads({ b0: true })), [old], 'no override set: the old folder');
+});
+
+test('w5344: a player gets a home of its own under FF_PLAYER_HOME (Linux XDG_CONFIG_HOME, macOS CFFIXED_USER_HOME), never HOME', () => {
+  const root = '/ffw';
+  const env = rootEnv(root, 'linux');
+  assert.equal(env.FF_PLAYER_HOME, workerPlayerHomeDir(root));
+  assert.equal(env.FF_PLAYER_HOME, path.join(root, 'gamedata-home'));
+  for (const k of ['HOME', 'XDG_CONFIG_HOME', 'CFFIXED_USER_HOME']) assert.equal(env[k], undefined, `${k} is not set for the whole worker`);
+  const given = { FF_PLAYER_HOME: '/ffw/gamedata-home', FF_GAME_DATA_DIR: '/ffw/gamedata', HOME: '/home/w' };
+  assert.deepEqual(playerHomeEnv(given, true, 'linux'), { XDG_CONFIG_HOME: '/ffw/gamedata-home/config' });
+  assert.deepEqual(playerHomeEnv(given, true, 'darwin'), { CFFIXED_USER_HOME: '/ffw/gamedata-home' });
+  assert.deepEqual(playerHomeEnv({ ...given, FF_PLAYER_HOME: 'V:\ffw\gamedata-home' }, true, 'win32'), {}, 'nothing moves HKCU');
+  // an older build keeps its data root under the home, where savesDirsFor and the live view look: unchanged, as is an unknown one
+  assert.deepEqual(playerHomeEnv(given, false, 'linux'), {});
+  assert.deepEqual(playerHomeEnv(given, undefined, 'linux'), {});
+  assert.deepEqual(playerHomeEnv({ ...given, FF_GAME_DATA_DIR: ' ' }, true, 'linux'), {});
+  assert.deepEqual(playerHomeEnv({ ...given, FF_PLAYER_HOME: undefined }, true, 'linux'), {});
+  assert.deepEqual(playerHomeEnv({ ...given, XDG_CONFIG_HOME: '/tour' }, true, 'linux'), {}, "a caller's own stays");
+});
+
+test('w5344: the build of an exe reads FF_GAME_DATA_DIR from its folder or a Mac .app; preparePlayerHome makes the folders', () => {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'w5344-'));
+  try {
+    const managed = path.join(d, 'win', 'finalfactory_Data', 'Managed');
+    fs.mkdirSync(managed, { recursive: true });
+    fs.writeFileSync(path.join(managed, 'FFCore.dll'), Buffer.concat([Buffer.from('MZ'), Buffer.from('FF_GAME_DATA_DIR', 'utf16le')]));
+    assert.equal(exeReadsGameDataDir(path.join(d, 'win', 'finalfactory.exe')), true);
+    const mac = path.join(d, 'finalfactory.app', 'Contents', 'Resources', 'Data', 'Managed');
+    fs.mkdirSync(mac, { recursive: true });
+    fs.writeFileSync(path.join(mac, 'FFCore.dll'), Buffer.from('MZ older build'));
+    assert.equal(exeReadsGameDataDir(path.join(d, 'finalfactory.app', 'Contents', 'MacOS', 'finalfactory')), false);
+    assert.equal(exeReadsGameDataDir(path.join(d, 'none', 'x.exe')), undefined);
+    const home = path.join(d, 'gamedata-home');
+    preparePlayerHome({ XDG_CONFIG_HOME: path.join(home, 'config') });
+    assert.ok(fs.statSync(path.join(home, 'config')).isDirectory());
+    const real = path.join(d, 'real');
+    fs.mkdirSync(path.join(real, 'Library', 'Application Support', 'Steam'), { recursive: true });
+    preparePlayerHome({ CFFIXED_USER_HOME: home }, real);
+    assert.ok(fs.statSync(path.join(home, 'Library', 'Preferences')).isDirectory());
+    if (process.platform !== 'win32') assert.ok(fs.lstatSync(path.join(home, 'Library', 'Application Support', 'Steam')).isSymbolicLink());
+  } finally {
+    fs.rmSync(d, { recursive: true, force: true });
+  }
 });
