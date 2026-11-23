@@ -131,3 +131,19 @@ test('w4422: `ff-leftovers folders` lists slot targets and stray checkout target
   assert.doesNotMatch(out.join(''), /not a place with an owner/);
   assert.equal(await foldersMain('check', [path.join(base, 'slot2', 'target')], env, Date.now(), (s) => void out.push(s), async () => ctx()), 1);
 });
+
+test('w5240: a stopped holder with a request not closed keeps its target but its incremental cache is DELETE; a running holder keeps both', async (t) => {
+  const { base, facts, ctx } = world(t, [{ id: 'slot1', holder: 'deadbeef' }, { id: 'slot2', holder: 'a1a1a1a1' }]);
+  const f = { ...facts, resumable: ['deadbeef'] };
+  const at = (rel: string, procs?: string[]) => judgeWithGit(path.join(base, rel), f, Date.now(), ctx(procs));
+  assert.equal((await at('slot1/target')).verdict, 'keep');
+  const inc = await at('slot1/target/debug/incremental');
+  assert.equal(inc.verdict, 'delete');
+  assert.match(inc.why, /worker deadbeef is stopped/);
+  assert.equal((await at('slot1/target/debug/incremental/ffu_sim-abc')).verdict, 'delete');
+  assert.equal((await at('slot1/target/debug/incremental', [`cargo test in ${path.join(base, 'slot1', 'ffu')}`])).verdict, 'keep');
+  assert.equal((await at('slot2/target/debug/incremental')).verdict, 'keep');
+  const rows = (await planFolders(f, { slots: ctx(), sizes: 'none' })).filter((r) => r.kind === 'ffu-slot-target');
+  const v = Object.fromEntries(rows.map((r) => [path.relative(base, r.path).replace(/\\/g, '/'), r.verdict]));
+  assert.deepEqual(v, { 'slot1/target': 'keep', 'slot1/target/debug/incremental': 'delete', 'slot2/target': 'keep' });
+});
