@@ -108,6 +108,12 @@ test('w913: a save copy named with the session\'s own tag may go; any other save
   refused(`rm -f "${saves}/"*`);
   refused(`rm -f "${saves}/ffa-ee5b82dc-../x.zip"`);
   refused(`rm -f "${saves}/ffa-ee5b82dcx.zip"`);
+  // w5306: a worker install's own data root (FF_GAME_DATA_DIR = <install>/gamedata) holds the copy on a commit with game PR #4237.
+  ok(`rm -f "/home/b/ffw/gamedata/UserData/saves/ffa-ee5b82dc-w5306.zip"`);
+  ok(`rm -f "V:/ffw/gamedata/UserData/saves/ffa-ee5b82dc-w5306.zip"`);
+  refused(`rm -f "/home/b/ffw/gamedata/UserData/saves/MyBigBase.zip"`);
+  refused(`rm -f "/home/b/ffw/gamedata/UserData/saves/ffa-0000aaaa-a.zip"`);
+  refused(`rm -f "/home/b/ffw/gamedata/UserData/settings.json"`);
   // The game's UserData layout (GameDataPaths.Saves = UserData/saves) is the same folder for this rule.
   ok(`rm -f "/c/Users/rydin/AppData/LocalLow/Never Games/finalfactory/UserData/saves/ffa-ee5b82dc-a.zip"`);
   refused(`rm -f "/c/Users/rydin/AppData/LocalLow/Never Games/finalfactory/UserData/saves/MyBigBase.zip"`);

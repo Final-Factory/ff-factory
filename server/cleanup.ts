@@ -42,6 +42,8 @@ export interface CleanupEnv {
   sandboxRoots?: string[];
   /** Folders of sandboxes whose Unity Library caches (BuildCache, BurstCache) are capped and aged out (w898). */
   cacheRoots?: string[];
+  /** The game's data roots a worker install gives its editors and players (FF_GAME_DATA_DIR, w5306): their playtest sessions age out. */
+  gameDataRoots?: string[];
 }
 
 export function hostCleanupEnv(agentTemp?: string): CleanupEnv {
@@ -315,6 +317,7 @@ export function cleanupRules(env: CleanupEnv, policy: CleanupPolicy): CleanupRul
       { id: 'playwright', dir: j(lib, 'Caches', 'ms-playwright'), olderThanHours: 7 * D, supersededOnly: true, what: 'an older Playwright browser' },
     );
   }
+  for (const g of env.gameDataRoots ?? []) rules.push({ id: 'playtest-sessions', dir: j(g, 'PlaytestSessions'), olderThanHours: policy.playtestDays * D, what: 'playtest screenshots and recordings' });
   for (const r of policy.ageRules) rules.push({ id: 'age-rule', dir: r.path, olderThanHours: r.olderThanDays * D, what: `older than ${r.olderThanDays} days (age rule)` });
   return rules;
 }

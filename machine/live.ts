@@ -16,12 +16,22 @@ import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import { gameDataRoots, legacyGameDataRoot } from './gameData.ts';
 
-/** Where a Final Factory process writes AgentControl/session-<pid>.json (Unity's persistentDataPath + /AgentControl). */
+/**
+ * Where a Final Factory process writes AgentControl/session-<pid>.json (GameDataPaths.Root + /AgentControl, AgentChannelHost):
+ * the old root's folder (Unity's persistentDataPath, or the Mac's fixed folder). Exported for tests.
+ */
 export function agentControlDir(platform: NodeJS.Platform = process.platform, home = os.homedir()): string {
-  if (platform === 'win32') return path.join(home, 'AppData', 'LocalLow', 'Never Games', 'finalfactory', 'AgentControl');
-  if (platform === 'darwin') return path.join(home, 'Library', 'Application Support', 'Never Games', 'finalfactory', 'AgentControl');
-  return path.join(home, '.config', 'unity3d', 'Never Games', 'finalfactory', 'AgentControl');
+  return path.join(legacyGameDataRoot(platform, home), 'AgentControl');
+}
+
+/**
+ * Every folder a process here may write its session file in (w5306): FF_GAME_DATA_DIR's first (a sandbox editor or player
+ * of a commit with game PR #4237), then the old root's (a branch or build from before it ignores the variable).
+ */
+export function agentControlDirs(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform, home = os.homedir()): string[] {
+  return gameDataRoots(env, platform, home).map((r) => path.join(r, 'AgentControl'));
 }
 
 export interface GameChannel {
@@ -35,12 +45,21 @@ export interface GameChannel {
 const BORN_SLACK_MS = 5_000;
 
 /**
- * The game's agent channel for one process, from its session file; undefined when there is none (not in play mode).
+ * The game's agent channel for one process, from its session file in the first of `dir` that has one (agentControlDirs);
+ * undefined when there is none (not in play mode).
  * `bornMs`, the process's start time: a file written before it is another, older process's under a reused pid, and is
  * ignored (w2255: on lothdesktop/slot1, 2026-10-26, editor pid 2044 found session-2044.json from 2026-10-14, and the
  * restage's first step failed with ECONNREFUSED on that file's port).
  */
-export function readGameChannel(pid: number, dir = agentControlDir(), bornMs?: number): GameChannel | undefined {
+export function readGameChannel(pid: number, dir: string | string[] = agentControlDirs(), bornMs?: number): GameChannel | undefined {
+  for (const d of [dir].flat()) {
+    const c = readGameChannelIn(pid, d, bornMs);
+    if (c) return c;
+  }
+  return undefined;
+}
+
+function readGameChannelIn(pid: number, dir: string, bornMs?: number): GameChannel | undefined {
   try {
     const file = path.join(dir, `session-${pid}.json`);
     if (bornMs !== undefined && fs.statSync(file).mtimeMs < bornMs - BORN_SLACK_MS) return undefined;
@@ -84,7 +103,7 @@ export class ProcessBirths {
   }
 
   /** The channel of `pid`, ignoring a file older than the process. */
-  channel(pid: number, dir?: string): GameChannel | undefined {
+  channel(pid: number, dir?: string | string[]): GameChannel | undefined {
     const born = this.get(pid);
     if (born === undefined) return undefined;
     return readGameChannel(pid, dir, born ?? undefined);

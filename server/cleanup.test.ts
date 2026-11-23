@@ -97,6 +97,9 @@ test('rules per platform: Windows (checked with Windows paths anywhere) and macO
   assert.deepEqual(at(win, 'claude-edit-diff'), ['C:/Users/rydin/AppData/Local/Temp/claude*/bash-edit-diff']);
   assert.deepEqual(at(win, 'worker-archives'), ['C:/Users/rydin/ff-worker']);
   assert.deepEqual(at(win, 'playtest-sessions'), ['C:/Users/rydin/AppData/LocalLow/Never Games/finalfactory*/PlaytestSessions']);
+  // w5306: a worker install's game data root (FF_GAME_DATA_DIR) ages out its playtest sessions too, on every OS.
+  assert.deepEqual(at(cleanupRules({ platform: 'win32', home: 'C:\\U', tmp: 'C:\\T', gameDataRoots: ['V:\\ffw\\gamedata'] }, DEFAULT_CLEANUP), 'playtest-sessions'), ['C:/U/AppData/LocalLow/Never Games/finalfactory*/PlaytestSessions', 'V:/ffw/gamedata/PlaytestSessions']);
+  assert.deepEqual(at(cleanupRules({ platform: 'linux', home: '/home/b', tmp: '/tmp', gameDataRoots: ['/home/b/ffw/gamedata'] }, DEFAULT_CLEANUP), 'playtest-sessions'), ['/home/b/ffw/gamedata/PlaytestSessions']);
   assert.deepEqual(at(win, 'sandbox-builds'), [], 'only where there are sandboxes');
   assert.deepEqual(at(cleanupRules({ platform: 'win32', home: 'C:\\U', tmp: 'C:\\T', sandboxRoots: ['F:\\ffsb'] }, DEFAULT_CLEANUP), 'sandbox-builds'), ['F:/ffsb/*/Builds']);
   assert.deepEqual(at(win, 'actions-work'), ['C:/Users/rydin/actions-runner*/_work', 'C:/actions-runner*/_work']);
