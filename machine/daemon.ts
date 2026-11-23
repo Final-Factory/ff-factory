@@ -98,7 +98,7 @@ import { TrayHost, trayInstance } from './tray.ts';
 import { FirefoxCloser, closeFirefox, firefoxFile, winFirefoxDeps } from './firefox.ts';
 import { GhLoginWatch, LOOK_EVERY_MS as GH_LOOK_EVERY_MS, lookHostsFile, type GhLoginDeps } from './ghLogin.ts';
 import { READ_EVERY_MS as STEAM_READ_EVERY_MS, SteamClientWatch, realSteamDeps, type SteamClientDeps } from './steamClient.ts';
-import { UvCachePruner, findUv, runQuiet, workerDeterminismAuditDir, workerUvCacheDir } from './sharedCaches.ts';
+import { UvCachePruner, findUv, runQuiet, workerDeterminismAuditDir, workerToolCacheEnv, workerUvCacheDir } from './sharedCaches.ts';
 import { DISK_CRITICAL_GB_DEFAULT, machinePlatformOf, priorityRank, type AttachmentRef, type BenchPriority, type CompactionTrigger, type HostHealth, type HostStats, type NoTimedRuns, type TimedAskMark, type PersonPlayReport, type SandboxPoolSettings, type SessionInfo, type TranscriptEvent } from '../shared/types.ts';
 
 export interface DaemonConfig {
@@ -258,10 +258,11 @@ export function withRootDefaults(cfg: DaemonConfig): DaemonConfig {
 /**
  * The environment a worker root gives every agent and script (w513): the root and its player slots, and (w5281) the shared
  * uv cache and the determinism audits' folder inside it, so `uv run --with ...` and the game's audits stop filling the
- * user's own folders. The daemon sets each only where its own environment lacks it (`??=`). Exported for tests.
+ * user's own folders, and (w5297) the other tools' caches (workerToolCacheEnv). The daemon sets each only where its own
+ * environment lacks it (`??=`). Exported for tests.
  */
-export function rootEnv(root: string): Record<string, string> {
-  return { FF_WORKER_ROOT: root, FF_PLAYER_SLOT_ROOT: path.join(root, 'players'), UV_CACHE_DIR: workerUvCacheDir(root), FF_DETERMINISM_AUDIT_DIR: workerDeterminismAuditDir(root) };
+export function rootEnv(root: string, platform: NodeJS.Platform = process.platform): Record<string, string> {
+  return { FF_WORKER_ROOT: root, FF_PLAYER_SLOT_ROOT: path.join(root, 'players'), UV_CACHE_DIR: workerUvCacheDir(root), FF_DETERMINISM_AUDIT_DIR: workerDeterminismAuditDir(root), ...workerToolCacheEnv(root, platform) };
 }
 
 /** The machine credential: daemon.json's, else the token file's first line (w513). Exported for tests. */

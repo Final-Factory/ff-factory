@@ -7,6 +7,7 @@ import { DEFAULT_HANG, bridgeInfo, bridgePing, editorVerdict, restartAllowed, ty
 import { closeWindow, decide, decideClose, describeDialog, findClosable, findDialogs, listWindows, mainWindow, parsePsJson, pressButton, sceneFilesUnchanged, type Dialog } from '../server/watchdog.ts';
 import { ensureBurstPrefOn, realBurstPrefDeps } from './burstPref.ts';
 import { scoped } from './linuxScope.ts';
+import { editorTempEnv } from './sharedCaches.ts';
 import { accessibilityStep, axPrompt, axTrusted, closeMacWindow, listMacDialogs, macPermissionProblem, nodeBinary, pressMacButton, sessionAway, sessionState, tccAccessibility, type SessionState } from './macDialogs.ts';
 
 /**
@@ -480,7 +481,10 @@ export function realDeps(platform: UnityPlatform = 'darwin'): UnityDeps {
       return /not found/i.test(why) ? undefined : `taskkill: ${why}`;
     },
     launch: async (bin, args, cwd) => {
-      const r = await ps(winLaunchScript(bin, args, cwd), 60_000);
+      // w5297: the editor's temp files in the install folder, not the person's %LOCALAPPDATA%\Temp (Start-Process passes PowerShell's environment on).
+      const temp = editorTempEnv(process.env, 'win32');
+      if (temp.TEMP) fs.mkdirSync(temp.TEMP, { recursive: true });
+      const r = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', winLaunchScript(bin, args, cwd)], { timeoutMs: 60_000, env: { ...process.env, ...temp } });
       const pid = Number(r.stdout.trim().split(/\s+/).pop());
       if (r.code !== 0 || !Number.isFinite(pid) || pid <= 0) throw new Error(`could not start ${bin}: ${(r.stderr || r.stdout).trim().slice(0, 300)}`);
       return pid;
