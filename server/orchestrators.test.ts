@@ -5059,6 +5059,44 @@ test('w2045: merge on green: a worker in the arm is told it may leave its report
   assert.equal(agents.waker.pending(a.id), undefined, 'the worker is not resumed');
 });
 
+test('w5316: a merge-on-green gate survives a close, a reopen and the dispatcher re-blocking on the same PR merging, and still merges on green', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o, dispatcher, chat, call } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }]);
+  mergeOnGreenArm(o, (id) => id === 'w1');
+  const pr = 'Final-Factory/ffu#998';
+  const head = 'd4c4fa3d857e2053e3a6adf63acb8cb5db0c6bba';
+  let checks: { done: boolean; text: string; green?: true } = { done: false, text: `1 of 1 checks on ${pr} still running` };
+  const merges: string[][] = [];
+  const watch = new BlockerWatch({ store, orchestrators: o, ci: async () => checks, merge: async (ref, h) => void merges.push([ref, h]) });
+  const a = await startedFor(env, 'w1');
+  const report = 'The fix merged.\n\nDONE: w1\nLearned: nothing new';
+  await a.h.blocked_on!({ request: 'w1', prs: [`ci:${pr}`], head, what: 'CI on ffu#998', merge_on_green: report });
+  o.workerTurnEnded(a.info, 'w1: still open: blocked on CI on Final-Factory/ffu#998');
+  // w5234 at 14:10: lothsahn closed it as done, then reopened it while CI ran.
+  const loth = chat(LOTH);
+  loth.lastFrom = 'human';
+  assert.equal((await call(loth.info, 'update_work', { id: 'w1', close: 'done', note: 'Its follow-up is covered.' })).isError, false);
+  const r = await call(loth.info, 'update_work', { id: 'w1', reopen: true, note: 'Reopened: I closed this too early, #998 has not merged.' });
+  assert.equal(r.isError, false, r.text);
+  let w = store.work.get('w1')!;
+  assert.equal(w.status, 'blocked', `a reopen keeps the gates it had: ${w.log.slice(-2).join(' | ')}`);
+  assert.equal(w.blocked!.mergeOnGreen?.head, head);
+  assert.match(w.log.at(-1)!, /reopened \(.*\); blocked again on CI on Final-Factory\/ffu#998, the gate its close dropped \(w5316\), merge on green/);
+  // Then the dispatcher blocked it on the PR merging: that wait ends in the merge FF Factory makes, so the gate stays.
+  const b = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'block', note: 'Reopened: waits for #998 to merge.', blocker: { kind: 'pr', ref: pr, what: 'ffu PR #998 merging' } });
+  assert.equal(b.isError, false, b.text);
+  w = store.work.get('w1')!;
+  assert.equal(w.status, 'blocked');
+  assert.equal(w.blocked!.kind, 'ci');
+  assert.equal(w.blocked!.mergeOnGreen?.head, head, 'the merge-on-green intent is kept');
+  assert.equal(w.alsoBlocked, undefined);
+  checks = { done: true, green: true, text: `CI on ${pr} finished: all 1 checks passed or skipped` };
+  await watch.tick();
+  assert.deepEqual(merges, [[pr, head]]);
+});
+
 test('w4498: arming merge on green checks the PR at once: a draft is refused with gh pr ready, a failing Evidence check with the section to add; a passing PR still arms', async (t) => {
   const env = await setupOnMachine(t);
   const { store, agents, o } = env;
