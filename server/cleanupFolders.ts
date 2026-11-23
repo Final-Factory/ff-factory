@@ -4,7 +4,8 @@ import { execFile } from 'node:child_process';
 import { freeableBytes, localWorkWhy, norm, unpushedWorkWhy, OUTSIDE_ROOT_WHY, within } from './cleanup.ts';
 import { requestIdsIn, CONTEXT_MAX_AGE_HOURS } from './staleOutput.ts';
 import type { SessionOwner } from './resumable.ts';
-import { finishedBulkIn, INSTALL_LEFTOVER_DEFAULTS, isCargoTarget, newestTopWrite, newestWrite } from './installLeftovers.ts';
+import { finishedBulkIn, INSTALL_LEFTOVER_DEFAULTS, isCargoTarget, newestTopWrite, newestWrite, runnerJobWhy, RUNNER_KEPT, type ProcLite } from './installLeftovers.ts';
+import { PLAYER_CACHE_ENTRY } from '../machine/playerCache.ts';
 import { FFU_SLOTS_DIR, readSlotState } from '../machine/ffuSlots.ts';
 import type { PublishedRecord } from './published.ts';
 import { leaseLive, mentions, OWN_LEFTOVER_DEFAULTS, type SlotLease } from './ownLeftovers.ts';
@@ -59,7 +60,7 @@ export interface CleanupFacts {
 
 export interface FolderRow {
   path: string;
-  kind: 'session-temp' | 'session-bulk' | 'scratch' | 'sandbox-output' | 'player-slot' | 'ffu-slot-target' | 'named' | 'other';
+  kind: 'session-temp' | 'session-bulk' | 'scratch' | 'sandbox-output' | 'player-slot' | 'ffu-slot-target' | 'ffu-runner-work' | 'player-cache' | 'named' | 'other';
   verdict: 'keep' | 'delete';
   why: string;
   /** What deleting it alone frees (w5168): files hard-linked to a place it does not hold (a build still kept) do not count. */
@@ -149,6 +150,10 @@ export interface SlotContext {
   self?: string;
   /** Sessions whose agent host process runs here now (machine/agentHost.ts, its command line names hosts/<session>), seen apart from the daemon's facts (w3217). */
   hosts?: string[];
+  /** The same processes with their pids (w5235): an FFU runner's Runner.Worker and listener are found by pid and parent. */
+  procList?: ProcLite[];
+  /** A runner's newest listener _diag log tail (machine/benchRunners.ts readListenerLog); tests give their own. */
+  runnerLog?: (runner: string) => string | undefined;
 }
 
 /**
@@ -284,6 +289,151 @@ export async function judgeFfuSlotPath(p: string, f: CleanupFacts, now: number, 
   return row('delete', `${inside}${what}, a slot ${held}, no running process names the slot and nothing in it was written for ${settle} min; the next build in the slot rebuilds it (rule ffu-slot-target)`);
 }
 
+/**
+ * An FFU self-hosted runner's job folder (<root>/ffu-runners/<runner>/_work/<entry>), judged as the daemon's rule
+ * ffu-runner-work judges it (installLeftovers.ts, w3502), or undefined for a path outside the runners. Before w5235 `check`
+ * called them "not a place with an owner in the ledger": on biscuit (w5233) ffu-biscuit-2's _work held 25 GB (16 GB
+ * ffu/ffu/target, 7.4 GB ffu/ffu/fuzz/target) with no Runner.Worker running, and the clean-up could not take it between two
+ * daemon passes. A runner keeps nothing in _work between jobs that a job does not make again: actions/checkout clones a
+ * missing workspace, the runner writes _temp and _PipelineMapping afresh, and cargo rebuilds a missing target (a cold build
+ * costs minutes, the price of the space). Its tool cache (_tool) and action downloads (_actions) stay, as the daemon keeps
+ * them; so do bin/, _diag/ and the runner's settings. Nothing goes while the runner runs a job (runnerJobWhy: its
+ * Runner.Worker, a process run from its _work, a listener just handed a job) or within the settle time of a write.
+ */
+export async function judgeRunnerWorkPath(p: string, f: CleanupFacts, now: number, ctx?: SlotContext): Promise<FolderRow | undefined> {
+  if (factsProblem(f, now) || !f.root) return undefined;
+  const base = path.join(f.root, 'ffu-runners');
+  if (!within(p, base) || norm(p) === norm(base)) return undefined;
+  const row = (verdict: FolderRow['verdict'], why: string): FolderRow => ({ path: p, kind: 'ffu-runner-work', verdict, why });
+  // Names as written on disk (norm lowercases them), for the reasons a person reads.
+  const rel = path.relative(base, p).split(/[\\/]+/);
+  const name = rel[0]!;
+  if (rel[1]?.toLowerCase() !== '_work' || rel.length < 3) return row('keep', `FFU runner ${name}'s own files (bin, _diag, its settings, the _work folder itself): only a job folder inside _work is a candidate`);
+  if (RUNNER_KEPT.test(rel[2]!)) return row('keep', `FFU runner ${name}'s ${rel[2]} (its tool cache or action downloads): kept, as the daemon's rule ffu-runner-work keeps them`);
+  const runner = path.join(base, name);
+  const entry = path.join(runner, '_work', rel[2]!);
+  const what = `FFU runner ${name}'s job folder (${rel[2]})`;
+  if (!ctx?.procList) return row('keep', `${what}: the running processes could not be read, so a running job cannot be ruled out`);
+  const busy = runnerJobWhy(runner, ctx.procList, now, ctx.runnerLog);
+  if (busy) return row('keep', `${what}: ${busy}`);
+  const settle = INSTALL_LEFTOVER_DEFAULTS.lowCacheSettleMinutes;
+  const newest = await newestTopWrite(entry);
+  if (newest > now - settle * 60_000) return row('keep', `${what}: written ${agoMin(now - newest)} ago, within the ${settle} min settle time (a job may have just ended or begun)`);
+  const inside = norm(p) === norm(entry) ? '' : `inside ${what}: `;
+  return row('delete', `${inside}${what}, no job running on the runner (no Runner.Worker, no process from its _work, its listener not handed a job) and nothing in it written for ${settle} min; the next job checks out and builds again (rule ffu-runner-work, w3502)`);
+}
+
+/**
+ * How many of the newest ready players the cache keeps whatever else says (w5235): two. A before/after leg (a fix against the
+ * commit before it, the players lane's A/B) needs two commits' players at once, and the newest build is usually the head a
+ * requester just built for its --dry run, which its pair legs then use (machine/playerCache.ts, w4601). A player an open
+ * request built or used, a pinned or leased one and one used in the last hour are kept by their own rules, so N covers only
+ * what nothing names. player_cache.py's own cap is 8 entries or 24 GB (FF_PLAYER_CACHE_MAX_ENTRIES).
+ */
+export const PLAYER_CACHE_KEEP_NEWEST = 2;
+/** A cached player used within this many minutes stays, as player_cache.py's FF_PLAYER_CACHE_RECENT_MIN default. */
+export const PLAYER_CACHE_RECENT_MIN = 60;
+/** A cache entry with no ready manifest (a build running or failed) stays this long after its last write. */
+export const PLAYER_CACHE_BUILD_HOURS = 6;
+
+const fileMtime = (p: string) => {
+  try {
+    return fs.statSync(p).mtimeMs;
+  } catch {
+    return 0;
+  }
+};
+
+/** A ready entry's build time: its manifest's "finished", else the manifest's mtime; undefined when not ready. */
+function readyAt(entry: string): number | undefined {
+  const m = readJson(path.join(entry, 'build-manifest.json')) as { status?: unknown; finished?: unknown } | undefined;
+  if (m?.status !== 'ok' || !fs.existsSync(path.join(entry, 'player'))) return undefined;
+  const at = typeof m.finished === 'string' ? Date.parse(m.finished) : NaN;
+  return Number.isFinite(at) ? at : fileMtime(path.join(entry, 'build-manifest.json'));
+}
+
+/** The sessions cache.log names for `key` (its built-ok and hit lines carry ff_session_id), newest last. */
+export function cacheLogSessions(log: string, key: string): string[] {
+  const out: string[] = [];
+  for (const line of log.split('\n')) {
+    const parts = line.trim().split(/\s+/);
+    if (parts[2] !== key || parts[1] === 'evicted') continue;
+    const sid = /(?:^|\s)ff_session_id=([\w-]+)/.exec(line)?.[1];
+    if (sid && !out.includes(sid)) out.push(sid);
+  }
+  return out;
+}
+
+/**
+ * A cached player (<root>/player-cache/<40 hex>-<os>[-burstN], the game repo's scripts/nightly/player_cache.py), or undefined
+ * for a path outside the cache. Before w5235 every entry was "not a place with an owner in the ledger": biscuit's 11 GB of
+ * eight Linux players (w5233) could only go through player_cache.py's own eviction, which runs after a build and stops at its
+ * 8-entry cap. An entry is kept while anything uses it, as player_cache.py's in_use keeps it from eviction, and more:
+ * a running process naming it or its commit (a build holding its lock names the entry), a live pin (<entry>.pins/<pid>), a
+ * last-used under an hour old, no ready manifest within a build's time, a player slot filled from it that a lease, a fill
+ * or a running process holds, a worker that built or used it (cache.log) whose request is not closed, and the newest
+ * PLAYER_CACHE_KEEP_NEWEST ready builds. The rest goes; the next run that needs that commit builds it again (3 to 23 min).
+ */
+export async function judgePlayerCachePath(p: string, f: CleanupFacts, now: number, ctx?: SlotContext): Promise<FolderRow | undefined> {
+  if (factsProblem(f, now) || !f.root) return undefined;
+  const base = path.join(f.root, 'player-cache');
+  if (!within(p, base) || norm(p) === norm(base)) return undefined;
+  const row = (verdict: FolderRow['verdict'], why: string): FolderRow => ({ path: p, kind: 'player-cache', verdict, why });
+  const rel = norm(p).slice(norm(base).length + 1).split('/');
+  const key = path.basename(path.join(base, rel[0]!));
+  if (!PLAYER_CACHE_ENTRY.test(key)) return row('keep', "the player cache's own files (cache.log, an entry's .lock or .pins): only a cached player's folder is a candidate");
+  if (rel.length > 1) return row('keep', `inside cached player ${key}: remove the entry itself (${path.join(base, key)}), never part of a player`);
+  const entry = path.join(base, key);
+  const what = `cached player ${key}`;
+  if (!ctx?.procs) return row('keep', `${what}: the running processes could not be read to see that nothing builds or plays it`);
+  const sha = key.slice(0, 40);
+  const user = ctx.procs.find((c) => mentions(c, entry) || c.toLowerCase().includes(sha));
+  if (user) return row('keep', `${what}: a running process names it or its commit (${user.slice(0, 160)})`);
+  const pins = (() => {
+    try {
+      return fs.readdirSync(`${entry}.pins`).map(Number).filter((n) => Number.isInteger(n) && n > 0);
+    } catch {
+      return [];
+    }
+  })().filter((pid) => ctx.alive(pid));
+  if (pins.length) return row('keep', `${what}: pinned by live pid ${pins.join(', ')} (player_cache.py pin)`);
+  const used = Math.max(fileMtime(path.join(entry, 'last-used')), readyAt(entry) ?? 0);
+  if (now - used < PLAYER_CACHE_RECENT_MIN * 60_000) return row('keep', `${what}: used ${agoMin(now - used)} ago, within ${PLAYER_CACHE_RECENT_MIN} min (player_cache.py's FF_PLAYER_CACHE_RECENT_MIN)`);
+  if (readyAt(entry) === undefined) {
+    const wrote = await newestTopWrite(entry);
+    if (now - wrote < PLAYER_CACHE_BUILD_HOURS * 3_600_000) return row('keep', `${what}: not ready (no build-manifest.json with "status": "ok") and written ${agoMin(now - wrote)} ago: a build may still run`);
+  }
+  for (const e of entries(path.join(f.root, 'players'))) {
+    if (!e.isDirectory() || !isSlotDir(e.name)) continue;
+    const slot = path.join(f.root, 'players', e.name);
+    const source = (readJson(path.join(slot, 'slot.json')) as { source?: unknown } | undefined)?.source;
+    if (typeof source !== 'string' || !within(source, entry)) continue;
+    const s = judgePlayerSlot(slot, ctx, now);
+    if (s.verdict === 'keep' && s.why !== EMPTY_SLOT_WHY) return row('keep', `${what}: player slot ${e.name} was filled from it and is in use (${s.why})`);
+  }
+  let log = '';
+  try {
+    log = fs.readFileSync(path.join(base, 'cache.log'), 'utf8');
+  } catch {
+    /* no log: no worker named */
+  }
+  const up = new Set([...f.live, ...f.resumable, ...Object.keys(f.owners ?? {}), ...(ctx.hosts ?? []), ...(ctx.self ? [ctx.self] : [])].map((s) => s.toLowerCase()));
+  const owner = cacheLogSessions(log, key).find((s) => up.has(s.toLowerCase()));
+  if (owner) {
+    const reqs = f.owners?.[owner]?.requests.map((r) => r.id).join(', ');
+    return row('keep', `${what}: worker ${owner}${reqs ? ` (${reqs})` : ''} built or used it (cache.log) and runs or has a request not closed`);
+  }
+  const newest = entries(base)
+    .filter((e) => e.isDirectory() && PLAYER_CACHE_ENTRY.test(e.name))
+    .map((e) => ({ name: e.name, at: readyAt(path.join(base, e.name)) }))
+    .filter((e): e is { name: string; at: number } => e.at !== undefined)
+    .sort((a, b) => b.at - a.at || a.name.localeCompare(b.name))
+    .slice(0, PLAYER_CACHE_KEEP_NEWEST)
+    .map((e) => e.name);
+  if (newest.includes(key)) return row('keep', `${what}: one of the ${PLAYER_CACHE_KEEP_NEWEST} newest ready builds (PLAYER_CACHE_KEEP_NEWEST: a before/after leg needs two commits' players)`);
+  return row('delete', `${what}: no running process, pin, slot in use or worker with a request not closed uses it, last used ${agoMin(now - used)} ago, and not one of the ${PLAYER_CACHE_KEEP_NEWEST} newest builds; the next run that needs this commit builds it again (3 to 23 min). An idle player slot filled from it keeps its hard-linked files until that slot is emptied too`);
+}
+
 /** The verdict for one path, wherever it is. */
 export function judgePath(p: string, f: CleanupFacts, now = Date.now(), slots?: SlotContext): FolderRow {
   const row = (kind: FolderRow['kind'], r: Pick<FolderRow, 'verdict' | 'why'>): FolderRow => ({ path: p, kind, ...r });
@@ -394,7 +544,10 @@ export async function withGitCheck(r: FolderRow, root: string | undefined, local
  * "its git state could not be read" and KEEP while the pass judged it DELETE (ffa-f1beecb0 on LothDesktop, 2026-11-08).
  */
 export async function judgeWithGit(p: string, f: CleanupFacts, now: number, slots?: SlotContext, o: { localWork?: (dir: string) => Promise<string | undefined>; unpushedWork?: (dir: string) => Promise<string | undefined> } = {}): Promise<FolderRow> {
-  const judged = (await judgeFfuSlotPath(p, f, now, slots)) ?? judgePath(p, f, now, slots);
+  const judged = (await judgeFfuSlotPath(p, f, now, slots)) ?? (await judgeRunnerWorkPath(p, f, now, slots)) ?? (await judgePlayerCachePath(p, f, now, slots)) ?? judgePath(p, f, now, slots);
+  // A runner's checkout is CI's own scratch (w5235): actions/checkout (clean: true, its default) runs git clean -ffdx and
+  // git reset --hard before every job, so its uncommitted files are a build's leftovers that the next job wipes anyway.
+  if (judged.kind === 'ffu-runner-work') return judged;
   const closed = judged.kind === 'session-temp' && judged.verdict === 'delete';
   return withGitCheck(judged, f.root, closed ? (o.unpushedWork ?? ((d: string) => unpushedWorkWhy(d, 60_000))) : o.localWork);
 }
@@ -441,6 +594,13 @@ export async function planFolders(f: CleanupFacts, o: { now?: number; sizes?: 'a
     if (!e.isDirectory() || !/^slot\d+$/.test(e.name)) continue;
     for (const t of [path.join(ffu, e.name, 'target'), path.join(ffu, e.name, 'ffu', 'target')]) if (fs.existsSync(t)) paths.push(t);
   }
+  // w5235: the FFU runners' job folders and the cached players, judged by judgeRunnerWorkPath and judgePlayerCachePath.
+  const runners = path.join(f.root!, 'ffu-runners');
+  for (const r of entries(runners)) {
+    if (!r.isDirectory()) continue;
+    for (const e of entries(path.join(runners, r.name, '_work'))) if (e.isDirectory() && !RUNNER_KEPT.test(e.name)) paths.push(path.join(runners, r.name, '_work', e.name));
+  }
+  for (const e of entries(path.join(f.root!, 'player-cache'))) if (e.isDirectory() && PLAYER_CACHE_ENTRY.test(e.name)) paths.push(path.join(f.root!, 'player-cache', e.name));
   for (const sb of f.sandboxes) {
     for (const top of ['Builds', '.nightly-builds']) for (const e of entries(path.join(sb.path, top))) paths.push(path.join(sb.path, top, e.name));
   }
