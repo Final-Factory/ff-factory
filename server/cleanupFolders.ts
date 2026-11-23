@@ -276,7 +276,21 @@ export async function judgeFfuSlotPath(p: string, f: CleanupFacts, now: number, 
   const what = stray ? `the cargo target left inside ffu ${id}'s checkout (ffu/target, where builds landed before the w4258 .cargo/config.toml routing)` : `ffu ${id}'s cargo target`;
   if (!isCargoTarget(target)) return row('keep', `${what} has no CACHEDIR.TAG written by cargo: not provably build output`);
   const holder = readSlotState(f.root).slots.find((x) => x.id === id)?.holder;
-  const up = holder && [...f.live, ...f.resumable, ...Object.keys(f.owners ?? {}), ...(ctx?.hosts ?? []), ...(ctx?.self ? [ctx.self] : [])].some((s) => s.toLowerCase() === holder.toLowerCase());
+  const is = (list: string[]) => !!holder && list.some((s) => s.toLowerCase() === holder.toLowerCase());
+  const up = is([...f.live, ...f.resumable, ...Object.keys(f.owners ?? {}), ...(ctx?.hosts ?? []), ...(ctx?.self ? [ctx.self] : [])]);
+  // w5240: a holder that is stopped but has a request not closed keeps its warm target, but not the debug/incremental cache of it:
+  // the daemon's sweep trims that over the slot cap (installLeftovers.ts; a rebuild is 22 s longer, w3426), and without this row
+  // biscuit's finished workers' targets (slot1 5.9 GB of 18.5 GB) stayed KEEP between jobs and filled the disk.
+  const rebuildable = rel[1] === 'target' && rel[2] === 'debug' && rel[3] === 'incremental';
+  if (up && rebuildable && !is([...f.live, ...(ctx?.hosts ?? []), ...(ctx?.self ? [ctx.self] : [])])) {
+    if (!ctx?.procs) return row('keep', `${what}: the running processes could not be read to see that nothing builds in or runs from the slot`);
+    const user = ctx.procs.find((c) => mentions(c, slot));
+    if (user) return row('keep', `${what}: a running process names the slot (${user.slice(0, 160)})`);
+    const settleMs = INSTALL_LEFTOVER_DEFAULTS.lowCacheSettleMinutes * 60_000;
+    const last = await newestTopWrite(path.join(target, 'debug', 'incremental'));
+    if (last > now - settleMs) return row('keep', `${what}: its incremental cache was written ${agoMin(now - last)} ago, within the settle time (a build may be running)`);
+    return row('delete', `the debug/incremental cache of ${what}: worker ${holder} is stopped (a request of it is not closed), no running process names the slot, nothing written for ${agoMin(settleMs)}; its warm units stay and the next edit rebuilds this cache (rebuildable, w5240)`);
+  }
   if (up) return row('keep', `${what}: the slot is held by worker ${holder}, which runs or has a request not closed (ffu-slot list); its warm target saves the next build minutes`);
   if (!ctx?.procs) return row('keep', `${what}: the running processes could not be read to see that nothing builds in or runs from the slot`);
   const user = ctx.procs.find((c) => mentions(c, slot));
@@ -614,6 +628,14 @@ export async function planFolders(f: CleanupFacts, o: { now?: number; sizes?: 'a
       continue;
     }
     rows.push(r);
+    // w5240: a kept slot target's incremental cache is judged on its own (a stopped holder's is DELETE).
+    if (r.kind === 'ffu-slot-target' && r.verdict === 'keep' && path.basename(p) === 'target' && path.basename(path.dirname(p)) !== 'ffu') {
+      const inc = path.join(p, 'debug', 'incremental');
+      if (fs.existsSync(inc)) {
+        const ir = await judgeWithGit(inc, f, now, o.slots, o);
+        if (ir.verdict === 'delete') rows.push(ir);
+      }
+    }
     const sid = r.kind === 'session-temp' ? sessionOfDir(path.basename(p)) : undefined;
     if (r.verdict === 'keep' && sid && finishedSession(sid, f)) rows.push(...(await finishedRows(p, f, { now, published: o.published, localWork: o.localWork, ignoredEvidence: o.ignoredEvidence })));
   }
