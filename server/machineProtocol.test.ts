@@ -147,7 +147,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // daemon ignores the field and pushes to the branch as before.
 // w5068 (no bump): `switch.holdPush`, the same hold for the push of unpushed commits before a switch; an older daemon
 // ignores it and pushes to the branch as before.
-const DECIDED = { protocol: 9, fingerprint: '4e7e08d752fa3113' };
+// w5333 (no bump): `LaunchSpec.fence`, the Mac worker write fence. The daemon sets it for its own agent host; the portal
+// never sends it, and an older agent host ignores it and runs claude unfenced (the setting is off by default).
+const DECIDED = { protocol: 9, fingerprint: '7509200125728f5e' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

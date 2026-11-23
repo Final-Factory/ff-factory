@@ -58,6 +58,7 @@ import { DESCRIPTION_CHARS, LABEL_INPUT_CHARS, MAX_OPTIONS, MEDIA_CHARS, MIN_OPT
 import { CARD_QUESTION_CHARS, MAX_ASKS } from '../shared/questionCard.ts';
 import { rangedNumber } from './forgiving.ts';
 import { EXPORT_GROUPS, EXPORT_ROLES, EXPORT_VIEWS } from './spendExport.ts';
+import { fenceSpawner, type WorkerFence } from './workerFence.ts';
 
 /** w5222: agent_transcript's time window and turn timing (server/turnTiming.ts, Store.readTranscriptBetween), for every role that has it. */
 export const TRANSCRIPT_WINDOW_SCHEMA = {
@@ -181,6 +182,8 @@ export interface LaunchSpec {
   /** Commit as this identity in every clone (gitIdentityEnv on the machine, w3093); `repos` are the public ones the guard holds to it. */
   publicGit?: { name: string; email: string; repos: string[] };
   claudeExecutable?: string;
+  /** Run claude inside the worker write fence (server/workerFence.ts, w5333; daemon.json `workerFence`, off by default). */
+  fence?: WorkerFence;
   /** Created before the process starts: `cwd` itself, and these files (relative to cwd) when missing. */
   init?: { files?: Record<string, string> };
 }
@@ -653,5 +656,6 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
     },
     env: agentEnv,
     ...(spec.claudeExecutable ? { pathToClaudeCodeExecutable: spec.claudeExecutable } : {}),
+    ...(spec.fence ? { spawnClaudeCodeProcess: fenceSpawner(spec.fence) } : {}),
   };
 }
