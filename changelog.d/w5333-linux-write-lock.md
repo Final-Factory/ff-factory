@@ -6,5 +6,5 @@
   Claude Code's `cc-socks` socket folder, the Max events file, Unity's `~/.config/unity3d` and
   `~/.local/share/unity3d`, `/tmp` (Unity ignores TMPDIR for three files there), `/dev`, `/proc`, and anything listed in
   `writeLockExtra`. The agent host
-  and the sandbox editor stay outside the lock. Docs: worker-root.md, "4.1 Write lock (Linux, trial)". Tests:
+  and the sandbox editor stay outside the lock. Docs: worker-root.md, "4.2 Write lock (Linux, trial)". Tests:
   `writeLock.test.ts`.

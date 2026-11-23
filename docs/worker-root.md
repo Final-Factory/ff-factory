@@ -523,7 +523,83 @@ console. Adopt B if both pass. The layout already allows it: the root sits outsi
 machine (the reason the Macs' root is `/Users/Shared/ffw`, not `~/ffw`), and switching is a change of the service's
 principal and the root's ACLs.
 
-### 4.1 Write lock (Linux, trial; w5333, 2026-11-23)
+### 4.1 Windows trial: writes only to the root (w5333, LothDesktop, 2026-11-23)
+
+lothsahn (w5333): "Regardless of user the workers should only write to the v: on windows. Ideally they'd only be allowed
+to do that." The target: whatever account runs them, workers and the editors, players and tools they start can write
+only under the root (`V:\ffw` on LothDesktop); every write elsewhere, C: included, is refused by the OS.
+
+**B (a dedicated user) does not meet it, and cannot be made without C:.** Measured on LothDesktop: the daemon's shell is
+not elevated (UAC on, Administrators deny-only), so creating a user needs an admin's elevation; and any local account
+lives in the SAM hive and the ProfileList key on C:, and its first logon makes `C:\Users\<user>` and its `NTUSER.DAT`
+there (a profile folder can be moved later, the registry entries cannot). A dedicated user also still writes its own
+profile, `C:\ProgramData`, `C:\Users\Public` and every other folder Users or Everyone may write, unless each is denied
+by hand.
+
+**What meets it without a new user: Windows integrity levels.** A process at Low integrity cannot write to an object
+labelled Medium, and every unlabelled file, folder and registry key counts as Medium (no-write-up). Label the root Low
+(`icacls V:\ffw /setintegritylevel (OI)(CI)low`, which its owner may do with no admin and nothing on C:) and start
+workers at Low: they write inside the root and nowhere else. Measured at Low integrity in a Low-labelled folder under
+`V:\ffw\tmp` (the trial's zone), same account, no admin:
+
+| Check | Result (measured) |
+|---|---|
+| Writes: root zone / an unlabelled `V:\ffw` folder / `D:\` / `E:\` / `C:\` / the C: profile / `HKCU\Software` | allowed / refused / refused / refused / refused / refused / refused (a Medium control wrote the unlabelled folder) |
+| The daemon's folder (`D:\work\ffw\daemon`) | unlabelled on D:, so Medium: refused by the same rule as `D:\` (not written to by name) |
+| How a worker starts at Low | a Low-labelled copy of an exe starts at Low from a Medium parent and its children inherit it: a copy of `node.exe` and of `cmd.exe` in the zone both ran at Low. No native helper and no `CreateProcessAsUser` needed |
+| git (init, commit, https clone), git-lfs, gh by token, node, PowerShell, Claude Code (`claude --version`) | all work |
+| git push/fetch auth | the current `GIT_CONFIG_*` helper (`!gh auth git-credential`) fails, since it runs msys `sh`; a config-only `http.https://github.com/.extraheader` with the token works |
+| Git Bash (msys) | crashes (0xC0000022) on the `msys-2.0` shared memory that the person's Medium Git Bash processes hold; a copy of `usr\bin` at another path gets its own section and works (`/cygdrive/<drive>` paths without an fstab) |
+| Unity 6000.3.19f1 licence | works (the licensing client starts and serves the editor) |
+| GUI editor (DX12) | works once `APPDATA`, `LOCALAPPDATA` and `USERPROFILE` point into the root; without that it stops on a modal "Moving file failed" (its Roaming preferences are refused) |
+| Batch player build | works: `Build Finished, Result: Success`, 89 MB player |
+| A built player, windowed | works: 800x600, 601 frames in 10 s, quits by itself |
+| The game (slot3-0 build b8b30f4a08), windowed, `-ffSoloQuitAfterSeconds 60` | runs and quits by itself; Steam login works ("Connected to Steam"); Steam Input's controller shared memory fails (`Failed creating file mapping SteamController_Master_mem`), so Steam controller input is likely lost at Low (a guess, no controller tried) |
+| `ff-leftovers end` | missed a Low-integrity editor (it was then closed by hand through its window); the sweep must see Low processes |
+
+**The holes.** Windows labels a few places Low for its own sandboxed apps, so a Low worker can still write there:
+`%USERPROFILE%\AppData\LocalLow` and `HKCU\Software\AppDataLow` (and any other object something already labelled Low). Measured: Unity's
+`persistentDataPath` and GI cache go to LocalLow whatever `USERPROFILE` says, and the game build above (older than
+`FF_GAME_DATA_DIR`) wrote its Workshop blueprint copy into the person's `LocalLow\Never Games`. Closing them: the game's
+`FF_GAME_DATA_DIR` (in the game since d28c91db85) and Unity's GI cache folder preference move our own writes; a one-time
+`icacls %USERPROFILE%\AppData\LocalLow /setintegritylevel (OI)(CI)medium` by the person closes the folder for every Low
+process (it touches C:, and breaks any other app that sandboxes itself at Low there; none was found on LothDesktop, a
+guess).
+
+**Options against the target**
+
+| Option | Meets "only the root"? | Admin / C: | Cost and what breaks |
+|---|---|---|---|
+| B. Dedicated local user (the w5297 design) | no: its profile, ProgramData, Public stay writable | admin; SAM, ProfileList and profile on C: | its own Unity licence, Claude and gh logins, a desktop session for the GPU; blocked by "nothing on C:" |
+| **D. Low integrity (trialled)** | yes, except LocalLow and AppDataLow until closed | none for the root; the LocalLow close is one person's icacls on C: | a worker-owned Git copy for msys (`CLAUDE_CODE_GIT_BASH_PATH`), token auth by `extraheader`, profile env vars into the root, leftovers that see Low processes, Steam Input; reading the person's files is still allowed (no-write-up only) |
+| E. Write-restricted token from the broker (`CreateRestrictedToken` with `WRITE_RESTRICTED` and a restricting SID granted write on the root) | yes, and no holes: only objects that grant the SID can be written | none (a restricted copy of the caller's own token needs no privilege) | not trialled; needs a small native launcher; named pipes, shared memory and HKCU writes are refused too, so the Unity licence pipe, msys and Unity's EditorPrefs may fail (a guess) |
+| F. AppContainer | yes | needs admin `CheckNetIsolation` for loopback; its profile goes under `AppData\Local\Packages` on C: | loopback (the MCP bridge, the portal), the licence pipe and every read path need grants; most work, not trialled |
+
+**Recommendation:** D, behind a setting that is off by default (`worker_integrity: "low"` in `daemon.json`):
+
+1. The install labels the root Low, except `secrets/` and the daemon's own app folder where it sits inside the root, which stay Medium (a worker cannot
+   rewrite the daemon's code or its tokens).
+2. `launchHost` (`machine/agentHost.ts`) spawns the agent host through a Low-labelled copy of `node.exe` in the root;
+   everything the agent starts inherits Low. Editors from `machine/unity.ts` go through the same launcher.
+3. `rootEnv` adds `APPDATA`, `LOCALAPPDATA`, `USERPROFILE` and `TEMP` under the root, `CLAUDE_CODE_GIT_BASH_PATH` to the
+   root's own Git copy, and git auth by `extraheader` instead of the shell helper.
+4. `machine/leftovers.ts` and the process sweeps learn to see and end Low processes.
+5. Ask each machine's person once to close LocalLow.
+
+Then trial E on one machine as the stricter variant, if the holes or Low's quirks are not acceptable.
+
+**Rollout per Windows machine** (effort is a guess)
+
+| Machine | Root | Effort | Risk and what breaks |
+|---|---|---|---|
+| LothDesktop | `V:\ffw` | half a day after the code lands: label, Git copy, setting on, one editor plus one player plus one agent turn | Steam Input in players; any tool that writes `%USERPROFILE%` directly (not through the env var) is refused and must be moved into the root |
+| BEAST | `F:\ffw` | the same, through an ffsb sandbox (the BEAST rule) | the ffsb helpers run outside the root on C: and must stay Medium; check they never run inside a Low worker |
+| LothLaptop | its root | the same | laptop power and GPU switching unchanged; the same Steam Input caveat |
+
+Not changed by any of these: the person's own Medium processes, the daemon itself (it stays Medium and launches
+workers), firewall rules and the network.
+
+### 4.2 Write lock (Linux, trial; w5333, 2026-11-23)
 
 lothsahn (w5333): "Run all three: Windows on LothDesktop, Linux on biscuit, Mac on m3 or m5". This is the Linux leg,
 tried on biscuit (Ubuntu, kernel 7.0.0-38). Off unless a Linux machine's daemon.json says `"writeLock": true`.
