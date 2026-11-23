@@ -29,6 +29,7 @@ import {
   slotsPointer,
   splitArgs,
   unityProcesses,
+  OVER_NOTICE_MS,
   type ArbiterDeps,
   type Place,
   type SlotRequest,
@@ -169,7 +170,7 @@ test('unity slots: two batch builds on a machine with one free slot run one afte
   const second = req('b2', { pid: 502, label: 'build bug-1553894544', createdAt: T0 + 1000 });
   let a = assess({ platform: 'win32', procs, requests: [first, second], places, limit: 3, now: T0 + 2000 });
   assert.deepEqual(a.grant, ['b1']);
-  assert.deepEqual(a.waiting, [{ id: 'b2', position: 1, why: 'needs 1, 0 free (3 of 3 in use)' }]);
+  assert.deepEqual(a.waiting, [{ id: 'b2', position: 1, why: 'needs 1, 0 free (3 of 3 in use); held by sandbox:lag-lead (no request, low), batch pid 11 outside the gate' }]);
   // b1's build runs under its wrapper.
   const running = [...procs, { pid: 501, ppid: 1, name: 'python.exe', cmd: 'python' }, { ...editorProc(601, 'D:\\work\\ffsb\\pr-fix', true), ppid: 501 }];
   a = assess({ platform: 'win32', procs: running, requests: [{ ...first, grantedAt: T0 + 2000 }, second], places, limit: 3, now: T0 + 60_000 });
@@ -196,7 +197,7 @@ test('unity slots: a free slot goes first to a waiter that already holds one, th
   const single = req('s1', { createdAt: T0 + 1 });
   const b = assess({ platform: 'win32', procs: [editorProc(11, 'D:\\other', true)], requests: [peer, single], places: [], limit: 2, now: T0 + 2 });
   assert.deepEqual(b.grant, []);
-  assert.deepEqual(b.waiting.map((w) => [w.id, w.why]), [['p1', 'needs 2, 1 free (1 of 2 in use)'], ['s1', 'behind 1 earlier request']]);
+  assert.deepEqual(b.waiting.map((w) => [w.id, w.why]), [['p1', 'needs 2, 1 free (1 of 2 in use); held by batch pid 11 outside the gate'], ['s1', 'behind 1 earlier request']]);
 });
 
 test('unity slots: two 2-editor peer runs on a machine with a limit of 3 never deadlock', () => {
@@ -257,7 +258,7 @@ test('unity slots: over the limit by processes started outside the gate, or RAM 
   assert.equal(a.overLimit, true);
   assert.equal(countsLine(a), 'editors 4 of 3: 1 interactive, 3 batch');
   assert.deepEqual(a.grant, []);
-  assert.equal(a.waiting[0].why, 'needs 1, 0 free (4 of 3 in use)');
+  assert.equal(a.waiting[0].why, 'needs 1, 0 free (4 of 3 in use); held by interactive pid 1 outside the gate, batch pid 2 outside the gate, batch pid 3 outside the gate, batch pid 4 outside the gate');
   const r = assess({ platform: 'win32', procs: [], requests: [req('r1')], places: [], limit: 3, now: T0, ramPct: 90 });
   assert.deepEqual(r.grant, []);
   assert.equal(r.waiting[0].why, 'RAM 90% used; new Unity launches wait below 85%');
@@ -309,7 +310,7 @@ test('unity slots: a client waits in the queue for its slot and gets it when the
     await new Promise((r) => setTimeout(r, 15));
   }
   assert.equal(box.second === undefined, true, "still waiting");
-  assert.match(said.join('\n'), /waiting for 1 Unity slot\(s\): position 1 of 1, needs 1, 0 free \(1 of 1 in use\); editors 1 of 1/);
+  assert.match(said.join('\n'), /waiting for 1 Unity slot\(s\): position 1 of 1, needs 1, 0 free \(1 of 1 in use\); held by "build pr-fix" \(sandbox:a, low\); editors 1 of 1/);
   const file = JSON.parse(fs.readFileSync(arbiterFile(dir), 'utf8'));
   assert.deepEqual(file.granted.map((g: { label: string }) => g.label), ['build pr-fix']);
   one.stop();
@@ -412,14 +413,20 @@ test('unity slots: `unity start` takes a slot by the same rule: refused behind w
   assert.match((await slots.startRefusal('sandbox:b'))!, /^not started: behind 1 earlier request; editors 1 of 2: 1 interactive, 0 batch; 1 launch\(es\) wait ahead of it\. Try again once one ends/);
   fs.rmSync(reqFile(dir, 'peer1'));
   procs = [editorProc(1, 'D:\\a'), editorProc(2, 'D:\\b', true), editorProc(3, 'D:\\c', true)];
-  assert.match((await slots.startRefusal('sandbox:b'))!, /^not started: needs 1, 0 free \(3 of 2 in use\); editors 3 of 2: 1 interactive, 2 batch/);
+  assert.match((await slots.startRefusal('sandbox:b'))!, /^not started: needs 1, 0 free \(3 of 2 in use\); held by interactive pid 1 outside the gate, batch pid 2 outside the gate, batch pid 3 outside the gate; editors 3 of 2: 1 interactive, 2 batch/);
   assert.equal(slots.line(), 'editors 3 of 2: 1 interactive, 2 batch; OVER LIMIT: nothing more starts until it drops');
   assert.equal(denyFile(dir, 'x').endsWith('deny-x.json'), true);
 });
 
-test('unity slots: tells the orchestrator once when the machine goes over its limit, and when it is back', async (t) => {
+test('unity slots: tells the orchestrator once when the machine stays over its limit for 15 s, and when it is back', async (t) => {
   let procs: Proc[] = [editorProc(1, 'D:\\ffsb\\a'), editorProc(2, 'D:\\nightly\\FinalFactory', true)];
-  const { slots, events } = arbiter(t, { limit: () => 1, procs: async () => procs });
+  let clock = Date.now();
+  const { slots, events } = arbiter(t, { limit: () => 1, procs: async () => procs, now: () => clock });
+  await slots.tick();
+  await slots.tick();
+  // w5324: an editor that quits is counted outside for a few seconds (LothDesktop 17:52Z): not told before OVER_NOTICE_MS.
+  assert.equal(events.length, 0);
+  clock += OVER_NOTICE_MS;
   await slots.tick();
   await slots.tick();
   assert.equal(events.length, 1);

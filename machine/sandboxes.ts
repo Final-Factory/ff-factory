@@ -559,7 +559,7 @@ export class SandboxPool {
     const saved = c.saved?.length ? ` It saved ${c.saved.join(', ')} first.` : '';
     this.changed(r, {
       benchClosed: { ...c, pids: [], reopenAt: new Date(this.d.now()).toISOString() },
-      ...(first ? { benchNote: `[bench turn] Your sandbox's Unity editor was closed at ${c.at.slice(11, 16)}Z for ${c.by} (${isPersonTicket(c.ticket) ? 'w1894: while a person plays the game on this machine, the agents\' editors, players and builds yield to it' : "w1829: while another worker's exclusive bench ticket times a run, nothing else runs on this machine"}).${saved} Its assets were saved too: check git status. Anything in play mode then is gone. It is starting again now (${text.slice(0, 200)}); mcp__machine__unity status says when it is up.` } : {}),
+      ...(first ? { benchNote: `[bench turn] Your sandbox's Unity editor was closed at ${c.at.slice(11, 16)}Z for ${c.by} (${isPersonTicket(c.ticket) ? 'w1894: while a person plays the game on this machine, the agents\' editors, players and builds yield to it' : c.ticket?.startsWith('slot:') ? 'w5324: a higher-priority run took its Unity slot; it was closed only while idle (no play mode, compile, import, test run or build), and it stayed closed while that run waited or ran' : "w1829: while another worker's exclusive bench ticket times a run, nothing else runs on this machine"}).${saved} Its assets were saved too: check git status.${c.ticket?.startsWith('slot:') ? '' : ' Anything in play mode then is gone.'} It is starting again now (${text.slice(0, 200)}); mcp__machine__unity status says when it is up.` } : {}),
     });
     return text;
   }

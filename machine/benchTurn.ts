@@ -127,6 +127,11 @@ export interface BenchTurnDeps {
   isPlayer?(pid: number, procs: Proc[]): boolean;
   /** Save and quit a sandbox's editor through the editor, and mark the sandbox closed for `by`'s `ticket` (never a kill). */
   closeEditor(id: string, by: string, ticket: string): Promise<{ closed: boolean; text: string }>;
+  /**
+   * w5324: a mark another gate keeps (a `slot:<request>` close, while that Unity slot request waits or runs): not reopened
+   * yet. Absent: none is kept.
+   */
+  keptClosed?(ticket: string): boolean;
   /** Start a closed sandbox's editor again (it queues for its shared turn); the mark stays until it runs. Throws when it cannot. */
   reopenEditor(id: string): Promise<string>;
   /** Its editor did not run after REOPEN_TRIES starts: drop the mark and tell its worker (an editor that crashes at boot). */
@@ -295,6 +300,7 @@ export class BenchTurn {
     for (const c of closed) {
       // w1894: a person's turn keeps every mark, whichever turn made it.
       if (h && !holdsSandbox(h, c.id) && (c.ticket === h.ticket || h.person)) continue;
+      if (this.d.keptClosed?.(c.ticket)) continue;
       if (c.starting || (c.reopenAt !== undefined && now - c.reopenAt < TURN_RETRY_MS) || (this.retryAt.get(c.id) ?? 0) > now) continue;
       const tries = this.starts.get(c.id) ?? 0;
       if (tries >= REOPEN_TRIES && this.d.giveUp) {

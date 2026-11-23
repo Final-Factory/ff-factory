@@ -161,11 +161,29 @@ the task's process group SIGKILLed, then `wait` returns the command's output and
 **The queue** (`assess`):
 
 - **All or nothing.** A request takes all its slots at once or none. A peer run that needs two editors asks for 2.
-- **Holders first.** When slots free, waiting requests from holders (a sandbox whose editor runs, a run that already
-  holds slots; agents in a sandbox carry `FF_UNITY_HOLDER=sandbox:<id>`) go first, then new requesters, oldest first in
-  each. A sandbox whose editor was stopped with the tool in the last 5 minutes keeps a holder's turn, so a worker that
-  stops its editor to build its own project in batch mode is not sent to the back. The first that does not fit stops
-  the queue, so singles never starve a peer run waiting for two.
+- **Priority first, then holders** (w5324). Waiting requests go by their session's request priority, frantic > urgent >
+  high > normal > low (`priorities.json`, read live at each look). Within one priority, requests from holders (a sandbox
+  whose editor runs, a run that already holds slots; agents in a sandbox carry `FF_UNITY_HOLDER=sandbox:<id>`) go first,
+  then new requesters, oldest first in each. A sandbox whose editor was stopped with the tool in the last 5 minutes keeps
+  a holder's turn, so a worker that stops its editor to build its own project in batch mode is not sent to the back of
+  its priority. The first that does not fit stops the queue, so singles never starve a peer run waiting for two. Until
+  w5324 holders went ahead of priority (w4620), so a normal sandbox whose editor was up went ahead of a frantic
+  newcomer: w5291, a frantic Build 64 release item, waited about 2 h on LothDesktop on 2026-11-23 (lothsahn: "If w5291 is
+  frantic priority, how is it waiting for a slot?").
+- **A higher priority takes an idle lower editor's slot, cleanly** (w5324; lothsahn: "High priority work should also
+  preempt lower priority work as well, cleanly, of course"). When the head of the queue does not fit, `assess` names in
+  `preempt` the running sandbox editors of strictly lower priority (their `editor:<sandbox>` session's) that hold their
+  slot alone, lowest first, enough for its count, or none. The daemon (`slotPreemptClose` in `machine/daemon.ts`)
+  closes each through the editor, as an idle Live view is closed (`idleCloseEditor`: save the scenes and assets, then
+  quit), never by a kill, and skips it while the worker's Unity MCP calls hold the editor's ticket (a compile or a test
+  run, or one in the last 5 min) or, in the same main-thread call as the quit, while it plays, compiles, imports, runs
+  tests (Test Framework's `TestRunnerApi.IsRunActive`, MCP for Unity's `TestRunStatus.IsRunning`) or builds a player
+  (`BUSY_LINES` in `machine/liveIdle.ts`). A skipped close is asked again after 60 s (`PREEMPT_RETRY_MS`). Never a
+  victim: an equal or higher priority, the waiter's own sandbox, a place with a granted run beside its editor (a build
+  or a test run under `unity-slot`), an editor still starting. The closed sandbox is marked `slot:<request>` (a bench
+  close, `benchClosed`), kept closed while that request waits or runs (`keptClosed`), then the bench turn starts it
+  again and its worker is told at its next message. The waiting reason says it: "held by sandbox:slot2 (w5293,
+  normal), ...; takes the slot of sandbox:slot2's editor (normal) once idle (w5324)".
 - **No deadlock.** A waiter that holds slots (its own process's, or its sandbox's open editor) and asks for more than the
   limit leaves it is refused at once ("ask for all N at once"). When every slot in use is held by waiters, nothing would
   ever free one: a later waiter that fits goes first (it can finish), and if none fits the newest waiting holder is
@@ -181,9 +199,12 @@ the task's process group SIGKILLed, then `wait` returns the command's output and
   quarter of 64 GB, and LothDesktop paged at 63 of 64. The queue waits; after 10 minutes on RAM the orchestrator is told.
   This host's own daemon's guard has a free-RAM gate on its editors too (`limits.minFreeRamGB`, 10 GB, handed to it by
 the portal; `server/hostHealth.ts` `blockReason`).
-- **The backstop.** Unity started outside the gate counts all the same. When the machine is over its limit the
-  orchestrator is told once ("over its limit... Started outside the slot gate: batch FinalFactory"), and again when it is
-  back. The backstop itself stops nothing; the reaper below ends a sandbox's orphaned or hung batch build.
+- **The backstop.** Unity started outside the gate counts all the same. When the machine stays over its limit for 15 s
+  (`OVER_NOTICE_MS`; an editor that quits is counted outside for a few seconds) the orchestrator is told once ("over its
+  limit... Started outside the slot gate: batch FinalFactory (started by python.exe)", each with its parent's name), and
+  again when it is back. A Unity process whose command line shows no `-projectPath` (a Windows listing can give an empty
+  one) is matched to its sandbox by the pid in the project's `Library/EditorInstance.json` (w5324: LothDesktop,
+  2026-11-23 19:30Z, "4 of 3 ... Started outside the slot gate: interactive pid 47084, interactive pid 41472"). The backstop itself stops nothing; the reaper below ends a sandbox's orphaned or hung batch build.
 - **One process, one slot; one start at a time** (w4775, LothDesktop on 2026-11-19). A batch Unity in a sandbox's
   project whose parent chain no longer reaches its granted run (a build's second Unity under `env`) is counted on that
   run's grant, not on the sandbox's place as well (`assess` in `machine/unitySlots.ts`): at 11:29:55Z one build read as
