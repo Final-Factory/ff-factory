@@ -479,7 +479,7 @@ test("w3328: below the critical line a disk clean-up request's worker starts on 
     assert.match(guard.blockReason('editor', { diskCleanup: true }) ?? '', /new editors wait/, 'the flag never starts an editor');
 
     // At the warn level too, and under the floor even the clean-up worker waits.
-    freeV = 31 * GB; // above critical + hysteresis (30), under warn + hysteresis (35)
+    freeV = 27 * GB; // above critical + DISK_RESUME_MARGIN_GB (25), under warn + it (30): the sandbox volume lifts at the gate's margin (w5167)
     await guard.tick();
     assert.match(d.startRefusal(ordinary, 's-ordinary') ?? '', /disk space is low/);
     assert.equal(d.startRefusal(cleanup, 's-cleanup'), undefined);
