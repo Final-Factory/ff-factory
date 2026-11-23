@@ -149,6 +149,14 @@ function parseLines(text: string, limit?: number): TranscriptEvent[] {
   return out;
 }
 
+/** w5222: an event line's time in ms, from the `"t":"…"` it ends with (Store.append writes seq and t last); undefined: none. */
+export function lineTime(line: string): number | undefined {
+  const m = /"t":"([^"]{10,40})"\}\s*$/.exec(line.length > 120 ? line.slice(-120) : line);
+  if (!m) return undefined;
+  const t = Date.parse(m[1]);
+  return Number.isNaN(t) ? undefined : t;
+}
+
 /** Non-empty lines in `buf` after its first newline: the lines a tail read holds whole. */
 function completeLines(buf: Buffer): number {
   let n = 0;
@@ -858,6 +866,93 @@ export class Store {
       if (!t) return [];
       const events = parseLines(t.text);
       if (t.whole || (events[0] && events[0].seq <= seq)) return events.filter((e) => e.seq >= seq);
+    }
+  }
+
+  /**
+   * w5222: the events persisted between `since` and `until` (ISO; inclusive), for turn timing. A plain transcript is searched by
+   * byte offset (each line ends with its `"t":"…"}`, and lines are appended in time order), so a window of an hour costs a few
+   * reads of a gigabyte file, not the file; a compressed one (idle a day, dataGuard.ts) is scanned. `truncated`: the window held
+   * more than `maxBytes` of lines, and the events stop there.
+   */
+  async readTranscriptBetween(sessionId: string, since: string, until: string, maxBytes = 48 * 1024 * 1024): Promise<{ events: TranscriptEvent[]; truncated: boolean }> {
+    const from = Date.parse(since);
+    const to = Date.parse(until);
+    const f = this.transcriptPath(sessionId);
+    if (!fs.existsSync(f)) {
+      const events: TranscriptEvent[] = [];
+      let bytes = 0;
+      const keep = (line: string) => {
+        const t = lineTime(line);
+        if (t === undefined || t < from || t > to || bytes > maxBytes) return false;
+        bytes += line.length;
+        return true;
+      };
+      for await (const e of this.scanTranscript(sessionId, keep)) events.push(e);
+      return { events, truncated: bytes > maxBytes };
+    }
+    const fd = fs.openSync(f, 'r');
+    try {
+      const size = fs.fstatSync(fd).size;
+      // the first newline at or after `at`, and the text of the last 200 bytes before it; undefined: none
+      const lineEnd = (at: number): { end: number; tail: string } | undefined => {
+        let pos = at;
+        let tail = '';
+        while (pos < size) {
+          const buf = Buffer.alloc(Math.min(TAIL_CHUNK, size - pos));
+          const n = fs.readSync(fd, buf, 0, buf.length, pos);
+          if (n <= 0) return undefined;
+          const nl = buf.subarray(0, n).indexOf(0x0a);
+          if (nl >= 0) return { end: pos + nl, tail: (tail + buf.toString('utf8', 0, nl)).slice(-200) };
+          tail = (tail + buf.toString('utf8', 0, n)).slice(-200);
+          pos += n;
+        }
+        return undefined;
+      };
+      // narrow [lo, hi) to the first line at or after `from`. Each probe reads the first WHOLE line after `mid` (the one holding
+      // `mid` may be cut inside its time): lo stays 0 or a line start, never past the window's first line, and every pass narrows.
+      let lo = 0;
+      let hi = size;
+      while (hi - lo > TAIL_CHUNK) {
+        const mid = Math.floor((lo + hi) / 2);
+        const cut = lineEnd(mid);
+        const whole = cut && lineEnd(cut.end + 1);
+        const t = whole ? lineTime(whole.tail) : undefined;
+        if (whole && t !== undefined && t < from) lo = Math.min(whole.end + 1, hi);
+        else hi = mid;
+      }
+      // read on from lo: lines before `from` are dropped, the read stops at the first line after `until`
+      const events: TranscriptEvent[] = [];
+      let pos = lo;
+      let rest = '';
+      let read = 0;
+      let truncated = false;
+      outer: while (pos < size) {
+        const buf = Buffer.alloc(Math.min(4 * 1024 * 1024, size - pos));
+        const n = fs.readSync(fd, buf, 0, buf.length, pos);
+        if (n <= 0) break;
+        pos += n;
+        read += n;
+        const lines = (rest + buf.toString('utf8', 0, n)).split('\n');
+        rest = lines.pop() ?? '';
+        for (const line of lines) {
+          const t = lineTime(line);
+          if (t === undefined || t < from) continue;
+          if (t > to) break outer;
+          try {
+            events.push(JSON.parse(line.replace(/^\0+/, '')) as TranscriptEvent);
+          } catch {
+            // a torn line after a crash
+          }
+        }
+        if (read > maxBytes) {
+          truncated = true;
+          break;
+        }
+      }
+      return { events, truncated };
+    } finally {
+      fs.closeSync(fd);
     }
   }
 

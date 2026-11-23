@@ -1656,6 +1656,18 @@ as Max in its thread, in a public PR. That is the combination a prompt injection
 closed to it, and its brief and the refusal say why. A trusted intake source (a nightly run, a release, a master batch:
 `untrusted: false`) is no bar. Tested in `server/orchestrators.test.ts` ("w4528").
 
+**Turn timing** (w5222, lothsahn: "Are the tool calls slow or your model calls slow?"). A worker's `agent_transcript`
+takes `since` and `until` (ISO times with a zone, at most 24 h apart) to read a window instead of the last events, each
+event with its time to the millisecond, and `timing: true` to answer how each whole turn in the window spent its wall
+time, an hour back by default (`server/turnTiming.ts`). Between two events the clock is the tools' while any tool call
+is open, else the model's (the API call and the SDK's step overhead together: streaming deltas are not persisted, so
+time to first token is not split out). Per turn it gives wall, model and tool shares, model steps with the characters
+each wrote, every tool's calls, and a person's mid-turn message timed to the turn's next assistant text with the tool
+calls started in between; then totals, medians, p90 and worst. The window is read by byte offset
+(`Store.readTranscriptBetween`: every line ends with its `"t"`, appended in time order), so an hour of a gigabyte
+coordinator transcript costs a few reads; a compressed transcript is scanned. The orchestrators' own `agent_transcript`
+keeps its old shape (their always-loaded tool budget, `coordinatorContext.test.ts`). Tested in `server/turnTiming.test.ts`.
+
 **Where a request's wall time went** (w4531). A worker whose open request carries the ledger-read grant (transcripts
 are every worker's since w4528, so no second grant) may call `work_timing` (group `ledger`): it measures the last finished (`done`) requests, newest
 first by their last DONE (`last`, default 50, at most 300; `until` for an earlier window to compare with), in two parts
