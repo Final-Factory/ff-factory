@@ -10983,48 +10983,53 @@ test('w4468: request_pair split lets a Mac host with no w3697 sentence in the br
   assert.match(pings.join('\n'), /a person's game on pc ended/);
 });
 
-// w4553 (lothsahn, 2026-11-17): two ffu rows on the same code ran at once and conflicted at merge (7 of 8 not-mergeable
-// failures from 2026-11-15 12:00Z to 11-17 11:00Z were ffu). start_agent holds the later one Blocked on the PR it overlaps.
-test('w4553: start_agent holds an ffu row whose files an open ffu PR edits, Blocked on that PR; override_overlap starts it; game work is never checked', async (t) => {
+// w4553 (lothsahn, 2026-11-17) found two ffu rows on the same code at start and held the later one Blocked; w5197 (lothsahn,
+// 2026-11-23: "Let FFU look requests run at once; each merges main before pushing, and the later PR fixes conflicts") starts
+// it all the same: both rows run, and each worker is told which files it shares and with whom.
+test('w5197: two ffu rows that share a file both start, and both workers get the shared-files note; game work is never checked', async (t) => {
   const { store, agents, dispatcher, call } = await setupOnMachine(t);
   agentsRoom(agents, ['pc']);
   putRequests(store, [
-    { id: 'w4370', status: 'active', repo: 'Final-Factory/ffu', sessionIds: ['s-4370'], prs: [{ repo: 'Final-Factory/ffu', number: 852, state: 'open' }] } as Partial<WorkItem> & { id: string },
-    { id: 'w4418', repo: 'Final-Factory/ffu', brief: 'Add pad bindings for Frenzy, Guardian and Obliterator Disk in crates/ffu-platform/src/lib.rs.' },
-    { id: 'w4419', repo: 'Final-Factory/ffu', brief: 'Tech rewards in sector/rewards.rs.' },
-    { id: 'w4420', brief: 'Fix crates/ffu-platform/src/lib.rs in the game repo (not ffu).' },
+    { id: 'w5189', repo: 'Final-Factory/ffu', title: 'FFU look: rim light', brief: 'Rim light on hulls.' },
+    { id: 'w5164', repo: 'Final-Factory/ffu', title: 'FFU look: dark Assembler tops', brief: 'Assembler tops are too dark.' },
+    { id: 'w5150', repo: 'Final-Factory/ffu', brief: 'Tech rewards in sector/rewards.rs.' },
+    { id: 'w4420', brief: 'Fix crates/ffu-render/src/mesh.wgsl in the game repo (not ffu).' },
   ]);
   let reads = 0;
-  (agents as unknown as { ffuReads: unknown }).ffuReads = {
-    openPrs: async () => (reads++, [{ number: 852, body: 'Request: w4370', updatedAt: new Date().toISOString(), files: ['crates/ffu-platform/src/lib.rs', 'docs/play.md'] }]),
-    hubs: async () => [],
-  };
-  const held = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Go.', title: 'Pad abilities', work_id: 'w4418' });
-  assert.equal(held.isError, false, held.text);
-  assert.match(held.text, /^w4418 was not started: it is ffu work .*Final-Factory\/ffu#852 \(w4370\): crates\/ffu-platform\/src\/lib\.rs\. It is held Blocked on Final-Factory\/ffu#852 .*override_duplicate/);
-  const w = store.work.get('w4418')!;
-  assert.equal(w.status, 'blocked');
-  assert.deepEqual(w.sessionIds, []);
-  assert.deepEqual([w.blocked?.kind, w.blocked?.ref, w.alsoBlocked], ['pr', 'Final-Factory/ffu#852', undefined]);
-  // A row on other files starts, and records the files its prompt names for the next check.
-  const other = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', title: 'Rewards', work_id: 'w4419', prompt: 'Edit crates/ffu-sim/src/sector/rewards.rs.' });
-  assert.doesNotMatch(other.text, /was not started/, other.text);
-  assert.deepEqual(store.work.get('w4419')!.ffuFiles, ['crates/ffu-sim/src/sector/rewards.rs']);
+  (agents as unknown as { ffuReads: unknown }).ffuReads = { openPrs: async () => (reads++, []), hubs: async () => [] };
+  const first = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', title: 'Rim light', work_id: 'w5189', prompt: 'Edit crates/ffu-render/src/mesh.wgsl.' });
+  assert.equal(first.isError, false, first.text);
+  assert.doesNotMatch(first.text, /w5197/, 'nothing in flight shares its files');
+  assert.deepEqual(store.work.get('w5189')!.ffuFiles, ['crates/ffu-render/src/mesh.wgsl']);
+  const s1 = store.work.get('w5189')!.sessionIds[0];
+  await until('w5189 ends its first turn', () => store.sessions.get(s1)?.status === 'idle');
+
+  const second = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', title: 'Assembler tops', work_id: 'w5164', prompt: 'Darken less in crates/ffu-render/src/mesh.wgsl.', extra_agent: true });
+  assert.equal(second.isError, false, second.text);
+  assert.match(second.text, /^Started agent .* It may edit files other ffu work in flight edits \(w5197\): w5189 \(in flight, no pull request yet\): crates\/ffu-render\/src\/mesh\.wgsl; it was told, and so was each of those requests' worker/);
+  const w = store.work.get('w5164')!;
+  assert.notEqual(w.status, 'blocked');
+  assert.equal(w.blocked, undefined);
+  assert.equal(w.sessionIds.length, 1);
+  const s2 = w.sessionIds[0];
+  await until('w5164 ends its first turn', () => store.sessions.get(s2)?.status === 'idle');
+  assert.match(JSON.stringify(store.readTranscript(s2)), /w5164 may edit files other ffu work in flight edits: w5189 \(in flight, no pull request yet\): crates\/ffu-render\/src\/mesh\.wgsl\. Nothing waits on it: merge origin\/main/);
+  await until('w5189 is told', () => JSON.stringify(store.readTranscript(s1)).includes('w5164 just started on ffu work that may edit files yours edits too: crates/ffu-render/src/mesh.wgsl'));
+  assert.ok(w.log.some((l) => /ffu files shared with work in flight \(w5197\), started anyway: w5189 .*mesh\.wgsl/.test(l)), w.log.join('\n'));
+  assert.ok(store.work.get('w5189')!.log.some((l) => l.includes(`ffu files shared with w5164 (w5197): told ${s1}`)), store.work.get('w5189')!.log.join('\n'));
+
+  // A row on other files gets no note.
+  const other = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', title: 'Rewards', work_id: 'w5150', prompt: 'Edit crates/ffu-sim/src/sector/rewards.rs.', extra_agent: true });
+  assert.doesNotMatch(other.text, /w5197/, other.text);
   // Game work is not read at all.
   const before = reads;
   await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Go.', title: 'Game', work_id: 'w4420', extra_agent: true });
   assert.equal(reads, before);
-  // A gh failure starts the row (logged): the check never stops ffu work.
+  // A gh failure starts the row (logged), with no note.
   (agents as unknown as { ffuReads: unknown }).ffuReads = { openPrs: async () => { throw new Error('HTTP 401'); }, hubs: async () => [] };
   putRequests(store, [{ id: 'w4421', repo: 'Final-Factory/ffu', brief: 'crates/ffu-platform/src/lib.rs' }]);
   const open = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Go.', title: 'Fails open', work_id: 'w4421', extra_agent: true });
-  assert.doesNotMatch(open.text, /was not started/, open.text);
-  // override_duplicate with a reason starts an overlapping row without reading GitHub.
-  (agents as unknown as { ffuReads: unknown }).ffuReads = { openPrs: async () => { throw new Error('not read'); }, hubs: async () => [] };
-  putRequests(store, [{ id: 'w4422', repo: 'Final-Factory/ffu', brief: 'crates/ffu-platform/src/lib.rs' }]);
-  const over = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Go.', title: 'Override', work_id: 'w4422', extra_agent: true, override_duplicate: 'it edits the gamepad table, w4370 the keyboard one' });
-  assert.doesNotMatch(over.text, /was not started/, over.text);
-  assert.notEqual(store.work.get('w4422')!.status, 'blocked');
+  assert.match(open.text, /^Started agent/, open.text);
 });
 
 test('w4613: request_pair with a published player: a leg on a computer of its OS is told to fetch it with fetch_attachment and skip the build; a leg on another OS gets no such line; a player of another commit is refused', async (t) => {

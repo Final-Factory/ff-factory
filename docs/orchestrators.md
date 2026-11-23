@@ -736,6 +736,19 @@ had room, which read as "LothDesktop can take more work but the queue isn't movi
      work, so the request reads "lothdesktop: its sandbox drive has 12.5 GB free, under the 30 GB a new FFU (cargo) worker
      needs (w3396)" and stays Queued. start_agent refuses the dispatcher the same (unless `disk_cleanup`). Unknown free
      space fits. Other work is not held by it: the host guard's 20 GB and 10 GB lines (hostHealth) still apply to all.
+   - **FFU rows on the same files run at once, each told of the other** (w5197, lothsahn, 2026-11-23: "Let FFU look requests
+     run at once; each merges main before pushing, and the later PR fixes conflicts"). w4553 had held an FFU request Blocked
+     while other FFU work in flight edited one of its files: five look requests on `crates/ffu-render/src/mesh.wgsl` (w5147,
+     w5164 and w5190 behind w5189 and w5191) ran one at a time. The check stays and only informs: when the dispatcher starts
+     an FFU request (start_agent with a work_id whose repo `isCargoRepo`), `ffuStartClashes` (`server/ffuOverlap.ts`)
+     compares its expected files (`ffuFiles`, and the paths its title, brief and start prompt name, hubs left out) with the
+     other FFU requests in flight and the open ffu pull requests updated in the last 72 h. On a match it starts all the same:
+     its start prompt carries `sharedFilesNote` ("[ffu files shared with work in flight (w5197)] ... merge origin/main into
+     your branch before every push ..."), the start_agent reply names the files and with whom, its log gets "ffu files shared
+     with work in flight (w5197), started anyway: ...", and each other open request it shares files with has its worker told
+     once (`Agents.tellFfuShared` through `tellPrConflict`, mark "ffu files shared with wNNN (w5197)"; a request whose worker
+     is stopped keeps the line in its log for its next turn). Nothing gates, queues or blocks on it, and override_duplicate
+     is not needed for it. A GitHub read that fails starts the row with no note (logged).
    - **Room that freed a moment ago is not yet WRONG** (w1944): the 21 flags came within seconds of the releases, before the
      ping (30 s quiet spell) had reached the dispatcher, which had started three by 22:15. `Agents.roomFacts` keeps since when
      each computer has had room (`RoomNow.since`, read each minute by the blocker watch and at every page or list_work read); a

@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { clashGates, clashLine, expectedFiles, ffuClashes, ffuStartClashes, FfuPrReads, filesNamed, hubFilesOf, MAX_NAMED, prRequest, sameFile, type FfuPr } from './ffuOverlap.ts';
+import { clashLine, expectedFiles, ffuClashes, ffuStartClashes, FfuPrReads, filesNamed, hubFilesOf, MAX_NAMED, peerFilesNote, prRequest, sameFile, sharedFilesNote, type FfuPr } from './ffuOverlap.ts';
 import type { WorkItem } from '../shared/types.ts';
 
-/** w4553: two ffu rows that edit the same code do not run at once (server/ffuOverlap.ts). */
+/** w4553: two ffu rows that edit the same code are found when the later starts; w5197: both run, told (server/ffuOverlap.ts). */
 
 const NOW = Date.parse('2026-11-16T08:00:00Z');
 const HUBS = ['crates/ffu-sim/src/sector.rs', 'crates/ffu-sim/src/snapshot.rs', 'crates/ffu-ui/src/hud.rs', 'crates/ffu-client/src/main.rs'];
@@ -57,20 +57,25 @@ test('w4553: a PR is for the request its Request or Part of line names, else its
 // ffu#852 (w4370), opened while w4418 was in flight: the pad layer in the same file and the same docs rows (w4548).
 const PR852: FfuPr = { number: 852, body: 'Request: w4370', updatedAt: '2026-11-16T08:35:00Z', files: ['crates/ffu-platform/src/lib.rs', 'docs/play.md', 'crates/ffu-ui/src/hud.rs'] };
 
-test('w4553: w4418 against w4370 in flight: held on ffu#852 for ffu-platform/src/lib.rs, not for the hub hud.rs', () => {
+test('w4553: w4418 against w4370 in flight: it shares ffu-platform/src/lib.rs with ffu#852, not the hub hud.rs', () => {
   const clashes = ffuClashes({ id: 'w4418', mine: expectedFiles(undefined, W4418, HUBS), prs: [PR852], rows: [{ id: 'w4370', files: [], prs: [852] }], hubs: HUBS, now: NOW });
   assert.deepEqual(clashes, [{ id: 'w4370', pr: 852, files: ['crates/ffu-platform/src/lib.rs'] }]);
   assert.equal(clashLine(clashes[0]), 'Final-Factory/ffu#852 (w4370): crates/ffu-platform/src/lib.rs');
-  assert.deepEqual(clashGates(clashes), [{ kind: 'pr', ref: 'Final-Factory/ffu#852', what: 'Final-Factory/ffu#852 to merge: it edits crates/ffu-platform/src/lib.rs too (w4553)' }]);
 });
 
-test('w4553: rows of one fan-out started together clash before either has a PR: the later waits on the request', () => {
+test('w4553: rows of one fan-out started together clash before either has a PR', () => {
   const clashes = ffuClashes({ id: 'w4376', mine: ['sector/structures.rs'], prs: [], rows: [{ id: 'w4377', files: ['crates/ffu-sim/src/sector/structures.rs'], prs: [] }], hubs: HUBS, now: NOW });
   assert.deepEqual(clashes, [{ id: 'w4377', files: ['sector/structures.rs'] }]);
-  assert.deepEqual(clashGates(clashes), [{ kind: 'request', ref: 'w4377', what: 'w4377 to close: its row edits sector/structures.rs too (w4553)' }]);
+  assert.equal(clashLine(clashes[0]), 'w4377 (in flight, no pull request yet): sector/structures.rs');
 });
 
-test('w4553: no hold on a hub, a parked PR, its own PR, or a row on other files', () => {
+test('w5197: the starting worker is told the files it shares and with whom; the other side is told who started', () => {
+  const note = sharedFilesNote('w5164', [{ id: 'w5189', pr: 990, files: ['crates/ffu-render/src/mesh.wgsl'] }, { id: 'w5191', files: ['crates/ffu-render/src/mesh.wgsl'] }]);
+  assert.match(note, /^\n\n\[ffu files shared with work in flight \(w5197\)\] w5164 may edit files other ffu work in flight edits: Final-Factory\/ffu#990 \(w5189\): crates\/ffu-render\/src\/mesh\.wgsl; w5191 \(in flight, no pull request yet\): crates\/ffu-render\/src\/mesh\.wgsl\. Nothing waits on it: merge origin\/main/);
+  assert.match(peerFilesNote('w5164', ['crates/ffu-render/src/mesh.wgsl']), /w5164 just started on ffu work that may edit files yours edits too: crates\/ffu-render\/src\/mesh\.wgsl\. Nothing waits on it: merge origin\/main .*w5164's pull request merges first, yours resolves the conflicts/);
+});
+
+test('w4553: no clash on a hub, a parked PR, its own PR, or a row on other files', () => {
   const parked: FfuPr = { number: 136, body: 'Request: w2895', updatedAt: '2026-11-04T06:21:00Z', files: ['crates/ffu-sim/src/sector/tech.rs'] };
   const own: FfuPr = { number: 900, body: 'Request: w4375', updatedAt: '2026-11-16T07:00:00Z', files: ['crates/ffu-sim/src/sector/tech.rs'] };
   const hub: FfuPr = { number: 901, body: 'Request: w4390', updatedAt: '2026-11-16T07:00:00Z', files: ['crates/ffu-sim/src/sector.rs', 'crates/ffu-sim/src/sector/mining.rs'] };
@@ -79,7 +84,7 @@ test('w4553: no hold on a hub, a parked PR, its own PR, or a row on other files'
   assert.deepEqual(ffuClashes({ id: 'w1', mine: [], prs: [hub], rows: [], hubs: HUBS, now: NOW }), []);
 });
 
-test('w4553: an open PR no row in flight owns still holds a row on its files', () => {
+test('w4553: an open PR no row in flight owns still clashes with a row on its files', () => {
   const pr: FfuPr = { number: 869, body: 'Request: w4492', updatedAt: '2026-11-16T07:10:00Z', files: ['crates/ffu-sim/src/ff1power.rs'] };
   assert.deepEqual(ffuClashes({ id: 'w4507', mine: ['ff1power.rs'], prs: [pr], rows: [], hubs: HUBS, now: NOW }), [{ id: 'w4492', pr: 869, files: ['ff1power.rs'] }]);
 });

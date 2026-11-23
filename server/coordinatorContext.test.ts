@@ -171,7 +171,10 @@ test('w1158: what a coordinator carries in every call stays within its budget', 
   // w4870 (lothsahn: "Paused machines should be treated as offline") gave the dispatcher's machines line the paused state
   // and decide_work pin (trimmed from 300 characters to 80; the rule is in docs/machines.md and the tools refuse the rest):
   // the dispatcher's measured 29,561, so the cap moved to 29,575.
-  const PROMPT_MAX = 29_575;
+  // w5197 (lothsahn: "Let FFU look requests run at once; each merges main before pushing, and the later PR fixes conflicts")
+  // added one line that an ffu file overlap never holds a row (trimmed from 520 characters to 121; the rule is in
+  // docs/orchestrators.md and the start_agent reply): the dispatcher's measured 29,691, so the cap moved to 29,700.
+  const PROMPT_MAX = 29_700;
   // w1163: the always-loaded sets now follow measured use (docs/tool-manifest.md); the dispatcher's is 23,436 characters
   // since w1159 gave list_work, list_sandboxes, list_machines and agent_transcript their output options. w1597 gave decide_work
   // its questions (one plain question per decision with its answers, as the person's card asks them; Ben, 2026-10-19: "just ask

@@ -35,10 +35,10 @@ import { statusLinesIn, stillOpenIn } from './ledgerRules.ts';
 import { inlineReviewMedia, MEDIA_FILE, outsideReview, publishedCopy, reviewRootOf } from './reviewMedia.ts';
 import { visualAskCheck } from './visualAsk.ts';
 import { ciPushHold } from './savePushHold.ts';
-import { BLOCKER_KIND_HELP, conflictText, FULL_SHA, gateSetter, gatesName, gatesOf, isWith, latestWorker, MAX_GATES, newestFirst, prLabel, prRefOf, type PrHealth } from '../shared/blockers.ts';
+import { BLOCKER_KIND_HELP, conflictText, FULL_SHA, gateSetter, gatesName, gatesOf, isWith, latestWorker, newestFirst, prLabel, prRefOf, type PrHealth } from '../shared/blockers.ts';
 import { isSamePerson, personForWork, poolOwnerOf, tokenPersonForWork, withPool } from './vault.ts';
 import { ghRunner, githubFromVault, githubPersonOf, githubTokens } from './githubTokens.ts';
-import { clashGates, clashLine, expectedFiles, ffuStartClashes, FfuPrReads } from './ffuOverlap.ts';
+import { clashLine, expectedFiles, type FfuClash, ffuStartClashes, FfuPrReads, peerFilesNote, sharedFilesNote } from './ffuOverlap.ts';
 import { namedIds, READ_LIST_MAX, READ_MAX_CHARS, readWork, type ReadWorkArgs } from './workRead.ts';
 import { readPortalLogs, realJournal, type PortalLogsInput } from './portalLogs.ts';
 import { PATH_HEALTH_FILE, filePathHealth } from './pathHealth.ts';
@@ -2973,26 +2973,30 @@ export class Agents {
   private readonly ffuReads = new FfuPrReads();
 
   /**
-   * w4553: hold ffu row `w` Blocked when its expected files collide with another ffu row in flight or a fresh open ffu pull
-   * request (server/ffuOverlap.ts); what start_agent answers then, or undefined to start it. A gh read that fails starts it
-   * (logged): the check saves a conflict, it must never stop ffu work.
+   * w4553, w5197: where ffu row `w` shares expected files with another ffu row in flight or a fresh open ffu pull request
+   * (server/ffuOverlap.ts). It holds nothing: the row starts and both sides are told (tellFfuShared). A gh read that fails
+   * finds none (logged).
    */
-  private async ffuOverlapHold(w: WorkItem, prompt: string): Promise<string | undefined> {
-    let found: ReturnType<typeof ffuStartClashes>;
+  private async ffuShared(w: WorkItem, prompt: string): Promise<FfuClash[]> {
     try {
       const run = ghRunner(githubPersonOf(tokenPersonForWork(this.cfg, w), w, this.identity.systemPayer().userId), `the ffu overlap check of ${w.id}`);
       const [prs, hubs] = await Promise.all([this.ffuReads.openPrs(run), this.ffuReads.hubs(run)]);
-      found = ffuStartClashes({ w, prompt, work: this.store.work.values(), prs, hubs, now: Date.now() });
+      return ffuStartClashes({ w, prompt, work: this.store.work.values(), prs, hubs, now: Date.now() }).clashes;
     } catch (e) {
       console.warn(`ffu overlap check: ${w.id}: ${(e as Error).message}; started without it (w4553)`);
-      return undefined;
+      return [];
     }
-    if (!found.clashes.length) return undefined;
-    const lines = found.clashes.map(clashLine);
-    const gates = clashGates(found.clashes).slice(0, MAX_GATES);
-    this.orchestrators.decide({ id: w.id, action: 'block', blockers: gates, note: `ffu overlap check (w4553): ${lines.join('; ')}` });
-    console.log(`ffu overlap check: held ${w.id}: ${lines.join('; ')}`);
-    return `${w.id} was not started: it is ffu work that would edit what other ffu work in flight edits (w4553), and two rows on the same code conflict at merge. ${lines.join('; ')}. It is held Blocked on ${gates.map((g) => g.ref).join(', ')} and comes back to you when ${gates.length > 1 ? 'they clear' : 'that clears'}. If they edit different parts of those files, start it anyway with override_duplicate saying so. Name the files a row will edit in its brief or start prompt: the check reads them.`;
+  }
+
+  /** w5197: ffu row `w` started beside `clashes`: a line in its log, and each other open request's worker told once. */
+  private tellFfuShared(w: WorkItem, clashes: readonly FfuClash[]) {
+    const lines = clashes.map(clashLine);
+    this.orchestrators.noteOnRequest(w.id, `ffu files shared with work in flight (w5197), started anyway: ${lines.join('; ')}`);
+    console.log(`ffu overlap check: ${w.id} shares files: ${lines.join('; ')}`);
+    for (const c of clashes) {
+      const peer = c.id && c.id !== w.id ? this.store.work.get(c.id) : undefined;
+      if (peer) this.orchestrators.tellPrConflict(peer.id, { mark: `ffu files shared with ${w.id} (w5197)`, text: peerFilesNote(w.id, c.files) });
+    }
   }
 
   startWorker(req: { sandbox?: string; machine?: string; prompt: string; title?: string; model?: string; effort?: EffortLevel; permissionMode?: PermissionMode; from: 'human' | 'orchestrator'; requestedBy?: Requester; attachments?: AttachmentRef[]; workId?: string }) {
@@ -6338,10 +6342,10 @@ When a person asked for a design or an analysis (a profile, an investigation, a 
             const cargoOn = ctx.role === 'dispatcher' && w && isCargoRepo(w.repo) && !a.disk_cleanup ? this.newWorkOn(a.sandbox, a.machine) : undefined;
             const cargoNo = cargoOn ? cargoShortOf(this.machines.diskRoom(cargoOn)?.freeBytes) : undefined;
             if (cargoNo) throw new Error(`${w!.id} is FFU (Rust) work and ${cargoOn}: ${cargoNo}. Leave it Queued: it starts there, or on a computer with room, once the clean-up frees the drive.`);
-            // w4553: an ffu row that would edit the files another ffu row in flight edits is held Blocked on it, not started.
+            // w4553, w5197: an ffu row that would edit files other ffu work in flight edits starts all the same, told so.
+            let ffuShared: FfuClash[] = [];
             if (ctx.role === 'dispatcher' && w && isCargoRepo(w.repo) && !a.disk_cleanup) {
-              const held = override ? undefined : await this.ffuOverlapHold(w, a.prompt);
-              if (held) return held;
+              ffuShared = await this.ffuShared(w, a.prompt);
               // The paths its start prompt names count for the rows started after it (its brief is read again each time).
               const named = expectedFiles(undefined, a.prompt, []);
               if (named.length) {
@@ -6399,7 +6403,7 @@ ${w.repo ?? ''}
             if (ctx.role === 'dispatcher') this.sharedSandboxProblem(a.sandbox, a.machine, a.work_id, a.extra_agent, needs);
             // An intake request always carries its rules (untrusted text, posting limits, the markers), whatever the brief says.
             // The request as filed goes with every brief (w496), then the intake rules and the PR line.
-            const prompt = `${a.prompt}${w ? requestAsFiled(w, a.prompt) : ''}${w ? this.handoverFor(w, this.target(a.sandbox, a.machine), handed.branch) : ''}${w?.source ? workerRules(w, handed.branch ?? this.sandboxBranchOf(this.target(a.sandbox, a.machine))) : ''}${w ? requestLineRule(w) : ''}`;
+            const prompt = `${a.prompt}${w && ffuShared.length ? sharedFilesNote(w.id, ffuShared) : ''}${w ? requestAsFiled(w, a.prompt) : ''}${w ? this.handoverFor(w, this.target(a.sandbox, a.machine), handed.branch) : ''}${w?.source ? workerRules(w, handed.branch ?? this.sandboxBranchOf(this.target(a.sandbox, a.machine))) : ''}${w ? requestLineRule(w) : ''}`;
             const s = this.startWorker({ sandbox: a.sandbox, machine: a.machine, prompt, title: w ? jobTitle(w.id, a.title!) : a.title, model: picked.model, effort: a.effort, permissionMode: a.permission_mode, from, requestedBy, attachments: files, workId: w?.id });
             const where = `in sandbox ${s.info.machineId}/${s.info.machineSandbox}`;
             if (s.info.status === 'error') return `Created agent ${s.info.id} ${where}, but it did not start: ${s.info.statusDetail}`;
@@ -6410,6 +6414,7 @@ ${w.repo ?? ''}
               const why = override ? ` (not a repeat: ${override})` : '';
               this.orchestrators.linkWorker(w.id, s.info, `started ${this.orchestrators.workerLine(s.info.id)}${picked.note}${why}`, { overrideGate: a.override_gate });
               item = ` for ${w.id}; ${names(w.requesters)}'s orchestrator is told`;
+              if (ffuShared.length) this.tellFfuShared(w, ffuShared);
             } else {
               const id =
                 ctx.role === 'dispatcher'
@@ -6419,7 +6424,8 @@ ${w.repo ?? ''}
               item = `; recorded in the ledger as ${id}`;
             }
             const withFiles = files.length ? ` It gets ${files.length === 1 ? 'the attachment' : `${files.length} attachments`} (${files.map((f) => f.id).join(', ')}) in ${INBOX_DIR}/.` : '';
-            return `Started agent ${s.info.id} "${s.info.title}" ${where}${picked.note || ` on ${this.cfg.defaultModel}`}, requested by ${requestedBy.displayName}${item}.${withFiles}${Agents.goneLine(files)}${this.queuedLine(s.info.id)}${handed.note}${hint}`;
+            const shared = ffuShared.length ? ` It may edit files other ffu work in flight edits (w5197): ${ffuShared.map(clashLine).join('; ')}; it was told, and so was each of those requests' worker: each merges origin/main before pushing and the later pull request resolves the conflicts.` : '';
+            return `Started agent ${s.info.id} "${s.info.title}" ${where}${picked.note || ` on ${this.cfg.defaultModel}`}, requested by ${requestedBy.displayName}${item}.${withFiles}${shared}${Agents.goneLine(files)}${this.queuedLine(s.info.id)}${handed.note}${hint}`;
           }),
         ),
         ...this.machineToolSpecs(tool, from, ctx),
@@ -8393,6 +8399,7 @@ ${this.worldBrief(true)}
 - Done means merged: a worker merges its own PR once its verification is done and CI is green (in the game repo, its required \`Test in editmode\` check; a PR that breaks the master batch comes back as an urgent revert request), and holds one only for exceptional risk or a concrete timing reason (it reports which, and when it will merge). Do not write a brief that ends at an open PR waiting for a person.
 - Game tests that assert on timing are their own \`[Category("Performance")]\` tests, and functional tests never carry the tag. They run in no CI (locally against a same-machine baseline, later on dedicated perf hardware). A worker fixes a wrong or mixed tag where it meets one; no brief asks to loosen a timing threshold (ff-agents evidence-gate).
 - Same spec, PR, branch or bug means the same work, unless the verbs differ (implement vs playtest vs review). A PR already being merged is not work to redo. A request other work fully covers is closed (w3248): reject it "superseded by <what>" or merge it. When the server found a strong overlap still in flight, start_agent refuses unless you pass override_duplicate saying what makes the request different.
+- FFU rows that share ffu files run at once (w5197, lothsahn): never hold one for another's files; the server tells both workers.
 - Priority: frantic, urgent, high, normal, low, then the oldest first, in every queue (strict, w4620). Do not stop a running worker for a new request unless a person asks.
 - Desyncs, crashes and hangs are urgent (w4810, docs/intake.md); for one still open below urgent, your decide_work note asks its requester to raise it.
 - Your decide_work note is what the requester's orchestrator reads: one or two plain lines. Starting or messaging with work_id tells them by itself.
