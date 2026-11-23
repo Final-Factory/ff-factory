@@ -32,8 +32,12 @@ export interface WorkerFence {
 /** An SBPL string literal. */
 const lit = (s: string) => `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 
-/** Inside the root, still read-only for workers: the daemon's folder, the main clone, the secrets, the root's record. */
-export const READ_ONLY_IN_ROOT = { subpaths: ['daemon', 'repo', 'secrets'], files: ['root.json'] };
+/**
+ * Inside the root, still read-only for workers: the daemon's folder, the secrets, the root's record. Not `repo`, the
+ * main clone: a sandbox is a git worktree whose git data (index, objects, refs) lives in it, so a fenced commit there
+ * failed on `repo/worktrees/<name>/index.lock` (w5333; the Linux lock leaves it writable for the same reason).
+ */
+export const READ_ONLY_IN_ROOT = { subpaths: ['daemon', 'secrets'], files: ['root.json'] };
 
 export function seatbeltProfile(f: WorkerFence): string {
   const home = (p: string) => path.join(f.home, p);
