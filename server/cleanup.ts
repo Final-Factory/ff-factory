@@ -568,17 +568,30 @@ async function remoteContains(url: string, dir: string, sha: string, timeoutMs: 
   return slug ? (await githubContains(slug, sha, timeoutMs)) === true : false;
 }
 
-/** The git repos (or worktrees: .git may be a file) at `dir` or one level below. */
+/** How deep reposIn looks: as deep as the stopped-session rule (installLeftovers.ts REPO_DEPTH), w5284. */
+const REPOS_IN_DEPTH = 4;
+const NO_REPO_LOOK = /^(\.git|node_modules|library)$/i;
+
+/**
+ * The git repos (or worktrees: .git may be a file) at `dir` or up to REPOS_IN_DEPTH levels below; a repo's own folders are
+ * not searched (its status covers its submodules). One level was not enough (w5284, biscuit 2026-11-23 15:12Z): agent-temp
+ * removed ffa-ac9b16c2 whole while the stopped-session rule kept `ffa-ac9b16c2/pmc-iauuxz34/work`, a clone with commits on
+ * no remote, two levels down.
+ */
 async function reposIn(dir: string): Promise<string[]> {
   const out: string[] = [];
-  if (fs.existsSync(path.join(dir, '.git'))) out.push(dir);
-  try {
-    for (const e of await fs.promises.readdir(dir, { withFileTypes: true })) {
-      if (e.isDirectory() && fs.existsSync(path.join(dir, e.name, '.git'))) out.push(path.join(dir, e.name));
+  const down = async (d: string, depth: number): Promise<void> => {
+    if (fs.existsSync(path.join(d, '.git'))) return void out.push(d);
+    if (depth >= REPOS_IN_DEPTH) return;
+    let entries: fs.Dirent[];
+    try {
+      entries = await fs.promises.readdir(d, { withFileTypes: true });
+    } catch {
+      return; // a file, or unreadable
     }
-  } catch {
-    // a file, or unreadable
-  }
+    for (const e of entries) if (e.isDirectory() && !NO_REPO_LOOK.test(e.name)) await down(path.join(d, e.name), depth + 1);
+  };
+  await down(dir, 0);
   return out;
 }
 
@@ -953,6 +966,8 @@ export async function removeRenamed(it: CleanupItem, out: CleanupRun): Promise<b
     // One `.ffclean-<n>` suffix at most: a leftover, or a name that already carries one, goes where it is (w5268).
     if (it.rule !== 'leftover') doomed = await renameAway(it.path);
   } catch (e) {
+    // Already gone (an item inside one removed earlier in the pass, or planned twice): neither failed nor freed (w5284).
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return true;
     out.failed.push({ path: it.path, why: `in use (${(e as NodeJS.ErrnoException).code ?? (e as Error).message})` });
     return false;
   }
@@ -986,6 +1001,7 @@ async function removeMembers(it: CleanupItem, out: CleanupRun): Promise<boolean>
       } else await fs.promises.unlink(m);
       bytes += size;
     } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') continue; // gone meanwhile (w5284)
       skipped++;
       first ||= `${m}: ${(e as NodeJS.ErrnoException).code ?? (e as Error).message}`;
     }
