@@ -268,7 +268,7 @@ the daemon's `process.env`). The editors the daemon starts inherit it too. So th
 
 | Variable | Points to | Moves | Basis |
 |---|---|---|---|
-| `CLAUDE_CONFIG_DIR` | `claude/` | settings, plugins (`registerAgents.sh` run with it set), `projects/` (transcripts, memory, resume), credentials on Windows | sourced: Claude Code settings docs; `server/usage.ts:195` already follows it |
+| `CLAUDE_CONFIG_DIR` | `claude/` | settings, plugins (`registerAgents.sh` run with it set), `projects/` (transcripts, memory, resume); not the machine's own login, which stays in `~/.claude` | set by the daemon on itself at start since w5305 ([2.8](#28-claude-codes-folder-w5305)) |
 | `TEMP`, `TMP`, `TMPDIR` | `tmp/` (the existing `temp_dir`) | agents' temp, Claude's task output | measured: today's mechanism, `machine/daemon.ts:58,126` |
 | `GIT_CONFIG_GLOBAL` | `home/.gitconfig` | identity, credential helper | sourced: git-config docs (git 2.32+) |
 | `GH_CONFIG_DIR` + `GH_TOKEN` | `home/.config/gh`, `secrets/gh-token` | gh's config; the token in place of the OS keyring, where BEAST's lives today (measured) | sourced: `gh help environment` |
@@ -381,12 +381,19 @@ when a new place in the daemon names the home folder, AppData or the system temp
 | A batch Unity run's log with no `-logFile` | `%LOCALAPPDATA%\Unity\Editor\Editor.log` | `~/Library/Logs/Unity/Editor.log` | `~/.config/unity3d/Editor.log` | **fixed** (w5297): the worker's `TMPDIR` |
 | A sandbox editor's temp files | `%LOCALAPPDATA%\Temp` | `/var/folders/...` | `/tmp` | **fixed** on Windows (`tmp/unity`); **exception** on macOS and Linux until the licensing client's socket is checked there |
 | Agents' temp | — | — | — | already inside: `tmp/ffa-<session>` |
-| Claude Code's folder (transcripts, plugins, settings) | `%USERPROFILE%\.claude` | `~/.claude` | `~/.claude` | **next**: `CLAUDE_CONFIG_DIR=<root>/claude` needs the plugins installed there first and each live session's transcript carried over, or resumes and skills break |
-| The game's data folder (saves, settings, AgentControl, desync reports, playtest sessions, timed runs' save copy) | `AppData\LocalLow\Never Games\finalfactory` | `~/Library/Application Support/Never Games/finalfactory` | `~/.config/unity3d/Never Games/finalfactory` | **fixed** (w5306): the daemon sets `FF_GAME_DATA_DIR=<root>/gamedata` (`rootEnv`, `machine/gameData.ts`), which `GameDataPaths.Root` takes since game PR #4237, and so do the game's `scripts/game_data.py where` and `player_slots.py`. A branch or player build from before #4237 ignores it and still writes the old folder, so the daemon's readers look in both: the live view's session files (`machine/live.ts` `agentControlDirs`, the override first) and the timed run's save copy (`machine/timedRunner.ts`: `savesDirsFor` reads each build's `FFCore.dll` for the variable's literal and copies the save where that build loads it, both folders when it cannot tell) |
+| Claude Code's folder (transcripts, plugins, settings) | `%USERPROFILE%\.claude` | `~/.claude` | `~/.claude` | **fixed** (w5305): `claude/`, once the tools publish has installed the plugins there ([2.8](#28-claude-codes-folder-w5305)); the machine's own login and registerAgents.sh's marker stay (**exception**) |
+| The game's data folder (saves, settings, AgentControl, desync reports, playtest sessions, timed runs' save copy) | `AppData\LocalLow\Never Games\finalfactory` | `~/Library/Application Support/Never Games/finalfactory` | `~/.config/unity3d/Never Games/finalfactory` | **fixed** (w5306): the daemon sets `FF_GAME_DATA_DIR=<root>/gamedata` (`rootEnv`, `machine/gameData.ts`), which `GameDataPaths.Root` takes since game PR #4237, and so do the game's `scripts/game_data.py where` and `player_slots.py` (`FF_GAME_DATA_ROOT` first, then `FF_GAME_DATA_DIR`, w5307). A branch or player build from before #4237 ignores it and still writes the old folder, so the daemon's readers look in both: the live view's session files (`machine/live.ts` `agentControlDirs`, the override first) and the timed run's save copy (`machine/timedRunner.ts`: `savesDirsFor` reads each build's `FFCore.dll` for the variable's literal and copies the save where that build loads it, both folders when it cannot tell) |
 | A slot player's `Player.log` | `LocalLow\...\Player.log` | `~/Library/Logs/Never Games/...` | `~/.config/unity3d/.../Player.log` | **fixed** (game PR #4237): `player_slots.py launch` passes `-logFile` under the worker's temp folder when `FF_WORKER_ROOT` is set and the caller gave none |
-| watch_video's cache and spend file | `~/.cache/watch_video`, `~/.config/ff-watch-video` | same | same | **next**: follow `FF_WORKER_ROOT` |
+| watch_video's cache and spend file | `~/.cache/watch_video`, `~/.config/ff-watch-video/spend.json` | same | same | **fixed** (w5307, final-factory-agents#1026): `cache/watch_video`, `cache/ff-watch-video/spend.json` when `FF_WORKER_ROOT` is set; the key file `gemini.env` stays in `~/.config/ff-watch-video`, a person's own secret |
+| honest-coop `agent_http` screenshots | beside the script in the plugin cache | same | same | **fixed** (w5307): the temp folder |
+| The game repo's scripts naming the game's data folder (69 audit, agent, feel and bench scripts, record_clip, honest-coop `agent_http`) | `AppData\LocalLow\Never Games\finalfactory` spelled out | `~/Library/Application Support/...` | `~/.config/unity3d/...` | **fixed** (w5307, FinalFactory#4239): they read `game_data.py root` / `scripts/game_data_root.sh`, `FF_GAME_DATA_ROOT` first, so they follow the game's data folder when it moves; `test_no_stale_game_data_paths.py` fails on a new one |
+| Game scripts' scratch files (cross-machine audits, editor-preflight, sp-dumpcamps diff, agent smoke tests) | — | `/tmp`, `/private/tmp` | `/tmp` | **fixed** (w5307): `$TMPDIR`, and over ssh the client's own `TMPDIR` |
+| `launch-editor.sh`'s editor log, `ffresume`'s settings | Unity's default `Editor.log`, `~/.ffresume.json` | same | same | **fixed** (w5307): `logs/unity/editor-<checkout>.log` when `FF_WORKER_ROOT` is set and `FF_EDITOR_LOGFILE` is not; `<root>/ffresume.json` first |
+| `run_cross_machine_build_audit.sh`'s player build | — | `/private/tmp/finalfactory-mp-audit` | — | **exception** (w5307): the build is copied to the same path on both Macs, so it cannot follow one machine's `TMPDIR`; `FF_BUILD_DIR` moves it |
+| Remote fallbacks in the cross-machine audits | — | the client's `~/Library/Application Support/...`, `/tmp` | — | **exception** (w5307): used only when the client cannot answer `game_data.py root` or its `TMPDIR` over ssh |
+| The nightly lab's helpers, `steam_cloud_check.py`, `seed_load_list_saves.py` | the per-OS data folder spelled out | same | same | **exception** (w5307): `nightly/player_slots.py` and `pair_relay.py` are copied alone to other machines, so each keeps its own copy of the per-OS rule, `FF_GAME_DATA_ROOT` first; `lab.py` and `ffnightly_linux.py` name the lab's other machines' and lab users' folders; `steam_cloud_check.py` names Steam Cloud's relative path; `seed_load_list_saves.py` builds a throwaway XDG root on purpose. Each is listed with its reason in the game repo's `test_no_stale_game_data_paths.py` |
 | Unity slots mailbox and shims | `~/.ff-factory/unity-slots` | same | same | **exception** (w469): scripts outside the daemon find it with no config |
-| `~/.unity-mcp` (status files, port registry) | yes | yes | yes | **exception**: the MCP-for-Unity package's port registry has no setting (`PortManager.cs`, v10.3.0) |
+| `~/.unity-mcp` (status files, port registry) | yes | yes | yes | **exception**: the MCP-for-Unity package's port registry has no setting (`PortManager.cs:316`, v10.3.0), and the daemon reads the editors' files there (`server/unityHang.ts`, `server/unityMcp.ts`) to mirror them per place into `UNITY_MCP_STATUS_DIR` (`machine/unityMcp.ts`) (w5307) |
 | Unity's own logs and licence, Unity Hub | `%LOCALAPPDATA%\Unity`, `%APPDATA%\UnityHub` | `~/Library/Logs/Unity`, `~/Library/Unity` | `~/.config/unity3d`, `~/.local/share/unity3d` | **exception**: shared with the person's Unity; the licence is per OS user |
 | EditorPrefs (Burst) and the game's PlayerPrefs | registry `HKCU\Software\Unity Technologies` | `~/Library/Preferences/com.unity3d.*.plist` | `~/.local/share/unity3d/prefs` | **exception**: Unity's own stores, no setting |
 | App Nap off for Unity | — | `defaults write <Unity> NSAppSleepDisabled` | — | **exception**: a user default |
@@ -396,6 +403,47 @@ when a new place in the daemon names the home folder, AppData or the system temp
 | Backtrace's crash database | `<persistentDataPath>/backtrace` | same | same | **exception** (w5306) until the game points it at the data root: `Assets/Main Backtrace Configuration.asset:44` is `DatabasePath: ${Application.persistentDataPath}/backtrace`, and `NativeCrashCollector` reads crashes there; moving it is a game change (handed up under w5306) |
 | Steam | the Steam client's own folders | same | same | **exception**: the person's Steam |
 | `ff-leftovers launch` (a program for a person) | its temp and home | same | same | **exception** (w4047): the person goes on using it |
+
+### 2.8 Claude Code's folder (w5305)
+
+lothsahn (w5297): "under no circumstances should workers write outside of ffw". Before w5305 a main install left
+`CLAUDE_CONFIG_DIR` unset, so every agent's transcripts, plugins and settings went to the person's `~/.claude` (8.6 GB on
+m5); only `worker.ts install --instance` set it, in `daemon.json` `env`. Now `server/claudeHome.ts` moves a worker root's
+agents to `<root>/claude`, in four parts that landed together:
+
+1. **The daemon's own environment.** At start (`machine/daemon.ts`, after `rootEnv`) `moveClaudeHome` sets
+   `CLAUDE_CONFIG_DIR=<root>/claude` on `process.env`, makes the folder and remembers the one it left in
+   `FF_CLAUDE_LEGACY_DIR` (and `FF_CLAUDE_WORKER_DIR`). Every reader that follows the variable looks there: the transcript
+   scrubber (which scans the legacy `projects/` too), `cliTranscriptPath`, plugin paths (`FF_SKILLS`), the evidence gate.
+   It does nothing when `daemon.json` `env` names a `CLAUDE_CONFIG_DIR` (an instance's own) or sets `FF_CLAUDE_HOME` to
+   `legacy` (the off switch).
+2. **Plugins before agents.** `worker.ts tools` (the rollout's tools publish after each verified portal deploy) runs
+   `registerAgents.sh` with `CLAUDE_CONFIG_DIR=<root>/claude`, so the plugins (the machine's remembered set, ff-discord
+   included where a person asked for it) install there. Until `<root>/claude/plugins/installed_plugins.json` lists
+   ff-agents with a skills folder, each agent launch runs with `CLAUDE_CONFIG_DIR` unset (`agentClaudeEnv` in
+   `server/launch.ts` `buildOptions`), on the legacy folder as before, so skills load either way. The person's own
+   `~/.claude` plugins are no longer updated by the publish: they are theirs.
+3. **Resume.** Before a conversation's process resumes (`server/sessions.ts` `launchResumed`), `carryTranscript` copies its
+   `<id>.jsonl` and `<id>/` folder (subagents, tool results) from the legacy `projects/<cwd>/` into the new one; it copies,
+   never moves, and the session's log says so. `cliTranscriptPath` looks in both folders. An agent already running in an
+   agent host keeps the folder it started with until its process ends.
+4. **Settings and config.** `settings.json` is carried once (marker `<root>/claude/.ff-settings-carried`) by the daemon's
+   start or the tools publish, whichever runs first: keys the new file lacks, never `enabledPlugins`,
+   `extraKnownMarketplaces`, credential helpers (`apiKeyHelper`, `awsAuthRefresh`, `awsCredentialExport`,
+   `otelHeadersHelper`) or an `env` entry whose name looks like a secret. The Unity MCP entry is read from
+   `<root>/claude/.claude.json` first, then the person's `~/.claude.json`, where MCP for Unity registers it
+   (`machine/unityMcp.ts`).
+
+What stays in `~/.claude`, on purpose:
+
+- **The machine's own claude.ai login.** macOS keeps it in the Keychain under a name that depends on `CLAUDE_CONFIG_DIR`,
+  Windows and Linux in `~/.claude/.credentials.json`; it is never moved or copied. The usage probe (`loginClaudeEnv`) and an
+  agent with no Claude credential of its own run with the variable unset. Every portal agent has a vault token
+  (`server/secrets.ts`), so in practice only the probe reads it.
+- **registerAgents.sh's checkout marker and plugin set** (`$HOME/.claude/final-factory-agents-checkout`, `-plugins`):
+  registerAgents.sh writes them and publish-skills reads the marker at that fixed path (final-factory-agents
+  `registerAgents.sh:40-41`, `publish-skills/SKILL.md:22`), so `server/agentTools.ts` and `server/strayWrite.ts` keep
+  reading them there. Moving them is a change in final-factory-agents first.
 
 ## 3. Install, uninstall, upgrade
 

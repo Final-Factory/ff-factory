@@ -1,6 +1,7 @@
 // The Unity MCP bridge for a machine's agents (docs/machines.md, "Unity MCP"): the MCP-for-Unity server the machine's
 // own Claude Code runs, given to each sandbox agent confined to its sandbox's editor (none in the main clone, w536), the
 // way the host confines its sandboxes' workers (server/unityMcp.ts).
+import { claudeJsonFiles } from '../server/claudeHome.ts';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -26,8 +27,20 @@ const asServer = (x: unknown): StdioServer | undefined => {
  * machine's own Claude Code has in ~/.claude.json (MCP for Unity registers it per project): the main clone's, then
  * a user-wide one, then the one most of its projects use. Undefined when there is none: agents then have no bridge.
  */
-export function resolveUnityMcpServer(explicit: StdioServer | undefined, repoPath: string, claudeJson = path.join(os.homedir(), '.claude.json')): { server?: StdioServer; source: string } {
+export function resolveUnityMcpServer(explicit: StdioServer | undefined, repoPath: string, claudeJson: string | string[] = claudeJsonFiles(process.env, os.homedir())): { server?: StdioServer; source: string } {
   if (explicit?.command) return { server: explicit, source: 'daemon.json unityMcpServer' };
+  // w5305: the daemon's own Claude Code config (<root>/claude/.claude.json) first, then the person's ~/.claude.json, where
+  // MCP for Unity registers it (server/claudeHome.ts claudeJsonFiles).
+  const files = Array.isArray(claudeJson) ? claudeJson : [claudeJson];
+  let last: { server?: StdioServer; source: string } = { source: 'no .claude.json' };
+  for (const f of files) {
+    last = unityMcpFrom(f, repoPath);
+    if (last.server) return last;
+  }
+  return last;
+}
+
+function unityMcpFrom(claudeJson: string, repoPath: string): { server?: StdioServer; source: string } {
   let cfg: { mcpServers?: Record<string, unknown>; projects?: Record<string, { mcpServers?: Record<string, unknown> }> };
   try {
     cfg = JSON.parse(fs.readFileSync(claudeJson, 'utf8').replace(/^﻿/, ''));
