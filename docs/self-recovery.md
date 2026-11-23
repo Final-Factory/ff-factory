@@ -1254,7 +1254,7 @@ so copies are full; a block-cloning volume (w900's Dev Drive) would make the six
 
 **`ff-leftovers` on the seed and on idle JIT (w5280).** Lothsahn asked (m5, 2026-11-23, w5198 then w5280) for the stale Library
 entries of free sandboxes and the seed to show as DELETE in `ff-leftovers folders` while the caches stay warm. Two rules:
-- **The seed** (`librarySeed`, which the daemon now writes into the clean-up facts): the same `staleCacheEntries` as a released
+- **The seed** (`librarySeed`, which the daemon now writes into the clean-up facts, else the install's own `seed/Library` when it exists: m5's pool named no seed on 2026-11-23 while that folder held 90 GB): the same `staleCacheEntries` as a released
   sandbox (superseded Burst player builds, BuildCache folders past the newest build and 2 GB), kind `seed-library`. Never its JIT,
   a cache whole or anything else in it; nothing at all while a process names the seed (copyTree's `cp`/robocopy of a sandbox clone
   does) or the process list is unknown. A seed inside a sandbox or beside `.git`/`Assets`/`ProjectSettings` is no seed. `remove`'s
