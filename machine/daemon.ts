@@ -13,6 +13,7 @@ import { randomUUID } from 'node:crypto';
 import WebSocket from 'ws';
 import { AgentSession, isMidTurn, midTurnRefusal, othersMidTurn, type OptionsFactory, type SessionHandle, type SessionSink } from '../server/sessions.ts';
 import { bus, type DistributiveOmit } from '../server/store.ts';
+import { fenceEnv, fenceFor, type WorkerFence } from '../server/workerFence.ts';
 import { CATALOG, buildOptions, githubCredentialEnv, type CatalogTool, type LaunchSpec, type ToolHandler } from '../server/launch.ts';
 import { MAIN_CLONE_NO_AGENTS, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION, RELOCATE_FALLBACK_MINUTES, SELF_UPDATE_VERSION, relocateProblem, type DaemonLiveView, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
 import { writeFileDurable } from '../server/durable.ts';
@@ -132,6 +133,11 @@ export interface DaemonConfig {
    */
   root?: string;
   repoPath: string;
+  /**
+   * The worker write fence (w5333, docs/worker-fence.md): "seatbelt" runs each sandbox agent's claude, and all it starts,
+   * under a macOS Seatbelt profile that lets it write only in `root` and a few named exceptions. Off when unset; macOS only.
+   */
+  workerFence?: 'seatbelt';
   /** The machine's own `claude` (its login, settings and plugins). */
   claude?: string;
   /**
@@ -2756,10 +2762,22 @@ export class Daemon {
     // GitHub Apps (w1519): the gh shim's folder goes before the unity-slot one, on the same PATH key.
     const pathKey = Object.keys(slot).find((k) => k.toUpperCase() === 'PATH') ?? Object.keys(process.env).find((k) => k.toUpperCase() === 'PATH') ?? 'PATH';
     const app = ghAppRunEnv(spec.env, this.ghApp, pathKey, slot[pathKey] ?? process.env[pathKey]);
-    const lock = this.cfg.writeLock && process.platform === 'linux' && this.cfg.root
+    const lock = spec.sandbox && this.cfg.writeLock && process.platform === 'linux' && this.cfg.root
       ? { writeLock: writeLockArgs({ root: this.cfg.root, appDir: appDirOfConfig(this.cfg), extraRoots: this.cfg.extraRoots, maxEventsFile: maxFile, unitySlots: this.slots.dir, runtimeDir: process.env.XDG_RUNTIME_DIR, home: os.homedir(), extra: this.cfg.writeLockExtra }) }
       : {};
-    return { ...spec, ...lock, stdioMcp: this.stdioMcpFor(spec), claudeExecutable: spec.claudeExecutable ?? this.cfg.claude, env: { ...spec.env, ...sessionTempEnv(agentTempRoot(this.cfg.tempDir), info.id), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...slot, ...app } };
+    const fence = spec.sandbox ? this.workerFence : undefined;
+    return { ...spec, ...lock, stdioMcp: this.stdioMcpFor(spec), claudeExecutable: spec.claudeExecutable ?? this.cfg.claude, ...(fence ? { fence } : {}), env: { ...spec.env, ...sessionTempEnv(agentTempRoot(this.cfg.tempDir), info.id), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...slot, ...app, ...(fence ? fenceEnv(fence) : {}) } };
+  }
+
+  private fenceMemo?: { fence?: WorkerFence };
+  /** The worker write fence for sandbox agents, or undefined when daemon.json leaves it off (w5333). */
+  private get workerFence(): WorkerFence | undefined {
+    if (!this.fenceMemo) {
+      const fence = fenceFor({ setting: this.cfg.workerFence, root: this.cfg.root, home: HOME });
+      if (this.cfg.workerFence && !fence) log(`worker fence: "${this.cfg.workerFence}" is set but cannot apply here (macOS with a worker root and ${'/usr/bin/sandbox-exec'} only); agents run unfenced`);
+      this.fenceMemo = { fence };
+    }
+    return this.fenceMemo.fence;
   }
 
   /**

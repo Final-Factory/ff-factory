@@ -523,6 +523,9 @@ console. Adopt B if both pass. The layout already allows it: the root sits outsi
 machine (the reason the Macs' root is `/Users/Shared/ffw`, not `~/ffw`), and switching is a change of the service's
 principal and the root's ACLs.
 
+**A write fence without a second user (macOS, w5333):** docs/worker-fence.md, off by default.
+
+
 ### 4.1 Windows trial: writes only to the root (w5333, LothDesktop, 2026-11-23)
 
 lothsahn (w5333): "Regardless of user the workers should only write to the v: on windows. Ideally they'd only be allowed
