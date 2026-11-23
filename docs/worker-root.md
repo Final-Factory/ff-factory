@@ -275,6 +275,8 @@ the daemon's `process.env`). The editors the daemon starts inherit it too. So th
 | `GIT_SSH_COMMAND` | `ssh -F <root>/home/.ssh/config -i <root>/secrets/ssh/id_ed25519` | git over ssh | sourced: git docs |
 | `UPM_CACHE_ROOT` | `cache/upm` | Unity's global package cache | sourced: Unity manual, "Customize the global cache location" |
 | `npm_config_cache`, `PIP_CACHE_DIR` | `cache/npm`, `cache/pip` | tool caches | sourced: npm and pip docs |
+| `UV_CACHE_DIR` | `cache/uv` | uv's cache: every `uv run --with` environment the worker prompt prescribes (36.9 GB in `~/.cache/uv` on m5, 2026-11-23); the daemon runs `uv cache prune` on it daily (w5281) | **in use**: `machine/daemon.ts` `rootEnv`, `machine/sharedCaches.ts` |
+| `FF_DETERMINISM_AUDIT_DIR` | `cache/determinism-audit` | the game's determinism audits, in place of `<game data>/DeterminismAudit` (5.2 GB on m5); the game's retention bounds it (w5281) | **in use**: `rootEnv`; the game's `NetworkDeterminismAuditRetention.AuditRoot` |
 | `FF_PLAYER_SLOT_ROOT`, `FF_PLAYER_SLOT_COUNT` | `players/`, 8 | the slot pool; ends the drive-letter probing in `default_root()` (`player_slots.py:69-79`), which had left BEAST with firewall rules for two pools (gone since; `default_root()` now returns `<FF_WORKER_ROOT>/players` or refuses) | measured: `player_slots.py:83-87` |
 | `FF_NIGHTLY_ROOT` | `nightly/` | the nightly lab | measured: `nightly.sh:17-18` |
 | `FFDISCORD_HOME` | `secrets/ffdiscord` | the Max bot config, where scripts honour it | measured: `nightly.sh:43`; whether the `ffdiscord` CLI itself does is unverified |

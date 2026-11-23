@@ -1358,7 +1358,7 @@ export async function removeSlots(args: string[], facts: CleanupFacts | undefine
  * it. Each removal is printed and appended with its size to <root>/logs/ff-leftovers-removed.jsonl (FF_LEFTOVERS_REMOVE_LOG
  * overrides it, for tests).
  */
-export const REMOVE_TOP = new Set(['repo', 'seed', 'secrets', 'backups', 'tools', 'steam', 'logs', 'sandboxes', 'players', 'tmp', 'scratch', 'timing', 'nightly', 'nightly-history', 'ffu-runners', 'ffu-sandboxes', 'player-cache', 'daemon']);
+export const REMOVE_TOP = new Set(['repo', 'seed', 'secrets', 'backups', 'tools', 'steam', 'logs', 'sandboxes', 'players', 'tmp', 'scratch', 'timing', 'nightly', 'nightly-history', 'ffu-runners', 'ffu-sandboxes', 'player-cache', 'daemon', 'cache']);
 
 /** Why `p` (resolved) may never go through `remove`, before any verdict; undefined when it may be judged. */
 export function removeFenceProblem(p: string, root: string, o: { home: string; daemonDir?: string; cwd?: string }): string | undefined {
