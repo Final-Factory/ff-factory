@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { checkFlakyRerun, portalDropReader, rerunTargets, resourceFault, type RerunJob, type RerunReader, type RerunTarget } from './rerunGuard.ts';
+import { checkFlakyRerun, portalDropReader, rerunTargets, resourceFault, runnerStopped, type RerunJob, type RerunReader, type RerunTarget } from './rerunGuard.ts';
 import { sandboxGuard } from './guard.ts';
 
 // w3784: both fixtures are the `test (ffu-windows)` job of ffu PR #510's CI run 42538461342, read with
@@ -205,4 +205,32 @@ test('w3836: an out-of-resource runner fault at attempt 1 may be rerun once; a c
   assert.ok(await checkFlakyRerun(cmd, { reader: reader([CLIPPY, REPEAT], undefined, { [CLIPPY.id]: QUOTA_LOG, [REPEAT.id]: E0433_LOG }).r }));
   // A log gh cannot read is refused (fail closed).
   assert.match((await checkFlakyRerun(cmd, { reader: reader([CLIPPY], undefined, { error: 'HTTP 410: Gone' }).r }))!, /its log could not be read \(HTTP 410: Gone\)/);
+});
+
+// w5271: ffu PR #998's run 45155653650, job "check" (job 137627783371, ffu-biscuit-4, attempt 1). A global OOM kill on
+// biscuit hit its test binary in the lavapipe golden-image step and systemd's OOMPolicy=stop stopped the runner's unit. The
+// job is `gh api repos/Final-Factory/ffu/actions/jobs/137627783371` and the log its last 14 lines from `.../logs`
+// (2026-11-23): exit code 143, then "The runner has received a shutdown signal".
+const STOPPED = load('rerun-runner-stopped-job.json');
+const STOPPED_LOG = text('rerun-runner-stopped-job.txt');
+
+test('w5271: a step ended by exit 143 and the runner stop annotation is a runner that died; a real failure beside it is not', async () => {
+  assert.equal(runnerStopped(STOPPED_LOG), true);
+  assert.ok(STOPPED.steps.some((s) => s.conclusion === 'failure'));
+  const cmd = 'gh run rerun 45155653650 --failed -R Final-Factory/ffu';
+  assert.equal(await checkFlakyRerun(cmd, { reader: reader([OK, STOPPED], [], { [STOPPED.id]: STOPPED_LOG }).r }), undefined);
+  assert.equal(await checkFlakyRerun(cmd, { reader: reader([{ ...STOPPED, run_attempt: 2 }], [], { [STOPPED.id]: STOPPED_LOG }).r }), undefined);
+
+  // A failed test before the stop, the annotation without exit 143, or exit 143 alone stays refused.
+  const failedTest = STOPPED_LOG.replace('##[error]Process completed', 'test result: FAILED. 40 passed; 1 failed\n##[error]Process completed');
+  assert.equal(runnerStopped(failedTest), false);
+  assert.match((await checkFlakyRerun(cmd, { reader: reader([STOPPED], [], { [STOPPED.id]: failedTest }).r }))!, /Refused \(w3784\): "check" \(job 137627783371\) of run 45155653650 in Final-Factory\/ffu failed in its step "renderer golden images.*a real failure/);
+  const exit101 = STOPPED_LOG.replace('exit code 143.', 'exit code 101.');
+  assert.equal(runnerStopped(exit101), false);
+  assert.ok(await checkFlakyRerun(cmd, { reader: reader([STOPPED], [], { [STOPPED.id]: exit101 }).r }));
+  assert.equal(runnerStopped(STOPPED_LOG.replace(/^.*shutdown signal.*$/m, '')), false);
+  // The stop annotation far from the exit line does not pair with it.
+  assert.equal(runnerStopped(STOPPED_LOG.replace(/^(.*exit code 143\..*)$/m, '$1\na\nb\nc')), false);
+  // A log gh cannot read is refused (fail closed).
+  assert.match((await checkFlakyRerun(cmd, { reader: reader([STOPPED], [], { error: 'HTTP 410: Gone' }).r }))!, /its log could not be read/);
 });

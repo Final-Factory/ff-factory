@@ -1,0 +1,14 @@
+2026-11-23T11:41:20.2655050Z test packs::tests::a_pack_folder_maps_crafters_to_the_crafter_model_and_nothing_else ... ok
+2026-11-23T11:41:20.2816805Z test packs::tests::the_tier_tables_follow_the_sims_tables ... ok
+2026-11-23T11:41:20.3024356Z test packs::tests::crafters_leave_the_quads_for_their_mesh_and_the_rest_stay_quads ... ok
+2026-11-23T11:41:20.3840428Z test packs::tests::the_watch_reads_a_rebaked_pack_once_it_holds_still_and_refuses_a_broken_one ... ok
+2026-11-23T11:41:20.9932190Z test packs::tests::a_tier_without_a_model_keeps_its_tile ... ok
+2026-11-23T11:41:21.8624403Z test packs::tests::the_client_draws_coarser_lods_as_it_zooms_out ... ok
+2026-11-23T11:41:22.1601269Z test packs::tests::the_gallery_sets_every_model_apart_inside_its_sector ... ok
+2026-11-23T11:41:23.0864214Z test packs::tests::the_built_in_packs_bound_each_model_to_what_it_draws ... ok
+2026-11-23T11:41:23.4127856Z test packs::tests::the_beam_model_is_ff1s_tube_along_the_connector ... ok
+2026-11-23T11:41:24.5543287Z test packs::tests::the_built_in_packs_draw_every_ff1_building_but_the_refused ... ok
+2026-11-23T11:41:27.9548718Z ##[error]Process completed with exit code 143.
+2026-11-23T11:41:27.9550447Z ##[error]The runner has received a shutdown signal. This can happen when the runner service is stopped, or a manually started runner is canceled.
+2026-11-23T11:41:28.4647012Z Cleaning up orphan processes
+2026-11-23T11:41:29.2863635Z ##[warning]Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
