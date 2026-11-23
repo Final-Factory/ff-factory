@@ -2,6 +2,7 @@
 // work ledger (filing, the dispatcher's decisions, the replies people's orchestrators get), each chat's budget between
 // its person's messages, and where the harness's messages about work and workers go. server/agents.ts builds their
 // options and tool belts on top of this; the rules that are not the model's to decide live here.
+import { deployResumeNote, deployResumeOn } from './deployResume.ts';
 import { crashHoldLine, crashHoldNote, liveCrashHolds } from './crashHolds.ts';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -4632,8 +4633,14 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       .join('');
     // w2417: the files each request it waited on published, whatever the report's cut (w2402's three zips, w2403's one).
     const files = this.gatePublished(gates);
-    const note = `${lead}${back}${results}${legs}${reported}${siblings}${files}${yours}${ci ? ` Run ff-pr merge now${prs ? ` (${prs})` : ''}: it merges on green, or names the red run to read (gh run view <run> --log-failed) and fix.` : ''}${deploy ? ' The deploy you waited for has happened: do the check that comes after it now (the live read, the health check), then report.' : ''} Carry on from where you left it.${held ? ` Your own check-in, which the block cancelled, is folded into this message; its note was: ${held.note}` : ''}`;
-    if (!this.wakeNow(sid, note, w.id)) return [];
+    // w5328: a deploy gate on another computer than the worker's own names where its check runs: the resume goes there.
+    const on = deployResumeOn(gates, this.store.sessions.get(sid)?.machineId, [...this.store.machines.keys()]);
+    const note = `${lead}${back}${results}${legs}${reported}${siblings}${files}${yours}${ci ? ` Run ff-pr merge now${prs ? ` (${prs})` : ''}: it merges on green, or names the red run to read (gh run view <run> --log-failed) and fix.` : ''}${deploy ? ' The deploy you waited for has happened: do the check that comes after it now (the live read, the health check), then report.' : ''}${on ? deployResumeNote(on) : ''} Carry on from where you left it.${held ? ` Your own check-in, which the block cancelled, is folded into this message; its note was: ${held.note}` : ''}`;
+    w.resumeOn = on ? { machines: on, session: sid, why: `its blocked_on waited for ${on.join(', ')}'s daemon update`, at: this.now().toISOString() } : undefined;
+    if (!this.wakeNow(sid, note, w.id)) {
+      w.resumeOn = undefined;
+      return [];
+    }
     this.noteResume(w, sid, note);
     // Folded in above: not handed back again when the rest clears (unblock's handBackCheckIns).
     if (held && still?.length) {

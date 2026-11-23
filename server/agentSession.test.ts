@@ -472,6 +472,32 @@ test('w2046: a message that waits only for room on its own computer goes to room
   assert.equal(sessions.queued().length, 0, 'moved: the message went with its work to the new session');
 });
 
+test('w5328: a gate resume goes to deployMove first, whatever holds its own computer: dropped once moved, held with its line while it waits', (t) => {
+  const { sessions, worker } = setup(t);
+  const c = worker();
+  c.info.machineId = 'lothdesktop';
+  sessions.machineHold = () => 'lothdesktop is on hold (Ben: crash hold)';
+  const asked: string[] = [];
+  let answer: true | string | undefined = 'it resumes on the computer whose update it waited for (w5328): it waits for m5; m5: no free sandbox made yet';
+  sessions.deployMove = (_s, q) => {
+    asked.push(q.text);
+    return answer;
+  };
+  sessions.send(c.info.id, 'w5319 is unblocked', 'system', undefined, { resumeOf: { work: 'w5319', note: 'n' } });
+  sessions.drain();
+  assert.ok(asked.includes('w5319 is unblocked'), JSON.stringify(sessions.queued()));
+  assert.equal(sessions.queued()[0]?.why, answer, 'its Queued line says it waits for m5, not the hold on lothdesktop');
+  answer = true;
+  sessions.drain();
+  assert.equal(sessions.queued().length, 0, 'moved: the message went with its work');
+  // A message without resumeOf is never asked: it is held or delivered as any.
+  asked.length = 0;
+  sessions.send(c.info.id, 'a person asks');
+  sessions.drain();
+  assert.deepEqual(asked, []);
+  assert.equal(sessions.queued()[0]?.why, 'lothdesktop is on hold (Ben: crash hold)');
+});
+
 test('the model a session shows is the one its last reply came from, not the configured one (w1358)', async (t) => {
   const { dir, store, sessions, worker } = setup(t);
   const s = worker();
