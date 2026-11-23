@@ -72,6 +72,7 @@ test('shared caches: no uv or no cache folder yet is no prune', () => {
   const lines: string[] = [];
   const none = new UvCachePruner({ dir: '/no/such/cache', uv: () => '/bin/uv', run: async () => ({ out: '' }), log: (l) => lines.push(l) });
   assert.equal(none.maybe(false), undefined);
+  assert.ok(none.due(false), 'a missing folder does not use up the day: the next pass looks again');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'uvprune-'));
   try {
     const noUv = new UvCachePruner({ dir, uv: () => undefined, run: async () => ({ out: '' }), log: (l) => lines.push(l) });
