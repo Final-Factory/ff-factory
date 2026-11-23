@@ -1349,7 +1349,7 @@ export async function removeSlots(args: string[], facts: CleanupFacts | undefine
  * ledger). Each path is judged exactly as `check` judges it (checkPath), and refused whatever the verdict when it is:
  * - off this computer's install drive (C: on Windows, w1755) or in the game's AppData folders;
  * - outside the worker install folder (w896), the folder itself, a top folder of it (REMOVE_TOP), the main clone (`repo`),
- *   `seed`, `secrets`, or the daemon's folder;
+ *   `seed` (but for stale entries of its Library caches, w5280), `secrets`, or the daemon's folder;
  * - a symbolic link or junction, or a path through one: the real place must be the name the verdict judged;
  * - the folder the command runs in, or a path inside a player slot.
  * A player slot itself goes to removeSlots (w5168): emptied and kept, its folder and firewall rule stay. Before w5168 remove
@@ -1358,7 +1358,7 @@ export async function removeSlots(args: string[], facts: CleanupFacts | undefine
  * it. Each removal is printed and appended with its size to <root>/logs/ff-leftovers-removed.jsonl (FF_LEFTOVERS_REMOVE_LOG
  * overrides it, for tests).
  */
-export const REMOVE_TOP = new Set(['repo', 'seed', 'secrets', 'backups', 'tools', 'steam', 'logs', 'sandboxes', 'players', 'tmp', 'scratch', 'timing', 'nightly', 'nightly-history', 'ffu-runners', 'ffu-sandboxes', 'player-cache', 'daemon']);
+export const REMOVE_TOP = new Set(['repo', 'seed', 'secrets', 'backups', 'tools', 'steam', 'logs', 'sandboxes', 'players', 'tmp', 'scratch', 'timing', 'nightly', 'nightly-history', 'ffu-runners', 'ffu-sandboxes', 'player-cache', 'daemon', 'cache']);
 
 /** Why `p` (resolved) may never go through `remove`, before any verdict; undefined when it may be judged. */
 export function removeFenceProblem(p: string, root: string, o: { home: string; daemonDir?: string; cwd?: string }): string | undefined {
@@ -1366,7 +1366,9 @@ export function removeFenceProblem(p: string, root: string, o: { home: string; d
   if (!within(p, root) || norm(p) === norm(root)) return 'outside the worker install folder: a clean-up deletes only inside it (w896)';
   const rel = norm(p).slice(norm(root).length + 1).split('/');
   if (rel[0] === 'repo') return "the machine's main clone, a person's own project folder: never removed";
-  if (rel[0] === 'seed' || rel[0] === 'secrets') return `the install's ${rel[0]} folder: never removed by a clean-up`;
+  // w5280: inside the seed only an entry of its Library caches (seed/Library/BurstCache|BuildCache/<entry>...), which the verdict judges.
+  const seedCacheEntry = rel[0] === 'seed' && rel.length >= 4 && rel[1] === 'library' && ['burstcache', 'buildcache'].includes(rel[2]!);
+  if ((rel[0] === 'seed' && !seedCacheEntry) || rel[0] === 'secrets') return `the install's ${rel[0]} folder: never removed by a clean-up${rel[0] === 'seed' ? ' (only stale entries of its Library/BurstCache and BuildCache, w5280)' : ''}`;
   if (o.daemonDir && norm(o.daemonDir) !== norm(root) && (within(p, o.daemonDir) || within(o.daemonDir, p))) return "the FF Factory daemon's folder: never removed";
   if (rel.length === 1 && REMOVE_TOP.has(rel[0]!)) return `a top folder of the install folder (${rel[0]}): never removed whole; remove the DELETE rows inside it`;
   if (o.cwd && within(o.cwd, p)) return 'the folder this command runs in, or one holding it: cd out of it first';

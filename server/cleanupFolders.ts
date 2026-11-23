@@ -5,7 +5,7 @@ import { freeableBytes, localWorkWhy, norm, unpushedWorkWhy, OUTSIDE_ROOT_WHY, w
 import { requestIdsIn, CONTEXT_MAX_AGE_HOURS } from './staleOutput.ts';
 import type { SessionOwner } from './resumable.ts';
 import { finishedBulkIn, INSTALL_LEFTOVER_DEFAULTS, isCargoTarget, newestTopWrite, newestWrite, runnerJobWhy, RUNNER_KEPT, type ProcLite } from './installLeftovers.ts';
-import { LIBRARY_CACHES, projectOpen, staleCacheEntries } from './cacheTrim.ts';
+import { idleJitEntries, LIBRARY_CACHES, projectOpen, staleCacheEntries, type StaleEntry } from './cacheTrim.ts';
 import { PLAYER_CACHE_ENTRY } from '../machine/playerCache.ts';
 import { FFU_SLOTS_DIR, readSlotState } from '../machine/ffuSlots.ts';
 import type { PublishedRecord } from './published.ts';
@@ -55,13 +55,15 @@ export interface CleanupFacts {
   contextAt?: string;
   /** The timed runs this machine plays now or has queued (machine/timedRunner.ts active()); absent: an older daemon, or none play here (w3217). */
   timedRuns?: string[];
+  /** The pool's Library seed (a Library folder itself, machine/sandboxes.ts librarySource): its stale cache entries are candidates (w5280). */
+  librarySeed?: string;
   /** Free space was below the soft threshold at the daemon's last clean-up pass: a finished worker's bulk goes after minutes, not a day (w2223). */
   low?: boolean;
 }
 
 export interface FolderRow {
   path: string;
-  kind: 'session-temp' | 'session-bulk' | 'scratch' | 'sandbox-output' | 'player-slot' | 'ffu-slot-target' | 'ffu-runner-work' | 'player-cache' | 'sandbox-library' | 'named' | 'other';
+  kind: 'session-temp' | 'session-bulk' | 'scratch' | 'sandbox-output' | 'player-slot' | 'ffu-slot-target' | 'ffu-runner-work' | 'player-cache' | 'sandbox-library' | 'seed-library' | 'named' | 'other';
   verdict: 'keep' | 'delete';
   why: string;
   /** What deleting it alone frees (w5168): files hard-linked to a place it does not hold (a build still kept) do not count. */
@@ -326,12 +328,54 @@ export async function judgeSandboxLibraryPath(p: string, f: CleanupFacts, ctx?: 
     const user = ctx.procs.find((c) => mentions(c, sb.path));
     if (user) return row('keep', `a running process names ${sb.id} (${user.slice(0, 160)})`);
     if (rel.length < 3) return row('keep', `${sb.id}'s Library/${rel[1]} as a whole: a cold Unity start is slow, only its stale entries are candidates`);
-    const { stale } = await staleCacheEntries(sb.path);
-    const hit = stale.find((e) => norm(p) === norm(e.path) || within(p, e.path));
-    if (!hit) return row('keep', `not stale: the newest Burst player builds, the manifests and the newest BuildCache folders stay (cacheTrim.ts)`);
+    const hit = (await sandboxLibraryStale(sb.path)).find((e) => norm(p) === norm(e.path) || within(p, e.path));
+    if (!hit) return row('keep', `not stale: the newest Burst player builds, JIT bundles loaded within ${JIT_IDLE_DAYS_TEXT}, the manifests and the newest BuildCache folders stay (cacheTrim.ts)`);
     return row('delete', `a stale entry of ${sb.id}'s Library/${rel[1]}: ${hit.why}; no worker is in the sandbox, no editor or build has it open (rebuildable, w5240)`);
   }
   return undefined;
+}
+
+const JIT_IDLE_DAYS_TEXT = '14 days';
+
+/** An idle sandbox's stale Library cache entries: the daemon trim's (staleCacheEntries) and JIT bundles idle 14 days (w5280). */
+async function sandboxLibraryStale(project: string): Promise<StaleEntry[]> {
+  return [...(await staleCacheEntries(project)).stale, ...(await idleJitEntries(project))];
+}
+
+/** The pool's Library seed when ff-leftovers may judge it (w5280): inside the install folder, not a sandbox's, not a project's own Library. */
+export function seedLibrary(f: CleanupFacts): string | undefined {
+  const seed = f.librarySeed;
+  if (!seed || !f.root || !within(seed, f.root) || path.basename(seed).toLowerCase() !== 'library') return undefined;
+  if (f.sandboxes.some((sb) => within(seed, sb.path) || norm(seed) === norm(sb.path))) return undefined;
+  const project = path.dirname(seed);
+  if (['.git', 'Assets', 'ProjectSettings'].some((n) => fs.existsSync(path.join(project, n)))) return undefined;
+  return seed;
+}
+
+/**
+ * A stale entry of the pool's Library seed (<root>/seed/Library on m5, the warm Library every new sandbox is cloned from and an
+ * idle one is cloned from again, machine/sandboxes.ts librarySource and reseedIdle), judged by the daemon trim's rules
+ * (staleCacheEntries: superseded Burst player builds, BuildCache folders older than the newest build past 2 GB), or undefined
+ * for a path outside it (w5280: m5's seed held 90 GB, 28.5 GB of it such entries, and no row reached it). Its JIT stays: nothing
+ * loads the seed, so access times say nothing there, and all 1,589 of its bundles were in a sandbox read within 14 days
+ * (measured 2026-11-23). Kept while any process names the seed (a sandbox being cloned from it: copyTree runs `cp` or
+ * robocopy with the seed's path), and the caches whole.
+ */
+export async function judgeSeedLibraryPath(p: string, f: CleanupFacts, ctx?: SlotContext): Promise<FolderRow | undefined> {
+  const seed = seedLibrary(f);
+  if (!seed || !within(p, seed) || factsProblem(f)) return undefined;
+  const rel = norm(p).slice(norm(seed).length + 1).split('/');
+  if (!LIBRARY_CACHES.some((c) => c.toLowerCase() === rel[0])) return undefined;
+  const row = (verdict: FolderRow['verdict'], why: string): FolderRow => ({ path: p, kind: 'seed-library', verdict, why });
+  if (!ctx?.procs) return row('keep', 'the running processes could not be read to see that no sandbox is being cloned from the Library seed');
+  const user = ctx.procs.find((c) => mentions(c, seed));
+  if (user) return row('keep', `a running process names the Library seed (${user.slice(0, 160)}): a sandbox may be cloned from it now`);
+  if (rel.length < 2) return row('keep', `the Library seed's ${rel[0]} as a whole: a sandbox cloned from a cold seed starts cold, only its stale entries are candidates`);
+  if (rel[0] === 'burstcache' && rel[1] === 'jit') return row('keep', "the Library seed's JIT: nothing loads the seed, so its access times say nothing; every seed bundle was in use in a sandbox (w5280)");
+  const { stale } = await staleCacheEntries(path.dirname(seed));
+  const hit = stale.find((e) => norm(p) === norm(e.path) || within(p, e.path));
+  if (!hit) return row('keep', 'not stale: the newest Burst player builds, the manifests and the newest BuildCache folders stay (cacheTrim.ts)');
+  return row('delete', `a stale entry of the Library seed's ${path.relative(seed, p).split(/[\\/]/)[0]}: ${hit.why}; no process names the seed (rebuildable, w5280)`);
 }
 
 /**
@@ -506,6 +550,8 @@ export function judgePath(p: string, f: CleanupFacts, now = Date.now(), slots?: 
   if (rel[0] === 'scratch' && rel.length >= 2) return row('scratch', judgeNamed(rel[1]!, f, now));
   if (rel[0] === 'players' && rel.length >= 2 && isSlotDir(rel[1]!)) return row('player-slot', judgePlayerSlot(path.join(root, 'players', rel[1]!), slots, now));
   if (rel[0] === 'timing') return row('other', { verdict: 'keep', why: judgeTiming(f) });
+  // w5281: the machine's shared caches (the uv cache, the determinism audits): the daemon prunes them itself.
+  if (rel[0] === 'cache') return row('other', { verdict: 'keep', why: "the machine's shared caches (uv, determinism audits): the daemon prunes uv's daily (uv cache prune), the game keeps its audits to 40 runs and 10 GB" });
   const named = rel.find((seg) => requestIdsIn(seg).length);
   if (named) return row('named', judgeNamed(named, f, now));
   return row('other', { verdict: 'keep', why: 'not a place with an owner in the ledger' });
@@ -589,7 +635,7 @@ export async function withGitCheck(r: FolderRow, root: string | undefined, local
  * "its git state could not be read" and KEEP while the pass judged it DELETE (ffa-f1beecb0 on LothDesktop, 2026-11-08).
  */
 export async function judgeWithGit(p: string, f: CleanupFacts, now: number, slots?: SlotContext, o: { localWork?: (dir: string) => Promise<string | undefined>; unpushedWork?: (dir: string) => Promise<string | undefined> } = {}): Promise<FolderRow> {
-  const judged = (await judgeFfuSlotPath(p, f, now, slots)) ?? (await judgeSandboxLibraryPath(p, f, slots)) ?? (await judgeRunnerWorkPath(p, f, now, slots)) ?? (await judgePlayerCachePath(p, f, now, slots)) ?? judgePath(p, f, now, slots);
+  const judged = (await judgeFfuSlotPath(p, f, now, slots)) ?? (await judgeSandboxLibraryPath(p, f, slots)) ?? (await judgeSeedLibraryPath(p, f, slots)) ?? (await judgeRunnerWorkPath(p, f, now, slots)) ?? (await judgePlayerCachePath(p, f, now, slots)) ?? judgePath(p, f, now, slots);
   // A runner's checkout is CI's own scratch (w5235): actions/checkout (clean: true, its default) runs git clean -ffdx and
   // git reset --hard before every job, so its uncommitted files are a build's leftovers that the next job wipes anyway.
   if (judged.kind === 'ffu-runner-work') return judged;
@@ -648,9 +694,12 @@ export async function planFolders(f: CleanupFacts, o: { now?: number; sizes?: 'a
   for (const e of entries(path.join(f.root!, 'player-cache'))) if (e.isDirectory() && PLAYER_CACHE_ENTRY.test(e.name)) paths.push(path.join(f.root!, 'player-cache', e.name));
   for (const sb of f.sandboxes) {
     // w5240: a sandbox's stale Library cache entries, only while it is idle and closed.
-    if (judgeSandbox(sb.id, f).verdict === 'delete' && !projectOpen(sb.path)) for (const e of (await staleCacheEntries(sb.path)).stale) paths.push(e.path);
+    if (judgeSandbox(sb.id, f).verdict === 'delete' && !projectOpen(sb.path)) for (const e of await sandboxLibraryStale(sb.path)) paths.push(e.path);
     for (const top of ['Builds', '.nightly-builds']) for (const e of entries(path.join(sb.path, top))) paths.push(path.join(sb.path, top, e.name));
   }
+  // w5280: the Library seed's stale entries, while no process names it (judgeSeedLibraryPath judges each again).
+  const seed = seedLibrary(f);
+  if (seed && o.slots?.procs && !o.slots.procs.some((c) => mentions(c, seed))) for (const e of (await staleCacheEntries(path.dirname(seed))).stale) paths.push(e.path);
   const rows: FolderPlan = [];
   let emptySlots = 0;
   for (const p of paths) {

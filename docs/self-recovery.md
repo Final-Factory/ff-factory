@@ -866,7 +866,7 @@ every worker's PATH read it (`machine/leftovers.ts`, beside `ff-leftovers list/e
   removal; a path inside a slot it refuses, naming the slot (w5168: one command for every DELETE row, rather than a row that
   names a second command, since the slot path is what `folders` prints and remove-slot's guards apply either way). It
   refuses, whatever the verdict, a path off the install drive (C: on Windows) or in the game's AppData folders, outside the
-  install folder, the folder itself or a top folder of it, the main clone (`repo`), `seed`, `secrets`, the daemon's folder, a
+  install folder, the folder itself or a top folder of it, the main clone (`repo`), `seed` (but for an entry inside `seed/Library/BurstCache` or `seed/Library/BuildCache`, w5280), `secrets`, the daemon's folder, a
   symbolic link or junction or a path through one (the real place must be the name judged), and
   the folder it runs in. It judges again just before the delete, never follows a link inside the folder it deletes, prints
   `REMOVED <path>` with the bytes it freed (hard links to files kept elsewhere apart, w5168) and appends a line to `<install>/logs/ff-leftovers-removed.jsonl`; exit 1 if any path was
@@ -1173,9 +1173,13 @@ Unity Hub's editors and installers; `%LOCALAPPDATA%\Unity` (logs, package cache,
 `~/.claude` (transcripts, plugins); dotnet workload temp; the system temp; the npm, NuGet, pip, uv and Playwright caches;
 Windows crash dumps. For each: which setting or script makes FF Factory write there, and whether a variable could move it
 inside the root (candidates, not verified here: `NUGET_PACKAGES`, `npm_config_cache`, `PLAYWRIGHT_BROWSERS_PATH`,
-`DOTNET_CLI_HOME`, `UV_CACHE_DIR`, `PIP_CACHE_DIR`, `CLAUDE_CONFIG_DIR`; Unity's own folders have none and the game's data
-folder has no override, [worker-root.md](worker-root.md) section 2). Moving one is a request for lothsahn to decide, not
-clean-up work.
+`DOTNET_CLI_HOME`, `PIP_CACHE_DIR`, `CLAUDE_CONFIG_DIR`; Unity's own folders have none, [worker-root.md](worker-root.md)
+section 2). Moving one is a request for lothsahn to decide, not clean-up work. Moved since (w5281, lothsahn): uv's cache
+(`UV_CACHE_DIR=<root>/cache/uv`, pruned daily by the daemon with `uv cache prune`, hourly below the soft threshold;
+`machine/sharedCaches.ts`) and the game's determinism audits (`FF_DETERMINISM_AUDIT_DIR=<root>/cache/determinism-audit`,
+kept to 40 runs and 10 GB by the game's own `NetworkDeterminismAuditRetention`; no clean-up pass deletes a path with `audit`
+in it). Both are set in the daemon's `rootEnv`, so every agent, editor, player and batch run it starts gets them; what
+already sits at the old places (`~/.cache/uv`, the game data folder's `DeterminismAudit`) stays until a person says it goes.
 
 ### Sandbox Library caches: trim on release (w898)
 
@@ -1209,7 +1213,7 @@ pairs of all but the newest `playerBuildsKept` 2 player builds (Burst checks an 
 a miss); the manifest, `Hashes` and `AotSettings_*.hash` stay. `BuildCache`: whole entry folders `<2 hex>/<hash>/<version>`,
 the Scriptable Build Pipeline's own prune unit (a single file removed failed a build, w1211): every folder the newest build wrote
 (within an hour of the newest write) stays, then the newest up to `buildCacheGB` 2 (one commit's build writes 0.4 GB), the rest
-goes. Never: `BurstCache/JIT` (no on-disk sign of which entries the editor still uses), `PlayerDataCache`, `EntitySceneBundles`
+goes. Never: `BurstCache/JIT` by the trim (no write-time sign of which entries the editor still uses; `ff-leftovers` alone judges it by access time, below), `PlayerDataCache`, `EntitySceneBundles`
 (w1576 dropped those whole after 24 h: no longer, a build trusts them whole and a cold one is the 534 s above), `Artifacts`,
 `Bee`, `ScriptAssemblies`, `PackageCache`. A dry run on lothdesktop the same day: slot2 3.2 GB stale (0.9 GB of Burst player
 builds, 10 of 12, and 2.3 GB of BuildCache), slot4 0.09 GB, the other four nothing. Gives up after 10 min. **When**:
@@ -1237,6 +1241,22 @@ renamed first, so one with an open file is skipped.
 0.7 + 2.5 GB). When the seed is missing the copy falls back to the main clone's or a sandbox's Library, and now leaves their
 `BuildCache` and `BurstCache` behind (`copyTree` `exclude`; robocopy `/XD`, elsewhere removed after the copy). D: on lothdesktop is NTFS,
 so copies are full; a block-cloning volume (w900's Dev Drive) would make the six copies share blocks but not stop each from growing.
+
+**`ff-leftovers` on the seed and on idle JIT (w5280).** Lothsahn asked (m5, 2026-11-23, w5198 then w5280) for the stale Library
+entries of free sandboxes and the seed to show as DELETE in `ff-leftovers folders` while the caches stay warm. Two rules:
+- **The seed** (`librarySeed`, which the daemon now writes into the clean-up facts): the same `staleCacheEntries` as a released
+  sandbox (superseded Burst player builds, BuildCache folders past the newest build and 2 GB), kind `seed-library`. Never its JIT,
+  a cache whole or anything else in it; nothing at all while a process names the seed (copyTree's `cp`/robocopy of a sandbox clone
+  does) or the process list is unknown. A seed inside a sandbox or beside `.git`/`Assets`/`ProjectSettings` is no seed. `remove`'s
+  fence lets through only entries inside the two caches. Measured on m5, 2026-11-23: 28.5 GB stale of 60.6 GB in the two caches
+  (BuildCache 18.0, macOS-Intel 6.3, macOS-Arm 3.2, Windows-Intel 1.0). Sandboxes cloned from it with `cp -c` share blocks, so a
+  removal frees only blocks no sandbox still shares: measure `df` before and after, not the row's size.
+- **Idle JIT** (`idleJitEntries`, sandboxes only): a `BurstCache/JIT/<hash>.bundle` with its `.bundle.dSYM` that nobody loaded for
+  `JIT_IDLE_DAYS` 14 days, by the newest of access and write time. The manifest and `Hashes` stay; a missing bundle is compiled
+  again on its next use. Only where the volume records reads (some entry read an hour or more after it was written): APFS on m5 does
+  (a bundle written on Oct 5 read on Nov 13), NTFS on lothdesktop's V: does not, and there nothing is judged idle. Write time
+  misjudged it: w5198 counted 5 GB of JIT "older than 14 days" by write time, while by access time slot3 had none idle and slot1
+  93 of 177 (327 MB). The seed's 1,589 bundles were all read in some sandbox within 14 days, so the seed's JIT stays whole.
 
 ## 6. Crash-safe data files
 
