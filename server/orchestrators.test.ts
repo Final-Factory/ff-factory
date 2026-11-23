@@ -11021,6 +11021,8 @@ test('w5197: two ffu rows that share a file both start, and both workers get the
   // A row on other files gets no note.
   const other = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', title: 'Rewards', work_id: 'w5150', prompt: 'Edit crates/ffu-sim/src/sector/rewards.rs.', extra_agent: true });
   assert.doesNotMatch(other.text, /w5197/, other.text);
+  // The peer note starts a turn for w5189's worker: let every worker go idle, as a game start needs a free sandbox (w1607).
+  await until('every worker is idle', () => [...store.sessions.values()].every((x) => x.status !== 'running' && x.status !== 'starting'));
   // Game work is not read at all.
   const before = reads;
   await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Go.', title: 'Game', work_id: 'w4420', extra_agent: true });
@@ -11028,6 +11030,7 @@ test('w5197: two ffu rows that share a file both start, and both workers get the
   // A gh failure starts the row (logged), with no note.
   (agents as unknown as { ffuReads: unknown }).ffuReads = { openPrs: async () => { throw new Error('HTTP 401'); }, hubs: async () => [] };
   putRequests(store, [{ id: 'w4421', repo: 'Final-Factory/ffu', brief: 'crates/ffu-platform/src/lib.rs' }]);
+  await until('every worker is idle again', () => [...store.sessions.values()].every((x) => x.status !== 'running' && x.status !== 'starting'));
   const open = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Go.', title: 'Fails open', work_id: 'w4421', extra_agent: true });
   assert.match(open.text, /^Started agent/, open.text);
 });
