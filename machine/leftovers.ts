@@ -1213,6 +1213,11 @@ async function checkPath(p: string, facts: CleanupFacts, now: number, published:
  * this pid's parents by ppid, and the MSYS parents the shim found (FF_LEFTOVERS_CALLERS), whose Windows ppid can be lost.
  */
 export function slotProcs(procs: Proc[], self: number, callers: number[] = []): string[] {
+  return slotProcList(procs, self, callers).map((p) => p.cmd);
+}
+
+/** slotProcs with the pids kept (w5235): an FFU runner's job is found by its Runner.Worker's pid and parent. */
+export function slotProcList(procs: Proc[], self: number, callers: number[] = []): Proc[] {
   const by = new Map(procs.map((p) => [p.pid, p]));
   const skip = new Set<number>(callers);
   for (let pid: number | undefined = self, n = 0; pid && pid > 1 && !skip.has(pid) && n < 64; n++) {
@@ -1223,7 +1228,7 @@ export function slotProcs(procs: Proc[], self: number, callers: number[] = []): 
     skip.add(pid);
     pid = by.get(pid)?.ppid;
   }
-  return procs.filter((p) => !skip.has(p.pid)).map((p) => p.cmd);
+  return procs.filter((p) => !skip.has(p.pid));
 }
 
 /** The player slots' context for `folders`, `check` and `remove-slot` (w2796): this host, live pids and the running processes' command lines. */
@@ -1231,9 +1236,10 @@ export async function slotContext(o: { procs?: () => Promise<Proc[]>; self?: num
   const platform: UnityPlatform = process.platform === 'win32' ? 'win32' : process.platform === 'linux' ? 'linux' : 'darwin';
   const list = o.procs ?? (async () => (await import('./unity.ts')).realDeps(platform).procs());
   const all = await list().catch(() => undefined);
-  const procs = all && slotProcs(all, o.self ?? process.pid, o.callers ?? callerPids(process.env.FF_LEFTOVERS_CALLERS));
+  const procList = all && slotProcList(all, o.self ?? process.pid, o.callers ?? callerPids(process.env.FF_LEFTOVERS_CALLERS));
+  const procs = procList?.map((p) => p.cmd);
   const self = o.session ?? process.env.FF_SESSION_ID;
-  return { host: os.hostname().toLowerCase(), alive: isAlive, procs, ...(self ? { self } : {}), ...(all ? { hosts: hostSessionsIn(all.map((p) => p.cmd)) } : {}) };
+  return { host: os.hostname().toLowerCase(), alive: isAlive, procs, ...(procList ? { procList } : {}), ...(self ? { self } : {}), ...(all ? { hosts: hostSessionsIn(all.map((p) => p.cmd)) } : {}) };
 }
 
 /** The sessions whose agent host runs, from command lines: `node ... agentHost.ts <app>/hosts/<session>` (machine/daemon.ts hostedSession, w3217). */
@@ -1352,7 +1358,7 @@ export async function removeSlots(args: string[], facts: CleanupFacts | undefine
  * it. Each removal is printed and appended with its size to <root>/logs/ff-leftovers-removed.jsonl (FF_LEFTOVERS_REMOVE_LOG
  * overrides it, for tests).
  */
-export const REMOVE_TOP = new Set(['repo', 'seed', 'secrets', 'backups', 'tools', 'steam', 'logs', 'sandboxes', 'players', 'tmp', 'scratch', 'timing', 'nightly', 'nightly-history', 'ffu-runners', 'ffu-sandboxes', 'daemon']);
+export const REMOVE_TOP = new Set(['repo', 'seed', 'secrets', 'backups', 'tools', 'steam', 'logs', 'sandboxes', 'players', 'tmp', 'scratch', 'timing', 'nightly', 'nightly-history', 'ffu-runners', 'ffu-sandboxes', 'player-cache', 'daemon']);
 
 /** Why `p` (resolved) may never go through `remove`, before any verdict; undefined when it may be judged. */
 export function removeFenceProblem(p: string, root: string, o: { home: string; daemonDir?: string; cwd?: string }): string | undefined {

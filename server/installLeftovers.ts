@@ -228,7 +228,7 @@ export function runnerJobWhy(runner: string, procs: ProcLite[] | undefined, now:
 }
 
 /** An Actions runner's tool cache and action downloads: kept, as the actions-work rule keeps them (server/cleanup.ts). */
-const RUNNER_KEPT = /^_(tool|actions)$/i;
+export const RUNNER_KEPT = /^_(tool|actions)$/i;
 
 /** A process still writing into a stopped session's folder. */
 export interface Stray {
