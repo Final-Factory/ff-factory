@@ -289,6 +289,9 @@ CREATE TABLE IF NOT EXISTS coverage(class TEXT NOT NULL, type TEXT NOT NULL, PRI
 CREATE INDEX IF NOT EXISTS coverage_type ON coverage(type);
 CREATE TABLE IF NOT EXISTS run_starts(key TEXT PRIMARY KEY, sessions TEXT, requests TEXT, tagged TEXT NOT NULL, at TEXT NOT NULL) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS ci_seen(artifact_id INTEGER PRIMARY KEY, status TEXT, tries INTEGER NOT NULL DEFAULT 0, at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS relabel_log(
+  batch TEXT NOT NULL, failure_id INTEGER NOT NULL, test TEXT NOT NULL, old_label TEXT, old_reason TEXT, old_by TEXT, old_at TEXT,
+  new_label TEXT NOT NULL, new_reason TEXT NOT NULL, at TEXT NOT NULL, reverted_at TEXT, PRIMARY KEY(batch, failure_id)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS gate_tuning(day TEXT PRIMARY KEY, at TEXT NOT NULL, summary TEXT NOT NULL, json TEXT NOT NULL) WITHOUT ROWID;
 `;
 
@@ -501,20 +504,6 @@ export class TestHistory {
   }
 
   /**
-   * w5457: how many times slower than usual a failing test ran: its failing run's time over the median of its passes (at least
-   * 5 of them, and the median counted as at least 50 ms). Undefined when there is nothing to compare. A test 100 times slower
-   * than usual stalled (an editor under machine load), which its failure says nothing about.
-   */
-  slowdown(f: PendingFailure): number | undefined {
-    const ms = (this.db.prepare('SELECT ms FROM results WHERE run_id = ? AND test_id = ?').get(f.runId, f.testId) as Row | undefined)?.ms;
-    if (typeof ms !== 'number') return undefined;
-    const passes = this.db.prepare("SELECT ms FROM results WHERE test_id = ? AND outcome = 'pass' AND ms IS NOT NULL ORDER BY ms").all(f.testId) as Row[];
-    if (passes.length < 5) return undefined;
-    const median = Number(passes[passes.length >> 1]!.ms);
-    return ms / Math.max(median, 50);
-  }
-
-  /**
    * The later runs of a failed test on its line: CI runs of the same branch (a pull request's head branch, master), or a
    * worker's runs in the same sandbox on the same branch. Answers the first later pass and how many later runs there were.
    */
@@ -568,6 +557,45 @@ export class TestHistory {
     return Number(r.changes);
   }
 
+  /** The labeller's own fp labels on local failures finished since `sinceIso`, oldest first (w5467). */
+  autoLocalFp(sinceIso: string): (PendingFailure & { oldReason: string | null; oldAt: string | null })[] {
+    return this.db
+      .prepare(
+        `SELECT f.id, f.run_id AS runId, t.name AS test, t.id AS testId, r.source, r.repo, r.sha, r.base, r.branch, r.machine, r.sandbox, r.finished, r.changes, f.reason AS oldReason, f.labelled_at AS oldAt
+         FROM failures f JOIN runs r ON r.id = f.run_id JOIN tests t ON t.id = f.test_id
+         WHERE r.source = 'local' AND f.label = 'fp' AND f.labelled_by = 'auto' AND r.finished >= ? ORDER BY r.finished`,
+      )
+      .all(sinceIso) as unknown as (PendingFailure & { oldReason: string | null; oldAt: string | null })[];
+  }
+
+  /** Write one relabel (the labeller's rank) and its log row together. */
+  relabelLogged(batch: string, f: PendingFailure & { oldReason?: string | null; oldAt?: string | null }, label: Label, reason: string) {
+    this.tx(() => {
+      if (!this.label(f.id, label, reason, 'auto')) return;
+      this.db
+        .prepare('INSERT OR REPLACE INTO relabel_log(batch, failure_id, test, old_label, old_reason, old_by, old_at, new_label, new_reason, at) VALUES(?,?,?,?,?,?,?,?,?,?)')
+        .run(batch, f.id, f.test, 'fp', f.oldReason ?? null, 'auto', f.oldAt ?? null, label, reason.slice(0, 500), new Date(this.now()).toISOString());
+    });
+  }
+
+  /** Restore a batch's old labels (only where the row still holds the batch's own auto label); answers how many. */
+  revertBatch(batch: string): number {
+    return this.tx(() => {
+      let n = 0;
+      const at = new Date(this.now()).toISOString();
+      for (const r of this.all('SELECT failure_id, old_label, old_reason, old_by, old_at, new_reason FROM relabel_log WHERE batch = ? AND reverted_at IS NULL', batch)) {
+        const u = this.db
+          .prepare("UPDATE failures SET label = ?, reason = ?, labelled_by = ?, labelled_at = ? WHERE id = ? AND label = 'unknown' AND labelled_by = 'auto' AND reason = ?")
+          .run(r.old_label, r.old_reason, r.old_by, r.old_at, r.failure_id, String(r.new_reason).slice(0, 500));
+        if (Number(u.changes) > 0) {
+          n++;
+          this.db.prepare('UPDATE relabel_log SET reverted_at = ? WHERE batch = ? AND failure_id = ?').run(at, batch, r.failure_id);
+        }
+      }
+      return n;
+    });
+  }
+
   /** Read-only SELECTs for the queries (the ad-hoc SQL route runs apart, in a worker, on its own read-only connection). */
   all(sql: string, ...args: (string | number | null)[]): Row[] {
     return this.db.prepare(sql).all(...args) as Row[];
@@ -587,8 +615,42 @@ export const localRunKey = (machineId: string, sandbox: string, file: string) =>
 /** The files a pull request's own change differs in between two of its head commits (CI), or undefined when unreadable. */
 export type PrDiff = (repo: string, a: string, b: string) => Promise<string[] | undefined>;
 
-/** A failing test this many times slower than its median passing time stalled (w5457). */
-const STALL_FACTOR = 100;
+/**
+ * The one reason a local failure is not counted (w5457; lothsahn, w5467: "Flaky tests in local runs still matter! We want the
+ * gents to go faster"): the worker was writing or editing that very test. Every other local failure stays as the change rules
+ * label it, a stall (a test minutes slower than its median) included. `p` is the next pass; undefined when it is no local run.
+ */
+export function notTheGame(f: PendingFailure, p: NextPass): { label: Label; reason: string } | undefined {
+  if (f.source !== 'local' || p.source !== 'local') return undefined;
+  const fc = f.changes ? (JSON.parse(f.changes) as Record<string, string>) : undefined;
+  const pc = p.changes ? (JSON.parse(p.changes) as Record<string, string>) : undefined;
+  return beingWritten(f.test, fc, fc && pc && f.base === p.base ? changedBetween(fc, pc) : undefined);
+}
+
+/**
+ * w5467: recompute the labeller's own fp labels on local failures of the last `days` days with today's rules (notTheGame),
+ * changing only those the rules now call unknown. A hand label (worker or person) is never touched. Every change is logged in
+ * relabel_log with the old label, so `revertRelabel` can undo the batch. dryRun reports without writing.
+ */
+export function relabelLocalFp(h: TestHistory, o: { days?: number; dryRun: boolean; now?: number }): { batch: string; scanned: number; changed: { id: number; test: string; reason: string }[] } {
+  const now = o.now ?? Date.now();
+  const batch = new Date(now).toISOString();
+  const changed: { id: number; test: string; reason: string }[] = [];
+  const rows = h.autoLocalFp(new Date(now - (o.days ?? 30) * DAY).toISOString());
+  for (const f of rows) {
+    const p = h.nextOnLine(f).pass;
+    const v = p && notTheGame(f, p);
+    if (!v || v.label === 'fp') continue;
+    changed.push({ id: f.id, test: f.test, reason: v.reason });
+    if (!o.dryRun) h.relabelLogged(batch, f, v.label, v.reason);
+  }
+  return { batch, scanned: rows.length, changed };
+}
+
+/** Undo one relabel batch: put back each logged row's old label if it still carries the batch's. Answers how many it restored. */
+export function revertRelabel(h: TestHistory, batch: string): number {
+  return h.revertBatch(batch);
+}
 
 const ageDays = (iso: string, now: number) => (now - Date.parse(iso)) / DAY;
 
@@ -611,19 +673,15 @@ export async function labelFailures(h: TestHistory, prDiff: PrDiff, now = Date.n
       continue;
     }
     const p = next.pass;
-    const slow = h.slowdown(f);
-    if (slow !== undefined && slow > STALL_FACTOR) {
-      n += +h.label(f.id, 'unknown', `the run stalled: the test took ${Math.round(slow)} times its median time to fail (an editor under load), so the failure says nothing about the test`, 'auto');
+    const notGame = notTheGame(f, p);
+    if (notGame) {
+      n += +h.label(f.id, notGame.label, notGame.reason, 'auto');
       continue;
     }
     const again = f.source === 'local' ? 'in the next local run that passed' : `in CI at ${String(p.sha).slice(0, 9)}`;
     let verdict: { label: Label; reason: string };
     if (f.source === 'local' && p.source === 'local') {
-      const fc = f.changes ? (JSON.parse(f.changes) as Record<string, string>) : undefined;
-      const pc = p.changes ? (JSON.parse(p.changes) as Record<string, string>) : undefined;
-      const authored = beingWritten(f.test, fc, fc && pc && f.base === p.base ? changedBetween(fc, pc) : undefined);
-      if (authored) verdict = authored;
-      else if (f.sha && f.sha === p.sha && (f.changes ?? '') === (p.changes ?? '')) verdict = labelFromChange([], 'on a re-run');
+      if (f.sha && f.sha === p.sha && (f.changes ?? '') === (p.changes ?? '')) verdict = labelFromChange([], 'on a re-run');
       else if (!f.changes || !p.changes) verdict = { label: 'unknown', reason: 'passed again, but a run kept no record of its changes (too many changed files)' };
       else if (f.base !== p.base) verdict = { label: 'unknown', reason: "passed again after the branch's base moved (origin/master merged in), so the change cannot be told apart" };
       else verdict = labelFromChange(changedBetween(JSON.parse(f.changes), JSON.parse(p.changes)), again);
@@ -637,7 +695,7 @@ export async function labelFailures(h: TestHistory, prDiff: PrDiff, now = Date.n
 
 // ---------------------------------------------------------------- the queries
 
-export const QUERIES = ['summary', 'slowest', 'false_positives', 'detections', 'never_caught', 'failures', 'test', 'local_runs', 'gate_tuning', 'sql', 'set_label'] as const;
+export const QUERIES = ['summary', 'slowest', 'false_positives', 'detections', 'never_caught', 'failures', 'test', 'local_runs', 'gate_tuning', 'sql', 'set_label', 'relabel'] as const;
 export type QueryName = (typeof QUERIES)[number];
 
 export interface QueryArgs {
@@ -664,6 +722,10 @@ export interface QueryArgs {
   /** set_label: the failure (failures' failure_id) and why. */
   failureId?: number;
   reason?: string;
+  /** relabel: report only (the default); false writes. */
+  dryRun?: boolean;
+  /** relabel: undo this batch (its id as the log shows it) instead of running one. */
+  batch?: string;
 }
 
 const esc = (s: string) => s.replace(/[\\%_]/g, (c) => `\\${c}`);
@@ -863,6 +925,7 @@ export function runSql(file: string, sql: string, max = SQL_MAX_ROWS, timeoutMs 
 /** The answer of the test_history tool: a ready-made query or ad-hoc SQL, as text. */
 export async function queryTestHistory(h: TestHistory, a: QueryArgs, now = Date.now(), by?: string): Promise<string> {
   if (a.query === 'set_label') return setLabelByHand(h, a, by);
+  if (a.query === 'relabel') return relabelByHand(h, a, now, by);
   if (a.query === 'sql') {
     if (!a.sql) throw new Error('query "sql" needs sql: one SELECT (tables: docs/test-history.md)');
     const r = await runSql(h.file, a.sql, a.limit ?? SQL_MAX_ROWS);
@@ -911,4 +974,26 @@ export function localRunTags(src: RunTagSource, machineId: string, sandbox: stri
   const here = sandbox ? src.workInSandbox(machineId, sandbox) : { sessions: [], requests: [] };
   if (here.sessions.length) return { sessions: here.sessions, requests: here.requests, tagged: here.sessions.length === 1 ? 'sandbox' : 'shared' };
   return { sessions: session ? [session] : [], requests: [], tagged: 'none' };
+}
+
+/**
+ * test_history relabel (w5467): recompute the labeller's own fp labels on local failures with today's rules, a dry run unless
+ * dryRun is false (writing needs a known caller). batch + dryRun false undoes one batch. Every change is in relabel_log.
+ */
+export function relabelByHand(h: TestHistory, a: QueryArgs, now: number, by: string | undefined): string {
+  const dry = a.dryRun !== false;
+  if (a.batch) {
+    if (dry) {
+      const r = h.all("SELECT count(*) AS n FROM relabel_log WHERE batch = ? AND reverted_at IS NULL", a.batch)[0];
+      return `Batch ${a.batch}: ${r?.n ?? 0} change(s) could be reverted (dry run; pass dryRun: false to revert).`;
+    }
+    if (!by || labelRank(by) === 0) throw new Error('relabel: the caller is not known');
+    return `Batch ${a.batch}: reverted ${revertRelabel(h, a.batch)} row(s), by ${by}.`;
+  }
+  if (!dry && (!by || labelRank(by) === 0)) throw new Error('relabel: the caller is not known');
+  const r = relabelLocalFp(h, { days: a.days ?? 30, dryRun: dry, now });
+  const byTest = new Map<string, number>();
+  for (const c of r.changed) byTest.set(classOf(c.test), (byTest.get(classOf(c.test)) ?? 0) + 1);
+  const top = [...byTest].sort((x, y) => y[1] - x[1]).slice(0, 15).map(([c, n]) => `${c}: ${n}`).join('; ');
+  return `${dry ? 'DRY RUN, nothing written' : `Written as batch ${r.batch} by ${by}`}: scanned ${r.scanned} auto fp local failure(s) of the last ${a.days ?? 30} days, ${r.changed.length} now unknown.\nBy class: ${top || 'none'}`;
 }

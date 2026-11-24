@@ -8,6 +8,7 @@ import {
   beingWritten,
   classOf,
   ownSourceIn,
+  relabelByHand,
   labelFailures,
   labelFromChange,
   localRunKey,
@@ -134,19 +135,55 @@ test('w5457: a local failure while the test file was being written or edited is 
   assert.match(String(l[0]!.reason), /being written or edited/);
 });
 
-test('w5457: a failure that took over 100 times the test median is unknown (a stalled editor), not fp', async () => {
+test('w5467: a stalled local failure (331 s against a 1 s median) stays counted: it is lost agent time, not authoring', async () => {
   const h = history();
-  const at = (i: number, outcome: TestCase['outcome'], ms: number) => h.addRun({ source: 'pr-gate', key: `s${i}`, repo: 'o/r', branch: 'b', sha: 'same', finished: iso(i) }, [{ ...tc('A.T.slow', outcome), ms }]);
+  const at = (i: number, outcome: TestCase['outcome'], ms: number) => h.addRun({ source: 'local', key: `s${i}`, machine: 'm', sandbox: 's', branch: 'b', sha: `h${i}`, base: 'm1', finished: iso(i), changes: {} }, [{ ...tc('A.T.slow', outcome), ms }]);
   for (let i = 0; i < 6; i++) at(i, 'pass', 1000);
   at(10, 'fail', 331_372);
   at(11, 'pass', 1000);
-  at(12, 'fail', 1200);
-  at(13, 'pass', 1000);
-  await labelFailures(h, async () => [], T0 + 3600_000);
-  const l = labelOf(h, 'A.T.slow');
-  assert.equal(l[0]!.label, 'unknown');
-  assert.match(String(l[0]!.reason), /stalled/);
-  assert.equal(l[1]!.label, 'fp');
+  await labelFailures(h, async () => undefined, T0 + 3600_000);
+  assert.equal(labelOf(h, 'A.T.slow')[0]!.label, 'fp');
+  assert.match(relabelByHand(h, { query: 'relabel' }, T0 + 3600_000, undefined), /0 now unknown/);
+});
+
+test('w5467: relabel recomputes only the labeller\'s own local fp rows, logs them, and can undo the batch', async () => {
+  const h = history();
+  const T = 'FF.Tests.PanelsHiddenHintTest.Shows';
+  const F = 'Assets/Tests/UI/PanelsHiddenHintTest.cs';
+  const run = (key: string, at: number, changes: Record<string, string>, outcome: TestCase['outcome'], sandbox: string) =>
+    h.addRun({ source: 'local', key, machine: 'beast', sandbox, branch: 'w1', sha: `h${at}`, base: 'm1', finished: iso(at), changes }, [tc(T, outcome)]);
+  // Labelled fp by the old rules (authoring), a hand-labelled twin, a real flake, and a failure outside the window.
+  run('a1', 0, { [F]: 'b1' }, 'fail', 's4');
+  run('a2', 2, { [F]: 'b2' }, 'pass', 's4');
+  run('b1', 0, { [F]: 'b1' }, 'fail', 's5');
+  run('b2', 2, { [F]: 'b2' }, 'pass', 's5');
+  run('c1', 0, { 'Assets/Tests/UI/OtherTest.cs': '1' }, 'fail', 's6');
+  run('c2', 2, { 'Assets/Tests/UI/OtherTest.cs': '2' }, 'pass', 's6');
+  h.all('SELECT 1');
+  const ids = [1, 3, 5].map((r) => h.failureId(r, T)!);
+  for (const id of ids) assert.ok(h.label(id, 'fp', 'passed again after only the tests changed', 'auto'));
+  assert.ok(h.label(ids[1]!, 'fp', 'I saw it flake', 'worker:s1'));
+  const now = T0 + 3600_000;
+  const dry = relabelByHand(h, { query: 'relabel' }, now, undefined);
+  assert.match(dry, /DRY RUN.*scanned 2 .*1 now unknown/);
+  assert.equal(labelOf(h, T)[0]!.label, 'fp');
+  assert.throws(() => relabelByHand(h, { query: 'relabel', dryRun: false }, now, undefined), /not known/);
+  const wet = relabelByHand(h, { query: 'relabel', dryRun: false }, now, 'worker:s9');
+  assert.match(wet, /batch (\S+) by worker:s9: scanned 2 .*1 now unknown/);
+  const l = labelOf(h, T);
+  assert.deepEqual(l.map((x) => x.label), ['unknown', 'fp', 'fp']);
+  assert.match(String(l[0]!.reason), /being written or edited/);
+  assert.equal(l[1]!.reason, 'I saw it flake');
+  const log = h.all('SELECT batch, failure_id, old_label, old_reason, new_label FROM relabel_log');
+  assert.equal(log.length, 1);
+  assert.equal(log[0]!.old_label, 'fp');
+  assert.equal(log[0]!.old_reason, 'passed again after only the tests changed');
+  assert.match(relabelByHand(h, { query: 'relabel' }, now, undefined), /scanned 1 .*0 now unknown/);
+  const batch = String(log[0]!.batch);
+  assert.match(relabelByHand(h, { query: 'relabel', batch, dryRun: false }, now, 'worker:s9'), /reverted 1 row/);
+  assert.deepEqual(labelOf(h, T).map((x) => x.label), ['fp', 'fp', 'fp']);
+  assert.equal(labelOf(h, T)[0]!.reason, 'passed again after only the tests changed');
+  assert.match(relabelByHand(h, { query: 'relabel', batch, dryRun: false }, now, 'worker:s9'), /reverted 0 row/);
 });
 
 test('w5457: ownSourceIn names the test class file only, and beingWritten leaves other changes alone', () => {
