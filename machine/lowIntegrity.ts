@@ -18,6 +18,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 export const LOW_LABEL = '(OI)(CI)low';
+/** An explicit Medium label, which overrides the Low one a folder inherits (measured, w5377). */
+export const MEDIUM_LABEL = '(OI)(CI)medium';
 /** Root children that stay Medium (writeLock.ts LOCKED_CHILDREN, plus the root's own record). */
 export const MEDIUM_CHILDREN = ['daemon', 'secrets'];
 
@@ -43,7 +45,7 @@ const inside = (child: string, parent: string) => {
 const same = (a: string, b: string) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
 
 /** The folders and files to label Low. Exported for tests. */
-export function lowTargets(i: LowTargetsInput): { dirs: string[]; files: string[] } {
+export function lowTargets(i: LowTargetsInput): { dirs: string[]; files: string[]; medium: string[] } {
   const exists = i.exists ?? fs.existsSync;
   const keep = new Set(MEDIUM_CHILDREN.map((c) => c.toLowerCase()));
   if (inside(i.appDir, i.root) && !same(i.appDir, i.root)) keep.add(path.relative(i.root, i.appDir).split(/[\\/]/)[0].toLowerCase());
@@ -69,7 +71,12 @@ export function lowTargets(i: LowTargetsInput): { dirs: string[]; files: string[
     dirs.push(e);
   }
   const files = (i.files ?? []).filter((f): f is string => !!f && !dirs.some((d) => inside(f, d)));
-  return { dirs, files };
+  // The agents' node (server/agentNode.ts, first on every agent's PATH) keeps Medium inside a Low tools folder: a process
+  // started from a Low-labelled exe runs at Low, so a Medium agent's node would be Low and the machine's Git it starts
+  // would crash (0xC0000022 on msys' shared object directory; measured w5377). A Low agent's node is Low anyway (a Low
+  // parent starts Low children), and a worker cannot rewrite the shared node.
+  const medium = dirs.some((d) => same(d, path.join(i.root, 'tools'))) ? [path.join(i.root, 'tools', 'node')] : [];
+  return { dirs, files, medium };
 }
 
 type Ran = { code: number | null; stdout: string; stderr: string };
@@ -83,7 +90,7 @@ export const isLabelledLow = (icaclsOut: string) => /Mandatory Label\\Low Mandat
  * the files already in it (measured, w5333). Never throws: a target it cannot label is reported, and the caller runs its
  * agents unfenced when any failed.
  */
-export async function labelLow(t: { dirs: string[]; files: string[] }, exec: Exec, say: (line: string) => void): Promise<boolean> {
+export async function labelLow(t: { dirs: string[]; files: string[]; medium?: string[] }, exec: Exec, say: (line: string) => void): Promise<boolean> {
   let ok = true;
   const one = async (p: string, label: string) => {
     try {
@@ -103,6 +110,20 @@ export async function labelLow(t: { dirs: string[]; files: string[] }, exec: Exe
   };
   for (const d of t.dirs) await one(d, LOW_LABEL);
   for (const f of t.files) await one(f, 'low');
+  // Folders kept Medium inside a Low one (lowTargets' medium): only those that exist and inherited Low. A failure here
+  // leaves the fence whole (only a Medium agent's node is affected), so it is said and not counted.
+  for (const p of t.medium ?? []) {
+    try {
+      if (!fs.existsSync(p)) continue;
+      const now = await exec('icacls', [p], { timeoutMs: 60_000 });
+      if (now.code !== 0 || !isLabelledLow(now.stdout)) continue;
+      const r = await exec('icacls', [p, '/setintegritylevel', MEDIUM_LABEL], { timeoutMs: 30 * 60_000 });
+      if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim().slice(-300));
+      say(`worker integrity: kept ${p} Medium`);
+    } catch (e) {
+      say(`worker integrity: could not keep ${p} Medium: ${(e as Error).message}`);
+    }
+  }
   return ok;
 }
 

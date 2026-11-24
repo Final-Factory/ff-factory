@@ -1,0 +1,1 @@
+- The worker install no longer lists `~/.ff-factory/unity-slots` as something it keeps outside the root: the mailbox has been `<root>/unity-slots` since w5377, and the update report showed the old path. The Unity slots pointer for scripts outside the daemon names the root's mailbox too.
