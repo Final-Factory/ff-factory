@@ -497,6 +497,12 @@ test('unity slots: a worker-root install\'s mailbox is found through its pointer
   fs.mkdirSync(rootSlots, { recursive: true });
   assert.equal(slotsDir({}, home), rootSlots, 'the nightly harness and a build by hand find the root\'s mailbox');
   assert.equal(slotsDir({ FF_UNITY_SLOTS: '/tmp/s' }, home), '/tmp/s', "an agent's own FF_UNITY_SLOTS wins");
+  // w5377: the mailbox inside the worker root, found from FF_WORKER_ROOT before the pointer, once it exists.
+  const root = path.join(home, 'ffw');
+  assert.equal(slotsDir({ FF_WORKER_ROOT: root }, home), rootSlots, 'no <root>/unity-slots yet: the pointer');
+  fs.mkdirSync(path.join(root, 'unity-slots'), { recursive: true });
+  assert.equal(slotsDir({ FF_WORKER_ROOT: root }, home), path.join(root, 'unity-slots'));
+  assert.equal(slotsDir({ FF_WORKER_ROOT: root, FF_UNITY_SLOTS: '/tmp/s' }, home), '/tmp/s');
 });
 
 test('unity slots: system_status, the Capacity block and the dashboard say "editors 4 of 3: 1 interactive, 3 batch"', () => {

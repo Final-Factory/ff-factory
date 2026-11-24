@@ -138,8 +138,13 @@ test('worker daemon: a root gives the folders, the agents\' environment and the 
   assert.equal(cfg.appDir, path.join('/r', 'daemon'));
   assert.equal(cfg.tempDir, path.join('/r', 'tmp'));
   assert.equal(cfg.tokenFile, path.join('/r', 'secrets', 'machine-token'));
-  assert.equal(cfg.unitySlotsDir, undefined, 'the Unity slots mailbox stays where every script finds it (w469)');
-  assert.equal(cfg.maxEventsFile, path.join('/r', 'daemon', 'max-events.jsonl'));
+  // w5377: what workers write for the daemon is inside the root, outside its Medium daemon folder; the old events file is drained.
+  assert.equal(cfg.unitySlotsDir, path.join('/r', 'unity-slots'));
+  assert.equal(cfg.maxEventsFile, path.join('/r', 'max', 'max-events.jsonl'));
+  assert.equal(cfg.maxEventsLegacy, path.join('/r', 'daemon', 'max-events.jsonl'));
+  const own = withRootDefaults({ portalUrl: 'p', id: 'x', token: 't', repoPath: 'r', root: '/r', appDir: '/d', maxEventsFile: '/e.jsonl', unitySlotsDir: '/s' });
+  assert.deepEqual([own.maxEventsFile, own.maxEventsLegacy, own.unitySlotsDir], ['/e.jsonl', undefined, '/s'], 'daemon.json\'s own paths win');
+  assert.equal(withRootDefaults({ portalUrl: 'p', id: 'x', token: 't', repoPath: 'r', root: '/r', appDir: '/d' }).maxEventsLegacy, path.join('/d', 'max-events.jsonl'));
   assert.equal(withRootDefaults({ portalUrl: 'p', id: 'x', token: 't', repoPath: 'r' }).appDir, undefined, 'no root: unchanged');
   // w1099: no FF_NIGHTLY_ROOT: the nightly lab root is gone (the night keeps its history in <root>/nightly-history).
   // w5281: the shared uv cache and the determinism audits' folder are inside the root.
