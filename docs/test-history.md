@@ -93,9 +93,10 @@ label never replaces one a person or worker set.
   - a local run where the failing test's own source file (`<Class>.cs`) was dirty in the run's changes, or differed
     between the failing and the passing run: the worker was writing or editing that test, so its pass says nothing about
     flakiness (w5457: one such run gave all 4 tests of PanelsHiddenHintTest a 1-of-32 "flake");
-  - a failure that took over 100 times the test's median passing time (at least 5 passes; median counted as 50 ms at
-    least): the run stalled, as an editor does under machine load (w5457);
   - or the test did not pass again on its line within 7 days.
+
+  A stalled run (a test minutes slower than its median) stays counted: lothsahn, w5467: "Flaky tests in local runs still
+  matter! We want the gents to go faster." Only the authoring rule above discounts a local failure.
 
   Known gap (w5457): a local failure from stale state (an asset reverted without a re-import, a probe built before
   recompiling) changes no file, so it still reads as "nothing changed" and stays `fp`; the runs record nothing that tells

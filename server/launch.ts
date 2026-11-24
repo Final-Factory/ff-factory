@@ -40,7 +40,7 @@ export const REPORT_FILTER = {
 };
 /** test_history's arguments (w4922, server/testHistory.ts QueryArgs), for workers and orchestrators alike. */
 export const TEST_HISTORY_ARGS = {
-  query: z.enum(TEST_HISTORY_QUERIES).describe('summary, slowest, false_positives, detections, never_caught, failures, test, local_runs, sql, or set_label (a hand label).'),
+  query: z.enum(TEST_HISTORY_QUERIES).describe('summary, slowest, false_positives, detections, never_caught, failures, test, local_runs, sql, set_label (a hand label), or relabel (recompute the labeller\'s own local fp labels with today\'s rules; a dry run unless dryRun is false).'),
   days: z.number().int().min(1).max(3650).optional().describe('The window in days; default 30.'),
   limit: z.number().int().min(1).max(200).optional().describe('At most this many rows; default 20 (sql: 200).'),
   sources: z.array(z.enum(TEST_HISTORY_SOURCES)).max(5).optional().describe('Only runs of these sources; default all.'),
@@ -53,6 +53,8 @@ export const TEST_HISTORY_ARGS = {
   untagged: z.boolean().optional().describe('local_runs: only runs no worker could be named for.'),
   request: z.string().regex(/^w\d+$/).optional().describe('local_runs: only this request\'s runs ("w4922").'),
   failureId: z.number().int().min(1).optional().describe('set_label: the failure (failure_id in query failures).'),
+  dryRun: z.boolean().optional().describe('relabel: report only (the default); false writes and logs every change.'),
+  batch: z.string().max(40).optional().describe('relabel: undo this batch (its id as the write reported it).'),
   reason: z.string().max(500).optional().describe('set_label: what shows it (a re-run, the commit that fixed it).'),
 };
 import { DESCRIPTION_CHARS, LABEL_INPUT_CHARS, MAX_OPTIONS, MEDIA_CHARS, MIN_OPTIONS } from '../shared/ask.ts';
