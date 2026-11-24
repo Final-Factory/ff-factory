@@ -13,7 +13,7 @@ import { scanShell } from './standingGuard.ts';
 import { redactSecrets } from './secrets.ts';
 import type { TimerAuthority } from './timers.ts';
 import type { LinkUpdateFlags, LinkUpdateReport } from './machineProtocol.ts';
-import { installerSummary } from './machineRollout.ts';
+import { linkReportSummary } from './machineRollout.ts';
 
 /**
  * The orchestration worker (w597, docs/ops-worker.md): ONE Claude Code session with a real shell, for Lothsahn's and
@@ -719,7 +719,7 @@ export const SAFE_ROOT = /^[\w:\\/. \-]+$/;
 
 /** The [machine update] message an update over the daemon's link ends with (w1596): what its job did, the installer's lines. Exported for tests. */
 export function linkUpdateMessage(machine: string, workId: string, r: LinkUpdateReport): string {
-  const lines = installerSummary(r.log).map((l) => `    ${l}`);
+  const lines = linkReportSummary(r).summary.map((l) => `    ${l}`);
   const commits = r.before || r.after ? ` ${r.before?.slice(0, 9) ?? '?'} → ${r.after?.slice(0, 9) ?? '?'}.` : '';
   const head = r.ok
     ? `${machine} updated over its daemon's link.${commits}`

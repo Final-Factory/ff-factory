@@ -138,7 +138,14 @@ export interface LinkUpdateReport {
   /** The new daemon was not seen healthy, so the job put the code that ran before back: did it come back? */
   rollback?: 'ok' | 'failed';
   note?: string;
+  /** The end of the job's log: since w5394 only this job's own section; an older daemon's holds earlier jobs' too. */
   log: string;
+  /**
+   * w5394: the settings this job's installer changed in daemon.json, one `+ key: value`, `- key: value` or
+   * `~ key: before -> after` line each, values whole; [] when it said none changed. Absent from an older daemon's report, or
+   * when the installer never got that far: read this job's section of `log` then (server/updateLog.ts).
+   */
+  settings?: string[];
   at: string;
 }
 
