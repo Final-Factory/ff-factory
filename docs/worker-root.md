@@ -393,7 +393,7 @@ when a new place in the daemon names the home folder, AppData or the system temp
 | `run_cross_machine_build_audit.sh`'s player build | — | `/private/tmp/finalfactory-mp-audit` | — | **exception** (w5307): the build is copied to the same path on both Macs, so it cannot follow one machine's `TMPDIR`; `FF_BUILD_DIR` moves it |
 | Remote fallbacks in the cross-machine audits | — | the client's `~/Library/Application Support/...`, `/tmp` | — | **exception** (w5307): used only when the client cannot answer `game_data.py root` or its `TMPDIR` over ssh |
 | The nightly lab's helpers, `steam_cloud_check.py`, `seed_load_list_saves.py` | the per-OS data folder spelled out | same | same | **exception** (w5307): `nightly/player_slots.py` and `pair_relay.py` are copied alone to other machines, so each keeps its own copy of the per-OS rule, `FF_GAME_DATA_ROOT` first; `lab.py` and `ffnightly_linux.py` name the lab's other machines' and lab users' folders; `steam_cloud_check.py` names Steam Cloud's relative path; `seed_load_list_saves.py` builds a throwaway XDG root on purpose. Each is listed with its reason in the game repo's `test_no_stale_game_data_paths.py` |
-| Unity slots mailbox and shims | `~/.ff-factory/unity-slots` | same | same | **exception** (w469): scripts outside the daemon find it with no config |
+| Unity slots mailbox and shims | `<root>/unity-slots` | same | same | **fixed** (w5377): a worker root's own; the daemon sets `FF_UNITY_SLOTS` for all it starts, and `slotsDir()` finds it from `FF_WORKER_ROOT`. Outside a worker root it stays `~/.ff-factory/unity-slots` (w469) |
 | `~/.unity-mcp` (status files, port registry) | yes | yes | yes | **exception**: the MCP-for-Unity package's port registry has no setting (`PortManager.cs:316`, v10.3.0), and the daemon reads the editors' files there (`server/unityHang.ts`, `server/unityMcp.ts`) to mirror them per place into `UNITY_MCP_STATUS_DIR` (`machine/unityMcp.ts`) (w5307) |
 | Unity's own logs and licence, Unity Hub | `%LOCALAPPDATA%\Unity`, `%APPDATA%\UnityHub` | `~/Library/Logs/Unity`, `~/Library/Unity` | `~/.config/unity3d`, `~/.local/share/unity3d` | **exception**: shared with the person's Unity; the licence is per OS user |
 | EditorPrefs (Burst) and an editor's PlayerPrefs (the perf test framework's `PT_Run`, Addressables' `AddressablesRuntimeDataPath`) | registry `HKCU\Software\Unity Technologies`, `HKCU\Software\Unity\UnityEditor\Never Games\finalfactory` | `~/Library/Preferences/com.unity3d.*.plist`, `unity.Never Games.finalfactory.plist` | `~/.local/share/unity3d/prefs`; the editor's PlayerPrefs file not located | **exception** (w5344): Unity's own stores; moving an editor's home would move its licence and EditorPrefs with it, not tried |
@@ -632,12 +632,19 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
 - `Daemon.lowSetup` (`machine/daemon.ts`) runs once at the daemon's start, in the background; agents start unfenced until
   it finishes, and stay unfenced, with the reason in `logs/daemon.log` (`worker integrity: ...`), if any step fails.
   - It labels the root's folders Low (`machine/lowIntegrity.ts` `lowTargets`, `labelLow`): every child except `daemon`,
-    `secrets` and the daemon's own folder; of `repo` only `repo\.git` (sandbox worktrees commit there). The root itself
-    stays Medium. Outside the root it labels the extra roots, the temp and sandbox folders where they are elsewhere,
-    and only what `daemon.json` `workerIntegrityAllow` lists, which is the person's decision. On LothDesktop that covers the
-    Unity slots mailbox (`C:\Users\<user>\.ff-factory\unity-slots`) and the Max events file in the daemon's folder.
-    Without them, a Low worker's `unity-slot run` cannot ask for a slot (the daemon logs this at start), and its Max
-    events are refused.
+    `secrets` and the daemon's own folder. `repo`, the bare store every sandbox is a worktree of (worker.ts cloneRepo),
+    is labelled whole; a `repo` with a working tree gets only its `.git` (lothsahn's "option 1", w5377: the existing
+    shared store, labelled and otherwise unchanged). The root itself stays Medium. Outside the root it labels the extra
+    roots, the temp and sandbox folders where they are elsewhere, and only what `daemon.json` `workerIntegrityAllow`
+    lists, which is the person's decision.
+  - What workers write for the daemon is inside the root, so it needs no exception (w5377, lothsahn's rule from w5297:
+    "under no circumstances should workers write outside of ffw"): a worker root's Unity slots mailbox is
+    `<root>\unity-slots` and its Max events file `<root>\max\max-events.jsonl` (`withRootDefaults`; `daemon.json`'s own
+    paths still win). The daemon makes both folders before it labels the root's children, and keeps reading the old
+    events file (`<daemon>\max-events.jsonl`, `maxEventsLegacy`) for agents started before the move; such an agent's
+    `unity-slot run` finds no arbiter in the old mailbox and runs ungated (`machine/unitySlots.ts` `acquire`).
+    `slotsDir()` finds `$FF_WORKER_ROOT/unity-slots` before the pointer, and the daemon sets `FF_UNITY_SLOTS` for all it
+    starts. A mailbox still outside the root and not allowed is logged at start.
   - It makes a Low-labelled copy of the SDK's `claude.exe` in `<root>\tools\low` (named by size and mtime) and runs it
     once with `--version` (`probeFence`, 60 s). That copy, not a Low node, is what a sandbox agent runs: the SDK takes
     it as `pathToClaudeCodeExecutable`, and the agent host stays Medium.
@@ -679,8 +686,7 @@ not restricted. Writes are allowed only in (`writeLockArgs`):
 |---|---|
 | every child folder of the root except `daemon` and `secrets` | the work; the daemon's folder (or `appDir` if it sits in the root under another name) and the secrets stay read-only. `repo` must stay writable: sandbox worktrees keep their git data in it |
 | `extraRoots` | folders of the install that live outside the root |
-| `<daemon>/max-events.jsonl` (this one file: write and truncate) | ffdiscord appends Max's events to it (`FF_MAX_EVENTS`) |
-| `~/.ff-factory/unity-slots` | the unity-slot mailbox (`FF_UNITY_SLOTS`) |
+| `maxEventsFile` and the Unity slots mailbox, only where `daemon.json` puts them outside the root | ffdiscord appends Max's events (`FF_MAX_EVENTS`); the unity-slot mailbox (`FF_UNITY_SLOTS`). A worker root keeps both inside it (`<root>/max`, `<root>/unity-slots`, w5377), so they need no rule |
 | `$XDG_RUNTIME_DIR/cc-socks` (sockets only) | Claude Code binds its socket there |
 | `~/.config/unity3d`, `~/.local/share/unity3d` | Unity's editor and player prefs, `upm.log` and CoreBusinessMetrics. Moving them with XDG_CONFIG_HOME would also hide the licence from Unity |
 | `/tmp` | Unity ignores TMPDIR for its Package Manager socket (`/tmp/Unity-Upm-<pid>.sock`: without it the editor exits 1), its shader compiler's lock (`/tmp/Unity-ShaderCompilerIPC-*.lock`) and `/tmp/.dotnet/shm` (without them it aborts at shader compiler start). |

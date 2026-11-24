@@ -27,6 +27,7 @@ import type { LinkUpdateFlags, LinkUpdateReport } from '../../server/machineProt
 import { linuxControlScript } from '../../server/machineDeployLinux.ts';
 import { macControlScript } from '../../server/machineDeploy.ts';
 import * as win from '../../server/machineDeployWin.ts';
+import { jobSection, settingsOfLog } from '../../server/updateLog.ts';
 import { readJson, scrub, updateFiles, writeJson, type UpdateJob } from '../../machine/selfUpdate.ts';
 import { sameCommit, withStandardPaths, type UpdateFlags, type WhoAmI } from './worker.ts';
 
@@ -126,14 +127,34 @@ export async function runJob(job: UpdateJob, d: JobDeps, resumed = false): Promi
   return putBack(job, d);
 }
 
-/** The end of the job's log for the report: the installer's lines, never a credential. */
-export function logTail(file: string, max = 12_000): string {
+/** The last `bytes` of a file (update-job.log only grows). */
+function readEnd(file: string, bytes: number): string {
+  const fd = fs.openSync(file, 'r');
   try {
-    const s = fs.readFileSync(file, 'utf8');
-    return scrub(s.slice(-max));
-  } catch {
-    return '';
+    const size = fs.fstatSync(fd).size;
+    const n = Math.min(size, bytes);
+    const b = Buffer.alloc(n);
+    fs.readSync(fd, b, 0, n, size - n);
+    return b.toString('utf8');
+  } finally {
+    fs.closeSync(fd);
   }
+}
+
+/**
+ * The report's log and settings for job `id`, never a credential: its own section of the log (w5394: the file holds every
+ * job's, and the 12 KB tail sent before held about six, so an earlier job's "Settings: none changed" was read as this one's),
+ * and the settings that section says it changed. Exported for tests.
+ */
+export function jobLog(file: string, id: string): Pick<LinkUpdateReport, 'log' | 'settings'> {
+  let section = '';
+  try {
+    section = scrub(jobSection(readEnd(file, 512 * 1024), id));
+  } catch {
+    // no log: no settings either
+  }
+  const settings = settingsOfLog(section);
+  return { log: section.slice(-12_000), ...(settings ? { settings } : {}) };
 }
 
 // ---------------------------------------------------------------- the real job
@@ -257,7 +278,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   writeJson(file, job);
   const out = await runJob(job, realDeps(job, say), resumed).catch((e): Outcome => ({ ok: false, exit: 1, note: `the job failed: ${(e as Error).message}` }));
   say(`${new Date().toISOString()} job ${job.id}: ${out.ok ? 'done' : 'FAILED'}${out.note ? ` (${out.note})` : ''}.`);
-  const report: LinkUpdateReport = { id: job.id, form: job.form === 'tools' ? 'tools' : 'update', commit: job.commit ?? '', ...out, log: logTail(f.log), at: new Date().toISOString() };
+  const report: LinkUpdateReport = { id: job.id, form: job.form === 'tools' ? 'tools' : 'update', commit: job.commit ?? '', ...out, ...jobLog(f.log, job.id), at: new Date().toISOString() };
   writeJson(f.result, report);
   writeJson(file, { ...job, phase: 'done', pid: undefined });
   // An unloaded daemon never comes back to remove this job's own task or LaunchAgent (it does after an update): the job does.

@@ -6,6 +6,7 @@ import { daemonBehind } from './machines.ts';
 import { SAFE_ROOT, SAFE_TARGET, workerToolsRemote, workerUpdateRemote } from './opsWorker.ts';
 import { AGENT_PLUGINS, EXIT, LINE, parseVersions, type Versions } from './agentTools.ts';
 import type { LinkUpdateReport } from './machineProtocol.ts';
+import { jobSection, settingsOfLog } from './updateLog.ts';
 import { UpdateNotReached } from './machineLink.ts';
 import { diskAboveLine } from '../shared/blockers.ts';
 
@@ -206,8 +207,31 @@ const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…`
  */
 export function installerSummary(out: string): string[] {
   const lines = out.replace(/\r/g, '').split('\n').map((l) => l.trimEnd()).filter((l) => l.trim());
-  const keep = lines.filter((l) => /^(Before:|After:|Settings|Dev Drive:|The portal sees|FAILED|Not updating|The portal does not|Credential:|Its log:)/.test(l) || /^\s+~ /.test(l) || /^- /.test(l));
+  const keep = lines.filter((l) => /^(Before:|After:|Settings|Dev Drive:|The portal sees|FAILED|Not updating|The portal does not|Credential:|Its log:)/.test(l) || /^\s+[+~-] \S+: /.test(l) || /^- /.test(l));
   return (keep.length ? keep : lines.slice(-6)).slice(-14).map((l) => clip(l.trim(), 240));
+}
+
+/**
+ * What an update job over the daemon's link reported (w5394): the summary and settings of THIS job only. Its `settings` field
+ * when the daemon sends one; an older daemon's `log` holds about six jobs' sections, so only this job's (from its
+ * `FF Factory update job <id>:` header) is read. Exported for tests.
+ */
+export function linkReportSummary(r: Pick<LinkUpdateReport, 'id' | 'log' | 'settings'>): { summary: string[]; settings?: string[] } {
+  const section = jobSection(r.log ?? '', r.id);
+  const settings = r.settings ?? settingsOfLog(section);
+  if (!settings) return { summary: installerSummary(section) };
+  // The settings lines come from the field, whole: the log's own (a "Settings" line and its indented diff lines) are dropped
+  // so that neither a stale nor a clipped one shows, and the field's go where the installer prints them (before "Credential:").
+  const rest = installerSummary(
+    section
+      .replace(/\r/g, '')
+      .split('\n')
+      .filter((l) => !/^Settings\b/.test(l) && !/^\s+[+~-] \S+: /.test(l))
+      .join('\n'),
+  ).slice(-12);
+  const head = settings.length ? ['Settings changed (daemon.json; everything else carried):', ...settings] : ['Settings: none changed (every setting carried).'];
+  const at = rest.findIndex((l) => /^(Credential:|The portal sees|The portal does not)/.test(l));
+  return { summary: at < 0 ? [...rest, ...head] : [...rest.slice(0, at), ...head, ...rest.slice(at)], settings };
 }
 
 /** The `~ key: before -> after` lines of an installer run: settings it changed. A rollout names none, so any is a surprise. */
@@ -439,8 +463,10 @@ export class MachineRollout {
       else await this.afterFailure(m, o, before, why);
       return;
     }
-    o.summary = installerSummary(r.log);
-    const changed = changedSettings(r.log);
+    // Only this job's settings (w5394): an older daemon's log holds earlier jobs' too.
+    const own = linkReportSummary(r);
+    o.summary = own.summary;
+    const changed = own.settings ? changedSettings(own.settings.join('\n')) : changedSettings(jobSection(r.log ?? '', r.id));
     if (changed.length) o.settingsChanged = changed;
     if (r.ok) {
       Object.assign(o, { status: 'ok', after: host.daemon(m.id) ?? r.after ?? sha.slice(0, 12) });

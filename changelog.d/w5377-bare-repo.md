@@ -1,0 +1,1 @@
+- The Windows Low-integrity worker fence (w5377) labels a worker install's bare `repo`, the git store every sandbox is a worktree of, so Low sandboxes can commit; it labelled a `repo\.git` that a bare store does not have.

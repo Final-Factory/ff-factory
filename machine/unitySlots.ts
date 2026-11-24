@@ -33,12 +33,15 @@ import { beeAccessDenied, compilerServerAdvice, compilerServers, logFileArg, log
 export const slotsPointer = (home = os.homedir()) => path.join(home, '.config', 'finalfactory', 'unity-slots.json');
 
 /**
- * Where the mailbox is: FF_UNITY_SLOTS (the daemon sets it for its agents), else the folder the worker-root pointer
- * names, else the home folder's, the same on every machine whatever the daemon's app_dir, so scripts find it with no
- * config. A pointer naming a folder that is gone (an uninstalled root) is ignored.
+ * Where the mailbox is: FF_UNITY_SLOTS (the daemon sets it for its agents and everything it starts), else a worker
+ * root's own (`$FF_WORKER_ROOT/unity-slots`, w5377) when it exists, else the folder the worker-root pointer names, else
+ * the home folder's, the same on every machine whatever the daemon's app_dir, so scripts find it with no config. A
+ * pointer naming a folder that is gone (an uninstalled root) is ignored.
  */
 export function slotsDir(env: NodeJS.ProcessEnv = process.env, home = os.homedir()): string {
   if (env.FF_UNITY_SLOTS) return env.FF_UNITY_SLOTS;
+  const inRoot = env.FF_WORKER_ROOT ? path.join(env.FF_WORKER_ROOT, 'unity-slots') : undefined;
+  if (inRoot && fs.existsSync(inRoot)) return inRoot;
   const p = readJson<{ dir?: unknown }>(slotsPointer(home));
   if (p && typeof p.dir === 'string' && p.dir && fs.existsSync(p.dir)) return p.dir;
   return path.join(home, '.ff-factory', 'unity-slots');

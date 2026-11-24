@@ -185,6 +185,8 @@ export interface DaemonConfig {
   tempDir?: string;
   /** The Max events file agents here append to (docs/max.md); default ~/.config/ff-factory/max-events.jsonl, null: none. */
   maxEventsFile?: string | null;
+  /** w5377: where a worker root kept the events file before (`<app_dir>/max-events.jsonl`); the daemon reads what agents still append there. Set by withRootDefaults. */
+  maxEventsLegacy?: string;
   /**
    * w5333 trial, Linux only, off by default: start every agent's claude under machine/ff-landlock.py, so it and all it
    * starts write only inside the root (not its daemon or secrets folders) and the few paths machine/writeLock.ts names.
@@ -274,10 +276,18 @@ const BUSY = new Set(['running', 'starting', 'waiting_permission']);
 
 /**
  * A worker root install's defaults (w513): what daemon.json leaves out comes from the root, so a redeploy that writes
- * only `root` (server/machineDeploy.ts daemonConfig) keeps every folder in it. Not the Unity slots mailbox: it stays
- * where every script finds it with no config (machine/unitySlots.ts slotsDir, the game's scripts/unity_slot.py),
- * so a scheduled nightly harness outside the daemon still queues with its editors (w469). Exported for tests.
+ * only `root` (server/machineDeploy.ts daemonConfig) keeps every folder in it. w5377 (lothsahn, w5297: "under no
+ * circumstances should workers write outside of ffw"): the two things workers write for the daemon, the Unity slots
+ * mailbox and the Max events file, are root children too (`unity-slots`, `max`), so every fence (Landlock, Seatbelt,
+ * Windows Low) covers them with no exception. The events file's old default is kept in `maxEventsLegacy`, which the
+ * daemon drains; an agent started before the move that still names the old mailbox runs its Unity launch ungated
+ * (machine/unitySlots.ts acquire: no fresh arbiter there). Exported for tests.
  */
+/** A worker root's Unity slots mailbox (w5377). */
+export const workerSlotsDir = (root: string) => path.join(root, 'unity-slots');
+/** A worker root's Max events file (w5377). */
+export const workerMaxEventsFile = (root: string) => path.join(root, 'max', 'max-events.jsonl');
+
 export function withRootDefaults(cfg: DaemonConfig): DaemonConfig {
   if (!cfg.root) return cfg;
   const appDir = cfg.appDir || path.join(cfg.root, 'daemon');
@@ -286,7 +296,9 @@ export function withRootDefaults(cfg: DaemonConfig): DaemonConfig {
     appDir,
     tempDir: cfg.tempDir || path.join(cfg.root, 'tmp'),
     tokenFile: cfg.tokenFile || path.join(cfg.root, 'secrets', 'machine-token'),
-    maxEventsFile: cfg.maxEventsFile === undefined ? path.join(appDir, 'max-events.jsonl') : cfg.maxEventsFile,
+    maxEventsFile: cfg.maxEventsFile === undefined ? workerMaxEventsFile(cfg.root) : cfg.maxEventsFile,
+    maxEventsLegacy: cfg.maxEventsFile === undefined ? path.join(appDir, 'max-events.jsonl') : cfg.maxEventsLegacy,
+    unitySlotsDir: cfg.unitySlotsDir || workerSlotsDir(cfg.root),
   };
 }
 
@@ -1502,22 +1514,28 @@ export class Daemon {
       this.timers.push(setInterval(() => void this.ensureBashTmp(), 5 * 60_000));
     }
     // What agents here did as Max (the ffdiscord CLI's lines): forwarded, and queued while the link is down.
+    // w5377: also the file a worker root used before it moved inside the root, while it is there (agents started before
+    // the move still append to it); each keeps its own offset.
     const maxFile = this.maxEventsFile;
-    if (maxFile) {
-      const offsetFile = `${maxFile}.daemon-offset`;
+    const legacy = this.cfg.maxEventsLegacy;
+    const maxFiles = [maxFile, legacy && maxFile && path.resolve(legacy) !== path.resolve(maxFile) && fs.existsSync(legacy) ? legacy : undefined];
+    for (const file of maxFiles) {
+      if (!file) continue;
+      const offsetFile = `${file}.daemon-offset`;
       let offset: number | undefined;
       try {
         offset = Number(fs.readFileSync(offsetFile, 'utf8')) || 0;
       } catch {
         /* first run: from the start */
       }
-      this.maxTail = new FileTail(maxFile, (line) => this.out({ type: 'max_event', line }), offset === undefined ? { fromStart: true } : { offset });
+      const tail = new FileTail(file, (line) => this.out({ type: 'max_event', line }), offset === undefined ? { fromStart: true } : { offset });
+      if (file === maxFile) this.maxTail = tail;
       let saved = offset;
       this.timers.push(
         setInterval(() => {
-          this.maxTail!.poll();
-          if (this.maxTail!.position !== saved) {
-            saved = this.maxTail!.position;
+          tail.poll();
+          if (tail.position !== saved) {
+            saved = tail.position;
             try {
               fs.writeFileSync(offsetFile, String(saved));
             } catch {
@@ -2854,6 +2872,8 @@ export class Daemon {
           return false;
         }
       };
+      // w5377: the folders workers write for the daemon exist before the root's children are listed, so they are labelled.
+      for (const d of [this.slots.dir, this.maxEventsFile && path.dirname(this.maxEventsFile)]) if (d) fs.mkdirSync(d, { recursive: true });
       const children = fs.readdirSync(root, { withFileTypes: true }).map((d) => ({ name: d.name, dir: d.isDirectory() }));
       const targets = lowTargets({
         root,
@@ -3672,8 +3692,10 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
   if (movedClaude) log(movedClaude);
   // server/launch.ts keeps the public identity's gitconfig in the daemon's folder.
   process.env.FF_APP_DIR = appDirOfConfig(cfg);
-  // The real daemon answers the machine's own Unity slots mailbox, where scripts look (a worker root keeps its own).
+  // The real daemon answers the machine's own Unity slots mailbox, where scripts look (a worker root keeps its own,
+  // inside it, w5377); what the daemon starts finds the same one.
   cfg.unitySlotsDir ??= slotsDir();
+  process.env.FF_UNITY_SLOTS = cfg.unitySlotsDir;
   // The tray app (w1532): on unless daemon.json says "tray": false.
   cfg.tray ??= true;
   const d = new Daemon(cfg);
