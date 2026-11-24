@@ -3,7 +3,7 @@
 // runs the real ones on a real Windows PC and a real Mac.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PUT_BACK, runJob, type JobDeps } from './linkJob.ts';
+import { PUT_BACK, runJob, updateFlagsOf, type JobDeps } from './linkJob.ts';
 import { jobName, jobPlist, launchJob } from '../../machine/osJob.ts';
 import { jobRemoveScript, jobScript, jobTaskXml, rollbackScript } from '../../server/machineDeployWin.ts';
 import type { UpdateJob } from '../../machine/selfUpdate.ts';
@@ -103,6 +103,14 @@ test('w1596: a job a reboot cut off only checks: the new daemon seen is done; on
   const back = await runJob(job({ before: OLD }), lost.deps, true);
   assert.equal(back.rollback, 'ok');
   assert.ok(lost.steps.includes('swapBack'));
+});
+
+test('w5377: the worker fence switch goes through to the installer update as named; an unnamed one and a value off the wire are not passed', () => {
+  assert.deepEqual(updateFlagsOf('/src', { workerFence: 'off' }), { source: '/src', workerFence: 'off' });
+  assert.deepEqual(updateFlagsOf('/src', { workerFence: 'on', maxUnity: 3 }), { source: '/src', maxUnity: 3, workerFence: 'on' });
+  assert.deepEqual(updateFlagsOf('/src', {}), { source: '/src' }, 'unset: carried');
+  assert.deepEqual(updateFlagsOf('/src', { workerFence: 'maybe' as never }), { source: '/src' });
+  assert.deepEqual(updateFlagsOf('/src', { devDrive: true, devDriveMaxGB: 200 }), { source: '/src', devDrive: 'on', devDriveMaxGB: 200 }, 'the other settings map as before');
 });
 
 test('w1596: the tools form and the unload', async () => {

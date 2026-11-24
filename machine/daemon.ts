@@ -13,12 +13,13 @@ import { randomUUID } from 'node:crypto';
 import WebSocket from 'ws';
 import { AgentSession, isMidTurn, midTurnRefusal, othersMidTurn, type OptionsFactory, type SessionHandle, type SessionSink } from '../server/sessions.ts';
 import { bus, type DistributiveOmit } from '../server/store.ts';
-import { fenceEnv, fenceFor, type WorkerFence } from '../server/workerFence.ts';
+import { fenceEnv, fenceFor, fencedArgv, type WorkerFence } from '../server/workerFence.ts';
+import { probeFence } from './fenceProbe.ts';
 import { CATALOG, buildOptions, githubCredentialEnv, type CatalogTool, type LaunchSpec, type ToolHandler } from '../server/launch.ts';
 import { MAIN_CLONE_NO_AGENTS, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION, RELOCATE_FALLBACK_MINUTES, SELF_UPDATE_VERSION, relocateProblem, type DaemonLiveView, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
 import { writeFileDurable } from '../server/durable.ts';
 import { LoopWatch, linkBeat } from '../server/loopWatch.ts';
-import { writeLockArgs } from './writeLock.ts';
+import { FF_LANDLOCK, writeLockArgs } from './writeLock.ts';
 import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, pidAlive, readHostState } from './agentHost.ts';
 import { SelfUpdater } from './selfUpdate.ts';
 import { installSshOf } from './installSsh.ts';
@@ -2763,22 +2764,65 @@ export class Daemon {
     // GitHub Apps (w1519): the gh shim's folder goes before the unity-slot one, on the same PATH key.
     const pathKey = Object.keys(slot).find((k) => k.toUpperCase() === 'PATH') ?? Object.keys(process.env).find((k) => k.toUpperCase() === 'PATH') ?? 'PATH';
     const app = ghAppRunEnv(spec.env, this.ghApp, pathKey, slot[pathKey] ?? process.env[pathKey]);
-    const lock = spec.sandbox && this.cfg.writeLock && process.platform === 'linux' && this.cfg.root
-      ? { writeLock: writeLockArgs({ root: this.cfg.root, appDir: appDirOfConfig(this.cfg), extraRoots: this.cfg.extraRoots, maxEventsFile: maxFile, unitySlots: this.slots.dir, runtimeDir: process.env.XDG_RUNTIME_DIR, home: os.homedir(), extra: this.cfg.writeLockExtra }) }
-      : {};
+    const lockArgs = spec.sandbox ? this.writeLock : undefined;
+    const lock = lockArgs ? { writeLock: lockArgs } : {};
     const fence = spec.sandbox ? this.workerFence : undefined;
     return { ...spec, ...lock, stdioMcp: this.stdioMcpFor(spec), claudeExecutable: spec.claudeExecutable ?? this.cfg.claude, ...(fence ? { fence } : {}), env: { ...spec.env, ...sessionTempEnv(agentTempRoot(this.cfg.tempDir), info.id), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...slot, ...app, ...(fence ? fenceEnv(fence) : {}) } };
   }
 
   private fenceMemo?: { fence?: WorkerFence };
-  /** The worker write fence for sandbox agents, or undefined when daemon.json leaves it off (w5333). */
+  /**
+   * The worker write fence for sandbox agents, or undefined when daemon.json leaves it off (w5333). Probed once
+   * (machine/fenceProbe.ts, w5377): a fence that cannot run a no-op is logged and left off, so agents run unfenced.
+   */
   private get workerFence(): WorkerFence | undefined {
     if (!this.fenceMemo) {
-      const fence = fenceFor({ setting: this.cfg.workerFence, root: this.cfg.root, home: HOME });
-      if (this.cfg.workerFence && !fence) log(`worker fence: "${this.cfg.workerFence}" is set but cannot apply here (macOS with a worker root and ${'/usr/bin/sandbox-exec'} only); agents run unfenced`);
+      let fence: WorkerFence | undefined;
+      try {
+        fence = fenceFor({ setting: this.cfg.workerFence, root: this.cfg.root, home: HOME });
+        if (this.cfg.workerFence && !fence) log(`worker fence: "${this.cfg.workerFence}" is set but cannot apply here (macOS with a worker root and ${'/usr/bin/sandbox-exec'} only); agents run unfenced`);
+        if (fence) {
+          const probe = probeFence(fencedArgv(fence, '/usr/bin/true', []));
+          if (probe.ok) log('worker fence: seatbelt is on for sandbox agents');
+          else {
+            log(`worker fence: seatbelt could not run a no-op (${probe.why}); agents run unfenced`);
+            fence = undefined;
+          }
+        }
+      } catch (e) {
+        log(`worker fence: ${(e as Error).message}; agents run unfenced`);
+        fence = undefined;
+      }
       this.fenceMemo = { fence };
     }
     return this.fenceMemo.fence;
+  }
+
+  private lockMemo?: { args?: string[] };
+  /**
+   * The Linux write lock's ff-landlock.py arguments for sandbox agents, or undefined when daemon.json leaves it off.
+   * Probed once like the fence above (w5377): a kernel without Landlock or a missing python3 leaves agents unlocked.
+   */
+  private get writeLock(): string[] | undefined {
+    if (!this.lockMemo) {
+      let args: string[] | undefined;
+      try {
+        if (this.cfg.writeLock && process.platform === 'linux' && this.cfg.root) {
+          args = writeLockArgs({ root: this.cfg.root, appDir: appDirOfConfig(this.cfg), extraRoots: this.cfg.extraRoots, maxEventsFile: this.maxEventsFile, unitySlots: this.slots.dir, runtimeDir: process.env.XDG_RUNTIME_DIR, home: os.homedir(), extra: this.cfg.writeLockExtra });
+          const probe = probeFence(['python3', FF_LANDLOCK, ...args, '--', '/bin/true']);
+          if (probe.ok) log('write lock: landlock is on for sandbox agents');
+          else {
+            log(`write lock: landlock could not run a no-op (${probe.why}); agents run unlocked`);
+            args = undefined;
+          }
+        } else if (this.cfg.writeLock) log('write lock: writeLock is set but applies on Linux with a worker root only; agents run unlocked');
+      } catch (e) {
+        log(`write lock: ${(e as Error).message}; agents run unlocked`);
+        args = undefined;
+      }
+      this.lockMemo = { args };
+    }
+    return this.lockMemo.args;
   }
 
   /**

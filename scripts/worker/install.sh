@@ -16,7 +16,8 @@
 # Update an install that is there (w613, docs/worker-install.md "Updating"), also over ssh with no keychain:
 #   bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.sh)" -- --update --root DIR
 # It asks nothing: every setting, the credential and the PATH come from the install. --max-sandboxes N,
-# --max-agents-per-sandbox N, --max-unity N change those; --daemon-ref REF (default: the commit the portal runs).
+# --max-agents-per-sandbox N, --max-unity N change those; --worker-fence on|off sets the worker write fence (w5377);
+# --daemon-ref REF (default: the commit the portal runs).
 # --tools instead of --update publishes the latest agent tools (final-factory-agents' plugins) for Claude Code here and
 # changes nothing else (w1476, docs/worker-install.md "The agent tools"); the portal runs it after every verified deploy.
 set -euo pipefail
@@ -43,6 +44,7 @@ while [ $# -gt 0 ]; do
     --no-ssh) EXTRA="$EXTRA --no-ssh"; shift ;;
     --ssh-host) EXTRA="$EXTRA --ssh-host $2"; shift 2 ;;
     --voice-whisper) EXTRA="$EXTRA --voice-whisper $2"; VOICE=$2; shift 2 ;;
+    --worker-fence) case "${2:-}" in on|off) WFENCE=$2 ;; *) echo "--worker-fence is on or off, not \"${2:-}\"" >&2; exit 2 ;; esac; shift 2 ;;
     --credential-file) CREDFILE=$2; shift 2 ;;
     --update) UPDATE=1; shift ;;
     --tools) TOOLS=1; shift ;;
@@ -130,6 +132,7 @@ if [ "$UPDATE" = 1 ]; then
   [ -z "$MAXU" ] || UARGS+=(--max-unity "$MAXU")
   [ -z "$DREF" ] || UARGS+=(--ref "$DREF")
   [ -z "${VOICE:-}" ] || UARGS+=(--voice-whisper "$VOICE")
+  [ -z "${WFENCE:-}" ] || UARGS+=(--worker-fence "$WFENCE")
   # A local checkout given with --source is the daemon code too: no download at all.
   [ -z "$SOURCE" ] || [ -n "$TEMP" ] || UARGS+=(--source "$SOURCE")
   "$NODE" "${FLAGS[@]}" "$SOURCE/scripts/worker/worker.ts" "${UARGS[@]}" </dev/null

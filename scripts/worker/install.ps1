@@ -23,7 +23,8 @@
   Update the install that is there (w613, docs/worker-install.md "Updating"), also from an ssh session, elevated or not:
     & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.ps1))) -Update -Root D:\ffw
   It asks nothing: every setting, the credential and the task's user come from the install. -MaxSandboxes,
-  -MaxAgentsPerSandbox, -MaxUnity change those; -DaemonRef (default: the commit the portal runs).
+  -MaxAgentsPerSandbox, -MaxUnity change those; -WorkerFence on|off sets the worker write fence; -DaemonRef (default: the
+  commit the portal runs).
 
 .PARAMETER Tools
   Publish the latest agent tools (final-factory-agents' plugins) for Claude Code on this PC, and change nothing else
@@ -35,6 +36,9 @@
 .PARAMETER VoiceWhisper
   Whisper on this PC's GPU for the portal's mic (w615, docs/voice.md): a model name (large-v3-turbo) turns it on, off
   turns it off. Left out: a re-run keeps what the daemon has (a new install: off).
+.PARAMETER WorkerFence
+  With -Update (w5377): turn the worker write fence on or off, as ops_worker machine_update worker_fence does. On sets this
+  PC's daemon.json key (workerIntegrity: low, Low integrity level), off removes it. Left out: the install keeps what it has.
 .PARAMETER PlayOnly
   A play-only computer (w1946, w2004): no game repo clone, no sandboxes and no Dev Drive; the daemon, its tray app and one
   player-slot pair as on any computer. join.ps1 passes it when the join code is a play-only one.
@@ -88,6 +92,7 @@ param(
     [string]$DaemonRef = '',
     [string]$Owner = '',
     [string]$VoiceWhisper = '',
+    [ValidateSet('on', 'off')][string]$WorkerFence,
     [switch]$NoDevDrive,
     [switch]$PlayOnly,
     [switch]$DevDrive,
@@ -231,6 +236,7 @@ if ($Update) {
     if ($DaemonRef) { $argv += @('--ref', $DaemonRef) }
     if ($Owner) { $argv += @('--owner', $Owner) }
     if ($VoiceWhisper) { $argv += @('--voice-whisper', $VoiceWhisper) }
+    if ($WorkerFence) { $argv += @('--worker-fence', $WorkerFence) }
     if ($NoDevDrive) { $argv += '--no-dev-drive' }
     if ($DevDrive) { $argv += '--dev-drive' }
     if ($MoveToDevDrive) { $argv += '--move-to-dev-drive' }

@@ -23,12 +23,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { jobName } from '../../machine/osJob.ts';
-import type { LinkUpdateReport } from '../../server/machineProtocol.ts';
+import type { LinkUpdateFlags, LinkUpdateReport } from '../../server/machineProtocol.ts';
 import { linuxControlScript } from '../../server/machineDeployLinux.ts';
 import { macControlScript } from '../../server/machineDeploy.ts';
 import * as win from '../../server/machineDeployWin.ts';
 import { readJson, scrub, updateFiles, writeJson, type UpdateJob } from '../../machine/selfUpdate.ts';
-import { sameCommit, withStandardPaths, type WhoAmI } from './worker.ts';
+import { sameCommit, withStandardPaths, type UpdateFlags, type WhoAmI } from './worker.ts';
 
 /** How long the code put back gets to be seen online, and when it is restarted once meanwhile. */
 export const PUT_BACK = { waitMs: 3 * 60_000, restartAfterMs: 60_000, pollMs: 3_000 };
@@ -155,6 +155,21 @@ async function script(what: string, platform: NodeJS.Platform, text: string): Pr
   return r.out;
 }
 
+/** The settings the portal named over the link, as the installer's update takes them; those it left out are carried. Exported for tests. */
+export function updateFlagsOf(source: string, f: LinkUpdateFlags): UpdateFlags {
+  return {
+    source,
+    ...(f.maxSandboxes !== undefined ? { maxSandboxes: f.maxSandboxes } : {}),
+    ...(f.maxAgentsPerSandbox !== undefined ? { maxAgentsPerSandbox: f.maxAgentsPerSandbox } : {}),
+    ...(f.maxUnity !== undefined ? { maxUnity: f.maxUnity } : {}),
+    ...(f.devDrive || f.moveToDevDrive ? { devDrive: 'on' as const } : {}),
+    ...(f.moveToDevDrive ? { moveToDevDrive: true } : {}),
+    ...(f.devDriveMaxGB !== undefined ? { devDriveMaxGB: f.devDriveMaxGB } : {}),
+    // From the wire: anything but on or off would otherwise count as off.
+    ...(f.workerFence === 'on' || f.workerFence === 'off' ? { workerFence: f.workerFence } : {}),
+  };
+}
+
 function realDeps(job: UpdateJob, say: (l: string) => void): JobDeps {
   const platform = process.platform;
   const svc = { task: job.service, only: true };
@@ -174,16 +189,7 @@ function realDeps(job: UpdateJob, say: (l: string) => void): JobDeps {
     version: (which) => versionIn(which),
     async update(j) {
       const w = await import('./worker.ts');
-      const f = j.flags ?? {};
-      return w.update(j.root, {
-        source: updateFiles(j.appDir).src,
-        ...(f.maxSandboxes !== undefined ? { maxSandboxes: f.maxSandboxes } : {}),
-        ...(f.maxAgentsPerSandbox !== undefined ? { maxAgentsPerSandbox: f.maxAgentsPerSandbox } : {}),
-        ...(f.maxUnity !== undefined ? { maxUnity: f.maxUnity } : {}),
-        ...(f.devDrive || f.moveToDevDrive ? { devDrive: 'on' as const } : {}),
-        ...(f.moveToDevDrive ? { moveToDevDrive: true } : {}),
-        ...(f.devDriveMaxGB !== undefined ? { devDriveMaxGB: f.devDriveMaxGB } : {}),
-      });
+      return w.update(j.root, updateFlagsOf(updateFiles(j.appDir).src, j.flags ?? {}));
     },
     async tools(j) {
       const w = await import('./worker.ts');
