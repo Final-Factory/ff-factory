@@ -15,6 +15,10 @@ import { AgentSession, isMidTurn, midTurnRefusal, othersMidTurn, type OptionsFac
 import { bus, type DistributiveOmit } from '../server/store.ts';
 import { fenceEnv, fenceFor, fencedArgv, type WorkerFence } from '../server/workerFence.ts';
 import { probeFence } from './fenceProbe.ts';
+import { labelLow, lowCopy, lowEnv, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
+import { compilerServers } from './compilerServer.ts';
+import { agentGitPathDir } from '../server/agentGit.ts';
+import { createRequire } from 'node:module';
 import { CATALOG, buildOptions, githubCredentialEnv, type CatalogTool, type LaunchSpec, type ToolHandler } from '../server/launch.ts';
 import { MAIN_CLONE_NO_AGENTS, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION, RELOCATE_FALLBACK_MINUTES, SELF_UPDATE_VERSION, relocateProblem, type DaemonLiveView, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
 import { writeFileDurable } from '../server/durable.ts';
@@ -139,6 +143,17 @@ export interface DaemonConfig {
    * under a macOS Seatbelt profile that lets it write only in `root` and a few named exceptions. Off when unset; macOS only.
    */
   workerFence?: 'seatbelt';
+  /**
+   * The Windows worker fence (w5377, docs/worker-root.md 4.1): "low" runs each sandbox agent's claude, and all it starts,
+   * at Low integrity, after the root's folders are labelled Low (machine/lowIntegrity.ts). Off when unset; Windows only.
+   */
+  workerIntegrity?: 'low';
+  /**
+   * Paths outside the worker root that Low workers may write, labelled Low with the root (w5377): the person's decision,
+   * never a default (lothsahn: "under no circumstances should workers write outside of ffw"). A path that is a file now is
+   * labelled alone; anything else as a folder. Example: the Unity slots mailbox when it is not in the root.
+   */
+  workerIntegrityAllow?: string[];
   /** The machine's own `claude` (its login, settings and plugins). */
   claude?: string;
   /**
@@ -1375,6 +1390,8 @@ export class Daemon {
     // w4672: a hello that offered no update over the link (root.json unreadable then: its Dev Drive not yet attached) is
     // offered again once the install record is back, without waiting for the next reconnect.
     this.timers.push(setInterval(() => this.offerSelfUpdate(), REOFFER_MS.value));
+    // w5377: the Windows worker fence, set up in the background; agents start unfenced until it is ready.
+    void this.lowSetup();
     // Unity slots (w469): the counts every 15 s, and every 5 s while a launch waits or holds one.
     try {
       this.slotBin = installShims(this.slots.dir);
@@ -2767,7 +2784,11 @@ export class Daemon {
     const lockArgs = spec.sandbox ? this.writeLock : undefined;
     const lock = lockArgs ? { writeLock: lockArgs } : {};
     const fence = spec.sandbox ? this.workerFence : undefined;
-    return { ...spec, ...lock, stdioMcp: this.stdioMcpFor(spec), claudeExecutable: spec.claudeExecutable ?? this.cfg.claude, ...(fence ? { fence } : {}), env: { ...spec.env, ...sessionTempEnv(agentTempRoot(this.cfg.tempDir), info.id), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...slot, ...app, ...(fence ? fenceEnv(fence) : {}) } };
+    const low = spec.sandbox ? this.low : undefined;
+    const lowPath = app[pathKey] ?? slot[pathKey] ?? process.env[pathKey];
+    const lowVars = low && this.cfg.root ? { ...lowEnv(this.cfg.root, low.git, pathKey, lowPath), ...(low.unity ? { FF_UNITY_EDITOR_ROOT: low.unity } : {}) } : {};
+    const claudeExecutable = low ? low.claude : (spec.claudeExecutable ?? this.cfg.claude);
+    return { ...spec, ...lock, stdioMcp: this.stdioMcpFor(spec), claudeExecutable, ...(fence ? { fence } : {}), env: { ...spec.env, ...sessionTempEnv(agentTempRoot(this.cfg.tempDir), info.id), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...slot, ...app, ...(fence ? fenceEnv(fence) : {}), ...lowVars } };
   }
 
   private fenceMemo?: { fence?: WorkerFence };
@@ -2796,6 +2817,101 @@ export class Daemon {
       this.fenceMemo = { fence };
     }
     return this.fenceMemo.fence;
+  }
+
+  /** The Windows Low fence once set up (lowSetup): the Low claude copy, the root's Git and Unity junction folder. */
+  private low?: { claude: string; git?: string; unity?: string };
+  private lowStarted = false;
+
+  /**
+   * Sets up the Windows worker fence when daemon.json says `workerIntegrity: "low"` (w5377): labels the root's folders
+   * Low, makes the Low claude copy and the Unity junctions, and runs the copy once (`--version`). Agents run unfenced
+   * until it is done, and stay unfenced, with the reason in the log, if any step fails. Never throws.
+   */
+  private async lowSetup(): Promise<void> {
+    if (this.lowStarted) return;
+    this.lowStarted = true;
+    const root = this.cfg.root;
+    if (this.cfg.workerIntegrity !== 'low') return;
+    if (process.platform !== 'win32' || !root) {
+      log('worker integrity: workerIntegrity is set but applies on Windows with a worker root only; agents run unfenced');
+      return;
+    }
+    try {
+      const say = (l: string) => log(l);
+      const exec = (cmd: string, args: string[], o?: { timeoutMs?: number }) => run(cmd, args, { timeoutMs: o?.timeoutMs ?? 60_000 });
+      const allow = this.cfg.workerIntegrityAllow ?? [];
+      const isFile = (p: string) => {
+        try {
+          return fs.statSync(p).isFile();
+        } catch {
+          return false;
+        }
+      };
+      const children = fs.readdirSync(root, { withFileTypes: true }).map((d) => ({ name: d.name, dir: d.isDirectory() }));
+      const targets = lowTargets({
+        root,
+        appDir: appDirOfConfig(this.cfg),
+        children,
+        extra: [...(this.cfg.extraRoots ?? []), this.cfg.tempDir, this.sandboxRoot(), ...allow.filter((a) => !isFile(a))],
+        files: allow.filter(isFile),
+        allowInAppDir: allow,
+      });
+      if (!(await labelLow(targets, exec, say))) {
+        log('worker integrity: not every folder could be labelled Low; agents run unfenced');
+        return;
+      }
+      const writable = (p: string) => [root, ...allow].some((a) => !path.relative(a, p).startsWith('..') && !path.isAbsolute(path.relative(a, p)));
+      if (!writable(this.slots.dir)) log(`worker integrity: the Unity slots mailbox ${this.slots.dir} is outside the root and not in workerIntegrityAllow; a Low worker's unity-slot run cannot ask for a slot`);
+      const sdkClaude = this.cfg.claude ?? path.join(path.dirname(createRequire(import.meta.url).resolve('@anthropic-ai/claude-agent-sdk-win32-x64/package.json')), 'claude.exe');
+      const claude = await lowCopy(root, sdkClaude, exec, say);
+      if (!claude) {
+        log('worker integrity: no Low claude copy; agents run unfenced');
+        return;
+      }
+      const probe = probeFence([claude, '--version'], { timeoutMs: 60_000 });
+      if (!probe.ok) {
+        log(`worker integrity: the Low claude could not run (${probe.why}); agents run unfenced`);
+        return;
+      }
+      const git = agentGitPathDir(root);
+      if (!git) log('worker integrity: no Git for Low workers at <root>\\tools\\git yet (worker.ts tools puts it there); Claude Code falls back to the machine\'s Git, which crashes at Low');
+      const read = (p: string) => fs.readFileSync(p, 'utf8');
+      const listed = hubListedEditors('win32', process.env, HOME, read);
+      const bases = [...(this.cfg.unityEditorRoot ? [this.cfg.unityEditorRoot] : []), ...hubEditorDirs('win32', process.env, HOME, read)];
+      const found = [...listed];
+      for (const b of bases) {
+        try {
+          for (const v of fs.readdirSync(b)) {
+            const bin = path.join(b, v, 'Editor', 'Unity.exe');
+            if (fs.existsSync(bin)) found.push({ version: v, bin });
+          }
+        } catch {
+          /* not there */
+        }
+      }
+      const versions = await lowUnityJunctions(root, found, exec, say);
+      this.low = { claude, ...(git ? { git } : {}), ...(versions.length ? { unity: lowUnityDir(root) } : {}) };
+      log(`worker integrity: Low is on for sandbox agents (claude ${claude}; git ${git ?? 'none'}; Unity junctions ${versions.join(', ') || 'none'})`);
+      // w5347: a Low compiler server on an install's own path takes every Medium compile on the machine; end it at once.
+      this.timers.push(setInterval(() => {
+        try {
+          for (const pid of strayLowServers(compilerServers(), root)) {
+            log(`worker integrity: ending Low compiler server ${pid}, which runs from the install's own path (w5347)`);
+            try {
+              process.kill(pid);
+            } catch {
+              /* gone */
+            }
+          }
+        } catch {
+          /* the next look */
+        }
+      }, 15_000));
+    } catch (e) {
+      log(`worker integrity: ${(e as Error).message}; agents run unfenced`);
+      this.low = undefined;
+    }
   }
 
   private lockMemo?: { args?: string[] };
