@@ -659,6 +659,23 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
   `PATH` with `CLAUDE_CODE_GIT_BASH_PATH`, and `FF_UNITY_EDITOR_ROOT` set to the junction folder. The game repo's batch
   scripts start Windows Unity from `$FF_UNITY_EDITOR_ROOT/<version>/Unity.exe` when it is set (FinalFactory #4285).
   `TEMP` and `TMP` were already the session's folder in the root. `USERPROFILE` is left alone.
+- **gh at Low** (w5430). gh keeps its login in `%APPDATA%\GitHub CLI` unless `GH_CONFIG_DIR` names a folder. Moving
+  `APPDATA` hid that login from every Low worker: "You are not logged into any GitHub hosts", and `ff-pr push` and
+  `gh pr create` failed on LothDesktop and BEAST.
+  - The daemon sets `GH_CONFIG_DIR` to its own user's gh login (`ghConfigDirFor`, `lowEnv`).
+  - For https://github.com, git's helpers become `gh auth git-credential` (`ghLoginCredentialEnv` in `server/launch.ts`).
+    Git Credential Manager's `helper-selector` cannot answer at Low: "could not read Username" (measured, w5427).
+  - gh reads that folder and the Windows keyring at Low (measured: "Logged in to github.com account Lothsahn (keyring)").
+    No token is copied into the environment.
+  - At start the daemon runs a Low copy of gh with `auth status`. It logs `worker integrity: gh authenticates for Low
+    workers`, or a loud `WARNING gh cannot authenticate`.
+  - `ff-pr` checks `gh auth status` before it pushes or merges, and refuses with where gh looked.
+- **A Low batch Unity's licence** (w5427). The machine's licensing client, started by a Medium editor, owns
+  `\\.\pipe\Unity-LicenseClient-<user>` and the mutex of the same name. No-write-up refuses a Low Unity both:
+  "Connection to channel ... refused", "Failed to acquire global mutex", "Licensing initialization failed after 74.82s".
+  The game repo's `scripts/unity_licensing.sh` (FinalFactory #4310) adds `-licensingIpc LicenseClient-<user>-low` for a
+  Unity under `FF_UNITY_EDITOR_ROOT`, so Unity starts its own Low licensing client. Measured: "Licensing is initialized
+  (took 0.13s)".
 - The root's Git is PortableGit 2.56.1 at `<root>\tools\git`, pinned by SHA-256 (`server/agentGit.ts`). `worker.ts tools`
   installs it on every Windows rollout and runs its first bash login at Medium: run first at Low, it could not make its
   links (measured).

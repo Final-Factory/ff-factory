@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { NIGHTLY_SENTRY, PoolHeldError, UNATTRIBUTED_DEFAULTS, Vault, tokenPersonForWork, unattributedKind, unattributedPerson, eligible, type KeySource, envNameProblem, fingerprintOf, keySource, newKeyText, readKey, valueProblem, vaultStatusLine, type VaultEntryMeta, type VaultContext } from './vault.ts';
 import { SECRET_ENV, addSecretValues, machineRunEnv, redactSecrets, registerSecretValues } from './secrets.ts';
-import { GITHUB_HELPER, githubCredentialEnv } from './launch.ts';
+import { GH_LOGIN_HELPER, GITHUB_HELPER, ghLoginCredentialEnv, githubCredentialEnv } from './launch.ts';
 import { buildAccounts, tokenKey } from './usage.ts';
 import { checkAccountConfig, loadConfig } from './config.ts';
 import { enrolledMachines, issueMachineToken, revokeMachineToken } from './machineTokens.ts';
@@ -644,4 +644,16 @@ test('vaultCli email (w785): add --email, grant --email after the fact, put neve
   assert.doesNotMatch(cli(undefined, 'list').stdout.split('\n').find((l) => l.startsWith('vault-ben-2')) ?? '', /@/);
   const all = [added.stdout, added.stderr, set.stdout, cli(undefined, 'list').stdout].join('\n');
   assert.ok(!all.includes(A.slice(13, 40)) && !all.includes(B.slice(13, 40)), 'no token value on any output');
+});
+
+test('w5430: ghLoginCredentialEnv clears github.com helpers and asks gh, after the entries already there', () => {
+  assert.deepEqual(ghLoginCredentialEnv({ GIT_CONFIG_COUNT: '2' }), {
+    GIT_CONFIG_KEY_2: 'credential.https://github.com.helper',
+    GIT_CONFIG_VALUE_2: '',
+    GIT_CONFIG_KEY_3: 'credential.https://github.com.helper',
+    GIT_CONFIG_VALUE_3: GH_LOGIN_HELPER,
+    GIT_CONFIG_COUNT: '4',
+  });
+  assert.equal(GH_LOGIN_HELPER, '!gh auth git-credential');
+  assert.equal(ghLoginCredentialEnv({}).GIT_CONFIG_COUNT, '2');
 });

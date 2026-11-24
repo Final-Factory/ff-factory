@@ -562,6 +562,24 @@ export function githubCredentialEnv(prior: Record<string, string | undefined>): 
 }
 
 /**
+ * The git credential helper for a Low worker with no vault GitHub token (w5430): the daemon set GH_CONFIG_DIR to the
+ * machine's own gh login (machine/lowIntegrity.ts lowEnv), and git asks gh for it (`gh auth git-credential`). The machine's
+ * own helpers are cleared for https://github.com, since Git Credential Manager's cannot answer at Low ("could not read
+ * Username", measured w5427). Appended after the entries already in `prior`, like githubCredentialEnv.
+ */
+export const GH_LOGIN_HELPER = '!gh auth git-credential';
+export function ghLoginCredentialEnv(prior: Record<string, string | undefined>): Record<string, string> {
+  const n = Number(prior.GIT_CONFIG_COUNT ?? 0) || 0;
+  return {
+    [`GIT_CONFIG_KEY_${n}`]: 'credential.https://github.com.helper',
+    [`GIT_CONFIG_VALUE_${n}`]: '',
+    [`GIT_CONFIG_KEY_${n + 1}`]: 'credential.https://github.com.helper',
+    [`GIT_CONFIG_VALUE_${n + 1}`]: GH_LOGIN_HELPER,
+    GIT_CONFIG_COUNT: String(n + 2),
+  };
+}
+
+/**
  * SDK options for a spec. `handlers` answers the spec's MCP tools; `processEnv` is the environment to start from (without its
  * credentials for spec.login); `editorRunning`, for a machine sandbox, says whether its editor is up (raw branch switches are
  * refused then).
@@ -577,7 +595,9 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
     const plugins = localPluginEnv(baseEnv, g.workerRoot);
     const env: Record<string, string | undefined> = { MCP_TIMEOUT: '120000', ...baseEnv, ...plugins, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', ...publicGitEnvFor(spec, baseEnv), ...spec.env };
     // A vault GitHub token (GH_TOKEN): gh reads it itself; git gets a helper that reads it (githubCredentialEnv).
-    return spec.env?.GH_TOKEN ? { ...env, ...githubCredentialEnv(env) } : env;
+    if (spec.env?.GH_TOKEN) return { ...env, ...githubCredentialEnv(env) };
+    // w5430: a Low worker's gh login (GH_CONFIG_DIR from lowEnv); a GitHub App run keeps its own helper.
+    return spec.env?.GH_CONFIG_DIR && !env.FF_GH_APP_HELPER ? { ...env, ...ghLoginCredentialEnv(env) } : env;
   })();
   // w3758: a worker with a vault GitHub token keeps the token's last calls for the portal's CI waits and merges, and hears
   // when one command of its own spent hundreds of them (server/ghSpendHook.ts).

@@ -193,12 +193,19 @@ export async function lowCopy(root: string, exe: string, exec: Exec, say: (line:
  * the root (daemon sessionTempEnv). The Git for Low workers (server/agentGit.ts) goes first on PATH and is Claude Code's
  * Git Bash: the machine's Git, at its own path, crashes at Low (0xC0000022 opening msys' shared object directory, which a
  * Medium msys made first; measured w5333), and a copy at another path gets its own.
+ *
+ * w5430: gh keeps its login in `%APPDATA%\GitHub CLI` unless GH_CONFIG_DIR names a folder, so the APPDATA move hid the
+ * machine's gh login from every Low worker ("You are not logged into any GitHub hosts"; `ff-pr push` and `gh pr create`
+ * failed on LothDesktop and BEAST). `ghConfigDir` (ghConfigDirFor, the daemon user's own login) puts it back as
+ * GH_CONFIG_DIR: gh reads that folder and the Windows keyring at Low (measured w5427, "Logged in to github.com account
+ * Lothsahn (keyring)"), and no token is copied anywhere. server/launch.ts gives git gh as its github.com helper for it.
  */
-export function lowEnv(root: string, gitDir: string | undefined, pathKey: string, pathNow: string | undefined): Record<string, string> {
+export function lowEnv(root: string, gitDir: string | undefined, pathKey: string, pathNow: string | undefined, ghConfigDir?: string): Record<string, string> {
   const home = path.join(root, 'home');
   return {
     APPDATA: path.join(home, 'AppData', 'Roaming'),
     LOCALAPPDATA: path.join(home, 'AppData', 'Local'),
+    ...(ghConfigDir ? { GH_CONFIG_DIR: ghConfigDir } : {}),
     ...(gitDir
       ? {
           CLAUDE_CODE_GIT_BASH_PATH: path.join(gitDir, 'bin', 'bash.exe'),
@@ -206,6 +213,17 @@ export function lowEnv(root: string, gitDir: string | undefined, pathKey: string
         }
       : {}),
   };
+}
+
+/**
+ * The daemon user's own gh login folder, for a Low worker's GH_CONFIG_DIR (w5430, lowEnv): the daemon's GH_CONFIG_DIR when
+ * set, else `%APPDATA%\GitHub CLI` when gh has logged in there (its hosts.yml). Undefined when gh has no login here.
+ */
+export function ghConfigDirFor(env: NodeJS.ProcessEnv, exists: (p: string) => boolean = fs.existsSync): string | undefined {
+  if (env.GH_CONFIG_DIR) return env.GH_CONFIG_DIR;
+  if (!env.APPDATA) return undefined;
+  const dir = path.join(env.APPDATA, 'GitHub CLI');
+  return exists(path.join(dir, 'hosts.yml')) ? dir : undefined;
 }
 
 export const lowUnityDir = (root: string) => path.join(root, 'tools', 'unity-low');
