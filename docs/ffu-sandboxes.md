@@ -17,6 +17,7 @@ Under the worker install folder (`FF_WORKER_ROOT`: `F:\ffw` on BEAST, `V:\ffw` o
 | `ffu-sandboxes/slot<N>/ffu` | a git worktree of it: the worker's checkout |
 | `ffu-sandboxes/slot<N>/target` | the slot's `CARGO_TARGET_DIR`, kept between workers. It sits outside the checkout, so a reset or a `git clean` never touches it |
 | `ffu-sandboxes/slot<N>/.cargo/config.toml` | `[build] target-dir` naming the slot's target (w4258), written on every `take`: cargo reads config from the folders above where it runs, so a build in the checkout lands in the slot's target even in a shell without `CARGO_TARGET_DIR` |
+| `ffu-sandboxes/slot<N>/bin` | where a script copies `ffu-server.exe` to run it (w5442): it has a firewall rule, a temp folder has none |
 | `ffu-sandboxes/slots.json` | each slot's holder (the session id), branch and last use |
 | `ffu-sandboxes/.lock` | a folder made atomically around every change; another worker takes it over after 15 min |
 
@@ -162,3 +163,27 @@ The Mac leg (the same script, `measure-portable.sh`) was handed up as its own re
 lothsahn asked for ffu caches "just like the unity linux builds, saving them in the same folder (but possibly with
 different names)". The names here (`ffu-sandboxes/`, rule `ffu-slot-target`) are for workers' machines only and do not
 collide with that cache.
+
+## Windows Firewall: ffu-server (w5442)
+
+lothsahn, 2026-11-24: "What ports does ffu-server need? These should be added for all the ffu sandboxes so that it can
+start servers always".
+
+Windows Firewall adds inbound Block rules for a new program path the first time it listens beyond loopback, and a block
+beats any allow, so a shard on a fresh slot could not take a peer from another PC. The worker install and every tools
+rollout keep the group **"Final Factory ffu-server"** (`scripts/worker/firewall.ps1 -FfuServer`, the paths from
+`machine/ffuSlots.ts` `ffuServerExes`): one inbound TCP allow rule, every profile, from Tailscale only (`100.64.0.0/10`,
+`fd7a:115c:a1e0::/48`; loopback is never filtered), for each of
+
+- `ffu-sandboxes\slot<N>\target\debug\ffu-server.exe` (a dev build),
+- `ffu-sandboxes\slot<N>\target\release\ffu-server.exe` (release and bench),
+- `ffu-sandboxes\slot<N>\bin\ffu-server.exe` (a script's copy),
+
+for N = 1..4 (`FFU_SLOTS_DEFAULT_MAX`; slot ids are the lowest free number), whether or not the slot exists yet, so a new
+slot is covered. The rules go by program, not port: ffu-server's ports come from flags and port 0 picks a free one.
+
+Its listeners, all TCP (ffu has no UDP socket): `--listen` (the client port, default `127.0.0.1:7777`), `--peer-listen`
+(a shard's peer port; `g3.sh` and `soak.sh` use `47100+k` for shard k), `--standby-listen`, `replica --listen`,
+`directory`'s own address in `--peers`, `proxy --listen`; `--control` is loopback only. A copy anywhere else (a temp
+folder, `C:\ProgramData\ffu\soak-bin`) has no rule: run it from the slot's target or `bin`. Macs (firewall off) and
+Linux need nothing.

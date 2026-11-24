@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { ffuSlotMain, readSlotState, realFfuSlotDeps, slotCheckout, slotTarget, takeSlot, releaseSlot, type FfuSlotDeps } from '../machine/ffuSlots.ts';
+import { FFU_SERVER_GROUP, FFU_SLOTS_DEFAULT_MAX, ffuServerExes, ffuSlotMain, readSlotState, realFfuSlotDeps, slotBin, slotCheckout, slotTarget, takeSlot, releaseSlot, type FfuSlotDeps } from '../machine/ffuSlots.ts';
 import type { CleanupGuard } from './cleanup.ts';
 import { installLeftoverSettings, planInstallLeftovers, type ProcLite } from './installLeftovers.ts';
 import { writeCargoUnit, type FakeUnit } from './cargoGraphFixture.ts';
@@ -286,4 +286,21 @@ test('w4258: a slot written minutes ago with no build running still loses its st
   assert.deepEqual(ffuItems(root, b), []);
   const held = (b as { held?: { path: string; why: string }[] }).held ?? [];
   assert.ok(held.some((h) => rel(root, h.path) === 'ffu-sandboxes/slot1/target' && /a running process uses it/.test(h.why)), JSON.stringify(held));
+});
+
+test('w5442: ffu-server has a firewall path in every slot an ffu machine can make, and firewall.ps1 rules it Tailscale-only', () => {
+  const exes = ffuServerExes(String.raw`F:\ffw`);
+  assert.equal(exes.length, 3 * FFU_SLOTS_DEFAULT_MAX, 'debug, release and bin for each of the default slots');
+  assert.deepEqual(exes.slice(0, 3), [String.raw`F:\ffw\ffu-sandboxes\slot1\target\debug\ffu-server.exe`, String.raw`F:\ffw\ffu-sandboxes\slot1\target\release\ffu-server.exe`, String.raw`F:\ffw\ffu-sandboxes\slot1\bin\ffu-server.exe`]);
+  assert.ok(exes.includes(String.raw`F:\ffw\ffu-sandboxes\slot` + FFU_SLOTS_DEFAULT_MAX + String.raw`\bin\ffu-server.exe`));
+  assert.equal(path.basename(slotBin('/ffw', 'slot2')), 'bin');
+  const ps = fs.readFileSync(path.join(import.meta.dirname, '..', 'scripts', 'worker', 'firewall.ps1'), 'utf8');
+  assert.match(ps, /\[string\]\$FfuServer = ''/, 'firewall.ps1 takes -FfuServer');
+  assert.match(ps, new RegExp(String.raw`\$FfuGroup = '` + FFU_SERVER_GROUP + `'`), 'the group name matches machine/ffuSlots.ts');
+  assert.match(ps, /Get-NetFirewallRule -Group \$FfuGroup/, 'a re-run and -Remove delete the group first');
+  assert.match(ps, /\$Tailnet = @\('100\.64\.0\.0\/10', 'fd7a:115c:a1e0::\/48'\)/, 'the tailnet only, never the internet');
+  assert.match(ps, /-Program \$exe -Protocol TCP `\s*-RemoteAddress \$script:Tailnet/, 'inbound TCP by program, from the tailnet');
+  const worker = fs.readFileSync(path.join(import.meta.dirname, '..', 'scripts', 'worker', 'worker.ts'), 'utf8');
+  assert.match(worker, /'-FfuServer', ffuServerExes\(l\.root\)\.join\(';'\)/, 'the install and firewallRepair pass the paths');
+  assert.match(worker, /\.\.\.\(fs\.existsSync\(node\) \? \[node\] : \[\]\), \.\.\.ffu\]/, 'firewallRepair checks them on every tools rollout');
 });

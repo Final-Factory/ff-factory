@@ -18,7 +18,12 @@
   node listen, so it never prompts either. -StaleUnder (the root's tmp folder) deletes the rules earlier prompts left for programs
   under it: a worker's own node copies, each in a session temp folder the harness has since removed.
 
-  -Remove deletes the three groups' rules, and the config file if it points at -Root.
+  -FfuServer names ffu-server's paths in the ffu slots (machine/ffuSlots.ts ffuServerExes, w5442): one inbound TCP allow
+  rule per path, every profile, from Tailscale only (100.64.0.0/10 and fd7a:115c:a1e0::/48; loopback is never filtered),
+  in the group "Final Factory ffu-server". Its ports come from flags (--listen, --peer-listen; port 0 picks one), so the
+  rule goes by program and names no port. No UDP: ffu has no UDP socket.
+
+  -Remove deletes the four groups' rules, and the config file if it points at -Root.
   Idempotent. Never touches NotifyOnListen (lothsahn, 2026-10-06: the prompts stay on).
 #>
 param(
@@ -28,6 +33,8 @@ param(
     [string]$UnityExe = '',
     [string]$AgentNode = '',
     [string]$StaleUnder = '',
+    # ffu-server's paths, ';'-separated (w5442).
+    [string]$FfuServer = '',
     [switch]$Remove,
     [string]$LogFile = '',
     # A test install beside a live one: its own rule groups ("<group> <suffix>") and no slot config (the live one's stays).
@@ -37,7 +44,10 @@ $ErrorActionPreference = 'Stop'
 $SlotGroup = 'Final Factory player slots'
 $UnityGroup = 'Final Factory Unity editors'
 $NodeGroup = 'Final Factory agent node'
-if ($GroupSuffix) { $SlotGroup = "$SlotGroup $GroupSuffix"; $UnityGroup = "$UnityGroup $GroupSuffix"; $NodeGroup = "$NodeGroup $GroupSuffix" }
+$FfuGroup = 'Final Factory ffu-server'
+if ($GroupSuffix) { $SlotGroup = "$SlotGroup $GroupSuffix"; $UnityGroup = "$UnityGroup $GroupSuffix"; $NodeGroup = "$NodeGroup $GroupSuffix"; $FfuGroup = "$FfuGroup $GroupSuffix" }
+# The tailnet's addresses (Tailscale's CGNAT range and its IPv6 ULA prefix): ffu-server's peers on the other machines.
+$Tailnet = @('100.64.0.0/10', 'fd7a:115c:a1e0::/48')
 $Config = Join-Path $env:ProgramData 'FinalFactory\player-slots.json'
 
 function Say([string]$text) {
@@ -51,14 +61,20 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     exit 1
 }
 
-function Add-Allow([string]$exe, [string]$name, [string]$group, [string]$why, [switch]$One) {
+function Add-Allow([string]$exe, [string]$name, [string]$group, [string]$why, [switch]$One, [switch]$Tailnet) {
     # A Block rule an earlier, dismissed prompt left for this exact path (outside our groups) would win over ours.
     # Allow rules people made stay: an uninstall then leaves the path as it found it.
     $stale = @(Get-NetFirewallApplicationFilter -Program $exe -ErrorAction SilentlyContinue |
-               Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object { $_.Group -ne $SlotGroup -and $_.Group -ne $UnityGroup -and $_.Action -eq 'Block' })
+               Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object { $_.Group -ne $SlotGroup -and $_.Group -ne $UnityGroup -and $_.Group -ne $FfuGroup -and $_.Action -eq 'Block' })
     if ($stale.Count) {
         Say "  ${name}: removing $($stale.Count) earlier Block rule(s) for $exe"
         $stale | Remove-NetFirewallRule
+    }
+    if ($Tailnet) {
+        # ffu-server (w5442): inbound TCP from the tailnet only, every profile.
+        New-NetFirewallRule -DisplayName $name -Group $group -Direction Inbound -Program $exe -Protocol TCP `
+            -RemoteAddress $script:Tailnet -Action Allow -Profile Any -Description $why | Out-Null
+        return 1
     }
     if ($One) {
         # One rule per player folder (lothsahn, w576): inbound, any protocol, every profile. The prompt only ever asks
@@ -79,7 +95,7 @@ function Add-Allow([string]$exe, [string]$name, [string]$group, [string]$why, [s
 }
 
 try {
-    $old = @(Get-NetFirewallRule -Group $SlotGroup -ErrorAction SilentlyContinue) + @(Get-NetFirewallRule -Group $UnityGroup -ErrorAction SilentlyContinue) + @(Get-NetFirewallRule -Group $NodeGroup -ErrorAction SilentlyContinue)
+    $old = @(Get-NetFirewallRule -Group $SlotGroup -ErrorAction SilentlyContinue) + @(Get-NetFirewallRule -Group $UnityGroup -ErrorAction SilentlyContinue) + @(Get-NetFirewallRule -Group $NodeGroup -ErrorAction SilentlyContinue) + @(Get-NetFirewallRule -Group $FfuGroup -ErrorAction SilentlyContinue)
     if ($old.Count) { $old | Remove-NetFirewallRule }
     if ($Remove) {
         $removedConfig = $false
@@ -104,6 +120,13 @@ try {
     if ($AgentNode) {
         $made += Add-Allow $AgentNode 'Final Factory agent node' $NodeGroup "The agents' node at its one fixed path (server/agentNode.ts, w1742)" -One
     }
+    $ffu = 0
+    foreach ($exe in @($FfuServer -split ';' | Where-Object { $_ })) {
+        $slot = Split-Path -Leaf (Split-Path -Parent (Split-Path -Parent $exe))
+        if ($slot -eq 'target') { $slot = Split-Path -Leaf (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $exe))) }
+        $made += Add-Allow $exe "Final Factory ffu-server $slot $(Split-Path -Leaf (Split-Path -Parent $exe))" $FfuGroup "ffu-server in ffu sandbox $slot, from Tailscale only (machine/ffuSlots.ts ffuServerExes, w5442)" -Tailnet
+        $ffu++
+    }
     $staleGone = 0
     if ($StaleUnder) {
         # Rules prompts left for programs in the root's temp folders (a worker's node copy, w1742), never one of ours or a test install's.
@@ -121,7 +144,7 @@ try {
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Config) | Out-Null
         [IO.File]::WriteAllText($Config, (@{ root = $Root; layout = 'sandbox-pairs'; count = $Pairs } | ConvertTo-Json))
     }
-    Say "OK: $made allow rule(s): $Root\slot1-0..slot$Pairs-1 ($(2 * $Pairs) player folders, one rule each) and $editors Unity editor(s)$(if ($AgentNode) { ", one for the agents' node $AgentNode" } else { '' })$(if ($staleGone) { "; removed $staleGone rule(s) earlier prompts left under $StaleUnder" } else { '' })$(if ($GroupSuffix) { ' (test groups; no slot config)' } else { "; slot root recorded in $Config" })."
+    Say "OK: $made allow rule(s): $Root\slot1-0..slot$Pairs-1 ($(2 * $Pairs) player folders, one rule each) and $editors Unity editor(s)$(if ($AgentNode) { ", one for the agents' node $AgentNode" } else { '' })$(if ($ffu) { ", $ffu for ffu-server in the ffu slots (Tailscale only)" } else { '' })$(if ($staleGone) { "; removed $staleGone rule(s) earlier prompts left under $StaleUnder" } else { '' })$(if ($GroupSuffix) { ' (test groups; no slot config)' } else { "; slot root recorded in $Config" })."
 } catch {
     Say "FAILED: $($_.Exception.Message)"
     exit 1
