@@ -109,3 +109,20 @@ export class McpScopes {
     }
   }
 }
+
+/**
+ * The uvx runs that fill a uv cache with the server's package, when the server is `uvx --offline --from <pkg> <tool>`
+ * (what MCP for Unity registers): first a check that needs no network (the package already there), then the same run
+ * online. Agents run the server against the worker install's own uv cache (UV_CACHE_DIR, w5281), which nothing else
+ * fills, and `--offline` cannot fill it, so every sandbox agent had no Unity MCP bridge on LothDesktop (w5377).
+ * Undefined for any other server.
+ */
+export function uvWarmRuns(server: StdioServer): { offline: string[]; online: string[] } | undefined {
+  const name = path.win32.basename(server.command).toLowerCase();
+  if (name !== 'uvx' && name !== 'uvx.exe') return undefined;
+  const a = server.args;
+  const from = a.indexOf('--from');
+  if (!a.includes('--offline') || from < 0 || !a[from + 1]) return undefined;
+  const online = ['--from', a[from + 1], 'python', '-c', 'pass'];
+  return { offline: ['--offline', ...online], online };
+}
