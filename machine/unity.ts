@@ -29,6 +29,8 @@ export interface Proc {
   cmd: string;
   /** Windows: the image name (Unity.exe), which says what the program is whatever its command line holds. */
   name?: string;
+  /** macOS: the process group (w5401, machine/shellGroups.ts: the worker shell an orphan was started from). */
+  pgid?: number;
 }
 
 export interface UnityDeps {
@@ -493,15 +495,20 @@ export function realDeps(platform: UnityPlatform = 'darwin'): UnityDeps {
   };
 }
 
+/** `ps -axo pid=,ppid=,pgid=,command=` (w5401: the process group too). */
+export function macProcs(stdout: string): Proc[] {
+  return stdout
+    .split('\n')
+    .map((l) => /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.*)$/.exec(l))
+    .filter((m): m is RegExpExecArray => !!m)
+    .map((m) => ({ pid: Number(m[1]), ppid: Number(m[2]), pgid: Number(m[3]), cmd: m[4] }));
+}
+
 function realDepsMac(): UnityDeps {
   return {
     procs: async () => {
-      const r = await run('ps', ['-axo', 'pid=,ppid=,command='], { timeoutMs: 15_000 });
-      return r.stdout
-        .split('\n')
-        .map((l) => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(l))
-        .filter((m): m is RegExpExecArray => !!m)
-        .map((m) => ({ pid: Number(m[1]), ppid: Number(m[2]), cmd: m[3] }));
+      const r = await run('ps', ['-axo', 'pid=,ppid=,pgid=,command='], { timeoutMs: 15_000 });
+      return macProcs(r.stdout);
     },
     kill: (pid, signal) => {
       try {
