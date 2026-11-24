@@ -15,6 +15,7 @@ import { anchorOf, daemonJson, layoutOf, planUpdate, reinstallProblems, sandboxR
 import { taskXml } from '../server/machineDeployWin.ts';
 import { roomLevel, blockReason } from '../server/hostHealth.ts';
 import { MachineGuard } from '../machine/hostGuard.ts';
+import { withRootDefaults, type DaemonConfig } from '../machine/daemon.ts';
 import { adoptLayout, rebaseUnder } from '../server/machines.ts';
 import type { Machine } from '../shared/types.ts';
 
@@ -110,7 +111,11 @@ test('a root on its drive keeps the daemon, its logs and the credential in the h
   const j = daemonJson({ ...o, devDriveDirs: { sandboxes: l.sandboxes, seed: l.seed, seedReady: false, blockClone: true, onRoot: true, host: 'D:\\work\\ffw', vhdx: 'D:\\work\\ffw\\devdrive.vhdx', maxGB: 275 } } as InstallOptions, l, 'lothdesktop', undefined) as Record<string, any>;
   assert.equal(j.appDir, l.daemon);
   assert.equal(j.tokenFile, l.token);
-  assert.equal(j.maxEventsFile, P.join(l.daemon, 'max-events.jsonl'));
+  // w5377: no events file of its own, so the root's default applies (inside the root) and the old one is drained.
+  assert.equal('maxEventsFile' in j, false);
+  const d = withRootDefaults(j as DaemonConfig);
+  assert.equal(d.maxEventsFile, path.join(j.root, 'max', 'max-events.jsonl'));
+  assert.equal(d.maxEventsLegacy, path.join(l.daemon, 'max-events.jsonl'));
   assert.equal(j.root, 'V:\\ffw');
   assert.equal(j.repoPath, l.repo);
   assert.equal(j.tempDir, l.tmp);

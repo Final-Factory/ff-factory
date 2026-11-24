@@ -1,0 +1,1 @@
+- Worker installs no longer write `maxEventsFile` into daemon.json, so the Max events file follows the root default inside the worker folder (`<root>/max/max-events.jsonl`, w5377); the old `<daemon>/max-events.jsonl` is still drained.
