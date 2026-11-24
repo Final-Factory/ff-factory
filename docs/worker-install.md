@@ -52,7 +52,7 @@ MCP-for-Unity editor plugin), Unity's caches, logs and licence (`%LOCALAPPDATA%\
 | What | Windows | macOS |
 |---|---|---|
 | The service | scheduled task `FFFactoryDaemon` (at logon, the user's interactive session, not elevated) | LaunchAgent `com.fffactory.daemon` (`~/Library/LaunchAgents`); on Linux the systemd user unit `~/.config/systemd/user/com.fffactory.daemon.service` |
-| Firewall rules | group "Final Factory player slots" (per slot exe path: in and out, TCP and UDP, every profile), group "Final Factory Unity editors" (each Unity editor the Hub has) and group "Final Factory agent node" (one inbound rule for `<root>\tools\node\node.exe`, the agents' node at its one fixed path, w1742); the step also deletes rules earlier prompts left for programs under `<root>\tmp` | none |
+| Firewall rules | group "Final Factory player slots" (per slot exe path: in and out, TCP and UDP, every profile), group "Final Factory Unity editors" (each Unity editor the Hub has) and group "Final Factory agent node" (one inbound rule for `<root>\tools\node\node.exe`, the agents' node at its one fixed path, w1742) and group "Final Factory ffu-server" (inbound TCP from Tailscale only for `ffu-server.exe` in each ffu slot's `target\debug`, `target\release` and `bin`, w5442; [ffu-sandboxes.md](ffu-sandboxes.md)); the step also deletes rules earlier prompts left for programs under `<root>\tmp` | none |
 | The slot config for scripts outside the daemon | `%ProgramData%\FinalFactory\player-slots.json` | `~/.config/finalfactory/player-slots.json` |
 | The Unity slots mailbox (`~/.ff-factory/unity-slots`, its standard place: no pointer is written, so the daemon, its agents and the nightly harness all use the same one, w469) | `%USERPROFILE%\.ff-factory\unity-slots` | `~/.ff-factory/unity-slots` |
 | The Dev Drive (w900, w1070) | the SYSTEM tasks `ffsb-helper-mount` (also at every boot), `-trim` and `-compact`, and their script in `%ProgramData%\ffsb-helpers`; the folder given at install, which keeps the drive's file and what starts before it (`devdrive.vhdx`, `devdrive.json`, `start-daemon.ps1`, `moved.json`) | none |
@@ -607,8 +607,8 @@ What `worker.ts tools` does (`server/agentTools.ts` `publishAgentTools`):
    new version replaces the folder's contents, never its path, so the install's rule for it keeps fitting; a node still
    running from the old folder leaves it for the next rollout (`... is in use`). A failure prints `WARNING: Agent node:`
    and does not change the exit code.
-9. Windows, when the install made firewall rules: reads, without admin rights, whether each player slot and the agents'
-   node has an enabled inbound allow rule for its exact path, and whether rules earlier prompts left under `<root>\tmp`
+9. Windows, when the install made firewall rules: reads, without admin rights, whether each player slot, the agents'
+   node and ffu-server in each ffu slot (w5442) has an enabled inbound allow rule for its exact path, and whether rules earlier prompts left under `<root>\tmp`
    remain (`firewallCheckScript`, two bulk reads, 4 s on lothdesktop's 696 rules). All there: one `Windows Firewall: ...
    are there.` line. Something missing and the run elevated: runs `firewall.ps1` as the install does and records the node's
    group in root.json. Not elevated: `WARNING: Windows Firewall: ...`, and the exit code stays. A daemon update and a tools

@@ -30,6 +30,7 @@ import { linuxControlScript, linuxReloadLines, parseUnitShow, systemdUnit, unitF
 import * as win from '../../server/machineDeployWin.ts';
 import { DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT, type SandboxPoolSettings } from '../../shared/types.ts';
 import { slotsPointer } from '../../machine/unitySlots.ts';
+import { FFU_SERVER_GROUP, ffuServerExes } from '../../machine/ffuSlots.ts';
 import { rootBackupOf } from '../../machine/selfUpdate.ts';
 import { cancelledGrow, carryDevDrive, claudeSlug, decideDevDrive, defaultMaxGB, devDriveDirs, devDriveGuard, gbOf, hostDirOf, linkRootFolders, moveSandboxes, parseDevDriveOutput, realMoveDeps, unlinkRootFolder, type DevDriveRecord, type DevDriveState } from './devdrive.ts';
 import { REINSTALL_KEEPS, driveRootOf, isHostFile, moveMap, readMoved, rebaseJson, rebasePath, rebaseText, writeMoved } from './driveRoot.ts';
@@ -1516,7 +1517,9 @@ function firewallArgs(action: 'add' | 'remove', l: Layout, slots: number, editor
   const script = path.join(SRC, 'scripts', 'worker', 'firewall.ps1');
   // The agents' node (w1742, server/agentNode.ts): its path gets its rule before the rollout first puts node there.
   const node = action === 'add' ? ['-AgentNode', agentNodeExe(l.root), '-StaleUnder', l.tmp] : [];
-  return ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-Root', l.players, '-Pairs', String(slots), ...node, ...(action === 'remove' ? ['-Remove'] : []), ...(editors.length ? ['-UnityExe', editors.join(';')] : []), ...(suffix ? ['-GroupSuffix', suffix] : [])];
+  // ffu-server in every ffu slot, from Tailscale only (w5442, machine/ffuSlots.ts ffuServerExes).
+  const ffu = action === 'add' ? ['-FfuServer', ffuServerExes(l.root).join(';')] : [];
+  return ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-Root', l.players, '-Pairs', String(slots), ...node, ...ffu, ...(action === 'remove' ? ['-Remove'] : []), ...(editors.length ? ['-UnityExe', editors.join(';')] : []), ...(suffix ? ['-GroupSuffix', suffix] : [])];
 }
 
 /**
@@ -1861,6 +1864,7 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
     noteOutside(m, { kind: 'firewall-group', name: SLOT_GROUP + sfx, note: `${o.maxSandboxes} sandboxes' player folders (slot1-0..slot${o.maxSandboxes}-1) under ${l.players}` });
     if (editors.length) noteOutside(m, { kind: 'firewall-group', name: UNITY_GROUP + sfx, note: editors.join('; ') });
     noteOutside(m, { kind: 'firewall-group', name: NODE_GROUP + sfx, note: agentNodeExe(l.root) });
+    noteOutside(m, { kind: 'firewall-group', name: FFU_SERVER_GROUP + sfx, note: ffuNote(l.root) });
     if (!o.firewallSuffix) noteOutside(m, { kind: 'file', name: path.join(process.env.ProgramData ?? 'C:\\ProgramData', 'FinalFactory', 'player-slots.json'), note: 'the slot root for scripts outside the daemon' });
     writeManifest(l.root, m);
     steps.unshift({ kind: 'firewall', args: firewallArgs('add', l, o.maxSandboxes, editors, o.firewallSuffix) });
@@ -2343,10 +2347,11 @@ export async function tools(root: string, ownerFlag?: string): Promise<number> {
 export async function firewallRepair(l: Layout, m: Manifest) {
   const slots = Array.from({ length: m.slots }, (_, i) => [0, 1].map((p) => path.join(l.players, `slot${i + 1}-${p}`, 'player', 'finalfactory.exe'))).flat();
   const node = agentNodeExe(l.root);
-  const exes = [...slots, ...(fs.existsSync(node) ? [node] : [])];
+  const ffu = ffuServerExes(l.root);
+  const exes = [...slots, ...(fs.existsSync(node) ? [node] : []), ...ffu];
   const seen = parseFirewallCheck(await ps('reading the firewall rules', firewallCheckScript(exes, l.tmp), 2 * 60_000).catch((e) => `${(e as Error).message}`));
   if (!seen) return say('WARNING: Windows Firewall: could not read the rules, so they were not checked.');
-  if (!seen.missing.length && !seen.stale) return say(`Windows Firewall: the rules for the ${slots.length} player folders${exes.includes(node) ? ' and the agent node' : ''} are there.`);
+  if (!seen.missing.length && !seen.stale) return say(`Windows Firewall: the rules for the ${slots.length} player folders${exes.includes(node) ? ', the agent node' : ''} and ffu-server in the ${ffu.length / 3} ffu slots are there.`);
   const what = [...(seen.missing.length ? [`no allow rule for ${seen.missing.join(', ')}`] : []), ...(seen.stale ? [`${seen.stale} rule(s) earlier prompts left under ${l.tmp}`] : [])].join('; ');
   if (!elevated()) return say(`WARNING: Windows Firewall: ${what}. This session is not elevated; an elevated tools run or update (the portal's ssh, ops_worker machine_update) makes them.`);
   const sfx = m.firewallSuffix ? ` ${m.firewallSuffix}` : '';
@@ -2354,11 +2359,15 @@ export async function firewallRepair(l: Layout, m: Manifest) {
     say(`Windows Firewall: ${what}; making the install's rules again.`);
     say((await elevatedSteps([{ kind: 'firewall', args: firewallArgs('add', l, m.slots, unityEditors(), m.firewallSuffix) }])).trim());
     if (exes.includes(node)) noteOutside(m, { kind: 'firewall-group', name: NODE_GROUP + sfx, note: node });
+    noteOutside(m, { kind: 'firewall-group', name: FFU_SERVER_GROUP + sfx, note: ffuNote(l.root) });
     writeManifest(l.root, m);
   } catch (e) {
     say(`WARNING: Windows Firewall: ${what}, and making them failed: ${(e as Error).message}`);
   }
 }
+
+/** root.json's note for the ffu-server group (w5442). */
+const ffuNote = (root: string) => `ffu-server in ${ffuServerExes(root).length / 3} ffu slots' targets and bin folders under ${path.join(root, 'ffu-sandboxes')}, from Tailscale only`;
 
 export const NIGHTLY_TASK = 'ff-nightly-e2e';
 

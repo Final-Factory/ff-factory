@@ -69,6 +69,30 @@ export const slotsBase = (root: string) => path.join(root, FFU_SLOTS_DIR);
 export const slotDir = (root: string, id: string) => path.join(slotsBase(root), id);
 export const slotCheckout = (root: string, id: string) => path.join(slotDir(root, id), 'ffu');
 export const slotTarget = (root: string, id: string) => path.join(slotDir(root, id), 'target');
+/** A slot's fixed folder for a server a run copies out of the target (w5442): a rebuild then never meets a running exe. */
+export const slotBin = (root: string, id: string) => path.join(slotDir(root, id), 'bin');
+
+/** The Windows Firewall group of ffu-server's rules (scripts/worker/firewall.ps1 $FfuGroup, w5442). */
+export const FFU_SERVER_GROUP = 'Final Factory ffu-server';
+
+/**
+ * Every path an ffu slot's ffu-server runs from on Windows (w5442; lothsahn, 2026-11-24: "What ports does ffu-server
+ * need? These should be added for all the ffu sandboxes so that it can start servers always"). Windows Firewall puts
+ * inbound Block rules on every new exe path that listens beyond loopback (ffu tools/soak.sh, w3346 and w3347), and a
+ * Block beats any allow, so the rules go by program: slot1..slot<max>'s cargo profiles (dev builds in debug; release and
+ * bench in release) and the slot's bin folder. Slot ids are the lowest free number up to max (nextId below), so these
+ * paths cover every slot a machine can make, before it exists. ffu-server's ports come from flags (--listen,
+ * --peer-listen, port 0 picks a free one), so a rule by port could not cover them all.
+ */
+export function ffuServerExes(root: string, max: number = FFU_SLOTS_DEFAULT_MAX): string[] {
+  const out: string[] = [];
+  for (let i = 1; i <= max; i++) {
+    const slot = path.win32.join(root, FFU_SLOTS_DIR, `slot${i}`);
+    out.push(path.win32.join(slot, 'target', 'debug', 'ffu-server.exe'), path.win32.join(slot, 'target', 'release', 'ffu-server.exe'), path.win32.join(slot, 'bin', 'ffu-server.exe'));
+  }
+  return out;
+}
+
 const stateFile = (root: string) => path.join(slotsBase(root), 'slots.json');
 const repoDir = (root: string) => path.join(slotsBase(root), 'repo');
 
