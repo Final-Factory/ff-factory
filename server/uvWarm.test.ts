@@ -31,3 +31,17 @@ test('the warm runs offline first, goes online only when the package is missing,
   assert.match(await warmUvCache(UVX.command, runs, 'V:/ffw/cache/uv', fake(true, true)) ?? '', /no Unity MCP bridge: no network/);
   assert.equal(await warmUvCache('node', undefined, 'V:/ffw/cache/uv', fake(true)), undefined);
 });
+
+test('the warm for Low agents runs under its own APPDATA and LOCALAPPDATA and says so (BEAST, w5402)', async () => {
+  const seen: NodeJS.ProcessEnv[] = [];
+  const fake = async (_bin: string, args: string[], env: NodeJS.ProcessEnv) => {
+    seen.push(env);
+    return args[0] === '--offline' ? { error: 'not found in the cache' } : {};
+  };
+  const low = { APPDATA: 'F:/ffw/home/AppData/Roaming', LOCALAPPDATA: 'F:/ffw/home/AppData/Local' };
+  assert.equal(await warmUvCache(UVX.command, uvWarmRuns(UVX), 'F:/ffw/cache/uv', fake, low, 'Low agents'), 'unity mcp: filled F:/ffw/cache/uv with its package for Low agents');
+  assert.equal(seen.length, 2);
+  for (const e of seen) assert.deepEqual([e.APPDATA, e.LOCALAPPDATA, e.UV_CACHE_DIR], [low.APPDATA, low.LOCALAPPDATA, 'F:/ffw/cache/uv']);
+  const fail = async () => ({ error: 'no network' });
+  assert.match(await warmUvCache(UVX.command, uvWarmRuns(UVX), 'F:/ffw/cache/uv', fail, low, 'Low agents') ?? '', /with its package for Low agents, so Low agents here get no Unity MCP bridge: no network/);
+});
