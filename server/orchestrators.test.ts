@@ -2516,7 +2516,7 @@ test("w3289: replay of w3245/w3246: a release blocked on another's live-with-not
   const what = "w1's report that the 1.0 release is live with its notes posted";
   const r = await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'block', note: 'Once the 1.0 release is out.', blocker: { kind: 'request', ref: 'w1', on: 'report', what } });
   assert.equal(r.isError, false, r.text);
-  assert.doesNotMatch(store.work.get('w1')!.log.join('\n'), /w2 waits on its report/, 'nobody to tell yet');
+  assert.doesNotMatch(store.work.get('w1')!.log.join('\n'), /w2 waits on its report \([^)]*\): told/, 'nobody to tell yet');
   const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Cut the 1.0 release', title: 'w1: 1.0 release', work_id: 'w1' });
   assert.equal(started.isError, false, started.text);
   const id = /Started agent (\w+)/.exec(started.text)![1];
@@ -2544,6 +2544,80 @@ test("w3289: replay of w3245/w3246: a release blocked on another's live-with-not
   assert.match((await watch.tick()).get('w2') ?? '', /^clear: w1's worker reported/);
   assert.notEqual(store.work.get('w2')!.status, 'blocked');
   assert.ok(isOpen(store.work.get('w1')!), 'w1 stays open for its after-check');
+});
+
+test("w5471: replay of w5466/w2895: a request blocked on an active request's report asks only that request's live worker, never its stopped finished legs; with none live the ask is recorded on it once", async (t) => {
+  const { store, sessions, agents, o, dispatcher, call } = await setupOnMachine(t);
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1', by: BEN, status: 'active' }, { id: 'w2', by: BEN }]);
+  // Every send, delivered or not: before w5471 the stopped legs here were each sent the ask (a resume of a real one).
+  const sent: string[] = [];
+  const send = sessions.send.bind(sessions);
+  sessions.send = ((id: string, ...rest: Parameters<typeof send> extends [string, ...infer R] ? R : never) => {
+    sent.push(id);
+    return send(id, ...rest);
+  }) as typeof sessions.send;
+  // w1 stands for w2895 (the FFU fan-out): three finished legs, stopped. Two said LEG DONE, the third just stopped with
+  // nothing pending on it. At 19:15 UTC on 2026-11-24 each such leg of w2895 was messaged and resumed.
+  const legs = ['leg00001', 'leg00002', 'leg00003'];
+  for (const [i, id] of legs.entries()) {
+    store.putSession({ id, kind: 'worker', title: `w1: row M${i}`, status: 'stopped', permissionMode: 'default', createdAt: T0, lastActivityAt: T0, turns: 3, costUsd: 1, pendingPermissions: [], lastResult: i < 2 ? `Row M${i} merged.\n\nLEG DONE: w1 M${i}` : `Row M${i} merged.` });
+  }
+  const w1 = store.work.get('w1')!;
+  w1.sessionIds = [...legs];
+  w1.done = { leg00001: { at: T0, report: 'LEG DONE: w1 M0', leg: true }, leg00002: { at: T0, report: 'LEG DONE: w1 M1', leg: true } };
+  store.putWork(w1);
+  const asked = (id: string) => store.readTranscript(id).filter((e) => e.kind === 'user' && /For w2: <the result, or where it is>/.test((e as { text: string }).text));
+  const what = "w1's row M6.6 merged";
+  const r = await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'block', note: 'After M6.6.', blocker: { kind: 'request', ref: 'w1', on: 'report', what } });
+  assert.equal(r.isError, false, r.text);
+  const watch = new BlockerWatch({ store, orchestrators: o });
+  await watch.tick();
+  await watch.tick();
+  await new Promise((res) => setTimeout(res, 200));
+  for (const id of legs) {
+    assert.ok(!sent.includes(id), `finished leg ${id} is not sent the ask`);
+    assert.equal(asked(id).length, 0, `finished leg ${id} is not asked`);
+    assert.equal(store.sessions.get(id)!.status, 'stopped', `finished leg ${id} is not resumed`);
+  }
+  assert.equal(store.work.get('w2')!.blocked!.told, undefined);
+  const nobody = store.work.get('w1')!.log.filter((l) => /w2 waits on its report \(w1's row M6\.6 merged\): no worker is on it now, so the next one is told/.test(l));
+  assert.equal(nobody.length, 1, 'the ask is recorded on w1 once, not on every look');
+
+  // One live worker joins w1 (the next planning leg): it alone is asked, once, and still no finished leg.
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Plan the next rows', title: 'w1: planning', work_id: 'w1' });
+  assert.equal(started.isError, false, started.text);
+  const live = /Started agent (\w+)/.exec(started.text)![1];
+  await until('its first turn', () => store.sessions.get(live)!.status === 'idle');
+  await watch.tick();
+  await until('the live worker is asked', () => asked(live).length === 1);
+  await watch.tick();
+  assert.equal(asked(live).length, 1, 'asked once');
+  assert.deepEqual(store.work.get('w2')!.blocked!.told, [live]);
+  for (const id of legs) assert.ok(!sent.includes(id) && !asked(id).length, `finished leg ${id} is still not asked`);
+});
+
+test('w5471: with no live worker on the awaited request, only its newest stopped worker with work pending is asked; an older leg whose last report still had a still-open line is not resumed', async (t) => {
+  const { store, sessions, o, dispatcher, call } = await setupOnMachine(t);
+  putRequests(store, [{ id: 'w1', by: BEN, status: 'active' }, { id: 'w2', by: BEN }]);
+  const sent: string[] = [];
+  const send = sessions.send.bind(sessions);
+  sessions.send = ((id: string, ...rest: Parameters<typeof send> extends [string, ...infer R] ? R : never) => {
+    sent.push(id);
+    return send(id, ...rest);
+  }) as typeof sessions.send;
+  for (const id of ['old00001', 'new00001']) {
+    store.putSession({ id, kind: 'worker', title: 'w1: leg', status: 'stopped', permissionMode: 'default', createdAt: T0, lastActivityAt: T0, turns: 3, costUsd: 1, pendingPermissions: [], lastResult: 'Pushed.\n\nw1: still open: CI on the PR' });
+  }
+  const w1 = store.work.get('w1')!;
+  w1.sessionIds = ['old00001', 'new00001'];
+  w1.links = { old00001: { at: '2026-11-04T10:00:00Z', how: 'sent' }, new00001: { at: '2026-11-24T10:00:00Z', how: 'sent' } };
+  store.putWork(w1);
+  const r = await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'block', note: 'After CI.', blocker: { kind: 'request', ref: 'w1', on: 'report', what: "w1's PR merged" } });
+  assert.equal(r.isError, false, r.text);
+  await new BlockerWatch({ store, orchestrators: o }).tick();
+  assert.ok(sent.includes('new00001'), 'its holder is asked');
+  assert.ok(!sent.includes('old00001'), 'the older leg is not');
 });
 
 test('w3289: toldOf reads a gate set before `told` was kept from the awaited request\'s log', () => {
@@ -6550,7 +6624,7 @@ test('w1841: a worker on a real portal: a reporter wait is Waiting with no [need
   const h = machines.hooks!.handlersFor(info, store.machines.get('pc')!);
   assert.match(String(await h.blocked_on!({ reports: ['w1'], what: "w1's Calculations window stills" })), /^Recorded: w2 is Blocked on w1/);
   // w1869: w1's workers are told what w2 waits for and how to mark the report that carries it (w1 has none here).
-  assert.doesNotMatch(String(store.work.get('w1')!.log.join('\n')), /w2 waits on its report/);
+  assert.doesNotMatch(String(store.work.get('w1')!.log.join('\n')), /w2 waits on its report \([^)]*\): told/);
   const g = store.work.get('w2')!.blocked!;
   assert.deepEqual([g.kind, g.ref, g.on], ['request', 'w1', 'report']);
   assert.match(await live(), /Blocked on w1/);

@@ -4052,6 +4052,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
    * 24-hour check …" with no "For w3246:" line, so w3246 sat Blocked until lothsahn unblocked it by hand at 01:10. A worker
    * stopped between turns on an active request (asleep on its own check-in, as w3245's was for its 24-hour after-check) is
    * told too: the message resumes it and keeps its check-in, so a milestone it already reached is marked within minutes.
+   * w5471: only the workers still on it (stillOn), never its finished legs; with none, the ask waits on it (noteNobodyToTell).
    */
   private tellReportWaited(waiter: WorkItem, gates: readonly WorkBlocker[]): string[] {
     const all = [...this.store.work.values()];
@@ -4062,9 +4063,16 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
       if (!x || !isOpen(x)) continue;
       const told = toldOf(g, x, waiter.id);
       const now: string[] = [];
-      for (const sid of x.sessionIds) {
+      // w5471: only the workers still on x (stillOn: live, or stopped with work pending on it, and not done with their
+      // part), never every session it ever had: an active request's finished legs are stopped for good. With none live,
+      // only the newest stopped one with work pending (its holder): an old leg's stale still-open line resumes nobody.
+      const still = this.stillOn(x);
+      const live = still.filter((sid) => this.store.sessions.get(sid)?.status !== 'stopped');
+      const on = live.length ? live : newestFirst(x).filter((sid) => still.includes(sid)).slice(0, 1);
+      if (!on.length) this.noteNobodyToTell(x, waiter, g);
+      for (const sid of on) {
         const s = this.store.sessions.get(sid);
-        if (!s || s.kind !== 'worker' || s.status === 'error' || (s.status === 'stopped' && x.status !== 'active') || s.waitingOn || !servedBy(sid, all).has(x.id) || out.includes(sid) || told.has(sid)) continue;
+        if (!s || s.kind !== 'worker' || s.status === 'error' || s.waitingOn || !servedBy(sid, all).has(x.id) || out.includes(sid) || told.has(sid)) continue;
         try {
           this.sessions.send(sid, `[about ${x.id} "${clip(x.title, 80)}"]
 ${waiter.id} ("${clip(waiter.title, 80)}") is blocked until a report of yours on ${x.id} carries: ${g.what}.
@@ -4083,6 +4091,19 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       }
     }
     return out;
+  }
+
+  /**
+   * w5471: a request waited on for its report with no worker on it now (stillOn is empty): the ask is recorded on it once,
+   * and the next worker that starts on it is told (retellReportWaits). No past session is messaged: a message resumes a
+   * stopped worker, and at 19:15 UTC on 2026-11-24 w5466's block on w2895's report reached about 35 of w2895's finished
+   * legs (b8f67a03, f515381f, 328e4cb7, a1518ead and 619b2065 each spent a turn on "not my leg").
+   */
+  private noteNobodyToTell(x: WorkItem, waiter: WorkItem, g: WorkBlocker) {
+    const mark = `${waiter.id} waits on its report (${g.what}): no worker is on it now`;
+    if (x.log.some((l) => l.includes(mark))) return;
+    this.stamp(x, `${mark}, so the next one is told to mark it "For ${waiter.id}:" (w5471)`);
+    this.store.putWork(x);
   }
 
   /**
