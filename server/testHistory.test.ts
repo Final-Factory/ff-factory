@@ -5,7 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   TestHistory,
+  beingWritten,
   classOf,
+  ownSourceIn,
   labelFailures,
   labelFromChange,
   localRunKey,
@@ -106,6 +108,52 @@ test('local runs: a pass in the same sandbox after only the test changed is fp; 
   assert.equal(labels[0]!.label, 'fp');
   assert.equal(labels[1]!.label, 'unknown');
   assert.match(String(labels[1]!.reason), /base moved/);
+});
+
+test('w5457: a local failure while the test file was being written or edited is unknown, not fp', async () => {
+  const h = history();
+  const T = 'FF.Tests.PanelsHiddenHintTest.Shows';
+  const F = 'Assets/Tests/UI/PanelsHiddenHintTest.cs';
+  const run = (key: string, at: number, changes: Record<string, string>, outcome: TestCase['outcome'], sandbox: string) =>
+    h.addRun({ source: 'local', key, machine: 'beast', sandbox, branch: 'w1', sha: `h${at}`, base: 'm1', finished: iso(at), changes }, [tc(T, outcome)]);
+  // PanelsHiddenHint shape: fails with the test file new and dirty, passes after the test file's blob changed.
+  run('a1', 0, { [F]: 'blob1' }, 'fail', 's4');
+  run('a2', 2, { [F]: 'blob2' }, 'pass', 's4');
+  // The test file dirty in the failing run only (committed before the pass): still the author's run.
+  run('b1', 0, { [F]: 'blob1' }, 'fail', 's5');
+  run('b2', 2, {}, 'pass', 's5');
+  // Same dirty test file, re-run with nothing changed.
+  run('c1', 0, { [F]: 'blob1' }, 'fail', 's6');
+  run('c2', 2, { [F]: 'blob1' }, 'pass', 's6');
+  // Another test file changed, not this one: still fp (the existing rule).
+  run('d1', 0, { 'Assets/Tests/UI/OtherTest.cs': '1' }, 'fail', 's7');
+  run('d2', 2, { 'Assets/Tests/UI/OtherTest.cs': '2' }, 'pass', 's7');
+  await labelFailures(h, async () => undefined, T0 + 3600_000);
+  const l = labelOf(h, T);
+  assert.deepEqual(l.map((x) => x.label), ['unknown', 'unknown', 'unknown', 'fp']);
+  assert.match(String(l[0]!.reason), /being written or edited/);
+});
+
+test('w5457: a failure that took over 100 times the test median is unknown (a stalled editor), not fp', async () => {
+  const h = history();
+  const at = (i: number, outcome: TestCase['outcome'], ms: number) => h.addRun({ source: 'pr-gate', key: `s${i}`, repo: 'o/r', branch: 'b', sha: 'same', finished: iso(i) }, [{ ...tc('A.T.slow', outcome), ms }]);
+  for (let i = 0; i < 6; i++) at(i, 'pass', 1000);
+  at(10, 'fail', 331_372);
+  at(11, 'pass', 1000);
+  at(12, 'fail', 1200);
+  at(13, 'pass', 1000);
+  await labelFailures(h, async () => [], T0 + 3600_000);
+  const l = labelOf(h, 'A.T.slow');
+  assert.equal(l[0]!.label, 'unknown');
+  assert.match(String(l[0]!.reason), /stalled/);
+  assert.equal(l[1]!.label, 'fp');
+});
+
+test('w5457: ownSourceIn names the test class file only, and beingWritten leaves other changes alone', () => {
+  assert.deepEqual(ownSourceIn('A.B.FooTest.Case(1,2)', ['Assets/Tests/FooTest.cs', 'Assets/Tests/FooTest.cs.meta', 'Assets/Tests/BarTest.cs']), ['Assets/Tests/FooTest.cs']);
+  assert.deepEqual(ownSourceIn('A.B.FooTest+Inner.Case', ['x/FooTest.cs']), ['x/FooTest.cs']);
+  assert.equal(beingWritten('A.B.FooTest.Case', { 'Assets/Scripts/Foo.cs': '1' }, ['Assets/Tests/BarTest.cs']), undefined);
+  assert.equal(beingWritten('A.B.FooTest.Case', undefined, ['Assets/Tests/FooTest.cs'])?.label, 'unknown');
 });
 
 test("the master batch's verdict labels its failures, and it keeps only failures per run (its passes are in the day rollup)", async () => {
