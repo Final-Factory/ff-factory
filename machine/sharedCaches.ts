@@ -184,14 +184,18 @@ export function runQuiet(bin: string, args: string[], timeoutMs: number): Promis
 
 /**
  * Fills `cacheDir` with the Unity MCP server's package when it is not there yet (machine/unityMcp.ts uvWarmRuns); what
- * it did, in a line for the log, or undefined when the server is not an offline uvx one.
+ * it did, in a line for the log, or undefined when the server is not an offline uvx one. `agentEnv` is what the agents'
+ * environment changes (`for` names them in the line): a Low agent's APPDATA and LOCALAPPDATA move into the root
+ * (lowIntegrity.ts lowEnv), so uv finds no managed Python there, picks another one from PATH and needs other packages, and
+ * a cache warmed under the daemon's own APPDATA still had no Unity MCP bridge for them (BEAST, w5402).
  */
-export async function warmUvCache(command: string, runs: { offline: string[]; online: string[] } | undefined, cacheDir: string, run: (bin: string, args: string[], env: NodeJS.ProcessEnv) => Promise<{ error?: string }>): Promise<string | undefined> {
+export async function warmUvCache(command: string, runs: { offline: string[]; online: string[] } | undefined, cacheDir: string, run: (bin: string, args: string[], env: NodeJS.ProcessEnv) => Promise<{ error?: string }>, agentEnv: Record<string, string> = {}, forWhom = 'agents'): Promise<string | undefined> {
   if (!runs) return undefined;
-  const env = { ...process.env, UV_CACHE_DIR: cacheDir };
-  if (!(await run(command, runs.offline, env)).error) return `unity mcp: its package is in ${cacheDir}`;
+  const env = { ...process.env, ...agentEnv, UV_CACHE_DIR: cacheDir };
+  const tag = forWhom === 'agents' ? '' : ` for ${forWhom}`;
+  if (!(await run(command, runs.offline, env)).error) return `unity mcp: its package is in ${cacheDir}${tag}`;
   const online = await run(command, runs.online, env);
-  return online.error ? `unity mcp: could not fill ${cacheDir} with its package, so agents here get no Unity MCP bridge: ${online.error.slice(0, 300)}` : `unity mcp: filled ${cacheDir} with its package`;
+  return online.error ? `unity mcp: could not fill ${cacheDir} with its package${tag}, so ${forWhom} here get no Unity MCP bridge: ${online.error.slice(0, 300)}` : `unity mcp: filled ${cacheDir} with its package${tag}`;
 }
 
 /** runQuiet with an environment. */

@@ -705,6 +705,10 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
   (FinalFactory #4294).
 - **A cache that only `--offline` reads stays empty.** The Unity MCP server runs as `uvx --offline` against
   `<root>\cache\uv` (w5281), so no sandbox agent had a bridge until the daemon filled that cache at start (#1131).
+  A Low agent's APPDATA is `<root>\home\AppData\Roaming` (`lowEnv`), where uv finds no managed Python, so it takes
+  the first one on PATH and resolves the server again. On BEAST that was Python 3.10, which needs packages (tomli)
+  the daemon's own warm never fetched, and Low agents still had no bridge (`CONNECTION_CLOSED`). The daemon now fills
+  the cache once more under the Low APPDATA when the fence comes on ("its package is in ... for Low agents"; w5402).
 - **`AppData\LocalLow` is writable at Low by Windows' design**, so the fence does not stop a player writing there. The
   game's own data goes to `FF_GAME_DATA_DIR` (w5297), but Unity's native writes are not checked.
 
