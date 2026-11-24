@@ -57,8 +57,9 @@ import { driveLabel, inNeverGames, installDrive, onInstallDrive } from '../serve
 import type { BusyJob } from '../shared/types.ts';
 import type { Proc, UnityPlatform } from './unity.ts';
 import { mountsIn, unmountOwnFuse, type Mount } from '../server/deadMounts.ts';
-import { gamePlayers, isUnityBinary, splitArgs, unityProcesses } from './unitySlots.ts';
+import { gamePlayers, isUnityBinary, slotsDir, splitArgs, unityProcesses } from './unitySlots.ts';
 import { inspectProcs, type ProcFacts } from './unityReaper.ts';
+import { askDaemon, orDaemon, procsMailbox, type ProcsAsk } from './procsBroker.ts';
 
 const MIN = 60_000;
 
@@ -1026,6 +1027,38 @@ export function readLeases(roots: string[]): PlayerLease[] {
 /** The facts the reaper reads on the real machine (start times and CPU as unityReaper.ts reads them). */
 export const realInspect = (platform: UnityPlatform) => (pids: number[]) => inspectProcs(platform, [...new Set(pids)].filter((p) => p > 0));
 
+/** The three process reads a worker's ff-leftovers makes: the process list, the FF_* variables, start time and CPU. */
+export interface ProcReaders {
+  procs: () => Promise<Proc[]>;
+  envs: (pids: number[]) => Promise<Map<number, ProcEnv>>;
+  inspect: (pids: number[]) => Promise<ProcFacts[]>;
+}
+
+/** The reads run here, with this machine's own `ps` (Linux /proc, Windows CIM). */
+export const localReaders = (platform: UnityPlatform): ProcReaders => ({ procs: async () => (await import('./unity.ts')).realDeps(platform).procs(), envs: (pids) => readEnvs(platform, pids), inspect: realInspect(platform) });
+
+/**
+ * This machine's readers for a worker (w5397): its own `ps` first, and when the worker fence refuses that setuid program,
+ * the daemon's answers through the mailbox (machine/procsBroker.ts). Unfenced, nothing changes. `local` and `ask` are
+ * for tests.
+ */
+export function workerReaders(platform: UnityPlatform, mailbox: string, local: ProcReaders = localReaders(platform), ask: typeof askDaemon = askDaemon): ProcReaders {
+  return {
+    procs: () => orDaemon(local.procs, () => ask<Proc[]>(mailbox, { op: 'procs' })),
+    envs: (pids) => orDaemon(() => local.envs(pids), async () => new Map(await ask<[number, ProcEnv][]>(mailbox, { op: 'env', pids }))),
+    inspect: (pids) => orDaemon(() => local.inspect(pids), () => ask<ProcFacts[]>(mailbox, { op: 'inspect', pids })),
+  };
+}
+
+/** The daemon's answer to a fenced worker's ask (machine/procsBroker.ts): the same reads, run outside the fence. */
+export function answerProcsAsk(platform: UnityPlatform, readers: ProcReaders = localReaders(platform)) {
+  return async (a: ProcsAsk): Promise<unknown> => {
+    if (a.op === 'procs') return readers.procs();
+    if (a.op === 'env') return [...(await readers.envs(a.pids ?? []))];
+    return readers.inspect(a.pids ?? []);
+  };
+}
+
 // ---------------------------------------------------------------- ff-leftovers: a worker's own teardown
 
 const SHELL = /^(bash|sh|zsh|dash|fish|cmd|powershell|pwsh)$/i;
@@ -1235,7 +1268,7 @@ export function slotProcList(procs: Proc[], self: number, callers: number[] = []
 /** The player slots' context for `folders`, `check` and `remove-slot` (w2796): this host, live pids and the running processes' command lines. */
 export async function slotContext(o: { procs?: () => Promise<Proc[]>; self?: number; callers?: number[]; session?: string } = {}): Promise<SlotContext> {
   const platform: UnityPlatform = process.platform === 'win32' ? 'win32' : process.platform === 'linux' ? 'linux' : 'darwin';
-  const list = o.procs ?? (async () => (await import('./unity.ts')).realDeps(platform).procs());
+  const list = o.procs ?? (() => workerReaders(platform, procsMailbox(slotsDir())).procs());
   const all = await list().catch(() => undefined);
   const procList = all && slotProcList(all, o.self ?? process.pid, o.callers ?? callerPids(process.env.FF_LEFTOVERS_CALLERS));
   const procs = procList?.map((p) => p.cmd);
@@ -1558,11 +1591,12 @@ export async function foldersMain(cmd: 'folders' | 'check' | 'remove-slot' | 're
 }
 
 /** `ff-leftovers [list|end]`: what this worker's session started that still runs, and ending it. */
-export async function leftoversMain(argv: string[], e: NodeJS.ProcessEnv = process.env): Promise<number> {
+/** `t`: a test's hands (the readers, the signal sender, the waits, the platform); the real ones otherwise. */
+export async function leftoversMain(argv: string[], e: NodeJS.ProcessEnv = process.env, t: { read?: ProcReaders; signal?: (pid: number, sig: 'SIGTERM' | 'SIGKILL') => unknown; wait?: (ms: number) => Promise<void>; platform?: UnityPlatform } = {}): Promise<number> {
   const cmd = argv[0] ?? 'list';
   if (cmd === 'folders' || cmd === 'check' || cmd === 'remove-slot' || cmd === 'remove') return foldersMain(cmd, argv.slice(1), e);
   const session = e.FF_SESSION_ID;
-  const platform: UnityPlatform = process.platform === 'win32' ? 'win32' : process.platform === 'linux' ? 'linux' : 'darwin';
+  const platform: UnityPlatform = t.platform ?? (process.platform === 'win32' ? 'win32' : process.platform === 'linux' ? 'linux' : 'darwin');
   if (session && cmd === 'launch' && argv.length > 1) return (await launchForPerson(argv.slice(1), session, e, platform)).code;
   if (!session || !['list', 'end'].includes(cmd)) {
     process.stdout.write(`usage: ff-leftovers [list|end|launch <program> [args]...|folders|check <path>...|remove <path>...|remove-slot <slot>...]\n  list: what this worker's session (FF_SESSION_ID) started that still runs: players, Xvfb, builds, servers, background jobs\n  end: end them (SIGTERM, then SIGKILL after 5 s), before DONE or a stop\n  launch <program> [args]...: start a program a person goes on using (a launcher, an installer's window, a desktop app) so that neither \`end\` nor FF Factory's sweep ever ends it or what it starts (w4047): without your session's FF_* variables and credentials, marked FF_FOR_PERSON, detached, from your home folder. A Mac: \`ff-leftovers launch open -a "<app>"\`; Windows: a Windows path to an .exe, or \`cmd /c start "" "<file>"\`. Never for a game player or a run of your own\n  folders: a clean-up's candidates under the install folder, each KEEP or DELETE by the ledger (a request not closed keeps its worker's folders)\n  check <path>...: the same verdict for paths you mean to delete; exit 1 if any is to be kept. Only paths in the install folder: on Windows never one on C: or another drive, apart from the game's AppData Never Games folders, which are always KEEP (w1755)\n  remove <path>...: delete what check judges DELETE, only inside the install folder: judged again just before the delete; refuses a link, the main clone and a running or resumable worker's folder; a player slot it empties and keeps, as remove-slot does (w5168); logs each removal and the bytes it freed: hard links to files kept elsewhere (a slot's build) do not count (w4394)\n  remove-slot <slot>...: empty idle player slots (<install>/players/slot<K>-<P>); refused while a lease lives, a fill runs or a process plays from it (w3204)\n${session ? '' : 'FF_SESSION_ID is not set: run it from a worker of FF Factory.\n'}`);
@@ -1570,13 +1604,17 @@ export async function leftoversMain(argv: string[], e: NodeJS.ProcessEnv = proce
   }
   const { realDeps } = await import('./unity.ts');
   const hands = realDeps(platform);
+  // w5397: under the worker fence `ps` is refused, and the daemon reads for this worker.
+  const read = t.read ?? workerReaders(platform, procsMailbox(slotsDir(e)));
+  const send = t.signal ?? ((pid: number, sig: 'SIGTERM' | 'SIGKILL') => hands.kill(pid, sig));
+  const wait = t.wait ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const tempRoot = sessionTempRoot(session, e);
   const msys = msysParents(e.FF_LEFTOVERS_MSYS);
   const facts = new Map<number, ProcFacts>();
   let topBatch = new Set<number>();
   const scan = async () => {
-    const procs = await hands.procs();
-    const env = await readEnvs(platform, procs.map((p) => p.pid));
+    const procs = await read.procs();
+    const env = await read.envs(procs.map((p) => p.pid));
     // The session's processes and their parents, and what names its temp folder: start times, so a reused parent pid is
     // told from the agent's host.
     const named = procs.filter((p) => tempSessionInArgs(p.cmd, tempRoot, platform) === session || tempSessionOf(p.cmd, tempRoot, platform) === session);
@@ -1585,7 +1623,7 @@ export async function leftoversMain(argv: string[], e: NodeJS.ProcessEnv = proce
     // the parent is no younger, and a pid Windows reused since names an unrelated process.
     if (platform === 'win32') facts.clear();
     const timed = platform === 'win32' ? procs.map((p) => p.pid) : sessionPids;
-    for (const f of await realInspect(platform)(timed.filter((p) => !facts.has(p))).catch(() => [] as ProcFacts[])) facts.set(f.pid, f);
+    for (const f of await read.inspect(timed.filter((p) => !facts.has(p))).catch(() => [] as ProcFacts[])) facts.set(f.pid, f);
     topBatch = new Set(unityProcesses(procs, platform).filter((u) => u.kind === 'batch').map((u) => u.pid));
     return ownLeftovers(session, procs, env, process.pid, platform, { callers: callerPids(e.FF_LEFTOVERS_CALLERS), born: (pid) => facts.get(pid)?.startedAt, tempRoot, msys });
   };
@@ -1614,13 +1652,13 @@ export async function leftoversMain(argv: string[], e: NodeJS.ProcessEnv = proce
   let killed = 0;
   let todo = mine;
   for (let round = 0; todo.length && round < 3; round++) {
-    for (const p of todo) hands.kill(p.pid, 'SIGTERM');
-    await new Promise((r) => setTimeout(r, LEFTOVER.TERM_WAIT_MS));
-    const after = await hands.procs();
+    for (const p of todo) send(p.pid, 'SIGTERM');
+    await wait(LEFTOVER.TERM_WAIT_MS);
+    const after = await read.procs();
     const left = todo.filter((p) => after.some((x) => x.pid === p.pid && x.cmd === p.cmd));
-    for (const p of left) hands.kill(p.pid, 'SIGKILL');
+    for (const p of left) send(p.pid, 'SIGKILL');
     killed += left.length;
-    await new Promise((r) => setTimeout(r, 500));
+    await wait(500);
     for (const p of todo) if (!ended.some((x) => x.pid === p.pid && x.cmd === p.cmd)) ended.push(p);
     todo = await scan();
   }

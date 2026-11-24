@@ -1352,8 +1352,10 @@ export function stopTree(pid: number, platform: NodeJS.Platform, graceMs: number
     const [c, p] = line.trim().split(/\s+/).map(Number);
     if (c && p) kids.set(p, [...(kids.get(p) ?? []), c]);
   }
+  // w5397: under the worker fence the setuid `ps` is refused and prints nothing; `pgrep -P` (not setuid) still lists children.
+  const childrenOf = (p: number) => (kids.size ? (kids.get(p) ?? []) : sh('pgrep', ['-P', String(p)]).split('\n').map(Number).filter((n) => n > 0));
   const tree = [pid];
-  for (let i = 0; i < tree.length; i++) for (const c of kids.get(tree[i]) ?? []) if (!tree.includes(c)) tree.push(c);
+  for (let i = 0; i < tree.length; i++) for (const c of childrenOf(tree[i])) if (!tree.includes(c)) tree.push(c);
   const signal = (sig: NodeJS.Signals) => {
     for (const p of tree) {
       try {

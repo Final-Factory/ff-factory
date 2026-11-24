@@ -72,7 +72,8 @@ import { listMacDialogs } from './macDialogs.ts';
 import { UnityReaper, inspectProcs, realReaperDeps, type ReaperDeps } from './unityReaper.ts';
 import type { CleanupFacts } from '../server/cleanupFolders.ts';
 import { movedRequestsOf, type SessionOwner } from '../server/resumable.ts';
-import { LeftoverReaper, installLeftoversShim, readEnvs, readLeases, realInspect, type LeftoverDeps } from './leftovers.ts';
+import { LeftoverReaper, answerProcsAsk, installLeftoversShim, readEnvs, readLeases, realInspect, type LeftoverDeps } from './leftovers.ts';
+import { POLL_MS as PROCS_POLL_MS, ProcsBroker, procsMailbox } from './procsBroker.ts';
 import { installPrShim } from './prFlow.ts';
 import { FFU_SLOTS_DEFAULT_MAX, installFfuSlotShim } from './ffuSlots.ts';
 import { agentNodePathDir } from '../server/agentNode.ts';
@@ -478,6 +479,8 @@ export class Daemon {
   readonly reaper: UnityReaper;
   /** Ends what a stopped worker left running: game players, Xvfb, builds, servers (machine/leftovers.ts, w1196, w1197). */
   readonly leftovers: LeftoverReaper;
+  /** Answers fenced workers' process reads (machine/procsBroker.ts, w5397); a real daemon on a Mac only. */
+  private procsBroker?: ProcsBroker;
   /** Closes the other editors and players while another worker's timed run holds the bench lock (machine/benchTurn.ts, w1829). */
   readonly benchTurn: BenchTurn;
   /** Pauses this machine's idle CI runners and ends CI leftovers while a timed run holds the bench lock (w3112). */
@@ -744,6 +747,8 @@ export class Daemon {
       pauseEnds: () => this.pauseStop.endsNow(),
       ...leftoverDeps,
     });
+    // w5397: a fenced worker's ff-leftovers cannot run the setuid `ps`; the daemon, outside the fence, reads for it.
+    this.procsBroker = real && platform === 'darwin' ? new ProcsBroker({ dir: procsMailbox(this.slots.dir), answer: answerProcsAsk(platform), log: (line) => log(line) }) : undefined;
     this.benchTurn = new BenchTurn({
       // w1894: a timed run's turn first (it ends within its 30 minutes; no new one is granted while a person plays), then a
       // person's game
@@ -1435,6 +1440,7 @@ export class Daemon {
     void this.slotTick();
     // Orphaned and hung batch builds (w791): looked at once a minute, and when a worker asks (unity clear_batch).
     this.timers.push(setInterval(() => void this.reaper.tick(), 15_000));
+    if (this.procsBroker) this.timers.push(setInterval(() => void this.procsBroker?.tick(), PROCS_POLL_MS));
     // What stopped workers left running (w1196, w1197): looked at once a minute.
     // w1894: each look also feeds the person's-game watch (machine/personPlay.ts)
     if (this.cfg.leftovers !== false) this.timers.push(setInterval(() => void this.leftovers.tick().then(() => this.feedPersonPlay()), 15_000));

@@ -64,3 +64,20 @@ Measured with the generated profile unless noted:
 - `sandbox-exec` is marked deprecated by Apple but ships in macOS 26.4 and is what Chromium, Bazel and Claude Code's own
   sandbox use.
 - A person's own editor and the daemon are never fenced.
+
+## Setuid programs: ps, top (w5397)
+
+macOS refuses to exec a setuid program inside the sandbox, whatever the profile says: on m5 (2026-11-24, w5393) a
+fenced agent's `ps -x -o pid=` gave "operation not permitted: ps", and `ff-leftovers list` and `end` died on
+"spawn EPERM". `/bin/ps` and `top` are setuid root; `pgrep`, `lsof` and `kill` are not and work. KERN_PROCARGS2
+(sysctl) works too, but hides the environment of Apple's own binaries (`/bin/zsh`, `/bin/sleep`: 0 entries, measured),
+and ff-leftovers finds a process's session by `FF_SESSION_ID` in its environment, so that is not enough.
+
+So the daemon, outside the fence, reads for the worker (`machine/procsBroker.ts`): the worker writes
+`<FF_UNITY_SLOTS>/procs/ask-<id>.json` (`procs`, `env` or `inspect`, with pids), the daemon answers `ans-<id>.json`
+within 250 ms. It answers only those three fixed reads and never runs or ends anything for a worker; ff-leftovers ends
+its own processes with kill(2). A worker tries its own `ps` first and asks only when the exec is refused, so an unfenced
+worker works as before. `stopTree` (unity-slot) falls back to `pgrep -P` when `ps` prints nothing.
+
+zsh writes heredocs under `TMPPREFIX` (default `/tmp/zsh`), refused by the fence ("can't create temp file for here
+document"); the fence's environment sets `TMPPREFIX=<root>/tmp/zsh`.
