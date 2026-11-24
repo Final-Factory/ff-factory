@@ -1,0 +1,1 @@
+- A worker root's Unity slots mailbox and Max events file are inside the root (w5377): `<root>/unity-slots` and `<root>/max/max-events.jsonl`, so the Landlock, Seatbelt and Windows Low fences cover them with no exception. The daemon still reads the old events file for agents started before the move; `daemon.json`'s own paths still win.
