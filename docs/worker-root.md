@@ -632,7 +632,7 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
 - `Daemon.lowSetup` (`machine/daemon.ts`) runs once at the daemon's start, in the background; agents start unfenced until
   it finishes, and stay unfenced, with the reason in `logs/daemon.log` (`worker integrity: ...`), if any step fails.
   - It labels the root's folders Low (`machine/lowIntegrity.ts` `lowTargets`, `labelLow`): every child except `daemon`,
-    `secrets` and the daemon's own folder. `repo`, the bare store every sandbox is a worktree of (worker.ts cloneRepo),
+    `secrets`, the daemon's own folder and the CI runners' `ffu-runners` (`CI_CHILDREN`, kept Medium: w5440). `repo`, the bare store every sandbox is a worktree of (worker.ts cloneRepo),
     is labelled whole; a `repo` with a working tree gets only its `.git` (lothsahn's "option 1", w5377: the existing
     shared store, labelled and otherwise unchanged). The root itself stays Medium. Outside the root it labels the extra
     roots, the temp and sandbox folders where they are elsewhere, and only what `daemon.json` `workerIntegrityAllow`
@@ -697,6 +697,14 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
   from it crashed (`NtCreateDirectoryObject(\BaseNamedObjects\msys-2.0S5-…): 0xC0000022`). `labelLow` gives
   `tools\node` an explicit `(OI)(CI)medium`, which beats the inherited Low (#1130). Check any new exe placed under a
   Low folder the same way: `icacls <exe>` shows `Low Mandatory Level:(I)`.
+- **CI runners are not workers: their folders stay Medium** (w5440). The first rollout labelled `<root>\ffu-runners`
+  Low with the rest. The Listener started before it stayed Medium, but each job's `Runner.Worker.exe` is started from
+  the Low-labelled `bin` folder, so every ffu Windows job on BEAST ran at Low from 2026-11-24 12:34Z and its Git Bash died
+  before the first step (`NtCreateDirectoryObject(\BaseNamedObjects\msys-2.0S5-…): 0xC0000022`). `lowTargets` keeps
+  `CI_CHILDREN` out of the Low list and labels them `(OI)(CI)medium` where they were Low; after labelling the daemon
+  checks every `<runner>\bin\Runner.Worker.exe` (`lowRunners`) and logs `CI runner job exe ... is still labelled Low`
+  if one is. A new runner folder inside the root goes in `CI_CHILDREN`. The game repo's Windows runners are not inside
+  any worker root.
 - **A Low process sees only Low processes.** tasklist, Get-Process and CIM list about 24 rows: no daemon, and no Medium
   editor or node. Never judge from inside a worker whether a Medium process is running.
 - **The firewall cmdlets are denied** (`Get-NetFirewallApplicationFilter`: "Access is denied", PermissionDenied). The
