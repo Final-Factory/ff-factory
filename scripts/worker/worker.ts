@@ -1915,6 +1915,8 @@ export interface UpdateFlags {
   ssh?: boolean;
   /** The GPU Whisper for the portal's mic (w615): a model name turns it on, "off" turns it off; unset carries daemon.json's. */
   voiceWhisper?: string;
+  /** The worker write fence (w5377): "on" sets this platform's daemon.json key, "off" removes it; unset carries daemon.json's. */
+  workerFence?: 'on' | 'off';
   /** The Dev Drive (w900): "on" makes one if the install has none; unset keeps the one it has (an update never makes one on its own). */
   devDrive?: 'on' | 'off';
   devDriveMaxGB?: number;
@@ -1924,11 +1926,44 @@ export interface UpdateFlags {
 }
 
 /**
+ * The daemon.json key that turns the worker write fence on, per platform (docs/worker-fence.md): Seatbelt on macOS, the
+ * Landlock write lock on Linux, Low integrity on Windows. `writeLockExtra` is the lock's list of extra folders, not a switch:
+ * it stays when the fence goes off. Exported for tests.
+ */
+export function workerFenceSetting(platform: NodeJS.Platform): { key: string; value: unknown } {
+  if (platform === 'darwin') return { key: 'workerFence', value: 'seatbelt' };
+  if (platform === 'linux') return { key: 'writeLock', value: true };
+  if (platform === 'win32') return { key: 'workerIntegrity', value: 'low' };
+  throw new Error(`worker_fence: no worker write fence on ${platform}`);
+}
+
+/** `--worker-fence on|off` (w5377): anything else is refused, never guessed at. Exported for tests. */
+export function workerFenceFlag(v: string | undefined): 'on' | 'off' | undefined {
+  if (v === undefined) return undefined;
+  if (v !== 'on' && v !== 'off') throw new Error(`--worker-fence is on or off, not "${v}"`);
+  return v;
+}
+
+/** The line an update prints for what it set the worker fence to (w5377). Exported for tests. */
+export function workerFenceLine(setting: 'on' | 'off', platform: NodeJS.Platform = process.platform): string {
+  return setting === 'on' ? `worker fence: on (${workerFenceSetting(platform).key})` : 'worker fence: off';
+}
+
+/** daemon.json with the worker fence set on or off for this platform (w5377); undefined: the config as it is. Exported for tests. */
+export function applyWorkerFence(config: Record<string, unknown>, setting: 'on' | 'off' | undefined, platform: NodeJS.Platform = process.platform): Record<string, unknown> {
+  if (!setting) return config;
+  const { key, value } = workerFenceSetting(platform);
+  if (setting === 'on') return { ...config, [key]: value };
+  const { [key]: _gone, ...rest } = config;
+  return rest;
+}
+
+/**
  * The install options an update runs with (w613): the root's own root.json and daemon.json, every setting carried
  * (beast's agent total, protected paths, the Library seed, the editors' priority, the disk guard, cleanup, the Unity
  * paths), the limits from the flags only when given, and the machine's own credential. Exported for tests.
  */
-export function planUpdate(root: string, m: Manifest, config: Record<string, unknown>, token: string, f: UpdateFlags & { absoluteWorktrees?: boolean }): InstallOptions {
+export function planUpdate(root: string, m: Manifest, config: Record<string, unknown>, token: string, f: UpdateFlags & { absoluteWorktrees?: boolean }, platform: NodeJS.Platform = process.platform): InstallOptions {
   const pool = (config.sandboxes && typeof config.sandboxes === 'object' ? config.sandboxes : {}) as Record<string, unknown>;
   const pick = (flag: number | undefined, key: string, fallback: number) => (flag !== undefined ? flag : typeof pool[key] === 'number' ? (pool[key] as number) : fallback);
   const maxSandboxes = pick(f.maxSandboxes, 'maxSandboxes', m.slots || 3);
@@ -1959,7 +1994,7 @@ export function planUpdate(root: string, m: Manifest, config: Record<string, unk
     ...(f.devDriveMaxGB !== undefined ? { devDriveMaxGB: f.devDriveMaxGB } : {}),
     ...(f.devDriveSkip ? { devDriveSkip: f.devDriveSkip } : {}),
     ...(f.moveToDevDrive ? { moveToDevDrive: true, devDrive: 'on' as const } : {}),
-    carry: { ...config, sandboxes: { ...pool, maxSandboxes, maxAgentsPerSandbox, maxUnity } },
+    carry: { ...applyWorkerFence(config, f.workerFence, platform), sandboxes: { ...pool, maxSandboxes, maxAgentsPerSandbox, maxUnity } },
     // A test install stays one through its updates (w1596): daemon.json says so (daemonJson, --no-cleanup).
     ...(config.leftovers === false ? { noCleanup: true } : {}),
     update: true,
@@ -2183,6 +2218,7 @@ export async function update(root: string, f: UpdateFlags): Promise<boolean> {
   }
   const rel = (await exec('git', ['-C', l.repo, 'config', '--get', 'worktree.useRelativePaths'])).stdout.trim();
   const o = planUpdate(l.root, m, config, token, { ...f, absoluteWorktrees: rel === 'false', ...(owner ? { owner } : {}) });
+  if (f.workerFence) say(workerFenceLine(f.workerFence));
   // Every prerequisite first (w629), before anything is fetched, stopped or restarted: m5's update over ssh found no
   // git-lfs, and its refused run still restarted the daemon and then reported the old one as current.
   say('Checking prerequisites (nothing changes until they all pass)...');
@@ -2727,6 +2763,8 @@ const USAGE = `node scripts/worker/worker.ts <install|update|reinstall|uninstall
             (this machine's own install, in place: every setting, the credential and the PATH carried; no game-repo
              fetch; restarts the daemon and checks the portal sees it; docs/worker-install.md, "Updating")
             [--voice-whisper <model>|off] (the GPU Whisper for the portal's mic, w615; default: as daemon.json has it)
+            [--worker-fence on|off] (w5377: this platform's worker write fence in daemon.json: the Landlock write lock on Linux,
+             Seatbelt on macOS, Low integrity on Windows; default: as daemon.json has it)
             [--dev-drive] [--dev-drive-max-gb N] [--dev-drive-skip U,T] [--move-to-dev-drive] (Windows, w900: make the Dev Drive if the
              install has none; --move-to-dev-drive also moves its sandboxes and seed onto it, which needs every sandbox free of
              workers and editors. An update without these keeps the drive it has and makes none.)
@@ -2821,6 +2859,8 @@ export async function main(argv = process.argv.slice(2)) {
   } else if (cmd === 'update') {
     if (!opts.root) throw new Error(USAGE);
     const opt = (k: string) => (opts[k] === undefined ? undefined : Number(opts[k]));
+    // A bare `--worker-fence` parses as a flag with no value: refused like any other value that is not on or off.
+    const workerFence = flags.has('worker-fence') ? workerFenceFlag('') : workerFenceFlag(opts['worker-fence']);
     await update(opts.root, {
       maxSandboxes: opt('max-sandboxes'),
       maxAgentsPerSandbox: opt('max-agents-per-sandbox'),
@@ -2831,6 +2871,7 @@ export async function main(argv = process.argv.slice(2)) {
       ...(flags.has('no-firewall') ? { firewall: false } : {}),
       ...(flags.has('no-ssh') ? { ssh: false } : {}),
       ...(opts['voice-whisper'] !== undefined ? { voiceWhisper: opts['voice-whisper'] } : {}),
+      ...(workerFence ? { workerFence } : {}),
       ...devDriveFlags(opts, flags),
     });
   } else if (cmd === 'reinstall') {

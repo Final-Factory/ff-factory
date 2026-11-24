@@ -16,7 +16,7 @@ import { carryExclude, claudeSlug, plan, rehome, sameVolume, stopOldScript, type
 import { cloneRepo, credentialId, daemonJson, mergePath, planUpdate, plistPathOf, settingsDiff, update, updateVerdict, withPlistPath, withStandardPaths, gitVersion, holdRedeploys, layoutOf, writeMacSlotConfig, nightlyTaskProblem, playerFolders, supervisorProblems, syncPlayerFolders, noteOutside, parseArgs, preflightProblems, removeSlotsPointer, writeSlotsPointer, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
 import { slotsPointer } from '../machine/unitySlots.ts';
 import { adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, inAdministrators, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, withAuthorizedKey, withoutAuthorizedKey } from './worker/portalSsh.ts';
-import { cloneEnv, devDriveFailure, exec, manifestFor, runElevatedSteps } from './worker/worker.ts';
+import { applyWorkerFence, cloneEnv, devDriveFailure, exec, main, manifestFor, runElevatedSteps, workerFenceFlag, workerFenceLine } from './worker/worker.ts';
 
 const TOKEN = `ffm_lothdesktop_${'A'.repeat(43)}`;
 const OPTS = { root: 'D:\\work\\ffw', portalUrl: 'https://portal.example', maxSandboxes: 3, maxAgentsPerSandbox: 2, maxUnity: 2 };
@@ -659,6 +659,45 @@ test('w615: worker update --voice-whisper turns the GPU Whisper on; without it t
   assert.deepEqual(daemonJson(planUpdate(root, BEAST_ROOT, BEAST_CONFIG, BEAST_TOKEN, { voiceWhisper: 'large-v3-turbo' }), l, 'beast', undefined).voice, { enabled: true, model: 'large-v3-turbo' });
   assert.equal(daemonJson(planUpdate(root, BEAST_ROOT, withVoice, BEAST_TOKEN, { voiceWhisper: 'off' }), l, 'beast', undefined).voice?.constructor, Object);
   assert.equal((daemonJson(planUpdate(root, BEAST_ROOT, withVoice, BEAST_TOKEN, { voiceWhisper: 'off' }), l, 'beast', undefined).voice as { enabled: boolean }).enabled, false);
+});
+
+test('w5377: worker update --worker-fence sets or removes the fence key for its platform in daemon.json; unset carries it; writeLockExtra stays', () => {
+  const root = path.join(os.tmpdir(), `ffw-update-fence-${process.pid}`);
+  const l = layoutOf(root);
+  const written = (config: Record<string, unknown>, f: { workerFence?: 'on' | 'off' }, platform: NodeJS.Platform) => daemonJson(planUpdate(root, BEAST_ROOT, config, BEAST_TOKEN, f, platform), l, 'beast', undefined);
+  const keys = { darwin: ['workerFence', 'seatbelt'], linux: ['writeLock', true], win32: ['workerIntegrity', 'low'] } as const;
+  for (const platform of ['darwin', 'linux', 'win32'] as const) {
+    const [key, value] = keys[platform];
+    assert.equal(key in written(BEAST_CONFIG, {}, platform), false, `${platform}: no fence unless asked`);
+    assert.equal(written(BEAST_CONFIG, { workerFence: 'on' }, platform)[key], value, `${platform}: on sets ${key}`);
+    const had = { ...BEAST_CONFIG, [key]: value, writeLockExtra: ['D:/extra'] };
+    assert.equal(written(had, {}, platform)[key], value, `${platform}: unset carries it`);
+    const off = written(had, { workerFence: 'off' }, platform);
+    assert.equal(key in off, false, `${platform}: off leaves no ${key} in the written daemon.json`);
+    assert.deepEqual(off.writeLockExtra, ['D:/extra'], `${platform}: writeLockExtra stays`);
+    assert.deepEqual(off.protectedPaths, BEAST_CONFIG.protectedPaths, 'the other settings are carried');
+    // Only this platform's key changes: another platform's key in a copied daemon.json is left alone.
+    const other = Object.values(keys).find(([k]) => k !== key)!;
+    assert.equal(written({ ...had, [other[0]]: other[1] }, { workerFence: 'off' }, platform)[other[0]], other[1]);
+  }
+  const cfg = { a: 1 };
+  assert.equal(applyWorkerFence(cfg, undefined, 'linux'), cfg, 'unset: the very config');
+  assert.equal(workerFenceLine('on', 'linux'), 'worker fence: on (writeLock)');
+  assert.equal(workerFenceLine('on', 'darwin'), 'worker fence: on (workerFence)');
+  assert.equal(workerFenceLine('on', 'win32'), 'worker fence: on (workerIntegrity)');
+  assert.equal(workerFenceLine('off', 'linux'), 'worker fence: off');
+});
+
+test('w5377: --worker-fence takes on or off and refuses anything else, before the update touches anything', async () => {
+  assert.deepEqual(parseArgs(['update', '--root', '/r', '--worker-fence', 'off']).opts, { root: '/r', 'worker-fence': 'off' });
+  assert.equal(workerFenceFlag(undefined), undefined);
+  assert.equal(workerFenceFlag('on'), 'on');
+  assert.equal(workerFenceFlag('off'), 'off');
+  for (const bad of ['ON', 'true', 'seatbelt', '']) assert.throws(() => workerFenceFlag(bad), /--worker-fence is on or off/);
+  const none = path.join(os.tmpdir(), `ffw-fence-none-${process.pid}`);
+  await assert.rejects(main(['update', '--root', none, '--worker-fence', 'maybe']), /--worker-fence is on or off, not "maybe"/);
+  await assert.rejects(main(['update', '--root', none, '--worker-fence']), /--worker-fence is on or off/);
+  assert.equal(fs.existsSync(none), false);
 });
 
 // ---------------------------------------------------------------- w629: an update over ssh finds its tools, and only succeeds on the target

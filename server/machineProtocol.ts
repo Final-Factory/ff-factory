@@ -118,6 +118,8 @@ export interface LinkUpdateFlags {
   devDrive?: boolean;
   moveToDevDrive?: boolean;
   devDriveMaxGB?: number;
+  /** The worker write fence on or off (w5377); unset: carried. A daemon that predates it ignores it. */
+  workerFence?: 'on' | 'off';
 }
 
 /**

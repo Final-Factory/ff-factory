@@ -690,6 +690,55 @@ for systemd-executor, or turning the sysctl off for the whole machine.
 - Needs Landlock (on in Ubuntu since 22.04). Without it the launcher exits 125 and the agent does not start: leave the
   setting off there.
 
+### 4.3 Turning a fence off, and why recovery never runs inside one (w5377, 2026-11-24)
+
+lothsahn (w5377): "If we turn on the fences, is there some emergency way we could reinstall the system if things go
+wrong?" Yes. A fence wraps only a sandbox agent's claude and what it starts. Everything that repairs a machine runs
+outside it: the daemon, the agent host, the in-process FF Factory tools, the machine agent's link and its update job
+(`scripts/worker/linkJob.ts`), the installer (`scripts/worker/install.ps1`, `install.sh`, `worker.ts update`) and an
+ssh session. A fenced worker breaking cannot stop any of them.
+
+**The one setting per OS** (daemon.json in the daemon's folder; the daemon reads it when it starts):
+
+| OS | Fence | On | Off |
+|---|---|---|---|
+| macOS | Seatbelt (`server/workerFence.ts`, docs/worker-fence.md) | `"workerFence": "seatbelt"` | key absent |
+| Linux | Landlock (`machine/writeLock.ts`, 4.2) | `"writeLock": true` (`writeLockExtra` is kept either way) | key absent |
+| Windows | Low integrity (4.1) | `"workerIntegrity": "low"` | key absent |
+
+**Off from the portal, nobody at the machine (the normal route).** The orchestrator or ops worker runs
+`ops_worker machine_update` with `machine: <id>` and `worker_fence: "off"` (or `"on"`). It goes the machine update's
+usual way: over the machine agent's link as `self_update` with the flag (`server/machines.ts` `linkUpdate`), or, when
+the link is down, by ssh as `install.ps1 -Update -WorkerFence off` on Windows and `install.sh --update --worker-fence
+off` on Mac and Linux (`server/opsWorker.ts` `machineInstall`). Either way `worker.ts update` (`planUpdate`) removes or
+sets this OS's key in daemon.json, carries every other key, and restarts the daemon, which starts its next agents
+without the fence. An update stops only the daemon: running agents stay in their agent hosts and keep the fence state they started
+with (docs/worker-install.md, "An update does not stop running work"); the change holds for every agent started
+after it.
+
+**By hand, if the portal cannot reach the machine at all.** From any shell on it (ssh, or a person at the desk):
+
+- Re-run the installer's update with the same flag the portal's ssh route sends: `install.ps1 -Update -WorkerFence off`
+  on Windows, `install.sh --update --worker-fence off` on Mac and Linux (worker-install.md says where the install's
+  scripts are and how to run them).
+- Or delete this OS's key from the daemon's `daemon.json` and restart the daemon's service (the scheduled task on
+  Windows, the systemd user unit on Linux, the LaunchAgent on a Mac; the installer made it). On Windows the Low labels
+  left on the root's folders need no undoing: they only stop Low processes writing up, and Medium ones are unaffected.
+
+**The fallback when a fence cannot apply** (`machine/fenceProbe.ts`). Before the daemon puts its first sandbox agent
+inside a fence, it runs a no-op inside the same fence once (Mac: `sandbox-exec -p <profile> /usr/bin/true`; Linux:
+`python3 ff-landlock.py <rules> -- /bin/true`; Windows: the Low launcher). If that does not exit 0 within 15 s (a
+kernel without Landlock, a profile the kernel refuses, python3 missing, the launcher gone), the daemon logs
+`worker fence: ... could not run a no-op (...); agents run unfenced` (or `write lock: ...`) and runs its agents
+unfenced. Nothing in the fence code can throw out of the daemon's start or an agent's spawn: the fence never fails
+the daemon, it fails open to the pre-fence behaviour and says so in `logs/daemon.log`. The daemon itself never runs
+inside a fence, so a fence change cannot stop it starting.
+
+**What a code rollback does not undo.** The link update rolls back the code when a new daemon does not come up
+(`linkJob.ts` `putBack`), but it does not revert daemon.json. That is intended: a bad fence does not stop the daemon
+(the fallback above), so a daemon that fails after an update failed for another reason, and the fence setting stays
+as the update set it.
+
 ## 5. Migration
 
 ### 5.1 Per machine

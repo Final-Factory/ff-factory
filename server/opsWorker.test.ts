@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { FFFCTL_FORMS, OPS_FFFCTL, OPS_GRANT, OPS_RESTART_GRANT, OPS_GITHUB_ROUTE, OPS_ID, OPS_LIMITS, OPS_PATHS, OpsWorker, checkOpsShell, inScratch, opsBrief, opsAllowedOrchestrator, opsGuard, opsHeader, opsSpawner, pollProblem } from './opsWorker.ts';
+import { FFFCTL_FORMS, OPS_FFFCTL, OPS_GRANT, OPS_RESTART_GRANT, OPS_GITHUB_ROUTE, OPS_ID, OPS_LIMITS, OPS_PATHS, OpsWorker, checkOpsShell, inScratch, opsBrief, opsAllowedOrchestrator, opsGuard, opsHeader, opsSpawner, pollProblem, workerUpdateFlags } from './opsWorker.ts';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { isMidTurn, OPS_SEND_REFUSED, SessionManager, setQueryForTesting } from './sessions.ts';
 import { Store } from './store.ts';
@@ -924,6 +924,21 @@ test('w855: machine_update opens a job in a harness turn, for the person\'s own 
   assert.ok(mv.text.includes(`-Update -Root C:\\ffw -MoveToDevDrive"'`), mv.text);
   assert.match(mv.text, /refuses, naming them, while an agent is in a sandbox/);
   assert.match(mv.text, /free space on the root's drive before and after/);
+  // w5377: the worker fence's remote switch: one flag per platform's installer, on or off and nothing else, alone or with others.
+  assert.throws(() => ops.machineInstall(ben, { machine: 'beast', workId: 'w847', workerFence: 'maybe' as never }), /worker_fence: on or off/);
+  assert.throws(() => ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', workerFence: '' as never }), /worker_fence: on or off/);
+  ops.machineInstall(ben, { machine: 'beast', workId: 'w847', workerFence: 'off' });
+  await new Promise((r) => setTimeout(r, 300));
+  const wfWin = store.readTranscript(OPS_ID, 100).filter((e) => e.kind === 'user').at(-1) as { text: string };
+  assert.ok(wfWin.text.includes(`-Update -Root C:\\ffw -WorkerFence off"'`), wfWin.text);
+  assert.match(wfWin.text, /with these settings changed: -WorkerFence off/);
+  ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', maxUnity: 1, workerFence: 'on' });
+  await new Promise((r) => setTimeout(r, 300));
+  const wfLin = store.readTranscript(OPS_ID, 120).filter((e) => e.kind === 'user').at(-1) as { text: string };
+  assert.ok(wfLin.text.includes(`--update --root /home/ben-ryding/ffw --max-unity 1 --worker-fence on'`), wfLin.text);
+  assert.deepEqual(workerUpdateFlags('win32', {}, {}, 'on'), ['-WorkerFence on']);
+  assert.deepEqual(workerUpdateFlags('darwin', {}, {}, 'off'), ['--worker-fence off']);
+  assert.deepEqual(workerUpdateFlags('linux', {}), [], 'unset: no flag, the install keeps its fence');
   ops.close();
 });
 
@@ -980,6 +995,14 @@ test('w1596: machine_update of a machine whose daemon updates over its own link:
   await new Promise((r) => setTimeout(r, 50));
   assert.match(told[1], /did not run: coosego refused it: an update job of this machine is still running/);
   assert.equal(recorded.length, 0, 'an update with no limit named leaves the record alone');
+  // w5377: the fence switch alone is a valid update, carried over the link as named; a value that is not on or off never goes.
+  ops.machineInstall(ben, { machine: 'coosego', workId: 'w847', workerFence: 'off' });
+  assert.deepEqual(asked.at(-1), { id: 'coosego', flags: { workerFence: 'off' } });
+  const before = asked.length;
+  assert.throws(() => ops.machineInstall(ben, { machine: 'coosego', workId: 'w847', workerFence: 'maybe' as never }), /worker_fence: on or off/);
+  assert.equal(asked.length, before, 'a refused value asks nothing');
+  assert.equal(recorded.length, 0, 'the fence switch is no limit: the record is left alone');
+  await new Promise((r) => setTimeout(r, 50));
   ops.close();
 
   // w1918: a connected daemon that offered no update over its link is never handed to ssh: the reason, and nothing run.
