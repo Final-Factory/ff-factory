@@ -181,3 +181,24 @@ export function runQuiet(bin: string, args: string[], timeoutMs: number): Promis
     });
   });
 }
+
+/**
+ * Fills `cacheDir` with the Unity MCP server's package when it is not there yet (machine/unityMcp.ts uvWarmRuns); what
+ * it did, in a line for the log, or undefined when the server is not an offline uvx one.
+ */
+export async function warmUvCache(command: string, runs: { offline: string[]; online: string[] } | undefined, cacheDir: string, run: (bin: string, args: string[], env: NodeJS.ProcessEnv) => Promise<{ error?: string }>): Promise<string | undefined> {
+  if (!runs) return undefined;
+  const env = { ...process.env, UV_CACHE_DIR: cacheDir };
+  if (!(await run(command, runs.offline, env)).error) return `unity mcp: its package is in ${cacheDir}`;
+  const online = await run(command, runs.online, env);
+  return online.error ? `unity mcp: could not fill ${cacheDir} with its package, so agents here get no Unity MCP bridge: ${online.error.slice(0, 300)}` : `unity mcp: filled ${cacheDir} with its package`;
+}
+
+/** runQuiet with an environment. */
+export function runQuietEnv(bin: string, args: string[], env: NodeJS.ProcessEnv, timeoutMs = UV_PRUNE_TIMEOUT_MS): Promise<{ out: string; error?: string }> {
+  return new Promise((resolve) => {
+    execFile(bin, args, { encoding: 'utf8', timeout: timeoutMs, windowsHide: true, env, maxBuffer: 16 * 1024 * 1024 }, (e, stdout, stderr) => {
+      resolve({ out: `${stdout ?? ''}\n${stderr ?? ''}`, ...(e ? { error: String(stderr || e.message).trim() } : {}) });
+    });
+  });
+}

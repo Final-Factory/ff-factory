@@ -1,0 +1,1 @@
+- The daemon fills the worker install's uv cache with the Unity MCP server's package at start. Agents have run that server with `uvx --offline` against `<root>/cache/uv` since w5281, which nothing filled, so sandbox agents on LothDesktop had no Unity MCP bridge (w5377).
