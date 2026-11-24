@@ -40,6 +40,8 @@ export interface PrDeps {
    * Answers what went wrong, or undefined when it worked. None: such a refusal stands.
    */
   updatePlugin?: () => string | undefined;
+  /** The environment ff-pr runs in, named when gh cannot authenticate (w5430). None: nothing is named. */
+  env?: NodeJS.ProcessEnv;
 }
 
 /** One workflow run on the PR's head, as `gh run list --json` answers it. */
@@ -502,11 +504,39 @@ export function merge(d: PrDeps, o: Opts): number {
   return 0;
 }
 
+/**
+ * w5430: the worker environment's gh check, before anything is pushed. A worker whose gh cannot authenticate (the Low
+ * fence's APPDATA move hid the machine's gh login: "You are not logged into any GitHub hosts") used to push its branch and
+ * then fail at gh pr create. Answers the loud refusal, or undefined when gh is logged in. A run with GitHub Apps
+ * (FF_GH_APP_NAMES) is left out: its gh token comes per repository (machine/ghApp.ts). gh's token lines are never repeated.
+ */
+export function ghAuthProblem(d: PrDeps, env: NodeJS.ProcessEnv = d.env ?? {}): string | undefined {
+  if (env.FF_GH_APP_NAMES) return undefined;
+  const r = d.run('gh', ['auth', 'status', '--hostname', 'github.com']);
+  if (r.code === 0) return undefined;
+  const said = `${r.out}\n${r.err}`
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l && !/token/i.test(l))
+    .slice(0, 2)
+    .join(' / ');
+  return (
+    `ff-pr: gh cannot authenticate to github.com, so nothing is pushed or opened (gh auth status exited ${r.code}${said ? `: ${said.slice(0, 300)}` : ''}).\n` +
+    `gh reads GH_TOKEN, else GH_CONFIG_DIR (${env.GH_CONFIG_DIR || 'unset'}), else %APPDATA%\\GitHub CLI (APPDATA ${env.APPDATA || 'unset'}). ` +
+    'A Low-integrity sandbox worker gets GH_CONFIG_DIR from its daemon (w5430); without it this is an FF Factory fault to report to your orchestrator. Never copy a token into the environment.\n'
+  );
+}
+
 export function prMain(argv: string[], d: PrDeps): number {
   const a = parseArgs(argv);
   if (typeof a === 'string') {
     d.write(`ff-pr: ${a}\n${USAGE}`);
     return 2;
+  }
+  const auth = ghAuthProblem(d);
+  if (auth) {
+    d.write(auth);
+    return 1;
   }
   return a.cmd === 'push' ? push(d, a.o) : a.cmd === 'status' ? status(d, a.o) : merge(d, a.o);
 }
@@ -523,6 +553,7 @@ export const realPrDeps: PrDeps = {
   sleep: (ms) => void Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms),
   evidenceScript: () => findLocalPrEvidence(),
   updatePlugin: () => updateLocalPlugin(),
+  env: process.env,
 };
 
 /** Write the ff-pr shims (sh for Git Bash and macOS/Linux, .cmd for PowerShell) into the agents' bin folder. */

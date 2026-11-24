@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { atlasWarning, ciVerdict, installPrShim, parseArgs, prMain, type PrDeps, type Ran } from '../machine/prFlow.ts';
+import { atlasWarning, ciVerdict, ghAuthProblem, installPrShim, parseArgs, prMain, type PrDeps, type Ran } from '../machine/prFlow.ts';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpFont } from './tmpFontFixture.ts';
 
@@ -260,4 +260,22 @@ test('w5069 push: the atlas warning does not stop the push', () => {
   assert.equal(prMain(['push'], d), 0);
   assert.match(d.said, /warning: 1 dynamic TMP font atlas/);
   assert.ok(d.ran.includes('git push -u origin HEAD:refs/heads/w1478-x'));
+});
+
+test('w5430: ff-pr refuses loudly before any push when gh cannot authenticate, and names where gh looked', () => {
+  const d = fake({ 'gh auth status': { code: 1, out: '', err: 'You are not logged into any GitHub hosts. To log in, run: gh auth login\n  - Token: gho_************' } });
+  d.env = { APPDATA: 'F:\\ffw\\home\\AppData\\Roaming' };
+  for (const cmd of [['push'], ['push', '--base', 'main'], ['status'], ['merge']]) {
+    d.said = '';
+    d.ran.length = 0;
+    assert.equal(prMain(cmd, d), 1, cmd[0]);
+    assert.deepEqual(d.ran, ['gh auth status --hostname github.com'], `${cmd[0]}: nothing past the check runs`);
+    assert.match(d.said, /gh cannot authenticate to github\.com.*not logged into any GitHub hosts/);
+    assert.match(d.said, /GH_CONFIG_DIR \(unset\).*APPDATA F:\\ffw/);
+    assert.doesNotMatch(d.said, /gho_/, "gh's token lines are never repeated");
+  }
+  assert.equal(ghAuthProblem(fake({}), {}), undefined, 'logged in: no refusal');
+  const app = fake({ 'gh auth status': { code: 1, out: '', err: 'x' } });
+  assert.equal(ghAuthProblem(app, { FF_GH_APP_NAMES: 'a' }), undefined, 'a GitHub App run is left out');
+  assert.deepEqual(app.ran, []);
 });

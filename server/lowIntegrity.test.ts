@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { currentAccount, isLabelledLow, labelLow, lowCopy, lowEnv, lowTargets, lowUnityDir, strayLowServers, type Exec } from '../machine/lowIntegrity.ts';
+import { currentAccount, ghConfigDirFor, isLabelledLow, labelLow, lowCopy, lowEnv, lowTargets, lowUnityDir, strayLowServers, type Exec } from '../machine/lowIntegrity.ts';
 
 /**
  * w5377: the Windows worker fence. What gets the Low label (and what must stay Medium: daemon, secrets, the daemon's
@@ -169,6 +169,18 @@ test('lowEnv moves APPDATA into the root and puts the agent Git first', () => {
   assert.equal(e.CLAUDE_CODE_GIT_BASH_PATH, path.join(git, 'bin', 'bash.exe'));
   assert.equal(e.Path, [path.join(git, 'cmd'), path.join(git, 'usr', 'bin'), 'C:\\Windows'].join(path.delimiter));
   assert.deepEqual(Object.keys(lowEnv(R, undefined, 'Path', 'x')).sort(), ['APPDATA', 'LOCALAPPDATA']);
+});
+
+test("w5430: lowEnv points gh at the machine's own gh login, and ghConfigDirFor finds it", () => {
+  const login = path.join(R, 'person', 'GitHub CLI');
+  const e = lowEnv(R, undefined, 'Path', 'x', login);
+  assert.equal(e.GH_CONFIG_DIR, login);
+  assert.notEqual(path.dirname(e.GH_CONFIG_DIR), e.APPDATA, "the login is the daemon user's, not the moved APPDATA");
+  const appdata = path.join(R, 'person');
+  assert.equal(ghConfigDirFor({ APPDATA: appdata }, (p) => p === path.join(login, 'hosts.yml')), login);
+  assert.equal(ghConfigDirFor({ APPDATA: appdata }, () => false), undefined, 'no hosts.yml: gh has no login here');
+  assert.equal(ghConfigDirFor({ APPDATA: appdata, GH_CONFIG_DIR: 'X' }, () => false), 'X');
+  assert.equal(ghConfigDirFor({}, () => true), undefined);
 });
 
 test('strayLowServers: a Low compiler server on the install path is ended, one through the junction or at Medium is not', () => {

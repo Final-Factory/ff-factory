@@ -16,7 +16,7 @@ import { bus, type DistributiveOmit } from '../server/store.ts';
 import { fenceEnv, fenceFor, fencedArgv, type WorkerFence } from '../server/workerFence.ts';
 import { probeFence } from './fenceProbe.ts';
 import { installShellGroups, readShellGroups, shellGroupEnv, shellGroupsDir } from './shellGroups.ts';
-import { labelLow, lowCopy, lowEnv, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
+import { ghConfigDirFor, labelLow, lowCopy, lowEnv, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
 import { compilerServers } from './compilerServer.ts';
 import { agentGitPathDir } from '../server/agentGit.ts';
 import { createRequire } from 'node:module';
@@ -2826,7 +2826,7 @@ export class Daemon {
     const fence = spec.sandbox ? this.workerFence : undefined;
     const low = spec.sandbox ? this.low : undefined;
     const lowPath = app[pathKey] ?? slot[pathKey] ?? process.env[pathKey];
-    const lowVars = low && this.cfg.root ? { ...lowEnv(this.cfg.root, low.git, pathKey, lowPath), ...(low.unity ? { FF_UNITY_EDITOR_ROOT: low.unity } : {}) } : {};
+    const lowVars = low && this.cfg.root ? { ...lowEnv(this.cfg.root, low.git, pathKey, lowPath, low.gh), ...(low.unity ? { FF_UNITY_EDITOR_ROOT: low.unity } : {}) } : {};
     const claudeExecutable = low ? low.claude : (spec.claudeExecutable ?? this.cfg.claude);
     const groups = spec.sandbox && this.shellGroupsOn ? shellGroupEnv(this.slots.dir, { ...process.env, ...spec.env }) : {};
     return { ...spec, ...lock, stdioMcp: this.stdioMcpFor(spec), claudeExecutable, ...(fence ? { fence } : {}), env: { ...spec.env, ...sessionTempEnv(agentTempRoot(this.cfg.tempDir), info.id), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...slot, ...app, ...(fence ? fenceEnv(fence) : {}), ...lowVars, ...groups } };
@@ -2861,7 +2861,7 @@ export class Daemon {
   }
 
   /** The Windows Low fence once set up (lowSetup): the Low claude copy, the root's Git and Unity junction folder. */
-  private low?: { claude: string; git?: string; unity?: string };
+  private low?: { claude: string; git?: string; unity?: string; gh?: string };
   private lowStarted = false;
 
   /**
@@ -2934,8 +2934,10 @@ export class Daemon {
         }
       }
       const versions = await lowUnityJunctions(root, found, exec, say);
-      this.low = { claude, ...(git ? { git } : {}), ...(versions.length ? { unity: lowUnityDir(root) } : {}) };
-      log(`worker integrity: Low is on for sandbox agents (claude ${claude}; git ${git ?? 'none'}; Unity junctions ${versions.join(', ') || 'none'})`);
+      const gh = ghConfigDirFor(process.env);
+      this.low = { claude, ...(git ? { git } : {}), ...(versions.length ? { unity: lowUnityDir(root) } : {}), ...(gh ? { gh } : {}) };
+      log(`worker integrity: Low is on for sandbox agents (claude ${claude}; git ${git ?? 'none'}; Unity junctions ${versions.join(', ') || 'none'}; gh login ${gh ?? 'none'})`);
+      await this.lowGhSelfTest(root, gh, exec, say);
       // w5402: Low agents run the Unity MCP server under the root's APPDATA (lowEnv), where uv resolves it again; fill
       // the cache for that too, or they get no bridge (BEAST: Python 3.10 from PATH needed packages the cache lacked).
       const mcp = resolveUnityMcpServer(this.cfg.unityMcpServer, this.cfg.repoPath);
@@ -2961,6 +2963,31 @@ export class Daemon {
     } catch (e) {
       log(`worker integrity: ${(e as Error).message}; agents run unfenced`);
       this.low = undefined;
+    }
+  }
+
+  /**
+   * w5430: the worker environment's gh self-test. Runs `gh auth status` at Low (a Low copy of the machine's gh, as the
+   * claude probe does) with a Low worker's APPDATA and GH_CONFIG_DIR, and logs a loud WARNING when gh cannot authenticate
+   * there: then ff-pr push and gh pr create fail in every sandbox (w5430, "You are not logged into any GitHub hosts").
+   * Prints only the result, never gh's token lines. Never throws; agents stay fenced either way.
+   */
+  private async lowGhSelfTest(root: string, gh: string | undefined, exec: (cmd: string, args: string[], o?: { timeoutMs?: number }) => Promise<{ code: number | null; stdout: string; stderr: string }>, say: (l: string) => void): Promise<void> {
+    const loud = (why: string) => log(`worker integrity: WARNING gh cannot authenticate for Low workers (${why}): ff-pr push, gh pr create and git push fail in every sandbox until it does (w5430). Log gh in as this machine's user (gh auth login), or set GH_CONFIG_DIR for the daemon.`);
+    try {
+      if (!gh) return loud(`no gh login here: no GH_CONFIG_DIR and no hosts.yml under ${process.env.APPDATA ?? '%APPDATA%'}\\GitHub CLI`);
+      const where = await exec('where.exe', ['gh'], { timeoutMs: 30_000 });
+      const exe = where.code === 0 ? where.stdout.split(/\r?\n/).map((l) => l.trim()).find((l) => /\.exe$/i.test(l)) : undefined;
+      if (!exe) return loud("gh is not on the daemon's PATH");
+      const copy = await lowCopy(root, exe, exec, say);
+      if (!copy) return loud('no Low copy of gh to test with');
+      const env = { ...process.env, ...lowEnv(root, undefined, 'PATH', process.env.PATH, gh), GH_TOKEN: '', GITHUB_TOKEN: '', GH_NO_UPDATE_NOTIFIER: '1', GH_PROMPT_DISABLED: '1' };
+      const r = await run(copy, ['auth', 'status', '--hostname', 'github.com'], { timeoutMs: 60_000, env });
+      const said = `${r.stdout}\n${r.stderr}`.split(/\r?\n/).filter((l) => l.trim() && !/token/i.test(l));
+      if (r.code !== 0) return loud(`gh auth status at Low exited ${r.code}: ${said.slice(0, 3).join(' / ').trim().slice(0, 300)}`);
+      log(`worker integrity: gh authenticates for Low workers (${said.find((l) => /Logged in/i.test(l))?.trim() ?? 'gh auth status ok'})`);
+    } catch (e) {
+      loud((e as Error).message);
     }
   }
 
