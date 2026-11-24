@@ -2936,6 +2936,13 @@ export class Daemon {
       const versions = await lowUnityJunctions(root, found, exec, say);
       this.low = { claude, ...(git ? { git } : {}), ...(versions.length ? { unity: lowUnityDir(root) } : {}) };
       log(`worker integrity: Low is on for sandbox agents (claude ${claude}; git ${git ?? 'none'}; Unity junctions ${versions.join(', ') || 'none'})`);
+      // w5402: Low agents run the Unity MCP server under the root's APPDATA (lowEnv), where uv resolves it again; fill
+      // the cache for that too, or they get no bridge (BEAST: Python 3.10 from PATH needed packages the cache lacked).
+      const mcp = resolveUnityMcpServer(this.cfg.unityMcpServer, this.cfg.repoPath);
+      if (mcp.server) {
+        const { APPDATA, LOCALAPPDATA } = lowEnv(root, undefined, 'PATH', undefined);
+        void warmUvCache(mcp.server.command, uvWarmRuns(mcp.server), workerUvCacheDir(root), runQuietEnv, { APPDATA, LOCALAPPDATA }, 'Low agents').then((m) => m && log(m)).catch((e) => log(`unity mcp: filling the uv cache for Low agents failed: ${(e as Error).message}`));
+      }
       // w5347: a Low compiler server on an install's own path takes every Medium compile on the machine; end it at once.
       this.timers.push(setInterval(() => {
         try {
