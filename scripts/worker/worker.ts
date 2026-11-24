@@ -1801,8 +1801,11 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
     say(`Dev Drive: not made, and the install carries on without it (sandboxes stay on ${path.win32.parse(l.root).root}): ${(e as Error).message}\nRun the update with -DevDrive once that is fixed, or install with -NoDevDrive to stop this message.`);
   }
 
-  // The Unity slots mailbox the daemon will use, outside the root on purpose; the uninstall removes it.
-  noteOutside(m, { kind: 'file', name: o.unitySlotsDir ?? path.join(os.homedir(), '.ff-factory', 'unity-slots'), note: 'the Unity slots mailbox every script finds (w469)' });
+  // The Unity slots mailbox is the root's own, <root>/unity-slots (machine/daemon.ts withRootDefaults, w5377): nothing
+  // outside the root to note, unless the install names one there.
+  if (o.unitySlotsDir && !pathKey(path.resolve(o.unitySlotsDir)).startsWith(pathKey(path.resolve(l.root)))) {
+    noteOutside(m, { kind: 'file', name: o.unitySlotsDir, note: 'the Unity slots mailbox this install names (w469)' });
+  }
   writeManifest(l.root, m);
 
   // 4. The daemon and its service. A test install cleans nothing: its settings are in place before it first starts.
@@ -2671,11 +2674,11 @@ while ($id -and $mine.Add([int]$id)) { $id = ($all | Where-Object { $_.ProcessId
   return items;
 }
 
-/** The Unity slots pointer for scripts outside the daemon (machine/unitySlots.ts slotsPointer): `{ "dir": <root>/daemon/unity-slots }`. Exported for tests. */
-export function writeSlotsPointer(l: Pick<Layout, 'daemon'>, home = os.homedir()): string {
+/** The Unity slots pointer for scripts outside the daemon (machine/unitySlots.ts slotsPointer): `{ "dir": <root>/unity-slots }` (w5377). Exported for tests. */
+export function writeSlotsPointer(l: Pick<Layout, 'root'>, home = os.homedir()): string {
   const file = slotsPointer(home);
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify({ dir: path.join(l.daemon, 'unity-slots') }, null, 2) + '\n');
+  fs.writeFileSync(file, JSON.stringify({ dir: path.join(l.root, 'unity-slots') }, null, 2) + '\n');
   return file;
 }
 

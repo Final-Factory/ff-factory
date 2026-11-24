@@ -294,9 +294,9 @@ test('worker install: the Unity slots pointer leads scripts outside the daemon t
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-wslots-'));
   try {
     const root = path.join(home, 'ff-worker');
-    const file = writeSlotsPointer({ daemon: path.join(root, 'daemon') }, home);
+    const file = writeSlotsPointer({ root }, home);
     assert.equal(file, slotsPointer(home));
-    assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { dir: path.join(root, 'daemon', 'unity-slots') });
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { dir: path.join(root, 'unity-slots') });
     assert.equal(removeSlotsPointer(path.join(home, 'other-root'), home), false, "another install's root: left");
     assert.ok(fs.existsSync(file));
     assert.equal(removeSlotsPointer(root, home), true);

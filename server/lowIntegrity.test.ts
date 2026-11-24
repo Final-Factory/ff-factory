@@ -48,6 +48,32 @@ test('adds home when missing, extras outside the root, and files not already und
   assert.deepEqual(t.files, [path.join(app, 'max-events.jsonl')]);
 });
 
+test("the agents' node stays Medium inside a Low tools folder, and only then (w5377)", () => {
+  const t = lowTargets({ root: R, appDir: path.join(R, 'daemon'), children: kids('tools', 'tmp'), exists: () => true });
+  assert.ok(t.dirs.includes(path.join(R, 'tools')));
+  assert.deepEqual(t.medium, [path.join(R, 'tools', 'node')]);
+  assert.deepEqual(lowTargets({ root: R, appDir: path.join(R, 'daemon'), children: kids('tmp'), exists: () => true }).medium, []);
+});
+
+test('labelLow keeps a medium folder Medium only when it inherited Low, and a failure there leaves the fence on (w5377)', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'low-'));
+  const node = path.join(dir, 'node');
+  const gone = path.join(dir, 'gone');
+  fs.mkdirSync(node);
+  const said: string[] = [];
+  const { exec, calls } = icacls(new Set([node]));
+  assert.equal(await labelLow({ dirs: [], files: [], medium: [node, gone] }, exec, (l) => void said.push(l)), true);
+  assert.deepEqual(calls.filter((c) => c.length > 1), [[node, '/setintegritylevel', '(OI)(CI)medium']]);
+  assert.ok(said.some((l) => l.includes('kept') && l.includes('Medium')));
+  const already = icacls(new Set());
+  await labelLow({ dirs: [], files: [], medium: [node] }, already.exec, () => {});
+  assert.deepEqual(already.calls.filter((c) => c.length > 1), [], 'not Low: left alone');
+  const bad = icacls(new Set([node]), node);
+  assert.equal(await labelLow({ dirs: [], files: [], medium: [node] }, bad.exec, (l) => void said.push(l)), true);
+  assert.ok(said.some((l) => l.includes('could not keep')));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test('reads the Low label from icacls', () => {
   assert.ok(isLabelledLow('V:\\ffw\\tmp Mandatory Label\\Low Mandatory Level:(OI)(CI)(NW)'));
   assert.ok(!isLabelledLow('V:\\ffw\\tmp BUILTIN\\Administrators:(F)'));

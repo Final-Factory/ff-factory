@@ -1,0 +1,1 @@
+- Windows worker fence: the agents' node (`<root>\tools\node`) is kept Medium inside the Low `tools` folder. Labelled Low, it ran every agent's node at Low, and from a Medium agent the machine's Git it started crashed (`0xC0000022` on msys' shared object directory, w5377).
