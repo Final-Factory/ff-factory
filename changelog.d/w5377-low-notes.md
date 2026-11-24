@@ -1,0 +1,1 @@
+- docs/worker-root.md 4.1 lists what a Low-integrity worker meets, as measured in LothDesktop's trial (w5377): what works, what is refused, exe labels, process listing, firewall cmdlets, the offline uv cache and LocalLow.
