@@ -60,6 +60,7 @@ import { mountsIn, unmountOwnFuse, type Mount } from '../server/deadMounts.ts';
 import { gamePlayers, isUnityBinary, slotsDir, splitArgs, unityProcesses } from './unitySlots.ts';
 import { inspectProcs, type ProcFacts } from './unityReaper.ts';
 import { askDaemon, orDaemon, procsMailbox, type ProcsAsk } from './procsBroker.ts';
+import { readShellGroups, shellGroupsDir, withShellGroups, type ShellGroup } from './shellGroups.ts';
 
 const MIN = 60_000;
 
@@ -147,6 +148,8 @@ export interface LeftoverDeps {
   /** FF_SESSION_ID, FF_SANDBOX_ID and FF_MACHINE_ID of the given processes, where the machine lets them be read. */
   envOf(pids: number[]): Promise<Map<number, ProcEnv>>;
   inspect(pids: number[]): Promise<ProcFacts[]>;
+  /** w5401: macOS worker shells' records (machine/shellGroups.ts), for processes whose environment shows no session. */
+  shellGroups?(): ShellGroup[];
   /** The session's agent process runs here (the daemon's entry, or its agent host still up). */
   sessionLive(id: string): boolean;
   /** A session this machine runs or ran (the daemon's entries, the portal's list in its welcome). */
@@ -642,7 +645,13 @@ export class LeftoverReaper {
       const c = d.platform === 'win32' ? posix(p.cmd).toLowerCase() : p.cmd;
       if (!INIT.test(c) && !WORKER_CLI.test(c) && prot.some((re) => re.test(c))) spare(p.pid);
     }
-    const env = await d.envOf(procs.map((p) => p.pid).filter((pid) => pid > 0 && !spared.has(pid)));
+    // w5401: on a Mac an Apple program's environment reads empty; the worker shells' records name its session.
+    const env = await withShellGroups(
+      procs.filter((p) => p.pid > 0 && !spared.has(p.pid)),
+      await d.envOf(procs.map((p) => p.pid).filter((pid) => pid > 0 && !spared.has(pid))),
+      d.shellGroups?.() ?? [],
+      (pids) => d.inspect(pids),
+    );
     // w4047: a program a worker started for a person (`ff-leftovers launch`) is the person's, and so is what it runs, whatever
     // its path or arguments name (an installer in the worker's temp folder): said once in the log, never ended.
     for (const p of procs) {
@@ -1614,7 +1623,10 @@ export async function leftoversMain(argv: string[], e: NodeJS.ProcessEnv = proce
   let topBatch = new Set<number>();
   const scan = async () => {
     const procs = await read.procs();
-    const env = await read.envs(procs.map((p) => p.pid));
+    // w5401: on a Mac an Apple program's environment reads empty (`nohup sleep 600 &`); this session's shells' records
+    // name the process groups it started.
+    const groups = platform === 'darwin' ? readShellGroups(shellGroupsDir(slotsDir(e)), { session }) : [];
+    const env = await withShellGroups(procs, await read.envs(procs.map((p) => p.pid)), groups, (pids) => read.inspect(pids));
     // The session's processes and their parents, and what names its temp folder: start times, so a reused parent pid is
     // told from the agent's host.
     const named = procs.filter((p) => tempSessionInArgs(p.cmd, tempRoot, platform) === session || tempSessionOf(p.cmd, tempRoot, platform) === session);

@@ -776,6 +776,21 @@ so one that names exactly one worker's temp folder among its arguments, in Windo
 (`tail -f /f/ffw/tmp/ffa-<session>/run.log`), is that worker's, and ends only once its own starter is gone too (another
 worker's live shell may be reading that folder). Sixteen such tails, started 10-15 to 10-18 by shells long gone, held
 stopped workers' folders on LothDesktop.
+A fourth on a Mac (w5401, `machine/shellGroups.ts`): macOS shows no environment for Apple's own programs (`/bin/zsh`,
+`/bin/sleep`, `tail`, `caffeinate`), to `ps -E` or KERN_PROCARGS2, unfenced and as the same user, so a worker's
+`nohup sleep 600 &` left behind (m5, 2026-11-24, pid 40085) was never listed or ended. Claude Code starts each Bash tool
+shell as `zsh -c` with pid = pgid = sid, and a `nohup x &` keeps that pgid after it is reparented to pid 1 (measured:
+shell 51099, orphan 51100 with pgid 51099). The daemon gives its macOS sandbox agents `ZDOTDIR=<slots>/zsh`
+(`installShellGroups`, `shellGroupEnv` in `runSpec`); its `.zshenv` appends `s <pid> <time> <FF_SESSION_ID> ...` to
+`<slots>/shell-groups/<session>.tsv`, an `e <pid> <time>` line on exit (`zshexit_functions`), then hands ZDOTDIR back
+(`FF_ZDOTDIR_WAS`, or unset) and sources the person's own files. A process with no session in its environment whose pgid is
+a recorded shell is that session's when the shell still runs and started when its line says, or is gone and the process
+started between its start and end lines (3 h when it left no end line: SIGTERM skips `zshexit`), or its parent is such a
+process of its group. A pid is reused only once its group is empty, and a reused group starts after the old shell ended, so
+another session's or a person's process does not match. Not covered: a shell other than zsh, `set -m` or `setsid` (a new
+group), a program that clears ZDOTDIR. Rejected: `CLAUDE_CODE_SHELL_PREFIX` (it turns off Claude Code features), editing
+Claude's shell snapshot (rewritten every session), polling the shells (a quick shell exits between polls). Tests:
+`server/shellGroups.test.ts`.
 
 **When it ends** (looked at once a minute; a process must have been seen by two looks):
 

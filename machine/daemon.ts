@@ -15,6 +15,7 @@ import { AgentSession, isMidTurn, midTurnRefusal, othersMidTurn, type OptionsFac
 import { bus, type DistributiveOmit } from '../server/store.ts';
 import { fenceEnv, fenceFor, fencedArgv, type WorkerFence } from '../server/workerFence.ts';
 import { probeFence } from './fenceProbe.ts';
+import { installShellGroups, readShellGroups, shellGroupEnv, shellGroupsDir } from './shellGroups.ts';
 import { labelLow, lowCopy, lowEnv, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
 import { compilerServers } from './compilerServer.ts';
 import { agentGitPathDir } from '../server/agentGit.ts';
@@ -479,6 +480,8 @@ export class Daemon {
   readonly reaper: UnityReaper;
   /** Ends what a stopped worker left running: game players, Xvfb, builds, servers (machine/leftovers.ts, w1196, w1197). */
   readonly leftovers: LeftoverReaper;
+  /** w5401: <slots>/zsh is written, so sandbox agents get ZDOTDIR (a real daemon on a Mac only). */
+  private shellGroupsOn = false;
   /** Answers fenced workers' process reads (machine/procsBroker.ts, w5397); a real daemon on a Mac only. */
   private procsBroker?: ProcsBroker;
   /** Closes the other editors and players while another worker's timed run holds the bench lock (machine/benchTurn.ts, w1829). */
@@ -716,6 +719,8 @@ export class Daemon {
       procs: real ? () => pd.procs() : async () => [],
       envOf: (pids) => readEnvs(platform, pids),
       inspect: realInspect(platform),
+      // w5401: macOS worker shells' records, for Apple programs whose environment reads empty (machine/shellGroups.ts).
+      ...(real && platform === 'darwin' ? { shellGroups: () => readShellGroups(shellGroupsDir(this.slots.dir), { prune: true }) } : {}),
       sessionLive: (id) => this.sessionLive(id),
       sessionKnown: (id) => this.entries.has(id) || this.portalSessions.has(id) || this.hostSessions.has(id),
       resumable: (id) => this.resumable.has(id),
@@ -748,6 +753,15 @@ export class Daemon {
       ...leftoverDeps,
     });
     // w5397: a fenced worker's ff-leftovers cannot run the setuid `ps`; the daemon, outside the fence, reads for it.
+    // w5401: the ZDOTDIR whose .zshenv notes each worker shell's session (machine/shellGroups.ts).
+    if (real && platform === 'darwin') {
+      try {
+        installShellGroups(this.slots.dir);
+        this.shellGroupsOn = true;
+      } catch (e) {
+        log(`leftovers: could not write the worker shells' zsh files: ${(e as Error).message}`);
+      }
+    }
     this.procsBroker = real && platform === 'darwin' ? new ProcsBroker({ dir: procsMailbox(this.slots.dir), answer: answerProcsAsk(platform), log: (line) => log(line) }) : undefined;
     this.benchTurn = new BenchTurn({
       // w1894: a timed run's turn first (it ends within its 30 minutes; no new one is granted while a person plays), then a
@@ -2812,7 +2826,8 @@ export class Daemon {
     const lowPath = app[pathKey] ?? slot[pathKey] ?? process.env[pathKey];
     const lowVars = low && this.cfg.root ? { ...lowEnv(this.cfg.root, low.git, pathKey, lowPath), ...(low.unity ? { FF_UNITY_EDITOR_ROOT: low.unity } : {}) } : {};
     const claudeExecutable = low ? low.claude : (spec.claudeExecutable ?? this.cfg.claude);
-    return { ...spec, ...lock, stdioMcp: this.stdioMcpFor(spec), claudeExecutable, ...(fence ? { fence } : {}), env: { ...spec.env, ...sessionTempEnv(agentTempRoot(this.cfg.tempDir), info.id), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...slot, ...app, ...(fence ? fenceEnv(fence) : {}), ...lowVars } };
+    const groups = spec.sandbox && this.shellGroupsOn ? shellGroupEnv(this.slots.dir, { ...process.env, ...spec.env }) : {};
+    return { ...spec, ...lock, stdioMcp: this.stdioMcpFor(spec), claudeExecutable, ...(fence ? { fence } : {}), env: { ...spec.env, ...sessionTempEnv(agentTempRoot(this.cfg.tempDir), info.id), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...slot, ...app, ...(fence ? fenceEnv(fence) : {}), ...lowVars, ...groups } };
   }
 
   private fenceMemo?: { fence?: WorkerFence };
