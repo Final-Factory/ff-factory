@@ -134,6 +134,21 @@ test('w5457: a local failure while the test file was being written or edited is 
   assert.match(String(l[0]!.reason), /being written or edited/);
 });
 
+test('w5457: a failure that took over 100 times the test median is unknown (a stalled editor), not fp', async () => {
+  const h = history();
+  const at = (i: number, outcome: TestCase['outcome'], ms: number) => h.addRun({ source: 'pr-gate', key: `s${i}`, repo: 'o/r', branch: 'b', sha: 'same', finished: iso(i) }, [{ ...tc('A.T.slow', outcome), ms }]);
+  for (let i = 0; i < 6; i++) at(i, 'pass', 1000);
+  at(10, 'fail', 331_372);
+  at(11, 'pass', 1000);
+  at(12, 'fail', 1200);
+  at(13, 'pass', 1000);
+  await labelFailures(h, async () => [], T0 + 3600_000);
+  const l = labelOf(h, 'A.T.slow');
+  assert.equal(l[0]!.label, 'unknown');
+  assert.match(String(l[0]!.reason), /stalled/);
+  assert.equal(l[1]!.label, 'fp');
+});
+
 test('w5457: ownSourceIn names the test class file only, and beingWritten leaves other changes alone', () => {
   assert.deepEqual(ownSourceIn('A.B.FooTest.Case(1,2)', ['Assets/Tests/FooTest.cs', 'Assets/Tests/FooTest.cs.meta', 'Assets/Tests/BarTest.cs']), ['Assets/Tests/FooTest.cs']);
   assert.deepEqual(ownSourceIn('A.B.FooTest+Inner.Case', ['x/FooTest.cs']), ['x/FooTest.cs']);

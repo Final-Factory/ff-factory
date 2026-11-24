@@ -501,6 +501,20 @@ export class TestHistory {
   }
 
   /**
+   * w5457: how many times slower than usual a failing test ran: its failing run's time over the median of its passes (at least
+   * 5 of them, and the median counted as at least 50 ms). Undefined when there is nothing to compare. A test 100 times slower
+   * than usual stalled (an editor under machine load), which its failure says nothing about.
+   */
+  slowdown(f: PendingFailure): number | undefined {
+    const ms = (this.db.prepare('SELECT ms FROM results WHERE run_id = ? AND test_id = ?').get(f.runId, f.testId) as Row | undefined)?.ms;
+    if (typeof ms !== 'number') return undefined;
+    const passes = this.db.prepare("SELECT ms FROM results WHERE test_id = ? AND outcome = 'pass' AND ms IS NOT NULL ORDER BY ms").all(f.testId) as Row[];
+    if (passes.length < 5) return undefined;
+    const median = Number(passes[passes.length >> 1]!.ms);
+    return ms / Math.max(median, 50);
+  }
+
+  /**
    * The later runs of a failed test on its line: CI runs of the same branch (a pull request's head branch, master), or a
    * worker's runs in the same sandbox on the same branch. Answers the first later pass and how many later runs there were.
    */
@@ -573,6 +587,9 @@ export const localRunKey = (machineId: string, sandbox: string, file: string) =>
 /** The files a pull request's own change differs in between two of its head commits (CI), or undefined when unreadable. */
 export type PrDiff = (repo: string, a: string, b: string) => Promise<string[] | undefined>;
 
+/** A failing test this many times slower than its median passing time stalled (w5457). */
+const STALL_FACTOR = 100;
+
 const ageDays = (iso: string, now: number) => (now - Date.parse(iso)) / DAY;
 
 /**
@@ -594,6 +611,11 @@ export async function labelFailures(h: TestHistory, prDiff: PrDiff, now = Date.n
       continue;
     }
     const p = next.pass;
+    const slow = h.slowdown(f);
+    if (slow !== undefined && slow > STALL_FACTOR) {
+      n += +h.label(f.id, 'unknown', `the run stalled: the test took ${Math.round(slow)} times its median time to fail (an editor under load), so the failure says nothing about the test`, 'auto');
+      continue;
+    }
     const again = f.source === 'local' ? 'in the next local run that passed' : `in CI at ${String(p.sha).slice(0, 9)}`;
     let verdict: { label: Label; reason: string };
     if (f.source === 'local' && p.source === 'local') {
