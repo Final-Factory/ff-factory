@@ -660,6 +660,31 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
 - Every 15 s the daemon ends any Low Roslyn compiler server that runs from an install's own path (`strayLowServers`), so
   a worker that starts Unity by its install path cannot break the machine's Medium compiles (w5347).
 
+**What a Low worker meets** (LothDesktop's trial, w5377, 2026-11-24; all measured from a Low agent):
+- **Works at Low:**
+  - git commit and fetch, and writes into the bare store (#1125);
+  - gh with the vault token;
+  - `unity-slot run` of a batchmode compile: licence resolved, exit 0;
+  - a slot player, windowed, quitting by itself;
+  - `ff-leftovers list` and `end`.
+- **Refused, as intended:** writes to `%USERPROFILE%`, `C:\ProgramData`, a drive's root, `<root>\secrets` and
+  `<root>\tools\node`.
+- **The label of an exe sets the integrity of whoever starts it.** Windows starts a Low-labelled exe at Low from any
+  parent. Labelling `<root>\tools` made the agents' `node` Low even in Medium agents, and Git's MSYS `sh.exe` started
+  from it crashed (`NtCreateDirectoryObject(\BaseNamedObjects\msys-2.0S5-…): 0xC0000022`). `labelLow` gives
+  `tools\node` an explicit `(OI)(CI)medium`, which beats the inherited Low (#1130). Check any new exe placed under a
+  Low folder the same way: `icacls <exe>` shows `Low Mandatory Level:(I)`.
+- **A Low process sees only Low processes.** tasklist, Get-Process and CIM list about 24 rows: no daemon, and no Medium
+  editor or node. Never judge from inside a worker whether a Medium process is running.
+- **The firewall cmdlets are denied** (`Get-NetFirewallApplicationFilter`: "Access is denied", PermissionDenied). The
+  rules' registry values under `HKLM:\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\FirewallRules`
+  are readable. The game repo's `player_slots.py` reads those instead, because it refused every launch before
+  (FinalFactory #4294).
+- **A cache that only `--offline` reads stays empty.** The Unity MCP server runs as `uvx --offline` against
+  `<root>\cache\uv` (w5281), so no sandbox agent had a bridge until the daemon filled that cache at start (#1131).
+- **`AppData\LocalLow` is writable at Low by Windows' design**, so the fence does not stop a player writing there. The
+  game's own data goes to `FF_GAME_DATA_DIR` (w5297), but Unity's native writes are not checked.
+
 **Rollout per Windows machine** (effort is a guess)
 
 | Machine | Root | Effort | Risk and what breaks |
