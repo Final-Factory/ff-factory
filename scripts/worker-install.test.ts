@@ -16,7 +16,7 @@ import { carryExclude, claudeSlug, plan, rehome, sameVolume, stopOldScript, type
 import { cloneRepo, credentialId, daemonJson, mergePath, planUpdate, plistPathOf, settingsDiff, update, updateVerdict, withPlistPath, withStandardPaths, gitVersion, holdRedeploys, layoutOf, writeMacSlotConfig, nightlyTaskProblem, playerFolders, supervisorProblems, syncPlayerFolders, noteOutside, parseArgs, preflightProblems, removeSlotsPointer, writeSlotsPointer, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
 import { slotsPointer } from '../machine/unitySlots.ts';
 import { adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, inAdministrators, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, withAuthorizedKey, withoutAuthorizedKey } from './worker/portalSsh.ts';
-import { applyWorkerFence, cloneEnv, devDriveFailure, exec, main, manifestFor, runElevatedSteps, workerFenceFlag, workerFenceLine } from './worker/worker.ts';
+import { applyWorkerFence, dropStaleSlotsNote, cloneEnv, devDriveFailure, exec, main, manifestFor, runElevatedSteps, workerFenceFlag, workerFenceLine } from './worker/worker.ts';
 
 const TOKEN = `ffm_lothdesktop_${'A'.repeat(43)}`;
 const OPTS = { root: 'D:\\work\\ffw', portalUrl: 'https://portal.example', maxSandboxes: 3, maxAgentsPerSandbox: 2, maxUnity: 2 };
@@ -813,4 +813,15 @@ test('worker install: play-only stays on the record, so an update clones nothing
   assert.equal(m.playOnly, true);
   assert.equal(manifestFor(m, o, 'desktop-coosego', 'D:\\ffw', '2026-10-25T00:00:00Z', 'win32').playOnly, true, 'kept by an update that does not say it');
   assert.equal(manifestFor(undefined, o, 'beast', 'F:\\ffw', '2026-10-24T00:00:00Z', 'win32').playOnly, undefined);
+});
+
+test("an update drops an older install's home mailbox note from root.json, keeping one inside the root or one the install names (w5402)", () => {
+  const root = path.resolve('/ffw');
+  const home = path.resolve('/home/u/.ff-factory/unity-slots');
+  const named = path.resolve('/elsewhere/unity-slots');
+  const task = { kind: 'task', name: 'FFFactoryDaemon', note: 'runs the daemon at logon' } as const;
+  const outside = [{ kind: 'file' as const, name: home, note: 'the Unity slots mailbox every script finds (w469)' }, task, { kind: 'file' as const, name: named }];
+  assert.deepEqual(dropStaleSlotsNote(outside, root), [task]);
+  assert.deepEqual(dropStaleSlotsNote(outside, root, named), [task, { kind: 'file', name: named }]);
+  assert.deepEqual(dropStaleSlotsNote([{ kind: 'file', name: path.join(root, 'unity-slots') }], root).length, 1);
 });

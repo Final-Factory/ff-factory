@@ -89,9 +89,26 @@ export const isLabelledLow = (icaclsOut: string) => /Mandatory Label\\Low Mandat
  * Labels each target Low unless it is already, and says what it did. icacls' label on a folder with (OI)(CI) reaches
  * the files already in it (measured, w5333). Never throws: a target it cannot label is reported, and the caller runs its
  * agents unfenced when any failed.
+ *
+ * Setting a mandatory label needs WRITE_OWNER on the path. An owner has only READ_CONTROL and WRITE_DAC by right, so where
+ * the account's write comes from a group ACE (BEAST's F:\ffw inherits Authenticated Users:(M) from the drive, and the
+ * daemon's token is not elevated, so Administrators:(F) does not count) icacls answers "Access is denied". The owner may
+ * still change the DACL, so labelLow then grants the account Full on the path and labels it again (measured on BEAST,
+ * w5402: denied, then the grant, then the label succeeds and reaches the files inside).
  */
-export async function labelLow(t: { dirs: string[]; files: string[]; medium?: string[] }, exec: Exec, say: (line: string) => void): Promise<boolean> {
+export async function labelLow(t: { dirs: string[]; files: string[]; medium?: string[] }, exec: Exec, say: (line: string) => void, account = currentAccount()): Promise<boolean> {
   let ok = true;
+  const setLabel = async (p: string, label: string) => {
+    let r = await exec('icacls', [p, '/setintegritylevel', label], { timeoutMs: 30 * 60_000 });
+    if (r.code !== 0 && account && /access is denied/i.test(r.stderr + r.stdout)) {
+      const g = await exec('icacls', [p, '/grant', `${account}:${label.startsWith('(OI)') ? '(OI)(CI)' : ''}F`], { timeoutMs: 30 * 60_000 });
+      if (g.code === 0) {
+        say(`worker integrity: gave ${account} Full on ${p}, which setting its label needs (WRITE_OWNER)`);
+        r = await exec('icacls', [p, '/setintegritylevel', label], { timeoutMs: 30 * 60_000 });
+      }
+    }
+    if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim().slice(-300));
+  };
   const one = async (p: string, label: string) => {
     try {
       if (!fs.existsSync(p)) {
@@ -100,8 +117,7 @@ export async function labelLow(t: { dirs: string[]; files: string[]; medium?: st
       }
       const now = await exec('icacls', [p], { timeoutMs: 60_000 });
       if (now.code === 0 && isLabelledLow(now.stdout)) return;
-      const r = await exec('icacls', [p, '/setintegritylevel', label], { timeoutMs: 30 * 60_000 });
-      if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim().slice(-300));
+      await setLabel(p, label);
       say(`worker integrity: labelled ${p} Low`);
     } catch (e) {
       ok = false;
@@ -117,8 +133,7 @@ export async function labelLow(t: { dirs: string[]; files: string[]; medium?: st
       if (!fs.existsSync(p)) continue;
       const now = await exec('icacls', [p], { timeoutMs: 60_000 });
       if (now.code !== 0 || !isLabelledLow(now.stdout)) continue;
-      const r = await exec('icacls', [p, '/setintegritylevel', MEDIUM_LABEL], { timeoutMs: 30 * 60_000 });
-      if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim().slice(-300));
+      await setLabel(p, MEDIUM_LABEL);
       say(`worker integrity: kept ${p} Medium`);
     } catch (e) {
       say(`worker integrity: could not keep ${p} Medium: ${(e as Error).message}`);
@@ -126,6 +141,10 @@ export async function labelLow(t: { dirs: string[]; files: string[]; medium?: st
   }
   return ok;
 }
+
+/** The account the daemon runs as, as icacls names it (DOMAIN\\user), or undefined off Windows. */
+export const currentAccount = (env: NodeJS.ProcessEnv = process.env): string | undefined =>
+  env.USERNAME ? (env.USERDOMAIN ? `${env.USERDOMAIN}\\${env.USERNAME}` : env.USERNAME) : undefined;
 
 export const lowToolsDir = (root: string) => path.join(root, 'tools', 'low');
 
