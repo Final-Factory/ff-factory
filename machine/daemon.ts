@@ -16,7 +16,7 @@ import { bus, type DistributiveOmit } from '../server/store.ts';
 import { fenceEnv, fenceFor, fencedArgv, type WorkerFence } from '../server/workerFence.ts';
 import { probeFence } from './fenceProbe.ts';
 import { installShellGroups, readShellGroups, shellGroupEnv, shellGroupsDir } from './shellGroups.ts';
-import { ghConfigDirFor, labelLow, lowCopy, lowEnv, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
+import { ghConfigDirFor, labelLow, lowCopy, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
 import { compilerServers } from './compilerServer.ts';
 import { agentGitPathDir } from '../server/agentGit.ts';
 import { createRequire } from 'node:module';
@@ -2904,6 +2904,8 @@ export class Daemon {
         log('worker integrity: not every folder could be labelled Low; agents run unfenced');
         return;
       }
+      // w5440: CI runners stay Medium (lowIntegrity.ts CI_CHILDREN); one whose job exe is still Low fails every Windows job.
+      for (const exe of await lowRunners(root, exec)) log(`worker integrity: CI runner job exe ${exe} is still labelled Low, so its jobs start at Low and Git Bash dies (0xC0000022); label its folder Medium`);
       const writable = (p: string) => [root, ...allow].some((a) => !path.relative(a, p).startsWith('..') && !path.isAbsolute(path.relative(a, p)));
       if (!writable(this.slots.dir)) log(`worker integrity: the Unity slots mailbox ${this.slots.dir} is outside the root and not in workerIntegrityAllow; a Low worker's unity-slot run cannot ask for a slot`);
       const sdkClaude = this.cfg.claude ?? path.join(path.dirname(createRequire(import.meta.url).resolve('@anthropic-ai/claude-agent-sdk-win32-x64/package.json')), 'claude.exe');

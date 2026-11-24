@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { currentAccount, ghConfigDirFor, isLabelledLow, labelLow, lowCopy, lowEnv, lowTargets, lowUnityDir, strayLowServers, type Exec } from '../machine/lowIntegrity.ts';
+import { currentAccount, ghConfigDirFor, isLabelledLow, labelLow, lowCopy, lowEnv, lowRunners, lowTargets, lowUnityDir, strayLowServers, type Exec } from '../machine/lowIntegrity.ts';
 
 /**
  * w5377: the Windows worker fence. What gets the Low label (and what must stay Medium: daemon, secrets, the daemon's
@@ -53,6 +53,26 @@ test("the agents' node stays Medium inside a Low tools folder, and only then (w5
   assert.ok(t.dirs.includes(path.join(R, 'tools')));
   assert.deepEqual(t.medium, [path.join(R, 'tools', 'node')]);
   assert.deepEqual(lowTargets({ root: R, appDir: path.join(R, 'daemon'), children: kids('tmp'), exists: () => true }).medium, []);
+});
+
+test('CI runner folders are never labelled Low and are kept Medium where an earlier rollout labelled them (w5440)', () => {
+  const t = lowTargets({ root: R, appDir: path.join(R, 'daemon'), children: kids('ffu-runners', 'tmp'), exists: () => true });
+  assert.ok(!t.dirs.some((d) => d.toLowerCase().includes('ffu-runners')));
+  assert.deepEqual(t.medium, [path.join(R, 'ffu-runners')]);
+  const both = lowTargets({ root: R, appDir: path.join(R, 'daemon'), children: kids('tools', 'FFU-Runners'), exists: () => true });
+  assert.deepEqual(both.medium, [path.join(R, 'tools', 'node'), path.join(R, 'FFU-Runners')]);
+});
+
+test("lowRunners names each runner whose Runner.Worker.exe is labelled Low (BEAST's ffu runners, w5440)", async () => {
+  const worker = (r: string) => path.join(R, 'ffu-runners', r, 'bin', 'Runner.Worker.exe');
+  const exec: Exec = async (_c, args) => ({
+    code: 0,
+    stdout: args[0] === worker('ffu-beast-4') ? `${args[0]} Mandatory Label\\Low Mandatory Level:(I)(NW)` : `${args[0]} BUILTIN\\Users:(RX)`,
+    stderr: '',
+  });
+  const list = (d: string) => (d === path.join(R, 'ffu-runners') ? ['cargo', 'ffu-beast-3', 'ffu-beast-4'] : []);
+  const exists = (p: string) => p === worker('ffu-beast-3') || p === worker('ffu-beast-4');
+  assert.deepEqual(await lowRunners(R, exec, { list, exists }), [worker('ffu-beast-4')]);
 });
 
 test('labelLow keeps a medium folder Medium only when it inherited Low, and a failure there leaves the fence on (w5377)', async () => {

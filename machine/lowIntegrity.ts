@@ -22,6 +22,14 @@ export const LOW_LABEL = '(OI)(CI)low';
 export const MEDIUM_LABEL = '(OI)(CI)medium';
 /** Root children that stay Medium (writeLock.ts LOCKED_CHILDREN, plus the root's own record). */
 export const MEDIUM_CHILDREN = ['daemon', 'secrets'];
+/**
+ * Root children that hold CI runners, which are not worker agents (w5440): they stay Medium, explicitly where an earlier
+ * rollout labelled them Low. A runner's Runner.Worker.exe is started per job from its bin folder, and a process started
+ * from a Low-labelled exe runs at Low, so a Low runner folder ran every job at Low, where Git Bash's msys dies at start
+ * (NtCreateDirectoryObject(\BaseNamedObjects\msys-2.0S5-...): 0xC0000022; BEAST's ffu runners, 2026-11-24 from 12:34Z).
+ * Medium also keeps Low workers off the runners' .credentials.
+ */
+export const CI_CHILDREN = ['ffu-runners'];
 
 export interface LowTargetsInput {
   root: string;
@@ -47,7 +55,7 @@ const same = (a: string, b: string) => path.resolve(a).toLowerCase() === path.re
 /** The folders and files to label Low. Exported for tests. */
 export function lowTargets(i: LowTargetsInput): { dirs: string[]; files: string[]; medium: string[] } {
   const exists = i.exists ?? fs.existsSync;
-  const keep = new Set(MEDIUM_CHILDREN.map((c) => c.toLowerCase()));
+  const keep = new Set([...MEDIUM_CHILDREN, ...CI_CHILDREN].map((c) => c.toLowerCase()));
   if (inside(i.appDir, i.root) && !same(i.appDir, i.root)) keep.add(path.relative(i.root, i.appDir).split(/[\\/]/)[0].toLowerCase());
   const dirs: string[] = [];
   for (const c of i.children) {
@@ -76,6 +84,8 @@ export function lowTargets(i: LowTargetsInput): { dirs: string[]; files: string[
   // would crash (0xC0000022 on msys' shared object directory; measured w5377). A Low agent's node is Low anyway (a Low
   // parent starts Low children), and a worker cannot rewrite the shared node.
   const medium = dirs.some((d) => same(d, path.join(i.root, 'tools'))) ? [path.join(i.root, 'tools', 'node')] : [];
+  const ci = new Set(CI_CHILDREN.map((c) => c.toLowerCase()));
+  for (const c of i.children) if (c.dir && ci.has(c.name.toLowerCase())) medium.push(path.join(i.root, c.name));
   return { dirs, files, medium };
 }
 
@@ -140,6 +150,26 @@ export async function labelLow(t: { dirs: string[]; files: string[]; medium?: st
     }
   }
   return ok;
+}
+
+/**
+ * The CI runners whose job process would start at Low (w5440): each `<root>/<CI child>/<runner>/bin/Runner.Worker.exe`
+ * that icacls says is labelled Low. The daemon checks this after labelling and says it loudly, since such a runner fails
+ * every Windows job before its first step. Exported for tests.
+ */
+export async function lowRunners(root: string, exec: Exec, o: { list?: (dir: string) => string[]; exists?: (p: string) => boolean } = {}): Promise<string[]> {
+  const list = o.list ?? ((d: string) => { try { return fs.readdirSync(d); } catch { return []; } });
+  const exists = o.exists ?? fs.existsSync;
+  const low: string[] = [];
+  for (const c of CI_CHILDREN) {
+    for (const r of list(path.join(root, c))) {
+      const exe = path.join(root, c, r, 'bin', 'Runner.Worker.exe');
+      if (!exists(exe)) continue;
+      const now = await exec('icacls', [exe], { timeoutMs: 60_000 });
+      if (now.code === 0 && isLabelledLow(now.stdout)) low.push(exe);
+    }
+  }
+  return low;
 }
 
 /** The account the daemon runs as, as icacls names it (DOMAIN\\user), or undefined off Windows. */
