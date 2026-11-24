@@ -7,8 +7,8 @@
  *
  * Off by default: daemon.json `workerIntegrity: "low"` turns it on, on Windows only. The root itself stays Medium: a Low
  * label on it would give Low processes delete-child over `secrets`. `daemon`, `secrets` and the daemon's own folder stay
- * Medium (a worker cannot rewrite the daemon's code or its tokens), and of the main clone `repo` only `repo\.git` is
- * labelled (sandbox worktrees commit there; the person's own working files stay Medium).
+ * Medium (a worker cannot rewrite the daemon's code or its tokens), and `repo`, the bare git store every sandbox is a
+ * worktree of, is labelled whole (sandbox worktrees commit there); a `repo` with a working tree gets only its `.git`.
  *
  * Not a boundary against a malicious worker: the sandbox editor the daemon starts is Medium and compiles what workers
  * write. It stops accidental writes outside the root, which is lothsahn's rule ("under no circumstances should workers
@@ -51,8 +51,12 @@ export function lowTargets(i: LowTargetsInput): { dirs: string[]; files: string[
   for (const c of i.children) {
     if (!c.dir || keep.has(c.name.toLowerCase())) continue;
     if (c.name.toLowerCase() === 'repo') {
-      const git = path.join(i.root, c.name, '.git');
+      // A worker install's repo is one bare store every sandbox is a worktree of (worker.ts cloneRepo): label all of it,
+      // as Landlock and Seatbelt already let workers write it. A clone with a working tree: only its .git.
+      const repo = path.join(i.root, c.name);
+      const git = path.join(repo, '.git');
       if (exists(git)) dirs.push(git);
+      else if (exists(path.join(repo, 'HEAD'))) dirs.push(repo);
       continue;
     }
     dirs.push(path.join(i.root, c.name));

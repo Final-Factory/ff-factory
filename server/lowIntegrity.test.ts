@@ -24,6 +24,14 @@ test('labels the root children except daemon, secrets and the daemon folder; of 
   assert.deepEqual(t.files, []);
 });
 
+test('a bare repo, the store every sandbox is a worktree of, is labelled whole; an empty repo folder is not', () => {
+  const head = path.join(R, 'repo', 'HEAD');
+  const t = lowTargets({ root: R, appDir: path.join(R, 'daemon'), children: kids('repo', 'home'), exists: (p) => p === head });
+  assert.deepEqual(t.dirs, [path.join(R, 'repo'), path.join(R, 'home')]);
+  const none = lowTargets({ root: R, appDir: path.join(R, 'daemon'), children: kids('repo', 'home'), exists: () => false });
+  assert.deepEqual(none.dirs, [path.join(R, 'home')]);
+});
+
 test('adds home when missing, extras outside the root, and files not already under a Low folder', () => {
   const app = path.resolve('/daemon');
   const slots = path.join(app, 'unity-slots');
