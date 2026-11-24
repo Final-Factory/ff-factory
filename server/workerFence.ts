@@ -108,9 +108,11 @@ export function fenceFor(o: { setting?: string; root?: string; platform?: NodeJS
 
 /**
  * What a fenced agent's environment adds: Claude Code's own temp (task output, its /tmp/cc-socks messaging socket) moves
- * into the root, and the auto-updater, which writes ~/.local/share/claude, is off.
+ * into the root, and the auto-updater, which writes ~/.local/share/claude, is off. TMPPREFIX: zsh writes each here-document
+ * to /tmp/zshXXXXXX, which the fence refuses (w5397, m5: "can't create temp file for here document: operation not
+ * permitted"); its files go to <root>/tmp/zshXXXXXX instead, and zsh removes each once read.
  */
-export const fenceEnv = (f: WorkerFence): Record<string, string> => ({ CLAUDE_CODE_TMPDIR: path.join(f.root, 'tmp', 'claude-code'), DISABLE_AUTOUPDATER: '1' });
+export const fenceEnv = (f: WorkerFence): Record<string, string> => ({ CLAUDE_CODE_TMPDIR: path.join(f.root, 'tmp', 'claude-code'), DISABLE_AUTOUPDATER: '1', TMPPREFIX: path.join(f.root, 'tmp', 'zsh') });
 
 /** The argv that runs `command args` inside the fence. */
 export const fencedArgv = (f: WorkerFence, command: string, args: string[]) => [SANDBOX_EXEC, '-p', seatbeltProfile(f), command, ...args];

@@ -539,7 +539,17 @@ test('readLeases: every slot\'s lease files, the session player_slots.py writes 
 
 const platform: UnityPlatform = process.platform === 'win32' ? 'win32' : process.platform === 'linux' ? 'linux' : 'darwin';
 
-test('readEnvs on this machine finds the session of a process started with it, and none in one started without', async () => {
+// Under the worker fence (w5397) the setuid ps cannot run: the tests that read this machine's processes with it skip,
+// and server/procsBroker.test.ts covers the fenced path.
+const PS_REFUSED = process.platform === 'darwin' && (() => {
+  try {
+    execFileSync('ps', ['-p', String(process.pid), '-o', 'pid='], { stdio: 'ignore' });
+    return false;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'EPERM' && 'ps is refused here (the worker fence)';
+  }
+})();
+test('readEnvs on this machine finds the session of a process started with it, and none in one started without', { skip: PS_REFUSED }, async () => {
   const sleeper = (extra: Record<string, string>) => spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { env: { ...process.env, FF_SESSION_ID: '', FF_MACHINE_ID: '', FF_WORKER_ROOT: '', ...extra }, stdio: 'ignore' });
   const a = sleeper({ FF_SESSION_ID: 'w1196abc', FF_SANDBOX_ID: 'slot9', FF_MACHINE_ID: 'testbox', FF_WORKER_ROOT: '/srv/ffw-test' });
   const b = sleeper({});
@@ -557,7 +567,7 @@ test('readEnvs on this machine finds the session of a process started with it, a
 // Git Bash on Windows (not WSL's System32\bash.exe), bash elsewhere.
 const BASH = process.platform === 'win32' ? ['C:\\Program Files\\Git\\bin\\bash.exe'].find((b) => fs.existsSync(b)) : '/bin/bash';
 
-test('on this machine: `ff-leftovers end` run through its shim from a bash pipeline ends the agent\'s background job, never the agent or its shell (w1219)', { skip: !BASH && 'no Git Bash' }, async () => {
+test('on this machine: `ff-leftovers end` run through its shim from a bash pipeline ends the agent\'s background job, never the agent or its shell (w1219)', { skip: (!BASH && 'no Git Bash') || PS_REFUSED }, async () => {
   // A throwaway session of its own: only this test's processes carry it, so nothing else can be listed or ended.
   const session = `w1219t${process.pid}`;
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ffleft-'));
@@ -597,7 +607,7 @@ test('on this machine: `ff-leftovers end` run through its shim from a bash pipel
 // Linux and a Mac (w1197: the m5's path is this one, with `ps -E` for the environments; the macOS CI job runs this file).
 const posixPlatform = process.platform === 'linux' ? 'linux' : process.platform === 'darwin' ? 'darwin' : undefined;
 
-test('on a real Linux machine or Mac: a detached "player" and "Xvfb" of a stopped session end, a live session\'s player stays', { skip: !posixPlatform && 'Linux and macOS only' }, async () => {
+test('on a real Linux machine or Mac: a detached "player" and "Xvfb" of a stopped session end, a live session\'s player stays', { skip: (!posixPlatform && 'Linux and macOS only') || PS_REFUSED }, async () => {
   const plat = posixPlatform!;
   // A Mac's player is the binary inside finalfactory.app, a Linux one finalfactory.x86_64 (unitySlots.ts gamePlayers).
   const playerIn = (slot: string) => (plat === 'darwin' ? path.join(root, 'players', slot, 'player', 'finalfactory.app', 'Contents', 'MacOS', 'finalfactory') : path.join(root, 'players', slot, 'player', 'finalfactory.x86_64'));
@@ -929,7 +939,7 @@ test('w4047: personEnv drops the worker\'s ownership variables and credentials, 
   assert.deepEqual(w, { Path: 'C:\\Windows', TEMP: 'C:\\Users\\b\\AppData\\Local\\Temp', TMP: 'C:\\Users\\b\\AppData\\Local\\Temp', LOCALAPPDATA: 'C:\\Users\\b\\AppData\\Local', FF_FOR_PERSON: 'cf018e8d' });
 });
 
-test('on this machine (w4047): a program started with `ff-leftovers launch` survives a sweep of its stopped worker, whose ordinary leftover is ended', async () => {
+test('on this machine (w4047): a program started with `ff-leftovers launch` survives a sweep of its stopped worker, whose ordinary leftover is ended', { skip: PS_REFUSED }, async () => {
   const session = `w4047t${process.pid}`;
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffperson-'));
   const out = path.join(dir, 'env.json');

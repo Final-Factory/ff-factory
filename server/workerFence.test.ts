@@ -52,7 +52,7 @@ test('fencedArgv runs the command under sandbox-exec with the profile inline; fe
   const a = fencedArgv(F, '/bin/claude', ['--x']);
   assert.deepEqual([a[0], a[1], a[3], a[4]], [SANDBOX_EXEC, '-p', '/bin/claude', '--x']);
   assert.equal(a[2], seatbeltProfile(F));
-  assert.deepEqual(fenceEnv(F), { CLAUDE_CODE_TMPDIR: '/Users/p/ffw/tmp/claude-code', DISABLE_AUTOUPDATER: '1' });
+  assert.deepEqual(fenceEnv(F), { CLAUDE_CODE_TMPDIR: '/Users/p/ffw/tmp/claude-code', DISABLE_AUTOUPDATER: '1', TMPPREFIX: '/Users/p/ffw/tmp/zsh' });
 });
 
 test('buildOptions sets spawnClaudeCodeProcess only for a fenced spec', () => {
@@ -62,8 +62,10 @@ test('buildOptions sets spawnClaudeCodeProcess only for a fenced spec', () => {
 });
 
 // The kernel's own verdict, on a Mac only (CI runs on Linux).
+// Inside a fenced worker a second sandbox is refused ("sandbox_apply: Operation not permitted", exit 71, m5, w5397).
 const mac = process.platform === 'darwin' && fs.existsSync(SANDBOX_EXEC);
-test('live: a fenced shell writes in the root and is refused outside it and in the read-only folders', { skip: !mac && 'needs macOS sandbox-exec' }, () => {
+const nested = mac && spawnSync(SANDBOX_EXEC, ['-p', '(version 1)(allow default)', '/usr/bin/true']).status !== 0;
+test('live: a fenced shell writes in the root and is refused outside it and in the read-only folders', { skip: (!mac && 'needs macOS sandbox-exec') || (nested && 'already inside a sandbox (a fenced worker): sandbox-exec cannot nest') }, () => {
   const tmp = fs.realpathSync(os.tmpdir());
   const root = fs.mkdtempSync(path.join(tmp, 'fence-root-'));
   const outside = fs.mkdtempSync(path.join(tmp, 'fence-out-'));
