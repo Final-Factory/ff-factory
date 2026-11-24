@@ -193,6 +193,20 @@ test('w5457: ownSourceIn names the test class file only, and beingWritten leaves
   assert.equal(beingWritten('A.B.FooTest.Case', undefined, ['Assets/Tests/FooTest.cs'])?.label, 'unknown');
 });
 
+test("w5480: ownSourceIn names a partial class's own files (Class.Part.cs), not a class that only shares the start of the name", () => {
+  // biscuit/slot3's run of 2026-11-23 11:50: w5254 was writing BlueprintProjectorTests.W5254.cs; the next run, with only that file
+  // changed, passed, and the five failures stayed fp.
+  const failing = {
+    'Assets/Scripts/Serialization/UpgradeSteps/Step1_0_0_63ProjectorsKeepTheirArea.cs': '59a25a19',
+    'Assets/Tests/Blueprints/BlueprintProjectorTests.W5254.cs': '2841827d',
+    'Assets/Tests/Blueprints/BlueprintProjectorTests.W5254.cs.meta': '13719980',
+  };
+  const test = 'Tests.Blueprints.BlueprintProjectorTests.W5254_AProjectorWithItsSavedArea_BuildsWhereItDid_OnceUpgraded("4x2",0,False)';
+  assert.deepEqual(ownSourceIn(test, Object.keys(failing)), ['Assets/Tests/Blueprints/BlueprintProjectorTests.W5254.cs']);
+  assert.equal(beingWritten(test, failing, ['Assets/Tests/Blueprints/BlueprintProjectorTests.W5254.cs'])?.label, 'unknown');
+  assert.deepEqual(ownSourceIn('A.B.FooTest.Case', ['x/FooTest.Part.cs', 'x/FooTests.cs', 'x/FooTestHelpers.cs', 'x/Bar.FooTest.cs']), ['x/FooTest.Part.cs']);
+});
+
 test("the master batch's verdict labels its failures, and it keeps only failures per run (its passes are in the day rollup)", async () => {
   const h = history();
   const { runId } = h.addRun({ source: 'master-batch', key: 'mb', sha: 'tip', branch: 'master', finished: iso(0) }, [

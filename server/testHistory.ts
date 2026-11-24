@@ -114,13 +114,19 @@ export function labelFromChange(paths: readonly string[] | undefined, again: str
 
 /**
  * The dirty paths of a local run's fingerprint that are the failing test's own source file (w5457): the class name is the file
- * name ("Ns.PanelsHiddenHintTest.Case(1)" → ".../PanelsHiddenHintTest.cs"; a nested class's outer class names the file).
+ * name ("Ns.PanelsHiddenHintTest.Case(1)" → ".../PanelsHiddenHintTest.cs"; a nested class's outer class names the file), or
+ * the first part of a partial class's file name (w5480: "BlueprintProjectorTests.W5254.cs", "DockingGlideTest.W5370.cs", the
+ * game repo's way to add a request's cases to a class; w5254 wrote its cases there and the failures stayed fp).
  */
 export function ownSourceIn(test: string, paths: Iterable<string>): string[] {
   const cls = classOf(test);
   const name = (cls.slice(cls.lastIndexOf('.') + 1).split('+')[0] ?? '').toLowerCase();
   if (!name) return [];
-  return [...paths].filter((p) => /\.cs$/i.test(p) && p.slice(p.lastIndexOf('/') + 1, -3).toLowerCase() === name);
+  return [...paths].filter((p) => {
+    if (!/\.cs$/i.test(p)) return false;
+    const file = p.slice(p.lastIndexOf('/') + 1, -3).toLowerCase();
+    return file === name || file.startsWith(`${name}.`);
+  });
 }
 
 /**
