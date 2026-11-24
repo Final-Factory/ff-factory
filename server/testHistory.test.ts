@@ -173,6 +173,57 @@ test("the master batch's verdict labels its failures, and it keeps only failures
   assert.equal(h.addRun({ source: 'master-batch', key: 'mb', finished: iso(0) }, []).added, false);
 });
 
+test('w5465: a test that fails in 3 master-line batches in a row is no flake: detect when game code changed before it ran clean, else unknown', async () => {
+  const h = history();
+  const repo = 'Final-Factory/FinalFactory';
+  // Each batch keeps an EditMode run (the failures) and a smoke run beside it; a release run on master is on the line too.
+  const batch = (i: number, fails: string[], source: 'master-batch' | 'release' = 'master-batch') => {
+    const { runId } = h.addRun({ source, key: `${source}-${i}`, sha: `s${i}`, branch: 'master', repo, finished: iso(i * 30) }, [
+      tc('A.T.ok', 'pass'), ...fails.map((t) => tc(t, 'fail')),
+    ]);
+    if (source === 'master-batch') h.addRun({ source, key: `${source}-${i}-smoke`, sha: `s${i}`, branch: 'master', repo, finished: iso(i * 30) }, [tc('A.Smoke.s', 'pass')]);
+    h.applyBatchVerdict(runId, { verdict: 'flaky', flaky: fails });
+  };
+  batch(0, ['A.T.flake']);
+  batch(1, ['A.T.polluted', 'A.T.alongside']);
+  batch(2, ['A.T.polluted', 'A.T.alongside', 'A.T.flake'], 'release');
+  batch(3, ['A.T.polluted', 'A.T.alongside']);
+  batch(4, []);
+  batch(5, ['A.T.polluted', 'A.T.alongside', 'A.T.still']);
+  batch(6, ['A.T.still']);
+  batch(7, ['A.T.still']);
+  const asked: string[] = [];
+  const diff = async (_repo: string, a: string, b: string) => {
+    asked.push(`${a}..${b}`);
+    return a === 's3' ? ['Assets/Scripts/UI/World/MinimapProbe.cs', 'Assets/Tests/Map/MinimapProbeTest.cs'] : ['Assets/Tests/Other.cs'];
+  };
+  await labelFailures(h, diff, T0 + 86_400_000);
+  const labels = (t: string) => labelOf(h, t).map((r) => r.label);
+  // Three batches in a row (s1, the release run s2, s3), clean from s4 after a game change: a real failure a merge fixed.
+  assert.deepEqual(labels('A.T.polluted'), ['detect', 'detect', 'detect', 'fp']);
+  assert.match(String(labelOf(h, 'A.T.polluted')[0]!.reason), /3 batches in a row, then ran clean from s4 on, after a change to game code/);
+  // Another test in the same streak: the same; its lone failure in s5 is one batch, still the confirm's flake.
+  assert.deepEqual(labels('A.T.alongside'), ['detect', 'detect', 'detect', 'fp']);
+  assert.deepEqual(labels('A.T.flake'), ['fp', 'fp']);
+  // Still failing at the line's end: not a flake, but nothing says what fixes it.
+  assert.deepEqual(labels('A.T.still'), ['unknown', 'unknown', 'unknown']);
+  assert.match(String(labelOf(h, 'A.T.still')[0]!.reason), /has not passed since/);
+  assert.deepEqual(asked, ['s3..s4']);
+  // A second pass changes nothing.
+  assert.equal(await labelFailures(h, diff, T0 + 86_400_000), 0);
+});
+
+test('w5465: a streak that ran clean after only test files changed is unknown, not fp', async () => {
+  const h = history();
+  for (let i = 0; i < 4; i++) {
+    const { runId } = h.addRun({ source: 'master-batch', key: `b${i}`, sha: `s${i}`, branch: 'master', repo: 'r', finished: iso(i) }, i < 3 ? [tc('A.T.x', 'fail')] : [tc('A.T.ok', 'pass')]);
+    if (i < 3) h.applyBatchVerdict(runId, { flaky: ['A.T.x'] });
+  }
+  await labelFailures(h, async () => ['Assets/Tests/X.cs'], T0 + 86_400_000);
+  assert.deepEqual(labelOf(h, 'A.T.x').map((r) => r.label), ['unknown', 'unknown', 'unknown']);
+  assert.match(String(labelOf(h, 'A.T.x')[0]!.reason), /after only tests or other files changed/);
+});
+
 test('w5415: a hung or unresolved batch labels its unresolved tests unknown, saying no run confirmed them', () => {
   const h = history();
   const { runId } = h.addRun({ source: 'master-batch', key: 'mb-hung', sha: 'tip', branch: 'master', finished: iso(0) }, [tc('A.Smoke.hung', 'fail')]);

@@ -102,6 +102,15 @@ label never replaces one a person or worker set.
   it apart. A worker relabels such a failure by hand (`set_label`). Labels already written are not recomputed: the
   labeller only decides pending failures.
 
+  **A streak on the master line is no flake** (`labelStreaks`, w5465): a test that failed in 3 or more master-line
+  batches in a row (master batches and release runs on master; one batch is one sha and finish time) loses its
+  automatic `fp` labels, whatever each confirm said. They become `detect` when game code changed between the last
+  failing batch and the next batch that ran without the failure, and `unknown` when it is still failing, only tests or
+  other files changed, or the diff cannot be read. This is the one pass that rewrites labels already written. w5455
+  found 195 such `fp` rows: 13 tests that `MinimapProbeTest` broke in 15 batches (2026-11-03 19:34 to 2026-11-04 02:14
+  UTC) and one release run, each passing alone in the confirm, until #3130 (w3006) fixed the polluter. The master
+  batch's confirm now catches such a case itself (`polluted` in `verdict.json`).
+
   The labeller never guesses.
 - **pending** (`label IS NULL`): not decided yet.
 
