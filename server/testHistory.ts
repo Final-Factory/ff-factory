@@ -442,7 +442,9 @@ export class TestHistory {
    * A master batch's own verdict on its failures (master-batch.py): a test that passed on the re-run at the same commit is
    * flaky (fp); one the bisect pinned on a merge is a detection, with that merge named; one it could not pin is unknown.
    */
-  applyBatchVerdict(runId: number, verdict: { flaky?: unknown; unresolved?: unknown; culprits?: unknown }) {
+  applyBatchVerdict(runId: number, verdict: { verdict?: unknown; flaky?: unknown; unresolved?: unknown; culprits?: unknown }) {
+    // hung and unresolved (w5413): no run confirmed these failures, so the bisect never ran (w5415).
+    const unconfirmed = verdict.verdict === 'hung' || verdict.verdict === 'unresolved';
     const names = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
     for (const t of names(verdict.flaky)) {
       const id = this.failureId(runId, t);
@@ -458,7 +460,7 @@ export class TestHistory {
     }
     for (const t of names(verdict.unresolved)) {
       const id = this.failureId(runId, t);
-      if (id) this.label(id, 'unknown', 'master batch: confirmed at the tip, but the bisect could not pin it on one merge', 'auto');
+      if (id) this.label(id, 'unknown', unconfirmed ? 'master batch: an editor hung or gave no results, so no run confirmed it and no merge was blamed' : 'master batch: confirmed at the tip, but the bisect could not pin it on one merge', 'auto');
     }
   }
 

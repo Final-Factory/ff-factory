@@ -3177,7 +3177,7 @@ export interface WorkSource {
    * merge in the window explains). Not `pr` or `branch` above: those would make the merge watch close it when the culprit's PR merged.
    * `gate-miss` (w4928, server/gateTuning.ts): the daily merge-gate tuning's tests to pull into the gate; run `gate-tuning`, tip the day.
    */
-  masterBatch?: { run: string; tip: string; kind: 'culprit' | 'no-results' | 'unbisected' | 'gate-miss'; sha?: string; pr?: number };
+  masterBatch?: { run: string; tip: string; kind: 'culprit' | 'no-results' | 'unbisected' | 'hung' | 'gate-miss'; sha?: string; pr?: number };
 }
 
 /** An intake request's plain-words summary (w3602, shared/intakeDigest.ts): whose words, and each part found in them. */

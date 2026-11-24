@@ -476,9 +476,10 @@ export function identityKeys(s: WorkSource): string[] {
   if (s.nightlyRun) keys.push(`nightly-run:${s.nightlyRun.date}`);
   if (s.nightlyReview) keys.push(`nightly-review:${s.nightlyReview.date}`);
   // A red master batch (w1180): one request per culprit merge while one is open (a later red run naming the same merge adds to
-  // it), one per tip that ran nothing, one per run whose failures no merge explains.
+  // it), one per tip that ran nothing, one per run whose failures no merge explains, and one hung-editor note while one is open
+  // (w5415: a later hung batch adds to it).
   const mb = s.masterBatch;
-  if (mb) keys.push(mb.kind === 'culprit' && mb.sha ? `master-batch:${mb.sha}` : mb.kind === 'no-results' ? `master-batch:tip:${mb.tip}` : mb.kind === 'gate-miss' ? `master-batch:gate-miss:${mb.tip}` : `master-batch:run:${mb.run}`);
+  if (mb) keys.push(mb.kind === 'culprit' && mb.sha ? `master-batch:${mb.sha}` : mb.kind === 'no-results' ? `master-batch:tip:${mb.tip}` : mb.kind === 'hung' ? 'master-batch:hung' : mb.kind === 'gate-miss' ? `master-batch:gate-miss:${mb.tip}` : `master-batch:run:${mb.run}`);
   return keys;
 }
 
