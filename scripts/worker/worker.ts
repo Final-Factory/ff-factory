@@ -705,10 +705,10 @@ export function daemonJson(o: InstallOptions, l: Layout, id: string, claude: str
     claude,
     appDir: l.daemon,
     tempDir: l.tmp,
-    // The Unity slots mailbox stays at its standard place (~/.ff-factory/unity-slots, machine/unitySlots.ts slotsDir),
-    // where the game's scripts and a scheduled nightly harness find it with no config (w469).
+    // The Unity slots mailbox and the Max events file are left to the daemon's root defaults (machine/daemon.ts
+    // withRootDefaults, w5377): both inside the root, `<root>/unity-slots` and `<root>/max/max-events.jsonl`, so no fence
+    // needs an exception for them; the old `<daemon>/max-events.jsonl` is drained while it exists (maxEventsLegacy).
     ...(o.unitySlotsDir ? { unitySlotsDir: o.unitySlotsDir } : {}),
-    maxEventsFile: path.join(l.daemon, 'max-events.jsonl'),
     ...(o.unityEditorRoot ? { unityEditorRoot: o.unityEditorRoot } : {}),
     ...(o.unityPath ? { unityPath: o.unityPath } : {}),
     // A test install beside a computer's real one (--no-cleanup, w1596): it cleans nothing, ends no process (the leftover
