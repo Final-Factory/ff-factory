@@ -90,7 +90,15 @@ label never replaces one a person or worker set.
   - the batch could not pin the failure (`unresolved`), or named it in no list;
   - a local run's branch base moved (origin/master was merged in);
   - more than 300 files changed;
+  - a local run where the failing test's own source file (`<Class>.cs`) was dirty in the run's changes, or differed
+    between the failing and the passing run: the worker was writing or editing that test, so its pass says nothing about
+    flakiness (w5457: one such run gave all 4 tests of PanelsHiddenHintTest a 1-of-32 "flake");
   - or the test did not pass again on its line within 7 days.
+
+  Known gap (w5457): a local failure from stale state (an asset reverted without a re-import, a probe built before
+  recompiling) changes no file, so it still reads as "nothing changed" and stays `fp`; the runs record nothing that tells
+  it apart. A worker relabels such a failure by hand (`set_label`). Labels already written are not recomputed: the
+  labeller only decides pending failures.
 
   The labeller never guesses.
 - **pending** (`label IS NULL`): not decided yet.

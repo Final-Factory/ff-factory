@@ -112,6 +112,30 @@ export function labelFromChange(paths: readonly string[] | undefined, again: str
   return { label: 'fp', reason: `passed ${again} after only files outside the game changed (${shown('other')})` };
 }
 
+/**
+ * The dirty paths of a local run's fingerprint that are the failing test's own source file (w5457): the class name is the file
+ * name ("Ns.PanelsHiddenHintTest.Case(1)" → ".../PanelsHiddenHintTest.cs"; a nested class's outer class names the file).
+ */
+export function ownSourceIn(test: string, paths: Iterable<string>): string[] {
+  const cls = classOf(test);
+  const name = (cls.slice(cls.lastIndexOf('.') + 1).split('+')[0] ?? '').toLowerCase();
+  if (!name) return [];
+  return [...paths].filter((p) => /\.cs$/i.test(p) && p.slice(p.lastIndexOf('/') + 1, -3).toLowerCase() === name);
+}
+
+/**
+ * w5457: a local failure the test's own author earned. The run was a worker's while it wrote or edited that test (its source is
+ * dirty in the failing run, or differs from the passing run), so the pass that followed says nothing about flakiness. Answers
+ * the label to give, or undefined when the test's source was not in play. Gap: a stale import or compile (a reverted asset not
+ * re-imported, a probe built before recompiling) changes no file, so it still reads as "nothing changed" and stays fp; nothing
+ * the runs record tells it apart, so the byRate list can still carry such a test until a worker relabels it by hand.
+ */
+export function beingWritten(test: string, failing: Record<string, string> | null | undefined, between: readonly string[] | undefined): { label: Label; reason: string } | undefined {
+  const own = ownSourceIn(test, [...Object.keys(failing ?? {}), ...(between ?? [])]);
+  if (!own.length) return undefined;
+  return { label: 'unknown', reason: `the test was being written or edited (${own.slice(0, 2).join(', ')} was changed in the local run or before the next pass), so the pass says nothing about flakiness` };
+}
+
 /** The paths whose content differs between two local fingerprints of the same base. */
 export function changedBetween(a: Record<string, string>, b: Record<string, string>): string[] {
   const out = new Set<string>();
@@ -573,7 +597,11 @@ export async function labelFailures(h: TestHistory, prDiff: PrDiff, now = Date.n
     const again = f.source === 'local' ? 'in the next local run that passed' : `in CI at ${String(p.sha).slice(0, 9)}`;
     let verdict: { label: Label; reason: string };
     if (f.source === 'local' && p.source === 'local') {
-      if (f.sha && f.sha === p.sha && (f.changes ?? '') === (p.changes ?? '')) verdict = labelFromChange([], 'on a re-run');
+      const fc = f.changes ? (JSON.parse(f.changes) as Record<string, string>) : undefined;
+      const pc = p.changes ? (JSON.parse(p.changes) as Record<string, string>) : undefined;
+      const authored = beingWritten(f.test, fc, fc && pc && f.base === p.base ? changedBetween(fc, pc) : undefined);
+      if (authored) verdict = authored;
+      else if (f.sha && f.sha === p.sha && (f.changes ?? '') === (p.changes ?? '')) verdict = labelFromChange([], 'on a re-run');
       else if (!f.changes || !p.changes) verdict = { label: 'unknown', reason: 'passed again, but a run kept no record of its changes (too many changed files)' };
       else if (f.base !== p.base) verdict = { label: 'unknown', reason: "passed again after the branch's base moved (origin/master merged in), so the change cannot be told apart" };
       else verdict = labelFromChange(changedBetween(JSON.parse(f.changes), JSON.parse(p.changes)), again);
