@@ -884,6 +884,16 @@ without one means it is off or failing, worth a person's look.
   pre-1.0 release) was blocked on "w3245 reporting" on 2026-11-06 at 22:11, the minute w3245's worker started; nobody told
   that worker, its 23:08 report (1.0.0.40 live, notes posted, "still open: the 24-hour check") had no `For w3246:` line, and
   w3246 waited until lothsahn unblocked it at 01:10.
+- **Only the workers still on it are asked** (w5471; lothsahn: "the blocked-on-report ask goes only to the request's
+  live or holding worker"). `tellReportWaited` asks the workers `stillOn` names: live ones, or stopped ones with work
+  still pending on wX (a check-in, a person wait, a still-open line), and not one that said `DONE` or `LEG DONE` for its
+  part; with none of them live, only the newest of the stopped ones (its holder), so an old leg's stale still-open line
+  resumes nobody. Never every session wX ever had: a message resumes a stopped worker. With none on it, the ask is stamped on wX's
+  log once ("no worker is on it now, so the next one is told") and `retellReportWaits` tells the next worker that starts.
+  On 2026-11-24 at 19:15 UTC, blocking w5466 on w2895's report (the FFU fan-out, active, with about 35 finished legs)
+  messaged every one of them. Each message tried to move a stopped leg (w2079's "did not move it again" lines in w2895's
+  log), and b8f67a03, f515381f, 328e4cb7, a1518ead and 619b2065 each resumed for a turn of "not my leg". Before, a stopped
+  worker was skipped only when wX was not active.
 - **A wait never closes a loop** (w2357; 2026-10-27: w2335 was Blocked on its timed leg w2338's report while w2338's
   worker reported "w2338: still open: waiting for w2335's worker 9524a4bc to send its fix commit", and only the 4-hourly
   unjam sweep found it). Three rules:
