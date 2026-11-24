@@ -1,0 +1,2 @@
+- Windows workers can run at Low integrity (w5377): with `workerIntegrity: "low"` in daemon.json (or `machine_update worker_fence on`), the daemon labels the worker root's folders Low and starts each sandbox agent's claude from a Low copy, so the agent and everything it starts can write only inside the root. Off by default; if any setup step fails, agents run unfenced and the daemon log says why.
+- Windows rollouts now put a pinned PortableGit at `<root>\tools\git` for Low workers. The machine's own Git crashes at Low.

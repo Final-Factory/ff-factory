@@ -626,6 +626,33 @@ the path ... is denied.'` (w5342: slot1's player builds and slot6's editor, unti
 
 Then trial E on one machine as the stricter variant, if the holes or Low's quirks are not acceptable.
 
+**As built (w5377, 2026-11-24).** `daemon.json` `"workerIntegrity": "low"` (set remotely by `machine_update worker_fence`,
+4.3), Windows only, off when absent. Where it differs from the plan above:
+
+- `Daemon.lowSetup` (`machine/daemon.ts`) runs once at the daemon's start, in the background; agents start unfenced until
+  it finishes, and stay unfenced, with the reason in `logs/daemon.log` (`worker integrity: ...`), if any step fails.
+  - It labels the root's folders Low (`machine/lowIntegrity.ts` `lowTargets`, `labelLow`): every child except `daemon`,
+    `secrets` and the daemon's own folder; of `repo` only `repo\.git` (sandbox worktrees commit there). The root itself
+    stays Medium. Outside the root it labels the extra roots, the temp and sandbox folders where they are elsewhere,
+    and only what `daemon.json` `workerIntegrityAllow` lists, which is the person's decision. On LothDesktop that covers the
+    Unity slots mailbox (`C:\Users\<user>\.ff-factory\unity-slots`) and the Max events file in the daemon's folder.
+    Without them, a Low worker's `unity-slot run` cannot ask for a slot (the daemon logs this at start), and its Max
+    events are refused.
+  - It makes a Low-labelled copy of the SDK's `claude.exe` in `<root>\tools\low` (named by size and mtime) and runs it
+    once with `--version` (`probeFence`, 60 s). That copy, not a Low node, is what a sandbox agent runs: the SDK takes
+    it as `pathToClaudeCodeExecutable`, and the agent host stays Medium.
+  - It junctions each installed Unity's `Editor` folder into `<root>\tools\unity-low\<version>`.
+- A sandbox agent's environment (`runSpec`) gets `APPDATA` and `LOCALAPPDATA` under `<root>\home`, the root's Git first on
+  `PATH` with `CLAUDE_CODE_GIT_BASH_PATH`, and `FF_UNITY_EDITOR_ROOT` set to the junction folder. The game repo's batch
+  scripts start Windows Unity from `$FF_UNITY_EDITOR_ROOT/<version>/Unity.exe` when it is set (FinalFactory #4285).
+  `TEMP` and `TMP` were already the session's folder in the root. `USERPROFILE` is left alone.
+- The root's Git is PortableGit 2.56.1 at `<root>\tools\git`, pinned by SHA-256 (`server/agentGit.ts`). `worker.ts tools`
+  installs it on every Windows rollout and runs its first bash login at Medium: run first at Low, it could not make its
+  links (measured).
+- The sandbox editors the daemon starts stay Medium. Only what a sandbox agent starts is Low.
+- Every 15 s the daemon ends any Low Roslyn compiler server that runs from an install's own path (`strayLowServers`), so
+  a worker that starts Unity by its install path cannot break the machine's Medium compiles (w5347).
+
 **Rollout per Windows machine** (effort is a guess)
 
 | Machine | Root | Effort | Risk and what breaks |
@@ -727,8 +754,9 @@ after it.
 
 **The fallback when a fence cannot apply** (`machine/fenceProbe.ts`). Before the daemon puts its first sandbox agent
 inside a fence, it runs a no-op inside the same fence once (Mac: `sandbox-exec -p <profile> /usr/bin/true`; Linux:
-`python3 ff-landlock.py <rules> -- /bin/true`; Windows: the Low launcher). If that does not exit 0 within 15 s (a
-kernel without Landlock, a profile the kernel refuses, python3 missing, the launcher gone), the daemon logs
+`python3 ff-landlock.py <rules> -- /bin/true`; Windows: the Low copy of claude with `--version`, after its folders are
+labelled, 4.1 "As built"). If that does not exit 0 within 15 s (60 s on Windows) (a kernel without Landlock, a profile
+the kernel refuses, python3 missing, a folder that could not be labelled), the daemon logs
 `worker fence: ... could not run a no-op (...); agents run unfenced` (or `write lock: ...`) and runs its agents
 unfenced. Nothing in the fence code can throw out of the daemon's start or an agent's spawn: the fence never fails
 the daemon, it fails open to the pre-fence behaviour and says so in `logs/daemon.log`. The daemon itself never runs

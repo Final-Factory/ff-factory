@@ -1,0 +1,215 @@
+/**
+ * The Windows worker fence (w5377, the design in docs/worker-root.md 4.1): sandbox agents run at Low integrity, so
+ * Windows' no-write-up rule refuses their writes to anything not labelled Low. The daemon labels the worker root's
+ * folders Low (each with (OI)(CI), so what is made in them later is Low too) and starts each sandbox agent's claude from
+ * a Low-labelled copy of the claude executable; a process started from a Low-labelled file runs at Low, and everything
+ * it starts (Bash, git, gh, batch Unity, players) inherits Low (both measured on LothDesktop, w5333 and w5377).
+ *
+ * Off by default: daemon.json `workerIntegrity: "low"` turns it on, on Windows only. The root itself stays Medium: a Low
+ * label on it would give Low processes delete-child over `secrets`. `daemon`, `secrets` and the daemon's own folder stay
+ * Medium (a worker cannot rewrite the daemon's code or its tokens), and of the main clone `repo` only `repo\.git` is
+ * labelled (sandbox worktrees commit there; the person's own working files stay Medium).
+ *
+ * Not a boundary against a malicious worker: the sandbox editor the daemon starts is Medium and compiles what workers
+ * write. It stops accidental writes outside the root, which is lothsahn's rule ("under no circumstances should workers
+ * write outside of ffw").
+ */
+import fs from 'node:fs';
+import path from 'node:path';
+
+export const LOW_LABEL = '(OI)(CI)low';
+/** Root children that stay Medium (writeLock.ts LOCKED_CHILDREN, plus the root's own record). */
+export const MEDIUM_CHILDREN = ['daemon', 'secrets'];
+
+export interface LowTargetsInput {
+  root: string;
+  /** The daemon's folder: kept Medium where it sits inside the root. */
+  appDir: string;
+  /** The root's children (names), as listed now. */
+  children: { name: string; dir: boolean }[];
+  /** Folders of the install outside the root, and the sandboxes' and temp folders where they are elsewhere. */
+  extra?: (string | undefined)[];
+  /** Single files outside the Low folders a worker must write (the Max events file). */
+  files?: (string | undefined)[];
+  /** Extras the daemon owns that a worker must write although they sit in the daemon's folder (the Unity slots mailbox). */
+  allowInAppDir?: (string | undefined)[];
+  exists?: (p: string) => boolean;
+}
+
+const inside = (child: string, parent: string) => {
+  const r = path.relative(parent, child);
+  return r === '' || (!!r && !r.startsWith('..') && !path.isAbsolute(r));
+};
+const same = (a: string, b: string) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
+
+/** The folders and files to label Low. Exported for tests. */
+export function lowTargets(i: LowTargetsInput): { dirs: string[]; files: string[] } {
+  const exists = i.exists ?? fs.existsSync;
+  const keep = new Set(MEDIUM_CHILDREN.map((c) => c.toLowerCase()));
+  if (inside(i.appDir, i.root) && !same(i.appDir, i.root)) keep.add(path.relative(i.root, i.appDir).split(/[\\/]/)[0].toLowerCase());
+  const dirs: string[] = [];
+  for (const c of i.children) {
+    if (!c.dir || keep.has(c.name.toLowerCase())) continue;
+    if (c.name.toLowerCase() === 'repo') {
+      const git = path.join(i.root, c.name, '.git');
+      if (exists(git)) dirs.push(git);
+      continue;
+    }
+    dirs.push(path.join(i.root, c.name));
+  }
+  // lowEnv's APPDATA and LOCALAPPDATA live here; labelLow makes it when it is missing.
+  if (!i.children.some((c) => c.name.toLowerCase() === 'home')) dirs.push(path.join(i.root, 'home'));
+  for (const e of i.extra ?? []) {
+    if (!e || inside(e, i.root) || dirs.some((d) => same(d, e))) continue;
+    if (inside(e, i.appDir) && !(i.allowInAppDir ?? []).some((a) => !!a && same(a, e))) continue;
+    dirs.push(e);
+  }
+  const files = (i.files ?? []).filter((f): f is string => !!f && !dirs.some((d) => inside(f, d)));
+  return { dirs, files };
+}
+
+type Ran = { code: number | null; stdout: string; stderr: string };
+export type Exec = (cmd: string, args: string[], o?: { timeoutMs?: number }) => Promise<Ran>;
+
+/** Whether icacls says this path carries an explicit or inherited Low mandatory label. Exported for tests. */
+export const isLabelledLow = (icaclsOut: string) => /Mandatory Label\\Low Mandatory Level/i.test(icaclsOut);
+
+/**
+ * Labels each target Low unless it is already, and says what it did. icacls' label on a folder with (OI)(CI) reaches
+ * the files already in it (measured, w5333). Never throws: a target it cannot label is reported, and the caller runs its
+ * agents unfenced when any failed.
+ */
+export async function labelLow(t: { dirs: string[]; files: string[] }, exec: Exec, say: (line: string) => void): Promise<boolean> {
+  let ok = true;
+  const one = async (p: string, label: string) => {
+    try {
+      if (!fs.existsSync(p)) {
+        if (label === LOW_LABEL) fs.mkdirSync(p, { recursive: true });
+        else fs.writeFileSync(p, '', { flag: 'a' });
+      }
+      const now = await exec('icacls', [p], { timeoutMs: 60_000 });
+      if (now.code === 0 && isLabelledLow(now.stdout)) return;
+      const r = await exec('icacls', [p, '/setintegritylevel', label], { timeoutMs: 30 * 60_000 });
+      if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim().slice(-300));
+      say(`worker integrity: labelled ${p} Low`);
+    } catch (e) {
+      ok = false;
+      say(`worker integrity: could not label ${p} Low: ${(e as Error).message}`);
+    }
+  };
+  for (const d of t.dirs) await one(d, LOW_LABEL);
+  for (const f of t.files) await one(f, 'low');
+  return ok;
+}
+
+export const lowToolsDir = (root: string) => path.join(root, 'tools', 'low');
+
+/**
+ * A Low-labelled copy of `exe` in `<root>\tools\low`, named by its size and mtime so a new claude gets a new copy; copies
+ * of older builds are removed when nothing runs them. Returns the copy's path, or undefined (and says why) when it
+ * cannot be made: the caller then runs that agent unfenced.
+ */
+export async function lowCopy(root: string, exe: string, exec: Exec, say: (line: string) => void): Promise<string | undefined> {
+  try {
+    const st = fs.statSync(exe);
+    const dir = lowToolsDir(root);
+    fs.mkdirSync(dir, { recursive: true });
+    const base = path.basename(exe, path.extname(exe));
+    const name = `${base}-${st.size}-${Math.floor(st.mtimeMs)}${path.extname(exe)}`;
+    const copy = path.join(dir, name);
+    if (!fs.existsSync(copy) || fs.statSync(copy).size !== st.size) {
+      const part = `${copy}.part`;
+      fs.copyFileSync(exe, part);
+      fs.renameSync(part, copy);
+    }
+    const now = await exec('icacls', [copy], { timeoutMs: 60_000 });
+    if (!(now.code === 0 && isLabelledLow(now.stdout))) {
+      const r = await exec('icacls', [copy, '/setintegritylevel', 'low'], { timeoutMs: 60_000 });
+      if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim().slice(-300));
+    }
+    for (const old of fs.readdirSync(dir)) {
+      if (old !== name && old.startsWith(`${base}-`)) {
+        try {
+          fs.rmSync(path.join(dir, old), { force: true });
+        } catch {
+          /* still running: the next start removes it */
+        }
+      }
+    }
+    return copy;
+  } catch (e) {
+    say(`worker integrity: could not make a Low copy of ${exe}: ${(e as Error).message}`);
+    return undefined;
+  }
+}
+
+/**
+ * What a Low agent's environment changes: the per-user folders programs write without asking (APPDATA, LOCALAPPDATA)
+ * move into the root, since a Low process cannot write the person's own. TEMP and TMP are already the session's folder in
+ * the root (daemon sessionTempEnv). The Git for Low workers (server/agentGit.ts) goes first on PATH and is Claude Code's
+ * Git Bash: the machine's Git, at its own path, crashes at Low (0xC0000022 opening msys' shared object directory, which a
+ * Medium msys made first; measured w5333), and a copy at another path gets its own.
+ */
+export function lowEnv(root: string, gitDir: string | undefined, pathKey: string, pathNow: string | undefined): Record<string, string> {
+  const home = path.join(root, 'home');
+  return {
+    APPDATA: path.join(home, 'AppData', 'Roaming'),
+    LOCALAPPDATA: path.join(home, 'AppData', 'Local'),
+    ...(gitDir
+      ? {
+          CLAUDE_CODE_GIT_BASH_PATH: path.join(gitDir, 'bin', 'bash.exe'),
+          [pathKey]: [path.join(gitDir, 'cmd'), path.join(gitDir, 'usr', 'bin'), pathNow].filter(Boolean).join(path.delimiter),
+        }
+      : {}),
+  };
+}
+
+export const lowUnityDir = (root: string) => path.join(root, 'tools', 'unity-low');
+
+/**
+ * Junctions `<root>\tools\unity-low\<version>` to each installed editor's `Editor` folder, for FF_UNITY_EDITOR_ROOT
+ * (the game repo's scripts start a Windows batch Unity from `$FF_UNITY_EDITOR_ROOT/<version>/Unity.exe` when it is set).
+ * Unity's Roslyn names its compiler server's pipe from the compiler's folder, so a Low Unity started through a junction
+ * gets its own Low server and no Medium editor's compile can reach it (measured, w5347; docs/worker-root.md 4.1). The
+ * junctions live in the root; nothing on the install's drive is written. Returns the versions it has.
+ */
+export async function lowUnityJunctions(root: string, editors: { version: string; bin: string }[], exec: Exec, say: (line: string) => void): Promise<string[]> {
+  const dir = lowUnityDir(root);
+  const have: string[] = [];
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch (e) {
+    say(`worker integrity: could not make ${dir}: ${(e as Error).message}`);
+    return have;
+  }
+  const seen = new Set<string>();
+  for (const e of editors) {
+    if (seen.has(e.version) || !/^[0-9][0-9A-Za-z.]*$/.test(e.version)) continue;
+    seen.add(e.version);
+    const target = path.dirname(e.bin); // <install>\<version>\Editor
+    const link = path.join(dir, e.version);
+    try {
+      if (fs.existsSync(path.join(link, 'Unity.exe'))) {
+        have.push(e.version);
+        continue;
+      }
+      fs.rmSync(link, { recursive: false, force: true });
+      const r = await exec('cmd.exe', ['/d', '/c', 'mklink', '/J', link, target], { timeoutMs: 60_000 });
+      if (r.code !== 0 || !fs.existsSync(path.join(link, 'Unity.exe'))) throw new Error((r.stderr || r.stdout).trim().slice(-300) || 'no Unity.exe through it');
+      have.push(e.version);
+    } catch (err) {
+      say(`worker integrity: could not junction Unity ${e.version} at ${link}: ${(err as Error).message}`);
+    }
+  }
+  return have;
+}
+
+/**
+ * Low-integrity Roslyn compiler servers that run from an install's own path rather than a junction under the root:
+ * every Medium compile on the machine would reach them and fail with CS2012 (w5347). The daemon ends them as soon as it
+ * sees one; a worker that started Unity by the install's path is told why in its own failed run. Exported for tests.
+ */
+export function strayLowServers(servers: { pid: number; rid: number; dll: string }[], root: string): number[] {
+  const under = lowUnityDir(root).toLowerCase();
+  return servers.filter((s) => s.rid > 0 && s.rid < 0x2000 && s.dll && !path.resolve(s.dll).toLowerCase().startsWith(under)).map((s) => s.pid);
+}

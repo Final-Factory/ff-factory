@@ -35,6 +35,7 @@ import { cancelledGrow, carryDevDrive, claudeSlug, decideDevDrive, defaultMaxGB,
 import { REINSTALL_KEEPS, driveRootOf, isHostFile, moveMap, readMoved, rebaseJson, rebasePath, rebaseText, writeMoved } from './driveRoot.ts';
 import { readJsonDurable as readJsonFile } from '../../server/durable.ts';
 import { publishAgentTools } from '../../server/agentTools.ts';
+import { agentGitDir, ensureAgentGit } from '../../server/agentGit.ts';
 import { NODE_GROUP, agentNodeDir, agentNodeExe, ensureAgentNode, firewallCheckScript, parseFirewallCheck } from '../../server/agentNode.ts';
 import { ADMIN_PROBE_PS, aclArgs, adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, hostnameFallback, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, tailscaleCandidates } from './portalSsh.ts';
 
@@ -2304,6 +2305,10 @@ export async function tools(root: string, ownerFlag?: string): Promise<number> {
   // The agents' node at one fixed path (w1742): a WARNING when it cannot be placed, never a failed publish of the plugins.
   if ((await ensureAgentNode(l.root, { exec, say, platform: process.platform })) === 'installed' && owner) {
     await giveTo(owner, [agentNodeDir(l.root)]).catch((e) => say(`WARNING: could not give ${agentNodeDir(l.root)} to ${owner}: ${(e as Error).message}`));
+  }
+  // The Git for Low-integrity workers (w5377, server/agentGit.ts): Windows only, a WARNING when it cannot be placed.
+  if ((await ensureAgentGit(l.root, { exec, say, platform: process.platform })) === 'installed' && owner) {
+    await giveTo(owner, [agentGitDir(l.root)]).catch((e) => say(`WARNING: could not give ${agentGitDir(l.root)} to ${owner}: ${(e as Error).message}`));
   }
   if (isWin && m.outside.some((x) => x.kind === 'firewall-group')) await firewallRepair(l, m);
   return code;
