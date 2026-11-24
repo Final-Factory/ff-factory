@@ -721,9 +721,10 @@ back to its request.
 - **The source.** Every 3 minutes the watch lists the workflow's newest 10 runs on master (`gh api
   repos/<repo>/actions/workflows/<workflow>/runs`, on the system payer's GitHub token: the portal's own login lacks
   "Actions: read", portal-on-ffbox-host.md D7). For each run that finished since it last looked it reads the job's log
-  and takes the **last** `MASTER_BATCH_VERDICT {json}` line (`parseVerdict`: version 1; `verdict` red, green, flaky or
-  no-results; the tip; `culprits` with the merge sha, PR number, subject, PR title and failing tests; `flaky`;
-  `unresolved`). The log is data: every field is checked, a culprit without a full sha is dropped, a bad PR number
+  and takes the **last** `MASTER_BATCH_VERDICT {json}` line (`parseVerdict`: version 1; `verdict` red, green, flaky,
+  no-results, hung or unresolved; the tip; `culprits` with the merge sha, PR number, subject, PR title and failing tests;
+  `flaky`; `unresolved`; `runs`, each editor run's label, sha, `ran` (false: it gave no results), `hung` and `infra`, the
+  reason it gave none, w5413). The log is data: every field is checked, a culprit without a full sha is dropped, a bad PR number
   becomes null, texts are cleaned and cut, and what reaches a brief sits in a fence. Runs that ended cancelled or timed
   out have no verdict and are skipped.
 - **A red run, a culprit.** For each culprit merge, **one** request, source `master-batch` (key `master-batch:<merge
@@ -737,6 +738,18 @@ back to its request.
   (`workerRules`) repeat it. No culprit but failing tests: one request `Master batch red: <n> tests not bisected`.
   A tip that ran nothing (`no-results`: a compile error or a crash): one request `Master batch red at <sha9>: no results
   (compile error or crash)`, once per tip.
+- **Hung and unresolved: no culprit, never a revert** (w5413, w5415). Since FinalFactory PR #4299 the batch names no merge
+  when no run confirmed a failure: batch 45362320107 blamed #4289 for a smoke test that hung on a loaded runner, because
+  the confirm run was refused by the hung editor's leftovers and its missing results counted as a failure.
+  `unresolved` (a real failure the confirm run gave no result for: hung, crashed, or refused by another Unity instance)
+  files the not-bisected request's variant, `Master batch red: <n> tests not confirmed (the confirm run gave no results)`,
+  urgent, key `master-batch:run:<run>`, which lists the runs that gave no results and says to reproduce at the tip first and
+  never revert a merge before a run shows it broke them. `hung` (the only failure was a hung editor and the confirm showed
+  no real failure) files **at most one** infrastructure note, `Master batch hung at <sha9>: no culprit (an infrastructure
+  note)`, at **normal** priority, triage `follow-up`, key `master-batch:hung`: while one is open a later hung batch files
+  nothing (a log line). A culprit in either line is ignored. A later run that passed supersedes both, as it supersedes a
+  red one. Neither names a culprit, so neither holds a version bump (the game repo's rule, its
+  `Documentation/Merge-Queue.md` "What still holds a bump").
 - **The hand-back.** The culprit PR's request is the one whose `prs` (filled by the ledger sweep) holds that PR in the
   game repo (`requestsForPr`: the repo is checked, PR numbers repeat across repos); with none, the requests named by
   `Request:` / `Part of:` lines in the PR's description (`gh pr view`). Each gets one log line (`Orchestrators.tellMasterBatch`), a

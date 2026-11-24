@@ -13,7 +13,7 @@ import { useFakeVault } from './testVault.ts';
 import type { Config } from './config.ts';
 import type { IntakeFiling } from './orchestrators.ts';
 import type { RunResult } from './proc.ts';
-import { workerRules } from './intakeRules.ts';
+import { identityKeys, workerRules } from './intakeRules.ts';
 import {
   JOB_NAME,
   JOB_SKIPPED,
@@ -26,6 +26,7 @@ import {
   parseVerdict,
   requestsForPr,
   unbisectedDraft,
+  hungDraft,
   type BatchRun,
   type MasterBatchGh,
   type PrFacts,
@@ -261,7 +262,7 @@ function setup(t: { after: (fn: () => void) => void }, masterBatch: Config['mast
     fileIntake: (f: IntakeFiling) => {
       if (skip) return { skipped: skip };
       filed.push(f);
-      const item = { id: `w${++seq}`, title: f.title, status: 'new' } as WorkItem;
+      const item = { id: `w${++seq}`, title: f.title, status: 'new', source: f.source } as WorkItem;
       work.set(item.id, item);
       return { item };
     },
@@ -444,6 +445,141 @@ test('w1180: a red run that a later run passed files nothing', async (t) => {
   const { out } = await quiet(() => w.tick());
   assert.equal(s.filed.length, 0);
   assert.ok(out.includes('run 101: red, superseded by a later green run'));
+});
+
+// ---------------------------------------------------------------- hung and unresolved (w5413's verdicts, w5415)
+
+// What master-batch.py printed for batch 45362320107 under w5413's logic: the smoke test hung after a green suite, the confirm
+// ran it and it passed alone.
+const SMOKE = ['FinalFactory.PlayModeTests.SmokeTest.TitleNewGameBigSave', 'FinalFactory.PlayModeTests.SmokeTest.TitleMenu'];
+const hungVerdict = (o: Record<string, unknown> = {}) =>
+  verdict({
+    verdict: 'hung',
+    failed: 2,
+    culprits: [],
+    unresolved: SMOKE,
+    note: 'the smoke tests hung in the full run and passed alone; a hang names no culprit',
+    runs: [
+      { label: 'full', sha: TIP, exit: 241, seconds: 4203, hung: 'run', ran: false },
+      { label: 'confirm', sha: TIP, exit: 0, seconds: 300, hung: null, ran: true },
+    ],
+    ...o,
+  });
+const unresolvedVerdict = (o: Record<string, unknown> = {}) =>
+  verdict({
+    verdict: 'unresolved',
+    failed: 1,
+    culprits: [],
+    unresolved: ['Tests.Belts.MergeOrder'],
+    runs: [
+      { label: 'full', sha: TIP, exit: 1, seconds: 1500, hung: null, ran: true },
+      { label: 'confirm', sha: TIP, exit: 1, seconds: 1, hung: null, ran: false, infra: 'another Unity instance had the project open' },
+    ],
+    ...o,
+  });
+
+test('w5415: parseVerdict reads the hung and unresolved verdicts and each run\'s ran, hung and infra', () => {
+  const h = parseVerdict(line(hungVerdict()))!;
+  assert.equal(h.verdict, 'hung');
+  assert.deepEqual(h.unresolved, SMOKE);
+  assert.deepEqual(h.runs, [
+    { label: 'full', sha: TIP, ran: false, hung: 'run' },
+    { label: 'confirm', sha: TIP, ran: true },
+  ]);
+  const u = parseVerdict(line(unresolvedVerdict()))!;
+  assert.equal(u.verdict, 'unresolved');
+  assert.deepEqual(u.runs[1], { label: 'confirm', sha: TIP, ran: false, infra: 'another Unity instance had the project open' });
+  // Malformed legs: no label, not an object, a ran that is not a bool, an infra too long.
+  const m = parseVerdict(line(unresolvedVerdict({ runs: [{ ran: false }, 'x', null, { label: 'back1', ran: 'no', infra: 'y'.repeat(500), sha: 'short' }] })))!;
+  assert.deepEqual(m.runs, [{ label: 'back1', infra: 'y'.repeat(200) }]);
+  assert.deepEqual(parseVerdict(line(verdict({ runs: undefined })))!.runs, [], 'an older line without runs still parses');
+  assert.ok(identityKeys(hungDraft({ repo: REPO, run: run(9, 'failure'), v: h }).source).includes('master-batch:hung'), 'one key for every hung batch: the intake adds a later one to the open note');
+});
+
+test('w5415: a hung batch files ONE normal-priority infrastructure note, never a revert, even if its line lists a culprit; more hangs add nothing while it is open', async (t) => {
+  const s = setup(t);
+  s.linked('w50');
+  s.gh.list = [run(100, 'success')];
+  const w = s.make();
+  await w.tick();
+  s.gh.list = [run(101, 'failure'), run(100, 'success')];
+  // A culprit in a hung line is never acted on (the script names none; the log is data).
+  s.gh.logs.set(101, logOf(hungVerdict({ run: '101', culprits: verdict().culprits })));
+  await quiet(() => w.tick());
+  assert.equal(s.filed.length, 1);
+  const f = s.filed[0];
+  assert.equal(f.title, 'Master batch hung at aaaaaaaaa: no culprit (an infrastructure note)');
+  assert.equal(f.priority, 'normal');
+  assert.equal(f.source.masterBatch?.kind, 'hung');
+  assert.equal(f.triage?.class, 'follow-up');
+  assert.ok(!f.brief.includes('git revert'), 'no revert command in a hung note');
+  assert.ok(f.brief.includes('Never revert a merge for a hang'));
+  assert.ok(f.brief.includes('full at aaaaaaaaa: hung (run), gave no results'));
+  assert.ok(f.brief.includes(SMOKE[0]));
+  assert.equal(s.told.length, 0, 'no culprit PR\'s request is told');
+  // The next hung batch while the note is open: nothing more.
+  s.gh.list = [run(102, 'failure'), ...s.gh.list];
+  s.gh.logs.set(102, logOf(hungVerdict({ run: '102', tip: sha('c') })));
+  const { out } = await quiet(() => w.tick());
+  assert.equal(s.filed.length, 1);
+  assert.ok(out.includes(`run 102: hung, ${[...s.work.keys()].at(-1)} already notes it`), out.join('; '));
+  // Once it is closed, a new hang is news again.
+  [...s.work.values()].at(-1)!.status = 'done';
+  s.gh.list = [run(103, 'failure'), ...s.gh.list];
+  s.gh.logs.set(103, logOf(hungVerdict({ run: '103' })));
+  await quiet(() => w.tick());
+  assert.equal(s.filed.length, 2);
+});
+
+test('w5415: a hung batch that a later run passed files nothing', async (t) => {
+  const s = setup(t);
+  s.gh.list = [run(100, 'success')];
+  const w = s.make();
+  await w.tick();
+  s.gh.list = [run(102, 'success'), run(101, 'failure'), run(100, 'success')];
+  s.gh.logs.set(101, logOf(hungVerdict()));
+  s.gh.logs.set(102, logOf(verdict({ verdict: 'green', failed: 0, culprits: [] })));
+  const { out } = await quiet(() => w.tick());
+  assert.equal(s.filed.length, 0);
+  assert.ok(out.includes('run 101: hung, superseded by a later green run'));
+});
+
+test('w5415: an unresolved batch files the unbisected request\'s variant: reproduce first, never revert blind, never a culprit', async (t) => {
+  const s = setup(t);
+  s.linked('w50');
+  s.gh.list = [run(100, 'success')];
+  const w = s.make();
+  await w.tick();
+  s.gh.list = [run(101, 'failure'), run(100, 'success')];
+  s.gh.logs.set(101, logOf(unresolvedVerdict({ run: '101', culprits: verdict().culprits })));
+  await quiet(() => w.tick());
+  assert.equal(s.filed.length, 1);
+  const f = s.filed[0];
+  assert.equal(f.title, 'Master batch red: 1 tests not confirmed (the confirm run gave no results)');
+  assert.equal(f.priority, 'urgent');
+  assert.equal(f.source.masterBatch?.kind, 'unbisected');
+  assert.ok(f.brief.includes('Failing tests, not confirmed:'));
+  assert.ok(f.brief.includes('confirm at aaaaaaaaa: gave no results, another Unity instance had the project open'));
+  assert.ok(f.brief.indexOf('1. Reproduce at the tip') < f.brief.indexOf('2. Revert that merge first'), 'reproduce comes first');
+  assert.ok(f.brief.includes('Never revert a merge before a run shows it broke them.'));
+  assert.equal(s.told.length, 0);
+  assert.equal(s.state().filed['101:unbisected'].work, [...s.work.keys()].at(-1));
+});
+
+test('w5415: the version-bump hold stays on a culprit: of all the verdicts only red names a merge to revert', async (t) => {
+  // FF Factory holds no bump itself: the game repo's rule (Documentation/Merge-Queue.md, "What still holds a bump") is a batch
+  // that finished red and names a culprit. What the portal adds is the revert request; hung and unresolved never file one.
+  const s = setup(t);
+  s.gh.list = [run(100, 'success')];
+  const w = s.make();
+  await w.tick();
+  s.gh.list = [run(103, 'failure'), run(102, 'failure'), run(101, 'failure'), run(100, 'success')];
+  s.gh.logs.set(101, logOf(hungVerdict({ run: '101' })));
+  s.gh.logs.set(102, logOf(unresolvedVerdict({ run: '102', tip: sha('c') })));
+  s.gh.logs.set(103, logOf(verdict({ run: '103', tip: sha('d') })));
+  await quiet(() => w.tick());
+  assert.deepEqual(s.filed.map((f) => f.source.masterBatch?.kind), ['hung', 'unbisected', 'culprit']);
+  assert.deepEqual(s.filed.filter((f) => f.brief.includes('git revert -m 1 ' + MERGE)).map((f) => f.source.masterBatch?.run), ['103']);
 });
 
 test('w1658: a run whose batch job was skipped (a version bump) is read once and never supersedes a red one', async (t) => {

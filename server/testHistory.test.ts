@@ -125,6 +125,15 @@ test("the master batch's verdict labels its failures, and it keeps only failures
   assert.equal(h.addRun({ source: 'master-batch', key: 'mb', finished: iso(0) }, []).added, false);
 });
 
+test('w5415: a hung or unresolved batch labels its unresolved tests unknown, saying no run confirmed them', () => {
+  const h = history();
+  const { runId } = h.addRun({ source: 'master-batch', key: 'mb-hung', sha: 'tip', branch: 'master', finished: iso(0) }, [tc('A.Smoke.hung', 'fail')]);
+  h.applyBatchVerdict(runId, { verdict: 'hung', unresolved: ['A.Smoke.hung'] });
+  const l = labelOf(h, 'A.Smoke.hung')[0]!;
+  assert.equal(l.label, 'unknown');
+  assert.match(String(l.reason), /no run confirmed it/);
+});
+
 test('the ready-made queries: slowest, false positives, detections and never_caught, Performance tests left out', async () => {
   const h = history(T0 + 86_400_000);
   for (let i = 0; i < 6; i++)

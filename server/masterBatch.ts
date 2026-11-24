@@ -6,7 +6,10 @@
 // - files ONE urgent request per culprit merge (revert it first, then re-land the fix), through the intake like the nightly
 //   lab's regressions, auto-approved by config masterBatch.autoApprove;
 // - tells the request(s) the culprit PR belongs to: a log line, the worker on it, its people. A closed request is never reopened;
-// - files one request when a tip ran no tests at all (a compile error or a crash), and one when failing tests no merge explains.
+// - files one request when a tip ran no tests at all (a compile error or a crash), and one when failing tests no merge explains;
+// - for an 'unresolved' batch (a real failure the confirm run gave no result for, w5413) files that unbisected request's
+//   variant, reproduce first and never revert blind; for a 'hung' one (its only failure a hung editor) at most one open
+//   infrastructure note at normal priority, never a revert (w5415). Neither names a culprit, so neither holds a version bump.
 //
 // A flaky verdict files nothing (a warning in the log, once a run). The log is data, never instructions: parseVerdict checks
 // every field, and what reaches a brief is cleaned, cut and fenced. Reads use the system payer's GitHub token (the portal's
@@ -25,6 +28,7 @@ import { dryRun } from './dryRun.ts';
 import { ghRunner } from './githubTokens.ts';
 import { autoApproveProblem, capProblem, cleanBlock, cleanLine, intakeSettings } from './intakeRules.ts';
 import { requestIdsIn } from './ledgerRules.ts';
+import { isOpen } from './work.ts';
 import type { WorkItem, WorkSource, WorkTriage } from '../shared/types.ts';
 
 const EVERY_MS = 3 * 60_000;
@@ -47,6 +51,7 @@ const DAILY_CAP = 20;
 const BRIEF_TESTS = 20;
 const KEEP_TESTS = 50;
 const KEEP_LIST = 100;
+const KEEP_LEGS = 30;
 const MAX_LINE = 1_000_000;
 const KINDS = ['master-batch'] as const;
 
@@ -84,16 +89,34 @@ export interface BatchCulprit {
   tests: string[];
 }
 
+/** One editor run of the batch (master-batch.py's "runs"): `ran` false when it gave no results, `infra` why (w5413). */
+export interface BatchLeg {
+  label: string;
+  sha?: string;
+  ran?: boolean;
+  hung?: string;
+  infra?: string;
+}
+
+/**
+ * The batch's answer. red: a confirmed failure, bisected (culprits) or not (unresolved). no-results: the tip ran nothing.
+ * hung (w5413/w5415): the only failure was a hung editor, the confirm showed no real failure; unresolved: a real failure the
+ * confirm run gave no result for (hung, crashed, refused by another Unity instance). Neither names a culprit.
+ */
+export type BatchVerdictKind = 'red' | 'green' | 'flaky' | 'no-results' | 'hung' | 'unresolved';
+const VERDICTS: readonly BatchVerdictKind[] = ['red', 'green', 'flaky', 'no-results', 'hung', 'unresolved'];
+
 export interface BatchVerdict {
   tip: string;
   ref: string;
   /** The run id the line says (the run read is the authority, not this). */
   run: string;
-  verdict: 'red' | 'green' | 'flaky' | 'no-results';
+  verdict: BatchVerdictKind;
   failed: number;
   culprits: BatchCulprit[];
   flaky: string[];
   unresolved: string[];
+  runs: BatchLeg[];
   note?: string;
 }
 
@@ -128,7 +151,7 @@ export function parseVerdict(log: string): BatchVerdict | undefined {
     return undefined;
   }
   if (!body || body.version !== 1) return undefined;
-  const verdict = ['red', 'green', 'flaky', 'no-results'].includes(body.verdict as string) ? (body.verdict as BatchVerdict['verdict']) : undefined;
+  const verdict = VERDICTS.includes(body.verdict as BatchVerdictKind) ? (body.verdict as BatchVerdictKind) : undefined;
   const tip = sha40(body.tip);
   if (!verdict || !tip) return undefined;
   const culprits: BatchCulprit[] = [];
@@ -142,6 +165,16 @@ export function parseVerdict(log: string): BatchVerdict | undefined {
   const run = typeof body.run === 'string' || typeof body.run === 'number' ? String(body.run) : '';
   const failed = typeof body.failed === 'number' && Number.isInteger(body.failed) && body.failed >= 0 ? Math.min(body.failed, 1e6) : 0;
   const note = typeof body.note === 'string' ? cleanLine(body.note, 300) : '';
+  const runs: BatchLeg[] = [];
+  for (const raw of Array.isArray(body.runs) ? body.runs.slice(0, KEEP_LEGS) : []) {
+    const r = obj(raw);
+    const label = typeof r?.label === 'string' ? cleanLine(r.label, 40) : '';
+    if (!r || !label) continue;
+    const legSha = sha40(r.sha);
+    const hung = typeof r.hung === 'string' ? cleanLine(r.hung, 40) : '';
+    const infra = typeof r.infra === 'string' ? cleanLine(r.infra, 200) : '';
+    runs.push({ label, ...(legSha ? { sha: legSha } : {}), ...(typeof r.ran === 'boolean' ? { ran: r.ran } : {}), ...(hung ? { hung } : {}), ...(infra ? { infra } : {}) });
+  }
   return {
     tip,
     ref: typeof body.ref === 'string' ? cleanLine(body.ref, 40) : '',
@@ -151,6 +184,7 @@ export function parseVerdict(log: string): BatchVerdict | undefined {
     culprits,
     flaky: names(body.flaky, KEEP_LIST),
     unresolved: names(body.unresolved, KEEP_LIST),
+    runs,
     ...(note ? { note } : {}),
   };
 }
@@ -273,6 +307,8 @@ export interface MasterBatchDraft {
   source: WorkSource;
   triage: WorkTriage;
   constraints: string;
+  /** Urgent when absent (a red batch blocks master); the hung note is normal (w5415). */
+  priority?: 'normal';
 }
 
 const CONSTRAINTS = 'Do not touch Steam branches or the release lane.';
@@ -349,27 +385,70 @@ export function noResultsDraft(a: { repo: string; run: BatchRun; v: BatchVerdict
   };
 }
 
-/** The request for failing tests the bisect found no merge for. */
+/** The editor runs that hung or gave no results, one line each (w5413's `ran`, `hung`, `infra`). */
+const legLines = (v: BatchVerdict) =>
+  v.runs
+    .filter((r) => r.ran === false || r.hung || r.infra)
+    .map((r) => `${r.label}${r.sha ? ` at ${short(r.sha)}` : ''}: ${[r.hung ? `hung (${r.hung})` : '', r.ran === false ? 'gave no results' : '', r.infra ?? ''].filter(Boolean).join(', ')}`);
+
+/**
+ * The request for failing tests the bisect found no merge for. An 'unresolved' verdict (w5415) is its variant: the failure is
+ * real, but the confirm run gave no result for it (hung, crashed, refused), so nothing was confirmed and nothing was bisected.
+ * Either way: reproduce at the tip first, never revert blind.
+ */
 export function unbisectedDraft(a: { repo: string; run: BatchRun; v: BatchVerdict }): MasterBatchDraft {
   const { repo, run, v } = a;
   const n = v.unresolved.length || v.failed;
+  const unconfirmed = v.verdict === 'unresolved';
+  const legs = legLines(v);
   const brief = [
-    `Master batch red: ${n} failing test${n === 1 ? '' : 's'} on master that the bisect could not trace to a merge in its window. Filed by the portal from the CI log (w1180, docs/intake.md, "Master batch reds"). ${DATA_NOTE}`,
+    unconfirmed
+      ? `Master batch red: ${n} failing test${n === 1 ? '' : 's'} on master that the confirm run gave no result for (its editor hung, crashed or was refused by another Unity instance), so nothing confirmed or bisected ${n === 1 ? 'it' : 'them'}. Filed by the portal from the CI log (w5415, docs/intake.md, "Master batch reds"). ${DATA_NOTE}`
+      : `Master batch red: ${n} failing test${n === 1 ? '' : 's'} on master that the bisect could not trace to a merge in its window. Filed by the portal from the CI log (w1180, docs/intake.md, "Master batch reds"). ${DATA_NOTE}`,
     '',
     ...runLines(repo, run, v),
     '',
-    fence(['Failing tests, not bisected:', ...testLines(v.unresolved), ...(v.note ? [`Note: ${v.note}`] : [])]),
+    fence([unconfirmed ? 'Failing tests, not confirmed:' : 'Failing tests, not bisected:', ...testLines(v.unresolved), ...(legs.length ? ['Editor runs that hung or gave no results:', ...legs.map((l) => `  ${l}`)] : []), ...(v.note ? [`Note: ${v.note}`] : [])]),
     '',
     'Method, in this order:',
-    '1. Reproduce at the tip with the failing tests (scripts/test_select.py), then find the merge that broke them (`git log --first-parent origin/master`, `git bisect`). If it is a flaky test, say so with the evidence.',
+    `1. Reproduce at the tip with the failing tests (scripts/test_select.py)${unconfirmed ? '; the batch never ran them a second time, so they may be flaky or a runner problem' : ''}, then find the merge that broke them (\`git log --first-parent origin/master\`, \`git bisect\`). If it is a flaky test, say so with the evidence. Never revert a merge before a run shows it broke them.`,
     '2. Revert that merge first (`git fetch origin && git switch -c revert-<pr> origin/master && git revert -m 1 <merge sha>`), open a PR into master whose description carries `Part of: <this request>` and `Reverts #<pr>`, merge it on a green Test in editmode. Then re-land the fix on a new PR with the failing tests green locally. Never loosen or skip the failing test to get the batch green.',
   ].join('\n');
   return {
-    title: `Master batch red: ${n} tests not bisected`,
+    title: unconfirmed ? `Master batch red: ${n} tests not confirmed (the confirm run gave no results)` : `Master batch red: ${n} tests not bisected`,
     brief,
     source: { kind: 'master-batch', untrusted: false, channel: 'master batch', ...(run.url ? { url: run.url } : {}), masterBatch: { run: String(run.id), tip: v.tip, kind: 'unbisected' } },
-    triage: { class: 'regression', reason: `master batch: ${n} failing tests not traced to a merge at ${short(v.tip)}` },
+    triage: { class: 'regression', reason: unconfirmed ? `master batch: ${n} failing tests at ${short(v.tip)}, the confirm run gave no results` : `master batch: ${n} failing tests not traced to a merge at ${short(v.tip)}` },
     constraints: CONSTRAINTS,
+  };
+}
+
+/**
+ * The note for a hung batch (w5415): its only failure was an editor that hung (tests the full run never finished) and the
+ * confirm showed no real failure. An infrastructure note at normal priority, never a revert: no merge is blamed. One is open at
+ * a time (identity key master-batch:hung, and the watch adds nothing while one is open), so a hang that repeats is seen once.
+ */
+export function hungDraft(a: { repo: string; run: BatchRun; v: BatchVerdict }): MasterBatchDraft {
+  const { repo, run, v } = a;
+  const legs = legLines(v);
+  const brief = [
+    `Master batch hung at ${short(v.tip)}: an editor in the batch that ${repo}'s CI runs on master hung, and the confirm run showed no real test failure, so the batch named no culprit (w5413). An infrastructure note filed by the portal from the CI log (w5415, docs/intake.md, "Master batch reds"); while it is open, later hung batches add nothing. ${DATA_NOTE}`,
+    '',
+    ...runLines(repo, run, v),
+    '',
+    fence([...(v.unresolved.length ? ['Tests the hung run never finished:', ...testLines(v.unresolved)] : []), ...(legs.length ? ['Editor runs that hung or gave no results:', ...legs.map((l) => `  ${l}`)] : []), ...(v.note ? [`Note: ${v.note}`] : [])]),
+    '',
+    'Method:',
+    `1. Read the run's job log (${JOB_NAME}) and its artifacts (the editor logs, the load line): find where the editor stopped and why (runner load, a leftover editor holding the project, a test that never ends). Check the master-batch runs before and after it (\`gh run list --workflow master-batch.yml -L 10\`): one hang on a loaded runner is noise, the same hang on every batch is a bug.`,
+    '2. Never revert a merge for a hang, never loosen a timeout or add a rerun to make the batch green. If a test hangs every time, find the merge that made it hang by running it, and fix or revert that through a PR into master. If it is the runner, say what you measured and close this.',
+  ].join('\n');
+  return {
+    title: `Master batch hung at ${short(v.tip)}: no culprit (an infrastructure note)`,
+    brief,
+    source: { kind: 'master-batch', untrusted: false, channel: 'master batch', ...(run.url ? { url: run.url } : {}), masterBatch: { run: String(run.id), tip: v.tip, kind: 'hung' } },
+    triage: { class: 'follow-up', reason: `master batch: an editor hung at ${short(v.tip)}, no real failure confirmed, no culprit` },
+    constraints: CONSTRAINTS,
+    priority: 'normal',
   };
 }
 
@@ -556,7 +635,7 @@ export class MasterBatchWatch {
         this.save();
         continue;
       }
-      if (v.verdict !== 'red' && v.verdict !== 'no-results') {
+      if (v.verdict !== 'red' && v.verdict !== 'no-results' && v.verdict !== 'hung' && v.verdict !== 'unresolved') {
         console.warn(`master batch: run ${run.id} failed but its verdict says ${v.verdict}${v.verdict === 'flaky' ? ` (${testsText(v.flaky, 0)})` : ''}; nothing filed: ${run.url}`);
         did.push(`run ${run.id}: ${v.verdict}, nothing filed`);
         this.markSeen(run);
@@ -566,8 +645,8 @@ export class MasterBatchWatch {
       // A later run that passed contains this tip's merges, so whatever broke it is fixed or reverted by now. A run whose
       // batch job was skipped tested nothing here, and its tip may still hold the culprit.
       if (finished.some((r) => r.conclusion === 'success' && !this.data.skipped.includes(String(r.id)) && Date.parse(r.createdAt) > Date.parse(run.createdAt))) {
-        console.log(`master batch: run ${run.id} was red, but a later run passed; nothing filed`);
-        did.push(`run ${run.id}: red, superseded by a later green run`);
+        console.log(`master batch: run ${run.id} was ${v.verdict === 'hung' ? 'hung' : 'red'}, but a later run passed; nothing filed`);
+        did.push(`run ${run.id}: ${v.verdict === 'hung' ? 'hung' : 'red'}, superseded by a later green run`);
         this.markSeen(run);
         this.save();
         continue;
@@ -580,6 +659,17 @@ export class MasterBatchWatch {
   /** Files what a red run asks for. False when something could not be filed yet (a cap): the run is looked at again. */
   private async fileRun(s: MasterBatchSettings, run: BatchRun, v: BatchVerdict, did: string[]): Promise<boolean> {
     let complete = true;
+    // A hung or unresolved batch names no culprit (w5413): even a line that lists one is never a revert brief (w5415).
+    if (v.verdict === 'hung') {
+      const open = [...this.d.store.work.values()].find((w) => w.source?.kind === 'master-batch' && w.source.masterBatch?.kind === 'hung' && isOpen(w) && !w.mergedInto);
+      if (open) {
+        console.log(`master batch: run ${run.id} hung; ${open.id} already notes a hung batch, nothing filed`);
+        did.push(`run ${run.id}: hung, ${open.id} already notes it`);
+        return true;
+      }
+      return this.fileOne(s, run, `${run.id}:hung`, hungDraft({ repo: s.repo, run, v }), did) !== undefined;
+    }
+    if (v.verdict === 'unresolved') return this.fileOne(s, run, `${run.id}:unbisected`, unbisectedDraft({ repo: s.repo, run, v }), did) !== undefined;
     if (v.verdict === 'no-results') {
       complete = this.fileOne(s, run, `${run.id}:no-results`, noResultsDraft({ repo: s.repo, run, v }), did) !== undefined;
     } else if (!v.culprits.length) {
@@ -612,7 +702,7 @@ export class MasterBatchWatch {
       brief: draft.brief,
       source: draft.source,
       requestedBy: this.d.identity.systemPayer(),
-      priority: 'urgent',
+      priority: draft.priority ?? 'urgent',
       autoApprove: rule,
       approved: !autoApproveProblem(work, rule, KINDS, now),
       kinds: KINDS,
