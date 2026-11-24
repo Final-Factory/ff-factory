@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { isLabelledLow, labelLow, lowCopy, lowEnv, lowTargets, lowUnityDir, strayLowServers, type Exec } from '../machine/lowIntegrity.ts';
+import { currentAccount, isLabelledLow, labelLow, lowCopy, lowEnv, lowTargets, lowUnityDir, strayLowServers, type Exec } from '../machine/lowIntegrity.ts';
 
 /**
  * w5377: the Windows worker fence. What gets the Low label (and what must stay Medium: daemon, secrets, the daemon's
@@ -106,6 +106,45 @@ test('labelLow labels only what is not Low yet, makes missing paths, and reports
   const bad = icacls(new Set(), b);
   assert.equal(await labelLow({ dirs: [b], files: [] }, bad.exec, (l) => void said.push(l)), false);
   assert.ok(said.some((l) => l.includes('Access is denied')));
+});
+
+test('labelLow grants the account Full and labels again when the label is denied for want of WRITE_OWNER (BEAST, w5402)', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'low-'));
+  const a = path.join(dir, 'a');
+  const f = path.join(dir, 'events.jsonl');
+  const node = path.join(dir, 'node');
+  fs.mkdirSync(node);
+  const granted = new Set<string>();
+  const calls: string[][] = [];
+  const exec: Exec = async (_cmd, args) => {
+    calls.push(args);
+    if (args.length === 1) return { code: 0, stdout: args[0] === node ? 'Mandatory Label\\Low Mandatory Level:(I)(OI)(CI)(NW)' : '', stderr: '' };
+    if (args[1] === '/grant') {
+      granted.add(args[0]);
+      return { code: 0, stdout: 'processed file', stderr: '' };
+    }
+    return granted.has(args[0]) ? { code: 0, stdout: '', stderr: '' } : { code: 5, stdout: '', stderr: `${args[0]}: Access is denied.` };
+  };
+  const said: string[] = [];
+  assert.equal(await labelLow({ dirs: [a], files: [f], medium: [node] }, exec, (l) => void said.push(l), 'BEAST\\rydin'), true);
+  assert.deepEqual(
+    calls.filter((c) => c[1] === '/grant'),
+    [
+      [a, '/grant', 'BEAST\\rydin:(OI)(CI)F'],
+      [f, '/grant', 'BEAST\\rydin:F'],
+      [node, '/grant', 'BEAST\\rydin:(OI)(CI)F'],
+    ],
+  );
+  assert.ok(said.some((l) => l.includes(`labelled ${a} Low`)) && said.some((l) => l.includes(`kept ${node} Medium`)));
+  // A denial the grant cannot cure (the grant is refused too) still fails, so the agents run unfenced.
+  const none: Exec = async (_cmd, args) => (args.length === 1 ? { code: 0, stdout: '', stderr: '' } : { code: 5, stdout: '', stderr: 'Access is denied.' });
+  assert.equal(await labelLow({ dirs: [a], files: [] }, none, () => {}, 'BEAST\\rydin'), false);
+});
+
+test('currentAccount names DOMAIN\\user as icacls takes it', () => {
+  assert.equal(currentAccount({ USERDOMAIN: 'BEAST', USERNAME: 'rydin' }), 'BEAST\\rydin');
+  assert.equal(currentAccount({ USERNAME: 'rydin' }), 'rydin');
+  assert.equal(currentAccount({}), undefined);
 });
 
 test('lowCopy names the copy by size and mtime, labels it, and removes older copies', async () => {

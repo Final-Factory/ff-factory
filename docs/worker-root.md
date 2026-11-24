@@ -637,6 +637,12 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
     shared store, labelled and otherwise unchanged). The root itself stays Medium. Outside the root it labels the extra
     roots, the temp and sandbox folders where they are elsewhere, and only what `daemon.json` `workerIntegrityAllow`
     lists, which is the person's decision.
+  - Setting a label needs WRITE_OWNER, which an owner lacks by right (it has READ_CONTROL and WRITE_DAC). Where the
+    account writes the root only through a group ACE, `icacls /setintegritylevel` answers "Access is denied" (BEAST,
+    w5402: `F:fw` inherits `Authenticated Users:(M)` from the drive, and the daemon's token is not elevated, so
+    `Administrators:(F)` does not count); every folder failed and the agents ran unfenced (Medium). `labelLow` then grants
+    the account `(OI)(CI)F` on that folder and labels it again (measured on BEAST: denied, grant, label, files inside
+    inherit Low).
   - What workers write for the daemon is inside the root, so it needs no exception (w5377, lothsahn's rule from w5297:
     "under no circumstances should workers write outside of ffw"): a worker root's Unity slots mailbox is
     `<root>\unity-slots` and its Max events file `<root>\max\max-events.jsonl` (`withRootDefaults`; `daemon.json`'s own

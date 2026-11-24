@@ -1649,6 +1649,20 @@ export function manifestFor(prev: Manifest | undefined, o: Pick<InstallOptions, 
   };
 }
 
+/**
+ * root.json's outside list without a Unity slots mailbox outside the root that this install does not name: the mailbox is
+ * `<root>/unity-slots` since w5377, and installs before c0fe6df recorded the home folder's. Exported for tests.
+ */
+export function dropStaleSlotsNote(outside: OutsideItem[], root: string, named?: string): OutsideItem[] {
+  const rootKey = pathKey(path.resolve(root));
+  const namedKey = named ? pathKey(path.resolve(named)) : undefined;
+  return outside.filter((x) => {
+    if (x.kind !== 'file' || !/unity-slots$/.test(x.name)) return true;
+    const k = pathKey(path.resolve(x.name));
+    return k.startsWith(rootKey) || k === namedKey;
+  });
+}
+
 /** root.json's record of a drive that holds the whole root (w1070), and what its host folder keeps, for the uninstall. */
 function notePinnedDrive(m: Manifest, rec: DevDriveRecord) {
   m.devDrive = rec;
@@ -1802,7 +1816,9 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
   }
 
   // The Unity slots mailbox is the root's own, <root>/unity-slots (machine/daemon.ts withRootDefaults, w5377): nothing
-  // outside the root to note, unless the install names one there.
+  // outside the root to note, unless the install names one there. An entry an older install left (the home folder's
+  // ~/.ff-factory/unity-slots) is dropped, or every update report goes on listing it (BEAST, w5402).
+  m.outside = dropStaleSlotsNote(m.outside, l.root, o.unitySlotsDir);
   if (o.unitySlotsDir && !pathKey(path.resolve(o.unitySlotsDir)).startsWith(pathKey(path.resolve(l.root)))) {
     noteOutside(m, { kind: 'file', name: o.unitySlotsDir, note: 'the Unity slots mailbox this install names (w469)' });
   }
