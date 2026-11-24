@@ -690,6 +690,68 @@ export async function labelFailures(h: TestHistory, prDiff: PrDiff, now = Date.n
     else verdict = { label: 'unknown', reason: 'passed again, but the commits are not recorded' };
     n += +h.label(f.id, verdict.label, verdict.reason, 'auto');
   }
+  return n + (await labelStreaks(h, prDiff));
+}
+
+/** Master-line batches a test fails in a row before its failures stop counting as flakes (w5465). */
+const STREAK = 3;
+/** The master line: the batches and release runs on master, each running the whole suite. */
+const MASTER_LINE = "r.branch = 'master' AND r.source IN ('master-batch', 'release')";
+
+/**
+ * A test that fails in STREAK or more master-line batches in a row is no flake, whatever each batch's confirm said (w5465:
+ * 13 tests another class broke passed alone, so each of 15 batches called them flaky, 195 fp rows, until #3130 fixed the
+ * polluter). Its automatic fp labels become detect when game code changed between its last failing batch and the next
+ * batch that ran without the failure, else unknown (still failing, only tests changed, or the diff unreadable). A batch
+ * is one run's sha and finish time: the master batch keeps an EditMode and a smoke run side by side, and only failures.
+ */
+export async function labelStreaks(h: TestHistory, prDiff: PrDiff): Promise<number> {
+  const tests = h.all(
+    `SELECT f.test_id AS id FROM failures f JOIN runs r ON r.id = f.run_id WHERE ${MASTER_LINE} AND f.label = 'fp' AND f.labelled_by = 'auto'
+     GROUP BY f.test_id`,
+  );
+  if (!tests.length) return 0;
+  const batches = h.all(`SELECT sha, finished, max(repo) AS repo FROM runs r WHERE ${MASTER_LINE} GROUP BY sha, finished ORDER BY finished, sha`);
+  const diffs = new Map<string, Promise<string[] | undefined>>();
+  let n = 0;
+  for (const { id } of tests) {
+    const fails = h.all(
+      `SELECT f.id, f.label, f.labelled_by, r.sha, r.finished FROM failures f JOIN runs r ON r.id = f.run_id WHERE f.test_id = ? AND ${MASTER_LINE}`,
+      Number(id),
+    );
+    const at = new Map<string, Row[]>();
+    for (const f of fails) at.set(`${f.sha}|${f.finished}`, [...(at.get(`${f.sha}|${f.finished}`) ?? []), f]);
+    let run: Row[] = [];
+    let last: Row | undefined;
+    const settle = async (next: Row | undefined) => {
+      const batchesInRun = new Set(run.map((f) => `${f.sha}|${f.finished}`)).size;
+      const flakes = run.filter((f) => f.label === 'fp' && f.labelled_by === 'auto');
+      if (batchesInRun >= STREAK && flakes.length) {
+        let label: Label = 'unknown';
+        let reason = `master line: failed in ${batchesInRun} batches in a row and has not passed since, so not a flake (w5465)`;
+        if (next && last) {
+          const key = `${last.sha}..${next.sha}`;
+          if (!diffs.has(key)) diffs.set(key, last.repo ? prDiff(String(last.repo), String(last.sha), String(next.sha)) : Promise.resolve(undefined));
+          const paths = await diffs.get(key)!;
+          const game = paths?.some((p) => pathKind(p) === 'game');
+          label = game ? 'detect' : 'unknown';
+          reason = `master line: failed in ${batchesInRun} batches in a row, then ran clean from ${String(next.sha).slice(0, 9)} on, ${
+            game ? 'after a change to game code: a real failure a merge fixed' : paths ? 'after only tests or other files changed' : 'and the change between them could not be read'
+          }; not a flake (w5465)`;
+        }
+        for (const f of flakes) n += +h.label(Number(f.id), label, reason, 'auto');
+      }
+      run = [];
+    };
+    for (const b of batches) {
+      const hit = at.get(`${b.sha}|${b.finished}`);
+      if (hit) {
+        run.push(...hit);
+        last = b;
+      } else if (run.length) await settle(b);
+    }
+    if (run.length) await settle(undefined);
+  }
   return n;
 }
 
