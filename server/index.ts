@@ -104,7 +104,7 @@ import { tailscaleWhois } from './machineJoin.ts';
 import { JOIN_PATHS, WINDOWS_INSTALLER_NAME, machineJoinHttp, windowsInstaller } from './machineJoinHttp.ts';
 import { bundleServedLine, updateBundleFor } from './machineLink.ts';
 import { issueMachineToken } from './machineTokens.ts';
-import { clientAddress, originOf, tailnetOnly } from './remoteChat.ts';
+import { originOf, tailnetDeviceAddress } from './remoteChat.ts';
 import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, type LiveStats, type SpeakRequest, type TranscribeRequest, type VocabularySource } from '../shared/voice.ts';
 import type { AccountUsage, AppState, CreateSandboxRequest, HostStatus, Machine, TokenWarning, PermissionDecisionRequest, Requester, ServerEvent, SessionInfo, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats, LiveKnobRequest, PoolPerson, TranscriptEvent, WorkItem } from '../shared/types.ts';
 import { slugify } from './sandboxes.ts';
@@ -115,7 +115,7 @@ import { warmSearchIndex } from './search.ts';
 import { dataGuardSettings, footprint, gzipRatioCached, runDataGuard } from './dataGuard.ts';
 import { cleanMediaTrouble, mediaTroubleLine } from '../shared/mediaTrouble.ts';
 import { LoopWatch } from './loopWatch.ts';
-import { PageSockets, fromThisMachine } from './pageSockets.ts';
+import { PageSockets, PAGE_MAX_PAYLOAD, fromThisMachine } from './pageSockets.ts';
 import { StallProfiler } from './stallProfile.ts';
 
 const WEB = path.join(ROOT, 'web', 'dist');
@@ -2150,7 +2150,8 @@ const requireJoinOwner = (req: http.IncomingMessage) => {
 // The tailnet device this browser is on, to name the PC when the owner adds it from its own browser (undefined off the tailnet).
 route('GET', '/api/machines/join/device', async (req) => {
   requireJoinOwner(req);
-  const device = tailnetOnly(req) ? await joinWhois(clientAddress(req)) : undefined;
+  const addr = tailnetDeviceAddress(req);
+  const device = addr ? await joinWhois(addr) : undefined;
   const name = device?.name;
   const machine = name ? machines.list().find((m) => m.host.toLowerCase() === name || m.id === name)?.id : undefined;
   return { name, machine };
@@ -2506,7 +2507,7 @@ const server = http.createServer(async (req, res) => {
 
 // Big messages (the full state a page gets when it connects, megabytes at thousands of sessions) go compressed;
 // the stream of small events does not pay for zlib. No context takeover: no zlib memory kept per page between messages.
-const wss = new WebSocketServer({ noServer: true, perMessageDeflate: { threshold: 16 * 1024, serverNoContextTakeover: true, clientNoContextTakeover: true } });
+const wss = new WebSocketServer({ noServer: true, maxPayload: PAGE_MAX_PAYLOAD, perMessageDeflate: { threshold: 16 * 1024, serverNoContextTakeover: true, clientNoContextTakeover: true } });
 /** Every page's socket, with the login it signed in as (notices meant for one person go to their pages only). */
 const clients = new Map<WebSocket, string>();
 /** One log line per page socket opening and closing, and each person's drops for /api/health (w4723, server/pageSockets.ts). */
