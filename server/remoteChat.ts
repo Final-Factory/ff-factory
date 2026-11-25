@@ -61,6 +61,11 @@ export function tailnetOnly(req: Pick<http.IncomingMessage, 'headers' | 'socket'
   return `this request did not come from the tailnet (a Tailscale address); ${what} is tailnet-only`;
 }
 
+/** The address to look up the tailnet device of, or undefined for a request that did not come over the tailnet (Funnel included). tailnetOnly returns a refusal for those, so it is truthy off the tailnet (w5532). */
+export function tailnetDeviceAddress(req: Pick<http.IncomingMessage, 'headers' | 'socket'>): string | undefined {
+  return tailnetOnly(req) ? undefined : clientAddress(req);
+}
+
 /** The client's address: the proxy's X-Forwarded-For on a connection from this machine (Tailscale Serve), else the connection's own. */
 export function clientAddress(req: Pick<http.IncomingMessage, 'headers' | 'socket'>): string {
   const direct = (req.socket.remoteAddress ?? '').replace(/^::ffff:/i, '');
