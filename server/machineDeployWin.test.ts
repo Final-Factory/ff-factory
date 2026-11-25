@@ -703,8 +703,8 @@ test('windows (real tray app): built with the in-box csc, it starts, counts a Se
   tray.stdin.write(`${JSON.stringify({ type: 'state', paused: false, why: 'No schedule: work runs any time', schedule: 'none', work: 'No agents working here', settings: { schedule: { enabled: false, start: '22:00', end: '08:00', days: [0, 1, 2, 3, 4, 5, 6] }, activity: { enabled: true, idleMinutes: 90 } }, machine: 'test' })}\n`);
   if (hello.hooks === 'keyboard and mouse') {
     // An injector started and compiled before the key is due (Add-Type takes seconds on a cold runner), then sending on cue:
-    // F24 down and up (a key no program acts on) and an X button press with no button named (an X click no program acts
-    // on), injected the way agents' tools inject input.
+    // F24 down and up (a key no program acts on) and an X2 ("forward") button press, injected the way agents' tools inject
+    // input. An X press that names no button never reaches a hook (CI run 45644678696: the key counted, that click not).
     const ps1 = path.join(dir, 'inject.ps1');
     fs.writeFileSync(ps1, `Add-Type -TypeDefinition @'
 using System; using System.Runtime.InteropServices;
@@ -721,8 +721,8 @@ public static class Inj {
   }
   public static uint XClick() {
     var a = new INPUT[2];
-    a[0].type = 0; a[0].mi.dwFlags = 0x80;
-    a[1].type = 0; a[1].mi.dwFlags = 0x100;
+    a[0].type = 0; a[0].mi.mouseData = 2; a[0].mi.dwFlags = 0x80;
+    a[1].type = 0; a[1].mi.mouseData = 2; a[1].mi.dwFlags = 0x100;
     return SendInput(2, a, Marshal.SizeOf(typeof(INPUT)));
   }
 }
