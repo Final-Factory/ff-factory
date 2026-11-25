@@ -1097,7 +1097,7 @@ export class MachineManager {
   // ---------------------------------------------------------------- daemon versions
 
   /** What each connected daemon said in its hello. */
-  private readonly hellos = new Map<string, { protocol: number; oldestPortal?: number; daemon?: string; catalog?: string[]; guard?: boolean; agentHosts?: boolean; saveWork?: boolean; liveView?: boolean; liveIdleClose?: boolean; liveRestage?: boolean; liveKeep?: boolean; compact?: boolean; ghApp?: boolean; selfUpdate?: number; timedRuns?: boolean; labFixtures?: boolean; steamUpload?: boolean; steamInstall?: boolean; portalPin?: PortalPinStatus }>();
+  private readonly hellos = new Map<string, { protocol: number; oldestPortal?: number; daemon?: string; catalog?: string[]; guard?: boolean; agentHosts?: boolean; saveWork?: boolean; liveView?: boolean; liveIdleClose?: boolean; liveRestage?: boolean; liveKeep?: boolean; compact?: boolean; ghApp?: boolean; selfUpdate?: number; timedRuns?: boolean; labFixtures?: boolean; steamUpload?: boolean; steamInstall?: boolean; portalPin?: PortalPinStatus; readFenceSwitch?: boolean }>();
 
   /** Each connected daemon's GPU Whisper (w615), from its hello and its `voice` messages. */
   private readonly voices = new Map<string, RemoteVoiceStatus>();
@@ -1199,12 +1199,12 @@ export class MachineManager {
     return this.isOnline(id) && this.hellos.has(id);
   }
 
-  /** The commit a connected daemon says it runs (its hello's machine/VERSION), or undefined. */
   /** The portal hosts its daemon follows and what pinning would have refused (w5576), from its hello; undefined from an older daemon. */
   portalPinOf(id: string): PortalPinStatus | undefined {
     return this.isOnline(id) ? this.hellos.get(id)?.portalPin : undefined;
   }
 
+  /** The commit a connected daemon says it runs (its hello's machine/VERSION), or undefined. */
   daemonOf(id: string): string | undefined {
     return this.isOnline(id) ? this.hellos.get(id)?.daemon : undefined;
   }
@@ -1319,9 +1319,11 @@ export class MachineManager {
   }
 
   /** Restart a machine's daemon over its link (its agents run on), or unload it as removeMachine does over ssh (w1596). */
-  async linkControl(id: string, action: 'restart' | 'uninstall'): Promise<void> {
+  async linkControl(id: string, action: 'restart' | 'uninstall' | 'read-fence-off' | 'read-fence-warn' | 'read-fence-on'): Promise<void> {
     refuseInDryRun(`a daemon ${action} of ${id} over its link`);
     if (!this.canLink(id)) throw new Error(`${id}'s daemon does not take a ${action} over its link`);
+    // w5546: an older daemon reads any action but restart as uninstall, so the switch goes only to one that offers it.
+    if (action.startsWith('read-fence') && !this.hellos.get(id)?.readFenceSwitch) throw new Error(`${id}'s daemon has no read fence switch (it runs code from before w5546): nothing was sent`);
     const callId = randomUUID();
     const done = this.linkControls.wait(callId, id, 60_000, `the ${action}`);
     this.post(id, { type: 'daemon_control', id: callId, action });
@@ -1958,9 +1960,15 @@ export class MachineManager {
    * while any run unless forced (as a redeploy is). A stopped daemon is left alone by the offline redeploy until
    * it is started (or redeployed) again.
    */
-  async controlDaemon(id: string, action: 'start' | 'stop' | 'restart', force = false): Promise<string> {
+  async controlDaemon(id: string, action: 'start' | 'stop' | 'restart' | 'read-fence-off' | 'read-fence-warn' | 'read-fence-on', force = false): Promise<string> {
     const m = this.require(id);
     refuseInDryRun(`a daemon ${action} on ${m.id}`);
+    // w5546: the worker read fence's live off switch, over the daemon's link only; no restart, its agents run on.
+    if (action === 'read-fence-off' || action === 'read-fence-warn' || action === 'read-fence-on') {
+      await this.linkControl(m.id, action);
+      const mode = action.slice('read-fence-'.length);
+      return `${m.id}: the worker read fence is ${mode} for runs started from now on${mode === 'on' ? ' once its probe passes' : ' (Windows: any No-Read-Up label taken off; macOS and Linux: runs already going keep the read rules they started with until they end)'}; its daemon log says what the probe found.`;
+    }
     if (this.deploying.has(m.id)) throw new Error(`${m.id} is being deployed right now`);
     const live = this.liveCount(m.id);
     // A daemon whose agents run in agent hosts (w605) restarts without stopping them; a stop still ends them.
@@ -2460,7 +2468,7 @@ export class MachineManager {
     if (!m) return;
     switch (msg.type) {
       case 'hello': {
-        this.hellos.set(id, { protocol: msg.protocol, ...(msg.oldestPortal !== undefined ? { oldestPortal: msg.oldestPortal } : {}), daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}), ...(msg.agentHosts ? { agentHosts: true } : {}), ...(msg.saveWork ? { saveWork: true } : {}), ...(msg.liveView ? { liveView: true } : {}), ...(msg.liveIdleClose ? { liveIdleClose: true } : {}), ...(msg.liveRestage ? { liveRestage: true } : {}), ...(msg.liveKeep ? { liveKeep: true } : {}), ...(msg.compact ? { compact: true } : {}), ...(msg.timedRuns ? { timedRuns: true } : {}), ...(msg.labFixtures ? { labFixtures: true } : {}), ...(msg.steamUpload ? { steamUpload: true } : {}), ...(msg.steamInstall ? { steamInstall: true } : {}), ...(msg.ghApp ? { ghApp: true } : {}), ...(typeof msg.selfUpdate === 'number' ? { selfUpdate: msg.selfUpdate } : {}), ...(msg.portalPin && typeof msg.portalPin === 'object' ? { portalPin: msg.portalPin } : {}) });
+        this.hellos.set(id, { protocol: msg.protocol, ...(msg.oldestPortal !== undefined ? { oldestPortal: msg.oldestPortal } : {}), daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}), ...(msg.agentHosts ? { agentHosts: true } : {}), ...(msg.saveWork ? { saveWork: true } : {}), ...(msg.liveView ? { liveView: true } : {}), ...(msg.liveIdleClose ? { liveIdleClose: true } : {}), ...(msg.liveRestage ? { liveRestage: true } : {}), ...(msg.liveKeep ? { liveKeep: true } : {}), ...(msg.compact ? { compact: true } : {}), ...(msg.timedRuns ? { timedRuns: true } : {}), ...(msg.labFixtures ? { labFixtures: true } : {}), ...(msg.steamUpload ? { steamUpload: true } : {}), ...(msg.steamInstall ? { steamInstall: true } : {}), ...(msg.ghApp ? { ghApp: true } : {}), ...(typeof msg.selfUpdate === 'number' ? { selfUpdate: msg.selfUpdate } : {}), ...(msg.portalPin && typeof msg.portalPin === 'object' ? { portalPin: msg.portalPin } : {}), ...(msg.readFenceSwitch ? { readFenceSwitch: true } : {}) });
         // GitHub App tokens (w1519): a daemon that keeps them gets the current set at once.
         if (msg.ghApp) this.pushGhAppTokens(id);
         // w1946: a play-only machine's timed runs: what it holds now, so the portal sends again what a restart lost.

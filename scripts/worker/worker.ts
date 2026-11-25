@@ -1944,6 +1944,8 @@ export interface UpdateFlags {
   voiceWhisper?: string;
   /** The worker write fence (w5377): "on" sets this platform's daemon.json key, "off" removes it; unset carries daemon.json's. */
   workerFence?: 'on' | 'off';
+  /** The worker caps' mode (w5554, docs/worker-caps.md): written as daemon.json's `workerCaps`; unset carries daemon.json's (absent: warn). */
+  workerCaps?: 'off' | 'warn' | 'enforce';
   /** The Dev Drive (w900): "on" makes one if the install has none; unset keeps the one it has (an update never makes one on its own). */
   devDrive?: 'on' | 'off';
   devDriveMaxGB?: number;
@@ -1985,6 +1987,18 @@ export function applyWorkerFence(config: Record<string, unknown>, setting: 'on' 
   return rest;
 }
 
+/** `--worker-caps off|warn|enforce` (w5554): anything else is refused, never guessed at. Exported for tests. */
+export function workerCapsFlag(v: string | undefined): 'off' | 'warn' | 'enforce' | undefined {
+  if (v === undefined) return undefined;
+  if (v !== 'off' && v !== 'warn' && v !== 'enforce') throw new Error(`--worker-caps is off, warn or enforce, not "${v}"`);
+  return v;
+}
+
+/** daemon.json with the worker caps' mode set (w5554); undefined: the config as it is. The same key on every platform. Exported for tests. */
+export function applyWorkerCaps(config: Record<string, unknown>, mode: 'off' | 'warn' | 'enforce' | undefined): Record<string, unknown> {
+  return mode ? { ...config, workerCaps: mode } : config;
+}
+
 /**
  * The install options an update runs with (w613): the root's own root.json and daemon.json, every setting carried
  * (beast's agent total, protected paths, the Library seed, the editors' priority, the disk guard, cleanup, the Unity
@@ -2021,7 +2035,7 @@ export function planUpdate(root: string, m: Manifest, config: Record<string, unk
     ...(f.devDriveMaxGB !== undefined ? { devDriveMaxGB: f.devDriveMaxGB } : {}),
     ...(f.devDriveSkip ? { devDriveSkip: f.devDriveSkip } : {}),
     ...(f.moveToDevDrive ? { moveToDevDrive: true, devDrive: 'on' as const } : {}),
-    carry: { ...applyWorkerFence(config, f.workerFence, platform), sandboxes: { ...pool, maxSandboxes, maxAgentsPerSandbox, maxUnity } },
+    carry: { ...applyWorkerCaps(applyWorkerFence(config, f.workerFence, platform), f.workerCaps), sandboxes: { ...pool, maxSandboxes, maxAgentsPerSandbox, maxUnity } },
     // A test install stays one through its updates (w1596): daemon.json says so (daemonJson, --no-cleanup).
     ...(config.leftovers === false ? { noCleanup: true } : {}),
     update: true,
@@ -2255,6 +2269,7 @@ export async function update(root: string, f: UpdateFlags): Promise<boolean> {
   const rel = (await exec('git', ['-C', l.repo, 'config', '--get', 'worktree.useRelativePaths'])).stdout.trim();
   const o = planUpdate(l.root, m, config, token, { ...f, absoluteWorktrees: rel === 'false', ...(owner ? { owner } : {}) });
   if (f.workerFence) say(workerFenceLine(f.workerFence));
+  if (f.workerCaps) say(`worker caps: ${f.workerCaps}`);
   // Every prerequisite first (w629), before anything is fetched, stopped or restarted: m5's update over ssh found no
   // git-lfs, and its refused run still restarted the daemon and then reported the old one as current.
   say('Checking prerequisites (nothing changes until they all pass)...');
@@ -2823,6 +2838,8 @@ const USAGE = `node scripts/worker/worker.ts <install|update|reinstall|uninstall
             [--voice-whisper <model>|off] (the GPU Whisper for the portal's mic, w615; default: as daemon.json has it)
             [--worker-fence on|off] (w5377: this platform's worker write fence in daemon.json: the Landlock write lock on Linux,
              Seatbelt on macOS, Low integrity on Windows; default: as daemon.json has it)
+            [--worker-caps off|warn|enforce] (w5554: the per-worker memory, process and temp caps' mode, daemon.json workerCaps;
+             absent means warn; docs/worker-caps.md)
             [--dev-drive] [--dev-drive-max-gb N] [--dev-drive-skip U,T] [--move-to-dev-drive] (Windows, w900: make the Dev Drive if the
              install has none; --move-to-dev-drive also moves its sandboxes and seed onto it, which needs every sandbox free of
              workers and editors. An update without these keeps the drive it has and makes none.)
@@ -2919,6 +2936,7 @@ export async function main(argv = process.argv.slice(2)) {
     const opt = (k: string) => (opts[k] === undefined ? undefined : Number(opts[k]));
     // A bare `--worker-fence` parses as a flag with no value: refused like any other value that is not on or off.
     const workerFence = flags.has('worker-fence') ? workerFenceFlag('') : workerFenceFlag(opts['worker-fence']);
+    const workerCaps = flags.has('worker-caps') ? workerCapsFlag('') : workerCapsFlag(opts['worker-caps']);
     await update(opts.root, {
       maxSandboxes: opt('max-sandboxes'),
       maxAgentsPerSandbox: opt('max-agents-per-sandbox'),
@@ -2930,6 +2948,7 @@ export async function main(argv = process.argv.slice(2)) {
       ...(flags.has('no-ssh') ? { ssh: false } : {}),
       ...(opts['voice-whisper'] !== undefined ? { voiceWhisper: opts['voice-whisper'] } : {}),
       ...(workerFence ? { workerFence } : {}),
+      ...(workerCaps ? { workerCaps } : {}),
       ...devDriveFlags(opts, flags),
     });
   } else if (cmd === 'reinstall') {

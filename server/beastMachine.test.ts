@@ -434,7 +434,7 @@ test('w469: a daemon gives its agents the Unity slots mailbox, their holder and 
   try {
     const slots = path.join(dir, 'slots');
     const d = new Daemon({ portalUrl: 'http://127.0.0.1:1', id: 'lothdesktop', token: 't', repoPath: path.join(dir, 'FinalFactory'), appDir: dir, maxEventsFile: null, unitySlotsDir: slots }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES);
-    assert.deepEqual(d.slotEnv({ sandbox: 'sb1', cwd: path.join(dir, 'ffsb', 'sb1') }, {}), { FF_UNITY_SLOTS: slots, FF_UNITY_HOLDER: 'sandbox:sb1' }, 'before start wrote the commands: no PATH change');
+    assert.deepEqual(d.slotEnv({ sandbox: 'sb1', cwd: path.join(dir, 'ffsb', 'sb1') }, {}), { FF_UNITY_SLOTS: slots, FF_UNITY_HOLDER: 'sandbox:sb1', UNITY_MCP_STATUS_DIR: path.join(dir, 'unity-mcp', 'sb1') }, 'before start wrote the commands: no PATH change (w5650: its own Unity MCP status folder)');
     // w5557: under a data root override, a sandbox agent gets its sandbox's own folder; no sandbox, the root stays as it is.
     const gd = path.join(dir, 'gamedata');
     assert.equal(d.slotEnv({ sandbox: 'sb1', cwd: path.join(dir, 'ffsb', 'sb1') }, { FF_GAME_DATA_DIR: gd }).FF_GAME_DATA_DIR, path.join(gd, 'sandboxes', 'sb1'));
@@ -574,7 +574,7 @@ test('w5545: the daemon arbitrates slots in its own folder, not the workers\' ma
     await inside.slots.tick();
     assert.deepEqual((await inside.slots.holds()).reqs, []);
     const env = d.rpcEnv('w5545-worker', 'slot3');
-    assert.equal(env.FF_DAEMON_RPC, path.join(appDir, 'rpc.json'));
+    assert.equal(env.FF_DAEMON_RPC, path.join(appDir, 'rpc', 'rpc.json'));
     const { readToken } = await import('../machine/daemonRpc.ts');
     assert.deepEqual(readToken(inside.rpcKey!, env.FF_DAEMON_TOKEN), { session: 'w5545-worker', sandbox: 'slot3' });
     inside.slots.close();

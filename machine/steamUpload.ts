@@ -279,8 +279,9 @@ export async function runSteamJob(msg: SteamUploadMsg, d: SteamRunDeps): Promise
   const say = (m: Omit<StateMsg, 'type' | 'id'>) => d.send({ type: 'steam_upload_state', id: msg.id, ...m });
   addSecretValues(Object.values(msg.secrets ?? {}).filter((v) => v));
   if (msg.guardCode) addSecretValues([msg.guardCode]);
-  // The account name is no secret, but no output repeats it (w5640).
-  if (msg.account) addSecretValues([msg.account]);
+  // The account name is no secret, but no output repeats it (w5640): the portal's setting, and the one config.json names
+  // already, which a check prints when the setting is unset (ffsteam's "<account> logs in", seen on BEAST 2026-11-25).
+  addSecretValues([msg.account, readConfig(d.root).release?.steam?.account].filter((v): v is string => !!v));
   if (busy) return say({ state: 'failed', error: 'this computer runs another Steam job now (one steamcmd session per account): ask again when it ends' });
   const sdir = steamDir(d.root);
   const lock = path.join(sdir, 'job.lock');

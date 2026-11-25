@@ -124,8 +124,10 @@ export interface LinkUpdateFlags {
   devDrive?: boolean;
   moveToDevDrive?: boolean;
   devDriveMaxGB?: number;
-  /** The worker write fence on or off (w5377); unset: carried. A daemon that predates it ignores it. */
+  /** The worker write fence on or off (w5377); unset: carried. A daemon that predates it passes it on to linkJob unchanged, and a linkJob that predates it does not write it. */
   workerFence?: 'on' | 'off';
+  /** The worker caps' mode (w5554, docs/worker-caps.md): daemon.json `workerCaps`; unset: carried. A daemon that predates it ignores it. */
+  workerCaps?: 'off' | 'warn' | 'enforce';
 }
 
 /**
@@ -162,8 +164,10 @@ export type DaemonSandbox = Omit<MachineSandbox, 'purpose' | 'sessionIds'>;
  * rateLimit (protocol 4): an agent there hit a rate limit, so the portal fetches the token's usage sooner.
  * tempSize (w3686, no bump): a worker's temp folder is over its threshold, arg { total, biggest, step } (server/tempSizeHook.ts); an older
  * portal re-emits it with no listener, and an older daemon or host never sends it.
- * workerCap (w5554, no bump): a worker's agent host hit one of its caps and ended its tools, arg { kind, limit, seen?, ended }
- * (machine/workerCaps.ts); an older portal ignores it.
+ * workerCap (w5554, no bump): a worker's agent host hit one of its caps and ended its tools, arg { kind, limit, seen?, ended,
+ * warn?, kernel? } (machine/workerCaps.ts); `warn`: warn mode, the cap would have been hit and nothing was ended; `kernel`:
+ * Linux, the kernel acted and the host ended nothing. An older portal ignores it, and one that predates the two flags words a
+ * warn hit as an enforced one (its ledger line says "ended 0").
  */
 export type SignalName = 'turnEnd' | 'permission' | 'result' | 'ended' | 'rateLimit' | 'tempSize' | 'workerCap';
 
@@ -343,7 +347,7 @@ export type ToDaemon =
    * over ssh: its supervisor stopped and unregistered, its agents ended, its files kept. Answered by daemon_control_result
    * before it goes (w1596). Sent only to a daemon whose hello offered `selfUpdate`.
    */
-  | { type: 'daemon_control'; id: string; action: 'restart' | 'uninstall' };
+  | { type: 'daemon_control'; id: string; action: 'restart' | 'uninstall' | 'read-fence-off' | 'read-fence-warn' | 'read-fence-on' };
 
 /** A live view a daemon runs (w1509), as its hello reports it. */
 export interface DaemonLiveView {
@@ -411,6 +415,11 @@ export type FromDaemon =
       pause?: MachinePause;
       /** It updates, restarts and unloads itself on the portal's word over this link (w1596, `self_update`, `daemon_control`): the version. An older portal ignores it. */
       selfUpdate?: number;
+      /**
+       * w5546: it takes daemon_control `read-fence-off` / `read-fence-warn` / `read-fence-on`, the worker read fence's live mode. Sent
+       * only to a daemon that says so: an older one reads any action but restart as uninstall.
+       */
+      readFenceSwitch?: boolean;
       /** The portal hosts it follows and what pinning would have refused (w5576, machine/portalPin.ts). An older portal ignores it. */
       portalPin?: PortalPinStatus;
       /** A worker root install (w513): its folders, so a record made without a deploy learns them. */

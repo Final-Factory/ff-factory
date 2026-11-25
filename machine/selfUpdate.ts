@@ -331,6 +331,8 @@ export interface SelfUpdaterDeps {
   nodeArgs?: string[];
   platform?: NodeJS.Platform;
   launch?: typeof launchJob;
+  /** w5546: sets the worker read fence's mode (daemon_control read-fence-off / read-fence-warn / read-fence-on). */
+  readFence?: (mode: 'off' | 'warn' | 'on') => Promise<void>;
   remove?: typeof removeJob;
   fetch?: typeof fetch;
   now?: () => number;
@@ -465,6 +467,17 @@ export class SelfUpdater {
     const answer = (ok: boolean, error?: string) => {
       this.answer({ type: 'daemon_control_result', id: msg.id, ok, ...(error ? { error } : {}) });
     };
+    if (msg.action === 'read-fence-off' || msg.action === 'read-fence-warn' || msg.action === 'read-fence-on') {
+      if (!this.deps.readFence) return answer(false, 'this daemon has no read fence switch');
+      try {
+        await this.deps.readFence(msg.action === 'read-fence-off' ? 'off' : msg.action === 'read-fence-warn' ? 'warn' : 'on');
+        answer(true);
+      } catch (e) {
+        answer(false, (e as Error).message);
+      }
+      return;
+    }
+    if (msg.action !== 'restart' && msg.action !== 'uninstall') return answer(false, `unknown action ${String((msg as { action?: unknown }).action)}`);
     if (msg.action === 'restart') {
       answer(true);
       this.deps.log('restart over the link: going; the supervisor starts the daemon again and it takes its agents back');

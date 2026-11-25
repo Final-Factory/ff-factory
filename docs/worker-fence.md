@@ -33,12 +33,14 @@ LothDesktop):
 | | Covers | Does not cover |
 |---|---|---|
 | Windows Low integrity | writes outside the root, registry under HKCU\Software, scheduled tasks, shutdown (measured on BEAST); writes to `daemon`, `secrets`, `ffu-runners`, `tools\node` | reads of anything, including `secrets\`; writes to every other sandbox, instance portals, `claude\` and players inside the root; signalling or injecting into other Low workers' processes; the network; code that runs above the fence (the instances updater task, a Medium editor, the daemon's `git status`) |
-| macOS Seatbelt | file writes outside the root; other conversations' transcripts in the root's Claude home (w5563, docs/transcript-seal.md) | reads (`~/.ssh`, browsers, `~/.config/gh`, the Keychain through securityd); preferences through cfprefsd; signals to other processes of the user; other sandboxes inside the root; the network |
+| macOS Seatbelt | file writes outside the root; other conversations' transcripts in the root's Claude home (w5563, docs/transcript-seal.md) | reads (`~/.ssh`, browsers, `~/.config/gh`, the Keychain through securityd); preferences through cfprefsd (unless `workerPrefFence`, w5659); signals to other processes of the user; other sandboxes inside the root; the network |
 | Linux Landlock | file writes outside the root | reads; signals; other sandboxes inside the root; the network; the systemd user bus (`systemd-run --user`, guess) |
 | Any OS | | a worker is not walled off from other workers' sandboxes inside the root (w5451 items 7 and 8) |
 
 **Resource caps** are not a fence, but they bound what one worker can use: memory, processes and temp disk per worker
-(w5554, docs/worker-caps.md, with the ways a hijacked worker can still escape them).
+(w5554, docs/worker-caps.md, with the ways a hijacked worker can still escape them). They start in warn mode, which measures
+and reports and stops nothing: `ops_worker machine_update worker_caps off` is the switch, as `worker_fence off` is the
+fence's, and enforce waits on a week of warn data and the owner's go.
 
 **Fixes, by state** (a fix is "merged" only when its PR has merged; everything else is in progress):
 
@@ -114,7 +116,101 @@ project folder and its `<id>/` folder; w5563, docs/transcript-seal.md), and from
 there. With `repo` read-only (the first version of #1115), a fenced commit in a sandbox failed: "Unable to create
 '.../repo/.git/worktrees/s1/index.lock': Operation not permitted" (w5333, measured on a stand-in root; the live test
 in `server/workerFence.test.ts` now commits in a worktree). The harness's own text guard keeps a careless agent's tools off it, which a script file gets past. The agent's environment adds `CLAUDE_CODE_TMPDIR=<root>/tmp/claude-code` (Claude Code's task output
-and its `/tmp/cc-socks` messaging socket move there) and `DISABLE_AUTOUPDATER=1` (the updater writes `~/.local/share/claude`).
+and its `/tmp/cc-socks` messaging socket move there) and `DISABLE_AUTOUPDATER=1` (the updater writes `~/.local/share/claude`), and `UV_TOOL_DIR=<root>/cache/uv-tools` (w5693: uvx
+writes a temp file in `~/.local/share/uv/tools`, so the Unity MCP server died at start; docs/worker-root.md 2.8).
+
+## Reads: the daemon's folder, secrets and root.json are closed (w5546, every OS)
+
+lothsahn (w5546): "workers can't read the secrets and daemon folders on any OS". The fences that refuse a worker's writes
+also refuse its reads of `<root>/secrets` (and the folder that really holds the machine credential when it is elsewhere: a
+Dev Drive install keeps it in the host folder, `D:\work\ffw\secrets` for root `V:\ffw` on LothDesktop; `secretsDirs`,
+machine/readFence.ts, from `tokenFile`), `<root>/root.json` and the daemon's folder (its own `appDir`, and
+`<root>/daemon` where that differs). What workers read or run in the daemon's folder is given back, from one list,
+`FENCE_READ_ALLOW` (server/daemonReads.ts): the guard's diagnostic reads (`DAEMON_READ_ALLOW`: logs, the code in `src` and
+`app`, sandboxes.json, the clean-up files, ...), the gh shim (`gh-app/bin`) and the Unity MCP status files (`unity-mcp`). Never
+given back: `daemon.json`, `hosts` (other sessions' specs and environments), `gh-app/tokens.json` (every app's tokens),
+`root.json` and `root-backup.json` (dropped from the guard's list too). A run's own GitHub App tokens file
+(`gh-app/sessions/<session>/tokens.json`, w5547, docs/github-apps.md) is given back to that run only (macOS, Linux), as a folder, so its rewrite by rename stays readable.
+
+| OS | How | Where |
+|---|---|---|
+| macOS | `(deny file-read-data ...)` on the closed paths, then `(allow file-read-data ...)` on the given-back ones (later rules win). Only contents: stat and realpath of a closed path still work. | `seatbeltProfile` `readRules` (server/workerFence.ts); per run `readAllowed` |
+| Linux | Landlock only grants, so ff-landlock.py handles read too (`--no-read`, `--read`): it grants read on everything but the closed paths (every sibling off the chain of each closed path's parents; the parents list names only) and the given-back ones. Symbolic links are not followed. | `readLockArgs` (machine/writeLock.ts), `read_grants` (machine/ff-landlock.py) |
+| Windows | A Medium mandatory label with No-Read-Up, `S:(ML;OICI;NWNR;;;ME)` on folders (`S:(ML;;NWNR;;;ME)` on files), set with `SetNamedSecurityInfoW` (icacls cannot set NR); the given-back paths get an explicit `S:(ML;OICI;NW;;;ME)`, which overrides the inherited one. Set at every daemon start when `workerIntegrity` is `low` (a self-update's new `app` folder inherits NR), skipping a label already in place. Never on the system drive: a target on C:, or a junction into it, is skipped and logged. | `noReadUpTargets`, `labelNoReadUp` (machine/lowIntegrity.ts), `lowSetup` (machine/daemon.ts) |
+
+Kept working through the daemon's own writes (lockout review of #1193):
+
+- A file workers read that the daemon rewrites (`cleanup-facts.json`, `person-play.json`) is written in place
+  (`writeInPlace`, machine/readFence.ts), never by rename: a renamed-in file is a new inode, which a Landlock grant does not
+  cover, and on Windows it takes the daemon folder's No-Read-Up label.
+- The given-back folders the daemon makes later (`logs`, `rpc` (the daemon's call address, w5545), `unity-mcp`, `unity-slots`, `gh-app/bin`, `gh-app/sessions`) are
+  made before the fences are set (`ensureReadBackDirs`), since Landlock skips a path that is not there.
+- The fence never stands between the daemon and its updates: only the claude runs it starts are fenced
+  (server/launch.ts `fenceSpawner`, `writeLockSpawner`); the daemon, its self-update check (machine/selfUpdate.ts
+  `checkPublished`) and the update job (machine/osJob.ts) run unfenced with the daemon's own environment, and the installer
+  clones and fetches anonymously. The gh-app helper is only ever in a run's environment (server/launch.ts, GIT_CONFIG_*).
+
+**Modes, off by default** (lockout review of #1193, lothsahn's rule: "warn-only first, enforce only after measured zero
+failures, keep a recovery route that needs no person"). The read fence has its own mode per machine, separate from the
+write fence's keys, kept in `read-fence` in the daemon's folder (machine/readFence.ts `readFenceMode`; a missing or
+unreadable file is `off`). The portal sets it live, with nobody at the machine and no restart: `machine_daemon` with action
+`read-fence-off`, `read-fence-warn` or `read-fence-on` (or `POST /api/machines/<id>/daemon` `{"action":"read-fence-warn"}`).
+Runs already going keep the fence they started with; the write fence never changes.
+
+| Mode | Runs started from now on | Windows labels | Probe |
+|---|---|---|---|
+| `off` (default) | no read rules | any No-Read-Up label a closed path still carries (an earlier `on`, a reverted build) is replaced by plain No-Write-Up at each start and at the switch (`openNoReadUp`); a path without one is not touched | none |
+| `warn` | no read rules | as `off` | yes, logged |
+| `on` | the read rules, once a probe has passed | No-Read-Up set at each start and at the switch | yes; a probe that finds a path workers need refused, or cannot judge one, leaves runs without read rules until one passes |
+
+**`on` is refused on Linux for now** (lockout re-review B4 of #1193, machine/readFence.ts `readFenceOnRefusal`): the switch
+answers with the reason, and a `read-fence` file that says `on` there is read as `warn`. See "Linux, a self-update" below:
+until the code folder survives an update, `on` would cost every running worker git push, gh, ff-pr and unity-slot at each
+update. macOS and Linux: switching to `off` or `warn` covers runs started afterwards only; Seatbelt and Landlock cannot be
+lifted from a running process, so runs already going keep the read rules they started with until they end.
+
+The probe (`probeReadFence`, machine/daemon.ts) runs at daemon start and at each switch, in a child of the daemon's own
+under the same fence a run gets (macOS Seatbelt, Linux Landlock with the read rules): node opens each closed path (the
+secrets folders, the machine token, root.json, daemon.json, gh-app/tokens.json) and each given-back one (FENCE_READ_ALLOW,
+`app/machine/ghApp.ts`) read-only and closes it at once, reading no byte, and the daemon logs one line, `read fence (<mode>,
+<os>) probe: a/b closed paths refused, c/d given-back paths open; ...` with what it would wrongly refuse or leave open. On
+Windows the labels are what refuses, so `warn` sets none and logs what `on` would close. Only a daemon whose hello offers
+`readFenceSwitch` is sent a mode: a daemon from before w5546 took any action but `restart` as an unload, and a daemon now
+refuses an action it does not know.
+
+Limits:
+
+- **Linux and Windows, diagnostic files** (in `on` mode): a given-back file in the daemon's folder that the daemon rewrites
+  by rename (`sandboxes.json` and `pause.json` through server/durable.ts, `update/job.json` and `update/result.json` through
+  machine/selfUpdate.ts `writeJson`, `cleanup-log.jsonl` when it rotates) is a new file afterwards, which a run started
+  before it cannot read until the next run (Linux) or the next daemon start (Windows). Only an agent's own `cat` of them
+  for diagnosis reads them; no worker tool does (`leftovers.ts` reads `cleanup-facts.json` and `published.jsonl`, both
+  written in place). Their writers are left as they are on purpose: the pool's crash-safe writer and the update job are
+  what a rewrite could break. The files a worker's tools need (`rpc/`, `unity-slots`, `unity-mcp`, `cleanup-facts.json`,
+  `person-play.json`, `published.jsonl`, its own tokens folder) are folders or written in place.
+- **Linux, a self-update** (in `on` mode): the update puts the new code in a new `app` folder (scripts/worker/linkJob.ts),
+  which a run that outlives the update was never granted, so until that run ends its gh helper, git credential helper and
+  `unity-slot` (all `node <daemon>/app/machine/...`) are refused. New runs are fine. This is why `on` is refused on Linux
+  until the code moves to a folder that survives the swap (a given-back `code/{app,app.old,app.new}`, or shims at a fixed
+  path). Related: `~/.gitconfig` rewritten by rename after a run started (`git config --global`, `gh auth setup-git`) is
+  unreadable to that run, and git treats that as fatal; a per-run `GIT_CONFIG_GLOBAL` in a given-back folder would avoid it. Windows has the same window until the
+  restarted daemon's start sets the labels again (about a minute on LothDesktop).
+
+- **Linux**: a file made directly in one of the closed paths' parent folders after the run started (a new file straight in
+  `$HOME` or the root, or one rewritten there by rename) is not readable by that run; one made below a granted sibling is.
+- **Windows**: every Low worker shares one Low token, so the `gh-app/sessions` folder is readable by all of them: each file
+  holds only the apps that run was given, but a worker could read another run's file on the same machine. macOS and Linux
+  give each run only its own.
+- **The gh shim across builds** (lockout re-review B5 of #1193): the helper skips the shim's folder (`FF_GH_APP_BIN`, else
+  the folder beside `FF_GH_APP_FILE`, else `gh-app/bin` beside the helper itself, machine/ghApp.ts `ghShimSkipDir`), never
+  takes a file that is one of our shims as the real gh (`isGhAppShim`), and refuses after `GH_SHIM_MAX_DEPTH` nested entries
+  (`FF_GH_APP_DEPTH`). A run still gets `FF_GH_APP_FILE`, naming `gh-app/tokens.moved`, which is never written: a helper from
+  before w5547 (a rollback by linkJob, a revert of #1193) then skips `gh-app/bin` and reads no token, falling back to
+  `GH_TOKEN`, instead of running the shim again without end.
+- **Windows, BEAST**: its `daemon` and `secrets` are junctions into `C:\ffw-anchor`, which the fence does not touch, so they
+  stay readable there until a person decides otherwise.
+- Same as the write half: the guard (server/daemonReads.ts) still decides what a worker's own tools may read; the fence
+  is what holds for every process the worker starts.
 
 ## Trial results (m5, macOS 26.4, 2026-11-23)
 
@@ -132,8 +228,26 @@ Measured with the generated profile unless noted:
 
 ## Known limits
 
-- **Not file writes, so not fenced**: preferences through cfprefsd (EditorPrefs, `defaults write`) and the Keychain go
-  through system daemons. `(deny user-preference-write)` would close the first; untried.
+- **Preferences through cfprefsd** (EditorPrefs, PlayerPrefs, `defaults write`) are written by cfprefsd, outside the
+  sandbox, so the file rules never see them: from inside the fence a `defaults write` of a new domain made its plist in
+  `~/Library/Preferences` (measured on m5). daemon.json `"workerPrefFence": true` adds `(deny user-preference-write)`
+  (`PREF_RULES`, w5659), once the daemon restarts (the fence is decided once per daemon process). Measured on m5, macOS 26.4:
+  - cfprefsd lets a write through when the client may write preferences **or** the plist's file. The rule therefore works
+    only with the file deny of `~/Library/Preferences`: together, a fenced `defaults write com.<new>` exits 1 ("Could
+    not write domain") and makes no plist. The rule alone did not refuse it.
+  - Reads still work (`defaults read com.unity3d.UnityEditor5.x` gave the same lines as unfenced).
+  - Unity is not hurt: a batch Unity under the profile with the rule compiled, passed `SimulationRateConstantsTest` 31/31
+    and the PlayMode `PlayModeTestsWriteNoQuitSavesTest`, while cfprefsd rejected 66 of its EditorPrefs and PlayerPrefs
+    writes. A refused EditorPrefs write is silent to Unity, so a worker's batch run no longer changes the user's
+    EditorPrefs, such as Burst's on/off (w5270).
+  - The daemon's own writes (App Nap, Burst's EditorPref) run outside the fence and are untouched.
+  - **No warn-only form exists on macOS.** The sandbox logs nothing for a rule, neither for an allow `(with report)` nor for
+    a deny, and `(trace ...)` writes no file (measured). Only cfprefsd logs each refusal: `log show --predicate
+    'eventMessage CONTAINS "rejecting write"'`, run from outside the fence. So the switch is off until it is enforced.
+  - The Keychain goes through securityd and stays open.
+- **The macOS sandbox reports nothing**: on m5 (macOS 26.4), no `Sandbox:` unified-log line and no kernel `deny(1)` line
+  were found for any refused write in 3 h of fenced workers being refused (measured, w5659). Evidence of a refusal is the
+  tool's own error (EPERM, "Operation not permitted").
 - **A licensing client a fenced editor starts stays fenced** after the editor exits, and a later unfenced editor may talk
   to it. It still writes only where the profile allows, which is where it needs to (measured: the licence resolved).
 - **Unity's fixed `/tmp` names**: a new Unity version that adds one fails until the profile allows it; the failure is

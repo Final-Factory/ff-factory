@@ -45,7 +45,6 @@ export const DAEMON_READ_ALLOW = [
   'cleanup-log.jsonl',
   'cleanup-state.json',
   'published.jsonl',
-  'root-backup.json',
   'outside-watch.json',
   'firefox.json',
   'run-daemon.ps1',
@@ -53,7 +52,15 @@ export const DAEMON_READ_ALLOW = [
 ];
 
 /** Beside the daemon's folder, in the install's host folder (scripts/worker/driveRoot.ts HOST_FILES): no secret. */
-export const HOST_READ_ALLOW = ['devdrive.json', 'root.json', 'moved.json'];
+export const HOST_READ_ALLOW = ['devdrive.json', 'moved.json'];
+
+/**
+ * What the worker fences (macOS Seatbelt, Linux Landlock, the Windows No-Read-Up label) give back to reads in the daemon's
+ * folder (w5546): the guard's list above, plus what workers run or their tools read there: the gh shim's folder
+ * (gh-app/bin; never gh-app/tokens.json, w5547) and the Unity MCP server's status files (unity-mcp, machine/unityMcp.ts).
+ * root.json and its spare (root-backup.json) are closed since w5546 (lothsahn: "...and root.json").
+ */
+export const FENCE_READ_ALLOW = [...DAEMON_READ_ALLOW, 'gh-app/bin', 'unity-mcp', 'rpc'];
 
 export interface DaemonReads {
   /** The daemon's folder (appDirOf). */
