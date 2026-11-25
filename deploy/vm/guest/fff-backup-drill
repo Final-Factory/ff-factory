@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# fff-backup-drill: the restore drill's checks (w5529), run in the VM as root by `fffctl backup-drill`.
+#
+# Reads one DECRYPTED backup (the tar.gz inside a .tar.gz.age) on stdin. The private age key never comes here: whoever
+# holds it decrypts on their own computer (or the FFBox host's `fff-vm backup-drill --identity FILE`) and pipes the plain
+# archive in. It is unpacked into a scratch folder of its own (root, 0700), then checked:
+#   - config/config.json and every data/*.json parse;
+#   - data/state.json is there and holds a sessions list;
+#   - data/vault.json is there and every entry opens with this VM's vault key (server/vaultCli.ts verify: counts only);
+#   - no file in it is the vault key (by name and by content hash).
+# The scratch folder is deleted whatever happened, and the result goes to $FFF_STATE_DIR/backup-drill.json (fffctl status
+# and the portal's system_status show it next to the backup's). --name NAME names the archive the drill came from.
+set -o errexit -o nounset -o pipefail
+# shellcheck source=lib.sh
+. "${FFF_LIB:-/usr/local/lib/fff}/lib.sh"
+need_root
+load_conf
+
+src=stdin
+while [ $# -gt 0 ]; do
+  case "$1" in --name) src=$2; shift ;; *) die "unknown option $1" ;; esac
+  shift
+done
+case "$src" in *[!A-Za-z0-9._:@/-]*) die "--name: letters, digits and ._:@/- only" ;; esac
+
+started=$(date -u +%FT%TZ)
+scratch=$(mktemp -d "${FFF_DRILL_TMP:-/var/tmp}/fff-drill.XXXXXX")
+chmod 0700 "$scratch"
+trap 'rm -rf "$scratch"' EXIT
+checks=()
+problems=()
+ok() { checks+=("$1"); log "drill: ok: $1"; }
+bad() { problems+=("$1"); log "drill: FAILED: $1"; }
+
+files=0
+if tar -xz -C "$scratch" --no-same-owner 2>"$scratch.err"; then
+  files=$(find "$scratch" -type f | wc -l)
+  ok "unpacked $files files"
+else
+  bad "the archive does not unpack: $(tail -n 1 "$scratch.err" | cut -c1-200)"
+fi
+rm -f "$scratch.err"
+
+if [ "${#problems[@]}" = 0 ]; then
+  if [ -f "$scratch/config/config.json" ] && jq -e . "$scratch/config/config.json" >/dev/null 2>&1; then ok "config/config.json parses"; else bad "config/config.json is missing or does not parse"; fi
+  nj=0 badj=()
+  while IFS= read -r -d '' f; do
+    nj=$((nj + 1))
+    jq -e . "$f" >/dev/null 2>&1 || badj+=("${f#"$scratch"/}")
+  done < <(find "$scratch/data" -maxdepth 1 -name '*.json' -print0 2>/dev/null)
+  if [ "${#badj[@]}" = 0 ] && [ "$nj" -gt 0 ]; then ok "$nj data/*.json files parse"; else bad "data: $nj JSON files, these do not parse: ${badj[*]:-none found}"; fi
+  if jq -e '.sessions | type == "array"' "$scratch/data/state.json" >/dev/null 2>&1; then
+    ok "data/state.json holds $(jq '.sessions | length' "$scratch/data/state.json") sessions"
+  else
+    bad "data/state.json is missing or holds no sessions list"
+  fi
+  if [ -f "$scratch/data/vault.json" ]; then
+    if [ -e "$CURRENT/server/vaultCli.ts" ]; then
+      if v=$(cd "$CURRENT" && FFF_VAULT_KEY_FILE=$FFF_VAULT_KEY FFSB_CONFIG=$FFF_ROOT/config/config.json node server/vaultCli.ts verify --file "$scratch/data/vault.json" 2>&1); then
+        ok "$(tail -n 1 <<<"$v")"
+      else
+        bad "the vault copy: $(tail -n 1 <<<"$v" | cut -c1-200)"
+      fi
+    else
+      bad "no current release to open the vault copy with (fffctl update first)"
+    fi
+  else
+    bad "data/vault.json is not in the backup"
+  fi
+  kname=$(find "$scratch" \( -name 'vault.key*' -o -name 'vault-key*' \) -print -quit)
+  khash=""
+  [ ! -s "$FFF_VAULT_KEY" ] || khash=$(sha256sum <"$FFF_VAULT_KEY" | cut -d' ' -f1)
+  kcopy=""
+  if [ -n "$khash" ]; then
+    ksize=$(stat -c %s "$FFF_VAULT_KEY")
+    while IFS= read -r -d '' f; do
+      [ "$(sha256sum <"$f" | cut -d' ' -f1)" != "$khash" ] || { kcopy=${f#"$scratch"/}; break; }
+    done < <(find "$scratch" -type f -size "${ksize}c" -print0)
+  fi
+  if [ -z "$kname$kcopy" ]; then ok "the vault key is not in the backup"; else bad "the backup holds the vault key: ${kname#"$scratch"/}${kcopy}"; fi
+fi
+
+rm -rf "$scratch"
+trap - EXIT
+result=ok
+[ "${#problems[@]}" = 0 ] || result=failed
+printf '%s\n' "${checks[@]}" "${problems[@]}" | jq -R . | jq -s --arg at "$started" --arg result "$result" --arg source "$src" \
+  --argjson files "$files" --argjson nproblems "${#problems[@]}" \
+  '{at: $at, result: $result, source: $source, files: $files, checks: .[0:(length - $nproblems)], problems: .[(length - $nproblems):]}' |
+  state_write backup-drill.json
+log "drill: $result ($src): scratch folder removed"
+[ "$result" = ok ] || {
+  tell_dispatcher "[backup] The restore drill of $src failed: ${problems[*]}. (fffctl status)"
+  exit 1
+}
