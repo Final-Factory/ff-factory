@@ -63,7 +63,7 @@ test('withoutOverlap: biscuit 15:12Z: a folder the own plan split stays with it;
   };
   const r = withoutOverlap(regular, own);
   assert.deepEqual(r.first.map((i) => path.basename(i.path)), ['ffa-23762b98', 'ffa-29812d82'], 'ffa-ac9b16c2 left to the own plan');
-  assert.deepEqual(r.own.map((i) => path.relative(T, i.path)), ['ffa-ac9b16c2/b-a.log', 'ffa-ac9b16c2/crop.py', 'ffa-ac9b16c2/claude-1000']);
+  assert.deepEqual(r.own.map((i) => path.posix.relative(T, i.path)), ['ffa-ac9b16c2/b-a.log', 'ffa-ac9b16c2/crop.py', 'ffa-ac9b16c2/claude-1000']);
 });
 
 test('planCleanup: agent-temp keeps a session folder with a git repo two levels down (pmc-*/work)', async (t) => {
