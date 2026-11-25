@@ -32,6 +32,7 @@ import type { SessionInfo, WorkBlocker, WorkItem } from '../shared/types.ts';
 import type { RoomNow } from './placement.ts';
 import { steamShortIn } from '../shared/capacity.ts';
 import { awayLabelsOf, awayNote, failedNote, isAwayLeg, settleJobs, offlineByMachine, offlineLabels, type Leg } from '../machine/awayRunners.ts';
+import { mergeTimeProblem } from './mergeOwner.ts';
 
 const EVERY_MS = 60_000;
 /**
@@ -484,11 +485,12 @@ export class BlockerWatch {
    * model turn. Red CI, a reading that is not green (unreadable, closed), or a merge GitHub refuses: unblocked as without it,
    * and the worker hears why.
    */
-  private async clearAll(w: WorkItem, gates: readonly { kind: string; ref?: string; head?: string; mergeOnGreen?: { head: string } }[], why: string, ci: ReadonlyMap<string, CiState | undefined>) {
+  private async clearAll(w: WorkItem, gates: readonly { kind: string; ref?: string; head?: string; mergeOnGreen?: { head: string; headRef?: string } }[], why: string, ci: ReadonlyMap<string, CiState | undefined>) {
     const g = gates.length === 1 && gates[0].kind === 'ci' && gates[0].ref && gates[0].mergeOnGreen ? gates[0] : undefined;
     if (!g || !this.d.orchestrators.mergedOnGreen) return this.d.orchestrators.unblock(w.id, why);
     if (!ci.get(ciKey(g.ref!, g.head))?.green) return this.d.orchestrators.unblock(w.id, `${why}; FF Factory did not merge it (the checks are not all green), and the report you left with merge_on_green was not filed`);
     try {
+      await this.ownedAtMerge(w, g);
       await (this.d.merge ? this.d.merge(g.ref!, g.mergeOnGreen!.head, this.d.githubPerson?.(w)) : ghMerge(g.ref!, g.mergeOnGreen!.head, ghRunner(this.d.githubPerson?.(w), `the merge of ${g.ref}`), this.d.evidenceScript));
     } catch (e) {
       const said = clipLine((e as Error).message, 1200);
@@ -500,6 +502,16 @@ export class BlockerWatch {
     this.mergeTries.delete(`${w.id} ${g.ref}`);
     this.prSeen.delete(g.ref!);
     this.d.orchestrators.mergedOnGreen(w.id, why);
+  }
+
+  /**
+   * w5549: at the merge, the pull request's head is read from GitHub again (the tick's reading, healthOf) and must still be
+   * the worker's own branch the gate was armed on (server/mergeOwner.ts): else it throws, and the worker merges by hand.
+   */
+  private async ownedAtMerge(w: WorkItem, g: { ref?: string; mergeOnGreen?: { headRef?: string } }): Promise<void> {
+    const h = await this.healthOf(g.ref!, this.d.githubPerson?.(w));
+    const why = mergeTimeProblem(g.ref!, h, g.mergeOnGreen?.headRef);
+    if (why) throw new Error(`not merged: ${why}`);
   }
 
   /**
@@ -551,6 +563,7 @@ export class BlockerWatch {
     for (const x of merge) {
       const g = x.g;
       try {
+        await this.ownedAtMerge(w, g);
         await (this.d.merge ? this.d.merge(g.ref!, g.mergeOnGreen!.head, this.d.githubPerson?.(w)) : ghMerge(g.ref!, g.mergeOnGreen!.head, ghRunner(this.d.githubPerson?.(w), `the merge of ${g.ref}`), this.d.evidenceScript));
       } catch (e) {
         const said = clipLine((e as Error).message, 1200);
@@ -933,7 +946,20 @@ export function prState(pr: { state?: string; mergeCommit?: { oid?: string } | n
 }
 
 /** What `gh pr view` says for a pull request's health (w907): its state, GitHub's mergeability, base branch and head commit. */
-export function prHealthOf(pr: { state?: string; mergeable?: string; baseRefName?: string; headRefOid?: string; headRefName?: string; body?: string; isDraft?: boolean }): PrHealth {
+export function prHealthOf(pr: {
+  state?: string;
+  mergeable?: string;
+  baseRefName?: string;
+  headRefOid?: string;
+  headRefName?: string;
+  body?: string;
+  isDraft?: boolean;
+  headRepository?: { name?: string } | null;
+  headRepositoryOwner?: { login?: string } | null;
+  isCrossRepository?: boolean;
+}): PrHealth {
+  // w5549: the head's repository, for merge on green's check that the pull request is the worker's own (server/mergeOwner.ts).
+  const headRepo = pr.headRepository?.name && pr.headRepositoryOwner?.login ? `${pr.headRepositoryOwner.login}/${pr.headRepository.name}` : undefined;
   const requests = requestIdsIn(pr.body ?? '');
   const state = pr.state === 'MERGED' ? 'merged' : pr.state === 'CLOSED' ? 'closed' : 'open';
   return {
@@ -941,6 +967,8 @@ export function prHealthOf(pr: { state?: string; mergeable?: string; baseRefName
     ...(pr.mergeable === 'CONFLICTING' ? { conflict: { base: pr.baseRefName || 'its base branch' } } : {}),
     ...(pr.headRefOid ? { head: pr.headRefOid } : {}),
     ...(pr.headRefName ? { headRef: pr.headRefName } : {}),
+    ...(headRepo ? { headRepo } : {}),
+    ...(pr.isCrossRepository === true ? { crossRepo: true as const } : {}),
     ...(requests.length ? { requests } : {}),
     ...(pr.isDraft === true ? { draft: true as const } : {}),
   };
@@ -953,7 +981,7 @@ export function prHealthOf(pr: { state?: string; mergeable?: string; baseRefName
 export async function ghPrHealth(ref: string, run: Runner = runProc): Promise<PrHealth> {
   const m = CI_REF.exec(ref);
   if (!m) throw new Error(`"${ref}" is not a pull request (owner/repo#123)`);
-  const r = await run('gh', ['pr', 'view', m[2], '-R', m[1], '--json', 'state,mergeable,baseRefName,headRefOid,headRefName,body,isDraft'], { timeoutMs: 30_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
+  const r = await run('gh', ['pr', 'view', m[2], '-R', m[1], '--json', 'state,mergeable,baseRefName,headRefOid,headRefName,body,isDraft,headRepository,headRepositoryOwner,isCrossRepository'], { timeoutMs: 30_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
   if (r.code !== 0) throw new Error(`gh pr view ${ref}: ${ghSaid(r)}`);
   return prHealthOf(JSON.parse(r.stdout) as Parameters<typeof prHealthOf>[0]);
 }
