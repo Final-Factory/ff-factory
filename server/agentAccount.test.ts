@@ -347,6 +347,8 @@ test('w5651: agentProbe asks the launcher for claude --version on a dummy creden
     assert.equal(header?.cwd, '/srv/fff/app/current');
     reply = 'ERR cannot enter /srv/fff/base\n';
     assert.deepEqual(await agentProbe(file, { version: '9' }), { ok: false, why: 'fff-agent-launch refused: cannot enter /srv/fff/base' });
+    // With no folder given: the portal's own, not the process's working folder (the e2e's warn leg ran from /home/fffadmin).
+    assert.equal(header?.cwd, path.resolve(import.meta.dirname, '..'));
     reply = 'OK\n';
     assert.equal((await agentProbe(file, { version: '9' })).ok, false);
     assert.match((await agentProbe(path.join(dir, 'none.sock'), { version: '9' })).why, /fff-agent\.socket is not running/);

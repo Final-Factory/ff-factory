@@ -218,7 +218,10 @@ export function agentProbe(
       const v = lines.slice(1).find((l) => /\d+\.\d+\.\d+/.test(l));
       end(Boolean(v), v ? `the launcher answered OK and Claude Code ${v.slice(0, 80)} ran as fff-agent` : 'the launcher answered OK, then Claude Code printed no version');
     });
-    s.write(agentHeader({ args: ['--version'], env: { CLAUDE_CODE_OAUTH_TOKEN: AGENT_PROBE_TOKEN }, cwd: o.cwd }, o.version ?? sdkVersion(), o.configDir ?? agentConfigDir()));
+    // In the portal's own folder (/srv/fff/app/... in the VM), never the process's working folder: from another one (the
+    // e2e's ssh session in /home/fffadmin) the launcher refused the folder and warn alerted a failure that was not one.
+    const cwd = o.cwd ?? path.resolve(import.meta.dirname, '..');
+    s.write(agentHeader({ args: ['--version'], env: { CLAUDE_CODE_OAUTH_TOKEN: AGENT_PROBE_TOKEN }, cwd }, o.version ?? sdkVersion(), o.configDir ?? agentConfigDir()));
   });
 }
 
