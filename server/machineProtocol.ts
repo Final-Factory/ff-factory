@@ -1,6 +1,7 @@
 // The WebSocket protocol between the portal (server/machines.ts) and a machine daemon
 // (machine/daemon.ts). JSON messages, one per frame. Types only, plus the version constant.
 import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
+import type { PortalPinStatus } from '../machine/portalPin.ts';
 import type { CatalogTool, LaunchSpec } from './launch.ts';
 import type { AccountIdentity } from './usage.ts';
 import type { StaleContext } from './staleOutput.ts';
@@ -50,6 +51,7 @@ import type { AttachmentRef, BenchLock, BenchPriority, BenchQueueReport, NoTimed
  * at the hello (its Dev Drive not yet attached); an older portal drops it.
  * Also (w4922, no bump): `test_history`, a sandbox's local test run for the portal's per-test history, which an older portal
  * drops (the daemon sends it again later), answered by `test_history_ack`, which an older daemon drops.
+ * Also (w5576, no bump): `portalPin` in the hello (machine/portalPin.ts), which an older portal ignores.
  */
 export const PROTOCOL_VERSION = 9;
 
@@ -391,6 +393,8 @@ export type FromDaemon =
       pause?: MachinePause;
       /** It updates, restarts and unloads itself on the portal's word over this link (w1596, `self_update`, `daemon_control`): the version. An older portal ignores it. */
       selfUpdate?: number;
+      /** The portal hosts it follows and what pinning would have refused (w5576, machine/portalPin.ts). An older portal ignores it. */
+      portalPin?: PortalPinStatus;
       /** A worker root install (w513): its folders, so a record made without a deploy learns them. */
       /** `ssh` (w4674): whether its installer set up the portal's ssh (root.json); absent from an older daemon or an unreadable root.json. */
       layout?: { root: string; appDir: string; repoPath: string; tempDir?: string; sandboxes?: SandboxPoolSettings | null; ssh?: boolean };

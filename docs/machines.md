@@ -2493,6 +2493,10 @@ machines?}` (protocol 8, w466) sends every connected daemon the new base URL. No
   stop ([restart.md](restart.md), "Files in data"). The VM's `fffctl migrate --cut-over` writes it over ssh, so the
   daemons move while the old portal still answers their acks, and before it stops.
 
+**Pinned hosts** (w5576, [portal-pin.md](portal-pin.md)): a daemon follows a relocate only to a host in
+`PINNED_PORTAL_HOSTS` (machine/portalPin.ts). Stage 1 warns only. Add the new host, and let the rollout reach every
+machine, before you relocate.
+
 **The portal's own host as a machine** (BEAST, `local`) is reached without ssh and dials the portal at loopback. When
 the portal leaves it, `convert_machine {machine, to: "ssh", ssh_host, portal_url}` (w466, docs/portal-on-ffbox-host.md
 change 3) makes it a machine reached over ssh. `to: "local"` turns it back, on the portal's own Windows computer, which

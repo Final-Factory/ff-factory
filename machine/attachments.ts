@@ -7,6 +7,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 import { prepareInbox, publishableFile, sha256File } from '../server/attachments.ts';
+import { notePortalRedirect } from './portalPin.ts';
 import { publishedAttachmentText } from '../shared/attachments.ts';
 import type { AttachmentRef, DeliveredAttachment } from '../shared/types.ts';
 import { sendChunks, type PublishOptions } from './review.ts';
@@ -49,6 +50,7 @@ export async function fetchAttachment(portalUrl: string, token: string, ref: Att
       try {
         poke();
         const res = await doFetch(url, { headers: { authorization: `Bearer ${token}`, ...(have ? { range: `bytes=${have}-` } : {}) }, signal: ctl.signal });
+        notePortalRedirect(url, res);
         if (res.status === 401 || res.status === 404) {
           // Not this machine's to fetch, or gone: trying again changes nothing.
           await res.body?.cancel();
