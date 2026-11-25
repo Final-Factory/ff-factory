@@ -18,6 +18,7 @@
 # It asks nothing: every setting, the credential and the PATH come from the install. --max-sandboxes N,
 # --max-agents-per-sandbox N, --max-unity N change those; --worker-fence on|off sets the worker write fence (w5377);
 # --worker-caps off|warn|enforce sets the worker memory, process and temp caps' mode (w5554);
+# --transcript-lock on|off (Linux, w5702) lets each locked worker write only its own conversation's transcript;
 # --daemon-ref REF (default: the pinned --ref, else the commit the portal runs).
 # --ref <full commit id> (w5516) pins the installer and the daemon code to that exact commit and refuses when it cannot check
 # it out; the portal's rollout fetches this script at its own verified commit and passes it:
@@ -50,6 +51,7 @@ while [ $# -gt 0 ]; do
     --voice-whisper) EXTRA="$EXTRA --voice-whisper $2"; VOICE=$2; shift 2 ;;
     --worker-fence) case "${2:-}" in on|off) WFENCE=$2 ;; *) echo "--worker-fence is on or off, not \"${2:-}\"" >&2; exit 2 ;; esac; shift 2 ;;
     --worker-caps) case "${2:-}" in off|warn|enforce) WCAPS=$2 ;; *) echo "--worker-caps is off, warn or enforce, not \"${2:-}\"" >&2; exit 2 ;; esac; shift 2 ;;
+    --transcript-lock) case "${2:-}" in on|off) TLOCK=$2 ;; *) echo "--transcript-lock is on or off, not \"${2:-}\"" >&2; exit 2 ;; esac; shift 2 ;;
     --credential-file) CREDFILE=$2; shift 2 ;;
     --update) UPDATE=1; shift ;;
     --tools) TOOLS=1; shift ;;
@@ -161,6 +163,7 @@ if [ "$UPDATE" = 1 ]; then
   [ -z "${VOICE:-}" ] || UARGS+=(--voice-whisper "$VOICE")
   [ -z "${WFENCE:-}" ] || UARGS+=(--worker-fence "$WFENCE")
   [ -z "${WCAPS:-}" ] || UARGS+=(--worker-caps "$WCAPS")
+  [ -z "${TLOCK:-}" ] || UARGS+=(--transcript-lock "$TLOCK")
   # A local checkout given with --source is the daemon code too: no download at all.
   [ -z "$SOURCE" ] || [ -n "$TEMP" ] || UARGS+=(--source "$SOURCE")
   "$NODE" "${FLAGS[@]}" "$SOURCE/scripts/worker/worker.ts" "${UARGS[@]}" </dev/null

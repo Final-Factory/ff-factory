@@ -128,6 +128,8 @@ export interface LinkUpdateFlags {
   workerFence?: 'on' | 'off';
   /** The worker caps' mode (w5554, docs/worker-caps.md): daemon.json `workerCaps`; unset: carried. A daemon that predates it ignores it. */
   workerCaps?: 'off' | 'warn' | 'enforce';
+  /** The transcript lock on or off (w5702, docs/transcript-seal.md), Linux only: daemon.json `transcriptLock`; unset: carried. A daemon that predates it ignores it. */
+  transcriptLock?: 'on' | 'off';
 }
 
 /**
