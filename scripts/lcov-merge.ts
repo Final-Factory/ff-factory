@@ -7,7 +7,8 @@
  * Lines add up exactly. Functions and branches are matched by line and their order on it, because lcov carries no source
  * offsets and node numbers them by what each process ran; a process can also put one branch on another line. Measured on
  * 40 script test files, one run against two shards merged: lines equal, branches 62.71% against 62.97%, functions 17.43%
- * against 17.44% (w5679). Read the branch and function columns as within about half a point.
+ * against 17.44% (w5679). On the whole suite (PR #1225, against main's last single run at an older commit): lines 92.37% both, branches 85.25% against
+ * 86.55%, functions 86.17% against 85.18%. Read the branch and function columns as within about 1.5 points.
  *
  *   node scripts/lcov-merge.ts <shard-1.lcov> <shard-2.lcov> ...
  */

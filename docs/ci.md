@@ -130,7 +130,9 @@ Known causes, so a future failure can be named at once:
   `unit` job); each shard's lcov is added up by the `coverage` job (`scripts/lcov-merge.ts`). Its line coverage equals one run's
   (92.37% on PR #1225's run and on main's last single run); functions and branches are matched by line, since node numbers
   them by what each process ran (a first merge by node's numbers read branches 79% against 87%), and come within about
-  half a point (measured locally on 40 files). On PR #1225's run the shards took 207 s and 323 s (measured): node deals the
+  half a point on 40 files (measured locally) and 1.3 points on the whole suite (85.25% branches and 86.17% functions
+  against 86.55% and 85.18% on main's last single run, an older commit). On PR #1225's runs the shards took 207 s and
+  323 s, then 227 s and 319 s (measured): node deals the
   files out in turn, not by time. The other route, `--test-concurrency=4` on one runner, saved 60-100 s (measured in
   w5619's experiment; 8 failed): not enough for 150 s of headroom. If a shard nears 400 s, go to three.
 - **gitleaks `generic-api-key` in a test or doc**: every one in the window was a fake key in a fixture; add it to
