@@ -169,6 +169,11 @@ queries do it (wire: [the contract](ffbox-connector-contract.md#read-only-querie
   them and `fetch_ffbox_report {id, game: "ffu"}` fetches one; without `game` (or `ff`) both read FF1's alone, so FF1's
   readers never see an FFU report. FFBox does not diagnose FFU reports yet: read one against `Final-Factory/ffu` at the
   build its `details.json` names, never FF1's code.
+  A worker's tool schema comes from its machine's daemon (machine/agentHost.ts reads server/launch.ts), not the portal:
+  until that daemon has updated, `game` is dropped without an error and the call answers FF1's reports. w5678's first
+  check after the portal deploy got FF1's 20 reports for `game: "ffu"` while `machine_rollout` showed beast still
+  `updating`. Check a new tool argument only after both deploys (`blocked_on` deploys `["portal", "<machine>"]`), and
+  check that the answer is the other game's, not just an answer.
 
 On FFBox, `ffwatch` answers both on the host (it is in group `ffintake`; the connector is not), opens every file under
 the report root read-only and never through a symlink, finds a report by its id alone and a file inside a zip by an
