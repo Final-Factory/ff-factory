@@ -155,6 +155,13 @@ export interface DaemonConfig {
    */
   workerFence?: 'seatbelt';
   /**
+   * w5659: with the Seatbelt fence on, also refuse workers' preference writes through cfprefsd (`defaults write`,
+   * EditorPrefs, PlayerPrefs), which otherwise land in ~/Library/Preferences outside the root (server/workerFence.ts
+   * PREF_RULES). Off when unset: macOS records no report of a sandbox rule, so there is no warn-only form; true enforces it
+   * once the daemon restarts (the fence is decided once per daemon process; docs/worker-fence.md "Known limits").
+   */
+  workerPrefFence?: boolean;
+  /**
    * The per-worker memory, process and temp-disk caps' mode (w5554, docs/worker-caps.md): "warn" (also when unset) measures and
    * reports and never limits or kills, "enforce" limits and ends a runaway's tools, "off" does nothing. Handed to each worker's
    * agent host in its start record; set remotely by `ops_worker machine_update worker_caps`.
@@ -3097,13 +3104,13 @@ export class Daemon {
       let fence: WorkerFence | undefined;
       let why: string | undefined;
       try {
-        fence = fenceFor({ setting: this.cfg.workerFence, root: this.cfg.root, home: HOME, workFolders: [this.cfg.tempDir, this.sandboxRoot()] });
+        fence = fenceFor({ setting: this.cfg.workerFence, root: this.cfg.root, home: HOME, workFolders: [this.cfg.tempDir, this.sandboxRoot()], prefDeny: this.cfg.workerPrefFence === true });
         if (fence) fence = { ...fence, appDir: appDirOfConfig(this.cfg), secretsDirs: this.secretsDirs };
         if (this.cfg.workerFence && !fence) why = `"${this.cfg.workerFence}" is set but cannot apply here (macOS with a worker root and ${'/usr/bin/sandbox-exec'} only)`;
         if (fence) {
           const probe = probeFence(fencedArgv(fence, '/usr/bin/true', []));
           if (probe.ok) {
-            log(`worker fence: seatbelt is on for sandbox agents; root folders kept read-only: ${this.closedRootChildren(fence.open ?? []).join(', ') || 'none'}`);
+            log(`worker fence: seatbelt is on for sandbox agents${this.cfg.workerPrefFence === true ? " with the preference-write block (workerPrefFence)" : ""}; root folders kept read-only: ${this.closedRootChildren(fence.open ?? []).join(', ') || 'none'}`);
             const f = fence;
             this.checkMaxEventsFence('seatbelt', (file) => fencedArgv(f, '/bin/sh', maxProbeArgv('/bin/sh', file).slice(1)));
           }

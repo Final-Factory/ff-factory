@@ -44,6 +44,8 @@ export interface WorkerFence {
   secretsDirs?: string[];
   /** The root children workers write (lowIntegrity.ts openChildren, w5569); absent: openChildren(root). */
   open?: string[];
+  /** w5659: refuse preference writes through cfprefsd too (PREF_RULES); daemon.json `workerPrefFence: true`. */
+  prefDeny?: boolean;
 }
 
 /** An SBPL string literal. */
@@ -106,6 +108,19 @@ export function ownTranscriptRules(o: OwnTranscript): string[] {
  */
 export const SIGNAL_RULES = [';; signals: only to this fence\'s own processes (w5562)', '(deny signal)', '(allow signal (target self) (target children) (target same-sandbox))'];
 
+/**
+ * Preferences (w5659): `defaults write`, NSUserDefaults, CFPreferences and Unity's EditorPrefs and PlayerPrefs reach the
+ * plist in ~/Library/Preferences through cfprefsd, which writes it outside the sandbox, so the file rules above never see
+ * them: from inside the fence a `defaults write` of a new domain made its plist there (measured on m5). cfprefsd lets a
+ * client write when the client may either write preferences or write the plist's own file, so this rule closes it only
+ * together with the file deny of ~/Library/Preferences above (measured on m5: a fenced `defaults write` of a new domain
+ * exits 1 "Could not write domain" and makes no plist; with this rule alone it is written). Reads still work. A refused
+ * EditorPrefs write is silent to Unity: a fenced batch Unity compiled, passed EditMode 31/31 and a PlayMode load test with
+ * cfprefsd rejecting 66 of its writes (measured on m5). macOS logs nothing for the sandbox itself; cfprefsd logs each
+ * refusal as "rejecting write of key(s) ... from process <pid> (<name>)" (`log show`, from outside the fence).
+ */
+export const PREF_RULES = [";; preferences through cfprefsd are refused too (w5659, with the file deny of ~/Library/Preferences)", '(deny user-preference-write)'];
+
 export function seatbeltProfile(f: WorkerFence, own?: OwnTranscript): string {
   const home = (p: string) => path.join(f.home, p);
   const extra = (f.extraWritable ?? []).filter((p) => path.isAbsolute(p));
@@ -149,6 +164,7 @@ export function seatbeltProfile(f: WorkerFence, own?: OwnTranscript): string {
     ')',
     ...(f.readOff ? [";; reads: the read fence is switched off on this machine (daemon_control read-fence-off, w5546)"] : readRules(f)),
     ...SIGNAL_RULES,
+    ...(f.prefDeny ? PREF_RULES : []),
   ].join('\n');
 }
 
@@ -190,7 +206,7 @@ const confstr = (name: string) => execFileSync('/usr/bin/getconf', [name], { enc
  * The fence for this daemon's agents, or undefined when it is off: daemon.json `workerFence` is not "seatbelt", the
  * machine is not a Mac, it has no worker root, or sandbox-exec is missing.
  */
-export function fenceFor(o: { setting?: string; root?: string; platform?: NodeJS.Platform; home: string; extraWritable?: string[]; workFolders?: (string | undefined)[]; exists?: (p: string) => boolean; getconf?: (name: string) => string }): WorkerFence | undefined {
+export function fenceFor(o: { setting?: string; root?: string; platform?: NodeJS.Platform; home: string; extraWritable?: string[]; workFolders?: (string | undefined)[]; prefDeny?: boolean; exists?: (p: string) => boolean; getconf?: (name: string) => string }): WorkerFence | undefined {
   if (o.setting !== 'seatbelt' || (o.platform ?? process.platform) !== 'darwin' || !o.root) return undefined;
   if (!(o.exists ?? fs.existsSync)(SANDBOX_EXEC)) return undefined;
   const get = o.getconf ?? confstr;
@@ -202,6 +218,7 @@ export function fenceFor(o: { setting?: string; root?: string; platform?: NodeJS
     darwinTemp: real(get('DARWIN_USER_TEMP_DIR')),
     darwinCache: real(get('DARWIN_USER_CACHE_DIR')),
     ...(o.extraWritable?.length ? { extraWritable: o.extraWritable.map(real) } : {}),
+    ...(o.prefDeny ? { prefDeny: true } : {}),
   };
 }
 
