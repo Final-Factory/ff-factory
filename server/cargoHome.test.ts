@@ -18,7 +18,9 @@ test('w5501: a CARGO_HOME outside the root moves to <root>/cache/cargo and is se
   assert.deepEqual(workerCargoHome(root, {}, 'C:\\Users\\ben', w), { home: 'F:\\ffw\\cache\\cargo', seedFrom: 'C:\\Users\\ben\\.cargo' }, 'unset: cargo used ~/.cargo');
   assert.deepEqual(workerCargoHome(root, { CARGO_HOME: 'D:\\rust\\cargo' }, 'C:\\Users\\ben', w), { home: 'F:\\ffw\\cache\\cargo', seedFrom: 'D:\\rust\\cargo' });
   // LothDesktop: already inside the root, in a folder workers write (any case).
-  assert.deepEqual(workerCargoHome('V:\\ffw', { CARGO_HOME: 'v:/FFW/tools/cargo' }, 'C:\\Users\\l', w), { home: 'v:\\FFW\\tools\\cargo' });
+  assert.deepEqual(workerCargoHome('V:\\ffw', { CARGO_HOME: 'v:/FFW/tools/cargo' }, 'C:\\Users\\l', w, () => true), { home: 'v:\\FFW\\tools\\cargo' });
+  // w5717: tools is Medium, so a Low worker cannot make it again once deleted: a missing one moves to cache/cargo.
+  assert.deepEqual(workerCargoHome('V:\\ffw', { CARGO_HOME: 'V:\\ffw\\tools\\cargo' }, 'C:\\Users\\l', w, () => false), { home: 'V:\\ffw\\cache\\cargo', seedFrom: 'V:\\ffw\\tools\\cargo' });
   // Inside the root but in a folder a Low worker cannot write (the runners' Medium folder, the daemon's, the secrets): moves.
   for (const c of ['ffu-runners\\cargo', 'daemon\\cargo', 'secrets\\cargo']) {
     const r = workerCargoHome(root, { CARGO_HOME: `F:\\ffw\\${c}` }, 'C:\\Users\\ben', w);
@@ -32,7 +34,7 @@ test('w5501: a CARGO_HOME outside the root moves to <root>/cache/cargo and is se
 test('w5501: the same on macOS and Linux', () => {
   const p = path.posix;
   assert.deepEqual(workerCargoHome('/Users/b/ffw', {}, '/Users/b', p), { home: '/Users/b/ffw/cache/cargo', seedFrom: '/Users/b/.cargo' });
-  assert.deepEqual(workerCargoHome('/home/b/ffw', { CARGO_HOME: '/home/b/ffw/tools/cargo' }, '/home/b', p), { home: '/home/b/ffw/tools/cargo' });
+  assert.deepEqual(workerCargoHome('/home/b/ffw', { CARGO_HOME: '/home/b/ffw/tools/cargo' }, '/home/b', p, () => true), { home: '/home/b/ffw/tools/cargo' });
   assert.deepEqual(workerCargoHome('/home/b/ffw', { CARGO_HOME: '/home/b/ffw-other/cargo' }, '/home/b', p), { home: '/home/b/ffw/cache/cargo', seedFrom: '/home/b/ffw-other/cargo' }, 'a sibling with the root as a prefix is outside it');
 });
 

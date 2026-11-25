@@ -34,7 +34,7 @@ const label = async (p: string) => /Mandatory Label\\(\w+) Mandatory Level:([^\s
 const sha = (f: string) => crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex');
 
 /** What the Low process tries, each on its own: prints one JSON object of action -> 'ok' or the error code. */
-const PROBE = `
+export const PROBE = `
 const fs = require('node:fs');
 const path = require('node:path');
 const [root, ...acts] = process.argv.slice(2);
@@ -50,8 +50,31 @@ for (const a of acts) {
   if (a === 'cargo') tr(a, () => fs.writeFileSync(path.join(t, 'cargo', 'registry', 'g.txt'), 'x'));
   if (a === 'cargo-new') tr(a, () => fs.mkdirSync(path.join(t, 'cargo', 'git', 'db'), { recursive: true }));
   if (a === 'git') tr(a, () => fs.writeFileSync(path.join(t, 'git', 'bin', 'y.txt'), 'x'));
+  const cp = require('node:child_process');
+  const out = (f, args) => { try { return cp.execFileSync(f, args, { encoding: 'utf8', windowsHide: true }); } catch (e) { return String(e.stdout || '') + String(e.message); } };
+  if (a === 'whoami') did.diag = (did.diag || '') + out(path.join(process.env.SystemRoot || process.env.windir, 'System32', 'whoami.exe'), ['/groups', '/priv']).split(/\\r?\\n/).filter((l) => /Mandatory Label|S-1-5-32-544|Se\\w+Privilege/.test(l)).map((l) => l.replace(/\\s+/g, ' ').trim()).join('\\n') + '\\n';
+  if (a === 'access') for (const p of [t, path.join(t, 'node'), path.join(t, 'node', 'node.exe')]) did.diag = (did.diag || '') + out('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(root, 'bin', 'acc.ps1'), p]);
 }
 process.stdout.write(JSON.stringify(did));
+`;
+
+/** Opens one path for one right at a time and closes it again (nothing renamed or written): what the token is granted. */
+export const ACC = `param([string]$P)
+Add-Type -TypeDefinition @"
+using System; using System.Runtime.InteropServices;
+public static class Acc {
+  [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+  public static extern IntPtr CreateFileW(string n, uint a, uint s, IntPtr sa, uint c, uint f, IntPtr t);
+  [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
+  public static string Try(string p, uint a) {
+    IntPtr h = CreateFileW(p, a, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero);
+    if (h == new IntPtr(-1)) return "refused(" + Marshal.GetLastWin32Error() + ")";
+    CloseHandle(h); return "granted";
+  }
+}
+"@
+$r = [ordered]@{ DELETE = 0x10000; FILE_DELETE_CHILD = 0x40; FILE_ADD_SUBDIRECTORY = 0x4 }
+"$P : " + (($r.Keys | ForEach-Object { "$_=" + [Acc]::Try($P, [uint32]$r[$_]) }) -join ' ')
 `;
 
 test('w5717: a Low worker can no longer rename or replace tools\\node, still writes the rest of tools, and a revert restores the old layout', { skip: process.platform !== 'win32' && 'Windows only' }, async (t) => {
@@ -74,6 +97,7 @@ test('w5717: a Low worker can no longer rename or replace tools\\node, still wri
     fs.copyFileSync(process.execPath, low);
     const probe = path.join(root, 'bin', 'probe.cjs');
     fs.writeFileSync(probe, PROBE);
+    fs.writeFileSync(path.join(root, 'bin', 'acc.ps1'), ACC);
     assert.equal((await run('icacls', [low, '/setintegritylevel', 'low'])).code, 0);
     const lowTry = (...acts: string[]): Record<string, string> => {
       const r = spawnSync(low, [probe, root, ...acts], { encoding: 'utf8', windowsHide: true, timeout: 120_000 });
@@ -103,7 +127,12 @@ test('w5717: a Low worker can no longer rename or replace tools\\node, still wri
     assert.match(await label(path.join(tools, 'git')), /^Low \(OI\)\(CI\)/);
     assert.match(await label(path.join(tools, 'node')), /^Medium/);
     const after = lowTry('rename-node', 'plant-node', 'add-to-node', 'new-tools-child', 'cargo', 'cargo-new', 'git');
-    assert.notEqual(after['rename-node'], 'ok', 'tools\\node cannot be renamed away');
+    // w5717 review: on the runner the rename went through (run 45635881985) though on LothDesktop a Low process is
+    // refused DELETE on a Medium folder under a Medium parent (measured). Say what the Low token and each right were.
+    const diag = lowTry('whoami', 'access').diag ?? '';
+    t.diagnostic(diag);
+    t.diagnostic(`labels: ${(await run('icacls', [tools])).stdout}\n${(await run('icacls', [path.join(tools, 'node')])).stdout}`);
+    assert.notEqual(after['rename-node'], 'ok', `tools\\node cannot be renamed away\n${diag}`);
     assert.notEqual(after['plant-node'], 'ok', 'node.exe cannot be replaced');
     assert.notEqual(after['add-to-node'], 'ok', 'nothing can be added beside node.exe');
     assert.notEqual(after['new-tools-child'], 'ok', 'no new folder in tools');
