@@ -257,7 +257,8 @@ export class Auth {
 
   /**
    * Mint a key (shown once; only its SHA-256 is stored). Re-minting a name replaces its old key. `user`: the login
-   * it acts for (work it starts is requested by them); a key without one acts for the owner. `scope`: a key for one
+   * it acts for (work it starts is requested by them; refused once that login is gone, w5533); a key without one is an
+   * unbound key, which /mcp takes as the owner's on purpose (server/mcp.ts). `scope`: a key for one
    * endpoint only ("nightly": POST /api/intake/nightly), refused on /mcp; a key without one is an MCP key.
    */
   createApiKey(name: string, user?: string, scope?: ApiKeyScope) {
@@ -275,6 +276,20 @@ export class Auth {
   /** Every key without its hash: name, the login it acts for, its scope and when it was made (fffctl apikey list, w1415). */
   apiKeyInfos(): { name: string; createdAt: string; user?: string; scope?: ApiKeyScope }[] {
     return this.keys().map(({ name, createdAt, user, scope }) => ({ name, createdAt, ...(user ? { user } : {}), ...(scope ? { scope } : {}) }));
+  }
+
+  /**
+   * How many bound keys and live sessions name a login that no longer exists, so are refused (w5533): counts only, for
+   * the boot log, so the portal's own log says what a deploy of the check cut off without anyone reading the files.
+   */
+  goneLogins(now = Date.now()): { keys: number; sessions: number; unboundKeys: number } {
+    const known = new Set(this.users().map((u) => u.username));
+    const mcp = this.keys().filter((k) => !k.scope);
+    return {
+      keys: this.keys().filter((k) => k.user !== undefined && !known.has(k.user)).length,
+      sessions: [...this.sessions.values()].filter((x) => x.expires > now && !known.has(x.username)).length,
+      unboundKeys: mcp.filter((k) => k.user === undefined).length,
+    };
   }
 
   revokeApiKey(name: string) {
@@ -298,6 +313,12 @@ export class Auth {
     const hit = digest && this.keys().find((k) => timingSafeEqual(Buffer.from(k.sha256, 'hex'), digest));
     if (hit) {
       this.keyFailures.delete(ip);
+      // w5533: a key bound to a login that no longer exists (users.json edited or restored) is refused, never read as
+      // the owner's. It is not counted as a bad key: it is a real one, and its holder learns why from the log.
+      if (hit.user !== undefined && !this.userInfo(hit.user)) {
+        console.warn(`API key "${hit.name}" from ${ip} refused: its login "${hit.user}" no longer exists`);
+        return { ok: false, status: 401 };
+      }
       return { ok: true, name: hit.name, ...(hit.user ? { user: hit.user } : {}), ...(hit.scope ? { scope: hit.scope } : {}) };
     }
     const locked = recent.length >= 10;
@@ -477,7 +498,7 @@ export class Auth {
     return new RegExp(`(?:^|;\\s*)${COOKIE}=([a-f0-9]{64})`).exec(req.headers.cookie ?? '')?.[1];
   }
 
-  /** The logged-in username, or undefined. */
+  /** The logged-in username, or undefined; a session whose login no longer exists ends here (w5533). */
   user(req: http.IncomingMessage): string | undefined {
     const id = this.sessionId(req);
     if (!id) return undefined;
@@ -485,6 +506,12 @@ export class Auth {
     const s = this.sessions.get(key);
     if (!s) return undefined;
     if (s.expires < Date.now()) {
+      this.sessions.delete(key);
+      this.persistSessions();
+      return undefined;
+    }
+    if (!this.userInfo(s.username)) {
+      console.warn(`session of "${s.username}" ended: that login no longer exists`);
       this.sessions.delete(key);
       this.persistSessions();
       return undefined;

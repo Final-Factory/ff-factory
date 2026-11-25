@@ -158,6 +158,36 @@ test('API keys: shown once, stored hashed, revocable; bad keys are throttled per
   assert.deepEqual(bearer(key2), { ok: false, status: 401 });
 });
 
+test('a key or a session whose login no longer exists is refused, never read as the owner’s (w5533)', async (t) => {
+  const dir = dataDir(t);
+  const a = new Auth(dir, { trustProxy: false });
+  await a.setUser('ben', 'correct horse battery', { role: 'owner' });
+  await a.setUser('loth', 'another long password', { role: 'member' });
+  const benKey = a.createApiKey('ben-mac', 'ben');
+  const lothKey = a.createApiKey('loth-pc', 'loth');
+  const oldKey = a.createApiKey('old-key');
+  const bearer = (k: string) => a.bearer(req({ headers: { authorization: `Bearer ${k}` } }));
+  const login = await a.login(req(), 'loth', 'another long password');
+  assert.ok(login.ok);
+  const cookie = cookieOf(login.cookie);
+  assert.equal(a.user(req({ cookie })), 'loth');
+  assert.deepEqual(bearer(lothKey), { ok: true, name: 'loth-pc', user: 'loth' });
+
+  // users.json edited or restored without loth: the key and the session are still on disk, and both are refused.
+  const usersFile = path.join(dir, 'users.json');
+  const users = JSON.parse(fs.readFileSync(usersFile, 'utf8')) as { username: string }[];
+  fs.writeFileSync(usersFile, JSON.stringify(users.filter((u) => u.username !== 'loth')));
+  assert.deepEqual(a.goneLogins(), { keys: 1, sessions: 1, unboundKeys: 1 });
+  assert.deepEqual(bearer(lothKey), { ok: false, status: 401 });
+  assert.equal(a.user(req({ cookie })), undefined);
+  // The session is gone for good, even if the login comes back.
+  assert.ok(!Object.values(JSON.parse(fs.readFileSync(path.join(dir, 'auth-sessions.json'), 'utf8')) as { username: string }[]).some((x) => x.username === 'loth'));
+
+  // A real key still works, and an unbound key is still an unbound key (no user: /mcp names the owner for it).
+  assert.deepEqual(bearer(benKey), { ok: true, name: 'ben-mac', user: 'ben' });
+  assert.deepEqual(bearer(oldKey), { ok: true, name: 'old-key' });
+});
+
 test('API keys: a key minted with a scope says so, so /mcp can refuse it; an unknown scope is refused', (t) => {
   const a = new Auth(dataDir(t), { trustProxy: false });
   const lab = a.createApiKey('nightly-lab', undefined, 'nightly');

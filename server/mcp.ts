@@ -60,8 +60,8 @@ export interface McpRouteDeps {
  * /mcp and /mcp/upload, as the server routes them: tailnet only (w1865), then machine clients authenticate with an API
  * key, not a browser session (no cookies, so no CSRF). A request that came through Tailscale Funnel, or from an address
  * outside the tailnet, is refused here for every tool, before its key is read. A scoped key (nightly, ffbox) is for those
- * reports only. A key bound to a login acts for that person; an unbound one (made before keys had users) for the owner,
- * and the orchestrator chat tools refuse it.
+ * reports only. A key bound to a login acts for that person, and is refused once that login no longer exists (w5533); an
+ * unbound one (made before keys had users) for the owner, and the orchestrator chat tools refuse it.
  */
 export async function routeMcp(d: McpRouteDeps, req: http.IncomingMessage, res: http.ServerResponse, url: URL) {
   const outside = tailnetOnly(req, '/mcp');
@@ -69,7 +69,10 @@ export async function routeMcp(d: McpRouteDeps, req: http.IncomingMessage, res: 
   const who = d.auth.bearer(req);
   if (!who.ok) return d.send(res, who.status, { error: who.status === 429 ? 'too many failures' : 'API key required' });
   if (who.scope) return d.send(res, 403, { error: `this key is for ${who.scope} reports only` });
-  const keyUser = d.auth.userInfo(who.user);
+  // w5533: a key bound to a login acts for that login, and auth.bearer has already refused one whose login is gone. Only
+  // an unbound key (no user at all, made before keys had users) acts for the owner, by name here, never as a fallback.
+  const keyUser = who.user === undefined ? undefined : d.auth.userInfo(who.user);
+  if (who.user !== undefined && !keyUser) return d.send(res, 401, { error: 'API key refused: its login no longer exists' });
   const person = keyUser ? asRequester(keyUser) : d.identity.owner();
   if (url.pathname === '/mcp/upload') {
     const r = await mcpUpload(d.attachments, { who: person, bound: !!keyUser, refuse: tailnetOnly(req) }, req, url.searchParams.get('name'));
