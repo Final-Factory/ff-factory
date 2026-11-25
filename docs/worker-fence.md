@@ -32,7 +32,7 @@ LothDesktop):
 
 | | Covers | Does not cover |
 |---|---|---|
-| Windows Low integrity | writes outside the root, registry under HKCU\Software, scheduled tasks, shutdown (measured on BEAST); writes to `daemon`, `secrets`, `ffu-runners`, `tools\node` | reads of anything, including `secrets\`; writes to every other sandbox, instance portals, `claude\` and players inside the root; signalling or injecting into other Low workers' processes; the network; code that runs above the fence (the instances updater task, a Medium editor, the daemon's `git status`) |
+| Windows Low integrity | writes outside the root, registry under HKCU\Software, scheduled tasks, shutdown (measured on BEAST); writes to `daemon`, `secrets`, `ffu-runners`, `tools\node`, `tools` itself (w5717; its other folders stay Low) | reads of anything, including `secrets\`; writes to every other sandbox, instance portals, `claude\` and players inside the root; signalling or injecting into other Low workers' processes; the network; code that runs above the fence (the instances updater task, a Medium editor, the daemon's `git status`) |
 | macOS Seatbelt | file writes outside the root; other conversations' transcripts in the root's Claude home (w5563, docs/transcript-seal.md); with the read fence `on`: reads of `~/.ssh`, browsers, `~/.config/gh` and the Keychain, Keychain services and preference writes (w5553, w5560, "Owner secrets" below); preference writes also with `workerPrefFence` (w5659) | with the read fence off: those reads; preference writes through cfprefsd unless `workerPrefFence`; signals to other processes of the user; other sandboxes inside the root; the network |
 | Linux Landlock | file writes outside the root; with `transcriptLock` on, other conversations' transcripts (w5702, docs/transcript-seal.md) | reads; signals; other sandboxes inside the root; the network; the systemd user bus (`systemd-run --user`, guess) |
 | Any OS | | a worker is not walled off from other workers' sandboxes inside the root (w5451 items 7 and 8) |
@@ -110,7 +110,8 @@ The profile (`seatbeltProfile`): `(allow default)`, `(deny file-write*)`, then a
 
 and then takes write back from `<CLAUDE_CONFIG_DIR>/projects` but the process's own conversation (`<id>.jsonl` in any
 project folder and its `<id>/` folder; w5563, docs/transcript-seal.md), and from `<root>/daemon`, `<root>/secrets`,
-`<root>/claude-medium` (the Medium agents' Claude folder, w5543), `<root>/cache-medium` (their uv cache, w5565) and
+`<root>/claude-medium` (the Medium agents' Claude folder, w5543), `<root>/cache-medium` (their uv cache, w5565),
+`<root>/tools-medium` (FF Factory's final-factory-agents checkout the agent tools publish takes forward, w5597) and
 `<root>/root.json` (later rules win). The main clone
 `<root>/repo` stays writable: each sandbox is a git worktree of it, and git keeps the worktree's index, objects and refs
 there. With `repo` read-only (the first version of #1115), a fenced commit in a sandbox failed: "Unable to create
@@ -188,7 +189,24 @@ under the same fence a run gets (macOS Seatbelt, Linux Landlock with the read ru
 secrets folders, the machine token, root.json, daemon.json, gh-app/tokens.json) and each given-back one (FENCE_READ_ALLOW,
 `app/machine/ghApp.ts`) read-only and closes it at once, reading no byte, and the daemon logs one line, `read fence (<mode>,
 <os>) probe: a/b closed paths refused, c/d given-back paths open; ...` with what it would wrongly refuse or leave open. On
-Windows the labels are what refuses, so `warn` sets none and logs what `on` would close. Only a daemon whose hello offers
+Windows the labels are what refuses, so `warn` sets none and logs what `on` would close.
+
+Since w5747 (from w5733's review of #1232) the probe also runs the owner-secret rules ("Owner secrets" below) as `on` adds
+them for a run that holds a token: the owner paths join the closed targets and the fence (Seatbelt `readDenied` plus
+`ownerSecrets`, so the Keychain mach denies and the preference-write deny; Landlock `--no-read`). A line `read fence
+(<mode>): owner-secret rules would close ...` says what they close (in `warn`: what `on` would). Then tool legs run under
+that same fence (`ownerToolLegs`, machine/ownerSecrets.ts): `gh api user` and `git ls-remote` of a private repository
+through the GH_TOKEN credential helper, both with the machine login's token and the empty `<root>/gh-worker` gh folder,
+must exit 0; on a Mac `security add-generic-password` must fail at once (a hang means a SecurityAgent dialog; a success is
+deleted again outside the fence). Their line is `read fence probe, tools under the owner rules (w5747): ...`. A failed
+leg, or legs not run because the daemon read no machine gh token, keeps `on` from enforcing, like a wrongly refused path.
+A Keychain leg that hung or got through is held (w5752's review of #1245): the daemon records it with its code version in
+`read-fence-keychain-held.json` in its own folder, and later probes skip that leg, so a dialog comes back at most once per
+code version rather than at every daemon start. The skipped leg still keeps `on` from enforcing; deleting the file or a
+daemon update runs it again.
+The per-run wiring is `ownerRunWiring` (machine/ownerSecrets.ts), tested in server/ownerSecrets.test.ts.
+
+Only a daemon whose hello offers
 `readFenceSwitch` is sent a mode: a daemon from before w5546 took any action but `restart` as an unload, and a daemon now
 refuses an action it does not know.
 
@@ -223,6 +241,16 @@ Limits:
   `GH_TOKEN`, instead of running the shim again without end.
 - **Windows, BEAST**: its `daemon` and `secrets` are junctions into `C:\ffw-anchor`, which the fence does not touch, so they
   stay readable there until a person decides otherwise.
+- **The machine's own Claude login** (w5559, lothsahn: "fenced workers can't read the machine's own Claude login anywhere,
+  and keep LothDesktop's C: off limits"): its `.credentials.json` files (`~/.claude`, the legacy folder, the Medium agents'
+  folder; `server/claudeHome.ts` `fencedLoginFiles`) are closed with the secrets, through the daemon's `secretsDirs`, so all
+  three fences and the read probe take them. Only the files, never the folder: skills in fenced workers read other files in
+  `~/.claude` by fixed path (publish-skills' `final-factory-agents-checkout`, `plugins/cache/...`), and on BEAST a Low
+  worker's `~/.claude` is the legacy folder itself. The workers' own Claude folder is left out: runs start on their vault
+  token and hold no machine login there. On Windows a login on the system drive is labelled only on the machines in
+  `machine/readFence.ts` `LOGIN_LABEL_ON_SYSTEM_DRIVE` (BEAST, whose request allows that one label); elsewhere it is left out
+  of the labels and the probe and logged at start. In `on` mode the daemon checks the login files' labels every minute and
+  sets a missing one again, since a token refresh by a Medium reader (the usage probe) may write the file anew.
 - Same as the write half: the guard (server/daemonReads.ts) still decides what a worker's own tools may read; the fence
   is what holds for every process the worker starts.
 
@@ -300,7 +328,9 @@ rules, so `read-fence-off` takes them off live. While a socket answers, `on` log
 **The pick: deny the sockets where the kernel can, and refuse `on` where it cannot.** A run in `on` mode denies the
 bus, keyring and agent sockets (`--deny-unix`; the bus and systemd were already denied to every locked run since w5562),
 and `on` takes effect on Linux only once this probe finds every owner socket refused. A kernel below ABI 9 never passes, so biscuit stays unenforced until it runs Linux 7.1 or
-newer. That is the kernel's limit, not a setting. Moving the gh login alone would not meet "cannot reach
+newer. That is the kernel's limit, not a setting. Lothsahn's call (w5562, 2026-11-25: "Leave it until Ubuntu's normal updates bring
+7.1"): no kernel upgrade by hand (not the 7.3 OEM kernel the archive offers, not unprivileged user namespaces), so Linux
+stays warn-only until Ubuntu's normal kernel reaches 7.1. Moving the gh login alone would not meet "cannot reach
 org.freedesktop.secrets", so it is not handed up.
 
 **The READ_DIR limit** (#1193's documented limit, kept): Landlock rights are inherited down the tree, and every parent on
@@ -325,6 +355,14 @@ Measured with the generated profile unless noted:
 
 ## Known limits
 
+- **Linux is warn-only until its kernel has Landlock ABI 9 (Linux 7.1)** (w5748; lothsahn: "Leave it until Ubuntu's
+  normal updates bring 7.1"). Below it a fenced run still reaches the session bus (the Secret Service, where the gh login
+  is kept), GNOME keyring and the ssh and gpg agents, and `on` keeps no read rules: biscuit (Ubuntu 26.04, 7.0.0-38, ABI 8)
+  measured all 12 owner sockets reachable. A newer kernel alone does not turn `on` on: `readFenceOnRefusal`
+  (machine/readFence.ts) still refuses `read-fence-on` on every Linux kernel for the self-update lockout (B4 of #1193).
+  Once Ubuntu ships 7.1, the owner-socket probe can pass by itself; `on` then still needs B4 fixed and a person's switch.
+  `live w5748 enforce` (server/w5748OwnerSockets.test.ts) is the check to run there first: it skips below ABI 9 and has
+  never run.
 - **Preferences through cfprefsd** (EditorPrefs, PlayerPrefs, `defaults write`) are written by cfprefsd, outside the
   sandbox, so the file rules never see them: from inside the fence a `defaults write` of a new domain made its plist in
   `~/Library/Preferences` (measured on m5). daemon.json `"workerPrefFence": true` adds `(deny user-preference-write)`
@@ -352,6 +390,9 @@ Measured with the generated profile unless noted:
 - `sandbox-exec` is marked deprecated by Apple but ships in macOS 26.4 and is what Chromium, Bazel and Claude Code's own
   sandbox use.
 - A person's own editor and the daemon are never fenced.
+- **Sandbox editors** the daemon starts on a Mac run under this profile, warn-only unless daemon.json says
+  `"editorFence": true` (w5630; docs/worker-root.md 4.1, "macOS: sandbox editors start under the workers' Seatbelt
+  profile"). Their HOME moves to `<root>/home`, so Unity's `~/Library` writes land in the root.
 
 ## Signals and launchd jobs (w5562)
 

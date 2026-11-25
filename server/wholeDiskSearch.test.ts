@@ -156,8 +156,12 @@ test('pluginEnv names the ff-agents plugin Claude Code installed, else FF Factor
   // CLAUDE_CONFIG_DIR moves the file.
   assert.deepEqual(pluginEnv({ env: { CLAUDE_CONFIG_DIR: '/elsewhere' }, home, readFile: read, exists: all }), {});
   // No file: FF Factory's own checkout in the install folder.
-  const co = path.join('/w', 'tools', 'final-factory-agents', 'plugins', 'ff-agents');
+  const co = path.join('/w', 'tools-medium', 'final-factory-agents', 'plugins', 'ff-agents');
   assert.deepEqual(pluginEnv({ env: {}, home, root: '/w', readFile: () => '{', exists: all }), { FF_AGENTS_PLUGIN: co, FF_SKILLS: path.join(co, 'skills') });
+  // w5597: a machine the publish has not moved yet: the old checkout in <root>/tools.
+  const old = path.join('/w', 'tools', 'final-factory-agents', 'plugins', 'ff-agents');
+  const onlyOld = (p: string) => p.startsWith(path.join('/w', 'tools', 'final-factory-agents'));
+  assert.deepEqual(pluginEnv({ env: {}, home, root: '/w', readFile: () => '{', exists: onlyOld }), { FF_AGENTS_PLUGIN: old, FF_SKILLS: path.join(old, 'skills') });
   // An installPath whose folder is gone, and no checkout: nothing.
   assert.deepEqual(pluginEnv({ env: {}, home, root: '/w', readFile: read, exists: () => false }), {});
 });
