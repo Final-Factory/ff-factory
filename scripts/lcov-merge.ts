@@ -4,6 +4,11 @@
  * shows up in both. This adds them up (a line's, a function's and a branch's hits summed) and prints the table node's
  * own `--experimental-test-coverage` prints for one run: the coverage of the whole suite, none lost to the split.
  *
+ * Lines add up exactly. Functions and branches are matched by line and their order on it, because lcov carries no source
+ * offsets and node numbers them by what each process ran; a process can also put one branch on another line. Measured on
+ * 40 script test files, one run against two shards merged: lines equal, branches 62.71% against 62.97%, functions 17.43%
+ * against 17.44% (w5679). Read the branch and function columns as within about half a point.
+ *
  *   node scripts/lcov-merge.ts <shard-1.lcov> <shard-2.lcov> ...
  */
 import fs from 'node:fs';
@@ -12,9 +17,9 @@ import path from 'node:path';
 export interface FileCov {
   /** Line -> hits. */
   lines: Map<number, number>;
-  /** "line,name" -> hits. */
+  /** "line#k" (the k-th function on that line) -> hits. */
   funcs: Map<string, number>;
-  /** "line,block,branch" -> hits. */
+  /** "line#k" (the k-th branch on that line) -> hits. */
   branches: Map<string, number>;
 }
 
@@ -23,7 +28,15 @@ const add = <K>(m: Map<K, number>, k: K, n: number) => m.set(k, (m.get(k) ?? 0) 
 /** Fold one lcov report into `into`, keyed by the file's path relative to `cwd`. */
 export function addLcov(into: Map<string, FileCov>, text: string, cwd = process.cwd()): void {
   let cur: FileCov | undefined;
-  const fnLine = new Map<string, string>();
+  // Keyed by line and order on the line, not by node's names and block numbers: those count up through what one process
+  // ran (anonymous_5, block 3), so the same function or branch has another number in another shard (w5679, measured).
+  const fnKey = new Map<string, string>();
+  const nth = new Map<string, number>();
+  const next = (kind: string, line: string) => {
+    const k = nth.get(`${kind}${line}`) ?? 0;
+    nth.set(`${kind}${line}`, k + 1);
+    return `${line}#${k}`;
+  };
   for (const raw of text.split(/\r?\n/)) {
     const at = raw.indexOf(':');
     const tag = at < 0 ? raw : raw.slice(0, at);
@@ -32,21 +45,22 @@ export function addLcov(into: Map<string, FileCov>, text: string, cwd = process.
       const key = path.relative(cwd, path.resolve(cwd, v)).split(path.sep).join('/');
       cur = into.get(key) ?? { lines: new Map(), funcs: new Map(), branches: new Map() };
       into.set(key, cur);
-      fnLine.clear();
+      fnKey.clear();
+      nth.clear();
     } else if (!cur) continue;
     else if (tag === 'DA') {
       const [line, hits] = v.split(',');
       add(cur.lines, Number(line), Number(hits));
     } else if (tag === 'FN') {
       const c = v.indexOf(',');
-      fnLine.set(v.slice(c + 1), v.slice(0, c));
+      fnKey.set(v.slice(c + 1), next('f', v.slice(0, c)));
     } else if (tag === 'FNDA') {
       const c = v.indexOf(',');
       const name = v.slice(c + 1);
-      add(cur.funcs, `${fnLine.get(name) ?? '?'},${name}`, Number(v.slice(0, c)));
+      add(cur.funcs, fnKey.get(name) ?? `?#${name}`, Number(v.slice(0, c)));
     } else if (tag === 'BRDA') {
-      const [line, block, branch, taken] = v.split(',');
-      add(cur.branches, `${line},${block},${branch}`, taken === '-' ? 0 : Number(taken));
+      const [line, , , taken] = v.split(',');
+      add(cur.branches, next('b', line), taken === '-' ? 0 : Number(taken));
     } else if (tag === 'end_of_record') cur = undefined;
   }
 }

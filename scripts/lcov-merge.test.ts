@@ -63,10 +63,10 @@ test('w5679: two shards of one file add up: a line, function or branch either sh
   assert.deepEqual([...files.keys()], ['server/a.ts', 'shared/b.ts']);
   const a = files.get('server/a.ts')!;
   assert.deepEqual([...a.lines], [[1, 3], [2, 3], [5, 2], [6, 2], [7, 0], [9, 1]]);
-  assert.equal(a.funcs.get('5,two'), 2);
-  assert.equal(a.funcs.get('9,anonymous_3'), 0, 'two functions on one line stay two');
-  assert.equal(a.branches.get('6,1,0'), 2);
-  assert.equal(a.branches.get('2,0,0'), 3, "a branch the other shard never reached ('-') counts 0");
+  assert.equal(a.funcs.get('5#0'), 2);
+  assert.equal(a.funcs.get('9#1'), 0, 'two functions on one line stay two');
+  assert.equal(a.branches.get('6#0'), 2);
+  assert.equal(a.branches.get('2#0'), 3, "a branch the other shard never reached ('-') counts 0");
   const { text, totals } = table(files);
   assert.deepEqual(totals, { files: 2, linePct: (100 * 6) / 7, branchPct: 100, funcPct: 80 });
   assert.match(text, /^server\/a\.ts \|  83\.33 \|   100\.00 \|   75\.00 \| 7$/m);
