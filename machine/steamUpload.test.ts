@@ -3,12 +3,19 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { checkRuns, copyNoLinks, inside, runSteamJob, steamEnv, type Runner, type SteamUploadMsg } from './steamUpload.ts';
+import { checkRuns, copyNoLinks, inside, installSteamcmd, runSteamJob, steamEnv, steamMissing, steamcmdExe, type Runner, type SteamUploadMsg } from './steamUpload.ts';
 
 function tmp(t: { after: (fn: () => void) => void }) {
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ff-steam-')));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   return dir;
+}
+/** A computer set up for ffsteam: steamcmd there, config.json naming it and an account. */
+function setUp(root: string) {
+  const exe = steamcmdExe(root);
+  fs.mkdirSync(path.dirname(exe), { recursive: true });
+  fs.writeFileSync(exe, 'x');
+  fs.writeFileSync(path.join(root, 'steam', 'config.json'), JSON.stringify({ release: { steam: { account: 'acct_one', steamcmd: exe } } }));
 }
 function runFolder(dir: string) {
   fs.mkdirSync(path.join(dir, 'release', 'player'), { recursive: true });
@@ -69,7 +76,7 @@ test('steam upload: a preview copies, checks and runs ffsteam on the copy, then 
   const d = tmp(t);
   const root = path.join(d, 'root');
   fs.mkdirSync(path.join(root, 'steam', 'ffbox', '.git'), { recursive: true });
-  fs.writeFileSync(path.join(root, 'steam', 'config.json'), '{}');
+  setUp(root);
   const me = path.join(d, 'ffa-me');
   runFolder(path.join(me, 'win'));
   runFolder(path.join(me, 'mac'));
@@ -115,4 +122,84 @@ test('steam upload: no fence lets a worker write steamcmd\'s folder (w5551)', as
   const args = writeLockArgs({ root, workFolders: [path.join(root, 'steam', 'x')] });
   assert.ok(!args.some((a) => a === path.join(root, 'steam') || a.startsWith(path.join(root, 'steam') + path.sep)), 'Linux: no write grant reaches it');
   assert.ok(READ_ONLY_IN_ROOT.subpaths.includes('steam'), 'macOS: Seatbelt keeps it read-only');
+});
+
+// w5640: a new urgent-lane computer sets itself up; no worker may write <root>/steam, so urgent_release.py steam-install cannot.
+const ACCT = 'build_acct_7';
+/** A runner and a download that act like Valve's: tar unpacks the exe, its first run exits 7 (an update). */
+function fakeValve() {
+  const calls: { cmd: string; args: string[] }[] = [];
+  const downloads: string[] = [];
+  const run: Runner = async (cmd, args) => {
+    calls.push({ cmd, args });
+    if (args[0] === '-xf') {
+      fs.writeFileSync(path.join(args[3], path.basename(steamcmdExe('/r'))), 'steamcmd');
+      return { code: 0, out: '' };
+    }
+    if (args[0] === '+quit') return { code: 7, out: `Logging in user '${ACCT}' ... no` };
+    if (args.some((a) => a.endsWith('ffsteam.py'))) return { code: 0, out: `steam login: ok as ${ACCT}` };
+    if (args.includes('-c')) return { code: 0, out: '{"main": ["linux", "mac", "windows"]}' };
+    return { code: 0, out: '' };
+  };
+  const download = async (url: string, file: string) => {
+    downloads.push(url);
+    fs.writeFileSync(file, 'archive');
+  };
+  return { calls, downloads, run, download };
+}
+const readCfg = (root: string) => JSON.parse(fs.readFileSync(path.join(root, 'steam', 'config.json'), 'utf8')) as { other?: number; release: { steam: Record<string, string> } };
+
+test('steam install: a fresh computer gets steamcmd and config.json with the portal account, never said back', async (t) => {
+  const root = path.join(tmp(t), 'root');
+  const v = fakeValve();
+  const sent: { state: string; error?: string; said?: string; result?: Record<string, unknown> }[] = [];
+  const logs: string[] = [];
+  const msg: SteamUploadMsg = { type: 'steam_upload', id: 'i1', action: 'install', session: 's', secrets: {}, account: ACCT };
+  await runSteamJob(msg, { root, allowedRoots: [], python: 'py', send: (m) => sent.push(m), log: (l) => logs.push(l), run: v.run, download: v.download });
+  const last = sent.at(-1)!;
+  assert.equal(last.state, 'done', last.error ?? '');
+  assert.equal(v.downloads.length, 1);
+  assert.match(v.downloads[0], /^https:\/\/steamcdn-a\.akamaihd\.net\/client\/installer\/steamcmd/);
+  assert.deepEqual(readCfg(root).release.steam, { account: ACCT, steamcmd: steamcmdExe(root), home: path.join(root, 'steam', 'home') });
+  assert.equal(steamMissing(root), undefined);
+  assert.deepEqual(fs.readdirSync(path.join(root, 'steam')).sort(), ['config.json', 'steamcmd'], 'the archive and the lock are gone');
+  assert.ok(!v.calls.some((c) => c.args.some((a) => a.endsWith('ffsteam.py'))), 'install logs nobody in');
+  assert.ok(!JSON.stringify([sent, logs]).includes(ACCT), 'the account is never said back');
+
+  // Again: steamcmd is there, so nothing is fetched; the account follows the setting; other config keys stay.
+  fs.writeFileSync(path.join(root, 'steam', 'config.json'), JSON.stringify({ ...readCfg(root), other: 1 }));
+  await installSteamcmd(root, 'acct_two', v.run, { download: v.download });
+  assert.equal(v.downloads.length, 1);
+  assert.equal(readCfg(root).other, 1);
+  assert.equal(readCfg(root).release.steam.account, 'acct_two');
+  // No setting: the account config.json names already is kept.
+  await installSteamcmd(root, undefined, v.run, { download: v.download });
+  assert.equal(readCfg(root).release.steam.account, 'acct_two');
+});
+
+test('steam install: no account in the setting or config.json installs nothing, and a bad name is refused', async (t) => {
+  const root = path.join(tmp(t), 'root');
+  const v = fakeValve();
+  const sent: { state: string; error?: string }[] = [];
+  await runSteamJob({ type: 'steam_upload', id: 'i2', action: 'install', session: 's', secrets: {} }, { root, allowedRoots: [], python: 'py', send: (m) => sent.push(m), log: () => {}, run: v.run, download: v.download });
+  assert.equal(sent.at(-1)!.state, 'failed');
+  assert.match(sent.at(-1)!.error!, /steamBuildAccount/);
+  assert.equal(v.downloads.length, 0);
+  assert.ok(!fs.existsSync(path.join(root, 'steam', 'steamcmd')));
+  await assert.rejects(installSteamcmd(root, 'a b; rm', v.run, { download: v.download }), /not a Steam account name/);
+  await assert.rejects(installSteamcmd(root, ACCT, v.run, { download: v.download, platform: 'aix' }), /no steamcmd for aix/);
+});
+
+test('steam install: a check on a fresh computer sets it up first, then logs in', async (t) => {
+  const root = path.join(tmp(t), 'root');
+  const v = fakeValve();
+  const sent: { state: string; phase?: string; error?: string; result?: Record<string, unknown> }[] = [];
+  await runSteamJob({ type: 'steam_upload', id: 'c1', action: 'check', session: 's', secrets: { FFSTEAM_PASSWORD: 'pw' }, account: ACCT }, { root, allowedRoots: [], python: 'py', send: (m) => sent.push(m), log: () => {}, run: v.run, download: v.download });
+  const last = sent.at(-1)!;
+  assert.equal(last.state, 'done', last.error ?? '');
+  assert.deepEqual([...new Set(sent.map((m) => m.phase).filter(Boolean))], ['installing steamcmd', 'ffbox', 'login check']);
+  assert.deepEqual(last.result, { exit: 0, depots: { main: ['linux', 'mac', 'windows'] } });
+  assert.equal(v.downloads.length, 1);
+  const login = v.calls.findIndex((c) => c.args.some((a) => a.endsWith('ffsteam.py')));
+  assert.ok(login > v.calls.findIndex((c) => c.args[0] === '+quit'), 'the login runs after the install');
 });

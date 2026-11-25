@@ -1096,7 +1096,7 @@ export class MachineManager {
   // ---------------------------------------------------------------- daemon versions
 
   /** What each connected daemon said in its hello. */
-  private readonly hellos = new Map<string, { protocol: number; oldestPortal?: number; daemon?: string; catalog?: string[]; guard?: boolean; agentHosts?: boolean; saveWork?: boolean; liveView?: boolean; liveIdleClose?: boolean; liveRestage?: boolean; liveKeep?: boolean; compact?: boolean; ghApp?: boolean; selfUpdate?: number; timedRuns?: boolean; labFixtures?: boolean; steamUpload?: boolean; portalPin?: PortalPinStatus; readFenceSwitch?: boolean }>();
+  private readonly hellos = new Map<string, { protocol: number; oldestPortal?: number; daemon?: string; catalog?: string[]; guard?: boolean; agentHosts?: boolean; saveWork?: boolean; liveView?: boolean; liveIdleClose?: boolean; liveRestage?: boolean; liveKeep?: boolean; compact?: boolean; ghApp?: boolean; selfUpdate?: number; timedRuns?: boolean; labFixtures?: boolean; steamUpload?: boolean; steamInstall?: boolean; portalPin?: PortalPinStatus; readFenceSwitch?: boolean }>();
 
   /** Each connected daemon's GPU Whisper (w615), from its hello and its `voice` messages. */
   private readonly voices = new Map<string, RemoteVoiceStatus>();
@@ -2448,7 +2448,7 @@ export class MachineManager {
     if (!m) return;
     switch (msg.type) {
       case 'hello': {
-        this.hellos.set(id, { protocol: msg.protocol, ...(msg.oldestPortal !== undefined ? { oldestPortal: msg.oldestPortal } : {}), daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}), ...(msg.agentHosts ? { agentHosts: true } : {}), ...(msg.saveWork ? { saveWork: true } : {}), ...(msg.liveView ? { liveView: true } : {}), ...(msg.liveIdleClose ? { liveIdleClose: true } : {}), ...(msg.liveRestage ? { liveRestage: true } : {}), ...(msg.liveKeep ? { liveKeep: true } : {}), ...(msg.compact ? { compact: true } : {}), ...(msg.timedRuns ? { timedRuns: true } : {}), ...(msg.labFixtures ? { labFixtures: true } : {}), ...(msg.steamUpload ? { steamUpload: true } : {}), ...(msg.ghApp ? { ghApp: true } : {}), ...(typeof msg.selfUpdate === 'number' ? { selfUpdate: msg.selfUpdate } : {}), ...(msg.portalPin && typeof msg.portalPin === 'object' ? { portalPin: msg.portalPin } : {}), ...(msg.readFenceSwitch ? { readFenceSwitch: true } : {}) });
+        this.hellos.set(id, { protocol: msg.protocol, ...(msg.oldestPortal !== undefined ? { oldestPortal: msg.oldestPortal } : {}), daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}), ...(msg.agentHosts ? { agentHosts: true } : {}), ...(msg.saveWork ? { saveWork: true } : {}), ...(msg.liveView ? { liveView: true } : {}), ...(msg.liveIdleClose ? { liveIdleClose: true } : {}), ...(msg.liveRestage ? { liveRestage: true } : {}), ...(msg.liveKeep ? { liveKeep: true } : {}), ...(msg.compact ? { compact: true } : {}), ...(msg.timedRuns ? { timedRuns: true } : {}), ...(msg.labFixtures ? { labFixtures: true } : {}), ...(msg.steamUpload ? { steamUpload: true } : {}), ...(msg.steamInstall ? { steamInstall: true } : {}), ...(msg.ghApp ? { ghApp: true } : {}), ...(typeof msg.selfUpdate === 'number' ? { selfUpdate: msg.selfUpdate } : {}), ...(msg.portalPin && typeof msg.portalPin === 'object' ? { portalPin: msg.portalPin } : {}), ...(msg.readFenceSwitch ? { readFenceSwitch: true } : {}) });
         // GitHub App tokens (w1519): a daemon that keeps them gets the current set at once.
         if (msg.ghApp) this.pushGhAppTokens(id);
         // w1946: a play-only machine's timed runs: what it holds now, so the portal sends again what a restart lost.
@@ -3292,6 +3292,11 @@ export class MachineManager {
   /** Whether a machine's daemon is online and runs the Steam check and upload (w5551: its hello offered `steamUpload`). */
   canSteamUpload(machineId: string): boolean {
     return this.isOnline(machineId) && !!this.hellos.get(machineId)?.steamUpload;
+  }
+
+  /** Whether a machine's daemon installs steamcmd for steam_upload (w5640: its hello offered `steamInstall`). */
+  canSteamInstall(machineId: string): boolean {
+    return this.canSteamUpload(machineId) && !!this.hellos.get(machineId)?.steamInstall;
   }
 
   /** Start a Steam check or upload on the machine (w5551); its word comes back through steamUploadReport. */

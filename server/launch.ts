@@ -417,7 +417,7 @@ export const CATALOG = {
   },
   /** docs/steam-upload.md (w5551): the daemon runs ffbox ffsteam.py with the build account's credential, which no worker holds. */
   steam_upload: {
-    action: z.enum(['check', 'upload', 'status']).describe('check: can this computer log in to Steam (once every 10 min, or now with guard_code); upload: upload your release build; status: how the job stands.'),
+    action: z.enum(['check', 'upload', 'status', 'install']).describe('check: can this computer log in to Steam (once every 10 min, or now with guard_code); install: set steamcmd up on this computer (a check or upload does it too when it is missing); upload: upload your release build; status: how the job stands.'),
     version: z.string().max(32).optional().describe('upload: the release, e.g. "1.0.0.12".'),
     app: z.enum(['main', 'demo']).optional().describe('upload: which Steam app (default main).'),
     sha: z.string().max(40).optional().describe('upload: the full commit built (the bump carrying cicd/release-lane.json).'),

@@ -166,7 +166,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // w5551 (no bump): `steamUpload` in the hello, `steam_upload` and its answer `steam_upload_state`; the portal sends a job only
 // to a daemon whose hello offered it, so an older daemon never gets one (the tool says that computer cannot upload yet), and
 // an older portal never sends one and drops the hello field.
-const DECIDED = { protocol: 9, fingerprint: 'fec4c430ef0464f5' };
+// w5640 (no bump): `steamInstall` in the hello; `steam_upload` takes action `install` and `account`. The portal sends install
+// only to a daemon whose hello offered steamInstall, and an older daemon ignores `account`.
+const DECIDED = { protocol: 9, fingerprint: 'd6d2d10b8844b287' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {
