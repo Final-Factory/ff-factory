@@ -2287,11 +2287,21 @@ LothDesktop and Beast, not just when BEAST is full").
       a `ci:` gate at once, resuming the worker, when the PR conflicts and no check has started: "PR #283 conflicts with
       main (CI can't run): merge main in, resolve, push, and wait again" (also in the request's log; checks already
       running keep it waiting); a `pr:` gate its worker set itself clears the same way on a conflict, only when its request
-      owns the PR (w3572, `ownsPr`: the ledger links it, its description has `Request:` or `Part of:` naming the request,
-      or its head branch is the request's); a dispatcher's does not, nor one on another request's PR, which stays Blocked
-      until that PR merges or closes, while the requests owning it are told once per head commit
-      (`BlockerWatch.tellPrConflicts`, `Orchestrators.tellPrConflict`; ffu#397, w3445's, woke w3423 and five other waiters
-      three times an hour to resolve it); (3) it also clears when no CI run exists for the PR's head (`none` from the
+      owns the PR (w3572, `ownsPr`: the ledger links it, its description has a `Request:` line naming the request, or a
+      `Part of:` one when no `Request:` line names anyone, or its head branch is the request's); a dispatcher's does not,
+      nor one on another request's PR, which stays Blocked until that PR merges or closes, while **one** request is told,
+      once per head commit (`BlockerWatch.tellPrConflicts`, `Orchestrators.tellPrConflict`; ffu#397, w3445's, woke w3423
+      and five other waiters three times an hour to resolve it): an open owner with a live worker (its `Request:` line
+      first, then the one updated last), else the parent a `Part of:` line names (`partOfPr`) if it has a worker, else
+      the owner's log; never the parent while the owner has a worker, and nobody when an owner already waits on the PR
+      itself. The log line names who was told and who not, and why. When two or more requests' gates on one PR would
+      clear at once (red CI, a conflict), only one is woken (`BlockerWatch.oneWakePerPr`: the owner, else the newest
+      `blocked_on`) and the others' gates become a `pr:` wait for that PR to merge (`Orchestrators.handPrGate`), with a
+      log line saying who works on it. Learned (w5845, 2026-11-25): ffu#1140 (w5476's, M6.13 blueprints, `Request: w5476`
+      and `Part of: w2895`) and ffu#1097 (w5472's, M6.6 turrets) conflicted, and the notice went to the planner w2895's
+      worker 00d724a6 as "w2895's" while w5476's own worker was on #1140 and w2895's other worker was already merging main
+      into #1097: a `Part of:` line names the parent planner, not the PR's owner, so it never routes a notice while a
+      `Request:` line names someone (tests "w5845: replay of ffu#1140" and "of ffu#1097", `server/orchestratorsGates.test.ts`); (3) it also clears when no CI run exists for the PR's head (`none` from the
       checks or Actions read) `CI_NO_RUN_MS` = **10 minutes** after the portal first saw that head: the run for #283 was
       created 18:30:39Z for a push made seconds before (measured), so ten minutes is far past any start-up and short
       against the hour lost. It needs the checks to be readable to tell "no run" from "unread" (the w829 15-minute

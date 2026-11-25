@@ -7747,9 +7747,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     if (!w || !isOpen(w) || w.log.some((l) => l.includes(a.mark))) return false;
     const all = [...this.store.work.values()];
     const told: string[] = [];
-    for (const sid of newestFirst(w)) {
-      const s = this.store.sessions.get(sid);
-      if (!s || s.kind !== 'worker' || s.status === 'error' || (s.status === 'stopped' && w.status !== 'active') || s.waitingOn || !servedBy(sid, all).has(w.id)) continue;
+    for (const sid of this.prWorkers(w, all)) {
       try {
         this.sessions.send(sid, `[about ${w.id} "${clip(w.title, 80)}"]\n${a.text}`, 'system');
         told.push(sid);
@@ -7760,6 +7758,42 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     }
     this.stamp(w, `${a.mark}: ${told.length ? `told ${told.join(', ')}: ` : ''}${a.text}`);
     this.store.putWork(w);
+    return true;
+  }
+
+  /** The workers tellPrConflict may tell on `w`, newest first: on it, not errored or waiting on a person (stopped only while it is active). */
+  private prWorkers(w: WorkItem, all: readonly WorkItem[] = [...this.store.work.values()]): string[] {
+    return newestFirst(w).filter((sid) => {
+      const s = this.store.sessions.get(sid);
+      return !!s && s.kind === 'worker' && s.status !== 'error' && !(s.status === 'stopped' && w.status !== 'active') && !s.waitingOn && servedBy(sid, all).has(w.id);
+    });
+  }
+
+  /** w5845: the worker a pull request notice about request `id` would reach (tellPrConflict), or undefined when it has none. */
+  prWorker(id: string): string | undefined {
+    const w = this.store.work.get(id);
+    return w && isOpen(w) ? this.prWorkers(w)[0] : undefined;
+  }
+
+  /**
+   * w5845: request `id` and another (`to`) both waited on pull request `gate.ref` (CI or a worker's pr gate) and both would be
+   * woken now (red or green CI, a conflict): only `to` is, and `id`'s gate becomes a wait for that PR to merge, set by the
+   * blocker watch, so two workers never push the same branch at once. Its log and the portal's log say who works on it and why.
+   */
+  handPrGate(id: string, gate: WorkBlocker, to: string, why: string): boolean {
+    const w = this.store.work.get(id);
+    if (!w || w.status !== 'blocked' || !w.blocked || !gate.ref) return false;
+    const gates = gatesOf(w);
+    const i = gates.findIndex((g) => sameGate(g, gate));
+    if (i < 0) return false;
+    const line = `${gate.ref} is ${to}'s to act on, not ${w.id}'s (${why}); ${w.id} now waits for it to merge (w5845)`;
+    const next: WorkBlocker = { kind: 'pr', ref: gate.ref, what: `${gate.ref} merging (${to} works on it, w5845)`, at: this.now().toISOString(), by: 'blocker watch' };
+    const left = gates.map((g, j) => (j === i ? next : g)).filter((g, j, xs) => xs.findIndex((x) => sameGate(x, g)) === j);
+    w.blocked = left[0];
+    w.alsoBlocked = left.length > 1 ? left.slice(1) : undefined;
+    this.stamp(w, line);
+    this.store.putWork(w);
+    console.log(`ledger: ${line}`);
     return true;
   }
 
