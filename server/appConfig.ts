@@ -55,6 +55,8 @@ export const SETTABLE_KEYS = [
   // and whether a member's login from a new browser waits for an owner's approval ("off" or "members").
   'trustProxy',
   'deviceApproval',
+  // The daemon link from the tailnet only (w5575): "warn", "enforce" or "off" (the recovery switch); null puts back "warn".
+  'machineLinkTailnet',
   // The privacy guards (w17, docs/privacy.md), the owner's only: true or false; null puts back the default (on for every
   // factory but Final Factory).
   'privacyGuards',
@@ -193,7 +195,7 @@ export type SettableKey = (typeof SETTABLE_KEYS)[number];
 const NO_HOST = '; "this host" is no place for work any more (w510): name this host\'s own daemon (e.g. "beast")';
 
 /** Keys only an owner may set (docs/identity.md roles): what the intake files and starts by itself. */
-export const OWNER_ONLY_KEYS: ReadonlySet<SettableKey> = new Set(['live.enabled', 'live.idleCloseMinutes', 'intake.ffbox', 'intake.reviewers', 'providers.ffbox.devRequests', 'claudeAccounts.dispatcher', 'machines.githubFromVault', 'vault.unattributed.intake', 'vault.unattributed.ffbox', 'vault.unattributed.nightly', 'orchestrator.timerFilingsPerMessage', 'trustProxy', 'deviceApproval', 'privacyGuards']);
+export const OWNER_ONLY_KEYS: ReadonlySet<SettableKey> = new Set(['live.enabled', 'live.idleCloseMinutes', 'intake.ffbox', 'intake.reviewers', 'providers.ffbox.devRequests', 'claudeAccounts.dispatcher', 'machines.githubFromVault', 'vault.unattributed.intake', 'vault.unattributed.ffbox', 'vault.unattributed.nightly', 'orchestrator.timerFilingsPerMessage', 'trustProxy', 'deviceApproval', 'machineLinkTailnet', 'privacyGuards']);
 
 const FFBOX_INTAKE_FLAGS = ['enabled', 'branches', 'diagnoses', 'requests', 'boardCheck', 'escalations'] as const;
 const FFBOX_INTAKE_KEYS = [...FFBOX_INTAKE_FLAGS, 'repo', 'dailyCap', 'match', 'autoApprove', 'desync', 'crash'];
@@ -572,6 +574,11 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       if (value === undefined || value === null || value === 'off') return value === 'off' ? 'off' : undefined;
       if (value === 'members') return 'members';
       throw new Error(`deviceApproval is "members" (a member's login from a new browser waits for an owner's approval in the portal) or "off"`);
+    }
+    case 'machineLinkTailnet': {
+      if (value === undefined || value === null) return undefined;
+      if (value === 'off' || value === 'warn' || value === 'enforce') return value;
+      throw new Error('machineLinkTailnet is "warn" (log a daemon link from outside the tailnet, let it in), "enforce" (refuse it) or "off" (no check: the recovery switch); null puts back "warn"');
     }
     case 'privacyGuards': {
       if (value === undefined || value === null) return undefined;
@@ -1036,6 +1043,7 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   else if (key === 'publicUrl') cfg.publicUrl = v as string | undefined;
   else if (key === 'trustProxy') cfg.trustProxy = v as boolean;
   else if (key === 'deviceApproval') cfg.deviceApproval = v as 'off' | 'members' | undefined;
+  else if (key === 'machineLinkTailnet') cfg.machineLinkTailnet = v as 'off' | 'warn' | 'enforce' | undefined;
   else if (key === 'privacyGuards') {
     if (v === undefined) delete cfg.privacyGuards;
     else cfg.privacyGuards = v as boolean;

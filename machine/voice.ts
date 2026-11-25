@@ -13,6 +13,7 @@ import { VOICE_DEFAULTS, type VoiceConfig } from '../server/config.ts';
 import { WORKER, modelDir, setupNeeded, setupRunning, setupVoice, voicePaths } from '../server/voiceSetup.ts';
 import { wavSeconds, type RemoteVoiceStatus } from '../shared/voice.ts';
 import type { HostStats } from '../shared/types.ts';
+import { workerWritable } from './sharedCaches.ts';
 
 /** daemon.json `voice` (docs/voice.md has the table). Everything but `enabled` has a default. */
 export interface DaemonVoiceSettings {
@@ -76,6 +77,19 @@ export function freeVramMiB(stats: HostStats | undefined): number | undefined {
   return g.memTotalMiB - g.memUsedMiB;
 }
 
+/**
+ * w5574 (from w5542's audit): why the daemon may not run the voice tools from where its settings put them, or undefined.
+ * The venv's python runs at the daemon's level, so it lives in the daemon's folder (the default, `<appDir>/voice`), which no
+ * worker can write; a toolsDir or uvPath elsewhere in the worker root (the old default `<root>/voice` was) is refused.
+ */
+export function voiceToolsProblem(v: Pick<VoiceConfig, 'toolsDir' | 'uvPath'>, root: string | undefined, appDir: string): string | undefined {
+  if (!root) return undefined;
+  for (const [what, p] of [['toolsDir', v.toolsDir], ['uvPath', v.uvPath]] as const) {
+    if (p && workerWritable(path.resolve(p), root, appDir)) return `voice ${what} ${p} is in a folder workers can write (w5574): leave it unset (${path.join(appDir, 'voice')}) or name one outside ${root}`;
+  }
+  return undefined;
+}
+
 /** What runs the model: the portal's PyWorker; tests give a fake. */
 export interface VoiceEngine {
   readonly loaded: boolean;
@@ -119,6 +133,8 @@ export interface DaemonVoiceDeps {
   needed?: (v: VoiceConfig) => string | null;
   /** The GPU's used memory right now, MiB (nvidia-smi), to measure the model's share; tests fake it. */
   vramUsedNow?: () => Promise<number | undefined>;
+  /** w5574: the worker root, where the voice tools may not be (voiceToolsProblem); `home` is the daemon's folder. */
+  root?: string;
 }
 
 export class DaemonVoice {
@@ -127,6 +143,9 @@ export class DaemonVoice {
   private readonly deps: DaemonVoiceDeps;
   readonly engine: VoiceEngine;
   private installing = false;
+  /** w5574: why the tools may not run from their folder (voiceToolsProblem), or undefined. */
+  private readonly untrusted?: string;
+  private readonly oldToolsDir?: string;
   private installError?: string;
   /** Why the last load was refused or failed (VRAM, an error); cleared by a load that works. */
   private refused?: string;
@@ -140,6 +159,9 @@ export class DaemonVoice {
     this.s = settings;
     this.v = voiceConfigOf(settings, home);
     this.deps = deps;
+    this.untrusted = voiceToolsProblem(this.v, deps.root, home);
+    // w5574: the tools were in <root>/voice before; that copy is never run again, and goes once the new one is installed.
+    this.oldToolsDir = deps.root && !settings.toolsDir && path.resolve(deps.root, 'voice') !== path.resolve(this.v.toolsDir) ? path.join(deps.root, 'voice') : undefined;
     this.engine =
       deps.engine ??
       new PyWorker(
@@ -165,6 +187,7 @@ export class DaemonVoice {
 
   status(): RemoteVoiceStatus {
     const base = { model: this.v.model };
+    if (this.untrusted) return { ...base, state: 'unavailable', detail: this.untrusted };
     if (this.installing || (!this.deps.needed && setupRunning(this.v))) return { ...base, state: 'installing', detail: `installing faster-whisper and ${this.v.model} in ${this.v.toolsDir}` };
     const need = this.needed();
     if (need) return { ...base, state: 'unavailable', detail: this.installError ? `setup failed: ${this.installError}` : need };
@@ -188,11 +211,12 @@ export class DaemonVoice {
    * (onStats), not before: until then the daemon has no reading of the GPU.
    */
   start() {
+    if (this.untrusted) return this.deps.log(`voice: ${this.untrusted}`);
     if (this.v.autoInstall && this.needed() && !(!this.deps.needed && setupRunning(this.v))) void this.install();
   }
 
   async install() {
-    if (this.installing) return;
+    if (this.installing || this.untrusted) return;
     this.installing = true;
     this.installError = undefined;
     this.notify();
@@ -208,6 +232,10 @@ export class DaemonVoice {
     };
     try {
       await (this.deps.setup ?? ((v, l) => setupVoice(v, l)))(this.v, say);
+      if (this.oldToolsDir && fs.existsSync(this.oldToolsDir)) {
+        fs.rmSync(this.oldToolsDir, { recursive: true, force: true });
+        say(`removed the old tools folder ${this.oldToolsDir}, which workers can write (w5574)`);
+      }
     } catch (e) {
       this.installError = (e as Error).message.split('\n').slice(-3).join(' ').slice(0, 400);
       say(`setup failed: ${(e as Error).message}`);
