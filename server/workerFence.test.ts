@@ -342,7 +342,7 @@ test('w5546 lockout review B1: the probe opens each path without reading it and 
 });
 
 test('seatbeltProfile: owner secrets deny the Keychain mach services and preference writes, and go with readOff (w5560)', () => {
-  const base = fenceFor({ setting: 'seatbelt', root: '/Users/p/ffw', home: '/Users/p' })!;
+  const base = fenceFor({ setting: 'seatbelt', root: '/Users/p/ffw', platform: 'darwin', home: '/Users/p', exists: () => true, getconf: (n) => `/t/${n}` })!;
   const f: WorkerFence = { ...base, readDenied: ['/Users/p/Library/Keychains'], ownerSecrets: { mach: ['com.apple.authd', 'com.apple.SecurityServer'] } };
   const on = seatbeltProfile(f);
   assert.match(on, /\(deny mach-lookup \(global-name "com\.apple\.authd"\) \(global-name "com\.apple\.SecurityServer"\)\)/);
