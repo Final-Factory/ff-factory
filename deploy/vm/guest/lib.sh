@@ -95,7 +95,7 @@ tailnet_url() {
 # when it is empty or another ts.net address (a renamed node, a copy from another portal). A URL off ts.net was set by
 # a person on purpose and stays. Succeeds when it changed the file, so the caller restarts the portal.
 sync_public_url() {
-  local cfg=$FFF_ROOT/config/config.json want have tmp
+  local cfg=$FFF_ROOT/config/config.json want have
   [ -f "$cfg" ] || return 1
   want=$(tailnet_url)
   if [ -z "$want" ]; then log "publicUrl: Tailscale has not joined yet, so it stays as it is (fffctl tailscale-join sets it)"; return 1; fi
@@ -107,12 +107,12 @@ sync_public_url() {
     return 1
   fi
   if [ "$DRY_RUN" = 1 ]; then log "DRY-RUN would set config.json publicUrl to $want (was ${have:-empty})"; return 1; fi
-  tmp=$(mktemp "$FFF_ROOT/config/.config.XXXXXX")
-  jq --arg url "$want" '.publicUrl = $url' "$cfg" >"$tmp" || { rm -f "$tmp"; warn "could not edit $cfg"; return 1; }
-  chown "$FFF_USER:$FFF_USER" "$tmp"
-  chmod 0600 "$tmp"
-  cp -p --remove-destination "$cfg" "$cfg.prev"
-  mv -f "$tmp" "$cfg"
+  # fff edits its own config (w5531: root writing in fff's folder would follow a link fff put there).
+  no_link "$cfg" "setting publicUrl" || return 1
+  # shellcheck disable=SC2016 # expands in the inner sh, as fff
+  as_fff sh -c 'umask 077 && t=$(mktemp "${1%/*}/.config.XXXXXX") && jq --arg url "$2" ".publicUrl = \$url" "$1" >"$t" &&
+    cp -p --remove-destination "$1" "$1.prev" && mv -f "$t" "$1" || { rm -f "$t"; exit 1; }' _ "$cfg" "$want" ||
+    { warn "could not edit $cfg"; return 1; }
   log "publicUrl: set to $want (was ${have:-empty})"
 }
 
@@ -139,30 +139,77 @@ load_conf() {
 # stat ("fatal: failed to stat '/home/fffadmin/ff-factory': Permission denied" from fffctl gh-login).
 as_fff() { as_fff_in / "$@"; }
 # as_fff_in DIR CMD...: the same, started in DIR.
-as_fff_in() { local dir=$1; shift; (cd "$dir" && runuser -u "$FFF_USER" -- env PATH="$PATH" HOME="$FFF_ROOT/home" GIT_LFS_SKIP_SMUDGE=1 GIT_TERMINAL_PROMPT=0 "$@"); }
+# Already the service account (the unit tests, which run as themselves): no runuser, which refuses a caller that is not root.
+as_fff_in() {
+  local dir=$1 run=(runuser -u "$FFF_USER" --)
+  shift
+  [ "$(id -un)" != "$FFF_USER" ] || run=()
+  (cd "$dir" && "${run[@]}" env PATH="$PATH" HOME="$FFF_ROOT/home" GIT_LFS_SKIP_SMUDGE=1 GIT_TERMINAL_PROMPT=0 "$@")
+}
 
-# data_write NAME: stdin to $DATA/NAME, whole (a temp file and a rename) and owned by fff, which the server needs to
-# read and remove it.
+# ---------------------------------------------------------------- root in fff's folders (w5531)
+# fff owns $DATA, config, home and its other folders, and can rename anything in them (and them, in the sticky $FFF_ROOT)
+# and put a symbolic link in its place, at any moment. Root that wrote, chowned or chmodded there by name would follow
+# the link to whatever it points at (/etc/shadow, /root/.ssh): so root does none of that. What lands in fff's folders is
+# written by fff (as_fff, through fff's own permissions, so a link only leads fff to what fff could reach anyway); root
+# changes only the owner of a folder, with chown -h from inside its checked parent; and a symbolic link on the way is
+# refused and logged first, so a swap shows in the journal.
+
+# real_dir DIR: DIR is a folder reached through no symbolic link (DIR itself included).
+real_dir() { [ "$(cd -P -- "$1" 2>/dev/null && pwd -P)" = "$1" ]; }
+
+# no_link PATH WHAT: PATH and every folder above it are no symbolic link (PATH may be missing); else logs and fails.
+no_link() {
+  local p=$1 up=${1%/*}
+  [ -L "$p" ] || ! real_dir "$up" || return 0
+  if [ ! -L "$p" ] && [ ! -e "$up" ] && [ ! -L "$up" ]; then
+    warn "$2 refused: $up does not exist"
+  else
+    warn "$2 refused: $p, or a folder above it, is a symbolic link (to $(readlink -m -- "$p" 2>/dev/null || echo '?')), which root does not follow into fff's folders (w5531)"
+  fi
+  return 1
+}
+
+# fff_dir DIR...: each DIR a folder of fff's with mode 0700, made in order (a parent before its child), never by root
+# following a link: a symbolic link at DIR or above it is refused (no_link); a folder there that is not fff's gets fff
+# as owner by root's chown -h from inside its parent (checked real, so a later swap of a folder above changes nothing);
+# fff makes it and sets its mode.
+fff_dir() {
+  local d p
+  for d in "$@"; do
+    if [ "$DRY_RUN" = 1 ]; then log "DRY-RUN would make $d fff's folder (0700)"; continue; fi
+    no_link "$d" "making $d fff's folder" || return 1
+    p=${d%/*}
+    if [ -e "$d" ] && [ -z "$(find "$d" -maxdepth 0 -user "$FFF_USER" 2>/dev/null)" ]; then
+      (cd -P -- "$p" && [ "$(pwd -P)" = "$p" ] && chown -h "$FFF_USER:$FFF_USER" -- "./${d##*/}") || { warn "could not give $d to $FFF_USER"; return 1; }
+    fi
+    as_fff mkdir -p -- "$d"
+    as_fff chmod 0700 -- "$d"
+  done
+}
+
+# fff_write FILE: stdin to FILE, in a folder of fff's, whole (a temp file and a rename), 0600, written by fff (w5531:
+# root writes nothing in fff's folders). Fails, logged, when FILE or a folder above it is a symbolic link.
+fff_write() {
+  no_link "$1" "writing $1" || return 1
+  # shellcheck disable=SC2016 # expands in the inner sh, as fff
+  as_fff sh -c 'umask 077 && t=$(mktemp "${1%/*}/.${1##*/}.XXXXXX") && cat >"$t" && mv -f "$t" "$1" || { rm -f "$t"; exit 1; }' _ "$1"
+}
+
+# data_write NAME: stdin to $DATA/NAME (fff_write), which the server needs to read and remove.
 data_write() {
-  local tmp
-  tmp=$(mktemp "$DATA/.$1.XXXXXX")
-  cat >"$tmp"
-  chown "$FFF_USER:$FFF_USER" "$tmp"
-  chmod 0600 "$tmp"
-  mv -f "$tmp" "$DATA/$1"
+  [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "data_write: not a file name: $1"
+  fff_write "$DATA/$1"
 }
 
 # tell_dispatcher TEXT: a system message to the dispatcher through data/orchestrator-inbox (server/index.ts reads
 # *.txt there every 5 s and sends each once), for what happens outside the server: a failed build, a rollback.
-# The temp file is mktemp's, never a name fff could have put a symbolic link at first (w5505).
+# fff makes the folder and writes the file (w5531: root's install -d -o fff and chown there followed a link fff could
+# have put in place of the folder or of the temp file).
 tell_dispatcher() {
-  local dir=$DATA/orchestrator-inbox name tmp
-  install -d -m 0700 -o "$FFF_USER" -g "$FFF_USER" "$dir"
-  name="$(date -u +%Y%m%dT%H%M%SZ)-$$"
-  tmp=$(mktemp "$dir/.$name.XXXXXX")
-  printf '%s\n' "$1" >"$tmp"
-  chown "$FFF_USER:$FFF_USER" "$tmp"
-  mv -f "$tmp" "$dir/$name.txt"
+  local dir=$DATA/orchestrator-inbox
+  fff_dir "$dir" || return 1
+  printf '%s\n' "$1" | fff_write "$dir/$(date -u +%Y%m%dT%H%M%SZ)-$$.txt"
 }
 
 health_json() { curl -fsS -m 10 "http://127.0.0.1:$FFF_PORT/api/health"; }

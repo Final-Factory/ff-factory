@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { buildReadsGameDataDir, exeReadsGameDataDir, gameDataRoots, legacyGameDataRoot, playerHomeEnv, preparePlayerHome, savesDirsFor, workerGameDataDir, workerPlayerHomeDir } from '../machine/gameData.ts';
+import { buildReadsGameDataDir, exeReadsGameDataDir, gameDataRoots, legacyGameDataRoot, sandboxGameDataDir, sandboxGameDataDirs, sandboxGameDataEnv, playerHomeEnv, preparePlayerHome, savesDirsFor, workerGameDataDir, workerPlayerHomeDir } from '../machine/gameData.ts';
 import { rootEnv } from '../machine/daemon.ts';
 
 test('w5306: the game data roots, the override first; the old root per OS as GameDataPaths.ResolveRoot has it', () => {
@@ -84,4 +84,17 @@ test('w5344: the build of an exe reads FF_GAME_DATA_DIR from its folder or a Mac
   } finally {
     fs.rmSync(d, { recursive: true, force: true });
   }
+});
+
+test('w5557: each sandbox keeps its game data in a folder of its own under the override; none without it', () => {
+  const base = path.join('V:', 'ffw', 'gamedata');
+  assert.equal(sandboxGameDataDir(base, 'slot3'), path.join(base, 'sandboxes', 'slot3'));
+  assert.equal(sandboxGameDataDir(base, '../x'), path.join(base, 'sandboxes', '.._x'), 'a sandbox id never leads out of the folder');
+  assert.deepEqual(sandboxGameDataEnv({ FF_GAME_DATA_DIR: ` ${base} ` }, 'slot3'), { FF_GAME_DATA_DIR: path.join(base, 'sandboxes', 'slot3') });
+  assert.deepEqual(sandboxGameDataEnv({}, 'slot3'), {}, 'no override: the game keeps its own default, nothing is invented');
+  assert.deepEqual(sandboxGameDataEnv({ FF_GAME_DATA_DIR: base }, undefined), {}, 'no sandbox: the machine root as it is');
+  const list = (d: string) => (d === path.join(base, 'sandboxes') ? ['slot1', 'slot3'] : []);
+  assert.deepEqual(sandboxGameDataDirs(base, list), [path.join(base, 'sandboxes', 'slot1'), path.join(base, 'sandboxes', 'slot3')]);
+  const home = path.join('C:', 'Users', 'p');
+  assert.deepEqual(gameDataRoots({ FF_GAME_DATA_DIR: base }, 'win32', home, list), [base, path.join(base, 'sandboxes', 'slot1'), path.join(base, 'sandboxes', 'slot3'), legacyGameDataRoot('win32', home)]);
 });

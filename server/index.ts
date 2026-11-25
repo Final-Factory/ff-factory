@@ -1,3 +1,5 @@
+// First (w5525): everything the portal prints reaches the journal redacted (server/journalRedact.ts).
+import './journalRedactStart.ts';
 import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -104,7 +106,8 @@ import { tailscaleWhois } from './machineJoin.ts';
 import { JOIN_PATHS, WINDOWS_INSTALLER_NAME, machineJoinHttp, windowsInstaller } from './machineJoinHttp.ts';
 import { bundleServedLine, updateBundleFor } from './machineLink.ts';
 import { issueMachineToken } from './machineTokens.ts';
-import { originOf, tailnetDeviceAddress } from './remoteChat.ts';
+import { originOf, tailnetDeviceAddress, tailnetOnly } from './remoteChat.ts';
+import { OWNER_DEVICE_APPROVAL_DEFAULT } from './devices.ts';
 import { clientAddress, configureClientAddress } from './clientAddress.ts';
 import { checkMachineLink, isMachineLinkPath, machineLinkMode } from './machineLinkGate.ts';
 import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, type LiveStats, type SpeakRequest, type TranscribeRequest, type VocabularySource } from '../shared/voice.ts';
@@ -409,6 +412,11 @@ machines.offlineAlert = (machineId, title, text) => {
   notifier.host(title, text);
   machines.report?.(text);
 };
+// w5555: a machine's worker fence failed (its sandbox workers are held) or is back, to the orchestrator and the host's devices.
+machines.fenceAlert = (_machineId, title, text) => {
+  notifier.host(title, text);
+  machines.report?.(text);
+};
 machines.cleanupFor = (id) => (store.machines.get(id)?.local ? { everyMinutes: 0, softFreeGB: 0 } : machineCleanupSettings(cfg, id));
 // The activity pause (w1574, docs/machines.md "Pausing a machine"): config machines.activityPause, per machine, off by default.
 machines.activityFor = (id) => machineActivityPause(cfg, id);
@@ -473,7 +481,13 @@ setInterval(() => {
   machines.checkOutdated();
 }, 30_000);
 // trustProxy and deviceApproval are read live: set_app_config changes them without a restart.
-const auth = new Auth(cfg.dataDir, { trustProxy: () => cfg.trustProxy, deviceApproval: () => cfg.deviceApproval ?? 'off' });
+const auth = new Auth(cfg.dataDir, {
+  trustProxy: () => cfg.trustProxy,
+  deviceApproval: () => cfg.deviceApproval ?? 'off',
+  // w5524: advisory unless config says otherwise; a login over the tailnet (not through Funnel) is never held.
+  ownerDeviceApproval: () => cfg.ownerDeviceApproval ?? OWNER_DEVICE_APPROVAL_DEFAULT,
+  onTailnet: (req) => tailnetOnly(req) === undefined,
+});
 {
   // w5533: counts only, never a key, a name or a session: what the refusal of logins that no longer exist cuts off.
   const gone = auth.goneLogins();
@@ -1328,6 +1342,24 @@ route('POST', '/api/work/(w[0-9]+)/priority', async (req, [id]) => {
     throw new HttpError(400, (e as Error).message);
   }
 });
+// w5577: the hand-up card (12 h unfiled): its person files the follow-ups (through their own orchestrator's file_follow_ups,
+// every request_work limit included) or drops them. Nothing files a hand-up by itself.
+route('POST', '/api/work/(w[0-9]+)/handups/file', async (req, [id]) => {
+  try {
+    return { id, ...agents.orchestrators.fileHandUps(id, requesterOf(req)) };
+  } catch (e) {
+    throw new HttpError(400, (e as Error).message);
+  }
+});
+route('POST', '/api/work/(w[0-9]+)/handups/drop', async (req, [id]) => {
+  const b = await readJson<{ note?: string }>(req);
+  try {
+    const w = agents.orchestrators.dropHandUps(id, requesterOf(req), typeof b.note === 'string' ? b.note : undefined);
+    return { id: w.id, status: w.status };
+  } catch (e) {
+    throw new HttpError(400, (e as Error).message);
+  }
+});
 route('POST', '/api/work/(w[0-9]+)/decline', async (req, [id]) => {
   const b = await readJson<{ note?: string }>(req);
   const w = agents.orchestrators.declineIntake(id, requesterOf(req), typeof b.note === 'string' ? b.note.slice(0, 300) : undefined);
@@ -1374,9 +1406,11 @@ const requireDeviceOwner = (req: http.IncomingMessage) => {
   return me;
 };
 const deviceViews = () => auth.deviceList().map((d) => ({ ...d, displayName: auth.userInfo(d.username)?.displayName ?? d.username }));
+// w5524: what owner device approval held or would have held, newest first, for the owners' Devices list.
+const deviceLogViews = () => auth.deviceLogList().map((e) => ({ ...e, displayName: auth.userInfo(e.username)?.displayName ?? e.username }));
 route('GET', '/api/devices', async (req) => {
   requireDeviceOwner(req);
-  return { deviceApproval: cfg.deviceApproval ?? 'off', devices: deviceViews() };
+  return { deviceApproval: cfg.deviceApproval ?? 'off', ownerDeviceApproval: cfg.ownerDeviceApproval ?? OWNER_DEVICE_APPROVAL_DEFAULT, devices: deviceViews(), current: auth.currentDevice(req), log: deviceLogViews() };
 });
 route('POST', '/api/devices/(d[A-Za-z0-9_-]{8})/(approve|deny|revoke)', async (req, [id, action]) => {
   const me = requireDeviceOwner(req);
