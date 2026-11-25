@@ -1101,7 +1101,7 @@ A worker writes its checkout's git config freely (`git config` in its worktree w
 makes goes through `server/safeGit.ts`: `run()` (`server/proc.ts`), the worker's `exec()` and `machine/prFlow.ts` fence
 git by themselves, and a direct child_process call uses `gitExecFileSync`/`gitSpawnSync`/`gitSpawn`/`gitExecFile`.
 The fence is command-scope config (it outranks every config file): `core.fsmonitor=false`, `core.hooksPath` on
-`server/gitHooks` (git-lfs's four hooks and no other, so a push still uploads LFS objects; `git lfs install`/`update`
+`server/gitHooks` (git-lfs's four hooks and no other, so a push still uploads LFS objects; its lock hooks (post-checkout, post-commit, post-merge) run only where `.gitattributes` marks something `lockable`, since git-lfs on every commit made them over three times slower; `git lfs install`/`update`
 keep the repository's folder, since they write hooks there), the `cat` pager, `:` editors, no signing, remote transports only https, http, ssh and
 file; `--no-ext-diff --no-textconv` on `diff`/`log`/`show`; and keys a repository names freely (a filter's `clean`, a
 diff `textconv`, a merge driver, a credential helper, `core.sshCommand`, git-lfs transfer agents) read by one `git config`

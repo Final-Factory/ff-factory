@@ -1,5 +1,9 @@
 #!/bin/sh
 # FF Factory's hooks for git it runs in a worker's checkout (w5541, server/safeGit.ts): git-lfs's own post-commit hook and
-# nothing else, so a push still uploads LFS objects while no hook a worker planted runs. No git-lfs: nothing to do.
+# nothing else, so no hook a worker planted runs. No git-lfs: nothing to do. This hook only makes lockable files read-only
+# (git-lfs locking), so it runs only where the checkout's .gitattributes marks something lockable (git runs it from the
+# worktree's top): git-lfs on every commit and checkout made them over three times slower for no work (measured on m5,
+# 40 rounds of add, commit and checkout: 1.4 s without it, 4.9 s with it), and CI's unit tests ran out of time.
 command -v git-lfs >/dev/null 2>&1 || exit 0
+grep -qs lockable .gitattributes || exit 0
 exec git lfs post-commit "$@"

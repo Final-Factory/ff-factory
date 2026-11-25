@@ -149,6 +149,11 @@ test('w5541: the fixed keys come first; the caller’s own entries follow and ke
   // git-lfs's hooks and nothing else, each one line that runs `git lfs <hook>`.
   assert.deepEqual(fs.readdirSync(HOOKS).sort(), ['post-checkout', 'post-commit', 'post-merge', 'pre-push']);
   for (const h of fs.readdirSync(HOOKS)) assert.match(fs.readFileSync(path.join(HOOKS, h), 'utf8'), new RegExp(`\\nexec git lfs ${h} "\\$@"\\n$`));
+  // The upload always runs; the lock hooks only where something is lockable (git-lfs on every commit slowed CI past its
+  // watchdog, w5583's rerun of #1179).
+  const lockGate = '\ngrep -qs lockable .gitattributes || exit 0\n';
+  assert.ok(!fs.readFileSync(path.join(HOOKS, 'pre-push'), 'utf8').includes(lockGate));
+  for (const h of ['post-checkout', 'post-commit', 'post-merge']) assert.ok(fs.readFileSync(path.join(HOOKS, h), 'utf8').includes(lockGate), h);
 });
 
 test('w5541: a repository-set program key takes the user’s value back, else a neutral one; credential helpers are replaced', () => {
