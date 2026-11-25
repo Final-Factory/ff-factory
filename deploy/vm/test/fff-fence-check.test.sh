@@ -15,6 +15,7 @@ tmp=$(mktemp -d)
 pids=()
 cleanup() {
   for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; done
+  [ -z "${unit:-}" ] || systemctl stop "$unit" 2>/dev/null || true
   rm -rf "$tmp"
 }
 trap cleanup EXIT
@@ -38,9 +39,18 @@ printf 'FFF_ROOT=%s\nFFF_USER=fff-no-such-user-w5506\n' "$tmp" >"$tmp/fff.conf"
 # The portal: an execute-only copy of node, as fff-portal.service's ExecStartPre makes it.
 cp "$(command -v node)" "$tmp/node-portal"
 chmod 0111 "$tmp/node-portal"
-FAKE_PORTAL_MARKER=$oat as_who "$tmp/node-portal" -e 'setTimeout(() => {}, 60000)' &
-portal=$!
-pids+=("$portal")
+unit=""
+if [ "$(id -u)" = 0 ] && [ -d /run/systemd/system ]; then
+  # As the VM starts it: systemd drops root for the unit's User= and runs the execute-only node.
+  unit=fff-fence-test-$$.service
+  systemd-run --quiet --collect --unit="$unit" -p User=nobody -p Group="$(id -gn nobody)" --setenv=FAKE_PORTAL_MARKER="$oat" \
+    "$tmp/node-portal" -e 'setTimeout(() => {}, 60000)'
+  portal=$(systemctl show -p MainPID --value "$unit")
+else
+  FAKE_PORTAL_MARKER=$oat as_who "$tmp/node-portal" -e 'setTimeout(() => {}, 60000)' &
+  portal=$!
+  pids+=("$portal")
+fi
 as_who env -i PATH="$PATH" CLAUDE_CODE_OAUTH_TOKEN="$oat" sleep 60 &
 claude=$!
 pids+=("$claude")
@@ -48,6 +58,7 @@ as_who env -i PATH="$PATH" GH_TOKEN="$ghp" sleep 60 &
 gh=$!
 pids+=("$gh")
 sleep 0.5
+echo "kernel $(uname -r), fs.suid_dumpable $(cat /proc/sys/fs/suid_dumpable), portal pid $portal ($( [ -n "$unit" ] && echo "systemd-run, User=nobody" || echo "as $who")): $(grep -E '^(Uid|NoNewPrivs)' "/proc/$portal/status" | tr -s '\t\n' '  '), environ $(stat -c '%U %a' "/proc/$portal/environ")"
 
 ctl() { FFF_TEST_NOROOT=1 FFF_LIB=$G FFF_CONF=$tmp/fff.conf FENCE_USER=$who FENCE_KEY=$tmp/vault.key FENCE_CREDENTIALS=$tmp/no-credentials FENCE_PORTAL_PID=$portal bash $G/fffctl fence-check "$@" 2>&1; }
 noval() { if printf '%s' "$1" | matches -e "$oat" -e "$ghp" -e 'a2V5LWJ5'; then fail "fence-check printed a value: $1"; fi; }
