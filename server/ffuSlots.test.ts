@@ -150,7 +150,7 @@ function target(root: string, slot: string, ageH: number, incBytes = 10, depsByt
   return t;
 }
 
-async function plan(root: string, o: { low?: boolean; procs?: ProcLite[]; inUse?: string[]; settings?: Record<string, unknown> } = {}) {
+async function plan(root: string, o: { low?: boolean; procs?: ProcLite[]; inUse?: string[]; settings?: Record<string, unknown>; scope?: 'cargo-cap' } = {}) {
   const guard: CleanupGuard = { keep: [path.join(root, 'sandboxes')], inUse: o.inUse ?? [], home: path.join(root, 'home') };
   return planInstallLeftovers({
     root,
@@ -165,6 +165,7 @@ async function plan(root: string, o: { low?: boolean; procs?: ProcLite[]; inUse?
     heldMinBytes: 0,
     alive: () => true,
     runnerLog: () => undefined,
+    ...(o.scope ? { scope: o.scope } : {}),
   });
 }
 
@@ -304,7 +305,8 @@ test('w5442: ffu-server has a firewall path in every slot an ffu machine can mak
   assert.match(ps, new RegExp(String.raw`\$FfuGroup = '` + FFU_SERVER_GROUP + `'`), 'the group name matches machine/ffuSlots.ts');
   assert.match(ps, /Get-NetFirewallRule -Group \$FfuGroup/, 'a re-run and -Remove delete the group first');
   assert.match(ps, /\$Tailnet = @\('100\.64\.0\.0\/10', 'fd7a:115c:a1e0::\/48'\)/, 'the tailnet only, never the internet');
-  assert.match(ps, /-Program \$exe -Protocol TCP `\s*-RemoteAddress \$script:Tailnet/, 'inbound TCP by program, from the tailnet');
+  assert.match(ps, /-Program \$exe -Protocol \$Protocol `\s*-RemoteAddress \$script:Tailnet/, 'inbound by program, from the tailnet');
+  assert.match(ps, /\[string\]\$Protocol = 'TCP'/, 'TCP unless a caller says otherwise (ffu-server says nothing: TCP; w5581)');
   const worker = fs.readFileSync(path.join(import.meta.dirname, '..', 'scripts', 'worker', 'worker.ts'), 'utf8');
   assert.match(worker, /'-FfuServer', ffuServerExes\(l\.root\)\.join\(';'\)/, 'the install and firewallRepair pass the paths');
   assert.match(worker, /\.\.\.\(fs\.existsSync\(node\) \? \[node\] : \[\]\), \.\.\.ffu\]/, 'firewallRepair checks them on every tools rollout');
@@ -375,4 +377,18 @@ test('w5503: an idle incremental cache that took a target over the cap goes alon
   assert.ok(sweep.members!.some((m) => rel(root, m) === 'ffu-sandboxes/slot1/target/debug/incremental'), JSON.stringify(sweep.members));
   assert.ok(!sweep.members!.some((m) => rel(root, m).startsWith('ffu-sandboxes/slot1/target/debug/incremental/')), 'nothing twice');
   assert.match(sweep.why, /stale build output.*; and the incremental cache/);
+});
+
+test('w5503: the hourly pass (scope cargo-cap) caps the ffu slots too, not only the daily or low one', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-w5503h-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
+  // LothDesktop, 2026-11-25 05:34 UTC: the first hourly pass after #1148 deployed never looked at slot2-4 (25-35 GB each,
+  // 11-21 GB of it idle incremental): the rule ran only in the full plan, which the daemon builds daily or on a low pass.
+  unitTargetWithIncremental(root, 'slot1', 20_000);
+  fs.writeFileSync(path.join(root, 'ffu-sandboxes', 'slots.json'), JSON.stringify({ slots: [{ id: 'slot1', holder: 'live0007' }] }));
+  const inUse = [path.join(root, 'tmp', 'ffa-live0007')];
+  const hourly = await plan(root, { inUse, scope: 'cargo-cap', settings: { ffuSlotTargetCapGB: 12_000 / 1024 ** 3 } });
+  assert.deepEqual(ffuItems(root, hourly), ['ffu-sandboxes/slot1/target/debug/incremental'], 'the idle cache goes on the hourly pass');
+  const tight = await plan(root, { inUse, scope: 'cargo-cap', settings: { ffuSlotTargetCapGB: 5_000 / 1024 ** 3 } });
+  assert.deepEqual(ffuItems(root, tight), ['ffu-sandboxes/slot1/target'], 'and the sweep, with the cache in its members');
 });

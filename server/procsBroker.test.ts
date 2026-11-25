@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { ProcsBroker, askDaemon, execRefused, orDaemon, parseAsk, procsMailbox, STALE_MS, type ProcsAsk } from '../machine/procsBroker.ts';
-import { answerProcsAsk, leftoversMain, workerReaders, type ProcEnv, type ProcReaders } from '../machine/leftovers.ts';
+import { answerProcsAsk, leftoversMain, slotContext, workerCensus, workerReaders, type ProcEnv, type ProcReaders } from '../machine/leftovers.ts';
 import { stopTree } from '../machine/unitySlots.ts';
 import type { ProcFacts } from '../machine/unityReaper.ts';
 import type { Proc } from '../machine/unity.ts';
@@ -57,23 +57,39 @@ test('execRefused: the sandbox refusing an exec (EPERM, EACCES), not a missing p
   assert.ok(!execRefused(undefined));
 });
 
-test('parseAsk answers only the three fixed reads, with whole positive pids', () => {
-  assert.deepEqual(parseAsk('{"op":"procs","pids":[1]}'), { op: 'procs' });
-  assert.deepEqual(parseAsk('{"op":"env","pids":[3,3,-1,2.5,"x",7]}'), { op: 'env', pids: [3, 7] });
-  assert.equal(parseAsk('{"op":"kill","pids":[3]}'), undefined);
-  assert.equal(parseAsk('{"op":"env"}'), undefined);
+test('parseAsk answers only the fixed reads, with who asks and whole positive pids', () => {
+  const who = { session: 's1', pid: 42 };
+  const w = '"who":{"session":"s1","pid":42}';
+  assert.deepEqual(parseAsk(`{"op":"procs","pids":[1],${w}}`), { op: 'procs', who });
+  assert.deepEqual(parseAsk(`{"op":"census",${w}}`), { op: 'census', who });
+  assert.deepEqual(parseAsk(`{"op":"env","pids":[3,3,-1,2.5,"x",7],${w}}`), { op: 'env', pids: [3, 7], who });
+  assert.equal(parseAsk(`{"op":"kill","pids":[3],${w}}`), undefined);
+  assert.equal(parseAsk(`{"op":"env",${w}}`), undefined);
+  // w5558: an ask that names no asker, or a malformed one, is not answered.
+  assert.equal(parseAsk('{"op":"procs"}'), undefined);
+  assert.equal(parseAsk('{"op":"procs","who":{"session":"s1"}}'), undefined);
+  assert.equal(parseAsk('{"op":"procs","who":{"session":"../x y","pid":42}}'), undefined);
+  assert.equal(parseAsk('{"op":"procs","who":{"session":"s1","pid":-4}}'), undefined);
   assert.equal(parseAsk('not json'), undefined);
 });
 
+/** The asking ff-leftovers (pid ME) of session s1, under claude (100). */
+const ME = 400;
+const WHO = { session: 's1', pid: ME };
+
 test('a worker whose ps is refused gets the daemon\'s answers through the mailbox', async () => {
-  const machine: Proc[] = [{ pid: 300, ppid: 1, cmd: 'sleep 600' }];
+  const machine: Proc[] = [
+    { pid: 100, ppid: 1, cmd: 'claude --print' },
+    { pid: 300, ppid: 1, cmd: 'sleep 600' },
+    { pid: ME, ppid: 100, cmd: 'node ff-leftovers list' },
+  ];
   const b = withBroker(answerProcsAsk('darwin', {
     procs: async () => machine,
-    envs: async (pids) => new Map(pids.filter((p) => p === 300).map((p) => [p, { session: 's1' } as ProcEnv])),
+    envs: async (pids) => new Map(pids.filter((p) => p !== 1).map((p) => [p, { session: 's1' } as ProcEnv])),
     inspect: async (pids) => pids.map((pid) => ({ pid, startedAt: 1000, cpuMs: 5 })),
   }));
   try {
-    const r = workerReaders('darwin', b.dir, epermReaders);
+    const r = workerReaders('darwin', b.dir, epermReaders, askDaemon, WHO);
     assert.deepEqual(await r.procs(), machine);
     assert.deepEqual([...(await r.envs([300, 301]))], [[300, { session: 's1' }]]);
     assert.deepEqual(await r.inspect([300]), [{ pid: 300, startedAt: 1000, cpuMs: 5 }]);
@@ -102,7 +118,7 @@ test('the daemon answers a bad ask with an error, and a read that fails says so 
     throw new Error('ps -E timed out');
   });
   try {
-    await assert.rejects(askDaemon(b.dir, { op: 'procs' }, { timeoutMs: 5_000 }), /the daemon could not read the processes: ps -E timed out/);
+    await assert.rejects(askDaemon(b.dir, { op: 'procs', who: WHO }, { timeoutMs: 5_000 }), /the daemon could not read the processes: ps -E timed out/);
     fs.writeFileSync(path.join(b.dir, 'ask-bad.json'), '{"op":"rm"}');
     await new Promise((r) => setTimeout(r, 100));
     assert.match(fs.readFileSync(path.join(b.dir, 'ans-bad.json'), 'utf8'), /not an ask this mailbox answers/);
@@ -141,14 +157,17 @@ test('the daemon drops a stale ask unanswered and removes answers nobody took', 
 test('fenced ff-leftovers lists and ends what its session left, through the daemon', async () => {
   // The agent's host (no FF variables), its claude (the session's root, spared), and a background sleep of the session
   // reparented to launchd: the one leftover.
+  // This test's own process is the asking ff-leftovers, under claude.
   let machine: Proc[] = [
     { pid: 50, ppid: 1, cmd: 'node agentHost.ts' },
     { pid: 100, ppid: 50, cmd: 'claude --print' },
     { pid: 300, ppid: 1, cmd: 'sleep 600' },
+    { pid: process.pid, ppid: 100, cmd: 'node ff-leftovers.ts list' },
   ];
   const envs = new Map<number, ProcEnv>([
     [100, { session: 's1', machine: 'm5' }],
     [300, { session: 's1', machine: 'm5' }],
+    [process.pid, { session: 's1', machine: 'm5' }],
   ]);
   const b = withBroker(answerProcsAsk('darwin', {
     procs: async () => machine,
@@ -163,7 +182,7 @@ test('fenced ff-leftovers lists and ends what its session left, through the daem
     const e = { FF_SESSION_ID: 's1', FF_MACHINE_ID: 'm5', FF_UNITY_SLOTS: b.slots };
     const t = {
       platform: 'darwin' as const,
-      read: workerReaders('darwin', b.dir, epermReaders),
+      read: workerReaders('darwin', b.dir, epermReaders, askDaemon, { session: 's1', pid: process.pid }),
       signal: (pid: number, sig: 'SIGTERM' | 'SIGKILL') => {
         sent.push([pid, sig]);
         machine = machine.filter((p) => p.pid !== pid);
@@ -203,4 +222,124 @@ test('stopTree: when ps is refused (it prints nothing), pgrep -P finds the tree'
   }
   assert.deepEqual(signalled, [10, 11, 12, 13]);
   assert.ok(calls.includes('pgrep -P 10'));
+});
+
+// ---------------------------------------------------------------- w5558: each worker sees only its own processes
+
+/**
+ * One Mac with the daemon, two workers (s1 in slot1, s2 in slot2) and the owner's own programs. s1 asks (ff-leftovers,
+ * pid ME, from its zsh 110). 110 is an Apple zsh whose environment reads empty: its shell record names it s1, and so the
+ * `/bin/sleep` it left reparented to launchd (310, same process group) is s1's too (w5401).
+ */
+const ROOT = '/Users/x/ffw';
+const twoWorkers = (): { machine: Proc[]; envs: Map<number, ProcEnv>; readers: ProcReaders; inspected: number[][] } => {
+  const machine: Proc[] = [
+    { pid: 1, ppid: 0, cmd: '/sbin/launchd' },
+    { pid: 10, ppid: 1, cmd: `node ${ROOT}/daemon/src/machine/daemon.ts` },
+    { pid: 50, ppid: 10, cmd: `node ${ROOT}/daemon/src/machine/agentHost.ts ${ROOT}/daemon/hosts/s1` },
+    { pid: 100, ppid: 50, cmd: 'claude --print' },
+    { pid: 110, ppid: 100, cmd: '/bin/zsh -c ff-leftovers list', pgid: 110 },
+    { pid: 120, ppid: 110, cmd: 'python3 bench.py', pgid: 110 },
+    { pid: 130, ppid: 120, cmd: '/bin/sleep 5', pgid: 110 },
+    { pid: 140, ppid: 100, cmd: 'node other-session-tool.js' },
+    { pid: 300, ppid: 1, cmd: 'python3 -m http.server' },
+    { pid: 310, ppid: 1, cmd: '/bin/sleep 900', pgid: 110 },
+    { pid: ME, ppid: 110, cmd: 'node ff-leftovers.ts list', pgid: 110 },
+    { pid: 60, ppid: 10, cmd: `node ${ROOT}/daemon/src/machine/agentHost.ts ${ROOT}/daemon/hosts/s2` },
+    { pid: 200, ppid: 60, cmd: 'claude --print' },
+    { pid: 210, ppid: 200, cmd: `/Applications/Unity/Unity -batchmode -projectPath ${ROOT}/sandboxes/slot2` },
+    { pid: 220, ppid: 1, cmd: 'sleep 600' },
+    { pid: 900, ppid: 1, cmd: '/Applications/Safari.app/Contents/MacOS/Safari' },
+  ];
+  const envs = new Map<number, ProcEnv>([
+    [10, { root: ROOT, machine: 'm5' }],
+    [100, { session: 's1', sandbox: 'slot1', machine: 'm5' }],
+    [120, { session: 's1', sandbox: 'slot1', machine: 'm5' }],
+    [140, { session: 's2', sandbox: 'slot2', machine: 'm5' }],
+    [300, { session: 's1', sandbox: 'slot1', machine: 'm5' }],
+    [ME, { session: 's1', sandbox: 'slot1', machine: 'm5' }],
+    [200, { session: 's2', sandbox: 'slot2', machine: 'm5' }],
+    [210, { session: 's2', sandbox: 'slot2', machine: 'm5' }],
+    [220, { session: 's2', sandbox: 'slot2', machine: 'm5' }],
+  ]);
+  const inspected: number[][] = [];
+  return {
+    machine,
+    envs,
+    inspected,
+    readers: {
+      procs: async () => machine,
+      envs: async (pids) => new Map(pids.filter((p) => envs.has(p)).map((p) => [p, envs.get(p)!])),
+      inspect: async (pids) => {
+        inspected.push(pids);
+        return pids.map((pid) => ({ pid, startedAt: 1_000, cpuMs: 1 }));
+      },
+    },
+  };
+};
+const s1Groups = (session: string) => (session === 's1' ? [{ leader: 110, start: 1_000, env: { session: 's1', sandbox: 'slot1', machine: 'm5' } }] : []);
+const sorted = (pids: number[]) => [...pids].sort((a, b) => a - b);
+
+test('w5558: the daemon shows a worker its own processes, and not another slot\'s, the daemon\'s or the owner\'s', async () => {
+  const w = twoWorkers();
+  const answer = answerProcsAsk('darwin', w.readers, { root: ROOT, groups: s1Groups });
+  const procs = (await answer({ op: 'procs', who: WHO })) as Proc[];
+  // Its own: claude and what it runs (the zsh, python, the sleep under it), its orphans by session (300) and by shell
+  // group (310), and itself; the parents of those without their environment (its agent host 50, launchd).
+  assert.deepEqual(sorted(procs.map((p) => p.pid)), [1, 50, 100, 110, 120, 130, 300, 310, ME]);
+  // Never s2's claude, its batch Unity, its orphan or the tool of s2 that s1's claude started; never the daemon or Safari.
+  for (const pid of [10, 60, 140, 200, 210, 220, 900]) assert.ok(!procs.some((p) => p.pid === pid), `pid ${pid} is not s1's`);
+  // Environments: only of its own processes (shell groups filled in); none of the parents, of s2, of the daemon.
+  const env = new Map((await answer({ op: 'env', pids: w.machine.map((p) => p.pid), who: WHO })) as [number, ProcEnv][]);
+  assert.deepEqual(sorted([...env.keys()]), [100, 110, 120, 130, 300, 310, ME]);
+  assert.ok([...env.values()].every((e) => e.session === 's1'));
+  // Start times: only of what it may see; the others are not even read.
+  w.inspected.length = 0;
+  const facts = (await answer({ op: 'inspect', pids: [100, 200, 210, 900, 10], who: WHO })) as ProcFacts[];
+  assert.deepEqual(facts.map((f) => f.pid), [100]);
+  assert.deepEqual(w.inspected.at(-1), [100]);
+  assert.deepEqual(await answer({ op: 'inspect', pids: [200, 900], who: WHO }), []);
+  // s2 asking from its claude sees its own and none of s1's.
+  const theirs = (await answer({ op: 'procs', who: { session: 's2', pid: 200 } })) as Proc[];
+  // 140 carries s2 though s1's claude started it: s2's, and its parent (s1's claude) is not shown.
+  assert.deepEqual(sorted(theirs.map((p) => p.pid)), [1, 60, 140, 200, 210, 220]);
+});
+
+test('w5558: an asker that is not of the session it names, not running, or names none is refused', async () => {
+  const w = twoWorkers();
+  const answer = answerProcsAsk('darwin', w.readers, { root: ROOT, groups: s1Groups });
+  await assert.rejects(answer({ op: 'procs', who: { session: 's2', pid: ME } }), /process 400 is not of session s2/);
+  await assert.rejects(answer({ op: 'env', pids: [200], who: { session: 's2', pid: 300 } }), /not of session s2/);
+  await assert.rejects(answer({ op: 'procs', who: { session: 's1', pid: 900 } }), /process 900 is not of session s1/);
+  await assert.rejects(answer({ op: 'procs', who: { session: 's1', pid: 10 } }), /not of session s1/, 'the daemon is no worker');
+  await assert.rejects(answer({ op: 'procs', who: { session: 's1', pid: 4242 } }), /process 4242 is not running/);
+  await assert.rejects(answer({ op: 'procs' }), /names no session/);
+  // Through the mailbox: an ask with no asker gets the format error, a forged one the refusal, and no process data.
+  const b = withBroker(answer);
+  try {
+    await assert.rejects(askDaemon(b.dir, { op: 'procs' }, { timeoutMs: 5_000 }), /not an ask this mailbox answers/);
+    await assert.rejects(askDaemon(b.dir, { op: 'env', pids: [200, 210], who: { session: 's2', pid: ME } }, { timeoutMs: 5_000 }), /could not read the processes: process 400 is not of session s2/);
+  } finally {
+    b.done();
+  }
+});
+
+test('w5558: the clean-up\'s census gives the command lines under the install folder and the agent hosts, with no environment', async () => {
+  const w = twoWorkers();
+  const answer = answerProcsAsk('darwin', w.readers, { root: ROOT, groups: s1Groups });
+  const census = (await answer({ op: 'census', who: WHO })) as Proc[];
+  assert.deepEqual(sorted(census.map((p) => p.pid)), [10, 50, 60, 210]);
+  for (const p of census) assert.deepEqual(Object.keys(p).sort(), ['cmd', 'pid', 'ppid'], 'pid, ppid and command only');
+  await assert.rejects(answerProcsAsk('darwin', w.readers)({ op: 'census', who: WHO }), /no install folder/, 'no root: no census, so the clean-up keeps');
+  await assert.rejects(answer({ op: 'census', who: { session: 's2', pid: ME } }), /not of session s2/);
+  // Fenced, ff-leftovers folders/check still sees that slot2's sandbox is in use and that both hosts run.
+  const b = withBroker(answer);
+  try {
+    const ctx = await slotContext({ procs: workerCensus('darwin', b.dir, epermReaders, askDaemon, WHO), self: ME, callers: [], session: 's1' });
+    assert.ok(ctx.procs?.some((c) => c.includes(`${ROOT}/sandboxes/slot2`)), 'a batch Unity of another slot keeps its sandbox');
+    assert.deepEqual(ctx.hosts?.sort(), ['s1', 's2']);
+    assert.ok(!ctx.procs?.some((c) => c.includes('Safari')), 'the owner\'s programs are not shown');
+  } finally {
+    b.done();
+  }
 });

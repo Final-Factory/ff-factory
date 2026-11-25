@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { currentAccount, ghConfigDirFor, isLabelledLow, labelLow, lowCopy, lowEnv, lowRunners, lowTargets, lowUnityDir, strayLowServers, type Exec } from '../machine/lowIntegrity.ts';
+import { currentAccount, ghConfigDirFor, isLabelledLow, isLabelledMedium, labelLow, ownerGameDataLock, lowCopy, lowEnv, lowRunners, lowTargets, lowUnityDir, strayLowServers, type Exec } from '../machine/lowIntegrity.ts';
 
 /**
  * w5377: the Windows worker fence. What gets the Low label (and what must stay Medium: daemon, secrets, the daemon's
@@ -17,7 +17,7 @@ test('labels the root children except daemon, secrets and the daemon folder; of 
   const t = lowTargets({
     root: R,
     appDir: path.join(R, 'app', 'current'),
-    children: [...kids('daemon', 'secrets', 'Sandboxes', 'repo', 'tmp', 'app', 'home'), { name: 'root.json', dir: false }],
+    children: [...kids('daemon', 'secrets', 'claude-medium', 'cache-medium', 'Sandboxes', 'repo', 'tmp', 'app', 'home'), { name: 'root.json', dir: false }],
     exists: () => true,
   });
   assert.deepEqual(t.dirs, [path.join(R, 'Sandboxes'), path.join(R, 'repo', '.git'), path.join(R, 'tmp'), path.join(R, 'home')]);
@@ -61,6 +61,25 @@ test('CI runner folders are never labelled Low and are kept Medium where an earl
   assert.deepEqual(t.medium, [path.join(R, 'ffu-runners')]);
   const both = lowTargets({ root: R, appDir: path.join(R, 'daemon'), children: kids('tools', 'FFU-Runners'), exists: () => true });
   assert.deepEqual(both.medium, [path.join(R, 'tools', 'node'), path.join(R, 'FFU-Runners')]);
+});
+
+test("only the folders workers write are labelled Low; BEAST's instances, demos, portals and any new folder stay Medium (w5539)", () => {
+  // BEAST's root on 2026-11-24 (ls F:\ffw), the folders the w5451 audit found labelled Low.
+  const beast = kids('archives', 'ben-factory', 'cache', 'claude', 'daemon', 'demos', 'ffu-runners', 'ffu-sandboxes', 'gamedata', 'home', 'instances',
+    'lens-factory', 'logs', 'max', 'migration', 'nightly-history', 'nightly', 'player-cache', 'players', 'release-records', 'repo', 'sandboxes',
+    'scratch-slot3', 'scratch', 'secrets', 'seed', 'steam-lobby-gate', 'steam', 'test-history', 'tmp', 'tools', 'unity-slots', 'voice', 'some-new-portal');
+  const t = lowTargets({ root: R, appDir: path.join(R, 'daemon'), children: beast, exists: (p) => p === path.join(R, 'repo', 'HEAD') });
+  const fenced = ['archives', 'ben-factory', 'demos', 'ffu-runners', 'instances', 'lens-factory', 'migration', 'scratch-slot3', 'some-new-portal'];
+  for (const n of fenced) {
+    assert.ok(!t.dirs.includes(path.join(R, n)), `${n} is not labelled Low`);
+    assert.ok(t.medium.includes(path.join(R, n)), `${n} is kept Medium`);
+  }
+  for (const n of ['daemon', 'secrets']) assert.ok(!t.dirs.includes(path.join(R, n)) && !t.medium.includes(path.join(R, n)), `${n} is left alone`);
+  for (const n of ['sandboxes', 'tmp', 'tools', 'claude', 'home', 'cache', 'players', 'nightly', 'logs', 'unity-slots', 'repo']) assert.ok(t.dirs.includes(path.join(R, n)), `${n} is labelled Low`);
+  // A temp or sandboxes folder the config puts in another root child makes that child a worker one.
+  const moved = lowTargets({ root: R, appDir: path.join(R, 'daemon'), children: kids('sb', 'instances'), extra: [path.join(R, 'sb', 'sandboxes')], exists: () => true });
+  assert.ok(moved.dirs.includes(path.join(R, 'sb')));
+  assert.deepEqual(moved.medium, [path.join(R, 'instances')]);
 });
 
 test("lowRunners names each runner whose Runner.Worker.exe is labelled Low (BEAST's ffu runners, w5440)", async () => {
@@ -212,4 +231,31 @@ test('strayLowServers: a Low compiler server on the install path is ended, one t
     { pid: 4, rid: 0x1000, dll: '' },
   ];
   assert.deepEqual(strayLowServers(servers, R), [1]);
+});
+
+test('w5557: the owner game folder lock reads back Medium, and says so when it is still Low or missing', async () => {
+  const dir = 'C:\\Users\\p\\AppData\\LocalLow\\Never Games\\finalfactory';
+  // icacls' own words (measured on LothDesktop for Low, w5333; Medium is the same line with "Medium").
+  const medium = `${dir} NT AUTHORITY\\SYSTEM:(OI)(CI)(F)\n    Mandatory Label\\Medium Mandatory Level:(OI)(CI)(NW)\n`;
+  const low = `${dir} NT AUTHORITY\\SYSTEM:(OI)(CI)(F)\n    Mandatory Label\\Low Mandatory Level:(OI)(CI)(NW)\n`;
+  const exec = (out: string): Exec => async () => ({ code: 0, stdout: out, stderr: '' }) as never;
+  assert.ok(isLabelledMedium(medium) && !isLabelledMedium(low));
+  assert.match(await ownerGameDataLock(dir, exec(medium), () => true), /is Medium; a Low worker's write there is refused/);
+  assert.match(await ownerGameDataLock(dir, exec(low), () => true), /is NOT Medium/);
+  assert.match(await ownerGameDataLock(dir, exec(medium), () => false), /does not exist yet/);
+});
+
+test('w5557: labelLow keeps an inherited-Low owner game folder Medium when it is in the medium list', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ownergd-'));
+  try {
+    const calls: string[][] = [];
+    const exec: Exec = async (cmd, args) => {
+      calls.push([cmd, ...args]);
+      return { code: 0, stdout: args.length === 1 ? `${args[0]} Mandatory Label\\Low Mandatory Level:(OI)(CI)(NW)` : '', stderr: '' } as never;
+    };
+    assert.equal(await labelLow({ dirs: [], files: [], medium: [dir] }, exec, () => {}), true);
+    assert.deepEqual(calls.find((c) => c.includes("/setintegritylevel")), ["icacls", dir, "/setintegritylevel", "(OI)(CI)medium"], JSON.stringify(calls));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

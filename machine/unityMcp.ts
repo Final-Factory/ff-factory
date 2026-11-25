@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { readStatusFiles, syncStatusDir } from '../server/unityMcp.ts';
+import { mcpStatusDirs } from '../server/unityHang.ts';
 import { normProject } from '../server/unityHang.ts';
 import type { StdioServer } from '../server/launch.ts';
 
@@ -80,15 +81,16 @@ export function scopedUnityMcp(server: StdioServer, appDir: string, place: strin
  */
 export class McpScopes {
   private readonly seen = new Map<string, { pid?: number; since?: number; lookedAt?: number }>();
-  private readonly home: string;
+  private readonly home?: string;
 
-  constructor(home = path.join(os.homedir(), '.unity-mcp')) {
+  /** `home`: one status folder (tests); unset: every folder editors write in (server/unityHang.ts mcpStatusDirs, w5540). */
+  constructor(home?: string) {
     this.home = home;
   }
 
   /** One look: `places` maps a place key to its project folder and its editor's pid (undefined: not running). */
   sync(appDir: string, places: { place: string; project: string; pid?: number }[], now: number, log: (line: string) => void = () => undefined) {
-    const files = readStatusFiles(this.home);
+    const files = readStatusFiles(this.home ?? mcpStatusDirs());
     for (const p of places) {
       const st = this.seen.get(p.place) ?? {};
       if (p.pid && p.pid !== st.pid) st.since = st.lookedAt ?? 0;
@@ -114,7 +116,8 @@ export class McpScopes {
  * The uvx runs that fill a uv cache with the server's package, when the server is `uvx --offline --from <pkg> <tool>`
  * (what MCP for Unity registers): first a check that needs no network (the package already there), then the same run
  * online. Agents run the server against the worker install's own uv cache (UV_CACHE_DIR, w5281), which nothing else
- * fills, and `--offline` cannot fill it, so every sandbox agent had no Unity MCP bridge on LothDesktop (w5377).
+ * fills, and `--offline` cannot fill it, so every sandbox agent had no Unity MCP bridge on LothDesktop (w5377). Since w5565
+ * Medium agents have their own cache (sharedCaches.ts mediumUvCacheDir), filled the same way.
  * Undefined for any other server.
  */
 export function uvWarmRuns(server: StdioServer): { offline: string[]; online: string[] } | undefined {
