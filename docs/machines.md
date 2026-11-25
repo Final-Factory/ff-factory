@@ -1127,7 +1127,10 @@ older daemon ignores it and keeps making worktrees.
   `refs/heads/<branch>` (not forced: a clone branch that moved on stays as it is). A delete that cannot keep them is
   refused ("delete refused: …; nothing was deleted"). A worker placed again in another sandbox finds its branch
   there: a slot repo's switch to a branch it does not have takes the clone's copy first (`takeStoreBranch`), as every
-  worktree saw one repository's branches before. Its stash stays in its own `.git`, gone with the sandbox.
+  worktree saw one repository's branches before. Its stash goes with them (`keepSlotStash`, w5692's review): each
+  entry, newest first, as `refs/sandbox-kept-stash/<sandbox>/<n>` with its index and untracked files, as a
+  worktree's `refs/stash` lived in the clone and outlived a delete; an entry dropped since is cleared on the next keep.
+  A worktree sandbox applies one with `git stash apply refs/sandbox-kept-stash/<sandbox>/0`; a slot repo fetches it from the clone first.
 - **The clone keeps what slots borrow**: before the first slot repo the daemon sets `gc.pruneExpire=never` on the
   clone unless someone set a value (`guardStorePrune`), so `git gc` never prunes an object a sandbox's commit points
   at; unreachable objects go into a cruft pack instead. This touches neither the clone's fetch nor the daemon's own
@@ -1135,7 +1138,9 @@ older daemon ignores it and keeps making worktrees.
 - **Fetches**: a sandbox's `git fetch` goes to origin itself (its own `remote.origin.url`); `switch_branch` fetches
   there as before. Objects it fetches land in its own `.git`, and the clone's next fetch makes them shared again.
 - **Going back**: `slot_repos off` stops making them; a slot-repo sandbox is turned back into a worktree by deleting
-  it (its branches are kept in the clone, above) and creating it again.
+  it (its branches and stash are kept in the clone, above) and creating it again (the w5614 test "the way back").
+  Do that before a daemon older than w5614 runs on the machine: its delete removes a slot repo's folder without
+  keeping its branches, and its dev-drive move and rehome would leave the alternates naming the old path.
 - **Not in stage 1**: a sandbox can still write the clone's files and another sandbox's `.git` (no ACL or integrity
   label yet); stage 2 (w5615) locks the clone down and stage 3 (w5616) the other slots.
 

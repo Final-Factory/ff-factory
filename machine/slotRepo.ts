@@ -284,8 +284,39 @@ export function finishConversion(dir: string): boolean {
 export async function keepSlotBranches(git: StoreGit, id: string, dir: string, branch: string, signal?: AbortSignal): Promise<string | undefined> {
   const kept = await git(['fetch', '--quiet', '--no-tags', dir, `+refs/heads/*:refs/sandbox-kept/${id}/*`], { signal, timeoutMs: 10 * 60_000 });
   if (kept.code !== 0) return `its branches could not be kept in the main clone (${kept.code}): ${short(kept.stderr || kept.stdout)}`;
+  const stash = await keepSlotStash(git, id, dir, signal);
+  if (stash) return stash;
   // Not forced: a store branch that moved on its own (another sandbox, a fetch) stays as it is; refs/sandbox-kept has this one.
   await git(['fetch', '--quiet', '--no-tags', dir, `refs/heads/${branch}:refs/heads/${branch}`], { signal, timeoutMs: 10 * 60_000 });
+  return undefined;
+}
+
+/** Where keepSlotStash keeps sandbox `id`'s stash entries in the store: `<prefix><n>`, n = 0 for stash@{0}. */
+export const keptStashPrefix = (id: string) => `refs/sandbox-kept-stash/${id}/`;
+
+async function refsUnder(git: StoreGit, prefix: string, dir: string | undefined, signal?: AbortSignal): Promise<string[]> {
+  const r = await git([...(dir ? ['-C', dir] : []), 'for-each-ref', '--format=%(refname)', prefix], { signal, timeoutMs: 60_000 });
+  return r.code === 0 ? r.stdout.split('\n').map((l) => l.trim()).filter(Boolean) : [];
+}
+
+/**
+ * A slot repo's stash into the store (w5614, w5692's review): a worktree's `refs/stash` lived in the shared clone and
+ * outlived a delete, so a slot repo's must too. Each entry (`stash list`, newest first) is named in the slot as
+ * `refs/kept-stash/<n>`, fetched into the store as `refs/sandbox-kept-stash/<id>/<n>`, its index and untracked parents
+ * with it; entries kept before and since dropped are cleared on both sides first. Returns a failure, else undefined.
+ */
+export async function keepSlotStash(git: StoreGit, id: string, dir: string, signal?: AbortSignal): Promise<string | undefined> {
+  for (const ref of await refsUnder(git, 'refs/kept-stash/', dir, signal)) await git(['-C', dir, 'update-ref', '-d', ref], { signal, timeoutMs: 60_000 });
+  for (const ref of await refsUnder(git, keptStashPrefix(id), undefined, signal)) await git(['update-ref', '-d', ref], { signal, timeoutMs: 60_000 });
+  const list = await git(['-C', dir, 'stash', 'list', '--format=%H'], { signal, timeoutMs: 60_000 });
+  const shas = list.code === 0 ? list.stdout.split('\n').map((l) => l.trim()).filter(Boolean) : [];
+  if (!shas.length) return undefined;
+  for (const [n, sha] of shas.entries()) {
+    const r = await git(['-C', dir, 'update-ref', `refs/kept-stash/${n}`, sha], { signal, timeoutMs: 60_000 });
+    if (r.code !== 0) return `its stash could not be kept in the main clone (${r.code}): ${short(r.stderr || r.stdout)}`;
+  }
+  const kept = await git(['fetch', '--quiet', '--no-tags', dir, `+refs/kept-stash/*:${keptStashPrefix(id)}*`], { signal, timeoutMs: 10 * 60_000 });
+  if (kept.code !== 0) return `its stash could not be kept in the main clone (${kept.code}): ${short(kept.stderr || kept.stdout)}`;
   return undefined;
 }
 
