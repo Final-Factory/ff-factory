@@ -5180,7 +5180,16 @@ function mergeOnGreenArm(o: unknown, arm: (id: string) => boolean) {
   (o as { d: { mergeOnGreenPilot?: (id: string) => boolean } }).d.mergeOnGreenPilot = arm;
 }
 
+/**
+ * w5549: GitHub reading each pull request as its worker's own (merge on green merges only that): head commit `head`, on a
+ * branch named for its request (`<request>-fix`, `requestOf`, w1 by default) of the pull request's own repository.
+ */
+function ownPrs(head: string | ((ref: string) => string), requestOf: (ref: string) => string = () => 'w1') {
+  return async (ref: string): Promise<PrHealth> => ({ state: 'open', head: typeof head === 'string' ? head : head(ref), headRef: `${requestOf(ref)}-fix`, headRepo: ref.split('#')[0] });
+}
+
 test('w2045: merge on green: a worker in the arm is told it may leave its report; on green CI FF Factory merges at its head and files the report, which closes the request with no turn of the worker', async (t) => {
+  const own = ownPrs('abc1234def5678');
   const env = await setupOnMachine(t);
   const { store, agents, o } = env;
   agentsRoom(agents, ['pc']);
@@ -5190,7 +5199,8 @@ test('w2045: merge on green: a worker in the arm is told it may leave its report
   const head = 'abc1234def5678';
   let checks: { done: boolean; text: string; green?: true } = { done: false, text: `1 of 1 checks on ${pr} still running` };
   const merges: string[][] = [];
-  const watch = new BlockerWatch({ store, orchestrators: o, ci: async () => checks, merge: async (ref, h) => void merges.push([ref, h]) });
+  const watch = new BlockerWatch({ store, orchestrators: o, prHealth: own, ci: async () => checks, merge: async (ref, h) => void merges.push([ref, h]) });
+  env.agents.prHealth = own;
   const a = await startedFor(env, 'w1');
   const told = String(await a.h.blocked_on!({ request: 'w1', prs: [`ci:${pr}`], head, what: 'CI on PR #2045' }));
   assert.match(told, /^w1 is in the merge-on-green pilot \(w2045\): .*merge_on_green: the report you would write after the merge/);
@@ -5199,7 +5209,7 @@ test('w2045: merge on green: a worker in the arm is told it may leave its report
   const report = 'TL;DR: the fix is in.\n\nDONE: w1\nLearned: nothing new';
   const set = String(await a.h.blocked_on!({ request: 'w1', prs: [`ci:${pr}`], head, what: 'CI on PR #2045', merge_on_green: report }));
   assert.match(set, /^Recorded: w1 is Blocked on CI on .*, merge on green \(w2045\)\. .*no DONE line now/);
-  assert.deepEqual(store.work.get('w1')!.blocked!.mergeOnGreen, { head, report, session: a.id });
+  assert.deepEqual(store.work.get('w1')!.blocked!.mergeOnGreen, { head, report, session: a.id, headRef: 'w1-fix' });
   // A DONE in the turn that ends now is the report's, filed after the merge: it does not close the request yet.
   o.workerTurnEnded(a.info, 'DONE: w1\nLearned: nothing new');
   assert.equal(store.work.get('w1')!.status, 'blocked');
@@ -5215,7 +5225,47 @@ test('w2045: merge on green: a worker in the arm is told it may leave its report
   assert.equal(agents.waker.pending(a.id), undefined, 'the worker is not resumed');
 });
 
+test("w5549: merge_on_green arms only on the worker's own pull request, read from GitHub: another worker's or a fork's is refused with why, and a head renamed after arming is not merged", async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }]);
+  mergeOnGreenArm(o, () => true);
+  const head = 'abc1234def5678';
+  const report = 'DONE: w1\nLearned: nothing new';
+  const heads = new Map<string, PrHealth>([
+    ['Final-Factory/FinalFactory#10', { state: 'open', head, headRef: 'w1-fix', headRepo: 'Final-Factory/FinalFactory' }],
+    ['Final-Factory/FinalFactory#11', { state: 'open', head, headRef: 'sandbox/slot1-w5480', headRepo: 'Final-Factory/FinalFactory' }],
+    ['Final-Factory/FinalFactory#12', { state: 'open', head, headRef: 'w1-fix', headRepo: 'someone/FinalFactory', crossRepo: true }],
+  ]);
+  agents.prHealth = async (ref) => heads.get(ref);
+  const merges: string[] = [];
+  const checks = { done: true, green: true as const, text: 'CI finished: all 1 checks passed or skipped' };
+  const watch = new BlockerWatch({ store, orchestrators: o, ci: async () => checks, merge: async (ref) => void merges.push(ref), prHealth: async (ref) => heads.get(ref) });
+  const a = await startedFor(env, 'w1');
+  const arm = (n: number) => a.h.blocked_on!({ request: 'w1', prs: [`ci:Final-Factory/FinalFactory#${n}`], head, what: `CI on #${n}`, merge_on_green: report });
+  // Another worker's pull request (w5480's sandbox branch): refused, saying why, and nothing recorded.
+  await assert.rejects(arm(11), /merge_on_green refused: FF Factory merges on green only your own pull request \(w5549\), and Final-Factory\/FinalFactory#11 is not yours: its head branch is sandbox\/slot1-w5480, which is not (your sandbox's branch \(.*\) or )?a branch named for w1 \(w1-<what>\): it is not your request's pull request\. .*Nothing was recorded\./);
+  // A fork's head, though its branch is named for w1: refused.
+  await assert.rejects(arm(12), /Final-Factory\/FinalFactory#12 is not yours: its head is someone\/FinalFactory:w1-fix, a branch of another repository \(a fork\)/);
+  // A pull request FF Factory cannot read: refused, never a guess.
+  await assert.rejects(arm(13), /#13 is not yours: FF Factory could not read/);
+  assert.equal(store.work.get('w1')!.blocked, undefined, 'nothing recorded by a refusal');
+  // Its own: armed, with the head branch GitHub named.
+  const set = String(await arm(10));
+  assert.doesNotMatch(set, /ignored|refused/, set);
+  assert.equal(store.work.get('w1')!.blocked!.mergeOnGreen!.headRef, 'w1-fix');
+  o.workerTurnEnded(a.info, 'w1: still open: blocked on CI on #10');
+  // The head is renamed (another branch pushed in its place) before CI is green: not merged, and the worker is told why.
+  heads.set('Final-Factory/FinalFactory#10', { state: 'open', head, headRef: 'w5480-other', headRepo: 'Final-Factory/FinalFactory' });
+  await watch.tick();
+  assert.deepEqual(merges, []);
+  assert.match(agents.waker.pending(a.id)?.note ?? '', /Final-Factory\/FinalFactory#10's head is Final-Factory\/FinalFactory:w5480-other, not Final-Factory\/FinalFactory:w1-fix/);
+  agents.waker.cancel(a.id);
+});
+
 test('w5316: a merge-on-green gate survives a close, a reopen and the dispatcher re-blocking on the same PR merging, and still merges on green', async (t) => {
+  const own = ownPrs('d4c4fa3d857e2053e3a6adf63acb8cb5db0c6bba');
   const env = await setupOnMachine(t);
   const { store, agents, o, dispatcher, chat, call } = env;
   agentsRoom(agents, ['pc']);
@@ -5225,7 +5275,8 @@ test('w5316: a merge-on-green gate survives a close, a reopen and the dispatcher
   const head = 'd4c4fa3d857e2053e3a6adf63acb8cb5db0c6bba';
   let checks: { done: boolean; text: string; green?: true } = { done: false, text: `1 of 1 checks on ${pr} still running` };
   const merges: string[][] = [];
-  const watch = new BlockerWatch({ store, orchestrators: o, ci: async () => checks, merge: async (ref, h) => void merges.push([ref, h]) });
+  const watch = new BlockerWatch({ store, orchestrators: o, prHealth: own, ci: async () => checks, merge: async (ref, h) => void merges.push([ref, h]) });
+  env.agents.prHealth = own;
   const a = await startedFor(env, 'w1');
   const report = 'The fix merged.\n\nDONE: w1\nLearned: nothing new';
   await a.h.blocked_on!({ request: 'w1', prs: [`ci:${pr}`], head, what: 'CI on ffu#998', merge_on_green: report });
@@ -5262,7 +5313,7 @@ test('w4498: arming merge on green checks the PR at once: a draft is refused wit
   const pr = 'Final-Factory/FinalFactory#3741';
   const head = 'abc1234def5678';
   const report = 'TL;DR: in.\n\nDONE: w1\nLearned: nothing new';
-  let health: PrHealth = { state: 'open', head, headRef: 'w4461', draft: true };
+  let health: PrHealth = { state: 'open', head, headRef: 'w1-draft', headRepo: 'Final-Factory/FinalFactory', draft: true };
   let evidence: string | undefined;
   const asked: string[] = [];
   agents.prHealth = async () => health;
@@ -5275,7 +5326,7 @@ test('w4498: arming merge on green checks the PR at once: a draft is refused wit
   );
   assert.equal(store.work.get('w1')!.status, 'active');
   // #3748 and #3760 as they happened: no Evidence section. Refused now, with the check's lines and the section to add.
-  health = { state: 'open', head, headRef: 'w4470' };
+  health = { state: 'open', head, headRef: 'w1-draft', headRepo: 'Final-Factory/FinalFactory' };
   evidence = 'the Evidence check refused it (pr_evidence.py --repo Final-Factory/FinalFactory --pr 3741, exit 1):\n  - no "## Evidence" section';
   await assert.rejects(
     async () => a.h.blocked_on!({ request: 'w1', prs: [`ci:${pr}`], head, what: 'CI on #3741', merge_on_green: report }),
@@ -5290,17 +5341,17 @@ test('w4498: arming merge on green checks the PR at once: a draft is refused wit
   assert.equal(store.work.get('w1')!.status, 'active');
   assert.equal(store.work.get('w1')!.blocked, undefined);
   // A wait without merge_on_green is not checked for evidence, and a draft may wait on CI.
-  health = { state: 'open', head, headRef: 'w4461', draft: true };
+  health = { state: 'open', head, headRef: 'w1-draft', headRepo: 'Final-Factory/FinalFactory', draft: true };
   asked.length = 0;
   assert.match(String(await a.h.blocked_on!({ request: 'w1', prs: [`ci:${pr}`], head, what: 'CI on #3741' })), /Recorded: w1 is Blocked on CI on/);
   assert.deepEqual(asked, []);
   // Ready, and the Evidence check passes: it arms.
-  health = { state: 'open', head, headRef: 'w4461' };
+  health = { state: 'open', head, headRef: 'w1-draft', headRepo: 'Final-Factory/FinalFactory' };
   evidence = undefined;
   const set = String(await a.h.blocked_on!({ request: 'w1', prs: [`ci:${pr}`], head, what: 'CI on #3741', merge_on_green: report }));
   assert.match(set, /^Recorded: w1 is Blocked on CI on .*, merge on green \(w2045\)/);
   assert.deepEqual(asked, [pr]);
-  assert.deepEqual(store.work.get('w1')!.blocked!.mergeOnGreen, { head, report, session: a.id });
+  assert.deepEqual(store.work.get('w1')!.blocked!.mergeOnGreen, { head, report, session: a.id, headRef: 'w1-draft' });
 });
 
 test('w3021: merge on green with a short head: blocked_on records the PR head whole, and a head recorded short still merges at the full sha and files the report', async (t) => {
@@ -5315,13 +5366,19 @@ test('w3021: merge on green with a short head: blocked_on records the PR head wh
   const ffu = 'Final-Factory/ffu#200';
   const other = 'Final-Factory/ffu#201';
   // w1: the PR is read at blocked_on (w907), and its head starts with the short sha: the full one is recorded.
-  agents.prHealth = async (ref) => ({ state: 'open', head: full, headRef: 'w3016' });
+  agents.prHealth = async (ref) => ({ state: 'open', head: full, headRef: 'w1-w3016', headRepo: ref.split('#')[0] });
   const a = await startedFor(env, 'w1');
   await a.h.blocked_on!({ request: 'w1', prs: [`ci:${ffu}`], head: short, what: 'CI on ffu#200', merge_on_green: report('w1') });
   assert.equal(store.work.get('w1')!.blocked!.mergeOnGreen!.head, full);
-  // w2: the PR could not be read then (ffu#200 as it happened), so the head stays short on the gate.
+  // w2: the PR could not be read then (ffu#200 as it happened): since w5549 that is refused, since FF Factory cannot tell
+  // it is w2's own; a gate recorded short before then still merges at the full sha.
   agents.prHealth = async () => undefined;
   const b = await startedFor(env, 'w2');
+  await assert.rejects(
+    async () => b.h.blocked_on!({ request: 'w2', prs: [`ci:${other}`], head: short, what: 'CI on ffu#201', merge_on_green: report('w2') }),
+    /merge_on_green refused: FF Factory merges on green only your own pull request \(w5549\), and Final-Factory\/ffu#201 is not yours: FF Factory could not read Final-Factory\/ffu#201's head branch from GitHub/,
+  );
+  agents.prHealth = async (ref) => ({ state: 'open', head: short, headRef: 'w2-w3016', headRepo: ref.split('#')[0] });
   await b.h.blocked_on!({ request: 'w2', prs: [`ci:${other}`], head: short, what: 'CI on ffu#201', merge_on_green: report('w2') });
   assert.equal(store.work.get('w2')!.blocked!.mergeOnGreen!.head, short);
   // The merge runs through the real ghMerge against a gh that, as GitHub does, refuses any expectedHeadOid but a full sha.
@@ -5335,7 +5392,7 @@ test('w3021: merge on green with a short head: blocked_on records the PR head wh
     return (oid === full ? { code: 0, stdout: '', stderr: '' } : { code: 1, stdout: '', stderr: `GraphQL: Could not coerce value "${oid}" to GitObjectID` }) as never;
   };
   const green = (ref: string) => ({ done: true, green: true as const, text: `CI on ${ref} finished: all 1 checks passed or skipped` });
-  const watch = new BlockerWatch({ store, orchestrators: o, ci: async (ref) => green(ref), merge: (ref, h) => ghMerge(ref, h, run, () => 'pe.py') });
+  const watch = new BlockerWatch({ store, orchestrators: o, ci: async (ref) => green(ref), merge: (ref, h) => ghMerge(ref, h, run, () => 'pe.py'), prHealth: async (ref) => ({ state: 'open', head: full, headRef: ref.endsWith('#200') ? 'w1-w3016' : 'w2-w3016', headRepo: ref.split('#')[0] }) });
   await watch.tick();
   assert.deepEqual(
     gh.filter((x) => x[1] === 'merge').map((x) => x[x.indexOf('--match-head-commit') + 1]),
@@ -5350,6 +5407,7 @@ test('w3021: merge on green with a short head: blocked_on records the PR head wh
 });
 
 test('w2045: merge on green: red CI, or a merge GitHub refuses, resumes the worker as without it, saying the report was not filed', async (t) => {
+  const own = ownPrs('abc1234def5678', (ref) => (ref.endsWith('#1') ? 'w1' : 'w2'));
   const env = await setupOnMachine(t);
   const { store, agents, o } = env;
   agentsRoom(agents, ['pc']);
@@ -5361,6 +5419,7 @@ test('w2045: merge on green: red CI, or a merge GitHub refuses, resumes the work
   const watch = new BlockerWatch({
     store,
     orchestrators: o,
+    prHealth: own,
     ci: async (ref) => checks.get(ref),
     merge: async (ref) => {
       merges.push(ref);
@@ -5370,6 +5429,7 @@ test('w2045: merge on green: red CI, or a merge GitHub refuses, resumes the work
   const report = 'DONE: w1\nLearned: nothing new';
   const red = 'Final-Factory/FinalFactory#1';
   const refused = 'Final-Factory/FinalFactory#2';
+  env.agents.prHealth = own;
   const a = await startedFor(env, 'w1');
   const b = await startedFor(env, 'w2');
   await a.h.blocked_on!({ request: 'w1', prs: [`ci:${red}`], head, what: 'CI', merge_on_green: report });
@@ -5387,6 +5447,7 @@ test('w2045: merge on green: red CI, or a merge GitHub refuses, resumes the work
 });
 
 test('w4531: merge on green, a transient GitHub error (502, GraphQL) is tried again next tick, not handed to the worker; it resumes only after MERGE_TRIES', async (t) => {
+  const own = ownPrs('abc1234def5678', (ref) => (ref.endsWith('#1') ? 'w1' : 'w2'));
   const env = await setupOnMachine(t);
   const { store, agents, o } = env;
   agentsRoom(agents, ['pc']);
@@ -5400,6 +5461,7 @@ test('w4531: merge on green, a transient GitHub error (502, GraphQL) is tried ag
   const watch = new BlockerWatch({
     store,
     orchestrators: o,
+    prHealth: own,
     ci: async (ref) => checks.get(ref),
     merge: async (ref) => {
       merges.push(ref);
@@ -5408,6 +5470,7 @@ test('w4531: merge on green, a transient GitHub error (502, GraphQL) is tried ag
       }
     },
   });
+  env.agents.prHealth = own;
   const a = await startedFor(env, 'w1');
   const b = await startedFor(env, 'w2');
   await a.h.blocked_on!({ request: 'w1', prs: [`ci:${passes}`], head, what: 'CI', merge_on_green: 'DONE: w1\nLearned: nothing new' });
@@ -5427,6 +5490,8 @@ test('w4531: merge on green, a transient GitHub error (502, GraphQL) is tried ag
 });
 
 test('w3906: merge on green, CI green but GitHub refuses the merge as not mergeable: the report is kept, the worker gets the remerge job, and its next blocked_on re-arms the merge with that report', async (t) => {
+  let cur = 'abc1234def5678';
+  const own = ownPrs(() => cur);
   const env = await setupOnMachine(t);
   const { store, agents, o } = env;
   agentsRoom(agents, ['pc']);
@@ -5442,6 +5507,7 @@ test('w3906: merge on green, CI green but GitHub refuses the merge as not mergea
   const watch = new BlockerWatch({
     store,
     orchestrators: o,
+    prHealth: own,
     ci: async () => checks,
     merge: async (ref, h) => {
       merges.push([ref, h]);
@@ -5449,6 +5515,7 @@ test('w3906: merge on green, CI green but GitHub refuses the merge as not mergea
       if (refuse) throw new Error(`gh pr merge ${ref}: Pull request Final-Factory/ffu#593 is not mergeable: the merge commit cannot be cleanly created.`);
     },
   });
+  env.agents.prHealth = own;
   const a = await startedFor(env, 'w1');
   await a.h.blocked_on!({ request: 'w1', prs: [`ci:${pr}`], head, what: 'CI on ffu#593', merge_on_green: report });
   await watch.tick();
@@ -5464,10 +5531,11 @@ test('w3906: merge on green, CI green but GitHub refuses the merge as not mergea
   assert.doesNotMatch(note, /not filed|Run ff-pr merge now/);
   agents.waker.cancel(a.id);
   // The worker merged main in and pushed: it blocks again with the new head and no report, and the merge is re-armed with the kept one.
+  cur = after;
   const told = String(await a.h.blocked_on!({ request: 'w1', prs: [`ci:${pr}`], head: after, what: 'CI on ffu#593 after the remerge' }));
   assert.match(told, /merge on green \(w2045\), re-armed with the report you left before \(w3906\)/);
   w = store.work.get('w1')!;
-  assert.deepEqual(w.blocked!.mergeOnGreen, { head: after, report, session: a.id });
+  assert.deepEqual(w.blocked!.mergeOnGreen, { head: after, report, session: a.id, headRef: 'w1-fix' });
   assert.equal(w.keptMergeReport, undefined);
   // Green CI again (never rerun to get it: the same green-only rule holds), and this time it merges, filing the kept report.
   refuse = false;
@@ -5494,6 +5562,7 @@ function gateRefs(w: WorkItem): string[] {
 }
 
 test("w2153: w2146 as it happened: two legs each wait on their own PR's CI with merge on green; the second leg's blocked_on keeps the first's gate, the first leg is not stopped as idle when the second merges and says DONE, and it is merged when its own CI is green", async (t) => {
+  const own = ownPrs((ref) => (ref.endsWith('#2524') ? 'aaaa1111bbbb' : 'cccc2222dddd'));
   const env = await setupOnMachine(t);
   const { store, agents, o } = env;
   agentsRoom(agents, ['pc']);
@@ -5508,11 +5577,12 @@ test("w2153: w2146 as it happened: two legs each wait on their own PR's CI with 
     [client, running(client)],
   ]);
   const merges: string[] = [];
-  const watch = new BlockerWatch({ store, orchestrators: o, ci: async (ref) => checks.get(ref), merge: async (ref) => void merges.push(ref) });
+  const watch = new BlockerWatch({ store, orchestrators: o, prHealth: own, ci: async (ref) => checks.get(ref), merge: async (ref) => void merges.push(ref) });
   const tick = async () => {
     (watch as unknown as { ciSeen: Map<string, unknown> }).ciSeen.clear();
     return watch.tick();
   };
+  env.agents.prHealth = own;
   const a = await startedFor(env, 'w1');
   const b = await secondWorkerOn(env, 'w1');
   // 14:20: the host leg (a4d94148) waits on #2524 and leaves its report; 14:22: the client leg (26258346) on #2525.
@@ -10332,6 +10402,7 @@ test('w2867: the one-off fix makes w2850 Waiting on input on Ben, its question a
 });
 
 test('w2972: one leg of a two-worker request hands its PR to the merge-on-green pilot with LEG DONE: on green FF Factory merges it and files the report, and the request stays open for the other leg until a DONE for the whole of it', async (t) => {
+  const own = ownPrs('abc1234def5678');
   const env = await setupOnMachine(t);
   const { store, agents, o, dispatcher, heard } = env;
   agentsRoom(agents, ['pc']);
@@ -10341,7 +10412,8 @@ test('w2972: one leg of a two-worker request hands its PR to the merge-on-green 
   const head = 'abc1234def5678';
   let checks: { done: boolean; text: string; green?: true } = { done: false, text: `1 of 1 checks on ${pr} still running` };
   const merges: string[] = [];
-  const watch = new BlockerWatch({ store, orchestrators: o, ci: async () => checks, merge: async (ref) => void merges.push(ref) });
+  const watch = new BlockerWatch({ store, orchestrators: o, prHealth: own, ci: async () => checks, merge: async (ref) => void merges.push(ref) });
+  env.agents.prHealth = own;
   const a = await startedFor(env, 'w1');
   const b = await secondWorkerOn(env, 'w1');
   // 50e2b52d (w2895 row M2.17) on 2026-11-03: "it requires a `DONE: w2895` line, and that would close the whole fan-out request".

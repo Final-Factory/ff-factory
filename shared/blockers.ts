@@ -92,6 +92,9 @@ export interface PrHealth {
   /** The head commit, and its branch. */
   head?: string;
   headRef?: string;
+  /** w5549: the repository (owner/name) its head branch is in, and whether GitHub calls it another repository's (a fork). */
+  headRepo?: string;
+  crossRepo?: true;
   /** Since when (ms) this portal has seen this head commit (set by the blocker watch). */
   headSeenAt?: number;
   /** w3572: the requests its description names with a `Request:` or `Part of:` line (lower case). */

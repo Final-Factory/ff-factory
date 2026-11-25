@@ -2998,7 +2998,13 @@ export interface WorkBlocker {
    * itself when every check passed, at this head (--match-head-commit), and files `report` as the worker's report, with no model
    * turn. On red, or a merge that fails, the worker is resumed as without it. `session`: the worker that set it.
    */
-  mergeOnGreen?: { head: string; report: string; session: string };
+  mergeOnGreen?: {
+    head: string;
+    report: string;
+    session: string;
+    /** w5549: the pull request's head branch as GitHub said when it was armed (the worker's own, server/mergeOwner.ts); the merge checks it again. */
+    headRef?: string;
+  };
   /**
    * deploy (w2140): the portal's automatic deploy is held because CI failed on the head of its main, so this gate cannot
    * clear until that is fixed. `text` is what the request's live state says ("deploy held: master CI failed on 5a1909756
