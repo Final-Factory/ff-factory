@@ -119,6 +119,8 @@ test('w3764: no new slot below the free-disk floor, and take prints the lines ev
   assert.match(lines, /^export FFU_SLOT='slot1'$/m);
   assert.match(lines, /^export CARGO_TARGET_DIR='.*ffu-sandboxes\/slot1\/target'$/m);
   assert.match(lines, /^export CARGO_INCREMENTAL=0$/m);
+  // w5501: the machine's cargo home inside the root, where a fenced worker can fetch a new crate.
+  assert.match(lines, /^export CARGO_HOME='.*\/cache\/cargo'$/m);
   assert.match(lines, /^cd '.*ffu-sandboxes\/slot1\/ffu'$/m);
 });
 
@@ -206,13 +208,13 @@ test('w3764: a low pass takes an unheld slot whole and only the incremental cach
 });
 
 /** A slot target with a current build (ffu_sim and its test, an hour old) and one from four days ago that nothing current uses. */
-function unitTarget(root: string, slot: string) {
+function unitTarget(root: string, slot: string, oldAgeH = 24 * 4) {
   const t = path.join(root, 'ffu-sandboxes', slot, 'target');
   fs.mkdirSync(path.join(root, 'ffu-sandboxes', slot, 'ffu'), { recursive: true });
   const serde: FakeUnit = { name: 'serde', hash: '1111111111111111', fp: 18_000_000_000_000_000_001n, ageH: 24 * 6 };
-  const glam: FakeUnit = { name: 'glam', hash: '2222222222222222', fp: 17_000_000_000_000_000_003n, ageH: 24 * 4, bytes: 4000 };
+  const glam: FakeUnit = { name: 'glam', hash: '2222222222222222', fp: 17_000_000_000_000_000_003n, ageH: oldAgeH, bytes: 4000 };
   const simNow: FakeUnit = { name: 'ffu_sim', hash: '3333333333333333', fp: 16_000_000_000_000_000_005n, deps: [serde], workspace: true, ageH: 1 };
-  const simOld: FakeUnit = { name: 'ffu_sim', hash: '4444444444444444', fp: 15_000_000_000_000_000_007n, deps: [glam, serde], workspace: true, ageH: 24 * 4, bytes: 4000 };
+  const simOld: FakeUnit = { name: 'ffu_sim', hash: '4444444444444444', fp: 15_000_000_000_000_000_007n, deps: [glam, serde], workspace: true, ageH: oldAgeH, bytes: 4000 };
   const testNow: FakeUnit = { name: 'golden', hash: '5555555555555555', fp: 14_000_000_000_000_000_009n, deps: [simNow], workspace: true, ageH: 1 };
   for (const u of [serde, glam, simNow, simOld, testNow]) writeCargoUnit(t, u, NOW);
   for (const d of [path.join(t, 'CACHEDIR.TAG'), t, path.join(t, 'debug'), ...['deps', '.fingerprint'].map((x) => path.join(t, 'debug', x))]) fs.utimesSync(d, (NOW - HOUR) / 1000, (NOW - HOUR) / 1000);
@@ -318,4 +320,59 @@ test('w5499: an incremental cache a build wrote within the settle time stays; an
   const p = await plan(root, { inUse: [path.join(root, 'tmp', 'ffa-live0001')] });
   assert.deepEqual(ffuItems(root, p), ['ffu-sandboxes/slot1/target/debug/incremental'], "slot2's incremental cache was written 5 min ago (a worker's CARGO_INCREMENTAL=1 loop): kept");
   assert.match(p.items.find((i) => i.rule === 'ffu-slot-target')!.why, /incremental off, as ffu CI does \(w5499\)/);
+});
+
+/** unitTarget plus an idle incremental cache of the live sim (two hours untouched), `incBytes` big. */
+function unitTargetWithIncremental(root: string, slot: string, incBytes: number) {
+  const t = unitTarget(root, slot, 4);
+  const s = path.join(t, 'debug', 'incremental', 'ffu_sim-3333333333333333', 's-abc');
+  fs.mkdirSync(s, { recursive: true });
+  fs.writeFileSync(path.join(s, 'dep-graph.bin'), Buffer.alloc(incBytes));
+  const old = (NOW - 2 * HOUR) / 1000;
+  for (const d of [path.join(s, 'dep-graph.bin'), s, path.dirname(s), path.dirname(path.dirname(s))]) fs.utimesSync(d, old, old);
+  for (const d of [t, path.join(t, 'debug')]) fs.utimesSync(d, (NOW - HOUR) / 1000, (NOW - HOUR) / 1000);
+  return t;
+}
+
+const sweptHashes = (it: { members?: string[] } | undefined) => [...new Set((it?.members ?? []).map((m) => /-([0-9a-f]{16})/.exec(path.basename(m))?.[1]).filter(Boolean))].sort();
+
+test('w5503: a released slot is swept to what its last worker built in its last hour; a held one keeps its 48 h of builds', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-w5503r-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
+  // slot1: released (no holder). slot2: held by a running worker. Both carry the current build (1 h old) and a variant
+  // built three hours before it (ffu_sim-4444 and glam, which only it uses): under the cap, inside the 48 h window.
+  unitTarget(root, 'slot1', 4);
+  unitTarget(root, 'slot2', 4);
+  fs.writeFileSync(path.join(root, 'ffu-sandboxes', 'slots.json'), JSON.stringify({ slots: [{ id: 'slot1' }, { id: 'slot2', holder: 'live0005' }] }));
+  const p = await plan(root, { inUse: [path.join(root, 'tmp', 'ffa-live0005')] });
+  const items = p.items.filter((i) => i.rule === 'ffu-slot-target');
+  assert.deepEqual(items.map((i) => rel(root, i.path)), ['ffu-sandboxes/slot1/target'], 'only the released slot is swept');
+  assert.deepEqual(sweptHashes(items[0]), ['2222222222222222', '4444444444444444'], 'the older variant and the dependency only it used go; serde, the live sim and its test stay');
+  assert.match(items[0].why, /the last 1 h before its last worker released it/);
+
+  // 0 turns the released window off: the slot keeps the held-slot window, and nothing goes.
+  const off = await plan(root, { inUse: [path.join(root, 'tmp', 'ffa-live0005')], settings: { ffuSlotReleasedKeepHours: 0 } });
+  assert.deepEqual(ffuItems(root, off), []);
+});
+
+test('w5503: an idle incremental cache that took a target over the cap goes alone; the warm units stay', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-w5503c-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
+  // ~9 KB of units (8 KB of them the older variant) plus a 20 KB idle incremental cache, against a 12 KB cap: the target is
+  // over the cap only because of the cache the w5499 trim takes on this pass anyway (LothDesktop slot3, 2026-11-25: 19.9 of
+  // 32.1 GB incremental, 12.1 GB without it).
+  unitTargetWithIncremental(root, 'slot1', 20_000);
+  fs.writeFileSync(path.join(root, 'ffu-sandboxes', 'slots.json'), JSON.stringify({ slots: [{ id: 'slot1', holder: 'live0006' }] }));
+  const p = await plan(root, { inUse: [path.join(root, 'tmp', 'ffa-live0006')], settings: { ffuSlotTargetCapGB: 12_000 / 1024 ** 3 } });
+  assert.deepEqual(ffuItems(root, p), ['ffu-sandboxes/slot1/target/debug/incremental'], 'the cache goes; no sweep of the units built 3 h before the newest');
+
+  // Over the cap without the cache too (a 5 KB cap): the window narrows, and the older variant goes with the cache. The cache
+  // rides in the sweep's members: as an item of its own inside the swept target the plan dropped it (w5503).
+  const tight = await plan(root, { inUse: [path.join(root, 'tmp', 'ffa-live0006')], settings: { ffuSlotTargetCapGB: 5_000 / 1024 ** 3 } });
+  assert.deepEqual(ffuItems(root, tight), ['ffu-sandboxes/slot1/target']);
+  const sweep = tight.items.find((i) => i.rule === 'ffu-slot-target')!;
+  assert.deepEqual(sweptHashes(sweep), ['2222222222222222', '4444444444444444'], 'the older variant and glam; the live sim stays');
+  assert.ok(sweep.members!.some((m) => rel(root, m) === 'ffu-sandboxes/slot1/target/debug/incremental'), JSON.stringify(sweep.members));
+  assert.ok(!sweep.members!.some((m) => rel(root, m).startsWith('ffu-sandboxes/slot1/target/debug/incremental/')), 'nothing twice');
+  assert.match(sweep.why, /stale build output.*; and the incremental cache/);
 });

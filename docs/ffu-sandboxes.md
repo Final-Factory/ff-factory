@@ -21,14 +21,38 @@ Under the worker install folder (`FF_WORKER_ROOT`: `F:\ffw` on BEAST, `V:\ffw` o
 | `ffu-sandboxes/slots.json` | each slot's holder (the session id), branch and last use |
 | `ffu-sandboxes/.lock` | a folder made atomically around every change; another worker takes it over after 15 min |
 
-The cargo registry and git cache stay in the machine's `CARGO_HOME`, which already holds one per machine. On BEAST that
-is `~/.cargo`; on LothDesktop it is `V:/ffw/tools/cargo`. A cold fetch of ffu's crates took 22 s and 1.1 GB (measured,
-BEAST).
+The cargo registry, its index and git dependencies are one `CARGO_HOME` per machine, inside the install folder (w5501),
+shared by every slot and every worker's cargo:
+
+- **Where.** The daemon sets `CARGO_HOME=<root>/cache/cargo` in its own environment at start, so every agent, script and
+  build it starts inherits it, and `ffu-slot take` (and `where`) also prints `export CARGO_HOME=...`. A `CARGO_HOME` the
+  daemon's environment already gives inside the root stays where it is (LothDesktop's `V:/ffw/tools/cargo`), unless it
+  sits in `daemon`, `secrets` or `ffu-runners`, which a fenced worker cannot write. Code: `machine/sharedCaches.ts`
+  `workerCargoHome`, `machine/daemon.ts` (the start, before `rootEnv`), `machine/ffuSlots.ts` `envLines`.
+- **Why.** On BEAST it used to be the person's `~/.cargo` on C:. A worker under the Windows Low-integrity fence cannot write
+  there, so a `cargo fetch` of a crate not yet downloaded failed with "Access is denied (os error 5)" (measured
+  2026-11-24, w5499); building with crates already fetched worked.
+- **Writable under every fence.** `cache` is a root child: on Windows the daemon labels it Low with `(OI)(CI)`
+  (`machine/lowIntegrity.ts` `lowTargets`), so `cache/cargo` and all cargo writes in it inherit Low; Linux Landlock and
+  macOS Seatbelt open every root child except `daemon` and `secrets`. The daemon makes the folder before it labels or starts
+  an agent.
+- **Seeded, read only.** When the home moved (from `~/.cargo`, or a `CARGO_HOME` outside the root), the daemon copies in
+  the background, once, what the old one has and the new one lacks: `registry/index`, `registry/cache` (the downloaded
+  `.crate` files), `git/db` and `config.toml`/`config`. Not `bin` (the person's installed tools stay where `PATH` finds
+  them), `registry/src` (cargo unpacks it again from the cache) or `credentials*` (a login). Each piece is copied into
+  `cache/cargo/.seed` and renamed into place, so cargo never sees half of one; a piece cargo made first is kept and the copy
+  dropped. The old home is only read: nothing on C: is written, moved or deleted. The daemon log says what it seeded
+  (`cargo home: ...`). A seed that cannot read the old home is said there too; cargo then downloads (a cold fetch of ffu's
+  crates: 22 s and 1.1 GB, measured on BEAST).
+- **Not the runners'.** The ffu CI runners keep their own `<root>/ffu-runners/cargo` (Medium on Windows, not a worker's).
+- `cargo install` now lands in `cache/cargo/bin`, which is not on `PATH`; tools a person installed before stay in the old
+  home's `bin`, still on `PATH`.
+- Tests: `server/cargoHome.test.ts`.
 
 ## Use (a worker)
 
 ```sh
-eval "$(ffu-slot take --branch my-branch)"   # sets FFU_SLOT, FFU_DIR, CARGO_TARGET_DIR and cds into the checkout
+eval "$(ffu-slot take --branch my-branch)"   # sets FFU_SLOT, FFU_DIR, CARGO_TARGET_DIR, CARGO_INCREMENTAL=0, CARGO_HOME and cds into the checkout
 cargo test --workspace --all-features --no-run
 ffu-slot release                             # once the work is pushed (a stopped worker's pushed slot frees itself)
 ffu-slot list                                # every slot, its branch, and why it is or is not free
@@ -85,9 +109,21 @@ sweep spares the units they run. Otherwise:
 |---|---|
 | No running or resumable worker holds the slot, nothing runs from it, and nothing was written for `ffuSlotIdleDays` (7) | the whole target |
 | Every pass | the stale units (below): what no workspace unit built within `ffuSlotKeepHours` (48) of the newest one uses, and superseded object files |
-| Over `ffuSlotTargetCapGB` (16 GB), or a low pass | the sweep's window narrows to 24, 6, then 1 h until the target fits |
+| No running or resumable worker holds the slot and nothing runs from it (released, w5503) | the sweep's window starts at `ffuSlotReleasedKeepHours` (1 h): what the last worker built in its last hour, and the dependencies that used, stay warm; older variants go |
+| Over `ffuSlotTargetCapGB` (16 GB), or a low pass | the sweep's window narrows to 24, 6, 1 h, then 15 min until the target fits. An incremental cache no build wrote for the settle time goes on this pass anyway, so it is not counted (w5503) |
 | Still over the cap | `debug/incremental`; the whole target only when no worker holds the slot and nothing runs from it (a held one is kept and listed) |
 | A low pass (the drive under its soft threshold) | the whole target of a slot no running or resumable worker holds; only `debug/incremental` of a held one |
+
+**The bound (w5503).** A released slot's target goes back to its last worker's last hour of builds within an hour of the
+release, and to nothing after `ffuSlotIdleDays`; any slot over the cap is swept down to that slot's 15 min of builds, and
+an unheld one goes whole if it still does not fit. A held slot over the cap after that is named in every pass's kept list.
+The sweep and the trims that go with one pass are one clean-up item. Before w5503 the incremental trim, an item inside the
+swept target, was dropped from the plan, so a slot swept on every pass kept its cache. Measured on LothDesktop at
+2026-11-25 04:40 UTC, before w5499 reached it: the slot targets were 4.1, 19.2, 32.1 and 25.6 GB. Of that, 0, 6.5, 19.9
+and 12.4 GB was `debug/incremental`, leaving 4.1 to 13.2 GB without it. A dry run of the sweep freed 0 GB from every slot
+at the 48 h window, and 8.8 GB (slot2) and 1.4 GB (slot3) at 1 h. A cold workspace test build costs 366 s and an edit
+rebuild 150 to 179 s, both with incremental off (measured on BEAST, w5499). So the sweep keeps the
+dependencies of the last build rather than taking a released target whole.
 
 ### The stale-unit sweep (`server/cargoGraphSweep.ts`, w4258)
 
@@ -109,6 +145,15 @@ superseded object files; at 6 h 3.68 GB would go, at 1 h 5.25 GB. A fresh target
 debug profile 4 to 11.5 GB on m5, so 16 GB keeps about two configurations warm and the narrowing windows reach it before
 the incremental cache or the whole target is touched. The sweep of an 11.5 GB profile read 2193 fingerprints in about
 1 s. The per-worker `cargoTargetCapGB` (8 GB, w3426) still applies to targets in temp folders.
+
+### A runner's job is looked for again before its `_work` goes (w5502)
+
+`ffu-runner-work` checks `runnerJobWhy` when it plans, but `runCleanup` renames the folder aside later, after `endStrays` and
+other awaits. A rename fails on a file a job holds open; a job handed out in that gap before it opens one could still lose
+its checkout. So `cleanupPass` passes `runCleanup` a `busyNow` check (`runnerBusyNow`, `server/installLeftovers.ts`): for an
+item of that rule (it carries its `runner`), `runnerJobWhy` runs again on a fresh process list right before the rename, and a
+job found keeps the item (`kept: a job may have started ...` in `failed`; an unreadable list keeps it too). Ben, w5499:
+"Don't break a CI run that is in progress". Test: `w3502TimingRunnerCleanup.test.ts`.
 
 ### What `ff-leftovers check` and `folders` say (`server/cleanupFolders.ts` `judgeFfuSlotPath`, w4422)
 
