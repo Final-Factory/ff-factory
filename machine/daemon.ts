@@ -44,7 +44,7 @@ import { DEFAULT_BUILD } from '../server/placement.ts';
 import { RELEASE_SANDBOX } from '../server/releaseSeat.ts';
 import { SandboxPool, realPoolDeps, totalAgentsRefusal, type PoolDeps } from './sandboxes.ts';
 import { batchUnityIn, nightsIn, slotRunsFor, switchHoldRefusal } from './switchHolds.ts';
-import { UnitySlots, editorInstancePid, gamePlayers, installShims, isAlive, runsIn, slotRpcHandlers, slotsDir, type Preempt } from './unitySlots.ts';
+import { UnitySlots, editorInstancePid, gamePlayers, unityProcesses, installShims, isAlive, runsIn, slotRpcHandlers, slotsDir, type Preempt } from './unitySlots.ts';
 import { McpScopes, mcpHomeStatusDir, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp, uvWarmRuns, mcpPlaces, workerEditorStatusDir, type StdioServer } from './unityMcp.ts';
 import { addSecretEnv, addSecretValues, redactSecrets, redactValue, skippedSecrets } from '../server/secrets.ts';
 import { CliScrubber, type CliScrubReport } from '../server/cliScrub.ts';
@@ -646,6 +646,8 @@ export class Daemon {
   private staleCtx?: StaleContext;
   /** Each place's Unity MCP status folder, kept holding only its own editor (machine/unityMcp.ts). */
   private readonly mcpScopes = new McpScopes();
+  /** w5746: the machine's top-level Unity processes at the last McpScopes look (refreshMcpScopes); undefined: not read yet. */
+  private mcpEditors?: { pid: number; project?: string }[];
   /** Windows: the folder Git Bash maps /tmp to, never cleaned up and made again when missing (server/gitBashTmp.ts, w603). */
   private bashTmp?: string;
 
@@ -1432,8 +1434,22 @@ export class Daemon {
         return (e as NodeJS.ErrnoException).code === 'EPERM' ? pid : undefined;
       }
     };
-    const places = mcpPlaces(this.pool.list(), alive, editorInstancePid);
+    const places = mcpPlaces(this.pool.list(), alive, editorInstancePid, this.mcpEditors);
     this.mcpScopes.sync(appDirOfConfig(this.cfg), places, Date.now(), (line) => log(line));
+  }
+
+  /**
+   * w5746: read the machine's Unity processes, so an EditorInstance.json pid counts only while it is a Unity editor of its
+   * sandbox's project (mcpPlaces), then sync. A failed read forgets the list: no such pid counts until the next one.
+   */
+  async refreshMcpScopes() {
+    try {
+      this.mcpEditors = unityProcesses(await this.procs(), machinePlatformOf(process.platform));
+    } catch (e) {
+      this.mcpEditors = undefined;
+      log(`unity mcp: reading the processes: ${(e as Error).message}`);
+    }
+    this.syncMcpScopes();
   }
 
   get connected() {
@@ -1657,7 +1673,7 @@ export class Daemon {
       }
       addMcpStatusDir(editors);
     }
-    this.timers.push(setInterval(() => this.syncMcpScopes(), 5_000));
+    this.timers.push(setInterval(() => void this.refreshMcpScopes(), 5_000));
     this.timers.push(setInterval(() => this.syncHostEditors(), 5_000));
     // Watch the portal's host from outside, with the config the portal last sent (it works while the portal is down).
     const watch = readOutsideWatch(outsideWatchFile(appDirOfConfig(this.cfg)));

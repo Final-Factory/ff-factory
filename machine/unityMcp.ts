@@ -46,19 +46,24 @@ export function workerEditorStatusDir(root: string, platform: NodeJS.Platform = 
 /**
  * The places McpScopes keeps, with the pid of the editor each one's folder follows: the daemon's own editor of the sandbox,
  * else (w5746) the editor a worker started itself in the sandbox's project (a -batchmode `unity-slot run`), by the pid Unity
- * wrote to its Library/EditorInstance.json at boot (`instancePid`). Its status file then counts only if written since that
- * pid was first seen, as for the daemon's own, so a file a dead editor left is never copied. `alive`: the pid while it runs.
+ * wrote to its Library/EditorInstance.json at boot (`instancePid`). That pid counts only while `editors` (the machine's
+ * top-level Unity processes, unitySlots.ts unityProcesses) has it as a Unity editor of this very project: a crashed editor
+ * leaves the file behind, and its pid may since belong to any process, which "alive" alone took for the editor and copied
+ * the dead one's port for as long as that process lived (independent review w5779). `editors` undefined (not read yet):
+ * no such pid counts. `alive`: the daemon's own editor's pid while it runs.
  */
 export function mcpPlaces(
   sandboxes: { id: string; path: string; unity: { pid?: number } }[],
   alive: (pid?: number) => number | undefined,
   instancePid: (project: string) => number | undefined,
+  editors: { pid: number; project?: string }[] | undefined,
 ): { place: string; project: string; pid?: number; fromInstance?: boolean }[] {
   return sandboxes.map((sb) => {
     const own = alive(sb.unity.pid);
     if (own) return { place: sb.id, project: sb.path, pid: own };
-    const pid = alive(instancePid(sb.path));
-    return pid ? { place: sb.id, project: sb.path, pid, fromInstance: true } : { place: sb.id, project: sb.path, pid: undefined };
+    const pid = instancePid(sb.path);
+    const editor = pid ? editors?.find((e) => e.pid === pid && e.project !== undefined && normProject(e.project) === normProject(sb.path)) : undefined;
+    return editor ? { place: sb.id, project: sb.path, pid: editor.pid, fromInstance: true } : { place: sb.id, project: sb.path, pid: undefined };
   });
 }
 
@@ -136,10 +141,12 @@ export function scopedUnityMcp(server: StdioServer, appDir: string, place: strin
  * Not so for a pid read from the project's Library/EditorInstance.json (`fromInstance`, w5746): a crashed editor leaves
  * that file and its status file behind, and its pid may since belong to any process, so at the first look only status
  * written from then on counts. A live editor's bridge rewrites its file every 0.5 s (MCP for Unity StdioBridgeHost
- * ProcessCommands), so it is picked up at the next look; a dead one's port never is (independent review w5753).
+ * ProcessCommands), so it is picked up at the next look; a dead one's port never is (independent review w5753). Its
+ * file must also be written after `since`, with no allowance (`strict`): the 2 s one let a file written just before the
+ * first look through (w5779).
  */
 export class McpScopes {
-  private readonly seen = new Map<string, { pid?: number; since?: number; lookedAt?: number }>();
+  private readonly seen = new Map<string, { pid?: number; since?: number; lookedAt?: number; strict?: boolean }>();
   private readonly home?: string;
 
   /** `home`: one status folder (tests); unset: every folder editors write in (server/unityHang.ts mcpStatusDirs, w5540). */
@@ -154,12 +161,13 @@ export class McpScopes {
       const st = this.seen.get(p.place) ?? {};
       if (p.pid && p.pid !== st.pid) st.since = st.lookedAt ?? (p.fromInstance ? now : 0);
       st.pid = p.pid;
+      st.strict = p.fromInstance;
       st.lookedAt = now;
       this.seen.set(p.place, st);
       // Each folder on its own: a failed first one must not leave the home copy with a stale `reloading: true` (w5677).
       for (const dir of [mcpStatusDir(appDir, p.place), mcpHomeStatusDir(appDir, p.place)]) {
         try {
-          syncStatusDir(dir, p.project, p.pid ? { since: st.since } : undefined, files);
+          syncStatusDir(dir, p.project, p.pid ? { since: st.since, strict: st.strict } : undefined, files);
         } catch (e) {
           log(`unity mcp ${p.place}: status folder ${dir}: ${(e as Error).message}`);
         }
