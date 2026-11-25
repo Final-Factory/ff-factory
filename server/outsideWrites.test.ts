@@ -72,6 +72,7 @@ const KNOWN: Record<string, [number, string]> = {
   'machine/unity.ts': [7, 'reads Unity\'s default log and install paths'],
   'machine/unityMcp.ts': [2, 'reads ~/.unity-mcp and ~/.claude.json'],
   'machine/unitySlots.ts': [3, 'exception: the Unity slots mailbox ~/.ff-factory/unity-slots (w469)'],
+  'server/agentAccount.ts': [2, "reads: Claude Code's folder (CLAUDE_CONFIG_DIR, else ~/.claude) named to the agents' launcher (w5598), and the VM's switch file FFF_AGENT_SWITCH names (w5651); writes nothing"],
   'server/agentTools.ts': [2, 'exception: the person\'s ~/.claude plugin marker'],
   'server/appConfig.ts': [1, 'the no-root default config folder'],
   'server/cleanup.ts': [4, 'reads: measures Unity\'s caches'],

@@ -140,6 +140,14 @@ export const FFFCTL_FORMS: Record<string, { allowed: string[]; changes: string[]
   'disk-usage': { allowed: [''], changes: [] },
   // What the portal's own account can open (w5506): refused or OPENED, credential names counted, never a value.
   'fence-check': { allowed: [''], changes: [] },
+  // The portal's agents' own account (w5598, w5651): status reads; off and warn are the worker's recovery route, which needs no
+  // orchestrator (an orchestrator under that account may be what is broken); on and default stay a person's.
+  agents: {
+    allowed: ['', 'status'],
+    changes: ['off', 'warn', 'on', 'default'],
+    ops: ['off', 'warn'],
+    grant: "off or warn only: agents start as the portal's account again, as before w5598; turning it on stays a person's",
+  },
   help: { allowed: [''], changes: [] },
   units: { allowed: ['', '--check'], changes: [] },
   logs: { allowed: ['', 'N'], changes: ['-f'] },
@@ -458,8 +466,12 @@ const PASS_ENV = /^(CLAUDE_CODE_[A-Z0-9_]+|ANTHROPIC_[A-Z0-9_]+|CLAUDE_AGENT_SDK
 /** The portal's own settings that must not reach it, though they match the pattern. */
 const NEVER_ENV = new Set(['CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_GIT_BASH_PATH']);
 
-/** The SDK's own version (its package.json): the launcher refuses a claude binary of another version. */
-export function sdkVersion(root = process.cwd()): string {
+/**
+ * The SDK's own version (its package.json): the launcher refuses a claude binary of another version. Found from this
+ * file's own folder, not the process's: from any other folder it read as unknown, and every agent fell back to fff
+ * (w5598's real-turn check ran its driver outside the app folder).
+ */
+export function sdkVersion(root = path.resolve(import.meta.dirname, '..')): string {
   try {
     return String(JSON.parse(fs.readFileSync(path.join(root, 'node_modules', '@anthropic-ai', 'claude-agent-sdk', 'package.json'), 'utf8')).version ?? '');
   } catch {
