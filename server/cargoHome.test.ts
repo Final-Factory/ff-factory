@@ -42,7 +42,8 @@ test('w5501: the daemon, ffu-slot take and the fences agree the cargo home is in
   const root = path.resolve('/ffw-root');
   for (const platform of ['win32', 'darwin', 'linux'] as const) assert.equal(rootEnv(root, platform).CARGO_HOME, workerCargoHomeDir(root), platform);
   assert.equal(realFfuSlotDeps({ FF_WORKER_ROOT: root }).cargoHome, workerCargoHomeDir(root));
-  assert.equal(realFfuSlotDeps({ FF_WORKER_ROOT: root, CARGO_HOME: path.join(root, 'tools', 'cargo') }).cargoHome, path.join(root, 'tools', 'cargo'));
+  // w5717: a cargo home under tools that is not there (this root is not on disk) moves to cache, as the daemon's does.
+  assert.equal(realFfuSlotDeps({ FF_WORKER_ROOT: root, CARGO_HOME: path.join(root, 'tools', 'cargo') }).cargoHome, workerCargoHomeDir(root));
   // Windows: `cache`, its parent, is a root child the daemon labels Low (OI)(CI), so the cargo home inherits Low.
   const t = lowTargets({ root, appDir: path.join(root, 'daemon'), children: ['cache', 'daemon', 'secrets', 'ffu-runners', 'tools'].map((name) => ({ name, dir: true })) });
   assert.ok(t.dirs.includes(path.join(root, 'cache')), 'cache is labelled Low');
