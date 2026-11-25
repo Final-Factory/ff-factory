@@ -119,7 +119,13 @@ export class UpdateBundles {
     // This commit's bundles stay (its full one and each machine's incremental one, which a rollout may still hand out), and
     // the newest one before it.
     const old = fs.readdirSync(this.dir).filter((n) => n.endsWith('.bundle') && !n.startsWith(head)).map((n) => path.join(this.dir, n)).sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
-    for (const f of old.slice(1)) fs.rmSync(f, { force: true });
+    for (const f of old.slice(1)) {
+      try {
+        fs.rmSync(f, { force: true });
+      } catch {
+        // Best effort: a bundle still being sent (EBUSY on Windows) goes at the next one.
+      }
+    }
     return { commit, file, sha256, size: fs.statSync(file).size, ...(not.length ? { from: not } : {}) };
   }
 

@@ -149,58 +149,121 @@ test('w1596: a worker install says it updates over its link; the portal sends th
   assert.equal(bad.rollback, 'ok');
 });
 
-test('w5593: a machine gets only what its checkout lacks, from the commit its daemon runs; one whose checkout lacks that base gets the full bundle', async (t) => {
+/**
+ * w5593: a daemon whose update stand-in job ran is updated again here, so its job's task is "removed" by a stub (the real one
+ * starts PowerShell on Windows for each job: the w5642 review's 238-329 s), and each step waits for that clean-up's job.json write.
+ */
+async function thinSetup(t: { after: (fn: () => unknown) => void }) {
   const s = await setup(t);
   await until('online, its hello read', () => s.mm.canLink('mx'));
   s.d.selfUpdate.deps.launch = finishing(s, {});
+  s.d.selfUpdate.deps.remove = async () => undefined;
   const offered: UpdateBundle[] = [];
   const offer = s.mm.bundles.offer.bind(s.mm.bundles);
   s.mm.bundles.offer = (id, b, now) => (offered.push(b), offer(id, b, now));
-  let runs: string | undefined;
-  s.mm.daemonCommit = () => runs;
+  const daemon = { runs: undefined as string | undefined };
+  s.mm.daemonCommit = () => daemon.runs;
   const f = updateFiles(s.appDir);
+  const update = async (form?: 'tools') => {
+    const r = await s.mm.linkUpdate('mx', form ? { form } : {});
+    // The daemon's own tick may be removing the job already (then this tick returns at once): wait for its job.json write.
+    await s.d.selfUpdate.tick();
+    await until('the ended job removed', () => readJson<UpdateJob>(f.job)?.removed === true);
+    return r;
+  };
+  return { s, offered, daemon, update, f };
+}
+
+test('w5593: a machine gets only what its checkout lacks, from the commit its daemon runs; the tools run from HEAD\'s parents', async (t) => {
+  const { s, offered, daemon, update, f } = await thinSetup(t);
   // A daemon that does not say its commit (or names one the portal lacks) gets the full bundle, as before.
   const one = s.repo.commit;
-  runs = 'f'.repeat(40);
-  assert.equal((await s.mm.linkUpdate('mx')).ok, true);
+  daemon.runs = 'f'.repeat(40);
+  assert.equal((await update()).ok, true);
   assert.equal(offered.at(-1)?.from, undefined, 'an unknown commit: the full bundle');
   const full1 = offered.at(-1)!;
-  // The portal moved on, with a big file: the daemon on `one` gets a bundle without what it has.
+  // The portal moved on, with a big file: the daemon on `one` (a short id in its hello) gets a bundle without what it has.
   fs.writeFileSync(path.join(s.repo.root, 'big.bin'), randomBytes(200_000));
   const two = portalRepo(s.repo.root, 'two').commit;
-  runs = one.slice(0, 8);
-  assert.equal((await s.mm.linkUpdate('mx')).ok, true);
-  const thin = offered.at(-1)!;
-  assert.deepEqual([thin.commit, thin.from], [two, [one]]);
+  daemon.runs = one.slice(0, 8);
+  assert.equal((await update()).ok, true);
+  assert.deepEqual([offered.at(-1)!.commit, offered.at(-1)!.from], [two, [one]]);
   assert.equal(git(f.src, 'rev-parse', 'HEAD'), two, 'checked out from the incremental bundle');
   const three = portalRepo(s.repo.root, 'three').commit;
   const full3 = await s.mm.bundles.prepare();
-  runs = two;
-  assert.equal((await s.mm.linkUpdate('mx')).ok, true);
+  daemon.runs = two;
+  assert.equal((await update()).ok, true);
   assert.ok(offered.at(-1)!.size < full3.size / 10, `incremental ${offered.at(-1)!.size} bytes against the full ${full3.size}`);
   assert.equal(git(f.src, 'rev-parse', 'HEAD'), three);
   // The tools publish on a daemon that runs this commit already: from its parents.
-  runs = three;
-  assert.equal((await s.mm.linkUpdate('mx', { form: 'tools' })).ok, true);
+  daemon.runs = three;
+  assert.equal((await update('tools')).ok, true);
   assert.deepEqual(offered.at(-1)!.from, [two]);
-  // A checkout without the base (a machine installed another way, a checkout made again): its daemon refuses the incremental
-  // bundle and the full one goes in the same call, so it is never left behind.
-  const four = portalRepo(s.repo.root, 'four').commit;
-  fs.rmSync(f.src, { recursive: true, force: true });
-  const n = offered.length;
-  const r = await s.mm.linkUpdate('mx');
-  assert.equal(r.ok, true);
-  assert.deepEqual(offered.slice(n).map((b) => b.from), [[three], undefined], 'the incremental bundle, then the full one');
-  assert.equal(git(f.src, 'rev-parse', 'HEAD'), four);
-  // Any other refusal is not mended by the full bundle: it is not sent.
-  writeJson(f.job, { ...readJson<UpdateJob>(f.job)!, phase: 'staged', reported: false });
-  const m = offered.length;
-  await assert.rejects(s.mm.linkUpdate('mx'), /mx refused it: an update job of this machine is still running/);
-  assert.equal(offered.length, m + 1, 'one offer, no fall back');
   // Bundles of the current commit stay; of older ones only the newest.
   const left = fs.readdirSync(path.join(s.tmp, 'data', 'update-bundles')).filter((x) => x.endsWith('.bundle'));
-  assert.ok(left.includes(path.basename(full1.file)) === false, 'the first commit\'s bundle is gone');
-  assert.ok(left.filter((x) => x.startsWith(four.slice(0, 16))).length >= 2, `both of four's bundles stay: ${left.join(', ')}`);
+  assert.equal(left.includes(path.basename(full1.file)), false, "the first commit's bundle is gone");
+  assert.equal(left.filter((x) => x.startsWith(three.slice(0, 16))).length, 2, `both of three's bundles stay: ${left.join(', ')}`);
+});
+
+test('w5593: a checkout without the base refuses the incremental bundle and gets the full one in the same call', async (t) => {
+  const { s, offered, daemon, update, f } = await thinSetup(t);
+  const one = s.repo.commit;
+  assert.equal((await update()).ok, true);
+  // A machine installed another way, or a checkout made again: its daemon names `one`, its checkout lacks it.
+  const two = portalRepo(s.repo.root, 'two').commit;
+  daemon.runs = one;
+  fs.rmSync(f.src, { recursive: true, force: true });
+  const n = offered.length;
+  assert.equal((await update()).ok, true);
+  assert.deepEqual(offered.slice(n).map((b) => b.from), [[one], undefined], 'the incremental bundle, then the full one');
+  assert.equal(git(f.src, 'rev-parse', 'HEAD'), two);
+});
+
+test('w5593: any other refusal (a job still running) is not mended by the full bundle: it is not sent', async (t) => {
+  const { s, offered, daemon, update, f } = await thinSetup(t);
+  const one = s.repo.commit;
+  assert.equal((await update()).ok, true);
+  portalRepo(s.repo.root, 'two');
+  daemon.runs = one;
+  writeJson(f.job, { ...readJson<UpdateJob>(f.job)!, phase: 'staged', reported: false });
+  const n = offered.length;
+  await assert.rejects(s.mm.linkUpdate('mx'), /mx refused it: an update job of this machine is still running/);
+  assert.deepEqual(offered.slice(n).map((b) => b.from), [[one]], 'one offer, no fall back');
+});
+
+test('w5593: the incremental base: a merge HEAD leaves out every parent; a short id is resolved; a bad, unknown or diverged one, or a root HEAD, gets none', async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-thin-'));
+  try {
+    const repo = path.join(tmp, 'repo');
+    fs.mkdirSync(repo);
+    const one = portalRepo(repo, 'one').commit;
+    const b = new UpdateBundles({ dataDir: path.join(tmp, 'data'), root: repo });
+    // A root commit as HEAD, on a daemon that runs it already: no parents to leave out.
+    const root = await b.prepare();
+    assert.equal(await b.thin(root, one), undefined, 'a root HEAD');
+    const main = git(repo, 'branch', '--show-current');
+    git(repo, 'checkout', '-q', '-b', 'side');
+    fs.writeFileSync(path.join(repo, 'side.txt'), 'side\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-qm', 'side');
+    const side = git(repo, 'rev-parse', 'HEAD');
+    git(repo, 'checkout', '-q', main);
+    const two = portalRepo(repo, 'two').commit;
+    git(repo, 'merge', '-q', '--no-ff', '-m', 'merge', 'side');
+    const merge = git(repo, 'rev-parse', 'HEAD');
+    const full = await b.prepare();
+    assert.equal(full.commit, merge);
+    assert.deepEqual((await b.thin(full, merge))?.from, [two, side], 'a daemon on the merge: every parent left out');
+    assert.deepEqual((await b.thin(full, one.slice(0, 7)))?.from, [one], 'a short id');
+    for (const bad of [undefined, '', 'abc', 'not-a-sha', 'g'.repeat(40), '0'.repeat(40), `${one.slice(0, 7)}^`]) assert.equal(await b.thin(full, bad), undefined, `"${bad}"`);
+    // A commit the portal has that HEAD does not descend from.
+    git(repo, 'checkout', '-q', '-b', 'other', one);
+    const other = portalRepo(repo, 'other').commit;
+    git(repo, 'checkout', '-q', main);
+    assert.equal(await b.thin(full, other), undefined, 'not behind HEAD');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test('w1596: the bundle goes only to the machine it was offered to, with its own credential; a wrong size, SHA-256 or commit changes nothing', async (t) => {
