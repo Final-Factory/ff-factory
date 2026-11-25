@@ -16,7 +16,7 @@ portal run on a PC.
 A machine joined from a browser on the LAN gets that page's origin as its portal URL (server/index.ts, `originOf`), so on a PC
 whose config has no `host`, such a machine reaches the portal only through the tailnet name: join it from that name.
 
-The portal warns at every start when its config has no `host` (`loadConfig`, server/config.ts).
+The portal warns at every start when its config has no `host` (`hostDefaultWarning`, server/config.ts; logged beside `listen` in server/index.ts, never by a CLI).
 
 So a portal on a PC (README "Setup") needs nothing set: `127.0.0.1`, published by `tailscale funnel --bg 8790`.
 

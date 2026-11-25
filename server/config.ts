@@ -570,6 +570,8 @@ export interface Config {
   retiredKeys?: string[];
   /** The startup line for a defaultBase naming a retired branch, read as the trunk (w1517): retiredBaseLine. */
   retiredBase?: string;
+  /** The startup line for a config with no "host" (w5538): hostDefaultWarning. Logged where the server listens, never by a CLI. */
+  hostWarning?: string;
   repo: {
     /** Clone URL for the base repository. */
     url: string;
@@ -1169,6 +1171,15 @@ export function withDefaults(raw: any): Config {
   };
 }
 
+/**
+ * w5538: a config with no "host" listens on loopback since the default moved from 0.0.0.0. The portal logs this at every start
+ * (server/index.ts, beside listen), so a portal reached on its own address (the VM host's health check) says why.
+ */
+export function hostDefaultWarning(file: string, raw: { host?: unknown }): string | undefined {
+  if (raw.host !== undefined) return undefined;
+  return `[config] ${file} has no "host": the portal listens on 127.0.0.1 only (the default since w5538). Set "host": "0.0.0.0" where something reaches it on its own address, as the portal VM's host check does (docs/portal-bind-address.md).`;
+}
+
 export function loadConfig(): Config {
   const file = configPath();
   // Damaged by a crash: the newest good version (config.json.1.., or the .prev setAppConfig keeps) takes its place.
@@ -1179,9 +1190,7 @@ export function loadConfig(): Config {
   const cfg = withDefaults(raw);
   cfg.retiredKeys = retiredConfigKeys(raw);
   cfg.retiredBase = retiredBaseLine(raw);
-  // w5538: a config with no "host" listens on loopback since the default moved from 0.0.0.0. Say so at every start, so a
-  // portal reached on its own address (the VM host's health check) is told why, not only on an install.sh rerun.
-  if (raw.host === undefined) console.warn(`[config] ${file} has no "host": the portal listens on 127.0.0.1 only (the default since w5538). Set "host": "0.0.0.0" where something reaches it on its own address, as the portal VM's host check does (docs/portal-bind-address.md).`);
+  cfg.hostWarning = hostDefaultWarning(file, raw);
   // The portal keeps no sandboxes (w510): only the base clone the orchestrators read is required.
   if (!cfg.repo) throw new Error('config.json is missing "repo"');
   const windowsOnly = windowsPathsOffWindows(cfg);

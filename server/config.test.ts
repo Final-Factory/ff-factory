@@ -252,10 +252,8 @@ test('loadConfig (w5538): with no host set the portal listens on loopback only; 
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-config-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   withConfig(t, minimal(dir));
-  const warned: string[] = [];
-  t.mock.method(console, 'warn', (m: string) => { warned.push(String(m)); });
   const cfg = loadConfig();
-  assert.ok(warned.some((m) => m.includes('has no "host"') && m.includes('127.0.0.1')), 'a config with no host is warned about at load');
+  assert.ok(cfg.hostWarning?.includes('has no "host"') && cfg.hostWarning.includes('127.0.0.1'), 'a config with no host carries the startup warning index.ts logs');
   assert.equal(cfg.host, '127.0.0.1', 'the default is loopback: a portal run on a PC does not serve its LAN');
   // The address index.ts passes to server.listen is cfg.host: bind with it and see where the socket really is.
   const bound = await new Promise<string>((resolve, reject) => {
@@ -268,9 +266,9 @@ test('loadConfig (w5538): with no host set the portal listens on loopback only; 
   });
   assert.equal(bound, '127.0.0.1');
   withConfig(t, { ...minimal(dir), host: '0.0.0.0' });
-  warned.length = 0;
-  assert.equal(loadConfig().host, '0.0.0.0', 'an explicit host wins (the portal VM sets it)');
-  assert.ok(!warned.some((m) => m.includes('has no "host"')), 'an explicit host is not warned about');
+  const explicit = loadConfig();
+  assert.equal(explicit.host, '0.0.0.0', 'an explicit host wins (the portal VM sets it)');
+  assert.equal(explicit.hostWarning, undefined, 'an explicit host is not warned about');
   withConfig(t, { ...minimal(dir), host: '10.1.2.3' });
   assert.equal(loadConfig().host, '10.1.2.3');
 });
