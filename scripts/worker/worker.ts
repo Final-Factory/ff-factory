@@ -1516,10 +1516,11 @@ export function syncPlayerFolders(players: string, keep: string[], log: (line: s
   return out;
 }
 
-function firewallArgs(action: 'add' | 'remove', l: Layout, slots: number, editors: string[], suffix?: string): string[] {
+function firewallArgs(action: 'add' | 'remove', l: Layout, slots: number, editors: string[], suffix?: string, nodeAnyAddress = false): string[] {
   const script = path.join(SRC, 'scripts', 'worker', 'firewall.ps1');
   // The agents' node (w1742, server/agentNode.ts): its path gets its rule before the rollout first puts node there.
-  const node = action === 'add' ? ['-AgentNode', agentNodeExe(l.root), '-StaleUnder', l.tmp] : [];
+  // nodeAnyAddress (w5581's warn stage): a repair keeps a wide node rule wide.
+  const node = action === 'add' ? ['-AgentNode', agentNodeExe(l.root), '-StaleUnder', l.tmp, ...(nodeAnyAddress ? ['-AgentNodeAnyAddress'] : [])] : [];
   // ffu-server in every ffu slot, from Tailscale only (w5442, machine/ffuSlots.ts ffuServerExes).
   const ffu = action === 'add' ? ['-FfuServer', ffuServerExes(l.root).join(';')] : [];
   return ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-Root', l.players, '-Pairs', String(slots), ...node, ...ffu, ...(action === 'remove' ? ['-Remove'] : []), ...(editors.length ? ['-UnityExe', editors.join(';')] : []), ...(suffix ? ['-GroupSuffix', suffix] : [])];
@@ -2405,14 +2406,14 @@ export async function firewallRepair(l: Layout, m: Manifest) {
   // and its warning leaves out "Windows Firewall" so the rollout's elevated rerun (machineRollout.publishTools) does not
   // narrow it either. "peer" names each connection from outside the tailnet that narrowing would cut off; the enforce
   // stage, a later PR, waits for those to be zero on every machine.
-  if (seen.wide.length) say(`WARNING: tailnet-only rule (w5581, warn only): ${seen.wide.join(', ')} can be reached from outside the tailnet (allowed from: ${seen.from.join('; ') || 'none read'}); connections from outside the tailnet now: ${seen.peers.length ? seen.peers.join(', ') : 'none'}${seen.read ? ` (${seen.read})` : ''}.`);
+  if (seen.wide.length) say(`WARNING: tailnet-only rule (w5581, warn only): ${seen.wide.join(', ')} can be reached from outside the tailnet (allowed from: ${seen.from.join('; ') || 'none read'}); connections from outside the tailnet now: ${[...seen.peers, ...seen.peersUnknown.map((p) => `could not see (${p})`)].join(', ') || 'none'}${seen.read ? ` (${seen.read})` : ''}.`);
   if (!seen.missing.length && !seen.stale) return say(`Windows Firewall: the rules for the ${slots.length} player folders${exes.includes(node) ? (seen.wide.includes(node) ? ', the agent node (from any address, see above)' : ', the agent node (tailnet only)') : ''} and ffu-server in the ${ffu.length / 3} ffu slots are there.`);
   const what = [...(seen.missing.length ? [`no allow rule for ${seen.missing.join(', ')}`] : []), ...(seen.stale ? [`${seen.stale} rule(s) earlier prompts left under ${l.tmp}`] : [])].join('; ');
   if (!elevated()) return say(`WARNING: Windows Firewall: ${what}. This session is not elevated; an elevated tools run or update (the portal's ssh, ops_worker machine_update) makes them.`);
   const sfx = m.firewallSuffix ? ` ${m.firewallSuffix}` : '';
   try {
     say(`Windows Firewall: ${what}; making the install's rules again.`);
-    say((await elevatedSteps([{ kind: 'firewall', args: firewallArgs('add', l, m.slots, unityEditors(), m.firewallSuffix) }])).trim());
+    say((await elevatedSteps([{ kind: 'firewall', args: firewallArgs('add', l, m.slots, unityEditors(), m.firewallSuffix, seen.wide.includes(node)) }])).trim());
     if (exes.includes(node)) noteOutside(m, { kind: 'firewall-group', name: NODE_GROUP + sfx, note: node });
     noteOutside(m, { kind: 'firewall-group', name: FFU_SERVER_GROUP + sfx, note: ffuNote(l.root) });
     writeManifest(l.root, m);

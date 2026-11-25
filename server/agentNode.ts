@@ -132,7 +132,8 @@ export const TAILNET_FORMS = ['100.64.0.0/255.192.0.0', '100.64.0.0/10', 'fd7a:1
  * tailnet: BEAST's node rule allowed Any (the ops worker's elevated read, 2026-11-25) while the earlier check, which
  * looked for 'Any' in the bulk read, printed "tailnet only" on every tools run. A rule the bulk read has no address
  * filter for is read again on its own. Then "peer <path> <address>" for each connection that path's running process
- * has from outside loopback and the tailnet: what narrowing the rule would cut off. "read ..." gives the counts read.
+ * has from outside loopback and the tailnet: what narrowing the rule would cut off; "peers notrunning <path>" or
+ * "peers unread <path>" when that could not be seen, never a silent "none". "read ..." gives the counts read.
  */
 export function firewallCheckScript(exes: string[], tmp: string, tailnetOnly: string[] = []): string {
   const q = (s: string) => `'${s.replace(/'/g, "''")}'`;
@@ -164,14 +165,14 @@ foreach ($e in ${narrow}) {
   $isWide = $false
   foreach ($n in @($rules[$k] | Where-Object { $_ })) {
     $ra = $from[$n]
-    if ($null -eq $ra) { $ra = @(Get-NetFirewallRule -Name $n | Get-NetFirewallAddressFilter | ForEach-Object { $_.RemoteAddress } | ForEach-Object { [string]$_ }) }
+    if ($null -eq $ra) { try { $ra = @(Get-NetFirewallRule -Name $n | Get-NetFirewallAddressFilter | ForEach-Object { $_.RemoteAddress } | ForEach-Object { [string]$_ }) } catch { $ra = @() } }
     "from $e $(@($ra) -join ',')"
     if (-not @($ra).Count -or @($ra | Where-Object { $tailnet -notcontains $_ }).Count) { $isWide = $true }
   }
   if ($isWide) { "wide $e" }
   try {
     $ids = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.ToLowerInvariant() -eq $k } | ForEach-Object { $_.Id })
-    if ($ids.Count) {
+    if (-not $ids.Count) { "peers notrunning $e" } else {
       $ports = @(Get-NetTCPConnection -State Listen -OwningProcess $ids -ErrorAction SilentlyContinue | ForEach-Object { $_.LocalPort })
       foreach ($c in @(Get-NetTCPConnection -State Established -OwningProcess $ids -ErrorAction SilentlyContinue)) {
         $ra = [string]$c.RemoteAddress
@@ -179,7 +180,7 @@ foreach ($e in ${narrow}) {
         if ($ra -eq '::1' -or $ra.StartsWith('127.') -or $ra.StartsWith('::ffff:127.')) { continue }
         $v4 = $ra -replace '^::ffff:', ''
         $o = $v4.Split('.')
-        if ($o.Count -eq 4 -and [int]$o[0] -eq 100 -and [int]$o[1] -ge 64 -and [int]$o[1] -le 127) { continue }
+        if ($o.Count -eq 4 -and ($o[0] -as [int]) -eq 100 -and ($o[1] -as [int]) -ge 64 -and ($o[1] -as [int]) -le 127) { continue }
         if ($ra.ToLowerInvariant().StartsWith('fd7a:115c:a1e0:')) { continue }
         "peer $e $($ra):$($c.LocalPort)"
       }
@@ -194,11 +195,11 @@ foreach ($e in ${narrow}) {
  * firewallCheckScript's answer: the paths without an allow rule, the tailnet-only paths an allow rule opens to any
  * address (w5581), and the count of stale temp rules; undefined when unreadable.
  */
-export function parseFirewallCheck(out: string): { missing: string[]; wide: string[]; stale: number; from: string[]; peers: string[]; read?: string } | undefined {
+export function parseFirewallCheck(out: string): { missing: string[]; wide: string[]; stale: number; from: string[]; peers: string[]; peersUnknown: string[]; read?: string } | undefined {
   const lines = out.replace(/\r/g, '').split('\n').map((l) => l.trim()).filter(Boolean);
   const stale = lines.map((l) => /^stale=(\d+)$/.exec(l)).find(Boolean);
   if (!stale) return undefined;
   const after = (word: string) => lines.filter((l) => l.startsWith(`${word} `)).map((l) => l.slice(word.length + 1));
   const read = lines.find((l) => l.startsWith('read '))?.slice(5);
-  return { missing: after('missing'), wide: after('wide'), stale: Number(stale[1]), from: after('from'), peers: after('peer'), ...(read ? { read } : {}) };
+  return { missing: after('missing'), wide: after('wide'), stale: Number(stale[1]), from: after('from'), peers: after('peer'), peersUnknown: after('peers'), ...(read ? { read } : {}) };
 }
