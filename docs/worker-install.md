@@ -640,6 +640,8 @@ What `worker.ts tools` does (`server/agentTools.ts` `publishAgentTools`):
 5. Puts back publish-skills' marker `~/.claude/final-factory-agents-checkout` if `registerAgents.sh` pointed it at the
    run's clone, so a person's skill edits keep going to their own checkout. With no marker before, it names FF Factory's
    checkout and the output says so; one that named the old `<root>/tools/final-factory-agents` now names the new one.
+   So does one that names no checkout (empty, or a folder without `.claude-plugin/marketplace.json`, such as an
+   earlier run's removed `ff-agents-run-*` clone: BEAST's marker named one through every publish of 2026-11-25, w5784).
 6. In an elevated Windows session (an administrator's ssh, BEAST), gives the checkout and Claude Code's
    final-factory-agents marketplace and cache folders to the daemon task's user (`icacls /setowner`), as the update does,
    so the non-elevated git there does not refuse them.
