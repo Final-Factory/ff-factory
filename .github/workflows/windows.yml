@@ -53,6 +53,8 @@ on:
       - 'server/safeGit.ts'
       - 'server/sandboxes.test.ts'
       - 'server/sandboxes.ts'
+      - 'server/toolsLabelsWin.test.ts'
+      - 'server/agentNode.ts'
       - 'server/gitHooks/**'
       - 'server/testPowershell.ts'
       - 'server/transcriptLabels.test.ts'

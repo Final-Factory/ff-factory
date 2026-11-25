@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { AGENT_GIT, agentGitDir, agentGitPathDir, ensureAgentGit, type AgentGitDeps } from './agentGit.ts';
+import { AGENT_GIT, agentGitDir, agentGitPathDir, agentGitStamp, ensureAgentGit, type AgentGitDeps } from './agentGit.ts';
 
 /**
  * w5377: the Git for Low-integrity workers sits at one path, <root>\tools\git. These hold its install with a fake
@@ -50,8 +50,42 @@ test('installs the pinned PortableGit at <root>\\tools\\git, its first login bef
   const login = ran.findIndex((r) => r.startsWith('bash.exe -lc'));
   assert.ok(login > 0, ran.join('\n'));
   assert.equal(agentGitPathDir(root, 'win32'), agentGitDir(root));
-  assert.deepEqual(fs.readdirSync(path.join(root, 'tools')), ['git'], 'no stage or archive left behind');
-  assert.equal(await ensureAgentGit(root, fake().d), 'current');
+  assert.deepEqual(fs.readdirSync(path.join(root, 'tools')).sort(), ['git', 'git.json'], 'no stage or archive left behind');
+  assert.ok(ran.includes(`icacls ${path.join(root, 'tools', `git-${AGENT_GIT.version}.part`, 'git')} /setintegritylevel (OI)(CI)low`), 'labelled Low before the swap');
+  const again = fake();
+  assert.equal(await ensureAgentGit(root, again.d), 'current');
+  assert.deepEqual(again.ran, [], 'a stamped Git is current with nothing run');
+});
+
+test('w5717: the installed Git is never run; a changed git.exe or bash.exe is replaced from a fresh download', async () => {
+  const root = tmp();
+  assert.equal(await ensureAgentGit(root, fake().d), 'installed');
+  const live = agentGitDir(root);
+  // A Low worker swaps in its own git.exe, which says the pinned version.
+  fs.writeFileSync(path.join(live, 'cmd', 'git.exe'), `git version ${AGENT_GIT.version}.windows.1 planted`);
+  const { d, ran, said } = fake();
+  assert.equal(await ensureAgentGit(root, d), 'installed');
+  assert.ok(!ran.some((r) => r.includes(path.join(live, 'cmd'))), ran.join('\n'));
+  assert.ok(said.some((l) => l.includes('not the one stamped')), said.join('\n'));
+  assert.ok(!fs.readFileSync(path.join(live, 'cmd', 'git.exe'), 'utf8').includes('planted'));
+  // A planted bash.exe too.
+  fs.writeFileSync(path.join(live, 'bin', 'bash.exe'), 'planted');
+  assert.equal(await ensureAgentGit(root, fake().d), 'installed');
+  assert.equal(fs.readFileSync(path.join(live, 'bin', 'bash.exe'), 'utf8'), '');
+});
+
+test('w5717: an install from before the stamp whose programs are the pinned ones is stamped, not swapped', async () => {
+  const root = tmp();
+  assert.equal(await ensureAgentGit(root, fake().d), 'installed');
+  fs.rmSync(agentGitStamp(root));
+  const marker = path.join(agentGitDir(root), 'kept.txt');
+  fs.writeFileSync(marker, '');
+  const { d, said } = fake();
+  assert.equal(await ensureAgentGit(root, d), 'current');
+  assert.ok(fs.existsSync(marker), 'the same folder');
+  assert.ok(fs.existsSync(agentGitStamp(root)));
+  assert.ok(said.some((l) => l.includes('no stamp')) && said.some((l) => l.includes('stamped')), said.join('\n'));
+  assert.deepEqual(fs.readdirSync(path.join(root, 'tools')).sort(), ['git', 'git.json']);
 });
 
 test('a download with another digest is refused and nothing is placed', async () => {

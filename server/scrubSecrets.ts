@@ -98,6 +98,11 @@ export interface ScrubReport {
   skipped: string[];
   /** The start-up scrub (w5613): its longest piece of work on the portal's own thread, in ms (starting the thread, a swap). */
   longestTurnMs?: number;
+  /**
+   * The same pieces' CPU time on the portal's thread, in ms: the work the scrub itself puts there. Unlike the wall time it
+   * leaves out the scheduler's preemption on a loaded machine (a CI runner's 285 ms wall for a piece, w5559).
+   */
+  longestTurnCpuMs?: number;
 }
 
 export const emptyReport = (): ScrubReport => ({ scanned: 0, files: [], total: 0, errors: [], skipped: [] });
@@ -235,12 +240,16 @@ export function commitScrubbed(c: ScrubCommit): ScrubReply {
 function scrubOnThread(dataDir: string): Promise<ScrubReport> {
   return new Promise((resolve, reject) => {
     let longest = 0;
+    let longestCpu = 0;
     const timed = <T>(fn: () => T): T => {
       const t0 = performance.now();
+      const c0 = process.threadCpuUsage();
       try {
         return fn();
       } finally {
         longest = Math.max(longest, performance.now() - t0);
+        const c = process.threadCpuUsage(c0);
+        longestCpu = Math.max(longestCpu, (c.user + c.system) / 1000);
       }
     };
     const w = timed(() => new Worker(new URL('./scrubThread.ts', import.meta.url), { workerData: { dataDir, values: [...knownSecretValues()] } }));
@@ -251,7 +260,7 @@ function scrubOnThread(dataDir: string): Promise<ScrubReport> {
         w.postMessage(timed(() => commitScrubbed(c)));
       } else if (m.done) {
         done = true;
-        resolve({ ...m.done, longestTurnMs: Math.round(longest) });
+        resolve({ ...m.done, longestTurnMs: Math.round(longest), longestTurnCpuMs: Math.round(longestCpu) });
         void w.terminate();
       }
     });

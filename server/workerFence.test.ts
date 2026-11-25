@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { buildOptions, type LaunchSpec } from './launch.ts';
 import { SANDBOX_EXEC, fenceEnv, fenceFor, fencedArgv, ownTranscriptOf, seatbeltProfile, sessionIdOf, type WorkerFence } from './workerFence.ts';
-import { ensureReadBackDirs, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceModeFile, readFenceOnRefusal, readFenceProbeTargets, secretsDirs, writeInPlace, writeReadFenceMode } from '../machine/readFence.ts';
+import { ensureReadBackDirs, LOGIN_LABEL_ON_SYSTEM_DRIVE, loginFenceFiles, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceModeFile, readFenceOnRefusal, readFenceProbeTargets, secretsDirs, writeInPlace, writeReadFenceMode } from '../machine/readFence.ts';
 import { projectSlug } from './claudeHome.ts';
 
 const F: WorkerFence = { kind: 'seatbelt', root: '/Users/p/ffw', home: '/Users/p', darwinTemp: '/private/var/folders/xx/T', darwinCache: '/private/var/folders/xx/C' };
@@ -374,6 +374,13 @@ test('w5639: <root>/steam (steamcmd\'s cached login, the upload config) is read-
     assert.deepEqual(t2.closed, [path.join(r, 'steam')]);
     // Linux: Landlock cannot refuse the folder's own open (its parents' READ_DIR is inherited), so the probe opens its files.
     assert.deepEqual(readFenceProbeTargets({ root: r, appDir: path.join(r, 'daemon'), secrets: [], allowBack: ['logs'], linux: true }).closed, [path.join(r, 'steam', 'config.json')]);
+    // w5747: the owner's secrets are closed targets too (existing ones; on Linux the files inside a folder).
+    const ssh = path.join(dir, 'home', '.ssh');
+    fs.mkdirSync(ssh, { recursive: true });
+    fs.writeFileSync(path.join(ssh, 'id_ed25519'), 'x');
+    const owner = [ssh, path.join(dir, 'home', '.mozilla')];
+    assert.deepEqual(readFenceProbeTargets({ root: r, appDir: path.join(r, 'daemon'), secrets: [], allowBack: ['logs'], linux: false, owner }).closed, [path.join(r, 'steam'), ssh]);
+    assert.deepEqual(readFenceProbeTargets({ root: r, appDir: path.join(r, 'daemon'), secrets: [], allowBack: ['logs'], linux: true, owner }).closed, [path.join(r, 'steam', 'config.json'), path.join(ssh, 'id_ed25519')]);
     if (process.platform === 'darwin' && fs.existsSync(SANDBOX_EXEC)) {
       // Under the real profile: steam's folder and its config.json refused, the lobby gate's file open.
       const real = fs.realpathSync(r);
@@ -413,6 +420,25 @@ test('w5546 lockout review B1: the probe opens each path without reading it and 
     if (/sandbox_apply/.test(f.stderr)) return;
     assert.deepEqual(judgeReadProbe(real, f.stdout), { wronglyRefused: [], leftOpen: [], unknown: [] }, f.stdout + f.stderr);
   }
+});
+
+test("w5559: a Claude login on a Windows system drive is closed only on BEAST; LothDesktop's C: is left out", () => {
+  const files = [path.win32.join('C:\\', 'Users', 'x', '.claude', '.credentials.json'), path.win32.join('V:\\', 'ffw', 'claude-medium', '.credentials.json')];
+  const onC = (p: string) => /^c:/i.test(p);
+  assert.deepEqual([...LOGIN_LABEL_ON_SYSTEM_DRIVE], ['beast']);
+  assert.deepEqual(loginFenceFiles(files, { platform: 'win32', machineId: 'beast', onSystemDrive: onC }), { closed: files, left: [] });
+  assert.deepEqual(loginFenceFiles(files, { platform: 'win32', machineId: 'lothdesktop', onSystemDrive: onC }), { closed: [files[1]], left: [files[0]] });
+  assert.deepEqual(loginFenceFiles(files, { platform: 'win32', onSystemDrive: onC }), { closed: [files[1]], left: [files[0]] }, 'no id: the system drive stays untouched');
+  const unix = ['/home/x/.claude/.credentials.json'];
+  assert.deepEqual(loginFenceFiles(unix, { platform: 'linux', machineId: 'biscuit', onSystemDrive: () => true }), { closed: unix, left: [] });
+});
+
+test('w5559: the Seatbelt profile closes a login file given with the secrets, inside its read deny', () => {
+  const login = '/Users/p/.claude/.credentials.json';
+  const p = seatbeltProfile({ ...F, secretsDirs: [login] });
+  const deny = p.indexOf('(deny file-read-data');
+  const at = p.indexOf(`(subpath "${login}")`);
+  assert.ok(deny >= 0 && at > deny && at < p.indexOf('(allow file-read-data', deny), p);
 });
 
 test('seatbeltProfile: owner secrets deny the Keychain mach services and preference writes, and go with readOff (w5560)', () => {
