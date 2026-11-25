@@ -455,6 +455,13 @@ export class MachineRollout {
     console.log(`machine rollout: ${id}: the download of its ${what} was cut: sent again (try ${c.retries} of ${this.lim.cutRetries})`);
   }
 
+  /** w5593/w5628: what a cut download's note says next: when it is sent again, or that its resends ran out (the review's M2). */
+  private cutNext(retries: number): string {
+    return retries < this.lim.cutRetries
+      ? `sent again by itself in ${Math.round(this.lim.cutRetryMs / 60_000)} min`
+      : `its ${this.lim.cutRetries} resends were cut too: its link to the portal stays slow, so it waits for the next deploy (needs a look)`;
+  }
+
   /** A commit that is not known counts as outdated (w970), unlike the nag in machines.ts that leaves it alone: the update fixes it. */
   private needsUpdate(id: string, sha: string): boolean {
     const daemon = this.d.host.daemon(id);
@@ -565,7 +572,7 @@ export class MachineRollout {
     } else if (o.status !== 'failed') delete o.diskFull;
     if (o.status === 'failed' && CUT_DOWNLOAD.test(o.note ?? '')) {
       o.cutDownload = { at: o.at, retries: o.cutDownload?.retries ?? 0 };
-      if (o.cutDownload.retries < this.lim.cutRetries) o.note = `${o.note}; sent again by itself in ${Math.round(this.lim.cutRetryMs / 60_000)} min`;
+      o.note = `${o.note}; ${this.cutNext(o.cutDownload.retries)}`;
     }
     // Were the agents taken back by the new daemon? Its hello after the update says what it runs.
     if (agentsBefore.length && o.status !== 'pending') await this.checkAdoption(m.id, o, agentsBefore, startedAt);
@@ -685,7 +692,7 @@ export class MachineRollout {
     t.at = new Date(this.now()).toISOString();
     if (t.status === 'failed' && CUT_DOWNLOAD.test(t.note ?? '')) {
       o.cutDownload = { at: t.at, retries: o.cutDownload?.retries ?? 0 };
-      if (o.cutDownload.retries < this.lim.cutRetries) t.note = `${t.note}; sent again by itself in ${Math.round(this.lim.cutRetryMs / 60_000)} min`;
+      t.note = `${t.note}; ${this.cutNext(o.cutDownload.retries)}`;
     }
     console.log(`machine rollout: ${m.id}: agent tools ${t.status}${t.note ? ` (${t.note})` : ''}`);
   }

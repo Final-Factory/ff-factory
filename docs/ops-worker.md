@@ -805,7 +805,7 @@ job, no worker.
   run whose bundle download the daemon gave up on ("the bundle's download did not finish in 480 s", "stalled" or "broke",
   `machine/selfUpdate.ts` `DOWNLOAD`; w5593, BEAST 2026-11-25 08:20:52Z, 13754368 of 29217059 bytes at 35 KB/s over a relayed
   link) changed nothing either, and is sent again by itself 5 minutes after it failed while the machine is online, at most 3
-  times per rollout (`ROLLOUT_LIMITS.cutRetries`, `cutRetryMs`); a failed update's tools run follows it again. A link update that gets no answer from a machine that
+  times per rollout (`ROLLOUT_LIMITS.cutRetries`, `cutRetryMs`); a failed update's tools run follows it again. Once the 3 resends were cut too, its line says "its 3 resends were cut too: its link to the portal stays slow, so it waits for the next deploy (needs a look)" (w5628): look at that machine's link (its speed in the journal's "update bundle went out / was cut" lines). A link update that gets no answer from a machine that
   went offline **without fetching its bundle** (w2005: m3 went dark 17 s before its update was sent, on 2026-10-24) never
   reached it, since the daemon fetches the bundle before it changes anything: it stays pending ("offline before the update
   reached it"), nothing is put back over ssh, and it is updated after its next hello like any machine offline at the deploy.
