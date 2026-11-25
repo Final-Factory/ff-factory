@@ -66,11 +66,12 @@ export const READ_ONLY_IN_ROOT = { subpaths: ['daemon', 'secrets', ...MEDIUM_ONL
 
 /**
  * w5546 (lothsahn: "workers can't read the secrets and daemon folders on any OS"): the same three are closed to reads as
- * well, except what a worker legitimately reads in the daemon's folder (FENCE_READ_ALLOW: its logs and code, the shims).
+ * well, and `steam` (w5639: steamcmd's cached Steam login and the upload config, which only the daemon reads), except
+ * what a worker legitimately reads in the daemon's folder (FENCE_READ_ALLOW: its logs and code, the shims).
  * `file-read-data` only: a stat of a path, which node's module loader and git make up every parent, stays allowed; the
  * daemon's folder may be listed (names, never contents, as server/daemonReads.ts allows).
  */
-export const READ_DENIED_IN_ROOT = { subpaths: ['daemon', 'secrets'], files: ['root.json'] };
+export const READ_DENIED_IN_ROOT = { subpaths: ['daemon', 'secrets', ...DAEMON_ONLY_CHILDREN], files: ['root.json'] };
 
 /**
  * w5563: the one conversation a fenced process may write in its Claude home's transcripts. `projects` is

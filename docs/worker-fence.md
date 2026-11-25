@@ -129,13 +129,27 @@ machine/readFence.ts, from `tokenFile`), `<root>/root.json` and the daemon's fol
 `FENCE_READ_ALLOW` (server/daemonReads.ts): the guard's diagnostic reads (`DAEMON_READ_ALLOW`: logs, the code in `src` and
 `app`, sandboxes.json, the clean-up files, ...), the gh shim (`gh-app/bin`) and the Unity MCP status files (`unity-mcp`). Never
 given back: `daemon.json`, `hosts` (other sessions' specs and environments), `gh-app/tokens.json` (every app's tokens),
-`root.json` and `root-backup.json` (dropped from the guard's list too). A run's own GitHub App tokens file
+`root.json` and `root-backup.json` (dropped from the guard's list too).
+
+**`<root>/steam` is closed too** (w5639, after w5551 made it unwritable): steamcmd, its cached Steam login (the ConnectCache
+in steamcmd's config), the upload `config.json`, the daemon's ffbox clone and `uploads.json`. It is every root child in
+`DAEMON_ONLY_CHILDREN` (server/claudeHome.ts), read-denied on each OS from that one list: macOS `READ_DENIED_IN_ROOT`
+(server/workerFence.ts), Linux `readLockArgs` (machine/writeLock.ts), Windows `noReadUpTargets` (machine/lowIntegrity.ts),
+and the probe's closed paths (`daemonOnlyDirs`, machine/readFence.ts). Nothing is given back inside it. Why this locks out
+nobody who needs it: the daemon runs steamcmd, the checks and the uploads itself (machine/steamUpload.ts `run`), unfenced and
+at Medium, and a No-Read-Up label refuses only a lower integrity; the person's own processes are Medium or unfenced too; no
+worker tool reads it (the `steam_upload` tool asks the daemon, and `urgent_release.py` stopped installing steamcmd in w5640).
+`steam-lobby-gate`, which workers write, is another child and stays open. It follows the same mode as the rest: `read-fence-off`
+takes its label off (Windows) and leaves it out of new runs' rules (macOS, Linux), from the portal with nobody at the machine.
+Tests: server/workerFence.test.ts "w5639", server/writeLock.test.ts (a live Landlock run on Linux CI).
+
+A run's own GitHub App tokens file
 (`gh-app/sessions/<session>/tokens.json`, w5547, docs/github-apps.md) is given back to that run only (macOS, Linux), as a folder, so its rewrite by rename stays readable.
 
 | OS | How | Where |
 |---|---|---|
 | macOS | `(deny file-read-data ...)` on the closed paths, then `(allow file-read-data ...)` on the given-back ones (later rules win). Only contents: stat and realpath of a closed path still work. | `seatbeltProfile` `readRules` (server/workerFence.ts); per run `readAllowed` |
-| Linux | Landlock only grants, so ff-landlock.py handles read too (`--no-read`, `--read`): it grants read on everything but the closed paths (every sibling off the chain of each closed path's parents; the parents list names only) and the given-back ones. Symbolic links are not followed. | `readLockArgs` (machine/writeLock.ts), `read_grants` (machine/ff-landlock.py) |
+| Linux | Landlock only grants, so ff-landlock.py handles read too (`--no-read`, `--read`): it grants read on everything but the closed paths (every sibling off the chain of each closed path's parents; the parents get READ_DIR only) and the given-back ones. Symbolic links are not followed. Landlock rights are inherited down the tree, so a parent's READ_DIR reaches the closed folder: a worker can still list the names in `<root>/secrets` or `<root>/steam`, never open a file there (w5639, CI on #1237). The probe therefore opens up to three files inside each closed folder on Linux, not the folder (`readFenceProbeTargets`). | `readLockArgs` (machine/writeLock.ts), `read_grants` (machine/ff-landlock.py) |
 | Windows | A Medium mandatory label with No-Read-Up, `S:(ML;OICI;NWNR;;;ME)` on folders (`S:(ML;;NWNR;;;ME)` on files), set with `SetNamedSecurityInfoW` (icacls cannot set NR); the given-back paths get an explicit `S:(ML;OICI;NW;;;ME)`, which overrides the inherited one. Set at every daemon start when `workerIntegrity` is `low` (a self-update's new `app` folder inherits NR), skipping a label already in place. Never on the system drive: a target on C:, or a junction into it, is skipped and logged. | `noReadUpTargets`, `labelNoReadUp` (machine/lowIntegrity.ts), `lowSetup` (machine/daemon.ts) |
 
 Kept working through the daemon's own writes (lockout review of #1193):
