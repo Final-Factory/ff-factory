@@ -17,7 +17,6 @@ import { DAEMON_ONLY_CHILDREN, MEDIUM_ONLY_CHILDREN } from './claudeHome.ts';
 import type { SpawnOptions, SpawnedProcess } from '@anthropic-ai/claude-agent-sdk';
 import { FENCE_READ_ALLOW } from './daemonReads.ts';
 import { openChildren } from '../machine/lowIntegrity.ts';
-import { workerUvToolDir } from '../machine/sharedCaches.ts';
 import { projectSlug } from './claudeHome.ts';
 
 export const SANDBOX_EXEC = '/usr/bin/sandbox-exec';
@@ -242,12 +241,11 @@ export function fenceFor(o: { setting?: string; root?: string; platform?: NodeJS
  * What a fenced agent's environment adds: Claude Code's own temp (task output, its /tmp/cc-socks messaging socket) moves
  * into the root, and the auto-updater, which writes ~/.local/share/claude, is off. TMPPREFIX: zsh writes each here-document
  * to /tmp/zshXXXXXX, which the fence refuses (w5397, m5: "can't create temp file for here document: operation not
- * permitted"); its files go to <root>/tmp/zshXXXXXX instead, and zsh removes each once read. UV_TOOL_DIR (w5693): uvx
- * takes a temp file in uv's tool folder on every run, ~/.local/share/uv/tools by default, which the fence refuses, so the
- * Unity MCP server (`uvx --from mcpforunityserver ...`) died at start; it runs from <root>/cache/uv-tools instead
- * (machine/sharedCaches.ts workerUvToolDir), never the Medium agents' one.
+ * permitted"); its files go to <root>/tmp/zshXXXXXX instead, and zsh removes each once read. uv's folders
+ * (w5693, w5745) are not set here: machine/sharedCaches.ts sandboxUvEnv gives every sandbox agent, fenced or not, and its
+ * editor the workers' ones, by one rule.
  */
-export const fenceEnv = (f: WorkerFence): Record<string, string> => ({ CLAUDE_CODE_TMPDIR: path.join(f.root, 'tmp', 'claude-code'), DISABLE_AUTOUPDATER: '1', TMPPREFIX: path.join(f.root, 'tmp', 'zsh'), UV_TOOL_DIR: workerUvToolDir(f.root) });
+export const fenceEnv = (f: WorkerFence): Record<string, string> => ({ CLAUDE_CODE_TMPDIR: path.join(f.root, 'tmp', 'claude-code'), DISABLE_AUTOUPDATER: '1', TMPPREFIX: path.join(f.root, 'tmp', 'zsh') });
 
 /** The argv that runs `command args` inside the fence. */
 export const fencedArgv = (f: WorkerFence, command: string, args: string[], own?: OwnTranscript) => [SANDBOX_EXEC, '-p', seatbeltProfile(f, own), command, ...args];
